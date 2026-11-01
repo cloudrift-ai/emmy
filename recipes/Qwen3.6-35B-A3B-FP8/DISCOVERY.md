@@ -1,5 +1,48 @@
 # Qwen3.6-35B-A3B-FP8 discovery
 
+## The recipe's native and plugin lanes on one RTX 5090 (2026-10-31)
+
+Both RTX 5090 lanes of `recipe.yaml`, deployed by `emmy deploy local` and benchmarked by `emmy bench --local` on one
+rented RTX 5090 (instance type `rtx59-7-48-750-xam.1`: 7 cores, 47 GiB of RAM; 64 GiB of swap added after the first
+plugin boot ran out of memory, below). The plugin lane runs `cloudriftai/vllm-emmy:0.25.1-3454735b` (`make
+vllm-emmy-image VLLM_VERSION=v0.25.1`), the native lane `cloudriftai/emmy-native-qwen3.6-35b-a3b-fp8:0.3.23-6732a701`
+(`make native-image`): its pack was prepared at `3454735b` (main at `35100514c` and this branch's drafter rows) inside
+the plugin image, from the recipe golden alone under strict evidence. Both images were built on a 3-core RTX 5090 and
+copied to this card unchanged; neither is published. The benchmark is the recipe's: 10 random-token prompts of 256
+tokens, 256 output tokens with `ignore_eos`, temperature 0, one request at a time, vLLM 0.25.1's client.
+
+| | native | plugin |
+|---|---|---|
+| TPOT, median / P99 | 20.5 / 22.3 ms | not benchmarked: about 0.3 tokens a second (the engine's count), below |
+| TTFT, median / P99 | 15.2 / 16.2 s | |
+| output tokens a second | 13.3 | |
+| tokens in / out | 2,482 / 2,560 | |
+| device memory at rest | 24.6 GiB | 30.6 GiB |
+| host memory of the server at rest | 16.4 GiB (the pinned expert pages included) | 29.5 GiB after its first boot, 41.6 GiB after the next |
+| ready after | 25-34 s, nothing compiled | 447 s from its pack; the first boot, below |
+
+Notes:
+
+- **No compile at the native boot.** Each native boot loads the pack and answers the smoke request; the server log names
+  no compile. The same image on the 3-core card gave the same benchmark (TPOT 20.7 ms, TTFT 15.3 s).
+- **The plugin decodes at about 0.3 tokens a second**, on this card and on the 3-core one, so a 256-token answer takes
+  about 14 minutes and the deploy's smoke request times out (690 s). The time is the GPU's: during a request it runs at
+  100% of its SMs with no memory or PCIe traffic, and a py-spy profile of the engine puts its whole forward in the
+  routed experts' combine, waiting on the device for the verify step's expert programs. On 2026-10-26 the same lane's
+  verify step took 202 ms (the 2026-10-26 table below). Not bisected; the benchmark was not run at this rate.
+- **The plugin's first boot** compiles for longer than the deploy's one-hour health wait (3,642 s, then torn down by
+  the run script; the 2026-10-26 one took 68 minutes), and on 47 GiB with no swap its engine was killed for memory 64
+  minutes in, while compiling the drafter, with the compile's seven worker processes beside 16.7 GiB of pinned expert
+  pages.
+  With swap, a boot that reused that run's programs took 971 s.
+- **TTFT.** Native's first token takes 15.2 s at 256 random tokens, on this card and on the 3-core one alike, against
+  4.98 s for the 256-token text prompt of the 2026-10-29 table below, on the x16 host. Each 64-row chunk reaches most
+  of a layer's experts and copies most of the host half in over the link (that table's notes), and a 256-token prompt
+  is four chunks; with the core count ruled out, the likely cause is a narrower PCIe link on these rentals, whose link
+  width was not recorded.
+- **Memory.** Device memory is the card's total after the boot (`nvidia-smi`), host memory the server container's
+  (`docker stats`), both at rest; peaks under load were not taken.
+
 ## Native and NInfer on one RTX 5090 (2026-10-29)
 
 NInfer at `1882c6ad` against native, one session on the card of the table below, with the protocol of

@@ -581,3 +581,54 @@ def test_load_recipe_rejects_conflicting_docker_options(tmp_path):
 
     with pytest.raises(ValueError, match="image"):
         load_recipe(str(tmp_path))
+
+
+# ── the native lane ───────────────────────────────────────────────
+
+_TWO_LANES = """
+model:
+  huggingface: org/Model
+  revision: abc
+engine:
+  llm:
+    context_length: 4096
+    max_concurrent_requests: 1
+    vllm:
+      image: cloudriftai/vllm-emmy:0.25.1-abcdef1
+matrices:
+  - deploy.gpu: NVIDIA GeForce RTX 5090
+  - deploy.gpu: NVIDIA GeForce RTX 5090
+    engine.llm.native:
+      image: cloudriftai/emmy-native-model:0.3.22-abcdef1
+      golden: golden/rtx5090_sm120.json
+      extra_args: --kv-cache-dtype fp8
+      extra_env:
+        EMMY_GEN_DECODE_BUCKET: "16"
+"""
+
+
+def test_resolve_for_hardware_picks_a_cards_lane_by_engine(tmp_path):
+    (tmp_path / "recipe.yaml").write_text(_TWO_LANES)
+    plugin = resolve_for_hardware(str(tmp_path), "NVIDIA GeForce RTX 5090", 1)
+    native = resolve_for_hardware(str(tmp_path), "NVIDIA GeForce RTX 5090", 1, engine="native")
+    assert plugin.engine.llm.engine_name == "vllm"
+    assert native.engine.llm.engine_name == "native"
+    assert native.engine.llm.image == "cloudriftai/emmy-native-model:0.3.22-abcdef1"
+    assert native.engine.llm.extra_env == {"EMMY_GEN_DECODE_BUCKET": "16"}
+    with pytest.raises(ValueError, match="served by sglang"):
+        resolve_for_hardware(str(tmp_path), "NVIDIA GeForce RTX 5090", 1, engine="sglang")
+
+
+@pytest.mark.parametrize(
+    ("llm", "message"),
+    [
+        ({"native": {"image": "img"}}, "recipe golden"),
+        ({"max_concurrent_requests": 4, "native": {"image": "img", "golden": "g.json"}}, "one request at a time"),
+        ({"tensor_parallel_size": 2, "native": {"image": "img", "golden": "g.json"}}, "one GPU"),
+        ({"native": {"image": "img", "golden": "g.json", "extra_args": "--strict-evidence"}}, "--strict-evidence"),
+    ],
+)
+def test_load_recipe_rejects_a_native_lane_it_cannot_serve(tmp_path, llm, message):
+    (tmp_path / "recipe.yaml").write_text(yaml.safe_dump({"model": {"huggingface": "org/m"}, "engine": {"llm": llm}}))
+    with pytest.raises(ValueError, match=message):
+        load_recipe(str(tmp_path))

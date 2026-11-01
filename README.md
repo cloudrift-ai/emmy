@@ -414,6 +414,7 @@ require CloudRift organization access.
   what `emmy deploy` runs (see [ARCHITECTURE.md](recipes/ARCHITECTURE.md); benchmark grids belong in `experiments/`)
 - [docker/](docker/) — Custom image builds ([vllm-emmy](docker/vllm-emmy/) — vLLM + the emmy plugin;
   [vllm-emmy-serve](docker/vllm-emmy-serve/) — prebuilt per-model images: warmed cubins + baked model snapshot;
+  [emmy-native](docker/emmy-native/) — a recipe's native lane: the native server and its prepared pack;
   [1cat-vllm-sm70](docker/1cat-vllm-sm70/) — source-pinned 1Cat-vLLM runtimes and request-time GPU caches for Volta)
 - [experiments/](experiments/) — Benchmark parameter sweeps, self-contained recipe + committed results —
   what `emmy bench` runs (see [ARCHITECTURE.md](experiments/ARCHITECTURE.md))
