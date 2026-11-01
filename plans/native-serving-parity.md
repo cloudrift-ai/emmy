@@ -143,8 +143,12 @@ not merged), #1293 (a cut arm's piece facts computed on the worker that builds t
   version, so records taken before it would measure a bench about to move. **#1298** (merged 2026-10-30) changed
   kernel sources (identities unchanged) beyond NVFP4 through its wider alignment proof. Neither is on the 5090
   parity path (the 5090's deployed NVFP4 kernels read no pair table).
-- **#1302** (in review): milestone 18 — the native recipe lane, built and measured on packs prepared from main's
+- **#1302** (draft): milestone 18 — the native recipe lane, built and measured on packs prepared from main's
   goldens (each DISCOVERY's 2026-10-31 section); its images are not published and wait on 17's promoted rows.
+- **#1309**: the retired tuning plan's re-record — 180 rows of both recipe goldens re-measured on a rented x16 RTX
+  5090 at the tune standard after the compiler fixes (0.918x the stored number at the median; the prologue64
+  `k_linear_mean_reduce_374241#2` row 494 -> 786 us, steady across runs). Its hardware-golden promotion came
+  out before it landed: the ledger's 2026-10-31 prior item is why, and 17 owns the promotion.
 
 ## Milestones
 
@@ -297,7 +301,9 @@ not merged), #1293 (a cut arm's piece facts computed on the worker that builds t
     recurrence roll, the unmeasured `SHARED_CARRY`) land before this, so the re-record measures the fixed
     kernels; the other cards' open record runs (the V100/A100/H100/4090 GDN routes) stay follow-ups, not this
     plan's scope. Gate: the prior reproduction gate green with no `prior-pending` left on these recipes; the
-    weights committed. Needs 2-16.
+    weights committed. Needs 2-16, and the prior gap the ledger dates 2026-10-31: the retired plan's promotion
+    (#1309, in its first form) put every recipe row into the RTX 5090 hardware golden and turned 20 gate nodes red
+    on seven kernels that no refit reproduces; the PR landed its re-records without the promotion.
 
 18. **The native lane in the recipes and the deploy path (#1302).** A recipe names the native server as its
     engine; the image carries `emmy-server`, the worker and the pack prepared from the recipe golden, so a deploy
@@ -627,6 +633,22 @@ Open, compiler — the correctness items block 17:
   the remainder chain and only the pieces stay the prior's picks — and the 3-row verify program still keeps one
   piece of 1.3e8 trips per cell that way, so the pin alone does not close this. What moves the prior itself is a
   refit on measured cuts of such programs, or a feature that tells a piece's recompute from its size.
+- (2026-10-31, #1309) The prior reproduction gate cannot go green on a promoted RTX 5090 hardware golden by a
+  refit, so 17 needs prior and export work first. The promotion of every recipe row, with both priors refit at
+  the shipped counts (schedule 400 iterations, placement 1,500, no folds), left 20 nodes red, all placement, all
+  on seven kernels: `k_unsqueeze_3c3255`, `k_where_2_reduce` and `k_linear_matmul_mean_reduce_e63033__place_d476a18d79`
+  (the prior picks fuse where the golden cuts), `k_linear_matmul_mean_reduce_29a8aa__place_2fe0da9b51` in three
+  contexts and `k_conv1d_linear_mean_reduce_45cfea` in four (fuse or another cut set), and on the A100
+  `k_linear_17ca5e` (split `g16k` where the golden records `g8k`, which main's weights reproduce). Two gaps. The
+  placement dataset records both arms as golden on identical feature vectors — the same kernel fused in one
+  program and cut in another (`k_where_2_reduce.001416a0cc19` fuse against `.aca2d3086a55` cut, likewise
+  `k_unsqueeze_3c3255` and the `85bd73`/`e63033` place kernels), 72 such vectors in the dataset — so no fit
+  reproduces both sides and the gate, which judges every program, misses one. And the export skips the conv1d
+  `45cfea` pools as "recorded cut not reached", so the fit never sees pools the gate judges. Both recipe goldens
+  hold these decisions on main under their `prior-pending` tags; a hardware golden's nodes the gate never skips.
+  What 17 needs: a feature that separates the two programs' contexts (or one decision per kernel), and an export
+  that reaches the recorded cut. The Llama 3.1 8B V100 SXM3 splits a default-count refit misses reproduce at the
+  shipped counts; a refit at `emmy fit`'s defaults (200/500) underfits and reddens 28 nodes.
 - (2026-10-31, #1302) The Qwen3.6 plugin lane decodes at about 0.3 tokens a second on the rented 5090s (202 ms a
   token on 2026-10-26): the card at 100% SM with no memory or PCIe traffic, py-spy in the routed-expert combine of
   the verify step. Not bisected.
