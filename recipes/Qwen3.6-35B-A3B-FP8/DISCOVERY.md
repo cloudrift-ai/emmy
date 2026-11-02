@@ -1,5 +1,110 @@
 # Qwen3.6-35B-A3B-FP8 discovery
 
+## Native, plugin and stock vLLM again, with concurrency and the step's programs (2026-11-01)
+
+The protocol of the 2026-10-26 table below, on main at `ea17c0964`, one session of 16 hours on one rented x16 RTX 5090
+(Gen5 x16; 16 cores, 60 GiB of RAM, no swap, driver 595.84, CUDA 13.1, a container with no Docker), the card of the
+27B's 2026-11-01 session.
+
+| | native | plugin | stock vLLM |
+|---|---|---|---|
+| TPOT / TTFT, 256-token prompt | 19.1 ms / 15.7 s | 81.7 ms / 3.54 s | 11.2 ms / 0.34 s |
+| TPOT / TTFT, 7,680-token prompt | 20.6 ms / 200 s | 95.5 ms / 108 s | 11.9 ms / 2.83 s |
+| TPOT / TTFT, 261,632-token prompt (the window's longest) | 36.9 ms / 7,385 s | 94.4 ms / 3,664 s | 15.3 ms / 144 s |
+| drafts accepted at 256 / 7,680 / 261,632 | 90 / 74 / 56% | 90 / 62 / 70% | 89 / 80 / 59% |
+| TPOT with the drafter off, 256 / 7,680 | 22.1 / 21.8 ms | | |
+| first token at 256 / 257 tokens | 15.7 / 5.88 s | | |
+| device memory at rest / peak | 24.5 / 25.3 GiB | 29.8 / 31.3 GiB | 30.7 / 30.7 GiB |
+| KV cache | 262,144 tokens, the window | 850,989 tokens at 0.93 | 358,723 tokens at 0.93 |
+| host memory of the server at rest, peak | 16.3 GiB, 18.8 GiB | 24.0 GiB, 24.2 GiB | 15.0 GiB, 15.3 GiB |
+| GSM8K strict / flexible match | 0.460 / 0.460 | 0.335 / 0.335 | 0.350 / 0.350 |
+| ready after | 23-55 s from its pack | 2,250-2,320 s, no pack | 62 s, 123 s at its first compile |
+
+Acceptance is what the client sees for every cell. Host memory is the resident set of the server's whole process group,
+with the pinned expert pages or offload inside it. GSM8K's standard error is 0.033-0.035.
+
+Stock and the plugin at higher concurrency, with `--max-num-seqs` raised and nothing else changed but stock's window at
+32 rows, where 262,144 tokens ran out of device memory at boot (176,000 tokens there):
+
+| | stock, 8 | stock, 32 | plugin, 8 | plugin, 32 |
+|---|---|---|---|---|
+| 256-token prompts: per-request TPOT | 53.2 ms | 78.6 ms | 447.8 ms | 599.5 ms |
+| total output tokens a second | 131.5 | 143.8 | 14.9 | 18.0 |
+| first token | 0.84 s | 38.0 s | 12.6 s | 288 s |
+| 7,680-token prompts: per-request TPOT | 97.0 ms | 130.5 ms | 531.0 ms | 567.2 ms |
+| total output tokens a second | 57.1 | 59.8 | 1.6 | 1.5 |
+| first token | 7.83 s | 97.2 s | 1,174 s | 5,151 s |
+| device memory peak | 29.8 GiB | 29.9 GiB | 31.2 GiB | 31.3 GiB |
+
+Each cell runs 4 x concurrency requests at 256 tokens and 2 x concurrency at 7,680, each request a different slice of
+the same Markdown. First token is the median request's, queueing included. The plugin keeps the recipe's settings, which
+name one request; what stops it batching was not investigated. No request failed.
+
+What differs from the 2026-10-26 session:
+
+- **The lanes are pip environments, not images:** vLLM 0.25.1 with torch 2.11 and this source for the plugin, vLLM
+  0.32.0 with torch 2.13 for stock. FlashInfer's first compile ran on four cores, and nothing measured did.
+- **The native pack is not strict.** A strict export refuses at main: `k_linear_mean_reduce_12bf99` has no measured row
+  for its `030_cut` fork. `emmy eval golden` says 58 twins deploy from the golden rows and 4 do not, `prologue1-native`,
+  `prologue3-native`, `prologue4-native` and `prologue64-native`, each at a `k_linear_mean_reduce` of that fork. So a
+  prior decides those forks, where the 2026-10-26 pack was strict.
+- **The plugin's evidence is strict now,** on every boot. It has no pack here, so its ready time is a lowering of every
+  program and does not compare; a boot at 8 or 32 rows takes 2,067 and 2,658 s.
+- **Transparent hugepages are `madvise`, read-only in this container, and proactive compaction is 20;** the 2026-10-26
+  boots had both off. `compact_stall` did not move during any native cell, so compaction did not stall them. Whether
+  hugepages change the expert programs' reads was not tested.
+- **The plugin's single-request column ran last,** after concurrency, since a 1,800 s limit cut its second boot short.
+
+Stock's TPOT at the longest prompt, 15.3 ms against 9.1 ms, is a drafted step of 33.5 ms against 21 ms. Here the step
+holds about level from 31 ms at 256 and 7,680 tokens; on 2026-10-26 the step at the longest prompt was shorter than the
+29 ms at 256. One request each, and the cause was not investigated.
+
+Where the time goes, from `nsys --cuda-graph-trace=node` on native (256 and 7,680 tokens, first token within 1% of the
+unprofiled cells and TPOT 5% above at 256). The table is the median launch of each program, in milliseconds. The one-row
+step comes from a boot with the drafter off and the others from a boot with it on. A page copy is the launch that moves
+pages into the slots; expert programs read the slots, and the pages in place for a row the slots do not hold. The rest
+is the embedding, the pre and post pieces, the combine, the heads and the greedy pick.
+
+| | one-row step | verify step, 256 | verify step, 7,680 | 4-row chunk, 256 | 4-row chunk, 7,680 | 64-row chunk, up to 4,096 | 64-row chunk, past 4,096 |
+|---|---|---|---|---|---|---|---|
+| Gated DeltaNet programs | 3.43 | 5.52 | 5.52 | 31.9 | 31.9 | 11.5 | 11.5 |
+| attention and rotary | 0.24 | 0.73 | 1.10 | 665.6 | 1,316.5 | 7.4 | 11.0 |
+| routers | 0.48 | 1.38 | 1.37 | 1.6 | 1.6 | 0.8 | 0.8 |
+| expert programs | 1.20 | 23.58 | 17.84 | 32.7 | 48.0 | 1,405.5 | 1,446.5 |
+| paging programs | 7.45 | 7.44 | 7.45 | 7.5 | 7.4 | 7.5 | 7.5 |
+| page copies | 8.20 | 13.51 | 12.12 | 11.9 | 13.8 | 5.4 | 4.8 |
+| the rest | 1.75 | 3.74 | 3.81 | 1.2 | 1.2 | 4.1 | 4.1 |
+| the launch, start to end | 23.38 | 56.95 | 50.40 | 752.4 | 1,421.3 | 1,443.0 | 1,487.8 |
+
+- **Decode.** The drafted step takes 53.5 ms on native at 256 tokens and 50.8 ms at 7,680 (TPOT times tokens a step),
+  against 229 and 215 ms on the plugin and 31 ms on stock. The one-row step's 7.45 ms of paging programs agrees with the
+  7.8 ms of an earlier split on the dev box and does not move with rows, so a one-row step spends two thirds of its
+  time in the pager: 15.65 ms of paging programs and page copies, then 1.2 ms in the expert programs. The verify
+  step is 44.5 ms of 57 ms in the expert programs and the pager, against 5.5 ms in the Gated DeltaNet programs.
+- **A prompt's tail.** A 256-token prompt is 3 chunks of 64, 15 chunks of 4 and 3 single steps; 257 is 4 chunks of 64
+  and one step. 3 x 1.443 s + 15 x 0.752 s is the 15.6 s of the first token, and 4 x 1.443 s is the control's 5.88 s.
+  The tail in 4-row chunks costs 11.3 s against about 1.5 s for the 63 single steps it replaced.
+- **The 4-row chunk's attention.** That chunk's attention is one kernel on each of the 10 attention layers,
+  `k_matmul_softmax_range_reduce_1b2f00`: 66.6 ms a layer with 4,096 positions held and 131.7 ms past that, 88-93% of
+  the chunk. Every other width runs attention as cut pieces, 0.37 ms a layer at 64 rows. The golden holds rows of the
+  uncut kernel only, with no routing row for it, so nothing measured offers the cut arm; its row reads 7,442 us against
+  6.9, 9.7 and 26.6 us for the top-level rows at 1, 3 and 64 rows. A cut kernel in line with those would leave a 4-row
+  chunk near 90 ms and the 256-token first token near the control's 5.9 s. That is an estimate from these rows; no such
+  program was built.
+- **Prefill.** At 7,680 tokens the 119 chunks of 64 take 174 s and the 15 chunks of 4 take 21 s, 196 s of the 200 s. The
+  64-row chunk is 97% expert programs, 21.8 ms a layer for gate and up and 13.4 ms for down, reading pages over the
+  link. It takes 1.44-1.49 s against 1.25 s on 2026-10-26; the card and the host memory settings both differ, and that
+  was not separated. Native takes 26.1 s per 1,000 prompt tokens at 7,680 and 28.2 s at 261,632, the plugin 14.1 and
+  14.0 s, stock 0.37 and 0.55 s.
+- **The longest prompt.** It was not captured. Native's first token is 1,611 s slower than on 2026-10-26. If the 4-row
+  attention keeps doubling with the positions held, its 15 chunks are about 640 s of that, and 4,087 chunks each about
+  0.24 s slower, the captured chunk past 4,096 positions against 1.25 s, are the rest. Both terms are extrapolations.
+- **Concurrency.** Stock goes from 79 total tokens a second at one row and 256 tokens to 131.5 at 8 rows and 143.8 at
+  32, and from 43.7 to 57.1 and 59.8 at 7,680. The plugin goes from 10.5 to 14.9 and 18.0 at 256, and falls from 2.0 to
+  1.6 and 1.5 at 7,680. The 27B's stock reaches 756 at 8 rows; what holds this one back was not investigated.
+- **Accuracy.** Native scores 0.460, about three standard errors above the plugin and stock, which agree with each
+  other.
+
 ## Native and NInfer on one RTX 5090 (2026-10-29)
 
 NInfer at `1882c6ad` against native, one session on the card of the table below, with the protocol of
