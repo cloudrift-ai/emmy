@@ -316,11 +316,11 @@ def test_drafted_generation_keeps_greedy_tokens(tmp_path, monkeypatch):
     at temperature zero the verify steps generate transformers' greedy tokens, the same pack's with the drafter left
     unloaded, captured or not, through chunked prefill, which writes the drafter's cache too; the nine-token prompt (the
     eight-token one and its first greedy token) ends at its third chunk, which generates the first token, and the
-    eight-token one leaves its last token to a verify step. The head drafts the target's own pick again, so once the target repeats one token every draft stands and a step
-    generates three tokens; before, a step takes one draft or none. Each step's logits are its tokens' rows. At
-    positive temperature every step decodes one token. The layers are attention only: without evidence a Gated DeltaNet layer's one-token
-    step runs past a minute (the state test above), so the per-row state carry is checked on the CPU
-    (``test_prepare``) and by the recipes' gates."""
+    eight-token one leaves its last token to a verify step. The head drafts the target's own pick again, so once the
+    target repeats one token every draft stands and a step generates three tokens; before, a step takes one draft or
+    none. Each step's logits are its tokens' rows. At positive temperature every step decodes one token. The layers are
+    attention only: without evidence a Gated DeltaNet layer's one-token step runs past a minute (the state test above),
+    so the per-row state carry is checked on the CPU (``test_prepare``) and by the recipes' gates."""
     executable = shutil.which("emmy-runtime-worker")
     if not executable:
         pytest.skip("build native worker and add it to PATH")
