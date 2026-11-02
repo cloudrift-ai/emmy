@@ -18,6 +18,9 @@ def register_publish_command(subparsers):
         default=None,
         help="Locally built image to retag; defaults to the recipe image",
     )
+    parser.add_argument(
+        "--engine", choices=("vllm", "sglang", "native"), default=None, help="Publish the image of the variant this engine serves"
+    )
     parser.add_argument("--dry-run", action="store_true", help="Validate metadata and print commands without changing images")
     parser.add_argument("--yes", action="store_true", help="Confirm the noninteractive Docker tag and push")
     parser.set_defaults(func=handle_publish)
@@ -25,7 +28,7 @@ def register_publish_command(subparsers):
 
 def handle_publish(args):
     try:
-        recipe = load_publish_recipe(args.recipe)
+        recipe = load_publish_recipe(args.recipe, args.engine)
         plan = publish_recipe_image(
             recipe,
             source_image=args.source_image,
