@@ -834,9 +834,9 @@ def benchmark_program(
         stack.enter_context(prog.on_torch_stream())
         eviction = None
         if cold:
-            from emmy.compiler.backend.cuda.cache import L2Eviction  # noqa: PLC0415
+            from emmy.compiler.backend.cuda.cache import CacheEviction  # noqa: PLC0415
 
-            eviction = L2Eviction()
+            eviction = CacheEviction()
         n = len(prog.plan.launches)
         batch_sizes = [1] * n
         # Per-launch sample list — kept around to compute the median
