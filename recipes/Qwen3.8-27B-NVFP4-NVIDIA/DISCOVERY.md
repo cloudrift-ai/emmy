@@ -43,10 +43,10 @@ What differs from the 2026-10-25 session:
   FlashInfer 0.7.0.post1 for stock, which compiles FlashInfer at first use. That compile on 16 cores ran out of the
   container's memory, so stock's first boot and one warming request of each size ran on four cores. Nothing measured
   did.
-- **The native pack is not strict.** `emmy eval golden` fails on this recipe at main: 57 twins deploy from the golden
-  rows and `prologue16-native` does not (`k_linear_mean_reduce_89f977` has no measured row for its `030_cut` fork). The
-  pack was exported without `--strict-evidence`, so a prior decides that one fork; every other program's rows are the
-  golden's.
+- **The native pack is not strict.** `emmy eval golden` fails on this recipe at `ea17c0964`: 57 twins deploy from the
+  golden rows and `prologue16-native` does not (`k_linear_mean_reduce_89f977` has no measured row for its `030_cut`
+  fork). The pack was exported without `--strict-evidence`, so a prior decides that one fork; every other program's rows
+  are the golden's. #1302 landed that fork's row after this session.
 - **The plugin has no pack here,** so its ready time is a lowering of every program and does not compare.
 - Native's `/health` means loaded: at its 5.4 s answer the device already held the full 30.7 GiB, and a request sent at
   once got its first token in 0.76 s.

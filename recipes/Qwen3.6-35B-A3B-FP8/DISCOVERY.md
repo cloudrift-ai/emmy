@@ -44,10 +44,11 @@ What differs from the 2026-10-26 session:
 
 - **The lanes are pip environments, not images:** vLLM 0.25.1 with torch 2.11 and this source for the plugin, vLLM
   0.32.0 with torch 2.13 for stock. FlashInfer's first compile ran on four cores, and nothing measured did.
-- **The native pack is not strict.** A strict export refuses at main: `k_linear_mean_reduce_12bf99` has no measured row
-  for its `030_cut` fork. `emmy eval golden` says 58 twins deploy from the golden rows and 4 do not, `prologue1-native`,
-  `prologue3-native`, `prologue4-native` and `prologue64-native`, each at a `k_linear_mean_reduce` of that fork. So a
-  prior decides those forks, where the 2026-10-26 pack was strict.
+- **The native pack is not strict.** A strict export refuses at `ea17c0964`: `k_linear_mean_reduce_12bf99` has no
+  measured row for its `030_cut` fork. `emmy eval golden` says 58 twins deploy from the golden rows and 4 do not,
+  `prologue1-native`, `prologue3-native`, `prologue4-native` and `prologue64-native`, each at a `k_linear_mean_reduce`
+  of that fork. So a prior decides those forks, where the 2026-10-26 pack was strict. #1302 landed that fork's row after
+  this session.
 - **The plugin's evidence is strict now,** on every boot. It has no pack here, so its ready time is a lowering of every
   program and does not compare; a boot at 8 or 32 rows takes 2,067 and 2,658 s.
 - **Transparent hugepages are `madvise`, read-only in this container, and proactive compaction is 20;** the 2026-10-26
