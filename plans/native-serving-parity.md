@@ -122,7 +122,41 @@ recurrence's double state write removed), #1289 (the out projection's operand cu
 pinned cut's remainder takes its own fork; a bare `PLACE=cut` cuts the remainder chain; `--pin-route` keeps a
 recorded set), #1304 (the NInfer tables — its squash carried #1279's stock and plugin tables, so #1279 is closed,
 not merged), #1293 (a cut arm's piece facts computed on the worker that builds the arm), and the tooling fixes
-#1283-#1286. Current main has not been measured on the protocol; milestone 1 does that once.
+#1283-#1286. Milestone 1 measured the protocol once, below.
+
+## Measured 2026-11-01 (milestones 1 and 8, #1311)
+
+Each DISCOVERY's 2026-11-01 section holds the tables, on main at `ea17c0964`: before #1302 and #1309 changed both
+recipe goldens, and with native packs that were not strict. The State above and the numbers quoted in the milestones
+are the older sessions'; each gate re-reads its number against these.
+
+The bar in these numbers: 27B TPOT <= 9.2 / 9.1 / 12.0 ms at 256 / 7,680 / 197,632 tokens, first token <= 0.17 / 1.26 /
+135 s; Qwen3.6 TPOT <= 13.4 / 14.3 / 23.0 ms, first token <= 0.68 / 5.66 / 288 s.
+
+The concurrency bar is still the proposal, for the owner to revise. In stock's numbers at concurrency 8 / 32, TPOT at
+most and output tokens a second at least:
+
+| | 256-token TPOT | 256-token output | 7,680-token TPOT | 7,680-token output |
+| --- | --- | --- | --- | --- |
+| 27B | 13.8 / 15.2 ms | 504 / 713 | 29.0 / 36.3 ms | 184 / 187 |
+| Qwen3.6 | 79.8 / 117.9 ms | 87.7 / 95.9 | 145.5 / 195.8 ms | 38.1 / 39.9 |
+
+The plugin's cells are a low floor: it keeps the recipes' settings, which name one request, and it did not batch.
+
+What the session changes for the milestones:
+
+- **Qwen3.6's first token at 256 tokens went from 5.07 to 15.7 s, and no milestone owned the cause.** It is in the
+  follow-ups below. The plugin floor at that cell is 3.54 s.
+- **5's budget is larger.** Attention at 197,632 tokens is 544 s of the 27B's 698 s, not ~351 s of 505 s, and 6.7 ms a
+  layer at 65,536 positions, not 4.6. The commit that moved it was not bisected. A 3x fold leaves ~181 s against 5's
+  117 s; 117 s takes ~4.6x.
+- **8 is done, and its floor says 9's gate cannot be met by width.** At 7,680 tokens attention is 1.09 s at any width,
+  and 512 rows with no rotary cost at all still leaves 3.85 s against 1.26 s. Wider chunks stop paying near 256 rows.
+- **11 and 12 stand, and 12's Gated DeltaNet branch does not apply.** The one-row step is 15.65 of 23.4 ms in the paging
+  programs and page copies. The verify step is 44.5 of 57 ms in the expert programs and the pager, 5.5 ms in the Gated
+  DeltaNet programs.
+- **14's reference chunk moved.** Qwen3.6's 64-row chunk takes 1.44-1.49 s against 1.25 s, 97% expert programs. The card
+  and the host memory settings both differ, and that was not separated.
 
 ## The open PRs, placed
 
@@ -606,6 +640,13 @@ Open items:
 - (2026-10-25, #1277) Qwen3.6's width-4 GDN program keeps slow recorded picks: 1.34 ms for its recurrence target
   (a 4x4096 contraction on a one-warp tile, 275 us three times), three reduces of 120, 120 and 60 us that offer
   no seam, in_proj pieces at 55 us. 12 picks this up only if 1's split blames the GDN programs.
+- (2026-11-01, #1311) Qwen3.6's 4-row prefill chunk runs attention as one uncut kernel,
+  `k_matmul_softmax_range_reduce_1b2f00`: 66.6 ms a layer, 131.7 ms past 4,096 positions, 88-93% of the chunk, 11.3 s of
+  the 256-token first token. #1281 added the chunk, and the golden still holds only the uncut rows and no routing row
+  for it at c497a0cc7; widths 1, 3 and 64 are cut. Needs a record run on the card. A cut in line with those widths would
+  bring that first token near the 257-token control's 5.88 s, an estimate; no such program was built.
+- (2026-11-01, #1311) Not measured: native at 8 and 32 rows, which 22 owns, and an nsys capture of Qwen3.6's longest
+  prompt. The audit on current main, after #1302's rows, needs a 5090: `emmy eval golden` refuses any other card.
 
 Open, compiler — the correctness items block 17:
 
