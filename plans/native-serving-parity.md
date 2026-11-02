@@ -37,10 +37,9 @@ In today's numbers the bar is: 27B TPOT <= 9.2 / 9.8 / 13.1 ms at 256 / 7,680 / 
 
 At concurrency the window is a shared budget, not a per-request promise: the cache allocation stays window-sized, and
 an admitted request's context is that budget over the admission cap — 32,768 tokens at concurrency 8, 8,192 at 32 —
-unless milestone 19's design picks another split. The concurrency bar's numbers are fixed from the stock and plugin
-columns milestone 1 measures (none exist in this line of work today); the proposal — per-request TPOT and total
-output tokens per second each within 1.5x stock at concurrency 8 and 32 — is revised with the owner against that
-measurement at milestone 1, not at the end of the stretch.
+unless milestone 19's design picks another split. The concurrency bar, accepted by the owner on 2026-11-02 against
+milestone 1's columns: per-request TPOT and total output tokens per second each within 1.5x stock at concurrency 8
+and 32. Its numbers are under "Measured 2026-11-01".
 
 ## State (2026-10-29)
 
@@ -133,8 +132,8 @@ are the older sessions'; each gate re-reads its number against these.
 The bar in these numbers: 27B TPOT <= 9.2 / 9.1 / 12.0 ms at 256 / 7,680 / 197,632 tokens, first token <= 0.17 / 1.26 /
 135 s; Qwen3.6 TPOT <= 13.4 / 14.3 / 23.0 ms, first token <= 0.68 / 5.66 / 288 s.
 
-The concurrency bar is still the proposal, for the owner to revise. In stock's numbers at concurrency 8 / 32, TPOT at
-most and output tokens a second at least:
+The concurrency bar, 1.5x stock as the owner accepted it on 2026-11-02. At concurrency 8 / 32, TPOT at most and output
+tokens a second at least:
 
 | | 256-token TPOT | 256-token output | 7,680-token TPOT | 7,680-token output |
 | --- | --- | --- | --- | --- |
