@@ -2,7 +2,11 @@
 repository goldens record — the set they are fit on — at one tolerance, in both spaces: a placement fork's arm
 exactly, a schedule row within the top ``SCHEDULE_TOP`` of its pool as the prior orders it. Every hardware golden
 and every maintained recipe's golden runs in ``make test``, its pools in slices of ``SLICE`` so the work spreads over
-the xdist workers: one node is one slice of one golden in one space, and holds the tolerance over that slice. The
+the xdist workers: one node is one slice of one golden in one space, and holds the tolerance over that slice. A slice
+takes every ``n``-th pool, ``n`` the golden's slice count, not a contiguous run: the export orders the pools heaviest
+first (the decisions with the longest arms), and a placement pool costs what realizing every arm of every fork on its
+root costs, minutes for the fused prefill kernels of a 1,000-kernel golden, so contiguous slices put a whole hour on
+one node. The
 schedule half draws as many rows per pool as a greedy compile in this lane does (``EMMY_POOL_DRAW``): the fit keeps
 its measured 2000, and a rank fraction with the golden row kept reads the same on a smaller draw, only coarser per
 pool.
@@ -95,24 +99,28 @@ def _parameters():
             if _prior_pending(path)
         ),
         *(
-            pytest.param(path, space, start, id=f"{_golden_id(path)}/{space}/{start // SLICE}")
+            pytest.param(path, space, k, id=f"{_golden_id(path)}/{space}/{k}")
             for path in ordered
             if not _prior_pending(path)
             for space, pools in _pools(path).items()
-            for start in range(0, len(pools), SLICE)
+            for k in range(_slices(pools))
         ),
     ]
 
 
-@pytest.mark.parametrize(("path", "space", "start"), _parameters())
-def test_the_shipped_priors_reproduce_the_goldens(path: Path, space: str, start: int) -> None:
+def _slices(pools) -> int:
+    return -(-len(pools) // SLICE)
+
+
+@pytest.mark.parametrize(("path", "space", "k"), _parameters())
+def test_the_shipped_priors_reproduce_the_goldens(path: Path, space: str, k: int) -> None:
     from emmy.compiler.pipeline.search.prior import OfflinePrior
     from emmy.compiler.pipeline.search.prior.offline import default_file
     from emmy.compiler.pipeline.search.prior.reproduce import reproduce_placement, reproduction_rate, schedule_ranks
 
     prior = OfflinePrior(path=str(default_file(space)))
     every = _placement_pools(path) if space == "placement" else _pools(path)["schedule"]
-    pools = every[start : start + SLICE]
+    pools = every[k :: _slices(every)]
     if space == "placement":
         # The decisions in scope are the whole golden's: a cut recorded on a piece outside the slice is on the path
         # of a kernel inside it.
@@ -125,6 +133,6 @@ def test_the_shipped_priors_reproduce_the_goldens(path: Path, space: str, start:
     rate = reproduction_rate(verdicts)
     missed = [f"{v.pool.name}: {v.found} -> {v.golden}" for v in judged if not v.ok]
     assert rate >= TOLERANCE, (
-        f"{_golden_id(path)} {space}, slice {start // SLICE}: {sum(v.ok for v in judged)}/{len(judged)} reproduced, "
+        f"{_golden_id(path)} {space}, slice {k}: {sum(v.ok for v in judged)}/{len(judged)} reproduced, "
         f"below {TOLERANCE:.2f}; report this node in the PR and leave routine refits to nightly refresh:\n  " + "\n  ".join(missed)
     )
