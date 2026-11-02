@@ -136,9 +136,10 @@ not merged), #1293 (a cut arm's piece facts computed on the worker that builds t
   host and did not measure the width-16 program it was aimed at. Neither is a milestone: evidence joins on exact
   identity, which neither changes.
 - **#1290** (draft): the tiny GDN hybrid in the serving regen, capture and completion split apart, and the GPU
-  tests it unblocks. #1303 (merged) was one blocker; #1294 (merged) was aimed at the other — the regenerated golden
-  held, on 8 of its 10 pinned GDN programs, a single-CTA remainder that does not finish in 62 s. Its body predates
-  #1294, so whether that closes it is unmeasured. The switch (26) needs its tests green.
+  tests it unblocks. #1303 (merged) was one blocker. #1294 (merged) closed part of the other, measured 2026-11-02 on
+  a golden regenerated from main at #1310: the one-row programs now run in 1.4 ms or less, but 6 of the 11 GDN programs
+  still hold a kernel that does not finish in 62 s, and three GPU tests stall on them (the register has the kernels).
+  The switch (26) needs its tests green.
 - **#1299** (open): lands before milestone 2, the first record milestone. It changes the cold bench and the tune DB
   version, so records taken before it would measure a bench about to move. **#1298** (merged 2026-10-30) changed
   kernel sources (identities unchanged) beyond NVFP4 through its wider alignment proof. Neither is on the 5090
@@ -640,6 +641,18 @@ Open, compiler — the correctness items block 17:
   the remainder chain and only the pieces stay the prior's picks — and the 3-row verify program still keeps one
   piece of 1.3e8 trips per cell that way, so the pin alone does not close this. What moves the prior itself is a
   refit on measured cuts of such programs, or a feature that tells a piece's recompute from its size.
+  (2026-11-02, #1290) Measured on main at #1310 with its refit priors, on a regenerated lane golden, each kernel
+  replayed alone on an RTX 5090 (`emmy run --golden --kernel REF --realization ROW --bench`). #1294 and the refits
+  closed the one-row programs (1.4 ms at most), and the 3-row verify program stays at 34 us. Six of the 11
+  GDN programs hold a kernel that hits the runtime's 62 s deadline, four of them on a single CTA: float32 width 4
+  `k_linear_matmul_mean_reduce_b7f3d1__place_045f77378c__place_aef6553056` (grid 16 x 128); bf16 width 4
+  `k_linear_matmul_mean_reduce_dcd742__place_668ca16ffb` (1 x 64) and width 16
+  `k_linear_matmul_mean_reduce_0658d5__place_80fdaa9e9c` (1 x 512); float16 width 4
+  `k_linear_matmul_mean_reduce_9a01eb__place_348985da70` (8 x 32), width 16
+  `k_linear_matmul_mean_reduce_206776__place_463fccf612` (1 x 512) and width 2
+  `k_linear_mean_reduce_0f91fc__place_08c61621a0#2` (1 x 256). So more CTAs alone do not close it.
+  `S_ext_serial_cell_work` ranks the 3.46e13 and 2.71e11 kernels at the top, but the 1.34e8 one hangs while a 6.6e7
+  one takes 205 ms.
 - (2026-10-31, #1309) The prior reproduction gate cannot go green on a promoted RTX 5090 hardware golden by a
   refit, so 17 needs prior and export work first. The promotion of every recipe row, with both priors refit at
   the shipped counts (schedule 400 iterations, placement 1,500, no folds), left 20 nodes red, all placement, all
