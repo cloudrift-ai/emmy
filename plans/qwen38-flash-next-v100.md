@@ -8,8 +8,13 @@ Emmy's kernels run inside the fork's runtime, which supplies the serving shell a
 the fork has to serve the model first: steps 1 to 3 set up the runtime and record the baseline to match, step 4 gets
 Emmy serving the model correctly, step 5 closes the speed gap, and step 6 releases.
 
-Written 2026-10-13, revised the same day after a review and after the owner fixed the goal. Steps 1 and 2 ran on
-2026-10-14 and 15; each result is written under its step. Numbers marked "upstream" are 1Cat-vLLM's own reports.
+Written 2026-10-13, revised the same day after a review and after the owner fixed the goal. Each result is written
+under its step. Numbers marked "upstream" are 1Cat-vLLM's own reports.
+
+**Where it stands (2026-11-01).** Steps 1 to 3 are done, and the nine items of step 4 are done, but step 4's gate has
+not run. Step 5 is under way: at one request Emmy takes 21.3 ms per token against the fork's 13, and 1.82 s to the
+first token at 4K against 0.93 s. Nothing else in the done gate has been measured for Emmy. The next work is listed
+under "Next" in step 5. The minimums in step 2 and Qwen's license are still open with the owner.
 
 ## What we know
 
@@ -62,31 +67,23 @@ cards at TP4 with direct NVLink, one request:
   2026-10-03). First requests at a new batch size compile Triton kernels. Several long prompts queue behind chunked
   prefill. A feature request (1100) asks for the fast FP16 lanes when the model is served with vision.
 
-### Our copy of the fork is two months old
+### Our fork
 
-`cloudrift-ai/1Cat-vLLM` was last pushed on 2026-08-13. It is 3,398 commits behind upstream and carries 13 commits of
-our own: the DeepSeek V4 long-context path and KV pool, a Laguna FP8 precision fix, Poolside parser fixes and warm-up
-changes. It has no `qwen4_exp`. Every V100 recipe pins an image built from it.
+Until step 3, `cloudrift-ai/1Cat-vLLM` stood at 2026-08-13, 3,398 commits behind upstream, with no `qwen4_exp`. This
+model now runs on its branch `cloudrift/v1.5.1` (step 3). Every other V100 recipe still pins an image from the August
+build.
 
 ### Emmy today
 
-- `recipes/Qwen3.8-Flash-Next` is an untested shell for H200, H100 and B200.
-- Emmy's own kernels have nothing for this architecture yet. The tracer covers every layer kind (step 4 item 1).
-  Missing in Emmy: the trace seams, the MoE split for Qwen's shared-expert gate, hosting Qwen Sparse Attention and the
-  Gated DeltaNet layers, MTP, and vision.
-- The plugin's own Gated DeltaNet layers run eager and refuse prefix caching, speculative decoding and CUDA graphs.
-  Only Emmy's own Gated DeltaNet state layer declares the hybrid cache vLLM needs; a fork layer hosted inside the Emmy
-  model has no such declaration yet.
+- `recipes/Qwen3.8-Flash-Next` is an untested shell for H200, H100 and B200. `recipes/Qwen3.8-Flash-Next-NVFP4` holds
+  the V100 serving config and golden, in a locked shell that proposes no deployment.
+- Emmy runs the model on four V100s under strict evidence (step 4). It hosts the fork's Qwen Sparse Attention, Gated
+  DeltaNet layers and n-gram table, and runs the pre and post programs and the experts. MTP and vision are not served
+  through Emmy.
 - The plugin refuses speculative decoding under pipeline parallelism and for a checkpoint whose embedding is not tied
-  to the output layer. This checkpoint's is not tied.
+  to the output layer. This checkpoint's is not tied. Step 2 chose MTP off, so this does not block the done gate.
 - The plugin's tensor parallelism slices only the routed experts. Everything else Emmy runs is replicated per rank.
-- Emmy's loader reads FP8, packed int4, MXFP4 and NVFP4 weights. DeepSeek's FP8 and MXFP4 run in Emmy's kernels on
-  V100; NVFP4 has run only on the RTX 5090. There is no GGUF reader.
-- Where Emmy's kernels serve this family, the evidence is thin and not in Emmy's favor. Qwen3.8-27B-FP8 on four
-  V100s: at four concurrent requests Emmy gave 5.4 tok/s in total against 40.8 for the fork. Emmy ran PP4 × TP1 and
-  the fork TP4, and the Emmy rows are single probes. On one RTX 5090 with BF16 weights and one request, Emmy gave 26.3
-  tok/s running eager against 63 for stock vLLM with CUDA graphs. On the 27B, one request spends about 2.85 ms per
-  Gated DeltaNet layer per token in Emmy's kernels, and the layer serves the requests of a step one after another.
+- There is no GGUF reader.
 - Native serving handles one dense Qwen3 request on one GPU. It has no MoE, no second GPU and no batching.
 
 ### The node
@@ -368,8 +365,9 @@ takes more as later rounds need it.
      be enforced at load;
   4. the MoE split for Qwen's shared-expert gate, with every routed expert sliced across tensor-parallel ranks;
      *Done, 2026-10-16:* every rank runs `pre` and `post` whole, the gated shared expert included, as DeepSeek keeps its
-     shared experts, plus its slice of every routed expert; only the routed output is all-reduced. The fork slices the
-     shared expert instead and reduces once, which is step 5's to weigh. The router runs as the checkpoint's module does
+     shared experts, plus its slice of every routed expert; only the routed output is all-reduced. The fork also reads
+     the shared expert whole, as the serving profile of 2026-10-27 showed (this note first said it slices it); what it
+     splits across ranks is the hyper-connection mixers. The router runs as the checkpoint's module does
      (FP16 logits, FP32 softmax, top-10 renormalized), and the correctness step checks it against the fork. A CPU test
      at two ranks reproduces the eager layer. The split loader no longer renames Qwen's `mlp.shared_expert` to the
      plural Laguna and GLM use, which had left the shared expert unloaded;
@@ -433,7 +431,8 @@ takes more as later rounds need it.
   and the carried Gated DeltaNet state across steps, then run the step 1 accuracy sets. First-token parity alone does
   not qualify this model.
 - Gate: the Emmy image boots strict on the test node, two boots give the same text, and it passes the correctness
-  checks and the accuracy sets within the step 1 tolerances.
+  checks and the accuracy sets within the step 1 tolerances. **Not run yet.** The evidence so far is the eight greedy
+  probe prompts of item 9.
 
 ### 5. Close the gap to the fork
 
@@ -500,7 +499,30 @@ Rounds, as with DeepSeek. Each round starts from a profile and ends with a boot 
   launch clearing its output clears its whole capacity) and lends them to run_each with the weight slices; in-boot
   A/B with a file switch (`abrows.sh`, VM-only patch): all copied 1.96 s, symbolic copied 1.88, all in place 1.84.
   Boot-to-boot drift on this VM is ~3% (TPOT 22.6 -> 23.3 ms on the SAME tree hours apart): A/B inside one boot.
-  Next: the NVFP4 decode lowering (~220 GB/s), post8's linear_7/8 operand cut.
+- **Round notes (2026-10-26 to 31).** NVFP4 decode lowering (#1298): the pair-table lookups are computed in CUDA and
+  byte runs vectorized, slots 42.0 -> 35.8 us per layer, but in side-by-side boots TPOT stayed 22.67 -> 22.64 ms and
+  TTFT at 4K 1.863 -> 1.844 s, so the table gather was not the limiter. Post8's linear_7/8 operand cut is a divide, not
+  a lever. Serving profile of post8 (2026-10-27): 20 kernels, 143 us busy per layer, 6.75 of 18.5 ms GPU busy per step
+  (the fork's step is 9.7 ms). The four big matmuls sit about 49 us per layer over their read floor (2.4 ms per step),
+  and 13 small pieces take 62 us per layer (3 ms per step), against an empty kernel's 0.9 us under graphs. The fork
+  reads the shared expert whole with cuBLAS gemv at 550-690 GB/s and splits the hyper-connection mixers across ranks
+  with all-gathers. A hand-written 8-row kernel was also about 2x off the read floor, so a new GEMV schedule family is
+  not the obvious win. The cold bench ranked post8's matmuls wrongly because a re-run kernel keeps its code in the
+  instruction cache, while serving runs about 58 other kernels between; #1299 evicts the code too and the golden was
+  re-measured and re-tuned under it: post8 143 -> 117.6 us per layer, GPU busy 19.32 -> 17.78 ms per step, TPOT
+  23.45 -> 21.38 ms, TTFT at 4K 2.08 -> 1.98 s. On the merged tree: TPOT 21.3 ms, TTFT at 4K 1.82 s. Before blaming a
+  golden for a boot difference, diff the boots' cubin directories: two boots read 3.5% apart across a card swap while
+  compiling the same 80 kernels.
+- **Next (2026-11-01).** Every number so far is one request at a short or 4K prompt, and the rounds' gains have
+  shrunk to about 1 ms per token. So measure the whole gap before more tuning:
+  1. Run step 4's gate: the correctness limits, the accuracy sets, two boots giving the same text.
+  2. Run this step's done gate once against the fork: first token at 1K, 8K, 32K and 130K, total output at 4 and 8
+     requests, four replicas together, and memory against the 3 GiB per card margin, of which step 2 left the fork
+     about 0.6 GiB to spare.
+  3. Profile current main again, then choose the round. Candidates, largest first, in figures from the 2026-10-27
+     profile: fewer kernels for post8's small pieces (about 3 ms per token); splitting the hyper-connection mixers
+     across ranks, which adds an exchange, so its gain is unmeasured; the one-token tail of a prefill, eager at 223 ms
+     against the fork's 75, and the ~80-token step's host wait per layer.
 - Gate, the definition of done. Both sides run step 2's production configuration: the same checkpoint, layout,
   context, key/value pool, concurrency, prefix-cache and MTP settings; fork, Emmy, Emmy, fork rounds; three repeats
   each:
