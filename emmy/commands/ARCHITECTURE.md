@@ -213,8 +213,8 @@ local-memory bytes beside register counts, making spills visible in the archived
 `run --bench --cold-cache` uses a separate evidence regime: `COLD_CACHE` is a golden input pin and a context-key field,
 independent of compiler flags. An omitted pin means hot-cache measurement. Import, lookup and export preserve that
 distinction, so a cold measurement cannot replace or price a hot one, or the reverse. Cold kernel timing uses one
-launch per event window after same-stream L2 eviction, outside the measured interval. It models weights read from
-memory, not the partial cache reuse of a served model.
+launch per event window after same-stream eviction of L2 and the instruction caches, outside the measured interval.
+It models weights and code read from memory, not the partial cache reuse of a served model.
 Cold mode times Emmy kernels only; peer Torch forwards retain internal cache reuse and are not comparable to
 per-kernel cold sums. Explicit peer timings and whole-row `--record` are refused. The correctness oracle, per-kernel
 DB writes, tuner candidates, and `--record-greedy` retain their usual roles. Cold windows always contain one replay;
@@ -608,10 +608,13 @@ emmy recipe create <org/model> [--root ROOT] [--task generate|embed] --rationale
 ### `emmy deploy local`
 
 Runs `docker compose` directly on the current machine. Auto-detects the local GPU via PCI sysfs and selects the matching `matrices` entry from the recipe.
+`--engine {vllm,sglang,native}` keeps only the card's entries that engine serves, so a card with a native lane beside
+its vLLM lane deploys either (recipe ARCHITECTURE, "The Native Lane").
 
 ```bash
 emmy deploy local --recipe <path> [--dry-run] [--teardown]
 emmy deploy local --recipe <path> --gpu "..." --gpu-count N    # override detection
+emmy deploy local --recipe <path> --engine native               # the card's native lane
 ```
 
 ### `emmy deploy ssh`
@@ -805,14 +808,16 @@ report.
 ### `emmy publish`
 
 Publishes the local serving image named by one concrete inference recipe. The recipe image is the destination and
-must match `cloudriftai/(vllm-emmy|1cat-vllm)-<model-slug>:<runtime-version>-<source-sha>`, where the source SHA is
+must match `cloudriftai/(vllm-emmy|1cat-vllm|emmy-native)-<model-slug>:<runtime-version>-<source-sha>`, where the
+source SHA is
 7–12 lowercase hexadecimal characters. The model slug comes from the same `emmy.publish.model_slug()` implementation
 used by `docker/vllm-emmy-serve/model_slug.sh`; `latest`, hardware tags, and qualification suffixes are rejected.
 
 The local source must carry `ai.emmy.publish.family`, `ai.emmy.model.id`, `org.opencontainers.image.version`, and
 `org.opencontainers.image.revision` labels matching the recipe destination. `--source-image` retags a local build
 whose temporary name differs from that destination. A matrix is accepted only when it expands to one concrete
-variant.
+variant, among those `--engine` serves when given: `--engine native` publishes a card's native lane
+([emmy-native](../../docker/emmy-native/ARCHITECTURE.md)), whose runtime version is the Emmy package's.
 
 Before any mutation, the command checks the registry destination. An existing destination is accepted only when its
 digest is already among the local image's `RepoDigests`; a different or unprovable digest is never overwritten. After

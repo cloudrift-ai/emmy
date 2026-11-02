@@ -286,9 +286,10 @@ _COLS = {
 }
 # Tables an older emmy wrote that nothing reads any more, dropped alongside the rest on a re-create.
 _OBSOLETE_TABLES = ("loop_op", "tile_op", "kernel_op", "cuda_op", "lowering", "kernel_set", "kernel_feature")
-#: The schema and cached identities (``PRAGMA user_version``): kernel wire, exact kernel identity and context key.
-#: A file holding another is re-created; bump when any changes. The DB tests pin kernel and context identities.
-_VERSION = 8  # The Affine normal form re-keys every kernel that sums, negates or scales a value by a constant.
+#: The schema and cached identities (``PRAGMA user_version``): kernel wire, exact kernel identity and context key, and
+#: what a context's regime measures. A file holding another is re-created; bump when any changes. The DB tests pin
+#: kernel and context identities.
+_VERSION = 9  # A cold-cache row times its kernel with the code evicted too; older cold rows timed it cached.
 # Drop order respects the foreign keys; create order is the reverse.
 _DROP_ORDER = (
     "perf",

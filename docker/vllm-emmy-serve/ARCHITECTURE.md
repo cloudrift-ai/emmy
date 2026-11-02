@@ -16,7 +16,8 @@ deterministic, tokenless boot.
 cloudriftai/<runtime-family>-<model-slug>:<runtime-version>-<source-sha>
 ```
 
-The supported runtime families are `vllm-emmy` and `1cat-vllm`. The tag records the runtime release and its source
+The supported runtime families are `vllm-emmy` and `1cat-vllm`, beside the native lane's `emmy-native`
+([emmy-native](../emmy-native/ARCHITECTURE.md)). The tag records the runtime release and its source
 revision; the target GPU, zero-recompile result, cache manifests, serving shape, and checkpoint revision belong in
 labels and qualification evidence, not mutable or hardware-specific tag suffixes. The model slug names the pinned
 config as well as the image repository:
