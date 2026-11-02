@@ -143,12 +143,16 @@ not merged), #1293 (a cut arm's piece facts computed on the worker that builds t
   version, so records taken before it would measure a bench about to move. **#1298** (merged 2026-10-30) changed
   kernel sources (identities unchanged) beyond NVFP4 through its wider alignment proof. Neither is on the 5090
   parity path (the 5090's deployed NVFP4 kernels read no pair table).
-- **#1302** (draft): milestone 18 — the native recipe lane, built and measured on packs prepared from main's
-  goldens (each DISCOVERY's 2026-10-31 section); its images are not published and wait on 17's promoted rows.
-- **#1309**: the retired tuning plan's re-record — 180 rows of both recipe goldens re-measured on a rented x16 RTX
-  5090 at the tune standard after the compiler fixes (0.918x the stored number at the median; the prologue64
-  `k_linear_mean_reduce_374241#2` row 494 -> 786 us, steady across runs). Its hardware-golden promotion came
-  out before it landed: the ledger's 2026-10-31 prior item is why, and 17 owns the promotion.
+- **#1302** (merged 2026-11-01): milestone 18 — the native recipe lane, built and measured on packs prepared from
+  main's goldens (each DISCOVERY's 2026-10-31 section), with both recipes' drafter rows on the RTX 5090 goldens; its
+  images are not published and wait on 17's promoted rows.
+- **#1309** (merged 2026-11-01): the retired tuning plan's re-record — 180 rows of both recipe goldens re-measured on
+  a rented x16 RTX 5090 at the tune standard after the compiler fixes (0.918x the stored number at the median; the
+  prologue64 `k_linear_mean_reduce_374241#2` row 494 -> 786 us, steady across runs). Its hardware-golden promotion
+  came out before it landed: the ledger's 2026-10-31 prior item is why.
+- **#1310** (draft): the promotion — every row and decision of both recipe goldens into the RTX 5090 hardware golden
+  except the five kernel trees of the 2026-10-31 ledger item, both priors refit on the promoted goldens, the gate
+  green; the recipes keep `prior-pending` until those five trees can follow.
 
 ## Milestones
 
@@ -303,7 +307,10 @@ not merged), #1293 (a cut arm's piece facts computed on the worker that builds t
     plan's scope. Gate: the prior reproduction gate green with no `prior-pending` left on these recipes; the
     weights committed. Needs 2-16, and the prior gap the ledger dates 2026-10-31: the retired plan's promotion
     (#1309, in its first form) put every recipe row into the RTX 5090 hardware golden and turned 20 gate nodes red
-    on seven kernels that no refit reproduces; the PR landed its re-records without the promotion.
+    on seven kernels that no refit reproduces; the PR landed its re-records without the promotion, and #1310 lands
+    the promotion of everything the gate reproduces, less the five RTX 5090 kernel trees of that ledger item, with
+    both priors refit. What remains of 17 is those five trees and the tag drop, which wait on the ledger item's
+    feature and export work.
 
 18. **The native lane in the recipes and the deploy path (#1302).** A recipe names the native server as its
     engine; the image carries `emmy-server`, the worker and the pack prepared from the recipe golden, so a deploy
@@ -648,7 +655,13 @@ Open, compiler — the correctness items block 17:
   hold these decisions on main under their `prior-pending` tags; a hardware golden's nodes the gate never skips.
   What 17 needs: a feature that separates the two programs' contexts (or one decision per kernel), and an export
   that reaches the recorded cut. The Llama 3.1 8B V100 SXM3 splits a default-count refit misses reproduce at the
-  shipped counts; a refit at `emmy fit`'s defaults (200/500) underfits and reddens 28 nodes.
+  shipped counts; a refit at `emmy fit`'s defaults (200/500) underfits and reddens 28 nodes. #1310 promotes the
+  rest. A piece's decisions cannot come out alone: the gate walks a root to the kernel set its recorded decisions
+  leave, and without the piece's decisions the prior's own cut order carves pieces outside that set, so the five
+  kernel trees come out whole (152 kernels, 78 decisions, 82 rows, 6 measured) and stay in the recipe goldens. The
+  dataset a refit reads has to be exported after the goldens are final: weights fit before #1302's drafter rows
+  reached the recipe goldens left four of their placement forks red once promoted, pools no fit had seen and the
+  `prior-pending` tag had hidden from the gate; the re-export and refit closed them.
 - (2026-10-31, #1302) The Qwen3.6 plugin lane decodes at about 0.3 tokens a second on the rented 5090s (202 ms a
   token on 2026-10-26): the card at 100% SM with no memory or PCIe traffic, py-spy in the routed-expert combine of
   the verify step. Not bisected.
