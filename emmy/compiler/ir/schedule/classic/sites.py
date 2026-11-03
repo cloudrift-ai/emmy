@@ -227,7 +227,10 @@ def _contraction_support(tile_op, site: NodeId, node: NodeSchedule, edges, geome
         raise ScheduleRefused(f"{node_id_spelling(site)}: one contraction currently requires one transport choice across its operands")
     stage = next(iter(edges.values())).stage if edges else Stage.direct()
     resolved_stage = None
-    if _wgmma_refusal(node.tile, stage) is not None or _multi_fold_direct_refusal(fold, node.tile, stage) is not None:
+    # A site below a kernel root reads through its root's transport, so its own direct stage is no
+    # gmem read: a warp-group score's operands are the chunk tier's shared-memory slabs.
+    own = None if site in tile_op.nested_sites else stage
+    if _wgmma_refusal(node.tile, own) is not None or _multi_fold_direct_refusal(fold, node.tile, stage) is not None:
         return None
     if view.as_contraction() is None or not node.tile.is_tiled:
         if not stage.is_direct:
@@ -413,6 +416,8 @@ class ClassicNodeSite(Site[ClassicSchedule]):
         plan = Tile.parse(named, work if work is not None and work.kind == "warp" else Work(kind="warp", units=(4, 1)))
         stage = self.problem.row.get(self.stage_key) if self.stage_key is not None else None
         stage = self.problem.row.get("STAGE") if stage is None else stage
+        if self.id in self.problem.tile.nested_sites:
+            stage = None  # fed through its root's transport (``_contraction_support``)
         if why := _wgmma_refusal(plan, None if stage is None else Stage.parse(stage)):
             raise ValueError(why)
 
@@ -546,12 +551,9 @@ class ClassicNodeSite(Site[ClassicSchedule]):
         """The transports each node choice can be fed by (:func:`_stage_candidates`). The edge catalog is
         their union, so a row can name any of them; a choice's supports pair it with its own only, never
         with a transport another choice brought — the leaf a draw reaches must be the leaf the row rebuilds.
-
-        A site below a kernel root (``TileOp.nested_tiles``) takes no transport of its own: the binder
-        reads one only at the root it builds around, and the chunk tier stages its score's operands
-        through the carrier's."""
+        A site below a kernel root takes none of its own (``TileOp.nested_sites``)."""
         tile, target, node = self.problem.tile, self.problem.target, self.node
-        if self.id not in tile.contractions or any(self.id == site for _, site in tile.nested_tiles):
+        if self.id not in tile.contractions or self.id in tile.nested_sites:
             return {choice: (Stage.direct(),) for choice in self.nodes}
         return {choice: _stage_candidates(tile, target, node, choice, paged=self.problem.paged) for choice in self.nodes}
 

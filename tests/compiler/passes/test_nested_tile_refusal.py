@@ -55,11 +55,12 @@ def _back_to_back() -> Graph:
     return graph
 
 
-def _attention() -> Graph:
+def _attention(heads: int = 2, seq: int = 64, dim: int = 32) -> Graph:
     graph = Graph()
+    shape = (Dim(1), Dim(heads), Dim(seq), Dim(dim))
     for name in ("q", "k", "v"):
-        graph.add_node(InputOp(), [], Tensor(name, (Dim(1), Dim(2), Dim(64), Dim(32)), dtype="f16"), node_id=name)
-    graph.add_node(SdpaOp(is_causal=False), ["q", "k", "v"], Tensor("o", (Dim(1), Dim(2), Dim(64), Dim(32)), dtype="f16"), node_id="o")
+        graph.add_node(InputOp(), [], Tensor(name, shape, dtype="f16"), node_id=name)
+    graph.add_node(SdpaOp(is_causal=False), ["q", "k", "v"], Tensor("o", shape, dtype="f16"), node_id="o")
     graph.inputs, graph.outputs = ["q", "k", "v"], ["o"]
     return graph
 
@@ -72,6 +73,16 @@ _PAIRED = {
     "TILE@map.1/twist": "mma_m16n8k16_f16_f32/f1x1",
     "TILE@map.1/twist.1/inner": "mma_m16n8k16_f16_f32/f1x2",
     "STAGE@map.1/twist": "d1/smem-async",
+}
+#: The same pair on the warp-group atoms, whose operands a shared-memory descriptor reads: the score's are
+#: the carrier's slabs.
+_PAIRED_WGMMA = {
+    "WORK": "w4x1",
+    "RASTER": "",
+    "REDUCE": "",
+    "TILE@map.1/twist": "wgmma_m64n128k16_f16_f32/f1x16/k4",
+    "TILE@map.1/twist.1/inner": "wgmma_m64n64k16_f16_f32/f1x8/k4",
+    "STAGE@map.1/twist": "d2/smem-async",
 }
 
 
@@ -161,13 +172,18 @@ def test_binder_refuses_a_tile_in_an_output_tiled_roots_cone(monkeypatch) -> Non
         factorize(realized, root=None)
 
 
-def test_a_chunk_score_keeps_its_tile_and_takes_no_transport() -> None:
+@pytest.mark.parametrize(
+    ("cap", "pins", "graph"),
+    [((8, 9), _PAIRED, _attention), ((9, 0), _PAIRED_WGMMA, lambda: _attention(heads=8, seq=512, dim=128))],
+    ids=["mma", "wgmma"],
+)
+def test_a_chunk_score_keeps_its_tile_and_takes_no_transport(cap, pins, graph) -> None:
     """The chunk tier is the one place the binder folds a nested tile, the score's, and it stages the
-    score's operands through the carrier's transport. The paired row is still offered; a transport
-    at the score is not, since the kernel it built was the one without it."""
-    ctx = replace(Context.from_target((8, 9), gpu_name="NVIDIA GeForce RTX 4090"), pool_sample=PoolSample(rows=64, seed=0))
-    with pinned_knobs(_PAIRED):
-        rows = enumerate_graph(_attention(), ctx).rows
+    score's operands through the carrier's transport. The paired row is still offered, a warp-group
+    score included; a transport at the score is not, since the kernel it built was the one without it."""
+    ctx = replace(Context.from_target(cap), pool_sample=PoolSample(rows=64, seed=0))
+    with pinned_knobs(pins):
+        rows = enumerate_graph(graph(), ctx).rows
     assert rows
     assert {row["STAGE@map.1/twist.1/inner"] for row in rows} == {""}
 

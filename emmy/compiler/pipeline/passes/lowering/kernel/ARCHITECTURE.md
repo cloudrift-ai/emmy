@@ -132,13 +132,16 @@ dynamic-grid tier ceil-divides the launch and threads the runtime extent as an `
 
 ### The one factorizer
 
-The scalar binding arm refuses a row that selects a contraction tile inside the subtree it lowers serially. The
-schedule offer applies the same rule (`TileOp.nested_tiles`), so an enumerated row should not reach this refusal,
-and a pin that names such a tile is refused at the offer with the rule's reason. The binder keeps the check for the
-cases the offer does not see: a root whose row tiles it but that still lowers serially here (its tile has no placed
-`(m, n)` axes, or the grid has fewer than two axes), a `TILE` at that root itself, and a root the binder peels to
-under that schedule that differs from the one `ops.kernel_roots` reads from the term. The greedy's rejected-row
-path then retries another schedule.
+Both binding arms refuse a row that selects what they would drop. The serial arm lowers its whole subtree per cell,
+so it refuses a contraction tile anywhere in it, its root's included. The output-tiled arm evaluates its cone per cell
+in the fill, so it refuses a tile below its root except the chunked carrier's score, which the tensor-core tier folds.
+Either arm refuses a `STAGE` below its root, since only the root's transport is read. The schedule offer applies the
+same rules (`TileOp.nested_tiles`), so an enumerated row should not reach these refusals, and a pin that names such a
+tile is refused at the offer with the rule's reason. The binder keeps the checks for the cases the offer does not
+see: a root whose row tiles it but that still lowers serially here (its tile has no placed `(m, n)` axes, or the grid
+has fewer than two axes), a `TILE` at that root itself, and a root the binder peels to under that schedule that
+differs from the one `ops.kernel_roots` reads from the term. The greedy's rejected-row path then retries another
+schedule.
 
 `_factor.factorize(tile, root)` is the **entry** every `TileOp` root lowers through: it builds the ambient `Ctx` and
 binds a wholly serial tree directly, so shared carriers are lowered together. A schedule that tiles an output or
@@ -404,9 +407,9 @@ recompute the XOR from `threadIdx` per load — a fifth of an attention chunk's 
 spills that came with holding the results. A base the reading cannot prove keeps the whole-index form.
 
 **Computed operands and nested Folds.** Every computed edge remains a schedule site. Scalar rows evaluate a pure
-producer in registers. Warp rows place a producer either in a synchronous shared-memory slab or, when the child is a
-scheduled contraction, directly in fragments before storing the slab consumed by `ldmatrix`. Materialized peers keep
-using the ordinary vectorized copy transports. These are residence choices over the same Fold tree; the scheduler and
+producer in registers. Warp rows place a producer in a synchronous shared-memory slab, evaluated per cell in the
+fill; a contraction nested there is a serial loop and takes no `TILE` or `STAGE` of its own (only the chunk tier's
+score does, see "The one factorizer"). Materialized peers keep using the ordinary vectorized copy transports. These are residence choices over the same Fold tree; the scheduler and
 materializer do not recognize operation families.
 
 **A carrier the tiers cannot fold WHOLE is no tile site.** `Fold.tiles_whole` asks whether the tile's accumulators can

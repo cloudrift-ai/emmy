@@ -712,6 +712,13 @@ class TileOp(Op):
             if self.sites[site].under(self.sites[root])
         )
 
+    @cached_property
+    def nested_sites(self) -> frozenset[NodeId]:
+        """The sites below a kernel root (:attr:`nested_tiles`). None takes a transport of its own: the binder
+        reads one only at the root it builds around, and the chunk tier stages its score's operands through the
+        carrier's."""
+        return frozenset(site for _, site in self.nested_tiles)
+
     def __getstate__(self):
         """Pickle stored fields only; derived schedule inventories recompute after transport."""
         return {name: self.__dict__[name] for name in self.__dataclass_fields__ if name in self.__dict__}

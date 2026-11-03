@@ -12,6 +12,6 @@
   {"parent":"k_sdpa_d6fdb1","arm":{"REDUCE@map.1/twist":"g16k"},"children":["k_sdpa_d6fdb1__partial","k_sdpa_d6fdb1#2"]}
  ],
  "rows": [
-  {"name":"k_sdpa_e02804.335a7769bd8d","kernel":"k_sdpa_d6fdb1__partial","pins":{"FAST_MATH":false},"knobs":{"TILE@twist":"mma_m16n8k16_f16_f32/f1x16/k4","TILE@twist.1/inner":"mma_m16n8k16_f16_f32/f1x8/k4","REDUCE@twist":"","REDUCE@twist.1/inner":"","STAGE@twist":"d2/smem-tma","STAGE@twist.1/inner":"d2/smem-tma","WORK":"w4x1","RASTER":""}},
+  {"name":"k_sdpa_e02804.335a7769bd8d","kernel":"k_sdpa_d6fdb1__partial","pins":{"FAST_MATH":false},"knobs":{"TILE@twist":"mma_m16n8k16_f16_f32/f1x16/k4","TILE@twist.1/inner":"mma_m16n8k16_f16_f32/f1x8/k4","REDUCE@twist":"","REDUCE@twist.1/inner":"","STAGE@twist":"d2/smem-tma","STAGE@twist.1/inner":"","WORK":"w4x1","RASTER":""}},
   {"name":"k_sdpa_e02804.e9ae8e5f2fed","kernel":"k_sdpa_d6fdb1#2","pins":{"FAST_MATH":false},"knobs":{"WORK":"","REDUCE":"","RASTER":""}}
  ]}
