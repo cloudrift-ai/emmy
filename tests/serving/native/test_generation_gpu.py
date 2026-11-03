@@ -320,14 +320,17 @@ def test_cached_qwen3_5_moe_routes_like_transformers(tmp_path, monkeypatch, expe
 def test_drafted_generation_keeps_greedy_tokens(tmp_path, monkeypatch, layer_types, dtype, prefill_size):
     """Speculative decoding's gate on a tiny Qwen3.5 and a one-layer multi-token-prediction head drafting two tokens:
     at temperature zero the verify steps generate transformers' greedy tokens, the same pack's with the drafter left
-    unloaded, captured or not, through chunked prefill, which writes the drafter's cache too; the nine-token prompt (the
-    eight-token one and its first greedy token) ends at its third chunk, which generates the first token, and the
-    eight-token one leaves its last token to a verify step. The head drafts the target's own pick again, so once the
-    target repeats one token every draft stands and a step generates three tokens; before, a step takes one draft or
-    none. Each step's logits are its tokens' rows. At positive temperature every step decodes one token. With a Gated
-    DeltaNet layer, a verify step keeps the state after each of its rows and the next step continues from the one
-    after its last accepted row; its programs (one row, the 4-row chunk, the 3-row verify) are twins of the lane's
-    hybrid, so they compile from the lane golden's cuts."""
+    unloaded, captured or not, through chunked prefill, which writes the drafter's cache too. The eight-token prompt and
+    the nine-token one, the eight and its first greedy token, cover both ends of a prompt: with attention layers and
+    3-row chunks the nine-token prompt ends at its third chunk, which generates the first token, and the eight-token one
+    leaves its last token to a verify step; with the Gated DeltaNet layer, whose carried state takes a chunk of prompt
+    tokens only, and 4-row chunks the eight-token prompt ends at its second chunk and the nine-token one leaves its last
+    token to a verify step. The head drafts the target's own pick again, so once the target repeats one token every
+    draft stands and a step generates three tokens; before, a step takes one draft or none. Each step's logits are its
+    tokens' rows. At positive temperature every step decodes one token. With a Gated DeltaNet layer, a verify step
+    keeps the state after each of its rows and the next step continues from the one after its last accepted row; its
+    programs (one row, the 4-row chunk, the 3-row verify) are twins of the lane's hybrid, so they compile from the lane
+    golden's cuts."""
     executable = shutil.which("emmy-runtime-worker")
     if not executable:
         pytest.skip("build native worker and add it to PATH")
@@ -370,9 +373,13 @@ def test_drafted_generation_keeps_greedy_tokens(tmp_path, monkeypatch, layer_typ
             finally:
                 await worker.aclose()
 
-        for prompt in ([5, 6, 7, 5, 6, 7, 5, 6], [5, 6, 7, 5, 6, 7, 5, 6, 3]):
+        def continuation(prompt):
             with torch.no_grad():
-                greedy = model.generate(torch.tensor([prompt]), max_new_tokens=new, do_sample=False)[0, len(prompt) :].tolist()
+                return model.generate(torch.tensor([prompt]), max_new_tokens=new, do_sample=False)[0, len(prompt) :].tolist()
+
+        eight = [5, 6, 7, 5, 6, 7, 5, 6]
+        for prompt in (eight, [*eight, continuation(eight)[0]]):
+            greedy = continuation(prompt)
             plain, steps = asyncio.run(run(prompt, False, True))
             assert plain == greedy and set(steps) == {1}
             for capture in (True, False):

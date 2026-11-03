@@ -732,10 +732,13 @@ Open, compiler — the correctness items block 17:
   repository's runner-shape accuracy cases (`test_gen_runner_gdn_gpu.py`, skipped for this hang) miss the same four
   cases on the previous golden as on this one, so they do not judge the cut sets. Next measured set for 44: the
   chain without the hand seam, its 63 s piece cut by the failure rule once `EMMY_KERNEL_TIMEOUT_MS` puts the
-  first-launch grace under its run time. Merged with main at #1314 (59ae2eca1): the drafted GDN variant's tokens are
-  still the greedy ones but its last step generates one token where the test expects three, so the branch's GDN
-  variant and #1313's prefill rule (the chunk that ends the prompt generates the first token) disagree about step
-  accounting; a test to reconcile, not a kernel.
+  first-launch grace under its run time. Merged with main at #1314 (59ae2eca1), the drafted GDN variant's last step
+  generated one token where the test expects three. Not #1313's prefill rule: its nine-token prompt is the eight-token
+  one and the attention model's first greedy token (3), and the hybrid's continuation of that prompt never repeats a
+  token within 24, so no draft stands. The nine-token prompt is now the eight-token one and the model's own first
+  greedy token (63 on the hybrid), whose tail repeats; the GDN variant's eight-token prompt is two whole 4-row chunks,
+  so it covers the chunk that ends the prompt, as the attention variant's nine-token prompt does. Both variants pass
+  on the card (33 min).
 - (2026-10-31, #1309) The prior reproduction gate cannot go green on a promoted RTX 5090 hardware golden by a
   refit, so 17 needs prior and export work first. The promotion of every recipe row, with both priors refit at
   the shipped counts (schedule 400 iterations, placement 1,500, no folds), left 20 nodes red, all placement, all
