@@ -26,7 +26,7 @@ def _chunk_loop(stage: str) -> str:
         "TILE@map.1/twist": "mma_m16n8k16_f16_f32/f1x8/k4",
         "TILE@map.1/twist.1/inner": "mma_m16n8k16_f16_f32/f1x8/k4",
         "STAGE@map.1/twist": stage,
-        "STAGE@map.1/twist.1/inner": stage,
+        "STAGE@map.1/twist.1/inner": "",
         "WORK": "w2x1",
     }
     with pinned_knobs(pins):
@@ -80,7 +80,7 @@ def test_tma_refills_preserve_causal_attention(stage: str) -> None:
         "REDUCE@map.1/twist": "",
         "REDUCE@map.1/twist.1/inner": "",
         "STAGE@map.1/twist": stage,
-        "STAGE@map.1/twist.1/inner": stage,
+        "STAGE@map.1/twist.1/inner": "",
     }
     with pinned_knobs(pins):
         compiled = Pipeline.build(CUDA_PASSES).run(graph, ctx=Context.probe())

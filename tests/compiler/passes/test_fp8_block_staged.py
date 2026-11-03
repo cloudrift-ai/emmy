@@ -144,9 +144,10 @@ def test_a_chunk_body_that_computes_a_row_statistic_does_not_reload_it(tmp_path)
     )
     graph, _, bundle = graph_from_code(code)
     quantize_and_spell(graph, bundle, tmp_path / "ckpt", scheme="fp8-block")
-    # The claim is about the staged compute fill's chunk body, so the three contraction sites are pinned to it
-    # and the reduction unsplit: a cold pool this size is one seeded descent, not a choice of tier.
-    staged = {f"STAGE@{site}": "d1/smem" for site in ("inner", "inner.1/map.1/inner", "inner.1/map.2/reduce.1/inner")}
+    # The claim is about the staged compute fill's chunk body, so the root is pinned to it and the reduction
+    # unsplit: a cold pool this size is one seeded descent, not a choice of tier. The gate and up contractions
+    # nested in the fill take no transport of their own.
+    staged = {"STAGE@inner": "d1/smem", "STAGE@inner.1/map.1/inner": "", "STAGE@inner.1/map.2/reduce.1/inner": ""}
     with pinned_knobs({"PLACE": "fuse", "REDUCE": "", **staged}):
         lowered = Pipeline.build(CUDA_PASSES).run(graph, ctx=Context.from_target((7, 0)))
     (src,) = [s for node in lowered.nodes.values() if (s := getattr(node.op, "kernel_source", None))]

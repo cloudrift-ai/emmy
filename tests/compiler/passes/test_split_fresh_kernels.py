@@ -518,7 +518,7 @@ def test_a_twisted_carrier_split_partial_binds_a_tensor_core_tile() -> None:
         "TILE@twist": "mma_m16n8k16_f16_f32/f1x8/k2",
         "TILE@twist.1/inner": "mma_m16n8k16_f16_f32/f1x4/k4",
         "STAGE@twist": "d2/smem-async",
-        "STAGE@twist.1/inner": "d2/smem-async",
+        "STAGE@twist.1/inner": "",
         "WORK": "w1x1",
     }
     with pinned_knobs(pins):
