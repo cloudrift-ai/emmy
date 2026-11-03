@@ -11,10 +11,12 @@ Emmy serving the model correctly, step 5 closes the speed gap, and step 6 releas
 Written 2026-10-13, revised the same day after a review and after the owner fixed the goal. Each result is written
 under its step. Numbers marked "upstream" are 1Cat-vLLM's own reports.
 
-**Where it stands (2026-11-01).** Steps 1 to 3 are done, and the nine items of step 4 are done, but step 4's gate has
-not run. Step 5 is under way: at one request Emmy takes 21.3 ms per token against the fork's 13, and 1.82 s to the
-first token at 4K against 0.93 s. Nothing else in the done gate has been measured for Emmy. The next work is listed
-under "Next" in step 5. The minimums in step 2 and Qwen's license are still open with the owner.
+**Where it stands (2026-11-03).** Steps 1 to 3 are done, and so are the nine items of step 4. Step 4's gate ran on
+2026-11-02: two boots give the same text and the accuracy sets pass, but the correctness limits are not met, and the
+fork does not meet them against itself either. Step 5's done gate ran once against the fork and fails on every point:
+Emmy is 2.0-2.5x slower to the first token, 1.67x slower per token at one request, gives 0.58-0.68x the fork's total
+output, and runs out of memory under the 3 GiB per card margin. The next work is item 3 under "Next" in step 5. The
+minimums in step 2 and Qwen's license are still open with the owner.
 
 ## What we know
 
@@ -431,8 +433,38 @@ takes more as later rounds need it.
   and the carried Gated DeltaNet state across steps, then run the step 1 accuracy sets. First-token parity alone does
   not qualify this model.
 - Gate: the Emmy image boots strict on the test node, two boots give the same text, and it passes the correctness
-  checks and the accuracy sets within the step 1 tolerances. **Not run yet.** The evidence so far is the eight greedy
-  probe prompts of item 9.
+  checks and the accuracy sets within the step 1 tolerances.
+- **Gate result, 2026-11-02.** Main `c497a0cc7`, strict boots of the recipe golden in step 2's shape, against the step
+  3 fork image in the same shape. Boots, accuracy: pass. Correctness: not met as written, on either side.
+  - Two boots give the same text: 16 of 16 greedy prompts identical, and prefill and decode log-probabilities
+    bit-identical.
+  - Accuracy sets, all within the step 1 tolerances: GSM8K 126 of 128 (reference 125), none at the output limit;
+    acceptance cases 27, 27, 28 without thinking and 27, 27, 26 with it (reference 27, 27, 27 / 26, 27, 27);
+    long-document codes 387 of 387 and 384 of 384 (reference 387 of 387 / 383 of 384).
+  - Correctness, as KL mean / p99 / max and top-1 agreement:
+
+    | Teacher-forced scenario | Emmy against the fork | A second fork boot against the fork |
+    | --- | --- | --- |
+    | Long outputs, 12 prompts of 1,024 tokens | 0.0064 / 0.14 / 1.10, 99.45% | 0.0073 / 0.16 / 3.50, 99.57% |
+    | The same, before the first divergence | 0.00086 / 0.0086 / 0.43, 99.48% | 0.00048 / 0.0026 / 1.11, 99.70% |
+    | Four requests at once | 0.00036 / 0.0051 / 0.024, 99.41% | 0.00030 / 0.0039 / 0.026, 99.61% |
+    | Prefix reuse, six suffixes on a shared 6K document | 0.0019 / 0.026 / 0.14, 99.22% | 0.0016 / 0.022 / 0.060, 98.96% |
+    | Carried state, prompts of 4.5K to 40K tokens | 0.031 / 0.57 / 3.55, 93.55% | 0.028 / 0.50 / 3.64, 94.34% |
+    | Prompt log-probabilities over prompt and output | 0.0093 / 0.085 / 0.45, 95.59% | 0.0074 / 0.069 / 0.38, 95.77% |
+
+  - Method: the engine's log-probabilities through the API, the top 20 per position. Where the two sides first pick
+    different tokens, the run restarts from the prompt plus the reference's tokens so far; "before the first
+    divergence" is the positions before any restart. KL over the shared top 20 plus a rest bucket is a lower bound:
+    on 48 positions read over the whole vocabulary it caught 90% of the exact KL (Emmy: exact mean 0.016, max 0.27).
+    The largest logit error cannot be measured this way, since log-probabilities leave one offset per position
+    unknown; the spread of log-probability differences over shared tokens fails 0.5 on both sides (up to 13 for
+    Emmy, 12 fork against fork).
+  - Reading: the fork does not meet the limits against itself, so in this shape they do not separate a defect from
+    the fork's own variation. Emmy differs from the fork by about what one fork boot differs from another. The fork
+    tunes small-shape kernels at warm-up (`VLLM_SM70_NVFP4_TUNE_SMALL_SHAPES`, as DeepSeek's FP8 tune), so its boots
+    differ; with the tune off, two fork boots are bit-identical in prefill and equal the second boot above. Against
+    that reproducible fork, Emmy's prompt log-probabilities read 0.0087 / 0.079 / 0.46, 95.57%. Whether to relax
+    the limits, or to measure them with logits against a tune-off fork, is the owner's call.
 
 ### 5. Close the gap to the fork
 
@@ -515,14 +547,46 @@ Rounds, as with DeepSeek. Each round starts from a profile and ends with a boot 
   compiling the same 80 kernels.
 - **Next (2026-11-01).** Every number so far is one request at a short or 4K prompt, and the rounds' gains have
   shrunk to about 1 ms per token. So measure the whole gap before more tuning:
-  1. Run step 4's gate: the correctness limits, the accuracy sets, two boots giving the same text.
+  1. Run step 4's gate: the correctness limits, the accuracy sets, two boots giving the same text. **Done
+     2026-11-02**, result under step 4.
   2. Run this step's done gate once against the fork: first token at 1K, 8K, 32K and 130K, total output at 4 and 8
      requests, four replicas together, and memory against the 3 GiB per card margin, of which step 2 left the fork
-     about 0.6 GiB to spare.
+     about 0.6 GiB to spare. **Done 2026-11-03**, result below.
   3. Profile current main again, then choose the round. Candidates, largest first, in figures from the 2026-10-27
      profile: fewer kernels for post8's small pieces (about 3 ms per token); splitting the hyper-connection mixers
      across ranks, which adds an exchange, so its gain is unmeasured; the one-token tail of a prefill, eager at 223 ms
-     against the fork's 75, and the ~80-token step's host wait per layer.
+     against the fork's 75, and the ~80-token step's host wait per layer. The done gate adds two facts to the choice:
+     prefill is further off than decode (2.0-2.5x against 1.67x), and memory fails the margin.
+- **Done gate, first run (2026-11-03).** Main `c497a0cc7`, the step 3 fork image, step 2's production shape on both
+  sides. First tokens by `dbg/ttftr.py` (random token ids; the first of four runs primes), the rest by `vllm bench
+  serve` (random prompts, greedy, `ignore_eos`, no warm-up request; one priming repeat, then three). Rounds in the
+  order fork, Emmy, Emmy, fork; a range is the measured repeats of both rounds of a side. Every point fails:
+
+  | Point | Fork | Emmy | Emmy against the fork |
+  | --- | ---: | ---: | ---: |
+  | First token, 1K | 0.43-0.47 s | 1.11-1.16 s | 2.5x slower |
+  | First token, 8K | 1.38-1.53 s | 3.39-3.42 s | 2.3x slower |
+  | First token, 32K | 5.99-6.08 s | 13.1-13.2 s | 2.2x slower |
+  | First token, 130K | 26.3-26.5 s | 52.2-52.6 s | 2.0x slower |
+  | One request, 1K / 512, per token | 12.6-12.8 ms | 21.1-21.3 ms | 1.67x slower |
+  | 4 requests, 4K / 1K, total output | 174-176 tok/s (20.3-20.5 ms) | 110-113 tok/s (30.3-30.9 ms) | 0.64x |
+  | 8 requests, 4K / 1K, total output | 278-282 tok/s (25.0-25.4 ms) | 162-165 tok/s (42.0-42.5 ms) | 0.58x |
+  | Four replicas, 32 requests through the load balancer | 742-894 tok/s | 459-530 tok/s | 0.68x (medians) |
+  | Step 2's worst-case loads with 3 GiB held per card | serves, 0.4-0.6 GiB spare | out of memory | fails |
+  | Boot | 419-465 s | 2,091-2,173 s | about 5x |
+
+  - The fork's rows reproduce step 2's baseline; its four-replica row is as noisy as there (775-811 and 808-863 tok/s
+    before). Emmy's first-token and bench rounds ran on two boots that agree, so no cubin diff was needed.
+  - Memory: with 3 GiB held per card, Emmy served the full-context prompt and then ran out of memory on the four 32K
+    prompts, on a 218 MiB allocation in the fork's per-layer-embedding short convolution during prefill, with Emmy
+    holding 28.3 GiB per card. With nothing held, Emmy serves every load; three cards peak at 29.6 GiB, and one sits at
+    32.2 GiB (0.5 GiB spare) for the whole run. Why one rank holds 2.6 GiB more is not established.
+  - Boot: about 36 minutes on every boot, cold or warm. Three greedy resolves of 400-530 s each run every time, and
+    the 1.2 MB kernel cache does not shorten them.
+  - Emmy's log reports decode-shaped steps of 10-16 tokens that miss the decode twin (width 8) and fall to the
+    symbolic path, and post8 at 12-13x its roofline floor (0.31-0.36 ms).
+  - For the next run: `vllm bench serve` with `HF_HUB_OFFLINE` needs the tokenizer's snapshot path (the cache has no
+    `main` ref), and a boot's time is best read from the log's timestamps, not from when polling started.
 - Gate, the definition of done. Both sides run step 2's production configuration: the same checkpoint, layout,
   context, key/value pool, concurrency, prefix-cache and MTP settings; fork, Emmy, Emmy, fork rounds; three repeats
   each:
