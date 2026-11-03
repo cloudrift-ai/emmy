@@ -694,16 +694,23 @@ class TileOp(Op):
         )
 
     @cached_property
-    def nested_tiles(self) -> tuple[tuple[NodeId, NodeId], ...]:
+    def nested_tiles(self) -> frozendict[tuple[NodeId, NodeId], bool]:
         """The ``(root, site)`` pairs of a kernel root (``ops.kernel_roots``) and a site below it that can
-        take a ``TILE``. The binder lowers such a tile only inside a root it output-tiles, and even there
-        only where the tier folds it (the chunked carrier's score); any other root lowers its subtree
-        serially, which would drop the tile, so the binder refuses the row instead. The classic
-        compatibility rules (``refusals._relation_refusal``) apply this binder rule at the offer."""
+        take a ``TILE``, each with whether the root folds that site: a chunked root folds its score
+        (``ContractionFacts.need``). The binder lowers such a tile only there, and only when the root
+        takes the tensor-core tier. A root it does not output-tile lowers its subtree serially, and an
+        output-tiled one evaluates any other nested site per cell in its fill, so either would drop the
+        tile; the binder refuses the row instead. The classic compatibility rules
+        (``refusals._relation_refusal``) apply this binder rule at the offer."""
         if not isinstance(self.op, Fold):
-            return ()
+            return frozendict()
         roots = [self._node_ids[id(root)] for root in kernel_roots(self.op) if id(root) in self._node_ids]
-        return tuple((root, site) for root in roots for site in self.family_sites["TILE"] if self.sites[site].under(self.sites[root]))
+        return frozendict(
+            ((root, site), self.views[root].chunked() and root in self.contractions and self.contractions[root].need == site)
+            for root in roots
+            for site in self.family_sites["TILE"]
+            if self.sites[site].under(self.sites[root])
+        )
 
     def __getstate__(self):
         """Pickle stored fields only; derived schedule inventories recompute after transport."""

@@ -545,9 +545,13 @@ class ClassicNodeSite(Site[ClassicSchedule]):
     def stage_candidates(self) -> Mapping[NodeSchedule, tuple[Stage, ...]]:
         """The transports each node choice can be fed by (:func:`_stage_candidates`). The edge catalog is
         their union, so a row can name any of them; a choice's supports pair it with its own only, never
-        with a transport another choice brought — the leaf a draw reaches must be the leaf the row rebuilds."""
+        with a transport another choice brought — the leaf a draw reaches must be the leaf the row rebuilds.
+
+        A site below a kernel root (``TileOp.nested_tiles``) takes no transport of its own: the binder
+        reads one only at the root it builds around, and the chunk tier stages its score's operands
+        through the carrier's."""
         tile, target, node = self.problem.tile, self.problem.target, self.node
-        if self.id not in tile.contractions:
+        if self.id not in tile.contractions or any(self.id == site for _, site in tile.nested_tiles):
             return {choice: (Stage.direct(),) for choice in self.nodes}
         return {choice: _stage_candidates(tile, target, node, choice, paged=self.problem.paged) for choice in self.nodes}
 
