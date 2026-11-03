@@ -822,12 +822,16 @@ def _relation_refusal(site: NodeId, pick, relation: _Relation, *, roots, pairs, 
             return "a partitioned chain member under an output-tiled root, whose fill owns its cone"
         if picks[root].reduce.coop_transposed:
             return "a partitioned chain member under a transposed band, which binds its fold alone"
-    for root, nested in nests:
+    for (root, nested), folded in nests.items():
         if site not in (root, nested):
             continue
         picks = {**relation.nodes, site: node}
-        if root in picks and nested in picks and picks[nested].tile.is_tiled and not picks[root].tile.is_tiled:
-            return "a contraction tile under a root that is not output-tiled, whose serial lowering would drop it"
+        if nested not in picks or not picks[nested].tile.is_tiled:
+            continue
+        if not folded:
+            return "a contraction tile below a kernel root that does not fold it, whose lowering would drop it"
+        if root in picks and not picks[root].tile.is_warp:
+            return "a score tile under a root that is not tensor-core tiled, whose lowering would drop it"
     work = relation.work
     if work is not None and pick.work is not None and pick.work != work:
         return "pick requires a different worker inventory"

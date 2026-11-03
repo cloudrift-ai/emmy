@@ -539,7 +539,23 @@ def _bind(op, ctx: Ctx, tail: tuple, out_val: str, store=None, *, output_specs: 
     c = op
     tile = ctx.sched.tile_of(op) if isinstance(op, Fold) and op.as_contraction() is not None else None
     stage = ctx.sched.get("STAGE", op) if tile is not None else None
-    if tile is not None and tile.axes is not None and len(grid) >= 2:
+    tiled = tile is not None and tile.axes is not None and len(grid) >= 2
+    # The NESTED site this node folds a chunk of at a time — the twisted carrier's score, whose
+    # own ``TILE`` the schedule decided beside this one; only the tensor-core tier folds it. The
+    # fragment seam already made the two agree (one warp column on the score, its N tile the chunk);
+    # the emission needs the node and its placed geometry to build the chunk's score tile.
+    inner = _inner_site(c, ctx) if tiled and tile.is_warp else None
+    # Any other tile at or below this node, and any transport below it, would be dropped: the serial
+    # arm lowers the whole subtree per cell, and the tiled arm evaluates its cone per cell in the fill.
+    kept = {id(node) for node in (op if tiled else None, inner[0] if inner is not None else None) if node is not None}
+    root_site = ctx.sched.site_of(op)
+    for site in ctx.sched.tile.sites:
+        below = site.under(root_site)
+        if (below or site.node is op) and id(site.node) not in kept and ctx.sched.tile_of(site.node) is not None:
+            raise UnbindableProjection(f"{'tiled' if tiled else 'serial'} lowering of {root_site.path} cannot realize TILE at {site.path}")
+        if below and ctx.sched.get("STAGE", site.node) is not None:
+            raise UnbindableProjection(f"lowering of {root_site.path} cannot realize STAGE at {site.path}")
+    if tiled:
         epi = list(tail)
         if not has_write(epi):
             epi = with_store(epi, ctx.output, grid, c.exposes[0])
@@ -556,11 +572,6 @@ def _bind(op, ctx: Ctx, tail: tuple, out_val: str, store=None, *, output_specs: 
         # grid (N 32 beside N 64), the pair binds one of them, and a positional ``grid[:-2]`` then
         # dropped the other — leaving an axis no block, unit or lead var defines.
         lead = tuple(axis for axis in grid if axis.name not in {bound.name for bound in tile.axes})
-        # The NESTED site this node folds a chunk of at a time — the twisted carrier's score, whose
-        # own ``TILE`` the schedule decided beside this one. The fragment seam already made the two
-        # agree (one warp column on the score, its N tile the chunk); the emission needs the node
-        # and its placed geometry to build the chunk's score tile.
-        inner = _inner_site(c, ctx)
         # A launch that fits the card in one wave at one CTA per SM takes as long as its longest
         # CTA, so a per-CTA early stop cannot shorten it and only costs the static trip count;
         # the chunk tier keeps the whole stream there. The CTA-per-SM half is not known here
@@ -600,10 +611,6 @@ def _bind(op, ctx: Ctx, tail: tuple, out_val: str, store=None, *, output_specs: 
         t = unit_tile(register_tile(atomize(tile.atom.shape[:2]), tile.mn), tile.mn)
         mn, bt, lanes = tile.mn, tile.launch_threads, tile.atom.lanes
     else:
-        root_site = ctx.sched.site_of(op)
-        for site in ctx.sched.tile.sites:
-            if (site.node is op or site.under(root_site)) and ctx.sched.tile_of(site.node) is not None:
-                raise UnbindableProjection(f"serial lowering of {root_site.path} cannot realize TILE at {site.path}")
         # The reduce partition rides the :class:`Fold` node; ``None`` for a pure pointwise /
         # scalar per-cell zero-axis ``Fold`` (no partition). Every partitioned reduction is a
         # ``Fold`` node (a projecting zero-axis

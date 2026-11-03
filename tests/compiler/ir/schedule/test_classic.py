@@ -196,10 +196,11 @@ def test_attention_score_tiles_its_consumers_row_across_grid_orders(free_order, 
     codec = ClassicScheduleCodec(context)
     knobs = codec.encode(_direct(context))
     knobs["WORK"] = "w4x1"
-    for node, fragment in ((carrier, "f1x16"), (score, "f1x8")):
+    # The chunk tier stages the score's operands through the carrier's transport: the score takes none.
+    for node, fragment, stage in ((carrier, "f1x16", "d2/smem-async"), (score, "f1x8", "")):
         path = geometry.site_of(node).path
         knobs[f"TILE@{path}"] = f"mma_m16n8k16_f16_f32/{fragment}/k4"
-        knobs[f"STAGE@{path}"] = "d2/smem-async"
+        knobs[f"STAGE@{path}"] = stage
     schedule = codec.decode(knobs)
     scheduled = materialize_classic(tile, name=tile.name, knobs=knobs, target=target, schedule=schedule)
     body = Body((factorize(scheduled, None),))

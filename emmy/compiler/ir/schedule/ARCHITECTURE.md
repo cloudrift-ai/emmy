@@ -197,13 +197,21 @@ untiled arm, so the context refuses a partitioned chain member beside an output-
 the cone per cell, statistic included, and the member's partition would realize as nothing — an unreproducible pin
 rather than a refusal. And the binder lowers a `TILE` below a kernel root (a node the binder builds the kernel
 around, `ops.kernel_roots`) only inside a root it output-tiles, that is, lowers through the tier that tiles its
-`(m, n)` output — and even there only where that tier folds the nested site (the chunked carrier's score). Any other
-root lowers its subtree serially, which would drop the tile, so the context refuses a tiled site below a root that is
-not output-tiled (`nested_tiles`), checked at whichever site of the pair is decided second. The NVFP4 scale — the
-maximum over each 16-element NVFP4 scale group of the gate/up contraction's output — used to be offered such rows,
-the prior ranked one tiled variant after another first, and the greedy compile spent a whole resolve (one pipeline
-pass over the whole program under the current blocklist) on each refusal at materialize until its retry budget ran
-out.
+`(m, n)` output — and even there only where that tier folds the nested site: the chunked carrier's score, under the
+tensor-core tier. Any other root lowers its subtree serially, and an output-tiled one evaluates any other nested site
+per cell in its fill; either would drop the tile. So the context refuses a tiled site below a root unless the root
+folds it (`nested_tiles` records which pairs it does) and takes a tensor-core tile, checked at whichever site of the
+pair is decided second. The NVFP4 scale — the maximum over each 16-element NVFP4 scale group of the gate/up
+contraction's output — used to be offered such rows, the prior ranked one tiled variant after another first, and the
+greedy compile spent a whole resolve (one pipeline pass over the whole program under the current blocklist) on each
+refusal at materialize until its retry budget ran out. The rows that tiled a contraction nested under an output-tiled
+root were accepted and built without the tile, so their measurements belonged to another schedule (the Qwen3.8 NVFP4
+gdn16 recurrence piece stamped two nested tiles and a TMA stage, and ran serial per-cell loops).
+
+A site below a kernel root takes no `STAGE` either (`nested_sites`): the binder reads a transport only at the root it
+builds around, and the chunk tier stages its score's operands through the carrier's own. A score's stage used to be
+offered, and every value built the same kernel. That also exempts a warp-group score from the rule that a `wgmma`
+tile needs a shared-memory stage: its descriptors read the carrier's slabs.
 
 A CHUNKED carrier's seam is stricter than an ordinary consumer's. The ordinary need tolerates an untiled producer;
 this one is built on the fragment, since the chunk's score IS the producer's tile — so the producer must be

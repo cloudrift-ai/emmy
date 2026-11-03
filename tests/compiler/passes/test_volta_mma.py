@@ -466,7 +466,7 @@ def test_sm70_attention_rings_its_key_and_value_through_registers(monkeypatch) -
     monkeypatch.setenv("EMMY_WORK", "w4x1")
     monkeypatch.setenv("EMMY_TILE@map.1/twist.1/inner", f"{VOLTA}/f1x2/k2")
     monkeypatch.setenv("EMMY_TILE@map.1/twist", f"{VOLTA}/f1x8/k8")
-    monkeypatch.setenv("EMMY_STAGE@map.1/twist.1/inner", "d2/smem")
+    monkeypatch.setenv("EMMY_STAGE@map.1/twist.1/inner", "")
     monkeypatch.setenv("EMMY_STAGE@map.1/twist", "d2/smem")
     monkeypatch.setenv("EMMY_REDUCE", "")
     monkeypatch.setenv("EMMY_RASTER", "")
