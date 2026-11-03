@@ -382,6 +382,10 @@ def test_moe_fixed_slot_combine_matches_routed_oracle(built):
     assert {p.executor.buffer(m["slots"].output_names[0])[0] for p, m in zip(programs, runner._moe, strict=True)} == {
         runner._slot_partials.data_ptr()
     }, "every layer's slot program lands its partials in the one shared tensor"
+    for p, m in zip(programs, runner._moe, strict=True):
+        assert {n: p.executor.buffer(n)[0] for n in m["inputs"]} == {n: t.data_ptr() for n, t in m["inputs"].items()}
+    pooled = {key.partition(":")[2] for key in runner._expert_slots["arena"]._backings}
+    assert not pooled & set(runner._moe[0]["inputs"]), "the slot arena holds no copy of a layer's experts"
 
     torch.manual_seed(1)
     for layer in (0, 1):

@@ -680,6 +680,7 @@ def _compile_split(
     import numpy as np
     import torch
 
+    from emmy.compiler.backend.binding import is_device_tensor
     from emmy.compiler.backend.cuda.program import CompiledProgram
     from emmy.compiler.backend.gpu_lock import gpu_lock
     from emmy.compiler.dtype import DataType, encode_bf16
@@ -781,7 +782,8 @@ def _compile_split(
             return encode_bf16(values)
         return values.astype(dt.np if dt is not None else dtype.np, copy=False)
 
-    feed = {n: _np_in(n, a) for n, a in zip(fed, build_args, strict=True)}
+    # A CUDA tensor is lent to the program as it is (``CompiledProgram.build_from_plan``).
+    feed = {n: a if is_device_tensor(a) else _np_in(n, a) for n, a in zip(fed, build_args, strict=True)}
     with gpu_lock():
         const_feed = _bind_plan_constants(plan, sources, dev_consts.arrays if dev_consts is not None else None)
         program = CompiledProgram.build_from_plan(plan, {**const_feed, **feed}, arena=arena)
@@ -1774,7 +1776,7 @@ class EmmyGenRunner:
                                 plan=stored(pre + "slots"),
                                 plan_cache=plan_cache,
                                 paged_inputs=tuple((n, paging[0]) for n in ind_names) if paging is not None else None,
-                                arena=slot_arena,
+                                # Only the plan is kept: off the arena, this build's memory goes with it.
                                 **stacked_kw,
                             )
                         reads[pre + "slots"] = loaded[pre + "slots"].reads if stored(pre + "slots") is not None else frozenset(read)
@@ -2623,13 +2625,15 @@ class EmmyGenRunner:
                         # A plan from a serving pack keeps the slots it was compiled with.
                         if {spec[2] for spec in slots["plan"].paged.values()} != ({m["paging"][0]} if "paging" in m else set()):
                             raise RuntimeError("the fixed-slot program was compiled for another expert budget than the device holds")
+                        # Unpaged, the instance is built over the layer's own expert tensors: lent at build, they take
+                        # no arena backing, which would otherwise hold a dead copy of one layer's experts.
                         prog, _ = _compile_split(
                             slots["wrapper"],
                             slots["examples"],
                             None,
                             slots["dtype"],
                             plan=slots["plan"],
-                            aux_examples=slots["aux_examples"],
+                            aux_examples=slots["aux_examples"] if "paging" in m else {**(slots["aux_examples"] or {}), **m["inputs"]},
                             weight_inputs=slots["weight_inputs"],
                             arena=slots["arena"],
                         )
@@ -2643,9 +2647,6 @@ class EmmyGenRunner:
                                 pager.declare(device(), name, homes, (m["num_experts"], m["bytes"][name], *m["paging"]))
                                 pager.bind(p.executor, name)
                             m["pager"] = pager
-                        else:
-                            for name, tensor in m["inputs"].items():
-                                p.alias_buffer(name, tensor)
                         m["slots"] = prog
                     torch.cuda.empty_cache()
         self._dev_ready = True
