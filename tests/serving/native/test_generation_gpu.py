@@ -100,8 +100,9 @@ def test_cached_qwen3_logits_and_generation(tmp_path, monkeypatch):
                             selected.append(next_token)
                         else:
                             assert result["tokens"] == []
-                    # Chunk dispatch advances only valid prompt rows. Reusing captured graphs
-                    # across different tails must neither expose padding nor retain an old cache.
+                    # Chunk dispatch advances only valid prompt rows, and the chunk that ends at the prompt's last token
+                    # (the six-token prompt's second) generates the first token. Reusing captured graphs across
+                    # different tails must neither expose padding nor retain an old cache.
                     await worker.run_job({"op": "start_generation", "prompt": str(path)}, wall_timeout_s=30)
                     position = 0
                     chunked = []
@@ -110,7 +111,8 @@ def test_cached_qwen3_logits_and_generation(tmp_path, monkeypatch):
                             {"op": "generation_step", "prefill": True, "capture": bool(capture), "logits": str(logits_path)},
                             wall_timeout_s=30,
                         )
-                        expected_position = position + (min(3, len(prompt) - position - 1) if position < len(prompt) - 1 else 1)
+                        rows = 3 if position + 3 == len(prompt) else min(3, len(prompt) - position - 1)
+                        expected_position = position + (rows if position < len(prompt) - 1 else 1)
                         assert result["position"] == expected_position
                         position = expected_position
                         if result["tokens"]:
@@ -247,7 +249,8 @@ def test_cached_qwen3_5_moe_routes_like_transformers(tmp_path, monkeypatch, expe
     routed experts (two per token) and the gated shared expert: every logit matches transformers'
     and every greedy token is its own, through sequential and chunked prefill, with capture on and
     off; a request after a reset repeats the first. A chunk runs the fixed-slot program once over
-    all its rows. The device holds every expert, or four or one of them per layer: then the pager
+    all its rows, and the four-token prompt's second chunk ends at its last token and generates the
+    first. The device holds every expert, or four or one of them per layer: then the pager
     moves the experts the router picks into the slots, and with one slot the other picks are read
     in place from host memory. The experts are wide, so they dominate the worker's memory, and the
     host holds them once: the heap keeps no copy, and the load's peak never passes through one.
@@ -282,7 +285,7 @@ def test_cached_qwen3_5_moe_routes_like_transformers(tmp_path, monkeypatch, expe
                     status = (line.split(":") for line in (Path("/proc") / str(worker._proc.pid) / "status").read_text().splitlines())
                     memory = {key: int(value.split()[0]) * 1024 for key, value in status if key in ("VmHWM", "VmRSS", "RssAnon")}
                     assert memory["RssAnon"] < experts / 2 and memory["VmHWM"] - memory["VmRSS"] < experts / 2, memory
-                for prompt in ([3], [5, 1, 4, 1, 5, 9, 2]):
+                for prompt in ([3], [5, 1, 4, 1, 5, 9, 2], [3, 1, 4, 1]):
                     np.asarray(prompt, np.int64).tofile(path)
                     runs = []
                     for capture, prefill in ((False, False), (True, False), (False, False), (True, True)):
@@ -311,12 +314,13 @@ def test_cached_qwen3_5_moe_routes_like_transformers(tmp_path, monkeypatch, expe
 def test_drafted_generation_keeps_greedy_tokens(tmp_path, monkeypatch):
     """Speculative decoding's gate on a tiny Qwen3.5 and a one-layer multi-token-prediction head drafting two tokens:
     at temperature zero the verify steps generate transformers' greedy tokens, the same pack's with the drafter left
-    unloaded, captured or not, through chunked prefill, which writes the drafter's cache too. The head drafts the
-    target's own pick again, so once the target repeats one token every draft stands and a step generates three
-    tokens; before, a step takes one draft or none. Each step's logits are its tokens' rows. At positive temperature
-    every step decodes one token. The layers are attention only: without evidence a Gated DeltaNet layer's one-token
-    step runs past a minute (the state test above), so the per-row state carry is checked on the CPU
-    (``test_prepare``) and by the recipes' gates."""
+    unloaded, captured or not, through chunked prefill, which writes the drafter's cache too; the nine-token prompt (the
+    eight-token one and its first greedy token) ends at its third chunk, which generates the first token, and the
+    eight-token one leaves its last token to a verify step. The head drafts the target's own pick again, so once the
+    target repeats one token every draft stands and a step generates three tokens; before, a step takes one draft or
+    none. Each step's logits are its tokens' rows. At positive temperature every step decodes one token. The layers are
+    attention only: without evidence a Gated DeltaNet layer's one-token step runs past a minute (the state test above),
+    so the per-row state carry is checked on the CPU (``test_prepare``) and by the recipes' gates."""
     executable = shutil.which("emmy-runtime-worker")
     if not executable:
         pytest.skip("build native worker and add it to PATH")
@@ -332,14 +336,11 @@ def test_drafted_generation_keeps_greedy_tokens(tmp_path, monkeypatch):
     model.save_pretrained(tmp_path / "checkpoint")
     add_mtp_head(tmp_path / "checkpoint", repeats=True)
     drafter, _ = load_drafter(str(tmp_path / "checkpoint"), None, model, 2)
-    prompt = [5, 6, 7, 5, 6, 7, 5, 6]
-    with torch.no_grad():
-        greedy = model.generate(torch.tensor([prompt]), max_new_tokens=new, do_sample=False)[0, len(prompt) :].tolist()
     with gpu_lock():
         root = export_model(model, tmp_path / "pack", context_length=context, prefill_size=3, drafter=drafter)
         monkeypatch.setenv("PATH", "/nonexistent")
 
-        async def run(draft, capture, temperature=0.0):
+        async def run(prompt, draft, capture, temperature=0.0):
             worker = NativeWorker(executable=executable)
             path, logits = tmp_path / "prompt.bin", tmp_path / "logits.bin"
             np.asarray(prompt, np.int64).tofile(path)
@@ -361,13 +362,16 @@ def test_drafted_generation_keeps_greedy_tokens(tmp_path, monkeypatch):
             finally:
                 await worker.aclose()
 
-        plain, steps = asyncio.run(run(False, True))
-        assert plain == greedy and set(steps) == {1}
-        for capture in (True, False):
-            drafted, steps = asyncio.run(run(True, capture))
-            assert drafted == greedy and steps[-1] == 3 and len(steps) < new
-        sampled = [asyncio.run(run(draft, True, temperature=0.8)) for draft in (False, True)]
-        assert sampled[0] == sampled[1] and set(sampled[1][1]) == {1}
+        for prompt in ([5, 6, 7, 5, 6, 7, 5, 6], [5, 6, 7, 5, 6, 7, 5, 6, 3]):
+            with torch.no_grad():
+                greedy = model.generate(torch.tensor([prompt]), max_new_tokens=new, do_sample=False)[0, len(prompt) :].tolist()
+            plain, steps = asyncio.run(run(prompt, False, True))
+            assert plain == greedy and set(steps) == {1}
+            for capture in (True, False):
+                drafted, steps = asyncio.run(run(prompt, True, capture))
+                assert drafted == greedy and steps[-1] == 3 and len(steps) < new
+            sampled = [asyncio.run(run(prompt, draft, True, temperature=0.8)) for draft in (False, True)]
+            assert sampled[0] == sampled[1] and set(sampled[1][1]) == {1}
 
 
 # Per-position absolute budgets and per-prompt RMS comparison, fixed before the
@@ -424,13 +428,11 @@ def test_fp8_checkpoint_exports_its_coded_trunk(tmp_path):
         return sum(m.weight.numel() for m in module.modules() if isinstance(m, torch.nn.Linear))
 
     layers = model.model.layers
-    # Every trunk weight a program runs is in the pack as its e4m3 code, so none was bound decoded;
-    # a prefill chunk stops at the last layer's keys and values, so its post half is not there.
-    tail = weights(layers[-1].self_attn.o_proj) + weights(layers[-1].mlp)
-    for name, expected in (("decode", weights(layers)), ("prefill", weights(layers) - tail)):
+    # Every trunk weight a program runs is in the pack as its e4m3 code, so none was bound decoded.
+    for name in ("decode", "prefill3"):
         plan = plan_from_dict(json.loads((root / manifest["programs"][name]).read_text()))
         coded = [b for b in plan.buffers if b.role == "constant" and b.dtype.name == "f8e4m3"]
-        assert sum(int(np.prod(b.resolve_shape({}))) for b in coded) == expected
+        assert sum(int(np.prod(b.resolve_shape({}))) for b in coded) == weights(layers)
     _computes_the_dequantized_model(model, root, executable, tmp_path)
 
 

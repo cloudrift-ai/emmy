@@ -265,6 +265,23 @@ def test_native_trunk_programs_are_the_plugins_serving_twins(model, tmp_path):
     assert "gdn3rows" in names and "mtp-prologue-sym" not in names
 
 
+def _eager_and_traced(module, examples):
+    """``module``'s outputs at ``examples``, through the traced graph, which must equal its eager ones."""
+    import torch
+
+    from emmy.compiler.backend.numpy import NumpyBackend
+    from emmy.compiler.trace.torch import trace_module
+
+    graph = trace_module(module, examples)
+    result, _ = NumpyBackend().run(graph, input_data=dict(zip(graph.inputs, (e.numpy() for e in examples), strict=True)))
+    traced = [result.outputs[name] for name in graph.outputs]
+    with torch.no_grad():
+        eager = module(*examples)
+    for actual, expected in zip(traced, eager if isinstance(eager, tuple) else (eager,), strict=True):
+        np.testing.assert_array_equal(actual, expected.numpy())
+    return traced
+
+
 def test_a_verify_step_takes_the_drafts_the_targets_picks_confirm():
     """The accept program counts the leading drafts the target's pick at the row before confirms: a draft after a
     miss stands for nothing, and one that matches by chance stands, since it is the greedy token all the same. It
@@ -273,20 +290,9 @@ def test_a_verify_step_takes_the_drafts_the_targets_picks_confirm():
     it. Eager and through the traced graph alike."""
     import torch
 
-    from emmy.compiler.backend.numpy import NumpyBackend
-    from emmy.compiler.trace.torch import trace_module
     from emmy.serving.native.prepare import accept_module, carry_module, pick_module
 
-    def run(module, examples):
-        graph = trace_module(module, examples)
-        result, _ = NumpyBackend().run(graph, input_data=dict(zip(graph.inputs, (e.numpy() for e in examples), strict=True)))
-        traced = [result.outputs[name] for name in graph.outputs]
-        with torch.no_grad():
-            eager = module(*examples)
-        for actual, expected in zip(traced, eager if isinstance(eager, tuple) else (eager,), strict=True):
-            np.testing.assert_array_equal(actual, expected.numpy())
-        return traced
-
+    run = _eager_and_traced
     # Three drafts after token 9; the target's picks at each of the four rows.
     for picks, accepted in (([4, 5, 6, 7], 3), ([3, 5, 6, 7], 0), ([4, 3, 6, 7], 1), ([4, 5, 3, 7], 2)):
         count, *positions = run(accept_module(3), (torch.tensor(picks), torch.tensor([9, 4, 5, 6]), torch.tensor([10])))
@@ -303,6 +309,19 @@ def test_a_verify_step_takes_the_drafts_the_targets_picks_confirm():
     state, history = run(carry_module(select=True), examples)
     np.testing.assert_array_equal(state, states[1:2].numpy())
     np.testing.assert_array_equal(history, histories[1:2].numpy())
+
+
+def test_a_chunk_reads_its_last_row_and_its_drafter_takes_its_pick_past_the_prompt():
+    """A chunk's head reads its last normalized row, and its drafter pass embeds the token after each row: the
+    prompt's where the host has one, and past the prompt (-1) the chunk's own pick. Eager and traced alike."""
+    import torch
+
+    from emmy.serving.native.prepare import last_module, next_module
+
+    rows = torch.randn(4, 3)
+    np.testing.assert_array_equal(_eager_and_traced(last_module(), (rows,))[0], rows[3:].numpy())
+    (tokens,) = _eager_and_traced(next_module(), (torch.tensor([6, 7, 8, -1]), torch.tensor([9])))
+    assert tokens.tolist() == [6, 7, 8, 9]
 
 
 def test_a_carry_writes_the_next_state_over_the_carried_one():
@@ -386,14 +405,14 @@ def test_native_programs_are_the_twins_a_native_serving_config_adds(tmp_path):
     model = qwen3_5_moe_model().to(torch.bfloat16)
     twins = trace_programs(model, prefill_size=3, decode_width=4)
     # The trunk is the plugin's: its attention halves, Gated DeltaNet layers and one-row fixed-slot experts are none of
-    # native's twins. The last prefill layer, an attention layer, only writes its cache; the gather is one any-width
-    # program.
+    # native's twins. A chunk runs every layer whole and the final norm, then the head and greedy selection over its
+    # last row, which the decode step's programs run; the gather is one any-width program.
     decode = ["carry", "router", "combine", "rope", "attend", "norm", "head", "greedy"]
-    prefill = ["router", "experts", "combine", "rope"]
+    prefill = ["router", "experts", "combine", "rope", "attend", "norm", "pick"]
     assert sorted(twins) == sorted([f"{k}1-native" for k in decode] + [f"{k}3-native" for k in prefill] + ["embed-sym-native"])
-    # A drafter adds the verify step's programs at its three rows, its decision and its pick, and a prefill chunk runs
-    # the last layer whole and the final norm, whose output the drafter reads; the drafter's own layer has the trunk's
-    # shape, its prologue is native's at each pass's rows (the decode step's and the drafter's second step's are one).
+    # A drafter adds the verify step's programs at its three rows, its decision and its pick, and a chunk's drafter pass
+    # takes the chunk's own pick past the prompt (``next``); the drafter's own layer has the trunk's shape, its
+    # prologue is native's at each pass's rows (the decode step's and the drafter's second step's are one).
     # A decode width below the chunk adds a second chunk at that width, for the tail of a prompt that no longer
     # fills the first.
     model.save_pretrained(tmp_path / "mtp")
@@ -401,7 +420,7 @@ def test_native_programs_are_the_twins_a_native_serving_config_adds(tmp_path):
     drafter, _ = load_drafter(str(tmp_path / "mtp"), None, model, 2)
     drafted = trace_programs(model, prefill_size=8, decode_width=4, drafter=drafter)
     verify = ["router", "experts", "combine", "rope", "attend", "norm", "head", "greedy", "carry", "accept", "pick", "prologue"]
-    chunk = ["router", "experts", "combine", "rope", "attend", "norm", "prologue"]
+    chunk = ["router", "experts", "combine", "rope", "attend", "norm", "pick", "next", "prologue"]
     expected = [f"{k}1-native" for k in (*decode, "prologue")] + [f"{k}3-native" for k in verify]
     expected += [f"{k}{rows}-native" for rows in (8, 4) for k in chunk]
     assert sorted(drafted) == sorted([*expected, "embed-sym-native"])

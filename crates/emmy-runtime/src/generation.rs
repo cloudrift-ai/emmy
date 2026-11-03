@@ -17,7 +17,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 use std::time::{Duration, Instant};
 
-const GENERATION_FORMAT: u32 = 14;
+const GENERATION_FORMAT: u32 = 15;
 const DEFAULT_TEMPERATURE: f64 = 0.0;
 const DEFAULT_TOP_P: f64 = 1.0;
 const DEFAULT_SEED: u64 = 0;
@@ -30,6 +30,9 @@ const WINDOW: &str = "cache_tokens";
 const WINDOW_STEP: usize = 4096;
 const PROGRAM: &str = "decode";
 const LOGIT_BYTES: usize = size_of::<f32>();
+/// The token after a chunk's row past the prompt, which its drafter pass embeds: the chunk's own
+/// greedy pick, which its program puts in place of this.
+const CHUNK_PICK: i64 = -1;
 
 /// The token one decode step selects from its FP32 logits at positive temperature: the tokens in
 /// descending logit order, ties by ascending id, the smallest prefix of that order reaching top-p,
@@ -138,11 +141,12 @@ pub struct Config {
     pub drafts: usize,
 }
 
-/// Whether the prefill program may take the chunk at `position`. A chunk's rows past the
-/// prompt embed a padding token and write cache rows the decode step overwrites, so it
-/// is taken wherever the whole chunk fits the context and the prompt's last token stays for
-/// decode. Carried state has no such repair: a row past the prompt would be folded into the
-/// request, so then every row of the chunk must be a prompt token before the last.
+/// Whether the prefill program may take the chunk at `position`. A chunk's head reads its last
+/// row, so the chunk whose last row is the prompt's last token gives the first generated token. A
+/// chunk's rows past the prompt embed a padding token and write cache rows the decode step
+/// overwrites, so it is taken wherever the whole chunk fits the context, and the prompt's last
+/// token then stays for decode. Carried state has no such repair: a row past the prompt would be
+/// folded into the request, so then every row of the chunk must be a prompt token.
 fn chunk_fits(
     position: usize,
     prompt_length: usize,
@@ -152,7 +156,7 @@ fn chunk_fits(
 ) -> bool {
     position + 1 < prompt_length
         && position + prefill_size <= context_length
-        && (!carried || position + prefill_size < prompt_length)
+        && (!carried || position + prefill_size <= prompt_length)
 }
 
 /// The positions a verify step at `position` reaches: the target's rows, the token it continues
@@ -238,6 +242,16 @@ impl Config {
     }
 }
 
+/// The program the last step's tokens came from, whose rows of logits are theirs.
+#[derive(Clone, Copy)]
+enum Last {
+    Decode,
+    /// The prefill program at this index, whose chunk ended the prompt.
+    Chunk(usize),
+    /// The verify program, with the rows of the tokens it generated.
+    Verify(usize),
+}
+
 pub struct Generator {
     // The borrowers drop before the decode executor that owns the shared allocations, and all
     // before the pager's tables and slots and the pages they point at.
@@ -257,8 +271,7 @@ pub struct Generator {
     // The drafts the last verify step made for the next one; zeros before the first, which may
     // match by chance, and a draft the target confirms is its greedy token whatever drafted it.
     drafts: Vec<i64>,
-    // The rows of logits the last step's tokens came from: a verify step's, or decode's one.
-    verified: Option<usize>,
+    last: Last,
     // A pack with a tower: each row's M-RoPE position and image row, which every step uploads.
     rows: Option<Rows>,
     stopped: bool,
@@ -373,14 +386,16 @@ fn borrow(
 }
 
 /// The token after each of `rows` rows at `position`, which the drafter embeds as it writes its
-/// cache: the prompt's, else token zero, whose cache row a later step rewrites.
-fn next_tokens(prompt: &[i64], position: usize, rows: usize) -> Vec<u8> {
+/// cache: the prompt's, else `past`. Decode takes token zero there, whose cache row a later step
+/// rewrites; a chunk takes [`CHUNK_PICK`], so the chunk that ends the prompt writes its last row
+/// from the first generated token.
+fn next_tokens(prompt: &[i64], position: usize, rows: usize, past: i64) -> Vec<u8> {
     (1..=rows)
         .flat_map(|row| {
             prompt
                 .get(position + row)
                 .copied()
-                .unwrap_or(0)
+                .unwrap_or(past)
                 .to_le_bytes()
         })
         .collect()
@@ -430,8 +445,12 @@ impl Generator {
                     let shape = input_shape(name, size as i64);
                     check_buffer(&prefill, name, "i64", "input", &shape)?;
                 }
+                // The logits and greedy token of the chunk's last row.
+                check_buffer(&prefill, "logits", "f32", "output", &[1, vocab])?;
+                check_buffer(&prefill, "token", "i64", "output", &[1])?;
                 ensure!(
-                    prefill.program.inputs == inputs && prefill.program.outputs.is_empty(),
+                    prefill.program.inputs == inputs
+                        && prefill.program.outputs == ["logits", "token"],
                     "invalid prefill interface"
                 );
                 Ok((size, prefill))
@@ -602,7 +621,7 @@ impl Generator {
             position: 0,
             prompt: Vec::new(),
             selected: 0,
-            verified: None,
+            last: Last::Decode,
             rows: None,
             stopped: true,
         })
@@ -652,18 +671,19 @@ impl Generator {
 
     /// Consume a prefill chunk, a verify step or one token on the decode program, and return the
     /// tokens it generated. The chunk rule (`chunk_fits`) says where a chunk is taken, at the widest
-    /// width that fits; at temperature
+    /// width that fits, and the chunk that ends the prompt generates the first token; at temperature
     /// zero a pack's verify program takes every step from the prompt's last token on, where its rows
     /// fit the context; the decode step covers the rest.
     pub fn advance(&mut self, capture: bool, ignore_eos: bool) -> Result<Vec<i64>> {
         ensure!(!self.stopped, "generation is stopped");
         let (position, length) = (self.position, self.prompt.len());
         let (context, carried) = (self.config.context_length, !self.config.state.is_empty());
-        if let Some((rows, prefill)) = self
+        if let Some((index, rows, prefill)) = self
             .prefill
             .iter_mut()
-            .map(|(rows, prefill)| (*rows, prefill))
-            .find(|(rows, _)| chunk_fits(position, length, *rows, context, carried))
+            .enumerate()
+            .map(|(index, (rows, prefill))| (index, *rows, prefill))
+            .find(|(_, rows, _)| chunk_fits(position, length, *rows, context, carried))
         {
             self.stopped = true;
             // The chunk's prompt tokens; a row past the prompt embeds token zero, and nothing reads
@@ -684,13 +704,18 @@ impl Generator {
             if self.config.drafts > 0 {
                 prefill.bind(
                     "next_tokens",
-                    &next_tokens(&self.prompt, self.position, rows),
+                    &next_tokens(&self.prompt, self.position, rows, CHUNK_PICK),
                 )?;
             }
             if let Some(image) = &self.rows {
                 image.bind(prefill, self.position, rows)?;
             }
             prefill.advance(capture)?;
+            if self.position + rows == length {
+                self.position = length;
+                self.last = Last::Chunk(index);
+                return Ok(vec![self.select(ignore_eos)?]);
+            }
             self.position += rows.min(length - self.position - 1);
             self.stopped = false;
             return Ok(Vec::new());
@@ -759,7 +784,7 @@ impl Generator {
             .iter()
             .position(|token| !ignore_eos && self.config.eos_ids.contains(token));
         let generated = picked[..stop.map_or(picked.len(), |at| at + 1)].to_vec();
-        self.verified = Some(generated.len());
+        self.last = Last::Verify(generated.len());
         self.stopped = stop.is_some();
         Ok(generated)
     }
@@ -783,7 +808,7 @@ impl Generator {
             .get(self.position)
             .copied()
             .unwrap_or(self.selected);
-        self.verified = None;
+        self.last = Last::Decode;
         set_window(
             &mut self.executor,
             self.position,
@@ -794,24 +819,35 @@ impl Generator {
             .bind("position", &(self.position as i64).to_le_bytes())?;
         self.executor.bind("tokens", &token.to_le_bytes())?;
         if self.config.drafts > 0 {
-            self.executor
-                .bind("next_tokens", &next_tokens(&self.prompt, self.position, 1))?;
+            self.executor.bind(
+                "next_tokens",
+                &next_tokens(&self.prompt, self.position, 1, 0),
+            )?;
         }
         if let Some(rows) = &self.rows {
             rows.bind(&mut self.executor, self.position, 1)?;
         }
         self.executor.advance(capture)?;
-        let position = self.position;
         self.position += 1;
         if self.position < self.prompt.len() {
             self.stopped = false;
             return Ok(None);
         }
+        self.select(ignore_eos).map(Some)
+    }
+
+    /// The token the program that took the token before `position` generated: its greedy pick, or
+    /// at positive temperature one sampled here from its logits. The next step embeds it.
+    fn select(&mut self, ignore_eos: bool) -> Result<i64> {
+        let executor = match self.last {
+            Last::Chunk(index) => &self.prefill[index].1,
+            _ => &self.executor,
+        };
         let token = if self.sampling.temperature == 0.0 {
             // The program's own greedy pick; a nonfinite logit leaves it out of range.
-            words(&self.executor.output("token")?)[0]
+            words(&executor.output("token")?)[0]
         } else {
-            let bytes = self.executor.output("logits")?;
+            let bytes = executor.output("logits")?;
             let logits: Vec<f32> = bytes
                 .as_chunks::<LOGIT_BYTES>()
                 .0
@@ -826,7 +862,7 @@ impl Generator {
             sample(
                 &logits,
                 &self.sampling,
-                (position + 2 - self.prompt.len()) as u64,
+                (self.position + 1 - self.prompt.len()) as u64,
             )?
         };
         ensure!(
@@ -835,19 +871,21 @@ impl Generator {
         );
         self.selected = token;
         self.stopped = !ignore_eos && self.config.eos_ids.contains(&token);
-        Ok(Some(token))
+        Ok(token)
     }
 
-    /// Diagnostic transfer only; a decode step at positive temperature downloads them anyway. A
-    /// verify step's are the rows of the tokens it generated.
+    /// Diagnostic transfer only; a step at positive temperature downloads them anyway. A verify
+    /// step's are the rows of the tokens it generated, a chunk's its last row's.
     pub fn logits(&self) -> Result<Vec<u8>> {
-        match (self.verified, &self.verify) {
-            (Some(rows), Some(verify)) => {
+        match self.last {
+            Last::Verify(rows) => {
+                let verify = self.verify.as_ref().context("no verify program")?;
                 let mut bytes = verify.output("logits")?;
                 bytes.truncate(rows * self.config.vocab_size * LOGIT_BYTES);
                 Ok(bytes)
             }
-            _ => self.executor.output("logits"),
+            Last::Chunk(index) => self.prefill[index].1.output("logits"),
+            Last::Decode => self.executor.output("logits"),
         }
     }
 
@@ -1020,25 +1058,31 @@ mod tests {
 
     #[test]
     fn carried_state_takes_a_chunk_only_inside_the_prompt() {
-        // Dense: a chunk is taken while the prompt's last token stays for decode and the chunk
-        // fits the context, rows past the prompt included.
+        // Dense: a chunk is taken while a prompt token stays before the last and the chunk fits
+        // the context, rows past the prompt included.
         assert!(chunk_fits(0, 2, 4, 8, false));
         assert!(chunk_fits(4, 8, 4, 8, false));
         assert!(!chunk_fits(5, 8, 4, 8, false));
         assert!(!chunk_fits(7, 8, 4, 8, false));
-        // Carried: every row must be a prompt token before the last.
+        // Carried: every row must be a prompt token, the last one included.
         assert!(!chunk_fits(0, 2, 4, 8, true));
         assert!(chunk_fits(0, 5, 4, 8, true));
-        assert!(!chunk_fits(0, 4, 4, 8, true));
-        assert!(chunk_fits(4, 9, 4, 16, true));
-        assert!(!chunk_fits(4, 8, 4, 16, true));
+        assert!(chunk_fits(0, 4, 4, 8, true));
+        assert!(chunk_fits(4, 8, 4, 16, true));
+        assert!(!chunk_fits(4, 7, 4, 16, true));
+        assert!(!chunk_fits(7, 8, 4, 16, true));
     }
 
     #[test]
     fn the_drafter_embeds_the_prompt_token_after_each_row() {
-        // Past the prompt a row's next token is unknown: token zero, whose cache row a later step rewrites.
-        assert_eq!(words(&next_tokens(&[5, 6, 7, 8], 1, 3)), [7, 8, 0]);
-        assert_eq!(words(&next_tokens(&[5], 0, 1)), [0]);
+        // Past the prompt a row's next token is unknown: decode's token zero, whose cache row a
+        // later step rewrites, or the chunk's own pick.
+        assert_eq!(words(&next_tokens(&[5, 6, 7, 8], 1, 3, 0)), [7, 8, 0]);
+        assert_eq!(words(&next_tokens(&[5], 0, 1, 0)), [0]);
+        assert_eq!(
+            words(&next_tokens(&[5, 6, 7, 8], 0, 4, CHUNK_PICK)),
+            [6, 7, 8, CHUNK_PICK]
+        );
     }
 
     #[test]
