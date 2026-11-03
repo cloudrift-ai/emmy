@@ -334,8 +334,8 @@ What the session changes for the milestones:
     recorded on the RTX 5090 promotes with the record-and-promote flow; re-record what the restamps re-keyed and
     what #1298/#1299 changed the measurement of; refit both priors in one pass; drop the `prior-pending` tags.
     Every compiler change of milestones 2-15 and the follow-ups list's compiler correctness items (the wrong FP4
-    code and the wrong-answer threshold, the dead scratch, the nested stamps, the loose rounding step, the
-    recurrence roll, the unmeasured `SHARED_CARRY`) land before this, so the re-record measures the fixed
+    code and the wrong-answer threshold, the dead scratch, the loose rounding step, the recurrence roll, the
+    unmeasured `SHARED_CARRY`) land before this, so the re-record measures the fixed
     kernels; the other cards' open record runs (the V100/A100/H100/4090 GDN routes) stay follow-ups, not this
     plan's scope. Gate: the prior reproduction gate green with no `prior-pending` left on these recipes; the
     weights committed. Needs 2-16, and the prior gap the ledger dates 2026-10-31: the retired plan's promotion
@@ -483,9 +483,9 @@ the changes that write a shared golden take turns.
 | Compiler, off the card | 4, the correctness items that block 17 | at the gates only | any lowering fix restamps all of them |
 | Batching | 19, then 20-25 | 21 onward | none before 21, then new programs in both recipes |
 
-Milestone 1 is two sessions, one per model, so two people take one model each from the start. Four of the six
-correctness items that block 17 reproduce off the card: the dead scratch, the nested stamps, the rounding step and
-the recurrence roll. The wrong FP4 code and `SHARED_CARRY` need one. That still makes this lane the one to staff
+Milestone 1 is two sessions, one per model, so two people take one model each from the start. Three of the five
+correctness items that block 17 reproduce off the card: the dead scratch, the rounding step and the recurrence roll.
+The wrong FP4 code and `SHARED_CARRY` need one. That still makes this lane the one to staff
 first: 17 is on the parity path and those items are its unowned prerequisite. The `fold.lower` assert and the
 `[N, 2]` loads also reproduce off the card, though neither blocks 17. 13 moved to the Qwen3.6 lane because it writes
 that recipe's golden.
@@ -655,9 +655,6 @@ Open, compiler — the correctness items block 17:
   wrong-answer check misses it: one bad element of 98304 stays under its mean-error threshold.
 - Correctness. The cut pass's dead scratch at width 4: one pin combination made a piece whose output nothing
   reads; #1243 dropped the pin instead of fixing the pass.
-- Correctness. Nested `TILE`/`STAGE` stamps under an output-tiled root are accepted by the binder and silently
-  dropped (gdn16 recurrence piece `...__place_84c2d13867__place_149fbfea8c__partial` runs serial per-cell loops).
-  Likely fix: offer a nested tile only where the binder realizes it; refuse the rest at the offer.
 - Correctness. The strict rule's rounding step comes from the coarsest float format in the producing chain with
   no list of which ops round: a bf16 slice cast to f32 and followed by f32-only math still gets the bf16 step.
 - Correctness. Rolling a recurrence misfires at small shapes: with 6 value heads and 8 or 12 tokens,
