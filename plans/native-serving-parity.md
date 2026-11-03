@@ -37,10 +37,9 @@ In today's numbers the bar is: 27B TPOT <= 9.2 / 9.8 / 13.1 ms at 256 / 7,680 / 
 
 At concurrency the window is a shared budget, not a per-request promise: the cache allocation stays window-sized, and
 an admitted request's context is that budget over the admission cap — 32,768 tokens at concurrency 8, 8,192 at 32 —
-unless milestone 19's design picks another split. The concurrency bar's numbers are fixed from the stock and plugin
-columns milestone 1 measures (none exist in this line of work today); the proposal — per-request TPOT and total
-output tokens per second each within 1.5x stock at concurrency 8 and 32 — is revised with the owner against that
-measurement at milestone 1, not at the end of the stretch.
+unless milestone 19's design picks another split. The concurrency bar, accepted by the owner on 2026-11-02 against
+milestone 1's columns: per-request TPOT and total output tokens per second each within 1.5x stock at concurrency 8
+and 32. Its numbers are under "Measured 2026-11-01".
 
 ## State (2026-10-29)
 
@@ -93,7 +92,8 @@ The diagnosis in brief:
   NInfer session 0.45 s at its 268-token chat prompt, and both are the carried-state chunk rule on the same pack: a
   chunk takes only prompt tokens before the last, so 256 tokens left 63 single steps (63 x 18.3 ms) where 268 left
   11, and the session's 257-token control measured 246 ms. #1281 (merged 2026-10-26) now takes the tail in
-  decode-width chunks: 694 ms at 256 tokens, 6.83 s at 7,680. Milestone 4 removes the remaining single steps.
+  decode-width chunks: 694 ms at 256 tokens, 6.83 s at 7,680. Milestone 4 (#1313) removed the remaining single
+  steps; the number waits on its gate.
 - **Qwen3.6 decode**: the one-row step is 19.6-19.8 ms and the drafter buys almost nothing — a verify step's three
   rows of eight picks route past the 8 device slots, and the drafted step reads 44-52 ms. The dev-box split (native
   ARCHITECTURE) put 7.8 ms of a step in the pager's table programs: the decision kernel runs one CTA, ~34 us for
@@ -122,7 +122,41 @@ recurrence's double state write removed), #1289 (the out projection's operand cu
 pinned cut's remainder takes its own fork; a bare `PLACE=cut` cuts the remainder chain; `--pin-route` keeps a
 recorded set), #1304 (the NInfer tables — its squash carried #1279's stock and plugin tables, so #1279 is closed,
 not merged), #1293 (a cut arm's piece facts computed on the worker that builds the arm), and the tooling fixes
-#1283-#1286. Current main has not been measured on the protocol; milestone 1 does that once.
+#1283-#1286. Milestone 1 measured the protocol once, below.
+
+## Measured 2026-11-01 (milestones 1 and 8, #1311)
+
+Each DISCOVERY's 2026-11-01 section holds the tables, on main at `ea17c0964`: before #1302 and #1309 changed both
+recipe goldens, and with native packs that were not strict. The State above and the numbers quoted in the milestones
+are the older sessions'; each gate re-reads its number against these.
+
+The bar in these numbers: 27B TPOT <= 9.2 / 9.1 / 12.0 ms at 256 / 7,680 / 197,632 tokens, first token <= 0.17 / 1.26 /
+135 s; Qwen3.6 TPOT <= 13.4 / 14.3 / 23.0 ms, first token <= 0.68 / 5.66 / 288 s.
+
+The concurrency bar, 1.5x stock as the owner accepted it on 2026-11-02. At concurrency 8 / 32, TPOT at most and output
+tokens a second at least:
+
+| | 256-token TPOT | 256-token output | 7,680-token TPOT | 7,680-token output |
+| --- | --- | --- | --- | --- |
+| 27B | 13.8 / 15.2 ms | 504 / 713 | 29.0 / 36.3 ms | 184 / 187 |
+| Qwen3.6 | 79.8 / 117.9 ms | 87.7 / 95.9 | 145.5 / 195.8 ms | 38.1 / 39.9 |
+
+The plugin's cells are a low floor: it keeps the recipes' settings, which name one request, and it did not batch.
+
+What the session changes for the milestones:
+
+- **Qwen3.6's first token at 256 tokens went from 5.07 to 15.7 s, and no milestone owned the cause.** It is in the
+  follow-ups below. The plugin floor at that cell is 3.54 s.
+- **5's budget is larger.** Attention at 197,632 tokens is 544 s of the 27B's 698 s, not ~351 s of 505 s, and 6.7 ms a
+  layer at 65,536 positions, not 4.6. The commit that moved it was not bisected. A 3x fold leaves ~181 s against 5's
+  117 s; 117 s takes ~4.6x.
+- **8 is done, and its floor says 9's gate cannot be met by width.** At 7,680 tokens attention is 1.09 s at any width,
+  and 512 rows with no rotary cost at all still leaves 3.85 s against 1.26 s. Wider chunks stop paying near 256 rows.
+- **11 and 12 stand, and 12's Gated DeltaNet branch does not apply.** The one-row step is 15.65 of 23.4 ms in the paging
+  programs and page copies. The verify step is 44.5 of 57 ms in the expert programs and the pager, 5.5 ms in the Gated
+  DeltaNet programs.
+- **14's reference chunk moved.** Qwen3.6's 64-row chunk takes 1.44-1.49 s against 1.25 s, 97% expert programs. The card
+  and the host memory settings both differ, and that was not separated.
 
 ## The open PRs, placed
 
@@ -187,13 +221,19 @@ not merged), #1293 (a cut arm's piece facts computed on the worker that builds t
    the 27B chunk 50 -> ~41 ms measured in the step; the verify step down ~0.5 ms; corpus and goldens current.
    Needs 1.
 
-4. **Prefill ends at the prompt's last token.** After #1281 a 256-token prompt still runs 15 single steps on the
-   27B (3 on Qwen3.6): a chunk takes only prompt tokens *before the last*, because only the decode program runs
-   the head. A drafted pack's chunks already run their last layer whole and the final norm; let the final chunk
+4. **Prefill ends at the prompt's last token (#1313).** After #1281 a 256-token prompt still runs 15 single steps
+   on the 27B (3 on Qwen3.6): a chunk takes only prompt tokens *before the last*, because only the decode program
+   runs the head. A drafted pack's chunks already run their last layer whole and the final norm; let the final chunk
    include the last prompt token and run the head and greedy selection over its last normalized row (a row pick,
    as the verify step's pick program does). 256 tokens then cost four chunks — the 257-token control's 246 ms.
    Gate: 27B first token at 256 tokens within one chunk's cost of the 257-token control; tokens unchanged on the
    probes; both models. Needs nothing.
+
+   #1313 (merged 2026-11-02) landed the mechanics, checked on the native surrogates: every chunk now ends at its last
+   row's logits and greedy token, and 256 tokens dispatch as four 64-row chunks on both models. What remains needs
+   the card: rows for the two new kernels at each chunk width (the row pick and the drafter-token program, 64 and 16
+   rows on the 27B, 64 and 4 on Qwen3.6), then the gate. Until those rows land, a strict-evidence bake of either
+   recipe's native image refuses them; images already published keep their own server and pack.
 
 5. **Long-window prefill attention folds chunk by chunk.** The 64-row attention writes its scores and
    probabilities to memory and runs the value expectation far below bandwidth: 4.6 ms a layer at 65,536 positions,
@@ -432,8 +472,9 @@ The record and measurement milestones share rented x16 RTX 5090 sessions instead
 - Milestone 1's two protocol sessions (one per model) also take the nsys splits, the 27B first-token controls and
   8's per-kernel chunk profile.
 - 2, 3 and 5 record in one rental: the head rows, both recipes' rope rows (3 re-keys Qwen3.6's rope too), the
-  folded prefill attention route. 6 and 7 share a second: decode attention at one and three rows for both models,
-  then the width-3 GDN tune in the step. 9's wide-width records are a third, after 8's floor is read.
+  folded prefill attention route. 4's rows and gate ride the first rental that comes. 6 and 7 share a second: decode
+  attention at one and three rows for both models, then the width-3 GDN tune in the step. 9's wide-width records are
+  a third, after 8's floor is read.
 - Qwen3.6's 13 and 14 share one rental; 15's overlap check rides it when the runtime lands in time, else it takes a
   short rental of its own before 16's gate session.
 - 10 and 16 are each a fresh protocol session per model (the bar requires one session, all columns).
@@ -450,7 +491,7 @@ the changes that write a shared golden take turns.
 | --- | --- | --- | --- |
 | 27B | 2, 3, 5, 6, 7, 8, 9 → 10 | most milestones | 27B; 3, 5 and 6 also Qwen3.6's |
 | Qwen3.6 | 11, 12, 13, 14, 15 → 16 | most milestones | Qwen3.6; 11's pager rows the 5090 hardware golden |
-| Compiler, off the card | 4, the correctness items that block 17 | at the gates only | any lowering fix restamps all of them |
+| Compiler, off the card | the correctness items that block 17; 4 landed (#1313) | at the gates only | any lowering fix restamps all of them |
 | Batching | 19, then 20-25 | 21 onward | none before 21, then new programs in both recipes |
 
 Milestone 1 is two sessions, one per model, so two people take one model each from the start. Four of the six
@@ -609,6 +650,15 @@ Open items:
 - (2026-10-25, #1277) Qwen3.6's width-4 GDN program keeps slow recorded picks: 1.34 ms for its recurrence target
   (a 4x4096 contraction on a one-warp tile, 275 us three times), three reduces of 120, 120 and 60 us that offer
   no seam, in_proj pieces at 55 us. 12 picks this up only if 1's split blames the GDN programs.
+- (2026-11-01, #1311) Qwen3.6's 4-row prefill chunk runs attention as one uncut kernel,
+  `k_matmul_softmax_range_reduce_1b2f00`: 66.6 ms a layer, 131.7 ms past 4,096 positions, 88-93% of the chunk, 11.3 s of
+  the 256-token first token. #1281 added the chunk, and the golden still holds only the uncut rows and no routing row
+  for it at c497a0cc7; widths 1, 3 and 64 are cut. Needs a record run on the card. A cut in line with those widths would
+  bring that first token near the 257-token control's 5.88 s, an estimate; no such program was built. Since #1313 a
+  256-token prompt takes four 64-row chunks and never reaches this chunk; a tail past the last whole 64-row chunk
+  still does.
+- (2026-11-01, #1311) Not measured: native at 8 and 32 rows, which 22 owns, and an nsys capture of Qwen3.6's longest
+  prompt. The audit on current main, after #1302's rows, needs a 5090: `emmy eval golden` refuses any other card.
 
 Open, compiler — the correctness items block 17:
 

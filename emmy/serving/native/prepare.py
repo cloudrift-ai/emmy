@@ -18,7 +18,7 @@ from emmy.serving.twins import LayoutScope, plan_layouts
 
 #: The longest context native serves: the window of the checkpoints it has served.
 MAX_CONTEXT = 262144
-GENERATION_VERSION = 14
+GENERATION_VERSION = 15
 PREFILL_SIZE = 16
 MASK_FILL = -1e9
 #: The symbolic axis attention reads the cache to: how many of its leading positions a step attends over, which the
@@ -313,6 +313,30 @@ def pick_module(drafts):
     return Pick()
 
 
+def last_module():
+    """A chunk's last normalized row, which its head reads: in the chunk that ends the prompt, the prompt's last token,
+    whose greedy pick is the first generated token."""
+    import torch
+
+    class Last(torch.nn.Module):
+        def forward(self, rows):
+            return rows[-1:]
+
+    return Last()
+
+
+def next_module():
+    """The token after each of a chunk's rows, which the drafter embeds as it writes its cache: the one the host
+    uploads, and past the prompt (-1) the chunk's own greedy pick, as a verify step's drafter takes the target's."""
+    import torch
+
+    class Next(torch.nn.Module):
+        def forward(self, tokens, token):
+            return torch.where(tokens < 0, token, tokens)
+
+    return Next()
+
+
 def router_module(gate, rows):
     """A MoE layer's router over the step's ``[rows, hidden]`` normalized rows, as Transformers'
     softmax top-k router computes it: the gate's linear in the model dtype, a softmax in FP32, the
@@ -441,7 +465,7 @@ def _weight_bytes(plan, nid, shape, sources):
 class _Step:
     def __init__(self, dtype, rows, context_length, ckpt=None, traced=None, shared=None, scopes=None, inputs=(), outputs=()):
         # A decode step (one row) ends at the logits and the greedy token; the runtime hands the token it
-        # selects back as the next step's input. A prefill chunk writes the cache and nothing else.
+        # selects back as the next step's input. A prefill chunk also writes the cache, and ends at its last row's.
         # ``ckpt`` (``load_model``) puts every program on the checkpoint-sourced lane: the trunk's
         # coded weights are spelled from the shards and bound from them, never off the module.
         # ``dtype`` is the model's, which every 16-bit buffer takes. With ``traced``, a dict, each
@@ -702,19 +726,20 @@ def _program(
     images=None,
 ):
     """One program of ``kind``: ``decode``, the one-token step at ``rows == 1``; ``prefill``, a chunk of ``rows``
-    prompt tokens that writes the cache and the carried state and computes nothing past the last
-    attention layer's keys; or ``verify``, a speculative step over the token it continues from and ``drafter``'s
-    drafts, ``rows`` in all, which takes the drafts the target's greedy choice confirms, carries the state after the
-    last accepted row and drafts the next step's tokens. The trunk is the vLLM plugin's: its serving twins, in the
-    model dtype, the attention halves at ``width`` rows (the width the plugin runs one token at: its decode bucket
-    without its M=1 tier; the chunk itself for prefill) and a Gated DeltaNet layer at the step's own rows, as the
-    plugin decomposes a step, so the recipe golden's rows are the trunk's. Native's own programs run at
-    ``rows`` and read and write the leading rows of the wider seams. The cache holds ``kv_dtype`` values
-    (a torch dtype). ``experts_of(index)`` reads a checkpoint-sourced MoE layer's routed experts as
+    prompt tokens that writes the cache and the carried state and ends at its last row's logits and greedy token, the
+    first generated token where that row is the prompt's last; or ``verify``, a speculative step over the token it
+    continues from and ``drafter``'s drafts, ``rows`` in all, which takes the drafts the target's greedy choice
+    confirms, carries the state after the last accepted row and drafts the next step's tokens. The trunk is the vLLM
+    plugin's: its serving twins, in the model dtype, the attention halves at ``width`` rows (the width the plugin runs
+    one token at: its decode bucket without its M=1 tier; the chunk itself for prefill) and a Gated DeltaNet layer at
+    the step's own rows, as the plugin decomposes a step, so the recipe golden's rows are the trunk's. Native's own
+    programs run at ``rows`` and read and write the leading rows of the wider seams. The cache holds ``kv_dtype``
+    values (a torch dtype). ``experts_of(index)`` reads a checkpoint-sourced MoE layer's routed experts as
     :func:`checkpoint_experts` does; without it they come off the module. With a ``drafter`` (:class:`Drafter`) the
     decode and prefill programs also write its cache at their rows, from the token after each one, which the host
-    uploads, so the prompt's positions are in it when the first verify step drafts. ``shared`` and ``scopes`` are
-    :class:`_Step`'s; ``traced`` traces the programs into it instead of compiling them.
+    uploads (past the prompt a chunk takes its own pick), so the prompt's positions are in it when the first verify
+    step drafts. ``shared`` and ``scopes`` are :class:`_Step`'s; ``traced`` traces the programs into it instead of
+    compiling them.
 
     ``images`` is how many image rows the vision tower writes at most (its widest program's), for a step that
     takes images: the step then also takes each row's M-RoPE position (``mrope``, ``[rows, 3]``) and the image row it
@@ -747,7 +772,7 @@ def _program(
     merged = bool(images) and not verify
     inputs += ["mrope", "image_rows"] if merged else ["mrope"] if images else []
     drafted = [f"draft{j}" for j in range(1, drafts + 1)]
-    outputs = [] if prefill else ["logits", "token", *(["accepted", *drafted] if verify else [])]
+    outputs = ["logits", "token", *(["accepted", *drafted] if verify else [])]
     # The model dtype: every 16-bit activation, cache and weight the step holds, as the plugin serves it.
     td = model.dtype
     step = _Step(get(str(td).removeprefix("torch.")), rows, context_length, ckpt, traced, shared, scopes, inputs, outputs)
@@ -756,9 +781,10 @@ def _program(
         step.buffer(name, {"position": (1,), "mrope": (rows, 3)}.get(name, (rows,)), I64, "input")
     if merged:
         step.buffer("images", (images, h), role="output")
-    if not prefill:
-        step.buffer("logits", (rows, vocab), F32, "output")
-        step.buffer("token", (rows,), I64, "output")
+    # A chunk's head reads its last row alone.
+    picks = 1 if prefill else rows
+    step.buffer("logits", (picks, vocab), F32, "output")
+    step.buffer("token", (picks,), I64, "output")
     for name in outputs[2:]:
         step.buffer(name, (1,), I64, "output")
 
@@ -773,12 +799,12 @@ def _program(
     def windowed():
         return torch.zeros(DEFAULT_SEQ_HINT, kv, d, dtype=kv_dtype)
 
-    def mixer_outputs(label, out, routed, n, role="scratch"):
+    def mixer_outputs(label, out, routed, n):
         # A MoE layer's mixer leaves its residual and the normalized rows its routed experts read; the
         # experts write the layer's output.
         if routed:
-            return [step.buffer(f"{label}.h", (n, h), role=role), step.buffer(f"{label}.xn", (n, h), role=role)]
-        return [step.buffer(out, (width, h), role=role)]
+            return [step.buffer(f"{label}.h", (n, h)), step.buffer(f"{label}.xn", (n, h))]
+        return [step.buffer(out, (width, h))]
 
     def experts(label, home, prefix, routed, expert, mixed, normed, out, n, read, weights=None, paged=True):
         """The routed half of a MoE layer after its mixer, which leaves the residual ``mixed``
@@ -964,12 +990,6 @@ def _program(
     # accepted row once the step has decided.
     carries = []
     for index, layer in enumerate(decoder.layers):
-        # The last prefill layer's outputs that nothing reads take the persistent role rather than
-        # a scratch slot nobody consumes: a Gated DeltaNet layer's hidden output, since the layer
-        # runs whole for its state, and an attention layer's rotated query and gate, since only its
-        # keys and values are needed in the cache. A drafter reads the last layer's output.
-        last_prefill = prefill and drafter is None and index + 1 == len(decoder.layers)
-        unread = "output" if last_prefill else "scratch"
         # A MoE layer's split, built once: its attention ``pre`` and ``post`` (none for a Gated
         # DeltaNet layer) and its experts' form.
         routed = moe_block_parts(layer.mlp)
@@ -981,9 +1001,9 @@ def _program(
             return f"{kind}{index}"
 
         if selected_layer_type(decoder, layer, index) == "linear_attention":
-            # A Gated DeltaNet layer always runs whole, the last prefill layer included: its state must advance. The
-            # plugin's program writes the next state and history apart from the ones it reads; the carry writes them
-            # over the ones the step carries. A verify step runs the plugin's program that keeps them after each row.
+            # The plugin's program writes the next state and history apart from the ones it reads; the carry writes
+            # them over the ones the step carries. A verify step runs the plugin's program that keeps them after each
+            # row.
             mixer = layer.linear_attn
             shapes = {
                 "state": ((1, mixer.num_v_heads, mixer.head_k_dim, mixer.head_v_dim), F32, torch.float32),
@@ -993,7 +1013,7 @@ def _program(
             state = [step.buffer(f"{label}.{name}", shape, dtype, role="output") for name, (shape, dtype, _) in shapes.items()]
             nexts = [step.buffer(f"{label}.{name}_next", (kept, *shape[1:]), dtype) for name, (shape, dtype, _) in shapes.items()]
             step.state += state
-            outputs = mixer_outputs(label, out, routed, rows, unread)
+            outputs = mixer_outputs(label, out, routed, rows)
             examples = [torch.zeros(1, rows, h, dtype=td), *(torch.zeros(shape, dtype=dtype) for shape, _, dtype in shapes.values())]
             wrapper = build_gdn_state_wrapper(layer, rows=verify)
             step.compiled(f"gdn{index}", wrapper, examples, [hidden, *state], [*outputs, *nexts], cache, twin=True)
@@ -1004,14 +1024,9 @@ def _program(
                 carries.append(carry)
             else:
                 step.compiled(*carry, cache)
-            # The last prefill layer's output is read by nothing, so its experts never run.
-            hidden = (
-                experts(label, label, prefix, routed, split[2], *outputs, out, rows, read) if routed and not last_prefill else outputs[0]
-            )
+            hidden = experts(label, label, prefix, routed, split[2], *outputs, out, rows, read) if routed else outputs[0]
             continue
-        hidden = attention(label, label, prefix, layer, split, hidden, rows, "position", out, last_prefill, read)
-    if prefill and drafter is None:
-        return step
+        hidden = attention(label, label, prefix, layer, split, hidden, rows, "position", out, read=read)
 
     # The final norm, then the head: the plugin's program over the codes of a head the checkpoint keeps coded, else
     # FP32 scores from 16-bit operands, since rounding the logits to 16 bits could tie distinct scores. A drafter reads
@@ -1055,11 +1070,9 @@ def _program(
         step.compiled(prefix("norm"), drafter.norm, (torch.zeros(n, h, dtype=td),), [out], [rows_out], cache, weights="mtp.norm", rows=n)
         return rows_out
 
-    if drafter is not None and not verify:
+    if drafter is not None and kind == "decode":
         # Its rotated query and gate take the persistent role, named by the program, which owns them.
         draft(f"mtp.{kind}", "next_tokens", normed, rows, "position", cache_only=True)
-    if prefill:
-        return step
     coded = _coded_head(model, ckpt)
 
     def head(prefix, normed, logits, n):
@@ -1087,8 +1100,21 @@ def _program(
     def greedy(prefix, logits, token, n):
         step.compiled(prefix, greedy_module(vocab), (torch.zeros(n, vocab, dtype=torch.float32),), [logits], [token], cache, rows=n)
 
-    head("head", normed, "logits", rows)
-    greedy("greedy", "logits", "token", rows)
+    # A chunk's head and greedy selection run over its last normalized row: the chunk that ends the prompt gives the
+    # first generated token, and every other chunk's goes unread.
+    picked = normed
+    if prefill:
+        picked = step.buffer("picked", (1, h))
+        step.compiled("pick", last_module(), (torch.zeros(rows, h, dtype=td),), [normed], [picked], cache)
+    head("head", picked, "logits", picks)
+    greedy("greedy", "logits", "token", picks)
+    if prefill and drafter is not None:
+        # The drafter's cache, from the token after each row: past the prompt the host has none and the chunk's pick
+        # takes its place, which the chunk that ends the prompt needs at its last row.
+        nexts = step.buffer("next", (rows,), I64)
+        examples = (torch.zeros(rows, dtype=torch.int64), scalar())
+        step.compiled("next", next_module(), examples, ["next_tokens", "token"], [nexts], cache)
+        draft(f"mtp.{kind}", nexts, normed, rows, "position", cache_only=True)
     if not verify:
         return step
     # The drafts the target confirms, decided on the device, then each Gated DeltaNet layer's state after the last
@@ -1314,7 +1340,7 @@ def _steps(
     programs = {"decode": program("decode", 1, decode_width)}
     # The chunk widths, widest first: the prefill chunk, then the decode width below it, so the tail of a prompt that
     # no longer fills the chunk is taken at the narrower one before the runtime's chunk rule runs it a token at a time
-    # (a prompt of 256 tokens with carried state and 64-row chunks alone ran its last 63 tokens as 63 steps).
+    # (a prompt of 255 tokens with carried state and 64-row chunks alone ran its last 63 tokens as 63 steps).
     prefill_sizes = sorted({n for n in (prefill_size, decode_width) if 1 < n <= prefill_size}, reverse=True)
     for n in prefill_sizes:
         programs[f"prefill{n}"] = program("prefill", n, n)

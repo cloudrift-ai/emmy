@@ -1,5 +1,107 @@
 # Qwen3.8-27B-NVFP4 (NVIDIA) discovery
 
+## Native, plugin and stock vLLM again, with concurrency and the chunk's kernels (2026-11-01)
+
+The protocol of the 2026-10-25 table below, on main at `ea17c0964`, one session on one rented x16 RTX 5090 (Gen5 x16, 57
+GB/s under load; 16 cores, 60 GiB of RAM, no swap, driver 595.84, CUDA 13.1, a container with no Docker).
+
+| | native | plugin | stock vLLM |
+|---|---|---|---|
+| TPOT / TTFT, 256-token prompt | 9.8 ms / 0.71 s | 10.3 ms / 0.19 s | 7.7 ms / 0.085 s |
+| TPOT / TTFT, 7,680-token prompt | 10.5 ms / 7.39 s | 10.4 ms / 5.09 s | 7.6 ms / 0.63 s |
+| TPOT / TTFT, 197,632-token prompt (stock's longest) | 26.5 ms / 698 s | 11.9 ms / 180 s | 8.0 ms / 67.4 s |
+| TPOT / TTFT, 261,632-token prompt (the window's longest) | 41.9 ms / 1,154 s | 15.7 ms / 260 s | does not fit |
+| drafts accepted at 256 / 7,680 / 197,632 / 261,632 | 70 / 66 / 88 / 57% | 71 / 71 / 78 / 54% | 68 / 71 / 91% / - |
+| TPOT with the drafter off, 256 / 7,680 | 16.2 / 16.5 ms | | |
+| first token at 256 / 257 / 268 tokens | 0.71 / 0.24 / 0.42 s | | |
+| device memory at rest / peak | 30.7 / 31.2 GiB | 29.9 / 30.7 GiB | 30.5 / 30.6 GiB |
+| KV cache | 262,144 tokens, the window | 305,585 tokens at 0.93 | 201,383 tokens at 0.93 |
+| host memory of the server at rest, peak | 3.4 GiB, 5.1 GiB | 11.9 GiB, 12.1 GiB | 5.5 GiB, 5.7 GiB |
+| GSM8K strict / flexible match | 0.720 / 0.755 | 0.720 / 0.770 | 0.585 / 0.640 |
+| ready after | 5 s from its pack | 1,500 s, no pack | 47 s, 270 s at its first compile |
+
+Stock and the plugin at higher concurrency, with `--max-num-seqs` raised and nothing else changed but stock's window,
+which 198,400 tokens no longer fit at these row counts (176,000 tokens here):
+
+| | stock, 8 | stock, 32 | plugin, 8 | plugin, 32 |
+|---|---|---|---|---|
+| 256-token prompts: per-request TPOT | 9.2 ms | 10.1 ms | 87.7 ms | 168.9 ms |
+| total output tokens a second | 756 | 1,070 | 75 | 69 |
+| first token | 0.14 s | 4.75 s | 4.26 s | 74.4 s |
+| 7,680-token prompts: per-request TPOT | 19.3 ms | 24.2 ms | 143.8 ms | 147.9 ms |
+| total output tokens a second | 276 | 281 | 6.9 | 6.6 |
+| first token | 1.42 s | 22.0 s | 261 s | 1,201 s |
+| device memory peak | 30.6 GiB | 30.6 GiB | 30.8 GiB | 30.8 GiB |
+
+Each cell runs 4 x concurrency requests at 256 tokens and 2 x concurrency at 7,680, each request a different slice of
+the same Markdown. First token is the median request's, queueing included. The plugin keeps the recipe's settings, which
+name one request; what stops it batching was not investigated.
+
+What differs from the 2026-10-25 session:
+
+- **The lanes are pip environments, not images:** vLLM 0.25.1 and this source for the plugin, vLLM 0.32.0 with
+  FlashInfer 0.7.0.post1 for stock, which compiles FlashInfer at first use. That compile on 16 cores ran out of the
+  container's memory, so stock's first boot and one warming request of each size ran on four cores. Nothing measured
+  did.
+- **The native pack is not strict.** `emmy eval golden` fails on this recipe at `ea17c0964`: 57 twins deploy from the
+  golden rows and `prologue16-native` does not (`k_linear_mean_reduce_89f977` has no measured row for its `030_cut`
+  fork). The pack was exported without `--strict-evidence`, so a prior decides that one fork; every other program's rows
+  are the golden's. #1302 landed that fork's row after this session.
+- **The plugin has no pack here,** so its ready time is a lowering of every program and does not compare.
+- Native's `/health` means loaded: at its 5.4 s answer the device already held the full 30.7 GiB, and a request sent at
+  once got its first token in 0.76 s.
+
+Where the time goes, from `nsys --cuda-graph-trace=node` on native (7,680 and 197,632 tokens, under 4% slower than the
+unprofiled cells):
+
+- **Decode.** The drafted step takes 23.5 ms on native, 25 ms on the plugin and 18.1 ms on stock (TPOT times tokens a
+  step), and the one-row step 16.6 ms on native. Both Emmy lanes took 32-33 ms on 2026-10-25, before #1282.
+- **The 64-row chunk.** 54.1 ms at up to 4,096 positions and 60.3 ms up to 8,192; its kernels sum to 54.6 and 60.8 ms.
+  The table is that chunk against the one-row step, by what each launch reads. Weight bytes are the checkpoint's. A
+  launch that reads weights at the one-row rate, about 1.43 TB/s, is bound by that read; one that grows with rows is
+  bound by rows.
+
+  | launches | weights | one row | 64 rows | bound by |
+  |---|---|---|---|---|
+  | rotary cache store (one CTA) | | 0.06 ms | 11.9 ms | rows |
+  | attention, up to 4,096 positions | | 0.74 ms | 6.3 ms | rows x positions |
+  | Gated DeltaNet in projections and input norm | 4.03 GB | 3.14 ms | 12.7 ms | rows |
+  | Gated DeltaNet state and convolution pieces | | 1.35 ms | 4.5 ms | rows |
+  | `k_slice_unsqueeze_reduce_f670fb` | | | 2.9 ms | neither: also 2.9 ms at 16 rows |
+  | Gated DeltaNet out projection | 1.51 GB | 1.03 ms | 1.7 ms | weight read, then rows |
+  | MLP gate and up, Gated DeltaNet layers | 4.81 GB | 3.36 ms | 3.6 ms | weight read |
+  | MLP down, Gated DeltaNet layers | 2.41 GB | 1.68 ms | 2.7 ms | weight read, then rows |
+  | attention layers: q | 1.01 GB | 1.10 ms | 2.1 ms | rows |
+  | attention layers: MLP gate and up | 1.60 GB | 1.07 ms | 1.2 ms | weight read |
+  | attention layers: MLP down | 0.80 GB | 0.55 ms | 1.0 ms | weight read, then rows |
+  | attention layers: k, v, o | 0.67 GB | 0.98 ms | 1.2 ms | weight read |
+  | the rest | | 1.8 ms | 2.8 ms | |
+
+  One read of all 16.8 GB of the trunk's weights is 11.8 ms, whatever the width.
+- **The floor at a wider chunk.** Without rotary and attention the trunk takes 36.4 ms at 64 rows and 15.6 ms at one row
+  without the head: 15.3 ms a chunk plus 0.33 ms a row. Two points on different programs, so an estimate, and no program
+  above 64 rows was measured; the verify step sits above that line (19.7 against 16.3 ms, its head left out).
+
+  | rows | trunk | rotary at today's rate | attention, up to 4,096 positions | chunk | per token |
+  |---|---|---|---|---|---|
+  | 64 | 36.4 ms | 11.9 ms | 6.3 ms | 54.6 ms | 0.85 ms |
+  | 256 | 100 ms | 48 ms | 25 ms | 173 ms | 0.68 ms |
+  | 512 | 184 ms | 95 ms | 50 ms | 330 ms | 0.64 ms |
+
+  The attention term does not shrink with width: 1.09 s of a 7,680-token prompt at any width. A 7,680-token prompt at
+  512 rows with no rotary cost at all is 15 x 184 ms + 1.09 s = 3.85 s; stock's whole first token there is 0.63 s. Wider
+  chunks stop paying near 256 rows, because the row term is what is left.
+- **A prompt's tail.** A chunk takes only prompt tokens before the last, and the tail runs in 16-row chunks, then one
+  row at a time. A 256-token prompt is 3 chunks of 64, 3 of 16 and 16 single steps; 257 is 4 chunks and one step; 268 is
+  4 chunks and 12 steps. The 16-row chunk costs 121.6 ms at 7,600 positions against 54-60 ms for 64 rows, and 1.91 s at
+  197,600: 45% of it is attention at 7,600 and 96% at 197,600.
+- **Long prompts.** Native's first token at the two long prompts is 38-42% slower than on 2026-10-25, and the plugin's
+  and stock's did not move. At 197,632 tokens the 64-row chunks take 692 s: attention 544 s, all else 149 s (48 ms a
+  chunk, flat). Attention grows linearly from 6.3 ms a chunk to 344 ms, 6.7 ms a layer at 65,536 positions against the
+  4.6 ms measured before. The kernel's rows are the golden's, so the non-strict fork is not the cause. The commit that
+  moved it was not bisected.
+- **Accuracy.** The Emmy lanes score within one standard error of each other; stock 0.12-0.14 lower, as before.
+
 ## The recipe's native and plugin lanes on one RTX 5090 (2026-10-31)
 
 Both RTX 5090 lanes of `recipe.yaml`, deployed and benchmarked by `emmy deploy local` and `emmy bench --local` on one

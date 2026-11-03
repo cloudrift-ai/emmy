@@ -213,8 +213,8 @@ local-memory bytes beside register counts, making spills visible in the archived
 `run --bench --cold-cache` uses a separate evidence regime: `COLD_CACHE` is a golden input pin and a context-key field,
 independent of compiler flags. An omitted pin means hot-cache measurement. Import, lookup and export preserve that
 distinction, so a cold measurement cannot replace or price a hot one, or the reverse. Cold kernel timing uses one
-launch per event window after same-stream L2 eviction, outside the measured interval. It models weights read from
-memory, not the partial cache reuse of a served model.
+launch per event window after same-stream eviction of L2 and the instruction caches, outside the measured interval.
+It models weights and code read from memory, not the partial cache reuse of a served model.
 Cold mode times Emmy kernels only; peer Torch forwards retain internal cache reuse and are not comparable to
 per-kernel cold sums. Explicit peer timings and whole-row `--record` are refused. The correctness oracle, per-kernel
 DB writes, tuner candidates, and `--record-greedy` retain their usual roles. Cold windows always contain one replay;

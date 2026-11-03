@@ -219,7 +219,7 @@ fn main() -> Result<()> {
                     } else {
                         generator.step(capture, false)?.into_iter().collect()
                     };
-                    // The logits of each generated token's row: none for a prefill chunk.
+                    // The logits of each generated token's row: none for a chunk that generated none.
                     if let Some(path) = logits
                         && (!prefill || !tokens.is_empty())
                     {
