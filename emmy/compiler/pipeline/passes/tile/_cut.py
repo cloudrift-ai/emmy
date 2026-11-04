@@ -1881,6 +1881,16 @@ def _region_term(regions: tuple, body, stores: tuple) -> Fold:
     return Fold(operands=regions, lift=Lambda.closing(bound, body, tuple(dict.fromkeys(results))))
 
 
+def _over(regions: tuple, owners: set[int], stores: tuple) -> tuple:
+    """The operand terms a piece writing ``stores`` is built over, in the kernel's operand order: the regions at the
+    positions ``owners``, and each region those stores read only for a coordinate or a guard (a scatter's row), which
+    owns no output and rides with them (:func:`~emmy.compiler.ir.tile.ops.output_regions`)."""
+    reads = {name for store in stores for name in store.reads}
+    return tuple(
+        region for index, (region, _, owned) in enumerate(regions) if index in owners or (not owned and reads & set(region.exposes))
+    )
+
+
 def _region_piece(tile: TileOp, regions: tuple, tail, stores: tuple, split_consumed: bool, spelling: str, shapes: dict):
     """One output-owning piece: the regions' term, the outputs they produce, and the PARENT's free
     axes. The placement is deliberately the parent's and not the seam's own axes — the piece is a
@@ -2342,9 +2352,9 @@ def realize(match: Match, root: Node, seams, *, joins: tuple = ()) -> Graph:
         regions = output_regions(parent_fold, specs)
         order = [store.write.output for store in specs]
         for index, seam in chosen.items():
-            region, tail, stores = regions[index]
+            _, tail, stores = regions[index]
             stores = _in_source_order(stores, order)
-            piece = _region_piece(tile, (region,), tail, stores, split_consumed, seam.spelling, shapes)
+            piece = _region_piece(tile, _over(regions, {index}, stores), tail, stores, split_consumed, seam.spelling, shapes)
             reads = _buffer_reads(piece.op)
             add_output_piece(
                 fragment,
@@ -2353,8 +2363,8 @@ def realize(match: Match, root: Node, seams, *, joins: tuple = ()) -> Graph:
                 _piece_inputs(root, piece.op, tuple(buffer for buffer in all_buffers if buffer in reads)),
                 suffix=_PLACED,
             )
-        kept = [regions[index] for index in range(len(regions)) if index not in chosen]
-        consumer_stores = _in_source_order(tuple(store for _, _, stores in kept for store in stores), order)
+        kept = {index for index, (_, _, stores) in enumerate(regions) if index not in chosen and stores}
+        consumer_stores = _in_source_order(tuple(store for index in kept for store in regions[index][2]), order)
         # A composed decision may hand every output away; then there is no sibling piece to emit.
         if not consumer_stores:
             _fuse_sibling_producers(fragment, spelled, tile)
@@ -2362,7 +2372,7 @@ def realize(match: Match, root: Node, seams, *, joins: tuple = ()) -> Graph:
             return fragment
         consumer_outputs = {store.write.output for store in consumer_stores}
         consumer_fold = _region_term(
-            tuple(region for region, _, _ in kept), Body(tuple(stmt for _, tail, _ in kept for stmt in tail)), consumer_stores
+            _over(regions, kept, consumer_stores), Body(tuple(stmt for index in sorted(kept) for stmt in regions[index][1])), consumer_stores
         )
 
     consumer = TileOp(

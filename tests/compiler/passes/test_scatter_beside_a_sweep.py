@@ -39,10 +39,14 @@ def test_one_rows_scatter_keeps_its_store():
 @pytest.mark.xfail(
     raises=LoweringError,
     strict=True,
-    reason="at two rows the kernel lowering drops the scatter's store, so every row is declined (#1248)",
+    reason="at two rows the kernel lowering drops the fused kernel's scatter store, so every row is declined (#1248)",
 )
 def test_two_rows_scatter_keeps_its_store():
-    assert {"scatter", "softmax"} <= _written(_RankedSlots(), 2)
+    """Kept fused: the cut that hands each output its own kernel avoids the dropped store, and is offered beside this."""
+    from emmy.compiler.pipeline.search.pins import pinned_knobs
+
+    with pinned_knobs({"PLACE": "fuse"}):
+        assert {"scatter", "softmax"} <= _written(_RankedSlots(), 2)
 
 
 def test_the_native_router_keeps_both_scatter_stores_at_a_chunks_rows():
@@ -57,3 +61,24 @@ def test_the_native_router_keeps_both_scatter_stores_at_a_chunks_rows():
             self.weight = torch.nn.Parameter(torch.randn(8, 16))
 
     assert {"scatter", "scatter_1"} <= _written(router_module(Gate(), 3), 3, width=16)
+
+
+def test_the_native_rotary_cache_store_spreads_over_the_rows_and_heads_it_writes():
+    """Native generation's rotary program stores a chunk's keys and values into the cache at its rows' positions,
+    beside the rotated queries over another sweep, so the fused kernel binds no grid. The store's row is computed once
+    per row, above the cell it stores, and rides with the keys' and values' region: each output then owns a kernel of
+    its own, and every kernel spreads over more blocks than one, where the store used to sweep the whole chunk in
+    one."""
+    from emmy.compiler.ir.cuda.ir import CudaOp
+    from emmy.serving.native.prepare import rope_module
+
+    rows, heads, kv, head_dim, rotary, context = 16, 8, 4, 128, 64, 256
+    cache = torch.zeros(context, kv, head_dim, dtype=torch.float8_e4m3fn)
+    projections = (torch.zeros(rows, width * head_dim, dtype=torch.bfloat16) for width in (heads, kv, kv))
+    examples = (*projections, torch.zeros(1, dtype=torch.int64), torch.zeros(context, rotary), torch.zeros(context, rotary), cache, cache.clone())
+    graph = trace_module(rope_module(heads, kv, head_dim, rotary, rows, cache.dtype), examples)
+    lowered = Pipeline.build(CUDA_PASSES).run(graph, ctx=Context.from_target((12, 0)), db=None)
+    launches = {tuple(t.name for t in node.outputs): node.op.grid[0][0] for node in lowered.nodes.values() if isinstance(node.op, CudaOp)}
+
+    assert set(launches) == {("view_1",), ("scatter", "scatter_1")}
+    assert all(blocks > 1 for blocks in launches.values()), launches
