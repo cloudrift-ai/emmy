@@ -62,9 +62,13 @@ point: a replay costs a rebind instead of ~1M `schedule()` calls per model, and 
 machine-local tune DB a cold pick resolves through. Strict evidence keeps the golden honest — a fork no
 row decides raises `EvidenceError` naming the kernel, so a stale or partial golden fails loudly instead of quietly
 restoring the search. Regenerate with `python -m tests.serving.regen` when a shape changes or a new one joins a table.
-The regen does not cover `generation/test_vllm_plugin_gdn_gpu.py`: that test's float16 hybrid is not in `RUNNERS`, and
-its GDN layer programs' rows in the sm120 golden were recorded separately, by the same capture-and-complete method. A
-regen drops them, and the prior alone then picks kernels that stall that test's engine setup.
+The plugin's Gated DeltaNet engine tests serve a float16 hybrid that `RUNNERS` holds at their widths, so their engines
+compile from the golden strictly too. On those shapes the prior alone keeps each GDN program one kernel that runs as a
+single thread block, so the regen captures and completes them under the cut pins `CUTS` names, and the golden's
+routing rows record the cuts. Those shapes make the regen slow (hours of compiles at one worker), so its two halves
+also run apart: `--capture PATH` needs the card, `--complete PATH` runs GPU-free. Native generation's tiny GDN tests
+compile the same GDN programs, so they take the lane's golden as evidence beside the prior
+(`evidence_scope(strict=False)`).
 These unmeasured scalar schedules are scoped to the live card. Missing or stale schedules still fail strict evidence;
 they must be refreshed when compiler changes alter the traced kernels.
 

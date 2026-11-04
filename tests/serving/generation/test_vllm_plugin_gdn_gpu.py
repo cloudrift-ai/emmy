@@ -9,8 +9,8 @@ that replays whole-step CUDA graphs of its decode steps, and on a captured one w
 through the per-request path (``copies``): each layer fills its own page table and copies its rows into a step-wide
 tensor, where a request alone in its step otherwise takes the program's own output rows.
 
-The GDN kernels take their schedules from the serving tests' golden: an uncut GDN kernel takes minutes per call.
-The attention programs, which that golden does not hold in float16, compile cold.
+The engine compiles from the serving tests' golden alone, strictly: the hybrid is one of its runner shapes
+(``helpers.RUNNERS``), recorded with its GDN programs' root cut forced, since an uncut GDN kernel takes minutes per call.
 """
 
 import pytest
@@ -22,19 +22,9 @@ MAX_NEW = 8
 
 
 def _save_tiny_hybrid(path):
-    import torch
-    from transformers.models.qwen3_5.configuration_qwen3_5 import Qwen3_5TextConfig
-    from transformers.models.qwen3_5.modeling_qwen3_5 import Qwen3_5ForCausalLM
+    from tests.serving.helpers import QWEN3_5_HYBRID, qwen3_5_model
 
-    from tests.serving.helpers import QWEN3_5_TINY
-
-    torch.manual_seed(0)
-    # Qwen3.8's rotary scheme at a small head: a quarter of each head rotates, on three M-RoPE axes. vLLM then
-    # hands the model ``[3, T]`` positions and asks it for them per request.
-    rope = {"rope_type": "default", "rope_theta": 1e7, "partial_rotary_factor": 0.25, "mrope_section": [3, 3, 2], "mrope_interleaved": True}
-    tiny = QWEN3_5_TINY | {"vocab_size": 32000, "max_position_embeddings": 512, "head_dim": 64, "rope_parameters": rope}
-    config = Qwen3_5TextConfig(**tiny)
-    Qwen3_5ForCausalLM(config).eval().to(torch.float16).save_pretrained(path)
+    qwen3_5_model(**QWEN3_5_HYBRID).half().save_pretrained(path)
 
 
 @pytest.fixture(scope="module", params=["eager", "captured", "copies"])
@@ -51,15 +41,12 @@ def engine(request, tmp_path_factory):
     from vllm.distributed.parallel_state import cleanup_dist_env_and_memory
 
     import emmy.serving
-    from emmy.compiler.pipeline.search.golden import evidence_scope
-    from emmy.compiler.pipeline.search.pins import pinned_knobs
     from emmy.serving.vllm_model_gen import EmmyGenModel
     from tests.serving import helpers
 
     model_dir = tmp_path_factory.mktemp("tiny_qwen3_5_hybrid")
     _save_tiny_hybrid(str(model_dir))
     emmy.serving.register()
-    document = helpers.golden_document()
     with pytest.MonkeyPatch.context() as env:
         if request.param == "copies":
             env.setattr(EmmyGenModel, "_alone", staticmethod(lambda metadata, t: False))
@@ -68,7 +55,7 @@ def engine(request, tmp_path_factory):
         # The widths the golden's GDN rows cover: 16, 4 and 1.
         env.setenv("EMMY_GEN_DECODE_BUCKET", "4")
         env.setenv("EMMY_GEN_PREFILL_BUCKET", "16")
-        with pinned_knobs(document.shared_regime()), evidence_scope([document]):
+        with helpers.evidence_scope():
             llm = vllm.LLM(
                 model=str(model_dir),
                 tokenizer=TOKENIZER,
