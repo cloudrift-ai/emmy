@@ -15,8 +15,10 @@ under its step. Numbers marked "upstream" are 1Cat-vLLM's own reports.
 2026-11-02: two boots give the same text and the accuracy sets pass, but the correctness limits are not met, and the
 fork does not meet them against itself either. Step 5's done gate ran once against the fork and fails on every point:
 Emmy is 2.0-2.5x slower to the first token, 1.67x slower per token at one request, gives 0.58-0.68x the fork's total
-output, and runs out of memory under the 3 GiB per card margin. The next work is item 3 under "Next" in step 5. The
-minimums in step 2 and Qwen's license are still open with the owner.
+output, and runs out of memory under the 3 GiB per card margin. Item 3 under "Next" ran its two parts on 2026-11-03:
+Emmy now passes the margin, and one decode round gave 1.8% more output at eight requests and nothing measurable at
+one. Whether to continue, and with which lever, is the owner's call. The minimums in step 2 and Qwen's license are
+still open with the owner.
 
 ## What we know
 
@@ -556,7 +558,8 @@ Rounds, as with DeepSeek. Each round starts from a profile and ends with a boot 
      profile: fewer kernels for post8's small pieces (about 3 ms per token); splitting the hyper-connection mixers
      across ranks, which adds an exchange, so its gain is unmeasured; the one-token tail of a prefill, eager at 223 ms
      against the fork's 75, and the ~80-token step's host wait per layer. The done gate adds two facts to the choice:
-     prefill is further off than decode (2.0-2.5x against 1.67x), and memory fails the margin.
+     prefill is further off than decode (2.0-2.5x against 1.67x), and memory fails the margin. **Approved by the
+     owner on 2026-11-03 as the memory fix, then one decode round; both done the same day**, results below.
 - **Done gate, first run (2026-11-03).** Main `c497a0cc7`, the step 3 fork image, step 2's production shape on both
   sides. First tokens by `dbg/ttftr.py` (random token ids; the first of four runs primes), the rest by `vllm bench
   serve` (random prompts, greedy, `ignore_eos`, no warm-up request; one priming repeat, then three). Rounds in the
@@ -587,6 +590,83 @@ Rounds, as with DeepSeek. Each round starts from a profile and ends with a boot 
     symbolic path, and post8 at 12-13x its roofline floor (0.31-0.36 ms).
   - For the next run: `vllm bench serve` with `HF_HUB_OFFLINE` needs the tokenizer's snapshot path (the cache has no
     `main` ref), and a boot's time is best read from the log's timestamps, not from when polling started.
+- **Memory round (2026-11-03), item 3 part 1.** Measured per rank by PyTorch's allocation history with the Python
+  call site of every block, beside each process's device memory, on boots of both sides without the margin running
+  step 2's worst-case loads. At its peak (the four 32K prompts) Emmy held 26.5 GiB live per rank against the fork's
+  25.5 (its peak is the 64K prefill). Memory outside PyTorch is 1.35 GiB on both sides.
+
+  | Per rank, GiB | Fork | Emmy |
+  | --- | ---: | ---: |
+  | Routed experts | 17.64 | 16.13 |
+  | Dense weights: pre and post, routers, hosted attention and Gated DeltaNet | 2.88 | 3.16 |
+  | Token embedding and output head | 0.59 | 1.48 |
+  | Emmy's program buffers | | 1.04 |
+  | Other (rotary cache, small buffers) | 0.19 | 0.19 |
+  | Key/value pool | 2.50 | 2.50 |
+  | Prefill transients at the peak | 1.59 | 1.81 |
+
+  - The fork keeps a quarter of the token-embedding table and of the output head per rank; Emmy held the whole
+    table on every card (1.19 GiB). Of Emmy's buffers, 0.34 GiB was a dead copy of one layer's experts: the
+    fixed-slot programs' arena kept the build-time backing after every layer pointed its program at its own
+    tensors. Emmy's dense weights are 0.28 GiB more because every rank runs pre and post whole, where the fork
+    splits the hyper-connection mixers; the fork's experts are 1.5 GiB more because it keeps packed copies.
+  - The 2.6 GiB extra on one card in the done gate's run is PyTorch's cache of freed blocks, which it gives back
+    under pressure: live memory is the same on all four ranks at every snapshot, and with the margin held all four
+    ranks failed at the same 28.3 GiB.
+  - Fix: the table stays in pinned host memory and every row is read in place over the link (`SERVE_EMBED_GPU=0`;
+    its gather is the golden's `embed-sym` twin, 7.2 us at one row), and each layer's fixed-slot program is built
+    over the layer's own expert tensors. Weights and buffers after load go from 21.99 to 20.51 GiB per rank, the
+    peak from 26.55 to 25.07 GiB, below the fork's 25.47. Reading the table over the link costs 7 ms per 4,096-token
+    prefill chunk (about 0.4% of a prefill) and 9 us per decode step.
+  - Found on the first fixed boot: the table's device view was a tensor on device 0, so ranks 1 to 3 each opened a
+    CUDA context on rank 0's card (0.06-0.3 GiB each). The view now sits on the rank's own device.
+  - Gate: `margin.sh` with 3 GiB held on every card passes all of step 2's worst-case loads, with no out-of-memory
+    and three to nine cache releases per rank. Two boots give the same text, 16 of 16, and the same text as the
+    step 4 gate's boots, so the fix changes no numerics.
+- **Decode round (2026-11-03), item 3 part 2.** Profile of one decode step at one request after part 1, rank 0, GPU
+  time per step by phase in ms (`dbg/phases.py`, kernels sorted by the layer cycle they sit in); the fork's busy time
+  is 10.2 ms, Emmy's 17.6 ms:
+
+  | Phase | Fork | Emmy |
+  | --- | ---: | ---: |
+  | Pre and post: hyper-connection mixing, norms, shared expert | 2.8, of it 1.5 push exchanges | 8.0 (pre8 2.3, post8 5.7) |
+  | Routers and their top-k | 0.9 | 1.0 |
+  | Routed experts | 1.1 | 1.4 (fixed slots) |
+  | Glue between programs: copies, casts, the routed combine and placement | 0.5 | 2.5 |
+  | Hosted sublayers: projections, Gated DeltaNet, sparse attention | 3.4 | 3.5 |
+  | All-reduces of the layer outputs | 0.7 | 0.7 |
+
+  - Per layer Emmy runs 315 us in 48 kernels, the fork 164 us in 25. Post8 is 74 us over the fork's matching work:
+    its four big matmuls are 8-row tiles of 14-18 us each, where the fork reads the same shared expert with 1-row
+    GEMVs in 6-10 us and splits the hyper-connection down projections across ranks (6 us plus a 3 us push
+    all-gather), and its 13 small pieces take 47 us. Pre8 is 29 us over, and its fused mixer costs what post8's cut
+    one does (48 us per site either way). Neither has a lever that fits one round: the matmuls sit at the latency
+    floor their tiles reached in the earlier tunes, and splitting the mixers puts two exchanges inside pre and
+    post, which makes them three programs each and re-records every pre and post twin.
+  - The round took the glue: a hyper-connection layer's routed placement now writes into the next layer's decode
+    input (also that layer's post residual) and a hosted Gated DeltaNet layer writes into its post twin's input,
+    so 2.7 copies per layer drop out (128 kernels and 0.24 ms of copies per step). Each rank's own GPU work fell
+    by 0.2 ms per step, but the all-reduces now wait about as much longer for the slowest rank. A/B of the two
+    boots in A B B A order: one request 22.14 -> 22.03 ms per token (within noise), eight requests 150.0 -> 152.8
+    tok/s total output (+1.8%, every pair the same way). Same text as before the round, 16 of 16; GSM8K 126 of 128
+    with none at the cap, acceptance cases 27 of 28 in each mode.
+  - What is left, largest first: splitting the hyper-connection mixers across ranks, as above; a 1-row tier for
+    one request (the fork's GEMVs read at about 680 GB/s where the 8-row tiles reach about 380, but the narrowest
+    twin settles its family's layouts, so the 1-row twins would re-lay every pre and post twin); fewer post8
+    kernels, which needs the compiler to fold a split-K finalize into its consumer; and at eight requests the
+    fixed-slot tier runs the experts one row at a time.
+  - Done gate's decode points re-measured after both parts, the final tree against a fresh fork boot, rounds fork,
+    Emmy, Emmy, fork, three repeats each after a priming one. Both still fail:
+
+    | Point | Fork | Emmy, first run | Emmy now |
+    | --- | ---: | ---: | ---: |
+    | One request, 1K / 512, per token | 12.66-12.84 ms | 21.1-21.3 ms | 20.99-21.12 ms (1.65x slower) |
+    | 8 requests, 4K / 1K, total output | 279.8-282.3 tok/s | 162-165 tok/s | 162.8-164.9 tok/s (0.58x) |
+    | Step 2's worst-case loads with 3 GiB held per card | passes | out of memory | passes |
+
+  - For the next run: a server profiled once (`/start_profile`) stays about 5% slower (22.3 against 21.2 ms per
+    token on the same tree, and the fork 14.1 against 12.8), so profile on one boot and measure on another; the
+    round's A/B used two profiled boots, which keeps its comparison fair.
 - Gate, the definition of done. Both sides run step 2's production configuration: the same checkpoint, layout,
   context, key/value pool, concurrency, prefix-cache and MTP settings; fork, Emmy, Emmy, fork rounds; three repeats
   each:

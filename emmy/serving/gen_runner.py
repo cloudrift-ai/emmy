@@ -680,6 +680,7 @@ def _compile_split(
     import numpy as np
     import torch
 
+    from emmy.compiler.backend.binding import is_device_tensor
     from emmy.compiler.backend.cuda.program import CompiledProgram
     from emmy.compiler.backend.gpu_lock import gpu_lock
     from emmy.compiler.dtype import DataType, encode_bf16
@@ -781,7 +782,8 @@ def _compile_split(
             return encode_bf16(values)
         return values.astype(dt.np if dt is not None else dtype.np, copy=False)
 
-    feed = {n: _np_in(n, a) for n, a in zip(fed, build_args, strict=True)}
+    # A CUDA tensor is lent to the program as it is (``CompiledProgram.build_from_plan``).
+    feed = {n: a if is_device_tensor(a) else _np_in(n, a) for n, a in zip(fed, build_args, strict=True)}
     with gpu_lock():
         const_feed = _bind_plan_constants(plan, sources, dev_consts.arrays if dev_consts is not None else None)
         program = CompiledProgram.build_from_plan(plan, {**const_feed, **feed}, arena=arena)
@@ -1774,7 +1776,7 @@ class EmmyGenRunner:
                                 plan=stored(pre + "slots"),
                                 plan_cache=plan_cache,
                                 paged_inputs=tuple((n, paging[0]) for n in ind_names) if paging is not None else None,
-                                arena=slot_arena,
+                                # Only the plan is kept: off the arena, this build's memory goes with it.
                                 **stacked_kw,
                             )
                         reads[pre + "slots"] = loaded[pre + "slots"].reads if stored(pre + "slots") is not None else frozenset(read)
@@ -2623,13 +2625,15 @@ class EmmyGenRunner:
                         # A plan from a serving pack keeps the slots it was compiled with.
                         if {spec[2] for spec in slots["plan"].paged.values()} != ({m["paging"][0]} if "paging" in m else set()):
                             raise RuntimeError("the fixed-slot program was compiled for another expert budget than the device holds")
+                        # Unpaged, the instance is built over the layer's own expert tensors: lent at build, they take
+                        # no arena backing, which would otherwise hold a dead copy of one layer's experts.
                         prog, _ = _compile_split(
                             slots["wrapper"],
                             slots["examples"],
                             None,
                             slots["dtype"],
                             plan=slots["plan"],
-                            aux_examples=slots["aux_examples"],
+                            aux_examples=slots["aux_examples"] if "paging" in m else {**(slots["aux_examples"] or {}), **m["inputs"]},
                             weight_inputs=slots["weight_inputs"],
                             arena=slots["arena"],
                         )
@@ -2643,9 +2647,6 @@ class EmmyGenRunner:
                                 pager.declare(device(), name, homes, (m["num_experts"], m["bytes"][name], *m["paging"]))
                                 pager.bind(p.executor, name)
                             m["pager"] = pager
-                        else:
-                            for name, tensor in m["inputs"].items():
-                                p.alias_buffer(name, tensor)
                         m["slots"] = prog
                     torch.cuda.empty_cache()
         self._dev_ready = True
@@ -2905,6 +2906,17 @@ class EmmyGenRunner:
             raise RuntimeError(f"token width {t} exceeds static-only capacity {self.prefill_capacity}")
         return tuple(self._pre[layer].run_device_sym(ins))
 
+    def decode_input(self, site, layer, like):
+        """The first input buffer of ``layer``'s ``site`` (``"pre"`` or ``"post"``) decode twin as a ``[T, W]`` view
+        when a step shaped like ``like`` fits that twin, else ``None``. A tensor written there is the program's input
+        already, so its upload copies nothing."""
+        programs = self._pre_decode if site == "pre" else self._post_decode
+        if programs is None or layer >= len(programs) or programs[layer] is None or like.shape[0] > self._decode_bucket:
+            return None
+        p = programs[layer]
+        view = p.program.buffer_view(p.input_names[0])[: like.shape[0]]
+        return view if view.shape == like.shape and view.dtype == like.dtype else None
+
     def forward_layer_post_device(self, layer, attn_out, residual, gate=None, token_ids=None, lora=None):
         """Device twin of :meth:`forward_layer_post`: ``(attn_out, residual[, gate])`` CUDA → ``[T,H]``
         CUDA. Decode-bucketed / chunk / symbolic-routed like
@@ -2931,7 +2943,9 @@ class EmmyGenRunner:
             # layer's pre uploads the carrier at the residual dtype.
             mixed = mixed.to(self.residual_dtype)
             xn = xn.to(self._activation_dtype)
-            return place_routed_streams(mixed, self._moe_routed(moe, xn, token_ids), mix)
+            # Placed straight into the next layer's decode input, which is also that layer's post residual.
+            out = self.decode_input("pre", layer + 1, mixed)
+            return place_routed_streams(mixed, self._moe_routed(moe, xn, token_ids), mix, out=out)
         if len(outs) == 3:
             h, xn, shared = outs
         else:

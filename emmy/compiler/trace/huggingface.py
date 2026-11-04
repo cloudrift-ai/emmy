@@ -1231,14 +1231,17 @@ def hyper_connection_seam(block):
     return None
 
 
-def place_routed_streams(mixed, routed, mix):
+def place_routed_streams(mixed, routed, mix, out=None):
     """Close the hyper-connection MoE seam: ``mixed[T, hc·H] + mix[T, hc] ⊗ routed[T, H]``.
 
     The post program already placed the shared expert and mixed the streams (``post ⊗ shared +
     combᵀ · streams``); the routed combine runs in torch afterwards and lands on the streams through the
-    same per-stream ``post`` weights, which the program returns as ``mix``."""
+    same per-stream ``post`` weights, which the program returns as ``mix``. ``out``, a ``[T, hc·H]`` tensor of the
+    result's dtype, receives the sum: the next program's own input buffer, so its upload copies nothing."""
+    import torch
+
     t = routed.shape[0]
-    return mixed + (mix.unsqueeze(-1) * routed.unsqueeze(-2)).reshape(t, -1)
+    return torch.add(mixed, (mix.unsqueeze(-1) * routed.unsqueeze(-2)).reshape(t, -1), out=out)
 
 
 def _build_hyper_connection_split(block):
