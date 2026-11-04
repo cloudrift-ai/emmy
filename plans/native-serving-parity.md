@@ -170,9 +170,12 @@ What the session changes for the milestones:
   host and did not measure the width-16 program it was aimed at. Neither is a milestone: evidence joins on exact
   identity, which neither changes.
 - **#1290** (draft): the tiny GDN hybrid in the serving regen, capture and completion split apart, and the GPU
-  tests it unblocks. #1303 (merged) was one blocker; #1294 (merged) was aimed at the other — the regenerated golden
-  held, on 8 of its 10 pinned GDN programs, a single-CTA remainder that does not finish in 62 s. Its body predates
-  #1294, so whether that closes it is unmeasured. The switch (26) needs its tests green.
+  tests it unblocks. #1303 (merged) was one blocker. #1294 (merged) closed part of the other, measured 2026-11-02 on
+  a golden regenerated from main at #1310: the one-row programs run in 1.4 ms or less. The six chunk and verify
+  programs whose kernels still hung: five were closed on 2026-11-03 by measured cuts recorded into the lane golden,
+  program 44's only finishing set computes a wrong answer and stays out (the register has the numbers); the
+  drafted-generation GDN test and the plugin's speculative engine test pass on the card. The switch (26) needs its
+  tests green.
 - **#1299** (open): lands before milestone 2, the first record milestone. It changes the cold bench and the tune DB
   version, so records taken before it would measure a bench about to move. **#1298** (merged 2026-10-30) changed
   kernel sources (identities unchanged) beyond NVFP4 through its wider alignment proof. Neither is on the 5090
@@ -685,6 +688,52 @@ Open, compiler — the correctness items block 17:
   the remainder chain and only the pieces stay the prior's picks — and the 3-row verify program still keeps one
   piece of 1.3e8 trips per cell that way, so the pin alone does not close this. What moves the prior itself is a
   refit on measured cuts of such programs, or a feature that tells a piece's recompute from its size.
+  (2026-11-02, #1290) Measured on main at #1310 with its refit priors, on a regenerated lane golden, each kernel
+  replayed alone on an RTX 5090 (`emmy run --golden --kernel REF --realization ROW --bench`). #1294 and the refits
+  closed the one-row programs (1.4 ms at most), and the 3-row verify program stays at 34 us. Six of the 11
+  GDN programs held a kernel that hit the runtime's 62 s deadline, four of them on a single CTA: float32 width 4
+  `k_linear_matmul_mean_reduce_b7f3d1__place_045f77378c__place_aef6553056` (grid 16 x 128); bf16 width 4
+  `k_linear_matmul_mean_reduce_dcd742__place_668ca16ffb` (1 x 64) and width 16
+  `k_linear_matmul_mean_reduce_0658d5__place_80fdaa9e9c` (1 x 512); float16 width 4
+  `k_linear_matmul_mean_reduce_9a01eb__place_348985da70` (8 x 32), width 16
+  `k_linear_matmul_mean_reduce_206776__place_463fccf612` (1 x 512) and width 2
+  `k_linear_mean_reduce_0f91fc__place_08c61621a0#2` (1 x 256). So more CTAs alone do not close it.
+  `S_ext_serial_cell_work` ranks the 3.46e13 and 2.71e11 kernels at the top, but the 1.34e8 one hangs while a 6.6e7
+  one takes 205 ms.
+  (2026-11-03, #1290) Closed by measured cuts, on a local RTX 5090 with a fresh tune DB. The replay of each kernel
+  alone writes its `bench_fail` row; `EMMY_KNOBS=PLACE=cut run --golden --kernel REF --bench` repeated then cuts the
+  piece that hung the round before (the failure rule takes keep-whole off it), two to three rounds each: the pieces'
+  sets alone run in 34.3 ms (37), 4.4 ms (40), 60 us (41), 34.9 ms (43), 61 us (44) and 278 us (53). Program 44's
+  chain needed one seam named by hand (`PLACE@place_4af66936f3=cut`): the piece it cuts runs 63 s, which the first
+  launch's flat minute of watchdog grace lets through and the bench stage's 10 s budget then fails without naming
+  a kernel. The whole targets, recorded strictly (`--realization SEED --bench --record-greedy`, seeded from a
+  traced-only row on each root, which a record benches as no pinned comparison), run in 39.8 us (37), 39.2 ms (40),
+  146 us (41), 69.8 ms (43), 145 us (44) and 265 us (53); the 35 ms single-CTA kernels left in 40 and 43 are the
+  single-CTA item above. Program 37's whole-target compile does not take the chain its isolated piece measured (the
+  piece sits under the file's `g16a` split, and in the program the cut recorded on its `c8670e0392` piece spells no
+  offered arm), and once its descendants carried failure rows it kept re-hanging the split parent `045f77378c`; the
+  isolated loop on that parent converged in two rounds, after which one more whole-target round found the 40 us set.
+  Two tooling facts the records ran into: a strict record compiles the family's narrower twins unpinned from
+  evidence, and the lane's rows are proposals, so the records ran on a working copy carrying the lane's own 1 us
+  stand-in (`helpers.golden_document`) on every proposal, taken off again afterwards with the proposals of kernels a
+  recorded set no longer runs (a stand-in would outprice the measured set in the tests); and `run --golden --program
+  N --bench` segfaults in the bench worker on the width-4 chunk programs (the whole-layer Torch twin), where the
+  realization path benches them. Each recorded row replays alone within its measurement. On the card the
+  drafted-generation GDN test passes, the plugin's speculative engine test passes, and the plugin GDN engine test no
+  longer stalls but its 5-token case generates wrong tokens with program 44's recorded set (the hand-named seam's
+  chain, 145 us for a 16-row recurrence; the 1-token case, one real row, is right), so program 44's tree is back to
+  its previous rows and that test stalls on it as before. The compiler lacks a numeric check of a recorded
+  whole-layer set: a record's reference is the pick's own output, and the `--program` Torch twin segfaults; the
+  repository's runner-shape accuracy cases (`test_gen_runner_gdn_gpu.py`, skipped for this hang) miss the same four
+  cases on the previous golden as on this one, so they do not judge the cut sets. Next measured set for 44: the
+  chain without the hand seam, its 63 s piece cut by the failure rule once `EMMY_KERNEL_TIMEOUT_MS` puts the
+  first-launch grace under its run time. Merged with main at #1314 (59ae2eca1), the drafted GDN variant's last step
+  generated one token where the test expects three. Not #1313's prefill rule: its nine-token prompt is the eight-token
+  one and the attention model's first greedy token (3), and the hybrid's continuation of that prompt never repeats a
+  token within 24, so no draft stands. The nine-token prompt is now the eight-token one and the model's own first
+  greedy token (63 on the hybrid), whose tail repeats; the GDN variant's eight-token prompt is two whole 4-row chunks,
+  so it covers the chunk that ends the prompt, as the attention variant's nine-token prompt does. Both variants pass
+  on the card (33 min).
 - (2026-10-31, #1309) The prior reproduction gate cannot go green on a promoted RTX 5090 hardware golden by a
   refit, so 17 needs prior and export work first. The promotion of every recipe row, with both priors refit at
   the shipped counts (schedule 400 iterations, placement 1,500, no folds), left 20 nodes red, all placement, all
