@@ -247,17 +247,47 @@ What the session changes for the milestones:
    rows on the 27B, 64 and 4 on Qwen3.6), then the gate. Until those rows land, a strict-evidence bake of either
    recipe's native image refuses them; images already published keep their own server and pack.
 
-5. **Long-window prefill attention folds chunk by chunk.** The 64-row attention writes its scores and
-   probabilities to memory and runs the value expectation far below bandwidth: 4.6 ms a layer at 65,536 positions,
-   the ~351 s attention term of the 505 s first token at 197,632. The tower attention already runs the folded form
-   — the mask a term of the score's own contraction, the expectation folding chunk by chunk on tensor cores,
-   FlashAttention's shape — so spell the text prefill attention over the paged cache the same way and record the
-   route. Stage it without TMA: the batching stretch pages this cache, and a launch that reads a paged buffer
-   through a descriptor refuses to export. cp.async stays legal only under the page grain 19 recommends
-   (Decisions). Gate: at 65,536 positions at least 3x faster
-   per layer; the attention term of the 197,632-token first
-   token <= 117 s (its share of the two-term budget; today ~351 s); the full-window prompt's first token <= 450 s
-   before 9 widens the chunk; the 4,096-window cells unchanged. Needs 1.
+5. **Long-window prefill attention folds chunk by chunk.** The 64-row attention's recorded route is four pieces —
+   the score GEMM to memory, the online statistics, the probabilities to memory, the P·V GEMM — and runs the value
+   expectation far below bandwidth: 6.7 ms a layer at 65,536 positions, the 544 s attention term of the 698 s first
+   token at 197,632 (the 2026-11-01 numbers). The fold is the softmax twist's expectation channel on tensor cores,
+   FlashAttention's shape, which the tower's attention already takes as one kernel. The text attention never
+   reached it, for three reasons found on 2026-11-04 by pinning the tower's schedule on the twin off the card, all
+   three closed by #1321 (the attention twins of both recipes re-key; their rows record with this milestone's):
+   - the twin rounded the normalized probabilities to the model dtype before the value product, so the expectation
+     never joined the twist — the twin hands the FP32 probabilities to the product;
+   - the causal mask compared the key coordinate against `position + arange(rows)`, a constant the trace lifts to an
+     input, and loop normalization hoists that per-row term, with the fill constants, into a pointwise operand over
+     the row axis, which the chunk tier refused twice (slab operands only, a mask only as a coordinate `Select`) —
+     the twin takes both indices from the window's own coordinate and compares `key − row` against the position,
+     the tier reads a leaf of coordinate aliases and uniform values as uniform (`Fold.uniform_leaf`), spells the
+     `where` as the coordinate `Select` it lands with the position a uniform value in the predicate
+     (`ir/schedule/mask.py`), and bounds the stream at the block end plus the position at runtime;
+   - the chunk tier's multiplicand width followed the streamed value, so an FP8 cache asked for an fp8 fragment the
+     computed weight cannot be demoted into — a 1-byte value now takes the 16-bit cell, converting per element in
+     its gmem-direct fragment load (its slab declines, so an FP8 cache stages nothing).
+
+   The twin lowers to one tensor-core kernel at the symbolic window with either cache and matches its torch twin at
+   every position and window, on a one-wave launch and on a wide one
+   (`tests/compiler/passes/test_chunk_position_mask.py`). It reverses a numerics choice, as 2 does for the head:
+   the probabilities reach the value product in FP32 and the tensor-core cell rounds them once to bf16 or f16,
+   where the old route rounded them to the model dtype in memory; the gate takes 2's probe-token and GSM8K check.
+   What is left is the card, and two speed risks the fold alone does not answer:
+   - **One wave.** The 64-row fold at 24 query heads is 24 CTAs on a 170-SM card. A layer at 65,536 positions is
+     ~100 GFLOP, about 1 ms on the whole card and near today's 6.7 ms on a seventh of it; and the tier keeps the
+     stream whole on a one-wave launch, so the causal half is not skipped either. A `REDUCE=g<n>k` split across the
+     keys must be among the offers and recorded with the route; #1321 tested `w4x1` alone.
+   - **The FP8 cache runs unstaged.** Its keys and values are read gmem-direct, a convert per element, through no
+     shared memory and no cp.async; only the bf16 cache stages. If the unstaged form misses the gate, a staged FP8
+     slab is compiler work this milestone owns, since no other does.
+
+   Record the route in both recipes (the attention twins at every width, the split arm among the offers, the FP8
+   cache unstaged), then measure. Stage it without TMA: the batching stretch pages this cache, and a launch that
+   reads a paged buffer through a descriptor refuses to export. cp.async stays legal only under the page grain 19
+   recommends (Decisions). Gate: the attention term of the 197,632-token first token <= 117 s, its share of the
+   two-term budget — today 544 s, so ~4.6x per layer at 65,536 positions (a 3x fold leaves ~181 s and misses); the
+   full-window prompt's first token <= 450 s before 9 widens the chunk; the 4,096-window cells unchanged; the
+   probe-token logprob deltas and GSM8K as 2's gate. Needs 1.
 
 6. **Long-window decode attention: one cache read per key-value group, a combine that does not rescan the
    window.** The 27B step grows +48 ms from 7,680 to 197,632 positions; stock grows +4. Two named causes: the
@@ -483,10 +513,14 @@ The record and measurement milestones share rented x16 RTX 5090 sessions instead
 
 - Milestone 1's two protocol sessions (one per model) also take the nsys splits, the 27B first-token controls and
   8's per-kernel chunk profile.
-- 2, 3 and 5 record in one rental: the head rows, both recipes' rope rows (3 re-keys Qwen3.6's rope too), the
-  folded prefill attention route. 4's rows and gate ride the first rental that comes. 6 and 7 share a second: decode
-  attention at one and three rows for both models, then the width-3 GDN tune in the step. 9's wide-width records are
-  a third, after 8's floor is read.
+- 2, 3 and 5 record in one rental, and it comes first: #1321 re-keys every attention twin of both recipes (the 27B's
+  attend 1/3/16/64, Qwen3.6's attend 1/3/4/64) on top of #1313's chunk kernels, so strict native export refuses
+  until that rental records attention at every width — before 4's gate and before any native measurement. It
+  records the head rows, both recipes' rope rows (3 re-keys Qwen3.6's rope too) and the folded prefill attention
+  route with its split arm. 6's per-key-value-head re-spell re-keys the decode attention this rental records: land
+  6's module change before it, or accept recording decode attention twice. 6 and 7 share a second: decode attention
+  at one and three rows for both models, then the width-3 GDN tune in the step. 9's wide-width records are a third,
+  after 8's floor is read.
 - Qwen3.6's 13 and 14 share one rental; 15's overlap check rides it when the runtime lands in time, else it takes a
   short rental of its own before 16's gate session.
 - 10 and 16 are each a fresh protocol session per model (the bar requires one session, all columns).
@@ -594,8 +628,9 @@ measured rows it may be too slow to use, and onboarding it is its own task, not 
   per-thread addresses cannot resolve a page per element, and a symbolic extent always counts as several. What remains
   there is gmem-direct and the plain compute fill. Today this binds little: of the 27B's 23 attention rows 22 are
   unstaged and one is `d2/smem-async`, and Qwen3.6's 19 split the same way, 18 and one. It binds the folded attention
-  of 5: a compute fill has no gmem-direct form and its stored peers copy through cp.async, so over several pages that
-  form may lose its speed or have no legal schedule. Nobody has tried it. So 19 recommends one page per request, 20
+  of 5 over a bf16 cache, which stages through cp.async, so over several pages that form may lose its speed or have
+  no legal schedule; the fold over an FP8 cache reads gmem-direct since #1321, which paging does not touch, at a
+  speed nobody has measured. So 19 recommends one page per request, 20
   makes the capped window count as one page, 5 and 6 stay off TMA, and batched attention over N regions is new work in
   21. If 13's renderer change lands, cp.async opens up over several pages as well.
 - **Prefix caching stays out** of every comparison and out of the batching scope, as the measured sessions ran
@@ -789,7 +824,8 @@ this plan's own: the stored `gdn3rows` row stays whole until 17 re-records it (#
   to pass, 15 holding it at the window.
 - **The 27B's long-prompt first token needs the attention fold more than the widening.** The two-term budget in
   State: folding alone leaves ~271 s at 197,632, widening alone ~370 s, both ~136 s — the bar with no slack. If
-  5's folded route misses its 3x, the cell cannot be saved by width; if the wide-width kernels refuse to amortize
+  5's folded route misses its ~4.6x (the 2026-11-01 budget), the cell cannot be saved by width; if the wide-width
+  kernels refuse to amortize
   (the paged gate-up precedent says schedules can refuse a new shape), the 256- and 7,680-token cells miss
   instead. 8 measures the chunk before 9 widens it, and 10 puts the result in front of the owner either way.
 - **Long-window decode sits near the memory floor.** After the shared cache read (6), the budget between native
