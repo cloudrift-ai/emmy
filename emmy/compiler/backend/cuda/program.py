@@ -140,7 +140,8 @@ def device_view(pinned):
     """Address a pinned (page-locked) host tensor as a CUDA tensor of the same shape and dtype:
     under unified addressing a mapped host allocation is reachable from the device at its own
     address, so a kernel gathers from it over PCIe with no copy. ``pinned`` must stay alive as
-    long as the view; the view owns nothing."""
+    long as the view; the view owns nothing. The view is on torch's current device: on a rank of a tensor-parallel
+    group, a view on device 0 would open a context there and run its ops on another rank's card."""
     import torch  # noqa: PLC0415
 
     if not pinned.is_pinned() or not pinned.is_contiguous():
@@ -150,7 +151,7 @@ def device_view(pinned):
         raise RuntimeError("this platform does not map host allocations into the device address space")
     np_dtype = np.dtype(str(pinned.dtype).removeprefix("torch."))
     capsule = emmy_runtime.device_tensor_capsule(
-        pinned.data_ptr(), list(pinned.shape), _DLPACK_CODES[np_dtype.kind], np_dtype.itemsize * 8, 0
+        pinned.data_ptr(), list(pinned.shape), _DLPACK_CODES[np_dtype.kind], np_dtype.itemsize * 8, torch.cuda.current_device()
     )
     return torch.from_dlpack(capsule)
 
