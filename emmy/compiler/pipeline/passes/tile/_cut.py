@@ -2011,14 +2011,10 @@ def _join_pieces(fragment: Graph, joins: tuple, spelled: dict[str, str], parent:
 
 
 def _finished(fragment: Graph, spelled: dict[str, str], parent: TileOp, joins: tuple) -> Graph:
-    """The cut fragment once every piece is in it: the pieces nothing reads dropped, the independent workspace
-    producers fused, each joined pair spliced into one.
-
-    A chosen seam can lie inside another chosen seam's piece that computes it in place, and then nothing reads its
-    workspace: a cone under one occurrence of a contraction whose producer is built from another occurrence (only a
-    member that spans the contraction's whole space can build it). Its piece is dropped before the fusion, which would
-    otherwise splice it into a piece something reads, leaving a buffer written and never loaded: the dead scratch the
-    backend refuses."""
+    """``fragment`` with the pieces nothing reads dropped, then its sibling producers fused and its joined pairs
+    spliced. A chosen seam goes unread when another chosen seam's piece computes it in place (a cone under one
+    occurrence of a contraction whose piece is built from another); fused into a piece something reads, it was a
+    buffer no launch reads, which the backend refuses as dead scratch."""
     fragment.remove_orphans()
     _fuse_sibling_producers(fragment, spelled, parent)
     _join_pieces(fragment, joins, spelled, parent)
