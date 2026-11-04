@@ -11,7 +11,7 @@ from emmy import gpu as gpu_registry
 from emmy.recipe.lifecycle import ONBOARDING_TAG, UNTESTED_TAG, recipe_is_runnable, validate_recipe_tags
 from emmy.recipe.matrix import build_override, expand_matrix
 from emmy.recipe.recipe import deep_merge, validate_modality_input
-from emmy.recipe.types import LLMConfig
+from emmy.recipe.types import MAX_FULL_CONTEXT_LATENCY_S, LLMConfig
 
 HF_ID = re.compile(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$")
 DEPLOYMENT_FIELDS = frozenset({"deploy.gpu", "deploy.gpu_count"})
@@ -86,7 +86,8 @@ def _inventory_deployments(config: dict, model_id: str) -> list[dict[str, object
 
     The input modalities travel with the deployment: a declared modality is a serving claim
     about one resolved variant (its engine flags must keep that input path on), and a recipe's
-    entries may differ, a text-only lane beside one that keeps the vision tower.
+    entries may differ, a text-only lane beside one that keeps the vision tower. So does the
+    full-context latency: it is measured on one entry, and is null until it was.
     """
     variants = _resolved_variants(config)
 
@@ -109,12 +110,21 @@ def _inventory_deployments(config: dict, model_id: str) -> list[dict[str, object
 
         context_length = llm.get("context_length")
         valid_context = isinstance(context_length, int) and not isinstance(context_length, bool) and context_length >= 1
+        latency = llm.get("full_context_latency_s")
+        if latency is not None and (not isinstance(latency, int) or isinstance(latency, bool) or latency < 1):
+            raise ValueError(f"Recipe {model_id}: engine.llm.full_context_latency_s must be a whole number of seconds, got {latency!r}")
+        if latency is not None and latency > MAX_FULL_CONTEXT_LATENCY_S:
+            raise ValueError(
+                f"Recipe {model_id}: engine.llm.full_context_latency_s {latency} exceeds the {MAX_FULL_CONTEXT_LATENCY_S} s"
+                " a deployed request has to answer; lower engine.llm.context_length and measure again"
+            )
         deployments.append(
             {
                 "gpu": gpu,
                 "gpu_count": gpu_count,
                 "gpu_memory_utilization": fraction,
                 "context_length": context_length if valid_context else None,
+                "full_context_latency_s": latency,
                 "input_modalities": list(input_modalities),
             }
         )

@@ -138,15 +138,25 @@ compare configurations, add an experiment; then fold the winner back into the re
   disabling the tower. The claim belongs to a deployment entry: a matrix entry declares it for itself as
   `model.input_modalities: [[text, image]]` when the recipe's other lanes stay text-only, and the catalog exports it per
   deployment, so it is a claim the smoke test and qualification of that entry must cover.
+- **The full-context latency**, once measured. `engine.llm.full_context_latency_s` is the slowest of three
+  non-streaming requests that fill the context, sent one at a time, in whole seconds, and at most the 290 seconds a
+  deployed request has before Relay abandons it; the protocol is in
+  [`emmy/recipe/ARCHITECTURE.md`](../emmy/recipe/ARCHITECTURE.md). It measures one deployment entry, so it sits on
+  the matrix entry it was measured on, and the catalog exports it per deployment as the reference Relay sets its
+  non-streaming request timeout from. Leave it unset rather than estimate it.
 
 ## What limits the values you can pin
 
-Two ceilings decide most of a serving config, and both are measured rather than derived:
+Three ceilings decide most of a serving config, and all are measured rather than derived:
 
 - **KV capacity caps context.** Weights come off the card first; whatever remains is the KV pool, shared across
   concurrent requests. vLLM refuses to boot when `max-model-len` exceeds it. For gemma-4-12B FP16 on a 32 GB 5090
   the measured pool is ~25,131 tokens — so its full native context does not fit, and the recipe's context is a
   choice about how many full-length sequences you want resident at once.
+- **Request time caps context too.** A deployed request has 290 seconds before Relay abandons it, and a non-streaming
+  request that fills the context is answered only after its whole prefill and generation. When the full-context
+  latency lane runs past that, the context is halved until the request fits, however much KV the card has: a context
+  the platform cannot answer a request in within that time is not one it serves.
 - **The prefill-chunk cap is a compiler limit.** `--max-num-batched-tokens` rides the 4096 dynamic-dim cap (plus
   bucket-sized rider headroom); long inputs stream through chunked prefill under it. Context length is not bounded
   by the compiler — RoPE and paged KV are vLLM-owned on this path.
@@ -157,8 +167,9 @@ Two ceilings decide most of a serving config, and both are measured rather than 
   turns it on owes a quality measurement taken with it on. `recipes/GLM-4.5-Air-EXL3` is the case where nothing fits
   without it.
 
-Both numbers come from the headroom sweep in the release workflow, which is why adding a model means running that
-sweep rather than guessing (`release-serving-image` skill, Step 4).
+The capacity numbers come from the headroom sweep in the release workflow, which is why adding a model means running
+that sweep rather than guessing (`release-serving-image` skill, Step 4); the time bound comes from the full-context
+latency lane the onboarding skill runs.
 
 ## Adding a model
 

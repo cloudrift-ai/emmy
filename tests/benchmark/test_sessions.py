@@ -5,6 +5,7 @@ import copy
 import json
 import time
 
+import httpx
 import pytest
 
 from emmy.benchmark.sessions import initial_length, measure
@@ -32,7 +33,7 @@ async def test_sessions_append_generated_tokens_and_keep_worker_affinity(caplog)
             return self.payload
 
     class Client:
-        async def post(self, url, json, headers=None):
+        async def post(self, url, json, headers=None, timeout=None):
             await asyncio.sleep(0)
             requests.append((copy.deepcopy(json), headers))
             return Response(
@@ -73,6 +74,80 @@ async def test_sessions_append_generated_tokens_and_keep_worker_affinity(caplog)
     assert before <= rows[0]["started_at_unix_s"] <= rows[-1]["ended_at_unix_s"] <= after
     assert len([row for row in rows if "usage" in row]) == 6
     assert all(row["usage"]["prompt_tokens_details"]["cached_tokens"] == 7 for row in rows if "usage" in row)
+
+
+def _one_call_config(output_tokens):
+    return {
+        "model": "test",
+        "base_url": "http://test",
+        "dp_size": 1,
+        "benchmark": {
+            "session_calls": 1,
+            "num_prompts": 3,
+            "random_input_len": 20,
+            "random_output_len": output_tokens,
+            "session_new_tokens": 0,
+            "max_concurrency": 1,
+            "session_affinity": False,
+            "random_prefix_len": 0,
+        },
+    }
+
+
+class _PlainCompletion:
+    """An OpenAI-compatible server that reports usage but neither token IDs nor cached-token details."""
+
+    def __init__(self, completion_tokens):
+        self.completion_tokens = completion_tokens
+        self.requests = []
+
+    async def post(self, url, json, headers=None, timeout=None):
+        await asyncio.sleep(0)
+        self.requests.append(json)
+        return self
+
+    def raise_for_status(self):
+        pass
+
+    def json(self):
+        return {"choices": [{"finish_reason": "length"}], "usage": {"prompt_tokens": 20, "completion_tokens": self.completion_tokens}}
+
+
+async def test_a_one_call_session_is_one_non_streaming_request_timed_end_to_end(caplog):
+    """The full-context latency lane: no prompt grows, so neither token IDs nor cached-token usage is needed."""
+    server = _PlainCompletion(completion_tokens=2)
+    with caplog.at_level("INFO"):
+        await measure(_one_call_config(2), server, list(range(1, 100)))
+
+    assert [(len(body["prompt"]), body["max_tokens"], body["ignore_eos"]) for body in server.requests] == [(20, 2, True)] * 3
+    rows = [row for row in (json.loads(record.message) for record in caplog.records) if "usage" in row]
+    assert [(row["turn"], row["prompt_length"]) for row in rows] == [(0, 20)] * 3
+    assert all(row["end_s"] >= row["start_s"] for row in rows)
+
+
+async def test_a_session_call_that_generates_fewer_tokens_than_requested_fails():
+    with pytest.raises(ExceptionGroup) as info:
+        await measure(_one_call_config(2), _PlainCompletion(completion_tokens=1), list(range(1, 100)))
+    assert "requested number of tokens" in str(info.value.exceptions[0])
+
+
+class _StalledCompletion(_PlainCompletion):
+    """A server whose generation outlasts the client's request timeout."""
+
+    async def post(self, url, json, headers=None, timeout=None):
+        self.requests.append(timeout)
+        raise httpx.ReadTimeout("timed out")
+
+
+async def test_a_session_request_that_runs_past_the_request_timeout_fails_the_run():
+    """The full-context latency lane fails on the request that misses the bound instead of waiting out the client's hour."""
+    config = _one_call_config(2)
+    config["benchmark"]["session_request_timeout_s"] = 290
+    server = _StalledCompletion(completion_tokens=2)
+    with pytest.raises(ExceptionGroup) as info:
+        await measure(config, server, list(range(1, 100)))
+    assert "session_request_timeout_s (290 s)" in str(info.value.exceptions[0])
+    assert set(server.requests) == {290}
 
 
 async def test_recipe_session_options_reach_the_remote_client_with_unique_repeat_seeds():
@@ -126,7 +201,7 @@ async def test_new_sessions_use_the_free_rank_when_an_earlier_review_is_slow():
             }
 
     class Client:
-        async def post(self, url, json, headers=None):
+        async def post(self, url, json, headers=None, timeout=None):
             if len(json["prompt"]) == 9:
                 admitted_ranks.append(headers["X-data-parallel-rank"])
                 if len(admitted_ranks) == 1:
