@@ -824,10 +824,13 @@ class Fold:
         return tuple(out)
 
     def uniform_leaf(self, axes: frozenset[str]) -> bool:
-        """Whether this leaf term exposes nothing but cell-uniform values and bare coordinates of ``axes``: literals,
-        loads indexed by no coordinate, and ``Let`` aliases of those coordinates. Such an operand adds no dependence
-        outside a term evaluated over ``axes`` — a mask over them reads it — and a tier that evaluates per fragment
-        folds the aliases into its coordinate predicates and reads the rest once."""
+        """Whether this operand varies over nothing the term it feeds does not evaluate over: an edge with no free axis,
+        or a leaf over ``axes`` alone whose body holds nothing but literals, loads indexed by no coordinate, and
+        ``Let`` aliases of those coordinates. Such an operand adds no dependence outside a term evaluated over
+        ``axes`` — a mask over them reads it — and a tier that evaluates per fragment folds the aliases into its
+        coordinate predicates and reads the rest once."""
+        if not self.free_axes:
+            return True
         if self.operands or self.base is not None or not self.free_axes <= axes:
             return False
         for stmt in self.lift.body:

@@ -1525,7 +1525,8 @@ def _mask_key_bounds(
             continue
         if affine[1].free_vars():
             # A uniform anchor — a position read from memory — makes the shift a runtime value, so the sign test
-            # below runs at runtime too: a lead below zero stops nothing, a lag above zero starts nothing.
+            # below runs at runtime too, clamped rather than dropped: a lead below zero stops at the block end, a
+            # lag above zero starts at the block base, where every key past the edge is masked for every row.
             runtime: Expr = BinaryExpr("-", Literal(0, "int"), affine[1].simplify(SimplifyCtx.empty()))
             if predicate.op in (">", ">="):
                 lead_expr = BinaryExpr("-", runtime, Literal(1, "int")) if predicate.op == ">=" else runtime

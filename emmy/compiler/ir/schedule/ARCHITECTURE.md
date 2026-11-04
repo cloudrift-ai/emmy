@@ -242,9 +242,10 @@ PREFIX — the carrier's lift cut to its score role, which is where an SDPA mask
 loader needs a gmem address: whatever supplies the pivot, and the streamed value. The prefix's remaining leaves are
 read once ahead of the chunk loop, so a mask's fill / zero constants may be a computed pair with no slab at all, and
 its statements may include a `Select` on the score fragment's OWN coordinates, which the emitter evaluates per element.
-Both were blanket refusals, and either one sent a masked attention target to the scalar tier whole. A leaf that
-exposes nothing but literals, loads indexed by no coordinate and `Let` aliases of the carrier's own coordinates is
-uniform to the tier (`Fold.uniform_leaf`): the aliases fold into the mask's predicate and the rest is read once. That
+Both were blanket refusals, and either one sent a masked attention target to the scalar tier whole. An operand with
+no free axis is uniform, as it always was, and so is a leaf that exposes nothing but literals, loads indexed by no
+coordinate and `Let` aliases of the carrier's own coordinates (`Fold.uniform_leaf`): the aliases fold into the mask's
+predicate and the rest is read once. That
 is how a mask the loop lowering hoisted over the row axis — the row alias beside the position — keeps the carrier
 bilinear and the chunk tier offered.
 
