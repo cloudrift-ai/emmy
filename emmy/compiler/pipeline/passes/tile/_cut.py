@@ -1961,13 +1961,17 @@ def _fuse_sibling_producers(fragment: Graph, spelled: dict[str, str], parent: Ti
     producer returns to Tile IR without a schedule, so an output-owning cut can separate it.
     ``spelled`` is each workspace buffer's seam; the fused producer is the piece of the seam set its
     members produced, and carries that set's token.
+
+    A producer nothing reads is dropped first. A chosen seam goes unread when another chosen seam's piece computes it
+    in place (a cone under one occurrence of a contraction whose piece is built from another); fused into a piece
+    something reads, it was a buffer no launch reads, which the backend refuses as dead scratch.
     """
+    fragment.remove_orphans()
     workspace = set(spelled)
     by_dependencies: dict[frozenset[str], set[str]] = {}
     for buffer in spelled:
-        node = fragment.producer(buffer)
-        if node is None:
-            continue  # nothing read it, and :func:`_finished` dropped its piece
+        if (node := fragment.producer(buffer)) is None:
+            continue  # dropped above
         if any(tensor.dtype.logical_elems > 1 for tensor in node.outputs):
             continue  # the Loop splicer cannot remove a packed tensor's storage relation
         by_dependencies.setdefault(frozenset(set(node.inputs) & workspace), set()).add(node.id)
@@ -2004,21 +2008,10 @@ def _join_pieces(fragment: Graph, joins: tuple, spelled: dict[str, str], parent:
     for producer, region in joins:
         workspace = next(buffer for buffer, spelling in spelled.items() if spelling == producer.spelling)
         if (node := fragment.producer(workspace)) is None:
-            continue  # the workspace piece was dropped unread: the region's piece stands alone
+            continue  # nothing read the workspace and its piece was dropped: the region's piece stands alone
         _, stores = region.owned
         members = {node.id, fragment.producer(f"{stores[0].write.output}{_PLACED}").id}
         _splice_pieces(fragment, members, spelled, parent, joined_spelling(producer, region))
-
-
-def _finished(fragment: Graph, spelled: dict[str, str], parent: TileOp, joins: tuple) -> Graph:
-    """``fragment`` with the pieces nothing reads dropped, then its sibling producers fused and its joined pairs
-    spliced. A chosen seam goes unread when another chosen seam's piece computes it in place (a cone under one
-    occurrence of a contraction whose piece is built from another); fused into a piece something reads, it was a
-    buffer no launch reads, which the backend refuses as dead scratch."""
-    fragment.remove_orphans()
-    _fuse_sibling_producers(fragment, spelled, parent)
-    _join_pieces(fragment, joins, spelled, parent)
-    return fragment
 
 
 def realize(match: Match, root: Node, seams, *, joins: tuple = ()) -> Graph:
@@ -2369,7 +2362,9 @@ def realize(match: Match, root: Node, seams, *, joins: tuple = ()) -> Graph:
         consumer_stores = _in_source_order(tuple(store for _, _, stores in kept for store in stores), order)
         # A composed decision may hand every output away; then there is no sibling piece to emit.
         if not consumer_stores:
-            return _finished(fragment, spelled, tile, joins)
+            _fuse_sibling_producers(fragment, spelled, tile)
+            _join_pieces(fragment, joins, spelled, tile)
+            return fragment
         consumer_outputs = {store.write.output for store in consumer_stores}
         consumer_fold = _region_term(
             tuple(region for region, _, _ in kept), Body(tuple(stmt for _, tail, _ in kept for stmt in tail)), consumer_stores
@@ -2399,7 +2394,9 @@ def realize(match: Match, root: Node, seams, *, joins: tuple = ()) -> Graph:
         _piece_inputs(root, consumer.op, tuple(buffer for buffer in all_buffers if buffer in reads)),
         suffix=_PLACED,
     )
-    return _finished(fragment, spelled, tile, joins)
+    _fuse_sibling_producers(fragment, spelled, tile)
+    _join_pieces(fragment, joins, spelled, tile)
+    return fragment
 
 
 def _reindexed(body: Body, mapping: dict) -> Body:
