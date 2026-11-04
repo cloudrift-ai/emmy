@@ -247,7 +247,12 @@ no free axis is uniform, as it always was, and so is a leaf that exposes nothing
 coordinate and `Let` aliases of the carrier's own coordinates (`Fold.uniform_leaf`): the aliases fold into the mask's
 predicate and the rest is read once. That
 is how a mask the loop lowering hoisted over the row axis — the row alias beside the position — keeps the carrier
-bilinear and the chunk tier offered.
+bilinear and the chunk tier offered. An alias is any `Let` over the coordinates and the cell-uniform names, so a key
+split's piece, whose sliced lift binds the absolute key as the partition times the slice length plus the slice
+coordinate, folds that expression into its predicate. The cell-uniform names (`cell_uniform`) are what the carrier's
+uniform leaves expose, the coordinates the launch fixes per CTA — the contraction's batch axes and a key split's
+partition — and the symbolic extents, which is what lets the gate and the emission read a split piece's mask at
+all: before, the partition coordinate in a sliced mask refused every causal split off the tier.
 
 A `wgmma` atom is a 16×8 warp sub-cell like `mma_m16n8k16`, but its instruction is issued by four M-adjacent warps
 over 64 rows and N columns, so `_wgmma_refusal` narrows the row it can hold: a `w<4k>x1` warp grid (the unit decode

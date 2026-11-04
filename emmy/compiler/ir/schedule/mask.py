@@ -3,28 +3,48 @@
 The SDPA decomposition spells a causal or banded mask as a coordinate ``Select`` whose predicate compares the key and
 the row; a program that masks with ``where(key - row <= position, 0, fill)`` lowers to a comparison and a ``where``
 over values that alias the coordinates (``Let v = a1``), and the uniform values it reads. Both are the same mask:
-``select_masks`` spells the second as the first, so the tier's gate and its emission read one form.
+``select_masks`` spells the second as the first, so the tier's gate and its emission read one form. A key split's
+piece reads the absolute key through its partition (``Let v = ks * b + a2``): an alias is any ``Let`` over the
+coordinates and the uniform values, folded into the predicate as the expression it binds.
 """
 
 from __future__ import annotations
 
 from emmy.compiler.ir.expr import BinaryExpr, Expr, Literal, Var
+from emmy.compiler.ir.pure.fold import Fold
 from emmy.compiler.ir.stmt import Affine, Assign, Let, Select, SelectBranch, Stmt
 
 _COMPARE = {"less": "<", "less_equal": "<=", "greater": ">", "greater_equal": ">="}
 _NEGATE = {"<": ">=", "<=": ">", ">": "<=", ">=": "<"}
 
 
-def coordinate_aliases(stmts, axes: frozenset[str] | set[str]) -> dict[str, str]:
-    """``{name: axis}`` for every ``Let`` in ``stmts`` that binds a bare coordinate of ``axes``."""
-    return {s.name: s.value.name for s in stmts if isinstance(s, Let) and isinstance(s.value, Var) and s.value.name in axes}
+def cell_uniform(tile, node: Fold, coord_axes: frozenset[str] | set[str]) -> frozenset[str]:
+    """The names one value serves every cell of a CTA: what the carrier's uniform leaves expose, the coordinates
+    the launch fixes per CTA — the contraction's batch axes and a key split's partition — and the symbolic extents
+    of ``tile``'s axes."""
+    contraction = node.as_contraction()
+    per_cta = node.free_axes - contraction.left_axes - contraction.right_axes
+    extents = {name for axis in tile.axes for name in axis.extent.expr.free_vars()}
+    leaves = {name for edge in node.operands if edge.uniform_leaf(frozenset(coord_axes)) for name in edge.exposes}
+    return frozenset(leaves | per_cta | extents)
 
 
-def select_masks(stmts, aliases: dict[str, str], uniform: set[str] | frozenset[str], axes: frozenset[str] | set[str]) -> list[Stmt] | None:
+def coordinate_aliases(stmts, axes: frozenset[str] | set[str], uniform: frozenset[str] | set[str] = frozenset()) -> dict[str, Expr]:
+    """``{name: expression}`` for every ``Let`` in ``stmts`` that binds an expression over a coordinate of ``axes``
+    and the uniform values — a bare coordinate, or a split piece's absolute key."""
+    return {
+        s.name: s.value
+        for s in stmts
+        if isinstance(s, Let) and s.value.free_vars() & set(axes) and s.value.free_vars() <= set(axes) | set(uniform)
+    }
+
+
+def select_masks(stmts, aliases: dict[str, Expr], uniform: set[str] | frozenset[str], axes: frozenset[str] | set[str]) -> list[Stmt] | None:
     """``stmts`` with every ``where`` over a comparison of coordinates and uniform values spelled as a coordinate
     ``Select``, the coordinate aliases it reads folded into the predicate — or ``None`` when a coordinate reaches a
     statement no ``Select`` can carry, which no per-fragment evaluation can place."""
-    coords: dict[str, Expr] = {name: Var(axis) for name, axis in aliases.items()}
+    coords: dict[str, Expr] = dict(aliases)
+    aliased = {name for expr in aliases.values() for name in expr.free_vars() if name in axes}
     scalars: dict[str, Expr] = {}
     predicates: dict[str, BinaryExpr] = {}
 
@@ -41,8 +61,8 @@ def select_masks(stmts, aliases: dict[str, str], uniform: set[str] | frozenset[s
     for stmt in stmts:
         if isinstance(stmt, Let) and stmt.name in coords:
             continue  # the alias folds into every predicate that reads it
-        if isinstance(stmt, Let) and isinstance(stmt.value, Literal):
-            scalars[stmt.name] = stmt.value
+        if isinstance(stmt, Let) and (isinstance(stmt.value, Literal) or stmt.value.free_vars() <= set(uniform)):
+            scalars[stmt.name] = stmt.value  # a literal, or a value over uniform names alone (a symbolic extent)
             out.append(stmt)
             continue
         reads = set(stmt.deps())
@@ -71,7 +91,7 @@ def select_masks(stmts, aliases: dict[str, str], uniform: set[str] | frozenset[s
             branches = (SelectBranch(value=keep, select=predicate), SelectBranch(value=fill, select=negated))
             out.append(Select(name=stmt.name, branches=branches))
             continue
-        if reads & (coords.keys() | predicates.keys() | set(aliases.values())):
+        if reads & (coords.keys() | predicates.keys() | aliased):
             return None  # a coordinate read outside a mask
         out.append(stmt)
     return out

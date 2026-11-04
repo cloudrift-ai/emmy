@@ -531,3 +531,34 @@ def test_a_twisted_carrier_split_partial_binds_a_tensor_core_tile() -> None:
     assert len(states) == 2, "the pivot and denominator each keep a per-row register"
     for state in states:
         assert f"? ({state}__r0_0) : ({state}__r0_1)" in partial, f"{state} reaches the workspace whole"
+
+
+def test_a_causal_split_piece_masks_its_absolute_key_on_the_chunk_tier() -> None:
+    """A key split's piece reads the absolute key through its partition coordinate; the chunk tier reads that
+    coordinate as uniform over the CTA, like the batch axes, so the sliced causal mask lands as the coordinate mask the
+    tier evaluates per element — before, the partition in the predicate refused every causal split off the tier."""
+    from emmy.commands.trace import graph_from_code
+    from emmy.compiler.ir.cuda import CudaOp
+    from emmy.compiler.pipeline.search.pins import pinned_knobs
+
+    q, kv = "torch.randn(1, 16, 128, 64, dtype=torch.float16)", "torch.randn(1, 2, 512, 64, dtype=torch.float16)"
+    code = (
+        f"q={q}; k={kv}; v={kv}; F.scaled_dot_product_attention(q.reshape(1, 2, 8, 128, 64), k.reshape(1, 2, 1, 512, 64), "
+        "v.reshape(1, 2, 1, 512, 64), is_causal=True).reshape(1, 16, 128, 64)"
+    )
+    pins = {
+        "PLACE": "fuse",
+        "REDUCE@map.1/twist": "g2k",
+        "TILE@twist": "mma_m16n8k16_f16_f32/f1x16/k4",
+        "TILE@twist.1/inner": "mma_m16n8k16_f16_f32/f1x8/k4",
+        "STAGE@twist": "",
+        "STAGE@twist.1/inner": "",
+        "WORK": "w4x1",
+    }
+    with pinned_knobs(pins):
+        lowered = Pipeline.build(CUDA_PASSES).run(graph_from_code(code)[0], ctx=_CTX)
+    sources = {nid: node.op.kernel_source for nid, node in lowered.nodes.items() if isinstance(node.op, CudaOp)}
+    partial = next(src for nid, src in sources.items() if nid.endswith("__partial"))
+    assert len(sources) == 2, sorted(sources)
+    assert "mma_m16n8k16" in partial and "__ck" in partial, "the partial folds its key slice on the chunk tier"
+    assert re.search(r"_ks \* 256 \+ \(a\d+__ck", partial), "the mask compares the slice's absolute key, 256 keys per partition"

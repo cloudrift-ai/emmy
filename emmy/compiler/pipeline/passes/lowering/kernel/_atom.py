@@ -32,7 +32,7 @@ from functools import partial
 from emmy.compiler.backend.cuda.dtype import cuda_name
 from emmy.compiler.dim import Dim
 from emmy.compiler.dtype import F32
-from emmy.compiler.ir.address import BYTE_SLAB_PAD, gmem_axis_step
+from emmy.compiler.ir.address import BYTE_SLAB_PAD, clamp_bound, gmem_axis_step, unclamped
 from emmy.compiler.ir.atom import AtomKind, wide_accumulate
 from emmy.compiler.ir.axis import Axis
 from emmy.compiler.ir.elementwise import ElementwiseImpl
@@ -72,7 +72,7 @@ from emmy.compiler.ir.pure.fold import Fold
 from emmy.compiler.ir.pure.lam import Lambda
 from emmy.compiler.ir.schedule import Side, Stage, Tile
 from emmy.compiler.ir.schedule.classic.refusals import chunk_partial_columns
-from emmy.compiler.ir.schedule.mask import coordinate_aliases, select_masks
+from emmy.compiler.ir.schedule.mask import cell_uniform, coordinate_aliases, select_masks
 from emmy.compiler.ir.schedule.packing import block_scaled_atom, packed_readings
 from emmy.compiler.ir.schedule.staging import chunk_key_stage, chunk_slab_pad, copied_b
 from emmy.compiler.ir.sigma import Sigma
@@ -244,6 +244,10 @@ def _direct_operand(load, inputs, *, k_name: str, own: str | None, legacy: tuple
     reads the wrong elements, and nothing raises. Element strides say it directly, and on an operand
     whose dims separate the two coordinates they say exactly what the dim positions said.
 
+    A split's slice reads a symbolic stream through a clamp onto its last position (``address.clamp_to``), which is
+    no stride: the strides are read off the position itself, and the loader stays in bounds through
+    :func:`_clamp_bound` instead.
+
     The strides are read off the FLAT address, not dim by dim: a reshape that splits a coordinate
     across two dims spells it ``[m / 2, (m % 2) * 128 + k]``, which no single dim holds affinely, while
     the address it sums to is ``128·m + k``. Each dim's addends are scaled by the dim's element stride
@@ -257,6 +261,7 @@ def _direct_operand(load, inputs, *, k_name: str, own: str | None, legacy: tuple
     tensor = inputs.get(load.input) if inputs else None
     if tensor is None or len(tensor.shape) != len(load.index):
         return legacy
+    load = unclamped(load)
     address: Expr = Literal(0, "int")
     unit = 1
     for dim in reversed(range(len(load.index))):
@@ -283,6 +288,17 @@ def _direct_operand(load, inputs, *, k_name: str, own: str | None, legacy: tuple
         f"(stride {strides[k_name]}) nor {own!r} (stride {own_stride}) is unit-stride, "
         f"so the operand has no leading dimension"
     )
+
+
+def _clamp_bound(load, axis_name: str, bound: Expr | None) -> Expr | None:
+    """``bound`` on ``axis_name`` tightened to where ``load`` reads in bounds — a split's slice overhangs a symbolic
+    stream by up to its width, and its loads clamp onto the stream's last position (``address.clamp_to``); the
+    fragment loaders stride the position itself (:func:`_direct_operand`), so the lanes past the stream end must
+    read nothing instead."""
+    end = clamp_bound(load, axis_name) if isinstance(load, Load) else None
+    if end is None:
+        return bound
+    return end if bound is None else _min(bound, end)
 
 
 def _cells(mn: tuple, offset, i: int, j: int):
@@ -2340,6 +2356,8 @@ class _MmaOps(_AtomOps):
         # keeps its identity. An exactly tiled static K carries no bound (byte-identical output).
         k_exact = k_axis.extent.is_static and k_axis.extent.as_static() % atom.atom_k == 0
         k_zero = None if k_exact else (Var(k_axis.name), k_axis.extent_expr())
+        a_k_zero = k_zero if k_zero is None else (k_zero[0], _clamp_bound(a_load, k_axis.name, k_zero[1]))
+        b_k_zero = k_zero if k_zero is None else (k_zero[0], _clamp_bound(b_load, k_axis.name, k_zero[1]))
 
         def read_row(i):
             if self.slabs[0] is not None:
@@ -2376,7 +2394,7 @@ class _MmaOps(_AtomOps):
                     staged=False,
                     ldm=a_ldm,
                     gmem_guard=_guard(m, cell),
-                    k_zero=k_zero,
+                    k_zero=a_k_zero,
                     fragment_layout=atom.fragment_layout,
                 )
             ]
@@ -2411,7 +2429,7 @@ class _MmaOps(_AtomOps):
                     b_trans=b_trans,
                     ldm=b_ldm,
                     gmem_guard=_guard(n, cell),
-                    k_zero=k_zero,
+                    k_zero=b_k_zero,
                     fragment_layout=atom.fragment_layout,
                 )
             ]
@@ -2962,8 +2980,8 @@ class _FlashOps(_MmaOps):
         # The mask the prefix adds, in the one form the tier lands (``select_masks``): its coordinate aliases fold into
         # the predicates, so the leaves' remaining values are uniform and read once.
         coord_axes = {self.c.axis, *self.c.as_contraction().left_axes}
-        uniform = frozenset(name for edge in self.c.operands[1:] if edge.uniform_leaf(frozenset(coord_axes)) for name in edge.exposes)
-        aliases = coordinate_aliases((*prefix.body, *(stmt for edge in leaves for stmt in edge.lift.body)), coord_axes)
+        uniform = cell_uniform(self.tile, self.c, coord_axes)
+        aliases = coordinate_aliases((*prefix.body, *(stmt for edge in leaves for stmt in edge.lift.body)), coord_axes, uniform)
         prefix_body = select_masks(prefix.body, aliases, uniform, coord_axes)
         assert prefix_body is not None, "the score's prefix reads a coordinate outside an additive mask"
         pre = [stmt for edge in leaves for stmt in edge.lower(axes=self.axes) if not (isinstance(stmt, Let) and stmt.name in aliases)]
@@ -3481,6 +3499,7 @@ class _FlashOps(_MmaOps):
         if key is None:
             sigma = Sigma({self.k_axis.name: col, self._score_k.name: k})
             trans, ldm = _direct_operand(b_load, self.inputs, k_name=self._score_k.name, own=self.k_axis.name, legacy=(trans, 0))
+            bound = _clamp_bound(b_load, self.k_axis.name, bound)
             return LdmatrixLoad(
                 frag=self.frag(f"_kb{j}"),
                 src_buffer=b_load.input,
@@ -3643,6 +3662,7 @@ class _FlashOps(_MmaOps):
         if value is None:
             legacy = (self.c.as_contraction().b_trans, 0)
             trans, ldm = _direct_operand(v_load, self.inputs, k_name=self.k_axis.name, own=n.axis.name, legacy=legacy)
+            bound = _clamp_bound(v_load, self.k_axis.name, bound)
             return LdmatrixLoad(
                 frag=self.frag(f"_b{j}_{t}"),
                 src_buffer=v_load.input,

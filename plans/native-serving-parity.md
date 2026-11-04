@@ -295,7 +295,18 @@ What the session changes for the milestones:
    - **One wave.** The 64-row fold at 24 query heads is 24 CTAs on a 170-SM card. A layer at 65,536 positions is
      ~100 GFLOP, about 1 ms on the whole card and near today's 6.7 ms on a seventh of it; and the tier keeps the
      stream whole on a one-wave launch, so the causal half is not skipped either. A `REDUCE=g<n>k` split across the
-     keys must be among the offers and recorded with the route; #1321 tested `w4x1` alone.
+     keys is the answer, and on 2026-11-04 it refused twice, probed off the card: the split declines a twisted
+     carrier over a symbolic stream (its last slice overhangs the window, and the split masks an overhang by
+     seeding every lift result, which breaks the tier's reading of the carrier); and the chunk tier refuses every
+     split piece's causal mask, static or not, because the partition coordinate the sliced body reads is not
+     uniform to its gate — so no causal attention has ever folded split on tensor cores. The fix: a twisted
+     carrier masks its overhang as the additive coordinate mask the tier lands (the score takes the pivot's
+     identity past the window, through the same where-chain the twin spells, the sliced lift reading the absolute
+     key unclamped), and the tier's mask gate reads a kernel's per-CTA coordinates — the contraction's batch axes
+     and the split's partition — and its symbolic extents as uniform, so the causal stop lands per slice (block
+     end plus position minus the slice base) and a slice past the diagonal folds nothing. Gate: the twin folds
+     under `g4k` and `g8k` at both caches and matches at every position and window, one wave and wide; the
+     static causal split lands the tier too. Recorded with the route at the rental, the split among the offers.
    - **The FP8 cache runs unstaged.** Its keys and values are read gmem-direct, a convert per element, through no
      shared memory and no cp.async; only the bf16 cache stages. If the unstaged form misses the gate, a staged FP8
      slab is compiler work this milestone owns, since no other does.

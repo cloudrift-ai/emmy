@@ -691,9 +691,17 @@ spells its mask as a comparison and a `where` instead — native's causal attent
 position loaded from memory — reaches the tier with its row index as a `Let` alias of the coordinate, hoisted with
 the position and the fill constants into a leaf over the row axis; `select_masks` (`ir/schedule/mask.py`) folds the
 aliases into the predicate and spells the `where` as that same `Select`, the uniform position a free variable the
-predicate keeps, so the gate and the emission read one form. The same `Select`s are also read
-ONCE, ahead of the loop, for what they say about whole chunks (`_mask_key_bounds`). Expression normalization may
-reverse either comparison's operands, so the bound reader first restores the `key − row` orientation. A mask whose
+predicate keeps, so the gate and the emission read one form. A key split's piece binds the absolute key as an
+expression over its partition coordinate, uniform per CTA like the batch axes and the symbolic extents
+(`cell_uniform`), so its mask lands the same way with the partition in the predicate. The same `Select`s are also read
+ONCE, ahead of the loop, for what they say about whole chunks (`_mask_key_bounds`); on a split piece the bound carries
+the partition, so each slice stops at the block end plus the position minus its own base. A split piece's loads reach
+the symbolic stream through a clamp onto its last position (`address.clamp_to`), which is no stride: a gmem-direct
+fragment loader reads its leading dimension off the position itself (`_direct_operand`) and bounds its lanes by the
+clamp's extent (`_clamp_bound`), where before the clamp hid the stride and the loader fell back on the buffer's
+trailing extent, a wrong row step whenever the stream is not the buffer's last-but-one dimension. Expression
+normalization may reverse either comparison's operands, so the bound reader first restores the `key − row`
+orientation. A mask whose
 masked branch reads `key > row + c` (or `>=`) with `c ≥ 0` masks every key from the CTA's block end onward for every
 row the CTA holds, so the chunk loop stops there; one whose masked branch reads `key < row − c` (or `<=`) masks every
 key before the CTA's block base for every row, so the loop starts on the chunk that key falls in. They become the
