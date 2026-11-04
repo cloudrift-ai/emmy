@@ -9,8 +9,6 @@ import torch.nn as nn
 
 #: An NVFP4 head's weight leaves: packed e2m1 codes, raw e4m3 block scales and the f32 global scale.
 NVFP4_HEAD_LEAVES = ("weight", "weight_scale", "weight_scale_2")
-#: The head's calibrated activation scale, which a checkpoint that runs the head W4A4 stores beside its weight.
-_NVFP4_HEAD_INPUT_SCALE = "lm_head.input_scale"
 #: The rows the head program is compiled and measured at: one sampled row, a single request's decode step.
 HEAD_ROWS = 1
 #: The tensor only an NVFP4 head stores.
@@ -148,7 +146,7 @@ def nvfp4_head_sources(checkpoint: str) -> dict:
     one), its block scales as raw e4m3 bits: what the head program's constants bind from."""
     from emmy.compiler.loader.safetensors import load_sources_by_path
 
-    paths = [*(f"lm_head.{leaf}" for leaf in NVFP4_HEAD_LEAVES), _NVFP4_HEAD_INPUT_SCALE]
+    paths = [f"lm_head.{leaf}" for leaf in (*NVFP4_HEAD_LEAVES, "input_scale")]
     return load_sources_by_path(checkpoint, paths, bits_paths={"lm_head.weight_scale"})
 
 
