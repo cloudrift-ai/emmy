@@ -587,6 +587,36 @@ Rounds, as with DeepSeek. Each round starts from a profile and ends with a boot 
     symbolic path, and post8 at 12-13x its roofline floor (0.31-0.36 ms).
   - For the next run: `vllm bench serve` with `HF_HUB_OFFLINE` needs the tokenizer's snapshot path (the cache has no
     `main` ref), and a boot's time is best read from the log's timestamps, not from when polling started.
+- **Memory round (2026-11-03), item 3 part 1.** Measured per rank by PyTorch's allocation history with the Python
+  call site of every block, beside each process's device memory, on boots of both sides without the margin running
+  step 2's worst-case loads. At its peak (the four 32K prompts) Emmy held 26.5 GiB live per rank against the fork's
+  25.5 (its peak is the 64K prefill). Memory outside PyTorch is 1.35 GiB on both sides.
+
+  | Per rank, GiB | Fork | Emmy |
+  | --- | ---: | ---: |
+  | Routed experts | 17.64 | 16.13 |
+  | Dense weights: pre and post, routers, hosted attention and Gated DeltaNet | 2.88 | 3.16 |
+  | Token embedding and output head | 0.59 | 1.48 |
+  | Emmy's program buffers | | 1.04 |
+  | Other (rotary cache, small buffers) | 0.19 | 0.19 |
+  | Key/value pool | 2.50 | 2.50 |
+  | Prefill transients at the peak | 1.59 | 1.81 |
+
+  - The fork keeps a quarter of the token-embedding table and of the output head per rank; Emmy held the whole
+    table on every card (1.19 GiB). Of Emmy's buffers, 0.34 GiB was a dead copy of one layer's experts: the
+    fixed-slot programs' arena kept the build-time backing after every layer pointed its program at its own
+    tensors. Emmy's dense weights are 0.28 GiB more because every rank runs pre and post whole, where the fork
+    splits the hyper-connection mixers; the fork's experts are 1.5 GiB more because it keeps packed copies.
+  - The 2.6 GiB extra on one card in the done gate's run is PyTorch's cache of freed blocks, which it gives back
+    under pressure: live memory is the same on all four ranks at every snapshot, and with the margin held all four
+    ranks failed at the same 28.3 GiB.
+  - Fix: the table stays in pinned host memory and every row is read in place over the link (`SERVE_EMBED_GPU=0`;
+    its gather is the golden's `embed-sym` twin, 7.2 us at one row), and each layer's fixed-slot program is built
+    over the layer's own expert tensors. Weights and buffers after load go from 21.99 to 20.51 GiB per rank, the
+    peak from 26.55 to 25.07 GiB, below the fork's 25.47.
+  - Gate: `margin.sh` with 3 GiB held on every card passes all four loads, with no out-of-memory and three to nine
+    cache releases per rank. Two boots give the same text, 16 of 16, and the same text as the step 4 gate's boots,
+    so the fix changes no numerics.
 - Gate, the definition of done. Both sides run step 2's production configuration: the same checkpoint, layout,
   context, key/value pool, concurrency, prefix-cache and MTP settings; fork, Emmy, Emmy, fork rounds; three repeats
   each:
