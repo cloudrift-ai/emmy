@@ -1075,8 +1075,10 @@ class EmmyGenModel(nn.Module, SupportsPP, SupportsMRoPE):
             x = (x[0] if isinstance(x, tuple) else x).to(self.dtype)
             mixer = self.fork_attn[layer]
             if isinstance(mixer, MambaBase):
-                # A Gated DeltaNet layer writes its output into the buffer it is handed, as the fork's layer calls it.
-                attn_out = torch.empty_like(x)
+                # A Gated DeltaNet layer writes its output into the buffer it is handed, as the fork's layer calls it:
+                # on a decode step, the post twin's own input.
+                attn_out = self.runner.decode_input("post", layer, x)
+                attn_out = torch.empty_like(x) if attn_out is None else attn_out
                 mixer(hidden_states=x, output=attn_out)
             else:
                 attn_out = mixer(positions=positions, hidden_states=x, **self._fork_attn_args)

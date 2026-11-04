@@ -81,7 +81,10 @@ def test_gated_residual_split_matches_eager_layer(layer_idx):
             num_experts=experts.gate_up_proj.shape[0],
         )
         got = place_routed_streams(mixed, routed, mix)
+        into = torch.full_like(mixed, float("nan"))
+        assert place_routed_streams(mixed, routed, mix, out=into) is into
     torch.testing.assert_close(got, ref, atol=1e-5, rtol=1e-5)
+    assert torch.equal(into, got), "a placement into a given buffer is the same sum"
 
 
 def test_tensor_parallel_ranks_sum_to_the_eager_layer():

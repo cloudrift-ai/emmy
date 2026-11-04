@@ -2906,6 +2906,20 @@ class EmmyGenRunner:
             raise RuntimeError(f"token width {t} exceeds static-only capacity {self.prefill_capacity}")
         return tuple(self._pre[layer].run_device_sym(ins))
 
+    def decode_input(self, site, layer, like):
+        """The first input buffer of ``layer``'s ``site`` (``"pre"`` or ``"post"``) decode twin as a ``[T, W]`` view
+        when a step shaped like ``like`` runs that twin, else ``None``. A tensor written there is the program's input
+        already, so its upload copies nothing."""
+        programs = self._pre_decode if site == "pre" else self._post_decode
+        t = like.shape[0]
+        if programs is None or layer >= len(programs) or programs[layer] is None or t > self._decode_bucket:
+            return None
+        if t == 1 and self._pre_m1 is not None:
+            return None
+        p = programs[layer]
+        view = p.program.buffer_view(p.input_names[0])[:t]
+        return view if view.shape == like.shape and view.dtype == like.dtype else None
+
     def forward_layer_post_device(self, layer, attn_out, residual, gate=None, token_ids=None, lora=None):
         """Device twin of :meth:`forward_layer_post`: ``(attn_out, residual[, gate])`` CUDA → ``[T,H]``
         CUDA. Decode-bucketed / chunk / symbolic-routed like
@@ -2932,7 +2946,9 @@ class EmmyGenRunner:
             # layer's pre uploads the carrier at the residual dtype.
             mixed = mixed.to(self.residual_dtype)
             xn = xn.to(self._activation_dtype)
-            return place_routed_streams(mixed, self._moe_routed(moe, xn, token_ids), mix)
+            # Placed straight into the next layer's decode input, which is also that layer's post residual.
+            out = self.decode_input("pre", layer + 1, mixed)
+            return place_routed_streams(mixed, self._moe_routed(moe, xn, token_ids), mix, out=out)
         if len(outs) == 3:
             h, xn, shared = outs
         else:
