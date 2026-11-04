@@ -13,7 +13,7 @@ from emmy.compiler.backend.gpu_lock import gpu_lock
 from emmy.compiler.backend.native import NativeWorker
 from emmy.serving.native.prepare import export_model
 from tests.compiler.helpers import requires_cuda
-from tests.serving.helpers import qwen3_5_model, qwen3_5_moe_model, qwen3_model
+from tests.serving.helpers import evidence_scope, qwen3_5_model, qwen3_5_moe_model, qwen3_model
 
 pytestmark = [requires_cuda, pytest.mark.xdist_group("cuda")]
 
@@ -178,10 +178,10 @@ def test_cached_qwen3_5_carries_state_across_steps_and_resets(tmp_path, monkeypa
     type: logits match transformers at prompt lengths 1, 16, 17 and 65, a second request after a
     reset equals the first, and capture on and off select the same tokens.
 
-    Sequential prefill only. Without measured evidence the chunk rule's kernels take no cut, and a
-    one-block kernel then recomputes a 64-wide reduction per state cell: 14 s per two-row chunk on
-    the smallest geometry, hours at sixteen rows. Chunked prefill of a Gated DeltaNet layer waits
-    for recorded schedules; the chunk rule for state is a runtime unit test."""
+    Sequential prefill only. The Gated DeltaNet program is the plugin's one-row twin of the lane's
+    hybrid, so it compiles from the lane golden's cuts: without them it is one kernel that runs as
+    one thread block and recomputes the chunk's triangular solve per output element, past the
+    worker's step deadline. The chunk rule for state is a runtime unit test."""
     executable = shutil.which("emmy-runtime-worker")
     if not executable:
         pytest.skip("build native worker and add it to PATH")
@@ -190,7 +190,8 @@ def test_cached_qwen3_5_carries_state_across_steps_and_resets(tmp_path, monkeypa
     model = qwen3_5_model(max_position_embeddings=context).half()
     model.config._attn_implementation = "eager"
     with gpu_lock():
-        root = export_model(model, tmp_path / "pack", context_length=context, prefill_size=1)
+        with evidence_scope(strict=False):
+            root = export_model(model, tmp_path / "pack", context_length=context, prefill_size=1)
         manifest = json.loads((root / "manifest.json").read_text())
         assert manifest["key"]["generation"]["state"] == ["layer0.state", "layer0.history"]
         monkeypatch.setenv("PATH", "/nonexistent")
@@ -311,16 +312,25 @@ def test_cached_qwen3_5_moe_routes_like_transformers(tmp_path, monkeypatch, expe
         asyncio.run(check())
 
 
-def test_drafted_generation_keeps_greedy_tokens(tmp_path, monkeypatch):
+@pytest.mark.parametrize(
+    ("layer_types", "dtype", "prefill_size"),
+    [(["full_attention"] * 2, torch.bfloat16, 3), (["linear_attention", "full_attention"], torch.float16, 4)],
+    ids=["attention", "gdn"],
+)
+def test_drafted_generation_keeps_greedy_tokens(tmp_path, monkeypatch, layer_types, dtype, prefill_size):
     """Speculative decoding's gate on a tiny Qwen3.5 and a one-layer multi-token-prediction head drafting two tokens:
     at temperature zero the verify steps generate transformers' greedy tokens, the same pack's with the drafter left
-    unloaded, captured or not, through chunked prefill, which writes the drafter's cache too; the nine-token prompt (the
-    eight-token one and its first greedy token) ends at its third chunk, which generates the first token, and the
-    eight-token one leaves its last token to a verify step. The head drafts the target's own pick again, so once the
-    target repeats one token every draft stands and a step generates three tokens; before, a step takes one draft or
-    none. Each step's logits are its tokens' rows. At positive temperature every step decodes one token. The layers are
-    attention only: without evidence a Gated DeltaNet layer's one-token step runs past a minute (the state test above),
-    so the per-row state carry is checked on the CPU (``test_prepare``) and by the recipes' gates."""
+    unloaded, captured or not, through chunked prefill, which writes the drafter's cache too. The eight-token prompt and
+    the nine-token one, the eight and its first greedy token, cover both ends of a prompt: with attention layers and
+    3-row chunks the nine-token prompt ends at its third chunk, which generates the first token, and the eight-token one
+    leaves its last token to a verify step; with the Gated DeltaNet layer, whose carried state takes a chunk of prompt
+    tokens only, and 4-row chunks the eight-token prompt ends at its second chunk and the nine-token one leaves its last
+    token to a verify step. The head drafts the target's own pick again, so once the target repeats one token every
+    draft stands and a step generates three tokens; before, a step takes one draft or none. Each step's logits are its
+    tokens' rows. At positive temperature every step decodes one token. With a Gated DeltaNet layer, a verify step
+    keeps the state after each of its rows and the next step continues from the one after its last accepted row; its
+    programs (one row, the 4-row chunk, the 3-row verify) are twins of the lane's hybrid, so they compile from the lane
+    golden's cuts."""
     executable = shutil.which("emmy-runtime-worker")
     if not executable:
         pytest.skip("build native worker and add it to PATH")
@@ -331,13 +341,14 @@ def test_drafted_generation_keeps_greedy_tokens(tmp_path, monkeypatch):
     monkeypatch.setenv("EMMY_GEN_M1_TIER", "0")
     monkeypatch.setenv("EMMY_GEN_DECODE_BUCKET", "4")
     context, new = 48, 24
-    model = qwen3_5_model(max_position_embeddings=context, layer_types=["full_attention"] * 2).to(torch.bfloat16)
+    model = qwen3_5_model(max_position_embeddings=context, layer_types=layer_types).to(dtype)
     model.config._attn_implementation = "eager"
     model.save_pretrained(tmp_path / "checkpoint")
     add_mtp_head(tmp_path / "checkpoint", repeats=True)
     drafter, _ = load_drafter(str(tmp_path / "checkpoint"), None, model, 2)
     with gpu_lock():
-        root = export_model(model, tmp_path / "pack", context_length=context, prefill_size=3, drafter=drafter)
+        with evidence_scope(strict=False):
+            root = export_model(model, tmp_path / "pack", context_length=context, prefill_size=prefill_size, drafter=drafter)
         monkeypatch.setenv("PATH", "/nonexistent")
 
         async def run(prompt, draft, capture, temperature=0.0):
@@ -362,9 +373,13 @@ def test_drafted_generation_keeps_greedy_tokens(tmp_path, monkeypatch):
             finally:
                 await worker.aclose()
 
-        for prompt in ([5, 6, 7, 5, 6, 7, 5, 6], [5, 6, 7, 5, 6, 7, 5, 6, 3]):
+        def continuation(prompt):
             with torch.no_grad():
-                greedy = model.generate(torch.tensor([prompt]), max_new_tokens=new, do_sample=False)[0, len(prompt) :].tolist()
+                return model.generate(torch.tensor([prompt]), max_new_tokens=new, do_sample=False)[0, len(prompt) :].tolist()
+
+        eight = [5, 6, 7, 5, 6, 7, 5, 6]
+        for prompt in (eight, [*eight, continuation(eight)[0]]):
+            greedy = continuation(prompt)
             plain, steps = asyncio.run(run(prompt, False, True))
             assert plain == greedy and set(steps) == {1}
             for capture in (True, False):
