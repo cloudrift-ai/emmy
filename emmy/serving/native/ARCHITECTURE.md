@@ -66,10 +66,11 @@ it is a buffer the pager holds in that many device slots, its pages in pinned ho
 is read in place over the link; otherwise it is a constant of the step. A paged table's gather is then the plugin's
 `embed-sym` twin, given the step's rows. A checkpoint that keeps its output head coded
 (NVFP4, untied) runs it as the plugin does, through the head program over its codes (`coded_head.head_graph`, the
-`head-sym` twin) at one row, with its FP32 logits. Its measured schedule reads the codes once per row, so a verify
-step's three rows cost three one-row heads (1.86 against 0.62 ms on the RTX 5090); a static three-row program gains
-little, since the decoded-weight head is offered only bf16 tensor-core tiles that decode the codes per tile (1.68 ms at
-best), and the head stays the plugin's until it is spelled as the trunk's W4A4 linears are.
+`head-sym` twin) at one row, with its FP32 logits, its constants bound from the checkpoint's stored tensors. The head
+is spelled as the trunk's linears are: W4A4 where the checkpoint stores `lm_head.input_scale`, as NVIDIA's Qwen3.8-27B
+does, which offers it the e2m1 tensor-core tile at sm_120. The weight-only head it replaced read its codes once per row
+(1.86 ms for a verify step's three rows against 0.62 ms for one on the RTX 5090), and a static three-row program of it
+was offered only bf16 tiles that decode the codes per tile (1.68 ms at best).
 
 A Qwen3.5 text decoder is found with `find_text_decoder`, since those checkpoints wrap it beside a vision tower, which
 only a pack with images holds ("Images", below). Its full-attention layers add two things to the Qwen3 path: the rotary

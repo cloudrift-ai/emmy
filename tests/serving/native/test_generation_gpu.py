@@ -389,6 +389,80 @@ def test_drafted_generation_keeps_greedy_tokens(tmp_path, monkeypatch, layer_typ
             assert sampled[0] == sampled[1] and set(sampled[1][1]) == {1}
 
 
+def test_nvfp4_head_checkpoint_exports_its_w4a4_head(tmp_path, monkeypatch):
+    """An NVFP4 output head stored with its activation's calibrated scale, as NVIDIA's Qwen3.8-27B stores it, exports
+    W4A4 into every program that runs it: the one-token step, the prefill chunks and the verify step, at its three rows
+    and at each draft's one. Each binds the head's codes and the stored activation scale, never a decoded head, and
+    drafting keeps the greedy tokens. The logits are checked only for gross errors: at this size a trunk difference
+    of one rounding flips an activation code now and then, which moves a row by up to ~10%, as far as the uncoded
+    head sits; the head's numerics are pinned where both sides code the same rows (``test_coded_head.py``)."""
+    executable = shutil.which("emmy-runtime-worker")
+    if not executable:
+        pytest.skip("build native worker and add it to PATH")
+    from emmy.compiler.backend.cuda._bench_worker import _reference_precision
+    from emmy.compiler.backend.plan import plan_from_dict
+    from emmy.serving.native.prepare import load_drafter, load_model
+    from tests.serving.helpers import add_mtp_head, nvfp4_head_checkpoint, static_fp4
+
+    monkeypatch.setenv("EMMY_GEN_M1_TIER", "0")
+    monkeypatch.setenv("EMMY_GEN_DECODE_BUCKET", "4")
+    context, new, input_scale = 24, 8, 0.002
+    model = qwen3_5_model(max_position_embeddings=context, layer_types=["full_attention"] * 2).to(torch.bfloat16)
+    model.config._attn_implementation = "eager"
+    model.save_pretrained(tmp_path / "ckpt")
+    add_mtp_head(tmp_path / "ckpt", repeats=True)
+    nvfp4_head_checkpoint(model, tmp_path / "ckpt", input_scale=input_scale)
+    twin, ckpt = load_model(str(tmp_path / "ckpt"))
+    drafter, ckpt = load_drafter(str(tmp_path / "ckpt"), None, twin, 2, ckpt)
+    with gpu_lock():
+        with evidence_scope(strict=False):
+            root = export_model(twin, tmp_path / "pack", context_length=context, prefill_size=3, ckpt=ckpt, drafter=drafter)
+    manifest = json.loads((root / "manifest.json").read_text())
+    assert {"decode", "verify"} <= set(manifest["programs"]) and any(name.startswith("prefill") for name in manifest["programs"])
+    vocab, hidden = model.config.vocab_size, model.config.hidden_size
+    for name, path in manifest["programs"].items():
+        plan = plan_from_dict(json.loads((root / path).read_text()))
+        head = {b.name: b for b in plan.buffers if b.role == "constant" and b.name.startswith("head.")}
+        shapes = {(b.dtype.name, tuple(b.resolve_shape({}))) for b in head.values()}
+        assert ("f4e2m1x2", (vocab, hidden // 2)) in shapes, f"{name} runs no coded head"
+        assert not any(dtype in ("bf16", "f32") and shape == (vocab, hidden) for dtype, shape in shapes), f"{name} binds a decoded head"
+        scalars = {
+            float(np.fromfile(root / manifest["bindings"][name][n], np.float32)[0])
+            for n, b in head.items()
+            if b.dtype.name == "f32" and int(np.prod(b.resolve_shape({}))) == 1
+        }
+        assert {np.float32(input_scale), np.float32(1) / np.float32(input_scale)} <= scalars, f"{name} codes no rows"
+    model.cuda()
+    weight = model.lm_head.weight.detach().float().cpu().numpy()
+
+    def reference(prefix):
+        with torch.no_grad(), _reference_precision(True):
+            row = model.model(torch.tensor([prefix], device="cuda")).last_hidden_state[0, -1]
+        return static_fp4(row.float().cpu().numpy(), input_scale) @ weight.T
+
+    async def run(prompt, draft):
+        worker = NativeWorker(executable=executable)
+        path, logits = tmp_path / "prompt.bin", tmp_path / "logits.bin"
+        np.asarray(prompt, np.int64).tofile(path)
+        try:
+            await worker.run_job({"op": "load_generation", "root": str(root), "draft": draft}, wall_timeout_s=60)
+            await worker.run_job({"op": "start_generation", "prompt": str(path)}, wall_timeout_s=60)
+            tokens = []
+            while len(tokens) < new:
+                step = {"op": "generation_step", "prefill": True, "capture": False, "logits": str(logits)}
+                result = await worker.run_job(step, wall_timeout_s=60)
+                rows = np.fromfile(logits, np.float32).reshape(len(result["tokens"]), -1) if result["tokens"] else ()
+                for row, token in zip(rows, result["tokens"], strict=True):
+                    assert _logit_errors(row, reference(prompt + tokens))["relative_l2_error"] < 0.25
+                    tokens.append(token)
+            return tokens[:new]
+        finally:
+            await worker.aclose()
+
+    prompt = [5, 6, 7, 5, 6, 7, 5, 6]
+    assert asyncio.run(run(prompt, True)) == asyncio.run(run(prompt, False))
+
+
 # Per-position absolute budgets and per-prompt RMS comparison, fixed before the
 # held-out cases below. FP32 uses the same FP16-rounded weights. The qualification
 # report retains the failed exploratory per-position comparison contract.

@@ -210,10 +210,12 @@ def _tiny_nvfp4_hybrid(path, config, mtp=None):
             f"{base}.weight_scale": torch.from_numpy(np.ascontiguousarray(scales)).view(torch.float8_e4m3fn),
             f"{base}.weight_scale_2": torch.from_numpy(scale2),
             f"{base}.input_scale": torch.tensor([0.05]),
-            # An NVFP4 output head, which serving keeps coded and runs as a program of its own.
+            # An NVFP4 output head with its activation's calibrated scale, which serving keeps coded and runs W4A4 as a
+            # program of its own.
             "lm_head.weight": torch.from_numpy(head[0]),
             "lm_head.weight_scale": torch.from_numpy(np.ascontiguousarray(head[1])).view(torch.float8_e4m3fn),
             "lm_head.weight_scale_2": torch.from_numpy(head[2].reshape(())),
+            "lm_head.input_scale": torch.tensor(0.05),
             # The trunk stores more layers than the MTP head, as every real checkpoint does: that count is what
             # tells the two stacks apart, and a tie would pick one by string-hash order.
             "model.layers.1.input_layernorm.weight": torch.ones(64, dtype=torch.bfloat16),
@@ -246,7 +248,8 @@ def test_gdn_serving_capture_has_explicit_state_inputs_and_outputs(tmp_path, qua
         from emmy.compiler.pipeline.search.golden.format import program_text
         from emmy.serving.coded_head import Nvfp4HeadSpec, head_graph
 
-        assert program_text(graphs["head-sym"]) == program_text(head_graph(Nvfp4HeadSpec(64, 64, "float16")))
+        assert program_text(graphs["head-sym"]) == program_text(head_graph(Nvfp4HeadSpec(64, 64, "float16", str(tmp_path))))
+        assert "to_f4e2m1" in program_text(graphs["head-sym"]), "the head runs W4A4, as the trunk's marked linears"
     for name, graph in graphs.items():
         if not name.startswith("gdn"):
             continue

@@ -689,9 +689,9 @@ def _paged_table(t, dtype, rows):
 
 def _coded_head(model, ckpt):
     """The NVFP4 output head a checkpoint keeps coded, as the plugin keeps it (``CodedHead``): its spec and a function
-    reading its codes from the shards, or ``None`` for a head the model holds."""
+    reading its stored tensors from the shards, or ``None`` for a head the model holds."""
     from emmy.compiler.loader.safetensors import load_sources_by_path
-    from emmy.serving.coded_head import NVFP4_HEAD_LEAVES, Nvfp4HeadSpec, nvfp4_head_stored
+    from emmy.serving.coded_head import Nvfp4HeadSpec, nvfp4_head_sources, nvfp4_head_stored
 
     cfg = model.config
     if ckpt is None or not nvfp4_head_stored(load_sources_by_path(ckpt[0], ["lm_head.weight_scale_2"])):
@@ -702,9 +702,9 @@ def _coded_head(model, ckpt):
         tensor_parallel_size=1,
         tied=getattr(cfg, "tie_word_embeddings", False),
         dtype=str(model.dtype).removeprefix("torch."),
+        checkpoint=ckpt[0],
     )
-    paths = [f"lm_head.{leaf}" for leaf in NVFP4_HEAD_LEAVES]
-    return spec, lru_cache(maxsize=1)(lambda: spec.feed(load_sources_by_path(ckpt[0], paths, bits_paths={"lm_head.weight_scale"})))
+    return spec, lru_cache(maxsize=1)(lambda: nvfp4_head_sources(ckpt[0]))
 
 
 def _program(
@@ -1089,13 +1089,9 @@ def _program(
 
             step.compiled(prefix, Head(), (torch.zeros(n, h, dtype=td),), [normed], [logits], cache, weights="head", rows=n)
             return
-        spec, feed = coded
-        graph = head_graph(spec)
-        inputs = [normed]
-        for name in graph.inputs[1:]:
-            shape = tuple(dim if isinstance(dim, int) else int(dim.expr.eval({})) for dim in graph.buffer(name).shape)
-            inputs.append(step.buffer(f"head.{name}", shape, get(graph.buffer(name).dtype), "constant", partial(lambda n: feed()[n], name)))
-        step.spliced(prefix, graph, inputs, [logits], cache, lambda _plan: {}, scope=LayoutScope(), sizes={"num_tokens": n})
+        spec, sources = coded
+        graph, sizes = head_graph(spec), {"num_tokens": n}
+        step.spliced(prefix, graph, [normed], [logits], cache, lambda _plan: sources(), scope=LayoutScope(), sizes=sizes, weights="head")
 
     def greedy(prefix, logits, token, n):
         step.compiled(prefix, greedy_module(vocab), (torch.zeros(n, vocab, dtype=torch.float32),), [logits], [token], cache, rows=n)

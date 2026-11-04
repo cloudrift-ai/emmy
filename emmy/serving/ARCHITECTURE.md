@@ -666,10 +666,13 @@ contract lives in [native/ARCHITECTURE.md](native/ARCHITECTURE.md); vLLM remains
   single-TP, and for EXL3 the `mul1` codebook) stays compressed. `CodedHead` (`serving/coded_head.py`) takes the
   `lm_head` slot, so vLLM's MTP proposer, which hands the draft model the target's head, shares it too, and both
   `compute_logits` paths pass its fp32 logits through a `logits_as_input` processor that scales and softcaps them.
-  It compiles one program whose inputs are the step's sampled rows, on the `num_tokens` axis of serving's any-width
-  programs (built for `max_num_seqs` × (1 + draft tokens) rows), and the codes, spelled per format: EXL3's
-  factorized algebra; NVFP4 through the input speller, each value decoded in-graph and rounded once to the model
-  dtype, as the decoded parameter holds it. One launch serves a verify step's rows; whether they share one read of
+  It compiles one program whose input is the step's sampled rows, on the `num_tokens` axis of serving's any-width
+  programs (built for `max_num_seqs` × (1 + draft tokens) rows), over the codes, spelled per format and bound from
+  the checkpoint's stored tensors: EXL3's factorized algebra; NVFP4 as the trunk spells a linear over a checkpoint
+  weight, the constant `lm_head.weight` turned into its codes and scales by the trunk's weight speller, and, where the
+  checkpoint stores `lm_head.input_scale`, the rows coded by its activation speller. That head is W4A4, as stock vLLM
+  runs it: both operands reach the product as packed e2m1 pairs, so at sm_120 the head is offered the block-scaled
+  tensor-core tile, and its logits stay f32. One launch serves a verify step's rows; whether they share one read of
   the codes is the schedule's choice, and a schedule that gives each row its own blocks reads them once per row,
   which at a few rows can cost more than the dense matmul it replaces. On Qwen3.8-27B-NVFP4 the card holds 0.67 GiB
   of codes and scales where the decoded BF16 head took 2.37 GiB. The head
@@ -1250,9 +1253,10 @@ list does not get the flooring treatment described above, so it can violate the 
   when none applies. Also pins that the coded path does NOT walk vLLM's weight stream, and that a compiled coded
   head receives the stored codes while the dense parameter stays untouched.
 - `tests/serving/generation/test_coded_head.py` — coded output heads: which EXL3 and NVFP4 heads stay coded, the
-  NVFP4 head program's inputs and its logits for several rows against the decoded head on the torch reference (no
-  GPU), and, on CUDA, both compiled heads against their decoded weights at one row, a full group and more rows than
-  a group holds, with their code buffers kept in place.
+  NVFP4 head spelled as the trunk's linears (W4A4 where the checkpoint stores `lm_head.input_scale`, offered the
+  e2m1 tile at sm_120 lowering), its W4A4 logits against an independent coding of the rows (no GPU), and, on CUDA,
+  both compiled heads at one row, a full group and more rows than a group holds, with their code buffers kept in
+  place.
 - `tests/serving/generation/test_gen_runner_gdn_gpu.py` — GDN layers through the runner, needs CUDA: prompt lengths
   on both sides of the static widths against the eager model, prefill followed by single-token steps, a request run
   after another one that must be bit-identical to the same request run alone, a padded step that must corrupt the

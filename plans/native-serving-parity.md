@@ -214,6 +214,14 @@ What the session changes for the milestones:
    teacher-forced logprob deltas on the probes reported; GSM8K no more than one standard error below the plugin
    lane's; rows recorded in the recipe golden. Needs 1, and #1299 in.
 
+   The off-card half is in a draft PR, checked on the RTX 4080. The head is now the checkpoint constant
+   `lm_head.weight` under the trunk's two spellers, so NVIDIA's stored `lm_head.input_scale` (0.02055, in a static
+   4-bit group that names `lm_head`) makes it W4A4; its logits stay f32. At sm_120 lowering the head is two kernels, the
+   rows' 4-bit quantize and the product, and the product reads as a block-scaled pair offered only the e2m1 tile.
+   The native decode, prefill and verify programs build and run with it on surrogates. The 27B golden's `head-sym`
+   program is the new trace, its two kernels stored with no rows, and the old head's two rows are gone; the hardware
+   golden keeps its old head program and rows. What remains needs the card: record the two kernels, then the gate.
+
 3. **The rotary cache store takes a grid.** The store names the whole cache (a scatter into a windowed buffer
    leaves its store no grid) and runs on one CTA: rope64 ~9 ms of a 64-row chunk (0.58 ms a layer), rope3 36-43 us
    a layer (0.6 ms a verify step), M-RoPE +122 us a layer and chunk. A lowering fix — the chunk's store spreads
