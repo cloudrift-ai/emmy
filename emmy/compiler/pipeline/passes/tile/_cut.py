@@ -2372,7 +2372,9 @@ def realize(match: Match, root: Node, seams, *, joins: tuple = ()) -> Graph:
             return fragment
         consumer_outputs = {store.write.output for store in consumer_stores}
         consumer_fold = _region_term(
-            _over(regions, kept, consumer_stores), Body(tuple(stmt for index in sorted(kept) for stmt in regions[index][1])), consumer_stores
+            _over(regions, kept, consumer_stores),
+            Body(tuple(stmt for index in sorted(kept) for stmt in regions[index][1])),
+            consumer_stores,
         )
 
     consumer = TileOp(

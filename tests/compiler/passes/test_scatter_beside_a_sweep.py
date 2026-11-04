@@ -75,7 +75,14 @@ def test_the_native_rotary_cache_store_spreads_over_the_rows_and_heads_it_writes
     rows, heads, kv, head_dim, rotary, context = 16, 8, 4, 128, 64, 256
     cache = torch.zeros(context, kv, head_dim, dtype=torch.float8_e4m3fn)
     projections = (torch.zeros(rows, width * head_dim, dtype=torch.bfloat16) for width in (heads, kv, kv))
-    examples = (*projections, torch.zeros(1, dtype=torch.int64), torch.zeros(context, rotary), torch.zeros(context, rotary), cache, cache.clone())
+    examples = (
+        *projections,
+        torch.zeros(1, dtype=torch.int64),
+        torch.zeros(context, rotary),
+        torch.zeros(context, rotary),
+        cache,
+        cache.clone(),
+    )
     graph = trace_module(rope_module(heads, kv, head_dim, rotary, rows, cache.dtype), examples)
     lowered = Pipeline.build(CUDA_PASSES).run(graph, ctx=Context.from_target((12, 0)), db=None)
     launches = {tuple(t.name for t in node.outputs): node.op.grid[0][0] for node in lowered.nodes.values() if isinstance(node.op, CudaOp)}
