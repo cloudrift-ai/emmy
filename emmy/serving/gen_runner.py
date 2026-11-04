@@ -2908,16 +2908,13 @@ class EmmyGenRunner:
 
     def decode_input(self, site, layer, like):
         """The first input buffer of ``layer``'s ``site`` (``"pre"`` or ``"post"``) decode twin as a ``[T, W]`` view
-        when a step shaped like ``like`` runs that twin, else ``None``. A tensor written there is the program's input
+        when a step shaped like ``like`` fits that twin, else ``None``. A tensor written there is the program's input
         already, so its upload copies nothing."""
         programs = self._pre_decode if site == "pre" else self._post_decode
-        t = like.shape[0]
-        if programs is None or layer >= len(programs) or programs[layer] is None or t > self._decode_bucket:
-            return None
-        if t == 1 and self._pre_m1 is not None:
+        if programs is None or layer >= len(programs) or programs[layer] is None or like.shape[0] > self._decode_bucket:
             return None
         p = programs[layer]
-        view = p.program.buffer_view(p.input_names[0])[:t]
+        view = p.program.buffer_view(p.input_names[0])[: like.shape[0]]
         return view if view.shape == like.shape and view.dtype == like.dtype else None
 
     def forward_layer_post_device(self, layer, attn_out, residual, gate=None, token_ids=None, lora=None):

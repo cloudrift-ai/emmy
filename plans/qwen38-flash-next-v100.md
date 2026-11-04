@@ -613,10 +613,13 @@ Rounds, as with DeepSeek. Each round starts from a profile and ends with a boot 
   - Fix: the table stays in pinned host memory and every row is read in place over the link (`SERVE_EMBED_GPU=0`;
     its gather is the golden's `embed-sym` twin, 7.2 us at one row), and each layer's fixed-slot program is built
     over the layer's own expert tensors. Weights and buffers after load go from 21.99 to 20.51 GiB per rank, the
-    peak from 26.55 to 25.07 GiB, below the fork's 25.47.
-  - Gate: `margin.sh` with 3 GiB held on every card passes all four loads, with no out-of-memory and three to nine
-    cache releases per rank. Two boots give the same text, 16 of 16, and the same text as the step 4 gate's boots,
-    so the fix changes no numerics.
+    peak from 26.55 to 25.07 GiB, below the fork's 25.47. Reading the table over the link costs 7 ms per 4,096-token
+    prefill chunk (about 0.4% of a prefill) and 9 us per decode step.
+  - Found on the first fixed boot: the table's device view was a tensor on device 0, so ranks 1 to 3 each opened a
+    CUDA context on rank 0's card (0.06-0.3 GiB each). The view now sits on the rank's own device.
+  - Gate: `margin.sh` with 3 GiB held on every card passes all of step 2's worst-case loads, with no out-of-memory
+    and three to nine cache releases per rank. Two boots give the same text, 16 of 16, and the same text as the
+    step 4 gate's boots, so the fix changes no numerics.
 - Gate, the definition of done. Both sides run step 2's production configuration: the same checkpoint, layout,
   context, key/value pool, concurrency, prefix-cache and MTP settings; fork, Emmy, Emmy, fork rounds; three repeats
   each:
