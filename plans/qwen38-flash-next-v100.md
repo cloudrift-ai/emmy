@@ -655,6 +655,18 @@ Rounds, as with DeepSeek. Each round starts from a profile and ends with a boot 
     twin settles its family's layouts, so the 1-row twins would re-lay every pre and post twin); fewer post8
     kernels, which needs the compiler to fold a split-K finalize into its consumer; and at eight requests the
     fixed-slot tier runs the experts one row at a time.
+  - Done gate's decode points re-measured after both parts, the final tree against a fresh fork boot, rounds fork,
+    Emmy, Emmy, fork, three repeats each after a priming one. Both still fail:
+
+    | Point | Fork | Emmy, first run | Emmy now |
+    | --- | ---: | ---: | ---: |
+    | One request, 1K / 512, per token | 12.66-12.84 ms | 21.1-21.3 ms | 20.99-21.12 ms (1.65x slower) |
+    | 8 requests, 4K / 1K, total output | 279.8-282.3 tok/s | 162-165 tok/s | 162.8-164.9 tok/s (0.58x) |
+    | Step 2's worst-case loads with 3 GiB held per card | passes | out of memory | passes |
+
+  - For the next run: a server profiled once (`/start_profile`) stays about 5% slower (22.3 against 21.2 ms per
+    token on the same tree, and the fork 14.1 against 12.8), so profile on one boot and measure on another; the
+    round's A/B used two profiled boots, which keeps its comparison fair.
 - Gate, the definition of done. Both sides run step 2's production configuration: the same checkpoint, layout,
   context, key/value pool, concurrency, prefix-cache and MTP settings; fork, Emmy, Emmy, fork rounds; three repeats
   each:
