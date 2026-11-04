@@ -508,10 +508,10 @@ def output_regions(op: Fold, output_specs: tuple) -> tuple[tuple[Fold, Body, tup
     root body must be disjoint, and together those cones must cover it. Refusals raise
     :class:`UnbindableProjection`.
 
-    A region no store's values read, read only where a store's coordinates or guard name it — a scatter's row,
-    computed once per row above the cell that stores it — owns no output: it rides with the one region whose stores
-    read it, and its entry has no stores. A piece writing those stores is built over both. A row read by two owners'
-    stores would be computed by both, and refuses.
+    A region that no store's values read, read only for a store's coordinates or guard — a scatter's row, computed
+    once per row above the cell that stores it — owns no output. It rides with the one region whose stores read it,
+    and its entry holds no stores; a piece writing those stores is built over both. A row the stores of two owners
+    read would be computed by both, so it refuses.
 
     This is the structural ownership rule alone, shared by kernel binding and by the rewrites that
     turn one multi-output ``TileOp`` into fresh pieces. :func:`projection_regions` composes it with
