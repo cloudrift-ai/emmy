@@ -227,10 +227,11 @@ What the session changes for the milestones:
    rope3 38-41 us). The row now rides with the store, and at sm_120 lowering every rope program of both recipes,
    M-RoPE included, gives each kernel a grid over the rows and heads it writes. Tokens are unchanged on the native
    surrogates; the corpus needed nothing. The restamp touched three goldens, all at the rope programs: the RTX 5090
-   hardware golden (22 kernels re-keyed, 7 decisions and 19 rows dropped, 9 rows demoted), the 27B's (14, 6, 12, 6)
-   and Qwen3.6's (8, 5, 8, 3); the one-row programs kept theirs. What remains needs the card: record the fresh rope
-   kernel sets of both recipes (27B: 3, 16 and 64 rows, plain and M-RoPE; Qwen3.6: 3, 4 and 64) and the hardware
-   golden's rope rows, then the gate.
+   hardware golden (22 kernels re-keyed, 11 decisions and 19 rows dropped, 9 rows demoted), the 27B's (14, 6, 12, 6)
+   and Qwen3.6's (8, 5, 8, 3); the one-row programs kept theirs. The dropped decisions are the cuts that left the copy
+   kernel. Both priors are refit on the restamped goldens. What remains needs the card: record the fresh rope kernel
+   sets of both recipes (27B: 3, 16 and 64 rows, plain and M-RoPE; Qwen3.6: 3, 4 and 64) and the hardware golden's
+   rope rows, refit, then the gate.
 
 4. **Prefill ends at the prompt's last token (#1313).** After #1281 a 256-token prompt still runs 15 single steps
    on the 27B (3 on Qwen3.6): a chunk takes only prompt tokens *before the last*, because only the decode program
