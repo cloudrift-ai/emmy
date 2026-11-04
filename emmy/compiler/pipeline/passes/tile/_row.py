@@ -200,7 +200,7 @@ def _paired_by_loads(tile: TileOp) -> TileOp:
         regions = output_regions(op, tile.output_specs)
     except UnbindableProjection:
         return tile
-    if len(regions) < 2 or any(tail for _, tail, _ in regions):
+    if len(regions) < 2 or any(tail or not stores for _, tail, stores in regions):
         return tile
     grid = {axis.name for axis in tile.place.free}
     axes = {axis.name: axis for axis in (*tile.axes, *(axis for spec in tile.output_specs for axis in spec.sweep))}

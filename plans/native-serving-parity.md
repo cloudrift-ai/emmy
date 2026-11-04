@@ -84,7 +84,7 @@ The diagnosis in brief:
   cells, where the chunk term is nearly all of the time.
 - **27B prefill**: 1.01 s per 1,000 prompt tokens against the plugin's 0.69 and stock's 0.084 at a 2,048-token
   chunk. A 64-row chunk costs native ~50-55 ms: trunk 41 ms (no per-kernel profile — milestone 8), the rotary cache
-  store 9 ms on one CTA; attention at 64 rows writes scores and probabilities to memory and grows with the window
+  store 9 ms on one CTA (milestone 3, #1318, gives it a grid; the number waits on its gate); attention at 64 rows writes scores and probabilities to memory and grows with the window
   (4.6 ms a layer at 65,536 positions). #1295 (merged) stopped the Gated DeltaNet out projection being computed
   twice under the block amax and re-recorded both NVFP4 goldens: the 512-token attention input target 883 -> 655 us,
   the 64-row out projection piece 44.9 -> 35.7 us.
@@ -220,6 +220,18 @@ What the session changes for the milestones:
    over the rows and heads it writes — so kernels re-key: restamp, re-record the rope rows, both recipes. Gate:
    the 27B chunk 50 -> ~41 ms measured in the step; the verify step down ~0.5 ms; corpus and goldens current.
    Needs 1.
+
+   #1318 landed the lowering fix, checked on the RTX 4080. The one block did not come from the cache's size: the
+   keys' and values' store reads its row from a term of its own, the ownership rule then refused the output-owning
+   cut, and every recorded route ended in a copy kernel over two sibling sweeps on one block (rope64 495 us a layer,
+   rope3 38-41 us). The row now rides with the store, and at sm_120 lowering every rope program of both recipes,
+   M-RoPE included, gives each kernel a grid over the rows and heads it writes. Tokens are unchanged on the native
+   surrogates; the corpus needed nothing. The restamp touched three goldens, all at the rope programs: the RTX 5090
+   hardware golden (22 kernels re-keyed, 11 decisions and 19 rows dropped, 9 rows demoted), the 27B's (14, 6, 12, 6)
+   and Qwen3.6's (8, 5, 8, 3); the one-row programs kept theirs. The dropped decisions are the cuts that left the copy
+   kernel. Both priors are refit on the restamped goldens. What remains needs the card: record the fresh rope kernel
+   sets of both recipes (27B: 3, 16 and 64 rows, plain and M-RoPE; Qwen3.6: 3, 4 and 64) and the hardware golden's
+   rope rows, refit, then the gate.
 
 4. **Prefill ends at the prompt's last token (#1313).** After #1281 a 256-token prompt still runs 15 single steps
    on the 27B (3 on Qwen3.6): a chunk takes only prompt tokens *before the last*, because only the decode program

@@ -504,9 +504,14 @@ def output_regions(op: Fold, output_specs: tuple) -> tuple[tuple[Fold, Body, tup
     the operand term, the root-body statements only that operand's outputs read, and those output
     specifications, all in the operands' spelling (the form every consumer emits).
 
-    Each output specification must read exactly one region, the regions' backward cones over the
+    Each output specification's values must read exactly one region, the regions' backward cones over the
     root body must be disjoint, and together those cones must cover it. Refusals raise
     :class:`UnbindableProjection`.
+
+    A region that no store's values read, read only for a store's coordinates or guard — a scatter's row, computed
+    once per row above the cell that stores it — owns no output. It rides with the one region whose stores read it,
+    and its entry holds no stores; a piece writing those stores is built over both. A row the stores of two owners
+    read would be computed by both, so it refuses.
 
     This is the structural ownership rule alone, shared by kernel binding and by the rewrites that
     turn one multi-output ``TileOp`` into fresh pieces. :func:`projection_regions` composes it with
@@ -530,18 +535,27 @@ def output_regions(op: Fold, output_specs: tuple) -> tuple[tuple[Fold, Body, tup
     by_name = {name: region for region in regions for name in region.exposes}
     members: dict[int, set] = {id(region): set() for region in regions}
     grouped: dict[int, list] = {id(region): [] for region in regions}
+    readers: dict[int, set] = {id(region): set() for region in regions}
+
+    def read(names) -> set[int]:
+        cone = lift.body.backward_cone(names)
+        return {id(by_name[name]) for name in (*cone.external_reads, *names) if name in by_name}
+
     for spec in output_specs:
-        # A store reads its values, and whatever its coordinates and guard name (a scatter's row).
-        cone = lift.body.backward_cone(spec.reads)
-        used = {id(by_name[name]) for name in (*cone.external_reads, *spec.reads) if name in by_name}
-        if len(used) != 1:
+        # A store reads its values, and whatever its coordinates and guard name (a scatter's row). Its values name its
+        # owner; a store of values no region computes is owned by what its coordinates read.
+        used = read(spec.reads)
+        owners = read(spec.write.values) or used
+        if len(owners) != 1:
             raise UnbindableProjection("an output-tiled root must own each output specification independently")
-        owner = used.pop()
-        members[owner].update(cone.members)
+        owner = owners.pop()
+        members[owner].update(lift.body.backward_cone(spec.reads).members)
         grouped[owner].append(spec)
+        for other in used - {owner}:
+            readers[other].add(owner)
 
     claimed: set = set().union(*members.values()) if members else set()
-    if claimed != set(lift.body) or any(not grouped[id(region)] for region in regions):
+    if claimed != set(lift.body) or any(len(readers[id(region)]) != (0 if grouped[id(region)] else 1) for region in regions):
         raise UnbindableProjection("an output-tiled root forest must cover the complete projection")
     if any(members[id(left)] & members[id(right)] for i, left in enumerate(regions) for right in regions[i + 1 :]):
         raise UnbindableProjection("output-tiled root projections may not share tail statements")
@@ -559,12 +573,12 @@ def projection_regions(op: Fold, output_specs: tuple) -> tuple[tuple[Fold, Fold,
     The ownership partition is :func:`output_regions`; this adds the binder's own requirement, that
     each region be ABOUT one reducing term, so ``_bind_roots`` has a node to bind and a split has a
     fold to slice. A region reading several reducing roots leaves the epilogue with no piece to hand
-    it to.
+    it to, and a scatter's row owns no output to bind it around.
     """
     out = []
     for region, tail, stores in output_regions(op, output_specs):
         root = projection_root(region)
-        if root is None:
+        if root is None or not stores:
             raise UnbindableProjection("an output-tiled root must own each output specification independently")
         out.append((root, region, tail, stores))
     return tuple(out)
@@ -649,7 +663,7 @@ def owns_outputs_it_cannot_bind(op, output_specs: tuple) -> bool:
         regions = output_regions(op, tuple(output_specs))
     except UnbindableProjection:
         return False
-    return any(projection_root(region) is None for region, _tail, _stores in regions)
+    return any(projection_root(region) is None for region, _tail, stores in regions if stores)
 
 
 def chain_members(root: Fold) -> tuple[Fold, ...]:

@@ -191,11 +191,14 @@ takes a re-spelled name only where the replaced root binds or defines it: two re
 reading it from a workspace and the other in place, and the in-place region's store keeps its own name.
 A seam whose cone solely produces some of the kernel's OWN outputs realizes as an OUTPUT-OWNING cut instead: the piece
 writes those outputs and the sibling piece keeps the rest, so no workspace is written and no dtype has to be
-determined for one. The ownership test is `ops.output_regions` — every store must read exactly one root operand, the
-operands' cones over the root body must be disjoint and must cover it — and the piece takes the projection statements
-its own stores read. The seam decides between the two readings rather than offering both, on the same ground as the
-storage frontier: the workspace here would hold the output's exact bytes at the output's exact dtype, leaving the
-sibling nothing to do for them but copy. Every independent output region offers this cut, including regions whose
+determined for one. The ownership test is `ops.output_regions` — every store's values must read exactly one root
+operand, the operands' cones over the root body must be disjoint and must cover it — and the piece takes the projection
+statements its own stores read. An operand a store reads only for its coordinates or guard — a scatter's row, computed
+once per row above the cell that stores it — owns no output and rides with the one operand whose stores read it, so the
+piece writing those stores is built over both. Native's rotary program stores the chunk's keys and values into the
+cache that way, beside the rotated queries. The seam decides between the two readings rather than offering both, on
+the same ground as the storage frontier: the workspace here would hold the output's exact bytes at the output's exact
+dtype, leaving the sibling nothing to do for them but copy. Every independent output region offers this cut, including regions whose
 pieces use the same grid. The cut remains available after sibling producers fuse, so evidence can choose their
 boundaries again. A piece's grid follows `TileOp`'s `promoted_sweep`; separating stores whose axes differ can expose
 the `(m, n)` pair that a contraction's schedule needs.
