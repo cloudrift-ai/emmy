@@ -332,7 +332,9 @@ contract lives in [native/ARCHITECTURE.md](native/ARCHITECTURE.md); vLLM remains
   memory and the uploads between layers self-copy-skip under an outer capture. A post twin's residual input is its
   pre twin's input buffer, which the post does not write, so the residual needs no protective copy; its gate input
   is its pre twin's gate output. The two buffers belong to these programs only: a mixed step's GDN calls must not
-  write into the arena backing the other tiers' pre twins share.
+  write into the arena backing the other tiers' pre twins share. A hyper-connection MoE layer's output is computed in
+  torch (`place_routed_streams`), which writes it into the next layer's decode input, and a hosted Gated DeltaNet
+  layer writes into its post twin's attention input (`decode_input`), so neither upload copies.
   **Post→pre chaining covers the other program families** (M=1, symbolic, prefill-chunk — the vLLM
   integration plan's Milestone A2): each family's post OUTPUT array is rewired at build onto its pre twins'
   shared hidden-INPUT backing, so the between-layer upload self-copy-skips on pointer equality. The skip pays
@@ -436,7 +438,8 @@ contract lives in [native/ARCHITECTURE.md](native/ARCHITECTURE.md); vLLM remains
   products over the k picks, so the kernels read the E-tensors directly and the whole expert layer is one fused
   kernel. `_ensure_device` instantiates the group's plan once per layer over that layer's experts, binding the
   shared `[k]` int64 selector the router writes and the shared `[k, H]` partials (one layer runs at a time) and the
-  layer's stacked tensors: resident, aliased as the plan's weight inputs; paged (`EMMY_GEN_EXPERTS_GPU` below the
+  layer's stacked tensors: resident, lent to the instance at build as the plan's weight inputs (an arena backing held
+  a dead copy of one layer's experts); paged (`EMMY_GEN_EXPERTS_GPU` below the
   expert count), the first experts on the device and the rest in pinned host memory, declared to the runtime pager,
   which binds the page tables the kernels read through and the tables the compiler-spliced paging program keeps
   (backend ARCHITECTURE, "Paging"). Bound once, so per-layer cached graphs
@@ -1088,7 +1091,10 @@ inspector and no paging program, and the pager binds a page table that points ev
 the gather is a device-side launch, so whole-step decode capture records it. Host memory does not double: the numpy
 table the oracle and the prefill fallback read is rebound to a view of the pinned home. vLLM's MTP drafter gathers from
 that home too, because its proposer shares the target's `embed_tokens` (`_SharedRawEmbedding`), which reads the runner's
-table; the home holds the table's rows wherever the pager also keeps a copy.
+table; the home holds the table's rows wherever the pager also keeps a copy. The home's device view is on the rank's
+own device: one on device 0 opened a CUDA context on rank 0's card from every other rank of a tensor-parallel group. At
+zero pages on a V100 SXM3 (Qwen3.8-Flash-Next, 248,320 x 2,560 fp16) the gather reads a 4,096-row prefill chunk over the
+link in 7 ms and a decode row in 9 us.
 
 A page is a block of rows, not one, because the paging program ranks every page against every other on each step:
 NVIDIA's Qwen3.8-27B-NVFP4 table (248,320 x 5,120 BF16) is 970 pages of 2.5 MiB, with tables of a few KB.

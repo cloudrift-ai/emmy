@@ -382,6 +382,10 @@ def test_moe_fixed_slot_combine_matches_routed_oracle(built):
     assert {p.executor.buffer(m["slots"].output_names[0])[0] for p, m in zip(programs, runner._moe, strict=True)} == {
         runner._slot_partials.data_ptr()
     }, "every layer's slot program lands its partials in the one shared tensor"
+    for p, m in zip(programs, runner._moe, strict=True):
+        assert {n: p.executor.buffer(n)[0] for n in m["inputs"]} == {n: t.data_ptr() for n, t in m["inputs"].items()}
+    pooled = {key.partition(":")[2] for key in runner._expert_slots["arena"]._backings}
+    assert not pooled & set(runner._moe[0]["inputs"]), "the slot arena holds no copy of a layer's experts"
 
     torch.manual_seed(1)
     for layer in (0, 1):
@@ -1354,6 +1358,21 @@ def test_pinned_bytes_take_their_own_size():
     assert (start, end - start) == (raw.data_ptr(), 6 * mmap.PAGESIZE)
     assert view.data_ptr() == raw.data_ptr()
     assert torch.equal(view.view(torch.int32).cpu(), source)
+
+
+@requires_cuda
+def test_a_pinned_view_is_on_the_current_device():
+    """A tensor-parallel rank reads its pinned pages through a view on its own device. A view on device 0 opened a
+    CUDA context on rank 0's card from every other rank, about 0.3 GiB each."""
+    import torch
+
+    from emmy.serving.gen_runner import _pinned
+
+    if torch.cuda.device_count() < 2:
+        pytest.skip("needs two devices")
+    with torch.cuda.device(1):
+        _, view = _pinned(torch.arange(8, dtype=torch.int32))
+    assert view.device == torch.device("cuda", 1)
 
 
 @pytest.fixture(scope="module")

@@ -1971,18 +1971,21 @@ def _fuse_sibling_producers(fragment: Graph, spelled: dict[str, str], parent: Ti
     producer returns to Tile IR without a schedule, so an output-owning cut can separate it.
     ``spelled`` is each workspace buffer's seam; the fused producer is the piece of the seam set its
     members produced, and carries that set's token.
+
+    A producer nothing reads is dropped first. A chosen seam goes unread when another chosen seam's piece computes it
+    in place (a cone under one occurrence of a contraction whose piece is built from another); fused into a piece
+    something reads, it was a buffer no launch reads, which the backend refuses as dead scratch.
     """
+    fragment.remove_orphans()
     workspace = set(spelled)
     by_dependencies: dict[frozenset[str], set[str]] = {}
     for buffer in spelled:
-        node = fragment.producer(buffer)
-        assert node is not None
+        if (node := fragment.producer(buffer)) is None:
+            continue  # dropped above
         if any(tensor.dtype.logical_elems > 1 for tensor in node.outputs):
             continue  # the Loop splicer cannot remove a packed tensor's storage relation
         by_dependencies.setdefault(frozenset(set(node.inputs) & workspace), set()).add(node.id)
     for members in by_dependencies.values():
-        # A previous splice can prune unused producers from later groups as orphans.
-        members = members & fragment.nodes.keys()
         if len(members) < 2:
             continue
         _splice_pieces(fragment, members, spelled, parent, "+".join(sorted({spelled[nid] for nid in members})))
@@ -2014,8 +2017,10 @@ def _join_pieces(fragment: Graph, joins: tuple, spelled: dict[str, str], parent:
     producer, if the seam's piece joined one) and the output-owning seam's piece."""
     for producer, region in joins:
         workspace = next(buffer for buffer, spelling in spelled.items() if spelling == producer.spelling)
+        if (node := fragment.producer(workspace)) is None:
+            continue  # nothing read the workspace and its piece was dropped: the region's piece stands alone
         _, stores = region.owned
-        members = {fragment.producer(workspace).id, fragment.producer(f"{stores[0].write.output}{_PLACED}").id}
+        members = {node.id, fragment.producer(f"{stores[0].write.output}{_PLACED}").id}
         _splice_pieces(fragment, members, spelled, parent, joined_spelling(producer, region))
 
 

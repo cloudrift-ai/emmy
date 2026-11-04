@@ -228,7 +228,11 @@ Scoped `PLACE@path=cut` pins are authoritative and COMPOSE: every pin that resol
 one kernel joins a single realization — one producer per seam, one consumer, a producer reading another seam's
 workspace when its value nests inside (a normalized K cone contains the K-norm statistic cut beside it) — and the
 kernel consumes that placement restriction at its current stage, while its same-name remainder and each piece take
-their own fork (see `030_cut` under "Kernel boundaries after maximal fusion"). Sibling workspace producers with the same workspace dependencies then
+their own fork (see `030_cut` under "Kernel boundaries after maximal fusion"). A chosen seam can still go unread: a
+contraction's piece is built from the one occurrence whose read spans its whole space, so a cone chosen under another
+occurrence is computed in place there and nothing loads its workspace. Such a piece is dropped before any piece is
+fused or joined, so the decision mints what its other seams mint; fused into a piece something reads, it was a buffer
+no launch reads, which the backend refuses. Sibling workspace producers with the same workspace dependencies then
 lower to Loop IR, use the ordinary fusion splicer, and lift back to unscheduled Tile IR. The consumer stays outside
 that region, preserving the selected workspace edge. The fused producer re-enters the cut pass; an output-owning
 cut can separate it again without creating workspace producers to re-fuse. Input argument order and prior

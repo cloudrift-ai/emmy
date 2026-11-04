@@ -324,7 +324,8 @@ def test_cut_stores_one_value_per_repeated_coordinate_group(second_divisor, expe
 
 @pytest.mark.parametrize("live_dependents", [0, 1, 2])
 def test_sibling_producer_fusion_prunes_unused_later_group(live_dependents: int) -> None:
-    """Splicing the first group can remove unused producers from the next group."""
+    """Sibling fusion drops the producers nothing reads before it groups them, so a later group loses its unused
+    members and only the live ones fuse."""
     from emmy.compiler.backend.numpy import NumpyBackend
     from emmy.compiler.ir.loop import LoopOp
 

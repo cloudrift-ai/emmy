@@ -1,4 +1,4 @@
-"""A cut materializes the components its consumer READS, and no others.
+"""A cut materializes the components its consumer READS, and no others, and builds no piece nothing reads.
 
 A reduce carries its accumulators together — six channels folded in one term — while a reader may
 take a single one. ``Fold.lower`` narrows an operand edge to what its reader takes and drops the
@@ -7,6 +7,10 @@ the piece and loaded by nobody. The CUDA backend's liveness plan refuses exactly
 buffer … has no consuming launch (dead scratch)", which killed the candidate before it was ever
 measured — a hundred consecutive placements of one Gated DeltaNet reduction died this way, so the
 tuner had no valid schedule to rank against a greedy pick three orders of magnitude off.
+
+A whole piece can go unread the same way. A chosen seam inside another chosen seam's piece, which computes it in
+place, has no reader left; sibling fusion then spliced its piece into one something reads, and that piece wrote the
+dead buffer.
 
 The oracle is the backend's own precondition, asked of the fragment the cut builds: every buffer a
 piece writes has a reader.
@@ -26,7 +30,8 @@ from emmy.compiler.ir.schedule import Placement
 from emmy.compiler.ir.stmt import Assign, Load, Write
 from emmy.compiler.ir.stmt.leaves import OutputSpec
 from emmy.compiler.ir.tile import TileOp
-from emmy.compiler.pipeline.passes.tile._cut import cuttable_seams, realize
+from emmy.compiler.pipeline.passes.tile._cut import cuttable_seams, join_pairs, realize
+from tests.compiler.helpers import case_target_tile
 from tests.compiler.terms import projection, reduction, slab
 
 _ROW, _COL = Axis("m", Dim(8)), Axis("k", Dim(32))
@@ -101,10 +106,49 @@ def test_a_cut_writes_no_workspace_its_consumer_never_reads(store_input) -> None
     assert seams, "the reducing branch must be offered as a cuttable seam for this shape to arise"
 
     fragment = realize(_Match(graph), node, (seams[0],))
+    dead = _unread(fragment, node)
+    assert not dead, f"the cut wrote workspaces no launch reads: {dead}"
+
+
+def _unread(fragment: Graph, node: Node) -> list[str]:
+    """The buffers a piece of ``fragment`` writes and no piece loads. The kernel's own outputs leave the fragment,
+    under their own names or the temporary ones the splice redirects; everything else a piece writes is scratch,
+    which the backend plans a live interval for and refuses without a reader."""
     pieces = [piece for piece in fragment.nodes.values() if isinstance(piece.op, TileOp)]
     read = set().union(*(_loaded(piece.op) for piece in pieces))
     written = {tensor.name for piece in pieces for tensor in piece.outputs}
-    # The kernel's own outputs leave the fragment; everything else a piece writes is scratch, which
-    # the backend plans a live interval for and refuses without a reader.
-    dead = sorted(written - read - set(node.buffer_names()))
+    return sorted(written - read - set(node.buffer_names()) - set(fragment.outputs))
+
+
+#: The width-4 Gated DeltaNet prologue of the float16 hybrid the vLLM GDN test serves. Its qkv projection is read at
+#: three places, one contraction seam over all three; the RMS norm cones under the third place are seams of their own.
+_GDN_CONV = "fused/gdn-conv-cut-inside-contraction.json"
+_PROJECTION = "PLACE@map.3/map.2/inner"
+_NORMED = "PLACE@map.3/map.2/inner.2/map"
+
+
+@pytest.mark.parametrize(
+    "spellings",
+    [(_PROJECTION, _NORMED, "PLACE@map.3/map.2/inner.2/map.6/map"), (_PROJECTION, _NORMED, "PLACE@map.4/map")],
+    ids=["nested", "joined"],
+)
+def test_a_seam_inside_a_cut_contraction_leaves_no_unread_piece(spellings) -> None:
+    """The contraction's piece is built from the one occurrence that spans its whole space, and the norm cones chosen
+    under another occurrence are then read by nothing: their pieces are dropped, not fused into the contraction's.
+    Joined with an output region, the norm's workspace piece is dropped and the region's piece stands alone."""
+    tile = case_target_tile(_GDN_CONV)
+    seams = cuttable_seams(tile)
+    chosen = tuple(next(seam for seam in seams if spelling in (seam.spelling, *seam.aliases)) for spelling in spellings)
+    joins = tuple(pair for pair in join_pairs(seams) if pair[0] is chosen[1] and pair[1] is chosen[2])
+    assert bool(joins) == (spellings[-1] == "PLACE@map.4/map"), "the norm and the region must be a joined pair"
+    graph = Graph()
+    for name, tensor in tile.inputs.items():
+        graph.add_node(InputOp(), [], tensor, node_id=name)
+    outputs = list(tile.outputs.values())
+    graph.add_node(tile, list(tile.inputs), outputs=outputs, node_id=outputs[0].name)
+    graph.inputs, graph.outputs = list(tile.inputs), [tensor.name for tensor in outputs]
+    node = graph.nodes[outputs[0].name]
+
+    fragment = realize(_Match(graph), node, chosen, joins=joins)
+    dead = _unread(fragment, node)
     assert not dead, f"the cut wrote workspaces no launch reads: {dead}"
