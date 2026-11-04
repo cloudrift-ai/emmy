@@ -235,17 +235,31 @@ What the session changes for the milestones:
    rows on the 27B, 64 and 4 on Qwen3.6), then the gate. Until those rows land, a strict-evidence bake of either
    recipe's native image refuses them; images already published keep their own server and pack.
 
-5. **Long-window prefill attention folds chunk by chunk.** The 64-row attention writes its scores and
-   probabilities to memory and runs the value expectation far below bandwidth: 4.6 ms a layer at 65,536 positions,
-   the ~351 s attention term of the 505 s first token at 197,632. The tower attention already runs the folded form
-   — the mask a term of the score's own contraction, the expectation folding chunk by chunk on tensor cores,
-   FlashAttention's shape — so spell the text prefill attention over the paged cache the same way and record the
-   route. Stage it without TMA: the batching stretch pages this cache, and a launch that reads a paged buffer
-   through a descriptor refuses to export. cp.async stays legal only under the page grain 19 recommends
-   (Decisions). Gate: at 65,536 positions at least 3x faster
-   per layer; the attention term of the 197,632-token first
-   token <= 117 s (its share of the two-term budget; today ~351 s); the full-window prompt's first token <= 450 s
-   before 9 widens the chunk; the 4,096-window cells unchanged. Needs 1.
+5. **Long-window prefill attention folds chunk by chunk.** The 64-row attention's recorded route is four pieces —
+   the score GEMM to memory, the online statistics, the probabilities to memory, the P·V GEMM — and runs the value
+   expectation far below bandwidth: 4.6 ms a layer at 65,536 positions, the ~351 s attention term of the 505 s first
+   token at 197,632. The fold is the softmax twist's expectation channel on tensor cores, FlashAttention's shape,
+   which the tower's attention already takes as one kernel. The text attention never reached it, for three reasons
+   found on 2026-11-04 by pinning the tower's schedule on the twin off the card:
+   - the twin rounded the normalized probabilities to the model dtype before the value product, so the expectation
+     never joined the twist — fixed (the attention twins of both recipes re-key; their rows record with this
+     milestone's);
+   - the causal mask compares the key coordinate against `position + row`, the position read from device memory,
+     and loop normalization hoists that per-row term, with the fill constants, into a pointwise operand over the row
+     axis; the chunk tier refuses it twice — it reads the score's operands as slabs only, and takes a mask only as a
+     Select over the score's coordinates with cell-uniform values (`_chunk_refusal`). The tier has to read a uniform
+     loaded value in the mask predicate beside the coordinates, and the hoisted per-row term as a per-row scalar.
+     With the mask removed and a 16-bit cache the twin lowers to the tensor-core fold at the symbolic window;
+   - the chunk tier's multiplicand width follows the streamed value, so an FP8 cache asks for an fp8 fragment the
+     computed weight cannot be demoted into ("a demoting compute fill cannot produce an fp8 fragment"), while the
+     score contraction already promotes FP8 keys into a 16-bit atom. The tier needs the same promoting fill for the
+     value, or an fp8 repack of the weight.
+   Both tier items are compiler work off the card; then record the route in both recipes. Stage it without TMA: the
+   batching stretch pages this cache, and a launch that reads a paged buffer through a descriptor refuses to
+   export. cp.async stays legal only under the page grain 19 recommends (Decisions). Gate: at 65,536 positions at
+   least 3x faster per layer; the attention term of the 197,632-token first token <= 117 s (its share of the
+   two-term budget; today ~351 s); the full-window prompt's first token <= 450 s before 9 widens the chunk; the
+   4,096-window cells unchanged. Needs 1.
 
 6. **Long-window decode attention: one cache read per key-value group, a combine that does not rescan the
    window.** The 27B step grows +48 ms from 7,680 to 197,632 positions; stock grows +4. Two named causes: the

@@ -234,10 +234,11 @@ def rope_module(heads, kv_heads, head_dim, rotary_dim, rows, cache_dtype, axes=N
 
 def attend_module(heads, kv_heads, head_dim, rows):
     """Causal grouped-query attention over the window's leading cache positions, every position past a row's own
-    masked on the device. The scores and the softmax are FP32; the probabilities are rounded to the model dtype for
-    the value expectation, which accumulates in FP32, as attention in the model dtype rounds them, so both products
-    are 16-bit contractions; only the output is rounded to the model dtype. Each query head reads its key-value
-    head's cache, the cache coming token-major (:func:`rope_module`)."""
+    masked on the device. The scores, the softmax and the value expectation are FP32; only the output is rounded to
+    the model dtype. The probabilities are not rounded to it first, as attention in the model dtype does: a cast
+    between the exponent and the value product is not the expectation the softmax twist folds, and a tensor-core
+    schedule rounds the weights to its multiplicand dtype itself. Each query head reads its key-value head's cache,
+    the cache coming token-major (:func:`rope_module`)."""
     import torch
 
     class Attend(torch.nn.Module):
@@ -249,7 +250,7 @@ def attend_module(heads, kv_heads, head_dim, rows):
             positions = position + torch.arange(rows)
             keep = torch.arange(window).unsqueeze(0) <= positions.unsqueeze(1)
             scores = torch.matmul(q3, k3.transpose(1, 2)) * head_dim**-0.5 + torch.where(keep, 0.0, MASK_FILL)
-            probabilities = torch.softmax(scores, dim=-1).to(q.dtype).float()
+            probabilities = torch.softmax(scores, dim=-1)
             return torch.matmul(probabilities, v3).to(q.dtype).transpose(0, 1).reshape(rows, heads * head_dim)
 
     return Attend()
