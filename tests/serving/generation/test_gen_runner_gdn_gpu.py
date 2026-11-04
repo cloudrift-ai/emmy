@@ -149,26 +149,19 @@ def test_gdn_bf16_prompt_matches_eager(built, length):
 @pytest.fixture(scope="module")
 def hybrid():
     """The tiny hybrid Qwen3.5: one GDN layer, then one full-attention layer that carries an output gate. The lane's
-    golden decides the GDN kernels — an uncut GDN kernel takes minutes per call. It holds no row for the attention
-    programs, so those compile cold, as the gated-attention tests in ``test_gen_runner_gpu`` do. That is why this
-    runner is not a ``RUNNERS`` entry: the table builds under strict evidence, which a cold attention compile fails."""
+    golden decides the GDN kernels, which are the ``qwen3_5.gdn.l2`` shape's: an uncut GDN kernel takes minutes per
+    call. It holds no row for these float32 attention programs, so those compile on the prior, as the gated-attention
+    tests in ``test_gen_runner_gpu`` do."""
     import torch
-    from transformers.models.qwen3_5.configuration_qwen3_5 import Qwen3_5TextConfig
-    from transformers.models.qwen3_5.modeling_qwen3_5 import Qwen3_5ForCausalLM
 
     if not torch.cuda.is_available():
         pytest.skip("CUDA not available")
-    from emmy.compiler.pipeline.search.golden import evidence_scope
-    from emmy.compiler.pipeline.search.pins import pinned_knobs
     from emmy.serving.gen_runner import EmmyGenRunner
     from tests.serving import helpers
     from tests.serving.conftest import Built
-    from tests.serving.helpers import QWEN3_5_TINY
 
-    torch.manual_seed(0)
-    model = Qwen3_5ForCausalLM(Qwen3_5TextConfig(**QWEN3_5_TINY)).eval()
-    document = helpers.golden_document()
-    with pinned_knobs(document.shared_regime()), evidence_scope([document]):
+    model = helpers.qwen3_5_model()
+    with helpers.evidence_scope(strict=False):
         runner = EmmyGenRunner.from_model(model, dtype_str="float32", decode_bucket=4, prefill_bucket=16, max_tokens=32)
     return Built(runner, model)
 
