@@ -1006,7 +1006,11 @@ def slice_routed_experts(model, rank: int, world: int) -> None:
     keep the same intermediate rows, down the matching columns, so a rank's expert output is a partial
     sum the group all-reduce completes and every rank runs the same picks. A meta parameter is
     re-declared at the sliced shape; a real one keeps its sliced values. Only the concatenated, biasless
-    ``F.linear`` layout (DeepSeek, OLMoE) is sliced."""
+    ``F.linear`` layout (DeepSeek, OLMoE) is sliced.
+
+    A Qwen4Exp block's shared expert is sliced the same way: its ``post`` returns the shared expert's output
+    apart (:func:`_build_gated_residual_split`), so that partial joins the routed one ahead of the all-reduce,
+    as the 1Cat fork's does. Its gate stays whole."""
     from torch import nn  # noqa: PLC0415
 
     trunk = getattr(model, "model", model)
@@ -1015,6 +1019,10 @@ def slice_routed_experts(model, rank: int, world: int) -> None:
         parts = moe_block_parts(block.mlp) if hasattr(block, "mlp") else None
         if parts is None:
             continue
+        if getattr(block, "attn_hyper_connection", None) is not None:
+            shared = block.mlp.shared_expert
+            for linear, name in ((shared.gate_proj, "w_gate"), (shared.up_proj, "w_up"), (shared.down_proj, "w_down")):
+                linear.weight = nn.Parameter(expert_intermediate_slice(name, linear.weight, rank, world), requires_grad=False)
         experts = parts[1]
         if moe_expert_layout(experts) != (False, False, False):
             raise NotImplementedError(
@@ -1234,10 +1242,11 @@ def hyper_connection_seam(block):
 def place_routed_streams(mixed, routed, mix, out=None):
     """Close the hyper-connection MoE seam: ``mixed[T, hc·H] + mix[T, hc] ⊗ routed[T, H]``.
 
-    The post program already placed the shared expert and mixed the streams (``post ⊗ shared +
-    combᵀ · streams``); the routed combine runs in torch afterwards and lands on the streams through the
-    same per-stream ``post`` weights, which the program returns as ``mix``. ``out``, a ``[T, hc·H]`` tensor of the
-    result's dtype, receives the sum: the next program's own input buffer, so its upload copies nothing."""
+    The post program already mixed the streams, and DeepSeek V4's placed its shared expert there (``post ⊗ shared +
+    combᵀ · streams``); the routed combine (with Qwen4Exp's shared expert added) runs in torch afterwards and lands
+    on the streams through the same per-stream ``post`` weights, which the program returns as ``mix``. ``out``, a
+    ``[T, hc·H]`` tensor of the result's dtype, receives the sum: the next program's own input buffer, so its
+    upload copies nothing."""
     import torch
 
     t = routed.shape[0]
@@ -1310,10 +1319,11 @@ def _build_gated_residual_split(block):
 
     - ``pre(hidden[T, hc·H]) -> x[T, H]`` — the attention-site gated residual's mixed input, what the Gated
       DeltaNet or sparse-attention sublayer consumes.
-    - ``post(attn_out[T, H], residual[T, hc·H]) -> (mixed[T, hc·H], xn[T, H], mix[T, hc])`` — the mixer output
-      injected into the streams (the injection weights are recomputed from ``residual``), the MLP-site gated
-      residual's mixed input ``xn`` for the router and the experts, the gated shared expert injected into the
-      streams, and the MLP-site injection weights that place the routed combine (:func:`place_routed_streams`).
+    - ``post(attn_out[T, H], residual[T, hc·H]) -> (mixed[T, hc·H], xn[T, H], mix[T, hc], shared[T, H])`` — the
+      mixer output injected into the streams (the injection weights are recomputed from ``residual``), the MLP-site
+      gated residual's mixed input ``xn`` for the router and the experts, the MLP-site injection weights, and the
+      gated shared expert's output. The runner adds ``shared`` to the routed combine, ahead of the all-reduce when
+      both are a rank's slice (:func:`slice_routed_experts`), and places the sum (:func:`place_routed_streams`).
 
     Both call the block's own gated-residual modules, as ``Qwen4ExpTextDecoderLayer.forward`` does. Layer 2's
     n-gram embedding is added to the carrier ahead of ``pre`` and is not part of either program."""
@@ -1341,8 +1351,7 @@ def _build_gated_residual_split(block):
             _mixed, streams, inject = self.attn_hyper_connection(residual)
             streams = streams + (attn_out.unsqueeze(-2) * inject.unsqueeze(-1)).flatten(-2)
             xn, streams, inject = self.mlp_hyper_connection(streams)
-            shared = torch.sigmoid(self.shared_expert_gate(xn)) * self.shared_expert(xn)
-            return streams + (shared.unsqueeze(-2) * inject.unsqueeze(-1)).flatten(-2), xn, inject
+            return streams, xn, inject, torch.sigmoid(self.shared_expert_gate(xn)) * self.shared_expert(xn)
 
     return Pre(), Post()
 
@@ -2619,10 +2628,10 @@ def load_quantized_split(
             if param is not None:
                 state[key] = torch.empty(param.shape, dtype=dtype, device="cpu")
 
-    if expert_slice is not None:
-        slice_routed_experts(model, *expert_slice)
     _trim_padded_weights(model, state)  # EXL3 pads both dims of every coded linear to 128
     missing, unexpected = model.load_state_dict(state, strict=False, assign=True)
+    if expert_slice is not None:  # after the load: a sliced shared expert is read whole (the routed ones are in the store)
+        slice_routed_experts(model, *expert_slice)
     if unexpected:
         logger.warning("quantized split load: %d unexpected checkpoint tensors (e.g. %s)", len(unexpected), unexpected[0])
     # DeepSeek/GLM/Laguna routers register this correction as a buffer.  Leaving it META when

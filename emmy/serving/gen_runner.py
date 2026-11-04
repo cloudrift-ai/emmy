@@ -2928,14 +2928,15 @@ class EmmyGenRunner:
         moe = self._moe[layer] if self._moe is not None else None
         if moe is None:
             return outs[0]
-        if len(outs) == 3 and self.hc_mult > 1:
+        if self.hc_mult > 1:
             # Hyper-connection seam: the post program already mixed the attention output onto the
-            # streams and placed the shared expert, and returns the per-stream weights the ROUTED
-            # result still needs. The routed result is reduced across the ranks' expert slices
-            # before the placement closes the layer.
+            # streams (DeepSeek V4's also placed the shared expert), and returns the per-stream weights
+            # the ROUTED result still needs. A Qwen4Exp post returns its shared expert's output too, which
+            # joins the routed result; that is reduced across the ranks' expert slices before the
+            # placement closes the layer.
             from emmy.compiler.trace.huggingface import place_routed_streams
 
-            mixed, xn, mix = outs
+            mixed, xn, mix, *shared = outs
             # A compiled variant may hand its outputs back in its ACCUMULATION dtype (some
             # geometries' post twins emit float32); the seam contract is the residual dtype for
             # the carrier and the activation dtype for the routed input, so normalize before the
@@ -2945,7 +2946,7 @@ class EmmyGenRunner:
             xn = xn.to(self._activation_dtype)
             # Placed straight into the next layer's decode input, which is also that layer's post residual.
             out = self.decode_input("pre", layer + 1, mixed)
-            return place_routed_streams(mixed, self._moe_routed(moe, xn, token_ids), mix, out=out)
+            return place_routed_streams(mixed, self._moe_routed(moe, xn, token_ids, *shared), mix, out=out)
         if len(outs) == 3:
             h, xn, shared = outs
         else:
@@ -2956,18 +2957,21 @@ class EmmyGenRunner:
                 raise RuntimeError("a separate float32 shared-expert output requires float32 routed accumulation")
         return _combine_moe_output(h, self._moe_routed(moe, xn, token_ids), shared)
 
-    def _moe_routed(self, moe, xn, token_ids):
+    def _moe_routed(self, moe, xn, token_ids, shared=None):
         """The routed experts' output for one MoE layer. Single-token decode rides the FIXED-SLOT
         combine (capture-legal — no host sync, a fixed launch set); every wider step keeps the routed
         dispatch, whose launch set varies with the routing (eager only). On a tensor-parallel group
         each rank computes its slice of every pick, and the group reduction sums the slices — so a
         decode batch reaches nearly as many distinct experts as it has picks, and its rows ride the
         fixed slots too (:attr:`moe_slot_width`): k launches per row cost less than one host-synced
-        dispatch per expert."""
+        dispatch per expert. A ``shared`` expert output (this rank's slice of it) is added ahead of
+        the reduction, so one all-reduce sums both."""
         if xn.shape[0] <= self.moe_slot_width:
             routed = self._moe_combine_slots(moe, xn, token_ids)
         else:
             routed = self._moe_combine(moe, xn, token_ids)
+        if shared is not None:
+            routed += shared
         if (reduce_routed := getattr(self, "_reduce_routed", None)) is not None:
             routed = reduce_routed(routed)
         return routed
@@ -3005,14 +3009,16 @@ class EmmyGenRunner:
                 specs = (("hidden", residual.dtype, width),)
             elif output_count == 2:
                 specs = (("hidden", residual.dtype, width), ("moe_xn", self._activation_dtype, width))
-            elif output_count == 3 and self.hc_mult > 1:
-                # A hyper-connection post returns three DIFFERENT widths: the mixed carrier, the
-                # hidden-width normed activation the experts consume, and the per-stream weights.
+            elif self.hc_mult > 1:
+                # A hyper-connection post returns DIFFERENT widths: the mixed carrier, the hidden-width
+                # normed activation the experts consume, the per-stream weights, and (Qwen4Exp) the
+                # shared expert's output.
                 specs = (
                     ("hidden", residual.dtype, width),
                     ("moe_xn", self._activation_dtype, self._hidden_size),
                     ("moe_mix", residual.dtype, self.hc_mult),
-                )
+                    ("moe_shared", self._activation_dtype, self._hidden_size),
+                )[:output_count]
             elif output_count == 3:
                 specs = (
                     ("hidden", residual.dtype, width),

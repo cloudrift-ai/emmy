@@ -436,7 +436,7 @@ def test_deepseek_serving_twins_capture_the_hyper_connection_seam_weight_free(tm
     assert [tuple(pre.nodes[i].output.shape) for i in pre.inputs] == [(4, 64)]
     assert [tuple(pre.nodes[o].output.shape) for o in pre.outputs] == [(4, 32)]
     assert [tuple(post.nodes[i].output.shape) for i in post.inputs] == [(4, 32), (4, 64)]
-    assert [tuple(post.nodes[o].output.shape) for o in post.outputs] == [(4, 64), (4, 32), (4, 2)]
+    assert [tuple(post.nodes[o].output.shape) for o in post.outputs] == [(4, 64), (4, 32), (4, 2), (4, 32)]
     assert [tuple(expert.nodes[i].output.shape) for i in expert.inputs] == [(4, 32), (32, 32), (32, 16)]
     token_dim = graphs["pre-sym"].nodes[graphs["pre-sym"].inputs[0]].output.shape[0]
     assert not token_dim.is_static and token_dim.as_atom_name() == "num_tokens"
@@ -464,7 +464,7 @@ def test_qwen4_exp_serving_twins_capture_the_gated_residual_seam_weight_free(tmp
     assert [tuple(pre.nodes[i].output.shape) for i in pre.inputs] == [(4, 64)]
     assert [tuple(pre.nodes[o].output.shape) for o in pre.outputs] == [(4, 32)]
     assert [tuple(post.nodes[i].output.shape) for i in post.inputs] == [(4, 32), (4, 64)]
-    assert [tuple(post.nodes[o].output.shape) for o in post.outputs] == [(4, 64), (4, 32), (4, 2)]
+    assert [tuple(post.nodes[o].output.shape) for o in post.outputs] == [(4, 64), (4, 32), (4, 2), (4, 32)]
     assert [tuple(expert.nodes[i].output.shape) for i in expert.inputs] == [(4, 32), (32, 32), (32, 16)]
     token_dim = graphs["pre-sym"].nodes[graphs["pre-sym"].inputs[0]].output.shape[0]
     assert not token_dim.is_static and token_dim.as_atom_name() == "num_tokens"

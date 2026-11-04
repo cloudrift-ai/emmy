@@ -375,9 +375,10 @@ contract lives in [native/ARCHITECTURE.md](native/ARCHITECTURE.md); vLLM remains
   tier below serves them. This is what makes a 256-expert model fit at all: one DeepSeek V4 pipeline stage's experts
   are ~9.4 GB against a 32 GB card that also carries attention, arenas and the KV cache, ~1.2 GB per rank once sliced
   eight ways. The slicing reaches the checkpoint read (`load_quantized_split`'s `expert_slice`), the twin's declared
-  expert shapes, the serving-twin capture (the config's `--tensor-parallel-size`) and the pack key. Everything else
-  the layer's programs hold runs whole on every rank, shared experts included (DeepSeek V4's, and Qwen3.8-Flash-Next's
-  gated one inside `post`), so only the routed output is all-reduced. The router the
+  expert shapes, the serving-twin capture (the config's `--tensor-parallel-size`) and the pack key. Qwen3.8-Flash-Next's
+  gated shared expert is sliced the same way: its `post` returns the shared expert's output apart, the runner adds it
+  to the routed output, and one all-reduce sums both, as the 1Cat fork does. Everything else the layer's programs hold
+  runs whole on every rank, DeepSeek V4's shared expert included. The router the
   combine calls is the runner's own copy (`serving_router`), cast to the activation dtype except for the
   expert-selection bias (`e_score_correction_bias`),
   which stays float32 as Transformers keeps it: DeepSeek V4's bias reaches ~27, where float16 rounding flipped a top-6
