@@ -1966,13 +1966,12 @@ def _fuse_sibling_producers(fragment: Graph, spelled: dict[str, str], parent: Ti
     by_dependencies: dict[frozenset[str], set[str]] = {}
     for buffer in spelled:
         node = fragment.producer(buffer)
-        assert node is not None
+        if node is None:
+            continue  # nothing read it, and :func:`_finished` dropped its piece
         if any(tensor.dtype.logical_elems > 1 for tensor in node.outputs):
             continue  # the Loop splicer cannot remove a packed tensor's storage relation
         by_dependencies.setdefault(frozenset(set(node.inputs) & workspace), set()).add(node.id)
     for members in by_dependencies.values():
-        # A previous splice can prune unused producers from later groups as orphans.
-        members = members & fragment.nodes.keys()
         if len(members) < 2:
             continue
         _splice_pieces(fragment, members, spelled, parent, "+".join(sorted({spelled[nid] for nid in members})))
@@ -2004,9 +2003,26 @@ def _join_pieces(fragment: Graph, joins: tuple, spelled: dict[str, str], parent:
     producer, if the seam's piece joined one) and the output-owning seam's piece."""
     for producer, region in joins:
         workspace = next(buffer for buffer, spelling in spelled.items() if spelling == producer.spelling)
+        if (node := fragment.producer(workspace)) is None:
+            continue  # the workspace piece was dropped unread: the region's piece stands alone
         _, stores = region.owned
-        members = {fragment.producer(workspace).id, fragment.producer(f"{stores[0].write.output}{_PLACED}").id}
+        members = {node.id, fragment.producer(f"{stores[0].write.output}{_PLACED}").id}
         _splice_pieces(fragment, members, spelled, parent, joined_spelling(producer, region))
+
+
+def _finished(fragment: Graph, spelled: dict[str, str], parent: TileOp, joins: tuple) -> Graph:
+    """The cut fragment once every piece is in it: the pieces nothing reads dropped, the independent workspace
+    producers fused, each joined pair spliced into one.
+
+    A chosen seam can lie inside another chosen seam's piece that computes it in place, and then nothing reads its
+    workspace: a cone under one occurrence of a contraction whose producer is built from another occurrence (only a
+    member that spans the contraction's whole space can build it). Its piece is dropped before the fusion, which would
+    otherwise splice it into a piece something reads, leaving a buffer written and never loaded: the dead scratch the
+    backend refuses."""
+    fragment.remove_orphans()
+    _fuse_sibling_producers(fragment, spelled, parent)
+    _join_pieces(fragment, joins, spelled, parent)
+    return fragment
 
 
 def realize(match: Match, root: Node, seams, *, joins: tuple = ()) -> Graph:
@@ -2357,9 +2373,7 @@ def realize(match: Match, root: Node, seams, *, joins: tuple = ()) -> Graph:
         consumer_stores = _in_source_order(tuple(store for _, _, stores in kept for store in stores), order)
         # A composed decision may hand every output away; then there is no sibling piece to emit.
         if not consumer_stores:
-            _fuse_sibling_producers(fragment, spelled, tile)
-            _join_pieces(fragment, joins, spelled, tile)
-            return fragment
+            return _finished(fragment, spelled, tile, joins)
         consumer_outputs = {store.write.output for store in consumer_stores}
         consumer_fold = _region_term(
             tuple(region for region, _, _ in kept), Body(tuple(stmt for _, tail, _ in kept for stmt in tail)), consumer_stores
@@ -2389,9 +2403,7 @@ def realize(match: Match, root: Node, seams, *, joins: tuple = ()) -> Graph:
         _piece_inputs(root, consumer.op, tuple(buffer for buffer in all_buffers if buffer in reads)),
         suffix=_PLACED,
     )
-    _fuse_sibling_producers(fragment, spelled, tile)
-    _join_pieces(fragment, joins, spelled, tile)
-    return fragment
+    return _finished(fragment, spelled, tile, joins)
 
 
 def _reindexed(body: Body, mapping: dict) -> Body:
