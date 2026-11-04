@@ -247,8 +247,11 @@ def attend_module(heads, kv_heads, head_dim, rows):
             q3 = q.view(rows, heads, head_dim).transpose(0, 1).float()
             k3 = keys.float().transpose(0, 1).repeat_interleave(group, dim=0)
             v3 = values.float().transpose(0, 1).repeat_interleave(group, dim=0)
-            positions = position + torch.arange(rows)
-            keep = torch.arange(window).unsqueeze(0) <= positions.unsqueeze(1)
+            # Both indices are the window's own coordinate (a constant ``arange(rows)`` would be an operand with a row
+            # axis), and the comparison keeps the key and the row together, so the mask reaches the compiler as a
+            # predicate over the score's coordinates and the position alone: the additive mask the chunk tier takes.
+            index = torch.arange(window)
+            keep = index.unsqueeze(0) - index[:rows].unsqueeze(1) <= position
             scores = torch.matmul(q3, k3.transpose(1, 2)) * head_dim**-0.5 + torch.where(keep, 0.0, MASK_FILL)
             probabilities = torch.softmax(scores, dim=-1)
             return torch.matmul(probabilities, v3).to(q.dtype).transpose(0, 1).reshape(rows, heads * head_dim)
@@ -550,7 +553,7 @@ class _Step:
         from emmy.serving.gen_runner import _plan_sources, _traced_split
 
         if window:
-            axis = torch.export.Dim(WINDOW, min=1, max=MAX_CONTEXT)
+            axis = torch.export.Dim(WINDOW, min=rows or 1, max=MAX_CONTEXT)  # a window holds at least the program's rows
             shapes = {name: {0: axis} if name in window else {} for name in inspect.signature(wrapper.forward).parameters}
             graph = trace_module(wrapper, tuple(examples), dynamic_shapes=shapes)
         else:

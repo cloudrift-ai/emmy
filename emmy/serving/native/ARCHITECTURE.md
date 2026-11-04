@@ -48,11 +48,10 @@ softmax computes them and accumulates in FP32; only the output is rounded to the
 to the model dtype first, as attention in the model dtype does, put a divide and a cast between the exponent and the
 value product, which is not the expectation the softmax twist recognizes, so the text attention could never fold chunk
 by chunk on tensor cores the way the tower's does; a tensor-core schedule rounds the unnormalized weights to its
-multiplicand dtype itself, as FlashAttention does. Two limits of the compiler's chunk tier still keep that fold off the
-text attention: it takes a mask only as a Select over the score's coordinates with cell-uniform values, and the causal
-mask's `position + row` term reaches it as a hoisted operand over the row axis; and under an FP8 cache its multiplicand
-width follows the streamed value, which the computed weight cannot be demoted into. Rotary constants come from the
-checkpoint's own module in FP32. Rotation also uses FP32 intermediates and rounds only the query/key outputs to the
+multiplicand dtype itself, as FlashAttention does. The causal mask compares the key against the row and the position,
+both indices the window's own coordinate, so it reaches the compiler's chunk tier as a predicate over the score's
+coordinates and one uniform value, the additive mask that tier takes; an FP8 cache's values convert in the fold's
+fragment loads. Rotary constants come from the checkpoint's own module in FP32. Rotation also uses FP32 intermediates and rounds only the query/key outputs to the
 model dtype. The final norm is a program of its own, ahead of the head. The existing standalone exporter
 bundles all binaries and weight bytes, each constant read from its source as the pack writes it, so the exporting
 process never holds the trunk; a constant decode and prefill share is one file, which the runtime reads once and lends
@@ -251,10 +250,9 @@ patch's row and column positions through the rotary tables vLLM's tower keeps (r
 attention over the image's own patches in the model dtype. A padding patch's key is masked through one more score
 dimension, where every query holds one and a padding key a large negative value, and the score's head is zero-padded
 to whole 16-wide steps: the mask is a term of the score's own contraction, so the expectation folds chunk by chunk on
-tensor cores, FlashAttention's shape. The chunk tier takes an additive mask only as a Select over the score's
-coordinates with cell-uniform values; a mask compared against the loaded patch count, like the text attention's against
-its loaded position, reaches the tier as a hoisted operand over the row axis and refuses the fold. The recipe golden
-records that route (the rotated query and key cut).
+tensor cores, FlashAttention's shape, which a mask compared against the loaded patch count takes as well since the
+text attention's mask against its loaded position does. The recipe golden records that route (the rotated query and
+key cut).
 
 Below `EMMY_GEN_VISION_GPU` blocks each block's projection weights are one page of a pool per weight, as the plugin's
 tower pages them (serving `ARCHITECTURE.md`, "The vision tower, and `EMMY_GEN_VISION_GPU`"). The pools are pager

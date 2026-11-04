@@ -686,7 +686,12 @@ readings the tier would otherwise refuse. Its LEAVES are read once ahead of the 
 one needs no gmem address at all: a causal mask's fill / zero constants are a computed pair, and only the pivot source
 and the streamed value are ever asked for a slab. And a `Select` on the score fragment's OWN coordinates — the row the
 carrier folds and the chunk it folds over — is per ELEMENT, not cell-uniform, so `_residence` lands it as a
-coordinate-masking `FragmentApply` under the same coordinate substitution the boundary mask performs. The same `Select`s are also read
+coordinate-masking `FragmentApply` under the same coordinate substitution the boundary mask performs. A program that
+spells its mask as a comparison and a `where` instead — native's causal attention, `key − row <= position` with the
+position loaded from memory — reaches the tier with its row index as a `Let` alias of the coordinate, hoisted with
+the position and the fill constants into a leaf over the row axis; `select_masks` (`ir/schedule/mask.py`) folds the
+aliases into the predicate and spells the `where` as that same `Select`, the uniform position a free variable the
+predicate keeps, so the gate and the emission read one form. The same `Select`s are also read
 ONCE, ahead of the loop, for what they say about whole chunks (`_mask_key_bounds`). Expression normalization may
 reverse either comparison's operands, so the bound reader first restores the `key − row` orientation. A mask whose
 masked branch reads `key > row + c` (or `>=`) with `c ≥ 0` masks every key from the CTA's block end onward for every

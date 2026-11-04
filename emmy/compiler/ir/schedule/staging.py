@@ -225,7 +225,7 @@ def _chunk_warp_stage(
     tier has to offer.
     """
     atom, view, n = tile.atom, c.as_contraction(), tile.n
-    slab = c.operands[1].as_slab()
+    slab = c.streamed.as_slab()
     if view is None or slab is None:
         return None
     b_nbytes = atom.operand_dtype("b").nbytes
@@ -634,7 +634,7 @@ def resolve_scalar_stage(
     if stage.transport == "smem-tma" and not (
         _tma_operand_box(c.operands[0].as_slab().load.index, tile.m.axis.name, k_axis.name, (tile.m.axis.name, k_axis.name))
         and _tma_operand_box(
-            c.operands[1].as_slab().load.index,
+            c.streamed.as_slab().load.index,
             tile.n.axis.name,
             k_axis.name,
             (tile.n.axis.name, k_axis.name) if b_trans else (k_axis.name, tile.n.axis.name),

@@ -36,11 +36,11 @@ from functools import cached_property
 
 from emmy.compiler.ir.axis import Axis
 from emmy.compiler.ir.elementwise import ElementwiseImpl
-from emmy.compiler.ir.expr import Var
+from emmy.compiler.ir.expr import Literal, Var
 from emmy.compiler.ir.pure.lam import Lambda
 from emmy.compiler.ir.pure.twist import Recipe, Twist
 from emmy.compiler.ir.sigma import Sigma
-from emmy.compiler.ir.stmt import Accum, Affine, Assign, Body, Carry, Load, Loop, OutputSpec, Pre, Select, Stmt
+from emmy.compiler.ir.stmt import Accum, Affine, Assign, Body, Carry, Let, Load, Loop, OutputSpec, Pre, Select, Stmt
 from emmy.compiler.ir.stmt.body import free_names
 
 # ``Body.structural_key()`` dispatches :func:`emmy.compiler.ir.stmt.passes.rewrite` over every
@@ -800,7 +800,9 @@ class Fold:
         by_name = {edge.exposes[index]: edge for _param, edge, index in self.bindings}
         a_edge = self.operands[0]
         a_names = {edge.exposes[index] for _param, edge, index in self.bindings if edge is a_edge}
-        uniform = {edge.exposes[index] for _param, edge, index in self.bindings if edge is not a_edge and not edge.free_axes}
+        uniform = {
+            edge.exposes[index] for _param, edge, index in self.bindings if edge is not a_edge and edge.uniform_leaf(a_edge.free_axes)
+        }
         based = self.based()  # bilinearity lives in BASE coordinates; ψ divides the product away
         out: list[tuple[int, Fold, str]] = []
         for index, result in enumerate(based.results):
@@ -820,6 +822,28 @@ class Fold:
                 continue  # a square, or a product that does not multiply A by exactly one other edge
             out.append((index, by_name[right[0]], right[0]))
         return tuple(out)
+
+    def uniform_leaf(self, axes: frozenset[str]) -> bool:
+        """Whether this leaf term exposes nothing but cell-uniform values and bare coordinates of ``axes``: literals,
+        loads indexed by no coordinate, and ``Let`` aliases of those coordinates. Such an operand adds no dependence
+        outside a term evaluated over ``axes`` — a mask over them reads it — and a tier that evaluates per fragment
+        folds the aliases into its coordinate predicates and reads the rest once."""
+        if self.operands or self.base is not None or not self.free_axes <= axes:
+            return False
+        for stmt in self.lift.body:
+            if isinstance(stmt, Let) and (isinstance(stmt.value, Literal) or (isinstance(stmt.value, Var) and stmt.value.name in axes)):
+                continue
+            if isinstance(stmt, Load) and not any(index.free_vars() for index in stmt.index):
+                continue
+            return False
+        return True
+
+    @property
+    def streamed(self) -> Fold:
+        """The operand edge a tier streams along this carrier's axis: the one bilinear channel's edge of a twisted
+        carrier (its uniform leaves may stand before it), ``operands[1]`` of a plain contraction."""
+        channels = self.bilinear_channels() if self.twist is not None else ()
+        return channels[0][1] if channels else self.operands[1]
 
     @cached_method
     def per_state(self) -> Fold | None:

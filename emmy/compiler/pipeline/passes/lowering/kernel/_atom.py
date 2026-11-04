@@ -72,6 +72,7 @@ from emmy.compiler.ir.pure.fold import Fold
 from emmy.compiler.ir.pure.lam import Lambda
 from emmy.compiler.ir.schedule import Side, Stage, Tile
 from emmy.compiler.ir.schedule.classic.refusals import chunk_partial_columns
+from emmy.compiler.ir.schedule.mask import coordinate_aliases, select_masks
 from emmy.compiler.ir.schedule.packing import block_scaled_atom, packed_readings
 from emmy.compiler.ir.schedule.staging import chunk_key_stage, chunk_slab_pad, copied_b
 from emmy.compiler.ir.sigma import Sigma
@@ -1489,7 +1490,9 @@ def _mask_affine(predicate: BinaryExpr, names: frozenset[str]) -> tuple[dict[str
     return None if form is None else (form[1], form[0])
 
 
-def _mask_key_bounds(stmts, held: str, key: Axis, row: str, offset, bk: int) -> tuple[Expr | None, Expr | None]:
+def _mask_key_bounds(
+    stmts, held: str, key: Axis, row: str, offset, bk: int, uniform: frozenset[str] = frozenset()
+) -> tuple[Expr | None, Expr | None]:
     """The chunk range outside which every key is masked for every row of this CTA — the stream's
     ``(k_first, k_end)``, each ``None`` when no mask bounds the keys on that side.
 
@@ -1518,7 +1521,20 @@ def _mask_key_bounds(stmts, held: str, key: Axis, row: str, offset, bk: int) -> 
             swapped = {"<": ">", "<=": ">=", ">": "<", ">=": "<="}
             predicate = BinaryExpr(swapped[predicate.op], predicate.right, predicate.left)
             affine = _mask_affine(predicate, frozenset({key.name, row}))
-        if affine is None or affine[0] != {key.name: 1, row: -1} or affine[1].free_vars():
+        if affine is None or affine[0] != {key.name: 1, row: -1} or not affine[1].free_vars() <= uniform:
+            continue
+        if affine[1].free_vars():
+            # A uniform anchor — a position read from memory — makes the shift a runtime value, so the sign test
+            # below runs at runtime too: a lead below zero stops nothing, a lag above zero starts nothing.
+            runtime: Expr = BinaryExpr("-", Literal(0, "int"), affine[1].simplify(SimplifyCtx.empty()))
+            if predicate.op in (">", ">="):
+                lead_expr = BinaryExpr("-", runtime, Literal(1, "int")) if predicate.op == ">=" else runtime
+                stop = BinaryExpr("+", offset.block_end(), _max(lead_expr, Literal(0, "int")))
+                end = stop if end is None else _min(end, stop)
+            else:
+                lag_expr = BinaryExpr("+", runtime, Literal(1, "int")) if predicate.op == "<=" else runtime
+                start = BinaryExpr("+", offset.block_base(), _min(lag_expr, Literal(0, "int")))
+                first = start if first is None else _max(first, start)
             continue
         shift = -int(affine[1].eval({}))  # the masked branch reads ``key OP row + shift``
         if predicate.op in (">", ">="):
@@ -2926,7 +2942,7 @@ class _FlashOps(_MmaOps):
         # re-decided: an enumeration that stopped spelling one of them would otherwise miscompile
         # in silence.
         assert atom.c_to_a_repack, "the chunk tier needs an atom whose C fragment repacks into an A operand"
-        reads = (*score.operands, self.c.operands[1]) if score is not None else self.c.operands[:2]
+        reads = (*score.operands, self.c.streamed) if score is not None else (self.c.operands[0], self.c.streamed)
         assert all(edge.as_slab() is not None for edge in reads), "the chunk tier reads its score operands and its streamed value as slabs"
         if score is not None:
             seam = (score_tile.n.axis.name, score_tile.n.units, score_tile.n.tile, score_tile.m.reg)
@@ -2942,7 +2958,14 @@ class _FlashOps(_MmaOps):
         assert all(self.c.axis not in edge.free_axes for edge in leaves), (
             "the chunk tier reads the score's prefix leaves once, ahead of the chunk loop"
         )
-        pre = [stmt for edge in leaves for stmt in edge.lower(axes=self.axes)]
+        # The mask the prefix adds, in the one form the tier lands (``select_masks``): its coordinate aliases fold into
+        # the predicates, so the leaves' remaining values are uniform and read once.
+        coord_axes = {self.c.axis, *self.c.as_contraction().left_axes}
+        uniform = frozenset(name for edge in self.c.operands[1:] if edge.uniform_leaf(frozenset(coord_axes)) for name in edge.exposes)
+        aliases = coordinate_aliases((*prefix.body, *(stmt for edge in leaves for stmt in edge.lift.body)), coord_axes)
+        prefix_body = select_masks(prefix.body, aliases, uniform, coord_axes)
+        assert prefix_body is not None, "the score's prefix reads a coordinate outside an additive mask"
+        pre = [stmt for edge in leaves for stmt in edge.lower(axes=self.axes) if not (isinstance(stmt, Let) and stmt.name in aliases)]
         pre += self._query_slab(mn) if self._score_atom.is_wgmma else self._query(offset, mn)
         # A coordinate mask makes every chunk outside this CTA's rows pure identity work, and the
         # loop skips it: it stops at a causal diagonal (``k_end``) and starts at a band's near edge
@@ -2951,7 +2974,7 @@ class _FlashOps(_MmaOps):
         # CTA, which walks the whole stream there, and the dynamic trip count only costs (9%
         # measured at the 128-CTA head-width-256 shape). Bounded at both ends, every CTA shortens.
         scored_name = (score if score is not None else self.c.operands[0]).exposes[0]
-        k_first, k_end = _mask_key_bounds(prefix.body, scored_name, key, m.axis.name, offset[0], bk)
+        k_first, k_end = _mask_key_bounds(prefix_body, scored_name, key, m.axis.name, offset[0], bk, uniform)
         if self.one_wave and (k_first is None or k_end is None):
             k_first = k_end = None
 
@@ -2987,7 +3010,7 @@ class _FlashOps(_MmaOps):
             for i in range(m.reg):
                 for j in range(cols):
                     stmts, frags, _ = _residence(
-                        prefix.body,
+                        prefix_body,
                         frags={held: self.frag(f"_s{i}_{j}")},
                         rows={},
                         tag=f"_w{i}_{j}_",
@@ -3120,7 +3143,7 @@ class _FlashOps(_MmaOps):
         if self.stage is None:
             return None
         elem = self.tile.atom.operand_dtype("b")
-        load = self.c.operands[1].as_slab().load
+        load = self.c.streamed.as_slab().load
         trans = self.c.as_contraction().b_trans
         # The Volta blocking copy pads its rows instead: its drain reads no swizzled slab.
         pad = chunk_slab_pad(self.tile, self.stage.choice)
@@ -3494,7 +3517,7 @@ class _FlashOps(_MmaOps):
         staged = None if streams is None else streams.value
         if atom.is_wgmma:
             return self._wgmma_expectation(mn, weights, steps, staged, slot)
-        v_load = self.c.operands[1].as_slab().load
+        v_load = self.c.streamed.as_slab().load
         # The mma's own target. On a REDUCED-accumulate cell that is the packed ``_ph`` fragment,
         # promoted into the f32 carrier once this chunk's mmas are done — the chunk IS the promote
         # cadence, so the reduced chain never accumulates past one chunk of keys.

@@ -12,6 +12,7 @@ from typing import TYPE_CHECKING
 
 from frozendict import frozendict
 
+from emmy.compiler.dtype import BF16, F16
 from emmy.compiler.ir.address import gmem_axis_step, split_addressable
 from emmy.compiler.ir.atom import ATOM_REGISTRY, AtomKind, atoms_for, wide_accumulate
 from emmy.compiler.ir.pure.fold import Fold, binding_extents
@@ -24,15 +25,19 @@ from emmy.compiler.ir.schedule.catalog import (
     warp_tile_moves,
 )
 from emmy.compiler.ir.schedule.choices import PlacedTile, Reduce, ResolvedStage, Stage, Tile, Work
+from emmy.compiler.ir.schedule.mask import coordinate_aliases, select_masks
 from emmy.compiler.ir.schedule.packing import block_scaled_atom
 from emmy.compiler.ir.schedule.views import ContractionFacts, NodeId
-from emmy.compiler.ir.stmt import Affine, Assign, Body, Load, Loop, Select, Stmt, Write, mask_select_predicate
+from emmy.compiler.ir.stmt import Affine, Assign, Body, Let, Load, Loop, Select, Stmt, Write, mask_select_predicate
 from emmy.compiler.ir.stmt.passes import has_contraction_tail
 
 from .schedule import NodeSchedule, binds_root, node_id_spelling, packed_works
 
 if TYPE_CHECKING:
     from emmy.compiler.ir.tile import TileOp
+
+
+_WIDE = (BF16, F16)  # the 16-bit multiplicand families a computed weight repacks into
 
 
 def _inner_free(tile: TileOp):
@@ -237,6 +242,11 @@ def _node_refusal(tile: TileOp, target, node, fragment_epilogue: bool, packed: t
     if atom_dtype is None:
         return "no operand dtype selects a tensor-core atom family"
     if atom_dtype.nbytes == 1 and atom_dtype != dtype:
+        if node.chunked():
+            # The chunk tier's weight is computed in f32 registers and repacks into a 16-bit A fragment; a 1-byte
+            # streamed value converts per element in its gmem-direct fragment load (its staged slab declines), so
+            # the cell is a 16-bit one over the value's codes.
+            return None if any(atoms_for(wide, ctx=target) for wide in _WIDE) else "no 16-bit tensor-core atom on this target"
         return "a demoting compute fill cannot produce an fp8 fragment"
     if not (atoms_for(atom_dtype, ctx=target) or atoms_for(atom_dtype, acc=atom_dtype, ctx=target)):
         return f"no tensor-core atom takes a {atom_dtype} multiplicand on this target"
@@ -254,7 +264,7 @@ def _chunk_refusal(tile: TileOp, node) -> str | None:
     # GATHERED into them when the carrier's own A edge is already the stored tile (softmax@V, whose
     # probabilities arrive as an input). Either way the tier gets a ``(row, chunk)`` C fragment; a
     # carrier that is neither has no chunk to fold.
-    reads = (*score.operands, node.operands[1]) if score is not None else node.operands[:2]
+    reads = (*score.operands, node.streamed) if score is not None else (node.operands[0], node.streamed)
     if score is None and node.operands[0].as_slab() is None:
         return "the chunk tier folds a carrier whose pivot a nested contraction or a stored tile supplies"
     # The chunk covers the score's OWN contraction in one pass and holds a query fragment per step,
@@ -267,17 +277,22 @@ def _chunk_refusal(tile: TileOp, node) -> str | None:
     # contraction, and what scales its raw accumulator lives in the lift above it. Its leaves past
     # the producer are read once ahead of the chunk, so none of them may vary over the chunk.
     prefix = node.applied.cone(node.roles[0])
-    if any(not isinstance(stmt, (Affine, Assign, Load, Select)) for stmt in prefix.body):
-        return "the score's own prefix holds more than a straight-line program"
     coord_axes = {node.axis, *node.as_contraction().left_axes}
-    uniform = {name for edge in node.operands if not edge.free_axes for name in edge.exposes}
-    for stmt in (stmt for stmt in prefix.body if isinstance(stmt, Select)):
-        consumers = [consumer for consumer in prefix.body if _adds(consumer, stmt.name)]
+    uniform = {name for edge in node.operands if edge.uniform_leaf(frozenset(coord_axes)) for name in edge.exposes}
+    aliases = coordinate_aliases((*prefix.body, *(stmt for edge in node.operands[1:] for stmt in edge.lift.body)), coord_axes)
+    body = select_masks(prefix.body, aliases, uniform, coord_axes)
+    if body is None:
+        return "the score's prefix reads a coordinate outside an additive mask"
+    if any(not isinstance(stmt, (Affine, Assign, Let, Load, Select)) for stmt in body):
+        return "the score's own prefix holds more than a straight-line program"
+    # A predicate reads the coordinates and the uniform values, never the chunk's own values.
+    for stmt in (stmt for stmt in body if isinstance(stmt, Select)):
+        consumers = [consumer for consumer in body if _adds(consumer, stmt.name)]
         if (
             mask_select_predicate(stmt) is None
             or len(consumers) != 1
             or not {branch.value for branch in stmt.branches} <= uniform
-            or any(not branch.select.free_vars() <= coord_axes for branch in stmt.branches)
+            or any(not branch.select.free_vars() <= coord_axes | uniform for branch in stmt.branches)
         ):
             return "the score's coordinate Select does not form a cell-uniform additive mask"
     leaves = [edge for edge in node.operands[1:] if set(edge.exposes) & set(prefix.params)]
@@ -362,9 +377,13 @@ def _atom_families(tile: TileOp, target, node, tail: list, packed: tuple = (None
     # f32 carrier once per chunk — the reduced one therefore runs that chain at the full consumer-die
     # rate without moving the softmax statistics off f32 (the score keeps ``wide_accumulate``).
     if node.chunked():
-        # Scores accumulate at full width; the streamed value determines the repacked multiplicand width.
+        # Scores accumulate at full width; the streamed value determines the repacked multiplicand width, except
+        # that a 1-byte value takes a 16-bit cell and converts in its fragment load (``_node_refusal``).
         dtype = _channel_dtype(tile, node, target)
-        offered = bindable((*atoms_for(dtype, ctx=target), *atoms_for(dtype, acc=dtype, ctx=target)))
+        families = _WIDE if dtype is not None and dtype.nbytes == 1 else (dtype,)
+        offered = bindable(
+            tuple(name for wide in families for name in (*atoms_for(wide, ctx=target), *atoms_for(wide, acc=wide, ctx=target)))
+        )
         return tuple(dict.fromkeys(name for name in offered if ATOM_REGISTRY[name].c_to_a_repack))
     if (pair := packed[1]) is not None:
         # ``_node_refusal`` already proved the channels share one stored code dtype that this
