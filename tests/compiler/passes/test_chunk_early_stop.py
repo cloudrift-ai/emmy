@@ -198,3 +198,17 @@ def test_the_launch_count_is_the_lead_extents_times_the_block_counts() -> None:
     ragged = Side(axis=Axis(name="a1", extent=Dim(100)), tile=64, units=4, reg=1, block="a1_b", unit="a1_u")
     assert launch_ctas((), (ragged, None)) == 2, "a partial block still launches"
     assert launch_ctas((Axis(name="s", extent=Dim("seq_len")),), (m, n)) is None, "a symbolic extent is unknown"
+
+
+def test_a_position_read_from_memory_bounds_the_stream_at_runtime() -> None:
+    """Native's causal mask compares ``key - row`` against a position the kernel loads: the anchor is a uniform value,
+    so the stop is the block end plus the position, the sign test kept at runtime, and nothing starts the stream."""
+    keep = BinaryExpr("<=", BinaryExpr("+", BinaryExpr("*", Literal(-1, "int"), Var("a1")), Var("a2")), Var("in0"))
+    mask = BinaryExpr(">", keep.left, keep.right)
+    select = Select(name="v1", branches=(SelectBranch(select=keep, value="zero"), SelectBranch(select=mask, value="fill")))
+    first, end = _mask_key_bounds(_masked_score(select), "s2", KEY, "a1", ROW_BLOCK, BK, frozenset({"in0"}))
+    assert first is None
+    shift = BinaryExpr("-", Literal(0, "int"), BinaryExpr("-", Literal(0, "int"), Var("in0")))  # the anchor, ``-in0``, negated
+    lead = TernaryExpr(cond=BinaryExpr(">", shift, Literal(0, "int")), if_true=shift, if_false=Literal(0, "int"))
+    assert _pretty(end.if_true) == _pretty(BinaryExpr("+", ROW_BLOCK.block_end(), lead))
+    assert _bounds(_masked_score(select)) == (None, None), "a value the caller does not name as uniform bounds nothing"
