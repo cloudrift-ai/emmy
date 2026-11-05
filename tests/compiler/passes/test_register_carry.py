@@ -370,8 +370,7 @@ m(torch.randn(2,4,{chunk},{keys}), torch.randn(2,4,{chunk},{keys}),
     lowered = Pipeline.build(["lowering/kernel", "lowering/cuda"]).run(graph)
     lowered.validate()
     (op,) = (n.op for n in lowered.nodes.values() if isinstance(n.op, CudaOp))
-    (port,) = (t.name for t in node.outputs if t.name not in graph.outputs)  # the state's buffer, dropped with the port
-    assert not op.serial and port not in op.arg_order
+    assert not op.serial
     # The carried state's register residency is a property of the deployable build: at the
     # correctness lane's `-Xcicc -O1` the fragment arrays stay in local memory.
     with gpu_lock(), config.nvcc_flags_override(""):

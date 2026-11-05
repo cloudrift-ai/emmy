@@ -839,6 +839,7 @@ def test_matmul_mma_f16acc_symbolic_k(monkeypatch):
     monkeypatch.setenv("EMMY_F16_MMA_F32_ACC", "1")
     monkeypatch.setenv("EMMY_TILE", "mma_m16n8k16_f16_f16/f1x1")
     monkeypatch.setenv("EMMY_WORK", "w1x1")
+    monkeypatch.setenv("EMMY_REDUCE", "")  # one kernel over the whole K: a split would slice the promote period
     monkeypatch.delenv("EMMY_STAGE", raising=False)
     M = N = 128
     run_k = 70  # off the 16-step grid AND off the _F16ACC_STEPS·16 promote period
