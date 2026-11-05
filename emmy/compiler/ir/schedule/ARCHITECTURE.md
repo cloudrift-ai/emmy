@@ -219,14 +219,18 @@ warp-tiled at the same atom, one warp column wide, with the chunk as its N tile 
 (`_fragment_agreements`). That equation is FlashAttention's own shape, and stating it here is what keeps the tier
 from being offered a row its emission would have to ignore. The chunk is the consumer `TILE` atom's K width, not a
 staging slab, and must contain a complete logical C fragment so its score can repack into the paired contraction's A
-operand. Coordinate masks remain eligible only when their complementary branches form an additive cell mask.
+operand. Coordinate masks remain eligible only when their complementary branches form an additive cell mask, whose
+predicate reads the score's coordinates and uniform values (a position loaded from memory) and nothing else.
 
 The tier also demands the score's own contraction extent be STATIC: the chunk covers it in one pass and holds a query
 fragment per atom-K step, so a symbolic extent there has no step count to hold them at. And the ATOM it names is the
 EXPECTATION's — the score keeps that atom's f32 sibling (`wide_accumulate`), so the reduced-accumulate cell can run
 the expectation's mma chain at the consumer-die full rate without moving the softmax's running max and denominator off
 f32; the chunk partial promotes into the f32 carrier once per chunk, which is the promote cadence. The streamed
-value selects the multiplicand dtype; the score's wider accumulator does not select a different atom family. How many
+value selects the multiplicand dtype — except a 1-byte one, which takes the 16-bit families, since the weight
+repacks from f32 registers into a 16-bit fragment whatever the value stores and the value converts per element in
+its gmem-direct fragment load (its slab declines); the score's wider accumulator does not select a different atom
+family. How many
 register columns of those partials are live at once is one rule the offer and the emitter both ask
 (`chunk_partial_columns`): the whole row while the thread's register envelope holds it, else one column pair. At head
 width 256 the row is 32 fragments, and with every partial live beside the carrier and the hoisted query the thread
@@ -238,7 +242,12 @@ PREFIX — the carrier's lift cut to its score role, which is where an SDPA mask
 loader needs a gmem address: whatever supplies the pivot, and the streamed value. The prefix's remaining leaves are
 read once ahead of the chunk loop, so a mask's fill / zero constants may be a computed pair with no slab at all, and
 its statements may include a `Select` on the score fragment's OWN coordinates, which the emitter evaluates per element.
-Both were blanket refusals, and either one sent a masked attention target to the scalar tier whole.
+Both were blanket refusals, and either one sent a masked attention target to the scalar tier whole. An operand with
+no free axis is uniform, as it always was, and so is a leaf that exposes nothing but literals, loads indexed by no
+coordinate and `Let` aliases of the carrier's own coordinates (`Fold.uniform_leaf`): the aliases fold into the mask's
+predicate and the rest is read once. That
+is how a mask the loop lowering hoisted over the row axis — the row alias beside the position — keeps the carrier
+bilinear and the chunk tier offered.
 
 A `wgmma` atom is a 16×8 warp sub-cell like `mma_m16n8k16`, but its instruction is issued by four M-adjacent warps
 over 64 rows and N columns, so `_wgmma_refusal` narrows the row it can hold: a `w<4k>x1` warp grid (the unit decode
