@@ -228,18 +228,10 @@ def _projection_refusal(tile: TileOp, node) -> str | None:
     offered: an independent-projection kernel must partition into output-owning regions and the
     split fold must own one of them (a projection reading SEVERAL roots into one output has no
     piece to hand the epilogue to). The residence guard leads: a head fold the realization cannot
-    STRIP from the projection — neither the kernel's own node (under its projection chain, as
-    ``head`` reaches it), an operand edge, nor a top-level projection member (``head``'s sweep
-    case: a fold reading the boundary store's sweep axis lands inside the sweep ``Loop``
-    ``apply_output_specs`` wraps) — would leave the epilogue re-running the whole reduction and
-    shadowing the workspace states, so the split declines there."""
+    STRIP from the projection — one reading the boundary store's sweep axis lands inside the sweep
+    ``Loop`` ``apply_output_specs`` wraps — would leave the epilogue re-running the whole reduction
+    and shadowing the workspace states, so the split declines there."""
     op = tile.op
-    if (
-        head(op) is not node
-        and all(edge is not node for edge in getattr(op, "operands", ()))
-        and not any(stmt is node for stmt in projection_tail(tile))
-    ):
-        return "the head fold is nested inside the projection's sweep loop; the split cannot strip it"
     if any(axis.name in node.free_axes for spec in tile.output_specs for axis in spec.sweep):
         return "the head fold is evaluated inside the boundary store's sweep loop; the split cannot strip it"
     if not isinstance(op, Fold) or op.axis is not None or len(op.operands) < 2:

@@ -46,8 +46,8 @@ def mul(a, b: int) -> Expr:
 
 def clamp_to(position: Expr, extent: Expr) -> Expr:
     """``position`` clamped onto a stream's last position — ``position < extent ? position : extent − 1`` — the
-    index a split's overhanging slice reads a symbolic stream through: the read stays in bounds, and the fold masks
-    what it folds there. :func:`clamped` reads it back."""
+    index an overhanging read takes through a stream or an output sweep: the read stays in bounds with a duplicate,
+    and the fold masks what it folds there or the guard discards the store. :func:`clamped` reads it back."""
     return TernaryExpr(BinaryExpr("<", position, extent), position, BinaryExpr("-", extent, Literal(1, "int")))
 
 

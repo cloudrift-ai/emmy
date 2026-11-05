@@ -49,6 +49,7 @@ from importlib import import_module
 
 from emmy.compiler.backend.cuda.dtype import cuda_name
 from emmy.compiler.dtype import F32
+from emmy.compiler.ir.address import clamp_to
 from emmy.compiler.ir.axis import Axis, Window
 from emmy.compiler.ir.elementwise import ElementwiseImpl
 from emmy.compiler.ir.expr import BinaryExpr, Literal, TernaryExpr, Var
@@ -65,7 +66,6 @@ from emmy.compiler.ir.tile.boundary import apply_output_specs
 from emmy.compiler.ir.tile.ir import observed_result_names
 from emmy.compiler.ir.tile.ops import UnbindableProjection, chain_members, projection_regions, sched_of, tiled_edges
 from emmy.compiler.pipeline.passes.lowering.kernel._atom import (
-    clamp_last,
     copy_cell,
     reduce_codegen,
     store_sink,
@@ -953,7 +953,7 @@ def _tile_reduce_axis_transposed(
     # The swept cell this lane owns. An extent not divisible by the output span leaves
     # the last block's upper lanes OVERHANGING: they clamp-read the last valid
     # column (a duplicate sweep, in-bounds) and their store is discarded by the guard below — the
-    # same masked-overhang contract the tiled contraction's ``clamp_last`` / ``Cond`` pair states.
+    # same masked-overhang contract the tiled contraction's ``clamp_to`` / ``Cond`` pair states.
     span = lanes_n * columns
     base = BinaryExpr("+", BinaryExpr("*", Var(blk_name), Literal(span, "int")), BinaryExpr("*", Var(n_lane.name), Literal(columns, "int")))
     cells = (
@@ -990,7 +990,7 @@ def _tile_reduce_axis_transposed(
     stores: list[Stmt] = []
     for j, cell in enumerate(cells):
         suffix = f"__v{j}" if j else ""
-        read = Sigma({out_ax.name: clamp_last(cell, out_ext) if overhang else cell})  # the sweep's reads
+        read = Sigma({out_ax.name: clamp_to(cell, out_ext) if overhang else cell})  # the sweep's reads
         sweep += copy_cell(hoisted, read, suffix, per_column)
         body += copy_cell(copies, read, suffix, per_column)
         # The guarded projection: in range by the guard, so no clamp.

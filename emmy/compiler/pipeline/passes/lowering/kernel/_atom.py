@@ -32,7 +32,7 @@ from functools import partial
 from emmy.compiler.backend.cuda.dtype import cuda_name
 from emmy.compiler.dim import Dim
 from emmy.compiler.dtype import F32
-from emmy.compiler.ir.address import BYTE_SLAB_PAD, clamp_bound, gmem_axis_step, unclamped
+from emmy.compiler.ir.address import BYTE_SLAB_PAD, clamp_bound, clamp_to, gmem_axis_step, unclamped
 from emmy.compiler.ir.atom import AtomKind, wide_accumulate
 from emmy.compiler.ir.axis import Axis
 from emmy.compiler.ir.elementwise import ElementwiseImpl
@@ -714,13 +714,6 @@ def _wgmma_drain(*, operands, slot, mn, atom, bk_elems: int, frag_ns: str, n_fol
     return stmts
 
 
-def clamp_last(idx: Expr, ext: Expr) -> Expr:
-    """Clamp an overhanging gmem coordinate to the last valid index — the overhanging cell still
-    reads an in-bounds (duplicate) operand, and its store is discarded by the guard (``RegStore`` /
-    ``Cond``)."""
-    return TernaryExpr(cond=BinaryExpr("<", idx, ext), if_true=idx, if_false=BinaryExpr("-", ext, Literal(1, "int")))
-
-
 def _min(a: Expr, b: Expr) -> Expr:
     return TernaryExpr(cond=BinaryExpr("<", a, b), if_true=a, if_false=b)
 
@@ -772,10 +765,10 @@ def _slab_index(operand_index, *, tile: Side, tile_base, k_axis, tile_is_row: bo
             # compute fill zeroes the matching A lanes, so it folds to nothing. The K-major
             # orientations have no such row and stay refused (``computed_operand_cover``).
             if not tile_is_row and not k_axis.extent.is_static:
-                k = clamp_last(k, k_axis.extent_expr())
+                k = clamp_to(k, k_axis.extent_expr())
             sig = Sigma(
                 {
-                    tile.axis.name: clamp_last(t, tile.ext) if tile.mask else t,
+                    tile.axis.name: clamp_to(t, tile.ext) if tile.mask else t,
                     k_axis.name: k,
                     **_sibling_sigma(sibling),
                 }
@@ -1129,14 +1122,14 @@ def _sync_operands(
 
     def m_coord(row) -> Expr:
         t = BinaryExpr("+", row_base, row)
-        return clamp_last(t, mn[0].ext) if mn[0].mask else t
+        return clamp_to(t, mn[0].ext) if mn[0].mask else t
 
     def k_coord(k) -> Expr:
-        return clamp_last(k, k_ext) if k_ext is not None else k
+        return clamp_to(k, k_ext) if k_ext is not None else k
 
     def n_coord(col) -> Expr:
         t = BinaryExpr("+", col_base, col)
-        return clamp_last(t, mn[1].ext) if mn[1].mask else t
+        return clamp_to(t, mn[1].ext) if mn[1].mask else t
 
     a_op, a_copied, prologue = _a_slab_operand(
         c,
@@ -1274,16 +1267,16 @@ def _packed_operands(
 
     def n_coord(row) -> Expr:
         t = BinaryExpr("+", col_base, row)
-        return clamp_last(t, n.ext) if n.mask else t
+        return clamp_to(t, n.ext) if n.mask else t
 
     def m_coord(row) -> Expr:
         t = BinaryExpr("+", row_base, row)
-        return clamp_last(t, m.ext) if m.mask else t
+        return clamp_to(t, m.ext) if m.mask else t
 
     k_ext = k_axis.extent_expr() if not k_axis.extent.is_static else None
 
     def k_coord(k) -> Expr:
-        return clamp_last(k, k_ext) if k_ext is not None else k
+        return clamp_to(k, k_ext) if k_ext is not None else k
 
     # A rides the SAME side the compute fill gives it: copied when materialized, compute-filled
     # when it is a cone. Only B differs here, and that is the whole point of the packed reading.
@@ -1423,7 +1416,7 @@ def _block_scaled_operands(
         def value(k0, row, col):
             k = BinaryExpr("+", k0, BinaryExpr("*", col, Literal(2, "int")))
             t = BinaryExpr("+", base, row)
-            sigma = Sigma({side.axis.name: clamp_last(t, side.ext) if side.mask else t, k_axis.name: k, **_sibling_sigma(sibling)})
+            sigma = Sigma({side.axis.name: clamp_to(t, side.ext) if side.mask else t, k_axis.name: k, **_sibling_sigma(sibling)})
             return [st.substitute(sigma) for st in cone], codes
 
         return SyncOperand(tag=tag, shape=(side.tile, bk_elems // 2), value=value, scale=scale)
@@ -1435,12 +1428,12 @@ def _block_scaled_operands(
 
         def coord(row):
             t = BinaryExpr("+", base, row)
-            return clamp_last(t, side.ext) if side.mask else t
+            return clamp_to(t, side.ext) if side.mask else t
 
         def index(k0):
             def gmem(row, col):
                 k = BinaryExpr("+", k0, BinaryExpr("*", col, Literal(step, "int")))
-                return at(clamp_last(k, k_ext) if k_ext is not None else k, coord(row))
+                return at(clamp_to(k, k_ext) if k_ext is not None else k, coord(row))
 
             return gmem
 
@@ -2980,7 +2973,7 @@ class _FlashOps(_MmaOps):
         # The mask the prefix adds, in the one form the tier lands (``select_masks``): its coordinate aliases fold into
         # the predicates, so the leaves' remaining values are uniform and read once.
         coord_axes = {self.c.axis, *self.c.as_contraction().left_axes}
-        uniform = cell_uniform(self.tile, self.c, coord_axes)
+        uniform = cell_uniform(self.axes, self.c, coord_axes)
         aliases = coordinate_aliases((*prefix.body, *(stmt for edge in leaves for stmt in edge.lift.body)), coord_axes, uniform)
         prefix_body = select_masks(prefix.body, aliases, uniform, coord_axes)
         assert prefix_body is not None, "the score's prefix reads a coordinate outside an additive mask"

@@ -279,7 +279,7 @@ def _chunk_refusal(tile: TileOp, node) -> str | None:
     # the producer are read once ahead of the chunk, so none of them may vary over the chunk.
     prefix = node.applied.cone(node.roles[0])
     coord_axes = {node.axis, *node.as_contraction().left_axes}
-    uniform = cell_uniform(tile, node, coord_axes)
+    uniform = cell_uniform(tile.axes, node, coord_axes)
     aliases = coordinate_aliases((*prefix.body, *(stmt for edge in node.operands[1:] for stmt in edge.lift.body)), coord_axes, uniform)
     body = select_masks(prefix.body, aliases, uniform, coord_axes)
     if body is None:

@@ -18,18 +18,18 @@ _COMPARE = {"less": "<", "less_equal": "<=", "greater": ">", "greater_equal": ">
 _NEGATE = {"<": ">=", "<=": ">", ">": "<=", ">=": "<"}
 
 
-def cell_uniform(tile, node: Fold, coord_axes: frozenset[str] | set[str]) -> frozenset[str]:
+def cell_uniform(axes, node: Fold, coord_axes: frozenset[str] | set[str]) -> frozenset[str]:
     """The names one value serves every cell of a CTA: what the carrier's uniform leaves expose, the coordinates
     the launch fixes per CTA — the contraction's batch axes and a key split's partition — and the symbolic extents
-    of ``tile``'s axes."""
+    of the kernel's axis table ``axes``."""
     contraction = node.as_contraction()
     per_cta = node.free_axes - contraction.left_axes - contraction.right_axes
-    extents = {name for axis in tile.axes for name in axis.extent.expr.free_vars()}
+    extents = {name for axis in axes for name in axis.extent.expr.free_vars()}
     leaves = {name for edge in node.operands if edge.uniform_leaf(frozenset(coord_axes)) for name in edge.exposes}
     return frozenset(leaves | per_cta | extents)
 
 
-def coordinate_aliases(stmts, axes: frozenset[str] | set[str], uniform: frozenset[str] | set[str] = frozenset()) -> dict[str, Expr]:
+def coordinate_aliases(stmts, axes: frozenset[str] | set[str], uniform: frozenset[str] | set[str]) -> dict[str, Expr]:
     """``{name: expression}`` for every ``Let`` in ``stmts`` that binds an expression over a coordinate of ``axes``
     and the uniform values — a bare coordinate, or a split piece's absolute key."""
     return {
@@ -61,7 +61,7 @@ def select_masks(stmts, aliases: dict[str, Expr], uniform: set[str] | frozenset[
     for stmt in stmts:
         if isinstance(stmt, Let) and stmt.name in coords:
             continue  # the alias folds into every predicate that reads it
-        if isinstance(stmt, Let) and (isinstance(stmt.value, Literal) or stmt.value.free_vars() <= set(uniform)):
+        if isinstance(stmt, Let) and stmt.value.free_vars() <= set(uniform):
             scalars[stmt.name] = stmt.value  # a literal, or a value over uniform names alone (a symbolic extent)
             out.append(stmt)
             continue
