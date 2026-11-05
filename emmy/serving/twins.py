@@ -292,9 +292,9 @@ def capture_twin_graphs(
     profile includes unconverted experts. Native MXFP4 expert twins carry the corresponding
     ``@mxfp4`` suffix and the exact packed block/scale inputs. ``static_only`` is the deliberate exception: it accepts
     only the proven decode-1/prefill-0 envelope and emits M=1 without any standard or symbolic twins.
-    ``expert_slices`` is the serving tensor-parallel width: each rank holds that slice of every routed
-    expert (:func:`~emmy.compiler.trace.huggingface.slice_routed_experts`), so the expert twins are
-    the sliced programs serving compiles. ``verify_width`` is a speculative verify step's widest request: a GDN layer
+    ``expert_slices`` is the serving tensor-parallel width: each rank holds that slice of every routed expert and
+    of a Qwen4Exp shared expert (:func:`~emmy.compiler.trace.huggingface.slice_routed_experts`), so the expert and
+    post twins are the sliced programs serving compiles. ``verify_width`` is a speculative verify step's widest request: a GDN layer
     then also traces the programs that keep each row's state (``gdn3rows``) at widths 1 to it, and a checkpoint with
     a multi-token-prediction head traces its prologue (``mtp-prologue-sym``); the head's layer is a full-attention
     layer of the trunk's shape, whose twins the trunk's carry, unless a coded checkpoint stores the head dense: its
