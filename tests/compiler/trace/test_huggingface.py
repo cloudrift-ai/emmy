@@ -1085,8 +1085,8 @@ def test_nvfp4_routed_experts_load_packed_with_per_row_global_scales(tmp_path, e
 
 def test_qwen4_exp_shared_expert_loads_under_its_own_name(tmp_path):
     """Qwen4Exp names its gated shared expert ``mlp.shared_expert`` in the checkpoint and in its module, so the
-    singular-to-plural translation Laguna's and GLM's checkpoints need does not apply, and every rank's ``post``
-    program holds the whole shared expert and its gate."""
+    singular-to-plural translation Laguna's and GLM's checkpoints need does not apply. Each rank's ``post`` program
+    holds its slice of the shared expert along the intermediate axis, as of every routed expert, and the whole gate."""
     torch = pytest.importorskip("torch")
     pytest.importorskip("transformers.models.qwen4_exp")
 
@@ -1098,6 +1098,9 @@ def test_qwen4_exp_shared_expert_loads_under_its_own_name(tmp_path):
     for key, value in shared.items():
         loaded = state[key.replace("model.language_model.", "model.")]
         assert not loaded.is_meta, key
+        if ".shared_expert." in key:
+            axis = 1 if ".down_proj." in key else 0
+            value = value.narrow(axis, value.shape[axis] // 2, value.shape[axis] // 2)
         assert torch.equal(loaded, value.to(torch.float16)), key
 
 

@@ -17,8 +17,9 @@ fork does not meet them against itself either. Step 5's done gate ran once again
 Emmy is 2.0-2.5x slower to the first token, 1.67x slower per token at one request, gives 0.58-0.68x the fork's total
 output, and runs out of memory under the 3 GiB per card margin. Item 3 under "Next" ran its two parts on 2026-11-03:
 Emmy now passes the margin, and one decode round gave 1.8% more output at eight requests and nothing measurable at
-one. Whether to continue, and with which lever, is the owner's call. The minimums in step 2 and Qwen's license are
-still open with the owner.
+one. The next lever, pre and post across ranks, is planned under step 5: its part 1 (the shared expert sliced across
+ranks) ran on 2026-11-04 for 2.6% faster decode at one request and 2.9% more output at eight, and its part 2 (the
+mixers' decode work split) is next. The minimums in step 2 and Qwen's license are still open with the owner.
 
 ## What we know
 
@@ -369,9 +370,10 @@ takes more as later rounds need it.
      be enforced at load;
   4. the MoE split for Qwen's shared-expert gate, with every routed expert sliced across tensor-parallel ranks;
      *Done, 2026-10-16:* every rank runs `pre` and `post` whole, the gated shared expert included, as DeepSeek keeps its
-     shared experts, plus its slice of every routed expert; only the routed output is all-reduced. The fork also reads
-     the shared expert whole, as the serving profile of 2026-10-27 showed (this note first said it slices it); what it
-     splits across ranks is the hyper-connection mixers. The router runs as the checkpoint's module does
+     shared experts, plus its slice of every routed expert; only the routed output is all-reduced. The fork slices the
+     shared expert across ranks and reduces its partial output together with the routed experts' (its allocations,
+     step 5's "Next (2026-11-03)"; a reading of the 2026-10-27 profile had said it reads it whole), and it keeps the
+     hyper-connection mixers' weights whole on every rank. The router runs as the checkpoint's module does
      (FP16 logits, FP32 softmax, top-10 renormalized), and the correctness step checks it against the fork. A CPU test
      at two ranks reproduces the eager layer. The split loader no longer renames Qwen's `mlp.shared_expert` to the
      plural Laguna and GLM use, which had left the shared expert unloaded;
@@ -539,8 +541,9 @@ Rounds, as with DeepSeek. Each round starts from a profile and ends with a boot 
   a lever. Serving profile of post8 (2026-10-27): 20 kernels, 143 us busy per layer, 6.75 of 18.5 ms GPU busy per step
   (the fork's step is 9.7 ms). The four big matmuls sit about 49 us per layer over their read floor (2.4 ms per step),
   and 13 small pieces take 62 us per layer (3 ms per step), against an empty kernel's 0.9 us under graphs. The fork
-  reads the shared expert whole with cuBLAS gemv at 550-690 GB/s and splits the hyper-connection mixers across ranks
-  with all-gathers. A hand-written 8-row kernel was also about 2x off the read floor, so a new GEMV schedule family is
+  reads its quarter of the shared expert with cuBLAS gemv (this note first said the whole of it, at 550-690 GB/s;
+  for a quarter that is 130-180 GB/s) and splits the hyper-connection mixers' work across ranks with all-gathers. A
+  hand-written 8-row kernel was also about 2x off the read floor, so a new GEMV schedule family is
   not the obvious win. The cold bench ranked post8's matmuls wrongly because a re-run kernel keeps its code in the
   instruction cache, while serving runs about 58 other kernels between; #1299 evicts the code too and the golden was
   re-measured and re-tuned under it: post8 143 -> 117.6 us per layer, GPU busy 19.32 -> 17.78 ms per step, TPOT
@@ -608,8 +611,9 @@ Rounds, as with DeepSeek. Each round starts from a profile and ends with a boot 
   - The fork keeps a quarter of the token-embedding table and of the output head per rank; Emmy held the whole
     table on every card (1.19 GiB). Of Emmy's buffers, 0.34 GiB was a dead copy of one layer's experts: the
     fixed-slot programs' arena kept the build-time backing after every layer pointed its program at its own
-    tensors. Emmy's dense weights are 0.28 GiB more because every rank runs pre and post whole, where the fork
-    splits the hyper-connection mixers; the fork's experts are 1.5 GiB more because it keeps packed copies.
+    tensors. Emmy's dense weights are 0.28 GiB more because every rank holds the shared expert whole (0.44 GiB),
+    where the fork holds a quarter (0.11 GiB); both hold the mixers whole (this note first named the mixers). The
+    fork's experts are 1.5 GiB more because it keeps packed copies.
   - The 2.6 GiB extra on one card in the done gate's run is PyTorch's cache of freed blocks, which it gives back
     under pressure: live memory is the same on all four ranks at every snapshot, and with the margin held all four
     ranks failed at the same 28.3 GiB.
@@ -637,12 +641,13 @@ Rounds, as with DeepSeek. Each round starts from a profile and ends with a boot 
   | All-reduces of the layer outputs | 0.7 | 0.7 |
 
   - Per layer Emmy runs 315 us in 48 kernels, the fork 164 us in 25. Post8 is 74 us over the fork's matching work:
-    its four big matmuls are 8-row tiles of 14-18 us each, where the fork reads the same shared expert with 1-row
-    GEMVs in 6-10 us and splits the hyper-connection down projections across ranks (6 us plus a 3 us push
-    all-gather), and its 13 small pieces take 47 us. Pre8 is 29 us over, and its fused mixer costs what post8's cut
-    one does (48 us per site either way). Neither has a lever that fits one round: the matmuls sit at the latency
-    floor their tiles reached in the earlier tunes, and splitting the mixers puts two exchanges inside pre and
-    post, which makes them three programs each and re-records every pre and post twin.
+    its four big matmuls are 8-row tiles of 14-18 us each, where the fork reads its quarter of the shared expert
+    with GEMVs in 6-10 us and splits the mixer's work across ranks (6 us for its 80 down rows, a 3-5 us push
+    all-gather, 7 us for its 640 mixed columns with the second gather inside), and its 13 small pieces take 47 us.
+    Pre8 is 29 us over, and its fused mixer costs what post8's cut one does (48 us per site either way). Neither
+    has a lever that fits one round: the matmuls sit at the latency floor their tiles reached in the earlier tunes,
+    and splitting the mixers puts two exchanges inside pre and post, which makes pre two programs and post three
+    and re-records their decode twins.
   - The round took the glue: a hyper-connection layer's routed placement now writes into the next layer's decode
     input (also that layer's post residual) and a hosted Gated DeltaNet layer writes into its post twin's input,
     so 2.7 copies per layer drop out (128 kernels and 0.24 ms of copies per step). Each rank's own GPU work fell
@@ -650,11 +655,12 @@ Rounds, as with DeepSeek. Each round starts from a profile and ends with a boot 
     boots in A B B A order: one request 22.14 -> 22.03 ms per token (within noise), eight requests 150.0 -> 152.8
     tok/s total output (+1.8%, every pair the same way). Same text as before the round, 16 of 16; GSM8K 126 of 128
     with none at the cap, acceptance cases 27 of 28 in each mode.
-  - What is left, largest first: splitting the hyper-connection mixers across ranks, as above; a 1-row tier for
-    one request (the fork's GEMVs read at about 680 GB/s where the 8-row tiles reach about 380, but the narrowest
-    twin settles its family's layouts, so the 1-row twins would re-lay every pre and post twin); fewer post8
-    kernels, which needs the compiler to fold a split-K finalize into its consumer; and at eight requests the
-    fixed-slot tier runs the experts one row at a time.
+  - What is left, largest first: the bytes pre and post read per rank, since the fork reads a quarter of the shared
+    expert and of each mixer's weights (planned under "Next (2026-11-03)"); fewer post8 kernels, which needs the
+    compiler to fold a split-K finalize into its consumer; and at eight requests the fixed-slot tier runs the
+    experts one row at a time. A 1-row tier, first listed here because the fork's GEMVs seemed to read at about
+    680 GB/s against the 8-row tiles' 380, has no support: that rate assumed the fork reads the whole shared expert,
+    and per byte Emmy's tiles read faster.
   - Done gate's decode points re-measured after both parts, the final tree against a fresh fork boot, rounds fork,
     Emmy, Emmy, fork, three repeats each after a priming one. Both still fail:
 
@@ -667,6 +673,61 @@ Rounds, as with DeepSeek. Each round starts from a profile and ends with a boot 
   - For the next run: a server profiled once (`/start_profile`) stays about 5% slower (22.3 against 21.2 ms per
     token on the same tree, and the fork 14.1 against 12.8), so profile on one boot and measure on another; the
     round's A/B used two profiled boots, which keeps its comparison fair.
+- **Next (2026-11-03): pre and post across ranks.** Pre and post are the largest decode gap (8.0 against 2.8 ms per
+  step at one request), and the fork's lead there is that each rank reads a quarter of the bytes. Its allocations and
+  source show how: it slices the shared expert four ways, as vLLM's Qwen3-Next block does (1.6 and 0.8 MB per layer
+  per rank, against Emmy's 6.6 and 3.3), and adds that partial output into the routed experts' all-reduce; and it
+  keeps the mixers' weights whole on every rank but splits their decode work: each rank computes 80 of the 320 down
+  rows and 640 of the 2,560 mixed columns, with a push all-gather after each, 18-23 us per site against Emmy's 48.
+  Two parts, each its own pull request, boot and A/B, in this order:
+  1. **Slice the shared expert across ranks**, at every width, the way the routed experts are sliced. `post` returns
+     the shared expert's partial output instead of placing it in the streams; the runner adds it into the routed
+     partial before the all-reduce it already runs, and the placement injects the sum. No new exchange. Expected:
+     about 1 ms per decode step at one and at eight requests (post8's two shared-expert matmuls take about 37 us per
+     layer whole), 0.33 GiB less per rank, and a slightly faster prefill. The post twins are re-recorded at every
+     width; pre is untouched. The sum order changes to the fork's (four partial sums, then the all-reduce), so the
+     text may move at near-ties: two boots must agree, and the agreement with the fork and the accuracy sets are
+     checked as in step 4.
+  2. **Split the mixers' decode work across ranks**, in the decode twins only; prefill keeps the whole weights, as
+     the fork does. Pre becomes two programs (the norm and this rank's 80 down rows; then this rank's 640 columns of
+     the up projection and the mix) and post three (the attention site's injection, then the same two for the MLP
+     site with its injection weights; then part 1's shared expert). Each of the four exchanges per layer is the group
+     all-reduce over a zeroed buffer whose own slice the program writes: exact, as a gather is, and captured as the
+     routed reduce is. The down rows are a view of the whole weight; the up projection's rank slice is a copy
+     (0.15 GiB per rank). Expected: a site from 48 to about 30 us if an exchange costs what Emmy's all-reduces cost
+     now (6-7 us with the wait for the slowest rank), about 1.7 ms per step. **Gate before the loader, runner and
+     golden work:** trace the split decode twins, bench them cold on the card, add the measured exchange cost, and go
+     on only if a site comes out at least 10 us faster (about 1 ms per step); otherwise stop and report.
+  - Both together would take one request from about 21 to about 18.5 ms per token (the fork 12.7) and give about 5%
+    more total output at eight requests. After each part: in-boot or side-by-side A/B on boots never profiled, the
+    margin test, two boots with the same text, GSM8K and the acceptance cases; one profiled boot for the phase table.
+  - Risks: four more barriers per layer, each waiting for the slowest rank (the fork's exchanges take 1.5 ms of its
+    step); moving pre8's and post8's weights to other programs can re-settle the wide twins' layouts, so check the
+    audit's layout lines, re-record the wide twins if they move, and re-measure first tokens then.
+  - What it leaves: post8's 13 small pieces (about 2.3 ms per step), and at eight requests the fixed-slot tier's one
+    row at a time, which no profile at eight requests has measured yet.
+- **Part 1, the shared expert across ranks (2026-11-04).** Qwen4Exp's `post` returns the gated shared expert's output
+  apart, each rank holds a quarter of its intermediate axis (160 of 640), and the runner adds it to the routed partial
+  ahead of the all-reduce it already ran. The three post twins trace a new program, so the golden's post routes were
+  moved onto the new kernels where a piece's content did not change (a one-off migration matching each seam by the
+  piece it cuts off), and the shared expert's new pieces were tuned and recorded cold on the V100 SXM3. The release
+  audit deploys all 13 twins from the golden alone.
+  - Isolated cold totals, old to new: post8 184.3 to 165.9 us, post4096 4,504 to 3,986 us, post-sym at 512 tokens
+    1,369 to 907 us. The wide twins' down projection needed tensor-core rows the tune's prior did not offer (14.1 ms
+    to 125 us at 4096 tokens), named with `--ab` from the card's offered schedules.
+  - A B B A on two boots never profiled, main against the branch: one request 1K / 512, 21.17 to 20.61 ms per token
+    (every pair the same way); eight requests 4K / 1K, 162.2 to 166.8 tok/s total output, 42.6 to 41.3 ms per token;
+    first tokens unchanged. The plan expected about 1 ms per step at one request.
+  - One profiled boot, GPU time per decode step at one request (the 2026-11-03 profile, then this one): busy 17.5 to
+    16.6 ms; post8 5.66 to 4.86 ms; exchanges 0.88 to 0.64 ms; elementwise 2.41 to 2.59 ms. The rise is the shared
+    add ahead of the all-reduce, one launch per layer (0.17 ms); folding it into the routed combine's matmul would
+    take it back, at one more rounding change.
+  - Weights 0.33 GiB less per rank (from the shapes). The margin test passes: with 3 GiB held per card every
+    worst-case load of step 2 completes and the server keeps serving.
+  - The sum order changed as planned: two branch boots give the same 16 of 16 free texts, and the branch keeps 7 of
+    16 of the 2026-11-03 boots; where it differs from main, both had already left the fork at the same token. GSM8K
+    124 of 128 (2 at the output limit; 126 before, the reference 125), acceptance cases 27 to 28 of 28 in each mode,
+    long-document codes 387 of 387 and 383 of 384 (the reference).
 - Gate, the definition of done. Both sides run step 2's production configuration: the same checkpoint, layout,
   context, key/value pool, concurrency, prefix-cache and MTP settings; fork, Emmy, Emmy, fork rounds; three repeats
   each:
