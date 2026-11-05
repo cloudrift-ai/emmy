@@ -1502,11 +1502,22 @@ _FLOAT_MANTISSA_BITS = {"bf16": 7, "f16": 10, "f32": 23, "f64": 52}
 
 
 def _computed_from_formats(frontend) -> dict:
-    """The coarsest IEEE float format each output of ``frontend`` is computed in: the coarsest among the output and
-    every value its producing chain computes. Graph inputs and constants do not count (the FP64 evaluation reads them
-    exactly), nor do quantized values (the math decodes them to a float first). ``None`` for an output with no float
-    value in its chain."""
+    """The coarsest IEEE float format each output of ``frontend`` is computed in: the coarsest format an op of its
+    producing chain rounds its values into. An op that only moves its first input's values (a layout op or a cast)
+    rounds them only when its format is coarser than theirs, so a bf16 input sliced and cast to f32 adds no bf16
+    step; every other op rounds into its own format. Graph inputs and constants do not count (the FP64 evaluation
+    reads them exactly), nor do quantized values (the math decodes them to a float first). ``None`` for an output no
+    op of its chain rounds into a float format."""
     from emmy.compiler.ir.base import ConstantOp, InputOp  # noqa: PLC0415
+    from emmy.compiler.ir.frontend.ir import CatOp, ReshapeOp, SliceOp, TransposeOp, UnsqueezeOp  # noqa: PLC0415
+    from emmy.compiler.ir.tensor.ir import CastOp, GatherOp, IndexMapOp, ScatterOp  # noqa: PLC0415
+
+    moves = (CastOp, CatOp, GatherOp, IndexMapOp, ReshapeOp, ScatterOp, SliceOp, TransposeOp, UnsqueezeOp)
+    bits = _FLOAT_MANTISSA_BITS
+
+    def rounds(node, fmt: str) -> bool:
+        source = frontend.buffer(node.inputs[0]).dtype.name if node.inputs else None
+        return not isinstance(node.op, moves) or source not in bits or bits[source] > bits[fmt]
 
     def coarsest(output: str) -> str | None:
         found, stack, seen = [], [output], set()
@@ -1516,9 +1527,11 @@ def _computed_from_formats(frontend) -> dict:
             if buf in seen or node is None or isinstance(node.op, (ConstantOp, InputOp)):
                 continue
             seen.add(buf)
-            found.append(frontend.buffer(buf).dtype.name)
+            fmt = frontend.buffer(buf).dtype.name
+            if fmt in bits and rounds(node, fmt):
+                found.append(fmt)
             stack.extend(node.inputs)
-        return min((f for f in found if f in _FLOAT_MANTISSA_BITS), key=_FLOAT_MANTISSA_BITS.get, default=None)
+        return min(found, key=bits.get, default=None)
 
     return {output: coarsest(output) for output in frontend.outputs}
 

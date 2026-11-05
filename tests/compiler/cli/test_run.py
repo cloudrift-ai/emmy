@@ -834,6 +834,25 @@ def test_strict_proof_takes_a_float_outputs_step_in_the_format_it_is_computed_in
     assert _strict_correctness_proof(worse_mean, eager, exact_out=exact, formats=bf16_math)["status"] == "fail"
 
 
+@pytest.mark.parametrize(
+    ("code", "fmt"),
+    [
+        ("x = torch.randn(4, 8, dtype=torch.bfloat16); torch.exp(x[:, :4].float() * 0.5)", "f32"),
+        ("x = torch.randn(4, 8, dtype=torch.bfloat16); torch.exp((x[:, :4] * 0.5).float())", "bf16"),
+        ("x = torch.randn(4, 8); torch.exp(x[:, :4].bfloat16().float() * 0.5)", "bf16"),
+    ],
+)
+def test_strict_proof_takes_a_float_outputs_step_from_the_ops_that_round(code, fmt):
+    """A bf16 input sliced and cast to f32 carries no bf16 rounding, so f32 math on it gets the f32 step. bf16 math
+    before the cast, or a cast that narrows f32 to bf16, rounds into bf16 and sets the bf16 step."""
+    from emmy.commands.run import _computed_from_formats, _output_formats
+    from emmy.commands.trace import graph_from_code
+
+    graph, *_ = graph_from_code(code)
+    formats = _output_formats(dict.fromkeys(graph.outputs), graph, _computed_from_formats(graph))
+    assert formats == dict.fromkeys(graph.outputs, fmt)
+
+
 def test_strict_proof_passes_a_quantized_output_one_code_from_the_reference():
     """A quantized output whose values are each the reference's code or one beside it passes when it misses the FP64
     code on no more elements than the reference and its mean error is no worse, even where its worst element sits two
