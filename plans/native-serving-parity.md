@@ -306,7 +306,17 @@ What the session changes for the milestones:
      and the split's partition — and its symbolic extents as uniform, so the causal stop lands per slice (block
      end plus position minus the slice base) and a slice past the diagonal folds nothing. Gate: the twin folds
      under `g4k` and `g8k` at both caches and matches at every position and window, one wave and wide; the
-     static causal split lands the tier too. Recorded with the route at the rental, the split among the offers.
+     static causal split lands the tier too. Landed and recorded on the dev-box 5090 (2026-11-04, #1324): four
+     compiler bugs, two more than the probe found (a sliced load's clamp hid its row stride from the gmem-direct
+     fragment loaders, a wrong answer; the partition coordinate's underscore flipped a sliced score's
+     orientation, which left the FP8 piece no row). At 512 cached tokens the 64-row fold splits four ways at
+     f1x16 to 29.5 us (27B) and 26.6 us (Qwen3.6), on par with the old four-piece rows (28.5 / 26.6); width 16
+     folds whole at 5.1 us (old 173.7); the 27B's width 3 splits eight ways (12.5 us); width 1 has no tile fork
+     and keeps the old shape, a score cut plus the key split on the remainder (7.1 / 7.4 us, old 7.3 / 6.9), which
+     Qwen3.6's widths 3 and 4 take too (12.2 / 14.8 us). The unsplit fold at width 64 spills at f1x32/k4 (222
+     us). Qwen3.6's rows are `FAST_MATH=0`, where the f16-accumulate cell is not offered: a pinned record on it is
+     invisible to every compile, so its rows stay on the f16/f32 cell. Every root compiles strictly from its file.
+     The strict serving audit of both goldens is next.
    - **The FP8 cache runs unstaged.** Its keys and values are read gmem-direct, a convert per element, through no
      shared memory and no cp.async; only the bf16 cache stages. If the unstaged form misses the gate, a staged FP8
      slab is compiler work this milestone owns, since no other does.
