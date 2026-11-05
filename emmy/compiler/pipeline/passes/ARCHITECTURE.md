@@ -305,7 +305,7 @@ fold slices through the generic `Fold.rewrite`), and each piece re-enters the sc
 its own row. The pieces' axis table holds one axis per name, so either slicer narrows every fold that names it.
 A stream whose length is symbolic (an attention window) splits into slices of `⌈K/w⌉` positions; the last overhangs
 the stream, its loads read the stream's last position and its lift folds nothing past the end: a monoid folds its
-seed there, and a twisted carrier's score takes the pivot's identity through the where-chain a program's own mask
+seed there, and a twisted carrier's score takes the pivot's identity through the `where` selects a program's own mask
 spells, the additive coordinate mask the chunk tier lands, so the carrier past the end weighs its channels by
 nothing. A carried or observed fold has neither and is refused. The sliced lift reads the absolute key unclamped
 (only a load needs the clamp), so a causal mask compares the key its loads read, and the chunk tier's stream bounds

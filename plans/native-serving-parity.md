@@ -301,7 +301,7 @@ What the session changes for the milestones:
      split piece's causal mask, static or not, because the partition coordinate the sliced body reads is not
      uniform to its gate — so no causal attention has ever folded split on tensor cores. The fix: a twisted
      carrier masks its overhang as the additive coordinate mask the tier lands (the score takes the pivot's
-     identity past the window, through the same where-chain the twin spells, the sliced lift reading the absolute
+     identity past the window, through the same `where` selects the twin spells, the sliced lift reading the absolute
      key unclamped), and the tier's mask gate reads a kernel's per-CTA coordinates — the contraction's batch axes
      and the split's partition — and its symbolic extents as uniform, so the causal stop lands per slice (block
      end plus position minus the slice base) and a slice past the diagonal folds nothing. Gate: the twin folds

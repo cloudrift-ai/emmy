@@ -110,7 +110,7 @@ def _clamped(k_axis: Axis, position):
 def _masked(fold: Fold, k_axis: Axis, position) -> Fold:
     """``fold`` folding nothing at any ``position`` past a symbolic stream's end, which the last slice overhangs; a
     static stream's slices tile it exactly. A monoid folds its seed there. A twisted carrier's score takes the
-    pivot's identity, added through the where-chain a program's own mask spells — the coordinate mask the chunk tier
+    pivot's identity, added through the `where` selects a program's own mask spells — the coordinate mask the chunk tier
     lands — so the carrier past the end weighs its channels by nothing, and an all-overhang slice folds a finite
     state the combine then scales away."""
     if k_axis.extent.is_static:
