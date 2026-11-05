@@ -176,11 +176,12 @@ mean error against FP64 is at most 1% above eager's and either its largest error
 step of the output's format at the candidate's worst element, or, for a quantized output, every value is eager's code
 or one beside it and the candidate misses the FP64 code on no more elements than eager. The step absorbs the two
 sides' worst elements sitting at different magnitudes; a value near the midpoint between two codes rounds either way.
-A float output's format is the coarsest float format its producing chain computes in, so an f32 copy of bf16 math
-gets a bf16 step; graph inputs, constants and quantized values in the chain do not count. A wrong element beyond
-eager's own error and one step, a code two steps off, or a bias across the output still fails. Without an FP64
-evaluation (a pinned row against the greedy program on the same inputs), a quantized output one code from the
-reference passes; a float output gets no such slack.
+A float output's format is the coarsest float format an op of its producing chain rounds into, so an f32 copy of
+bf16 math gets a bf16 step. A layout op or a cast only moves values and rounds them only when it narrows them, so f32
+math on a bf16 input sliced and cast to f32 keeps the f32 step; graph inputs, constants and quantized values in the
+chain do not count. A wrong element beyond eager's own error and one step, a code two steps off, or a bias across the
+output still fails. Without an FP64 evaluation (a pinned row against the greedy program on the same inputs), a
+quantized output one code from the reference passes; a float output gets no such slack.
 The TIMED eager forward keeps torch's defaults, the library a user runs. The `torch.compile` column is admitted by the
 same dtype-scaled verdict as the Emmy output (Inductor's own FP16 GEMM is outside a flat `1e-3` of cuBLAS at these
 depths on an RTX 4090), and a backend that cannot be built travels as a failure in the results, printed `failed` in

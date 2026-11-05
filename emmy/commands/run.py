@@ -1591,7 +1591,7 @@ def _strict_correctness_proof(
 
     ``formats`` names each output's format (a dtype name, ``_output_formats``): a quantized output's
     storage format; for a float output, the coarser of its storage format and the coarsest float format
-    it is computed in. An f32 output cast from a bf16 value carries bf16 rounding errors, and two summation
+    it is computed in. An f32 output cast from bf16 math carries bf16 rounding errors, and two summation
     orders of that bf16 math land up to a bf16 step apart, thousands of f32 steps. An output without a
     format gets no step, only the largest-error rule, and no one-code pass. A real fault — a wrong element beyond the reference's own
     error and one step, a code two steps off, or a bias across the output — still fails.
