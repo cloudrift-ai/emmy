@@ -76,7 +76,7 @@ from vllm.v1.attention.backends.registry import MambaAttentionBackendEnum
 from vllm.v1.attention.backends.utils import mamba_get_block_table_tensor
 
 from emmy import config as emmy_config  # aliased: `config` is the HF config in this module
-from emmy.serving.coded_head import NVFP4_HEAD_LEAVES, CodedHead, Exl3HeadSpec, Nvfp4HeadSpec, nvfp4_head_dir
+from emmy.serving.coded_head import NVFP4_HEAD_LEAVES, CodedHead, Exl3HeadSpec, Nvfp4HeadSpec, nvfp4_head_dir, nvfp4_head_sources
 from emmy.serving.gen_runner import EmmyGenRunner
 from emmy.serving.vllm_model import _trunk_dtype_str, pinned_model_id
 
@@ -292,17 +292,14 @@ def _coded_lm_head_source(model_id: str) -> dict | None:
 
 
 def _nvfp4_lm_head_source(model_id: str) -> dict | None:
-    """The NVFP4 head's leaves as numpy, its block scales as raw e4m3 bits, or ``None`` when this
+    """The NVFP4 head's stored tensors as numpy, its block scales as raw e4m3 bits, or ``None`` when this
     checkpoint's head is not NVFP4. Its ``lm_head.weight`` holds packed codes, so the weight stream
     must not load it. ``load_weights`` reads them, so the codes (0.67 GiB on Qwen3.8-27B) are not
     held through the trunk load, and hands them to the compiled head or decodes them."""
-    from emmy.compiler.loader.safetensors import load_sources_by_path
-
     if (qdir := nvfp4_head_dir(model_id)) is None:
         return None
-    paths = [f"lm_head.{leaf}" for leaf in NVFP4_HEAD_LEAVES]
-    src = load_sources_by_path(qdir, paths, bits_paths={"lm_head.weight_scale"})
-    if src.keys() != set(paths):
+    src = nvfp4_head_sources(qdir)
+    if not {f"lm_head.{leaf}" for leaf in NVFP4_HEAD_LEAVES} <= src.keys():
         raise ValueError("NVFP4 lm_head is missing its packed weight or block scale")
     return src
 
@@ -770,8 +767,8 @@ class EmmyGenModel(nn.Module, SupportsPP, SupportsMRoPE):
         )
         if self._coded_head_source is not None:
             self._coded_head_spec = Exl3HeadSpec.from_source(self._coded_head_source, **head)
-        elif self._is_last_rank and nvfp4_head_dir(self._model_id) is not None:
-            self._coded_head_spec = Nvfp4HeadSpec.from_config(dtype=_trunk_dtype_str(mc.dtype), **head)
+        elif self._is_last_rank and (qdir := nvfp4_head_dir(self._model_id)) is not None:
+            self._coded_head_spec = Nvfp4HeadSpec.from_config(dtype=_trunk_dtype_str(mc.dtype), checkpoint=qdir, **head)
         # The rows one step samples: every request's next token, and a verify step's draft tokens too.
         spec_decode = vllm_config.speculative_config
         draft = spec_decode.num_speculative_tokens if spec_decode is not None else 0

@@ -607,3 +607,49 @@ def fp8_block_checkpoint(model, path, *, block: int = 32) -> None:
     if model.config.tie_word_embeddings:
         del tensors["lm_head.weight"]  # one storage; safetensors refuses to write it twice
     save_file(tensors, str(path / "model.safetensors"))
+
+
+def static_fp4(x, input_scale):
+    """modelopt's static 4-bit activation round trip, in f32: an e4m3 scale per 16 values relative to ``input_scale``,
+    the values coded e2m1 against it, and decoded against its f16 rounding (the trunk speller's order of operations)."""
+    import numpy as np
+
+    from emmy.compiler.dtype import decode_f4, decode_f8, encode_f4, encode_f8
+
+    blocks = np.asarray(x, dtype=np.float32).reshape(*np.shape(x)[:-1], -1, 16)
+    amax = np.abs(blocks).max(axis=-1, keepdims=True)
+    ratio = amax * np.float32(1 / 6) * (np.float32(1) / np.float32(input_scale))
+    scale = decode_f8(encode_f8(ratio, "f8e4m3"), "f8e4m3").astype(np.float32) * np.float32(input_scale)
+    codes = decode_f4(encode_f4(blocks / np.maximum(scale, np.float32(1e-12))))
+    return (codes * scale.astype(np.float16).astype(np.float32)).reshape(np.shape(x))
+
+
+def nvfp4_head_checkpoint(model, path, *, input_scale: float) -> None:
+    """Rewrite the output head of the checkpoint ``model`` was saved to at ``path`` as NVFP4 run W4A4 — its codes,
+    block scales and global scale beside the activation's calibrated ``input_scale``, as NVIDIA's Qwen3.8-27B stores
+    it — and leave the head of ``model`` holding the decoded weights: a W4A4 head's logits are those weights times its
+    input's static 4-bit round trip (:func:`static_fp4`)."""
+    import json
+
+    import numpy as np
+    import torch
+    from safetensors.torch import load_file, save_file
+
+    from emmy.compiler.loader.quant import dequantize_nvfp4, quantize_nvfp4
+    from emmy.compiler.loader.synthesize import _NVFP4_CONFIG
+
+    path = Path(path)
+    head = model.lm_head
+    packed, scale_bits, scale_2 = quantize_nvfp4(head.weight.detach().float().numpy())
+    stored = load_file(path / "model.safetensors")
+    stored |= {
+        "lm_head.weight": torch.from_numpy(packed),
+        "lm_head.weight_scale": torch.from_numpy(np.ascontiguousarray(scale_bits)).view(torch.float8_e4m3fn),
+        "lm_head.weight_scale_2": torch.from_numpy(scale_2.reshape(())),
+        "lm_head.input_scale": torch.tensor(input_scale, dtype=torch.float32),
+    }
+    save_file(stored, str(path / "model.safetensors"), metadata={"format": "pt"})
+    document = json.loads((path / "config.json").read_text())
+    document["quantization_config"] = _NVFP4_CONFIG
+    (path / "config.json").write_text(json.dumps(document, indent=1))
+    head.weight.data = torch.from_numpy(dequantize_nvfp4(packed, scale_bits, scale_2)).to(head.weight.dtype)

@@ -549,10 +549,17 @@ def capture_twin_graphs(
         graphs = _spell_coded_twins(graphs, storage, layer_scopes=layer_scopes)
     elif coded_weights:
         graphs = _spell_checkpoint_twins(graphs, model, revision, layer_scopes)
-        # The output head serving keeps coded (``CodedHead``): one any-width program over its NVFP4 codes.
-        spec = Nvfp4HeadSpec.from_config(hidden_size=hidden, vocab_size=vocab, tensor_parallel_size=expert_slices, tied=tied, dtype=dtype)
-        if spec is not None and nvfp4_head_stored(_weight_names(model, revision)):
-            graphs["head-sym"] = head_graph(spec)
+        # The output head serving keeps coded (``CodedHead``): one any-width program over its NVFP4 codes, spelled from
+        # the checkpoint as the trunk's linears are.
+        if nvfp4_head_stored(_weight_names(model, revision)):
+            from emmy.compiler.loader.safetensors import _resolve_model_dir  # noqa: PLC0415
+
+            checkpoint = str(_resolve_model_dir(model, revision))
+            spec = Nvfp4HeadSpec.from_config(
+                hidden_size=hidden, vocab_size=vocab, tensor_parallel_size=expert_slices, tied=tied, dtype=dtype, checkpoint=checkpoint
+            )
+            if spec is not None:
+                graphs["head-sym"] = head_graph(spec)
     # The gather of a token-embedding table serving pages (``EMMY_GEN_EMBED_GPU`` below its page count).
     if embed_gpu is not None and embed_gpu < -(-vocab // EMBED_PAGE_ROWS) and not tied:
         graphs["embed-sym"] = embed_gather_graph(vocab, hidden, td)
