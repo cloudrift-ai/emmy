@@ -1503,21 +1503,20 @@ _FLOAT_MANTISSA_BITS = {"bf16": 7, "f16": 10, "f32": 23, "f64": 52}
 
 def _computed_from_formats(frontend) -> dict:
     """The coarsest IEEE float format each output of ``frontend`` is computed in: the coarsest format an op of its
-    producing chain rounds its values into. An op that only moves its first input's values (a layout op or a cast)
-    rounds them only when its format is coarser than theirs, so a bf16 input sliced and cast to f32 adds no bf16
-    step; every other op rounds into its own format. Graph inputs and constants do not count (the FP64 evaluation
-    reads them exactly), nor do quantized values (the math decodes them to a float first). ``None`` for an output no
-    op of its chain rounds into a float format."""
+    producing chain rounds into. A layout op (the trace writes a cast as one) moves its first input's values and rounds
+    them only into a coarser format, so a bf16 input sliced and cast to f32 adds no bf16 step; every other op rounds
+    into its own format. Graph inputs and constants do not count (the FP64 evaluation reads them exactly), nor do
+    quantized values (the math decodes them to a float first). ``None`` for an output no op rounds into a float."""
     from emmy.compiler.ir.base import ConstantOp, InputOp  # noqa: PLC0415
     from emmy.compiler.ir.frontend.ir import CatOp, ReshapeOp, SliceOp, TransposeOp, UnsqueezeOp  # noqa: PLC0415
-    from emmy.compiler.ir.tensor.ir import CastOp, GatherOp, IndexMapOp, ScatterOp  # noqa: PLC0415
+    from emmy.compiler.ir.tensor.ir import GatherOp, IndexMapOp, ScatterOp  # noqa: PLC0415
 
-    moves = (CastOp, CatOp, GatherOp, IndexMapOp, ReshapeOp, ScatterOp, SliceOp, TransposeOp, UnsqueezeOp)
+    layout = (CatOp, GatherOp, IndexMapOp, ReshapeOp, ScatterOp, SliceOp, TransposeOp, UnsqueezeOp)
     bits = _FLOAT_MANTISSA_BITS
 
     def rounds(node, fmt: str) -> bool:
-        source = frontend.buffer(node.inputs[0]).dtype.name if node.inputs else None
-        return not isinstance(node.op, moves) or source not in bits or bits[source] > bits[fmt]
+        source = frontend.buffer(node.inputs[0]).dtype.name if isinstance(node.op, layout) and node.inputs else None
+        return source not in bits or bits[source] > bits[fmt]
 
     def coarsest(output: str) -> str | None:
         found, stack, seen = [], [output], set()
