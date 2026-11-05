@@ -674,8 +674,12 @@ contract lives in [native/ARCHITECTURE.md](native/ARCHITECTURE.md); vLLM remains
   runs it: both operands reach the product as packed e2m1 pairs, so at sm_120 the head is offered the block-scaled
   tensor-core tile, and its logits stay f32. One launch serves a verify step's rows; whether they share one read of
   the codes is the schedule's choice, and a schedule that gives each row its own blocks reads them once per row,
-  which at a few rows can cost more than the dense matmul it replaces. On Qwen3.8-27B-NVFP4 the card holds 0.67 GiB
-  of codes and scales where the decoded BF16 head took 2.37 GiB. The head
+  which at a few rows can cost more than the dense matmul it replaces. The program is compiled and measured at one
+  row: the spellers name the rows' axis afresh in the buffers they add, so the program takes its input's one-row hint
+  again after spelling, and each of its kernels is keyed at one row. On Qwen3.8-27B-NVFP4 the card holds 0.67 GiB
+  of codes and scales where the decoded BF16 head took 2.37 GiB, and on an RTX 5090 the W4A4 head takes the e2m1 tile
+  with its warps across the vocabulary: 0.44 ms at one or three rows, where the weight-only head's schedule read the
+  codes once per row (0.62 ms at one row, 1.86 ms at three). The head
   program is a serving twin (`head-sym`) and a kernel of its own, so like any twin it takes its schedule from a
   measured row in the card's golden, and from the prior where there is none. Any other coded head decodes into
   vLLM's parameter in output-row blocks (`decode_exl3_blocks`, whose whole-tensor fold runs in float64, ~5 GiB for a

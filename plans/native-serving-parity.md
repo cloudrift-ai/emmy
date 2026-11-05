@@ -220,7 +220,18 @@ What the session changes for the milestones:
    rows' 4-bit quantize and the product, and the product reads as a block-scaled pair offered only the e2m1 tile.
    The native decode, prefill and verify programs build and run with it on surrogates. The 27B golden's `head-sym`
    program is the new trace, its two kernels stored with no rows, and the old head's two rows are gone; the hardware
-   golden keeps its old head program and rows. What remains needs the card: record the two kernels, then the gate.
+   golden keeps its old head program and rows.
+
+   Recorded and gated on a rented x16 RTX 5090 on 2026-11-05. The spellers had keyed the product at 512 rows (the
+   coded rows lost the head's one-row hint), where the evidence picks a tile that runs 7 ms at one row; the head
+   program now takes its hint again after spelling. At one row the product takes the e2m1 tile with its warps across
+   the vocabulary (`w1x4`, `f1x8`, 433 us whole), a schedule a 24-row tune did not reach (scalar only, 964 us). Same
+   card, main's pack against this one, both exported without strict evidence: verify step 51.3 -> 49.3 ms, its head
+   3.3 -> 1.3 ms; one-row head 625 -> 448 us; plugin TPOT 11.1 -> 9.9 ms. Teacher-forced on main's greedy tokens the
+   forced token's logprob moves 0.26 at most (median 0.0015), 250 of 256 picks agree; GSM8K on native 0.720 / 0.760.
+   The strict audit deploys 51 of 62 twins: the 11 that do not are 3's, 4's and 5's native rows, not the head's.
+   Without them a pack's decode attention takes the prior's uncut picks, 23-27 ms a step, so both steps above are
+   about twice #1282's.
 
 3. **The rotary cache store takes a grid.** The store names the whole cache (a scatter into a windowed buffer
    leaves its store no grid) and runs on one CTA: rope64 ~9 ms of a 64-row chunk (0.58 ms a layer), rope3 36-43 us
