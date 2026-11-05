@@ -4,7 +4,7 @@ import numpy as np
 import pytest
 
 from emmy.compiler.loader.quant import dequantize_nvfp4, quantize_nvfp4
-from emmy.serving.coded_head import Exl3HeadSpec, Nvfp4HeadSpec, head_graph
+from emmy.serving.coded_head import HEAD_ROWS, Exl3HeadSpec, Nvfp4HeadSpec, head_graph
 from tests.compiler.helpers import requires_cuda
 from tests.serving.helpers import static_fp4
 from tests.support.checkpoints import exl3_linear_tensors
@@ -150,7 +150,8 @@ def test_nvfp4_head_is_spelled_w4a4_as_the_trunks_linears(tmp_path):
     constants are the checkpoint's codes and scales, and where the checkpoint stores ``lm_head.input_scale`` the rows
     reach the product through the static 4-bit round trip. At sm_120 lowering the head's contraction then reads as a
     block-scaled pair of packed operands and is offered the e2m1 tensor-core tile, as stock vLLM runs this head; a
-    checkpoint with no activation scale keeps the weight-only head and a 16-bit tile."""
+    checkpoint with no activation scale keeps the weight-only head and a 16-bit tile. Every kernel is measured at
+    the head's own rows, the coded rows' product too."""
     from emmy.compiler.context import Context
     from emmy.compiler.ir.base import ConstantOp
     from emmy.compiler.ir.pure.fold import Fold
@@ -158,6 +159,7 @@ def test_nvfp4_head_is_spelled_w4a4_as_the_trunks_linears(tmp_path):
     from emmy.compiler.ir.tensor.ir import ElementwiseOp
     from emmy.compiler.ir.tile import TileOp
     from emmy.compiler.pipeline import LOOP_PASSES, Pipeline
+    from emmy.compiler.wire import kernel_bindings
 
     def folds(node):
         return [node, *(f for e in node.operands for f in folds(e))] if isinstance(node, Fold) else []
@@ -176,6 +178,7 @@ def test_nvfp4_head_is_spelled_w4a4_as_the_trunks_linears(tmp_path):
         ctx = Context.from_target((12, 0))
         tiled = Pipeline.build(["tile/lift"], select={"lift"}).run(Pipeline.build(LOOP_PASSES).run(graph), ctx=ctx)
         tiles = [node.op for node in tiled.nodes.values() if isinstance(node.op, TileOp)]
+        assert all(kernel_bindings(tile) == {"num_tokens": HEAD_ROWS} for tile in tiles)
         products = [(tile, fold) for tile in tiles for fold in folds(tile.op) if fold.as_contraction() is not None]
         assert len(products) == 1, "the head is one contraction"
         ((tile, product),) = products

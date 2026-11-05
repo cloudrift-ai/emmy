@@ -171,12 +171,15 @@ def head_graph(spec: Exl3HeadSpec | Nvfp4HeadSpec):
     from emmy.compiler.dim import Dim
     from emmy.compiler.graph import Graph, Tensor
     from emmy.compiler.ir.base import InputOp
+    from emmy.compiler.specialize import rehint_program
 
     graph = Graph()
     graph.add_node(InputOp(), [], Tensor("x", (Dim("num_tokens", hint=HEAD_ROWS), spec.hidden_size), spec.dtype), node_id="x")
     graph.inputs = ["x"]
     graph.outputs = [spec.spell(graph, "x")]
-    return graph
+    # A speller's buffers name the rows afresh, at the default hint: the coded rows of a W4A4 head would key the product
+    # at 512 rows.
+    return rehint_program(graph, {"num_tokens": HEAD_ROWS})
 
 
 class CodedHead(nn.Module):
