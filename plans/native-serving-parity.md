@@ -316,7 +316,11 @@ What the session changes for the milestones:
      Qwen3.6's widths 3 and 4 take too (12.2 / 14.8 us). The unsplit fold at width 64 spills at f1x32/k4 (222
      us). Qwen3.6's rows are `FAST_MATH=0`, where the f16-accumulate cell is not offered: a pinned record on it is
      invisible to every compile, so its rows stay on the f16/f32 cell. Every root compiles strictly from its file.
-     The strict serving audit of both goldens is next.
+     The strict serving audit of both goldens passes (2026-11-05, dev-box 5090): 62 of 62 twins (27B) and 66 of 66
+     (Qwen3.6) deploy from the golden rows alone. The first round failed seven twins per file, none attention: the
+     rope twins (#1318's restamp demoted their rows; its record run rode this one, 2-5 us a program, 3.4-4.7 us at
+     64 rows against 500 us before) and the pick/next twins #1313 added without rows (0.6-0.9 us). A record compiles
+     the family's narrower twins first from the file, so the wide rope roots record narrow to wide.
    - **The FP8 cache runs unstaged.** Its keys and values are read gmem-direct, a convert per element, through no
      shared memory and no cp.async; only the bf16 cache stages. If the unstaged form misses the gate, a staged FP8
      slab is compiler work this milestone owns, since no other does.
