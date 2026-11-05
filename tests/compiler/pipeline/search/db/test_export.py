@@ -168,7 +168,7 @@ def test_a_static_piece_under_a_symbolic_root_exports_in_its_own_regime():
     the static head dimension); the fork on that piece is a static-regime group, whatever its root's regime, and the
     group's tier agrees with the rows it packs."""
     golden = GoldenFile.load(Path(__file__).parents[5] / "recipes" / "Qwen3.8-27B-NVFP4-NVIDIA" / "golden" / "rtx5090_sm120.json")
-    target = "k_matmul_softmax_range_reduce_908021"
+    target = "k_matmul_softmax_range_reduce_3e1cea"
     rows = [row for row in golden.rows if any(golden.kernel(route.parent).name == target for route in golden.path_to(row.kernel))]
     assert rows
     db = SearchDB()
