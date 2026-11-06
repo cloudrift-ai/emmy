@@ -75,19 +75,24 @@ def _normalize_body(stmts: Body) -> Body:
         stmts = rename_ssa_sequential(topo_sort_siblings(expand_calls(prepare_body(stmts))))
     # The folds are the one step that feeds the steps ahead of it: a fold can leave a value unread, make two loops
     # mergeable, or change what orders the free axes. So the steps run again after a fold that changed the body, and
-    # only then. The order after them permutes and names; no step reads what it decides.
+    # only then. The order after them permutes and names, and one step reads names: the order gives two bindings that
+    # shared a name their own, and a value only the other's readers kept alive is then unread. A body the order left
+    # such a value in goes through the steps again.
     for _ in range(8):
         prepared = Body.coerce(prepare_body(stmts))
         stmts = fold_values(prepared)
-        if stmts is prepared:
-            ordered = _canonical_order(prepared)
-            # The order is not yet final on its own output; it runs until it is.
-            while (again := _canonical_order(ordered)) != ordered:
-                ordered = again
+        if stmts is not prepared:
+            continue
+        ordered = _canonical_order(prepared)
+        # The order is not yet final on its own output; it runs until it is.
+        while (again := _canonical_order(ordered)) != ordered:
+            ordered = again
+        stmts = drop_unread_values(ordered)
+        if stmts == ordered:
             return ordered
     from emmy.compiler.ir.stmt.base import pretty_body  # noqa: PLC0415
 
-    raise ValueError("the folds did not settle in eight rounds:\n" + "\n".join(pretty_body(stmts, "  ")))
+    raise ValueError("the normal form did not settle in eight rounds:\n" + "\n".join(pretty_body(stmts, "  ")))
 
 
 def _commuted(stmts: Body) -> Body:

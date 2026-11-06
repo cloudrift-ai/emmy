@@ -6,7 +6,7 @@ from itertools import product
 
 from emmy.compiler.ir.axis import Axis
 from emmy.compiler.ir.expr import BinaryExpr, Literal, Var
-from emmy.compiler.ir.stmt import Assign, Body, Cond, Load, Loop, Select, SelectBranch, Write, normalize_body
+from emmy.compiler.ir.stmt import Accum, Assign, Body, Cond, Load, Loop, Select, SelectBranch, Write, normalize_body
 from emmy.compiler.ir.stmt.normalize import (
     _canonicalize_exprs,
     _normalize_body,
@@ -172,3 +172,31 @@ def test_no_step_changes_a_prepared_body_the_folds_leave_alone() -> None:
         else:
             raise AssertionError("the folds did not settle")
         assert prepare_body(prepared) == prepared
+
+
+def test_a_reduction_only_another_bindings_readers_kept_alive_is_dropped() -> None:
+    """A cut can splice one cone twice under the same names: a statistic, then a contraction that reads it, twice.
+    Placement keeps the first statistic for both readers and the merge folds the second into a contraction, where
+    nothing reads it. It shares the first one's name, and the unread-value drop reads by name, so only the names the
+    order gives tell the two apart: the normal form holds one statistic, and normalization leaves it alone."""
+    i, j, k, m = Var("i"), Var("j"), Var("k"), Var("m")
+
+    def cone(weights: str, out: str) -> tuple:
+        statistic = Loop(Axis("k", 4), (Load(name="x", input="X", index=(i, k)), Assign("sq", "multiply", ("x", "x")), Accum("s", "sq")))
+        contraction = Loop(
+            Axis("m", 4),
+            (
+                Load(name="y", input="X", index=(i, m)),
+                Assign("scaled", "multiply", ("y", "r")),
+                Load(name=f"w_{out}", input=weights, index=(m, j)),
+                Assign(f"p_{out}", "multiply", (f"w_{out}", "scaled")),
+                Accum(out, f"p_{out}"),
+            ),
+        )
+        return statistic, Assign("r", "rsqrt", ("s",)), contraction
+
+    writes = (Write(output="O1", index=(i, j), value="o1"), Write(output="O2", index=(i, j), value="o2"))
+    body = Body((Loop(Axis("i", 8), (Loop(Axis("j", 3), (*cone("W1", "o1"), *cone("W2", "o2"), *writes)),)),))
+    normalized = normalize_body(body)
+    assert len(normalized.accums) == 3
+    assert _normalize_body(normalized) == normalized
