@@ -280,7 +280,7 @@ def value_numbers(body: Body, resource_key: Callable[[str], object] = lambda nam
 
     def visit(stmts: Body) -> None:
         nonlocal touched
-        carried.update(stmts.carried_names)
+        carried.update(stmts._carried_names)
         for stmt in stmts:
             touched = []
             if isinstance(stmt, leaves.Load):
@@ -368,7 +368,7 @@ def value_numbers(body: Body, resource_key: Callable[[str], object] = lambda nam
                 del binding[len(binding) - len(bound) :]
                 if isinstance(stmt, (blocks.Loop, blocks.StridedLoop)):
                     loops.pop()
-                exported = {name: env[name] for child in stmt.nested() for name in child.carried_names if name in env}
+                exported = {name: env[name] for child in stmt.nested() for name in child._carried_names if name in env}
                 env.clear()
                 env.update(saved[0])
                 env.update(exported)

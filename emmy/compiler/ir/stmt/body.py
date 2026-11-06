@@ -14,13 +14,10 @@ Phase 1 surface (this file): the protocol that lets every
 as method-shaped wrappers around the existing free functions.
 
 Phase 2 surface: def-use queries (``definitions``, ``axis_dependencies``,
-``deps_closure``, ``depends_on`` / ``independent``, ``deps_of``), Kahn
-``topological_order``, type-filtered lookups
+``depends_on``), Kahn ``topological_order``, type-filtered lookups
 (``loads``, ``writes``, ``accums``, …), and dependence cones
-(:class:`Cone`, :meth:`Body.backward_cone`
-/ :meth:`Body.defs_die_at`) — the shared substrate behind the rules
-that slice computed-operand cones. Region transforms (``replace_at``,
-``partition_at``) remain follow-ups; add as needed.
+(:class:`Cone`, :meth:`Body.backward_cone`) — the shared substrate behind the rules
+that slice computed-operand cones.
 """
 
 from __future__ import annotations
@@ -48,7 +45,7 @@ class Cone:
     Construction never fails and applies no eligibility judgment: an
     unresolved name is data (``external_reads``), not an error. Which
     external reads are acceptable, which member kinds are cuttable, and
-    whether the cone's values escape (:meth:`Body.defs_die_at`) are the
+    whether the cone's values escape are the
     calling rule's conditions — bail decisions stay in rules, the dataflow
     walk lives here (``passes/ARCHITECTURE.md``: phrase conditions over cone
     properties instead of re-walking shapes).
@@ -272,10 +269,10 @@ class Body(tuple[Stmt, ...], Wire):
         incoming: Sequence[set[int] | frozenset[int]],
         tie_break: Callable[[int, Stmt], object] | None = None,
     ) -> Body:
-        """This body in :meth:`topological_permutation` order."""
-        return Body(self[index] for index in self.topological_permutation(incoming, tie_break))
+        """This body in :meth:`_topological_permutation` order."""
+        return Body(self[index] for index in self._topological_permutation(incoming, tie_break))
 
-    def topological_permutation(
+    def _topological_permutation(
         self,
         incoming: Sequence[set[int] | frozenset[int]],
         tie_break: Callable[[int, Stmt], object] | None = None,
@@ -317,25 +314,6 @@ class Body(tuple[Stmt, ...], Wire):
 
     # -- generic backward dataflow --------------------------------------
 
-    def dependency_depths(self, *types: type[Stmt], inputs: Mapping[str, int] | None = None) -> dict[str, int]:
-        """Longest def-use path to each SSA name, counting only statements of ``types``.
-
-        The body must be in SSA dependency order, as for :meth:`fold`. ``inputs`` supplies depths
-        for external buffers, so a caller composing bodies can continue a producer's path through
-        its consumer's loads. Missing inputs start at zero. Equal depths of counted statements
-        prove independence; different depths need not prove dependence.
-        """
-        inputs = inputs or {}
-        memo = self.fold(
-            lambda stmt, children, _: (
-                max(
-                    (*(depth for depth in children if depth is not None), *(inputs.get(name, 0) for name in stmt.external_reads())),
-                    default=0,
-                )
-                + isinstance(stmt, types)
-            )
-        )
-        return {name: memo[id(stmt)] for name, stmt in self.definitions.items()}
 
     def coalesce(self) -> Body:
         """Assemble shared SSA definitions once and merge adjacent independent reduction loops.
@@ -438,25 +416,25 @@ class Body(tuple[Stmt, ...], Wire):
     # -- def-use analysis ------------------------------------------------
 
     @cached_property
-    def carried_names(self) -> tuple[str, ...]:
+    def _carried_names(self) -> tuple[str, ...]:
         """Accumulator and carried-state names, deduplicated in structural order."""
         from emmy.compiler.ir.stmt.leaves import Accum, Carry  # noqa: PLC0415
 
         return tuple(dict.fromkeys(name for stmt in self.iter_of_type(Accum, Carry) for name in stmt.carried_names()))
 
     @cached_property
-    def local_defs(self) -> frozenset[str]:
+    def _local_defs(self) -> frozenset[str]:
         """Bindings at this scope, including states exported by nested statements."""
         from emmy.compiler.ir.stmt.order import _ordered_sibling_defs  # noqa: PLC0415
 
         return frozenset(name for stmt in self for name in _ordered_sibling_defs(stmt))
 
     @cached_property
-    def free_ssa(self) -> frozenset[str]:
+    def _free_ssa(self) -> frozenset[str]:
         """SSA reads from the enclosing scope, excluding this scope's definitions and exported states."""
         from emmy.compiler.ir.stmt.order import _free_ssa  # noqa: PLC0415
 
-        return frozenset().union(*(_free_ssa(stmt) for stmt in self)) - self.local_defs
+        return frozenset().union(*(_free_ssa(stmt) for stmt in self)) - self._local_defs
 
     @cached_property
     def definitions(self) -> dict[str, Stmt]:
@@ -556,7 +534,7 @@ class Body(tuple[Stmt, ...], Wire):
         return dependencies
 
     @cached_property
-    def deps_closure(self) -> dict[str, frozenset[str]]:
+    def _deps_closure(self) -> dict[str, frozenset[str]]:
         """For every SSA name defined in this body (recursive), the
         set of names it transitively reads. Values include both SSA
         names (defined elsewhere in the body or externally) and axis
@@ -629,7 +607,7 @@ class Body(tuple[Stmt, ...], Wire):
         StridedLoop / Tile / Cond) it rolls up every nested stmt's
         reads and removes the wrapper's own bound axes — so e.g.
         ``Loop(b, ...)._stmt_reads()`` does not contain ``b``."""
-        closure = self.deps_closure
+        closure = self._deps_closure
         seeds: set[str] = set(s.deps())
         for e in s.exprs():
             seeds.update(e.free_vars())
@@ -662,7 +640,7 @@ class Body(tuple[Stmt, ...], Wire):
         b_set = {b} if isinstance(b, str) else set(b)
         if not b_set:
             return False
-        closure = self.deps_closure
+        closure = self._deps_closure
         a_iter: Iterable[Stmt | str] = [a] if isinstance(a, (str, Stmt)) else a
         for x in a_iter:
             if isinstance(x, Stmt):
@@ -673,49 +651,7 @@ class Body(tuple[Stmt, ...], Wire):
                     return True
         return False
 
-    def independent(self, a: Stmt | str | Iterable[Stmt | str], b: Stmt | str | Iterable[Stmt | str]) -> bool:
-        """True iff ``a`` and ``b`` share no dataflow path — neither
-        ``a`` transitively reads any name in ``b`` nor vice versa.
-        Symmetric counterpart to :meth:`depends_on`. Use this when
-        asking "are these two things related at all?" (fusion safety,
-        motion legality); use :meth:`depends_on` when direction
-        matters (invariance, hoist gates).
 
-        For symmetric usage, ``Stmt`` arguments on either side expand
-        to their *defined* names (what the stmt produces) when used as
-        a read target — same swap-and-call behavior as
-        :meth:`depends_on`."""
-
-        def _as_target(x: Stmt | str | Iterable[Stmt | str]) -> set[str]:
-            items = [x] if isinstance(x, (str, Stmt)) else list(x)
-            out: set[str] = set()
-            for it in items:
-                if isinstance(it, Stmt):
-                    for sub in it.nested():
-                        for c in sub.iter():
-                            out.update(c.defines())
-                    out.update(it.defines())
-                else:
-                    out.add(it)
-            return out
-
-        return not (self.depends_on(a, _as_target(b)) or self.depends_on(b, _as_target(a)))
-
-    def deps_of(self, stmt: Stmt) -> tuple[Stmt | None, ...]:
-        """Defining stmts inside this body for each of ``stmt``'s SSA
-        reads, in the same order as ``stmt.deps()``. Position-preserving:
-        each entry is the ``Stmt`` that produces the corresponding dep,
-        or ``None`` if the dep is read but not defined locally (Tile-
-        input buffer reference, constant, or an SSA from an enclosing
-        scope — i.e. an external read).
-
-        Replaces the ``[body.def_of(d) for d in stmt.deps()]`` pattern
-        rules used to write inline. Use ``isinstance(s, T)`` predicates
-        to filter results — ``None`` won't match any concrete stmt
-        type, so external reads drop out automatically; check
-        ``s is None`` explicitly when the gate cares about externals."""
-        defs = self.definitions
-        return tuple(defs.get(d) for d in stmt.deps())
 
     # -- dependence cones --------------------------------------------------
 
@@ -750,47 +686,9 @@ class Body(tuple[Stmt, ...], Wire):
             pending.extend(free_names(s))
         return Cone(members=tuple(s for s in self if id(s) in member_ids), external_reads=frozenset(external))
 
-    def defs_die_at(self, members: Iterable[Stmt], *, roots: Iterable[str], allowed: Iterable[Stmt]) -> bool:
-        """True iff no stmt in this body outside ``members`` reads a name
-        they expose — except the ``allowed`` stmts, which may read names in
-        ``roots`` (and nothing else from the cone). The escape check for
-        cutting a cone out: its values must die at the designated consumers
-        (e.g. the matmul multiplies) or the cut would break a reader left
-        behind. ``members`` may span several scope levels of this body
-        (a cell cone plus its prologue deps); each member's whole subtree
-        counts as inside."""
-        members = tuple(members)  # may arrive as a generator; iterated twice
-        member_ids = {id(s) for s in members}
-        moved_defs: set[str] = set()
-        for s in members:
-            moved_defs |= exposed_defines(s)
-        root_set = frozenset(roots)
-        allowed_ids = {id(s) for s in allowed}
-
-        def walk(stmts: Iterable[Stmt]) -> bool:
-            for s in stmts:
-                if id(s) in member_ids:
-                    continue  # the whole subtree moves; internal uses are fine
-                reads = set(s.deps()) & moved_defs
-                if reads and not (id(s) in allowed_ids and reads <= root_set):
-                    return False
-                for sub in s.nested():
-                    if not walk(sub):
-                        return False
-            return True
-
-        return walk(self)
 
     # -- type-filtered lookups -------------------------------------------
 
-    def of_type(self, *types: type) -> tuple[Stmt, ...]:
-        """Top-level stmts in this body matching any of the given
-        types. The named helpers below (:meth:`loads`, :meth:`writes`,
-        :meth:`accums`, :meth:`loops`, :meth:`stages`) walk the entire
-        body recursively; use ``of_type`` when you need only the
-        top-level slice (e.g. "Loops directly in this Tile body, not
-        inside nested wrappers")."""
-        return tuple(s for s in self if isinstance(s, types))
 
     @cached_method
     def iter_of_type(self, *types: type) -> tuple[Stmt, ...]:

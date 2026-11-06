@@ -213,7 +213,7 @@ def _shuffled_and_renamed(body: Body, rng: random.Random) -> tuple[Body, dict[st
 
     def reorder(stmts: Body) -> Body:
         stmts = Body.coerce(stmts)
-        order = stmts.topological_permutation(ordering_constraints(stmts, effects=True), lambda _index, _stmt: rng.random())
+        order = stmts._topological_permutation(ordering_constraints(stmts, effects=True), lambda _index, _stmt: rng.random())
         out = []
         for index in order:
             stmt = stmts[index]

@@ -45,7 +45,7 @@ def rename_free(stmt: Stmt, alias: Mapping[str, str]) -> Stmt:
     # Rewrite each child once, with only the aliases its scope does not rebind.
     inner = []
     for b in bodies:
-        bound = b.local_defs
+        bound = b._local_defs
         pruned = {k: v for k, v in alias.items() if k not in bound and k not in stmt.binds_axes()}
         # The surviving value may itself be shadowed here. Rename the local binding before
         # substituting, so dropping outer ``b = a`` cannot capture the use of b as an inner a.

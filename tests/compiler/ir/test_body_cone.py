@@ -1,16 +1,10 @@
-"""Unit tests for ``Body.backward_cone`` / ``defs_die_at``.
-
-The cone API is the shared dataflow substrate behind the rules that used to
-hand-roll slicing (``_split_demoted``, ``021_hoist_staged_loads_above_mask``)
-— see ``passes/ARCHITECTURE.md``. Construction never fails: unresolved names
-are ``external_reads``, and every eligibility judgment stays in the rule.
-"""
+"""Unit tests for ``Body.backward_cone``."""
 
 from __future__ import annotations
 
 from emmy.compiler.ir.axis import Axis
 from emmy.compiler.ir.expr import Var
-from emmy.compiler.ir.stmt import Accum, Assign, Body, Load, Loop, Select, SelectBranch, Write
+from emmy.compiler.ir.stmt import Accum, Assign, Body, Load, Loop, Select, SelectBranch
 
 
 def _ld(name: str, src: str, *idx: str) -> Load:
@@ -85,46 +79,3 @@ def test_backward_cone_select_predicate_axis_is_read():
 
 
 # --- defs_die_at ------------------------------------------------------
-
-
-def test_defs_die_at_allows_designated_consumer():
-    body = _cell()
-    cone = body.backward_cone(["a1"])
-    assert body.defs_die_at(cone.members, roots=["a1"], allowed=[body[3]]) is True
-
-
-def test_defs_die_at_rejects_escaping_read():
-    body = Body([*_cell(), Write(output="leak", index=(Var("m"),), values=("a1",))])
-    cone = body.backward_cone(["a1"])
-    assert body.defs_die_at(cone.members, roots=["a1"], allowed=[body[3]]) is False
-
-
-def test_defs_die_at_rejects_consumer_reading_past_root():
-    """The allowed consumer may read only the roots — a multiply that also
-    reads a cone-internal temp blocks the cut."""
-    body = Body(
-        [
-            _ld("a0", "x", "m", "k"),
-            _asn("a1", "negative", "a0"),
-            _ld("b", "w", "k", "n"),
-            _asn("p", "multiply", "a1", "a0"),
-            Accum(name="acc", value="p"),
-        ]
-    )
-    cone = body.backward_cone(["a1"])
-    assert body.defs_die_at(cone.members, roots=["a1"], allowed=[body[3]]) is False
-
-
-def test_defs_die_at_member_subtree_reads_are_internal():
-    """A wrapper member's internal uses of moved names don't count as
-    escapes — the whole subtree moves."""
-    body = Body(
-        [
-            _asn("c0", "negative", "z"),
-            Loop(axis=Axis("k", 8), body=(_ld("c1", "x", "k"), _asn("c2", "multiply", "c1", "c0"), Accum(name="acc", value="c2"))),
-            _asn("out", "exp", "acc"),
-        ]
-    )
-    cone = body.backward_cone(["acc"])
-    assert body[0] in cone.members and body[1] in cone.members
-    assert body.defs_die_at(cone.members, roots=["acc"], allowed=[body[2]]) is True

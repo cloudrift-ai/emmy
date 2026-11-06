@@ -159,20 +159,23 @@ def _imports(path: pathlib.Path):
 
 
 def test_the_statement_module_is_entered_through_its_package() -> None:
-    """Outside ``ir/stmt``, the compiler imports the statement package and its public names, nothing else.
+    """Outside ``ir/stmt``, the compiler and its tests import the statement package's exported names, nothing else.
 
     A submodule path or a private name is a dependency on how the module is built. The package's export list is the
-    whole interface, so the module can be rearranged, or replaced, behind it.
+    whole interface, so the module can be rearranged, or replaced, behind it. The tests of how it is built are the
+    one exception, and they sit in one directory that leaves with the implementation.
     """
-    stmt_dir = _REPO_ROOT / "emmy" / "compiler" / "ir" / "stmt"
+    import emmy.compiler.ir.stmt as stmt
+
+    inside = (_REPO_ROOT / "emmy" / "compiler" / "ir" / "stmt", _REPO_ROOT / "tests" / "compiler" / "ir" / "stmt" / "implementation")
     offenders = []
-    for py in sorted((_REPO_ROOT / "emmy").rglob("*.py")):
-        if stmt_dir in py.parents:
+    for py in sorted([*(_REPO_ROOT / "emmy").rglob("*.py"), *(_REPO_ROOT / "tests").rglob("*.py")]):
+        if any(root in py.parents for root in inside):
             continue
         for module, names in _imports(py):
-            if module.startswith(_STMT_PACKAGE + ".") or (module == _STMT_PACKAGE and any(name.startswith("_") for name in names)):
+            if module.startswith(_STMT_PACKAGE + ".") or (module == _STMT_PACKAGE and not set(names) <= set(stmt.__all__)):
                 offenders.append(f"{py.relative_to(_REPO_ROOT)}: from {module} import {', '.join(names)}")
-    assert not offenders, "import these from the statement package's public names:\n" + "\n".join(offenders)
+    assert not offenders, "import these from the statement package's exported names:\n" + "\n".join(offenders)
 
 
 def test_the_statement_module_exports_a_pinned_list() -> None:

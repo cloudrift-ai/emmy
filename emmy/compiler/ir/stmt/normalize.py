@@ -1095,7 +1095,7 @@ def place_values(stmts: Body) -> Body:
         shell = rename_free(stmt.with_bodies(tuple(Body() for _ in children)), alias)
         built = shell.with_bodies(tuple(Body(kept) for kept, _, _ in children))
         # The states the block still holds: a nested block that escaped settled its own at the scope it moved to.
-        exported = tuple(name for child in built.nested() for name in child.carried_names)
+        exported = tuple(name for child in built.nested() for name in child._carried_names)
         where = depth
         if not stmt.has_side_effects and not any(isinstance(member, Carry) for member in members):
             where = target(depth, set(free_names(built)), marks)
@@ -1345,7 +1345,7 @@ def _canonical_order(stmts: Body) -> Body:
                 stmt = stmt.with_bodies(tuple(ordered(child) for child in stmt.nested()))
             rebuilt.append(stmt)
         rebuilt = Body(rebuilt)
-        order = rebuilt.topological_permutation(ordering_constraints(rebuilt, effects=True), lambda index, _stmt: priorities[index])
+        order = rebuilt._topological_permutation(ordering_constraints(rebuilt, effects=True), lambda index, _stmt: priorities[index])
         return Body(rebuilt[index] for index in order)
 
     placed = ordered(stmts)
