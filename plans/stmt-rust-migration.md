@@ -59,7 +59,7 @@ The preparation is Python only and changes no kernel. Most of it is merged or in
 | The normal-form and identity memos, keyed by a body's text | A table inside the crate keyed by the body's hash | Hashing a body of 20 statements again is 15 ns against 2,765 ns today. |
 | The structural form (`structural.py`) of a statement | Generated with the kind, feeding the identity digest | The digest value may move (decision 2). |
 | `Call`, `Subroutine` | Two more kinds; a subroutine is shared data | Needed only by the one normalization step fusion runs on a body with calls. |
-| `Fold` answering part of the statement protocol | Stays in Python | Open question below. |
+| `Fold`, a Tile IR term that holds `Lambda` bodies | Stays in Python; its `rewrite` is its own entry and it answers no statement member | A Python term holding Rust bodies is the allowed direction of the boundary. |
 
 ### Kinds
 
@@ -125,7 +125,7 @@ Both implementations exist until the switch and never share an object: a body go
 | Loopify compares statements without listing their fields | open |
 | The debug dump stores a body as its text, not as `repr` read back by `eval` | open |
 | A fixture that yields the raw bodies of a corpus lowering | open; rules 1 to 3 run over it |
-| `Fold` stops answering the statement protocol; the walks that reach one become functions over the interface | open |
+| `Fold` stops answering the statement protocol; the walks that reach one become functions over the interface | done (`Fold` keeps a `rewrite` of its own; nothing else was read) |
 | An expression's structural form is its text; the four concrete expression classes take full names | open; moves every identity once (decision 11): the tune DB version and its pinned identities move with it |
 | No Tile layer table is keyed on a statement or a body | open; check, convert the caller if one is |
 | The kernels whose folded constant would move under a Rust fold are counted | open; decision 9 re-records them |

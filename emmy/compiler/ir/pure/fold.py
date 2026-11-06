@@ -194,9 +194,6 @@ class Fold:
     ``ops.Sched``, which is why ``lower`` cannot see it and ``identity_key(with_io=True, with_knobs=True)``
     stays byte-identical whichever partition the fork picked."""
 
-    pure = True  # a term is a value — its internals are its own; legal inside a stored ``Lambda``
-    deps_deep = True  # :meth:`deps` is the memoized scoped rollup — read walks must not re-walk the lift
-
     # The CLOSED inputs, each an operand edge (a slab or an inline node) — the 1k fold
     # vocabulary. Sharing is edge reuse: the step reads an operand's bound name as many times as it
     # needs. ``lower`` places each edge at the shallowest scope binding its coordinates, ahead of its reader.
@@ -470,10 +467,6 @@ class Fold:
             init=tuple(self.init[index] for index in positions),
             base=Lambda.componentwise(tuple(ops[index] for index in positions), names),
         )
-
-    def binds_axes(self) -> frozenset[str]:
-        """The axis this term binds — what the statement-door ``rewrite`` drops from σ for the subtree."""
-        return frozenset() if self.axis is None else frozenset({self.axis})
 
     @cached_property
     def carries(self) -> bool:
@@ -1117,7 +1110,7 @@ class Fold:
             from emmy.compiler.ir.stmt import canonicalize_identity  # noqa: PLC0415
 
             if self.axis != pivot.axis:
-                x = x._rewrite(lambda name: name, Sigma({self.axis: Var(pivot.axis)}), lambda axis: axis)
+                x = x.rewrite(lambda name: name, Sigma({self.axis: Var(pivot.axis)}))
             scope = tuple(axes.values())
             return canonicalize_identity(x.lower(axes=scope)) == canonicalize_identity(y.lower(axes=scope))
 
@@ -1170,7 +1163,7 @@ class Fold:
             extra_params = tuple(p for edge in extra_edges for p, e in bound if e is edge)
             if old != new:
                 extra_edges = tuple(
-                    edge._rewrite(
+                    edge.rewrite(
                         lambda n: n,
                         Sigma({old: Var(new)}),
                         lambda a, old=old, new=new: replace(a, name=new) if a.name == old else a,
@@ -1654,35 +1647,28 @@ class Fold:
         place(self, [], None, root)
         return root.assemble()
 
-    #: A term rewrites as a statement does: the entry drops the mappings its own binder shadows.
-    rewrite = Statement.rewrite
-
-    def _rewrite(self, rename, sigma, axis_fn):  # noqa: ANN001, ANN202 — see ``Statement.rewrite``
-        # ONE handler for the one stored kind (the collapse retired the Map / Contraction arms —
-        # singledispatch keys on the stored type, and there is now only one). Every operand edge
-        # dispatches back through the registry; the fold renames its lift / monoid in lockstep
-        # (params track the operand names positionally, the combine's results ARE the accumulator
-        # names). At zero axes there is no iteration var to rename and no monoid to thread.
-        # σ is applied hygienically to the term's own binder: the reduce axis this term binds is a
-        # different variable from any σ key spelled alike, so its mapping is dropped for the subtree.
-        # Operand edges are terms, so they rewrite through this same registry, never the statement entry.
-        if self.axis is not None and sigma is not None and self.axis in sigma.mapping:
+    def rewrite(self, rename, sigma: Sigma = Sigma.IDENTITY, axis_fn=lambda axis: axis) -> Fold:  # noqa: ANN001
+        """This term with every SSA name through ``rename``, every expression through ``sigma`` and every axis through
+        ``axis_fn``, the way ``Statement.rewrite`` rewrites a statement: the lift and the monoid rename in lockstep
+        (params track the operand names positionally, the combine's results ARE the accumulator names), and σ is
+        applied hygienically to the term's own binder — the reduce axis this term binds is a different variable from
+        any σ key spelled alike, so its mapping is dropped for the subtree. At zero axes there is no iteration var to
+        rename and no monoid to thread. Operand edges are terms and rewrite through this same entry."""
+        if self.axis is not None and self.axis in sigma.mapping:
             sigma = Sigma({name: value for name, value in sigma.mapping.items() if name != self.axis})
-        operands = tuple(edge._rewrite(rename, sigma, axis_fn) for edge in self.operands)
+        operands = tuple(edge.rewrite(rename, sigma, axis_fn) for edge in self.operands)
         lead = (rename(self.axis),) if self.axis is not None else ()  # the iteration var — a slab has none
 
         def _param(name: str) -> str:
             # The environment tail may hold AXIS names, which rename through sigma (the body's own
             # coordinate substitution), not through the SSA renamer. Taking sigma's answer when it has
             # one keeps a param and every use of it in the body spelled the same way.
-            mapped = sigma.get(name) if sigma is not None else None
+            mapped = sigma.get(name)
             return mapped.name if isinstance(mapped, Var) else rename(name)
 
         bound_count = len(lead) + len(self.bindings)
         substitutions = {
-            p: mapped
-            for p in self.lift.params[bound_count:]
-            if sigma is not None and (mapped := sigma.get(p)) is not None and not isinstance(mapped, Var)
+            p: mapped for p in self.lift.params[bound_count:] if (mapped := sigma.get(p)) is not None and not isinstance(mapped, Var)
         }
         needed = set().union(*(expression.free_vars() for expression in substitutions.values()))
         params = (*lead, *(_param(p) for p in self.lift.params[len(lead) : bound_count]))

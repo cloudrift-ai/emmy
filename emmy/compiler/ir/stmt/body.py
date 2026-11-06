@@ -141,12 +141,10 @@ class Body(Wire):
 
     def __init__(self, stmts: Iterable[Statement] = ()) -> None:
         members = tuple(stmts)
-        # A body holds STATEMENTS. A pure term is not one — ``Fold`` duck-types the statement
-        # protocol so the shared walks can reach it, but it is not a ``Statement`` and does not belong
-        # in a statement sequence: a Fold tree composes through ``operands``, and a term sitting in
-        # a body is a second, competing composition mechanism. Checked by TYPE rather than by
-        # naming the kinds that are excluded, so the rule holds for anything else that duck-types
-        # its way in later.
+        # A body holds STATEMENTS. A pure term (``Fold``) is not one and does not belong in a statement
+        # sequence: a Fold tree composes through ``operands``, and a term sitting in a body is a second,
+        # competing composition mechanism. Checked by TYPE rather than by naming the kinds that are
+        # excluded, so the rule holds for anything else that duck-types its way in later.
         stray = [type(member).__name__ for member in members if not isinstance(member, Statement)]
         if stray:
             raise TypeError(f"Body holds non-statement member(s) {stray}; a term composes through operand edges")
