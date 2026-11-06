@@ -448,7 +448,7 @@ and clamping only its start still copies past the extent. A **multi-channel prod
 `(b, acc)` channels over one shared A edge, either a computed cone or a materialized load; `_AtomOps.channels` reads
 them off the node) fills one B slab per channel, drains N mma chains off the ONE ldmatrix'd A fragment into
 per-channel C fragments (`_fold_frag`), and the projection (SwiGLU) combines the channels per element in the store's
-epilogue `Lambda` (`extra_frags`). Epilogue loads substitute the cell base plus each lane's row and column offsets
+epilogue (`extra_frags`). Epilogue loads substitute the cell base plus each lane's row and column offsets
 inside their source index expressions, so block-scale quotients and split quotient/remainder coordinates retain
 their arithmetic. FP4 conversion helper emission reads the rendered kernel body, including these fused epilogues.
 Materialized A copies into the same single A slab; computed A evaluates into it. A
@@ -853,7 +853,7 @@ under the default fast-math regime. Structural body normalization stays independ
 
 `085_fast_exp` follows the enabled `FAST_MATH` default, unless an explicit `FAST_EXP` pin overrides it. It lowers
 `exp` through `__expf`, promoting half inputs and rounding back afterward, and records the policy for idempotence.
-The rewrite includes generated `RegStore` epilogue lambdas, each traversed in its own SSA scope. Host evaluation
+The rewrite includes generated `RegStore` epilogue bodies, each traversed in its own SSA scope. Host evaluation
 continues to use `exp`; only CUDA evaluation uses the approximate intrinsic.
 `100_loopify` remains off by default (`EMMY_LOOPIFY=N`), a generic **loop re-roller** iterated to a fixpoint.
 Loopify folds a maximal run of ≥ `N` congruent per-fragment statements —

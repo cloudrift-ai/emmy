@@ -62,7 +62,7 @@ from emmy.compiler.graph import Node
 from emmy.compiler.ir.axis import Axis
 from emmy.compiler.ir.expr import BinaryExpr, Expr, Literal, Var
 from emmy.compiler.ir.kernel import KernelOp
-from emmy.compiler.ir.kernel.ir import FRAG, FragmentApply, RegFragment
+from emmy.compiler.ir.kernel.ir import FRAG, FragmentApply, FragmentArg, RegFragment
 from emmy.compiler.ir.pure import Lambda
 from emmy.compiler.ir.stmt import Body, StridedLoop
 from emmy.compiler.pipeline import Pattern, RuleSkipped
@@ -105,7 +105,7 @@ def rewrite(root: Node) -> KernelOp | None:
 def _is_unary_post(s, out: str, layout) -> bool:
     """``s`` is an in-place ``FragmentApply`` that applies ONE unary op to ``out`` (``out *= g(out)``)
     — the fusable tail of a pointwise chain (the softmax ``p *= exp(p)`` after ``p <- s − m``)."""
-    return isinstance(s, FragmentApply) and s.in_place and s.out == out and s.layout == layout and s.kinds == (FRAG,) and s.args == (out,)
+    return isinstance(s, FragmentApply) and s.in_place and s.out == out and s.layout == layout and s.args == (FragmentArg(FRAG, (out,)),)
 
 
 def _fuse_chains(body: Body) -> Body:
