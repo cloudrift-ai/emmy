@@ -701,6 +701,15 @@ measured rows it may be too slow to use, and onboarding it is its own task, not 
   speed nobody has measured. So 19 recommends one page per request, 20
   makes the capped window count as one page, 5 and 6 stay off TMA, and batched attention over N regions is new work in
   21. If 13's renderer change lands, cp.async opens up over several pages as well.
+- **Attention is priced per window range** (owner, 2026-11-06, after 5's gate). One pick, measured at the symbolic
+  window's 512-token hint, ran at every window and missed at the long ones (the ledger's 2026-11-06 item), and no
+  step runs a window below 4,096: the runtime rounds every window up to a multiple of 4,096. Native compiles each
+  attention program at a short and at a long window price, and the runtime takes the range's program when it captures
+  a window's graph, which it already does every 4,096 positions. A kernel's identity is hint-free, so a program keeps
+  its kernels and gains rows at a second binding, and the long price benches through `emmy run --golden` directly,
+  with no pinned pack. One price at a long window was rejected: on the 4080 the best one-row key split moves 4x
+  between 4,096 and 131,072 positions (#1329), so the short cells would pay. Two ranges first; the boundary comes from
+  the card's measurements. 5's prefill and 6's decode both take it.
 - **Prefix caching stays out** of every comparison and out of the batching scope, as the measured sessions ran
   (`--no-enable-prefix-caching` on stock).
 - **Two promotions, not one.** The single-request promotion (17) does not wait for batching: the stretch's
@@ -780,7 +789,8 @@ Open items:
   last chunk of a 197,632-token prompt and 300 s of its first token, which is 5's miss. The verify step's three-row
   route, a score cut and a 16-way key split, takes 4.3 ms a layer at 197,632 positions, 75 ms of a 95.6 ms step. Not
   measured: whether a wider split or another route wins at long windows; `emmy run --golden --kernel` benches a
-  kernel at its stored bindings only. 5 and 6 both need picks that hold at the windows their gates name.
+  kernel at its stored bindings only. 5 and 6 both need picks that hold at the windows their gates name. Decided:
+  attention is priced per window range (Decisions).
 - (2026-11-06) The 27B's native server leaves a median 2.6 ms between a prompt's 64-row chunk launches on an idle host
   (nsys at 7,680 tokens), about 8 s of the 197,632-token first token, and 3.7 ms while exports compiled on the host.
   Not investigated.
