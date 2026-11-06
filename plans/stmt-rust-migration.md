@@ -123,7 +123,7 @@ Both implementations exist until the switch and never share an object: a body go
 | The tests of the passes state bodies as text | open; about 100 files, 3,244 hand-built statements |
 | Kernel IR kinds print and read through their declarations | done (decision 10); the thirty hand-written printers are gone |
 | Loopify compares statements without listing their fields | open |
-| The debug dump stores a body as its text, not as `repr` read back by `eval` | open |
+| The debug dump stores a body as its text, not as `repr` read back by `eval` | done; the Tile layer's term and output specs still dump as `repr` |
 | A fixture that yields the raw bodies of a corpus lowering | open; rules 1 to 3 run over it |
 | `Fold` stops answering the statement protocol; the walks that reach one become functions over the interface | done (`Fold` keeps a `rewrite` of its own; nothing else was read) |
 | An expression's structural form is its text; the four concrete expression classes take full names | open; moves every identity once (decision 11): the tune DB version and its pinned identities move with it |

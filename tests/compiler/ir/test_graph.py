@@ -185,13 +185,8 @@ def test_cuda_op_tma_descriptors_roundtrip():
 
 
 def test_kernel_op_windowed_axis_roundtrip():
-    """A dumped kernel-stage graph must rehydrate a ``Tile`` whose axes carry a ``Window``.
-
-    ``repr(Axis)`` spells the ``window`` field in full, so every register-tiled or cross-CTA-split
-    kernel dumps ``Window(parent=Axis(...), partition=...)`` inside ``KernelOp.body``.
-    ``Window`` lives in ``ir/axis.py``, which the eval scope's auto-populate loop did not cover, so
-    ``Graph.from_dict`` on ``07_lowering_kernel.json`` raised ``NameError: name 'Window' is not
-    defined`` — and with it every ``emmy run --ir <kernel.json>``."""
+    """A dumped kernel-stage graph stores its Kernel IR body as the body's text and rehydrates a ``Tile`` whose
+    axes carry a ``Window`` from it, so ``emmy run --ir <kernel.json>`` reads what the dump wrote."""
     import json
 
     from emmy.compiler.ir.axis import Axis, Window
@@ -208,9 +203,12 @@ def test_kernel_op_windowed_axis_roundtrip():
     g.add_node(op=KernelOp(body=(body,), name="k_x"), inputs=[x], output=Tensor("out", (512, 4096), "f16"), node_id="out")
     g.inputs, g.outputs = [x], ["out"]
 
-    loaded = Graph.from_dict(json.loads(json.dumps(g.to_dict(), default=str)))  # the EMMY_DUMP_DIR disk round-trip
+    dumped = g.to_dict()
+    assert dumped["nodes"]["out"]["op_fields"]["body"] == str(g.nodes["out"].op.body)
+    loaded = Graph.from_dict(json.loads(json.dumps(dumped, default=str)))  # the EMMY_DUMP_DIR disk round-trip
     op = loaded.nodes["out"].op
     assert isinstance(op, KernelOp), f"expected KernelOp, got {op!r}"
+    assert op.body == g.nodes["out"].op.body
     (tile,) = op.body
     assert isinstance(tile.axes[0].window, Window), f"expected a rehydrated Window, got {tile.axes[0].window!r}"
     assert tile.axes[0].source_axis.name == "a0"

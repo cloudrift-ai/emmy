@@ -167,9 +167,9 @@ def _serialize_field(v):
     - ``Dim`` → the stable Torch-wire dimension mapping, tagged so atomic and
       composite expressions round-trip through op fields.
     - An ``Expression``, a ``Statement`` or an ``IndexSource`` → its eval-able ``repr``, at any depth of a list,
-      tuple or mapping. Said here because ``str`` of an expression or a statement is its text, which
-      ``_deserialize_field`` does not read; a ``Body`` is the list of its statements' reprs, and
-      ``LoopOp.__post_init__`` / ``TileOp.__post_init__`` coerce it back on load.
+      tuple or mapping.
+    - A ``Body`` is its text (``Body.to_wire``), read back by ``Body.from_wire``; an ``Expression`` field
+      (``ConstantOp.context_value``) is its text too.
     - ``ConstantOp.source_graph`` — a nested mini-graph round-trips through the graph's own dict form, tagged.
     - Nested ``Op`` instances (e.g. ``ConstantOp.load_ops``) → ``{"__op__": ClassName, "fields": {...}}``.
 
@@ -181,7 +181,9 @@ def _serialize_field(v):
     from emmy.compiler.ir.stmt import Body, Statement
     from emmy.compiler.ir.tensor.ir import IndexSource
 
-    if isinstance(v, (Expression, Statement, IndexSource)):
+    if isinstance(v, (Body, Expression)):
+        return v.to_wire()
+    if isinstance(v, (Statement, IndexSource)):
         return repr(v)
     if isinstance(v, Graph):
         return {"__graph__": v.to_dict()}
@@ -189,8 +191,6 @@ def _serialize_field(v):
         return v.name
     if isinstance(v, Dim):
         return {"__dim__": v.to_wire()}
-    if isinstance(v, Body):
-        return [repr(stmt) for stmt in v]
     if isinstance(v, Op):
         return {"__op__": type(v).__name__, "fields": _serialize_op_fields(v)}
     nested = (Expression, Statement, IndexSource, Op, Dim, list, tuple, dict)
@@ -219,6 +219,14 @@ def _deserialize_field(k, v):
         # A bare name (``"add"``) is an ``ElementwiseImpl``; a constructor repr
         # (``"Fold(...)"`` — the ``TileOp.op`` node tree) is eval'd back like a Statement repr.
         return _eval_stmt(v) if "(" in v else ElementwiseImpl(v)
+    if k == "body" and isinstance(v, str):
+        from emmy.compiler.ir.stmt import Body  # noqa: PLC0415
+
+        return Body.from_wire(v)
+    if k == "context_value" and isinstance(v, str):
+        from emmy.compiler.ir.expression import Expression  # noqa: PLC0415
+
+        return Expression.from_wire(v)
     # ``TileOp``'s schedule descriptors serialize as constructor-repr strings
     # (``Placement(...)`` / ``Tile(...)`` / ``Reduce(...)`` / ``Stage(...)`` /
     # ``WarpSpec(...)``); ``None`` fields round-trip as JSON null. Eval a string only when it
@@ -226,8 +234,6 @@ def _deserialize_field(k, v):
     # (a name / path / C source) that merely looks like ``Name(...)`` is never eval'd.
     if isinstance(v, str):
         return _maybe_eval_ctor(v)
-    if k == "body" and isinstance(v, list) and v and all(isinstance(e, str) for e in v):
-        return tuple(_eval_stmt(e) for e in v)
     if k == "sources" and isinstance(v, list) and v and all(isinstance(e, str) and e.startswith("IndexSource(") for e in v):
         return tuple(_eval_stmt(e) for e in v)
     if isinstance(v, dict) and "__graph__" in v:
