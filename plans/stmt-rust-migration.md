@@ -18,6 +18,13 @@ line-by-line translation.
 5. **No statement kind is ever a Python class on a Rust base**, not even as a step on the way.
 6. **Text everywhere.** A body's wire form is its text; tests state bodies as text and assert on printed text; an
    expression field crosses the boundary as its text. No reader of the old wire form exists.
+7. **Every kind is a struct in the crate** (option A below), and **the port lands as one PR** that replaces the Python
+   implementation: no PR adds Rust beside Python, and nothing is declared in both.
+8. **A second extension**, the compiler's own (a name like `emmy-ir`), beside the optional runtime extension.
+9. **Rust folds constants.** The kernels whose folded constant moves are counted first and re-recorded.
+10. **Kernel IR kinds print and read through their declarations**; every Kernel IR listing may change shape.
+11. **An expression's identity is its text**, not its class name, so the identity moves once with the port and never
+    again on a rename; the four concrete expression classes take full names then.
 
 ## The module when the port starts
 
@@ -56,21 +63,16 @@ The preparation is Python only and changes no kernel. Most of it is merged or in
 
 ### Kinds
 
-Two ways to carry the declarations over. Both keep the role table as it is.
+Every kind is a struct in the crate (decision 7). The 45 declarations are transcribed once as Rust structs, Kernel
+IR's included: they are data, a few hundred lines, and the Python declarations are deleted in the same PR. The
+extension exports a class per kind with the same name, the same keyword constructor and the same field reads, so the
+71 importing files do not change. A layer adds a kind by adding a struct. This is the fastest form and the one the
+trial measured. The role of a field can be an attribute on the field or the field's type (a name that is defined and a
+name that is read being two types); that choice is made when the crate's first kinds are written.
 
-- **A. Every kind is a struct in the crate (recommended).** The 45 declarations are rewritten once as Rust structs,
-  Kernel IR's included: they are data, a few hundred lines. The extension exports a class per kind with the same name,
-  the same keyword constructor and the same field reads, so the 71 importing files do not change. A layer adds a kind
-  by adding a struct. This is the fastest form and the one the trial measured.
-- **B. Kinds stay declared in Python, and the decorator registers them.** The Python `@statement` decorator keeps its
-  syntax and its implementation moves to Rust: it hands the crate the kind's name, fields and roles, and gets back a
-  class the crate created. A layer keeps declaring its kinds in Python. The crate then stores every statement as a
-  generic record and reads fields by position, which costs speed in the steps that know the shared kinds, and creating
-  classes at run time under the stable ABI is low-level work.
-
-A is one path and the simpler crate. B is worth its cost only if layers must add kinds without touching Rust. In
-either case the role of a field can be an attribute on the field or the field's type (a name that is defined and a name
-that is read being two types); that choice is made when the crate's first kinds are written.
+The alternative, kinds declared in Python and registered with the crate by the decorator, was rejected: it keeps a
+Python class per kind, stores every statement as a generic record read by position, and creates classes at run time
+under the stable ABI.
 
 ### The boundary
 
@@ -123,6 +125,10 @@ Both implementations exist until the switch and never share an object: a body go
 | Loopify compares statements without listing their fields | open |
 | The debug dump stores a body as its text, not as `repr` read back by `eval` | open |
 | A fixture that yields the raw bodies of a corpus lowering | open; rules 1 to 3 run over it |
+| `Fold` stops answering the statement protocol; the walks that reach one become functions over the interface | open |
+| An expression's structural form is its text; the four concrete expression classes take full names | open; moves every identity once (decision 11): the tune DB version and its pinned identities move with it |
+| No Tile layer table is keyed on a statement or a body | open; check, convert the caller if one is |
+| The kernels whose folded constant would move under a Rust fold are counted | open; decision 9 re-records them |
 
 ### 1. Expressions and their text
 
@@ -164,8 +170,9 @@ golden's fresh lowering (8.2 s when the one-pass normalization landed).
 
 ### 6. The switch
 
-The extension exports the classes and functions under the module's 36 names, `emmy/compiler/ir/stmt/__init__.py`
-re-exports them, and the Python implementation is deleted in the same PR. The tune DB version moves.
+Steps 1 to 5 are built on one branch and land together (decision 7). The extension exports the classes and functions
+under the module's 36 names, `emmy/compiler/ir/stmt/__init__.py` re-exports them, and the Python implementation is
+deleted in the same PR. The tune DB version moves.
 
 Verify: the full suite on a card; `emmy golden check` on every repository golden; the corpus regenerates with no
 verdict change; `git diff --stat main -- emmy/` is negative by about 5,000 lines.
@@ -204,17 +211,8 @@ rename, never by copy over the old file.
 
 ## Questions still open
 
-- **A or B for the kinds.** Recommended: A.
-- **One extension or two.** The runtime extension is optional at build time and the compiler cannot be. That argues
-  for a second extension beside it, built by the same `make setup`.
-- **`Fold`.** It is not a statement and a body refuses it, but it answers part of the statement protocol so shared
-  walks can reach it. Find which exported functions are handed one today; each stays a Python function over the
-  module's interface or stops taking it.
-- **Constant folding.** Keeping every stored kernel's rows (rule 1) asks for the same folded constants. The choices:
-  fold in Python before a body crosses, fold in Rust and re-record the kernels whose constant moves, or let Rust call
-  NumPy, which decision 4 rules out. Count the kernels that would move before choosing.
-- **Tables stored on objects.** The Tile layer still keeps tables on objects it does not own. Check whether any of
-  them is a statement or a body; convert that caller before the switch.
+None. The five that were open (where the kinds are declared, one extension or two, constant folding, the Kernel IR
+text, the expression class names) are decisions 7 to 11; what each asks for is in the preparation table.
 
 ## Not in this plan
 
