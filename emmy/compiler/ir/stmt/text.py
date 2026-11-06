@@ -33,7 +33,11 @@ The statements, with ``[dtype]`` an optional element type written first (``f32 v
 ``Loop``            ``for <axis> [unroll=true] [seed=false]:``
 ``StridedLoop``     ``for a in <start>..<extent> step <step> [until <end>] [window(…)] [unroll=true] [seed=false]:``
 ``Cond``            ``if <predicate>:`` and an optional ``else:``
+``Call``            ``n = call sub[buf0, buf1](<expression>, …)`` — the buffers the call binds the subroutine's to
 ==================  ================================================================================
+
+A subroutine a call names is defined once, ahead of the statements: ``sub name(<axis>, …) -> result:`` over its body.
+Subroutines compare by object, so what reading a text back keeps is which calls share one, not the object.
 
 An axis is ``name in 0..extent``; a symbolic extent's hint follows it as ``seq~128`` when it is not the default, and a
 window as ``window(parent=<axis>, base=<expr>, bound=<expr>, partition=true)``, each part only when set. Expressions
@@ -54,10 +58,13 @@ from emmy.compiler.ir.stmt.base import Stmt
 from emmy.compiler.ir.stmt.blocks import Cond, Loop, StridedLoop
 from emmy.compiler.ir.stmt.body import Body
 from emmy.compiler.ir.stmt.leaves import Accum, Affine, Assign, Carry, Init, Let, Load, Pre, Select, SelectBranch, Write, ZeroPrologue
+from emmy.compiler.ir.stmt.subroutine import Call, Subroutine
 
 INDENT = "    "
 #: Words the reader gives a meaning, so a name spelled like one is written between backticks.
-_KEYWORDS = frozenset("for in if else let init zero load pre select when over seed step until window carried swizzle words unroll".split())
+_KEYWORDS = frozenset(
+    "for in if else let init zero load pre select when over seed step until window carried swizzle words unroll sub call".split()
+)
 
 
 def _name(name: str) -> str:
@@ -155,6 +162,9 @@ def lines(stmt: Stmt, indent: str = "") -> list[str]:
         case Cond():
             orelse = [f"{indent}else:", *pretty_body(stmt.else_body, inner)] if stmt.else_body else []
             return [f"{indent}if {stmt.cond}:", *pretty_body(stmt.body, inner), *orelse]
+        case Call():
+            args = ", ".join(str(arg) for arg in stmt.args)
+            text = f"{_name(stmt.name)} = call {_name(stmt.target.name)}[{_names(stmt.target.buffers)}]({args})"
         case _:
             # A kind of another layer says its own lines.
             return stmt.pretty(indent)
@@ -166,6 +176,27 @@ def pretty_body(body: Iterable[Stmt], indent: str = "") -> list[str]:
     return [line for stmt in body for line in lines(stmt, indent)]
 
 
+def body_text(body: Body) -> str:
+    """A body's whole text: the subroutines its calls name, each once and ahead of its callers, then its statements."""
+    return "\n".join([*(line for sub in _subroutines(body, {}).values() for line in _definition(sub)), *pretty_body(body)])
+
+
+def _definition(sub: Subroutine) -> list[str]:
+    axes = ", ".join(_axis(axis) + _window(axis.window) for axis in sub.axes)
+    return [f"sub {_name(sub.name)}({axes}) -> {_name(sub.result)}:", *pretty_body(sub.body, INDENT)]
+
+
+def _subroutines(body: Body, found: dict[str, Subroutine]) -> dict[str, Subroutine]:
+    """The subroutines ``body`` calls by name, a callee ahead of its caller. Two calls may name one subroutine bound
+    to other buffers; two subroutines of one name are refused."""
+    for call in body.iter_of_type(Call):
+        _subroutines(call.target.body, found)
+        first = found.setdefault(call.target.name, call.target)
+        if first is not call.target and _definition(first.with_buffers(call.target.buffers)) != _definition(call.target):
+            raise ValueError(f"two subroutines are named {first.name!r}: a body's text defines a name once")
+    return found
+
+
 # ---------------------------------------------------------------------------
 # The reader
 # ---------------------------------------------------------------------------
@@ -174,7 +205,7 @@ def pretty_body(body: Iterable[Stmt], indent: str = "") -> list[str]:
 def parse_body(text: str) -> Body:
     """The body ``text`` spells — ``str(body)``'s inverse. An error names its line."""
     rows = [(len(line) - len(line.lstrip(" ")), number, line.strip()) for number, line in enumerate(text.splitlines(), 1) if line.strip()]
-    return _block(rows)
+    return _block(rows, {})
 
 
 def _under(rows: list, depth: int) -> tuple[list, list]:
@@ -183,8 +214,9 @@ def _under(rows: list, depth: int) -> tuple[list, list]:
     return rows[:cut], rows[cut:]
 
 
-def _block(rows: list) -> Body:
-    """The statements ``rows`` spell: each row at the first one's depth, with the deeper rows after it under it."""
+def _block(rows: list, subs: dict[str, Subroutine]) -> Body:
+    """The statements ``rows`` spell: each row at the first one's depth, with the deeper rows after it under it. A
+    subroutine a row defines joins ``subs``, which the calls after it name."""
     out: list[Stmt] = []
     depth = rows[0][0] if rows else 0
     while rows:
@@ -196,7 +228,11 @@ def _block(rows: list) -> Body:
         try:
             if indent != depth:
                 raise ValueError("unexpected indentation")
-            out.append(_Line(text).statement(under, orelse))
+            if text.startswith("sub "):
+                sub = _Line(text).subroutine(under, subs)
+                subs[sub.name] = sub
+            else:
+                out.append(_Line(text).statement(under, orelse, subs))
         except ValueError as exc:
             raise ValueError(str(exc) if str(exc).startswith("line ") else f"line {number}: {exc}") from exc
     return Body(out)
@@ -205,7 +241,7 @@ def _block(rows: list) -> Body:
 class _Line(Parser):
     """One line of a body's text."""
 
-    PUNCTUATION = (*Parser.PUNCTUATION, "<-", "+=", "=", "..", "~")
+    PUNCTUATION = (*Parser.PUNCTUATION, "<-", "->", "+=", "=", "..", "~")
 
     def at_word(self, word: str, ahead: int = 0) -> bool:
         token = self.peek(ahead)
@@ -269,6 +305,28 @@ class _Line(Parser):
         self.expect("..")
         return name, start, self.dim()
 
+    def whole_axis(self) -> Axis:
+        """An axis that is no loop's: ``name in 0..extent`` and its window."""
+        name, start, extent = self.axis()
+        if start != Literal(0, "int"):
+            raise self.error("an axis starts at 0")
+        return Axis(name, extent, window=self.window())
+
+    def subroutine(self, under: list, subs: dict[str, Subroutine]) -> Subroutine:
+        """``sub name(<axis>, …) -> result:`` over the rows of its body."""
+        self.index += 1
+        name = self.name()
+        self.expect("(")
+        axes: list[Axis] = []
+        while not self.accept(")"):
+            if axes:
+                self.expect(",")
+            axes.append(self.whole_axis())
+        self.expect("->")
+        result = self.name()
+        self.expect(":")
+        return self.end(Subroutine(name, tuple(axes), _block(under, subs), result))
+
     def window(self) -> Window | None:
         if not (self.at_word("window") and self.at("(", 1)):
             return None
@@ -280,10 +338,7 @@ class _Line(Parser):
             key = self.name()
             self.expect("=")
             if key == "parent":
-                name, start, extent = self.axis()
-                if start != Literal(0, "int"):
-                    raise self.error("an axis starts at 0")
-                parts[key] = Axis(name, extent, window=self.window())
+                parts[key] = self.whole_axis()
             elif key in ("base", "bound"):
                 parts[key] = self.expression()
             elif key == "partition" and (self.at_word("true") or self.at_word("false")):
@@ -292,16 +347,17 @@ class _Line(Parser):
                 raise self.error(f"no window part {key!r}")
         return Window(**parts)
 
-    def statement(self, under: list, orelse: list) -> Stmt:
-        """The statement this line spells, ``under`` the rows of its block (``orelse`` those of an ``else``)."""
+    def statement(self, under: list, orelse: list, subs: dict[str, Subroutine]) -> Stmt:
+        """The statement this line spells, ``under`` the rows of its block (``orelse`` those of an ``else``); a call
+        names one of ``subs``."""
         if self.tokens[-1][:2] != ("op", ":") and under:
             raise ValueError(f"line {under[0][1]}: unexpected indentation")
         if self.word("for"):
-            return self.loop(_block(under))
+            return self.loop(_block(under, subs))
         if self.word("if"):
             cond = self.expression()
             self.expect(":")
-            return self.end(Cond(cond, _block(under), _block(orelse)))
+            return self.end(Cond(cond, _block(under, subs), _block(orelse, subs)))
         if self.word("let"):
             dtype, name = self.typed_name()
             self.expect("=")
@@ -337,6 +393,16 @@ class _Line(Parser):
             return self.end(Load(names=names, input=buffer, index=index, dtype=dtype, carried=carried))
         if len(names) > 1:
             raise self.error("only a load binds several names")
+        if self.at_word("call") and not self.at("(", 1):
+            self.index += 1
+            target = subs.get(label := self.name())
+            if target is None:
+                raise self.error(f"no subroutine {label!r} is defined above")
+            self.expect("[")
+            buffers = self.names("]")
+            self.expect("(")
+            target = target if buffers == target.buffers else target.with_buffers(buffers)
+            return self.end(Call(name, target, self.expressions(")")))
         if self.at_word("pre") and not self.at("(", 1):
             self.index += 1
             carrier = self.name()

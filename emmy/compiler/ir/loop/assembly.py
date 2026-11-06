@@ -33,7 +33,6 @@ from emmy.compiler.ir.stmt import (
     Subroutine,
     Write,
     prepare_body,
-    pretty_body,
 )
 from emmy.utils import cached_method
 
@@ -100,11 +99,6 @@ def definitions(body: Body) -> tuple[Subroutine, ...]:
 
     visit(body)
     return tuple(out)
-
-
-def pretty_subroutines(body: Body, indent: str = "") -> list[str]:
-    """Compact definitions followed by the calling body."""
-    return [line for target in definitions(body) for line in (*target.pretty(indent), "")] + pretty_body(body, indent)
 
 
 def reduction_depths(body: Body, inputs: dict[str, int], calls: dict[int, int]) -> dict[str, int]:
@@ -266,7 +260,7 @@ class Splicer(BodyBuilder):
         # an already-emitted producer. Reconstruction itself only orders new demands.
         body = Body.coerce(self.finish())
         if logger.isEnabledFor(logging.DEBUG):
-            logger.debug("Compact fusion:\n%s", "\n".join(pretty_subroutines(body)))
+            logger.debug("Compact fusion:\n%s", body)
         # Calls are storage sharing while the region is built: the body that leaves holds every operation.
         return expand_calls(body)
 

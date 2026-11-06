@@ -14,6 +14,7 @@ from emmy.compiler.ir.stmt import (
     Affine,
     Assign,
     Body,
+    Call,
     Carry,
     Cond,
     Init,
@@ -24,6 +25,7 @@ from emmy.compiler.ir.stmt import (
     Select,
     SelectBranch,
     StridedLoop,
+    Subroutine,
     Write,
     ZeroPrologue,
     parse_body,
@@ -154,6 +156,58 @@ def test_the_reader_takes_any_consistent_indentation_and_blank_lines():
 def test_a_reading_error_names_its_line(text, message):
     with pytest.raises(ValueError, match=message):
         parse_body(text)
+
+
+CALLS = """\
+sub inner(r in 0..4) -> s:
+    for k in 0..8:
+        x = load a[r, k]
+        s <- add(s, x) over k
+sub outer(r in 0..4, c in 0..2 window(parent=cc in 0..4)) -> t:
+    u = call inner[a](r)
+    w = load b[c]
+    t = multiply(u, w)
+for i in 0..4:
+    p = call outer[a, b](i, 0)
+    q = call outer[a, b](i, 1)
+    z = call outer[m, b](i, 1)
+    v = p + q + z
+    y[i] = v"""
+
+
+def test_a_call_names_a_subroutine_defined_once_ahead_of_it():
+    """Subroutines compare by object, so reading a text back keeps which calls share one, and the text itself."""
+    body = parse_body(CALLS)
+    assert str(body) == CALLS
+    p, q, z = (stmt.target for stmt in body.iter_of_type(Call))
+    assert p is q and p.name == z.name == "outer"
+    assert (p.buffers, z.buffers, p.params, p.result) == (("a", "b"), ("m", "b"), ("r", "c"), "t")
+    assert p.axes[1].window.parent.name == "cc"
+    assert str(parse_body(str(body))) == CALLS
+
+
+@pytest.mark.parametrize(
+    ("text", "message"),
+    [
+        ("p = call missing[a](i)", "line 1: no subroutine 'missing' is defined above"),
+        ("sub f(r in 0..4) -> s:\n    x = load a[r]\np = call f[a](0)", "line 1: .*must define its result"),
+        ("sub f(r in 0..4) -> x:\n    x = load a[r]\np = call f[a](0, 1)", "line 3: .*do not match its parameters"),
+    ],
+)
+def test_a_call_that_does_not_fit_its_subroutine_is_refused(text, message):
+    with pytest.raises(ValueError, match=message):
+        parse_body(text)
+
+
+def test_two_subroutines_of_one_name_have_no_text():
+    def sub(buffer: str) -> Subroutine:
+        return Subroutine(
+            "f", (Axis("r", 4),), (Load("x", buffer, (Var("r"),)), Assign("y", "exp" if buffer == "a" else "log", ("x",))), "y"
+        )
+
+    body = Body((Call("p", sub("a"), (A0,)), Call("q", sub("b"), (A0,))))
+    with pytest.raises(ValueError, match="two subroutines are named 'f'"):
+        str(body)
 
 
 def _stored_bodies(value) -> list:

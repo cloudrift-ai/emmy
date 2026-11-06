@@ -10,7 +10,6 @@ from emmy.compiler.ir.axis import Axis
 from emmy.compiler.ir.expr import Expr
 from emmy.compiler.ir.stmt.base import Stmt
 from emmy.compiler.ir.stmt.body import Body
-from emmy.compiler.ir.stmt.text import pretty_body
 from emmy.utils import cached_method
 
 
@@ -51,13 +50,6 @@ class Subroutine:
     def params(self) -> tuple[str, ...]:
         return tuple(axis.name for axis in self.axes)
 
-    def pretty(self, indent: str = "") -> list[str]:
-        return [
-            f"{indent}sub {self.name}({', '.join((*self.buffers, *self.params))}):",
-            *pretty_body(self.body, indent + "    "),
-            f"{indent}    return {self.result}",
-        ]
-
 
 @dataclass(frozen=True)
 class Call(Stmt):
@@ -95,10 +87,6 @@ class Call(Stmt):
     def rename_buffers(self, rename):  # noqa: ANN001 — see Stmt.rename_buffers
         buffers = tuple(rename.get(name, name) for name in self.target.buffers)
         return self if buffers == self.target.buffers else self.replace(target=self.target.with_buffers(buffers))
-
-    def pretty(self, indent: str = "") -> list[str]:
-        args = (*self.target.buffers, *(str(arg) for arg in self.args))
-        return [f"{indent}{self.name} = {self.target.name}({', '.join(args)})"]
 
     def _rewrite(self, rename, sigma, axis_fn):  # noqa: ANN001, ANN202 — see ``Stmt.rewrite``
         return self.replace(

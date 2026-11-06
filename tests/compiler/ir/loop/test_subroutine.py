@@ -10,9 +10,9 @@ from emmy.compiler.graph import Graph, Tensor
 from emmy.compiler.ir.axis import Axis
 from emmy.compiler.ir.expr import Literal, Var
 from emmy.compiler.ir.loop import LoopOp
-from emmy.compiler.ir.loop.assembly import definitions, expand_calls, pretty_subroutines
+from emmy.compiler.ir.loop.assembly import definitions, expand_calls
 from emmy.compiler.ir.sigma import Sigma
-from emmy.compiler.ir.stmt import Accum, Assign, Body, Call, Load, Loop, Subroutine, Write, normalize_body, prepare_body
+from emmy.compiler.ir.stmt import Accum, Assign, Body, Call, Load, Loop, Subroutine, Write, normalize_body, parse_body, prepare_body
 from emmy.compiler.pipeline import Pipeline
 
 
@@ -122,13 +122,15 @@ def test_outlining_preserves_inline_identity():
         assert expanded.identity(structural=structural).key == inlined.identity(structural=structural).key
 
 
-def test_compact_pretty_prints_a_shared_definition_once():
-    rendered = "\n".join(pretty_subroutines(_body(_project(), 4)))
-    assert rendered.count("sub project(x, weight, row, col):") == 1
-    assert "return sum" in rendered
-    assert "left = project(x, weight, k, c)" in rendered
-    assert "right = project(x, weight, k," in rendered
+def test_a_compact_body_prints_a_shared_definition_once_and_reads_back():
+    rendered = str(_body(_project(), 4))
+    assert rendered.count("sub project(row in 0..3, col in 0..8) -> sum:") == 1
+    assert "left = call project[x, weight](k, c)" in rendered
+    assert "right = call project[x, weight](k," in rendered
     assert len(rendered.splitlines()) < 18
+    back = parse_body(rendered)
+    assert str(back) == rendered
+    assert len(definitions(back)) == 1
 
 
 def test_buffer_renaming_preserves_shared_definitions():

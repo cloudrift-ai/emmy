@@ -306,6 +306,9 @@ for a0 in 0..4:
     y[a0] = acc0
 ```
 
+A subroutine a call names is defined once, ahead of the statements, and the call spells the buffers it binds. Since
+subroutines compare by object, what a text read back keeps is which calls share one.
+
 The printer and the reader sit side by side in one file, one clause per kind, and its docstring is the grammar. A
 kind of another layer says its own lines in `pretty` and has no reader. `tests/compiler/ir/stmt/test_text.py` holds
 both directions over every kind and every corpus kernel.

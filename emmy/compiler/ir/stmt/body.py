@@ -161,9 +161,9 @@ class Body(Wire):
 
     def __str__(self) -> str:
         """The body's text, which ``parse_body`` reads back to an equal body."""
-        from emmy.compiler.ir.stmt.text import pretty_body  # noqa: PLC0415 — the text module imports every kind
+        from emmy.compiler.ir.stmt.text import body_text  # noqa: PLC0415 — the text module imports every kind
 
-        return "\n".join(pretty_body(self))
+        return body_text(self)
 
     def __getitem__(self, key):
         r = self._stmts[key]
