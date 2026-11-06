@@ -326,108 +326,12 @@ class Tile(Stmt):
     def binds_axes(self) -> frozenset[str]:
         return frozenset(a.name for a in self.axes)
 
-    @property
-    def extents(self) -> tuple[int, ...]:
-        """Static extent of each axis (raises on a symbolic extent)."""
-        out: list[int] = []
-        for a in self.axes:
-            if not a.extent.is_static:
-                raise NotImplementedError(f"Tile: symbolic axis {a.name!r} not supported yet")
-            out.append(a.extent.as_static())
-        return tuple(out)
-
-    @property
-    def n_elements(self) -> int:
-        """Total iteration-space size — one thread per element. Static axes only (raises on a
-        symbolic axis; the dynamic-grid path uses :attr:`n_dim` instead)."""
-        from math import prod  # noqa: PLC0415
-
-        return prod(self.extents) if self.axes else 1
-
-    @property
-    def cells(self) -> int:
-        """The per-CTA cooperative cell count — ``block_threads`` when set, else the scalar tier's
-        ``_BLOCK_SIZE``. This is ``blockDim`` minus any aux band, i.e. the divisor the cuda lowering
-        uses for ``gridDim = ceil(n_elements / cells)``. So ``n_elements % cells == 0`` (and no aux
-        band) means the static grid covers the iteration space exactly — no partial last block, so
-        the ``_gid < N`` tail guard is provably always-true and :meth:`render` elides it."""
-        if self.block_threads is not None:
-            return self.block_threads
-        from emmy.compiler.ir.kernel.render import _BLOCK_SIZE  # noqa: PLC0415
-
-        return _BLOCK_SIZE
-
-    @property
-    def is_static_grid(self) -> bool:
-        """True iff every grid axis has a static extent (the static launch path)."""
-        return all(a.extent.is_static for a in self.axes)
-
-    @property
-    def n_dim(self):
-        """Total iteration-space size as a :class:`Dim` — the ∏ of the axis extents, holding a
-        symbolic factor (a dynamic ``seq_len``) when any axis is symbolic. The cuda lowering
-        sizes the launch from this (``ceil(n_dim / blockDim)`` CTAs, ``seq_len`` resolved at
-        launch); the renderer guards ``_gid < n_dim`` so the partial last block is masked."""
-        from emmy.compiler.dim import Dim  # noqa: PLC0415
-
-        n = Dim(1)
-        for a in self.axes:
-            n = n * a.extent
-        return n
-
     def pretty(self, indent: str = "") -> list[str]:
         names = ", ".join(a.name for a in self.axes)
         # A symbolic grid (dynamic seq_len) prints its Dim product — ``n_elements`` would raise,
         # and ``pretty`` feeds ``structural_key`` / the op-inventory persist, so it must stay total.
-        n = self.n_elements if self.is_static_grid else self.n_dim
+        n = tile_n_elements(self) if tile_is_static(self) else tile_n_dim(self)
         return [f"{indent}Tile[{names}] (N={n})", *pretty_body(self.body, indent + "    ")]
-
-    def _raster_pair(self) -> tuple[int, int] | None:
-        """``(grouped, other)`` axis positions of an active grouped raster: the ``(m, n)`` block axes adjacent in
-        the decode, ``m`` before ``n``; ``None`` when the order is the flat one."""
-        if not (self.raster_group and self.raster_group > 1 and self.raster_axes):
-            return None
-        names = [a.name for a in self.axes]
-        if self.raster_axes[0] not in names or self.raster_axes[1] not in names:
-            return None
-        mi, ni = names.index(self.raster_axes[0]), names.index(self.raster_axes[1])
-        if ni != mi + 1:
-            return None
-        return (mi, ni) if self.raster_orient == "m" else (ni, mi)
-
-    def _render_symbolic_decode(self, ctx: RenderCtx) -> list[str]:
-        """The flat id decoded into the axis vars of a symbolic grid, with the grouped raster when one is active:
-        the static path's swizzle with the extents rendered as C expressions, so a dynamic ``seq_len`` grid takes
-        the same L2-friendly launch order. The ragged last group always takes the clamp — its size is a runtime
-        value."""
-        decoded = _render_grid_axis_decode(self.axes, "_gid", ctx, wide=True)
-        pair = self._raster_pair()
-        if pair is None:
-            return decoded
-        gi, oi = pair
-        mi, ni = min(gi, oi), max(gi, oi)
-        pad, g = _pad(ctx.indent), self.raster_group
-        ea, eb = _extent_c(self.axes[gi], ctx), _extent_c(self.axes[oi], ctx)
-        inner = list(self.axes[ni + 1 :])
-        sub = f"_gid / ({_stride_c(inner, ctx, wide=True)})" if inner else "_gid"
-        if mi != 0:
-            sub = f"({sub}) % ((long long){ea} * {eb})"
-        stripe = f"((long long){g} * {eb})"
-        grouped = f"_rgrp * {g} + (_rsub % {stripe}) % _rsz"
-        other = f"(_rsub % {stripe}) / _rsz"
-        swizzle = {
-            self.axes[gi].name: grouped,
-            self.axes[oi].name: other,
-        }
-        lines = [
-            f"{pad}long long _rsub = {sub};",
-            f"{pad}long long _rgrp = _rsub / {stripe};",
-            f"{pad}long long _rsz = min((long long){g}, (long long){ea} - _rgrp * {g});",
-        ]
-        for line in decoded:
-            name = line.strip().removeprefix("int ").split(" = ", 1)[0]
-            lines.append(f"{pad}int {name} = {swizzle[name]};" if name in swizzle else line)
-        return lines
 
     def _rewrite(self, rename, sigma, axis_fn):  # noqa: ANN001, ANN202 — see ``Stmt.rewrite``
         # ``axes`` map through ``axis_fn``; the body's stmts route through the
@@ -456,13 +360,111 @@ class Tile(Stmt):
         )
 
 
+def tile_extents(tile: Tile) -> tuple[int, ...]:
+    """Static extent of each axis (raises on a symbolic extent)."""
+    out: list[int] = []
+    for a in tile.axes:
+        if not a.extent.is_static:
+            raise NotImplementedError(f"Tile: symbolic axis {a.name!r} not supported yet")
+        out.append(a.extent.as_static())
+    return tuple(out)
+
+
+def tile_n_elements(tile: Tile) -> int:
+    """Total iteration-space size — one thread per element. Static axes only (raises on a
+    symbolic axis; the dynamic-grid path uses :func:`tile_n_dim` instead)."""
+    from math import prod  # noqa: PLC0415
+
+    return prod(tile_extents(tile)) if tile.axes else 1
+
+
+def tile_cells(tile: Tile) -> int:
+    """The per-CTA cooperative cell count — ``block_threads`` when set, else the scalar tier's
+    ``_BLOCK_SIZE``. This is ``blockDim`` minus any aux band, i.e. the divisor the cuda lowering
+    uses for ``gridDim = ceil(n_elements / cells)``. So ``n_elements % cells == 0`` (and no aux
+    band) means the static grid covers the iteration space exactly — no partial last block, so
+    the ``_gid < N`` tail guard is provably always-true and the render elides it."""
+    if tile.block_threads is not None:
+        return tile.block_threads
+    from emmy.compiler.ir.kernel.render import _BLOCK_SIZE  # noqa: PLC0415
+
+    return _BLOCK_SIZE
+
+
+def tile_is_static(tile: Tile) -> bool:
+    """True iff every grid axis has a static extent (the static launch path)."""
+    return all(a.extent.is_static for a in tile.axes)
+
+
+def tile_n_dim(tile: Tile):
+    """Total iteration-space size as a :class:`Dim` — the ∏ of the axis extents, holding a
+    symbolic factor (a dynamic ``seq_len``) when any axis is symbolic. The cuda lowering
+    sizes the launch from this (``ceil(n_dim / blockDim)`` CTAs, ``seq_len`` resolved at
+    launch); the renderer guards ``_gid < n_dim`` so the partial last block is masked."""
+    from emmy.compiler.dim import Dim  # noqa: PLC0415
+
+    n = Dim(1)
+    for a in tile.axes:
+        n = n * a.extent
+    return n
+
+
+def _raster_pair(tile: Tile) -> tuple[int, int] | None:
+    """``(grouped, other)`` axis positions of an active grouped raster: the ``(m, n)`` block axes adjacent in
+    the decode, ``m`` before ``n``; ``None`` when the order is the flat one."""
+    if not (tile.raster_group and tile.raster_group > 1 and tile.raster_axes):
+        return None
+    names = [a.name for a in tile.axes]
+    if tile.raster_axes[0] not in names or tile.raster_axes[1] not in names:
+        return None
+    mi, ni = names.index(tile.raster_axes[0]), names.index(tile.raster_axes[1])
+    if ni != mi + 1:
+        return None
+    return (mi, ni) if tile.raster_orient == "m" else (ni, mi)
+
+
+def _render_symbolic_decode(tile: Tile, ctx: RenderCtx) -> list[str]:
+    """The flat id decoded into the axis vars of a symbolic grid, with the grouped raster when one is active:
+    the static path's swizzle with the extents rendered as C expressions, so a dynamic ``seq_len`` grid takes
+    the same L2-friendly launch order. The ragged last group always takes the clamp — its size is a runtime
+    value."""
+    decoded = _render_grid_axis_decode(tile.axes, "_gid", ctx, wide=True)
+    pair = _raster_pair(tile)
+    if pair is None:
+        return decoded
+    gi, oi = pair
+    mi, ni = min(gi, oi), max(gi, oi)
+    pad, g = _pad(ctx.indent), tile.raster_group
+    ea, eb = _extent_c(tile.axes[gi], ctx), _extent_c(tile.axes[oi], ctx)
+    inner = list(tile.axes[ni + 1 :])
+    sub = f"_gid / ({_stride_c(inner, ctx, wide=True)})" if inner else "_gid"
+    if mi != 0:
+        sub = f"({sub}) % ((long long){ea} * {eb})"
+    stripe = f"((long long){g} * {eb})"
+    grouped = f"_rgrp * {g} + (_rsub % {stripe}) % _rsz"
+    other = f"(_rsub % {stripe}) / _rsz"
+    swizzle = {
+        tile.axes[gi].name: grouped,
+        tile.axes[oi].name: other,
+    }
+    lines = [
+        f"{pad}long long _rsub = {sub};",
+        f"{pad}long long _rgrp = _rsub / {stripe};",
+        f"{pad}long long _rsz = min((long long){g}, (long long){ea} - _rgrp * {g});",
+    ]
+    for line in decoded:
+        name = line.strip().removeprefix("int ").split(" = ", 1)[0]
+        lines.append(f"{pad}int {name} = {swizzle[name]};" if name in swizzle else line)
+    return lines
+
+
 @render_stmt.register
 def _(node: Tile, ctx: RenderCtx) -> list[str]:
     pad = _pad(ctx.indent)
     # Symbolic grid (a dynamic free axis): size the guard + decode from the runtime extents
     # via the symbolic-aware helpers (the ``Dim`` name renders to its ``int`` arg). Kept off
     # the static path so static codegen stays byte-identical.
-    if not node.is_static_grid:
+    if not tile_is_static(node):
         inner = ctx.child()
         # A symbolic grid's total is unboundable at render time, so the flat id and every
         # stride divisor are ALWAYS 64-bit — a batched coop-reduce grid overflows int32 at
@@ -483,18 +485,18 @@ def _(node: Tile, ctx: RenderCtx) -> list[str]:
             f"{pad}long long _gid = {sgid};",
             f"{pad}if (_gid < {n}) {{",
         ]
-        out.extend(node._render_symbolic_decode(inner))
+        out.extend(_render_symbolic_decode(node, inner))
         out.extend(render_body(node.body, inner))
         out.append(f"{pad}}}")
         return out
-    extents = node.extents
+    extents = tile_extents(node)
     # Inner-stride of each axis = product of the extents to its right.
     strides: list[int] = [1] * len(extents)
     acc = 1
     for i in range(len(extents) - 1, -1, -1):
         strides[i] = acc
         acc *= extents[i]
-    n = node.n_elements
+    n = tile_n_elements(node)
     # A flat id past INT32_MAX wraps negative in 32-bit arithmetic and every decoded index
     # goes wild (a per-cell coop-reduce grid reaches it: M·N·coop = 4096·3840·256 ≈ 4.0e9 on
     # the gemma-4 down-proj demote → cudaErrorIllegalAddress). Widen the id to 64-bit exactly
@@ -516,7 +518,7 @@ def _(node: Tile, ctx: RenderCtx) -> list[str]:
     # guard ``_gid < n`` is always-true (and nvcc can't prove it: ``gridDim`` is a launch arg), so
     # emit the decode + body flat. Otherwise the partial last block (or the aux threads that launch
     # past the cells) needs masking.
-    guard = not node.spread and (node.aux_threads != 0 or n % node.cells != 0)
+    guard = not node.spread and (node.aux_threads != 0 or n % tile_cells(node) != 0)
     out = [f"{pad}{'long long' if wide else 'int'} _gid = {gid};"]
     inner = ctx.child()
     ipad = _pad(inner.indent)
@@ -1386,71 +1388,6 @@ class FragmentApply(Stmt):
         chain = "".join(f" |> {p.name}" for p in self.post)
         return [f"{indent}FragmentApply({self.out} {'*=' if self.in_place else '<-'} {self.op.name}({shown}){chain})"]
 
-    def _row_expr(self, names: tuple) -> Expr:
-        """The per-row scalar for the loop element ``_e`` — a ternary over the layout's row split
-        (m16n8: ``(_e < 2 ? row0 : row1)``). ``elem_row`` must be contiguous blocks (it is for every
-        modeled atom), so the boundaries are ``block = n_elems / rows_per_lane`` apart."""
-        lay = self.layout
-        rows, block = lay.rows_per_lane, lay.n_elems // lay.rows_per_lane
-        contiguous = [r for r in range(rows) for _ in range(block)]
-        if list(lay.elem_row) == contiguous:
-            expr: Expr = Var(names[rows - 1])
-            for r in range(rows - 2, -1, -1):
-                expr = TernaryExpr(BinaryExpr("<", Var("_e"), Literal((r + 1) * block, "int")), Var(names[r]), expr)
-            return expr
-        expr = Var(names[lay.elem_row[-1]])
-        for i in range(lay.n_elems - 2, -1, -1):
-            expr = TernaryExpr(BinaryExpr("==", Var("_e"), Literal(i, "int")), Var(names[lay.elem_row[i]]), expr)
-        return expr
-
-    def _coords(self, i: int) -> dict[str, Expr]:
-        """Element ``i``'s absolute coordinates for the reserved vars: tile origin + layout offset."""
-        lay = self.layout
-        sub: dict[str, Expr] = {}
-        if self.col_base is not None:
-            sub[FRAG_COL] = BinaryExpr("+", self.col_base, lay.col_off[i])
-        if self.row_base is not None:
-            sub[FRAG_ROW] = BinaryExpr("+", self.row_base, lay.row_off[lay.elem_row[i]])
-        return sub
-
-    def _arg(self, name: object, kind: str, ctx: RenderCtx, i: int | None) -> Expr:
-        """One operand's expression for element ``i`` — or for the loop var ``_e`` when ``None``."""
-        if kind == FRAG:
-            return Var(f"{name}[{'_e' if i is None else i}]")
-        if kind == ROW:
-            return self._row_expr(name) if i is None else Var(name[self.layout.elem_row[i]])
-        if kind == COORD:
-            return name.substitute(self._coords(i))
-        if kind == GMEM:
-            buf, index = name
-            sub = self._coords(i)
-            text = f"{buf}[{render_index(buf, tuple(e.substitute(sub) for e in index), ctx)}]"
-            dt = ctx.buffer_dtypes.get(buf, "f32")
-            return Var(text if dt == "f32" else ctx.target.convert(text, dt, "f32"))
-        # UNIFORM — the fragment algebra is f32; a narrower scalar (e.g. an ``__half`` constant
-        # load) converts through the target intrinsic, like the scalar ``Assign``'s promote rule.
-        if isinstance(name, Expr):
-            return name
-        nm = str(name)
-        if ctx.literal_ssa and nm in ctx.literal_ssa:
-            return Literal(float(ctx.literal_ssa[nm]))
-        dt = ctx.ssa_dtypes.get(nm) if ctx.ssa_dtypes else None
-        if dt and dt != "f32":
-            from emmy.compiler.ir.expr import FuncCallExpr  # noqa: PLC0415
-
-            converted = ctx.target.convert(nm, dt, "f32")
-            paren = converted.index("(") if "(" in converted else -1
-            if paren > 0 and converted.endswith(")"):
-                return FuncCallExpr(converted[:paren], [Var(nm)])
-        return Var(nm)
-
-    def _element(self, ctx: RenderCtx, i: int | None) -> str:
-        argvars = [self._arg(a, k, ctx, i) for a, k in zip(self.args, self.kinds, strict=True)]
-        expr = op_to_expr(self.op.name, argvars)
-        for post_op in self.post:  # compose the fused unary tail (outermost last)
-            expr = op_to_expr(post_op.name, [expr])
-        return expr.render(ctx)
-
     def _rewrite(self, rename, sigma, axis_fn):  # noqa: ANN001, ANN202 — see ``Stmt.rewrite``
         # SSA operands route through ``rename``; a COORD predicate, a GMEM template and the tile-origin
         # bases σ-substitute (the canonicalizer renames the query / kv axis vars). The reserved
@@ -1473,6 +1410,75 @@ class FragmentApply(Stmt):
         )
 
 
+def _row_expr(stmt: FragmentApply, names: tuple) -> Expr:
+    """The per-row scalar for the loop element ``_e`` — a ternary over the layout's row split
+    (m16n8: ``(_e < 2 ? row0 : row1)``). ``elem_row`` must be contiguous blocks (it is for every
+    modeled atom), so the boundaries are ``block = n_elems / rows_per_lane`` apart."""
+    lay = stmt.layout
+    rows, block = lay.rows_per_lane, lay.n_elems // lay.rows_per_lane
+    contiguous = [r for r in range(rows) for _ in range(block)]
+    if list(lay.elem_row) == contiguous:
+        expr: Expr = Var(names[rows - 1])
+        for r in range(rows - 2, -1, -1):
+            expr = TernaryExpr(BinaryExpr("<", Var("_e"), Literal((r + 1) * block, "int")), Var(names[r]), expr)
+        return expr
+    expr = Var(names[lay.elem_row[-1]])
+    for i in range(lay.n_elems - 2, -1, -1):
+        expr = TernaryExpr(BinaryExpr("==", Var("_e"), Literal(i, "int")), Var(names[lay.elem_row[i]]), expr)
+    return expr
+
+
+def _frag_coords(stmt: FragmentApply, i: int) -> dict[str, Expr]:
+    """Element ``i``'s absolute coordinates for the reserved vars: tile origin + layout offset."""
+    lay = stmt.layout
+    sub: dict[str, Expr] = {}
+    if stmt.col_base is not None:
+        sub[FRAG_COL] = BinaryExpr("+", stmt.col_base, lay.col_off[i])
+    if stmt.row_base is not None:
+        sub[FRAG_ROW] = BinaryExpr("+", stmt.row_base, lay.row_off[lay.elem_row[i]])
+    return sub
+
+
+def _frag_operand(stmt: FragmentApply, name: object, kind: str, ctx: RenderCtx, i: int | None) -> Expr:
+    """One operand's expression for element ``i`` — or for the loop var ``_e`` when ``None``."""
+    if kind == FRAG:
+        return Var(f"{name}[{'_e' if i is None else i}]")
+    if kind == ROW:
+        return _row_expr(stmt, name) if i is None else Var(name[stmt.layout.elem_row[i]])
+    if kind == COORD:
+        return name.substitute(_frag_coords(stmt, i))
+    if kind == GMEM:
+        buf, index = name
+        sub = _frag_coords(stmt, i)
+        text = f"{buf}[{render_index(buf, tuple(e.substitute(sub) for e in index), ctx)}]"
+        dt = ctx.buffer_dtypes.get(buf, "f32")
+        return Var(text if dt == "f32" else ctx.target.convert(text, dt, "f32"))
+    # UNIFORM — the fragment algebra is f32; a narrower scalar (e.g. an ``__half`` constant
+    # load) converts through the target intrinsic, like the scalar ``Assign``'s promote rule.
+    if isinstance(name, Expr):
+        return name
+    nm = str(name)
+    if ctx.literal_ssa and nm in ctx.literal_ssa:
+        return Literal(float(ctx.literal_ssa[nm]))
+    dt = ctx.ssa_dtypes.get(nm) if ctx.ssa_dtypes else None
+    if dt and dt != "f32":
+        from emmy.compiler.ir.expr import FuncCallExpr  # noqa: PLC0415
+
+        converted = ctx.target.convert(nm, dt, "f32")
+        paren = converted.index("(") if "(" in converted else -1
+        if paren > 0 and converted.endswith(")"):
+            return FuncCallExpr(converted[:paren], [Var(nm)])
+    return Var(nm)
+
+
+def _frag_element(stmt: FragmentApply, ctx: RenderCtx, i: int | None) -> str:
+    argvars = [_frag_operand(stmt, a, k, ctx, i) for a, k in zip(stmt.args, stmt.kinds, strict=True)]
+    expr = op_to_expr(stmt.op.name, argvars)
+    for post_op in stmt.post:  # compose the fused unary tail (outermost last)
+        expr = op_to_expr(post_op.name, [expr])
+    return expr.render(ctx)
+
+
 @render_stmt.register
 def _(stmt: FragmentApply, ctx: RenderCtx) -> list[str]:
     """One ``#pragma unroll`` loop over the fragment's ``n_elems`` — ``out[_e] = post…(op(args_e))``
@@ -1486,11 +1492,11 @@ def _(stmt: FragmentApply, ctx: RenderCtx) -> list[str]:
     lines = [] if stmt.in_place else [f"{pad}float {stmt.out}[{n}];"]
     if any(k in (COORD, GMEM) for k in stmt.kinds):
         lines += _lane_preamble(ctx, pad, lay.lane_decl, lay.lane_names)
-        return lines + [f"{pad}{stmt.out}[{i}] = {stmt._element(ctx, i)};" for i in range(n)]
+        return lines + [f"{pad}{stmt.out}[{i}] = {_frag_element(stmt, ctx, i)};" for i in range(n)]
     inner = ctx.child()
     lines.append(f"{pad}#pragma unroll")
     lines.append(f"{pad}for (int _e = 0; _e < {n}; _e++) {{")
-    lines.append(f"{_pad(inner.indent)}{stmt.out}[_e] = {stmt._element(inner, None)};")
+    lines.append(f"{_pad(inner.indent)}{stmt.out}[_e] = {_frag_element(stmt, inner, None)};")
     lines.append(f"{pad}}}")
     return lines
 
@@ -1632,36 +1638,38 @@ class RegFragment(Stmt):
     count: int = 1  # >1 arrays the fragment family: ``<ty> name[count][n_regs]`` (loopify only)
     nregs: int | None = None  # explicit for layouts whose one instruction realizes several PTX cells; 0 = one scalar register
 
-    def _nregs(self) -> int:
-        return self.nregs if self.nregs is not None else _mma_sync_nregs(self.role, self.shape, self.dtype)
-
     def defines(self) -> tuple[str, ...]:
         return (self.name,)
 
     def local_decls(self) -> tuple[str, ...]:
         return (self.name,)
 
-    def _dims(self) -> str:
-        """The declaration's subscripts — the family count when arrayed, then the per-member
-        register count, which a scalar register does not have. Spelled once so the listing and the
-        emitted decl cannot disagree about a family's shape."""
-        n_regs = self._nregs()
-        extents = ((self.count,) if self.count > 1 else ()) + ((n_regs,) if n_regs else ())
-        return "".join(f"[{e}]" for e in extents)
-
     def pretty(self, indent: str = "") -> list[str]:
         m, n, k = self.shape
-        return [f"{indent}RegFragment {self.role}:{self.dtype.name} {self.name}{self._dims()} ({m}x{n}x{k})"]
+        return [f"{indent}RegFragment {self.role}:{self.dtype.name} {self.name}{_frag_dims(self)} ({m}x{n}x{k})"]
 
     def _rewrite(self, rename, sigma, axis_fn):  # noqa: ANN001, ANN202 — see ``Stmt.rewrite``
         return RegFragment(name=rename(self.name), role=self.role, shape=self.shape, dtype=self.dtype, count=self.count, nregs=self.nregs)
 
 
+def _frag_nregs(stmt: RegFragment) -> int:
+    return stmt.nregs if stmt.nregs is not None else _mma_sync_nregs(stmt.role, stmt.shape, stmt.dtype)
+
+
+def _frag_dims(stmt: RegFragment) -> str:
+    """The declaration's subscripts — the family count when arrayed, then the per-member
+    register count, which a scalar register does not have. Spelled once so the listing and the
+    emitted decl cannot disagree about a family's shape."""
+    n_regs = _frag_nregs(stmt)
+    extents = ((stmt.count,) if stmt.count > 1 else ()) + ((n_regs,) if n_regs else ())
+    return "".join(f"[{e}]" for e in extents)
+
+
 @render_stmt.register
 def _(stmt: RegFragment, ctx: RenderCtx) -> list[str]:
-    n_regs = stmt._nregs()
+    n_regs = _frag_nregs(stmt)
     ctx.ssa_dtypes[stmt.name] = stmt.dtype.name
-    dims = stmt._dims()
+    dims = _frag_dims(stmt)
     if stmt.role == "c" and stmt.dtype.nbytes != 2:
         # Brace-init zeros the whole (arrayed) accumulator; ``= {0.0f, ...}`` stays the flat form.
         init = " = {}" if stmt.count > 1 else f" = {{{', '.join(['0.0f'] * n_regs)}}}"
@@ -2000,23 +2008,6 @@ class LdmatrixLoad(Stmt):
         guard = "" if self.gmem_guard is None else f" guard<{self.gmem_guard[1].pretty()}"
         return [f"{indent}LdmatrixLoad {self.frag} <- {self.src_buffer}[{idx}] ({variant}{guard}, ldm={self.ldm or 'auto'})"]
 
-    def _swizzled_addr(self, flat: str, lane: str, ctx: RenderCtx, lane_rows: int, lane_col_mod: int) -> str:
-        """The lane's slab address: the tile base ``flat`` plus the lane's own ``lane`` offset,
-        which spans ``lane_rows`` rows and columns ``lane_col_mod`` apart, through the slab's
-        swizzle — split per :func:`swizzled_slab_index` wherever the tile base allows, so the
-        swizzle of the lane's part is computed once for the whole drain."""
-        if not swizzle_xor(self.swizzle):
-            return f"&{self.src_buffer}[{flat} + {lane}]"
-        split = None
-        if len(self.src_index) == 2 and ctx.shapes.get(self.src_buffer, (0, 0))[-1] == self.ldm:
-            split = swizzled_slab_index(
-                self.swizzle, self.ldm, lane, self.src_index[0], self.src_index[1], ctx, lane_rows=lane_rows, lane_col_mod=lane_col_mod
-            )
-        # ``emmy_swizzle_<mode>`` (preamble, built from ``LDMATRIX_SWIZZLE_XOR``) applies
-        # ``e ^ (((e >> shift) & mask) << 3)`` — the helper spells the (often long) element
-        # index once instead of inlining it twice around the XOR.
-        return f"&{self.src_buffer}[{split if split is not None else f'{swizzle_fn(self.swizzle)}({flat} + {lane})'}]"
-
     def _rewrite(self, rename, sigma, axis_fn):  # noqa: ANN001, ANN202 — see ``Stmt.rewrite``
         return LdmatrixLoad(
             frag=rename(self.frag),
@@ -2037,6 +2028,24 @@ class LdmatrixLoad(Stmt):
             fragment_layout=self.fragment_layout,
             fragment_index=self.fragment_index,
         )
+
+
+def _swizzled_addr(node: LdmatrixLoad, flat: str, lane: str, ctx: RenderCtx, lane_rows: int, lane_col_mod: int) -> str:
+    """The lane's slab address: the tile base ``flat`` plus the lane's own ``lane`` offset,
+    which spans ``lane_rows`` rows and columns ``lane_col_mod`` apart, through the slab's
+    swizzle — split per :func:`swizzled_slab_index` wherever the tile base allows, so the
+    swizzle of the lane's part is computed once for the whole drain."""
+    if not swizzle_xor(node.swizzle):
+        return f"&{node.src_buffer}[{flat} + {lane}]"
+    split = None
+    if len(node.src_index) == 2 and ctx.shapes.get(node.src_buffer, (0, 0))[-1] == node.ldm:
+        split = swizzled_slab_index(
+            node.swizzle, node.ldm, lane, node.src_index[0], node.src_index[1], ctx, lane_rows=lane_rows, lane_col_mod=lane_col_mod
+        )
+    # ``emmy_swizzle_<mode>`` (preamble, built from ``LDMATRIX_SWIZZLE_XOR``) applies
+    # ``e ^ (((e >> shift) & mask) << 3)`` — the helper spells the (often long) element
+    # index once instead of inlining it twice around the XOR.
+    return f"&{node.src_buffer}[{split if split is not None else f'{swizzle_fn(node.swizzle)}({flat} + {lane})'}]"
 
 
 @render_stmt.register
@@ -2245,10 +2254,10 @@ def _(node: LdmatrixLoad, ctx: RenderCtx) -> list[str]:
             elem = f"({lane} % 16) * {ldm} + ({lane} / 16) * 8"
             helper = "emmy_ldmatrix_x4_trans_pair"
         # The helper loads both fragments' registers directly (no ``_p4`` staging temp / block).
-        return [f"{_pad(ctx.indent)}{helper}({node.frag}, {node.pair_frag}, {node._swizzled_addr(flat, elem, ctx, 16, 16)});"]
+        return [f"{_pad(ctx.indent)}{helper}({node.frag}, {node.pair_frag}, {_swizzled_addr(node, flat, elem, ctx, 16, 16)});"]
     if node.role == "a":
         # 16×16 A: x4 — lane addresses M-row (lane%16), K-col block (lane/16)*8.
-        addr = node._swizzled_addr(flat, f"({lane} % 16) * {ldm} + ({lane} / 16) * 8", ctx, 16, 16)
+        addr = _swizzled_addr(node, flat, f"({lane} % 16) * {ldm} + ({lane} / 16) * 8", ctx, 16, 16)
         return [f"{_pad(ctx.indent)}emmy_ldmatrix_x4({node.frag}, {addr});"]
     # Transposed-B (Q@K^T): the slab keeps the operand's native N-major layout
     # (N rows × K cols), which IS the mma's col-major B — a plain x2 (no
@@ -2256,10 +2265,10 @@ def _(node: LdmatrixLoad, ctx: RenderCtx) -> list[str]:
     # half 0, lanes 8-15 the same rows at K col 8 (each 8x8 matrix's rows land
     # as the fragment's (k, k+1) pairs, cf. ``emmy_mma_load_b_gmem_trans``).
     if node.b_trans:
-        addr = node._swizzled_addr(flat, f"({lane} % 8) * {ldm} + (({lane} / 8) % 2) * 8", ctx, 8, 16)
+        addr = _swizzled_addr(node, flat, f"({lane} % 8) * {ldm} + (({lane} / 8) % 2) * 8", ctx, 8, 16)
         return [f"{_pad(ctx.indent)}emmy_ldmatrix_x2({node.frag}, {addr});"]
     # 16×8 B: x2.trans — lane addresses K-row (lane%16); .trans yields col-major.
-    addr = node._swizzled_addr(flat, f"({lane} % 16) * {ldm}", ctx, 16, 8)
+    addr = _swizzled_addr(node, flat, f"({lane} % 16) * {ldm}", ctx, 16, 8)
     return [f"{_pad(ctx.indent)}emmy_ldmatrix_x2_trans({node.frag}, {addr});"]
 
 
@@ -2296,13 +2305,8 @@ class MmaSyncPtx(Stmt):
     sfa_frag: str | None = None
     sfb_frag: str | None = None
 
-    @property
-    def block_scaled(self) -> bool:
-        """Whether this mma carries its own block scales — the fp4 atom's distinguishing trait."""
-        return self.sfa_frag is not None
-
     def deps(self) -> tuple[str, ...]:
-        scales = (self.sfa_frag, self.sfb_frag) if self.block_scaled else ()
+        scales = (self.sfa_frag, self.sfb_frag) if self.sfa_frag is not None else ()
         return (self.c_frag, self.a_frag, self.b_frag, *scales)
 
     def defines(self) -> tuple[str, ...]:
@@ -2312,7 +2316,7 @@ class MmaSyncPtx(Stmt):
     def pretty(self, indent: str = "") -> list[str]:
         m, n, k = self.shape
         acc = "" if self.c_dtype == "f32" else f" acc:{self.c_dtype}"
-        scales = f" scales:{self.sfa_frag},{self.sfb_frag}" if self.block_scaled else ""
+        scales = f" scales:{self.sfa_frag},{self.sfb_frag}" if self.sfa_frag is not None else ""
         return [f"{indent}MmaSyncPtx {self.c_frag} += {self.a_frag} @ {self.b_frag} (m{m}n{n}k{k} {self.ab_dtype}{acc}{scales})"]
 
     def _rewrite(self, rename, sigma, axis_fn):  # noqa: ANN001, ANN202 — see ``Stmt.rewrite``
@@ -2341,7 +2345,7 @@ def _(stmt: MmaSyncPtx, ctx: RenderCtx) -> list[str]:
     if stmt.b_row_major:
         assert (m, n, k) == (8, 8, 4), "only the Volta atom has a row-major B wrapper"
         wrapper += "_brow"
-    if stmt.block_scaled:
+    if stmt.sfa_frag is not None:
         # The block-scaled wrapper accumulates in place, so it takes the scale registers
         # where the others take ``c`` a second time.
         args = f"{stmt.c_frag}, {stmt.a_frag}, {stmt.b_frag}, {stmt.sfa_frag}, {stmt.sfb_frag}"
@@ -2538,21 +2542,8 @@ class WgmmaMma(Stmt):
         if self.a_frag is not None and self.trans_a:
             raise ValueError("wgmma: the register-form A operand is K-major (no transpose bit)")
 
-    @property
-    def form(self) -> str:
-        """``"ss"`` (both operands through descriptors) or ``"rs"`` (A in registers)."""
-        return "ss" if self.a_desc is not None else "rs"
-
-    @property
-    def wrapper(self) -> str:
-        """The prelude wrapper this cell calls — one per ``(N, ab_dtype, form)`` a kernel uses."""
-        return f"emmy_wgmma_m64n{self.shape[1]}k16_{self.ab_dtype}_f32_{self.form}"
-
-    def _a(self) -> str:
-        return self.a_desc if self.a_desc is not None else self.a_frag
-
     def deps(self) -> tuple[str, ...]:
-        return (*self.c_frags, self._a(), self.b_desc)
+        return (*self.c_frags, _wgmma_a(self), self.b_desc)
 
     def defines(self) -> tuple[str, ...]:
         # Accumulates into the C fragments in place — a definition, like MmaSyncPtx.
@@ -2562,7 +2553,7 @@ class WgmmaMma(Stmt):
         m, n, k = self.shape
         flags = ("" if self.scale_d else " scale_d=0") + (" trans_a" if self.trans_a else "") + (" trans_b" if self.trans_b else "")
         acc = ", ".join(self.c_frags)
-        return [f"{indent}WgmmaMma {{{acc}}} += {self._a()} @ {self.b_desc} (m{m}n{n}k{k} {self.ab_dtype} {self.form}{flags})"]
+        return [f"{indent}WgmmaMma {{{acc}}} += {_wgmma_a(self)} @ {self.b_desc} (m{m}n{n}k{k} {self.ab_dtype} {wgmma_form(self)}{flags})"]
 
     def _rewrite(self, rename, sigma, axis_fn):  # noqa: ANN001, ANN202 — see ``Stmt.rewrite``
         return self.replace(
@@ -2573,12 +2564,26 @@ class WgmmaMma(Stmt):
         )
 
 
+def wgmma_form(stmt: WgmmaMma) -> str:
+    """``"ss"`` (both operands through descriptors) or ``"rs"`` (A in registers)."""
+    return "ss" if stmt.a_desc is not None else "rs"
+
+
+def wgmma_wrapper(stmt: WgmmaMma) -> str:
+    """The prelude wrapper this cell calls — one per ``(N, ab_dtype, form)`` a kernel uses."""
+    return f"emmy_wgmma_m64n{stmt.shape[1]}k16_{stmt.ab_dtype}_f32_{wgmma_form(stmt)}"
+
+
+def _wgmma_a(stmt: WgmmaMma) -> str:
+    return stmt.a_desc if stmt.a_desc is not None else stmt.a_frag
+
+
 @render_stmt.register
 def _(stmt: WgmmaMma, ctx: RenderCtx) -> list[str]:
     # The transpose bits are PTX immediates, which nvcc accepts only as integral constant
     # expressions — template arguments of the wrapper, not function parameters.
-    tnsp = f"<{stmt.trans_a}, {stmt.trans_b}>" if stmt.form == "ss" else f"<{stmt.trans_b}>"
-    return [f"{_pad(ctx.indent)}{stmt.wrapper}{tnsp}({', '.join(stmt.c_frags)}, {stmt._a()}, {stmt.b_desc}, {stmt.scale_d});"]
+    tnsp = f"<{stmt.trans_a}, {stmt.trans_b}>" if wgmma_form(stmt) == "ss" else f"<{stmt.trans_b}>"
+    return [f"{_pad(ctx.indent)}{wgmma_wrapper(stmt)}{tnsp}({', '.join(stmt.c_frags)}, {_wgmma_a(stmt)}, {stmt.b_desc}, {stmt.scale_d});"]
 
 
 @dataclass(frozen=True)
@@ -2772,301 +2777,6 @@ class RegStore(Stmt):
         run = "" if not self.run else f" +{','.join(cell.frag for cell in self.run)} (16-byte rows)"
         return [f"{indent}RegStore {self.dst_buffer}[{idx}] <- {self.frag}{run}{epi}{guards}{acc} (ldm={self.ldm or 'auto'})"]
 
-    def _swz(self, addr: str) -> str:
-        """The store address, XOR-permuted through the slab's swizzle helper when this store
-        targets a swizzled smem slab — inert at the default ``"NONE"``."""
-        return addr if not swizzle_xor(self.swizzle) else f"{swizzle_fn(self.swizzle)}({addr})"
-
-    def _pair_store(self, addr: str, v0: str, v1: str, vec2: str, packer: str) -> str:
-        """One vectorized row-pair store line — a plain assign, or (``atomic``) the packed-pair
-        ``atomicAdd`` (native f16x2 / bf16x2 red; the caller keeps f32 off this path pre-sm90)."""
-        tgt = f"reinterpret_cast<{vec2}*>(&{self.dst_buffer}[{self._swz(addr)}])"
-        if self.atomic:
-            return f"atomicAdd({tgt}, {packer}({v0}, {v1}));"
-        return f"*{tgt} = {packer}({v0}, {v1});"
-
-    def _elem_store(self, addr: str, val: str, dst_dt: str) -> str:
-        """One per-element store line — plain assign (the implicit f32→dst conversion), or
-        (``atomic``) a scalar ``atomicAdd`` with the conversion made explicit (no float overload
-        on a ``__half*`` / ``__nv_bfloat16*`` destination)."""
-        if self.atomic:
-            conv = {"f16": "__float2half({})", "bf16": "__float2bfloat16({})"}.get(dst_dt, "{}")
-            return f"atomicAdd(&{self.dst_buffer}[{addr}], {conv.format(val)});"
-        return f"{self.dst_buffer}[{self._swz(addr)}] = {val};"
-
-    def _element_coords(self) -> list[tuple[str, str, Expr, Expr]]:
-        """Per-lane ``(row C text, col C text, row Expr, col Expr)`` for this fragment layout."""
-        from emmy.compiler.ir.expr import BinaryExpr, Var  # noqa: PLC0415
-
-        if self.volta_interleaved:
-            mi, ni = (x & 1 for x in self.fragment_index)
-            row_adjust, col_adjust = -12 * mi, -12 * ni
-
-            def coord(base: str, offset: int) -> tuple[str, Expr]:
-                if offset == 0:
-                    return base, Var(base)
-                op = "+" if offset > 0 else "-"
-                amount = abs(offset)
-                return f"({base} {op} {amount})", BinaryExpr(op, Var(base), Literal(amount, "int"))
-
-            out = []
-            for i in range(8):
-                row, row_expr = coord("_vr", row_adjust + (i & 2))
-                col, col_expr = coord("_vc", col_adjust + (16 if i & 4 else 0) + (i & 1))
-                out.append((row, col, row_expr, col_expr))
-            return out
-        if self.fragment_layout == "m8n8k4":
-            out = []
-            for i in range(8):
-                ro, co = i & 2, (i & 4) + (i & 1)
-                row = Var("_vr") if ro == 0 else BinaryExpr("+", Var("_vr"), Literal(ro, "int"))
-                col = Var("_vc") if co == 0 else BinaryExpr("+", Var("_vc"), Literal(co, "int"))
-                out.append(("_vr" if ro == 0 else f"(_vr + {ro})", "_vc" if co == 0 else f"(_vc + {co})", row, col))
-            return out
-        return [
-            (
-                "_g" if i < 2 else "(_g + 8)",
-                f"(_t * 2 + {i & 1})",
-                Var("_g") if i < 2 else BinaryExpr("+", Var("_g"), Literal(8, "int")),
-                BinaryExpr("+", BinaryExpr("*", Var("_t"), Literal(2, "int")), Literal(i & 1, "int")),
-            )
-            for i in range(4)
-        ]
-
-    def _element_values(self, ctx: RenderCtx) -> tuple[list[list[str]], list[str]]:
-        """``(per_element_preamble, values)``: the four per-lane store values,
-        plus, per element, the leaf-load / chain-op declaration lines that
-        element needs (so a guarded render can scope element ``i``'s gmem
-        reads inside element ``i``'s boundary check). Without
-        an epilogue the values are the bare ``frag[i]`` and the preambles are
-        empty. With one, each element ``i`` (row ``_g``/``_g+8``, col
-        ``2_t+{0,1}``) declares its leaf loads at the element's own coordinates
-        (floating values widened to f32, integer values kept as integers) and the
-        chain ops (via the scalar ``Assign`` renderer), all scoped inside the
-        store's ``{ }`` block. Leaf loads are scalar; lanes ``_t = 0..3`` cover
-        8 contiguous columns, so the warp's
-        accesses coalesce regardless."""
-        coords = self._element_coords()
-        if self.epilogue is None:
-            return [[] for _ in coords], [f"{self.frag}[{i}]" for i in range(len(coords))]
-        epi = self.epilogue
-        conv = {"f16": "__half2float({})", "bf16": "__bfloat162float({})"}
-        frags = (self.frag, *self.extra_frags)
-        per_elem: list[list[str]] = []
-        vals: list[str] = []
-        for i, (_row, _col, row_off, col_off) in enumerate(coords):
-            lines: list[str] = []
-            env = {acc: f"{fr}[{i}]" for acc, fr in zip(epi.params, frags, strict=False)}
-            for value in env.values():
-                ctx.ssa_dtypes[value] = "f32"
-            # The reserved ``ELEM_ROW`` / ``ELEM_COL`` vars substitute to this element's row / col offset
-            # within the fragment; a Load index and a Select predicate already carry the cell base.
-            coord = {ELEM_ROW: row_off, ELEM_COL: col_off}
-            for st in epi.body:
-                if isinstance(st, Load):
-                    temp = f"{st.name}_e{i}"
-                    storage_dt = ctx.buffer_dtypes.get(st.input, "f32")
-                    value_dt = st.dtype.name if st.dtype is not None else storage_dt
-                    integer = value_dt in INTEGER_NAMES
-                    if st.input in ctx.literal_constants:
-                        if integer:
-                            lines.append(f"const {ctx.type_name(value_dt)} {temp} = {int(ctx.literal_constants[st.input])};")
-                        else:
-                            lines.append(f"const float {temp} = {float(ctx.literal_constants[st.input])!r}f;")
-                    else:
-                        flat = render_index(st.input, tuple(e.substitute(coord) for e in st.index), ctx)
-                        if integer:
-                            lines.append(f"const {ctx.type_name(value_dt)} {temp} = {st.input}[{flat}];")
-                        else:
-                            lines.append(f"const float {temp} = {conv.get(storage_dt, '{}').format(f'{st.input}[{flat}]')};")
-                    env[st.name] = temp
-                    ctx.ssa_dtypes[temp] = value_dt if integer else "f32"
-                elif isinstance(st, Select):
-                    # The select is declared f32, and a chain op keeps the tail's own dtype, so a
-                    # branch value narrowed by an earlier op converts back here — a ternary over a
-                    # ``__half`` and a ``float`` does not compile.
-                    def widened(value, ctx=ctx, env=env):
-                        rendered = env[value]
-                        return conv.get(ctx.ssa_dtypes.get(rendered, "f32"), "{}").format(rendered)
-
-                    expr = widened(st.branches[-1].value)
-                    for br in reversed(st.branches[:-1]):
-                        rc = br.select.substitute(coord).render(ctx)
-                        expr = f"(({rc}) ? {widened(br.value)} : {expr})"
-                    lines.append(f"const float {st.name}_e{i} = {expr};")
-                    env[st.name] = f"{st.name}_e{i}"
-                    ctx.ssa_dtypes[env[st.name]] = "f32"
-                else:
-                    local = st.rewrite(
-                        lambda name, st=st, i=i, env=env: f"{name}_e{i}" if name == st.name else env.get(name, name), Sigma(coord)
-                    )
-                    rendered = render_stmt(local, replace(ctx, indent=0))[0]
-                    lines.append(f"const {rendered}")
-                    env[st.name] = f"{st.name}_e{i}"
-            per_elem.append(lines)
-            vals.append(env[epi.results[0]])
-        return per_elem, vals
-
-    @staticmethod
-    def _offset(term: str, stride: int | str) -> str:
-        return term if stride == 1 else f"({term}) * {stride}"
-
-    def _addr(self, flat: str, row: str, col: str, row_stride: int | str, col_stride: int | str) -> str:
-        """Flat address of one fragment element under its independently derived M/N strides."""
-        return f"{flat} + {self._offset(row, row_stride)} + {self._offset(col, col_stride)}"
-
-    def _render_run(self, ctx: RenderCtx, *, flat: str, ldm, dst_dt: str) -> list[str] | None:
-        """The four cells of :attr:`run` as one 16-byte store per lane and row, or ``None`` for a
-        destination that is not 16-bit or whose row stride breaks the 16-byte alignment.
-
-        Lane ``t`` of a quad holds columns ``2t, 2t+1`` of each cell. Three ``shfl.xor`` rounds
-        transpose the quad's 4×4 grid of packed pairs: in round ``s`` a lane sends the pair of
-        cell ``t^s`` and receives, from lane ``t^s``, that lane's pair of cell ``t``. Lane ``t``
-        then holds all eight columns of cell ``t`` and writes them at ``8t`` past the first
-        cell. The quad runs whole, as the fragment stores it replaces already assume."""
-        vec2 = {"f16": "__half2", "bf16": "__nv_bfloat162"}.get(dst_dt)
-        if vec2 is None or not isinstance(ldm, int) or ldm % 8:
-            return None
-        packer = {"f16": "__floats2half2_rn", "bf16": "__floats2bfloat162_rn"}[dst_dt]
-        pad = _pad(ctx.indent)
-        cells = (self, *self.run)
-        names = [[f"_wp{r}_{k}" for k in range(len(cells))] for r in (0, 1)]
-        lines = [
-            f"{pad}{{ const int _g = (threadIdx.x & 31) >> 2; const int _t = (threadIdx.x & 31) & 3;",
-            f"{pad}  unsigned {', '.join(n for row in names for n in row)};",
-        ]
-        for k, cell in enumerate(cells):
-            pre, vals = cell._element_values(ctx)
-            lines.append(f"{pad}  {{")
-            lines += [f"{pad}    {ln}" for group in pre for ln in group]
-            for r in (0, 1):
-                pair = f"{packer}({vals[2 * r]}, {vals[2 * r + 1]})"
-                lines.append(f"{pad}    {{ {vec2} _h = {pair}; {names[r][k]} = *reinterpret_cast<unsigned*>(&_h); }}")
-            lines.append(f"{pad}  }}")
-
-        def pick(*by_lane: str) -> str:
-            return f"(_t == 0 ? {by_lane[0]} : _t == 1 ? {by_lane[1]} : _t == 2 ? {by_lane[2]} : {by_lane[3]})"
-
-        for r, row in ((0, "_g"), (1, "(_g + 8)")):
-            p0, p1, p2, p3 = names[r]
-            q1, q2, q3 = (f"_wq{r}_{s}" for s in (1, 2, 3))
-            lines += [
-                f"{pad}  const unsigned {q1} = __shfl_xor_sync(0xffffffffu, {pick(p1, p0, p3, p2)}, 1);",
-                f"{pad}  const unsigned {q2} = __shfl_xor_sync(0xffffffffu, {pick(p2, p3, p0, p1)}, 2);",
-                f"{pad}  const unsigned {q3} = __shfl_xor_sync(0xffffffffu, {pick(p3, p2, p1, p0)}, 3);",
-                f"{pad}  *reinterpret_cast<uint4*>(&{self.dst_buffer}[{flat} + {row} * {ldm} + _t * 8]) = make_uint4("
-                f"{pick(p0, q1, q2, q3)}, {pick(q1, p1, q3, q2)}, {pick(q2, q3, p2, q1)}, {pick(q3, q2, q1, p3)});",
-            ]
-        lines.append(f"{pad}}}")
-        return lines
-
-    def _render_m8n8k4(self, ctx: RenderCtx, *, flat: str, ldm, ldn, dst_dt: str, pre: list[list[str]], vals: list[str]) -> list[str]:
-        """Store an m8n8k4 accumulator under the selected Volta warp-tile arrangement."""
-        pad = _pad(ctx.indent)
-        lane = "(threadIdx.x & 31)"
-        # Each four-lane group and its +16 partner own one 8x8 computation. _vr/_vc are the lane's
-        # base coordinates under either the ordinary 16x16 cell or paired 32x32 warp-tile map.
-        if self.volta_interleaved:
-            lines = [
-                f"{pad}{{ const int _vl = {lane}; const int _vq = _vl >> 2;",
-                f"{pad}  const int _vr = (((_vq & 4) >> 1) + (_vq & 1)) * 8 + (_vl & 1);",
-                f"{pad}  const int _vc = ((_vq >> 1) & 1) * 8 + (_vl & 2);",
-            ]
-        else:
-            lines = [
-                f"{pad}{{ const int _vl = {lane}; const int _vq = (_vl & 15) >> 2;",
-                f"{pad}  const int _vr = (_vq >> 1) * 8 + (_vl >> 4) * 4 + (_vl & 1);",
-                f"{pad}  const int _vc = (_vq & 1) * 8 + (_vl & 2);",
-            ]
-        mbase = mbound = nbase = nbound = None
-        if self.m_guard is not None:
-            mbase, mbound = (e.render(ctx) for e in self.m_guard)
-        if self.n_guard is not None:
-            nbase, nbound = (e.render(ctx) for e in self.n_guard)
-        vec2 = {"f16": "__half2", "bf16": "__nv_bfloat162", "f32": "float2"}.get(dst_dt)
-        if nbound is None and ldn == 1 and vec2 is not None and not (self.atomic and dst_dt == "f32"):
-            packer = {"f16": "__floats2half2_rn", "bf16": "__floats2bfloat162_rn", "f32": "make_float2"}[dst_dt]
-            coords = self._element_coords()
-            for pair in range(0, len(coords), 2):
-                row, col, _row_expr, _col_expr = coords[pair]
-                indent = f"{pad}  "
-                if mbound is not None:
-                    lines.append(f"{indent}if (({mbase}) + {row} < ({mbound})) {{")
-                    indent += "  "
-                lines.extend(f"{indent}{ln}" for ln in (*pre[pair], *pre[pair + 1]))
-                addr = self._addr(flat, row, col, ldm, ldn)
-                lines.append(f"{indent}{self._pair_store(addr, vals[pair], vals[pair + 1], vec2, packer)}")
-                if mbound is not None:
-                    lines.append(f"{pad}  }}")
-            lines.append(f"{pad}}}")
-            return lines
-        for i, (row, col, _row_expr, _col_expr) in enumerate(self._element_coords()):
-            preds = []
-            if mbound is not None:
-                preds.append(f"({mbase}) + {row} < ({mbound})")
-            if nbound is not None:
-                preds.append(f"({nbase}) + {col} < ({nbound})")
-            indent = f"{pad}  "
-            if preds:
-                lines.append(f"{indent}if ({' && '.join(preds)}) {{")
-                indent += "  "
-            lines.extend(f"{indent}{ln}" for ln in pre[i])
-            addr = self._addr(flat, row, col, ldm, ldn)
-            lines.append(f"{indent}{self._elem_store(addr, vals[i], dst_dt)}")
-            if preds:
-                lines.append(f"{pad}  }}")
-        lines.append(f"{pad}}}")
-        return lines
-
-    def _render_guarded(self, ctx: RenderCtx, *, flat: str, ldm, ldn, dst_dt: str, pre: list[list[str]], vals: list[str]) -> list[str]:
-        """Masked-tile store: each fragment element's store (and its epilogue
-        gmem reads, which index the same possibly-out-of-range coordinates)
-        runs under that element's own boundary check. With only an ``m_guard``
-        the two columns of a row share the row predicate, so the vectorized
-        row-pair store survives; an ``n_guard`` splits the pair (its columns
-        straddle the bound) into per-element scalar stores."""
-        pad = _pad(ctx.indent)
-        lane = "(threadIdx.x & 31)"
-        m_pred: list[str | None] = [None] * 4
-        n_pred: list[str | None] = [None] * 4
-        if self.m_guard is not None:
-            base, bound = self.m_guard[0].render(ctx), self.m_guard[1].render(ctx)
-            m_pred = [f"({base}) + _g < ({bound})"] * 2 + [f"({base}) + _g + 8 < ({bound})"] * 2
-        if self.n_guard is not None:
-            base, bound = self.n_guard[0].render(ctx), self.n_guard[1].render(ctx)
-            n_pred = [
-                f"({base}) + _t * 2 < ({bound})",
-                f"({base}) + _t * 2 + 1 < ({bound})",
-                f"({base}) + _t * 2 < ({bound})",
-                f"({base}) + _t * 2 + 1 < ({bound})",
-            ]
-        lines = [f"{pad}{{ const int _g = {lane} >> 2; const int _t = {lane} & 3;"]
-        vec2 = {"f16": "__half2", "bf16": "__nv_bfloat162", "f32": "float2"}.get(dst_dt)
-        if self.n_guard is None and ldn == 1 and vec2 is not None and not (self.atomic and dst_dt == "f32"):
-            # Row-guarded vectorized pairs: elements {0,1} share row _g,
-            # {2,3} share row _g+8; each pair's preamble + store sit inside
-            # the pair's row check.
-            packer = {"f16": "__floats2half2_rn", "bf16": "__floats2bfloat162_rn", "f32": "make_float2"}[dst_dt]
-            for pair, addr_row in ((0, "_g"), (2, "(_g + 8)")):
-                addr = f"{flat} + {addr_row} * {ldm} + _t * 2"
-                lines.append(f"{pad}  if ({m_pred[pair]}) {{")
-                lines += [f"{pad}    {ln}" for ln in (*pre[pair], *pre[pair + 1])]
-                lines.append(f"{pad}    {self._pair_store(addr, vals[pair], vals[pair + 1], vec2, packer)}")
-                lines.append(f"{pad}  }}")
-            lines.append(f"{pad}}}")
-            return lines
-        # Per-element scalar stores under the conjunction of the live guards.
-        for i in range(4):
-            row = "_g" if i < 2 else "(_g + 8)"
-            preds = " && ".join(p for p in (m_pred[i], n_pred[i]) if p is not None)
-            addr = self._addr(flat, row, f"_t * 2 + {i & 1}", ldm, ldn)
-            lines.append(f"{pad}  if ({preds}) {{")
-            lines += [f"{pad}    {ln}" for ln in pre[i]]
-            lines.append(f"{pad}    {self._elem_store(addr, vals[i], dst_dt)}")
-            lines.append(f"{pad}  }}")
-        lines.append(f"{pad}}}")
-        return lines
-
     def _rewrite(self, rename, sigma, axis_fn):  # noqa: ANN001, ANN202 — see ``Stmt.rewrite``
         # The epilogue's chain SSA names are render-local (scoped per element inside the store's
         # block), so only its Exprs σ-substitute — the load indices and the captured predicates thread
@@ -3101,6 +2811,312 @@ class RegStore(Stmt):
         )
 
 
+def _store_swz(node: RegStore, addr: str) -> str:
+    """The store address, XOR-permuted through the slab's swizzle helper when this store
+    targets a swizzled smem slab — inert at the default ``"NONE"``."""
+    return addr if not swizzle_xor(node.swizzle) else f"{swizzle_fn(node.swizzle)}({addr})"
+
+
+def _pair_store(node: RegStore, addr: str, v0: str, v1: str, vec2: str, packer: str) -> str:
+    """One vectorized row-pair store line — a plain assign, or (``atomic``) the packed-pair
+    ``atomicAdd`` (native f16x2 / bf16x2 red; the caller keeps f32 off this path pre-sm90)."""
+    tgt = f"reinterpret_cast<{vec2}*>(&{node.dst_buffer}[{_store_swz(node, addr)}])"
+    if node.atomic:
+        return f"atomicAdd({tgt}, {packer}({v0}, {v1}));"
+    return f"*{tgt} = {packer}({v0}, {v1});"
+
+
+def _elem_store(node: RegStore, addr: str, val: str, dst_dt: str) -> str:
+    """One per-element store line — plain assign (the implicit f32→dst conversion), or
+    (``atomic``) a scalar ``atomicAdd`` with the conversion made explicit (no float overload
+    on a ``__half*`` / ``__nv_bfloat16*`` destination)."""
+    if node.atomic:
+        conv = {"f16": "__float2half({})", "bf16": "__float2bfloat16({})"}.get(dst_dt, "{}")
+        return f"atomicAdd(&{node.dst_buffer}[{addr}], {conv.format(val)});"
+    return f"{node.dst_buffer}[{_store_swz(node, addr)}] = {val};"
+
+
+def _element_coords(node: RegStore) -> list[tuple[str, str, Expr, Expr]]:
+    """Per-lane ``(row C text, col C text, row Expr, col Expr)`` for this fragment layout."""
+    from emmy.compiler.ir.expr import BinaryExpr, Var  # noqa: PLC0415
+
+    if node.volta_interleaved:
+        mi, ni = (x & 1 for x in node.fragment_index)
+        row_adjust, col_adjust = -12 * mi, -12 * ni
+
+        def coord(base: str, offset: int) -> tuple[str, Expr]:
+            if offset == 0:
+                return base, Var(base)
+            op = "+" if offset > 0 else "-"
+            amount = abs(offset)
+            return f"({base} {op} {amount})", BinaryExpr(op, Var(base), Literal(amount, "int"))
+
+        out = []
+        for i in range(8):
+            row, row_expr = coord("_vr", row_adjust + (i & 2))
+            col, col_expr = coord("_vc", col_adjust + (16 if i & 4 else 0) + (i & 1))
+            out.append((row, col, row_expr, col_expr))
+        return out
+    if node.fragment_layout == "m8n8k4":
+        out = []
+        for i in range(8):
+            ro, co = i & 2, (i & 4) + (i & 1)
+            row = Var("_vr") if ro == 0 else BinaryExpr("+", Var("_vr"), Literal(ro, "int"))
+            col = Var("_vc") if co == 0 else BinaryExpr("+", Var("_vc"), Literal(co, "int"))
+            out.append(("_vr" if ro == 0 else f"(_vr + {ro})", "_vc" if co == 0 else f"(_vc + {co})", row, col))
+        return out
+    return [
+        (
+            "_g" if i < 2 else "(_g + 8)",
+            f"(_t * 2 + {i & 1})",
+            Var("_g") if i < 2 else BinaryExpr("+", Var("_g"), Literal(8, "int")),
+            BinaryExpr("+", BinaryExpr("*", Var("_t"), Literal(2, "int")), Literal(i & 1, "int")),
+        )
+        for i in range(4)
+    ]
+
+
+def _element_values(node: RegStore, ctx: RenderCtx) -> tuple[list[list[str]], list[str]]:
+    """``(per_element_preamble, values)``: the four per-lane store values,
+    plus, per element, the leaf-load / chain-op declaration lines that
+    element needs (so a guarded render can scope element ``i``'s gmem
+    reads inside element ``i``'s boundary check). Without
+    an epilogue the values are the bare ``frag[i]`` and the preambles are
+    empty. With one, each element ``i`` (row ``_g``/``_g+8``, col
+    ``2_t+{0,1}``) declares its leaf loads at the element's own coordinates
+    (floating values widened to f32, integer values kept as integers) and the
+    chain ops (via the scalar ``Assign`` renderer), all scoped inside the
+    store's ``{ }`` block. Leaf loads are scalar; lanes ``_t = 0..3`` cover
+    8 contiguous columns, so the warp's
+    accesses coalesce regardless."""
+    coords = _element_coords(node)
+    if node.epilogue is None:
+        return [[] for _ in coords], [f"{node.frag}[{i}]" for i in range(len(coords))]
+    epi = node.epilogue
+    conv = {"f16": "__half2float({})", "bf16": "__bfloat162float({})"}
+    frags = (node.frag, *node.extra_frags)
+    per_elem: list[list[str]] = []
+    vals: list[str] = []
+    for i, (_row, _col, row_off, col_off) in enumerate(coords):
+        lines: list[str] = []
+        env = {acc: f"{fr}[{i}]" for acc, fr in zip(epi.params, frags, strict=False)}
+        for value in env.values():
+            ctx.ssa_dtypes[value] = "f32"
+        # The reserved ``ELEM_ROW`` / ``ELEM_COL`` vars substitute to this element's row / col offset
+        # within the fragment; a Load index and a Select predicate already carry the cell base.
+        coord = {ELEM_ROW: row_off, ELEM_COL: col_off}
+        for st in epi.body:
+            if isinstance(st, Load):
+                temp = f"{st.name}_e{i}"
+                storage_dt = ctx.buffer_dtypes.get(st.input, "f32")
+                value_dt = st.dtype.name if st.dtype is not None else storage_dt
+                integer = value_dt in INTEGER_NAMES
+                if st.input in ctx.literal_constants:
+                    if integer:
+                        lines.append(f"const {ctx.type_name(value_dt)} {temp} = {int(ctx.literal_constants[st.input])};")
+                    else:
+                        lines.append(f"const float {temp} = {float(ctx.literal_constants[st.input])!r}f;")
+                else:
+                    flat = render_index(st.input, tuple(e.substitute(coord) for e in st.index), ctx)
+                    if integer:
+                        lines.append(f"const {ctx.type_name(value_dt)} {temp} = {st.input}[{flat}];")
+                    else:
+                        lines.append(f"const float {temp} = {conv.get(storage_dt, '{}').format(f'{st.input}[{flat}]')};")
+                env[st.name] = temp
+                ctx.ssa_dtypes[temp] = value_dt if integer else "f32"
+            elif isinstance(st, Select):
+                # The select is declared f32, and a chain op keeps the tail's own dtype, so a
+                # branch value narrowed by an earlier op converts back here — a ternary over a
+                # ``__half`` and a ``float`` does not compile.
+                def widened(value, ctx=ctx, env=env):
+                    rendered = env[value]
+                    return conv.get(ctx.ssa_dtypes.get(rendered, "f32"), "{}").format(rendered)
+
+                expr = widened(st.branches[-1].value)
+                for br in reversed(st.branches[:-1]):
+                    rc = br.select.substitute(coord).render(ctx)
+                    expr = f"(({rc}) ? {widened(br.value)} : {expr})"
+                lines.append(f"const float {st.name}_e{i} = {expr};")
+                env[st.name] = f"{st.name}_e{i}"
+                ctx.ssa_dtypes[env[st.name]] = "f32"
+            else:
+                local = st.rewrite(
+                    lambda name, st=st, i=i, env=env: f"{name}_e{i}" if name == st.name else env.get(name, name), Sigma(coord)
+                )
+                rendered = render_stmt(local, replace(ctx, indent=0))[0]
+                lines.append(f"const {rendered}")
+                env[st.name] = f"{st.name}_e{i}"
+        per_elem.append(lines)
+        vals.append(env[epi.results[0]])
+    return per_elem, vals
+
+
+def _scaled_offset(term: str, stride: int | str) -> str:
+    return term if stride == 1 else f"({term}) * {stride}"
+
+
+def _store_addr(node: RegStore, flat: str, row: str, col: str, row_stride: int | str, col_stride: int | str) -> str:
+    """Flat address of one fragment element under its independently derived M/N strides."""
+    return f"{flat} + {_scaled_offset(row, row_stride)} + {_scaled_offset(col, col_stride)}"
+
+
+def _render_run(node: RegStore, ctx: RenderCtx, *, flat: str, ldm, dst_dt: str) -> list[str] | None:
+    """The four cells of :attr:`run` as one 16-byte store per lane and row, or ``None`` for a
+    destination that is not 16-bit or whose row stride breaks the 16-byte alignment.
+
+    Lane ``t`` of a quad holds columns ``2t, 2t+1`` of each cell. Three ``shfl.xor`` rounds
+    transpose the quad's 4×4 grid of packed pairs: in round ``s`` a lane sends the pair of
+    cell ``t^s`` and receives, from lane ``t^s``, that lane's pair of cell ``t``. Lane ``t``
+    then holds all eight columns of cell ``t`` and writes them at ``8t`` past the first
+    cell. The quad runs whole, as the fragment stores it replaces already assume."""
+    vec2 = {"f16": "__half2", "bf16": "__nv_bfloat162"}.get(dst_dt)
+    if vec2 is None or not isinstance(ldm, int) or ldm % 8:
+        return None
+    packer = {"f16": "__floats2half2_rn", "bf16": "__floats2bfloat162_rn"}[dst_dt]
+    pad = _pad(ctx.indent)
+    cells = (node, *node.run)
+    names = [[f"_wp{r}_{k}" for k in range(len(cells))] for r in (0, 1)]
+    lines = [
+        f"{pad}{{ const int _g = (threadIdx.x & 31) >> 2; const int _t = (threadIdx.x & 31) & 3;",
+        f"{pad}  unsigned {', '.join(n for row in names for n in row)};",
+    ]
+    for k, cell in enumerate(cells):
+        pre, vals = _element_values(cell, ctx)
+        lines.append(f"{pad}  {{")
+        lines += [f"{pad}    {ln}" for group in pre for ln in group]
+        for r in (0, 1):
+            pair = f"{packer}({vals[2 * r]}, {vals[2 * r + 1]})"
+            lines.append(f"{pad}    {{ {vec2} _h = {pair}; {names[r][k]} = *reinterpret_cast<unsigned*>(&_h); }}")
+        lines.append(f"{pad}  }}")
+
+    def pick(*by_lane: str) -> str:
+        return f"(_t == 0 ? {by_lane[0]} : _t == 1 ? {by_lane[1]} : _t == 2 ? {by_lane[2]} : {by_lane[3]})"
+
+    for r, row in ((0, "_g"), (1, "(_g + 8)")):
+        p0, p1, p2, p3 = names[r]
+        q1, q2, q3 = (f"_wq{r}_{s}" for s in (1, 2, 3))
+        lines += [
+            f"{pad}  const unsigned {q1} = __shfl_xor_sync(0xffffffffu, {pick(p1, p0, p3, p2)}, 1);",
+            f"{pad}  const unsigned {q2} = __shfl_xor_sync(0xffffffffu, {pick(p2, p3, p0, p1)}, 2);",
+            f"{pad}  const unsigned {q3} = __shfl_xor_sync(0xffffffffu, {pick(p3, p2, p1, p0)}, 3);",
+            f"{pad}  *reinterpret_cast<uint4*>(&{node.dst_buffer}[{flat} + {row} * {ldm} + _t * 8]) = make_uint4("
+            f"{pick(p0, q1, q2, q3)}, {pick(q1, p1, q3, q2)}, {pick(q2, q3, p2, q1)}, {pick(q3, q2, q1, p3)});",
+        ]
+    lines.append(f"{pad}}}")
+    return lines
+
+
+def _render_m8n8k4(node: RegStore, ctx: RenderCtx, *, flat: str, ldm, ldn, dst_dt: str, pre: list[list[str]], vals: list[str]) -> list[str]:
+    """Store an m8n8k4 accumulator under the selected Volta warp-tile arrangement."""
+    pad = _pad(ctx.indent)
+    lane = "(threadIdx.x & 31)"
+    # Each four-lane group and its +16 partner own one 8x8 computation. _vr/_vc are the lane's
+    # base coordinates under either the ordinary 16x16 cell or paired 32x32 warp-tile map.
+    if node.volta_interleaved:
+        lines = [
+            f"{pad}{{ const int _vl = {lane}; const int _vq = _vl >> 2;",
+            f"{pad}  const int _vr = (((_vq & 4) >> 1) + (_vq & 1)) * 8 + (_vl & 1);",
+            f"{pad}  const int _vc = ((_vq >> 1) & 1) * 8 + (_vl & 2);",
+        ]
+    else:
+        lines = [
+            f"{pad}{{ const int _vl = {lane}; const int _vq = (_vl & 15) >> 2;",
+            f"{pad}  const int _vr = (_vq >> 1) * 8 + (_vl >> 4) * 4 + (_vl & 1);",
+            f"{pad}  const int _vc = (_vq & 1) * 8 + (_vl & 2);",
+        ]
+    mbase = mbound = nbase = nbound = None
+    if node.m_guard is not None:
+        mbase, mbound = (e.render(ctx) for e in node.m_guard)
+    if node.n_guard is not None:
+        nbase, nbound = (e.render(ctx) for e in node.n_guard)
+    vec2 = {"f16": "__half2", "bf16": "__nv_bfloat162", "f32": "float2"}.get(dst_dt)
+    if nbound is None and ldn == 1 and vec2 is not None and not (node.atomic and dst_dt == "f32"):
+        packer = {"f16": "__floats2half2_rn", "bf16": "__floats2bfloat162_rn", "f32": "make_float2"}[dst_dt]
+        coords = _element_coords(node)
+        for pair in range(0, len(coords), 2):
+            row, col, _row_expr, _col_expr = coords[pair]
+            indent = f"{pad}  "
+            if mbound is not None:
+                lines.append(f"{indent}if (({mbase}) + {row} < ({mbound})) {{")
+                indent += "  "
+            lines.extend(f"{indent}{ln}" for ln in (*pre[pair], *pre[pair + 1]))
+            addr = _store_addr(node, flat, row, col, ldm, ldn)
+            lines.append(f"{indent}{_pair_store(node, addr, vals[pair], vals[pair + 1], vec2, packer)}")
+            if mbound is not None:
+                lines.append(f"{pad}  }}")
+        lines.append(f"{pad}}}")
+        return lines
+    for i, (row, col, _row_expr, _col_expr) in enumerate(_element_coords(node)):
+        preds = []
+        if mbound is not None:
+            preds.append(f"({mbase}) + {row} < ({mbound})")
+        if nbound is not None:
+            preds.append(f"({nbase}) + {col} < ({nbound})")
+        indent = f"{pad}  "
+        if preds:
+            lines.append(f"{indent}if ({' && '.join(preds)}) {{")
+            indent += "  "
+        lines.extend(f"{indent}{ln}" for ln in pre[i])
+        addr = _store_addr(node, flat, row, col, ldm, ldn)
+        lines.append(f"{indent}{_elem_store(node, addr, vals[i], dst_dt)}")
+        if preds:
+            lines.append(f"{pad}  }}")
+    lines.append(f"{pad}}}")
+    return lines
+
+
+def _render_guarded(
+    node: RegStore, ctx: RenderCtx, *, flat: str, ldm, ldn, dst_dt: str, pre: list[list[str]], vals: list[str]
+) -> list[str]:
+    """Masked-tile store: each fragment element's store (and its epilogue
+    gmem reads, which index the same possibly-out-of-range coordinates)
+    runs under that element's own boundary check. With only an ``m_guard``
+    the two columns of a row share the row predicate, so the vectorized
+    row-pair store survives; an ``n_guard`` splits the pair (its columns
+    straddle the bound) into per-element scalar stores."""
+    pad = _pad(ctx.indent)
+    lane = "(threadIdx.x & 31)"
+    m_pred: list[str | None] = [None] * 4
+    n_pred: list[str | None] = [None] * 4
+    if node.m_guard is not None:
+        base, bound = node.m_guard[0].render(ctx), node.m_guard[1].render(ctx)
+        m_pred = [f"({base}) + _g < ({bound})"] * 2 + [f"({base}) + _g + 8 < ({bound})"] * 2
+    if node.n_guard is not None:
+        base, bound = node.n_guard[0].render(ctx), node.n_guard[1].render(ctx)
+        n_pred = [
+            f"({base}) + _t * 2 < ({bound})",
+            f"({base}) + _t * 2 + 1 < ({bound})",
+            f"({base}) + _t * 2 < ({bound})",
+            f"({base}) + _t * 2 + 1 < ({bound})",
+        ]
+    lines = [f"{pad}{{ const int _g = {lane} >> 2; const int _t = {lane} & 3;"]
+    vec2 = {"f16": "__half2", "bf16": "__nv_bfloat162", "f32": "float2"}.get(dst_dt)
+    if node.n_guard is None and ldn == 1 and vec2 is not None and not (node.atomic and dst_dt == "f32"):
+        # Row-guarded vectorized pairs: elements {0,1} share row _g,
+        # {2,3} share row _g+8; each pair's preamble + store sit inside
+        # the pair's row check.
+        packer = {"f16": "__floats2half2_rn", "bf16": "__floats2bfloat162_rn", "f32": "make_float2"}[dst_dt]
+        for pair, addr_row in ((0, "_g"), (2, "(_g + 8)")):
+            addr = f"{flat} + {addr_row} * {ldm} + _t * 2"
+            lines.append(f"{pad}  if ({m_pred[pair]}) {{")
+            lines += [f"{pad}    {ln}" for ln in (*pre[pair], *pre[pair + 1])]
+            lines.append(f"{pad}    {_pair_store(node, addr, vals[pair], vals[pair + 1], vec2, packer)}")
+            lines.append(f"{pad}  }}")
+        lines.append(f"{pad}}}")
+        return lines
+    # Per-element scalar stores under the conjunction of the live guards.
+    for i in range(4):
+        row = "_g" if i < 2 else "(_g + 8)"
+        preds = " && ".join(p for p in (m_pred[i], n_pred[i]) if p is not None)
+        addr = _store_addr(node, flat, row, f"_t * 2 + {i & 1}", ldm, ldn)
+        lines.append(f"{pad}  if ({preds}) {{")
+        lines += [f"{pad}    {ln}" for ln in pre[i]]
+        lines.append(f"{pad}    {_elem_store(node, addr, vals[i], dst_dt)}")
+        lines.append(f"{pad}  }}")
+    lines.append(f"{pad}}}")
+    return lines
+
+
 @render_stmt.register
 def _(node: RegStore, ctx: RenderCtx) -> list[str]:
     flat = render_index(node.dst_buffer, node.dst_index, ctx)
@@ -3109,9 +3125,9 @@ def _(node: RegStore, ctx: RenderCtx) -> list[str]:
     dst_dt = ctx.buffer_dtypes.get(node.dst_buffer, "f32")
     pad = _pad(ctx.indent)
     lane = "(threadIdx.x & 31)"
-    pre, vals = node._element_values(ctx)
+    pre, vals = _element_values(node, ctx)
     if node.fragment_layout == "m8n8k4":
-        return node._render_m8n8k4(ctx, flat=flat, ldm=ldm, ldn=ldn, dst_dt=dst_dt, pre=pre, vals=vals)
+        return _render_m8n8k4(node, ctx, flat=flat, ldm=ldm, ldn=ldn, dst_dt=dst_dt, pre=pre, vals=vals)
     # C is 16×8: lane owns (row g, cols 2t,2t+1) and (row g+8, cols 2t,2t+1)
     # with g = lane/4, t = lane%4. The two cols per row are CONTIGUOUS, so
     # each row's pair is one vectorized 4-byte store (``__half2`` / ``float2``)
@@ -3120,12 +3136,12 @@ def _(node: RegStore, ctx: RenderCtx) -> list[str]:
     # base ``flat`` is tile-aligned and ``2t`` is even, so the pair is
     # 4-/8-byte aligned. The ``{ }`` block scopes _g/_t (and the per-element
     # epilogue temps) per RegStore.
-    if node.run and (wide := node._render_run(ctx, flat=flat, ldm=ldm, dst_dt=dst_dt)) is not None:
+    if node.run and (wide := _render_run(node, ctx, flat=flat, ldm=ldm, dst_dt=dst_dt)) is not None:
         return wide
     if node.run:  # a destination the 16-byte row cannot serve stores each cell on its own
         return [ln for cell in (node.replace(run=()), *node.run) for ln in render_stmt(cell, ctx)]
     if node.m_guard is not None or node.n_guard is not None:
-        return node._render_guarded(ctx, flat=flat, ldm=ldm, ldn=ldn, dst_dt=dst_dt, pre=pre, vals=vals)
+        return _render_guarded(node, ctx, flat=flat, ldm=ldm, ldn=ldn, dst_dt=dst_dt, pre=pre, vals=vals)
     lane_stmt = f"const int _g = {lane} >> 2; const int _t = {lane} & 3;"
     if node.epilogue is None:
         # Flash output store: no per-element epilogue temps, so declare _g/_t once per scope
@@ -3143,12 +3159,15 @@ def _(node: RegStore, ctx: RenderCtx) -> list[str]:
         lo = f"{flat} + _g * {ldm} + _t * 2"
         hi = f"{flat} + (_g + 8) * {ldm} + _t * 2"
         body += [
-            f"{base}{node._pair_store(lo, vals[0], vals[1], vec2, packer)}",
-            f"{base}{node._pair_store(hi, vals[2], vals[3], vec2, packer)}",
+            f"{base}{_pair_store(node, lo, vals[0], vals[1], vec2, packer)}",
+            f"{base}{_pair_store(node, hi, vals[2], vals[3], vec2, packer)}",
         ]
     else:  # per-element scalar stores (dtypes without a 2-vector packer; atomic f32)
         coords = (("_g", "_t * 2 + 0"), ("_g", "_t * 2 + 1"), ("(_g + 8)", "_t * 2 + 0"), ("(_g + 8)", "_t * 2 + 1"))
-        body += [f"{base}{node._elem_store(node._addr(flat, row, col, ldm, ldn), vals[i], dst_dt)}" for i, (row, col) in enumerate(coords)]
+        body += [
+            f"{base}{_elem_store(node, _store_addr(node, flat, row, col, ldm, ldn), vals[i], dst_dt)}"
+            for i, (row, col) in enumerate(coords)
+        ]
     if close:
         body[-1] += close
     return head + body

@@ -66,14 +66,14 @@ def test_only_the_consumer_blackwell_family_offers_the_atom(cc, available):
 
 def test_the_mma_node_carries_both_scale_fragments():
     node = MmaSyncPtx(c_frag="c", a_frag="a", b_frag="b", shape=(16, 8, 64), ab_dtype="e2m1", sfa_frag="sa", sfb_frag="sb")
-    assert node.block_scaled
+    assert node.sfa_frag is not None
     # The scales are read, so a reordering pass has to keep them defined before the mma.
     assert node.deps() == ("c", "a", "b", "sa", "sb")
 
 
 def test_a_plain_mma_node_carries_no_scales():
     node = MmaSyncPtx(c_frag="c", a_frag="a", b_frag="b", shape=(16, 8, 16))
-    assert not node.block_scaled
+    assert node.sfa_frag is None
     assert node.deps() == ("c", "a", "b")
 
 
