@@ -525,3 +525,25 @@ def describe(case: Case) -> dict[str, str]:
         "dtype": "/".join(sorted(dtypes)),
         "family": case.path.parent.name,
     }
+
+
+def raw_bodies(case: Case) -> list:
+    """The bodies the lowering of ``case`` hands to normalization, each once, in the order they arrive: what a loop
+    op is constructed over, and what an identity is taken of (a tile op's loop body, synthesized from its term).
+    The material the normalization rules are stated over — a stored kernel is what one of these normalizes to."""
+    import emmy.compiler.ir.stmt as stmt
+    import emmy.compiler.ir.stmt.identity as identity
+
+    seen: dict[str, object] = {}
+    normalize = stmt.normalize_body
+
+    def catching(body):  # noqa: ANN001, ANN202 — the normalization entry's signature
+        seen.setdefault(str(body), body)
+        return normalize(body)
+
+    stmt.normalize_body = identity.normalize_body = catching
+    try:
+        lowered(case, case.context())
+    finally:
+        stmt.normalize_body = identity.normalize_body = normalize
+    return list(seen.values())

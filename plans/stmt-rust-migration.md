@@ -124,7 +124,7 @@ Both implementations exist until the switch and never share an object: a body go
 | Kernel IR kinds print and read through their declarations | done (decision 10); the thirty hand-written printers are gone |
 | Loopify compares statements without listing their fields | done; it reads `fields_of` and rebuilds through `replace` |
 | The debug dump stores a body as its text, not as `repr` read back by `eval` | done; the Tile layer's term and output specs still dump as `repr` |
-| A fixture that yields the raw bodies of a corpus lowering | open; rules 1 to 3 run over it |
+| A fixture that yields the raw bodies of a corpus lowering | done: `helpers.raw_bodies(case)` catches every body handed to normalization; `tests/compiler/ir/stmt/test_raw_bodies.py` states rules 1 and 3 over it in Python, the port adds rule 2 |
 | `Fold` stops answering the statement protocol; the walks that reach one become functions over the interface | done (`Fold` keeps a `rewrite` of its own; nothing else was read) |
 | An expression's structural form is its text; the four concrete expression classes take full names | open; moves every identity once (decision 11): the tune DB version and its pinned identities move with it |
 | No Tile layer table is keyed on a statement or a body | done: none is stored. Four places (`tile/boundary.py`, `passes/tile/_twist.py`, `_fromloop.py`) hold a set of `id(stmt)` within one call to tell equal statements apart, which holds as long as a body hands back the same Python object on every read (the boundary rule above); `TileOp._node_ids` keys terms, which stay in Python |
