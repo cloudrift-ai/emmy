@@ -97,7 +97,7 @@ def test_a_kind_holds_its_elementwise_operation_as_op() -> None:
 _K = Axis("k", 8)
 _BELOW = BinaryExpr("<", Var("i"), Literal(2, "int"))
 _EXAMPLES = [
-    Load("x", "a", (Var("i"),), dtype=F32),
+    Load(("x",), "a", (Var("i"),), dtype=F32),
     Assign("y", "exp", ("x",)),
     Affine("z", ("x", "y"), (2.0, -1.0), offset=0.5),
     Accum("s", "x", "add"),
@@ -105,15 +105,15 @@ _EXAMPLES = [
     Pre("p", "c", (Var("i"),)),
     Init("s", 0.0, dtype=F32),
     Let("n", BinaryExpr("+", Var("i"), Literal(1, "int"))),
-    Write("out", (Var("i"),), "x"),
+    Write("out", (Var("i"),), ("x",)),
     Select("m", (SelectBranch("x", _BELOW), SelectBranch("y", Literal(1, "int")))),
     ZeroPrologue(dst="out", words=16),
-    Loop(_K, (Load("x", "a", (Var("k"),)), Accum("s", "x", "add"))),
-    StridedLoop(_K, Literal(0, "int"), Literal(2, "int"), (Load("x", "a", (Var("k"),)),), end=Var("n")),
-    Cond(_BELOW, (Write("out", (), "x"),), (Write("out", (), "y"),)),
+    Loop(_K, (Load(("x",), "a", (Var("k"),)), Accum("s", "x", "add"))),
+    StridedLoop(_K, Literal(0, "int"), Literal(2, "int"), (Load(("x",), "a", (Var("k"),)),), end=Var("n")),
+    Cond(_BELOW, (Write("out", (), ("x",)),), (Write("out", (), ("y",)),)),
     Call(
         "r",
-        Subroutine("row_sum", (Axis("row", 4),), (Loop(_K, (Load("x", "a", (Var("row"), Var("k"))), Accum("s", "x", "add"))),), "s"),
+        Subroutine("row_sum", (Axis("row", 4),), (Loop(_K, (Load(("x",), "a", (Var("row"), Var("k"))), Accum("s", "x", "add"))),), "s"),
         (Var("i"),),
     ),
 ]
@@ -130,7 +130,9 @@ _OPERANDS = kernel_ir.fragment_args(
 _KERNEL_EXAMPLES = [
     kernel_ir.Smem("s", (16, 16)),
     kernel_ir.Sync(),
-    kernel_ir.Tile(axes=(Axis("m", 4), Axis("n", 8)), body=(Load("x", "a", (Var("m"), Var("n"))),), raster_axes=("m", "n"), raster_group=2),
+    kernel_ir.Tile(
+        axes=(Axis("m", 4), Axis("n", 8)), body=(Load(("x",), "a", (Var("m"), Var("n"))),), raster_axes=("m", "n"), raster_group=2
+    ),
     kernel_ir.CpAsyncCopy(smem="s", smem_index=_INDEX, src="a", src_index=_INDEX, lane_index=_INDEX, valid=_BELOW),
     kernel_ir.CpAsyncCommit(),
     kernel_ir.CpAsyncWait(1),
@@ -172,7 +174,7 @@ _KERNEL_EXAMPLES = [
         dst_index=_INDEX,
         frag="c",
         shape=(16, 8, 16),
-        epilogue=Body((Load("r", "res", _INDEX), Assign("y", "add", ("acc", "r")))),
+        epilogue=Body((Load(("r",), "res", _INDEX), Assign("y", "add", ("acc", "r")))),
         epilogue_params=("acc",),
         epilogue_result="y",
         extra_frags=("c2",),
@@ -223,7 +225,7 @@ def test_a_shared_kind_states_only_what_no_role_gives(stmt) -> None:
 
 def test_a_number_in_a_role_field_is_plain_data() -> None:
     """A constant stride is no expression and a literal seed is no buffer."""
-    loop = StridedLoop(_K, Var("t"), 4, (Load("x", "a", (Var("k"),)),))
+    loop = StridedLoop(_K, Var("t"), 4, (Load(("x",), "a", (Var("k"),)),))
     assert loop.expressions() == (Var("t"),) and loop.rewrite(lambda name: f"{name}_").step == 4
     carry = Carry("state", "value", (Var("i"),), 0.5)
     assert carry.external_reads() == () and carry.rename_buffers({"state": "other"}) is carry
@@ -232,7 +234,7 @@ def test_a_number_in_a_role_field_is_plain_data() -> None:
 
 def test_a_field_read_through_lists_each_name_once() -> None:
     """The names an index or a predicate mentions are reads, listed in field order beside the names a field holds."""
-    write = Write("out", (Var("i"), BinaryExpr("+", Var("i"), Var("gather"))), "value")
+    write = Write("out", (Var("i"), BinaryExpr("+", Var("i"), Var("gather"))), ("value",))
     assert write.deps() == ("i", "gather", "value")
     select = Select("picked", (SelectBranch("x", _BELOW), SelectBranch("y", BinaryExpr(">=", Var("i"), Literal(2, "int")))))
     assert select.deps() == ("x", "i", "y")
@@ -273,7 +275,7 @@ def test_a_term_keeps_its_names_and_follows_a_substitution() -> None:
     store = _KERNEL_EXAMPLES[-1]
     moved = store.rewrite(lambda name: f"{name}_", Sigma({"i": Var("i") + 4}))
     assert moved.epilogue[1] == Assign("y", "add", ("acc", "r")) and moved.epilogue_params == ("acc",)
-    assert moved.epilogue[0] == Load("r", "res", moved.dst_index) and moved.dst_index == (Var("i_") + 4, Var("j_"))
+    assert moved.epilogue[0] == Load(("r",), "res", moved.dst_index) and moved.dst_index == (Var("i_") + 4, Var("j_"))
     assert (moved.frag, moved.extra_frags, moved.run[0].frag) == ("c_", ("c2_",), "d_")
 
 
@@ -281,7 +283,7 @@ def test_a_bound_axis_name_follows_its_axis() -> None:
     tile = _KERNEL_EXAMPLES[2].replace(spread=True)
     renamed = tile.rename({"m": "m2", "x": "x2"})
     assert [axis.name for axis in renamed.axes] == ["m2", "n"] and renamed.raster_axes == ("m2", "n")
-    assert renamed.body == Body((Load("x2", "a", (Var("m2"), Var("n"))),)) and renamed.spread
+    assert renamed.body == Body((Load(("x2",), "a", (Var("m2"), Var("n"))),)) and renamed.spread
     assert renamed.binds_axes() == {"m2", "n"}
 
 
@@ -340,7 +342,7 @@ def test_a_body_is_an_immutable_sequence_of_its_statements() -> None:
     """What callers may rely on in a ``Body``: it is built from any iterable, a slice or a sum of bodies is a
     body, two bodies with equal statements are equal and hash alike, and a statement placed in one is the same
     object every time it is read — passes key their side tables on that object."""
-    load, write = Load("x", "a", (Var("i"),)), Write("out", (Var("i"),), "x")
+    load, write = Load(("x",), "a", (Var("i"),)), Write("out", (Var("i"),), ("x",))
     body = Body(stmt for stmt in [load, write])
     assert len(body) == 2 and list(body) == [load, write] and write in body
     assert isinstance(body[:1], Body) and isinstance(body + [load], Body) and isinstance([load] + body, Body)

@@ -1941,7 +1941,7 @@ def _indexed_read(seam: CutSite, own: str, channel: int, correspondence: tuple, 
     mapping.update({axis.name: Literal(0, "int") for axis in seam.axes if _unit(axis) and axis.name not in mapping})
     return Fold.slab(
         Load(
-            name=_read_name(own, token, ordinal),
+            names=(_read_name(own, token, ordinal),),
             input=held[channel],
             index=tuple(expression.substitute(mapping) for expression in indexes[channel]),
         )
@@ -2138,7 +2138,7 @@ def realize(match: Match, root: Node, seams, *, joins: tuple = ()) -> Graph:
                 held[position] = held[rep]
                 indexes[position] = tuple(expression.substitute(mapping) for expression in indexes[rep])
         loads: tuple = tuple(
-            Fold.slab(Load(name=_read_name(name, token), input=held[position], index=indexes[position])) if position in held else None
+            Fold.slab(Load(names=(_read_name(name, token),), input=held[position], index=indexes[position])) if position in held else None
             for position, name in enumerate(child.exposes)
         )
         if front is not None:
@@ -2147,7 +2147,7 @@ def realize(match: Match, root: Node, seams, *, joins: tuple = ()) -> Graph:
             # projection over a slab. The residue is a lambda over that read, so tagging what it
             # EXPOSES renames its defining statements in lockstep and leaves the read's own
             # internal spelling alone.
-            raw = Load(name=names[0], input=buffers[0], index=index, dtype=front.dtype)
+            raw = Load(names=(names[0],), input=buffers[0], index=index, dtype=front.dtype)
             operands = tuple(edge for edge in child.operands if set(edge.exposes) & Body(front.residue).ssa_uses)
             params = tuple(name for edge in operands for name in edge.exposes)
             residue = Lambda.closing(params, Body((raw, *front.residue)), child.applied.results)
@@ -2169,7 +2169,7 @@ def realize(match: Match, root: Node, seams, *, joins: tuple = ()) -> Graph:
             replacements[id(sibling)] = tuple(
                 Fold.slab(
                     Load(
-                        name=_read_name(own, token, ordinal),
+                        names=(_read_name(own, token, ordinal),),
                         input=held[channel],
                         index=tuple(expression.substitute(mapping) for expression in indexes[channel]),
                     )
@@ -2309,7 +2309,8 @@ def realize(match: Match, root: Node, seams, *, joins: tuple = ()) -> Graph:
                 *minted,
             ),
             output_specs=tuple(
-                OutputSpec(Write(output=buffer, index=index, value=name), sweep=grid) for name, buffer in zip(names, buffers, strict=True)
+                OutputSpec(Write(output=buffer, index=index, values=(name,)), sweep=grid)
+                for name, buffer in zip(names, buffers, strict=True)
             ),
             split_consumed=split_consumed,
         )
@@ -2451,7 +2452,7 @@ def _contraction_reads(tile: TileOp, root: Node, groups, seam_of: dict, taken: d
                 for expression, (lo, _) in zip(expressions, group.space, strict=True)
             )
             name = _read_name(own, token, ordinal)
-            reads.setdefault(id(member), {})[position] = Fold.slab(Load(name=name, input=buffer, index=index))
+            reads.setdefault(id(member), {})[position] = Fold.slab(Load(names=(name,), input=buffer, index=index))
             read_names.setdefault(own, name)
         out.append((group, buffer, reads))
     return out
@@ -2589,7 +2590,7 @@ def _contraction_body(tile: TileOp, group: ContractionGroup, buffer: str, others
     }
     if shift:
         body = _reindexed(body, shift)
-    return body, Write(output=buffer, index=tuple(Var(f"{_PLACEHOLDER}{slot}") for slot in range(len(expressions))), value=name)
+    return body, Write(output=buffer, index=tuple(Var(f"{_PLACEHOLDER}{slot}") for slot in range(len(expressions))), values=(name,))
 
 
 __all__ = [

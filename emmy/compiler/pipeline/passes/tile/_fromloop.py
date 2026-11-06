@@ -714,11 +714,11 @@ def states_as_buffers(body: Body, prefix: str, inputs: Mapping[str, Tensor]) -> 
         # The seed is a buffer of the state's shape (the tensor an unrolled loop started from) or a constant.
         if isinstance(start, str):
             cell = (*(Var(axis.name) for axis in outer), *stmt.index)
-            seeded: Statement = Load(name=seed, input=start, index=seed_index(cell, inputs[start].shape))
+            seeded: Statement = Load(names=(seed,), input=start, index=seed_index(cell, inputs[start].shape))
         else:
             seeded = Let(name=seed, value=Literal(start))
         return (
-            Load(name=held, input=buffer, index=index),
+            Load(names=(held,), input=buffer, index=index),
             seeded,
             Select(name=stmt.name, branches=(SelectBranch(held, after_first), SelectBranch(seed, Literal(True, "bool")))),
         )
@@ -727,7 +727,7 @@ def states_as_buffers(body: Body, prefix: str, inputs: Mapping[str, Tensor]) -> 
         if stmt.name in stored:
             return ()
         index = (Var(time.name), *(Var(axis.name) for axis in outer), *stmt.index)
-        return (Write(output=f"{prefix}__{stmt.name}", index=index, value=stmt.value),)
+        return (Write(output=f"{prefix}__{stmt.name}", index=index, values=(stmt.value,)),)
 
     def walk(stmts: Body, outer: tuple[Axis, ...], time: Axis | None, seeds: dict[str, float | str], stored: dict) -> Body:
         out: list[Statement] = []

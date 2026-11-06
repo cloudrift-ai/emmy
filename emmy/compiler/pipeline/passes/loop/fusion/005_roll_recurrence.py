@@ -310,7 +310,9 @@ def _rolled(step: Body, steps: int, seed: float | str) -> Body:
 def _slice(tensor: Tensor, source: str, step: int) -> LoopOp:
     axes = tuple(Axis(f"s{dim}", extent) for dim, extent in enumerate(tensor.shape))
     cell = tuple(Var(axis.name) for axis in axes)
-    body = Body((Load(name="kept", input=source, index=(Literal(step, "int"), *cell)), Write(output=tensor.name, index=cell, value="kept")))
+    body = Body(
+        (Load(names=("kept",), input=source, index=(Literal(step, "int"), *cell)), Write(output=tensor.name, index=cell, values=("kept",)))
+    )
     for axis in reversed(axes):
         body = Body((Loop(axis=axis, body=body),))
     return LoopOp(body=body)

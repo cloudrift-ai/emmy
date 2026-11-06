@@ -494,7 +494,7 @@ def with_store(stmts: list[Statement], output: str, grid, value: str) -> list[St
     if has_write(stmts):
         return stmts
     index = tuple(Var(ax.name) for ax in grid)
-    return [*stmts, Write(output=output, index=index, value=value)]
+    return [*stmts, Write(output=output, index=index, values=(value,))]
 
 
 def _inner_site(c, ctx: Ctx) -> tuple | None:
@@ -794,7 +794,7 @@ def _restage_loads(stmts: list[Statement], buf: str, smem: str, n_grid: int, gri
     out: list[Statement] = []
     for s in stmts:
         if isinstance(s, Load) and s.is_scalar and s.input == buf and len(s.index) == n_grid + 1 and tuple(s.index[:n_grid]) == grid_vars:
-            out.append(Load(name=s.name, input=smem, index=(s.index[-1],)))
+            out.append(Load(names=(s.name,), input=smem, index=(s.index[-1],)))
             continue
         bodies = s.nested()
         if bodies:
@@ -849,7 +849,7 @@ def emit_combine(
             )
         idx = BinaryExpr("+", BinaryExpr("*", slot, Literal(scale, "int")), Var(iv))
         out: list[Statement] = [Smem(name=b, extents=(n_threads * scale,), dtype=smem_c) for b in bufs]
-        out += [Write(output=b, index=(idx,), value=st) for b, st in zip(bufs, state, strict=True)]
+        out += [Write(output=b, index=(idx,), values=(st,)) for b, st in zip(bufs, state, strict=True)]
         out.append(Sync())
         out.append(
             TreeHalve(bufs=bufs, state=state, state_b=state_b, combine_states=prog, length=n_threads, tid_var=t, dtype=dtype, inner=inner)
@@ -873,11 +873,11 @@ def emit_combine(
                 out.append(
                     Cond(
                         cond=BinaryExpr("==", Var("lane"), Literal(0, "int")),
-                        body=tuple(Write(output=b, index=(Var("warp"),), value=st) for b, st in zip(bufs, state, strict=True)),
+                        body=tuple(Write(output=b, index=(Var("warp"),), values=(st,)) for b, st in zip(bufs, state, strict=True)),
                     )
                 )
             else:
-                out += [Write(output=b, index=(Var(tid_var),), value=st) for b, st in zip(bufs, state, strict=True)]
+                out += [Write(output=b, index=(Var(tid_var),), values=(st,)) for b, st in zip(bufs, state, strict=True)]
             out.append(Sync())
             out.append(TreeHalve(bufs=bufs, state=state, state_b=state_b, combine_states=prog, length=width, tid_var=tid_var, dtype=dtype))
         else:  # FoldMove.ATOMIC / FoldMove.REG — cross-CTA / register tiers, not emitted by the intra-CTA walk.

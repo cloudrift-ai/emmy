@@ -266,7 +266,7 @@ def _inspector_plan(graph, node, name: str, axis: int, page: int, pages: int):
 
     def mark(stmt):
         page_of = BinaryExpr("//", CastExpr("int", stmt.index[axis]), Literal(page, "int"))
-        return (Let("one", Literal(1, "int"), dtype=I32), Write(output=marks, index=(page_of,), value="one"))
+        return (Let("one", Literal(1, "int"), dtype=I32), Write(output=marks, index=(page_of,), values=("one",)))
 
     def prune(stmts) -> tuple:
         out: list = []

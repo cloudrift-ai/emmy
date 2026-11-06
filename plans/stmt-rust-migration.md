@@ -119,7 +119,7 @@ Both implementations exist until the switch and never share an object: a body go
 
 | Step | State |
 | --- | --- |
-| Plain constructors: `Load` and `Write` take their fields as declared; no string, tuple or number is converted after construction | open; about 90 compiler sites and under 40 test sites now the tests are text |
+| Plain constructors: `Load` and `Write` take their fields as declared; no string, tuple or number is converted after construction | done: every site passes `names=(…,)` / `values=(…,)`; the two `__init__` methods are gone, a `__post_init__` refuses an empty tuple and a vector atomic write |
 | The tests of the passes state bodies as text | done: 97 files; what stays constructed is the subject of its test (the text and protocol tests, a kind the reader does not know, an invalid value) |
 | Kernel IR kinds print and read through their declarations | done (decision 10); the thirty hand-written printers are gone |
 | Loopify compares statements without listing their fields | done; it reads `fields_of` and rebuilds through `replace` |
