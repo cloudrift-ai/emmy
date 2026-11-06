@@ -346,7 +346,7 @@ What the session changes for the milestones:
    Qwen3.6's window step bounded the same way at its own cache's read time, the number fixed from 1's split;
    short cells unchanged. Needs 1, 5.
 
-   The off-card half is in a draft PR, stacked on #1324 and checked on the RTX 4080. Main's decode route cut the score
+   The off-card half is in a draft PR, checked on the RTX 4080. Before #1324 the decode route cut the score
    out, scanned the window again for the statistics and again for the probabilities, and split only the value
    product, every query head reading its key-value head's values. #1324 already splits the twisted fold across the
    window, so a finalize combines the slices' partial states. What it kept is the per-head spelling: its remainder ran
