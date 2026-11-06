@@ -36,6 +36,7 @@ from emmy.compiler.ir.stmt import (
     Write,
     ZeroPrologue,
     map_exprs,
+    parse_body,
 )
 
 
@@ -294,10 +295,10 @@ def test_a_statement_survives_the_wire_form_and_pickling(stmt) -> None:
 
 def test_a_rename_reaches_names_and_expressions() -> None:
     names = {"x": "x2", "i": "j"}
-    load, write = Load("x", "a", (Var("i"),)), Write("out", (Var("i"),), "x")
-    assert load.rename(names) == Load("x2", "a", (Var("j"),))
-    assert write.rename(names) == Write("out", (Var("j"),), "x2")
-    assert map_exprs(load, lambda expr: expr.rename(lambda name: names.get(name, name))) == Load("x", "a", (Var("j"),))
+    load, write = parse_body("x = load a[i]\nout[i] = x")
+    assert str(load.rename(names)) == "x2 = load a[j]"
+    assert str(write.rename(names)) == "out[j] = x2"
+    assert str(map_exprs(load, lambda expr: expr.rename(lambda name: names.get(name, name)))) == "x = load a[j]"
 
 
 def test_a_body_is_an_immutable_sequence_of_its_statements() -> None:

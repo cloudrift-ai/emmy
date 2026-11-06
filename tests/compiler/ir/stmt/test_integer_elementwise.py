@@ -6,12 +6,39 @@ from importlib import import_module
 
 import pytest
 
-from emmy.compiler.dtype import F32, U32
+from emmy.compiler.dtype import U32
 from emmy.compiler.graph import Node, Tensor
-from emmy.compiler.ir.expr import Literal
 from emmy.compiler.ir.kernel import KernelOp
 from emmy.compiler.ir.render import RenderCtx, render_stmt
-from emmy.compiler.ir.stmt import Assign, Body, Load, Write
+from emmy.compiler.ir.stmt import Stmt, parse_body
+
+
+def _stmt(text: str) -> Stmt:
+    (stmt,) = parse_body(text)
+    return stmt
+
+
+def _stamped(result: str) -> list[str]:
+    """The lines of ``out[0] = result`` over two ``u32`` buffers once the kernel's types are stamped."""
+    body = parse_body(
+        f"""
+        a = load lhs[0]
+        b = load rhs[0]
+        {result}
+        out[0] = result
+        """
+    )
+    out = Tensor("out", (1,), U32)
+    kernel = KernelOp(
+        body=body,
+        name="integer_elementwise",
+        inputs={"lhs": Tensor("lhs", (1,), U32), "rhs": Tensor("rhs", (1,), U32)},
+        outputs={"out": out},
+    )
+    root = Node(id="out", op=kernel, inputs=["lhs", "rhs"], outputs=(out,))
+    stamped = import_module("emmy.compiler.pipeline.passes.lowering.kernel.030_stamp_types").rewrite(root)
+    assert stamped is not None
+    return str(stamped.body).splitlines()
 
 
 @pytest.mark.parametrize(
@@ -28,15 +55,15 @@ from emmy.compiler.ir.stmt import Assign, Body, Load, Write
 )
 def test_integer_assign_renders_natively(op, symbol):
     ctx = RenderCtx(ssa_dtypes={"a": "u32", "b": "u32"})
-    line = render_stmt(Assign(name="result", op=op, args=("a", "b")), ctx)[0]
+    line = render_stmt(_stmt(f"result = {op}(a, b)"), ctx)[0]
     assert line == f"    unsigned int result = a {symbol} b;"
     assert ctx.ssa_dtypes["result"] == "u32"
 
 
 def test_f32_bitwise_names_remain_logical_masks():
     ctx = RenderCtx(ssa_dtypes={"a": "f32", "b": "f32"})
-    assert render_stmt(Assign(name="both", op="bitwise_and", args=("a", "b")), ctx) == ["    float both = a && b;"]
-    assert render_stmt(Assign(name="either", op="bitwise_or", args=("a", "b")), ctx) == ["    float either = a || b;"]
+    assert render_stmt(_stmt("both = bitwise_and(a, b)"), ctx) == ["    float both = a && b;"]
+    assert render_stmt(_stmt("either = bitwise_or(a, b)"), ctx) == ["    float either = a || b;"]
 
 
 @pytest.mark.parametrize(
@@ -44,60 +71,13 @@ def test_f32_bitwise_names_remain_logical_masks():
     ["add", "subtract", "multiply", "floor_divide", "remainder", "left_shift", "right_shift", "bitwise_and", "bitwise_or", "bitwise_xor"],
 )
 def test_stamp_types_preserves_integer_assign_and_write(op):
-    idx = (Literal(0, "int"),)
-    body = Body(
-        (
-            Load(name="a", input="lhs", index=idx),
-            Load(name="b", input="rhs", index=idx),
-            Assign(name="result", op=op, args=("a", "b")),
-            Write(output="out", index=idx, value="result"),
-        )
-    )
-    tensor = Tensor("lhs", (1,), U32)
-    out = Tensor("out", (1,), U32)
-    kernel = KernelOp(
-        body=body,
-        name="integer_elementwise",
-        inputs={"lhs": tensor, "rhs": Tensor("rhs", (1,), U32)},
-        outputs={"out": out},
-    )
-    root = Node(id="out", op=kernel, inputs=["lhs", "rhs"], outputs=(out,))
-
-    stamped = import_module("emmy.compiler.pipeline.passes.lowering.kernel.030_stamp_types").rewrite(root)
-    assert stamped is not None
-    assign = next(stmt for stmt in stamped.body if isinstance(stmt, Assign))
-    write = next(stmt for stmt in stamped.body if isinstance(stmt, Write))
-    assert assign.dtype == U32
-    assert write.value_dtype == U32
+    lines = _stamped(f"result = {op}(a, b)")
+    assert f"u32 result = {op}(a, b)" in lines
+    assert "u32 out[0] = result" in lines
 
 
 def test_stamp_types_repairs_a_stale_float_stamp_on_integer_algebra():
-    idx = (Literal(0, "int"),)
-    body = Body(
-        (
-            Load(name="a", input="lhs", index=idx),
-            Load(name="b", input="rhs", index=idx),
-            Assign(name="result", op="left_shift", args=("a", "b"), dtype=F32),
-            Write(output="out", index=idx, value="result"),
-        )
-    )
-    tensor = Tensor("lhs", (1,), U32)
-    out = Tensor("out", (1,), U32)
-    root = Node(
-        id="out",
-        op=KernelOp(
-            body=body,
-            name="integer_elementwise",
-            inputs={"lhs": tensor, "rhs": Tensor("rhs", (1,), U32)},
-            outputs={"out": out},
-        ),
-        inputs=["lhs", "rhs"],
-        outputs=(out,),
-    )
-
-    stamped = import_module("emmy.compiler.pipeline.passes.lowering.kernel.030_stamp_types").rewrite(root)
-    assign = next(stmt for stmt in stamped.body if isinstance(stmt, Assign))
-    assert assign.dtype == U32
+    assert "u32 result = left_shift(a, b)" in _stamped("f32 result = left_shift(a, b)")
 
 
 def test_an_integer_constant_load_keeps_its_dtype_when_it_folds_to_a_literal():
@@ -105,18 +85,16 @@ def test_an_integer_constant_load_keeps_its_dtype_when_it_folds_to_a_literal():
     INTEGER one must keep its own dtype: the binding's SSA dtype decides the CONSUMER's arithmetic,
     and a shift amount folded to f32 sends its shift down the f32 path, which has no `<<`."""
     ctx = RenderCtx(literal_constants={"shift_c": 4.0})
-    load = Load(name="shift", input="shift_c", index=(Literal(0, "int"),), dtype=U32)
-    assert render_stmt(load, ctx) == ["    unsigned int shift = 4;"]
+    assert render_stmt(_stmt("u32 shift = load shift_c[0]"), ctx) == ["    unsigned int shift = 4;"]
     assert ctx.ssa_dtypes["shift"] == "u32"
     ctx.ssa_dtypes["odd"] = "u32"
-    assert render_stmt(Assign(name="hi", op="left_shift", args=("odd", "shift")), ctx) == ["    unsigned int hi = odd << shift;"]
+    assert render_stmt(_stmt("hi = left_shift(odd, shift)"), ctx) == ["    unsigned int hi = odd << shift;"]
 
 
 def test_a_float_constant_load_still_binds_as_a_float_literal():
     """The float case is untouched — every kernel reading a scalar float constant renders as before."""
     ctx = RenderCtx(literal_constants={"scale_c": 0.125})
-    load = Load(name="scale", input="scale_c", index=(Literal(0, "int"),), dtype=F32)
-    assert render_stmt(load, ctx) == ["    float scale = 0.125f;"]
+    assert render_stmt(_stmt("f32 scale = load scale_c[0]"), ctx) == ["    float scale = 0.125f;"]
     assert ctx.ssa_dtypes["scale"] == "f32"
 
 
@@ -127,13 +105,13 @@ def test_the_literal_prefold_leaves_an_integer_constant_named():
     from emmy.compiler.ir.render import render_body
 
     ctx = RenderCtx(literal_constants={"shift_c": 4.0, "scale_c": 0.125})
-    body = Body(
-        (
-            Load(name="shift", input="shift_c", index=(Literal(0, "int"),), dtype=U32),
-            Load(name="scale", input="scale_c", index=(Literal(0, "int"),), dtype=F32),
-            Assign(name="hi", op="left_shift", args=("odd", "shift")),
-            Assign(name="lo", op="multiply", args=("odd", "scale")),
-        )
+    body = parse_body(
+        """
+        u32 shift = load shift_c[0]
+        f32 scale = load scale_c[0]
+        hi = left_shift(odd, shift)
+        lo = multiply(odd, scale)
+        """
     )
     ctx.ssa_dtypes["odd"] = "u32"
     lines = render_body(body, ctx)
