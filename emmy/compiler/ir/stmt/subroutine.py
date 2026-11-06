@@ -8,8 +8,9 @@ from functools import cached_property
 
 from emmy.compiler.ir.axis import Axis
 from emmy.compiler.ir.expr import Expr
+from emmy.compiler.ir.stmt.base import Stmt
 from emmy.compiler.ir.stmt.body import Body
-from emmy.compiler.ir.stmt.declared import Declared, role
+from emmy.compiler.ir.stmt.declared import kind, role
 from emmy.utils import cached_method
 
 
@@ -51,8 +52,8 @@ class Subroutine:
         return tuple(axis.name for axis in self.axes)
 
 
-@dataclass(frozen=True)
-class Call(Declared):
+@kind
+class Call(Stmt):
     """A fusion-only scalar call; its definition stays outside generic statement-tree walks.
 
     Fusion expands its calls before a LoopOp is built. They are not members of Tile IR lambdas, and a body that

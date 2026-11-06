@@ -6,13 +6,13 @@ Each carries a child body (or two, for ``Cond``) and overrides
 
 from __future__ import annotations
 
-from dataclasses import dataclass
 from functools import cached_property
 
 from emmy.compiler.ir.axis import Axis
 from emmy.compiler.ir.expr import Expr, Var
+from emmy.compiler.ir.stmt.base import Stmt
 from emmy.compiler.ir.stmt.body import Body
-from emmy.compiler.ir.stmt.declared import Declared, role
+from emmy.compiler.ir.stmt.declared import kind, role
 from emmy.compiler.ir.stmt.leaves import Accum, Carry
 
 # The loop-carried reduce accumulators — a Loop is a *reduce* loop iff its immediate
@@ -43,8 +43,8 @@ def carried_cells(body: Body) -> dict[str, tuple[int | Axis, ...]]:
     return out
 
 
-@dataclass(frozen=True)
-class Loop(Declared):
+@kind
+class Loop(Stmt):
     """Explicit iteration block — one loop over an axis.
 
     ``body`` executes ``axis.extent`` times, once per axis value. Reduce-
@@ -95,8 +95,8 @@ class Loop(Declared):
         return any(isinstance(s, _CARRIERS) for s in self.body) or bool(self.carries)
 
 
-@dataclass(frozen=True)
-class StridedLoop(Declared):
+@kind
+class StridedLoop(Stmt):
     """Strided iteration: ``for (axis = start; axis < axis.extent; axis += step)``.
 
     Cooperative variant of ``Loop`` — used at Tile IR to express "threads
@@ -139,8 +139,8 @@ class StridedLoop(Declared):
         return any(isinstance(s, _CARRIERS) for s in self.body)
 
 
-@dataclass(frozen=True)
-class Cond(Declared):
+@kind
+class Cond(Stmt):
     """Conditional block — ``if (cond) { body } [else { else_body }]``.
 
     ``cond`` is an ``Expr`` over axis Vars and previously-defined SSA
