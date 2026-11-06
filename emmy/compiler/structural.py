@@ -55,7 +55,8 @@ class Structural(Protocol):
     return different strings.
 
     **Inherit it and you get the default**: :func:`form` over the instance, which is the right
-    answer for any frozen dataclass whose fields ARE its identity (every ``Stmt``). Override it
+    answer for any frozen dataclass whose fields ARE its identity (every ``Stmt``, which holds this
+    default as a class attribute instead of inheriting the protocol's metaclass). Override it
     when the type owns a canonicalization the field walk cannot know — ``Fold``'s α-invariance,
     ``Body``'s normalize-and-collapse, ``Graph``'s Merkle walk over its nodes.
 

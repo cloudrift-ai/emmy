@@ -95,7 +95,7 @@ def _axis_identity(a: Axis) -> Axis:
 # ---------------------------------------------------------------------------
 
 
-class Stmt(Structural, Wire):
+class Stmt(Wire):
     """Base class for IR body statements.
 
     Every concrete Stmt implements:
@@ -106,6 +106,11 @@ class Stmt(Structural, Wire):
     - ``nested()`` — child statement bodies for tree traversal (default:
       no children; block-structured stmts override).
     """
+
+    # The protocol's default key, held and not inherited: a class that inherits a ``Protocol`` takes its metaclass,
+    # and every ``isinstance`` on a statement kind then runs Python code. ``form`` tells the default from an
+    # override by this function's identity.
+    structural_key = Structural.structural_key
 
     # Purity trait — True iff this stmt is a pure value binding, a legal member of a stored
     # ``Lambda`` body (the λ-foldMap term vocabulary). Declared on the interface with a

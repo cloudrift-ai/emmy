@@ -46,6 +46,11 @@ def _kinds() -> list[type]:
     return sorted(set(subclasses(Stmt)), key=lambda cls: cls.__qualname__)
 
 
+def test_a_kind_check_is_native() -> None:
+    """No statement class has a metaclass of its own: ``isinstance`` on a kind stays the interpreter's check."""
+    assert [cls.__qualname__ for cls in (Stmt, *_kinds()) if type(cls) is not type] == []
+
+
 def test_every_kind_states_the_protocol() -> None:
     """A kind says how it rewrites and prints, and each reading half comes with its rebuilding half.
 
