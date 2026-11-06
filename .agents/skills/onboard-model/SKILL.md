@@ -43,6 +43,12 @@ A host with about 23.5 GiB of RAM has known traps. An export with swap off needs
 compile's forked arm builds fail with ENOMEM. Transparent hugepages and proactive compaction go off beside pinned expert
 pages, or the compaction thread runs a core at 100%. Few compile workers fit beside 16 GiB of pinned pages.
 
+A container can show the host's CPUs while its CPU quota (`/sys/fs/cgroup/cpu/cpu.cfs_quota_us`) allows far fewer.
+Every Emmy and torch process then starts threads and workers for every CPU it sees, and the quota throttles them: on a
+384-CPU host with a 46-CPU quota, four exports and audits ran 245 threads each, were throttled in 38% of the quota's
+periods, and a strict 27B export had not finished after 45 minutes; with 8 threads and 10 workers each it took 37. Set
+`OMP_NUM_THREADS` and `EMMY_WORKERS` so the processes you run together stay under the quota.
+
 ## 0. Inputs and mode
 
 Read [`README.md`](../../../README.md) first. Its **Related Projects** map names the platform, runtime, provisioning,
