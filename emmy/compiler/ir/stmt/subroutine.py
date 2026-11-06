@@ -8,8 +8,8 @@ from functools import cached_property
 
 from emmy.compiler.ir.axis import Axis
 from emmy.compiler.ir.expr import Expr
-from emmy.compiler.ir.stmt.base import Stmt
 from emmy.compiler.ir.stmt.body import Body
+from emmy.compiler.ir.stmt.declared import Declared, role
 from emmy.utils import cached_method
 
 
@@ -52,16 +52,16 @@ class Subroutine:
 
 
 @dataclass(frozen=True)
-class Call(Stmt):
+class Call(Declared):
     """A fusion-only scalar call; its definition stays outside generic statement-tree walks.
 
     Fusion expands its calls before a LoopOp is built. They are not members of Tile IR lambdas, and a body that
     holds one has no normal form.
     """
 
-    name: str
+    name: str = role("defines")
     target: Subroutine
-    args: tuple[Expr, ...]
+    args: tuple[Expr, ...] = role("expr", "reads")
 
     deps_deep = True
 
@@ -69,27 +69,9 @@ class Call(Stmt):
         if len(self.args) != len(self.target.params):
             raise ValueError("subroutine arguments do not match its parameters")
 
-    def defines(self) -> tuple[str, ...]:
-        return (self.name,)
-
-    def deps(self) -> tuple[str, ...]:
-        return tuple(sorted(set().union(*(arg.free_vars() for arg in self.args))))
-
-    def exprs(self) -> tuple[Expr, ...]:
-        return self.args
-
-    def with_exprs(self, exprs: tuple[Expr, ...]) -> Stmt:
-        return self.replace(args=exprs)
-
     def external_reads(self) -> tuple[str, ...]:
         return self.target.buffers
 
     def rename_buffers(self, rename):  # noqa: ANN001 — see Stmt.rename_buffers
         buffers = tuple(rename.get(name, name) for name in self.target.buffers)
         return self if buffers == self.target.buffers else self.replace(target=self.target.with_buffers(buffers))
-
-    def _rewrite(self, rename, sigma, axis_fn):  # noqa: ANN001, ANN202 — see ``Stmt.rewrite``
-        return self.replace(
-            name=rename(self.name),
-            args=tuple(sigma.apply(arg).rename(rename) for arg in self.args),
-        )

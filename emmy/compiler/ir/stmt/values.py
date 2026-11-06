@@ -27,6 +27,7 @@ from itertools import groupby, permutations, product
 
 from emmy.compiler.ir.expr import Var
 from emmy.compiler.ir.stmt import blocks, leaves
+from emmy.compiler.ir.stmt.base import Stmt
 from emmy.compiler.ir.stmt.body import Body
 from emmy.compiler.ir.stmt.order import bound_axes
 from emmy.compiler.structural import form
@@ -99,7 +100,13 @@ def distinct(body: Body) -> Body:
     one immutable statement twice."""
     body = Body.coerce(body)
     members = list(body.iter())
-    return body if len({id(stmt) for stmt in members}) == len(members) else Body(stmt.rename({}) for stmt in body)
+    return body if len({id(stmt) for stmt in members}) == len(members) else Body(_copy(stmt) for stmt in body)
+
+
+def _copy(stmt: Stmt) -> Stmt:
+    """An equal statement that shares no statement object with ``stmt``."""
+    bodies = stmt.nested()
+    return stmt.with_bodies(tuple(Body(_copy(child) for child in body) for body in bodies)) if bodies else stmt.replace()
 
 
 def value_numbers(body: Body, resource_key: Callable[[str], object] = lambda name: name) -> Numbering:

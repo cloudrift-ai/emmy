@@ -270,8 +270,14 @@ statements that are not a child body. Carried statements (`stmts`: the cells a `
 combine of a `TreeHalve`) are part of the statement: they are rewritten with it and their buffers, expressions and
 free reads are its own, a name one of them defines or the statement binds being hidden. A term (`term`: a
 `RegStore`'s epilogue) keeps its statements' names private: a rename reaches only the coordinates its expressions
-read. Kernel IR declares all of its kinds this way; a kind whose member the roles cannot give is a missing role, not
-a hand-written member.
+read. An expression field that is also a `reads` field is read through: the names its expressions mention are
+names the statement reads (a `Load`'s index, a `Select`'s predicates, a `Cond`'s condition). A number where a
+name, a buffer or an expression is expected is plain data (a constant stride, a literal seed).
+
+The shared kinds and the Kernel IR kinds are all declared. A kind whose member the roles cannot give is a missing
+role, not a hand-written member; the shared kinds state four, which `test_protocol.py` pins: an `Accum`'s reduced
+axes follow a substitution that splits an axis, a `Let` and a `Call` read buffers their fields do not name (inside
+an expression, through the subroutine), and a `StridedLoop` with an `end` binds one more name than its axis.
 
 Behaviour that is not on this list lives outside the module as a function over statements. CUDA rendering is the
 main case: `ir/render.py` holds the render context, the index flattening and one render function per kind,

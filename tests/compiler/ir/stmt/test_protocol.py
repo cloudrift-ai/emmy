@@ -204,6 +204,40 @@ def test_a_declared_kind_states_only_its_fields(stmt) -> None:
     assert not stated
 
 
+# The protocol members a shared kind states itself, because no role gives them.
+_STATED = {
+    Accum: {"_rewrite"},  # its reduced axes follow a substitution that splits an axis
+    Let: {"external_reads", "rename_buffers"},  # the buffers a flat index inside its expression names
+    Call: {"external_reads", "rename_buffers"},  # the buffers its subroutine reads
+    StridedLoop: {"binds_axes"},  # the ``<axis>_end`` name an ``end`` override hoists
+}
+
+
+@pytest.mark.parametrize("stmt", _EXAMPLES, ids=lambda stmt: type(stmt).__name__)
+def test_a_shared_kind_states_only_what_no_role_gives(stmt) -> None:
+    """A shared kind is declared too: every protocol member but the few listed follows from its fields' roles."""
+    stated = set(vars(type(stmt))) & {name for name in vars(Declared) if not name.startswith("__")}
+    assert stated == _STATED.get(type(stmt), set())
+
+
+def test_a_number_in_a_role_field_is_plain_data() -> None:
+    """A constant stride is no expression and a literal seed is no buffer."""
+    loop = StridedLoop(_K, Var("t"), 4, (Load("x", "a", (Var("k"),)),))
+    assert loop.exprs() == (Var("t"),) and loop.rewrite(lambda name: f"{name}_").step == 4
+    carry = Carry("state", "value", (Var("i"),), 0.5)
+    assert carry.external_reads() == () and carry.rename_buffers({"state": "other"}) is carry
+    assert carry.replace(seed="init").external_reads() == ("init",)
+
+
+def test_a_field_read_through_lists_each_name_once() -> None:
+    """The names an index or a predicate mentions are reads, listed in field order beside the names a field holds."""
+    write = Write("out", (Var("i"), BinaryExpr("+", Var("i"), Var("gather"))), "value")
+    assert write.deps() == ("i", "gather", "value")
+    select = Select("picked", (SelectBranch("x", _BELOW), SelectBranch("y", BinaryExpr(">=", Var("i"), Literal(2, "int")))))
+    assert select.deps() == ("x", "i", "y")
+    assert Carry("state", "value", (Var("i"),), 0.0).deps() == ("value",)
+
+
 @pytest.mark.parametrize("stmt", _KERNEL_EXAMPLES, ids=lambda stmt: type(stmt).__name__)
 def test_a_rename_reaches_every_name_and_no_buffer(stmt) -> None:
     """What a declared kind reads and defines follows a rename; the buffers it reads and writes follow a buffer
