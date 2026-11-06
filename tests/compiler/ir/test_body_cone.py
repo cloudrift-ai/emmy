@@ -10,9 +10,7 @@ from __future__ import annotations
 
 from emmy.compiler.ir.axis import Axis
 from emmy.compiler.ir.expr import Var
-from emmy.compiler.ir.stmt import Accum, Assign, Load, Loop, Select, Write
-from emmy.compiler.ir.stmt.body import Body
-from emmy.compiler.ir.stmt.leaves import SelectBranch
+from emmy.compiler.ir.stmt import Accum, Assign, Body, Load, Loop, Select, SelectBranch, Write
 
 
 def _ld(name: str, src: str, *idx: str) -> Load:

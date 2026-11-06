@@ -10,8 +10,7 @@ from itertools import count
 from emmy.compiler.dtype import BF16, F16, F32, F64
 from emmy.compiler.graph import Node
 from emmy.compiler.ir.kernel import KernelOp
-from emmy.compiler.ir.stmt import Accum, Assign, Body, Cond, Init, Loop, Stmt, StridedLoop
-from emmy.compiler.ir.stmt.order import ordering_constraints
+from emmy.compiler.ir.stmt import Accum, Assign, Body, Cond, Init, Loop, Stmt, StridedLoop, ordering_constraints
 from emmy.compiler.pipeline import Pattern, RuleSkipped
 from emmy.compiler.pipeline.search.space import FAST_MATH, precision_pin
 

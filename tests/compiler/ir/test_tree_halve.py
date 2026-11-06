@@ -1,15 +1,16 @@
 """The cross-thread smem combine's rendered forms and its rewrite."""
 
 from emmy.compiler.ir.kernel.ir import TreeHalve
+from emmy.compiler.ir.render import RenderCtx, render_stmt
 from emmy.compiler.ir.sigma import Sigma
-from emmy.compiler.ir.stmt import Assign, RenderCtx
+from emmy.compiler.ir.stmt import Assign
 from emmy.compiler.ir.stmt.passes import _rewrite_kind
 
 _SUM = (Assign(name="acc0", op="add", args=("acc0", "acc0__o")),)
 
 
 def _render(halve: TreeHalve) -> str:
-    return "\n".join(halve.render(RenderCtx()))
+    return "\n".join(render_stmt(halve, RenderCtx()))
 
 
 def test_the_warp_partials_fold_in_one_warp_behind_one_barrier() -> None:

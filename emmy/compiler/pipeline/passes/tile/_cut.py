@@ -493,7 +493,7 @@ def join_pairs(seams) -> tuple[tuple[CutSite, CutSite], ...]:
 def _pruned(body: Body, roots: frozenset[str]) -> Body:
     """``body`` cut to what ``roots`` need — the statements a root reads through, in order, a
     loop kept with what its own body keeps."""
-    from emmy.compiler.ir.stmt.body import free_names  # noqa: PLC0415
+    from emmy.compiler.ir.stmt import free_names  # noqa: PLC0415
 
     needed = set(roots)
     while True:
@@ -568,7 +568,7 @@ def _value_forms(seam: CutSite, axes: tuple) -> tuple[tuple, dict[str, Expr], di
     statistic read at ``i // 2560`` of a flattened 10240-wide axis and at its own 4-wide stream axis is one value.
     Returned beside the forms and the expressions: the address each strided coordinate's cell is stored at, and the
     stored axes."""
-    from emmy.compiler.ir.stmt.identity import canonicalize_identity  # noqa: PLC0415 — identity imports the tile IR
+    from emmy.compiler.ir.stmt import canonicalize_identity  # noqa: PLC0415 — identity imports the tile IR
 
     scoped = tuple(axis.name for axis in seam.axes if axis.name in seam.node.free_axes)
     names = {name: f"_s{position}" for position, name in enumerate(scoped)}
@@ -723,7 +723,7 @@ def _read_through(found: tuple, own: dict) -> tuple:
 
 def _row_form(seam: CutSite, name: str, row: Expr, common: tuple[str, ...], axes: tuple) -> tuple | None:
     """Exact identity of a contraction channel as a function of one output address."""
-    from emmy.compiler.ir.stmt.identity import canonicalize_identity  # noqa: PLC0415 — tile IR import
+    from emmy.compiler.ir.stmt import canonicalize_identity  # noqa: PLC0415 — tile IR import
 
     node = _channels(seam.node, (name,)) if len(seam.node.exposes) > 1 else seam.node
     scoped = tuple(axis.name for axis in seam.axes if axis.name in node.free_axes)
@@ -1164,7 +1164,7 @@ def _canonical_slots(body: Body, placeholders: int) -> tuple[object, tuple[int, 
     and the same contraction reads its weight first under a block amax and its activation first elsewhere, which
     made the two occurrences two groups, each recomputing the contraction. Past four placeholders the numbering
     stays as found."""
-    from emmy.compiler.ir.stmt.identity import canonicalize_identity  # noqa: PLC0415 — identity imports the tile IR
+    from emmy.compiler.ir.stmt import canonicalize_identity  # noqa: PLC0415 — identity imports the tile IR
 
     found = tuple(range(placeholders))
     best = (canonicalize_identity(body), found)

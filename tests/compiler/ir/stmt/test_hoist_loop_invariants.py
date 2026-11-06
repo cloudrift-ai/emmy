@@ -8,10 +8,8 @@ from __future__ import annotations
 
 from emmy.compiler.ir.axis import Axis
 from emmy.compiler.ir.expr import Literal, Var
-from emmy.compiler.ir.stmt.blocks import Loop, StridedLoop
-from emmy.compiler.ir.stmt.body import Body
-from emmy.compiler.ir.stmt.leaves import Accum, Assign, Load, Write
-from emmy.compiler.ir.stmt.normalize import normalize_body, place_values
+from emmy.compiler.ir.stmt import Accum, Assign, Body, Load, Loop, StridedLoop, Write, normalize_body
+from emmy.compiler.ir.stmt.normalize import place_values
 
 
 def test_hoists_invariant_load_above_loop() -> None:

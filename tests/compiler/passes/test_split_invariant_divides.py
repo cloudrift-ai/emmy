@@ -9,8 +9,7 @@ from emmy.compiler.dtype import BF16, F16, F32, F64, I32
 from emmy.compiler.ir.axis import Axis
 from emmy.compiler.ir.expr import Var
 from emmy.compiler.ir.kernel import KernelOp
-from emmy.compiler.ir.stmt import Assign, Body, Load, Loop, Write
-from emmy.compiler.ir.stmt.normalize import normalize_body
+from emmy.compiler.ir.stmt import Assign, Body, Load, Loop, Write, normalize_body
 from emmy.compiler.pipeline import RuleSkipped
 
 rule = import_module("emmy.compiler.pipeline.passes.lowering.kernel.040_split_invariant_divides")

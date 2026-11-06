@@ -15,10 +15,8 @@ from emmy.compiler.graph import Node, Tensor
 from emmy.compiler.ir.axis import Axis
 from emmy.compiler.ir.expr import BinaryExpr, Expr, Literal, Var
 from emmy.compiler.ir.kernel import KernelOp
-from emmy.compiler.ir.stmt import RenderCtx
-from emmy.compiler.ir.stmt.blocks import Loop
-from emmy.compiler.ir.stmt.body import Body
-from emmy.compiler.ir.stmt.leaves import Assign, Load, Select, SelectBranch, Write
+from emmy.compiler.ir.render import RenderCtx, render_stmt
+from emmy.compiler.ir.stmt import Assign, Body, Load, Loop, Select, SelectBranch, Write
 from emmy.compiler.ir.stmt.normalize import simplify_body
 
 ELSE = Literal(True, "bool")
@@ -90,5 +88,5 @@ def test_select_preserves_the_common_type_in_its_consumers(left, right, result, 
     assert next(s for s in stamped.body if isinstance(s, Assign)).dtype == result
     assert next(s for s in stamped.body if isinstance(s, Write)).value_dtype == result
     ctx = RenderCtx(ssa_dtypes={"a": left.name, "b": right.name})
-    assert selection.render(ctx)[0].startswith(f"    {ctype} chosen = ")
+    assert render_stmt(selection, ctx)[0].startswith(f"    {ctype} chosen = ")
     assert ctx.ssa_dtypes["chosen"] == result.name

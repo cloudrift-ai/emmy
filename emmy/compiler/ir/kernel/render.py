@@ -29,8 +29,8 @@ from emmy.compiler.ir.kernel.ir import (
     swizzle_fn,
     swizzle_xor,
 )
-from emmy.compiler.ir.stmt import Paged, RenderCtx, render_body
-from emmy.compiler.ir.stmt.leaves import Assign, Write
+from emmy.compiler.ir.render import Paged, RenderCtx, _body_uses_lane_warp, render_body
+from emmy.compiler.ir.stmt import Assign, Write
 from emmy.compiler.tensor import Tensor
 
 # Per-CTA static-smem hard cap on every CUDA arch we target. Above this,
@@ -1560,7 +1560,6 @@ def render_kernelop(
     body_text = "\n".join(render_body(kernel_op.body, ctx))
     # The cross-thread combine (``WarpShuffle`` / ``TreeHalve``) references the hardware
     # warp ``lane`` / ``warp`` ids; declare them at function entry when the body needs them.
-    from emmy.compiler.ir.stmt.blocks import _body_uses_lane_warp  # noqa: PLC0415
 
     if _body_uses_lane_warp(kernel_op.body):
         body_text = "    int lane = threadIdx.x & 31;\n    int warp = threadIdx.x >> 5;\n" + body_text

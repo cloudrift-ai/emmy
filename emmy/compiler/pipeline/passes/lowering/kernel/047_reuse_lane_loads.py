@@ -24,8 +24,7 @@ from emmy.compiler.ir.expr import BinaryExpr, Interval, Literal, SimplifyCtx
 from emmy.compiler.ir.kernel import KernelOp
 from emmy.compiler.ir.kernel.ir import Tile
 from emmy.compiler.ir.sigma import Sigma
-from emmy.compiler.ir.stmt import Assign, Body, Stmt, StridedLoop
-from emmy.compiler.ir.stmt.leaves import Accum, Init, Let, Load, Select, Write
+from emmy.compiler.ir.stmt import Accum, Assign, Body, Init, Let, Load, Select, Stmt, StridedLoop, Write
 from emmy.compiler.pipeline import Pattern, RuleSkipped
 
 PATTERN = [Pattern("root", KernelOp)]

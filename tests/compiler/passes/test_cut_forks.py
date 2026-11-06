@@ -794,8 +794,7 @@ def test_alpha_equivalent_operand_cones_cluster_into_one_seam() -> None:
 
 
 def test_cut_value_identity_keeps_updates_of_carried_state_read_before_the_update() -> None:
-    from emmy.compiler.ir.stmt import Accum, Body, Loop
-    from emmy.compiler.ir.stmt.identity import canonicalize_identity
+    from emmy.compiler.ir.stmt import Accum, Body, Loop, canonicalize_identity
     from emmy.compiler.pipeline.passes.tile._cut import _pruned
 
     body = Body(

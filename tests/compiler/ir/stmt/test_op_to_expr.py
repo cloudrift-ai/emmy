@@ -7,8 +7,8 @@ from emmy.compiler.dtype import F32
 from emmy.compiler.ir.axis import Axis
 from emmy.compiler.ir.elementwise import ElementwiseImpl
 from emmy.compiler.ir.expr import BinaryExpr, FuncCallExpr, Literal, TernaryExpr, Var
-from emmy.compiler.ir.stmt import Assign, Body, Load, Loop, Write
-from emmy.compiler.ir.stmt.base import dtype_promote, op_to_expr
+from emmy.compiler.ir.render import op_to_expr
+from emmy.compiler.ir.stmt import Assign, Body, Load, Loop, Write, dtype_promote
 from emmy.compiler.ir.stmt.normalize import place_values
 
 

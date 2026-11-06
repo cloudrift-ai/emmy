@@ -33,8 +33,7 @@ from emmy.compiler.dtype import get as dtype_get
 from emmy.compiler.graph import Node
 from emmy.compiler.ir.expr import Literal
 from emmy.compiler.ir.kernel import KernelOp
-from emmy.compiler.ir.stmt import Accum, Affine, Assign, Body, Init, Let, Load, Select, Stmt, Write
-from emmy.compiler.ir.stmt.base import dtype_promote
+from emmy.compiler.ir.stmt import Accum, Affine, Assign, Body, Init, Let, Load, Select, Stmt, Write, dtype_promote
 from emmy.compiler.pipeline import Pattern, RuleSkipped
 
 PATTERN = [Pattern("root", KernelOp)]

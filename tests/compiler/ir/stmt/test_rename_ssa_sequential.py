@@ -20,9 +20,7 @@ import pytest
 from emmy.compiler.dim import Dim
 from emmy.compiler.ir.axis import Axis
 from emmy.compiler.ir.expr import Literal, Var
-from emmy.compiler.ir.stmt.blocks import Cond, Loop, StridedLoop
-from emmy.compiler.ir.stmt.body import Body
-from emmy.compiler.ir.stmt.leaves import Accum, Init, Load, Write
+from emmy.compiler.ir.stmt import Accum, Body, Cond, Init, Load, Loop, StridedLoop, Write
 from emmy.compiler.ir.stmt.normalize import rename_ssa_sequential
 from emmy.compiler.pipeline.passes.tile._fromloop import fold_from_loop
 

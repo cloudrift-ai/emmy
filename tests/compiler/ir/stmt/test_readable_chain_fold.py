@@ -11,9 +11,8 @@ from __future__ import annotations
 
 from emmy.compiler.dtype import F16, F32, I32, U32
 from emmy.compiler.ir.expr import Literal
-from emmy.compiler.ir.stmt.base import RenderCtx, render_body
-from emmy.compiler.ir.stmt.body import Body
-from emmy.compiler.ir.stmt.leaves import Accum, Assign, Load
+from emmy.compiler.ir.render import RenderCtx, render_body
+from emmy.compiler.ir.stmt import Accum, Assign, Body, Load
 
 
 def _render(*stmts) -> list[str]:

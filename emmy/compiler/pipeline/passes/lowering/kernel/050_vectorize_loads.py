@@ -58,8 +58,7 @@ from emmy.compiler.backend.cuda.render_target import CudaRenderTarget
 from emmy.compiler.graph import Node
 from emmy.compiler.ir.expr import BinaryExpr, Expr, Literal, SimplifyCtx, Var, affine_form
 from emmy.compiler.ir.kernel import KernelOp
-from emmy.compiler.ir.stmt import Body, Load, Stmt, StridedLoop
-from emmy.compiler.ir.stmt.passes import map_exprs
+from emmy.compiler.ir.stmt import Body, Load, Stmt, StridedLoop, map_exprs
 from emmy.compiler.pipeline import Pattern, RuleSkipped
 from emmy.compiler.pipeline.passes.lowering.kernel._vector import strided_alignment, vector_run
 from emmy.compiler.pipeline.search.space import VECTORIZE_LOADS

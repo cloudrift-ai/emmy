@@ -12,9 +12,7 @@ from __future__ import annotations
 from dataclasses import dataclass, replace
 
 from emmy.compiler.ir.elementwise import ElementwiseImpl
-from emmy.compiler.ir.stmt.base import Stmt, pretty_body
-from emmy.compiler.ir.stmt.body import Body, _exposed_defines, free_names
-from emmy.compiler.ir.stmt.leaves import Affine, Assign, Load
+from emmy.compiler.ir.stmt import Affine, Assign, Body, Load, Stmt, exposed_defines, free_names, pretty_body
 from emmy.compiler.wire import Wire
 
 
@@ -33,7 +31,7 @@ def _canonical_body_order(body: Body) -> Body:
             len(getattr(stmt, "args", ()) or ()),
         )
 
-    definitions = [_exposed_defines(stmt) for stmt in stmts]
+    definitions = [exposed_defines(stmt) for stmt in stmts]
     dependencies = [free_names(stmt) for stmt in stmts]
     placed = []
     remaining = list(range(len(stmts)))
@@ -101,7 +99,7 @@ class Lambda(Wire):
             raise ValueError(f"Lambda body must be pure — impure stmt kind(s): {impure}")
         defined = set(self.params)
         for s in self.body:
-            defined |= _exposed_defines(s)
+            defined |= exposed_defines(s)
         missing = [r for r in self.results if r not in defined]
         if missing:
             raise ValueError(f"Lambda results {missing} are not defined by the body or params")
@@ -135,7 +133,7 @@ class Lambda(Wire):
         body = _normalize_body(Body.coerce(body))
         bound = set(params)
         for stmt in body:
-            bound |= _exposed_defines(stmt)
+            bound |= exposed_defines(stmt)
         # Reads the body does not define, plus any RESULT it does not define either: a write may
         # pass an enclosing value straight through (``o[j] = acc`` over an already-reduced
         # accumulator), and that result has no def to name, so it binds as a param like any read.
@@ -173,7 +171,7 @@ class Lambda(Wire):
         """Every name this lambda binds — params plus every def its body exposes (deep)."""
         out = set(self.params)
         for s in self.body:
-            out |= _exposed_defines(s)
+            out |= exposed_defines(s)
         return frozenset(out)
 
     def __getstate__(self):
@@ -198,7 +196,7 @@ class Lambda(Wire):
         if name in self.params:
             return Lambda.closing((), Body(()), (name,))
         params = set(self.params)
-        visible = Body(tuple(s for s in self.body if not (_exposed_defines(s) & params) or name in _exposed_defines(s)))
+        visible = Body(tuple(s for s in self.body if not (exposed_defines(s) & params) or name in exposed_defines(s)))
         members = tuple(visible.backward_cone((name,)).members)
         return Lambda.closing((), Body(members), (name,))
 

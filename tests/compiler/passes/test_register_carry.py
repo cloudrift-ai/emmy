@@ -10,6 +10,7 @@ from emmy.compiler.graph import Graph
 from emmy.compiler.ir.base import InputOp
 from emmy.compiler.ir.cuda import CudaOp
 from emmy.compiler.ir.kernel.ir import FragmentPromote, FragmentRepack, LdmatrixLoad, MmaSyncPtx, RegFragment
+from emmy.compiler.ir.render import render_stmt
 from emmy.compiler.ir.schedule import Stage
 from emmy.compiler.ir.schedule.base import ScheduleRefused
 from emmy.compiler.ir.schedule.register import RegisterCodec, RegisterContext, RegisterProblem, materialize_register
@@ -307,12 +308,12 @@ def test_gmem_fragment_loads_keep_their_constant_offset_in_the_pointer():
     is one pointer and a load immediate on both (179 registers on CUDA 12.9)."""
     from emmy.compiler.dim import Dim
     from emmy.compiler.ir.expr import BinaryExpr, Literal, Var
-    from emmy.compiler.ir.stmt import RenderCtx
+    from emmy.compiler.ir.render import RenderCtx
 
     ctx = RenderCtx(shapes={"k": (Dim(4), Dim(64), Dim(128))}, buffer_dtypes={"k": "f32"}, ssa_dtypes={"r": "f16"})
     row = BinaryExpr("+", BinaryExpr("*", Var("a0"), Literal(64, "int")), Literal(16, "int"))
     load = LdmatrixLoad(frag="r", src_buffer="k", src_index=(Var("a1"), row, Literal(8, "int")), role="b", staged=False, ldm=128)
-    (line,) = load.render(ctx)
+    (line,) = render_stmt(load, ctx)
     assert line.strip() == "emmy_mma_load_b_gmem<float, __half>(r, &k[a1 * 8192 + a0 * 64 * 128] + 2056, 128);"
 
 

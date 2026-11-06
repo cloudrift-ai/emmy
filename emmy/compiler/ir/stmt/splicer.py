@@ -74,25 +74,6 @@ class _Demand:
     bound_as: str
 
 
-def observes_running_accumulator(meta: BodyAnalysis, write: Write, scope: Scope) -> bool:
-    """Whether ``write`` observes an accumulator before its reduce loop completes — directly, or through
-    the values computed from it inside the loop (the rounding a non-f32 store spells, a cast)."""
-    pending, seen = list(write.values), set()
-    while pending:
-        name = pending.pop()
-        if name in seen:
-            continue
-        seen.add(name)
-        defining = meta.defs.get(name)
-        if isinstance(defining, Accum):
-            reduce_axis = meta.reduce_axes.get(name)
-            if reduce_axis is not None and reduce_axis in scope.enclosing:
-                return True
-        elif defining is not None:
-            pending.extend(defining.deps())
-    return False
-
-
 def expand_calls(body: Body) -> Body:
     """Expand compact SSA bodies through shared demands and reduction-axis unification."""
     targets = definitions(body)
@@ -242,7 +223,7 @@ class Splicer(BodyBuilder):
             if found is None:
                 raise NotSupported(f"root loop {root_tag!r} has no Write to {output!r}")
             w, scope = found
-            if observes_running_accumulator(root, w, scope):
+            if root.observes_running_accumulator(w, scope):
                 raise UnfusableStmt(
                     f"root Write to {w.output!r} observes running accumulator {w.value!r}; ordered loop cannot be spliced",
                     origin=root_tag,
@@ -369,7 +350,7 @@ class Splicer(BodyBuilder):
                 f"(target writes {[w.output for w, _ in target.writes]}) — usually a buf-name != node-id mismatch on the producer"
             )
         target_write, target_scope = found
-        if observes_running_accumulator(target, target_write, target_scope):
+        if target.observes_running_accumulator(target_write, target_scope):
             raise UnfusableStmt(
                 f"splice edge into {target_tag!r} observes running accumulator {target_write.value!r}; ordered loop cannot be spliced",
                 origin=target_tag,

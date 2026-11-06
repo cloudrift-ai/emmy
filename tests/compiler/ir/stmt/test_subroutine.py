@@ -10,8 +10,8 @@ from emmy.compiler.ir.axis import Axis
 from emmy.compiler.ir.expr import Literal, Var
 from emmy.compiler.ir.loop import LoopOp
 from emmy.compiler.ir.sigma import Sigma
-from emmy.compiler.ir.stmt import Accum, Assign, Body, Load, Loop, Write
-from emmy.compiler.ir.stmt.normalize import normalize_body, prepare_body
+from emmy.compiler.ir.stmt import Accum, Assign, Body, Load, Loop, Write, normalize_body
+from emmy.compiler.ir.stmt.normalize import prepare_body
 from emmy.compiler.ir.stmt.subroutine import Call, Subroutine, definitions, pretty_subroutines
 from emmy.compiler.pipeline import Pipeline
 

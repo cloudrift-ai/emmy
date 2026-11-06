@@ -277,7 +277,7 @@ _IDENTITY_HOME = "emmy/compiler/ir/base.py"
 #: second spelling.
 _IDENTITY_DEFINERS = {
     "identity_key": {_IDENTITY_HOME, "emmy/compiler/ir/cuda/ir.py"},
-    "body_identity": {_IDENTITY_HOME, "emmy/compiler/ir/stmt/ir.py", "emmy/compiler/ir/tile/ir.py"},
+    "body_identity": {_IDENTITY_HOME, "emmy/compiler/ir/body_op.py", "emmy/compiler/ir/tile/ir.py"},
     "io_fingerprint": {_IDENTITY_HOME},
     "deploy_identity": set(),
     "cache_key": set(),
@@ -383,7 +383,7 @@ def test_every_buffer_bearing_stmt_can_rename_its_buffers() -> None:
     import pkgutil
 
     import emmy.compiler.ir as ir_pkg
-    from emmy.compiler.ir.stmt.base import Stmt
+    from emmy.compiler.ir.stmt import Stmt
 
     for mod in pkgutil.walk_packages(ir_pkg.__path__, prefix="emmy.compiler.ir."):
         importlib.import_module(mod.name)

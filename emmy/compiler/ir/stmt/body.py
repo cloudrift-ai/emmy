@@ -54,7 +54,7 @@ class Cone:
     properties instead of re-walking shapes).
 
     A member is a whole top-level stmt: a wrapper (Loop / Cond / Tile) joins
-    as a unit, exposing names per :func:`_exposed_defines` and reading per
+    as a unit, exposing names per :func:`exposed_defines` and reading per
     :func:`free_names` (subtree rolled up, internally-bound axes
     excluded). Axis vars from enclosing scopes survive into
     ``external_reads`` — intersect with an axis-name set to get the cone's
@@ -71,7 +71,7 @@ class Cone:
         return Body(self.members).loads
 
 
-def _exposed_defines(s: Stmt) -> set[str]:
+def exposed_defines(s: Stmt) -> set[str]:
     """SSA names ``s`` makes visible at its own scope level — own defines
     plus every nested define. A deliberate over-approximation: nested non-Accum
     names don't truly cross a Loop boundary, but well-formed SSA never reads them
@@ -360,7 +360,7 @@ class Body(tuple[Stmt, ...], Wire):
             if stmt.has_side_effects:
                 seen.clear()
                 folded.clear()
-            elif _exposed_defines(stmt):
+            elif exposed_defines(stmt):
                 if stmt in seen:
                     continue
                 seen.add(stmt)
@@ -729,7 +729,7 @@ class Body(tuple[Stmt, ...], Wire):
         itself an external read (members come out empty)."""
         by_name: dict[str, Stmt] = {}
         for s in self:
-            for n in _exposed_defines(s):
+            for n in exposed_defines(s):
                 by_name[n] = s
         member_ids: set[int] = set()
         external: set[str] = set()
@@ -763,7 +763,7 @@ class Body(tuple[Stmt, ...], Wire):
         member_ids = {id(s) for s in members}
         moved_defs: set[str] = set()
         for s in members:
-            moved_defs |= _exposed_defines(s)
+            moved_defs |= exposed_defines(s)
         root_set = frozenset(roots)
         allowed_ids = {id(s) for s in allowed}
 
@@ -990,27 +990,3 @@ def _normalize_body_of(body: Body) -> Body:
 #: program normalizes ~700 distinct bodies three to four times each, and one prior-gate pool meets more than
 #: 4,096; a resident body costs ~20 KB, so the bound is ~330 MB a process never reaches in practice.
 _normal_form = Memo(maxsize=16384)
-
-
-def refs_axis(s: Stmt, name: str) -> bool:
-    """``s`` references axis ``name`` in any carried expr (deep) — ``Stmt.exprs``: a ``Load`` /
-    ``Write`` index, a ``Select``'s branch predicates. Both spellings are coordinate reads, so both
-    make the stmt vary with the axis; a mask ``Select`` read as invariant would be hoisted out of
-    the per-cell body it predicates."""
-    if any(name in e.free_vars() for e in s.exprs()):
-        return True
-    return any(refs_axis(child, name) for b in s.nested() for child in b)
-
-
-def stmt_axis_names(stmts) -> set[str]:
-    """Every loop induction variable bound anywhere in ``stmts`` (deep). A composed structural node
-    sitting in the body needs no special case — it is a ``Stmt``, so its children are reached through
-    the same ``nested()`` walk as any block stmt's."""
-    out: set[str] = set()
-    for s in stmts:
-        ax = getattr(s, "axis", None)
-        if ax is not None and hasattr(ax, "name"):
-            out.add(ax.name)
-        for b in s.nested():
-            out |= stmt_axis_names(b)
-    return out

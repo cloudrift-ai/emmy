@@ -155,14 +155,14 @@ def find_all_bindings(graph: Graph, stage_filter: set[str] | None = None) -> lis
 
 
 # ---------------------------------------------------------------------------
-# Thread-axis decode (mirrors ir/stmt/blocks.py::_render_thread_axis_decode)
+# Thread-axis decode (mirrors ir/render.py::_render_thread_axis_decode)
 # ---------------------------------------------------------------------------
 
 
 def _thread_axis_env(thread_axes: tuple[Axis, ...], tid: int) -> dict[str, int]:
     """Reproduce the runtime decode of ``threadIdx.x`` into per-axis ints.
 
-    Identical to ``_render_thread_axis_decode`` in ``ir/stmt/blocks.py``:
+    Identical to ``_render_thread_axis_decode`` in ``ir/render.py``:
     outermost axis = ``tid // inner_prod``, inner axes get
     ``(tid // stride) % extent`` with ``stride`` doubling rightward,
     and a single-axis tile collapses to ``tid``.

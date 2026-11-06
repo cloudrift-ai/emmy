@@ -12,25 +12,8 @@ from emmy.compiler.dim import Dim
 from emmy.compiler.dtype import F32
 from emmy.compiler.ir.axis import Axis, Window
 from emmy.compiler.ir.expr import BinaryExpr, Literal, Var
-from emmy.compiler.ir.stmt.blocks import Cond, Loop
-from emmy.compiler.ir.stmt.body import Body
-from emmy.compiler.ir.stmt.identity import canonicalize_identity
-from emmy.compiler.ir.stmt.leaves import (
-    Accum,
-    Affine,
-    Assign,
-    Init,
-    Let,
-    Load,
-    Write,
-)
-from emmy.compiler.ir.stmt.normalize import (
-    _canonicalize_exprs,
-    _normalize_body,
-    normalize_body,
-    prepare_body,
-    rename_ssa_sequential,
-)
+from emmy.compiler.ir.stmt import Accum, Affine, Assign, Body, Cond, Init, Let, Load, Loop, Write, canonicalize_identity, normalize_body
+from emmy.compiler.ir.stmt.normalize import _canonicalize_exprs, _normalize_body, prepare_body, rename_ssa_sequential
 
 # ---------------------------------------------------------------------------
 # sort_commutative_args

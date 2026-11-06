@@ -14,9 +14,23 @@ from emmy.compiler.graph import Node
 from emmy.compiler.ir.axis import Axis
 from emmy.compiler.ir.expr import BinaryExpr, Builtin, Literal, SimplifyCtx, TernaryExpr, Var
 from emmy.compiler.ir.kernel import KernelOp, Smem, Sync, Tile
-from emmy.compiler.ir.stmt import Accum, Affine, Assign, Body, Carry, Cond, Let, Load, Loop, Pre, Select, StridedLoop, Write
-from emmy.compiler.ir.stmt.base import dtype_promote
-from emmy.compiler.ir.stmt.body import free_names
+from emmy.compiler.ir.stmt import (
+    Accum,
+    Affine,
+    Assign,
+    Body,
+    Carry,
+    Cond,
+    Let,
+    Load,
+    Loop,
+    Pre,
+    Select,
+    StridedLoop,
+    Write,
+    dtype_promote,
+    free_names,
+)
 from emmy.compiler.pipeline import Match, Pattern, RuleSkipped
 from emmy.compiler.pipeline.fork import DeferredFork
 from emmy.compiler.pipeline.passes.tile._fromloop import seed_index, stored_states

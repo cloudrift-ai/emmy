@@ -45,9 +45,7 @@ def test_insert_descends_by_axis_and_prepends_at_the_leaf():
     Loop, and each level keeps prepend order — newest first, a fresh nested Loop ahead of the
     stmts inserted before it."""
     from emmy.compiler.ir.axis import Axis
-    from emmy.compiler.ir.stmt.analysis import Scope
-    from emmy.compiler.ir.stmt.blocks import Loop
-    from emmy.compiler.ir.stmt.leaves import Assign
+    from emmy.compiler.ir.stmt import Assign, Loop, Scope
 
     a, b = Axis("a", 4), Axis("b", 8)
     builder = BodyBuilder(set())

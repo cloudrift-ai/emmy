@@ -29,7 +29,7 @@ from typing import TYPE_CHECKING
 import numpy as np
 
 from emmy.compiler.backend.loop.render_target import LoopRenderTarget
-from emmy.compiler.ir.stmt import RenderCtx, render_body
+from emmy.compiler.ir.render import RenderCtx, render_body
 
 if TYPE_CHECKING:
     from emmy.compiler.ir.loop.ir import LoopOp

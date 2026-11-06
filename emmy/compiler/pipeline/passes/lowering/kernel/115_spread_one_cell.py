@@ -21,8 +21,7 @@ from emmy.compiler.graph import Node
 from emmy.compiler.ir.expr import Var
 from emmy.compiler.ir.kernel import KernelOp, Tile
 from emmy.compiler.ir.kernel.ir import Sync
-from emmy.compiler.ir.stmt import Body, Load, Loop, Stmt, Write
-from emmy.compiler.ir.stmt.blocks import StridedLoop
+from emmy.compiler.ir.stmt import Body, Load, Loop, Stmt, StridedLoop, Write
 from emmy.compiler.pipeline import Pattern, RuleSkipped
 
 PATTERN = [Pattern("root", KernelOp)]

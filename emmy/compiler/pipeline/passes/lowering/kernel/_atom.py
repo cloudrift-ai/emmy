@@ -91,10 +91,11 @@ from emmy.compiler.ir.stmt import (
     StridedLoop,
     Write,
     binary,
+    exposed_defines,
+    free_names,
     mask_select_predicate,
+    rename_free,
 )
-from emmy.compiler.ir.stmt.body import _exposed_defines, free_names
-from emmy.compiler.ir.stmt.passes import rename_free
 from emmy.compiler.ir.tile.ops import cone_stat, cone_stat_dtypes
 from emmy.compiler.pipeline.passes.lowering.kernel._stage import (
     CpAsyncTransport,
@@ -149,7 +150,7 @@ def _unshadowed(body, states: tuple[str, ...]) -> list:
     not share because they were formed differently — and however alike they look those are two
     values, so the tail's takes its own name. A tail that only READS a state is untouched, and still
     reads the cell's accumulator through the ordinary suffix."""
-    shadowed = {name for stmt in body for name in _exposed_defines(stmt)} & set(states)
+    shadowed = {name for stmt in body for name in exposed_defines(stmt)} & set(states)
     if not shadowed:
         return list(body)
     return [stmt.rewrite(lambda name: f"{name}__own" if name in shadowed else name) for stmt in body]

@@ -299,7 +299,7 @@ _STMT_EVAL_SCOPE: dict | None = None
 def _pure_lambda(params=(), body=(), results=()):
     """Rehydrate a dumped ``Lambda`` repr through its normal formation checks."""
     from emmy.compiler.ir.pure import Lambda  # noqa: PLC0415
-    from emmy.compiler.ir.stmt.body import Body  # noqa: PLC0415
+    from emmy.compiler.ir.stmt import Body  # noqa: PLC0415
 
     return Lambda(params=tuple(params), body=Body.coerce(body), results=tuple(results))
 
@@ -1245,7 +1245,7 @@ class Graph(Wire):
         autotuner case)."""
         from emmy.compiler.ir.axis import Axis  # noqa: PLC0415
         from emmy.compiler.ir.expr import Var  # noqa: PLC0415
-        from emmy.compiler.ir.stmt.blocks import Loop  # noqa: PLC0415
+        from emmy.compiler.ir.stmt import Loop  # noqa: PLC0415
 
         dims = [dim for nid in self.inputs for dim in self.buffer(nid).shape]
         for node in self.nodes.values():
@@ -1294,7 +1294,7 @@ class Graph(Wire):
         from dataclasses import fields as dc_fields  # noqa: PLC0415
 
         from emmy.compiler.dim import Dim  # noqa: PLC0415
-        from emmy.compiler.ir.stmt.body import Body  # noqa: PLC0415
+        from emmy.compiler.ir.stmt import Body  # noqa: PLC0415
         from emmy.compiler.structural import digest  # noqa: PLC0415
 
         def _unwrap_dims(v: object) -> object:

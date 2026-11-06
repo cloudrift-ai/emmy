@@ -126,7 +126,7 @@ class Expr(Wire):
         """Emit a target-language (C / CUDA) expression string.
 
         Concrete subclasses override. The ``ctx`` is duck-typed against
-        :class:`emmy.compiler.ir.stmt.RenderCtx` (intrinsic /
+        :class:`emmy.compiler.ir.render.RenderCtx` (intrinsic /
         builtin spelling tables, optional shape map). ``parent_prec``
         drives parenthesization in nested ``BinaryExpr`` chains.
         """
@@ -695,7 +695,7 @@ class FlatIndex(Expr):
         return frozenset().union(*(e.free_vars() for e in self.index))
 
     def render(self, ctx, parent_prec: int = 0) -> str:
-        from emmy.compiler.ir.stmt.base import render_index  # noqa: PLC0415 — stmt imports expr
+        from emmy.compiler.ir.render import render_index  # noqa: PLC0415 — the render module imports expr
 
         text = render_index(self.buffer, self.index, ctx)
         return f"({text})" if parent_prec > 0 else text

@@ -28,8 +28,7 @@ from dataclasses import replace
 from emmy.compiler.graph import Node
 from emmy.compiler.ir.expr import Expr, Literal, TernaryExpr
 from emmy.compiler.ir.kernel import KernelOp
-from emmy.compiler.ir.stmt import Assign, Body, Let, Stmt
-from emmy.compiler.ir.stmt.leaves import Load, Select, SelectBranch
+from emmy.compiler.ir.stmt import Assign, Body, Let, Load, Select, SelectBranch, Stmt
 from emmy.compiler.pipeline import Pattern, RuleSkipped
 
 PATTERN = [Pattern("root", KernelOp)]

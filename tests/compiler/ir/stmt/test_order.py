@@ -7,12 +7,7 @@ from itertools import permutations, product
 from emmy.compiler.ir.axis import Axis
 from emmy.compiler.ir.expr import BinaryExpr, Literal, Var
 from emmy.compiler.ir.kernel.ir import CpAsyncCommit, CpAsyncWait, Sync, WgmmaCommit, WgmmaFence, WgmmaWait
-from emmy.compiler.ir.stmt.blocks import Cond, Loop
-from emmy.compiler.ir.stmt.body import Body
-from emmy.compiler.ir.stmt.identity import canonicalize_identity
-from emmy.compiler.ir.stmt.leaves import Assign, Let, Load, Write
-from emmy.compiler.ir.stmt.normalize import normalize_body
-from emmy.compiler.ir.stmt.order import ordering_constraints
+from emmy.compiler.ir.stmt import Assign, Body, Cond, Let, Load, Loop, Write, canonicalize_identity, normalize_body, ordering_constraints
 
 
 def _certificate(colors, edges, ranks: tuple[int, ...]) -> tuple:
@@ -192,8 +187,7 @@ def test_executable_order_ignores_the_iteration_order_of_a_statements_buffers(mo
     """Two projections of one normalized input, symmetric but for their weight buffer: which one
     comes first must not follow the order a set of buffer names iterates in, which is the
     per-process hash seed's. A fused two-projection serving kernel re-spelled on every boot."""
-    from emmy.compiler.ir.stmt import order
-    from emmy.compiler.ir.stmt.leaves import Accum
+    from emmy.compiler.ir.stmt import Accum, order
 
     def projection(weight: str) -> Loop:
         k = f"k_{weight}"

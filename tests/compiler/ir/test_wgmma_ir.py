@@ -27,7 +27,8 @@ from emmy.compiler.ir.kernel.ir import (
     wgmma_descriptor_bits,
 )
 from emmy.compiler.ir.kernel.render import _WGMMA_PRELUDE, _wgmma_prelude, render_kernelop
-from emmy.compiler.ir.stmt import Body, RenderCtx
+from emmy.compiler.ir.render import RenderCtx, render_stmt
+from emmy.compiler.ir.stmt import Body
 from emmy.compiler.ir.stmt.passes import rewrite
 
 _NS = (64, 128, 256)
@@ -45,7 +46,7 @@ def _cell(n: int = 64, ab_dtype: str = "bf16", form: str = "ss", **kw) -> WgmmaM
 
 
 def _line(stmt) -> str:
-    return stmt.render(RenderCtx())[0].strip()
+    return render_stmt(stmt, RenderCtx())[0].strip()
 
 
 @pytest.mark.parametrize(("swizzle", "mode"), [("NONE", 0), ("B128", 1), ("B64", 2), ("B32", 3), ("B128@7", 1)])

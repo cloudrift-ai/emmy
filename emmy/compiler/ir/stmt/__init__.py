@@ -17,9 +17,6 @@ Defined here rather than under any one IR package because all three IRs
   (drop-size-one, canonicalize-axis-order, copy-alias-elim,
   reduce-axis-unify, hoist, simplify, dedup-loads, canonical-statement-order, rename-ssa) in
   :mod:`.normalize`.
-- Pretty printing + render context: ``RenderCtx``, ``op_to_expr``,
-  ``select_to_ternary``, ``render_index`` (in :mod:`.base`).
-
 Each IR layer adds its own scheduling-specific Stmts on top:
 
 - Loop IR: nothing extra — its bodies are exactly Loop / leaves.
@@ -32,25 +29,11 @@ Loop-IR's ``LoopOp`` and validation stay in ``ir/loop/`` because they enforce Lo
 invariants. Body analysis, demand reconstruction, normalization and structural identity stay here.
 """
 
-from emmy.compiler.ir.stmt.base import (
-    INDENT,
-    Paged,
-    RenderCtx,
-    Stmt,
-    op_to_expr,
-    pretty_body,
-    render_body,
-    render_index,
-    select_to_ternary,
-)
-from emmy.compiler.ir.stmt.base import (
-    _axis_identity as _axis_identity,  # re-export for downstream IR layers,
-)
-from emmy.compiler.ir.stmt.base import (
-    _pad as _pad,  # re-export for ir.kernel.ir,
-)
+from emmy.compiler.ir.stmt.analysis import BodyAnalysis, Scope
+from emmy.compiler.ir.stmt.base import Stmt, dtype_promote, pretty_body
 from emmy.compiler.ir.stmt.blocks import Cond, Loop, StridedLoop
-from emmy.compiler.ir.stmt.body import Body, refs_axis, stmt_axis_names
+from emmy.compiler.ir.stmt.body import Body, exposed_defines, free_names
+from emmy.compiler.ir.stmt.identity import canonicalize_identity
 from emmy.compiler.ir.stmt.leaves import (
     Accum,
     Affine,
@@ -68,38 +51,46 @@ from emmy.compiler.ir.stmt.leaves import (
     binary,
     mask_select_predicate,
 )
-from emmy.compiler.ir.stmt.normalize import normalize_body
+from emmy.compiler.ir.stmt.normalize import fold_affine, normalize_body
+from emmy.compiler.ir.stmt.order import ordering_constraints
+from emmy.compiler.ir.stmt.passes import map_exprs, rename_free
+from emmy.compiler.ir.stmt.splicer import NotSupported, Program, Splicer, UnfusableStmt
 
 __all__ = [
-    "refs_axis",
-    "stmt_axis_names",
-    "INDENT",
     "Accum",
-    "Pre",
-    "Carry",
     "Affine",
-    "binary",
     "Assign",
     "Body",
+    "BodyAnalysis",
+    "Carry",
     "Cond",
     "Init",
     "Let",
     "Load",
     "Loop",
-    "mask_select_predicate",
-    "Paged",
-    "RenderCtx",
-    "ZeroPrologue",
+    "NotSupported",
+    "OutputSpec",
+    "Pre",
+    "Program",
+    "Scope",
     "Select",
     "SelectBranch",
+    "Splicer",
     "Stmt",
     "StridedLoop",
+    "UnfusableStmt",
     "Write",
-    "OutputSpec",
+    "ZeroPrologue",
+    "binary",
+    "canonicalize_identity",
+    "dtype_promote",
+    "exposed_defines",
+    "fold_affine",
+    "free_names",
+    "map_exprs",
+    "mask_select_predicate",
     "normalize_body",
-    "op_to_expr",
+    "ordering_constraints",
     "pretty_body",
-    "render_body",
-    "render_index",
-    "select_to_ternary",
+    "rename_free",
 ]

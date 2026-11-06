@@ -40,8 +40,7 @@ from emmy.compiler.ir.expr import Literal, Var
 from emmy.compiler.ir.pure.lam import Lambda
 from emmy.compiler.ir.pure.twist import Recipe, Twist
 from emmy.compiler.ir.sigma import Sigma
-from emmy.compiler.ir.stmt import Accum, Affine, Assign, Body, Carry, Let, Load, Loop, OutputSpec, Pre, Select, Stmt
-from emmy.compiler.ir.stmt.body import free_names
+from emmy.compiler.ir.stmt import Accum, Affine, Assign, Body, Carry, Let, Load, Loop, OutputSpec, Pre, Select, Stmt, free_names
 
 # ``Body.structural_key()`` dispatches :func:`emmy.compiler.ir.stmt.passes.rewrite` over every
 # stmt for SSA / Expr / axis canonicalization. Register the structural node's handler here — an
@@ -1122,7 +1121,7 @@ class Fold:
         def alike(x: Fold, y: Fold) -> bool:
             """Compare values under their actual coordinate scopes, independently of a lift's
             coordinate-parameter order and the names of the axes its operands bind."""
-            from emmy.compiler.ir.stmt.identity import canonicalize_identity  # noqa: PLC0415
+            from emmy.compiler.ir.stmt import canonicalize_identity  # noqa: PLC0415
 
             if self.axis != pivot.axis:
                 x = _rewrite_kind(x, lambda name: name, Sigma({self.axis: Var(pivot.axis)}), lambda axis: axis)

@@ -110,3 +110,21 @@ class BodyAnalysis:
             live_axes=bound.axis_dependencies,
             guards=guards,
         )
+
+    def observes_running_accumulator(self, write: Write, scope: Scope) -> bool:
+        """Whether ``write`` observes an accumulator before its reduce loop completes — directly, or through
+        the values computed from it inside the loop (the rounding a non-f32 store spells, a cast)."""
+        pending, seen = list(write.values), set()
+        while pending:
+            name = pending.pop()
+            if name in seen:
+                continue
+            seen.add(name)
+            defining = self.defs.get(name)
+            if isinstance(defining, Accum):
+                reduce_axis = self.reduce_axes.get(name)
+                if reduce_axis is not None and reduce_axis in scope.enclosing:
+                    return True
+            elif defining is not None:
+                pending.extend(defining.deps())
+        return False

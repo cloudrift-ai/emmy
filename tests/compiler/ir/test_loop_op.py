@@ -19,7 +19,7 @@ from emmy.compiler.ir.loop import (
     SelectBranch,
     Write,
 )
-from emmy.compiler.ir.stmt.body import Body
+from emmy.compiler.ir.stmt import Body
 
 
 def Port(index=()):

@@ -14,6 +14,7 @@ from emmy.compiler.graph import Graph, Tensor
 from emmy.compiler.ir.atom import ATOM_REGISTRY, atoms_for
 from emmy.compiler.ir.base import InputOp
 from emmy.compiler.ir.frontend.ir import LinearOp, MatmulOp, RmsNormOp, SdpaOp
+from emmy.compiler.ir.render import render_stmt
 from emmy.compiler.ir.schedule.catalog import MAX_FRAGMENT_REGISTERS, warp_tile_moves
 from emmy.compiler.ir.tile import TileOp
 from emmy.compiler.pipeline import CUDA_PASSES, TILE_PASSES, Pipeline
@@ -193,7 +194,7 @@ def test_sm70_source_uses_only_the_volta_mma_family(monkeypatch, trans) -> None:
 def test_volta_direct_vectors_require_aligned_complete_runs(role, trans, dtype, stride, offset, masked_k, aligned):
     from emmy.compiler.ir.expr import Literal, Var
     from emmy.compiler.ir.kernel.ir import LdmatrixLoad
-    from emmy.compiler.ir.stmt import RenderCtx
+    from emmy.compiler.ir.render import RenderCtx
 
     ctx = RenderCtx(shapes={"x": (Dim(17), Dim(stride))}, buffer_dtypes={"x": dtype}, ssa_dtypes={"r": "f16"})
     load = LdmatrixLoad(
@@ -208,7 +209,7 @@ def test_volta_direct_vectors_require_aligned_complete_runs(role, trans, dtype, 
         gmem_guard=(Literal(0, "int"), Literal(17, "int")),
         k_zero=(Literal(0, "int"), Literal(3, "int")) if masked_k else None,
     )
-    source = "\n".join(load.render(ctx))
+    source = "\n".join(render_stmt(load, ctx))
     assert ("load_gmem4<" in source) == (aligned and (role == "a" or trans))
 
 

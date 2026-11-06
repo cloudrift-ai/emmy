@@ -12,8 +12,7 @@ import pytest
 
 from emmy.compiler.ir.axis import Axis
 from emmy.compiler.ir.expr import Literal, Var
-from emmy.compiler.ir.stmt import Accum, Assign, Carry, Load, Loop, StridedLoop
-from emmy.compiler.ir.stmt.body import Body
+from emmy.compiler.ir.stmt import Accum, Assign, Body, Carry, Load, Loop, StridedLoop
 
 
 def _ld(name: str, src: str, *idx: str) -> Load:
