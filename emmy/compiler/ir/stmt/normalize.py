@@ -84,9 +84,6 @@ def _normalize_body(stmts: Body) -> Body:
         if stmts is not prepared:
             continue
         ordered = _canonical_order(prepared)
-        # The order is not yet final on its own output; it runs until it is.
-        while (again := _canonical_order(ordered)) != ordered:
-            ordered = again
         stmts = drop_unread_values(ordered)
         if stmts == ordered:
             return ordered
@@ -1342,38 +1339,40 @@ def _canonical_order(stmts: Body) -> Body:
     role = roles(stmts)
     numbering = value_numbers(stmts, lambda name: role.get(name, name))
 
+    def unlisted(stmt: Stmt) -> Stmt:
+        """A sum with its coefficients sorted: the order lists a sum's terms itself, so what it sorts by reads none of
+        that listing."""
+        return stmt.replace(coefficients=tuple(sorted(stmt.coefficients))) if isinstance(stmt, Affine) else stmt
+
     def shape(stmt: Stmt) -> str:
         """A statement's own shape with every name and buffer one placeholder: what tells a load from a store, a sum
         from a product, a plain index from a composite one, before any value or spelling is read."""
         children = stmt.nested()
         shell = stmt.with_bodies(tuple(Body() for _ in children)) if children else stmt
-        return repr(form(shell.rename(lambda _name: "__slot__").rename_buffers(_Slotted())))
+        return repr(form(unlisted(shell.rename(lambda _name: "__slot__").rename_buffers(_Slotted()))))
 
     def spelling(stmt: Stmt) -> str:
         """The whole subtree with names abstracted and buffers spelled: the tie-break between siblings of one shape,
-        so symmetric siblings order by the buffers they touch."""
-        return repr(form(stmt.rename(lambda _name: "__name__")))
+        so symmetric siblings order by the buffers they touch. Like the shape and the value, it reads nothing the
+        order itself decides — the subtree comes with its children ordered — so the order is final on its own
+        output."""
+        return repr(form(Body((stmt.rename(lambda _name: "__name__"),)).map(unlisted)))
 
     def ordered(body: Body) -> Body:
         body = Body.coerce(body)
+        rebuilt = Body(stmt.with_bodies(tuple(ordered(child) for child in stmt.nested())) if stmt.nested() else stmt for stmt in body)
         shapes = [shape(stmt) for stmt in body]
         ties = Counter(shapes)
         priorities = []
-        for stmt, own in zip(body, shapes, strict=True):
+        for stmt, built, own in zip(body, rebuilt, shapes, strict=True):
             children = stmt.nested()
             category = 2 if children and stmt.has_side_effects else int(not children)
-            spelled = spelling(stmt) if ties[own] > 1 else ""
+            spelled = spelling(built) if ties[own] > 1 else ""
             if children:
                 priorities.append((category, own, spelled, scope_tree(numbering, Body((stmt,)))))
             else:
                 number, params = numbering.numbers[id(stmt)]
                 priorities.append((category, own, spelled, number, repr(params)))
-        rebuilt = []
-        for stmt in body:
-            if stmt.nested():
-                stmt = stmt.with_bodies(tuple(ordered(child) for child in stmt.nested()))
-            rebuilt.append(stmt)
-        rebuilt = Body(rebuilt)
         order = rebuilt._topological_permutation(ordering_constraints(rebuilt, effects=True), lambda index, _stmt: priorities[index])
         return Body(rebuilt[index] for index in order)
 
