@@ -127,8 +127,8 @@ Both implementations exist until the switch and never share an object: a body go
 | A fixture that yields the raw bodies of a corpus lowering | open; rules 1 to 3 run over it |
 | `Fold` stops answering the statement protocol; the walks that reach one become functions over the interface | done (`Fold` keeps a `rewrite` of its own; nothing else was read) |
 | An expression's structural form is its text; the four concrete expression classes take full names | open; moves every identity once (decision 11): the tune DB version and its pinned identities move with it |
-| No Tile layer table is keyed on a statement or a body | open; check, convert the caller if one is |
-| The kernels whose folded constant would move under a Rust fold are counted | open; decision 9 re-records them |
+| No Tile layer table is keyed on a statement or a body | done: none is stored. Four places (`tile/boundary.py`, `passes/tile/_twist.py`, `_fromloop.py`) hold a set of `id(stmt)` within one call to tell equal statements apart, which holds as long as a body hands back the same Python object on every read (the boundary rule above); `TileOp._node_ids` keys terms, which stay in Python |
+| The kernels whose folded constant would move under a Rust fold are counted | done for the corpus: the fold evaluates `+ - * /` in f64 (`Affine`) and an elementwise op in f32 through NumPy; over all 258 cases the only op beyond those is `exp`, twice, on `0` (`exp(s - s)`), which every libm gives exactly, so no corpus kernel moves. The repository goldens were not counted (their fresh lowering takes ten minutes); the same spy over them is the count to take before the switch |
 
 ### 1. Expressions and their text
 
