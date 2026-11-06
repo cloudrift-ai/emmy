@@ -60,6 +60,10 @@ def role(*roles: str, default: object = MISSING) -> Field:
     return field(default=default, metadata={"roles": frozenset(roles)})
 
 
+#: Every declared kind by name — what the text reader builds a kind of another layer from.
+KINDS: dict[str, type] = {}
+
+
 @dataclass_transform(frozen_default=True, field_specifiers=(role, field))
 def statement(cls: type | None = None, /, **options: bool):  # noqa: ANN201 — the class, or the decorator that takes it
     """Declare a statement kind: ``cls`` becomes a frozen dataclass (``options`` go to ``dataclass``) and gets every
@@ -67,6 +71,7 @@ def statement(cls: type | None = None, /, **options: bool):  # noqa: ANN201 — 
 
     def declare(cls: type) -> type:
         cls = dataclass(frozen=True, **options)(cls)
+        KINDS[cls.__name__] = cls
         for name, member in _members(cls).items():
             stated = getattr(cls, name)
             if stated is getattr(Statement, name) or getattr(stated, "derived", False):

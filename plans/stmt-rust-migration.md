@@ -121,7 +121,7 @@ Both implementations exist until the switch and never share an object: a body go
 | --- | --- |
 | Plain constructors: `Load` and `Write` take their fields as declared; no string, tuple or number is converted after construction | open; 62 compiler sites, and about 1,080 test sites once the tests are text |
 | The tests of the passes state bodies as text | open; about 100 files, 3,244 hand-built statements |
-| Kernel IR kinds print and read through their declarations | open; it changes every Kernel IR listing, so the owner decides |
+| Kernel IR kinds print and read through their declarations | done (decision 10); the thirty hand-written printers are gone |
 | Loopify compares statements without listing their fields | open |
 | The debug dump stores a body as its text, not as `repr` read back by `eval` | open |
 | A fixture that yields the raw bodies of a corpus lowering | open; rules 1 to 3 run over it |

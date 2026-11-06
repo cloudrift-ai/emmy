@@ -68,17 +68,13 @@ def test_a_body_is_no_tuple_and_a_field_that_holds_one_defaults_to_a_body() -> N
 
 
 def test_every_kind_states_the_protocol() -> None:
-    """A kind says how it rewrites, a kind of another layer says how it prints (the statement module's own print
-    through its text), and each reading half comes with its rebuilding half.
-
-    A kind that lists child bodies rebuilds from bodies; one that lists expressions rebuilds from expressions.
-    """
+    """A kind says how it rewrites, and each reading half comes with its rebuilding half: a kind that lists child
+    bodies rebuilds from bodies; one that lists expressions rebuilds from expressions. Every kind prints through the
+    text module, a kind of another layer through its declaration."""
     missing = []
     for cls in _kinds():
         if cls._rewrite is Statement._rewrite:
             missing.append(f"{cls.__name__}: _rewrite")
-        if not hasattr(cls, "pretty") and not cls.__module__.startswith(stmt_pkg.__name__):
-            missing.append(f"{cls.__name__}: pretty")
         if (cls.nested is Statement.nested) != (cls.with_bodies is Statement.with_bodies):
             missing.append(f"{cls.__name__}: nested and with_bodies come together")
         if (cls.expressions is Statement.expressions) != (cls.map_expressions is Statement.map_expressions):

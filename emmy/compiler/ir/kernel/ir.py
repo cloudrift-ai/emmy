@@ -68,7 +68,6 @@ from emmy.compiler.ir.stmt import (
     Statement,
     StridedLoop,
     Write,
-    pretty_body,
     role,
     statement,
 )
@@ -143,11 +142,6 @@ class Smem(Statement):
     dtype: str = "float"
     align: int = 0
 
-    def pretty(self, indent: str = "") -> list[str]:
-        ext = ", ".join(str(e) for e in self.extents) or "-"
-        ali = f" align={self.align}" if self.align else ""
-        return [f"{indent}Smem {self.dtype} {self.name}[{ext}]{ali}"]
-
 
 @render_stmt.register
 def _(stmt: Smem, ctx: RenderCtx) -> list[str]:
@@ -203,13 +197,6 @@ class Sync(Statement):
     barrier_id: int = 0
     count: int | None = None
     warp: bool = False  # warp-scope __syncwarp() (barrier_id must stay 0)
-
-    def pretty(self, indent: str = "") -> list[str]:
-        if self.warp:
-            return [f"{indent}Sync(warp)"]
-        if self.barrier_id == 0:
-            return [f"{indent}Sync"]
-        return [f"{indent}Sync(bar={self.barrier_id}, count={self.count})"]
 
 
 @render_stmt.register
@@ -298,13 +285,6 @@ class Tile(Statement):
             object.__setattr__(self, "body", Body(self.body))
         if self.aux_threads and self.block_threads is None:
             raise ValueError("Tile.aux_threads requires a cooperative block_threads")
-
-    def pretty(self, indent: str = "") -> list[str]:
-        names = ", ".join(a.name for a in self.axes)
-        # A symbolic grid (dynamic seq_len) prints its Dim product — ``n_elements`` would raise,
-        # and ``pretty`` feeds ``structural_key`` / the op-inventory persist, so it must stay total.
-        n = tile_n_elements(self) if tile_is_static(self) else tile_n_dim(self)
-        return [f"{indent}Tile[{names}] (N={n})", *pretty_body(self.body, indent + "    ")]
 
 
 def tile_extents(tile: Tile) -> tuple[int, ...]:
@@ -571,13 +551,6 @@ class CpAsyncCopy(Statement):
     # 23 us on a 16 us GEMM contending for that one row.
     valid: Expression | None = role("expression", default=None)
 
-    def pretty(self, indent: str = "") -> list[str]:
-        smem_idx = ", ".join(str(e) for e in self.smem_index)
-        src_idx = ", ".join(str(e) for e in self.src_index)
-        swz = f" swz={self.swizzle}" if swizzle_xor(self.swizzle) else ""
-        lane = f" + lane({', '.join(str(e) for e in self.lane_index)})" if self.lane_index is not None else ""
-        return [f"{indent}cp.async[{self.nbytes}B] {self.smem}[{smem_idx}]{lane}{swz} <- {self.src}[{src_idx}]"]
-
 
 @render_stmt.register
 def _(node: CpAsyncCopy, ctx: RenderCtx) -> list[str]:
@@ -611,9 +584,6 @@ class CpAsyncCommit(Statement):
     issued by this thread into a commit group. Pairs with
     ``CpAsyncWait`` to wait for that group to drain."""
 
-    def pretty(self, indent: str = "") -> list[str]:
-        return [f"{indent}cp.async.commit_group"]
-
 
 @render_stmt.register
 def _(stmt: CpAsyncCommit, ctx: RenderCtx) -> list[str]:
@@ -627,9 +597,6 @@ class CpAsyncWait(Statement):
     style); larger values stagger waits for software pipelining."""
 
     group: int = 0
-
-    def pretty(self, indent: str = "") -> list[str]:
-        return [f"{indent}cp.async.wait_group({self.group})"]
 
 
 @render_stmt.register
@@ -658,11 +625,6 @@ class TmaDescriptor(Statement):
     swizzle: str = "NONE"
     dtype: str = "float"
 
-    def pretty(self, indent: str = "") -> list[str]:
-        shape = ", ".join(str(e) for e in self.src_shape)
-        box = ", ".join(str(e) for e in self.box_extents)
-        return [f"{indent}TmaDescriptor {self.name} <- {self.src_buf}[{shape}] box=[{box}] swizzle={self.swizzle}"]
-
 
 @render_stmt.register
 def _(stmt: TmaDescriptor, ctx: RenderCtx) -> list[str]:
@@ -686,12 +648,6 @@ class TmaLoad(Statement):
     coords: tuple[Expression, ...] = role("expression")
     mbar: str
     mbar_slot: Expression | None = role("expression", default=None)
-
-    def pretty(self, indent: str = "") -> list[str]:
-        smem_idx = ", ".join(str(e) for e in self.smem_index)
-        coords = ", ".join(str(e) for e in self.coords)
-        s = "" if self.mbar_slot is None else f"[{self.mbar_slot}]"
-        return [f"{indent}TmaLoad {self.smem}[{smem_idx}] <- {self.desc}({coords}) mbar={self.mbar}{s}"]
 
 
 @render_stmt.register
@@ -725,10 +681,6 @@ class MbarrierInit(Statement):
     count: int = 1
     slot: Expression | None = role("expression", default=None)
 
-    def pretty(self, indent: str = "") -> list[str]:
-        s = "" if self.slot is None else f"[{self.slot}]"
-        return [f"{indent}MbarrierInit({self.mbar}{s}, count={self.count})"]
-
 
 @render_stmt.register
 def _(stmt: MbarrierInit, ctx: RenderCtx) -> list[str]:
@@ -746,10 +698,6 @@ class MbarrierArriveExpectTx(Statement):
     mbar: str
     bytes_: int
     slot: Expression | None = role("expression", default=None)
-
-    def pretty(self, indent: str = "") -> list[str]:
-        s = "" if self.slot is None else f"[{self.slot}]"
-        return [f"{indent}MbarrierArriveExpectTx({self.mbar}{s}, bytes={self.bytes_})"]
 
 
 @render_stmt.register
@@ -769,10 +717,6 @@ class MbarrierArrive(Statement):
 
     mbar: str
     slot: Expression | None = role("expression", default=None)
-
-    def pretty(self, indent: str = "") -> list[str]:
-        s = "" if self.slot is None else f"[{self.slot}]"
-        return [f"{indent}MbarrierArrive({self.mbar}{s})"]
 
 
 @render_stmt.register
@@ -798,9 +742,6 @@ class SetMaxNReg(Statement):
     count: int
     direction: str  # "inc" or "dec"
 
-    def pretty(self, indent: str = "") -> list[str]:
-        return [f"{indent}SetMaxNReg.{self.direction}({self.count})"]
-
 
 @render_stmt.register
 def _(stmt: SetMaxNReg, ctx: RenderCtx) -> list[str]:
@@ -818,10 +759,6 @@ class MbarrierWait(Statement):
     mbar: str
     phase: Expression = role("expression")
     slot: Expression | None = role("expression", default=None)
-
-    def pretty(self, indent: str = "") -> list[str]:
-        s = "" if self.slot is None else f"[{self.slot}]"
-        return [f"{indent}MbarrierWait({self.mbar}{s}, phase={self.phase})"]
 
 
 @render_stmt.register
@@ -868,10 +805,6 @@ class TreeHalve(Statement):
     # slot — ``buf[t·scale + inner_var]`` vs ``buf[(t+s)·scale + inner_var]``, broadcast from
     # ``buf[inner_var]``. ``None`` keeps the flat ``buf[t]`` layout.
     inner: tuple[str, int] | None = None
-
-    def pretty(self, indent: str = "") -> list[str]:
-        bar = "" if self.barrier_id == 0 else f", bar={self.barrier_id}/{self.barrier_count}"
-        return [f"{indent}TreeHalve({', '.join(self.state)}, length={self.length}, tid={self.tid_var}{bar})"]
 
 
 @render_stmt.register
@@ -979,9 +912,6 @@ class WarpShuffle(Statement):
     dtype: DataType = F32
     prefix: bool = False
 
-    def pretty(self, indent: str = "") -> list[str]:
-        return [f"{indent}WarpShuffle({', '.join(self.state)}, length={self.length}, prefix={self.prefix})"]
-
 
 @render_stmt.register
 def _(stmt: WarpShuffle, ctx: RenderCtx) -> list[str]:
@@ -1019,9 +949,6 @@ class WarpBroadcast(Statement):
 
     state: tuple[str, ...] = role("reads")
     length: int
-
-    def pretty(self, indent: str = "") -> list[str]:
-        return [f"{indent}WarpBroadcast({', '.join(self.state)}, length={self.length})"]
 
 
 @render_stmt.register
@@ -1202,20 +1129,6 @@ class FragmentApply(Statement):
     row_base: Expression | None = role("expression", default=None)
     col_base: Expression | None = role("expression", default=None)
 
-    def pretty(self, indent: str = "") -> list[str]:
-        def _show(arg: FragmentArg) -> str:
-            if arg.kind == FRAG:
-                return f"{arg.names[0]}[]"
-            if arg.kind == ROW:
-                return f"{list(arg.names)}"
-            if arg.kind == GMEM:
-                return f"{arg.buffer}[{', '.join(str(e) for e in arg.expressions)}]"
-            return str(arg.expressions[0]) if arg.expressions else arg.names[0]
-
-        shown = ", ".join(_show(arg) for arg in self.args)
-        chain = "".join(f" |> {p.name}" for p in self.post)
-        return [f"{indent}FragmentApply({self.out} {'*=' if self.in_place else '<-'} {self.op.name}({shown}){chain})"]
-
 
 def _row_expression(stmt: FragmentApply, names: tuple[str, ...]) -> Expression:
     """The per-row scalar for the loop element ``_e`` — a ternary over the layout's row split
@@ -1330,9 +1243,6 @@ class FragmentRowReduce(Statement):
     layout: str = "m16n8k16"
     dtype: DataType = F32
 
-    def pretty(self, indent: str = "") -> list[str]:
-        return [f"{indent}FragmentRowReduce({self.top}, {self.bot} <- {', '.join(self.frags)}, op={self.op.name})"]
-
 
 @render_stmt.register
 def _(stmt: FragmentRowReduce, ctx: RenderCtx) -> list[str]:
@@ -1428,10 +1338,6 @@ class RegFragment(Statement):
     dtype: DataType
     count: int = 1  # >1 arrays the fragment family: ``<ty> name[count][n_regs]`` (loopify only)
     nregs: int | None = None  # explicit for layouts whose one instruction realizes several PTX cells; 0 = one scalar register
-
-    def pretty(self, indent: str = "") -> list[str]:
-        m, n, k = self.shape
-        return [f"{indent}RegFragment {self.role}:{self.dtype.name} {self.name}{_frag_dims(self)} ({m}x{n}x{k})"]
 
 
 def _frag_nregs(stmt: RegFragment) -> int:
@@ -1646,10 +1552,6 @@ class BlockScaleLoad(Statement):
     role: str  # "a" / "b" — which side's lane map supplies the rows
     ldm: int = 0
 
-    def pretty(self, indent: str = "") -> list[str]:
-        idx = ", ".join(str(e) for e in self.src_index)
-        return [f"{indent}BlockScaleLoad {self.frag} <- {self.src_buffer}[{idx}] (sf{self.role}, ldm={self.ldm})"]
-
 
 @render_stmt.register
 def _(node: BlockScaleLoad, ctx: RenderCtx) -> list[str]:
@@ -1732,23 +1634,6 @@ class LdmatrixLoad(Statement):
     # Position inside this warp operand's register tile. Volta pairs even/odd logical fragments
     # after slot offsets have made structural coordinate-delta matching needlessly fragile.
     fragment_index: int = 0
-
-    def pretty(self, indent: str = "") -> list[str]:
-        idx = ", ".join(str(e) for e in self.src_index)
-        if self.pair_frag is not None:
-            variant = "x4 pair" if self.b_trans else "x4.trans pair"
-            pair = f"({self.frag}, {self.pair_frag})"
-            return [f"{indent}LdmatrixLoad {pair} <- {self.src_buffer}[{idx}] ({variant}, ldm={self.ldm or 'auto'})"]
-        if self.scale_buffer is not None:
-            variant = f"byte decode x {self.scale_buffer}"
-        elif self.byte_slab:
-            variant = "byte gather"
-        elif self.fragment_layout == "m8n8k4" and self.staged:
-            variant = "shared gather"
-        else:
-            variant = ("x4" if self.role == "a" else ("x2" if self.b_trans else "x2.trans")) if self.staged else "gmem-direct"
-        guard = "" if self.gmem_guard is None else f" guard<{self.gmem_guard[1]}"
-        return [f"{indent}LdmatrixLoad {self.frag} <- {self.src_buffer}[{idx}] ({variant}{guard}, ldm={self.ldm or 'auto'})"]
 
 
 def _swizzled_addr(node: LdmatrixLoad, flat: str, lane: str, ctx: RenderCtx, lane_rows: int, lane_col_mod: int) -> str:
@@ -2026,12 +1911,6 @@ class MmaSyncPtx(Statement):
     sfa_frag: str | None = role("reads", default=None)
     sfb_frag: str | None = role("reads", default=None)
 
-    def pretty(self, indent: str = "") -> list[str]:
-        m, n, k = self.shape
-        acc = "" if self.c_dtype == "f32" else f" acc:{self.c_dtype}"
-        scales = f" scales:{self.sfa_frag},{self.sfb_frag}" if self.sfa_frag is not None else ""
-        return [f"{indent}MmaSyncPtx {self.c_frag} += {self.a_frag} @ {self.b_frag} (m{m}n{n}k{k} {self.ab_dtype}{acc}{scales})"]
-
 
 @render_stmt.register
 def _(stmt: MmaSyncPtx, ctx: RenderCtx) -> list[str]:
@@ -2066,9 +1945,6 @@ class FragmentPromote(Statement):
     src: str = role("updates")  # packed f16 mma accumulator fragment — rezeroed after the fold
     fragment_layout: str = "m16n8k16"
 
-    def pretty(self, indent: str = "") -> list[str]:
-        return [f"{indent}FragmentPromote {self.dst} += {self.src} (f16acc chunk fold, {self.src} rezeroed)"]
-
 
 @render_stmt.register
 def _(stmt: FragmentPromote, ctx: RenderCtx) -> list[str]:
@@ -2093,10 +1969,6 @@ class FragmentRepack(Statement):
     fragment_layout: str = "m16n8k16"
     part: int = 0
     role: str = "a"
-
-    def pretty(self, indent: str = "") -> list[str]:
-        role = ", role=b" if self.role == "b" else ""
-        return [f"{indent}FragmentRepack {self.frag} <- {self.srcs} ({self.ab_dtype}, {self.fragment_layout}, part={self.part}{role})"]
 
 
 @render_stmt.register
@@ -2148,10 +2020,6 @@ class WgmmaDescriptor(Statement):
     lbo_bytes: int
     sbo_bytes: int
 
-    def pretty(self, indent: str = "") -> list[str]:
-        idx = "" if self.smem_index is None else f"[{self.smem_index}]"
-        return [f"{indent}WgmmaDescriptor {self.name} <- {self.smem}{idx} ({self.swizzle}, lbo={self.lbo_bytes}, sbo={self.sbo_bytes})"]
-
 
 @render_stmt.register
 def _(stmt: WgmmaDescriptor, ctx: RenderCtx) -> list[str]:
@@ -2199,12 +2067,6 @@ class WgmmaMma(Statement):
         if self.a_frag is not None and self.trans_a:
             raise ValueError("wgmma: the register-form A operand is K-major (no transpose bit)")
 
-    def pretty(self, indent: str = "") -> list[str]:
-        m, n, k = self.shape
-        flags = ("" if self.scale_d else " scale_d=0") + (" trans_a" if self.trans_a else "") + (" trans_b" if self.trans_b else "")
-        acc = ", ".join(self.c_frags)
-        return [f"{indent}WgmmaMma {{{acc}}} += {_wgmma_a(self)} @ {self.b_desc} (m{m}n{n}k{k} {self.ab_dtype} {wgmma_form(self)}{flags})"]
-
 
 def wgmma_form(stmt: WgmmaMma) -> str:
     """``"ss"`` (both operands through descriptors) or ``"rs"`` (A in registers)."""
@@ -2234,9 +2096,6 @@ class WgmmaFence(Statement):
     before the ``wgmma.mma_async`` that follows. The lowering issues it before the first cell after
     anything else touched the accumulator (the epilogue, the softmax rescale)."""
 
-    def pretty(self, indent: str = "") -> list[str]:
-        return [f"{indent}WgmmaFence"]
-
 
 @render_stmt.register
 def _(stmt: WgmmaFence, ctx: RenderCtx) -> list[str]:
@@ -2248,9 +2107,6 @@ class WgmmaCommit(Statement):
     """``wgmma.commit_group.sync.aligned`` — closes the ``wgmma.mma_async`` cells issued since the
     last commit into one group for :class:`WgmmaWait` to count. The lowering commits after a
     chunk's cells."""
-
-    def pretty(self, indent: str = "") -> list[str]:
-        return [f"{indent}WgmmaCommit"]
 
 
 @render_stmt.register
@@ -2267,9 +2123,6 @@ class WgmmaWait(Statement):
     barrier."""
 
     group: int = 0
-
-    def pretty(self, indent: str = "") -> list[str]:
-        return [f"{indent}WgmmaWait({self.group})"]
 
 
 @render_stmt.register
@@ -2373,22 +2226,6 @@ class RegStore(Statement):
     # the stores, and every one of them a full sector. Each member keeps its own fragment and
     # epilogue; only the store is shared.
     run: tuple[RegStore, ...] = role("stmts", default=())
-
-    def pretty(self, indent: str = "") -> list[str]:
-        idx = ", ".join(str(e) for e in self.dst_index)
-        epi = ""
-        if self.epilogue is not None:
-            chain = ", ".join(st.op.name for st in self.epilogue if isinstance(st, Assign))
-            bufs = ", ".join(self.external_reads())
-            epi = f" epilogue[{chain}]({bufs or 'no loads'})"
-        guards = ""
-        if self.m_guard is not None:
-            guards += f" m<{self.m_guard[1]}"
-        if self.n_guard is not None:
-            guards += f" n<{self.n_guard[1]}"
-        acc = " (atomic)" if self.atomic else ""
-        run = "" if not self.run else f" +{','.join(cell.frag for cell in self.run)} (16-byte rows)"
-        return [f"{indent}RegStore {self.dst_buffer}[{idx}] <- {self.frag}{run}{epi}{guards}{acc} (ldm={self.ldm or 'auto'})"]
 
 
 def _store_swz(node: RegStore, addr: str) -> str:

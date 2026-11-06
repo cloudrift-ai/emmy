@@ -569,7 +569,7 @@ def test_a_kernel_ir_kind_is_declared_not_programmed() -> None:
         for cls in _kernel_kinds()
         for name, member in vars(cls).items()
         if (callable(member) or isinstance(member, (property, functools.cached_property, staticmethod, classmethod)))
-        and name not in ("pretty", "__post_init__")
+        and name != "__post_init__"
         and not getattr(member, "derived", False)
         and not (name.startswith("__") and name != "__post_init__")
     ]
