@@ -107,16 +107,14 @@ class Statement:
     # ``Lambda`` body (the λ-foldMap term vocabulary). Declared on the interface with a
     # CONSERVATIVE ``False`` default and per-class opt-in (no isinstance whitelist): ``Load`` /
     # ``Assign`` declare pure; the effectful / scope-bound kinds (``Accum``, ``Write``, ``Init``,
-    # ``Loop``…) never do; the structural nodes (``Fold`` / zero-axis ``Fold``) declare pure — a term is a
-    # value, its internals are its own. A NEW stmt kind is excluded from lambdas until it
-    # declares itself. ``Lambda.__post_init__`` is the enforcing formation gate.
+    # ``Loop``…) never do. A NEW stmt kind is excluded from lambdas until it declares itself.
+    # ``Lambda.__post_init__`` is the enforcing formation gate.
     pure: bool = False
 
     # Rolled-deps trait — True iff :meth:`deps` already reports the ENTIRE subtree's reads,
     # scope-correctly (every nested lambda's params subtracted). A read walk then takes ``deps()``
     # and must not re-walk ``nested()``: the flat re-walk cannot see an inner lambda's params, so
-    # a factored operand cone's result read inside the lift leaks out as a phantom capture.
-    # Conservative default; ``Fold`` (the memoized scoped rollup) opts in.
+    # a subroutine's own params leak out as phantom captures. Conservative default; ``Call`` opts in.
     deps_deep: bool = False
 
     def deps(self) -> tuple[str, ...]:

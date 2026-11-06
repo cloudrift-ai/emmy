@@ -136,11 +136,10 @@ them. A loop-invariant scale `Load` ahead of attention's score contraction is th
 a special case: it reads no coordinate the reduce loop binds, so it lands ahead of the loop even
 though the cone that reads it rides inside. The only place terms become statements is `Fold.lower()`.
 
-`Fold` does keep a small structural protocol whose names it shares with `Statement` — `nested()` for its
-children, `rewrite()` for α-renaming, and `defines()` for its result names.
-These are term operations spelled the same way so one canonicalizer and one deep walk serve both
-vocabularies; they are not statement behaviour, and no render function is registered for `Fold`. Impure
-computation stays in Loop IR until total lift; there is no impure `Lambda` construction path.
+`Fold` answers no part of the statement protocol. Its `rewrite()` is the term's own entry, spelled like the
+statement's so one caller renames or substitutes either vocabulary, but a body refuses a term and no statement walk
+reaches one; no render function is registered for `Fold`. Impure computation stays in Loop IR until total lift; there
+is no impure `Lambda` construction path.
 
 **`nested()` is the STATEMENT protocol, and it deliberately does not reach a Fold's operand edges**
 — it yields the lift body, and nothing at all for a contraction, whose algebra is meant to read as
@@ -497,14 +496,10 @@ digest of its lowered body — there is no separate term hasher. The `TileOp`'s 
 the nest `lower()` derives (the body is the term's normal form); the variant key (`identity_key(with_io=True,
 with_knobs=True)`) folds the schedule-free body identity with the knobs; and the deploy join key (the deploy identity
 (`identity_key(with_io=True)`), over `TileOp.loop_body`) types the roles the body reads its buffers through, so term
-re-spellings and cluster-sibling ops that lower alike share schedule evidence. `Fold.deps()` exposes names captured
-outside the lift params, including captures reached recursively through operand edges. A contraction deliberately hides
-its pure lift body from generic nested-body walks, so this direct dependency surface is what keeps an operand's captured
-statistic ordered before the contraction that reads it. A read walk STOPS at this rollup — the **`Statement.deps_deep`
-trait** (a `Statement`-protocol member beside `pure`, conservative `False` default; `Fold` opts in) tells
-`_member_reads` that `deps()` already answers for the whole subtree, scope-correctly. Re-walking the lift's flat
-namespace cannot see its params, so an operand-supplied name read inside the lift leaked out of every enclosing lambda
-as a phantom capture: an operand-supplied name is not an enclosing capture.
+re-spellings and cluster-sibling ops that lower alike share schedule evidence. A read walk STOPS at a statement whose
+**`deps_deep` trait** is set (a `Statement`-protocol member beside `pure`, conservative `False` default; `Call` opts
+in): its `deps()` already answers for the whole subtree, scope-correctly, so the walk does not re-walk `nested()`,
+whose flat namespace cannot see the subroutine's own params.
 
 A reduce is a contraction not by "two loads" but by the genuine algebra — the lift ⊗
 **distributes over** the fold ⊕ (`multiply` over `add`; *not* `add` over `add`, a sum of two
