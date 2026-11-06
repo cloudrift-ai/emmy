@@ -40,7 +40,7 @@ The invariant is what stops facts from acquiring a second home. A term that rend
 no private spelling of anything the statements already carry:
 
 - the neutral elements come from `Accum.op.identity` through the ONE identity placement
-  (`Loop.render` / `StridedLoop.render`), so no `identities` field rides on the term and no
+  (`Loop`'s render / `StridedLoop`'s render), so no `identities` field rides on the term and no
   `Init` seed is emitted beside it;
 - the rescale temps arrive as ordinary `Assign`s, so the generic SSA rename, liveness and read
   counters see them with no special `deps()` channel to keep complete.
@@ -139,8 +139,8 @@ though the cone that reads it rides inside. The only place terms become statemen
 `Fold` does keep a small structural protocol whose names it shares with `Stmt` — `nested()` for its
 children, `rewrite()` for α-renaming, and `defines()` for its result names.
 These are term operations spelled the same way so one canonicalizer and one deep walk serve both
-vocabularies; they are not statement behaviour, and `Fold` has no `render`. Impure computation stays
-in Loop IR until total lift; there is no impure `Lambda` construction path.
+vocabularies; they are not statement behaviour, and no render function is registered for `Fold`. Impure
+computation stays in Loop IR until total lift; there is no impure `Lambda` construction path.
 
 **`nested()` is the STATEMENT protocol, and it deliberately does not reach a Fold's operand edges**
 — it yields the lift body, and nothing at all for a contraction, whose algebra is meant to read as
@@ -219,18 +219,65 @@ keep working unchanged. `source` is excluded from
 `Graph.structural_key` and from the variant key (`identity_key(with_io=True, with_knobs=True)`) — kernels rendered
 along different lowering paths still dedup in the tuning cache.
 
-**Stmt subclasses are `@dataclass(frozen=True)`** — every concrete Loop-IR
-/ Tile-IR / Kernel-IR statement (`Loop`, `Cond`, leaves, `Tile`, `Smem`, `Sync`,
-`CpAsyncCopy`, `TmaDescriptor`, …) is immutable + hashable. `Body` is a `tuple[Stmt, ...]`
-subclass, so ordinary body equality and hashing work end-to-end. `Body.structural_key()` uses the complete
-`structural.form`, including identity-relevant fields such as `Axis.window` that may deliberately be excluded from
-general equality. Its exact and clustered keys, and its executable normal forms, are cached properties on that Body;
-there is no equality-keyed shared cache that could alias distinct metadata. To "edit" a frozen
-Stmt, return a fresh instance via `dataclasses.replace(stmt, field=value)`;
-`__post_init__` coercions use `object.__setattr__`. Ops, by contrast,
-are frozen and unhashable — rewrites replace the op and rebind its graph node. Op fields stored inside Stmts (e.g.
-`Assign.op`) must be lightweight value objects (e.g. `ElementwiseImpl`,
-not `ElementwiseOp`) so the surrounding Stmt's hashability isn't poisoned.
+**A statement is immutable data** — every concrete Loop-IR / Tile-IR / Kernel-IR statement (`Loop`, `Cond`, leaves,
+`Tile`, `Smem`, `Sync`, `CpAsyncCopy`, `TmaDescriptor`, …) has named read-only fields, compares by content and is
+hashable. To "edit" one, take a copy with `stmt.replace(field=value)`; nothing outside `ir/stmt/` calls
+`dataclasses.replace` on a statement. One pass still lists a statement's fields: the kernel loopify pass, which
+compares whole statements field by field to roll repeated ones into a loop. Ops, by contrast, are frozen and
+unhashable — rewrites replace the op and rebind its graph node. Op fields stored inside statements (e.g.
+`Assign.op`) must be lightweight value objects (e.g. `ElementwiseImpl`, not `ElementwiseOp`) so the surrounding
+statement stays hashable.
+
+## The statement module's interface
+
+`ir/stmt/` is the vocabulary all three IRs share, so the rest of the compiler uses it through one package and
+nothing else: no submodule path, no private name. The package exports the statement kinds, `Body` and `OutputSpec`,
+`normalize_body` and `canonicalize_identity`, a few functions over statements (`free_names`, `exposed_defines`,
+`rename_free`, `map_exprs`, `binary`, `mask_select_predicate`, `pretty_body`, `ordering_constraints`,
+`dtype_promote`), two normalization steps a pass may call on its own (`fold_affine`, `simplify_body`), and the body
+assembly fusion drives (`Splicer`, `Program`, `BodyAnalysis`, `Scope` and its two refusals). The module itself
+imports expressions, axes, dtypes and the structural and wire forms: no op, tensor, graph, backend or pipeline.
+`tests/architecture/test_layering.py` pins the export list and both directions.
+
+**The statement protocol** is what a kind owes, all of it methods on the kind. A layer adds a kind by stating
+these, and nothing else:
+
+| Group | Members |
+| --- | --- |
+| Traits | `pure`, `deps_deep`, `has_side_effects` |
+| Reads and writes | `deps`, `defines`, `external_reads`, `external_writes`, `local_decls`, `binds_axes` |
+| Structure | `nested` with `with_bodies`; `exprs` with `with_exprs` |
+| Rebuilding | `_rewrite` (behind `rewrite`, `rename` and `substitute`), `rename_buffers`, `replace` |
+| Display and storage | `pretty`, the wire form |
+
+Each reading member has a rebuilding half: `with_bodies` takes what `nested` returned, `with_exprs` what `exprs`
+returned. `rewrite` is the one entry for renaming and substitution; it drops the substitutions a statement's own
+binder shadows and hands the rest to the kind's `_rewrite`. The expression pair is complete for the shared kinds
+only: `exprs` lists every expression a shared kind holds and `with_exprs` rebuilds it from them. Nothing maps
+expressions over a Kernel IR body, and its kinds are not held to that: some report expressions they cannot be
+rebuilt from, which the base refuses by name, and some hold expressions they do not report, which a map would skip.
+`tests/compiler/ir/stmt/test_protocol.py` checks that every kind in every layer states the protocol, and the
+rebuilding halves on an example of each shared kind.
+
+Behaviour that is not on this list lives outside the module as a function over statements. CUDA rendering is the
+main case: `ir/render.py` holds the render context, the index flattening and one render function per kind,
+dispatched on the kind; Kernel IR registers its own kinds beside their classes.
+
+**`Body`** is an immutable sequence of statements, built from any iterable. A slice or a sum of bodies is a `Body`;
+two bodies with equal statements are equal and hash alike; a statement placed in a body is the same object every
+time it is read, which passes rely on when they key side tables by statement; it survives the wire form and
+pickling. Being a `tuple` is not part of that contract. `Body.structural_key()` uses the complete `structural.form`,
+including identity-relevant fields such as `Axis.window` that may deliberately be excluded from general equality.
+Its exact and clustered keys, and its executable normal forms, are cached on that `Body`; there is no equality-keyed
+shared cache that could alias distinct metadata. Callers use its walks (`iter`, `map`, `fold`, `iter_of_type`,
+`loads`, `writes`, `carries`, `accums`, `loops`), its def-use readings (`definitions`, `ssa_defs`, `ssa_uses`,
+`axis_names`, `axis_dependencies`, `depends_on`, `backward_cone`), its orders (`topological_order`, `coalesce`),
+`rename_buffers`, and its identity (`identity`, `structural_key`, `census`, `literals_abstracted`,
+`literal_free_key`).
+
+The tests under `tests/compiler/ir/stmt/` state what goes into the module and what comes out, and hold for any
+implementation of it. The ones under `tests/compiler/ir/stmt/implementation/` call its inner steps and leave with
+this implementation.
 
 ## `base.py`
 
@@ -309,7 +356,7 @@ distribute over that reduce — the `_SEMIRING` table, only `(+, ×)` today) liv
 atom-cell matchers ask round them out: `reduce_canon` (alias →
 base combine, `sum` → `add` …) and the `_REDUCE_SPELLING` registry
 (`reduce_spelling`) — the single op-keyed table
-behind the four sites that used to switch on the reduce op name (`Accum.render`'s
+behind the four sites that used to switch on the reduce op name (`Accum`'s render's
 `+=` / `*=` / `fmax` / `fmin`, `kernel/ir._binary_combine_expr`, and
 `ReduceOp.forward` / `ScanOp.forward`'s numpy reductions). `op.selecting` (the
 max/min family) drives the init-placement dtype choice. `op.decodes` names the storage
@@ -524,11 +571,11 @@ Body walkers: `iter_body(body)` (pre-order; powers `for s in loop_op`),
 `Stmt.pretty(indent)` (rendered lines for kernel dumps; block stmts
 recurse via `pretty_body`).
 
-CUDA scalar rendering goes through `stmt.base.op_to_expr`. Boolean masks retain the historical f32 SSA convention,
+CUDA scalar rendering goes through `op_to_expr` in `ir/render.py`. Boolean masks retain the historical f32 SSA convention,
 so Torch's `bitwise_not` spelling renders as logical zero-test (`mask == 0`); explicitly bool-stamped values use the
 same semantics. Integer complement is not inferred from that name and fails closed until it has a typed consumer.
 The optional readable-source fold keeps a single-use `Assign` named when any argument's stamped dtype differs from
-the result dtype, so the target-aware `Assign.render` path remains responsible for conversions such as
+the result dtype, so the target-aware render of an `Assign` remains responsible for conversions such as
 `__half2float`.
 
 `Select` uses the common dtype of its branch values, and type propagation gives its consumers that same dtype.
@@ -546,13 +593,12 @@ Dependence cones (`ir/stmt/body.py`): `Body.backward_cone(roots)` builds a `Cone
 the subset of the body's immediate stmts closed under SSA dependence (a wrapper joins as a unit; internally-bound
 axes excluded), plus `external_reads`, the names read from outside (axis vars and enclosing/sibling scopes alike).
 Construction never fails: unresolved names are data, and chaining scope levels means seeding the next level's
-`backward_cone` with the previous one's `external_reads`. `Body.defs_die_at(members, roots=…, allowed=…)` is the
-matching escape check (may the cone be cut out, with only the designated consumers reading its roots?). This is
+`backward_cone` with the previous one's `external_reads`. This is
 the shared substrate behind the rules that slice cones (the demoted-operand producer cut in
 `tile/cut/030_cut`) — eligibility judgments stay in the rules, per
 `pipeline/passes/ARCHITECTURE.md`.
 
-`Body.dependency_depths` folds the def-use graph with a caller-selected set of statement kinds to count. External
+The splicer folds the def-use graph counting the accumulators on each value's path. External
 buffer depths let composition carry the result across producer/consumer boundaries without expanding either body.
 Counting accumulators gives a sufficient independence proof for early reduction sharing: equal-depth reductions
 cannot read each other's finalized result. The splicer supplies graph edges and keeps coordinate substitution local.
@@ -576,7 +622,7 @@ walk. Any other caller that cones a non-SSA body owes itself the same reading.
 `rewrite` has two distinct rename channels that must stay disjoint:
 `rename_ssa` carries **SSA-name** renames, `sigma` carries **axis**
 substitutions. `Load`/`Write` index exprs apply *both*
-(`_rename_ssa_vars_in_expr(sigma.apply(e), rename)`) so an indirect
+(`sigma.apply(e).rename(rename)`) so an indirect
 (gather) index Var gets renamed exactly once. Putting the same name in
 both maps renames it twice — and if the two passes form a chain (e.g.
 `x → in5` and a pre-existing `in5 → in26`) the double application
@@ -667,7 +713,7 @@ inside definitions. Subroutine boundaries never limit fusion.
   not bind itself): it must read no name the first body defines (blocking softmax-style sequential reduces where
   sum-exp reads `acc_max`), and no between-stmt def. Names both bodies merely happen to bind are a COLLISION, not a
   dependence — two alpha-equal copies of one cone always share every spelling — so the incoming body's copies rename
-  apart. Only a name the incoming Loop still binds after it closes (its immediate carriers, which `Loop.render`
+  apart. Only a name the incoming Loop still binds after it closes (its immediate carriers, which `Loop`'s render
   declares ahead of the loop) refuses, because the rename cannot reach that name's readers outside. Eliminates the
   duplicate K traversal in patterns like `silu(x@Wg) * (x@Wu)`, and the duplicate score pass between the channels of a
   blocked twisted carrier; subsequent normalization collapses the duplicate loads, and the lowering passes stage both

@@ -9,8 +9,6 @@ loop that carries it is read off the body.
 
 from __future__ import annotations
 
-from dataclasses import replace
-
 import numpy as np
 import pytest
 
@@ -170,7 +168,7 @@ def _unit_seeded_graph() -> Graph:
     DeepSeek V4's hyper-connections does."""
 
     def lead(stmt):
-        return replace(stmt, index=(ZERO, *stmt.index)) if isinstance(stmt, (Pre, Carry)) else stmt
+        return stmt.replace(index=(ZERO, *stmt.index)) if isinstance(stmt, (Pre, Carry)) else stmt
 
     graph = Graph()
     inputs = [("D", (STEPS,)), ("W", (N, N)), ("U", (STEPS, N, N)), ("S0", (1, N, N))]

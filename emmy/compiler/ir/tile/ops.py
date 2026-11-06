@@ -31,8 +31,7 @@ from emmy.compiler.ir.schedule.classic import (
     classic_node_key,
     classic_stage_key,
 )
-from emmy.compiler.ir.stmt import Accum, Affine, Assign, Body, Init, Let, Load, Loop, Select, refs_axis, stmt_axis_names
-from emmy.compiler.ir.stmt.base import Stmt, dtype_promote
+from emmy.compiler.ir.stmt import Accum, Affine, Assign, Body, Init, Let, Load, Loop, Select, Stmt, dtype_promote
 from emmy.compiler.ir.tile.boundary import apply_output_specs
 from emmy.compiler.ir.tile.path import UnknownSiteError, sites
 
@@ -817,3 +816,27 @@ __all__ = [
     "sched_of",
     "tiled_edges",
 ]
+
+
+def refs_axis(s: Stmt, name: str) -> bool:
+    """``s`` references axis ``name`` in any carried expr (deep) — ``Stmt.exprs``: a ``Load`` /
+    ``Write`` index, a ``Select``'s branch predicates. Both spellings are coordinate reads, so both
+    make the stmt vary with the axis; a mask ``Select`` read as invariant would be hoisted out of
+    the per-cell body it predicates."""
+    if any(name in e.free_vars() for e in s.exprs()):
+        return True
+    return any(refs_axis(child, name) for b in s.nested() for child in b)
+
+
+def stmt_axis_names(stmts) -> set[str]:
+    """Every loop induction variable bound anywhere in ``stmts`` (deep). A composed structural node
+    sitting in the body needs no special case — it is a ``Stmt``, so its children are reached through
+    the same ``nested()`` walk as any block stmt's."""
+    out: set[str] = set()
+    for s in stmts:
+        ax = getattr(s, "axis", None)
+        if ax is not None and hasattr(ax, "name"):
+            out.add(ax.name)
+        for b in s.nested():
+            out |= stmt_axis_names(b)
+    return out

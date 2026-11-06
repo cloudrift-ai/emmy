@@ -124,7 +124,7 @@ def _fuse_chains(body: Body) -> Body:
         if isinstance(s, FragmentApply):
             while i + 1 < len(stmts) and _is_unary_post(stmts[i + 1], s.out, s.layout):
                 nxt = stmts[i + 1]
-                s = replace(s, post=s.post + (nxt.op, *nxt.post))
+                s = s.replace(post=s.post + (nxt.op, *nxt.post))
                 i += 1
         out.append(s)
         i += 1
@@ -144,13 +144,9 @@ def _one_pass(body: Body, min_run: int, loopvar: str) -> Body:
         # Point every scalar reference OUTSIDE a re-rolled loop at the arrayed decl (``fam{j}`` →
         # ``fam[j]`` — the row-reduce / repack / non-re-rolled fragment ops). The arrayed RegFragment
         # (name ``fam``) and the loops' ``fam[_r]`` are absent from the map.
-        from emmy.compiler.ir.sigma import Sigma  # noqa: PLC0415
-        from emmy.compiler.ir.stmt.base import _axis_identity  # noqa: PLC0415
-        from emmy.compiler.ir.stmt.passes import rewrite as _rw  # noqa: PLC0415
-
         rename_map = {f"{stem}{j}": f"{stem}[{j}]" for stem, cnt in to_array.items() for j in range(cnt)}
         rn = lambda x: rename_map.get(x, x)  # noqa: E731
-        new = Body(tuple(_rw(s, rn, Sigma.IDENTITY, _axis_identity) for s in new))
+        new = Body(tuple(s.rewrite(rn) for s in new))
     return new
 
 

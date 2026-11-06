@@ -1,6 +1,5 @@
 """Coordinate selects can discard a scalar reduction without executing its loop."""
 
-from dataclasses import replace
 from importlib import import_module
 
 import numpy as np
@@ -76,17 +75,17 @@ def test_guard_does_not_skip_effects_or_use_an_unavailable_predicate(unsafe):
     outer = body[0]
     reduction, *tail = outer.body
     if unsafe == "store":
-        reduction = replace(reduction, body=(*reduction.body, Write(output="side", index=(Var("k"),), value="value")))
+        reduction = reduction.replace(body=(*reduction.body, Write(output="side", index=(Var("k"),), value="value")))
     elif unsafe == "sync":
-        reduction = replace(reduction, body=(*reduction.body, Sync()))
+        reduction = reduction.replace(body=(*reduction.body, Sync()))
     elif unsafe == "carried":
-        reduction = replace(reduction, seed=False)
+        reduction = reduction.replace(seed=False)
     else:
         tail = [
-            replace(s, branches=tuple(replace(b, select=b.select.substitute({"i": Var("later")})) for b in s.branches))
+            s.replace(branches=tuple(b.replace(select=b.select.substitute({"i": Var("later")})) for b in s.branches))
             if isinstance(s, Select)
             else s
             for s in tail
         ]
-    candidate = Body((replace(outer, body=(reduction, *tail)),))
+    candidate = Body((outer.replace(body=(reduction, *tail)),))
     assert guard._guard(candidate)[0].body[0] == reduction

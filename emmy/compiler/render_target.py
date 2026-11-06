@@ -1,6 +1,6 @@
 """Render-target abstraction for the Kernel-IR source emitter.
 
-The Kernel-IR ``Stmt.render`` methods produce target-specific source
+The statement render functions (``ir/render.py``) produce target-specific source
 (today: CUDA / C++). They consult a :class:`RenderTarget` on the
 ``RenderCtx`` instead of hardcoding C spellings, so the rendering code
 stays target-agnostic and the same IR can lower to another C-family
@@ -22,7 +22,7 @@ from typing import Protocol
 
 
 class RenderTarget(Protocol):
-    """Per-target renderer helpers consulted by ``Stmt.render``.
+    """Per-target renderer helpers consulted by the statement render functions.
 
     All methods take canonical dtype tokens (``"f32"``, ``"f16"``, ...);
     the implementation maps them to target-specific C spellings.
@@ -67,7 +67,7 @@ class RenderTarget(Protocol):
 
     def has_native_op(self, op_name: str, dtype: str) -> bool:
         """Whether ``op_name`` has a native form at ``dtype``. Drives the
-        ``Assign.render`` dispatch between native and promote-and-demote
+        ``Assign``'s render dispatch between native and promote-and-demote
         rendering.
         """
 

@@ -159,11 +159,11 @@ def test_selected_stores_keep_memory_effects_and_other_readers(unsafe):
     elif unsafe == "sync":
         stmts.insert(2, Sync())
     elif unsafe == "atomic":
-        stmts[-1] = replace(stmts[-1], atomic=True)
+        stmts[-1] = stmts[-1].replace(atomic=True)
     elif unsafe == "extra_reader":
         stmts.append(Assign("used", "abs", ("chosen",), dtype=F32))
     else:
-        stmts[-1] = replace(stmts[-1], index=(Var("chosen"),))
+        stmts[-1] = stmts[-1].replace(index=(Var("chosen"),))
     body = Body(stmts)
     assert shared._guard_stores(body) == body
 

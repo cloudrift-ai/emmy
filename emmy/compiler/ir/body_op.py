@@ -1,13 +1,5 @@
 """Shared base class for body-carrying IR ops (``LoopOp`` / ``KernelOp``;
 ``TileOp`` stores a pure term instead and subclasses ``Op`` directly).
-
-Lives inside the ``ir.stmt`` package — and imports its dependencies
-(``Body``, ``Load``, ``Write``, ``Stmt``, ``pretty_body``) from their leaf
-modules directly rather than via the package ``__init__`` — so that
-``ir.stmt.normalize`` (which loads ``Stage`` from ``ir.tile.ir``) doesn't
-re-enter ``ir.stmt.__init__`` through the back door when ``tile.ir``
-imports ``BodyOp``. The leaf-module imports load cleanly because none of
-them touches ``ir.tile``.
 """
 
 from __future__ import annotations
@@ -19,10 +11,8 @@ from frozendict import frozendict
 
 from emmy.compiler.dtype import F32
 from emmy.compiler.ir.base import ConstantOp, Op, buffer_types
-from emmy.compiler.ir.stmt.base import Stmt
-from emmy.compiler.ir.stmt.base import pretty_body as _pretty_body_stmts
-from emmy.compiler.ir.stmt.body import Body
-from emmy.compiler.ir.stmt.leaves import Load, Write
+from emmy.compiler.ir.stmt import Body, Load, Stmt, Write, ZeroPrologue
+from emmy.compiler.ir.stmt import pretty_body as _pretty_body_stmts
 from emmy.compiler.tensor import Tensor
 
 
@@ -111,8 +101,6 @@ class BodyOp(Op):
         body without re-seeding I/O surfaces here, not on a later mystery
         KeyError), then replaces each entry's placeholder Tensor with the
         real graph-sourced one when the buffer is a graph node."""
-        from emmy.compiler.ir.stmt.leaves import ZeroPrologue  # noqa: PLC0415 — leaf import; ir.stmt.__init__ would cycle
-
         body_in, body_out = self._derive_io_names()
         stray_in = [n for n in body_in if n not in self.inputs]
         if stray_in:

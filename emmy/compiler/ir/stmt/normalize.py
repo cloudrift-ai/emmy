@@ -33,13 +33,15 @@ from itertools import count, product
 import numpy as np
 
 from emmy.compiler.dtype import F32
+from emmy.compiler.ir.axis import extend_simplify_ctx
 from emmy.compiler.ir.expr import BinaryExpr, CastExpr, Expr, FuncCallExpr, Literal, SimplifyCtx, TernaryExpr, Var, affine_form
 from emmy.compiler.ir.sigma import Sigma
 from emmy.compiler.ir.stmt.base import Stmt, dtype_promote
 from emmy.compiler.ir.stmt.blocks import Cond, Loop, StridedLoop
 from emmy.compiler.ir.stmt.body import Body, free_names
-from emmy.compiler.ir.stmt.leaves import Accum, Affine, Assign, Carry, Init, Let, Load, Select, Write
+from emmy.compiler.ir.stmt.leaves import Accum, Affine, Assign, Carry, Init, Let, Load, Select, SelectBranch, Write
 from emmy.compiler.ir.stmt.order import bound_axes, ordering_constraints, topological_sort
+from emmy.compiler.ir.stmt.passes import map_exprs, rename_free
 from emmy.compiler.ir.stmt.subroutine import definitions
 
 __all__ = ["normalize_body"]
@@ -99,10 +101,10 @@ def _commuted(stmts: Body) -> Body:
 
     def sort(stmt: Stmt) -> Stmt:
         if isinstance(stmt, Assign) and stmt.op.commutative:
-            return replace(stmt, args=tuple(sorted(stmt.args)))
+            return stmt.replace(args=tuple(sorted(stmt.args)))
         if isinstance(stmt, Affine):
             terms = sorted(stmt.terms, key=lambda term: term[1])
-            return replace(stmt, args=tuple(arg for _, arg in terms), coefficients=tuple(c for c, _ in terms))
+            return stmt.replace(args=tuple(arg for _, arg in terms), coefficients=tuple(c for c, _ in terms))
         return stmt
 
     return stmts.map(sort)
@@ -651,7 +653,7 @@ def _unify_siblings(body: Body) -> Body:
         # substitution must stop at a re-binding scope; these loops ARE the re-binding scopes.
         new_axis = replace(loop.axis, name=canonical, extent=extent)
         renamed = tuple(s.rename({loop.axis.name: canonical}) for s in loop.body)
-        stmts[idx] = replace(loop, axis=new_axis, body=renamed)
+        stmts[idx] = loop.replace(axis=new_axis, body=renamed)
 
     return Body(stmts)
 
@@ -769,7 +771,7 @@ def merge_sibling_reduce_loops(stmts: Body) -> Body:
 def _carried_out(body: Body) -> frozenset[str]:
     """The names a ``Loop`` or ``StridedLoop`` over ``body`` still binds after it CLOSES.
 
-    :meth:`Loop.render` declares the carriers of the immediate body ahead of the loop, so those —
+    :meth:`Loop`'s render declares the carriers of the immediate body ahead of the loop, so those —
     and states updated through conditions or a nested loop that does not seed its own — are the
     names a later statement can still read. Every other definition lives inside the block the loop closes,
     which is what makes it renamable when two loops merge.
@@ -860,20 +862,43 @@ def _merge_sibling_reduce_loops(body: Body) -> Body:
 # ---------------------------------------------------------------------------
 # Pass 6: simplify Exprs inside body Stmts (constant folding, identity collapse,
 # range-based comparison folding). The per-Expr rewrite logic lives on each
-# ``Expr`` subclass as ``simplify(ctx)``; the walk over Stmts is dispatched
-# in :mod:`.passes` (singledispatch + Stage introspection).
+# ``Expr`` subclass as ``simplify(ctx)``; the walk threads the loop axes' ranges.
 # ---------------------------------------------------------------------------
 
 
 def simplify_body(body: Body) -> Body:
-    """Simplify every Expr inside a body. Seeds ``SimplifyCtx`` from
-    ``Loop`` / ``StridedLoop`` / ``Tile`` axis extents as the walker descends.
-    Tile-IR Stmt registrations are loaded when ``tile.ir`` is imported."""
-    from emmy.compiler.ir.stmt.passes import simplify  # noqa: PLC0415
+    """Simplify every Expr inside a body, each under the value ranges of the loop axes around it."""
+    return tuple(_simplify(s, SimplifyCtx.empty()) for s in Body.coerce(body))
 
-    body = Body.coerce(body)
-    ctx = SimplifyCtx.empty()
-    return tuple(simplify(s, ctx) for s in body)
+
+def _simplify(stmt: Stmt, ctx: SimplifyCtx) -> Stmt:
+    stmt = map_exprs(stmt, lambda expr: expr.simplify(ctx))
+    if isinstance(stmt, Select):
+        return _decided(stmt)
+    if isinstance(stmt, (Loop, StridedLoop, Cond)):
+        inner = ctx if isinstance(stmt, Cond) else extend_simplify_ctx(ctx, stmt.axis)
+        return stmt.with_bodies(tuple(Body(_simplify(c, inner) for c in b) for b in stmt.nested()))
+    return stmt
+
+
+def _decided(s: Select) -> Select:
+    """``s`` without the branches its simplified predicates DECIDE.
+
+    Branches are ordered and the last one is the else, so a predicate that folds to false is
+    unreachable and one that folds to true is the else from there on. Keeping such a branch costs
+    far more than its own arithmetic: ``Select.deps`` names its value, so the tree-wide prune holds
+    the whole producer cone alive, and a reduce inside a cone nothing can select does not read the
+    output sweep -- which is what makes ``promoted_sweep`` refuse the grid and leave the kernel
+    sweeping every cell in one block. Fusing a scatter at a literal coordinate decides a branch this
+    way at every read it reaches, so this is the ordinary case, not a corner one.
+    """
+    kept: list[SelectBranch] = []
+    for branch in s.branches[:-1]:
+        if not isinstance(branch.select, Literal):
+            kept.append(branch)
+        elif branch.select.value:
+            return Select(name=s.name, branches=(*kept, branch))
+    return Select(name=s.name, branches=(*kept, s.branches[-1]))
 
 
 # ---------------------------------------------------------------------------
@@ -897,7 +922,6 @@ def place_values(stmts: Body) -> Body:
     scopes, as :func:`rename_ssa_sequential` leaves them.
     """
     from emmy.compiler.ir.stmt.leaves import Carry, Pre  # noqa: PLC0415
-    from emmy.compiler.ir.stmt.passes import rename_free  # noqa: PLC0415
     from emmy.compiler.ir.stmt.subroutine import Call  # noqa: PLC0415
     from emmy.compiler.ir.stmt.values import distinct, value_numbers  # noqa: PLC0415
 
@@ -1071,7 +1095,7 @@ def place_values(stmts: Body) -> Body:
         shell = rename_free(stmt.with_bodies(tuple(Body() for _ in children)), alias)
         built = shell.with_bodies(tuple(Body(kept) for kept, _, _ in children))
         # The states the block still holds: a nested block that escaped settled its own at the scope it moved to.
-        exported = tuple(name for child in built.nested() for name in child.carried_names)
+        exported = tuple(name for child in built.nested() for name in child._carried_names)
         where = depth
         if not stmt.has_side_effects and not any(isinstance(member, Carry) for member in members):
             where = target(depth, set(free_names(built)), marks)
@@ -1321,7 +1345,7 @@ def _canonical_order(stmts: Body) -> Body:
                 stmt = stmt.with_bodies(tuple(ordered(child) for child in stmt.nested()))
             rebuilt.append(stmt)
         rebuilt = Body(rebuilt)
-        order = rebuilt.topological_permutation(ordering_constraints(rebuilt, effects=True), lambda index, _stmt: priorities[index])
+        order = rebuilt._topological_permutation(ordering_constraints(rebuilt, effects=True), lambda index, _stmt: priorities[index])
         return Body(rebuilt[index] for index in order)
 
     placed = ordered(stmts)
@@ -1338,10 +1362,10 @@ def _canonical_order(stmts: Body) -> Body:
 
     def listed(stmt: Stmt) -> Stmt:
         if isinstance(stmt, Assign) and stmt.op.commutative and len(stmt.args) > 1:
-            return replace(stmt, args=tuple(sorted(stmt.args, key=lambda name: (*operand.get(name, (3, "")), name))))
+            return stmt.replace(args=tuple(sorted(stmt.args, key=lambda name: (*operand.get(name, (3, "")), name))))
         if isinstance(stmt, Affine) and len(stmt.args) > 1:
             terms = sorted(stmt.terms, key=lambda term: (*operand.get(term[1], (3, "")), term[1], term[0]))
-            return replace(stmt, args=tuple(arg for _, arg in terms), coefficients=tuple(c for c, _ in terms))
+            return stmt.replace(args=tuple(arg for _, arg in terms), coefficients=tuple(c for c, _ in terms))
         return stmt
 
     result = result.map(listed)
@@ -1352,7 +1376,6 @@ def _canonical_order(stmts: Body) -> Body:
 
 def _canonicalize_exprs(stmts: Body, axes: tuple[str, ...] = ()) -> Body:
     """Canonicalize integer expressions using lexical binding order, never axis spelling."""
-    from emmy.compiler.ir.stmt.passes import map_exprs  # noqa: PLC0415
     from emmy.compiler.structural import form  # noqa: PLC0415
 
     commutative = frozenset({"+", "*", "==", "!=", "&&", "||", "&", "|", "^"})

@@ -7,8 +7,9 @@ from emmy.compiler.dtype import F16, F32, I32
 from emmy.compiler.ir.elementwise import ElementwiseImpl
 from emmy.compiler.ir.expr import Literal, Var
 from emmy.compiler.ir.kernel.ir import RegStore
+from emmy.compiler.ir.render import RenderCtx, render_stmt
 from emmy.compiler.ir.sigma import Sigma
-from emmy.compiler.ir.stmt import Assign, Let, RenderCtx, Write
+from emmy.compiler.ir.stmt import Assign, Let, Write
 from emmy.compiler.pipeline import RuleSkipped
 from emmy.compiler.pipeline.passes.lowering.kernel._atom import _warp_epilogue
 from tests.compiler.helpers import requires_cuda, requires_sm, requires_sm90
@@ -88,7 +89,7 @@ def _render(*assigns) -> tuple[str, object]:
         epilogue=epilogue,
     )
     ctx = RenderCtx(shapes={"out": (16, 16)}, buffer_dtypes={"out": "f16"})
-    return "\n".join(store.render(ctx)), epilogue
+    return "\n".join(render_stmt(store, ctx)), epilogue
 
 
 def test_typed_copy_narrows_the_fragment_value_before_its_consumer() -> None:
@@ -179,7 +180,7 @@ def test_transposed_fragment_store_uses_both_output_strides() -> None:
         row_dim=1,
         col_dim=0,
     )
-    source = "\n".join(store.render(RenderCtx(shapes={"out": (16, 16)}, buffer_dtypes={"out": "f16"})))
+    source = "\n".join(render_stmt(store, RenderCtx(shapes={"out": (16, 16)}, buffer_dtypes={"out": "f16"})))
 
     assert "reinterpret_cast<__half2*>" not in source
     assert "(_t * 2 + 1) * 16" in source
@@ -240,13 +241,13 @@ def test_integer_load_in_fragment_epilogue_keeps_shift_operands_integer() -> Non
     assert epilogue is not None
     store = RegStore(dst_buffer="out", dst_index=(Var("m"), Var("n")), frag="_c", shape=(16, 8, 16), ldm=16, epilogue=epilogue)
     ctx = RenderCtx(shapes={"out": (16, 16), "shift": (1,)}, buffer_dtypes={"out": "i32", "shift": "i32"})
-    source = "\n".join(store.render(ctx))
+    source = "\n".join(render_stmt(store, ctx))
 
     assert "const int shift_e0 = shift[0];" in source
     assert "int bits_e0 = code_e0 << shift_e0;" in source
 
     literal = RenderCtx(shapes={"out": (16, 16)}, buffer_dtypes={"out": "i32"}, literal_constants={"shift": 4.0})
-    literal_source = "\n".join(store.render(literal))
+    literal_source = "\n".join(render_stmt(store, literal))
     assert "const int shift_e0 = 4;" in literal_source
     assert "int bits_e0 = code_e0 << shift_e0;" in literal_source
 

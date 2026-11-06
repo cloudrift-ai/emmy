@@ -91,10 +91,11 @@ from emmy.compiler.ir.stmt import (
     StridedLoop,
     Write,
     binary,
+    exposed_defines,
+    free_names,
     mask_select_predicate,
+    rename_free,
 )
-from emmy.compiler.ir.stmt.body import _exposed_defines, free_names
-from emmy.compiler.ir.stmt.passes import rename_free
 from emmy.compiler.ir.tile.ops import cone_stat, cone_stat_dtypes
 from emmy.compiler.pipeline.passes.lowering.kernel._stage import (
     CpAsyncTransport,
@@ -149,7 +150,7 @@ def _unshadowed(body, states: tuple[str, ...]) -> list:
     not share because they were formed differently — and however alike they look those are two
     values, so the tail's takes its own name. A tail that only READS a state is untouched, and still
     reads the cell's accumulator through the ordinary suffix."""
-    shadowed = {name for stmt in body for name in _exposed_defines(stmt)} & set(states)
+    shadowed = {name for stmt in body for name in exposed_defines(stmt)} & set(states)
     if not shadowed:
         return list(body)
     return [stmt.rewrite(lambda name: f"{name}__own" if name in shadowed else name) for stmt in body]
@@ -1857,7 +1858,7 @@ def _dedup_loads(stmts: list[Stmt]) -> list[Stmt]:
 
     Dedup itself is per-``stmts`` (this list only); the rewrite reaches nested scopes, since an
     epilogue cell's output sweep consumes the loads hoisted above it. It goes through
-    :func:`~emmy.compiler.ir.stmt.passes.rename_free` so a nested scope re-binding a dropped
+    :func:`~emmy.compiler.ir.stmt.rename_free` so a nested scope re-binding a dropped
     name keeps its own binding."""
     seen: dict = {}
     rename: dict[str, str] = {}
@@ -2559,7 +2560,7 @@ class _ScalarOps(_AtomOps):
 
     def state(self, cells):
         """The scalar accumulator seeds. Gmem-direct (unstaged): none — the accumulators are seeded
-        inside the reduce ``Loop`` (the dissolved fold ``Accum``\\ s + ``Loop.render``). **Staged**: a
+        inside the reduce ``Loop`` (the dissolved fold ``Accum``\\ s + ``Loop``'s render). **Staged**: a
         per-cell ``Init(acc__c{i}_{j} = 0)`` emitted here, **outside** the outer slab loop, so the
         carrier-less :func:`_scalar_drain` folds across every slab without re-seeding (the nested-loop
         accumulator-lifetime split — the scalar analogue of :meth:`_MmaOps.state` declaring the ``_c``
@@ -2573,7 +2574,7 @@ class _ScalarOps(_AtomOps):
         """The gmem-direct scalar leaf constructors: each register ROW reads its A operand once (a
         gmem ``Load`` or a computed register-resident body), each COL its B ``Load`` once, each
         ``(i, j)`` cell folds the TERM's own per-step statements (:meth:`Fold.step`), and the
-        K-loop is a unit ``Loop`` (``Loop.render`` seeds the accumulators; the store reads them). A
+        K-loop is a unit ``Loop`` (``Loop``'s render seeds the accumulators; the store reads them). A
         masked axis wraps its read in-bounds (``% extent``) and the overhanging store is guarded
         (:meth:`store`).
 
@@ -2807,7 +2808,7 @@ def _residence(
                 bound = tuple(rows[a][half] if a in rows else a for a in reads)
                 if not frags_only:
                     out.append(
-                        Accum(name=target, value=bound[1], op=stmt.op, base=bound[0]) if accum else replace(stmt, name=target, args=bound)
+                        Accum(name=target, value=bound[1], op=stmt.op, base=bound[0]) if accum else stmt.replace(name=target, args=bound)
                     )
             rows[stmt.name] = pair
         elif not frags_only:

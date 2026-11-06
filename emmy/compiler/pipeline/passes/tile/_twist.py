@@ -175,7 +175,7 @@ def _factored(term: Fold, param: str) -> Fold | None:
     the lift ``exp(mask + c·score − m)`` becomes ``exp(s − m)`` with ``s = mask + c·score``, the cone the pivot
     itself folds, which a recipe then matches as the score. A projection composed in first (``−m`` hoisted out of
     the loop) joins the sum before the split; ``None`` when no sum reads ``param`` beside other terms."""
-    from emmy.compiler.ir.stmt.normalize import fold_affine  # noqa: PLC0415 — a pass may call a normalization step
+    from emmy.compiler.ir.stmt import fold_affine  # noqa: PLC0415 — a pass may call a normalization step
 
     lift = term.lift
     body = fold_affine(lift.body, frozenset(lift.results))

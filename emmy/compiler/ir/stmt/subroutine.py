@@ -9,7 +9,6 @@ from emmy.compiler.ir.axis import Axis
 from emmy.compiler.ir.expr import Expr
 from emmy.compiler.ir.stmt.base import Stmt, pretty_body
 from emmy.compiler.ir.stmt.body import Body
-from emmy.compiler.ir.stmt.passes import _rename_ssa_vars_in_expr, _rewrite_kind
 from emmy.utils import cached_method
 
 
@@ -88,25 +87,25 @@ class Call(Stmt):
     def exprs(self) -> tuple[Expr, ...]:
         return self.args
 
+    def with_exprs(self, exprs: tuple[Expr, ...]) -> Stmt:
+        return self.replace(args=exprs)
+
     def external_reads(self) -> tuple[str, ...]:
         return self.target.buffers
 
     def rename_buffers(self, rename):  # noqa: ANN001 — see Stmt.rename_buffers
         buffers = tuple(rename.get(name, name) for name in self.target.buffers)
-        return self if buffers == self.target.buffers else replace(self, target=self.target.with_buffers(buffers))
+        return self if buffers == self.target.buffers else self.replace(target=self.target.with_buffers(buffers))
 
     def pretty(self, indent: str = "") -> list[str]:
         args = (*self.target.buffers, *(arg.pretty() for arg in self.args))
         return [f"{indent}{self.name} = {self.target.name}({', '.join(args)})"]
 
-
-@_rewrite_kind.register
-def _(stmt: Call, rename, sigma, axis_fn) -> Stmt:
-    return replace(
-        stmt,
-        name=rename(stmt.name),
-        args=tuple(_rename_ssa_vars_in_expr(sigma.apply(arg), rename) for arg in stmt.args),
-    )
+    def _rewrite(self, rename, sigma, axis_fn):  # noqa: ANN001, ANN202 — see ``Stmt.rewrite``
+        return self.replace(
+            name=rename(self.name),
+            args=tuple(sigma.apply(arg).rename(rename) for arg in self.args),
+        )
 
 
 def definitions(body: Body) -> tuple[Subroutine, ...]:

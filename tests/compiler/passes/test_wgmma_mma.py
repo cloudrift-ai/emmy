@@ -31,8 +31,7 @@ from emmy.compiler.ir.schedule.classic import ClassicProblem, ClassicScheduleCon
 from emmy.compiler.ir.schedule.classic import refusals as classic
 from emmy.compiler.ir.schedule.classic.refusals import _wgmma_refusal
 from emmy.compiler.ir.schedule.classic.sites import _stage_candidates
-from emmy.compiler.ir.stmt import Load
-from emmy.compiler.ir.stmt.leaves import Assign
+from emmy.compiler.ir.stmt import Assign, Load
 from emmy.compiler.ir.tile import Placement, TileOp
 from emmy.compiler.pipeline import TILE_PASSES, Pipeline
 from emmy.compiler.pipeline.passes.lowering.kernel._atom import _slab_operands, _sync_operands, _tile_base, _wgmma_drain

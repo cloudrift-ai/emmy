@@ -16,8 +16,7 @@ from emmy.compiler.ir.base import InputOp
 from emmy.compiler.ir.elementwise import ElementwiseImpl
 from emmy.compiler.ir.expr import Expr, Literal, Var
 from emmy.compiler.ir.loop import Assign, Axis, Load, Loop, LoopOp, Stmt, Write
-from emmy.compiler.ir.stmt import Body
-from emmy.compiler.ir.stmt.base import dtype_promote
+from emmy.compiler.ir.stmt import Body, dtype_promote
 from emmy.compiler.ir.tensor.ir import BitcastOp, ElementwiseOp
 from emmy.compiler.pipeline import Match, Pattern
 

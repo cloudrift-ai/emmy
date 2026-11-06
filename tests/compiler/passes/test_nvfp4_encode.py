@@ -49,7 +49,7 @@ def test_the_render_emits_the_encode_helper_rather_than_a_dtype_conversion():
     """The fp8 encodes render as an identity and let the result dtype convert. This one must not:
     a raw uint8 store would move the wrong bits entirely."""
     from emmy.compiler.ir.expr import FuncCallExpr, Var
-    from emmy.compiler.ir.stmt.base import op_to_expr
+    from emmy.compiler.ir.render import op_to_expr
 
     expr = op_to_expr("to_f4e2m1", [Var("v")])
     assert isinstance(expr, FuncCallExpr)
@@ -62,7 +62,7 @@ def test_round_to_nearest_f32_division_has_reference_and_target_spellings():
     from emmy.compiler.ir.expr import FuncCallExpr, Var
     from emmy.compiler.ir.kernel.render import _INTRINSIC_TO_CUDA
     from emmy.compiler.ir.loop.runner import _INTRINSICS_CPP, PRELUDE
-    from emmy.compiler.ir.stmt.base import RenderCtx, op_to_expr
+    from emmy.compiler.ir.render import RenderCtx, op_to_expr
 
     numerator = np.array([0.75, -1.25], dtype=np.float32)
     denominator = np.array([1.0, 2.0], dtype=np.float32)

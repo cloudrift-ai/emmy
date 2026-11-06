@@ -1,15 +1,13 @@
 """Every corpus kernel reuses pure values already available in its lexical scope."""
 
 import json
-from dataclasses import replace
 
 import pytest
 
 from emmy.compiler.ir.axis import Axis
 from emmy.compiler.ir.expr import Literal, Var
-from emmy.compiler.ir.stmt import Accum, Assign, Body, Cond, Load, Loop, Write
-from emmy.compiler.ir.stmt.body import free_names
-from emmy.compiler.ir.stmt.normalize import _normalize_body, normalize_body
+from emmy.compiler.ir.stmt import Accum, Assign, Body, Cond, Load, Loop, Write, free_names, normalize_body
+from emmy.compiler.ir.stmt.normalize import _normalize_body
 from tests.compiler.realization.helpers import CASES_DIR, case_files
 
 
@@ -24,12 +22,12 @@ def _assert_scoped_cse(body, available=()):
         if stmt.pure and not (isinstance(stmt, Load) and stmt.carried) and not set(stmt.defines()).intersection(stmt.deps()):
             assert stmt not in available, f"available duplicate binding: {stmt.pretty()}"
         # A redefinition changes the value of an operand or of the earlier representative.
-        rebound = set(stmt.defines()) | {name for child in stmt.nested() for name in child.carried_names}
+        rebound = set(stmt.defines()) | {name for child in stmt.nested() for name in child._carried_names}
         available = [prior for prior in available if not rebound.intersection((*prior.defines(), *free_names(prior)))]
         if stmt.nested():
             writes = {name for child in stmt.nested() for member in child.iter() for name in member.external_writes()}
             for child in stmt.nested():
-                shadowed = child.local_defs | stmt.binds_axes()
+                shadowed = child._local_defs | stmt.binds_axes()
                 inherited = [
                     prior
                     for prior in available
@@ -42,11 +40,11 @@ def _assert_scoped_cse(body, available=()):
             if stmt.pure and stmt.defines() and not (isinstance(stmt, Load) and stmt.carried):
                 candidate = stmt
                 if isinstance(candidate, Assign) and candidate.op.commutative:
-                    candidate = replace(candidate, args=tuple(sorted(candidate.args)))
+                    candidate = candidate.replace(args=tuple(sorted(candidate.args)))
                 for prior in available:
                     renamed = prior.rename(dict(zip(prior.defines(), candidate.defines(), strict=False)))
                     if isinstance(renamed, Assign) and renamed.op.commutative:
-                        renamed = replace(renamed, args=tuple(sorted(renamed.args)))
+                        renamed = renamed.replace(args=tuple(sorted(renamed.args)))
                     assert candidate != renamed, f"available duplicate: {prior.pretty()} followed by {stmt.pretty()}"
                 available.append(stmt)
         available = [prior for prior in available if not writes.intersection(prior.external_reads())]

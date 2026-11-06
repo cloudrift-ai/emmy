@@ -13,14 +13,8 @@ from __future__ import annotations
 
 from emmy.compiler.ir.axis import Axis
 from emmy.compiler.ir.expr import BinaryExpr, Literal, Var
-from emmy.compiler.ir.stmt.blocks import Loop
-from emmy.compiler.ir.stmt.body import Body
-from emmy.compiler.ir.stmt.leaves import Accum, Assign, Load, Write
-from emmy.compiler.ir.stmt.normalize import (
-    _unify_siblings,
-    merge_sibling_reduce_loops,
-    normalize_body,
-)
+from emmy.compiler.ir.stmt import Accum, Assign, Body, Load, Loop, Write, normalize_body
+from emmy.compiler.ir.stmt.normalize import _unify_siblings, merge_sibling_reduce_loops
 
 # ---------------------------------------------------------------------------
 # Helpers

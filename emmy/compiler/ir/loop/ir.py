@@ -40,12 +40,14 @@ from frozendict import frozendict
 
 from emmy.compiler.ir.axis import Axis
 from emmy.compiler.ir.base import Op
+from emmy.compiler.ir.body_op import BodyOp
 from emmy.compiler.ir.elementwise import ElementwiseImpl
-from emmy.compiler.ir.stmt import (  # noqa: F401  (re-exported via __init__)
+from emmy.compiler.ir.stmt import (  # noqa: F401  (re-exported via __init__)  # noqa: F401 — public Loop IR aliases
     Accum,
     Affine,
     Assign,
     Body,
+    BodyAnalysis,
     Carry,
     Cond,
     Init,
@@ -53,14 +55,13 @@ from emmy.compiler.ir.stmt import (  # noqa: F401  (re-exported via __init__)
     Load,
     Loop,
     Pre,
+    Scope,
     Select,
     SelectBranch,
     Stmt,
     Write,
     pretty_body,
 )
-from emmy.compiler.ir.stmt.analysis import BodyAnalysis, Scope  # noqa: F401 — public Loop IR aliases
-from emmy.compiler.ir.stmt.ir import BodyOp
 
 # Body Stmts (Stmt, Load, Assign, Accum, Write, Select, SelectBranch,
 # Loop, Cond) and the tree-walk helpers (map_body) live in

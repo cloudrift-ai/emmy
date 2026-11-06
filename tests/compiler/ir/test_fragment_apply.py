@@ -3,8 +3,8 @@
 from emmy.compiler.ir.elementwise import ElementwiseImpl
 from emmy.compiler.ir.expr import BinaryExpr, Literal, Var
 from emmy.compiler.ir.kernel.ir import COORD, FRAG, FRAG_COL, FRAG_ROW, GMEM, UNIFORM, FragmentApply
+from emmy.compiler.ir.render import RenderCtx, render_stmt
 from emmy.compiler.ir.sigma import Sigma
-from emmy.compiler.ir.stmt import RenderCtx
 
 
 def _causal_mask() -> FragmentApply:
@@ -20,7 +20,7 @@ def _causal_mask() -> FragmentApply:
 
 
 def test_coordinate_mask_renders_one_guarded_line_per_element() -> None:
-    lines = _causal_mask().render(RenderCtx())
+    lines = render_stmt(_causal_mask(), RenderCtx())
     stores = [ln.strip() for ln in lines if ln.strip().startswith("s[")]
     assert len(stores) == 4, "every element of the m16n8 fragment is masked at its own coordinates"
     assert stores[0] == "s[0] = ((kv + 8 + (_t * 2 + 0) > q + _g) ? (-1e+30f) : (s[0]));"
@@ -39,7 +39,7 @@ def test_gmem_operand_reads_the_buffer_at_absolute_coordinates_and_converts() ->
         col_base=Var("kv"),
     )
     ctx = RenderCtx(shapes={"mask": (1, 64, 64)}, buffer_dtypes={"mask": "f16"})
-    lines = bias.render(ctx)
+    lines = render_stmt(bias, ctx)
     assert bias.external_reads() == ("mask",)
     assert bias.rename_buffers({"mask": "m0"}).external_reads() == ("m0",)
     assert "s[3] = s[3] + __half2float(mask[(q + (_g + 8)) * 64 + (kv + (_t * 2 + 1))]);" in [ln.strip() for ln in lines]
@@ -57,6 +57,6 @@ def test_rewrite_substitutes_bases_and_templates_but_not_the_reserved_coordinate
 
 def test_plain_operands_keep_the_unrolled_loop_form() -> None:
     scale = FragmentApply(out="s", op=ElementwiseImpl("multiply"), args=("s", Literal(0.125)), kinds=(FRAG, UNIFORM), in_place=True)
-    lines = scale.render(RenderCtx())
+    lines = render_stmt(scale, RenderCtx())
     assert any("#pragma unroll" in ln for ln in lines)
     assert any("s[_e] = s[_e] * 0.125f;" in ln for ln in lines)

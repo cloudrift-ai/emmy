@@ -22,7 +22,7 @@ def _ordered_sibling_defs(stmt: Stmt) -> tuple[str, ...]:
     children = stmt.nested()
     if not children:
         return stmt.defines()
-    return tuple(dict.fromkeys(name for child in children for name in child.carried_names))
+    return tuple(dict.fromkeys(name for child in children for name in child._carried_names))
 
 
 def _free_ssa(stmt: Stmt) -> frozenset[str]:
@@ -36,7 +36,7 @@ def _free_ssa(stmt: Stmt) -> frozenset[str]:
         return frozenset(stmt.deps())
     reads = set(stmt.deps())
     for child in children:
-        reads.update(child.free_ssa)
+        reads.update(child._free_ssa)
     return frozenset(reads)
 
 

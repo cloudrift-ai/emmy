@@ -137,6 +137,8 @@ U8 = DataType("u8", np.dtype(np.uint8), 1)
 U16 = DataType("u16", np.dtype(np.uint16), 2)
 U32 = DataType("u32", np.dtype(np.uint32), 4)
 U64 = DataType("u64", np.dtype(np.uint64), 8)
+#: The integer dtype tokens: arithmetic on them stays in the integer family and renders as integer C.
+INTEGER_NAMES = frozenset({"i16", "i32", "i64", "u8", "u16", "u32", "u64"})
 
 # Bool — appears on the explicit-mask construction ops in HF whole-model
 # traces (comparisons / logical masks feeding the attention bias). Like the

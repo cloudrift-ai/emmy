@@ -157,7 +157,7 @@ def _chain_beside_a_sibling(stages: dict[str, LoopOp], widths: dict[str, int] | 
             if not isinstance(stmt, Load):
                 return stmt
             index = (stmt.index[0] % Literal(8, "int"),)
-            return replace(stmt, index=(*index, Literal(0, "int")) if stmt.input == "b0" else index)
+            return stmt.replace(index=(*index, Literal(0, "int")) if stmt.input == "b0" else index)
 
         rebound = replace(op, body=op.body.map(bound_load)).rename_buffers({"b0": "broadcast"})
         graph.add_node(rebound, [upstream], Tensor(tag, ((widths or {}).get(tag, 8),)), node_id=tag)

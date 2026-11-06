@@ -30,7 +30,6 @@ from emmy.compiler.ir.schedule.mask import cell_uniform, coordinate_aliases, sel
 from emmy.compiler.ir.schedule.packing import block_scaled_atom
 from emmy.compiler.ir.schedule.views import ContractionFacts, NodeId
 from emmy.compiler.ir.stmt import Affine, Assign, Body, Let, Load, Loop, Select, Stmt, Write, mask_select_predicate
-from emmy.compiler.ir.stmt.passes import has_contraction_tail
 
 from .schedule import NodeSchedule, binds_root, node_id_spelling, packed_works
 
@@ -1033,3 +1032,18 @@ def _paired_budget_refusal(node: Fold, producer: Fold | None, placed: PlacedTile
         f"paired contractions require at least {required} live fragment registers/thread, over the "
         f"{available}-register envelope at {placed.block_threads} threads/CTA"
     )
+
+
+def has_contraction_tail(stmts) -> bool:
+    """True if the post-reduce tail contracts over a NEW free axis — a ``Loop`` whose body holds an
+    inner reduce ``Loop``. This is the fused norm→linear shape, distinguished from a plain softmax
+    tail (a single sweep over the SAME axis). ``Body.accums`` supplies the deep accumulator scan.
+
+    The reduce tiers read it to price a tail, and the shared-row stage gate to decide there is one
+    to share a row with."""
+    for s in stmts:
+        if isinstance(s, Loop) and any(isinstance(c, Loop) and Body(c.body).accums for c in s.body):
+            return True
+        if any(has_contraction_tail(list(b)) for b in s.nested()):
+            return True
+    return False

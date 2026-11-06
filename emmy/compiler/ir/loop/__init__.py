@@ -23,7 +23,6 @@ from emmy.compiler.ir.loop.ir import (
 )
 from emmy.compiler.ir.loop.splicer import UnfusableStmt, observes_running_accumulator, splice_graph, splice_loops
 from emmy.compiler.ir.sigma import Sigma
-from emmy.compiler.ir.stmt.builder import BodyBuilder
 
 __all__ = [
     "Accum",
@@ -33,7 +32,6 @@ __all__ = [
     "Cond",
     "Load",
     "Loop",
-    "BodyBuilder",
     "BodyAnalysis",
     "LoopOp",
     "Scope",

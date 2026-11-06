@@ -6,7 +6,7 @@ anything — they appear unchanged from the frontend stage all the way through
 to fusion, and the numpy backend supplies their values at runtime.
 
 The shared base for body-carrying ops (``LoopOp`` / ``KernelOp``) is
-:class:`emmy.compiler.ir.stmt.ir.BodyOp`; ``TileOp`` subclasses ``Op``
+:class:`emmy.compiler.ir.body_op.BodyOp`; ``TileOp`` subclasses ``Op``
 directly (it stores a pure term, not a body).
 
 ``_keepdim_axis`` is a small shape helper used by both ``ReduceOp`` (minimal IR,

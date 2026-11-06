@@ -14,6 +14,8 @@ to ``Load`` / ``Assign`` / ``Write`` are gone.
 
 from __future__ import annotations
 
+from emmy.compiler.dtype import INTEGER_NAMES
+
 _TYPE_NAME: dict[str, str] = {
     "f32": "float",
     "f16": "__half",
@@ -34,7 +36,6 @@ _TYPE_NAME: dict[str, str] = {
     "bool": "bool",
 }
 
-_INTEGER_DTYPES = frozenset({"i16", "i32", "i64", "u8", "u16", "u32", "u64"})
 _INTEGER_NATIVE_OPS = frozenset(
     {
         "add",
@@ -223,7 +224,7 @@ class CudaRenderTarget:
             return True
         if dtype in ("f16", "f16x2"):
             return op_name in _NATIVE_FP16_OPS
-        if dtype in _INTEGER_DTYPES:
+        if dtype in INTEGER_NAMES:
             return op_name in _INTEGER_NATIVE_OPS
         return False
 

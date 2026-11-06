@@ -89,7 +89,7 @@ def rewrite(match: Match, root: Node) -> LoopOp:
         taken.add(name)
         edits[id(write)] = (
             Assign(name=name, op="copy", args=(write.value,), dtype=buffer.dtype),
-            replace(write, values=(name,)),
+            write.replace(values=(name,)),
         )
 
     if not edits:

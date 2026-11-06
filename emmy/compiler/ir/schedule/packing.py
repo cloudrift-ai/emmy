@@ -26,8 +26,7 @@ from dataclasses import dataclass, replace
 
 from frozendict import frozendict
 
-from emmy.compiler.ir.stmt import Assign, Load
-from emmy.compiler.ir.stmt.body import Body
+from emmy.compiler.ir.stmt import Assign, Body, Load
 
 
 def _idx_vars(index) -> set[str]:

@@ -52,7 +52,6 @@ from emmy.compiler.ir.pure.lam import Lambda
 from emmy.compiler.ir.schedule.packing import match_packed_pair_node
 from emmy.compiler.ir.sigma import Sigma
 from emmy.compiler.ir.stmt import Affine, Assign, Body, Let, Load, Loop, Write
-from emmy.compiler.ir.stmt.passes import rewrite as rewrite_stmt
 from emmy.compiler.ir.tile import OutputSpec, Placement, TileOp
 from emmy.compiler.ir.tile.ops import (
     UnbindableProjection,
@@ -493,7 +492,7 @@ def join_pairs(seams) -> tuple[tuple[CutSite, CutSite], ...]:
 def _pruned(body: Body, roots: frozenset[str]) -> Body:
     """``body`` cut to what ``roots`` need — the statements a root reads through, in order, a
     loop kept with what its own body keeps."""
-    from emmy.compiler.ir.stmt.body import free_names  # noqa: PLC0415
+    from emmy.compiler.ir.stmt import free_names  # noqa: PLC0415
 
     needed = set(roots)
     while True:
@@ -568,7 +567,7 @@ def _value_forms(seam: CutSite, axes: tuple) -> tuple[tuple, dict[str, Expr], di
     statistic read at ``i // 2560`` of a flattened 10240-wide axis and at its own 4-wide stream axis is one value.
     Returned beside the forms and the expressions: the address each strided coordinate's cell is stored at, and the
     stored axes."""
-    from emmy.compiler.ir.stmt.identity import canonicalize_identity  # noqa: PLC0415 — identity imports the tile IR
+    from emmy.compiler.ir.stmt import canonicalize_identity  # noqa: PLC0415 — identity imports the tile IR
 
     scoped = tuple(axis.name for axis in seam.axes if axis.name in seam.node.free_axes)
     names = {name: f"_s{position}" for position, name in enumerate(scoped)}
@@ -578,12 +577,12 @@ def _value_forms(seam: CutSite, axes: tuple) -> tuple[tuple, dict[str, Expr], di
     # norm), and that loop keeps its own variable.
     captured = Sigma({name: Var(spelled) for name, spelled in names.items()})
     cells = _stored_cells(seam.node, stored, strides)
-    body = Body(tuple(rewrite_stmt(stmt, lambda name: name, captured) for stmt in cells.lower(bound=frozenset(scoped), axes=axes)))
+    body = Body(tuple(stmt.rewrite(lambda name: name, captured) for stmt in cells.lower(bound=frozenset(scoped), axes=axes)))
     reads = _coordinate_reads(body, tuple(names.values()))
     if reads:
         sigma = _AbstractingSigma({name: Var(name) for name in reads})
         object.__setattr__(sigma, "_reads", reads)
-        body = Body(tuple(rewrite_stmt(stmt, lambda name: name, sigma) for stmt in body))
+        body = Body(tuple(stmt.rewrite(lambda name: name, sigma) for stmt in body))
     forms = []
     for exposed in seam.node.exposes:
         identity = canonicalize_identity(_pruned(body, frozenset((exposed,))))
@@ -723,15 +722,15 @@ def _read_through(found: tuple, own: dict) -> tuple:
 
 def _row_form(seam: CutSite, name: str, row: Expr, common: tuple[str, ...], axes: tuple) -> tuple | None:
     """Exact identity of a contraction channel as a function of one output address."""
-    from emmy.compiler.ir.stmt.identity import canonicalize_identity  # noqa: PLC0415 — tile IR import
+    from emmy.compiler.ir.stmt import canonicalize_identity  # noqa: PLC0415 — tile IR import
 
     node = _channels(seam.node, (name,)) if len(seam.node.exposes) > 1 else seam.node
     scoped = tuple(axis.name for axis in seam.axes if axis.name in node.free_axes)
     captured = Sigma({axis: Var(f"_s{i}") for i, axis in enumerate(common)})
-    body = Body(tuple(rewrite_stmt(stmt, lambda value: value, captured) for stmt in node.lower(bound=frozenset(scoped), axes=axes)))
+    body = Body(tuple(stmt.rewrite(lambda value: value, captured) for stmt in node.lower(bound=frozenset(scoped), axes=axes)))
     sigma = _AbstractingRow()
     object.__setattr__(sigma, "_row", row)
-    body = Body(tuple(rewrite_stmt(stmt, lambda value: value, sigma) for stmt in body))
+    body = Body(tuple(stmt.rewrite(lambda value: value, sigma) for stmt in body))
     if any(row.free_vars() & expr.free_vars() for stmt in body.iter() for expr in stmt.exprs()):
         return None
     identity = canonicalize_identity(_pruned(body, frozenset((name,))))
@@ -1010,7 +1009,7 @@ def _abstracted(body: Body, captured: frozenset[str], table: dict, by_name: dict
 
     def visit(stmt, scope, step):
         if isinstance(stmt, Load):
-            return replace(stmt, index=tuple(step(e) if e.free_vars() and e.free_vars() <= scope else e for e in stmt.index))
+            return stmt.replace(index=tuple(step(e) if e.free_vars() and e.free_vars() <= scope else e for e in stmt.index))
         inner = scope - {stmt.axis.name} if isinstance(stmt, Loop) else scope
         nested = stmt.nested()
         return stmt.with_bodies(tuple(Body(tuple(visit(child, inner, step) for child in body)) for body in nested)) if nested else stmt
@@ -1164,7 +1163,7 @@ def _canonical_slots(body: Body, placeholders: int) -> tuple[object, tuple[int, 
     and the same contraction reads its weight first under a block amax and its activation first elsewhere, which
     made the two occurrences two groups, each recomputing the contraction. Past four placeholders the numbering
     stays as found."""
-    from emmy.compiler.ir.stmt.identity import canonicalize_identity  # noqa: PLC0415 — identity imports the tile IR
+    from emmy.compiler.ir.stmt import canonicalize_identity  # noqa: PLC0415 — identity imports the tile IR
 
     found = tuple(range(placeholders))
     best = (canonicalize_identity(body), found)
@@ -1360,7 +1359,7 @@ def _read_inline(node: Fold, inline: _InlineReads) -> tuple[Fold, dict[str, str]
     loads = dict(inline.reads)
     body = Body(
         tuple(
-            replace(loads[defined[0]], names=defined) if len(defined := tuple(stmt.defines())) == 1 and defined[0] in loads else stmt
+            loads[defined[0]].replace(names=defined) if len(defined := tuple(stmt.defines())) == 1 and defined[0] in loads else stmt
             for stmt in node.lift.body
         )
     )
@@ -1479,7 +1478,7 @@ def _without_identity_casts(node: Fold, dtypes: dict[str, object]) -> Fold:
         if slab is None or not isinstance(stmt, Assign) or stmt.op != ElementwiseImpl("copy") or stmt.args != proj.lift.params[:1]:
             continue
         if dtypes.get(slab.load.input) == stmt.dtype:
-            targets[id(proj)] = (Fold.slab(replace(slab.load, names=(stmt.name,))),)
+            targets[id(proj)] = (Fold.slab(slab.load.replace(names=(stmt.name,))),)
     return _replace_fold(node, targets, {}) if targets else node
 
 
@@ -1629,11 +1628,11 @@ def _stored_cells(produced: Fold, axes: tuple, strides: dict[str, tuple[int, int
             continue
         d, c = stride
         if c == 1:
-            produced = rewrite_stmt(produced, lambda name: name, Sigma({axis.name: Var(axis.name) * d}))
+            produced = produced.rewrite(lambda name: name, Sigma({axis.name: Var(axis.name) * d}))
             continue
         folding = _FoldingSigma({axis.name: (Var(axis.name) / c) * d + BinaryExpr("%", Var(axis.name), Literal(c, "int"))})
         object.__setattr__(folding, "_ctx", SimplifyCtx(ranges={axis.name: Interval(0, axis.extent.as_static() - 1)}))
-        produced = rewrite_stmt(produced, lambda name: name, folding)
+        produced = produced.rewrite(lambda name: name, folding)
     return produced
 
 
@@ -1674,7 +1673,7 @@ def _substitute_and_fold(produced: Fold, name: str, sigma: Sigma, ctx: SimplifyC
     folding = _FoldingSigma(dict(sigma.mapping))
     object.__setattr__(folding, "_ctx", ctx)
     operands = tuple(_substitute_and_fold(edge, name, sigma, ctx) for edge in produced.operands)
-    body = Body(rewrite_stmt(stmt, lambda n: n, folding) for stmt in produced.lift.body)
+    body = Body(stmt.rewrite(lambda n: n, folding) for stmt in produced.lift.body)
     lift = Lambda.closing(tuple(p for p in produced.lift.params if p != name), body, produced.lift.results)
     return replace(produced, operands=operands, lift=lift)
 
@@ -2416,7 +2415,7 @@ def _reindexed(body: Body, mapping: dict) -> Body:
 
     def visit(stmt, scope):
         if isinstance(stmt, Load):
-            return replace(stmt, index=tuple(expr.substitute(scope) for expr in stmt.index))
+            return stmt.replace(index=tuple(expr.substitute(scope) for expr in stmt.index))
         inner = {name: expr for name, expr in scope.items() if name != stmt.axis.name} if isinstance(stmt, Loop) else scope
         nested = stmt.nested()
         return stmt.with_bodies(tuple(Body(tuple(visit(child, inner) for child in body)) for body in nested)) if nested else stmt

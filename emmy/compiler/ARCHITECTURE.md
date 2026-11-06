@@ -99,8 +99,7 @@ reader — the context key, the `H_fast_math` feature, the tune DB's regime, the
 - **Layer 1** — no GPU, no CUDA, no backend imports. Dialect ops
   implement `infer_output_shape(input_shapes)` and a numpy `forward()`.
 - **Layer 2** — operates on `Graph` + Loop IR only. Every `LoopOp`'s
-  `__post_init__` canonicalizes (`ir/stmt/normalize.py`) and simplifies
-  (`ir/stmt/passes.py`) its body.
+  `__post_init__` canonicalizes its body (`ir/stmt/normalize.py`).
 - **Layer 3** — backends are the only place GPU specifics live.
 
 ## Shared invariants

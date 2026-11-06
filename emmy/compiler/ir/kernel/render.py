@@ -21,16 +21,19 @@ from emmy.compiler.ir.kernel.ir import (
     KernelOp,
     LdmatrixLoad,
     RegStore,
+    SetMaxNReg,
     Smem,
     TmaDescriptor,
+    TreeHalve,
+    WarpShuffle,
     WgmmaMma,
     frag_dtype,
     pack_smem,
     swizzle_fn,
     swizzle_xor,
 )
-from emmy.compiler.ir.stmt import Paged, RenderCtx, render_body
-from emmy.compiler.ir.stmt.leaves import Assign, Write
+from emmy.compiler.ir.render import Paged, RenderCtx, render_body
+from emmy.compiler.ir.stmt import Assign, Body, Write
 from emmy.compiler.tensor import Tensor
 
 # Per-CTA static-smem hard cap on every CUDA arch we target. Above this,
@@ -79,7 +82,7 @@ static __device__ __forceinline__ unsigned char emmy_to_f4e2m1(float value) {
 
 """
 
-# The e2m1 pair table an NVFP4 weight decodes through, computed instead of read (``Load.render`` spells
+# The e2m1 pair table an NVFP4 weight decodes through, computed instead of read (``Load``'s render spells
 # a lookup into a ``RenderCtx.pair_tables`` buffer as this call). Row ``b`` of the 256x2 table holds
 # byte ``b``'s low- and high-nibble values, so flat index ``i`` reads nibble ``i & 1`` of byte ``i >> 1``.
 # The code's sign goes to the f16 sign bit and its three magnitude bits under the exponent's two low
@@ -1456,7 +1459,7 @@ def render_kernelop(
     ``literal_constants`` maps input-buffer names to scalar values that
     should be embedded in the kernel body as ``float`` literals instead
     of passed as kernel parameters. Loads of those bufs render as
-    ``float name = <value>;`` (see ``Load.render``) and the buf is
+    ``float name = <value>;`` (see ``Load``'s render) and the buf is
     excluded from the kernel signature.
 
     ``paged_buffers`` names buffers virtualized along one axis, as
@@ -1560,7 +1563,6 @@ def render_kernelop(
     body_text = "\n".join(render_body(kernel_op.body, ctx))
     # The cross-thread combine (``WarpShuffle`` / ``TreeHalve``) references the hardware
     # warp ``lane`` / ``warp`` ids; declare them at function entry when the body needs them.
-    from emmy.compiler.ir.stmt.blocks import _body_uses_lane_warp  # noqa: PLC0415
 
     if _body_uses_lane_warp(kernel_op.body):
         body_text = "    int lane = threadIdx.x & 31;\n    int warp = threadIdx.x >> 5;\n" + body_text
@@ -1657,7 +1659,7 @@ def render_kernelop(
 def _compute_dynamic_smem_offsets(kernel_op: KernelOp) -> tuple[dict[str, int], int]:
     """Walk the body collecting ``Smem`` decls. If their summed footprint
     exceeds the static cap, return ``({name: byte_offset}, total_bytes)``
-    so ``Smem.render`` can emit pool aliases. Otherwise return an empty
+    so ``Smem``'s render can emit pool aliases. Otherwise return an empty
     map — the kernel keeps using ``__shared__ T arr[N]``.
 
     Offsets/total come from :func:`pack_smem` (each buffer aligned to the
@@ -1687,3 +1689,19 @@ def _launch_bounds_for(kernel_op: KernelOp) -> int:
 
 
 __all__ = ["render_kernelop"]
+
+
+def _body_uses_lane_warp(body: Body) -> bool:
+    """True iff the body needs the ``lane`` / ``warp`` helper vars.
+
+    The materializer emits ``lane`` / ``warp`` use sites alongside:
+    - ``WarpShuffle`` and ``TreeHalve`` (the per-warp partial gate
+      ``if (lane == 0)``, ``TreeHalve(..., tid_var="warp")``).
+    - ``SetMaxNReg`` (only emitted by the warp-specialized materializer
+      path, which wraps in ``Cond(warp < P, ...)`` — the Cond predicate
+      references ``Var("warp")`` directly so the helper must be in scope).
+
+    Checking for these three primitives covers every kernel that
+    references either helper.
+    """
+    return bool(body.iter_of_type(WarpShuffle, TreeHalve, SetMaxNReg))

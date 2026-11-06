@@ -11,7 +11,7 @@ Stamping rules:
   ``inputs`` / ``outputs`` (matcher-populated graph Tensors). A Load against
   a locally-declared buffer (smem) keeps the render-time fallback.
 - ``Assign(op, args)`` — ``dtype = dtype_promote(op.name, [ssa[a] for a in
-  args])``, the same rule ``Assign.render`` applies inline. Same-arg squares
+  args])``, the same rule ``Assign``'s render applies inline. Same-arg squares
   and ``pow`` are promoted to f32 (overflow guard, below).
 - ``Write(output, value)`` — ``value_dtype = ssa[value]``. The destination
   buffer dtype stays a render-time concern; only the value side is stamped.
@@ -33,8 +33,7 @@ from emmy.compiler.dtype import get as dtype_get
 from emmy.compiler.graph import Node
 from emmy.compiler.ir.expr import Literal
 from emmy.compiler.ir.kernel import KernelOp
-from emmy.compiler.ir.stmt import Accum, Affine, Assign, Body, Init, Let, Load, Select, Stmt, Write
-from emmy.compiler.ir.stmt.base import dtype_promote
+from emmy.compiler.ir.stmt import Accum, Affine, Assign, Body, Init, Let, Load, Select, Stmt, Write, dtype_promote
 from emmy.compiler.pipeline import Pattern, RuleSkipped
 
 PATTERN = [Pattern("root", KernelOp)]
@@ -105,7 +104,7 @@ def _stamp_stmt(s: Stmt, ctx: _StampCtx) -> Stmt:
     if isinstance(s, Let):
         # A float literal takes f32 when nothing narrows it; an index keeps its expression's type.
         if s.dtype is None and isinstance(s.value, Literal) and s.value.dtype == "float":
-            s = replace(s, dtype=F32)
+            s = s.replace(dtype=F32)
         if s.dtype is not None:
             ctx.ssa_dtypes[s.name] = s.dtype
         return s
@@ -120,7 +119,7 @@ def _stamp_stmt(s: Stmt, ctx: _StampCtx) -> Stmt:
 
 def _stamp_accum(s: Accum, ctx: _StampCtx) -> Accum:
     """Freeze the accumulator dtype — the old ``020_place_inits`` policy, applied to the
-    ``Accum`` itself (the carrier is the source of truth; ``Loop.render`` derives the seed
+    ``Accum`` itself (the carrier is the source of truth; ``Loop``'s render derives the seed
     from it). A **selecting** combine (``max`` / ``min``) picks an existing value, so it
     stays in the folded value's dtype — fp16 ``max`` accumulates in fp16. An
     **accumulating** combine (``sum`` / ``prod`` — incl. the matmul fold) builds magnitude,
@@ -134,7 +133,7 @@ def _stamp_accum(s: Accum, ctx: _StampCtx) -> Accum:
     value_dt = ctx.ssa_dtypes.get(s.value) or F32
     dt = ctx.ssa_dtypes.get(s.name) or (value_dt if s.op.selecting else F32)
     ctx.ssa_dtypes[s.name] = dt
-    return replace(s, dtype=dt)
+    return s.replace(dtype=dt)
 
 
 def _stamp_load(s: Load, ctx: _StampCtx) -> Load:
@@ -143,7 +142,7 @@ def _stamp_load(s: Load, ctx: _StampCtx) -> Load:
         for n in s.names:
             ctx.ssa_dtypes[n] = dt
         if s.dtype is None:
-            return replace(s, dtype=dt)
+            return s.replace(dtype=dt)
     return s
 
 
@@ -165,7 +164,7 @@ def _stamp_assign(s: Assign, ctx: _StampCtx) -> Assign:
     if result_dt == F16 and _is_overflow_prone(s):
         result_dt = F32
     ctx.ssa_dtypes[s.name] = result_dt
-    return replace(s, dtype=result_dt) if s.dtype != result_dt else s
+    return s.replace(dtype=result_dt) if s.dtype != result_dt else s
 
 
 def _stamp_affine(s: Affine, ctx: _StampCtx) -> Affine:
@@ -175,7 +174,7 @@ def _stamp_affine(s: Affine, ctx: _StampCtx) -> Affine:
         return s
     result_dt = dtype_get(dtype_promote("add", [(ctx.ssa_dtypes.get(a) or F32).name for a in s.args]))
     ctx.ssa_dtypes[s.name] = result_dt
-    return replace(s, dtype=result_dt)
+    return s.replace(dtype=result_dt)
 
 
 def _is_overflow_prone(s: Assign) -> bool:

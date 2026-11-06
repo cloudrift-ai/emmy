@@ -15,8 +15,7 @@ from emmy.compiler.ir.axis import Axis
 from emmy.compiler.ir.elementwise import ElementwiseImpl
 from emmy.compiler.ir.expr import Literal, Var
 from emmy.compiler.ir.schedule import Tile, Work
-from emmy.compiler.ir.stmt import Load
-from emmy.compiler.ir.stmt.leaves import Assign
+from emmy.compiler.ir.stmt import Assign, Load
 from emmy.compiler.pipeline.passes.lowering.kernel._atom import _sync_operands
 from emmy.compiler.pipeline.passes.lowering.kernel._stage import CtaTile
 from tests.compiler.terms import projection, reduction
