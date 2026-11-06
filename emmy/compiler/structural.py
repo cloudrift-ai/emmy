@@ -8,20 +8,7 @@ compilation result). Bits that are name-only / advisory / ambient I/O
 are deliberately excluded — see each implementer's docstring for the
 exact include/exclude list.
 
-Implementers today:
-
-- :class:`emmy.compiler.dim.Dim` — the extent expression; excludes its advisory expected-size hint.
-- :class:`emmy.compiler.graph.Graph` — Merkle digest over op kinds,
-  body structure, output shapes/dtypes, input wiring; excludes node ids,
-  Tensor names, and Hints.
-- :class:`emmy.compiler.ir.stmt.body.Body` — canonicalized body
-  rendering with SSA / axis / commutative-arg / external-buffer names
-  normalized away. A tile term has no key of its own: a ``TileOp`` keys
-  on the Loop IR its term lowers to.
-- :class:`emmy.compiler.context.Context` — codegen-affecting
-  compilation knobs (compute capability today; tuning overrides as they
-  land). Excludes ambient I/O fields (dump dirs, verbosity, the session
-  cache).
+``Dim``, ``Graph``, ``Body`` and ``Context`` implement it.
 
 ``Op.identity_key`` layers on these: one lattice over the op's canonical
 Loop-IR body, typing its buffer roles and folding in the knob dict for the
@@ -42,6 +29,7 @@ from __future__ import annotations
 
 import dataclasses
 import hashlib
+from collections.abc import Callable, Sequence
 from typing import Protocol, runtime_checkable
 
 
@@ -93,38 +81,25 @@ def instance_memo(obj, slot: str) -> dict:
 def form(value: object) -> object:
     """The STRUCTURAL rendering of ``value`` — a nested ``(class name, *fields)`` tuple.
 
-    The one alternative to ``repr`` for anything that enters an identity. Every IR value object is
-    a frozen dataclass (``Stmt``, ``Expr``, ``Axis``, ``Dim``, ``DataType``, ``Window``), so the
-    field walk is generic over all of them and needs no per-class list: a new node kind is covered
-    the day it is added, and a ``__repr__`` edit never moves a key. That matters because how a
-    statement PRINTS is a presentation choice, and presentation choices must not re-key every
-    stored golden.
+    The one alternative to ``repr`` for anything that enters an identity: how a statement PRINTS is a presentation
+    choice, and a ``__repr__`` edit must not re-key every stored golden.
 
-    Rendering rules, in order:
+    Primitives and ``None`` pass through, so the leaves stay comparable by value; tuples and lists render
+    elementwise; sets render SORTED, because their iteration order is not stable. Any other value renders by the
+    rule of its class, chosen once per class, the first of:
 
-    - primitives and ``None`` pass through, so the leaves stay comparable by value;
-    - tuples / lists (``Body`` included — it is a ``tuple`` subclass) render elementwise;
-    - sets render SORTED, because their iteration order is not stable and an unsorted rendering
-      would key one object two ways;
-    - a value that OVERRIDES :meth:`Structural.structural_key` renders as ``(class, its key)`` —
-      it owns a canonicalization this walk cannot know (``Body``'s normalize-and-collapse,
-      ``Graph``'s Merkle walk). Two renderings of one type is what this module exists to
-      prevent, so the type that knows better is asked. A type that merely INHERITS the default
-      falls through to the field walk below — that is the default's definition, and delegating
-      would recurse. Checked AFTER the container rules, so a ``Body`` still renders elementwise
-      rather than through its own aggressive normalize-and-collapse key;
-    - dataclasses render as their fields, in declaration order;
-    - anything else exposing a ``str`` ``name`` renders as ``(class, name)`` — the
-      ``ElementwiseImpl`` case, whose name IS its identity (its algebraic traits are looked up by
-      it) and which is not a dataclass;
-    - anything remaining RAISES. There is no ``repr`` fallback: a silent one would be the very
-      thing this function exists to remove, and it would hide the moment a new field type started
-      keying kernels on its ``__repr__``. A type that lands here needs a rule above — one line,
-      decided by whoever knows what part of that value is identity and what part is incidental.
-
-    ``DataType`` takes the dataclass route, so its numpy dtype rides along as a leaf. That is
-    stable — ``numpy.dtype`` repr is a public API and equal dtypes render equal — just noisier
-    than the name alone.
+    - the class supplies its own form in ``structural_form()``: the one way a class that is not a dataclass, or
+      whose form is not its fields, enters an identity (``Body`` renders elementwise, as a tuple does). A class
+      with fields calls :func:`record_form`, so it is keyed the way a dataclass is;
+    - the class OVERRIDES :meth:`Structural.structural_key`: ``(class, its key)`` — it owns a canonicalization
+      this walk cannot know (``Graph``'s Merkle walk), and a type that merely inherits the default must fall
+      through, or the default would call itself forever;
+    - a dataclass: :func:`record_form` over its fields in declaration order, so a new node kind is covered the day
+      it is added. ``DataType`` takes this route, so its numpy dtype rides along as a leaf: stable, since equal
+      dtypes render equal, just noisier than the name alone;
+    - a ``str`` ``name``: ``(class, name)`` — ``ElementwiseImpl``, whose name IS its identity;
+    - anything else RAISES. There is no ``repr`` fallback: a silent one would hide the moment a new field type
+      started keying kernels on its ``__repr__``. A type that lands here supplies ``structural_form``.
     """
     if value is None or isinstance(value, (str, int, float, bool)):
         return value
@@ -132,37 +107,53 @@ def form(value: object) -> object:
         return tuple(form(v) for v in value)
     if isinstance(value, (set, frozenset)):
         return tuple(sorted((form(v) for v in value), key=repr))
-    own_key = getattr(type(value), "structural_key", None)
-    if own_key is not None and own_key is not Structural.structural_key:
-        return (type(value).__name__, value.structural_key())
-    if dataclasses.is_dataclass(value) and not isinstance(value, type):
-        return (type(value).__name__, *_rendered_fields(value))
+    cls = type(value)
+    rule = _RULES.get(cls)
+    if rule is None:
+        rule = _RULES[cls] = _rule_of(cls)
+    return rule(value)
+
+
+_RULES: dict[type, Callable[[object], object]] = {}
+
+
+def _rule_of(cls: type) -> Callable[[object], object]:
+    if (own := getattr(cls, "structural_form", None)) is not None:
+        return own
+    if getattr(cls, "structural_key", Structural.structural_key) is not Structural.structural_key:
+        return lambda value: (cls.__name__, value.structural_key())
+    if dataclasses.is_dataclass(cls):
+        declared = [(field.name, field.default) for field in dataclasses.fields(cls)]
+        return lambda value: record_form(cls.__name__, [(getattr(value, name), default) for name, default in declared])
+    return _named
+
+
+def _named(value: object) -> tuple:
     name = getattr(value, "name", None)
     if isinstance(name, str):
         return (type(value).__name__, name)
     raise TypeError(
-        f"structural.form has no rule for {type(value).__name__}, so this value cannot enter an "
-        "identity. Add a rule in structural.form: render the part of it that IS the identity, and "
-        "drop the part that is incidental. Do not fall back to repr — that is what this replaced."
+        f"structural.form has no rule for {type(value).__name__}, so this value cannot enter an identity. Give the "
+        "class a structural_form that renders the part of it that IS the identity. Do not fall back to repr."
     )
 
 
-def _rendered_fields(value) -> list:
-    """One dataclass's fields, less the TRAILING ones left at their default.
+def record_form(name: str, fields: Sequence[tuple[object, object]]) -> tuple:
+    """``(name, *fields)`` less the TRAILING fields left at their default. ``fields`` pairs each value with its
+    default, ``dataclasses.MISSING`` where it has none.
 
-    A field a value does not use says nothing about what that value IS, and rendering it anyway
-    means a dataclass that GROWS one moves the identity of every value in the tree — every kernel,
-    every recorded row, every corpus case — for a field none of them set. Trailing only, so the
-    rendering stays positional: a default in the middle still holds its place.
+    A field a value does not use says nothing about what that value IS, and rendering it anyway means a class that
+    GROWS one moves the identity of every value in the tree — every kernel, every recorded row, every corpus case —
+    for a field none of them set. Trailing only, so the rendering stays positional: a default in the middle still
+    holds its place.
     """
-    fields = dataclasses.fields(value)
-    rendered = [form(getattr(value, field.name)) for field in fields]
-    while rendered:
-        field = fields[len(rendered) - 1]
-        if field.default is dataclasses.MISSING or getattr(value, field.name) != field.default:
+    kept = len(fields)
+    while kept:
+        value, default = fields[kept - 1]
+        if default is dataclasses.MISSING or value != default:
             break
-        rendered.pop()
-    return rendered
+        kept -= 1
+    return (name, *(form(value) for value, _ in fields[:kept]))
 
 
 def digest(*parts: object) -> str:

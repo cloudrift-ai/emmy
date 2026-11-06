@@ -251,6 +251,29 @@ def test_a_statement_is_copied_through_its_own_method() -> None:
     assert not offenders, "copy these statements with ``stmt.replace(...)``:\n" + "\n".join(sorted(offenders))
 
 
+def test_a_class_is_on_the_wire_by_what_it_registers() -> None:
+    """Nothing under ``emmy/`` asks whether a value inherits ``Wire``, and only the mixin's own defaults read a
+    dataclass field for the wire: a class joins through ``wire.register`` with its tag, its two wire functions and
+    its parts, so one that cannot be a dataclass or inherit a Python base travels like any other."""
+    by_base = re.compile(r"\b(?:isinstance|issubclass)\([^()]*\bWire\b")
+    offenders = [
+        f"{py.relative_to(_REPO_ROOT)}:{number}"
+        for py in sorted((_REPO_ROOT / "emmy").rglob("*.py"))
+        for number, line in enumerate(py.read_text().splitlines(), 1)
+        if by_base.search(line)
+    ]
+    assert not offenders, "ask the wire registry, not the base class:\n" + "\n".join(offenders)
+    wire = ast.parse((_REPO_ROOT / "emmy" / "compiler" / "wire.py").read_text())
+    reflecting = {
+        function.name
+        for function in ast.walk(wire)
+        if isinstance(function, ast.FunctionDef)
+        for node in ast.walk(function)
+        if isinstance(node, ast.Name) and node.id in ("fields", "is_dataclass")
+    }
+    assert reflecting == {"wire_parts", "_wire_fields"}
+
+
 # ---------------------------------------------------------------------------
 # Fix 1 firewall — keep the
 # assemble→TileOp boundary clean: every benched scheduling choice lives in the
