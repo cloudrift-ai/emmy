@@ -6,27 +6,16 @@ from __future__ import annotations
 
 import pytest
 
-from emmy.compiler.ir.axis import Axis
-from emmy.compiler.ir.expression import Literal, Var
-from emmy.compiler.ir.stmt import Accum, Assign, Body, Carry, Load, Loop, StridedLoop
-
-
-def _ld(name: str, src: str, *idx: str) -> Load:
-    return Load(name=name, input=src, index=tuple(Var(v) for v in idx))
-
-
-def _asn(name: str, op: str, *args: str) -> Assign:
-    return Assign(name=name, op=op, args=args)
-
-
-def _acc(name: str, value: str, op: str = "add") -> Accum:
-    return Accum(name=name, value=value, op=op)
+from emmy.compiler.ir.stmt import Accum, Assign, Carry, Loop, parse_body
 
 
 def test_scope_summaries_share_nested_analysis(monkeypatch):
-    bodies = [Body((_asn("value", "exp", "source"), _acc("sum", "value")))]
-    for level in range(32):
-        bodies.append(Body((Loop(Axis(f"i{level}", 4), bodies[-1]),)))
+    text = "value = exp(source)\nsum <- add(sum, value)"
+    for level in reversed(range(32)):
+        text = f"for i{level} in 0..4:\n" + "\n".join(f"    {line}" for line in text.splitlines())
+    bodies = [parse_body(text)]
+    while isinstance(bodies[-1][0], Loop):
+        bodies.append(bodies[-1][0].body)
     visits = 0
     original = Assign.deps
 
@@ -36,24 +25,36 @@ def test_scope_summaries_share_nested_analysis(monkeypatch):
         return original(stmt)
 
     monkeypatch.setattr(Assign, "deps", counted)
-    for body in reversed(bodies):
+    for body in bodies:
         assert body._free_ssa == frozenset({"source"})
         assert tuple(stmt.name for stmt in body.accums) == ("sum",)
     assert visits == 1
 
 
 def test_scope_summary_preserves_reads_above_a_shadowed_name():
-    inner = Body((_asn("outer", "exp", "source"),))
-    body = Body((_asn("use", "abs", "outer"), Loop(Axis("i", 4), inner)))
+    body = parse_body(
+        """
+        use = abs(outer)
+        for i in 0..4:
+            outer = exp(source)
+        """
+    )
+    inner = body[1].body
     assert inner._free_ssa == frozenset({"source"})
     assert body._free_ssa == frozenset({"outer", "source"})
 
 
 def test_recursive_type_queries_share_children_and_preserve_mixed_order():
-    carry = Carry("state", "value", (), 0)
-    accum = _acc("sum", "value")
-    child = Body((carry, accum))
-    body = Body((Loop(Axis("i", 4), child), carry))
+    body = parse_body(
+        """
+        for i in 0..4:
+            state[] <- value seed 0
+            sum <- add(sum, value)
+        state[] <- value seed 0
+        """
+    )
+    child = body[0].body
+    carry, accum = child
     assert child.carries == (carry,)
     assert child.accums == (accum,)
     assert body.iter_of_type(Accum, Carry) == (carry, accum, carry)
@@ -67,14 +68,14 @@ def test_recursive_type_queries_share_children_and_preserve_mixed_order():
 @pytest.mark.parametrize("dependent", [False, True])
 @pytest.mark.parametrize("strided", [False, True])
 def test_coalesce_preserves_finalized_reduction_dependencies(dependent, strided):
-    axis = Axis("k", 8)
-    first = (_ld("v", "x", "k"), _acc("maximum", "v", "maximum"))
-    second = (_ld("v", "x", "k"),)
+    header = f"for k in 0..8{' step 1' if strided else ''}:"
+    first = ("v = load x[k]", "maximum <- maximum(maximum, v)")
+    second = ("v = load x[k]",)
     if dependent:
-        second += (_asn("shifted", "subtract", "v", "maximum"),)
-    second += (_acc("sum", "shifted" if dependent else "v"),)
-    loops = tuple(StridedLoop(axis, Literal(0, "int"), 1, body) if strided else Loop(axis, body) for body in (first, second))
-    body = Body(loops).coalesce()
+        second += ("shifted = subtract(v, maximum)",)
+    second += (f"sum <- add(sum, {'shifted' if dependent else 'v'})",)
+    loops = (header, *(f"    {line}" for line in first), header, *(f"    {line}" for line in second))
+    body = parse_body("\n".join(loops)).coalesce()
     assert len(body) == (2 if dependent else 1)
     assert len(body.loads) == (2 if dependent else 1)
     assert body._carried_names == ("maximum", "sum")

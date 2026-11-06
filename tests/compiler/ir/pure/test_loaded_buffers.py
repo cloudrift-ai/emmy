@@ -4,8 +4,6 @@ operand edges, never off a lowered view."""
 from __future__ import annotations
 
 from emmy.compiler.ir.axis import Axis
-from emmy.compiler.ir.expression import Var
-from emmy.compiler.ir.stmt import Assign, Load
 from emmy.compiler.pipeline.passes.tile._cut import _buffer_reads
 from tests.compiler.terms import contraction, projection, slab
 
@@ -17,9 +15,9 @@ def _root_holding_a_cone():
     holding its cut cones, and each cone reads its workspace through an operand edge. The cone is
     an EDGE and not a body member — a term composes through ``operands``, and a body holds
     statements — so a reader that walks statements alone cannot see beneath it."""
-    source = projection(body=(Load(name="w", input="ws", index=(Var("j"),)),), results=("w",))
-    cone = projection((source,), (Assign(name="c", op="relu", args=("w",)),), ("c",))
-    return projection((cone,), (Assign(name="out", op="copy", args=("c",)),), ("out",))
+    source = projection(body="w = load ws[j]", results=("w",))
+    cone = projection((source,), "c = relu(w)", ("c",))
+    return projection((cone,), "out = copy(c)", ("out",))
 
 
 def test_a_cone_held_as_an_edge_still_reports_its_operand_buffers() -> None:

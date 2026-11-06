@@ -15,7 +15,7 @@ from dataclasses import replace
 from emmy.compiler.ir.axis import Axis
 from emmy.compiler.ir.expression import Literal, Var
 from emmy.compiler.ir.schedule import Side
-from emmy.compiler.ir.stmt import Body, Write
+from emmy.compiler.ir.stmt import Body, parse_body
 from emmy.compiler.pipeline.passes.lowering.kernel._tiling import atomize, grid_tile, register_tile, shrink_axis, unit_tile
 
 
@@ -92,7 +92,7 @@ def test_the_cells_the_callables_receive_are_the_register_grid() -> None:
 
     def store(i, j, _off, _mn):
         stores.append((i, j))
-        return [Write(output="out", index=(Var("m"),), value="v")]
+        return list(parse_body("out[m] = v"))
 
     t = grid_tile(
         unit_tile(register_tile(atomize((1, 1)), mn), mn),
@@ -143,14 +143,14 @@ def test_the_tile_body_is_state_then_reduce_then_stores() -> None:
     """The splice order the seal guarantees: accumulator state, the reduce region's top decls +
     K-loop, then the per-cell stores."""
     mn = _mn()
-    mk = lambda tag: Write(output=tag, index=(Var("m"),), value="v")  # noqa: E731
+    mk = lambda tag: list(parse_body(f"{tag}[m] = v"))  # noqa: E731
     t = grid_tile(
         unit_tile(register_tile(atomize((1, 1)), mn), mn),
         mn=mn,
         block_threads=32,
-        state_decls=lambda _cells: [mk("state")],
-        reduce_region=lambda _c, _o, _mn: ([mk("top")], [mk("kloop")]),
-        store=lambda i, _j, _o, _mn: [mk(f"store{i}")],
+        state_decls=lambda _cells: mk("state"),
+        reduce_region=lambda _c, _o, _mn: (mk("top"), mk("kloop")),
+        store=lambda i, _j, _o, _mn: mk(f"store{i}"),
     )
     assert [s.output for s in t.body] == ["state", "top", "kloop", "store0", "store1"]
     assert isinstance(t.body, Body)

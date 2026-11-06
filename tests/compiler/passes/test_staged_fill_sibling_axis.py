@@ -22,12 +22,11 @@ from __future__ import annotations
 from emmy.compiler.dim import Dim
 from emmy.compiler.dtype import F16, F32, U8
 from emmy.compiler.ir.axis import Axis
-from emmy.compiler.ir.elementwise import ElementwiseImpl
-from emmy.compiler.ir.expression import Expression, Literal, TernaryExpr, Var
+from emmy.compiler.ir.expression import Expression, Literal, Var
 from emmy.compiler.ir.schedule import Tile, Work
 from emmy.compiler.ir.schedule.packing import PackedKBlockB
 from emmy.compiler.ir.schedule.staging import copied_b
-from emmy.compiler.ir.stmt import Assign, Load
+from emmy.compiler.ir.stmt import Load, parse_body
 from emmy.compiler.pipeline.passes.lowering.kernel._atom import _packed_operands, _slab_operands, _sync_operands, _tile_base
 from emmy.compiler.pipeline.passes.lowering.kernel._stage import CtaTile
 from emmy.compiler.tensor import Tensor
@@ -88,8 +87,7 @@ def test_sync_transport_async_b_binds_the_sibling_axis():
     weight whose row index carries the m residue."""
     mn = _mn()
     ka = Axis("k", Dim(2048))
-    a = Load(name="in1", input="x", index=(Var("m"), Var("k")), dtype=F16)
-    b = Load(name="in0", input="w", index=(_row_residue(Var("m"), Var("n")), Var("k")), dtype=F16)
+    a, b = parse_body(f"f16 in1 = load x[m, k]\nf16 in0 = load w[{_row_residue(Var('m'), Var('n'))}, k]")
     c = contraction(ka, a, (b, "acc"))
     cta = CtaTile(linear_tid=Var("_t"), n_threads=32)
     inputs = {"x": Tensor("x", (32, 2048), dtype=F16), "w": Tensor("w", (1024, 2048), dtype=F16)}
@@ -100,9 +98,7 @@ def test_sync_transport_async_b_binds_the_sibling_axis():
 
 def test_a_conditional_inner_coordinate_requires_a_compute_fill():
     ka = Axis("k", 64)
-    a = Load(name="a", input="x", index=(Var("m"), Var("k")))
-    col = TernaryExpr(Var("batch").lt(_lit(1)), Var("n"), _lit(0))
-    b = Load(name="b", input="w", index=(Var("k"), col))
+    a, b = parse_body("a = load x[m, k]\nb = load w[k, batch < 1 ? n : 0]")
     c = contraction(ka, a, (b, "acc"))
     inputs = {"x": Tensor("x", (32, 64), dtype=F32), "w": Tensor("w", (64, 128), dtype=F32)}
     assert not copied_b(c, c.operands[1], inputs)
@@ -114,14 +110,19 @@ def _packed_matvec():
     ``ws`` stands for the placement cut's workspace: the scale is one value, and the cut indexes
     the buffer by the consuming kernel's outer free axis, so the decode cone reads ``ws[_um]``."""
     ka = Axis("k", Dim(2048))
-    a = Load(name="in1", input="x", index=(Var("_um"), Var("k")), dtype=F16)
-    scale = Load(name="in0", input="ws", index=(Var("_um"),), dtype=F32)
-    codes = Load(name="in3", input="wsb", index=(Var("n"), Var("k") / _lit(16)), dtype=F32)
-    factor = Assign(name="fac", op=ElementwiseImpl("multiply"), args=("in0", "in3"))
-    bits = Load(name="in2", input="wbits", index=(Var("n"), Var("k") / _lit(2)), dtype=U8)
-    pairs = Load(name="in6", input="pairs", index=(Var("in2") * _lit(2) + Var("k") % _lit(2),), dtype=F16)
-    value = Assign(name="bv", op=ElementwiseImpl("multiply"), args=("in6", "fac"))
-    b = projection(body=(scale, codes, factor, bits, pairs, value), results=("bv",))
+    [a] = parse_body("f16 in1 = load x[_um, k]")
+    cone = parse_body(
+        """
+        f32 in0 = load ws[_um]
+        f32 in3 = load wsb[n, k / 16]
+        fac = multiply(in0, in3)
+        u8 in2 = load wbits[n, k / 2]
+        f16 in6 = load pairs[in2 * 2 + k % 2]
+        bv = multiply(in6, fac)
+        """
+    )
+    bits, pairs = cone[3], cone[4]
+    b = projection(body=cone, results=("bv",))
     packed = PackedKBlockB(bits=bits, table=pairs, factor="fac", block=16)
     return contraction(ka, a, (b, "acc")), packed, ka
 

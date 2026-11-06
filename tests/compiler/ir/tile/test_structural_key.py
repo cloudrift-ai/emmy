@@ -12,9 +12,8 @@ never collide."""
 from __future__ import annotations
 
 from emmy.compiler.ir.axis import Axis
-from emmy.compiler.ir.expression import Var
 from emmy.compiler.ir.pure.fold import Fold
-from emmy.compiler.ir.stmt import Accum, Assign, Body, Load, Loop
+from emmy.compiler.ir.stmt import parse_body
 from emmy.compiler.ir.tile import Placement
 from emmy.compiler.ir.tile.ir import TileOp
 from emmy.compiler.pipeline.passes.tile._fromloop import fold_from_loop
@@ -25,14 +24,15 @@ K = 512
 
 def _bare(*, buf: str = "x", acc: str = "acc0", load: str = "in0", v: str = "v1", extent: int = K, op: str = "multiply") -> Fold:
     """A lifted squared-sum reduce — a slab operand under a planar fold."""
-    body = Body(
-        (
-            Load(name=load, input=buf, index=(Var("m"), Var("k"))),
-            Assign(name=v, op=op, args=(load, load)),
-            Accum(name=acc, value=v, op="add", axes=("k",)),
-        )
+    (loop,) = parse_body(
+        f"""
+        for k in 0..{extent}:
+            {load} = load {buf}[m, k]
+            {v} = {op}({load}, {load})
+            {acc} <- add({acc}, {v}) over k
+        """
     )
-    return fold_from_loop(Loop(axis=Axis("k", extent), body=body))
+    return fold_from_loop(loop)
 
 
 def _contraction(*, a_buf: str = "A", b_bufs: tuple[str, ...] = ("W0",), names: str = "") -> Fold:
@@ -44,7 +44,12 @@ def _wrapped(inner: Fold, *, buf: str, load: str = "in3", v: str = "v5") -> Fold
     """A projection (zero-axis) fold over ``inner`` whose lift also reads ``buf`` — RMSNorm's
     twice-read-edge shape when ``buf`` is the inner fold's own input."""
     (bound,) = inner.combine.results
-    body = (Load(name=load, input=buf, index=(Var("m"), Var("a2"))), Assign(name=v, op="multiply", args=(load, bound)))
+    body = parse_body(
+        f"""
+        {load} = load {buf}[m, a2]
+        {v} = multiply({load}, {bound})
+        """
+    )
     return projection((inner,), body, (v,))
 
 
@@ -78,11 +83,9 @@ def test_buffer_renames_never_move_the_key() -> None:
 
 
 def test_independent_stmt_interleaving_never_moves_the_key() -> None:
-    load = Load(name="in0", input="x", index=(Var("a0"), Var("a1")))
-    add = Assign(name="v1", op="add", args=("in0", "in0"))
-    mul = Assign(name="v2", op="multiply", args=("in0", "in0"))
-    one = projection(body=(load, add, mul), results=("v1", "v2"))
-    two = projection(body=(load, mul, add), results=("v1", "v2"))
+    load, add, mul = "in0 = load x[a0, a1]", "v1 = add(in0, in0)", "v2 = multiply(in0, in0)"
+    one = projection(body=parse_body("\n".join((load, add, mul))), results=("v1", "v2"))
+    two = projection(body=parse_body("\n".join((load, mul, add))), results=("v1", "v2"))
     assert _key(one) == _key(two)
 
 

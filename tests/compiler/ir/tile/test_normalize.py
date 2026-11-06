@@ -15,7 +15,7 @@ from emmy.compiler.ir.elementwise import ElementwiseImpl
 from emmy.compiler.ir.expression import Literal, Var
 from emmy.compiler.ir.loop import LoopOp
 from emmy.compiler.ir.pure import Fold, Lambda
-from emmy.compiler.ir.stmt import Accum, Assign, Body, Let, Load, Loop, Write
+from emmy.compiler.ir.stmt import Assign, Body, Load, Loop, Write, parse_body
 from emmy.compiler.ir.tile import OutputSpec, Placement, TileOp
 from emmy.compiler.ir.tile.normalize import _share_common_cones
 from emmy.compiler.ir.tile.path import family_sites, sites
@@ -35,19 +35,28 @@ def _lift(body: Body) -> TileOp:
     return Pipeline.build(["tile/lift"], select=["lift"]).run(graph).nodes["out"].op
 
 
-def _reduce_loop(*stmts, axis: Axis = K32) -> Fold:
-    """A reduce loop over ``axis`` lifted to its term: the ONE former, so a fixture reads exactly like
-    a lifted kernel — every load a slab, every computed product argument a cone operand."""
-    return fold_from_loop(Loop(axis=axis, body=Body(stmts)))
+def _reduce_loop(text: str) -> Fold:
+    """A reduce loop's text lifted to its term: the ONE former, so a fixture reads exactly like a
+    lifted kernel — every load a slab, every computed product argument a cone operand."""
+    (loop,) = parse_body(text)
+    return fold_from_loop(loop)
 
 
-def _matmul(a_index=None, b_index=None, *, extent: int = 32) -> Fold:
+def _spec(text: str, *sweep: Axis) -> OutputSpec:
+    """The output specification of the one store ``text`` spells."""
+    (write,) = parse_body(text)
+    return OutputSpec(write=write, sweep=sweep)
+
+
+def _matmul(a_index: str = "m, k", b_index: str = "n, k", *, extent: int = 32) -> Fold:
     return _reduce_loop(
-        Load(name="left", input="x", index=a_index or (Var("m"), Var("k"))),
-        Load(name="right", input="w", index=b_index or (Var("n"), Var("k"))),
-        Assign(name="product", op="multiply", args=("left", "right")),
-        Accum(name="acc", value="product", op="add", axes=("k",)),
-        axis=Axis("k", Dim(extent)),
+        f"""
+        for k in 0..{extent}:
+            left = load x[{a_index}]
+            right = load w[{b_index}]
+            product = multiply(left, right)
+            acc <- add(acc, product) over k
+        """
     )
 
 
@@ -75,7 +84,7 @@ def test_tile_post_init_canonicalizes_contraction() -> None:
 
 
 def test_tile_post_init_canonicalizes_broadcast_batched_contraction() -> None:
-    planar = _matmul(a_index=(Var("k"), Var("batch") * 8 + Var("m")))
+    planar = _matmul(a_index="k, batch * 8 + m")
 
     tile = _tile(planar, K32, free=(Axis("batch", 4), M8, N16))
 
@@ -85,37 +94,25 @@ def test_tile_post_init_canonicalizes_broadcast_batched_contraction() -> None:
 
 
 def test_tile_post_init_recovers_an_elided_unit_contraction_row() -> None:
-    planar = _matmul(a_index=(Literal(0, "int"), Var("k")), extent=16)
+    planar = _matmul(a_index="0, k", extent=16)
 
-    tile = _tile(
-        planar,
-        Axis("k", Dim(16)),
-        free=(N16,),
-        output_specs=(OutputSpec(Write(output="out", index=(Literal(0, "int"), Var("n")), value="acc")),),
-    )
+    tile = _tile(planar, Axis("k", Dim(16)), free=(N16,), output_specs=(_spec("out[0, n] = acc"),))
 
     assert tuple(axis.name for axis in tile.place.free) == ("_um", "n")
     assert tile.op.as_contraction() is not None
 
 
-@pytest.mark.parametrize(
-    "index",
-    (
-        (Var("n"), Literal(0, "int")),
-        (Literal(0, "int"), Var("n") * 2),
-    ),
-    ids=("varying-coordinate-before-zero", "strided-column"),
-)
+@pytest.mark.parametrize("index", ("n, 0", "0, n * 2"), ids=("varying-coordinate-before-zero", "strided-column"))
 def test_tile_post_init_does_not_infer_a_unit_row_from_a_non_dense_boundary(index) -> None:
-    planar = _matmul(a_index=(Literal(0, "int"), Var("k")), extent=16)
+    planar = _matmul(a_index="0, k", extent=16)
 
-    tile = _tile(planar, Axis("k", Dim(16)), free=(N16,), output_specs=(OutputSpec(Write(output="out", index=index, value="acc")),))
+    tile = _tile(planar, Axis("k", Dim(16)), free=(N16,), output_specs=(_spec(f"out[{index}] = acc"),))
 
     assert tuple(axis.name for axis in tile.place.free) == ("n",)
 
 
 def test_contraction_promotes_a_shared_store_sweep_once() -> None:
-    stores = tuple(OutputSpec(write=Write(output="out", index=(Var("m"), Var("n")), value="acc"), sweep=(N16,)) for _ in range(2))
+    stores = tuple(_spec("out[m, n] = acc", N16) for _ in range(2))
 
     tile = _tile(_matmul(), N16, K32, free=(M8,), output_specs=stores)
 
@@ -130,7 +127,7 @@ def test_contraction_promotes_a_shared_store_sweep_after_grid_mapping() -> None:
         op=normalized,
         place=Placement(free=(M8,), grid=(M8,), mapped=True),
         axes=(M8, N16, K32),
-        output_specs=(OutputSpec(write=Write(output="out", index=(Var("m"), Var("n")), value="acc"), sweep=(N16,)),),
+        output_specs=(_spec("out[m, n] = acc", N16),),
     )
 
     assert tuple(axis.name for axis in tile.place.free) == ("m", "n")
@@ -142,16 +139,9 @@ def test_contraction_promotes_a_shared_store_sweep_after_grid_mapping() -> None:
 def test_nested_contraction_promotes_a_shared_store_sweep() -> None:
     """A sibling reduction can be the root-most node while a later contraction reads the sweep axis."""
     r = Axis("r", 4)
-    stat = reduction(r, (slab("sample", "s", "m", "r"),), (Assign(name="stat__v", op="copy", args=("sample",)),), ("stat",))
-    root = projection((stat, _matmul()), (Assign(name="result", op="add", args=("stat", "acc")),), ("result",))
-    tile = _tile(
-        root,
-        N16,
-        r,
-        K32,
-        free=(M8,),
-        output_specs=(OutputSpec(write=Write(output="out", index=(Var("m"), Var("n")), value="result"), sweep=(N16,)),),
-    )
+    stat = reduction(r, (slab("sample", "s", "m", "r"),), parse_body("stat__v = copy(sample)"), ("stat",))
+    root = projection((stat, _matmul()), parse_body("result = add(stat, acc)"), ("result",))
+    tile = _tile(root, N16, r, K32, free=(M8,), output_specs=(_spec("out[m, n] = result", N16),))
 
     assert tuple(axis.name for axis in tile.place.free) == ("m", "n")
     assert tile.output_specs[0].sweep == ()
@@ -164,17 +154,22 @@ def test_sibling_output_sweeps_stay_sweeps() -> None:
     four such nests, and promoting all seven of their axes made its grid their 2^56-cell product."""
     p = Axis("p", 4)
     second = _reduce_loop(
-        Load(name="left2", input="x", index=(Var("m"), Var("k"))),
-        Load(name="right2", input="u", index=(Var("p"), Var("k"))),
-        Assign(name="product2", op="multiply", args=("left2", "right2")),
-        Accum(name="acc2", value="product2", op="add", axes=("k",)),
+        """
+        for k in 0..32:
+            left2 = load x[m, k]
+            right2 = load u[p, k]
+            product2 = multiply(left2, right2)
+            acc2 <- add(acc2, product2) over k
+        """
     )
-    body = (Assign(name="a", op="relu", args=("acc",)), Assign(name="b", op="relu", args=("acc2",)))
+    body = parse_body(
+        """
+        a = relu(acc)
+        b = relu(acc2)
+        """
+    )
     root = projection((_matmul(), second), body, ("a", "b"))
-    stores = (
-        OutputSpec(write=Write(output="out", index=(Var("m"), Var("n")), value="a"), sweep=(N16,)),
-        OutputSpec(write=Write(output="out2", index=(Var("m"), Var("p")), value="b"), sweep=(p,)),
-    )
+    stores = (_spec("out[m, n] = a", N16), _spec("out2[m, p] = b", p))
 
     tile = _tile(root, N16, p, K32, free=(M8,), output_specs=stores)
 
@@ -185,14 +180,10 @@ def test_sibling_output_sweeps_stay_sweeps() -> None:
 def _independent_output_tile(reverse=False):
     p, q, r, s = (Axis(name, size) for name, size in zip(("p", "q", "r", "s"), (3, 5, 7, 2), strict=True))
     first = slab("xv", "x", "p", "q")
-    second = projection((slab("yv", "y", "p", "r"),), (Assign(name="zv", op="relu", args=("yv",)),), ("zv",))
+    second = projection((slab("yv", "y", "p", "r"),), parse_body("zv = relu(yv)"), ("zv",))
     third = slab("wv", "w", "s")
-    root = projection((first, second, third), (Let(name="unused", value=Literal(0)),), ("unused",))
-    specs = (
-        OutputSpec(write=Write(output="xo", index=(Var("p"), Var("q")), value="xv"), sweep=(p, q)),
-        OutputSpec(write=Write(output="yo", index=(Var("p"), Var("r")), value="zv"), sweep=(p, r)),
-        OutputSpec(write=Write(output="wo", index=(Var("s"),), value="wv"), sweep=(s,)),
-    )
+    root = projection((first, second, third), parse_body("let unused = 0.0"), ("unused",))
+    specs = (_spec("xo[p, q] = xv", p, q), _spec("yo[p, r] = zv", p, r), _spec("wo[s] = wv", s))
     return _tile(root, p, q, r, s, output_specs=specs[::-1] if reverse else specs)
 
 
@@ -248,15 +239,9 @@ def _swept_reduce(*, per_cell: bool) -> TileOp:
     r = Axis("r", 4)
     index = (Var("m"), Var("n"), Var("r")) if per_cell else (Var("m"), Var("r"))
     read = slab("sample", "s", *(str(part.name) for part in index))
-    stat = reduction(r, (read,), (Assign(name="stat__v", op="copy", args=("sample",)),), ("stat",))
-    root = projection((stat,), (Assign(name="result", op="negative", args=("stat",)),), ("result",))
-    return _tile(
-        root,
-        N16,
-        r,
-        free=(M8,),
-        output_specs=(OutputSpec(write=Write(output="out", index=(Var("m"), Var("n")), value="result"), sweep=(N16,)),),
-    )
+    stat = reduction(r, (read,), parse_body("stat__v = copy(sample)"), ("stat",))
+    root = projection((stat,), parse_body("result = negative(stat)"), ("result",))
+    return _tile(root, N16, r, free=(M8,), output_specs=(_spec("out[m, n] = result", N16),))
 
 
 def test_a_pointwise_sweep_stays_a_loop_for_the_worker_split() -> None:
@@ -265,8 +250,13 @@ def test_a_pointwise_sweep_stays_a_loop_for_the_worker_split() -> None:
     across a worker inventory, and `cases/reduce/rms-norm-cut-sweep-work.json` pins the row that
     does it (885.9 us walking the sweep in one thread, 4.2 us split across 512). Taking the axis
     onto the grid here would decide that for the schedule instead of offering it."""
-    body = (Load(name="v", input="x", index=(Var("m"), Var("n"))), Assign(name="out_v", op="negative", args=("v",)))
-    store = OutputSpec(write=Write(output="out", index=(Var("m"), Var("n")), value="out_v"), sweep=(N16,))
+    body = parse_body(
+        """
+        v = load x[m, n]
+        out_v = negative(v)
+        """
+    )
+    store = _spec("out[m, n] = out_v", N16)
     tile = _tile(projection((), body, ("out_v",)), N16, free=(M8,), output_specs=(store,))
 
     assert tuple(axis.name for axis in tile.place.free) == ("m",)
@@ -277,8 +267,13 @@ def test_a_pointwise_sweep_promotes_when_the_launch_has_no_other_axis() -> None:
     """The same bare sweep with nothing else to launch over. One block runs the whole kernel however
     the workers are split, so the sweep is the only axis the grid could spread across and it takes
     it — the residual-add piece a cut leaves behind in the serving post-attention kernel."""
-    body = (Load(name="v", input="x", index=(Var("n"),)), Assign(name="out_v", op="negative", args=("v",)))
-    store = OutputSpec(write=Write(output="out", index=(Var("n"),), value="out_v"), sweep=(N16,))
+    body = parse_body(
+        """
+        v = load x[n]
+        out_v = negative(v)
+        """
+    )
+    store = _spec("out[n] = out_v", N16)
     tile = _tile(projection((), body, ("out_v",)), N16, output_specs=(store,))
 
     assert tuple(axis.name for axis in tile.place.free) == ("n",)
@@ -308,18 +303,10 @@ def test_a_row_statistic_keeps_its_sweep_a_loop() -> None:
 def test_nested_contraction_promotes_a_swept_column_beside_an_implicit_unit_row() -> None:
     """A nested linear site turns the swept column into grid placement before scheduling."""
     r = Axis("r", 4)
-    stat = reduction(r, (slab("sample", "s", "r"),), (Assign(name="stat__v", op="copy", args=("sample",)),), ("stat",))
-    linear = _matmul(a_index=(Literal(0, "int"), Var("k")), b_index=(Var("k"), Var("n")))
-    root = projection((stat, linear), (Assign(name="result", op="add", args=("stat", "acc")),), ("result",))
-    tile = _tile(
-        root,
-        N16,
-        r,
-        K32,
-        output_specs=(
-            OutputSpec(write=Write(output="out", index=(Literal(0, "int"), Literal(0, "int"), Var("n")), value="result"), sweep=(N16,)),
-        ),
-    )
+    stat = reduction(r, (slab("sample", "s", "r"),), parse_body("stat__v = copy(sample)"), ("stat",))
+    linear = _matmul(a_index="0, k", b_index="k, n")
+    root = projection((stat, linear), parse_body("result = add(stat, acc)"), ("result",))
+    tile = _tile(root, N16, r, K32, output_specs=(_spec("out[0, 0, n] = result", N16),))
 
     assert tuple(axis.name for axis in tile.place.free) == ("_um", "n")
     assert tile.output_specs[0].sweep == ()
@@ -330,17 +317,8 @@ def test_nested_contraction_promotes_a_swept_column_beside_an_implicit_unit_row(
 def test_matvec_recovers_an_implicit_unit_row_through_an_output_reshape() -> None:
     """A split head/value boundary is still one varying matrix column coordinate."""
     n, k = Axis("n", 2048), Axis("k", Dim(1024))
-    product = _matmul(a_index=(Var("k"),), b_index=(Var("k"), Var("n")), extent=1024)
-    tile = _tile(
-        product,
-        k,
-        free=(n,),
-        output_specs=(
-            OutputSpec(
-                write=Write(output="out", index=(Literal(0, "int"), Literal(0, "int"), Var("n") / 128, Var("n") % 128), value="acc")
-            ),
-        ),
-    )
+    product = _matmul(a_index="k", b_index="k, n", extent=1024)
+    tile = _tile(product, k, free=(n,), output_specs=(_spec("out[0, 0, n / 128, n % 128] = acc"),))
 
     assert tuple(axis.name for axis in tile.place.free) == ("_um", "n")
     assert isinstance(tile.op, Fold) and tile.op.as_contraction() is not None
@@ -348,13 +326,8 @@ def test_matvec_recovers_an_implicit_unit_row_through_an_output_reshape() -> Non
 
 def test_matvec_keeps_its_unit_row_beside_grouped_columns() -> None:
     group, n, k = Axis("group", 8), Axis("n", 16), Axis("k", Dim(32))
-    product = _matmul(a_index=(Var("k"),), b_index=(Var("k"), Var("group") * 16 + Var("n")))
-    tile = _tile(
-        product,
-        k,
-        free=(group, n),
-        output_specs=(OutputSpec(Write(output="out", index=(Literal(0, "int"), Var("group"), Var("n")), value="acc")),),
-    )
+    product = _matmul(a_index="k", b_index="k, group * 16 + n")
+    tile = _tile(product, k, free=(group, n), output_specs=(_spec("out[0, group, n] = acc"),))
 
     assert tuple(axis.name for axis in tile.place.free) == ("_um", "group", "n")
     assert tuple(axis.name for axis in tile.grid_sched._mn_for(tile.op)) == ("_um", "n")
@@ -376,12 +349,12 @@ def test_rowless_grouped_columns_gain_a_unit_row(channels, projected, scattered,
     )
     values = tuple(f"out{i}" if projected else f"acc{i}" for i in range(channels))
     root = (
-        projection((product,), tuple(Assign(name=name, op="relu", args=(f"acc{i}",)) for i, name in enumerate(values)), values)
+        projection((product,), parse_body("\n".join(f"{name} = relu(acc{i})" for i, name in enumerate(values))), values)
         if projected
         else product
     )
-    index = (Var("group") / 2, Var("group") % 2, Var("n") * 2) if scattered else (Var("group"), Var("n"))
-    stores = tuple(OutputSpec(Write(output=f"out{i}", index=index, value=value)) for i, value in enumerate(values))
+    index = "group / 2, group % 2, n * 2" if scattered else "group, n"
+    stores = tuple(_spec(f"out{i}[{index}] = {value}") for i, value in enumerate(values))
     tile = TileOp(
         op=root,
         axes=(K32,),
@@ -392,7 +365,7 @@ def test_rowless_grouped_columns_gain_a_unit_row(channels, projected, scattered,
     assert tuple(axis.name for axis in tile.place.free) == ("group", "_um", "n")
     assert tuple(axis.name for axis in tile.place.grid) == (("group", "_um", "n") if mapped else ())
     assert tile.axis_of("_um").extent == Dim(1)
-    assert tuple(spec.write.index for spec in tile.output_specs) == (index,) * channels
+    assert tuple(spec.write.index for spec in tile.output_specs) == tuple(store.write.index for store in stores)
     rebuilt = TileOp(op=tile.op, place=tile.place, axes=tile.axes, output_specs=tile.output_specs)
     assert rebuilt.place == tile.place
     assert rebuilt.identity_key(with_io=True, with_knobs=True) == tile.identity_key(with_io=True, with_knobs=True)
@@ -412,7 +385,7 @@ def test_unit_row_requires_every_output_root_to_be_rowless(second_has_row, mirro
 
         def mirror(root):
             left, right = (
-                projection((edge,), (Assign(name=f"v{i}", op="relu", args=edge.exposes),), (f"v{i}",))
+                projection((edge,), parse_body(f"v{i} = relu({', '.join(edge.exposes)})"), (f"v{i}",))
                 for i, edge in enumerate(root.operands)
             )
             return contraction(K32, right, (left, root.exposes[0]))
@@ -421,15 +394,15 @@ def test_unit_row_requires_every_output_root_to_be_rowless(second_has_row, mirro
         second = mirror(second) if mirror_second else second
     root = projection(
         (first, second),
-        (Assign(name="x", op="relu", args=("acc",)), Assign(name="y", op="relu", args=("acc2",))),
+        parse_body(
+            """
+            x = relu(acc)
+            y = relu(acc2)
+            """
+        ),
         ("x", "y"),
     )
-    tile = _tile(
-        root,
-        K32,
-        free=(group, n),
-        output_specs=tuple(OutputSpec(Write(output=name, index=(Var("group"), Var("n")), value=name)) for name in ("x", "y")),
-    )
+    tile = _tile(root, K32, free=(group, n), output_specs=tuple(_spec(f"{name}[group, n] = {name}") for name in ("x", "y")))
 
     expected = ("group", "n") if second_has_row else ("group", "_um", "n")
     assert tuple(axis.name for axis in tile.place.free) == expected
@@ -459,43 +432,28 @@ def _key_swept_score(shared_reader: bool = False) -> TileOp:
     """A reduced attention shape: a key sweep whose body computes the per-key statistic and rsqrt
     feeding the score contraction's computed B operand cone. With ``shared_reader`` the sweep's
     own result also reads the rsqrt, so the chain does not die into the edge."""
-    d, t = Axis("d", Dim(16)), Axis("t", Dim(8))
-    stat = Loop(
-        axis=d,
-        body=Body(
-            (
-                Load(name="ksq", input="k", index=(Var("t"), Var("d"))),
-                Assign(name="sq", op="multiply", args=("ksq", "ksq")),
-                Accum(name="ss", value="sq", op="add", axes=("d",)),
-            )
-        ),
+    mixed = "\n                    mixed = multiply(acc, inv)" if shared_reader else ""
+    return _lift(
+        parse_body(
+            f"""
+            for m in 0..4:
+                for t in 0..8:
+                    for d in 0..16:
+                        ksq = load k[t, d]
+                        sq = multiply(ksq, ksq)
+                        ss <- add(ss, sq) over d
+                    inv = rsqrt(ss)
+                    for d in 0..16:
+                        qv = load q[m, d]
+                        kv = load k[t, d]
+                        kn = multiply(kv, inv)
+                        prod = multiply(qv, kn)
+                        acc <- add(acc, prod) over d{mixed}
+                    mx <- maximum(mx, {"mixed" if shared_reader else "acc"}) over t
+                out[m] = mx
+            """
+        )
     )
-    score = Loop(
-        axis=d,
-        body=Body(
-            (
-                Load(name="qv", input="q", index=(Var("m"), Var("d"))),
-                Load(name="kv", input="k", index=(Var("t"), Var("d"))),
-                Assign(name="kn", op="multiply", args=("kv", "inv")),
-                Assign(name="prod", op="multiply", args=("qv", "kn")),
-                Accum(name="acc", value="prod", op="add", axes=("d",)),
-            )
-        ),
-    )
-    mixed = (Assign(name="mixed", op="multiply", args=("acc", "inv")),) if shared_reader else ()
-    sweep = Loop(
-        axis=t,
-        body=Body(
-            (
-                stat,
-                Assign(name="inv", op="rsqrt", args=("ss",)),
-                score,
-                *mixed,
-                Accum(name="mx", value="mixed" if shared_reader else "acc", op="maximum", axes=("t",)),
-            )
-        ),
-    )
-    return _lift(Body((Loop(axis=Axis("m", 4), body=Body((sweep, Write(output="out", index=(Var("m"),), value="mx")))),)))
 
 
 def _score_and_b(tile: TileOp) -> tuple[Fold, Fold, Fold]:
@@ -540,20 +498,16 @@ def test_normalization_prunes_an_operand_component_no_reader_reads() -> None:
     dead half stops riding the interface and the loads defining it stop being carried twice."""
     epilogue = projection(
         (slab("acc", "workspace", "m"),),
-        (
-            Load(name="scale", input="sdpa_scale", index=(Literal(0, "int"),)),
-            Assign(name="v10", op="reciprocal", args=("acc",)),
+        parse_body(
+            """
+            scale = load sdpa_scale[0]
+            v10 = reciprocal(acc)
+            """
         ),
         results=("scale", "v10"),
     )
-    root = projection((epilogue,), (Assign(name="out", op="multiply", args=("v10", "v10")),))
-    tile = TileOp(
-        op=root,
-        name="k_epilogue",
-        place=Placement(free=(M8,)),
-        axes=(M8,),
-        output_specs=(OutputSpec(write=Write(output="o", index=(Var("m"),), values=("out",))),),
-    )
+    root = projection((epilogue,), parse_body("out = multiply(v10, v10)"))
+    tile = TileOp(op=root, name="k_epilogue", place=Placement(free=(M8,)), axes=(M8,), output_specs=(_spec("o[m] = out"),))
     (edge,) = tile.op.operands
     assert edge.exposes == ("v10",)  # ``scale`` went with the param nothing bound
     assert tile.op.lift.params == ("v10",)
@@ -567,14 +521,19 @@ def test_unread_planar_state_drops_its_independent_coordinate(stored_second) -> 
     stats = reduction(
         r,
         (slab("xv", "x", "m", "r"), slab("yv", "y", "n", "r")),
-        (Assign(name="sx__v", op="copy", args=("xv",)), Assign(name="sy__v", op="copy", args=("yv",))),
+        parse_body(
+            """
+            sx__v = copy(xv)
+            sy__v = copy(yv)
+            """
+        ),
         ("sx", "sy"),
         "maximum",
     )
-    root = projection((stats,), (Assign(name="out", op="negative", args=("sx",)),), ("out",))
-    specs = [OutputSpec(Write(output="o", index=(Var("m"),), value="out"))]
+    root = projection((stats,), parse_body("out = negative(sx)"), ("out",))
+    specs = [_spec("o[m] = out")]
     if stored_second:
-        specs.append(OutputSpec(Write(output="tap", index=(Var("n"),), value="sy")))
+        specs.append(_spec("tap[n] = sy"))
     tile = _tile(root, N16, r, free=(M8,), output_specs=tuple(specs))
     states = {site.node.exposes: site.node for site in sites(tile.op) if site.node.axis is not None}
     assert set(states) == ({("sx",), ("sy",)} if stored_second else {("sx",)})
@@ -605,14 +564,19 @@ def test_planar_state_pruning_does_not_depend_on_operand_object_sharing() -> Non
     stat = reduction(
         K32,
         (slab("xv", "x", "m", "k"),),
-        (Assign(name="sx__v", op="copy", args=("xv",)), Assign(name="ss__v", op="multiply", args=("xv", "xv"))),
+        parse_body(
+            """
+            sx__v = copy(xv)
+            ss__v = multiply(xv, xv)
+            """
+        ),
         ("sx", "ss"),
     )
 
     def normalized(second):
-        left = projection((stat,), (Assign(name="left", op="negative", args=("sx",)),), ("left",))
-        right = projection((second,), (Assign(name="right", op="negative", args=("ss",)),), ("right",))
-        root = projection((left, right), (Assign(name="out", op="add", args=("left", "right")),), ("out",))
+        left = projection((stat,), parse_body("left = negative(sx)"), ("left",))
+        right = projection((second,), parse_body("right = negative(ss)"), ("right",))
+        root = projection((left, right), parse_body("out = add(left, right)"), ("out",))
         return _tile(root, K32, free=(M8,)).op
 
     assert normalized(stat) == normalized(replace(stat))
@@ -622,13 +586,18 @@ def test_readers_of_independent_shared_statistics_keep_only_their_own_coordinate
     stat = reduction(
         K32,
         (slab("xv", "x", "m", "k"), slab("yv", "y", "n", "k")),
-        (Assign(name="sx__v", op="copy", args=("xv",)), Assign(name="sy__v", op="copy", args=("yv",))),
+        parse_body(
+            """
+            sx__v = copy(xv)
+            sy__v = copy(yv)
+            """
+        ),
         ("sx", "sy"),
         "maximum",
     )
-    left = projection((stat,), (Assign(name="left", op="negative", args=("sx",)),), ("left",))
-    right = projection((stat,), (Assign(name="right", op="negative", args=("sy",)),), ("right",))
-    root = projection((left, right), (Assign(name="out", op="add", args=("left", "right")),), ("out",))
+    left = projection((stat,), parse_body("left = negative(sx)"), ("left",))
+    right = projection((stat,), parse_body("right = negative(sy)"), ("right",))
+    root = projection((left, right), parse_body("out = add(left, right)"), ("out",))
     tile = _tile(root, K32, free=(M8, N16))
     by_result = {site.node.exposes: site.node for site in sites(tile.op)}
     assert by_result[("left",)].free_axes == frozenset({"m"})
@@ -640,12 +609,9 @@ def test_readers_of_independent_shared_statistics_keep_only_their_own_coordinate
 def test_normalization_keeps_a_component_only_a_boundary_store_reads() -> None:
     """A store is a reader too: a sweep's per-cell projection reaches its ``Write`` with no lift
     binding it, so the prune keeps what the output specifications name."""
-    cell = projection((slab("acc", "workspace", "m"),), (Assign(name="v", op="exp", args=("acc",)),), results=("acc", "v"))
-    root = projection((cell,), (Assign(name="out", op="rsqrt", args=("acc",)),))
-    specs = (
-        OutputSpec(write=Write(output="o", index=(Var("m"),), values=("out",))),
-        OutputSpec(write=Write(output="tap", index=(Var("m"),), values=("v",))),
-    )
+    cell = projection((slab("acc", "workspace", "m"),), parse_body("v = exp(acc)"), results=("acc", "v"))
+    root = projection((cell,), parse_body("out = rsqrt(acc)"))
+    specs = (_spec("o[m] = out"), _spec("tap[m] = v"))
     tile = TileOp(op=root, name="k_tap", place=Placement(free=(M8,)), axes=(M8,), output_specs=specs)
     (edge,) = tile.op.operands
     assert edge.exposes == ("acc", "v")  # ``v`` survives on the store's word alone
@@ -670,13 +636,13 @@ def test_normalization_shares_structurally_identical_cones() -> None:
 def _statistic_under_two_binders() -> TileOp:
     """A row statistic feeding a contraction nested under a separate fold binder."""
     r, k, t = Axis("r", Dim(16)), Axis("k", Dim(16)), Axis("t", Dim(4))
-    stat = reduction(r, (slab("xr", "x", "m", "r"),), (Assign(name="ss__v", op="multiply", args=("xr", "xr")),), ("ss",))
+    stat = reduction(r, (slab("xr", "x", "m", "r"),), parse_body("ss__v = multiply(xr, xr)"), ("ss",))
     # The statistic and its rsqrt are the B cone's SOURCE — an operand a projection evaluates
     # before its body, so the chain rides its own edge rather than a sibling body position.
-    source = projection((stat,), (Assign(name="inv", op="rsqrt", args=("ss",)),), ("inv",))
-    b_cone = projection((slab("wv", "w", "t", "k"), source), (Assign(name="wn", op="multiply", args=("wv", "inv")),), ("wn",))
+    source = projection((stat,), parse_body("inv = rsqrt(ss)"), ("inv",))
+    b_cone = projection((slab("wv", "w", "t", "k"), source), parse_body("wn = multiply(wv, inv)"), ("wn",))
     score = contraction(k, slab("qv", "q", "m", "k"), (b_cone, "acc"))
-    sweep = reduction(t, (score,), (Assign(name="mx__v", op="copy", args=("acc",)),), ("mx",), "maximum")
+    sweep = reduction(t, (score,), parse_body("mx__v = copy(acc)"), ("mx",), "maximum")
     return _tile(projection((sweep,), results=("mx",)), r, k, t, free=(Axis("m", 4),))
 
 
@@ -715,19 +681,15 @@ def test_a_fold_reading_a_sweep_axis_declares_it_on_the_operand_edge() -> None:
     than inferred from where it sits."""
     k, j = Axis("k", Dim(4)), Axis("j", Dim(4))
     fold = _reduce_loop(
-        Load(name="xin", input="x", index=(Var("m"), Var("k"), Var("j"))),
-        Accum(name="acc", value="xin", op="add", axes=("k",)),
-        axis=k,
+        """
+        for k in 0..4:
+            xin = load x[m, k, j]
+            acc <- add(acc, xin) over k
+        """
     )
-    root = projection((fold,), (Assign(name="v", op="relu", args=("acc",)),), ("v",))
+    root = projection((fold,), parse_body("v = relu(acc)"), ("v",))
 
-    tile = _tile(
-        root,
-        j,
-        k,
-        free=(M8,),
-        output_specs=(OutputSpec(write=Write(output="out", index=(Var("m"), Var("j")), value="v"), sweep=(j,)),),
-    )
+    tile = _tile(root, j, k, free=(M8,), output_specs=(_spec("out[m, j] = v", j),))
 
     assert not any(isinstance(stmt, Fold) for stmt in tile.op.lift.body)
     (edge,) = tile.op.operands
@@ -744,14 +706,17 @@ def _channels(fold: Fold) -> tuple[Fold, ...]:
 
 def test_contraction_clusters_alpha_equivalent_shared_operands() -> None:
     planar = _reduce_loop(
-        Load(name="left0", input="x", index=(Var("m"), Var("k"))),
-        Load(name="right0", input="w0", index=(Var("n"), Var("k"))),
-        Assign(name="product0", op="multiply", args=("left0", "right0")),
-        Load(name="left1", input="x", index=(Var("m"), Var("k"))),
-        Load(name="right1", input="w1", index=(Var("n"), Var("k"))),
-        Assign(name="product1", op="multiply", args=("left1", "right1")),
-        Accum(name="acc0", value="product0", op="add", axes=("k",)),
-        Accum(name="acc1", value="product1", op="add", axes=("k",)),
+        """
+        for k in 0..32:
+            left0 = load x[m, k]
+            right0 = load w0[n, k]
+            product0 = multiply(left0, right0)
+            left1 = load x[m, k]
+            right1 = load w1[n, k]
+            product1 = multiply(left1, right1)
+            acc0 <- add(acc0, product0) over k
+            acc1 <- add(acc1, product1) over k
+        """
     )
 
     tile = _tile(planar, K32, free=(M8, N16))
@@ -764,16 +729,19 @@ def test_contraction_clusters_alpha_equivalent_shared_operands() -> None:
 
 def test_contraction_coalesces_overlapping_equivalent_shared_operands() -> None:
     planar = _reduce_loop(
-        Load(name="left", input="x", index=(Var("m"), Var("k"))),
-        Load(name="scale", input="s", index=(Var("k"),)),
-        Assign(name="scaled0", op="multiply", args=("left", "scale")),
-        Assign(name="scaled1", op="multiply", args=("left", "scale")),
-        Load(name="right0", input="w0", index=(Var("n"), Var("k"))),
-        Load(name="right1", input="w1", index=(Var("n"), Var("k"))),
-        Assign(name="product0", op="multiply", args=("scaled0", "right0")),
-        Assign(name="product1", op="multiply", args=("scaled1", "right1")),
-        Accum(name="acc0", value="product0", op="add", axes=("k",)),
-        Accum(name="acc1", value="product1", op="add", axes=("k",)),
+        """
+        for k in 0..32:
+            left = load x[m, k]
+            scale = load s[k]
+            scaled0 = multiply(left, scale)
+            scaled1 = multiply(left, scale)
+            right0 = load w0[n, k]
+            right1 = load w1[n, k]
+            product0 = multiply(scaled0, right0)
+            product1 = multiply(scaled1, right1)
+            acc0 <- add(acc0, product0) over k
+            acc1 <- add(acc1, product1) over k
+        """
     )
 
     tile = _tile(planar, K32, free=(M8, N16))
@@ -787,13 +755,16 @@ def test_contraction_coalesces_overlapping_equivalent_shared_operands() -> None:
 
 def test_contraction_orients_a_shared_commutative_argument_first() -> None:
     planar = _reduce_loop(
-        Load(name="left0", input="x0", index=(Var("m"), Var("k"))),
-        Load(name="left1", input="x1", index=(Var("m"), Var("k"))),
-        Load(name="right", input="w", index=(Var("k"), Var("n"))),
-        Assign(name="product0", op="multiply", args=("left0", "right")),
-        Assign(name="product1", op="multiply", args=("left1", "right")),
-        Accum(name="acc0", value="product0", op="add", axes=("k",)),
-        Accum(name="acc1", value="product1", op="add", axes=("k",)),
+        """
+        for k in 0..32:
+            left0 = load x0[m, k]
+            left1 = load x1[m, k]
+            right = load w[k, n]
+            product0 = multiply(left0, right)
+            product1 = multiply(left1, right)
+            acc0 <- add(acc0, product0) over k
+            acc1 <- add(acc1, product1) over k
+        """
     )
 
     tile = _tile(planar, K32, free=(M8, N16))
@@ -807,12 +778,15 @@ def test_contraction_orients_a_shared_commutative_argument_first() -> None:
 
 def test_contraction_computes_an_equivalent_channel_once() -> None:
     planar = _reduce_loop(
-        Load(name="left", input="x", index=(Var("m"), Var("k"))),
-        Load(name="right", input="w", index=(Var("n"), Var("k"))),
-        Assign(name="product0", op="multiply", args=("left", "right")),
-        Assign(name="product1", op="multiply", args=("left", "right")),
-        Accum(name="acc0", value="product0", op="add", axes=("k",)),
-        Accum(name="acc1", value="product1", op="add", axes=("k",)),
+        """
+        for k in 0..32:
+            left = load x[m, k]
+            right = load w[n, k]
+            product0 = multiply(left, right)
+            product1 = multiply(left, right)
+            acc0 <- add(acc0, product0) over k
+            acc1 <- add(acc1, product1) over k
+        """
     )
 
     tile = _tile(planar, K32, free=(M8, N16))
@@ -823,10 +797,10 @@ def test_contraction_computes_an_equivalent_channel_once() -> None:
 
 
 def test_projection_keeps_only_the_maximal_shared_operand() -> None:
-    small = projection(body=(Load(name="a", input="x", index=(Var("m"),)),), results=("a",))
-    large = projection((small,), (Assign(name="b", op="copy", args=("a",)),), ("a", "b"))
+    small = projection(body=parse_body("a = load x[m]"), results=("a",))
+    large = projection((small,), parse_body("b = copy(a)"), ("a", "b"))
 
-    root = projection((small, large), (Assign(name="o", op="copy", args=("b",)),))
+    root = projection((small, large), parse_body("o = copy(b)"))
 
     assert root.operands == (large,)
     assert root.lift.params == ("a", "b")
@@ -835,15 +809,18 @@ def test_projection_keeps_only_the_maximal_shared_operand() -> None:
 
 def test_semiring_merges_overlapping_operand_cones_into_one_multi_result_edge() -> None:
     planar = _reduce_loop(
-        Load(name="left", input="x", index=(Var("m"), Var("k"))),
-        Load(name="scale", input="s", index=(Var("k"),)),
-        Assign(name="scaled", op="multiply", args=("left", "scale")),
-        Load(name="right0", input="w0", index=(Var("k"), Var("n"))),
-        Load(name="right1", input="w1", index=(Var("k"), Var("n"))),
-        Assign(name="product0", op="multiply", args=("left", "right0")),
-        Assign(name="product1", op="multiply", args=("scaled", "right1")),
-        Accum(name="acc0", value="product0", op="add", axes=("k",)),
-        Accum(name="acc1", value="product1", op="add", axes=("k",)),
+        """
+        for k in 0..32:
+            left = load x[m, k]
+            scale = load s[k]
+            scaled = multiply(left, scale)
+            right0 = load w0[k, n]
+            right1 = load w1[k, n]
+            product0 = multiply(left, right0)
+            product1 = multiply(scaled, right1)
+            acc0 <- add(acc0, product0) over k
+            acc1 <- add(acc1, product1) over k
+        """
     )
 
     tile = _tile(planar, K32, free=(M8, N16))
@@ -855,24 +832,18 @@ def test_semiring_merges_overlapping_operand_cones_into_one_multi_result_edge() 
 
 
 def _computed_matmul(*, computed_a: bool, computed_b: bool) -> TileOp:
-    body: list = [Load(name="left", input="x", index=(Var("m"), Var("k")))]
+    body = ["for k in 0..32:", "    left = load x[m, k]"]
     left = "left"
     if computed_a:
-        body += [
-            Load(name="left_scale", input="xs", index=(Var("k"),)),
-            Assign(name="computed_left", op="multiply", args=(left, "left_scale")),
-        ]
+        body += ["    left_scale = load xs[k]", f"    computed_left = multiply({left}, left_scale)"]
         left = "computed_left"
-    body.append(Load(name="right", input="w", index=(Var("k"), Var("n"))))
+    body.append("    right = load w[k, n]")
     right = "right"
     if computed_b:
-        body += [
-            Load(name="right_scale", input="ws", index=(Var("k"),)),
-            Assign(name="computed_right", op="multiply", args=(right, "right_scale")),
-        ]
+        body += ["    right_scale = load ws[k]", f"    computed_right = multiply({right}, right_scale)"]
         right = "computed_right"
-    body += [Assign(name="product", op="multiply", args=(left, right)), Accum(name="acc", value="product", op="add", axes=("k",))]
-    return _tile(projection((_reduce_loop(*body),)), K32, free=(M8, N16))
+    body += [f"    product = multiply({left}, {right})", "    acc <- add(acc, product) over k"]
+    return _tile(projection((_reduce_loop("\n".join(body)),)), K32, free=(M8, N16))
 
 
 def test_contraction_factors_a_computed_operand_cone() -> None:
@@ -904,38 +875,27 @@ def test_contraction_factors_both_computed_operand_cones_idempotently() -> None:
 def test_contraction_preserves_computed_operand_statement_order() -> None:
     """A computed A that reads a statistic through a chain lowers in dependency order: the row-max
     loop, the reciprocal, the value loop that reads it."""
-    j, k = Axis("j", Dim(32)), Axis("k", Dim(64))
-    row_max = Loop(
-        axis=j,
-        body=Body(
-            (Load(name="score", input="s", index=(Var("m"), Var("j"))), Accum(name="row_max", value="score", op="maximum", axes=("j",)))
-        ),
+    tile = _lift(
+        parse_body(
+            """
+            for m in 0..8:
+                for n in 0..16:
+                    for k in 0..64:
+                        for j in 0..32:
+                            score = load s[m, j]
+                            row_max <- maximum(row_max, score) over j
+                        inv = reciprocal(row_max)
+                        for j in 0..32:
+                            v = load v[j, k]
+                            weighted = multiply(inv, v)
+                            value <- add(value, weighted) over j
+                        weight = load w[k, n]
+                        product = multiply(value, weight)
+                        out <- add(out, product) over k
+                    out[m, n] = out
+            """
+        )
     )
-    value = Loop(
-        axis=j,
-        body=Body(
-            (
-                Load(name="v", input="v", index=(Var("j"), Var("k"))),
-                Assign(name="weighted", op="multiply", args=("inv", "v")),
-                Accum(name="value", value="weighted", op="add", axes=("j",)),
-            )
-        ),
-    )
-    outer = Loop(
-        axis=k,
-        body=Body(
-            (
-                row_max,
-                Assign(name="inv", op="reciprocal", args=("row_max",)),
-                value,
-                Load(name="weight", input="w", index=(Var("k"), Var("n"))),
-                Assign(name="product", op="multiply", args=("value", "weight")),
-                Accum(name="out", value="product", op="add", axes=("k",)),
-            )
-        ),
-    )
-    cell = Body((outer, Write(output="out", index=(Var("m"), Var("n")), value="out")))
-    tile = _lift(Body((Loop(axis=M8, body=Body((Loop(axis=N16, body=cell),))),)))
 
     assert tile.op.as_contraction() is not None
     computed = tile.op.operands[0]
@@ -951,14 +911,19 @@ def test_share_common_cones_unifies_internally_renamed_copies() -> None:
     distinct and silently sever the sharing."""
 
     def cone(load: str, product: str, row: str = "m") -> Fold:
-        body = Body((Load(name=load, input="x", index=(Var(row), Var("k"))), Assign(name=product, op="multiply", args=(load, load))))
+        body = parse_body(
+            f"""
+            {load} = load x[{row}, k]
+            {product} = multiply({load}, {load})
+            """
+        )
         return Fold(lift=Lambda.closing(("k",), body, (product,)), init=(0.0,), base=Lambda.componentwise(("add",), ("acc",)))
 
     def consumer(inner: Fold, out: str) -> Fold:
-        return projection((inner,), (Assign(name=out, op="exp", args=("acc",)),), (out,))
+        return projection((inner,), parse_body(f"{out} = exp(acc)"), (out,))
 
     def rooted(second: Fold) -> Fold:
-        root = projection((consumer(cone("l1", "p1"), "u"), consumer(second, "v")), (Assign(name="w", op="add", args=("u", "v")),), ("w",))
+        root = projection((consumer(cone("l1", "p1"), "u"), consumer(second, "v")), parse_body("w = add(u, v)"), ("w",))
         return _share_common_cones(root)
 
     unified = rooted(cone("l2", "p2"))
@@ -977,9 +942,11 @@ def test_a_carrier_of_two_independent_products_becomes_one_term_per_state() -> N
     carrier = reduction(
         a28,
         (slab("wg", "Wg", "n", "a28"), slab("xg", "Xg", "m", "a28"), slab("wu", "Wu", "n", "a28"), slab("xu", "Xu", "m", "a28")),
-        (
-            Assign(name="acc_g__v", op="multiply", args=("wg", "xg")),
-            Assign(name="acc_u__v", op="multiply", args=("wu", "xu")),
+        parse_body(
+            """
+            acc_g__v = multiply(wg, xg)
+            acc_u__v = multiply(wu, xu)
+            """
         ),
         ("acc_g", "acc_u"),
     )
@@ -1002,7 +969,12 @@ def test_a_contraction_beside_a_plain_reduction_keeps_its_own_term() -> None:
     carrier = reduction(
         k,
         (slab("x", "X", "m", "k"), slab("w", "W", "n", "k"), slab("y", "Y", "m", "k"), slab("v", "V", "n", "k")),
-        (Assign(name="sum__v", op="add", args=("x", "w")), Assign(name="product__v", op="multiply", args=("y", "v"))),
+        parse_body(
+            """
+            sum__v = add(x, w)
+            product__v = multiply(y, v)
+            """
+        ),
         ("sum", "product"),
     )
     apart = carrier.per_state()
@@ -1026,23 +998,32 @@ def test_a_carrier_that_folds_whole_or_carries_no_product_stays_one_term() -> No
     statistics = reduction(
         a28,
         (slab("x", "X", "m", "a28"),),
-        (Assign(name="sum__v", op="multiply", args=("x", "x")), Assign(name="count__v", op="add", args=("x", "x"))),
+        parse_body(
+            """
+            sum__v = multiply(x, x)
+            count__v = add(x, x)
+            """
+        ),
         ("sum", "count"),
     )
     assert len(statistics.bilinear_channels()) < 2 and statistics.per_state() is None
 
 
 def test_total_lift_produces_canonical_contraction() -> None:
-    inner = Body(
-        (
-            Load(name="left", input="x", index=(Var("m"), Var("k"))),
-            Load(name="right", input="w", index=(Var("n"), Var("k"))),
-            Assign(name="product", op="multiply", args=("left", "right")),
-            Accum(name="acc", value="product", op="add", axes=("k",)),
+    tile = _lift(
+        parse_body(
+            """
+            for m in 0..8:
+                for n in 0..16:
+                    for k in 0..32:
+                        left = load x[m, k]
+                        right = load w[n, k]
+                        product = multiply(left, right)
+                        acc <- add(acc, product) over k
+                    out[m, n] = acc
+            """
         )
     )
-    cell = Body((Loop(axis=K32, body=inner), Write(output="out", index=(Var("m"), Var("n")), value="acc")))
-    tile = _lift(Body((Loop(axis=M8, body=Body((Loop(axis=N16, body=cell),))),)))
 
     assert tile.op.as_contraction() is not None
     assert tile.op.axis is not None
@@ -1052,18 +1033,19 @@ def _fed_chain_root(feed: bool) -> Fold:
     """A scalar chain beside a reduce whose step reads the chain's result when ``feed`` (the composed
     placement cut's consumer shape), lifted: the chain becomes the reduce's PROVIDER operand."""
     scale_arg = "v25" if feed else "left"
-    loop = Loop(
-        axis=Axis("k", Dim(8)),
-        body=Body(
-            (
-                Load(name="left", input="x", index=(Var("k"),)),
-                Assign(name="scaled", op="multiply", args=("left", scale_arg)),
-                Accum(name="acc", value="scaled", op="add", axes=("k",)),
-            )
-        ),
+    return _lift(
+        parse_body(
+            f"""
+            ws = load cutbuf[0]
+            v25 = rsqrt(ws)
+            for k in 0..8:
+                left = load x[k]
+                scaled = multiply(left, {scale_arg})
+                acc <- add(acc, scaled) over k
+            out[0] = acc
+            """
+        )
     )
-    chain = (Load(name="ws", input="cutbuf", index=(Literal(0, "int"),)), Assign(name="v25", op="rsqrt", args=("ws",)))
-    return _lift(Body((*chain, loop, Write(output="out", index=(Literal(0, "int"),), value="acc"))))
 
 
 def test_a_body_fed_fold_takes_its_provider_as_a_sibling_operand() -> None:
@@ -1104,8 +1086,8 @@ def test_a_name_two_stores_ride_at_different_extents_is_not_one_axis() -> None:
     from emmy.compiler.ir.tile.ir import promoted_sweep
 
     op = projection((_matmul(),))
-    wide = OutputSpec(write=Write(output="wide", index=(Var("m"), Var("n")), value="acc"), sweep=(N16,))
-    narrow = OutputSpec(write=Write(output="narrow", index=(Var("m"), Var("n")), value="acc"), sweep=(Axis("n", 8),))
+    wide = _spec("wide[m, n] = acc", N16)
+    narrow = _spec("narrow[m, n] = acc", Axis("n", 8))
 
     assert promoted_sweep(op, (wide, wide)) == {"n"}, "one axis two stores ride at one extent still promotes"
     assert promoted_sweep(op, (wide, narrow)) == set()
@@ -1119,7 +1101,7 @@ def test_a_pointwise_sweep_under_a_unit_row_promotes() -> None:
     from emmy.compiler.ir.tile.ir import promoted_sweep
 
     op = projection((slab("x", "x", "h", "d"),))
-    store = OutputSpec(write=Write(output="out", index=(Var("h"), Var("d")), value="x"), sweep=(Axis("h", 16), Axis("d", 512)))
+    store = _spec("out[h, d] = x", Axis("h", 16), Axis("d", 512))
 
     assert promoted_sweep(op, (store,), free=(Axis("_row", 1),)) == {"h", "d"}
     assert promoted_sweep(op, (store,), free=(Axis("m", 4),)) == set(), "a real free axis still leaves the sweep to the schedule"
@@ -1130,26 +1112,10 @@ def test_root_collapses_onto_the_operand_the_stores_read() -> None:
     result is a statistic nothing keeps. Left standing, the root holds an invariant reduce alive, and
     ``promoted_sweep`` will not promote a store sweep past a reduce that does not read it — so the
     kernel keeps a one-axis placement and walks every cell of the sweep in one block."""
-    carried = reduction(
-        K32,
-        (slab("near", "x", "m", "n", "k"),),
-        (Assign(name="carried__v", op="multiply", args=("near", "near")),),
-        ("carried",),
-    )
-    invariant = reduction(
-        K32,
-        (slab("far", "y", Literal(0, "int"), Var("k")),),
-        (Assign(name="stat__v", op="multiply", args=("far", "far")),),
-        ("stat",),
-    )
-    root = projection((invariant, carried), (Assign(name="dead", op="multiply", args=("stat", "stat")),), ("dead",))
-    tile = _tile(
-        root,
-        N16,
-        K32,
-        free=(M8,),
-        output_specs=(OutputSpec(write=Write(output="out", index=(Var("m"), Var("n")), value="carried"), sweep=(N16,)),),
-    )
+    carried = reduction(K32, (slab("near", "x", "m", "n", "k"),), parse_body("carried__v = multiply(near, near)"), ("carried",))
+    invariant = reduction(K32, (slab("far", "y", Literal(0, "int"), Var("k")),), parse_body("stat__v = multiply(far, far)"), ("stat",))
+    root = projection((invariant, carried), parse_body("dead = multiply(stat, stat)"), ("dead",))
+    tile = _tile(root, N16, K32, free=(M8,), output_specs=(_spec("out[m, n] = carried", N16),))
 
     assert tile.op == carried  # the root and the operand only its dead lift bound are gone
     assert all(_input(edge) != "y" for edge in tile.op.operands)

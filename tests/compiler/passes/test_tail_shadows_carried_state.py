@@ -13,9 +13,8 @@ untouched: that read is how a per-cell epilogue reaches its accumulator.
 from __future__ import annotations
 
 from emmy.compiler.ir.axis import Axis
-from emmy.compiler.ir.expression import Var
 from emmy.compiler.ir.schedule import Tile
-from emmy.compiler.ir.stmt import Accum, Assign, Body, Load, Loop, Write
+from emmy.compiler.ir.stmt import Body, parse_body
 from emmy.compiler.pipeline.passes.lowering.kernel._atom import reduce_codegen, store_sink
 from emmy.compiler.pipeline.passes.lowering.kernel._tiling import atomize, grid_tile, register_tile, unit_tile
 from tests.compiler.terms import contraction
@@ -27,11 +26,8 @@ _PLAN = Tile(units=(2, 2), regs=(2, 2))
 def _tile(epilogue: Body):
     """The scalar contraction ``a ⊗ b`` with ``epilogue`` as its projection tail, sealed through
     ``grid_tile`` the way ``_factor._bind``'s output-tiled arm seals it."""
-    c = contraction(
-        _K,
-        Load(name="a", input="A", index=(Var("m"), Var("k"))),
-        (Load(name="b", input="B", index=(Var("k"), Var("n"))), "acc"),
-    )
+    a, b = parse_body("a = load A[m, k]\nb = load B[k, n]")
+    c = contraction(_K, a, (b, "acc"))
     plan = _PLAN.at(_M, _N)
     state, region = reduce_codegen(c, plan, k_axis=_K, axes=(_M, _N, _K))
     return grid_tile(
@@ -51,20 +47,14 @@ def _definitions(tile, name: str) -> int:
 
 def _recomputing_tail() -> Body:
     """A tail that folds the same sum again into a name the term also carries."""
-    return Body(
-        (
-            Loop(
-                axis=_K,
-                body=Body(
-                    (
-                        Load(name="again", input="A", index=(Var("m"), Var("k"))),
-                        Accum(name="acc", value="again", op="add", axes=("k",)),
-                    )
-                ),
-            ),
-            Assign(name="out", op="multiply", args=("acc", "acc")),
-            Write(output="out", index=(Var("m"), Var("n")), value="out"),
-        )
+    return parse_body(
+        """
+        for k in 0..4:
+            again = load A[m, k]
+            acc <- add(acc, again) over k
+        out = multiply(acc, acc)
+        out[m, n] = out
+        """
     )
 
 
@@ -77,11 +67,6 @@ def test_a_tail_that_recomputes_a_carried_state_does_not_redeclare_the_cell_accu
 def test_a_tail_that_only_reads_the_state_still_reads_the_cell_accumulator() -> None:
     """The ordinary epilogue: no definition of its own, so nothing is renamed and the read resolves
     to the cell's accumulator through the plain suffix."""
-    tail = Body(
-        (
-            Assign(name="scaled", op="multiply", args=("acc", "acc")),
-            Write(output="out", index=(Var("m"), Var("n")), value="scaled"),
-        )
-    )
+    tail = parse_body("scaled = multiply(acc, acc)\nout[m, n] = scaled")
     reads = {dep for stmt in Body(_tile(tail).body).iter() for dep in stmt.deps()}
     assert "acc__c0_0" in reads and not any(name.startswith("acc__own") for name in reads)
