@@ -57,7 +57,7 @@ def _bounds(stmts) -> tuple:
 
 
 def _pretty(expr) -> str:
-    return expr.pretty() if hasattr(expr, "pretty") else str(expr)
+    return str(expr)
 
 
 def test_a_causal_mask_stops_the_stream_at_the_block_end() -> None:

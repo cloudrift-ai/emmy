@@ -1532,7 +1532,7 @@ def _dim_to_json(d):
     try:
         return d.value
     except TypeError:
-        return d.expr.pretty()
+        return str(d.expr)
 
 
 def _rename_alias(node: Node, old: str, new: str) -> None:
@@ -1689,5 +1689,5 @@ def _fmt_indexmap(node: Node, graph: Graph) -> str:
         if isinstance(e, Literal) and e.value == 0 and dim < len(input_shape) and input_shape[dim] == 1:
             coord_strs.append("na")
         else:
-            coord_strs.append(e.substitute(placeholder_rename).pretty())
+            coord_strs.append(str(e.substitute(placeholder_rename)))
     return f"{input_name}[{', '.join(coord_strs)}]"

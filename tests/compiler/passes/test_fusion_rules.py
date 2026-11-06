@@ -1045,7 +1045,7 @@ def test_output_reshape_folds_into_reduce_producer(rows):
     assert len(writes) == 1 and writes[0].output == "out"
     idx = writes[0].index
     assert len(idx) == 2, "the retargeted Write indexes the flat output shape"
-    assert "/" not in idx[1].pretty() and "%" not in idx[1].pretty(), f"clean affine index expected: {idx[1].pretty()}"
+    assert "/" not in str(idx[1]) and "%" not in str(idx[1]), f"clean affine index expected: {idx[1]}"
     # The producer's loops carry the kernel: no loop over the flat width, under which the reduce
     # would run once per output column.
     assert not any(loop.axis.extent == Dim(H * D) for loop in kernels[0].op.body.loops), "the reduce runs per column"

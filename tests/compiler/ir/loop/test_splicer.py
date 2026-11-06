@@ -885,7 +885,7 @@ def test_output_equivalence_cluster_retargets_reduce_through_copy_chain(monkeypa
     assert _count_kind(merged, Accum) == 1
     assert [write.output for write in merged.writes] == ["out"]
     assert len(merged.writes[0].index) == 1
-    assert "/" not in merged.writes[0].index[0].pretty() and "%" not in merged.writes[0].index[0].pretty()
+    assert "/" not in str(merged.writes[0].index[0]) and "%" not in str(merged.writes[0].index[0])
 
 
 def test_output_equivalence_retargets_transpose_in_canonical_storage_order():

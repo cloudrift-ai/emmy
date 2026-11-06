@@ -48,7 +48,7 @@ class Expr(Wire):
     wire_tag = "expr"
 
     def to_wire(self) -> str:
-        return _spell(self, 0)
+        return str(self)
 
     @classmethod
     def from_wire(cls, value: object, where: str = "expr") -> Expr:
@@ -93,13 +93,9 @@ class Expr(Wire):
         """Less-than (``<``)."""
         return BinaryExpr("<", self, _coerce(other))
 
-    def pretty(self) -> str:
-        """Format this Expr as a compact, human-readable string.
-
-        Default raises so any Expr subclass that forgot to override is
-        surfaced loudly. Concrete subclasses override.
-        """
-        raise NotImplementedError(f"{type(self).__name__}.pretty not implemented")
+    def __str__(self) -> str:
+        """The expression's text (:func:`parse`'s inverse): what it is on the wire and in every listing."""
+        return _spell(self, 0)
 
     def substitute(self, mapping: dict[str, Expr]) -> Expr:
         """Replace ``Var(name)`` subterms with ``mapping[name]``.
@@ -273,9 +269,6 @@ class Var(Expr):
     def eval(self, env: dict[str, object]) -> object:
         return env[self.name]
 
-    def pretty(self) -> str:
-        return self.name
-
     def substitute(self, mapping: dict[str, Expr]) -> Expr:
         return mapping.get(self.name, self)
 
@@ -314,9 +307,6 @@ class Literal(Expr):
 
     def eval(self, env: dict[str, object]) -> object:
         return self.value
-
-    def pretty(self) -> str:
-        return str(self.value)
 
     def substitute(self, mapping: dict[str, Expr]) -> Expr:
         return self
@@ -371,9 +361,6 @@ class BinaryExpr(Expr):
         # Single source of binary-op semantics: ``apply_binop`` (also used by
         # constant folding) — eval only supplies the evaluated operands.
         return apply_binop(self.op, self.left.eval(env), self.right.eval(env))
-
-    def pretty(self) -> str:
-        return f"({self.left.pretty()} {self.op} {self.right.pretty()})"
 
     def substitute(self, mapping: dict[str, Expr]) -> Expr:
         return BinaryExpr(self.op, self.left.substitute(mapping), self.right.substitute(mapping))
@@ -531,9 +518,6 @@ class Builtin(Expr):
     def eval(self, env: dict[str, object]) -> object:
         raise NotImplementedError(f"Builtin {self.name!r} is GPU-only; cannot eval in numpy")
 
-    def pretty(self) -> str:
-        return self.name
-
     def substitute(self, mapping: dict[str, Expr]) -> Expr:
         return self
 
@@ -572,9 +556,6 @@ class FuncCallExpr(Expr):
         except ValueError as e:
             raise NotImplementedError(f"FuncCallExpr.eval: unknown intrinsic {self.name!r}") from e
         return op(*(a.eval(env) for a in self.args))
-
-    def pretty(self) -> str:
-        return f"{self.name}({', '.join(a.pretty() for a in self.args)})"
 
     def substitute(self, mapping: dict[str, Expr]) -> Expr:
         return FuncCallExpr(self.name, tuple(a.substitute(mapping) for a in self.args))
@@ -616,9 +597,6 @@ class TernaryExpr(Expr):
             return self.if_true.eval(env) if bool(cond) else self.if_false.eval(env)
         return np.where(cond, self.if_true.eval(env), self.if_false.eval(env))
 
-    def pretty(self) -> str:
-        return f"({self.cond.pretty()} ? {self.if_true.pretty()} : {self.if_false.pretty()})"
-
     def substitute(self, mapping: dict[str, Expr]) -> Expr:
         return TernaryExpr(self.cond.substitute(mapping), self.if_true.substitute(mapping), self.if_false.substitute(mapping))
 
@@ -659,9 +637,6 @@ class CastExpr(Expr):
             return np.asarray(v).astype(np.int64) if hasattr(v, "__array__") else int(v)
         return v
 
-    def pretty(self) -> str:
-        return f"({self.dtype}){self.expr.pretty()}"
-
     def substitute(self, mapping: dict[str, Expr]) -> Expr:
         return CastExpr(self.dtype, self.expr.substitute(mapping))
 
@@ -693,9 +668,6 @@ class FlatIndex(Expr):
 
     def eval(self, env: dict[str, object]) -> object:
         raise TypeError("FlatIndex has no host evaluation: the buffer shape is a render-time fact")
-
-    def pretty(self) -> str:
-        return f"{self.buffer}[{', '.join(e.pretty() for e in self.index)}]"
 
     def substitute(self, mapping: dict[str, Expr]) -> Expr:
         return FlatIndex(self.buffer, tuple(e.substitute(mapping) for e in self.index))
@@ -761,10 +733,18 @@ def _float_lit(v: float) -> str:
 #: How tightly an atom binds: a cast's operand is written at this level, so anything but an atom is parenthesized.
 _ATOM = 100
 _NAME = re.compile(r"[A-Za-z_]\w*(?:\.[A-Za-z_]\w*)?")
-_TOKEN = re.compile(
-    r"\s*(?:(?P<number>\d+(?:\.\d*)?(?:[eE][+-]?\d+)?)|(?P<name>[A-Za-z_]\w*(?:\.[A-Za-z_]\w*)?)"
-    r"|(?P<op>\|\||&&|==|!=|<=|>=|<<|>>|//|[-+*/%<>^&|?:(),]))"
-)
+#: Names the reader gives a meaning of their own, so a variable or a buffer of that name is written quoted.
+_RESERVED = frozenset({"true", "false", "inf", "nan"})
+
+
+def spell_name(name: str, reserved: frozenset[str] = frozenset()) -> str:
+    """``name`` as the reader reads a name back: bare when it is an identifier with no other meaning, else between
+    backticks (a ``$0`` port, a name that is also a built-in or a keyword)."""
+    if _NAME.fullmatch(name) and name not in BUILTINS and name not in _RESERVED and name not in reserved:
+        return name
+    if "`" in name or "\n" in name:
+        raise ValueError(f"the name {name!r} has no spelling")
+    return f"`{name}`"
 
 
 def _spell(expr: Expr, parent: int) -> str:
@@ -772,9 +752,7 @@ def _spell(expr: Expr, parent: int) -> str:
     ternary's 0, :data:`_ATOM`)."""
     match expr:
         case Var(name):
-            if name in BUILTINS or name in ("true", "false") or not _NAME.fullmatch(name):
-                raise ValueError(f"the variable name {name!r} has no spelling: the reader would not read it back as a variable")
-            return name
+            return spell_name(name)
         case Builtin(name):
             if name not in BUILTINS:
                 raise ValueError(f"{name!r} is no GPU built-in")
@@ -795,39 +773,65 @@ def _spell(expr: Expr, parent: int) -> str:
             return f"({text})" if parent > 0 else text
         case CastExpr(dtype, inner):
             return f"({dtype}){_spell(inner, _ATOM)}"
-    raise ValueError(f"a {type(expr).__name__} has no wire spelling")
+        case FlatIndex(buffer, index):
+            return f"{spell_name(buffer)}[{', '.join(_spell(e, 0) for e in index)}]"
+    raise ValueError(f"a {type(expr).__name__} has no spelling")
 
 
 def _literal_text(value: object, dtype: str) -> str:
-    """A literal written by its dtype: ``3``, ``0.5`` / ``2.0`` (always a point or an exponent), ``true``."""
+    """A literal written by its dtype: ``3``, ``0.5`` / ``2.0`` / ``inf`` (a point, an exponent or a word), ``true``."""
     if dtype == "bool":
         return "true" if value else "false"
     if dtype == "int" and int(value) == value:
         return str(int(value))
-    if dtype == "float" and np.isfinite(value):
+    if dtype == "float":
         return repr(float(value))
     raise ValueError(f"the literal {value!r} of dtype {dtype!r} has no spelling")
 
 
 def parse(text: str) -> Expr:
-    """The expression ``text`` spells — :meth:`Expr.to_wire`'s inverse, by precedence climbing over
-    :data:`_PRECEDENCE`. A parse error names its position in the text."""
-    return _Parser(text).parse()
+    """The expression ``text`` spells — ``str(expr)``'s inverse, by precedence climbing over :data:`_PRECEDENCE`.
+    A parse error names its position in the text."""
+    parser = Parser(text)
+    expr = parser.expression()
+    if parser.peek() is not None:
+        raise parser.error("unexpected text")
+    return expr
 
 
-class _Parser:
+class Parser:
+    """The reader of an expression's text. Text that holds expressions among other things (a statement) is read by
+    a subclass: it adds its own punctuation to :attr:`PUNCTUATION` and takes each expression with
+    :meth:`expression`, which stops at the first token no expression continues with."""
+
+    #: Operators and punctuation, longest first where one starts another.
+    PUNCTUATION: tuple[str, ...] = ("||", "&&", "==", "!=", "<=", ">=", "<<", ">>", "//", *"-+*/%<>^&|?:(),[]")
+    _TOKENS: dict[type, re.Pattern] = {}
+
     def __init__(self, text: str) -> None:
         self.text = text
         self.tokens: list[tuple[str, str, int]] = []
+        pattern = self._pattern()
         position = 0
         while text[position:].strip():
-            match = _TOKEN.match(text, position)
+            match = pattern.match(text, position)
             if match is None:
                 raise self.error("unexpected character", len(text) - len(text[position:].lstrip()))
             kind = match.lastgroup
             self.tokens.append((kind, match.group(kind), match.start(kind)))
             position = match.end()
         self.index = 0
+
+    @classmethod
+    def _pattern(cls) -> re.Pattern:
+        if cls not in Parser._TOKENS:
+            ops = "|".join(re.escape(op) for op in sorted(cls.PUNCTUATION, key=len, reverse=True))
+            # A number needs a digit after its point, so ``0..4`` is a number, two dots and a number.
+            Parser._TOKENS[cls] = re.compile(
+                r"\s*(?:(?P<number>\d+(?:\.\d+)?(?:[eE][+-]?\d+)?)|(?P<name>" + _NAME.pattern + r")|`(?P<quoted>[^`\n]+)`"
+                rf"|(?P<op>{ops}))"
+            )
+        return Parser._TOKENS[cls]
 
     def error(self, message: str, position: int | None = None) -> ValueError:
         if position is None:
@@ -846,29 +850,36 @@ class _Parser:
         return token
 
     def expect(self, op: str) -> None:
-        token = self.peek()
-        if token is None or token[:2] != ("op", op):
+        if not self.accept(op):
             raise self.error(f"expected {op!r}")
+
+    def accept(self, op: str) -> bool:
+        """Step over ``op`` when it is next."""
+        if not self.at(op):
+            return False
         self.index += 1
+        return True
 
     def at(self, op: str, ahead: int = 0) -> bool:
         token = self.peek(ahead)
         return token is not None and token[:2] == ("op", op)
 
-    def parse(self) -> Expr:
-        expr = self.ternary()
-        if self.peek() is not None:
-            raise self.error("unexpected text")
-        return expr
-
-    def ternary(self) -> Expr:
+    def expression(self) -> Expr:
         cond = self.binary(1)
-        if not self.at("?"):
+        if not self.accept("?"):
             return cond
-        self.index += 1
-        if_true = self.ternary()
+        if_true = self.expression()
         self.expect(":")
-        return TernaryExpr(cond, if_true, self.ternary())
+        return TernaryExpr(cond, if_true, self.expression())
+
+    def expressions(self, close: str) -> tuple[Expr, ...]:
+        """A comma-separated list of expressions up to ``close``, which is consumed."""
+        items: list[Expr] = []
+        while not self.accept(close):
+            if items:
+                self.expect(",")
+            items.append(self.expression())
+        return tuple(items)
 
     def binary(self, least: int) -> Expr:
         left = self.operand()
@@ -877,32 +888,39 @@ class _Parser:
             left = BinaryExpr(token[1], left, self.binary(_PRECEDENCE[token[1]] + 1))
         return left
 
-    def operand(self) -> Expr:
-        kind, value, _position = self.take()
+    def number(self) -> Literal | None:
+        """The number next in the text, signed or not, or ``None`` when what is next is no number."""
+        sign = "-" if self.at("-") else ""
+        kind, value, _position = self.peek(len(sign)) or ("", "", 0)
         if kind == "number":
-            return _number(value)
-        if kind == "op" and value == "-" and (token := self.peek()) is not None and token[0] == "number":
-            self.index += 1
-            return _number(f"-{token[1]}")
+            literal = Literal(float(sign + value), "float") if any(mark in value for mark in ".eE") else Literal(int(sign + value), "int")
+        elif kind == "name" and value in ("inf", "nan"):
+            literal = Literal(float(sign + value), "float")
+        else:
+            return None
+        self.index += len(sign) + 1
+        return literal
+
+    def operand(self) -> Expr:
+        if (literal := self.number()) is not None:
+            return literal
+        kind, value, _position = self.take()
+        if kind == "quoted":
+            return FlatIndex(value, self.expressions("]")) if self.accept("[") else Var(value)
         if kind == "name":
             if value in ("true", "false"):
                 return Literal(value == "true", "bool")
-            if self.at("("):
-                self.index += 1
-                args = []
-                while not self.at(")"):
-                    if args:
-                        self.expect(",")
-                    args.append(self.ternary())
-                self.index += 1
-                return FuncCallExpr(value, tuple(args))
+            if self.accept("("):
+                return FuncCallExpr(value, self.expressions(")"))
+            if self.accept("["):
+                return FlatIndex(value, self.expressions("]"))
             return Builtin(value) if value in BUILTINS else Var(value)
         if kind == "op" and value == "(":
             # ``(dtype)`` followed by an operand is a cast; the writer never parenthesizes a lone name otherwise.
             if (token := self.peek()) is not None and token[0] == "name" and self.at(")", 1) and self._starts_operand(2):
                 self.index += 2
                 return CastExpr(token[1], self.operand())
-            inner = self.ternary()
+            inner = self.expression()
             self.expect(")")
             return inner
         self.index -= 1
@@ -910,13 +928,7 @@ class _Parser:
 
     def _starts_operand(self, ahead: int) -> bool:
         token = self.peek(ahead)
-        return token is not None and (token[0] in ("number", "name") or token[1] == "(")
-
-
-def _number(text: str) -> Literal:
-    if any(mark in text for mark in ".eE"):
-        return Literal(float(text), "float")
-    return Literal(int(text), "int")
+        return token is not None and (token[0] in ("number", "name", "quoted") or token[1] == "(")
 
 
 # ---------------------------------------------------------------------------

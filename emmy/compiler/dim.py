@@ -259,7 +259,7 @@ class Dim(Wire):
             return str(self.expr.value)
         if isinstance(self.expr, Var):
             return self.expr.name
-        return self.expr.pretty()
+        return str(self.expr)
 
 
 def to_dim(value: int | str | Dim | Expr) -> Dim:

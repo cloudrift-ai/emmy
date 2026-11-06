@@ -31,7 +31,7 @@ def test_mod_factor_cancellation_preserves_value(coeff: int, modulus: int):
     e = BinaryExpr("%", BinaryExpr("*", f, Literal(coeff, "int")), Literal(modulus, "int"))
     s = _simplify(e)
     for v in range(0, 256):
-        assert e.eval({"f": v}) == s.eval({"f": v}), f"mismatch at f={v}: {e.pretty()} vs {s.pretty()}"
+        assert e.eval({"f": v}) == s.eval({"f": v}), f"mismatch at f={v}: {e} vs {s}"
 
 
 def test_mod_cancel_specific_shape():

@@ -148,7 +148,7 @@ class Load(Stmt):
         return self.input in literal_constants
 
     def pretty(self, indent: str = "") -> list[str]:
-        idx = ", ".join(e.pretty() for e in self.index)
+        idx = ", ".join(str(e) for e in self.index)
         names = ", ".join(self.names)
         return [f"{indent}{names} = load {self.input}[{idx}]"]
 
@@ -473,7 +473,7 @@ class Carry(Stmt):
 
     def pretty(self, indent: str = "") -> list[str]:
         seed = self.seed if isinstance(self.seed, str) else f"{self.seed:g}"
-        return [f"{indent}{self.name}[{', '.join(e.pretty() for e in self.index)}] <- {self.value}  (seed {seed})"]
+        return [f"{indent}{self.name}[{', '.join(str(e) for e in self.index)}] <- {self.value}  (seed {seed})"]
 
     def _rewrite(self, rename, sigma, axis_fn):  # noqa: ANN001, ANN202 — see ``Stmt.rewrite``
         index = tuple(sigma.apply(e).rename(rename) for e in self.index)
@@ -512,7 +512,7 @@ class Pre(Stmt):
         return self.replace(index=exprs)
 
     def pretty(self, indent: str = "") -> list[str]:
-        return [f"{indent}{self.name} = pre {self.carrier}[{', '.join(e.pretty() for e in self.index)}]"]
+        return [f"{indent}{self.name} = pre {self.carrier}[{', '.join(str(e) for e in self.index)}]"]
 
     def _rewrite(self, rename, sigma, axis_fn):  # noqa: ANN001, ANN202 — see ``Stmt.rewrite``
         return Pre(name=rename(self.name), carrier=rename(self.carrier), index=tuple(sigma.apply(e).rename(rename) for e in self.index))
@@ -604,7 +604,7 @@ class Let(Stmt):
 
     def pretty(self, indent: str = "") -> list[str]:
         prefix = f"{self.dtype.name} " if self.dtype is not None else ""
-        return [f"{indent}{prefix}{self.name} = {self.value.pretty()}"]
+        return [f"{indent}{prefix}{self.name} = {self.value}"]
 
     def _rewrite(self, rename, sigma, axis_fn):  # noqa: ANN001, ANN202 — see ``Stmt.rewrite``
         return Let(name=rename(self.name), value=sigma.apply(self.value).rename(rename), dtype=self.dtype)
@@ -727,7 +727,7 @@ class Write(Stmt):
         return True
 
     def pretty(self, indent: str = "") -> list[str]:
-        idx = ", ".join(e.pretty() for e in self.index)
+        idx = ", ".join(str(e) for e in self.index)
         swz = f" swz={self.swizzle}" if self.swizzle != "NONE" else ""
         if self.is_vector:
             return [f"{indent}{self.output}[{idx}]{swz} = ({', '.join(self.values)})"]
@@ -792,7 +792,7 @@ class Select(Stmt):
         lines: list[str] = []
         for bi, br in enumerate(self.branches):
             prefix = f"{self.name} =" if bi == 0 else f"{' ' * len(self.name)}  "
-            lines.append(f"{indent}{prefix} {br.value} when ({br.select.pretty()})")
+            lines.append(f"{indent}{prefix} {br.value} when ({br.select})")
         return lines
 
     def _rewrite(self, rename, sigma, axis_fn):  # noqa: ANN001, ANN202 — see ``Stmt.rewrite``

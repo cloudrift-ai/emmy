@@ -247,7 +247,7 @@ def test_packed_operand_split_pair_fuses():
     n = chain[1].axis.name
     wv = next(s for s in op.body.iter() if isinstance(s, Load) and s.input == "w")
     assert wv.index[0] == Var(n), "the packed row dim must collapse to the bare fused axis"
-    assert n not in wv.index[1].free_vars(), f"the row axis stayed inside the packed offset: {wv.index[1].pretty()}"
+    assert n not in wv.index[1].free_vars(), f"the row axis stayed inside the packed offset: {wv.index[1]}"
 
 
 def test_packed_split_nest_classifies_as_contraction():

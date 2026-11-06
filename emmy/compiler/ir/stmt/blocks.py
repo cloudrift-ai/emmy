@@ -229,9 +229,9 @@ class StridedLoop(Stmt):
         return any(isinstance(s, _CARRIERS) for s in self.body)
 
     def pretty(self, indent: str = "") -> list[str]:
-        start = self.start.pretty()
-        step = self.step.pretty() if isinstance(self.step, Expr) else self.step
-        bound = self.end.pretty() if self.end is not None else self.axis.extent
+        start = str(self.start)
+        step = str(self.step) if isinstance(self.step, Expr) else self.step
+        bound = str(self.end) if self.end is not None else self.axis.extent
         head = f"{indent}for {self.axis.name} in {start}..{bound}:{step}{_source_suffix(self.axis)}"
         return [head, *pretty_body(self.body, indent + INDENT)]
 
@@ -298,7 +298,7 @@ class Cond(Stmt):
         return self.replace(cond=exprs[0])
 
     def pretty(self, indent: str = "") -> list[str]:
-        lines = [f"{indent}if ({self.cond.pretty()}):", *pretty_body(self.body, indent + INDENT)]
+        lines = [f"{indent}if ({self.cond}):", *pretty_body(self.body, indent + INDENT)]
         if self.else_body:
             lines.append(f"{indent}else:")
             lines.extend(pretty_body(self.else_body, indent + INDENT))

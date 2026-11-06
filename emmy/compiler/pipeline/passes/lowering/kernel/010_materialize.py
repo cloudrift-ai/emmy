@@ -177,11 +177,11 @@ def _binding(stmt) -> tuple | None:
     compare. A scalar ``Load`` binds an ADDRESS; ``Assign`` and ``Let`` bind EXPRESSIONS over names the
     scope has already bound. A second, identical binding computes the same value."""
     if isinstance(stmt, Load) and stmt.is_scalar:
-        return (stmt.input, tuple(e.pretty() for e in stmt.index))
+        return (stmt.input, tuple(str(e) for e in stmt.index))
     if isinstance(stmt, Assign):
         return (stmt.op.name, stmt.args, stmt.dtype)
     if isinstance(stmt, Let):
-        return (Let, stmt.value.pretty(), stmt.dtype)  # spelled, so a negative zero stays distinct from zero
+        return (Let, str(stmt.value), stmt.dtype)  # spelled, so a negative zero stays distinct from zero
     return None
 
 

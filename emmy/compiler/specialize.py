@@ -86,7 +86,7 @@ def rehint_program(graph: Graph, sizes: Mapping[str, int]) -> Graph:
         if isinstance(value.expr, Var):
             return Dim(value.expr, hint=sizes[value.expr.name])
         if missing := sorted(value.expr.free_vars() - set(sizes)):
-            raise ValueError(f"no size for {', '.join(missing)} in the dim {value.expr.pretty()}")
+            raise ValueError(f"no size for {', '.join(missing)} in the dim {value.expr}")
         return Dim(value.expr, hint=int(value.expr.eval(dict(sizes))))
 
     return rehint(graph)

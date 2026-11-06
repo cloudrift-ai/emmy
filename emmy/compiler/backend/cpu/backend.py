@@ -156,7 +156,7 @@ def _static_or_name(dim) -> int | str:  # noqa: ANN001
     try:
         return dim.value
     except (TypeError, ValueError) as exc:
-        raise Unsupported(f"composite dim {dim.expr.pretty()}") from exc
+        raise Unsupported(f"composite dim {dim.expr}") from exc
 
 
 def _build(graph: Graph, node, schedule) -> CpuKernel:  # noqa: ANN001

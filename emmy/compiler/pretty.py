@@ -51,7 +51,7 @@ def fmt_type(shape: tuple, dtype, syms: dict[str, Var] | None = None) -> str:
 
 def _fmt_dim(d, syms: dict[str, Var] | None) -> str:
     expr = getattr(d, "expr", None)
-    return str(d) if expr is None or not syms else expr.substitute(syms).pretty()
+    return str(d) if expr is None or not syms else str(expr.substitute(syms))
 
 
 def _symbols(graph) -> dict[str, Var]:
@@ -81,7 +81,7 @@ def _binders(op: IndexMapOp) -> list[str]:
 def _index_expr(op: IndexMapOp, names: list[str], syms: dict[str, Var]) -> str:
     """The coordinate vector one source reads, in the result's index variables."""
     rename = {f"{PLACEHOLDER_PREFIX}{d}": Var(n.lstrip("_")) for d, n in enumerate(names)} | syms
-    return "[" + ", ".join(e.substitute(rename).pretty() for e in op.sources[0].coord_map) + "]"
+    return "[" + ", ".join(str(e.substitute(rename)) for e in op.sources[0].coord_map) + "]"
 
 
 def _convert_fn(src_t) -> str:
@@ -181,10 +181,10 @@ def _fmt_index_sources(op: IndexMapOp, args: list[str], syms: dict[str, Var]) ->
 
     lines = []
     for src in op.sources:
-        coords = ", ".join(e.substitute(rename).pretty() for e in src.coord_map)
+        coords = ", ".join(str(e.substitute(rename)) for e in src.coord_map)
         fields = [f"operand: {args[src.input_idx]}", f"coord: {closure(src.coord_map, f'[{coords}]')}"]
         if src.select is not None:
-            fields.append(f"select: {closure((src.select,), src.select.substitute(rename).pretty())}")
+            fields.append(f"select: {closure((src.select,), str(src.select.substitute(rename)))}")
         lines.append(f"      IndexSource {{ {', '.join(fields)} }},")
     return "emmy::index_map([\n" + "\n".join(lines) + "\n    ])"
 
@@ -195,7 +195,7 @@ def fmt_constant(node, syms: dict[str, Var]) -> str:
     if op.value is not None:
         base = repr(op.value)
     elif getattr(op, "context_value", None) is not None:
-        base = f"context({op.context_value.substitute(syms).pretty()})"
+        base = f"context({op.context_value.substitute(syms)})"
     elif op.source_path:
         base = f'load("{op.source_path}")'
     elif getattr(op, "source_parts", ()):

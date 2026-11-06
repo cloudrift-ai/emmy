@@ -313,9 +313,15 @@ Shared expression sublanguage used by every IR layer: `Load.index`,
 `StridedLoop.start`/`step`, `Cond.cond`, etc. Imports nothing from
 other IR files.
 
+An expression has one text, `str(expr)`, and `parse` reads it back to an equal expression: C-like, parenthesized only
+where precedence needs it (`a5 / 128 * 128 + a6`). The same text is the expression on the wire, in every listing and
+in every error message, so there is no second printer to keep in agreement. A name that is no identifier, or that the
+reader would take for something else (`true`, a GPU built-in), is written between backticks. Text that holds
+expressions among other things is read by a subclass of `Parser`, which takes each expression where it stands.
+
 | Symbol                                                                       | Role                                                                     |
 |------------------------------------------------------------------------------|--------------------------------------------------------------------------|
-| `Var`, `Literal`, `BinaryExpr`, `Builtin`, `FuncCallExpr`, `TernaryExpr`, `CastExpr`, `FlatIndex` | Expression nodes. Each has `eval(env) → value/ndarray`, `pretty()`, `substitute(mapping)`, `free_vars()`, plus the generic tree walks `subterms()` / `rebuild(fn)`. `FlatIndex` is a buffer coordinate's row-major offset, flattened against the buffer's shape at render time; it only appears in a kernel body. |
+| `Var`, `Literal`, `BinaryExpr`, `Builtin`, `FuncCallExpr`, `TernaryExpr`, `CastExpr`, `FlatIndex` | Expression nodes. Each has `eval(env) → value/ndarray`, `substitute(mapping)`, `free_vars()`, plus the generic tree walks `subterms()` / `rebuild(fn)`. `FlatIndex` is a buffer coordinate's row-major offset, flattened against the buffer's shape at render time; it only appears in a kernel body. |
 | `_ExprOps`                                                                   | Mixin: Python operator overloading for expression building; default `NotImplementedError` for `pretty`/`substitute`/`free_vars`. |
 | `Expr`                                                                       | Union type alias.                                                        |
 | `PLACEHOLDER_PREFIX`, `placeholder`, `is_placeholder`                        | Convention for output-coord placeholders in coord maps.                  |
