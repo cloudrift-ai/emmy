@@ -219,11 +219,14 @@ def test_the_statement_module_depends_on_expressions_and_values_only() -> None:
     assert not offenders, "the statement module must not depend on these:\n" + "\n".join(offenders)
 
 
-def test_a_statement_is_copied_through_its_own_method() -> None:
-    """Outside ``ir/stmt``, nothing edits a statement with ``dataclasses.replace``: ``Stmt.replace`` is the one way.
+def test_a_statement_is_copied_and_read_through_its_own_methods() -> None:
+    """Outside ``ir/stmt``, nothing edits a statement with ``dataclasses.replace`` (``Stmt.replace`` is the one way)
+    and nothing lists a statement's dataclass fields: a caller reads a statement through the statement protocol, so
+    a kind need not be a dataclass.
 
-    The class a ``replace`` call receives is not visible in the source, so this lowers the first corpus case of
-    each family and watches every call of ``dataclasses.replace`` whose argument is a statement.
+    The class such a call receives is not visible in the source, so this lowers the first corpus case of each
+    family and watches the calls. The wire form and the structural form may list fields: they are where a
+    statement's class states them, and they read a dataclass kind on its behalf.
     """
     import dataclasses
     import sys
@@ -231,14 +234,24 @@ def test_a_statement_is_copied_through_its_own_method() -> None:
     from emmy.compiler.ir.stmt import SelectBranch, Stmt
     from tests.compiler.realization import helpers
 
+    kinds = (Stmt, SelectBranch)
     inside = str(_REPO_ROOT / "emmy" / "compiler" / "ir" / "stmt")
-    offenders: set[str] = set()
+    forms = {str(_REPO_ROOT / "emmy" / "compiler" / name) for name in ("wire.py", "structural.py")} | {dataclasses.__file__}
+    listers = {dataclasses.fields.__code__: "class_or_instance", dataclasses.asdict.__code__: "obj", dataclasses.astuple.__code__: "obj"}
+    copies: set[str] = set()
+    listings: set[str] = set()
 
     def watch(frame, event, _arg):  # noqa: ANN001, ANN202 — the ``sys.setprofile`` signature
-        if event == "call" and frame.f_code is dataclasses.replace.__code__ and isinstance(frame.f_locals.get("obj"), (Stmt, SelectBranch)):
-            caller = frame.f_back.f_code.co_filename
-            if not caller.startswith(inside):
-                offenders.add(f"{pathlib.Path(caller).relative_to(_REPO_ROOT)}:{frame.f_back.f_lineno}")
+        if event != "call" or not (frame.f_code is dataclasses.replace.__code__ or frame.f_code in listers):
+            return
+        subject = frame.f_locals.get(listers.get(frame.f_code, "obj"))
+        caller = frame.f_back.f_code.co_filename
+        if not (isinstance(subject, kinds) or (isinstance(subject, type) and issubclass(subject, kinds))) or caller.startswith(inside):
+            return
+        if frame.f_code not in listers:
+            copies.add(f"{pathlib.Path(caller).relative_to(_REPO_ROOT)}:{frame.f_back.f_lineno}")
+        elif caller not in forms:
+            listings.add(f"{pathlib.Path(caller).relative_to(_REPO_ROOT)}:{frame.f_back.f_lineno}")
 
     cases = [helpers.load_case(sorted(family.glob("*.json"))[0]) for family in sorted(helpers.CASES_DIR.iterdir()) if family.is_dir()]
     previous = sys.getprofile()
@@ -248,7 +261,8 @@ def test_a_statement_is_copied_through_its_own_method() -> None:
             helpers.lowered(case, case.context())
     finally:
         sys.setprofile(previous)
-    assert not offenders, "copy these statements with ``stmt.replace(...)``:\n" + "\n".join(sorted(offenders))
+    assert not copies, "copy these statements with ``stmt.replace(...)``:\n" + "\n".join(sorted(copies))
+    assert not listings, "read these statements through the statement protocol:\n" + "\n".join(sorted(listings))
 
 
 def test_a_class_is_on_the_wire_by_what_it_registers() -> None:

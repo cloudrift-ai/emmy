@@ -86,6 +86,18 @@ def test_every_kind_states_the_protocol() -> None:
     assert not missing, "these statement kinds leave part of the protocol unstated:\n" + "\n".join(missing)
 
 
+def test_a_kind_holds_its_elementwise_operation_as_op() -> None:
+    """The clustered identity reads a statement's operation by the name ``op``, in every layer."""
+    held = [
+        (cls.__name__, f.name)
+        for cls in _kinds()
+        if dataclasses.is_dataclass(cls)
+        for f in dataclasses.fields(cls)
+        if f.type == "ElementwiseImpl"
+    ]
+    assert {kind for kind, _ in held} >= {"Assign", "Accum"} and {name for _, name in held} == {"op"}
+
+
 _K = Axis("k", 8)
 _BELOW = BinaryExpr("<", Var("i"), Literal(2, "int"))
 _EXAMPLES = [
