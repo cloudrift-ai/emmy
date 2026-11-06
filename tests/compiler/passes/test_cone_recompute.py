@@ -17,11 +17,9 @@ from __future__ import annotations
 
 from emmy.compiler.dim import Dim
 from emmy.compiler.ir.axis import Axis
-from emmy.compiler.ir.elementwise import ElementwiseImpl
-from emmy.compiler.ir.expression import Var
 from emmy.compiler.ir.schedule import Tile, Work
 from emmy.compiler.ir.schedule.views import cone_seam
-from emmy.compiler.ir.stmt import Assign, Body, Load, Loop, Write
+from emmy.compiler.ir.stmt import Body, Loop, parse_body
 from emmy.compiler.pipeline.passes.lowering.kernel._atom import _hoist_k_invariant, reduce_codegen, store_sink
 from emmy.compiler.pipeline.passes.lowering.kernel._tiling import atomize, grid_tile, register_tile, unit_tile
 from tests.compiler.terms import contraction, projection, reduction, slab
@@ -33,21 +31,13 @@ M, N, K, J = Axis("m", Dim(64)), Axis("n", Dim(64)), Axis("k", Dim(32)), Axis("j
 def _pv():
     """The P·V fold over the key axis, reading the contraction axis ``k`` of the o_proj it feeds — built
     afresh each time, the way the tree forms one traced value twice."""
-    p = Load(name="p", input="p", index=(Var("m"), Var("s")))
-    v = Load(name="v", input="v", index=(Var("s"), Var("k")))
-    return contraction(S, p, (v, "acc"))
+    return contraction(S, slab("p", "p", "m", "s"), (slab("v", "v", "s", "k"), "acc"))
 
 
 def _cone():
     """``out = acc · f(acc)``: the fold read directly and through a derived edge."""
-    derived = projection(
-        operands=(_pv(),), body=(Assign(name="inv", op=ElementwiseImpl("multiply"), args=("acc", "acc")),), results=("inv",)
-    )
-    return projection(
-        operands=(_pv(), derived),
-        body=(Assign(name="out", op=ElementwiseImpl("multiply"), args=("acc", "inv")),),
-        results=("out",),
-    )
+    derived = projection(operands=(_pv(),), body=parse_body("inv = multiply(acc, acc)"), results=("inv",))
+    return projection(operands=(_pv(), derived), body=parse_body("out = multiply(acc, inv)"), results=("out",))
 
 
 def test_the_seam_lowers_a_twice_read_fold_once() -> None:
@@ -61,14 +51,16 @@ def test_the_seam_lowers_a_twice_read_fold_once() -> None:
 
 def test_the_prologue_lowers_a_shared_statistic_once() -> None:
     """Two row-invariant edges over one row statistic bridge two values but fold the statistic once."""
-    stat = reduction(J, (slab("xj", "x", "m", "j"),), (Assign(name="sq", op=ElementwiseImpl("multiply"), args=("xj", "xj")),), ("acc0",))
-    scale = projection(operands=(stat,), body=(Assign(name="r1", op=ElementwiseImpl("rsqrt"), args=("acc0",)),), results=("r1",))
-    shift = projection(operands=(stat,), body=(Assign(name="r2", op=ElementwiseImpl("multiply"), args=("acc0", "acc0")),), results=("r2",))
+    stat = reduction(J, (slab("xj", "x", "m", "j"),), parse_body("sq = multiply(xj, xj)"), ("acc0",))
+    scale = projection(operands=(stat,), body=parse_body("r1 = rsqrt(acc0)"), results=("r1",))
+    shift = projection(operands=(stat,), body=parse_body("r2 = multiply(acc0, acc0)"), results=("r2",))
     cone = projection(
         operands=(scale, shift, slab("xk", "x", "m", "k")),
-        body=(
-            Assign(name="t", op=ElementwiseImpl("multiply"), args=("r1", "xk")),
-            Assign(name="a", op=ElementwiseImpl("multiply"), args=("t", "r2")),
+        body=parse_body(
+            """
+            t = multiply(r1, xk)
+            a = multiply(t, r2)
+            """
         ),
         results=("a",),
     )
@@ -85,7 +77,7 @@ def test_dedup_keeps_a_repeated_effect_and_the_first_definition() -> None:
     fold = _pv().lower(axes=(S,))
     assert (fold + fold).coalesce() == fold
     assert fold.coalesce() == fold
-    write = Write(output="out", index=(Var("m"), Var("k")), value="acc", atomic=True)
+    (write,) = parse_body("out[m, k] += acc")
     assert Body((*fold, *fold, write, write)).coalesce() == Body((*fold, write, write))
     effectful = Loop(axis=S, body=(*fold, write))
     assert Body((effectful, effectful)).coalesce() == Body((effectful, effectful))
@@ -94,23 +86,15 @@ def test_dedup_keeps_a_repeated_effect_and_the_first_definition() -> None:
 def _norm_linear() -> tuple:
     """``out[m, n] = Σ_k w[n, k] · (x[m, k] · Σ_j x[m, j]²)`` — the fused norm→linear shape, whose A is a
     cone over a row statistic (the ``j`` reduce, invariant in the contraction axis) and a k-varying read."""
-    stat = reduction(J, (slab("xj", "x", "m", "j"),), (Assign(name="sq", op=ElementwiseImpl("multiply"), args=("xj", "xj")),), ("acc0",))
-    cone = projection(
-        operands=(stat, slab("xk", "x", "m", "k")),
-        body=(Assign(name="a", op=ElementwiseImpl("multiply"), args=("acc0", "xk")),),
-        results=("a",),
-    )
+    stat = reduction(J, (slab("xj", "x", "m", "j"),), parse_body("sq = multiply(xj, xj)"), ("acc0",))
+    cone = projection(operands=(stat, slab("xk", "x", "m", "k")), body=parse_body("a = multiply(acc0, xk)"), results=("a",))
     return cone, contraction(K, cone, (slab("w", "w", "n", "k"), "acc"))
 
 
 def test_the_seam_does_not_bridge_a_statistic_the_cell_defines() -> None:
     """A shared row statistic can also be computed inside a varying operand's cone."""
     inner, _ = _norm_linear()
-    cone = projection(
-        operands=(inner.operands[0], inner),
-        body=(Assign(name="out", op=ElementwiseImpl("multiply"), args=("acc0", "a")),),
-        results=("out",),
-    )
+    cone = projection(operands=(inner.operands[0], inner), body=parse_body("out = multiply(acc0, a)"), results=("out",))
     pro, cell, stats, chunk = cone_seam(cone, K.name, axes=(M, N, K, J))
     assert "acc0" in Body(cell).definitions
     assert pro == stats == chunk == ()
@@ -122,7 +106,7 @@ def _register_tiled(spelling: str) -> Body:
     axes = (M, N, K, J)
     plan = Tile.parse(spelling, Work.parse("w1x1")).at(M, N)
     state, region = reduce_codegen(c, plan, seam=cone_seam(cone, K.name, axes=axes), k_axis=K, axes=axes)
-    epilogue = Body((Write(output="out", index=(Var("m"), Var("n")), value=c.combine.results[0]),))
+    epilogue = parse_body(f"out[m, n] = {c.combine.results[0]}")
     return grid_tile(
         unit_tile(register_tile(atomize(plan.atom.shape[:2]), plan.mn), plan.mn),
         mn=plan.mn,
@@ -167,10 +151,8 @@ def test_a_read_of_a_loop_bound_accumulator_stays_with_its_loop() -> None:
     """A reduce over the CONTRACTION axis binds its accumulator inside its own body, so the projection
     that reads the accumulator back is loop-varying too. Reading only the loop's head left that
     accumulator invariant and hoisted the projection ahead of the loop that fills it."""
-    square = Assign(name="acc0__v", op=ElementwiseImpl("multiply"), args=("xj", "xj"))
-    inner = reduction(J, (slab("xj", "x", "k", "j"),), (square,), ("acc0",))
-    read = Assign(name="a", op=ElementwiseImpl("multiply"), args=("acc0", "acc0"))
-    body = (*inner.lower(axes=(M, N, K, J)), read)
+    inner = reduction(J, (slab("xj", "x", "k", "j"),), parse_body("acc0__v = multiply(xj, xj)"), ("acc0",))
+    body = (*inner.lower(axes=(M, N, K, J)), *parse_body("a = multiply(acc0, acc0)"))
     hoisted, rest = _hoist_k_invariant(body, K.name)
     assert hoisted == ()
     assert rest == body

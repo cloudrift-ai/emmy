@@ -7,6 +7,7 @@ from emmy.compiler.graph import Graph, Tensor
 from emmy.compiler.ir.base import InputOp
 from emmy.compiler.ir.frontend.ir import LinearOp
 from emmy.compiler.ir.loop import Loop, LoopOp
+from emmy.compiler.ir.stmt import parse_body
 from emmy.compiler.pipeline import LOOP_PASSES, Pipeline
 from tests.compiler.passes.test_roll_recurrence import _SINKHORN, _delta
 
@@ -114,39 +115,30 @@ def _chain_beside_a_sibling(stages: dict[str, LoopOp], widths: dict[str, int] | 
     ``(graph, the chain's last state)``."""
     from dataclasses import replace
 
-    from emmy.compiler.ir.expression import Literal, Var
-    from emmy.compiler.ir.loop import Assign, Axis, Load, Write
+    from emmy.compiler.ir.expression import Literal
+    from emmy.compiler.ir.loop import Load
 
-    axis = Axis("i", 8)
     graph = Graph()
     graph.add_node(InputOp(), [], Tensor("b0", (9,)), node_id="b0")
     producer = LoopOp(
-        body=(
-            Loop(
-                axis=axis,
-                body=(
-                    Load(name="p", input="b0", index=(Var("i"),)),
-                    Assign(name="pv", op="relu", args=("p",)),
-                    Write(output="root", index=(Var("i"),), value="pv"),
-                ),
-            ),
+        body=parse_body(
+            """
+            for i in 0..8:
+                p = load b0[i]
+                pv = relu(p)
+                root[i] = pv
+            """
         ),
     )
     graph.add_node(producer, ["b0"], Tensor("root", (8,)), node_id="root")
     broadcast = LoopOp(
-        body=(
-            Loop(
-                axis=axis,
-                body=(
-                    Loop(
-                        axis=Axis("j", 32),
-                        body=(
-                            Load(name="v", input="root", index=(Var("i"),)),
-                            Write(output="broadcast", index=(Var("i"), Var("j")), value="v"),
-                        ),
-                    ),
-                ),
-            ),
+        body=parse_body(
+            """
+            for i in 0..8:
+                for j in 0..32:
+                    v = load root[i]
+                    broadcast[i, j] = v
+            """
         ),
     )
     graph.add_node(broadcast, ["root"], Tensor("broadcast", (8, 32)), node_id="broadcast")
@@ -163,15 +155,13 @@ def _chain_beside_a_sibling(stages: dict[str, LoopOp], widths: dict[str, int] | 
         graph.add_node(rebound, [upstream], Tensor(tag, ((widths or {}).get(tag, 8),)), node_id=tag)
         upstream = tag
     sibling = LoopOp(
-        body=(
-            Loop(
-                axis=axis,
-                body=(
-                    Load(name="q", input="root", index=(Var("i"),)),
-                    Assign(name="qv", op="negative", args=("q",)),
-                    Write(output="easy", index=(Var("i"),), value="qv"),
-                ),
-            ),
+        body=parse_body(
+            """
+            for i in 0..8:
+                q = load root[i]
+                qv = negative(q)
+                easy[i] = qv
+            """
         ),
     )
     graph.add_node(sibling, ["root"], Tensor("easy", (8,)), node_id="easy")
@@ -215,21 +205,22 @@ def test_a_chain_the_roller_does_not_roll_is_an_error_not_a_smaller_region():
     """Every stage of this chain has a shape of its own, so no two are states of one recurrence
     and nothing rolls; the region the chain multiplies in raises at the splicer's construction
     bound. Nothing catches it — the kernel set is never a fall-through."""
-    from emmy.compiler.ir.expression import BinaryExpr, Literal, Var
-    from emmy.compiler.ir.loop import Assign, Axis, Load, UnfusableStmt, Write
+    from emmy.compiler.ir.loop import UnfusableStmt
 
     stages: dict[str, LoopOp] = {}
     for k in range(16):
         src = "b0" if k == 0 else f"s{k - 1}"
-        left = BinaryExpr("+", BinaryExpr("*", Literal(2, "int"), Var("i")), Literal(1, "int"))
-        right = BinaryExpr("+", BinaryExpr("*", Literal(3, "int"), Var("i")), Literal(2, "int"))
-        body = (
-            Load(name=f"x{k}", input=src, index=(left,)),
-            Load(name=f"y{k}", input=src, index=(right,)),
-            Assign(name=f"v{k}", op="add", args=(f"x{k}", f"y{k}")),
-            Write(output=f"s{k}", index=(Var("i"),), value=f"v{k}"),
+        stages[f"s{k}"] = LoopOp(
+            body=parse_body(
+                f"""
+                for i in 0..{8 + k}:
+                    x{k} = load {src}[2 * i + 1]
+                    y{k} = load {src}[3 * i + 2]
+                    v{k} = add(x{k}, y{k})
+                    s{k}[i] = v{k}
+                """
+            )
         )
-        stages[f"s{k}"] = LoopOp(body=(Loop(axis=Axis("i", 8 + k), body=body),))
     graph, _ = _chain_beside_a_sibling(stages, widths={f"s{k}": 8 + k for k in range(16)})
     with pytest.raises(UnfusableStmt, match="bindings per source statement"):
         Pipeline.build(["loop/fusion"]).run(graph)

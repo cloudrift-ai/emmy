@@ -26,7 +26,7 @@ from emmy.compiler.ir.expression import BinaryExpr, Literal, Var
 from emmy.compiler.ir.schedule import Stage, Tile, Work
 from emmy.compiler.ir.schedule.catalog import stage_moves
 from emmy.compiler.ir.schedule.staging import resolve_warp_stage
-from emmy.compiler.ir.stmt import Load
+from emmy.compiler.ir.stmt import parse_body
 from tests.compiler.helpers import requires_cuda, requires_sm
 from tests.compiler.terms import contraction
 
@@ -44,9 +44,8 @@ def _tma_pins() -> tuple[str, ...]:
 
 def _node(*, a_dtype: DataType = F16, b_dtype: DataType = F8E4M3, m=512, n=4096, k=4096, b_trans=False):
     ka = Axis("k", Dim(k))
-    a = Load(name="a", input="x", index=(Var("m"), Var("k")), dtype=a_dtype)
-    b_index = (Var("n"), Var("k")) if b_trans else (Var("k"), Var("n"))
-    b = Load(name="wb", input="w_bits", index=b_index, dtype=b_dtype)
+    [a] = parse_body(f"{a_dtype.name} a = load x[m, k]")
+    [b] = parse_body(f"{b_dtype.name} wb = load w_bits[{'n, k' if b_trans else 'k, n'}]")
     node = contraction(ka, a, (b, "acc"))
     b_shape = (n, k) if b_trans else (k, n)
     inputs = {"x": Tensor("x", (m, k), a_dtype), "w_bits": Tensor("w_bits", b_shape, b_dtype)}
@@ -114,11 +113,8 @@ def test_k32_atoms_resolve_staged_byte_slabs():
         st = resolve_warp_stage(node, tile, Stage.parse(spec), 100 * 1024, inputs, k_axis=ka)
         assert st is not None and st.bk_elems == tile.bk * 32
     ka = Axis("k", Dim("seq"))
-    sym = contraction(
-        ka,
-        Load(name="a", input="x", index=(Var("m"), Var("k")), dtype=F8E4M3),
-        (Load(name="wb", input="w_bits", index=(Var("k"), Var("n")), dtype=F8E4M3), "acc"),
-    )
+    [a, b] = parse_body("f8e4m3 a = load x[m, k]\nf8e4m3 wb = load w_bits[k, n]")
+    sym = contraction(ka, a, (b, "acc"))
     assert resolve_warp_stage(sym, tile, Stage.parse("d2/smem-async"), 100 * 1024, inputs, k_axis=ka) is None
 
 

@@ -1,7 +1,7 @@
 """Unit tests for structural feature extraction
 (``search/features.structure_features``).
 
-Hand-built ``Body`` fixtures (same style as ``tests/compiler/ir/stmt/
+Hand-written ``Body`` fixtures (same style as ``tests/compiler/ir/stmt/
 test_structural_key.py``) exercise the skeleton histogram, the extent-free
 invariant, the ``S_ext_*`` extent block, and the ``S_dtype_*`` multiset; a
 second group compiles real frontend graphs (triple-matmul, matmul + epilogue,
@@ -13,14 +13,10 @@ from __future__ import annotations
 
 from sys import float_info
 
-from emmy.compiler.dim import Dim
 from emmy.compiler.graph import Graph
-from emmy.compiler.ir.axis import Axis
 from emmy.compiler.ir.base import InputOp
-from emmy.compiler.ir.elementwise import ElementwiseImpl
-from emmy.compiler.ir.expression import Var
 from emmy.compiler.ir.loop import LoopOp
-from emmy.compiler.ir.stmt import Accum, Assign, Body, Load, Loop, Write
+from emmy.compiler.ir.stmt import Body, parse_body
 from emmy.compiler.pipeline.search.features import STRUCT_PREFIX, stamps, structure_features
 from emmy.compiler.tensor import Tensor
 
@@ -28,51 +24,32 @@ from emmy.compiler.tensor import Tensor
 def _rms_body(ext_i: int = 8, ext_k: int = 64, *, stored_k_major: bool = False) -> Body:
     """Free ``i`` over reduce ``k``: sum of squares of ``a`` → ``o``. One
     reduce (RMSNorm-like); ``stored_k_major`` stores ``a`` as ``[k, i]``."""
-    return Body(
-        (
-            Loop(
-                axis=Axis("i", ext_i),
-                body=(
-                    Loop(
-                        axis=Axis("k", ext_k),
-                        body=(
-                            Load(name="x", input="a", index=(Var("k"), Var("i")) if stored_k_major else (Var("i"), Var("k"))),
-                            Assign(name="sq", op="multiply", args=("x", "x")),
-                            Accum(name="s", value="sq", op=ElementwiseImpl("add")),
-                        ),
-                    ),
-                    Write(output="o", index=(Var("i"),), value="s"),
-                ),
-            ),
-        )
+    index = "k, i" if stored_k_major else "i, k"
+    return parse_body(
+        f"""
+        for i in 0..{ext_i}:
+            for k in 0..{ext_k}:
+                x = load a[{index}]
+                sq = multiply(x, x)
+                s <- add(s, sq)
+            o[i] = s
+        """
     )
 
 
 def _softmax_body() -> Body:
     """Free ``i`` with two reduce loops (max then sum) — two reduces (softmax-like)."""
-    return Body(
-        (
-            Loop(
-                axis=Axis("i", 8),
-                body=(
-                    Loop(
-                        axis=Axis("k", 64),
-                        body=(
-                            Load(name="x", input="a", index=(Var("i"), Var("k"))),
-                            Accum(name="m", value="x", op=ElementwiseImpl("max")),
-                        ),
-                    ),
-                    Loop(
-                        axis=Axis("k2", 64),
-                        body=(
-                            Load(name="x2", input="a", index=(Var("i"), Var("k2"))),
-                            Accum(name="s", value="x2", op=ElementwiseImpl("add")),
-                        ),
-                    ),
-                    Write(output="o", index=(Var("i"),), value="s"),
-                ),
-            ),
-        )
+    return parse_body(
+        """
+        for i in 0..8:
+            for k in 0..64:
+                x = load a[i, k]
+                m <- max(m, x)
+            for k2 in 0..64:
+                x2 = load a[i, k2]
+                s <- add(s, x2)
+            o[i] = s
+        """
     )
 
 
@@ -137,21 +114,14 @@ def test_extents_split_free_vs_reduce():
 
 def test_extent_products_saturate_without_building_unbounded_integers():
     # A loop is a reduce iff its body carries an ``Accum``: the two inner loops fold, the outer is free.
-    body = Body(
-        (
-            Loop(
-                axis=Axis("outer", 10**200),
-                body=(
-                    Loop(
-                        axis=Axis("middle", 10**200),
-                        body=(
-                            Loop(axis=Axis("inner", 10**200), body=(Accum(name="acc", value="x", axes=("inner",)),)),
-                            Accum(name="tot", value="acc", axes=("middle",)),
-                        ),
-                    ),
-                ),
-            ),
-        )
+    body = parse_body(
+        f"""
+        for outer in 0..{10**200}:
+            for middle in 0..{10**200}:
+                for inner in 0..{10**200}:
+                    acc <- add(acc, x) over inner
+                tot <- add(tot, acc) over middle
+        """
     )
 
     feats = structure_features(body)
@@ -161,22 +131,14 @@ def test_extent_products_saturate_without_building_unbounded_integers():
 
 
 def test_symbolic_axis_counted_and_excluded_from_prod():
-    body = Body(
-        (
-            Loop(
-                axis=Axis("s", Dim("seq_len")),
-                body=(
-                    Loop(
-                        axis=Axis("k", 64),
-                        body=(
-                            Load(name="x", input="a", index=(Var("s"), Var("k"))),
-                            Accum(name="acc", value="x", op=ElementwiseImpl("add")),
-                        ),
-                    ),
-                    Write(output="o", index=(Var("s"),), value="acc"),
-                ),
-            ),
-        )
+    body = parse_body(
+        """
+        for s in 0..seq_len:
+            for k in 0..64:
+                x = load a[s, k]
+                acc <- add(acc, x)
+            o[s] = acc
+        """
     )
     feats = structure_features(body)
     assert feats["S_ext_n_symbolic_axis"] == 1.0
@@ -189,29 +151,17 @@ def test_symbolic_axis_counted_and_excluded_from_prod():
 def _nested_reduce_body(ext_k1: int = 16, ext_k2: int = 32) -> Body:
     """Free ``i`` over reduce ``k1`` whose step recomputes an inner reduce ``k2`` — the
     recomputation nest shape: a thread serializes ``k1 * k2`` trips per output cell."""
-    return Body(
-        (
-            Loop(
-                axis=Axis("i", 8),
-                body=(
-                    Loop(
-                        axis=Axis("k1", ext_k1),
-                        body=(
-                            Loop(
-                                axis=Axis("k2", ext_k2),
-                                body=(
-                                    Load(name="x", input="a", index=(Var("i"), Var("k2"))),
-                                    Accum(name="inner", value="x", op=ElementwiseImpl("add")),
-                                ),
-                            ),
-                            Assign(name="w", op="multiply", args=("inner", "inner")),
-                            Accum(name="s", value="w", op=ElementwiseImpl("add")),
-                        ),
-                    ),
-                    Write(output="o", index=(Var("i"),), value="s"),
-                ),
-            ),
-        )
+    return parse_body(
+        f"""
+        for i in 0..8:
+            for k1 in 0..{ext_k1}:
+                for k2 in 0..{ext_k2}:
+                    x = load a[i, k2]
+                    inner <- add(inner, x)
+                w = multiply(inner, inner)
+                s <- add(s, w)
+            o[i] = s
+        """
     )
 
 
@@ -233,39 +183,23 @@ def test_serial_cell_work_takes_the_max_path_over_sibling_reduces():
 
 def test_serial_cell_work_saturates_and_skips_symbolic_extents():
     # A reduce loop is one that accumulates: the nested pair folds a load through ``acc``.
-    huge = Body(
-        (
-            Loop(
-                axis=Axis("outer", 10**200),
-                body=(
-                    Loop(
-                        axis=Axis("inner", 10**200),
-                        body=(
-                            Load(name="x", input="a", index=(Var("outer"), Var("inner"))),
-                            Accum(name="acc", value="x", op=ElementwiseImpl("add")),
-                        ),
-                    ),
-                    Accum(name="total", value="acc", op=ElementwiseImpl("add")),
-                ),
-            ),
-        )
+    huge = parse_body(
+        f"""
+        for outer in 0..{10**200}:
+            for inner in 0..{10**200}:
+                x = load a[outer, inner]
+                acc <- add(acc, x)
+            total <- add(total, acc)
+        """
     )
     assert structure_features(huge)["S_ext_serial_cell_work"] == float_info.max
-    symbolic = Body(
-        (
-            Loop(
-                axis=Axis("s", Dim("seq_len")),
-                body=(
-                    Loop(
-                        axis=Axis("k", 64),
-                        body=(
-                            Load(name="x", input="a", index=(Var("s"), Var("k"))),
-                            Accum(name="acc", value="x", op=ElementwiseImpl("add")),
-                        ),
-                    ),
-                ),
-            ),
-        )
+    symbolic = parse_body(
+        """
+        for s in 0..seq_len:
+            for k in 0..64:
+                x = load a[s, k]
+                acc <- add(acc, x)
+        """
     )
     # The symbolic reduce extent contributes no factor; the static nested reduce still counts.
     assert structure_features(symbolic)["S_ext_serial_cell_work"] == 64.0
@@ -281,10 +215,21 @@ def test_trips_count_every_statement_once_per_enclosing_trip():
 
 
 def test_trips_saturate_and_count_a_symbolic_extent_once():
-    store = (Write(output="o", index=(), value="x"),)
-    huge = Body((Loop(axis=Axis("outer", 10**200), body=(Loop(axis=Axis("inner", 10**200), body=store),)),))
+    huge = parse_body(
+        f"""
+        for outer in 0..{10**200}:
+            for inner in 0..{10**200}:
+                o[] = x
+        """
+    )
     assert structure_features(huge)["S_ext_trips"] == float_info.max
-    symbolic = Body((Loop(axis=Axis("s", Dim("seq_len")), body=(Loop(axis=Axis("k", 64), body=store),)),))
+    symbolic = parse_body(
+        """
+        for s in 0..seq_len:
+            for k in 0..64:
+                o[] = x
+        """
+    )
     assert structure_features(symbolic)["S_ext_trips"] == 64.0
 
 

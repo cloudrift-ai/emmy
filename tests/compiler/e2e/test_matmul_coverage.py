@@ -484,37 +484,23 @@ _F16 = "f16"
 def _mma_matmul_graph(mode: str, M: int, N: int, K: int, out: str, trans: bool):
     """A hand-built ``C[i,j] = Σ_k A[i,k]·B[…]`` over f16 operands; ``trans`` makes B ``[j,k]``
     (Q@Kᵀ, K last). ``mode='dynamic'`` makes the M (row) axis symbolic (the dynamic-grid tier)."""
-    from emmy.compiler.ir.elementwise import ElementwiseImpl  # noqa: PLC0415
-    from emmy.compiler.ir.expression import Var  # noqa: PLC0415
-    from emmy.compiler.ir.loop import Axis, Load, Loop, LoopOp, Write  # noqa: PLC0415
-    from emmy.compiler.ir.stmt import Accum, Assign  # noqa: PLC0415
+    from emmy.compiler.ir.loop import LoopOp  # noqa: PLC0415
+    from emmy.compiler.ir.stmt import parse_body  # noqa: PLC0415
 
     Mg = dyn_M(mode, M)
-    i, j, k = Axis("i", Mg), Axis("j", N), Axis("k", K)
-    b_index = (Var("j"), Var("k")) if trans else (Var("k"), Var("j"))
     op = LoopOp(
-        body=(
-            Loop(
-                axis=i,
-                body=(
-                    Loop(
-                        axis=j,
-                        body=(
-                            Loop(
-                                axis=k,
-                                body=(
-                                    Load(name="a_v", input="a", index=(Var("i"), Var("k"))),
-                                    Load(name="b_v", input="b", index=b_index),
-                                    Assign(name="p", op=ElementwiseImpl("multiply"), args=("a_v", "b_v")),
-                                    Accum(name="acc", value="p"),
-                                ),
-                            ),
-                            Write(output="c", index=(Var("i"), Var("j")), value="acc"),
-                        ),
-                    ),
-                ),
-            ),
-        ),
+        body=parse_body(
+            f"""
+            for i in 0..{Mg}:
+                for j in 0..{N}:
+                    for k in 0..{K}:
+                        a_v = load a[i, k]
+                        b_v = load b[{"j, k" if trans else "k, j"}]
+                        p = multiply(a_v, b_v)
+                        acc <- add(acc, p)
+                    c[i, j] = acc
+            """
+        )
     )
     g = Graph()
     g.add_node(InputOp(), [], Tensor("a", (Mg, K), dtype=F16), node_id="a")
@@ -528,37 +514,23 @@ def _mma_symbolic_k_graph(M: int, N: int, *, trans: bool):
     """``C[i,j] = Σ_k A[i,k]·B[…]`` with the contraction (K) axis SYMBOLIC (``seq_len``) — ``trans``
     makes B ``[j,k]`` (transposed-B, K contiguous), so the warp mma zero-fills the masked-K tail
     through the (n,k)-swapped trans helper. M / N are static tile divisors (no M/N mask)."""
-    from emmy.compiler.ir.elementwise import ElementwiseImpl  # noqa: PLC0415
-    from emmy.compiler.ir.expression import Var  # noqa: PLC0415
-    from emmy.compiler.ir.loop import Axis, Load, Loop, LoopOp, Write  # noqa: PLC0415
-    from emmy.compiler.ir.stmt import Accum, Assign  # noqa: PLC0415
+    from emmy.compiler.ir.loop import LoopOp  # noqa: PLC0415
+    from emmy.compiler.ir.stmt import parse_body  # noqa: PLC0415
 
     Kg = Dim("seq_len")
-    i, j, k = Axis("i", M), Axis("j", N), Axis("k", Kg)
-    b_index = (Var("j"), Var("k")) if trans else (Var("k"), Var("j"))
     op = LoopOp(
-        body=(
-            Loop(
-                axis=i,
-                body=(
-                    Loop(
-                        axis=j,
-                        body=(
-                            Loop(
-                                axis=k,
-                                body=(
-                                    Load(name="a_v", input="a", index=(Var("i"), Var("k"))),
-                                    Load(name="b_v", input="b", index=b_index),
-                                    Assign(name="p", op=ElementwiseImpl("multiply"), args=("a_v", "b_v")),
-                                    Accum(name="acc", value="p"),
-                                ),
-                            ),
-                            Write(output="c", index=(Var("i"), Var("j")), value="acc"),
-                        ),
-                    ),
-                ),
-            ),
-        ),
+        body=parse_body(
+            f"""
+            for i in 0..{M}:
+                for j in 0..{N}:
+                    for k in 0..{Kg}:
+                        a_v = load a[i, k]
+                        b_v = load b[{"j, k" if trans else "k, j"}]
+                        p = multiply(a_v, b_v)
+                        acc <- add(acc, p)
+                    c[i, j] = acc
+            """
+        )
     )
     g = Graph()
     g.add_node(InputOp(), [], Tensor("a", (M, Kg), dtype=F16), node_id="a")
@@ -894,44 +866,27 @@ def _mma_epilogue_graph(mode: str, epilogue: str):
     g.add_node(InputOp(), [], Tensor("a", (Mg, K), dtype=F16), node_id="a")
     g.add_node(InputOp(), [], Tensor("b", (K, N), dtype=F16), node_id="b")
     if epilogue == "causal":
-        from emmy.compiler.ir.elementwise import ElementwiseImpl  # noqa: PLC0415
-        from emmy.compiler.ir.expression import BinaryExpr, Literal, Var  # noqa: PLC0415
-        from emmy.compiler.ir.loop import Axis, Load, Loop, LoopOp, Write  # noqa: PLC0415
-        from emmy.compiler.ir.stmt import Accum, Assign, Select, SelectBranch  # noqa: PLC0415
+        from emmy.compiler.ir.loop import LoopOp  # noqa: PLC0415
+        from emmy.compiler.ir.stmt import parse_body  # noqa: PLC0415
 
-        i, j, k = Axis("i", Mg), Axis("j", N), Axis("k", K)
         op = LoopOp(
-            body=(
-                Loop(
-                    axis=i,
-                    body=(
-                        Loop(
-                            axis=j,
-                            body=(
-                                Load(name="mz", input="mz", index=(Literal(0, "int"),)),
-                                Load(name="mf", input="mf", index=(Literal(0, "int"),)),
-                                Loop(
-                                    axis=k,
-                                    body=(
-                                        Load(name="a_v", input="a", index=(Var("i"), Var("k"))),
-                                        Load(name="b_v", input="b", index=(Var("k"), Var("j"))),
-                                        Assign(name="p", op=ElementwiseImpl("multiply"), args=("a_v", "b_v")),
-                                        Accum(name="acc", value="p"),
-                                    ),
-                                ),
-                                Select(
-                                    name="out",
-                                    branches=(
-                                        SelectBranch(value="acc", select=BinaryExpr("<=", Var("j"), Var("i"))),
-                                        SelectBranch(value="mf", select=BinaryExpr(">", Var("j"), Var("i"))),
-                                    ),
-                                ),
-                                Write(output="c", index=(Var("i"), Var("j")), value="out"),
-                            ),
-                        ),
-                    ),
-                ),
-            ),
+            body=parse_body(
+                f"""
+                for i in 0..{Mg}:
+                    for j in 0..{N}:
+                        mz = load mz[0]
+                        mf = load mf[0]
+                        for k in 0..{K}:
+                            a_v = load a[i, k]
+                            b_v = load b[k, j]
+                            p = multiply(a_v, b_v)
+                            acc <- add(acc, p)
+                        out = select:
+                            acc when j <= i
+                            mf when j > i
+                        c[i, j] = out
+                """
+            )
         )
         g.add_node(InputOp(), [], Tensor("mz", (1,), dtype=F32), node_id="mz")
         g.add_node(InputOp(), [], Tensor("mf", (1,), dtype=F32), node_id="mf")

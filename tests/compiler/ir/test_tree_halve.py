@@ -3,9 +3,9 @@
 from emmy.compiler.ir.kernel.ir import TreeHalve
 from emmy.compiler.ir.render import RenderCtx, render_stmt
 from emmy.compiler.ir.sigma import Sigma
-from emmy.compiler.ir.stmt import Assign
+from emmy.compiler.ir.stmt import parse_body
 
-_SUM = (Assign(name="acc0", op="add", args=("acc0", "acc0__o")),)
+_SUM = tuple(parse_body("acc0 = add(acc0, acc0__o)"))
 
 
 def _render(halve: TreeHalve) -> str:

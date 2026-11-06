@@ -10,9 +10,8 @@ from emmy.compiler.dim import Dim
 from emmy.compiler.dtype import F32
 from emmy.compiler.graph import Graph, Tensor
 from emmy.compiler.ir.base import InputOp
-from emmy.compiler.ir.expression import Literal
 from emmy.compiler.ir.kernel import KernelOp
-from emmy.compiler.ir.stmt import Body, Write, ZeroPrologue
+from emmy.compiler.ir.stmt import ZeroPrologue, parse_body
 from emmy.compiler.pipeline import Match, Rule, RuleSkipped
 
 delegate = import_module("emmy.compiler.pipeline.passes.lowering.cuda.005_delegate_zero_init")
@@ -22,10 +21,7 @@ def _atomic_graph(shape=(32, 512), predecessor: str = "k_predecessor", mid: str 
     graph = Graph()
     graph.add_node(InputOp(), [], Tensor("x", (1,), F32), node_id="x")
     graph.add_node(KernelOp(name=predecessor), ["x"], Tensor(mid, (1,), F32), node_id=mid)
-    atomic = KernelOp(
-        body=Body((Write(output="acc", index=(Literal(0, "int"),), value="v", atomic=True),)),
-        name="k_atomic",
-    )
+    atomic = KernelOp(body=parse_body("acc[0] += v"), name="k_atomic")
     graph.add_node(atomic, [mid], Tensor("acc", tuple(Dim(size) if isinstance(size, int) else size for size in shape), F32), node_id="acc")
     atomic = graph.nodes["acc"].op = atomic.with_io(graph, graph.nodes["acc"])
     match = Match(graph=graph, root_node_id="acc", rule=Rule(name="test", pattern=[]))
@@ -64,7 +60,7 @@ def test_large_static_atomic_output_delegates_without_a_size_policy() -> None:
 def test_first_atomic_kernel_keeps_runtime_zero_init() -> None:
     graph = Graph()
     graph.add_node(InputOp(), [], Tensor("x", (1,), F32), node_id="x")
-    atomic = KernelOp(body=Body((Write(output="acc", index=(Literal(0, "int"),), value="v", atomic=True),)), name="k_atomic")
+    atomic = KernelOp(body=parse_body("acc[0] += v"), name="k_atomic")
     graph.add_node(atomic, ["x"], Tensor("acc", (32, 512), F32), node_id="acc")
     atomic = graph.nodes["acc"].op = atomic.with_io(graph, graph.nodes["acc"])
     match = Match(graph=graph, root_node_id="acc", rule=Rule(name="test", pattern=[]))

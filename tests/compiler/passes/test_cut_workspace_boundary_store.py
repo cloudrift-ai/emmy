@@ -26,9 +26,8 @@ from emmy.compiler.dtype import F32
 from emmy.compiler.graph import Graph, Node, Tensor
 from emmy.compiler.ir.axis import Axis
 from emmy.compiler.ir.base import InputOp
-from emmy.compiler.ir.expression import Var
 from emmy.compiler.ir.schedule import Placement
-from emmy.compiler.ir.stmt import Assign, OutputSpec, Write
+from emmy.compiler.ir.stmt import OutputSpec, parse_body
 from emmy.compiler.ir.tile import TileOp
 from emmy.compiler.pipeline.passes.tile._cut import cuttable_seams, realize
 from tests.compiler.terms import projection, reduction, slab
@@ -43,15 +42,15 @@ def _kernel() -> tuple[Graph, Node]:
     boundary store is written from — while ``squared`` keeps a second output reading it, so the
     consumer survives the cut with work of its own.
     """
-    total = reduction(_COL, (slab("cell", "x", "m", "k"),), (Assign(name="total__v", op="copy", args=("cell",)),), ("total",))
-    root = projection((total,), (Assign(name="squared", op="multiply", args=("total", "total")),), results=("squared",))
+    total = reduction(_COL, (slab("cell", "x", "m", "k"),), parse_body("total__v = copy(cell)"), ("total",))
+    root = projection((total,), parse_body("squared = multiply(total, total)"), results=("squared",))
     tile = TileOp(
         op=root,
         place=Placement(free=(_ROW,)),
         axes=(_ROW, _COL),
         output_specs=(
-            OutputSpec(Write(output="sum", index=(Var("m"),), value="total")),
-            OutputSpec(Write(output="square", index=(Var("m"),), value="squared")),
+            OutputSpec(*parse_body("sum[m] = total")),
+            OutputSpec(*parse_body("square[m] = squared")),
         ),
     )
     graph = Graph()
@@ -101,17 +100,17 @@ def _stored_operand_kernel() -> tuple[Graph, Node]:
     of ``bias`` into the piece, so the consumer is left with a store of a value no term of its own
     defines. A Qwen3.8 gated DeltaNet layer reaches this shape once earlier cuts leave a stored
     workspace read beside the cone that reads it."""
-    total = reduction(_COL, (slab("cell", "x", "m", "k"),), (Assign(name="total__v", op="copy", args=("cell",)),), ("total",))
-    shifted = projection((slab("bias", "b", "m"), total), (Assign(name="shifted", op="add", args=("bias", "total")),))
-    root = projection((shifted,), (Assign(name="squared", op="multiply", args=("shifted", "shifted")),))
+    total = reduction(_COL, (slab("cell", "x", "m", "k"),), parse_body("total__v = copy(cell)"), ("total",))
+    shifted = projection((slab("bias", "b", "m"), total), parse_body("shifted = add(bias, total)"))
+    root = projection((shifted,), parse_body("squared = multiply(shifted, shifted)"))
     tile = TileOp(
         op=root,
         place=Placement(free=(_ROW,)),
         axes=(_ROW, _COL),
         output_specs=(
-            OutputSpec(Write(output="copy", index=(Var("m"),), value="bias")),
-            OutputSpec(Write(output="shift", index=(Var("m"),), value="shifted")),
-            OutputSpec(Write(output="square", index=(Var("m"),), value="squared")),
+            OutputSpec(*parse_body("copy[m] = bias")),
+            OutputSpec(*parse_body("shift[m] = shifted")),
+            OutputSpec(*parse_body("square[m] = squared")),
         ),
     )
     graph = Graph()

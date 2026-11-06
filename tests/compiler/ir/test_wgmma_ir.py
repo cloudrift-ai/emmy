@@ -23,12 +23,11 @@ from emmy.compiler.ir.kernel.ir import (
     WgmmaFence,
     WgmmaMma,
     WgmmaWait,
-    Write,
     wgmma_descriptor_bits,
 )
 from emmy.compiler.ir.kernel.render import _WGMMA_PRELUDE, _wgmma_prelude, render_kernelop
 from emmy.compiler.ir.render import RenderCtx, render_stmt
-from emmy.compiler.ir.stmt import Body
+from emmy.compiler.ir.stmt import Body, parse_body
 
 _NS = (64, 128, 256)
 _DTYPES = ("f16", "bf16")
@@ -200,7 +199,7 @@ def _driver() -> str:
         *(_cell(n, ab, form, scale_d=int(i > 0), trans_b=int(ab == "f16")) for i, (n, ab, form) in enumerate(forms)),
         WgmmaCommit(),
         WgmmaWait(),
-        *(Write(output="out", index=(Literal(4 * j + k, "int"),), value=f"c{j}[{k}]") for j in range(256 // 8) for k in range(4)),
+        *parse_body("\n".join(f"out[{4 * j + k}] = `c{j}[{k}]`" for j in range(256 // 8) for k in range(4))),
     ]
     return render_kernelop(KernelOp(body=Body(tuple(stmts)), name="k_wgmma_probe"), shapes={"out": (128,)})
 

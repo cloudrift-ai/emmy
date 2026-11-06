@@ -229,11 +229,10 @@ def test_tile_op_scalar_atom_schedule_roundtrip(monkeypatch):
         KernelSchedule,
         ProjectionSchedule,
     )
-    from emmy.compiler.ir.stmt import Let
     from emmy.compiler.ir.tile import TileOp
     from tests.compiler.terms import projection
 
-    fold = projection(body=(Let(name="zero", value=0.0),))
+    fold = projection(body="let `zero` = 0.0")
     source = TileOp(op=fold)
     context = ClassicScheduleContext(source)
     classic = Schedule(
@@ -286,14 +285,19 @@ def test_tile_op_twisted_recipe_roundtrip():
     from emmy.compiler.ir.pure import Fold, Lambda
     from emmy.compiler.ir.pure.twist import SOFTMAX, Channel, Twist
     from emmy.compiler.ir.schedule import Placement
-    from emmy.compiler.ir.stmt import Assign, Body, Let
+    from emmy.compiler.ir.stmt import parse_body
     from emmy.compiler.ir.tile import TileOp
     from tests.compiler.terms import projection, slab
 
     m, k = Axis("m", 4), Axis("k", 128)
     lift = Lambda.closing(
         ("k", "y"),
-        Body((Assign(name="s", op="copy", args=("y",)), Let(name="one", value=1.0))),
+        parse_body(
+            """
+            s = copy(y)
+            let one = 1.0
+            """
+        ),
         ("s", "one"),
     )
     carrier = Fold(
@@ -303,7 +307,7 @@ def test_tile_op_twisted_recipe_roundtrip():
         base=Lambda.componentwise(SOFTMAX.base[:2], ("pivot", "total")),
         twist=Twist(recipe=SOFTMAX, channels=(0,)),
     )
-    root = projection((carrier,), (Assign(name="out", op="divide", args=("total", "pivot")),))
+    root = projection((carrier,), "out = divide(total, pivot)")
     graph = Graph()
     y = graph.add_node(InputOp(), [], Tensor("y", (4, 128), "f32"), node_id="y")
     graph.add_node(
@@ -474,21 +478,16 @@ def test_mimo_rename_node_keeps_aux_buffer():
 
 def test_rename_node_rewrites_load_in_nested_fold_lambda() -> None:
     from emmy.compiler.ir.axis import Axis
-    from emmy.compiler.ir.expression import Var
     from emmy.compiler.ir.pure import Fold, Lambda
-    from emmy.compiler.ir.stmt import Assign, Body, Load
+    from emmy.compiler.ir.stmt import Body, parse_body
     from emmy.compiler.ir.tile import Placement, TileOp
 
     def addition(name: str) -> Lambda:
         other = f"{name}__o"
-        return Lambda(
-            params=(name, other),
-            body=Body((Assign(name=name, op="add", args=(name, other)),)),
-            results=(name,),
-        )
+        return Lambda(params=(name, other), body=parse_body(f"{name} = add({name}, {other})"), results=(name,))
 
     inner = Fold(
-        lift=Lambda.closing(("k",), Body((Load(name="value", input="x", index=(Var("m"), Var("k"))),)), ("value",)),
+        lift=Lambda.closing(("k",), parse_body("value = load x[m, k]"), ("value",)),
         init=(0.0,),
         base=addition("inner_acc"),
     )
@@ -516,21 +515,18 @@ def test_rename_node_rewrites_load_in_nested_fold_lambda() -> None:
 
 def test_rename_node_does_not_renormalize_a_loop_body(monkeypatch) -> None:
     import emmy.compiler.ir.stmt as stmt
-    from emmy.compiler.ir.axis import Axis
-    from emmy.compiler.ir.expression import Var
-    from emmy.compiler.ir.loop import Load, Loop, LoopOp, Write
+    from emmy.compiler.ir.loop import LoopOp
+    from emmy.compiler.ir.stmt import parse_body
 
     graph = Graph()
     graph.add_node(InputOp(), [], Tensor("x", (4,)), node_id="x")
     loop = LoopOp(
-        body=(
-            Loop(
-                axis=Axis("a", 4),
-                body=(
-                    Load(name="value", input="x", index=(Var("a"),)),
-                    Write(output="out", index=(Var("a"),), value="value"),
-                ),
-            ),
+        body=parse_body(
+            """
+            for a in 0..4:
+                value = load x[a]
+                out[a] = value
+            """
         )
     )
     graph.add_node(loop, ["x"], Tensor("out", (4,)), node_id="out")

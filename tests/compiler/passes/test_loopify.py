@@ -3,15 +3,14 @@ express in terms of that loop var declines the run instead of building an invali
 
 import importlib
 
-from emmy.compiler.ir.expression import Literal
 from emmy.compiler.ir.pure import Lambda
-from emmy.compiler.ir.stmt import Body, Load
+from emmy.compiler.ir.stmt import parse_body
 
 _loopify = importlib.import_module("emmy.compiler.pipeline.passes.lowering.kernel.100_loopify")
 
 
 def _scale(by: int) -> Lambda:
-    return Lambda(params=("x",), body=Body((Load(name="y", input="x", index=(Literal(by, "int"),)),)), results=("y",))
+    return Lambda(params=("x",), body=parse_body(f"y = load x[{by}]"), results=("y",))
 
 
 def test_a_lambda_that_differs_across_the_run_declines_the_run() -> None:
