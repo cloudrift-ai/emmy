@@ -437,7 +437,7 @@ reduce, the channel patterns, the repack — reads the same C fragments either w
 
 Where the edge is not a bindable contraction (or the atom has no modeled C layout) it stays per-cell: spliced into the
 fill's cell and evaluated inline from lowered loop IR, a scalar dot per slab cell. Geometry: exact cover on N only. A
-masked / symbolic **M** clamp-reads (the A / stat-prologue σ ride `_clamp_last`; the overhang store is discarded by
+masked / symbolic **M** clamp-reads (the A / stat-prologue σ ride `clamp_to`; the overhang store is discarded by
 the `RegStore` guard). A symbolic **K** rides the fill's own **K MASK** — the same clamp-to-identity discipline on the
 contraction axis: the cone's reads clamp in-bounds and every slab lane whose k index reaches past the runtime extent
 stores the additive fold identity 0 (`_atom._k_masked`; the bilinear reading pins ⊕ = add, so a zero operand folds to
@@ -469,6 +469,9 @@ reading then names the tensor's trailing extent as `ldm` and calls the operand N
 reduction axis. Both are wrong, the fragment reads the wrong elements, and nothing raises. `_direct_operand` takes both
 from the operand's FLAT address — each dim's addends scaled by that dim's element stride and simplified — so a reshape
 that splits one coordinate across dims (`x[m / 2, (m % 2) * 128 + k]`) still reads as the `128·m + k` it sums to.
+A split piece reaches a symbolic stream through a clamp onto its last position (`address.clamp_to`), which is no
+stride: the loader reads the leading dimension off the position itself and bounds its lanes by the clamp's extent,
+so the overhang zero-fills instead of stepping by the buffer's trailing extent.
 The flash tier's gmem reads take theirs the same way — the hoisted query fragments and the unstaged key and value:
 a query stored `[seq, head, dim]` strides its rows by every head's dim, and read at its trailing extent the Qwen3-0.6B
 layer's flash piece disagreed with eager on 487k of 524k outputs.
@@ -691,9 +694,12 @@ spells its mask as a comparison and a `where` instead — native's causal attent
 position loaded from memory — reaches the tier with its row index as a `Let` alias of the coordinate, hoisted with
 the position and the fill constants into a leaf over the row axis; `select_masks` (`ir/schedule/mask.py`) folds the
 aliases into the predicate and spells the `where` as that same `Select`, the uniform position a free variable the
-predicate keeps, so the gate and the emission read one form. The same `Select`s are also read
-ONCE, ahead of the loop, for what they say about whole chunks (`_mask_key_bounds`). Expression normalization may
-reverse either comparison's operands, so the bound reader first restores the `key − row` orientation. A mask whose
+predicate keeps, so the gate and the emission read one form. A key split's piece binds the absolute key as an
+expression over its partition coordinate, uniform per CTA like the batch axes and the symbolic extents
+(`cell_uniform`), so its mask lands the same way with the partition in the predicate. The same `Select`s are also read
+ONCE, ahead of the loop, for what they say about whole chunks (`_mask_key_bounds`); on a split piece the bound carries
+the partition, so each slice stops at the block end plus the position minus its own base. Expression normalization
+may reverse either comparison's operands, so the bound reader first restores the `key − row` orientation. A mask whose
 masked branch reads `key > row + c` (or `>=`) with `c ≥ 0` masks every key from the CTA's block end onward for every
 row the CTA holds, so the chunk loop stops there; one whose masked branch reads `key < row − c` (or `<=`) masks every
 key before the CTA's block base for every row, so the loop starts on the chunk that key falls in. They become the

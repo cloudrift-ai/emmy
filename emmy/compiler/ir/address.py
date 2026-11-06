@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import math
 
-from emmy.compiler.ir.expr import BinaryExpr, Expr, Literal, Var, affine_form
+from emmy.compiler.ir.expr import BinaryExpr, Expr, Literal, TernaryExpr, Var, affine_form
 from emmy.compiler.ir.stmt import Load
 
 # Row pad (in ELEMENTS = bytes) for a cp.async-staged 1-byte (fp8) operand slab. The cooperative
@@ -42,6 +42,39 @@ def add(*terms) -> Expr:
 def mul(a, b: int) -> Expr:
     """``a · b`` as an Expr, folding the ``b in {0, 1}`` degenerate cases."""
     return add() if b == 0 else (a if b == 1 else BinaryExpr("*", a if not isinstance(a, int) else Literal(a, "int"), Literal(b, "int")))
+
+
+def clamp_to(position: Expr, extent: Expr) -> Expr:
+    """``position`` clamped onto a stream's last position — ``position < extent ? position : extent − 1`` — the
+    index an overhanging read takes through a stream or an output sweep: the read stays in bounds with a duplicate,
+    and the fold masks what it folds there or the guard discards the store. :func:`clamped` reads it back."""
+    return TernaryExpr(BinaryExpr("<", position, extent), position, BinaryExpr("-", extent, Literal(1, "int")))
+
+
+def clamped(expr: Expr) -> tuple[Expr, Expr] | None:
+    """``(position, extent)`` when ``expr`` is :func:`clamp_to` of them, else ``None``."""
+    if not isinstance(expr, TernaryExpr) or not isinstance(expr.cond, BinaryExpr) or expr.cond.op != "<":
+        return None
+    position, extent = expr.cond.left, expr.cond.right
+    if expr.if_true == position and expr.if_false == BinaryExpr("-", extent, Literal(1, "int")):
+        return position, extent
+    return None
+
+
+def unclamped(load: Load) -> Load:
+    """``load`` reading every clamped position as the position itself — the address a loader strides, bounded
+    by :func:`clamp_bound` instead."""
+    return Load(load.names, load.input, tuple(c[0] if (c := clamped(e)) is not None else e for e in load.index))
+
+
+def clamp_bound(load: Load, axis_name: str) -> Expr | None:
+    """How far along ``axis_name`` ``load`` reads in bounds, from the axis's own origin: the clamp's extent less the
+    position at ``axis_name = 0``. ``None`` when no component of the index clamps a position over ``axis_name``."""
+    for e in load.index:
+        c = clamped(e)
+        if c is not None and axis_name in c[0].free_vars():
+            return BinaryExpr("-", c[1], c[0].substitute({axis_name: Literal(0, "int")}))
+    return None
 
 
 def gmem_axis_step(load: Load, axis_name: str, inputs) -> tuple[int, int] | None:

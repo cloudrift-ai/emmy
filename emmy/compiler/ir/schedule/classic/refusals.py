@@ -15,6 +15,7 @@ from frozendict import frozendict
 from emmy.compiler.dtype import BF16, F16
 from emmy.compiler.ir.address import gmem_axis_step, split_addressable
 from emmy.compiler.ir.atom import ATOM_REGISTRY, AtomKind, atoms_for, wide_accumulate
+from emmy.compiler.ir.expr import Literal
 from emmy.compiler.ir.pure.fold import Fold, binding_extents
 from emmy.compiler.ir.schedule.catalog import (
     WARP_LANES,
@@ -25,7 +26,7 @@ from emmy.compiler.ir.schedule.catalog import (
     warp_tile_moves,
 )
 from emmy.compiler.ir.schedule.choices import PlacedTile, Reduce, ResolvedStage, Stage, Tile, Work
-from emmy.compiler.ir.schedule.mask import coordinate_aliases, select_masks
+from emmy.compiler.ir.schedule.mask import cell_uniform, coordinate_aliases, select_masks
 from emmy.compiler.ir.schedule.packing import block_scaled_atom
 from emmy.compiler.ir.schedule.views import ContractionFacts, NodeId
 from emmy.compiler.ir.stmt import Affine, Assign, Body, Let, Load, Loop, Select, Stmt, Write, mask_select_predicate
@@ -278,20 +279,22 @@ def _chunk_refusal(tile: TileOp, node) -> str | None:
     # the producer are read once ahead of the chunk, so none of them may vary over the chunk.
     prefix = node.applied.cone(node.roles[0])
     coord_axes = {node.axis, *node.as_contraction().left_axes}
-    uniform = {name for edge in node.operands if edge.uniform_leaf(frozenset(coord_axes)) for name in edge.exposes}
-    aliases = coordinate_aliases((*prefix.body, *(stmt for edge in node.operands[1:] for stmt in edge.lift.body)), coord_axes)
+    uniform = cell_uniform(tile.axes, node, coord_axes)
+    aliases = coordinate_aliases((*prefix.body, *(stmt for edge in node.operands[1:] for stmt in edge.lift.body)), coord_axes, uniform)
     body = select_masks(prefix.body, aliases, uniform, coord_axes)
     if body is None:
         return "the score's prefix reads a coordinate outside an additive mask"
     if any(not isinstance(stmt, (Affine, Assign, Let, Load, Select)) for stmt in body):
         return "the score's own prefix holds more than a straight-line program"
-    # A predicate reads the coordinates and the uniform values, never the chunk's own values.
+    # A predicate reads the coordinates and the uniform values, never the chunk's own values; a branch is a uniform
+    # value or a literal the prefix binds.
+    scalars = {stmt.name for stmt in body if isinstance(stmt, Let) and isinstance(stmt.value, Literal)}
     for stmt in (stmt for stmt in body if isinstance(stmt, Select)):
         consumers = [consumer for consumer in body if _adds(consumer, stmt.name)]
         if (
             mask_select_predicate(stmt) is None
             or len(consumers) != 1
-            or not {branch.value for branch in stmt.branches} <= uniform
+            or not {branch.value for branch in stmt.branches} <= uniform | scalars
             or any(not branch.select.free_vars() <= coord_axes | uniform for branch in stmt.branches)
         ):
             return "the score's coordinate Select does not form a cell-uniform additive mask"
