@@ -30,7 +30,7 @@ line-by-line translation.
 
 The preparation is Python only and changes no kernel. Most of it is merged or in review (#1334 to #1348).
 
-- One package, 36 exported names, 20 of them classes. 71 compiler files and 117 test files import it, and nothing
+- One package, 37 exported names, 20 of them classes. 71 compiler files and 117 test files import it, and nothing
   imports a submodule. The compiler constructs a statement at 566 sites and tests a statement's kind at 401.
 - 5,039 lines: normalization 1,427, value numbering 536, the order and identity 222, `Body` 679, the text 483, the
   kinds 888, the protocol 641, the package file and two helpers 163.
@@ -122,7 +122,7 @@ Both implementations exist until the switch and never share an object: a body go
 | Plain constructors: `Load` and `Write` take their fields as declared; no string, tuple or number is converted after construction | open; 62 compiler sites, and about 1,080 test sites once the tests are text |
 | The tests of the passes state bodies as text | open; about 100 files, 3,244 hand-built statements |
 | Kernel IR kinds print and read through their declarations | done (decision 10); the thirty hand-written printers are gone |
-| Loopify compares statements without listing their fields | open |
+| Loopify compares statements without listing their fields | done; it reads `fields_of` and rebuilds through `replace` |
 | The debug dump stores a body as its text, not as `repr` read back by `eval` | done; the Tile layer's term and output specs still dump as `repr` |
 | A fixture that yields the raw bodies of a corpus lowering | open; rules 1 to 3 run over it |
 | `Fold` stops answering the statement protocol; the walks that reach one become functions over the interface | done (`Fold` keeps a `rewrite` of its own; nothing else was read) |
@@ -171,7 +171,7 @@ golden's fresh lowering (8.2 s when the one-pass normalization landed).
 ### 6. The switch
 
 Steps 1 to 5 are built on one branch and land together (decision 7). The extension exports the classes and functions
-under the module's 36 names, `emmy/compiler/ir/stmt/__init__.py` re-exports them, and the Python implementation is
+under the module's 37 names, `emmy/compiler/ir/stmt/__init__.py` re-exports them, and the Python implementation is
 deleted in the same PR. The tune DB version moves.
 
 Verify: the full suite on a card; `emmy golden check` on every repository golden; the corpus regenerates with no

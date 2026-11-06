@@ -192,7 +192,7 @@ def test_the_statement_module_exports_a_pinned_list() -> None:
     steps = ["fold_affine", "simplify_body", "prepare_body"]
     assembly = ["Call", "Subroutine"]
     # What a layer declares a kind of its own with: the decorator that writes the protocol, and a field's role.
-    declaring = ["statement", "role"]
+    declaring = ["statement", "role", "fields_of"]
     assert sorted(stmt.__all__) == sorted(kinds + containers + functions + steps + assembly + declaring)
 
 

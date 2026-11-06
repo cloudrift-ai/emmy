@@ -64,7 +64,7 @@ from emmy.compiler.ir.expression import BinaryExpr, Expression, Literal, Var
 from emmy.compiler.ir.kernel import KernelOp
 from emmy.compiler.ir.kernel.ir import FRAG, FragmentApply, FragmentArg, RegFragment
 from emmy.compiler.ir.pure import Lambda
-from emmy.compiler.ir.stmt import Body, StridedLoop
+from emmy.compiler.ir.stmt import Body, Statement, StridedLoop, fields_of
 from emmy.compiler.pipeline import Pattern, RuleSkipped
 from emmy.compiler.pipeline.passes.lowering.kernel._atom import unroll_ok_n
 from emmy.compiler.pipeline.search.space import LOOPIFY
@@ -226,6 +226,14 @@ def _reroll(vals: list, loopvar: str, frag_stems: set[str]):
         return _recurse_seq(vals, loopvar, frag_stems, tuple)
     if isinstance(v0, Lambda):
         return _FAIL  # a closed term binds only its params, so it cannot read the loop var — decline
+    if isinstance(v0, Statement) and all(type(v) is type(v0) for v in vals):
+        changes = {}
+        for name in fields_of(type(v0)):
+            sub = _reroll([getattr(v, name) for v in vals], loopvar, frag_stems)
+            if sub is _FAIL:
+                return _FAIL
+            changes[name] = sub
+        return v0.replace(**changes)
     if all(type(v) is type(v0) for v in vals) and (isinstance(v0, Expression) or is_dataclass(v0)):
         accepted = _init_kwargs(type(v0))
         kw = {}
@@ -276,6 +284,9 @@ def _families_in(tmpl, loopvar: str, out: set[str]) -> None:
     elif isinstance(tmpl, (tuple, Body)):
         for v in tmpl:
             _families_in(v, loopvar, out)
+    elif isinstance(tmpl, Statement):
+        for name in fields_of(type(tmpl)):
+            _families_in(getattr(tmpl, name), loopvar, out)
     elif isinstance(tmpl, Expression) or is_dataclass(tmpl):
         for f in fields(tmpl):
             if f.init:

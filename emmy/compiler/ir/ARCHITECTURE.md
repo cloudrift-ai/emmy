@@ -222,8 +222,9 @@ along different lowering paths still dedup in the tuning cache.
 `Tile`, `Smem`, `Sync`, `CpAsyncCopy`, `TmaDescriptor`, …) has named read-only fields, compares by content and is
 hashable. To "edit" one, take a copy with `stmt.replace(field=value)`; nothing outside `ir/stmt/` calls
 `dataclasses.replace` on a statement or lists its fields, and a layering test watches a lowering for both. A kind
-states its fields to the text reader and the structural form only. One pass still lists them: the kernel loopify
-pass, off unless pinned, compares whole statements field by field to roll repeated ones into a loop. Ops, by
+states its fields to the text reader and the structural form only. A pass that generalizes whole statements (the
+kernel loopify pass, off unless pinned, rolls repeated ones into a loop) reads each field by the name `fields_of`
+gives and rebuilds through `replace`, so it needs no dataclass behind the kind. Ops, by
 contrast, are frozen and unhashable — rewrites replace the op and rebind its graph node. Op fields stored inside
 statements (e.g. `Assign.op`) must be lightweight value objects (e.g. `ElementwiseImpl`, not `ElementwiseOp`) so the
 surrounding statement stays hashable. A kind that applies one elementwise operation names that field `op`: the
@@ -237,8 +238,9 @@ nothing else: no submodule path, no private name. The package exports the statem
 `rename_free`, `binary`, `mask_select_predicate`, `ordering_constraints`, `dtype_promote`), the text
 form (`pretty_body`, `parse_body`), three normalization steps a caller may run on its own (`fold_affine`, `simplify_body`,
 `prepare_body`), the two kinds fusion's body assembly in `ir/loop/` builds a region with (`Call`, `Subroutine`), and
-what a layer declares a kind of its own with (`kind`, `role`). The module itself imports expressions, axes,
-dtypes and the structural and wire forms: no op, tensor, graph, backend or pipeline.
+what a layer declares a kind of its own with (`statement`, `role`) and the names of a kind's fields (`fields_of`).
+The module itself imports expressions, axes, dtypes and the structural and wire forms: no op, tensor, graph,
+backend or pipeline.
 `tests/architecture/test_layering.py` pins the export list and both directions.
 
 **The statement protocol** is what a kind owes, all of it methods on the kind. No kind writes them: the shared
