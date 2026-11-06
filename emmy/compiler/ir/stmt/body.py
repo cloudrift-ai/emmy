@@ -1,23 +1,9 @@
-"""``Body`` — an immutable sequence of body Stmts with built-in
-def-use / iteration / transform queries.
+"""``Body`` — an immutable sequence of body Stmts with built-in def-use / iteration / transform queries.
 
-Implemented as a ``tuple`` subclass so it interoperates transparently
-everywhere a ``tuple[Stmt, ...]`` was previously accepted: iteration,
-indexing, length, slicing, equality, hashing, and ``isinstance(body,
-tuple)`` all work without thinking. The methods on Body are the
-recommended way to phrase common analyses (def-use, iteration,
-type-filtered lookups) so they can be added incrementally without
-rippling through call sites.
-
-Phase 1 surface (this file): the protocol that lets every
-``tuple[Stmt, ...]`` site accept Body, plus :meth:`iter` / :meth:`map`
-as method-shaped wrappers around the existing free functions.
-
-Phase 2 surface: def-use queries (``definitions``, ``axis_dependencies``,
-``depends_on``), Kahn ``topological_order``, type-filtered lookups
-(``loads``, ``writes``, ``accums``, …), and dependence cones
-(:class:`Cone`, :meth:`Body.backward_cone`) — the shared substrate behind the rules
-that slice computed-operand cones.
+The methods on Body are the recommended way to phrase common analyses: the walks, the def-use readings
+(``definitions``, ``axis_dependencies``, ``depends_on``), the orders, the type-filtered lookups (``loads``,
+``writes``, ``accums``, …) and dependence cones (:class:`Cone`, :meth:`Body.backward_cone`) — the shared substrate
+behind the rules that slice computed-operand cones.
 """
 
 from __future__ import annotations
@@ -31,6 +17,7 @@ from heapq import heappop, heappush
 from types import SimpleNamespace
 
 from emmy.compiler.ir.stmt.base import Stmt
+from emmy.compiler.structural import form
 from emmy.compiler.wire import Wire, decode, encode
 from emmy.utils import cached_method
 
@@ -124,27 +111,19 @@ def free_names(s: Stmt) -> frozenset[str]:
     return frozenset(reads - defs)
 
 
-class Body(tuple[Stmt, ...], Wire):
-    """Immutable Stmt sequence. A slice or a sum of bodies is a ``Body``, two bodies with equal
-    statements are equal and hash alike, and a statement read from one twice is the same object.
-    It is a ``tuple`` subclass today; callers do not rely on that.
+class Body(Wire):
+    """Immutable Stmt sequence, built from any iterable. A slice or a sum of bodies is a ``Body``, two bodies with
+    equal statements are equal and hash alike, and a statement read from one twice is the same object. It is no
+    ``tuple``: it equals no tuple, and what it offers of a sequence is what is written here.
 
-    Constructed from any iterable: ``Body(some_tuple)``,
-    ``Body([s1, s2])``, ``Body(s for s in ... if ...)``.
-
-    No ``__slots__`` — instances retain ``__dict__`` so
-    ``functools.cached_property`` works for the analysis methods we
-    add incrementally (``def_table``, ``external_reads``, etc.). The
-    per-instance dict adds a small memory overhead vs a bare tuple,
-    but Body counts are bounded by the number of kernel bodies in a
-    pipeline run (tens to hundreds), so it's not a concern.
+    Instances keep a ``__dict__``, so ``functools.cached_property`` holds the analyses on the body they derive from.
     """
 
     wire_tag = "body"
 
     def to_wire(self) -> list:
         """The statements, each tagged by its class."""
-        return [encode(stmt) for stmt in self]
+        return [encode(stmt) for stmt in self._stmts]
 
     @classmethod
     def from_wire(cls, value: object, where: str = "body") -> Body:
@@ -155,7 +134,14 @@ class Body(tuple[Stmt, ...], Wire):
         except TypeError as exc:
             raise ValueError(f"{where}: {exc}") from exc
 
-    def __new__(cls, stmts: Iterable[Stmt] = ()) -> Body:
+    def wire_parts(self) -> dict[str, object]:
+        return {"stmts": self._stmts}
+
+    def structural_form(self) -> tuple:
+        """Elementwise, as a sequence renders: :meth:`structural_key` is the normalize-and-collapse key, not the form."""
+        return tuple(form(stmt) for stmt in self._stmts)
+
+    def __init__(self, stmts: Iterable[Stmt] = ()) -> None:
         members = tuple(stmts)
         # A body holds STATEMENTS. A pure term is not one — ``Fold`` duck-types the statement
         # protocol so the shared walks can reach it, but it is not a ``Stmt`` and does not belong
@@ -166,27 +152,32 @@ class Body(tuple[Stmt, ...], Wire):
         stray = [type(member).__name__ for member in members if not isinstance(member, Stmt)]
         if stray:
             raise TypeError(f"Body holds non-statement member(s) {stray}; a term composes through operand edges")
-        return super().__new__(cls, members)
+        self._stmts = members
+
+    def __len__(self) -> int:
+        return len(self._stmts)
+
+    def __iter__(self) -> Iterator[Stmt]:
+        return iter(self._stmts)
 
     def __getitem__(self, key):
-        r = super().__getitem__(key)
+        r = self._stmts[key]
         return Body(r) if isinstance(key, slice) else r
 
+    def __eq__(self, other: object) -> bool:
+        return self._stmts == other._stmts if type(other) is Body else NotImplemented
+
+    def __hash__(self) -> int:
+        return hash(self._stmts)
+
+    def __repr__(self) -> str:
+        return repr(self._stmts)
+
     def __add__(self, other: Iterable[Stmt]) -> Body:
-        if isinstance(other, tuple):
-            return Body(tuple.__add__(self, other))
-        return Body(tuple.__add__(self, tuple(other)))
+        return Body(self._stmts + tuple(other))
 
     def __radd__(self, other: Iterable[Stmt]) -> Body:
-        if isinstance(other, tuple):
-            return Body(tuple.__add__(other, self))
-        return Body(tuple.__add__(tuple(other), self))
-
-    # No custom ``__repr__`` — inherit ``tuple.__repr__`` so a Body
-    # round-trips through ``repr(...)`` / ``eval(...)`` as a tuple.
-    # Loop / Tile / Cond / StridedLoop / LoopOp / TileOp /
-    # KernelOp ``__post_init__`` coerce on construction so the ingest
-    # path ends up with Body either way.
+        return Body(tuple(other) + self._stmts)
 
     @staticmethod
     def coerce(value: Body | Iterable[Stmt]) -> Body:

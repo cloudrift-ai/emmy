@@ -203,9 +203,7 @@ def _serialize_field(v):
     if isinstance(v, Dim):
         return {"__dim__": v.to_wire()}
     if isinstance(v, Body):
-        # Body is a ``tuple`` subclass; downcast to plain tuple so
-        # JSON encodes element-by-element rather than via ``__repr__``
-        # (which would produce a single ``"Body((...))"`` string).
+        # A plain tuple, so JSON encodes element-by-element.
         return tuple(v)
     if isinstance(v, Op):
         return {

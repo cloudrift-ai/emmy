@@ -272,7 +272,7 @@ class Cond(Stmt):
 
     cond: Expr
     body: Body
-    else_body: Body = ()
+    else_body: Body = Body()
 
     def __post_init__(self) -> None:
 

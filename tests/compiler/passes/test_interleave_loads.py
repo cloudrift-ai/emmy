@@ -80,7 +80,7 @@ def test_interleaved_loads_of_one_buffer_widen(dtype) -> None:
 
     loads = [stmt for stmt in out if isinstance(stmt, Load)]
     assert len(loads) == 1 and loads[0].names == ("x0", "x1", "x2", "x3")
-    assert out.index(loads[0]) == 0, "the widened load sits where the first element was loaded"
+    assert out[0] is loads[0], "the widened load sits where the first element was loaded"
 
 
 def test_vector_loads_and_stores_require_aligned_row_offsets() -> None:
