@@ -234,10 +234,10 @@ statement stays hashable.
 nothing else: no submodule path, no private name. The package exports the statement kinds, `Body` and `OutputSpec`,
 `normalize_body` and `canonicalize_identity`, a few functions over statements (`free_names`, `exposed_defines`,
 `rename_free`, `map_exprs`, `binary`, `mask_select_predicate`, `pretty_body`, `ordering_constraints`,
-`dtype_promote`), two normalization steps a pass may call on its own (`fold_affine`, `simplify_body`), the body
-assembly fusion drives (`Splicer`, `Program`, `BodyAnalysis`, `Scope` and its two refusals), and what a layer
-declares a kind of its own with (`Declared`, `role`). The module itself
-imports expressions, axes, dtypes and the structural and wire forms: no op, tensor, graph, backend or pipeline.
+`dtype_promote`), three normalization steps a caller may run on its own (`fold_affine`, `simplify_body`,
+`prepare_body`), the two kinds fusion's body assembly in `ir/loop/` builds a region with (`Call`, `Subroutine`), and
+what a layer declares a kind of its own with (`Declared`, `role`). The module itself imports expressions, axes,
+dtypes and the structural and wire forms: no op, tensor, graph, backend or pipeline.
 `tests/architecture/test_layering.py` pins the export list and both directions.
 
 **The statement protocol** is what a kind owes, all of it methods on the kind. The shared kinds state these by
@@ -673,17 +673,17 @@ Pure `body → body` passes run from `LoopOp.__post_init__` so every
 constructed `LoopOp` (including intermediate fusion results) is
 canonicalized before validation:
 
-Fusion may construct a compact body containing scalar `Call` statements. Each references one read-only `Subroutine`
-with explicit coordinate parameters and captured input buffers. A symbolic dim an index names is no coordinate, so
-the definition reads it free, as it reads a buffer. Early ordering, placement and coordinate
-simplification operate on the calls; each shared definition is prepared once. Identical calls to the same definition
-share by argument structure without searching their bodies. Before full placement, the statement-layer splicer expands
-calls using the same demand reconstruction as fusion. Independent reductions with equal extents and
-reduction depths share axes; coordinate substitutions keep different arguments distinct. Placement then shares common
-producers across definitions. Terminal values also seed expansion, so normalization accepts bodies without output
-writes and preserves unused values beside writes. The expanded body is the only form used by validation, executable
-identity, serialization and Tile IR lifting. Operation clustering also starts from that CSE form, so it sees operations
-inside definitions. Subroutine boundaries never limit fusion.
+While it builds a region, fusion holds a compact body containing scalar `Call` statements. Each references one
+read-only `Subroutine` with explicit coordinate parameters and captured input buffers. A symbolic dim an index names
+is no coordinate, so the definition reads it free, as it reads a buffer. Fusion runs `prepare_body` on the compact
+body: ordering, placement and coordinate simplification operate on the calls, and on each shared definition once.
+Identical calls to the same definition share by argument structure without searching their bodies. Fusion then
+expands the calls with the demand reconstruction that built the region. Independent reductions with equal extents
+and reduction depths share axes; coordinate substitutions keep different arguments distinct. Terminal values also
+seed expansion, so a body without output writes expands too. The expanded body is the only form that leaves fusion:
+normalization refuses a body that holds a call, so validation, executable identity, serialization and Tile IR
+lifting never meet one. Placement then shares common producers across definitions, and operation clustering starts
+from that CSE form. Subroutine boundaries never limit fusion.
 
 - `topo_sort_siblings` — stable Kahn reorder so SSA defs precede their uses
   within each body (fixes splicer-produced use-before-def).
@@ -866,12 +866,12 @@ own shared definitions. Equal calls reuse the same demand before expanding their
 distinct calls. `compile -vv` prints this intermediate form as `sub name(buffers, coordinates):` and one-line calls.
 The final Loop IR listing is expanded and fully CSE'd, as are all persisted kernels.
 
-Body analysis, mutable construction and demand reconstruction belong to the generic statement layer. `stmt/splicer`
-consumes bodies and splice edges; it imports no Loop IR types. The Loop IR adapter chooses graph regions and wraps
-the reconstructed body in a validated `LoopOp`. Normalization uses the same engine to expand subroutines, sharing
-equal demands before constructing duplicate cones. Fresh names and coordinate substitution prevent capture; equal
-reduction depth keeps a reduction that reads another's finalized value in a separate sweep. Every legal fusion
-region is still built whole; subroutine boundaries do not affect final CSE.
+Body analysis, mutable construction and demand reconstruction are fusion's body assembly (`loop/assembly.py`). It
+consumes bodies and splice edges, and uses the statement module through its exported interface. The splicer chooses
+graph regions and wraps the reconstructed body in a validated `LoopOp`. The same engine expands the subroutine calls
+before the body leaves, sharing equal demands before constructing duplicate cones. Fresh names and coordinate
+substitution prevent capture; equal reduction depth keeps a reduction that reads another's finalized value in a
+separate sweep. Every legal fusion region is still built whole; subroutine boundaries do not affect final CSE.
 
 Before dependency reconstruction, `splice_graph` finds output equivalence clusters: single-owner copy chains ending
 at a terminal graph output, with the same dtype and element count and an exact symbolic proof that the source and
@@ -926,7 +926,7 @@ order. Each Write's own scope determines its output shape, so independent siblin
 different extents. This powers `LoopOp.forward`, so post-fusion graphs run through the default `Backend.run` topo-walk
 like any pre-fusion graph.
 
-### `stmt/builder.py` — body construction
+### `loop/builder.py` — body construction
 
 `BodyBuilder` constructs bodies for fusion and subroutine expansion without spelling out every `Loop(Axis(…))`
 nest. Construction is mutable — descent is a dict lookup per scope level and a prepend is an append to a

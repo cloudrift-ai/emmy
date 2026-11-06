@@ -19,6 +19,7 @@ from emmy.compiler.ir.stmt import (
     Affine,
     Assign,
     Body,
+    Call,
     Carry,
     Cond,
     Declared,
@@ -31,6 +32,7 @@ from emmy.compiler.ir.stmt import (
     SelectBranch,
     Stmt,
     StridedLoop,
+    Subroutine,
     Write,
     ZeroPrologue,
     map_exprs,
@@ -101,7 +103,14 @@ _EXAMPLES = [
     Loop(_K, (Load("x", "a", (Var("k"),)), Accum("s", "x", "add"))),
     StridedLoop(_K, Literal(0, "int"), Literal(2, "int"), (Load("x", "a", (Var("k"),)),), end=Var("n")),
     Cond(_BELOW, (Write("out", (), "x"),), (Write("out", (), "y"),)),
+    Call(
+        "r",
+        Subroutine("row_sum", (Axis("row", 4),), (Loop(_K, (Load("x", "a", (Var("row"), Var("k"))), Accum("s", "x", "add"))),), "s"),
+        (Var("i"),),
+    ),
 ]
+# A call's definition is compared by object, and fusion expands the call before a body is stored or sent anywhere.
+_STORED = [example for example in _EXAMPLES if not isinstance(example, Call)]
 
 
 _INDEX = (Var("i"), Var("j"))
@@ -263,7 +272,7 @@ def test_an_expression_map_reaches_every_expression_a_statement_holds(stmt) -> N
     assert mapped.with_exprs(tuple(stmt.exprs())) == stmt
 
 
-@pytest.mark.parametrize("stmt", _EXAMPLES, ids=lambda stmt: type(stmt).__name__)
+@pytest.mark.parametrize("stmt", _STORED, ids=lambda stmt: type(stmt).__name__)
 def test_a_statement_survives_the_wire_form_and_pickling(stmt) -> None:
     body = Body((stmt,))
     assert Body.from_wire(body.to_wire()) == body
