@@ -937,7 +937,7 @@ class SyncTransport:
         plans: list[str] = []
         cell_defs: set[str] = set()
         for p, (a, b) in enumerate(zip(s0, s1, strict=True)):
-            if "\n".join(a.pretty()) == "\n".join(b.pretty()) and not (set(a.deps()) & cell_defs):
+            if str(a) == str(b) and not (set(a.deps()) & cell_defs):
                 plans.append("hoist")
                 continue
             step = SyncTransport._affine_step(a.index[-1], b.index[-1], ctx) if isinstance(a, Load) and isinstance(b, Load) else None

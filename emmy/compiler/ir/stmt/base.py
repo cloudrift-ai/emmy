@@ -22,9 +22,6 @@ if TYPE_CHECKING:
     from emmy.compiler.ir.stmt.body import Body
 
 
-INDENT = "    "
-
-
 _INTEGER_ELEMENTWISE_OPS = frozenset(
     {
         "add",
@@ -74,12 +71,6 @@ def dtype_promote(op_name: str, arg_dtypes: list[str]) -> str:
     return "f32"
 
 
-def spell_literal(value: float) -> str:
-    """The one spelling of a literal: an integer without a point, anything else as Python repr."""
-    value = float(value)
-    return str(int(value)) if value.is_integer() and abs(value) < 2**53 else repr(value)
-
-
 def _identity_rename(name: str) -> str:
     """Default SSA rename — :meth:`Stmt.substitute` renames nothing."""
     return name
@@ -105,6 +96,8 @@ class Stmt(Wire):
       through ``rename_ssa`` and Expr subterms σ-substituted.
     - ``nested()`` — child statement bodies for tree traversal (default:
       no children; block-structured stmts override).
+
+    ``str(stmt)`` is its text. A kind outside the statement module says its own lines in ``pretty(indent)``.
     """
 
     # Held, not inherited: a ``Protocol`` base brings a metaclass that makes every ``isinstance`` on a kind run
@@ -357,20 +350,8 @@ class Stmt(Wire):
             raise NotImplementedError(f"{type(self).__name__} cannot be rebuilt from mapped expressions")
         return self
 
-    def pretty(self, indent: str = "") -> list[str]:
-        """Render this stmt as a list of indented lines.
+    def __str__(self) -> str:
+        """This stmt's text (:mod:`emmy.compiler.ir.stmt.text`)."""
+        from emmy.compiler.ir.stmt.text import lines  # noqa: PLC0415 — the text module imports every kind
 
-        Block-structured stmts recurse into their bodies via
-        ``child.pretty(indent + INDENT)``; leaves return a single line.
-        Subclasses override to control formatting; default surfaces the
-        class name as a placeholder for any stmt that forgot to override.
-        """
-        return [f"{indent}<unrecognized {type(self).__name__}>"]
-
-
-def pretty_body(body: Body, indent: str = "") -> list[str]:
-    """Flatten ``stmt.pretty(indent)`` over a body sequence."""
-    out: list[str] = []
-    for s in body:
-        out.extend(s.pretty(indent))
-    return out
+        return "\n".join(lines(self))

@@ -82,7 +82,7 @@ def _normalize_body(stmts: Body) -> Body:
         stmts = drop_unread_values(ordered)
         if stmts == ordered:
             return ordered
-    from emmy.compiler.ir.stmt.base import pretty_body  # noqa: PLC0415
+    from emmy.compiler.ir.stmt.text import pretty_body  # noqa: PLC0415
 
     raise ValueError("the normal form did not settle in eight rounds:\n" + "\n".join(pretty_body(stmts, "  ")))
 

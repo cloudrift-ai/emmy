@@ -160,6 +160,12 @@ class Body(Wire):
     def __iter__(self) -> Iterator[Stmt]:
         return iter(self._stmts)
 
+    def __str__(self) -> str:
+        """The body's text, which ``parse_body`` reads back to an equal body."""
+        from emmy.compiler.ir.stmt.text import pretty_body  # noqa: PLC0415 — the text module imports every kind
+
+        return "\n".join(pretty_body(self))
+
     def __getitem__(self, key):
         r = self._stmts[key]
         return Body(r) if isinstance(key, slice) else r

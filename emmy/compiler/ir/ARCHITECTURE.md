@@ -235,8 +235,8 @@ clustered identity reads it by that name.
 `ir/stmt/` is the vocabulary all three IRs share, so the rest of the compiler uses it through one package and
 nothing else: no submodule path, no private name. The package exports the statement kinds, `Body` and `OutputSpec`,
 `normalize_body` and `canonicalize_identity`, a few functions over statements (`free_names`, `exposed_defines`,
-`rename_free`, `map_exprs`, `binary`, `mask_select_predicate`, `pretty_body`, `ordering_constraints`,
-`dtype_promote`), three normalization steps a caller may run on its own (`fold_affine`, `simplify_body`,
+`rename_free`, `map_exprs`, `binary`, `mask_select_predicate`, `ordering_constraints`, `dtype_promote`), the text
+form (`pretty_body`, `parse_body`), three normalization steps a caller may run on its own (`fold_affine`, `simplify_body`,
 `prepare_body`), the two kinds fusion's body assembly in `ir/loop/` builds a region with (`Call`, `Subroutine`), and
 what a layer declares a kind of its own with (`Declared`, `role`). The module itself imports expressions, axes,
 dtypes and the structural and wire forms: no op, tensor, graph, backend or pipeline.
@@ -251,7 +251,7 @@ hand; a layer adds a kind of its own by declaring it (below), and nothing else:
 | Reads and writes | `deps`, `defines`, `external_reads`, `external_writes`, `local_decls`, `binds_axes` |
 | Structure | `nested` with `with_bodies`; `exprs` with `with_exprs` |
 | Rebuilding | `_rewrite` (behind `rewrite`, `rename` and `substitute`), `rename_buffers`, `replace` |
-| Display and storage | `pretty`, the wire form |
+| Display and storage | the text (a kind of another layer: `pretty`), the wire form |
 
 Each reading member has a rebuilding half: `with_bodies` takes what `nested` returned, `with_exprs` what `exprs`
 returned. `rewrite` is the one entry for renaming and substitution; it drops the substitutions a statement's own
@@ -289,6 +289,25 @@ shared cache that could alias distinct metadata. Callers use its walks (`iter`, 
 `axis_names`, `axis_dependencies`, `depends_on`, `backward_cone`), its orders (`topological_order`, `coalesce`),
 `rename_buffers`, and its identity (`identity`, `structural_key`, `census`, `literals_abstracted`,
 `literal_free_key`).
+
+**A body has one text.** `str(body)` is it and `parse_body` reads it back to an equal body, so the text says
+everything a statement holds and nothing derived from it: a field at its default is left out, an axis carries its
+window and a symbolic extent its hint. One statement is one line, a block's statements sit indented under its
+header, and expressions are in their own text:
+
+```
+let f32 v0 = 0.125
+for a0 in 0..4:
+    for a1 in 0..seq~128:
+        in0 = load x[a0, a1]
+        v1 = 2*in0 - v0 + 1
+        acc0 <- add(acc0, v1) over a1
+    y[a0] = acc0
+```
+
+The printer and the reader sit side by side in one file, one clause per kind, and its docstring is the grammar. A
+kind of another layer says its own lines in `pretty` and has no reader. `tests/compiler/ir/stmt/test_text.py` holds
+both directions over every kind and every corpus kernel.
 
 The tests under `tests/compiler/ir/stmt/` state what goes into the module and what comes out, and hold for any
 implementation of it. The ones under `tests/compiler/ir/stmt/implementation/` call its inner steps and leave with

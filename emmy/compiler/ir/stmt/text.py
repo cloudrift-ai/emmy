@@ -1,0 +1,417 @@
+"""The text of a body: one printer and one reader, exact inverses.
+
+``str(body)`` is the body's text and :func:`parse_body` reads it back to an equal body, so the text says everything
+a statement holds: a field at its default is left out, nothing else is. One statement is one line; a block's
+statements are indented four spaces under its header::
+
+    let f32 v0 = 0.125
+    for a0 in 0..4:
+        for a1 in 0..seq~128:
+            in0 = load x[a0, a1]
+            v1 = multiply(in0, v0)
+            v2 = 2*v1 - in0 + 1
+            acc0 <- add(acc0, v2) over a1
+        v3 = select:
+            acc0 when a0 < 2
+            v0 when a0 >= 2
+        y[a0] = v3
+
+The statements, with ``[dtype]`` an optional element type written first (``f32 v1 = …``):
+
+==================  ================================================================================
+``Load``            ``[dtype] n0, n1 = load buf[i, j] [carried=load|unpack]``
+``Pre``             ``n = pre state[i, j]``
+``Assign``          ``[dtype] n = op(a, b)``
+``Affine``          ``[dtype] n = 2*a - b + 1`` — coefficient ``*`` name per term, the offset last
+``Let``             ``let [dtype] n = <expression>``
+``Init``            ``init dtype n = <number>``
+``Accum``           ``[dtype] n <- op(n, value) [over a, b]`` — the first operand is the base when it is not ``n``
+``Carry``           ``[dtype] state[i, j] <- value seed <number or buffer>``
+``Write``           ``[dtype] buf[i, j] = v`` / ``= (v0, v1)`` / ``+= v`` (atomic) ``[swizzle=MODE]``
+``Select``          ``n = select:`` over one ``value when <predicate>`` line per branch
+``ZeroPrologue``    ``zero buf words=N``
+``Loop``            ``for <axis> [unroll=true] [seed=false]:``
+``StridedLoop``     ``for a in <start>..<extent> step <step> [until <end>] [window(…)] [unroll=true] [seed=false]:``
+``Cond``            ``if <predicate>:`` and an optional ``else:``
+==================  ================================================================================
+
+An axis is ``name in 0..extent``; a symbolic extent's hint follows it as ``seq~128`` when it is not the default, and a
+window as ``window(parent=<axis>, base=<expr>, bound=<expr>, partition=true)``, each part only when set. Expressions
+are in their own text (:mod:`emmy.compiler.ir.expr`), and a name that is no identifier or that reads as a keyword is
+written between backticks. A statement kind of another layer prints through its own ``pretty`` and has no reader yet.
+"""
+
+from __future__ import annotations
+
+from collections.abc import Iterable
+
+from emmy.compiler.dim import Dim
+from emmy.compiler.dtype import DataType
+from emmy.compiler.dtype import get as dtype_of
+from emmy.compiler.ir.axis import Axis, Window
+from emmy.compiler.ir.expr import Expr, Literal, Parser, spell_name
+from emmy.compiler.ir.stmt.base import Stmt
+from emmy.compiler.ir.stmt.blocks import Cond, Loop, StridedLoop
+from emmy.compiler.ir.stmt.body import Body
+from emmy.compiler.ir.stmt.leaves import Accum, Affine, Assign, Carry, Init, Let, Load, Pre, Select, SelectBranch, Write, ZeroPrologue
+
+INDENT = "    "
+#: Words the reader gives a meaning, so a name spelled like one is written between backticks.
+_KEYWORDS = frozenset("for in if else let init zero load pre select when over seed step until window carried swizzle words unroll".split())
+
+
+def _name(name: str) -> str:
+    return spell_name(name, _KEYWORDS)
+
+
+def _names(names: Iterable[str]) -> str:
+    return ", ".join(_name(name) for name in names)
+
+
+def spell_number(value: float) -> str:
+    """The one spelling of a number a statement holds: an integer without a point, anything else as Python writes it."""
+    value = float(value)
+    return str(int(value)) if value.is_integer() and abs(value) < 2**53 else repr(value)
+
+
+def _typed(dtype: DataType | None) -> str:
+    return f"{dtype.name} " if dtype is not None else ""
+
+
+def _index(index: tuple[Expr, ...]) -> str:
+    return f"[{', '.join(str(e) for e in index)}]"
+
+
+def _axis(axis: Axis, start: str = "0") -> str:
+    extent = str(axis.extent.expr)
+    if axis.extent.hint != Dim(axis.extent.expr).hint:
+        extent += f"~{axis.extent.hint}"
+    return f"{_name(axis.name)} in {start}..{extent}"
+
+
+def _window(window: Window | None) -> str:
+    if window is None:
+        return ""
+    parts = {
+        "parent": None if window.parent is None else _axis(window.parent) + _window(window.parent.window),
+        "base": window.base,
+        "bound": window.bound,
+        "partition": "true" if window.partition else None,
+    }
+    return f" window({', '.join(f'{key}={value}' for key, value in parts.items() if value is not None)})"
+
+
+def _flags(stmt: Loop | StridedLoop) -> str:
+    return (" unroll=true" if stmt.unroll else "") + ("" if stmt.seed else " seed=false") + ":"
+
+
+def _affine(stmt: Affine) -> str:
+    terms = [(c, _name(arg) if abs(c) == 1 else f"{spell_number(abs(c))}*{_name(arg)}") for c, arg in stmt.terms]
+    if stmt.offset != 0:
+        terms.append((stmt.offset, spell_number(abs(stmt.offset))))
+    head, *rest = terms
+    return ("-" if head[0] < 0 else "") + head[1] + "".join(f" {'-' if c < 0 else '+'} {term}" for c, term in rest)
+
+
+def lines(stmt: Stmt, indent: str = "") -> list[str]:
+    """``stmt``'s text as lines, each starting with ``indent``."""
+    inner = indent + INDENT
+    match stmt:
+        case Load():
+            carried = f" carried={stmt.carried}" if stmt.carried else ""
+            text = f"{_typed(stmt.dtype)}{_names(stmt.names)} = load {_name(stmt.input)}{_index(stmt.index)}{carried}"
+        case Pre():
+            text = f"{_name(stmt.name)} = pre {_name(stmt.carrier)}{_index(stmt.index)}"
+        case Assign():
+            text = f"{_typed(stmt.dtype)}{_name(stmt.name)} = {stmt.op.name}({_names(stmt.args)})"
+        case Affine():
+            text = f"{_typed(stmt.dtype)}{_name(stmt.name)} = {_affine(stmt)}"
+        case Let():
+            text = f"let {_typed(stmt.dtype)}{_name(stmt.name)} = {stmt.value}"
+        case Init():
+            text = f"init {stmt.dtype.name} {_name(stmt.name)} = {spell_number(stmt.identity)}"
+        case Accum():
+            over = f" over {_names(stmt.axes)}" if stmt.axes else ""
+            base = stmt.name if stmt.base is None else stmt.base
+            text = f"{_typed(stmt.dtype)}{_name(stmt.name)} <- {stmt.op.name}({_names((base, stmt.value))}){over}"
+        case Carry():
+            seed = _name(stmt.seed) if isinstance(stmt.seed, str) else spell_number(stmt.seed)
+            text = f"{_typed(stmt.dtype)}{_name(stmt.name)}{_index(stmt.index)} <- {_name(stmt.value)} seed {seed}"
+        case Write():
+            value = f"({_names(stmt.values)})" if stmt.is_vector else _name(stmt.values[0])
+            swizzle = f" swizzle={stmt.swizzle}" if stmt.swizzle != "NONE" else ""
+            store = "+=" if stmt.atomic else "="
+            text = f"{_typed(stmt.value_dtype)}{_name(stmt.output)}{_index(stmt.index)} {store} {value}{swizzle}"
+        case Select():
+            return [f"{indent}{_name(stmt.name)} = select:", *(f"{inner}{_name(b.value)} when {b.select}" for b in stmt.branches)]
+        case ZeroPrologue():
+            text = f"zero {_name(stmt.dst)} words={stmt.words}"
+        case Loop():
+            return [f"{indent}for {_axis(stmt.axis)}{_window(stmt.axis.window)}{_flags(stmt)}", *pretty_body(stmt.body, inner)]
+        case StridedLoop():
+            until = f" until {stmt.end}" if stmt.end is not None else ""
+            head = f"for {_axis(stmt.axis, str(stmt.start))} step {stmt.step}{until}{_window(stmt.axis.window)}{_flags(stmt)}"
+            return [indent + head, *pretty_body(stmt.body, inner)]
+        case Cond():
+            orelse = [f"{indent}else:", *pretty_body(stmt.else_body, inner)] if stmt.else_body else []
+            return [f"{indent}if {stmt.cond}:", *pretty_body(stmt.body, inner), *orelse]
+        case _:
+            # A kind of another layer says its own lines.
+            return stmt.pretty(indent)
+    return [indent + text]
+
+
+def pretty_body(body: Iterable[Stmt], indent: str = "") -> list[str]:
+    """The lines of a body's text, each starting with ``indent``."""
+    return [line for stmt in body for line in lines(stmt, indent)]
+
+
+# ---------------------------------------------------------------------------
+# The reader
+# ---------------------------------------------------------------------------
+
+
+def parse_body(text: str) -> Body:
+    """The body ``text`` spells — ``str(body)``'s inverse. An error names its line."""
+    rows = [(len(line) - len(line.lstrip(" ")), number, line.strip()) for number, line in enumerate(text.splitlines(), 1) if line.strip()]
+    return _block(rows)
+
+
+def _under(rows: list, depth: int) -> tuple[list, list]:
+    """``rows`` split after the leading ones indented deeper than ``depth``."""
+    cut = next((index for index, row in enumerate(rows) if row[0] <= depth), len(rows))
+    return rows[:cut], rows[cut:]
+
+
+def _block(rows: list) -> Body:
+    """The statements ``rows`` spell: each row at the first one's depth, with the deeper rows after it under it."""
+    out: list[Stmt] = []
+    depth = rows[0][0] if rows else 0
+    while rows:
+        (indent, number, text), rows = rows[0], rows[1:]
+        under, rows = _under(rows, depth)
+        orelse: list = []
+        if text.startswith("if ") and rows and rows[0][2].replace(" ", "") == "else:":
+            orelse, rows = _under(rows[1:], depth)
+        try:
+            if indent != depth:
+                raise ValueError("unexpected indentation")
+            out.append(_Line(text).statement(under, orelse))
+        except ValueError as exc:
+            raise ValueError(str(exc) if str(exc).startswith("line ") else f"line {number}: {exc}") from exc
+    return Body(out)
+
+
+class _Line(Parser):
+    """One line of a body's text."""
+
+    PUNCTUATION = (*Parser.PUNCTUATION, "<-", "+=", "=", "..", "~")
+
+    def at_word(self, word: str, ahead: int = 0) -> bool:
+        token = self.peek(ahead)
+        return token is not None and token[:2] == ("name", word)
+
+    def word(self, word: str) -> bool:
+        """Step over the keyword ``word`` when it is next."""
+        if not self.at_word(word):
+            return False
+        self.index += 1
+        return True
+
+    def name(self) -> str:
+        kind, value, _position = self.take()
+        if kind not in ("name", "quoted"):
+            self.index -= 1
+            raise self.error("expected a name")
+        return value
+
+    def names(self, close: str | None = None) -> tuple[str, ...]:
+        """Names separated by commas, up to ``close`` when one is given."""
+        if close is not None and self.accept(close):
+            return ()
+        out = [self.name()]
+        while self.accept(","):
+            out.append(self.name())
+        if close is not None:
+            self.expect(close)
+        return tuple(out)
+
+    def value(self) -> float:
+        literal = self.number()
+        if literal is None:
+            raise self.error("expected a number")
+        return float(literal.value)
+
+    def flag(self, key: str) -> bool | None:
+        """``key=true`` / ``key=false`` when it is next, else ``None``."""
+        if not (self.at_word(key) and self.at("=", 1)):
+            return None
+        self.index += 2
+        if not (self.at_word("true") or self.at_word("false")):
+            raise self.error("expected true or false")
+        return self.take()[1] == "true"
+
+    def end(self, stmt):  # noqa: ANN001, ANN201 — what the line spelled, once nothing is left on it
+        if self.peek() is not None:
+            raise self.error("unexpected text")
+        return stmt
+
+    def dim(self) -> Dim:
+        expr = self.expression()
+        return Dim(expr, hint=int(self.value())) if self.accept("~") else Dim(expr)
+
+    def axis(self) -> tuple[str, Expr, Dim]:
+        """``name in start..extent``."""
+        name = self.name()
+        if not self.word("in"):
+            raise self.error("expected 'in'")
+        start = self.expression()
+        self.expect("..")
+        return name, start, self.dim()
+
+    def window(self) -> Window | None:
+        if not (self.at_word("window") and self.at("(", 1)):
+            return None
+        self.index += 2
+        parts: dict = {}
+        while not self.accept(")"):
+            if parts:
+                self.expect(",")
+            key = self.name()
+            self.expect("=")
+            if key == "parent":
+                name, start, extent = self.axis()
+                if start != Literal(0, "int"):
+                    raise self.error("an axis starts at 0")
+                parts[key] = Axis(name, extent, window=self.window())
+            elif key in ("base", "bound"):
+                parts[key] = self.expression()
+            elif key == "partition" and (self.at_word("true") or self.at_word("false")):
+                parts[key] = self.take()[1] == "true"
+            else:
+                raise self.error(f"no window part {key!r}")
+        return Window(**parts)
+
+    def statement(self, under: list, orelse: list) -> Stmt:
+        """The statement this line spells, ``under`` the rows of its block (``orelse`` those of an ``else``)."""
+        if self.tokens[-1][:2] != ("op", ":") and under:
+            raise ValueError(f"line {under[0][1]}: unexpected indentation")
+        if self.word("for"):
+            return self.loop(_block(under))
+        if self.word("if"):
+            cond = self.expression()
+            self.expect(":")
+            return self.end(Cond(cond, _block(under), _block(orelse)))
+        if self.word("let"):
+            dtype, name = self.typed_name()
+            self.expect("=")
+            return self.end(Let(name, self.expression(), dtype))
+        if self.word("init"):
+            dtype, name = self.typed_name()
+            self.expect("=")
+            if dtype is None:
+                raise self.error("an init names its dtype")
+            return self.end(Init(name, self.value(), dtype=dtype))
+        if self.word("zero"):
+            dst = self.name()
+            if not (self.word("words") and self.accept("=")):
+                raise self.error("expected words=N")
+            return self.end(ZeroPrologue(dst, int(self.value())))
+        dtype, name = self.typed_name()
+        if self.accept("["):
+            return self.end(self.store(dtype, name, self.expressions("]")))
+        if self.accept("<-"):
+            op = self.name()
+            self.expect("(")
+            base, value = self.names(")")
+            axes = self.names() if self.word("over") else ()
+            return self.end(Accum(name, value, op, dtype, axes, None if base == name else base))
+        names = (name, *(self.names() if self.accept(",") else ()))
+        self.expect("=")
+        if self.at_word("load") and not self.at("(", 1):
+            self.index += 1
+            buffer = self.name()
+            self.expect("[")
+            index = self.expressions("]")
+            carried = self.name() if self.word("carried") and self.accept("=") else ""
+            return self.end(Load(names=names, input=buffer, index=index, dtype=dtype, carried=carried))
+        if len(names) > 1:
+            raise self.error("only a load binds several names")
+        if self.at_word("pre") and not self.at("(", 1):
+            self.index += 1
+            carrier = self.name()
+            self.expect("[")
+            return self.end(Pre(name, carrier, self.expressions("]")))
+        if self.at_word("select") and self.at(":", 1):
+            self.index += 2
+            return self.end(Select(name, tuple(_Line(text).branch(number) for _indent, number, text in under)))
+        if (token := self.peek()) is not None and token[0] == "name" and self.at("(", 1):
+            self.index += 2
+            return self.end(Assign(name, token[1], self.names(")"), dtype))
+        return self.end(self.affine(name, dtype))
+
+    def branch(self, number: int) -> SelectBranch:
+        """``value when predicate``, one branch of a select, on line ``number``."""
+        try:
+            value = self.name()
+            if not self.word("when"):
+                raise self.error("expected 'when'")
+            return self.end(SelectBranch(value, self.expression()))
+        except ValueError as exc:
+            raise ValueError(f"line {number}: {exc}") from exc
+
+    def typed_name(self) -> tuple[DataType | None, str]:
+        """``[dtype] name``: two names in a row are a dtype and the name it types."""
+        first = self.peek()
+        following = self.peek(1)
+        if first is not None and first[0] == "name" and following is not None and following[0] in ("name", "quoted"):
+            self.index += 1
+            return dtype_of(first[1]), self.name()
+        return None, self.name()
+
+    def store(self, dtype: DataType | None, name: str, index: tuple[Expr, ...]) -> Stmt:
+        """What follows ``name[index]``: a carried state's next value, or a write."""
+        if self.accept("<-"):
+            value = self.name()
+            if not self.word("seed"):
+                raise self.error("expected 'seed'")
+            literal = self.number()
+            return Carry(name, value, index, float(literal.value) if literal is not None else self.name(), dtype)
+        atomic = self.accept("+=")
+        if not atomic:
+            self.expect("=")
+        values = self.names(")") if self.accept("(") else (self.name(),)
+        swizzle = self.name() if self.word("swizzle") and self.accept("=") else "NONE"
+        return Write(name, index, values=values, value_dtype=dtype, atomic=atomic, swizzle=swizzle)
+
+    def affine(self, name: str, dtype: DataType | None) -> Affine:
+        args: list[str] = []
+        coefficients: list[float] = []
+        offset = 0.0
+        while self.peek() is not None:
+            negative = self.accept("-")
+            if not negative and (args or offset) and not self.accept("+"):
+                raise self.error("expected '+' or '-'")
+            sign = -1.0 if negative else 1.0
+            literal = self.number()
+            if literal is None or self.accept("*"):
+                args.append(self.name())
+                coefficients.append(sign * (1.0 if literal is None else float(literal.value)))
+            else:
+                offset = sign * float(literal.value)
+                break
+        return Affine(name, tuple(args), tuple(coefficients), offset, dtype)
+
+    def loop(self, body: Body) -> Stmt:
+        name, start, extent = self.axis()
+        step = self.expression() if self.word("step") else None
+        end = self.expression() if self.word("until") else None
+        axis = Axis(name, extent, window=self.window())
+        unroll, seed = self.flag("unroll") or False, self.flag("seed")
+        self.expect(":")
+        flags = {"unroll": unroll, "seed": True if seed is None else seed}
+        if step is not None:
+            return self.end(StridedLoop(axis, start, step, body, end=end, **flags))
+        if start != Literal(0, "int") or end is not None:
+            raise self.error("a loop that does not start at 0, or stops early, names its step")
+        return self.end(Loop(axis, body, **flags))

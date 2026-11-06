@@ -8,8 +8,9 @@ from functools import cached_property
 
 from emmy.compiler.ir.axis import Axis
 from emmy.compiler.ir.expr import Expr
-from emmy.compiler.ir.stmt.base import Stmt, pretty_body
+from emmy.compiler.ir.stmt.base import Stmt
 from emmy.compiler.ir.stmt.body import Body
+from emmy.compiler.ir.stmt.text import pretty_body
 from emmy.utils import cached_method
 
 
