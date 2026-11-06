@@ -65,8 +65,8 @@ import math
 from dataclasses import dataclass
 
 from emmy.compiler.ir.expr import BinaryExpr, Expr, Interval, Literal, SimplifyCtx, Var, affine_form
+from emmy.compiler.ir.loop.assembly import NotSupported, Program, Splicer, UnfusableStmt
 from emmy.compiler.ir.loop.ir import Load, Loop, LoopOp, Write
-from emmy.compiler.ir.stmt import NotSupported, Program, Splicer, UnfusableStmt
 
 logger = logging.getLogger(__name__)
 

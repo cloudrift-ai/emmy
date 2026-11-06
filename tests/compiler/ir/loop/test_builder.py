@@ -1,6 +1,6 @@
 """Loop body construction and fresh-name allocation."""
 
-from emmy.compiler.ir.stmt.builder import BodyBuilder
+from emmy.compiler.ir.loop.builder import BodyBuilder
 
 
 class _LookupBudget(set):
@@ -45,7 +45,8 @@ def test_insert_descends_by_axis_and_prepends_at_the_leaf():
     Loop, and each level keeps prepend order — newest first, a fresh nested Loop ahead of the
     stmts inserted before it."""
     from emmy.compiler.ir.axis import Axis
-    from emmy.compiler.ir.stmt import Assign, Loop, Scope
+    from emmy.compiler.ir.loop import Scope
+    from emmy.compiler.ir.stmt import Assign, Loop
 
     a, b = Axis("a", 4), Axis("b", 8)
     builder = BodyBuilder(set())

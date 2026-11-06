@@ -1,4 +1,5 @@
-"""Shared reduction bodies during fusion; calls disappear before executable CSE."""
+"""Shared reduction bodies: the two kinds fusion builds a region with. Fusion expands every call before a body
+leaves it, so normalization, identity and storage never meet one."""
 
 from __future__ import annotations
 
@@ -49,10 +50,6 @@ class Subroutine:
     def params(self) -> tuple[str, ...]:
         return tuple(axis.name for axis in self.axes)
 
-    @cached_property
-    def reduction_depth(self) -> int:
-        return reduction_depths(self.body)[self.result]
-
     def pretty(self, indent: str = "") -> list[str]:
         return [
             f"{indent}sub {self.name}({', '.join((*self.buffers, *self.params))}):",
@@ -65,7 +62,8 @@ class Subroutine:
 class Call(Stmt):
     """A fusion-only scalar call; its definition stays outside generic statement-tree walks.
 
-    Calls expand before a LoopOp is validated or lifted. They are not members of Tile IR lambdas.
+    Fusion expands its calls before a LoopOp is built. They are not members of Tile IR lambdas, and a body that
+    holds one has no normal form.
     """
 
     name: str
@@ -106,41 +104,3 @@ class Call(Stmt):
             name=rename(self.name),
             args=tuple(sigma.apply(arg).rename(rename) for arg in self.args),
         )
-
-
-def definitions(body: Body) -> tuple[Subroutine, ...]:
-    """Definitions in dependency order, each visited once regardless of the number of calls."""
-    seen: set[int] = set()
-    out: list[Subroutine] = []
-
-    def visit(stmts: Body) -> None:
-        for stmt in stmts.iter():
-            if isinstance(stmt, Call) and id(stmt.target) not in seen:
-                seen.add(id(stmt.target))
-                visit(stmt.target.body)
-                out.append(stmt.target)
-
-    visit(body)
-    return tuple(out)
-
-
-def pretty_subroutines(body: Body, indent: str = "") -> list[str]:
-    """Compact definitions followed by the calling body."""
-    return [line for target in definitions(body) for line in (*target.pretty(indent), "")] + pretty_body(body, indent)
-
-
-def reduction_depths(body: Body, inputs: dict[str, int] | None = None) -> dict[str, int]:
-    """Reduction depth including the reductions held in shared definitions."""
-    from emmy.compiler.ir.stmt.leaves import Accum
-
-    inputs = inputs or {}
-    memo = body.fold(
-        lambda stmt, children, _: (
-            max(
-                (*(depth for depth in children if depth is not None), *(inputs.get(name, 0) for name in stmt.external_reads())),
-                default=0,
-            )
-            + (stmt.target.reduction_depth if isinstance(stmt, Call) else isinstance(stmt, Accum))
-        )
-    )
-    return {name: memo[id(stmt)] for name, stmt in body.definitions.items()}

@@ -1,7 +1,8 @@
-"""Shared demand reconstruction for body fusion and compact subroutine expansion.
+"""Body assembly for fusion: demand reconstruction over statement analyses and splice edges.
 
-The engine consumes statement analyses and splice edges, never graph nodes or LoopOps. The Loop
-IR adapter chooses graph regions and wraps the resulting Body in a validated LoopOp.
+It keeps each source reduction as a call to a shared subroutine while it builds a region, then expands the calls by
+the same reconstruction, so no body leaves with one. It consumes analyses and edges, never graph nodes or LoopOps:
+the splicer chooses graph regions and wraps the resulting Body in a validated LoopOp.
 """
 
 from __future__ import annotations
@@ -15,14 +16,25 @@ from graphlib import TopologicalSorter
 
 from emmy.compiler.ir.axis import Axis
 from emmy.compiler.ir.expr import Expr, Interval, Literal, SimplifyCtx, Var
+from emmy.compiler.ir.loop.analysis import BodyAnalysis, Scope
+from emmy.compiler.ir.loop.builder import BodyBuilder
 from emmy.compiler.ir.sigma import Sigma
-from emmy.compiler.ir.stmt.analysis import BodyAnalysis, Scope
-from emmy.compiler.ir.stmt.base import Stmt
-from emmy.compiler.ir.stmt.blocks import Cond
-from emmy.compiler.ir.stmt.body import Body
-from emmy.compiler.ir.stmt.builder import BodyBuilder
-from emmy.compiler.ir.stmt.leaves import Accum, Affine, Assign, Let, Load, Select, Write
-from emmy.compiler.ir.stmt.subroutine import Call, Subroutine, definitions, pretty_subroutines, reduction_depths
+from emmy.compiler.ir.stmt import (
+    Accum,
+    Affine,
+    Assign,
+    Body,
+    Call,
+    Cond,
+    Let,
+    Load,
+    Select,
+    Stmt,
+    Subroutine,
+    Write,
+    prepare_body,
+    pretty_body,
+)
 from emmy.utils import cached_method
 
 logger = logging.getLogger(__name__)
@@ -74,8 +86,54 @@ class _Demand:
     bound_as: str
 
 
+def definitions(body: Body) -> tuple[Subroutine, ...]:
+    """Definitions in dependency order, each visited once regardless of the number of calls."""
+    seen: set[int] = set()
+    out: list[Subroutine] = []
+
+    def visit(stmts: Body) -> None:
+        for stmt in stmts.iter():
+            if isinstance(stmt, Call) and id(stmt.target) not in seen:
+                seen.add(id(stmt.target))
+                visit(stmt.target.body)
+                out.append(stmt.target)
+
+    visit(body)
+    return tuple(out)
+
+
+def pretty_subroutines(body: Body, indent: str = "") -> list[str]:
+    """Compact definitions followed by the calling body."""
+    return [line for target in definitions(body) for line in (*target.pretty(indent), "")] + pretty_body(body, indent)
+
+
+def reduction_depths(body: Body, inputs: dict[str, int], calls: dict[int, int]) -> dict[str, int]:
+    """Reduction depth including the reductions held in shared definitions, each one's depth kept in ``calls``."""
+
+    def called(target: Subroutine) -> int:
+        depth = calls.get(id(target))
+        if depth is None:
+            depth = calls[id(target)] = reduction_depths(target.body, {}, calls)[target.result]
+        return depth
+
+    memo = body.fold(
+        lambda stmt, children, _: (
+            max(
+                (*(depth for depth in children if depth is not None), *(inputs.get(name, 0) for name in stmt.external_reads())),
+                default=0,
+            )
+            + (called(stmt.target) if isinstance(stmt, Call) else isinstance(stmt, Accum))
+        )
+    )
+    return {name: memo[id(stmt)] for name, stmt in body.definitions.items()}
+
+
 def expand_calls(body: Body) -> Body:
-    """Expand compact SSA bodies through shared demands and reduction-axis unification."""
+    """``body`` with every subroutine call expanded, through shared demands and reduction-axis unification.
+    The calls are simplified and placed first, so equal calls are one demand."""
+    if not definitions(body):
+        return body
+    body = prepare_body(body)
     targets = definitions(body)
     if not targets:
         return body
@@ -108,7 +166,7 @@ class Program:
     def used_names(self) -> set[str]:
         return set().union(
             *(
-                set(meta.body.ssa_defs | meta.body._free_ssa | meta.body.axis_names)
+                set(meta.body.ssa_defs | meta.body.ssa_uses | meta.body.axis_names)
                 | {axis.name for scope in meta.scopes.values() for axis in scope.enclosing}
                 for meta in self.loops.values()
             )
@@ -120,13 +178,14 @@ class Program:
         for (origin, source), target in self.splice_edges.items():
             dependencies[origin][source] = target
         depths: dict[str, dict[str, int]] = {}
+        calls: dict[int, int] = {}
         order = TopologicalSorter({tag: {origin for origin, _ in edges.values()} for tag, edges in dependencies.items()})
         for tag in order.static_order():
             inputs = {
                 source: max((depths[origin][w.value] for w, _ in self.loops[origin].writes if w.output == output), default=0)
                 for source, (origin, output) in dependencies[tag].items()
             }
-            depths[tag] = reduction_depths(self.loops[tag].body, inputs)
+            depths[tag] = reduction_depths(self.loops[tag].body, inputs, calls)
         return depths
 
     @cached_property
@@ -141,8 +200,6 @@ class Program:
         builder = Splicer(self, roots=(), outline=(origin, name))
         result = builder._ensure_dep(name, origin, Sigma.IDENTITY, scope)
         builder.resolve()
-        from emmy.compiler.ir.stmt.normalize import prepare_body
-
         # A temporary output keeps the returned value live while aliases and unit reductions
         # simplify. It is removed before forming the read-only subroutine.
         body = prepare_body(Body((*builder.finish(), Write(output="_return", index=(), value=result))))
@@ -151,7 +208,7 @@ class Program:
 
 
 class Splicer(BodyBuilder):
-    """Build a maximal region, keeping reduction cones as shared calls until final CSE.
+    """Build a maximal region, keeping reduction cones as shared calls until the region is whole.
 
     Worklist dep-resolution is reverse-topological — producers demanded after consumers — so
     the builder's prepend-at-leaf behavior yields defined-before-use ordering. Reusing an already
@@ -210,7 +267,8 @@ class Splicer(BodyBuilder):
         body = Body.coerce(self.finish())
         if logger.isEnabledFor(logging.DEBUG):
             logger.debug("Compact fusion:\n%s", "\n".join(pretty_subroutines(body)))
-        return body
+        # Calls are storage sharing while the region is built: the body that leaves holds every operation.
+        return expand_calls(body)
 
     # -- Seed: every selected root Write, with its value queued -------------
 

@@ -6,10 +6,7 @@ from dataclasses import dataclass, field
 
 from emmy.compiler.ir.axis import Axis
 from emmy.compiler.ir.expr import Expr
-from emmy.compiler.ir.stmt.base import Stmt
-from emmy.compiler.ir.stmt.blocks import Cond, Loop
-from emmy.compiler.ir.stmt.body import Body
-from emmy.compiler.ir.stmt.leaves import Accum, Carry, Write
+from emmy.compiler.ir.stmt import Accum, Body, Carry, Cond, Loop, Stmt, Write
 
 
 @dataclass(frozen=True)

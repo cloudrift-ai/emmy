@@ -1,7 +1,7 @@
 """Loop IR — post-fusion kernel representation and validation.
 
-``LoopOp`` normalizes its body before validation. The statement vocabulary, body analysis and
-reconstruction live in ``ir/stmt``; the Loop IR splicer supplies graph regions to that shared engine.
+``LoopOp`` normalizes its body before validation. The statement vocabulary lives in ``ir/stmt``; body analysis
+and the body assembly fusion drives live here, and the splicer supplies graph regions to that engine.
 Common types are re-exported here for Loop IR callers.
 """
 

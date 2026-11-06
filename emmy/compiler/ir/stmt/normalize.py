@@ -42,7 +42,7 @@ from emmy.compiler.ir.stmt.body import Body, free_names
 from emmy.compiler.ir.stmt.leaves import Accum, Affine, Assign, Carry, Init, Let, Load, Select, SelectBranch, Write
 from emmy.compiler.ir.stmt.order import bound_axes, ordering_constraints, topological_sort
 from emmy.compiler.ir.stmt.passes import map_exprs, rename_free
-from emmy.compiler.ir.stmt.subroutine import definitions
+from emmy.compiler.ir.stmt.subroutine import Call
 
 __all__ = ["normalize_body"]
 
@@ -63,16 +63,11 @@ def normalize_body(stmts: Body) -> Body:
 
 def _normalize_body(stmts: Body) -> Body:
     """Uncached implementation owned by :class:`Body`'s normalization property."""
-    from emmy.compiler.ir.stmt.splicer import expand_calls
-
+    # The normal form holds every operation: a call is storage sharing inside fusion, which expands it.
+    if stmts.iter_of_type(Call):
+        raise ValueError("a body that holds a subroutine call has no normal form; fusion expands its calls")
     # Motion can put two lexical bindings in one scope. Give them distinct names first.
     stmts = rename_ssa_sequential(topo_sort_siblings(stmts))
-    # Calls are storage sharing only. Full normalization sees every operation, so reduction
-    # fusion, executable identity and Tile IR's common-cone detection use the same CSE form.
-    if definitions(stmts):
-        # The expansion lands consumers above producers it reused; sort before naming, or a read ahead of its
-        # definition reads a name the renaming never binds.
-        stmts = rename_ssa_sequential(topo_sort_siblings(expand_calls(prepare_body(stmts))))
     # The folds feed the steps ahead of them: a fold can leave a value unread, make two loops mergeable, or change
     # what orders the free axes. So the steps run again after a fold that changed the body. The order permutes and
     # names, and one step reads names: the order gives two bindings that shared a name their own, and a value only
@@ -915,7 +910,6 @@ def place_values(stmts: Body) -> Body:
     scopes, as :func:`rename_ssa_sequential` leaves them.
     """
     from emmy.compiler.ir.stmt.leaves import Carry, Pre  # noqa: PLC0415
-    from emmy.compiler.ir.stmt.subroutine import Call  # noqa: PLC0415
     from emmy.compiler.ir.stmt.values import distinct, value_numbers  # noqa: PLC0415
 
     body = distinct(stmts)

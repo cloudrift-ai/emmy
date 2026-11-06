@@ -188,9 +188,9 @@ def test_the_statement_module_exports_a_pinned_list() -> None:
     containers = ["Body", "OutputSpec"]
     functions = ["normalize_body", "canonicalize_identity", "free_names", "exposed_defines", "rename_free", "map_exprs", "binary"]
     functions += ["mask_select_predicate", "pretty_body", "ordering_constraints", "dtype_promote"]
-    # Normalization steps a pass calls on its own, and the body assembly fusion drives.
-    steps = ["fold_affine", "simplify_body"]
-    assembly = ["BodyAnalysis", "Scope", "Program", "Splicer", "NotSupported", "UnfusableStmt"]
+    # Normalization steps a pass calls on its own, and the two kinds fusion assembles a region with.
+    steps = ["fold_affine", "simplify_body", "prepare_body"]
+    assembly = ["Call", "Subroutine"]
     # What a layer declares a kind of its own with: the base that computes the protocol, and a field's role.
     declaring = ["Declared", "role"]
     assert sorted(stmt.__all__) == sorted(kinds + containers + functions + steps + assembly + declaring)

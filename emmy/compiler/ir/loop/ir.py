@@ -42,12 +42,12 @@ from emmy.compiler.ir.axis import Axis
 from emmy.compiler.ir.base import Op
 from emmy.compiler.ir.body_op import BodyOp
 from emmy.compiler.ir.elementwise import ElementwiseImpl
+from emmy.compiler.ir.loop.analysis import BodyAnalysis, Scope  # noqa: F401 — public Loop IR aliases
 from emmy.compiler.ir.stmt import (  # noqa: F401  (re-exported via __init__)  # noqa: F401 — public Loop IR aliases
     Accum,
     Affine,
     Assign,
     Body,
-    BodyAnalysis,
     Carry,
     Cond,
     Init,
@@ -55,7 +55,6 @@ from emmy.compiler.ir.stmt import (  # noqa: F401  (re-exported via __init__)  #
     Load,
     Loop,
     Pre,
-    Scope,
     Select,
     SelectBranch,
     Stmt,
