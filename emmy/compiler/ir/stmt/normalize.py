@@ -101,10 +101,10 @@ def _commuted(stmts: Body) -> Body:
 
     def sort(stmt: Stmt) -> Stmt:
         if isinstance(stmt, Assign) and stmt.op.commutative:
-            return replace(stmt, args=tuple(sorted(stmt.args)))
+            return stmt.replace(args=tuple(sorted(stmt.args)))
         if isinstance(stmt, Affine):
             terms = sorted(stmt.terms, key=lambda term: term[1])
-            return replace(stmt, args=tuple(arg for _, arg in terms), coefficients=tuple(c for c, _ in terms))
+            return stmt.replace(args=tuple(arg for _, arg in terms), coefficients=tuple(c for c, _ in terms))
         return stmt
 
     return stmts.map(sort)
@@ -653,7 +653,7 @@ def _unify_siblings(body: Body) -> Body:
         # substitution must stop at a re-binding scope; these loops ARE the re-binding scopes.
         new_axis = replace(loop.axis, name=canonical, extent=extent)
         renamed = tuple(s.rename({loop.axis.name: canonical}) for s in loop.body)
-        stmts[idx] = replace(loop, axis=new_axis, body=renamed)
+        stmts[idx] = loop.replace(axis=new_axis, body=renamed)
 
     return Body(stmts)
 
@@ -1362,10 +1362,10 @@ def _canonical_order(stmts: Body) -> Body:
 
     def listed(stmt: Stmt) -> Stmt:
         if isinstance(stmt, Assign) and stmt.op.commutative and len(stmt.args) > 1:
-            return replace(stmt, args=tuple(sorted(stmt.args, key=lambda name: (*operand.get(name, (3, "")), name))))
+            return stmt.replace(args=tuple(sorted(stmt.args, key=lambda name: (*operand.get(name, (3, "")), name))))
         if isinstance(stmt, Affine) and len(stmt.args) > 1:
             terms = sorted(stmt.terms, key=lambda term: (*operand.get(term[1], (3, "")), term[1], term[0]))
-            return replace(stmt, args=tuple(arg for _, arg in terms), coefficients=tuple(c for c, _ in terms))
+            return stmt.replace(args=tuple(arg for _, arg in terms), coefficients=tuple(c for c, _ in terms))
         return stmt
 
     result = result.map(listed)

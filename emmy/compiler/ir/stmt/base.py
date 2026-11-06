@@ -342,6 +342,10 @@ class Stmt(Structural, Wire):
         """
         return ()
 
+    def replace(self, **changes) -> Stmt:  # noqa: ANN003 — field values
+        """A copy of this stmt with the named fields changed — the one way a statement is edited."""
+        return replace(self, **changes)
+
     def with_exprs(self, exprs: tuple[Expr, ...]) -> Stmt:
         """Write-side counterpart to :meth:`exprs`: this stmt with its expressions replaced by ``exprs``,
         positionally. A kind that reports expressions and is met by an expression map overrides it."""

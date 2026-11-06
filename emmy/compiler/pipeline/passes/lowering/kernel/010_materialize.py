@@ -169,7 +169,7 @@ def _pointwise_strip(tile: TileOp, materialized):
     axes = tuple(
         replace(axis, extent=Dim(axis.extent.as_static() // width)) if axis.name == inner.name else axis for axis in materialized.axes
     )
-    return replace(materialized, axes=axes, body=Body((*loads, *computes, *writes)))
+    return materialized.replace(axes=axes, body=Body((*loads, *computes, *writes)))
 
 
 def _binding(stmt) -> tuple | None:

@@ -104,7 +104,7 @@ def _stamp_stmt(s: Stmt, ctx: _StampCtx) -> Stmt:
     if isinstance(s, Let):
         # A float literal takes f32 when nothing narrows it; an index keeps its expression's type.
         if s.dtype is None and isinstance(s.value, Literal) and s.value.dtype == "float":
-            s = replace(s, dtype=F32)
+            s = s.replace(dtype=F32)
         if s.dtype is not None:
             ctx.ssa_dtypes[s.name] = s.dtype
         return s
@@ -133,7 +133,7 @@ def _stamp_accum(s: Accum, ctx: _StampCtx) -> Accum:
     value_dt = ctx.ssa_dtypes.get(s.value) or F32
     dt = ctx.ssa_dtypes.get(s.name) or (value_dt if s.op.selecting else F32)
     ctx.ssa_dtypes[s.name] = dt
-    return replace(s, dtype=dt)
+    return s.replace(dtype=dt)
 
 
 def _stamp_load(s: Load, ctx: _StampCtx) -> Load:
@@ -142,7 +142,7 @@ def _stamp_load(s: Load, ctx: _StampCtx) -> Load:
         for n in s.names:
             ctx.ssa_dtypes[n] = dt
         if s.dtype is None:
-            return replace(s, dtype=dt)
+            return s.replace(dtype=dt)
     return s
 
 
@@ -164,7 +164,7 @@ def _stamp_assign(s: Assign, ctx: _StampCtx) -> Assign:
     if result_dt == F16 and _is_overflow_prone(s):
         result_dt = F32
     ctx.ssa_dtypes[s.name] = result_dt
-    return replace(s, dtype=result_dt) if s.dtype != result_dt else s
+    return s.replace(dtype=result_dt) if s.dtype != result_dt else s
 
 
 def _stamp_affine(s: Affine, ctx: _StampCtx) -> Affine:
@@ -174,7 +174,7 @@ def _stamp_affine(s: Affine, ctx: _StampCtx) -> Affine:
         return s
     result_dt = dtype_get(dtype_promote("add", [(ctx.ssa_dtypes.get(a) or F32).name for a in s.args]))
     ctx.ssa_dtypes[s.name] = result_dt
-    return replace(s, dtype=result_dt)
+    return s.replace(dtype=result_dt)
 
 
 def _is_overflow_prone(s: Assign) -> bool:

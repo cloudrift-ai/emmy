@@ -213,6 +213,38 @@ def test_the_statement_module_depends_on_expressions_and_values_only() -> None:
     assert not offenders, "the statement module must not depend on these:\n" + "\n".join(offenders)
 
 
+def test_a_statement_is_copied_through_its_own_method() -> None:
+    """Outside ``ir/stmt``, nothing edits a statement with ``dataclasses.replace``: ``Stmt.replace`` is the one way.
+
+    The class a ``replace`` call receives is not visible in the source, so this lowers the first corpus case of
+    each family and watches every call of ``dataclasses.replace`` whose argument is a statement.
+    """
+    import dataclasses
+    import sys
+
+    from emmy.compiler.ir.stmt import SelectBranch, Stmt
+    from tests.compiler.realization import helpers
+
+    inside = str(_REPO_ROOT / "emmy" / "compiler" / "ir" / "stmt")
+    offenders: set[str] = set()
+
+    def watch(frame, event, _arg):  # noqa: ANN001, ANN202 — the ``sys.setprofile`` signature
+        if event == "call" and frame.f_code is dataclasses.replace.__code__ and isinstance(frame.f_locals.get("obj"), (Stmt, SelectBranch)):
+            caller = frame.f_back.f_code.co_filename
+            if not caller.startswith(inside):
+                offenders.add(f"{pathlib.Path(caller).relative_to(_REPO_ROOT)}:{frame.f_back.f_lineno}")
+
+    cases = [helpers.load_case(sorted(family.glob("*.json"))[0]) for family in sorted(helpers.CASES_DIR.iterdir()) if family.is_dir()]
+    previous = sys.getprofile()
+    sys.setprofile(watch)
+    try:
+        for case in cases:
+            helpers.lowered(case, case.context())
+    finally:
+        sys.setprofile(previous)
+    assert not offenders, "copy these statements with ``stmt.replace(...)``:\n" + "\n".join(sorted(offenders))
+
+
 # ---------------------------------------------------------------------------
 # Fix 1 firewall — keep the
 # assemble→TileOp boundary clean: every benched scheduling choice lives in the

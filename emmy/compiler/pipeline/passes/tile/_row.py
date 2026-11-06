@@ -76,7 +76,7 @@ def _bind(body: Body, axis: Axis, position: int, shapes: dict) -> Body:
             return stmt
         replaced = list(index)
         replaced[position] = Var(axis.name)
-        return replace(stmt, index=tuple(replaced))
+        return stmt.replace(index=tuple(replaced))
 
     return body.map(rebind)
 
@@ -240,7 +240,7 @@ def _paired_by_loads(tile: TileOp) -> TileOp:
     )
     sweep = tuple(axes[name] for name in dict.fromkeys(order) if name in respelled_outer - grid)
     specs = tuple(
-        replace(spec, write=replace(spec.write, index=tuple(sigma.apply(expr) for expr in spec.write.index)), sweep=sweep)
+        replace(spec, write=spec.write.replace(index=tuple(sigma.apply(expr) for expr in spec.write.index)), sweep=sweep)
         if spec in stores
         else spec
         for spec in tile.output_specs

@@ -35,12 +35,12 @@ def _stamp_axes(loop: Loop) -> Loop:
     body = tuple(
         _stamp_axes(stmt)
         if isinstance(stmt, Loop)
-        else replace(stmt, axes=(loop.axis.name,))
+        else stmt.replace(axes=(loop.axis.name,))
         if isinstance(stmt, Accum) and not stmt.axes
         else stmt
         for stmt in loop.body
     )
-    return replace(loop, body=Body(body))
+    return loop.replace(body=Body(body))
 
 
 @dataclass
@@ -247,7 +247,7 @@ def _factor_products(
             edge_of[arg], hoists[arg] = split
     # A split argument's product reads the raw slab in its place.
     raw_names = {arg: edge.exposes[0] for arg, edge in edge_of.items()}
-    products = [replace(product, args=tuple(raw_names.get(name, name) for name in product.args)) for product in products]
+    products = [product.replace(args=tuple(raw_names.get(name, name) for name in product.args)) for product in products]
     # Overlapping cones are one term exposing every root they share members with.
     groups: list[list[str]] = []
     for arg in (arg for arg in computed if arg not in edge_of):
@@ -290,7 +290,7 @@ def _factor_products(
 
     pairs = [tuple(unified(edge) for edge in pair) for pair in pairs]
     if renames:
-        products = [replace(product, args=tuple(renames.get(name, name) for name in product.args)) for product in products]
+        products = [product.replace(args=tuple(renames.get(name, name) for name in product.args)) for product in products]
     ordered = _orient(pairs, tuple(axis.name for axis in axes))
     split_names = {raw: arg for arg, raw in raw_names.items()}
     consumed.update(id(term) for hoist in hoists.values() for term in hoist.terms)  # a factor's slab rides the epilogue
@@ -355,7 +355,7 @@ def _renamed_sweep(loop: Loop, taken: set[str]) -> Loop:
     taken = taken | set(Body(loop.body).ssa_defs)
     fresh = next(name for index in range(1, len(taken) + 2) if (name := f"{loop.axis.name}_{index}") not in taken)
     coords = Sigma({loop.axis.name: Var(fresh)})
-    return replace(loop, axis=replace(loop.axis, name=fresh), body=Body(tuple(stmt.substitute(coords) for stmt in loop.body)))
+    return loop.replace(axis=replace(loop.axis, name=fresh), body=Body(tuple(stmt.substitute(coords) for stmt in loop.body)))
 
 
 def lift_body(body, axes: tuple = (), levels: tuple = (), carriers: dict | None = None) -> tuple[tuple, Body]:
@@ -428,7 +428,7 @@ def lift_body(body, axes: tuple = (), levels: tuple = (), carriers: dict | None 
                 term = Fold(operands=operands, lift=lift)
                 edges.append(term)
                 level.exposed.update((name, term) for name in term.exposes)
-            level.stmts.append(replace(stmt, body=retained))
+            level.stmts.append(stmt.replace(body=retained))
             continue
         nested = stmt.nested()
         if nested:
@@ -518,7 +518,7 @@ def scan_from_loop(loop: Loop, axes: tuple = (), levels: tuple = ()) -> tuple[Fo
         results=tuple(f"{value}__obs" for value in stored),
     )
     fold = Fold(operands=edges, lift=lift, init=init, base=combine, observe=observe)
-    renamed = tuple(replace(stmt, values=tuple(f"{value}__obs" for value in stmt.values)) for stmt in writes)
+    renamed = tuple(stmt.replace(values=tuple(f"{value}__obs" for value in stmt.values)) for stmt in writes)
     return fold, renamed
 
 
@@ -608,7 +608,7 @@ def _carried_from_loop(loop: Loop, axes: tuple, levels: tuple) -> tuple[Fold, tu
 
     def strip(stmt: Stmt) -> Stmt:
         if isinstance(stmt, Carry) or (isinstance(stmt, Pre) and stmt.carrier in loop.carries):
-            return replace(stmt, index=tuple(e for position, e in enumerate(stmt.index) if position not in unit))
+            return stmt.replace(index=tuple(e for position, e in enumerate(stmt.index) if position not in unit))
         return stmt
 
     if unit:
@@ -637,7 +637,7 @@ def _carried_from_loop(loop: Loop, axes: tuple, levels: tuple) -> tuple[Fold, tu
         base=Lambda.componentwise(("next",) * len(names), names),
         cells=carried[0].cells,
     )
-    return fold, (*(replace(stmt, values=tuple(observed[value] for value in stmt.values)) for stmt in writes), *sweeps)
+    return fold, (*(stmt.replace(values=tuple(observed[value] for value in stmt.values)) for stmt in writes), *sweeps)
 
 
 def carrying_loops(body: Body, outer: tuple[Axis, ...] = ()) -> list[tuple[Loop, tuple[Axis, ...]]]:
@@ -744,9 +744,9 @@ def states_as_buffers(body: Body, prefix: str, inputs: Mapping[str, Tensor]) -> 
                 stored = stored_states(stmt, outer)
                 buffers = {name: cells for name, cells in stmt.carries.items() if name not in stored}
                 shapes.update((f"{prefix}__{name}", (stmt.axis, *outer, *cells)) for name, cells in buffers.items())
-                out.append(replace(stmt, body=walk(stmt.body, outer, stmt.axis, carried, stored)))
+                out.append(stmt.replace(body=walk(stmt.body, outer, stmt.axis, carried, stored)))
             elif isinstance(stmt, Loop) and time is None:
-                out.append(replace(stmt, body=walk(stmt.body, (*outer, stmt.axis), time, seeds, stored)))
+                out.append(stmt.replace(body=walk(stmt.body, (*outer, stmt.axis), time, seeds, stored)))
             elif stmt.nested():
                 out.append(stmt.with_bodies(tuple(walk(child, outer, time, seeds, stored) for child in stmt.nested())))
             else:

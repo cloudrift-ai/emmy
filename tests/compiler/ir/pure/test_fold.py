@@ -485,7 +485,7 @@ def test_the_step_is_the_merge_at_the_injected_singleton() -> None:
     assert "e" not in {stmt.name for stmt in injected.body}, "nothing may see through psi: exp(score) overflows"
     step, merged = fold.step(), fold.merge(injected.results)
     assert tuple(step[: len(injected.body)]) == tuple(injected.body)
-    assert tuple(step[len(injected.body) :]) == tuple(replace(s, axes=("k",)) if isinstance(s, Accum) else s for s in merged)
+    assert tuple(step[len(injected.body) :]) == tuple(s.replace(axes=("k",)) if isinstance(s, Accum) else s for s in merged)
 
 
 # --- the memo ------------------------------------------------------------------------------------ #

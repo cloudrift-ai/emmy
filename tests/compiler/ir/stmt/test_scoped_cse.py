@@ -1,7 +1,6 @@
 """Every corpus kernel reuses pure values already available in its lexical scope."""
 
 import json
-from dataclasses import replace
 
 import pytest
 
@@ -41,11 +40,11 @@ def _assert_scoped_cse(body, available=()):
             if stmt.pure and stmt.defines() and not (isinstance(stmt, Load) and stmt.carried):
                 candidate = stmt
                 if isinstance(candidate, Assign) and candidate.op.commutative:
-                    candidate = replace(candidate, args=tuple(sorted(candidate.args)))
+                    candidate = candidate.replace(args=tuple(sorted(candidate.args)))
                 for prior in available:
                     renamed = prior.rename(dict(zip(prior.defines(), candidate.defines(), strict=False)))
                     if isinstance(renamed, Assign) and renamed.op.commutative:
-                        renamed = replace(renamed, args=tuple(sorted(renamed.args)))
+                        renamed = renamed.replace(args=tuple(sorted(renamed.args)))
                     assert candidate != renamed, f"available duplicate: {prior.pretty()} followed by {stmt.pretty()}"
                 available.append(stmt)
         available = [prior for prior in available if not writes.intersection(prior.external_reads())]

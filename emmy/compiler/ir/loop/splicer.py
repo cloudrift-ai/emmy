@@ -62,7 +62,7 @@ from __future__ import annotations
 
 import logging
 import math
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 
 from emmy.compiler.ir.expr import BinaryExpr, Expr, Interval, Literal, SimplifyCtx, Var, affine_form
 from emmy.compiler.ir.loop.ir import Load, Loop, LoopOp, Write
@@ -436,7 +436,7 @@ def _retarget_equivalent_output(graph, op: LoopOp, cluster: _OutputEquivalenceCl
             coordinates = _unflatten(flat.simplify(ctx), shape, ctx)
             if coordinates is None:
                 return None
-        replacement[id(write)] = replace(write, output=output, index=(*write.index[:leading], *coordinates))
+        replacement[id(write)] = write.replace(output=output, index=(*write.index[:leading], *coordinates))
 
     return LoopOp(
         body=op.body.map(lambda stmt: replacement.get(id(stmt), stmt)),

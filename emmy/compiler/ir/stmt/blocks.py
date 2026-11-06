@@ -6,7 +6,7 @@ Each carries a child body (or two, for ``Cond``) and overrides
 
 from __future__ import annotations
 
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 from functools import cached_property
 
 from emmy.compiler.ir.axis import Axis
@@ -220,7 +220,7 @@ class StridedLoop(Stmt):
     def with_exprs(self, exprs: tuple[Expr, ...]) -> Stmt:
         start, *rest = exprs
         step = rest.pop(0) if isinstance(self.step, Expr) else self.step
-        return replace(self, start=start, step=step, end=rest[0] if rest else None)
+        return self.replace(start=start, step=step, end=rest[0] if rest else None)
 
     @property
     def is_reduce(self) -> bool:
@@ -295,7 +295,7 @@ class Cond(Stmt):
         return (self.cond,)
 
     def with_exprs(self, exprs: tuple[Expr, ...]) -> Stmt:
-        return replace(self, cond=exprs[0])
+        return self.replace(cond=exprs[0])
 
     def pretty(self, indent: str = "") -> list[str]:
         lines = [f"{indent}if ({self.cond.pretty()}):", *pretty_body(self.body, indent + INDENT)]

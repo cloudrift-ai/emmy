@@ -9,7 +9,7 @@ spliced in as one).
 
 from __future__ import annotations
 
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 
 from emmy.compiler.ir.elementwise import ElementwiseImpl
 from emmy.compiler.ir.stmt import Affine, Assign, Body, Load, Stmt, exposed_defines, free_names, pretty_body
@@ -55,10 +55,10 @@ def _normalize_body(body: Body) -> Body:
 
     def sort(stmt: Stmt) -> Stmt:
         if isinstance(stmt, Assign) and stmt.op.commutative and len(stmt.args) > 1:
-            return replace(stmt, args=tuple(sorted(stmt.args)))
+            return stmt.replace(args=tuple(sorted(stmt.args)))
         if isinstance(stmt, Affine) and len(stmt.args) > 1:
             terms = sorted(stmt.terms, key=lambda term: term[1])
-            return replace(stmt, args=tuple(arg for _, arg in terms), coefficients=tuple(c for c, _ in terms))
+            return stmt.replace(args=tuple(arg for _, arg in terms), coefficients=tuple(c for c, _ in terms))
         return stmt
 
     return Body(sort(stmt) for stmt in ordered)

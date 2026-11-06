@@ -2808,7 +2808,7 @@ def _residence(
                 bound = tuple(rows[a][half] if a in rows else a for a in reads)
                 if not frags_only:
                     out.append(
-                        Accum(name=target, value=bound[1], op=stmt.op, base=bound[0]) if accum else replace(stmt, name=target, args=bound)
+                        Accum(name=target, value=bound[1], op=stmt.op, base=bound[0]) if accum else stmt.replace(name=target, args=bound)
                     )
             rows[stmt.name] = pair
         elif not frags_only:

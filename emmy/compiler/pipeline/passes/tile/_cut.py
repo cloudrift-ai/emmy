@@ -1009,7 +1009,7 @@ def _abstracted(body: Body, captured: frozenset[str], table: dict, by_name: dict
 
     def visit(stmt, scope, step):
         if isinstance(stmt, Load):
-            return replace(stmt, index=tuple(step(e) if e.free_vars() and e.free_vars() <= scope else e for e in stmt.index))
+            return stmt.replace(index=tuple(step(e) if e.free_vars() and e.free_vars() <= scope else e for e in stmt.index))
         inner = scope - {stmt.axis.name} if isinstance(stmt, Loop) else scope
         nested = stmt.nested()
         return stmt.with_bodies(tuple(Body(tuple(visit(child, inner, step) for child in body)) for body in nested)) if nested else stmt
@@ -1359,7 +1359,7 @@ def _read_inline(node: Fold, inline: _InlineReads) -> tuple[Fold, dict[str, str]
     loads = dict(inline.reads)
     body = Body(
         tuple(
-            replace(loads[defined[0]], names=defined) if len(defined := tuple(stmt.defines())) == 1 and defined[0] in loads else stmt
+            loads[defined[0]].replace(names=defined) if len(defined := tuple(stmt.defines())) == 1 and defined[0] in loads else stmt
             for stmt in node.lift.body
         )
     )
@@ -1478,7 +1478,7 @@ def _without_identity_casts(node: Fold, dtypes: dict[str, object]) -> Fold:
         if slab is None or not isinstance(stmt, Assign) or stmt.op != ElementwiseImpl("copy") or stmt.args != proj.lift.params[:1]:
             continue
         if dtypes.get(slab.load.input) == stmt.dtype:
-            targets[id(proj)] = (Fold.slab(replace(slab.load, names=(stmt.name,))),)
+            targets[id(proj)] = (Fold.slab(slab.load.replace(names=(stmt.name,))),)
     return _replace_fold(node, targets, {}) if targets else node
 
 
@@ -2415,7 +2415,7 @@ def _reindexed(body: Body, mapping: dict) -> Body:
 
     def visit(stmt, scope):
         if isinstance(stmt, Load):
-            return replace(stmt, index=tuple(expr.substitute(scope) for expr in stmt.index))
+            return stmt.replace(index=tuple(expr.substitute(scope) for expr in stmt.index))
         inner = {name: expr for name, expr in scope.items() if name != stmt.axis.name} if isinstance(stmt, Loop) else scope
         nested = stmt.nested()
         return stmt.with_bodies(tuple(Body(tuple(visit(child, inner) for child in body)) for body in nested)) if nested else stmt

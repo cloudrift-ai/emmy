@@ -453,9 +453,9 @@ def realize_carry_split(match: Match, root: Node, cta: int) -> Graph:
 
         def rewrite(stmt):
             if isinstance(stmt, Carry):
-                return replace(stmt, index=(*prefix, *stmt.index), seed=seed)
+                return stmt.replace(index=(*prefix, *stmt.index), seed=seed)
             if isinstance(stmt, Pre) and stmt.carrier == state:
-                return replace(stmt, index=(*prefix, *stmt.index))
+                return stmt.replace(index=(*prefix, *stmt.index))
             return stmt
 
         return stmts.map(rewrite)
@@ -622,7 +622,7 @@ def _sliced_edge(edge, sigma: Sigma, k_name: str, kslice=None, ksplit: Axis | No
     every partition, each recomputing it — the REDUNDANT-STATISTIC split. That redundancy is what
     the split trades for parallelism; whether it pays on a given shape is evidence's decision."""
     if isinstance(edge, Load):
-        return replace(edge, index=tuple(sigma.apply(e) for e in edge.index))
+        return edge.replace(index=tuple(sigma.apply(e) for e in edge.index))
 
     ops = tuple(_sliced_edge(e, sigma, k_name, kslice, ksplit) if k_name in e.free_axes else e for e in edge.operands)
     body = Body(tuple(s.substitute(sigma) for s in edge.lift.body))
@@ -711,8 +711,7 @@ def add_output_piece(frag: Graph, root: Node, piece: TileOp, inputs: list[str], 
     piece = replace(
         piece,
         output_specs=tuple(
-            replace(spec, write=replace(spec.write, output=renamed.get(spec.write.output, spec.write.output)))
-            for spec in piece.output_specs
+            replace(spec, write=spec.write.replace(output=renamed.get(spec.write.output, spec.write.output))) for spec in piece.output_specs
         ),
     )
     tensors = (
@@ -901,7 +900,7 @@ def realize_split(match: Match, root: Node, cta: int, finalize: str) -> Graph:
         # projection (the offer read the whole tail, a conservative superset — see its docstring).
         _enforce(atomic_finalize(partial_fold, projection, tile.outputs))
         if stores:
-            p_stores = tuple(replace(store, write=replace(store.write, atomic=True)) for store in stores)
+            p_stores = tuple(replace(store, write=store.write.replace(atomic=True)) for store in stores)
         else:
             p_stores = (OutputSpec(write=Write(output=out.name, index=cell, values=states, atomic=True)),)
         piece = _piece(

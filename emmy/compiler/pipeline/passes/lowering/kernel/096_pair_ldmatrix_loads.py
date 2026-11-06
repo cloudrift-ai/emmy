@@ -189,7 +189,7 @@ def _pair(stmts: list[Stmt]) -> list[Stmt] | None:
                 moved_deps = {v for e in b.src_index for v in e.free_vars()}
                 if any(_blocks(s, a.frag, b.frag, moved_deps) for s in out[i + 1 : j]):
                     break
-                out[i] = replace(a, pair_frag=b.frag)
+                out[i] = a.replace(pair_frag=b.frag)
                 del out[j]
                 changed = True
                 break

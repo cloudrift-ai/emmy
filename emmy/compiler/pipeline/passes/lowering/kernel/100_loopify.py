@@ -124,7 +124,7 @@ def _fuse_chains(body: Body) -> Body:
         if isinstance(s, FragmentApply):
             while i + 1 < len(stmts) and _is_unary_post(stmts[i + 1], s.out, s.layout):
                 nxt = stmts[i + 1]
-                s = replace(s, post=s.post + (nxt.op, *nxt.post))
+                s = s.replace(post=s.post + (nxt.op, *nxt.post))
                 i += 1
         out.append(s)
         i += 1

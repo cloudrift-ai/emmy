@@ -289,7 +289,7 @@ def test_reductions_share_dependencies_in_cse_form(dependent, offset):
         ),
     )
     left = _reduce_producer(source="P", output="left")
-    left = replace(left, body=left.body.map(lambda s: replace(s, op="maximum") if isinstance(s, Accum) else s))
+    left = replace(left, body=left.body.map(lambda s: s.replace(op="maximum") if isinstance(s, Accum) else s))
     prefix = (Load(name="m", input="left", index=(Var("a0"),)),) if dependent else ()
     subtract = (Assign(name="shifted", op="subtract", args=("p", "m")),) if dependent else ()
     right = LoopOp(

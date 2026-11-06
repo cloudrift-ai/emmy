@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-from dataclasses import replace
-
 from emmy.compiler.dtype import F32
 from emmy.compiler.ir.axis import Axis
 from emmy.compiler.ir.elementwise import ElementwiseImpl
@@ -75,7 +73,7 @@ class _Fragments:
                 RegFragment(
                     name=out, role=role, shape=self.atom.shape, dtype=self.atom.operand_dtype(role), nregs=self.atom.fragment_nregs(role)
                 ),
-                replace(srcs, frag=out)
+                srcs.replace(frag=out)
                 if isinstance(srcs, LdmatrixLoad)
                 else FragmentRepack(frag=out, srcs=srcs, role=role, fragment_layout=self.atom.fragment_layout, part=part),
             )

@@ -36,8 +36,6 @@ fusion must keep the spelling the splicer composes through.
 
 from __future__ import annotations
 
-from dataclasses import replace
-
 from emmy.compiler.ir.address import split_pair
 from emmy.compiler.ir.axis import Axis
 from emmy.compiler.ir.expr import BinaryExpr, CastExpr, Expr, FuncCallExpr, Literal, SimplifyCtx, TernaryExpr, Var
@@ -118,7 +116,7 @@ def _fuse_pair(outer: Loop, inner: Loop, shapes: dict, between: tuple[Loop, ...]
     if not _folds_clean(fused, q.name, shapes):
         return None
     for mid in reversed(between):
-        fused = replace(mid, body=Body((fused,)))
+        fused = mid.replace(body=Body((fused,)))
     return fused
 
 
@@ -144,7 +142,7 @@ def _fuse_once(body: Body, shapes: dict) -> Body | None:
                 return Body((*body[:i], fused, *body[i + 1 :]))
         inner = _fuse_once(s.body, shapes)
         if inner is not None:
-            return Body((*body[:i], replace(s, body=inner), *body[i + 1 :]))
+            return Body((*body[:i], s.replace(body=inner), *body[i + 1 :]))
     return None
 
 
@@ -220,13 +218,13 @@ def _split_once(body: Body, names: frozenset[str]) -> Body | None:
                 while outer in names:
                     outer += "_"
                 sigma = Sigma({axis.name: Var(outer) * Literal(factor, "int") + Var(axis.name)})
-                inner = replace(stmt, axis=Axis(axis.name, factor), body=Body(s.substitute(sigma) for s in stmt.body))
+                inner = stmt.replace(axis=Axis(axis.name, factor), body=Body(s.substitute(sigma) for s in stmt.body))
                 split = Loop(Axis(outer, extent // factor), Body((inner,)), unroll=stmt.unroll, seed=stmt.seed)
                 (split,) = simplify_body((split,))
                 return Body((*body[:i], split, *body[i + 1 :]))
         inner = _split_once(stmt.body, names)
         if inner is not None:
-            return Body((*body[:i], replace(stmt, body=inner), *body[i + 1 :]))
+            return Body((*body[:i], stmt.replace(body=inner), *body[i + 1 :]))
     return None
 
 

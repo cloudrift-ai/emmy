@@ -136,13 +136,13 @@ class Load(Stmt):
 
     def rename_buffers(self, rename):  # noqa: ANN001 — see ``Stmt.rename_buffers``
         new = rename.get(self.input, self.input)
-        return self if new == self.input else replace(self, input=new)
+        return self if new == self.input else self.replace(input=new)
 
     def exprs(self) -> tuple[Expr, ...]:
         return self.index
 
     def with_exprs(self, exprs: tuple[Expr, ...]) -> Stmt:
-        return replace(self, index=exprs)
+        return self.replace(index=exprs)
 
     def is_literal(self, literal_constants: dict[str, float]) -> bool:
         return self.input in literal_constants
@@ -153,8 +153,7 @@ class Load(Stmt):
         return [f"{indent}{names} = load {self.input}[{idx}]"]
 
     def _rewrite(self, rename, sigma, axis_fn):  # noqa: ANN001, ANN202 — see ``Stmt.rewrite``
-        return replace(
-            self,
+        return self.replace(
             names=tuple(rename(n) for n in self.names),
             index=tuple(sigma.apply(e).rename(rename) for e in self.index),
         )
@@ -278,13 +277,13 @@ class Affine(Stmt):
         if self.offset != 0:
             total = step("add" if self.offset > 0 else "subtract", (total, bound(abs(self.offset))))
         if out and out[-1].name == total:
-            out[-1] = replace(out[-1], name=self.name)
+            out[-1] = out[-1].replace(name=self.name)
         else:
             out.append(Assign(self.name, "copy", (total,), self.dtype))
         return out
 
     def _rewrite(self, rename, sigma, axis_fn):  # noqa: ANN001, ANN202 — see ``Stmt.rewrite``
-        return replace(self, name=rename(self.name), args=tuple(rename(a) for a in self.args))
+        return self.replace(name=rename(self.name), args=tuple(rename(a) for a in self.args))
 
 
 def binary(stmts) -> tuple[Stmt, ...]:  # noqa: ANN001 — any iterable of Stmt
@@ -449,7 +448,7 @@ class Carry(Stmt):
         return (self.seed,) if isinstance(self.seed, str) else ()
 
     def rename_buffers(self, rename):  # noqa: ANN001 — see ``Stmt.rename_buffers``
-        return replace(self, seed=rename.get(self.seed, self.seed)) if isinstance(self.seed, str) else self
+        return self.replace(seed=rename.get(self.seed, self.seed)) if isinstance(self.seed, str) else self
 
     @property
     def cells(self) -> tuple[str, ...]:
@@ -470,7 +469,7 @@ class Carry(Stmt):
         return self.index
 
     def with_exprs(self, exprs: tuple[Expr, ...]) -> Stmt:
-        return replace(self, index=exprs)
+        return self.replace(index=exprs)
 
     def pretty(self, indent: str = "") -> list[str]:
         seed = self.seed if isinstance(self.seed, str) else f"{self.seed:g}"
@@ -510,7 +509,7 @@ class Pre(Stmt):
         return self.index
 
     def with_exprs(self, exprs: tuple[Expr, ...]) -> Stmt:
-        return replace(self, index=exprs)
+        return self.replace(index=exprs)
 
     def pretty(self, indent: str = "") -> list[str]:
         return [f"{indent}{self.name} = pre {self.carrier}[{', '.join(e.pretty() for e in self.index)}]"]
@@ -594,14 +593,14 @@ class Let(Stmt):
         return (self.value,)
 
     def with_exprs(self, exprs: tuple[Expr, ...]) -> Stmt:
-        return replace(self, value=exprs[0])
+        return self.replace(value=exprs[0])
 
     def external_reads(self) -> tuple[str, ...]:
         return tuple(dict.fromkeys(e.buffer for e in self.value.subterms() if isinstance(e, FlatIndex)))
 
     def rename_buffers(self, rename):  # noqa: ANN001 — see ``Stmt.rename_buffers``
         value = self.value.rebuild(lambda e: replace(e, buffer=rename.get(e.buffer, e.buffer)) if isinstance(e, FlatIndex) else e)
-        return self if value == self.value else replace(self, value=value)
+        return self if value == self.value else self.replace(value=value)
 
     def pretty(self, indent: str = "") -> list[str]:
         prefix = f"{self.dtype.name} " if self.dtype is not None else ""
@@ -715,13 +714,13 @@ class Write(Stmt):
 
     def rename_buffers(self, rename):  # noqa: ANN001 — see ``Stmt.rename_buffers``
         new = rename.get(self.output, self.output)
-        return self if new == self.output else replace(self, output=new)
+        return self if new == self.output else self.replace(output=new)
 
     def exprs(self) -> tuple[Expr, ...]:
         return self.index
 
     def with_exprs(self, exprs: tuple[Expr, ...]) -> Stmt:
-        return replace(self, index=exprs)
+        return self.replace(index=exprs)
 
     @cached_property
     def has_side_effects(self) -> bool:
@@ -754,6 +753,9 @@ class SelectBranch(Wire):
     value: str  # SSA name when predicate holds
     select: Expr  # predicate over axis Vars
 
+    def replace(self, **changes) -> SelectBranch:  # noqa: ANN003 — field values
+        return replace(self, **changes)
+
 
 @dataclass(frozen=True)
 class Select(Stmt):
@@ -784,7 +786,7 @@ class Select(Stmt):
         return tuple(b.select for b in self.branches)
 
     def with_exprs(self, exprs: tuple[Expr, ...]) -> Stmt:
-        return replace(self, branches=tuple(SelectBranch(b.value, select) for b, select in zip(self.branches, exprs, strict=True)))
+        return self.replace(branches=tuple(SelectBranch(b.value, select) for b, select in zip(self.branches, exprs, strict=True)))
 
     def pretty(self, indent: str = "") -> list[str]:
         lines: list[str] = []
@@ -852,7 +854,7 @@ class ZeroPrologue(Stmt):
 
     def rename_buffers(self, rename):  # noqa: ANN001 — see ``Stmt.rename_buffers``
         new = rename.get(self.dst, self.dst)
-        return self if new == self.dst else replace(self, dst=new)
+        return self if new == self.dst else self.replace(dst=new)
 
     @cached_property
     def has_side_effects(self) -> bool:

@@ -589,7 +589,7 @@ class CpAsyncCopy(Stmt):
 
     def rename_buffers(self, rename):  # noqa: ANN001 — see ``Stmt.rename_buffers``
         new = rename.get(self.src, self.src)
-        return self if new == self.src else replace(self, src=new)
+        return self if new == self.src else self.replace(src=new)
 
     def pretty(self, indent: str = "") -> list[str]:
         smem_idx = ", ".join(e.pretty() for e in self.smem_index)
@@ -702,7 +702,7 @@ class TmaDescriptor(Stmt):
 
     def rename_buffers(self, rename):  # noqa: ANN001 — see ``Stmt.rename_buffers``
         new = rename.get(self.src_buf, self.src_buf)
-        return self if new == self.src_buf else replace(self, src_buf=new)
+        return self if new == self.src_buf else self.replace(src_buf=new)
 
     def pretty(self, indent: str = "") -> list[str]:
         shape = ", ".join(str(e) for e in self.src_shape)
@@ -1330,7 +1330,7 @@ class FragmentApply(Stmt):
 
     def rename_buffers(self, rename):  # noqa: ANN001 — see ``Stmt.rename_buffers``
         args = tuple((rename.get(a[0], a[0]), a[1]) if k == GMEM else a for a, k in zip(self.args, self.kinds, strict=True))
-        return self if args == self.args else replace(self, args=args)
+        return self if args == self.args else self.replace(args=args)
 
     def pretty(self, indent: str = "") -> list[str]:
         def _show(a: object, k: str) -> str:
@@ -1427,8 +1427,7 @@ class FragmentApply(Stmt):
                 return (a[0], tuple(sigma.apply(e) for e in a[1]))
             return rename(a) if isinstance(a, str) else a
 
-        return replace(
-            self,
+        return self.replace(
             out=rename(self.out),
             args=tuple(_arg(a, k) for a, k in zip(self.args, self.kinds, strict=True)),
             row_base=sigma.apply(self.row_base) if self.row_base is not None else None,
@@ -1827,7 +1826,7 @@ class BlockScaleLoad(Stmt):
 
     def rename_buffers(self, rename):  # noqa: ANN001 — see ``Stmt.rename_buffers``
         new = rename.get(self.src_buffer, self.src_buffer)
-        return self if new == self.src_buffer else replace(self, src_buffer=new)
+        return self if new == self.src_buffer else self.replace(src_buffer=new)
 
     def exprs(self) -> tuple[Expr, ...]:
         return tuple(self.src_index)
@@ -1939,7 +1938,7 @@ class LdmatrixLoad(Stmt):
 
     def rename_buffers(self, rename):  # noqa: ANN001 — see ``Stmt.rename_buffers``
         new = rename.get(self.src_buffer, self.src_buffer)
-        return self if new == self.src_buffer else replace(self, src_buffer=new)
+        return self if new == self.src_buffer else self.replace(src_buffer=new)
 
     def exprs(self) -> tuple[Expr, ...]:
         guard = () if self.gmem_guard is None else self.gmem_guard
@@ -2338,7 +2337,7 @@ class FragmentPromote(Stmt):
         return [f"{indent}FragmentPromote {self.dst} += {self.src} (f16acc chunk fold, {self.src} rezeroed)"]
 
     def _rewrite(self, rename, sigma, axis_fn):  # noqa: ANN001, ANN202 — see ``Stmt.rewrite``
-        return replace(self, dst=rename(self.dst), src=rename(self.src))
+        return self.replace(dst=rename(self.dst), src=rename(self.src))
 
 
 @render_stmt.register
@@ -2378,8 +2377,7 @@ class FragmentRepack(Stmt):
     def _rewrite(self, rename, sigma, axis_fn):  # noqa: ANN001, ANN202 — see ``Stmt.rewrite``
         # Pure register (the flash P→A handoff): route the destination and source C fragments through
         # ``rename`` (SSA canonicalizer / per-cell replicator); no index / axis to σ-substitute.
-        return replace(
-            self,
+        return self.replace(
             frag=rename(self.frag),
             srcs=tuple(rename(src) for src in self.srcs),
         )
@@ -2442,7 +2440,7 @@ class WgmmaDescriptor(Stmt):
 
     def rename_buffers(self, rename):  # noqa: ANN001 — see ``Stmt.rename_buffers``
         new = rename.get(self.smem, self.smem)
-        return self if new == self.smem else replace(self, smem=new)
+        return self if new == self.smem else self.replace(smem=new)
 
     def exprs(self) -> tuple[Expr, ...]:
         return () if self.smem_index is None else (self.smem_index,)
@@ -2453,7 +2451,7 @@ class WgmmaDescriptor(Stmt):
 
     def _rewrite(self, rename, sigma, axis_fn):  # noqa: ANN001, ANN202 — see ``Stmt.rewrite``
         index = None if self.smem_index is None else sigma.apply(self.smem_index).rename(rename)
-        return replace(self, name=rename(self.name), smem_index=index)
+        return self.replace(name=rename(self.name), smem_index=index)
 
 
 @render_stmt.register
@@ -2529,8 +2527,7 @@ class WgmmaMma(Stmt):
         return [f"{indent}WgmmaMma {{{acc}}} += {self._a()} @ {self.b_desc} (m{m}n{n}k{k} {self.ab_dtype} {self.form}{flags})"]
 
     def _rewrite(self, rename, sigma, axis_fn):  # noqa: ANN001, ANN202 — see ``Stmt.rewrite``
-        return replace(
-            self,
+        return self.replace(
             c_frags=tuple(rename(c) for c in self.c_frags),
             b_desc=rename(self.b_desc),
             a_desc=None if self.a_desc is None else rename(self.a_desc),
@@ -2714,7 +2711,7 @@ class RegStore(Stmt):
     def rename_buffers(self, rename):  # noqa: ANN001 — see ``Stmt.rename_buffers``
         new = rename.get(self.dst_buffer, self.dst_buffer)
         run = tuple(cell.rename_buffers(rename) for cell in self.run)
-        return self if new == self.dst_buffer and run == self.run else replace(self, dst_buffer=new, run=run)
+        return self if new == self.dst_buffer and run == self.run else self.replace(dst_buffer=new, run=run)
 
     def exprs(self) -> tuple[Expr, ...]:
         epi = () if self.epilogue is None else tuple(e for st in self.epilogue.body for e in st.exprs())
@@ -3055,8 +3052,7 @@ class RegStore(Stmt):
         # to racing plain assigns, and a dropped ``swizzle`` left the flash weight tile stored
         # row-major under a drain that reads it XOR-permuted. Naming only what changes cannot regress
         # that way when a field is added.
-        return replace(
-            self,
+        return self.replace(
             dst_index=tuple(sigma.apply(e) for e in self.dst_index),
             frag=rename(self.frag),
             extra_frags=tuple(rename(f) for f in self.extra_frags),
@@ -3089,7 +3085,7 @@ def _(node: RegStore, ctx: RenderCtx) -> list[str]:
     if node.run and (wide := node._render_run(ctx, flat=flat, ldm=ldm, dst_dt=dst_dt)) is not None:
         return wide
     if node.run:  # a destination the 16-byte row cannot serve stores each cell on its own
-        return [ln for cell in (replace(node, run=()), *node.run) for ln in render_stmt(cell, ctx)]
+        return [ln for cell in (node.replace(run=()), *node.run) for ln in render_stmt(cell, ctx)]
     if node.m_guard is not None or node.n_guard is not None:
         return node._render_guarded(ctx, flat=flat, ldm=ldm, ldn=ldn, dst_dt=dst_dt, pre=pre, vals=vals)
     lane_stmt = f"const int _g = {lane} >> 2; const int _t = {lane} & 3;"

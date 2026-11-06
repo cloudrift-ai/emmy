@@ -75,7 +75,7 @@ def _guard(body: Body, axes: frozenset[str] = frozenset()) -> Body:
                     end = stmt.end if isinstance(stmt, StridedLoop) and stmt.end is not None else stmt.axis.extent_expr()
                     if isinstance(stmt, Loop):
                         stmt = StridedLoop(stmt.axis, _FALSE, _TRUE, stmt.body, unroll=stmt.unroll, seed=stmt.seed)
-                    stmt = replace(stmt, end=TernaryExpr(wanted, end, _FALSE))
+                    stmt = stmt.replace(end=TernaryExpr(wanted, end, _FALSE))
             for name in free_names(stmt):
                 need(name, _TRUE)
         rewritten.append(stmt)

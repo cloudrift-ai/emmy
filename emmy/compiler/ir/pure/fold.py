@@ -1052,7 +1052,7 @@ class Fold:
                 for state, value, seed in zip(self.base.results, lift.results, self.init, strict=False)
             )
             return Body((*lift.body, *carried))
-        merged = [replace(stmt, axes=(self.axis,)) if isinstance(stmt, Accum) else stmt for stmt in self.merge(lift.results)]
+        merged = [stmt.replace(axes=(self.axis,)) if isinstance(stmt, Accum) else stmt for stmt in self.merge(lift.results)]
         observed = self.observe.body if self.observe is not None else ()
         return Body((*lift.body, *merged, *observed))
 
@@ -1214,7 +1214,7 @@ class Fold:
                         continue
                     fresh = stmt.name if stmt.name not in taken else f"{name}__{stmt.name}"
                     names[stmt.name] = fresh
-                    spelled = replace(spelled, name=fresh)
+                    spelled = spelled.replace(name=fresh)
                     body.append(spelled)
                     taken.add(fresh)
                     if isinstance(spelled, Assign):

@@ -128,7 +128,7 @@ def _reuse(stmts: list[Stmt], written: frozenset[str], ctx: SimplifyCtx) -> list
             local = {name for s in Body((stmt,)).iter() for name in s.defines()}
             stmt = stmt.rewrite(lambda name, local=local: name if name in local else rename.get(name, name))
         if isinstance(stmt, Load) and stmt.is_scalar and stmt.input not in written and not stmt.carried:
-            stmt = replace(stmt, index=tuple(e.simplify(ctx) for e in stmt.index))
+            stmt = stmt.replace(index=tuple(e.simplify(ctx) for e in stmt.index))
             key = (stmt.input, stmt.dtype, tuple(_canonical(e) for e in stmt.index))
             if key in seen:
                 rename[stmt.name] = seen[key]

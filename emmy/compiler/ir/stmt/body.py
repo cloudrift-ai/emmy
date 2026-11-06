@@ -368,7 +368,7 @@ class Body(tuple[Stmt, ...], Wire):
                 if accumulators & folded:
                     if accumulators <= folded:
                         continue
-                    stmt = replace(stmt, body=Body(stmt.body.backward_cone(accumulators - folded).members))
+                    stmt = stmt.replace(body=Body(stmt.body.backward_cone(accumulators - folded).members))
             prior = out[-1] if out else None
             if (
                 isinstance(stmt, (Loop, StridedLoop))
@@ -376,10 +376,10 @@ class Body(tuple[Stmt, ...], Wire):
                 and prior.is_reduce
                 and stmt.is_reduce
                 and not (prior.has_side_effects or stmt.has_side_effects)
-                and replace(prior, body=stmt.body) == stmt
+                and prior.replace(body=stmt.body) == stmt
                 and not (free_names(stmt) & prior.body.ssa_defs)
             ):
-                stmt = replace(prior, body=(prior.body + stmt.body).coalesce())
+                stmt = prior.replace(body=(prior.body + stmt.body).coalesce())
                 out.pop()
             out.append(stmt)
             folded.update(_seeded_accumulators(stmt))
@@ -941,7 +941,7 @@ class Body(tuple[Stmt, ...], Wire):
             # A loop's static extent is a literal too: a step whose reduction covers one more
             # element than the last is still the same step.
             if isinstance(stmt, Loop) and isinstance(stmt.axis.extent.expr, Literal) and type(stmt.axis.extent.expr.value) is int:
-                return replace(stmt, axis=replace(stmt.axis, extent=Dim(held(stmt.axis.extent.expr.value))))
+                return stmt.replace(axis=replace(stmt.axis, extent=Dim(held(stmt.axis.extent.expr.value))))
             return map_exprs(stmt, lift)
 
         body = self.map(abstracted)

@@ -46,7 +46,7 @@ def rewrite(root: Node) -> KernelOp:
             written |= _writes(stmt)
         else:
             body.append(stmt)
-    spread = replace(tile, body=Body(tuple(body)), spread=True)
+    spread = tile.replace(body=Body(tuple(body)), spread=True)
     return replace(op, body=Body(tuple(spread if stmt is tile else stmt for stmt in op.body)))
 
 

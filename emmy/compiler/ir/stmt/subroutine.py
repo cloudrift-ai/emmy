@@ -88,22 +88,21 @@ class Call(Stmt):
         return self.args
 
     def with_exprs(self, exprs: tuple[Expr, ...]) -> Stmt:
-        return replace(self, args=exprs)
+        return self.replace(args=exprs)
 
     def external_reads(self) -> tuple[str, ...]:
         return self.target.buffers
 
     def rename_buffers(self, rename):  # noqa: ANN001 — see Stmt.rename_buffers
         buffers = tuple(rename.get(name, name) for name in self.target.buffers)
-        return self if buffers == self.target.buffers else replace(self, target=self.target.with_buffers(buffers))
+        return self if buffers == self.target.buffers else self.replace(target=self.target.with_buffers(buffers))
 
     def pretty(self, indent: str = "") -> list[str]:
         args = (*self.target.buffers, *(arg.pretty() for arg in self.args))
         return [f"{indent}{self.name} = {self.target.name}({', '.join(args)})"]
 
     def _rewrite(self, rename, sigma, axis_fn):  # noqa: ANN001, ANN202 — see ``Stmt.rewrite``
-        return replace(
-            self,
+        return self.replace(
             name=rename(self.name),
             args=tuple(sigma.apply(arg).rename(rename) for arg in self.args),
         )
