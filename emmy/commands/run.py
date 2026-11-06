@@ -1502,11 +1502,21 @@ _FLOAT_MANTISSA_BITS = {"bf16": 7, "f16": 10, "f32": 23, "f64": 52}
 
 
 def _computed_from_formats(frontend) -> dict:
-    """The coarsest IEEE float format each output of ``frontend`` is computed in: the coarsest among the output and
-    every value its producing chain computes. Graph inputs and constants do not count (the FP64 evaluation reads them
-    exactly), nor do quantized values (the math decodes them to a float first). ``None`` for an output with no float
-    value in its chain."""
+    """The coarsest IEEE float format each output of ``frontend`` is computed in: the coarsest format an op of its
+    producing chain rounds into. A layout op (the trace writes a cast as one) moves its first input's values and rounds
+    them only into a coarser format, so a bf16 input sliced and cast to f32 adds no bf16 step; every other op rounds
+    into its own format. Graph inputs and constants do not count (the FP64 evaluation reads them exactly), nor do
+    quantized values (the math decodes them to a float first). ``None`` for an output no op rounds into a float."""
     from emmy.compiler.ir.base import ConstantOp, InputOp  # noqa: PLC0415
+    from emmy.compiler.ir.frontend.ir import CatOp, ReshapeOp, SliceOp, TransposeOp, UnsqueezeOp  # noqa: PLC0415
+    from emmy.compiler.ir.tensor.ir import GatherOp, IndexMapOp, ScatterOp  # noqa: PLC0415
+
+    layout = (CatOp, GatherOp, IndexMapOp, ReshapeOp, ScatterOp, SliceOp, TransposeOp, UnsqueezeOp)
+    bits = _FLOAT_MANTISSA_BITS
+
+    def rounds(node, fmt: str) -> bool:
+        source = frontend.buffer(node.inputs[0]).dtype.name if isinstance(node.op, layout) and node.inputs else None
+        return source not in bits or bits[source] > bits[fmt]
 
     def coarsest(output: str) -> str | None:
         found, stack, seen = [], [output], set()
@@ -1516,9 +1526,11 @@ def _computed_from_formats(frontend) -> dict:
             if buf in seen or node is None or isinstance(node.op, (ConstantOp, InputOp)):
                 continue
             seen.add(buf)
-            found.append(frontend.buffer(buf).dtype.name)
+            fmt = frontend.buffer(buf).dtype.name
+            if fmt in bits and rounds(node, fmt):
+                found.append(fmt)
             stack.extend(node.inputs)
-        return min((f for f in found if f in _FLOAT_MANTISSA_BITS), key=_FLOAT_MANTISSA_BITS.get, default=None)
+        return min(found, key=bits.get, default=None)
 
     return {output: coarsest(output) for output in frontend.outputs}
 
@@ -1578,7 +1590,7 @@ def _strict_correctness_proof(
 
     ``formats`` names each output's format (a dtype name, ``_output_formats``): a quantized output's
     storage format; for a float output, the coarser of its storage format and the coarsest float format
-    it is computed in. An f32 output cast from a bf16 value carries bf16 rounding errors, and two summation
+    it is computed in. An f32 output cast from bf16 math carries bf16 rounding errors, and two summation
     orders of that bf16 math land up to a bf16 step apart, thousands of f32 steps. An output without a
     format gets no step, only the largest-error rule, and no one-code pass. A real fault — a wrong element beyond the reference's own
     error and one step, a code two steps off, or a bias across the output — still fails.
