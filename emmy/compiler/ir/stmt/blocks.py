@@ -1,7 +1,7 @@
-"""Block-structured ``Stmt`` subclasses — ``Loop``, ``StridedLoop``, ``Cond``.
+"""Block-structured ``Statement`` subclasses — ``Loop``, ``StridedLoop``, ``Cond``.
 
 Each carries a child body (or two, for ``Cond``) and overrides
-``Stmt.nested`` so a body walk can recurse uniformly.
+``Statement.nested`` so a body walk can recurse uniformly.
 """
 
 from __future__ import annotations
@@ -9,10 +9,10 @@ from __future__ import annotations
 from functools import cached_property
 
 from emmy.compiler.ir.axis import Axis
-from emmy.compiler.ir.expr import Expr, Var
-from emmy.compiler.ir.stmt.base import Stmt
+from emmy.compiler.ir.expression import Expression, Var
+from emmy.compiler.ir.stmt.base import Statement
 from emmy.compiler.ir.stmt.body import Body
-from emmy.compiler.ir.stmt.declared import kind, role
+from emmy.compiler.ir.stmt.declared import role, statement
 from emmy.compiler.ir.stmt.leaves import Accum, Carry
 
 # The loop-carried reduce accumulators — a Loop is a *reduce* loop iff its immediate
@@ -43,8 +43,8 @@ def carried_cells(body: Body) -> dict[str, tuple[int | Axis, ...]]:
     return out
 
 
-@kind
-class Loop(Stmt):
+@statement
+class Loop(Statement):
     """Explicit iteration block — one loop over an axis.
 
     ``body`` executes ``axis.extent`` times, once per axis value. Reduce-
@@ -95,8 +95,8 @@ class Loop(Stmt):
         return any(isinstance(s, _CARRIERS) for s in self.body) or bool(self.carries)
 
 
-@kind
-class StridedLoop(Stmt):
+@statement
+class StridedLoop(Statement):
     """Strided iteration: ``for (axis = start; axis < axis.extent; axis += step)``.
 
     Cooperative variant of ``Loop`` — used at Tile IR to express "threads
@@ -105,7 +105,7 @@ class StridedLoop(Stmt):
     axis Var directly; the strided iteration shape is encoded by the
     loop construct itself rather than via affine indexing in the body.
 
-    ``end`` overrides the ``<`` bound with an arbitrary ``Expr`` over in-scope names
+    ``end`` overrides the ``<`` bound with an arbitrary ``Expression`` over in-scope names
     (default: the axis extent) — a data-independent early stop such as the causal
     flash stream's triangular kv bound. The axis extent stays the analysis-visible
     range; ``end`` must never exceed it.
@@ -114,11 +114,11 @@ class StridedLoop(Stmt):
     reduce-loop iff its body contains an ``Accum``."""
 
     axis: Axis = role("axis")
-    start: Expr = role("expr")
-    step: Expr = role("expr")
+    start: Expression = role("expression")
+    step: Expression = role("expression")
     body: Body = role("body")
     unroll: bool = False
-    end: Expr | None = role("expr", default=None)
+    end: Expression | None = role("expression", default=None)
     seed: bool = True  # emit the per-``Accum`` identity seed before the loop; False when the
     # carrier this loop folds is declared once OUTSIDE it at a seed the term names and the ⊕'s
     # identity does not (a twisted carrier's pivot seeds at the term's own ``init``, not at
@@ -139,11 +139,11 @@ class StridedLoop(Stmt):
         return any(isinstance(s, _CARRIERS) for s in self.body)
 
 
-@kind
-class Cond(Stmt):
+@statement
+class Cond(Statement):
     """Conditional block — ``if (cond) { body } [else { else_body }]``.
 
-    ``cond`` is an ``Expr`` over axis Vars and previously-defined SSA
+    ``cond`` is an ``Expression`` over axis Vars and previously-defined SSA
     names; ``body`` and ``else_body`` are stmt sequences executed when
     the predicate evaluates true / false respectively. ``else_body``
     empty means a bare ``if``.
@@ -158,7 +158,7 @@ class Cond(Stmt):
     own deps; the recursive walker picks them up.
     """
 
-    cond: Expr = role("expr", "reads")
+    cond: Expression = role("expression", "reads")
     body: Body = role("body")
     else_body: Body = role("body", default=Body())
 

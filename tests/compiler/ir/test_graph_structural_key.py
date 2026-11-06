@@ -14,7 +14,7 @@ from __future__ import annotations
 from emmy.compiler.graph import Graph, Tensor
 from emmy.compiler.ir.axis import Axis
 from emmy.compiler.ir.base import ConstantOp, InputOp
-from emmy.compiler.ir.expr import Var
+from emmy.compiler.ir.expression import Var
 from emmy.compiler.ir.loop.ir import LoopOp
 from emmy.compiler.ir.render import render_stmt
 from emmy.compiler.ir.stmt import Assign, Body, Load, Loop, Write
@@ -302,7 +302,7 @@ def test_structural_key_handles_fragment_repack() -> None:
 
 def test_structural_key_handles_index_declarations() -> None:
     """Precomputed kernel indices remain hashable and follow SSA and buffer renaming during tuning."""
-    from emmy.compiler.ir.expr import FlatIndex, FuncCallExpr, Literal
+    from emmy.compiler.ir.expression import FlatIndex, FuncCallExpr, Literal
     from emmy.compiler.ir.stmt import Let
 
     stmt = Let("store", FuncCallExpr("layout", (Var("row"), Literal(4, "int"))))

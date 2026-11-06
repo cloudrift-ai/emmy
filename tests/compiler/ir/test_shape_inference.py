@@ -11,7 +11,7 @@ parallel.
 from __future__ import annotations
 
 from emmy.compiler.dim import Dim
-from emmy.compiler.ir.expr import BinaryExpr, Literal, Var
+from emmy.compiler.ir.expression import BinaryExpr, Literal, Var
 from emmy.compiler.ir.frontend.ir import (
     CatOp,
     LinearOp,
@@ -122,14 +122,14 @@ def test_cat_symbolic_axis_stays_symbolic():
     out = CatOp().infer_output_shape([(Dim(1), Dim("S")), (Dim(1), Dim("S"))])
     expected_last = Dim("S") + Dim("S")
     assert out == (Dim(1), expected_last)
-    assert out[1].expr == BinaryExpr("+", Var("S"), Var("S"))
+    assert out[1].expression == BinaryExpr("+", Var("S"), Var("S"))
 
 
 def test_reshape_minus_one_inferred_static():
     # Same as the legacy static case: -1 resolves to 3584 via numel arithmetic.
     out = ReshapeOp(shape=(1, 8, -1)).infer_output_shape([(Dim(1), Dim(28), Dim(8), Dim(128))])
     assert out == (Dim(1), Dim(8), Dim(3584))
-    assert out[2].expr == Literal(3584, "int")
+    assert out[2].expression == Literal(3584, "int")
 
 
 def test_reshape_minus_one_cancels_symbolic_factor():

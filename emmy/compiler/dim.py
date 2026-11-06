@@ -1,22 +1,22 @@
-"""``Dim`` — one tensor / axis extent, backed by an ``Expr``.
+"""``Dim`` — one tensor / axis extent, backed by an ``Expression``.
 
 Every Dim carries a shape expression:
 
 - ``Dim(32)`` wraps ``Literal(32, "int")`` — a static extent.
 - ``Dim("seq_len")`` wraps ``Var("seq_len")`` — an atomic symbolic extent.
 - ``Dim(seq) * Dim(2)`` wraps ``BinaryExpr("*", Var("seq"), Literal(2))`` —
-  a composite symbolic extent. Operators on Dim dispatch to ``Expr`` and
-  eagerly fold via ``Expr.simplify``: ``Dim(32) * Dim(64) → Dim(Literal(2048))``,
+  a composite symbolic extent. Operators on Dim dispatch to ``Expression`` and
+  eagerly fold via ``Expression.simplify``: ``Dim(32) * Dim(64) → Dim(Literal(2048))``,
   ``Dim("s") * Dim(1) → Dim(Var("s"))``.
 
 Reads:
 
-- ``d.expr`` always works — returns the underlying ``Expr``.
+- ``d.expression`` always works — returns the underlying ``Expression``.
 - ``d.as_static()`` returns the int for ``Literal``-backed dims, raises otherwise.
 - ``d.as_atom_name()`` returns the str name for ``Var``-backed dims, raises otherwise.
   Use at sites that route by symbolic name (kernel param signature, sym_env keys).
 - ``d.value`` returns the int (``Literal``) or the name (``Var``); raises on
-  composite. Back-compat shim — prefer ``.as_static()`` / ``.as_atom_name()`` / ``.expr``
+  composite. Back-compat shim — prefer ``.as_static()`` / ``.as_atom_name()`` / ``.expression``
   at new call sites.
 - ``d == 32`` / ``d == "seq_len"`` / ``d == Dim(...)`` all work — the first
   two unwrap to ``Literal.value`` / ``Var.name``; composite dims only compare
@@ -24,7 +24,7 @@ Reads:
 
 Runtime resolution:
 
-- ``d.expr.eval(sym_env)`` gives the int extent at launch time, where
+- ``d.expression.eval(sym_env)`` gives the int extent at launch time, where
   ``sym_env: dict[str, int]`` maps each symbolic name to its concrete value
   (read from input array shapes). Composite Dims (e.g. ``S * 2`` from a cat
   output) resolve uniformly with atomic ones — one path, no branch.
@@ -39,7 +39,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from emmy.compiler.ir.expr import BinaryExpr, Expr, Interval, Literal, SimplifyCtx, Var
+from emmy.compiler.ir.expression import BinaryExpr, Expression, Interval, Literal, SimplifyCtx, Var
 from emmy.compiler.wire import Wire
 
 # Default "expected size" for a symbolic dim when none is supplied explicitly.
@@ -59,33 +59,33 @@ DEFAULT_SEQ_HINT = 512
 DYNAMIC_DIM_MAX = 4096
 
 
-def _coerce_expr(value: int | str | Expr | Dim) -> Expr:
-    """Coerce a Dim constructor argument to an ``Expr``.
+def _coerce_expression(value: int | str | Expression | Dim) -> Expression:
+    """Coerce a Dim constructor argument to an ``Expression``.
 
     - bare ``int`` → ``Literal(value, "int")``
     - bare ``str`` → ``Var(value)``
-    - ``Expr``     → passed through
-    - ``Dim``      → unwrapped to its ``expr``
+    - ``Expression``     → passed through
+    - ``Dim``      → unwrapped to its ``expression``
     """
     if isinstance(value, Dim):
-        return value.expr
+        return value.expression
     if isinstance(value, int):
         return Literal(value, "int")
     if isinstance(value, str):
         return Var(value)
-    if isinstance(value, Expr):
+    if isinstance(value, Expression):
         return value
     raise TypeError(f"Dim: cannot wrap {type(value).__name__}: {value!r}")
 
 
-def _simplify(expr: Expr) -> Expr:
+def _simplify(expression: Expression) -> Expression:
     # Shape vars (every free ``Var`` in a Dim expression) are positive by
     # definition: a tensor extent can't be zero or negative. Expose that
     # via ``SimplifyCtx.ranges`` so the simplifier's ``//`` cancellation
     # path can safely cancel matching factors (otherwise ``(s*128) // (s*4)``
     # has no way to reduce to ``32``).
-    ranges = {name: Interval(1, 1 << 30) for name in expr.free_vars()}
-    return expr.simplify(SimplifyCtx(ranges))
+    ranges = {name: Interval(1, 1 << 30) for name in expression.free_vars()}
+    return expression.simplify(SimplifyCtx(ranges))
 
 
 @dataclass(frozen=True, init=False, eq=False)
@@ -93,10 +93,10 @@ class Dim(Wire):
     wire_tag = "dim"
 
     def to_wire(self):
-        """``int`` for a static dim, ``{sym, hint}`` for a bare symbol, ``{expr, hint}`` for a composite."""
-        if isinstance(self.expr, Literal) and self.expr.dtype == "int":
-            return int(self.expr.value)
-        out = {"sym": self.expr.name} if isinstance(self.expr, Var) else {"expr": self.expr.to_wire()}
+        """``int`` for a static dim, ``{sym, hint}`` for a bare symbol, ``{expression, hint}`` for a composite."""
+        if isinstance(self.expression, Literal) and self.expression.dtype == "int":
+            return int(self.expression.value)
+        out = {"sym": self.expression.name} if isinstance(self.expression, Var) else {"expr": self.expression.to_wire()}
         if self.hint is not None:
             out["hint"] = self.hint
         return out
@@ -107,31 +107,31 @@ class Dim(Wire):
             return cls(value)
         keys = set(value) if isinstance(value, dict) else set()
         if not (("sym" in keys and keys <= {"sym", "hint"}) or ("expr" in keys and keys <= {"expr", "hint"})):
-            raise ValueError(f"{where} must be an integer, {{sym, hint}} or {{expr, hint}}")
+            raise ValueError(f"{where} must be an integer, {{sym, hint}} or {{expression, hint}}")
         hint = int(value["hint"]) if value.get("hint") is not None else None
-        return cls(str(value["sym"]), hint=hint) if "sym" in keys else cls(Expr.from_wire(value["expr"], f"{where}.expr"), hint=hint)
+        return cls(str(value["sym"]), hint=hint) if "sym" in keys else cls(Expression.from_wire(value["expr"], f"{where}.expr"), hint=hint)
 
-    expr: Expr
+    expression: Expression
     # Advisory "expected size" for a symbolic dim — the value the tuner /
     # partition planner pretends the axis has when picking tile sizes (set
     # at trace time from ``--seq-len``). Pure metadata: excluded from
     # equality / hashing / pretty-rendering so two Dims with the same
-    # ``expr`` stay structurally identical (and cache keys hint-independent)
+    # ``expression`` stay structurally identical (and cache keys hint-independent)
     # regardless of hint. Atomic symbolic Dims carry it; arithmetic results
     # do not (only the input/axis Dim needs it). ``None`` on static dims.
     hint: int | None
 
-    def __init__(self, value: int | str | Expr | Dim, *, hint: int | None = None) -> None:
+    def __init__(self, value: int | str | Expression | Dim, *, hint: int | None = None) -> None:
         # ``frozen=True`` blocks normal assignment; route through object.__setattr__.
-        expr = _coerce_expr(value)
-        object.__setattr__(self, "expr", expr)
+        expression = _coerce_expression(value)
+        object.__setattr__(self, "expression", expression)
         # Explicit hint wins; otherwise inherit when wrapping an existing Dim,
         # and finally fall back to ``DEFAULT_SEQ_HINT`` for an atomic symbolic
         # dim (a single ``Var``) so the planner always sees an expected size.
         # Composite (``BinaryExpr``) and static (``Literal``) dims keep ``None``.
         if hint is None and isinstance(value, Dim):
             hint = value.hint
-        if hint is None and isinstance(expr, Var):
+        if hint is None and isinstance(expression, Var):
             hint = DEFAULT_SEQ_HINT
         object.__setattr__(self, "hint", hint)
 
@@ -139,79 +139,79 @@ class Dim(Wire):
         """Identity of the extent expression; the expected-size hint is advisory."""
         from emmy.compiler.structural import digest, form  # noqa: PLC0415
 
-        return digest(form(self.expr))
+        return digest(form(self.expression))
 
     # ---- inspection ------------------------------------------------------
 
     @property
     def is_static(self) -> bool:
-        return isinstance(self.expr, Literal) and isinstance(self.expr.value, int)
+        return isinstance(self.expression, Literal) and isinstance(self.expression.value, int)
 
     def as_static(self) -> int:
-        if not (isinstance(self.expr, Literal) and isinstance(self.expr.value, int)):
-            raise TypeError(f"Dim({self.expr!r}) is not a static int — cannot resolve to int statically")
-        return self.expr.value
+        if not (isinstance(self.expression, Literal) and isinstance(self.expression.value, int)):
+            raise TypeError(f"Dim({self.expression!r}) is not a static int — cannot resolve to int statically")
+        return self.expression.value
 
     @property
     def value(self) -> int | str:
         """Back-compat shim: ``Literal.value`` for static, ``Var.name`` for atomic
-        symbolic. Raises on composite. Prefer ``.expr`` at new call sites."""
-        if isinstance(self.expr, Literal) and isinstance(self.expr.value, int):
-            return self.expr.value
-        if isinstance(self.expr, Var):
-            return self.expr.name
-        raise TypeError(f"Dim({self.expr!r}).value: composite dim has no scalar value; use .expr")
+        symbolic. Raises on composite. Prefer ``.expression`` at new call sites."""
+        if isinstance(self.expression, Literal) and isinstance(self.expression.value, int):
+            return self.expression.value
+        if isinstance(self.expression, Var):
+            return self.expression.name
+        raise TypeError(f"Dim({self.expression!r}).value: composite dim has no scalar value; use .expression")
 
     def as_atom_name(self) -> str:
         """Return the symbolic name when this Dim is a single ``Var``; raise
         otherwise. Use at sites that route by symbolic name — kernel signature
         params, structural-key entries, runtime ``sym_env`` lookups — and
         want to fail loud if a static or composite Dim slips in."""
-        if isinstance(self.expr, Var):
-            return self.expr.name
-        raise TypeError(f"Dim({self.expr!r}).as_atom_name: dim is not an atomic Var")
+        if isinstance(self.expression, Var):
+            return self.expression.name
+        raise TypeError(f"Dim({self.expression!r}).as_atom_name: dim is not an atomic Var")
 
-    # ---- arithmetic — eager-fold via Expr.simplify -----------------------
+    # ---- arithmetic — eager-fold via Expression.simplify -----------------------
 
     def __add__(self, other: int | Dim) -> Dim:
-        return Dim(_simplify(BinaryExpr("+", self.expr, _coerce_expr(other))))
+        return Dim(_simplify(BinaryExpr("+", self.expression, _coerce_expression(other))))
 
     def __radd__(self, other: int | Dim) -> Dim:
-        return Dim(_simplify(BinaryExpr("+", _coerce_expr(other), self.expr)))
+        return Dim(_simplify(BinaryExpr("+", _coerce_expression(other), self.expression)))
 
     def __sub__(self, other: int | Dim) -> Dim:
-        return Dim(_simplify(BinaryExpr("-", self.expr, _coerce_expr(other))))
+        return Dim(_simplify(BinaryExpr("-", self.expression, _coerce_expression(other))))
 
     def __rsub__(self, other: int | Dim) -> Dim:
-        return Dim(_simplify(BinaryExpr("-", _coerce_expr(other), self.expr)))
+        return Dim(_simplify(BinaryExpr("-", _coerce_expression(other), self.expression)))
 
     def __mul__(self, other: int | Dim) -> Dim:
-        return Dim(_simplify(BinaryExpr("*", self.expr, _coerce_expr(other))))
+        return Dim(_simplify(BinaryExpr("*", self.expression, _coerce_expression(other))))
 
     def __rmul__(self, other: int | Dim) -> Dim:
-        return Dim(_simplify(BinaryExpr("*", _coerce_expr(other), self.expr)))
+        return Dim(_simplify(BinaryExpr("*", _coerce_expression(other), self.expression)))
 
     def __floordiv__(self, other: int | Dim) -> Dim:
-        return Dim(_simplify(BinaryExpr("//", self.expr, _coerce_expr(other))))
+        return Dim(_simplify(BinaryExpr("//", self.expression, _coerce_expression(other))))
 
     def __rfloordiv__(self, other: int | Dim) -> Dim:
-        return Dim(_simplify(BinaryExpr("//", _coerce_expr(other), self.expr)))
+        return Dim(_simplify(BinaryExpr("//", _coerce_expression(other), self.expression)))
 
     def __mod__(self, other: int | Dim) -> Dim:
-        return Dim(_simplify(BinaryExpr("%", self.expr, _coerce_expr(other))))
+        return Dim(_simplify(BinaryExpr("%", self.expression, _coerce_expression(other))))
 
     def __rmod__(self, other: int | Dim) -> Dim:
-        return Dim(_simplify(BinaryExpr("%", _coerce_expr(other), self.expr)))
+        return Dim(_simplify(BinaryExpr("%", _coerce_expression(other), self.expression)))
 
     def ceil_div(self, other: int | Dim) -> Dim:
         """Ceiling division ``ceil(self / other)``, as ``(self + (other - 1)) // other``.
 
         One masked-tile grid-extent formula for static and symbolic dims alike:
-        eager ``Expr.simplify`` folds a static (``Literal``) dim to the integer
+        eager ``Expression.simplify`` folds a static (``Literal``) dim to the integer
         ceil (``Dim(65).ceil_div(16) → Dim(5)``, matching the ``-(-E // b)``
         idiom for positive extents), while a symbolic dim builds the composite
-        ceil-div ``Expr`` the launch resolver evals from ``sym_values``. Replaces
-        the hand-written static-int / symbolic-``Expr`` ceil-div pair at masked
+        ceil-div ``Expression`` the launch resolver evals from ``sym_values``. Replaces
+        the hand-written static-int / symbolic-``Expression`` ceil-div pair at masked
         block-axis and masked-K sites (``tile/010_partition_loops.py``)."""
         return (self + (other - 1)) // other
 
@@ -219,7 +219,7 @@ class Dim(Wire):
 
     def __eq__(self, other: object) -> bool:
         if isinstance(other, Dim):
-            return self.expr == other.expr
+            return self.expression == other.expression
         # Back-compat ergonomics: ``Dim(32) == 32`` and ``Dim("s") == "s"``
         # keep working so test assertions and existing pass code don't churn.
         # Composite dims (``BinaryExpr``-backed) never compare equal to bare
@@ -227,9 +227,9 @@ class Dim(Wire):
         if isinstance(other, bool):
             return NotImplemented
         if isinstance(other, int):
-            return isinstance(self.expr, Literal) and self.expr.value == other
+            return isinstance(self.expression, Literal) and self.expression.value == other
         if isinstance(other, str):
-            return isinstance(self.expr, Var) and self.expr.name == other
+            return isinstance(self.expression, Var) and self.expression.name == other
         return NotImplemented
 
     def __ne__(self, other: object) -> bool:
@@ -239,31 +239,31 @@ class Dim(Wire):
         return not eq
 
     def __hash__(self) -> int:
-        # Hash on the canonical Expr so Dim(32) and Dim(Literal(32, "int"))
+        # Hash on the canonical Expression so Dim(32) and Dim(Literal(32, "int"))
         # hash identically. Atomic Vars and Literals are themselves frozen
         # and hashable; composite BinaryExpr is hashable post-M0.
-        return hash(self.expr)
+        return hash(self.expression)
 
     def __repr__(self) -> str:
-        if isinstance(self.expr, Literal) and isinstance(self.expr.value, int):
-            return f"Dim({self.expr.value!r})"
-        if isinstance(self.expr, Var):
-            return f"Dim({self.expr.name!r})"
-        return f"Dim({self.expr!r})"
+        if isinstance(self.expression, Literal) and isinstance(self.expression.value, int):
+            return f"Dim({self.expression.value!r})"
+        if isinstance(self.expression, Var):
+            return f"Dim({self.expression.name!r})"
+        return f"Dim({self.expression!r})"
 
     def __str__(self) -> str:
         # Used by f-strings / ``str()`` — render transparently so pretty IR
         # output (``for i in 0..32``) and ``Body.structural_key`` digests
         # don't change shape just because the type wrapper exists.
-        if isinstance(self.expr, Literal) and isinstance(self.expr.value, int):
-            return str(self.expr.value)
-        if isinstance(self.expr, Var):
-            return self.expr.name
-        return str(self.expr)
+        if isinstance(self.expression, Literal) and isinstance(self.expression.value, int):
+            return str(self.expression.value)
+        if isinstance(self.expression, Var):
+            return self.expression.name
+        return str(self.expression)
 
 
-def to_dim(value: int | str | Dim | Expr) -> Dim:
-    """Coerce ``int`` / ``str`` / ``Expr`` to ``Dim``; pass ``Dim`` through unchanged."""
+def to_dim(value: int | str | Dim | Expression) -> Dim:
+    """Coerce ``int`` / ``str`` / ``Expression`` to ``Dim``; pass ``Dim`` through unchanged."""
     return value if isinstance(value, Dim) else Dim(value)
 
 

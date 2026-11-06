@@ -11,8 +11,8 @@ Construction resolves the callable from the op's ``name`` via
 ``getattr(np, name)`` otherwise. Unknown names raise. Arity is read
 from the callable's ufunc ``nin`` or the explicit table for non-ufunc multi-input intrinsics.
 
-This module intentionally doesn't depend on the ``Expr`` AST in
-``ir/expr.py`` — that's the coordinate / predicate sublanguage for
+This module intentionally doesn't depend on the ``Expression`` AST in
+``ir/expression.py`` — that's the coordinate / predicate sublanguage for
 indices, a separate layer.
 """
 
@@ -311,14 +311,14 @@ def _op_name(op) -> str:
 # ---------------------------------------------------------------------------
 # Reduce render-spelling registry — the single op-keyed table behind the four
 # sites that used to switch on the reduce op name: ``Accum``'s render (CUDA
-# ``+=`` / ``*=`` / ``fmax`` / ``fmin``), ``kernel/ir._binary_combine_expr``
-# (the tree-combine binary expr), and ``ReduceOp.forward`` / ``ScanOp.forward``
+# ``+=`` / ``*=`` / ``fmax`` / ``fmin``), ``kernel/ir._binary_combine_expression``
+# (the tree-combine binary expression), and ``ReduceOp.forward`` / ``ScanOp.forward``
 # (the numpy interpreter reductions). Keyed by canonical combine name.
 # ---------------------------------------------------------------------------
 
 
 class ReduceSpelling(NamedTuple):
-    infix: str | None  # binary-expr operator (``a + b``), or None for a call form
+    infix: str | None  # binary-expression operator (``a + b``), or None for a call form
     compound: str | None  # compound assignment (``name += rhs``), or None
     intrinsic: str | None  # CUDA/abstract intrinsic (``fmax`` / ``fmin``), or None
     np_reduce: Callable  # numpy axis reduction (keepdims)

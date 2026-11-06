@@ -12,7 +12,7 @@ from emmy.compiler.graph import Graph
 from emmy.compiler.ir.axis import Axis
 from emmy.compiler.ir.base import ConstantOp, InputOp
 from emmy.compiler.ir.elementwise import ElementwiseImpl
-from emmy.compiler.ir.expr import BinaryExpr, Builtin, CastExpr, Expr, FlatIndex, FuncCallExpr, Literal, TernaryExpr, Var
+from emmy.compiler.ir.expression import BinaryExpr, Builtin, CastExpr, Expression, FlatIndex, FuncCallExpr, Literal, TernaryExpr, Var
 from emmy.compiler.ir.frontend.ir import (
     CatOp,
     Conv1dOp,
@@ -49,7 +49,7 @@ from emmy.compiler.wire import decode, encode, intern
 
 
 @pytest.mark.parametrize(
-    ("expr", "text"),
+    ("expression", "text"),
     [
         (Var("s"), "s"),
         (Builtin("thread_idx.x"), "thread_idx.x"),
@@ -88,16 +88,16 @@ from emmy.compiler.wire import decode, encode, intern
         (FlatIndex("model.layers.0.weight", (Literal(0, "int"),)), "`model.layers.0.weight`[0]"),
     ],
 )
-def test_expression_round_trip(expr, text):
-    assert str(expr) == text
-    assert expr.to_wire() == text
-    assert Expr.from_wire(text) == expr
-    assert decode(encode(expr)) == expr
+def test_expression_round_trip(expression, text):
+    assert str(expression) == text
+    assert expression.to_wire() == text
+    assert Expression.from_wire(text) == expression
+    assert decode(encode(expression)) == expression
 
 
 def test_expression_parse_error_names_its_position():
     with pytest.raises(ValueError, match="position 4"):
-        Expr.from_wire("a + * b")
+        Expression.from_wire("a + * b")
 
 
 def test_a_name_holding_a_backtick_has_no_text():
@@ -108,7 +108,7 @@ def test_a_name_holding_a_backtick_has_no_text():
 def test_dimension_round_trip_preserves_composite_expression_and_hint():
     dims = [Dim(32), Dim("seq", hint=17), Dim(BinaryExpr("*", Var("seq"), Literal(2, "int")))]
     restored = [Dim.from_wire(dim.to_wire()) for dim in dims]
-    assert [dim.expr for dim in restored] == [dim.expr for dim in dims]
+    assert [dim.expression for dim in restored] == [dim.expression for dim in dims]
     assert [dim.hint for dim in restored] == [dim.hint for dim in dims]
 
 

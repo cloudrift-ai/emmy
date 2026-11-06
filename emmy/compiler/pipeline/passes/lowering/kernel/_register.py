@@ -5,7 +5,7 @@ from __future__ import annotations
 from emmy.compiler.dtype import F32
 from emmy.compiler.ir.axis import Axis
 from emmy.compiler.ir.elementwise import ElementwiseImpl
-from emmy.compiler.ir.expr import BinaryExpr, Literal, SimplifyCtx, TernaryExpr, Var
+from emmy.compiler.ir.expression import BinaryExpr, Literal, SimplifyCtx, TernaryExpr, Var
 from emmy.compiler.ir.kernel.ir import (
     COORD,
     FRAG,

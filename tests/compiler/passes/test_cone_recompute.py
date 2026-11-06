@@ -18,7 +18,7 @@ from __future__ import annotations
 from emmy.compiler.dim import Dim
 from emmy.compiler.ir.axis import Axis
 from emmy.compiler.ir.elementwise import ElementwiseImpl
-from emmy.compiler.ir.expr import Var
+from emmy.compiler.ir.expression import Var
 from emmy.compiler.ir.schedule import Tile, Work
 from emmy.compiler.ir.schedule.views import cone_seam
 from emmy.compiler.ir.stmt import Assign, Body, Load, Loop, Write

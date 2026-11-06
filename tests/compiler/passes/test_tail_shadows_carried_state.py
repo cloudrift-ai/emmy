@@ -13,7 +13,7 @@ untouched: that read is how a per-cell epilogue reaches its accumulator.
 from __future__ import annotations
 
 from emmy.compiler.ir.axis import Axis
-from emmy.compiler.ir.expr import Var
+from emmy.compiler.ir.expression import Var
 from emmy.compiler.ir.schedule import Tile
 from emmy.compiler.ir.stmt import Accum, Assign, Body, Load, Loop, Write
 from emmy.compiler.pipeline.passes.lowering.kernel._atom import reduce_codegen, store_sink

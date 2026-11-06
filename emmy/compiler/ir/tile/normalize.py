@@ -67,7 +67,7 @@ def _binds(node: Fold) -> tuple[tuple[str, ...], tuple[tuple[str, ...], ...], tu
 def _reads(node: Fold) -> frozenset[str] | None:
     """The lift params ``node`` actually reads — its body's reads and its results, a result that is
     itself a param (a pass-through) among them. ``None`` when the question cannot be answered here:
-    a term whose body holds a nested node reads through it, and a node is no ``Stmt``, so the body's
+    a term whose body holds a nested node reads through it, and a node is no ``Statement``, so the body's
     own read set does not cover it."""
     if any(isinstance(stmt, Fold) for stmt in node.lift.body):
         return None

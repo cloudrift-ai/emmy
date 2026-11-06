@@ -20,7 +20,7 @@ from dataclasses import replace
 
 from emmy.compiler.dtype import get as get_dtype
 from emmy.compiler.ir.address import gmem_axis_step
-from emmy.compiler.ir.expr import Var
+from emmy.compiler.ir.expression import Var
 from emmy.compiler.ir.pure.fold import (
     Fold,
 )
@@ -31,7 +31,7 @@ from emmy.compiler.ir.schedule.classic import (
     classic_node_key,
     classic_stage_key,
 )
-from emmy.compiler.ir.stmt import Accum, Affine, Assign, Body, Init, Let, Load, Loop, Select, Stmt, dtype_promote
+from emmy.compiler.ir.stmt import Accum, Affine, Assign, Body, Init, Let, Load, Loop, Select, Statement, dtype_promote
 from emmy.compiler.ir.tile.boundary import apply_output_specs
 from emmy.compiler.ir.tile.path import UnknownSiteError, sites
 
@@ -452,7 +452,7 @@ def axis_names(root) -> set[str]:
     return out
 
 
-def projection_tail(tile) -> list[Stmt]:
+def projection_tail(tile) -> list[Statement]:
     """The kernel's EFFECTFUL projection stmt stream — the root zero-axis fold's (pure) body with the
     kernel-boundary ``TileOp.output_specs`` reconstituted (:func:`~emmy.compiler.ir.tile.ir.apply_output_specs`).
     This reads the outer projection, not work nested in its operands. The ``coop-t`` band's
@@ -818,19 +818,19 @@ __all__ = [
 ]
 
 
-def refs_axis(s: Stmt, name: str) -> bool:
-    """``s`` references axis ``name`` in any carried expr (deep) — ``Stmt.exprs``: a ``Load`` /
+def refs_axis(s: Statement, name: str) -> bool:
+    """``s`` references axis ``name`` in any carried expression (deep) — ``Statement.expressions``: a ``Load`` /
     ``Write`` index, a ``Select``'s branch predicates. Both spellings are coordinate reads, so both
     make the stmt vary with the axis; a mask ``Select`` read as invariant would be hoisted out of
     the per-cell body it predicates."""
-    if any(name in e.free_vars() for e in s.exprs()):
+    if any(name in e.free_vars() for e in s.expressions()):
         return True
     return any(refs_axis(child, name) for b in s.nested() for child in b)
 
 
 def stmt_axis_names(stmts) -> set[str]:
     """Every loop induction variable bound anywhere in ``stmts`` (deep). A composed structural node
-    sitting in the body needs no special case — it is a ``Stmt``, so its children are reached through
+    sitting in the body needs no special case — it is a ``Statement``, so its children are reached through
     the same ``nested()`` walk as any block stmt's."""
     out: set[str] = set()
     for s in stmts:

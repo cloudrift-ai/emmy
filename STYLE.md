@@ -94,16 +94,17 @@ its formatting without re-measuring tests, and `make lint` checks it.
 
 ### IR statements must be frozen dataclasses
 
-Every concrete `Stmt` subclass — Loop-IR (`Loop`, `StridedLoop`, `Cond`, leaves), Tile-IR (`GridTile`, `ThreadTile`,
-`RegisterTile`, `SerialTile`, `StridedTile`, `Stage`, `StageBundle`, `AsyncWait`), Kernel-IR (`Smem`, `Sync`,
-`CpAsyncCopy`, `TmaDescriptor`, `TmaLoad`, `MbarrierInit`, …) — must be declared `@dataclass(frozen=True)`. `Body` is
-an immutable sequence of statements, so freezing every Stmt makes the entire body tree hashable end-to-end.
+Every concrete `Statement` subclass — Loop-IR (`Loop`, `StridedLoop`, `Cond`, leaves), Tile-IR (`GridTile`,
+`ThreadTile`, `RegisterTile`, `SerialTile`, `StridedTile`, `Stage`, `StageBundle`, `AsyncWait`), Kernel-IR (`Smem`,
+`Sync`, `CpAsyncCopy`, `TmaDescriptor`, `TmaLoad`, `MbarrierInit`, …) — must be declared `@dataclass(frozen=True)`.
+`Body` is an immutable sequence of statements, so freezing every Statement makes the entire body tree hashable
+end-to-end.
 
 Why: an immutable body can safely own cached structural keys and executable normal forms. It can also be used as a
-cache key when a position-independent structural lookup genuinely needs one. A single mutable Stmt anywhere in the
+cache key when a position-independent structural lookup genuinely needs one. A single mutable Statement anywhere in the
 tree breaks both guarantees, and the surrounding code cannot degrade gracefully without losing the optimization.
 
-If you need to "edit" a frozen Stmt, return a new instance via `stmt.replace(field=value)`; outside `ir/stmt/`,
+If you need to "edit" a frozen Statement, return a new instance via `stmt.replace(field=value)`; outside `ir/stmt/`,
 `dataclasses.replace` is not called on a statement. If a
 `__post_init__` needs to coerce a field (e.g. `tuple → Body`), use `object.__setattr__(self, "field", coerced)` —
 that's the standard pattern for frozen dataclasses that still need light normalization at construction time. Don't
@@ -116,7 +117,7 @@ Every `Op` dataclass is `frozen=True` as well (an architecture test ratchets it)
 clone in `LoopOp.rename_buffers` (field-level `object.__setattr__`, no `__init__`): a buffer rename must not
 renormalize, since canonical sibling order can depend on external-buffer spelling. Ops stay UNHASHABLE
 (`__hash__ = None`) — semantic comparison is `identity_key`, never `hash`. Also make sure no Op ends up as a *field
-value* of a Stmt —
+value* of a Statement —
 `Assign.op` / `Accum.op` / `Select.op` take an `ElementwiseImpl` (the lightweight value object, already hashable),
 never an `ElementwiseOp` wrapper.
 

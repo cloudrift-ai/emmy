@@ -8,7 +8,7 @@ from __future__ import annotations
 from dataclasses import replace
 
 from emmy.compiler.ir.axis import Axis
-from emmy.compiler.ir.expr import BinaryExpr, Literal, Var
+from emmy.compiler.ir.expression import BinaryExpr, Literal, Var
 from emmy.compiler.ir.kernel.ir import Smem, TreeHalve, WarpShuffle
 from emmy.compiler.ir.pure import Fold
 from emmy.compiler.ir.schedule import Placement, Raster, Reduce, Stage, Tile, Work, derive_inventory
@@ -79,7 +79,7 @@ def _flat(stmts) -> list:
 
 
 def _names_read(stmts) -> set[str]:
-    return {n for s in stmts for n in (*s.deps(), *(v for e in s.exprs() for v in e.free_vars()))}
+    return {n for s in stmts for n in (*s.deps(), *(v for e in s.expressions() for v in e.free_vars()))}
 
 
 def test_a_partitioned_chain_member_emits_the_provider_chain_ahead_of_the_strided_loop() -> None:

@@ -485,7 +485,7 @@ def _mma_matmul_graph(mode: str, M: int, N: int, K: int, out: str, trans: bool):
     """A hand-built ``C[i,j] = Σ_k A[i,k]·B[…]`` over f16 operands; ``trans`` makes B ``[j,k]``
     (Q@Kᵀ, K last). ``mode='dynamic'`` makes the M (row) axis symbolic (the dynamic-grid tier)."""
     from emmy.compiler.ir.elementwise import ElementwiseImpl  # noqa: PLC0415
-    from emmy.compiler.ir.expr import Var  # noqa: PLC0415
+    from emmy.compiler.ir.expression import Var  # noqa: PLC0415
     from emmy.compiler.ir.loop import Axis, Load, Loop, LoopOp, Write  # noqa: PLC0415
     from emmy.compiler.ir.stmt import Accum, Assign  # noqa: PLC0415
 
@@ -529,7 +529,7 @@ def _mma_symbolic_k_graph(M: int, N: int, *, trans: bool):
     makes B ``[j,k]`` (transposed-B, K contiguous), so the warp mma zero-fills the masked-K tail
     through the (n,k)-swapped trans helper. M / N are static tile divisors (no M/N mask)."""
     from emmy.compiler.ir.elementwise import ElementwiseImpl  # noqa: PLC0415
-    from emmy.compiler.ir.expr import Var  # noqa: PLC0415
+    from emmy.compiler.ir.expression import Var  # noqa: PLC0415
     from emmy.compiler.ir.loop import Axis, Load, Loop, LoopOp, Write  # noqa: PLC0415
     from emmy.compiler.ir.stmt import Accum, Assign  # noqa: PLC0415
 
@@ -895,7 +895,7 @@ def _mma_epilogue_graph(mode: str, epilogue: str):
     g.add_node(InputOp(), [], Tensor("b", (K, N), dtype=F16), node_id="b")
     if epilogue == "causal":
         from emmy.compiler.ir.elementwise import ElementwiseImpl  # noqa: PLC0415
-        from emmy.compiler.ir.expr import BinaryExpr, Literal, Var  # noqa: PLC0415
+        from emmy.compiler.ir.expression import BinaryExpr, Literal, Var  # noqa: PLC0415
         from emmy.compiler.ir.loop import Axis, Load, Loop, LoopOp, Write  # noqa: PLC0415
         from emmy.compiler.ir.stmt import Accum, Assign, Select, SelectBranch  # noqa: PLC0415
 
@@ -1702,7 +1702,7 @@ def test_regstore_rewrite_preserves_atomic():
     ``atomic`` there silently degraded a rewritten (f16acc array-fragment rolled) atomic split-K
     store to racing plain assigns: the partitions clobber instead of accumulate, numerically wrong
     with no loud failure (found on the gemma-4 mlp_down.m32.lin g4a pinned compile)."""
-    from emmy.compiler.ir.expr import Var
+    from emmy.compiler.ir.expression import Var
     from emmy.compiler.ir.kernel.ir import RegStore
     from emmy.compiler.ir.sigma import Sigma
 

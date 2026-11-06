@@ -45,7 +45,7 @@ def test_a_symbolic_stream_splits_into_overhanging_masked_slices() -> None:
     fold = head(partial.op)
     # ⌈keys / 4⌉ positions a slice, and a lift that keeps a position only inside the stream.
     extent = partial.axis_of(fold.axis).extent
-    assert not extent.is_static and extent.expr.eval({"keys": 37}) == 10
+    assert not extent.is_static and extent.expression.eval({"keys": 37}) == 10
     assert any(isinstance(stmt, Select) for stmt in fold.lift.body)
 
 

@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from emmy.compiler.ir.axis import Axis
-from emmy.compiler.ir.expr import Var
+from emmy.compiler.ir.expression import Var
 from emmy.compiler.ir.stmt import Accum, Assign, Body, Load, Loop, Select, SelectBranch
 
 

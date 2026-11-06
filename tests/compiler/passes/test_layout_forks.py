@@ -12,7 +12,7 @@ from emmy.compiler.context import Context
 from emmy.compiler.graph import Graph, Tensor
 from emmy.compiler.ir.axis import Axis
 from emmy.compiler.ir.base import ConstantOp, InputOp
-from emmy.compiler.ir.expr import Var
+from emmy.compiler.ir.expression import Var
 from emmy.compiler.ir.frontend.ir import TransposeOp
 from emmy.compiler.ir.loop import LoopOp
 from emmy.compiler.ir.stmt import Load, Write

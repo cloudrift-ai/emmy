@@ -17,7 +17,7 @@ from emmy.compiler.ir.axis import Axis, Window
 from emmy.compiler.ir.base import ConstantOp, InputOp
 from emmy.compiler.ir.cuda.ir import CudaOp
 from emmy.compiler.ir.elementwise import ElementwiseImpl
-from emmy.compiler.ir.expr import Literal, Var
+from emmy.compiler.ir.expression import Literal, Var
 from emmy.compiler.ir.frontend.ir import SdpaOp, SoftmaxOp
 from emmy.compiler.ir.pure.fold import Fold
 from emmy.compiler.ir.stmt import Assign, Let, Load, Write
@@ -999,7 +999,7 @@ def test_a_contraction_is_one_group_whichever_operand_its_body_reads_first() -> 
     assert not rest and len(grouped) == 1
     (group,) = grouped[0].contraction
     assert len(group.members) == 2 and group.space == ((0, 4), (0, 32)), "laid out in the first member's order"
-    reads = {tuple(str(expr) for expr in exprs) for _, _, exprs, _ in group.members}
+    reads = {tuple(str(expression) for expression in expressions) for _, _, expressions, _ in group.members}
     assert len(reads) == 1, "both occurrences read the one workspace at the same slots"
 
 
@@ -1426,7 +1426,7 @@ def test_copies_read_at_shifted_columns_cluster_onto_the_plain_read() -> None:
     """RoPE's rotate-half reads one projection at its own column and at the two half-shifted ones:
     one value at three addresses. The plain copy computes it, and each shifted copy reads its
     workspace at the column expression it spelled."""
-    from emmy.compiler.ir.expr import Literal, TernaryExpr
+    from emmy.compiler.ir.expression import Literal, TernaryExpr
     from emmy.compiler.pipeline.passes.tile._cut import _cluster_value_seams
 
     n, low = Var("n"), Var("n").lt(4)
@@ -1442,7 +1442,7 @@ def test_copies_read_at_shifted_columns_cluster_onto_the_plain_read() -> None:
 
 def test_a_column_read_past_the_plain_copy_is_not_its_value() -> None:
     """A shifted read reaching past the plain copy's axis reads columns that copy never computes."""
-    from emmy.compiler.ir.expr import Literal
+    from emmy.compiler.ir.expression import Literal
     from emmy.compiler.pipeline.passes.tile._cut import _cluster_value_seams
 
     seams = [_column_seam(Var("n") + Literal(4, "int"), "PLACE@map.1/inner"), _column_seam(Var("n"), "PLACE@map.2/inner")]
@@ -1453,7 +1453,7 @@ def test_a_column_read_past_the_plain_copy_is_not_its_value() -> None:
 def test_a_copy_storing_c_of_every_d_cells_reads_the_plain_copy_at_its_stored_address() -> None:
     """A copy reading its column only as ``m // 4`` and ``m % 2`` stores two of every four cells: over 16 columns it
     is the plain 8-column value, and reads that copy's workspace where its own would store the cell."""
-    from emmy.compiler.ir.expr import BinaryExpr, Literal
+    from emmy.compiler.ir.expression import BinaryExpr, Literal
     from emmy.compiler.pipeline.passes.tile._cut import _cluster_value_seams
 
     m = Var("m")
@@ -1729,7 +1729,7 @@ def test_a_scalar_operand_is_no_seam() -> None:
     """A value uniform over the kernel — an sdpa scale beside its mask fills — offers no cut. The
     piece would be a kernel writing scalars to a workspace so its reader could read them back, and
     a seam nothing realizes costs the greedy an arm per rank."""
-    from emmy.compiler.ir.expr import Literal
+    from emmy.compiler.ir.expression import Literal
 
     scale = projection(
         body=(

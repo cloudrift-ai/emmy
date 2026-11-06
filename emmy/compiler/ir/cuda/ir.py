@@ -12,7 +12,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 
 from emmy.compiler.ir.base import Op
-from emmy.compiler.ir.expr import Expr
+from emmy.compiler.ir.expression import Expression
 from emmy.compiler.structural import digest
 
 
@@ -33,9 +33,9 @@ class TmaDescMeta:
 
 
 # int = static factor; str = symbolic axis name (resolved at launch from
-# sym_values); Expr = a composite extent (e.g. ceil-div ``(seq_len+15)//16`` for
+# sym_values); Expression = a composite extent (e.g. ceil-div ``(seq_len+15)//16`` for
 # a hint-driven masked block axis) evaluated against sym_values at launch.
-_GridFactor = int | str | Expr
+_GridFactor = int | str | Expression
 GridDimSpec = tuple[_GridFactor, ...]  # product of factors → one grid dim's extent
 
 
@@ -91,7 +91,7 @@ class CudaOp(Op):
 
 def resolve_dim(spec, sym_values: dict[str, int]) -> int:
     """Multiply a ``GridDimSpec``'s factors, resolving ``str`` factors
-    from ``sym_values`` and ``Expr`` factors via ``Expr.eval`` (e.g. a
+    from ``sym_values`` and ``Expression`` factors via ``Expression.eval`` (e.g. a
     ceil-div block extent ``(seq_len+15)//16``). Accepts a bare ``int``
     (legacy static grid) as shorthand for a single-int spec — keeps
     pre-symbolic CudaOps working until every producer has been migrated.

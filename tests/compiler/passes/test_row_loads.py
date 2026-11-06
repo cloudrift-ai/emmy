@@ -82,7 +82,7 @@ def test_a_lane_loop_unrolls_only_when_its_start_is_below_its_step() -> None:
     import importlib
 
     from emmy.compiler.ir.axis import Axis
-    from emmy.compiler.ir.expr import Interval, Literal, SimplifyCtx, Var
+    from emmy.compiler.ir.expression import Interval, Literal, SimplifyCtx, Var
     from emmy.compiler.ir.stmt import Body, Load, StridedLoop
 
     trips = importlib.import_module("emmy.compiler.pipeline.passes.lowering.kernel.047_reuse_lane_loads")._trips
@@ -104,7 +104,7 @@ def test_sibling_lane_loops_over_one_cone_unroll_to_distinct_names() -> None:
     import importlib
 
     from emmy.compiler.ir.axis import Axis
-    from emmy.compiler.ir.expr import Interval, Literal, SimplifyCtx, Var
+    from emmy.compiler.ir.expression import Interval, Literal, SimplifyCtx, Var
     from emmy.compiler.ir.stmt import Assign, Body, Load, StridedLoop, Write
 
     walk = importlib.import_module("emmy.compiler.pipeline.passes.lowering.kernel.047_reuse_lane_loads")._walk
@@ -131,7 +131,7 @@ def test_an_outer_reuse_never_renames_a_nested_trip_definition() -> None:
     import importlib
 
     from emmy.compiler.ir.axis import Axis
-    from emmy.compiler.ir.expr import Interval, Literal, SimplifyCtx, Var
+    from emmy.compiler.ir.expression import Interval, Literal, SimplifyCtx, Var
     from emmy.compiler.ir.stmt import Body, Load, Loop, StridedLoop, Write
 
     walk = importlib.import_module("emmy.compiler.pipeline.passes.lowering.kernel.047_reuse_lane_loads")._walk

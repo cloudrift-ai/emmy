@@ -15,7 +15,7 @@ from dataclasses import dataclass
 from functools import cached_property
 from heapq import heappop, heappush
 
-from emmy.compiler.ir.stmt.base import Stmt
+from emmy.compiler.ir.stmt.base import Statement
 from emmy.compiler.structural import form
 from emmy.compiler.wire import Wire
 from emmy.utils import cached_method
@@ -44,17 +44,17 @@ class Cone:
     axis usage, subtract it to get the SSA names that must resolve
     elsewhere."""
 
-    members: tuple[Stmt, ...]
+    members: tuple[Statement, ...]
     external_reads: frozenset[str]
 
     @property
-    def loads(self) -> tuple[Stmt, ...]:
+    def loads(self) -> tuple[Statement, ...]:
         """Every ``Load`` in the members, nested included, body order —
         the cone's leaf operands (dtype checks, graph resolution)."""
         return Body(self.members).loads
 
 
-def exposed_defines(s: Stmt) -> set[str]:
+def exposed_defines(s: Statement) -> set[str]:
     """SSA names ``s`` makes visible at its own scope level — own defines
     plus every nested define. A deliberate over-approximation: nested non-Accum
     names don't truly cross a Loop boundary, but well-formed SSA never reads them
@@ -66,7 +66,7 @@ def exposed_defines(s: Stmt) -> set[str]:
     return out
 
 
-def _seeded_accumulators(s: Stmt) -> frozenset[str]:
+def _seeded_accumulators(s: Statement) -> frozenset[str]:
     """The accumulators a reduce loop declares in its enclosing scope: the ``Accum`` targets of its
     immediate body, each seeded just ahead of the loop. Empty for any other statement, for a loop
     whose accumulators are declared elsewhere (``seed=False``), and for a loop carrying a state."""
@@ -78,7 +78,7 @@ def _seeded_accumulators(s: Stmt) -> frozenset[str]:
     return frozenset(c.name for c in s.body if isinstance(c, Accum))
 
 
-def free_names(s: Stmt) -> frozenset[str]:
+def free_names(s: Statement) -> frozenset[str]:
     """Every name ``s`` (whole subtree) reads from its enclosing scope — SSA reads AND index
     coordinates, less what the subtree defines or binds.
 
@@ -92,9 +92,9 @@ def free_names(s: Stmt) -> frozenset[str]:
     reads: set[str] = set()
     defs: set[str] = set()
 
-    def walk(st: Stmt, bound: frozenset[str]) -> None:
+    def walk(st: Statement, bound: frozenset[str]) -> None:
         reads.update(set(st.deps()) - bound)
-        for e in st.exprs():
+        for e in st.expressions():
             reads.update(e.free_vars() - bound)
         defs.update(st.defines())
         if st.deps_deep:
@@ -111,7 +111,7 @@ def free_names(s: Stmt) -> frozenset[str]:
 
 
 class Body(Wire):
-    """Immutable Stmt sequence, built from any iterable. A slice or a sum of bodies is a ``Body``, two bodies with
+    """Immutable Statement sequence, built from any iterable. A slice or a sum of bodies is a ``Body``, two bodies with
     equal statements are equal and hash alike, and a statement read from one twice is the same object. It is no
     ``tuple``: it equals no tuple, and what it offers of a sequence is what is written here.
 
@@ -139,15 +139,15 @@ class Body(Wire):
         """Elementwise, as a sequence renders: :meth:`structural_key` is the normalize-and-collapse key, not the form."""
         return tuple(form(stmt) for stmt in self._stmts)
 
-    def __init__(self, stmts: Iterable[Stmt] = ()) -> None:
+    def __init__(self, stmts: Iterable[Statement] = ()) -> None:
         members = tuple(stmts)
         # A body holds STATEMENTS. A pure term is not one — ``Fold`` duck-types the statement
-        # protocol so the shared walks can reach it, but it is not a ``Stmt`` and does not belong
+        # protocol so the shared walks can reach it, but it is not a ``Statement`` and does not belong
         # in a statement sequence: a Fold tree composes through ``operands``, and a term sitting in
         # a body is a second, competing composition mechanism. Checked by TYPE rather than by
         # naming the kinds that are excluded, so the rule holds for anything else that duck-types
         # its way in later.
-        stray = [type(member).__name__ for member in members if not isinstance(member, Stmt)]
+        stray = [type(member).__name__ for member in members if not isinstance(member, Statement)]
         if stray:
             raise TypeError(f"Body holds non-statement member(s) {stray}; a term composes through operand edges")
         self._stmts = members
@@ -155,7 +155,7 @@ class Body(Wire):
     def __len__(self) -> int:
         return len(self._stmts)
 
-    def __iter__(self) -> Iterator[Stmt]:
+    def __iter__(self) -> Iterator[Statement]:
         return iter(self._stmts)
 
     def __str__(self) -> str:
@@ -177,14 +177,14 @@ class Body(Wire):
     def __repr__(self) -> str:
         return repr(self._stmts)
 
-    def __add__(self, other: Iterable[Stmt]) -> Body:
+    def __add__(self, other: Iterable[Statement]) -> Body:
         return Body(self._stmts + tuple(other))
 
-    def __radd__(self, other: Iterable[Stmt]) -> Body:
+    def __radd__(self, other: Iterable[Statement]) -> Body:
         return Body(tuple(other) + self._stmts)
 
     @staticmethod
-    def coerce(value: Body | Iterable[Stmt]) -> Body:
+    def coerce(value: Body | Iterable[Statement]) -> Body:
         """Wrap if not already a Body. Used by ``LoopOp`` /
         ``TileOp`` ``__post_init__`` so the legacy
         ``Op(body=tuple_value)`` construction shape keeps working."""
@@ -192,10 +192,10 @@ class Body(Wire):
 
     # -- iteration -------------------------------------------------------
 
-    def iter(self) -> Iterator[Stmt]:
+    def iter(self) -> Iterator[Statement]:
         """Pre-order iteration over this body and every nested body
         (``Loop`` / ``Tile`` / ``Cond`` / ``StridedLoop`` recurse via
-        ``Stmt.nested()``)."""
+        ``Statement.nested()``)."""
         for s in self:
             yield s
             for child_body in s.nested():
@@ -205,7 +205,7 @@ class Body(Wire):
 
     def rename_buffers(self, rename) -> Body:  # noqa: ANN001 — any str->str mapping
         """This body with every external-buffer reference renamed through ``rename`` — the
-        body-level face of :meth:`Stmt.rename_buffers` (the recursive :meth:`map` reaches every
+        body-level face of :meth:`Statement.rename_buffers` (the recursive :meth:`map` reaches every
         nested leaf, so wrapper stmts need no handling). An injective spelling-only rename retains
         this body's declared normal-form fixed points, while an aliasing rename must recompute
         ordering because it changes memory dependencies."""
@@ -217,15 +217,15 @@ class Body(Wire):
             result.__dict__["_normalized"] = result
         return result
 
-    def map(self, fn: Callable[[Stmt], Stmt | None | Iterable[Stmt]]) -> Body:
+    def map(self, fn: Callable[[Statement], Statement | None | Iterable[Statement]]) -> Body:
         """Recursive 1:N body transformer. Post-order: each block stmt's
         nested body is mapped first, then ``fn`` is applied to the
         children-rewritten wrapper. Returns a new Body with each stmt
         replaced by ``fn(stmt)``:
 
-        - a single ``Stmt`` (kept in place of the input),
+        - a single ``Statement`` (kept in place of the input),
         - ``None`` (drop the input), or
-        - an iterable of ``Stmt`` (inline all of them).
+        - an iterable of ``Statement`` (inline all of them).
 
         ``fn`` is called on *every* stmt including ``Loop`` / ``Tile`` /
         ``Cond`` / ``StridedLoop`` wrappers — but with their bodies already
@@ -241,18 +241,18 @@ class Body(Wire):
         already-rewritten children.
         """
 
-        def descend(s: Stmt) -> Stmt:
+        def descend(s: Statement) -> Statement:
             nested = s.nested()
             if not nested:
                 return s
             return s.with_bodies(tuple(b.map(fn) for b in nested))
 
-        out: list[Stmt] = []
+        out: list[Statement] = []
         for s in self:
             r = fn(descend(s))
             if r is None:
                 continue
-            if isinstance(r, Stmt):
+            if isinstance(r, Statement):
                 out.append(r)
             else:
                 out.extend(r)
@@ -261,7 +261,7 @@ class Body(Wire):
     def topological_order(
         self,
         incoming: Sequence[set[int] | frozenset[int]],
-        tie_break: Callable[[int, Stmt], object] | None = None,
+        tie_break: Callable[[int, Statement], object] | None = None,
     ) -> Body:
         """This body in :meth:`_topological_permutation` order."""
         return Body(self[index] for index in self._topological_permutation(incoming, tie_break))
@@ -269,7 +269,7 @@ class Body(Wire):
     def _topological_permutation(
         self,
         incoming: Sequence[set[int] | frozenset[int]],
-        tie_break: Callable[[int, Stmt], object] | None = None,
+        tie_break: Callable[[int, Statement], object] | None = None,
     ) -> tuple[int, ...]:
         """Kahn topological order over indexed predecessor sets, as source indices.
 
@@ -324,8 +324,8 @@ class Body(Wire):
         """
         from emmy.compiler.ir.stmt.blocks import Loop, StridedLoop  # noqa: PLC0415
 
-        out: list[Stmt] = []
-        seen: set[Stmt] = set()
+        out: list[Statement] = []
+        seen: set[Statement] = set()
         folded: set[str] = set()  # accumulators the reduce loops of ``out`` declare at this scope
         for stmt in self:
             if stmt.has_side_effects:
@@ -358,7 +358,7 @@ class Body(Wire):
 
     def fold[T](
         self,
-        fn: Callable[[Stmt, tuple[T | None, ...], frozenset[str]], T],
+        fn: Callable[[Statement, tuple[T | None, ...], frozenset[str]], T],
     ) -> dict[int, T]:
         """Generic backward dataflow over this body's def-use DAG.
 
@@ -372,7 +372,7 @@ class Body(Wire):
           read). Position-preserving: same order as ``stmt.deps()``.
         - ``bound`` — set of axis names introduced by enclosing
           ``Loop`` / ``StridedLoop`` / ``Tile`` wrappers via
-          ``Stmt.binds_axes()``. ``Cond`` doesn't bind axes. Callbacks
+          ``Statement.binds_axes()``. ``Cond`` doesn't bind axes. Callbacks
           that don't care about scope can ignore this.
 
         Returns the per-stmt memo keyed by ``id(stmt)`` without recursively hashing nested bodies.
@@ -430,11 +430,11 @@ class Body(Wire):
         return frozenset().union(*(_free_ssa(stmt) for stmt in self)) - self._local_defs
 
     @cached_property
-    def definitions(self) -> dict[str, Stmt]:
+    def definitions(self) -> dict[str, Statement]:
         """Map every SSA name produced anywhere inside this body
-        (recursive) to its defining ``Stmt``.
+        (recursive) to its defining ``Statement``.
 
-        Built once per Body via :meth:`Stmt.defines` over :meth:`iter`;
+        Built once per Body via :meth:`Statement.defines` over :meth:`iter`;
         cached on the instance, so repeated queries (``def_of`` from
         many call sites in a single rule) are O(1) after the first
         access. Body is immutable, so the cache stays valid for its
@@ -484,10 +484,10 @@ class Body(Wire):
         dependencies: dict[str, frozenset[str]] = {}
         axis_names = self.axis_names
 
-        def _immediate_axes(stmt: Stmt) -> frozenset[str]:
+        def _immediate_axes(stmt: Statement) -> frozenset[str]:
             reads: set[str] = set(stmt.deps())
-            for expr in stmt.exprs():
-                reads.update(expr.free_vars())
+            for expression in stmt.expressions():
+                reads.update(expression.free_vars())
             axes = reads & axis_names
             for name in reads:
                 axes.update(dependencies.get(name, frozenset()))
@@ -524,7 +524,7 @@ class Body(Wire):
         surface in ``external_reads`` — chain another scope level by seeding
         its ``backward_cone`` with them. A root not defined at this level is
         itself an external read (members come out empty)."""
-        by_name: dict[str, Stmt] = {}
+        by_name: dict[str, Statement] = {}
         for s in self:
             for n in exposed_defines(s):
                 by_name[n] = s
@@ -550,7 +550,7 @@ class Body(Wire):
     # -- type-filtered lookups -------------------------------------------
 
     @cached_method
-    def iter_of_type(self, *types: type) -> tuple[Stmt, ...]:
+    def iter_of_type(self, *types: type) -> tuple[Statement, ...]:
         """Matching statements in preorder, reusing each child's cached query.
 
         The named helpers (:meth:`loads`, :meth:`writes`, ...) share this lookup."""
@@ -563,7 +563,7 @@ class Body(Wire):
         return tuple(found)
 
     @cached_property
-    def loads(self) -> tuple[Stmt, ...]:
+    def loads(self) -> tuple[Statement, ...]:
         """All ``Load`` stmts in the body (recursive). Replaces the
         per-Op ``loads`` properties on ``LoopOp`` / ``TileOp`` /
         ``KernelOp``. Cached on the instance — Body is immutable."""
@@ -572,21 +572,21 @@ class Body(Wire):
         return self.iter_of_type(Load)
 
     @cached_property
-    def writes(self) -> tuple[Stmt, ...]:
+    def writes(self) -> tuple[Statement, ...]:
         """All ``Write`` stmts in the body (recursive)."""
         from emmy.compiler.ir.stmt.leaves import Write  # noqa: PLC0415
 
         return self.iter_of_type(Write)
 
     @cached_property
-    def carries(self) -> tuple[Stmt, ...]:
+    def carries(self) -> tuple[Statement, ...]:
         """All ``Carry`` stmts in the body (recursive): the carried states it defines."""
         from emmy.compiler.ir.stmt.leaves import Carry  # noqa: PLC0415
 
         return self.iter_of_type(Carry)
 
     @cached_property
-    def accums(self) -> tuple[Stmt, ...]:
+    def accums(self) -> tuple[Statement, ...]:
         """All ``Accum`` stmts in the body (recursive). May contain
         multiple Accums sharing a single accumulator name (matmul-shape
         K-inner reduces, 008's per-cell replicated accumulator chains).
@@ -598,7 +598,7 @@ class Body(Wire):
         return self.iter_of_type(Accum)
 
     @cached_property
-    def loops(self) -> tuple[Stmt, ...]:
+    def loops(self) -> tuple[Statement, ...]:
         """All ``Loop`` stmts in the body (recursive)."""
         from emmy.compiler.ir.stmt.blocks import Loop  # noqa: PLC0415
 

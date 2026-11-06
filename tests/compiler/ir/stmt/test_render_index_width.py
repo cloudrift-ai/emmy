@@ -11,7 +11,7 @@ later CUDA test sharing that xdist worker.
 import pytest
 
 from emmy.compiler.dim import DYNAMIC_DIM_MAX, Dim
-from emmy.compiler.ir.expr import Var
+from emmy.compiler.ir.expression import Var
 from emmy.compiler.ir.render import RenderCtx, render_index
 
 _SMALL = (Dim(4), Dim(512), Dim(1024))  # 2_097_152 elements

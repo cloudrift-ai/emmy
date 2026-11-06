@@ -7,7 +7,7 @@ new name collides with a *surviving* old name elsewhere in the body.
 
 This guards the ``in24``-undefined embedding-lookup bug: the renumber used to
 publish each Load rename into both the SSA channel (``rename``) and the axis
-channel (``sigma``). The Load/Write rewriter applies both to index exprs, so an
+channel (``sigma``). The Load/Write rewriter applies both to index expressions, so an
 indirect index Var was substituted twice — and a rename chain (``in2_3 → in5``
 while a pre-existing ``in5`` → ``in26``) collapsed transitively, wiring the
 gather to the wrong row.
@@ -19,7 +19,7 @@ import pytest
 
 from emmy.compiler.dim import Dim
 from emmy.compiler.ir.axis import Axis
-from emmy.compiler.ir.expr import Literal, Var
+from emmy.compiler.ir.expression import Literal, Var
 from emmy.compiler.ir.stmt import Accum, Body, Cond, Init, Load, Loop, StridedLoop, Write
 from emmy.compiler.ir.stmt.normalize import rename_ssa_sequential
 from emmy.compiler.pipeline.passes.tile._fromloop import fold_from_loop

@@ -14,7 +14,7 @@ stable carrier. The ⊕ the fold actually folds with is then derived —
 ``combine(x, y) = psi(psi_inv(x) base psi_inv(y))`` — in the stable spelling the recipe certifies,
 and ``twist=None`` is the planar case where ``psi`` is the identity and ``combine`` IS ``base``.
 
-Nothing here is a :class:`~emmy.compiler.ir.stmt.base.Stmt`. A composed step — flash's ``Σ Q·K``
+Nothing here is a :class:`~emmy.compiler.ir.stmt.base.Statement`. A composed step — flash's ``Σ Q·K``
 ahead of its ``Σ_j P·V``, split-K's sliced contraction — is reached through ``operands``, and its
 POSITION in the emitted nest is produced by the derivation (:meth:`Fold.lower` places every term
 at the shallowest scope binding its free coordinates, operands ahead of their readers), not by
@@ -36,11 +36,11 @@ from functools import cached_property
 
 from emmy.compiler.ir.axis import Axis
 from emmy.compiler.ir.elementwise import ElementwiseImpl
-from emmy.compiler.ir.expr import Literal, Var
+from emmy.compiler.ir.expression import Literal, Var
 from emmy.compiler.ir.pure.lam import Lambda
 from emmy.compiler.ir.pure.twist import Recipe, Twist
 from emmy.compiler.ir.sigma import Sigma
-from emmy.compiler.ir.stmt import Accum, Affine, Assign, Body, Carry, Let, Load, Loop, OutputSpec, Pre, Select, Stmt, free_names
+from emmy.compiler.ir.stmt import Accum, Affine, Assign, Body, Carry, Let, Load, Loop, OutputSpec, Pre, Select, Statement, free_names
 from emmy.utils import cached_method
 
 #: The symbolic extents of the program being compiled. The launch binds them, so a term reads one free — like a
@@ -965,7 +965,7 @@ class Fold:
         if _affine_classes(self, state, reads, {})[state][0] not in ("affine", "free") or not reads:
             return None
         own = tuple(Var(cell) for cell in self.cells)
-        mixed = {position for read in reads for position, expr in enumerate(read.index) if expr != own[position]}
+        mixed = {position for read in reads for position, expression in enumerate(read.index) if expression != own[position]}
         if not mixed:
             return AffineView(state=state, mixed=None, kept=None)  # a diagonal map: one coefficient per cell is what the probe reads
         if len(mixed) != 1 or len(self.cells) < 2:
@@ -1011,7 +1011,7 @@ class Fold:
             stmt = definitions.get(name)
             return name == state or (stmt is not None and any(reads(arg, state) for arg in stmt.args))
 
-        out: list[Stmt] = []
+        out: list[Statement] = []
         for stmt in applied:
             if stmt.name not in view.states:
                 out.append(stmt)
@@ -1451,8 +1451,8 @@ class Fold:
         indexed = frozenset(
             name
             for spec in stores
-            for expr in _store_reads(spec)
-            for name in expr.free_vars()
+            for expression in _store_reads(spec)
+            for name in expression.free_vars()
             if name in origin and name not in coordinates and name not in bound and name not in internal
         )
         stored = frozenset(name for spec in stores for name in spec.write.values) | indexed
@@ -1472,13 +1472,15 @@ class Fold:
             assert key is not None and all(origin.get(name) == key for name in spec.write.values), (
                 f"a store over {spec.write.values} writes values no one term defines"
             )
-            rows = {origin[name] for expr in _store_reads(spec) for name in expr.free_vars() if name in indexed}
+            rows = {origin[name] for expression in _store_reads(spec) for name in expression.free_vars() if name in indexed}
             owned.setdefault(max((key, *rows), key=lambda k: placed_at[k[0]]), []).append(spec)
         for spec in stores:
             for axis in spec.sweep:
                 coordinates.setdefault(axis.name, axis)
         declared.extend(name for name in coordinates if name not in declared)
-        read = self.free_axes | ({name for spec in stores for expr in _store_reads(spec) for name in expr.free_vars()} - indexed)
+        read = self.free_axes | (
+            {name for spec in stores for expression in _store_reads(spec) for name in expression.free_vars()} - indexed
+        )
         if missing := read - bound - internal - set(coordinates):
             raise ValueError(f"lower: no extent for coordinates {sorted(missing)} — the closed program takes them as axes")
         # A name a nested reduce binds is still a free coordinate here when the tree reads it free
@@ -1496,7 +1498,7 @@ class Fold:
 
             def __init__(self, opened: list[str], bound: frozenset[str]) -> None:
                 self.opened, self.bound = opened, bound
-                self.nest: dict[tuple[str, ...], list[Stmt]] = {(): []}
+                self.nest: dict[tuple[str, ...], list[Statement]] = {(): []}
 
             def path_of(self, free: frozenset[str], path: tuple[str, ...] | None) -> tuple[str, ...]:
                 # The free loops a term sits under: the shallowest prefix of its reader's path
@@ -1506,7 +1508,7 @@ class Fold:
                     return tuple(name for name in self.opened if name in needed)
                 return next(path[:depth] for depth in range(len(path) + 1) if needed <= set(path[:depth]))
 
-            def sink(self, path: tuple[str, ...]) -> list[Stmt]:
+            def sink(self, path: tuple[str, ...]) -> list[Statement]:
                 for depth in range(len(path) + 1):
                     self.nest.setdefault(path[:depth], [])
                 return self.nest[path]
@@ -1528,7 +1530,7 @@ class Fold:
         def attach(
             term: Fold,
             kind: str,
-            target: list[Stmt],
+            target: list[Statement],
             node: tuple[str, ...],
             scope: frozenset[str],
             nest: _Nest,
@@ -1539,11 +1541,13 @@ class Fold:
             # selects the stores whose coordinates name a value some term computes (``True``), the others
             # (``False``), or every store (``None``).
             for spec in owned.get((id(term), kind), ()):
-                if computed is not None and computed != bool({name for expr in _store_reads(spec) for name in expr.free_vars()} & indexed):
+                if computed is not None and computed != bool(
+                    {name for expression in _store_reads(spec) for name in expression.free_vars()} & indexed
+                ):
                     continue
                 # The store sits under the loops binding every coordinate it spells, and every coordinate a
                 # value it names is evaluated over (a scatter's row, computed per cell of a sweep).
-                read = {name for expr in _store_reads(spec) for name in expr.free_vars()}
+                read = {name for expression in _store_reads(spec) for name in expression.free_vars()}
                 extra = evaluated_over(read) - scope
                 if not extra:
                     target.append(spec.stmt())
@@ -1553,9 +1557,9 @@ class Fold:
                 )
                 nest.sink((*node, *(name for name in nest.opened if name in extra))).append(spec.stmt())
 
-        emitted: dict[tuple[int, int], tuple[Fold, list[Stmt]]] = {}
+        emitted: dict[tuple[int, int], tuple[Fold, list[Statement]]] = {}
 
-        def place(term: Fold, loops: list[tuple[str, frozenset[str], list[Stmt]]], path: tuple[str, ...] | None, nest: _Nest) -> None:
+        def place(term: Fold, loops: list[tuple[str, frozenset[str], list[Statement]]], path: tuple[str, ...] | None, nest: _Nest) -> None:
             # ``loops``: the reduce loops enclosing this position, outermost first, as (axis, scope, stmts).
             if any(axis in term.free_axes for axis, _, _ in loops):
                 depth = next(depth for depth, (_, scope, _) in enumerate(loops) if evaluated_over(term.free_axes) <= scope)
@@ -1627,7 +1631,7 @@ class Fold:
                 else:
                     outer.append(Loop(axis=coordinates[term.axis], body=body))
                 return
-            inner: list[Stmt] = []
+            inner: list[Statement] = []
             for edge in placed(term):
                 place(edge, [*loops, (term.axis, scope | {term.axis}, inner)], node, nest)
             inner.extend(term.step())
@@ -1651,9 +1655,9 @@ class Fold:
         return root.assemble()
 
     #: A term rewrites as a statement does: the entry drops the mappings its own binder shadows.
-    rewrite = Stmt.rewrite
+    rewrite = Statement.rewrite
 
-    def _rewrite(self, rename, sigma, axis_fn):  # noqa: ANN001, ANN202 — see ``Stmt.rewrite``
+    def _rewrite(self, rename, sigma, axis_fn):  # noqa: ANN001, ANN202 — see ``Statement.rewrite``
         # ONE handler for the one stored kind (the collapse retired the Map / Contraction arms —
         # singledispatch keys on the stored type, and there is now only one). Every operand edge
         # dispatches back through the registry; the fold renames its lift / monoid in lockstep
@@ -1680,7 +1684,7 @@ class Fold:
             for p in self.lift.params[bound_count:]
             if sigma is not None and (mapped := sigma.get(p)) is not None and not isinstance(mapped, Var)
         }
-        needed = set().union(*(expr.free_vars() for expr in substitutions.values()))
+        needed = set().union(*(expression.free_vars() for expression in substitutions.values()))
         params = (*lead, *(_param(p) for p in self.lift.params[len(lead) : bound_count]))
         params += tuple(_param(p) for p in self.lift.params[bound_count:] if p not in substitutions or p in needed)
         body = Body(tuple(st.rewrite(rename, sigma, axis_fn) for st in self.lift.body))
@@ -1723,7 +1727,7 @@ def _affine_classes(
     if read is not None:
         if read.carrier == state:
             reads.append(read)
-        varies = any(name in expr.free_vars() for index, expr in enumerate(read.index) if index != position) if kept else False
+        varies = any(name in expression.free_vars() for index, expression in enumerate(read.index) if index != position) if kept else False
         out = {read.name: ("affine" if read.carrier == state else "free", varies)}
         memo[id(term)] = out
         return out
@@ -1756,7 +1760,7 @@ def _affine_classes(
         elif isinstance(stmt, Affine):
             env[stmt.name] = combine("add", tuple(of(arg) for arg in stmt.args))
         elif isinstance(stmt, Load):
-            coordinates = tuple(of(var) for expr in stmt.index for var in expr.free_vars())
+            coordinates = tuple(of(var) for expression in stmt.index for var in expression.free_vars())
             env[stmt.name] = ("non", False) if any(kind != "free" for kind, _ in coordinates) else ("free", any(v for _, v in coordinates))
         elif isinstance(stmt, Select):
             branches = tuple(of(branch.value) for branch in stmt.branches)

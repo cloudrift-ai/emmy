@@ -931,7 +931,7 @@ def test_emmy_only_benchmark_returns_same_input_reference():
 def test_constant_cast_fragment_has_no_whole_op_reference(monkeypatch):
     """A cast's synthetic boundary cannot be compared with the original constant's value."""
     from emmy.compiler import pipeline
-    from emmy.compiler.ir.expr import Var
+    from emmy.compiler.ir.expression import Var
     from emmy.compiler.ir.tensor.ir import IndexMapOp, IndexSource
 
     # Keep the cast boundary that a larger unfusable consumer region leaves behind.

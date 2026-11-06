@@ -5,7 +5,7 @@ from __future__ import annotations
 from itertools import permutations
 
 from emmy.compiler.ir.axis import Axis
-from emmy.compiler.ir.expr import Var
+from emmy.compiler.ir.expression import Var
 from emmy.compiler.ir.stmt import Assign, Body, Load, Loop, Write, normalize_body
 
 

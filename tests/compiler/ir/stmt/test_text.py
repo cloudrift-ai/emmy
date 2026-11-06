@@ -8,7 +8,7 @@ import pytest
 from emmy.compiler.dim import Dim
 from emmy.compiler.dtype import F8E4M3, F16, F32
 from emmy.compiler.ir.axis import Axis, Window
-from emmy.compiler.ir.expr import BinaryExpr, Literal, Var
+from emmy.compiler.ir.expression import BinaryExpr, Literal, Var
 from emmy.compiler.ir.stmt import (
     Accum,
     Affine,

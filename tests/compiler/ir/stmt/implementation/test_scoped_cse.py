@@ -5,7 +5,7 @@ import json
 import pytest
 
 from emmy.compiler.ir.axis import Axis
-from emmy.compiler.ir.expr import Literal, Var
+from emmy.compiler.ir.expression import Literal, Var
 from emmy.compiler.ir.stmt import Accum, Assign, Body, Cond, Load, Loop, Write, free_names, normalize_body
 from emmy.compiler.ir.stmt.normalize import _normalize_body
 from tests.compiler.realization.helpers import CASES_DIR, case_files

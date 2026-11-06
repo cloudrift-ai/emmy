@@ -8,7 +8,7 @@ from emmy.compiler.dim import Dim
 from emmy.compiler.dtype import BF16, F16, F32
 from emmy.compiler.ir.axis import Axis
 from emmy.compiler.ir.elementwise import ElementwiseImpl
-from emmy.compiler.ir.expr import Literal
+from emmy.compiler.ir.expression import Literal
 from emmy.compiler.ir.kernel import KernelOp
 from emmy.compiler.ir.stmt import Accum, Assign, Body, Load, Loop
 
@@ -60,7 +60,7 @@ def test_interleave_keeps_load_before_nested_consumer() -> None:
 def _unrolled_pointwise(*, between=(), dtype=F16) -> Body:
     """Four unrolled cells of ``out = x * x``: each cell loads its 16-bit element and squares it
     before the next cell's load, as the unroller emits a pointwise body."""
-    from emmy.compiler.ir.expr import Var
+    from emmy.compiler.ir.expression import Var
 
     stmts = []
     for u in range(4):
@@ -85,7 +85,7 @@ def test_interleaved_loads_of_one_buffer_widen(dtype) -> None:
 
 def test_vector_loads_and_stores_require_aligned_row_offsets() -> None:
     from emmy.compiler.graph import Tensor
-    from emmy.compiler.ir.expr import Var
+    from emmy.compiler.ir.expression import Var
     from emmy.compiler.ir.stmt import Write
 
     for columns, row, aligned in (
@@ -104,7 +104,7 @@ def test_vector_loads_and_stores_require_aligned_row_offsets() -> None:
 
 def test_vector_alignment_recomposes_split_coordinates() -> None:
     from emmy.compiler.graph import Tensor
-    from emmy.compiler.ir.expr import BinaryExpr, Var
+    from emmy.compiler.ir.expression import BinaryExpr, Var
     from emmy.compiler.pipeline.passes.lowering.kernel._vector import vector_run
 
     tensor = Tensor("x", (4, 8), F32)
@@ -118,10 +118,10 @@ def test_a_gathered_selector_term_is_an_unknown_integer() -> None:
     """A routed expert's weight run starts at a gathered selector times the expert's stride, behind the gather's sign
     wrap. That term has no affine form, but it is an integer, so a stride that is a multiple of the width keeps the
     run aligned, and an odd one does not."""
-    from emmy.compiler.ir.expr import BinaryExpr, CastExpr, TernaryExpr, Var
+    from emmy.compiler.ir.expression import BinaryExpr, CastExpr, TernaryExpr, Var
     from emmy.compiler.pipeline.passes.lowering.kernel._vector import vector_run
 
-    sel = CastExpr(dtype="int", expr=Var("in0"))
+    sel = CastExpr(dtype="int", expression=Var("in0"))
     wrap = TernaryExpr(BinaryExpr("<", sel, Literal(0, "int")), BinaryExpr("+", sel, Literal(512, "int")), sel)
 
     def run(stride: int) -> list:
@@ -139,7 +139,7 @@ def test_a_strided_loop_variable_carries_its_alignment() -> None:
     from emmy.compiler.dtype import F16
     from emmy.compiler.graph import Tensor
     from emmy.compiler.ir.axis import Axis
-    from emmy.compiler.ir.expr import BinaryExpr, Var
+    from emmy.compiler.ir.expression import BinaryExpr, Var
     from emmy.compiler.ir.stmt import StridedLoop
 
     tensor = Tensor("w", (4, 1024), F16)
@@ -155,7 +155,7 @@ def test_a_strided_loop_variable_carries_its_alignment() -> None:
 def test_a_load_whose_index_is_computed_in_between_stays_put() -> None:
     """A later load moves up only when its index needs nothing defined in between."""
     from emmy.compiler.dtype import F16
-    from emmy.compiler.ir.expr import Var
+    from emmy.compiler.ir.expression import Var
 
     body = Body(
         (
@@ -169,7 +169,7 @@ def test_a_load_whose_index_is_computed_in_between_stays_put() -> None:
 
 def test_a_write_to_the_buffer_in_between_stops_the_run() -> None:
     """A load never moves above a store into its own buffer."""
-    from emmy.compiler.ir.expr import Var
+    from emmy.compiler.ir.expression import Var
     from emmy.compiler.ir.stmt import Write
 
     store = Write(output="x", index=(Var("a0"),), values=("y0",))
@@ -185,7 +185,7 @@ def test_ring_slot_transposed_b_fragments_pair() -> None:
     The row is ``slot * rows + (warp_row + 8)``: the +8 sits inside the chain, and the slot term is
     not affine. Left unpaired, every F.linear GEMM drained B with twice the ldmatrix count in its
     main loop."""
-    from emmy.compiler.ir.expr import Var
+    from emmy.compiler.ir.expression import Var
     from emmy.compiler.ir.kernel.ir import LdmatrixLoad
 
     slot = (Var("_ks") / Literal(32, "int")) % Literal(4, "int") * Literal(64, "int")

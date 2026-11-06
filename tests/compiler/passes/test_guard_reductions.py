@@ -6,7 +6,7 @@ import numpy as np
 import pytest
 
 from emmy.compiler.ir.axis import Axis
-from emmy.compiler.ir.expr import Literal, Var
+from emmy.compiler.ir.expression import Literal, Var
 from emmy.compiler.ir.kernel import KernelOp, Sync
 from emmy.compiler.ir.loop.runner import execute_loop_op_cpp
 from emmy.compiler.ir.stmt import Accum, Assign, Body, Load, Loop, Select, SelectBranch, StridedLoop, Write

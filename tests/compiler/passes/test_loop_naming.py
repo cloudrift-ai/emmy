@@ -14,7 +14,7 @@ import importlib
 from emmy.compiler import provenance as prov
 from emmy.compiler.graph import Graph, Tensor
 from emmy.compiler.ir.base import InputOp
-from emmy.compiler.ir.expr import Var
+from emmy.compiler.ir.expression import Var
 from emmy.compiler.ir.frontend.ir import RmsNormOp
 from emmy.compiler.ir.loop import Axis, Load, Loop, LoopOp, Write
 from emmy.compiler.pipeline import LOOP_PASSES, Pipeline

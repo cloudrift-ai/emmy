@@ -3,8 +3,8 @@
 import pytest
 
 from emmy.compiler.ir.axis import Axis
-from emmy.compiler.ir.expr import Var
-from emmy.compiler.ir.stmt import Assign, Body, Cond, Loop, Stmt, Write, rename_free
+from emmy.compiler.ir.expression import Var
+from emmy.compiler.ir.stmt import Assign, Body, Cond, Loop, Statement, Write, rename_free
 from emmy.compiler.ir.stmt.normalize import place_values
 
 
@@ -19,14 +19,14 @@ def test_free_rename_visits_nested_statements_once(monkeypatch, depth, eliminate
     for level in range(depth):
         stmt = Loop(Axis(f"i{level}", 4), (stmt,))
     visits = 0
-    original = Stmt.rewrite
+    original = Statement.rewrite
 
     def counted(*args):
         nonlocal visits
         visits += 1
         return original(*args)
 
-    monkeypatch.setattr(Stmt, "rewrite", counted)
+    monkeypatch.setattr(Statement, "rewrite", counted)
     if eliminate:
         result = place_values(Body((Assign("outer", "copy", ("renamed",)), Assign("shadow", "copy", ("wrong",)), stmt)))[0]
     else:

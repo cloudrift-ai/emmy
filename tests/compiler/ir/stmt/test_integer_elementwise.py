@@ -10,10 +10,10 @@ from emmy.compiler.dtype import U32
 from emmy.compiler.graph import Node, Tensor
 from emmy.compiler.ir.kernel import KernelOp
 from emmy.compiler.ir.render import RenderCtx, render_stmt
-from emmy.compiler.ir.stmt import Stmt, parse_body
+from emmy.compiler.ir.stmt import Statement, parse_body
 
 
-def _stmt(text: str) -> Stmt:
+def _stmt(text: str) -> Statement:
     (stmt,) = parse_body(text)
     return stmt
 

@@ -12,7 +12,7 @@ from emmy.compiler.context import Context
 from emmy.compiler.dim import Dim
 from emmy.compiler.ir.axis import Axis
 from emmy.compiler.ir.cuda import CudaOp
-from emmy.compiler.ir.expr import BinaryExpr, Literal, TernaryExpr, Var
+from emmy.compiler.ir.expression import BinaryExpr, Literal, TernaryExpr, Var
 from emmy.compiler.ir.frontend.ir import SdpaOp
 from emmy.compiler.ir.stmt import Assign, Select, SelectBranch
 from emmy.compiler.pipeline import CUDA_PASSES, Pipeline
@@ -56,8 +56,8 @@ def _bounds(stmts) -> tuple:
     return _mask_key_bounds(stmts, "s2", KEY, "a1", ROW_BLOCK, BK)
 
 
-def _pretty(expr) -> str:
-    return str(expr)
+def _pretty(expression) -> str:
+    return str(expression)
 
 
 def test_a_causal_mask_stops_the_stream_at_the_block_end() -> None:

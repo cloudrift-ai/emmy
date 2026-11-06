@@ -431,7 +431,7 @@ def _mis_sliced_tail():
     """A projection tail whose chain op reads ``acc2`` — a sibling channel's
     accumulator, which a node sliced to one channel never computes."""
     from emmy.compiler.ir.elementwise import ElementwiseImpl
-    from emmy.compiler.ir.expr import Var
+    from emmy.compiler.ir.expression import Var
     from emmy.compiler.ir.stmt import Assign, Write
 
     return [

@@ -1,6 +1,6 @@
 """A statement kind declared as data: typed fields, and the role each field plays.
 
-:func:`kind` declares one: it makes the class a frozen dataclass and writes every member of the statement protocol
+:func:`statement` declares one: it makes the class a frozen dataclass and writes every member of the statement protocol
 from those roles, once, when the class is defined. So a kind writes none of them: the shared kinds and the Kernel IR
 kinds are all declared. A role says what a field is to the rest of the compiler:
 
@@ -12,7 +12,7 @@ kinds are all declared. A role says what a field is to the rest of the compiler:
 ``buffer_read``   buffers it reads
 ``buffer_write``  buffers it writes
 ``local_buffer``  buffers it declares kernel-local
-``expr``          expressions
+``expression``          expressions
 ``axis``          axes it binds for its child bodies
 ``axis_name``     names of axes it binds, which follow those axes when they are renamed
 ``body``          a child body
@@ -25,7 +25,7 @@ A field holds one value, a tuple of them, or ``None``. A number where a name, a 
 plain data: a stride that is a constant, a seed that is a literal. A field with no role is plain data: nothing renames
 it and no member reports it.
 
-An ``expr`` field that also ``reads`` is read through: the names its expressions mention are names the statement
+An ``expression`` field that also ``reads`` is read through: the names its expressions mention are names the statement
 reads, each listed once.
 """
 
@@ -36,8 +36,8 @@ from dataclasses import MISSING, Field, dataclass, field, fields, replace
 from functools import cache
 from typing import dataclass_transform
 
-from emmy.compiler.ir.expr import Expr
-from emmy.compiler.ir.stmt.base import Stmt, _identity_rename
+from emmy.compiler.ir.expression import Expression
+from emmy.compiler.ir.stmt.base import Statement, _identity_rename
 from emmy.compiler.ir.stmt.body import Body
 
 _DEFINES = frozenset({"defines", "updates"})
@@ -47,7 +47,7 @@ _NAMES = _DEFINES | _READS | _LOCAL
 _BUFFER_READS = frozenset({"buffer_read"})
 _BUFFER_WRITES = frozenset({"buffer_write"})
 _LOCAL_BUFFERS = frozenset({"local_buffer"})
-_EXPRS = frozenset({"expr"})
+_EXPRS = frozenset({"expression"})
 _AXES = frozenset({"axis"})
 _CARRIED = frozenset({"stmts", "term"})
 _ROLES = _NAMES | _BUFFER_READS | _BUFFER_WRITES | _LOCAL_BUFFERS | _EXPRS | _AXES | _CARRIED | {"axis_name", "body", "record"}
@@ -61,7 +61,7 @@ def role(*roles: str, default: object = MISSING) -> Field:
 
 
 @dataclass_transform(frozen_default=True, field_specifiers=(role, field))
-def kind(cls: type | None = None, /, **options: bool):  # noqa: ANN201 — the class, or the decorator that takes it
+def statement(cls: type | None = None, /, **options: bool):  # noqa: ANN201 — the class, or the decorator that takes it
     """Declare a statement kind: ``cls`` becomes a frozen dataclass (``options`` go to ``dataclass``) and gets every
     protocol member its fields' roles give. A member the class states itself, because no role gives it, is kept."""
 
@@ -69,7 +69,7 @@ def kind(cls: type | None = None, /, **options: bool):  # noqa: ANN201 — the c
         cls = dataclass(frozen=True, **options)(cls)
         for name, member in _members(cls).items():
             stated = getattr(cls, name)
-            if stated is getattr(Stmt, name) or getattr(stated, "derived", False):
+            if stated is getattr(Statement, name) or getattr(stated, "derived", False):
                 member.derived = True
                 setattr(cls, name, member)
         return cls
@@ -145,7 +145,7 @@ def _rebuilt(obj: object, change: Callable[[frozenset[str], object], object]) ->
     return replace(obj, **changes) if changes else obj
 
 
-def _mapped(body: Body, fn: Callable[[Stmt], Stmt]) -> Body:
+def _mapped(body: Body, fn: Callable[[Statement], Statement]) -> Body:
     """``body`` with ``fn`` applied to each statement; ``body`` itself when every statement comes back as it was."""
     stmts = tuple(fn(stmt) for stmt in body)
     return body if all(new is old for new, old in zip(stmts, body, strict=True)) else Body(stmts)
@@ -178,8 +178,8 @@ def _members(cls: type) -> dict[str, Callable]:
     members["external_reads"] = reader(_BUFFER_READS, "external_reads", unique=True)
     members["external_writes"] = reader(_BUFFER_WRITES, "external_writes", unique=True)
     members["local_decls"] = reader(_LOCAL_BUFFERS)
-    if (exprs := reader(_EXPRS, "exprs")) is not None:
-        members.update(exprs=exprs, map_exprs=_map_exprs)
+    if (expressions := reader(_EXPRS, "expressions")) is not None:
+        members.update(expressions=expressions, map_expressions=_map_expressions)
     if axes := _route(cls, _AXES, False):
         members["bound_axes"] = lambda self: tuple(_gather(self, axes, _AXES))
         members["binds_axes"] = lambda self: frozenset(axis.name for axis in _gather(self, axes, _AXES))
@@ -202,14 +202,14 @@ def _deps(cls: type) -> Callable | None:
     locals_ = _route(cls, _LOCAL, False)
     if not route and not scopes:
         return None
-    if len(route) == 1 and route[0][1] == _OWN and not scopes and "expr" not in dict(_plan(cls))[route[0][0]]:
+    if len(route) == 1 and route[0][1] == _OWN and not scopes and "expression" not in dict(_plan(cls))[route[0][0]]:
         ((name, _),) = route
         return lambda self: _items(getattr(self, name))
 
-    def deps(self: Stmt) -> tuple[str, ...]:
+    def deps(self: Statement) -> tuple[str, ...]:
         reads: list[str] = []
         for item in _gather(self, route, _READS):
-            if isinstance(item, Expr):  # a field read through: the names its expressions mention, each listed once
+            if isinstance(item, Expression):  # a field read through: the names its expressions mention, each listed once
                 reads += [name for name in sorted(item.free_vars()) if name not in reads]
             else:
                 reads.append(item)
@@ -225,20 +225,20 @@ def _deps(cls: type) -> Callable | None:
     return deps
 
 
-def _map_exprs(self: Stmt, fn: Callable[[Expr], Expr]) -> Stmt:
+def _map_expressions(self: Statement, fn: Callable[[Expression], Expression]) -> Statement:
     def change(has: frozenset[str], value):  # noqa: ANN001, ANN202 — a field's value
-        if "expr" in has:
+        if "expression" in has:
             return _each(value, fn)
         if "term" in has:
-            return _mapped(value, lambda stmt: stmt.map_exprs(fn))
+            return _mapped(value, lambda stmt: stmt.map_expressions(fn))
         if "stmts" in has:
-            return tuple(stmt.map_exprs(fn) for stmt in value)
+            return tuple(stmt.map_expressions(fn) for stmt in value)
         return value
 
     return _rebuilt(self, change)
 
 
-def _rename_buffers(self: Stmt, rename) -> Stmt:  # noqa: ANN001 — see ``Stmt.rename_buffers``
+def _rename_buffers(self: Statement, rename) -> Statement:  # noqa: ANN001 — see ``Statement.rename_buffers``
     def change(has: frozenset[str], value):  # noqa: ANN001, ANN202 — a field's value
         if has & (_BUFFER_READS | _BUFFER_WRITES):
             return _each(value, lambda buffer: rename.get(buffer, buffer))
@@ -251,14 +251,14 @@ def _rename_buffers(self: Stmt, rename) -> Stmt:  # noqa: ANN001 — see ``Stmt.
     return _rebuilt(self, change)
 
 
-def rewrite_by_roles(self: Stmt, rename, sigma, axis_fn) -> Stmt:  # noqa: ANN001 — see ``Stmt.rewrite``
+def rewrite_by_roles(self: Statement, rename, sigma, axis_fn) -> Statement:  # noqa: ANN001 — see ``Statement.rewrite``
     """What a declared kind's ``_rewrite`` is: every name renamed, every expression substituted and renamed, every
     axis mapped, every child and carried statement rewritten. A kind that states its own ``_rewrite`` calls this for
     the fields the roles cover."""
 
     def change(has: frozenset[str], value):  # noqa: ANN001, ANN202 — a field's value
-        if "expr" in has:
-            return _each(value, lambda expr: sigma.apply(expr).rename(rename))
+        if "expression" in has:
+            return _each(value, lambda expression: sigma.apply(expression).rename(rename))
         if has & _NAMES:
             return _each(value, rename)
         if "axis" in has:
@@ -273,7 +273,10 @@ def rewrite_by_roles(self: Stmt, rename, sigma, axis_fn) -> Stmt:  # noqa: ANN00
         if "term" in has:  # its statements' names are its own; a coordinate its expressions read is not
             defined = {name for stmt in value for name in stmt.defines()}
             moved = (stmt.rewrite(_identity_rename, sigma, axis_fn) for stmt in value)
-            return Body(stmt.map_exprs(lambda expr: expr.rename(lambda name: name if name in defined else rename(name))) for stmt in moved)
+            return Body(
+                stmt.map_expressions(lambda expression: expression.rename(lambda name: name if name in defined else rename(name)))
+                for stmt in moved
+            )
         return value
 
     return _rebuilt(self, change)

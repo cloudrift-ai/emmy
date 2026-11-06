@@ -20,12 +20,12 @@ from dataclasses import replace
 from math import prod
 
 from emmy.compiler.ir.axis import Axis
-from emmy.compiler.ir.expr import BinaryExpr, Expr, Interval, Literal, SimplifyCtx, Var, affine_form
+from emmy.compiler.ir.expression import BinaryExpr, Expression, Interval, Literal, SimplifyCtx, Var, affine_form
 from emmy.compiler.ir.loop import LoopOp
 from emmy.compiler.ir.pure import Fold
 from emmy.compiler.ir.pure.lam import Lambda
 from emmy.compiler.ir.sigma import Sigma
-from emmy.compiler.ir.stmt import Body, Load, Loop, Stmt, Write
+from emmy.compiler.ir.stmt import Body, Load, Loop, Statement, Write
 from emmy.compiler.ir.tile import TileOp
 from emmy.compiler.ir.tile.ops import UnbindableProjection, output_regions
 from emmy.compiler.ir.tile.path import sites
@@ -62,7 +62,7 @@ def _unit_positions(body: Body, shapes: Mapping) -> tuple[int, ...]:
 def _bind(body: Body, axis: Axis, position: int, shapes: dict) -> Body:
     """Substitute ``axis`` for the constant coordinate at ``position`` of every aligned buffer."""
 
-    def rebind(stmt: Stmt) -> Stmt:
+    def rebind(stmt: Statement) -> Statement:
         buffer, index = (
             (stmt.input, stmt.index) if isinstance(stmt, Load) else (stmt.output, stmt.index) if isinstance(stmt, Write) else (None, None)
         )
@@ -172,12 +172,12 @@ class FoldingSigma(Sigma):
     ``Sigma.apply`` substitutes and stops, which is right everywhere else: a σ that rewrote its result would hide what
     it did."""
 
-    def __init__(self, mapping: dict[str, Expr], ctx: SimplifyCtx) -> None:
+    def __init__(self, mapping: dict[str, Expression], ctx: SimplifyCtx) -> None:
         super().__init__(mapping)
         object.__setattr__(self, "_ctx", ctx)
 
-    def apply(self, expr):
-        return expr.substitute(self.mapping).simplify(self._ctx)
+    def apply(self, expression):
+        return expression.substitute(self.mapping).simplify(self._ctx)
 
 
 def _paired_by_loads(tile: TileOp) -> TileOp:
@@ -208,7 +208,7 @@ def _paired_by_loads(tile: TileOp) -> TileOp:
     ctx = SimplifyCtx(ranges={name: Interval(0, axis.extent.as_static() - 1) for name, axis in axes.items()})
     outer = [(grid & region.free_axes) | {axis.name for spec in stores for axis in spec.sweep} for region, _, stores in regions]
     loads = [_region_loads(region) for region, _, _ in regions]
-    best: tuple[int, int, dict[str, Expr]] | None = None
+    best: tuple[int, int, dict[str, Expression]] | None = None
     for index, (region, _, _) in enumerate(regions):
         theirs = tuple(load for other, found in enumerate(loads) if other != index for load in found)
         before = _coinciding(loads[index], theirs, {}, ctx, set().union(*outer) | grid)
@@ -232,7 +232,7 @@ def _paired_by_loads(tile: TileOp) -> TileOp:
     respelled = _recoordinated(region, sigma)
     # The re-spelled region sweeps every coordinate it now reads that the grid does not bind: the other regions'
     # sweeps in their order first, so the shared ones nest outermost, then its own.
-    respelled_outer = {name for expr in full.values() for name in expr.free_vars()}
+    respelled_outer = {name for expression in full.values() for name in expression.free_vars()}
     own = (*(axis.name for spec in stores for axis in spec.sweep), *(axis.name for axis in tile.place.free))
     order = (
         *(axis.name for spec in tile.output_specs if spec not in stores for axis in spec.sweep),
@@ -240,7 +240,7 @@ def _paired_by_loads(tile: TileOp) -> TileOp:
     )
     sweep = tuple(axes[name] for name in dict.fromkeys(order) if name in respelled_outer - grid)
     specs = tuple(
-        replace(spec, write=spec.write.replace(index=tuple(sigma.apply(expr) for expr in spec.write.index)), sweep=sweep)
+        replace(spec, write=spec.write.replace(index=tuple(sigma.apply(expression) for expression in spec.write.index)), sweep=sweep)
         if spec in stores
         else spec
         for spec in tile.output_specs
@@ -254,7 +254,7 @@ def _read_coordinates(mine: Load, read: Load, own: set[str], theirs: set[str], a
     covering the same range, mapped to that expression; ``None`` unless the two reads then name one element."""
     if mine.input != read.input or len(mine.index) != len(read.index):
         return None
-    mapping: dict[str, Expr] = {}
+    mapping: dict[str, Expression] = {}
     pairs: dict[str, str] = {}
     for left, right in zip(mine.index, read.index, strict=True):
         if isinstance(left, Var) and left.name in own:
@@ -270,16 +270,16 @@ def _read_coordinates(mine: Load, read: Load, own: set[str], theirs: set[str], a
                 return None
         elif left != right or left.free_vars() & own:
             return None
-    if all(expr == Var(name) for name, expr in mapping.items()):
+    if all(expression == Var(name) for name, expression in mapping.items()):
         return None
     return mapping
 
 
-def _completed(mapping: dict[str, Expr], own: set[str], axes: dict) -> dict[str, Expr] | None:
+def _completed(mapping: dict[str, Expression], own: set[str], axes: dict) -> dict[str, Expression] | None:
     """``mapping`` extended to every coordinate in ``own``: one it leaves alone keeps its name, unless the mapped
     coordinates now use that name, in which case it takes a name they freed, of equal extent; ``None`` when none is
     free or the re-spelled coordinates cover another number of cells."""
-    used = {name for expr in mapping.values() for name in expr.free_vars()}
+    used = {name for expression in mapping.values() for name in expression.free_vars()}
     freed = sorted(name for name in mapping if name not in used)
     full = dict(mapping)
     for name in sorted(own - mapping.keys()):
@@ -291,7 +291,7 @@ def _completed(mapping: dict[str, Expr], own: set[str], axes: dict) -> dict[str,
             return None
         freed.remove(taken)
         full[name] = Var(taken)
-    after = {name for expr in full.values() for name in expr.free_vars()}
+    after = {name for expression in full.values() for name in expression.free_vars()}
     size = prod(axes[name].extent.as_static() for name in own)
     return full if prod(axes[name].extent.as_static() for name in after) == size else None
 
@@ -305,7 +305,7 @@ def _coinciding(mine: tuple, theirs: tuple, mapping: dict, ctx: SimplifyCtx, out
         for j, other in enumerate(theirs)
         if load.input == other.input
         and len(load.index) == len(other.index)
-        and _equal_modulo_reduce(tuple(sigma.apply(expr) for expr in load.index), other.index, outer)
+        and _equal_modulo_reduce(tuple(sigma.apply(expression) for expression in load.index), other.index, outer)
     )
 
 
@@ -360,7 +360,7 @@ def _store_ordered(tile: TileOp) -> TileOp:
     return replace(tile, place=replace(tile.place, free=free))
 
 
-def _slowest_first(index: Expr) -> list[str]:
+def _slowest_first(index: Expression) -> list[str]:
     """The axes one store coordinate names, the larger stride first; a coordinate not affine in them keeps its
     names' sorted order."""
     names = sorted(index.free_vars())
@@ -432,21 +432,21 @@ def _align_owned_sweeps(piece: TileOp) -> TileOp:
 
     def sigma(sweep: tuple[Axis, ...], mapping: dict[str, Var]) -> Sigma | None:
         remaining = tuple(axis for axis in sweep if axis.name not in mapping)
-        available = tuple(axis for axis in anchor if axis.name not in {expr.name for expr in mapping.values()})
+        available = tuple(axis for axis in anchor if axis.name not in {expression.name for expression in mapping.values()})
         if prod(axis.extent.as_static() for axis in remaining) != prod(axis.extent.as_static() for axis in available):
             return None
         flat = Var(available[0].name) if available else Literal(0, "int")
         for axis in available[1:]:
             flat = flat * Literal(axis.extent.as_static(), "int") + Var(axis.name)
-        substitution: dict[str, Expr] = dict(mapping)
+        substitution: dict[str, Expression] = dict(mapping)
         for i, axis in enumerate(remaining):
             stride = prod(follower.extent.as_static() for follower in remaining[i + 1 :])
-            expr = flat
+            expression = flat
             if stride > 1:
-                expr = BinaryExpr("/", expr, Literal(stride, "int"))
+                expression = BinaryExpr("/", expression, Literal(stride, "int"))
             if i:
-                expr = BinaryExpr("%", expr, Literal(axis.extent.as_static(), "int"))
-            substitution[axis.name] = expr
+                expression = BinaryExpr("%", expression, Literal(axis.extent.as_static(), "int"))
+            substitution[axis.name] = expression
         return Sigma(substitution)
 
     def loads(region: Fold) -> tuple[Load, ...]:
@@ -490,8 +490,8 @@ def _align_owned_sweeps(piece: TileOp) -> TileOp:
                 # The rest of the output domain may flatten without mixing those coordinates.
                 if (
                     shared
-                    and len({expr.name for expr in shared.values()}) == len(shared)
-                    and tuple(expr.substitute({**reduced, **shared}) for expr in load.index) == other.index
+                    and len({expression.name for expression in shared.values()}) == len(shared)
+                    and tuple(expression.substitute({**reduced, **shared}) for expression in load.index) == other.index
                 ):
                     return shared
         return None

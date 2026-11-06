@@ -42,10 +42,10 @@ def _tma_descriptors(kernel: KernelOp) -> tuple[TmaDescMeta, ...]:
 
 def _symbolic_runtime_args(kernel: KernelOp) -> tuple[str, ...]:
     """Every symbolic ``Dim`` name the body references, in first-seen order — via an axis
-    extent (a dynamic reduce / output-sweep ``seq_len``) or inside a stmt ``Expr`` (a
+    extent (a dynamic reduce / output-sweep ``seq_len``) or inside a stmt ``Expression`` (a
     ``Load``/``Write`` index carrying a normalized negative-slice offset like
     ``seq_len - 1``, which needs the arg even when every axis is static). The kernel takes
-    one ``int`` arg per name, the launch resolves it from the input shapes. Stmt-expr free
+    one ``int`` arg per name, the launch resolves it from the input shapes. Statement-expression free
     vars are filtered to names carried by the kernel's tensor shapes so loop / SSA vars
     never match, beside the program's own symbolic sizes (``EXTENTS``: a term may read one no buffer of the kernel
     carries, the last index of a symbolic range). Dict-keyed for stable ordering."""
@@ -53,15 +53,15 @@ def _symbolic_runtime_args(kernel: KernelOp) -> tuple[str, ...]:
     for t in (*kernel.inputs.values(), *kernel.outputs.values()):
         for d in t.shape:
             if not d.is_static:
-                shape_syms |= d.expr.free_vars()
+                shape_syms |= d.expression.free_vars()
     seen: dict[str, None] = {}
     for s in kernel.body.iter():
         axes = s.axes if isinstance(s, Tile) else ((s.axis,) if hasattr(s, "axis") else ())
         for ax in axes:
             if isinstance(ax, Axis) and not ax.extent.is_static:
-                for nm in ax.extent.expr.free_vars():
+                for nm in ax.extent.expression.free_vars():
                     seen.setdefault(nm, None)
-        for e in s.exprs():
+        for e in s.expressions():
             for nm in e.free_vars():
                 if nm in shape_syms:
                     seen.setdefault(nm, None)
@@ -127,8 +127,8 @@ def rewrite(match: Match, root: Node) -> CudaOp | None:
         grid = (((n + cells - 1) // cells,), (1,), (1,))
     else:
         # Symbolic grid (a dynamic free axis): ``ceil(∏extents / blockDim)`` CTAs, the symbolic
-        # factor resolved from ``sym_values`` at launch (the ``Expr`` grid factor).
-        grid = ((tile_n_dim(tile).ceil_div(cells).expr,), (1,), (1,))
+        # factor resolved from ``sym_values`` at launch (the ``Expression`` grid factor).
+        grid = ((tile_n_dim(tile).ceil_div(cells).expression,), (1,), (1,))
     block = ((cells + tile.aux_threads,), (1,), (1,))
     # Signature / arg order: buffers, then the TMA descriptor params (bound to the
     # launch-encoded ``CUtensorMap`` device arrays), then the symbolic ``int`` args

@@ -6,7 +6,7 @@ import pytest
 from frozendict import frozendict
 
 from emmy.compiler.ir.elementwise import ElementwiseImpl
-from emmy.compiler.ir.expr import BinaryExpr, Literal, Var
+from emmy.compiler.ir.expression import BinaryExpr, Literal, Var
 from emmy.compiler.ir.loop import (
     Accum,
     Affine,
@@ -501,7 +501,7 @@ def test_update_op_conflict_rejected():
 
 
 # ---------------------------------------------------------------------------
-# Loop Stmt — nested body form
+# Loop Statement — nested body form
 # ---------------------------------------------------------------------------
 
 

@@ -15,7 +15,7 @@ from frozendict import frozendict
 from emmy.compiler.dtype import BF16, F16
 from emmy.compiler.ir.address import gmem_axis_step, split_addressable
 from emmy.compiler.ir.atom import ATOM_REGISTRY, AtomKind, atoms_for, wide_accumulate
-from emmy.compiler.ir.expr import Literal
+from emmy.compiler.ir.expression import Literal
 from emmy.compiler.ir.pure.fold import Fold, binding_extents
 from emmy.compiler.ir.schedule.catalog import (
     WARP_LANES,
@@ -29,7 +29,7 @@ from emmy.compiler.ir.schedule.choices import PlacedTile, Reduce, ResolvedStage,
 from emmy.compiler.ir.schedule.mask import cell_uniform, coordinate_aliases, select_masks
 from emmy.compiler.ir.schedule.packing import block_scaled_atom
 from emmy.compiler.ir.schedule.views import ContractionFacts, NodeId
-from emmy.compiler.ir.stmt import Affine, Assign, Body, Let, Load, Loop, Select, Stmt, Write, mask_select_predicate
+from emmy.compiler.ir.stmt import Affine, Assign, Body, Let, Load, Loop, Select, Statement, Write, mask_select_predicate
 
 from .schedule import NodeSchedule, binds_root, node_id_spelling, packed_works
 
@@ -689,7 +689,7 @@ def _wgmma_register_refusal(node: Fold, plan: Tile) -> str | None:
     )
 
 
-def _adds(consumer: Stmt, name: str) -> bool:
+def _adds(consumer: Statement, name: str) -> bool:
     """Whether ``consumer`` adds the value ``name`` to something: a sum with it as a unit term."""
     if isinstance(consumer, Affine):
         return any(arg == name and coefficient == 1 for coefficient, arg in consumer.terms)

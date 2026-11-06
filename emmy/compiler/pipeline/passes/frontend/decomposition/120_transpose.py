@@ -5,7 +5,7 @@ full permutation of length ``ndim`` (``aten.permute``).
 """
 
 from emmy.compiler.graph import Graph, Node, Tensor
-from emmy.compiler.ir.expr import placeholder
+from emmy.compiler.ir.expression import placeholder
 from emmy.compiler.ir.frontend.ir import TransposeOp
 from emmy.compiler.pipeline import Match, Pattern, RuleSkipped
 from emmy.compiler.pipeline.passes.frontend.decomposition._helpers import open_fragment, single_indexmap

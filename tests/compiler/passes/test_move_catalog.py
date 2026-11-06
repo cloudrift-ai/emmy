@@ -20,7 +20,7 @@ from emmy.compiler.dim import Dim
 from emmy.compiler.graph import Graph, Tensor
 from emmy.compiler.ir.axis import Axis
 from emmy.compiler.ir.base import InputOp
-from emmy.compiler.ir.expr import Var
+from emmy.compiler.ir.expression import Var
 from emmy.compiler.ir.frontend.ir import MatmulOp
 from emmy.compiler.ir.schedule import Reduce, Tile, Work, derive_workers, resolve_site_tile
 from emmy.compiler.ir.schedule.catalog import MAX_BLOCK_THREADS as _MAX_BLOCK_THREADS

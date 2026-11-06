@@ -192,7 +192,7 @@ def test_sm70_source_uses_only_the_volta_mma_family(monkeypatch, trans) -> None:
     ids=["aligned", "offset", "stride", "k-tail"],
 )
 def test_volta_direct_vectors_require_aligned_complete_runs(role, trans, dtype, stride, offset, masked_k, aligned):
-    from emmy.compiler.ir.expr import Literal, Var
+    from emmy.compiler.ir.expression import Literal, Var
     from emmy.compiler.ir.kernel.ir import LdmatrixLoad
     from emmy.compiler.ir.render import RenderCtx
 
@@ -419,7 +419,7 @@ def test_sm70_shallow_k_tile_keeps_store_addresses_near_the_deposit(monkeypatch)
 def test_sm70_register_tile_keeps_the_volta_fragment_layout_through_the_reroll(monkeypatch) -> None:
     """A register tile wide enough to ROLL back into a loop still drains and stores as Volta.
 
-    The rolled form rebuilds every stmt through ``Stmt.rewrite``; dropping ``fragment_layout``
+    The rolled form rebuilds every stmt through ``Statement.rewrite``; dropping ``fragment_layout``
     there re-defaulted the drain to the modern ``ldmatrix`` and the store to the m16n8k16 C map —
     an uncompilable, wrong-layout sm_70 kernel that the ``f1x1`` cases above cannot see."""
     _pin(monkeypatch, VOLTA, tile="f2x2", stage="d1/smem")

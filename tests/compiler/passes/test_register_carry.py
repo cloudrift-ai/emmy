@@ -73,7 +73,7 @@ def test_register_storage_refuses_cross_warp_state_reads():
 
 
 def test_register_step_keeps_a_time_coordinate_read_by_its_lift():
-    from emmy.compiler.ir.expr import Var
+    from emmy.compiler.ir.expression import Var
     from emmy.compiler.ir.stmt import Assign, Body, Load
 
     (tile,) = (n.op for n in _lift(_graph()).nodes.values() if isinstance(n.op, TileOp))
@@ -131,7 +131,7 @@ def test_chunk_loop_is_inside_one_launch(target):
 
 def _with_output_batch_axis(graph, batch_extent):
     from emmy.compiler.dim import Dim
-    from emmy.compiler.ir.expr import Literal
+    from emmy.compiler.ir.expression import Literal
     from emmy.compiler.ir.stmt import Write
 
     node = graph.nodes["out"]
@@ -185,7 +185,7 @@ def test_register_fork_keeps_the_carrier_when_classic_is_also_offered():
 @pytest.mark.parametrize("target", [(7, 0), (12, 0)], ids=["volta", "modern"])
 @pytest.mark.parametrize("stride", [1, 2])
 def test_register_operands_use_direct_loads_when_the_address_allows_it(target, stride):
-    from emmy.compiler.ir.expr import Literal
+    from emmy.compiler.ir.expression import Literal
     from emmy.compiler.ir.stmt import Load
 
     graph = _graph()
@@ -275,7 +275,7 @@ def test_register_state_starts_from_the_seed_tensor_on_cuda(unit, unit_batch):
 def test_seed_tensor_keeps_unit_dimensions_on_cuda(register):
     from emmy.compiler.backend.cuda.program import run_program
     from emmy.compiler.dim import Dim
-    from emmy.compiler.ir.expr import Literal
+    from emmy.compiler.ir.expression import Literal
     from emmy.compiler.ir.stmt import Carry, Pre
 
     source = _graph(seed="S0")
@@ -307,7 +307,7 @@ def test_gmem_fragment_loads_keep_their_constant_offset_in_the_pointer():
     24 bytes there, while CUDA 13 folded the same source into 189 registers. ``&k[base] + 2048``
     is one pointer and a load immediate on both (179 registers on CUDA 12.9)."""
     from emmy.compiler.dim import Dim
-    from emmy.compiler.ir.expr import BinaryExpr, Literal, Var
+    from emmy.compiler.ir.expression import BinaryExpr, Literal, Var
     from emmy.compiler.ir.render import RenderCtx
 
     ctx = RenderCtx(shapes={"k": (Dim(4), Dim(64), Dim(128))}, buffer_dtypes={"k": "f32"}, ssa_dtypes={"r": "f16"})

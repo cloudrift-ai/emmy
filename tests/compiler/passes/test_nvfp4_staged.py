@@ -24,7 +24,7 @@ from emmy.compiler.dtype import BF16, F8E4M3, F16, F32, F4E2M1x2
 from emmy.compiler.graph import Tensor
 from emmy.compiler.ir.address import BYTE_SLAB_PAD
 from emmy.compiler.ir.axis import Axis
-from emmy.compiler.ir.expr import BinaryExpr, CastExpr, Literal, Var
+from emmy.compiler.ir.expression import BinaryExpr, CastExpr, Literal, Var
 from emmy.compiler.ir.pure import Fold
 from emmy.compiler.ir.schedule import Stage, Tile, Work
 from emmy.compiler.ir.schedule.packing import packed_readings
@@ -64,7 +64,7 @@ def _packed_cone(k: int, *, block: int = 16, k_last: bool = True, row: str = "n"
         Assign(name=f"{q}v0", op="from_f8e4m3", args=(f"{q}in1",)),
         Assign(name=f"{q}v1", op="copy", args=(f"{q}in2",)),
         Assign(name=f"{q}v2", op="multiply", args=(f"{q}in0", f"{q}v0")),
-        Load(name=f"{q}in3", input=f"{q}w_f4_pairs", index=(CastExpr(dtype="int", expr=Var(f"{q}v1")), pair), dtype=None),
+        Load(name=f"{q}in3", input=f"{q}w_f4_pairs", index=(CastExpr(dtype="int", expression=Var(f"{q}v1")), pair), dtype=None),
         Assign(name=f"{q}v3", op="multiply", args=(f"{q}in3", f"{q}v2")),
     )
     return projection(body=body)
