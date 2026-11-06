@@ -211,6 +211,10 @@ def pytest_addoption(parser):
         action="store_true",
         help="Rewrite tests/durations_cpu.json from this run's CPU timings.",
     )
+    # Opt-in native checkpoint qualification (tests/serving/native); ordinary tests use a hermetic tiny model. The
+    # options live here because pytest parses the command line before it loads a subdirectory's conftest.
+    parser.addoption("--native-checkpoint", help="Local dense Qwen3 checkpoint for full-model native qualification")
+    parser.addoption("--native-artifact", help="Prepared native artifact matching --native-checkpoint")
 
 
 def pytest_runtest_logreport(report):
