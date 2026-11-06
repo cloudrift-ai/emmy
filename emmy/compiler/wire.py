@@ -2,14 +2,15 @@
 
 A class joins the wire through :func:`register`, with its tag, its two wire functions and the parts the rewrite goes
 into. Mixing in :class:`Wire` registers a class as it is defined and supplies all of them for a dataclass: its init
-fields, minus the ones it names in ``wire_skip``, written by their annotations. A field whose annotation names one wire class
-holds that class's payload bare; a field whose annotation is a base class, a union of classes or ``Any`` holds
-``{tag: payload}``, so the reader knows which class to build; a field at its default is omitted; a field annotated
-``dict`` is an opaque payload kept as it is (a program pool's entries). A class whose wire is not its fields — a dim,
-a tensor, a body, a graph, a leaf type — overrides ``to_wire`` / ``from_wire``. ``wire_tag`` names the class on the
-wire, the class name by default; every wire class registers its tag when it is defined, so a tagged payload decodes
-without anyone listing the classes; a subclass that inherits its base's codec goes by the base's tag (an expression
-node is its text). The walker refuses an unknown or missing key by path.
+fields, minus the ones it names in ``wire_skip``, written by their annotations. A field whose annotation names one
+wire class holds that class's payload bare; a field whose annotation is a base class, a union of classes or ``Any``
+holds ``{tag: payload}``, so the reader knows which class to build; a field at its default is omitted; a field
+annotated ``dict`` is an opaque payload kept as it is (a program pool's entries). A class whose wire is not its fields
+— a dim, a tensor, a graph, a leaf type, an expression or a body (each its text) — overrides ``to_wire`` /
+``from_wire``. ``wire_tag`` names the class on the wire, the class name by default; every wire class registers its tag
+when it is defined, so a tagged payload decodes without anyone listing the classes; a subclass that inherits its
+base's codec goes by the base's tag (an expression node is its text). The walker refuses an unknown or missing key by
+path.
 """
 
 from __future__ import annotations

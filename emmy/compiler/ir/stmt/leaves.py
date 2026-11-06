@@ -17,7 +17,6 @@ from emmy.compiler.ir.elementwise import ElementwiseImpl
 from emmy.compiler.ir.expr import BinaryExpr, Expr, FlatIndex, Literal, Var
 from emmy.compiler.ir.sigma import Sigma
 from emmy.compiler.ir.stmt.base import Stmt
-from emmy.compiler.wire import Wire
 
 
 @dataclass(frozen=True, init=False)
@@ -697,7 +696,7 @@ class Write(Stmt):
 
 
 @dataclass(frozen=True)
-class SelectBranch(Wire):
+class SelectBranch:
     """One branch of a ``Select`` body statement."""
 
     value: str  # SSA name when predicate holds

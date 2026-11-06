@@ -1,7 +1,8 @@
 """The wire form and the structural form of a class that is no dataclass: what it supplies, and what it gets.
 
 A class joins the wire with its tag, its two wire functions and its parts, and enters an identity with its own
-structural form. Neither form reads a dataclass field of it, and the wire does not ask it to inherit ``Wire``.
+structural form. Neither form reads a dataclass field of it, and the wire does not ask it to inherit ``Wire``. A
+statement kind written by hand enters an identity the same way.
 """
 
 from __future__ import annotations
@@ -67,9 +68,8 @@ class Holder(Wire):
 
 
 class Scaled(Stmt):
-    """A statement kind written by hand: ``name = value`` over a span."""
-
-    wire_tag = "test.scaled"
+    """A statement kind written by hand: ``name = value`` over a span. A statement is not on the wire (a body's wire
+    form is its text), so it supplies its structural form and nothing else."""
 
     def __init__(self, name: str, value: str, span: Span) -> None:
         self.name, self.value, self.span = name, value, span
@@ -95,16 +95,6 @@ class Scaled(Stmt):
     def pretty(self, indent: str = "") -> list[str]:
         return [f"{indent}{self.name} = scaled({self.value}, {self.span!r})"]
 
-    def to_wire(self) -> dict:
-        return {"name": self.name, "value": self.value, "span": self.span.to_wire()}
-
-    @classmethod
-    def from_wire(cls, value: object, where: str = "scaled") -> Scaled:
-        return cls(value["name"], value["value"], Span.from_wire(value["span"]))
-
-    def wire_parts(self) -> dict[str, object]:
-        return {"name": self.name, "value": self.value, "span": self.span}
-
     def structural_form(self) -> tuple:
         return record_form("Scaled", [(part, dataclasses.MISSING) for part in (self.name, self.value, self.span)])
 
@@ -127,21 +117,13 @@ def test_a_registered_class_round_trips_the_wire_tagged_and_by_annotation() -> N
     assert Holder.from_wire(holder.to_wire()) == holder
 
 
-def test_a_hand_written_statement_kind_round_trips_the_wire() -> None:
-    body = _body()
-    wire = encode(body)
-    assert wire["body"][1] == {"test.scaled": {"name": "y", "value": "x", "span": [1, 4]}}
-    assert decode(wire) == body
-
-
 def test_the_rewrite_goes_into_a_class_through_its_parts_and_rebuilds_it() -> None:
     def widen(value: object):
         return Span(value.lo, value.hi + 1) if isinstance(value, Span) else None
 
-    assert rewrite(_body(), widen) == _body(span=Span(1, 5))
     assert rewrite(Holder(Span(1), (Span(2, 3),)), widen) == Holder(Span(1, 1), (Span(2, 4),))
     assert rewrite(Span(1, 4), lambda value: 9 if value == 4 else None) == Span(1, 9)
-    untouched = _body()
+    untouched = Holder(Span(1))
     assert rewrite(untouched, lambda value: None) is untouched
 
 

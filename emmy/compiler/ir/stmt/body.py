@@ -18,7 +18,7 @@ from types import SimpleNamespace
 
 from emmy.compiler.ir.stmt.base import Stmt
 from emmy.compiler.structural import form
-from emmy.compiler.wire import Wire, decode, encode
+from emmy.compiler.wire import Wire
 from emmy.utils import cached_method
 
 
@@ -121,21 +121,20 @@ class Body(Wire):
 
     wire_tag = "body"
 
-    def to_wire(self) -> list:
-        """The statements, each tagged by its class."""
-        return [encode(stmt) for stmt in self._stmts]
+    def to_wire(self) -> str:
+        """The body's text."""
+        return str(self)
 
     @classmethod
     def from_wire(cls, value: object, where: str = "body") -> Body:
-        if not isinstance(value, list):
-            raise ValueError(f"{where} must be a list of statements")
-        try:
-            return cls(decode(item) for item in value)
-        except TypeError as exc:
-            raise ValueError(f"{where}: {exc}") from exc
+        from emmy.compiler.ir.stmt.text import parse_body  # noqa: PLC0415 — the text module imports every kind
 
-    def wire_parts(self) -> dict[str, object]:
-        return {"stmts": self._stmts}
+        if not isinstance(value, str):
+            raise ValueError(f"{where} must be a body's text")
+        try:
+            return parse_body(value)
+        except ValueError as exc:
+            raise ValueError(f"{where}: {exc}") from exc
 
     def structural_form(self) -> tuple:
         """Elementwise, as a sequence renders: :meth:`structural_key` is the normalize-and-collapse key, not the form."""

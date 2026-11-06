@@ -289,7 +289,7 @@ _OBSOLETE_TABLES = ("loop_op", "tile_op", "kernel_op", "cuda_op", "lowering", "k
 #: The schema and cached identities (``PRAGMA user_version``): kernel wire, exact kernel identity and context key, and
 #: what a context's regime measures. A file holding another is re-created; bump when any changes. The DB tests pin
 #: kernel and context identities.
-_VERSION = 10  # An operation's read of a carried state ahead of its update is keyed by use; older keys spelled the state's name.
+_VERSION = 11  # A stored kernel holds its body as text; older rows hold a list of tagged statements, which nothing reads.
 # Drop order respects the foreign keys; create order is the reverse.
 _DROP_ORDER = (
     "perf",

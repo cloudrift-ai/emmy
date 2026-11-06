@@ -223,7 +223,7 @@ along different lowering paths still dedup in the tuning cache.
 `Tile`, `Smem`, `Sync`, `CpAsyncCopy`, `TmaDescriptor`, …) has named read-only fields, compares by content and is
 hashable. To "edit" one, take a copy with `stmt.replace(field=value)`; nothing outside `ir/stmt/` calls
 `dataclasses.replace` on a statement or lists its fields, and a layering test watches a lowering for both. A kind
-states its fields to the wire form and the structural form only. One pass still lists them: the kernel loopify
+states its fields to the text reader and the structural form only. One pass still lists them: the kernel loopify
 pass, off unless pinned, compares whole statements field by field to roll repeated ones into a loop. Ops, by
 contrast, are frozen and unhashable — rewrites replace the op and rebind its graph node. Op fields stored inside
 statements (e.g. `Assign.op`) must be lightweight value objects (e.g. `ElementwiseImpl`, not `ElementwiseOp`) so the
@@ -251,7 +251,7 @@ hand; a layer adds a kind of its own by declaring it (below), and nothing else:
 | Reads and writes | `deps`, `defines`, `external_reads`, `external_writes`, `local_decls`, `binds_axes` |
 | Structure | `nested` with `with_bodies`; `exprs` with `with_exprs` |
 | Rebuilding | `_rewrite` (behind `rewrite`, `rename` and `substitute`), `rename_buffers`, `replace` |
-| Display and storage | the text (a kind of another layer: `pretty`), the wire form |
+| Display and storage | the text (a kind of another layer: `pretty`); a body's text is its wire form |
 
 Each reading member has a rebuilding half: `with_bodies` takes what `nested` returned, `with_exprs` what `exprs`
 returned. `rewrite` is the one entry for renaming and substitution; it drops the substitutions a statement's own
@@ -290,7 +290,8 @@ shared cache that could alias distinct metadata. Callers use its walks (`iter`, 
 `rename_buffers`, and its identity (`identity`, `structural_key`, `census`, `literals_abstracted`,
 `literal_free_key`).
 
-**A body has one text.** `str(body)` is it and `parse_body` reads it back to an equal body, so the text says
+**A body has one text**, which is also its wire form. `str(body)` is it and `parse_body` reads it back to an equal
+body, so the text says
 everything a statement holds and nothing derived from it: a field at its default is left out, an axis carries its
 window and a symbolic extent its hint. One statement is one line, a block's statements sit indented under its
 header, and expressions are in their own text:
