@@ -85,13 +85,15 @@ def test_the_wrapper_name_spells_n_dtype_and_form(n: int, ab_dtype: str, form: s
     acc = ", ".join(_frags(n))
     a, tnsp = ("aD", "<0, 0>") if form == "ss" else ("a", "<0>")
     assert _line(cell) == f"emmy_wgmma_m64n{n}k16_{ab_dtype}_f32_{form}{tnsp}({acc}, {a}, bD, 1);"
-    assert cell.pretty()[0] == f"WgmmaMma {{{acc}}} += {a} @ bD (m64n{n}k16 {ab_dtype} {form})"
+    operand = "a_desc=aD" if form == "ss" else "a_frag=a"
+    dtype = "" if ab_dtype == "f16" else f", ab_dtype={ab_dtype}"
+    assert str(cell) == f"WgmmaMma(c_frags=({acc}), b_desc=bD, shape=(64, {n}, 16){dtype}, {operand})"
 
 
 def test_the_transpose_bits_and_scale_d_reach_the_call() -> None:
     ss = _cell(64, "f16", "ss", scale_d=0, trans_a=1, trans_b=1)
     assert _line(ss).endswith("_f32_ss<1, 1>(c0, c1, c2, c3, c4, c5, c6, c7, aD, bD, 0);")
-    assert ss.pretty()[0].endswith("(m64n64k16 f16 ss scale_d=0 trans_a trans_b)")
+    assert str(ss).endswith("a_desc=aD, scale_d=0, trans_a=1, trans_b=1)")
     rs = _cell(64, "f16", "rs", trans_b=1)
     assert _line(rs).endswith("_f32_rs<1>(c0, c1, c2, c3, c4, c5, c6, c7, a, bD, 1);")
 
@@ -114,7 +116,7 @@ def test_fence_commit_wait_render_the_bare_instructions() -> None:
     assert _line(WgmmaWait(1)) == 'asm volatile("wgmma.wait_group.sync.aligned 1;\\n" ::: "memory");'
     for stmt in (WgmmaFence(), WgmmaCommit(), WgmmaWait()):
         assert stmt.deps() == () and stmt.defines() == ()
-    assert [s.pretty()[0] for s in (WgmmaFence(), WgmmaCommit(), WgmmaWait(2))] == ["WgmmaFence", "WgmmaCommit", "WgmmaWait(2)"]
+    assert [str(s) for s in (WgmmaFence(), WgmmaCommit(), WgmmaWait(2))] == ["WgmmaFence", "WgmmaCommit", "WgmmaWait(group=2)"]
 
 
 def test_the_cell_reads_its_operands_and_defines_its_accumulator() -> None:

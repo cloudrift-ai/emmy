@@ -250,7 +250,7 @@ def pretty(op, indent: str = "", *, tile=None) -> list[str]:
     if isinstance(op, Fold):
         return [f"{indent}{_head(op, ctx)}", *_branch(_items(op, ctx), indent)]
     if isinstance(op, Statement):
-        return list(op.pretty(indent))
+        return pretty_body(Body((op,)), indent)
     return [f"{indent}{op!r}"]
 
 
