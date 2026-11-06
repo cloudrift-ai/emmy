@@ -296,7 +296,9 @@ def test_straight_line_code_is_slower_after_cache_eviction():
         prog = CompiledProgram.build_from_plan(plan, {"scratch": torch.zeros(4, device="cuda")})
         evict = CacheEviction()
         with prog.on_torch_stream():
-            hot = statistics.median(prog.executor.time_launch(0, 1, 1000.0) for _ in range(30))
+            # The fastest of many launches is one that found its code cached. On a card another process shares, that
+            # process evicts the code too, and the median of the repeated launches drifts toward the evicted time.
+            hot = min(prog.executor.time_launch(0, 1, 1000.0) for _ in range(300))
             cold = []
             for _ in range(30):
                 evict()
