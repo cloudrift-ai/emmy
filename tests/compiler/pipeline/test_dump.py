@@ -211,3 +211,24 @@ def test_repro_keeps_constant_derived_boundaries(tmp_path):
     assert kinds["act"] == "InputOp", "input-derived feed must become a synthetic boundary"
     assert sub.inputs == ["act"]
     assert sub.outputs == ["p"]
+
+
+def test_every_stage_dump_of_a_kernel_lowering_reads_back(tmp_path):
+    """A stage dump stores each body as its text, Kernel IR included, and ``Graph.from_dict`` reads the file the dump
+    wrote: the kernel stage's body comes back equal to the one the lowering built."""
+    import json
+
+    from emmy.compiler.ir.kernel.ir import KernelOp
+    from emmy.compiler.pipeline import CUDA_PASSES
+    from tests.compiler.realization import helpers
+
+    case = helpers.load_case(helpers.CASES_DIR / "matmul/f16-mma-f16acc-tma.json")
+    with helpers.evidence_scope(case):
+        graph = Pipeline.build(CUDA_PASSES).run(case.program(), ctx=case.context(), db=None, dump=CompilerDump(dir=tmp_path))
+    built = {op.body for node in graph.nodes.values() for op in node.op.source_chain() if isinstance(op, KernelOp)}
+    assert built
+    dumps = sorted(tmp_path.rglob("*.json"))
+    read = [Graph.from_dict(data) for path in dumps if isinstance(data := json.loads(path.read_text()), dict) and "nodes" in data]
+    assert len(read) > 8
+    kernel_bodies = {node.op.body for loaded in read for node in loaded.nodes.values() if isinstance(node.op, KernelOp)}
+    assert kernel_bodies and kernel_bodies <= built  # the chain holds every pass's kernel body; the dump holds the stage's
