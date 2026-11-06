@@ -25,7 +25,7 @@ from emmy.compiler.dtype import F16, F32
 from emmy.compiler.graph import Graph, Tensor
 from emmy.compiler.ir.axis import Axis
 from emmy.compiler.ir.base import InputOp
-from emmy.compiler.ir.expr import Literal
+from emmy.compiler.ir.expression import Literal
 from emmy.compiler.ir.frontend.ir import LinearOp, SliceOp
 from emmy.compiler.ir.schedule import Placement, Raster, Reduce, Stage, Tile, Work, derive_inventory
 from emmy.compiler.ir.schedule.base import Schedule

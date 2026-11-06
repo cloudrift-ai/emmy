@@ -20,7 +20,7 @@ from emmy.compiler.dim import Dim
 from emmy.compiler.dtype import F16, F32, I32
 from emmy.compiler.ir.axis import Axis
 from emmy.compiler.ir.elementwise import ElementwiseImpl
-from emmy.compiler.ir.expr import Literal, Var
+from emmy.compiler.ir.expression import Literal, Var
 from emmy.compiler.ir.pure import Fold
 from emmy.compiler.ir.stmt import Accum, Assign, Body, Let, Load, Loop
 from emmy.compiler.ir.tile.ops import cone_stat_dtypes, edge_dtypes

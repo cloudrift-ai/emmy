@@ -13,7 +13,7 @@ import pytest
 from emmy.compiler.backend.numpy import NumpyBackend
 from emmy.compiler.graph import Graph, Tensor
 from emmy.compiler.ir.base import ConstantOp, InputOp
-from emmy.compiler.ir.expr import Literal, placeholder
+from emmy.compiler.ir.expression import Literal, placeholder
 from emmy.compiler.ir.frontend.ir import LinearOp, RmsNormOp
 from emmy.compiler.ir.loop import Accum, Affine, Assign, Load, LoopOp, Select, Write
 from emmy.compiler.ir.tensor.ir import ElementwiseOp, GatherOp, IndexMapOp, IndexSource, ReduceOp, ScanOp
@@ -769,7 +769,7 @@ def test_shared_const_broadcast_lowers_as_one_mimo_cuda_kernel():
 def _make_shared_transpose():
     """A transpose (general layout op) feeding two elementwise consumers —
     covers the non-constant pure-indexmap path."""
-    from emmy.compiler.ir.expr import placeholder
+    from emmy.compiler.ir.expression import placeholder
     from emmy.compiler.pipeline.passes.frontend.decomposition._helpers import single_indexmap
 
     g = Graph()
@@ -965,7 +965,7 @@ def test_output_reshape_folds_into_reduce_producer(rows):
     """
     from emmy.compiler.dim import Dim
     from emmy.compiler.ir.axis import Axis
-    from emmy.compiler.ir.expr import BinaryExpr, Literal, Var
+    from emmy.compiler.ir.expression import BinaryExpr, Literal, Var
     from emmy.compiler.ir.loop import Load, Loop
     from emmy.compiler.ir.stmt import Body
 
@@ -1083,7 +1083,7 @@ def _make_pending_product_into_exp_residual_add():
     gmem scratch per layer, 17 GB at S=4096 on the Qwen3 embed trunk)."""
     from emmy.compiler.dim import Dim
     from emmy.compiler.ir.axis import Axis
-    from emmy.compiler.ir.expr import Var
+    from emmy.compiler.ir.expression import Var
     from emmy.compiler.ir.loop import Load, Loop
     from emmy.compiler.ir.stmt import Body
 
@@ -1175,7 +1175,7 @@ def test_product_reduction_fuses_before_upstream_activation():
     """An activation feeding a decomposed contraction must not strand its M×K×N product."""
     from emmy.compiler.dim import Dim
     from emmy.compiler.ir.axis import Axis
-    from emmy.compiler.ir.expr import Var
+    from emmy.compiler.ir.expression import Var
     from emmy.compiler.ir.loop import Load, Loop
     from emmy.compiler.ir.stmt import Body
 

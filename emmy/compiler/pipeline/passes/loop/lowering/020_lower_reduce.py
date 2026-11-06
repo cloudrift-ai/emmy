@@ -11,7 +11,7 @@ from __future__ import annotations
 from emmy.compiler.graph import Graph, Node, Tensor
 from emmy.compiler.ir.base import InputOp
 from emmy.compiler.ir.elementwise import ElementwiseImpl, reduce_canon
-from emmy.compiler.ir.expr import Expr, Literal, Var
+from emmy.compiler.ir.expression import Expression, Literal, Var
 from emmy.compiler.ir.loop import Accum, Axis, Load, Loop, LoopOp, Write
 from emmy.compiler.ir.stmt import Body
 from emmy.compiler.ir.tensor.ir import ReduceOp
@@ -85,7 +85,7 @@ def rewrite(match: Match, root: Node) -> Graph | None:
     return frag
 
 
-def _build_write_index(axes: tuple[Axis, ...], reduce_axis_name: str, out_shape: tuple) -> tuple[Expr, ...]:
+def _build_write_index(axes: tuple[Axis, ...], reduce_axis_name: str, out_shape: tuple) -> tuple[Expression, ...]:
     """Build the Write's index for a reduce kernel under the keepdim invariant.
 
     Tensor IR's rank-preservation rule (enforced by the tracer and every
@@ -98,7 +98,7 @@ def _build_write_index(axes: tuple[Axis, ...], reduce_axis_name: str, out_shape:
             f"lower_reduce: out_shape rank {len(out_shape)} must equal axes count {len(axes)} "
             f"(keepdim invariant — wrap in a squeeze IndexMapOp if a dropped shape is needed)"
         )
-    result: list[Expr] = []
+    result: list[Expression] = []
     for a, d in zip(axes, out_shape, strict=True):
         if a.name == reduce_axis_name or (d.is_static and d.as_static() == 1):
             result.append(Literal(0, "int"))

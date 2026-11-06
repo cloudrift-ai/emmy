@@ -18,7 +18,7 @@ from __future__ import annotations
 
 import pytest
 
-from emmy.compiler.ir.expr import BinaryExpr, Interval, Literal, SimplifyCtx, Var
+from emmy.compiler.ir.expression import BinaryExpr, Interval, Literal, SimplifyCtx, Var
 
 K, N, BLOCK = 4096, 12288, 16  # reduce extent, row extent, NVFP4 scale block
 

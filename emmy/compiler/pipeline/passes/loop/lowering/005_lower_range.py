@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from emmy.compiler.dtype import get as get_dtype
 from emmy.compiler.graph import Graph, Node, Tensor
-from emmy.compiler.ir.expr import Var
+from emmy.compiler.ir.expression import Var
 from emmy.compiler.ir.loop import Axis, Loop, LoopOp, Write
 from emmy.compiler.ir.stmt import Body, Let
 from emmy.compiler.ir.tensor.ir import RangeOp

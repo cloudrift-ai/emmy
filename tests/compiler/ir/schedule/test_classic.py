@@ -13,7 +13,7 @@ from emmy.compiler.graph import Graph, Tensor
 from emmy.compiler.ir.atom import ATOM_REGISTRY
 from emmy.compiler.ir.axis import Axis
 from emmy.compiler.ir.base import InputOp
-from emmy.compiler.ir.expr import Var
+from emmy.compiler.ir.expression import Var
 from emmy.compiler.ir.pure import Fold
 from emmy.compiler.ir.schedule import (
     PlacedTile,

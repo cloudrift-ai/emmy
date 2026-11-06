@@ -13,7 +13,7 @@ import numpy as np
 
 from emmy.compiler.graph import Graph, Tensor
 from emmy.compiler.ir.base import ConstantOp
-from emmy.compiler.ir.expr import BinaryExpr, Literal, TernaryExpr, placeholder
+from emmy.compiler.ir.expression import BinaryExpr, Literal, TernaryExpr, placeholder
 from emmy.compiler.ir.frontend.ir import MatmulOp, ReshapeOp, SliceOp, TransposeOp
 from emmy.compiler.ir.tensor.ir import (
     BitcastOp,

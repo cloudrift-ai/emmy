@@ -10,7 +10,7 @@ from emmy.compiler.dim import Dim
 from emmy.compiler.dtype import F32
 from emmy.compiler.graph import Graph, Tensor
 from emmy.compiler.ir.base import InputOp
-from emmy.compiler.ir.expr import Literal
+from emmy.compiler.ir.expression import Literal
 from emmy.compiler.ir.kernel import KernelOp
 from emmy.compiler.ir.stmt import Body, Write, ZeroPrologue
 from emmy.compiler.pipeline import Match, Rule, RuleSkipped

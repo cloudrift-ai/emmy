@@ -30,7 +30,7 @@ if TYPE_CHECKING:
     from collections.abc import Iterator
 
     from emmy.compiler.graph import Graph, Node
-    from emmy.compiler.ir.expr import Expr
+    from emmy.compiler.ir.expression import Expression
     from emmy.compiler.tensor import Tensor
 
 
@@ -288,9 +288,9 @@ class ConstantOp(Op):
 
     - ``value`` — a **static** scalar fixed at trace/compile time (eps, scale, a folded dim).
     - ``context_value`` — a **runtime** scalar bound at launch from the context (the
-      ``sym_values`` symbolic-dim env) via an :class:`~emmy.compiler.ir.expr.Expr` over
+      ``sym_values`` symbolic-dim env) via an :class:`~emmy.compiler.ir.expression.Expression` over
       symbolic-dim names; e.g. a dynamic mean's divisor = the runtime reduce-axis size
-      (``Var("seq_len")``). The backend fills the buffer with ``float(expr.eval(sym_values))``
+      (``Var("seq_len")``). The backend fills the buffer with ``float(expression.eval(sym_values))``
       per run.
     - **neither** — an **executor-supplied** tensor (weights / RoPE tables loaded from
       safetensors, or fed as ``input_data``).
@@ -303,7 +303,7 @@ class ConstantOp(Op):
 
     name: str
     value: float | int | bool | None = None  # a STATIC scalar (None ⇒ not a static constant)
-    context_value: Expr | None = None  # a RUNTIME scalar bound from context (sym_values); see class doc
+    context_value: Expression | None = None  # a RUNTIME scalar bound from context (sym_values); see class doc
     load_ops: tuple[Op, ...] = ()
     source_path: str | None = None
     source_parts: tuple[tuple[str, tuple[int, ...]], ...] = ()  # axis-0 concat of (path, shape) parts; see class doc

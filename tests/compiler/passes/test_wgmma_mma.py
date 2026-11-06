@@ -23,7 +23,7 @@ from emmy.compiler.ir.atom import ATOM_REGISTRY, atoms_for, wide_accumulate
 from emmy.compiler.ir.axis import Axis
 from emmy.compiler.ir.base import InputOp
 from emmy.compiler.ir.elementwise import ElementwiseImpl
-from emmy.compiler.ir.expr import Literal, Var
+from emmy.compiler.ir.expression import Literal, Var
 from emmy.compiler.ir.frontend.ir import MatmulOp
 from emmy.compiler.ir.kernel.ir import Smem, TmaDescriptor, WgmmaDescriptor
 from emmy.compiler.ir.schedule import Stage, Tile, Work
@@ -213,8 +213,8 @@ def _lit(n: int) -> Literal:
     return Literal(n, "int")
 
 
-def _at(expr, **env: int) -> int:
-    return expr.eval(dict(env))
+def _at(expression, **env: int) -> int:
+    return expression.eval(dict(env))
 
 
 def _atom_major_operands():

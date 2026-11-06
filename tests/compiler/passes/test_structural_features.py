@@ -18,7 +18,7 @@ from emmy.compiler.graph import Graph
 from emmy.compiler.ir.axis import Axis
 from emmy.compiler.ir.base import InputOp
 from emmy.compiler.ir.elementwise import ElementwiseImpl
-from emmy.compiler.ir.expr import Var
+from emmy.compiler.ir.expression import Var
 from emmy.compiler.ir.loop import LoopOp
 from emmy.compiler.ir.stmt import Accum, Assign, Body, Load, Loop, Write
 from emmy.compiler.pipeline.search.features import STRUCT_PREFIX, stamps, structure_features

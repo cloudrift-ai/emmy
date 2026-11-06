@@ -25,7 +25,7 @@ from dataclasses import replace
 
 from emmy.compiler.dim import Dim
 from emmy.compiler.graph import Node
-from emmy.compiler.ir.expr import BinaryExpr, Literal, Var
+from emmy.compiler.ir.expression import BinaryExpr, Literal, Var
 from emmy.compiler.ir.kernel import KernelOp
 from emmy.compiler.ir.kernel.ir import ELEM_COL, ELEM_ROW, FRAG_COL, FRAG_ROW
 from emmy.compiler.ir.pure.fold import EXTENTS
@@ -129,7 +129,7 @@ def _unbound_names(tile: TileOp, root: Node, body: Body) -> set[str]:
     serial = (axis.name for axis in tile.place.serial)
     bound = {*root.inputs, *root.buffer_names(), *_RENDERED_HELPERS, *serial, *tile.extents, *EXTENTS.get()}
     for axis in (*tile.axes, *tile.place.free):
-        bound |= set(axis.extent_expr().free_vars())
+        bound |= set(axis.extent_expression().free_vars())
     return set().union(*(free_names(stmt) for stmt in body)) - bound
 
 

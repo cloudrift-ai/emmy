@@ -41,7 +41,7 @@ from emmy.compiler.ir.address import clamp_to, gmem_axis_step
 from emmy.compiler.ir.axis import Axis, Window
 from emmy.compiler.ir.base import InputOp
 from emmy.compiler.ir.elementwise import ElementwiseImpl
-from emmy.compiler.ir.expr import BinaryExpr, Literal, Var
+from emmy.compiler.ir.expression import BinaryExpr, Literal, Var
 from emmy.compiler.ir.loop import LoopOp
 from emmy.compiler.ir.pure import Lambda
 from emmy.compiler.ir.pure.fold import Fold
@@ -49,7 +49,7 @@ from emmy.compiler.ir.pure.twist import Twist
 from emmy.compiler.ir.schedule import Reduce, Work
 from emmy.compiler.ir.schedule.catalog import splitk_moves
 from emmy.compiler.ir.sigma import Sigma
-from emmy.compiler.ir.stmt import Accum, Affine, Assign, Body, Carry, Let, Load, Loop, Pre, Select, SelectBranch, Stmt, Write
+from emmy.compiler.ir.stmt import Accum, Affine, Assign, Body, Carry, Let, Load, Loop, Pre, Select, SelectBranch, Statement, Write
 from emmy.compiler.ir.tile import OutputSpec, Placement, TileOp
 from emmy.compiler.ir.tile.ops import Sched, carries_partition, head, projection_regions, projection_root, projection_tail
 from emmy.compiler.pipeline import Match
@@ -97,13 +97,13 @@ def _slice_length(k_axis: Axis, width: int):
     """The positions one partition's slice of the stream spans: ``K/w``, or ``⌈K/w⌉`` of a symbolic stream."""
     if k_axis.extent.is_static:
         return Literal(k_axis.extent.as_static() // width, "int")
-    return BinaryExpr("/", BinaryExpr("+", k_axis.extent.expr, Literal(width - 1, "int")), Literal(width, "int"))
+    return BinaryExpr("/", BinaryExpr("+", k_axis.extent.expression, Literal(width - 1, "int")), Literal(width, "int"))
 
 
 def _clamped(k_axis: Axis, position):
     """``position`` as the stream's loads read it: a symbolic stream's overhanging slice reads its last position
     (:func:`~emmy.compiler.ir.address.clamp_to`, which the gmem-direct fragment loaders read back)."""
-    return position if k_axis.extent.is_static else clamp_to(position, k_axis.extent.expr)
+    return position if k_axis.extent.is_static else clamp_to(position, k_axis.extent.expression)
 
 
 def _masked(fold: Fold, k_axis: Axis, position) -> Fold:
@@ -114,8 +114,8 @@ def _masked(fold: Fold, k_axis: Axis, position) -> Fold:
     state the combine then scales away."""
     if k_axis.extent.is_static:
         return fold
-    end = k_axis.extent.expr
-    stmts: list[Stmt] = []
+    end = k_axis.extent.expression
+    stmts: list[Statement] = []
     if fold.twist is None:
         inside = BinaryExpr("<", position, end)
         results = []
@@ -492,8 +492,8 @@ def realize_carry_split(match: Match, root: Node, cta: int) -> Graph:
     last = Literal(steps - 1, "int")
     carried = f"{state}__across"
 
-    def at(position: int | None, expr) -> tuple:
-        return tuple(expr if index == position else coordinate for index, coordinate in enumerate(own))
+    def at(position: int | None, expression) -> tuple:
+        return tuple(expression if index == position else coordinate for index, coordinate in enumerate(own))
 
     def applied(along) -> tuple:
         # ``A_p`` at this cell's row and column ``along`` times the state at column ``along``.

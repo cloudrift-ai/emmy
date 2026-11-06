@@ -32,7 +32,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from emmy.compiler.ir.pure.lam import Lambda
-from emmy.compiler.ir.stmt import Affine, Assign, Body, Let, Stmt
+from emmy.compiler.ir.stmt import Affine, Assign, Body, Let, Statement
 
 
 @dataclass(frozen=True)
@@ -96,7 +96,7 @@ class Twist:
         channel's ``injection`` states, so lowering reads it instead of computing it.
         """
         spelled = dict(zip(self.recipe.lift.params, roles, strict=False))  # a role the term never bound stays absent
-        body: list[Stmt] = []
+        body: list[Statement] = []
         results = [roles[0]]
         for state, index in zip(states[1:], self.channels, strict=True):
             injection = self.recipe.channels[index].injection
@@ -169,7 +169,7 @@ class Recipe:
         return Lambda(params=states + other, body=Body(body), results=states)
 
 
-def _lam(params: tuple[str, ...], body: tuple[Stmt, ...], *results: str) -> Lambda:
+def _lam(params: tuple[str, ...], body: tuple[Statement, ...], *results: str) -> Lambda:
     return Lambda(params=params, body=Body(body), results=results)
 
 

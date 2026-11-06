@@ -7,10 +7,10 @@ from dataclasses import dataclass, replace
 from functools import cached_property
 
 from emmy.compiler.ir.axis import Axis
-from emmy.compiler.ir.expr import Expr
-from emmy.compiler.ir.stmt.base import Stmt
+from emmy.compiler.ir.expression import Expression
+from emmy.compiler.ir.stmt.base import Statement
 from emmy.compiler.ir.stmt.body import Body
-from emmy.compiler.ir.stmt.declared import kind, role
+from emmy.compiler.ir.stmt.declared import role, statement
 from emmy.utils import cached_method
 
 
@@ -52,8 +52,8 @@ class Subroutine:
         return tuple(axis.name for axis in self.axes)
 
 
-@kind
-class Call(Stmt):
+@statement
+class Call(Statement):
     """A fusion-only scalar call; its definition stays outside generic statement-tree walks.
 
     Fusion expands its calls before a LoopOp is built. They are not members of Tile IR lambdas, and a body that
@@ -62,7 +62,7 @@ class Call(Stmt):
 
     name: str = role("defines")
     target: Subroutine
-    args: tuple[Expr, ...] = role("expr", "reads")
+    args: tuple[Expression, ...] = role("expression", "reads")
 
     deps_deep = True
 
@@ -73,6 +73,6 @@ class Call(Stmt):
     def external_reads(self) -> tuple[str, ...]:
         return self.target.buffers
 
-    def rename_buffers(self, rename):  # noqa: ANN001 — see Stmt.rename_buffers
+    def rename_buffers(self, rename):  # noqa: ANN001 — see Statement.rename_buffers
         buffers = tuple(rename.get(name, name) for name in self.target.buffers)
         return self if buffers == self.target.buffers else self.replace(target=self.target.with_buffers(buffers))

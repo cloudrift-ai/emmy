@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from emmy.compiler.graph import Graph, Tensor
 from emmy.compiler.ir.base import ConstantOp, InputOp
-from emmy.compiler.ir.expr import placeholder
+from emmy.compiler.ir.expression import placeholder
 from emmy.compiler.ir.frontend.ir import RmsNormOp
 from emmy.compiler.ir.tensor.ir import ElementwiseOp, IndexMapOp, IndexSource, ReduceOp
 from emmy.compiler.pipeline import TILE_PASSES, Pipeline

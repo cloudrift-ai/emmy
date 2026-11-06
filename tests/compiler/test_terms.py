@@ -5,7 +5,7 @@ from __future__ import annotations
 
 from emmy.compiler.ir.axis import Axis
 from emmy.compiler.ir.elementwise import ElementwiseImpl
-from emmy.compiler.ir.expr import BinaryExpr, CastExpr, Literal, Var
+from emmy.compiler.ir.expression import BinaryExpr, CastExpr, Literal, Var
 from emmy.compiler.ir.stmt import Accum, Assign, Body, Load, Loop
 from emmy.compiler.pipeline.passes.tile._fromloop import fold_from_loop, scan_from_loop
 from tests.compiler.terms import contraction, projection, slab

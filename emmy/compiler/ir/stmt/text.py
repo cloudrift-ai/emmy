@@ -40,8 +40,8 @@ A subroutine a call names is defined once, ahead of the statements: ``sub name(<
 Subroutines compare by object, so what reading a text back keeps is which calls share one, not the object.
 
 An axis is ``name in 0..extent``; a symbolic extent's hint follows it as ``seq~128`` when it is not the default, and a
-window as ``window(parent=<axis>, base=<expr>, bound=<expr>, partition=true)``, each part only when set. Expressions
-are in their own text (:mod:`emmy.compiler.ir.expr`), and a name that is no identifier or that reads as a keyword is
+window as ``window(parent=<axis>, base=<expression>, bound=<expression>, partition=true)``, each part only when set. Expressions
+are in their own text (:mod:`emmy.compiler.ir.expression`), and a name that is no identifier or that reads as a keyword is
 written between backticks. A statement kind of another layer prints through its own ``pretty`` and has no reader yet.
 """
 
@@ -53,8 +53,8 @@ from emmy.compiler.dim import Dim
 from emmy.compiler.dtype import DataType
 from emmy.compiler.dtype import get as dtype_of
 from emmy.compiler.ir.axis import Axis, Window
-from emmy.compiler.ir.expr import Expr, Literal, Parser, spell_name
-from emmy.compiler.ir.stmt.base import Stmt
+from emmy.compiler.ir.expression import Expression, Literal, Parser, spell_name
+from emmy.compiler.ir.stmt.base import Statement
 from emmy.compiler.ir.stmt.blocks import Cond, Loop, StridedLoop
 from emmy.compiler.ir.stmt.body import Body
 from emmy.compiler.ir.stmt.leaves import Accum, Affine, Assign, Carry, Init, Let, Load, Pre, Select, SelectBranch, Write, ZeroPrologue
@@ -85,13 +85,13 @@ def _typed(dtype: DataType | None) -> str:
     return f"{dtype.name} " if dtype is not None else ""
 
 
-def _index(index: tuple[Expr, ...]) -> str:
+def _index(index: tuple[Expression, ...]) -> str:
     return f"[{', '.join(str(e) for e in index)}]"
 
 
 def _axis(axis: Axis, start: str = "0") -> str:
-    extent = str(axis.extent.expr)
-    if axis.extent.hint != Dim(axis.extent.expr).hint:
+    extent = str(axis.extent.expression)
+    if axis.extent.hint != Dim(axis.extent.expression).hint:
         extent += f"~{axis.extent.hint}"
     return f"{_name(axis.name)} in {start}..{extent}"
 
@@ -120,7 +120,7 @@ def _affine(stmt: Affine) -> str:
     return ("-" if head[0] < 0 else "") + head[1] + "".join(f" {'-' if c < 0 else '+'} {term}" for c, term in rest)
 
 
-def lines(stmt: Stmt, indent: str = "") -> list[str]:
+def lines(stmt: Statement, indent: str = "") -> list[str]:
     """``stmt``'s text as lines, each starting with ``indent``."""
     inner = indent + INDENT
     match stmt:
@@ -171,7 +171,7 @@ def lines(stmt: Stmt, indent: str = "") -> list[str]:
     return [indent + text]
 
 
-def pretty_body(body: Iterable[Stmt], indent: str = "") -> list[str]:
+def pretty_body(body: Iterable[Statement], indent: str = "") -> list[str]:
     """The lines of a body's text, each starting with ``indent``."""
     return [line for stmt in body for line in lines(stmt, indent)]
 
@@ -217,7 +217,7 @@ def _under(rows: list, depth: int) -> tuple[list, list]:
 def _block(rows: list, subs: dict[str, Subroutine]) -> Body:
     """The statements ``rows`` spell: each row at the first one's depth, with the deeper rows after it under it. A
     subroutine a row defines joins ``subs``, which the calls after it name."""
-    out: list[Stmt] = []
+    out: list[Statement] = []
     depth = rows[0][0] if rows else 0
     while rows:
         (indent, number, text), rows = rows[0], rows[1:]
@@ -293,10 +293,10 @@ class _Line(Parser):
         return stmt
 
     def dim(self) -> Dim:
-        expr = self.expression()
-        return Dim(expr, hint=int(self.value())) if self.accept("~") else Dim(expr)
+        expression = self.expression()
+        return Dim(expression, hint=int(self.value())) if self.accept("~") else Dim(expression)
 
-    def axis(self) -> tuple[str, Expr, Dim]:
+    def axis(self) -> tuple[str, Expression, Dim]:
         """``name in start..extent``."""
         name = self.name()
         if not self.word("in"):
@@ -347,7 +347,7 @@ class _Line(Parser):
                 raise self.error(f"no window part {key!r}")
         return Window(**parts)
 
-    def statement(self, under: list, orelse: list, subs: dict[str, Subroutine]) -> Stmt:
+    def statement(self, under: list, orelse: list, subs: dict[str, Subroutine]) -> Statement:
         """The statement this line spells, ``under`` the rows of its block (``orelse`` those of an ``else``); a call
         names one of ``subs``."""
         if self.tokens[-1][:2] != ("op", ":") and under:
@@ -435,7 +435,7 @@ class _Line(Parser):
             return dtype_of(first[1]), self.name()
         return None, self.name()
 
-    def store(self, dtype: DataType | None, name: str, index: tuple[Expr, ...]) -> Stmt:
+    def store(self, dtype: DataType | None, name: str, index: tuple[Expression, ...]) -> Statement:
         """What follows ``name[index]``: a carried state's next value, or a write."""
         if self.accept("<-"):
             value = self.name()
@@ -468,7 +468,7 @@ class _Line(Parser):
                 break
         return Affine(name, tuple(args), tuple(coefficients), offset, dtype)
 
-    def loop(self, body: Body) -> Stmt:
+    def loop(self, body: Body) -> Statement:
         name, start, extent = self.axis()
         step = self.expression() if self.word("step") else None
         end = self.expression() if self.word("until") else None

@@ -7,7 +7,7 @@ import numpy as np
 from emmy.compiler.graph import Graph, Tensor
 from emmy.compiler.ir.base import ConstantOp
 from emmy.compiler.ir.elementwise import ElementwiseImpl
-from emmy.compiler.ir.expr import Literal
+from emmy.compiler.ir.expression import Literal
 from emmy.compiler.ir.tensor.ir import ElementwiseOp, IndexMapOp, IndexSource
 from emmy.compiler.loader.binder import evaluate_source_graph
 

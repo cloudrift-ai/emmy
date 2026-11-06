@@ -26,7 +26,7 @@ scope, and — for a carrier — a seed the enclosing scope has to declare. A **
 α-renaming, and has no position at all. `Lambda`, the `Fold` term and the twist recipes (`ir/pure/twist.py` — a
 twisted monoid as data, which `Fold.fuse` fuses a reduce and the reduce it reads into) all live on the term side.
 
-**A pure class is never a `Stmt` subclass and never occupies a statement position.** When a term
+**A pure class is never a `Statement` subclass and never occupies a statement position.** When a term
 has to reach the instruction stream it is RENDERED into statements at the point of use — never
 spliced in as one. `Fold.merge(other)` is the shape of that: the cross-partition state⊕state
 combine IS the fold's stored `combine` applied with its second operand naming the partial being
@@ -66,7 +66,7 @@ member, and the existing tables are to be converted to one.
 
 **Tile IR stores terms, not statements.** `TileOp` holds the `Fold` term; the typed classic
 schedule, materialization, output specifications, and knobs belong to `TileOp`, not the term. So `Fold` lives in
-`ir/pure/fold.py` and is not a `Stmt`.
+`ir/pure/fold.py` and is not a `Statement`.
 
 **Lambda construction binds every read and orders definitions before uses.** Both checks use the scope-aware
 `free_names` analysis, including coordinates in predicates and indices. `Lambda.closing` appends unbound reads as
@@ -128,7 +128,7 @@ The literal reference enumerator remains the oracle. Bounded-product checks and 
 traversal order to produce the same complete set; the lowering implementation must satisfy that product contract.
 
 A composed step — flash's `Σ Q·K` ahead of its `Σ_j P·V`, split-K's sliced contraction — used to be
-the argument for `Stmt`-hood: it has to appear at a POSITION in the emitted step stream. It does not
+the argument for `Statement`-hood: it has to appear at a POSITION in the emitted step stream. It does not
 need to be a statement to get there. The tree already carries it: a composed node is an entry in
 `operands`, and its position is produced by the derivation — `Fold.lower` places every term of the
 tree at the shallowest scope binding its free coordinates, operands ahead of the term that reads
@@ -136,7 +136,7 @@ them. A loop-invariant scale `Load` ahead of attention's score contraction is th
 a special case: it reads no coordinate the reduce loop binds, so it lands ahead of the loop even
 though the cone that reads it rides inside. The only place terms become statements is `Fold.lower()`.
 
-`Fold` does keep a small structural protocol whose names it shares with `Stmt` — `nested()` for its
+`Fold` does keep a small structural protocol whose names it shares with `Statement` — `nested()` for its
 children, `rewrite()` for α-renaming, and `defines()` for its result names.
 These are term operations spelled the same way so one canonicalizer and one deep walk serve both
 vocabularies; they are not statement behaviour, and no render function is registered for `Fold`. Impure
@@ -249,22 +249,22 @@ kinds are declared (below), and a layer adds a kind of its own by declaring it, 
 | --- | --- |
 | Traits | `pure`, `deps_deep`, `has_side_effects` |
 | Reads and writes | `deps`, `defines`, `external_reads`, `external_writes`, `local_decls`, `bound_axes`, `binds_axes` |
-| Structure | `nested` with `with_bodies`; `exprs` with `map_exprs` |
+| Structure | `nested` with `with_bodies`; `expressions` with `map_expressions` |
 | Rebuilding | `_rewrite` (behind `rewrite`, `rename` and `substitute`), `rename_buffers`, `replace` |
 | Display and storage | the text (a kind of another layer: `pretty`); a body's text is its wire form |
 
-Each reading member has a rebuilding half: `with_bodies` takes what `nested` returned, and `map_exprs` applies a
-function to each expression `exprs` lists, in that order. `bound_axes` are the axes a kind binds and `binds_axes`
+Each reading member has a rebuilding half: `with_bodies` takes what `nested` returned, and `map_expressions` applies a
+function to each expression `expressions` lists, in that order. `bound_axes` are the axes a kind binds and `binds_axes`
 the names it brings into scope, which are those axes' names and any other name it hoists. `rewrite` is the one
 entry for renaming and substitution; it drops the substitutions a statement's own binder shadows and hands the rest
 to the kind's `_rewrite`. `tests/compiler/ir/stmt/test_protocol.py` checks that every kind in every layer states the
 protocol, and the rebuilding halves on an example of each shared kind and each Kernel IR kind.
 
-**A declared kind** is a statement kind stated as data: a class under the `@kind` decorator whose fields carry a type
-and, through `role(...)`, what the field is to the rest of the compiler. The roles are names the statement defines,
+**A declared kind** is a statement kind stated as data: a class under the `@statement` decorator whose fields carry a
+type and, through `role(...)`, what the field is to the rest of the compiler. The roles are names the statement defines,
 reads, updates in place or binds for its own use; buffers it reads, writes or declares kernel-local; expressions;
 axes it binds and names that follow them; a child body; statements it carries; the body of a pure term; and records
-whose own fields play roles. A field with no role is plain data. `@kind` makes the class a frozen dataclass and
+whose own fields play roles. A field with no role is plain data. `@statement` makes the class a frozen dataclass and
 writes every protocol member from the roles once, when the class is defined, so a declared kind writes none: what
 it reads is its `reads` and `updates` fields, a rename maps every name field and every expression, a buffer rename
 maps the buffer fields, and so on. Two roles hold statements that are not a child body. Carried statements (`stmts`: the cells a `RegStore` stores with it, the
@@ -336,24 +336,24 @@ them.
 | `ConstantOp`    | Sentinel: weights / scalar constants. Scalars carry `value`; tensors carry `source_path` / `source_shape` / `source_dtype` (the safetensors / `nn.Module` address) plus `load_ops` — a chain of frontend ops applied at bind time by the loader. `source_parts` is the multi-source alternative: `(path, shape)` pairs the loader reads and concatenates along axis 0 before running the chain. `source_graph` is the N-source bind record (`032_fold_constant_subgraphs`' collapsed static cone): a mini-graph whose external leaves name source paths and whose scalar leaves carry values — the loader binds/evaluates it through the NumPy backend, then runs the chain. Exactly one of `source_path` / `source_parts` / `source_graph` is set on a loadable constant. |
 | `_keepdim_axis` | Shape helper shared by `ReduceOp` (tensor) and `MeanOp` (frontend).            |
 
-## `expr.py`
+## `expression.py`
 
 Shared expression sublanguage used by every IR layer: `Load.index`,
 `Write.index`, `SelectBranch.select`, `IndexMapOp.coord_map`,
 `StridedLoop.start`/`step`, `Cond.cond`, etc. Imports nothing from
 other IR files.
 
-An expression has one text, `str(expr)`, and `parse` reads it back to an equal expression: C-like, parenthesized only
-where precedence needs it (`a5 / 128 * 128 + a6`). The same text is the expression on the wire, in every listing and
-in every error message, so there is no second printer to keep in agreement. A name that is no identifier, or that the
-reader would take for something else (`true`, a GPU built-in), is written between backticks. Text that holds
+An expression has one text, `str(expression)`, and `parse` reads it back to an equal expression: C-like, parenthesized
+only where precedence needs it (`a5 / 128 * 128 + a6`). The same text is the expression on the wire, in every listing
+and in every error message, so there is no second printer to keep in agreement. A name that is no identifier, or that
+the reader would take for something else (`true`, a GPU built-in), is written between backticks. Text that holds
 expressions among other things is read by a subclass of `Parser`, which takes each expression where it stands.
 
 | Symbol                                                                       | Role                                                                     |
 |------------------------------------------------------------------------------|--------------------------------------------------------------------------|
 | `Var`, `Literal`, `BinaryExpr`, `Builtin`, `FuncCallExpr`, `TernaryExpr`, `CastExpr`, `FlatIndex` | Expression nodes. Each has `eval(env) → value/ndarray`, `substitute(mapping)`, `free_vars()`, plus the generic tree walks `subterms()` / `rebuild(fn)`. `FlatIndex` is a buffer coordinate's row-major offset, flattened against the buffer's shape at render time; it only appears in a kernel body. |
 | `_ExprOps`                                                                   | Mixin: Python operator overloading for expression building; default `NotImplementedError` for `pretty`/`substitute`/`free_vars`. |
-| `Expr`                                                                       | Union type alias.                                                        |
+| `Expression`                                                                       | Union type alias.                                                        |
 | `PLACEHOLDER_PREFIX`, `placeholder`, `is_placeholder`                        | Convention for output-coord placeholders in coord maps.                  |
 
 ## `frontend/ir.py`
@@ -389,7 +389,7 @@ it replaces the frontend layout ops via `coord_map` expressions.
 | `ReduceOp`                           | Collapse one axis via associative binary op.                   |
 | `ScanOp`                             | Cumulative variant of reduce.                                  |
 | `GatherOp`, `ScatterOp`              | Data-dependent reads / writes.                                 |
-| `IndexMapOp` + `IndexSource`         | Unified layout-only op over `Expr`.                            |
+| `IndexMapOp` + `IndexSource`         | Unified layout-only op over `Expression`.                            |
 
 `RangeOp`, `CastOp`, and `BitcastOp` are generic value operations, not checkpoint-format operations. Their current
 consumer is static reconstruction algebra, so `032_fold_constant_subgraphs` removes them before Loop lifting. A
@@ -408,7 +408,7 @@ atom-cell matchers ask round them out: `reduce_canon` (alias →
 base combine, `sum` → `add` …) and the `_REDUCE_SPELLING` registry
 (`reduce_spelling`) — the single op-keyed table
 behind the four sites that used to switch on the reduce op name (`Accum`'s render's
-`+=` / `*=` / `fmax` / `fmin`, `kernel/ir._binary_combine_expr`, and
+`+=` / `*=` / `fmax` / `fmin`, `kernel/ir._binary_combine_expression`, and
 `ReduceOp.forward` / `ScanOp.forward`'s numpy reductions). `op.selecting` (the
 max/min family) drives the init-placement dtype choice. `op.decodes` names the storage
 dtype an op is the decode cast for (the f8 family today) — the trait the tile binding
@@ -421,7 +421,7 @@ the current example. Its condition and both value operands are explicitly broadc
 One `LoopOp` = one GPU kernel described as an SSA program over named
 iteration axes. Free vs reduce is inferred from body structure — a
 `Loop` is a reduce Loop iff its body holds a carrier, an `Accum`. `is_reduce` (and axis threading
-and the other carrier-agnostic checks) test exactly that — the carrier is a plain `Stmt` with the
+and the other carrier-agnostic checks) test exactly that — the carrier is a plain `Statement` with the
 reduce-surface methods, no shared base class. `Accum` exposes `associative` / `commutative` /
 `has_identity` traits, forwarded to its scalar `op`. A reduce `Loop` carries no annotation — it
 folds iff its body carries an `Accum` — and NO algebra payload (the fold's ⊕ lives on the `Fold` node's
@@ -485,28 +485,26 @@ there is no type to dispatch on and no second place for a fact to live.
   only boundary output writes consume. Its schedule preserves every prefix: a serial fold, or a cooperative warp
   prefix scan at a root without a provider chain. Register partials and cross-CTA splits remain unavailable.
 
-`Fold.lower(bound, stores)` flattens the term to the loop nest: a plain loop for every free coordinate the caller
-left unbound, outermost the one the most terms share, the reduce loop of each term innermost, every term placed at
-the shallowest scope binding its free coordinates, and each boundary store right after the term defining its value.
-A value of the tree a term or a store reads by name, such as the expert a gathered row belongs to, counts as the
-coordinates of the term that defines it, since no loop binds a value.
-A term's coordinates there are those its own step reads, directly or through the operands it reads: an operand it only
-carries to a store — a multi-output root's per-page and per-slot results beside a count — takes its own loop beside
-the others, never one nested in another's. Loops carry NO algebra and no annotation, so the derived nest depends
-only on what is stored, which is what makes every identity of the term a digest of its lowered body — there is no
-separate term hasher.
-The `TileOp`'s body identity is the canonical digest of the nest `lower()` derives (the body is the
-term's normal form); the variant key (`identity_key(with_io=True, with_knobs=True)`) folds the schedule-free body
-identity with the knobs; and the deploy join key (the deploy identity (`identity_key(with_io=True)`), over
-`TileOp.loop_body`) types the roles the body reads its buffers through, so term re-spellings and cluster-sibling ops
-that lower alike share schedule evidence.
-`Fold.deps()` exposes names captured outside the lift params, including captures reached recursively through operand
-edges. A contraction deliberately hides its pure lift body from generic nested-body walks, so this direct dependency
-surface is what keeps an operand's captured statistic ordered before the contraction that reads it. A read walk
-STOPS at this rollup — the **`Stmt.deps_deep` trait** (a `Stmt`-protocol member beside `pure`, conservative `False`
-default; `Fold` opts in) tells `_member_reads` that `deps()` already answers for the whole subtree, scope-correctly.
-Re-walking the lift's flat namespace cannot see its params, so an operand-supplied name read inside the lift leaked
-out of every enclosing lambda as a phantom capture: an operand-supplied name is not an enclosing capture.
+`Fold.lower(bound, stores)` flattens the term to the loop nest: a plain loop for every free coordinate the caller left
+unbound, outermost the one the most terms share, the reduce loop of each term innermost, every term placed at the
+shallowest scope binding its free coordinates, and each boundary store right after the term defining its value. A value
+of the tree a term or a store reads by name, such as the expert a gathered row belongs to, counts as the coordinates of
+the term that defines it, since no loop binds a value. A term's coordinates there are those its own step reads, directly
+or through the operands it reads: an operand it only carries to a store — a multi-output root's per-page and per-slot
+results beside a count — takes its own loop beside the others, never one nested in another's. Loops carry NO algebra and
+no annotation, so the derived nest depends only on what is stored, which is what makes every identity of the term a
+digest of its lowered body — there is no separate term hasher. The `TileOp`'s body identity is the canonical digest of
+the nest `lower()` derives (the body is the term's normal form); the variant key (`identity_key(with_io=True,
+with_knobs=True)`) folds the schedule-free body identity with the knobs; and the deploy join key (the deploy identity
+(`identity_key(with_io=True)`), over `TileOp.loop_body`) types the roles the body reads its buffers through, so term
+re-spellings and cluster-sibling ops that lower alike share schedule evidence. `Fold.deps()` exposes names captured
+outside the lift params, including captures reached recursively through operand edges. A contraction deliberately hides
+its pure lift body from generic nested-body walks, so this direct dependency surface is what keeps an operand's captured
+statistic ordered before the contraction that reads it. A read walk STOPS at this rollup — the **`Statement.deps_deep`
+trait** (a `Statement`-protocol member beside `pure`, conservative `False` default; `Fold` opts in) tells
+`_member_reads` that `deps()` already answers for the whole subtree, scope-correctly. Re-walking the lift's flat
+namespace cannot see its params, so an operand-supplied name read inside the lift leaked out of every enclosing lambda
+as a phantom capture: an operand-supplied name is not an enclosing capture.
 
 A reduce is a contraction not by "two loads" but by the genuine algebra — the lift ⊗
 **distributes over** the fold ⊕ (`multiply` over `add`; *not* `add` over `add`, a sum of two
@@ -566,7 +564,7 @@ definitions of one state name are an error. **Example** — the online-softmax c
 **The λ-foldMap primitives** (`ir/pure/lam.py`) — the finished algebra vocabulary the tile IR
 stores against (see the tile-lowering ARCHITECTURE for the storage story). `Lambda(params, body, results)` is the ONE
 binder kind over the reused stmt vocabulary — a `Body` of PURE stmts only (ANF ≙ a let-chain), validated in
-`__post_init__` via the **`Stmt.pure` trait** (declared on the `Stmt` interface, conservative `False` default;
+`__post_init__` via the **`Statement.pure` trait** (declared on the `Statement` interface, conservative `False` default;
 `Load`/`Assign`/`Select` and the structural `Fold` node opt in; `Accum`/`Write`/`Init`/`Loop`
 never do — no
 isinstance whitelist), with results-defined checked there too and α-invariance by canonical renumbering
@@ -604,29 +602,29 @@ names it recognizes the pair by canonical form (`Fold.fuse`), never by a stored 
 | `Load`                       | Body-form external read: `name = load(input)[index...]`. `input` matches the producing graph node's id.           |
 | `Assign`                     | SSA body stmt: `name = op(args)` with `op: ElementwiseImpl`.                                                      |
 | `Affine`                     | `name = offset + Σ coefficient·arg` — the one statement for a sum, a difference, a negation or a product with a literal (a `Let` binding a number); normalization folds every such cone into it (`fold_affine`), so `add`, `subtract` and `negative` never survive a floating cone and `x + x`, `2 * x` and `x + 3 * x - x` are one body. Identity sorts its terms by value. Kernel IR spells it as binary `Assign`s over `Let`-bound literals (`010_materialize`). |
-| `Accum`                      | Reduce accumulator: `name = op(name, value)` inside a reduce `Loop`. Initialized to its op's identity. ``axes`` lists the reduction axis names — propagated through Sigma renames (including σ-splits via `Expr.free_vars()`); the escape-analysis helper derives cross-thread cooperativity from ``axes ∩ enclosing ThreadTile.axes``. |
+| `Accum`                      | Reduce accumulator: `name = op(name, value)` inside a reduce `Loop`. Initialized to its op's identity. ``axes`` lists the reduction axis names — propagated through Sigma renames (including σ-splits via `Expression.free_vars()`); the escape-analysis helper derives cross-thread cooperativity from ``axes ∩ enclosing ThreadTile.axes``. |
 | `Carry`                      | The next value of one cell of a carried state: `name[index...] <- value`, holding `seed` before the first step. No op: a state folds nothing. |
 | `Pre`                        | Read of one cell of a carried state: `name = pre carrier[index...]`, the previous step's value inside the loop that carries it. |
 | `Init`                       | Explicit `<dtype> name = identity;` seed at this scope (`name` + scalar `identity` + `dtype`). Used for a carried state's seed (one per component), emitted above the streaming `Loop`. Scope-bound (never hoisted); shadows a deeper same-named `Accum` init. |
-| `Let`                        | Pure binding of one `Expr` to a name: a scalar literal (the twisted carrier's injected `1`), a precomputed integer index, a `FlatIndex` offset. Scoped like an `Assign`; legal inside a stored `Lambda`. |
+| `Let`                        | Pure binding of one `Expression` to a name: a scalar literal (the twisted carrier's injected `1`), a precomputed integer index, a `FlatIndex` offset. Scoped like an `Assign`; legal inside a stored `Lambda`. |
 | `Write`                      | Write an SSA value to output at `index`.                                                                          |
 | `Select` + `SelectBranch`    | Coord-predicated binding (replaces the old Mux).                                                                  |
 | `Loop`                       | Serial iteration block: `axis` + nested `body`.                                                                   |
 | `StridedLoop`                | Strided iteration (`start`, `step`) — cooperative thread-stride loop reused by Tile/Kernel IR.                    |
-| `Cond`                       | If/else block over an `Expr` predicate.                                                                           |
-| `Stmt`                       | Base class — every body statement subclasses it. Leaves and control-flow nodes live in `ir/stmt/`.               |
+| `Cond`                       | If/else block over an `Expression` predicate.                                                                           |
+| `Statement`                       | Base class — every body statement subclasses it. Leaves and control-flow nodes live in `ir/stmt/`.               |
 
 Body walkers: `iter_body(body)` (pre-order; powers `for s in loop_op`),
-`map_body(body, fn)` (transformer), `Stmt.rewrite(rename_ssa, sigma)`
-(per-stmt copy with SSA rename + Expr substitution),
-`Stmt.pretty(indent)` (rendered lines for kernel dumps; block stmts
+`map_body(body, fn)` (transformer), `Statement.rewrite(rename_ssa, sigma)`
+(per-stmt copy with SSA rename + Expression substitution),
+`Statement.pretty(indent)` (rendered lines for kernel dumps; block stmts
 recurse via `pretty_body`).
 
-CUDA scalar rendering goes through `op_to_expr` in `ir/render.py`. Boolean masks retain the historical f32 SSA convention,
-so Torch's `bitwise_not` spelling renders as logical zero-test (`mask == 0`); explicitly bool-stamped values use the
-same semantics. Integer complement is not inferred from that name and fails closed until it has a typed consumer.
-The optional readable-source fold keeps a single-use `Assign` named when any argument's stamped dtype differs from
-the result dtype, so the target-aware render of an `Assign` remains responsible for conversions such as
+CUDA scalar rendering goes through `op_to_expression` in `ir/render.py`. Boolean masks retain the historical f32 SSA
+convention, so Torch's `bitwise_not` spelling renders as logical zero-test (`mask == 0`); explicitly bool-stamped values
+use the same semantics. Integer complement is not inferred from that name and fails closed until it has a typed
+consumer. The optional readable-source fold keeps a single-use `Assign` named when any argument's stamped dtype differs
+from the result dtype, so the target-aware render of an `Assign` remains responsible for conversions such as
 `__half2float`.
 
 `Select` uses the common dtype of its branch values, and type propagation gives its consumers that same dtype.
@@ -672,7 +670,7 @@ walk. Any other caller that cones a non-SSA body owes itself the same reading.
 
 `rewrite` has two distinct rename channels that must stay disjoint:
 `rename_ssa` carries **SSA-name** renames, `sigma` carries **axis**
-substitutions. `Load`/`Write` index exprs apply *both*
+substitutions. `Load`/`Write` index expressions apply *both*
 (`sigma.apply(e).rename(rename)`) so an indirect
 (gather) index Var gets renamed exactly once. Putting the same name in
 both maps renames it twice — and if the two passes form a chain (e.g.
@@ -860,9 +858,9 @@ The exact and compute-unit-clustered forms are cached on each immutable `Body`. 
 axis names, argument spelling and discovery order, dependency-valid statement order, or equivalent commutative and
 affine expression spelling therefore share a structural key. Use it when deduplicating candidate bodies in search.
 
-### `ir/expr.py` — Expr simplification
+### `ir/expression.py` — Expression simplification
 
-`simplify` (called inside `normalize_body`). Generic bottom-up Expr rewriter:
+`simplify` (called inside `normalize_body`). Generic bottom-up Expression rewriter:
 constant folding, algebraic identities, range-based comparison folding
 (`(k0 > 2047 ? 2047 : k0) < 0 ? 0 : k0` → `k0`). `SimplifyCtx`/`Interval`
 track integer ranges from axis extents (`axis.extend_simplify_ctx` pushes
@@ -947,9 +945,9 @@ multiplies is a recurrence for `loop/fusion/005_roll_recurrence` to roll, not a 
 kernel set depend on the order the producers were visited in. This is a termination bound, not a fusion-quality gate:
 placement still owns every cut on a merge that CAN be built.
 
-Each splice memoizes `Expr.free_vars()` by expression identity while placing dependencies. Sigma expressions remain
-live for the splice, and identity avoids both repeated coordinate-tree walks and the recursive structural hashing a
-global cache would require; the memo is discarded with the splicer.
+Each splice memoizes `Expression.free_vars()` by expression identity while placing dependencies. Sigma expressions
+remain live for the splice, and identity avoids both repeated coordinate-tree walks and the recursive structural hashing
+a global cache would require; the memo is discarded with the splicer.
 
 `Sigma` computes canonical expression text once for each initial substitution. Derived substitutions created by
 `extend` and `restrict` retain the applicable canonical entries from their parent, so dependency placement neither

@@ -3,7 +3,7 @@ express in terms of that loop var declines the run instead of building an invali
 
 import importlib
 
-from emmy.compiler.ir.expr import Literal
+from emmy.compiler.ir.expression import Literal
 from emmy.compiler.ir.pure import Lambda
 from emmy.compiler.ir.stmt import Body, Load
 

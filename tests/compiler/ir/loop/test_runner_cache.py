@@ -88,7 +88,7 @@ def test_float_precision_boundaries_use_host_cpp_spelling():
 
 def test_multi_output_runner_uses_each_write_scope():
     from emmy.compiler.backend.loop import LoopBackend
-    from emmy.compiler.ir.expr import Var
+    from emmy.compiler.ir.expression import Var
     from emmy.compiler.ir.loop import Assign, Axis, Load, Loop, LoopOp, Write
 
     loop = LoopOp(

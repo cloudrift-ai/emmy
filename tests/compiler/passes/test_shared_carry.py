@@ -13,7 +13,7 @@ from emmy.compiler.graph import Graph, Tensor
 from emmy.compiler.ir.axis import Axis
 from emmy.compiler.ir.base import InputOp
 from emmy.compiler.ir.cuda import CudaOp
-from emmy.compiler.ir.expr import BinaryExpr, Literal, TernaryExpr, Var
+from emmy.compiler.ir.expression import BinaryExpr, Literal, TernaryExpr, Var
 from emmy.compiler.ir.kernel import KernelOp, Sync
 from emmy.compiler.ir.loop import LoopOp
 from emmy.compiler.ir.loop.runner import execute_loop_op_cpp

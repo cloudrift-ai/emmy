@@ -1,4 +1,4 @@
-"""Leaf ``Stmt`` subclasses — pure compute primitives (no nested bodies).
+"""Leaf ``Statement`` subclasses — pure compute primitives (no nested bodies).
 
 ``Load``, ``Assign``, ``Accum``, ``Init``, ``Write``, ``Select`` — each
 produces / writes a single SSA value. Block-structured stmts (Loop /
@@ -14,14 +14,14 @@ from itertools import count
 from emmy.compiler.dtype import DataType
 from emmy.compiler.ir.axis import Axis
 from emmy.compiler.ir.elementwise import ElementwiseImpl
-from emmy.compiler.ir.expr import BinaryExpr, Expr, FlatIndex, Literal, Var
+from emmy.compiler.ir.expression import BinaryExpr, Expression, FlatIndex, Literal, Var
 from emmy.compiler.ir.sigma import Sigma
-from emmy.compiler.ir.stmt.base import Stmt
-from emmy.compiler.ir.stmt.declared import kind, rewrite_by_roles, role
+from emmy.compiler.ir.stmt.base import Statement
+from emmy.compiler.ir.stmt.declared import rewrite_by_roles, role, statement
 
 
-@kind(init=False)
-class Load(Stmt):
+@statement(init=False)
+class Load(Statement):
     """Read a value (or N consecutive values) from an external input buffer.
 
     Scalar (``width == 1``): one SSA binding ``names[0]``. Vector
@@ -64,7 +64,7 @@ class Load(Stmt):
     input: str = role("buffer_read")
     # Read through: a data-dependent (gather) index like ``weight[(int)in0, a]`` reads ``in0``. Axis names appear
     # among the reads too; every consumer resolves a read against the body's definitions, where axes are absent.
-    index: tuple[Expr, ...] = role("expr", "reads")
+    index: tuple[Expression, ...] = role("expression", "reads")
     dtype: DataType | None
     carried: str = ""  # a default, so a Load that does not set it renders (and keys) as before
 
@@ -74,7 +74,7 @@ class Load(Stmt):
         self,
         name: str | None = None,
         input: str | None = None,
-        index: tuple[Expr, ...] | None = None,
+        index: tuple[Expression, ...] | None = None,
         *,
         names: tuple[str, ...] | None = None,
         dtype: DataType | None = None,
@@ -118,8 +118,8 @@ class Load(Stmt):
         return len(self.names) == 1
 
 
-@kind
-class Assign(Stmt):
+@statement
+class Assign(Statement):
     """Pure SSA body statement: ``name = op(args)``.
 
     ``op`` is an ``ElementwiseImpl`` — the elementwise combine (add /
@@ -146,8 +146,8 @@ class Assign(Stmt):
             object.__setattr__(self, "op", ElementwiseImpl(self.op))
 
 
-@kind
-class Affine(Stmt):
+@statement
+class Affine(Statement):
     """Pure SSA body statement: ``name = offset + Σ coefficient·arg``.
 
     The one statement for a sum, a difference, a negation or a product with a literal: normalization folds every
@@ -179,10 +179,10 @@ class Affine(Stmt):
     def terms(self) -> tuple[tuple[float, str], ...]:
         return tuple(zip(self.coefficients, self.args, strict=True))
 
-    def as_assigns(self) -> list[Stmt]:
+    def as_assigns(self) -> list[Statement]:
         """The same value as binary ``Assign``s over ``Let``-bound literals, the last one named ``name``: for a
         lowering that evaluates one operation at a time (Kernel IR, the fragment programs)."""
-        out: list[Stmt] = []
+        out: list[Statement] = []
         fresh = (f"{self.name}__t{index}" for index in count())
 
         def bound(value: float) -> str:
@@ -211,7 +211,7 @@ class Affine(Stmt):
         return out
 
 
-def binary(stmts) -> tuple[Stmt, ...]:  # noqa: ANN001 — any iterable of Stmt
+def binary(stmts) -> tuple[Statement, ...]:  # noqa: ANN001 — any iterable of Statement
     """``stmts`` with every ``Affine`` spelled as its binary ``Assign``s, for a lowering that evaluates one
     operation at a time; the other statements pass through."""
     return tuple(part for stmt in stmts for part in (stmt.as_assigns() if isinstance(stmt, Affine) else (stmt,)))
@@ -234,8 +234,8 @@ def _rewrite_axis_name(name: str, sigma: Sigma) -> tuple[str, ...]:
     return tuple(sorted(replacement.free_vars()))
 
 
-@kind
-class Accum(Stmt):
+@statement
+class Accum(Statement):
     """Reduce accumulator — declares-and-folds in one statement.
 
     Semantics: ``name = op(name, value)`` inside the enclosing reduce
@@ -288,7 +288,7 @@ class Accum(Stmt):
             object.__setattr__(self, "base", None)
 
     @property
-    def init(self) -> Expr:
+    def init(self) -> Expression:
         """Identity value for the accumulator (from the op's metadata)."""
         identity = self.op.identity
         return Literal(identity if identity is not None else 0.0)
@@ -307,7 +307,7 @@ class Accum(Stmt):
     def has_identity(self) -> bool:
         return self.op.has_identity
 
-    def _rewrite(self, rename, sigma, axis_fn):  # noqa: ANN001, ANN202 — see ``Stmt.rewrite``
+    def _rewrite(self, rename, sigma, axis_fn):  # noqa: ANN001, ANN202 — see ``Statement.rewrite``
         # The reduced axes are names a substitution can split, which no role says.
         axes = tuple(sorted({rename(n) for old in self.axes for n in _rewrite_axis_name(old, sigma)}))
         rewritten = rewrite_by_roles(self, rename, sigma, axis_fn)
@@ -315,8 +315,8 @@ class Accum(Stmt):
 
 
 #: The suffix of the slot a :class:`Carry` defines during a step.
-@kind
-class Carry(Stmt):
+@statement
+class Carry(Statement):
     """The next value of one cell of a CARRIED STATE: ``name[index] <- value``.
 
     A recurrence's state, which a fold is not: its steps run in order, its step is any computation,
@@ -332,7 +332,7 @@ class Carry(Stmt):
 
     name: str = role("defines")
     value: str = role("reads")
-    index: tuple[Expr, ...] = role("expr")
+    index: tuple[Expression, ...] = role("expression")
     #: What the state holds before the first step: a constant, or the name of a buffer of the
     #: state's shape read cell by cell — the tensor an unrolled loop started from.
     seed: float | str = role("buffer_read")
@@ -345,8 +345,8 @@ class Carry(Stmt):
         return tuple(e.name for e in self.index if isinstance(e, Var))
 
 
-@kind
-class Pre(Stmt):
+@statement
+class Pre(Statement):
     """A read of one cell of a carried state: ``name = carrier[index]``.
 
     Inside the ``Loop`` that carries it, the value the PREVIOUS step left (the seed on the first
@@ -362,11 +362,11 @@ class Pre(Stmt):
 
     name: str = role("defines")
     carrier: str = role("reads")
-    index: tuple[Expr, ...] = role("expr", "reads")
+    index: tuple[Expression, ...] = role("expression", "reads")
 
 
-@kind
-class Init(Stmt):
+@statement
+class Init(Statement):
     """Explicit accumulator / carried-state seed at this scope:
     ``<dtype> <name> = <identity>;`` — a scope-local declaration.
 
@@ -393,14 +393,14 @@ class Init(Stmt):
             object.__setattr__(self, "dtype", _get(self.dtype))
 
 
-@kind
-class Let(Stmt):
+@statement
+class Let(Statement):
     """A pure binding of one expression to an SSA name: ``<dtype> <name> = <value>;``.
 
     Three things reach a body this way — a scalar literal (the twisted carrier's injection binds
     the ``1`` online softmax folds each element with, so the lift can return it by name), an
     integer index precomputed once outside a nested hot loop, and a buffer coordinate's flattened
-    offset (:class:`~emmy.compiler.ir.expr.FlatIndex`) reused across a copy's trips. Pure, so it
+    offset (:class:`~emmy.compiler.ir.expression.FlatIndex`) reused across a copy's trips. Pure, so it
     is legal inside a stored ``Lambda`` body. A float literal's ``dtype`` is stamped at kernel
     lowering like an ``Assign``'s (f32 when nothing narrows it); an untyped index renders as ``auto``
     and takes its expression's type. A bare number coerces to a float ``Literal``.
@@ -409,7 +409,7 @@ class Let(Stmt):
     pure = True
 
     name: str = role("defines")
-    value: Expr = role("expr", "reads")
+    value: Expression = role("expression", "reads")
     dtype: DataType | None = None
 
     def __post_init__(self) -> None:
@@ -419,13 +419,13 @@ class Let(Stmt):
     def external_reads(self) -> tuple[str, ...]:
         return tuple(dict.fromkeys(e.buffer for e in self.value.subterms() if isinstance(e, FlatIndex)))
 
-    def rename_buffers(self, rename):  # noqa: ANN001 — see ``Stmt.rename_buffers``
+    def rename_buffers(self, rename):  # noqa: ANN001 — see ``Statement.rename_buffers``
         value = self.value.rebuild(lambda e: replace(e, buffer=rename.get(e.buffer, e.buffer)) if isinstance(e, FlatIndex) else e)
         return self if value == self.value else self.replace(value=value)
 
 
-@kind(init=False)
-class Write(Stmt):
+@statement(init=False)
+class Write(Statement):
     """Write an SSA value (or N consecutive values) to ``output``.
 
     Scalar (``width == 1``): stores one SSA value at ``index``. Vector
@@ -451,7 +451,7 @@ class Write(Stmt):
     """
 
     output: str = role("buffer_write")
-    index: tuple[Expr, ...] = role("expr", "reads")
+    index: tuple[Expression, ...] = role("expression", "reads")
     values: tuple[str, ...] = role("reads")
     value_dtype: DataType | None
     # An ``atomicAdd`` reduce-write (cross-CTA split-reduce, ``030_cut``'s atomic finalize):
@@ -470,7 +470,7 @@ class Write(Stmt):
     def __init__(
         self,
         output: str | None = None,
-        index: tuple[Expr, ...] | None = None,
+        index: tuple[Expression, ...] | None = None,
         value: str | None = None,
         *,
         values: tuple[str, ...] | None = None,
@@ -528,14 +528,14 @@ class SelectBranch:
     """One branch of a ``Select`` body statement."""
 
     value: str = role("reads")  # SSA name when predicate holds
-    select: Expr = role("expr", "reads")  # predicate over axis Vars
+    select: Expression = role("expression", "reads")  # predicate over axis Vars
 
     def replace(self, **changes) -> SelectBranch:  # noqa: ANN003 — field values
         return replace(self, **changes)
 
 
-@kind
-class Select(Stmt):
+@statement
+class Select(Statement):
     """Coord-predicated value binding — replaces Mux.
 
     At each iteration coord, exactly one branch's ``select`` predicate
@@ -554,7 +554,7 @@ class Select(Stmt):
             raise ValueError("Select.branches must be non-empty")
 
 
-def mask_select_predicate(select: Select) -> Expr | None:
+def mask_select_predicate(select: Select) -> Expression | None:
     """The mask branch of an ordered two-way comparison, or ``None`` for another Select form."""
     if len(select.branches) != 2:
         return None
@@ -574,8 +574,8 @@ def mask_select_predicate(select: Select) -> Expr | None:
     return mask.select
 
 
-@kind
-class ZeroPrologue(Stmt):
+@statement
+class ZeroPrologue(Statement):
     """Zero another launch's atomic accumulator from THIS kernel — the delegated zero-init
     (``lowering/cuda/005_delegate_zero_init``).
 
@@ -624,9 +624,9 @@ class OutputSpec:
     sweep: tuple[Axis, ...] = ()
     # The store's guard: it runs only where ``when`` holds. A scatter pointed past the end of its
     # buffer stores nothing (``045_lower_scatter``); the guard reads the same values the index does.
-    when: Expr | None = None
+    when: Expression | None = None
 
-    def stmt(self) -> Stmt:
+    def stmt(self) -> Statement:
         """The store as it stands in a statement stream: the write, under its guard when it has one."""
         from emmy.compiler.ir.stmt.blocks import Cond  # noqa: PLC0415 — blocks imports this module
 
@@ -637,4 +637,6 @@ class OutputSpec:
         """Every name the store reads: the values it writes, then what its coordinates and its guard name — a
         scatter's row is a value computed like any other, and the term it comes from has to keep it."""
         guard = () if self.when is None else (self.when,)
-        return tuple(dict.fromkeys((*self.write.values, *(name for expr in (*self.write.index, *guard) for name in expr.free_vars()))))
+        return tuple(
+            dict.fromkeys((*self.write.values, *(name for expression in (*self.write.index, *guard) for name in expression.free_vars())))
+        )

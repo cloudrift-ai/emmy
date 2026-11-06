@@ -2,7 +2,7 @@
 
 from emmy.compiler.dtype import F32
 from emmy.compiler.ir.axis import Axis
-from emmy.compiler.ir.expr import Var
+from emmy.compiler.ir.expression import Var
 from emmy.compiler.ir.stmt import Assign, Body, Load, Loop, Write
 from emmy.compiler.ir.stmt.normalize import place_values
 

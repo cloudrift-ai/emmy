@@ -37,7 +37,7 @@ from dataclasses import replace
 from emmy.compiler.backend.cuda.render_target import CudaRenderTarget
 from emmy.compiler.graph import Node
 from emmy.compiler.ir.kernel import KernelOp
-from emmy.compiler.ir.stmt import Body, Stmt, Write
+from emmy.compiler.ir.stmt import Body, Statement, Write
 from emmy.compiler.pipeline import Pattern, RuleSkipped
 from emmy.compiler.pipeline.passes.lowering.kernel._vector import vector_run
 from emmy.compiler.pipeline.search.space import VECTORIZE_STORES
@@ -73,7 +73,7 @@ def _vectorize_body(top: KernelOp, body: Body) -> Body:
     """Post-order body transform: recurse into nested bodies first, then
     scan this scope for consecutive-Write runs. Threads ``top`` through so
     ``_buf_dtype`` can resolve per-buffer dtypes against the same op."""
-    descended: list[Stmt] = []
+    descended: list[Statement] = []
     for s in body:
         nested = s.nested()
         if nested:
@@ -81,7 +81,7 @@ def _vectorize_body(top: KernelOp, body: Body) -> Body:
         else:
             descended.append(s)
 
-    out: list[Stmt] = []
+    out: list[Statement] = []
     i = 0
     while i < len(descended):
         replaced = False
@@ -99,7 +99,7 @@ def _vectorize_body(top: KernelOp, body: Body) -> Body:
     return body if vectorized == body else vectorized
 
 
-def _try_vec_store(stmts: Iterable[Stmt], start: int, n: int, top: KernelOp) -> Write | None:
+def _try_vec_store(stmts: Iterable[Statement], start: int, n: int, top: KernelOp) -> Write | None:
     """If ``stmts[start:start+n]`` matches the consecutive-Write pattern
     and the target supports ``vector_type(elem_dtype, n)`` for the
     destination buffer's dtype, return the widened :class:`Write`.

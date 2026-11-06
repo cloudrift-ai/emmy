@@ -8,7 +8,7 @@ import pytest
 
 from emmy.compiler.graph import Graph, Tensor
 from emmy.compiler.ir.axis import Axis
-from emmy.compiler.ir.expr import Literal, Var
+from emmy.compiler.ir.expression import Literal, Var
 from emmy.compiler.ir.loop import LoopOp
 from emmy.compiler.ir.loop.assembly import definitions, expand_calls
 from emmy.compiler.ir.sigma import Sigma

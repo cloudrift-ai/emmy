@@ -22,7 +22,7 @@ import pytest
 
 from emmy.compiler.dim import Dim
 from emmy.compiler.ir.axis import Axis
-from emmy.compiler.ir.expr import BinaryExpr, Literal, Var
+from emmy.compiler.ir.expression import BinaryExpr, Literal, Var
 from emmy.compiler.ir.pure import Fold, Lambda
 from emmy.compiler.ir.pure.twist import SOFTMAX, Twist
 from emmy.compiler.ir.sigma import Sigma

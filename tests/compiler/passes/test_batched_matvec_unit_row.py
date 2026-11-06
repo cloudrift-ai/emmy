@@ -10,7 +10,7 @@ from emmy.compiler.graph import Graph, Tensor
 from emmy.compiler.ir.axis import Axis
 from emmy.compiler.ir.base import InputOp
 from emmy.compiler.ir.cuda import CudaOp
-from emmy.compiler.ir.expr import BinaryExpr, Literal, Var
+from emmy.compiler.ir.expression import BinaryExpr, Literal, Var
 from emmy.compiler.ir.loop import LoopOp
 from emmy.compiler.ir.stmt import Accum, Assign, Body, Load, Loop, Write
 from emmy.compiler.ir.tile import OutputSpec, Placement, TileOp
@@ -245,7 +245,7 @@ def test_row_scaled_fp8_b_matches_independent_reference() -> None:
 
 
 def _grouped_weight_graph() -> Graph:
-    from emmy.compiler.ir.expr import BinaryExpr, Literal
+    from emmy.compiler.ir.expression import BinaryExpr, Literal
 
     h, m, n, k = (Var(name) for name in ("h", "m", "n", "k"))
     group = BinaryExpr("//", h, Literal(3, "int"))

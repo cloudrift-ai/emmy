@@ -5,7 +5,7 @@ import pytest
 
 from emmy.compiler.dtype import F16, F32, I32
 from emmy.compiler.ir.elementwise import ElementwiseImpl
-from emmy.compiler.ir.expr import Literal, Var
+from emmy.compiler.ir.expression import Literal, Var
 from emmy.compiler.ir.kernel.ir import RegStore
 from emmy.compiler.ir.render import RenderCtx, render_stmt
 from emmy.compiler.ir.sigma import Sigma
@@ -183,7 +183,7 @@ def test_transposed_fragment_store_uses_both_output_strides() -> None:
 def test_a_mask_over_an_op_result_renders_after_that_op() -> None:
     """A causal mask may select a value the chain computes (a scaled score), not only a loaded one:
     the ternary renders once that op has run."""
-    from emmy.compiler.ir.expr import BinaryExpr, Literal
+    from emmy.compiler.ir.expression import BinaryExpr, Literal
     from emmy.compiler.ir.stmt import Load, Select, SelectBranch
 
     source, _ = _render(
@@ -202,7 +202,7 @@ def test_a_mask_over_an_op_result_renders_after_that_op() -> None:
 def test_a_mask_over_a_narrowed_value_widens_both_branches() -> None:
     """A chain op keeps the tail's dtype, so a mask over a narrowed value converts back: a ternary
     mixing ``__half`` and ``float`` does not compile."""
-    from emmy.compiler.ir.expr import BinaryExpr, Literal
+    from emmy.compiler.ir.expression import BinaryExpr, Literal
     from emmy.compiler.ir.stmt import Load, Select, SelectBranch
 
     source, _ = _render(
@@ -221,7 +221,7 @@ def test_a_mask_over_a_narrowed_value_widens_both_branches() -> None:
 
 def test_integer_load_in_fragment_epilogue_keeps_shift_operands_integer() -> None:
     """A packed output's shift amount must reach the epilogue as an integer, like a scalar Load."""
-    from emmy.compiler.ir.expr import Literal
+    from emmy.compiler.ir.expression import Literal
     from emmy.compiler.ir.stmt import Load
 
     tail = [

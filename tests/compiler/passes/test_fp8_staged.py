@@ -22,7 +22,7 @@ from emmy.compiler.dtype import F8E4M3, F16, F32, DataType
 from emmy.compiler.graph import Tensor
 from emmy.compiler.ir.address import BYTE_SLAB_PAD
 from emmy.compiler.ir.axis import Axis
-from emmy.compiler.ir.expr import BinaryExpr, Literal, Var
+from emmy.compiler.ir.expression import BinaryExpr, Literal, Var
 from emmy.compiler.ir.schedule import Stage, Tile, Work
 from emmy.compiler.ir.schedule.catalog import stage_moves
 from emmy.compiler.ir.schedule.staging import resolve_warp_stage
@@ -196,7 +196,7 @@ def test_byte_a_widening_matches_decoded_matmul_cuda(dtype):
 
 def _drain_max_way(rows: int, cols: int, pad: int, reads) -> int:
     """Worst per-instruction ``max_way`` over the drain's per-lane slab reads. ``reads`` yields
-    ``(row_expr, col_expr)`` per emitted load, in the fragment loaders' lane→element map."""
+    ``(row_expression, col_expression)`` per emitted load, in the fragment loaders' lane→element map."""
     taxes = (Axis("_t", Dim(32)),)
     worst = 0
     for row, col in reads:
@@ -206,7 +206,7 @@ def _drain_max_way(rows: int, cols: int, pad: int, reads) -> int:
     return worst
 
 
-def _lane_exprs():
+def _lane_expressions():
     lane = Var("_t")
     return BinaryExpr("/", lane, Literal(4, "int")), BinaryExpr("%", lane, Literal(4, "int"))
 
@@ -231,7 +231,7 @@ def test_byte_slab_pad_keeps_the_drain_conflict_free():
     """The 16 B row pad's reason, stated as a regression: at ``BYTE_SLAB_PAD`` every byte-slab
     drain instruction is ≤ 2-way (the oracle's broadcast-corrected worst bank); dense rows
     (pad 0 — the TMA deposit) are 4-way on the same maps."""
-    grp, tig = _lane_exprs()
+    grp, tig = _lane_expressions()
     cases = [
         ("k16 trans-B", 128, 64, _k16_trans_reads(grp, tig)),
         ("k32 trans-B", 128, 64, _k32_reads(grp, tig, a_side=False)),

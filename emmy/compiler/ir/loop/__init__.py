@@ -18,7 +18,7 @@ from emmy.compiler.ir.loop.ir import (
     Scope,
     Select,
     SelectBranch,
-    Stmt,
+    Statement,
     Write,
 )
 from emmy.compiler.ir.loop.splicer import UnfusableStmt, observes_running_accumulator, splice_graph, splice_loops
@@ -38,7 +38,7 @@ __all__ = [
     "Select",
     "SelectBranch",
     "Sigma",
-    "Stmt",
+    "Statement",
     "Write",
     "iter_body",
     "map_body",

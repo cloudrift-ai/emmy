@@ -9,7 +9,7 @@ import pytest
 from emmy.compiler.context import Context
 from emmy.compiler.graph import Graph
 from emmy.compiler.ir.axis import Axis
-from emmy.compiler.ir.expr import BinaryExpr, Literal, Var
+from emmy.compiler.ir.expression import BinaryExpr, Literal, Var
 from emmy.compiler.ir.schedule import Placement
 from emmy.compiler.ir.stmt import Select, SelectBranch
 from emmy.compiler.ir.tile import TileOp

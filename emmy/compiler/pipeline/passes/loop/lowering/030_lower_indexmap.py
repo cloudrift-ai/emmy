@@ -12,7 +12,7 @@ from __future__ import annotations
 
 from emmy.compiler.graph import Graph, Node, Tensor
 from emmy.compiler.ir.base import InputOp
-from emmy.compiler.ir.expr import PLACEHOLDER_PREFIX, Literal, Var
+from emmy.compiler.ir.expression import PLACEHOLDER_PREFIX, Literal, Var
 from emmy.compiler.ir.loop import Axis, Load, Loop, LoopOp, Select, SelectBranch, Write
 from emmy.compiler.ir.stmt import Body
 from emmy.compiler.ir.tensor.ir import IndexMapOp
@@ -48,8 +48,8 @@ def rewrite(match: Match, root: Node) -> Graph | None:
             input_names.append(src_id)
             name = f"in{i}"
             body.append(Load(name=name, input=src_id, index=idx))
-            select_expr = src.select.substitute(mapping) if src.select is not None else Literal(True, "bool")
-            branches.append(SelectBranch(value=name, select=select_expr))
+            select_expression = src.select.substitute(mapping) if src.select is not None else Literal(True, "bool")
+            branches.append(SelectBranch(value=name, select=select_expression))
         body.append(Select(name="v", branches=tuple(branches)))
         body.append(Write(output=out_buf, index=write_index, value="v"))
 

@@ -23,7 +23,7 @@ from emmy.compiler.graph import Graph, Tensor
 from emmy.compiler.ir.axis import Axis
 from emmy.compiler.ir.base import InputOp
 from emmy.compiler.ir.elementwise import ElementwiseImpl
-from emmy.compiler.ir.expr import BinaryExpr, Literal, Var
+from emmy.compiler.ir.expression import BinaryExpr, Literal, Var
 from emmy.compiler.ir.loop import LoopOp
 from emmy.compiler.ir.stmt import Accum, Assign, Body, Load, Loop, Write
 from emmy.compiler.ir.tile import TileOp
@@ -125,10 +125,10 @@ def test_flattened_row_head_restores_separate_operand_axes():
     op = _run(graph)
     loads = {load.input: load for load in op.loads}
     assert not any(
-        isinstance(expr, BinaryExpr) and expr.op in ("/", "//", "%")
+        isinstance(expression, BinaryExpr) and expression.op in ("/", "//", "%")
         for load in op.loads
         for index in load.index
-        for expr in index.subterms()
+        for expression in index.subterms()
     )
     assert len(loads["x"].index[1].free_vars()) == 1
     assert not loads["x"].index[1].free_vars() & loads["w"].index[0].free_vars()
@@ -212,10 +212,10 @@ def _packed_kloop(w_index: tuple) -> Loop:
     )
 
 
-def _packed_index(n_expr) -> tuple:
+def _packed_index(n_expression) -> tuple:
     """``w[n, ((n*K + k) / 2) % (K/2)]`` — the address a pair-packed constant carries."""
-    flat = BinaryExpr("+", BinaryExpr("*", n_expr, Literal(K, "int")), Var("k"))
-    return (n_expr, BinaryExpr("%", BinaryExpr("/", flat, Literal(2, "int")), Literal(K // 2, "int")))
+    flat = BinaryExpr("+", BinaryExpr("*", n_expression, Literal(K, "int")), Var("k"))
+    return (n_expression, BinaryExpr("%", BinaryExpr("/", flat, Literal(2, "int")), Literal(K // 2, "int")))
 
 
 def _packed_split_graph() -> Graph:
@@ -351,7 +351,7 @@ def test_transposed_canonical_nest_orders_free_by_the_remainder_dim():
 def test_canonical_nest_classifies_as_contraction():
     """Downstream of the canonicalization: the fused nest binds the contraction with the split
     store, and the free order keeps the fused N trailing (position read through the div/mod
-    exprs, not bare Vars)."""
+    expressions, not bare Vars)."""
     n = Axis("n", Dim(H * D))
     kloop = Loop(
         axis=Axis("k", Dim(K)),
@@ -436,7 +436,7 @@ def test_warp_epilogue_preserves_split_and_block_scale_coordinates():
     epilogue = _warp_epilogue(tail, "acc", "m", "n", sigma)["epilogue"]
     load = epilogue[0]
     for col in range(8):
-        got = tuple(expr.eval({ELEM_ROW: 3, ELEM_COL: col}) for expr in load.index)
+        got = tuple(expression.eval({ELEM_ROW: 3, ELEM_COL: col}) for expression in load.index)
         assert got == (2, 19, (30 + col) // 32, (30 + col) % 32, (30 + col) // 8)
 
 
@@ -486,8 +486,8 @@ def test_bilinear_batched_operand_still_binds():
     assert con.operands[0].as_slab().load.input == "x"
 
 
-def test_bilinear_binds_a_composite_role_expr():
-    """A third free axis composed into the SAME index expr as the role axis (the split-axis
+def test_bilinear_binds_a_composite_role_expression():
+    """A third free axis composed into the SAME index expression as the role axis (the split-axis
     composite ``4*a1 + n``) binds as the direct B load: each side's own axes stay its role, the
     tile orients the trailing one and the rest ride the grid, which defines them. The Qwen3.8 AWQ
     down projection has this shape; refusing it left the piece off the tensor cores."""

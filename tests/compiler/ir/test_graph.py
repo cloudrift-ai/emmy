@@ -338,12 +338,12 @@ def test_to_dict_serializes_composite_shape_dim():
     """A node whose output shape carries a COMPOSITE Dim (``BinaryExpr``-backed —
     e.g. the demoted symbolic-N B operand's TMA-padded ``round_up(seq_len, 64)``
     inner extent, or a CatOp output) must not crash ``to_dict``: the dump path
-    serializes it to its pretty expr string. Atomic dims (int / Var name) still
+    serializes it to its pretty expression string. Atomic dims (int / Var name) still
     return their scalar value for the ``run --ir`` round-trip."""
     from emmy.compiler.dim import Dim
 
     g = Graph()
-    padded = Dim((Dim("seq_len").ceil_div(64) * 64).expr, hint=512)  # ((seq_len + 63) // 64) * 64
+    padded = Dim((Dim("seq_len").ceil_div(64) * 64).expression, hint=512)  # ((seq_len + 63) // 64) * 64
     g.add_node(op=InputOp(), inputs=[], output=Tensor("xnb", (128, padded)), node_id="xnb")
     g.inputs, g.outputs = ["xnb"], ["xnb"]
 
@@ -351,7 +351,7 @@ def test_to_dict_serializes_composite_shape_dim():
     shape = d["nodes"]["xnb"]["outputs"][0]["shape"]
     assert shape[0] == 128, "static inner-rank dim keeps its int value"
     assert isinstance(shape[1], str) and "seq_len" in shape[1] and "64" in shape[1], (
-        f"composite dim must serialize to its pretty expr string, got {shape[1]!r}"
+        f"composite dim must serialize to its pretty expression string, got {shape[1]!r}"
     )
 
 
@@ -379,7 +379,7 @@ def test_to_dict_roundtrips_an_expression_field_through_the_dump():
     import json
 
     from emmy.compiler.ir.base import ConstantOp
-    from emmy.compiler.ir.expr import BinaryExpr, Literal, Var
+    from emmy.compiler.ir.expression import BinaryExpr, Literal, Var
 
     scale = BinaryExpr("*", Var("seq_len"), Literal(2, "int"))
     g = Graph()
@@ -476,7 +476,7 @@ def test_mimo_rename_node_keeps_aux_buffer():
 
 def test_rename_node_rewrites_load_in_nested_fold_lambda() -> None:
     from emmy.compiler.ir.axis import Axis
-    from emmy.compiler.ir.expr import Var
+    from emmy.compiler.ir.expression import Var
     from emmy.compiler.ir.pure import Fold, Lambda
     from emmy.compiler.ir.stmt import Assign, Body, Load
     from emmy.compiler.ir.tile import Placement, TileOp
@@ -519,7 +519,7 @@ def test_rename_node_rewrites_load_in_nested_fold_lambda() -> None:
 def test_rename_node_does_not_renormalize_a_loop_body(monkeypatch) -> None:
     import emmy.compiler.ir.stmt as stmt
     from emmy.compiler.ir.axis import Axis
-    from emmy.compiler.ir.expr import Var
+    from emmy.compiler.ir.expression import Var
     from emmy.compiler.ir.loop import Load, Loop, LoopOp, Write
 
     graph = Graph()

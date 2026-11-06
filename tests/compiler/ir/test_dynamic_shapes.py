@@ -627,20 +627,20 @@ def test_split_seq_len_reaches_the_cuda_kernel_signature():
 
     (kernel,) = (node.op for node in compiled.nodes.values() if isinstance(node.op, CudaOp))
     assert set(kernel.runtime_args) == {"q_len", "kv_len"}, kernel.runtime_args
-    grid_symbols = {var.name for dim in kernel.grid[0] for var in _expr_vars(dim)}
+    grid_symbols = {var.name for dim in kernel.grid[0] for var in _expression_vars(dim)}
     assert grid_symbols == {"q_len"}, f"grid should scale with the query rows alone, got {grid_symbols}"
 
 
-def _expr_vars(expr):
+def _expression_vars(expression):
     """Every ``Var`` reachable from a shape expression."""
-    from emmy.compiler.ir.expr import Var
+    from emmy.compiler.ir.expression import Var
 
-    if isinstance(expr, Var):
-        yield expr
+    if isinstance(expression, Var):
+        yield expression
     for child in ("left", "right", "operand", "value"):
-        sub = getattr(expr, child, None)
+        sub = getattr(expression, child, None)
         if hasattr(sub, "eval"):
-            yield from _expr_vars(sub)
+            yield from _expression_vars(sub)
 
 
 def test_qwen_whole_model_dynamic_traces():

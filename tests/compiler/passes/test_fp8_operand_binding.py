@@ -27,7 +27,7 @@ from emmy.compiler.graph import Tensor
 from emmy.compiler.ir.atom import ATOM_REGISTRY
 from emmy.compiler.ir.axis import Axis
 from emmy.compiler.ir.elementwise import ElementwiseImpl
-from emmy.compiler.ir.expr import Literal, Var
+from emmy.compiler.ir.expression import Literal, Var
 from emmy.compiler.ir.schedule import Stage, Tile, Work
 from emmy.compiler.ir.schedule.staging import resolve_warp_stage
 from emmy.compiler.ir.stmt import Accum, Assign, Body, Load, Loop
@@ -350,7 +350,7 @@ def _packed_kblock_body(scale_stride=32, scale_k=None):
     e4m3 block scale (k under /16), fused-scale multiply, packed byte load, index copy,
     pair-table gather, final value x factor multiply. ``scale_k`` overrides the scale
     Load's k expression for the negative cases."""
-    from emmy.compiler.ir.expr import BinaryExpr, CastExpr, Literal
+    from emmy.compiler.ir.expression import BinaryExpr, CastExpr, Literal
 
     n, k = Var("a1"), Var("a2")
     flat = BinaryExpr("+", BinaryExpr("*", n, Literal(scale_stride, "int")), k)
@@ -363,7 +363,7 @@ def _packed_kblock_body(scale_stride=32, scale_k=None):
         Assign(name="v1", op="multiply", args=("in0", "v0")),
         Assign(name="v2", op="copy", args=("in2",)),
         Assign(name="v3", op="copy", args=("v1",)),
-        Load(name="in3", input="w_f4_pairs", index=(CastExpr(dtype="int", expr=Var("v2")), Literal(0, "int")), dtype=None),
+        Load(name="in3", input="w_f4_pairs", index=(CastExpr(dtype="int", expression=Var("v2")), Literal(0, "int")), dtype=None),
         Assign(name="v4", op="multiply", args=("in3", "v3")),
     ]
 
@@ -419,9 +419,9 @@ def test_packed_kblock_b_declines_without_a_packed_load():
 
 
 def test_packed_kblock_b_declines_mixed_guarded_and_naked_k():
-    # One index expr holds a guarded division AND a bare k: the naked flag alone must
+    # One index expression holds a guarded division AND a bare k: the naked flag alone must
     # decline (the guard set is non-empty, so the single-block check would pass).
-    from emmy.compiler.ir.expr import BinaryExpr, Literal
+    from emmy.compiler.ir.expression import BinaryExpr, Literal
     from emmy.compiler.ir.schedule.packing import match_packed_kblock_b
 
     n, k = Var("a1"), Var("a2")

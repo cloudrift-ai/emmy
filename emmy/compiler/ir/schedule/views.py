@@ -110,11 +110,11 @@ def _chunk_block(edge: Fold, k_name: str, axes: tuple) -> int | None:
         return None
     blocks: set[int] = set()
     for stmt in Body(tuple(edge.lower(axes=axes))).iter():
-        exprs = tuple(stmt.exprs())
-        if k_name in stmt.deps() and not any(k_name in expr.free_vars() for expr in exprs):
+        expressions = tuple(stmt.expressions())
+        if k_name in stmt.deps() and not any(k_name in expression.free_vars() for expression in expressions):
             return None  # K read as a value, not as a coordinate
-        for expr in exprs:
-            naked, guards = k_block_guard(expr, k_name)
+        for expression in expressions:
+            naked, guards = k_block_guard(expression, k_name)
             if naked:
                 return None
             blocks |= guards

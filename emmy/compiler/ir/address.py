@@ -1,4 +1,4 @@
-"""Flat-address `Expr` builders — fold-aware `sum` / `product` over int / `Expr` terms, plus
+"""Flat-address `Expression` builders — fold-aware `sum` / `product` over int / `Expression` terms, plus
 `split_pair` / `split_addressable` — the re-fused
 split-store spelling of an axis across two buffer dims, and whether per-atom-origin addressing is
 exact for one — and `gmem_axis_step` / `gmem_row_stride` — how a gmem `Load`'s flat address moves
@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import math
 
-from emmy.compiler.ir.expr import BinaryExpr, Expr, Literal, TernaryExpr, Var, affine_form
+from emmy.compiler.ir.expression import BinaryExpr, Expression, Literal, TernaryExpr, Var, affine_form
 from emmy.compiler.ir.stmt import Load
 
 # Row pad (in ELEMENTS = bytes) for a cp.async-staged 1-byte (fp8) operand slab. The cooperative
@@ -28,8 +28,8 @@ from emmy.compiler.ir.stmt import Load
 BYTE_SLAB_PAD = 16
 
 
-def add(*terms) -> Expr:
-    """Sum int / Expr terms into one Expr (dropping literal zeros)."""
+def add(*terms) -> Expression:
+    """Sum int / Expression terms into one Expression (dropping literal zeros)."""
     out = None
     for t in terms:
         e = Literal(t, "int") if isinstance(t, int) else t
@@ -39,24 +39,24 @@ def add(*terms) -> Expr:
     return out if out is not None else Literal(0, "int")
 
 
-def mul(a, b: int) -> Expr:
-    """``a · b`` as an Expr, folding the ``b in {0, 1}`` degenerate cases."""
+def mul(a, b: int) -> Expression:
+    """``a · b`` as an Expression, folding the ``b in {0, 1}`` degenerate cases."""
     return add() if b == 0 else (a if b == 1 else BinaryExpr("*", a if not isinstance(a, int) else Literal(a, "int"), Literal(b, "int")))
 
 
-def clamp_to(position: Expr, extent: Expr) -> Expr:
+def clamp_to(position: Expression, extent: Expression) -> Expression:
     """``position`` clamped onto a stream's last position — ``position < extent ? position : extent − 1`` — the
     index an overhanging read takes through a stream or an output sweep: the read stays in bounds with a duplicate,
     and the fold masks what it folds there or the guard discards the store. :func:`clamped` reads it back."""
     return TernaryExpr(BinaryExpr("<", position, extent), position, BinaryExpr("-", extent, Literal(1, "int")))
 
 
-def clamped(expr: Expr) -> tuple[Expr, Expr] | None:
-    """``(position, extent)`` when ``expr`` is :func:`clamp_to` of them, else ``None``."""
-    if not isinstance(expr, TernaryExpr) or not isinstance(expr.cond, BinaryExpr) or expr.cond.op != "<":
+def clamped(expression: Expression) -> tuple[Expression, Expression] | None:
+    """``(position, extent)`` when ``expression`` is :func:`clamp_to` of them, else ``None``."""
+    if not isinstance(expression, TernaryExpr) or not isinstance(expression.cond, BinaryExpr) or expression.cond.op != "<":
         return None
-    position, extent = expr.cond.left, expr.cond.right
-    if expr.if_true == position and expr.if_false == BinaryExpr("-", extent, Literal(1, "int")):
+    position, extent = expression.cond.left, expression.cond.right
+    if expression.if_true == position and expression.if_false == BinaryExpr("-", extent, Literal(1, "int")):
         return position, extent
     return None
 
@@ -67,7 +67,7 @@ def unclamped(load: Load) -> Load:
     return Load(load.names, load.input, tuple(c[0] if (c := clamped(e)) is not None else e for e in load.index))
 
 
-def clamp_bound(load: Load, axis_name: str) -> Expr | None:
+def clamp_bound(load: Load, axis_name: str) -> Expression | None:
     """How far along ``axis_name`` ``load`` reads in bounds, from the axis's own origin: the clamp's extent less the
     position at ``axis_name = 0``. ``None`` when no component of the index clamps a position over ``axis_name``."""
     for e in load.index:
@@ -162,24 +162,24 @@ def _run_gcd(a: int, b: int) -> int:
     return b if a == 0 else a if b == 0 else math.gcd(a, b)
 
 
-def _int_lit(e: Expr) -> int | None:
+def _int_lit(e: Expression) -> int | None:
     """``e``'s value when it is an integer :class:`Literal`, else ``None``."""
     return e.value if isinstance(e, Literal) and isinstance(e.value, int) and not isinstance(e.value, bool) else None
 
 
-def _divisible(expr: Expr, n: int) -> bool:
-    """Whether ``expr`` is PROVABLY a multiple of ``n`` — every additive term literal-``n``-divisible
+def _divisible(expression: Expression, n: int) -> bool:
+    """Whether ``expression`` is PROVABLY a multiple of ``n`` — every additive term literal-``n``-divisible
     or carrying a literal factor that is. Conservative: an opaque var answers no."""
-    if (v := _int_lit(expr)) is not None:
+    if (v := _int_lit(expression)) is not None:
         return v % n == 0
-    if isinstance(expr, BinaryExpr) and expr.op in ("+", "-"):
-        return _divisible(expr.left, n) and _divisible(expr.right, n)
-    if isinstance(expr, BinaryExpr) and expr.op == "*":
-        return _divisible(expr.left, n) or _divisible(expr.right, n)
+    if isinstance(expression, BinaryExpr) and expression.op in ("+", "-"):
+        return _divisible(expression.left, n) and _divisible(expression.right, n)
+    if isinstance(expression, BinaryExpr) and expression.op == "*":
+        return _divisible(expression.left, n) or _divisible(expression.right, n)
     return False
 
 
-def _axis_step(expr: Expr, axis: str) -> tuple[int, int] | None:
+def _axis_step(expression: Expression, axis: str) -> tuple[int, int] | None:
     """``(delta, run)`` for ONE index component — see :func:`gmem_axis_step`. ``None`` when the
     component's dependence on ``axis`` is not a step at all (a clamp, a gather, ``axis·axis``).
 
@@ -191,40 +191,40 @@ def _axis_step(expr: Expr, axis: str) -> tuple[int, int] | None:
     by one, each over an ``n``-aligned ``n``-window.
 
     Both readings take the operand NON-NEGATIVE, which a buffer coordinate is (the same assumption
-    ``expr._div_mod_decompose`` states as a range check); C truncation toward zero would break the
+    ``expression._div_mod_decompose`` states as a range check); C truncation toward zero would break the
     window argument below zero."""
-    if axis not in expr.free_vars():
+    if axis not in expression.free_vars():
         return 0, 0
-    if isinstance(expr, Var):
+    if isinstance(expression, Var):
         return 1, 0
-    if not isinstance(expr, BinaryExpr):
+    if not isinstance(expression, BinaryExpr):
         return None
-    if expr.op in ("+", "-"):
-        left, right = _axis_step(expr.left, axis), _axis_step(expr.right, axis)
+    if expression.op in ("+", "-"):
+        left, right = _axis_step(expression.left, axis), _axis_step(expression.right, axis)
         if left is None or right is None:
             return None
-        return left[0] + (right[0] if expr.op == "+" else -right[0]), _run_gcd(left[1], right[1])
-    if expr.op == "*":
-        for side, other in ((expr.left, expr.right), (expr.right, expr.left)):
+        return left[0] + (right[0] if expression.op == "+" else -right[0]), _run_gcd(left[1], right[1])
+    if expression.op == "*":
+        for side, other in ((expression.left, expression.right), (expression.right, expression.left)):
             if axis in other.free_vars():
                 continue
             mult = _int_lit(other)
             step = _axis_step(side, axis) if mult is not None else None
             return None if step is None else (step[0] * mult, step[1])
         return None  # axis · axis — not a step
-    if expr.op in ("/", "%") and (n := _int_lit(expr.right)) is not None and n > 0:
-        step = _axis_step(expr.left, axis)
+    if expression.op in ("/", "%") and (n := _int_lit(expression.right)) is not None and n > 0:
+        step = _axis_step(expression.left, axis)
         if step is None:
             return None
         delta, run = step
         if delta % n == 0:  # whole blocks: the block index steps, the offset holds still
-            return (delta // n, run) if expr.op == "/" else (0, run)
-        if delta == 1 and run == 0 and _divisible(expr.left.substitute({axis: Literal(0, "int")}), n):
-            return (0, _run_gcd(run, n)) if expr.op == "/" else (1, _run_gcd(run, n))
+            return (delta // n, run) if expression.op == "/" else (0, run)
+        if delta == 1 and run == 0 and _divisible(expression.left.substitute({axis: Literal(0, "int")}), n):
+            return (0, _run_gcd(run, n)) if expression.op == "/" else (1, _run_gcd(run, n))
     return None
 
 
-def _delinearized(index: tuple, shape: tuple) -> Expr | None:
+def _delinearized(index: tuple, shape: tuple) -> Expression | None:
     """The ONE flat source coordinate a DELINEARIZING index map re-reads, or ``None`` when
     ``index`` is not such a map.
 
@@ -267,7 +267,7 @@ def _delinearized(index: tuple, shape: tuple) -> Expr | None:
 
 
 def split_pair(index: tuple, name: str) -> int | None:
-    """``Q`` when the exprs of ``index`` mentioning ``name`` are exactly one integer quotient and one
+    """``Q`` when the expressions of ``index`` mentioning ``name`` are exactly one integer quotient and one
     ``name % Q`` (the split-store spelling a re-fused axis reaches a buffer with, in either dim
     order), else ``None``."""
     carrying = [e for e in index if name in e.free_vars()]

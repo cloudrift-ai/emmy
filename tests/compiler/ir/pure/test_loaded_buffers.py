@@ -4,7 +4,7 @@ operand edges, never off a lowered view."""
 from __future__ import annotations
 
 from emmy.compiler.ir.axis import Axis
-from emmy.compiler.ir.expr import Var
+from emmy.compiler.ir.expression import Var
 from emmy.compiler.ir.stmt import Assign, Load
 from emmy.compiler.pipeline.passes.tile._cut import _buffer_reads
 from tests.compiler.terms import contraction, projection, slab
@@ -25,7 +25,7 @@ def _root_holding_a_cone():
 def test_a_cone_held_as_an_edge_still_reports_its_operand_buffers() -> None:
     """The lowered body cannot answer this, which is why the cut may not ask it.
 
-    ``Body.loads`` walks ``Stmt.nested()``, and a Fold's operand edges are not nested statements —
+    ``Body.loads`` walks ``Statement.nested()``, and a Fold's operand edges are not nested statements —
     so a region that keeps its cone as a term hides every buffer beneath that edge. A cut that
     declared the lowered view named fewer graph inputs than the kernel the materializer built from
     the same tree went on to read; the workspace producers lost their only consumer edge, were

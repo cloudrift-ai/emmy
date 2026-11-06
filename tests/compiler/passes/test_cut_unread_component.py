@@ -25,7 +25,7 @@ from emmy.compiler.dtype import F32
 from emmy.compiler.graph import Graph, Node, Tensor
 from emmy.compiler.ir.axis import Axis
 from emmy.compiler.ir.base import InputOp
-from emmy.compiler.ir.expr import Var
+from emmy.compiler.ir.expression import Var
 from emmy.compiler.ir.schedule import Placement
 from emmy.compiler.ir.stmt import Assign, Load, OutputSpec, Write
 from emmy.compiler.ir.tile import TileOp

@@ -15,7 +15,7 @@ import pytest
 
 from emmy.compiler.ir.axis import Axis
 from emmy.compiler.ir.elementwise import ElementwiseImpl
-from emmy.compiler.ir.expr import Var
+from emmy.compiler.ir.expression import Var
 from emmy.compiler.ir.pure import Lambda
 from emmy.compiler.ir.pure.fold import Fold
 from emmy.compiler.ir.pure.twist import SOFTMAX, Twist

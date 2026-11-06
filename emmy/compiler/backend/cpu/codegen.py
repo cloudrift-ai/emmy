@@ -219,7 +219,7 @@ class _Fn:
                 if otherwise is not None:
                     otherwise()
 
-    def expr(self, e):
+    def expression(self, e):
         """An index, predicate or scalar expression: i64 for integers, i1 for predicates, f32 for SSA values."""
         k = _kind(e)
         b = self.b
@@ -238,14 +238,14 @@ class _Fn:
                 return b.load(self.vars[e.name], typ=F32)
             raise Unsupported(f"unbound variable {e.name}")
         if k == "CastExpr":
-            v = self.expr(e.expr)
+            v = self.expression(e.expression)
             if e.dtype in ("float", "f32"):
                 return v if v.type == F32 else b.sitofp(self.integer(v), F32)
             if e.dtype == "int":
                 return b.fptosi(v, I64) if v.type == F32 else self.integer(v)
             raise Unsupported(f"cast to {e.dtype}")
         if k == "TernaryExpr":
-            on_true, on_false = self.expr(e.if_true), self.expr(e.if_false)
+            on_true, on_false = self.expression(e.if_true), self.expression(e.if_false)
             if F32 in (on_true.type, on_false.type):
                 on_true, on_false = self.real(on_true), self.real(on_false)
             else:
@@ -255,7 +255,7 @@ class _Fn:
             op = e.op
             if op in ("&&", "||"):
                 return (b.and_ if op == "&&" else b.or_)(self.pred(e.left), self.pred(e.right))
-            left, right = self.expr(e.left), self.expr(e.right)
+            left, right = self.expression(e.left), self.expression(e.right)
             if F32 in (left.type, right.type):
                 left, right = self.real(left), self.real(right)
                 arith = {"+": b.fadd, "-": b.fsub, "*": b.fmul, "/": b.fdiv}
@@ -292,21 +292,21 @@ class _Fn:
         return v if v.type == F32 else self.b.sitofp(self.integer(v), F32)
 
     def index(self, e):
-        return self.integer(self.expr(e))
+        return self.integer(self.expression(e))
 
     def pred(self, e):
-        v = self.expr(e)
+        v = self.expression(e)
         if v.type == F32:
             return self.b.fcmp_unordered("!=", v, ir.Constant(F32, 0.0))
         return v if v.type == I1 else self.b.icmp_signed("!=", v, ir.Constant(I64, 0))
 
-    def element(self, buf, index_exprs):
+    def element(self, buf, index_expressions):
         """Row-major address of ``buf[index...]``; a runtime dimension makes the stride a runtime product."""
         shape = self.shapes[buf]
-        if len(index_exprs) not in (0, len(shape)):
-            raise Unsupported(f"{buf}: {len(index_exprs)} indices for rank {len(shape)}")
+        if len(index_expressions) not in (0, len(shape)):
+            raise Unsupported(f"{buf}: {len(index_expressions)} indices for rank {len(shape)}")
         offset, stride = ir.Constant(I64, 0), 1
-        for e, d in zip(reversed(index_exprs), reversed(shape), strict=False):
+        for e, d in zip(reversed(index_expressions), reversed(shape), strict=False):
             term = self.index(e)
             if not (isinstance(stride, int) and stride == 1):
                 term = self.b.mul(term, ir.Constant(I64, stride) if isinstance(stride, int) else stride)
@@ -515,7 +515,7 @@ class _Fn:
                     result = self.b.select(self.pred(branch.select), self.value(branch.value, acc_index), result)
                 self.b.store(result, self.slot(s.name))
             elif k == "Let":
-                v = self.expr(s.value)
+                v = self.expression(s.value)
                 if v.type == F32:
                     self.b.store(v, self.slot(s.name))
                 else:
@@ -903,11 +903,11 @@ def _tiled(part, nest, accums, red_loop, par_loops, post, lo, hi, rows_block, co
 def _lane_body(stmts, red: str, block: str, lanes: int, lane: int, blocks: int) -> list:
     """``stmts`` with the reduce index ``red`` spelled ``lanes * block + lane`` and every expression simplified, so an
     index that is constant across a block's lanes (a block scale's) reads ``block`` alone."""
-    from emmy.compiler.ir.expr import BinaryExpr, Interval, Literal, SimplifyCtx, Var  # noqa: PLC0415
+    from emmy.compiler.ir.expression import BinaryExpr, Interval, Literal, SimplifyCtx, Var  # noqa: PLC0415
 
     at = BinaryExpr("+", BinaryExpr("*", Var(block), Literal(lanes, "int")), Literal(lane, "int"))
     ctx = SimplifyCtx.empty().extend(block, Interval(0, blocks - 1))
-    return [s.map_exprs(lambda e: e.substitute({red: at}).simplify(ctx)) for s in stmts]
+    return [s.map_expressions(lambda e: e.substitute({red: at}).simplify(ctx)) for s in stmts]
 
 
 def _full_reduction(start, nest, accums, red_loop, post, buffers, shapes, dtypes, size_names, parallel):

@@ -23,7 +23,7 @@ from __future__ import annotations
 
 from emmy.compiler.graph import Graph, Node, Tensor
 from emmy.compiler.ir.base import InputOp
-from emmy.compiler.ir.expr import BinaryExpr, CastExpr, Literal, TernaryExpr, Var, placeholder
+from emmy.compiler.ir.expression import BinaryExpr, CastExpr, Literal, TernaryExpr, Var, placeholder
 from emmy.compiler.ir.loop import Axis, Cond, Load, Loop, LoopOp, Write
 from emmy.compiler.ir.stmt import Body
 from emmy.compiler.ir.tensor.ir import IndexMapOp, IndexSource, ScatterOp
@@ -50,7 +50,7 @@ def rewrite(match: Match, root: Node, inp_dest: Node, inp_idx: Node, inp_values:
     axis = int(root.op.axis) % rank
     idx_shape = tuple(inp_idx.output.shape)
     value_shape = tuple(inp_values.output.shape)
-    extent = dest_shape[axis].expr
+    extent = dest_shape[axis].expression
     index = CastExpr("int", Var("idx"))
     index = TernaryExpr(index.lt(0), index + extent, index)
 

@@ -28,10 +28,10 @@ from emmy.compiler.dtype import F32
 from emmy.compiler.graph import Graph, Node, Tensor
 from emmy.compiler.ir.axis import Axis
 from emmy.compiler.ir.base import ConstantOp, InputOp
-from emmy.compiler.ir.expr import BinaryExpr, Expr, Literal, Var, affine_form
+from emmy.compiler.ir.expression import BinaryExpr, Expression, Literal, Var, affine_form
 from emmy.compiler.ir.loop import LoopOp, UnfusableStmt
 from emmy.compiler.ir.sigma import Sigma
-from emmy.compiler.ir.stmt import Accum, Assign, Body, Carry, Let, Load, Loop, Pre, Select, SelectBranch, Stmt, Write
+from emmy.compiler.ir.stmt import Accum, Assign, Body, Carry, Let, Load, Loop, Pre, Select, SelectBranch, Statement, Write
 from emmy.compiler.pipeline import Match, Pattern, RuleSkipped
 from emmy.compiler.pipeline.passes.loop.fusion._region import build_merged_region, live_outputs_of
 
@@ -77,23 +77,23 @@ def _literals_abstracted(body: Body) -> tuple[Body, tuple[int, ...]]:
         literals.append(value)
         return Var(f"__lit{len(literals) - 1}")
 
-    def abstract(expr):
-        if isinstance(expr, Literal) and expr.dtype == "int" and type(expr.value) is int:
-            return held(expr.value)
-        return expr
+    def abstract(expression):
+        if isinstance(expression, Literal) and expression.dtype == "int" and type(expression.value) is int:
+            return held(expression.value)
+        return expression
 
-    def lift(expr):
+    def lift(expression):
         # An affine index carries its anchor whole, a zero one included: ``a`` and ``a + 4`` are
         # one shape read at two offsets, and normalization spells the first without the ``+ 0``.
-        if isinstance(expr, Literal):
-            return abstract(expr)
-        form = affine_form(expr, expr.free_vars())
+        if isinstance(expression, Literal):
+            return abstract(expression)
+        form = affine_form(expression, expression.free_vars())
         try:
             anchor = int(form[0].eval({})) if form is not None else None
         except (KeyError, TypeError, ValueError):
             anchor = None
         if anchor is None:
-            return expr.rebuild(abstract)
+            return expression.rebuild(abstract)
         rest = None
         for name, coeff in sorted(form[1].items()):
             term = Var(name) if coeff == 1 else BinaryExpr("*", Var(name), Literal(coeff, "int"))
@@ -103,9 +103,9 @@ def _literals_abstracted(body: Body) -> tuple[Body, tuple[int, ...]]:
     def abstracted(stmt):
         # A loop's static extent is a literal too: a step whose reduction covers one more
         # element than the last is still the same step.
-        if isinstance(stmt, Loop) and isinstance(stmt.axis.extent.expr, Literal) and type(stmt.axis.extent.expr.value) is int:
-            return stmt.replace(axis=replace(stmt.axis, extent=Dim(held(stmt.axis.extent.expr.value))))
-        return stmt.map_exprs(lift)
+        if isinstance(stmt, Loop) and isinstance(stmt.axis.extent.expression, Literal) and type(stmt.axis.extent.expression.value) is int:
+            return stmt.replace(axis=replace(stmt.axis, extent=Dim(held(stmt.axis.extent.expression.value))))
+        return stmt.map_expressions(lift)
 
     return body.map(abstracted), tuple(literals)
 
@@ -234,22 +234,22 @@ def _advanced(abstract: Body, literals: tuple[int, ...], deltas: tuple[int, ...]
     step's own bound each accumulate folds its identity instead — the mask the tracer itself
     spells a partial reduction with, and no wider than a step the chain ran."""
 
-    def value(literal: int, delta: int) -> Expr:
+    def value(literal: int, delta: int) -> Expression:
         if isinstance(by, int):
             return Literal(literal + delta * by, "int")
         return BinaryExpr("+", Literal(literal, "int"), BinaryExpr("*", by, Literal(delta, "int"))) if delta else Literal(literal, "int")
 
-    def fold(expr: Expr) -> Expr:
+    def fold(expression: Expression) -> Expression:
         # The abstraction lifts every affine anchor, so a zero one comes back as ``+ 0``.
-        if isinstance(expr, BinaryExpr) and expr.op == "+" and expr.right == Literal(0, "int"):
-            return expr.left
-        return expr
+        if isinstance(expression, BinaryExpr) and expression.op == "+" and expression.right == Literal(0, "int"):
+            return expression.left
+        return expression
 
     sigma = Sigma({f"__lit{index}": value(literal, delta) for index, (literal, delta) in enumerate(zip(literals, deltas, strict=True))})
     masked = 0
 
-    def mask(within: Expr):
-        def past_the_bound(stmt: Stmt) -> Stmt | tuple[Stmt, ...]:
+    def mask(within: Expression):
+        def past_the_bound(stmt: Statement) -> Statement | tuple[Statement, ...]:
             nonlocal masked
             if not isinstance(stmt, Accum):
                 if isinstance(stmt, (Write, Carry)):
@@ -264,12 +264,12 @@ def _advanced(abstract: Body, literals: tuple[int, ...], deltas: tuple[int, ...]
 
         return past_the_bound
 
-    def advance(stmt: Stmt) -> Stmt:
+    def advance(stmt: Statement) -> Statement:
         if isinstance(stmt, Loop):
-            expr = stmt.axis.extent.expr
-            if not (isinstance(expr, Var) and expr.name.startswith("__lit")):
+            expression = stmt.axis.extent.expression
+            if not (isinstance(expression, Var) and expression.name.startswith("__lit")):
                 return stmt
-            literal, delta = literals[int(expr.name[5:])], deltas[int(expr.name[5:])]
+            literal, delta = literals[int(expression.name[5:])], deltas[int(expression.name[5:])]
             if isinstance(by, int) or delta == 0:
                 return stmt.replace(axis=replace(stmt.axis, extent=Dim(literal + delta * (by if isinstance(by, int) else 0))))
             widest = max(literal, literal + delta * (steps - 1))
@@ -277,7 +277,7 @@ def _advanced(abstract: Body, literals: tuple[int, ...], deltas: tuple[int, ...]
             return stmt.replace(axis=replace(stmt.axis, extent=Dim(widest)), body=stmt.body.map(mask(within)))
         if stmt.nested():
             return stmt
-        return stmt.rewrite(lambda name: name, sigma).map_exprs(lambda expr: expr.rebuild(fold))
+        return stmt.rewrite(lambda name: name, sigma).map_expressions(lambda expression: expression.rebuild(fold))
 
     return abstract.map(advance)
 
@@ -292,7 +292,7 @@ def _rolled(step: Body, steps: int, seed: float | str) -> Body:
     """The step under a loop that carries its state: the state read becomes a ``Pre`` read, its
     store the state's definition, and every kept buffer gains the step as its leading axis."""
 
-    def roll(stmt: Stmt) -> Stmt | tuple[Stmt, ...]:
+    def roll(stmt: Statement) -> Statement | tuple[Statement, ...]:
         if isinstance(stmt, Load) and stmt.input == _STATE:
             return Pre(name=stmt.names[0], carrier=_STATE, index=stmt.index)
         if not isinstance(stmt, Write):

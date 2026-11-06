@@ -11,7 +11,7 @@ from __future__ import annotations
 import pytest
 
 from emmy.compiler.ir.axis import Axis
-from emmy.compiler.ir.expr import Literal, Var
+from emmy.compiler.ir.expression import Literal, Var
 from emmy.compiler.ir.stmt import Accum, Assign, Body, Load, Loop, StridedLoop
 
 

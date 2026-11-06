@@ -12,7 +12,7 @@ from emmy.compiler.dtype import F32
 from emmy.compiler.dtype import get as dtype_get
 from emmy.compiler.graph import Node
 from emmy.compiler.ir.axis import Axis
-from emmy.compiler.ir.expr import BinaryExpr, Builtin, Literal, SimplifyCtx, TernaryExpr, Var
+from emmy.compiler.ir.expression import BinaryExpr, Builtin, Literal, SimplifyCtx, TernaryExpr, Var
 from emmy.compiler.ir.kernel import KernelOp, Smem, Sync, Tile
 from emmy.compiler.ir.stmt import (
     Accum,
@@ -42,8 +42,12 @@ _stamp = import_module("emmy.compiler.pipeline.passes.lowering.kernel.030_stamp_
 _materialize = import_module("emmy.compiler.pipeline.passes.lowering.kernel.010_materialize")
 
 
-def _conjuncts(expr):
-    return _conjuncts(expr.left) | _conjuncts(expr.right) if isinstance(expr, BinaryExpr) and expr.op == "&&" else frozenset((expr,))
+def _conjuncts(expression):
+    return (
+        _conjuncts(expression.left) | _conjuncts(expression.right)
+        if isinstance(expression, BinaryExpr) and expression.op == "&&"
+        else frozenset((expression,))
+    )
 
 
 def _owned(body, carry):
@@ -201,7 +205,7 @@ def _resident(op, program, retained=frozenset()):
         copying, predicate = (), None
     step = Body((*step, Sync()))
     for axis in reversed(grid):
-        start, end = Literal(0, "int"), axis.extent_expr()
+        start, end = Literal(0, "int"), axis.extent_expression()
         if predicate is not None:
             for condition in _conjuncts(predicate):
                 if not isinstance(condition, BinaryExpr):

@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from emmy.compiler.ir.expr import BinaryExpr, Literal, Var
+from emmy.compiler.ir.expression import BinaryExpr, Literal, Var
 from emmy.compiler.ir.loop import (
     Assign,
     Axis,
@@ -60,11 +60,11 @@ def test_large_sigma_target_free_vars_walks_do_not_scale_with_producer_chain(mon
         root_walks = 0
         original = BinaryExpr.free_vars
 
-        def counted_free_vars(expr):
+        def counted_free_vars(expression):
             nonlocal root_walks
-            if expr.op == "^":
+            if expression.op == "^":
                 root_walks += 1
-            return original(expr)
+            return original(expression)
 
         with monkeypatch.context() as patch:
             patch.setattr(BinaryExpr, "free_vars", counted_free_vars)

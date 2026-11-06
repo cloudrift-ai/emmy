@@ -17,7 +17,7 @@ import pytest
 
 from emmy.compiler.dtype import F8E4M3, F32
 from emmy.compiler.graph import Tensor
-from emmy.compiler.ir.expr import BinaryExpr, Literal, Var
+from emmy.compiler.ir.expression import BinaryExpr, Literal, Var
 from emmy.compiler.ir.schedule.packing import match_packed_kblock_b
 from emmy.compiler.ir.schedule.views import cone_seam
 from emmy.compiler.ir.stmt import Assign, Load
