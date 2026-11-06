@@ -34,7 +34,6 @@ from __future__ import annotations
 from collections.abc import Callable, Iterator
 from dataclasses import MISSING, Field, dataclass, field, fields, replace
 from functools import cache
-from itertools import islice
 from typing import dataclass_transform
 
 from emmy.compiler.ir.expr import Expr
@@ -180,8 +179,9 @@ def _members(cls: type) -> dict[str, Callable]:
     members["external_writes"] = reader(_BUFFER_WRITES, "external_writes", unique=True)
     members["local_decls"] = reader(_LOCAL_BUFFERS)
     if (exprs := reader(_EXPRS, "exprs")) is not None:
-        members.update(exprs=exprs, with_exprs=_with_exprs)
+        members.update(exprs=exprs, map_exprs=_map_exprs)
     if axes := _route(cls, _AXES, False):
+        members["bound_axes"] = lambda self: tuple(_gather(self, axes, _AXES))
         members["binds_axes"] = lambda self: frozenset(axis.name for axis in _gather(self, axes, _AXES))
     if len(bodies) == 1:
         members["nested"] = lambda self: (getattr(self, bodies[0]),)
@@ -225,30 +225,27 @@ def _deps(cls: type) -> Callable | None:
     return deps
 
 
-def _with_exprs(self: Stmt, exprs: tuple[Expr, ...]) -> Stmt:
-    fresh = iter(exprs)
-
+def _map_exprs(self: Stmt, fn: Callable[[Expr], Expr]) -> Stmt:
     def change(has: frozenset[str], value):  # noqa: ANN001, ANN202 — a field's value
         if "expr" in has:
-            return _each(value, lambda _expr: next(fresh))
-        if has & _CARRIED:
-            carried = (stmt.with_exprs(tuple(islice(fresh, len(tuple(stmt.exprs()))))) for stmt in value)
-            return Body(carried) if "term" in has else tuple(carried)
+            return _each(value, fn)
+        if "term" in has:
+            return _mapped(value, lambda stmt: stmt.map_exprs(fn))
+        if "stmts" in has:
+            return tuple(stmt.map_exprs(fn) for stmt in value)
         return value
 
-    rebuilt = _rebuilt(self, change)
-    if next(fresh, None) is not None:
-        raise ValueError(f"{type(self).__name__} holds fewer expressions than it was given")
-    return rebuilt
+    return _rebuilt(self, change)
 
 
 def _rename_buffers(self: Stmt, rename) -> Stmt:  # noqa: ANN001 — see ``Stmt.rename_buffers``
     def change(has: frozenset[str], value):  # noqa: ANN001, ANN202 — a field's value
         if has & (_BUFFER_READS | _BUFFER_WRITES):
             return _each(value, lambda buffer: rename.get(buffer, buffer))
-        if has & _CARRIED:
-            carried = (stmt.rename_buffers(rename) for stmt in value)
-            return Body(carried) if "term" in has else tuple(carried)
+        if "term" in has:
+            return _mapped(value, lambda stmt: stmt.rename_buffers(rename))
+        if "stmts" in has:
+            return tuple(stmt.rename_buffers(rename) for stmt in value)
         return value
 
     return _rebuilt(self, change)
@@ -276,10 +273,7 @@ def rewrite_by_roles(self: Stmt, rename, sigma, axis_fn) -> Stmt:  # noqa: ANN00
         if "term" in has:  # its statements' names are its own; a coordinate its expressions read is not
             defined = {name for stmt in value for name in stmt.defines()}
             moved = (stmt.rewrite(_identity_rename, sigma, axis_fn) for stmt in value)
-            return Body(
-                stmt.with_exprs(tuple(expr.rename(lambda name: name if name in defined else rename(name)) for expr in stmt.exprs()))
-                for stmt in moved
-            )
+            return Body(stmt.map_exprs(lambda expr: expr.rename(lambda name: name if name in defined else rename(name))) for stmt in moved)
         return value
 
     return _rebuilt(self, change)

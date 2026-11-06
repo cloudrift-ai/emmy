@@ -9,12 +9,11 @@ chosen by normalization from the value numbering.
 
 from __future__ import annotations
 
-from emmy.compiler.ir.axis import Axis
 from emmy.compiler.ir.stmt.base import Stmt
 from emmy.compiler.ir.stmt.body import Body
 from emmy.compiler.ir.stmt.leaves import Accum, Carry, Init
 
-__all__ = ["bound_axes", "ordering_constraints", "topological_sort"]
+__all__ = ["ordering_constraints", "topological_sort"]
 
 
 def _ordered_sibling_defs(stmt: Stmt) -> tuple[str, ...]:
@@ -38,14 +37,6 @@ def _free_ssa(stmt: Stmt) -> frozenset[str]:
     for child in children:
         reads.update(child._free_ssa)
     return frozenset(reads)
-
-
-def bound_axes(stmt: Stmt) -> tuple[Axis, ...]:
-    """The axes a statement binds, as :class:`Axis` values."""
-    axis = getattr(stmt, "axis", None)
-    if isinstance(axis, Axis):
-        return (axis,)
-    return tuple(axis for axis in getattr(stmt, "axes", ()) if isinstance(axis, Axis))
 
 
 def _resources(stmt: Stmt) -> tuple[set[str], set[str], set[str]]:

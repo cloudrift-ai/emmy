@@ -23,7 +23,7 @@ line-by-line translation.
 
 The preparation is Python only and changes no kernel. Most of it is merged or in review (#1334 to #1348).
 
-- One package, 37 exported names, 21 of them classes. 71 compiler files and 117 test files import it, and nothing
+- One package, 36 exported names, 20 of them classes. 71 compiler files and 117 test files import it, and nothing
   imports a submodule. The compiler constructs a statement at 566 sites and tests a statement's kind at 401.
 - 5,039 lines: normalization 1,427, value numbering 536, the order and identity 222, `Body` 679, the text 483, the
   kinds 888, the protocol 641, the package file and two helpers 163.
@@ -164,7 +164,7 @@ golden's fresh lowering (8.2 s when the one-pass normalization landed).
 
 ### 6. The switch
 
-The extension exports the classes and functions under the module's 37 names, `emmy/compiler/ir/stmt/__init__.py`
+The extension exports the classes and functions under the module's 36 names, `emmy/compiler/ir/stmt/__init__.py`
 re-exports them, and the Python implementation is deleted in the same PR. The tune DB version moves.
 
 Verify: the full suite on a card; `emmy golden check` on every repository golden; the corpus regenerates with no

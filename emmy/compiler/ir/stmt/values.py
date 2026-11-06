@@ -29,7 +29,6 @@ from emmy.compiler.ir.expr import Var
 from emmy.compiler.ir.stmt import blocks, leaves
 from emmy.compiler.ir.stmt.base import Stmt
 from emmy.compiler.ir.stmt.body import Body
-from emmy.compiler.ir.stmt.order import bound_axes
 from emmy.compiler.structural import form
 
 __all__ = ["Numbering", "digest", "distinct", "effect_order", "roles", "scope_tree", "value_numbers"]
@@ -112,7 +111,6 @@ def _copy(stmt: Stmt) -> Stmt:
 def value_numbers(body: Body, resource_key: Callable[[str], object] = lambda name: name) -> Numbering:
     """Number every statement of ``body``, which holds every statement once (:func:`distinct`); ``resource_key``
     spells a buffer or carried state in a payload."""
-    from emmy.compiler.ir.stmt.passes import map_exprs  # noqa: PLC0415
 
     out = Numbering()
     env: dict[str, tuple[str, tuple[Param, ...]]] = {}
@@ -281,13 +279,13 @@ def value_numbers(body: Body, resource_key: Callable[[str], object] = lambda nam
                 names[name] = repr(operand(name, ops))
         for name in axes:
             names.setdefault(name, "$axis")
-        for index, axis in enumerate(bound_axes(stmt)):
+        for index, axis in enumerate(stmt.bound_axes()):
             names[axis.name] = f"$b{index}"
         for name in (*stmt.external_reads(), *stmt.external_writes()):
             if name not in names:
                 names[name] = repr(operand(name, ops) if name in env else resource(name, "buffer", touched))
         shell = stmt.with_bodies(tuple(Body() for _ in stmt.nested())) if stmt.nested() else stmt
-        shell = map_exprs(shell, lambda _expr: Var("$expr"))
+        shell = shell.map_exprs(lambda _expr: Var("$expr"))
         return form(shell.rename(names).rename_buffers(names)), exprs
 
     def visit(stmts: Body) -> None:
@@ -364,7 +362,7 @@ def value_numbers(body: Body, resource_key: Callable[[str], object] = lambda nam
                 out.kind[id(stmt)] = "block"
                 out.scope[id(stmt)] = tuple(path)
                 out.sources[id(stmt)] = tuple(defined_by[name] for name in stmt.deps() if name in defined_by)
-                bound = bound_axes(stmt)
+                bound = stmt.bound_axes()
                 saved = dict(env), {axis.name: axes.get(axis.name) for axis in bound}
                 for axis in bound:
                     axes[axis.name] = descriptor(axis, stmt)

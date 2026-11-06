@@ -34,7 +34,6 @@ from emmy.compiler.ir.stmt import (
     Subroutine,
     Write,
     ZeroPrologue,
-    map_exprs,
     parse_body,
 )
 
@@ -82,8 +81,8 @@ def test_every_kind_states_the_protocol() -> None:
             missing.append(f"{cls.__name__}: pretty")
         if (cls.nested is Stmt.nested) != (cls.with_bodies is Stmt.with_bodies):
             missing.append(f"{cls.__name__}: nested and with_bodies come together")
-        if (cls.exprs is Stmt.exprs) != (cls.with_exprs is Stmt.with_exprs):
-            missing.append(f"{cls.__name__}: exprs and with_exprs come together")
+        if (cls.exprs is Stmt.exprs) != (cls.map_exprs is Stmt.map_exprs):
+            missing.append(f"{cls.__name__}: exprs and map_exprs come together")
     assert not missing, "these statement kinds leave part of the protocol unstated:\n" + "\n".join(missing)
 
 
@@ -196,8 +195,8 @@ def test_every_exported_kind_has_an_example() -> None:
     assert {type(example) for example in _KERNEL_EXAMPLES} == kernel
 
 
-_PROTOCOL = ("deps", "defines", "external_reads", "external_writes", "local_decls", "binds_axes", "exprs", "with_exprs")
-_PROTOCOL += ("nested", "with_bodies", "rename_buffers", "_rewrite")
+_PROTOCOL = ("deps", "defines", "external_reads", "external_writes", "local_decls", "bound_axes", "binds_axes", "exprs")
+_PROTOCOL += ("map_exprs", "nested", "with_bodies", "rename_buffers", "_rewrite")
 
 
 def _stated(cls: type) -> set[str]:
@@ -295,8 +294,7 @@ def test_a_statement_rebuilds_as_itself(stmt) -> None:
     """Every rebuilding member, given what its reading half returned, gives back an equal statement."""
     assert stmt.rewrite(lambda name: name) == stmt
     assert stmt.with_bodies(stmt.nested()) == stmt
-    assert stmt.with_exprs(tuple(stmt.exprs())) == stmt
-    assert map_exprs(stmt, lambda expr: expr) is stmt
+    assert stmt.map_exprs(lambda expr: expr) is stmt
     assert stmt.rename_buffers({}) == stmt
 
 
@@ -315,15 +313,16 @@ def _held_exprs(value, child_bodies=()) -> list:
 
 @pytest.mark.parametrize("stmt", _ALL_EXAMPLES, ids=lambda stmt: type(stmt).__name__)
 def test_an_expression_map_reaches_every_expression_a_statement_holds(stmt) -> None:
-    """``exprs`` lists every expression of the statement and ``with_exprs`` puts each one back in its place."""
+    """``exprs`` lists every expression of the statement and ``map_exprs`` reaches each one in that order."""
     held = _held_exprs(stmt)
     assert sorted(map(repr, stmt.exprs())) == sorted(map(repr, held))
     markers = tuple(Var(f"e{index}") for index in range(len(held)))
     fresh = iter(markers)
-    mapped = map_exprs(stmt, lambda _expr: next(fresh))
+    mapped = stmt.map_exprs(lambda _expr: next(fresh))
     assert tuple(mapped.exprs()) == markers
     assert sorted(map(repr, _held_exprs(mapped))) == sorted(map(repr, markers))
-    assert mapped.with_exprs(tuple(stmt.exprs())) == stmt
+    back = iter(stmt.exprs())
+    assert mapped.map_exprs(lambda _expr: next(back)) == stmt
 
 
 @pytest.mark.parametrize("stmt", _STORED, ids=lambda stmt: type(stmt).__name__)
@@ -338,7 +337,7 @@ def test_a_rename_reaches_names_and_expressions() -> None:
     load, write = parse_body("x = load a[i]\nout[i] = x")
     assert str(load.rename(names)) == "x2 = load a[j]"
     assert str(write.rename(names)) == "out[j] = x2"
-    assert str(map_exprs(load, lambda expr: expr.rename(lambda name: names.get(name, name)))) == "x = load a[j]"
+    assert str(load.map_exprs(lambda expr: expr.rename(lambda name: names.get(name, name)))) == "x = load a[j]"
 
 
 def test_a_body_is_an_immutable_sequence_of_its_statements() -> None:
