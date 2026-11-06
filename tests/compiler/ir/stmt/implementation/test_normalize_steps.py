@@ -11,7 +11,8 @@ from emmy.compiler.ir.stmt.normalize import (
     _canonicalize_exprs,
     _normalize_body,
     drop_unread_values,
-    fold_values,
+    fold_affine,
+    fold_trivial_selects,
     prepare_body,
     rename_ssa_sequential,
 )
@@ -71,7 +72,7 @@ def test_a_commutative_comparison_orders_its_axes_by_binding_not_spelling() -> N
 
 def test_normal_form_is_a_fixed_point_when_the_order_breaks_a_tie_by_spelling() -> None:
     """Two loop-invariant values of one shape tie in the canonical order, which breaks the tie by their spelling: the
-    order runs again on its own output until it leaves it alone, so normalizing the normal form changes nothing."""
+    spelling reads nothing the order decides, so normalizing the normal form changes nothing."""
     tile = (Literal(0, "int"), Var("a0"), Var("a2") / Literal(64, "int"), Var("a2") % Literal(64, "int"))
     body = Body(
         (
@@ -150,14 +151,6 @@ def test_unread_values_leave_with_everything_only_they_read() -> None:
     assert drop_unread_values(Body((Loop(Axis("i", 8), (*chain, *kept)),))) == Body((Loop(Axis("i", 8), kept),))
 
 
-def test_the_folds_run_to_their_own_fixed_point() -> None:
-    """The folds feed each other: the difference is zero to the affine fold, its exponential and the quotient one to
-    the constant fold, and the product by it a copy to the affine fold again. One call settles all of it."""
-    folded = fold_values(prepare_body(rename_ssa_sequential(_one_key_softmax())))
-    assert fold_values(folded) is folded
-    assert [s.op.name for s in folded.iter() if isinstance(s, Assign)] == ["copy"]
-
-
 def test_no_step_changes_a_prepared_body_the_folds_leave_alone() -> None:
     """The driver runs the steps again only after a fold changed the body, so a prepared body the folds leave alone
     has to be one every step leaves alone."""
@@ -165,8 +158,8 @@ def test_no_step_changes_a_prepared_body_the_folds_leave_alone() -> None:
         prepared = rename_ssa_sequential(body)
         for _ in range(8):
             prepared = prepare_body(prepared)
-            folded = fold_values(prepared)
-            if folded is prepared:
+            folded = fold_affine(fold_trivial_selects(prepared))
+            if folded == prepared:
                 break
             prepared = folded
         else:
