@@ -61,6 +61,7 @@ from emmy.compiler.ir.stmt import (
     Assign,
     Body,
     Cond,
+    Declared,
     Load,
     Loop,
     Select,
@@ -69,6 +70,7 @@ from emmy.compiler.ir.stmt import (
     StridedLoop,
     Write,
     pretty_body,
+    role,
 )
 
 # The widest iteration space a 32-bit flat thread id can address — past this the
@@ -121,7 +123,7 @@ def _render_grid_axis_decode(axes: tuple[Axis, ...], idx_expr: str, ctx: RenderC
 
 
 @dataclass(frozen=True)
-class Smem(Stmt):
+class Smem(Declared):
     """Declare a per-block ``__shared__`` array.
 
     Renders to ``__shared__ [__align__(N)] <dtype> <name>[<prod(extents)>];``.
@@ -136,21 +138,15 @@ class Smem(Stmt):
     "no explicit alignment" — falls back to the dtype's natural alignment.
     """
 
-    name: str
+    name: str = role("local_buffer")
     extents: tuple[int, ...]
     dtype: str = "float"
     align: int = 0
-
-    def local_decls(self) -> tuple[str, ...]:
-        return (self.name,)
 
     def pretty(self, indent: str = "") -> list[str]:
         ext = ", ".join(str(e) for e in self.extents) or "-"
         ali = f" align={self.align}" if self.align else ""
         return [f"{indent}Smem {self.dtype} {self.name}[{ext}]{ali}"]
-
-    def _rewrite(self, rename, sigma, axis_fn):  # noqa: ANN001, ANN202 — see ``Stmt.rewrite``
-        return self
 
 
 @render_stmt.register
@@ -185,7 +181,7 @@ def _(stmt: Smem, ctx: RenderCtx) -> list[str]:
 
 
 @dataclass(frozen=True)
-class Sync(Stmt):
+class Sync(Declared):
     """Thread-group barrier.
 
     ``barrier_id == 0`` (default): ``__syncthreads();`` — CTA-wide.
@@ -215,9 +211,6 @@ class Sync(Stmt):
             return [f"{indent}Sync"]
         return [f"{indent}Sync(bar={self.barrier_id}, count={self.count})"]
 
-    def _rewrite(self, rename, sigma, axis_fn):  # noqa: ANN001, ANN202 — see ``Stmt.rewrite``
-        return self
-
 
 @render_stmt.register
 def _(stmt: Sync, ctx: RenderCtx) -> list[str]:
@@ -234,7 +227,7 @@ def _(stmt: Sync, ctx: RenderCtx) -> list[str]:
 
 
 @dataclass(frozen=True)
-class Tile(Stmt):
+class Tile(Declared):
     """Tile coordinate binding — one GPU thread per output element.
 
     The kernel-IR realization of a :class:`~emmy.compiler.ir.tile.TileOp`'s
@@ -281,14 +274,14 @@ class Tile(Stmt):
     ``threadIdx.x``, and the store side is guarded to compute threads).
     """
 
-    axes: tuple[Axis, ...]
-    body: Body
+    axes: tuple[Axis, ...] = role("axis")
+    body: Body = role("body")
     block_threads: int | None = None
     aux_threads: int = 0
     # The ``(m, n)`` BLOCK axis names of a 2-D-tiled contraction output — the structural
     # eligibility for CTA rasterization, stamped by ``grid_tile`` (only there is the m/n
     # identity known). ``None`` = not a 2-D contraction grid (reduce tier, 1-D output).
-    raster_axes: tuple[str, str] | None = None
+    raster_axes: tuple[str, str] | None = role("axis_name", default=None)
     # The resolved ``RASTER`` codec (grid_tile, off the TileOp's stamped knobs): the flat CTA
     # order iterates ``raster_group`` block-tiles of the ``raster_orient`` axis fastest within
     # each launch stripe, so consecutive CTAs share the same streamed operand slab and its
@@ -306,57 +299,12 @@ class Tile(Stmt):
         if self.aux_threads and self.block_threads is None:
             raise ValueError("Tile.aux_threads requires a cooperative block_threads")
 
-    def nested(self) -> tuple[Body, ...]:
-        return (self.body,)
-
-    def with_bodies(self, bodies: tuple[Body, ...]) -> Stmt:
-        (body,) = bodies
-        return Tile(
-            axes=self.axes,
-            body=body,
-            block_threads=self.block_threads,
-            aux_threads=self.aux_threads,
-            raster_axes=self.raster_axes,
-            raster_group=self.raster_group,
-            raster_orient=self.raster_orient,
-            spread=self.spread,
-        )
-
-    def binds_axes(self) -> frozenset[str]:
-        return frozenset(a.name for a in self.axes)
-
     def pretty(self, indent: str = "") -> list[str]:
         names = ", ".join(a.name for a in self.axes)
         # A symbolic grid (dynamic seq_len) prints its Dim product — ``n_elements`` would raise,
         # and ``pretty`` feeds ``structural_key`` / the op-inventory persist, so it must stay total.
         n = tile_n_elements(self) if tile_is_static(self) else tile_n_dim(self)
         return [f"{indent}Tile[{names}] (N={n})", *pretty_body(self.body, indent + "    ")]
-
-    def _rewrite(self, rename, sigma, axis_fn):  # noqa: ANN001, ANN202 — see ``Stmt.rewrite``
-        # ``axes`` map through ``axis_fn``; the body's stmts route through the
-        # generic per-stmt rewrite so SSA names / Exprs canonicalize inside. The
-        # per-CTA thread counts (``block_threads`` / ``aux_threads``) are geometry,
-        # not SSA — carry them through verbatim (dropping them silently falls the
-        # launch back to the scalar ``_BLOCK_SIZE``, over-launching a cooperative
-        # tile), exactly as ``Tile.with_bodies`` preserves them. The rasterization
-        # fields are geometry too — ``raster_axes`` names axes, so it follows the
-        # ``axis_fn`` renames (dropping it silently reverts the launch order to the
-        # ungrouped N-fastest raster — the exact silent-loss this handler's comment
-        # has always warned about).
-        new_axes = tuple(axis_fn(a) for a in self.axes)
-        raster_axes = self.raster_axes
-        if raster_axes is not None:
-            renames = {old.name: new.name for old, new in zip(self.axes, new_axes, strict=True)}
-            raster_axes = (renames.get(raster_axes[0], raster_axes[0]), renames.get(raster_axes[1], raster_axes[1]))
-        return Tile(
-            axes=new_axes,
-            body=Body(tuple(c.rewrite(rename, sigma, axis_fn) for c in self.body)),
-            block_threads=self.block_threads,
-            aux_threads=self.aux_threads,
-            raster_axes=raster_axes,
-            raster_group=self.raster_group,
-            raster_orient=self.raster_orient,
-        )
 
 
 def tile_extents(tile: Tile) -> tuple[int, ...]:
@@ -580,7 +528,7 @@ def _(node: Tile, ctx: RenderCtx) -> list[str]:
 
 
 @dataclass(frozen=True)
-class CpAsyncCopy(Stmt):
+class CpAsyncCopy(Declared):
     """Issue one ``cp.async.{ca,cg}.shared.global`` instruction.
 
     Replaces the per-thread ``Load(reg) + Write(smem)`` pair in cooperative
@@ -602,9 +550,9 @@ class CpAsyncCopy(Stmt):
     shape (same as ``Load`` / ``Write``)."""
 
     smem: str  # destination smem buffer name
-    smem_index: tuple[Expr, ...]
-    src: str  # source global buffer name
-    src_index: tuple[Expr, ...]
+    smem_index: tuple[Expr, ...] = role("expr")
+    src: str = role("buffer_read")  # source global buffer name
+    src_index: tuple[Expr, ...] = role("expr")
     nbytes: int = 4  # bytes per cp.async (4/8/16); 16 ⇒ .cg, else .ca
     # Software smem swizzle mode ("NONE"/"B32"/"B64"/"B128"): XOR the flattened destination
     # element index via ``emmy_swizzle_<mode>`` — the same address-based permutation the
@@ -615,20 +563,13 @@ class CpAsyncCopy(Stmt):
     # lane through the swizzle split (:func:`swizzled_slab_index`) — the swizzle of the lane's part
     # computed once, the stripe base an immediate — where a loop over the flat chunk index
     # re-swizzled every copy's whole index. ``None`` addresses the whole chunk in ``smem_index``.
-    lane_index: tuple[Expr, ...] | None = None
+    lane_index: tuple[Expr, ...] | None = role("expr", default=None)
     lane_rows: int = 0
     # Whether the chunk lies inside the source, for a tile row past a masked edge: the copy then
     # writes zeros and reads nothing. The source index stays clamped in bounds. Without it the
     # clamped rows all read the edge's last row, and on the A100 a 96-row tile over 512 rows spent
     # 23 us on a 16 us GEMM contending for that one row.
-    valid: Expr | None = None
-
-    def external_reads(self) -> tuple[str, ...]:
-        return (self.src,)
-
-    def rename_buffers(self, rename):  # noqa: ANN001 — see ``Stmt.rename_buffers``
-        new = rename.get(self.src, self.src)
-        return self if new == self.src else self.replace(src=new)
+    valid: Expr | None = role("expr", default=None)
 
     def pretty(self, indent: str = "") -> list[str]:
         smem_idx = ", ".join(e.pretty() for e in self.smem_index)
@@ -636,19 +577,6 @@ class CpAsyncCopy(Stmt):
         swz = f" swz={self.swizzle}" if swizzle_xor(self.swizzle) else ""
         lane = f" + lane({', '.join(e.pretty() for e in self.lane_index)})" if self.lane_index is not None else ""
         return [f"{indent}cp.async[{self.nbytes}B] {self.smem}[{smem_idx}]{lane}{swz} <- {self.src}[{src_idx}]"]
-
-    def _rewrite(self, rename, sigma, axis_fn):  # noqa: ANN001, ANN202 — see ``Stmt.rewrite``
-        return CpAsyncCopy(
-            smem=self.smem,
-            smem_index=tuple(sigma.apply(e) for e in self.smem_index),
-            src=self.src,
-            src_index=tuple(sigma.apply(e) for e in self.src_index),
-            nbytes=self.nbytes,
-            swizzle=self.swizzle,
-            lane_index=None if self.lane_index is None else tuple(sigma.apply(e) for e in self.lane_index),
-            lane_rows=self.lane_rows,
-            valid=None if self.valid is None else sigma.apply(self.valid),
-        )
 
 
 @render_stmt.register
@@ -678,16 +606,13 @@ def _(node: CpAsyncCopy, ctx: RenderCtx) -> list[str]:
 
 
 @dataclass(frozen=True)
-class CpAsyncCommit(Stmt):
+class CpAsyncCommit(Declared):
     """``cp.async.commit_group;`` — finalize the preceding cp.async copies
     issued by this thread into a commit group. Pairs with
     ``CpAsyncWait`` to wait for that group to drain."""
 
     def pretty(self, indent: str = "") -> list[str]:
         return [f"{indent}cp.async.commit_group"]
-
-    def _rewrite(self, rename, sigma, axis_fn):  # noqa: ANN001, ANN202 — see ``Stmt.rewrite``
-        return self
 
 
 @render_stmt.register
@@ -696,7 +621,7 @@ def _(stmt: CpAsyncCommit, ctx: RenderCtx) -> list[str]:
 
 
 @dataclass(frozen=True)
-class CpAsyncWait(Stmt):
+class CpAsyncWait(Declared):
     """``cp.async.wait_group N;`` — block this thread until ≤ N cp.async
     groups remain in flight. ``group=0`` waits for everything (synchronous
     style); larger values stagger waits for software pipelining."""
@@ -706,9 +631,6 @@ class CpAsyncWait(Stmt):
     def pretty(self, indent: str = "") -> list[str]:
         return [f"{indent}cp.async.wait_group({self.group})"]
 
-    def _rewrite(self, rename, sigma, axis_fn):  # noqa: ANN001, ANN202 — see ``Stmt.rewrite``
-        return self
-
 
 @render_stmt.register
 def _(stmt: CpAsyncWait, ctx: RenderCtx) -> list[str]:
@@ -716,7 +638,7 @@ def _(stmt: CpAsyncWait, ctx: RenderCtx) -> list[str]:
 
 
 @dataclass(frozen=True)
-class TmaDescriptor(Stmt):
+class TmaDescriptor(Declared):
     """Host-built ``CUtensorMap`` descriptor for a TMA box copy.
 
     Declarative — renders nothing inside the kernel. The CUDA backend
@@ -730,26 +652,16 @@ class TmaDescriptor(Stmt):
     """
 
     name: str
-    src_buf: str
+    src_buf: str = role("buffer_read")
     src_shape: tuple[int, ...]
     box_extents: tuple[int, ...]
     swizzle: str = "NONE"
     dtype: str = "float"
 
-    def external_reads(self) -> tuple[str, ...]:
-        return (self.src_buf,)
-
-    def rename_buffers(self, rename):  # noqa: ANN001 — see ``Stmt.rename_buffers``
-        new = rename.get(self.src_buf, self.src_buf)
-        return self if new == self.src_buf else self.replace(src_buf=new)
-
     def pretty(self, indent: str = "") -> list[str]:
         shape = ", ".join(str(e) for e in self.src_shape)
         box = ", ".join(str(e) for e in self.box_extents)
         return [f"{indent}TmaDescriptor {self.name} <- {self.src_buf}[{shape}] box=[{box}] swizzle={self.swizzle}"]
-
-    def _rewrite(self, rename, sigma, axis_fn):  # noqa: ANN001, ANN202 — see ``Stmt.rewrite``
-        return self
 
 
 @render_stmt.register
@@ -759,7 +671,7 @@ def _(stmt: TmaDescriptor, ctx: RenderCtx) -> list[str]:
 
 
 @dataclass(frozen=True)
-class TmaLoad(Stmt):
+class TmaLoad(Declared):
     """``cp.async.bulk.tensor.<rank>d`` — single-thread box copy.
 
     Issued by exactly one thread of the CTA (the materializer wraps this
@@ -769,27 +681,17 @@ class TmaLoad(Stmt):
     before) and ``MbarrierWait`` (issued by every consumer thread)."""
 
     smem: str
-    smem_index: tuple[Expr, ...]
+    smem_index: tuple[Expr, ...] = role("expr")
     desc: str
-    coords: tuple[Expr, ...]
+    coords: tuple[Expr, ...] = role("expr")
     mbar: str
-    mbar_slot: Expr | None = None
+    mbar_slot: Expr | None = role("expr", default=None)
 
     def pretty(self, indent: str = "") -> list[str]:
         smem_idx = ", ".join(e.pretty() for e in self.smem_index)
         coords = ", ".join(e.pretty() for e in self.coords)
         s = "" if self.mbar_slot is None else f"[{self.mbar_slot.pretty()}]"
         return [f"{indent}TmaLoad {self.smem}[{smem_idx}] <- {self.desc}({coords}) mbar={self.mbar}{s}"]
-
-    def _rewrite(self, rename, sigma, axis_fn):  # noqa: ANN001, ANN202 — see ``Stmt.rewrite``
-        return TmaLoad(
-            smem=self.smem,
-            smem_index=tuple(sigma.apply(e) for e in self.smem_index),
-            desc=self.desc,
-            coords=tuple(sigma.apply(e) for e in self.coords),
-            mbar=self.mbar,
-            mbar_slot=sigma.apply(self.mbar_slot) if self.mbar_slot is not None else None,
-        )
 
 
 @render_stmt.register
@@ -810,7 +712,7 @@ def _(node: TmaLoad, ctx: RenderCtx) -> list[str]:
 
 
 @dataclass(frozen=True)
-class MbarrierInit(Stmt):
+class MbarrierInit(Declared):
     """``mbarrier.init.shared.b64 [&mbar[slot]], count;`` — one-shot init.
 
     With ``slot=None``: initializes a scalar mbarrier (single-slot path).
@@ -821,18 +723,11 @@ class MbarrierInit(Stmt):
 
     mbar: str
     count: int = 1
-    slot: Expr | None = None
+    slot: Expr | None = role("expr", default=None)
 
     def pretty(self, indent: str = "") -> list[str]:
         s = "" if self.slot is None else f"[{self.slot.pretty()}]"
         return [f"{indent}MbarrierInit({self.mbar}{s}, count={self.count})"]
-
-    def _rewrite(self, rename, sigma, axis_fn):  # noqa: ANN001, ANN202 — see ``Stmt.rewrite``
-        return MbarrierInit(
-            mbar=self.mbar,
-            count=self.count,
-            slot=sigma.apply(self.slot) if self.slot is not None else None,
-        )
 
 
 @render_stmt.register
@@ -843,25 +738,18 @@ def _(stmt: MbarrierInit, ctx: RenderCtx) -> list[str]:
 
 
 @dataclass(frozen=True)
-class MbarrierArriveExpectTx(Stmt):
+class MbarrierArriveExpectTx(Declared):
     """``mbarrier.arrive.expect_tx.shared.b64`` — declare the expected
     transaction byte count for the in-flight TMA copy on this barrier.
     With per-slot mbarrier arrays, ``slot`` selects the ring buffer slot."""
 
     mbar: str
     bytes_: int
-    slot: Expr | None = None
+    slot: Expr | None = role("expr", default=None)
 
     def pretty(self, indent: str = "") -> list[str]:
         s = "" if self.slot is None else f"[{self.slot.pretty()}]"
         return [f"{indent}MbarrierArriveExpectTx({self.mbar}{s}, bytes={self.bytes_})"]
-
-    def _rewrite(self, rename, sigma, axis_fn):  # noqa: ANN001, ANN202 — see ``Stmt.rewrite``
-        return MbarrierArriveExpectTx(
-            mbar=self.mbar,
-            bytes_=self.bytes_,
-            slot=sigma.apply(self.slot) if self.slot is not None else None,
-        )
 
 
 @render_stmt.register
@@ -872,7 +760,7 @@ def _(stmt: MbarrierArriveExpectTx, ctx: RenderCtx) -> list[str]:
 
 
 @dataclass(frozen=True)
-class MbarrierArrive(Stmt):
+class MbarrierArrive(Declared):
     """``mbarrier.arrive.shared.b64`` — simple arrive (no transaction-byte
     count). Used by warp-specialized consumer warps to signal "slot empty"
     so the producer can refill it on the next ring iteration. The producer
@@ -880,17 +768,11 @@ class MbarrierArrive(Stmt):
     incoming TMA byte count)."""
 
     mbar: str
-    slot: Expr | None = None
+    slot: Expr | None = role("expr", default=None)
 
     def pretty(self, indent: str = "") -> list[str]:
         s = "" if self.slot is None else f"[{self.slot.pretty()}]"
         return [f"{indent}MbarrierArrive({self.mbar}{s})"]
-
-    def _rewrite(self, rename, sigma, axis_fn):  # noqa: ANN001, ANN202 — see ``Stmt.rewrite``
-        return MbarrierArrive(
-            mbar=self.mbar,
-            slot=sigma.apply(self.slot) if self.slot is not None else None,
-        )
 
 
 @render_stmt.register
@@ -901,7 +783,7 @@ def _(stmt: MbarrierArrive, ctx: RenderCtx) -> list[str]:
 
 
 @dataclass(frozen=True)
-class SetMaxNReg(Stmt):
+class SetMaxNReg(Declared):
     """``setmaxnreg.{inc,dec}.sync.aligned.u32 N;`` — Hopper+ register-budget
     redistribution. ``direction="dec"`` shrinks the calling warp's max
     register count to ``count`` (returning registers to the pool);
@@ -919,9 +801,6 @@ class SetMaxNReg(Stmt):
     def pretty(self, indent: str = "") -> list[str]:
         return [f"{indent}SetMaxNReg.{self.direction}({self.count})"]
 
-    def _rewrite(self, rename, sigma, axis_fn):  # noqa: ANN001, ANN202 — see ``Stmt.rewrite``
-        return self
-
 
 @render_stmt.register
 def _(stmt: SetMaxNReg, ctx: RenderCtx) -> list[str]:
@@ -930,26 +809,19 @@ def _(stmt: SetMaxNReg, ctx: RenderCtx) -> list[str]:
 
 
 @dataclass(frozen=True)
-class MbarrierWait(Stmt):
+class MbarrierWait(Declared):
     """``mbarrier.try_wait.parity.shared.b64`` — block until the barrier's
     parity flips for ``phase``. Replaces ``CpAsyncWait + Sync`` for TMA
     transports — mbarrier arrival already provides CTA-wide visibility.
     ``slot`` selects the ring buffer slot when the mbarrier is an array."""
 
     mbar: str
-    phase: Expr
-    slot: Expr | None = None
+    phase: Expr = role("expr")
+    slot: Expr | None = role("expr", default=None)
 
     def pretty(self, indent: str = "") -> list[str]:
         s = "" if self.slot is None else f"[{self.slot.pretty()}]"
         return [f"{indent}MbarrierWait({self.mbar}{s}, phase={self.phase.pretty()})"]
-
-    def _rewrite(self, rename, sigma, axis_fn):  # noqa: ANN001, ANN202 — see ``Stmt.rewrite``
-        return MbarrierWait(
-            mbar=self.mbar,
-            phase=sigma.apply(self.phase),
-            slot=sigma.apply(self.slot) if self.slot is not None else None,
-        )
 
 
 @render_stmt.register
@@ -961,7 +833,7 @@ def _(stmt: MbarrierWait, ctx: RenderCtx) -> list[str]:
 
 
 @dataclass(frozen=True)
-class TreeHalve(Stmt):
+class TreeHalve(Declared):
     """Cross-thread combine of a (possibly multi-component) monoid state over a
     PRE-POPULATED power-of-two smem tree — the > warp_size fallback for
     :class:`WarpShuffle`.
@@ -983,9 +855,9 @@ class TreeHalve(Stmt):
     """
 
     bufs: tuple[str, ...]
-    state: tuple[str, ...]
-    state_b: tuple[str, ...]
-    combine_states: tuple[Assign, ...]
+    state: tuple[str, ...] = role("reads")
+    state_b: tuple[str, ...] = role("local")
+    combine_states: tuple[Assign, ...] = role("stmts")
     length: int
     tid_var: str
     dtype: DataType = F32
@@ -997,30 +869,9 @@ class TreeHalve(Stmt):
     # ``buf[inner_var]``. ``None`` keeps the flat ``buf[t]`` layout.
     inner: tuple[str, int] | None = None
 
-    def deps(self) -> tuple[str, ...]:
-        return tuple(self.state)
-
     def pretty(self, indent: str = "") -> list[str]:
         bar = "" if self.barrier_id == 0 else f", bar={self.barrier_id}/{self.barrier_count}"
         return [f"{indent}TreeHalve({', '.join(self.state)}, length={self.length}, tid={self.tid_var}{bar})"]
-
-    def _rewrite(self, rename, sigma, axis_fn):  # noqa: ANN001, ANN202 — see ``Stmt.rewrite``
-        # The carried state, the second-operand state, and the combine_states program
-        # all reference SSA names — thread them through ``rename`` so the canonicalizer
-        # can renumber. ``bufs`` are smem slab names (absent from the rename map → no-op)
-        # and ``tid_var`` is a loop var, left untouched.
-        return TreeHalve(
-            bufs=tuple(rename(b) for b in self.bufs),
-            state=tuple(rename(n) for n in self.state),
-            state_b=tuple(rename(n) for n in self.state_b),
-            combine_states=tuple(a.rewrite(rename, sigma, axis_fn) for a in self.combine_states),
-            length=self.length,
-            tid_var=self.tid_var,
-            dtype=self.dtype,
-            barrier_id=self.barrier_id,
-            barrier_count=self.barrier_count,
-            inner=self.inner,
-        )
 
 
 @render_stmt.register
@@ -1090,7 +941,7 @@ def _(stmt: TreeHalve, ctx: RenderCtx) -> list[str]:
 
 
 @dataclass(frozen=True)
-class WarpShuffle(Stmt):
+class WarpShuffle(Declared):
     """Cross-thread combine of a (possibly multi-component) monoid state over
     ``length`` lanes via ``__shfl_xor_sync`` — a register-only butterfly (no smem,
     no syncthreads).
@@ -1121,28 +972,15 @@ class WarpShuffle(Stmt):
     is correct per warp).
     """
 
-    state: tuple[str, ...]
-    state_b: tuple[str, ...]
-    combine_states: tuple[Assign, ...]
+    state: tuple[str, ...] = role("reads")
+    state_b: tuple[str, ...] = role("local")
+    combine_states: tuple[Assign, ...] = role("stmts")
     length: int
     dtype: DataType = F32
     prefix: bool = False
 
-    def deps(self) -> tuple[str, ...]:
-        return tuple(self.state)
-
     def pretty(self, indent: str = "") -> list[str]:
         return [f"{indent}WarpShuffle({', '.join(self.state)}, length={self.length}, prefix={self.prefix})"]
-
-    def _rewrite(self, rename, sigma, axis_fn):  # noqa: ANN001, ANN202 — see ``Stmt.rewrite``
-        return WarpShuffle(
-            state=tuple(rename(n) for n in self.state),
-            state_b=tuple(rename(n) for n in self.state_b),
-            combine_states=tuple(a.rewrite(rename, sigma, axis_fn) for a in self.combine_states),
-            length=self.length,
-            dtype=self.dtype,
-            prefix=self.prefix,
-        )
 
 
 @render_stmt.register
@@ -1176,20 +1014,14 @@ def _(stmt: WarpShuffle, ctx: RenderCtx) -> list[str]:
 
 
 @dataclass(frozen=True)
-class WarpBroadcast(Stmt):
+class WarpBroadcast(Declared):
     """Broadcast the last lane's state within each aligned lane group, in place."""
 
-    state: tuple[str, ...]
+    state: tuple[str, ...] = role("reads")
     length: int
-
-    def deps(self) -> tuple[str, ...]:
-        return self.state
 
     def pretty(self, indent: str = "") -> list[str]:
         return [f"{indent}WarpBroadcast({', '.join(self.state)}, length={self.length})"]
-
-    def _rewrite(self, rename, sigma, axis_fn):  # noqa: ANN001, ANN202 — see ``Stmt.rewrite``
-        return WarpBroadcast(state=tuple(rename(n) for n in self.state), length=self.length)
 
 
 @render_stmt.register
@@ -1307,9 +1139,9 @@ class FragmentArg:
     - ``GMEM`` — ``buffer`` is the buffer read and ``exprs`` its index template."""
 
     kind: str
-    names: tuple[str, ...] = ()
-    exprs: tuple[Expr, ...] = ()
-    buffer: str | None = None
+    names: tuple[str, ...] = role("reads", default=())
+    exprs: tuple[Expr, ...] = role("expr", default=())
+    buffer: str | None = role("buffer_read", default=None)
 
 
 def fragment_args(args: tuple, kinds: tuple[str, ...]) -> tuple[FragmentArg, ...]:
@@ -1327,7 +1159,7 @@ def fragment_args(args: tuple, kinds: tuple[str, ...]) -> tuple[FragmentArg, ...
 
 
 @dataclass(frozen=True)
-class FragmentApply(Stmt):
+class FragmentApply(Declared):
     """The one per-element pointwise node over an ``mma.sync`` C fragment — the fragment-tier
     sibling of the scalar ``Assign``.
 
@@ -1357,9 +1189,9 @@ class FragmentApply(Stmt):
 
     ``layout`` names the atom's C-fragment geometry (:func:`frag_layout`)."""
 
-    out: str
+    out: str = role("defines")
     op: ElementwiseImpl
-    args: tuple[FragmentArg, ...]
+    args: tuple[FragmentArg, ...] = role("record")
     in_place: bool = False
     layout: str = "m16n8k16"
     # Extra UNARY ops composed onto the result, outermost last — so ``exp(s − m)`` is one node
@@ -1367,24 +1199,8 @@ class FragmentApply(Stmt):
     # subtract stmt feeding an exp stmt. Populated only by ``100_loopify``'s pin-gated chain fusion;
     # empty by default (the base op alone).
     post: tuple[ElementwiseImpl, ...] = ()
-    row_base: Expr | None = None
-    col_base: Expr | None = None
-
-    def deps(self) -> tuple[str, ...]:
-        return tuple(name for arg in self.args for name in arg.names)
-
-    def defines(self) -> tuple[str, ...]:
-        return (self.out,)
-
-    def exprs(self) -> tuple[Expr, ...]:
-        return (*(e for arg in self.args for e in arg.exprs), *(b for b in (self.row_base, self.col_base) if b is not None))
-
-    def external_reads(self) -> tuple[str, ...]:
-        return tuple(dict.fromkeys(arg.buffer for arg in self.args if arg.buffer is not None))
-
-    def rename_buffers(self, rename):  # noqa: ANN001 — see ``Stmt.rename_buffers``
-        args = tuple(arg if arg.buffer is None else replace(arg, buffer=rename.get(arg.buffer, arg.buffer)) for arg in self.args)
-        return self if args == self.args else self.replace(args=args)
+    row_base: Expr | None = role("expr", default=None)
+    col_base: Expr | None = role("expr", default=None)
 
     def pretty(self, indent: str = "") -> list[str]:
         def _show(arg: FragmentArg) -> str:
@@ -1399,20 +1215,6 @@ class FragmentApply(Stmt):
         shown = ", ".join(_show(arg) for arg in self.args)
         chain = "".join(f" |> {p.name}" for p in self.post)
         return [f"{indent}FragmentApply({self.out} {'*=' if self.in_place else '<-'} {self.op.name}({shown}){chain})"]
-
-    def _rewrite(self, rename, sigma, axis_fn):  # noqa: ANN001, ANN202 — see ``Stmt.rewrite``
-        # SSA operands route through ``rename``; a COORD predicate, a GMEM template and the tile-origin
-        # bases σ-substitute (the canonicalizer renames the query / kv axis vars). The reserved
-        # ``__frow`` / ``__fcol`` coordinate vars and any free runtime symbol (``seq_len``) are not
-        # local axes, so σ leaves them alone.
-        return self.replace(
-            out=rename(self.out),
-            args=tuple(
-                replace(arg, names=tuple(rename(n) for n in arg.names), exprs=tuple(sigma.apply(e) for e in arg.exprs)) for arg in self.args
-            ),
-            row_base=sigma.apply(self.row_base) if self.row_base is not None else None,
-            col_base=sigma.apply(self.col_base) if self.col_base is not None else None,
-        )
 
 
 def _row_expr(stmt: FragmentApply, names: tuple[str, ...]) -> Expr:
@@ -1506,7 +1308,7 @@ def _(stmt: FragmentApply, ctx: RenderCtx) -> list[str]:
 
 
 @dataclass(frozen=True)
-class FragmentRowReduce(Stmt):
+class FragmentRowReduce(Declared):
     """Per-ROW reduction over one warp's ``mma.sync`` C fragments — the chunk pivot and the
     per-row channel partials the twisted carrier's atom tier folds (``_atom._FlashOps``).
 
@@ -1521,31 +1323,15 @@ class FragmentRowReduce(Stmt):
     keyed on the PTX C layout. It is why the tier requires the chunk to sit inside one warp column
     (``n_units == 1`` on the score): a reduction that crossed warps would need smem."""
 
-    top: str  # the first per-lane row value, broadcast across its column group
-    bot: str  # the second per-lane row value, broadcast across its column group
-    frags: tuple[str, ...]  # the layout-sized C fragments spanning the chunk
+    top: str = role("defines")  # the first per-lane row value, broadcast across its column group
+    bot: str = role("defines")  # the second per-lane row value, broadcast across its column group
+    frags: tuple[str, ...] = role("reads")  # the layout-sized C fragments spanning the chunk
     op: ElementwiseImpl  # the fold — ``maximum`` for the pivot, ``add`` for a summed channel
     layout: str = "m16n8k16"
     dtype: DataType = F32
 
-    def deps(self) -> tuple[str, ...]:
-        return self.frags
-
-    def defines(self) -> tuple[str, ...]:
-        return (self.top, self.bot)
-
     def pretty(self, indent: str = "") -> list[str]:
         return [f"{indent}FragmentRowReduce({self.top}, {self.bot} <- {', '.join(self.frags)}, op={self.op.name})"]
-
-    def _rewrite(self, rename, sigma, axis_fn):  # noqa: ANN001, ANN202 — see ``Stmt.rewrite``
-        return FragmentRowReduce(
-            top=rename(self.top),
-            bot=rename(self.bot),
-            frags=tuple(rename(f) for f in self.frags),
-            op=self.op,
-            layout=self.layout,
-            dtype=self.dtype,
-        )
 
 
 @render_stmt.register
@@ -1613,7 +1399,7 @@ def _mma_sync_nregs(role: str, shape: tuple[int, int, int], dtype: DataType | No
 
 
 @dataclass(frozen=True)
-class RegFragment(Stmt):
+class RegFragment(Declared):
     """Declare an mma.sync per-thread register array.
 
     mma.sync multiplicands are explicit per-lane register arrays —
@@ -1636,25 +1422,16 @@ class RegFragment(Stmt):
     block-scale fragments) arrays to one dimension, ``unsigned name[count]``,
     because its member is the register itself and not an array of them."""
 
-    name: str
+    name: str = role("defines", "local_buffer")
     role: str  # "a" / "b" / "c"
     shape: tuple[int, int, int]
     dtype: DataType
     count: int = 1  # >1 arrays the fragment family: ``<ty> name[count][n_regs]`` (loopify only)
     nregs: int | None = None  # explicit for layouts whose one instruction realizes several PTX cells; 0 = one scalar register
 
-    def defines(self) -> tuple[str, ...]:
-        return (self.name,)
-
-    def local_decls(self) -> tuple[str, ...]:
-        return (self.name,)
-
     def pretty(self, indent: str = "") -> list[str]:
         m, n, k = self.shape
         return [f"{indent}RegFragment {self.role}:{self.dtype.name} {self.name}{_frag_dims(self)} ({m}x{n}x{k})"]
-
-    def _rewrite(self, rename, sigma, axis_fn):  # noqa: ANN001, ANN202 — see ``Stmt.rewrite``
-        return RegFragment(name=rename(self.name), role=self.role, shape=self.shape, dtype=self.dtype, count=self.count, nregs=self.nregs)
 
 
 def _frag_nregs(stmt: RegFragment) -> int:
@@ -1844,7 +1621,7 @@ def smem_layout_index(mode: str, flat: str, buffer: str, ctx: RenderCtx, indices
 
 
 @dataclass(frozen=True)
-class BlockScaleLoad(Stmt):
+class BlockScaleLoad(Declared):
     """Load one lane's b32 of ue4m3 block scales for the block-scaled fp4 mma.
 
     The instruction takes its per-16-element scales as two ordinary register operands beside the
@@ -1863,37 +1640,15 @@ class BlockScaleLoad(Stmt):
     block scale: there the k16 drain folds it into a 16-bit fragment and no scale reaches the
     instruction. These two never appear on one operand."""
 
-    frag: str
-    src_buffer: str
-    src_index: tuple[Expr, ...]
+    frag: str = role("defines")
+    src_buffer: str = role("buffer_read")
+    src_index: tuple[Expr, ...] = role("expr")
     role: str  # "a" / "b" — which side's lane map supplies the rows
     ldm: int = 0
-
-    def defines(self) -> tuple[str, ...]:
-        return (self.frag,)
-
-    def external_reads(self) -> tuple[str, ...]:
-        return (self.src_buffer,)
-
-    def rename_buffers(self, rename):  # noqa: ANN001 — see ``Stmt.rename_buffers``
-        new = rename.get(self.src_buffer, self.src_buffer)
-        return self if new == self.src_buffer else self.replace(src_buffer=new)
-
-    def exprs(self) -> tuple[Expr, ...]:
-        return tuple(self.src_index)
 
     def pretty(self, indent: str = "") -> list[str]:
         idx = ", ".join(e.pretty() for e in self.src_index)
         return [f"{indent}BlockScaleLoad {self.frag} <- {self.src_buffer}[{idx}] (sf{self.role}, ldm={self.ldm})"]
-
-    def _rewrite(self, rename, sigma, axis_fn):  # noqa: ANN001, ANN202 — see ``Stmt.rewrite``
-        return BlockScaleLoad(
-            frag=rename(self.frag),
-            src_buffer=self.src_buffer,
-            src_index=tuple(sigma.apply(e) for e in self.src_index),
-            role=self.role,
-            ldm=self.ldm,
-        )
 
 
 @render_stmt.register
@@ -1910,7 +1665,7 @@ def _(node: BlockScaleLoad, ctx: RenderCtx) -> list[str]:
 
 
 @dataclass(frozen=True)
-class LdmatrixLoad(Stmt):
+class LdmatrixLoad(Declared):
     """``ldmatrix.sync.aligned.m8n8.x{2,4}[.trans].b16`` — load one operand
     fragment from smem into a per-thread register array.
 
@@ -1941,21 +1696,21 @@ class LdmatrixLoad(Stmt):
     reading past the runtime-sized buffer. Clamped lanes read duplicates;
     their stores are masked by the RegStore guards."""
 
-    frag: str
-    src_buffer: str
-    src_index: tuple[Expr, ...]
+    frag: str = role("updates")
+    src_buffer: str = role("buffer_read")
+    src_index: tuple[Expr, ...] = role("expr")
     role: str  # "a" → x4; "b" → x2.trans
     ldm: int = 0
     swizzle: str = "NONE"  # TMA smem swizzle mode the slab was written with
     staged: bool = True  # False → gmem-direct fragment load (operand not in smem)
-    gmem_guard: tuple[Expr, Expr] | None = None  # masked-axis (base, bound); gmem-direct only
-    k_zero: tuple[Expr, Expr] | None = None  # masked-K reduce axis (base, bound); gmem-direct only
+    gmem_guard: tuple[Expr, Expr] | None = role("expr", default=None)  # masked-axis (base, bound); gmem-direct only
+    k_zero: tuple[Expr, Expr] | None = role("expr", default=None)  # masked-K reduce axis (base, bound); gmem-direct only
     b_trans: bool = False  # role "b" only: B stored N×K (Q@K^T native col-major) → gmem-direct trans helper / staged plain x2
     # A second B fragment filled by the SAME ldmatrix (the ``096_pair_ldmatrix_loads`` peephole):
     # the paired x4 loads two slab-adjacent B fragments in one instruction — ``frag`` gets the
     # matrices addressed by lanes 0-15, ``pair_frag`` those of lanes 16-31. Staged role-"b"
     # NONE-swizzle only; ``src_index`` stays the FIRST (low) fragment's tile base.
-    pair_frag: str | None = None
+    pair_frag: str | None = role("updates", default=None)
     # A staged 1-BYTE (fp8) operand slab: ldmatrix is b16-only below sm_100a, so the drain is the
     # cooperative per-lane byte gather instead — the SAME lane→element map the gmem-direct
     # fragment loaders spell, pointed at the smem slab. A 16-bit destination fragment (W8A16)
@@ -1970,31 +1725,13 @@ class LdmatrixLoad(Stmt):
     # row stride); the scales are here, ``scale_index`` the fragment's ``(row, k-block)`` base and
     # ``scale_ldm`` that slab's row stride in elements. ``None`` on every other drain — an fp8 byte
     # slab carries a k-INVARIANT scale, which commutes out of the fold into the epilogue instead.
-    scale_buffer: str | None = None
-    scale_index: tuple[Expr, ...] = ()
+    scale_buffer: str | None = role("buffer_read", default=None)
+    scale_index: tuple[Expr, ...] = role("expr", default=())
     scale_ldm: int = 0
     fragment_layout: str = "m16n8k16"
     # Position inside this warp operand's register tile. Volta pairs even/odd logical fragments
     # after slot offsets have made structural coordinate-delta matching needlessly fragile.
     fragment_index: int = 0
-
-    def deps(self) -> tuple[str, ...]:
-        return (self.frag,) if self.pair_frag is None else (self.frag, self.pair_frag)
-
-    def defines(self) -> tuple[str, ...]:
-        return (self.frag,) if self.pair_frag is None else (self.frag, self.pair_frag)
-
-    def external_reads(self) -> tuple[str, ...]:
-        return (self.src_buffer,) if self.scale_buffer is None else (self.src_buffer, self.scale_buffer)
-
-    def rename_buffers(self, rename):  # noqa: ANN001 — see ``Stmt.rename_buffers``
-        new = rename.get(self.src_buffer, self.src_buffer)
-        return self if new == self.src_buffer else self.replace(src_buffer=new)
-
-    def exprs(self) -> tuple[Expr, ...]:
-        guard = () if self.gmem_guard is None else self.gmem_guard
-        kz = () if self.k_zero is None else self.k_zero
-        return (*self.src_index, *guard, *kz, *self.scale_index)
 
     def pretty(self, indent: str = "") -> list[str]:
         idx = ", ".join(e.pretty() for e in self.src_index)
@@ -2012,27 +1749,6 @@ class LdmatrixLoad(Stmt):
             variant = ("x4" if self.role == "a" else ("x2" if self.b_trans else "x2.trans")) if self.staged else "gmem-direct"
         guard = "" if self.gmem_guard is None else f" guard<{self.gmem_guard[1].pretty()}"
         return [f"{indent}LdmatrixLoad {self.frag} <- {self.src_buffer}[{idx}] ({variant}{guard}, ldm={self.ldm or 'auto'})"]
-
-    def _rewrite(self, rename, sigma, axis_fn):  # noqa: ANN001, ANN202 — see ``Stmt.rewrite``
-        return LdmatrixLoad(
-            frag=rename(self.frag),
-            src_buffer=self.src_buffer,
-            src_index=tuple(sigma.apply(e) for e in self.src_index),
-            role=self.role,
-            ldm=self.ldm,
-            swizzle=self.swizzle,
-            staged=self.staged,
-            gmem_guard=None if self.gmem_guard is None else (sigma.apply(self.gmem_guard[0]), sigma.apply(self.gmem_guard[1])),
-            k_zero=None if self.k_zero is None else (sigma.apply(self.k_zero[0]), sigma.apply(self.k_zero[1])),
-            b_trans=self.b_trans,
-            pair_frag=None if self.pair_frag is None else rename(self.pair_frag),
-            byte_slab=self.byte_slab,
-            scale_buffer=self.scale_buffer,
-            scale_index=tuple(sigma.apply(e) for e in self.scale_index),
-            scale_ldm=self.scale_ldm,
-            fragment_layout=self.fragment_layout,
-            fragment_index=self.fragment_index,
-        )
 
 
 def _swizzled_addr(node: LdmatrixLoad, flat: str, lane: str, ctx: RenderCtx, lane_rows: int, lane_col_mod: int) -> str:
@@ -2278,7 +1994,7 @@ def _(node: LdmatrixLoad, ctx: RenderCtx) -> list[str]:
 
 
 @dataclass(frozen=True)
-class MmaSyncPtx(Stmt):
+class MmaSyncPtx(Declared):
     """``mma.sync.aligned.m{M}n{N}k{K}.row.col.f32.{ab}.{ab}.f32`` — one
     tensor-core MMA via inline PTX (the ``s16816`` instruction).
 
@@ -2295,9 +2011,9 @@ class MmaSyncPtx(Stmt):
     consumer dies; the lowering pairs it with a periodic
     :class:`FragmentPromote` into an f32 shadow fragment)."""
 
-    c_frag: str
-    a_frag: str
-    b_frag: str
+    c_frag: str = role("updates")
+    a_frag: str = role("reads")
+    b_frag: str = role("reads")
     shape: tuple[int, int, int]
     ab_dtype: str = "f16"
     c_dtype: str = "f32"
@@ -2307,38 +2023,14 @@ class MmaSyncPtx(Stmt):
     # The BLOCK-SCALED form's two extra register operands (one packed b32 of ue4m3 block scales
     # per side), set together or not at all. Present only for the fp4 atom, whose instruction
     # applies the per-16-element scales itself; every other mma leaves them ``None``.
-    sfa_frag: str | None = None
-    sfb_frag: str | None = None
-
-    def deps(self) -> tuple[str, ...]:
-        scales = (self.sfa_frag, self.sfb_frag) if self.sfa_frag is not None else ()
-        return (self.c_frag, self.a_frag, self.b_frag, *scales)
-
-    def defines(self) -> tuple[str, ...]:
-        # Accumulates into c_frag in place — a definition, like MmaSyncPtx.
-        return (self.c_frag,)
+    sfa_frag: str | None = role("reads", default=None)
+    sfb_frag: str | None = role("reads", default=None)
 
     def pretty(self, indent: str = "") -> list[str]:
         m, n, k = self.shape
         acc = "" if self.c_dtype == "f32" else f" acc:{self.c_dtype}"
         scales = f" scales:{self.sfa_frag},{self.sfb_frag}" if self.sfa_frag is not None else ""
         return [f"{indent}MmaSyncPtx {self.c_frag} += {self.a_frag} @ {self.b_frag} (m{m}n{n}k{k} {self.ab_dtype}{acc}{scales})"]
-
-    def _rewrite(self, rename, sigma, axis_fn):  # noqa: ANN001, ANN202 — see ``Stmt.rewrite``
-        return MmaSyncPtx(
-            c_frag=rename(self.c_frag),
-            a_frag=rename(self.a_frag),
-            b_frag=rename(self.b_frag),
-            shape=self.shape,
-            ab_dtype=self.ab_dtype,
-            c_dtype=self.c_dtype,
-            b_row_major=self.b_row_major,
-            # The block-scaled form's scale registers are fragments like any other and must be
-            # renamed with them: dropping them here would silently rewrite the instruction into its
-            # plain three-operand sibling, which renders with the wrong arity.
-            sfa_frag=rename(self.sfa_frag) if self.sfa_frag is not None else None,
-            sfb_frag=rename(self.sfb_frag) if self.sfb_frag is not None else None,
-        )
 
 
 @render_stmt.register
@@ -2359,7 +2051,7 @@ def _(stmt: MmaSyncPtx, ctx: RenderCtx) -> list[str]:
 
 
 @dataclass(frozen=True)
-class FragmentPromote(Stmt):
+class FragmentPromote(Declared):
     """Fold an f16-accumulate mma **C fragment** into its f32 **shadow fragment** and rezero it —
     the chunked-accumulation promote of the ``_f16acc`` atom family: the mma chain accumulates at
     the full f16-accumulate HMMA rate, and every K chunk this promote-adds the packed f16 partials
@@ -2370,21 +2062,12 @@ class FragmentPromote(Stmt):
     are defined here (``src`` is rezeroed), so reorderings keep the promote pinned between the
     mma chain and the store."""
 
-    dst: str  # f32 shadow accumulator fragment — the store-side view
-    src: str  # packed f16 mma accumulator fragment — rezeroed after the fold
+    dst: str = role("updates")  # f32 shadow accumulator fragment — the store-side view
+    src: str = role("updates")  # packed f16 mma accumulator fragment — rezeroed after the fold
     fragment_layout: str = "m16n8k16"
-
-    def deps(self) -> tuple[str, ...]:
-        return (self.dst, self.src)
-
-    def defines(self) -> tuple[str, ...]:
-        return (self.dst, self.src)
 
     def pretty(self, indent: str = "") -> list[str]:
         return [f"{indent}FragmentPromote {self.dst} += {self.src} (f16acc chunk fold, {self.src} rezeroed)"]
-
-    def _rewrite(self, rename, sigma, axis_fn):  # noqa: ANN001, ANN202 — see ``Stmt.rewrite``
-        return self.replace(dst=rename(self.dst), src=rename(self.src))
 
 
 @render_stmt.register
@@ -2394,7 +2077,7 @@ def _(stmt: FragmentPromote, ctx: RenderCtx) -> list[str]:
 
 
 @dataclass(frozen=True)
-class FragmentRepack(Stmt):
+class FragmentRepack(Declared):
     """Convert mma **C fragments** into one 16-bit operand fragment in registers.
 
     The m16n8k16 layout takes two k-adjacent C fragments whose lanes already align with A. The
@@ -2404,30 +2087,16 @@ class FragmentRepack(Stmt):
     The m16n8k16 f16 B layout takes one C fragment and exchanges its packed column pairs
     between lanes. Every lane of the warp must participate in that exchange."""
 
-    frag: str
-    srcs: tuple[str, ...]
+    frag: str = role("defines")
+    srcs: tuple[str, ...] = role("reads")
     ab_dtype: str = "f16"
     fragment_layout: str = "m16n8k16"
     part: int = 0
     role: str = "a"
 
-    def deps(self) -> tuple[str, ...]:
-        return self.srcs
-
-    def defines(self) -> tuple[str, ...]:
-        return (self.frag,)
-
     def pretty(self, indent: str = "") -> list[str]:
         role = ", role=b" if self.role == "b" else ""
         return [f"{indent}FragmentRepack {self.frag} <- {self.srcs} ({self.ab_dtype}, {self.fragment_layout}, part={self.part}{role})"]
-
-    def _rewrite(self, rename, sigma, axis_fn):  # noqa: ANN001, ANN202 — see ``Stmt.rewrite``
-        # Pure register (the flash P→A handoff): route the destination and source C fragments through
-        # ``rename`` (SSA canonicalizer / per-cell replicator); no index / axis to σ-substitute.
-        return self.replace(
-            frag=rename(self.frag),
-            srcs=tuple(rename(src) for src in self.srcs),
-        )
 
 
 @render_stmt.register
@@ -2464,7 +2133,7 @@ def wgmma_descriptor_bits(addr: int, lbo: int, sbo: int, mode: int) -> int:
 
 
 @dataclass(frozen=True)
-class WgmmaDescriptor(Stmt):
+class WgmmaDescriptor(Declared):
     """``unsigned long long name = emmy_wgmma_desc(...)`` — the shared-memory matrix descriptor a
     ``wgmma.mma_async`` operand is read through (:func:`wgmma_descriptor_bits`). Replaces
     :class:`LdmatrixLoad` on a descriptor-fed operand: the tensor core reads the slab itself, so no
@@ -2472,33 +2141,16 @@ class WgmmaDescriptor(Stmt):
     the k step; ``lbo_bytes`` / ``sbo_bytes`` are the leading / stride byte offsets between core
     matrices, which the lowering derives from the slab's layout."""
 
-    name: str
-    smem: str
-    smem_index: Expr | None
+    name: str = role("defines")
+    smem: str = role("buffer_read")
+    smem_index: Expr | None = role("expr")
     swizzle: str
     lbo_bytes: int
     sbo_bytes: int
 
-    def defines(self) -> tuple[str, ...]:
-        return (self.name,)
-
-    def external_reads(self) -> tuple[str, ...]:
-        return (self.smem,)
-
-    def rename_buffers(self, rename):  # noqa: ANN001 — see ``Stmt.rename_buffers``
-        new = rename.get(self.smem, self.smem)
-        return self if new == self.smem else self.replace(smem=new)
-
-    def exprs(self) -> tuple[Expr, ...]:
-        return () if self.smem_index is None else (self.smem_index,)
-
     def pretty(self, indent: str = "") -> list[str]:
         idx = "" if self.smem_index is None else f"[{self.smem_index.pretty()}]"
         return [f"{indent}WgmmaDescriptor {self.name} <- {self.smem}{idx} ({self.swizzle}, lbo={self.lbo_bytes}, sbo={self.sbo_bytes})"]
-
-    def _rewrite(self, rename, sigma, axis_fn):  # noqa: ANN001, ANN202 — see ``Stmt.rewrite``
-        index = None if self.smem_index is None else sigma.apply(self.smem_index).rename(rename)
-        return self.replace(name=rename(self.name), smem_index=index)
 
 
 @render_stmt.register
@@ -2510,7 +2162,7 @@ def _(stmt: WgmmaDescriptor, ctx: RenderCtx) -> list[str]:
 
 
 @dataclass(frozen=True)
-class WgmmaMma(Stmt):
+class WgmmaMma(Declared):
     """``wgmma.mma_async.sync.aligned.m64n{N}k16.f32.{ab}.{ab}`` — one warp-group tensor-core MMA,
     issued asynchronously by the four warps of a group together.
 
@@ -2526,12 +2178,12 @@ class WgmmaMma(Stmt):
     The discipline around the cells (:class:`WgmmaFence`, :class:`WgmmaCommit`,
     :class:`WgmmaWait`) is the lowering's: nothing here orders the accumulator read."""
 
-    c_frags: tuple[str, ...]
-    b_desc: str
+    c_frags: tuple[str, ...] = role("updates")
+    b_desc: str = role("reads")
     shape: tuple[int, int, int]
     ab_dtype: str = "f16"
-    a_desc: str | None = None
-    a_frag: str | None = None
+    a_desc: str | None = role("reads", default=None)
+    a_frag: str | None = role("reads", default=None)
     scale_d: int = 1
     trans_a: int = 0
     trans_b: int = 0
@@ -2547,26 +2199,11 @@ class WgmmaMma(Stmt):
         if self.a_frag is not None and self.trans_a:
             raise ValueError("wgmma: the register-form A operand is K-major (no transpose bit)")
 
-    def deps(self) -> tuple[str, ...]:
-        return (*self.c_frags, _wgmma_a(self), self.b_desc)
-
-    def defines(self) -> tuple[str, ...]:
-        # Accumulates into the C fragments in place — a definition, like MmaSyncPtx.
-        return self.c_frags
-
     def pretty(self, indent: str = "") -> list[str]:
         m, n, k = self.shape
         flags = ("" if self.scale_d else " scale_d=0") + (" trans_a" if self.trans_a else "") + (" trans_b" if self.trans_b else "")
         acc = ", ".join(self.c_frags)
         return [f"{indent}WgmmaMma {{{acc}}} += {_wgmma_a(self)} @ {self.b_desc} (m{m}n{n}k{k} {self.ab_dtype} {wgmma_form(self)}{flags})"]
-
-    def _rewrite(self, rename, sigma, axis_fn):  # noqa: ANN001, ANN202 — see ``Stmt.rewrite``
-        return self.replace(
-            c_frags=tuple(rename(c) for c in self.c_frags),
-            b_desc=rename(self.b_desc),
-            a_desc=None if self.a_desc is None else rename(self.a_desc),
-            a_frag=None if self.a_frag is None else rename(self.a_frag),
-        )
 
 
 def wgmma_form(stmt: WgmmaMma) -> str:
@@ -2592,16 +2229,13 @@ def _(stmt: WgmmaMma, ctx: RenderCtx) -> list[str]:
 
 
 @dataclass(frozen=True)
-class WgmmaFence(Stmt):
+class WgmmaFence(Declared):
     """``wgmma.fence.sync.aligned`` — orders the group's earlier register and shared-memory accesses
     before the ``wgmma.mma_async`` that follows. The lowering issues it before the first cell after
     anything else touched the accumulator (the epilogue, the softmax rescale)."""
 
     def pretty(self, indent: str = "") -> list[str]:
         return [f"{indent}WgmmaFence"]
-
-    def _rewrite(self, rename, sigma, axis_fn):  # noqa: ANN001, ANN202 — see ``Stmt.rewrite``
-        return self
 
 
 @render_stmt.register
@@ -2610,16 +2244,13 @@ def _(stmt: WgmmaFence, ctx: RenderCtx) -> list[str]:
 
 
 @dataclass(frozen=True)
-class WgmmaCommit(Stmt):
+class WgmmaCommit(Declared):
     """``wgmma.commit_group.sync.aligned`` — closes the ``wgmma.mma_async`` cells issued since the
     last commit into one group for :class:`WgmmaWait` to count. The lowering commits after a
     chunk's cells."""
 
     def pretty(self, indent: str = "") -> list[str]:
         return [f"{indent}WgmmaCommit"]
-
-    def _rewrite(self, rename, sigma, axis_fn):  # noqa: ANN001, ANN202 — see ``Stmt.rewrite``
-        return self
 
 
 @render_stmt.register
@@ -2628,7 +2259,7 @@ def _(stmt: WgmmaCommit, ctx: RenderCtx) -> list[str]:
 
 
 @dataclass(frozen=True)
-class WgmmaWait(Stmt):
+class WgmmaWait(Declared):
     """``wgmma.wait_group.sync.aligned N`` — block until at most ``group`` committed groups are still
     in flight. Carries no deps: the accumulator it completes is the ``c_frags`` of the cells before
     it, and the lowering places the wait before any read of those fragments and before the slot's
@@ -2640,9 +2271,6 @@ class WgmmaWait(Stmt):
     def pretty(self, indent: str = "") -> list[str]:
         return [f"{indent}WgmmaWait({self.group})"]
 
-    def _rewrite(self, rename, sigma, axis_fn):  # noqa: ANN001, ANN202 — see ``Stmt.rewrite``
-        return self
-
 
 @render_stmt.register
 def _(stmt: WgmmaWait, ctx: RenderCtx) -> list[str]:
@@ -2650,7 +2278,7 @@ def _(stmt: WgmmaWait, ctx: RenderCtx) -> list[str]:
 
 
 @dataclass(frozen=True)
-class RegStore(Stmt):
+class RegStore(Declared):
     """Store an mma.sync f32 accumulator array to the output buffer with a
     per-lane epilogue downconvert.
 
@@ -2704,18 +2332,18 @@ class RegStore(Stmt):
     an f32 destination has no packed atomic below sm_90, so it drops to
     per-element scalar ``atomicAdd``\\ s."""
 
-    dst_buffer: str
-    dst_index: tuple[Expr, ...]
-    frag: str
+    dst_buffer: str = role("buffer_write")
+    dst_index: tuple[Expr, ...] = role("expr")
+    frag: str = role("reads")
     shape: tuple[int, int, int]
     ldm: int = 0
     ldn: int = 0
-    epilogue: Body | None = None
+    epilogue: Body | None = role("term", default=None)
     epilogue_params: tuple[str, ...] = ()
     epilogue_result: str | None = None
-    extra_frags: tuple[str, ...] = ()
-    m_guard: tuple[Expr, Expr] | None = None
-    n_guard: tuple[Expr, Expr] | None = None
+    extra_frags: tuple[str, ...] = role("reads", default=())
+    m_guard: tuple[Expr, Expr] | None = role("expr", default=None)
+    n_guard: tuple[Expr, Expr] | None = role("expr", default=None)
     atomic: bool = False
     fragment_layout: str = "m16n8k16"
     # The paired Volta operand layouts require CUTLASS's interleaved 32x32 accumulator map. This
@@ -2744,30 +2372,7 @@ class RegStore(Stmt):
     # each lane writes one cell's eight columns of a row as a single 16-byte store — a quarter of
     # the stores, and every one of them a full sector. Each member keeps its own fragment and
     # epilogue; only the store is shared.
-    run: tuple[RegStore, ...] = ()
-
-    def deps(self) -> tuple[str, ...]:
-        return (self.frag, *self.extra_frags, *(d for cell in self.run for d in cell.deps()))
-
-    def external_reads(self) -> tuple[str, ...]:
-        # The fused epilogue's leaf loads are gmem reads this stmt performs directly (their
-        # original Load stmts were stripped by the atom lowering), so they must be declared here for
-        # the kernel signature / render shapes to include the buffers.
-        own = () if self.epilogue is None else tuple(ld.input for ld in self.epilogue if isinstance(ld, Load))
-        return tuple(dict.fromkeys((*own, *(b for cell in self.run for b in cell.external_reads()))))
-
-    def external_writes(self) -> tuple[str, ...]:
-        return (self.dst_buffer,)
-
-    def rename_buffers(self, rename):  # noqa: ANN001 — see ``Stmt.rename_buffers``
-        new = rename.get(self.dst_buffer, self.dst_buffer)
-        run = tuple(cell.rename_buffers(rename) for cell in self.run)
-        return self if new == self.dst_buffer and run == self.run else self.replace(dst_buffer=new, run=run)
-
-    def exprs(self) -> tuple[Expr, ...]:
-        epi = () if self.epilogue is None else tuple(e for st in self.epilogue for e in st.exprs())
-        guards = tuple(e for g in (self.m_guard, self.n_guard) if g is not None for e in g)
-        return (*self.dst_index, *epi, *guards, *(e for cell in self.run for e in cell.exprs()))
+    run: tuple[RegStore, ...] = role("stmts", default=())
 
     def pretty(self, indent: str = "") -> list[str]:
         idx = ", ".join(e.pretty() for e in self.dst_index)
@@ -2784,37 +2389,6 @@ class RegStore(Stmt):
         acc = " (atomic)" if self.atomic else ""
         run = "" if not self.run else f" +{','.join(cell.frag for cell in self.run)} (16-byte rows)"
         return [f"{indent}RegStore {self.dst_buffer}[{idx}] <- {self.frag}{run}{epi}{guards}{acc} (ldm={self.ldm or 'auto'})"]
-
-    def _rewrite(self, rename, sigma, axis_fn):  # noqa: ANN001, ANN202 — see ``Stmt.rewrite``
-        # The epilogue's chain SSA names are render-local (scoped per element inside the store's
-        # block), so only its Exprs σ-substitute — the load indices and the captured predicates thread
-        # the per-cell replication offsets through exactly like ``dst_index``. Its params stay bound
-        # to the store's fragments, which rename with the store.
-        epilogue = self.epilogue
-        if epilogue is not None:
-            epilogue = Body(tuple(st.rewrite(lambda n: n, sigma) for st in epilogue))
-
-        # Guard base/bound Exprs σ-substitute like ``dst_index`` (the per-cell
-        # replicator's offsets must reach the boundary predicate; the bound is a
-        # Literal or free symbolic Var, which σ passes through).
-        def _sub_guard(g):  # noqa: ANN001, ANN202 — tuple[Expr, Expr] | None
-            return None if g is None else (sigma.apply(g[0]), sigma.apply(g[1]))
-
-        # ``replace`` — NOT a field-by-field rebuild. Every field this rewrite does not touch is a
-        # POLICY the store carries, and defaulting one silently produces a numerically-wrong kernel with
-        # no loud failure: a dropped ``atomic`` degraded a rewritten (e.g. loopify-rolled) split-K store
-        # to racing plain assigns, and a dropped ``swizzle`` left the flash weight tile stored
-        # row-major under a drain that reads it XOR-permuted. Naming only what changes cannot regress
-        # that way when a field is added.
-        return self.replace(
-            dst_index=tuple(sigma.apply(e) for e in self.dst_index),
-            frag=rename(self.frag),
-            extra_frags=tuple(rename(f) for f in self.extra_frags),
-            epilogue=epilogue,
-            m_guard=_sub_guard(self.m_guard),
-            n_guard=_sub_guard(self.n_guard),
-            run=tuple(cell._rewrite(rename, sigma, axis_fn) for cell in self.run),
-        )
 
 
 def _store_swz(node: RegStore, addr: str) -> str:

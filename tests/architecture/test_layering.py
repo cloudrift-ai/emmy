@@ -191,7 +191,9 @@ def test_the_statement_module_exports_a_pinned_list() -> None:
     # Normalization steps a pass calls on its own, and the body assembly fusion drives.
     steps = ["fold_affine", "simplify_body"]
     assembly = ["BodyAnalysis", "Scope", "Program", "Splicer", "NotSupported", "UnfusableStmt"]
-    assert sorted(stmt.__all__) == sorted(kinds + containers + functions + steps + assembly)
+    # What a layer declares a kind of its own with: the base that computes the protocol, and a field's role.
+    declaring = ["Declared", "role"]
+    assert sorted(stmt.__all__) == sorted(kinds + containers + functions + steps + assembly + declaring)
 
 
 def test_the_statement_module_depends_on_expressions_and_values_only() -> None:
@@ -510,26 +512,6 @@ def test_every_buffer_bearing_stmt_can_rename_its_buffers() -> None:
     )
 
 
-_PROTOCOL_MEMBERS = frozenset(
-    {
-        "deps",
-        "defines",
-        "external_reads",
-        "external_writes",
-        "rename_buffers",
-        "local_decls",
-        "exprs",
-        "with_exprs",
-        "nested",
-        "with_bodies",
-        "binds_axes",
-        "_rewrite",
-        "pretty",
-        "__post_init__",
-    }
-)
-
-
 def _kernel_kinds() -> list[type]:
     import emmy.compiler.ir.kernel.ir as kernel_ir
     from emmy.compiler.ir.stmt import Stmt
@@ -539,19 +521,22 @@ def _kernel_kinds() -> list[type]:
     ]
 
 
-def test_a_kernel_ir_kind_holds_fields_and_the_statement_protocol_only() -> None:
-    """A Kernel IR statement kind is data: its fields, the statement protocol, and a constructor check. What rendering
-    or a lowering asks of it beyond that is a function over the statement, beside the render functions."""
+def test_a_kernel_ir_kind_is_declared_not_programmed() -> None:
+    """A Kernel IR statement kind is data: fields with their roles, how it prints, and at most a constructor check.
+    The statement protocol follows from the roles (``Declared``); what rendering or a lowering asks of a statement
+    beyond that is a function over it, beside the render functions."""
+    from emmy.compiler.ir.stmt import Declared
+
     offenders = [
         f"{cls.__name__}.{name}"
         for cls in _kernel_kinds()
         for name, member in vars(cls).items()
         if (callable(member) or isinstance(member, (property, functools.cached_property, staticmethod, classmethod)))
-        and name not in _PROTOCOL_MEMBERS
+        and name not in ("pretty", "__post_init__")
         and not (name.startswith("__") and name != "__post_init__")
     ]
-    assert len(_kernel_kinds()) == 30
-    assert not offenders, "move these to functions over the statement:\n" + "\n".join(sorted(offenders))
+    assert len(_kernel_kinds()) == 30 and all(issubclass(cls, Declared) for cls in _kernel_kinds())
+    assert not offenders, "state these as field roles, or move them to functions over the statement:\n" + "\n".join(sorted(offenders))
 
 
 def test_a_kernel_ir_field_has_a_type_from_the_closed_set() -> None:

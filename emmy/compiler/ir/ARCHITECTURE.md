@@ -234,13 +234,14 @@ statement stays hashable.
 nothing else: no submodule path, no private name. The package exports the statement kinds, `Body` and `OutputSpec`,
 `normalize_body` and `canonicalize_identity`, a few functions over statements (`free_names`, `exposed_defines`,
 `rename_free`, `map_exprs`, `binary`, `mask_select_predicate`, `pretty_body`, `ordering_constraints`,
-`dtype_promote`), two normalization steps a pass may call on its own (`fold_affine`, `simplify_body`), and the body
-assembly fusion drives (`Splicer`, `Program`, `BodyAnalysis`, `Scope` and its two refusals). The module itself
+`dtype_promote`), two normalization steps a pass may call on its own (`fold_affine`, `simplify_body`), the body
+assembly fusion drives (`Splicer`, `Program`, `BodyAnalysis`, `Scope` and its two refusals), and what a layer
+declares a kind of its own with (`Declared`, `role`). The module itself
 imports expressions, axes, dtypes and the structural and wire forms: no op, tensor, graph, backend or pipeline.
 `tests/architecture/test_layering.py` pins the export list and both directions.
 
-**The statement protocol** is what a kind owes, all of it methods on the kind. A layer adds a kind by stating
-these, and nothing else:
+**The statement protocol** is what a kind owes, all of it methods on the kind. The shared kinds state these by
+hand; a layer adds a kind of its own by declaring it (below), and nothing else:
 
 | Group | Members |
 | --- | --- |
@@ -252,12 +253,23 @@ these, and nothing else:
 
 Each reading member has a rebuilding half: `with_bodies` takes what `nested` returned, `with_exprs` what `exprs`
 returned. `rewrite` is the one entry for renaming and substitution; it drops the substitutions a statement's own
-binder shadows and hands the rest to the kind's `_rewrite`. The expression pair is complete for the shared kinds
-only: `exprs` lists every expression a shared kind holds and `with_exprs` rebuilds it from them. Nothing maps
-expressions over a Kernel IR body, and its kinds are not held to that: some report expressions they cannot be
-rebuilt from, which the base refuses by name, and some hold expressions they do not report, which a map would skip.
-`tests/compiler/ir/stmt/test_protocol.py` checks that every kind in every layer states the protocol, and the
-rebuilding halves on an example of each shared kind.
+binder shadows and hands the rest to the kind's `_rewrite`. `exprs` lists every expression a kind holds and
+`with_exprs` rebuilds it from them. `tests/compiler/ir/stmt/test_protocol.py` checks that every kind in every layer
+states the protocol, and the rebuilding halves on an example of each shared kind and each Kernel IR kind.
+
+**A declared kind** is a statement kind stated as data: a frozen dataclass on `Declared` whose fields carry a type
+and, through `role(...)`, what the field is to the rest of the compiler. The roles are names the statement defines,
+reads, updates in place or binds for its own use; buffers it reads, writes or declares kernel-local; expressions;
+axes it binds and names that follow them; a child body; statements it carries; the body of a pure term; and records
+whose own fields play roles. A field with no role is plain data. `Declared` computes every protocol member from the
+roles, in field order, so a declared kind writes none: what it reads is its `reads` and `updates` fields, a rename
+maps every name field and every expression, a buffer rename maps the buffer fields, and so on. Two roles hold
+statements that are not a child body. Carried statements (`stmts`: the cells a `RegStore` stores with it, the
+combine of a `TreeHalve`) are part of the statement: they are rewritten with it and their buffers, expressions and
+free reads are its own, a name one of them defines or the statement binds being hidden. A term (`term`: a
+`RegStore`'s epilogue) keeps its statements' names private: a rename reaches only the coordinates its expressions
+read. Kernel IR declares all of its kinds this way; a kind whose member the roles cannot give is a missing role, not
+a hand-written member.
 
 Behaviour that is not on this list lives outside the module as a function over statements. CUDA rendering is the
 main case: `ir/render.py` holds the render context, the index flattening and one render function per kind,
@@ -956,13 +968,13 @@ Reuses `Tile` + leaf stmts from Tile IR; adds hardware primitives
 materialized from scheduling decisions. `KernelOp` carries the body
 directly (no separate AST class).
 
-A Kernel IR statement kind is data. Its class holds fields, the statement protocol and at most a constructor check;
-what rendering or the CUDA lowering asks of a statement beyond that (a grid's size, a fragment's register count, a
-store's element addresses) is a function over the statement, beside the kind's render function. Every field has a
-type from one closed set: strings, numbers, booleans, expressions, axes, dtypes, elementwise ops, bodies, statements,
-records of such fields (`FragmentArg`, one operand of a `FragmentApply`), and tuples and optionals of those. A
-fragment layout is therefore named, not held: the kind stores the atom's layout name and rendering looks the
-geometry up. `tests/architecture/test_layering.py` guards both.
+A Kernel IR statement kind is data: a declared kind (see the statement module's interface). Its class holds fields
+with their roles, how it prints and at most a constructor check; what rendering or the CUDA lowering asks of a
+statement beyond that (a grid's size, a fragment's register count, a store's element addresses) is a function over the
+statement, beside the kind's render function. Every field has a type from one closed set: strings, numbers, booleans,
+expressions, axes, dtypes, elementwise ops, bodies, statements, records of such fields (`FragmentArg`, one operand of
+a `FragmentApply`), and tuples and optionals of those. A fragment layout is therefore named, not held: the kind stores
+the atom's layout name and rendering looks the geometry up. `tests/architecture/test_layering.py` guards both.
 
 | Symbol             | Role                                                              |
 |--------------------|-------------------------------------------------------------------|
