@@ -617,7 +617,7 @@ walk. Any other caller that cones a non-SSA body owes itself the same reading.
 `rewrite` has two distinct rename channels that must stay disjoint:
 `rename_ssa` carries **SSA-name** renames, `sigma` carries **axis**
 substitutions. `Load`/`Write` index exprs apply *both*
-(`_rename_ssa_vars_in_expr(sigma.apply(e), rename)`) so an indirect
+(`sigma.apply(e).rename(rename)`) so an indirect
 (gather) index Var gets renamed exactly once. Putting the same name in
 both maps renames it twice — and if the two passes form a chain (e.g.
 `x → in5` and a pre-existing `in5 → in26`) the double application

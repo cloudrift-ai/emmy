@@ -17,6 +17,10 @@ Defined here rather than under any one IR package because all three IRs
   (drop-size-one, canonicalize-axis-order, copy-alias-elim,
   reduce-axis-unify, hoist, simplify, dedup-loads, canonical-statement-order, rename-ssa) in
   :mod:`.normalize`.
+
+``__all__`` is the whole interface: the rest of the compiler imports these names and no submodule. Rendering a
+statement as C / CUDA source is not statement business and lives in :mod:`emmy.compiler.ir.render`.
+
 Each IR layer adds its own scheduling-specific Stmts on top:
 
 - Loop IR: nothing extra — its bodies are exactly Loop / leaves.

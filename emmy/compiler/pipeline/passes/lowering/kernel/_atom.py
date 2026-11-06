@@ -1858,7 +1858,7 @@ def _dedup_loads(stmts: list[Stmt]) -> list[Stmt]:
 
     Dedup itself is per-``stmts`` (this list only); the rewrite reaches nested scopes, since an
     epilogue cell's output sweep consumes the loads hoisted above it. It goes through
-    :func:`~emmy.compiler.ir.stmt.passes.rename_free` so a nested scope re-binding a dropped
+    :func:`~emmy.compiler.ir.stmt.rename_free` so a nested scope re-binding a dropped
     name keeps its own binding."""
     seen: dict = {}
     rename: dict[str, str] = {}
