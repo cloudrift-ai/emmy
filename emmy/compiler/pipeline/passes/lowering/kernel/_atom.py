@@ -2560,7 +2560,7 @@ class _ScalarOps(_AtomOps):
 
     def state(self, cells):
         """The scalar accumulator seeds. Gmem-direct (unstaged): none — the accumulators are seeded
-        inside the reduce ``Loop`` (the dissolved fold ``Accum``\\ s + ``Loop.render``). **Staged**: a
+        inside the reduce ``Loop`` (the dissolved fold ``Accum``\\ s + ``Loop``'s render). **Staged**: a
         per-cell ``Init(acc__c{i}_{j} = 0)`` emitted here, **outside** the outer slab loop, so the
         carrier-less :func:`_scalar_drain` folds across every slab without re-seeding (the nested-loop
         accumulator-lifetime split — the scalar analogue of :meth:`_MmaOps.state` declaring the ``_c``
@@ -2574,7 +2574,7 @@ class _ScalarOps(_AtomOps):
         """The gmem-direct scalar leaf constructors: each register ROW reads its A operand once (a
         gmem ``Load`` or a computed register-resident body), each COL its B ``Load`` once, each
         ``(i, j)`` cell folds the TERM's own per-step statements (:meth:`Fold.step`), and the
-        K-loop is a unit ``Loop`` (``Loop.render`` seeds the accumulators; the store reads them). A
+        K-loop is a unit ``Loop`` (``Loop``'s render seeds the accumulators; the store reads them). A
         masked axis wraps its read in-bounds (``% extent``) and the overhanging store is guarded
         (:meth:`store`).
 

@@ -67,7 +67,7 @@ class RenderTarget(Protocol):
 
     def has_native_op(self, op_name: str, dtype: str) -> bool:
         """Whether ``op_name`` has a native form at ``dtype``. Drives the
-        ``Assign.render`` dispatch between native and promote-and-demote
+        ``Assign``'s render dispatch between native and promote-and-demote
         rendering.
         """
 

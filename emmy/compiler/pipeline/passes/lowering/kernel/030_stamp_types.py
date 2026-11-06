@@ -11,7 +11,7 @@ Stamping rules:
   ``inputs`` / ``outputs`` (matcher-populated graph Tensors). A Load against
   a locally-declared buffer (smem) keeps the render-time fallback.
 - ``Assign(op, args)`` — ``dtype = dtype_promote(op.name, [ssa[a] for a in
-  args])``, the same rule ``Assign.render`` applies inline. Same-arg squares
+  args])``, the same rule ``Assign``'s render applies inline. Same-arg squares
   and ``pow`` are promoted to f32 (overflow guard, below).
 - ``Write(output, value)`` — ``value_dtype = ssa[value]``. The destination
   buffer dtype stays a render-time concern; only the value side is stamped.
@@ -119,7 +119,7 @@ def _stamp_stmt(s: Stmt, ctx: _StampCtx) -> Stmt:
 
 def _stamp_accum(s: Accum, ctx: _StampCtx) -> Accum:
     """Freeze the accumulator dtype — the old ``020_place_inits`` policy, applied to the
-    ``Accum`` itself (the carrier is the source of truth; ``Loop.render`` derives the seed
+    ``Accum`` itself (the carrier is the source of truth; ``Loop``'s render derives the seed
     from it). A **selecting** combine (``max`` / ``min``) picks an existing value, so it
     stays in the folded value's dtype — fp16 ``max`` accumulates in fp16. An
     **accumulating** combine (``sum`` / ``prod`` — incl. the matmul fold) builds magnitude,

@@ -76,6 +76,3 @@ def test_backward_cone_select_predicate_axis_is_read():
     )
     cone = body.backward_cone(["v"])
     assert "n" in cone.external_reads
-
-
-# --- defs_die_at ------------------------------------------------------

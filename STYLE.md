@@ -104,7 +104,7 @@ cache key when a position-independent structural lookup genuinely needs one. A s
 tree breaks both guarantees, and the surrounding code cannot degrade gracefully without losing the optimization.
 
 If you need to "edit" a frozen Stmt, return a new instance via `stmt.replace(field=value)`; outside `ir/stmt/`,
-`dataclasses.replace` and `dataclasses.fields` are not called on a statement. If a
+`dataclasses.replace` is not called on a statement. If a
 `__post_init__` needs to coerce a field (e.g. `tuple → Body`), use `object.__setattr__(self, "field", coerced)` —
 that's the standard pattern for frozen dataclasses that still need light normalization at construction time. Don't
 add `try/except TypeError` fallbacks around structural caches to tolerate unhashable stmts; fix the unhashable stmt

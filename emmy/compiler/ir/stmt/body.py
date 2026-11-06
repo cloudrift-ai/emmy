@@ -545,12 +545,9 @@ class Body(tuple[Stmt, ...], Wire):
         varies with that axis. Reads of an Accum's *running* value
         from inside its own loop body get the wrong answer here —
         passes that gate on those (the in-loop online-softmax merge
-        pattern) keep the explicit ``deps_of(c)`` check that returns
-        the Accum's defining stmt directly.
+        pattern) look up the Accum's defining stmt directly.
 
-        This is the substrate behind :meth:`depends_on` and
-        :meth:`independent`. Most call sites prefer those phrased
-        helpers over poking the closure directly.
+        This is the substrate behind :meth:`depends_on`.
         """
         closure: dict[str, frozenset[str]] = {}
 

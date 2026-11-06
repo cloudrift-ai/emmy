@@ -104,7 +104,7 @@ class RenderCtx:
     # ``literal_ssa`` but the inlined value is a rendered sub-expression, not a float.
     inline_exprs: dict[str, str] = field(default_factory=dict)
     # Per-buffer byte offsets into a single ``extern __shared__`` pool
-    # ``_smem_pool``. When non-empty, ``Smem.render`` emits a pointer
+    # ``_smem_pool``. When non-empty, ``Smem``'s render emits a pointer
     # alias into the pool instead of a stand-alone ``__shared__`` array
     # — the only way to exceed the 48 KB static-smem cap.
     smem_dynamic_offsets: dict[str, int] = field(default_factory=dict)
@@ -131,7 +131,7 @@ class RenderCtx:
     # Render-time hint to ``Literal.render``: when set to a non-default
     # dtype, float literals render via ``target.literal(text, dtype)``
     # so they compose with non-default-dtype operands. Set transiently
-    # by ``Assign.render`` around the native expression render.
+    # by ``Assign``'s render around the native expression render.
     literal_default_dtype: str | None = None
     # C-scope-local declared locals (the mma lane vars ``_g`` / ``_t``, the
     # ``cp.async`` staging address ``_smem_addr``). A self-scoping stmt declares
@@ -254,13 +254,13 @@ def op_to_expr(fn: str, inputs: list[Expr], *, dtype: str | None = None) -> Expr
         return inputs[0]
     if fn in ("from_f8e4m3", "from_f8e5m2"):
         # fp8 decode cast: the value semantics live in the dtype conversion the
-        # target already applied to the argument (``Assign.render`` promotes the
+        # target already applied to the argument (``Assign``'s render promotes the
         # f8-typed arg through ``target.convert``, which spells the decode), so
         # the op itself is an identity here — like ``copy``, but never a raw
         # byte move because the arg reaches this point converted.
         return inputs[0]
     if fn in ("to_f8e4m3", "to_f8e5m2"):
-        # fp8 encode cast — the decode twin: ``Assign.render`` computes the arg at f32 and its
+        # fp8 encode cast — the decode twin: ``Assign``'s render computes the arg at f32 and its
         # result-dtype demotion routes through ``target.convert``, which spells the <cuda_fp8.h>
         # constructor (round-to-nearest-even, saturate-to-finite). Identity here, same as above.
         return inputs[0]
@@ -571,7 +571,7 @@ def render_body(body: Body, ctx: RenderCtx) -> list[str]:
     if _readable():
         # The readability scan runs before this body's Loads / Assigns render, so their dtypes are
         # not in ``ctx.ssa_dtypes`` yet. Keep their stamped types locally: folding an expression
-        # that needs a target conversion would bypass ``Assign.render`` and drop that conversion.
+        # that needs a target conversion would bypass ``Assign``'s render and drop that conversion.
         local_dtypes = {name: s.dtype.name for s in body if isinstance(s, (Load, Assign)) and s.dtype is not None for name in s.defines()}
         total = _read_counts(body, {})
         local: dict[str, int] = {}
@@ -743,13 +743,13 @@ def _dtype_intrinsics(target, result_dt: str, expr: Expr) -> dict[str, str]:
 def _(stmt: Load, ctx: RenderCtx) -> list[str]:
     pad = _pad(ctx.indent)
     # Inlined scalar constants stay as ``float`` locals — the
-    # consumer's ``Assign.render`` will demote / convert if needed.
+    # consumer's ``Assign``'s render will demote / convert if needed.
     # (Only valid for scalar Loads; the vectorize pass excludes
     # literal-const buffers.)
     lit = ctx.literal_constants.get(stmt.input) if ctx.literal_constants else None
     if lit is not None and stmt.is_scalar:
         # An INTEGER constant keeps its own element dtype. Folding it to f32 would decide the
-        # CONSUMER's arithmetic too: ``Assign.render`` reads its args' dtypes to choose between
+        # CONSUMER's arithmetic too: ``Assign``'s render reads its args' dtypes to choose between
         # the native integer spelling and the f32 promotion, and the bit operations (a pack's
         # shift, a nibble mask) have no f32 spelling at all. Float constants keep the f32
         # binding, which is what every consumer of them already computes in.
@@ -1161,25 +1161,6 @@ def _(node: Loop, ctx: RenderCtx) -> list[str]:
     return out
 
 
-def _body_uses_lane_warp(body: Body) -> bool:
-    """True iff the body needs the ``lane`` / ``warp`` helper vars.
-
-    The materializer emits ``lane`` / ``warp`` use sites alongside:
-    - ``WarpShuffle`` and ``TreeHalve`` (the per-warp partial gate
-      ``if (lane == 0)``, ``TreeHalve(..., tid_var="warp")``).
-    - ``SetMaxNReg`` (only emitted by the warp-specialized materializer
-      path, which wraps in ``Cond(warp < P, ...)`` — the Cond predicate
-      references ``Var("warp")`` directly so the helper must be in scope).
-
-    Checking for these three primitives covers every kernel that
-    references either helper.
-    """
-    # Local import — kernel-IR primitives sit in a downstream module.
-    from emmy.compiler.ir.kernel.ir import SetMaxNReg, TreeHalve, WarpShuffle
-
-    return bool(body.iter_of_type(WarpShuffle, TreeHalve, SetMaxNReg))
-
-
 def _extent_c(ax: Axis, ctx: RenderCtx) -> str:
     """Render one axis extent as a C expression: literal int for static
     ``Dim``, the symbolic name for ``Dim('seq_len')``. ``Dim.__str__``
@@ -1195,70 +1176,10 @@ def _extent_c(ax: Axis, ctx: RenderCtx) -> str:
     return f"({ext.expr.render(ctx)})"
 
 
-def _stride_c(axes, ctx: RenderCtx, *, wide: bool = False) -> str:
-    """Build a C expression for the product of axis extents — used as the
-    stride divisor in the grid-axis decode. ``1`` if ``axes`` is empty.
-    ``wide`` prefixes the FIRST factor with a ``(long long)`` cast so the
-    whole product evaluates in 64-bit — a symbolic-grid divisor like
-    ``seq_len * 6144 * 256`` overflows int32 while being *computed*, before
-    any promotion against a 64-bit dividend can help."""
-    if not axes:
-        return "1"
-    factors = [_extent_c(a, ctx) for a in axes]
-    if wide:
-        factors[0] = f"(long long){factors[0]}"
-    return " * ".join(factors)
-
-
-def _render_grid_axis_decode(axes: tuple[Axis, ...], idx_expr: str, ctx: RenderCtx, *, wide: bool = False) -> list[str]:
-    """Decode ``idx_expr`` (``blockIdx.x`` or ``threadIdx.x``) into per-axis ints.
-    ``wide`` keeps every stride divisor in 64-bit (see :func:`_stride_c`); the decoded
-    axis vars stay ``int`` — each is bounded by its extent."""
-    pad = _pad(ctx.indent)
-    if not axes:
-        return []
-    if len(axes) == 1:
-        return [f"{pad}int {axes[0].name} = {idx_expr};"]
-    decoded: list[str] = []
-    stride_axes: list[Axis] = []  # accumulated INNER axes (per-step product is their extents)
-    for ax in reversed(axes):
-        extent = _extent_c(ax, ctx)
-        if not stride_axes:
-            decoded.append(f"int {ax.name} = {idx_expr} % {extent};")
-        else:
-            decoded.append(f"int {ax.name} = ({idx_expr} / ({_stride_c(stride_axes, ctx, wide=wide)})) % {extent};")
-        stride_axes.append(ax)
-    outer = axes[0]
-    outer_stride = _stride_c(list(axes[1:]), ctx, wide=wide)
-    decoded[-1] = f"int {outer.name} = {idx_expr} / ({outer_stride});"
-    return [pad + line for line in reversed(decoded)]
-
-
-def _render_thread_axis_decode(axes: tuple[Axis, ...], ctx: RenderCtx) -> list[str]:
-    """Emit ``int <axis> = (tid / stride) % extent;`` per axis."""
-    pad = _pad(ctx.indent)
-    decoded: list[str] = []
-    stride_axes: list[Axis] = []
-    for ax in reversed(axes):
-        extent = _extent_c(ax, ctx)
-        if not stride_axes:
-            decoded.append(f"int {ax.name} = tid % {extent};")
-        else:
-            decoded.append(f"int {ax.name} = (tid / ({_stride_c(stride_axes, ctx)})) % {extent};")
-        stride_axes.append(ax)
-    if len(axes) == 1:
-        decoded = [f"int {axes[0].name} = tid;"]
-    else:
-        outer = axes[0]
-        outer_stride = _stride_c(list(axes[1:]), ctx)
-        decoded[-1] = f"int {outer.name} = tid / ({outer_stride});"
-    return [pad + line for line in reversed(decoded)]
-
-
 @render_stmt.register
 def _(stmt: StridedLoop, ctx: RenderCtx) -> list[str]:
     """``for (int axis = start; axis < extent; axis += step)`` with the
-    same per-Loop accumulator-init prelude as ``Loop.render``."""
+    same per-Loop accumulator-init prelude as ``Loop``'s render."""
 
     pad = _pad(ctx.indent)
     out: list[str] = []

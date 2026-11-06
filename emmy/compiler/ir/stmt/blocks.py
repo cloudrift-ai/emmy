@@ -148,7 +148,7 @@ class Loop(Stmt):
 
     def _rewrite(self, rename, sigma, axis_fn):  # noqa: ANN001, ANN202 — see ``Stmt.rewrite``
         # Preserve the reduce ``role`` annotation through σ-offsets / axis-renames. The loop carries
-        # no algebra — the fold'self ⊕ lives on the ``Fold`` node, whose own rewrite handler renames the
+        # no algebra — the fold's ⊕ lives on the ``Fold`` node, whose own rewrite handler renames the
         # stored combine in lockstep (``Lambda.rename``).
         return Loop(
             axis=axis_fn(self.axis),

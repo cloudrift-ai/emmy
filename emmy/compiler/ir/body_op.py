@@ -11,7 +11,7 @@ from frozendict import frozendict
 
 from emmy.compiler.dtype import F32
 from emmy.compiler.ir.base import ConstantOp, Op, buffer_types
-from emmy.compiler.ir.stmt import Body, Load, Stmt, Write
+from emmy.compiler.ir.stmt import Body, Load, Stmt, Write, ZeroPrologue
 from emmy.compiler.ir.stmt import pretty_body as _pretty_body_stmts
 from emmy.compiler.tensor import Tensor
 
@@ -101,8 +101,6 @@ class BodyOp(Op):
         body without re-seeding I/O surfaces here, not on a later mystery
         KeyError), then replaces each entry's placeholder Tensor with the
         real graph-sourced one when the buffer is a graph node."""
-        from emmy.compiler.ir.stmt import ZeroPrologue  # noqa: PLC0415 — leaf import; ir.stmt.__init__ would cycle
-
         body_in, body_out = self._derive_io_names()
         stray_in = [n for n in body_in if n not in self.inputs]
         if stray_in:

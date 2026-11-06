@@ -771,7 +771,7 @@ def merge_sibling_reduce_loops(stmts: Body) -> Body:
 def _carried_out(body: Body) -> frozenset[str]:
     """The names a ``Loop`` or ``StridedLoop`` over ``body`` still binds after it CLOSES.
 
-    :meth:`Loop.render` declares the carriers of the immediate body ahead of the loop, so those —
+    :meth:`Loop`'s render declares the carriers of the immediate body ahead of the loop, so those —
     and states updated through conditions or a nested loop that does not seed its own — are the
     names a later statement can still read. Every other definition lives inside the block the loop closes,
     which is what makes it renamable when two loops merge.

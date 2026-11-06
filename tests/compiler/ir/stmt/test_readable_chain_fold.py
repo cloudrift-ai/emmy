@@ -58,7 +58,7 @@ def test_fold_preserves_integer_dtype_for_bitwise_consumer(monkeypatch) -> None:
 
 
 def test_fold_keeps_mixed_dtype_conversion_named(monkeypatch) -> None:
-    """A readability fold must not bypass the target-aware conversion in ``Assign.render``."""
+    """A readability fold must not bypass the target-aware conversion in ``Assign``'s render."""
     monkeypatch.setenv("EMMY_READABLE", "1")
     lines = render_body(
         Body(

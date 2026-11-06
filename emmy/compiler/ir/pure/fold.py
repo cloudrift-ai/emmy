@@ -1657,9 +1657,9 @@ class Fold:
         # ONE handler for the one stored kind (the collapse retired the Map / Contraction arms —
         # singledispatch keys on the stored type, and there is now only one). Every operand edge
         # dispatches back through the registry; the fold renames its lift / monoid in lockstep
-        # (params track the operand names positionally, the combine'self results ARE the accumulator
+        # (params track the operand names positionally, the combine's results ARE the accumulator
         # names). At zero axes there is no iteration var to rename and no monoid to thread.
-        # σ is applied hygienically to the term'self own binder: the reduce axis this term binds is a
+        # σ is applied hygienically to the term's own binder: the reduce axis this term binds is a
         # different variable from any σ key spelled alike, so its mapping is dropped for the subtree.
         # Operand edges are terms, so they rewrite through this same registry, never the statement entry.
         if self.axis is not None and sigma is not None and self.axis in sigma.mapping:
@@ -1668,8 +1668,8 @@ class Fold:
         lead = (rename(self.axis),) if self.axis is not None else ()  # the iteration var — a slab has none
 
         def _param(name: str) -> str:
-            # The environment tail may hold AXIS names, which rename through sigma (the body'self own
-            # coordinate substitution), not through the SSA renamer. Taking sigma'self answer when it has
+            # The environment tail may hold AXIS names, which rename through sigma (the body's own
+            # coordinate substitution), not through the SSA renamer. Taking sigma's answer when it has
             # one keeps a param and every use of it in the body spelled the same way.
             mapped = sigma.get(name) if sigma is not None else None
             return mapped.name if isinstance(mapped, Var) else rename(name)
@@ -1693,7 +1693,7 @@ class Fold:
         observe = None
         if self.observe is not None:
             # The observer renames in lockstep: param 0 tracks the axis, the state params track the
-            # combine'self renamed results, the body/results are ordinary SSA material.
+            # combine's renamed results, the body/results are ordinary SSA material.
             observe = Lambda(
                 params=(*lead, *(rename(p) for p in self.observe.params[1:])),
                 body=Body(tuple(st.rewrite(rename, sigma, axis_fn) for st in self.observe.body)),

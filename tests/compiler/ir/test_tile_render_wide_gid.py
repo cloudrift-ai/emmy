@@ -1,4 +1,4 @@
-"""``Tile.render`` widens the flat thread id past INT32_MAX.
+"""``Tile``'s render widens the flat thread id past INT32_MAX.
 
 A per-cell coop-reduce grid can exceed 2^31 total threads (gemma-4-12B's M=4096
 down-proj demote: 4096 * 3840 * 256 = 4.03e9); the 32-bit ``blockIdx.x * blockDim.x``

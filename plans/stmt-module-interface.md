@@ -29,8 +29,9 @@ That is a constant factor, which a Rust port removes and no Python fix does.
 4. **`Body` as a tuple.** Callers no longer rely on it, bar two generic walkers: the structural form and the wire
    rewrite both reach a `Body` through `isinstance(..., tuple)`. With `Body` made a plain sequence, those two were
    all that `tests/compiler/ir` and `tests/compiler/passes` needed changed.
-5. **Kernel IR's kinds and `with_exprs`.** Five Kernel IR kinds report expressions and cannot be rebuilt from them.
-   Nothing maps expressions over a Kernel IR body today; the base refuses by name if something does.
+5. **Kernel IR's kinds and expressions.** Five Kernel IR kinds report expressions and cannot be rebuilt from them;
+   the base refuses by name. Six more hold expressions `exprs` does not report (`CpAsyncCopy`, `TmaLoad` and the
+   four mbarrier kinds), so a map would skip them. Nothing maps expressions over a Kernel IR body today.
 6. **Statement copies no test reaches.** The guard against `dataclasses.replace` on a statement watches a lowering.
    A call site that no corpus case and no pass or IR test executes is not found by it.
 
@@ -48,7 +49,8 @@ That is a constant factor, which a Rust port removes and no Python fix does.
 - **Object identity.** About 53 call sites key side tables on `id(statement)`. A statement read from a body twice
   must be the same object; a test pins it.
 - **Kernel IR's kinds** stay Python classes implementing the protocol. To a Rust core they are leaves it calls back
-  into through the protocol's methods.
+  into through the protocol's methods. Two of them, `RegStore` and `Tile`, still keep part of their rendering as
+  methods the render functions call.
 - **Conversion cost** across the Python/Rust boundary is unmeasured. Measure it on the heaviest RTX 5090 placement
   pool before committing to a design.
 

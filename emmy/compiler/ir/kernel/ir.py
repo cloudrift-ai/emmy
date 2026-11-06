@@ -49,8 +49,6 @@ from emmy.compiler.ir.render import (
     RenderCtx,
     _extent_c,
     _pad,
-    _render_grid_axis_decode,
-    _stride_c,
     op_to_expr,
     render_address,
     render_body,
@@ -75,8 +73,48 @@ from emmy.compiler.ir.stmt import (
 )
 
 # The widest iteration space a 32-bit flat thread id can address — past this the
-# ``Tile`` decode must widen to 64-bit (see ``Tile.render``).
+# ``Tile`` decode must widen to 64-bit (see ``Tile``'s render).
 _INT32_MAX = 2**31 - 1
+
+
+def _stride_c(axes, ctx: RenderCtx, *, wide: bool = False) -> str:
+    """Build a C expression for the product of axis extents — used as the
+    stride divisor in the grid-axis decode. ``1`` if ``axes`` is empty.
+    ``wide`` prefixes the FIRST factor with a ``(long long)`` cast so the
+    whole product evaluates in 64-bit — a symbolic-grid divisor like
+    ``seq_len * 6144 * 256`` overflows int32 while being *computed*, before
+    any promotion against a 64-bit dividend can help."""
+    if not axes:
+        return "1"
+    factors = [_extent_c(a, ctx) for a in axes]
+    if wide:
+        factors[0] = f"(long long){factors[0]}"
+    return " * ".join(factors)
+
+
+def _render_grid_axis_decode(axes: tuple[Axis, ...], idx_expr: str, ctx: RenderCtx, *, wide: bool = False) -> list[str]:
+    """Decode ``idx_expr`` (``blockIdx.x`` or ``threadIdx.x``) into per-axis ints.
+    ``wide`` keeps every stride divisor in 64-bit (see :func:`_stride_c`); the decoded
+    axis vars stay ``int`` — each is bounded by its extent."""
+    pad = _pad(ctx.indent)
+    if not axes:
+        return []
+    if len(axes) == 1:
+        return [f"{pad}int {axes[0].name} = {idx_expr};"]
+    decoded: list[str] = []
+    stride_axes: list[Axis] = []  # accumulated INNER axes (per-step product is their extents)
+    for ax in reversed(axes):
+        extent = _extent_c(ax, ctx)
+        if not stride_axes:
+            decoded.append(f"int {ax.name} = {idx_expr} % {extent};")
+        else:
+            decoded.append(f"int {ax.name} = ({idx_expr} / ({_stride_c(stride_axes, ctx, wide=wide)})) % {extent};")
+        stride_axes.append(ax)
+    outer = axes[0]
+    outer_stride = _stride_c(list(axes[1:]), ctx, wide=wide)
+    decoded[-1] = f"int {outer.name} = {idx_expr} / ({outer_stride});"
+    return [pad + line for line in reversed(decoded)]
+
 
 # ---------------------------------------------------------------------------
 # Hardware primitives
@@ -392,7 +430,7 @@ class Tile(Stmt):
         return lines
 
     def _rewrite(self, rename, sigma, axis_fn):  # noqa: ANN001, ANN202 — see ``Stmt.rewrite``
-        # ``axes`` map through ``axis_fn``; the body'self stmts route through the
+        # ``axes`` map through ``axis_fn``; the body's stmts route through the
         # generic per-stmt rewrite so SSA names / Exprs canonicalize inside. The
         # per-CTA thread counts (``block_threads`` / ``aux_threads``) are geometry,
         # not SSA — carry them through verbatim (dropping them silently falls the
@@ -400,7 +438,7 @@ class Tile(Stmt):
         # tile), exactly as ``Tile.with_bodies`` preserves them. The rasterization
         # fields are geometry too — ``raster_axes`` names axes, so it follows the
         # ``axis_fn`` renames (dropping it silently reverts the launch order to the
-        # ungrouped N-fastest raster — the exact silent-loss this handler'self comment
+        # ungrouped N-fastest raster — the exact silent-loss this handler's comment
         # has always warned about).
         new_axes = tuple(axis_fn(a) for a in self.axes)
         raster_axes = self.raster_axes
@@ -2286,7 +2324,7 @@ class MmaSyncPtx(Stmt):
             ab_dtype=self.ab_dtype,
             c_dtype=self.c_dtype,
             b_row_major=self.b_row_major,
-            # The block-scaled form'self scale registers are fragments like any other and must be
+            # The block-scaled form's scale registers are fragments like any other and must be
             # renamed with them: dropping them here would silently rewrite the instruction into its
             # plain three-operand sibling, which renders with the wrong arity.
             sfa_frag=rename(self.sfa_frag) if self.sfa_frag is not None else None,
@@ -3030,18 +3068,18 @@ class RegStore(Stmt):
         return lines
 
     def _rewrite(self, rename, sigma, axis_fn):  # noqa: ANN001, ANN202 — see ``Stmt.rewrite``
-        # The epilogue'self chain SSA names are render-local (scoped per element inside the store'self
+        # The epilogue's chain SSA names are render-local (scoped per element inside the store's
         # block), so only its Exprs σ-substitute — the load indices and the captured predicates thread
         # the per-cell replication offsets through exactly like ``dst_index``. The lambda is re-closed
         # over what the substituted body reads (its trailing coordinate params); the leading params
-        # stay bound to the store'self fragments, which rename with the store.
+        # stay bound to the store's fragments, which rename with the store.
         epilogue = self.epilogue
         if epilogue is not None:
             body = Body(tuple(st.rewrite(lambda n: n, sigma) for st in epilogue.body))
             epilogue = Lambda.closing(epilogue.params[: 1 + len(self.extra_frags)], body, epilogue.results)
 
         # Guard base/bound Exprs σ-substitute like ``dst_index`` (the per-cell
-        # replicator'self offsets must reach the boundary predicate; the bound is a
+        # replicator's offsets must reach the boundary predicate; the bound is a
         # Literal or free symbolic Var, which σ passes through).
         def _sub_guard(g):  # noqa: ANN001, ANN202 — tuple[Expr, Expr] | None
             return None if g is None else (sigma.apply(g[0]), sigma.apply(g[1]))

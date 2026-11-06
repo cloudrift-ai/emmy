@@ -7,7 +7,7 @@ by 0, 1, ..., N-1. The CUDA backend can emit those as a single
 ``float<N>`` / ``__half2`` reinterpret-cast read followed by N ``.x/.y/.z/.w``
 unpacks. Folding the run into one ``Load(names=(n0, n1, ...), input, index)``
 makes the optimization visible in the IR (``--ir kernel`` shows one Load with
-multiple LHS names) while keeping the renderer simple — ``Load.render``
+multiple LHS names) while keeping the renderer simple — ``Load``'s render
 branches on the vector form.
 
 ## What the pass does

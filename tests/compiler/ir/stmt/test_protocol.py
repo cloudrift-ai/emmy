@@ -1,5 +1,6 @@
 """The statement protocol: what a statement kind owes, checked over every kind in every IR layer."""
 
+import dataclasses
 import importlib
 import pickle
 import pkgutil
@@ -10,7 +11,7 @@ import emmy.compiler.ir as ir_pkg
 import emmy.compiler.ir.stmt as stmt_pkg
 from emmy.compiler.dtype import F32
 from emmy.compiler.ir.axis import Axis
-from emmy.compiler.ir.expr import BinaryExpr, Literal, Var
+from emmy.compiler.ir.expr import BinaryExpr, Expr, Literal, Var
 from emmy.compiler.ir.stmt import (
     Accum,
     Affine,
@@ -49,8 +50,7 @@ def test_every_kind_states_the_protocol() -> None:
     """A kind says how it rewrites and prints, and each reading half comes with its rebuilding half.
 
     A kind that lists child bodies rebuilds from bodies; one that lists expressions rebuilds from expressions. The
-    second half is not asked of Kernel IR's kinds: nothing maps expressions over a Kernel IR body, and the base
-    refuses, by name, the day something does.
+    second half is asked of the shared kinds only: nothing maps expressions over a Kernel IR body.
     """
     missing = []
     for cls in _kinds():
@@ -99,6 +99,30 @@ def test_a_statement_rebuilds_as_itself(stmt) -> None:
     assert stmt.with_exprs(tuple(stmt.exprs())) == stmt
     assert map_exprs(stmt, lambda expr: expr) is stmt
     assert stmt.rename_buffers({}) == stmt
+
+
+def _held_exprs(value) -> list:
+    """Every expression a statement holds in its fields, found by reflection: the check on what ``exprs`` reports."""
+    if isinstance(value, Expr):
+        return [value]
+    if isinstance(value, (tuple, list)) and not isinstance(value, Body):
+        return [expr for item in value for expr in _held_exprs(item)]
+    if isinstance(value, (Stmt, SelectBranch)):
+        return [expr for f in dataclasses.fields(value) for expr in _held_exprs(getattr(value, f.name))]
+    return []
+
+
+@pytest.mark.parametrize("stmt", _EXAMPLES, ids=lambda stmt: type(stmt).__name__)
+def test_an_expression_map_reaches_every_expression_a_statement_holds(stmt) -> None:
+    """``exprs`` lists every expression of the statement and ``with_exprs`` puts each one back in its place."""
+    held = _held_exprs(stmt)
+    assert sorted(map(repr, stmt.exprs())) == sorted(map(repr, held))
+    markers = tuple(Var(f"e{index}") for index in range(len(held)))
+    fresh = iter(markers)
+    mapped = map_exprs(stmt, lambda _expr: next(fresh))
+    assert tuple(mapped.exprs()) == markers
+    assert sorted(map(repr, _held_exprs(mapped))) == sorted(map(repr, markers))
+    assert mapped.with_exprs(tuple(stmt.exprs())) == stmt
 
 
 @pytest.mark.parametrize("stmt", _EXAMPLES, ids=lambda stmt: type(stmt).__name__)

@@ -341,7 +341,7 @@ class Accum(Stmt):
     # Optional accumulator dtype. ``None`` in Loop IR — derived at lowering
     # time. The Init-placement pass freezes this to a concrete
     # :class:`DataType` (typically ``F32`` for fp16 reductions). When set,
-    # ``Accum.render`` declares the local in that dtype and inserts a
+    # ``Accum``'s render declares the local in that dtype and inserts a
     # ``__half2float`` / ``__float2half`` on ``value`` only when ``value``'s
     # dtype disagrees with the accumulator's. ``None`` preserves the legacy
     # f32 rendering.
@@ -352,7 +352,7 @@ class Accum(Stmt):
     # ``name = op(name, value)``. A twisted carrier's streaming merge lowers each
     # state component to a ``base``-``Accum``: the ψ rescale is a preceding ``Assign``
     # binding ``base`` (e.g. ``lm = l·alpha``), so the fold itself stays an ``Accum``
-    # whose seed is still ``op.identity``. The seed (and ``Loop.render``'s per-Accum
+    # whose seed is still ``op.identity``. The seed (and ``Loop``'s render's per-Accum
     # init) is unchanged — ``base`` only redirects the in-loop left operand.
     base: str | None = None
 
@@ -524,7 +524,7 @@ class Init(Stmt):
     ``<dtype> <name> = <identity>;`` — a scope-local declaration.
 
     A fold's OWN seed does not ride here — it lives on its ``Accum`` and is derived by
-    ``Loop.render`` from ``op.identity``. What produces an ``Init`` is the CLAMP-TO-IDENTITY
+    ``Loop``'s render from ``op.identity``. What produces an ``Init`` is the CLAMP-TO-IDENTITY
     masking: a masked tail's ``Select`` needs the identity as an SSA name to select, so the
     masked ILP copy (``lowering/kernel/_factor``) and the compute fill's K mask
     (``lowering/kernel/_atom._k_masked``) each bind one. ``identity`` is the neutral element
@@ -556,7 +556,7 @@ class Init(Stmt):
 
     def _rewrite(self, rename, sigma, axis_fn):  # noqa: ANN001, ANN202 — see ``Stmt.rewrite``
         # ``identity`` is a constant scalar — only the name moves. Renamed in lockstep with
-        # the fold'self ``Accum`` (registered above) so the seed stays paired.
+        # the fold's ``Accum`` (registered above) so the seed stays paired.
         return Init(name=rename(self.name), identity=self.identity, dtype=self.dtype)
 
 

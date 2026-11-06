@@ -2,7 +2,7 @@
 
 A ``LoopOp`` plus the runtime input shapes uniquely determine a C++
 source string. We render that source by walking the body via each
-``Stmt.render``, hand the result to ``cppyy.cppdef`` (Cling JIT-compiles
+``Stmt``'s render, hand the result to ``cppyy.cppdef`` (Cling JIT-compiles
 + links it into the running process), then call the resulting function
 with raw pointers to numpy arrays.
 

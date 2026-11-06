@@ -40,7 +40,7 @@ The invariant is what stops facts from acquiring a second home. A term that rend
 no private spelling of anything the statements already carry:
 
 - the neutral elements come from `Accum.op.identity` through the ONE identity placement
-  (`Loop.render` / `StridedLoop.render`), so no `identities` field rides on the term and no
+  (`Loop`'s render / `StridedLoop`'s render), so no `identities` field rides on the term and no
   `Init` seed is emitted beside it;
 - the rescale temps arrive as ordinary `Assign`s, so the generic SSA rename, liveness and read
   counters see them with no special `deps()` channel to keep complete.
@@ -221,10 +221,12 @@ along different lowering paths still dedup in the tuning cache.
 
 **A statement is immutable data** — every concrete Loop-IR / Tile-IR / Kernel-IR statement (`Loop`, `Cond`, leaves,
 `Tile`, `Smem`, `Sync`, `CpAsyncCopy`, `TmaDescriptor`, …) has named read-only fields, compares by content and is
-hashable. To "edit" one, take a copy with `stmt.replace(field=value)`; nothing outside `ir/stmt/` reaches for the
-dataclass machinery of a statement. Ops, by contrast, are frozen and unhashable — rewrites replace the op and rebind
-its graph node. Op fields stored inside statements (e.g. `Assign.op`) must be lightweight value objects (e.g.
-`ElementwiseImpl`, not `ElementwiseOp`) so the surrounding statement stays hashable.
+hashable. To "edit" one, take a copy with `stmt.replace(field=value)`; nothing outside `ir/stmt/` calls
+`dataclasses.replace` on a statement. One pass still lists a statement's fields: the kernel loopify pass, which
+compares whole statements field by field to roll repeated ones into a loop. Ops, by contrast, are frozen and
+unhashable — rewrites replace the op and rebind its graph node. Op fields stored inside statements (e.g.
+`Assign.op`) must be lightweight value objects (e.g. `ElementwiseImpl`, not `ElementwiseOp`) so the surrounding
+statement stays hashable.
 
 ## The statement module's interface
 
@@ -250,9 +252,12 @@ these, and nothing else:
 
 Each reading member has a rebuilding half: `with_bodies` takes what `nested` returned, `with_exprs` what `exprs`
 returned. `rewrite` is the one entry for renaming and substitution; it drops the substitutions a statement's own
-binder shadows and hands the rest to the kind's `_rewrite`. Kernel IR's kinds report expressions without rebuilding
-from them: nothing maps expressions over a Kernel IR body, and the base refuses by name if something does.
-`tests/compiler/ir/stmt/test_protocol.py` checks every kind in every layer.
+binder shadows and hands the rest to the kind's `_rewrite`. The expression pair is complete for the shared kinds
+only: `exprs` lists every expression a shared kind holds and `with_exprs` rebuilds it from them. Nothing maps
+expressions over a Kernel IR body, and its kinds are not held to that: some report expressions they cannot be
+rebuilt from, which the base refuses by name, and some hold expressions they do not report, which a map would skip.
+`tests/compiler/ir/stmt/test_protocol.py` checks that every kind in every layer states the protocol, and the
+rebuilding halves on an example of each shared kind.
 
 Behaviour that is not on this list lives outside the module as a function over statements. CUDA rendering is the
 main case: `ir/render.py` holds the render context, the index flattening and one render function per kind,
@@ -351,7 +356,7 @@ distribute over that reduce — the `_SEMIRING` table, only `(+, ×)` today) liv
 atom-cell matchers ask round them out: `reduce_canon` (alias →
 base combine, `sum` → `add` …) and the `_REDUCE_SPELLING` registry
 (`reduce_spelling`) — the single op-keyed table
-behind the four sites that used to switch on the reduce op name (`Accum.render`'s
+behind the four sites that used to switch on the reduce op name (`Accum`'s render's
 `+=` / `*=` / `fmax` / `fmin`, `kernel/ir._binary_combine_expr`, and
 `ReduceOp.forward` / `ScanOp.forward`'s numpy reductions). `op.selecting` (the
 max/min family) drives the init-placement dtype choice. `op.decodes` names the storage
@@ -708,7 +713,7 @@ inside definitions. Subroutine boundaries never limit fusion.
   not bind itself): it must read no name the first body defines (blocking softmax-style sequential reduces where
   sum-exp reads `acc_max`), and no between-stmt def. Names both bodies merely happen to bind are a COLLISION, not a
   dependence — two alpha-equal copies of one cone always share every spelling — so the incoming body's copies rename
-  apart. Only a name the incoming Loop still binds after it closes (its immediate carriers, which `Loop.render`
+  apart. Only a name the incoming Loop still binds after it closes (its immediate carriers, which `Loop`'s render
   declares ahead of the loop) refuses, because the rename cannot reach that name's readers outside. Eliminates the
   duplicate K traversal in patterns like `silu(x@Wg) * (x@Wu)`, and the duplicate score pass between the channels of a
   blocked twisted carrier; subsequent normalization collapses the duplicate loads, and the lowering passes stage both
