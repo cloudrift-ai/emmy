@@ -21,7 +21,7 @@ from emmy.compiler.ir.kernel.ir import (
     RegFragment,
     RegStore,
     Tile,
-    frag_layout,
+    fragment_args,
 )
 from emmy.compiler.ir.stmt import Assign, Body, Let, Load, Pre, Select, StridedLoop, binary
 from emmy.compiler.pipeline.passes.tile._fromloop import seed_index
@@ -38,7 +38,7 @@ class _Fragments:
         self.atom = tile.schedule.kernel.tile.atom
         self.period = tile.schedule.kernel.tile.bk
         self.width = self.atom.atom_n
-        self.layout = frag_layout(self.atom.fragment_layout)
+        self.layout = self.atom.fragment_layout
         self.extents = {axis.name: axis.extent.as_static() for axis in tile.axes}
         self.body = []
         self.memo = {}
@@ -57,7 +57,12 @@ class _Fragments:
             out = self.name()
             self.body.append(
                 FragmentApply(
-                    out=out, op=ElementwiseImpl(op), args=args, kinds=kinds, layout=self.layout, row_base=row_base, col_base=col_base
+                    out=out,
+                    op=ElementwiseImpl(op),
+                    args=fragment_args(args, kinds),
+                    layout=self.layout,
+                    row_base=row_base,
+                    col_base=col_base,
                 )
             )
             self.memo[key] = out
@@ -278,7 +283,7 @@ def factorize_register(tile):
             )
     for state, value in zip(emit.states, fragments(program.roots[-1], *cells[-1][::-1]), strict=True):
         emit.body.append(
-            FragmentApply(out=state, op=ElementwiseImpl("copy"), args=(value,), kinds=(FRAG,), layout=emit.layout, in_place=True)
+            FragmentApply(out=state, op=ElementwiseImpl("copy"), args=fragment_args((value,), (FRAG,)), layout=emit.layout, in_place=True)
         )
     declarations = tuple(RegFragment(name=name, role="c", shape=emit.atom.shape, dtype=F32) for name in emit.states)
     loop = StridedLoop(axis=tile.axis_of(program.time), start=Literal(0, "int"), step=Literal(1, "int"), body=Body(emit.body), unroll=False)

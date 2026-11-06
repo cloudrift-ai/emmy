@@ -73,45 +73,29 @@ def _normalize_body(stmts: Body) -> Body:
         # The expansion lands consumers above producers it reused; sort before naming, or a read ahead of its
         # definition reads a name the renaming never binds.
         stmts = rename_ssa_sequential(topo_sort_siblings(expand_calls(prepare_body(stmts))))
-    # The form has settled when a round leaves its own input unchanged: prepared, folded and ordered. The fold reads
-    # no order, so it runs ahead of the order, and a body it changes is prepared again before it is ordered. The order
-    # runs again on its own output until it leaves it alone: a tie it broke by spelling breaks the same way twice.
+    # The folds feed the steps ahead of them: a fold can leave a value unread, make two loops mergeable, or change
+    # what orders the free axes. So the steps run again after a fold that changed the body. The order permutes and
+    # names, and one step reads names: the order gives two bindings that shared a name their own, and a value only
+    # the other's readers kept alive is then unread. A body the order left such a value in goes through the steps
+    # again; any other is final, since the order is final on its own output.
     for _ in range(8):
-        while True:
-            reduced = prepare_body(stmts)
-            if reduced == stmts:
-                break
-            stmts = reduced
-        folded = fold_affine(reduced)
-        if _commuted(folded) != _commuted(reduced):
-            stmts = folded
+        prepared = Body.coerce(prepare_body(stmts))
+        stmts = Body.coerce(fold_affine(fold_trivial_selects(prepared)))
+        if stmts != prepared:
             continue
-        ordered = _canonical_order(reduced)
-        if ordered == reduced:
+        ordered = _canonical_order(prepared)
+        stmts = drop_unread_values(ordered)
+        if stmts == ordered:
             return ordered
-        stmts = ordered
     from emmy.compiler.ir.stmt.base import pretty_body  # noqa: PLC0415
 
     raise ValueError("the normal form did not settle in eight rounds:\n" + "\n".join(pretty_body(stmts, "  ")))
 
 
-def _commuted(stmts: Body) -> Body:
-    """``stmts`` with every commutative operation's operands and every ``Affine``'s terms sorted: the fold lists them
-    in no order, so a fold that changed nothing agrees with its input up to that."""
-
-    def sort(stmt: Stmt) -> Stmt:
-        if isinstance(stmt, Assign) and stmt.op.commutative:
-            return stmt.replace(args=tuple(sorted(stmt.args)))
-        if isinstance(stmt, Affine):
-            terms = sorted(stmt.terms, key=lambda term: term[1])
-            return stmt.replace(args=tuple(arg for _, arg in terms), coefficients=tuple(c for c, _ in terms))
-        return stmt
-
-    return stmts.map(sort)
-
-
 def prepare_body(stmts: Body) -> Body:
-    """One round of the exact simplifications, then every value placed once (:func:`place_values`)."""
+    """The exact simplifications, then every value placed once (:func:`place_values`). Value placement feeds the two
+    steps ahead of it — a value placed outside its loop can leave two loops mergeable, two reads made one can leave a
+    predicate constant — and they feed it back, so the three run until the first two leave a placed body alone."""
     stmts = topo_sort_siblings(stmts)
     stmts = drop_size_one_free_axes(stmts)
     stmts = drop_size_one_reduce_axes(stmts)
@@ -119,9 +103,12 @@ def prepare_body(stmts: Body) -> Body:
     stmts = fold_trivial_selects(stmts)
     stmts = fold_constants(stmts)
     stmts = drop_unread_values(stmts)
-    stmts = merge_sibling_reduce_loops(stmts)
-    stmts = _canonicalize_exprs(Body.coerce(simplify_body(stmts)))
-    return place_values(stmts)
+    placed = None
+    while True:
+        simplified = _canonicalize_exprs(Body.coerce(simplify_body(merge_sibling_reduce_loops(stmts))))
+        if simplified == placed:
+            return placed
+        stmts = placed = place_values(simplified)
 
 
 # ---------------------------------------------------------------------------
@@ -409,21 +396,27 @@ def drop_unread_values(stmts: Body) -> Body:
     stmts = Body.coerce(stmts)
     if not stmts.writes:
         return stmts
-    reads: Counter[str] = Counter()
-    for stmt in stmts.iter():
-        own = set(stmt.defines())
-        reads.update(name for name in stmt.deps() if name not in own)
-        for expr in stmt.exprs():
-            reads.update(name for name in expr.free_vars() if name not in own)
+    # Dropping a value can leave its operands unread in turn: count and drop until a sweep drops nothing.
+    while True:
+        reads: Counter[str] = Counter()
+        for stmt in stmts.iter():
+            own = set(stmt.defines())
+            reads.update(name for name in stmt.deps() if name not in own)
+            for expr in stmt.exprs():
+                reads.update(name for name in expr.free_vars() if name not in own)
+        dropped = False
 
-    def drop(stmt: Stmt) -> Stmt | None:
-        if isinstance(stmt, _PURE) and not getattr(stmt, "carried", False) and not any(reads[name] for name in stmt.defines()):
-            return None
-        if stmt.nested() and not any(stmt.nested()):
-            return None
-        return stmt
+        def drop(stmt: Stmt, reads: Counter[str] = reads) -> Stmt | None:
+            nonlocal dropped
+            unread = isinstance(stmt, _PURE) and not getattr(stmt, "carried", False) and not any(reads[name] for name in stmt.defines())
+            if unread or (stmt.nested() and not any(stmt.nested())):
+                dropped = True
+                return None
+            return stmt
 
-    return stmts.map(drop)
+        stmts = stmts.map(drop)
+        if not dropped:
+            return stmts
 
 
 # ---------------------------------------------------------------------------
@@ -1313,38 +1306,40 @@ def _canonical_order(stmts: Body) -> Body:
     role = roles(stmts)
     numbering = value_numbers(stmts, lambda name: role.get(name, name))
 
+    def unlisted(stmt: Stmt) -> Stmt:
+        """A sum with its coefficients sorted: the order lists a sum's terms itself, so what it sorts by reads none of
+        that listing."""
+        return stmt.replace(coefficients=tuple(sorted(stmt.coefficients))) if isinstance(stmt, Affine) else stmt
+
     def shape(stmt: Stmt) -> str:
         """A statement's own shape with every name and buffer one placeholder: what tells a load from a store, a sum
         from a product, a plain index from a composite one, before any value or spelling is read."""
         children = stmt.nested()
         shell = stmt.with_bodies(tuple(Body() for _ in children)) if children else stmt
-        return repr(form(shell.rename(lambda _name: "__slot__").rename_buffers(_Slotted())))
+        return repr(form(unlisted(shell.rename(lambda _name: "__slot__").rename_buffers(_Slotted()))))
 
     def spelling(stmt: Stmt) -> str:
         """The whole subtree with names abstracted and buffers spelled: the tie-break between siblings of one shape,
-        so symmetric siblings order by the buffers they touch."""
-        return repr(form(stmt.rename(lambda _name: "__name__")))
+        so symmetric siblings order by the buffers they touch. Like the shape and the value, it reads nothing the
+        order itself decides — the subtree comes with its children ordered — so the order is final on its own
+        output."""
+        return repr(form(Body((stmt.rename(lambda _name: "__name__"),)).map(unlisted)))
 
     def ordered(body: Body) -> Body:
         body = Body.coerce(body)
+        rebuilt = Body(stmt.with_bodies(tuple(ordered(child) for child in stmt.nested())) if stmt.nested() else stmt for stmt in body)
         shapes = [shape(stmt) for stmt in body]
         ties = Counter(shapes)
         priorities = []
-        for stmt, own in zip(body, shapes, strict=True):
+        for stmt, built, own in zip(body, rebuilt, shapes, strict=True):
             children = stmt.nested()
             category = 2 if children and stmt.has_side_effects else int(not children)
-            spelled = spelling(stmt) if ties[own] > 1 else ""
+            spelled = spelling(built) if ties[own] > 1 else ""
             if children:
                 priorities.append((category, own, spelled, scope_tree(numbering, Body((stmt,)))))
             else:
                 number, params = numbering.numbers[id(stmt)]
                 priorities.append((category, own, spelled, number, repr(params)))
-        rebuilt = []
-        for stmt in body:
-            if stmt.nested():
-                stmt = stmt.with_bodies(tuple(ordered(child) for child in stmt.nested()))
-            rebuilt.append(stmt)
-        rebuilt = Body(rebuilt)
         order = rebuilt._topological_permutation(ordering_constraints(rebuilt, effects=True), lambda index, _stmt: priorities[index])
         return Body(rebuilt[index] for index in order)
 

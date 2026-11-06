@@ -11,6 +11,7 @@ this file rather than scattering one-off greps elsewhere.
 from __future__ import annotations
 
 import ast
+import functools
 import pathlib
 import re
 
@@ -190,7 +191,9 @@ def test_the_statement_module_exports_a_pinned_list() -> None:
     # Normalization steps a pass calls on its own, and the body assembly fusion drives.
     steps = ["fold_affine", "simplify_body"]
     assembly = ["BodyAnalysis", "Scope", "Program", "Splicer", "NotSupported", "UnfusableStmt"]
-    assert sorted(stmt.__all__) == sorted(kinds + containers + functions + steps + assembly)
+    # What a layer declares a kind of its own with: the base that computes the protocol, and a field's role.
+    declaring = ["Declared", "role"]
+    assert sorted(stmt.__all__) == sorted(kinds + containers + functions + steps + assembly + declaring)
 
 
 def test_the_statement_module_depends_on_expressions_and_values_only() -> None:
@@ -507,6 +510,69 @@ def test_every_buffer_bearing_stmt_can_rename_its_buffers() -> None:
         "these stmt kinds declare external buffers but cannot rename them — add a "
         "rename_buffers override beside the declaration:\n" + "\n".join(sorted(offenders))
     )
+
+
+def _kernel_kinds() -> list[type]:
+    import emmy.compiler.ir.kernel.ir as kernel_ir
+    from emmy.compiler.ir.stmt import Stmt
+
+    return [
+        cls for cls in vars(kernel_ir).values() if isinstance(cls, type) and issubclass(cls, Stmt) and cls.__module__ == kernel_ir.__name__
+    ]
+
+
+def test_a_kernel_ir_kind_is_declared_not_programmed() -> None:
+    """A Kernel IR statement kind is data: fields with their roles, how it prints, and at most a constructor check.
+    The statement protocol follows from the roles (``Declared``); what rendering or a lowering asks of a statement
+    beyond that is a function over it, beside the render functions."""
+    from emmy.compiler.ir.stmt import Declared
+
+    offenders = [
+        f"{cls.__name__}.{name}"
+        for cls in _kernel_kinds()
+        for name, member in vars(cls).items()
+        if (callable(member) or isinstance(member, (property, functools.cached_property, staticmethod, classmethod)))
+        and name not in ("pretty", "__post_init__")
+        and not (name.startswith("__") and name != "__post_init__")
+    ]
+    assert len(_kernel_kinds()) == 30 and all(issubclass(cls, Declared) for cls in _kernel_kinds())
+    assert not offenders, "state these as field roles, or move them to functions over the statement:\n" + "\n".join(sorted(offenders))
+
+
+def test_a_kernel_ir_field_has_a_type_from_the_closed_set() -> None:
+    """Every field of a Kernel IR statement kind is a string, a number, a boolean, an expression, an axis, a dtype, an
+    elementwise op, a body, a statement, a record of such fields, or a tuple or optional of those. A bare ``tuple``,
+    ``object`` or a class from outside that set is a field nothing but Python can hold."""
+    import dataclasses
+    import types
+    import typing
+
+    import emmy.compiler.ir.kernel.ir as kernel_ir
+    from emmy.compiler.dtype import DataType
+    from emmy.compiler.ir.axis import Axis
+    from emmy.compiler.ir.elementwise import ElementwiseImpl
+    from emmy.compiler.ir.expr import Expr
+    from emmy.compiler.ir.stmt import Body, Stmt
+
+    def closed(tp) -> bool:  # noqa: ANN001 — a type hint
+        if tp in (str, int, float, bool, type(None)):
+            return True
+        if typing.get_origin(tp) in (tuple, typing.Union, types.UnionType):
+            return all(closed(arg) for arg in typing.get_args(tp) if arg is not Ellipsis)
+        if not isinstance(tp, type):
+            return False
+        if issubclass(tp, (Expr, Axis, DataType, ElementwiseImpl, Body, Stmt)):
+            return True
+        record = dataclasses.is_dataclass(tp) and tp.__module__ == kernel_ir.__name__
+        return record and all(closed(hint) for hint in typing.get_type_hints(tp).values())
+
+    offenders = [
+        f"{cls.__name__}.{field.name}: {field.type}"
+        for cls in _kernel_kinds()
+        for field in dataclasses.fields(cls)
+        if not closed(typing.get_type_hints(cls)[field.name])
+    ]
+    assert not offenders, "give these fields a type from the closed set:\n" + "\n".join(offenders)
 
 
 def test_every_op_is_a_frozen_dataclass() -> None:

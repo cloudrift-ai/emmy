@@ -234,13 +234,14 @@ statement stays hashable.
 nothing else: no submodule path, no private name. The package exports the statement kinds, `Body` and `OutputSpec`,
 `normalize_body` and `canonicalize_identity`, a few functions over statements (`free_names`, `exposed_defines`,
 `rename_free`, `map_exprs`, `binary`, `mask_select_predicate`, `pretty_body`, `ordering_constraints`,
-`dtype_promote`), two normalization steps a pass may call on its own (`fold_affine`, `simplify_body`), and the body
-assembly fusion drives (`Splicer`, `Program`, `BodyAnalysis`, `Scope` and its two refusals). The module itself
+`dtype_promote`), two normalization steps a pass may call on its own (`fold_affine`, `simplify_body`), the body
+assembly fusion drives (`Splicer`, `Program`, `BodyAnalysis`, `Scope` and its two refusals), and what a layer
+declares a kind of its own with (`Declared`, `role`). The module itself
 imports expressions, axes, dtypes and the structural and wire forms: no op, tensor, graph, backend or pipeline.
 `tests/architecture/test_layering.py` pins the export list and both directions.
 
-**The statement protocol** is what a kind owes, all of it methods on the kind. A layer adds a kind by stating
-these, and nothing else:
+**The statement protocol** is what a kind owes, all of it methods on the kind. The shared kinds state these by
+hand; a layer adds a kind of its own by declaring it (below), and nothing else:
 
 | Group | Members |
 | --- | --- |
@@ -252,12 +253,23 @@ these, and nothing else:
 
 Each reading member has a rebuilding half: `with_bodies` takes what `nested` returned, `with_exprs` what `exprs`
 returned. `rewrite` is the one entry for renaming and substitution; it drops the substitutions a statement's own
-binder shadows and hands the rest to the kind's `_rewrite`. The expression pair is complete for the shared kinds
-only: `exprs` lists every expression a shared kind holds and `with_exprs` rebuilds it from them. Nothing maps
-expressions over a Kernel IR body, and its kinds are not held to that: some report expressions they cannot be
-rebuilt from, which the base refuses by name, and some hold expressions they do not report, which a map would skip.
-`tests/compiler/ir/stmt/test_protocol.py` checks that every kind in every layer states the protocol, and the
-rebuilding halves on an example of each shared kind.
+binder shadows and hands the rest to the kind's `_rewrite`. `exprs` lists every expression a kind holds and
+`with_exprs` rebuilds it from them. `tests/compiler/ir/stmt/test_protocol.py` checks that every kind in every layer
+states the protocol, and the rebuilding halves on an example of each shared kind and each Kernel IR kind.
+
+**A declared kind** is a statement kind stated as data: a frozen dataclass on `Declared` whose fields carry a type
+and, through `role(...)`, what the field is to the rest of the compiler. The roles are names the statement defines,
+reads, updates in place or binds for its own use; buffers it reads, writes or declares kernel-local; expressions;
+axes it binds and names that follow them; a child body; statements it carries; the body of a pure term; and records
+whose own fields play roles. A field with no role is plain data. `Declared` computes every protocol member from the
+roles, in field order, so a declared kind writes none: what it reads is its `reads` and `updates` fields, a rename
+maps every name field and every expression, a buffer rename maps the buffer fields, and so on. Two roles hold
+statements that are not a child body. Carried statements (`stmts`: the cells a `RegStore` stores with it, the
+combine of a `TreeHalve`) are part of the statement: they are rewritten with it and their buffers, expressions and
+free reads are its own, a name one of them defines or the statement binds being hidden. A term (`term`: a
+`RegStore`'s epilogue) keeps its statements' names private: a rename reaches only the coordinates its expressions
+read. Kernel IR declares all of its kinds this way; a kind whose member the roles cannot give is a missing role, not
+a hand-written member.
 
 Behaviour that is not on this list lives outside the module as a function over statements. CUDA rendering is the
 main case: `ir/render.py` holds the render context, the index flattening and one render function per kind,
@@ -692,8 +704,9 @@ inside definitions. Subroutine boundaries never limit fusion.
 - `fold_trivial_selects` — a `Select` whose branches all bind one value is a copy of it.
 - `drop_unread_values` — a pure statement whose values nothing reads is dropped, and a loop or branch left with
   no statement goes with it: the work reached no output. The one-key softmax weight leaves its whole score behind
-  this way, the dot product that fed it and the loop that summed it included. A body that stores nothing is a
-  fragment whose values are all its reader's, so nothing is dropped from it.
+  this way, the dot product that fed it and the loop that summed it included: a dropped value leaves its operands
+  unread in turn, and one call drops the whole chain. A body that stores nothing is a fragment whose values are all
+  its reader's, so nothing is dropped from it.
 - `fold_affine` — every maximal single-reader cone of `add`, `subtract`, `negative`, literal `multiply`, literal
   `divide` and `Affine` over floating values becomes one `Affine`: like terms summed, zero terms dropped, the constant
   its offset, a division by a literal the product by its reciprocal, a single unit term with no offset a `copy`.
@@ -741,14 +754,24 @@ inside definitions. Subroutine boundaries never limit fusion.
   reduction's axis tuple is canonicalized as a set. SSA values travel only through the rename channel, never `sigma`,
   so indirect indices cannot be renamed twice. Normalization separates lexical bindings before motion can put them
   in one scope, then assigns canonical names again after ordering the result.
-- Preparation and placement run to a joint fixed point: a value placed once can remove an axis dependency or expose a
-  sibling merge in the next round, and a merge exposes values to place. Legal motion and merging expose availability;
-  equality alone never moves a value across a scope or an effect. This is scoped placement, not general partial
-  redundancy elimination: separately executed sibling scopes and equality through mutable loop-carried state may
-  remain, and loads are invalidated by writes to any element of their buffer. Affine integer expressions over bound
-  loop coordinates have a unique coefficient form in lexical axis order; for proven nonnegative indices, positive
-  constant quotient chains collapse to one divisor, and `/` and `//` share that spelling. Unsupported expressions
-  compare structurally after these rewrites.
+- Normalization runs its steps once and checks nothing. The steps that feed each other run to their own fixed
+  point where they sit: a value placed outside its loop can expose a sibling merge, two reads placement made one can
+  leave a predicate constant, and a merge exposes values to place, so the merge, the expression simplification and
+  placement run until the first two leave a placed body alone. The folds feed the steps ahead of them — a fold can
+  leave a value unread or change what orders the free axes — so the steps run again after a fold that changed the
+  body, and only then. The order runs last, once, with one exception: the unread-value drop reads by name, and a cut
+  can splice one cone twice under the same names, so a value only its namesake's readers kept alive is unread only
+  once the order has given every binding its own name. A body the order left such a value in goes through the steps
+  again. What keeps this honest is a test, not a loop: the normal form of
+  every kernel a repository golden or the realization corpus stores is one normalization leaves alone
+  (`tests/compiler/ir/stmt/implementation/test_normal_form_is_final.py`). A form that was not final would give two
+  spellings of one body two texts, and no error.
+- Legal motion and merging expose availability; equality alone never moves a value across a scope or an effect. This
+  is scoped placement, not general partial redundancy elimination: separately executed sibling scopes and equality
+  through mutable loop-carried state may remain, and loads are invalidated by writes to any element of their buffer.
+  Affine integer expressions over bound loop coordinates have a unique coefficient form in lexical axis order; for
+  proven nonnegative indices, positive constant quotient chains collapse to one divisor, and `/` and `//` share that
+  spelling. Unsupported expressions compare structurally after these rewrites.
 - The canonical order comes from the value numbering. Within a scope, blocks without a side effect come first, then
   leaves, then blocks with one, each group by statement kind; ties break by the value — a leaf by its number and its
   coordinates spelled by binding depth, a block by the hash of its scope tree — with every buffer spelled by the role
@@ -756,7 +779,9 @@ inside definitions. Subroutine boundaries never limit fusion.
   two the body cannot tell apart, which then order by name. Dependency and effect constraints
   (`order.ordering_constraints`) bound the order; a heap-based Kahn sort takes the least-priority ready statement.
   Names are then given sequentially, a commutative operation lists its operands by value and then by those names, and
-  a final axis unification restores shared reduction dimensions without merging dependent loops.
+  a final axis unification restores shared reduction dimensions without merging dependent loops. The order is final
+  on its own output because nothing it sorts by reads what it decides: a statement's shape and a block's spelled
+  subtree read a sum's coefficients sorted and the block's children already ordered, and no number reads a name.
 
 ### `ir/stmt/values.py` — value numbering
 
@@ -767,7 +792,9 @@ read at `(h / 384) * 128 + d` in one nest and at a grid axis in another number a
 under two consumers. A reduce binds the parameters that mention its axis, retains their bound index expressions in
 its number, and keeps the free coordinates those parameters read. Offsets and strides still distinguish reduced
 walks. Commutative operands order by number, and operands tied on number by the layout and then the
-parameter order their arrangement gives, so neither the source order nor the spelling reaches a number. The same
+parameter order their arrangement gives, so neither the source order nor the spelling reaches a number. A carried
+state an operation reads ahead of its update — the previous step's value — is keyed by use, like every other read of
+a state; only a name free in the body is spelled. The same
 number applied to the same coordinate expressions in one scope is one instance — what placement computes once.
 
 ### `ir/stmt/identity.py` — structural identity
@@ -941,6 +968,14 @@ Reuses `Tile` + leaf stmts from Tile IR; adds hardware primitives
 materialized from scheduling decisions. `KernelOp` carries the body
 directly (no separate AST class).
 
+A Kernel IR statement kind is data: a declared kind (see the statement module's interface). Its class holds fields
+with their roles, how it prints and at most a constructor check; what rendering or the CUDA lowering asks of a
+statement beyond that (a grid's size, a fragment's register count, a store's element addresses) is a function over the
+statement, beside the kind's render function. Every field has a type from one closed set: strings, numbers, booleans,
+expressions, axes, dtypes, elementwise ops, bodies, statements, records of such fields (`FragmentArg`, one operand of
+a `FragmentApply`), and tuples and optionals of those. A fragment layout is therefore named, not held: the kind stores
+the atom's layout name and rendering looks the geometry up. `tests/architecture/test_layering.py` guards both.
+
 | Symbol             | Role                                                              |
 |--------------------|-------------------------------------------------------------------|
 | `KernelOp`         | Graph-op wrapper around a `Tile`-rooted body. One per kernel.     |
@@ -960,7 +995,7 @@ directly (no separate AST class).
 | `FragmentApply`    | The one pointwise node over a C fragment. Each argument resides in another fragment, a per-row register pair, a cell-uniform scalar, a predicate over the element's absolute coordinates (`COORD`), or a global-memory load template at those coordinates (`GMEM`). A coordinate mask is a `where` over a `COORD` predicate — the masked branch takes the carrier's finite identity, avoiding `-inf - -inf` in an all-masked chunk, and an additive mask applies its keep op first; an additive bias is an `add` of a `GMEM` operand. The atom's fragment-layout descriptor supplies the element count and row mapping, so the same leaf serves m16n8k16 and Volta m8n8k4. |
 | `FragmentRowReduce` | Fold one warp's C fragments along the atom's N direction, per ROW: in-lane columns combine first, then the layout's `__shfl_xor` masks combine the column-group lanes. The resulting register pair is what a `FragmentApply` broadcasts as a `ROW` operand. The chunk tier's pivot and summed channel partials are exactly this, which is why the tier needs the chunk inside one warp column. |
 | `FragmentRepack`   | Convert C fragments into a 16-bit operand in registers. The m16n8k16 f16 B form exchanges packed column pairs across the warp; the A form uses the existing lane layout. m16n8k16 consumes two adjacent fragments; Volta m8n8k4 selects a four-column A slice or four-row B slice from one logical 16×16 C fragment with warp shuffles of packed FP16 pairs. |
-| `RegStore`         | Layout-aware per-lane epilogue store: four C elements for m16n8k16 or eight elements covering the four Volta output quadrants for m8n8k4. A paired Volta tile derives the matching interleaved 32×32 accumulator map from its cell position; it is not a schedule field. Adjacent elements leave as one packed pair when N is contiguous, including under an M-only tail guard; an N guard or strided physical orientation keeps scalar stores. Stores f32 directly or downconverts to f16. An optional epilogue is a pure `Lambda` over the projection tail's own `Load` / `Assign` / `Select` stmts, its leading params bound to the store's fragments; it is evaluated at each element's own coordinates. Floating loads widen to f32, while integer loads stay typed so shifts and bitwise operations on packed codes render as integer CUDA expressions. `run` holds the next three N-adjacent cells of a 16-bit `wgmma` output: the quad's lanes exchange packed column pairs so each lane stores one cell's eight columns of a row as one 16-byte store (`097_widen_fragment_stores`). |
+| `RegStore`         | Layout-aware per-lane epilogue store: four C elements for m16n8k16 or eight elements covering the four Volta output quadrants for m8n8k4. A paired Volta tile derives the matching interleaved 32×32 accumulator map from its cell position; it is not a schedule field. Adjacent elements leave as one packed pair when N is contiguous, including under an M-only tail guard; an N guard or strided physical orientation keeps scalar stores. Stores f32 directly or downconverts to f16. An optional epilogue is a pure term over the projection tail's own `Load` / `Assign` / `Select` stmts, stored as its body with the names bound to the store's fragments and the name of the stored value; it is evaluated at each element's own coordinates. Floating loads widen to f32, while integer loads stay typed so shifts and bitwise operations on packed codes render as integer CUDA expressions. `run` holds the next three N-adjacent cells of a 16-bit `wgmma` output: the quad's lanes exchange packed column pairs so each lane stores one cell's eight columns of a row as one 16-byte store (`097_widen_fragment_stores`). |
 | Shared from `tile` | `Tile` (launch geometry); from `ir/stmt/`: `Loop`, `StridedLoop`, `Load`, `Assign`, `Accum`, `Init`, `Let`, `Write`, `Select`, `Cond`, `ZeroPrologue`. |
 
 Volta direct A and transposed-B loads use the shared four-value loader when the flattened base and row stride

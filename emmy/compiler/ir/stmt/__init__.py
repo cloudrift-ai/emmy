@@ -37,6 +37,7 @@ from emmy.compiler.ir.stmt.analysis import BodyAnalysis, Scope
 from emmy.compiler.ir.stmt.base import Stmt, dtype_promote, pretty_body
 from emmy.compiler.ir.stmt.blocks import Cond, Loop, StridedLoop
 from emmy.compiler.ir.stmt.body import Body, exposed_defines, free_names
+from emmy.compiler.ir.stmt.declared import Declared, role
 from emmy.compiler.ir.stmt.identity import canonicalize_identity
 from emmy.compiler.ir.stmt.leaves import (
     Accum,
@@ -68,6 +69,7 @@ __all__ = [
     "BodyAnalysis",
     "Carry",
     "Cond",
+    "Declared",
     "Init",
     "Let",
     "Load",
@@ -97,5 +99,6 @@ __all__ = [
     "ordering_constraints",
     "pretty_body",
     "rename_free",
+    "role",
     "simplify_body",
 ]

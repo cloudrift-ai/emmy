@@ -6,8 +6,16 @@ from itertools import product
 
 from emmy.compiler.ir.axis import Axis
 from emmy.compiler.ir.expr import BinaryExpr, Literal, Var
-from emmy.compiler.ir.stmt import Assign, Body, Cond, Load, Loop, Write, normalize_body
-from emmy.compiler.ir.stmt.normalize import _canonicalize_exprs, _normalize_body, prepare_body, rename_ssa_sequential
+from emmy.compiler.ir.stmt import Accum, Assign, Body, Cond, Load, Loop, Select, SelectBranch, Write, normalize_body
+from emmy.compiler.ir.stmt.normalize import (
+    _canonicalize_exprs,
+    _normalize_body,
+    drop_unread_values,
+    fold_affine,
+    fold_trivial_selects,
+    prepare_body,
+    rename_ssa_sequential,
+)
 
 
 def test_atomic_partition_axis_order_converges_independently_of_affine_spelling() -> None:
@@ -64,7 +72,7 @@ def test_a_commutative_comparison_orders_its_axes_by_binding_not_spelling() -> N
 
 def test_normal_form_is_a_fixed_point_when_the_order_breaks_a_tie_by_spelling() -> None:
     """Two loop-invariant values of one shape tie in the canonical order, which breaks the tie by their spelling: the
-    order runs again on its own output until it leaves it alone, so normalizing the normal form changes nothing."""
+    spelling reads nothing the order decides, so normalizing the normal form changes nothing."""
     tile = (Literal(0, "int"), Var("a0"), Var("a2") / Literal(64, "int"), Var("a2") % Literal(64, "int"))
     body = Body(
         (
@@ -92,3 +100,96 @@ def test_normal_form_is_a_fixed_point_when_the_order_breaks_a_tie_by_spelling() 
     )
     once = _normalize_body(body)
     assert repr(_normalize_body(once)) == repr(once)
+
+
+def _one_key_softmax() -> Body:
+    """``v * (exp(s - s) / exp(s - s))``, which is ``v``."""
+    i = Var("i")
+    return Body(
+        (
+            Loop(
+                Axis("i", 8),
+                (
+                    Load(name="v", input="x", index=(i,)),
+                    Load(name="s", input="y", index=(i,)),
+                    Assign("z", "subtract", ("s", "s")),
+                    Assign("u", "exp", ("z",)),
+                    Assign("w", "divide", ("u", "u")),
+                    Assign("o", "multiply", ("v", "w")),
+                    Write(output="O", index=(i,), value="o"),
+                ),
+            ),
+        )
+    )
+
+
+def _equal_gather_index() -> Body:
+    """Two reads of one index make a predicate constant, the select it decided a copy, and its reader invariant."""
+    i = Var("i")
+    decided = Select(
+        name="s",
+        branches=(
+            SelectBranch("x", BinaryExpr("<", BinaryExpr("-", Var("a"), Var("b")), Literal(1, "int"))),
+            SelectBranch("a", Literal(1, "int")),
+        ),
+    )
+    loop = (
+        Load(name="a", input="indices", index=(i,)),
+        Load(name="b", input="indices", index=(i,)),
+        decided,
+        Assign(name="v", op="exp", args=("s",)),
+        Write(output="out", index=(i,), value="v"),
+    )
+    return Body((Load(name="x", input="x", index=(Literal(0, "int"),)), Loop(axis=Axis("i", 4), body=loop)))
+
+
+def test_unread_values_leave_with_everything_only_they_read() -> None:
+    """A dropped value leaves its operands unread in turn: one call drops the whole chain."""
+    i = Var("i")
+    chain = (Load(name="y", input="Y", index=(i,)), Assign("a", "exp", ("y",)), Assign("b", "exp", ("a",)), Assign("c", "exp", ("b",)))
+    kept = (Load(name="x", input="X", index=(i,)), Write(output="O", index=(i,), value="x"))
+    assert drop_unread_values(Body((Loop(Axis("i", 8), (*chain, *kept)),))) == Body((Loop(Axis("i", 8), kept),))
+
+
+def test_no_step_changes_a_prepared_body_the_folds_leave_alone() -> None:
+    """The driver runs the steps again only after a fold changed the body, so a prepared body the folds leave alone
+    has to be one every step leaves alone."""
+    for body in (_one_key_softmax(), _equal_gather_index()):
+        prepared = rename_ssa_sequential(body)
+        for _ in range(8):
+            prepared = prepare_body(prepared)
+            folded = fold_affine(fold_trivial_selects(prepared))
+            if folded == prepared:
+                break
+            prepared = folded
+        else:
+            raise AssertionError("the folds did not settle")
+        assert prepare_body(prepared) == prepared
+
+
+def test_a_reduction_only_another_bindings_readers_kept_alive_is_dropped() -> None:
+    """A cut can splice one cone twice under the same names: a statistic, then a contraction that reads it, twice.
+    Placement keeps the first statistic for both readers and the merge folds the second into a contraction, where
+    nothing reads it. It shares the first one's name, and the unread-value drop reads by name, so only the names the
+    order gives tell the two apart: the normal form holds one statistic, and normalization leaves it alone."""
+    i, j, k, m = Var("i"), Var("j"), Var("k"), Var("m")
+
+    def cone(weights: str, out: str) -> tuple:
+        statistic = Loop(Axis("k", 4), (Load(name="x", input="X", index=(i, k)), Assign("sq", "multiply", ("x", "x")), Accum("s", "sq")))
+        contraction = Loop(
+            Axis("m", 4),
+            (
+                Load(name="y", input="X", index=(i, m)),
+                Assign("scaled", "multiply", ("y", "r")),
+                Load(name=f"w_{out}", input=weights, index=(m, j)),
+                Assign(f"p_{out}", "multiply", (f"w_{out}", "scaled")),
+                Accum(out, f"p_{out}"),
+            ),
+        )
+        return statistic, Assign("r", "rsqrt", ("s",)), contraction
+
+    writes = (Write(output="O1", index=(i, j), value="o1"), Write(output="O2", index=(i, j), value="o2"))
+    body = Body((Loop(Axis("i", 8), (Loop(Axis("j", 3), (*cone("W1", "o1"), *cone("W2", "o2"), *writes)),)),))
+    normalized = normalize_body(body)
+    assert len(normalized.accums) == 3
+    assert _normalize_body(normalized) == normalized

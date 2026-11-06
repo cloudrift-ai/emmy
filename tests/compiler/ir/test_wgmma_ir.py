@@ -119,9 +119,9 @@ def test_fence_commit_wait_render_the_bare_instructions() -> None:
 
 def test_the_cell_reads_its_operands_and_defines_its_accumulator() -> None:
     ss = _cell(64, form="ss")
-    assert ss.deps() == (*_frags(64), "aD", "bD") and ss.defines() == _frags(64)
+    assert ss.deps() == (*_frags(64), "bD", "aD") and ss.defines() == _frags(64)
     rs = _cell(64, form="rs")
-    assert rs.deps() == (*_frags(64), "a", "bD") and rs.defines() == _frags(64)
+    assert rs.deps() == (*_frags(64), "bD", "a") and rs.defines() == _frags(64)
 
 
 def test_rewrite_renames_ssa_names_and_keeps_buffers() -> None:

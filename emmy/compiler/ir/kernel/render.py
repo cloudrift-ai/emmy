@@ -31,6 +31,7 @@ from emmy.compiler.ir.kernel.ir import (
     pack_smem,
     swizzle_fn,
     swizzle_xor,
+    wgmma_form,
 )
 from emmy.compiler.ir.render import Paged, RenderCtx, render_body
 from emmy.compiler.ir.stmt import Assign, Body, Write
@@ -1386,7 +1387,7 @@ def _wgmma_wrapper(n: int, ab_dtype: str, form: str) -> str:
 def _wgmma_prelude(kernel_op: KernelOp) -> str:
     """The wgmma helpers plus one wrapper per ``(N, ab_dtype, form)`` the body's ``WgmmaMma`` cells
     use; empty when none is present, so every other kernel's source stays byte-identical."""
-    forms = sorted({(s.shape[1], s.ab_dtype, s.form) for s in kernel_op.body.iter() if isinstance(s, WgmmaMma)})
+    forms = sorted({(s.shape[1], s.ab_dtype, wgmma_form(s)) for s in kernel_op.body.iter() if isinstance(s, WgmmaMma)})
     if not forms:
         return ""
     return _WGMMA_PRELUDE + "".join(_wgmma_wrapper(n, ab_dtype, form) for n, ab_dtype, form in forms)
@@ -1622,7 +1623,7 @@ def render_kernelop(
     # staged byte-slab drain helpers likewise join only when a byte-slab drain is present.
     if any(isinstance(s, MmaSyncPtx) and s.ab_dtype in ("e4m3", "e5m2") for s in kernel_op.body.iter()):
         mma_sync_prelude += _MMA_F8_PRELUDE
-    if any(isinstance(s, MmaSyncPtx) and s.block_scaled for s in mma_stmts):
+    if any(isinstance(s, MmaSyncPtx) and s.sfa_frag is not None for s in mma_stmts):
         # The block-scaled fp4 wrapper reuses the ``_b8`` data loaders, so it needs the fp8
         # prelude beside it even when no fp8 mma is present.
         if _MMA_F8_PRELUDE not in mma_sync_prelude:
