@@ -73,20 +73,17 @@ def _normalize_body(stmts: Body) -> Body:
         # The expansion lands consumers above producers it reused; sort before naming, or a read ahead of its
         # definition reads a name the renaming never binds.
         stmts = rename_ssa_sequential(topo_sort_siblings(expand_calls(prepare_body(stmts))))
-    # The folds are the one step that feeds the steps ahead of it: a fold can leave a value unread, make two loops
-    # mergeable, or change what orders the free axes. So the steps run again after a fold that changed the body, and
-    # only then. The order after them permutes and names, and one step reads names: the order gives two bindings that
-    # shared a name their own, and a value only the other's readers kept alive is then unread. A body the order left
-    # such a value in goes through the steps again.
+    # The folds feed the steps ahead of them: a fold can leave a value unread, make two loops mergeable, or change
+    # what orders the free axes. So the steps run again after a fold that changed the body. The order permutes and
+    # names, and one step reads names: the order gives two bindings that shared a name their own, and a value only
+    # the other's readers kept alive is then unread. A body the order left such a value in goes through the steps
+    # again; any other is final, since the order is final on its own output.
     for _ in range(8):
         prepared = Body.coerce(prepare_body(stmts))
-        stmts = fold_values(prepared)
-        if stmts is not prepared:
+        stmts = Body.coerce(fold_affine(fold_trivial_selects(prepared)))
+        if stmts != prepared:
             continue
         ordered = _canonical_order(prepared)
-        # The order is not yet final on its own output; it runs until it is.
-        while (again := _canonical_order(ordered)) != ordered:
-            ordered = again
         stmts = drop_unread_values(ordered)
         if stmts == ordered:
             return ordered
@@ -95,28 +92,10 @@ def _normalize_body(stmts: Body) -> Body:
     raise ValueError("the normal form did not settle in eight rounds:\n" + "\n".join(pretty_body(stmts, "  ")))
 
 
-def _commuted(stmts: Body) -> Body:
-    """``stmts`` with every commutative operation's operands and every ``Affine``'s terms sorted: the fold lists them
-    in no order, so a fold that changed nothing agrees with its input up to that."""
-
-    def sort(stmt: Stmt) -> Stmt:
-        if isinstance(stmt, Assign) and stmt.op.commutative:
-            return stmt.replace(args=tuple(sorted(stmt.args)))
-        if isinstance(stmt, Affine):
-            terms = sorted(stmt.terms, key=lambda term: term[1])
-            return stmt.replace(args=tuple(arg for _, arg in terms), coefficients=tuple(c for c, _ in terms))
-        return stmt
-
-    return stmts.map(sort)
-
-
 def prepare_body(stmts: Body) -> Body:
-    """The exact simplifications, then every value placed once (:func:`place_values`).
-
-    Value placement feeds the two steps ahead of it: a value placed outside its loop can leave two loops mergeable,
-    and two reads it made one can leave an index or a predicate a constant. Both feed it back — a merge puts two
-    copies of a value in one scope. The three run until the merge and the simplification leave a placed body alone;
-    no other step reads what placement decides, apart from the folds, which run after this (:func:`fold_values`)."""
+    """The exact simplifications, then every value placed once (:func:`place_values`). Value placement feeds the two
+    steps ahead of it — a value placed outside its loop can leave two loops mergeable, two reads made one can leave a
+    predicate constant — and they feed it back, so the three run until the first two leave a placed body alone."""
     stmts = topo_sort_siblings(stmts)
     stmts = drop_size_one_free_axes(stmts)
     stmts = drop_size_one_reduce_axes(stmts)
@@ -595,21 +574,6 @@ def fold_affine(stmts: Body, exposed: frozenset[str] = frozenset()) -> Body:
         for expr in stmt.exprs():
             reads.update(expr.free_vars())
     return folded.map(lambda stmt: None if literal_of(stmt) is not None and not reads[stmt.name] else stmt)
-
-
-def fold_values(stmts: Body) -> Body:
-    """The folds, run to their own fixed point: a select that decides nothing, an operation over literals, an affine
-    cone. Each feeds the others — ``s - s`` is ``0`` to the affine fold, ``exp(0)`` is then ``1`` to the constant
-    fold, and the product by it is a copy to the affine fold again — so they run as one step, on the placed body:
-    the affine fold reads how many readers a value has, which is what value placement settles. Returns ``stmts``
-    itself when no fold changes it, up to the order of an ``Affine``'s terms, which the fold lists in none."""
-    stmts = Body.coerce(stmts)
-    folded = stmts
-    while True:
-        again = Body.coerce(fold_affine(fold_constants(fold_trivial_selects(folded))))
-        if _commuted(again) == _commuted(folded):
-            return folded
-        folded = again
 
 
 # ---------------------------------------------------------------------------
@@ -1342,38 +1306,40 @@ def _canonical_order(stmts: Body) -> Body:
     role = roles(stmts)
     numbering = value_numbers(stmts, lambda name: role.get(name, name))
 
+    def unlisted(stmt: Stmt) -> Stmt:
+        """A sum with its coefficients sorted: the order lists a sum's terms itself, so what it sorts by reads none of
+        that listing."""
+        return stmt.replace(coefficients=tuple(sorted(stmt.coefficients))) if isinstance(stmt, Affine) else stmt
+
     def shape(stmt: Stmt) -> str:
         """A statement's own shape with every name and buffer one placeholder: what tells a load from a store, a sum
         from a product, a plain index from a composite one, before any value or spelling is read."""
         children = stmt.nested()
         shell = stmt.with_bodies(tuple(Body() for _ in children)) if children else stmt
-        return repr(form(shell.rename(lambda _name: "__slot__").rename_buffers(_Slotted())))
+        return repr(form(unlisted(shell.rename(lambda _name: "__slot__").rename_buffers(_Slotted()))))
 
     def spelling(stmt: Stmt) -> str:
         """The whole subtree with names abstracted and buffers spelled: the tie-break between siblings of one shape,
-        so symmetric siblings order by the buffers they touch."""
-        return repr(form(stmt.rename(lambda _name: "__name__")))
+        so symmetric siblings order by the buffers they touch. Like the shape and the value, it reads nothing the
+        order itself decides — the subtree comes with its children ordered — so the order is final on its own
+        output."""
+        return repr(form(Body((stmt.rename(lambda _name: "__name__"),)).map(unlisted)))
 
     def ordered(body: Body) -> Body:
         body = Body.coerce(body)
+        rebuilt = Body(stmt.with_bodies(tuple(ordered(child) for child in stmt.nested())) if stmt.nested() else stmt for stmt in body)
         shapes = [shape(stmt) for stmt in body]
         ties = Counter(shapes)
         priorities = []
-        for stmt, own in zip(body, shapes, strict=True):
+        for stmt, built, own in zip(body, rebuilt, shapes, strict=True):
             children = stmt.nested()
             category = 2 if children and stmt.has_side_effects else int(not children)
-            spelled = spelling(stmt) if ties[own] > 1 else ""
+            spelled = spelling(built) if ties[own] > 1 else ""
             if children:
                 priorities.append((category, own, spelled, scope_tree(numbering, Body((stmt,)))))
             else:
                 number, params = numbering.numbers[id(stmt)]
                 priorities.append((category, own, spelled, number, repr(params)))
-        rebuilt = []
-        for stmt in body:
-            if stmt.nested():
-                stmt = stmt.with_bodies(tuple(ordered(child) for child in stmt.nested()))
-            rebuilt.append(stmt)
-        rebuilt = Body(rebuilt)
         order = rebuilt._topological_permutation(ordering_constraints(rebuilt, effects=True), lambda index, _stmt: priorities[index])
         return Body(rebuilt[index] for index in order)
 

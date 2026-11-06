@@ -107,9 +107,8 @@ class Stmt(Wire):
       no children; block-structured stmts override).
     """
 
-    # The protocol's default key, held and not inherited: a class that inherits a ``Protocol`` takes its metaclass,
-    # and every ``isinstance`` on a statement kind then runs Python code. ``form`` tells the default from an
-    # override by this function's identity.
+    # Held, not inherited: a ``Protocol`` base brings a metaclass that makes every ``isinstance`` on a kind run
+    # Python code. ``form`` tells this default from an override by the function's identity.
     structural_key = Structural.structural_key
 
     # Purity trait — True iff this stmt is a pure value binding, a legal member of a stored

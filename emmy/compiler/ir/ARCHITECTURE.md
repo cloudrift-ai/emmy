@@ -692,8 +692,9 @@ inside definitions. Subroutine boundaries never limit fusion.
 - `fold_trivial_selects` — a `Select` whose branches all bind one value is a copy of it.
 - `drop_unread_values` — a pure statement whose values nothing reads is dropped, and a loop or branch left with
   no statement goes with it: the work reached no output. The one-key softmax weight leaves its whole score behind
-  this way, the dot product that fed it and the loop that summed it included. A body that stores nothing is a
-  fragment whose values are all its reader's, so nothing is dropped from it.
+  this way, the dot product that fed it and the loop that summed it included: a dropped value leaves its operands
+  unread in turn, and one call drops the whole chain. A body that stores nothing is a fragment whose values are all
+  its reader's, so nothing is dropped from it.
 - `fold_affine` — every maximal single-reader cone of `add`, `subtract`, `negative`, literal `multiply`, literal
   `divide` and `Affine` over floating values becomes one `Affine`: like terms summed, zero terms dropped, the constant
   its offset, a division by a literal the product by its reciprocal, a single unit term with no offset a `copy`.
@@ -741,14 +742,24 @@ inside definitions. Subroutine boundaries never limit fusion.
   reduction's axis tuple is canonicalized as a set. SSA values travel only through the rename channel, never `sigma`,
   so indirect indices cannot be renamed twice. Normalization separates lexical bindings before motion can put them
   in one scope, then assigns canonical names again after ordering the result.
-- Preparation and placement run to a joint fixed point: a value placed once can remove an axis dependency or expose a
-  sibling merge in the next round, and a merge exposes values to place. Legal motion and merging expose availability;
-  equality alone never moves a value across a scope or an effect. This is scoped placement, not general partial
-  redundancy elimination: separately executed sibling scopes and equality through mutable loop-carried state may
-  remain, and loads are invalidated by writes to any element of their buffer. Affine integer expressions over bound
-  loop coordinates have a unique coefficient form in lexical axis order; for proven nonnegative indices, positive
-  constant quotient chains collapse to one divisor, and `/` and `//` share that spelling. Unsupported expressions
-  compare structurally after these rewrites.
+- Normalization runs its steps once and checks nothing. The steps that feed each other run to their own fixed
+  point where they sit: a value placed outside its loop can expose a sibling merge, two reads placement made one can
+  leave a predicate constant, and a merge exposes values to place, so the merge, the expression simplification and
+  placement run until the first two leave a placed body alone. The folds feed the steps ahead of them — a fold can
+  leave a value unread or change what orders the free axes — so the steps run again after a fold that changed the
+  body, and only then. The order runs last, once, with one exception: the unread-value drop reads by name, and a cut
+  can splice one cone twice under the same names, so a value only its namesake's readers kept alive is unread only
+  once the order has given every binding its own name. A body the order left such a value in goes through the steps
+  again. What keeps this honest is a test, not a loop: the normal form of
+  every kernel a repository golden or the realization corpus stores is one normalization leaves alone
+  (`tests/compiler/ir/stmt/implementation/test_normal_form_is_final.py`). A form that was not final would give two
+  spellings of one body two texts, and no error.
+- Legal motion and merging expose availability; equality alone never moves a value across a scope or an effect. This
+  is scoped placement, not general partial redundancy elimination: separately executed sibling scopes and equality
+  through mutable loop-carried state may remain, and loads are invalidated by writes to any element of their buffer.
+  Affine integer expressions over bound loop coordinates have a unique coefficient form in lexical axis order; for
+  proven nonnegative indices, positive constant quotient chains collapse to one divisor, and `/` and `//` share that
+  spelling. Unsupported expressions compare structurally after these rewrites.
 - The canonical order comes from the value numbering. Within a scope, blocks without a side effect come first, then
   leaves, then blocks with one, each group by statement kind; ties break by the value — a leaf by its number and its
   coordinates spelled by binding depth, a block by the hash of its scope tree — with every buffer spelled by the role
@@ -756,7 +767,9 @@ inside definitions. Subroutine boundaries never limit fusion.
   two the body cannot tell apart, which then order by name. Dependency and effect constraints
   (`order.ordering_constraints`) bound the order; a heap-based Kahn sort takes the least-priority ready statement.
   Names are then given sequentially, a commutative operation lists its operands by value and then by those names, and
-  a final axis unification restores shared reduction dimensions without merging dependent loops.
+  a final axis unification restores shared reduction dimensions without merging dependent loops. The order is final
+  on its own output because nothing it sorts by reads what it decides: a statement's shape and a block's spelled
+  subtree read a sum's coefficients sorted and the block's children already ordered, and no number reads a name.
 
 ### `ir/stmt/values.py` — value numbering
 
@@ -767,7 +780,9 @@ read at `(h / 384) * 128 + d` in one nest and at a grid axis in another number a
 under two consumers. A reduce binds the parameters that mention its axis, retains their bound index expressions in
 its number, and keeps the free coordinates those parameters read. Offsets and strides still distinguish reduced
 walks. Commutative operands order by number, and operands tied on number by the layout and then the
-parameter order their arrangement gives, so neither the source order nor the spelling reaches a number. The same
+parameter order their arrangement gives, so neither the source order nor the spelling reaches a number. A carried
+state an operation reads ahead of its update — the previous step's value — is keyed by use, like every other read of
+a state; only a name free in the body is spelled. The same
 number applied to the same coordinate expressions in one scope is one instance — what placement computes once.
 
 ### `ir/stmt/identity.py` — structural identity
