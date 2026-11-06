@@ -163,57 +163,41 @@ def _lookup_op_class(name: str) -> type[Op] | None:
 def _serialize_field(v):
     """Flatten non-JSON-friendly op field values to a JSON-compatible form.
 
-    Special cases:
-
     - ``ir.elementwise.ElementwiseImpl`` → its ``name`` string.
     - ``Dim`` → the stable Torch-wire dimension mapping, tagged so atomic and
       composite expressions round-trip through op fields.
-    - ``ir.stmt.Body`` → the underlying ``stmts`` tuple. Body is an
-      in-memory wrapper; on disk we keep the tuple-of-stmts form so
-      ``_deserialize_field``'s list-of-Stmt-reprs path keeps working
-      unchanged. ``LoopOp.__post_init__`` / ``TileOp.__post_init__``
-      coerce the tuple back to Body on load.
-    - Nested ``Op`` instances (e.g. ``ConstantOp.load_ops``) →
-      ``{"__op__": ClassName, "fields": {...}}`` dicts; tuples/lists of
-      Ops recurse element-wise.
+    - An ``Expr``, a ``Stmt`` or an ``IndexSource`` → its eval-able ``repr``, at any depth of a list,
+      tuple or mapping. Said here because ``str`` of an expression or a statement is its text, which
+      ``_deserialize_field`` does not read; a ``Body`` is the list of its statements' reprs, and
+      ``LoopOp.__post_init__`` / ``TileOp.__post_init__`` coerce it back on load.
+    - ``ConstantOp.source_graph`` — a nested mini-graph round-trips through the graph's own dict form, tagged.
+    - Nested ``Op`` instances (e.g. ``ConstantOp.load_ops``) → ``{"__op__": ClassName, "fields": {...}}``.
 
-    Everything else passes through. ``_deserialize_field`` reverses
-    this on load.
+    Everything else passes through. ``_deserialize_field`` reverses this on load.
     """
     from emmy.compiler.dim import Dim
     from emmy.compiler.ir.elementwise import ElementwiseImpl
-    from emmy.compiler.ir.stmt import Body
+    from emmy.compiler.ir.expr import Expr
+    from emmy.compiler.ir.stmt import Body, Stmt
     from emmy.compiler.ir.tensor.ir import IndexSource
 
-    # ``IndexSource`` (IndexMapOp.sources) is a plain dataclass holding ``Expr``
-    # objects — serialize as eval-able repr strings, the same round-trip the
-    # body-Stmt path uses, so it survives JSON instead of being stringified by
-    # ``json.dumps(default=str)`` (which ``_deserialize_field`` couldn't reverse).
-    if isinstance(v, IndexSource):
+    if isinstance(v, (Expr, Stmt, IndexSource)):
         return repr(v)
-    # ``ConstantOp.source_graph`` — a nested mini-graph field round-trips
-    # through the graph's own dict form, tagged so ``_deserialize_field`` can
-    # tell it from an ordinary dict-valued op field.
     if isinstance(v, Graph):
         return {"__graph__": v.to_dict()}
-    if isinstance(v, (list, tuple)) and v and all(isinstance(x, IndexSource) for x in v):
-        return [repr(x) for x in v]
     if isinstance(v, ElementwiseImpl):
         return v.name
     if isinstance(v, Dim):
         return {"__dim__": v.to_wire()}
     if isinstance(v, Body):
-        # A plain tuple, so JSON encodes element-by-element.
-        return tuple(v)
+        return [repr(stmt) for stmt in v]
     if isinstance(v, Op):
-        return {
-            "__op__": type(v).__name__,
-            "fields": _serialize_op_fields(v),
-        }
-    if isinstance(v, (list, tuple)) and v and all(isinstance(x, Op) for x in v):
-        return [_serialize_field(x) for x in v]
-    if isinstance(v, (list, tuple)) and v and any(isinstance(x, Dim) for x in v):
-        return [_serialize_field(x) for x in v]
+        return {"__op__": type(v).__name__, "fields": _serialize_op_fields(v)}
+    nested = (Expr, Stmt, IndexSource, Op, Dim, list, tuple, dict)
+    if isinstance(v, (list, tuple)):
+        return [_serialize_field(x) if isinstance(x, nested) else x for x in v]
+    if isinstance(v, dict):
+        return {key: _serialize_field(x) if isinstance(x, (Expr, Stmt, list, tuple, dict)) else x for key, x in v.items()}
     return v
 
 
