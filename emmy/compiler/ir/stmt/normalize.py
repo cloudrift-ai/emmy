@@ -38,7 +38,7 @@ from emmy.compiler.ir.expr import BinaryExpr, CastExpr, Expr, FuncCallExpr, Lite
 from emmy.compiler.ir.sigma import Sigma
 from emmy.compiler.ir.stmt.base import Stmt, dtype_promote
 from emmy.compiler.ir.stmt.blocks import Cond, Loop, StridedLoop
-from emmy.compiler.ir.stmt.body import Body, free_names
+from emmy.compiler.ir.stmt.body import Body, exposed_defines, free_names
 from emmy.compiler.ir.stmt.leaves import Accum, Affine, Assign, Carry, Init, Let, Load, Select, SelectBranch, Write
 from emmy.compiler.ir.stmt.order import bound_axes, ordering_constraints, topological_sort
 from emmy.compiler.ir.stmt.passes import map_exprs, rename_free
@@ -67,7 +67,7 @@ def _normalize_body(stmts: Body) -> Body:
     if stmts.iter_of_type(Call):
         raise ValueError("a body that holds a subroutine call has no normal form; fusion expands its calls")
     # Motion can put two lexical bindings in one scope. Give them distinct names first.
-    stmts = rename_ssa_sequential(topo_sort_siblings(stmts))
+    stmts = rename_ssa_sequential(topological_sort(stmts))
     # The folds feed the steps ahead of them: a fold can leave a value unread, make two loops mergeable, or change
     # what orders the free axes. So the steps run again after a fold that changed the body. The order permutes and
     # names, and one step reads names: the order gives two bindings that shared a name their own, and a value only
@@ -91,7 +91,7 @@ def prepare_body(stmts: Body) -> Body:
     """The exact simplifications, then every value placed once (:func:`place_values`). Value placement feeds the two
     steps ahead of it — a value placed outside its loop can leave two loops mergeable, two reads made one can leave a
     predicate constant — and they feed it back, so the three run until the first two leave a placed body alone."""
-    stmts = topo_sort_siblings(stmts)
+    stmts = topological_sort(stmts)
     stmts = drop_size_one_free_axes(stmts)
     stmts = drop_size_one_reduce_axes(stmts)
     stmts = canonicalize_free_axis_order(stmts)
@@ -100,7 +100,7 @@ def prepare_body(stmts: Body) -> Body:
     stmts = drop_unread_values(stmts)
     placed = None
     while True:
-        simplified = _canonicalize_exprs(Body.coerce(simplify_body(merge_sibling_reduce_loops(stmts))))
+        simplified = _canonicalize_exprs(simplify_body(merge_sibling_reduce_loops(stmts)))
         if simplified == placed:
             return placed
         stmts = placed = place_values(simplified)
@@ -764,7 +764,7 @@ def _carried_out(body: Body) -> frozenset[str]:
     names a later statement can still read. Every other definition lives inside the block the loop closes,
     which is what makes it renamable when two loops merge.
     """
-    out = {name for stmt in body if isinstance(stmt, Accum) for name in stmt.carried_names()}
+    out = {stmt.name for stmt in body if isinstance(stmt, Accum)}
     for stmt in body:
         if isinstance(stmt, (Loop, StridedLoop)) and not stmt.seed:
             out |= _carried_out(stmt.body)
@@ -776,7 +776,7 @@ def _carried_out(body: Body) -> frozenset[str]:
 
 def _rename_apart(body: Body, clashing: frozenset[str], taken: frozenset[str]) -> Body:
     """``body`` with each name in ``clashing`` renamed to one neither side spells."""
-    used = set(body.ssa_defs) | set(body.ssa_uses) | set(taken)
+    used = set(body.definitions) | set(body.ssa_uses) | set(taken)
     mapping: dict[str, str] = {}
     for name in sorted(clashing):
         fresh = next(candidate for n in count(1) if (candidate := f"{name}__m{n}") not in used)
@@ -817,7 +817,7 @@ def _merge_sibling_reduce_loops(body: Body) -> Body:
             # what two alpha-equal copies of a single cone always share — and counting those as
             # reads reports a dependence that is not there.
             reads = free_names(t)
-            merged_defs = Body.coerce(merged.body).ssa_defs
+            merged_defs = Body.coerce(merged.body).definitions.keys()
             if merged_defs & reads:
                 continue
             incoming = Body.coerce(t.body)
@@ -825,14 +825,14 @@ def _merge_sibling_reduce_loops(body: Body) -> Body:
             # binding one name for unrelated values. Renaming the incoming body's copy apart is
             # sound for every name the loop closes over; a name it still binds afterwards has
             # readers the rename cannot reach, so that one refuses.
-            clashing = merged_defs & incoming.ssa_defs
+            clashing = merged_defs & incoming.definitions.keys()
             if clashing & _carried_out(incoming):
                 continue
             between_defs: set[str] = set()
             for k in range(i + 1, j):
                 if k in consumed:
                     continue
-                between_defs |= Body.coerce(Body((items[k],))).ssa_defs
+                between_defs |= exposed_defines(items[k])
             if between_defs & reads:
                 continue
             merged = Loop(
@@ -856,7 +856,7 @@ def _merge_sibling_reduce_loops(body: Body) -> Body:
 
 def simplify_body(body: Body) -> Body:
     """Simplify every Expr inside a body, each under the value ranges of the loop axes around it."""
-    return tuple(_simplify(s, SimplifyCtx.empty()) for s in Body.coerce(body))
+    return Body(_simplify(s, SimplifyCtx.empty()) for s in Body.coerce(body))
 
 
 def _simplify(stmt: Stmt, ctx: SimplifyCtx) -> Stmt:
@@ -1127,33 +1127,6 @@ def place_values(stmts: Body) -> Body:
 # ---------------------------------------------------------------------------
 
 
-def topo_sort_siblings(stmts: Body) -> Body:
-    """Reorder stmts within each Body so SSA defs precede their uses.
-
-    Recurses into every child body via the Stmt protocol
-    (:meth:`Stmt.nested` / :meth:`Stmt.with_bodies`), then runs a stable
-    Kahn ordering over the current sibling list. A block stmt
-    (``Loop`` / ``StridedLoop`` / ``Tile`` / ``Cond``) is opaque at the
-    parent level: it ``defs`` any Accum names that escape its body
-    (visible to siblings via Loop's cross-boundary Accum semantics) and
-    ``uses`` its wrapper-level deps plus any free SSA names referenced
-    inside (names referenced inside but not defined inside).
-
-    Splicer worklists (and any future producer that emits stmts with
-    sibling-dedup) can land a consumer above an already-emitted producer
-    when the producer was reused from an earlier emission. Sorting at
-    normalize time decouples final body order from producer subtleties
-    and guarantees every constructed ``LoopOp`` / ``TileOp`` lands with
-    defs above uses, which downstream passes (validator, renamer,
-    codegen) rely on.
-
-    Stable: when the dep edges leave a free choice, the original sibling
-    order is preserved (heap-based Kahn with index tiebreak). Idempotent:
-    bodies already in topo order round-trip unchanged.
-    """
-    return topological_sort(Body.coerce(stmts))
-
-
 # ---------------------------------------------------------------------------
 # Pass 7: canonicalize SSA names to sequential v0, v1, ...
 # ---------------------------------------------------------------------------
@@ -1211,7 +1184,7 @@ class _SequentialScope:
             scalar = _carried_out(child)
             for member in child.iter_of_type(Accum, Carry):
                 if isinstance(member, Carry) or member.name in scalar:
-                    exported.extend(member.carried_names())
+                    exported.append(member.name)
         exported = tuple(dict.fromkeys(exported))
         if children:
             for name in exported:
@@ -1265,7 +1238,7 @@ def rename_ssa_sequential(stmts: Body) -> Body:
     Idempotent: bodies already in canonical form round-trip unchanged."""
 
     stmts = Body.coerce(stmts)
-    scope = _SequentialScope(reserved=frozenset().union(*(free_names(stmt) for stmt in stmts)) - stmts.ssa_defs)
+    scope = _SequentialScope(reserved=frozenset().union(*(free_names(stmt) for stmt in stmts)) - stmts.definitions.keys())
     return Body(tuple(scope.step(stmt) for stmt in stmts))
 
 

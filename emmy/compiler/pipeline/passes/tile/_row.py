@@ -326,7 +326,7 @@ def _renamable(region: Fold, names: set[str]) -> bool:
         or site.node.axis in names
         or set(site.node.cells) & names
         or set(site.node.lift.results) & names
-        or {*site.node.lift.body.ssa_defs, *site.node.lift.body.axis_names} & names
+        or {*site.node.lift.body.definitions, *site.node.lift.body.axis_names} & names
         for site in sites(region)
     )
 
@@ -415,7 +415,7 @@ def _align_owned_sweeps(piece: TileOp) -> TileOp:
                     site.node.axis,
                     *site.node.lift.params[: (site.node.axis is not None) + len(site.node.bindings)],
                     *site.node.exposes,
-                    *site.node.lift.body.ssa_defs,
+                    *site.node.lift.body.definitions,
                     *site.node.lift.body.axis_names,
                 }
                 for site in sites(region)

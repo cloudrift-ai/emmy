@@ -12,7 +12,7 @@ from __future__ import annotations
 from emmy.compiler.ir.axis import Axis
 from emmy.compiler.ir.stmt.base import Stmt
 from emmy.compiler.ir.stmt.body import Body
-from emmy.compiler.ir.stmt.leaves import Init
+from emmy.compiler.ir.stmt.leaves import Accum, Carry, Init
 
 __all__ = ["bound_axes", "ordering_constraints", "topological_sort"]
 
@@ -52,7 +52,7 @@ def _resources(stmt: Stmt) -> tuple[set[str], set[str], set[str]]:
     members = tuple(member for child in stmt.nested() for member in child.iter()) or (stmt,)
     reads = {name for member in members for name in member.external_reads()}
     writes = {name for member in members for name in member.external_writes()}
-    state = {name for member in members for name in getattr(member, "carried_names", lambda: ())()}
+    state = {member.name for member in members if isinstance(member, (Accum, Carry))}
     if isinstance(stmt, Init):
         state.update(stmt.defines())
     return reads, writes, state

@@ -21,13 +21,14 @@ state, so it is straight-line code, and rolling it would only store every state.
 from __future__ import annotations
 
 from dataclasses import replace
+from functools import lru_cache
 
 from emmy.compiler.dim import Dim
 from emmy.compiler.dtype import F32
 from emmy.compiler.graph import Graph, Node, Tensor
 from emmy.compiler.ir.axis import Axis
 from emmy.compiler.ir.base import ConstantOp, InputOp
-from emmy.compiler.ir.expr import BinaryExpr, Expr, Literal, Var
+from emmy.compiler.ir.expr import BinaryExpr, Expr, Literal, Var, affine_form
 from emmy.compiler.ir.loop import LoopOp, UnfusableStmt
 from emmy.compiler.ir.sigma import Sigma
 from emmy.compiler.ir.stmt import Accum, Assign, Body, Carry, Let, Load, Loop, Pre, Select, SelectBranch, Stmt, Write, map_exprs
@@ -53,6 +54,69 @@ def _ancestors(graph: Graph, node_id: str) -> set[str]:
     return seen
 
 
+@lru_cache(maxsize=256)
+def _census(body: Body) -> tuple[tuple[str, int], ...]:
+    """How many statements of each kind ``body`` holds, nested ones included — a linear-time
+    necessary condition for two bodies to be one computation, to ask before an exact key."""
+    counts: dict[str, int] = {}
+    for stmt in body.iter():
+        kind = type(stmt).__name__
+        counts[kind] = counts.get(kind, 0) + 1
+    return tuple(sorted(counts.items()))
+
+
+@lru_cache(maxsize=256)
+def _literals_abstracted(body: Body) -> tuple[Body, tuple[int, ...]]:
+    """``body`` with every integer literal of its expressions replaced by a positional
+    variable ``__lit<i>``, and the literals it held, in that order. The copies of one computation
+    an unrolled loop leaves read at successive offsets and mask at successive bounds: they share
+    the abstracted body and differ in the literals, affinely in the step."""
+    literals: list[int] = []
+
+    def held(value: int) -> Var:
+        literals.append(value)
+        return Var(f"__lit{len(literals) - 1}")
+
+    def abstract(expr):
+        if isinstance(expr, Literal) and expr.dtype == "int" and type(expr.value) is int:
+            return held(expr.value)
+        return expr
+
+    def lift(expr):
+        # An affine index carries its anchor whole, a zero one included: ``a`` and ``a + 4`` are
+        # one shape read at two offsets, and normalization spells the first without the ``+ 0``.
+        if isinstance(expr, Literal):
+            return abstract(expr)
+        form = affine_form(expr, expr.free_vars())
+        try:
+            anchor = int(form[0].eval({})) if form is not None else None
+        except (KeyError, TypeError, ValueError):
+            anchor = None
+        if anchor is None:
+            return expr.rebuild(abstract)
+        rest = None
+        for name, coeff in sorted(form[1].items()):
+            term = Var(name) if coeff == 1 else BinaryExpr("*", Var(name), Literal(coeff, "int"))
+            rest = term if rest is None else BinaryExpr("+", rest, term)
+        return held(anchor) if rest is None else BinaryExpr("+", rest, held(anchor))
+
+    def abstracted(stmt):
+        # A loop's static extent is a literal too: a step whose reduction covers one more
+        # element than the last is still the same step.
+        if isinstance(stmt, Loop) and isinstance(stmt.axis.extent.expr, Literal) and type(stmt.axis.extent.expr.value) is int:
+            return stmt.replace(axis=replace(stmt.axis, extent=Dim(held(stmt.axis.extent.expr.value))))
+        return map_exprs(stmt, lift)
+
+    return body.map(abstracted), tuple(literals)
+
+
+@lru_cache(maxsize=256)
+def _literal_free_key(body: Body) -> str:
+    """The exact identity of ``body`` blind to its integer literals — what the copies of one
+    computation at successive offsets and bounds share (:func:`_literals_abstracted`)."""
+    return _literals_abstracted(body)[0].structural_key(structural=False)
+
+
 def _chain(graph: Graph, first: Node) -> list[Node]:
     """``first`` and every later state: what descends from it with the same shape and the same body
     once its integer literals are taken out."""
@@ -66,7 +130,7 @@ def _chain(graph: Graph, first: Node) -> list[Node]:
         alike = isinstance(node.op, LoopOp) and node.outputs[0].shape == tensor.shape and node.outputs[0].dtype == tensor.dtype
         # The exact key canonicalizes the body, which a fused kernel of thousands of statements pays
         # for in seconds: ask only of a body with the same statements to begin with.
-        if alike and node.op.body.census == body.census and node.op.body.literal_free_key == body.literal_free_key:
+        if alike and _census(node.op.body) == _census(body) and _literal_free_key(node.op.body) == _literal_free_key(body):
             chain.append(node)
     return chain
 
@@ -296,9 +360,9 @@ def _roll(match: Match, chain: list[Node]) -> Graph:
         raise RuleSkipped("the steps keep different buffers")
     if any(tuple(value for _, value in read) != tuple(value for _, value in constants) for _, _, read in spliced):
         raise RuleSkipped("the steps read different constants")
-    abstract, literals = step.literals_abstracted
-    second, later = spliced[1][0].literals_abstracted
-    if second.literal_free_key != abstract.literal_free_key or len(later) != len(literals):
+    abstract, literals = _literals_abstracted(step)
+    second, later = _literals_abstracted(spliced[1][0])
+    if _literal_free_key(second) != _literal_free_key(abstract) or len(later) != len(literals):
         raise RuleSkipped("the second step is not the first step's body")
     deltas = tuple(b - a for a, b in zip(literals, later, strict=True))
     for index, (body, _, _) in enumerate(spliced):
