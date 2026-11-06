@@ -25,11 +25,12 @@ The preparation is Python only and changes no kernel. Most of it is merged or in
 
 - One package, 37 exported names, 21 of them classes. 71 compiler files and 117 test files import it, and nothing
   imports a submodule. The compiler constructs a statement at 566 sites and tests a statement's kind at 401.
-- 5,032 lines: normalization 1,427, value numbering 536, the order and identity 222, `Body` 679, the text 483, the
-  kinds 887, the protocol 635, the package file and two helpers 163.
-- Every kind is declared: a frozen dataclass whose fields carry a type and a role (`role("defines")`,
-  `role("expr", "reads")`, ...). All 45 kinds, the 15 shared ones and Kernel IR's 30, get every protocol member from
-  one implementation that reads the roles. Four members no role gives are stated on their kinds and pinned by a test.
+- 5,039 lines: normalization 1,427, value numbering 536, the order and identity 222, `Body` 679, the text 483, the
+  kinds 888, the protocol 641, the package file and two helpers 163.
+- Every kind is declared: a class under the `@kind` decorator whose fields carry a type and a role
+  (`role("defines")`, `role("expr", "reads")`, ...). The decorator makes it a frozen dataclass and writes every
+  protocol member from the roles, for all 45 kinds: the 15 shared ones and Kernel IR's 30. Four members no role gives
+  are stated on their kinds and pinned by a test.
 - A body has one text, read back by `parse_body` to an equal body. It is the wire form in every golden, corpus case
   and freeze, and the language of the statement module's tests.
 - Normalization runs each step once and refuses a body that holds a subroutine call; fusion expands its own calls.
@@ -39,7 +40,7 @@ The preparation is Python only and changes no kernel. Most of it is merged or in
 | Python today | Rust | Notes |
 | --- | --- | --- |
 | A kind: frozen dataclass, fields with `role(...)` | A struct per kind, all in one `enum Stmt` | The role table carries over one to one. See "Kinds". |
-| The declared base (`declared.py`): members computed from roles at each call | A derive on the struct: the same members generated when the crate is built | No lookup per call. |
+| The `@kind` decorator: members generated from the roles when the class is defined | A derive on the struct: the same members generated when the crate is built | The decorator is the derive's Python form. |
 | `Stmt.rewrite`, `rename`, `substitute`, `rename_buffers`, `map_exprs`, `with_bodies` | One generated "rebuild with these parts changed" per kind, and thin functions over it | Today these are six entry points over one field walk. |
 | `Body`: a sequence with content equality | A shared, immutable slice of statements | A member read twice from Python is one object. |
 | About twenty cached readings on `Body` (`definitions`, `ssa_uses`, `loads`, ...) | Fields of the body's shared data, each computed once on first use | Rust can keep a derived value inside the object; Python cannot see the difference. |
@@ -116,7 +117,6 @@ Both implementations exist until the switch and never share an object: a body go
 
 | Step | State |
 | --- | --- |
-| A `@kind` decorator declares a kind and generates its members once per class | next PR; it also removes the 6% lowering time the declared base costs today |
 | Plain constructors: `Load` and `Write` take their fields as declared; no string, tuple or number is converted after construction | open; 62 compiler sites, and about 1,080 test sites once the tests are text |
 | The tests of the passes state bodies as text | open; about 100 files, 3,244 hand-built statements |
 | Kernel IR kinds print and read through their declarations | open; it changes every Kernel IR listing, so the owner decides |

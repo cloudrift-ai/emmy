@@ -22,7 +22,6 @@ from emmy.compiler.ir.stmt import (
     Call,
     Carry,
     Cond,
-    Declared,
     Init,
     Let,
     Load,
@@ -49,7 +48,7 @@ def _kinds() -> list[type]:
             yield sub
             yield from subclasses(sub)
 
-    return sorted((cls for cls in set(subclasses(Stmt)) if cls is not Declared), key=lambda cls: cls.__qualname__)
+    return sorted(set(subclasses(Stmt)), key=lambda cls: cls.__qualname__)
 
 
 def test_a_kind_check_is_native() -> None:
@@ -192,16 +191,24 @@ _ALL_EXAMPLES = _EXAMPLES + _KERNEL_EXAMPLES
 
 def test_every_exported_kind_has_an_example() -> None:
     exported = {kind for name in stmt_pkg.__all__ if isinstance(kind := getattr(stmt_pkg, name), type) and issubclass(kind, Stmt)}
-    assert {type(example) for example in _EXAMPLES} == exported - {Stmt, Declared}
+    assert {type(example) for example in _EXAMPLES} == exported - {Stmt}
     kernel = {kind for kind in _kinds() if kind.__module__ == kernel_ir.__name__}
     assert {type(example) for example in _KERNEL_EXAMPLES} == kernel
+
+
+_PROTOCOL = ("deps", "defines", "external_reads", "external_writes", "local_decls", "binds_axes", "exprs", "with_exprs")
+_PROTOCOL += ("nested", "with_bodies", "rename_buffers", "_rewrite")
+
+
+def _stated(cls: type) -> set[str]:
+    """The protocol members ``cls`` writes itself: the ones ``@kind`` did not derive from its fields' roles."""
+    return {name for name in _PROTOCOL if name in vars(cls) and not getattr(vars(cls)[name], "derived", False)}
 
 
 @pytest.mark.parametrize("stmt", _KERNEL_EXAMPLES, ids=lambda stmt: type(stmt).__name__)
 def test_a_declared_kind_states_only_its_fields(stmt) -> None:
     """A Kernel IR kind is declared: its protocol members are the ones its fields' roles give it."""
-    stated = set(vars(type(stmt))) & {name for name in vars(Declared) if not name.startswith("__")}
-    assert not stated
+    assert type(stmt)._rewrite.derived and not _stated(type(stmt))
 
 
 # The protocol members a shared kind states itself, because no role gives them.
@@ -216,8 +223,7 @@ _STATED = {
 @pytest.mark.parametrize("stmt", _EXAMPLES, ids=lambda stmt: type(stmt).__name__)
 def test_a_shared_kind_states_only_what_no_role_gives(stmt) -> None:
     """A shared kind is declared too: every protocol member but the few listed follows from its fields' roles."""
-    stated = set(vars(type(stmt))) & {name for name in vars(Declared) if not name.startswith("__")}
-    assert stated == _STATED.get(type(stmt), set())
+    assert _stated(type(stmt)) == _STATED.get(type(stmt), set())
 
 
 def test_a_number_in_a_role_field_is_plain_data() -> None:

@@ -17,11 +17,11 @@ from emmy.compiler.ir.elementwise import ElementwiseImpl
 from emmy.compiler.ir.expr import BinaryExpr, Expr, FlatIndex, Literal, Var
 from emmy.compiler.ir.sigma import Sigma
 from emmy.compiler.ir.stmt.base import Stmt
-from emmy.compiler.ir.stmt.declared import Declared, role
+from emmy.compiler.ir.stmt.declared import kind, rewrite_by_roles, role
 
 
-@dataclass(frozen=True, init=False)
-class Load(Declared):
+@kind(init=False)
+class Load(Stmt):
     """Read a value (or N consecutive values) from an external input buffer.
 
     Scalar (``width == 1``): one SSA binding ``names[0]``. Vector
@@ -118,8 +118,8 @@ class Load(Declared):
         return len(self.names) == 1
 
 
-@dataclass(frozen=True)
-class Assign(Declared):
+@kind
+class Assign(Stmt):
     """Pure SSA body statement: ``name = op(args)``.
 
     ``op`` is an ``ElementwiseImpl`` — the elementwise combine (add /
@@ -146,8 +146,8 @@ class Assign(Declared):
             object.__setattr__(self, "op", ElementwiseImpl(self.op))
 
 
-@dataclass(frozen=True)
-class Affine(Declared):
+@kind
+class Affine(Stmt):
     """Pure SSA body statement: ``name = offset + Σ coefficient·arg``.
 
     The one statement for a sum, a difference, a negation or a product with a literal: normalization folds every
@@ -234,8 +234,8 @@ def _rewrite_axis_name(name: str, sigma: Sigma) -> tuple[str, ...]:
     return tuple(sorted(replacement.free_vars()))
 
 
-@dataclass(frozen=True)
-class Accum(Declared):
+@kind
+class Accum(Stmt):
     """Reduce accumulator — declares-and-folds in one statement.
 
     Semantics: ``name = op(name, value)`` inside the enclosing reduce
@@ -310,13 +310,13 @@ class Accum(Declared):
     def _rewrite(self, rename, sigma, axis_fn):  # noqa: ANN001, ANN202 — see ``Stmt.rewrite``
         # The reduced axes are names a substitution can split, which no role says.
         axes = tuple(sorted({rename(n) for old in self.axes for n in _rewrite_axis_name(old, sigma)}))
-        rewritten = super()._rewrite(rename, sigma, axis_fn)
+        rewritten = rewrite_by_roles(self, rename, sigma, axis_fn)
         return rewritten if axes == self.axes else rewritten.replace(axes=axes)
 
 
 #: The suffix of the slot a :class:`Carry` defines during a step.
-@dataclass(frozen=True)
-class Carry(Declared):
+@kind
+class Carry(Stmt):
     """The next value of one cell of a CARRIED STATE: ``name[index] <- value``.
 
     A recurrence's state, which a fold is not: its steps run in order, its step is any computation,
@@ -345,8 +345,8 @@ class Carry(Declared):
         return tuple(e.name for e in self.index if isinstance(e, Var))
 
 
-@dataclass(frozen=True)
-class Pre(Declared):
+@kind
+class Pre(Stmt):
     """A read of one cell of a carried state: ``name = carrier[index]``.
 
     Inside the ``Loop`` that carries it, the value the PREVIOUS step left (the seed on the first
@@ -365,8 +365,8 @@ class Pre(Declared):
     index: tuple[Expr, ...] = role("expr", "reads")
 
 
-@dataclass(frozen=True)
-class Init(Declared):
+@kind
+class Init(Stmt):
     """Explicit accumulator / carried-state seed at this scope:
     ``<dtype> <name> = <identity>;`` — a scope-local declaration.
 
@@ -393,8 +393,8 @@ class Init(Declared):
             object.__setattr__(self, "dtype", _get(self.dtype))
 
 
-@dataclass(frozen=True)
-class Let(Declared):
+@kind
+class Let(Stmt):
     """A pure binding of one expression to an SSA name: ``<dtype> <name> = <value>;``.
 
     Three things reach a body this way — a scalar literal (the twisted carrier's injection binds
@@ -424,8 +424,8 @@ class Let(Declared):
         return self if value == self.value else self.replace(value=value)
 
 
-@dataclass(frozen=True, init=False)
-class Write(Declared):
+@kind(init=False)
+class Write(Stmt):
     """Write an SSA value (or N consecutive values) to ``output``.
 
     Scalar (``width == 1``): stores one SSA value at ``index``. Vector
@@ -534,8 +534,8 @@ class SelectBranch:
         return replace(self, **changes)
 
 
-@dataclass(frozen=True)
-class Select(Declared):
+@kind
+class Select(Stmt):
     """Coord-predicated value binding — replaces Mux.
 
     At each iteration coord, exactly one branch's ``select`` predicate
@@ -574,8 +574,8 @@ def mask_select_predicate(select: Select) -> Expr | None:
     return mask.select
 
 
-@dataclass(frozen=True)
-class ZeroPrologue(Declared):
+@kind
+class ZeroPrologue(Stmt):
     """Zero another launch's atomic accumulator from THIS kernel — the delegated zero-init
     (``lowering/cuda/005_delegate_zero_init``).
 

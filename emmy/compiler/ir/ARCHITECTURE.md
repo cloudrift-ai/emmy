@@ -238,7 +238,7 @@ nothing else: no submodule path, no private name. The package exports the statem
 `rename_free`, `map_exprs`, `binary`, `mask_select_predicate`, `ordering_constraints`, `dtype_promote`), the text
 form (`pretty_body`, `parse_body`), three normalization steps a caller may run on its own (`fold_affine`, `simplify_body`,
 `prepare_body`), the two kinds fusion's body assembly in `ir/loop/` builds a region with (`Call`, `Subroutine`), and
-what a layer declares a kind of its own with (`Declared`, `role`). The module itself imports expressions, axes,
+what a layer declares a kind of its own with (`kind`, `role`). The module itself imports expressions, axes,
 dtypes and the structural and wire forms: no op, tensor, graph, backend or pipeline.
 `tests/architecture/test_layering.py` pins the export list and both directions.
 
@@ -259,14 +259,14 @@ binder shadows and hands the rest to the kind's `_rewrite`. `exprs` lists every 
 `with_exprs` rebuilds it from them. `tests/compiler/ir/stmt/test_protocol.py` checks that every kind in every layer
 states the protocol, and the rebuilding halves on an example of each shared kind and each Kernel IR kind.
 
-**A declared kind** is a statement kind stated as data: a frozen dataclass on `Declared` whose fields carry a type
+**A declared kind** is a statement kind stated as data: a class under the `@kind` decorator whose fields carry a type
 and, through `role(...)`, what the field is to the rest of the compiler. The roles are names the statement defines,
 reads, updates in place or binds for its own use; buffers it reads, writes or declares kernel-local; expressions;
 axes it binds and names that follow them; a child body; statements it carries; the body of a pure term; and records
-whose own fields play roles. A field with no role is plain data. `Declared` computes every protocol member from the
-roles, in field order, so a declared kind writes none: what it reads is its `reads` and `updates` fields, a rename
-maps every name field and every expression, a buffer rename maps the buffer fields, and so on. Two roles hold
-statements that are not a child body. Carried statements (`stmts`: the cells a `RegStore` stores with it, the
+whose own fields play roles. A field with no role is plain data. `@kind` makes the class a frozen dataclass and
+writes every protocol member from the roles once, when the class is defined, so a declared kind writes none: what
+it reads is its `reads` and `updates` fields, a rename maps every name field and every expression, a buffer rename
+maps the buffer fields, and so on. Two roles hold statements that are not a child body. Carried statements (`stmts`: the cells a `RegStore` stores with it, the
 combine of a `TreeHalve`) are part of the statement: they are rewritten with it and their buffers, expressions and
 free reads are its own, a name one of them defines or the statement binds being hidden. A term (`term`: a
 `RegStore`'s epilogue) keeps its statements' names private: a rename reaches only the coordinates its expressions
