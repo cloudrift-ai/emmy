@@ -18,8 +18,10 @@ Emmy is 2.0-2.5x slower to the first token, 1.67x slower per token at one reques
 output, and runs out of memory under the 3 GiB per card margin. Item 3 under "Next" ran its two parts on 2026-11-03:
 Emmy now passes the margin, and one decode round gave 1.8% more output at eight requests and nothing measurable at
 one. The next lever, pre and post across ranks, is planned under step 5: its part 1 (the shared expert sliced across
-ranks) ran on 2026-11-04 for 2.6% faster decode at one request and 2.9% more output at eight, and its part 2 (the
-mixers' decode work split) is next. The minimums in step 2 and Qwen's license are still open with the owner.
+ranks) ran on 2026-11-04 for 2.6% faster decode at one request and 2.9% more output at eight. Its part 2 (the
+mixers' decode work split) stopped at its gate on 2026-11-05; instead pre8's down rows took the cross-CTA split that
+post8's already had, for 3.8% faster decode at one request and 1.8% more output at eight. The minimums in step 2 and
+Qwen's license are still open with the owner.
 
 ## What we know
 
@@ -728,6 +730,27 @@ Rounds, as with DeepSeek. Each round starts from a profile and ends with a boot 
     16 of the 2026-11-03 boots; where it differs from main, both had already left the fork at the same token. GSM8K
     124 of 128 (2 at the output limit; 126 before, the reference 125), acceptance cases 27 to 28 of 28 in each mode,
     long-document codes 387 of 387 and 383 of 384 (the reference).
+- **Part 2, the mixers' decode work split (2026-11-05): stopped at its gate.** One rank's split pre was traced in the
+  deployed pre8's cuts (the norm statistics, the rank's 80 down rows, its 2,560 up rows, its 640 mixed columns) and
+  benched cold on the V100 SXM3: 39.0 us, plus two exchanges at 6.65 us each (their serving average, the wait for the
+  slowest rank included), 52.3 against pre8's 62.5 us. That is 10.2 us faster cold, at the bar; scaled piece by piece
+  to the serving times of the 2026-11-04 profile (pre8 48.6 us there), about 6.7 us, below it. The loader, runner and
+  golden work did not start. The weak piece was the down rows: 80 rows at about 13.5 us in serving terms against the
+  fork's 6, under schedules that read each weight row once per token.
+- **Pre8's down rows split across blocks (2026-11-05).** Post8's down projection already ran as a cross-CTA split
+  with tensor-core tiles over the eight tokens (17.2 us plus a 2.8 us finalize in that profile), while pre8's split
+  had never been measured and its down rows ran unsplit at 28.9 us. The golden now records the split for pre8: the
+  10,240-long sum in 64 slices, a tensor-core partial per slice (19.5 us cold) and a finalize (8.2 us), against 37.9 us
+  unsplit. Pre8 goes from 68.6 to 56.3 us cold, a strict compile from the golden alone picks it, and the release audit
+  deploys all 13 twins. No compiler change.
+  - A B B A on two boots never profiled, main against the branch: one request 1K / 512, 20.86 to 20.07 ms per token
+    (every pair the same way); eight requests 4K / 1K, 165.6 to 168.6 tok/s total output, 41.7 to 40.9 ms per token;
+    first tokens unchanged.
+  - The sum order changed: 4 of 6 free texts match main, the other two part after about 370 characters. GSM8K 124
+    of 128 (none at the output limit), acceptance cases 27 to 28 of 28 in each mode, long-document codes 387 of 387
+    and 384 of 384.
+  - Not run: the margin test (no weight moved; the split's state buffer is under 1 MB), a second branch boot (the
+    finalize sums the 64 states in a fixed order), a profiled boot.
 - Gate, the definition of done. Both sides run step 2's production configuration: the same checkpoint, layout,
   context, key/value pool, concurrency, prefix-cache and MTP settings; fork, Emmy, Emmy, fork rounds; three repeats
   each:
