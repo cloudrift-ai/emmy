@@ -18,7 +18,7 @@ from emmy.compiler.ir.axis import Axis
 from emmy.compiler.ir.base import is_f4_pair_table
 from emmy.compiler.ir.cuda import CudaOp, TmaDescMeta
 from emmy.compiler.ir.kernel import KernelOp, Tile
-from emmy.compiler.ir.kernel.ir import TmaDescriptor
+from emmy.compiler.ir.kernel.ir import TmaDescriptor, tile_is_static, tile_n_dim, tile_n_elements
 from emmy.compiler.ir.kernel.render import _BLOCK_SIZE, render_kernelop
 from emmy.compiler.ir.pure.fold import EXTENTS
 from emmy.compiler.ir.stmt import Load, Write, ZeroPrologue
@@ -122,13 +122,13 @@ def rewrite(match: Match, root: Node) -> CudaOp | None:
     # scalar tier is one thread per cell over the fixed ``_BLOCK_SIZE`` block. A warp-specialized
     # producer band (``aux_threads``) widens ``blockDim`` only — the grid still covers the cells.
     cells = tile.block_threads if tile.block_threads is not None else _BLOCK_SIZE
-    if tile.is_static_grid:
-        n = tile.n_elements
+    if tile_is_static(tile):
+        n = tile_n_elements(tile)
         grid = (((n + cells - 1) // cells,), (1,), (1,))
     else:
         # Symbolic grid (a dynamic free axis): ``ceil(∏extents / blockDim)`` CTAs, the symbolic
         # factor resolved from ``sym_values`` at launch (the ``Expr`` grid factor).
-        grid = ((tile.n_dim.ceil_div(cells).expr,), (1,), (1,))
+        grid = ((tile_n_dim(tile).ceil_div(cells).expr,), (1,), (1,))
     block = ((cells + tile.aux_threads,), (1,), (1,))
     # Signature / arg order: buffers, then the TMA descriptor params (bound to the
     # launch-encoded ``CUtensorMap`` device arrays), then the symbolic ``int`` args

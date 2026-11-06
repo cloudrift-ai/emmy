@@ -79,17 +79,10 @@ def test_packed_fp4_epilogue_reads_each_elements_block_scale(runtime_rows) -> No
 def _render(*assigns) -> tuple[str, object]:
     tail = [*assigns, Write(output="out", index=(Var("m"), Var("n")), value=assigns[-1].name)]
     epilogue = _warp_epilogue(tail, "acc", "m", "n", Sigma.IDENTITY)
-    assert epilogue is not None
-    store = RegStore(
-        dst_buffer="out",
-        dst_index=(Var("m"), Var("n")),
-        frag="_c",
-        shape=(16, 8, 16),
-        ldm=16,
-        epilogue=epilogue,
-    )
+    assert epilogue
+    store = RegStore(dst_buffer="out", dst_index=(Var("m"), Var("n")), frag="_c", shape=(16, 8, 16), ldm=16, **epilogue)
     ctx = RenderCtx(shapes={"out": (16, 16)}, buffer_dtypes={"out": "f16"})
-    return "\n".join(render_stmt(store, ctx)), epilogue
+    return "\n".join(render_stmt(store, ctx)), store.epilogue
 
 
 def test_typed_copy_narrows_the_fragment_value_before_its_consumer() -> None:
@@ -98,7 +91,7 @@ def test_typed_copy_narrows_the_fragment_value_before_its_consumer() -> None:
         Assign(name="result", op=ElementwiseImpl("copy"), args=("narrow",)),
     )
 
-    assert epilogue.body[0].dtype is F16
+    assert epilogue[0].dtype is F16
     assert "const __half narrow_e0 = __float2half(_c[0]);" in source
     assert "const __half result_e0 = narrow_e0;" in source
 
@@ -106,7 +99,7 @@ def test_typed_copy_narrows_the_fragment_value_before_its_consumer() -> None:
 def test_untyped_copy_keeps_the_existing_f32_epilogue() -> None:
     source, epilogue = _render(Assign(name="result", op=ElementwiseImpl("copy"), args=("acc",)))
 
-    assert epilogue.body[0].dtype is None
+    assert epilogue[0].dtype is None
     assert "const float result_e0 = _c[0];" in source
     assert "__float2half(_c[0])" not in source
 
@@ -116,7 +109,7 @@ def test_typed_literal_binding_survives_fragment_epilogue_rendering() -> None:
         Let("scale", Literal(0.125), dtype=F32),
         Assign("result", "multiply", ("acc", "scale")),
     )
-    assert epilogue.body[0] == Let("scale", Literal(0.125), dtype=F32)
+    assert epilogue[0] == Let("scale", Literal(0.125), dtype=F32)
     assert "const float scale_e0 = 0.125f;" in source
     assert "const float result_e0 = _c[0] * scale_e0;" in source
 
@@ -161,7 +154,7 @@ def test_fast_exp_policy_reaches_generated_fragment_epilogues(monkeypatch, fast_
         for store in stores:
             for cell in (store, *store.run):
                 assert cell.epilogue is not None
-                ops = [stmt.op.name for stmt in cell.epilogue.body if isinstance(stmt, Assign)]
+                ops = [stmt.op.name for stmt in cell.epilogue if isinstance(stmt, Assign)]
                 assert expected in ops and ("exp" if enabled else "exp_fast") not in ops
         compiled = Pipeline.build([FINAL_LOWERING_PASS]).run(lowered, ctx=ctx)
     (source,) = [node.op.kernel_source for node in compiled.nodes.values() if isinstance(node.op, CudaOp)]
@@ -238,8 +231,8 @@ def test_integer_load_in_fragment_epilogue_keeps_shift_operands_integer() -> Non
         Write(output="out", index=(Var("m"), Var("n")), value="bits"),
     ]
     epilogue = _warp_epilogue(tail, "acc", "m", "n", Sigma.IDENTITY)
-    assert epilogue is not None
-    store = RegStore(dst_buffer="out", dst_index=(Var("m"), Var("n")), frag="_c", shape=(16, 8, 16), ldm=16, epilogue=epilogue)
+    assert epilogue
+    store = RegStore(dst_buffer="out", dst_index=(Var("m"), Var("n")), frag="_c", shape=(16, 8, 16), ldm=16, **epilogue)
     ctx = RenderCtx(shapes={"out": (16, 16), "shift": (1,)}, buffer_dtypes={"out": "i32", "shift": "i32"})
     source = "\n".join(render_stmt(store, ctx))
 

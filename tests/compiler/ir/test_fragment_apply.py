@@ -2,7 +2,7 @@
 
 from emmy.compiler.ir.elementwise import ElementwiseImpl
 from emmy.compiler.ir.expr import BinaryExpr, Literal, Var
-from emmy.compiler.ir.kernel.ir import COORD, FRAG, FRAG_COL, FRAG_ROW, GMEM, UNIFORM, FragmentApply
+from emmy.compiler.ir.kernel.ir import COORD, FRAG, FRAG_COL, FRAG_ROW, GMEM, UNIFORM, FragmentApply, FragmentArg, fragment_args
 from emmy.compiler.ir.render import RenderCtx, render_stmt
 from emmy.compiler.ir.sigma import Sigma
 
@@ -11,8 +11,7 @@ def _causal_mask() -> FragmentApply:
     return FragmentApply(
         out="s",
         op=ElementwiseImpl("where"),
-        args=(BinaryExpr(">", Var(FRAG_COL), Var(FRAG_ROW)), Literal(-1e30), "s"),
-        kinds=(COORD, UNIFORM, FRAG),
+        args=fragment_args((BinaryExpr(">", Var(FRAG_COL), Var(FRAG_ROW)), Literal(-1e30), "s"), (COORD, UNIFORM, FRAG)),
         in_place=True,
         row_base=Var("q"),
         col_base=BinaryExpr("+", Var("kv"), Literal(8, "int")),
@@ -32,8 +31,7 @@ def test_gmem_operand_reads_the_buffer_at_absolute_coordinates_and_converts() ->
     bias = FragmentApply(
         out="s",
         op=ElementwiseImpl("add"),
-        args=("s", ("mask", (Literal(0, "int"), Var(FRAG_ROW), Var(FRAG_COL)))),
-        kinds=(FRAG, GMEM),
+        args=fragment_args(("s", ("mask", (Literal(0, "int"), Var(FRAG_ROW), Var(FRAG_COL)))), (FRAG, GMEM)),
         in_place=True,
         row_base=Var("q"),
         col_base=Var("kv"),
@@ -48,15 +46,17 @@ def test_gmem_operand_reads_the_buffer_at_absolute_coordinates_and_converts() ->
 def test_rewrite_substitutes_bases_and_templates_but_not_the_reserved_coordinates() -> None:
     sigma = Sigma({"q": Var("a1"), "kv": Var("a3")})
     rewritten = _causal_mask().rewrite(lambda n: {"s": "s9"}.get(n, n), sigma)
-    assert rewritten.out == "s9" and rewritten.args[2] == "s9"
+    assert rewritten.out == "s9" and rewritten.args[2] == FragmentArg(FRAG, ("s9",))
     assert rewritten.row_base == Var("a1")
-    assert rewritten.args[0] == BinaryExpr(">", Var(FRAG_COL), Var(FRAG_ROW)), "the reserved vars are not local axes"
+    assert rewritten.args[0].exprs == (BinaryExpr(">", Var(FRAG_COL), Var(FRAG_ROW)),), "the reserved vars are not local axes"
     assert rewritten.deps() == ("s9",), "a predicate and a literal contribute no SSA reads"
-    assert rewritten.exprs()[0] == rewritten.args[0]
+    assert rewritten.exprs()[0] == rewritten.args[0].exprs[0]
 
 
 def test_plain_operands_keep_the_unrolled_loop_form() -> None:
-    scale = FragmentApply(out="s", op=ElementwiseImpl("multiply"), args=("s", Literal(0.125)), kinds=(FRAG, UNIFORM), in_place=True)
+    scale = FragmentApply(
+        out="s", op=ElementwiseImpl("multiply"), args=fragment_args(("s", Literal(0.125)), (FRAG, UNIFORM)), in_place=True
+    )
     lines = render_stmt(scale, RenderCtx())
     assert any("#pragma unroll" in ln for ln in lines)
     assert any("s[_e] = s[_e] * 0.125f;" in ln for ln in lines)

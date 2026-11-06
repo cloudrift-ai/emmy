@@ -433,9 +433,8 @@ def test_warp_epilogue_preserves_split_and_block_scale_coordinates():
         Write(output="out", index=(Var("m"), Var("n")), value="result"),
     ]
     sigma = Sigma({"b": Literal(2, "int"), "m": Literal(16, "int"), "n": Literal(30, "int")})
-    epilogue = _warp_epilogue(tail, "acc", "m", "n", sigma)
-    assert epilogue is not None
-    load = epilogue.body[0]
+    epilogue = _warp_epilogue(tail, "acc", "m", "n", sigma)["epilogue"]
+    load = epilogue[0]
     for col in range(8):
         got = tuple(expr.eval({ELEM_ROW: 3, ELEM_COL: col}) for expr in load.index)
         assert got == (2, 19, (30 + col) // 32, (30 + col) % 32, (30 + col) // 8)
