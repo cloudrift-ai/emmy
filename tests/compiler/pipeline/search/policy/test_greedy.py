@@ -52,7 +52,7 @@ def test_db_measured_index_collects_kernels_whose_every_measured_variant_failed(
     attributable to the kernel whatever route produced it."""
 
     def row(kernel: str, status: str, us: float, **knobs) -> SimpleNamespace:
-        return SimpleNamespace(kernel=kernel, status=status, stats=SimpleNamespace(median=us), knobs=knobs)
+        return SimpleNamespace(kernel=kernel, status=status, stats=SimpleNamespace(median=us), knobs=knobs, bindings={})
 
     rows = [
         row("doomed", "bench_fail", 2_000_000.0, WORK="t32"),
@@ -66,7 +66,7 @@ def test_db_measured_index_collects_kernels_whose_every_measured_variant_failed(
     measured = _db_measured_index_build(db, ctx)
     assert "doomed" in measured.failed, "every measured variant of this kernel hit the watchdog"
     assert "mixed" not in measured.failed, "a kernel with one ok variant is not disqualified"
-    assert measured.ok == {"mixed": [({"WORK": "t64"}, 7.0)]}
+    assert measured.ok == {"mixed": {(): [({"WORK": "t64"}, 7.0)]}}
 
 
 @dataclass(frozen=True)
@@ -105,7 +105,7 @@ def test_schedule_pick_descends_directly_to_complete_measured_row() -> None:
         root_op=_kernel(),
         ctx=SimpleNamespace(features=lambda: {"H_opt": 3.0}),
     )
-    index = {"k": [({"TILE": "42", "STAGE": "73"}, 1.25)], "another": [({"TILE": "1", "STAGE": "1"}, 0.5)]}
+    index = {"k": {(): [({"TILE": "42", "STAGE": "73"}, 1.25)]}, "another": {(): [({"TILE": "1", "STAGE": "1"}, 0.5)]}}
     leaf, knobs, price = _direct_measured_pick(point, None, index)
 
     assert knobs == {"TILE": "42", "STAGE": "73"}
@@ -121,7 +121,7 @@ def test_measured_schedule_survives_missing_prior(monkeypatch) -> None:
     monkeypatch.setattr(
         greedy,
         "_db_measured_index",
-        lambda _db, _ctx: SimpleNamespace(ok={"k": [({"TILE": "1", "STAGE": "0"}, 1.0)]}, failed=set()),
+        lambda _db, _ctx: SimpleNamespace(ok={"k": {(): [({"TILE": "1", "STAGE": "0"}, 1.0)]}}, failed=set()),
     )
     chosen = greedy.greedy_decide(prior=None, placement_prior=_BarePrior(), db=object())(point)
     assert leaf_knobs(chosen) == {"TILE": "1", "STAGE": "0"}
@@ -143,17 +143,17 @@ def test_measured_rows_do_not_cross_exact_kernel_identities() -> None:
     """Two kernels of one structure are two kernels: each one's rows price its own candidates, and a kernel
     nothing measured has none."""
     rows = [
-        SimpleNamespace(kernel="flat", status="ok", stats=SimpleNamespace(median=17.0), knobs={"WORK": "t32"}),
-        SimpleNamespace(kernel="strided", status="ok", stats=SimpleNamespace(median=27.0), knobs={"WORK": "t512"}),
-        SimpleNamespace(kernel="flat", status="ok", stats=SimpleNamespace(median=1.0), knobs={"WORK": "t64"}),
+        SimpleNamespace(kernel="flat", status="ok", stats=SimpleNamespace(median=17.0), knobs={"WORK": "t32"}, bindings={}),
+        SimpleNamespace(kernel="strided", status="ok", stats=SimpleNamespace(median=27.0), knobs={"WORK": "t512"}, bindings={}),
+        SimpleNamespace(kernel="flat", status="ok", stats=SimpleNamespace(median=1.0), knobs={"WORK": "t64"}, bindings={}),
     ]
     db = SimpleNamespace(iter_perf=lambda *_args, **_kwargs: rows)
     ctx = SimpleNamespace(gpu_name="card", compute_capability=(7, 0))
     index = _db_measured_index_build(db, ctx)
     candidates = [{"WORK": work} for work in ("t32", "t64", "t512")]
 
-    assert greedy._db_measured_pick(index.ok["strided"], candidates) == (2, 27.0)
-    assert greedy._db_measured_pick(index.ok["flat"], candidates) == (1, 1.0)
+    assert greedy._db_measured_pick(greedy._measured_at(index.ok, "strided", {}), candidates) == (2, 27.0)
+    assert greedy._db_measured_pick(greedy._measured_at(index.ok, "flat", {}), candidates) == (1, 1.0)
     assert "unmeasured" not in index.ok
 
 
@@ -170,7 +170,7 @@ def test_standard_golden_schedule_cannot_win_under_fast_exp() -> None:
     ctx = Context.from_target((12, 0), gpu_name=GPU_5090, compile_flags="", precision={"FAST_EXP": True})
     candidates = [{"WORK": "t32", "FAST_EXP": True}, {"WORK": "t64", "FAST_EXP": True}]
     index = _db_measured_index_build(db, ctx)
-    assert greedy._db_measured_pick(index.ok["k"], candidates) == (1, 2.0)
+    assert greedy._db_measured_pick(greedy._measured_at(index.ok, "k", {}), candidates) == (1, 2.0)
 
 
 def test_strict_evidence_refuses_a_fork_no_measurement_decides(monkeypatch) -> None:
@@ -281,7 +281,7 @@ def test_streamed_db_tier_outranks_the_model(monkeypatch) -> None:
     monkeypatch.setattr(greedy, "_CHUNK", 10)
     # The measured DB row must win the deploy even though the model scores other rows better
     # (every row with _score == 0.0 beats the measured row's model score).
-    db_idx = {"k": [({"TILE": "7", "STAGE": "3"}, 2.0)]}
+    db_idx = {"k": {(): [({"TILE": "7", "STAGE": "3"}, 2.0)]}}
     got = _stream_tiers(_point(_rows()), _BarePrior(), None, db_idx)
     assert got is not None
     leaf, knobs, price, _tier = got
@@ -453,6 +453,57 @@ def test_a_measured_split_is_priced_from_its_pieces_with_no_routing_row() -> Non
 
     assert deployed(21.0) == {"y__partial", "y"}, "a measured split faster than the unsplit kernel must be taken"
     assert deployed(60.0) == {"y"}, "a measured split slower than the unsplit kernel must lose to it"
+
+
+def test_a_kernel_measured_at_two_sizes_is_ranked_at_the_size_it_compiles_at() -> None:
+    """One kernel over a symbolic reduction, measured at two sizes (native's attention, priced per range of windows):
+    a compile at each size ranks the rows measured there. Unsplit, the matvec takes 10 us over 4,096 positions and
+    300 us over 131,072, where a split takes 21 us: the short compile keeps it whole and the long one splits, never
+    pricing the long kernel at its short time."""
+    import torch
+
+    from emmy.compiler.context import Context
+    from emmy.compiler.pipeline import LOOP_PASSES, Pipeline
+    from emmy.compiler.pipeline.pipeline import Run
+    from emmy.compiler.pipeline.search.bench_record import kernel_row
+    from emmy.compiler.pipeline.search.db import PerfStats, SearchDB
+    from emmy.compiler.specialize import rehint_program
+    from emmy.compiler.trace.torch import trace_module
+    from emmy.compiler.wire import kernel_bindings
+    from tests.compiler.pipeline.search.helpers import GPU_5090
+
+    class Matvec(torch.nn.Module):
+        def forward(self, x, w):
+            return x @ w
+
+    n = torch.export.Dim("n", min=2, max=1 << 20)
+    examples = (torch.zeros(1, 512, dtype=torch.float16), torch.zeros(512, 16, dtype=torch.float16))
+    traced = trace_module(Matvec(), examples, dynamic_shapes={"x": {1: n}, "w": {0: n}})
+    ctx = Context.from_target((12, 0), gpu_name=GPU_5090)
+
+    def kernels(size: int, decide) -> dict:
+        lowered = Pipeline.build(LOOP_PASSES).run(rehint_program(traced, {"n": size}), ctx=ctx)
+        terminal, _trace = Run(pipeline=Pipeline.build(["tile/lift", "tile/cut"]), ctx=ctx).resolve(lowered, decide)
+        return {nid: node.op for nid, node in terminal.nodes.items() if isinstance(node.op, TileOp)}
+
+    def arm(reduce: str):
+        return lambda fp: next(o for o in fp.options if leaf_knobs(o).get("REDUCE", "") == reduce)
+
+    def measured(op, us: float) -> None:
+        stats = PerfStats(median=us, min=us, max=us, mean=us, variance=0.0, n_samples=30)
+        db.record_kernel(kernel_row(op, op.name))
+        identity = op.identity_key(structural=False, with_io=True)
+        db.record_perf(ctx, identity, bindings=kernel_bindings(op), knobs={"WORK": "w1x8"}, status="ok", stats=stats)
+
+    db = SearchDB()
+    for size, us in ((4096, 10.0), (131072, 300.0)):
+        [fused] = kernels(size, arm("")).values()
+        measured(fused, us)
+    for nid, op in kernels(131072, arm("g8k")).items():
+        measured(op, 20.0 if nid.endswith("__partial") else 1.0)
+
+    assert len(kernels(4096, greedy.greedy_decide(prior=None, db=db))) == 1, "measured whole at 4,096, the matvec stays whole"
+    assert len(kernels(131072, greedy.greedy_decide(prior=None, db=db))) == 2, "the long matvec's whole time is its own 300 us"
 
 
 def test_stored_placement_cuts_register_composed_and_child_routes() -> None:
