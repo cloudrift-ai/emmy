@@ -370,9 +370,12 @@ class Fold:
                 # spelling the lift happened to declare first. Then one kernel's two contractions
                 # over the same operands could orient opposite ways, and the twisted rewrite —
                 # which matches score cones by canonical form — stopped recognizing them as one
-                # score, silently demoting flash attention to its two-pass form.
+                # score, silently demoting flash attention to its two-pass form. A coordinate the
+                # compiler minted (a key split's partition, ``_a2_ks``) is no earlier than the
+                # program's own: it sorts by its name without the leading underscore, so a sliced
+                # operand keeps the orientation its unsliced form had.
                 rows = pair[0].free_axes ^ pair[1].free_axes if slabs else frozenset()
-                k_last.sort(key=lambda e: min(e.free_axes & rows, default=""))
+                k_last.sort(key=lambda e: min((name.lstrip("_") for name in e.free_axes & rows), default=""))
                 a_edge = k_last[0] if len(pair) == 2 and k_last else None
                 # One slab and one computed operand: a slab that reads k in an earlier position than
                 # its last is laid out ``B[k, n]``, so the computed operand is A. A GEMV whose input

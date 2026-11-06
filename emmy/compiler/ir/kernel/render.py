@@ -715,7 +715,7 @@ static __device__ __forceinline__ void emmy_mma_load_b_gmem(unsigned* r, const T
 // the buffer, and clamping to the fragment base read past its end (an intermittent
 // CUDA_ERROR_ILLEGAL_ADDRESS, wherever that memory was unmapped). Clamped lanes read a duplicate
 // in-bounds value; zero-filled and clamped lanes alike have their stores masked by the RegStore
-// guard (the tile path's ``clamp_last``, same contract).
+// guard (the tile path's ``clamp_to``, same contract).
 template <typename T, typename F = T>
 static __device__ __forceinline__ void emmy_mma_load_a_gmem_mclamp(unsigned* r, const T* g, int ldm, int rows_left) {
     int lane = threadIdx.x & 31, grp = lane >> 2, tig = lane & 3;

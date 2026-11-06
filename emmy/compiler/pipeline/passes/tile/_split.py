@@ -37,10 +37,11 @@ from dataclasses import replace
 from emmy.compiler.dim import Dim
 from emmy.compiler.dtype import BF16, F16, F32
 from emmy.compiler.graph import Graph, Node, Tensor
-from emmy.compiler.ir.address import gmem_axis_step
+from emmy.compiler.ir.address import clamp_to, gmem_axis_step
 from emmy.compiler.ir.axis import Axis, Window
 from emmy.compiler.ir.base import InputOp
-from emmy.compiler.ir.expr import BinaryExpr, Literal, TernaryExpr, Var
+from emmy.compiler.ir.elementwise import ElementwiseImpl
+from emmy.compiler.ir.expr import BinaryExpr, Literal, Var
 from emmy.compiler.ir.loop import LoopOp
 from emmy.compiler.ir.pure import Lambda
 from emmy.compiler.ir.pure.fold import Fold
@@ -48,7 +49,7 @@ from emmy.compiler.ir.pure.twist import Twist
 from emmy.compiler.ir.schedule import Reduce, Work
 from emmy.compiler.ir.schedule.catalog import splitk_moves
 from emmy.compiler.ir.sigma import Sigma
-from emmy.compiler.ir.stmt import Accum, Assign, Body, Carry, Let, Load, Loop, Pre, Select, SelectBranch, Write
+from emmy.compiler.ir.stmt import Accum, Affine, Assign, Body, Carry, Let, Load, Loop, Pre, Select, SelectBranch, Stmt, Write
 from emmy.compiler.ir.stmt.passes import projection_distributes
 from emmy.compiler.ir.tile import OutputSpec, Placement, TileOp
 from emmy.compiler.ir.tile.ops import Sched, carries_partition, head, projection_regions, projection_root, projection_tail
@@ -84,13 +85,12 @@ def splitk_width(k_axis: Axis, width: int) -> str | None:
 def _stream_refusal(node: Fold, k_axis: Axis, width: int) -> str | None:
     """Why the head fold's stream cannot split ``width`` ways (``None`` when it can): :func:`splitk_width` over a static
     stream. A symbolic one splits into slices of ``⌈K/w⌉`` positions, the last overhanging ``K``, whose loads clamp
-    to the stream's last position and whose lift folds the monoid's seed past its end (:func:`_masked`). The seed is
-    the identity of a plain monoid or a contraction, never of a twisted carrier's injected singleton, a carried state
-    or an observed scan."""
+    to the stream's last position and whose lift masks every position past its end (:func:`_masked`) — a monoid's or
+    a twisted carrier's, never a carried state's or an observed scan's."""
     if k_axis.extent.is_static:
         return splitk_width(k_axis, width)
-    if node.twist is not None or node.carries or node.observe is not None:
-        return f"cross-CTA split of the symbolic reduce axis {k_axis.name!r} is built for a plain monoid or a contraction"
+    if node.carries or node.observe is not None:
+        return f"cross-CTA split of the symbolic reduce axis {k_axis.name!r} is built for a monoid or a twisted carrier"
     return None
 
 
@@ -102,26 +102,42 @@ def _slice_length(k_axis: Axis, width: int):
 
 
 def _clamped(k_axis: Axis, position):
-    """``position`` as the stream's loads read it: a symbolic stream's overhanging slice reads its last position."""
-    if k_axis.extent.is_static:
-        return position
-    end = k_axis.extent.expr
-    return TernaryExpr(BinaryExpr("<", position, end), position, BinaryExpr("-", end, Literal(1, "int")))
+    """``position`` as the stream's loads read it: a symbolic stream's overhanging slice reads its last position
+    (:func:`~emmy.compiler.ir.address.clamp_to`, which the gmem-direct fragment loaders read back)."""
+    return position if k_axis.extent.is_static else clamp_to(position, k_axis.extent.expr)
 
 
 def _masked(fold: Fold, k_axis: Axis, position) -> Fold:
-    """``fold`` folding its monoid's seed at every ``position`` past a symbolic stream's end, which the last slice
-    overhangs; a static stream's slices tile it exactly."""
+    """``fold`` folding nothing at any ``position`` past a symbolic stream's end, which the last slice overhangs; a
+    static stream's slices tile it exactly. A monoid folds its seed there. A twisted carrier's score takes the
+    pivot's identity, added through the `where` selects a program's own mask spells — the coordinate mask the chunk tier
+    lands — so the carrier past the end weighs its channels by nothing, and an all-overhang slice folds a finite
+    state the combine then scales away."""
     if k_axis.extent.is_static:
         return fold
-    inside = BinaryExpr("<", position, k_axis.extent.expr)
-    stmts, results = [], []
-    for name, seed in zip(fold.lift.results, fold.init, strict=True):
+    end = k_axis.extent.expr
+    stmts: list[Stmt] = []
+    if fold.twist is None:
+        inside = BinaryExpr("<", position, end)
+        results = []
+        for name, seed in zip(fold.lift.results, fold.init, strict=True):
+            stmts += [
+                Let(name=f"{name}__seed", value=seed),
+                Select(name=f"{name}__in", branches=(SelectBranch(name, inside), SelectBranch(f"{name}__seed", Literal(True, "bool")))),
+            ]
+            results.append(f"{name}__in")
+    else:
+        score, *channels = fold.lift.results
         stmts += [
-            Let(name=f"{name}__seed", value=seed),
-            Select(name=f"{name}__in", branches=(SelectBranch(name, inside), SelectBranch(f"{name}__seed", Literal(True, "bool")))),
+            Let(name=f"{score}__key", value=position),
+            Let(name=f"{score}__end", value=end),
+            Let(name=f"{score}__keep", value=Literal(0.0, "float")),
+            Let(name=f"{score}__fill", value=Literal(float(fold.init[0]), "float")),
+            Assign(name=f"{score}__inside", op=ElementwiseImpl("less"), args=(f"{score}__key", f"{score}__end")),
+            Assign(name=f"{score}__mask", op=ElementwiseImpl("where"), args=(f"{score}__inside", f"{score}__keep", f"{score}__fill")),
+            Affine(name=f"{score}__in", args=(score, f"{score}__mask"), coefficients=(1.0, 1.0), offset=0.0),
         ]
-        results.append(f"{name}__in")
+        results = [f"{score}__in", *channels]
     body = Body((*fold.lift.body, *stmts))
     return replace(fold, lift=Lambda.closing(fold.lift.params, body, tuple(results)))
 
@@ -212,17 +228,10 @@ def _projection_refusal(tile: TileOp, node) -> str | None:
     offered: an independent-projection kernel must partition into output-owning regions and the
     split fold must own one of them (a projection reading SEVERAL roots into one output has no
     piece to hand the epilogue to). The residence guard leads: a head fold the realization cannot
-    STRIP from the projection — neither the kernel's own node, an operand edge, nor a top-level
-    projection member (``head``'s sweep case: a fold reading the boundary store's sweep axis lands
-    inside the sweep ``Loop`` ``apply_output_specs`` wraps) — would leave the epilogue re-running
-    the whole reduction and shadowing the workspace states, so the split declines there."""
+    STRIP from the projection — one reading the boundary store's sweep axis lands inside the sweep
+    ``Loop`` ``apply_output_specs`` wraps — would leave the epilogue re-running the whole reduction
+    and shadowing the workspace states, so the split declines there."""
     op = tile.op
-    if (
-        op is not node
-        and all(edge is not node for edge in getattr(op, "operands", ()))
-        and not any(stmt is node for stmt in projection_tail(tile))
-    ):
-        return "the head fold is nested inside the projection's sweep loop; the split cannot strip it"
     if any(axis.name in node.free_axes for spec in tile.output_specs for axis in spec.sweep):
         return "the head fold is evaluated inside the boundary store's sweep loop; the split cannot strip it"
     if not isinstance(op, Fold) or op.axis is not None or len(op.operands) < 2:
@@ -643,11 +652,14 @@ def _sliced_contraction(node: Fold, k_axis: Axis, w: int) -> tuple[Axis, Axis, F
     # no k and this changes nothing; one that reads the contraction coordinate DIRECTLY is
     # comparing against a partition-local index while its operands already reach absolute k.
     # Causal attention is exactly that lift: its mask is ``row < key``, and left unreindexed every
-    # partition above the first admits keys far above the diagonal.
+    # partition above the first admits keys far above the diagonal. The lift reads the absolute key
+    # UNCLAMPED: only a load needs the clamp, and a mask that compared a clamped key would admit the
+    # overhang as the stream's last position — :func:`_masked` masks it, and the chunk tier reads
+    # the comparison for its stream bounds, which a clamp would hide.
     # Re-CLOSED, not re-spelled: the head's first param is its iteration binder, which must keep
     # its position, so the partition coordinate the substituted body now reads joins as a TRAILING
     # param — where a coordinate already sits, and past the operand correspondence.
-    body = Body(tuple(stmt.substitute(sigma) for stmt in node.lift.body))
+    body = Body(tuple(stmt.substitute(Sigma({node.axis: position})) for stmt in node.lift.body))
     lift = Lambda.closing(node.lift.params, body, node.lift.results)
     return ksplit, kslice, _masked(replace(node, operands=operands, lift=lift), k_axis, position)
 

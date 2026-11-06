@@ -295,7 +295,32 @@ What the session changes for the milestones:
    - **One wave.** The 64-row fold at 24 query heads is 24 CTAs on a 170-SM card. A layer at 65,536 positions is
      ~100 GFLOP, about 1 ms on the whole card and near today's 6.7 ms on a seventh of it; and the tier keeps the
      stream whole on a one-wave launch, so the causal half is not skipped either. A `REDUCE=g<n>k` split across the
-     keys must be among the offers and recorded with the route; #1321 tested `w4x1` alone.
+     keys is the answer, and on 2026-11-04 it refused twice, probed off the card: the split declines a twisted
+     carrier over a symbolic stream (its last slice overhangs the window, and the split masks an overhang by
+     seeding every lift result, which breaks the tier's reading of the carrier); and the chunk tier refuses every
+     split piece's causal mask, static or not, because the partition coordinate the sliced body reads is not
+     uniform to its gate — so no causal attention has ever folded split on tensor cores. The fix: a twisted
+     carrier masks its overhang as the additive coordinate mask the tier lands (the score takes the pivot's
+     identity past the window, through the same `where` selects the twin spells, the sliced lift reading the absolute
+     key unclamped), and the tier's mask gate reads a kernel's per-CTA coordinates — the contraction's batch axes
+     and the split's partition — and its symbolic extents as uniform, so the causal stop lands per slice (block
+     end plus position minus the slice base) and a slice past the diagonal folds nothing. Gate: the twin folds
+     under `g4k` and `g8k` at both caches and matches at every position and window, one wave and wide; the
+     static causal split lands the tier too. Landed and recorded on the dev-box 5090 (2026-11-04, #1324): four
+     compiler bugs, two more than the probe found (a sliced load's clamp hid its row stride from the gmem-direct
+     fragment loaders, a wrong answer; the partition coordinate's underscore flipped a sliced score's
+     orientation, which left the FP8 piece no row). At 512 cached tokens the 64-row fold splits four ways at
+     f1x16 to 29.5 us (27B) and 26.6 us (Qwen3.6), on par with the old four-piece rows (28.5 / 26.6); width 16
+     folds whole at 5.1 us (old 173.7); the 27B's width 3 splits eight ways (12.5 us); width 1 has no tile fork
+     and keeps the old shape, a score cut plus the key split on the remainder (7.1 / 7.4 us, old 7.3 / 6.9), which
+     Qwen3.6's widths 3 and 4 take too (12.2 / 14.8 us). The unsplit fold at width 64 spills at f1x32/k4 (222
+     us). Qwen3.6's rows are `FAST_MATH=0`, where the f16-accumulate cell is not offered: a pinned record on it is
+     invisible to every compile, so its rows stay on the f16/f32 cell. Every root compiles strictly from its file.
+     The strict serving audit of both goldens passes (2026-11-05, dev-box 5090): 62 of 62 twins (27B) and 66 of 66
+     (Qwen3.6) deploy from the golden rows alone. The first round failed seven twins per file, none attention: the
+     rope twins (#1318's restamp demoted their rows; its record run rode this one, 2-5 us a program, 3.4-4.7 us at
+     64 rows against 500 us before) and the pick/next twins #1313 added without rows (0.6-0.9 us). A record compiles
+     the family's narrower twins first from the file, so the wide rope roots record narrow to wide.
    - **The FP8 cache runs unstaged.** Its keys and values are read gmem-direct, a convert per element, through no
      shared memory and no cp.async; only the bf16 cache stages. If the unstaged form misses the gate, a staged FP8
      slab is compiler work this milestone owns, since no other does.
