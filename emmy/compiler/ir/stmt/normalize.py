@@ -73,23 +73,23 @@ def _normalize_body(stmts: Body) -> Body:
         # The expansion lands consumers above producers it reused; sort before naming, or a read ahead of its
         # definition reads a name the renaming never binds.
         stmts = rename_ssa_sequential(topo_sort_siblings(expand_calls(prepare_body(stmts))))
-    # The form has settled when a round leaves its own input unchanged: prepared, folded and ordered. The fold reads
-    # no order, so it runs ahead of the order, and a body it changes is prepared again before it is ordered. The order
-    # runs again on its own output until it leaves it alone: a tie it broke by spelling breaks the same way twice.
+    # The folds are the one step that feeds the steps ahead of it: a fold can leave a value unread, make two loops
+    # mergeable, or change what orders the free axes. So the steps run again after a fold that changed the body, and
+    # only then. The order after them permutes and names, and one step reads names: the order gives two bindings that
+    # shared a name their own, and a value only the other's readers kept alive is then unread. A body the order left
+    # such a value in goes through the steps again.
     for _ in range(8):
-        while True:
-            reduced = prepare_body(stmts)
-            if reduced == stmts:
-                break
-            stmts = reduced
-        folded = fold_affine(reduced)
-        if _commuted(folded) != _commuted(reduced):
-            stmts = folded
+        prepared = Body.coerce(prepare_body(stmts))
+        stmts = fold_values(prepared)
+        if stmts is not prepared:
             continue
-        ordered = _canonical_order(reduced)
-        if ordered == reduced:
+        ordered = _canonical_order(prepared)
+        # The order is not yet final on its own output; it runs until it is.
+        while (again := _canonical_order(ordered)) != ordered:
+            ordered = again
+        stmts = drop_unread_values(ordered)
+        if stmts == ordered:
             return ordered
-        stmts = ordered
     from emmy.compiler.ir.stmt.base import pretty_body  # noqa: PLC0415
 
     raise ValueError("the normal form did not settle in eight rounds:\n" + "\n".join(pretty_body(stmts, "  ")))
@@ -111,7 +111,12 @@ def _commuted(stmts: Body) -> Body:
 
 
 def prepare_body(stmts: Body) -> Body:
-    """One round of the exact simplifications, then every value placed once (:func:`place_values`)."""
+    """The exact simplifications, then every value placed once (:func:`place_values`).
+
+    Value placement feeds the two steps ahead of it: a value placed outside its loop can leave two loops mergeable,
+    and two reads it made one can leave an index or a predicate a constant. Both feed it back — a merge puts two
+    copies of a value in one scope. The three run until the merge and the simplification leave a placed body alone;
+    no other step reads what placement decides, apart from the folds, which run after this (:func:`fold_values`)."""
     stmts = topo_sort_siblings(stmts)
     stmts = drop_size_one_free_axes(stmts)
     stmts = drop_size_one_reduce_axes(stmts)
@@ -119,9 +124,12 @@ def prepare_body(stmts: Body) -> Body:
     stmts = fold_trivial_selects(stmts)
     stmts = fold_constants(stmts)
     stmts = drop_unread_values(stmts)
-    stmts = merge_sibling_reduce_loops(stmts)
-    stmts = _canonicalize_exprs(Body.coerce(simplify_body(stmts)))
-    return place_values(stmts)
+    placed = None
+    while True:
+        simplified = _canonicalize_exprs(Body.coerce(simplify_body(merge_sibling_reduce_loops(stmts))))
+        if simplified == placed:
+            return placed
+        stmts = placed = place_values(simplified)
 
 
 # ---------------------------------------------------------------------------
@@ -409,21 +417,27 @@ def drop_unread_values(stmts: Body) -> Body:
     stmts = Body.coerce(stmts)
     if not stmts.writes:
         return stmts
-    reads: Counter[str] = Counter()
-    for stmt in stmts.iter():
-        own = set(stmt.defines())
-        reads.update(name for name in stmt.deps() if name not in own)
-        for expr in stmt.exprs():
-            reads.update(name for name in expr.free_vars() if name not in own)
+    # Dropping a value can leave its operands unread in turn: count and drop until a sweep drops nothing.
+    while True:
+        reads: Counter[str] = Counter()
+        for stmt in stmts.iter():
+            own = set(stmt.defines())
+            reads.update(name for name in stmt.deps() if name not in own)
+            for expr in stmt.exprs():
+                reads.update(name for name in expr.free_vars() if name not in own)
+        dropped = False
 
-    def drop(stmt: Stmt) -> Stmt | None:
-        if isinstance(stmt, _PURE) and not getattr(stmt, "carried", False) and not any(reads[name] for name in stmt.defines()):
-            return None
-        if stmt.nested() and not any(stmt.nested()):
-            return None
-        return stmt
+        def drop(stmt: Stmt, reads: Counter[str] = reads) -> Stmt | None:
+            nonlocal dropped
+            unread = isinstance(stmt, _PURE) and not getattr(stmt, "carried", False) and not any(reads[name] for name in stmt.defines())
+            if unread or (stmt.nested() and not any(stmt.nested())):
+                dropped = True
+                return None
+            return stmt
 
-    return stmts.map(drop)
+        stmts = stmts.map(drop)
+        if not dropped:
+            return stmts
 
 
 # ---------------------------------------------------------------------------
@@ -581,6 +595,21 @@ def fold_affine(stmts: Body, exposed: frozenset[str] = frozenset()) -> Body:
         for expr in stmt.exprs():
             reads.update(expr.free_vars())
     return folded.map(lambda stmt: None if literal_of(stmt) is not None and not reads[stmt.name] else stmt)
+
+
+def fold_values(stmts: Body) -> Body:
+    """The folds, run to their own fixed point: a select that decides nothing, an operation over literals, an affine
+    cone. Each feeds the others — ``s - s`` is ``0`` to the affine fold, ``exp(0)`` is then ``1`` to the constant
+    fold, and the product by it is a copy to the affine fold again — so they run as one step, on the placed body:
+    the affine fold reads how many readers a value has, which is what value placement settles. Returns ``stmts``
+    itself when no fold changes it, up to the order of an ``Affine``'s terms, which the fold lists in none."""
+    stmts = Body.coerce(stmts)
+    folded = stmts
+    while True:
+        again = Body.coerce(fold_affine(fold_constants(fold_trivial_selects(folded))))
+        if _commuted(again) == _commuted(folded):
+            return folded
+        folded = again
 
 
 # ---------------------------------------------------------------------------
