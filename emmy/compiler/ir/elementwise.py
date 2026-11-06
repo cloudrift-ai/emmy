@@ -310,7 +310,7 @@ def _op_name(op) -> str:
 
 # ---------------------------------------------------------------------------
 # Reduce render-spelling registry — the single op-keyed table behind the four
-# sites that used to switch on the reduce op name: ``Accum.render`` (CUDA
+# sites that used to switch on the reduce op name: ``Accum``'s render (CUDA
 # ``+=`` / ``*=`` / ``fmax`` / ``fmin``), ``kernel/ir._binary_combine_expr``
 # (the tree-combine binary expr), and ``ReduceOp.forward`` / ``ScanOp.forward``
 # (the numpy interpreter reductions). Keyed by canonical combine name.
@@ -335,7 +335,7 @@ _REDUCE_SPELLING: dict[str, ReduceSpelling] = {
 
 def reduce_spelling(op) -> ReduceSpelling:
     """The render data for a reduce combine, defaulting to additive (``+=``)
-    for non-reduce / unknown ops — matches ``Accum.render``'s legacy fallback.
+    for non-reduce / unknown ops — matches ``Accum``'s render's legacy fallback.
     Accepts an op name or ``ElementwiseImpl``."""
     return _REDUCE_SPELLING.get(reduce_canon(_op_name(op)), _REDUCE_SPELLING["add"])
 

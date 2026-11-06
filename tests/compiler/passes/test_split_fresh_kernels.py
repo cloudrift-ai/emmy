@@ -29,7 +29,7 @@ from emmy.compiler.dtype import BF16, F16, F32
 from emmy.compiler.graph import Graph, Tensor
 from emmy.compiler.ir.axis import Axis
 from emmy.compiler.ir.base import InputOp
-from emmy.compiler.ir.expr import Var
+from emmy.compiler.ir.expr import Literal, Var
 from emmy.compiler.ir.frontend.ir import MatmulOp
 from emmy.compiler.ir.pure.fold import Fold
 from emmy.compiler.ir.stmt import Load, Loop, Write
@@ -562,3 +562,32 @@ def test_a_causal_split_piece_masks_its_absolute_key_on_the_chunk_tier() -> None
     assert len(sources) == 2, sorted(sources)
     assert "mma_m16n8k16" in partial and "__ck" in partial, "the partial folds its key slice on the chunk tier"
     assert re.search(r"_ks \* 256 \+ \(a\d+__ck", partial), "the mask compares the slice's absolute key, 256 keys per partition"
+
+
+@pytest.mark.parametrize(
+    ("operation", "args", "expected"),
+    [
+        ("divide", ("state", "count"), True),
+        ("divide", ("count", "state"), False),
+        ("divide", ("state", "state"), False),
+        ("multiply", ("state", "count"), True),
+        ("multiply", ("count", "state"), True),
+        ("multiply", ("state", "state"), False),
+        ("add", ("state", "count"), False),
+    ],
+)
+def test_projection_distributes(operation, args, expected):
+    from emmy.compiler.ir.stmt import Assign, Write
+    from emmy.compiler.pipeline.passes.tile._split import projection_distributes
+
+    body = [Assign("scaled", operation, args), Write("out", (), value="scaled")]
+    assert projection_distributes(body, ("state",)) is expected
+
+
+@pytest.mark.parametrize("count,expected", [(Literal(1024.0), True), (Var("size"), True), (Var("state"), False)])
+def test_projection_distributes_with_a_state_independent_binding(count, expected):
+    from emmy.compiler.ir.stmt import Assign, Let, Write
+    from emmy.compiler.pipeline.passes.tile._split import projection_distributes
+
+    body = [Let("count", count, dtype=F32), Assign("scaled", "divide", ("state", "count")), Write("out", (), "scaled")]
+    assert projection_distributes(body, ("state",)) is expected

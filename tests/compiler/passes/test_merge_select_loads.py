@@ -1,7 +1,6 @@
 """A coordinate select's two private load chains merge into one without changing memory order."""
 
 from collections import Counter
-from dataclasses import replace
 from importlib import import_module
 
 import numpy as np
@@ -48,12 +47,12 @@ def test_selected_loads_keep_memory_effects_and_late_coordinates(unsafe):
         stmts.insert(1, Sync())
     elif unsafe == "late_predicate":
         select = stmts[-2]
-        stmts[-2] = replace(select, branches=(replace(select.branches[0], select=Var("later").lt(2)), *select.branches[1:]))
+        stmts[-2] = select.replace(branches=(select.branches[0].replace(select=Var("later").lt(2)), *select.branches[1:]))
         stmts.insert(-2, Let("later", Literal(0, "int")))
     elif unsafe == "late_index":
-        stmts[1] = replace(stmts[1], index=(Literal(1, "int"), Var("later")))
+        stmts[1] = stmts[1].replace(index=(Literal(1, "int"), Var("later")))
         stmts.insert(1, Let("later", Literal(0, "int")))
     else:
-        stmts[0] = replace(stmts[0], carried="load")
+        stmts[0] = stmts[0].replace(carried="load")
     body = Body(stmts)
     assert _rewrite(body) == body

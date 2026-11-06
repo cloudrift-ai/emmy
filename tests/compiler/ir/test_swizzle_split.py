@@ -6,7 +6,7 @@ import pytest
 
 from emmy.compiler.ir.expr import Literal, Var
 from emmy.compiler.ir.kernel.ir import swizzle_fn, swizzle_xor, swizzled_slab_index
-from emmy.compiler.ir.stmt.base import RenderCtx
+from emmy.compiler.ir.render import RenderCtx
 
 
 def _swz(mode: str):

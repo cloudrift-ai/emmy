@@ -203,9 +203,7 @@ def _serialize_field(v):
     if isinstance(v, Dim):
         return {"__dim__": v.to_wire()}
     if isinstance(v, Body):
-        # Body is a ``tuple`` subclass; downcast to plain tuple so
-        # JSON encodes element-by-element rather than via ``__repr__``
-        # (which would produce a single ``"Body((...))"`` string).
+        # A plain tuple, so JSON encodes element-by-element.
         return tuple(v)
     if isinstance(v, Op):
         return {
@@ -299,7 +297,7 @@ _STMT_EVAL_SCOPE: dict | None = None
 def _pure_lambda(params=(), body=(), results=()):
     """Rehydrate a dumped ``Lambda`` repr through its normal formation checks."""
     from emmy.compiler.ir.pure import Lambda  # noqa: PLC0415
-    from emmy.compiler.ir.stmt.body import Body  # noqa: PLC0415
+    from emmy.compiler.ir.stmt import Body  # noqa: PLC0415
 
     return Lambda(params=tuple(params), body=Body.coerce(body), results=tuple(results))
 
@@ -1245,7 +1243,7 @@ class Graph(Wire):
         autotuner case)."""
         from emmy.compiler.ir.axis import Axis  # noqa: PLC0415
         from emmy.compiler.ir.expr import Var  # noqa: PLC0415
-        from emmy.compiler.ir.stmt.blocks import Loop  # noqa: PLC0415
+        from emmy.compiler.ir.stmt import Loop  # noqa: PLC0415
 
         dims = [dim for nid in self.inputs for dim in self.buffer(nid).shape]
         for node in self.nodes.values():
@@ -1294,7 +1292,7 @@ class Graph(Wire):
         from dataclasses import fields as dc_fields  # noqa: PLC0415
 
         from emmy.compiler.dim import Dim  # noqa: PLC0415
-        from emmy.compiler.ir.stmt.body import Body  # noqa: PLC0415
+        from emmy.compiler.ir.stmt import Body  # noqa: PLC0415
         from emmy.compiler.structural import digest  # noqa: PLC0415
 
         def _unwrap_dims(v: object) -> object:

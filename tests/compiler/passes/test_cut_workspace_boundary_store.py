@@ -28,8 +28,7 @@ from emmy.compiler.ir.axis import Axis
 from emmy.compiler.ir.base import InputOp
 from emmy.compiler.ir.expr import Var
 from emmy.compiler.ir.schedule import Placement
-from emmy.compiler.ir.stmt import Assign, Write
-from emmy.compiler.ir.stmt.leaves import OutputSpec
+from emmy.compiler.ir.stmt import Assign, OutputSpec, Write
 from emmy.compiler.ir.tile import TileOp
 from emmy.compiler.pipeline.passes.tile._cut import cuttable_seams, realize
 from tests.compiler.terms import projection, reduction, slab

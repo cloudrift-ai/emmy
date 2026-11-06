@@ -76,7 +76,7 @@ def test_a_weight_may_read_only_its_own_operand_coordinates(coordinate, contract
         (
             Let("offset", Var(coordinate)),
             Assign("shifted", "add", ("r", "offset")),
-            replace(carrier.lift.body[0], args=("shifted",)),
+            carrier.lift.body[0].replace(args=("shifted",)),
             carrier.lift.body[1],
         )
     )

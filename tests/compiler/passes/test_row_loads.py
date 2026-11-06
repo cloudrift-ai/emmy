@@ -12,7 +12,7 @@ import numpy as np
 import torch
 
 from emmy.compiler.ir.kernel import KernelOp
-from emmy.compiler.ir.stmt.leaves import Load
+from emmy.compiler.ir.stmt import Load
 from emmy.compiler.pipeline.search.pins import pinned_knobs
 from tests.compiler.helpers import requires_cuda
 
@@ -83,8 +83,7 @@ def test_a_lane_loop_unrolls_only_when_its_start_is_below_its_step() -> None:
 
     from emmy.compiler.ir.axis import Axis
     from emmy.compiler.ir.expr import Interval, Literal, SimplifyCtx, Var
-    from emmy.compiler.ir.stmt import Body, StridedLoop
-    from emmy.compiler.ir.stmt.leaves import Load
+    from emmy.compiler.ir.stmt import Body, Load, StridedLoop
 
     trips = importlib.import_module("emmy.compiler.pipeline.passes.lowering.kernel.047_reuse_lane_loads")._trips
     body = Body((Load(name="v", input="x", index=(Var("i"),), dtype="float16"),))
@@ -106,8 +105,7 @@ def test_sibling_lane_loops_over_one_cone_unroll_to_distinct_names() -> None:
 
     from emmy.compiler.ir.axis import Axis
     from emmy.compiler.ir.expr import Interval, Literal, SimplifyCtx, Var
-    from emmy.compiler.ir.stmt import Assign, Body, StridedLoop
-    from emmy.compiler.ir.stmt.leaves import Load, Write
+    from emmy.compiler.ir.stmt import Assign, Body, Load, StridedLoop, Write
 
     walk = importlib.import_module("emmy.compiler.pipeline.passes.lowering.kernel.047_reuse_lane_loads")._walk
     lanes = SimplifyCtx.empty().extend("lane", Interval(0, 15))
@@ -134,8 +132,7 @@ def test_an_outer_reuse_never_renames_a_nested_trip_definition() -> None:
 
     from emmy.compiler.ir.axis import Axis
     from emmy.compiler.ir.expr import Interval, Literal, SimplifyCtx, Var
-    from emmy.compiler.ir.stmt import Body, Loop, StridedLoop
-    from emmy.compiler.ir.stmt.leaves import Load, Write
+    from emmy.compiler.ir.stmt import Body, Load, Loop, StridedLoop, Write
 
     walk = importlib.import_module("emmy.compiler.pipeline.passes.lowering.kernel.047_reuse_lane_loads")._walk
     lanes = SimplifyCtx.empty().extend("lane", Interval(0, 15))

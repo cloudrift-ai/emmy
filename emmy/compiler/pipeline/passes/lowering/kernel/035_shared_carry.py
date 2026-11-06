@@ -14,9 +14,23 @@ from emmy.compiler.graph import Node
 from emmy.compiler.ir.axis import Axis
 from emmy.compiler.ir.expr import BinaryExpr, Builtin, Literal, SimplifyCtx, TernaryExpr, Var
 from emmy.compiler.ir.kernel import KernelOp, Smem, Sync, Tile
-from emmy.compiler.ir.stmt import Accum, Affine, Assign, Body, Carry, Cond, Let, Load, Loop, Pre, Select, StridedLoop, Write
-from emmy.compiler.ir.stmt.base import dtype_promote
-from emmy.compiler.ir.stmt.body import free_names
+from emmy.compiler.ir.stmt import (
+    Accum,
+    Affine,
+    Assign,
+    Body,
+    Carry,
+    Cond,
+    Let,
+    Load,
+    Loop,
+    Pre,
+    Select,
+    StridedLoop,
+    Write,
+    dtype_promote,
+    free_names,
+)
 from emmy.compiler.pipeline import Match, Pattern, RuleSkipped
 from emmy.compiler.pipeline.fork import DeferredFork
 from emmy.compiler.pipeline.passes.tile._fromloop import seed_index, stored_states
@@ -166,11 +180,11 @@ def _resident(op, program, retained=frozenset()):
                             discarded.add(seed.name)
                         stmt = Assign(stmt.name, "copy", (held.name,), dtype=promoted)
             if isinstance(stmt, Load) and stmt.input == port:
-                stmt = replace(stmt, input=shared, index=(parity, *cells_of(stmt.index)), dtype=tensor.dtype)
+                stmt = stmt.replace(input=shared, index=(parity, *cells_of(stmt.index)), dtype=tensor.dtype)
             elif isinstance(stmt, Write) and stmt.output == port:
                 if port in retained:
                     out.append(stmt)
-                stmt = replace(stmt, output=shared, index=(Literal(1, "int") - parity, *cells_of(stmt.index)), value_dtype=tensor.dtype)
+                stmt = stmt.replace(output=shared, index=(Literal(1, "int") - parity, *cells_of(stmt.index)), value_dtype=tensor.dtype)
             elif stmt.nested():
                 stmt = stmt.with_bodies(tuple(rewrite(child) for child in stmt.nested()))
             out.append(stmt)
@@ -217,7 +231,7 @@ def _resident(op, program, retained=frozenset()):
     )
     # One padding column per row keeps column-strided reads of the state off one bank.
     body = (Smem(shared, (2, *shape[:-1], shape[-1] + 1), cuda_name(tensor.dtype)), initialize, Sync(), *step)
-    return replace(op, serial=(), body=Body((replace(tile, axes=(*tile.axes[: len(batch)], *tile.axes[split:]), body=Body(body)),)))
+    return replace(op, serial=(), body=Body((tile.replace(axes=(*tile.axes[: len(batch)], *tile.axes[split:]), body=Body(body)),)))
 
 
 def _guard_stores(body: Body, types=None) -> Body:
@@ -296,7 +310,7 @@ def _guard_stores(body: Body, types=None) -> Body:
             for i in sorted(found):
                 stmt = stmts[i]
                 if isinstance(stmt, Load):
-                    stmt = replace(stmt, index=tuple(_resolve(e.simplify(SimplifyCtx.empty()), cond, truth) for e in stmt.index))
+                    stmt = stmt.replace(index=tuple(_resolve(e.simplify(SimplifyCtx.empty()), cond, truth) for e in stmt.index))
                 chain.append(stmt)
             chain.append(Assign(select.name, "copy", (branch.value,), dtype=types.get(select.name, F32)))
             guarded.append(_guard_stores(Body((*chain, *continuation, *stores)), types))
@@ -363,7 +377,7 @@ def _parallel_copy(op, program, step, shared, parity, shape, batch, threads, dty
         out = []
         for stmt in body:
             if isinstance(stmt, Cond) and copy_branch(stmt.else_body):
-                stmt = replace(stmt, else_body=Body())
+                stmt = stmt.replace(else_body=Body())
                 removed = True
             if stmt.nested():
                 stmt = stmt.with_bodies(tuple(omit(child) for child in stmt.nested()))

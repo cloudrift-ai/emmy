@@ -2,7 +2,7 @@
 
 A ``LoopOp`` plus the runtime input shapes uniquely determine a C++
 source string. We render that source by walking the body via each
-``Stmt.render``, hand the result to ``cppyy.cppdef`` (Cling JIT-compiles
+``Stmt``'s render, hand the result to ``cppyy.cppdef`` (Cling JIT-compiles
 + links it into the running process), then call the resulting function
 with raw pointers to numpy arrays.
 
@@ -29,7 +29,7 @@ from typing import TYPE_CHECKING
 import numpy as np
 
 from emmy.compiler.backend.loop.render_target import LoopRenderTarget
-from emmy.compiler.ir.stmt import RenderCtx, render_body
+from emmy.compiler.ir.render import RenderCtx, render_body
 
 if TYPE_CHECKING:
     from emmy.compiler.ir.loop.ir import LoopOp

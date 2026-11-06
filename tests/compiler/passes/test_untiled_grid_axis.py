@@ -24,7 +24,7 @@ from emmy.compiler.dtype import F32
 from emmy.compiler.graph import Graph, Tensor
 from emmy.compiler.ir.base import InputOp
 from emmy.compiler.ir.frontend.ir import LinearOp
-from emmy.compiler.ir.stmt.body import free_names
+from emmy.compiler.ir.stmt import free_names
 from emmy.compiler.ir.tensor.ir import ElementwiseOp
 from emmy.compiler.pipeline import KERNEL_PASSES, Pipeline
 from emmy.compiler.pipeline.search.pins import pinned_knobs

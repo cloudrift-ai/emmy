@@ -31,8 +31,7 @@ from emmy.compiler.ir.kernel.ir import ELEM_COL, ELEM_ROW, FRAG_COL, FRAG_ROW
 from emmy.compiler.ir.pure.fold import EXTENTS
 from emmy.compiler.ir.schedule.register import RegisterMaterialization
 from emmy.compiler.ir.sigma import Sigma
-from emmy.compiler.ir.stmt import Affine, Assign, Body, Let, Load, Write
-from emmy.compiler.ir.stmt.body import free_names
+from emmy.compiler.ir.stmt import Affine, Assign, Body, Let, Load, Write, free_names
 from emmy.compiler.ir.tile import TileOp
 from emmy.compiler.ir.tile.ops import UnbindableProjection, reduce_plan, sched_of
 from emmy.compiler.pipeline import Match, Pattern, RuleSkipped
@@ -170,7 +169,7 @@ def _pointwise_strip(tile: TileOp, materialized):
     axes = tuple(
         replace(axis, extent=Dim(axis.extent.as_static() // width)) if axis.name == inner.name else axis for axis in materialized.axes
     )
-    return replace(materialized, axes=axes, body=Body((*loads, *computes, *writes)))
+    return materialized.replace(axes=axes, body=Body((*loads, *computes, *writes)))
 
 
 def _binding(stmt) -> tuple | None:

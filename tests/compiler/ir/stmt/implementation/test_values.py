@@ -15,10 +15,7 @@ from emmy.compiler.ir.axis import Axis
 from emmy.compiler.ir.expr import BinaryExpr, Literal, Var
 from emmy.compiler.ir.loop import LoopOp
 from emmy.compiler.ir.sigma import Sigma
-from emmy.compiler.ir.stmt import Accum, Assign, Body, Load, Loop, Write
-from emmy.compiler.ir.stmt.blocks import Cond
-from emmy.compiler.ir.stmt.normalize import normalize_body
-from emmy.compiler.ir.stmt.order import ordering_constraints
+from emmy.compiler.ir.stmt import Accum, Assign, Body, Cond, Load, Loop, Write, normalize_body, ordering_constraints
 from emmy.compiler.ir.stmt.values import digest, value_numbers
 
 
@@ -216,7 +213,7 @@ def _shuffled_and_renamed(body: Body, rng: random.Random) -> tuple[Body, dict[st
 
     def reorder(stmts: Body) -> Body:
         stmts = Body.coerce(stmts)
-        order = stmts.topological_permutation(ordering_constraints(stmts, effects=True), lambda _index, _stmt: rng.random())
+        order = stmts._topological_permutation(ordering_constraints(stmts, effects=True), lambda _index, _stmt: rng.random())
         out = []
         for index in order:
             stmt = stmts[index]

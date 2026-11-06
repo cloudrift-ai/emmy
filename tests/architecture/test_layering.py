@@ -11,6 +11,7 @@ this file rather than scattering one-off greps elsewhere.
 from __future__ import annotations
 
 import ast
+import functools
 import pathlib
 import re
 
@@ -145,6 +146,134 @@ def test_normalization_has_one_entry_point_and_no_orphan_transform() -> None:
     assert not orphans, "no normalization step calls these; a transform invoked only from outside is a pass:\n" + "\n".join(orphans)
 
 
+_STMT_PACKAGE = "emmy.compiler.ir.stmt"
+
+
+def _imports(path: pathlib.Path):
+    """Every ``(module, names)`` a file imports, function-local imports included."""
+    for node in ast.walk(ast.parse(path.read_text())):
+        if isinstance(node, ast.ImportFrom) and node.module:
+            yield node.module, [alias.name for alias in node.names]
+        elif isinstance(node, ast.Import):
+            for alias in node.names:
+                yield alias.name, []
+
+
+def test_the_statement_module_is_entered_through_its_package() -> None:
+    """Outside ``ir/stmt``, the compiler and its tests import the statement package's exported names, nothing else.
+
+    A submodule path or a private name is a dependency on how the module is built. The package's export list is the
+    whole interface, so the module can be rearranged, or replaced, behind it. The tests of how it is built are the
+    one exception, and they sit in one directory that leaves with the implementation.
+    """
+    import emmy.compiler.ir.stmt as stmt
+
+    inside = (_REPO_ROOT / "emmy" / "compiler" / "ir" / "stmt", _REPO_ROOT / "tests" / "compiler" / "ir" / "stmt" / "implementation")
+    offenders = []
+    for py in sorted([*(_REPO_ROOT / "emmy").rglob("*.py"), *(_REPO_ROOT / "tests").rglob("*.py")]):
+        if any(root in py.parents for root in inside):
+            continue
+        for module, names in _imports(py):
+            if module.startswith(_STMT_PACKAGE + ".") or (module == _STMT_PACKAGE and not set(names) <= set(stmt.__all__)):
+                offenders.append(f"{py.relative_to(_REPO_ROOT)}: from {module} import {', '.join(names)}")
+    assert not offenders, "import these from the statement package's exported names:\n" + "\n".join(offenders)
+
+
+def test_the_statement_module_exports_a_pinned_list() -> None:
+    """The statement module's interface is this list. A name added here is a decision, not a convenience."""
+    import emmy.compiler.ir.stmt as stmt
+
+    kinds = ["Stmt", "Load", "Assign", "Affine", "Accum", "Carry", "Pre", "Init", "Let", "Write", "Select", "SelectBranch"]
+    kinds += ["ZeroPrologue", "Loop", "StridedLoop", "Cond"]
+    containers = ["Body", "OutputSpec"]
+    functions = ["normalize_body", "canonicalize_identity", "free_names", "exposed_defines", "rename_free", "map_exprs", "binary"]
+    functions += ["mask_select_predicate", "pretty_body", "ordering_constraints", "dtype_promote"]
+    # Normalization steps a pass calls on its own, and the two kinds fusion assembles a region with.
+    steps = ["fold_affine", "simplify_body", "prepare_body"]
+    assembly = ["Call", "Subroutine"]
+    # What a layer declares a kind of its own with: the base that computes the protocol, and a field's role.
+    declaring = ["Declared", "role"]
+    assert sorted(stmt.__all__) == sorted(kinds + containers + functions + steps + assembly + declaring)
+
+
+def test_the_statement_module_depends_on_expressions_and_values_only() -> None:
+    """``ir/stmt`` is the vocabulary every IR shares, so it sits below all of them: it imports expressions, axes,
+    dtypes and the structural and wire forms. No op, tensor, graph, backend, renderer or pipeline."""
+    allowed = (
+        _STMT_PACKAGE,
+        "emmy.compiler.ir.expr",
+        "emmy.compiler.ir.axis",
+        "emmy.compiler.ir.sigma",
+        "emmy.compiler.ir.elementwise",
+        "emmy.compiler.dtype",
+        "emmy.compiler.dim",
+        "emmy.compiler.structural",
+        "emmy.compiler.wire",
+        "emmy.utils",
+    )
+    offenders = []
+    for py in sorted((_REPO_ROOT / "emmy" / "compiler" / "ir" / "stmt").glob("*.py")):
+        for module, _names in _imports(py):
+            if module.startswith("emmy") and not any(module == root or module.startswith(root + ".") for root in allowed):
+                offenders.append(f"{py.relative_to(_REPO_ROOT)}: {module}")
+    assert not offenders, "the statement module must not depend on these:\n" + "\n".join(offenders)
+
+
+def test_a_statement_is_copied_through_its_own_method() -> None:
+    """Outside ``ir/stmt``, nothing edits a statement with ``dataclasses.replace``: ``Stmt.replace`` is the one way.
+
+    The class a ``replace`` call receives is not visible in the source, so this lowers the first corpus case of
+    each family and watches every call of ``dataclasses.replace`` whose argument is a statement.
+    """
+    import dataclasses
+    import sys
+
+    from emmy.compiler.ir.stmt import SelectBranch, Stmt
+    from tests.compiler.realization import helpers
+
+    inside = str(_REPO_ROOT / "emmy" / "compiler" / "ir" / "stmt")
+    offenders: set[str] = set()
+
+    def watch(frame, event, _arg):  # noqa: ANN001, ANN202 — the ``sys.setprofile`` signature
+        if event == "call" and frame.f_code is dataclasses.replace.__code__ and isinstance(frame.f_locals.get("obj"), (Stmt, SelectBranch)):
+            caller = frame.f_back.f_code.co_filename
+            if not caller.startswith(inside):
+                offenders.add(f"{pathlib.Path(caller).relative_to(_REPO_ROOT)}:{frame.f_back.f_lineno}")
+
+    cases = [helpers.load_case(sorted(family.glob("*.json"))[0]) for family in sorted(helpers.CASES_DIR.iterdir()) if family.is_dir()]
+    previous = sys.getprofile()
+    sys.setprofile(watch)
+    try:
+        for case in cases:
+            helpers.lowered(case, case.context())
+    finally:
+        sys.setprofile(previous)
+    assert not offenders, "copy these statements with ``stmt.replace(...)``:\n" + "\n".join(sorted(offenders))
+
+
+def test_a_class_is_on_the_wire_by_what_it_registers() -> None:
+    """Nothing under ``emmy/`` asks whether a value inherits ``Wire``, and only the mixin's own defaults read a
+    dataclass field for the wire: a class joins through ``wire.register`` with its tag, its two wire functions and
+    its parts, so one that cannot be a dataclass or inherit a Python base travels like any other."""
+    by_base = re.compile(r"\b(?:isinstance|issubclass)\([^()]*\bWire\b")
+    offenders = [
+        f"{py.relative_to(_REPO_ROOT)}:{number}"
+        for py in sorted((_REPO_ROOT / "emmy").rglob("*.py"))
+        for number, line in enumerate(py.read_text().splitlines(), 1)
+        if by_base.search(line)
+    ]
+    assert not offenders, "ask the wire registry, not the base class:\n" + "\n".join(offenders)
+    wire = ast.parse((_REPO_ROOT / "emmy" / "compiler" / "wire.py").read_text())
+    reflecting = {
+        function.name
+        for function in ast.walk(wire)
+        if isinstance(function, ast.FunctionDef)
+        for node in ast.walk(function)
+        if isinstance(node, ast.Name) and node.id in ("fields", "is_dataclass")
+    }
+    assert reflecting == {"wire_parts", "_wire_fields"}
+
+
 # ---------------------------------------------------------------------------
 # Fix 1 firewall — keep the
 # assemble→TileOp boundary clean: every benched scheduling choice lives in the
@@ -277,7 +406,7 @@ _IDENTITY_HOME = "emmy/compiler/ir/base.py"
 #: second spelling.
 _IDENTITY_DEFINERS = {
     "identity_key": {_IDENTITY_HOME, "emmy/compiler/ir/cuda/ir.py"},
-    "body_identity": {_IDENTITY_HOME, "emmy/compiler/ir/stmt/ir.py", "emmy/compiler/ir/tile/ir.py"},
+    "body_identity": {_IDENTITY_HOME, "emmy/compiler/ir/body_op.py", "emmy/compiler/ir/tile/ir.py"},
     "io_fingerprint": {_IDENTITY_HOME},
     "deploy_identity": set(),
     "cache_key": set(),
@@ -383,7 +512,7 @@ def test_every_buffer_bearing_stmt_can_rename_its_buffers() -> None:
     import pkgutil
 
     import emmy.compiler.ir as ir_pkg
-    from emmy.compiler.ir.stmt.base import Stmt
+    from emmy.compiler.ir.stmt import Stmt
 
     for mod in pkgutil.walk_packages(ir_pkg.__path__, prefix="emmy.compiler.ir."):
         importlib.import_module(mod.name)
@@ -404,6 +533,69 @@ def test_every_buffer_bearing_stmt_can_rename_its_buffers() -> None:
         "these stmt kinds declare external buffers but cannot rename them — add a "
         "rename_buffers override beside the declaration:\n" + "\n".join(sorted(offenders))
     )
+
+
+def _kernel_kinds() -> list[type]:
+    import emmy.compiler.ir.kernel.ir as kernel_ir
+    from emmy.compiler.ir.stmt import Stmt
+
+    return [
+        cls for cls in vars(kernel_ir).values() if isinstance(cls, type) and issubclass(cls, Stmt) and cls.__module__ == kernel_ir.__name__
+    ]
+
+
+def test_a_kernel_ir_kind_is_declared_not_programmed() -> None:
+    """A Kernel IR statement kind is data: fields with their roles, how it prints, and at most a constructor check.
+    The statement protocol follows from the roles (``Declared``); what rendering or a lowering asks of a statement
+    beyond that is a function over it, beside the render functions."""
+    from emmy.compiler.ir.stmt import Declared
+
+    offenders = [
+        f"{cls.__name__}.{name}"
+        for cls in _kernel_kinds()
+        for name, member in vars(cls).items()
+        if (callable(member) or isinstance(member, (property, functools.cached_property, staticmethod, classmethod)))
+        and name not in ("pretty", "__post_init__")
+        and not (name.startswith("__") and name != "__post_init__")
+    ]
+    assert len(_kernel_kinds()) == 30 and all(issubclass(cls, Declared) for cls in _kernel_kinds())
+    assert not offenders, "state these as field roles, or move them to functions over the statement:\n" + "\n".join(sorted(offenders))
+
+
+def test_a_kernel_ir_field_has_a_type_from_the_closed_set() -> None:
+    """Every field of a Kernel IR statement kind is a string, a number, a boolean, an expression, an axis, a dtype, an
+    elementwise op, a body, a statement, a record of such fields, or a tuple or optional of those. A bare ``tuple``,
+    ``object`` or a class from outside that set is a field nothing but Python can hold."""
+    import dataclasses
+    import types
+    import typing
+
+    import emmy.compiler.ir.kernel.ir as kernel_ir
+    from emmy.compiler.dtype import DataType
+    from emmy.compiler.ir.axis import Axis
+    from emmy.compiler.ir.elementwise import ElementwiseImpl
+    from emmy.compiler.ir.expr import Expr
+    from emmy.compiler.ir.stmt import Body, Stmt
+
+    def closed(tp) -> bool:  # noqa: ANN001 — a type hint
+        if tp in (str, int, float, bool, type(None)):
+            return True
+        if typing.get_origin(tp) in (tuple, typing.Union, types.UnionType):
+            return all(closed(arg) for arg in typing.get_args(tp) if arg is not Ellipsis)
+        if not isinstance(tp, type):
+            return False
+        if issubclass(tp, (Expr, Axis, DataType, ElementwiseImpl, Body, Stmt)):
+            return True
+        record = dataclasses.is_dataclass(tp) and tp.__module__ == kernel_ir.__name__
+        return record and all(closed(hint) for hint in typing.get_type_hints(tp).values())
+
+    offenders = [
+        f"{cls.__name__}.{field.name}: {field.type}"
+        for cls in _kernel_kinds()
+        for field in dataclasses.fields(cls)
+        if not closed(typing.get_type_hints(cls)[field.name])
+    ]
+    assert not offenders, "give these fields a type from the closed set:\n" + "\n".join(offenders)
 
 
 def test_every_op_is_a_frozen_dataclass() -> None:

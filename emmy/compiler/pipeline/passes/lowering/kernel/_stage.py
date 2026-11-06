@@ -456,7 +456,7 @@ def sync_stat_fill(
     ``Loop`` (or a sub-warp CTA) falls back to the serial one-row-per-THREAD stripe.
 
     A row is declared at its OWN bridged value's C type (``dtypes``, name → C type; ``dtype`` for
-    anything absent). The declaration is where a bridged value's dtype is stated — ``Smem.render``
+    anything absent). The declaration is where a bridged value's dtype is stated — ``Smem``'s render
     registers it and the cell's read picks it up — so a row declared float would put the cell's
     arithmetic in f32 whatever crossed it, and the bit operations have no f32 spelling.
 

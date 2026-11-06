@@ -50,13 +50,12 @@ def test_a_rewrite_keeps_the_zero_fill_predicate() -> None:
     from emmy.compiler.ir.expr import BinaryExpr, Literal, Var  # noqa: PLC0415
     from emmy.compiler.ir.kernel.ir import CpAsyncCopy  # noqa: PLC0415
     from emmy.compiler.ir.sigma import Sigma  # noqa: PLC0415
-    from emmy.compiler.ir.stmt.passes import rewrite  # noqa: PLC0415
 
     sigma = Sigma({"r": Literal(5, "int")})
     copy = CpAsyncCopy(
         smem="s", smem_index=(Var("r"),), src="a", src_index=(Var("r"),), nbytes=16, valid=BinaryExpr("<", Var("r"), Literal(8, "int"))
     )
-    assert rewrite(copy, lambda n: n, sigma).valid.pretty() == BinaryExpr("<", Literal(5, "int"), Literal(8, "int")).pretty()
+    assert copy.rewrite(lambda n: n, sigma).valid.pretty() == BinaryExpr("<", Literal(5, "int"), Literal(8, "int")).pretty()
 
 
 @requires_cuda

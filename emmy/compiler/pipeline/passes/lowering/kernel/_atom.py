@@ -45,13 +45,11 @@ from emmy.compiler.ir.kernel.ir import (
     FRAG_COL,
     FRAG_ROW,
     GMEM,
-    M16N8,
     ROW,
     UNIFORM,
     VOLTA_B_CONGRUOUS,
     VOLTA_CROSSWISE,
     BlockScaleLoad,
-    FragLayout,
     FragmentApply,
     FragmentPromote,
     FragmentRepack,
@@ -66,7 +64,7 @@ from emmy.compiler.ir.kernel.ir import (
     WgmmaFence,
     WgmmaMma,
     WgmmaWait,
-    frag_layout,
+    fragment_args,
 )
 from emmy.compiler.ir.pure.fold import Fold
 from emmy.compiler.ir.pure.lam import Lambda
@@ -91,10 +89,11 @@ from emmy.compiler.ir.stmt import (
     StridedLoop,
     Write,
     binary,
+    exposed_defines,
+    free_names,
     mask_select_predicate,
+    rename_free,
 )
-from emmy.compiler.ir.stmt.body import _exposed_defines, free_names
-from emmy.compiler.ir.stmt.passes import rename_free
 from emmy.compiler.ir.tile.ops import cone_stat, cone_stat_dtypes
 from emmy.compiler.pipeline.passes.lowering.kernel._stage import (
     CpAsyncTransport,
@@ -149,7 +148,7 @@ def _unshadowed(body, states: tuple[str, ...]) -> list:
     not share because they were formed differently — and however alike they look those are two
     values, so the tail's takes its own name. A tail that only READS a state is untouched, and still
     reads the cell's accumulator through the ordinary suffix."""
-    shadowed = {name for stmt in body for name in _exposed_defines(stmt)} & set(states)
+    shadowed = {name for stmt in body for name in exposed_defines(stmt)} & set(states)
     if not shadowed:
         return list(body)
     return [stmt.rewrite(lambda name: f"{name}__own" if name in shadowed else name) for stmt in body]
@@ -310,9 +309,10 @@ def _cells(mn: tuple, offset, i: int, j: int):
 
 
 # ---- warp/mma tier ----------------------------------------------------------------------------- #
-def _warp_epilogue(tail: list[Stmt], acc: str, m_name: str, n_name: str, sigma: Sigma, extra_accs: tuple[str, ...] = ()) -> Lambda | None:
-    """Fold the projection (zero-axis) fold into the store's epilogue :class:`Lambda` for cell
-    ``sigma``. ``None`` when there is no projection (a bare ``Write`` of the accumulator).
+def _warp_epilogue(tail: list[Stmt], acc: str, m_name: str, n_name: str, sigma: Sigma, extra_accs: tuple[str, ...] = ()) -> dict:
+    """Fold the projection (zero-axis) fold into the store's epilogue fields for cell ``sigma`` — a
+    :class:`RegStore`'s ``epilogue``, ``epilogue_params`` and ``epilogue_result``. Empty when there
+    is no projection (a bare ``Write`` of the accumulator).
     ``extra_accs`` are a multi-fold node's additional accumulator names, bound after ``acc`` so
     the chain combines the channels per element.
 
@@ -344,7 +344,7 @@ def _warp_epilogue(tail: list[Stmt], acc: str, m_name: str, n_name: str, sigma: 
         elif isinstance(s, Write):
             write = s
     if write is None or not any(isinstance(s, (Assign, Select)) for s in body):
-        return None
+        return {}
     # Every chain-op arg must be BOUND in the render env (the accumulator(s), a leaf load, a
     # select, or an earlier op) — an unbound name means the variant's projection tail reads a
     # value this node does not compute (a mis-sliced multi-channel combine: the gemma GeGLU
@@ -364,7 +364,10 @@ def _warp_epilogue(tail: list[Stmt], acc: str, m_name: str, n_name: str, sigma: 
                 f"projection epilogue reads {unbound} this node does not compute (mis-sliced multi-channel tail)", reject=True
             )
         bound.update(st.defines())
-    return Lambda.closing((acc, *extra_accs), Body(body), (write.value,))
+    # Formed as a closed term, which refuses an impure statement and fixes the statement order; the
+    # store keeps the body and the names bound to its fragments.
+    term = Lambda.closing((acc, *extra_accs), Body(body), (write.value,))
+    return {"epilogue": term.body, "epilogue_params": (acc, *extra_accs), "epilogue_result": write.value}
 
 
 # ---- operand staging (smem slab + ldmatrix drain) ---------------------------------------------- #
@@ -1655,7 +1658,7 @@ def _staged(ops: _AtomOps, cells, offset, mn: tuple[Side, Side]):
         finalize = [
             *alpha_stmts,
             *(
-                FragmentApply(out=cf, op=ElementwiseImpl("multiply"), args=(cf, alpha_of[f]), kinds=(FRAG, UNIFORM), in_place=True)
+                FragmentApply(out=cf, op=ElementwiseImpl("multiply"), args=fragment_args((cf, alpha_of[f]), (FRAG, UNIFORM)), in_place=True)
                 for f in range(len(ops.channels))
                 for i in range(mn[0].reg)
                 for j in range(mn[1].reg)
@@ -1857,7 +1860,7 @@ def _dedup_loads(stmts: list[Stmt]) -> list[Stmt]:
 
     Dedup itself is per-``stmts`` (this list only); the rewrite reaches nested scopes, since an
     epilogue cell's output sweep consumes the loads hoisted above it. It goes through
-    :func:`~emmy.compiler.ir.stmt.passes.rename_free` so a nested scope re-binding a dropped
+    :func:`~emmy.compiler.ir.stmt.rename_free` so a nested scope re-binding a dropped
     name keeps its own binding."""
     seen: dict = {}
     rename: dict[str, str] = {}
@@ -2461,7 +2464,7 @@ class _MmaOps(_AtomOps):
 
     def store(self, i, j, offset, mn):
         """Store cell ``(i, j)``'s ``_c`` fragment to the output, folding the projection ``tail`` into a
-        an epilogue ``Lambda`` and guarding overhanging M/N rows. A multi-fold node binds its extra C
+        a store epilogue and guarding overhanging M/N rows. A multi-fold node binds its extra C
         fragments as additional epilogue accumulators (the combine — SwiGLU — reads them per cell)."""
         atom = self.tile.atom
         volta_interleaved = self._volta_pair_layout(mn)
@@ -2507,7 +2510,7 @@ class _MmaOps(_AtomOps):
                     frag=frags[primary],
                     extra_frags=tuple(frags[f] for f in extra),
                     shape=atom.shape,
-                    epilogue=epi,
+                    **epi,
                     m_guard=_guard(m, mcell),
                     n_guard=_guard(n, ncell),
                     atomic=write.atomic,
@@ -2559,7 +2562,7 @@ class _ScalarOps(_AtomOps):
 
     def state(self, cells):
         """The scalar accumulator seeds. Gmem-direct (unstaged): none — the accumulators are seeded
-        inside the reduce ``Loop`` (the dissolved fold ``Accum``\\ s + ``Loop.render``). **Staged**: a
+        inside the reduce ``Loop`` (the dissolved fold ``Accum``\\ s + ``Loop``'s render). **Staged**: a
         per-cell ``Init(acc__c{i}_{j} = 0)`` emitted here, **outside** the outer slab loop, so the
         carrier-less :func:`_scalar_drain` folds across every slab without re-seeding (the nested-loop
         accumulator-lifetime split — the scalar analogue of :meth:`_MmaOps.state` declaring the ``_c``
@@ -2573,7 +2576,7 @@ class _ScalarOps(_AtomOps):
         """The gmem-direct scalar leaf constructors: each register ROW reads its A operand once (a
         gmem ``Load`` or a computed register-resident body), each COL its B ``Load`` once, each
         ``(i, j)`` cell folds the TERM's own per-step statements (:meth:`Fold.step`), and the
-        K-loop is a unit ``Loop`` (``Loop.render`` seeds the accumulators; the store reads them). A
+        K-loop is a unit ``Loop`` (``Loop``'s render seeds the accumulators; the store reads them). A
         masked axis wraps its read in-bounds (``% extent``) and the overhanging store is guarded
         (:meth:`store`).
 
@@ -2697,7 +2700,7 @@ def _residence(
     hold: str = "",
     memo: dict | None = None,
     frags_only: bool = False,
-    layout: FragLayout = M16N8,
+    layout: str = "m16n8k16",
     select_sigma: Sigma | None = None,
     row_base: Expr | None = None,
     col_base: Expr | None = None,
@@ -2748,14 +2751,15 @@ def _residence(
             # The keep branch applies the authored scalar to every element; the masked elements then
             # take the carrier's finite identity, so an all-masked chunk never sees ``-inf - -inf``.
             out.append(
-                FragmentApply(out=name, op=stmt.op, args=(frags[source], mask.branches[0].value), kinds=(FRAG, UNIFORM), layout=layout)
+                FragmentApply(
+                    out=name, op=stmt.op, args=fragment_args((frags[source], mask.branches[0].value), (FRAG, UNIFORM)), layout=layout
+                )
             )
             out.append(
                 FragmentApply(
                     out=name,
                     op=ElementwiseImpl("where"),
-                    args=(select_sigma.apply(predicate), Literal(float(mask_fill)), name),
-                    kinds=(COORD, UNIFORM, FRAG),
+                    args=fragment_args((select_sigma.apply(predicate), Literal(float(mask_fill)), name), (COORD, UNIFORM, FRAG)),
                     in_place=True,
                     layout=layout,
                     row_base=row_base,
@@ -2792,8 +2796,7 @@ def _residence(
                 FragmentApply(
                     out=name,
                     op=stmt.op,
-                    args=tuple(args),
-                    kinds=tuple(kinds),
+                    args=fragment_args(tuple(args), tuple(kinds)),
                     in_place=target is not None,
                     layout=layout,
                 )
@@ -2807,7 +2810,7 @@ def _residence(
                 bound = tuple(rows[a][half] if a in rows else a for a in reads)
                 if not frags_only:
                     out.append(
-                        Accum(name=target, value=bound[1], op=stmt.op, base=bound[0]) if accum else replace(stmt, name=target, args=bound)
+                        Accum(name=target, value=bound[1], op=stmt.op, base=bound[0]) if accum else stmt.replace(name=target, args=bound)
                     )
             rows[stmt.name] = pair
         elif not frags_only:
@@ -2940,7 +2943,7 @@ class _FlashOps(_MmaOps):
         """The chunk loop — the ONE loop this tier opens over the carrier's axis."""
         m, n = mn
         atom = self.tile.atom
-        layout = frag_layout(atom.fragment_layout)
+        layout = atom.fragment_layout
         # The chunk is the TILE's own K width, which is also what the resolver derives ``bk_elems``
         # as — so a ``STAGE`` at this site names the transport and adds no second spelling of it.
         bk = atom.atom_k * self.tile.bk
@@ -3040,12 +3043,14 @@ class _FlashOps(_MmaOps):
                             FragmentApply(
                                 out=scored[i, j],
                                 op=ElementwiseImpl("where"),
-                                args=(
-                                    BinaryExpr(">=", Var(FRAG_COL), bound),
-                                    Literal(float(self.c.base.components()[0].identity)),
-                                    scored[i, j],
+                                args=fragment_args(
+                                    (
+                                        BinaryExpr(">=", Var(FRAG_COL), bound),
+                                        Literal(float(self.c.base.components()[0].identity)),
+                                        scored[i, j],
+                                    ),
+                                    (COORD, UNIFORM, FRAG),
                                 ),
-                                kinds=(COORD, UNIFORM, FRAG),
                                 in_place=True,
                                 layout=layout,
                                 col_base=BinaryExpr("+", base, Literal(j * atom.atom_n, "int")),
@@ -3272,10 +3277,9 @@ class _FlashOps(_MmaOps):
                     FragmentApply(
                         out=self.frag(f"_s{i}_{j}"),
                         op=ElementwiseImpl("add"),
-                        args=(self.frag(f"_s{i}_{j}"), (load.input, index)),
-                        kinds=(FRAG, GMEM),
+                        args=fragment_args((self.frag(f"_s{i}_{j}"), (load.input, index)), (FRAG, GMEM)),
                         in_place=True,
-                        layout=frag_layout(atom.fragment_layout),
+                        layout=atom.fragment_layout,
                         row_base=offset[0].base(i),
                         col_base=BinaryExpr("+", base, Literal(j * atom.atom_n, "int")),
                     )
@@ -3771,7 +3775,7 @@ class _FlashOps(_MmaOps):
         cell = {m.axis.name, n.axis.name}
         if any(isinstance(stmt, Load) and cell & {name for e in stmt.index for name in e.free_vars()} for stmt in tail):
             raise RuleSkipped("the chunk tier's projection reads a per-cell operand beside a per-row carrier state", reject=True)
-        layout = frag_layout(atom.fragment_layout)
+        layout = atom.fragment_layout
         stmts, frags, _rows = _residence(tail, frags=frags, rows=rows, tag=f"_ep{i}_{j}_", layout=layout)
         out = list(stmts)
         for write in writes:
@@ -3780,7 +3784,9 @@ class _FlashOps(_MmaOps):
                 # broadcasts into a fragment so the store is the ordinary fragment store, one value
                 # per cell of the row it stands for.
                 name = f"_ep{i}_{j}_{write.value}"
-                out.append(FragmentApply(out=name, op=ElementwiseImpl("copy"), args=(rows[write.value],), kinds=(ROW,), layout=layout))
+                out.append(
+                    FragmentApply(out=name, op=ElementwiseImpl("copy"), args=fragment_args((rows[write.value],), (ROW,)), layout=layout)
+                )
                 frags[write.value] = name
             out.append(
                 RegStore(

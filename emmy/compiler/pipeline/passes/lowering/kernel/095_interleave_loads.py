@@ -37,9 +37,7 @@ from dataclasses import replace
 
 from emmy.compiler.graph import Node
 from emmy.compiler.ir.kernel import KernelOp
-from emmy.compiler.ir.stmt import Body, Stmt
-from emmy.compiler.ir.stmt.blocks import Cond
-from emmy.compiler.ir.stmt.leaves import Assign, Load
+from emmy.compiler.ir.stmt import Assign, Body, Cond, Load, Stmt
 from emmy.compiler.pipeline import Pattern, RuleSkipped
 from emmy.compiler.pipeline.search.space import INTERLEAVE_LOADS
 

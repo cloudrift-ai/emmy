@@ -33,14 +33,16 @@ from itertools import count, product
 import numpy as np
 
 from emmy.compiler.dtype import F32
+from emmy.compiler.ir.axis import extend_simplify_ctx
 from emmy.compiler.ir.expr import BinaryExpr, CastExpr, Expr, FuncCallExpr, Literal, SimplifyCtx, TernaryExpr, Var, affine_form
 from emmy.compiler.ir.sigma import Sigma
 from emmy.compiler.ir.stmt.base import Stmt, dtype_promote
 from emmy.compiler.ir.stmt.blocks import Cond, Loop, StridedLoop
 from emmy.compiler.ir.stmt.body import Body, free_names
-from emmy.compiler.ir.stmt.leaves import Accum, Affine, Assign, Carry, Init, Let, Load, Select, Write
+from emmy.compiler.ir.stmt.leaves import Accum, Affine, Assign, Carry, Init, Let, Load, Select, SelectBranch, Write
 from emmy.compiler.ir.stmt.order import bound_axes, ordering_constraints, topological_sort
-from emmy.compiler.ir.stmt.subroutine import definitions
+from emmy.compiler.ir.stmt.passes import map_exprs, rename_free
+from emmy.compiler.ir.stmt.subroutine import Call
 
 __all__ = ["normalize_body"]
 
@@ -61,55 +63,34 @@ def normalize_body(stmts: Body) -> Body:
 
 def _normalize_body(stmts: Body) -> Body:
     """Uncached implementation owned by :class:`Body`'s normalization property."""
-    from emmy.compiler.ir.stmt.splicer import expand_calls
-
+    # The normal form holds every operation: a call is storage sharing inside fusion, which expands it.
+    if stmts.iter_of_type(Call):
+        raise ValueError("a body that holds a subroutine call has no normal form; fusion expands its calls")
     # Motion can put two lexical bindings in one scope. Give them distinct names first.
     stmts = rename_ssa_sequential(topo_sort_siblings(stmts))
-    # Calls are storage sharing only. Full normalization sees every operation, so reduction
-    # fusion, executable identity and Tile IR's common-cone detection use the same CSE form.
-    if definitions(stmts):
-        # The expansion lands consumers above producers it reused; sort before naming, or a read ahead of its
-        # definition reads a name the renaming never binds.
-        stmts = rename_ssa_sequential(topo_sort_siblings(expand_calls(prepare_body(stmts))))
-    # The form has settled when a round leaves its own input unchanged: prepared, folded and ordered. The fold reads
-    # no order, so it runs ahead of the order, and a body it changes is prepared again before it is ordered. The order
-    # runs again on its own output until it leaves it alone: a tie it broke by spelling breaks the same way twice.
+    # The folds feed the steps ahead of them: a fold can leave a value unread, make two loops mergeable, or change
+    # what orders the free axes. So the steps run again after a fold that changed the body. The order permutes and
+    # names, and one step reads names: the order gives two bindings that shared a name their own, and a value only
+    # the other's readers kept alive is then unread. A body the order left such a value in goes through the steps
+    # again; any other is final, since the order is final on its own output.
     for _ in range(8):
-        while True:
-            reduced = prepare_body(stmts)
-            if reduced == stmts:
-                break
-            stmts = reduced
-        folded = fold_affine(reduced)
-        if _commuted(folded) != _commuted(reduced):
-            stmts = folded
+        prepared = Body.coerce(prepare_body(stmts))
+        stmts = Body.coerce(fold_affine(fold_trivial_selects(prepared)))
+        if stmts != prepared:
             continue
-        ordered = _canonical_order(reduced)
-        if ordered == reduced:
+        ordered = _canonical_order(prepared)
+        stmts = drop_unread_values(ordered)
+        if stmts == ordered:
             return ordered
-        stmts = ordered
     from emmy.compiler.ir.stmt.base import pretty_body  # noqa: PLC0415
 
     raise ValueError("the normal form did not settle in eight rounds:\n" + "\n".join(pretty_body(stmts, "  ")))
 
 
-def _commuted(stmts: Body) -> Body:
-    """``stmts`` with every commutative operation's operands and every ``Affine``'s terms sorted: the fold lists them
-    in no order, so a fold that changed nothing agrees with its input up to that."""
-
-    def sort(stmt: Stmt) -> Stmt:
-        if isinstance(stmt, Assign) and stmt.op.commutative:
-            return replace(stmt, args=tuple(sorted(stmt.args)))
-        if isinstance(stmt, Affine):
-            terms = sorted(stmt.terms, key=lambda term: term[1])
-            return replace(stmt, args=tuple(arg for _, arg in terms), coefficients=tuple(c for c, _ in terms))
-        return stmt
-
-    return stmts.map(sort)
-
-
 def prepare_body(stmts: Body) -> Body:
-    """One round of the exact simplifications, then every value placed once (:func:`place_values`)."""
+    """The exact simplifications, then every value placed once (:func:`place_values`). Value placement feeds the two
+    steps ahead of it — a value placed outside its loop can leave two loops mergeable, two reads made one can leave a
+    predicate constant — and they feed it back, so the three run until the first two leave a placed body alone."""
     stmts = topo_sort_siblings(stmts)
     stmts = drop_size_one_free_axes(stmts)
     stmts = drop_size_one_reduce_axes(stmts)
@@ -117,9 +98,12 @@ def prepare_body(stmts: Body) -> Body:
     stmts = fold_trivial_selects(stmts)
     stmts = fold_constants(stmts)
     stmts = drop_unread_values(stmts)
-    stmts = merge_sibling_reduce_loops(stmts)
-    stmts = _canonicalize_exprs(Body.coerce(simplify_body(stmts)))
-    return place_values(stmts)
+    placed = None
+    while True:
+        simplified = _canonicalize_exprs(Body.coerce(simplify_body(merge_sibling_reduce_loops(stmts))))
+        if simplified == placed:
+            return placed
+        stmts = placed = place_values(simplified)
 
 
 # ---------------------------------------------------------------------------
@@ -407,21 +391,27 @@ def drop_unread_values(stmts: Body) -> Body:
     stmts = Body.coerce(stmts)
     if not stmts.writes:
         return stmts
-    reads: Counter[str] = Counter()
-    for stmt in stmts.iter():
-        own = set(stmt.defines())
-        reads.update(name for name in stmt.deps() if name not in own)
-        for expr in stmt.exprs():
-            reads.update(name for name in expr.free_vars() if name not in own)
+    # Dropping a value can leave its operands unread in turn: count and drop until a sweep drops nothing.
+    while True:
+        reads: Counter[str] = Counter()
+        for stmt in stmts.iter():
+            own = set(stmt.defines())
+            reads.update(name for name in stmt.deps() if name not in own)
+            for expr in stmt.exprs():
+                reads.update(name for name in expr.free_vars() if name not in own)
+        dropped = False
 
-    def drop(stmt: Stmt) -> Stmt | None:
-        if isinstance(stmt, _PURE) and not getattr(stmt, "carried", False) and not any(reads[name] for name in stmt.defines()):
-            return None
-        if stmt.nested() and not any(stmt.nested()):
-            return None
-        return stmt
+        def drop(stmt: Stmt, reads: Counter[str] = reads) -> Stmt | None:
+            nonlocal dropped
+            unread = isinstance(stmt, _PURE) and not getattr(stmt, "carried", False) and not any(reads[name] for name in stmt.defines())
+            if unread or (stmt.nested() and not any(stmt.nested())):
+                dropped = True
+                return None
+            return stmt
 
-    return stmts.map(drop)
+        stmts = stmts.map(drop)
+        if not dropped:
+            return stmts
 
 
 # ---------------------------------------------------------------------------
@@ -651,7 +641,7 @@ def _unify_siblings(body: Body) -> Body:
         # substitution must stop at a re-binding scope; these loops ARE the re-binding scopes.
         new_axis = replace(loop.axis, name=canonical, extent=extent)
         renamed = tuple(s.rename({loop.axis.name: canonical}) for s in loop.body)
-        stmts[idx] = replace(loop, axis=new_axis, body=renamed)
+        stmts[idx] = loop.replace(axis=new_axis, body=renamed)
 
     return Body(stmts)
 
@@ -769,7 +759,7 @@ def merge_sibling_reduce_loops(stmts: Body) -> Body:
 def _carried_out(body: Body) -> frozenset[str]:
     """The names a ``Loop`` or ``StridedLoop`` over ``body`` still binds after it CLOSES.
 
-    :meth:`Loop.render` declares the carriers of the immediate body ahead of the loop, so those —
+    :meth:`Loop`'s render declares the carriers of the immediate body ahead of the loop, so those —
     and states updated through conditions or a nested loop that does not seed its own — are the
     names a later statement can still read. Every other definition lives inside the block the loop closes,
     which is what makes it renamable when two loops merge.
@@ -860,20 +850,43 @@ def _merge_sibling_reduce_loops(body: Body) -> Body:
 # ---------------------------------------------------------------------------
 # Pass 6: simplify Exprs inside body Stmts (constant folding, identity collapse,
 # range-based comparison folding). The per-Expr rewrite logic lives on each
-# ``Expr`` subclass as ``simplify(ctx)``; the walk over Stmts is dispatched
-# in :mod:`.passes` (singledispatch + Stage introspection).
+# ``Expr`` subclass as ``simplify(ctx)``; the walk threads the loop axes' ranges.
 # ---------------------------------------------------------------------------
 
 
 def simplify_body(body: Body) -> Body:
-    """Simplify every Expr inside a body. Seeds ``SimplifyCtx`` from
-    ``Loop`` / ``StridedLoop`` / ``Tile`` axis extents as the walker descends.
-    Tile-IR Stmt registrations are loaded when ``tile.ir`` is imported."""
-    from emmy.compiler.ir.stmt.passes import simplify  # noqa: PLC0415
+    """Simplify every Expr inside a body, each under the value ranges of the loop axes around it."""
+    return tuple(_simplify(s, SimplifyCtx.empty()) for s in Body.coerce(body))
 
-    body = Body.coerce(body)
-    ctx = SimplifyCtx.empty()
-    return tuple(simplify(s, ctx) for s in body)
+
+def _simplify(stmt: Stmt, ctx: SimplifyCtx) -> Stmt:
+    stmt = map_exprs(stmt, lambda expr: expr.simplify(ctx))
+    if isinstance(stmt, Select):
+        return _decided(stmt)
+    if isinstance(stmt, (Loop, StridedLoop, Cond)):
+        inner = ctx if isinstance(stmt, Cond) else extend_simplify_ctx(ctx, stmt.axis)
+        return stmt.with_bodies(tuple(Body(_simplify(c, inner) for c in b) for b in stmt.nested()))
+    return stmt
+
+
+def _decided(s: Select) -> Select:
+    """``s`` without the branches its simplified predicates DECIDE.
+
+    Branches are ordered and the last one is the else, so a predicate that folds to false is
+    unreachable and one that folds to true is the else from there on. Keeping such a branch costs
+    far more than its own arithmetic: ``Select.deps`` names its value, so the tree-wide prune holds
+    the whole producer cone alive, and a reduce inside a cone nothing can select does not read the
+    output sweep -- which is what makes ``promoted_sweep`` refuse the grid and leave the kernel
+    sweeping every cell in one block. Fusing a scatter at a literal coordinate decides a branch this
+    way at every read it reaches, so this is the ordinary case, not a corner one.
+    """
+    kept: list[SelectBranch] = []
+    for branch in s.branches[:-1]:
+        if not isinstance(branch.select, Literal):
+            kept.append(branch)
+        elif branch.select.value:
+            return Select(name=s.name, branches=(*kept, branch))
+    return Select(name=s.name, branches=(*kept, s.branches[-1]))
 
 
 # ---------------------------------------------------------------------------
@@ -897,8 +910,6 @@ def place_values(stmts: Body) -> Body:
     scopes, as :func:`rename_ssa_sequential` leaves them.
     """
     from emmy.compiler.ir.stmt.leaves import Carry, Pre  # noqa: PLC0415
-    from emmy.compiler.ir.stmt.passes import rename_free  # noqa: PLC0415
-    from emmy.compiler.ir.stmt.subroutine import Call  # noqa: PLC0415
     from emmy.compiler.ir.stmt.values import distinct, value_numbers  # noqa: PLC0415
 
     body = distinct(stmts)
@@ -1071,7 +1082,7 @@ def place_values(stmts: Body) -> Body:
         shell = rename_free(stmt.with_bodies(tuple(Body() for _ in children)), alias)
         built = shell.with_bodies(tuple(Body(kept) for kept, _, _ in children))
         # The states the block still holds: a nested block that escaped settled its own at the scope it moved to.
-        exported = tuple(name for child in built.nested() for name in child.carried_names)
+        exported = tuple(name for child in built.nested() for name in child._carried_names)
         where = depth
         if not stmt.has_side_effects and not any(isinstance(member, Carry) for member in members):
             where = target(depth, set(free_names(built)), marks)
@@ -1289,39 +1300,41 @@ def _canonical_order(stmts: Body) -> Body:
     role = roles(stmts)
     numbering = value_numbers(stmts, lambda name: role.get(name, name))
 
+    def unlisted(stmt: Stmt) -> Stmt:
+        """A sum with its coefficients sorted: the order lists a sum's terms itself, so what it sorts by reads none of
+        that listing."""
+        return stmt.replace(coefficients=tuple(sorted(stmt.coefficients))) if isinstance(stmt, Affine) else stmt
+
     def shape(stmt: Stmt) -> str:
         """A statement's own shape with every name and buffer one placeholder: what tells a load from a store, a sum
         from a product, a plain index from a composite one, before any value or spelling is read."""
         children = stmt.nested()
         shell = stmt.with_bodies(tuple(Body() for _ in children)) if children else stmt
-        return repr(form(shell.rename(lambda _name: "__slot__").rename_buffers(_Slotted())))
+        return repr(form(unlisted(shell.rename(lambda _name: "__slot__").rename_buffers(_Slotted()))))
 
     def spelling(stmt: Stmt) -> str:
         """The whole subtree with names abstracted and buffers spelled: the tie-break between siblings of one shape,
-        so symmetric siblings order by the buffers they touch."""
-        return repr(form(stmt.rename(lambda _name: "__name__")))
+        so symmetric siblings order by the buffers they touch. Like the shape and the value, it reads nothing the
+        order itself decides — the subtree comes with its children ordered — so the order is final on its own
+        output."""
+        return repr(form(Body((stmt.rename(lambda _name: "__name__"),)).map(unlisted)))
 
     def ordered(body: Body) -> Body:
         body = Body.coerce(body)
+        rebuilt = Body(stmt.with_bodies(tuple(ordered(child) for child in stmt.nested())) if stmt.nested() else stmt for stmt in body)
         shapes = [shape(stmt) for stmt in body]
         ties = Counter(shapes)
         priorities = []
-        for stmt, own in zip(body, shapes, strict=True):
+        for stmt, built, own in zip(body, rebuilt, shapes, strict=True):
             children = stmt.nested()
             category = 2 if children and stmt.has_side_effects else int(not children)
-            spelled = spelling(stmt) if ties[own] > 1 else ""
+            spelled = spelling(built) if ties[own] > 1 else ""
             if children:
                 priorities.append((category, own, spelled, scope_tree(numbering, Body((stmt,)))))
             else:
                 number, params = numbering.numbers[id(stmt)]
                 priorities.append((category, own, spelled, number, repr(params)))
-        rebuilt = []
-        for stmt in body:
-            if stmt.nested():
-                stmt = stmt.with_bodies(tuple(ordered(child) for child in stmt.nested()))
-            rebuilt.append(stmt)
-        rebuilt = Body(rebuilt)
-        order = rebuilt.topological_permutation(ordering_constraints(rebuilt, effects=True), lambda index, _stmt: priorities[index])
+        order = rebuilt._topological_permutation(ordering_constraints(rebuilt, effects=True), lambda index, _stmt: priorities[index])
         return Body(rebuilt[index] for index in order)
 
     placed = ordered(stmts)
@@ -1338,10 +1351,10 @@ def _canonical_order(stmts: Body) -> Body:
 
     def listed(stmt: Stmt) -> Stmt:
         if isinstance(stmt, Assign) and stmt.op.commutative and len(stmt.args) > 1:
-            return replace(stmt, args=tuple(sorted(stmt.args, key=lambda name: (*operand.get(name, (3, "")), name))))
+            return stmt.replace(args=tuple(sorted(stmt.args, key=lambda name: (*operand.get(name, (3, "")), name))))
         if isinstance(stmt, Affine) and len(stmt.args) > 1:
             terms = sorted(stmt.terms, key=lambda term: (*operand.get(term[1], (3, "")), term[1], term[0]))
-            return replace(stmt, args=tuple(arg for _, arg in terms), coefficients=tuple(c for c, _ in terms))
+            return stmt.replace(args=tuple(arg for _, arg in terms), coefficients=tuple(c for c, _ in terms))
         return stmt
 
     result = result.map(listed)
@@ -1352,7 +1365,6 @@ def _canonical_order(stmts: Body) -> Body:
 
 def _canonicalize_exprs(stmts: Body, axes: tuple[str, ...] = ()) -> Body:
     """Canonicalize integer expressions using lexical binding order, never axis spelling."""
-    from emmy.compiler.ir.stmt.passes import map_exprs  # noqa: PLC0415
     from emmy.compiler.structural import form  # noqa: PLC0415
 
     commutative = frozenset({"+", "*", "==", "!=", "&&", "||", "&", "|", "^"})

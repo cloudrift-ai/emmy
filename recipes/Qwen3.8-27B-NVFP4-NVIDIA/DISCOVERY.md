@@ -1,5 +1,69 @@
 # Qwen3.8-27B-NVFP4 (NVIDIA) discovery
 
+## The gates of milestones 3, 4 and 5 (2026-11-06)
+
+The gates of the parity plan's milestones 3 (the rotary store's grid), 4 (prefill ends at the prompt's last token) and 5
+(the folded prefill attention), native only, on one rented x16 RTX 5090 (vast.ai; Gen5 x16; a container with a 46-CPU
+quota on a 384-CPU EPYC 9B14 host, driver 615.71, CUDA 13.1). Main is at `f33a86522`, after #1324 recorded the rope,
+row-pick, drafter-token and attention twins. The client, prompts and settings are the 2026-11-01 section's. Two
+reference packs ran on the same card, from the tree before 4 (#1311, `504165b13`) and the tree before 5 (#1318,
+`57fabd6e2`); neither is strict, since rows later PRs recorded are missing from their goldens. Main's column is a
+second pass on an idle host. The first pass, while pack exports compiled on the host, gave the same numbers within 4%
+(413 and 684 s at the two long prompts).
+
+On the card, `emmy eval golden --serving-config` deploys all 62 twins from the golden rows alone, the pack exports
+under strict evidence, and `emmy golden check` says current, 517 kernels.
+
+| | #1311 tree | #1318 tree | main | 2026-11-01 |
+|---|---|---|---|---|
+| TPOT / TTFT, 256-token prompt | 9.65 ms / 0.70 s | 9.31 ms / 0.17 s | 8.70 ms / 0.15 s | 9.8 ms / 0.71 s |
+| first token, 257-token prompt | 0.24 s | 0.19 s | 0.17 s | 0.24 s |
+| TPOT / TTFT, 7,680-token prompt | | | 9.76 ms / 4.81 s | 10.5 ms / 7.39 s |
+| TPOT / TTFT, 197,632-token prompt | | | 42.9 ms / 429 s | 26.5 ms / 698 s |
+| TPOT / TTFT, 261,632-token prompt | | | 50.6 ms / 687 s | 41.9 ms / 1,154 s |
+| drafts accepted at 256 / 7,680 / 197,632 / 261,632 | 71% at 256 | 73% at 256 | 76 / 75 / 61 / 67% | 70 / 66 / 88 / 57% |
+| device memory at rest | 30.7 GiB | 30.7 GiB | 27.9 GiB | 30.7 GiB |
+| GSM8K strict / flexible match | | | 0.730 / 0.750 | 0.720 / 0.755 |
+
+The gates:
+
+- **Milestone 4, met.** At 256 tokens, four 64-row chunks, the first token comes in 0.15 s against the 257-token
+  control's 0.17 s; the tree before it took 0.70 s, its control 0.24 s. The trees before and after #1313 give the same
+  64 greedy tokens on all four probes (`scripts/validate_serve.py`'s), on both models.
+- **Milestone 3, met.** In the captured step the rotary store takes 0.09 ms of a 64-row chunk, against 11.9 ms on
+  2026-11-01, and the chunk takes 38.6 ms at up to 4,096 positions, against 54.1 ms. The verify step's three-row store
+  takes 0.08 ms of the step, against about 0.6 ms.
+- **Milestone 5, missed.** The attention term of the 197,632-token first token is 300 s of GPU time, against at most
+  117 s (544 s on 2026-11-01), and the full window's first token is 687 s, against at most 450 s. A layer at 65,536
+  positions takes 3.66 ms against 6.7 ms: 1.8x, where the budget needs 4.6x. The cells within 4,096 positions did not
+  get slower. GSM8K holds, inside one standard error of the plugin lane's 0.720 / 0.770 on 2026-11-01.
+
+Where the time goes, from `nsys --cuda-graph-trace=node` on main (7,680 and 197,632 tokens; first token within 7% of
+the unprofiled runs), the median launch in milliseconds:
+
+| | 64-row chunk, up to 4,096 | 64-row chunk, 4,096 to 7,680 | 64-row chunk, all of 197,632 (mean) | verify step, 7,680 | verify step, 197,632 |
+|---|---|---|---|---|---|
+| rotary store | 0.09 | 0.09 | 0.09 | 0.08 | 0.08 |
+| attention | 3.07 | 5.98 | 97.2 | 2.90 | 75.1 |
+| the rest | 35.9 | 35.9 | 36.0 | 20.8 | 20.8 |
+| the launch, start to end | 38.6 | 41.5 | 132.9 | 23.4 | 95.6 |
+
+- **The 64-row fold takes the same split at every window.** Its rows were measured at 512 cached tokens, where the
+  4-way key split wins, so a chunk runs that split in 192 blocks however many positions it holds: 0.37 ms a layer at
+  4,096 positions, 3.66 ms at 65,536 and 12.3 ms at 197,568, where each block streams about 49,000 keys. Whether a
+  wider split wins at long windows was not measured. The fold also frees 2.8 GiB of device memory, the old route's
+  scores and probabilities.
+- **Decode attention got slower at long windows.** The verify step's three-row attention runs as a score cut and a
+  16-way key split of the rest, also picked at 512 cached tokens: 0.17 ms a layer at 7,700 positions and 4.3 ms at
+  197,632, where it is 75 ms of a 95.6 ms step. The drafted step at 197,632 took 73 ms on 2026-11-01, so TPOT there went
+  from 26.5 to 42.9 ms, and at the window's longest prompt from 41.9 to 50.6 ms. Milestone 6 re-spells this program.
+- **The host leaves 2.6 ms between a prompt's chunks** (median, nsys at 7,680 tokens on an idle host), about 8 s over
+  the 3,088 chunks of a 197,632-token prompt, and 3.7 ms while exports compiled on the host. Not investigated.
+- **Probe tokens.** Main and the #1318 tree part at tokens 46, 9, 5 and 4 of the four probes' 64; each pack repeats its
+  own tokens. Between them differ the fold and #1322's W4A4 head, which alone parted one probe at its second token.
+  Where they part, both continuations read well ("a young boy named Tom" against "a young man named Tom"). Native
+  returns no log-probabilities, so the margin at each parting point is not measured.
+
 ## Native, plugin and stock vLLM again, with concurrency and the chunk's kernels (2026-11-01)
 
 The protocol of the 2026-10-25 table below, on main at `ea17c0964`, one session on one rented x16 RTX 5090 (Gen5 x16, 57

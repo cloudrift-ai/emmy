@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from emmy.compiler.dtype import INTEGER_NAMES
+
 _FLOAT_DTYPES = frozenset({"f32", "f16", "f16x2", "f8e4m3", "f8e5m2"})
 _TYPE_NAME = {
     **{dtype: "float" for dtype in _FLOAT_DTYPES},
@@ -25,7 +27,6 @@ _HOST_NBYTES = {
     "unsigned long long": 8,
     "bool": 1,
 }
-_INTEGER_DTYPES = frozenset({"i16", "i32", "i64", "u8", "u16", "u32", "u64"})
 _INTEGER_NATIVE_OPS = frozenset(
     {
         "add",
@@ -83,7 +84,7 @@ class LoopRenderTarget:
     def has_native_op(self, op_name: str, dtype: str) -> bool:
         if dtype == "f32":
             return True
-        if dtype in _INTEGER_DTYPES:
+        if dtype in INTEGER_NAMES:
             return op_name in _INTEGER_NATIVE_OPS
         return False
 

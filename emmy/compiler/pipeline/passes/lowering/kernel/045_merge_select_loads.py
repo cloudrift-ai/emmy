@@ -28,8 +28,7 @@ from dataclasses import replace
 from emmy.compiler.graph import Node
 from emmy.compiler.ir.expr import Expr, Literal, TernaryExpr
 from emmy.compiler.ir.kernel import KernelOp
-from emmy.compiler.ir.stmt import Assign, Body, Let, Stmt
-from emmy.compiler.ir.stmt.leaves import Load, Select, SelectBranch
+from emmy.compiler.ir.stmt import Assign, Body, Let, Load, Select, SelectBranch, Stmt
 from emmy.compiler.pipeline import Pattern, RuleSkipped
 
 PATTERN = [Pattern("root", KernelOp)]
@@ -112,7 +111,7 @@ def _merge(stmts: list, position: int, uses: Counter) -> list | None:
             index = tuple(_select_index(cond, a, b) for a, b in zip(stmt.index, twin.index, strict=True))
             if any(defs.get(name, -1) >= i for e in index for name in e.free_vars()):
                 return None
-            merged[i] = replace(stmt, index=index)
+            merged[i] = stmt.replace(index=index)
         else:
             merged[i] = stmt
     out: list[Stmt] = []
@@ -124,16 +123,16 @@ def _merge(stmts: list, position: int, uses: Counter) -> list | None:
                 out.append(Assign(select.name, "copy", (a_name,)))
             elif wrapped == "a":
                 # Branch A's unary op stays where it was, now over the merged chain.
-                out.append(replace(select, branches=(first, SelectBranch(a_name, other.select))))
+                out.append(select.replace(branches=(first, SelectBranch(a_name, other.select))))
             else:
                 # Branch B's unary op is re-read off the merged chain, beside the select.
-                out.append(replace(stmts[defs[other.value]], args=(a_name,)))
-                out.append(replace(select, branches=(SelectBranch(a_name, cond), other)))
+                out.append(stmts[defs[other.value]].replace(args=(a_name,)))
+                out.append(select.replace(branches=(SelectBranch(a_name, cond), other)))
             continue
         if wrapped == "b" and i == defs.get(other.value):
             continue  # re-emitted beside the select, after the merged chain
         if wrapped == "a" and i == defs.get(first.value):
-            out.append(replace(stmt, args=(a_name,)))
+            out.append(stmt.replace(args=(a_name,)))
             continue
         out.append(merged.get(i, stmt))
     return out

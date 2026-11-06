@@ -69,6 +69,13 @@ excluded (names, hints, ambient I/O) — the contract is "include only
 bits that affect codegen output or dataflow semantics" so the
 autotuning cache doesn't bust on cosmetic edits.
 
+A class takes part in the two stored forms by what it supplies, never by what it is. On the wire (`compiler/wire.py`)
+a class is registered with its tag, its two wire functions (`to_wire`, `from_wire`) and the parts the wire rewrite
+goes into (`wire_parts`); the `Wire` mixin registers a subclass as it is defined and supplies all of them for a
+dataclass from its fields. In an identity, `structural.form` renders a class by its own `structural_form` when it has
+one and a dataclass by its fields; both go through `record_form`, the one rule that keeps a trailing field left at
+its default out of every key. Neither form asks a class to be a dataclass or to inherit a Python base.
+
 `Context` binds the effective precision decisions when a compile starts. Its key includes those decisions beside
 the target, compiler flags and cache mode, so an independent `FAST_EXP`, `F16_MMA_F32_ACC` or `FP8_MMA` override
 cannot read another regime's timings. Reconstructed contexts take the recorded pins explicitly; later environment
@@ -99,8 +106,7 @@ reader — the context key, the `H_fast_math` feature, the tune DB's regime, the
 - **Layer 1** — no GPU, no CUDA, no backend imports. Dialect ops
   implement `infer_output_shape(input_shapes)` and a numpy `forward()`.
 - **Layer 2** — operates on `Graph` + Loop IR only. Every `LoopOp`'s
-  `__post_init__` canonicalizes (`ir/stmt/normalize.py`) and simplifies
-  (`ir/stmt/passes.py`) its body.
+  `__post_init__` canonicalizes its body (`ir/stmt/normalize.py`).
 - **Layer 3** — backends are the only place GPU specifics live.
 
 ## Shared invariants

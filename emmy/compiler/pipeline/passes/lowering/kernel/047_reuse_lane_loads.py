@@ -24,8 +24,7 @@ from emmy.compiler.ir.expr import BinaryExpr, Interval, Literal, SimplifyCtx
 from emmy.compiler.ir.kernel import KernelOp
 from emmy.compiler.ir.kernel.ir import Tile
 from emmy.compiler.ir.sigma import Sigma
-from emmy.compiler.ir.stmt import Assign, Body, Stmt, StridedLoop
-from emmy.compiler.ir.stmt.leaves import Accum, Init, Let, Load, Select, Write
+from emmy.compiler.ir.stmt import Accum, Assign, Body, Init, Let, Load, Select, Stmt, StridedLoop, Write
 from emmy.compiler.pipeline import Pattern, RuleSkipped
 
 PATTERN = [Pattern("root", KernelOp)]
@@ -129,7 +128,7 @@ def _reuse(stmts: list[Stmt], written: frozenset[str], ctx: SimplifyCtx) -> list
             local = {name for s in Body((stmt,)).iter() for name in s.defines()}
             stmt = stmt.rewrite(lambda name, local=local: name if name in local else rename.get(name, name))
         if isinstance(stmt, Load) and stmt.is_scalar and stmt.input not in written and not stmt.carried:
-            stmt = replace(stmt, index=tuple(e.simplify(ctx) for e in stmt.index))
+            stmt = stmt.replace(index=tuple(e.simplify(ctx) for e in stmt.index))
             key = (stmt.input, stmt.dtype, tuple(_canonical(e) for e in stmt.index))
             if key in seen:
                 rename[stmt.name] = seen[key]

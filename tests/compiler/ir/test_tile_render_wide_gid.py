@@ -1,4 +1,4 @@
-"""``Tile.render`` widens the flat thread id past INT32_MAX.
+"""``Tile``'s render widens the flat thread id past INT32_MAX.
 
 A per-cell coop-reduce grid can exceed 2^31 total threads (gemma-4-12B's M=4096
 down-proj demote: 4096 * 3840 * 256 = 4.03e9); the 32-bit ``blockIdx.x * blockDim.x``
@@ -9,11 +9,12 @@ ride a 64-bit ``_gid`` exactly when the static iteration space needs it — and 
 
 from emmy.compiler.ir.axis import Axis
 from emmy.compiler.ir.kernel.ir import Tile
-from emmy.compiler.ir.stmt import Body, RenderCtx
+from emmy.compiler.ir.render import RenderCtx, render_stmt
+from emmy.compiler.ir.stmt import Body
 
 
 def _render(axes, **kw) -> str:
-    return "\n".join(Tile(axes=axes, body=Body(()), **kw).render(RenderCtx()))
+    return "\n".join(render_stmt(Tile(axes=axes, body=Body(()), **kw), RenderCtx()))
 
 
 def test_wide_gid_past_int32():

@@ -753,7 +753,7 @@ def _mask_streamed(body: list[Stmt], axis: str, offset: int, extent, stream_iden
             ident, masked = f"{s.value}__id", f"{s.value}__m"
             out.append(Init(name=ident, identity=s.op.identity, dtype=F32))
             out.append(Select(name=masked, branches=(SelectBranch(s.value, cond), SelectBranch(ident, Literal(1, "int")))))
-            out.append(replace(s, value=masked))
+            out.append(s.replace(value=masked))
         else:
             out.append(s)
     return out
@@ -1015,7 +1015,7 @@ def _tile_reduce_axis_transposed(
         # to the projection even when the whole block skips the reduction.
         accums = {stmt.name: stmt for stmt in strided.body if isinstance(stmt, Accum)}
         seeds = [Init(name=stmt.name, identity=stmt.op.identity, dtype=stmt.dtype or F32) for stmt in accums.values()]
-        strided = replace(strided, seed=False)
+        strided = strided.replace(seed=False)
         return seeds, [*sweep, Cond(cond=condition, body=(strided, *merge))], stores, lanes_axes, out_ax
     return [], [*sweep, strided, *merge], stores, lanes_axes, out_ax
 
@@ -1092,7 +1092,7 @@ def _strided_fold(op: Fold, rloop, plan, ctx: Ctx, lane: Axis | None) -> list[St
 
     # The reduce loop: ``reg`` interleaved accumulator chains (ILP), striding the axis by
     # ``coop·reg`` from the lane's start. The dissolved fold ``Accum``\\ s seed each copy's
-    # accumulator (``StridedLoop.render``).
+    # accumulator (``StridedLoop``'s render).
     # The shared iteration coordinates (grid + reduce + lane axis vars) and the symbolic
     # extent's runtime arg(s) (e.g. ``seq_len``) are common to every register copy — exclude
     # them from the per-copy SSA rename. ``copy_cell`` also protects nested loop coordinates.
@@ -1237,7 +1237,7 @@ def _tile_reduce_axis(
             dtype=cuda_name(ctx.inputs[staged].dtype),
         )
         n_grid = len(grid)
-        rloop = replace(rloop, body=Body(tuple(_restage_loads(list(rloop.body), staged, smem_name, n_grid, grid_vars))))
+        rloop = rloop.replace(body=Body(tuple(_restage_loads(list(rloop.body), staged, smem_name, n_grid, grid_vars))))
         tail_src = _restage_loads(tail_src, staged, smem_name, n_grid, grid_vars)
 
     fold = _scan_fold(op, rloop, plan, lane) if op.observe is not None else _strided_fold(op, rloop, plan, ctx, lane)
@@ -1267,8 +1267,8 @@ def _scan_fold(op: Fold, rloop: Loop, plan: Reduce, lane: Axis) -> list[Stmt]:
             if padded:
                 masked = f"{stmt.value}__scan_mask"
                 body.append(Select(name=masked, branches=(SelectBranch(stmt.value, valid), SelectBranch(empty, Literal(1, "int")))))
-                stmt = replace(stmt, value=masked)
-            stmt = replace(stmt, base=empty, axes=(chunk.name,), dtype=F32)
+                stmt = stmt.replace(value=masked)
+            stmt = stmt.replace(base=empty, axes=(chunk.name,), dtype=F32)
         body.append(stmt)
     body.append(
         WarpShuffle(state=state, state_b=op.combine.params[len(state) :], combine_states=tuple(op.combine.body), length=width, prefix=True)

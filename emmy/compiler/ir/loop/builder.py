@@ -25,10 +25,8 @@ level per insert. That is invisible on a small graph and decisive on a large one
 from __future__ import annotations
 
 from emmy.compiler.ir.axis import Axis
-from emmy.compiler.ir.stmt.analysis import Scope
-from emmy.compiler.ir.stmt.base import Stmt
-from emmy.compiler.ir.stmt.blocks import Loop
-from emmy.compiler.ir.stmt.body import Body
+from emmy.compiler.ir.loop.analysis import Scope
+from emmy.compiler.ir.stmt import Body, Loop, Stmt
 
 
 class _Scope:

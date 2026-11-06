@@ -8,7 +8,7 @@ its type and its use instead of its spelling (:func:`emmy.compiler.ir.stmt.value
 from __future__ import annotations
 
 from collections.abc import Mapping
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 
 from emmy.compiler.ir.stmt.base import Stmt
 from emmy.compiler.ir.stmt.body import Body, Memo
@@ -84,6 +84,6 @@ def _canonicalize_op_clusters(stmts: Body) -> Body:
                     changes[f.name] = rep
         if not changes:
             return s
-        return replace(s, **changes)
+        return s.replace(**changes)
 
     return stmts.map(fn)

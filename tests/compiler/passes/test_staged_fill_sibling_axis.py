@@ -27,8 +27,7 @@ from emmy.compiler.ir.expr import Expr, Literal, TernaryExpr, Var
 from emmy.compiler.ir.schedule import Tile, Work
 from emmy.compiler.ir.schedule.packing import PackedKBlockB
 from emmy.compiler.ir.schedule.staging import copied_b
-from emmy.compiler.ir.stmt import Load
-from emmy.compiler.ir.stmt.leaves import Assign
+from emmy.compiler.ir.stmt import Assign, Load
 from emmy.compiler.pipeline.passes.lowering.kernel._atom import _packed_operands, _slab_operands, _sync_operands, _tile_base
 from emmy.compiler.pipeline.passes.lowering.kernel._stage import CtaTile
 from emmy.compiler.tensor import Tensor

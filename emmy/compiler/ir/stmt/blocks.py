@@ -1,24 +1,19 @@
 """Block-structured ``Stmt`` subclasses — ``Loop``, ``StridedLoop``, ``Cond``.
 
 Each carries a child body (or two, for ``Cond``) and overrides
-``Stmt.nested`` so :func:`iter_body` can recurse uniformly. Tile-axis
-decode helpers (``_render_grid_axis_decode``, ``_render_thread_axis_decode``,
-``_body_uses_lane_warp``) live alongside and were consumed by the typed
-tile flavors of the (now demolished) tile IR.
+``Stmt.nested`` so a body walk can recurse uniformly.
 """
 
 from __future__ import annotations
 
-import math
 from dataclasses import dataclass
 from functools import cached_property
 
-from emmy.compiler.dtype import F32 as _F32
 from emmy.compiler.ir.axis import Axis
-from emmy.compiler.ir.expr import Expr, Literal, Var
-from emmy.compiler.ir.stmt.base import INDENT, RenderCtx, Stmt, _pad, pretty_body, render_body
+from emmy.compiler.ir.expr import Expr, Var
+from emmy.compiler.ir.stmt.base import INDENT, Stmt, pretty_body
 from emmy.compiler.ir.stmt.body import Body
-from emmy.compiler.ir.stmt.leaves import NEXT_STEP, Accum, Carry
+from emmy.compiler.ir.stmt.leaves import Accum, Carry
 
 # The loop-carried reduce accumulators — a Loop is a *reduce* loop iff its immediate
 # body holds one of these (the predicate `is_reduce` keys off, see below).
@@ -151,154 +146,16 @@ class Loop(Stmt):
             *(f"{bar}# commit {name}" for name in self.carries),
         ]
 
-    def render(self, ctx: RenderCtx) -> list[str]:
-
-        pad = _pad(ctx.indent)
-        out: list[str] = []
-        # Per-Loop ``<dtype> <acc> = identity;`` for each distinct ``Accum`` fold in the
-        # immediate body — the seed rides on the fold, derived here from ``op.identity`` at
-        # the fold's ``dtype`` (so fp32-over-fp16 declares ``float acc = 0.0f;``, a fp16
-        # ``max`` declares ``__half acc = __float2half(0.0f);``), no explicit ``Init``. This
-        # is the SINGLE seed-placement path, and ``Accum`` is the ONLY stmt it reads: a reduce
-        # ``Loop``'s body already holds the loose fold ``Accum``\\ s (dissolved at recognition),
-        # and a cross-partition combine reaches a statement position only by rendering itself to
-        # ``Accum``\\ s (``algebra.merge_stmts``), so no neutral element ever travels on a term and
-        # there is no second carrier kind to special-case. A nested fold re-declares per enclosing
-        # iteration (scope-local shadowing), so a same-named outer carrier is harmless. This
-        # is the *serial* schedule's placement; a cooperative / cross-CTA realization reads
-        # the same fold ``Accum``\\ s' ``op.identity`` to seed its partials.
-        seen: set[str] = set()
-        # A carried state is two slots of its cell shape: the one the previous step left, which
-        # every read sees, and the one this step defines, committed when the step ends. The serial
-        # placement again; a schedule that keeps one slot, or stores it elsewhere, reads the same state.
-        for name, shape in self.carries.items():
-            carry = next(c for c in self.body.carries if c.name == name)
-            extents = tuple(1 if isinstance(d, int) else int(d.extent.as_static()) for d in shape)
-            size = 1
-            for extent in extents:
-                size *= extent
-            # The seed is a constant in every cell or a buffer of the state's shape, copied whole.
-            if isinstance(carry.seed, str):
-                seed = f"{carry.seed}, {carry.seed} + {size}"
-            else:
-                seed = f"{size}, {ctx.identity_literal(carry.seed, carry.dtype)}"
-            for slot in (name, f"{name}{NEXT_STEP}"):
-                ctx.shapes[slot] = extents
-                out.append(f"{pad}std::vector<{ctx.type_name(carry.dtype)}> {slot}({seed});")
-            ctx.ssa_dtypes[name] = (carry.dtype or _F32).name
-        for s in self.body:
-            if isinstance(s, Accum) and s.name not in seen:
-                seen.add(s.name)
-                identity = s.op.identity
-                if identity is None:
-                    raise ValueError(f"Accum {s.name!r} op {s.op.name!r} has no identity")
-                if self.seed:
-                    out.append(f"{pad}{ctx.type_name(s.dtype)} {s.name} = {ctx.identity_literal(identity, s.dtype)};")
-                ctx.ssa_dtypes[s.name] = (s.dtype or _F32).name
-        var = self.axis.name
-        extent = _extent_c(self.axis, ctx)
-        if self.unroll:
-            out.append(f"{pad}#pragma unroll")
-        out.append(f"{pad}for (int {var} = 0; {var} < {extent}; {var}++) {{")
-        inner = ctx.child()
-        out.extend(render_body(self.body, inner))
-        out.extend(f"{_pad(inner.indent)}{name} = {name}{NEXT_STEP};" for name in self.carries)
-        out.append(f"{pad}}}")
-        return out
-
-
-def _body_uses_lane_warp(body: Body) -> bool:
-    """True iff the body needs the ``lane`` / ``warp`` helper vars.
-
-    The materializer emits ``lane`` / ``warp`` use sites alongside:
-    - ``WarpShuffle`` and ``TreeHalve`` (the per-warp partial gate
-      ``if (lane == 0)``, ``TreeHalve(..., tid_var="warp")``).
-    - ``SetMaxNReg`` (only emitted by the warp-specialized materializer
-      path, which wraps in ``Cond(warp < P, ...)`` — the Cond predicate
-      references ``Var("warp")`` directly so the helper must be in scope).
-
-    Checking for these three primitives covers every kernel that
-    references either helper.
-    """
-    # Local import — kernel-IR primitives sit in a downstream module.
-    from emmy.compiler.ir.kernel.ir import SetMaxNReg, TreeHalve, WarpShuffle
-
-    return bool(body.iter_of_type(WarpShuffle, TreeHalve, SetMaxNReg))
-
-
-def _extent_c(ax: Axis, ctx: RenderCtx) -> str:
-    """Render one axis extent as a C expression: literal int for static
-    ``Dim``, the symbolic name for ``Dim('seq_len')``. ``Dim.__str__``
-    already returns the bare ``value`` for those, so a plain ``str`` is
-    enough. A composite extent (the ceil-div block axis of a hint-driven
-    masked tile, ``(seq_len+31)//32``) must go through the C expr renderer
-    so ``//`` becomes ``/`` — ``str`` would leak the Python spelling."""
-    ext = ax.extent
-    if ext.is_static or isinstance(ext.expr, Var):
-        return str(ext)
-    # Parenthesize: the extent lands as a ``%`` / ``/`` operand in the decode
-    # (``idx % (seq_len+31)/32`` would otherwise mis-associate).
-    return f"({ext.expr.render(ctx)})"
-
-
-def _stride_c(axes, ctx: RenderCtx, *, wide: bool = False) -> str:
-    """Build a C expression for the product of axis extents — used as the
-    stride divisor in the grid-axis decode. ``1`` if ``axes`` is empty.
-    ``wide`` prefixes the FIRST factor with a ``(long long)`` cast so the
-    whole product evaluates in 64-bit — a symbolic-grid divisor like
-    ``seq_len * 6144 * 256`` overflows int32 while being *computed*, before
-    any promotion against a 64-bit dividend can help."""
-    if not axes:
-        return "1"
-    factors = [_extent_c(a, ctx) for a in axes]
-    if wide:
-        factors[0] = f"(long long){factors[0]}"
-    return " * ".join(factors)
-
-
-def _render_grid_axis_decode(axes: tuple[Axis, ...], idx_expr: str, ctx: RenderCtx, *, wide: bool = False) -> list[str]:
-    """Decode ``idx_expr`` (``blockIdx.x`` or ``threadIdx.x``) into per-axis ints.
-    ``wide`` keeps every stride divisor in 64-bit (see :func:`_stride_c`); the decoded
-    axis vars stay ``int`` — each is bounded by its extent."""
-    pad = _pad(ctx.indent)
-    if not axes:
-        return []
-    if len(axes) == 1:
-        return [f"{pad}int {axes[0].name} = {idx_expr};"]
-    decoded: list[str] = []
-    stride_axes: list[Axis] = []  # accumulated INNER axes (per-step product is their extents)
-    for ax in reversed(axes):
-        extent = _extent_c(ax, ctx)
-        if not stride_axes:
-            decoded.append(f"int {ax.name} = {idx_expr} % {extent};")
-        else:
-            decoded.append(f"int {ax.name} = ({idx_expr} / ({_stride_c(stride_axes, ctx, wide=wide)})) % {extent};")
-        stride_axes.append(ax)
-    outer = axes[0]
-    outer_stride = _stride_c(list(axes[1:]), ctx, wide=wide)
-    decoded[-1] = f"int {outer.name} = {idx_expr} / ({outer_stride});"
-    return [pad + line for line in reversed(decoded)]
-
-
-def _render_thread_axis_decode(axes: tuple[Axis, ...], ctx: RenderCtx) -> list[str]:
-    """Emit ``int <axis> = (tid / stride) % extent;`` per axis."""
-    pad = _pad(ctx.indent)
-    decoded: list[str] = []
-    stride_axes: list[Axis] = []
-    for ax in reversed(axes):
-        extent = _extent_c(ax, ctx)
-        if not stride_axes:
-            decoded.append(f"int {ax.name} = tid % {extent};")
-        else:
-            decoded.append(f"int {ax.name} = (tid / ({_stride_c(stride_axes, ctx)})) % {extent};")
-        stride_axes.append(ax)
-    if len(axes) == 1:
-        decoded = [f"int {axes[0].name} = tid;"]
-    else:
-        outer = axes[0]
-        outer_stride = _stride_c(list(axes[1:]), ctx)
-        decoded[-1] = f"int {outer.name} = tid / ({outer_stride});"
-    return [pad + line for line in reversed(decoded)]
+    def _rewrite(self, rename, sigma, axis_fn):  # noqa: ANN001, ANN202 — see ``Stmt.rewrite``
+        # Preserve the reduce ``role`` annotation through σ-offsets / axis-renames. The loop carries
+        # no algebra — the fold's ⊕ lives on the ``Fold`` node, whose own rewrite handler renames the
+        # stored combine in lockstep (``Lambda.rename``).
+        return Loop(
+            axis=axis_fn(self.axis),
+            body=tuple(c.rewrite(rename, sigma, axis_fn) for c in self.body),
+            unroll=self.unroll,
+            seed=self.seed,
+        )
 
 
 @dataclass(frozen=True)
@@ -360,6 +217,11 @@ class StridedLoop(Stmt):
         out = (self.start, self.step) if isinstance(self.step, Expr) else (self.start,)
         return (*out, self.end) if self.end is not None else out
 
+    def with_exprs(self, exprs: tuple[Expr, ...]) -> Stmt:
+        start, *rest = exprs
+        step = rest.pop(0) if isinstance(self.step, Expr) else self.step
+        return self.replace(start=start, step=step, end=rest[0] if rest else None)
+
     @property
     def is_reduce(self) -> bool:
         """A strided loop is a reduce-loop iff its immediate body contains a carrier (``Accum``) —
@@ -373,47 +235,20 @@ class StridedLoop(Stmt):
         head = f"{indent}for {self.axis.name} in {start}..{bound}:{step}{_source_suffix(self.axis)}"
         return [head, *pretty_body(self.body, indent + INDENT)]
 
-    def render(self, ctx: RenderCtx) -> list[str]:
-        """``for (int axis = start; axis < extent; axis += step)`` with the
-        same per-Loop accumulator-init prelude as ``Loop.render``."""
+    def _rewrite(self, rename, sigma, axis_fn):  # noqa: ANN001, ANN202 — see ``Stmt.rewrite``
+        def _expr(expr: Expr) -> Expr:
+            return sigma.apply(expr).rename(rename)
 
-        pad = _pad(ctx.indent)
-        out: list[str] = []
-        seen: set[str] = set()
-        for s in self.body:
-            if isinstance(s, Accum) and s.name not in seen:
-                seen.add(s.name)
-                identity = s.op.identity
-                if identity is None:
-                    raise ValueError(f"Accum {s.name!r} op {s.op.name!r} has no identity")
-                if self.seed:
-                    out.append(f"{pad}{ctx.type_name(s.dtype)} {s.name} = {ctx.identity_literal(identity, s.dtype)};")
-                ctx.ssa_dtypes[s.name] = (s.dtype or _F32).name
-        var = self.axis.name
-        start_str = self.start.render(ctx)
-        step_str = self.step.render(ctx) if isinstance(self.step, Expr) else str(self.step)
-        # ``_extent_c`` renders a symbolic bound (a cooperative reduce over a dynamic
-        # ``seq_len`` strides each lane to the runtime extent — the ``< seq_len`` bound is the
-        # masked tail, idle lanes folding the carrier identity) as the C name, a static one as
-        # its literal int.
-        if self.unroll:
-            out.append(f"{pad}#pragma unroll")
-        if self.end is not None:
-            # Hoist the override bound into the for-init (``<var>_end``, referenceable by body
-            # stmts — the staged prefetch clamp) so a non-literal bound is evaluated once, not
-            # per iteration / per use (the inline form measurably spills on the flash stream).
-            init = f"int {var} = {start_str}, {var}_end = {self.end.render(ctx)}"
-            out.append(f"{pad}for ({init}; {var} < {var}_end; {var} += {step_str}) {{")
-        else:
-            out.append(f"{pad}for (int {var} = {start_str}; {var} < {_extent_c(self.axis, ctx)}; {var} += {step_str}) {{")
-        inner = ctx.child()
-        if isinstance(self.start, Literal) and isinstance(self.step, Literal | int):
-            step = self.step.value if isinstance(self.step, Literal) else self.step
-            if isinstance(self.start.value, int) and isinstance(step, int) and (stride := math.gcd(self.start.value, step)):
-                inner.aligned[var] = stride
-        out.extend(render_body(self.body, inner))
-        out.append(f"{pad}}}")
-        return out
+        step = _expr(self.step) if isinstance(self.step, Expr) else self.step
+        return StridedLoop(
+            axis=axis_fn(self.axis),
+            start=_expr(self.start),
+            step=step,
+            body=tuple(c.rewrite(rename, sigma, axis_fn) for c in self.body),
+            unroll=self.unroll,
+            end=_expr(self.end) if self.end is not None else None,
+            seed=self.seed,
+        )
 
 
 @dataclass(frozen=True)
@@ -437,7 +272,7 @@ class Cond(Stmt):
 
     cond: Expr
     body: Body
-    else_body: Body = ()
+    else_body: Body = Body()
 
     def __post_init__(self) -> None:
 
@@ -459,6 +294,9 @@ class Cond(Stmt):
     def exprs(self) -> tuple[Expr, ...]:
         return (self.cond,)
 
+    def with_exprs(self, exprs: tuple[Expr, ...]) -> Stmt:
+        return self.replace(cond=exprs[0])
+
     def pretty(self, indent: str = "") -> list[str]:
         lines = [f"{indent}if ({self.cond.pretty()}):", *pretty_body(self.body, indent + INDENT)]
         if self.else_body:
@@ -466,14 +304,9 @@ class Cond(Stmt):
             lines.extend(pretty_body(self.else_body, indent + INDENT))
         return lines
 
-    def render(self, ctx: RenderCtx) -> list[str]:
-        pad = _pad(ctx.indent)
-        cond = self.cond.render(ctx)
-        inner = ctx.child()
-        body = render_body(self.body, inner)
-        out = [f"{pad}if ({cond}) {{", *body, f"{pad}}}"]
-        if self.else_body:
-            out[-1] = f"{pad}}} else {{"
-            out.extend(render_body(self.else_body, inner))
-            out.append(f"{pad}}}")
-        return out
+    def _rewrite(self, rename, sigma, axis_fn):  # noqa: ANN001, ANN202 — see ``Stmt.rewrite``
+        return Cond(
+            cond=sigma.apply(self.cond).rename(rename),
+            body=tuple(c.rewrite(rename, sigma, axis_fn) for c in self.body),
+            else_body=tuple(c.rewrite(rename, sigma, axis_fn) for c in self.else_body),
+        )
