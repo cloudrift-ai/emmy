@@ -186,7 +186,7 @@ def test_the_statement_module_exports_a_pinned_list() -> None:
     kinds = ["Stmt", "Load", "Assign", "Affine", "Accum", "Carry", "Pre", "Init", "Let", "Write", "Select", "SelectBranch"]
     kinds += ["ZeroPrologue", "Loop", "StridedLoop", "Cond"]
     containers = ["Body", "OutputSpec"]
-    functions = ["normalize_body", "canonicalize_identity", "free_names", "exposed_defines", "rename_free", "map_exprs", "binary"]
+    functions = ["normalize_body", "canonicalize_identity", "free_names", "exposed_defines", "rename_free", "binary"]
     functions += ["mask_select_predicate", "pretty_body", "parse_body", "ordering_constraints", "dtype_promote"]
     # Normalization steps a pass calls on its own, and the two kinds fusion assembles a region with.
     steps = ["fold_affine", "simplify_body", "prepare_body"]

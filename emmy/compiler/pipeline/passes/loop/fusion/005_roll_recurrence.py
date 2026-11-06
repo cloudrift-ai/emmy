@@ -31,7 +31,7 @@ from emmy.compiler.ir.base import ConstantOp, InputOp
 from emmy.compiler.ir.expr import BinaryExpr, Expr, Literal, Var, affine_form
 from emmy.compiler.ir.loop import LoopOp, UnfusableStmt
 from emmy.compiler.ir.sigma import Sigma
-from emmy.compiler.ir.stmt import Accum, Assign, Body, Carry, Let, Load, Loop, Pre, Select, SelectBranch, Stmt, Write, map_exprs
+from emmy.compiler.ir.stmt import Accum, Assign, Body, Carry, Let, Load, Loop, Pre, Select, SelectBranch, Stmt, Write
 from emmy.compiler.pipeline import Match, Pattern, RuleSkipped
 from emmy.compiler.pipeline.passes.loop.fusion._region import build_merged_region, live_outputs_of
 
@@ -105,7 +105,7 @@ def _literals_abstracted(body: Body) -> tuple[Body, tuple[int, ...]]:
         # element than the last is still the same step.
         if isinstance(stmt, Loop) and isinstance(stmt.axis.extent.expr, Literal) and type(stmt.axis.extent.expr.value) is int:
             return stmt.replace(axis=replace(stmt.axis, extent=Dim(held(stmt.axis.extent.expr.value))))
-        return map_exprs(stmt, lift)
+        return stmt.map_exprs(lift)
 
     return body.map(abstracted), tuple(literals)
 
@@ -277,7 +277,7 @@ def _advanced(abstract: Body, literals: tuple[int, ...], deltas: tuple[int, ...]
             return stmt.replace(axis=replace(stmt.axis, extent=Dim(widest)), body=stmt.body.map(mask(within)))
         if stmt.nested():
             return stmt
-        return map_exprs(stmt.rewrite(lambda name: name, sigma), lambda expr: expr.rebuild(fold))
+        return stmt.rewrite(lambda name: name, sigma).map_exprs(lambda expr: expr.rebuild(fold))
 
     return abstract.map(advance)
 

@@ -54,7 +54,7 @@ from emmy.compiler.ir.stmt.leaves import (
 )
 from emmy.compiler.ir.stmt.normalize import fold_affine, normalize_body, prepare_body, simplify_body
 from emmy.compiler.ir.stmt.order import ordering_constraints
-from emmy.compiler.ir.stmt.passes import map_exprs, rename_free
+from emmy.compiler.ir.stmt.passes import rename_free
 from emmy.compiler.ir.stmt.subroutine import Call, Subroutine
 from emmy.compiler.ir.stmt.text import parse_body, pretty_body
 
@@ -86,7 +86,6 @@ __all__ = [
     "fold_affine",
     "free_names",
     "kind",
-    "map_exprs",
     "mask_select_predicate",
     "normalize_body",
     "ordering_constraints",

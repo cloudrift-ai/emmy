@@ -235,29 +235,30 @@ clustered identity reads it by that name.
 `ir/stmt/` is the vocabulary all three IRs share, so the rest of the compiler uses it through one package and
 nothing else: no submodule path, no private name. The package exports the statement kinds, `Body` and `OutputSpec`,
 `normalize_body` and `canonicalize_identity`, a few functions over statements (`free_names`, `exposed_defines`,
-`rename_free`, `map_exprs`, `binary`, `mask_select_predicate`, `ordering_constraints`, `dtype_promote`), the text
+`rename_free`, `binary`, `mask_select_predicate`, `ordering_constraints`, `dtype_promote`), the text
 form (`pretty_body`, `parse_body`), three normalization steps a caller may run on its own (`fold_affine`, `simplify_body`,
 `prepare_body`), the two kinds fusion's body assembly in `ir/loop/` builds a region with (`Call`, `Subroutine`), and
 what a layer declares a kind of its own with (`kind`, `role`). The module itself imports expressions, axes,
 dtypes and the structural and wire forms: no op, tensor, graph, backend or pipeline.
 `tests/architecture/test_layering.py` pins the export list and both directions.
 
-**The statement protocol** is what a kind owes, all of it methods on the kind. The shared kinds state these by
-hand; a layer adds a kind of its own by declaring it (below), and nothing else:
+**The statement protocol** is what a kind owes, all of it methods on the kind. No kind writes them: the shared
+kinds are declared (below), and a layer adds a kind of its own by declaring it, and nothing else:
 
 | Group | Members |
 | --- | --- |
 | Traits | `pure`, `deps_deep`, `has_side_effects` |
-| Reads and writes | `deps`, `defines`, `external_reads`, `external_writes`, `local_decls`, `binds_axes` |
-| Structure | `nested` with `with_bodies`; `exprs` with `with_exprs` |
+| Reads and writes | `deps`, `defines`, `external_reads`, `external_writes`, `local_decls`, `bound_axes`, `binds_axes` |
+| Structure | `nested` with `with_bodies`; `exprs` with `map_exprs` |
 | Rebuilding | `_rewrite` (behind `rewrite`, `rename` and `substitute`), `rename_buffers`, `replace` |
 | Display and storage | the text (a kind of another layer: `pretty`); a body's text is its wire form |
 
-Each reading member has a rebuilding half: `with_bodies` takes what `nested` returned, `with_exprs` what `exprs`
-returned. `rewrite` is the one entry for renaming and substitution; it drops the substitutions a statement's own
-binder shadows and hands the rest to the kind's `_rewrite`. `exprs` lists every expression a kind holds and
-`with_exprs` rebuilds it from them. `tests/compiler/ir/stmt/test_protocol.py` checks that every kind in every layer
-states the protocol, and the rebuilding halves on an example of each shared kind and each Kernel IR kind.
+Each reading member has a rebuilding half: `with_bodies` takes what `nested` returned, and `map_exprs` applies a
+function to each expression `exprs` lists, in that order. `bound_axes` are the axes a kind binds and `binds_axes`
+the names it brings into scope, which are those axes' names and any other name it hoists. `rewrite` is the one
+entry for renaming and substitution; it drops the substitutions a statement's own binder shadows and hands the rest
+to the kind's `_rewrite`. `tests/compiler/ir/stmt/test_protocol.py` checks that every kind in every layer states the
+protocol, and the rebuilding halves on an example of each shared kind and each Kernel IR kind.
 
 **A declared kind** is a statement kind stated as data: a class under the `@kind` decorator whose fields carry a type
 and, through `role(...)`, what the field is to the rest of the compiler. The roles are names the statement defines,

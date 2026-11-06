@@ -40,8 +40,8 @@ from emmy.compiler.ir.stmt.base import Stmt, dtype_promote
 from emmy.compiler.ir.stmt.blocks import Cond, Loop, StridedLoop
 from emmy.compiler.ir.stmt.body import Body, exposed_defines, free_names
 from emmy.compiler.ir.stmt.leaves import Accum, Affine, Assign, Carry, Init, Let, Load, Select, SelectBranch, Write
-from emmy.compiler.ir.stmt.order import bound_axes, ordering_constraints, topological_sort
-from emmy.compiler.ir.stmt.passes import map_exprs, rename_free
+from emmy.compiler.ir.stmt.order import ordering_constraints, topological_sort
+from emmy.compiler.ir.stmt.passes import rename_free
 from emmy.compiler.ir.stmt.subroutine import Call
 
 __all__ = ["normalize_body"]
@@ -860,7 +860,7 @@ def simplify_body(body: Body) -> Body:
 
 
 def _simplify(stmt: Stmt, ctx: SimplifyCtx) -> Stmt:
-    stmt = map_exprs(stmt, lambda expr: expr.simplify(ctx))
+    stmt = stmt.map_exprs(lambda expr: expr.simplify(ctx))
     if isinstance(stmt, Select):
         return _decided(stmt)
     if isinstance(stmt, (Loop, StridedLoop, Cond)):
@@ -1196,7 +1196,7 @@ class _SequentialScope:
         axes = dict(self.inherited_axes)
         for old in stmt.binds_axes():
             axes[old] = self._fresh("a")
-        for axis in bound_axes(stmt):
+        for axis in stmt.bound_axes():
             for source in axis.sources():
                 if source.name not in self.sources:
                     self.sources[source.name] = self._fresh("p")
@@ -1390,8 +1390,8 @@ def _canonicalize_exprs(stmts: Body, axes: tuple[str, ...] = ()) -> Body:
         return expr
 
     def statement(stmt: Stmt) -> Stmt:
-        rewritten = map_exprs(stmt, expression)
-        bound = (*axes, *(axis.name for axis in bound_axes(stmt)))
+        rewritten = stmt.map_exprs(expression)
+        bound = (*axes, *(axis.name for axis in stmt.bound_axes()))
         return rewritten.with_bodies(tuple(_canonicalize_exprs(child, bound) for child in rewritten.nested()))
 
     return Body(statement(stmt) for stmt in stmts)
