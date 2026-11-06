@@ -529,21 +529,33 @@ def describe(case: Case) -> dict[str, str]:
 
 def raw_bodies(case: Case) -> list:
     """The bodies the lowering of ``case`` hands to normalization, each once, in the order they arrive: what a loop
-    op is constructed over, and what an identity is taken of (a tile op's loop body, synthesized from its term).
+    op is constructed over, and a tile op's loop body, synthesized from its term, which its identity is taken of.
     The material the normalization rules are stated over — a stored kernel is what one of these normalizes to."""
+    from functools import cached_property
+
     import emmy.compiler.ir.stmt as stmt
-    import emmy.compiler.ir.stmt.identity as identity
+    from emmy.compiler.ir.tile.ir import TileOp
 
     seen: dict[str, object] = {}
     normalize = stmt.normalize_body
+    synthesized = TileOp.loop_body
 
     def catching(body):  # noqa: ANN001, ANN202 — the normalization entry's signature
         seen.setdefault(str(body), body)
         return normalize(body)
 
-    stmt.normalize_body = identity.normalize_body = catching
+    def catching_loop_body(op):  # noqa: ANN001, ANN202 — the tile op's loop body, before its identity is taken
+        body = synthesized.func(op)
+        if body is not None:
+            seen.setdefault(str(body), body)
+        return body
+
+    stmt.normalize_body = catching
+    TileOp.loop_body = cached_property(catching_loop_body)
+    TileOp.loop_body.__set_name__(TileOp, "loop_body")
     try:
         lowered(case, case.context())
     finally:
-        stmt.normalize_body = identity.normalize_body = normalize
+        stmt.normalize_body = normalize
+        TileOp.loop_body = synthesized
     return list(seen.values())
