@@ -222,11 +222,13 @@ along different lowering paths still dedup in the tuning cache.
 **A statement is immutable data** — every concrete Loop-IR / Tile-IR / Kernel-IR statement (`Loop`, `Cond`, leaves,
 `Tile`, `Smem`, `Sync`, `CpAsyncCopy`, `TmaDescriptor`, …) has named read-only fields, compares by content and is
 hashable. To "edit" one, take a copy with `stmt.replace(field=value)`; nothing outside `ir/stmt/` calls
-`dataclasses.replace` on a statement. One pass still lists a statement's fields: the kernel loopify pass, which
-compares whole statements field by field to roll repeated ones into a loop. Ops, by contrast, are frozen and
-unhashable — rewrites replace the op and rebind its graph node. Op fields stored inside statements (e.g.
-`Assign.op`) must be lightweight value objects (e.g. `ElementwiseImpl`, not `ElementwiseOp`) so the surrounding
-statement stays hashable.
+`dataclasses.replace` on a statement or lists its fields, and a layering test watches a lowering for both. A kind
+states its fields to the wire form and the structural form only. One pass still lists them: the kernel loopify
+pass, off unless pinned, compares whole statements field by field to roll repeated ones into a loop. Ops, by
+contrast, are frozen and unhashable — rewrites replace the op and rebind its graph node. Op fields stored inside
+statements (e.g. `Assign.op`) must be lightweight value objects (e.g. `ElementwiseImpl`, not `ElementwiseOp`) so the
+surrounding statement stays hashable. A kind that applies one elementwise operation names that field `op`: the
+clustered identity reads it by that name.
 
 ## The statement module's interface
 

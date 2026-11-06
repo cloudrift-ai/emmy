@@ -61,29 +61,20 @@ def _digest_identity(stmts: Body, types: tuple[tuple[str, object], ...] | None) 
 
 
 def _canonicalize_op_clusters(stmts: Body) -> Body:
-    """Replace operation fields with their compute-unit cluster representative.
+    """Replace each statement's operation with its compute-unit cluster representative.
 
-    Generic dataclass field inspection covers every operation-bearing statement without coupling
-    identity to individual IR dialects. The result is digest material and must not be executed.
+    A kind that applies one elementwise operation holds it as ``op``, in every IR layer, so reading that one
+    attribute covers them without coupling identity to a dialect. The result is digest material and must not be
+    executed.
     """
-    from dataclasses import fields, is_dataclass  # noqa: PLC0415
-
     from emmy.compiler.ir.elementwise import ElementwiseImpl, cluster_representative  # noqa: PLC0415
 
     def fn(s: Stmt) -> Stmt:
         if isinstance(s, Affine):  # a sum is FMA-class work; which coefficients it carries is not the cluster's business
             return Assign(s.name, cluster_representative(ElementwiseImpl("add")), s.args, s.dtype)
-        if not is_dataclass(s):
-            return s
-        changes: dict[str, ElementwiseImpl] = {}
-        for f in fields(s):
-            val = getattr(s, f.name)
-            if isinstance(val, ElementwiseImpl):
-                rep = cluster_representative(val)
-                if rep != val:
-                    changes[f.name] = rep
-        if not changes:
-            return s
-        return s.replace(**changes)
+        op = getattr(s, "op", None)
+        if isinstance(op, ElementwiseImpl) and (rep := cluster_representative(op)) != op:
+            return s.replace(op=rep)
+        return s
 
     return stmts.map(fn)
