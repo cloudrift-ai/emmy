@@ -29,7 +29,6 @@ from emmy.compiler.ir.kernel.ir import (
 from emmy.compiler.ir.kernel.render import _WGMMA_PRELUDE, _wgmma_prelude, render_kernelop
 from emmy.compiler.ir.render import RenderCtx, render_stmt
 from emmy.compiler.ir.stmt import Body
-from emmy.compiler.ir.stmt.passes import rewrite
 
 _NS = (64, 128, 256)
 _DTYPES = ("f16", "bf16")
@@ -136,13 +135,13 @@ def test_rewrite_renames_ssa_names_and_keeps_buffers() -> None:
             WgmmaWait(),
         )
     )
-    renamed = body.map(lambda s: rewrite(s, lambda name: f"{name}_r"))
+    renamed = body.map(lambda s: s.rewrite(lambda name: f"{name}_r"))
     desc, fence, ss, rs, commit, wait = renamed
     assert desc == WgmmaDescriptor(name="bD_r", smem="K_s", smem_index=Var("k0_r") * 64, swizzle="B128", lbo_bytes=16, sbo_bytes=1024)
     assert ss.c_frags == tuple(f"{c}_r" for c in _frags(64)) and (ss.a_desc, ss.b_desc) == ("aD_r", "bD_r")
     assert (rs.a_frag, rs.a_desc, rs.b_desc) == ("a_r", None, "bD_r")
     assert (fence, commit, wait) == (WgmmaFence(), WgmmaCommit(), WgmmaWait())
-    assert body.map(lambda s: rewrite(s, lambda name: name)) == body
+    assert body.map(lambda s: s.rewrite(lambda name: name)) == body
 
 
 def test_the_prelude_joins_only_with_a_wgmma_cell() -> None:

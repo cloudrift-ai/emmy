@@ -42,8 +42,7 @@ from emmy.compiler.ir.address import split_pair
 from emmy.compiler.ir.axis import Axis
 from emmy.compiler.ir.expr import BinaryExpr, CastExpr, Expr, FuncCallExpr, Literal, SimplifyCtx, TernaryExpr, Var
 from emmy.compiler.ir.sigma import Sigma
-from emmy.compiler.ir.stmt import Body, Load, Loop, Write
-from emmy.compiler.ir.stmt.passes import simplify as _simplify_stmt
+from emmy.compiler.ir.stmt import Body, Load, Loop, Write, simplify_body
 
 
 def _no_divmod_on(e: Expr, name: str) -> bool:
@@ -115,7 +114,7 @@ def _fuse_pair(outer: Loop, inner: Loop, shapes: dict, between: tuple[Loop, ...]
     sigma = Sigma({p.name: BinaryExpr("//", f, lit), q.name: BinaryExpr("%", f, lit)})
     body = Body(tuple(s.substitute(sigma) for s in inner.body))
     fused = Loop(axis=Axis(q.name, big * small), body=body, unroll=outer.unroll or inner.unroll, seed=inner.seed)
-    fused = _simplify_stmt(fused, SimplifyCtx.empty())
+    (fused,) = simplify_body((fused,))
     if not _folds_clean(fused, q.name, shapes):
         return None
     for mid in reversed(between):
@@ -223,7 +222,7 @@ def _split_once(body: Body, names: frozenset[str]) -> Body | None:
                 sigma = Sigma({axis.name: Var(outer) * Literal(factor, "int") + Var(axis.name)})
                 inner = replace(stmt, axis=Axis(axis.name, factor), body=Body(s.substitute(sigma) for s in stmt.body))
                 split = Loop(Axis(outer, extent // factor), Body((inner,)), unroll=stmt.unroll, seed=stmt.seed)
-                split = _simplify_stmt(split, SimplifyCtx.empty())
+                (split,) = simplify_body((split,))
                 return Body((*body[:i], split, *body[i + 1 :]))
         inner = _split_once(stmt.body, names)
         if inner is not None:

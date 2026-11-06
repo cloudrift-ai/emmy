@@ -4,7 +4,6 @@ from emmy.compiler.ir.kernel.ir import TreeHalve
 from emmy.compiler.ir.render import RenderCtx, render_stmt
 from emmy.compiler.ir.sigma import Sigma
 from emmy.compiler.ir.stmt import Assign
-from emmy.compiler.ir.stmt.passes import _rewrite_kind
 
 _SUM = (Assign(name="acc0", op="add", args=("acc0", "acc0__o")),)
 
@@ -30,4 +29,4 @@ def test_a_block_slab_keeps_the_halving_tree() -> None:
 def test_a_rewrite_keeps_the_segment_layout() -> None:
     """The transposed combine halves segment by segment; losing ``inner`` in a rewrite folds across outputs."""
     halve = TreeHalve(bufs=("b",), state=("acc0",), state_b=("acc0__o",), combine_states=_SUM, length=4, tid_var="k_co", inner=("n_ln", 32))
-    assert _rewrite_kind(halve, lambda name: name, Sigma({}), lambda axis: axis).inner == ("n_ln", 32)
+    assert halve.rewrite(lambda name: name, Sigma({}), lambda axis: axis).inner == ("n_ln", 32)

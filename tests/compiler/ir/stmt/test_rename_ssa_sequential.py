@@ -69,8 +69,6 @@ def test_fold_combine_tracks_accum_rename() -> None:
     # cooperative combine reads a state name the renamed lift no longer defines (the M=1
     # cut-consumer's ``acc1``-undefined miscompile). A term is never a ``Body`` member, so the
     # rename reaches it through the rewrite registry directly.
-    from emmy.compiler.ir.stmt.passes import rewrite
-
     loop = Loop(
         axis=Axis(name="k0", extent=Dim(8)),
         body=Body(
@@ -83,7 +81,7 @@ def test_fold_combine_tracks_accum_rename() -> None:
     fold = fold_from_loop(loop)
     assert fold is not None
 
-    renamed = rewrite(fold, lambda name: f"{name}_r")
+    renamed = fold.rewrite(lambda name: f"{name}_r")
 
     assert renamed.combine.results == ("acc1_r",), renamed.combine.results
     assert renamed.exposes == ("acc1_r",)

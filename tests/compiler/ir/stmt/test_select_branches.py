@@ -16,8 +16,7 @@ from emmy.compiler.ir.axis import Axis
 from emmy.compiler.ir.expr import BinaryExpr, Expr, Literal, Var
 from emmy.compiler.ir.kernel import KernelOp
 from emmy.compiler.ir.render import RenderCtx, render_stmt
-from emmy.compiler.ir.stmt import Assign, Body, Load, Loop, Select, SelectBranch, Write
-from emmy.compiler.ir.stmt.normalize import simplify_body
+from emmy.compiler.ir.stmt import Assign, Body, Load, Loop, Select, SelectBranch, Write, simplify_body
 
 ELSE = Literal(True, "bool")
 

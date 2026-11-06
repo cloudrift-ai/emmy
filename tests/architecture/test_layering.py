@@ -145,6 +145,74 @@ def test_normalization_has_one_entry_point_and_no_orphan_transform() -> None:
     assert not orphans, "no normalization step calls these; a transform invoked only from outside is a pass:\n" + "\n".join(orphans)
 
 
+_STMT_PACKAGE = "emmy.compiler.ir.stmt"
+
+
+def _imports(path: pathlib.Path):
+    """Every ``(module, names)`` a file imports, function-local imports included."""
+    for node in ast.walk(ast.parse(path.read_text())):
+        if isinstance(node, ast.ImportFrom) and node.module:
+            yield node.module, [alias.name for alias in node.names]
+        elif isinstance(node, ast.Import):
+            for alias in node.names:
+                yield alias.name, []
+
+
+def test_the_statement_module_is_entered_through_its_package() -> None:
+    """Outside ``ir/stmt``, the compiler imports the statement package and its public names, nothing else.
+
+    A submodule path or a private name is a dependency on how the module is built. The package's export list is the
+    whole interface, so the module can be rearranged, or replaced, behind it.
+    """
+    stmt_dir = _REPO_ROOT / "emmy" / "compiler" / "ir" / "stmt"
+    offenders = []
+    for py in sorted((_REPO_ROOT / "emmy").rglob("*.py")):
+        if stmt_dir in py.parents:
+            continue
+        for module, names in _imports(py):
+            if module.startswith(_STMT_PACKAGE + ".") or (module == _STMT_PACKAGE and any(name.startswith("_") for name in names)):
+                offenders.append(f"{py.relative_to(_REPO_ROOT)}: from {module} import {', '.join(names)}")
+    assert not offenders, "import these from the statement package's public names:\n" + "\n".join(offenders)
+
+
+def test_the_statement_module_exports_a_pinned_list() -> None:
+    """The statement module's interface is this list. A name added here is a decision, not a convenience."""
+    import emmy.compiler.ir.stmt as stmt
+
+    kinds = ["Stmt", "Load", "Assign", "Affine", "Accum", "Carry", "Pre", "Init", "Let", "Write", "Select", "SelectBranch"]
+    kinds += ["ZeroPrologue", "Loop", "StridedLoop", "Cond"]
+    containers = ["Body", "OutputSpec"]
+    functions = ["normalize_body", "canonicalize_identity", "free_names", "exposed_defines", "rename_free", "map_exprs", "binary"]
+    functions += ["mask_select_predicate", "pretty_body", "ordering_constraints", "dtype_promote"]
+    # Normalization steps a pass calls on its own, and the body assembly fusion drives.
+    steps = ["fold_affine", "simplify_body"]
+    assembly = ["BodyAnalysis", "Scope", "Program", "Splicer", "NotSupported", "UnfusableStmt"]
+    assert sorted(stmt.__all__) == sorted(kinds + containers + functions + steps + assembly)
+
+
+def test_the_statement_module_depends_on_expressions_and_values_only() -> None:
+    """``ir/stmt`` is the vocabulary every IR shares, so it sits below all of them: it imports expressions, axes,
+    dtypes and the structural and wire forms. No op, tensor, graph, backend, renderer or pipeline."""
+    allowed = (
+        _STMT_PACKAGE,
+        "emmy.compiler.ir.expr",
+        "emmy.compiler.ir.axis",
+        "emmy.compiler.ir.sigma",
+        "emmy.compiler.ir.elementwise",
+        "emmy.compiler.dtype",
+        "emmy.compiler.dim",
+        "emmy.compiler.structural",
+        "emmy.compiler.wire",
+        "emmy.utils",
+    )
+    offenders = []
+    for py in sorted((_REPO_ROOT / "emmy" / "compiler" / "ir" / "stmt").glob("*.py")):
+        for module, _names in _imports(py):
+            if module.startswith("emmy") and not any(module == root or module.startswith(root + ".") for root in allowed):
+                offenders.append(f"{py.relative_to(_REPO_ROOT)}: {module}")
+    assert not offenders, "the statement module must not depend on these:\n" + "\n".join(offenders)
+
+
 # ---------------------------------------------------------------------------
 # Fix 1 firewall — keep the
 # assemble→TileOp boundary clean: every benched scheduling choice lives in the

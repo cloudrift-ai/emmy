@@ -13,7 +13,7 @@ from typing import TYPE_CHECKING
 
 from emmy.compiler.dtype import INTEGER_NAMES
 from emmy.compiler.ir.axis import Axis
-from emmy.compiler.ir.expr import Expr, Var
+from emmy.compiler.ir.expr import Expr
 from emmy.compiler.ir.sigma import Sigma
 from emmy.compiler.structural import Structural
 from emmy.compiler.wire import Wire
@@ -210,10 +210,7 @@ class Stmt(Structural, Wire):
             return lookup(name, name) if lookup is not None else names(name)
 
         def rename_expr(expr: Expr | None) -> Expr | None:
-            if expr is None:
-                return None
-            mapping = {name: Var(rename_name(name)) for name in expr.free_vars() if rename_name(name) != name}
-            return expr.substitute(mapping) if mapping else expr
+            return None if expr is None else expr.rename(rename_name)
 
         def rename_axis_tree(axis: Axis, seen: frozenset[int]) -> Axis:
             window = axis.window
@@ -250,20 +247,24 @@ class Stmt(Structural, Wire):
         sigma: Sigma = Sigma.IDENTITY,
         axis_fn: Callable[[Axis], Axis] = _axis_identity,
     ) -> Stmt:
-        """Return a copy with every SSA name (binding + dep refs) mapped
-        through ``rename_ssa``, every Expr subterm σ-substituted, and
-        every axis on a ``Loop`` / ``StridedLoop`` mapped through
-        ``axis_fn``. Subclasses without axes accept and ignore ``axis_fn``;
-        Loop-like subclasses thread it through their bodies.
+        """Rename, σ-substitute and axis-map this subtree: every SSA name (binding and reads) through
+        ``rename_ssa``, every Expr subterm through ``sigma``, every loop axis through ``axis_fn``. Prefer
+        :meth:`rename` / :meth:`substitute`, which say which of the two operations a caller means.
 
-        Per-stmt logic lives in :mod:`.passes` (singledispatch over Stmt
-        type + introspection walker for the Stage hierarchy). This method
-        is a thin shim so existing call sites (``s.rewrite(...)``) keep
-        working.
+        σ is applied HYGIENICALLY: the mapping for a name this stmt binds is dropped before its
+        subtree is rewritten, because that binder introduces a different variable. A RENAME is
+        unaffected — it travels through ``rename_ssa``/``axis_fn`` and renames the binder itself, which
+        is exactly why it may pass where a substitution may not.
+
+        Each kind states how its own fields rewrite in :meth:`_rewrite`; children go back through this entry.
         """
-        from emmy.compiler.ir.stmt.passes import rewrite  # noqa: PLC0415
+        shadowed = self.binds_axes() & sigma.mapping.keys() if sigma.mapping else ()
+        if shadowed:
+            sigma = Sigma({name: value for name, value in sigma.mapping.items() if name not in shadowed})
+        return self._rewrite(rename_ssa, sigma, axis_fn)
 
-        return rewrite(self, rename_ssa, sigma, axis_fn)
+    def _rewrite(self, rename, sigma, axis_fn):  # noqa: ANN001, ANN202 — see :meth:`rewrite`
+        raise NotImplementedError(f"rewrite not implemented for {type(self).__name__}")
 
     def nested(self) -> tuple[Body, ...]:
         """Child statement bodies for tree traversal.
@@ -340,6 +341,13 @@ class Stmt(Structural, Wire):
         the ``bound`` set threaded through :meth:`binds_axes`.
         """
         return ()
+
+    def with_exprs(self, exprs: tuple[Expr, ...]) -> Stmt:
+        """Write-side counterpart to :meth:`exprs`: this stmt with its expressions replaced by ``exprs``,
+        positionally. A kind that reports expressions and is met by an expression map overrides it."""
+        if exprs:
+            raise NotImplementedError(f"{type(self).__name__} cannot be rebuilt from mapped expressions")
+        return self
 
     def pretty(self, indent: str = "") -> list[str]:
         """Render this stmt as a list of indented lines.

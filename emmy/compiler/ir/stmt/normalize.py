@@ -33,13 +33,15 @@ from itertools import count, product
 import numpy as np
 
 from emmy.compiler.dtype import F32
+from emmy.compiler.ir.axis import extend_simplify_ctx
 from emmy.compiler.ir.expr import BinaryExpr, CastExpr, Expr, FuncCallExpr, Literal, SimplifyCtx, TernaryExpr, Var, affine_form
 from emmy.compiler.ir.sigma import Sigma
 from emmy.compiler.ir.stmt.base import Stmt, dtype_promote
 from emmy.compiler.ir.stmt.blocks import Cond, Loop, StridedLoop
 from emmy.compiler.ir.stmt.body import Body, free_names
-from emmy.compiler.ir.stmt.leaves import Accum, Affine, Assign, Carry, Init, Let, Load, Select, Write
+from emmy.compiler.ir.stmt.leaves import Accum, Affine, Assign, Carry, Init, Let, Load, Select, SelectBranch, Write
 from emmy.compiler.ir.stmt.order import bound_axes, ordering_constraints, topological_sort
+from emmy.compiler.ir.stmt.passes import map_exprs, rename_free
 from emmy.compiler.ir.stmt.subroutine import definitions
 
 __all__ = ["normalize_body"]
@@ -860,20 +862,43 @@ def _merge_sibling_reduce_loops(body: Body) -> Body:
 # ---------------------------------------------------------------------------
 # Pass 6: simplify Exprs inside body Stmts (constant folding, identity collapse,
 # range-based comparison folding). The per-Expr rewrite logic lives on each
-# ``Expr`` subclass as ``simplify(ctx)``; the walk over Stmts is dispatched
-# in :mod:`.passes` (singledispatch + Stage introspection).
+# ``Expr`` subclass as ``simplify(ctx)``; the walk threads the loop axes' ranges.
 # ---------------------------------------------------------------------------
 
 
 def simplify_body(body: Body) -> Body:
-    """Simplify every Expr inside a body. Seeds ``SimplifyCtx`` from
-    ``Loop`` / ``StridedLoop`` / ``Tile`` axis extents as the walker descends.
-    Tile-IR Stmt registrations are loaded when ``tile.ir`` is imported."""
-    from emmy.compiler.ir.stmt.passes import simplify  # noqa: PLC0415
+    """Simplify every Expr inside a body, each under the value ranges of the loop axes around it."""
+    return tuple(_simplify(s, SimplifyCtx.empty()) for s in Body.coerce(body))
 
-    body = Body.coerce(body)
-    ctx = SimplifyCtx.empty()
-    return tuple(simplify(s, ctx) for s in body)
+
+def _simplify(stmt: Stmt, ctx: SimplifyCtx) -> Stmt:
+    stmt = map_exprs(stmt, lambda expr: expr.simplify(ctx))
+    if isinstance(stmt, Select):
+        return _decided(stmt)
+    if isinstance(stmt, (Loop, StridedLoop, Cond)):
+        inner = ctx if isinstance(stmt, Cond) else extend_simplify_ctx(ctx, stmt.axis)
+        return stmt.with_bodies(tuple(Body(_simplify(c, inner) for c in b) for b in stmt.nested()))
+    return stmt
+
+
+def _decided(s: Select) -> Select:
+    """``s`` without the branches its simplified predicates DECIDE.
+
+    Branches are ordered and the last one is the else, so a predicate that folds to false is
+    unreachable and one that folds to true is the else from there on. Keeping such a branch costs
+    far more than its own arithmetic: ``Select.deps`` names its value, so the tree-wide prune holds
+    the whole producer cone alive, and a reduce inside a cone nothing can select does not read the
+    output sweep -- which is what makes ``promoted_sweep`` refuse the grid and leave the kernel
+    sweeping every cell in one block. Fusing a scatter at a literal coordinate decides a branch this
+    way at every read it reaches, so this is the ordinary case, not a corner one.
+    """
+    kept: list[SelectBranch] = []
+    for branch in s.branches[:-1]:
+        if not isinstance(branch.select, Literal):
+            kept.append(branch)
+        elif branch.select.value:
+            return Select(name=s.name, branches=(*kept, branch))
+    return Select(name=s.name, branches=(*kept, s.branches[-1]))
 
 
 # ---------------------------------------------------------------------------
@@ -897,7 +922,6 @@ def place_values(stmts: Body) -> Body:
     scopes, as :func:`rename_ssa_sequential` leaves them.
     """
     from emmy.compiler.ir.stmt.leaves import Carry, Pre  # noqa: PLC0415
-    from emmy.compiler.ir.stmt.passes import rename_free  # noqa: PLC0415
     from emmy.compiler.ir.stmt.subroutine import Call  # noqa: PLC0415
     from emmy.compiler.ir.stmt.values import distinct, value_numbers  # noqa: PLC0415
 
@@ -1352,7 +1376,6 @@ def _canonical_order(stmts: Body) -> Body:
 
 def _canonicalize_exprs(stmts: Body, axes: tuple[str, ...] = ()) -> Body:
     """Canonicalize integer expressions using lexical binding order, never axis spelling."""
-    from emmy.compiler.ir.stmt.passes import map_exprs  # noqa: PLC0415
     from emmy.compiler.structural import form  # noqa: PLC0415
 
     commutative = frozenset({"+", "*", "==", "!=", "&&", "||", "&", "|", "^"})

@@ -51,7 +51,7 @@ from emmy.compiler.ir.stmt.leaves import (
     binary,
     mask_select_predicate,
 )
-from emmy.compiler.ir.stmt.normalize import fold_affine, normalize_body
+from emmy.compiler.ir.stmt.normalize import fold_affine, normalize_body, simplify_body
 from emmy.compiler.ir.stmt.order import ordering_constraints
 from emmy.compiler.ir.stmt.passes import map_exprs, rename_free
 from emmy.compiler.ir.stmt.splicer import NotSupported, Program, Splicer, UnfusableStmt
@@ -93,4 +93,5 @@ __all__ = [
     "ordering_constraints",
     "pretty_body",
     "rename_free",
+    "simplify_body",
 ]

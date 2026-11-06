@@ -41,13 +41,6 @@ from emmy.compiler.ir.pure.lam import Lambda
 from emmy.compiler.ir.pure.twist import Recipe, Twist
 from emmy.compiler.ir.sigma import Sigma
 from emmy.compiler.ir.stmt import Accum, Affine, Assign, Body, Carry, Let, Load, Loop, OutputSpec, Pre, Select, Stmt, free_names
-
-# ``Body.structural_key()`` dispatches :func:`emmy.compiler.ir.stmt.passes.rewrite` over every
-# stmt for SSA / Expr / axis canonicalization. Register the structural node's handler here — an
-# INLINE node operand dispatches back through the same registry, so a stored computed operand
-# (the cone, flash's ``P``) canonicalizes like any other subtree.
-from emmy.compiler.ir.stmt.passes import _rename_ssa_vars_in_expr, _rewrite_kind
-from emmy.compiler.ir.stmt.passes import rewrite as _rewrite  # noqa: E402
 from emmy.utils import cached_method
 
 #: The symbolic extents of the program being compiled. The launch binds them, so a term reads one free — like a
@@ -1124,7 +1117,7 @@ class Fold:
             from emmy.compiler.ir.stmt import canonicalize_identity  # noqa: PLC0415
 
             if self.axis != pivot.axis:
-                x = _rewrite_kind(x, lambda name: name, Sigma({self.axis: Var(pivot.axis)}), lambda axis: axis)
+                x = x._rewrite(lambda name: name, Sigma({self.axis: Var(pivot.axis)}), lambda axis: axis)
             scope = tuple(axes.values())
             return canonicalize_identity(x.lower(axes=scope)) == canonicalize_identity(y.lower(axes=scope))
 
@@ -1177,8 +1170,10 @@ class Fold:
             extra_params = tuple(p for edge in extra_edges for p, e in bound if e is edge)
             if old != new:
                 extra_edges = tuple(
-                    _rewrite_kind(
-                        edge, lambda n: n, Sigma({old: Var(new)}), lambda a, old=old, new=new: replace(a, name=new) if a.name == old else a
+                    edge._rewrite(
+                        lambda n: n,
+                        Sigma({old: Var(new)}),
+                        lambda a, old=old, new=new: replace(a, name=new) if a.name == old else a,
                     )
                     for edge in extra_edges
                 )
@@ -1405,7 +1400,7 @@ class Fold:
             replace(
                 spec,
                 write=spec.write.rewrite(lambda name: spelled.get(name, name)),
-                when=None if spec.when is None else _rename_ssa_vars_in_expr(spec.when, lambda name: spelled.get(name, name)),
+                when=None if spec.when is None else spec.when.rename(lambda name: spelled.get(name, name)),
             )
             for spec in stores
         )
@@ -1655,60 +1650,61 @@ class Fold:
         place(self, [], None, root)
         return root.assemble()
 
+    #: A term rewrites as a statement does: the entry drops the mappings its own binder shadows.
+    rewrite = Stmt.rewrite
+
+    def _rewrite(self, rename, sigma, axis_fn):  # noqa: ANN001, ANN202 — see ``Stmt.rewrite``
+        # ONE handler for the one stored kind (the collapse retired the Map / Contraction arms —
+        # singledispatch keys on the stored type, and there is now only one). Every operand edge
+        # dispatches back through the registry; the fold renames its lift / monoid in lockstep
+        # (params track the operand names positionally, the combine'self results ARE the accumulator
+        # names). At zero axes there is no iteration var to rename and no monoid to thread.
+        # σ is applied hygienically to the term'self own binder: the reduce axis this term binds is a
+        # different variable from any σ key spelled alike, so its mapping is dropped for the subtree.
+        # Operand edges are terms, so they rewrite through this same registry, never the statement entry.
+        if self.axis is not None and sigma is not None and self.axis in sigma.mapping:
+            sigma = Sigma({name: value for name, value in sigma.mapping.items() if name != self.axis})
+        operands = tuple(edge._rewrite(rename, sigma, axis_fn) for edge in self.operands)
+        lead = (rename(self.axis),) if self.axis is not None else ()  # the iteration var — a slab has none
+
+        def _param(name: str) -> str:
+            # The environment tail may hold AXIS names, which rename through sigma (the body'self own
+            # coordinate substitution), not through the SSA renamer. Taking sigma'self answer when it has
+            # one keeps a param and every use of it in the body spelled the same way.
+            mapped = sigma.get(name) if sigma is not None else None
+            return mapped.name if isinstance(mapped, Var) else rename(name)
+
+        bound_count = len(lead) + len(self.bindings)
+        substitutions = {
+            p: mapped
+            for p in self.lift.params[bound_count:]
+            if sigma is not None and (mapped := sigma.get(p)) is not None and not isinstance(mapped, Var)
+        }
+        needed = set().union(*(expr.free_vars() for expr in substitutions.values()))
+        params = (*lead, *(_param(p) for p in self.lift.params[len(lead) : bound_count]))
+        params += tuple(_param(p) for p in self.lift.params[bound_count:] if p not in substitutions or p in needed)
+        body = Body(tuple(st.rewrite(rename, sigma, axis_fn) for st in self.lift.body))
+        results = tuple(rename(r) for r in self.lift.results)
+        # Only an expression substitution can introduce a coordinate absent from the original tail.
+        # A self-referential substitution still keeps its old binder in its original position.
+        lift = Lambda.closing(params, body, results) if substitutions else Lambda(params, body, results)
+        base = self.base.rename(rename) if self.base is not None else None
+        cells = tuple(_param(cell) for cell in self.cells)  # coordinates, like the environment tail
+        observe = None
+        if self.observe is not None:
+            # The observer renames in lockstep: param 0 tracks the axis, the state params track the
+            # combine'self renamed results, the body/results are ordinary SSA material.
+            observe = Lambda(
+                params=(*lead, *(rename(p) for p in self.observe.params[1:])),
+                body=Body(tuple(st.rewrite(rename, sigma, axis_fn) for st in self.observe.body)),
+                results=tuple(rename(r) for r in self.observe.results),
+            )
+        return replace(self, operands=operands, lift=lift, base=base, observe=observe, cells=cells)
+
 
 def _store_reads(spec: OutputSpec) -> tuple:
     """The expressions a boundary store reads: its coordinates and its guard."""
     return (*spec.write.index, *(() if spec.when is None else (spec.when,)))
-
-
-@_rewrite_kind.register
-def _(s: Fold, rename, sigma, axis_fn):
-    # ONE handler for the one stored kind (the collapse retired the Map / Contraction arms —
-    # singledispatch keys on the stored type, and there is now only one). Every operand edge
-    # dispatches back through the registry; the fold renames its lift / monoid in lockstep
-    # (params track the operand names positionally, the combine's results ARE the accumulator
-    # names). At zero axes there is no iteration var to rename and no monoid to thread.
-    # σ is applied hygienically to the term's own binder: the reduce axis this term binds is a
-    # different variable from any σ key spelled alike, so its mapping is dropped for the subtree.
-    # Operand edges are terms, so they rewrite through this same registry, never the statement entry.
-    if s.axis is not None and sigma is not None and s.axis in sigma.mapping:
-        sigma = Sigma({name: value for name, value in sigma.mapping.items() if name != s.axis})
-    operands = tuple(_rewrite_kind(edge, rename, sigma, axis_fn) for edge in s.operands)
-    lead = (rename(s.axis),) if s.axis is not None else ()  # the iteration var — a slab has none
-
-    def _param(name: str) -> str:
-        # The environment tail may hold AXIS names, which rename through sigma (the body's own
-        # coordinate substitution), not through the SSA renamer. Taking sigma's answer when it has
-        # one keeps a param and every use of it in the body spelled the same way.
-        mapped = sigma.get(name) if sigma is not None else None
-        return mapped.name if isinstance(mapped, Var) else rename(name)
-
-    bound_count = len(lead) + len(s.bindings)
-    substitutions = {
-        p: mapped
-        for p in s.lift.params[bound_count:]
-        if sigma is not None and (mapped := sigma.get(p)) is not None and not isinstance(mapped, Var)
-    }
-    needed = set().union(*(expr.free_vars() for expr in substitutions.values()))
-    params = (*lead, *(_param(p) for p in s.lift.params[len(lead) : bound_count]))
-    params += tuple(_param(p) for p in s.lift.params[bound_count:] if p not in substitutions or p in needed)
-    body = Body(tuple(_rewrite(st, rename, sigma, axis_fn) for st in s.lift.body))
-    results = tuple(rename(r) for r in s.lift.results)
-    # Only an expression substitution can introduce a coordinate absent from the original tail.
-    # A self-referential substitution still keeps its old binder in its original position.
-    lift = Lambda.closing(params, body, results) if substitutions else Lambda(params, body, results)
-    base = s.base.rename(rename) if s.base is not None else None
-    cells = tuple(_param(cell) for cell in s.cells)  # coordinates, like the environment tail
-    observe = None
-    if s.observe is not None:
-        # The observer renames in lockstep: param 0 tracks the axis, the state params track the
-        # combine's renamed results, the body/results are ordinary SSA material.
-        observe = Lambda(
-            params=(*lead, *(rename(p) for p in s.observe.params[1:])),
-            body=Body(tuple(_rewrite(st, rename, sigma, axis_fn) for st in s.observe.body)),
-            results=tuple(rename(r) for r in s.observe.results),
-        )
-    return replace(s, operands=operands, lift=lift, base=base, observe=observe, cells=cells)
 
 
 def _affine_classes(

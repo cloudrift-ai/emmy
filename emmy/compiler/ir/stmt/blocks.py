@@ -6,7 +6,7 @@ Each carries a child body (or two, for ``Cond``) and overrides
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from functools import cached_property
 
 from emmy.compiler.ir.axis import Axis
@@ -146,6 +146,17 @@ class Loop(Stmt):
             *(f"{bar}# commit {name}" for name in self.carries),
         ]
 
+    def _rewrite(self, rename, sigma, axis_fn):  # noqa: ANN001, ANN202 — see ``Stmt.rewrite``
+        # Preserve the reduce ``role`` annotation through σ-offsets / axis-renames. The loop carries
+        # no algebra — the fold'self ⊕ lives on the ``Fold`` node, whose own rewrite handler renames the
+        # stored combine in lockstep (``Lambda.rename``).
+        return Loop(
+            axis=axis_fn(self.axis),
+            body=tuple(c.rewrite(rename, sigma, axis_fn) for c in self.body),
+            unroll=self.unroll,
+            seed=self.seed,
+        )
+
 
 @dataclass(frozen=True)
 class StridedLoop(Stmt):
@@ -206,6 +217,11 @@ class StridedLoop(Stmt):
         out = (self.start, self.step) if isinstance(self.step, Expr) else (self.start,)
         return (*out, self.end) if self.end is not None else out
 
+    def with_exprs(self, exprs: tuple[Expr, ...]) -> Stmt:
+        start, *rest = exprs
+        step = rest.pop(0) if isinstance(self.step, Expr) else self.step
+        return replace(self, start=start, step=step, end=rest[0] if rest else None)
+
     @property
     def is_reduce(self) -> bool:
         """A strided loop is a reduce-loop iff its immediate body contains a carrier (``Accum``) —
@@ -218,6 +234,21 @@ class StridedLoop(Stmt):
         bound = self.end.pretty() if self.end is not None else self.axis.extent
         head = f"{indent}for {self.axis.name} in {start}..{bound}:{step}{_source_suffix(self.axis)}"
         return [head, *pretty_body(self.body, indent + INDENT)]
+
+    def _rewrite(self, rename, sigma, axis_fn):  # noqa: ANN001, ANN202 — see ``Stmt.rewrite``
+        def _expr(expr: Expr) -> Expr:
+            return sigma.apply(expr).rename(rename)
+
+        step = _expr(self.step) if isinstance(self.step, Expr) else self.step
+        return StridedLoop(
+            axis=axis_fn(self.axis),
+            start=_expr(self.start),
+            step=step,
+            body=tuple(c.rewrite(rename, sigma, axis_fn) for c in self.body),
+            unroll=self.unroll,
+            end=_expr(self.end) if self.end is not None else None,
+            seed=self.seed,
+        )
 
 
 @dataclass(frozen=True)
@@ -263,9 +294,19 @@ class Cond(Stmt):
     def exprs(self) -> tuple[Expr, ...]:
         return (self.cond,)
 
+    def with_exprs(self, exprs: tuple[Expr, ...]) -> Stmt:
+        return replace(self, cond=exprs[0])
+
     def pretty(self, indent: str = "") -> list[str]:
         lines = [f"{indent}if ({self.cond.pretty()}):", *pretty_body(self.body, indent + INDENT)]
         if self.else_body:
             lines.append(f"{indent}else:")
             lines.extend(pretty_body(self.else_body, indent + INDENT))
         return lines
+
+    def _rewrite(self, rename, sigma, axis_fn):  # noqa: ANN001, ANN202 — see ``Stmt.rewrite``
+        return Cond(
+            cond=sigma.apply(self.cond).rename(rename),
+            body=tuple(c.rewrite(rename, sigma, axis_fn) for c in self.body),
+            else_body=tuple(c.rewrite(rename, sigma, axis_fn) for c in self.else_body),
+        )

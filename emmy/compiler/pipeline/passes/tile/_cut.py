@@ -52,7 +52,6 @@ from emmy.compiler.ir.pure.lam import Lambda
 from emmy.compiler.ir.schedule.packing import match_packed_pair_node
 from emmy.compiler.ir.sigma import Sigma
 from emmy.compiler.ir.stmt import Affine, Assign, Body, Let, Load, Loop, Write
-from emmy.compiler.ir.stmt.passes import rewrite as rewrite_stmt
 from emmy.compiler.ir.tile import OutputSpec, Placement, TileOp
 from emmy.compiler.ir.tile.ops import (
     UnbindableProjection,
@@ -578,12 +577,12 @@ def _value_forms(seam: CutSite, axes: tuple) -> tuple[tuple, dict[str, Expr], di
     # norm), and that loop keeps its own variable.
     captured = Sigma({name: Var(spelled) for name, spelled in names.items()})
     cells = _stored_cells(seam.node, stored, strides)
-    body = Body(tuple(rewrite_stmt(stmt, lambda name: name, captured) for stmt in cells.lower(bound=frozenset(scoped), axes=axes)))
+    body = Body(tuple(stmt.rewrite(lambda name: name, captured) for stmt in cells.lower(bound=frozenset(scoped), axes=axes)))
     reads = _coordinate_reads(body, tuple(names.values()))
     if reads:
         sigma = _AbstractingSigma({name: Var(name) for name in reads})
         object.__setattr__(sigma, "_reads", reads)
-        body = Body(tuple(rewrite_stmt(stmt, lambda name: name, sigma) for stmt in body))
+        body = Body(tuple(stmt.rewrite(lambda name: name, sigma) for stmt in body))
     forms = []
     for exposed in seam.node.exposes:
         identity = canonicalize_identity(_pruned(body, frozenset((exposed,))))
@@ -728,10 +727,10 @@ def _row_form(seam: CutSite, name: str, row: Expr, common: tuple[str, ...], axes
     node = _channels(seam.node, (name,)) if len(seam.node.exposes) > 1 else seam.node
     scoped = tuple(axis.name for axis in seam.axes if axis.name in node.free_axes)
     captured = Sigma({axis: Var(f"_s{i}") for i, axis in enumerate(common)})
-    body = Body(tuple(rewrite_stmt(stmt, lambda value: value, captured) for stmt in node.lower(bound=frozenset(scoped), axes=axes)))
+    body = Body(tuple(stmt.rewrite(lambda value: value, captured) for stmt in node.lower(bound=frozenset(scoped), axes=axes)))
     sigma = _AbstractingRow()
     object.__setattr__(sigma, "_row", row)
-    body = Body(tuple(rewrite_stmt(stmt, lambda value: value, sigma) for stmt in body))
+    body = Body(tuple(stmt.rewrite(lambda value: value, sigma) for stmt in body))
     if any(row.free_vars() & expr.free_vars() for stmt in body.iter() for expr in stmt.exprs()):
         return None
     identity = canonicalize_identity(_pruned(body, frozenset((name,))))
@@ -1629,11 +1628,11 @@ def _stored_cells(produced: Fold, axes: tuple, strides: dict[str, tuple[int, int
             continue
         d, c = stride
         if c == 1:
-            produced = rewrite_stmt(produced, lambda name: name, Sigma({axis.name: Var(axis.name) * d}))
+            produced = produced.rewrite(lambda name: name, Sigma({axis.name: Var(axis.name) * d}))
             continue
         folding = _FoldingSigma({axis.name: (Var(axis.name) / c) * d + BinaryExpr("%", Var(axis.name), Literal(c, "int"))})
         object.__setattr__(folding, "_ctx", SimplifyCtx(ranges={axis.name: Interval(0, axis.extent.as_static() - 1)}))
-        produced = rewrite_stmt(produced, lambda name: name, folding)
+        produced = produced.rewrite(lambda name: name, folding)
     return produced
 
 
@@ -1674,7 +1673,7 @@ def _substitute_and_fold(produced: Fold, name: str, sigma: Sigma, ctx: SimplifyC
     folding = _FoldingSigma(dict(sigma.mapping))
     object.__setattr__(folding, "_ctx", ctx)
     operands = tuple(_substitute_and_fold(edge, name, sigma, ctx) for edge in produced.operands)
-    body = Body(rewrite_stmt(stmt, lambda n: n, folding) for stmt in produced.lift.body)
+    body = Body(stmt.rewrite(lambda n: n, folding) for stmt in produced.lift.body)
     lift = Lambda.closing(tuple(p for p in produced.lift.params if p != name), body, produced.lift.results)
     return replace(produced, operands=operands, lift=lift)
 
