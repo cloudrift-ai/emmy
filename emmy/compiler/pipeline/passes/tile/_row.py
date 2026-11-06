@@ -26,7 +26,6 @@ from emmy.compiler.ir.pure import Fold
 from emmy.compiler.ir.pure.lam import Lambda
 from emmy.compiler.ir.sigma import Sigma
 from emmy.compiler.ir.stmt import Body, Load, Loop, Stmt, Write
-from emmy.compiler.ir.stmt.passes import rewrite
 from emmy.compiler.ir.tile import TileOp
 from emmy.compiler.ir.tile.ops import UnbindableProjection, output_regions
 from emmy.compiler.ir.tile.path import sites
@@ -77,7 +76,7 @@ def _bind(body: Body, axis: Axis, position: int, shapes: dict) -> Body:
             return stmt
         replaced = list(index)
         replaced[position] = Var(axis.name)
-        return replace(stmt, index=tuple(replaced))
+        return stmt.replace(index=tuple(replaced))
 
     return body.map(rebind)
 
@@ -241,7 +240,7 @@ def _paired_by_loads(tile: TileOp) -> TileOp:
     )
     sweep = tuple(axes[name] for name in dict.fromkeys(order) if name in respelled_outer - grid)
     specs = tuple(
-        replace(spec, write=replace(spec.write, index=tuple(sigma.apply(expr) for expr in spec.write.index)), sweep=sweep)
+        replace(spec, write=spec.write.replace(index=tuple(sigma.apply(expr) for expr in spec.write.index)), sweep=sweep)
         if spec in stores
         else spec
         for spec in tile.output_specs
@@ -315,7 +314,7 @@ def _recoordinated(node: Fold, sigma: FoldingSigma) -> Fold:
     whole term would be dropped as shadowed exactly where it has work to do: each lift is re-closed instead, the
     substituted names leaving its params and the names it now reads appended."""
     operands = tuple(_recoordinated(edge, sigma) for edge in node.operands)
-    body = Body(rewrite(stmt, lambda name: name, sigma) for stmt in node.lift.body)
+    body = Body(stmt.rewrite(lambda name: name, sigma) for stmt in node.lift.body)
     lift = Lambda.closing(tuple(param for param in node.lift.params if param not in sigma.mapping), body, node.lift.results)
     return replace(node, operands=operands, lift=lift)
 
@@ -507,9 +506,7 @@ def _align_owned_sweeps(piece: TileOp) -> TileOp:
         if substitution is None:
             return piece
         substitutions[sweep] = substitution
-    operands = tuple(
-        rewrite(region, lambda name: name, substitutions[sweep]) for (region, _, _), sweep in zip(regions, sweeps, strict=True)
-    )
+    operands = tuple(region.rewrite(lambda name: name, substitutions[sweep]) for (region, _, _), sweep in zip(regions, sweeps, strict=True))
     specs = tuple(replace(spec, write=spec.write.substitute(substitutions[spec.sweep]), sweep=anchor) for spec in piece.output_specs)
     aligned = replace(piece, op=replace(op, operands=operands), output_specs=specs)
     return aligned if all(not spec.sweep for spec in aligned.output_specs) else piece

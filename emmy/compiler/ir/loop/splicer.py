@@ -62,12 +62,11 @@ from __future__ import annotations
 
 import logging
 import math
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 
 from emmy.compiler.ir.expr import BinaryExpr, Expr, Interval, Literal, SimplifyCtx, Var, affine_form
+from emmy.compiler.ir.loop.assembly import NotSupported, Program, Splicer, UnfusableStmt
 from emmy.compiler.ir.loop.ir import Load, Loop, LoopOp, Write
-from emmy.compiler.ir.stmt.splicer import NotSupported, Program, Splicer, UnfusableStmt
-from emmy.compiler.ir.stmt.splicer import observes_running_accumulator as _observes_running_accumulator
 
 logger = logging.getLogger(__name__)
 
@@ -89,7 +88,7 @@ def observes_running_accumulator(op: LoopOp) -> bool:
     """Whether a Write of ``op`` observes an accumulator before its reduce loop completes — an
     ordered prefix output (a scan) no merged body preserves, so the loop is a kernel of its own."""
     meta = op.analyze()
-    return any(_observes_running_accumulator(meta, write, scope) for write, scope in meta.writes)
+    return any(meta.observes_running_accumulator(write, scope) for write, scope in meta.writes)
 
 
 # ---------------------------------------------------------------------------
@@ -437,7 +436,7 @@ def _retarget_equivalent_output(graph, op: LoopOp, cluster: _OutputEquivalenceCl
             coordinates = _unflatten(flat.simplify(ctx), shape, ctx)
             if coordinates is None:
                 return None
-        replacement[id(write)] = replace(write, output=output, index=(*write.index[:leading], *coordinates))
+        replacement[id(write)] = write.replace(output=output, index=(*write.index[:leading], *coordinates))
 
     return LoopOp(
         body=op.body.map(lambda stmt: replacement.get(id(stmt), stmt)),

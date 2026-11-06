@@ -56,7 +56,7 @@ def test_a_slab_declares_the_coordinates_it_indexes() -> None:
 def test_a_slab_lowers_to_exactly_its_load() -> None:
     """Wrapping is a declaration, not a layer: the emitted statements are unchanged."""
     load = Load(name="l", input="x", index=(Var("m"), Var("k")))
-    assert Fold.slab(load).lower(axes=SCOPE) == (load,)
+    assert Fold.slab(load).lower(axes=SCOPE) == Body((load,))
 
 
 def test_a_slab_does_not_reduce() -> None:

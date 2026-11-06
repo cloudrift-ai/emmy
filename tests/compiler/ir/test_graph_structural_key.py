@@ -16,8 +16,8 @@ from emmy.compiler.ir.axis import Axis
 from emmy.compiler.ir.base import ConstantOp, InputOp
 from emmy.compiler.ir.expr import Var
 from emmy.compiler.ir.loop.ir import LoopOp
-from emmy.compiler.ir.stmt import Assign, Load, Loop, Write
-from emmy.compiler.ir.stmt.body import Body
+from emmy.compiler.ir.render import render_stmt
+from emmy.compiler.ir.stmt import Assign, Body, Load, Loop, Write
 
 # ---------------------------------------------------------------------------
 # Builders
@@ -296,7 +296,7 @@ def test_structural_key_handles_fragment_repack() -> None:
         b = FragmentRepack(frag="b", srcs=("c",), fragment_layout=layout, part=3, role="b")
         renamed = b.rewrite(lambda name: "new_" + name)
         assert renamed.role == "b" and renamed.part == 3
-        assert "emmy_c_to_b" in renamed.render(RenderCtx())[0]
+        assert "emmy_c_to_b" in render_stmt(renamed, RenderCtx())[0]
         Body((renamed,)).structural_key()
 
 

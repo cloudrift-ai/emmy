@@ -10,7 +10,8 @@ from emmy.compiler.dtype import F32, U32
 from emmy.compiler.graph import Node, Tensor
 from emmy.compiler.ir.expr import Literal
 from emmy.compiler.ir.kernel import KernelOp
-from emmy.compiler.ir.stmt import Assign, Body, Load, RenderCtx, Write
+from emmy.compiler.ir.render import RenderCtx, render_stmt
+from emmy.compiler.ir.stmt import Assign, Body, Load, Write
 
 
 @pytest.mark.parametrize(
@@ -27,15 +28,15 @@ from emmy.compiler.ir.stmt import Assign, Body, Load, RenderCtx, Write
 )
 def test_integer_assign_renders_natively(op, symbol):
     ctx = RenderCtx(ssa_dtypes={"a": "u32", "b": "u32"})
-    line = Assign(name="result", op=op, args=("a", "b")).render(ctx)[0]
+    line = render_stmt(Assign(name="result", op=op, args=("a", "b")), ctx)[0]
     assert line == f"    unsigned int result = a {symbol} b;"
     assert ctx.ssa_dtypes["result"] == "u32"
 
 
 def test_f32_bitwise_names_remain_logical_masks():
     ctx = RenderCtx(ssa_dtypes={"a": "f32", "b": "f32"})
-    assert Assign(name="both", op="bitwise_and", args=("a", "b")).render(ctx) == ["    float both = a && b;"]
-    assert Assign(name="either", op="bitwise_or", args=("a", "b")).render(ctx) == ["    float either = a || b;"]
+    assert render_stmt(Assign(name="both", op="bitwise_and", args=("a", "b")), ctx) == ["    float both = a && b;"]
+    assert render_stmt(Assign(name="either", op="bitwise_or", args=("a", "b")), ctx) == ["    float either = a || b;"]
 
 
 @pytest.mark.parametrize(
@@ -105,17 +106,17 @@ def test_an_integer_constant_load_keeps_its_dtype_when_it_folds_to_a_literal():
     and a shift amount folded to f32 sends its shift down the f32 path, which has no `<<`."""
     ctx = RenderCtx(literal_constants={"shift_c": 4.0})
     load = Load(name="shift", input="shift_c", index=(Literal(0, "int"),), dtype=U32)
-    assert load.render(ctx) == ["    unsigned int shift = 4;"]
+    assert render_stmt(load, ctx) == ["    unsigned int shift = 4;"]
     assert ctx.ssa_dtypes["shift"] == "u32"
     ctx.ssa_dtypes["odd"] = "u32"
-    assert Assign(name="hi", op="left_shift", args=("odd", "shift")).render(ctx) == ["    unsigned int hi = odd << shift;"]
+    assert render_stmt(Assign(name="hi", op="left_shift", args=("odd", "shift")), ctx) == ["    unsigned int hi = odd << shift;"]
 
 
 def test_a_float_constant_load_still_binds_as_a_float_literal():
     """The float case is untouched — every kernel reading a scalar float constant renders as before."""
     ctx = RenderCtx(literal_constants={"scale_c": 0.125})
     load = Load(name="scale", input="scale_c", index=(Literal(0, "int"),), dtype=F32)
-    assert load.render(ctx) == ["    float scale = 0.125f;"]
+    assert render_stmt(load, ctx) == ["    float scale = 0.125f;"]
     assert ctx.ssa_dtypes["scale"] == "f32"
 
 
@@ -123,7 +124,7 @@ def test_the_literal_prefold_leaves_an_integer_constant_named():
     """`render_body`'s pre-pass drops a literal-constant Load and inlines its value at every use
     site — as a FLOAT literal, since that is what its map holds. An integer constant stays out of
     it and keeps its named local, or the bit operation reading it lands back in f32."""
-    from emmy.compiler.ir.stmt.base import render_body
+    from emmy.compiler.ir.render import render_body
 
     ctx = RenderCtx(literal_constants={"shift_c": 4.0, "scale_c": 0.125})
     body = Body(

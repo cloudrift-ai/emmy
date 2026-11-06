@@ -37,6 +37,6 @@ def rewrite(root: Node) -> KernelOp | None:
 def _lower_exp(stmt: Stmt) -> Stmt:
     if isinstance(stmt, RegStore) and stmt.epilogue is not None:
         # The store's lambda has its own SSA scope; it is not a nested statement body.
-        stmt = replace(stmt, epilogue=replace(stmt.epilogue, body=stmt.epilogue.body.map(_lower_exp)))
+        stmt = stmt.replace(epilogue=stmt.epilogue.map(_lower_exp))
     op = getattr(stmt, "op", None)
-    return replace(stmt, op=_FAST) if isinstance(op, ElementwiseImpl) and op.name == "exp" else stmt
+    return stmt.replace(op=_FAST) if isinstance(op, ElementwiseImpl) and op.name == "exp" else stmt

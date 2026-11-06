@@ -7,7 +7,7 @@ by 0, 1, ..., N-1. The CUDA backend can emit those as a single
 ``float<N>`` / ``__half2`` reinterpret-cast read followed by N ``.x/.y/.z/.w``
 unpacks. Folding the run into one ``Load(names=(n0, n1, ...), input, index)``
 makes the optimization visible in the IR (``--ir kernel`` shows one Load with
-multiple LHS names) while keeping the renderer simple — ``Load.render``
+multiple LHS names) while keeping the renderer simple — ``Load``'s render
 branches on the vector form.
 
 ## What the pass does
@@ -58,8 +58,7 @@ from emmy.compiler.backend.cuda.render_target import CudaRenderTarget
 from emmy.compiler.graph import Node
 from emmy.compiler.ir.expr import BinaryExpr, Expr, Literal, SimplifyCtx, Var, affine_form
 from emmy.compiler.ir.kernel import KernelOp
-from emmy.compiler.ir.stmt import Body, Load, Stmt, StridedLoop
-from emmy.compiler.ir.stmt.passes import map_exprs
+from emmy.compiler.ir.stmt import Body, Load, Stmt, StridedLoop, map_exprs
 from emmy.compiler.pipeline import Pattern, RuleSkipped
 from emmy.compiler.pipeline.passes.lowering.kernel._vector import strided_alignment, vector_run
 from emmy.compiler.pipeline.search.space import VECTORIZE_LOADS

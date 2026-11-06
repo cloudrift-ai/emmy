@@ -40,7 +40,7 @@ The invariant is what stops facts from acquiring a second home. A term that rend
 no private spelling of anything the statements already carry:
 
 - the neutral elements come from `Accum.op.identity` through the ONE identity placement
-  (`Loop.render` / `StridedLoop.render`), so no `identities` field rides on the term and no
+  (`Loop`'s render / `StridedLoop`'s render), so no `identities` field rides on the term and no
   `Init` seed is emitted beside it;
 - the rescale temps arrive as ordinary `Assign`s, so the generic SSA rename, liveness and read
   counters see them with no special `deps()` channel to keep complete.
@@ -139,8 +139,8 @@ though the cone that reads it rides inside. The only place terms become statemen
 `Fold` does keep a small structural protocol whose names it shares with `Stmt` — `nested()` for its
 children, `rewrite()` for α-renaming, and `defines()` for its result names.
 These are term operations spelled the same way so one canonicalizer and one deep walk serve both
-vocabularies; they are not statement behaviour, and `Fold` has no `render`. Impure computation stays
-in Loop IR until total lift; there is no impure `Lambda` construction path.
+vocabularies; they are not statement behaviour, and no render function is registered for `Fold`. Impure
+computation stays in Loop IR until total lift; there is no impure `Lambda` construction path.
 
 **`nested()` is the STATEMENT protocol, and it deliberately does not reach a Fold's operand edges**
 — it yields the lift body, and nothing at all for a contraction, whose algebra is meant to read as
@@ -219,18 +219,78 @@ keep working unchanged. `source` is excluded from
 `Graph.structural_key` and from the variant key (`identity_key(with_io=True, with_knobs=True)`) — kernels rendered
 along different lowering paths still dedup in the tuning cache.
 
-**Stmt subclasses are `@dataclass(frozen=True)`** — every concrete Loop-IR
-/ Tile-IR / Kernel-IR statement (`Loop`, `Cond`, leaves, `Tile`, `Smem`, `Sync`,
-`CpAsyncCopy`, `TmaDescriptor`, …) is immutable + hashable. `Body` is a `tuple[Stmt, ...]`
-subclass, so ordinary body equality and hashing work end-to-end. `Body.structural_key()` uses the complete
-`structural.form`, including identity-relevant fields such as `Axis.window` that may deliberately be excluded from
-general equality. Its exact and clustered keys, and its executable normal forms, are cached properties on that Body;
-there is no equality-keyed shared cache that could alias distinct metadata. To "edit" a frozen
-Stmt, return a fresh instance via `dataclasses.replace(stmt, field=value)`;
-`__post_init__` coercions use `object.__setattr__`. Ops, by contrast,
-are frozen and unhashable — rewrites replace the op and rebind its graph node. Op fields stored inside Stmts (e.g.
-`Assign.op`) must be lightweight value objects (e.g. `ElementwiseImpl`,
-not `ElementwiseOp`) so the surrounding Stmt's hashability isn't poisoned.
+**A statement is immutable data** — every concrete Loop-IR / Tile-IR / Kernel-IR statement (`Loop`, `Cond`, leaves,
+`Tile`, `Smem`, `Sync`, `CpAsyncCopy`, `TmaDescriptor`, …) has named read-only fields, compares by content and is
+hashable. To "edit" one, take a copy with `stmt.replace(field=value)`; nothing outside `ir/stmt/` calls
+`dataclasses.replace` on a statement. One pass still lists a statement's fields: the kernel loopify pass, which
+compares whole statements field by field to roll repeated ones into a loop. Ops, by contrast, are frozen and
+unhashable — rewrites replace the op and rebind its graph node. Op fields stored inside statements (e.g.
+`Assign.op`) must be lightweight value objects (e.g. `ElementwiseImpl`, not `ElementwiseOp`) so the surrounding
+statement stays hashable.
+
+## The statement module's interface
+
+`ir/stmt/` is the vocabulary all three IRs share, so the rest of the compiler uses it through one package and
+nothing else: no submodule path, no private name. The package exports the statement kinds, `Body` and `OutputSpec`,
+`normalize_body` and `canonicalize_identity`, a few functions over statements (`free_names`, `exposed_defines`,
+`rename_free`, `map_exprs`, `binary`, `mask_select_predicate`, `pretty_body`, `ordering_constraints`,
+`dtype_promote`), three normalization steps a caller may run on its own (`fold_affine`, `simplify_body`,
+`prepare_body`), the two kinds fusion's body assembly in `ir/loop/` builds a region with (`Call`, `Subroutine`), and
+what a layer declares a kind of its own with (`Declared`, `role`). The module itself imports expressions, axes,
+dtypes and the structural and wire forms: no op, tensor, graph, backend or pipeline.
+`tests/architecture/test_layering.py` pins the export list and both directions.
+
+**The statement protocol** is what a kind owes, all of it methods on the kind. The shared kinds state these by
+hand; a layer adds a kind of its own by declaring it (below), and nothing else:
+
+| Group | Members |
+| --- | --- |
+| Traits | `pure`, `deps_deep`, `has_side_effects` |
+| Reads and writes | `deps`, `defines`, `external_reads`, `external_writes`, `local_decls`, `binds_axes` |
+| Structure | `nested` with `with_bodies`; `exprs` with `with_exprs` |
+| Rebuilding | `_rewrite` (behind `rewrite`, `rename` and `substitute`), `rename_buffers`, `replace` |
+| Display and storage | `pretty`, the wire form |
+
+Each reading member has a rebuilding half: `with_bodies` takes what `nested` returned, `with_exprs` what `exprs`
+returned. `rewrite` is the one entry for renaming and substitution; it drops the substitutions a statement's own
+binder shadows and hands the rest to the kind's `_rewrite`. `exprs` lists every expression a kind holds and
+`with_exprs` rebuilds it from them. `tests/compiler/ir/stmt/test_protocol.py` checks that every kind in every layer
+states the protocol, and the rebuilding halves on an example of each shared kind and each Kernel IR kind.
+
+**A declared kind** is a statement kind stated as data: a frozen dataclass on `Declared` whose fields carry a type
+and, through `role(...)`, what the field is to the rest of the compiler. The roles are names the statement defines,
+reads, updates in place or binds for its own use; buffers it reads, writes or declares kernel-local; expressions;
+axes it binds and names that follow them; a child body; statements it carries; the body of a pure term; and records
+whose own fields play roles. A field with no role is plain data. `Declared` computes every protocol member from the
+roles, in field order, so a declared kind writes none: what it reads is its `reads` and `updates` fields, a rename
+maps every name field and every expression, a buffer rename maps the buffer fields, and so on. Two roles hold
+statements that are not a child body. Carried statements (`stmts`: the cells a `RegStore` stores with it, the
+combine of a `TreeHalve`) are part of the statement: they are rewritten with it and their buffers, expressions and
+free reads are its own, a name one of them defines or the statement binds being hidden. A term (`term`: a
+`RegStore`'s epilogue) keeps its statements' names private: a rename reaches only the coordinates its expressions
+read. Kernel IR declares all of its kinds this way; a kind whose member the roles cannot give is a missing role, not
+a hand-written member.
+
+Behaviour that is not on this list lives outside the module as a function over statements. CUDA rendering is the
+main case: `ir/render.py` holds the render context, the index flattening and one render function per kind,
+dispatched on the kind; Kernel IR registers its own kinds beside their classes.
+
+**`Body`** is an immutable sequence of statements, built from any iterable. A slice or a sum of bodies is a `Body`;
+two bodies with equal statements are equal and hash alike; a statement placed in a body is the same object every
+time it is read, which passes rely on when they key side tables by statement; it survives the wire form and
+pickling. It is not a `tuple` and equals none: of a sequence it has a length, iteration, indexing and slicing, and a
+field that holds one defaults to a `Body`. `Body.structural_key()` uses the complete `structural.form`,
+including identity-relevant fields such as `Axis.window` that may deliberately be excluded from general equality.
+Its exact and clustered keys, and its executable normal forms, are cached on that `Body`; there is no equality-keyed
+shared cache that could alias distinct metadata. Callers use its walks (`iter`, `map`, `fold`, `iter_of_type`,
+`loads`, `writes`, `carries`, `accums`, `loops`), its def-use readings (`definitions`, `ssa_defs`, `ssa_uses`,
+`axis_names`, `axis_dependencies`, `depends_on`, `backward_cone`), its orders (`topological_order`, `coalesce`),
+`rename_buffers`, and its identity (`identity`, `structural_key`, `census`, `literals_abstracted`,
+`literal_free_key`).
+
+The tests under `tests/compiler/ir/stmt/` state what goes into the module and what comes out, and hold for any
+implementation of it. The ones under `tests/compiler/ir/stmt/implementation/` call its inner steps and leave with
+this implementation.
 
 ## `base.py`
 
@@ -309,7 +369,7 @@ distribute over that reduce — the `_SEMIRING` table, only `(+, ×)` today) liv
 atom-cell matchers ask round them out: `reduce_canon` (alias →
 base combine, `sum` → `add` …) and the `_REDUCE_SPELLING` registry
 (`reduce_spelling`) — the single op-keyed table
-behind the four sites that used to switch on the reduce op name (`Accum.render`'s
+behind the four sites that used to switch on the reduce op name (`Accum`'s render's
 `+=` / `*=` / `fmax` / `fmin`, `kernel/ir._binary_combine_expr`, and
 `ReduceOp.forward` / `ScanOp.forward`'s numpy reductions). `op.selecting` (the
 max/min family) drives the init-placement dtype choice. `op.decodes` names the storage
@@ -524,11 +584,11 @@ Body walkers: `iter_body(body)` (pre-order; powers `for s in loop_op`),
 `Stmt.pretty(indent)` (rendered lines for kernel dumps; block stmts
 recurse via `pretty_body`).
 
-CUDA scalar rendering goes through `stmt.base.op_to_expr`. Boolean masks retain the historical f32 SSA convention,
+CUDA scalar rendering goes through `op_to_expr` in `ir/render.py`. Boolean masks retain the historical f32 SSA convention,
 so Torch's `bitwise_not` spelling renders as logical zero-test (`mask == 0`); explicitly bool-stamped values use the
 same semantics. Integer complement is not inferred from that name and fails closed until it has a typed consumer.
 The optional readable-source fold keeps a single-use `Assign` named when any argument's stamped dtype differs from
-the result dtype, so the target-aware `Assign.render` path remains responsible for conversions such as
+the result dtype, so the target-aware render of an `Assign` remains responsible for conversions such as
 `__half2float`.
 
 `Select` uses the common dtype of its branch values, and type propagation gives its consumers that same dtype.
@@ -546,13 +606,12 @@ Dependence cones (`ir/stmt/body.py`): `Body.backward_cone(roots)` builds a `Cone
 the subset of the body's immediate stmts closed under SSA dependence (a wrapper joins as a unit; internally-bound
 axes excluded), plus `external_reads`, the names read from outside (axis vars and enclosing/sibling scopes alike).
 Construction never fails: unresolved names are data, and chaining scope levels means seeding the next level's
-`backward_cone` with the previous one's `external_reads`. `Body.defs_die_at(members, roots=…, allowed=…)` is the
-matching escape check (may the cone be cut out, with only the designated consumers reading its roots?). This is
+`backward_cone` with the previous one's `external_reads`. This is
 the shared substrate behind the rules that slice cones (the demoted-operand producer cut in
 `tile/cut/030_cut`) — eligibility judgments stay in the rules, per
 `pipeline/passes/ARCHITECTURE.md`.
 
-`Body.dependency_depths` folds the def-use graph with a caller-selected set of statement kinds to count. External
+The splicer folds the def-use graph counting the accumulators on each value's path. External
 buffer depths let composition carry the result across producer/consumer boundaries without expanding either body.
 Counting accumulators gives a sufficient independence proof for early reduction sharing: equal-depth reductions
 cannot read each other's finalized result. The splicer supplies graph edges and keeps coordinate substitution local.
@@ -576,7 +635,7 @@ walk. Any other caller that cones a non-SSA body owes itself the same reading.
 `rewrite` has two distinct rename channels that must stay disjoint:
 `rename_ssa` carries **SSA-name** renames, `sigma` carries **axis**
 substitutions. `Load`/`Write` index exprs apply *both*
-(`_rename_ssa_vars_in_expr(sigma.apply(e), rename)`) so an indirect
+(`sigma.apply(e).rename(rename)`) so an indirect
 (gather) index Var gets renamed exactly once. Putting the same name in
 both maps renames it twice — and if the two passes form a chain (e.g.
 `x → in5` and a pre-existing `in5 → in26`) the double application
@@ -614,17 +673,17 @@ Pure `body → body` passes run from `LoopOp.__post_init__` so every
 constructed `LoopOp` (including intermediate fusion results) is
 canonicalized before validation:
 
-Fusion may construct a compact body containing scalar `Call` statements. Each references one read-only `Subroutine`
-with explicit coordinate parameters and captured input buffers. A symbolic dim an index names is no coordinate, so
-the definition reads it free, as it reads a buffer. Early ordering, placement and coordinate
-simplification operate on the calls; each shared definition is prepared once. Identical calls to the same definition
-share by argument structure without searching their bodies. Before full placement, the statement-layer splicer expands
-calls using the same demand reconstruction as fusion. Independent reductions with equal extents and
-reduction depths share axes; coordinate substitutions keep different arguments distinct. Placement then shares common
-producers across definitions. Terminal values also seed expansion, so normalization accepts bodies without output
-writes and preserves unused values beside writes. The expanded body is the only form used by validation, executable
-identity, serialization and Tile IR lifting. Operation clustering also starts from that CSE form, so it sees operations
-inside definitions. Subroutine boundaries never limit fusion.
+While it builds a region, fusion holds a compact body containing scalar `Call` statements. Each references one
+read-only `Subroutine` with explicit coordinate parameters and captured input buffers. A symbolic dim an index names
+is no coordinate, so the definition reads it free, as it reads a buffer. Fusion runs `prepare_body` on the compact
+body: ordering, placement and coordinate simplification operate on the calls, and on each shared definition once.
+Identical calls to the same definition share by argument structure without searching their bodies. Fusion then
+expands the calls with the demand reconstruction that built the region. Independent reductions with equal extents
+and reduction depths share axes; coordinate substitutions keep different arguments distinct. Terminal values also
+seed expansion, so a body without output writes expands too. The expanded body is the only form that leaves fusion:
+normalization refuses a body that holds a call, so validation, executable identity, serialization and Tile IR
+lifting never meet one. Placement then shares common producers across definitions, and operation clustering starts
+from that CSE form. Subroutine boundaries never limit fusion.
 
 - `topo_sort_siblings` — stable Kahn reorder so SSA defs precede their uses
   within each body (fixes splicer-produced use-before-def).
@@ -646,8 +705,9 @@ inside definitions. Subroutine boundaries never limit fusion.
 - `fold_trivial_selects` — a `Select` whose branches all bind one value is a copy of it.
 - `drop_unread_values` — a pure statement whose values nothing reads is dropped, and a loop or branch left with
   no statement goes with it: the work reached no output. The one-key softmax weight leaves its whole score behind
-  this way, the dot product that fed it and the loop that summed it included. A body that stores nothing is a
-  fragment whose values are all its reader's, so nothing is dropped from it.
+  this way, the dot product that fed it and the loop that summed it included: a dropped value leaves its operands
+  unread in turn, and one call drops the whole chain. A body that stores nothing is a fragment whose values are all
+  its reader's, so nothing is dropped from it.
 - `fold_affine` — every maximal single-reader cone of `add`, `subtract`, `negative`, literal `multiply`, literal
   `divide` and `Affine` over floating values becomes one `Affine`: like terms summed, zero terms dropped, the constant
   its offset, a division by a literal the product by its reciprocal, a single unit term with no offset a `copy`.
@@ -667,7 +727,7 @@ inside definitions. Subroutine boundaries never limit fusion.
   not bind itself): it must read no name the first body defines (blocking softmax-style sequential reduces where
   sum-exp reads `acc_max`), and no between-stmt def. Names both bodies merely happen to bind are a COLLISION, not a
   dependence — two alpha-equal copies of one cone always share every spelling — so the incoming body's copies rename
-  apart. Only a name the incoming Loop still binds after it closes (its immediate carriers, which `Loop.render`
+  apart. Only a name the incoming Loop still binds after it closes (its immediate carriers, which `Loop`'s render
   declares ahead of the loop) refuses, because the rename cannot reach that name's readers outside. Eliminates the
   duplicate K traversal in patterns like `silu(x@Wg) * (x@Wu)`, and the duplicate score pass between the channels of a
   blocked twisted carrier; subsequent normalization collapses the duplicate loads, and the lowering passes stage both
@@ -695,14 +755,24 @@ inside definitions. Subroutine boundaries never limit fusion.
   reduction's axis tuple is canonicalized as a set. SSA values travel only through the rename channel, never `sigma`,
   so indirect indices cannot be renamed twice. Normalization separates lexical bindings before motion can put them
   in one scope, then assigns canonical names again after ordering the result.
-- Preparation and placement run to a joint fixed point: a value placed once can remove an axis dependency or expose a
-  sibling merge in the next round, and a merge exposes values to place. Legal motion and merging expose availability;
-  equality alone never moves a value across a scope or an effect. This is scoped placement, not general partial
-  redundancy elimination: separately executed sibling scopes and equality through mutable loop-carried state may
-  remain, and loads are invalidated by writes to any element of their buffer. Affine integer expressions over bound
-  loop coordinates have a unique coefficient form in lexical axis order; for proven nonnegative indices, positive
-  constant quotient chains collapse to one divisor, and `/` and `//` share that spelling. Unsupported expressions
-  compare structurally after these rewrites.
+- Normalization runs its steps once and checks nothing. The steps that feed each other run to their own fixed
+  point where they sit: a value placed outside its loop can expose a sibling merge, two reads placement made one can
+  leave a predicate constant, and a merge exposes values to place, so the merge, the expression simplification and
+  placement run until the first two leave a placed body alone. The folds feed the steps ahead of them — a fold can
+  leave a value unread or change what orders the free axes — so the steps run again after a fold that changed the
+  body, and only then. The order runs last, once, with one exception: the unread-value drop reads by name, and a cut
+  can splice one cone twice under the same names, so a value only its namesake's readers kept alive is unread only
+  once the order has given every binding its own name. A body the order left such a value in goes through the steps
+  again. What keeps this honest is a test, not a loop: the normal form of
+  every kernel a repository golden or the realization corpus stores is one normalization leaves alone
+  (`tests/compiler/ir/stmt/implementation/test_normal_form_is_final.py`). A form that was not final would give two
+  spellings of one body two texts, and no error.
+- Legal motion and merging expose availability; equality alone never moves a value across a scope or an effect. This
+  is scoped placement, not general partial redundancy elimination: separately executed sibling scopes and equality
+  through mutable loop-carried state may remain, and loads are invalidated by writes to any element of their buffer.
+  Affine integer expressions over bound loop coordinates have a unique coefficient form in lexical axis order; for
+  proven nonnegative indices, positive constant quotient chains collapse to one divisor, and `/` and `//` share that
+  spelling. Unsupported expressions compare structurally after these rewrites.
 - The canonical order comes from the value numbering. Within a scope, blocks without a side effect come first, then
   leaves, then blocks with one, each group by statement kind; ties break by the value — a leaf by its number and its
   coordinates spelled by binding depth, a block by the hash of its scope tree — with every buffer spelled by the role
@@ -710,7 +780,9 @@ inside definitions. Subroutine boundaries never limit fusion.
   two the body cannot tell apart, which then order by name. Dependency and effect constraints
   (`order.ordering_constraints`) bound the order; a heap-based Kahn sort takes the least-priority ready statement.
   Names are then given sequentially, a commutative operation lists its operands by value and then by those names, and
-  a final axis unification restores shared reduction dimensions without merging dependent loops.
+  a final axis unification restores shared reduction dimensions without merging dependent loops. The order is final
+  on its own output because nothing it sorts by reads what it decides: a statement's shape and a block's spelled
+  subtree read a sum's coefficients sorted and the block's children already ordered, and no number reads a name.
 
 ### `ir/stmt/values.py` — value numbering
 
@@ -721,7 +793,9 @@ read at `(h / 384) * 128 + d` in one nest and at a grid axis in another number a
 under two consumers. A reduce binds the parameters that mention its axis, retains their bound index expressions in
 its number, and keeps the free coordinates those parameters read. Offsets and strides still distinguish reduced
 walks. Commutative operands order by number, and operands tied on number by the layout and then the
-parameter order their arrangement gives, so neither the source order nor the spelling reaches a number. The same
+parameter order their arrangement gives, so neither the source order nor the spelling reaches a number. A carried
+state an operation reads ahead of its update — the previous step's value — is keyed by use, like every other read of
+a state; only a name free in the body is spelled. The same
 number applied to the same coordinate expressions in one scope is one instance — what placement computes once.
 
 ### `ir/stmt/identity.py` — structural identity
@@ -792,12 +866,12 @@ own shared definitions. Equal calls reuse the same demand before expanding their
 distinct calls. `compile -vv` prints this intermediate form as `sub name(buffers, coordinates):` and one-line calls.
 The final Loop IR listing is expanded and fully CSE'd, as are all persisted kernels.
 
-Body analysis, mutable construction and demand reconstruction belong to the generic statement layer. `stmt/splicer`
-consumes bodies and splice edges; it imports no Loop IR types. The Loop IR adapter chooses graph regions and wraps
-the reconstructed body in a validated `LoopOp`. Normalization uses the same engine to expand subroutines, sharing
-equal demands before constructing duplicate cones. Fresh names and coordinate substitution prevent capture; equal
-reduction depth keeps a reduction that reads another's finalized value in a separate sweep. Every legal fusion
-region is still built whole; subroutine boundaries do not affect final CSE.
+Body analysis, mutable construction and demand reconstruction are fusion's body assembly (`loop/assembly.py`). It
+consumes bodies and splice edges, and uses the statement module through its exported interface. The splicer chooses
+graph regions and wraps the reconstructed body in a validated `LoopOp`. The same engine expands the subroutine calls
+before the body leaves, sharing equal demands before constructing duplicate cones. Fresh names and coordinate
+substitution prevent capture; equal reduction depth keeps a reduction that reads another's finalized value in a
+separate sweep. Every legal fusion region is still built whole; subroutine boundaries do not affect final CSE.
 
 Before dependency reconstruction, `splice_graph` finds output equivalence clusters: single-owner copy chains ending
 at a terminal graph output, with the same dtype and element count and an exact symbolic proof that the source and
@@ -852,7 +926,7 @@ order. Each Write's own scope determines its output shape, so independent siblin
 different extents. This powers `LoopOp.forward`, so post-fusion graphs run through the default `Backend.run` topo-walk
 like any pre-fusion graph.
 
-### `stmt/builder.py` — body construction
+### `loop/builder.py` — body construction
 
 `BodyBuilder` constructs bodies for fusion and subroutine expansion without spelling out every `Loop(Axis(…))`
 nest. Construction is mutable — descent is a dict lookup per scope level and a prepend is an append to a
@@ -895,6 +969,14 @@ Reuses `Tile` + leaf stmts from Tile IR; adds hardware primitives
 materialized from scheduling decisions. `KernelOp` carries the body
 directly (no separate AST class).
 
+A Kernel IR statement kind is data: a declared kind (see the statement module's interface). Its class holds fields
+with their roles, how it prints and at most a constructor check; what rendering or the CUDA lowering asks of a
+statement beyond that (a grid's size, a fragment's register count, a store's element addresses) is a function over the
+statement, beside the kind's render function. Every field has a type from one closed set: strings, numbers, booleans,
+expressions, axes, dtypes, elementwise ops, bodies, statements, records of such fields (`FragmentArg`, one operand of
+a `FragmentApply`), and tuples and optionals of those. A fragment layout is therefore named, not held: the kind stores
+the atom's layout name and rendering looks the geometry up. `tests/architecture/test_layering.py` guards both.
+
 | Symbol             | Role                                                              |
 |--------------------|-------------------------------------------------------------------|
 | `KernelOp`         | Graph-op wrapper around a `Tile`-rooted body. One per kernel.     |
@@ -914,7 +996,7 @@ directly (no separate AST class).
 | `FragmentApply`    | The one pointwise node over a C fragment. Each argument resides in another fragment, a per-row register pair, a cell-uniform scalar, a predicate over the element's absolute coordinates (`COORD`), or a global-memory load template at those coordinates (`GMEM`). A coordinate mask is a `where` over a `COORD` predicate — the masked branch takes the carrier's finite identity, avoiding `-inf - -inf` in an all-masked chunk, and an additive mask applies its keep op first; an additive bias is an `add` of a `GMEM` operand. The atom's fragment-layout descriptor supplies the element count and row mapping, so the same leaf serves m16n8k16 and Volta m8n8k4. |
 | `FragmentRowReduce` | Fold one warp's C fragments along the atom's N direction, per ROW: in-lane columns combine first, then the layout's `__shfl_xor` masks combine the column-group lanes. The resulting register pair is what a `FragmentApply` broadcasts as a `ROW` operand. The chunk tier's pivot and summed channel partials are exactly this, which is why the tier needs the chunk inside one warp column. |
 | `FragmentRepack`   | Convert C fragments into a 16-bit operand in registers. The m16n8k16 f16 B form exchanges packed column pairs across the warp; the A form uses the existing lane layout. m16n8k16 consumes two adjacent fragments; Volta m8n8k4 selects a four-column A slice or four-row B slice from one logical 16×16 C fragment with warp shuffles of packed FP16 pairs. |
-| `RegStore`         | Layout-aware per-lane epilogue store: four C elements for m16n8k16 or eight elements covering the four Volta output quadrants for m8n8k4. A paired Volta tile derives the matching interleaved 32×32 accumulator map from its cell position; it is not a schedule field. Adjacent elements leave as one packed pair when N is contiguous, including under an M-only tail guard; an N guard or strided physical orientation keeps scalar stores. Stores f32 directly or downconverts to f16. An optional epilogue is a pure `Lambda` over the projection tail's own `Load` / `Assign` / `Select` stmts, its leading params bound to the store's fragments; it is evaluated at each element's own coordinates. Floating loads widen to f32, while integer loads stay typed so shifts and bitwise operations on packed codes render as integer CUDA expressions. `run` holds the next three N-adjacent cells of a 16-bit `wgmma` output: the quad's lanes exchange packed column pairs so each lane stores one cell's eight columns of a row as one 16-byte store (`097_widen_fragment_stores`). |
+| `RegStore`         | Layout-aware per-lane epilogue store: four C elements for m16n8k16 or eight elements covering the four Volta output quadrants for m8n8k4. A paired Volta tile derives the matching interleaved 32×32 accumulator map from its cell position; it is not a schedule field. Adjacent elements leave as one packed pair when N is contiguous, including under an M-only tail guard; an N guard or strided physical orientation keeps scalar stores. Stores f32 directly or downconverts to f16. An optional epilogue is a pure term over the projection tail's own `Load` / `Assign` / `Select` stmts, stored as its body with the names bound to the store's fragments and the name of the stored value; it is evaluated at each element's own coordinates. Floating loads widen to f32, while integer loads stay typed so shifts and bitwise operations on packed codes render as integer CUDA expressions. `run` holds the next three N-adjacent cells of a 16-bit `wgmma` output: the quad's lanes exchange packed column pairs so each lane stores one cell's eight columns of a row as one 16-byte store (`097_widen_fragment_stores`). |
 | Shared from `tile` | `Tile` (launch geometry); from `ir/stmt/`: `Loop`, `StridedLoop`, `Load`, `Assign`, `Accum`, `Init`, `Let`, `Write`, `Select`, `Cond`, `ZeroPrologue`. |
 
 Volta direct A and transposed-B loads use the shared four-value loader when the flattened base and row stride

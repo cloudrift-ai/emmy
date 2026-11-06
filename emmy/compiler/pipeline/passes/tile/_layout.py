@@ -35,7 +35,7 @@ def _source_shape(node: Node) -> tuple | None:
 def _edit(term: Fold, names: dict[str, str]) -> Fold:
     def load(stmt):
         if isinstance(stmt, Load) and stmt.input in names:
-            return replace(stmt, input=names[stmt.input], index=tuple(reversed(stmt.index)))
+            return stmt.replace(input=names[stmt.input], index=tuple(reversed(stmt.index)))
         return stmt
 
     return replace(

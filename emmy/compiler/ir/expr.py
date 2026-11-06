@@ -112,6 +112,15 @@ class Expr(Wire):
         """
         raise NotImplementedError(f"{type(self).__name__}.substitute not implemented")
 
+    def rename(self, rename) -> Expr:  # noqa: ANN001 — a ``str -> str`` function
+        """This expression with every free variable's name mapped through ``rename``.
+
+        A rewrite applies it to an index or a predicate, so a value an indirect index reads (a gather's
+        ``x[a0, (int)in0]``) follows the rename of its definition. A name the function keeps passes through.
+        """
+        mapping = {n: Var(rename(n)) for n in self.free_vars() if rename(n) != n}
+        return self.substitute(mapping) if mapping else self
+
     @cached_property
     def form(self) -> object:
         """:func:`~emmy.compiler.structural.form` of this expression, rendered once: value numbering reads every
@@ -126,7 +135,7 @@ class Expr(Wire):
         """Emit a target-language (C / CUDA) expression string.
 
         Concrete subclasses override. The ``ctx`` is duck-typed against
-        :class:`emmy.compiler.ir.stmt.RenderCtx` (intrinsic /
+        :class:`emmy.compiler.ir.render.RenderCtx` (intrinsic /
         builtin spelling tables, optional shape map). ``parent_prec``
         drives parenthesization in nested ``BinaryExpr`` chains.
         """
@@ -695,7 +704,7 @@ class FlatIndex(Expr):
         return frozenset().union(*(e.free_vars() for e in self.index))
 
     def render(self, ctx, parent_prec: int = 0) -> str:
-        from emmy.compiler.ir.stmt.base import render_index  # noqa: PLC0415 — stmt imports expr
+        from emmy.compiler.ir.render import render_index  # noqa: PLC0415 — the render module imports expr
 
         text = render_index(self.buffer, self.index, ctx)
         return f"({text})" if parent_prec > 0 else text

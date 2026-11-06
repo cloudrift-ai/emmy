@@ -20,9 +20,7 @@ import pytest
 from emmy.compiler.dim import Dim
 from emmy.compiler.ir.axis import Axis
 from emmy.compiler.ir.expr import Literal, Var
-from emmy.compiler.ir.stmt.blocks import Cond, Loop, StridedLoop
-from emmy.compiler.ir.stmt.body import Body
-from emmy.compiler.ir.stmt.leaves import Accum, Init, Load, Write
+from emmy.compiler.ir.stmt import Accum, Body, Cond, Init, Load, Loop, StridedLoop, Write
 from emmy.compiler.ir.stmt.normalize import rename_ssa_sequential
 from emmy.compiler.pipeline.passes.tile._fromloop import fold_from_loop
 
@@ -71,8 +69,6 @@ def test_fold_combine_tracks_accum_rename() -> None:
     # cooperative combine reads a state name the renamed lift no longer defines (the M=1
     # cut-consumer's ``acc1``-undefined miscompile). A term is never a ``Body`` member, so the
     # rename reaches it through the rewrite registry directly.
-    from emmy.compiler.ir.stmt.passes import rewrite
-
     loop = Loop(
         axis=Axis(name="k0", extent=Dim(8)),
         body=Body(
@@ -85,7 +81,7 @@ def test_fold_combine_tracks_accum_rename() -> None:
     fold = fold_from_loop(loop)
     assert fold is not None
 
-    renamed = rewrite(fold, lambda name: f"{name}_r")
+    renamed = fold.rewrite(lambda name: f"{name}_r")
 
     assert renamed.combine.results == ("acc1_r",), renamed.combine.results
     assert renamed.exposes == ("acc1_r",)

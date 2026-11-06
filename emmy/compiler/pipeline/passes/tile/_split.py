@@ -50,7 +50,6 @@ from emmy.compiler.ir.schedule import Reduce, Work
 from emmy.compiler.ir.schedule.catalog import splitk_moves
 from emmy.compiler.ir.sigma import Sigma
 from emmy.compiler.ir.stmt import Accum, Affine, Assign, Body, Carry, Let, Load, Loop, Pre, Select, SelectBranch, Stmt, Write
-from emmy.compiler.ir.stmt.passes import projection_distributes
 from emmy.compiler.ir.tile import OutputSpec, Placement, TileOp
 from emmy.compiler.ir.tile.ops import Sched, carries_partition, head, projection_regions, projection_root, projection_tail
 from emmy.compiler.pipeline import Match
@@ -454,9 +453,9 @@ def realize_carry_split(match: Match, root: Node, cta: int) -> Graph:
 
         def rewrite(stmt):
             if isinstance(stmt, Carry):
-                return replace(stmt, index=(*prefix, *stmt.index), seed=seed)
+                return stmt.replace(index=(*prefix, *stmt.index), seed=seed)
             if isinstance(stmt, Pre) and stmt.carrier == state:
-                return replace(stmt, index=(*prefix, *stmt.index))
+                return stmt.replace(index=(*prefix, *stmt.index))
             return stmt
 
         return stmts.map(rewrite)
@@ -623,7 +622,7 @@ def _sliced_edge(edge, sigma: Sigma, k_name: str, kslice=None, ksplit: Axis | No
     every partition, each recomputing it — the REDUNDANT-STATISTIC split. That redundancy is what
     the split trades for parallelism; whether it pays on a given shape is evidence's decision."""
     if isinstance(edge, Load):
-        return replace(edge, index=tuple(sigma.apply(e) for e in edge.index))
+        return edge.replace(index=tuple(sigma.apply(e) for e in edge.index))
 
     ops = tuple(_sliced_edge(e, sigma, k_name, kslice, ksplit) if k_name in e.free_axes else e for e in edge.operands)
     body = Body(tuple(s.substitute(sigma) for s in edge.lift.body))
@@ -712,8 +711,7 @@ def add_output_piece(frag: Graph, root: Node, piece: TileOp, inputs: list[str], 
     piece = replace(
         piece,
         output_specs=tuple(
-            replace(spec, write=replace(spec.write, output=renamed.get(spec.write.output, spec.write.output)))
-            for spec in piece.output_specs
+            replace(spec, write=spec.write.replace(output=renamed.get(spec.write.output, spec.write.output))) for spec in piece.output_specs
         ),
     )
     tensors = (
@@ -902,7 +900,7 @@ def realize_split(match: Match, root: Node, cta: int, finalize: str) -> Graph:
         # projection (the offer read the whole tail, a conservative superset — see its docstring).
         _enforce(atomic_finalize(partial_fold, projection, tile.outputs))
         if stores:
-            p_stores = tuple(replace(store, write=replace(store.write, atomic=True)) for store in stores)
+            p_stores = tuple(replace(store, write=store.write.replace(atomic=True)) for store in stores)
         else:
             p_stores = (OutputSpec(write=Write(output=out.name, index=cell, values=states, atomic=True)),)
         piece = _piece(
@@ -986,3 +984,46 @@ def realize_split(match: Match, root: Node, cta: int, finalize: str) -> Graph:
 
 
 __all__ = ["atomic_finalize", "realize_carry_split", "realize_split", "split_forks", "splitk_width", "state_ports"]
+
+
+def projection_distributes(body, states: tuple[str, ...]) -> bool:
+    """True if the kernel's projection epilogue is a **linear-homogeneous** map of the carried
+    state(s) — i.e. it distributes over the atomic-add combine, so applying it to each CTA's
+    partition before the ``atomicAdd`` equals applying it once after the cross-CTA sum
+    (``Σ c·xₛ = c·(Σ xₛ)``). A bare state write (``proj = id``) trivially distributes; a constant
+    *scale* — ``mean``'s ``/N`` — does; an additive offset (a fused bias), a nonlinear unary
+    (``relu`` / ``reciprocal`` of the *state*), or a product of two state-derived values do NOT.
+
+    Conservative forward dataflow: ``linear`` is the set of SSA names that are a
+    linear-homogeneous function of the state. Multiplication by or division by a state-independent
+    operand grows this set; division requires the state in the numerator. Any other op that consumes a
+    ``linear`` value — or any projection stmt we can't reason about — refuses. The final ``Write``
+    must store only ``linear`` values."""
+    linear = set(states)
+    for s in body:
+        if isinstance(s, Write):
+            return all(v in linear for v in s.values)
+        if isinstance(s, Load):
+            continue  # reads memory (the count / a per-output operand) — state-independent
+        if isinstance(s, Let):
+            if s.value.free_vars() & linear:
+                return False
+            continue  # a literal or coordinate expression independent of the carried state
+        if isinstance(s, Affine):
+            hot = [a for a in s.args if a in linear]
+            if not hot:
+                continue
+            if len(hot) == len(s.args) and s.offset == 0:
+                linear.add(s.name)  # a sum of scaled state values — ``mean``'s ``/N`` — is still linear-homogeneous
+                continue
+            return False  # an offset or a state-independent term breaks distributivity
+        if not isinstance(s, Assign):
+            return False  # an unfamiliar projection stmt — can't prove distributivity
+        hot = [a for a in s.args if a in linear]
+        if not hot:
+            continue  # state-independent — a constant w.r.t. the split
+        if len(hot) == 1 and (s.op.name == "multiply" or s.op.name == "divide" and s.args[0] in linear):
+            linear.add(s.name)  # state · constant or state / constant — still linear-homogeneous
+            continue
+        return False  # offset / inverse / nonlinear of a state value breaks distributivity
+    return False  # no Write reached

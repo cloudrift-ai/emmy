@@ -10,9 +10,7 @@ from emmy.compiler.ir.axis import Axis
 from emmy.compiler.ir.elementwise import ElementwiseImpl
 from emmy.compiler.ir.expr import Literal
 from emmy.compiler.ir.kernel import KernelOp
-from emmy.compiler.ir.stmt import Body
-from emmy.compiler.ir.stmt.blocks import Loop
-from emmy.compiler.ir.stmt.leaves import Accum, Assign, Load
+from emmy.compiler.ir.stmt import Accum, Assign, Body, Load, Loop
 
 _vectorize_loads = import_module("emmy.compiler.pipeline.passes.lowering.kernel.050_vectorize_loads")._vectorize_body
 _vectorize_stores = import_module("emmy.compiler.pipeline.passes.lowering.kernel.080_vectorize_stores")._vectorize_body
@@ -82,7 +80,7 @@ def test_interleaved_loads_of_one_buffer_widen(dtype) -> None:
 
     loads = [stmt for stmt in out if isinstance(stmt, Load)]
     assert len(loads) == 1 and loads[0].names == ("x0", "x1", "x2", "x3")
-    assert out.index(loads[0]) == 0, "the widened load sits where the first element was loaded"
+    assert out[0] is loads[0], "the widened load sits where the first element was loaded"
 
 
 def test_vector_loads_and_stores_require_aligned_row_offsets() -> None:
@@ -172,7 +170,7 @@ def test_a_load_whose_index_is_computed_in_between_stays_put() -> None:
 def test_a_write_to_the_buffer_in_between_stops_the_run() -> None:
     """A load never moves above a store into its own buffer."""
     from emmy.compiler.ir.expr import Var
-    from emmy.compiler.ir.stmt.leaves import Write
+    from emmy.compiler.ir.stmt import Write
 
     store = Write(output="x", index=(Var("a0"),), values=("y0",))
     out = _vectorize_loads(KernelOp(body=Body(())), _unrolled_pointwise(between=(store,)))

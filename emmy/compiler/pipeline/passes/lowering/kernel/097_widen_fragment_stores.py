@@ -61,7 +61,7 @@ def _walk(body: Body) -> tuple[Body, bool]:
     while i < len(stmts):
         group = stmts[i : i + _RUN]
         if len(group) == _RUN and _widens(group):
-            out.append(replace(group[0], run=tuple(group[1:])))
+            out.append(group[0].replace(run=tuple(group[1:])))
             changed = True
             i += _RUN
         else:

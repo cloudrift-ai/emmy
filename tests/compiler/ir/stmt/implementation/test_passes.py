@@ -1,0 +1,39 @@
+"""Statement rewriting."""
+
+import pytest
+
+from emmy.compiler.ir.axis import Axis
+from emmy.compiler.ir.expr import Var
+from emmy.compiler.ir.stmt import Assign, Body, Cond, Loop, Stmt, Write, rename_free
+from emmy.compiler.ir.stmt.normalize import place_values
+
+
+@pytest.mark.parametrize("depth", [2, 24])
+@pytest.mark.parametrize("eliminate", [False, True], ids=["rename", "eliminate"])
+def test_free_rename_visits_nested_statements_once(monkeypatch, depth, eliminate):
+    stmt = Cond(
+        cond=Var("outer"),
+        body=(Assign("shadow", "exp", ("outer",)), Write("left", (), "shadow")),
+        else_body=(Write("right", (), "outer"),),
+    )
+    for level in range(depth):
+        stmt = Loop(Axis(f"i{level}", 4), (stmt,))
+    visits = 0
+    original = Stmt.rewrite
+
+    def counted(*args):
+        nonlocal visits
+        visits += 1
+        return original(*args)
+
+    monkeypatch.setattr(Stmt, "rewrite", counted)
+    if eliminate:
+        result = place_values(Body((Assign("outer", "copy", ("renamed",)), Assign("shadow", "copy", ("wrong",)), stmt)))[0]
+    else:
+        result = rename_free(stmt, {"outer": "renamed", "shadow": "wrong"})
+    members = tuple(Body((result,)).iter())
+    assert visits <= 3 * len(members), "linear in the statements, whatever the depth"
+    branch = next(member for member in members if isinstance(member, Cond))
+    assert branch.cond == Var("renamed")
+    assert branch.body == Body((Assign("shadow", "exp", ("renamed",)), Write("left", (), "shadow")))
+    assert branch.else_body == Body((Write("right", (), "renamed"),))

@@ -904,7 +904,7 @@ def _lane_body(stmts, red: str, block: str, lanes: int, lane: int, blocks: int) 
     """``stmts`` with the reduce index ``red`` spelled ``lanes * block + lane`` and every expression simplified, so an
     index that is constant across a block's lanes (a block scale's) reads ``block`` alone."""
     from emmy.compiler.ir.expr import BinaryExpr, Interval, Literal, SimplifyCtx, Var  # noqa: PLC0415
-    from emmy.compiler.ir.stmt.passes import map_exprs  # noqa: PLC0415
+    from emmy.compiler.ir.stmt import map_exprs  # noqa: PLC0415
 
     at = BinaryExpr("+", BinaryExpr("*", Var(block), Literal(lanes, "int")), Literal(lane, "int"))
     ctx = SimplifyCtx.empty().extend(block, Interval(0, blocks - 1))

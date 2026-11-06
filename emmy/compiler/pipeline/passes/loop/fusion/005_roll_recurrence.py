@@ -30,8 +30,7 @@ from emmy.compiler.ir.base import ConstantOp, InputOp
 from emmy.compiler.ir.expr import BinaryExpr, Expr, Literal, Var
 from emmy.compiler.ir.loop import LoopOp, UnfusableStmt
 from emmy.compiler.ir.sigma import Sigma
-from emmy.compiler.ir.stmt import Accum, Assign, Body, Carry, Let, Load, Loop, Pre, Select, SelectBranch, Stmt, Write
-from emmy.compiler.ir.stmt.passes import map_exprs
+from emmy.compiler.ir.stmt import Accum, Assign, Body, Carry, Let, Load, Loop, Pre, Select, SelectBranch, Stmt, Write, map_exprs
 from emmy.compiler.pipeline import Match, Pattern, RuleSkipped
 from emmy.compiler.pipeline.passes.loop.fusion._region import build_merged_region, live_outputs_of
 
@@ -197,7 +196,7 @@ def _advanced(abstract: Body, literals: tuple[int, ...], deltas: tuple[int, ...]
             idle, contributed = f"{stmt.name}__idle{masked}", f"{stmt.name}__in{masked}"
             masked += 1
             select = Select(name=contributed, branches=(SelectBranch(stmt.value, within), SelectBranch(idle, Literal(True, "bool"))))
-            return (Let(name=idle, value=stmt.init), select, replace(stmt, value=contributed))
+            return (Let(name=idle, value=stmt.init), select, stmt.replace(value=contributed))
 
         return past_the_bound
 
@@ -208,10 +207,10 @@ def _advanced(abstract: Body, literals: tuple[int, ...], deltas: tuple[int, ...]
                 return stmt
             literal, delta = literals[int(expr.name[5:])], deltas[int(expr.name[5:])]
             if isinstance(by, int) or delta == 0:
-                return replace(stmt, axis=replace(stmt.axis, extent=Dim(literal + delta * (by if isinstance(by, int) else 0))))
+                return stmt.replace(axis=replace(stmt.axis, extent=Dim(literal + delta * (by if isinstance(by, int) else 0))))
             widest = max(literal, literal + delta * (steps - 1))
             within = BinaryExpr("<", Var(stmt.axis.name), value(literal, delta))
-            return replace(stmt, axis=replace(stmt.axis, extent=Dim(widest)), body=stmt.body.map(mask(within)))
+            return stmt.replace(axis=replace(stmt.axis, extent=Dim(widest)), body=stmt.body.map(mask(within)))
         if stmt.nested():
             return stmt
         return map_exprs(stmt.rewrite(lambda name: name, sigma), lambda expr: expr.rebuild(fold))
@@ -234,7 +233,7 @@ def _rolled(step: Body, steps: int, seed: float | str) -> Body:
             return Pre(name=stmt.names[0], carrier=_STATE, index=stmt.index)
         if not isinstance(stmt, Write):
             return stmt
-        kept = replace(stmt, index=(Var("step"), *stmt.index))
+        kept = stmt.replace(index=(Var("step"), *stmt.index))
         if stmt.output != f"{_STEP}0":
             return kept
         if len(stmt.values) != 1 or not all(isinstance(e, Var) or e == Literal(0, "int") for e in stmt.index):

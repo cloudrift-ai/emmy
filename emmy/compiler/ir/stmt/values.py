@@ -163,6 +163,11 @@ def value_numbers(body: Body, resource_key: Callable[[str], object] = lambda nam
             return resource(name, "state", touched)
         return ("free", name)
 
+    def unbound(name: str) -> object:
+        """An operation's argument no statement ahead of it binds: a carried state read ahead of its update — the
+        previous step's value, keyed by use like every other read of it — or a name free in the body, spelled."""
+        return resource(name, "state", touched) if name in carried else name
+
     def resource(name: str, kind: str, number_of: list[str]) -> object:
         """A buffer or state in a payload, keyed by use rather than spelling; ``number_of`` collects what touched it."""
         held = out.states if kind == "state" else out.buffers
@@ -280,7 +285,7 @@ def value_numbers(body: Body, resource_key: Callable[[str], object] = lambda nam
 
     def visit(stmts: Body) -> None:
         nonlocal touched
-        carried.update(stmts.carried_names)
+        carried.update(stmts._carried_names)
         for stmt in stmts:
             touched = []
             if isinstance(stmt, leaves.Load):
@@ -292,15 +297,15 @@ def value_numbers(body: Body, resource_key: Callable[[str], object] = lambda nam
                 define(stmt, stmt.names, value, "load")
             elif isinstance(stmt, leaves.Assign):
                 ops = [env[arg] for arg in stmt.args if arg in env]
-                frees = tuple(arg for arg in stmt.args if arg not in env)
-                payload = (str(stmt.op), str(stmt.dtype), frees)
                 commutative = bool(getattr(stmt.op, "commutative", False))
+                frees = tuple(unbound(arg) for arg in stmt.args if arg not in env)
+                payload = (str(stmt.op), str(stmt.dtype), tuple(sorted(frees, key=repr)) if commutative else frees)
                 define(stmt, (stmt.name,), compose("assign", payload, ops, [], commutative=commutative), "assign")
             elif isinstance(stmt, leaves.Affine):
                 # Each term numbers as its coefficient over its value, and the sum lists the terms by number: no
                 # order of the terms reaches the key.
                 ops = [compose("term", (coefficient,), [env[arg]], []) for coefficient, arg in stmt.terms if arg in env]
-                frees = tuple(sorted((coefficient, arg) for coefficient, arg in stmt.terms if arg not in env))
+                frees = tuple(sorted(((coefficient, unbound(arg)) for coefficient, arg in stmt.terms if arg not in env), key=repr))
                 define(stmt, (stmt.name,), compose("affine", (stmt.offset, frees, str(stmt.dtype)), ops, [], commutative=True), "assign")
             elif isinstance(stmt, leaves.Init):
                 define(stmt, (stmt.name,), compose("init", (repr(stmt.identity), str(stmt.dtype)), [], []), "init")
@@ -368,7 +373,7 @@ def value_numbers(body: Body, resource_key: Callable[[str], object] = lambda nam
                 del binding[len(binding) - len(bound) :]
                 if isinstance(stmt, (blocks.Loop, blocks.StridedLoop)):
                     loops.pop()
-                exported = {name: env[name] for child in stmt.nested() for name in child.carried_names if name in env}
+                exported = {name: env[name] for child in stmt.nested() for name in child._carried_names if name in env}
                 env.clear()
                 env.update(saved[0])
                 env.update(exported)

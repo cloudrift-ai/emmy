@@ -247,7 +247,7 @@ def extract_output_specs(stmts) -> tuple[tuple[Stmt, ...], tuple[OutputSpec, ...
     non-reduce ``Loop`` holding writes and nested output loops — sibling sweeps included) gives
     one ``sweep`` spec per write over its axis PATH (:func:`_sweep_specs`), its pure prefix
     rejoining the stream. An already-pure stream returns ``(stmts, ())``."""
-    original = tuple(stmts)
+    original = Body(stmts)
     rest = list(stmts)
     stores: list[OutputSpec] = []
     while rest:

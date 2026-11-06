@@ -10,8 +10,7 @@ from itertools import count
 from emmy.compiler.dtype import BF16, F16, F32, F64
 from emmy.compiler.graph import Node
 from emmy.compiler.ir.kernel import KernelOp
-from emmy.compiler.ir.stmt import Accum, Assign, Body, Cond, Init, Loop, Stmt, StridedLoop
-from emmy.compiler.ir.stmt.order import ordering_constraints
+from emmy.compiler.ir.stmt import Accum, Assign, Body, Cond, Init, Loop, Stmt, StridedLoop, ordering_constraints
 from emmy.compiler.pipeline import Pattern, RuleSkipped
 from emmy.compiler.pipeline.search.space import FAST_MATH, precision_pin
 
@@ -40,7 +39,7 @@ def split_invariant_divides(body: Body) -> Body:
                 reciprocal = next(fresh)
                 return (
                     Assign(reciprocal, "reciprocal", (divisor,), dtype=stmt.dtype),
-                    replace(stmt, op="multiply", args=(numerator, reciprocal)),
+                    stmt.replace(op="multiply", args=(numerator, reciprocal)),
                 )
         return stmt
 
@@ -120,7 +119,7 @@ def _hoist_loop_invariants(stmts: Body) -> Body:
                 axis = s.axis.name
                 hoisted = _closed_under_constraints(inner, {index for index, c in enumerate(inner) if _hoistable(c, axis)})
                 new_body.extend(c for index, c in enumerate(inner) if index in hoisted)
-                new_body.append(replace(s, body=tuple(c for index, c in enumerate(inner) if index not in hoisted)))
+                new_body.append(s.replace(body=tuple(c for index, c in enumerate(inner) if index not in hoisted)))
             elif isinstance(s, Cond):
                 new_body.append(Cond(cond=s.cond, body=tuple(walk(s.body)), else_body=tuple(walk(s.else_body))))
             else:

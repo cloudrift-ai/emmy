@@ -143,7 +143,7 @@ def test_sweep_used_as_value_keeps_separate_sweeps() -> None:
 def test_repeated_output_buffer_keeps_separate_sweeps() -> None:
     tile = _siblings()
     first, second = tile.output_specs
-    duplicate = replace(tile, output_specs=(first, replace(second, write=replace(second.write, output="out0"))))
+    duplicate = replace(tile, output_specs=(first, replace(second, write=second.write.replace(output="out0"))))
     assert _align_owned_sweeps(duplicate) is duplicate  # not a kernel on its own: the refusal is all there is to check
 
 

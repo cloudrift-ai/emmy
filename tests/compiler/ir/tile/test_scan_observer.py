@@ -20,7 +20,6 @@ from emmy.compiler.ir.pure import Lambda
 from emmy.compiler.ir.pure.fold import Fold
 from emmy.compiler.ir.pure.twist import SOFTMAX, Twist
 from emmy.compiler.ir.stmt import Accum, Assign, Body, Load, Loop, Write
-from emmy.compiler.ir.stmt.passes import rewrite
 from emmy.compiler.ir.tile import OutputSpec, extract_output_specs, observed_result_names
 from emmy.compiler.pipeline.passes.tile._fromloop import fold_from_loop, lift_loop_op, scan_from_loop
 
@@ -111,7 +110,7 @@ def test_rewrite_threads_the_observer() -> None:
     # An SSA rename map carries SSA defines only — the iteration var and the enclosing row
     # coordinate are axis names, and they rename through ``axis_fn`` / σ, never through this.
     ssa = {"acc", "acc__obs", "x0"}
-    renamed = rewrite(scan, lambda name: f"{name}_r" if name in ssa else name)
+    renamed = scan.rewrite(lambda name: f"{name}_r" if name in ssa else name)
     assert renamed.observe is not None
     assert renamed.observe.params == ("k", "acc_r")
     assert renamed.observe.results == ("acc__obs_r",)

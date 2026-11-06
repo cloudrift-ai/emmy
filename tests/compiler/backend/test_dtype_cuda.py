@@ -151,7 +151,7 @@ def test_every_shared_c_spelling_names_the_dtype_its_inverse_returns():
 
 
 def test_canonical_from_cuda_name_int_dtypes():
-    # The inverse mapping is what ``Smem.render`` consults to recover the
+    # The inverse mapping is what ``Smem``'s render consults to recover the
     # canonical DataType from a kernel-internal C name.
     assert canonical_from_cuda_name("int") == "i32"
     assert canonical_from_cuda_name("long long") == "i64"

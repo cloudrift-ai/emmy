@@ -1519,7 +1519,7 @@ applies the kernel's projection epilogue **per partition** before the `atomicAdd
 projection *distributes* over the add (`Σ φ(xₛ) = φ(Σ xₛ)`): a constant scale like `mean`'s `×1/N` distributes and
 rides the atomic; a non-distributive epilogue (`l2`'s `sqrt`, a fused bias/activation) is refused
 (`ValueError` → pin `g<n>k`, which projects once after the combine). The check is
-`ir/stmt/passes.projection_distributes`, applied by `tile/_split.atomic_finalize`.
+`projection_distributes`, applied by `atomic_finalize` beside it in `tile/_split`.
 
 Two deploy-only dominance/default rules live beside the generic schedule enumeration. A coalesced wide-K `F.linear`
 MATVEC (the M=1 contraction-demotion tier) always uses a `b32` single-warp fold unless `REDUCE` is explicitly pinned;
@@ -1568,7 +1568,7 @@ codec (bare/root-global; the fifth schedule-fork level): `gm<G>` iterates `G` M 
 launch stripe so consecutive CTAs share the streamed B slab (L2 reuse — the flat order streams B from DRAM once per
 M-row: `A + C + B×2` measured on the 4090's `mlp_gate_up`, 503.6 vs cuBLAS's 365.8 MB); `gn<G>` is the transpose
 (A streamed); empty = the flat N-fastest row-major order. Changes
-no per-CTA work, layout, or schedule — only the block-id decode (`ir/kernel` `Tile.render`, `Tile.raster_axes` the
+no per-CTA work, layout, or schedule — only the block-id decode (`ir/kernel` `Tile`'s render, `Tile.raster_axes` the
 `grid_tile` eligibility). The fixed 2-D contraction domain is `('', 'gm8', 'gn4', 'gn8')`; the schedule restriction
 keeps `gn4` and `gn8` out unless an exact `RASTER` parameter selects one. Wall-time effect is small and shape-dependent
 (±2–4% measured), so golden evidence arbitrates per shape.

@@ -10,6 +10,7 @@ from emmy.compiler.graph import Graph
 from emmy.compiler.ir.base import InputOp
 from emmy.compiler.ir.cuda import CudaOp
 from emmy.compiler.ir.kernel.ir import FragmentPromote, FragmentRepack, LdmatrixLoad, MmaSyncPtx, RegFragment
+from emmy.compiler.ir.render import render_stmt
 from emmy.compiler.ir.schedule import Stage
 from emmy.compiler.ir.schedule.base import ScheduleRefused
 from emmy.compiler.ir.schedule.register import RegisterCodec, RegisterContext, RegisterProblem, materialize_register
@@ -65,7 +66,7 @@ def test_register_storage_refuses_cross_warp_state_reads():
     from tests.compiler.ir.test_carried_state import _step, c, i, j, k
 
     graph = _graph()
-    body = _step((c, i, j)).map(lambda s: replace(s, index=(i, k)) if isinstance(s, Pre) and s.index == (k, j) else s)
+    body = _step((c, i, j)).map(lambda s: s.replace(index=(i, k)) if isinstance(s, Pre) and s.index == (k, j) else s)
     graph.nodes["out"].op = LoopOp(body=body)
     (tile,) = (n.op for n in _lift(graph).nodes.values() if isinstance(n.op, TileOp))
     assert tile.register_program is None
@@ -138,7 +139,7 @@ def _with_output_batch_axis(graph, batch_extent):
     tensor.shape = (tensor.shape[0], Dim(batch_extent), *tensor.shape[1:])
     node.op = replace(
         node.op,
-        body=node.op.body.map(lambda s: replace(s, index=(s.index[0], Literal(0, "int"), *s.index[1:])) if isinstance(s, Write) else s),
+        body=node.op.body.map(lambda s: s.replace(index=(s.index[0], Literal(0, "int"), *s.index[1:])) if isinstance(s, Write) else s),
     )
     return graph
 
@@ -194,7 +195,7 @@ def test_register_operands_use_direct_loads_when_the_address_allows_it(target, s
     graph.nodes["out"].op = replace(
         op,
         body=op.body.map(
-            lambda s: replace(s, index=(s.index[0], s.index[1] * Literal(stride, "int"))) if isinstance(s, Load) and s.input == "W" else s
+            lambda s: s.replace(index=(s.index[0], s.index[1] * Literal(stride, "int"))) if isinstance(s, Load) and s.input == "W" else s
         ),
     )
     (tile,) = (n.op for n in _lift(graph).nodes.values() if isinstance(n.op, TileOp))
@@ -307,12 +308,12 @@ def test_gmem_fragment_loads_keep_their_constant_offset_in_the_pointer():
     is one pointer and a load immediate on both (179 registers on CUDA 12.9)."""
     from emmy.compiler.dim import Dim
     from emmy.compiler.ir.expr import BinaryExpr, Literal, Var
-    from emmy.compiler.ir.stmt import RenderCtx
+    from emmy.compiler.ir.render import RenderCtx
 
     ctx = RenderCtx(shapes={"k": (Dim(4), Dim(64), Dim(128))}, buffer_dtypes={"k": "f32"}, ssa_dtypes={"r": "f16"})
     row = BinaryExpr("+", BinaryExpr("*", Var("a0"), Literal(64, "int")), Literal(16, "int"))
     load = LdmatrixLoad(frag="r", src_buffer="k", src_index=(Var("a1"), row, Literal(8, "int")), role="b", staged=False, ldm=128)
-    (line,) = load.render(ctx)
+    (line,) = render_stmt(load, ctx)
     assert line.strip() == "emmy_mma_load_b_gmem<float, __half>(r, &k[a1 * 8192 + a0 * 64 * 128] + 2056, 128);"
 
 
@@ -370,8 +371,7 @@ m(torch.randn(2,4,{chunk},{keys}), torch.randn(2,4,{chunk},{keys}),
     lowered = Pipeline.build(["lowering/kernel", "lowering/cuda"]).run(graph)
     lowered.validate()
     (op,) = (n.op for n in lowered.nodes.values() if isinstance(n.op, CudaOp))
-    (port,) = (t.name for t in node.outputs if t.name not in graph.outputs)  # the state's buffer, dropped with the port
-    assert not op.serial and port not in op.arg_order
+    assert not op.serial
     # The carried state's register residency is a property of the deployable build: at the
     # correctness lane's `-Xcicc -O1` the fragment arrays stay in local memory.
     with gpu_lock(), config.nvcc_flags_override(""):

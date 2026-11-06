@@ -21,8 +21,7 @@ from emmy.compiler.ir.elementwise import ElementwiseImpl
 from emmy.compiler.ir.expr import Var
 from emmy.compiler.ir.schedule import Tile, Work
 from emmy.compiler.ir.schedule.views import cone_seam
-from emmy.compiler.ir.stmt import Body, Load, Loop, Write
-from emmy.compiler.ir.stmt.leaves import Assign
+from emmy.compiler.ir.stmt import Assign, Body, Load, Loop, Write
 from emmy.compiler.pipeline.passes.lowering.kernel._atom import _hoist_k_invariant, reduce_codegen, store_sink
 from emmy.compiler.pipeline.passes.lowering.kernel._tiling import atomize, grid_tile, register_tile, unit_tile
 from tests.compiler.terms import contraction, projection, reduction, slab
@@ -87,9 +86,9 @@ def test_dedup_keeps_a_repeated_effect_and_the_first_definition() -> None:
     assert (fold + fold).coalesce() == fold
     assert fold.coalesce() == fold
     write = Write(output="out", index=(Var("m"), Var("k")), value="acc", atomic=True)
-    assert Body((*fold, *fold, write, write)).coalesce() == (*fold, write, write)
+    assert Body((*fold, *fold, write, write)).coalesce() == Body((*fold, write, write))
     effectful = Loop(axis=S, body=(*fold, write))
-    assert Body((effectful, effectful)).coalesce() == (effectful, effectful)
+    assert Body((effectful, effectful)).coalesce() == Body((effectful, effectful))
 
 
 def _norm_linear() -> tuple:

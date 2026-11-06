@@ -27,8 +27,8 @@ from emmy.compiler.ir.kernel.ir import (
     wgmma_descriptor_bits,
 )
 from emmy.compiler.ir.kernel.render import _WGMMA_PRELUDE, _wgmma_prelude, render_kernelop
-from emmy.compiler.ir.stmt import Body, RenderCtx
-from emmy.compiler.ir.stmt.passes import rewrite
+from emmy.compiler.ir.render import RenderCtx, render_stmt
+from emmy.compiler.ir.stmt import Body
 
 _NS = (64, 128, 256)
 _DTYPES = ("f16", "bf16")
@@ -45,7 +45,7 @@ def _cell(n: int = 64, ab_dtype: str = "bf16", form: str = "ss", **kw) -> WgmmaM
 
 
 def _line(stmt) -> str:
-    return stmt.render(RenderCtx())[0].strip()
+    return render_stmt(stmt, RenderCtx())[0].strip()
 
 
 @pytest.mark.parametrize(("swizzle", "mode"), [("NONE", 0), ("B128", 1), ("B64", 2), ("B32", 3), ("B128@7", 1)])
@@ -119,9 +119,9 @@ def test_fence_commit_wait_render_the_bare_instructions() -> None:
 
 def test_the_cell_reads_its_operands_and_defines_its_accumulator() -> None:
     ss = _cell(64, form="ss")
-    assert ss.deps() == (*_frags(64), "aD", "bD") and ss.defines() == _frags(64)
+    assert ss.deps() == (*_frags(64), "bD", "aD") and ss.defines() == _frags(64)
     rs = _cell(64, form="rs")
-    assert rs.deps() == (*_frags(64), "a", "bD") and rs.defines() == _frags(64)
+    assert rs.deps() == (*_frags(64), "bD", "a") and rs.defines() == _frags(64)
 
 
 def test_rewrite_renames_ssa_names_and_keeps_buffers() -> None:
@@ -135,13 +135,13 @@ def test_rewrite_renames_ssa_names_and_keeps_buffers() -> None:
             WgmmaWait(),
         )
     )
-    renamed = body.map(lambda s: rewrite(s, lambda name: f"{name}_r"))
+    renamed = body.map(lambda s: s.rewrite(lambda name: f"{name}_r"))
     desc, fence, ss, rs, commit, wait = renamed
     assert desc == WgmmaDescriptor(name="bD_r", smem="K_s", smem_index=Var("k0_r") * 64, swizzle="B128", lbo_bytes=16, sbo_bytes=1024)
     assert ss.c_frags == tuple(f"{c}_r" for c in _frags(64)) and (ss.a_desc, ss.b_desc) == ("aD_r", "bD_r")
     assert (rs.a_frag, rs.a_desc, rs.b_desc) == ("a_r", None, "bD_r")
     assert (fence, commit, wait) == (WgmmaFence(), WgmmaCommit(), WgmmaWait())
-    assert body.map(lambda s: rewrite(s, lambda name: name)) == body
+    assert body.map(lambda s: s.rewrite(lambda name: name)) == body
 
 
 def test_the_prelude_joins_only_with_a_wgmma_cell() -> None:

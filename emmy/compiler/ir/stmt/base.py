@@ -1,185 +1,30 @@
-"""``Stmt`` abstract base + render context + Expr-tree helpers.
+"""``Stmt``, the abstract base of every IR body statement, and the dtype rule its kinds share.
 
-The atom of every IR body. Concrete subclasses live in ``leaves`` (pure
-compute) and ``blocks`` (control flow); body walkers + body-level
-normalization passes live in ``visit`` and ``normalize``.
+Concrete kinds live in ``leaves`` (pure compute) and ``blocks`` (control flow); ``Body`` and the body-level
+normalization live in ``body`` and ``normalize``.
 """
 
 from __future__ import annotations
 
 from collections.abc import Callable, Iterable
-from dataclasses import dataclass, field, replace
+from dataclasses import replace
 from functools import cached_property
-from typing import TYPE_CHECKING, ClassVar, Protocol
+from typing import TYPE_CHECKING
 
-from emmy.compiler.dim import DYNAMIC_DIM_MAX, Dim
+from emmy.compiler.dtype import INTEGER_NAMES
 from emmy.compiler.ir.axis import Axis
-from emmy.compiler.ir.expr import BinaryExpr, CastExpr, Expr, FuncCallExpr, Literal, SimplifyCtx, TernaryExpr, Var
+from emmy.compiler.ir.expr import Expr
 from emmy.compiler.ir.sigma import Sigma
 from emmy.compiler.structural import Structural
 from emmy.compiler.wire import Wire
 
 if TYPE_CHECKING:
     from emmy.compiler.ir.stmt.body import Body
-    from emmy.compiler.ir.stmt.leaves import Select
-    from emmy.compiler.render_target import RenderTarget
-
-
-def _default_render_target():
-    """Lazy default: a :class:`CudaRenderTarget` instance. Used when
-    ``RenderCtx`` is constructed without an explicit target — keeps the
-    legacy "everything is CUDA" behavior for tests / golden output.
-
-    Lazy to avoid importing the backend at IR-module load time."""
-    from emmy.compiler.backend.cuda.render_target import CudaRenderTarget  # noqa: PLC0415
-
-    return CudaRenderTarget()
 
 
 INDENT = "    "
 
 
-# ---------------------------------------------------------------------------
-# RenderCtx — target-tuned tables + walk state for ``Stmt.render`` / ``Expr.render``
-# ---------------------------------------------------------------------------
-
-
-class Memory(Protocol):
-    """How a buffer's bytes are reached — the only thing a transport asks of one.
-
-    ``base`` is the pointer to address from and ``flat`` the index to use with it, so a
-    transport renders ``f"{base}[{flat}]"`` without knowing whether the buffer is one
-    allocation or many. ``vectorizable`` says whether consecutive elements are guaranteed
-    contiguous, which is what a vector access needs.
-    """
-
-    vectorizable: ClassVar[bool]
-
-    def base(self, index: tuple, ctx: RenderCtx) -> str: ...
-
-    def flat(self, index: tuple, ctx: RenderCtx) -> str: ...
-
-
-@dataclass
-class RenderCtx:
-    """Per-render state. ``target`` is the :class:`RenderTarget` that
-    owns every target-specific C spelling decision (type names,
-    conversion intrinsics, per-dtype op spellings, native-op coverage,
-    vector load shapes). Everything else here is generic walk state.
-
-    ``intrinsics`` / ``builtins`` keep the legacy abstract→spelling
-    indirection used by ``FuncCallExpr.render`` / ``Builtin.render``
-    for symbols that don't vary by dtype (``thread_idx.x`` →
-    ``threadIdx.x``, etc.). Dtype-aware lookups go through
-    ``ctx.target.intrinsic(...)`` instead.
-
-    ``shapes`` maps every buffer to its declared shape so multi-dim
-    ``Load`` / ``Write`` indices can be flattened row-major.
-    """
-
-    target: RenderTarget = field(default_factory=_default_render_target)
-    shapes: dict[str, tuple[int, ...]] = field(default_factory=dict)
-    indent: int = 1
-    intrinsics: dict[str, str] = field(default_factory=dict)
-    builtins: dict[str, str] = field(default_factory=dict)
-    literal_constants: dict[str, float] = field(default_factory=dict)
-    # SSA names whose defining Load came from a ``literal_constants``
-    # input — populated by ``render_body`` after scanning the body, and
-    # consumed by ``Var.render`` to inline the float at use sites instead
-    # of emitting a named ``float in0 = 0.044f;`` decl.
-    literal_ssa: dict[str, float] = field(default_factory=dict)
-    # Single-use scalar SSA temps folded into their sole consumer's expression — readability only
-    # (``EMMY_READABLE``), so ``m_i__t2 = expf(m_i__t1)`` with ``m_i__t1 = m_i - t0`` collapses to
-    # ``m_i__t2 = expf(m_i - t0)`` (the scalar-tier analogue of the fragment chain fusion). Populated
-    # by ``render_body`` (per flat body, in def order) and consumed by ``Var.render`` — exactly like
-    # ``literal_ssa`` but the inlined value is a rendered sub-expression, not a float.
-    inline_exprs: dict[str, str] = field(default_factory=dict)
-    # Per-buffer byte offsets into a single ``extern __shared__`` pool
-    # ``_smem_pool``. When non-empty, ``Smem.render`` emits a pointer
-    # alias into the pool instead of a stand-alone ``__shared__`` array
-    # — the only way to exceed the 48 KB static-smem cap.
-    smem_dynamic_offsets: dict[str, int] = field(default_factory=dict)
-    # How each buffer's bytes are reached, for the buffers that are not one allocation — see
-    # :class:`Memory`. Absent names are :class:`Flat`, so an empty map renders every buffer
-    # exactly as it always was.
-    memory: dict[str, Memory] = field(default_factory=dict)
-    # The input buffers that are the e2m1 pair table (``ir.base.is_f4_pair_table``): ``Load`` computes a lookup into
-    # one from its index instead of reading it.
-    pair_tables: frozenset[str] = frozenset()
-    # Per-buffer canonical dtype tokens (``"f32"`` / ``"f16"``) for every
-    # global-buffer name (kernel inputs + outputs). ``Load`` declares its
-    # SSA-name local in the source buffer's C type so values flow at
-    # buffer dtype end-to-end where possible; ``Write`` inserts the
-    # target's conversion intrinsic only when the value's dtype disagrees
-    # with the destination buffer's dtype. Missing entries default to
-    # ``"f32"`` so legacy bodies render unchanged.
-    buffer_dtypes: dict[str, str] = field(default_factory=dict)
-    # Per-SSA-name canonical dtype tokens, populated as ``render_body``
-    # walks. ``Load`` writes the source buffer's dtype; ``Assign`` writes
-    # ``promote(args)``. Consumed by downstream ``Assign`` / ``Write`` to
-    # decide native-vs-promote-fallback and to insert conversions.
-    ssa_dtypes: dict[str, str] = field(default_factory=dict)
-    # Render-time hint to ``Literal.render``: when set to a non-default
-    # dtype, float literals render via ``target.literal(text, dtype)``
-    # so they compose with non-default-dtype operands. Set transiently
-    # by ``Assign.render`` around the native expression render.
-    literal_default_dtype: str | None = None
-    # C-scope-local declared locals (the mma lane vars ``_g`` / ``_t``, the
-    # ``cp.async`` staging address ``_smem_addr``). A self-scoping stmt declares
-    # these once per ``{ }`` scope and reuses / reassigns them afterward instead
-    # of wrapping itself in a redundant block — so a loop body holding a single
-    # such stmt renders flat (``for (…) { … }``, not ``for (…) { { … } }``).
-    # UNLIKE the tables above this is **scope-local**: ``child()`` copies it (a
-    # new C scope inherits the enclosing scope's decls but its own additions do
-    # not leak back to the parent or across to siblings).
-    scope_decls: set[str] = field(default_factory=set)
-    # The loop counters in scope whose every value is a multiple of a known stride — a static
-    # ``StridedLoop`` start and step — so an index built from one is provably aligned
-    # (``kernel.ir._multiple_of``). Scope-local like ``scope_decls``.
-    aligned: dict[str, int] = field(default_factory=dict)
-
-    def child(self) -> RenderCtx:
-        """Return a new ctx one indent level deeper. The mutable tables (``shapes``,
-        ``ssa_dtypes``, …) stay shared by reference (SSA names are globally unique);
-        ``scope_decls`` is COPIED — it tracks per-C-scope local declarations, which an
-        inner scope inherits but must not leak back out of."""
-        return replace(self, indent=self.indent + 1, scope_decls=set(self.scope_decls), aligned=dict(self.aligned))
-
-    # ---- Convenience wrappers over ``self.target``. These exist so the
-    # render methods read ``ctx.type_name(dt)`` instead of pulling the
-    # target out by hand; they also default ``None`` dtype to F32 so the
-    # call sites don't repeat that boilerplate.
-
-    def memory_for(self, buf: str) -> Memory:
-        """How ``buf`` is reached. Every buffer is :class:`Flat` unless declared otherwise."""
-        return self.memory.get(buf) or Flat(buf)
-
-    def type_name(self, dtype) -> str:
-        """C type spelling for a local declaration. Accepts a
-        :class:`DataType`, a canonical-name string, or ``None`` (treated
-        as F32)."""
-        return self.target.type_name(_canonical_dtype_name(dtype))
-
-    def identity_literal(self, identity: float, dtype) -> str:
-        """Render an accumulator's identity (0, 1, -inf, ...) as a C
-        literal in ``dtype``, wrapping with the target's dtype cast if
-        needed (e.g. ``__float2half(0.0f)`` for fp16). Accepts a
-        :class:`DataType`, a canonical-name string, or ``None`` (F32)."""
-        from emmy.compiler.ir.expr import _float_lit  # noqa: PLC0415
-
-        return self.target.literal(_float_lit(float(identity)), _canonical_dtype_name(dtype))
-
-
-def _canonical_dtype_name(dtype) -> str:
-    """Normalize ``DataType | str | None`` to the canonical dtype token."""
-    if dtype is None:
-        return "f32"
-    if isinstance(dtype, str):
-        return dtype
-    return dtype.name
-
-
-_INTEGER_DTYPES = frozenset({"i16", "i32", "i64", "u8", "u16", "u32", "u64"})
 _INTEGER_ELEMENTWISE_OPS = frozenset(
     {
         "add",
@@ -202,7 +47,7 @@ _INTEGER_ELEMENTWISE_OPS = frozenset(
 def dtype_promote(op_name: str, arg_dtypes: list[str]) -> str:
     """Promote an elementwise op's arg dtypes to a single result dtype.
 
-    Mirrors the inline rule in ``Assign.render``: the result is the
+    The rule the render of an ``Assign`` applies: the result is the
     common dtype iff every arg agrees; any disagreement promotes to f32.
     Floating point keeps the historical "all f16 → f16, otherwise f32"
     rule. Integer arithmetic/bit manipulation must instead retain a common
@@ -210,10 +55,9 @@ def dtype_promote(op_name: str, arg_dtypes: list[str]) -> str:
     renderer sees the operation. Comparisons and logical masks deliberately
     stay on the floating-point rule.
 
-    Lifted out of ``Assign.render`` so the ``030_stamp_types`` pass can
-    reuse the same rule when stamping ``Assign.dtype`` on the IR.
+    The ``030_stamp_types`` pass uses the same rule to stamp ``Assign.dtype`` on the IR.
     """
-    if arg_dtypes and op_name in _INTEGER_ELEMENTWISE_OPS and all(d in _INTEGER_DTYPES for d in arg_dtypes):
+    if arg_dtypes and op_name in _INTEGER_ELEMENTWISE_OPS and all(d in INTEGER_NAMES for d in arg_dtypes):
         # Keep packed arithmetic in the integer family.  NumPy promotes u64+i32 to f64 because
         # neither integer type contains the other's full range; that is disastrous for bit
         # extraction.  Use the usual C-style rank/sign rule instead: the widest unsigned type
@@ -236,10 +80,6 @@ def spell_literal(value: float) -> str:
     return str(int(value)) if value.is_integer() and abs(value) < 2**53 else repr(value)
 
 
-def _pad(n: int) -> str:
-    return "    " * n
-
-
 def _identity_rename(name: str) -> str:
     """Default SSA rename — :meth:`Stmt.substitute` renames nothing."""
     return name
@@ -251,351 +91,11 @@ def _axis_identity(a: Axis) -> Axis:
 
 
 # ---------------------------------------------------------------------------
-# Render helpers — translate elementwise op names to Expr trees, and flatten
-# multi-dim coord tuples into row-major flat-index strings.
-# ---------------------------------------------------------------------------
-
-
-_BINARY_OP: dict[str, str] = {
-    "add": "+",
-    "subtract": "-",
-    "multiply": "*",
-    "divide": "/",
-    "mod": "%",
-    # Comparisons + legacy bool combines — the whole-model explicit-mask subgraph.
-    # Non-integer operands reach ``op_to_expr`` promoted to f32; C's implicit
-    # nonzero→bool conversion makes these logical spellings valid on them. Typed
-    # integer operands use ``_INTEGER_BINARY_OP`` instead, including packed
-    # bitwise decode operations.
-    "equal": "==",
-    "not_equal": "!=",
-    "greater": ">",
-    "less": "<",
-    "greater_equal": ">=",
-    "less_equal": "<=",
-    "bitwise_or": "||",
-    "bitwise_and": "&&",
-}
-
-_INTEGER_BINARY_OP: dict[str, str] = {
-    "floor_divide": "//",
-    "remainder": "%",
-    "mod": "%",
-    "left_shift": "<<",
-    "right_shift": ">>",
-    "bitwise_or": "|",
-    "bitwise_and": "&",
-    "bitwise_xor": "^",
-}
-
-
-def op_to_expr(fn: str, inputs: list[Expr], *, dtype: str | None = None) -> Expr:
-    """Translate an elementwise op name to an ``Expr`` tree.
-
-    Emits abstract intrinsic names (``"exp"``, ``"fmax"``, ``"fabs"``, ...)
-    that targets translate to libm / CUDA spellings via
-    ``RenderCtx.intrinsics`` at ``FuncCallExpr.render`` time. ``dtype``
-    distinguishes integer bit manipulation from the traced mask convention:
-    integer ``bitwise_and``/``bitwise_or`` render as ``&``/``|``, while the
-    historical f32 mask path remains logical ``&&``/``||``.
-    """
-    if dtype in _INTEGER_DTYPES and fn in _INTEGER_BINARY_OP:
-        return BinaryExpr(_INTEGER_BINARY_OP[fn], inputs[0], inputs[1])
-    if dtype in _INTEGER_DTYPES and fn == "bitwise_count":
-        return FuncCallExpr("bitwise_count", tuple(inputs))
-    if fn in _BINARY_OP:
-        return BinaryExpr(_BINARY_OP[fn], inputs[0], inputs[1])
-    if fn == "divide_rn_f32":
-        return FuncCallExpr(fn, tuple(inputs))
-    if fn == "maximum":
-        return FuncCallExpr("fmax", tuple(inputs))
-    if fn == "minimum":
-        return FuncCallExpr("fmin", tuple(inputs))
-    if fn == "pow":
-        return FuncCallExpr("pow", tuple(inputs))
-    if fn == "negative":
-        return BinaryExpr("-", Literal(0.0, "float"), inputs[0])
-    if fn in ("copy", "pad"):
-        return inputs[0]
-    if fn in ("from_f8e4m3", "from_f8e5m2"):
-        # fp8 decode cast: the value semantics live in the dtype conversion the
-        # target already applied to the argument (``Assign.render`` promotes the
-        # f8-typed arg through ``target.convert``, which spells the decode), so
-        # the op itself is an identity here — like ``copy``, but never a raw
-        # byte move because the arg reaches this point converted.
-        return inputs[0]
-    if fn in ("to_f8e4m3", "to_f8e5m2"):
-        # fp8 encode cast — the decode twin: ``Assign.render`` computes the arg at f32 and its
-        # result-dtype demotion routes through ``target.convert``, which spells the <cuda_fp8.h>
-        # constructor (round-to-nearest-even, saturate-to-finite). Identity here, same as above.
-        return inputs[0]
-    if fn == "to_f4e2m1":
-        # e2m1 encode — NOT the fp8 encodes' identity. Those convert to an fp8 type whose
-        # constructor rounds; the codes here land on an ordinary integer carrier, where the same
-        # identity would truncate the value instead. The render emits the rounding as a helper
-        # (``_F4_ENCODE_PRELUDE``).
-        return FuncCallExpr("emmy_to_f4e2m1", (inputs[0],))
-    if fn == "square":
-        return BinaryExpr("*", inputs[0], inputs[0])
-    if fn == "reciprocal":
-        return BinaryExpr("/", Literal(1.0, "float"), inputs[0])
-    if fn == "relu":
-        return FuncCallExpr("fmax", (Literal(0.0, "float"), inputs[0]))
-    if fn == "sigmoid":
-        neg_x = BinaryExpr("-", Literal(0.0, "float"), inputs[0])
-        exp_neg = FuncCallExpr("exp", (neg_x,))
-        return BinaryExpr("/", Literal(1.0, "float"), BinaryExpr("+", Literal(1.0, "float"), exp_neg))
-    if fn in ("exp", "exp_fast", "log", "rsqrt", "sin", "cos", "tanh", "sqrt", "erf", "floor"):
-        return FuncCallExpr(fn, tuple(inputs))
-    if fn == "abs":
-        return FuncCallExpr("fabs", tuple(inputs))
-    if fn == "where":
-        # np.where(cond, a, b) — the mask-apply tail of the explicit-mask
-        # subgraph. The f32-promoted cond is C-truthy (nonzero) in ``?:``.
-        return TernaryExpr(inputs[0], inputs[1], inputs[2])
-    if fn == "bitwise_not":
-        # Torch spells ``~mask`` as bitwise_not even when ``mask`` is bool. Loop
-        # IR historically promotes boolean mask SSA values to f32, so both the
-        # implicit f32 convention and an explicitly bool-stamped value mean
-        # logical-not. Never infer integer complement here: that requires a
-        # separately typed and tested ``~`` path.
-        if dtype not in (None, "f32", "bool"):
-            raise NotImplementedError(f"render: bitwise_not supports boolean masks only, got dtype={dtype!r}")
-        if len(inputs) != 1:
-            raise ValueError(f"render: bitwise_not requires one input, got {len(inputs)}")
-        zero = Literal(0.0, "float") if dtype in (None, "f32") else Literal(0, "int")
-        return BinaryExpr("==", inputs[0], zero)
-    raise NotImplementedError(f"render: elementwise fn={fn!r} not supported")
-
-
-def render_merge_program(program, state_names, ctx: RenderCtx, pad: str | None = None, *, dtype=None) -> list[str]:
-    """Render a monoid ``merge`` / ``combine_states`` program (a tuple of
-    ``Assign``) at ``dtype`` (a :class:`DataType`; ``None`` → fp32). An ``Assign``
-    whose target is in ``state_names`` is a reassignment of an already-declared
-    carried value (``name = …;``); every other ``Assign`` declares a local temp
-    (``<ty> t = …;``). Statement order is load-bearing — a state update must follow
-    every read of that state's old value (the carrier builder guarantees it).
-
-    The program is the PURE form a stored ``combine`` holds — ``Assign`` only, its
-    final writes reassigning the carried state. Used by the kernel-IR cross-thread
-    combine primitives ``WarpShuffle`` / ``TreeHalve``, which render it at the
-    carrier's dtype (fp32 for monoids, the accumulator dtype for a degenerate scalar
-    reduce) inside a loop they emit themselves."""
-    if pad is None:
-        pad = _pad(ctx.indent)
-    dt = "f32" if dtype is None else dtype.name
-    ty = ctx.type_name(dt)
-    sset = set(state_names)
-    out: list[str] = []
-    for a in program:
-        # The merge runs at ``dt`` — cast any arg with a different dtype (e.g. a raw
-        # ``__half`` value loaded into the partial, as in fp16 flash's ``p · v``) so
-        # the operator isn't ambiguous. The cast is a no-op for matching args.
-        arg_exprs = [Var(x) if ctx.ssa_dtypes.get(x, dt) == dt else CastExpr(ty, Var(x)) for x in a.args]
-        rhs = op_to_expr(a.op.name, arg_exprs, dtype=dt).render(ctx)
-        if a.name in sset:
-            out.append(f"{pad}{a.name} = {rhs};")  # reassign carried state
-        else:
-            ctx.ssa_dtypes[a.name] = dt
-            out.append(f"{pad}{ty} {a.name} = {rhs};")  # local temp
-    return out
-
-
-def select_to_ternary(s: Select, dtype: str = "float") -> Expr:
-    """Cast branches to their common result type, avoiding ambiguous half/float C++ conditionals."""
-    branches = list(s.branches)
-    result: Expr = CastExpr(dtype, Var(branches[-1].value))
-    for b in reversed(branches[:-1]):
-        result = TernaryExpr(cond=b.select, if_true=CastExpr(dtype, Var(b.value)), if_false=result)
-    return result
-
-
-#: Largest value C ``int`` addressing can represent; past it a flat address wraps negative.
-_INT_MAX = 2**31 - 1
-
-
-def render_index(buf: str, indices: tuple, ctx: RenderCtx, shape: tuple | None = None) -> str:
-    """Row-major flatten ``buf[i0][i1]...`` to a single C/CUDA expression.
-
-    Builds the row-major sum as an ``Expr`` and runs ``simplify`` on it so
-    constant-zero indices (typical of size-1 outer dims) drop out via the
-    standard ``0 * x → 0`` / ``0 + y → y`` folds rather than emitting
-    ``0 * stride`` terms in the output.
-
-    ``shape`` overrides the buffer's declared shape — a paged read flattens over ONE page,
-    whose paged axis is the page size rather than the buffer's full extent. A single index is
-    already a flat address; any other index spells every dim of a known shape, ``0`` at a size-one dim.
-    """
-    flat = _flat_index(buf, indices, ctx, shape)
-    return flat if isinstance(flat, str) else flat.render(ctx)
-
-
-def render_address(buf: str, indices: tuple, ctx: RenderCtx) -> str:
-    """``&buf[...]`` with the flat index's constant terms added to the pointer: ``&k[i] + 2056``.
-
-    CUDA 12's front end widens an ``int`` index sum to 64 bits before it folds the sum's
-    constant, so ``&k[i + 2048]`` and ``&k[i + 2056]`` become two live 64-bit pointers, where
-    ``&k[i] + 2048`` is one pointer and a load immediate. A register-carried tile's unrolled
-    fragment loads hold a hundred such offsets, and the extra pointers spill a kernel at the
-    register cap (the GDN chunk step: 255 registers and a spill on CUDA 12.9, 179 with this form).
-    """
-    flat = _flat_index(buf, indices, ctx)
-    if isinstance(flat, str):
-        return f"&{buf}[{flat}]"
-    index, offset = _split_offset(flat)
-    if not offset:
-        return f"&{buf}[{flat.render(ctx)}]"
-    return f"&{buf}[{(index or Literal(0, 'int')).render(ctx)}] + {offset}"
-
-
-def _split_offset(e: Expr) -> tuple[Expr | None, int]:
-    """``e`` as ``index + offset``, the constant taken through ``+`` and ``* literal``."""
-    if isinstance(e, Literal) and e.dtype == "int":
-        return None, int(e.value)
-    if isinstance(e, BinaryExpr) and e.op == "+":
-        (left, a), (right, b) = _split_offset(e.left), _split_offset(e.right)
-        return (left if right is None else right if left is None else BinaryExpr("+", left, right)), a + b
-    if isinstance(e, BinaryExpr) and e.op == "*":
-        for term, scale in ((e.left, e.right), (e.right, e.left)):
-            if isinstance(scale, Literal) and scale.dtype == "int":
-                index, offset = _split_offset(term)
-                return (None if index is None else BinaryExpr("*", index, scale)), offset * int(scale.value)
-    return e, 0
-
-
-def _flat_index(buf: str, indices: tuple, ctx: RenderCtx, shape: tuple | None = None) -> Expr | str:
-    """The row-major flat index of ``buf[indices]``: a simplified ``int`` Expr, or the rendered
-    ``long long`` sum when the buffer's extent exceeds ``int`` addressing."""
-    if len(indices) == 0:
-        return Literal(0, "int")
-    if len(indices) == 1:
-        return indices[0].simplify(SimplifyCtx.empty())
-    shape = ctx.shapes.get(buf) if shape is None else shape
-    if shape is None or len(shape) != len(indices):
-        raise ValueError(f"{buf}: {len(indices)} indices for a buffer of shape {shape} — an index spells every dim of its buffer")
-    wide = _exceeds_int_range(shape)
-    flat = None
-    parts: list[str] = []
-    for d, idx in enumerate(indices):
-        stride: Expr = Literal(1, "int")
-        for k in range(d + 1, len(shape)):
-            stride = BinaryExpr("*", stride, _to_expr(shape[k]))
-        stride = stride.simplify(SimplifyCtx.empty())
-        if wide:
-            # Widen the TERM, not the finished sum: `(long long)(a*b + c*d)` computes the whole
-            # sum in `int` and widens an already-wrapped result. Casting the index makes each
-            # multiply 64-bit, and the accumulating `+` chain stays 64-bit by promotion.
-            i_src = idx.simplify(SimplifyCtx.empty()).render(ctx)
-            parts.append(f"(long long)({i_src})" if _is_one(stride) else f"(long long)({i_src}) * ({stride.render(ctx)})")
-            continue
-        term: Expr = idx if _is_one(stride) else BinaryExpr("*", idx, stride)
-        flat = term if flat is None else BinaryExpr("+", flat, term)
-    if wide:
-        return "(" + " + ".join(parts) + ")"
-    assert flat is not None
-    return flat.simplify(SimplifyCtx.empty())
-
-
-@dataclass(frozen=True)
-class Flat:
-    """One contiguous allocation — every buffer, unless it says otherwise."""
-
-    name: str
-    vectorizable: ClassVar[bool] = True
-
-    def base(self, index: tuple, ctx: RenderCtx) -> str:
-        del index, ctx
-        return self.name
-
-    def flat(self, index: tuple, ctx: RenderCtx) -> str:
-        return render_index(self.name, index, ctx)
-
-
-@dataclass(frozen=True)
-class Paged:
-    """A device table of equal-sized pages, each holding the buffer's shape with the paged axis
-    cut to ``page`` — the shape a KV cache has once it is allocated per request.
-
-    The paged index splits: its quotient picks the page (:meth:`base`), its remainder addresses
-    inside one (:meth:`flat`), and every other axis flattens row-major exactly as it does for a
-    flat buffer. Both halves fold through the ordinary index simplifier, so a loop tiled to a
-    multiple of the page size resolves the page once per tile rather than once per element.
-
-    The index along the paged axis is whatever the program spelled — an axis, a value it loaded, a
-    mix — so a cache written at an absolute position is a scatter into it, and no shift is applied
-    here.
-
-    Not vectorizable: a vector access spans consecutive elements, which may cross a page.
-    """
-
-    name: str
-    axis: int
-    page: int
-    vectorizable: ClassVar[bool] = False
-
-    def base(self, index: tuple, ctx: RenderCtx) -> str:
-        page = BinaryExpr("//", index[self.axis], Literal(self.page, "int"))
-        return f"{self.name}__pages[{page.simplify(SimplifyCtx.empty()).render(ctx)}]"
-
-    def flat(self, index: tuple, ctx: RenderCtx) -> str:
-        shape = ctx.shapes.get(self.name)
-        if shape is None or len(shape) != len(index):
-            raise ValueError(f"paged buffer {self.name!r} needs a declared shape matching its {len(index)} indices; got {shape}")
-        within = BinaryExpr("%", index[self.axis], Literal(self.page, "int"))
-        inside = tuple(within if d == self.axis else idx for d, idx in enumerate(index))
-        return render_index(self.name, inside, ctx, shape=(*shape[: self.axis], self.page, *shape[self.axis + 1 :]))
-
-
-def _exceeds_int_range(shape) -> bool:
-    """Whether this buffer's element count can pass ``INT_MAX``, so its addresses need 64-bit
-    arithmetic.
-
-    A flat address is a sum of ``index * stride`` terms, and C evaluates it in ``int`` unless an
-    operand is wider. Past ``INT_MAX`` the sum wraps NEGATIVE and the access lands outside the
-    allocation — an illegal access that poisons the whole CUDA context, not a wrong answer. It is
-    not hypothetical: a 4x512-token Qwen3 trunk plans a 2^32-element activation buffer.
-
-    A symbolic dim is taken at ``DYNAMIC_DIM_MAX``, the exported bound on every ``--dynamic`` axis,
-    so the answer is an upper bound over every shape the program can legally be resolved at rather
-    than a guess about the one in front of us. (``Dim.hint`` is NOT usable here: it is advisory and
-    a run may exceed it.) Buffers that stay inside the range keep their existing 32-bit
-    addressing byte for byte, which is most of them — 64-bit index math is not free."""
-    numel = 1
-    for dim in shape:
-        expr = getattr(dim, "expr", None)
-        if isinstance(dim, int):
-            numel *= dim
-        elif isinstance(expr, Literal) and isinstance(expr.value, int):
-            numel *= expr.value
-        else:
-            numel *= DYNAMIC_DIM_MAX
-        if numel > _INT_MAX:
-            return True
-    return False
-
-
-def _to_expr(d) -> Expr:
-    """Pull the ``Expr`` out of a shape element: ``Dim`` exposes its expr
-    directly; bare ``int`` becomes ``Literal``. ``Tensor.shape`` is always
-    ``tuple[Dim, ...]``, so the ``int`` branch only catches the rare
-    bare-int shape that slipped past coercion."""
-    if isinstance(d, Dim):
-        return d.expr
-    if isinstance(d, int):
-        return Literal(d, "int")
-    raise TypeError(f"_to_expr: unexpected shape element {d!r}")
-
-
-def _is_one(e: Expr) -> bool:
-    return isinstance(e, Literal) and e.value == 1
-
-
-# ---------------------------------------------------------------------------
 # Stmt — abstract base
 # ---------------------------------------------------------------------------
 
 
-class Stmt(Structural, Wire):
+class Stmt(Wire):
     """Base class for IR body statements.
 
     Every concrete Stmt implements:
@@ -606,6 +106,10 @@ class Stmt(Structural, Wire):
     - ``nested()`` — child statement bodies for tree traversal (default:
       no children; block-structured stmts override).
     """
+
+    # Held, not inherited: a ``Protocol`` base brings a metaclass that makes every ``isinstance`` on a kind run
+    # Python code. ``form`` tells this default from an override by the function's identity.
+    structural_key = Structural.structural_key
 
     # Purity trait — True iff this stmt is a pure value binding, a legal member of a stored
     # ``Lambda`` body (the λ-foldMap term vocabulary). Declared on the interface with a
@@ -710,10 +214,7 @@ class Stmt(Structural, Wire):
             return lookup(name, name) if lookup is not None else names(name)
 
         def rename_expr(expr: Expr | None) -> Expr | None:
-            if expr is None:
-                return None
-            mapping = {name: Var(rename_name(name)) for name in expr.free_vars() if rename_name(name) != name}
-            return expr.substitute(mapping) if mapping else expr
+            return None if expr is None else expr.rename(rename_name)
 
         def rename_axis_tree(axis: Axis, seen: frozenset[int]) -> Axis:
             window = axis.window
@@ -750,20 +251,24 @@ class Stmt(Structural, Wire):
         sigma: Sigma = Sigma.IDENTITY,
         axis_fn: Callable[[Axis], Axis] = _axis_identity,
     ) -> Stmt:
-        """Return a copy with every SSA name (binding + dep refs) mapped
-        through ``rename_ssa``, every Expr subterm σ-substituted, and
-        every axis on a ``Loop`` / ``StridedLoop`` mapped through
-        ``axis_fn``. Subclasses without axes accept and ignore ``axis_fn``;
-        Loop-like subclasses thread it through their bodies.
+        """Rename, σ-substitute and axis-map this subtree: every SSA name (binding and reads) through
+        ``rename_ssa``, every Expr subterm through ``sigma``, every loop axis through ``axis_fn``. Prefer
+        :meth:`rename` / :meth:`substitute`, which say which of the two operations a caller means.
 
-        Per-stmt logic lives in :mod:`.passes` (singledispatch over Stmt
-        type + introspection walker for the Stage hierarchy). This method
-        is a thin shim so existing call sites (``s.rewrite(...)``) keep
-        working.
+        σ is applied HYGIENICALLY: the mapping for a name this stmt binds is dropped before its
+        subtree is rewritten, because that binder introduces a different variable. A RENAME is
+        unaffected — it travels through ``rename_ssa``/``axis_fn`` and renames the binder itself, which
+        is exactly why it may pass where a substitution may not.
+
+        Each kind states how its own fields rewrite in :meth:`_rewrite`; children go back through this entry.
         """
-        from emmy.compiler.ir.stmt.passes import rewrite  # noqa: PLC0415
+        shadowed = self.binds_axes() & sigma.mapping.keys() if sigma.mapping else ()
+        if shadowed:
+            sigma = Sigma({name: value for name, value in sigma.mapping.items() if name not in shadowed})
+        return self._rewrite(rename_ssa, sigma, axis_fn)
 
-        return rewrite(self, rename_ssa, sigma, axis_fn)
+    def _rewrite(self, rename, sigma, axis_fn):  # noqa: ANN001, ANN202 — see :meth:`rewrite`
+        raise NotImplementedError(f"rewrite not implemented for {type(self).__name__}")
 
     def nested(self) -> tuple[Body, ...]:
         """Child statement bodies for tree traversal.
@@ -841,6 +346,17 @@ class Stmt(Structural, Wire):
         """
         return ()
 
+    def replace(self, **changes) -> Stmt:  # noqa: ANN003 — field values
+        """A copy of this stmt with the named fields changed — the one way a statement is edited."""
+        return replace(self, **changes)
+
+    def with_exprs(self, exprs: tuple[Expr, ...]) -> Stmt:
+        """Write-side counterpart to :meth:`exprs`: this stmt with its expressions replaced by ``exprs``,
+        positionally. A kind that reports expressions and is met by an expression map overrides it."""
+        if exprs:
+            raise NotImplementedError(f"{type(self).__name__} cannot be rebuilt from mapped expressions")
+        return self
+
     def pretty(self, indent: str = "") -> list[str]:
         """Render this stmt as a list of indented lines.
 
@@ -851,16 +367,6 @@ class Stmt(Structural, Wire):
         """
         return [f"{indent}<unrecognized {type(self).__name__}>"]
 
-    def render(self, ctx: RenderCtx) -> list[str]:
-        """Emit indented C / CUDA source lines for this stmt.
-
-        Block-structured stmts recurse via ``child.render(ctx.child())``;
-        leaves return a single line. The ``ctx`` carries target-specific
-        intrinsic / builtin tables, current indent, and per-buf shapes
-        for index flattening. Subclasses override.
-        """
-        raise NotImplementedError(f"{type(self).__name__}.render not implemented")
-
 
 def pretty_body(body: Body, indent: str = "") -> list[str]:
     """Flatten ``stmt.pretty(indent)`` over a body sequence."""
@@ -868,146 +374,3 @@ def pretty_body(body: Body, indent: str = "") -> list[str]:
     for s in body:
         out.extend(s.pretty(indent))
     return out
-
-
-def render_body(body: Body, ctx: RenderCtx) -> list[str]:
-    """Flatten ``stmt.render(ctx)`` over a body sequence.
-
-    Detection of vectorizable Load runs (``LDS.128`` / ``__half2``) is
-    no longer done here — the dedicated Kernel-IR pass
-    ``050_vectorize_loads`` widens those runs into one :class:`Load`
-    with ``extra_names`` populated before render. This function's only
-    pre-walk responsibility is registering literal-constant Loads so
-    their ``Var(name)`` uses inline as float literals instead of
-    materializing a named local. An INTEGER constant is left out of that
-    inlining: the map holds floats and every use site renders them as
-    float literals, which would put a shift amount or a nibble mask into
-    f32 arithmetic that has no spelling for the bit operation reading it.
-    Those keep their named local, at their own dtype.
-    """
-    from emmy.compiler.ir.stmt.leaves import Load  # local — avoid cycle
-
-    # Pre-pass: register every literal-constant Load's SSA name in the ctx
-    # so subsequent ``Var(name)`` references render as the literal value.
-    # The Load itself is then skipped — the loop IR pretty printer behaves
-    # the same way (``multiply(in4, 0.044)`` instead of an explicit
-    # ``in0 = load mul_1_c1[0]; multiply(in4, in0)`` chain).
-    if ctx.literal_constants:
-        new_map = dict(ctx.literal_ssa)
-        changed = False
-        for s in body:
-            # Literal-const Loads are always scalar (the vectorize pass
-            # excludes literal-const buffers from its widening logic).
-            if isinstance(s, Load) and s.is_scalar and s.is_literal(ctx.literal_constants) and not _integer_load(s):
-                new_map[s.name] = ctx.literal_constants[s.input]
-                changed = True
-        if changed:
-            ctx = replace(ctx, literal_ssa=new_map)
-
-    # Readability (EMMY_READABLE): fold each single-use scalar ``Assign`` temp into its sole
-    # consumer's expression — ``m_i__t2 = expf(m_i__t1)`` over ``m_i__t1 = m_i - t0`` becomes
-    # ``m_i__t2 = expf(m_i - t0)``. Only when the temp's ONE read is in this same flat body (a nested
-    # or repeated use keeps it named), so it never changes evaluation; SASS-identical. Correctness
-    # rests on two premises: (1) every node's ``deps()`` is a COMPLETE account of the names its
-    # render references — ``_read_counts`` sees readers only through it, so an under-reporting node
-    # (a stashed name in a field ``deps`` skips) could hide a second reader of a folded temp; and
-    # (2) no statement between the def and its sole read redefines an operand the folded expression
-    # reads (a carrier commit — ``l_i = …`` — is a same-body redefinition). (2) is checked below
-    # (the straddle guard); (1) is each node's ``deps`` contract.
-    from emmy.compiler.ir.stmt.leaves import Assign  # local — avoid cycle
-
-    inlined: set[str] = set()
-    if _readable():
-        # The readability scan runs before this body's Loads / Assigns render, so their dtypes are
-        # not in ``ctx.ssa_dtypes`` yet. Keep their stamped types locally: folding an expression
-        # that needs a target conversion would bypass ``Assign.render`` and drop that conversion.
-        local_dtypes = {name: s.dtype.name for s in body if isinstance(s, (Load, Assign)) and s.dtype is not None for name in s.defines()}
-        from emmy.compiler.ir.expr import BinaryExpr, TernaryExpr, Var  # local — avoid cycle
-
-        total = _read_counts(body, {})
-        local: dict[str, int] = {}
-        for s in body:
-            for nm in s.deps():
-                local[nm] = local.get(nm, 0) + 1
-        inline = dict(ctx.inline_exprs)
-        bases: dict[str, frozenset[str]] = {}  # inlined temp → the base names its folded expression reads
-        stmts = list(body)
-        for di, s in enumerate(stmts):
-            if not (
-                isinstance(s, Assign)
-                and s.op.name != "bitcast"
-                and total.get(s.name, 0) == 1
-                and local.get(s.name, 0) == 1
-                and s.name not in inline
-            ):
-                continue
-            # The sole reader must render its operands through ``op_to_expr`` / ``Var.render`` (only
-            # ``Assign`` does) — folding into an ``Accum`` / ``Write`` would drop the temp
-            # without substituting it, leaving an undefined reference.
-            ri = next((j for j, r in enumerate(stmts) if s.name in r.deps()), None)
-            if ri is None or not isinstance(stmts[ri], Assign):
-                continue
-            result_dt = s.dtype.name if s.dtype is not None else "f32"
-            arg_dtypes = [local_dtypes.get(arg, ctx.ssa_dtypes.get(arg, "f32")) for arg in s.args]
-            if any(dtype != result_dt for dtype in arg_dtypes):
-                # The named Assign's target-aware renderer inserts conversions (for example
-                # ``__half2float``). The readability-only fold renders a bare Expr tree, so keep
-                # the Assign named rather than silently changing its type semantics.
-                continue
-            # Straddle guard: the fold moves this computation from its def site to the read site, so
-            # every base operand — transitively, through already-inlined temps — must not be redefined
-            # by a statement in between (``defines()``: a state commit / Accum). Each link checks its
-            # own def→read window; chained folds compose, so the windows cover the full span from the
-            # earliest constituent's def to the final read.
-            names = frozenset(nm for a in s.args for nm in bases.get(a, (a,)))
-            if any(nm in st.defines() for st in stmts[di + 1 : ri] for nm in names):
-                continue
-            expr = op_to_expr(
-                s.op.name,
-                [Var(a) for a in s.args],
-                dtype=s.dtype.name if s.dtype is not None else None,
-            )
-            rendered = expr.render(replace(ctx, inline_exprs=inline))
-            inline[s.name] = f"({rendered})" if isinstance(expr, (BinaryExpr, TernaryExpr)) else rendered
-            if s.dtype is not None:
-                # The defining Assign is omitted below, so its normal render path cannot
-                # register the SSA dtype. Preserve it for the consumer: otherwise an inlined
-                # integer shift feeding a bitwise mask is mistaken for f32 and rendered with
-                # logical ``&&``/``||`` instead of integer ``&``/``|``.
-                ctx.ssa_dtypes[s.name] = s.dtype.name
-            bases[s.name] = names
-            inlined.add(s.name)
-        if inlined:
-            ctx = replace(ctx, inline_exprs=inline)
-
-    out: list[str] = []
-    for s in body:
-        if isinstance(s, Load) and s.is_scalar and s.name in ctx.literal_ssa and s.is_literal(ctx.literal_constants):
-            continue  # its value inlines at every use site
-        if isinstance(s, Assign) and s.name in inlined:
-            continue  # folded into its consumer
-        out.extend(s.render(ctx))
-    return out
-
-
-def _integer_load(load) -> bool:
-    """Whether a Load reads an integer buffer — asked of the literal-constant fold, which renders
-    its values as float literals."""
-    return load.dtype is not None and load.dtype.name in _INTEGER_DTYPES
-
-
-def _readable() -> bool:
-    from emmy import config  # local — avoid cycle
-
-    return config.readable()
-
-
-def _read_counts(body: Body, counts: dict[str, int]) -> dict[str, int]:
-    """Total reads of each SSA name across ``body`` and every nested body (a name read inside a loop
-    counts, so a temp used only in a nested scope is never folded at this level)."""
-    for s in body:
-        for nm in s.deps():
-            counts[nm] = counts.get(nm, 0) + 1
-        for b in s.nested():
-            _read_counts(b, counts)
-    return counts

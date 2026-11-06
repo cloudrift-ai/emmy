@@ -2,10 +2,8 @@
 
 from emmy.compiler.ir.axis import Axis
 from emmy.compiler.ir.expr import BinaryExpr, Literal, Var
-from emmy.compiler.ir.stmt.blocks import Cond, Loop
-from emmy.compiler.ir.stmt.body import Body
-from emmy.compiler.ir.stmt.leaves import Accum, Affine, Assign, Init, Let, Load, Select, SelectBranch, Write
-from emmy.compiler.ir.stmt.normalize import normalize_body, place_values
+from emmy.compiler.ir.stmt import Accum, Affine, Assign, Body, Cond, Init, Let, Load, Loop, Select, SelectBranch, Write, normalize_body
+from emmy.compiler.ir.stmt.normalize import place_values
 
 
 def test_dedup_loads_preserves_loads_under_a_rebound_coordinate() -> None:
@@ -425,7 +423,7 @@ def test_dedup_loads_does_not_reuse_a_read_across_a_loop_that_writes_its_buffer(
 def test_normalize_body_dedups_identical_accumulations() -> None:
     """Two consumers of one fused value carry two copies of its accumulation in one reduce loop
     after the splice; the second is the first under another name."""
-    from emmy.compiler.ir.stmt.leaves import Accum
+    from emmy.compiler.ir.stmt import Accum
 
     body = Body(
         (

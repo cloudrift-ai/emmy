@@ -3,7 +3,7 @@
 Two layers:
 
 * :func:`lane_bank_distribution` — pure lane→bank oracle. Decodes an intra-CTA thread id
-  ``warp_id*32 + lane`` per the same axis flattening as ``Tile.render``, evaluates a Load's
+  ``warp_id*32 + lane`` per the same axis flattening as ``Tile``'s render, evaluates a Load's
   slab-relative ``Expr`` index per lane against row-major strides over the slab extents, and
   tallies per-bank distinct addresses (4-byte banks — a sub-word element dtype packs
   ``4 // elem_bytes`` elements per bank word). Free vars not in ``thread_axes`` and not in
@@ -155,14 +155,14 @@ def find_all_bindings(graph: Graph, stage_filter: set[str] | None = None) -> lis
 
 
 # ---------------------------------------------------------------------------
-# Thread-axis decode (mirrors ir/stmt/blocks.py::_render_thread_axis_decode)
+# Thread-axis decode
 # ---------------------------------------------------------------------------
 
 
 def _thread_axis_env(thread_axes: tuple[Axis, ...], tid: int) -> dict[str, int]:
     """Reproduce the runtime decode of ``threadIdx.x`` into per-axis ints.
 
-    Identical to ``_render_thread_axis_decode`` in ``ir/stmt/blocks.py``:
+    The decode a thread tile renders:
     outermost axis = ``tid // inner_prod``, inner axes get
     ``(tid // stride) % extent`` with ``stride`` doubling rightward,
     and a single-axis tile collapses to ``tid``.
