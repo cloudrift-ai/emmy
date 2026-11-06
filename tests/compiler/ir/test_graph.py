@@ -374,6 +374,23 @@ def test_to_dict_roundtrips_composite_op_field_dim():
     assert restored.nodes["y"].op.out_shape == (groups,)
 
 
+def test_to_dict_roundtrips_an_expression_field_through_the_dump():
+    """An expression's ``str`` is its text, which the dump reader does not read: the dump writes its ``repr``."""
+    import json
+
+    from emmy.compiler.ir.base import ConstantOp
+    from emmy.compiler.ir.expr import BinaryExpr, Literal, Var
+
+    scale = BinaryExpr("*", Var("seq_len"), Literal(2, "int"))
+    g = Graph()
+    g.add_node(op=ConstantOp(name="c", context_value=scale), inputs=[], output=Tensor("c", ()), node_id="c")
+    g.outputs = ["c"]
+
+    restored = Graph.from_dict(json.loads(json.dumps(g.to_dict(), default=str)))
+
+    assert restored.nodes["c"].op.context_value == scale
+
+
 # ---- multi-output (MIMO) foundation ----
 
 

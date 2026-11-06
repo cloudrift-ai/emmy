@@ -12,7 +12,7 @@ from emmy.compiler.graph import Graph
 from emmy.compiler.ir.axis import Axis
 from emmy.compiler.ir.base import ConstantOp, InputOp
 from emmy.compiler.ir.elementwise import ElementwiseImpl
-from emmy.compiler.ir.expr import BinaryExpr, Builtin, CastExpr, Expr, FuncCallExpr, Literal, TernaryExpr, Var
+from emmy.compiler.ir.expr import BinaryExpr, Builtin, CastExpr, Expr, FlatIndex, FuncCallExpr, Literal, TernaryExpr, Var
 from emmy.compiler.ir.frontend.ir import (
     CatOp,
     Conv1dOp,
@@ -78,9 +78,18 @@ from emmy.compiler.wire import decode, encode, intern
         (CastExpr("int", Var("x")), "(int)x"),
         (CastExpr("int", BinaryExpr("+", Var("x"), Literal(1, "int"))), "(int)(x + 1)"),
         (CastExpr("int", Literal(-1, "int")), "(int)(-1)"),
+        (Literal(float("-inf")), "-inf"),
+        (BinaryExpr("*", Var("x"), Literal(float("inf"))), "x * inf"),
+        (FlatIndex("w", (Var("a0"), BinaryExpr("+", Var("a1"), Literal(1, "int")))), "w[a0, a1 + 1]"),
+        (BinaryExpr("+", FlatIndex("w", (Var("a0"),)), Literal(4, "int")), "w[a0] + 4"),
+        (Var("$0"), "`$0`"),
+        (Var("thread_idx.x"), "`thread_idx.x`"),
+        (Var("true"), "`true`"),
+        (FlatIndex("model.layers.0.weight", (Literal(0, "int"),)), "`model.layers.0.weight`[0]"),
     ],
 )
 def test_expression_round_trip(expr, text):
+    assert str(expr) == text
     assert expr.to_wire() == text
     assert Expr.from_wire(text) == expr
     assert decode(encode(expr)) == expr
@@ -91,9 +100,9 @@ def test_expression_parse_error_names_its_position():
         Expr.from_wire("a + * b")
 
 
-def test_a_variable_spelled_like_a_builtin_has_no_text():
+def test_a_name_holding_a_backtick_has_no_text():
     with pytest.raises(ValueError, match="no spelling"):
-        Var("thread_idx.x").to_wire()
+        str(Var("a`b"))
 
 
 def test_dimension_round_trip_preserves_composite_expression_and_hint():

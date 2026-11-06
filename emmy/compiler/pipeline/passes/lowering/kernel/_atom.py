@@ -1867,7 +1867,7 @@ def _dedup_loads(stmts: list[Stmt]) -> list[Stmt]:
     kept: list[Stmt] = []
     for s in stmts:
         if isinstance(s, Load) and s.is_scalar:
-            sig = (s.input, tuple(e.pretty() for e in s.index))
+            sig = (s.input, tuple(str(e) for e in s.index))
             if sig in seen:
                 rename[s.names[0]] = seen[sig]
                 continue

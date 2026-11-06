@@ -572,10 +572,10 @@ class CpAsyncCopy(Declared):
     valid: Expr | None = role("expr", default=None)
 
     def pretty(self, indent: str = "") -> list[str]:
-        smem_idx = ", ".join(e.pretty() for e in self.smem_index)
-        src_idx = ", ".join(e.pretty() for e in self.src_index)
+        smem_idx = ", ".join(str(e) for e in self.smem_index)
+        src_idx = ", ".join(str(e) for e in self.src_index)
         swz = f" swz={self.swizzle}" if swizzle_xor(self.swizzle) else ""
-        lane = f" + lane({', '.join(e.pretty() for e in self.lane_index)})" if self.lane_index is not None else ""
+        lane = f" + lane({', '.join(str(e) for e in self.lane_index)})" if self.lane_index is not None else ""
         return [f"{indent}cp.async[{self.nbytes}B] {self.smem}[{smem_idx}]{lane}{swz} <- {self.src}[{src_idx}]"]
 
 
@@ -688,9 +688,9 @@ class TmaLoad(Declared):
     mbar_slot: Expr | None = role("expr", default=None)
 
     def pretty(self, indent: str = "") -> list[str]:
-        smem_idx = ", ".join(e.pretty() for e in self.smem_index)
-        coords = ", ".join(e.pretty() for e in self.coords)
-        s = "" if self.mbar_slot is None else f"[{self.mbar_slot.pretty()}]"
+        smem_idx = ", ".join(str(e) for e in self.smem_index)
+        coords = ", ".join(str(e) for e in self.coords)
+        s = "" if self.mbar_slot is None else f"[{self.mbar_slot}]"
         return [f"{indent}TmaLoad {self.smem}[{smem_idx}] <- {self.desc}({coords}) mbar={self.mbar}{s}"]
 
 
@@ -726,7 +726,7 @@ class MbarrierInit(Declared):
     slot: Expr | None = role("expr", default=None)
 
     def pretty(self, indent: str = "") -> list[str]:
-        s = "" if self.slot is None else f"[{self.slot.pretty()}]"
+        s = "" if self.slot is None else f"[{self.slot}]"
         return [f"{indent}MbarrierInit({self.mbar}{s}, count={self.count})"]
 
 
@@ -748,7 +748,7 @@ class MbarrierArriveExpectTx(Declared):
     slot: Expr | None = role("expr", default=None)
 
     def pretty(self, indent: str = "") -> list[str]:
-        s = "" if self.slot is None else f"[{self.slot.pretty()}]"
+        s = "" if self.slot is None else f"[{self.slot}]"
         return [f"{indent}MbarrierArriveExpectTx({self.mbar}{s}, bytes={self.bytes_})"]
 
 
@@ -771,7 +771,7 @@ class MbarrierArrive(Declared):
     slot: Expr | None = role("expr", default=None)
 
     def pretty(self, indent: str = "") -> list[str]:
-        s = "" if self.slot is None else f"[{self.slot.pretty()}]"
+        s = "" if self.slot is None else f"[{self.slot}]"
         return [f"{indent}MbarrierArrive({self.mbar}{s})"]
 
 
@@ -820,8 +820,8 @@ class MbarrierWait(Declared):
     slot: Expr | None = role("expr", default=None)
 
     def pretty(self, indent: str = "") -> list[str]:
-        s = "" if self.slot is None else f"[{self.slot.pretty()}]"
-        return [f"{indent}MbarrierWait({self.mbar}{s}, phase={self.phase.pretty()})"]
+        s = "" if self.slot is None else f"[{self.slot}]"
+        return [f"{indent}MbarrierWait({self.mbar}{s}, phase={self.phase})"]
 
 
 @render_stmt.register
@@ -1209,8 +1209,8 @@ class FragmentApply(Declared):
             if arg.kind == ROW:
                 return f"{list(arg.names)}"
             if arg.kind == GMEM:
-                return f"{arg.buffer}[{', '.join(e.pretty() for e in arg.exprs)}]"
-            return arg.exprs[0].pretty() if arg.exprs else arg.names[0]
+                return f"{arg.buffer}[{', '.join(str(e) for e in arg.exprs)}]"
+            return str(arg.exprs[0]) if arg.exprs else arg.names[0]
 
         shown = ", ".join(_show(arg) for arg in self.args)
         chain = "".join(f" |> {p.name}" for p in self.post)
@@ -1647,7 +1647,7 @@ class BlockScaleLoad(Declared):
     ldm: int = 0
 
     def pretty(self, indent: str = "") -> list[str]:
-        idx = ", ".join(e.pretty() for e in self.src_index)
+        idx = ", ".join(str(e) for e in self.src_index)
         return [f"{indent}BlockScaleLoad {self.frag} <- {self.src_buffer}[{idx}] (sf{self.role}, ldm={self.ldm})"]
 
 
@@ -1734,7 +1734,7 @@ class LdmatrixLoad(Declared):
     fragment_index: int = 0
 
     def pretty(self, indent: str = "") -> list[str]:
-        idx = ", ".join(e.pretty() for e in self.src_index)
+        idx = ", ".join(str(e) for e in self.src_index)
         if self.pair_frag is not None:
             variant = "x4 pair" if self.b_trans else "x4.trans pair"
             pair = f"({self.frag}, {self.pair_frag})"
@@ -1747,7 +1747,7 @@ class LdmatrixLoad(Declared):
             variant = "shared gather"
         else:
             variant = ("x4" if self.role == "a" else ("x2" if self.b_trans else "x2.trans")) if self.staged else "gmem-direct"
-        guard = "" if self.gmem_guard is None else f" guard<{self.gmem_guard[1].pretty()}"
+        guard = "" if self.gmem_guard is None else f" guard<{self.gmem_guard[1]}"
         return [f"{indent}LdmatrixLoad {self.frag} <- {self.src_buffer}[{idx}] ({variant}{guard}, ldm={self.ldm or 'auto'})"]
 
 
@@ -2149,7 +2149,7 @@ class WgmmaDescriptor(Declared):
     sbo_bytes: int
 
     def pretty(self, indent: str = "") -> list[str]:
-        idx = "" if self.smem_index is None else f"[{self.smem_index.pretty()}]"
+        idx = "" if self.smem_index is None else f"[{self.smem_index}]"
         return [f"{indent}WgmmaDescriptor {self.name} <- {self.smem}{idx} ({self.swizzle}, lbo={self.lbo_bytes}, sbo={self.sbo_bytes})"]
 
 
@@ -2375,7 +2375,7 @@ class RegStore(Declared):
     run: tuple[RegStore, ...] = role("stmts", default=())
 
     def pretty(self, indent: str = "") -> list[str]:
-        idx = ", ".join(e.pretty() for e in self.dst_index)
+        idx = ", ".join(str(e) for e in self.dst_index)
         epi = ""
         if self.epilogue is not None:
             chain = ", ".join(st.op.name for st in self.epilogue if isinstance(st, Assign))
@@ -2383,9 +2383,9 @@ class RegStore(Declared):
             epi = f" epilogue[{chain}]({bufs or 'no loads'})"
         guards = ""
         if self.m_guard is not None:
-            guards += f" m<{self.m_guard[1].pretty()}"
+            guards += f" m<{self.m_guard[1]}"
         if self.n_guard is not None:
-            guards += f" n<{self.n_guard[1].pretty()}"
+            guards += f" n<{self.n_guard[1]}"
         acc = " (atomic)" if self.atomic else ""
         run = "" if not self.run else f" +{','.join(cell.frag for cell in self.run)} (16-byte rows)"
         return [f"{indent}RegStore {self.dst_buffer}[{idx}] <- {self.frag}{run}{epi}{guards}{acc} (ldm={self.ldm or 'auto'})"]

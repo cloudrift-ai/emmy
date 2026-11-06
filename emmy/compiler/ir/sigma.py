@@ -26,7 +26,7 @@ class Sigma:
     the consumer's namespace.
 
     Equality and hashing are by canonical form — sorted ``(name,
-    expr.pretty())`` pairs — so two Sigmas built from different dicts
+    str(expr))`` pairs — so two Sigmas built from different dicts
     that denote the same substitution compare equal and share a hash
     bucket.
     """
@@ -34,7 +34,7 @@ class Sigma:
     mapping: dict[str, Expr] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
-        key = tuple(sorted((k, v.pretty()) for k, v in self.mapping.items()))
+        key = tuple(sorted((k, str(v)) for k, v in self.mapping.items()))
         object.__setattr__(self, "_key", key)
 
     @classmethod
@@ -58,7 +58,7 @@ class Sigma:
     def extend(self, name: str, expr: Expr) -> Sigma:
         mapping = {**self.mapping, name: expr}
         existing = ((axis, canonical) for axis, canonical in self._key if axis != name)
-        key = tuple(sorted((*existing, (name, expr.pretty()))))
+        key = tuple(sorted((*existing, (name, str(expr)))))
         return self._from_key(mapping, key)
 
     def restrict(self, names: set[str]) -> Sigma:

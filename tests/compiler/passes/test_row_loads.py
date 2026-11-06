@@ -145,6 +145,6 @@ def test_an_outer_reuse_never_renames_a_nested_trip_definition() -> None:
     stage = Loop(axis=Axis("k", 4), body=Body((lane_loop(Load(name="in0", input="stat", index=(Var("i"),), dtype="float16"), "tile"),)))
     out = walk(Body((fill, stage)), frozenset({"stat", "tile"}), lanes)
     inner = next(s for s in out if isinstance(s, Loop)).body
-    loads = [(s.name, s.index[0].pretty()) for s in inner if isinstance(s, Load)]
+    loads = [(s.name, str(s.index[0])) for s in inner if isinstance(s, Load)]
     assert [name for name, _ in loads] == ["in0__u0", "in0__u1"], loads
     assert len({index for _, index in loads}) == 2, loads

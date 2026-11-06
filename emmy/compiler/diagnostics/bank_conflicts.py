@@ -378,7 +378,7 @@ def _binding_result(b: StageBinding, k_iter: int, warp_id: int) -> BankConflictR
         smem_bytes=prod(extents) * elem_bytes,
         load_name=b.load.names[0],
         tile_op_name=b.tile_op_name,
-        index_repr=tuple(e.pretty() for e in b.load.index),
+        index_repr=tuple(str(e) for e in b.load.index),
         lane_banks=dist.lane_banks,
         lane_addrs=dist.lane_addrs,
         counts=dist.counts,

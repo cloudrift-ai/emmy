@@ -947,7 +947,7 @@ class SyncTransport:
                 and b.is_scalar
                 and a.input == b.input
                 and len(a.index) == len(b.index)
-                and all(x.pretty() == y.pretty() for x, y in zip(a.index[:-1], b.index[:-1], strict=True))
+                and all(str(x) == str(y) for x, y in zip(a.index[:-1], b.index[:-1], strict=True))
                 and step == 1
                 and isinstance(sz[p], Load)
                 and aligned(sz[p].index[-1])

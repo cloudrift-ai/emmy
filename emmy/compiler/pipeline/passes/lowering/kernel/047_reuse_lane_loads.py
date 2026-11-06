@@ -145,7 +145,7 @@ def _canonical(expr):
     names = expr.free_vars()
     form = affine_form(expr, names) if names else None
     if form is None:
-        return expr.pretty()
+        return str(expr)
     anchor, coeffs = form
     anchor = anchor.simplify(SimplifyCtx.empty())
-    return (anchor.pretty(), tuple(sorted((name, c) for name, c in coeffs.items() if c)))
+    return (str(anchor), tuple(sorted((name, c) for name, c in coeffs.items() if c)))

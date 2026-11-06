@@ -1436,7 +1436,7 @@ def test_copies_read_at_shifted_columns_cluster_onto_the_plain_read() -> None:
     (clustered,) = _cluster_value_seams(seams, (Axis("n", 8), Axis("k", 8)))
 
     assert clustered.spelling == "PLACE@map.3/inner"
-    assert sorted(dict(pairs)["n"].pretty() for _, pairs, _ in clustered.siblings) == sorted((lower.pretty(), upper.pretty()))
+    assert sorted(str(dict(pairs)["n"]) for _, pairs, _ in clustered.siblings) == sorted((str(lower), str(upper)))
 
 
 def test_a_column_read_past_the_plain_copy_is_not_its_value() -> None:
@@ -1463,7 +1463,7 @@ def test_a_copy_storing_c_of_every_d_cells_reads_the_plain_copy_at_its_stored_ad
     (clustered,) = _cluster_value_seams([folded, _column_seam(Var("n"), "PLACE@map.2/inner")], (Axis("n", 8), Axis("k", 8), Axis("m", 16)))
 
     assert clustered.spelling == "PLACE@map.2/inner"
-    assert [dict(pairs)["n"].pretty() for _, pairs, _ in clustered.siblings] == [stored.pretty()]
+    assert [str(dict(pairs)["n"]) for _, pairs, _ in clustered.siblings] == [str(stored)]
 
 
 def test_a_conversion_to_the_dtype_a_workspace_stores_reads_the_workspace_itself() -> None:
@@ -1622,7 +1622,7 @@ def test_a_twin_channel_read_at_shifted_columns_reads_the_plain_channels_workspa
 
     def loads(node) -> list[tuple[str, str]]:
         body = node.op.op.lower(frozenset(), node.op.output_specs, node.op.axes)
-        return [(stmt.input, stmt.index[-1].pretty()) for stmt in body.iter() if isinstance(stmt, Load)]
+        return [(stmt.input, str(stmt.index[-1])) for stmt in body.iter() if isinstance(stmt, Load)]
 
     *producers, consumer = (cut.nodes[nid] for nid in cut.topological_order() if isinstance(cut.nodes[nid].op, TileOp))
     workspaces = [tensor for node in producers for tensor in node.outputs]
@@ -1708,7 +1708,7 @@ def test_a_gqa_value_read_at_its_flat_channel_is_stored_once_per_kv_head() -> No
     assert [d.as_static() for d in producer.outputs[0].shape][-1] == 16
     body = producer.op.op.lower(frozenset(), producer.op.output_specs, producer.op.axes)
     (weight,) = [stmt for stmt in body.iter() if isinstance(stmt, Load) and stmt.input == "x1"]
-    assert "/" not in weight.index[-1].pretty() and "%" not in weight.index[-1].pretty()
+    assert "/" not in str(weight.index[-1]) and "%" not in str(weight.index[-1])
 
 
 @requires_cuda

@@ -96,7 +96,7 @@ class Call(Stmt):
         return self if buffers == self.target.buffers else self.replace(target=self.target.with_buffers(buffers))
 
     def pretty(self, indent: str = "") -> list[str]:
-        args = (*self.target.buffers, *(arg.pretty() for arg in self.args))
+        args = (*self.target.buffers, *(str(arg) for arg in self.args))
         return [f"{indent}{self.name} = {self.target.name}({', '.join(args)})"]
 
     def _rewrite(self, rename, sigma, axis_fn):  # noqa: ANN001, ANN202 — see ``Stmt.rewrite``

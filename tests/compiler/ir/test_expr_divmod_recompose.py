@@ -35,9 +35,9 @@ def test_scaled_pair_preserves_value(c: int, k: int):
     rem = BinaryExpr("%", f, _lit(c)) if k == 1 else BinaryExpr("*", BinaryExpr("%", f, _lit(c)), _lit(k))
     e = BinaryExpr("+", quot, rem)
     s = _simplify(e)
-    assert "%" not in s.pretty() and "//" not in s.pretty() and "/" not in s.pretty()
+    assert "%" not in str(s) and "//" not in str(s) and "/" not in str(s)
     for v in range(0, 4 * c + 3):
-        assert e.eval({"f": v}) == s.eval({"f": v}), f"mismatch at f={v}: {s.pretty()}"
+        assert e.eval({"f": v}) == s.eval({"f": v}), f"mismatch at f={v}: {s}"
 
 
 def test_pair_inside_longer_chain():
@@ -50,7 +50,7 @@ def test_pair_inside_longer_chain():
         BinaryExpr("%", f, _lit(512)),
     )
     s = _simplify(e)
-    assert "%" not in s.pretty()
+    assert "%" not in str(s)
     for fv, rv in ((0, 0), (511, 1), (513, 3), (12287, 7)):
         assert e.eval({"f": fv, "row": rv}) == s.eval({"f": fv, "row": rv})
 
@@ -61,7 +61,7 @@ def test_mismatched_divisors_do_not_fold():
     s = _simplify(e)
     for v in (0, 255, 256, 511, 513):
         assert e.eval({"f": v}) == s.eval({"f": v})
-    assert "%" in s.pretty(), "different divisors must not recompose"
+    assert "%" in str(s), "different divisors must not recompose"
 
 
 def test_mismatched_scale_does_not_fold():
@@ -71,11 +71,11 @@ def test_mismatched_scale_does_not_fold():
     s = _simplify(e)
     for v in (0, 511, 512, 1025):
         assert e.eval({"f": v}) == s.eval({"f": v})
-    assert "%" in s.pretty()
+    assert "%" in str(s)
 
 
 def test_different_dividends_do_not_fold():
     f, g = Var("f"), Var("g")
     e = BinaryExpr("+", BinaryExpr("*", BinaryExpr("//", f, _lit(64)), _lit(64)), BinaryExpr("%", g, _lit(64)))
     s = _simplify(e)
-    assert "%" in s.pretty()
+    assert "%" in str(s)

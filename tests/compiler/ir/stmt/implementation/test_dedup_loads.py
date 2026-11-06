@@ -98,7 +98,7 @@ def test_normalize_hoisted_shadowed_loads_keep_their_values() -> None:
 
 
 def test_cse_does_not_use_expression_printing(monkeypatch) -> None:
-    monkeypatch.setattr(BinaryExpr, "pretty", lambda self: "index")
+    monkeypatch.setattr(BinaryExpr, "__str__", lambda self: "index")
     indices = [BinaryExpr("+", Var("i"), Literal(n, "int")) for n in (1, 2)]
     body = Body(Load(name=f"x{n}", input="x", index=(index,)) for n, index in enumerate(indices))
     assert place_values(body) == body

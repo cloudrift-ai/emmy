@@ -382,7 +382,7 @@ def _validate(loop: LoopOp) -> None:
                     raise ValueError(f"Carry {stmt.name!r}: one statement defines a carried state")
                 if stmt.name not in celled:
                     raise ValueError(
-                        f"Carry {stmt.name!r}: no loop carries its cells {tuple(e.pretty() for e in stmt.index)} — each is a bare "
+                        f"Carry {stmt.name!r}: no loop carries its cells {tuple(str(e) for e in stmt.index)} — each is a bare "
                         "axis (or the 0 of a size-one axis) bound by a loop inside the one over the steps"
                     )
                 exported_accs.add(stmt.name)

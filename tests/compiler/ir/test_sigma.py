@@ -13,15 +13,15 @@ def test_restrict_reuses_parent_canonical_entries(monkeypatch):
     target = _deep_expr(128)
     sigma = Sigma({"b": Var("b"), "a": target})
     root_walks = 0
-    original = BinaryExpr.pretty
+    original = BinaryExpr.__str__
 
-    def counted_pretty(expr):
+    def counted_text(expr):
         nonlocal root_walks
         if expr.op == "^":
             root_walks += 1
         return original(expr)
 
-    monkeypatch.setattr(BinaryExpr, "pretty", counted_pretty)
+    monkeypatch.setattr(BinaryExpr, "__str__", counted_text)
     restricted = [sigma.restrict({"a"}) for _ in range(1_000)]
 
     assert root_walks == 0
@@ -33,15 +33,15 @@ def test_extend_reuses_unchanged_canonical_entries(monkeypatch):
     target = _deep_expr(128)
     sigma = Sigma({"a": target})
     root_walks = 0
-    original = BinaryExpr.pretty
+    original = BinaryExpr.__str__
 
-    def counted_pretty(expr):
+    def counted_text(expr):
         nonlocal root_walks
         if expr.op == "^":
             root_walks += 1
         return original(expr)
 
-    monkeypatch.setattr(BinaryExpr, "pretty", counted_pretty)
+    monkeypatch.setattr(BinaryExpr, "__str__", counted_text)
     extended = sigma.extend("b", Var("j"))
 
     assert root_walks == 0
