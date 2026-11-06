@@ -5,6 +5,7 @@ from __future__ import annotations
 import math
 from dataclasses import dataclass, replace
 from functools import lru_cache, partial
+from typing import NamedTuple
 
 import numpy as np
 
@@ -18,16 +19,39 @@ from emmy.serving.twins import LayoutScope, plan_layouts
 
 #: The longest context native serves: the window of the checkpoints it has served.
 MAX_CONTEXT = 262144
-GENERATION_VERSION = 15
+GENERATION_VERSION = 16
 PREFILL_SIZE = 16
 MASK_FILL = -1e9
 #: The symbolic axis attention reads the cache to: how many of its leading positions a step attends over, which the
 #: runtime sets as the request grows (runtime ``ARCHITECTURE.md``, "Cached generation").
 WINDOW = "cache_tokens"
+#: The ranges of windows a step attends over, each priced at one window: a range's attention program is compiled with
+#: the window's hint there, so its rows are measured and its pick made at that window, and a step runs its window's
+#: range's program. Each range is its twins' name suffix, its first window and its price; it ends below the next range's
+#: first window, the last at the context. A step's window is a multiple of 4,096 from 4,096 (runtime
+#: ``ARCHITECTURE.md``, "Cached generation"), the short range's price. The card's measurements set the boundary.
+WINDOW_RANGES = (("", 1, 4096), ("-long", 32768, 131072))
 #: e4m3's largest finite value: a cache store saturates to it, as vLLM's does.
 FP8_MAX = 448.0
 MODEL_TYPES = ("qwen3", "qwen3_5_text", "qwen3_5_moe_text")
 LAYER_TYPES = ("full_attention", "linear_attention")
+
+
+class WindowRange(NamedTuple):
+    """One range of :data:`WINDOW_RANGES` in a context: its twins' name suffix, its first and last window, and the
+    window its attention program is priced at."""
+
+    name: str
+    first: int
+    last: int
+    price: int
+
+
+def window_ranges(context_length):
+    """The :data:`WINDOW_RANGES` a context of ``context_length`` positions reaches, each ending below the next one."""
+    reached = [r for r in WINDOW_RANGES if r[1] <= context_length]
+    lasts = [first - 1 for _, first, _ in reached[1:]] + [context_length]
+    return [WindowRange(name, first, last, price) for (name, first, price), last in zip(reached, lasts, strict=True)]
 
 
 def load_model(model_id, revision=None, dtype="auto"):
@@ -553,6 +577,7 @@ class _Step:
         coded=None,
         twin=False,
         window=(),
+        priced=None,
         weights=None,
         rows=None,
     ):
@@ -561,20 +586,22 @@ class _Step:
         spells its expert programs. ``twin`` says the program is one of the plugin's serving twins, traced as the
         plugin traces it: its weights take the layouts of the plugin's wrapper ``weights`` (``prefix`` by default),
         and it is no native twin. ``window`` names the arguments whose leading axis is the window (:data:`WINDOW`):
-        the program reads their leading rows, as many as the runtime sets. ``rows``, the program's own rows where
-        they are not the step's, names a traced program."""
+        the program reads their leading rows, as many as the runtime sets. It is priced at the window of ``priced``,
+        the :class:`WindowRange` it runs in. ``rows``, the program's own rows where they are not the step's, names a
+        traced program."""
         import inspect
 
         import torch
 
         from emmy.compiler.loader.quant import spell_quantized_inputs
+        from emmy.compiler.specialize import rehint_program
         from emmy.compiler.trace.torch import trace_module
         from emmy.serving.gen_runner import _plan_sources, _traced_split
 
         if window:
             axis = torch.export.Dim(WINDOW, min=rows or 1, max=MAX_CONTEXT)  # a window holds at least the program's rows
             shapes = {name: {0: axis} if name in window else {} for name in inspect.signature(wrapper.forward).parameters}
-            graph = trace_module(wrapper, tuple(examples), dynamic_shapes=shapes)
+            graph = rehint_program(trace_module(wrapper, tuple(examples), dynamic_shapes=shapes), {WINDOW: priced.price})
         else:
             graph = _traced_split(wrapper, examples, None, self.ckpt)
         if coded:
@@ -585,7 +612,18 @@ class _Step:
             sources = partial(_module_sources, wrapper)
         scope = self.scopes.setdefault(weights or prefix, LayoutScope()) if twin else None
         self.spliced(
-            prefix, graph, inputs, outputs, cache, sources, output_names=output_names, paged=paged, scope=scope, weights=weights, rows=rows
+            prefix,
+            graph,
+            inputs,
+            outputs,
+            cache,
+            sources,
+            output_names=output_names,
+            paged=paged,
+            scope=scope,
+            weights=weights,
+            rows=rows,
+            priced=priced,
         )
 
     def spliced(
@@ -604,6 +642,7 @@ class _Step:
         weights=None,
         rows=None,
         plugin=None,
+        priced=None,
     ):
         """Compile ``graph`` and splice its plan in: its inputs and outputs take the step's names,
         everything else is scoped by ``prefix``; its constants bind from ``sources(plan)``. ``output_names``
@@ -622,7 +661,9 @@ class _Step:
         Everything is spelled in the graph's own names, never the step's, so every layer traces the same graph and
         compiles once. ``rows`` names a traced program as :meth:`compiled` does, and ``plugin`` says whether it is
         one of the plugin's (a program compiled in a ``scope`` by default): a native program may share a plugin
-        wrapper's scope, as the drafter's prologue shares the layouts of its weights across the widths it runs at."""
+        wrapper's scope, as the drafter's prologue shares the layouts of its weights across the widths it runs at.
+        A program ``priced`` for a :class:`WindowRange` runs only while the window lies in it: each range's program
+        takes its own scope (``prefix`` and the range's name), and its traced twin the range's name."""
         from emmy.compiler.backend.cuda.backend import CudaBackend
         from emmy.compiler.backend.paging import TABLES
         from emmy.compiler.backend.plan_cache import binding_neutral_key
@@ -636,9 +677,10 @@ class _Step:
         if self.traced is not None:
             # Every layer of one shape traces one program, which the first names by its kind and width (``-sym`` for a
             # program of any width), and says whether it is the plugin's.
-            name = f"{prefix.rsplit('.', 1)[-1].rstrip('0123456789')}{'-sym' if sizes else rows or self.rows}"
+            name = f"{prefix.rsplit('.', 1)[-1].rstrip('0123456789')}{'-sym' if sizes else rows or self.rows}{priced.name if priced else ''}"
             self.traced.setdefault(binding_neutral_key(graph), (name, graph, scope is not None if plugin is None else plugin))
             return
+        prefix += priced.name if priced else ""
         settled = tuple(scope.settled().items()) if scope is not None else ()
 
         def compile_plan(g):
@@ -688,7 +730,9 @@ class _Step:
             ):
                 raise ValueError(f"incompatible program seam: {name}")
         self.plan.buffers += [replace(buffer, name=name) for buffer, name in added if buffer.name in pager]
-        self.plan.launches += splice(self.plan, plan, prefix=prefix, renames=renames, sizes=sizes)
+        launches = splice(self.plan, plan, prefix=prefix, renames=renames, sizes=sizes)
+        span = {"size_range": (WINDOW, priced.first, priced.last)} if priced else {}
+        self.plan.launches += [replace(launch, **span) for launch in launches]
         for buffer, name in added:
             # A paged constant is bound by its page table: its bytes are pages of the pager (the vision tower's blocks).
             if buffer.role == "constant" and buffer.name not in plan.paged:
@@ -812,7 +856,7 @@ def _program(
         step.buffer(name, (1,), I64, "output")
 
     # Example inputs are distinct tensors: the tracer folds two arguments that share one into a
-    # single aliased input. A windowed one's leading axis is the window, traced at its hint.
+    # single aliased input. A windowed one's leading axis is the window, traced at its hint and priced at its range's.
     def scalar():
         return torch.zeros(1, dtype=torch.int64)
 
@@ -990,19 +1034,22 @@ def _program(
         )
         if cache_only:
             return None
-        # A decode or verify step attends per key-value head (:func:`attend_module`); its output is the same bytes.
+        # A decode or verify step attends per key-value head (:func:`attend_module`); its output is the same bytes. Each
+        # range of windows attends through its own program, priced there (:data:`WINDOW_RANGES`).
         attended = step.buffer(f"{label}.attention", (width, heads * d) if prefill else (width, kv, heads // kv, d))
-        step.compiled(
-            prefix("attend"),
-            attend_module(heads, kv, d, n, grouped=not prefill),
-            (head_rows(n, heads), windowed(), windowed(), scalar()),
-            [rotated, keys, values, position],
-            [attended],
-            cache,
-            paged=(("keys", 0, page_tokens), ("values", 0, page_tokens)) if pages else (),
-            window=("keys", "values"),
-            rows=n,
-        )
+        for priced in window_ranges(context_length):
+            step.compiled(
+                prefix("attend"),
+                attend_module(heads, kv, d, n, grouped=not prefill),
+                (head_rows(n, heads), windowed(), windowed(), scalar()),
+                [rotated, keys, values, position],
+                [attended],
+                cache,
+                paged=(("keys", 0, page_tokens), ("values", 0, page_tokens)) if pages else (),
+                window=("keys", "values"),
+                priced=priced,
+                rows=n,
+            )
         outputs = mixer_outputs(label, out, routed, width)
         examples = (head_rows(width, heads), torch.zeros(width, h, dtype=td), *(head_rows(width, heads) for _ in gated))
         step.compiled(

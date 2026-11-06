@@ -140,7 +140,9 @@ def _append(graph, *, ctx, document: GoldenFile, name_prefix: str | None = None,
             added += len(document.kernels) - stored_before
             for template in group:
                 pins = dict(template.get("pins", {}))
-                if any(row.kernel == stored.ref and row.pins == pins for row in document.rows):
+                # Two programs may lower to one kernel at two sets of sizes (native's attention priced per range of
+                # windows): each set takes its own row.
+                if any((row.kernel, row.pins, row.bindings) == (stored.ref, pins, kernel_bindings(tile)) for row in document.rows):
                     continue
                 name = f"{name_prefix}.{tile.name}" if name_prefix else tile.name
                 if template.get("name"):

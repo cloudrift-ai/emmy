@@ -994,7 +994,7 @@ def _targets_in_build_order(document, target_rows) -> list[tuple[str, dict, str,
             dict(pins),
             target,
         )
-        for (target, pins), rows in target_rows.items()
+        for (target, pins, _), rows in target_rows.items()
     ]
     traced = {kernel.ref: kernel.traced for kernel in document.targets()}
     ctx = Context.from_target(tuple(document.compute_cap), gpu_name=document.gpu_name or None)

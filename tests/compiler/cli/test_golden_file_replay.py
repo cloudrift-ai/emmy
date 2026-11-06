@@ -2247,3 +2247,34 @@ def test_record_greedy_cold_rows_do_not_replace_hot_measurements(tmp_path):
             )
     rows = [row for row in GoldenFile.load(path).rows if row.measured]
     assert {(bool(row.pins.get("COLD_CACHE")), row.measurements.emmy_us) for row in rows} == {(False, 1.0), (True, 3.0)}
+
+
+def test_a_kernel_priced_at_two_sizes_keeps_a_row_and_a_realization_at_each(tmp_path):
+    """Two programs that differ only in a symbolic size's hint (native's attention, priced per range of windows) lower
+    to one kernel, which keeps a row at each size: a whole-file walk benches each, and a realization's kernel and its
+    Torch twin both run at its row's size, whichever program the kernel was stored from."""
+    import torch
+
+    from emmy.commands.compile import resolve_golden_arg
+    from emmy.compiler.pipeline.search.golden import write_trace_inventories
+    from emmy.compiler.specialize import rehint_program
+    from emmy.compiler.trace.torch import trace_module
+    from emmy.compiler.wire import symbolic_bindings
+
+    class Relu(torch.nn.Module):
+        def forward(self, x):
+            return torch.relu(x)
+
+    traced = trace_module(Relu(), (torch.zeros(512, 8),), dynamic_shapes={"x": {0: torch.export.Dim("seq", min=2, max=1 << 20)}})
+    path = tmp_path / "priced.json"
+    programs = {"relu1": rehint_program(traced, {"seq": 4096}), "relu1-long": rehint_program(traced, {"seq": 131072})}
+    write_trace_inventories(programs, path, ctx=Context.from_target((8, 9)))
+    document = GoldenFile.load(path)
+    assert len(document.kernels) == 1
+    assert sorted((row.name.split(".")[0], row.bindings["seq"]) for row in document.rows) == [("relu1", 4096), ("relu1-long", 131072)]
+    assert len(document.target_rows()) == 2
+    long = next(row for row in document.rows if row.bindings["seq"] == 131072)
+    args = _args(path, realization=long.name)
+    resolve_golden_arg(args)
+    for graph in (args._golden_graph, args._golden_reference):
+        assert symbolic_bindings(node.output for node in graph.nodes.values()) == {"seq": 131072}
