@@ -25,6 +25,7 @@ from emmy.compiler.backend.cpu.runtime import CpuKernel, NativeProgram, default_
 from emmy.compiler.context import Context
 from emmy.compiler.ir.base import ConstantOp, is_f4_pair_table
 from emmy.compiler.ir.loop import LoopOp
+from emmy.compiler.ir.stmt import Body
 from emmy.compiler.ir.tile.ir import TileOp
 from emmy.compiler.pipeline import LOOP_PASSES, Pipeline
 from emmy.compiler.pipeline.search.pins import pinned_knobs
@@ -109,7 +110,7 @@ def _reads(term) -> set[str]:
         seen.add(id(value))
         if type(value).__name__ == "Load":
             found.add(value.input)
-        if isinstance(value, (tuple, list)):
+        if isinstance(value, (tuple, list, Body)):
             stack.extend(value)
         elif hasattr(value, "__dataclass_fields__"):
             stack.extend(getattr(value, name) for name in value.__dataclass_fields__)

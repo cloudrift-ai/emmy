@@ -278,7 +278,8 @@ dispatched on the kind; Kernel IR registers its own kinds beside their classes.
 **`Body`** is an immutable sequence of statements, built from any iterable. A slice or a sum of bodies is a `Body`;
 two bodies with equal statements are equal and hash alike; a statement placed in a body is the same object every
 time it is read, which passes rely on when they key side tables by statement; it survives the wire form and
-pickling. Being a `tuple` is not part of that contract. `Body.structural_key()` uses the complete `structural.form`,
+pickling. It is not a `tuple` and equals none: of a sequence it has a length, iteration, indexing and slicing, and a
+field that holds one defaults to a `Body`. `Body.structural_key()` uses the complete `structural.form`,
 including identity-relevant fields such as `Axis.window` that may deliberately be excluded from general equality.
 Its exact and clustered keys, and its executable normal forms, are cached on that `Body`; there is no equality-keyed
 shared cache that could alias distinct metadata. Callers use its walks (`iter`, `map`, `fold`, `iter_of_type`,

@@ -54,6 +54,18 @@ def test_a_kind_check_is_native() -> None:
     assert [cls.__qualname__ for cls in (Stmt, *_kinds()) if type(cls) is not type] == []
 
 
+def test_a_body_is_no_tuple_and_a_field_that_holds_one_defaults_to_a_body() -> None:
+    """A tuple never equals a body, so a tuple default on a body field would keep that field in every identity."""
+    assert not issubclass(Body, tuple) and Body() != ()
+    assert [
+        f"{kind.__qualname__}.{field.name}"
+        for kind in _kinds()
+        if dataclasses.is_dataclass(kind)
+        for field in dataclasses.fields(kind)
+        if "Body" in str(field.type) and isinstance(field.default, (tuple, list))
+    ] == []
+
+
 def test_every_kind_states_the_protocol() -> None:
     """A kind says how it rewrites and prints, and each reading half comes with its rebuilding half.
 
@@ -230,7 +242,7 @@ def _held_exprs(value, child_bodies=()) -> list:
     A child body's expressions are its own statements'; any other statement a kind holds is part of it."""
     if isinstance(value, Expr):
         return [value]
-    if isinstance(value, (tuple, list)) and not any(value is body for body in child_bodies):
+    if isinstance(value, (tuple, list, Body)) and not any(value is body for body in child_bodies):
         return [expr for item in value for expr in _held_exprs(item)]
     if isinstance(value, (Stmt, SelectBranch, kernel_ir.FragmentArg)):
         nested = value.nested() if isinstance(value, Stmt) else ()

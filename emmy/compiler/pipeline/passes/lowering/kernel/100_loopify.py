@@ -273,7 +273,7 @@ def _families_in(tmpl, loopvar: str, out: set[str]) -> None:
     if isinstance(tmpl, str):
         if tmpl.endswith(suffix):
             out.add(tmpl[: -len(suffix)])
-    elif isinstance(tmpl, tuple):
+    elif isinstance(tmpl, (tuple, Body)):
         for v in tmpl:
             _families_in(v, loopvar, out)
     elif isinstance(tmpl, Expr) or is_dataclass(tmpl):
