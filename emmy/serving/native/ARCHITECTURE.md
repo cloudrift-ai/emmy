@@ -43,7 +43,12 @@ is one launch sequence at every position of a window and replays as one graph. N
 hand-written: the step ends at the FP32 logits and the greedy token, a compiled reduction over them, and the runtime
 samples on the host only at positive temperature (below), so the same export serves any device the compiler targets.
 Attention keeps its dot products, scores and softmax in FP32, which avoids losing near-tied scores at large
-magnitudes. Each query head reads its key-value head's cache. The value expectation reads the FP32 probabilities as the
+magnitudes. A decode or verify step attends per key-value head: its scores are `[rows, kv_heads, group, window]` and
+its output `[rows, kv_heads, group, head_dim]`, the bytes of `[rows, heads * head_dim]`. A kernel's axes follow its
+output's storage order, so the group is the axis the chunk tier folds as its rows, the group's query heads share one
+read of their key-value head's cache, and a split across the window combines the slices' partial states. A step's few
+rows stay on the grid, each reading the cache once. A prefill chunk attends per query head, the chunk's rows the fold's
+rows, and each query head reads its key-value head's cache. The value expectation reads the FP32 probabilities as the
 softmax computes them and accumulates in FP32; only the output is rounded to the model dtype. Rounding the probabilities
 to the model dtype first, as attention in the model dtype does, put a divide and a cast between the exponent and the
 value product, which is not the expectation the softmax twist recognizes, so the text attention could never fold chunk
