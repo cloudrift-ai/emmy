@@ -51,7 +51,7 @@ def rename_free(stmt: Stmt, alias: Mapping[str, str]) -> Stmt:
         # substituting, so dropping outer ``b = a`` cannot capture the use of b as an inner a.
         captured = bound.intersection(pruned.values())
         if captured:
-            used = set(b.ssa_defs | b.ssa_uses | b.axis_names) | set(alias) | set(alias.values())
+            used = set(b.definitions.keys() | b.ssa_uses | b.axis_names) | set(alias) | set(alias.values())
             renames = {}
             for name in sorted(captured):
                 fresh = name + "_local"

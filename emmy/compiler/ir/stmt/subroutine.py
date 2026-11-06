@@ -31,7 +31,7 @@ class Subroutine:
         if self.body.carries or any(stmt.has_side_effects for stmt in self.body):
             raise ValueError("a fusion subroutine must be read-only")
         # The body may read more than its parameters: an index can name a symbolic dim, which is no coordinate.
-        if self.result not in self.body.ssa_defs:
+        if self.result not in self.body.definitions:
             raise ValueError("a fusion subroutine must define its result")
 
     def __getstate__(self):

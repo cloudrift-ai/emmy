@@ -447,7 +447,7 @@ def test_ssa_rejects_duplicate_name():
 
 def test_ssa_topo_sorts_forward_reference():
     """A body with a forward SSA reference is silently reordered by
-    ``topo_sort_siblings`` in ``normalize_body`` so the def precedes its
+    ``topological_sort`` in ``normalize_body`` so the def precedes its
     use. Validation only rejects truly undefined names / cycles."""
     axes = _pointwise_axes(1)
     p = Port(index=(Var("a0"),))

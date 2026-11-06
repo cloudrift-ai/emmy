@@ -140,9 +140,6 @@ class Load(Stmt):
     def with_exprs(self, exprs: tuple[Expr, ...]) -> Stmt:
         return self.replace(index=exprs)
 
-    def is_literal(self, literal_constants: dict[str, float]) -> bool:
-        return self.input in literal_constants
-
     def _rewrite(self, rename, sigma, axis_fn):  # noqa: ANN001, ANN202 — see ``Stmt.rewrite``
         return self.replace(
             names=tuple(rename(n) for n in self.names),
@@ -353,19 +350,6 @@ class Accum(Stmt):
     def defines(self) -> tuple[str, ...]:
         return (self.name,)
 
-    def carried_names(self) -> tuple[str, ...]:
-        return (self.name,)
-
-    def combine_operands(self) -> tuple[str, ...]:
-        return (f"{self.name}__o",)
-
-    def combine_partials(self) -> tuple[Assign, ...]:
-        """The scalar op-fold of two partials: ``name = op(name, name__o)`` — the
-        same combine the cooperative / split-K realizations apply, reified as a
-        one-``Assign`` program so the decomposition move reads it uniformly with
-        the stored combine's state⊕state re-emission."""
-        return (Assign(name=self.name, op=self.op, args=(self.name, f"{self.name}__o"), dtype=self.dtype),)
-
     # Algebraic traits forward to the scalar combine op — a ``max`` Accum and a
     # ``sum`` Accum differ, and ``self.op`` is the source of truth.
     @property
@@ -432,9 +416,6 @@ class Carry(Stmt):
         return (self.value,)
 
     def defines(self) -> tuple[str, ...]:
-        return (self.name,)
-
-    def carried_names(self) -> tuple[str, ...]:
         return (self.name,)
 
     def exprs(self) -> tuple[Expr, ...]:

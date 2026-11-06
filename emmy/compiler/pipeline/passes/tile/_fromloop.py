@@ -352,7 +352,7 @@ def _renamed_sweep(loop: Loop, taken: set[str]) -> Loop:
     name (the fused encode kernel's byte sweep and scale sweep, both ``a1`` at different
     extents). Loop IR binds per loop, so the reuse is legal there; a term tree names one coordinate
     per name, so the second sweep is alpha-renamed, binder and references together."""
-    taken = taken | set(Body(loop.body).ssa_defs)
+    taken = taken | set(Body(loop.body).definitions)
     fresh = next(name for index in range(1, len(taken) + 2) if (name := f"{loop.axis.name}_{index}") not in taken)
     coords = Sigma({loop.axis.name: Var(fresh)})
     return loop.replace(axis=replace(loop.axis, name=fresh), body=Body(tuple(stmt.substitute(coords) for stmt in loop.body)))

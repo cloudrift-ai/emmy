@@ -1037,7 +1037,7 @@ def _a_slab_operand(
         # σ is hygienic (:meth:`Stmt.substitute`): a cone statistic re-binding the contraction axis
         # name (attention's k-norm inside the K cone) keeps its own iteration var.
         sigma = Sigma({m_name: m_coord(row), k_name: k_coord(k)})
-        reads = Body(cell).ssa_uses - Body(cell).ssa_defs
+        reads = Body(cell).ssa_uses - Body(cell).definitions.keys()
         stmts: list[Stmt] = [Load(names=(nm,), input=_stat_slab(nm), index=(row,)) for nm in (*stats, *chunk_stats) if nm in reads]
         stmts += [s.substitute(sigma) for s in cell]
         return _k_masked(stmts, c.operands[0].exposes[-1], k, k_ext)
@@ -1060,7 +1060,7 @@ def _a_slab_operand(
     if chunk_stats:
         chunk_dtypes = {nm: cuda_name(dt) for nm, dt in cone_stat_dtypes(chunk_pro, chunk_stats, inputs).items()}
         prologue += stat_rows(chunk_stats, _stat_slab, row_axis, dtypes=chunk_dtypes)
-        reads = [nm for nm in stats if nm in Body(chunk_pro).ssa_uses - Body(chunk_pro).ssa_defs]
+        reads = [nm for nm in stats if nm in Body(chunk_pro).ssa_uses - Body(chunk_pro).definitions.keys()]
         stat = next(edge for edge in c.operands[0].operands if set(chunk_stats) & set(edge.exposes))
 
         def before(k0):
@@ -1850,7 +1850,7 @@ def _cell_varying(body, side: Side | None) -> bool:
     ``_u`` split vars are bound, so the per-copy rename (:func:`copy_cell`) suffixes the surviving
     axis name into an undefined identifier (nvcc: ``identifier "a1__ar9" is undefined``, the
     whole-model qwen3-0.6b layer-0 o_proj on sm_89). Such an operand is read per CELL instead."""
-    return side is not None and Body(body).depends_on(body, side.name)
+    return side is not None and any(side.name in free_names(stmt) for stmt in body)
 
 
 def _dedup_loads(stmts: list[Stmt]) -> list[Stmt]:

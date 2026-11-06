@@ -113,7 +113,7 @@ def test_outlining_preserves_inline_identity():
     def inline(stmt):
         if not isinstance(stmt, Call):
             return stmt
-        rename = {name: f"{stmt.name}_{name}" for name in (*target.body.ssa_defs, *target.body.axis_names)}
+        rename = {name: f"{stmt.name}_{name}" for name in (*target.body.definitions, *target.body.axis_names)}
         sigma = Sigma(dict(zip(target.params, stmt.args, strict=True)))
         return (*[s.rename(rename).substitute(sigma) for s in target.body], Assign(stmt.name, "copy", (rename[target.result],)))
 
@@ -177,4 +177,4 @@ def test_expansion_does_not_capture_free_caller_coordinates():
     normalized = normalize_body(expand_calls(body))
     (load,) = [stmt for stmt in normalized.loads if stmt.input == "x"]
     assert load.index[0] == Var("wv_s1")
-    assert "wv_s1" not in normalized.ssa_defs
+    assert "wv_s1" not in normalized.definitions

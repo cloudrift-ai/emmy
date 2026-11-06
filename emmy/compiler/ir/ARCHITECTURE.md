@@ -285,10 +285,10 @@ field that holds one defaults to a `Body`. `Body.structural_key()` uses the comp
 including identity-relevant fields such as `Axis.window` that may deliberately be excluded from general equality.
 Its exact and clustered keys, and its executable normal forms, are cached on that `Body`; there is no equality-keyed
 shared cache that could alias distinct metadata. Callers use its walks (`iter`, `map`, `fold`, `iter_of_type`,
-`loads`, `writes`, `carries`, `accums`, `loops`), its def-use readings (`definitions`, `ssa_defs`, `ssa_uses`,
-`axis_names`, `axis_dependencies`, `depends_on`, `backward_cone`), its orders (`topological_order`, `coalesce`),
-`rename_buffers`, and its identity (`identity`, `structural_key`, `census`, `literals_abstracted`,
-`literal_free_key`).
+`loads`, `writes`, `carries`, `accums`, `loops`), its def-use readings (`definitions`, `ssa_uses`, `axis_names`,
+`axis_dependencies`, `backward_cone`), its orders (`topological_order`, `coalesce`), `rename_buffers`, and its
+identity (`identity`, `structural_key`). The names a body defines are the keys of `definitions`; the names one
+statement makes visible are `exposed_defines`.
 
 **A body has one text**, which is also its wire form. `str(body)` is it and `parse_body` reads it back to an equal
 body, so the text says
@@ -716,7 +716,7 @@ normalization refuses a body that holds a call, so validation, executable identi
 lifting never meet one. Placement then shares common producers across definitions, and operation clustering starts
 from that CSE form. Subroutine boundaries never limit fusion.
 
-- `topo_sort_siblings` — stable Kahn reorder so SSA defs precede their uses
+- `topological_sort` — stable Kahn reorder so SSA defs precede their uses
   within each body (fixes splicer-produced use-before-def).
 - `drop_size_one_free_axes` — inline extent-1 free Loops.
 - `drop_size_one_reduce_axes` — collapse a canonical extent-1 reduction to its single monoid update. This includes
