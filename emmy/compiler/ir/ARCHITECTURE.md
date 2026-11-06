@@ -250,7 +250,7 @@ kinds are declared (below), and a layer adds a kind of its own by declaring it, 
 | Reads and writes | `deps`, `defines`, `external_reads`, `external_writes`, `local_decls`, `bound_axes`, `binds_axes` |
 | Structure | `nested` with `with_bodies`; `expressions` with `map_expressions` |
 | Rebuilding | `_rewrite` (behind `rewrite`, `rename` and `substitute`), `rename_buffers`, `replace` |
-| Display and storage | the text (a kind of another layer: `pretty`); a body's text is its wire form |
+| Display and storage | the text, a kind of another layer through its declaration; a body's text is its wire form |
 
 Each reading member has a rebuilding half: `with_bodies` takes what `nested` returned, and `map_expressions` applies a
 function to each expression `expressions` lists, in that order. `bound_axes` are the axes a kind binds and `binds_axes`
@@ -315,9 +315,13 @@ for a0 in 0..4:
 A subroutine a call names is defined once, ahead of the statements, and the call spells the buffers it binds. Since
 subroutines compare by object, what a text read back keeps is which calls share one.
 
-The printer and the reader sit side by side in one file, one clause per kind, and its docstring is the grammar. A
-kind of another layer says its own lines in `pretty` and has no reader. `tests/compiler/ir/stmt/test_text.py` holds
-both directions over every kind and every corpus kernel.
+The printer and the reader sit side by side in one file, one clause per shared kind, and its docstring is the
+grammar. A kind of another layer (the Kernel IR's thirty) prints and reads through its declaration: its class name,
+the fields not at their default as `field=value` in parentheses, and one indented block per field that holds
+statements — `Smem(name=s_x, extents=(64, 64), dtype=f16)`, `Tile(axes=(a0 in 0..64), block_threads=128):` over its
+body. Each value is spelled by its type and read by the field's declared type, so a layer that adds a kind adds no
+printer and no reader. `tests/compiler/ir/stmt/test_text.py` holds both directions over every kind, every corpus
+kernel and the Kernel IR of six corpus lowerings that reach every Kernel IR kind.
 
 The tests under `tests/compiler/ir/stmt/` state what goes into the module and what comes out, and hold for any
 implementation of it. The ones under `tests/compiler/ir/stmt/implementation/` call its inner steps and leave with
@@ -612,7 +616,7 @@ names it recognizes the pair by canonical form (`Fold.fuse`), never by a stored 
 Body walkers: `iter_body(body)` (pre-order; powers `for s in loop_op`),
 `map_body(body, fn)` (transformer), `Statement.rewrite(rename_ssa, sigma)`
 (per-stmt copy with SSA rename + Expression substitution),
-`Statement.pretty(indent)` (rendered lines for kernel dumps; block stmts
+`str(stmt)` (the statement's text, the lines kernel dumps show; block stmts
 recurse via `pretty_body`).
 
 CUDA scalar rendering goes through `op_to_expression` in `ir/render.py`. Boolean masks retain the historical f32 SSA

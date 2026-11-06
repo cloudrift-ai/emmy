@@ -24,6 +24,7 @@ from emmy.compiler.ir.stmt import (
     Pre,
     Select,
     SelectBranch,
+    Statement,
     StridedLoop,
     Subroutine,
     Write,
@@ -224,3 +225,50 @@ def test_every_corpus_kernel_reads_back_from_its_text():
         back = parse_body(str(body))
         assert _exact(back) == _exact(body)
         assert str(back) == str(body)
+
+
+#: Six cases whose Kernel IR reaches every kind the corpus lowers to; ``SetMaxNReg`` is in no corpus kernel.
+KERNEL_CASES = [
+    "attention/sdpa-hd64-wgmma-value-sm90.json",
+    "matmul/f16-mma-f16acc-tma.json",
+    "matmul/f16-warp-band-p1-tma-d1-m128.json",
+    "matmul/fp4-tma-w4a4-linear-ring.json",
+    "reduce/computed-provider-coop-t-sm70.json",
+    "scan/f32-cumsum-warp-prefix.json",
+]
+
+
+def _kernel_bodies(case_path: str) -> list[Body]:
+    from emmy.compiler.ir.kernel.ir import KernelOp
+
+    case = helpers.load_case(helpers.CASES_DIR / case_path)
+    graph, _ = helpers.lowered(case, case.context())
+    return [op.body for node in graph.nodes.values() for op in node.op.source_chain() if isinstance(op, KernelOp)]
+
+
+@pytest.mark.parametrize("case_path", KERNEL_CASES)
+def test_a_kernel_ir_body_reads_back_from_its_text(case_path):
+    """A kind of the Kernel IR prints and reads through its declaration, so a lowered kernel's text is exact."""
+    bodies = _kernel_bodies(case_path)
+    assert bodies
+    for body in bodies:
+        back = parse_body(str(body))
+        assert _exact(back) == _exact(body)
+        assert str(back) == str(body)
+
+
+def test_every_kernel_ir_kind_has_a_text():
+    from emmy.compiler.ir.kernel import ir as kernel
+
+    kinds = {
+        kind
+        for case_path in KERNEL_CASES
+        for body in _kernel_bodies(case_path)
+        for stmt in body.iter()
+        if (kind := type(stmt)).__module__ == kernel.__name__
+    }
+    declared = {
+        cls for cls in vars(kernel).values() if isinstance(cls, type) and issubclass(cls, Statement) and cls.__module__ == kernel.__name__
+    }
+    assert declared - kinds == {kernel.SetMaxNReg}
+    assert str(Body((kernel.SetMaxNReg(count=232, direction="inc"),))) == "SetMaxNReg(count=232, direction=inc)"
