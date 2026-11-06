@@ -114,3 +114,20 @@ def test_a_rename_reaches_names_and_expressions() -> None:
     assert load.rename(names) == Load("x2", "a", (Var("j"),))
     assert write.rename(names) == Write("out", (Var("j"),), "x2")
     assert map_exprs(load, lambda expr: expr.rename(lambda name: names.get(name, name))) == Load("x", "a", (Var("j"),))
+
+
+def test_a_body_is_an_immutable_sequence_of_its_statements() -> None:
+    """What callers may rely on in a ``Body``: it is built from any iterable, a slice or a sum of bodies is a
+    body, two bodies with equal statements are equal and hash alike, and a statement placed in one is the same
+    object every time it is read — passes key their side tables on that object."""
+    load, write = Load("x", "a", (Var("i"),)), Write("out", (Var("i"),), "x")
+    body = Body(stmt for stmt in [load, write])
+    assert len(body) == 2 and list(body) == [load, write] and write in body
+    assert isinstance(body[:1], Body) and isinstance(body + [load], Body) and isinstance([load] + body, Body)
+    assert body == Body([load, write]) and hash(body) == hash(Body((load, write))) and body != Body((write, load))
+    assert body[0] is load and next(iter(body)) is load and body[-1] is write
+    looped = Body((Loop(_K, body),))
+    assert [id(stmt) for stmt in looped.iter()] == [id(looped[0]), id(load), id(write)]
+    assert looped[0].nested()[0][0] is load
+    with pytest.raises(TypeError):
+        Body((load, "not a statement"))

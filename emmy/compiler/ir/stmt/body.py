@@ -125,10 +125,9 @@ def free_names(s: Stmt) -> frozenset[str]:
 
 
 class Body(tuple[Stmt, ...], Wire):
-    """Immutable Stmt sequence. Tuple-subclass so existing tuple-shaped
-    APIs accept Body for free; preserves its own type through
-    :meth:`__getitem__` slicing and :meth:`__add__` concatenation so
-    callers don't keep falling back to plain tuples.
+    """Immutable Stmt sequence. A slice or a sum of bodies is a ``Body``, two bodies with equal
+    statements are equal and hash alike, and a statement read from one twice is the same object.
+    It is a ``tuple`` subclass today; callers do not rely on that.
 
     Constructed from any iterable: ``Body(some_tuple)``,
     ``Body([s1, s2])``, ``Body(s for s in ... if ...)``.
@@ -313,7 +312,6 @@ class Body(tuple[Stmt, ...], Wire):
         return result
 
     # -- generic backward dataflow --------------------------------------
-
 
     def coalesce(self) -> Body:
         """Assemble shared SSA definitions once and merge adjacent independent reduction loops.
@@ -651,8 +649,6 @@ class Body(tuple[Stmt, ...], Wire):
                     return True
         return False
 
-
-
     # -- dependence cones --------------------------------------------------
 
     def backward_cone(self, roots: Iterable[str]) -> Cone:
@@ -686,9 +682,7 @@ class Body(tuple[Stmt, ...], Wire):
             pending.extend(free_names(s))
         return Cone(members=tuple(s for s in self if id(s) in member_ids), external_reads=frozenset(external))
 
-
     # -- type-filtered lookups -------------------------------------------
-
 
     @cached_method
     def iter_of_type(self, *types: type) -> tuple[Stmt, ...]:

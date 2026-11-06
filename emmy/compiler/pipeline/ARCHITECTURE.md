@@ -1519,7 +1519,7 @@ applies the kernel's projection epilogue **per partition** before the `atomicAdd
 projection *distributes* over the add (`Σ φ(xₛ) = φ(Σ xₛ)`): a constant scale like `mean`'s `×1/N` distributes and
 rides the atomic; a non-distributive epilogue (`l2`'s `sqrt`, a fused bias/activation) is refused
 (`ValueError` → pin `g<n>k`, which projects once after the combine). The check is
-`ir/stmt/passes.projection_distributes`, applied by `tile/_split.atomic_finalize`.
+`projection_distributes`, applied by `atomic_finalize` beside it in `tile/_split`.
 
 Two deploy-only dominance/default rules live beside the generic schedule enumeration. A coalesced wide-K `F.linear`
 MATVEC (the M=1 contraction-demotion tier) always uses a `b32` single-warp fold unless `REDUCE` is explicitly pinned;

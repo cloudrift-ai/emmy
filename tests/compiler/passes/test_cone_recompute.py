@@ -86,9 +86,9 @@ def test_dedup_keeps_a_repeated_effect_and_the_first_definition() -> None:
     assert (fold + fold).coalesce() == fold
     assert fold.coalesce() == fold
     write = Write(output="out", index=(Var("m"), Var("k")), value="acc", atomic=True)
-    assert Body((*fold, *fold, write, write)).coalesce() == (*fold, write, write)
+    assert Body((*fold, *fold, write, write)).coalesce() == Body((*fold, write, write))
     effectful = Loop(axis=S, body=(*fold, write))
-    assert Body((effectful, effectful)).coalesce() == (effectful, effectful)
+    assert Body((effectful, effectful)).coalesce() == Body((effectful, effectful))
 
 
 def _norm_linear() -> tuple:

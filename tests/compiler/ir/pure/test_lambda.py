@@ -46,7 +46,7 @@ def test_lambda_orders_the_definition_read_by_a_predicate_first() -> None:
     reversed_body = Lambda.closing((), Body((value, predicate)), ("value",))
 
     assert forward == reversed_body
-    assert forward.body == (predicate, value)
+    assert forward.body == Body((predicate, value))
 
 
 @pytest.mark.parametrize(

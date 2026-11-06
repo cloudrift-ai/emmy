@@ -97,13 +97,14 @@ its formatting without re-measuring tests, and `make lint` checks it.
 Every concrete `Stmt` subclass — Loop-IR (`Loop`, `StridedLoop`, `Cond`, leaves), Tile-IR (`GridTile`, `ThreadTile`,
 `RegisterTile`, `SerialTile`, `StridedTile`, `Stage`, `StageBundle`, `AsyncWait`), Kernel-IR (`Smem`, `Sync`,
 `CpAsyncCopy`, `TmaDescriptor`, `TmaLoad`, `MbarrierInit`, …) — must be declared `@dataclass(frozen=True)`. `Body` is
-already a `tuple[Stmt, ...]` subclass, so freezing every Stmt makes the entire body tree hashable end-to-end.
+an immutable sequence of statements, so freezing every Stmt makes the entire body tree hashable end-to-end.
 
 Why: an immutable body can safely own cached structural keys and executable normal forms. It can also be used as a
 cache key when a position-independent structural lookup genuinely needs one. A single mutable Stmt anywhere in the
 tree breaks both guarantees, and the surrounding code cannot degrade gracefully without losing the optimization.
 
-If you need to "edit" a frozen Stmt, return a new instance via `dataclasses.replace(stmt, field=value)`. If a
+If you need to "edit" a frozen Stmt, return a new instance via `stmt.replace(field=value)`; outside `ir/stmt/`,
+`dataclasses.replace` and `dataclasses.fields` are not called on a statement. If a
 `__post_init__` needs to coerce a field (e.g. `tuple → Body`), use `object.__setattr__(self, "field", coerced)` —
 that's the standard pattern for frozen dataclasses that still need light normalization at construction time. Don't
 add `try/except TypeError` fallbacks around structural caches to tolerate unhashable stmts; fix the unhashable stmt
