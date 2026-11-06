@@ -677,7 +677,8 @@ class _Step:
         if self.traced is not None:
             # Every layer of one shape traces one program, which the first names by its kind and width (``-sym`` for a
             # program of any width), and says whether it is the plugin's.
-            name = f"{prefix.rsplit('.', 1)[-1].rstrip('0123456789')}{'-sym' if sizes else rows or self.rows}{priced.name if priced else ''}"
+            width = "-sym" if sizes else rows or self.rows
+            name = f"{prefix.rsplit('.', 1)[-1].rstrip('0123456789')}{width}{priced.name if priced else ''}"
             self.traced.setdefault(binding_neutral_key(graph), (name, graph, scope is not None if plugin is None else plugin))
             return
         prefix += priced.name if priced else ""
@@ -1323,8 +1324,9 @@ def trace_programs(model, *, prefill_size=None, decode_width=None, ckpt=None, kv
     ``<kind><width>-native`` after its kind and rows (``router1-native``, ``rope64-native``), numbered after the first
     of a kind and width; the layers of one shape trace one program, and so does the ``drafter``'s layer where its
     shape is theirs. They are traced at the model's window (:func:`default_context`), where the rotary program's
-    cache is the whole context; attention reads it to the window at any context. ``vision`` is :func:`export_model`'s:
-    an export that answers images adds its image path."""
+    cache is the whole context; attention reads it to the window at any context, once per range of windows the context
+    reaches, the long range's twin named apart (``attend64-long-native``). ``vision`` is :func:`export_model`'s: an
+    export that answers images adds its image path."""
     traced = {}
     _steps(model, None, None, prefill_size, ckpt, kv_cache_dtype, traced, decode_width, drafter=drafter, vision=vision)
     twins = {}

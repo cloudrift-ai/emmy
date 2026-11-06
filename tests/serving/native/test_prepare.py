@@ -458,8 +458,12 @@ def test_attention_is_traced_once_per_window_range_at_its_price():
 
     model = qwen3_5_moe_model(max_position_embeddings=262144).to(torch.bfloat16)
     twins = trace_programs(model, prefill_size=3, decode_width=4)
-    attention = {name: symbolic_bindings(node.output for node in g.nodes.values()) for name, g in twins.items() if name.startswith("attend")}
-    assert attention == {f"attend{rows}{suffix}-native": {WINDOW: price} for rows in (1, 3) for suffix, price in (("", 4096), ("-long", 131072))}
+    attention = {
+        name: symbolic_bindings(node.output for node in g.nodes.values()) for name, g in twins.items() if name.startswith("attend")
+    }
+    assert attention == {
+        f"attend{rows}{suffix}-native": {WINDOW: price} for rows in (1, 3) for suffix, price in (("", 4096), ("-long", 131072))
+    }
     assert twin_width("attend3-long-native") == 3
 
 
