@@ -67,6 +67,25 @@ def test_random_input_values_bound_u8_scale_codes_without_changing_adjacent_inpu
     assert fp8.dtype == np.uint8 and np.isfinite(decode_f8(fp8, "f8e4m3")).all()
 
 
+def test_a_native_chunk_is_benched_last_in_the_window_it_is_priced_at():
+    """A causal chunk reads keys only up to its rows, and a random draw puts its rows at the cache's start: a bench
+    gives native's attention the position of the window's last chunk, so its time is the window's."""
+    from emmy.commands.run import _chunk_position
+    from emmy.compiler.specialize import specialize_program
+    from emmy.compiler.trace.torch import trace_module
+    from emmy.serving.native.prepare import attend_module
+
+    window = torch.export.Dim("cache_tokens", min=64, max=1 << 20)
+    examples = (torch.zeros(16, 32), torch.zeros(512, 2, 8), torch.zeros(512, 2, 8), torch.zeros(1, dtype=torch.int64))
+    traced = trace_module(attend_module(4, 2, 8, 16), examples, dynamic_shapes={"keys": {0: window}, "values": {0: window}})
+
+    def static(shape):
+        return tuple(dim.as_static() for dim in shape)
+
+    assert _chunk_position(specialize_program(traced, {"cache_tokens": 4096}), static) == 4096 - 16
+    assert _chunk_position(trace_module(torch.nn.ReLU(), (torch.zeros(4),)), static) is None
+
+
 def test_random_input_values_use_adapter_scale_and_binary_selection():
     import numpy as np
 
