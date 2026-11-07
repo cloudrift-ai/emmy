@@ -30,7 +30,7 @@ Loop-IR's ``LoopOp``, its validation and fusion's body assembly stay in ``ir/loo
 identity stay here, with the two kinds fusion assembles a region with (``Call``, ``Subroutine``).
 """
 
-from emmy.compiler.ir.stmt.base import Stmt, dtype_promote, pretty_body
+from emmy.compiler.ir.stmt.base import Stmt, dtype_promote
 from emmy.compiler.ir.stmt.blocks import Cond, Loop, StridedLoop
 from emmy.compiler.ir.stmt.body import Body, exposed_defines, free_names
 from emmy.compiler.ir.stmt.declared import Declared, role
@@ -56,6 +56,7 @@ from emmy.compiler.ir.stmt.normalize import fold_affine, normalize_body, prepare
 from emmy.compiler.ir.stmt.order import ordering_constraints
 from emmy.compiler.ir.stmt.passes import map_exprs, rename_free
 from emmy.compiler.ir.stmt.subroutine import Call, Subroutine
+from emmy.compiler.ir.stmt.text import parse_body, pretty_body
 
 __all__ = [
     "Accum",
@@ -90,6 +91,7 @@ __all__ = [
     "normalize_body",
     "ordering_constraints",
     "prepare_body",
+    "parse_body",
     "pretty_body",
     "rename_free",
     "role",

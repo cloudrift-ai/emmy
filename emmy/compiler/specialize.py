@@ -9,6 +9,7 @@ from emmy.compiler.dim import Dim
 from emmy.compiler.graph import Graph
 from emmy.compiler.ir.expr import Expr, Interval, Literal, SimplifyCtx, Var
 from emmy.compiler.ir.frontend.ir import ReshapeOp, SliceOp
+from emmy.compiler.ir.stmt import Body, map_exprs
 from emmy.compiler.wire import rewrite
 
 
@@ -19,6 +20,13 @@ def _rewrite_graph(graph: Graph, fn: Callable[[object], object | None]) -> Graph
         node.op = rewrite(node.op, fn)
         node.outputs = tuple(rewrite(tensor, fn) for tensor in node.outputs)
     return out
+
+
+def _rewrite_body(body: Body, fn: Callable[[object], object | None]) -> Body:
+    """``body`` with ``fn`` applied to every expression and inside every loop axis: what the rewrite reaches in a
+    body, which is no wire object's fields but the statement module's own."""
+    mapped = body.map(lambda stmt: map_exprs(stmt, lambda expr: rewrite(expr, fn)))
+    return Body(stmt.rewrite(lambda name: name, axis_fn=lambda axis: rewrite(axis, fn)) for stmt in mapped)
 
 
 def _bound_expr(expr: Expr, bindings: Mapping[str, int], *, extent: bool) -> Expr:
@@ -59,6 +67,8 @@ def specialize_program(graph: Graph, bindings: Mapping[str, int]) -> Graph:
     def bind(value):
         if isinstance(value, Graph):
             return _rewrite_graph(value, bind)
+        if isinstance(value, Body):
+            return _rewrite_body(value, bind)
         if isinstance(value, Dim):
             return _bound_dim(value, bindings)
         if isinstance(value, Expr):
@@ -81,6 +91,8 @@ def rehint_program(graph: Graph, sizes: Mapping[str, int]) -> Graph:
     def rehint(value):
         if isinstance(value, Graph):
             return _rewrite_graph(value, rehint)
+        if isinstance(value, Body):
+            return _rewrite_body(value, rehint)
         if not isinstance(value, Dim) or value.is_static or not value.expr.free_vars() & sizes.keys():
             return None
         if isinstance(value.expr, Var):

@@ -364,21 +364,22 @@ def _plain_fold() -> LoopOp:
     return LoopOp(body=Body((Loop(axis=Axis("c", STEPS), body=(over_i, Write(output="out", index=(c,), value="total"))),)))
 
 
-def test_a_dump_outlines_the_loop_that_carries_the_state() -> None:
-    """The dump says where a state lives: the header names it with its cell extents, a bar runs down
-    the carrying loop's column, and the commit closes the section."""
-    carrying, tail = (stmt.pretty() for stmt in _fold_then_read().body)
-
-    assert carrying[0].endswith("  # carries acc0[4]")
-    assert all(line.startswith("|") for line in carrying[1:])
-    assert carrying[-1] == "|   # commit acc0"
-    assert tail == ["for a2 in 0..4", "    v2 = pre acc0[a2]", "    out[a2] = v2"]
-
-
-def test_a_loop_that_carries_nothing_prints_unchanged() -> None:
+def test_a_carried_state_prints_as_its_statements() -> None:
+    """The listing is the body's text: the state's update names its seed, and a read of it is a ``pre``."""
+    assert _fold_then_read().pretty_body() == (
+        "    for a0 in 0..3:\n"
+        "        for a1 in 0..4:\n"
+        "            in0 = load U[a0, a1]\n"
+        "            v0 = pre acc0[a1]\n"
+        "            v1 = in0 + v0\n"
+        "            acc0[a1] <- v1 seed 0\n"
+        "    for a2 in 0..4:\n"
+        "        v2 = pre acc0[a2]\n"
+        "        out[a2] = v2"
+    )
     assert _plain_fold().pretty_body() == (
-        "    for a0 in 0..3\n"
-        "        for a1 in 0..4\n"
+        "    for a0 in 0..3:\n"
+        "        for a1 in 0..4:\n"
         "            in0 = load U[a0, a1]\n"
         "            acc0 <- add(acc0, in0)\n"
         "        out[a0] = acc0"

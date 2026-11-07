@@ -36,6 +36,7 @@ from emmy.compiler.ir.stmt import (
     Write,
     ZeroPrologue,
     map_exprs,
+    parse_body,
 )
 
 
@@ -69,7 +70,8 @@ def test_a_body_is_no_tuple_and_a_field_that_holds_one_defaults_to_a_body() -> N
 
 
 def test_every_kind_states_the_protocol() -> None:
-    """A kind says how it rewrites and prints, and each reading half comes with its rebuilding half.
+    """A kind says how it rewrites, a kind of another layer says how it prints (the statement module's own print
+    through its text), and each reading half comes with its rebuilding half.
 
     A kind that lists child bodies rebuilds from bodies; one that lists expressions rebuilds from expressions.
     """
@@ -77,7 +79,7 @@ def test_every_kind_states_the_protocol() -> None:
     for cls in _kinds():
         if cls._rewrite is Stmt._rewrite:
             missing.append(f"{cls.__name__}: _rewrite")
-        if cls.pretty is Stmt.pretty:
+        if not hasattr(cls, "pretty") and not cls.__module__.startswith(stmt_pkg.__name__):
             missing.append(f"{cls.__name__}: pretty")
         if (cls.nested is Stmt.nested) != (cls.with_bodies is Stmt.with_bodies):
             missing.append(f"{cls.__name__}: nested and with_bodies come together")
@@ -293,10 +295,10 @@ def test_a_statement_survives_the_wire_form_and_pickling(stmt) -> None:
 
 def test_a_rename_reaches_names_and_expressions() -> None:
     names = {"x": "x2", "i": "j"}
-    load, write = Load("x", "a", (Var("i"),)), Write("out", (Var("i"),), "x")
-    assert load.rename(names) == Load("x2", "a", (Var("j"),))
-    assert write.rename(names) == Write("out", (Var("j"),), "x2")
-    assert map_exprs(load, lambda expr: expr.rename(lambda name: names.get(name, name))) == Load("x", "a", (Var("j"),))
+    load, write = parse_body("x = load a[i]\nout[i] = x")
+    assert str(load.rename(names)) == "x2 = load a[j]"
+    assert str(write.rename(names)) == "out[j] = x2"
+    assert str(map_exprs(load, lambda expr: expr.rename(lambda name: names.get(name, name)))) == "x = load a[j]"
 
 
 def test_a_body_is_an_immutable_sequence_of_its_statements() -> None:

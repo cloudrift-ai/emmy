@@ -76,6 +76,11 @@ dataclass from its fields. In an identity, `structural.form` renders a class by 
 one and a dataclass by its fields; both go through `record_form`, the one rule that keeps a trailing field left at
 its default out of every key. Neither form asks a class to be a dataclass or to inherit a Python base.
 
+Two classes are their text on the wire: an expression and a body of statements (`ir/ARCHITECTURE.md`). A statement
+is not a wire class at all, so a stored kernel reads as the listing a dump prints, and the wire rewrite does not go
+into a body: a caller that binds dimensions in one maps its expressions and its loop axes through the statement
+module's own functions.
+
 `Context` binds the effective precision decisions when a compile starts. Its key includes those decisions beside
 the target, compiler flags and cache mode, so an independent `FAST_EXP`, `F16_MMA_F32_ACC` or `FP8_MMA` override
 cannot read another regime's timings. Reconstructed contexts take the recorded pins explicitly; later environment

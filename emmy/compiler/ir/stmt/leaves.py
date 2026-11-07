@@ -16,11 +16,7 @@ from emmy.compiler.ir.axis import Axis
 from emmy.compiler.ir.elementwise import ElementwiseImpl
 from emmy.compiler.ir.expr import BinaryExpr, Expr, FlatIndex, Literal, Var
 from emmy.compiler.ir.sigma import Sigma
-from emmy.compiler.ir.stmt.base import (
-    Stmt,
-    spell_literal,
-)
-from emmy.compiler.wire import Wire
+from emmy.compiler.ir.stmt.base import Stmt
 
 
 @dataclass(frozen=True, init=False)
@@ -147,11 +143,6 @@ class Load(Stmt):
     def is_literal(self, literal_constants: dict[str, float]) -> bool:
         return self.input in literal_constants
 
-    def pretty(self, indent: str = "") -> list[str]:
-        idx = ", ".join(str(e) for e in self.index)
-        names = ", ".join(self.names)
-        return [f"{indent}{names} = load {self.input}[{idx}]"]
-
     def _rewrite(self, rename, sigma, axis_fn):  # noqa: ANN001, ANN202 — see ``Stmt.rewrite``
         return self.replace(
             names=tuple(rename(n) for n in self.names),
@@ -191,10 +182,6 @@ class Assign(Stmt):
 
     def defines(self) -> tuple[str, ...]:
         return (self.name,)
-
-    def pretty(self, indent: str = "") -> list[str]:
-        prefix = f"{self.dtype.name} " if self.dtype is not None else ""
-        return [f"{indent}{prefix}{self.name} = {self.op.name}({', '.join(self.args)})"]
 
     def _rewrite(self, rename, sigma, axis_fn):  # noqa: ANN001, ANN202 — see ``Stmt.rewrite``
         return Assign(name=rename(self.name), op=self.op, args=tuple(rename(a) for a in self.args), dtype=self.dtype)
@@ -238,18 +225,6 @@ class Affine(Stmt):
 
     def defines(self) -> tuple[str, ...]:
         return (self.name,)
-
-    def spelled(self) -> str:
-        """``2*x - y + 1``: the expression in its own vocabulary."""
-        parts = [("-" if c < 0 else "+", arg if abs(c) == 1 else f"{spell_literal(abs(c))}*{arg}") for c, arg in self.terms]
-        if self.offset != 0 or not parts:
-            parts.append(("-" if self.offset < 0 else "+", spell_literal(abs(self.offset))))
-        text = parts[0][1] if parts[0][0] == "+" else f"-{parts[0][1]}"
-        return text + "".join(f" {sign} {term}" for sign, term in parts[1:])
-
-    def pretty(self, indent: str = "") -> list[str]:
-        prefix = f"{self.dtype.name} " if self.dtype is not None else ""
-        return [f"{indent}{prefix}{self.name} = {self.spelled()}"]
 
     def as_assigns(self) -> list[Stmt]:
         """The same value as binary ``Assign``s over ``Let``-bound literals, the last one named ``name``: for a
@@ -359,6 +334,8 @@ class Accum(Stmt):
     def __post_init__(self) -> None:
         if isinstance(self.op, str):
             object.__setattr__(self, "op", ElementwiseImpl(self.op))
+        if self.base == self.name:  # the ordinary self-fold has one spelling
+            object.__setattr__(self, "base", None)
 
     @property
     def init(self) -> Expr:
@@ -402,11 +379,6 @@ class Accum(Stmt):
     @property
     def has_identity(self) -> bool:
         return self.op.has_identity
-
-    def pretty(self, indent: str = "") -> list[str]:
-        prefix = f"{self.dtype.name} " if self.dtype is not None else ""
-        base = self.base if self.base is not None else self.name
-        return [f"{indent}{prefix}{self.name} <- {self.op.name}({base}, {self.value})"]
 
     def _rewrite(self, rename, sigma, axis_fn):  # noqa: ANN001, ANN202 — see ``Stmt.rewrite``
         new_axes = tuple(sorted({rename(n) for old in self.axes for n in _rewrite_axis_name(old, sigma)}))
@@ -471,10 +443,6 @@ class Carry(Stmt):
     def with_exprs(self, exprs: tuple[Expr, ...]) -> Stmt:
         return self.replace(index=exprs)
 
-    def pretty(self, indent: str = "") -> list[str]:
-        seed = self.seed if isinstance(self.seed, str) else f"{self.seed:g}"
-        return [f"{indent}{self.name}[{', '.join(str(e) for e in self.index)}] <- {self.value}  (seed {seed})"]
-
     def _rewrite(self, rename, sigma, axis_fn):  # noqa: ANN001, ANN202 — see ``Stmt.rewrite``
         index = tuple(sigma.apply(e).rename(rename) for e in self.index)
         return Carry(name=rename(self.name), value=rename(self.value), index=index, seed=self.seed, dtype=self.dtype)
@@ -510,9 +478,6 @@ class Pre(Stmt):
 
     def with_exprs(self, exprs: tuple[Expr, ...]) -> Stmt:
         return self.replace(index=exprs)
-
-    def pretty(self, indent: str = "") -> list[str]:
-        return [f"{indent}{self.name} = pre {self.carrier}[{', '.join(str(e) for e in self.index)}]"]
 
     def _rewrite(self, rename, sigma, axis_fn):  # noqa: ANN001, ANN202 — see ``Stmt.rewrite``
         return Pre(name=rename(self.name), carrier=rename(self.carrier), index=tuple(sigma.apply(e).rename(rename) for e in self.index))
@@ -550,9 +515,6 @@ class Init(Stmt):
 
     def defines(self) -> tuple[str, ...]:
         return (self.name,)
-
-    def pretty(self, indent: str = "") -> list[str]:
-        return [f"{indent}Init({self.dtype.name} {self.name} = {self.identity})"]
 
     def _rewrite(self, rename, sigma, axis_fn):  # noqa: ANN001, ANN202 — see ``Stmt.rewrite``
         # ``identity`` is a constant scalar — only the name moves. Renamed in lockstep with
@@ -601,10 +563,6 @@ class Let(Stmt):
     def rename_buffers(self, rename):  # noqa: ANN001 — see ``Stmt.rename_buffers``
         value = self.value.rebuild(lambda e: replace(e, buffer=rename.get(e.buffer, e.buffer)) if isinstance(e, FlatIndex) else e)
         return self if value == self.value else self.replace(value=value)
-
-    def pretty(self, indent: str = "") -> list[str]:
-        prefix = f"{self.dtype.name} " if self.dtype is not None else ""
-        return [f"{indent}{prefix}{self.name} = {self.value}"]
 
     def _rewrite(self, rename, sigma, axis_fn):  # noqa: ANN001, ANN202 — see ``Stmt.rewrite``
         return Let(name=rename(self.name), value=sigma.apply(self.value).rename(rename), dtype=self.dtype)
@@ -726,15 +684,6 @@ class Write(Stmt):
     def has_side_effects(self) -> bool:
         return True
 
-    def pretty(self, indent: str = "") -> list[str]:
-        idx = ", ".join(str(e) for e in self.index)
-        swz = f" swz={self.swizzle}" if self.swizzle != "NONE" else ""
-        if self.is_vector:
-            return [f"{indent}{self.output}[{idx}]{swz} = ({', '.join(self.values)})"]
-        if self.atomic:
-            return [f"{indent}{self.output}[{idx}] += {self.values[0]}  (atomic)"]
-        return [f"{indent}{self.output}[{idx}]{swz} = {self.values[0]}"]
-
     def _rewrite(self, rename, sigma, axis_fn):  # noqa: ANN001, ANN202 — see ``Stmt.rewrite``
         return Write(
             output=self.output,
@@ -747,7 +696,7 @@ class Write(Stmt):
 
 
 @dataclass(frozen=True)
-class SelectBranch(Wire):
+class SelectBranch:
     """One branch of a ``Select`` body statement."""
 
     value: str  # SSA name when predicate holds
@@ -787,13 +736,6 @@ class Select(Stmt):
 
     def with_exprs(self, exprs: tuple[Expr, ...]) -> Stmt:
         return self.replace(branches=tuple(SelectBranch(b.value, select) for b, select in zip(self.branches, exprs, strict=True)))
-
-    def pretty(self, indent: str = "") -> list[str]:
-        lines: list[str] = []
-        for bi, br in enumerate(self.branches):
-            prefix = f"{self.name} =" if bi == 0 else f"{' ' * len(self.name)}  "
-            lines.append(f"{indent}{prefix} {br.value} when ({br.select})")
-        return lines
 
     def _rewrite(self, rename, sigma, axis_fn):  # noqa: ANN001, ANN202 — see ``Stmt.rewrite``
         # A branch condition reads coordinates exactly as a Load index does: σ first, then the rename
@@ -859,9 +801,6 @@ class ZeroPrologue(Stmt):
     @cached_property
     def has_side_effects(self) -> bool:
         return True
-
-    def pretty(self, indent: str = "") -> list[str]:
-        return [f"{indent}zero {self.dst}[0:{self.words}w]  (delegated zero-init)"]
 
     def _rewrite(self, rename, sigma, axis_fn):  # noqa: ANN001, ANN202 — see ``Stmt.rewrite``
         # Buffer name + word count only — like ``Write.output``, ``dst`` is a buffer, and buffers

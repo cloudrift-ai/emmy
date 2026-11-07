@@ -371,7 +371,7 @@ def test_constants_follow_the_input_names_of_the_kernel_copy_the_db_keeps(tmp_pa
     document = replace(case.document, gpu_name=CARDS[case.compute_cap], rows=[replace(row, measurements=measured) for row in case.rows])
     [target] = document.targets()
     db = SearchDB()
-    renamed = replace(target, loop_ir=json.loads(json.dumps(target.loop_ir).replace('"linear_wt"', '"other_wt"')))
+    renamed = replace(target, loop_ir=json.loads(json.dumps(target.loop_ir).replace("linear_wt", "other_wt")))
     db.record_kernel(renamed.keyed(target.exact_identity))
     import_file(db, document.dump(tmp_path / "golden.json"), "golden:test")
     [pool] = placement_pools(db, golden_pools(db)[0])
