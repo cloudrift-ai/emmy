@@ -56,11 +56,17 @@ parent's imports.
   dtypes (`DType`, `kinds/dtype.rs`, with the promotion rule), the kernel vocabularies a field holds (`Swizzle`,
   `RasterOrient`, `FragmentLayout`, `Role`), the GPU built-ins (`expr::Builtin`), a cast's target (`LitType`) and the
   digest's tags (`numbering::Tag`, whose texts a test pins, since they are identity material). An elementwise
-  operation is `Op::Known(Elementwise)`, an enum of the operations the compiler knows a property of (commutative,
-  associative, the neutral element, the cluster, integer arithmetic, an affine role, the host evaluator), or
-  `Op::Other(name)` for a spelling only a renderer knows. A string of any of these sets exists where the text is read
-  or written, at the Python boundary, and nowhere else; the renderer's own vocabularies (a shared-memory slab's C
-  type, an MMA wrapper's `ab_dtype`) stay names the crate carries and never reads.
+  operation is `Op::Known(Elementwise)` or `Op::Other(name)`, a spelling only a renderer knows. The known operations
+  are one declaration (`operations!` in `kinds/elementwise.rs`): each variant with its spelling and its properties,
+  which generates the enum, its `Display`/`FromStr` pair and the table `OPS` the enum indexes, one `OpInfo` row per
+  operation (commutative, associative, the neutral element, the cluster representative, integer arithmetic, whether
+  it copies its operand, its affine role, its host evaluator). Every reader of an operation's nature (the affine
+  fold, the alias reads of placement and the ties, the dtype promotion, the clustered identity, the Python tables)
+  reads a property; none matches a name. The neutral element is the real one (`-inf` for a maximum) and `seed` is
+  what a kernel initializes with, the bounded stand-in `±1e30` the CUDA source and every stored kernel spell. A
+  string of any of these sets exists where the text is read or written, at the Python boundary, and nowhere else;
+  the renderer's own vocabularies (a shared-memory slab's C type, an MMA wrapper's `ab_dtype`) stay names the crate
+  carries and never reads.
 - **Axes** (`kinds/axis.rs`): `Axis` (name, `Dim`, window), equal by name and extent as the Python class is; the window is
   provenance. The Python `Axis`, `Dim`, `DataType` and `ElementwiseImpl` objects stay Python classes: a statement holds
   a name (or an axis's parts) and the extension makes the object on first read.

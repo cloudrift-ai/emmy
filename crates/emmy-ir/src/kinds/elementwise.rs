@@ -9,12 +9,92 @@ use std::sync::Arc;
 
 use crate::{Error, Name, Result};
 
-/// The operations the compiler knows a property of, each with its one spelling. `$text` is the name a statement's
-/// text and the Python `ElementwiseImpl` use; a spelling outside the list is an [`Op::Other`].
-macro_rules! elementwise {
-    ($( $Variant:ident = $text:literal, )*) => {
+/// How `fold_affine` reads an operation: as a term of a sum.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum AffineRole {
+    /// `a + b`: both operands with the scale.
+    Sum,
+    /// `a - b`: the second operand with the negated scale.
+    Difference,
+    /// `-a`: the operand with the negated scale.
+    Negation,
+    /// `a * b` with one literal operand: the other operand scaled by it.
+    Scale,
+    /// `a / b` with a literal divisor: the dividend scaled by its reciprocal.
+    Quotient,
+}
+
+impl AffineRole {
+    pub fn arity(self) -> usize {
+        match self {
+            AffineRole::Negation => 1,
+            _ => 2,
+        }
+    }
+}
+
+/// How an operation computes on host floats, for constant folding; `None` where it has no host form here (it stays
+/// as written).
+#[derive(Clone, Copy)]
+pub enum Eval {
+    None,
+    Unary(fn(f32) -> f32),
+    Binary(fn(f32, f32) -> f32),
+    Ternary(fn(f32, f32, f32) -> f32),
+}
+
+/// Everything the compiler knows of a known operation, in one row of the table `OPS` indexes by `Elementwise`.
+#[derive(Clone, Copy)]
+pub struct OpInfo {
+    /// The spelling: how the operation prints and reads.
+    pub text: &'static str,
+    /// A binary combine where `op(a, b) == op(b, a)`.
+    pub commutative: bool,
+    /// A binary combine where `op(op(a, b), c) == op(a, op(b, c))`: the reassociable reduce combines.
+    pub associative: bool,
+    /// The reducer's neutral element; `seed` is what a kernel initializes with.
+    pub neutral: Option<f64>,
+    /// The compute-unit cluster representative: the clustered identity collapses operations sharing a GPU unit.
+    pub cluster: Option<Elementwise>,
+    /// Arithmetic on integer operands stays in the integer family (the dtype promotion rule).
+    pub integer: bool,
+    /// The operation returns its one operand unchanged: an alias normalization reads through.
+    pub copies: bool,
+    /// How `fold_affine` reads it, when it is a term of a sum.
+    pub affine: Option<AffineRole>,
+    /// Its value on `f32` operands, as NumPy computes it for `np.float32` scalars.
+    pub eval: Eval,
+}
+
+impl OpInfo {
+    const DEFAULT: OpInfo = OpInfo {
+        text: "",
+        commutative: false,
+        associative: false,
+        neutral: None,
+        cluster: None,
+        integer: false,
+        copies: false,
+        affine: None,
+        eval: Eval::None,
+    };
+}
+
+/// The finite stand-in a kernel initializes an unbounded neutral element with (the CUDA source and every stored
+/// kernel spell `-1e+30f`); a bounded one is itself.
+const SEED_BOUND: f64 = 1e30;
+
+/// The known operations: one list declares each variant, its spelling and its properties, and generates the enum,
+/// its `Display`/`FromStr` pair and the table. A property left out takes `OpInfo::DEFAULT`'s value.
+macro_rules! operations {
+    ($( $Variant:ident = $text:literal { $( $field:ident : $value:expr ),* $(,)? }, )*) => {
         #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
         pub enum Elementwise { $( $Variant, )* }
+
+        /// The properties of every known operation, in `Elementwise` order.
+        pub static OPS: [OpInfo; Elementwise::ALL.len()] = [
+            $( OpInfo { text: $text, $( $field: $value, )* ..OpInfo::DEFAULT }, )*
+        ];
 
         impl Elementwise {
             pub const ALL: &[Elementwise] = &[ $( Elementwise::$Variant, )* ];
@@ -37,21 +117,79 @@ macro_rules! elementwise {
     };
 }
 
-elementwise! {
-    Add = "add", Sum = "sum", Subtract = "subtract", Sub = "sub", Negative = "negative", Multiply = "multiply",
-    Prod = "prod", Fma = "fma", Square = "square", Abs = "abs", Absolute = "absolute", Fabs = "fabs",
-    Maximum = "maximum", Minimum = "minimum", Amax = "amax", Fmax = "fmax", Fmin = "fmin", Sign = "sign",
-    Divide = "divide", DivideRnF32 = "divide_rn_f32", TrueDivide = "true_divide", FloorDivide = "floor_divide",
-    Remainder = "remainder", Mod = "mod", Reciprocal = "reciprocal",
-    Sqrt = "sqrt", Rsqrt = "rsqrt", Exp = "exp", ExpFast = "exp_fast", Exp2 = "exp2", Expm1 = "expm1",
-    Log = "log", Log2 = "log2", Log10 = "log10", Log1p = "log1p", Sin = "sin", Cos = "cos", Tan = "tan",
-    Tanh = "tanh", Sinh = "sinh", Cosh = "cosh", Arctan = "arctan", Arcsin = "arcsin", Arccos = "arccos",
-    Floor = "floor", Ceil = "ceil", Trunc = "trunc", Rint = "rint", Round = "round",
-    Sigmoid = "sigmoid", Silu = "silu", Softplus = "softplus", Erf = "erf", Gelu = "gelu", GeluTanh = "gelu_tanh",
-    Pow = "pow", Power = "power", Relu = "relu", Where = "where",
-    Copy = "copy", Pad = "pad", Positive = "positive", Bitcast = "bitcast",
-    LeftShift = "left_shift", RightShift = "right_shift", BitwiseAnd = "bitwise_and", BitwiseOr = "bitwise_or",
-    BitwiseXor = "bitwise_xor", BitwiseCount = "bitwise_count",
+use Elementwise as E;
+
+operations! {
+    Add = "add" { commutative: true, associative: true, neutral: Some(0.0), cluster: Some(E::Multiply), integer: true, affine: Some(AffineRole::Sum), eval: Eval::Binary(|a, b| a + b) },
+    Sum = "sum" { commutative: true, associative: true, neutral: Some(0.0), cluster: Some(E::Multiply) },
+    Subtract = "subtract" { cluster: Some(E::Multiply), integer: true, affine: Some(AffineRole::Difference), eval: Eval::Binary(|a, b| a - b) },
+    Sub = "sub" { cluster: Some(E::Multiply) },
+    Negative = "negative" { cluster: Some(E::Multiply), integer: true, affine: Some(AffineRole::Negation), eval: Eval::Unary(|x| -x) },
+    Multiply = "multiply" { commutative: true, associative: true, neutral: Some(1.0), cluster: Some(E::Multiply), integer: true, affine: Some(AffineRole::Scale), eval: Eval::Binary(|a, b| a * b) },
+    Prod = "prod" { commutative: true, associative: true, neutral: Some(1.0), cluster: Some(E::Multiply) },
+    Fma = "fma" { cluster: Some(E::Multiply) },
+    Square = "square" { cluster: Some(E::Multiply), eval: Eval::Unary(|x| x * x) },
+    Abs = "abs" { cluster: Some(E::Multiply), eval: Eval::Unary(f32::abs) },
+    Absolute = "absolute" { eval: Eval::Unary(f32::abs) },
+    Fabs = "fabs" { eval: Eval::Unary(f32::abs) },
+    Maximum = "maximum" { commutative: true, associative: true, neutral: Some(f64::NEG_INFINITY), cluster: Some(E::Maximum), eval: Eval::Binary(f32::max) },
+    Minimum = "minimum" { commutative: true, associative: true, neutral: Some(f64::INFINITY), cluster: Some(E::Maximum), eval: Eval::Binary(f32::min) },
+    Amax = "amax" { commutative: true, associative: true, neutral: Some(f64::NEG_INFINITY), cluster: Some(E::Maximum) },
+    Fmax = "fmax" { cluster: Some(E::Maximum), eval: Eval::Binary(f32::max) },
+    Fmin = "fmin" { cluster: Some(E::Maximum), eval: Eval::Binary(f32::min) },
+    Sign = "sign" { cluster: Some(E::Maximum), eval: Eval::Unary(|x| if x > 0.0 { 1.0 } else if x < 0.0 { -1.0 } else { 0.0 }) },
+    Divide = "divide" { cluster: Some(E::Divide), affine: Some(AffineRole::Quotient), eval: Eval::Binary(|a, b| a / b) },
+    DivideRnF32 = "divide_rn_f32" { cluster: Some(E::Divide), eval: Eval::Binary(|a, b| a / b) },
+    TrueDivide = "true_divide" { cluster: Some(E::Divide), eval: Eval::Binary(|a, b| a / b) },
+    FloorDivide = "floor_divide" { cluster: Some(E::Divide), integer: true, eval: Eval::Binary(|a, b| (a / b).floor()) },
+    Remainder = "remainder" { cluster: Some(E::Divide), integer: true, eval: Eval::Binary(|a, b| a - (a / b).floor() * b) },
+    Mod = "mod" { cluster: Some(E::Divide), integer: true, eval: Eval::Binary(|a, b| a - (a / b).floor() * b) },
+    Reciprocal = "reciprocal" { cluster: Some(E::Divide), eval: Eval::Unary(|x| 1.0 / x) },
+    Sqrt = "sqrt" { cluster: Some(E::Exp), eval: Eval::Unary(f32::sqrt) },
+    Rsqrt = "rsqrt" { cluster: Some(E::Exp), eval: Eval::Unary(|x| 1.0 / x.sqrt()) },
+    Exp = "exp" { cluster: Some(E::Exp), eval: Eval::Unary(f32::exp) },
+    ExpFast = "exp_fast" { cluster: Some(E::Exp), eval: Eval::Unary(f32::exp) },
+    Exp2 = "exp2" { eval: Eval::Unary(f32::exp2) },
+    Expm1 = "expm1" { eval: Eval::Unary(f32::exp_m1) },
+    Log = "log" { cluster: Some(E::Exp), eval: Eval::Unary(f32::ln) },
+    Log2 = "log2" { cluster: Some(E::Exp), eval: Eval::Unary(f32::log2) },
+    Log10 = "log10" { cluster: Some(E::Exp), eval: Eval::Unary(f32::log10) },
+    Log1p = "log1p" { eval: Eval::Unary(f32::ln_1p) },
+    Sin = "sin" { cluster: Some(E::Exp), eval: Eval::Unary(f32::sin) },
+    Cos = "cos" { cluster: Some(E::Exp), eval: Eval::Unary(f32::cos) },
+    Tan = "tan" { cluster: Some(E::Exp), eval: Eval::Unary(f32::tan) },
+    Tanh = "tanh" { cluster: Some(E::Exp), eval: Eval::Unary(f32::tanh) },
+    Sinh = "sinh" { eval: Eval::Unary(f32::sinh) },
+    Cosh = "cosh" { eval: Eval::Unary(f32::cosh) },
+    Arctan = "arctan" { eval: Eval::Unary(f32::atan) },
+    Arcsin = "arcsin" { eval: Eval::Unary(f32::asin) },
+    Arccos = "arccos" { eval: Eval::Unary(f32::acos) },
+    Floor = "floor" { eval: Eval::Unary(f32::floor) },
+    Ceil = "ceil" { eval: Eval::Unary(f32::ceil) },
+    Trunc = "trunc" { eval: Eval::Unary(f32::trunc) },
+    Rint = "rint" { eval: Eval::Unary(libm::rintf) },
+    Round = "round" { eval: Eval::Unary(libm::rintf) },
+    Sigmoid = "sigmoid" { cluster: Some(E::Exp), eval: Eval::Unary(|x| 1.0 / (1.0 + (-x).exp())) },
+    Silu = "silu" { cluster: Some(E::Exp), eval: Eval::Unary(|x| x / (1.0 + (-x).exp())) },
+    // np.logaddexp(0, x) = max(0, x) + log1p(exp(-|x|))
+    Softplus = "softplus" { cluster: Some(E::Exp), eval: Eval::Unary(|x| x.max(0.0) + (-x.abs()).exp().ln_1p()) },
+    Erf = "erf" { cluster: Some(E::Exp), eval: Eval::Unary(libm::erff) },
+    Gelu = "gelu" { cluster: Some(E::Exp), eval: Eval::Unary(|x| 0.5 * x * (1.0 + libm::erff(x / 2f32.sqrt()))) },
+    GeluTanh = "gelu_tanh" { cluster: Some(E::Exp), eval: Eval::Unary(|x| 0.5 * x * (1.0 + ((2.0f32 / std::f32::consts::PI).sqrt() * (x + 0.044715 * x * x * x)).tanh())) },
+    Pow = "pow" { cluster: Some(E::Exp), eval: Eval::Binary(f32::powf) },
+    Power = "power" { cluster: Some(E::Exp), eval: Eval::Binary(f32::powf) },
+    Relu = "relu" { cluster: Some(E::Exp), eval: Eval::Unary(|x| x.max(0.0)) },
+    Where = "where" { eval: Eval::Ternary(|c, a, b| if c != 0.0 { a } else { b }) },
+    Copy = "copy" { cluster: Some(E::Copy), copies: true, eval: Eval::Unary(|x| x) },
+    Pad = "pad" { eval: Eval::Unary(|x| x) },
+    Positive = "positive" { eval: Eval::Unary(|x| x) },
+    Bitcast = "bitcast" { eval: Eval::Unary(|x| x) },
+    LeftShift = "left_shift" { integer: true },
+    RightShift = "right_shift" { integer: true },
+    BitwiseAnd = "bitwise_and" { integer: true },
+    BitwiseOr = "bitwise_or" { integer: true },
+    BitwiseXor = "bitwise_xor" { integer: true },
+    BitwiseCount = "bitwise_count" { integer: true },
 }
 
 impl fmt::Display for Elementwise {
@@ -67,73 +205,28 @@ pub const ALIASES: [(&str, Elementwise); 2] = [
 ];
 
 impl Elementwise {
-    /// A binary combine where `op(a, b) == op(b, a)`.
-    pub fn commutative(self) -> bool {
-        use Elementwise::*;
-        matches!(self, Add | Multiply | Maximum | Minimum | Amax | Sum | Prod)
+    /// The row of the table: every property in one place.
+    pub fn info(self) -> &'static OpInfo {
+        &OPS[self as usize]
     }
 
-    /// A binary combine where `op(op(a, b), c) == op(a, op(b, c))`: the reassociable reduce combines.
-    pub fn associative(self) -> bool {
-        self.commutative()
+    /// The neutral element as a kernel initializes it: the bounded stand-in of an unbounded one.
+    pub fn seed(self) -> Option<f64> {
+        self.info()
+            .neutral
+            .map(|neutral| neutral.clamp(-SEED_BOUND, SEED_BOUND))
     }
 
-    /// A reducer's neutral element.
-    pub fn identity(self) -> Option<f64> {
-        use Elementwise::*;
-        match self {
-            Add | Sum => Some(0.0),
-            Multiply | Prod => Some(1.0),
-            Maximum | Amax => Some(-1e30),
-            Minimum => Some(1e30),
-            _ => None,
-        }
-    }
-
-    /// The compute-unit cluster representative: the clustered identity collapses operations that share a GPU
-    /// functional unit. `None` for an operation no cluster lists.
-    pub fn cluster(self) -> Option<Elementwise> {
-        use Elementwise::*;
-        Some(match self {
-            Add | Sum | Subtract | Sub | Negative | Multiply | Prod | Abs | Fma | Square => {
-                Multiply
-            }
-            Maximum | Minimum | Amax | Sign | Fmax | Fmin => Maximum,
-            Divide | DivideRnF32 | TrueDivide | FloorDivide | Remainder | Mod | Reciprocal => {
-                Divide
-            }
-            Sqrt | Rsqrt | Exp | Log | Log2 | Log10 | Sin | Cos | Tan | Tanh | Sigmoid | Silu
-            | Softplus | Erf | Gelu | GeluTanh | Pow | Relu | Power | ExpFast => Exp,
-            Copy => Copy,
+    /// The op's value on `f32` operands, as NumPy computes it for `np.float32` scalars; `None` for an op with no host
+    /// form here (it stays as written), an arity that does not fit, or a result that is not finite.
+    pub fn evaluate_f32(self, args: &[f32]) -> Option<f32> {
+        let value = match (self.info().eval, args) {
+            (Eval::Unary(f), [x]) => f(*x),
+            (Eval::Binary(f), [a, b]) => f(*a, *b),
+            (Eval::Ternary(f), [a, b, c]) => f(*a, *b, *c),
             _ => return None,
-        })
-    }
-
-    /// Arithmetic on integer operands stays in the integer family.
-    pub fn integer(self) -> bool {
-        use Elementwise::*;
-        matches!(
-            self,
-            Add | Subtract
-                | Negative
-                | Multiply
-                | FloorDivide
-                | Remainder
-                | Mod
-                | LeftShift
-                | RightShift
-                | BitwiseAnd
-                | BitwiseOr
-                | BitwiseXor
-                | BitwiseCount
-        )
-    }
-
-    /// Whether `fold_affine` reads this operation as a term of a sum: a sum, a difference, a negation, or a product
-    /// or quotient by a literal.
-    pub fn affine(self) -> bool {
-        use Elementwise::*;
-        matches!(self, Add | Subtract | Negative | Multiply | Divide)
+        };
+        value.is_finite().then_some(value)
     }
 }
 
@@ -173,21 +266,42 @@ impl Op {
         *self == Op::Known(op)
     }
 
+    /// The known operation's properties; `Other` has none.
+    pub fn info(&self) -> Option<&'static OpInfo> {
+        self.known().map(Elementwise::info)
+    }
+
     pub fn commutative(&self) -> bool {
-        self.known().is_some_and(Elementwise::commutative)
+        self.info().is_some_and(|info| info.commutative)
     }
 
     pub fn associative(&self) -> bool {
-        self.known().is_some_and(Elementwise::associative)
+        self.info().is_some_and(|info| info.associative)
     }
 
-    pub fn identity(&self) -> Option<f64> {
-        self.known().and_then(Elementwise::identity)
+    /// The reducer's neutral element.
+    pub fn neutral(&self) -> Option<f64> {
+        self.info().and_then(|info| info.neutral)
+    }
+
+    /// The neutral element as a kernel initializes it.
+    pub fn seed(&self) -> Option<f64> {
+        self.known().and_then(Elementwise::seed)
+    }
+
+    /// The operation returns its one operand unchanged.
+    pub fn copies(&self) -> bool {
+        self.info().is_some_and(|info| info.copies)
+    }
+
+    /// How `fold_affine` reads the operation, when it is a term of a sum.
+    pub fn affine(&self) -> Option<AffineRole> {
+        self.info().and_then(|info| info.affine)
     }
 
     /// The op's compute-unit cluster representative; the op itself when no cluster lists it.
     pub fn cluster_representative(&self) -> Op {
-        match self.known().and_then(Elementwise::cluster) {
+        match self.info().and_then(|info| info.cluster) {
             Some(representative) => Op::Known(representative),
             None => self.clone(),
         }
@@ -214,96 +328,24 @@ impl fmt::Display for Op {
 
 pub type Ops = Arc<[Op]>;
 
-impl Elementwise {
-    /// The op's value on `f32` operands, as NumPy computes it for `np.float32` scalars; `None` for an op with no host
-    /// form here (it stays as written) or a result that is not finite.
-    pub fn evaluate_f32(self, args: &[f32]) -> Option<f32> {
-        use Elementwise::*;
-        let one = || args.first().copied();
-        let two = || {
-            if args.len() == 2 {
-                Some((args[0], args[1]))
-            } else {
-                None
-            }
-        };
-        let erf = |x: f32| libm::erff(x);
-        let value = match self {
-            Copy | Pad | Positive | Bitcast => one()?,
-            Negative => -one()?,
-            Abs | Absolute | Fabs => one()?.abs(),
-            Exp | ExpFast => one()?.exp(),
-            Exp2 => one()?.exp2(),
-            Expm1 => one()?.exp_m1(),
-            Log => one()?.ln(),
-            Log2 => one()?.log2(),
-            Log10 => one()?.log10(),
-            Log1p => one()?.ln_1p(),
-            Sqrt => one()?.sqrt(),
-            Rsqrt => 1.0 / one()?.sqrt(),
-            Square => one()? * one()?,
-            Reciprocal => 1.0 / one()?,
-            Sin => one()?.sin(),
-            Cos => one()?.cos(),
-            Tan => one()?.tan(),
-            Tanh => one()?.tanh(),
-            Sinh => one()?.sinh(),
-            Cosh => one()?.cosh(),
-            Arctan => one()?.atan(),
-            Arcsin => one()?.asin(),
-            Arccos => one()?.acos(),
-            Floor => one()?.floor(),
-            Ceil => one()?.ceil(),
-            Trunc => one()?.trunc(),
-            Rint | Round => libm::rintf(one()?),
-            Sign => {
-                let x = one()?;
-                if x > 0.0 {
-                    1.0
-                } else if x < 0.0 {
-                    -1.0
-                } else {
-                    0.0
-                }
-            }
-            Relu => one()?.max(0.0),
-            Sigmoid => 1.0 / (1.0 + (-one()?).exp()),
-            Silu => one()? / (1.0 + (-one()?).exp()),
-            Softplus => {
-                let x = one()?;
-                // np.logaddexp(0, x) = max(0, x) + log1p(exp(-|x|))
-                x.max(0.0) + (-x.abs()).exp().ln_1p()
-            }
-            Erf => erf(one()?),
-            Gelu => {
-                let x = one()?;
-                0.5 * x * (1.0 + erf(x / 2f32.sqrt()))
-            }
-            GeluTanh => {
-                let x = one()?;
-                0.5 * x
-                    * (1.0
-                        + ((2.0f32 / std::f32::consts::PI).sqrt() * (x + 0.044715 * x * x * x))
-                            .tanh())
-            }
-            Add => two().map(|(a, b)| a + b)?,
-            Subtract => two().map(|(a, b)| a - b)?,
-            Multiply => two().map(|(a, b)| a * b)?,
-            Divide | TrueDivide | DivideRnF32 => two().map(|(a, b)| a / b)?,
-            FloorDivide => two().map(|(a, b)| (a / b).floor())?,
-            Remainder | Mod => two().map(|(a, b)| a - (a / b).floor() * b)?,
-            Maximum | Fmax => two().map(|(a, b)| a.max(b))?,
-            Minimum | Fmin => two().map(|(a, b)| a.min(b))?,
-            Power | Pow => two().map(|(a, b)| a.powf(b))?,
-            Where if args.len() == 3 => {
-                if args[0] != 0.0 {
-                    args[1]
-                } else {
-                    args[2]
-                }
-            }
-            _ => return None,
-        };
-        value.is_finite().then_some(value)
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_table_is_in_enum_order_and_spells_every_operation() {
+        for (index, op) in Elementwise::ALL.iter().enumerate() {
+            assert_eq!(OPS[index].text, op.text(), "{op:?}");
+            assert_eq!(op.text().parse::<Elementwise>().unwrap(), *op);
+        }
+        assert_eq!(Elementwise::Maximum.info().neutral, Some(f64::NEG_INFINITY));
+        assert_eq!(Elementwise::Maximum.seed(), Some(-1e30));
+        assert_eq!(Elementwise::Minimum.seed(), Some(1e30));
+        assert_eq!(Elementwise::Add.seed(), Some(0.0));
+        assert_eq!(Elementwise::Add.evaluate_f32(&[1.5, 2.0]), Some(3.5));
+        assert_eq!(Elementwise::Add.evaluate_f32(&[1.5]), None);
+        assert_eq!(Elementwise::Where.evaluate_f32(&[0.0, 1.0, 2.0]), Some(2.0));
+        assert_eq!(Op::new("__rshift__"), Op::Known(Elementwise::RightShift));
+        assert!(Op::new("unknown_op").info().is_none());
     }
 }

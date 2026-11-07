@@ -11,34 +11,35 @@ mod statement;
 
 /// The elementwise tables the Python `ElementwiseImpl` reads, each a view of the operations' properties.
 fn elementwise_tables(m: &Bound<'_, PyModule>) -> PyResult<()> {
-    use emmy_ir::kinds::elementwise::{ALIASES, Elementwise};
+    use emmy_ir::kinds::elementwise::{ALIASES, Elementwise, OpInfo};
     let py = m.py();
-    fn texts(keep: fn(Elementwise) -> bool) -> Vec<&'static str> {
+    fn texts(keep: fn(&OpInfo) -> bool) -> Vec<&'static str> {
         Elementwise::ALL
             .iter()
             .copied()
-            .filter(|op| keep(*op))
+            .filter(|op| keep(op.info()))
             .map(Elementwise::text)
             .collect()
     }
     m.add(
         "COMMUTATIVE_OPS",
-        PyFrozenSet::new(py, texts(Elementwise::commutative))?,
+        PyFrozenSet::new(py, texts(|info| info.commutative))?,
     )?;
     m.add(
         "ASSOCIATIVE_OPS",
-        PyFrozenSet::new(py, texts(Elementwise::associative))?,
+        PyFrozenSet::new(py, texts(|info| info.associative))?,
     )?;
+    // What a kernel seeds a reduction with: the bounded stand-in of an unbounded neutral element.
     let identity = PyDict::new(py);
     for op in Elementwise::ALL {
-        if let Some(value) = op.identity() {
+        if let Some(value) = op.seed() {
             identity.set_item(op.text(), value)?;
         }
     }
     m.add("OP_IDENTITY", identity)?;
     let clusters = PyDict::new(py);
     for op in Elementwise::ALL {
-        if let Some(representative) = op.cluster() {
+        if let Some(representative) = op.info().cluster {
             clusters.set_item(op.text(), representative.text())?;
         }
     }
