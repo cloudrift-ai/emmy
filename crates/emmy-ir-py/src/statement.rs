@@ -872,7 +872,7 @@ impl Accum {
     #[getter]
     fn has_identity(slf: &Bound<'_, Self>) -> PyResult<bool> {
         let accum: &emmy_ir::kinds::Accum = inner(slf.as_super().get())?;
-        Ok(accum.op.identity().is_some())
+        Ok(accum.op.neutral().is_some())
     }
 }
 

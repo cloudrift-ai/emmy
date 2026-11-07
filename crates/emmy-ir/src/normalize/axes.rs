@@ -69,7 +69,7 @@ pub fn drop_size_one_reduce_axes(body: &Body) -> Body {
             match &*member {
                 Statement::Accum(a) => match &a.base {
                     None => {
-                        if a.op.identity().is_none() {
+                        if a.op.neutral().is_none() {
                             return Some(vec![stmt.clone()]);
                         }
                         out.push(assign(

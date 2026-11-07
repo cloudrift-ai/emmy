@@ -62,7 +62,7 @@ impl DType {
 /// rule for integer arithmetic on integers, `f16` when every argument is `f16`, else `f32`.
 pub fn promote(op: Option<Elementwise>, arg_dtypes: &[DType]) -> DType {
     if !arg_dtypes.is_empty()
-        && op.is_some_and(Elementwise::integer)
+        && op.is_some_and(|op| op.info().integer)
         && arg_dtypes.iter().all(|d| d.is_integer())
     {
         let widest = |signed: bool| {

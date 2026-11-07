@@ -6,7 +6,6 @@ use std::sync::Arc;
 
 use super::with_bodies;
 use crate::body::{Body, free_names};
-use crate::kinds::elementwise::Elementwise;
 use crate::kinds::*;
 use crate::numbering::{Number, Numbering, Param, value_numbers};
 use crate::order::is_protocol;
@@ -206,7 +205,7 @@ impl Placer<'_> {
                 self.alias.remove(&name);
             }
             if let Statement::Assign(a) = &**stmt
-                && a.op.is(Elementwise::Copy)
+                && a.op.copies()
                 && a.args.len() == 1
                 && a.dtype.is_none()
             {
@@ -479,6 +478,7 @@ pub fn place_values(body: &Body) -> Result<Body> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::kinds::elementwise::Elementwise;
     use crate::normalize::normalize_body;
     use crate::normalize::testing::*;
 

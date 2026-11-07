@@ -9,7 +9,7 @@ use crate::Name;
 use crate::body::Body;
 use crate::expr::Expression;
 use crate::kinds::dtype::promote;
-use crate::kinds::elementwise::{Elementwise, Op};
+use crate::kinds::elementwise::{AffineRole, Elementwise, Op};
 use crate::kinds::field::{DType, Float, Names};
 use crate::kinds::*;
 use crate::numbering::Key;
@@ -52,7 +52,7 @@ pub fn fold_constants(body: &Body) -> Body {
             return None;
         }
         let values: Vec<f64> = stmt.args.iter().map(|arg| env[arg]).collect();
-        if stmt.op.is(Elementwise::Copy) {
+        if stmt.op.copies() {
             return Some(values[0]);
         }
         let args: Vec<f32> = values.iter().map(|v| *v as f32).collect();
@@ -285,17 +285,21 @@ pub fn fold_affine(body: &Body, exposed: &HashSet<Name>) -> Body {
             match &*stmts[index] {
                 Statement::Affine(_) => true,
                 Statement::Assign(a) => {
-                    let Some(op) = a.op.known().filter(|op| op.affine()) else {
+                    let Some(role) = a.op.affine() else {
                         return false;
                     };
-                    if a.args.len() != if op == Elementwise::Negative { 1 } else { 2 } {
+                    if a.args.len() != role.arity() {
                         return false;
                     }
-                    if op == Elementwise::Divide {
-                        return values[index].get(&a.args[1]).is_some_and(|v| *v != 0.0);
+                    match role {
+                        AffineRole::Quotient => {
+                            values[index].get(&a.args[1]).is_some_and(|v| *v != 0.0)
+                        }
+                        AffineRole::Scale => {
+                            a.args.iter().any(|arg| values[index].contains_key(arg))
+                        }
+                        _ => true,
                     }
-                    op != Elementwise::Multiply
-                        || a.args.iter().any(|arg| values[index].contains_key(arg))
                 }
                 _ => false,
             }
@@ -374,14 +378,14 @@ pub fn fold_affine(body: &Body, exposed: &HashSet<Name>) -> Body {
                             self.collect(index, arg, scale * coefficient, terms, offset);
                         }
                     }
-                    Statement::Assign(a) => match (a.op.known(), &a.args[..]) {
-                        (Some(Elementwise::Negative), [x]) => {
+                    Statement::Assign(a) => match (a.op.affine(), &a.args[..]) {
+                        (Some(AffineRole::Negation), [x]) => {
                             self.collect(index, x, -scale, terms, offset)
                         }
-                        (Some(Elementwise::Divide), [x, d]) => {
+                        (Some(AffineRole::Quotient), [x, d]) => {
                             self.collect(index, x, scale / self.values[index][d], terms, offset)
                         }
-                        (Some(Elementwise::Multiply), [left, right]) => {
+                        (Some(AffineRole::Scale), [left, right]) => {
                             if let Some(value) = self.values[index].get(left) {
                                 self.collect(index, right, scale * value, terms, offset);
                             } else {
@@ -394,12 +398,12 @@ pub fn fold_affine(body: &Body, exposed: &HashSet<Name>) -> Body {
                                 );
                             }
                         }
-                        (op, [a0, a1]) => {
+                        (role, [a0, a1]) => {
                             self.collect(index, a0, scale, terms, offset);
                             self.collect(
                                 index,
                                 a1,
-                                if op == Some(Elementwise::Subtract) {
+                                if role == Some(AffineRole::Difference) {
                                     -scale
                                 } else {
                                     scale

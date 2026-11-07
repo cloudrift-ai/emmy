@@ -105,9 +105,9 @@ impl Carry {
 }
 
 impl Accum {
-    /// The identity value of the accumulator: the op's neutral element, `0.0` when it has none.
+    /// The value the accumulator starts from: the op's neutral element as a kernel seeds it, `0.0` when it has none.
     pub fn init(&self) -> Expression {
-        Expression::float(self.op.identity().unwrap_or(0.0))
+        Expression::float(self.op.seed().unwrap_or(0.0))
     }
 }
 
