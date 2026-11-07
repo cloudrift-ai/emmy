@@ -1,10 +1,6 @@
-"""Tests for Load deduplication during body normalization."""
+"""Normalization shares equal loads and the cones they feed: what the whole driver leaves of a body with duplicates."""
 
-from emmy.emmy_ir import place_values
-
-from emmy.compiler.ir.expression import BinaryExpression
-from emmy.compiler.ir.stmt import Affine, Assign, Body, Cond, Let, Load, Loop, Select, Write, normalize_body, parse_body
-from tests.compiler.ir.stmt import listing
+from emmy.compiler.ir.stmt import Affine, Assign, Body, Cond, Load, Loop, Write, normalize_body, parse_body
 
 
 def test_dedup_loads_preserves_loads_under_a_rebound_coordinate() -> None:
@@ -26,12 +22,12 @@ def test_dedup_loads_preserves_loads_under_a_rebound_coordinate() -> None:
         """
     )
     values = np.array([1, 2, 4, 8], dtype=np.float32)
-    actual = execute_loop_op_cpp(LoopOp(body=place_values(body)), {"x": values}, {"out": (4,)})
+    actual = execute_loop_op_cpp(LoopOp(body=normalize_body(body)), {"x": values}, {"out": (4,)})
 
     np.testing.assert_allclose(actual, values / values.sum(), rtol=1e-6)
 
 
-def testnormalize_uncached_dedups_loads_and_rewires_gather_indices() -> None:
+def test_normalize_dedups_loads_and_rewires_gather_indices() -> None:
     body = parse_body(
         """
         for a in 0..4:
@@ -72,150 +68,6 @@ def test_normalize_hoisted_shadowed_loads_keep_their_values() -> None:
         assert loads[writes["inner"]] == inner_input
         assert len(loads) == (1 if inner_input == "x" else 2)
         assert normalize_body(op.body) == op.body
-
-
-def test_cse_does_not_use_expression_printing(monkeypatch) -> None:
-    body = parse_body("x0 = load x[i + 1]\nx1 = load x[i + 2]")
-    monkeypatch.setattr(BinaryExpression, "__str__", lambda self: "index")
-    assert place_values(body) == body
-
-
-def test_cse_shares_selections_and_their_downstream_cones() -> None:
-    body = parse_body(
-        """
-        let `zero` = 0
-        let other_zero = 0
-        left = select:
-            x when p
-            `zero` when 1
-        right = select:
-            x when p
-            other_zero when 1
-        a = exp(left)
-        b = exp(right)
-        out[0] = b
-        """
-    )
-    out = place_values(body)
-    assert [type(s) for s in out] == [Let, Select, Assign, Write]
-    assert out[-1].value == "a"
-
-
-def test_cse_selection_predicates_observe_rebound_coordinates() -> None:
-    body = parse_body(
-        """
-        a = select:
-            x when k
-            y when 1
-        for k in 0..4:
-            b = select:
-                x when k
-                y when 1
-            out[k] = b
-        """
-    )
-    assert place_values(body) == body
-
-
-def test_cse_does_not_drop_repeated_accumulator_updates() -> None:
-    body = parse_body(
-        """
-        for k in 0..8:
-            sum <- add(sum, x) over k
-            sum <- add(sum, x) over k
-        """
-    )
-    assert place_values(body) == body
-
-
-def test_cse_does_not_alias_distinct_unseeded_accumulators() -> None:
-    body = parse_body(
-        """
-        for k in 0..8 seed=false:
-            left <- add(left, x) over k
-            right <- add(right, x) over k
-        """
-    )
-    assert place_values(body) == body
-
-
-def test_cse_partial_state_changes_invalidate_dependent_values() -> None:
-    body = parse_body(
-        """
-        for k in 0..8:
-            before = exp(sum)
-            sum <- add(sum, x) over k
-            after = exp(sum)
-            out[k] = after
-        """
-    )
-    assert place_values(body) == body
-
-
-def test_cse_nested_state_changes_invalidate_enclosing_values() -> None:
-    body = parse_body(
-        """
-        before = exp(sum)
-        for k in 0..4 seed=false:
-            sum <- add(sum, x) over k
-        after = exp(sum)
-        out[0] = after
-        """
-    )
-    assert place_values(body) == body
-
-
-def test_cse_does_not_reuse_a_staged_load_assignment() -> None:
-    body = parse_body("value = load x[0]\nvalue = load x[0] carried=load")
-    assert place_values(body) == body
-
-
-def test_cse_removes_repeated_copies_of_one_binding() -> None:
-    from emmy.compiler.ir.loop import LoopOp
-
-    body = parse_body(
-        """
-        value = load x[0]
-        first[0] = value
-        value = load x[0]
-        second[0] = value
-        """
-    )
-    assert str(place_values(body)) == listing(
-        """
-        value = load x[0]
-        first[0] = value
-        second[0] = value
-        """
-    )
-    assert len([stmt for stmt in LoopOp(body=body).body if isinstance(stmt, Load)]) == 1
-
-
-def test_cse_never_aliases_a_value_to_an_overwritten_representative() -> None:
-    body = parse_body(
-        """
-        value = load x[0]
-        copy = load x[0]
-        value = load y[0]
-        out[0] = copy
-        """
-    )
-    assert place_values(body) == body
-    updates = parse_body("value = exp(value)\nvalue = exp(value)")
-    assert place_values(updates) == updates
-
-
-def test_cse_does_not_merge_reductions_with_distinct_explicit_seeds() -> None:
-    body = parse_body(
-        """
-        init f32 left = 0
-        init f32 right = 1
-        for k in 0..8:
-            left <- add(left, x)
-            right <- add(right, x)
-        """
-    )
-    assert place_values(body) == body
 
 
 def test_normalization_closes_simplification_cse_and_invariant_motion() -> None:
@@ -262,14 +114,6 @@ def test_cse_factors_common_branch_cones_without_speculation() -> None:
     assert normalize_body(Body(tuple(out))) == out
 
 
-def test_common_branch_load_cannot_cross_a_write_on_either_path() -> None:
-    read = "    value = load x[0]\n    out[0] = value\n"
-    write = "    x[0] = replacement\n"
-    for left, right in ((write + read, read), (read, write + read)):
-        body = parse_body(f"if predicate:\n{left}else:\n{right}")
-        assert place_values(body) == body
-
-
 def test_normalized_quotient_addresses_fuse_and_share_the_whole_reduction() -> None:
     def reduction(axis, name, nested):
         index = f"{axis} / 128 / 2" if nested else f"{axis} / 256"
@@ -290,119 +134,7 @@ def test_normalized_quotient_addresses_fuse_and_share_the_whole_reduction() -> N
     assert normalize_body(Body(tuple(out))) == out
 
 
-def test_dedup_loads_closes_commutative_chains_after_aliasing() -> None:
-    """An alias that reverses sorted operands must not hide the rest of a duplicate chain."""
-    body = parse_body(
-        """
-        z = load X[0]
-        a = load X[0]
-        m = load Y[0]
-        z1 = multiply(m, z)
-        a1 = multiply(a, m)
-        z2 = add(m, z1)
-        a2 = add(a1, m)
-        left = subtract(m, z1)
-        right = subtract(a1, m)
-        O[0] = a2
-        L[0] = left
-        R[0] = right
-        """
-    )
-
-    out = place_values(body)
-
-    assert [stmt.name for stmt in out if isinstance(stmt, Assign)] == ["z1", "z2", "left", "right"]
-    assert str(out[-4]) == "right = subtract(z1, m)"
-    assert str(out[-3]) == "O[0] = z2"
-    assert place_values(out) == out
-
-
-def test_dedup_loads_still_rewires_an_inner_use_of_the_dropped_name() -> None:
-    """The mirror case: the loop only *reads* the dropped name, so the alias must reach inside."""
-    body = parse_body(
-        """
-        in0 = load const[0]
-        in1 = load const[0]
-        for a in 0..4:
-            v = add(in0, in1)
-        """
-    )
-
-    out = place_values(body)
-
-    assert [s.name for s in out if isinstance(s, Load)] == ["in0"]
-    assert [str(stmt) for stmt in out.iter() if isinstance(stmt, Assign)] == ["v = add(in0, in0)"]
-
-
-def test_cse_reuses_a_dominating_read_until_the_write_on_that_branch() -> None:
-    body = parse_body(
-        """
-        old = load x[0]
-        if p:
-            before = load x[0]
-            out[0] = before
-            x[0] = replacement
-            after = load x[0]
-            new[0] = after
-        """
-    )
-    out = place_values(body)
-    assert str(out[1].body[0]) == "out[0] = old"
-    assert [load.name for load in out.loads] == ["old", "after"]
-
-
-def test_dedup_loads_rewires_every_vector_lane() -> None:
-    """A duplicate vector load aliases each lane to the corresponding kept lane."""
-    body = parse_body(
-        """
-        x0, x1 = load X[0]
-        y0, y1 = load X[0]
-        sum = add(y0, y1)
-        """
-    )
-
-    out = place_values(body)
-
-    assert str(out) == listing(
-        """
-        x0, x1 = load X[0]
-        sum = add(x0, x1)
-        """
-    )
-
-
-def test_dedup_loads_invalidates_a_read_after_writing_its_buffer() -> None:
-    body = parse_body(
-        """
-        old = load B[0]
-        replacement = load R[0]
-        B[0] = replacement
-        new = load B[0]
-        O[0] = new
-        """
-    )
-
-    out = place_values(body)
-
-    assert [stmt.name for stmt in out if isinstance(stmt, Load) and stmt.input == "B"] == ["old", "new"]
-
-
-def test_dedup_loads_does_not_reuse_a_read_across_a_loop_that_writes_its_buffer() -> None:
-    body = parse_body(
-        """
-        before = load B[0]
-        for a in 0..4:
-            current = load B[0]
-            B[0] = current
-        """
-    )
-
-    out = place_values(body)
-
-    assert str(out[1].body[0]) == "current = load B[0]"
-
-
-def testnormalize_uncached_dedups_identical_accumulations() -> None:
+def test_normalize_dedups_identical_accumulations() -> None:
     """Two consumers of one fused value carry two copies of its accumulation in one reduce loop
     after the splice; the second is the first under another name."""
     body = parse_body(

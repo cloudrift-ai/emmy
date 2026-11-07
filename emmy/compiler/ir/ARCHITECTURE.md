@@ -329,8 +329,9 @@ printer and no reader. `tests/compiler/ir/stmt/test_text.py` holds both directio
 kernel and the Kernel IR of six corpus lowerings that reach every Kernel IR kind.
 
 The tests under `tests/compiler/ir/stmt/` state what goes into the module and what comes out, and hold for any
-implementation of it. The ones under `tests/compiler/ir/stmt/implementation/` call its inner steps and leave with
-this implementation.
+implementation of it. The ones under `tests/compiler/ir/stmt/implementation/` read this implementation's own
+summaries and memo and leave with it. The inner steps of normalization are tested beside their Rust, in
+`crates/emmy-ir` (`cargo test -p emmy-ir`); the extension exports the driver and the steps a pass calls, no other.
 
 ## `base.py`
 

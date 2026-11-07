@@ -260,4 +260,235 @@ mod tests {
             ia.key
         );
     }
+
+    #[test]
+    fn atomic_partition_axis_order_converges_independently_of_affine_spelling() {
+        // An axis absent from an atomic output must not trade places with a scaled output axis every round.
+        let mut forms: HashSet<String> = HashSet::new();
+        for (row, part) in [("row", "part"), ("z", "a")] {
+            for reverse_loops in [false, true] {
+                for reverse_sum in [false, true] {
+                    let terms = [format!("{row} * 256"), format!("{part} * 64")];
+                    let index = if reverse_sum {
+                        format!("{} + {}", terms[1], terms[0])
+                    } else {
+                        format!("{} + {}", terms[0], terms[1])
+                    };
+                    let mut spelled = format!("x = load X[{index}]\nO[{row} * 2] += x");
+                    let wrapping = if reverse_loops {
+                        [row, part]
+                    } else {
+                        [part, row]
+                    };
+                    for name in wrapping {
+                        spelled = format!("for {name} in 0..2:\n{}", testing::indented(&spelled));
+                    }
+                    let given = parse_body(&spelled).unwrap();
+                    let mut prepared = rename_ssa_sequential(&given);
+                    // A bounded number of rounds before the fixed-point driver: the regression used to cycle.
+                    for _ in 0..4 {
+                        prepared = prepare_body(&prepared).unwrap();
+                    }
+                    assert_eq!(prepare_body(&prepared).unwrap(), prepared);
+                    let normalized = normalize_body(&given).unwrap();
+                    let reread = parse_body(&body_text(&normalized).unwrap()).unwrap();
+                    assert_eq!(normalize_body(&reread).unwrap(), normalized);
+                    forms.insert(body_text(&normalized).unwrap());
+                }
+            }
+        }
+        assert_eq!(forms.len(), 1);
+    }
+
+    #[test]
+    fn normal_form_is_a_fixed_point_when_the_order_breaks_a_tie_by_spelling() {
+        // Two loop-invariant values of one shape tie in the canonical order, which breaks the tie by their
+        // spelling: the spelling reads nothing the order decides, so normalizing the normal form changes nothing.
+        let once = normalize_uncached(&testing::body(
+            "
+            for a0 in 0..48:
+                for a2 in 0..512:
+                    v36 = multiply(v35, v3)
+                    v37 = pad(v36)
+                    reshape_9[0, a0, a2 / 64, a2 % 64] = v37
+                    for a7 in 0..128:
+                        v146 = pad(v145)
+                        reshape_5[0, a0, a2 / 64, a2 % 64, a7] = v146
+            ",
+        ))
+        .unwrap();
+        let again = normalize_uncached(&once).unwrap();
+        assert_eq!(body_text(&again).unwrap(), body_text(&once).unwrap());
+        assert_eq!(again, once);
+    }
+
+    /// `v * (exp(s - s) / exp(s - s))`, which is `v`.
+    fn one_key_softmax() -> Body {
+        testing::body(
+            "
+            for i in 0..8:
+                v = load x[i]
+                s = load y[i]
+                z = subtract(s, s)
+                u = exp(z)
+                w = divide(u, u)
+                o = multiply(v, w)
+                O[i] = o
+            ",
+        )
+    }
+
+    /// Two reads of one index make a predicate constant, the select it decided a copy, and its reader invariant.
+    fn equal_gather_index() -> Body {
+        testing::body(
+            "
+            x = load x[0]
+            for i in 0..4:
+                a = load indices[i]
+                b = load indices[i]
+                s = select:
+                    x when a - b < 1
+                    a when 1
+                v = exp(s)
+                out[i] = v
+            ",
+        )
+    }
+
+    #[test]
+    fn no_step_changes_a_prepared_body_the_folds_leave_alone() {
+        // The driver runs the steps again only after a fold changed the body, so a prepared body the folds leave
+        // alone has to be one every step leaves alone.
+        for given in [one_key_softmax(), equal_gather_index()] {
+            let mut prepared = rename_ssa_sequential(&given);
+            let mut settled = false;
+            for _ in 0..8 {
+                prepared = prepare_body(&prepared).unwrap();
+                let folded = fold_affine(&fold_trivial_selects(&prepared), &HashSet::new());
+                if folded == prepared {
+                    settled = true;
+                    break;
+                }
+                prepared = folded;
+            }
+            assert!(settled, "the folds did not settle");
+            assert_eq!(prepare_body(&prepared).unwrap(), prepared);
+        }
+    }
+
+    #[test]
+    fn a_reduction_only_another_bindings_readers_kept_alive_is_dropped() {
+        // A cut can splice one cone twice under the same names: a statistic, then a contraction that reads it,
+        // twice. Placement keeps the first statistic for both readers and the merge folds the second into a
+        // contraction, where nothing reads it. It shares the first one's name, and the unread-value drop reads by
+        // name, so only the names the order gives tell the two apart: the normal form holds one statistic, and
+        // normalization leaves it alone.
+        let cone = |weights: &str, out: &str| {
+            format!(
+                "
+            for k in 0..4:
+                x = load X[i, k]
+                sq = multiply(x, x)
+                s <- add(s, sq)
+            r = rsqrt(s)
+            for m in 0..4:
+                y = load X[i, m]
+                scaled = multiply(y, r)
+                w_{out} = load {weights}[m, j]
+                p_{out} = multiply(w_{out}, scaled)
+                {out} <- add({out}, p_{out})"
+            )
+        };
+        let writes = "
+            O1[i, j] = o1
+            O2[i, j] = o2";
+        let given = testing::body(&format!(
+            "for i in 0..8:\n    for j in 0..3:{}{}{writes}",
+            cone("W1", "o1"),
+            cone("W2", "o2")
+        ));
+        let normalized = normalize_body(&given).unwrap();
+        assert_eq!(
+            normalized.accums().len(),
+            3,
+            "{}",
+            body_text(&normalized).unwrap()
+        );
+        assert_eq!(normalize_uncached(&normalized).unwrap(), normalized);
+    }
+}
+
+/// What the tests of the steps share: a body from its text, texts back, and the fields they assert on.
+#[cfg(test)]
+pub(crate) mod testing {
+    use std::sync::Arc;
+
+    use crate::Name;
+    use crate::body::Body;
+    use crate::kinds::Statement;
+    use crate::text::{body_text, parse_body, statement_text};
+
+    pub(crate) fn body(text: &str) -> Body {
+        parse_body(text).unwrap_or_else(|err| panic!("{err}\n{text}"))
+    }
+
+    pub(crate) fn text(body: &Body) -> String {
+        body_text(body).unwrap()
+    }
+
+    pub(crate) fn stmt_text(stmt: &Arc<Statement>) -> String {
+        statement_text(stmt).unwrap()
+    }
+
+    pub(crate) fn kinds(body: &Body) -> Vec<&'static str> {
+        body.stmts().iter().map(|stmt| stmt.kind_name()).collect()
+    }
+
+    /// The body a loop holds, or a branch's taken arm.
+    pub(crate) fn inner(stmt: &Statement) -> Body {
+        match stmt.nested().as_slice() {
+            [first, ..] => first.clone(),
+            [] => panic!("not a statement over a body: {}", stmt.kind_name()),
+        }
+    }
+
+    pub(crate) fn axis(stmt: &Statement) -> &str {
+        match stmt {
+            Statement::Loop(l) => &l.axis.name,
+            Statement::StridedLoop(l) => &l.axis.name,
+            _ => panic!("not a loop: {}", stmt.kind_name()),
+        }
+    }
+
+    /// The axes of the top-level loops, in order.
+    pub(crate) fn loop_axes(body: &Body) -> Vec<String> {
+        body.stmts()
+            .iter()
+            .filter(|stmt| matches!(&***stmt, Statement::Loop(_)))
+            .map(|stmt| axis(stmt).to_string())
+            .collect()
+    }
+
+    /// The names the top-level accumulations update, in order.
+    pub(crate) fn accum_names(body: &Body) -> Vec<String> {
+        body.stmts()
+            .iter()
+            .filter_map(|stmt| match &**stmt {
+                Statement::Accum(a) => Some(a.name.to_string()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    pub(crate) fn strs(names: &[Name]) -> Vec<&str> {
+        names.iter().map(|name| &**name).collect()
+    }
+
+    /// `text` one level further in.
+    pub(crate) fn indented(text: &str) -> String {
+        text.lines()
+            .map(|line| format!("    {line}"))
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
 }
