@@ -119,7 +119,7 @@ pub fn num_from_py(value: &Bound<'_, PyAny>) -> PyResult<Num> {
     )))
 }
 
-/// The expression `value` holds; a bare number is a literal of its own kind: an integer stays an integer (a strided
+/// The expression `value` holds; a bare number is a literal of its own type: an integer stays an integer (a strided
 /// loop's `step=4` spells `step 4`), a float is a float literal.
 pub fn expression_from_py(value: &Bound<'_, PyAny>) -> PyResult<Expression> {
     if let Ok(expression) = value.cast::<PyExpression>() {

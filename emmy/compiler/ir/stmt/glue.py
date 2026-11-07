@@ -20,7 +20,7 @@ Write = _ir.Write
 
 
 def fields_of(cls: type) -> tuple[str, ...]:
-    """The names of the fields a kind holds, in declaration order: what ``stmt.replace(**changes)`` takes."""
+    """The names of the fields a statement type holds, in declaration order: what ``stmt.replace(**changes)`` takes."""
     return cls._fields
 
 

@@ -518,19 +518,19 @@ impl PyBody {
         py: Python<'py>,
         types: &Bound<'py, PyTuple>,
     ) -> PyResult<Bound<'py, PyTuple>> {
-        let mut kinds: Vec<emmy_ir::statement::StatementType> = Vec::new();
+        let mut statement_types: Vec<emmy_ir::statement::StatementType> = Vec::new();
         for item in types.iter() {
             let cls = item
                 .cast::<PyType>()
                 .map_err(|_| PyTypeError::new_err("iter_of_type takes statement classes"))?;
             match statement_type_of(cls) {
-                Some(kind) => kinds.push(kind),
+                Some(ty) => statement_types.push(ty),
                 None if cls.is(py.get_type::<PyStatement>()) => {
-                    kinds.extend(emmy_ir::statement::StatementType::ALL.iter().copied())
+                    statement_types.extend(emmy_ir::statement::StatementType::ALL.iter().copied())
                 }
                 None => {
                     return Err(PyTypeError::new_err(format!(
-                        "{} is no statement kind",
+                        "{} is no statement type",
                         cls.name()?
                     )));
                 }
@@ -538,7 +538,7 @@ impl PyBody {
         }
         let items: PyResult<Vec<Bound<'py, PyAny>>> = self
             .body
-            .of_types(&kinds)
+            .of_types(&statement_types)
             .iter()
             .map(|here| wrap_ref(py, here))
             .collect();

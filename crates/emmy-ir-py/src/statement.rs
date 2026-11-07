@@ -1,6 +1,6 @@
 //! The statement classes: one base, `Statement`, holding the shared statement and the Python objects its fields hand
-//! back, and one class per kind generated from the crate's declaration. A kind check is a native class check; a
-//! field read hands back a held object.
+//! back, and one class per statement type generated from the crate's declaration. An `isinstance` check on a
+//! statement type is a native class check; a field read hands back a held object.
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -22,7 +22,7 @@ use crate::convert::{
 };
 use crate::expression::{PyExpression, mapping_from_py, renames_from_py};
 
-/// The base class of every statement kind.
+/// The base class of every statement type.
 #[pyclass(subclass, frozen, module = "emmy.compiler.ir.stmt", name = "Statement")]
 pub struct PyStatement {
     pub stmt: Arc<Statement>,
@@ -311,7 +311,7 @@ impl PyStatement {
         self.stmt.has_side_effects()
     }
 
-    /// The structural form: the kind's name over its fields' forms, trailing defaults left out.
+    /// The structural form: the statement type's name over its fields' forms, trailing defaults left out.
     fn structural_form<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyTuple>> {
         let fields = self.stmt.fields();
         let mut parts: Vec<Bound<'py, PyAny>> =
@@ -377,25 +377,27 @@ pub fn _statement_from_text(py: Python<'_>, text: &str) -> PyResult<Py<PyAny>> {
     wrap_statement(py, &parse_statement(text).py()?)
 }
 
-fn too_many(kind: &str, count: usize) -> PyErr {
+fn too_many(type_name: &str, count: usize) -> PyErr {
     PyTypeError::new_err(format!(
-        "{kind}() takes at most {count} positional arguments"
+        "{type_name}() takes at most {count} positional arguments"
     ))
 }
 
-fn missing(kind: &str, field: &str) -> PyErr {
-    PyTypeError::new_err(format!("{kind}() missing a required argument: '{field}'"))
-}
-
-fn unexpected(kind: &str, key: &str) -> PyErr {
+fn missing(type_name: &str, field: &str) -> PyErr {
     PyTypeError::new_err(format!(
-        "{kind}() got an unexpected keyword argument '{key}'"
+        "{type_name}() missing a required argument: '{field}'"
     ))
 }
 
-/// The arguments a constructor received, matched to the kind's fields.
+fn unexpected(type_name: &str, key: &str) -> PyErr {
+    PyTypeError::new_err(format!(
+        "{type_name}() got an unexpected keyword argument '{key}'"
+    ))
+}
+
+/// The arguments a constructor received, matched to the statement type's fields.
 struct Arguments<'a, 'py> {
-    kind: &'static str,
+    type_name: &'static str,
     fields: &'static [FieldInfo],
     args: &'a Bound<'py, PyTuple>,
     kwargs: Option<&'a Bound<'py, PyDict>>,
@@ -424,13 +426,13 @@ impl<'py> Arguments<'_, 'py> {
     fn finish(&self) -> PyResult<()> {
         let allowed = self.fields.iter().filter(|f| !f.kw_only).count();
         if self.args.len() > allowed {
-            return Err(too_many(self.kind, allowed));
+            return Err(too_many(self.type_name, allowed));
         }
         if let Some(kwargs) = self.kwargs {
             for key in kwargs.keys() {
                 let key: String = key.extract()?;
                 if !self.fields.iter().any(|f| f.name == key) {
-                    return Err(unexpected(self.kind, &key));
+                    return Err(unexpected(self.type_name, &key));
                 }
             }
         }
@@ -440,7 +442,7 @@ impl<'py> Arguments<'_, 'py> {
 
 macro_rules! define_py_statement_types {
     (
-        kinds { $( $(#[doc = $doc:literal])* $layer:ident $StatementType:ident {$($flag:tt)|*} { $( $field:ident : $ty:ty [$($role:ident)|*] $(= $default:expr)? ,)* } )* }
+        statement_types { $( $(#[doc = $doc:literal])* $layer:ident $StatementType:ident {$($flag:tt)|*} { $( $field:ident : $ty:ty [$($role:ident)|*] $(= $default:expr)? ,)* } )* }
         records { $( $(#[doc = $rdoc:literal])* $rlayer:ident $Record:ident { $( $rfield:ident : $rty:ty [$($rrole:ident)|*] $(= $rdefault:expr)? ,)* } )* }
     ) => {
         $(
@@ -451,16 +453,16 @@ macro_rules! define_py_statement_types {
                 /// The statement the constructor arguments build, and the objects it keeps beside its fields.
                 fn build(args: &Bound<'_, PyTuple>, kwargs: Option<&Bound<'_, PyDict>>) -> PyResult<(Statement, Held)> {
                     let mut held = Held::new();
-                    let kind = define_py_statement_types!(@given $StatementType args kwargs held { $( $field : $ty [$($role)|*] $(= $default)? ,)* });
-                    Ok((finished(Statement::$StatementType(kind)).py()?, held))
+                    let stmt = define_py_statement_types!(@given $StatementType args kwargs held { $( $field : $ty [$($role)|*] $(= $default)? ,)* });
+                    Ok((finished(Statement::$StatementType(stmt)).py()?, held))
                 }
 
                 /// This statement with the named fields changed.
                 fn rebuild(base: &PyStatement, py: Python<'_>, changes: &Bound<'_, PyDict>) -> PyResult<(Statement, Held)> {
                     let Statement::$StatementType(current) = &*base.stmt else { return Err(PyTypeError::new_err("not a ".to_owned() + stringify!($StatementType))) };
                     let mut held = Held::new();
-                    let kind = define_py_statement_types!(@changed $StatementType current changes held (|index| base.held(py, index)) { $( $field : $ty [$($role)|*] $(= $default)? ,)* });
-                    Ok((finished(Statement::$StatementType(kind)).py()?, held))
+                    let stmt = define_py_statement_types!(@changed $StatementType current changes held (|index| base.held(py, index)) { $( $field : $ty [$($role)|*] $(= $default)? ,)* });
+                    Ok((finished(Statement::$StatementType(stmt)).py()?, held))
                 }
             }
 
@@ -482,7 +484,7 @@ macro_rules! define_py_statement_types {
                     Ok(Bound::new(slf.py(), PyClassInitializer::from(PyStatement::new(Arc::new(stmt), held)).add_subclass($StatementType))?.into_any())
                 }
 
-                /// The names of this kind's fields, in declaration order.
+                /// The names of this statement type's fields, in declaration order.
                 #[classattr]
                 fn _fields<'py>(py: Python<'py>) -> PyResult<Bound<'py, PyTuple>> {
                     PyTuple::new(py, emmy_ir::statement::$StatementType::FIELDS.iter().map(|f| PyString::new(py, f.name)))
@@ -602,7 +604,7 @@ macro_rules! define_py_statement_types {
             }
         }
 
-        /// The Python object of `stmt`, an instance of its kind's class.
+        /// The Python object of `stmt`, an instance of its statement type's class.
         pub fn wrap_statement_holding(py: Python<'_>, stmt: &Arc<Statement>, held: Vec<Option<Py<PyAny>>>) -> PyResult<Py<PyAny>> {
             let base = PyClassInitializer::from(PyStatement::new(stmt.clone(), held));
             Ok(match &**stmt {
@@ -610,7 +612,7 @@ macro_rules! define_py_statement_types {
             })
         }
 
-        /// The kind class of each kind name, for `iter_of_type`.
+        /// The statement type a class stands for, for `iter_of_type`.
         pub fn statement_type_of(cls: &Bound<'_, PyType>) -> Option<emmy_ir::statement::StatementType> {
             $( if cls.is(&cls.py().get_type::<$StatementType>()) { return Some(emmy_ir::statement::StatementType::$StatementType); } )*
             None
@@ -652,7 +654,7 @@ macro_rules! define_py_statement_types {
     // The constructor's fields: each by keyword or position, converted and kept, or its default.
     (@given $Type:ident $args:ident $kwargs:ident $held:ident { $( $field:ident : $ty:ty [$($role:ident)|*] $(= $default:expr)? ,)* }) => {{
         use emmy_ir::statement as k;
-        let mut given = Arguments { kind: k::$Type::NAME, fields: k::$Type::FIELDS, args: $args, kwargs: $kwargs, positional: 0 };
+        let mut given = Arguments { type_name: k::$Type::NAME, fields: k::$Type::FIELDS, args: $args, kwargs: $kwargs, positional: 0 };
         let out = k::$Type {
             $( $field: match given.take(stringify!($field), define_py_statement_types!(@kw_only $($role)|*))? {
                 Some(value) => define_py_statement_types!(@convert $Type $field [$ty] value $held),
@@ -702,18 +704,18 @@ macro_rules! define_py_statement_types {
 /// The Python objects a statement's fields came from, one slot per field.
 type Held = Vec<Option<Py<PyAny>>>;
 
-/// Every key of `changes` names a field of the kind.
-fn only_fields(kind: &str, fields: &[FieldInfo], changes: &Bound<'_, PyDict>) -> PyResult<()> {
+/// Every key of `changes` names a field of the statement type.
+fn only_fields(type_name: &str, fields: &[FieldInfo], changes: &Bound<'_, PyDict>) -> PyResult<()> {
     for key in changes.keys() {
         let key: String = key.extract()?;
         if !fields.iter().any(|f| f.name == key) {
-            return Err(unexpected(kind, &key));
+            return Err(unexpected(type_name, &key));
         }
     }
     Ok(())
 }
 
-/// The generated classes: a kind with no field leaves the per-field locals of its constructors unused.
+/// The generated classes: a statement type with no field leaves the per-field locals of its constructors unused.
 #[allow(unused_variables, unused_assignments, unused_mut)]
 mod generated {
     use super::*;
@@ -727,9 +729,9 @@ mod generated {
 
 pub use generated::*;
 
-// --- what the shared kinds know beyond their fields -----------------------------------------------
+// --- what the shared statement types know beyond their fields -------------------------------------
 
-/// The statement behind a kind's class, as that kind.
+/// The statement behind a statement type's class, as that type's struct.
 fn inner<'a, K>(base: &'a PyStatement) -> PyResult<&'a K>
 where
     &'a K: TryFrom<&'a Statement, Error = emmy_ir::Error>,

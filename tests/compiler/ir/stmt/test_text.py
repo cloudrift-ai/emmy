@@ -1,6 +1,6 @@
 """A body's text at the Python boundary: a statement built through the Python constructors (dtype objects, a dim's hint,
 a window) prints as its text and reads back; every stored kernel and lowered Kernel IR round-trips. The text of each
-kind on its own is the crate's test."""
+statement type on its own is the crate's test."""
 
 import json
 from textwrap import dedent
@@ -134,7 +134,7 @@ def test_every_corpus_kernel_reads_back_from_its_text():
         assert str(back) == str(body)
 
 
-#: Six cases whose Kernel IR reaches every kind the corpus lowers to; ``SetMaxNReg`` is in no corpus kernel.
+#: Six cases whose Kernel IR reaches every statement type the corpus lowers to; ``SetMaxNReg`` is in no corpus kernel.
 KERNEL_CASES = [
     "attention/sdpa-hd64-wgmma-value-sm90.json",
     "matmul/f16-mma-f16acc-tma.json",
@@ -155,7 +155,7 @@ def _kernel_bodies(case_path: str) -> list[Body]:
 
 @pytest.mark.parametrize("case_path", KERNEL_CASES)
 def test_a_kernel_ir_body_reads_back_from_its_text(case_path):
-    """A kind of the Kernel IR prints and reads through its declaration, so a lowered kernel's text is exact."""
+    """A statement type of the Kernel IR prints and reads through its declaration, so a lowered kernel's text is exact."""
     bodies = _kernel_bodies(case_path)
     assert bodies
     for body in bodies:
@@ -164,18 +164,18 @@ def test_a_kernel_ir_body_reads_back_from_its_text(case_path):
         assert str(back) == str(body)
 
 
-def test_every_kernel_ir_kind_has_a_text():
+def test_every_kernel_ir_statement_type_has_a_text():
     from emmy.compiler.ir.kernel import ir as kernel
 
-    kinds = {
-        kind
+    lowered = {
+        cls
         for case_path in KERNEL_CASES
         for body in _kernel_bodies(case_path)
         for stmt in body.iter()
-        if (kind := type(stmt)).__module__ == kernel.__name__
+        if (cls := type(stmt)).__module__ == kernel.__name__
     }
     declared = {
         cls for cls in vars(kernel).values() if isinstance(cls, type) and issubclass(cls, Statement) and cls.__module__ == kernel.__name__
     }
-    assert declared - kinds == {kernel.SetMaxNReg}
+    assert declared - lowered == {kernel.SetMaxNReg}
     assert str(Body((kernel.SetMaxNReg(count=232, direction="inc"),))) == "SetMaxNReg(count=232, direction=inc)"

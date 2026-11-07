@@ -3,7 +3,7 @@ name = "emmy-ir"
 version = "0.1.0"
 edition = "2024"
 license = "Apache-2.0"
-description = "The compiler's statement and expression vocabulary: kinds, bodies, their text, value numbering and normalization."
+description = "The compiler's statement and expression vocabulary: statement types, bodies, their text, value numbering and normalization."
 
 [dependencies]
 blake3 = "1"

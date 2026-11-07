@@ -1,6 +1,6 @@
-//! The compiler's statement and expression vocabulary, in Rust: the kinds every IR layer shares, bodies and their
-//! text, value numbering, identity and normalization. Pure Rust; the Python extension beside it (`emmy-ir-py`) wraps
-//! these types as the classes `emmy.compiler.ir.stmt` and `emmy.compiler.ir.expression` export.
+//! The compiler's statement and expression vocabulary, in Rust: the statement types every IR layer shares, bodies
+//! and their text, value numbering, identity and normalization. Pure Rust; the Python extension beside it
+//! (`emmy-ir-py`) wraps these types as the classes `emmy.compiler.ir.stmt` and `emmy.compiler.ir.expression` export.
 
 use std::sync::Arc;
 

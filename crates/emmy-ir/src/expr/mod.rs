@@ -355,7 +355,7 @@ impl std::str::FromStr for CastTarget {
     }
 }
 
-/// Every expression kind, declared once: the variant, the Python class it is (its struct and its name) and its
+/// Every expression type, declared once: the variant, the Python class it is (its struct and its name) and its
 /// fields in order. `$callback` receives the list and generates from it: the enum and its walks here, the classes in
 /// the extension. The digest spells a node by the variant's name, so this list is also the digest's.
 #[macro_export]
@@ -452,7 +452,7 @@ impl ExprField for Arc<[Expression]> {
     }
 }
 
-/// The core's callback: the `Expr` enum and the walks every kind answers through its fields.
+/// The core's callback: the `Expr` enum and the walks every expression type answers through its fields.
 macro_rules! define_exprs {
     ($( $(#[doc = $doc:literal])* $Variant:ident as $Py:ident $name:literal { $( $field:ident : $ty:ty ),* } ,)*) => {
         /// One node of an expression tree.
@@ -461,7 +461,7 @@ macro_rules! define_exprs {
             $( $(#[doc = $doc])* $Variant( $($ty),* ), )*
         }
 
-        /// Every expression kind by name: the tag the digest spells a node by (`kind().text()`).
+        /// Every expression type by name: the tag the digest spells a node by (`ty().text()`).
         #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
         pub enum ExprType { $( $Variant, )* }
 
@@ -1210,7 +1210,7 @@ mod tests {
         );
         let literal_types: Vec<&str> = LitType::ALL.iter().map(|t| t.text()).collect();
         assert_eq!(literal_types, ["int", "float", "bool"]);
-        let kinds: Vec<&str> = [
+        let types: Vec<&str> = [
             Expression::var("x"),
             Expression::int(1),
             Expression::new(Expr::Builtin(Builtin::WarpSize)),
@@ -1231,7 +1231,7 @@ mod tests {
         .map(|e| e.ty().text())
         .collect();
         assert_eq!(
-            kinds,
+            types,
             [
                 "Var",
                 "Literal",

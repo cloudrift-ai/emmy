@@ -1,5 +1,5 @@
-//! What a declared kind's fields are made of, and the one trait every field type implements: how it is visited and
-//! rewritten by role, spelled on a header and read back by its type.
+//! What a declared statement type's fields are made of, and the one trait every field type implements: how it is
+//! visited and rewritten by role, spelled on a header and read back by its type.
 
 use std::collections::HashMap;
 use std::hash::{Hash, Hasher};
@@ -189,9 +189,11 @@ impl Values {
         Ok(())
     }
 
-    pub fn finish(self, kind: &str) -> Result<()> {
+    pub fn finish(self, type_name: &str) -> Result<()> {
         match self.0.keys().next() {
-            Some(field) => Err(Error::Value(format!("a {kind} has no field {field:?}"))),
+            Some(field) => Err(Error::Value(format!(
+                "a {type_name} has no field {field:?}"
+            ))),
             None => Ok(()),
         }
     }

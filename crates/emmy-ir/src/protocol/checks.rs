@@ -1,10 +1,10 @@
-//! The checks a kind makes on construction, each over its own fields: what Python's `__post_init__` refused.
+//! The checks a statement type makes on construction, each over its own fields: what Python's `__post_init__` refused.
 
 use crate::statement::*;
 use crate::{Error, Result};
 use std::sync::Arc;
 
-/// The checks Python's `__post_init__` made, each kind over its own fields.
+/// The checks Python's `__post_init__` made, each statement type over its own fields.
 impl Load {
     pub fn validate(&self) -> Result<()> {
         if self.names.is_empty() {
@@ -114,10 +114,10 @@ impl RegStore {
     }
 }
 
-fn carried_type(stmts: &[Arc<Statement>], kind: StatementType) -> Result<()> {
-    match stmts.iter().find(|s| s.ty() != kind) {
+fn carried_type(stmts: &[Arc<Statement>], ty: StatementType) -> Result<()> {
+    match stmts.iter().find(|s| s.ty() != ty) {
         Some(other) => Err(Error::Type(format!(
-            "expected {kind} statements, got a {}",
+            "expected {ty} statements, got a {}",
             other.ty()
         ))),
         None => Ok(()),

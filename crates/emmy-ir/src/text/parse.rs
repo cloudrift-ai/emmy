@@ -269,7 +269,7 @@ impl Line {
             .parser
             .tokens
             .last()
-            .is_some_and(|t| t.kind == TokenKind::ElementwiseOp && t.text == ":");
+            .is_some_and(|t| t.kind == TokenKind::Op && t.text == ":");
         if !ends_block && !nested.is_empty() {
             return Err(Error::Value(format!(
                 "line {}: unexpected indentation",
@@ -278,12 +278,12 @@ impl Line {
         }
         if let Some(token) = self.parser.peek(0)
             && token.kind == TokenKind::Name
-            && let Ok(kind) = token.text.parse::<StatementType>()
-            && kind.layer() != Layer::Shared
+            && let Ok(ty) = token.text.parse::<StatementType>()
+            && ty.layer() != Layer::Shared
             && (self.parser.at("(", 1) || self.parser.at(":", 1) || self.parser.peek(1).is_none())
         {
             self.parser.index += 1;
-            return self.declared(kind, nested, subs);
+            return self.declared(ty, nested, subs);
         }
         if self.word("for") {
             let body = block(nested, subs)?;
@@ -465,15 +465,15 @@ impl Line {
         self.end(Arc::new(Statement::Affine(affine)))
     }
 
-    /// A kind of another layer: its header's fields, then its blocks among the rows under it.
+    /// A statement type of another layer: its header's fields, then its blocks among the rows under it.
     fn declared(
         &mut self,
-        kind: StatementType,
+        ty: StatementType,
         nested: &[Row],
         subs: &mut HashMap<Name, Arc<Subroutine>>,
     ) -> Result<Arc<Statement>> {
-        let fields = kind.fields();
-        let mut values = self.record(kind.name(), fields, &|field| kind.field_ty(field))?;
+        let fields = ty.fields();
+        let mut values = self.record(ty.name(), fields, &|field| ty.field_ty(field))?;
         self.parser.accept(":");
         self.end(())?;
         let mut body: Vec<Row> = Vec::new();
@@ -501,20 +501,20 @@ impl Line {
         if !body.is_empty() {
             if !fields.iter().any(|f| f.name == "body") {
                 return Err(Error::Value(format!(
-                    "line {}: a {kind} holds no body",
+                    "line {}: a {ty} holds no body",
                     body[0].1
                 )));
             }
             values.set("body", Value::Body(block(&body, subs)?))?;
         }
-        let stmt = kind.from_values(values)?;
+        let stmt = ty.from_values(values)?;
         Ok(Arc::new(finished(stmt)?))
     }
 
-    /// The `(field=value, …)` of a declared kind or record, each value read by its field's type.
+    /// The `(field=value, …)` of a declared statement type or record, each value read by its field's type.
     fn record(
         &mut self,
-        kind: &str,
+        type_name: &str,
         fields: &[FieldInfo],
         ty_of: &dyn Fn(&str) -> Option<FieldType>,
     ) -> Result<Values> {
@@ -533,7 +533,7 @@ impl Line {
                     .filter(|f| !f.is_block());
                 let Some(field) = field else {
                     return Err(self.parser.error(&format!(
-                        "a {kind} has no field {} on its header",
+                        "a {type_name} has no field {} on its header",
                         crate::expr::python_repr(&key)
                     )));
                 };
@@ -541,7 +541,7 @@ impl Line {
                 let Some(ty) = ty_of(field.name) else {
                     return Err(self
                         .parser
-                        .error(&format!("{kind} has no field {}", field.name)));
+                        .error(&format!("{type_name} has no field {}", field.name)));
                 };
                 let value = self.typed(&ty)?;
                 values.set(field.name, value)?;

@@ -1,5 +1,5 @@
-//! What the shared kinds answer beyond their fields: the states a loop carries, a reduction's seed, a sum's terms
-//! and its binary form, a select's mask, the literal a statement binds.
+//! What the shared statement types answer beyond their fields: the states a loop carries, a reduction's seed, a
+//! sum's terms and its binary form, a select's mask, the literal a statement binds.
 
 use crate::body::Body;
 use crate::elementwise::{ElementwiseOp, Operation};

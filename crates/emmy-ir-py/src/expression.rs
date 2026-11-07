@@ -1,4 +1,4 @@
-//! The expression classes: one base, `Expression`, holding the shared tree, and one class per kind.
+//! The expression classes: one base, `Expression`, holding the shared tree, and one class per expression type.
 
 use std::collections::HashMap;
 use std::sync::{Arc, OnceLock};
@@ -76,9 +76,9 @@ impl PyExprField for Arc<[Expression]> {
     }
 }
 
-/// The extension's callback over the expression kinds: one class per kind with a getter per field, the one wrap of an
-/// expression into its class, and the registration. A literal's two parts have getters of their own, since the node
-/// holds them as one value.
+/// The extension's callback over the expression types: one class per expression type with a getter per field, the one
+/// wrap of an expression into its class, and the registration. A literal's two parts have getters of their own, since
+/// the node holds them as one value.
 macro_rules! define_py_exprs {
     ($( $(#[doc = $doc:literal])* $Variant:ident as $Py:ident $name:literal { $( $field:ident : $ty:ty ),* } ,)*) => {
         $(
@@ -90,7 +90,7 @@ macro_rules! define_py_exprs {
         )*
 
         impl PyExpression {
-            /// The Python object of `expr`: an instance of its kind's class.
+            /// The Python object of `expr`: an instance of its expression type's class.
             pub fn wrap<'py>(py: Python<'py>, expr: &Expression) -> PyResult<Bound<'py, PyAny>> {
                 let base = PyClassInitializer::from(PyExpression::base(expr.clone())?);
                 Ok(match &**expr {
@@ -452,8 +452,8 @@ impl PyExpression {
     }
 }
 
-fn expr_type_error(kind: &str) -> PyErr {
-    PyTypeError::new_err(format!("not a {kind}"))
+fn expr_type_error(type_name: &str) -> PyErr {
+    PyTypeError::new_err(format!("not a {type_name}"))
 }
 
 #[pymethods]

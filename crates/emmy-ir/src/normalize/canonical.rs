@@ -30,10 +30,10 @@ pub(crate) struct Counters {
 }
 
 impl Counters {
-    fn fresh(&mut self, kind: &'static str) -> Name {
+    fn fresh(&mut self, prefix: &'static str) -> Name {
         loop {
-            let count = self.counts.entry(kind).or_insert(0);
-            let name: Name = format!("{kind}{count}").into();
+            let count = self.counts.entry(prefix).or_insert(0);
+            let name: Name = format!("{prefix}{count}").into();
             *count += 1;
             if !self.reserved.contains(&name) {
                 return name;
@@ -52,11 +52,11 @@ pub(crate) struct SequentialScope {
 }
 
 impl SequentialScope {
-    fn allocate(&mut self, counters: &mut Counters, old: &Name, kind: &'static str) {
+    fn allocate(&mut self, counters: &mut Counters, old: &Name, prefix: &'static str) {
         if self.owned.contains(old) || self.fixed.contains(old) {
             return;
         }
-        self.ssa.insert(old.clone(), counters.fresh(kind));
+        self.ssa.insert(old.clone(), counters.fresh(prefix));
         self.owned.insert(old.clone());
     }
 

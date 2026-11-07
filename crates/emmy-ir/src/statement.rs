@@ -1,11 +1,11 @@
-//! The statement kinds, declared as data: every kind is a struct whose fields carry a type and the roles they play.
-//! The declarations are one macro ([`with_statement_types!`]) so the Python extension generates its classes from the same
-//! list, and [`define_statement_types!`] turns the list into the structs, the `Statement` enum and the protocol walks over
-//! the roles.
+//! The statement types, declared as data: every statement type is a struct whose fields carry a type and the roles
+//! they play. The declarations are one macro ([`with_statement_types!`]) so the Python extension generates its classes
+//! from the same list, and [`define_statement_types!`] turns the list into the structs, the `Statement` enum and the
+//! protocol walks over the roles.
 //!
 //! A role says what a field is to the rest of the compiler: `DEFINES` / `READS` / `UPDATES` / `LOCAL` for SSA names,
 //! `BUFFER_READ` / `BUFFER_WRITE` / `LOCAL_BUFFER` for buffers, `EXPRESSION`, `AXIS` and `AXIS_NAME`, `BODY` for a
-//! child body, `STMTS` for statements the kind carries, `TERM` for the body of a pure term whose names are private,
+//! child body, `STMTS` for carried statements, `TERM` for the body of a pure term whose names are private,
 //! and `RECORD` for records whose own fields play roles. A number where a name, a buffer or an expression is expected
 //! is plain data ([`NumOr`]). A field with no role is plain data.
 
@@ -56,7 +56,7 @@ pub const READING: Roles = READS.or(UPDATES);
 pub const BUFFERS: Roles = BUFFER_READ.or(BUFFER_WRITE);
 pub const CARRIED: Roles = STMTS.or(TERM);
 
-/// What a kind is as a whole, as a set of flags.
+/// What a statement type is as a whole, as a set of flags.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 pub struct StatementFlags(u32);
 
@@ -75,15 +75,15 @@ impl StatementFlags {
 pub const PURE: StatementFlags = StatementFlags(1);
 pub const SIDE_EFFECTS: StatementFlags = StatementFlags(2);
 pub const DEPS_DEEP: StatementFlags = StatementFlags(4);
-/// The kind checks its fields on construction (`validate`, in the protocol's checks).
+/// The statement type checks its fields on construction (`validate`, in the protocol's checks).
 pub const CHECKED: StatementFlags = StatementFlags(8);
 
-/// Every statement kind and record, declared once. `$callback` receives the list and generates from it.
+/// Every statement type and record, declared once. `$callback` receives the list and generates from it.
 #[macro_export]
 macro_rules! with_statement_types {
     ($callback:ident) => {
         $callback! {
-            kinds {
+            statement_types {
                 /// Read a value (or N consecutive values) from an external input buffer.
                 ///
                 /// Scalar (`width == 1`): one SSA binding `names[0]`. Vector (`width > 1`): N SSA bindings; lane k reads
@@ -282,8 +282,8 @@ macro_rules! with_statement_types {
                 }
                 /// Explicit iteration block — one loop over an axis.
                 ///
-                /// `body` executes `axis.extent` times, once per axis value. Reduce- kind Loops fold any `Accum` statements in
-                /// their body into the named accumulator (one sweep over the axis per accumulator). Free-kind Loops run in
+                /// `body` executes `axis.extent` times, once per axis value. Reduce-loops fold any `Accum` statements in
+                /// their body into the named accumulator (one sweep over the axis per accumulator). Free loops run in
                 /// parallel with no folding.
                 ///
                 /// SSA scoping: `Assign` / `Select` names defined inside `body` are scoped to that body — invisible to statements
@@ -593,7 +593,7 @@ macro_rules! with_statement_types {
                 ///
                 /// Writes `out` (a layout-sized f32 C fragment) `= op(args…)` per element `i` via the same `op_to_expression`
                 /// translation the scalar `Assign` uses — so ANY elementwise op reaches the tensor-core tier, not just softmax's
-                /// `exp` / scale. Each arg (:class:`FragmentArg`) is one of five kinds:
+                /// `exp` / scale. Each arg (:class:`FragmentArg`) is one of five forms, named by its `kind`:
                 ///
                 /// - `FRAG` — a C-fragment, indexed `arg[i]`; - `ROW` — a per-row scalar pair, broadcast by the layout's element-
                 /// to-row map; - `UNIFORM` — a cell-uniform scalar name or `Literal`, the same value for every element; - `COORD`
@@ -603,7 +603,7 @@ macro_rules! with_statement_types {
                 /// vars, read at each element's absolute coordinates and converted to f32 (SDPA's additive `attn_mask` bias; the
                 /// gathered score tile of the softmax@V carrier).
                 ///
-                /// `row_base` / `col_base` are the tile origin the `COORD` / `GMEM` kinds add to the layout's per-element
+                /// `row_base` / `col_base` are the tile origin the `COORD` / `GMEM` args add to the layout's per-element
                 /// offsets; `row_base` is required iff a template references `__frow`.
                 ///
                 /// Realizations: `exp(s − m)` = a `subtract` (FRAG, ROW) then an `exp` (FRAG); `O *= α` = an in-place `multiply`
@@ -915,14 +915,14 @@ macro_rules! with_statement_types {
     };
 }
 
-/// Where a kind is exported from: the shared statement module or the Kernel IR.
+/// Where a statement type is exported from: the shared statement module or the Kernel IR.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Layer {
     Shared,
     Kernel,
 }
 
-/// One field of a declared kind: its name, its roles and whether it has a default.
+/// One field of a declared statement type: its name, its roles and whether it has a default.
 #[derive(Clone, Copy, Debug)]
 pub struct FieldInfo {
     pub name: &'static str,
@@ -953,7 +953,7 @@ macro_rules! __has_default {
 /// The core's callback: the structs, the `Statement` enum and the generic walks.
 macro_rules! define_statement_types {
     (
-        kinds { $( $(#[doc = $doc:literal])* $layer:ident $StatementType:ident {$($flag:tt)|*} { $( $field:ident : $ty:ty [$($role:ident)|*] $(= $default:expr)? ,)* } )* }
+        statement_types { $( $(#[doc = $doc:literal])* $layer:ident $StatementType:ident {$($flag:tt)|*} { $( $field:ident : $ty:ty [$($role:ident)|*] $(= $default:expr)? ,)* } )* }
         records { $( $(#[doc = $rdoc:literal])* $rlayer:ident $Record:ident { $( $rfield:ident : $rty:ty [$($rrole:ident)|*] $(= $rdefault:expr)? ,)* } )* }
     ) => {
         $(
@@ -973,10 +973,10 @@ macro_rules! define_statement_types {
             impl<'a> TryFrom<&'a Statement> for &'a $StatementType {
                 type Error = $crate::Error;
 
-                /// The statement as this kind, or a type error naming the kind it is.
+                /// The statement as this statement type, or a type error naming the type it is.
                 fn try_from(stmt: &'a Statement) -> $crate::Result<&'a $StatementType> {
                     match stmt {
-                        Statement::$StatementType(kind) => Ok(kind),
+                        Statement::$StatementType(inner) => Ok(inner),
                         other => Err($crate::Error::Type(format!("not a {}: a {}", stringify!($StatementType), other.ty()))),
                     }
                 }
@@ -996,7 +996,8 @@ macro_rules! define_statement_types {
                 define_statement_types!(@fields $Record { $( $rfield : $rty [$($rrole)|*] $(= $rdefault)? ,)* });
             }
 
-            /// A record is a field of the kind that holds it: spelled on the header as its name over its own fields.
+            /// A record is a field of the statement type that holds it: spelled on the header as its name over its own
+            /// fields.
             impl $crate::field::Field for $Record {
                 fn ty() -> $crate::field::FieldType {
                     $crate::field::FieldType::Record($Record::NAME)
@@ -1029,7 +1030,7 @@ macro_rules! define_statement_types {
                 }
                 fn from_value(value: $crate::field::Value) -> $crate::Result<Self> {
                     match value {
-                        $crate::field::Value::Record(kind, values) if kind == $Record::NAME => {
+                        $crate::field::Value::Record(name, values) if name == $Record::NAME => {
                             $Record::from_values(values)
                         }
                         other => Err(other.mismatch(concat!("a ", stringify!($Record)))),
@@ -1038,20 +1039,20 @@ macro_rules! define_statement_types {
             }
         )*
 
-        /// Every statement kind, one variant each.
+        /// A statement of any type: one variant per statement type.
         #[derive(Clone, PartialEq, Eq, Hash, Debug)]
         pub enum Statement {
             $( $StatementType($StatementType), )*
         }
 
-        /// Every statement kind by name, in declaration order.
+        /// Every statement type by name, in declaration order.
         #[derive(Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Debug)]
         pub enum StatementType {
             $( $StatementType, )*
         }
 
         impl StatementType {
-            /// Every kind, in declaration order.
+            /// Every statement type, in declaration order.
             pub const ALL: &[StatementType] = &[ $( StatementType::$StatementType, )* ];
 
             pub fn name(self) -> &'static str {
@@ -1070,7 +1071,7 @@ macro_rules! define_statement_types {
                 match self { $( StatementType::$StatementType => $StatementType::field_ty(field), )* }
             }
 
-            /// A statement of this kind from its field values.
+            /// A statement of this type from its field values.
             pub fn from_values(self, values: $crate::field::Values) -> $crate::Result<Statement> {
                 match self { $( StatementType::$StatementType => Ok(Statement::$StatementType($StatementType::from_values(values)?)), )* }
             }
@@ -1082,7 +1083,7 @@ macro_rules! define_statement_types {
             fn from_str(name: &str) -> $crate::Result<StatementType> {
                 match name {
                     $( stringify!($StatementType) => Ok(StatementType::$StatementType), )*
-                    _ => Err($crate::Error::Value(format!("no statement kind {name}"))),
+                    _ => Err($crate::Error::Value(format!("no statement type {name}"))),
                 }
             }
         }
@@ -1110,29 +1111,30 @@ macro_rules! define_statement_types {
                 self.ty().fields()
             }
 
-            /// The operation a kind with an `op` field holds.
+            /// The operation a statement with an `op` field holds.
             pub fn op(&self) -> Option<&$crate::elementwise::ElementwiseOp> {
                 match self { $( Statement::$StatementType(k) => k.op(), )* }
             }
 
-            /// This statement with another operation, for a kind that holds one; itself for any other.
+            /// This statement with another operation, for a statement type that holds one; itself for any other.
             pub fn with_op(&self, op: $crate::elementwise::ElementwiseOp) -> Statement {
                 match self { $( Statement::$StatementType(k) => Statement::$StatementType(k.with_op(op)), )* }
             }
 
-            /// The dtype a kind's `dtype` field holds: the value-defining shared kinds, and TreeHalve, WarpShuffle,
-            /// FragmentRowReduce and RegFragment, whose field is typed `DType` too.
+            /// The dtype a statement's `dtype` field holds: the value-defining shared statement types, and TreeHalve,
+            /// WarpShuffle, FragmentRowReduce and RegFragment, whose field is typed `DType` too.
             pub fn dtype(&self) -> Option<&$crate::field::DType> {
                 match self { $( Statement::$StatementType(k) => k.dtype(), )* }
             }
 
-            /// The one name a kind's defining `name` field binds: the single-value shared kinds, Call, and
-            /// RegFragment and WgmmaDescriptor.
+            /// The one name a statement's defining `name` field binds: the single-value shared statement types, Call,
+            /// and RegFragment and WgmmaDescriptor.
             pub fn name(&self) -> Option<&$crate::Name> {
                 match self { $( Statement::$StatementType(k) => k.name(), )* }
             }
 
-            /// The checks a kind makes on construction: `validate` of every `CHECKED` kind, nothing for the others.
+            /// The checks a statement makes on construction: `validate` of every `CHECKED` statement type, nothing for
+            /// the others.
             pub fn check(&self) -> $crate::Result<()> {
                 match self { $( Statement::$StatementType(k) => define_statement_types!(@check k {$($flag)|*}), )* }
             }
@@ -1163,8 +1165,8 @@ macro_rules! define_statement_types {
 
         $(
             impl From<$StatementType> for Statement {
-                fn from(kind: $StatementType) -> Statement {
-                    Statement::$StatementType(kind)
+                fn from(stmt: $StatementType) -> Statement {
+                    Statement::$StatementType(stmt)
                 }
             }
         )*
@@ -1240,7 +1242,7 @@ macro_rules! define_statement_types {
             Ok(out)
         }
 
-        /// The operation this kind holds: its `op` field, when it has one.
+        /// The operation this statement holds: its `op` field, when it has one.
         pub fn op(&self) -> Option<&$crate::elementwise::ElementwiseOp> {
             $( if stringify!($field) == "op" { return <$ty as $crate::field::Field>::as_op(&self.$field); } )*
             None
@@ -1251,13 +1253,13 @@ macro_rules! define_statement_types {
             $Type { $( $field: if stringify!($field) == "op" { <$ty as $crate::field::Field>::with_op(&self.$field, &op) } else { self.$field.clone() }, )* }
         }
 
-        /// The dtype a value-defining kind stamps: its `dtype` field, when it has one of that type.
+        /// The dtype a value-defining statement stamps: its `dtype` field, when it has one of that type.
         pub fn dtype(&self) -> Option<&$crate::field::DType> {
             $( if stringify!($field) == "dtype" { return <$ty as $crate::field::Field>::as_dtype(&self.$field); } )*
             None
         }
 
-        /// The one name a single-value kind defines: its `name` field, when that field defines.
+        /// The one name a single-value statement defines: its `name` field, when that field defines.
         pub fn name(&self) -> Option<&$crate::Name> {
             $( if stringify!($field) == "name" && (Roles::NONE $(.or(define_statement_types!(@role $role)))*).contains_any(DEFINES) { return <$ty as $crate::field::Field>::as_name(&self.$field); } )*
             None
@@ -1277,16 +1279,16 @@ macro_rules! define_statement_types {
         <$ty as $crate::field::Field>::equals(&$self.$field, &$default)
     };
     (@at_default $self:ident $field:ident $ty:ty) => { false };
-    (@take $values:ident $kind:ident $field:ident $ty:ty = $default:expr) => {
+    (@take $values:ident $Type:ident $field:ident $ty:ty = $default:expr) => {
         match $values.take(stringify!($field)) {
             Some(value) => <$ty as $crate::field::Field>::from_value(value)?,
             None => $default,
         }
     };
-    (@take $values:ident $kind:ident $field:ident $ty:ty) => {
+    (@take $values:ident $Type:ident $field:ident $ty:ty) => {
         match $values.take(stringify!($field)) {
             Some(value) => <$ty as $crate::field::Field>::from_value(value)?,
-            None => return Err($crate::Error::Value(format!("{} requires {}", stringify!($kind), stringify!($field)))),
+            None => return Err($crate::Error::Value(format!("{} requires {}", stringify!($Type), stringify!($field)))),
         }
     };
 }
@@ -1306,14 +1308,14 @@ with_statement_types!(define_statement_types);
 mod tests {
     use super::*;
 
-    /// The declaration list, as kinds and records with their fields in order: what every stored body's text, every
-    /// golden and every tune DB key spell. A change here is a change to all of them.
+    /// The declaration list, as statement types and records with their fields in order: what every stored body's
+    /// text, every golden and every tune DB key spell. A change here is a change to all of them.
     #[test]
     fn the_declarations_are_pinned() {
         let mut listing = String::new();
-        for kind in StatementType::ALL {
-            let fields: Vec<&str> = kind.fields().iter().map(|f| f.name).collect();
-            listing.push_str(&format!("{} {}\n", kind.name(), fields.join(" ")));
+        for ty in StatementType::ALL {
+            let fields: Vec<&str> = ty.fields().iter().map(|f| f.name).collect();
+            listing.push_str(&format!("{} {}\n", ty.name(), fields.join(" ")));
         }
         for (name, fields) in [
             (SelectBranch::NAME, SelectBranch::FIELDS),

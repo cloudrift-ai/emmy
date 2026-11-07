@@ -1,5 +1,6 @@
-"""The statement classes at the Python boundary, checked over every kind in every IR layer. The protocol itself (rename,
-substitute, the roles a kind's fields play, the buffers it reads and writes) is tested in the `emmy-ir` crate."""
+"""The statement classes at the Python boundary, checked over every statement type in every IR layer. The protocol
+itself (rename, substitute, the roles a statement type's fields play, the buffers it reads and writes) is tested in the
+`emmy-ir` crate."""
 
 import importlib
 import pickle
@@ -40,7 +41,7 @@ from emmy.compiler.ir.stmt import (
 )
 
 
-def _kinds() -> list[type]:
+def _statement_types() -> list[type]:
     for mod in pkgutil.walk_packages(ir_pkg.__path__, prefix="emmy.compiler.ir."):
         importlib.import_module(mod.name)
 
@@ -52,9 +53,9 @@ def _kinds() -> list[type]:
     return sorted(set(subclasses(Statement)), key=lambda cls: cls.__qualname__)
 
 
-def test_a_kind_check_is_native() -> None:
-    """No statement class has a metaclass of its own: ``isinstance`` on a kind stays the interpreter's check."""
-    assert [cls.__qualname__ for cls in (Statement, *_kinds()) if type(cls) is not type] == []
+def test_a_statement_type_check_is_native() -> None:
+    """No statement class has a metaclass of its own: ``isinstance`` on a statement type stays the interpreter's check."""
+    assert [cls.__qualname__ for cls in (Statement, *_statement_types()) if type(cls) is not type] == []
 
 
 _K = Axis("k", 8)
@@ -165,7 +166,7 @@ def test_a_statement_read_through_two_wrappers_of_one_body_is_one_object() -> No
     assert first[0] is first[0] and first[-1].nested() == second[-1].nested()
 
 
-def test_a_kind_holds_its_elementwise_operation_as_op() -> None:
+def test_a_statement_type_holds_its_elementwise_operation_as_op() -> None:
     """The clustered identity reads a statement's operation by the name ``op``, in every layer: what the Python getter
     hands back is the operation object."""
     held = [
@@ -174,7 +175,7 @@ def test_a_kind_holds_its_elementwise_operation_as_op() -> None:
         for name in fields_of(type(stmt))
         if isinstance(getattr(stmt, name), ElementwiseImpl)
     ]
-    assert {kind for kind, _ in held} >= {"Assign", "Accum"} and {name for _, name in held} == {"op"}
+    assert {type_name for type_name, _ in held} >= {"Assign", "Accum"} and {name for _, name in held} == {"op"}
 
 
 def test_a_number_in_a_role_field_is_plain_data() -> None:
@@ -199,7 +200,7 @@ def test_a_statement_rebuilds_as_itself(stmt) -> None:
 
 def _held_expressions(value, child_bodies=()) -> list:
     """Every expression a statement holds in its fields, found by reflection: the check on what ``expressions`` reports.
-    A child body's expressions are its own statements'; any other statement a kind holds is part of it."""
+    A child body's expressions are its own statements'; any other statement it holds is part of it."""
     if isinstance(value, Expression):
         return [value]
     if isinstance(value, (tuple, list, Body)) and not any(value is body for body in child_bodies):
@@ -238,18 +239,18 @@ def test_an_error_in_an_expression_map_reaches_the_caller() -> None:
         parse_body("x = load a[i]").map(lambda stmt: stmt.map_expressions(fail))
 
 
-def test_every_kind_reads_back_from_its_text_and_lists_its_fields() -> None:
-    """Every kind, in every layer, has a text its reader takes back, and its fields are the ones ``fields_of`` lists."""
+def test_every_statement_type_reads_back_from_its_text_and_lists_its_fields() -> None:
+    """Every statement type, in every layer, has a text its reader takes back, and its fields are the ones ``fields_of`` lists."""
     for stmt in _ALL_EXAMPLES:
         if not isinstance(stmt, Call):
             assert parse_body(str(stmt)) == Body((stmt,))
         assert stmt.replace(**{name: getattr(stmt, name) for name in fields_of(type(stmt))}) == stmt
 
 
-def test_every_exported_kind_has_an_example() -> None:
-    exported = {kind for name in stmt_pkg.__all__ if isinstance(kind := getattr(stmt_pkg, name), type) and issubclass(kind, Statement)}
+def test_every_exported_statement_type_has_an_example() -> None:
+    exported = {cls for name in stmt_pkg.__all__ if isinstance(cls := getattr(stmt_pkg, name), type) and issubclass(cls, Statement)}
     assert {type(example) for example in _EXAMPLES} == exported - {Statement}
-    kernel = {kind for kind in _kinds() if kind.__module__ == kernel_ir.__name__}
+    kernel = {cls for cls in _statement_types() if cls.__module__ == kernel_ir.__name__}
     assert {type(example) for example in _KERNEL_EXAMPLES} == kernel
 
 

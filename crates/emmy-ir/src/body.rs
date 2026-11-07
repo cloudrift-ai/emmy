@@ -82,7 +82,7 @@ pub struct BodyData {
     definitions: OnceLock<HashMap<Name, StmtRef>>,
     axis_names: OnceLock<HashSet<Name>>,
     ssa_uses: OnceLock<HashSet<Name>>,
-    by_kind: Mutex<HashMap<Vec<StatementType>, Vec<StmtRef>>>,
+    by_type: Mutex<HashMap<Vec<StatementType>, Vec<StmtRef>>>,
     exact: OnceLock<u64>,
     normalized: OnceLock<Normalized>,
 }
@@ -224,7 +224,7 @@ impl Body {
             definitions: OnceLock::new(),
             axis_names: OnceLock::new(),
             ssa_uses: OnceLock::new(),
-            by_kind: Mutex::new(HashMap::new()),
+            by_type: Mutex::new(HashMap::new()),
             exact: OnceLock::new(),
             normalized: OnceLock::new(),
         }))
@@ -561,19 +561,19 @@ impl Body {
         dependencies
     }
 
-    /// The statements of the given statement_types, pre-order, cached per kind set.
-    pub fn of_types(&self, kinds: &[StatementType]) -> Vec<StmtRef> {
-        let key = kinds.to_vec();
-        if let Some(found) = locked(&self.0.by_kind).get(&key) {
+    /// The statements of the given statement types, pre-order, cached per set of types.
+    pub fn of_types(&self, types: &[StatementType]) -> Vec<StmtRef> {
+        let key = types.to_vec();
+        if let Some(found) = locked(&self.0.by_type).get(&key) {
             return found.clone();
         }
         let mut out = Vec::new();
         self.walk(&mut |here| {
-            if kinds.contains(&here.stmt().ty()) {
+            if types.contains(&here.stmt().ty()) {
                 out.push(here.clone());
             }
         });
-        locked(&self.0.by_kind).insert(key, out.clone());
+        locked(&self.0.by_type).insert(key, out.clone());
         out
     }
 

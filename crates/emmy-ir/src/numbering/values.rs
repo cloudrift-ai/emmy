@@ -190,8 +190,8 @@ impl Context<'_> {
         }
     }
 
-    fn resource(&mut self, name: &Name, kind: Tag, touched: &mut Vec<Name>) -> Key {
-        let held = if kind == Tag::State {
+    fn resource(&mut self, name: &Name, tag: Tag, touched: &mut Vec<Name>) -> Key {
+        let held = if tag == Tag::State {
             &mut self.out.states
         } else {
             &mut self.out.buffers
@@ -200,7 +200,7 @@ impl Context<'_> {
             held.push(name.clone());
         }
         touched.push(name.clone());
-        Key::tuple([Key::tag(kind), (self.resource_key)(name)])
+        Key::tuple([Key::tag(tag), (self.resource_key)(name)])
     }
 
     fn param_depths(&mut self, param: &Param) -> Vec<usize> {
@@ -242,10 +242,10 @@ impl Context<'_> {
         (parent, mapped)
     }
 
-    /// Number `kind`/`payload` over `ops`, unifying parameters by their expression; `bound` axes reduce.
+    /// Number `tag`/`payload` over `ops`, unifying parameters by their expression; `bound` axes reduce.
     fn compose(
         &mut self,
-        kind: Tag,
+        tag: Tag,
         payload: Key,
         mut ops: Vec<Value>,
         params: &[Param],
@@ -348,7 +348,7 @@ impl Context<'_> {
         }
         // A value is a function of its coordinates whatever their range; a store's sweep is its domain.
         let mut domain = Vec::new();
-        if kind == Tag::Store {
+        if tag == Tag::Store {
             for param in &kept {
                 for depth in self.param_depths(param) {
                     domain.push(match self.binding.get(depth) {
@@ -359,7 +359,7 @@ impl Context<'_> {
             }
         }
         let number = hash_parts([
-            Key::tag(kind),
+            Key::tag(tag),
             payload,
             Key::Tuple(mapped),
             reduced,
@@ -385,7 +385,7 @@ impl Context<'_> {
         self.out.numbers[ordinal] = Some(value);
     }
 
-    /// Any statement kind: its shape with names abstracted, its expressions as parameters and operands.
+    /// Any statement type: its shape with names abstracted, its expressions as parameters and operands.
     fn generic(
         &mut self,
         stmt: &Arc<Statement>,

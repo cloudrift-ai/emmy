@@ -1,7 +1,8 @@
 //! The text of a body: one printer and one reader, exact inverses. One statement is one line; a block's statements
-//! are indented four spaces under its header; a field at its default is left out, nothing else is. The shared kinds
-//! have clauses of their own; a kind of another layer prints and reads through its declaration (`StatementType(field=value,
-//! …):` over its blocks). A subroutine a call names is defined once, ahead of the statements.
+//! are indented four spaces under its header; a field at its default is left out, nothing else is. The shared
+//! statement types have clauses of their own; a statement type of another layer prints and reads through its
+//! declaration (`StatementType(field=value, …):` over its blocks). A subroutine a call names is defined once, ahead
+//! of the statements.
 
 pub mod parse;
 pub mod print;
@@ -63,7 +64,7 @@ mod tests {
         "Tile(axes=(a0 in 0..64, a1 in 0..64), block_threads=128):\n    RegStore(dst_buffer=y, dst_index=(a0, a1), frag=c0, shape=(16, 8, 8)):\n        epilogue:\n            v1 = multiply(v0, s)\n        run:\n            RegStore(dst_buffer=y, dst_index=(a0, a1 + 8), frag=c1, shape=(16, 8, 8))",
         "FragmentApply(out=o, op=where, args=(FragmentArg(kind=coord, expressions=(_vc > _vr)), FragmentArg(kind=gmem, expressions=(i, j), buffer=mask)), row_base=q)",
         "TreeHalve(bufs=(b), state=(acc), state_b=(acc__o), length=8, tid_var=t):\n    combine_states:\n        t = multiply(acc, acc__o)\n        acc = add(acc, t)",
-        // The other Kernel IR kinds, and the two with the most fields at their fullest.
+        // The other Kernel IR statement types, and the two with the most fields at their fullest.
         "Sync",
         "CpAsyncCopy(smem=s, smem_index=(i, j), src=a, src_index=(i, j), lane_index=(i, j), valid=i < 2)",
         "CpAsyncCommit",
@@ -119,7 +120,8 @@ mod tests {
         }
     }
 
-    /// No kind goes without a text: the statements above, with the calls, hold one of every kind, in every layer.
+    /// No statement type goes without a text: the statements above, with the calls, hold one of every type, in
+    /// every layer.
     #[test]
     fn every_statement_type_has_a_text() {
         let covered: BTreeSet<StatementType> = STATEMENTS
@@ -136,9 +138,9 @@ mod tests {
         let text = "let f32 v0 = 0.125\nfor a0 in 0..4:\n    for a1 in 0..8:\n        in0 = load x[a0, a1]\n        v1 = 2*in0 + v0\n        acc0 <- add(acc0, v1) over a1\n    y[a0] = acc0";
         let body = parse_body(text).unwrap();
         assert_eq!(body_text(&body).unwrap(), text);
-        let kinds: Vec<StatementType> = body.iter_stmts().iter().map(|stmt| stmt.ty()).collect();
+        let types: Vec<StatementType> = body.iter_stmts().iter().map(|stmt| stmt.ty()).collect();
         assert_eq!(
-            kinds,
+            types,
             [
                 StatementType::Let,
                 StatementType::Loop,

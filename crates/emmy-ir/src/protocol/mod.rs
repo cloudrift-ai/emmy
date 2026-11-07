@@ -1,8 +1,9 @@
-//! The statement protocol: what every kind answers, written once over the roles of its fields. Reads (`deps`,
-//! `defines`, the buffers, the expressions, the axes, the child bodies) and their rebuilding halves (`with_bodies`,
-//! `map_expressions`, `rename_buffers`, and `rewrite` behind `rename` and `substitute`). The few members no role
-//! gives are stated here by kind: an `Accum`'s reduced axes follow a substitution that splits an axis, a `Let` and
-//! a `Call` read buffers their fields do not name, a `StridedLoop` with an `end` binds one more name than its axis.
+//! The statement protocol: what every statement type answers, written once over the roles of its fields. Reads
+//! (`deps`, `defines`, the buffers, the expressions, the axes, the child bodies) and their rebuilding halves
+//! (`with_bodies`, `map_expressions`, `rename_buffers`, and `rewrite` behind `rename` and `substitute`). The few
+//! members no role gives are stated here by statement type: an `Accum`'s reduced axes follow a substitution that
+//! splits an axis, a `Let` and a `Call` read buffers their fields do not name, a `StridedLoop` with an `end` binds one
+//! more name than its axis.
 
 pub mod checks;
 pub mod shared;
@@ -675,7 +676,7 @@ impl Statement {
         )
     }
 
-    /// A kind with a body field: what the text indents statements under.
+    /// A statement with a body field: what the text indents statements under.
     pub fn is_block(&self) -> bool {
         self.fields().iter().any(|f| f.roles.contains_any(BODY))
     }
@@ -814,7 +815,7 @@ mod tests {
     use crate::normalize::testing::{body, stmt_text, strs, text};
     use crate::text::parse_statement;
 
-    /// One statement of every kind, in declaration order; a call is spelled after the subroutine it names.
+    /// One statement of every statement type, in declaration order; a call is spelled after the subroutine it names.
     const EXAMPLES: &[&str] = &[
         "f32 x = load a[i]",
         "y = exp(x)",
@@ -873,14 +874,14 @@ mod tests {
         parse_statement(text).unwrap_or_else(|err| panic!("{err}\n{text}"))
     }
 
-    /// The examples, one per kind.
+    /// The examples, one per statement type.
     fn examples() -> Vec<Arc<Statement>> {
         let examples: Vec<Arc<Statement>> = EXAMPLES.iter().map(|text| statement(text)).collect();
         let statement_types: Vec<StatementType> = examples.iter().map(|stmt| stmt.ty()).collect();
         assert_eq!(
             statement_types,
             StatementType::ALL,
-            "one example per kind, in declaration order"
+            "one example per statement type, in declaration order"
         );
         examples
     }
@@ -892,11 +893,8 @@ mod tests {
             .collect()
     }
 
-    fn example(kind: StatementType) -> Arc<Statement> {
-        examples()
-            .into_iter()
-            .find(|stmt| stmt.ty() == kind)
-            .unwrap()
+    fn example(ty: StatementType) -> Arc<Statement> {
+        examples().into_iter().find(|stmt| stmt.ty() == ty).unwrap()
     }
 
     fn mapping(pairs: &[(&str, &str)]) -> HashMap<Name, Name> {
@@ -966,17 +964,17 @@ mod tests {
         };
         let held: Vec<(&str, &str)> = StatementType::ALL
             .iter()
-            .flat_map(|kind| {
-                kind.fields()
+            .flat_map(|ty| {
+                ty.fields()
                     .iter()
-                    .filter(|field| kind.field_ty(field.name).is_some_and(|ty| is_op(&ty)))
-                    .map(|field| (kind.name(), field.name))
+                    .filter(|field| ty.field_ty(field.name).as_ref().is_some_and(is_op))
+                    .map(|field| (ty.name(), field.name))
             })
             .collect();
-        let kinds: HashSet<&str> = held.iter().map(|(kind, _)| *kind).collect();
+        let types: HashSet<&str> = held.iter().map(|(ty, _)| *ty).collect();
         let names: HashSet<&str> = held.iter().map(|(_, name)| *name).collect();
         assert!(
-            kinds.is_superset(&HashSet::from(["Assign", "Accum"])),
+            types.is_superset(&HashSet::from(["Assign", "Accum"])),
             "{held:?}"
         );
         assert_eq!(names, HashSet::from(["op"]));
@@ -1012,20 +1010,20 @@ mod tests {
 
     #[test]
     fn a_rename_reaches_every_name_and_no_buffer() {
-        // What a declared kind reads and defines follows a rename; the buffers it reads and writes follow a buffer
+        // What a declared statement reads and defines follows a rename; the buffers it reads and writes follow a buffer
         // rename, the ones a carried statement or an epilogue reads included.
         for stmt in kernel_examples() {
-            let kind = stmt.ty();
+            let ty = stmt.ty();
             let renamed = suffixed(&stmt, "_");
             assert_eq!(
                 owned(&renamed.deps()),
                 suffix_all(&stmt.deps(), "_"),
-                "{kind}"
+                "{ty}"
             );
             assert_eq!(
                 owned(&renamed.defines()),
                 suffix_all(&stmt.defines(), "_"),
-                "{kind}"
+                "{ty}"
             );
             let defines = stmt.defines();
             let locals: Vec<String> = stmt
@@ -1046,7 +1044,7 @@ mod tests {
                     owned(&renamed.local_decls())
                 ),
                 (stmt.external_reads(), stmt.external_writes(), locals),
-                "{kind}"
+                "{ty}"
             );
             let buffers: HashMap<Name, Name> = stmt
                 .external_reads()
@@ -1064,17 +1062,17 @@ mod tests {
             assert_eq!(
                 moved.external_reads(),
                 through(stmt.external_reads()),
-                "{kind}"
+                "{ty}"
             );
             assert_eq!(
                 moved.external_writes(),
                 through(stmt.external_writes()),
-                "{kind}"
+                "{ty}"
             );
             assert_eq!(
                 (moved.deps(), moved.defines()),
                 (stmt.deps(), stmt.defines()),
-                "{kind}"
+                "{ty}"
             );
         }
     }
@@ -1150,19 +1148,19 @@ mod tests {
     fn a_statement_rebuilds_as_itself() {
         // Every rebuilding member, given what its reading half returned, gives back an equal statement.
         for stmt in examples() {
-            let kind = stmt.ty();
-            assert_eq!(*kept(&stmt), *stmt, "{kind}");
+            let ty = stmt.ty();
+            assert_eq!(*kept(&stmt), *stmt, "{ty}");
             assert_eq!(
                 *Statement::with_bodies(&stmt, stmt.nested()).unwrap(),
                 *stmt,
-                "{kind}"
+                "{ty}"
             );
             let mapped = Statement::map_expressions(&stmt, &mut |expression| expression.clone());
-            assert!(Arc::ptr_eq(&mapped, &stmt), "{kind}");
+            assert!(Arc::ptr_eq(&mapped, &stmt), "{ty}");
             assert_eq!(
                 *Statement::rename_buffers(&stmt, &HashMap::new()),
                 *stmt,
-                "{kind}"
+                "{ty}"
             );
         }
     }
@@ -1186,10 +1184,10 @@ mod tests {
         // and every field that holds statements plays BODY, TERM or STMTS: then the walk reaches every one.
         let declared = StatementType::ALL
             .iter()
-            .flat_map(|kind| {
-                kind.fields()
+            .flat_map(|ty| {
+                ty.fields()
                     .iter()
-                    .map(move |field| (kind.name(), field, kind.field_ty(field.name)))
+                    .map(move |field| (ty.name(), field, ty.field_ty(field.name)))
             })
             .chain(SelectBranch::FIELDS.iter().map(|field| {
                 (
@@ -1221,16 +1219,16 @@ mod tests {
             }
         }
         for stmt in examples() {
-            let kind = stmt.ty();
+            let ty = stmt.ty();
             let markers: Vec<Expression> = (0..stmt.expressions().len())
                 .map(|index| Expression::var(&format!("e{index}")))
                 .collect();
             let mut fresh = markers.iter();
             let mapped = Statement::map_expressions(&stmt, &mut |_| fresh.next().unwrap().clone());
-            assert_eq!(mapped.expressions(), markers, "{kind}");
+            assert_eq!(mapped.expressions(), markers, "{ty}");
             let mut back = stmt.expressions().into_iter();
             let restored = Statement::map_expressions(&mapped, &mut |_| back.next().unwrap());
-            assert_eq!(*restored, *stmt, "{kind}");
+            assert_eq!(*restored, *stmt, "{ty}");
         }
     }
 

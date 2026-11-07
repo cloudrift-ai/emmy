@@ -17,10 +17,10 @@ use crate::field::{FieldType, Float};
 use crate::numbering::{Key, Numbering, expression_key};
 use crate::statement::{Affine, Statement};
 
-/// A statement's own shape with every name and buffer one placeholder: its kind, then its fields in declaration order.
-/// Kinds sort by name, which puts every store after the values it reads, as the Python order's structural form had
-/// it, and one kind's statements sort by their first differing field, so an `Assign`'s operation decides before its
-/// dtype. A loop's axis field is its extent's digest ([`extent_digest`]).
+/// A statement's own shape with every name and buffer one placeholder: its statement type, then its fields in
+/// declaration order. Statement types sort by name, which puts every store after the values it reads, as the Python
+/// order's structural form had it, and the statements of one type sort by their first differing field, so an
+/// `Assign`'s operation decides before its dtype. A loop's axis field is its extent's digest ([`extent_digest`]).
 pub(crate) fn sibling_shape(stmt: &Arc<Statement>) -> Result<Key> {
     let children = stmt.nested();
     let shell = if children.is_empty() {
@@ -296,7 +296,7 @@ mod tests {
     use crate::expr::{Builtin, CastTarget, Expr, Expression, LitType, parse};
 
     /// The extent digest spells an expression in the Python order's old form (`BinaryExpr`, `FuncCallExpr`, ...);
-    /// the stored goldens' decisions are addressed in it, so each kind's spelling is pinned through its digest.
+    /// the stored goldens' decisions are addressed in it, so each expression type's spelling is pinned by its digest.
     #[test]
     fn the_extent_digest_spells_every_expression_type_as_it_always_did() {
         let samples = [
