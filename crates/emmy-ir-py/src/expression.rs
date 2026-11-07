@@ -10,7 +10,8 @@ use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyFrozenSet, PyList, PyString, PyTuple};
 
 use crate::convert::{
-    IntoPyErr, PARSE, PyField, cached, expression_from_py, num_from_py, num_to_py,
+    IntoPyErr, PARSE, PyField, cached, expression_from_py, located, num_from_py, num_to_py,
+    translate,
 };
 
 /// The base class of every expression node: the shared tree, and the Python objects its fields hand back.
@@ -342,7 +343,7 @@ impl PyExpression {
             )));
         };
         let expression = emmy_ir::expr::parse(text.to_str()?)
-            .map_err(|err| PyValueError::new_err(format!("{where_}: {err}")))?;
+            .map_err(|err| located(cls.py(), where_, translate(err)))?;
         let wrapped = PyExpression::wrap(cls.py(), &expression)?;
         if !wrapped.is_instance(cls)? {
             return Err(PyValueError::new_err(format!(

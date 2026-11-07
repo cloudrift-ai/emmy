@@ -11,7 +11,9 @@ use pyo3::exceptions::{PyIndexError, PyTypeError, PyValueError};
 use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyFrozenSet, PyList, PySet, PySlice, PyString, PyTuple, PyType};
 
-use crate::convert::{IntoPyErr, PyField, Slots, cached, slots, statement_from_py, str_tuple};
+use crate::convert::{
+    IntoPyErr, PyField, Slots, cached, located, slots, statement_from_py, str_tuple, translate,
+};
 use crate::expression::{PyExpression, renames_from_py};
 use crate::statement::{PyStatement, kind_of, statements_from_py, wrap_statement};
 
@@ -42,15 +44,33 @@ impl<T, V> Tables<T, V> {
             .map(|_| read(value))
     }
 
-    fn insert(&mut self, object: &Arc<T>, value: V) {
-        if self.entries.len() % 1024 == 1023 {
-            self.entries
-                .retain(|_, (alive, _)| alive.strong_count() > 0);
-        }
+    /// Remember `value` for `object`; true when the table is due for a purge.
+    fn insert(&mut self, object: &Arc<T>, value: V) -> bool {
         self.entries.insert(
             Arc::as_ptr(object) as usize,
             (Arc::downgrade(object), value),
         );
+        self.entries.len().is_multiple_of(1024)
+    }
+
+    /// The values of every entry whose object is gone, removed from the table.
+    fn dead(&mut self) -> Vec<V> {
+        self.entries
+            .extract_if(|_, (alive, _)| alive.strong_count() == 0)
+            .map(|(_, (_, value))| value)
+            .collect()
+    }
+}
+
+/// Drop the dead entries of `tables`, outside its lock: a value may hold Python objects whose finalizers come back
+/// here, and the objects it held may have kept other entries alive, so the purge runs again while it frees any.
+fn purge<T, V>(tables: &Mutex<Tables<T, V>>) {
+    loop {
+        let dead = emmy_ir::locked(tables).dead();
+        if dead.is_empty() {
+            return;
+        }
+        drop(dead);
     }
 }
 
@@ -62,7 +82,11 @@ fn wrappers(body: &Body) -> Wrappers {
         return table;
     }
     let table: Wrappers = (0..body.len()).map(|_| OnceLock::new()).collect();
-    tables.insert(&body.0, table.clone());
+    let due = tables.insert(&body.0, table.clone());
+    drop(tables);
+    if due {
+        purge(WRAPPERS.get_or_init(|| Mutex::new(Tables::new())));
+    }
     table
 }
 
@@ -281,7 +305,7 @@ impl PyBody {
             )));
         };
         let body = parse_body_text(text.to_str()?)
-            .map_err(|err| PyValueError::new_err(format!("{where_}: {err}")))?;
+            .map_err(|err| located(value.py(), where_, translate(err)))?;
         PyBody::wrap(value.py(), &body)
     }
 
@@ -587,7 +611,9 @@ impl PySubroutine {
             },
         )?;
         let reference = py.import("weakref")?.getattr("ref")?.call1((&wrapper,))?;
-        emmy_ir::locked(subroutines()).insert(sub, reference.unbind());
+        if emmy_ir::locked(subroutines()).insert(sub, reference.unbind()) {
+            purge(subroutines());
+        }
         Ok(wrapper)
     }
 }
