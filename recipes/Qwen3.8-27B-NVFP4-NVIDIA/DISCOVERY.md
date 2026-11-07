@@ -1,5 +1,45 @@
 # Qwen3.8-27B-NVFP4 (NVIDIA) discovery
 
+## Attention priced per range of windows: milestones 5 and 6 again (2026-11-07)
+
+Native attention now compiles once per range of windows, priced at 4,096 and at 131,072 cached tokens, and a step runs
+its window's range's program; the long range starts at 16,384 (#1352, stacked on #1329's grouped decode attention).
+Recorded and gated on one rented x16 RTX 5090 (vast.ai; Gen5 x16; a 46-CPU quota on a 96-core EPYC 9655 host, driver
+610.57, CUDA 13.1). The client, prompts and settings are the 2026-11-06 section's, the prompts cut from that section's
+tree. The pack exports under strict evidence.
+
+Every attention twin was swept whole and under key splits g2k to g128k, the FP8 cache unstaged, no TMA, fast math on,
+and the compile's pick recorded. The compiler offers splits up to g64k; g128k measured faster on the decode twins at
+131,072 (one row 475 against 581 µs, three rows 1,296 against 1,413 µs), and no compile can deploy it.
+
+| twin | at 4,096 | at 131,072 |
+|---|---|---|
+| `attend1` (decode) | g32k, 27.7 µs | g64k, 581 µs |
+| `attend3` (verify) | g16k, 54.9 µs | g64k, 1,413 µs |
+| `attend16` | g8k, 141 µs | g8k, 6,516 µs |
+| `attend64` (chunk) | g16k, 195 µs | g32k, 5,126 µs |
+
+| | this branch | 2026-11-06 (main) |
+|---|---|---|
+| TPOT / TTFT, 256-token prompt | 9.44 ms / 0.154 s | 8.70 ms / 0.15 s |
+| first token, 257-token prompt | 0.177 s | 0.17 s |
+| TPOT / TTFT, 7,680-token prompt | 9.72 ms / 4.88 s | 9.76 ms / 4.81 s |
+| TPOT / TTFT, 197,632-token prompt | 23.7 ms / 318 s | 42.9 ms / 429 s |
+| TPOT / TTFT, 261,632-token prompt | 32.7 ms / 505 s | 50.6 ms / 687 s |
+| drafts accepted at 256 / 7,680 / 197,632 / 261,632 | 70 / 71 / 79 / 62% | 76 / 75 / 61 / 67% |
+| device memory at rest | 27.9 GiB | 27.9 GiB |
+
+- **Milestone 5, missed.** The attention term of the 197,632-token first token is 200 s of GPU time (`nsys
+  --cuda-graph-trace=node`, 3,088 chunks), against at most 117 s (300 s on 2026-11-06). The full window's first token is
+  505 s, against at most 450 s (687 s).
+- **Milestone 6, missed.** The captured verify step takes 60.7 ms at 197,632 positions (attention 39.6 ms) against
+  21.9 ms at the 4,096 window (attention 1.1 ms): +38.9 ms, where the bound is about 8 ms (+73.7 on 2026-11-06).
+- **The short cells did not move.** The drafted step at 256 tokens takes 21.9 ms on both trees; TPOT reads higher here
+  because fewer drafts were accepted on these prompts, which the attention's changed numerics move.
+- **What is left is the kernels, not the pricing.** Every attention fold here runs at 255 registers with local memory
+  spills and 17% occupancy. The one-row decode at 131,072 reads 268 MB of cache in 581 µs, about 0.46 TB/s; the 64-row
+  chunk takes 5.1 ms there, where reading the cache once per query head at the card's bandwidth takes under 1 ms.
+
 ## The gates of milestones 3, 4 and 5 (2026-11-06)
 
 The gates of the parity plan's milestones 3 (the rotary store's grid), 4 (prefill ends at the prompt's last token) and 5

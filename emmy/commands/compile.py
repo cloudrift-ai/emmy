@@ -210,6 +210,7 @@ def resolve_golden_arg(args) -> None:
     the substring must name **one** kernel: a match spanning several exits 2 listing them. Exits 2 on an unknown
     name (listing the available names) or a conflict with ``--code`` / positional input / ``--ir`` / ``--dynamic``."""
     from emmy.compiler.pipeline.search.golden import GoldenFile, repository  # noqa: PLC0415
+    from emmy.compiler.specialize import rehint_program  # noqa: PLC0415
 
     name = getattr(args, "realization", None)
     golden_file = getattr(args, "golden", None)
@@ -332,7 +333,10 @@ def resolve_golden_arg(args) -> None:
     path = document.path_to(row.kernel)
     target = document.kernel(path[0].parent if path else row.kernel)
     args._golden_graph = document.executable(target, row.bindings)
-    args._golden_reference = document.reference_program(target)
+    # The Torch twin runs at the row's sizes too: its traced program may be priced at others (a kernel's identity has no
+    # sizes, so another program's row can name it).
+    reference = document.reference_program(target)
+    args._golden_reference = reference and rehint_program(reference, row.bindings)
     args._golden_document, args._golden_scope = document, list({id(other): other for other, _ in matches}.values())
     args._golden_rows = [row for _, row in matches]
     pinned = [(source, row) for source, row in matches if row.knobs or row.measured or not row.latency]
@@ -748,7 +752,7 @@ def selected_regime(args) -> dict:
         return {}
     rows = getattr(args, "_golden_rows", None)
     if rows is None and (program := getattr(args, "program", None)) is not None:
-        rows = [row for (target, _), group in document.target_rows().items() if document.kernel(target).traced == program for row in group]
+        rows = [row for (target, *_), group in document.target_rows().items() if document.kernel(target).traced == program for row in group]
     elif rows is None and (kernel := getattr(args, "kernel", None)):
         rows = [row for row in document.rows if row.kernel in document.kernel_set(kernel)]
     try:

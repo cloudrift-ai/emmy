@@ -312,15 +312,16 @@ class GoldenFile(Wire):
         return [kernel for kernel in self.kernels if kernel.traced is not None]
 
     def target_rows(self) -> dict[tuple, list[Row]]:
-        """The rows of each target kernel, by ``(target ref, sorted pins)``: a target's own rows and its pieces' rows
-        in one input regime — what one ``run --golden PATH`` realization benches, named by its shortest row name."""
+        """The rows of each target kernel, by ``(target ref, sorted pins, sorted bindings)``: a target's own rows and
+        its pieces' rows in one input regime and at one set of sizes — what one ``run --golden PATH`` realization
+        benches, named by its shortest row name."""
         targets = {kernel.ref for kernel in self.targets()}
         out: dict[tuple, list[Row]] = {}
         for row in self.rows:
             path = self.path_to(row.kernel)
             root = path[0].parent if path else row.kernel
             if root in targets:
-                out.setdefault((root, tuple(sorted(row.pins.items()))), []).append(row)
+                out.setdefault((root, tuple(sorted(row.pins.items())), tuple(sorted(row.bindings.items()))), []).append(row)
         return out
 
     def rows_of(self, name: str) -> list[Row]:
