@@ -150,7 +150,7 @@ def _job_status(result: str, success: str) -> str:
 
 
 def _nightly_summary(environment: Mapping[str, str]) -> tuple[str, str, int, list[dict[str, Any]]]:
-    results = [environment.get(f"{job}_RESULT", "") for job in ("DURATIONS", "PRIOR", "DISCOVER", "GAPS", "FILL")]
+    results = [environment.get(f"{job}_RESULT", "") for job in ("DURATIONS", "PRIOR", "DISCOVER", "GAPS", "FILL", "FREEZE")]
     if "cancelled" in results:
         title = "Nightly refresh cancelled"
         description = "The nightly refresh was cancelled before every job completed."
@@ -159,7 +159,7 @@ def _nightly_summary(environment: Mapping[str, str]) -> tuple[str, str, int, lis
         title = "Nightly refresh completed"
         description = (
             "CPU test durations, the priors and the recipe lifecycle were refreshed on main; "
-            "the compiler gaps were listed and the hardware goldens filled."
+            "the compiler gaps were listed, the hardware goldens filled and the measurement freeze realized."
         )
         color = SUCCESS_COLOR
     else:
@@ -174,6 +174,11 @@ def _nightly_summary(environment: Mapping[str, str]) -> tuple[str, str, int, lis
         summary = environment.get(f"{space.upper()}_PRIOR", "").strip()
         value = summary or _job_status(results[1], "No comparison reported; open the run.")
         fields.append({"name": f"{space.capitalize()} prior", "value": value[:FIELD_VALUE_LIMIT], "inline": False})
+    # The freeze job reports its own count whether or not every row realized; a job that never got there is described
+    # by its result.
+    freeze = environment.get("MEASUREMENT_FREEZE", "").strip()
+    value = freeze or _job_status(results[5], "No report; open the run.")
+    fields.append({"name": "Measurement freeze", "value": value[:FIELD_VALUE_LIMIT], "inline": False})
     gaps = environment.get("COMPILER_GAPS", "").strip() if results[3] == "success" else ""
     value = gaps or _job_status(results[3], "No listing reported; open the run.")
     fields.append({"name": "Compiler gaps", "value": value[:FIELD_VALUE_LIMIT], "inline": False})

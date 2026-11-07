@@ -1,7 +1,8 @@
 """``emmy golden check`` — what a restamp onto the fresh lowering of a golden's own programs would change — and
 ``emmy golden restamp``, the rewrite: a kernel takes the fresh identity and body, a row measured on a kernel whose
 body changed keeps its schedule and loses its microseconds, a kernel no fresh kernel writes is dropped with its
-rows, a decision the fresh parent no longer takes the same way goes with its pieces' rows."""
+rows, a decision the fresh parent no longer takes the same way goes with its pieces' rows. ``emmy golden realize``
+compiles every row that has a schedule under it and names the rows the compiler no longer realizes."""
 
 from __future__ import annotations
 
@@ -12,7 +13,7 @@ from dataclasses import replace
 
 import pytest
 
-from emmy.commands.golden import handle_golden_check, handle_golden_restamp
+from emmy.commands.golden import handle_golden_check, handle_golden_realize, handle_golden_restamp
 from emmy.compiler.pipeline.search.db import RoutingRow
 from emmy.compiler.pipeline.search.golden import GoldenFile, restamp
 from emmy.compiler.pipeline.search.golden.repository import _RECORDS_DIR
@@ -97,6 +98,30 @@ def test_check_fails_a_kernel_re_keyed_under_its_own_body(golden, caplog, monkey
     with caplog.at_level("ERROR"):
         assert _check(golden) == 1
     assert "re-keyed k_matmul" in caplog.text
+
+
+def _realize(path, json_out=None) -> int:
+    try:
+        handle_golden_realize(Namespace(paths=[str(path)], jobs=1, json_out=json_out))
+    except SystemExit as exc:
+        return int(exc.code)
+    return 0
+
+
+def test_realize_compiles_every_scheduled_row_and_names_the_rows_the_compiler_no_longer_realizes(golden, tmp_path, caplog):
+    """A freeze stores no program, so a restamp cannot see its rows go stale: realize compiles each row under its own
+    schedule with the file as the evidence, and a row whose schedule the lowering refuses is reported with the reason."""
+    report = tmp_path / "report.json"
+    assert _realize(golden, report) == 0
+    assert json.loads(report.read_text()) == [{"file": str(golden), "gpu_name": "NVIDIA GeForce RTX 4080", "rows": 9, "failed": []}]
+    document = GoldenFile.load(golden)
+    rows = [replace(row, knobs={**row.knobs, "TILE": "no-such-tile"}) if row.name == "matmul.square.512" else row for row in document.rows]
+    replace(document, rows=rows).dump(golden, overwrite=True)
+    with caplog.at_level("ERROR"):
+        assert _realize(golden, report) == 1
+    (failed,) = json.loads(report.read_text())[0]["failed"]
+    assert (failed["row"], failed["kernel"]) == ("matmul.square.512", "k_matmul_2967be") and "does not resolve" in failed["reason"]
+    assert "1 of 9 rows do not realize" in caplog.text and "matmul.square.512 (k_matmul_2967be)" in caplog.text
 
 
 def test_restamp_rewrites_the_golden_onto_the_fresh_lowering(golden, caplog):
