@@ -6,10 +6,11 @@
 //! under the ranges a [`SimplifyCtx`] carries; the affine form ([`affine_form`]) reads an index as anchor plus
 //! integer coefficients.
 
+use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 use std::fmt::Write as _;
 use std::hash::{Hash, Hasher};
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
 use crate::{Error, Name, Result};
 
@@ -422,6 +423,76 @@ pub enum Expr {
 /// A shared, immutable expression.
 #[derive(Clone, Debug)]
 pub struct Expression(pub Arc<Expr>);
+
+thread_local! {
+    static SIMPLIFYING: Cell<usize> = const { Cell::new(0) };
+    static DROPPING: Cell<usize> = const { Cell::new(0) };
+    static DEFERRED: RefCell<Vec<Expression>> = const { RefCell::new(Vec::new()) };
+}
+
+/// How many levels a drop unwinds before the rest of a chain is set aside for the outermost drop.
+const DROP_DEPTH: usize = 128;
+
+/// The leaf a taken child leaves behind: one shared literal.
+fn leaf() -> Expression {
+    static LEAF: OnceLock<Expression> = OnceLock::new();
+    LEAF.get_or_init(|| Expression::int(0)).clone()
+}
+
+impl Expr {
+    fn children_mut(&mut self, f: &mut dyn FnMut(&mut Expression)) {
+        match self {
+            Expr::Var(_) | Expr::Literal(_) | Expr::Builtin(_) => {}
+            Expr::Binary(_, left, right) => {
+                f(left);
+                f(right);
+            }
+            Expr::Ternary(a, b, c) => {
+                f(a);
+                f(b);
+                f(c);
+            }
+            Expr::Cast(_, inner) => f(inner),
+            Expr::Call(_, args) | Expr::FlatIndex(_, args) => {
+                if let Some(items) = Arc::get_mut(args) {
+                    items.iter_mut().for_each(f);
+                }
+            }
+        }
+    }
+}
+
+impl Drop for Expression {
+    /// A chain of nested expressions drops level by level: a node dropped `DROP_DEPTH` levels down sets its
+    /// children aside, and the outermost drop takes them up once it has unwound, so no chain overflows the stack.
+    fn drop(&mut self) {
+        if Arc::strong_count(&self.0) != 1 {
+            return;
+        }
+        let Some(node) = Arc::get_mut(&mut self.0) else {
+            return;
+        };
+        if matches!(node, Expr::Var(_) | Expr::Literal(_) | Expr::Builtin(_)) {
+            return;
+        }
+        let depth = DROPPING.with(Cell::get);
+        if depth >= DROP_DEPTH {
+            DEFERRED.with(|deferred| {
+                let mut deferred = deferred.borrow_mut();
+                node.children_mut(&mut |child| deferred.push(std::mem::replace(child, leaf())));
+            });
+            return;
+        }
+        DROPPING.with(|d| d.set(depth + 1));
+        node.children_mut(&mut |child| drop(std::mem::replace(child, leaf())));
+        DROPPING.with(|d| d.set(depth));
+        if depth == 0 {
+            while let Some(expression) = DEFERRED.with(|deferred| deferred.borrow_mut().pop()) {
+                drop(expression);
+            }
+        }
+    }
+}
 
 impl PartialEq for Expression {
     fn eq(&self, other: &Self) -> bool {
@@ -981,6 +1052,19 @@ impl Expression {
     /// Bottom-up rewrite: constant-fold literals, drop algebraic identities, collapse static comparisons. Pure and
     /// idempotent.
     pub fn simplify(&self, ctx: &SimplifyCtx) -> Result<Expression> {
+        let depth = SIMPLIFYING.with(Cell::get);
+        if depth >= MAX_NESTING {
+            return Err(Error::Value(
+                "the expression nests too deep to simplify".into(),
+            ));
+        }
+        SIMPLIFYING.with(|d| d.set(depth + 1));
+        let result = self.simplify_node(ctx);
+        SIMPLIFYING.with(|d| d.set(depth));
+        result
+    }
+
+    fn simplify_node(&self, ctx: &SimplifyCtx) -> Result<Expression> {
         match &**self {
             Expr::Var(_) | Expr::Literal(_) | Expr::Builtin(_) => Ok(self.clone()),
             Expr::Binary(op, left, right) => simplify_binary(self, *op, left, right, ctx),
@@ -1142,6 +1226,31 @@ pub use simplify::*;
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn chain(depth: usize) -> Expression {
+        let mut chain = Expression::var("a");
+        for _ in 0..depth {
+            chain = Expression::binary(BinOp::Add, chain, Expression::int(1));
+        }
+        chain
+    }
+
+    #[test]
+    fn a_chain_too_deep_to_simplify_is_refused() {
+        assert!(chain(200_000).simplify(&SimplifyCtx::empty()).is_err());
+    }
+
+    #[test]
+    fn a_deep_chain_drops_without_recursion() {
+        drop(chain(200_000));
+    }
+
+    #[test]
+    fn a_text_nesting_too_deep_is_refused() {
+        let nested = format!("{}a{}", "(".repeat(5000), ")".repeat(5000));
+        assert!(parse(&nested).is_err());
+        assert!(parse(&format!("{}a{}", "(".repeat(50), ")".repeat(50))).is_ok());
+    }
 
     #[test]
     fn integer_rewrites_decline_rather_than_overflow() {

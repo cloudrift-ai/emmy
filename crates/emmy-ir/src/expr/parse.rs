@@ -33,7 +33,11 @@ pub struct Parser {
     pub text: String,
     pub tokens: Vec<Token>,
     pub index: usize,
+    depth: usize,
 }
+
+/// How deep an expression may nest before the reader refuses it, so a pathological text cannot exhaust the stack.
+pub const MAX_NESTING: usize = 256;
 
 impl Parser {
     /// Tokenize `text` with the expression punctuation plus `extra` (longest first where one starts another).
@@ -151,6 +155,7 @@ impl Parser {
             text: text.to_string(),
             tokens,
             index: 0,
+            depth: 0,
         })
     }
 
@@ -212,6 +217,16 @@ impl Parser {
     }
 
     pub fn expression(&mut self) -> Result<Expression> {
+        if self.depth >= MAX_NESTING {
+            return Err(self.error("the expression nests too deep"));
+        }
+        self.depth += 1;
+        let result = self.nested_expression();
+        self.depth -= 1;
+        result
+    }
+
+    fn nested_expression(&mut self) -> Result<Expression> {
         let cond = self.binary(1)?;
         if !self.accept("?") {
             return Ok(cond);
