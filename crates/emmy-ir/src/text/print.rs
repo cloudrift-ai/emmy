@@ -198,10 +198,7 @@ pub fn lines(stmt: &Statement, indent: &str, out: &mut Vec<String>) -> Result<()
                 Some(end) => format!(" until {}", end.try_text()?),
                 None => String::new(),
             };
-            let step = match &s.step {
-                NumOr::Num(n) => spell_number(n.as_f64()),
-                NumOr::Value(e) => e.try_text()?,
-            };
+            let step = s.step.try_text()?;
             let start = s.start.try_text()?;
             // The window follows the extent, so spell the axis without it and add it after the step.
             let bare = Axis {

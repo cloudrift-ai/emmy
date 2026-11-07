@@ -1,71 +1,7 @@
-"""Unit tests for IndexMapOp + coord_expression helpers."""
+"""Unit tests for IndexMapOp."""
 
-from emmy.compiler.ir.expression import (
-    PLACEHOLDER_PREFIX,
-    BinaryExpression,
-    Literal,
-    TernaryExpression,
-    Var,
-    is_placeholder,
-    placeholder,
-)
+from emmy.compiler.ir.expression import PLACEHOLDER_PREFIX, Literal, placeholder
 from emmy.compiler.ir.tensor.ir import IndexMapOp, IndexSource
-
-# ---------- placeholder helpers ----------
-
-
-def test_placeholder_uses_prefix():
-    assert placeholder(0).name == f"{PLACEHOLDER_PREFIX}0"
-    assert placeholder(3).name == f"{PLACEHOLDER_PREFIX}3"
-
-
-def test_is_placeholder_unbound():
-    assert is_placeholder(placeholder(0))
-    assert is_placeholder(placeholder(7))
-    assert not is_placeholder(Var("row"))
-
-
-def test_is_placeholder_specific_axis():
-    assert is_placeholder(placeholder(2), d=2)
-    assert not is_placeholder(placeholder(2), d=3)
-
-
-# ---------- substitute ----------
-
-
-def test_substitute_replaces_var():
-    expression = placeholder(0)
-    result = expression.substitute({placeholder(0).name: Var("row")})
-    assert isinstance(result, Var) and result.name == "row"
-
-
-def test_substitute_passes_unmapped_vars():
-    expression = placeholder(1)
-    result = expression.substitute({placeholder(0).name: Var("row")})
-    assert isinstance(result, Var) and result.name == placeholder(1).name
-
-
-def test_substitute_leaves_literal_alone():
-    expression = Literal(5, "int")
-    assert expression.substitute({}) == expression
-
-
-def test_substitute_rewrites_binop():
-    expression = placeholder(0) + Literal(7, "int")
-    result = expression.substitute({placeholder(0).name: Var("row")})
-    assert isinstance(result, BinaryExpression) and result.op == "+"
-    assert isinstance(result.left, Var) and result.left.name == "row"
-    assert isinstance(result.right, Literal) and result.right.value == 7
-
-
-def test_substitute_rewrites_ternary():
-    cond = placeholder(0).lt(Literal(64, "int"))
-    expression = TernaryExpression(cond, placeholder(0), placeholder(0) - Literal(64, "int"))
-    result = expression.substitute({placeholder(0).name: Var("col")})
-    assert isinstance(result, TernaryExpression)
-    assert isinstance(result.if_true, Var) and result.if_true.name == "col"
-    assert isinstance(result.if_false, BinaryExpression) and result.if_false.op == "-"
-
 
 # ---------- IndexMapOp.is_identity ----------
 

@@ -1571,4 +1571,100 @@ mod tests {
         let e = parse("i / 2 * 2 + i % 2").unwrap().simplify(&ctx).unwrap();
         assert_eq!(e.text(), "i");
     }
+
+    #[test]
+    fn a_name_holding_a_backtick_has_no_text() {
+        let err = Expression::var("a`b").try_text().unwrap_err();
+        assert!(
+            matches!(&err, Error::Value(message) if message.contains("no spelling")),
+            "{err}"
+        );
+    }
+
+    fn var_name(e: &Expression) -> Option<&str> {
+        e.as_var().map(|name| &**name)
+    }
+
+    /// The mapping that sends the placeholder of axis `d` to the variable `to`.
+    fn placeholder_to(d: usize, to: &str) -> HashMap<Name, Expression> {
+        HashMap::from([(
+            Name::from(format!("{PLACEHOLDER_PREFIX}{d}")),
+            Expression::var(to),
+        )])
+    }
+
+    #[test]
+    fn a_placeholder_is_named_by_the_prefix() {
+        assert_eq!(
+            var_name(&Expression::placeholder(0)),
+            Some(format!("{PLACEHOLDER_PREFIX}0").as_str())
+        );
+        assert_eq!(
+            var_name(&Expression::placeholder(3)),
+            Some(format!("{PLACEHOLDER_PREFIX}3").as_str())
+        );
+    }
+
+    #[test]
+    fn with_no_axis_every_placeholder_is_one_and_another_name_is_not() {
+        assert!(Expression::placeholder(0).is_placeholder(None));
+        assert!(Expression::placeholder(7).is_placeholder(None));
+        assert!(!Expression::var("row").is_placeholder(None));
+    }
+
+    #[test]
+    fn with_an_axis_only_that_axis_placeholder_is_one() {
+        assert!(Expression::placeholder(2).is_placeholder(Some(2)));
+        assert!(!Expression::placeholder(2).is_placeholder(Some(3)));
+    }
+
+    #[test]
+    fn substitute_replaces_a_variable() {
+        let result = Expression::placeholder(0).substitute(&placeholder_to(0, "row"));
+        assert_eq!(var_name(&result), Some("row"));
+    }
+
+    #[test]
+    fn substitute_passes_an_unmapped_variable() {
+        let result = Expression::placeholder(1).substitute(&placeholder_to(0, "row"));
+        assert_eq!(
+            var_name(&result),
+            Some(format!("{PLACEHOLDER_PREFIX}1").as_str())
+        );
+    }
+
+    #[test]
+    fn substitute_leaves_a_literal_alone() {
+        let e = Expression::int(5);
+        assert_eq!(e.substitute(&HashMap::new()), e);
+    }
+
+    #[test]
+    fn substitute_rewrites_a_binary_expression() {
+        let e = Expression::binary(BinOp::Add, Expression::placeholder(0), Expression::int(7));
+        let result = e.substitute(&placeholder_to(0, "row"));
+        let Expr::Binary(op, left, right) = &*result else {
+            panic!("not a binary expression: {result}");
+        };
+        assert_eq!(*op, BinOp::Add);
+        assert_eq!(var_name(left), Some("row"));
+        assert_eq!(right.literal_value(), Some(Num::Int(7)));
+    }
+
+    #[test]
+    fn substitute_rewrites_a_ternary() {
+        let p0 = Expression::placeholder(0);
+        let cond = Expression::binary(BinOp::Lt, p0.clone(), Expression::int(64));
+        let wrapped = Expression::binary(BinOp::Sub, p0.clone(), Expression::int(64));
+        let e = Expression::new(Expr::Ternary(cond, p0, wrapped));
+        let result = e.substitute(&placeholder_to(0, "col"));
+        let Expr::Ternary(_, if_true, if_false) = &*result else {
+            panic!("not a ternary: {result}");
+        };
+        assert_eq!(var_name(if_true), Some("col"));
+        assert!(
+            matches!(&**if_false, Expr::Binary(BinOp::Sub, ..)),
+            "{if_false}"
+        );
+    }
 }

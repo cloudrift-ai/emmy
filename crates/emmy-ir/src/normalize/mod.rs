@@ -169,6 +169,27 @@ mod tests {
     use crate::text::{body_text, parse_body};
 
     #[test]
+    fn a_body_that_holds_a_call_has_no_normal_form() {
+        let given = parse_body(
+            "sub project(row in 0..3, col in 0..8) -> sum:
+    for k in 0..16:
+        xv = load x[row, k]
+        wv = load weight[col, k]
+        product = multiply(xv, wv)
+        sum <- add(sum, product) over k
+for k in 0..3:
+    for c in 0..8:
+        left = call project[x, weight](k, c)
+        right = call project[x, weight](k, (c + 4) % 8)
+        value = add(left, right)
+        out[k, c] = value",
+        )
+        .unwrap();
+        let error = normalize_body(&given).unwrap_err().to_string();
+        assert!(error.contains("no normal form"), "{error}");
+    }
+
+    #[test]
     fn a_normal_form_is_freed_with_its_body() {
         let body = parse_body("x = load X[a]\nO[a] = x").unwrap();
         let normal = normalize_body(&body).unwrap();

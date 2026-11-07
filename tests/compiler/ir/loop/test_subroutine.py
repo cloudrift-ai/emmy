@@ -69,11 +69,6 @@ def test_full_cse_crosses_distinct_definitions_and_tile_lift():
     assert len(tile.loop_body.accums) == 1
 
 
-def test_a_body_that_holds_a_call_has_no_normal_form():
-    with pytest.raises(ValueError, match="no normal form"):
-        normalize_body(_body(4))
-
-
 def test_outlining_preserves_inline_identity():
     """Equivalent outlining affects neither the exact identity nor the compute-unit-clustered one."""
     compact = _body(4)
@@ -90,17 +85,6 @@ def test_outlining_preserves_inline_identity():
     inlined, expanded = compact.map(inline), expand_calls(compact)
     for structural in (False, True):
         assert expanded.identity(structural=structural).key == inlined.identity(structural=structural).key
-
-
-def test_a_compact_body_prints_a_shared_definition_once_and_reads_back():
-    rendered = str(_body(4))
-    assert rendered.count("sub project(row in 0..3, col in 0..8) -> sum:") == 1
-    assert "left = call project[x, weight](k, c)" in rendered
-    assert "right = call project[x, weight](k," in rendered
-    assert len(rendered.splitlines()) < 18
-    back = parse_body(rendered)
-    assert str(back) == rendered
-    assert len(definitions(back)) == 1
 
 
 def test_buffer_renaming_preserves_shared_definitions():

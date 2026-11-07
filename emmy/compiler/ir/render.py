@@ -1272,7 +1272,7 @@ def _(stmt: StridedLoop, ctx: RenderCtx) -> list[str]:
             ctx.ssa_dtypes[s.name] = (s.dtype or F32).name
     var = stmt.axis.name
     start_str = render_expression(stmt.start, ctx)
-    step_str = render_expression(stmt.step, ctx) if isinstance(stmt.step, Expression) else str(stmt.step)
+    step_str = render_expression(stmt.step, ctx)
     # ``_extent_c`` renders a symbolic bound (a cooperative reduce over a dynamic
     # ``seq_len`` strides each lane to the runtime extent — the ``< seq_len`` bound is the
     # masked tail, idle lanes folding the carrier identity) as the C name, a static one as
@@ -1288,9 +1288,9 @@ def _(stmt: StridedLoop, ctx: RenderCtx) -> list[str]:
     else:
         out.append(f"{pad}for (int {var} = {start_str}; {var} < {_extent_c(stmt.axis, ctx)}; {var} += {step_str}) {{")
     inner = ctx.child()
-    if isinstance(stmt.start, Literal) and isinstance(stmt.step, Literal | int):
-        step = stmt.step.value if isinstance(stmt.step, Literal) else stmt.step
-        if isinstance(stmt.start.value, int) and isinstance(step, int) and (stride := math.gcd(stmt.start.value, step)):
+    if isinstance(stmt.start, Literal) and isinstance(stmt.step, Literal):
+        start, step = stmt.start.value, stmt.step.value
+        if isinstance(start, int) and isinstance(step, int) and (stride := math.gcd(start, step)):
             inner.aligned[var] = stride
     out.extend(render_body(stmt.body, inner))
     out.append(f"{pad}}}")

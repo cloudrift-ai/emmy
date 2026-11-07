@@ -406,3 +406,133 @@ pub fn parse(text: &str) -> Result<Expression> {
     }
     Ok(expression)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn var(name: &str) -> Expression {
+        Expression::var(name)
+    }
+
+    fn int(value: i64) -> Expression {
+        Expression::int(value)
+    }
+
+    fn float(value: f64) -> Expression {
+        Expression::float(value)
+    }
+
+    fn binary(op: &str, left: Expression, right: Expression) -> Expression {
+        Expression::binary(BinOp::parse(op).unwrap(), left, right)
+    }
+
+    fn ternary(cond: Expression, if_true: Expression, if_false: Expression) -> Expression {
+        Expression::new(Expr::Ternary(cond, if_true, if_false))
+    }
+
+    fn cast(dtype: &str, inner: Expression) -> Expression {
+        Expression::new(Expr::Cast(dtype.into(), inner))
+    }
+
+    fn flat_index(buffer: &str, index: Vec<Expression>) -> Expression {
+        Expression::new(Expr::FlatIndex(buffer.into(), index.into()))
+    }
+
+    #[test]
+    fn every_expression_kind_prints_its_text_and_reads_back() {
+        let cases = [
+            (var("s"), "s"),
+            (
+                Expression::new(Expr::Builtin("thread_idx.x".into())),
+                "thread_idx.x",
+            ),
+            (int(3), "3"),
+            (int(-1), "-1"),
+            (float(0.5), "0.5"),
+            (Expression::literal(Num::Int(2), LitType::Float), "2.0"),
+            (float(1e-05), "1e-05"),
+            (Expression::literal(Num::Bool(true), LitType::Bool), "true"),
+            (binary("+", var("s"), int(2)), "s + 2"),
+            (binary("+", var("a1"), int(-1)), "a1 + -1"),
+            (
+                binary(
+                    "+",
+                    binary("*", binary("/", var("a5"), int(128)), int(128)),
+                    var("a6"),
+                ),
+                "a5 / 128 * 128 + a6",
+            ),
+            (
+                binary("-", var("a"), binary("-", var("b"), var("c"))),
+                "a - (b - c)",
+            ),
+            (
+                binary("*", binary("+", var("a"), var("b")), var("c")),
+                "(a + b) * c",
+            ),
+            (
+                binary("^", var("a"), binary("+", var("b"), var("c"))),
+                "a ^ b + c",
+            ),
+            (
+                binary("+", binary("^", var("a"), var("b")), var("c")),
+                "(a ^ b) + c",
+            ),
+            (
+                binary("&", var("a"), binary("*", var("b"), var("c"))),
+                "a & b * c",
+            ),
+            (
+                binary("*", binary("&", var("a"), var("b")), var("c")),
+                "(a & b) * c",
+            ),
+            (binary("//", var("a"), int(2)), "a // 2"),
+            (
+                Expression::new(Expr::Call(
+                    "maximum".into(),
+                    vec![var("x"), float(0.0)].into(),
+                )),
+                "maximum(x, 0.0)",
+            ),
+            (ternary(var("p"), int(1), int(0)), "p ? 1 : 0"),
+            (
+                binary("+", ternary(var("p"), var("a"), var("b")), int(1)),
+                "(p ? a : b) + 1",
+            ),
+            (cast("int", var("x")), "(int)x"),
+            (cast("int", binary("+", var("x"), int(1))), "(int)(x + 1)"),
+            (cast("int", int(-1)), "(int)(-1)"),
+            (float(f64::NEG_INFINITY), "-inf"),
+            (binary("*", var("x"), float(f64::INFINITY)), "x * inf"),
+            (
+                flat_index("w", vec![var("a0"), binary("+", var("a1"), int(1))]),
+                "w[a0, a1 + 1]",
+            ),
+            (
+                binary("+", flat_index("w", vec![var("a0")]), int(4)),
+                "w[a0] + 4",
+            ),
+            (var("$0"), "`$0`"),
+            (var("thread_idx.x"), "`thread_idx.x`"),
+            (var("true"), "`true`"),
+            (
+                flat_index("model.layers.0.weight", vec![int(0)]),
+                "`model.layers.0.weight`[0]",
+            ),
+        ];
+        for (expression, text) in cases {
+            assert_eq!(expression.try_text().unwrap(), text);
+            assert_eq!(parse(text).unwrap(), expression, "{text}");
+        }
+    }
+
+    #[test]
+    fn a_parse_error_names_its_position() {
+        let err = parse("a + * b").unwrap_err();
+        assert!(
+            matches!(&err, Error::Value(message) if message.contains("position 4")),
+            "{err}"
+        );
+    }
+}

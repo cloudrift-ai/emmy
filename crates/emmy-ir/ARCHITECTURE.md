@@ -48,8 +48,8 @@ child module takes its parent's imports.
   that is one answers, every other field's default is none. A test pins the digest of the declaration list, the names
   and field orders every stored text spells.
 - **Fields** (`kinds/field.rs`): one trait, `Field`, every field type implements: how it is visited and rewritten by role,
-  spelled on a declared kind's header and read back by its `Ty`. A number where a name or an expression is expected
-  (`NumOr<T>`) is plain data. A record (`SelectBranch`, `FragmentArg`) is declared in the same list with a layer of
+  spelled on a declared kind's header and read back by its `Ty`. A number where a name is expected (`NumOr<T>`, a
+  carry's literal seed) is plain data. A record (`SelectBranch`, `FragmentArg`) is declared in the same list with a layer of
   its own, a struct whose own fields play roles and a `Field` of the kind that holds it.
 - **Axes** (`kinds/axis.rs`): `Axis` (name, `Dim`, window), equal by name and extent as the Python class is; the window is
   provenance. The Python `Axis`, `Dim`, `DataType` and `ElementwiseImpl` objects stay Python classes: a statement holds

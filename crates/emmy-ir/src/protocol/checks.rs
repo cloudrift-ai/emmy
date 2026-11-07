@@ -132,3 +132,52 @@ pub fn finished(stmt: Statement) -> Result<Statement> {
         other => other,
     })
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::Name;
+    use crate::text::parse_statement;
+
+    /// A wgmma cell over eight C fragments at m64n64k16, its A operand named by `a_operand`.
+    fn cell(a_operand: &str) -> WgmmaMma {
+        let stmt = parse_statement(&format!(
+            "WgmmaMma(c_frags=(c0, c1, c2, c3, c4, c5, c6, c7), b_desc=bD, shape=(64, 64, 16), {a_operand})"
+        ))
+        .unwrap();
+        <&WgmmaMma>::try_from(&*stmt).unwrap().clone()
+    }
+
+    /// What the constructor's checks refuse `cell` with: a value error's message.
+    fn refusal(cell: WgmmaMma) -> String {
+        match finished(Statement::WgmmaMma(cell)) {
+            Err(Error::Value(message)) => message,
+            other => panic!("not refused with a value error: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn the_cell_rejects_malformed_operands() {
+        let both = WgmmaMma {
+            a_frag: Some("a".into()),
+            ..cell("a_desc=aD")
+        };
+        assert!(refusal(both).contains("exactly one of a_desc / a_frag"));
+        let sixteen = WgmmaMma {
+            c_frags: (0..16).map(|j| Name::from(format!("c{j}"))).collect(),
+            ..cell("a_desc=aD")
+        };
+        assert!(refusal(sixteen).contains("8 m16n8 C fragments"));
+        let transposed = WgmmaMma {
+            trans_a: 1,
+            ..cell("a_frag=a")
+        };
+        assert!(refusal(transposed).contains("K-major"));
+        let mma_sync = WgmmaMma {
+            c_frags: Names::from([Name::from("c0")]),
+            shape: Shape3(16, 8, 16),
+            ..cell("a_desc=aD")
+        };
+        assert!(refusal(mma_sync).contains("m64n"));
+    }
+}

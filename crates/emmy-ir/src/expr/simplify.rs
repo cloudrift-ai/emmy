@@ -624,3 +624,51 @@ pub fn index_set_size(
     }
     Some(total)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// `(f * coeff) <op> divisor`.
+    fn scaled(op: BinOp, coeff: i64, divisor: i64) -> Expression {
+        let product = Expression::binary(BinOp::Mul, Expression::var("f"), Expression::int(coeff));
+        Expression::binary(op, product, Expression::int(divisor))
+    }
+
+    fn at(e: &Expression, f: i64) -> Num {
+        e.eval(&HashMap::from([(Name::from("f"), Num::Int(f))]))
+            .unwrap()
+    }
+
+    /// `(c·x) % (c·y)` is `c·(x % y)`: the common factor scales the remainder, it does not vanish.
+    #[test]
+    fn the_modulo_factor_cancel_keeps_the_value() {
+        for (coeff, modulus) in [(8, 64), (2, 4), (3, 6), (4, 16), (16, 128), (2, 8), (5, 10)] {
+            let e = scaled(BinOp::Mod, coeff, modulus);
+            let s = e.simplify(&SimplifyCtx::empty()).unwrap();
+            for v in 0..256 {
+                assert_eq!(at(&e, v), at(&s, v), "mismatch at f={v}: {e} vs {s}");
+            }
+        }
+    }
+
+    /// The shape that broke vectorized cp.async: `(f*8) % 64` is `8 * (f % 8)`, not `f % 8`.
+    #[test]
+    fn the_modulo_factor_cancel_keeps_the_common_factor() {
+        let s = scaled(BinOp::Mod, 8, 64)
+            .simplify(&SimplifyCtx::empty())
+            .unwrap();
+        assert_eq!(at(&s, 1), Num::Int(8));
+        assert_eq!(at(&s, 9), Num::Int(8));
+    }
+
+    /// Division cancels the factor outright: `(f*8) / 64 == f / 8`.
+    #[test]
+    fn the_division_factor_cancel_keeps_the_value() {
+        let e = scaled(BinOp::Div, 8, 64);
+        let s = e.simplify(&SimplifyCtx::empty()).unwrap();
+        for v in 0..256 {
+            assert_eq!(at(&e, v), at(&s, v), "mismatch at f={v}: {e} vs {s}");
+        }
+    }
+}

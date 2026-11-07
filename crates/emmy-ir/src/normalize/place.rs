@@ -478,6 +478,7 @@ pub fn place_values(body: &Body) -> Result<Body> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::normalize::normalize_body;
     use crate::normalize::testing::*;
 
     fn placed(text: &str) -> Body {
@@ -487,6 +488,24 @@ mod tests {
     fn unchanged(text: &str) {
         let given = body(text);
         assert_eq!(place_values(&given).unwrap(), given, "{text}");
+    }
+
+    /// What the whole driver leaves of `text`.
+    fn normalized(text: &str) -> Body {
+        normalize_body(&body(text)).unwrap()
+    }
+
+    /// The normal form of a fresh body of `out`'s statements, which no cache on `out` answers.
+    fn renormalized(out: &Body) -> Body {
+        normalize_body(&Body::new(out.stmts().to_vec())).unwrap()
+    }
+
+    /// The one value a scalar write stores.
+    fn written(stmt: &Statement) -> &Name {
+        match stmt {
+            Statement::Write(write) if write.values.len() == 1 => &write.values[0],
+            _ => panic!("not a scalar write: {}", stmt.kind()),
+        }
     }
 
     /// The first name of every load in the tree, pre-order.
@@ -1019,5 +1038,196 @@ mod tests {
             unreachable!()
         };
         assert_eq!(strs(&read.args), ["acc1", "acc1"]);
+    }
+
+    #[test]
+    fn normalization_dedups_loads_and_rewires_gather_indices() {
+        let out = normalized(
+            "
+            for a in 0..4:
+                idx0 = load indices[a]
+                idx1 = load indices[a]
+                x0 = load values[idx0]
+                x1 = load values[idx1]
+                sum = add(x0, x1)
+                out[a] = sum
+            ",
+        );
+        assert_eq!(out.len(), 1, "{}", text(&out));
+        let looped = inner(&out.stmts()[0]);
+        let loads: Vec<String> = looped
+            .stmts()
+            .iter()
+            .filter(|stmt| matches!(&***stmt, Statement::Load(_)))
+            .map(stmt_text)
+            .collect();
+        assert_eq!(loads, ["in0 = load indices[a0]", "in1 = load values[in0]"]);
+        assert_eq!(stmt_text(&looped.stmts()[looped.len() - 2]), "v0 = 2*in1");
+    }
+
+    #[test]
+    fn normalization_keeps_the_values_of_hoisted_shadowed_loads() {
+        // Motion preserves lexical bindings before CSE merges equal loads.
+        for inner_input in ["x", "y"] {
+            let out = normalized(&format!(
+                "
+                value = load x[0]
+                for i in 0..4:
+                    value = load {inner_input}[0]
+                    inner[i] = value
+                outer[0] = value
+                "
+            ));
+            let loads: HashMap<Name, Name> = out
+                .stmts()
+                .iter()
+                .filter_map(|stmt| match &**stmt {
+                    Statement::Load(load) => Some((load.names[0].clone(), load.input.clone())),
+                    _ => None,
+                })
+                .collect();
+            let writes: HashMap<Name, Name> = out
+                .writes()
+                .iter()
+                .filter_map(|here| match &**here.stmt() {
+                    Statement::Write(write) => Some((write.output.clone(), written(here).clone())),
+                    _ => None,
+                })
+                .collect();
+            assert_eq!(&*loads[&writes["outer"]], "x");
+            assert_eq!(&*loads[&writes["inner"]], inner_input);
+            assert_eq!(loads.len(), if inner_input == "x" { 1 } else { 2 });
+            assert_eq!(renormalized(&out), out);
+        }
+    }
+
+    #[test]
+    fn normalization_closes_simplification_cse_and_invariant_motion() {
+        // An equal gather index exposes a constant predicate, then an invariant shared cone.
+        let out = normalized(
+            "
+            x = load x[0]
+            for i in 0..4:
+                a = load indices[i]
+                b = load indices[i]
+                s = select:
+                    x when a - b < 1
+                    a when 1
+                v = exp(s)
+                out[i] = v
+            ",
+        );
+        assert!(
+            out.stmts()
+                .iter()
+                .any(|stmt| matches!(&**stmt, Statement::Assign(a) if &*a.op.name == "exp")),
+            "{}",
+            text(&out)
+        );
+        assert_eq!(renormalized(&out), out);
+    }
+
+    #[test]
+    fn cse_factors_common_branch_cones_without_speculation() {
+        let branch = |prefix: &str, extra: &str| {
+            indented(&format!(
+                "{prefix}i = load indices[0]\n{prefix}x = load x[{prefix}i]\n{prefix}v = exp({prefix}x)\n\
+                 {prefix}only = load {extra}[0]\n{prefix}out = add({prefix}v, {prefix}only)\nout[0] = {prefix}out"
+            ))
+        };
+        let out = normalized(&format!(
+            "if predicate:\n{}\nelse:\n{}",
+            branch("a", "left"),
+            branch("b", "right")
+        ));
+        assert_eq!(
+            kinds(&out),
+            ["Load", "Load", "Assign", "Cond"],
+            "{}",
+            text(&out)
+        );
+        let Statement::Assign(shared) = &*out.stmts()[2] else {
+            unreachable!()
+        };
+        assert_eq!(&*shared.op.name, "exp");
+        for arm in out.stmts()[3].nested() {
+            assert_eq!(kinds(&arm), ["Load", "Affine", "Write"]);
+            let Statement::Affine(sum) = &*arm.stmts()[1] else {
+                unreachable!()
+            };
+            assert!(sum.args.contains(&shared.name));
+        }
+        assert_eq!(renormalized(&out), out);
+    }
+
+    #[test]
+    fn normalized_quotient_addresses_fuse_and_share_the_whole_reduction() {
+        let reduction = |axis: &str, name: &str, nested: bool| {
+            let index = if nested {
+                format!("{axis} / 128 / 2")
+            } else {
+                format!("{axis} / 256")
+            };
+            format!(
+                "for {axis} in 0..1024:\n    {name}x = load x[{index}]\n    {name}v = exp({name}x)\n    \
+                 {name} <- add({name}, {name}v) over {axis}"
+            )
+        };
+        let out = normalized(&format!(
+            "{}\n{}\nout[0] = right\nother[0] = left",
+            reduction("i", "left", true),
+            reduction("j", "right", false)
+        ));
+        assert_eq!(out.loads().len(), 1, "{}", text(&out));
+        assert_eq!(out.accums().len(), 1);
+        assert_eq!(out.loops().len(), 1);
+        let n = out.len();
+        assert_eq!(written(&out.stmts()[n - 1]), written(&out.stmts()[n - 2]));
+        assert_eq!(renormalized(&out), out);
+    }
+
+    #[test]
+    fn normalization_dedups_identical_accumulations() {
+        // Two consumers of one fused value carry two copies of its accumulation in one reduce loop after the splice;
+        // the second is the first under another name.
+        let out = normalized(
+            "
+            for m in 0..4:
+                for k in 0..8:
+                    x0 = load x[m, k]
+                    w0 = load w[k]
+                    p0 = multiply(x0, w0)
+                    acc0 <- add(acc0, p0) over k
+                    x1 = load x[m, k]
+                    w1 = load w[k]
+                    p1 = multiply(x1, w1)
+                    acc1 <- add(acc1, p1) over k
+                gate = exp(acc0)
+                up = exp(acc1)
+                out = multiply(gate, up)
+                out[m] = out
+            ",
+        );
+        assert_eq!(out.len(), 1, "{}", text(&out));
+        let outer = inner(&out.stmts()[0]);
+        let reduces: Vec<&Arc<Statement>> = outer
+            .stmts()
+            .iter()
+            .filter(|stmt| matches!(&***stmt, Statement::Loop(_)))
+            .collect();
+        let [reduce] = reduces[..] else {
+            panic!("one reduce loop: {}", text(&out))
+        };
+        assert_eq!(kinds(&inner(reduce)), ["Load", "Load", "Assign", "Accum"]);
+        let product = outer
+            .stmts()
+            .iter()
+            .filter_map(|stmt| match &**stmt {
+                Statement::Assign(assign) => Some(assign),
+                _ => None,
+            })
+            .next_back()
+            .unwrap();
+        assert_eq!(strs(&product.args), ["v1", "v1"]);
     }
 }
