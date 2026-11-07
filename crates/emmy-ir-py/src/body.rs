@@ -1,11 +1,12 @@
 //! `Body`, `Subroutine` and `Cone` as Python classes, and the module's functions over bodies and statements.
 
 use std::collections::{HashMap, HashSet};
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::{Arc, Mutex, Once, OnceLock};
 
 use emmy_ir::Name;
 use emmy_ir::body::{Body, StmtRef, Subroutine, exposed_defines, free_names};
 use emmy_ir::kinds::Statement;
+use emmy_ir::memo::{Stats, Store};
 use emmy_ir::text::{body_lines, body_text, parse_body as parse_body_text};
 use pyo3::exceptions::{PyIndexError, PyTypeError, PyValueError};
 use pyo3::prelude::*;
@@ -22,26 +23,46 @@ use crate::statement::{PyStatement, kind_of, statements_from_py, wrap_statement}
 /// Python object. An entry outlives its body only until the next purge.
 type Wrappers = Arc<[OnceLock<Py<PyAny>>]>;
 
+/// How many entries a table grows by between two purges of its dead ones.
+const PURGE_EVERY: usize = 1024;
+
 /// A table of per-object state on this side of the boundary, keyed by the shared object's address while it lives:
 /// a body's statement wrappers, a subroutine's one Python object. An entry outlives its object only until the next
-/// purge.
+/// purge, every `PURGE_EVERY` inserts or from the memo registry's `clear_all`; the table is listed there with the
+/// memos, so it is inspected and purged from the same place, though it is not bounded (a live object keeps its one
+/// wrapper).
 struct Tables<T, V> {
+    name: &'static str,
     entries: HashMap<usize, (std::sync::Weak<T>, V)>,
+    hits: u64,
+    misses: u64,
 }
 
 impl<T, V> Tables<T, V> {
-    fn new() -> Tables<T, V> {
+    fn new(name: &'static str) -> Tables<T, V> {
         Tables {
+            name,
             entries: HashMap::new(),
+            hits: 0,
+            misses: 0,
         }
     }
 
-    fn get<R>(&self, object: &Arc<T>, read: impl FnOnce(&V) -> R) -> Option<R> {
-        let (alive, value) = self.entries.get(&(Arc::as_ptr(object) as usize))?;
-        alive
-            .upgrade()
-            .filter(|found| Arc::ptr_eq(found, object))
-            .map(|_| read(value))
+    fn get<R>(&mut self, object: &Arc<T>, read: impl FnOnce(&V) -> R) -> Option<R> {
+        let found = self
+            .entries
+            .get(&(Arc::as_ptr(object) as usize))
+            .and_then(|(alive, value)| {
+                alive
+                    .upgrade()
+                    .filter(|found| Arc::ptr_eq(found, object))
+                    .map(|_| read(value))
+            });
+        match found {
+            Some(_) => self.hits += 1,
+            None => self.misses += 1,
+        }
+        found
     }
 
     /// Remember `value` for `object`: the value a dead object at the same address left, for the caller to drop
@@ -54,7 +75,7 @@ impl<T, V> Tables<T, V> {
                 (Arc::downgrade(object), value),
             )
             .map(|(_, old)| old);
-        (old, self.entries.len().is_multiple_of(1024))
+        (old, self.entries.len().is_multiple_of(PURGE_EVERY))
     }
 
     /// The values of every entry whose object is gone, removed from the table.
@@ -68,9 +89,9 @@ impl<T, V> Tables<T, V> {
 
 /// Drop the dead entries of `tables`, outside its lock: a value may hold Python objects whose finalizers come back
 /// here, and the objects it held may have kept other entries alive, so the purge runs again while it frees any.
-fn purge<T, V>(tables: &Mutex<Tables<T, V>>) {
+fn purge<T, V>(table: &Table<T, V>) {
     loop {
-        let dead = emmy_ir::locked(tables).dead();
+        let dead = table.lock().dead();
         if dead.is_empty() {
             return;
         }
@@ -78,10 +99,52 @@ fn purge<T, V>(tables: &Mutex<Tables<T, V>>) {
     }
 }
 
-static WRAPPERS: OnceLock<Mutex<Tables<emmy_ir::body::BodyData, Wrappers>>> = OnceLock::new();
+/// A table behind its lock: what the statics hold and the memo registry lists.
+struct Table<T, V>(Mutex<Tables<T, V>>);
+
+impl<T, V> Table<T, V> {
+    fn lock(&self) -> std::sync::MutexGuard<'_, Tables<T, V>> {
+        emmy_ir::locked(&self.0)
+    }
+}
+
+impl<T: Send + Sync, V: Send> Store for Table<T, V> {
+    fn stats(&self) -> Stats {
+        let tables = self.lock();
+        Stats {
+            name: tables.name,
+            entries: tables.entries.len(),
+            capacity: None,
+            hits: tables.hits,
+            misses: tables.misses,
+        }
+    }
+
+    fn clear(&self) {
+        purge(self);
+    }
+}
+
+/// The one table under `cell`, built under `name` on first use and listed in the memo registry once.
+fn tables<T: Send + Sync + 'static, V: Send + 'static>(
+    cell: &'static OnceLock<Table<T, V>>,
+    listed: &'static Once,
+    name: &'static str,
+) -> &'static Table<T, V> {
+    let tables = cell.get_or_init(|| Table(Mutex::new(Tables::new(name))));
+    listed.call_once(|| emmy_ir::memo::register(tables));
+    tables
+}
+
+static WRAPPERS: OnceLock<Table<emmy_ir::body::BodyData, Wrappers>> = OnceLock::new();
+static WRAPPERS_LISTED: Once = Once::new();
+
+fn wrapper_tables() -> &'static Table<emmy_ir::body::BodyData, Wrappers> {
+    tables(&WRAPPERS, &WRAPPERS_LISTED, "statement_wrappers")
+}
 
 fn wrappers(body: &Body) -> Wrappers {
-    let mut tables = emmy_ir::locked(WRAPPERS.get_or_init(|| Mutex::new(Tables::new())));
+    let mut tables = wrapper_tables().lock();
     if let Some(table) = tables.get(&body.0, Wrappers::clone) {
         return table;
     }
@@ -90,7 +153,7 @@ fn wrappers(body: &Body) -> Wrappers {
     drop(tables);
     drop(old);
     if due {
-        purge(WRAPPERS.get_or_init(|| Mutex::new(Tables::new())));
+        purge(wrapper_tables());
     }
     table
 }
@@ -642,17 +705,19 @@ pub struct PySubroutine {
 }
 
 /// The weak reference to each subroutine's one Python object, keyed by the subroutine's address while it lives.
-static SUBROUTINES: OnceLock<Mutex<Tables<Subroutine, Py<PyAny>>>> = OnceLock::new();
+static SUBROUTINES: OnceLock<Table<Subroutine, Py<PyAny>>> = OnceLock::new();
+static SUBROUTINES_LISTED: Once = Once::new();
 
-fn subroutines() -> &'static Mutex<Tables<Subroutine, Py<PyAny>>> {
-    SUBROUTINES.get_or_init(|| Mutex::new(Tables::new()))
+fn subroutines() -> &'static Table<Subroutine, Py<PyAny>> {
+    tables(&SUBROUTINES, &SUBROUTINES_LISTED, "subroutine_wrappers")
 }
 
 impl PySubroutine {
     /// The one Python object of `sub` while any reference to it lives.
     pub fn wrap<'py>(py: Python<'py>, sub: &Arc<Subroutine>) -> PyResult<Bound<'py, PySubroutine>> {
-        let remembered =
-            emmy_ir::locked(subroutines()).get(sub, |reference| reference.clone_ref(py));
+        let remembered = subroutines()
+            .lock()
+            .get(sub, |reference| reference.clone_ref(py));
         if let Some(reference) = remembered {
             let alive = reference.bind(py).call0()?;
             if let Ok(found) = alive.cast::<PySubroutine>() {
@@ -667,7 +732,7 @@ impl PySubroutine {
             },
         )?;
         let reference = py.import("weakref")?.getattr("ref")?.call1((&wrapper,))?;
-        let (old, due) = emmy_ir::locked(subroutines()).insert(sub, reference.unbind());
+        let (old, due) = subroutines().lock().insert(sub, reference.unbind());
         drop(old);
         if due {
             purge(subroutines());
@@ -945,5 +1010,31 @@ pub fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(mask_select_predicate, m)?)?;
     m.add_function(wrap_pyfunction!(ordering_constraints, m)?)?;
     m.add_function(wrap_pyfunction!(dtype_promote, m)?)?;
+    m.add_function(wrap_pyfunction!(clear_memos, m)?)?;
+    m.add_function(wrap_pyfunction!(memo_stats, m)?)?;
     Ok(())
+}
+
+/// Forget every memoized normal form and identity and purge the wrapper tables: what a test worker or a process
+/// pool does to start clean.
+#[pyfunction]
+fn clear_memos() {
+    emmy_ir::memo::clear_all();
+}
+
+/// Every memo's figures: a list of dicts with `name`, `entries`, `capacity` (None for an unbounded table), `hits`
+/// and `misses`.
+#[pyfunction]
+fn memo_stats<'py>(py: Python<'py>) -> PyResult<Bound<'py, PyList>> {
+    let out = PyList::empty(py);
+    for stats in emmy_ir::memo::stats() {
+        let item = PyDict::new(py);
+        item.set_item("name", stats.name)?;
+        item.set_item("entries", stats.entries)?;
+        item.set_item("capacity", stats.capacity)?;
+        item.set_item("hits", stats.hits)?;
+        item.set_item("misses", stats.misses)?;
+        out.append(item)?;
+    }
+    Ok(out)
 }

@@ -14,7 +14,7 @@ use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
-use crate::body::{Body, Normalized, Subroutine, exposed_defines, free_names, loop_parts, unique};
+use crate::body::{Body, Subroutine, exposed_defines, free_names, loop_parts, unique};
 use crate::expr::{Expr, Expression};
 use crate::kinds::axis::Axis;
 use crate::kinds::field::{AxisRef, Rewriter, SubroutineRef, Visitor};
@@ -735,7 +735,7 @@ impl Body {
             return self.clone();
         }
         // An injective spelling-only rename keeps the normal form a body is its own.
-        if matches!(self.0.normalized.get(), Some(Normalized::Itself)) {
+        if self.is_normal() {
             let resources: Vec<Name> = unique(
                 self.iter_stmts()
                     .iter()
@@ -746,7 +746,7 @@ impl Body {
                 .map(|name| mapping.get(name).cloned().unwrap_or_else(|| name.clone()))
                 .collect();
             if renamed.len() == resources.len() {
-                let _ = result.0.normalized.set(Normalized::Itself);
+                result.mark_normal();
             }
         }
         result

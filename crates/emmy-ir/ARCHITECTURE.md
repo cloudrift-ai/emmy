@@ -22,8 +22,8 @@ protocol in `mod.rs`, what the shared kinds answer beyond their fields in `kinds
 `key.rs`, the value numbering in `values.rs`, the scope-tree digest in `digest.rs`), `normalize/` (the driver and the
 helpers the steps share in `mod.rs`, the steps by what they do: `axes`, `fold`, `siblings`, `simplify`, `place`,
 `canonical`, and every tie-break in `ties.rs`), `identity.rs` (the identity of a body's normal form) and `memo.rs`,
-the one bounded memo both the normal form and the identity are kept in. Every file imports what it uses by name; no
-child module takes its parent's imports.
+the memo store every memo is declared in. Every file imports what it uses by name; no child module takes its
+parent's imports.
 
 ## Data
 
@@ -96,9 +96,23 @@ canonical and independent of the input order like the full search's, but not alw
 over the corpus and the golden check are what shows no stored kernel's order moved. `identity.rs` memoizes the
 identity per body and per coloring. `normalize/` holds the steps and the driver `normalize_body`; `canonical_order`
 and `place_values` are the two steps that read the numbering, and the order ranks a product's operands through the
-statement objects it permuted. Both memos are `memo::Memo`, keyed by the body's text under its content hash and
-bounded by entry count: body equality leaves the axis windows out, the text spells them, and a window is identity
-material.
+statement objects it permuted.
+
+## Memos
+
+What a process remembers across bodies is a `memo::Memo`, declared with the `memo!` macro that names its capacity in
+entries (`normal_forms` in the normalization driver, `identities` in `identity.rs`, both 16,384) and lists it in one
+registry, so every memo is inspected (entries, hits, misses) and cleared from one place (`memo::stats`,
+`memo::clear_all`; `emmy_ir.memo_stats()` and `emmy_ir.clear_memos()` in Python, for a test worker or a process pool
+that starts clean). The caches are `quick_cache`'s: bounded by entry count, sharded so no lock is held across a
+computation, evicting by its S3-FIFO policy, and one asker computes a missing value while a second asker of the same
+key waits for it. A memo's key is the body's exact form, `body::Exact`: equal when the statements are and every axis
+is exactly, hint and window included, which body equality leaves out, with a hash computed once and kept with the
+body; no key is a printed text. A body also keeps the one normal form it was given (`normal_form`,
+`remember_normal_form`, `is_normal`, `mark_normal` in `body.rs`), so a body normalized twice costs one lookup and a
+protocol rewrite that keeps a normal form says so through that API. The extension's wrapper tables (a body's
+statement wrappers, a subroutine's one Python object) are listed in the same registry: not bounded, since a live
+object keeps its one wrapper, but purged of dead entries every 1,024 inserts and on `clear_all`.
 
 The canonical order decides what the digest leaves open, and the lift of a body into terms reads that order: sibling
 regions are addressed by position in every recorded cut decision, and a product's operand order is its orientation

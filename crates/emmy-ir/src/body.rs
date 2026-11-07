@@ -6,8 +6,8 @@ use std::collections::{HashMap, HashSet};
 use std::hash::{Hash, Hasher};
 use std::sync::{Arc, Mutex, OnceLock};
 
-use crate::kinds::field::{Axes, Names};
-use crate::kinds::{Kind, Statement};
+use crate::kinds::field::{Axes, AxisRef, Names, Visitor};
+use crate::kinds::{Kind, Roles, Statement};
 use crate::{Error, Name, Result, infallible, locked};
 
 /// What `Body::map` applies: a statement to the statements that replace it, or `None` to drop it.
@@ -81,15 +81,47 @@ pub struct BodyData {
     axis_names: OnceLock<HashSet<Name>>,
     ssa_uses: OnceLock<HashSet<Name>>,
     by_kind: Mutex<HashMap<Vec<Kind>, Vec<StmtRef>>>,
-    pub(crate) normalized: OnceLock<Normalized>,
+    exact: OnceLock<u64>,
+    normalized: OnceLock<Normalized>,
 }
 
 /// What a body knows of its normal form once it was taken: that it is its own, or which body it is. Never the body's
 /// own `Arc`, which would keep it alive forever.
 #[derive(Clone)]
-pub(crate) enum Normalized {
+enum Normalized {
     Itself,
     Other(Body),
+}
+
+/// A body as a memo key: equal to another when the statements are equal and every axis is exactly, hint and window
+/// included, which body equality leaves out (a window is provenance to the body and identity material to what the
+/// memos keep). The hash is computed once and kept with the body, so no key is a printed text.
+#[derive(Clone, Debug)]
+pub struct Exact(pub Body);
+
+impl PartialEq for Exact {
+    fn eq(&self, other: &Exact) -> bool {
+        if self.0.ptr_eq(&other.0) {
+            return true;
+        }
+        if self.0.exact_hash() != other.0.exact_hash() || self.0 != other.0 {
+            return false;
+        }
+        let (mine, theirs) = (self.0.axes(), other.0.axes());
+        mine.len() == theirs.len()
+            && mine
+                .iter()
+                .zip(theirs.iter())
+                .all(|(a, b)| Arc::ptr_eq(a, b) || a.exact_eq(b.as_ref()))
+    }
+}
+
+impl Eq for Exact {}
+
+impl Hash for Exact {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        self.0.exact_hash().hash(state);
+    }
 }
 
 /// An immutable sequence of statements. Two bodies with equal statements are equal and hash alike; a slice or a
@@ -151,8 +183,70 @@ impl Body {
             axis_names: OnceLock::new(),
             ssa_uses: OnceLock::new(),
             by_kind: Mutex::new(HashMap::new()),
+            exact: OnceLock::new(),
             normalized: OnceLock::new(),
         }))
+    }
+
+    /// Every axis a statement of this subtree holds, in field order: what the exact key compares beyond equality.
+    fn axes(&self) -> Vec<AxisRef> {
+        struct Collect(Vec<AxisRef>);
+        impl Visitor for Collect {
+            fn axis(&mut self, _roles: Roles, axis: &AxisRef) {
+                self.0.push(axis.clone());
+            }
+            fn body(&mut self, _roles: Roles, body: &Body) {
+                for stmt in body.stmts() {
+                    stmt.visit(self);
+                }
+            }
+            fn carried(&mut self, _roles: Roles, stmt: &Arc<Statement>) {
+                stmt.visit(self);
+            }
+        }
+        let mut collect = Collect(Vec::new());
+        for stmt in self.stmts() {
+            stmt.visit(&mut collect);
+        }
+        collect.0
+    }
+
+    /// The hash of the exact form: the content hash with every axis's hint and window, computed once.
+    pub fn exact_hash(&self) -> u64 {
+        *self.0.exact.get_or_init(|| {
+            let mut hasher = std::collections::hash_map::DefaultHasher::new();
+            self.0.hash.hash(&mut hasher);
+            for axis in self.axes() {
+                axis.exact_hash(&mut hasher);
+            }
+            hasher.finish()
+        })
+    }
+
+    /// The normal form this body already knows: itself, or the body normalization gave it.
+    pub(crate) fn normal_form(&self) -> Option<Body> {
+        self.0.normalized.get().map(|normal| match normal {
+            Normalized::Itself => self.clone(),
+            Normalized::Other(normal) => normal.clone(),
+        })
+    }
+
+    /// Remember `normal` as this body's normal form, and `normal` as its own.
+    pub(crate) fn remember_normal_form(&self, normal: &Body) {
+        normal.mark_normal();
+        if !normal.ptr_eq(self) {
+            let _ = self.0.normalized.set(Normalized::Other(normal.clone()));
+        }
+    }
+
+    /// Whether this body is known to be its own normal form.
+    pub(crate) fn is_normal(&self) -> bool {
+        matches!(self.0.normalized.get(), Some(Normalized::Itself))
+    }
+
+    /// Record that this body is its own normal form.
+    pub(crate) fn mark_normal(&self) {
+        let _ = self.0.normalized.set(Normalized::Itself);
     }
 
     pub fn from_statements(stmts: impl IntoIterator<Item = Statement>) -> Body {
@@ -987,6 +1081,24 @@ mod tests {
         );
         let (_, external) = given.backward_cone(&roots(&["v"]));
         assert!(strs(&external).contains(&"n"));
+    }
+
+    #[test]
+    fn the_exact_key_tells_apart_what_body_equality_does_not() {
+        let plain = parse_body("for i in 0..n:\n    x = load X[i]\n    O[i] = x").unwrap();
+        let hinted = parse_body("for i in 0..n~128:\n    x = load X[i]\n    O[i] = x").unwrap();
+        let windowed =
+            parse_body("for i in 0..n window(parent=j in 0..m):\n    x = load X[i]\n    O[i] = x")
+                .unwrap();
+        let again = parse_body("for i in 0..n:\n    x = load X[i]\n    O[i] = x").unwrap();
+        assert_eq!(plain, hinted, "a hint is no part of body equality");
+        assert_eq!(plain, windowed, "a window is no part of body equality");
+        assert_eq!(Exact(plain.clone()), Exact(again.clone()));
+        assert_eq!(plain.exact_hash(), again.exact_hash());
+        assert_ne!(Exact(plain.clone()), Exact(hinted.clone()));
+        assert_ne!(plain.exact_hash(), hinted.exact_hash());
+        assert_ne!(Exact(plain.clone()), Exact(windowed.clone()));
+        assert_ne!(plain.exact_hash(), windowed.exact_hash());
     }
 
     #[test]

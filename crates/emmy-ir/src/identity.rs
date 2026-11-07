@@ -2,19 +2,14 @@
 //! its use instead of its spelling, and the roles its buffers fill.
 
 use std::collections::HashMap;
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::Arc;
 
-use crate::body::Body;
+use crate::body::{Body, Exact};
 use crate::kinds::elementwise::Op;
 use crate::kinds::{Assign, Statement};
-use crate::memo::Memo;
 use crate::normalize::normalize_body;
 use crate::numbering::{digest, hex};
-use crate::text::body_text;
-use crate::{Name, Result, locked};
-
-/// How many identities the process keeps: a cut's arms lower the same pieces again and again.
-const MEMO_SIZE: usize = 16384;
+use crate::{Name, Result, memo};
 
 /// What an identity was computed under: the clustered reading or the exact one, and each buffer's color.
 #[derive(Clone, PartialEq, Eq, Hash, Debug)]
@@ -58,14 +53,10 @@ fn canonicalize_op_clusters(body: &Body) -> Body {
     })
 }
 
-/// The identities of the bodies met in this process, per coloring.
-fn identities() -> &'static Mutex<Memo<(u64, IdentityKey), Identity>> {
-    static MEMO: OnceLock<Mutex<Memo<(u64, IdentityKey), Identity>>> = OnceLock::new();
-    MEMO.get_or_init(|| Mutex::new(Memo::new(MEMO_SIZE)))
-}
-
-pub fn clear_memo() {
-    locked(identities()).clear();
+memo! {
+    /// The identities of the normal forms met in this process, per coloring: a cut's arms lower the same pieces
+    /// again and again.
+    pub fn identities() -> Memo<(Exact, IdentityKey), Identity> [capacity = 16_384]
 }
 
 /// Key the normal form of `body`, optionally with operations collapsed to compute-unit clusters. `colors` types
@@ -89,19 +80,13 @@ pub fn canonicalize_identity(
         cluster,
         colors: colors_key,
     };
-    let memo_key = (stmts.content_hash(), key.clone());
-    let text = body_text(&stmts)?;
-    let remembered = locked(identities()).get(&memo_key, &text);
-    if let Some(identity) = remembered {
-        return Ok(identity);
-    }
-    let (tree, arguments) = digest(&stmts, colors);
-    let identity = Identity {
-        key: hex(tree),
-        arguments,
-    };
-    locked(identities()).put(memo_key, text, identity.clone());
-    Ok(identity)
+    identities().get_or_try_insert(&(Exact(stmts.clone()), key), || {
+        let (tree, arguments) = digest(&stmts, colors);
+        Ok(Identity {
+            key: hex(tree),
+            arguments,
+        })
+    })
 }
 
 #[cfg(test)]
