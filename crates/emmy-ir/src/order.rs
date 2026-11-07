@@ -171,22 +171,6 @@ mod tests {
     use crate::normalize::{normalize_body, normalize_uncached};
 
     /// Every order of `items`.
-    fn permutations<T: Clone>(items: &[T]) -> Vec<Vec<T>> {
-        if items.is_empty() {
-            return vec![Vec::new()];
-        }
-        (0..items.len())
-            .flat_map(|index| {
-                let mut rest = items.to_vec();
-                let first = rest.remove(index);
-                permutations(&rest).into_iter().map(move |mut tail| {
-                    tail.insert(0, first.clone());
-                    tail
-                })
-            })
-            .collect()
-    }
-
     #[test]
     fn every_order_of_a_small_body_normalizes_to_one_form() {
         let statements = body(
@@ -334,5 +318,117 @@ mod tests {
             })
             .collect();
         assert_eq!(keys.len(), 1);
+    }
+
+    fn structural_key(given: &Body) -> String {
+        canonicalize_identity(given, true, None).unwrap().key
+    }
+
+    fn exact_key(given: &Body) -> String {
+        canonicalize_identity(given, false, None).unwrap().key
+    }
+
+    #[test]
+    fn a_repeated_definition_is_captured_from_its_nearest_predecessor() {
+        let make = |name: &str, inner: &str, result: &str, late_before_capture: bool| {
+            let capture = format!("if true:\n    {inner} = abs({name})\n    P[] = {inner}\n");
+            let second = format!("{name} = load B[]\n");
+            let middle = if late_before_capture {
+                format!("{second}{capture}")
+            } else {
+                format!("{capture}{second}")
+            };
+            body(&format!(
+                "{name} = load A[]\n{middle}{result} = exp({name})\nO[] = {result}"
+            ))
+        };
+        let before = normalize_body(&make("value", "inside", "result", false)).unwrap();
+        let renamed =
+            normalize_body(&make("renamed", "renamed_inside", "renamed_result", false)).unwrap();
+        let after = normalize_body(&make("value", "inside", "result", true)).unwrap();
+        assert_eq!(text(&before), text(&renamed));
+        assert_ne!(text(&before), text(&after));
+    }
+
+    #[test]
+    fn a_shadowing_after_the_read_keeps_the_outer_dependency() {
+        // A deeper scope's rebind of a name binds nothing read above it: the block still depends on the enclosing
+        // definition, so it cannot sort above it.
+        let given = body(
+            "if true:\n    y = abs(x)\n    if true:\n        let x = 2.0\n        P[] = x\n    O[] = y\nx = load X[]",
+        );
+        let normal = text(&normalize_body(&given).unwrap());
+        let mut lines = normal.lines();
+        let (first, second) = (lines.next().unwrap(), lines.next().unwrap());
+        assert!(first.ends_with(" = load X[]"), "{normal}");
+        assert!(second.starts_with("if "), "{normal}");
+    }
+
+    /// A small deterministic generator, so the property runs the same every time.
+    struct Lcg(u64);
+
+    impl Lcg {
+        fn next(&mut self, bound: usize) -> usize {
+            self.0 = self
+                .0
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            ((self.0 >> 33) % bound as u64) as usize
+        }
+    }
+
+    #[test]
+    fn the_structural_key_is_invariant_under_random_renaming_and_reordering() {
+        // Seeded property check: independent load/compute/write chains keyed under every interleaving and spelling.
+        // The relation graph never reads a spelling or a source position.
+        let chains = |seed: u64, shuffle: bool| -> Body {
+            let mut rng = Lcg(seed);
+            let mut loops: Vec<String> = (0..4)
+                .map(|chain| {
+                    let prefix = if shuffle {
+                        format!("c{chain}_")
+                    } else {
+                        format!("r{}_", rng.next(1000))
+                    };
+                    let op = ["abs", "exp", "negative"][chain % 3];
+                    format!(
+                        "for {prefix}i in 0..4:\n    {prefix}x = load {prefix}X[{prefix}i]\n    {prefix}y = {op}({prefix}x)\n    {prefix}O[{prefix}i] = {prefix}y"
+                    )
+                })
+                .collect();
+            if shuffle {
+                for index in (1..loops.len()).rev() {
+                    loops.swap(index, rng.next(index + 1));
+                }
+            }
+            body(&loops.join("\n"))
+        };
+        let keys: HashSet<String> = (0..12u64)
+            .flat_map(|seed| [false, true].map(|shuffle| structural_key(&chains(seed, shuffle))))
+            .collect();
+        assert_eq!(keys.len(), 1);
+    }
+
+    #[test]
+    fn the_identity_ignores_a_buffer_spelling_that_reorders_the_executable_body() {
+        // The executable order breaks symmetric ties by buffer spelling; identity labels the same graph without it,
+        // so a rename that flips the executable order keys the same.
+        let make = |left: &str, right: &str| {
+            body(&format!(
+                "x = load {left}[]\ny = load {right}[]\nz = add(x, y)\nO[] = z"
+            ))
+        };
+        let left_leads = |given: &Body, left: &str| {
+            text(given)
+                .lines()
+                .next()
+                .unwrap()
+                .ends_with(&format!(" = load {left}[]"))
+        };
+        let first = normalize_body(&make("X", "Y")).unwrap();
+        let second = normalize_body(&make("z_input", "a_input")).unwrap();
+        assert_ne!(left_leads(&first, "X"), left_leads(&second, "z_input"));
+        assert_eq!(structural_key(&first), structural_key(&second));
+        assert_eq!(exact_key(&first), exact_key(&second));
     }
 }

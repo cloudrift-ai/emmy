@@ -1234,6 +1234,7 @@ pub use simplify::*;
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::normalize::testing::eval_int;
 
     fn chain(depth: usize) -> Expression {
         let mut chain = Expression::var("a");
@@ -1264,14 +1265,6 @@ mod tests {
 
     fn int(text: &str) -> Expression {
         parse(text).unwrap()
-    }
-
-    fn eval_int(e: &Expression, env: &[(&str, i64)]) -> i64 {
-        let env: HashMap<Name, Num> = env
-            .iter()
-            .map(|(name, value)| (Name::from(*name), Num::Int(*value)))
-            .collect();
-        e.eval(&env).unwrap().as_int().unwrap()
     }
 
     /// `n*K + k` over the packed-weight ranges: the unpacked element offset the packed address is built from.

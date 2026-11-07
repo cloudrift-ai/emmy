@@ -12,7 +12,7 @@ import emmy.compiler.ir.stmt as stmt_pkg
 from emmy.compiler.dtype import F32
 from emmy.compiler.ir.axis import Axis
 from emmy.compiler.ir.elementwise import ElementwiseImpl
-from emmy.compiler.ir.expression import BinaryExpression, Literal, Var
+from emmy.compiler.ir.expression import BinaryExpression, Expression, Literal, Var
 from emmy.compiler.ir.kernel import ir as kernel_ir
 from emmy.compiler.ir.stmt import (
     Accum,
@@ -163,6 +163,79 @@ def test_a_statement_read_through_two_wrappers_of_one_body_is_one_object() -> No
     assert first == second and [stmt for stmt in first] == [stmt for stmt in second]
     assert all(a is b for a, b in zip(first, second, strict=True))
     assert first[0] is first[0] and first[-1].nested() == second[-1].nested()
+
+
+def test_a_kind_holds_its_elementwise_operation_as_op() -> None:
+    """The clustered identity reads a statement's operation by the name ``op``, in every layer: what the Python getter
+    hands back is the operation object."""
+    held = [
+        (type(stmt).__name__, name)
+        for stmt in _ALL_EXAMPLES
+        for name in fields_of(type(stmt))
+        if isinstance(getattr(stmt, name), ElementwiseImpl)
+    ]
+    assert {kind for kind, _ in held} >= {"Assign", "Accum"} and {name for _, name in held} == {"op"}
+
+
+def test_a_number_in_a_role_field_is_plain_data() -> None:
+    """A bare number given for an expression is an integer literal when it is one; a literal seed is no buffer."""
+    loop = StridedLoop(_K, Var("t"), 4, (Load(("x",), "a", (Var("k"),)),))
+    assert loop.step == Literal(4, "int") and str(loop).splitlines()[0] == "for k in t..8 step 4:"
+    assert loop.expressions() == (Var("t"), Literal(4, "int")) and loop.rewrite(lambda name: f"{name}_").step == Literal(4, "int")
+    carry = Carry("state", "value", (Var("i"),), 0.5)
+    assert carry.external_reads() == () and carry.rename_buffers({"state": "other"}) is carry
+    assert carry.replace(seed="init").external_reads() == ("init",)
+
+
+@pytest.mark.parametrize("stmt", _ALL_EXAMPLES, ids=lambda stmt: type(stmt).__name__)
+def test_a_statement_rebuilds_as_itself(stmt) -> None:
+    """Every rebuilding member, given what its reading half returned, gives back an equal statement, and a map that
+    changes nothing gives back the object."""
+    assert stmt.rewrite(lambda name: name) == stmt
+    assert stmt.with_bodies(stmt.nested()) == stmt
+    assert stmt.map_expressions(lambda expression: expression) is stmt
+    assert stmt.rename_buffers({}) == stmt
+
+
+def _held_expressions(value, child_bodies=()) -> list:
+    """Every expression a statement holds in its fields, found by reflection: the check on what ``expressions`` reports.
+    A child body's expressions are its own statements'; any other statement a kind holds is part of it."""
+    if isinstance(value, Expression):
+        return [value]
+    if isinstance(value, (tuple, list, Body)) and not any(value is body for body in child_bodies):
+        return [expression for item in value for expression in _held_expressions(item)]
+    if isinstance(value, (Statement, SelectBranch, kernel_ir.FragmentArg)):
+        nested = value.nested() if isinstance(value, Statement) else ()
+        return [expression for name in fields_of(type(value)) for expression in _held_expressions(getattr(value, name), nested)]
+    return []
+
+
+@pytest.mark.parametrize("stmt", _ALL_EXAMPLES, ids=lambda stmt: type(stmt).__name__)
+def test_an_expression_map_reaches_every_expression_a_statement_holds(stmt) -> None:
+    """``expressions`` lists every expression of the statement and ``map_expressions`` calls the Python function on
+    each one in that order."""
+    held = _held_expressions(stmt)
+    assert sorted(map(repr, stmt.expressions())) == sorted(map(repr, held))
+    markers = tuple(Var(f"e{index}") for index in range(len(held)))
+    fresh = iter(markers)
+    mapped = stmt.map_expressions(lambda _expression: next(fresh))
+    assert tuple(mapped.expressions()) == markers
+    assert sorted(map(repr, _held_expressions(mapped))) == sorted(map(repr, markers))
+    back = iter(stmt.expressions())
+    assert mapped.map_expressions(lambda _expression: next(back)) == stmt
+
+
+def test_an_error_in_an_expression_map_reaches_the_caller() -> None:
+    class Marker(Exception):
+        pass
+
+    def fail(_expression):
+        raise Marker("from the callback")
+
+    with pytest.raises(Marker, match="from the callback"):
+        parse_body("x = load a[i]")[0].map_expressions(fail)
+    with pytest.raises(Marker, match="from the callback"):
+        parse_body("x = load a[i]").map(lambda stmt: stmt.map_expressions(fail))
 
 
 def test_every_kind_reads_back_from_its_text_and_lists_its_fields() -> None:

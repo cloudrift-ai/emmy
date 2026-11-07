@@ -223,18 +223,6 @@ fn frozenset<'py>(
     PyFrozenSet::new(py, names.iter().map(|name| PyString::new(py, name)))
 }
 
-fn incoming_from_py(value: &Bound<'_, PyAny>) -> PyResult<Vec<HashSet<usize>>> {
-    value
-        .try_iter()?
-        .map(|sources| {
-            sources?
-                .try_iter()?
-                .map(|source| source?.extract::<usize>())
-                .collect()
-        })
-        .collect()
-}
-
 #[pymethods]
 impl PyBody {
     #[new]
@@ -410,35 +398,6 @@ impl PyBody {
         PyBody::wrap(slf.py(), &result)
     }
 
-    /// Kahn's order over indexed predecessor sets, as source indices.
-    fn _topological_permutation(&self, incoming: &Bound<'_, PyAny>) -> PyResult<Vec<usize>> {
-        Ok(self
-            .body
-            .topological_permutation::<()>(&incoming_from_py(incoming)?, None))
-    }
-
-    /// This body in topological order under `incoming`.
-    #[pyo3(signature = (incoming, tie_break = None))]
-    fn topological_order<'py>(
-        slf: &Bound<'py, Self>,
-        incoming: &Bound<'py, PyAny>,
-        tie_break: Option<&Bound<'py, PyAny>>,
-    ) -> PyResult<Bound<'py, PyBody>> {
-        if tie_break.is_some_and(|t| !t.is_none()) {
-            return Err(PyTypeError::new_err(
-                "topological_order takes no tie-break; the canonical order is normalization's",
-            ));
-        }
-        let ordered = slf
-            .get()
-            .body
-            .topological_order(&incoming_from_py(incoming)?);
-        if ordered.ptr_eq(&slf.get().body) {
-            return Ok(slf.clone());
-        }
-        PyBody::wrap(slf.py(), &ordered)
-    }
-
     /// Shared SSA definitions assembled once and adjacent independent reduction loops merged.
     fn coalesce<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyBody>> {
         PyBody::wrap(py, &self.body.coalesce())
@@ -466,12 +425,6 @@ impl PyBody {
     #[getter]
     fn _local_defs<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyFrozenSet>> {
         frozenset(py, self.body.local_defs().iter().cloned())
-    }
-
-    /// SSA reads from the enclosing scope, excluding this scope's definitions and exported states.
-    #[getter]
-    fn _free_ssa<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyFrozenSet>> {
-        frozenset(py, self.body.free_ssa().iter().cloned())
     }
 
     #[getter]
