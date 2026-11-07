@@ -1,11 +1,14 @@
 //! The simplifier: folds literals, drops algebraic identities and decides static comparisons under the ranges a
 //! [`SimplifyCtx`] carries; the affine form reads an index as anchor plus integer coefficients.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::HashMap;
+use std::hash::Hash;
 use std::sync::Arc;
 
-use super::*;
-use crate::Result;
+use super::{BinOp, Expr, Expression, Lit, LitType, Num, apply_binop};
+use crate::{Name, Result};
+
+use std::collections::BTreeMap;
 
 // --- the simplifier's helpers ---------------------------------------------------------------------
 

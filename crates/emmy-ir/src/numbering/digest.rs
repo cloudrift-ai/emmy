@@ -1,6 +1,13 @@
 //! The identity: the scope-tree hash over a numbering, with the buffers and carried states keyed by use.
 
-use super::*;
+use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
+
+use super::{Key, Number, Numbering, hash_parts, value_numbers};
+use crate::body::{Body, StmtRef};
+use crate::kinds::axis::spell_axis;
+use crate::order::ordering_constraints;
+use crate::{Name, locked};
 
 /// Per member of `body`, the members it must follow for an effect and not for a value.
 pub fn effect_order(body: &Body) -> Vec<HashSet<usize>> {

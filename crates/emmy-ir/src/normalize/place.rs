@@ -1,7 +1,15 @@
 //! Placement: every pure value once, at the shallowest scope on its consumers' path, and the free-name aliasing it
 //! rests on.
 
-use super::*;
+use std::collections::{BTreeSet, HashMap, HashSet};
+use std::sync::Arc;
+
+use super::with_bodies;
+use crate::body::{Body, free_names};
+use crate::kinds::*;
+use crate::numbering::{Number, Numbering, Param, value_numbers};
+use crate::order::is_protocol;
+use crate::{Name, Result};
 
 // --- placement -----------------------------------------------------------------------------------------------
 

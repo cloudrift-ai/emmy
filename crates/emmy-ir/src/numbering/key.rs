@@ -1,6 +1,9 @@
 //! Digest material: the `Key` tree every number, parameter and tie is spelled in, and its hash.
 
-use super::*;
+use std::sync::Arc;
+
+use crate::Name;
+use crate::expr::Num;
 
 /// Digest material: a tree of primitives, hashed to a number and ordered totally.
 #[derive(Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Debug)]

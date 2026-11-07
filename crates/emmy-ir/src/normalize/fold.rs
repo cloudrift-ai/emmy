@@ -1,7 +1,19 @@
 //! The folds: a select whose branches bind one value, an operation over literals, a value nothing reads, and a sum
 //! into one `Affine` statement.
 
-use super::*;
+use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
+
+use super::{assign, with_bodies};
+use crate::Name;
+use crate::body::Body;
+use crate::expr::Expression;
+use crate::kinds::dtype::{is_float, promote};
+use crate::kinds::elementwise::evaluate_f32;
+use crate::kinds::field::{DType, Float, Names};
+use crate::kinds::*;
+use crate::numbering::Key;
+use crate::protocol::literal_binding;
 
 // --- folds ----------------------------------------------------------------------------------------------
 

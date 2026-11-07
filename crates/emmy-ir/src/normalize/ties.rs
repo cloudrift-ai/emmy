@@ -189,9 +189,17 @@ pub(crate) fn operand_ranks(
         .collect();
     let mut cone = HashMap::new();
     cone_sizes(result, &mut cone);
+    // The order permuted the numbered body's statements without rebuilding them, so a placed statement is the
+    // numbered one it shares its object with, while both bodies live.
+    let numbered: HashMap<*const Statement, usize> = numbering
+        .refs
+        .iter()
+        .enumerate()
+        .map(|(ordinal, here)| (Arc::as_ptr(here.stmt()), ordinal))
+        .collect();
     let mut operand: HashMap<Name, Key> = HashMap::new();
-    for (before, after) in placed.iter_refs().iter().zip(result.iter_stmts()) {
-        if let Some(ordinal) = numbering.ordinal_of(before)
+    for (before, after) in placed.iter_stmts().iter().zip(result.iter_stmts()) {
+        if let Some(&ordinal) = numbered.get(&Arc::as_ptr(before))
             && let Some((number, params)) = &numbering.numbers[ordinal]
         {
             let rank = match &*after {

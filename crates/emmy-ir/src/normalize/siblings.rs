@@ -1,6 +1,15 @@
 //! Sibling reduce loops: reduce-axis names unified where load positions overlap, and loops over one axis merged.
 
-use super::*;
+use std::collections::{BTreeSet, HashMap, HashSet};
+use std::sync::Arc;
+
+use super::with_bodies;
+use crate::Name;
+use crate::body::{Body, exposed_defines, free_names};
+use crate::expr::{Expression, SimplifyCtx, affine_form};
+use crate::kinds::axis::{Axis, Dim};
+use crate::kinds::*;
+use crate::numbering::Key;
 
 // --- sibling reduce loops ---------------------------------------------------------------------------------
 
@@ -271,6 +280,7 @@ pub fn merge_sibling_reduce_loops(body: &Body) -> Body {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::normalize::normalize_body;
     use crate::normalize::testing::*;
 
     fn lines<S: AsRef<str>>(parts: &[S]) -> String {

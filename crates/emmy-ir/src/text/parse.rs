@@ -1,6 +1,16 @@
 //! The reader: the lines of a body back to the body, an error naming its line.
 
-use super::*;
+use std::collections::HashMap;
+use std::sync::Arc;
+
+use crate::body::{Body, Subroutine};
+use crate::expr::{Expression, Lit, Num, Parser, TokenKind};
+use crate::kinds::axis::{Axis, Dim, Window};
+use crate::kinds::elementwise::Op;
+use crate::kinds::field::{DType, Float, NumOr, Ty, Value, Values};
+use crate::kinds::*;
+use crate::protocol::finished;
+use crate::{Error, Name, Result};
 
 type Row<'a> = (usize, usize, &'a str);
 

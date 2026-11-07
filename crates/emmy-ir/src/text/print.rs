@@ -1,6 +1,14 @@
 //! The printer: a statement to its line, a block's statements indented under its header, a body to its lines.
 
-use super::*;
+use std::sync::Arc;
+
+use super::INDENT;
+use crate::body::{Body, Subroutine};
+use crate::expr::Expression;
+use crate::kinds::axis::{Axis, spell_axis, spell_window};
+use crate::kinds::field::{DType, NumOr, spell_number, spell_stmt_name};
+use crate::kinds::*;
+use crate::{Error, Name, Result};
 
 fn names(items: &[Name]) -> Result<String> {
     Ok(items
