@@ -15,14 +15,12 @@ import pytest
 
 from emmy.compiler.backend.cuda.backend import CudaBackend
 from emmy.compiler.context import Context
-from emmy.compiler.dtype import F16, F32, decode_f8
+from emmy.compiler.dtype import decode_f8
 from emmy.compiler.graph import Graph, Tensor
-from emmy.compiler.ir.axis import Axis
 from emmy.compiler.ir.base import InputOp
 from emmy.compiler.ir.cuda import CudaOp
-from emmy.compiler.ir.expr import BinaryExpr, Literal, Var
 from emmy.compiler.ir.loop import LoopOp
-from emmy.compiler.ir.stmt import Accum, Assign, Body, Load, Loop, Write
+from emmy.compiler.ir.stmt import parse_body
 from emmy.compiler.pipeline import CUDA_PASSES, Pipeline
 from emmy.compiler.pipeline.search.pins import pinned_knobs
 from tests.compiler.helpers import device_compute_capability, requires_cuda
@@ -34,29 +32,26 @@ N, K = 256, 3072
 def _graph() -> Graph:
     """``out[n] = Σ_k x[k] · f16(scale[n/128, k/128] · decode(w_bits[n, k]))``: a block-scaled fp8 weight's decode
     cone fused into the product, as a width-1 projection reads it."""
-    n, k = Var("n"), Var("k")
-    block = lambda v: BinaryExpr("/", v, Literal(128, "int"))  # noqa: E731
-    cell = (
-        Loop(
-            Axis("k", K),
-            (
-                Load("wb", "w_bits", (n, k)),
-                Assign("wd", "from_f8e4m3", ("wb",), dtype=F16),
-                Load("ws", "w_scale", (block(n), block(k))),
-                Assign("w", "multiply", ("ws", "wd"), dtype=F16),
-                Load("xv", "x", (k,)),
-                Assign("p", "multiply", ("xv", "w"), dtype=F32),
-                Accum("sum", "p", axes=("k",)),
-            ),
-        ),
-        Write("out", (n,), "sum"),
+    body = parse_body(
+        f"""
+        for n in 0..{N}:
+            for k in 0..{K}:
+                wb = load w_bits[n, k]
+                f16 wd = from_f8e4m3(wb)
+                ws = load w_scale[n / 128, k / 128]
+                f16 w = multiply(ws, wd)
+                xv = load x[k]
+                f32 p = multiply(xv, w)
+                sum <- add(sum, p) over k
+            out[n] = sum
+        """
     )
     graph = Graph()
     graph.add_node(InputOp(), [], Tensor("w_bits", (N, K), "f8e4m3"), node_id="w_bits")
     graph.add_node(InputOp(), [], Tensor("w_scale", (N // 128, K // 128), "f32"), node_id="w_scale")
     graph.add_node(InputOp(), [], Tensor("x", (K,), "f16"), node_id="x")
     graph.add_node(
-        LoopOp(body=Body((Loop(Axis("n", N), cell),)), name="k_fp8_matvec"),
+        LoopOp(body=body, name="k_fp8_matvec"),
         ["w_bits", "w_scale", "x"],
         Tensor("out", (N,), "f32"),
         node_id="out",

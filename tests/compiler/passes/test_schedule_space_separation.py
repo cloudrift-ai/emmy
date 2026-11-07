@@ -174,7 +174,7 @@ def test_an_axis_renamed_twin_preserves_the_node_id_vocabulary() -> None:
     from dataclasses import replace
 
     from emmy.commands.trace import graph_from_code
-    from emmy.compiler.ir.expr import Var
+    from emmy.compiler.ir.expression import Var
     from emmy.compiler.ir.sigma import Sigma
     from emmy.compiler.ir.tile.ir import TileOp
     from emmy.compiler.pipeline.passes.tile._fromloop import lift_loop_op

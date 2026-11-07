@@ -12,13 +12,12 @@ from emmy.compiler.context import Context
 from emmy.compiler.graph import Graph, Tensor
 from emmy.compiler.ir.axis import Axis
 from emmy.compiler.ir.base import ConstantOp, InputOp
-from emmy.compiler.ir.expr import Var
 from emmy.compiler.ir.frontend.ir import TransposeOp
-from emmy.compiler.ir.stmt import Load, Write
+from emmy.compiler.ir.stmt import parse_body
 from emmy.compiler.ir.tile import OutputSpec, Placement, TileOp
 from emmy.compiler.pipeline import Pipeline
 from emmy.serving.twins import twins_in_build_order
-from tests.compiler.terms import contraction
+from tests.compiler.terms import contraction, slab
 
 
 def _traced(width, source: str | None) -> Graph:
@@ -101,8 +100,8 @@ def test_a_fork_less_reader_in_a_wider_twin_settles_the_family_folded():
     flat = replace(
         reader,
         name="z",
-        op=contraction(axis_k, Load(name="xv", input="x", index=(Var("k"),)), (Load(name="wv", input="w", index=(Var("k"),)), "acc")),
-        output_specs=(OutputSpec(Write(output="z", index=(Var("n"),), value="acc")),),
+        op=contraction(axis_k, slab("xv", "x", "k"), (slab("wv", "w", "k"), "acc")),
+        output_specs=(OutputSpec(parse_body("z[n] = acc")[0]),),
     )
     gdn16.add_node(flat, ["x", "w"], outputs=(Tensor("z", (16,), "f32"),), node_id="z")
     gdn16.outputs = ["y", "z"]
@@ -243,13 +242,11 @@ def _twin(n: int) -> Graph:
     """A traced width twin: one kernel reading the transposed weight ``w`` at output width ``n``."""
     axis_n, axis_k = Axis("n", n), Axis("k", 8)
     tile = TileOp(
-        op=contraction(
-            axis_k, Load(name="xv", input="x", index=(Var("k"),)), (Load(name="wv", input="w", index=(Var("k"), Var("n"))), "acc")
-        ),
+        op=contraction(axis_k, slab("xv", "x", "k"), (slab("wv", "w", "k", "n"), "acc")),
         name="y",
         place=Placement(free=(axis_n,)),
         axes=(axis_n, axis_k),
-        output_specs=(OutputSpec(Write(output="y", index=(Var("n"),), value="acc")),),
+        output_specs=(OutputSpec(parse_body("y[n] = acc")[0]),),
     )
     graph = Graph()
     graph.add_node(InputOp(), [], Tensor("x", (8,), "f32"), node_id="x")

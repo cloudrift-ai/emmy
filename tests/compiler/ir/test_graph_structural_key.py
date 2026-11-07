@@ -12,12 +12,10 @@ the graph's input / output sequences.
 from __future__ import annotations
 
 from emmy.compiler.graph import Graph, Tensor
-from emmy.compiler.ir.axis import Axis
 from emmy.compiler.ir.base import ConstantOp, InputOp
-from emmy.compiler.ir.expr import Var
 from emmy.compiler.ir.loop.ir import LoopOp
 from emmy.compiler.ir.render import render_stmt
-from emmy.compiler.ir.stmt import Assign, Body, Load, Loop, Write
+from emmy.compiler.ir.stmt import Body, parse_body
 
 # ---------------------------------------------------------------------------
 # Builders
@@ -32,19 +30,14 @@ def _add_loopop(g: Graph, nid: str, in_x: str, in_y: str, shape: tuple) -> str:
     """LoopOp that does ``out[i] = in_x[i] + in_y[i]`` with ``Load.input``
     referencing the producer node ids ``in_x`` / ``in_y`` (matches Graph
     wiring conventions: buf names == producer node ids)."""
-    a = Axis("a", shape[0])
-    body = Body(
-        (
-            Loop(
-                axis=a,
-                body=(
-                    Load(name="lx", input=in_x, index=(Var("a"),)),
-                    Load(name="ly", input=in_y, index=(Var("a"),)),
-                    Assign(name="z", op="add", args=("lx", "ly")),
-                    Write(output=nid, index=(Var("a"),), value="z"),
-                ),
-            ),
-        )
+    body = parse_body(
+        f"""
+        for a in 0..{shape[0]}:
+            lx = load {in_x}[a]
+            ly = load {in_y}[a]
+            z = add(lx, ly)
+            {nid}[a] = z
+        """
     )
     return g.add_node(op=LoopOp(body=body), inputs=[in_x, in_y], output=Tensor(nid, shape), node_id=nid)
 
@@ -111,19 +104,14 @@ def test_structural_key_equal_for_swapped_commutative_body_order() -> None:
     g_yx = Graph()
     _input(g_yx, "x", (4,))
     _input(g_yx, "y", (4,))
-    a = Axis("a", 4)
-    body = Body(
-        (
-            Loop(
-                axis=a,
-                body=(
-                    Load(name="ly", input="y", index=(Var("a"),)),
-                    Load(name="lx", input="x", index=(Var("a"),)),
-                    Assign(name="z", op="add", args=("ly", "lx")),
-                    Write(output="out", index=(Var("a"),), value="z"),
-                ),
-            ),
-        )
+    body = parse_body(
+        """
+        for a in 0..4:
+            ly = load y[a]
+            lx = load x[a]
+            z = add(ly, lx)
+            out[a] = z
+        """
     )
     g_yx.add_node(op=LoopOp(body=body), inputs=["x", "y"], output=Tensor("out", (4,)), node_id="out")
     g_yx.inputs = ["x", "y"]
@@ -203,19 +191,14 @@ def test_structural_key_distinguishes_cross_cluster_body_op() -> None:
     b = Graph()
     _input(b, "x", (4,))
     _input(b, "y", (4,))
-    ax = Axis("a", 4)
-    body = Body(
-        (
-            Loop(
-                axis=ax,
-                body=(
-                    Load(name="lx", input="x", index=(Var("a"),)),
-                    Load(name="ly", input="y", index=(Var("a"),)),
-                    Assign(name="z", op="divide", args=("lx", "ly")),
-                    Write(output="out", index=(Var("a"),), value="z"),
-                ),
-            ),
-        )
+    body = parse_body(
+        """
+        for a in 0..4:
+            lx = load x[a]
+            ly = load y[a]
+            z = divide(lx, ly)
+            out[a] = z
+        """
     )
     b.add_node(op=LoopOp(body=body), inputs=["x", "y"], output=Tensor("out", (4,)), node_id="out")
     b.inputs = ["x", "y"]
@@ -302,16 +285,13 @@ def test_structural_key_handles_fragment_repack() -> None:
 
 def test_structural_key_handles_index_declarations() -> None:
     """Precomputed kernel indices remain hashable and follow SSA and buffer renaming during tuning."""
-    from emmy.compiler.ir.expr import FlatIndex, FuncCallExpr, Literal
-    from emmy.compiler.ir.stmt import Let
-
-    stmt = Let("store", FuncCallExpr("layout", (Var("row"), Literal(4, "int"))))
+    (stmt,) = parse_body("let store = layout(row, 4)")
     Body((stmt,)).structural_key()
     renamed = stmt.rewrite(lambda name: {"store": "store9", "row": "row9"}.get(name, name))
     assert renamed.name == "store9"
     assert renamed.value.free_vars() == frozenset({"row9"})
 
-    flat = Let("base", FlatIndex("input", (Var("row"), Literal(4, "int"))) - FlatIndex("input", (Literal(0, "int"), Literal(0, "int"))))
+    (flat,) = parse_body("let base = input[row, 4] - input[0, 0]")
     Body((flat,)).structural_key()
     renamed = flat.rewrite(lambda name: {"base": "base9", "row": "row9"}.get(name, name)).rename_buffers({"input": "b0"})
     assert renamed.name == "base9"

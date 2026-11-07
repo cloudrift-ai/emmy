@@ -484,7 +484,7 @@ def test_spell_trellis_builds_generic_cone(tmp_path):
         if isinstance(nn.op, IndexMapOp) and nn.output.name.endswith(("window_lo", "window_hi"))
     }
     assert len(direct_maps) == 2
-    assert all(any(op in src.coord_map[-1].pretty() for op in ("%", "//")) for src in direct_maps.values() for src in src.sources)
+    assert all(any(op in str(src.coord_map[-1]) for op in ("%", "//")) for src in direct_maps.values() for src in src.sources)
     assert sum(isinstance(nn.op, MatmulOp) for nn in g.nodes.values()) == 3
     # The logical dense weight and its fp16 rounding boundary never exist in the
     # executable graph; the coded linear is born as three factored contractions.

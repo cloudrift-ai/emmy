@@ -15,7 +15,7 @@ from __future__ import annotations
 
 from emmy.compiler.dim import Dim
 from emmy.compiler.graph import Graph, Node, Tensor
-from emmy.compiler.ir.expr import Literal, placeholder
+from emmy.compiler.ir.expression import Literal, placeholder
 from emmy.compiler.ir.tensor.ir import IndexMapOp, IndexSource
 
 

@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from emmy.compiler.dim import Dim
 from emmy.compiler.graph import Graph, Node, Tensor
-from emmy.compiler.ir.expr import BinaryExpr, Literal, SimplifyCtx, Var, placeholder
+from emmy.compiler.ir.expression import BinaryExpr, Literal, SimplifyCtx, Var, placeholder
 from emmy.compiler.ir.frontend.ir import ReshapeOp
 from emmy.compiler.pipeline import Match, Pattern
 from emmy.compiler.pipeline.passes.frontend.decomposition._helpers import open_fragment, single_indexmap
@@ -24,7 +24,7 @@ def _reshape_coord_map(in_shape: tuple, out_shape: tuple):
     coordinate is:  c_j = (flat // in_stride_j) % in_shape_j
     where flat = sum(out_coord_i * out_stride_i).
 
-    Strides are built as ``Expr`` trees rather than Python ints so symbolic
+    Strides are built as ``Expression`` trees rather than Python ints so symbolic
     shape elements (``Dim('seq_len')``) thread through as ``Var('seq_len')``
     factors. The simplifier folds constant runs before the tree lands in
     the ``IndexMapOp.sources`` coord map.
@@ -41,7 +41,7 @@ def _reshape_coord_map(in_shape: tuple, out_shape: tuple):
         stride_simplified = out_stride.simplify(SimplifyCtx.empty())
         term = placeholder(d) if _is_one(stride_simplified) else BinaryExpr("*", placeholder(d), stride_simplified)
         flat = term if flat is None else BinaryExpr("+", term, flat)
-        out_stride = BinaryExpr("*", out_stride, _to_expr(out_shape[d]))
+        out_stride = BinaryExpr("*", out_stride, _to_expression(out_shape[d]))
 
     if flat is None:
         flat = Literal(0, "int")
@@ -51,7 +51,7 @@ def _reshape_coord_map(in_shape: tuple, out_shape: tuple):
     for j in range(in_ndim - 1, -1, -1):
         stride_j = in_stride.simplify(SimplifyCtx.empty())
         coord = flat if _is_one(stride_j) else BinaryExpr("/", flat, stride_j)
-        dim_j = _to_expr(in_shape[j])
+        dim_j = _to_expression(in_shape[j])
         if j > 0:
             coord = BinaryExpr("%", coord, dim_j)
         coords.insert(0, coord.simplify(SimplifyCtx.empty()))
@@ -60,18 +60,18 @@ def _reshape_coord_map(in_shape: tuple, out_shape: tuple):
     return tuple(coords)
 
 
-def _to_expr(d) -> object:
-    """Pull the ``Expr`` out of a shape element. ``Tensor.shape`` is always
-    ``tuple[Dim, ...]`` so ``d.expr`` is the common path; bare ``int`` /
+def _to_expression(d) -> object:
+    """Pull the ``Expression`` out of a shape element. ``Tensor.shape`` is always
+    ``tuple[Dim, ...]`` so ``d.expression`` is the common path; bare ``int`` /
     ``str`` only show up for the un-coerced literal-shape passed via
     ``ReshapeOp.shape``."""
     if isinstance(d, Dim):
-        return d.expr
+        return d.expression
     if isinstance(d, int):
         return Literal(d, "int")
     if isinstance(d, str):
         return Var(d)
-    raise TypeError(f"_to_expr: unexpected shape element {d!r}")
+    raise TypeError(f"_to_expression: unexpected shape element {d!r}")
 
 
 def _is_one(e) -> bool:

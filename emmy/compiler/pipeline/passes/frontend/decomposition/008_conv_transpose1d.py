@@ -18,7 +18,7 @@ times as many, most of them by zero.
 """
 
 from emmy.compiler.graph import Graph, Node, Tensor
-from emmy.compiler.ir.expr import BinaryExpr, Literal, placeholder
+from emmy.compiler.ir.expression import BinaryExpr, Literal, placeholder
 from emmy.compiler.ir.frontend.ir import ConvTranspose1dOp, MatmulOp
 from emmy.compiler.ir.tensor.ir import ElementwiseOp
 from emmy.compiler.pipeline import Match, Pattern

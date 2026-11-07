@@ -770,7 +770,7 @@ class Run:
         cand = Candidate(run=self, graph=graph, cursor=Cursor(run=self))
         trace: list[Decision] = []
         # The launch binds every symbolic size of the graph's inputs, whichever caller resolves it.
-        with binding_extents(name for buffer in graph.inputs for dim in graph.buffer(buffer).shape for name in dim.expr.free_vars()):
+        with binding_extents(name for buffer in graph.inputs for dim in graph.buffer(buffer).shape for name in dim.expression.free_vars()):
             while not cand.cursor.is_done:
                 self._step(cand, decide=decide, trace=trace)
         return cand.graph, trace

@@ -26,7 +26,7 @@ from dataclasses import replace
 
 from emmy.compiler.ir.address import BYTE_SLAB_PAD, gmem_axis_step
 from emmy.compiler.ir.axis import Axis
-from emmy.compiler.ir.expr import affine_form
+from emmy.compiler.ir.expression import affine_form
 from emmy.compiler.ir.pure.fold import Fold
 from emmy.compiler.ir.schedule import ResolvedStage, Stage, Tile
 from emmy.compiler.ir.schedule.packing import block_scaled_atom, packed_readings
@@ -108,16 +108,16 @@ def _clamp_depth(depth: int, slot_bytes: int, budget: int) -> int:
 
 def _tma_operand_box(index: tuple, tile_name: str, k_name: str, order: tuple[str, str] | None = None) -> bool:
     names = {tile_name, k_name}
-    if not 2 <= len(index) <= 4 or any(names & expr.free_vars() for expr in index[:-2]):
+    if not 2 <= len(index) <= 4 or any(names & expression.free_vars() for expression in index[:-2]):
         return False
     # A box is a rectangle in the descriptor's coordinates, one tile coordinate per dim. A reshape
     # that splits a coordinate across dims, or packs both into one, has no such rectangle: the box
     # would copy the declared row pitch and deposit the wrong elements.
-    for expr in index[-2:]:
-        axes = expr.free_vars() & names
-        if len(axes) > 1 or (axes and affine_form(expr, axes) is None):
+    for expression in index[-2:]:
+        axes = expression.free_vars() & names
+        if len(axes) > 1 or (axes and affine_form(expression, axes) is None):
             return False
-    physical = tuple(next(iter(axes)) for expr in index[-2:] if len(axes := expr.free_vars() & names) == 1)
+    physical = tuple(next(iter(axes)) for expression in index[-2:] if len(axes := expression.free_vars() & names) == 1)
     return order is None or len(physical) != 2 or set(physical) != names or physical == order
 
 

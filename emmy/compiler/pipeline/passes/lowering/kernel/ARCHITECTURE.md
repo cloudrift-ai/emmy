@@ -856,31 +856,29 @@ multiply when `FAST_MATH` is enabled. It runs after dtype stamping, preserves fl
 varying division and explicit round-to-nearest f32 division alone. The latter protects FP4 encoding boundaries even
 under the default fast-math regime. Structural body normalization stays independent of arithmetic policy.
 
-`085_fast_exp` follows the enabled `FAST_MATH` default, unless an explicit `FAST_EXP` pin overrides it. It lowers
-`exp` through `__expf`, promoting half inputs and rounding back afterward, and records the policy for idempotence.
-The rewrite includes generated `RegStore` epilogue bodies, each traversed in its own SSA scope. Host evaluation
-continues to use `exp`; only CUDA evaluation uses the approximate intrinsic.
-`100_loopify` remains off by default (`EMMY_LOOPIFY=N`), a generic **loop re-roller** iterated to a fixpoint.
-Loopify folds a maximal run of ≥ `N` congruent per-fragment statements —
-an mma body's per-fragment epilogue (`FragmentApply`), its load+mma pairs, the fragment `RegStore`s, the A-fragment
-loads, a nested contraction's K-chunks × N-atoms — into
-`#pragma unroll` `StridedLoop`s over `_r{depth}`. The matcher (`_reroll`) is node-type-agnostic: a recursive structural
-walk over each candidate window's Stmt/Expr trees returns a template ONLY when every per-iteration difference is a
-**contiguous fragment family** index (`O_i_f0 … O_i_f{N-1}` or an already-arrayed `fam[0] …`, arrayed into one
-`count`-arrayed `RegFragment` decl and indexed `fam[_r]`) or an **affine address offset** — and it peels a trailing
-`± Literal` off each index Expr so a codegen-**folded** `kv0` (really `kv0 + 0*8`) reconciles with a sibling's `kv0 + 8`.
-A family that is not `RegFragment`-declared (a scalar carrier / an inline-declared fragment) bails the run. Iterating to
-a fixpoint (fresh `_r{depth}` per pass; already-arrayed `fam[i]` refs re-parsed) turns nested runs into nested loops:
-pass k re-rolls the inner N-atoms, pass k+1 sees the resulting sibling loops as a run and wraps them. Correctness is
-structural: an unrolled congruent run executes in the SAME order as the original straight-line statements, so a template
-that reproduces every window is byte-identical after nvcc unrolls — identical SASS.
-Only the family's `RegFragment` decl carries its dtype, so a render that needs a fragment reference's dtype reads it
-off the stem (`kernel.ir.frag_dtype`) — an arrayed member is `fam[_r]`, which no declaration names.
-A readability lever for `--ir cuda` inspection, `N=4` the recommended sweet spot (skips the 2-long runs).
-Two orthogonal readability transforms ride alongside: `FragmentApply` **always** renders as one element
+`085_fast_exp` follows the enabled `FAST_MATH` default, unless an explicit `FAST_EXP` pin overrides it. It lowers `exp`
+through `__expf`, promoting half inputs and rounding back afterward, and records the policy for idempotence. The rewrite
+includes generated `RegStore` epilogue bodies, each traversed in its own SSA scope. Host evaluation continues to use
+`exp`; only CUDA evaluation uses the approximate intrinsic. `100_loopify` remains off by default (`EMMY_LOOPIFY=N`), a
+generic **loop re-roller** iterated to a fixpoint. Loopify folds a maximal run of ≥ `N` congruent per-fragment
+statements — an mma body's per-fragment epilogue (`FragmentApply`), its load+mma pairs, the fragment `RegStore`s, the
+A-fragment loads, a nested contraction's K-chunks × N-atoms — into `#pragma unroll` `StridedLoop`s over `_r{depth}`. The
+matcher (`_reroll`) is node-type-agnostic: a recursive structural walk over each candidate window's Statement/Expression
+trees returns a template ONLY when every per-iteration difference is a **contiguous fragment family** index (`O_i_f0 …
+O_i_f{N-1}` or an already-arrayed `fam[0] …`, arrayed into one `count`-arrayed `RegFragment` decl and indexed `fam[_r]`)
+or an **affine address offset** — and it peels a trailing `± Literal` off each index Expression so a codegen-**folded**
+`kv0` (really `kv0 + 0*8`) reconciles with a sibling's `kv0 + 8`. A family that is not `RegFragment`-declared (a scalar
+carrier / an inline-declared fragment) bails the run. Iterating to a fixpoint (fresh `_r{depth}` per pass;
+already-arrayed `fam[i]` refs re-parsed) turns nested runs into nested loops: pass k re-rolls the inner N-atoms, pass
+k+1 sees the resulting sibling loops as a run and wraps them. Correctness is structural: an unrolled congruent run
+executes in the SAME order as the original straight-line statements, so a template that reproduces every window is
+byte-identical after nvcc unrolls — identical SASS. Only the family's `RegFragment` decl carries its dtype, so a render
+that needs a fragment reference's dtype reads it off the stem (`kernel.ir.frag_dtype`) — an arrayed member is `fam[_r]`,
+which no declaration names. A readability lever for `--ir cuda` inspection, `N=4` the recommended sweet spot (skips the
+2-long runs). Two orthogonal readability transforms ride alongside: `FragmentApply` **always** renders as one element
 `#pragma unroll for (_e)` loop (the ROW operand as the row-split ternary `_e < 2 ? row0 : row1`), so a re-rolled family
 nests as `for (_r) { for (_e) … }`; and pin-gated **chain fusion** (`_fuse_chains`, before the re-roll) folds a
-`FragmentApply` immediately consumed by an in-place unary `FragmentApply` on the same fragment (`p <- s − m` then
-`p *= exp(p)`) into one node carrying the tail on its `post` field, so the softmax renders `p[_e] = expf(s[_e] − m)`.
-NOTE: the whole-body SSA rename this pass runs is why the shared `_rewrite` `Tile` handler must carry `block_threads` /
+`FragmentApply` immediately consumed by an in-place unary `FragmentApply` on the same fragment (`p <- s − m` then `p *=
+exp(p)`) into one node carrying the tail on its `post` field, so the softmax renders `p[_e] = expf(s[_e] − m)`. NOTE:
+the whole-body SSA rename this pass runs is why the shared `_rewrite` `Tile` handler must carry `block_threads` /
 `aux_threads` through verbatim — dropping them silently over-launches a cooperative tile.

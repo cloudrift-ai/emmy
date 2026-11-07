@@ -9,7 +9,7 @@ from __future__ import annotations
 from emmy.compiler.ir.pure.fold import Fold
 from emmy.compiler.ir.schedule.classic import CLASSIC_FAMILIES
 from emmy.compiler.ir.schedule.register import RegisterSchedule
-from emmy.compiler.ir.stmt import Body, Stmt, pretty_body
+from emmy.compiler.ir.stmt import Body, Statement, pretty_body
 from emmy.compiler.ir.tile.ops import axis_names, sched_of
 
 # --------------------------------------------------------------------------- #
@@ -155,7 +155,7 @@ def _edge(edge, ctx: _Ctx, result: str | None = None) -> tuple[str, object]:
     head = f"operand[{', '.join(names)}]" + (f" -> {result}" if result is not None else "")
     if edge.as_slab() is not None:
         load = edge.as_slab().load
-        load = load.pretty()[0].strip().removeprefix(f"{load.name} = ")
+        load = str(load).removeprefix(f"{load.name} = ")
         return f"{head}: {load}   ‹materialized›", lambda cont: []
     return f"{head}: {_head(edge, ctx)}   ‹computed›", _subtree(edge, ctx)
 
@@ -249,8 +249,8 @@ def pretty(op, indent: str = "", *, tile=None) -> list[str]:
     ctx = _Ctx(tile, root=op)
     if isinstance(op, Fold):
         return [f"{indent}{_head(op, ctx)}", *_branch(_items(op, ctx), indent)]
-    if isinstance(op, Stmt):
-        return list(op.pretty(indent))
+    if isinstance(op, Statement):
+        return pretty_body(Body((op,)), indent)
     return [f"{indent}{op!r}"]
 
 
@@ -294,10 +294,6 @@ def tile_body(tile) -> str:
         return ""
     lines = [f"    {line}" for line in _pretty_place(tile)]
     lines += pretty(tile.op, "    ", tile=tile)
-    outputs = [
-        f"{f'sweep({".".join(axis.name for axis in spec.sweep)}) ' if spec.sweep else ''}{line.strip()}"
-        for spec in tile.output_specs
-        for line in spec.write.pretty()
-    ]
+    outputs = [f"{f'sweep({".".join(axis.name for axis in spec.sweep)}) ' if spec.sweep else ''}{spec.write}" for spec in tile.output_specs]
     lines += _pretty_region("outputs", outputs)
     return "\n".join(lines)

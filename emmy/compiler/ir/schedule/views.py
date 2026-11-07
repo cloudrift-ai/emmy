@@ -110,11 +110,11 @@ def _chunk_block(edge: Fold, k_name: str, axes: tuple) -> int | None:
         return None
     blocks: set[int] = set()
     for stmt in Body(tuple(edge.lower(axes=axes))).iter():
-        exprs = tuple(stmt.exprs())
-        if k_name in stmt.deps() and not any(k_name in expr.free_vars() for expr in exprs):
+        expressions = tuple(stmt.expressions())
+        if k_name in stmt.deps() and not any(k_name in expression.free_vars() for expression in expressions):
             return None  # K read as a value, not as a coordinate
-        for expr in exprs:
-            naked, guards = k_block_guard(expr, k_name)
+        for expression in expressions:
+            naked, guards = k_block_guard(expression, k_name)
             if naked:
                 return None
             blocks |= guards
@@ -181,9 +181,9 @@ def cone_seam(cone, k_name: str, axes: tuple = ()) -> tuple[tuple, tuple, tuple[
         + list(cone.step())
     ).coalesce()
     chunk_results = {nm for edge, c in zip(cone.operands, chunked, strict=True) if c for nm in edge.exposes}
-    cell_reads = Body(cell).ssa_uses - Body(cell).ssa_defs
+    cell_reads = Body(cell).ssa_uses - Body(cell).definitions.keys()
     chunk_stats = tuple(sorted(chunk_results & cell_reads))
     chunk = (chunk_pro, chunk_stats, block) if chunk_stats else ()
     pro_results = {nm for edge, varies in zip(cone.operands, varying, strict=True) if not varies for nm in edge.exposes}
-    stats = tuple(sorted(pro_results & (cell_reads | (Body(chunk_pro).ssa_uses - Body(chunk_pro).ssa_defs))))
+    stats = tuple(sorted(pro_results & (cell_reads | (Body(chunk_pro).ssa_uses - Body(chunk_pro).definitions.keys()))))
     return (pro, cell, stats, chunk) if stats else ((), cell, (), chunk)

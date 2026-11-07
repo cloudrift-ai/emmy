@@ -25,15 +25,15 @@ from dataclasses import dataclass, field
 from hashlib import blake2b
 from itertools import groupby, permutations, product
 
-from emmy.compiler.ir.expr import Var
+from emmy.compiler.ir.expression import Var
 from emmy.compiler.ir.stmt import blocks, leaves
+from emmy.compiler.ir.stmt.base import Statement
 from emmy.compiler.ir.stmt.body import Body
-from emmy.compiler.ir.stmt.order import bound_axes
 from emmy.compiler.structural import form
 
 __all__ = ["Numbering", "digest", "distinct", "effect_order", "roles", "scope_tree", "value_numbers"]
 
-#: A parameter: ``("expr", form)`` of a coordinate-only expression, every axis spelled by its binding depth.
+#: A parameter: ``("expression", form)`` of a coordinate-only expression, every axis spelled by its binding depth.
 Param = tuple[str, object]
 
 
@@ -99,13 +99,18 @@ def distinct(body: Body) -> Body:
     one immutable statement twice."""
     body = Body.coerce(body)
     members = list(body.iter())
-    return body if len({id(stmt) for stmt in members}) == len(members) else Body(stmt.rename({}) for stmt in body)
+    return body if len({id(stmt) for stmt in members}) == len(members) else Body(_copy(stmt) for stmt in body)
+
+
+def _copy(stmt: Statement) -> Statement:
+    """An equal statement that shares no statement object with ``stmt``."""
+    bodies = stmt.nested()
+    return stmt.with_bodies(tuple(Body(_copy(child) for child in body) for body in bodies)) if bodies else stmt.replace()
 
 
 def value_numbers(body: Body, resource_key: Callable[[str], object] = lambda name: name) -> Numbering:
     """Number every statement of ``body``, which holds every statement once (:func:`distinct`); ``resource_key``
     spells a buffer or carried state in a payload."""
-    from emmy.compiler.ir.stmt.passes import map_exprs  # noqa: PLC0415
 
     out = Numbering()
     env: dict[str, tuple[str, tuple[Param, ...]]] = {}
@@ -136,8 +141,8 @@ def value_numbers(body: Body, resource_key: Callable[[str], object] = lambda nam
             return name in axes
         return not isinstance(value, tuple) or all(coordinate_only(part) for part in value)
 
-    def abstract(expr, params: list, ops: list) -> object:
-        """``form(expr)`` with every maximal coordinate-only subexpression a parameter and every SSA read an operand."""
+    def abstract(expression, params: list, ops: list) -> object:
+        """``form(expression)`` with every maximal coordinate-only subexpression a parameter and every SSA read an operand."""
 
         def walk(value: object) -> object:
             if isinstance(value, tuple) and reads_axis(value) and coordinate_only(value):
@@ -152,7 +157,7 @@ def value_numbers(body: Body, resource_key: Callable[[str], object] = lambda nam
                 return tuple(walk(part) for part in value)
             return value
 
-        return walk(expr.form)
+        return walk(expression.form)
 
     def operand(name: str, ops: list) -> object:
         if name in env:
@@ -266,7 +271,7 @@ def value_numbers(body: Body, resource_key: Callable[[str], object] = lambda nam
 
     def generic(stmt, ops: list, params: list, touched: list[str]) -> object:
         """Any statement kind: its shape with names abstracted, its expressions as parameters and operands."""
-        exprs = tuple(abstract(expr, params, ops) for expr in stmt.exprs())
+        expressions = tuple(abstract(expression, params, ops) for expression in stmt.expressions())
         defined = (*stmt.defines(), *stmt.local_decls())
         names: dict[str, str] = {name: f"$d{index}" for index, name in enumerate(defined)}
         for name in stmt.deps():
@@ -274,14 +279,14 @@ def value_numbers(body: Body, resource_key: Callable[[str], object] = lambda nam
                 names[name] = repr(operand(name, ops))
         for name in axes:
             names.setdefault(name, "$axis")
-        for index, axis in enumerate(bound_axes(stmt)):
+        for index, axis in enumerate(stmt.bound_axes()):
             names[axis.name] = f"$b{index}"
         for name in (*stmt.external_reads(), *stmt.external_writes()):
             if name not in names:
                 names[name] = repr(operand(name, ops) if name in env else resource(name, "buffer", touched))
         shell = stmt.with_bodies(tuple(Body() for _ in stmt.nested())) if stmt.nested() else stmt
-        shell = map_exprs(shell, lambda _expr: Var("$expr"))
-        return form(shell.rename(names).rename_buffers(names)), exprs
+        shell = shell.map_expressions(lambda _expression: Var("$expr"))
+        return form(shell.rename(names).rename_buffers(names)), expressions
 
     def visit(stmts: Body) -> None:
         nonlocal touched
@@ -291,7 +296,7 @@ def value_numbers(body: Body, resource_key: Callable[[str], object] = lambda nam
             if isinstance(stmt, leaves.Load):
                 params: list = []
                 ops: list = []
-                index = tuple(abstract(expr, params, ops) for expr in stmt.index)
+                index = tuple(abstract(expression, params, ops) for expression in stmt.index)
                 buffer = operand(stmt.input, ops) if stmt.input in env else resource(stmt.input, "buffer", touched)
                 value = compose("load", (buffer, index, str(stmt.dtype), stmt.carried, len(stmt.names)), ops, params)
                 define(stmt, stmt.names, value, "load")
@@ -323,7 +328,7 @@ def value_numbers(body: Body, resource_key: Callable[[str], object] = lambda nam
                 define(stmt, (stmt.name,), compose("select", tuple(payload), ops, params), "select")
             elif isinstance(stmt, leaves.Write):
                 params, ops = [], []
-                index = tuple(abstract(expr, params, ops) for expr in stmt.index)
+                index = tuple(abstract(expression, params, ops) for expression in stmt.index)
                 values = tuple(operand(name, ops) for name in stmt.values)
                 buffer = operand(stmt.output, ops) if stmt.output in env else resource(stmt.output, "buffer", touched)
                 payload = (buffer, index, values, str(stmt.value_dtype), stmt.atomic, repr(stmt.swizzle))
@@ -333,13 +338,13 @@ def value_numbers(body: Body, resource_key: Callable[[str], object] = lambda nam
             elif isinstance(stmt, leaves.Carry):
                 params, ops = [], []
                 value = operand(stmt.value, ops)
-                index = tuple(abstract(expr, params, ops) for expr in stmt.index)
+                index = tuple(abstract(expression, params, ops) for expression in stmt.index)
                 seed = resource(stmt.seed, "buffer", touched) if isinstance(stmt.seed, str) else repr(stmt.seed)
                 state = resource(stmt.name, "state", touched)
                 define(stmt, (stmt.name,), compose("carry", (state, index, value, seed, str(stmt.dtype)), ops, params), "carry")
             elif isinstance(stmt, leaves.Pre):
                 params, ops = [], []
-                index = tuple(abstract(expr, params, ops) for expr in stmt.index)
+                index = tuple(abstract(expression, params, ops) for expression in stmt.index)
                 state = resource(stmt.carrier, "state", touched)
                 define(stmt, (stmt.name,), compose("pre", (state, index), ops, params), "pre")
             elif stmt.nested():
@@ -350,14 +355,14 @@ def value_numbers(body: Body, resource_key: Callable[[str], object] = lambda nam
                     number, params = compose("cond", (abstract(stmt.cond, params, ops),), ops, params)
                     header = ("cond", number)
                 else:
-                    shape, exprs = generic(stmt, ops, params, touched)
-                    number, params = compose("block", (shape, exprs), ops, params)
+                    shape, expressions = generic(stmt, ops, params, touched)
+                    number, params = compose("block", (shape, expressions), ops, params)
                     header = ("block", number)
                 out.blocks[id(stmt)] = (header, tuple(params))
                 out.kind[id(stmt)] = "block"
                 out.scope[id(stmt)] = tuple(path)
                 out.sources[id(stmt)] = tuple(defined_by[name] for name in stmt.deps() if name in defined_by)
-                bound = bound_axes(stmt)
+                bound = stmt.bound_axes()
                 saved = dict(env), {axis.name: axes.get(axis.name) for axis in bound}
                 for axis in bound:
                     axes[axis.name] = descriptor(axis, stmt)
@@ -384,9 +389,9 @@ def value_numbers(body: Body, resource_key: Callable[[str], object] = lambda nam
                         axes[name] = previous
             else:
                 params, ops = [], []
-                shape, exprs = generic(stmt, ops, params, touched)
+                shape, expressions = generic(stmt, ops, params, touched)
                 defined = (*stmt.defines(), *stmt.local_decls())
-                define(stmt, defined, compose("other", (shape, exprs), ops, params), "other")
+                define(stmt, defined, compose("other", (shape, expressions), ops, params), "other")
             for name in touched:
                 out.touch[name].append(out.numbers[id(stmt)][0] if id(stmt) in out.numbers else out.blocks[id(stmt)][0][1])
                 out.touching[name].append(id(stmt))

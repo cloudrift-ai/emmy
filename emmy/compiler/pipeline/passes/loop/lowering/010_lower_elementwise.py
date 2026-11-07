@@ -14,8 +14,8 @@ from __future__ import annotations
 from emmy.compiler.graph import Graph, Node, Tensor
 from emmy.compiler.ir.base import InputOp
 from emmy.compiler.ir.elementwise import ElementwiseImpl
-from emmy.compiler.ir.expr import Expr, Literal, Var
-from emmy.compiler.ir.loop import Assign, Axis, Load, Loop, LoopOp, Stmt, Write
+from emmy.compiler.ir.expression import Expression, Literal, Var
+from emmy.compiler.ir.loop import Assign, Axis, Load, Loop, LoopOp, Statement, Write
 from emmy.compiler.ir.stmt import Body, dtype_promote
 from emmy.compiler.ir.tensor.ir import BitcastOp, ElementwiseOp
 from emmy.compiler.pipeline import Match, Pattern
@@ -34,7 +34,7 @@ def rewrite(match: Match, root: Node) -> Graph | None:
     # and ``LoopOp.forward`` / launch geometry resolve them from input array shapes at run time.
     axes = tuple(Axis(name=f"a{i}", extent=d) for i, d in enumerate(out_shape))
 
-    load_stmts: list[Stmt] = []
+    load_stmts: list[Statement] = []
     load_names: list[str] = []
     for i, inp_id in enumerate(root.inputs):
         inp_t = graph.buffer(inp_id)
@@ -42,7 +42,7 @@ def rewrite(match: Match, root: Node) -> Graph | None:
         idx = _identity_index(inp_shape, axes)
         name = f"in{i}"
         load_names.append(name)
-        load_stmts.append(Load(name=name, input=inp_id, index=idx))
+        load_stmts.append(Load(names=(name,), input=inp_id, index=idx))
 
     write_index = tuple(Var(a.name) for a in axes)
     if isinstance(root.op, ElementwiseOp):
@@ -61,7 +61,7 @@ def rewrite(match: Match, root: Node) -> Graph | None:
     inner: Body = (
         *load_stmts,
         Assign(name="v", op=op, args=tuple(load_names), dtype=assign_dtype),
-        Write(output=f"loop_{root.id}", index=write_index, value="v"),
+        Write(output=f"loop_{root.id}", index=write_index, values=("v",)),
     )
     # Nest the body in free-axis Loops (outer axis wraps the innermost).
     body: Body = inner
@@ -88,7 +88,7 @@ def rewrite(match: Match, root: Node) -> Graph | None:
     return frag
 
 
-def _identity_index(src_shape: tuple, axes: tuple[Axis, ...]) -> tuple[Expr, ...]:
+def _identity_index(src_shape: tuple, axes: tuple[Axis, ...]) -> tuple[Expression, ...]:
     """Build an identity read index for ``src_shape`` under ``axes``.
 
     Walks right-to-left so non-size-1 source dims latch onto the rightmost
@@ -98,7 +98,7 @@ def _identity_index(src_shape: tuple, axes: tuple[Axis, ...]) -> tuple[Expr, ...
     if not src_shape:
         return ()
 
-    result: list[Expr] = [Literal(0, "int")] * len(src_shape)
+    result: list[Expression] = [Literal(0, "int")] * len(src_shape)
     cursor = len(axes) - 1
 
     for i in range(len(src_shape) - 1, -1, -1):

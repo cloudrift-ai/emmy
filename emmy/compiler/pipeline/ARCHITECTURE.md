@@ -561,8 +561,7 @@ At a **schedule fork** (one kernel's row):
 1. the **evidence index** (`greedy._db_measured_index`): the fastest row of the same kernel — rows are indexed by the
    exact identity of the kernel they measured and the sizes they were measured at, and the fork asks for its own
    (`wire.kernel_identity`, `wire.kernel_bindings`; a row that names no size, recorded before rows named one, answers
-   at every size) — that agrees
-   with an offered leaf, whether it came from the tune DB or from a golden file. `_direct_measured_pick` descends the
+   at every size) — that agrees with an offered leaf, whether it came from the tune DB or from a golden file. `_direct_measured_pick` descends the
    lazy tree straight to it, asking each branch whether it admits the row (`Fork.admits`: a schedule branch spells a
    prefix of what its leaves will spell, a level branch a projection of it, and a knob the row leaves undecided is
    free), so a partial row reaches its leaf whatever the pool size. The prefix reading excludes the empty spelling: a

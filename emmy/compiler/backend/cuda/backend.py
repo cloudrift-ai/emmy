@@ -136,14 +136,16 @@ class CudaBackend(Backend):
             time_ms = result.time_ms
         # Symbolic output shapes bind from the supplied input array shapes:
         # each atomic symbolic input dim records its runtime size. Output dims
-        # (possibly composite Dim exprs) then resolve via ``expr.eval(sym_env)``
+        # (possibly composite Dim expressions) then resolve via ``expression.eval(sym_env)``
         # — one path covers Literal / Var / BinaryExpr uniformly.
         sym_env = compiled.symbolic_env(input_data)
 
         def shaped(values: dict) -> dict[str, np.ndarray]:
             buffers = {name: compiled.buffer(name) for name in values}
             return {
-                name: np.asarray(vals, dtype=buffers[name].dtype.np).reshape(tuple(int(d.expr.eval(sym_env)) for d in buffers[name].shape))
+                name: np.asarray(vals, dtype=buffers[name].dtype.np).reshape(
+                    tuple(int(d.expression.eval(sym_env)) for d in buffers[name].shape)
+                )
                 for name, vals in values.items()
             }
 

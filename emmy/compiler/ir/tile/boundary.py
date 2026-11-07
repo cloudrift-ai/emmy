@@ -58,7 +58,7 @@ def _splice_streamed(stmts: list, write: Write) -> bool:
         if _splice_streamed(inner, write):
             stmts[i] = stmt.with_bodies((Body(tuple(inner)),))
             return True
-        if stmt.is_reduce and values <= set().union(*(Body((s,)).ssa_defs for s in inner)):
+        if stmt.is_reduce and values <= set().union(*(exposed_defines(s) for s in inner)):
             stmts[i] = stmt.with_bodies((Body((*inner, write)),))
             return True
     return False

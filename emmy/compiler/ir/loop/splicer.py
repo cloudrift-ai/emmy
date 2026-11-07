@@ -39,7 +39,7 @@ Unified dedup. A single table keyed on
 ``(origin, name, emit_scope, σ.restrict(live_axes))`` decides whether
 to share an existing emission or allocate a fresh one. ``live_axes``
 comes from ``BodyAnalysis`` and is the set of axes transitively reachable
-through the stmt's Expr subtrees — σ bindings outside that set are
+through the stmt's Expression subtrees — σ bindings outside that set are
 irrelevant and collapsed. Same key → share; different emit scope or
 different live-σ → emit twice. This handles plain-stmt and subroutine-call sharing, Accum
 scope multiplicity (SDPA QK^T at softmax-max vs softmax-output), and
@@ -53,7 +53,7 @@ before-use. The exception is the dedup case: when a stmt's operand
 hits an existing binding emitted earlier in the worklist, the new stmt
 still prepends above the existing one — landing above its own dep.
 That sibling inversion is fixed up by the generic
-``topo_sort_siblings`` pass in :mod:`emmy.compiler.ir.stmt.normalize`,
+``topological_sort`` step of body normalization,
 which runs inside ``LoopOp.__post_init__`` — so the splicer doesn't
 need its own ordering pass; constructing the ``LoopOp`` is enough.
 """
@@ -64,7 +64,7 @@ import logging
 import math
 from dataclasses import dataclass
 
-from emmy.compiler.ir.expr import BinaryExpr, Expr, Interval, Literal, SimplifyCtx, Var, affine_form
+from emmy.compiler.ir.expression import BinaryExpr, Expression, Interval, Literal, SimplifyCtx, Var, affine_form
 from emmy.compiler.ir.loop.assembly import NotSupported, Program, Splicer, UnfusableStmt
 from emmy.compiler.ir.loop.ir import Load, Loop, LoopOp, Write
 
@@ -306,7 +306,7 @@ def _layout_copy_inverse(graph, node, output: str) -> tuple[str, tuple[int, ...]
     destination_flat = _dense_flat_address(write_index, destination_strides, extents, ctx)
     if destination_flat is None:
         return None
-    actual = tuple(expr.simplify(ctx) for expr in load_index)
+    actual = tuple(expression.simplify(ctx) for expression in load_index)
     inverse = [0] * len(source_dims)
     if any(actual[i] != Literal(0, "int") for i, dim in enumerate(source_dims) if dim == 1):
         return None
@@ -343,18 +343,18 @@ def _extent_ctx(extents: dict[str, int]) -> SimplifyCtx:
     return ctx
 
 
-def _flat_expr(index: tuple[Expr, ...], strides: list[int], ctx: SimplifyCtx) -> Expr:
+def _flat_expression(index: tuple[Expression, ...], strides: list[int], ctx: SimplifyCtx) -> Expression:
     """Flatten one row-major index and simplify it under ``ctx``."""
-    flat: Expr = Literal(0, "int")
+    flat: Expression = Literal(0, "int")
     for expression, stride in zip(index, strides, strict=True):
         term = expression if stride == 1 else BinaryExpr("*", expression, Literal(stride, "int"))
         flat = BinaryExpr("+", flat, term)
     return flat.simplify(ctx)
 
 
-def _dense_flat_address(index: tuple[Expr, ...], strides: list[int], extents: dict[str, int], ctx: SimplifyCtx) -> Expr | None:
+def _dense_flat_address(index: tuple[Expression, ...], strides: list[int], extents: dict[str, int], ctx: SimplifyCtx) -> Expression | None:
     """Return the flat address when it densely enumerates the loop domain."""
-    flat = _flat_expr(index, strides, ctx)
+    flat = _flat_expression(index, strides, ctx)
     affine = affine_form(flat, set(extents))
     if affine is None:
         return None
@@ -373,7 +373,7 @@ def _dense_flat_address(index: tuple[Expr, ...], strides: list[int], extents: di
     return flat
 
 
-def _flat_digit(flat: Expr, stride: int, extent: int, ctx: SimplifyCtx) -> Expr:
+def _flat_digit(flat: Expression, stride: int, extent: int, ctx: SimplifyCtx) -> Expression:
     """Return one mixed-radix digit of ``flat``; unit dimensions are literal zero."""
     if extent == 1:
         return Literal(0, "int")
@@ -381,7 +381,7 @@ def _flat_digit(flat: Expr, stride: int, extent: int, ctx: SimplifyCtx) -> Expr:
     return BinaryExpr("%", digit, Literal(extent, "int")).simplify(ctx)
 
 
-def _unflatten(flat: Expr, shape, ctx: SimplifyCtx) -> tuple[Expr, ...] | None:
+def _unflatten(flat: Expression, shape, ctx: SimplifyCtx) -> tuple[Expression, ...] | None:
     """Decompose ``flat`` into one static row-major coordinate tuple."""
     strides = _static_strides(shape)
     if strides is None:
@@ -427,7 +427,7 @@ def _retarget_equivalent_output(graph, op: LoopOp, cluster: _OutputEquivalenceCl
         for inverse, shape in steps:
             if len(coordinates) != len(inverse):
                 return None
-            flat: Expr = Literal(0, "int")
+            flat: Expression = Literal(0, "int")
             for expression, stride in zip(coordinates, inverse, strict=True):
                 if not stride:
                     continue

@@ -7,7 +7,7 @@ new name collides with a *surviving* old name elsewhere in the body.
 
 This guards the ``in24``-undefined embedding-lookup bug: the renumber used to
 publish each Load rename into both the SSA channel (``rename``) and the axis
-channel (``sigma``). The Load/Write rewriter applies both to index exprs, so an
+channel (``sigma``). The Load/Write rewriter applies both to index expressions, so an
 indirect index Var was substituted twice — and a rename chain (``in2_3 → in5``
 while a pre-existing ``in5`` → ``in26``) collapsed transitively, wiring the
 gather to the wrong row.
@@ -17,10 +17,7 @@ from __future__ import annotations
 
 import pytest
 
-from emmy.compiler.dim import Dim
-from emmy.compiler.ir.axis import Axis
-from emmy.compiler.ir.expr import Literal, Var
-from emmy.compiler.ir.stmt import Accum, Body, Cond, Init, Load, Loop, StridedLoop, Write
+from emmy.compiler.ir.stmt import Accum, Body, Init, Load, Write, parse_body
 from emmy.compiler.ir.stmt.normalize import rename_ssa_sequential
 from emmy.compiler.pipeline.passes.tile._fromloop import fold_from_loop
 
@@ -38,13 +35,13 @@ def test_gather_index_survives_rename_chain_collision() -> None:
     # gather's index references the second ids load (old name ``idx1``), whose
     # new name ``in1`` collides with that surviving ``in1`` — the exact shape
     # of the embedding + RMSNorm-weight kernel that triggered the bug.
-    body = Body(
-        (
-            Load(name="idx0", input="ids", index=(Var("a0"),)),
-            Load(name="idx1", input="ids", index=(Var("a0"),)),
-            Load(name="gather", input="w", index=(Var("idx1"), Var("a0"))),
-            Load(name="in1", input="weight", index=(Var("a0"),)),
-        )
+    body = parse_body(
+        """
+        idx0 = load ids[a0]
+        idx1 = load ids[a0]
+        gather = load w[idx1, a0]
+        in1 = load weight[a0]
+        """
     )
 
     out = rename_ssa_sequential(body)
@@ -56,9 +53,9 @@ def test_gather_index_survives_rename_chain_collision() -> None:
     weight = _find_load(out, "weight")
 
     assert weight.names == ("in3",)
-    assert gather.index[0] == Var("in1"), gather.index[0]
+    assert str(gather.index[0]) == "in1", gather.index[0]
     # And the gather index must NOT have been double-substituted onto the weight.
-    assert gather.index[0] != Var(weight.names[0])
+    assert str(gather.index[0]) != weight.names[0]
     # Sanity: idx0 is the very first Load → in0.
     assert idx1_new == ("in0",)
 
@@ -69,14 +66,12 @@ def test_fold_combine_tracks_accum_rename() -> None:
     # cooperative combine reads a state name the renamed lift no longer defines (the M=1
     # cut-consumer's ``acc1``-undefined miscompile). A term is never a ``Body`` member, so the
     # rename reaches it through the rewrite registry directly.
-    loop = Loop(
-        axis=Axis(name="k0", extent=Dim(8)),
-        body=Body(
-            (
-                Load(name="v9", input="a", index=(Var("k0"),)),
-                Accum(name="acc1", value="v9", axes=("k0",)),
-            )
-        ),
+    (loop,) = parse_body(
+        """
+        for k0 in 0..8:
+            v9 = load a[k0]
+            acc1 <- add(acc1, v9) over k0
+        """
     )
     fold = fold_from_loop(loop)
     assert fold is not None
@@ -90,12 +85,18 @@ def test_fold_combine_tracks_accum_rename() -> None:
 
 
 def test_canonical_names_do_not_capture_free_arguments():
-    body = Body((Loop(Axis("k", 4), (Load("value", "x", (Var("a0"), Var("k"), Var("in0"))), Accum("total", "value"))),))
+    body = parse_body(
+        """
+        for k in 0..4:
+            value = load x[a0, k, in0]
+            total <- add(total, value)
+        """
+    )
     renamed = rename_ssa_sequential(body)
     (loop,) = renamed
     load = _find_load(renamed, "x")
     assert loop.axis.name != "a0" and load.name != "in0"
-    assert load.index == (Var("a0"), Var(loop.axis.name), Var("in0"))
+    assert tuple(str(index) for index in load.index) == ("a0", loop.axis.name, "in0")
     assert rename_ssa_sequential(renamed) == renamed
 
 
@@ -103,12 +104,18 @@ def test_canonical_names_do_not_capture_free_arguments():
 @pytest.mark.parametrize("seed", [False, True])
 @pytest.mark.parametrize("conditional", [False, True])
 def test_nested_loop_updates_keep_their_enclosing_seed(strided, seed, conditional):
-    body = Body((Load("value", "x", (Var("k"),)), Accum("total", "value", axes=("k",))))
-    inner = (
-        StridedLoop(Axis("k", 4), Literal(0, "int"), Literal(1, "int"), body, seed=seed) if strided else Loop(Axis("k", 4), body, seed=seed)
+    inner = f"for k in 0..4{' step 1' if strided else ''}{'' if seed else ' seed=false'}:"
+    wrapper = "if enabled:" if conditional else "for i in 0..2:"
+    original = parse_body(
+        f"""
+        init f32 total = 0
+        {wrapper}
+            {inner}
+                value = load x[k]
+                total <- add(total, value) over k
+        out[] = total
+        """
     )
-    wrapper = Cond(Var("enabled"), (inner,)) if conditional else Loop(Axis("i", 2), (inner,))
-    original = Body((Init("total", 0, dtype="f32"), wrapper, Write("out", (), "total")))
 
     renamed = rename_ssa_sequential(original)
 
