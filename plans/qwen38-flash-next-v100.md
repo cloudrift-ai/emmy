@@ -751,6 +751,76 @@ Rounds, as with DeepSeek. Each round starts from a profile and ends with a boot 
     and 384 of 384.
   - Not run: the margin test (no weight moved; the split's state buffer is under 1 MB), a second branch boot (the
     finalize sums the 64 states in a fixed order), a profiled boot.
+- **Measurement round (2026-11-07): first token and eight requests.** Main `cc38c02d2` against the step 3 fork image,
+  step 2's shape on both sides. One profiled boot per side gives the phase splits: rank 0's GPU time per phase, where
+  an all-reduce counts only the fastest rank's kernel per call and the rest of rank 0's time in it is waiting. One
+  boot per side that was never profiled gives the numbers: first token at 4K random token ids 1.84-1.86 s against
+  the fork's 0.85-0.87 s; eight requests of 4K / 1K 166.7-168.4 tok/s against 269.5-278.9 tok/s (median gap between
+  tokens 36.2-36.5 against 23.1-24.0 ms). Emmy matches the #1326 A/B, so main serves as that branch did.
+  - First token at 4K, summed over its three steps (3,920, 175 and 1 tokens), ms:
+
+    | Phase | Fork | Emmy |
+    | --- | ---: | ---: |
+    | Routed experts, with their row gather, weighting and combine | 171 | 831 |
+    | Pre and post: hyper-connection mixers, norms, shared expert | 156 | 297 |
+    | Glue between programs: copies, casts, the routed placement, eager norms | 30 | 147 |
+    | Hosted sublayers: projections, Gated DeltaNet, sparse attention | 207 | 195 |
+    | Router and its top-k | 14 | 15 |
+    | All-reduces | 33 | 34 |
+    | Token embedding and the n-gram embedding | 1 | 12 |
+    | GPU work | 612 | 1,530 |
+    | Host time, idle, and waiting for other ranks | about 245 | about 320 |
+
+  - Per step, from first tokens at 2, 176, 3,921 and 4,096 tokens: the 3,920-token step takes about 1.34 s on Emmy
+    and 0.64 s on the fork, and is GPU work on both. The 175-token step (0.36 against 0.17 s) and the 1-token step
+    (0.12 against 0.03 s) are host time on both: the GPU sits in all-reduces waiting for the slowest rank's host.
+  - In the 3,920-token step Emmy launches about 270 expert programs per layer, about 1,000 kernels, most of them at
+    the 256-row twin (about 206 real rows), each kernel under one full wave of the card. The fork runs three grouped
+    GEMMs and one finalize per layer. Emmy's expert kernels take 549 ms there, and their row gather, weighting and
+    combine another 109 ms, against the fork's 147 ms for all of it. The fork's small steps count their mixer,
+    shared-expert and router GEMMs under the projections (at most about 25 ms).
+  - Eight requests, one decode step, ms:
+
+    | Phase | Fork | Emmy |
+    | --- | ---: | ---: |
+    | Routed experts | 4.37 | 10.37 |
+    | Fixed slots, per row: selector copy, input upload, output copy, combine | in the row above | 5.03 |
+    | Pre and post | 5.76 | 6.99 |
+    | Router and its top-k | 1.17 | 1.21 |
+    | Glue between programs | 1.66 | 2.35 |
+    | Hosted sublayers: projections, Gated DeltaNet, sparse attention | 6.83 | 7.32 |
+    | All-reduces | 0.70 | 0.97 |
+    | Embeddings and sampling | 0.19 | 0.20 |
+    | GPU busy | 20.67 | 34.45 |
+    | Host and idle: the never-profiled median gap minus GPU busy | 2.4-3.3 | 1.8-2.0 |
+
+  - The fixed-slot tier runs the experts one row at a time, as suspected: per layer it repeats the selector copy, the
+    input upload, the program's three kernels and the row's combine eight times, about 40 us per row and 320 us per
+    layer against the fork's 91. Its slot kernels cost 1.30 ms per row and step, against 1.41 ms at one request. At
+    eight requests the fork no longer splits the mixers' work across ranks, so its pre and post grow from 2.8 to
+    5.8 ms, while Emmy's stay at the 8-row twins' cost.
+  - The eight-request run: Emmy's 195 s are about 148 s of decode steps and 47 s of steps that carry a prompt chunk;
+    the fork's 118-122 s are about 95-98 and 23-24 (a gap above twice the median counts as a prompt step). Decode is two
+    thirds of the gap.
+  - The largest lever for eight requests: one launch set of the fixed-slot program over all eight rows' slots (80
+    expert slices) and one combine, in place of eight row passes; a step of one request keeps the 1-row program.
+    Expected 8.5-10 ms per decode step if that launch reads the slices at 400-550 GB/s (the fork reads its about 74
+    distinct experts at about 550; Emmy's row pass reads at about 250): total output from 168 to about 204-212 tok/s
+    (the fork 270-279).
+  - The largest lever for the first token: the prefill experts as one launch per tier over all its experts, with the
+    weighting and the sum in the same pass. Removing the per-kernel cost and the 256-row padding alone is worth about
+    0.2 s per 4,096-token chunk; the fork's rate would give about 0.65 s. First token at 4K from 1.85 s to 1.2-1.65 s,
+    the same per chunk at every length (6-16 s of the 26 s gap at 130K), and 3-9% more total output at eight requests.
+  - Proposed next round: the eight-row fixed slots. Its cost is measured exactly (the runner loops over the rows), it
+    is 11 of the 13.8 ms GPU gap per decode step at eight requests and helps four requests too, and it is a new width
+    of an existing program, not a new kernel shape. Gate it before the runner and golden work, as part 2 did: trace
+    the 8-row program, bench it cold on the card, and go on only if the experts and their dispatch come to 8 ms per
+    step or less (from 15.4). The prefill experts come after it.
+  - Not measured: the rate one launch over 80 slices reaches (the gate measures it); how often eight rows pick the
+    same expert in real routing (about 7% of picks if routing were random); the wait for the slowest rank under the
+    wider program; four requests; the mixed steps at eight requests (estimated from the gaps, not profiled). The
+    fork's 4K first token has three samples: the two runs after the 3,921-token prompts hit the prefix cache.
+  - Boot: Emmy took 23 minutes on this main (1,387-1,417 s), the fork 7.
 - Gate, the definition of done. Both sides run step 2's production configuration: the same checkpoint, layout,
   context, key/value pool, concurrency, prefix-cache and MTP settings; fork, Emmy, Emmy, fork rounds; three repeats
   each:
