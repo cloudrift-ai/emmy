@@ -353,19 +353,11 @@ pub fn canonicalize_expressions(body: &Body, axes: &[Name]) -> Result<Body> {
         .enumerate()
         .map(|(i, name)| (name.clone(), i))
         .collect();
-    let mut failure: Option<Error> = None;
     let out: Vec<Arc<Statement>> = body
         .stmts()
         .iter()
         .map(|stmt| {
-            let rewritten =
-                Statement::map_expressions(stmt, &mut |e| match rewrite(e, &axis_order) {
-                    Ok(done) => done,
-                    Err(err) => {
-                        failure = Some(err);
-                        e.clone()
-                    }
-                });
+            let rewritten = Statement::try_map_expressions(stmt, &mut |e| rewrite(e, &axis_order))?;
             let mut bound: Vec<Name> = axes.to_vec();
             bound.extend(stmt.bound_axes().iter().map(|axis| axis.name.clone()));
             let nested = rewritten.nested();
@@ -379,9 +371,6 @@ pub fn canonicalize_expressions(body: &Body, axes: &[Name]) -> Result<Body> {
             Ok(with_bodies(&rewritten, bodies?))
         })
         .collect::<Result<_>>()?;
-    if let Some(err) = failure {
-        return Err(err);
-    }
     Ok(body.rebuilt(out))
 }
 

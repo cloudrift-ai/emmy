@@ -8,10 +8,14 @@ use std::sync::{Arc, Mutex, OnceLock};
 
 use crate::kinds::field::{Axes, Names};
 use crate::kinds::{Kind, Statement};
-use crate::{Error, Name, Result, locked};
+use crate::{Error, Name, Result, infallible, locked};
 
 /// What `Body::map` applies: a statement to the statements that replace it, or `None` to drop it.
 pub type MapFn<'a> = dyn FnMut(&Arc<Statement>) -> Option<Vec<Arc<Statement>>> + 'a;
+pub type TryMapStmtFn<'a, E> =
+    dyn FnMut(&Arc<Statement>) -> std::result::Result<Option<Arc<Statement>>, E> + 'a;
+pub type TryMapFn<'a, E> =
+    dyn FnMut(&Arc<Statement>) -> std::result::Result<Option<Vec<Arc<Statement>>>, E> + 'a;
 
 /// One statement inside a body: the body that holds it directly and its position there. It holds the statement and
 /// only a weak reference to the body, so a body may keep references to its own statements without keeping itself
@@ -250,8 +254,8 @@ impl Body {
     }
 
     /// The recursive 1:N transformer: each block's bodies are mapped first, then `f` on the children-rewritten
-    /// statement, which it keeps, drops (`None`) or replaces by several.
-    pub fn map(&self, f: &mut MapFn<'_>) -> Body {
+    /// statement, which it keeps, drops (`None`) or replaces by several. An error ends the walk.
+    pub fn try_map<E>(&self, f: &mut TryMapFn<'_, E>) -> std::result::Result<Body, E> {
         let mut out = Vec::new();
         let mut changed = false;
         for stmt in self.stmts() {
@@ -259,10 +263,11 @@ impl Body {
             let descended = if nested.is_empty() {
                 stmt.clone()
             } else {
-                let bodies: Vec<Body> = nested.iter().map(|body| body.map(f)).collect();
-                Statement::rebuild_bodies(stmt, bodies)
+                let bodies: std::result::Result<Vec<Body>, E> =
+                    nested.iter().map(|body| body.try_map(f)).collect();
+                Statement::rebuild_bodies(stmt, bodies?)
             };
-            match f(&descended) {
+            match f(&descended)? {
                 None => changed = true,
                 Some(replacement) => {
                     if !(replacement.len() == 1 && Arc::ptr_eq(&replacement[0], stmt)) {
@@ -272,15 +277,20 @@ impl Body {
                 }
             }
         }
-        if changed {
+        Ok(if changed {
             Body::new(out)
         } else {
             self.clone()
-        }
+        })
     }
 
-    /// `map` whose function keeps, drops or replaces one statement by one.
-    pub fn map_stmts(&self, f: &mut dyn FnMut(&Arc<Statement>) -> Option<Arc<Statement>>) -> Body {
+    /// `try_map` with a function that cannot fail.
+    pub fn map(&self, f: &mut MapFn<'_>) -> Body {
+        infallible(self.try_map(&mut |stmt| Ok::<_, std::convert::Infallible>(f(stmt))))
+    }
+
+    /// `try_map` whose function keeps, drops or replaces one statement by one.
+    pub fn try_map_stmts<E>(&self, f: &mut TryMapStmtFn<'_, E>) -> std::result::Result<Body, E> {
         let mut out = Vec::new();
         let mut same = true;
         for stmt in self.stmts() {
@@ -288,10 +298,11 @@ impl Body {
             let descended = if nested.is_empty() {
                 stmt.clone()
             } else {
-                let bodies: Vec<Body> = nested.iter().map(|body| body.map_stmts(f)).collect();
-                Statement::rebuild_bodies(stmt, bodies)
+                let bodies: std::result::Result<Vec<Body>, E> =
+                    nested.iter().map(|body| body.try_map_stmts(f)).collect();
+                Statement::rebuild_bodies(stmt, bodies?)
             };
-            match f(&descended) {
+            match f(&descended)? {
                 Some(kept) => {
                     if !Arc::ptr_eq(&kept, stmt) {
                         same = false;
@@ -301,7 +312,12 @@ impl Body {
                 None => same = false,
             }
         }
-        if same { self.clone() } else { Body::new(out) }
+        Ok(if same { self.clone() } else { Body::new(out) })
+    }
+
+    /// `try_map_stmts` with a function that cannot fail.
+    pub fn map_stmts(&self, f: &mut dyn FnMut(&Arc<Statement>) -> Option<Arc<Statement>>) -> Body {
+        infallible(self.try_map_stmts(&mut |stmt| Ok::<_, std::convert::Infallible>(f(stmt))))
     }
 
     // --- def-use readings -----------------------------------------------------------------------
@@ -721,5 +737,32 @@ impl Subroutine {
             result: self.result.clone(),
             buffers,
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::text::parse_body;
+
+    #[test]
+    fn a_failing_walk_returns_its_error_and_builds_nothing() {
+        let body =
+            parse_body("x = load X[i]\nfor k in 0..4:\n    y = load Y[k]\n    O[k] = y").unwrap();
+        let mut visited = 0;
+        let failed = body.try_map_stmts(&mut |stmt| {
+            visited += 1;
+            match &**stmt {
+                Statement::Load(load) if &*load.input == "Y" => Err("no Y"),
+                _ => Ok(Some(stmt.clone())),
+            }
+        });
+        assert_eq!(failed, Err("no Y"));
+        assert_eq!(visited, 2, "the walk stops at the error");
+        let kept = body.try_map(&mut |stmt| Ok::<_, ()>(Some(vec![stmt.clone()])));
+        assert!(
+            kept.unwrap().ptr_eq(&body),
+            "a walk that keeps every statement keeps the body"
+        );
     }
 }

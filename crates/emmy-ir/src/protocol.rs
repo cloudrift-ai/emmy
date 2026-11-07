@@ -505,6 +505,24 @@ impl Statement {
         }
     }
 
+    /// This statement with its expressions replaced positionally, as `expressions` lists them; itself when none
+    /// changes.
+    pub fn with_expressions(this: &Arc<Statement>, expressions: Vec<Expression>) -> Arc<Statement> {
+        let mut items = expressions.into_iter();
+        Statement::map_expressions(this, &mut |e| items.next().unwrap_or_else(|| e.clone()))
+    }
+
+    /// This statement with `f` on each of its expressions, in the order `expressions` lists them; itself when none
+    /// changes. An error ends the walk.
+    pub fn try_map_expressions<E>(
+        this: &Arc<Statement>,
+        f: &mut dyn FnMut(&Expression) -> std::result::Result<Expression, E>,
+    ) -> std::result::Result<Arc<Statement>, E> {
+        let mapped: std::result::Result<Vec<Expression>, E> =
+            this.expressions().iter().map(&mut *f).collect();
+        Ok(Statement::with_expressions(this, mapped?))
+    }
+
     /// This statement with every buffer renamed through `mapping`; itself when none changes.
     pub fn rename_buffers(this: &Arc<Statement>, mapping: &HashMap<Name, Name>) -> Arc<Statement> {
         Statement::rename_buffers_with(this, &Renaming::new(mapping))

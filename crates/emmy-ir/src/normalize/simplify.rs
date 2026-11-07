@@ -16,17 +16,7 @@ pub fn simplify_body(body: &Body) -> Result<Body> {
 }
 
 pub(crate) fn simplify_stmt(stmt: &Arc<Statement>, ctx: &SimplifyCtx) -> Result<Arc<Statement>> {
-    let mut failure: Option<Error> = None;
-    let stmt = Statement::map_expressions(stmt, &mut |e| match e.simplify(ctx) {
-        Ok(simplified) => simplified,
-        Err(err) => {
-            failure = Some(err);
-            e.clone()
-        }
-    });
-    if let Some(err) = failure {
-        return Err(err);
-    }
+    let stmt = Statement::try_map_expressions(stmt, &mut |e| e.simplify(ctx))?;
     match &*stmt {
         Statement::Select(s) => Ok(Arc::new(Statement::Select(decided(s)))),
         Statement::Loop(l) => {
