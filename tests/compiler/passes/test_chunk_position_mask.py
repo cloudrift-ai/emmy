@@ -13,9 +13,8 @@ import torch
 
 from emmy.compiler.backend.gpu_lock import gpu_lock
 from emmy.compiler.context import Context
-from emmy.compiler.dtype import decode_bf16
+from emmy.compiler.dtype import BF16, F8E4M3, decode_bf16
 from emmy.compiler.ir.cuda import CudaOp
-from emmy.compiler.dtype import BF16, F8E4M3
 from emmy.compiler.ir.pure.fold import Fold
 from emmy.compiler.ir.schedule import Stage, Tile, Work
 from emmy.compiler.ir.schedule.classic import refusals
