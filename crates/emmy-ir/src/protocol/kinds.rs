@@ -3,7 +3,7 @@
 
 use crate::body::Body;
 use crate::expr::{Expr, Expression, LitType};
-use crate::kinds::elementwise::Op;
+use crate::kinds::elementwise::{Elementwise, Op};
 use crate::kinds::field::{AxisRef, Names, NumOr};
 use crate::kinds::*;
 use crate::{Error, Name, Result};
@@ -107,7 +107,7 @@ impl Carry {
 impl Accum {
     /// The identity value of the accumulator: the op's neutral element, `0.0` when it has none.
     pub fn init(&self) -> Expression {
-        Expression::float(self.op.identity.unwrap_or(0.0))
+        Expression::float(self.op.identity().unwrap_or(0.0))
     }
 }
 
@@ -166,18 +166,18 @@ impl Affine {
                 let let_ = Let {
                     name: name.clone(),
                     value: Expression::float(value),
-                    dtype: self.affine.dtype.clone(),
+                    dtype: self.affine.dtype,
                 };
                 self.out.push(Arc::new(Statement::Let(let_)));
                 name
             }
-            fn step(&mut self, op: &str, args: Vec<Name>) -> Name {
+            fn step(&mut self, op: Elementwise, args: Vec<Name>) -> Name {
                 let name = self.fresh();
                 let assign = Assign {
                     name: name.clone(),
-                    op: Op::new(op),
+                    op: Op::Known(op),
                     args: args.into(),
-                    dtype: self.affine.dtype.clone(),
+                    dtype: self.affine.dtype,
                 };
                 self.out.push(Arc::new(Statement::Assign(assign)));
                 name
@@ -197,13 +197,17 @@ impl Affine {
                 arg.clone()
             } else {
                 let literal = chain.bound(coefficient.abs());
-                chain.step("multiply", vec![arg.clone(), literal])
+                chain.step(Elementwise::Multiply, vec![arg.clone(), literal])
             };
             total = Some(match total {
                 None if coefficient > 0.0 => term,
-                None => chain.step("negative", vec![term]),
+                None => chain.step(Elementwise::Negative, vec![term]),
                 Some(current) => chain.step(
-                    if coefficient > 0.0 { "add" } else { "subtract" },
+                    if coefficient > 0.0 {
+                        Elementwise::Add
+                    } else {
+                        Elementwise::Subtract
+                    },
                     vec![current, term],
                 ),
             });
@@ -216,9 +220,9 @@ impl Affine {
             let literal = chain.bound(self.offset.0.abs());
             total = chain.step(
                 if self.offset.0 > 0.0 {
-                    "add"
+                    Elementwise::Add
                 } else {
-                    "subtract"
+                    Elementwise::Subtract
                 },
                 vec![total, literal],
             );
@@ -235,9 +239,9 @@ impl Affine {
             }
             _ => out.push(Arc::new(Statement::Assign(Assign {
                 name: self.name.clone(),
-                op: Op::new("copy"),
+                op: Op::Known(Elementwise::Copy),
                 args: Names::from([total]),
-                dtype: self.dtype.clone(),
+                dtype: self.dtype,
             }))),
         }
         out
@@ -300,7 +304,7 @@ pub fn literal_binding(stmt: &Statement) -> Option<(&Name, f64)> {
     if let Statement::Let(let_) = stmt
         && let Expr::Literal(lit) = &*let_.value
         && lit.dtype == LitType::Float
-        && let_.dtype.as_ref().is_none_or(|d| d.name() == "f32")
+        && let_.dtype.is_none_or(|d| d == DType::F32)
     {
         return Some((&let_.name, lit.value.as_f64()));
     }

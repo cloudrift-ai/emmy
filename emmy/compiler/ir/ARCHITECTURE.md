@@ -294,8 +294,9 @@ two bodies with equal statements are equal and hash alike; a statement placed in
 time it is read, which passes rely on when they key side tables by statement; it survives the wire form and
 pickling. It is not a `tuple` and equals none: of a sequence it has a length, iteration, indexing and slicing, and a
 field that holds one defaults to a `Body`. Its identity reads an axis's window, which equality leaves out: two bodies
-may be equal and key apart. Its exact and clustered keys and its executable normal form are cached on that `Body`,
-and the memos shared across bodies are keyed by the body's text, which spells the windows, never by equality.
+may be equal and key apart. Its executable normal form is cached on that `Body`; the memos shared across bodies (the
+normal forms, the identities) are keyed by the body's exact form, which reads the windows, hints and the bits of every
+number, never by equality or by text.
 Callers use its walks (`iter`, `map`, `fold`, `iter_of_type`,
 `loads`, `writes`, `carries`, `accums`, `loops`), its def-use readings (`definitions`, `ssa_uses`, `axis_names`,
 `axis_dependencies`, `backward_cone`), its orders (`topological_order`, `coalesce`), `rename_buffers`, and its

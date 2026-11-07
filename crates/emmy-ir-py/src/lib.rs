@@ -9,30 +9,43 @@ mod convert;
 mod expression;
 mod statement;
 
-/// The elementwise tables the Python `ElementwiseImpl` reads: one source for both sides.
+/// The elementwise tables the Python `ElementwiseImpl` reads, each a view of the operations' properties.
 fn elementwise_tables(m: &Bound<'_, PyModule>) -> PyResult<()> {
+    use emmy_ir::kinds::elementwise::{ALIASES, Elementwise};
     let py = m.py();
+    fn texts(keep: fn(Elementwise) -> bool) -> Vec<&'static str> {
+        Elementwise::ALL
+            .iter()
+            .copied()
+            .filter(|op| keep(*op))
+            .map(Elementwise::text)
+            .collect()
+    }
     m.add(
         "COMMUTATIVE_OPS",
-        PyFrozenSet::new(py, emmy_ir::kinds::elementwise::COMMUTATIVE.iter())?,
+        PyFrozenSet::new(py, texts(Elementwise::commutative))?,
     )?;
     m.add(
         "ASSOCIATIVE_OPS",
-        PyFrozenSet::new(py, emmy_ir::kinds::elementwise::ASSOCIATIVE.iter())?,
+        PyFrozenSet::new(py, texts(Elementwise::associative))?,
     )?;
     let identity = PyDict::new(py);
-    for (name, value) in emmy_ir::kinds::elementwise::IDENTITY {
-        identity.set_item(name, value)?;
+    for op in Elementwise::ALL {
+        if let Some(value) = op.identity() {
+            identity.set_item(op.text(), value)?;
+        }
     }
     m.add("OP_IDENTITY", identity)?;
     let clusters = PyDict::new(py);
-    for (name, representative) in emmy_ir::kinds::elementwise::CLUSTERS {
-        clusters.set_item(name, representative)?;
+    for op in Elementwise::ALL {
+        if let Some(representative) = op.cluster() {
+            clusters.set_item(op.text(), representative.text())?;
+        }
     }
     m.add("OP_CLUSTERS", clusters)?;
     let aliases = PyDict::new(py);
-    for (alias, canonical) in emmy_ir::kinds::elementwise::ALIASES {
-        aliases.set_item(alias, canonical)?;
+    for (alias, canonical) in ALIASES {
+        aliases.set_item(alias, canonical.text())?;
     }
     m.add("OP_ALIASES", aliases)?;
     Ok(())
@@ -45,10 +58,5 @@ fn emmy_ir_module(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(statement::_statement_from_text, m)?)?;
     body::register(m)?;
     elementwise_tables(m)?;
-    m.add("KIND_NAMES", statement::kind_names())?;
-    m.add(
-        "INTEGER_DTYPES",
-        PyFrozenSet::new(m.py(), emmy_ir::kinds::dtype::INTEGER_NAMES.iter())?,
-    )?;
     Ok(())
 }

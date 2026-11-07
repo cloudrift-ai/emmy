@@ -407,17 +407,13 @@ struct Arguments<'a, 'py> {
 
 impl<'py> Arguments<'_, 'py> {
     /// The argument for `field`, by keyword or by position, `None` when it was not given.
-    fn take(
-        &mut self,
-        field: &str,
-        roles: emmy_ir::kinds::Roles,
-    ) -> PyResult<Option<Bound<'py, PyAny>>> {
+    fn take(&mut self, field: &str) -> PyResult<Option<Bound<'py, PyAny>>> {
         if let Some(kwargs) = self.kwargs
             && let Some(value) = kwargs.get_item(field)?
         {
             return Ok(Some(value));
         }
-        if roles.contains_any(emmy_ir::kinds::KW_ONLY) {
+        if self.fields.iter().any(|f| f.name == field && f.kw_only) {
             return Ok(None);
         }
         if self.positional < self.args.len() {
@@ -429,11 +425,7 @@ impl<'py> Arguments<'_, 'py> {
     }
 
     fn finish(&self) -> PyResult<()> {
-        let allowed = self
-            .fields
-            .iter()
-            .filter(|f| !f.roles.contains_any(emmy_ir::kinds::KW_ONLY))
-            .count();
+        let allowed = self.fields.iter().filter(|f| !f.kw_only).count();
         if self.args.len() > allowed {
             return Err(too_many(self.kind, allowed));
         }
@@ -665,7 +657,7 @@ macro_rules! define_py_kinds {
         use emmy_ir::kinds as k;
         let mut given = Arguments { kind: k::$Type::NAME, fields: k::$Type::FIELDS, args: $args, kwargs: $kwargs, positional: 0 };
         let out = k::$Type {
-            $( $field: match given.take(stringify!($field), k::Roles::NONE $(.or(k::$role))*)? {
+            $( $field: match given.take(stringify!($field))? {
                 Some(value) => define_py_kinds!(@convert $Type $field [$ty] value $held),
                 None => {
                     $held.push(None);
@@ -874,13 +866,13 @@ impl Accum {
     #[getter]
     fn commutative(slf: &Bound<'_, Self>) -> PyResult<bool> {
         let accum: &emmy_ir::kinds::Accum = inner(slf.as_super().get())?;
-        Ok(accum.op.commutative)
+        Ok(accum.op.commutative())
     }
 
     #[getter]
     fn has_identity(slf: &Bound<'_, Self>) -> PyResult<bool> {
         let accum: &emmy_ir::kinds::Accum = inner(slf.as_super().get())?;
-        Ok(accum.op.identity.is_some())
+        Ok(accum.op.identity().is_some())
     }
 }
 
@@ -942,14 +934,6 @@ impl StridedLoop {
         let l: &emmy_ir::kinds::StridedLoop = inner(slf.as_super().get())?;
         Ok(l.is_reduce())
     }
-}
-
-/// The names of every kind, for the module's listing.
-pub fn kind_names() -> Vec<&'static str> {
-    emmy_ir::kinds::Kind::ALL
-        .iter()
-        .map(|kind| kind.name())
-        .collect()
 }
 
 /// Every statement a Python iterable holds.

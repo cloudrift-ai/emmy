@@ -6,8 +6,10 @@ use std::collections::{HashMap, HashSet};
 use std::hash::{Hash, Hasher};
 use std::sync::{Arc, Mutex, OnceLock};
 
+use crate::expr::{Expression, Num};
 use crate::kinds::field::{Axes, AxisRef, Names, Visitor};
 use crate::kinds::{Kind, Roles, Statement};
+use crate::numbering::{Key, expression_key};
 use crate::{Error, Name, Result, infallible, locked};
 
 /// What `Body::map` applies: a statement to the statements that replace it, or `None` to drop it.
@@ -93,34 +95,74 @@ enum Normalized {
     Other(Body),
 }
 
-/// A body as a memo key: equal to another when the statements are equal and every axis is exactly, hint and window
-/// included, which body equality leaves out (a window is provenance to the body and identity material to what the
-/// memos keep). The hash is computed once and kept with the body, so no key is a printed text.
+/// A body as a memo key: equal to another when the statements are equal and so is everything body equality leaves
+/// out, the exact material: every axis's hint and window (provenance to the body, identity material to what the
+/// memos keep), every expression with its literals by bits, and every number a field holds by bits (a signed zero
+/// keys apart from zero, every NaN alike, as the digest keys them). The hash is computed once and kept with the body,
+/// so no key is a printed text.
 #[derive(Clone, Debug)]
-pub struct Exact(pub Body);
+pub struct MemoKey(pub Body);
 
-impl PartialEq for Exact {
-    fn eq(&self, other: &Exact) -> bool {
-        if self.0.ptr_eq(&other.0) {
-            return true;
-        }
-        if self.0.exact_hash() != other.0.exact_hash() || self.0 != other.0 {
-            return false;
-        }
-        let (mine, theirs) = (self.0.axes(), other.0.axes());
-        mine.len() == theirs.len()
-            && mine
-                .iter()
-                .zip(theirs.iter())
-                .all(|(a, b)| Arc::ptr_eq(a, b) || a.exact_eq(b.as_ref()))
+impl PartialEq for MemoKey {
+    fn eq(&self, other: &MemoKey) -> bool {
+        self.0.ptr_eq(&other.0)
+            || (self.0.exact_hash() == other.0.exact_hash()
+                && self.0 == other.0
+                && self.0.exact_material() == other.0.exact_material())
     }
 }
 
-impl Eq for Exact {}
+impl Eq for MemoKey {}
 
-impl Hash for Exact {
+impl Hash for MemoKey {
     fn hash<H: Hasher>(&self, state: &mut H) {
         self.0.exact_hash().hash(state);
+    }
+}
+
+/// What body equality leaves out, in walk order.
+#[derive(Default, PartialEq, Eq, Hash)]
+struct Material {
+    axes: Vec<ExactAxis>,
+    expressions: Vec<Key>,
+    numbers: Vec<Key>,
+}
+
+/// An axis compared and hashed exactly, hint and window included.
+struct ExactAxis(AxisRef);
+
+impl PartialEq for ExactAxis {
+    fn eq(&self, other: &ExactAxis) -> bool {
+        Arc::ptr_eq(&self.0, &other.0) || self.0.exact_eq(&other.0)
+    }
+}
+
+impl Eq for ExactAxis {}
+
+impl Hash for ExactAxis {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        self.0.exact_hash(state);
+    }
+}
+
+impl Visitor for Material {
+    fn expression(&mut self, _roles: Roles, expression: &Expression) {
+        self.expressions
+            .push(expression_key(expression, &mut |_| None));
+    }
+    fn axis(&mut self, _roles: Roles, axis: &AxisRef) {
+        self.axes.push(ExactAxis(axis.clone()));
+    }
+    fn number(&mut self, value: Num) {
+        self.numbers.push(Key::num(value));
+    }
+    fn body(&mut self, _roles: Roles, body: &Body) {
+        for stmt in body.stmts() {
+            stmt.visit(self);
+        }
+    }
+    fn carried(&mut self, _roles: Roles, stmt: &Arc<Statement>) {
+        stmt.visit(self);
     }
 }
 
@@ -188,37 +230,21 @@ impl Body {
         }))
     }
 
-    /// Every axis a statement of this subtree holds, in field order: what the exact key compares beyond equality.
-    fn axes(&self) -> Vec<AxisRef> {
-        struct Collect(Vec<AxisRef>);
-        impl Visitor for Collect {
-            fn axis(&mut self, _roles: Roles, axis: &AxisRef) {
-                self.0.push(axis.clone());
-            }
-            fn body(&mut self, _roles: Roles, body: &Body) {
-                for stmt in body.stmts() {
-                    stmt.visit(self);
-                }
-            }
-            fn carried(&mut self, _roles: Roles, stmt: &Arc<Statement>) {
-                stmt.visit(self);
-            }
-        }
-        let mut collect = Collect(Vec::new());
+    /// What the memo key compares beyond equality, collected from the whole subtree.
+    fn exact_material(&self) -> Material {
+        let mut material = Material::default();
         for stmt in self.stmts() {
-            stmt.visit(&mut collect);
+            stmt.visit(&mut material);
         }
-        collect.0
+        material
     }
 
-    /// The hash of the exact form: the content hash with every axis's hint and window, computed once.
-    pub fn exact_hash(&self) -> u64 {
+    /// The hash of the exact form: the content hash with the exact material, computed once.
+    fn exact_hash(&self) -> u64 {
         *self.0.exact.get_or_init(|| {
             let mut hasher = std::collections::hash_map::DefaultHasher::new();
             self.0.hash.hash(&mut hasher);
-            for axis in self.axes() {
-                axis.exact_hash(&mut hasher);
-            }
+            self.exact_material().hash(&mut hasher);
             hasher.finish()
         })
     }
@@ -1093,12 +1119,35 @@ mod tests {
         let again = parse_body("for i in 0..n:\n    x = load X[i]\n    O[i] = x").unwrap();
         assert_eq!(plain, hinted, "a hint is no part of body equality");
         assert_eq!(plain, windowed, "a window is no part of body equality");
-        assert_eq!(Exact(plain.clone()), Exact(again.clone()));
+        assert_eq!(MemoKey(plain.clone()), MemoKey(again.clone()));
         assert_eq!(plain.exact_hash(), again.exact_hash());
-        assert_ne!(Exact(plain.clone()), Exact(hinted.clone()));
+        assert_ne!(MemoKey(plain.clone()), MemoKey(hinted.clone()));
         assert_ne!(plain.exact_hash(), hinted.exact_hash());
-        assert_ne!(Exact(plain.clone()), Exact(windowed.clone()));
+        assert_ne!(MemoKey(plain.clone()), MemoKey(windowed.clone()));
         assert_ne!(plain.exact_hash(), windowed.exact_hash());
+    }
+
+    #[test]
+    fn the_memo_key_reads_numbers_by_their_bits() {
+        let zero = parse_body("let x = 0.0\nO[] = x").unwrap();
+        let negative_zero = parse_body("let x = -0.0\nO[] = x").unwrap();
+        assert_eq!(
+            zero, negative_zero,
+            "a literal compares as Python's float does"
+        );
+        assert_ne!(MemoKey(zero.clone()), MemoKey(negative_zero.clone()));
+        assert_ne!(zero.exact_hash(), negative_zero.exact_hash());
+        let nan = parse_body("init f32 acc = nan\nO[] = acc").unwrap();
+        let again = parse_body("init f32 acc = nan\nO[] = acc").unwrap();
+        assert_eq!(
+            MemoKey(nan.clone()),
+            MemoKey(again.clone()),
+            "every NaN keys alike"
+        );
+        assert_eq!(nan.exact_hash(), again.exact_hash());
+        let seeded = parse_body("state[i] <- v seed -0.0").unwrap();
+        let other_seed = parse_body("state[i] <- v seed 0.0").unwrap();
+        assert_ne!(MemoKey(seeded), MemoKey(other_seed));
     }
 
     #[test]

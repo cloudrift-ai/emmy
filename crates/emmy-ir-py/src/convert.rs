@@ -8,7 +8,9 @@ use emmy_ir::body::Body;
 use emmy_ir::expr::{Expression, Num};
 use emmy_ir::kinds::axis::{Axis, Dim, Window};
 use emmy_ir::kinds::elementwise::Op;
-use emmy_ir::kinds::field::{DType, Float, Int2, NumOr, Shape3, SubroutineRef};
+use emmy_ir::kinds::field::{
+    DType, Float, FragmentLayout, Int2, NumOr, RasterOrient, Role, Shape3, SubroutineRef, Swizzle,
+};
 use emmy_ir::kinds::{FragmentArg, SelectBranch, Statement};
 use emmy_ir::{Error, Name};
 use pyo3::exceptions::{
@@ -245,7 +247,7 @@ pub fn dtype_to_py<'py>(py: Python<'py>, dtype: &DType) -> PyResult<Bound<'py, P
 }
 
 pub fn op_to_py<'py>(py: Python<'py>, op: &Op) -> PyResult<Bound<'py, PyAny>> {
-    ELEMENTWISE.get(py)?.call1((&*op.name,))
+    ELEMENTWISE.get(py)?.call1((op.name(),))
 }
 
 fn is_tuple_of_str(value: &Bound<'_, PyAny>) -> bool {
@@ -541,12 +543,29 @@ impl PyField for DType {
         if value.is_instance_of::<PyString>() {
             let dtype = DTYPE_GET.get(value.py())?.call1((value,))?;
             let name: String = dtype.getattr("name")?.extract()?;
-            return Ok((DType::new(&name), Some(dtype.unbind())));
+            return Ok((name.parse().py()?, Some(dtype.unbind())));
         }
         let name: String = value.getattr("name")?.extract()?;
-        Ok((DType::new(&name), Some(value.clone().unbind())))
+        Ok((name.parse().py()?, Some(value.clone().unbind())))
     }
 }
+
+/// A closed set crosses the boundary as its text: Python reads and passes the spelling.
+macro_rules! vocabulary_py_field {
+    ($($ty:ty),*) => { $(
+        impl PyField for $ty {
+            fn to_py(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+                Ok(PyString::new(py, &self.text()).into_any().unbind())
+            }
+            fn from_py(value: &Bound<'_, PyAny>) -> PyResult<Extracted<Self>> {
+                let text: String = value.extract()?;
+                Ok((text.parse().py()?, None))
+            }
+        }
+    )* };
+}
+
+vocabulary_py_field!(Swizzle, RasterOrient, FragmentLayout, Role);
 
 impl PyField for i64 {
     fn to_py(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {

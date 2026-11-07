@@ -53,8 +53,6 @@ pub const BODY: Roles = Roles(1 << 10);
 pub const STMTS: Roles = Roles(1 << 11);
 pub const TERM: Roles = Roles(1 << 12);
 pub const RECORD: Roles = Roles(1 << 13);
-/// A constructor property carried with the roles: the field is given by keyword only (an `Init`'s dtype).
-pub const KW_ONLY: Roles = Roles(1 << 20);
 
 /// The SSA-name roles a rename maps.
 pub const NAMES: Roles = DEFINES.or(READS).or(UPDATES).or(LOCAL);
@@ -173,7 +171,7 @@ macro_rules! with_kinds {
                 shared Accum {} {
                     name: Name [DEFINES],
                     value: Name [READS],
-                    op: Op [] = Op::new("add"),
+                    op: Op [] = Op::Known($crate::kinds::elementwise::Elementwise::Add),
                     dtype: Option<DType> [] = None,
                     axes: Names [] = Names::from([]),
                     base: Option<Name> [READS] = None,
@@ -257,7 +255,7 @@ macro_rules! with_kinds {
                     values: Names [READS],
                     value_dtype: Option<DType> [] = None,
                     atomic: bool [] = false,
-                    swizzle: Name [] = Name::from("NONE"),
+                    swizzle: Swizzle [] = Swizzle::NONE,
                 }
                 /// Coord-predicated value binding — replaces Mux.
                 ///
@@ -427,7 +425,7 @@ macro_rules! with_kinds {
                     aux_threads: i64 [] = 0,
                     raster_axes: Option<(Name, Name)> [AXIS_NAME] = None,
                     raster_group: Option<i64> [] = None,
-                    raster_orient: Name [] = Name::from("m"),
+                    raster_orient: RasterOrient [] = RasterOrient::M,
                     spread: bool [] = false,
                 }
                 /// Issue one `cp.async.{ca,cg}.shared.global` instruction.
@@ -450,7 +448,7 @@ macro_rules! with_kinds {
                     src: Name [BUFFER_READ],
                     src_index: Exprs [EXPRESSION],
                     nbytes: i64 [] = 4,
-                    swizzle: Name [] = Name::from("NONE"),
+                    swizzle: Swizzle [] = Swizzle::NONE,
                     lane_index: Option<Exprs> [EXPRESSION] = None,
                     lane_rows: i64 [] = 0,
                     valid: Option<Expression> [EXPRESSION] = None,
@@ -475,7 +473,7 @@ macro_rules! with_kinds {
                     src_buf: Name [BUFFER_READ],
                     src_shape: Ints [],
                     box_extents: Ints [],
-                    swizzle: Name [] = Name::from("NONE"),
+                    swizzle: Swizzle [] = Swizzle::NONE,
                     dtype: Name [] = Name::from("float"),
                 }
                 /// `cp.async.bulk.tensor.<rank>d` — single-thread box copy.
@@ -556,7 +554,7 @@ macro_rules! with_kinds {
                     combine_states: Stmts [STMTS],
                     length: i64 [],
                     tid_var: Name [],
-                    dtype: DType [] = DType::new("f32"),
+                    dtype: DType [] = DType::F32,
                     barrier_id: i64 [] = 0,
                     barrier_count: Option<i64> [] = None,
                     inner: Option<(Name, i64)> [] = None,
@@ -587,7 +585,7 @@ macro_rules! with_kinds {
                     state_b: Names [LOCAL],
                     combine_states: Stmts [STMTS],
                     length: i64 [],
-                    dtype: DType [] = DType::new("f32"),
+                    dtype: DType [] = DType::F32,
                     prefix: bool [] = false,
                 }
                 /// Broadcast the last lane's state within each aligned lane group, in place.
@@ -625,7 +623,7 @@ macro_rules! with_kinds {
                     op: Op [],
                     args: FragmentArgs [RECORD],
                     in_place: bool [] = false,
-                    layout: Name [] = Name::from("m16n8k16"),
+                    layout: FragmentLayout [] = FragmentLayout::M16n8k16,
                     post: Ops [] = Ops::from([]),
                     row_base: Option<Expression> [EXPRESSION] = None,
                     col_base: Option<Expression> [EXPRESSION] = None,
@@ -647,8 +645,8 @@ macro_rules! with_kinds {
                     bot: Name [DEFINES],
                     frags: Names [READS],
                     op: Op [],
-                    layout: Name [] = Name::from("m16n8k16"),
-                    dtype: DType [] = DType::new("f32"),
+                    layout: FragmentLayout [] = FragmentLayout::M16n8k16,
+                    dtype: DType [] = DType::F32,
                 }
                 /// Declare an mma.sync per-thread register array.
                 ///
@@ -667,7 +665,7 @@ macro_rules! with_kinds {
                 /// an array of them.
                 kernel RegFragment {} {
                     name: Name [DEFINES | LOCAL_BUFFER],
-                    role: Name [],
+                    role: Role [],
                     shape: Shape3 [],
                     dtype: DType [],
                     count: i64 [] = 1,
@@ -693,7 +691,7 @@ macro_rules! with_kinds {
                     frag: Name [DEFINES],
                     src_buffer: Name [BUFFER_READ],
                     src_index: Exprs [EXPRESSION],
-                    role: Name [],
+                    role: Role [],
                     ldm: i64 [] = 0,
                 }
                 /// `ldmatrix.sync.aligned.m8n8.x{2,4}[.trans].b16` — load one operand fragment from smem into a per-thread
@@ -721,9 +719,9 @@ macro_rules! with_kinds {
                     frag: Name [UPDATES],
                     src_buffer: Name [BUFFER_READ],
                     src_index: Exprs [EXPRESSION],
-                    role: Name [],
+                    role: Role [],
                     ldm: i64 [] = 0,
-                    swizzle: Name [] = Name::from("NONE"),
+                    swizzle: Swizzle [] = Swizzle::NONE,
                     staged: bool [] = true,
                     gmem_guard: Option<(Expression, Expression)> [EXPRESSION] = None,
                     k_zero: Option<(Expression, Expression)> [EXPRESSION] = None,
@@ -733,7 +731,7 @@ macro_rules! with_kinds {
                     scale_buffer: Option<Name> [BUFFER_READ] = None,
                     scale_index: Exprs [EXPRESSION] = Exprs::from([]),
                     scale_ldm: i64 [] = 0,
-                    fragment_layout: Name [] = Name::from("m16n8k16"),
+                    fragment_layout: FragmentLayout [] = FragmentLayout::M16n8k16,
                     fragment_index: i64 [] = 0,
                 }
                 /// `mma.sync.aligned.m{M}n{N}k{K}.row.col.f32.{ab}.{ab}.f32` — one tensor-core MMA via inline PTX (the `s16816`
@@ -767,7 +765,7 @@ macro_rules! with_kinds {
                 kernel FragmentPromote {} {
                     dst: Name [UPDATES],
                     src: Name [UPDATES],
-                    fragment_layout: Name [] = Name::from("m16n8k16"),
+                    fragment_layout: FragmentLayout [] = FragmentLayout::M16n8k16,
                 }
                 /// Convert mma **C fragments** into one 16-bit operand fragment in registers.
                 ///
@@ -780,9 +778,9 @@ macro_rules! with_kinds {
                     frag: Name [DEFINES],
                     srcs: Names [READS],
                     ab_dtype: Name [] = Name::from("f16"),
-                    fragment_layout: Name [] = Name::from("m16n8k16"),
+                    fragment_layout: FragmentLayout [] = FragmentLayout::M16n8k16,
                     part: i64 [] = 0,
-                    role: Name [] = Name::from("a"),
+                    role: Role [] = Role::A,
                 }
                 /// `unsigned long long name = emmy_wgmma_desc(...)` — the shared-memory matrix descriptor a `wgmma.mma_async`
                 /// operand is read through (:func:`wgmma_descriptor_bits`). Replaces :class:`LdmatrixLoad` on a descriptor-fed
@@ -793,7 +791,7 @@ macro_rules! with_kinds {
                     name: Name [DEFINES],
                     smem: Name [BUFFER_READ],
                     smem_index: Option<Expression> [EXPRESSION],
-                    swizzle: Name [],
+                    swizzle: Swizzle [],
                     lbo_bytes: i64 [],
                     sbo_bytes: i64 [],
                 }
@@ -890,10 +888,10 @@ macro_rules! with_kinds {
                     m_guard: Option<(Expression, Expression)> [EXPRESSION] = None,
                     n_guard: Option<(Expression, Expression)> [EXPRESSION] = None,
                     atomic: bool [] = false,
-                    fragment_layout: Name [] = Name::from("m16n8k16"),
+                    fragment_layout: FragmentLayout [] = FragmentLayout::M16n8k16,
                     volta_interleaved: bool [] = false,
                     fragment_index: Int2 [] = Int2(0, 0),
-                    swizzle: Name [] = Name::from("NONE"),
+                    swizzle: Swizzle [] = Swizzle::NONE,
                     row_dim: Option<i64> [] = None,
                     col_dim: Option<i64> [] = None,
                     run: Stmts [STMTS] = Stmts::from([]),
@@ -935,6 +933,8 @@ pub struct FieldInfo {
     pub name: &'static str,
     pub roles: Roles,
     pub has_default: bool,
+    /// Given by keyword only in the Python constructor (an `Init`'s dtype): `KW_ONLY` in the declaration, no role.
+    pub kw_only: bool,
 }
 
 impl FieldInfo {
@@ -1177,17 +1177,17 @@ macro_rules! define_kinds {
     (@fields $Type:ident { $( $field:ident : $ty:ty [$($role:ident)|*] $(= $default:expr)? ,)* }) => {
         pub const NAME: &'static str = stringify!($Type);
         pub const FIELDS: &'static [FieldInfo] = &[
-            $( FieldInfo { name: stringify!($field), roles: Roles::NONE $(.or($role))*, has_default: $crate::__has_default!($($default)?) }, )*
+            $( FieldInfo { name: stringify!($field), roles: Roles::NONE $(.or(define_kinds!(@role $role)))*, has_default: $crate::__has_default!($($default)?), kw_only: define_kinds!(@kw_only $($role)|*) }, )*
         ];
 
         /// Visit every role-playing value, in field order.
         pub fn visit(&self, visitor: &mut dyn $crate::kinds::field::Visitor) {
-            $( <$ty as $crate::kinds::field::Field>::visit(&self.$field, Roles::NONE $(.or($role))*, visitor); )*
+            $( <$ty as $crate::kinds::field::Field>::visit(&self.$field, Roles::NONE $(.or(define_kinds!(@role $role)))*, visitor); )*
         }
 
         /// The same with every role-playing value passed through `rewriter`.
         pub fn rewrite(&self, rewriter: &mut dyn $crate::kinds::field::Rewriter) -> $Type {
-            $Type { $( $field: <$ty as $crate::kinds::field::Field>::rewrite(&self.$field, Roles::NONE $(.or($role))*, rewriter), )* }
+            $Type { $( $field: <$ty as $crate::kinds::field::Field>::rewrite(&self.$field, Roles::NONE $(.or(define_kinds!(@role $role)))*, rewriter), )* }
         }
 
         /// Whether `other` holds the same values, field by field, by identity where a field is shared.
@@ -1264,12 +1264,17 @@ macro_rules! define_kinds {
 
         /// The one name a single-value kind defines: its `name` field, when that field defines.
         pub fn name(&self) -> Option<&$crate::Name> {
-            $( if stringify!($field) == "name" && (Roles::NONE $(.or($role))*).contains_any(DEFINES) { return <$ty as $crate::kinds::field::Field>::as_name(&self.$field); } )*
+            $( if stringify!($field) == "name" && (Roles::NONE $(.or(define_kinds!(@role $role)))*).contains_any(DEFINES) { return <$ty as $crate::kinds::field::Field>::as_name(&self.$field); } )*
             None
         }
     };
     (@layer shared) => { Layer::Shared };
     (@layer kernel) => { Layer::Kernel };
+    (@role KW_ONLY) => { Roles::NONE };
+    (@role $role:ident) => { $role };
+    (@kw_only) => { false };
+    (@kw_only KW_ONLY $(| $rest:ident)*) => { true };
+    (@kw_only $role:ident $(| $rest:ident)*) => { define_kinds!(@kw_only $($rest)|*) };
     (@check $k:ident {}) => {{ let _ = &$k; Ok(()) }};
     (@check $k:ident {CHECKED $(| $rest:tt)*}) => { $k.validate() };
     (@check $k:ident {$flag:tt $(| $rest:tt)*}) => { define_kinds!(@check $k {$($rest)|*}) };
@@ -1296,8 +1301,8 @@ use crate::body::Body;
 use crate::expr::Expression;
 use crate::kinds::elementwise::Op;
 pub use crate::kinds::field::{
-    Axes, AxisRef, Branches, DType, Exprs, Float, Floats, FragmentArgs, Int2, Ints, Names, NumOr,
-    Ops, Shape3, Stmts, SubroutineRef,
+    Axes, AxisRef, Branches, DType, Exprs, Float, Floats, FragmentArgs, FragmentLayout, Int2, Ints,
+    Names, NumOr, Ops, RasterOrient, Role, Shape3, Stmts, SubroutineRef, Swizzle, SwizzleMode,
 };
 
 with_kinds!(define_kinds);

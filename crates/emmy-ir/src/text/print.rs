@@ -98,7 +98,7 @@ pub fn lines(stmt: &Statement, indent: &str, out: &mut Vec<String>) -> Result<()
             "{}{} = {}({})",
             typed(&s.dtype),
             spell_stmt_name(&s.name)?,
-            s.op.name,
+            s.op,
             names(&s.args)?
         ),
         Statement::Affine(s) => format!(
@@ -130,7 +130,7 @@ pub fn lines(stmt: &Statement, indent: &str, out: &mut Vec<String>) -> Result<()
                 "{}{} <- {}({}){}",
                 typed(&s.dtype),
                 spell_stmt_name(&s.name)?,
-                s.op.name,
+                s.op,
                 names(&[base.clone(), s.value.clone()])?,
                 over
             )
@@ -155,8 +155,8 @@ pub fn lines(stmt: &Statement, indent: &str, out: &mut Vec<String>) -> Result<()
             } else {
                 spell_stmt_name(&s.values[0])?
             };
-            let swizzle = if &*s.swizzle != "NONE" {
-                format!(" swizzle={}", spell_stmt_name(&s.swizzle)?)
+            let swizzle = if s.swizzle != Swizzle::NONE {
+                format!(" swizzle={}", spell_stmt_name(&s.swizzle.text())?)
             } else {
                 String::new()
             };

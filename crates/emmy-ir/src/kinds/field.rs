@@ -6,7 +6,7 @@ use std::hash::{Hash, Hasher};
 use std::sync::Arc;
 
 use crate::body::Body;
-use crate::expr::{Expression, Num, float_repr, hash_f64, spell_name};
+use crate::expr::{Expression, Num, float_repr, hash_f64, same_f64, spell_name};
 use crate::kinds::axis::Axis;
 use crate::kinds::axis::spell_axis;
 use crate::kinds::elementwise::Op;
@@ -14,7 +14,7 @@ use crate::kinds::{
     AXIS, AXIS_NAME, BODY, BUFFERS, EXPRESSION, FragmentArg, NAMES, Roles, STMTS, SelectBranch,
     Statement, TERM,
 };
-use crate::{Error, Name, Result};
+use crate::{Error, Name, Result, closed_set};
 
 /// Words the reader gives a meaning, so a name spelled like one is written between backticks.
 pub const KEYWORDS: [&str; 25] = [
@@ -39,18 +39,76 @@ pub type Ops = Arc<[Op]>;
 pub type Ints = Arc<[i64]>;
 pub type Floats = Arc<[Float]>;
 
-/// An element type by its canonical name.
-#[derive(Clone, PartialEq, Eq, Hash, Debug)]
-pub struct DType(pub Name);
+pub use crate::kinds::dtype::DType;
 
-impl DType {
-    pub fn new(name: &str) -> DType {
-        DType(name.into())
+closed_set! {
+    /// How a shared-memory slab's 16-byte chunks are permuted against bank conflicts.
+    pub enum SwizzleMode ("swizzle") {
+        None = "NONE", B32 = "B32", B64 = "B64", B128 = "B128", V70A = "V70A", V70B = "V70B",
     }
+}
 
-    pub fn name(&self) -> &str {
-        &self.0
+/// A swizzle: its mode and, for a software swizzle over a slab row wider than one atom, the row shift the XOR reads
+/// at in place of the mode's own (`B128@7`).
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+pub struct Swizzle {
+    pub mode: SwizzleMode,
+    pub shift: Option<u8>,
+}
+
+impl Swizzle {
+    pub const NONE: Swizzle = Swizzle {
+        mode: SwizzleMode::None,
+        shift: None,
+    };
+
+    pub fn text(self) -> String {
+        match self.shift {
+            None => self.mode.text().to_string(),
+            Some(shift) => format!("{}@{shift}", self.mode),
+        }
     }
+}
+
+impl std::fmt::Display for Swizzle {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.text())
+    }
+}
+
+impl std::str::FromStr for Swizzle {
+    type Err = Error;
+
+    fn from_str(text: &str) -> Result<Swizzle> {
+        let (mode, shift) = text
+            .split_once('@')
+            .map_or((text, None), |(m, s)| (m, Some(s)));
+        let shift = shift
+            .map(|s| {
+                s.parse::<u8>()
+                    .map_err(|_| Error::Value(format!("no swizzle shift {s}")))
+            })
+            .transpose()?;
+        Ok(Swizzle {
+            mode: mode.parse()?,
+            shift,
+        })
+    }
+}
+
+closed_set! {
+    /// Which tile axis a raster walks first.
+    pub enum RasterOrient ("raster orientation") { M = "m", N = "n", }
+}
+
+closed_set! {
+    /// The MMA fragment layout a register fragment follows.
+    pub enum FragmentLayout ("fragment layout") { M16n8k16 = "m16n8k16", M8n8k4 = "m8n8k4", Wgmma = "wgmma", }
+}
+
+closed_set! {
+    /// An MMA operand's place.
+    pub enum Role ("fragment role") { A = "a", B = "b", C = "c", }
 }
 
 /// A float with the equality a Python float has (`0.0 == -0.0`), hashable.
@@ -59,7 +117,7 @@ pub struct Float(pub f64);
 
 impl PartialEq for Float {
     fn eq(&self, other: &Self) -> bool {
-        self.0 == other.0
+        same_f64(self.0, other.0)
     }
 }
 
@@ -117,6 +175,8 @@ pub trait Visitor {
     fn name(&mut self, _roles: Roles, _name: &Name) {}
     fn expression(&mut self, _roles: Roles, _expression: &Expression) {}
     fn axis(&mut self, _roles: Roles, _axis: &AxisRef) {}
+    /// A number a field holds as plain data: a coefficient, an offset, a literal seed.
+    fn number(&mut self, _value: Num) {}
     fn body(&mut self, _roles: Roles, _body: &Body) {}
     fn carried(&mut self, _roles: Roles, _stmt: &Arc<Statement>) {}
 }
@@ -587,12 +647,20 @@ impl Field for Stmts {
 
 /// A field that plays no role: its type tag, its spelling, its reading, and any accessor it answers.
 macro_rules! plain_field {
+    ($ty:ty, $tag:expr, |$this:ident, $out:ident| $spell:expr, |$value:ident| $read:expr, fn visit $($visit:tt)*) => {
+        plain_field!(@visit $ty, $tag, |$this, $out| $spell, |$value| $read, { fn visit $($visit)* });
+    };
     ($ty:ty, $tag:expr, |$this:ident, $out:ident| $spell:expr, |$value:ident| $read:expr $(, $extra:item)*) => {
+        plain_field!(@visit $ty, $tag, |$this, $out| $spell, |$value| $read, {
+            fn visit(&self, _roles: Roles, _visitor: &mut dyn Visitor) {}
+        } $(, $extra)*);
+    };
+    (@visit $ty:ty, $tag:expr, |$this:ident, $out:ident| $spell:expr, |$value:ident| $read:expr, { $visit:item } $(, $extra:item)*) => {
         impl Field for $ty {
             fn ty() -> Ty {
                 $tag
             }
-            fn visit(&self, _roles: Roles, _visitor: &mut dyn Visitor) {}
+            $visit
             fn rewrite(&self, _roles: Roles, _rewriter: &mut dyn Rewriter) -> Self {
                 self.clone()
             }
@@ -636,26 +704,44 @@ plain_field!(
     |value| match value {
         Value::Number(number) => Ok(Float(number.as_f64())),
         other => Err(other.mismatch("a number")),
+    },
+    fn visit(&self, _roles: Roles, visitor: &mut dyn Visitor) {
+        visitor.number(Num::Float(self.0));
     }
 );
 
-plain_field!(
+/// A closed set as a field: spelled by its text, read back from a name.
+macro_rules! vocabulary_field {
+    ($ty:ty, $tag:expr $(, $extra:item)*) => {
+        plain_field!(
+            $ty,
+            $tag,
+            |this, out| out.push_str(&spell_stmt_name(&this.text())?),
+            |value| match value {
+                Value::Name(name) => name.parse(),
+                other => Err(other.mismatch(concat!("a ", stringify!($ty)))),
+            }
+            $(, $extra)*
+        );
+    };
+}
+
+vocabulary_field!(
     DType,
     Ty::DType,
-    |this, out| out.push_str(&spell_stmt_name(&this.0)?),
-    |value| match value {
-        Value::Name(name) => Ok(DType(name)),
-        other => Err(other.mismatch("a dtype")),
-    },
     fn as_dtype(&self) -> Option<&DType> {
         Some(self)
     }
 );
+vocabulary_field!(Swizzle, Ty::Name);
+vocabulary_field!(RasterOrient, Ty::Name);
+vocabulary_field!(FragmentLayout, Ty::Name);
+vocabulary_field!(Role, Ty::Name);
 
 plain_field!(
     Op,
     Ty::Op,
-    |this, out| out.push_str(&spell_stmt_name(&this.name)?),
+    |this, out| out.push_str(&spell_stmt_name(this.name())?),
     |value| match value {
         Value::Name(name) => Ok(Op::new(&name)),
         other => Err(other.mismatch("an elementwise op")),
@@ -717,8 +803,9 @@ impl<T: Field> Field for NumOr<T> {
         Ty::NumOr(Box::new(T::ty()))
     }
     fn visit(&self, roles: Roles, visitor: &mut dyn Visitor) {
-        if let NumOr::Value(value) = self {
-            value.visit(roles, visitor);
+        match self {
+            NumOr::Value(value) => value.visit(roles, visitor),
+            NumOr::Num(number) => visitor.number(*number),
         }
     }
     fn rewrite(&self, roles: Roles, rewriter: &mut dyn Rewriter) -> Self {

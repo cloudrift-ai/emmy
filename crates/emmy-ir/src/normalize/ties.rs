@@ -13,6 +13,7 @@ use crate::Name;
 use crate::Result;
 use crate::body::Body;
 use crate::expr::{BinOp, Expr, Expression, Num, python_repr};
+use crate::kinds::elementwise::Elementwise;
 use crate::kinds::field::{Float, Ty};
 use crate::kinds::{Affine, Statement};
 use crate::numbering::{Key, Numbering, expression_key};
@@ -111,7 +112,7 @@ pub(crate) fn extent_digest(expression: &Expression) -> String {
                 };
                 format!("('Literal', {value}, {})", python_repr(lit.dtype.name()))
             }
-            Expr::Builtin(name) => format!("('Builtin', {})", python_repr(name)),
+            Expr::Builtin(builtin) => format!("('Builtin', {})", python_repr(builtin.text())),
             Expr::Binary(op, left, right) => {
                 format!(
                     "('BinaryExpr', {}, {}, {})",
@@ -203,7 +204,7 @@ pub(crate) fn operand_ranks(
                 Statement::Accum(_) | Statement::Init(_) => 0,
                 Statement::Load(_) => 1,
                 Statement::Assign(a)
-                    if &*a.op.name == "copy"
+                    if a.op.is(Elementwise::Copy)
                         && a.args.len() == 1
                         && loaded.contains(&a.args[0]) =>
                 {

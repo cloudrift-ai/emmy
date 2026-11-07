@@ -6,6 +6,7 @@ use std::sync::Arc;
 
 use super::with_bodies;
 use crate::body::{Body, free_names};
+use crate::kinds::elementwise::Elementwise;
 use crate::kinds::*;
 use crate::numbering::{Number, Numbering, Param, value_numbers};
 use crate::order::is_protocol;
@@ -205,7 +206,7 @@ impl Placer<'_> {
                 self.alias.remove(&name);
             }
             if let Statement::Assign(a) = &**stmt
-                && &*a.op.name == "copy"
+                && a.op.is(Elementwise::Copy)
                 && a.args.len() == 1
                 && a.dtype.is_none()
             {
@@ -1120,7 +1121,7 @@ mod tests {
         assert!(
             out.stmts()
                 .iter()
-                .any(|stmt| matches!(&**stmt, Statement::Assign(a) if &*a.op.name == "exp")),
+                .any(|stmt| matches!(&**stmt, Statement::Assign(a) if a.op.is(Elementwise::Exp))),
             "{}",
             text(&out)
         );
@@ -1149,7 +1150,7 @@ mod tests {
         let Statement::Assign(shared) = &*out.stmts()[2] else {
             unreachable!()
         };
-        assert_eq!(&*shared.op.name, "exp");
+        assert!(shared.op.is(Elementwise::Exp));
         for arm in out.stmts()[3].nested() {
             assert_eq!(kinds(&arm), ["Load", "Affine", "Write"]);
             let Statement::Affine(sum) = &*arm.stmts()[1] else {

@@ -12,6 +12,7 @@ use std::fmt::Write as _;
 use std::hash::{Hash, Hasher};
 use std::sync::{Arc, OnceLock};
 
+use crate::closed_set;
 use crate::{Error, Name, Result};
 
 // --- numbers --------------------------------------------------------------------------------------
@@ -66,11 +67,16 @@ impl PartialEq for Num {
     fn eq(&self, other: &Self) -> bool {
         match (self, other) {
             (Num::Int(a), Num::Int(b)) => a == b,
-            (Num::Float(a), Num::Float(b)) => a == b,
+            (Num::Float(a), Num::Float(b)) => same_f64(*a, *b),
             (Num::Bool(a), Num::Bool(b)) => a == b,
-            _ => self.as_f64() == other.as_f64(),
+            _ => same_f64(self.as_f64(), other.as_f64()),
         }
     }
+}
+
+/// Float equality that is an equivalence, as `Hash` needs: `0.0 == -0.0` as Python has it, and every NaN alike.
+pub fn same_f64(a: f64, b: f64) -> bool {
+    a == b || (a.is_nan() && b.is_nan())
 }
 
 impl Eq for Num {}
@@ -425,7 +431,7 @@ macro_rules! with_exprs {
             /// A number with the type it is spelled in.
             Literal as PyLiteral "Literal" { lit: Lit },
             /// A GPU built-in with no host form.
-            Builtin as PyBuiltin "Builtin" { name: Name },
+            Builtin as PyBuiltin "Builtin" { name: Builtin },
             Binary as PyBinaryExpression "BinaryExpression" { op: BinOp, left: Expression, right: Expression },
             /// A call of a named function over its arguments.
             Call as PyFunctionCallExpression "FunctionCallExpression" { name: Name, args: Arc<[Expression]> },
@@ -457,6 +463,7 @@ pub trait ExprField: Clone {
 impl ExprField for Name {}
 impl ExprField for Lit {}
 impl ExprField for BinOp {}
+impl ExprField for Builtin {}
 
 impl ExprField for Expression {
     fn each_child(&self, f: &mut dyn FnMut(&Expression)) {
@@ -659,25 +666,20 @@ impl std::fmt::Display for Expression {
     }
 }
 
-/// Every GPU built-in's name. The reader tells a built-in from a variable by this set, so no variable takes one.
-pub const BUILTINS: [&str; 13] = [
-    "thread_idx.x",
-    "thread_idx.y",
-    "thread_idx.z",
-    "block_idx.x",
-    "block_idx.y",
-    "block_idx.z",
-    "block_dim.x",
-    "block_dim.y",
-    "block_dim.z",
-    "grid_dim.x",
-    "grid_dim.y",
-    "grid_dim.z",
-    "warp_size",
-];
+closed_set! {
+    /// Every GPU built-in. The reader tells a built-in from a variable by this set, so no variable takes one of its
+    /// names.
+    pub enum Builtin ("GPU built-in") {
+        ThreadIdxX = "thread_idx.x", ThreadIdxY = "thread_idx.y", ThreadIdxZ = "thread_idx.z",
+        BlockIdxX = "block_idx.x", BlockIdxY = "block_idx.y", BlockIdxZ = "block_idx.z",
+        BlockDimX = "block_dim.x", BlockDimY = "block_dim.y", BlockDimZ = "block_dim.z",
+        GridDimX = "grid_dim.x", GridDimY = "grid_dim.y", GridDimZ = "grid_dim.z",
+        WarpSize = "warp_size",
+    }
+}
 
 pub fn is_builtin(name: &str) -> bool {
-    BUILTINS.contains(&name)
+    name.parse::<Builtin>().is_ok()
 }
 
 /// Names the reader gives a meaning of their own, so a variable of that name is written quoted.
@@ -814,12 +816,7 @@ impl Expression {
     fn spell(&self, parent: u8, out: &mut String) -> Result<()> {
         match &**self {
             Expr::Var(name) => out.push_str(&spell_name(name, &[])?),
-            Expr::Builtin(name) => {
-                if !is_builtin(name) {
-                    return Err(Error::Value(format!("{name:?} is no GPU built-in")));
-                }
-                out.push_str(name);
-            }
+            Expr::Builtin(builtin) => out.push_str(builtin.text()),
             Expr::Literal(lit) => {
                 let text = literal_text(lit)?;
                 if text.starts_with('-') && parent == ATOM {
@@ -988,8 +985,8 @@ impl Expression {
                 .copied()
                 .ok_or_else(|| Error::Key(name.to_string())),
             Expr::Literal(lit) => Ok(lit.value),
-            Expr::Builtin(name) => Err(Error::NotImplemented(format!(
-                "Builtin {name:?} is GPU-only; cannot eval"
+            Expr::Builtin(builtin) => Err(Error::NotImplemented(format!(
+                "Builtin {builtin} is GPU-only; cannot eval"
             ))),
             Expr::Binary(op, l, r) => apply_binop(*op, l.eval(env)?, r.eval(env)?),
             Expr::Call(name, _) => Err(Error::NotImplemented(format!(
