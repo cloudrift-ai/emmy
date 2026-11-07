@@ -52,7 +52,7 @@ impl PyStatement {
             Some(index) => self.field(py, index),
             None => Err(PyAttributeError::new_err(format!(
                 "{} has no field {name}",
-                self.stmt.kind()
+                self.stmt.ty()
             ))),
         }
     }
@@ -103,7 +103,7 @@ fn sigma_from_py(value: &Bound<'_, PyAny>) -> PyResult<HashMap<Name, Expression>
 
 /// Wraps the Python object of a statement, the same for a statement reached again through its body.
 pub fn wrap_statement(py: Python<'_>, stmt: &Arc<Statement>) -> PyResult<Py<PyAny>> {
-    wrap_kind(py, stmt, Vec::new())
+    wrap_statement_holding(py, stmt, Vec::new())
 }
 
 fn same_or_wrap<'py>(
@@ -315,7 +315,7 @@ impl PyStatement {
     fn structural_form<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyTuple>> {
         let fields = self.stmt.fields();
         let mut parts: Vec<Bound<'py, PyAny>> =
-            vec![PyString::new(py, self.stmt.kind().name()).into_any()];
+            vec![PyString::new(py, self.stmt.ty().name()).into_any()];
         let header: HashMap<&str, String> = self.stmt.header_fields().py()?.into_iter().collect();
         let blocks: HashMap<&str, ()> = self
             .stmt
@@ -438,39 +438,39 @@ impl<'py> Arguments<'_, 'py> {
     }
 }
 
-macro_rules! define_py_kinds {
+macro_rules! define_py_statement_types {
     (
-        kinds { $( $(#[doc = $doc:literal])* $layer:ident $Kind:ident {$($flag:tt)|*} { $( $field:ident : $ty:ty [$($role:ident)|*] $(= $default:expr)? ,)* } )* }
+        kinds { $( $(#[doc = $doc:literal])* $layer:ident $StatementType:ident {$($flag:tt)|*} { $( $field:ident : $ty:ty [$($role:ident)|*] $(= $default:expr)? ,)* } )* }
         records { $( $(#[doc = $rdoc:literal])* $rlayer:ident $Record:ident { $( $rfield:ident : $rty:ty [$($rrole:ident)|*] $(= $rdefault:expr)? ,)* } )* }
     ) => {
         $(
-            define_py_kinds!(@class $layer $Kind $(#[doc = $doc])*);
+            define_py_statement_types!(@class $layer $StatementType $(#[doc = $doc])*);
 
             #[allow(non_upper_case_globals, unused_variables, unused_mut)]
-            impl $Kind {
+            impl $StatementType {
                 /// The statement the constructor arguments build, and the objects it keeps beside its fields.
                 fn build(args: &Bound<'_, PyTuple>, kwargs: Option<&Bound<'_, PyDict>>) -> PyResult<(Statement, Held)> {
                     let mut held = Held::new();
-                    let kind = define_py_kinds!(@given $Kind args kwargs held { $( $field : $ty [$($role)|*] $(= $default)? ,)* });
-                    Ok((finished(Statement::$Kind(kind)).py()?, held))
+                    let kind = define_py_statement_types!(@given $StatementType args kwargs held { $( $field : $ty [$($role)|*] $(= $default)? ,)* });
+                    Ok((finished(Statement::$StatementType(kind)).py()?, held))
                 }
 
                 /// This statement with the named fields changed.
                 fn rebuild(base: &PyStatement, py: Python<'_>, changes: &Bound<'_, PyDict>) -> PyResult<(Statement, Held)> {
-                    let Statement::$Kind(current) = &*base.stmt else { return Err(PyTypeError::new_err("not a ".to_owned() + stringify!($Kind))) };
+                    let Statement::$StatementType(current) = &*base.stmt else { return Err(PyTypeError::new_err("not a ".to_owned() + stringify!($StatementType))) };
                     let mut held = Held::new();
-                    let kind = define_py_kinds!(@changed $Kind current changes held (|index| base.held(py, index)) { $( $field : $ty [$($role)|*] $(= $default)? ,)* });
-                    Ok((finished(Statement::$Kind(kind)).py()?, held))
+                    let kind = define_py_statement_types!(@changed $StatementType current changes held (|index| base.held(py, index)) { $( $field : $ty [$($role)|*] $(= $default)? ,)* });
+                    Ok((finished(Statement::$StatementType(kind)).py()?, held))
                 }
             }
 
             #[pymethods]
-            impl $Kind {
+            impl $StatementType {
                 #[new]
                 #[pyo3(signature = (*args, **kwargs))]
                 fn new(args: &Bound<'_, PyTuple>, kwargs: Option<&Bound<'_, PyDict>>) -> PyResult<PyClassInitializer<Self>> {
                     let (stmt, held) = Self::build(args, kwargs)?;
-                    Ok(PyClassInitializer::from(PyStatement::new(Arc::new(stmt), held)).add_subclass($Kind))
+                    Ok(PyClassInitializer::from(PyStatement::new(Arc::new(stmt), held)).add_subclass($StatementType))
                 }
 
                 /// A copy of this statement with the named fields changed: the one way a statement is edited.
@@ -479,31 +479,31 @@ macro_rules! define_py_kinds {
                     let Some(changes) = changes.filter(|c| !c.is_empty()) else { return Ok(slf.clone().into_any()) };
                     let base = slf.as_super().get();
                     let (stmt, held) = Self::rebuild(base, slf.py(), changes)?;
-                    Ok(Bound::new(slf.py(), PyClassInitializer::from(PyStatement::new(Arc::new(stmt), held)).add_subclass($Kind))?.into_any())
+                    Ok(Bound::new(slf.py(), PyClassInitializer::from(PyStatement::new(Arc::new(stmt), held)).add_subclass($StatementType))?.into_any())
                 }
 
                 /// The names of this kind's fields, in declaration order.
                 #[classattr]
                 fn _fields<'py>(py: Python<'py>) -> PyResult<Bound<'py, PyTuple>> {
-                    PyTuple::new(py, emmy_ir::statement::$Kind::FIELDS.iter().map(|f| PyString::new(py, f.name)))
+                    PyTuple::new(py, emmy_ir::statement::$StatementType::FIELDS.iter().map(|f| PyString::new(py, f.name)))
                 }
 
                 /// A pure value binding: a legal member of a stored term.
                 #[classattr]
                 fn pure() -> bool {
-                    emmy_ir::statement::$Kind::FLAGS.contains(emmy_ir::statement::PURE)
+                    emmy_ir::statement::$StatementType::FLAGS.contains(emmy_ir::statement::PURE)
                 }
 
                 /// `deps` already reports the whole subtree's reads.
                 #[classattr]
                 fn deps_deep() -> bool {
-                    emmy_ir::statement::$Kind::FLAGS.contains(emmy_ir::statement::DEPS_DEEP)
+                    emmy_ir::statement::$StatementType::FLAGS.contains(emmy_ir::statement::DEPS_DEEP)
                 }
 
                 $(
                     #[getter]
                     fn $field<'py>(slf: &Bound<'py, Self>) -> PyResult<Bound<'py, PyAny>> {
-                        const INDEX: usize = position(emmy_ir::statement::$Kind::FIELDS, stringify!($field));
+                        const INDEX: usize = position(emmy_ir::statement::$StatementType::FIELDS, stringify!($field));
                         slf.as_super().get().field(slf.py(), INDEX)
                     }
                 )*
@@ -511,7 +511,7 @@ macro_rules! define_py_kinds {
         )*
 
         $(
-            define_py_kinds!(@record $rlayer $Record $(#[doc = $rdoc])*);
+            define_py_statement_types!(@record $rlayer $Record $(#[doc = $rdoc])*);
 
             impl $Record {
                 pub fn new_from(record: emmy_ir::statement::$Record) -> $Record {
@@ -537,7 +537,7 @@ macro_rules! define_py_kinds {
                 #[pyo3(signature = (*args, **kwargs))]
                 fn new(args: &Bound<'_, PyTuple>, kwargs: Option<&Bound<'_, PyDict>>) -> PyResult<$Record> {
                     let mut held = Held::new();
-                    let record = define_py_kinds!(@given $Record args kwargs held { $( $rfield : $rty [$($rrole)|*] $(= $rdefault)? ,)* });
+                    let record = define_py_statement_types!(@given $Record args kwargs held { $( $rfield : $rty [$($rrole)|*] $(= $rdefault)? ,)* });
                     Ok($Record::with_held(record, held))
                 }
 
@@ -548,7 +548,7 @@ macro_rules! define_py_kinds {
                     let this = slf.get();
                     let current = &this.record;
                     let mut held = Held::new();
-                    let record = define_py_kinds!(@changed $Record current changes held (|index: usize| this.slots[index].get().map(|value| value.clone_ref(slf.py()))) { $( $rfield : $rty [$($rrole)|*] $(= $rdefault)? ,)* });
+                    let record = define_py_statement_types!(@changed $Record current changes held (|index: usize| this.slots[index].get().map(|value| value.clone_ref(slf.py()))) { $( $rfield : $rty [$($rrole)|*] $(= $rdefault)? ,)* });
                     Bound::new(slf.py(), $Record::with_held(record, held))
                 }
 
@@ -588,7 +588,7 @@ macro_rules! define_py_kinds {
         /// The Python object of field `index` of `stmt`.
         pub fn field_to_py(stmt: &Arc<Statement>, index: usize, py: Python<'_>) -> PyResult<Py<PyAny>> {
             match &**stmt {
-                $( Statement::$Kind(k) => {
+                $( Statement::$StatementType(k) => {
                     #[allow(unused_mut, unused_variables, unused_assignments)]
                     let mut position = 0usize;
                     $(
@@ -597,41 +597,41 @@ macro_rules! define_py_kinds {
                         }
                         position += 1;
                     )*
-                    Err(PyAttributeError::new_err(format!("{} has no field {index}", stringify!($Kind))))
+                    Err(PyAttributeError::new_err(format!("{} has no field {index}", stringify!($StatementType))))
                 } )*
             }
         }
 
         /// The Python object of `stmt`, an instance of its kind's class.
-        pub fn wrap_kind(py: Python<'_>, stmt: &Arc<Statement>, held: Vec<Option<Py<PyAny>>>) -> PyResult<Py<PyAny>> {
+        pub fn wrap_statement_holding(py: Python<'_>, stmt: &Arc<Statement>, held: Vec<Option<Py<PyAny>>>) -> PyResult<Py<PyAny>> {
             let base = PyClassInitializer::from(PyStatement::new(stmt.clone(), held));
             Ok(match &**stmt {
-                $( Statement::$Kind(_) => Py::new(py, base.add_subclass($Kind))?.into_any(), )*
+                $( Statement::$StatementType(_) => Py::new(py, base.add_subclass($StatementType))?.into_any(), )*
             })
         }
 
         /// The kind class of each kind name, for `iter_of_type`.
-        pub fn kind_of(cls: &Bound<'_, PyType>) -> Option<emmy_ir::statement::Kind> {
-            $( if cls.is(&cls.py().get_type::<$Kind>()) { return Some(emmy_ir::statement::Kind::$Kind); } )*
+        pub fn statement_type_of(cls: &Bound<'_, PyType>) -> Option<emmy_ir::statement::StatementType> {
+            $( if cls.is(&cls.py().get_type::<$StatementType>()) { return Some(emmy_ir::statement::StatementType::$StatementType); } )*
             None
         }
 
-        pub fn register_kinds(m: &Bound<'_, PyModule>) -> PyResult<()> {
+        pub fn register_statement_types(m: &Bound<'_, PyModule>) -> PyResult<()> {
             m.add_class::<PyStatement>()?;
-            $( m.add_class::<$Kind>()?; )*
+            $( m.add_class::<$StatementType>()?; )*
             $( m.add_class::<$Record>()?; )*
             Ok(())
         }
     };
-    (@class shared $Kind:ident $(#[doc = $doc:literal])*) => {
+    (@class shared $StatementType:ident $(#[doc = $doc:literal])*) => {
         $(#[doc = $doc])*
         #[pyclass(extends = PyStatement, frozen, module = "emmy.compiler.ir.stmt")]
-        pub struct $Kind;
+        pub struct $StatementType;
     };
-    (@class kernel $Kind:ident $(#[doc = $doc:literal])*) => {
+    (@class kernel $StatementType:ident $(#[doc = $doc:literal])*) => {
         $(#[doc = $doc])*
         #[pyclass(extends = PyStatement, frozen, module = "emmy.compiler.ir.kernel.ir")]
-        pub struct $Kind;
+        pub struct $StatementType;
     };
     (@record shared $Record:ident $(#[doc = $doc:literal])*) => {
         $(#[doc = $doc])*
@@ -654,11 +654,11 @@ macro_rules! define_py_kinds {
         use emmy_ir::statement as k;
         let mut given = Arguments { kind: k::$Type::NAME, fields: k::$Type::FIELDS, args: $args, kwargs: $kwargs, positional: 0 };
         let out = k::$Type {
-            $( $field: match given.take(stringify!($field), define_py_kinds!(@kw_only $($role)|*))? {
-                Some(value) => define_py_kinds!(@convert $Type $field [$ty] value $held),
+            $( $field: match given.take(stringify!($field), define_py_statement_types!(@kw_only $($role)|*))? {
+                Some(value) => define_py_statement_types!(@convert $Type $field [$ty] value $held),
                 None => {
                     $held.push(None);
-                    define_py_kinds!(@default $Type $field $(= $default)?)
+                    define_py_statement_types!(@default $Type $field $(= $default)?)
                 }
             }, )*
         };
@@ -675,7 +675,7 @@ macro_rules! define_py_kinds {
         k::$Type {
             $( $field: {
                 let value = match $changes.get_item(stringify!($field))? {
-                    Some(value) => define_py_kinds!(@convert $Type $field [$ty] value $held),
+                    Some(value) => define_py_statement_types!(@convert $Type $field [$ty] value $held),
                     None => {
                         $held.push(kept(index));
                         $current.$field.clone()
@@ -694,9 +694,9 @@ macro_rules! define_py_kinds {
     }};
     (@kw_only) => { false };
     (@kw_only KW_ONLY $(| $rest:ident)*) => { true };
-    (@kw_only $role:ident $(| $rest:ident)*) => { define_py_kinds!(@kw_only $($rest)|*) };
-    (@default $Kind:ident $field:ident = $default:expr) => { $default };
-    (@default $Kind:ident $field:ident) => { return Err(missing(stringify!($Kind), stringify!($field))) };
+    (@kw_only $role:ident $(| $rest:ident)*) => { define_py_statement_types!(@kw_only $($rest)|*) };
+    (@default $StatementType:ident $field:ident = $default:expr) => { $default };
+    (@default $StatementType:ident $field:ident) => { return Err(missing(stringify!($StatementType), stringify!($field))) };
 }
 
 /// The Python objects a statement's fields came from, one slot per field.
@@ -719,10 +719,10 @@ mod generated {
     use super::*;
     use emmy_ir::Name;
     use emmy_ir::body::Body;
-    use emmy_ir::elementwise::Op;
+    use emmy_ir::elementwise::ElementwiseOp;
     use emmy_ir::field::*;
 
-    emmy_ir::with_kinds!(define_py_kinds);
+    emmy_ir::with_statement_types!(define_py_statement_types);
 }
 
 pub use generated::*;

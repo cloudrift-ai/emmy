@@ -463,18 +463,18 @@ macro_rules! define_exprs {
 
         /// Every expression kind by name: the tag the digest spells a node by (`kind().text()`).
         #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
-        pub enum ExprKind { $( $Variant, )* }
+        pub enum ExprType { $( $Variant, )* }
 
-        impl ExprKind {
+        impl ExprType {
             pub const fn text(self) -> &'static str {
-                match self { $( ExprKind::$Variant => stringify!($Variant), )* }
+                match self { $( ExprType::$Variant => stringify!($Variant), )* }
             }
         }
 
         #[allow(unused_variables, unused_mut, unused_assignments)]
         impl Expr {
-            pub fn kind(&self) -> ExprKind {
-                match self { $( Expr::$Variant(..) => ExprKind::$Variant, )* }
+            pub fn ty(&self) -> ExprType {
+                match self { $( Expr::$Variant(..) => ExprType::$Variant, )* }
             }
 
             /// `f` on each child, in field order.
@@ -1228,7 +1228,7 @@ mod tests {
             Expression::new(Expr::FlatIndex("b".into(), Arc::from([]))),
         ]
         .iter()
-        .map(|e| e.kind().text())
+        .map(|e| e.ty().text())
         .collect();
         assert_eq!(
             kinds,

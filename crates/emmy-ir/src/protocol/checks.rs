@@ -98,27 +98,27 @@ impl WgmmaMma {
 
 impl TreeHalve {
     pub fn validate(&self) -> Result<()> {
-        carried_kind(&self.combine_states, Kind::Assign)
+        carried_type(&self.combine_states, StatementType::Assign)
     }
 }
 
 impl WarpShuffle {
     pub fn validate(&self) -> Result<()> {
-        carried_kind(&self.combine_states, Kind::Assign)
+        carried_type(&self.combine_states, StatementType::Assign)
     }
 }
 
 impl RegStore {
     pub fn validate(&self) -> Result<()> {
-        carried_kind(&self.run, Kind::RegStore)
+        carried_type(&self.run, StatementType::RegStore)
     }
 }
 
-fn carried_kind(stmts: &[Arc<Statement>], kind: Kind) -> Result<()> {
-    match stmts.iter().find(|s| s.kind() != kind) {
+fn carried_type(stmts: &[Arc<Statement>], kind: StatementType) -> Result<()> {
+    match stmts.iter().find(|s| s.ty() != kind) {
         Some(other) => Err(Error::Type(format!(
             "expected {kind} statements, got a {}",
-            other.kind()
+            other.ty()
         ))),
         None => Ok(()),
     }

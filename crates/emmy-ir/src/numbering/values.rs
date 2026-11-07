@@ -6,7 +6,7 @@ use std::sync::Arc;
 use super::{Key, Number, Param, Tag, expression_key, hash_parts};
 use crate::Name;
 use crate::body::{Body, StmtRef};
-use crate::expr::{Expr, ExprKind, Expression};
+use crate::expr::{Expr, ExprType, Expression};
 use crate::field::NumOr;
 use crate::statement::Statement;
 use crate::text::structural_text;
@@ -88,7 +88,7 @@ fn descriptor(axis: &crate::axis::Axis, stmt: &Statement) -> Key {
     let flags = match stmt {
         Statement::Loop(l) => Key::tuple([Key::Bool(l.unroll), Key::Bool(l.seed)]),
         Statement::StridedLoop(l) => Key::tuple([Key::Bool(l.unroll), Key::Bool(l.seed)]),
-        other => Key::str(other.kind().name()),
+        other => Key::str(other.ty().name()),
     };
     Key::tuple([extent, window, flags])
 }
@@ -96,7 +96,7 @@ fn descriptor(axis: &crate::axis::Axis, stmt: &Statement) -> Key {
 fn depths(key: &Key, out: &mut Vec<usize>) {
     if let Key::Tuple(parts) = key {
         if let [Key::Str(tag), Key::Int(depth)] = &parts[..]
-            && &**tag == ExprKind::Var.text()
+            && &**tag == ExprType::Var.text()
         {
             out.push(*depth as usize);
             return;
@@ -133,7 +133,7 @@ impl Context<'_> {
         expression_key(e, &mut |e| match &**e {
             Expr::Var(name) => self
                 .depth_of(name)
-                .map(|depth| Key::tuple([Key::str(ExprKind::Var.text()), Key::Int(depth as i64)])),
+                .map(|depth| Key::tuple([Key::str(ExprType::Var.text()), Key::Int(depth as i64)])),
             _ => None,
         })
     }
@@ -294,7 +294,7 @@ impl Context<'_> {
                             let bare = Key::tuple([
                                 Key::tag(Tag::Expr),
                                 Key::tuple([
-                                    Key::str(ExprKind::Var.text()),
+                                    Key::str(ExprType::Var.text()),
                                     Key::Int(depth as i64),
                                 ]),
                             ]);
@@ -308,7 +308,7 @@ impl Context<'_> {
             fn bound_form(value: &Key, bound_depths: &[usize], kept: &[Param]) -> Key {
                 if let Key::Tuple(parts) = value {
                     if let [Key::Str(tag), Key::Int(depth)] = &parts[..]
-                        && &**tag == ExprKind::Var.text()
+                        && &**tag == ExprType::Var.text()
                     {
                         let depth = *depth as usize;
                         if let Some(position) = bound_depths.iter().position(|d| *d == depth) {
@@ -883,7 +883,7 @@ mod tests {
             number,
             params
                 .iter()
-                .map(|p| Key::tuple([Key::str(ExprKind::Var.text()), Key::Int(*p)]))
+                .map(|p| Key::tuple([Key::str(ExprType::Var.text()), Key::Int(*p)]))
                 .collect(),
         )
     }
@@ -896,7 +896,7 @@ mod tests {
             vec![operand(2, &[9])],
             coordinates.iter().map(|c| operand(7, &[*c])).collect(),
         ];
-        let params = vec![Key::tuple([Key::str(ExprKind::Var.text()), Key::Int(9)])];
+        let params = vec![Key::tuple([Key::str(ExprType::Var.text()), Key::Int(9)])];
         let greedy = greedy_layout(&groups, &params);
         assert_eq!(greedy, exhaustive_layout(&groups, &params));
         assert_eq!(greedy, least_layout(&groups, &params));

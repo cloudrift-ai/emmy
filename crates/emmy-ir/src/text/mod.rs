@@ -1,6 +1,6 @@
 //! The text of a body: one printer and one reader, exact inverses. One statement is one line; a block's statements
 //! are indented four spaces under its header; a field at its default is left out, nothing else is. The shared kinds
-//! have clauses of their own; a kind of another layer prints and reads through its declaration (`Kind(field=value,
+//! have clauses of their own; a kind of another layer prints and reads through its declaration (`StatementType(field=value,
 //! …):` over its blocks). A subroutine a call names is defined once, ahead of the statements.
 
 pub mod parse;
@@ -19,7 +19,7 @@ mod tests {
     use super::*;
     use crate::body::{Body, Subroutine};
     use crate::normalize::testing::strs;
-    use crate::statement::{Call, Kind};
+    use crate::statement::{Call, StatementType};
 
     const STATEMENTS: &[&str] = &[
         "in0 = load x[a0, a1 + 1]",
@@ -96,7 +96,7 @@ mod tests {
 
     /// The subroutine each call of `body` names, in order.
     fn targets(body: &Body) -> Vec<Arc<Subroutine>> {
-        body.of_kinds(&[Kind::Call])
+        body.of_types(&[StatementType::Call])
             .iter()
             .map(|here| <&Call>::try_from(&**here.stmt()).unwrap().target.0.clone())
             .collect()
@@ -121,14 +121,14 @@ mod tests {
 
     /// No kind goes without a text: the statements above, with the calls, hold one of every kind, in every layer.
     #[test]
-    fn every_kind_has_a_text() {
-        let covered: BTreeSet<Kind> = STATEMENTS
+    fn every_statement_type_has_a_text() {
+        let covered: BTreeSet<StatementType> = STATEMENTS
             .iter()
             .chain([&CALLS])
             .flat_map(|text| parse_body(text).unwrap().iter_stmts())
-            .map(|stmt| stmt.kind())
+            .map(|stmt| stmt.ty())
             .collect();
-        assert_eq!(covered, Kind::ALL.iter().copied().collect());
+        assert_eq!(covered, StatementType::ALL.iter().copied().collect());
     }
 
     #[test]
@@ -136,17 +136,17 @@ mod tests {
         let text = "let f32 v0 = 0.125\nfor a0 in 0..4:\n    for a1 in 0..8:\n        in0 = load x[a0, a1]\n        v1 = 2*in0 + v0\n        acc0 <- add(acc0, v1) over a1\n    y[a0] = acc0";
         let body = parse_body(text).unwrap();
         assert_eq!(body_text(&body).unwrap(), text);
-        let kinds: Vec<Kind> = body.iter_stmts().iter().map(|stmt| stmt.kind()).collect();
+        let kinds: Vec<StatementType> = body.iter_stmts().iter().map(|stmt| stmt.ty()).collect();
         assert_eq!(
             kinds,
             [
-                Kind::Let,
-                Kind::Loop,
-                Kind::Loop,
-                Kind::Load,
-                Kind::Affine,
-                Kind::Accum,
-                Kind::Write
+                StatementType::Let,
+                StatementType::Loop,
+                StatementType::Loop,
+                StatementType::Load,
+                StatementType::Affine,
+                StatementType::Accum,
+                StatementType::Write
             ]
         );
         assert_eq!(parse_body("").unwrap(), Body::empty());

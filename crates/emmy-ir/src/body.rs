@@ -9,7 +9,7 @@ use std::sync::{Arc, Mutex, OnceLock};
 use crate::expr::{Expression, Num};
 use crate::field::{Axes, AxisRef, Names, Visitor};
 use crate::numbering::{Key, expression_key};
-use crate::statement::{Kind, Roles, Statement};
+use crate::statement::{Roles, Statement, StatementType};
 use crate::{Error, Name, Result, infallible, locked};
 
 /// What `Body::map` applies: a statement to the statements that replace it, or `None` to drop it.
@@ -82,7 +82,7 @@ pub struct BodyData {
     definitions: OnceLock<HashMap<Name, StmtRef>>,
     axis_names: OnceLock<HashSet<Name>>,
     ssa_uses: OnceLock<HashSet<Name>>,
-    by_kind: Mutex<HashMap<Vec<Kind>, Vec<StmtRef>>>,
+    by_kind: Mutex<HashMap<Vec<StatementType>, Vec<StmtRef>>>,
     exact: OnceLock<u64>,
     normalized: OnceLock<Normalized>,
 }
@@ -561,15 +561,15 @@ impl Body {
         dependencies
     }
 
-    /// The statements of the given kinds, pre-order, cached per kind set.
-    pub fn of_kinds(&self, kinds: &[Kind]) -> Vec<StmtRef> {
+    /// The statements of the given statement_types, pre-order, cached per kind set.
+    pub fn of_types(&self, kinds: &[StatementType]) -> Vec<StmtRef> {
         let key = kinds.to_vec();
         if let Some(found) = locked(&self.0.by_kind).get(&key) {
             return found.clone();
         }
         let mut out = Vec::new();
         self.walk(&mut |here| {
-            if kinds.contains(&here.stmt().kind()) {
+            if kinds.contains(&here.stmt().ty()) {
                 out.push(here.clone());
             }
         });
@@ -578,23 +578,23 @@ impl Body {
     }
 
     pub fn loads(&self) -> Vec<StmtRef> {
-        self.of_kinds(&[Kind::Load])
+        self.of_types(&[StatementType::Load])
     }
 
     pub fn writes(&self) -> Vec<StmtRef> {
-        self.of_kinds(&[Kind::Write])
+        self.of_types(&[StatementType::Write])
     }
 
     pub fn carries(&self) -> Vec<StmtRef> {
-        self.of_kinds(&[Kind::Carry])
+        self.of_types(&[StatementType::Carry])
     }
 
     pub fn accums(&self) -> Vec<StmtRef> {
-        self.of_kinds(&[Kind::Accum])
+        self.of_types(&[StatementType::Accum])
     }
 
     pub fn loops(&self) -> Vec<StmtRef> {
-        self.of_kinds(&[Kind::Loop])
+        self.of_types(&[StatementType::Loop])
     }
 
     // --- cones and orders -------------------------------------------------------------------------
@@ -900,7 +900,7 @@ mod tests {
     }
 
     #[test]
-    fn kind_queries_share_children_and_keep_a_mixed_order() {
+    fn statement_type_queries_share_children_and_keep_a_mixed_order() {
         let given = body(
             "
             for i in 0..4:
@@ -914,10 +914,10 @@ mod tests {
         assert_eq!(child.carries(), std::slice::from_ref(&carry));
         assert_eq!(child.accums(), std::slice::from_ref(&accum));
         assert_eq!(
-            given.of_kinds(&[Kind::Accum, Kind::Carry]),
+            given.of_types(&[StatementType::Accum, StatementType::Carry]),
             [carry, accum, given.at(1)]
         );
-        assert_eq!(child.of_kinds(&[Kind::Carry]), child.carries());
+        assert_eq!(child.of_types(&[StatementType::Carry]), child.carries());
         assert_eq!(strs(given.carried_names()), ["state", "sum"]);
     }
 

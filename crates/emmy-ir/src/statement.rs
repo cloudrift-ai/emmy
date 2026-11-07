@@ -1,6 +1,6 @@
 //! The statement kinds, declared as data: every kind is a struct whose fields carry a type and the roles they play.
-//! The declarations are one macro ([`with_kinds!`]) so the Python extension generates its classes from the same
-//! list, and [`define_kinds!`] turns the list into the structs, the `Statement` enum and the protocol walks over
+//! The declarations are one macro ([`with_statement_types!`]) so the Python extension generates its classes from the same
+//! list, and [`define_statement_types!`] turns the list into the structs, the `Statement` enum and the protocol walks over
 //! the roles.
 //!
 //! A role says what a field is to the rest of the compiler: `DEFINES` / `READS` / `UPDATES` / `LOCAL` for SSA names,
@@ -58,29 +58,29 @@ pub const CARRIED: Roles = STMTS.or(TERM);
 
 /// What a kind is as a whole, as a set of flags.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
-pub struct KindFlags(u32);
+pub struct StatementFlags(u32);
 
-impl KindFlags {
-    pub const NONE: KindFlags = KindFlags(0);
+impl StatementFlags {
+    pub const NONE: StatementFlags = StatementFlags(0);
 
-    pub const fn or(self, other: KindFlags) -> KindFlags {
-        KindFlags(self.0 | other.0)
+    pub const fn or(self, other: StatementFlags) -> StatementFlags {
+        StatementFlags(self.0 | other.0)
     }
 
-    pub const fn contains(self, other: KindFlags) -> bool {
+    pub const fn contains(self, other: StatementFlags) -> bool {
         self.0 & other.0 != 0
     }
 }
 
-pub const PURE: KindFlags = KindFlags(1);
-pub const SIDE_EFFECTS: KindFlags = KindFlags(2);
-pub const DEPS_DEEP: KindFlags = KindFlags(4);
+pub const PURE: StatementFlags = StatementFlags(1);
+pub const SIDE_EFFECTS: StatementFlags = StatementFlags(2);
+pub const DEPS_DEEP: StatementFlags = StatementFlags(4);
 /// The kind checks its fields on construction (`validate`, in the protocol's checks).
-pub const CHECKED: KindFlags = KindFlags(8);
+pub const CHECKED: StatementFlags = StatementFlags(8);
 
 /// Every statement kind and record, declared once. `$callback` receives the list and generates from it.
 #[macro_export]
-macro_rules! with_kinds {
+macro_rules! with_statement_types {
     ($callback:ident) => {
         $callback! {
             kinds {
@@ -128,7 +128,7 @@ macro_rules! with_kinds {
                 /// epilogue feeding an `__half*` Write computes in `__half` end to end without spurious promotions.
                 shared Assign {PURE} {
                     name: Name [DEFINES],
-                    op: Op [],
+                    op: ElementwiseOp [],
                     args: Names [READS],
                     dtype: Option<DType> [] = None,
                 }
@@ -166,7 +166,7 @@ macro_rules! with_kinds {
                 shared Accum {} {
                     name: Name [DEFINES],
                     value: Name [READS],
-                    op: Op [] = Op::Known($crate::elementwise::Elementwise::Add),
+                    op: ElementwiseOp [] = ElementwiseOp::Known($crate::elementwise::Operation::Add),
                     dtype: Option<DType> [] = None,
                     axes: Names [] = Names::from([]),
                     base: Option<Name> [READS] = None,
@@ -615,11 +615,11 @@ macro_rules! with_kinds {
                 /// `layout` names the atom's C-fragment geometry (:func:`frag_layout`).
                 kernel FragmentApply {} {
                     out: Name [DEFINES],
-                    op: Op [],
+                    op: ElementwiseOp [],
                     args: FragmentArgs [RECORD],
                     in_place: bool [] = false,
                     layout: Name [] = Name::from("m16n8k16"),
-                    post: Ops [] = Ops::from([]),
+                    post: ElementwiseOps [] = ElementwiseOps::from([]),
                     row_base: Option<Expression> [EXPRESSION] = None,
                     col_base: Option<Expression> [EXPRESSION] = None,
                 }
@@ -639,7 +639,7 @@ macro_rules! with_kinds {
                     top: Name [DEFINES],
                     bot: Name [DEFINES],
                     frags: Names [READS],
-                    op: Op [],
+                    op: ElementwiseOp [],
                     layout: Name [] = Name::from("m16n8k16"),
                     dtype: DType [] = DType::F32,
                 }
@@ -951,33 +951,33 @@ macro_rules! __has_default {
 }
 
 /// The core's callback: the structs, the `Statement` enum and the generic walks.
-macro_rules! define_kinds {
+macro_rules! define_statement_types {
     (
-        kinds { $( $(#[doc = $doc:literal])* $layer:ident $Kind:ident {$($flag:tt)|*} { $( $field:ident : $ty:ty [$($role:ident)|*] $(= $default:expr)? ,)* } )* }
+        kinds { $( $(#[doc = $doc:literal])* $layer:ident $StatementType:ident {$($flag:tt)|*} { $( $field:ident : $ty:ty [$($role:ident)|*] $(= $default:expr)? ,)* } )* }
         records { $( $(#[doc = $rdoc:literal])* $rlayer:ident $Record:ident { $( $rfield:ident : $rty:ty [$($rrole:ident)|*] $(= $rdefault:expr)? ,)* } )* }
     ) => {
         $(
             $(#[doc = $doc])*
             #[derive(Clone, PartialEq, Eq, Hash, Debug)]
-            pub struct $Kind {
+            pub struct $StatementType {
                 $( pub $field: $ty, )*
             }
 
             #[allow(non_upper_case_globals, dead_code, unused_variables, unused_mut)]
-            impl $Kind {
-                pub const LAYER: Layer = define_kinds!(@layer $layer);
-                pub const FLAGS: KindFlags = KindFlags::NONE $(.or($flag))*;
-                define_kinds!(@fields $Kind { $( $field : $ty [$($role)|*] $(= $default)? ,)* });
+            impl $StatementType {
+                pub const LAYER: Layer = define_statement_types!(@layer $layer);
+                pub const FLAGS: StatementFlags = StatementFlags::NONE $(.or($flag))*;
+                define_statement_types!(@fields $StatementType { $( $field : $ty [$($role)|*] $(= $default)? ,)* });
             }
 
-            impl<'a> TryFrom<&'a Statement> for &'a $Kind {
+            impl<'a> TryFrom<&'a Statement> for &'a $StatementType {
                 type Error = $crate::Error;
 
                 /// The statement as this kind, or a type error naming the kind it is.
-                fn try_from(stmt: &'a Statement) -> $crate::Result<&'a $Kind> {
+                fn try_from(stmt: &'a Statement) -> $crate::Result<&'a $StatementType> {
                     match stmt {
-                        Statement::$Kind(kind) => Ok(kind),
-                        other => Err($crate::Error::Type(format!("not a {}: a {}", stringify!($Kind), other.kind()))),
+                        Statement::$StatementType(kind) => Ok(kind),
+                        other => Err($crate::Error::Type(format!("not a {}: a {}", stringify!($StatementType), other.ty()))),
                     }
                 }
             }
@@ -992,14 +992,14 @@ macro_rules! define_kinds {
 
             #[allow(non_upper_case_globals, dead_code, unused_variables, unused_mut)]
             impl $Record {
-                pub const LAYER: Layer = define_kinds!(@layer $rlayer);
-                define_kinds!(@fields $Record { $( $rfield : $rty [$($rrole)|*] $(= $rdefault)? ,)* });
+                pub const LAYER: Layer = define_statement_types!(@layer $rlayer);
+                define_statement_types!(@fields $Record { $( $rfield : $rty [$($rrole)|*] $(= $rdefault)? ,)* });
             }
 
             /// A record is a field of the kind that holds it: spelled on the header as its name over its own fields.
             impl $crate::field::Field for $Record {
-                fn ty() -> $crate::field::Ty {
-                    $crate::field::Ty::Record($Record::NAME)
+                fn ty() -> $crate::field::FieldType {
+                    $crate::field::FieldType::Record($Record::NAME)
                 }
                 fn visit(&self, _roles: Roles, visitor: &mut dyn $crate::field::Visitor) {
                     $Record::visit(self, visitor);
@@ -1041,130 +1041,130 @@ macro_rules! define_kinds {
         /// Every statement kind, one variant each.
         #[derive(Clone, PartialEq, Eq, Hash, Debug)]
         pub enum Statement {
-            $( $Kind($Kind), )*
+            $( $StatementType($StatementType), )*
         }
 
         /// Every statement kind by name, in declaration order.
         #[derive(Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Debug)]
-        pub enum Kind {
-            $( $Kind, )*
+        pub enum StatementType {
+            $( $StatementType, )*
         }
 
-        impl Kind {
+        impl StatementType {
             /// Every kind, in declaration order.
-            pub const ALL: &[Kind] = &[ $( Kind::$Kind, )* ];
+            pub const ALL: &[StatementType] = &[ $( StatementType::$StatementType, )* ];
 
             pub fn name(self) -> &'static str {
-                match self { $( Kind::$Kind => $Kind::NAME, )* }
+                match self { $( StatementType::$StatementType => $StatementType::NAME, )* }
             }
 
             pub fn layer(self) -> Layer {
-                match self { $( Kind::$Kind => $Kind::LAYER, )* }
+                match self { $( StatementType::$StatementType => $StatementType::LAYER, )* }
             }
 
             pub fn fields(self) -> &'static [FieldInfo] {
-                match self { $( Kind::$Kind => $Kind::FIELDS, )* }
+                match self { $( StatementType::$StatementType => $StatementType::FIELDS, )* }
             }
 
-            pub fn field_ty(self, field: &str) -> Option<$crate::field::Ty> {
-                match self { $( Kind::$Kind => $Kind::field_ty(field), )* }
+            pub fn field_ty(self, field: &str) -> Option<$crate::field::FieldType> {
+                match self { $( StatementType::$StatementType => $StatementType::field_ty(field), )* }
             }
 
             /// A statement of this kind from its field values.
             pub fn from_values(self, values: $crate::field::Values) -> $crate::Result<Statement> {
-                match self { $( Kind::$Kind => Ok(Statement::$Kind($Kind::from_values(values)?)), )* }
+                match self { $( StatementType::$StatementType => Ok(Statement::$StatementType($StatementType::from_values(values)?)), )* }
             }
         }
 
-        impl std::str::FromStr for Kind {
+        impl std::str::FromStr for StatementType {
             type Err = $crate::Error;
 
-            fn from_str(name: &str) -> $crate::Result<Kind> {
+            fn from_str(name: &str) -> $crate::Result<StatementType> {
                 match name {
-                    $( stringify!($Kind) => Ok(Kind::$Kind), )*
+                    $( stringify!($StatementType) => Ok(StatementType::$StatementType), )*
                     _ => Err($crate::Error::Value(format!("no statement kind {name}"))),
                 }
             }
         }
 
-        impl std::fmt::Display for Kind {
+        impl std::fmt::Display for StatementType {
             fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
                 f.write_str(self.name())
             }
         }
 
         impl Statement {
-            pub fn kind(&self) -> Kind {
-                match self { $( Statement::$Kind(_) => Kind::$Kind, )* }
+            pub fn ty(&self) -> StatementType {
+                match self { $( Statement::$StatementType(_) => StatementType::$StatementType, )* }
             }
 
             pub fn layer(&self) -> Layer {
-                self.kind().layer()
+                self.ty().layer()
             }
 
-            pub fn flags(&self) -> KindFlags {
-                match self { $( Statement::$Kind(_) => $Kind::FLAGS, )* }
+            pub fn flags(&self) -> StatementFlags {
+                match self { $( Statement::$StatementType(_) => $StatementType::FLAGS, )* }
             }
 
             pub fn fields(&self) -> &'static [FieldInfo] {
-                self.kind().fields()
+                self.ty().fields()
             }
 
             /// The operation a kind with an `op` field holds.
-            pub fn op(&self) -> Option<&$crate::elementwise::Op> {
-                match self { $( Statement::$Kind(k) => k.op(), )* }
+            pub fn op(&self) -> Option<&$crate::elementwise::ElementwiseOp> {
+                match self { $( Statement::$StatementType(k) => k.op(), )* }
             }
 
             /// This statement with another operation, for a kind that holds one; itself for any other.
-            pub fn with_op(&self, op: $crate::elementwise::Op) -> Statement {
-                match self { $( Statement::$Kind(k) => Statement::$Kind(k.with_op(op)), )* }
+            pub fn with_op(&self, op: $crate::elementwise::ElementwiseOp) -> Statement {
+                match self { $( Statement::$StatementType(k) => Statement::$StatementType(k.with_op(op)), )* }
             }
 
             /// The dtype a kind's `dtype` field holds: the value-defining shared kinds, and TreeHalve, WarpShuffle,
             /// FragmentRowReduce and RegFragment, whose field is typed `DType` too.
             pub fn dtype(&self) -> Option<&$crate::field::DType> {
-                match self { $( Statement::$Kind(k) => k.dtype(), )* }
+                match self { $( Statement::$StatementType(k) => k.dtype(), )* }
             }
 
             /// The one name a kind's defining `name` field binds: the single-value shared kinds, Call, and
             /// RegFragment and WgmmaDescriptor.
             pub fn name(&self) -> Option<&$crate::Name> {
-                match self { $( Statement::$Kind(k) => k.name(), )* }
+                match self { $( Statement::$StatementType(k) => k.name(), )* }
             }
 
             /// The checks a kind makes on construction: `validate` of every `CHECKED` kind, nothing for the others.
             pub fn check(&self) -> $crate::Result<()> {
-                match self { $( Statement::$Kind(k) => define_kinds!(@check k {$($flag)|*}), )* }
+                match self { $( Statement::$StatementType(k) => define_statement_types!(@check k {$($flag)|*}), )* }
             }
 
             pub fn visit(&self, visitor: &mut dyn $crate::field::Visitor) {
-                match self { $( Statement::$Kind(k) => k.visit(visitor), )* }
+                match self { $( Statement::$StatementType(k) => k.visit(visitor), )* }
             }
 
             pub fn rewrite_fields(&self, rewriter: &mut dyn $crate::field::Rewriter) -> Statement {
-                match self { $( Statement::$Kind(k) => Statement::$Kind(k.rewrite(rewriter)), )* }
+                match self { $( Statement::$StatementType(k) => Statement::$StatementType(k.rewrite(rewriter)), )* }
             }
 
             pub fn same(&self, other: &Statement) -> bool {
                 match (self, other) {
-                    $( (Statement::$Kind(a), Statement::$Kind(b)) => a.same(b), )*
+                    $( (Statement::$StatementType(a), Statement::$StatementType(b)) => a.same(b), )*
                     _ => false,
                 }
             }
 
             pub fn header_fields(&self) -> $crate::Result<Vec<(&'static str, String)>> {
-                match self { $( Statement::$Kind(k) => k.header_fields(), )* }
+                match self { $( Statement::$StatementType(k) => k.header_fields(), )* }
             }
 
             pub fn block_fields(&self) -> Vec<(&'static str, Vec<std::sync::Arc<Statement>>)> {
-                match self { $( Statement::$Kind(k) => k.block_fields(), )* }
+                match self { $( Statement::$StatementType(k) => k.block_fields(), )* }
             }
         }
 
         $(
-            impl From<$Kind> for Statement {
-                fn from(kind: $Kind) -> Statement {
-                    Statement::$Kind(kind)
+            impl From<$StatementType> for Statement {
+                fn from(kind: $StatementType) -> Statement {
+                    Statement::$StatementType(kind)
                 }
             }
         )*
@@ -1172,17 +1172,17 @@ macro_rules! define_kinds {
     (@fields $Type:ident { $( $field:ident : $ty:ty [$($role:ident)|*] $(= $default:expr)? ,)* }) => {
         pub const NAME: &'static str = stringify!($Type);
         pub const FIELDS: &'static [FieldInfo] = &[
-            $( FieldInfo { name: stringify!($field), roles: Roles::NONE $(.or(define_kinds!(@role $role)))*, has_default: $crate::__has_default!($($default)?), kw_only: define_kinds!(@kw_only $($role)|*) }, )*
+            $( FieldInfo { name: stringify!($field), roles: Roles::NONE $(.or(define_statement_types!(@role $role)))*, has_default: $crate::__has_default!($($default)?), kw_only: define_statement_types!(@kw_only $($role)|*) }, )*
         ];
 
         /// Visit every role-playing value, in field order.
         pub fn visit(&self, visitor: &mut dyn $crate::field::Visitor) {
-            $( <$ty as $crate::field::Field>::visit(&self.$field, Roles::NONE $(.or(define_kinds!(@role $role)))*, visitor); )*
+            $( <$ty as $crate::field::Field>::visit(&self.$field, Roles::NONE $(.or(define_statement_types!(@role $role)))*, visitor); )*
         }
 
         /// The same with every role-playing value passed through `rewriter`.
         pub fn rewrite(&self, rewriter: &mut dyn $crate::field::Rewriter) -> $Type {
-            $Type { $( $field: <$ty as $crate::field::Field>::rewrite(&self.$field, Roles::NONE $(.or(define_kinds!(@role $role)))*, rewriter), )* }
+            $Type { $( $field: <$ty as $crate::field::Field>::rewrite(&self.$field, Roles::NONE $(.or(define_statement_types!(@role $role)))*, rewriter), )* }
         }
 
         /// Whether `other` holds the same values, field by field, by identity where a field is shared.
@@ -1196,7 +1196,7 @@ macro_rules! define_kinds {
             let mut out = Vec::new();
             $(
                 if !<$ty as $crate::field::Field>::is_block() {
-                    let at_default = define_kinds!(@at_default self $field $ty $(= $default)?);
+                    let at_default = define_statement_types!(@at_default self $field $ty $(= $default)?);
                     if !at_default {
                         let mut text = String::new();
                         <$ty as $crate::field::Field>::spell(&self.$field, &mut text)?;
@@ -1213,7 +1213,7 @@ macro_rules! define_kinds {
             let mut out = Vec::new();
             $(
                 if <$ty as $crate::field::Field>::is_block() {
-                    let at_default = define_kinds!(@at_default self $field $ty $(= $default)?);
+                    let at_default = define_statement_types!(@at_default self $field $ty $(= $default)?);
                     if !at_default {
                         out.push((stringify!($field), <$ty as $crate::field::Field>::block(&self.$field)));
                     }
@@ -1223,7 +1223,7 @@ macro_rules! define_kinds {
         }
 
         /// The type a field is read by.
-        pub fn field_ty(name: &str) -> Option<$crate::field::Ty> {
+        pub fn field_ty(name: &str) -> Option<$crate::field::FieldType> {
             match name {
                 $( stringify!($field) => Some(<$ty as $crate::field::Field>::ty()), )*
                 _ => None,
@@ -1234,20 +1234,20 @@ macro_rules! define_kinds {
         pub fn from_values(mut values: $crate::field::Values) -> $crate::Result<$Type> {
             #[allow(unused_mut, unused_variables)]
             let out = $Type {
-                $( $field: define_kinds!(@take values $Type $field $ty $(= $default)?), )*
+                $( $field: define_statement_types!(@take values $Type $field $ty $(= $default)?), )*
             };
             values.finish(Self::NAME)?;
             Ok(out)
         }
 
         /// The operation this kind holds: its `op` field, when it has one.
-        pub fn op(&self) -> Option<&$crate::elementwise::Op> {
+        pub fn op(&self) -> Option<&$crate::elementwise::ElementwiseOp> {
             $( if stringify!($field) == "op" { return <$ty as $crate::field::Field>::as_op(&self.$field); } )*
             None
         }
 
         /// The same with another operation; itself when it holds none.
-        pub fn with_op(&self, op: $crate::elementwise::Op) -> $Type {
+        pub fn with_op(&self, op: $crate::elementwise::ElementwiseOp) -> $Type {
             $Type { $( $field: if stringify!($field) == "op" { <$ty as $crate::field::Field>::with_op(&self.$field, &op) } else { self.$field.clone() }, )* }
         }
 
@@ -1259,7 +1259,7 @@ macro_rules! define_kinds {
 
         /// The one name a single-value kind defines: its `name` field, when that field defines.
         pub fn name(&self) -> Option<&$crate::Name> {
-            $( if stringify!($field) == "name" && (Roles::NONE $(.or(define_kinds!(@role $role)))*).contains_any(DEFINES) { return <$ty as $crate::field::Field>::as_name(&self.$field); } )*
+            $( if stringify!($field) == "name" && (Roles::NONE $(.or(define_statement_types!(@role $role)))*).contains_any(DEFINES) { return <$ty as $crate::field::Field>::as_name(&self.$field); } )*
             None
         }
     };
@@ -1269,10 +1269,10 @@ macro_rules! define_kinds {
     (@role $role:ident) => { $role };
     (@kw_only) => { false };
     (@kw_only KW_ONLY $(| $rest:ident)*) => { true };
-    (@kw_only $role:ident $(| $rest:ident)*) => { define_kinds!(@kw_only $($rest)|*) };
+    (@kw_only $role:ident $(| $rest:ident)*) => { define_statement_types!(@kw_only $($rest)|*) };
     (@check $k:ident {}) => {{ let _ = &$k; Ok(()) }};
     (@check $k:ident {CHECKED $(| $rest:tt)*}) => { $k.validate() };
-    (@check $k:ident {$flag:tt $(| $rest:tt)*}) => { define_kinds!(@check $k {$($rest)|*}) };
+    (@check $k:ident {$flag:tt $(| $rest:tt)*}) => { define_statement_types!(@check $k {$($rest)|*}) };
     (@at_default $self:ident $field:ident $ty:ty = $default:expr) => {
         <$ty as $crate::field::Field>::equals(&$self.$field, &$default)
     };
@@ -1293,14 +1293,14 @@ macro_rules! define_kinds {
 
 use crate::Name;
 use crate::body::Body;
-use crate::elementwise::Op;
+use crate::elementwise::ElementwiseOp;
 use crate::expr::Expression;
 pub use crate::field::{
-    Axes, AxisRef, Branches, DType, Exprs, Float, Floats, FragmentArgs, Int2, Ints, Names, NumOr,
-    Ops, Shape3, Stmts, SubroutineRef,
+    Axes, AxisRef, Branches, DType, ElementwiseOps, Exprs, Float, Floats, FragmentArgs, Int2, Ints,
+    Names, NumOr, Shape3, Stmts, SubroutineRef,
 };
 
-with_kinds!(define_kinds);
+with_statement_types!(define_statement_types);
 
 #[cfg(test)]
 mod tests {
@@ -1311,7 +1311,7 @@ mod tests {
     #[test]
     fn the_declarations_are_pinned() {
         let mut listing = String::new();
-        for kind in Kind::ALL {
+        for kind in StatementType::ALL {
             let fields: Vec<&str> = kind.fields().iter().map(|f| f.name).collect();
             listing.push_str(&format!("{} {}\n", kind.name(), fields.join(" ")));
         }

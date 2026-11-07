@@ -5,7 +5,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use crate::body::{Body, MemoKey};
-use crate::elementwise::{Elementwise, Op};
+use crate::elementwise::{ElementwiseOp, Operation};
 use crate::memo::BODY_MEMO_CAPACITY;
 use crate::normalize::normalize_body;
 use crate::numbering::{digest, hex};
@@ -35,7 +35,7 @@ fn canonicalize_op_clusters(body: &Body) -> Body {
             // A sum is FMA-class work; which coefficients it carries is not the cluster's business.
             Statement::Affine(a) => Arc::new(Statement::Assign(Assign {
                 name: a.name.clone(),
-                op: Op::Known(Elementwise::Add).cluster_representative(),
+                op: ElementwiseOp::Known(Operation::Add).cluster_representative(),
                 args: a.args.clone(),
                 dtype: a.dtype,
             })),

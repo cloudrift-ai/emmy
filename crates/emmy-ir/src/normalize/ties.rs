@@ -12,8 +12,8 @@ use super::with_bodies;
 use crate::Name;
 use crate::Result;
 use crate::body::Body;
-use crate::expr::{BinOp, Expr, ExprKind, Expression, Num, python_repr};
-use crate::field::{Float, Ty};
+use crate::expr::{BinOp, Expr, ExprType, Expression, Num, python_repr};
+use crate::field::{FieldType, Float};
 use crate::numbering::{Key, Numbering, expression_key};
 use crate::statement::{Affine, Statement};
 
@@ -48,13 +48,10 @@ pub(crate) fn sibling_shape(stmt: &Arc<Statement>) -> Result<Key> {
         .into_iter()
         .map(|(name, text)| match extent {
             Some(expression) if name == "axis" => Key::Str(extent_digest(expression).into()),
-            _ => field_key(shell.kind().field_ty(name), &text),
+            _ => field_key(shell.ty().field_ty(name), &text),
         })
         .collect::<Vec<_>>();
-    Ok(Key::tuple([
-        Key::str(stmt.kind().name()),
-        Key::Tuple(fields),
-    ]))
+    Ok(Key::tuple([Key::str(stmt.ty().name()), Key::Tuple(fields)]))
 }
 
 /// The whole subtree with names abstracted and buffers spelled: the tie-break between siblings of one shape, so
@@ -67,8 +64,10 @@ pub(crate) fn sibling_spelling(stmt: &Arc<Statement>) -> Key {
 
 /// A header field's key: its text, and for a sequence field whether it holds one element, which sorts after longer
 /// sequences, as the Python order's text of a one-element tuple did.
-fn field_key(ty: Option<Ty>, text: &str) -> Key {
-    if matches!(ty, Some(Ty::Seq(_) | Ty::Tuple(_))) && text.starts_with('(') && text.ends_with(')')
+fn field_key(ty: Option<FieldType>, text: &str) -> Key {
+    if matches!(ty, Some(FieldType::Seq(_) | FieldType::Tuple(_)))
+        && text.starts_with('(')
+        && text.ends_with(')')
     {
         let mut depth = 0i32;
         let mut top_level_comma = false;
@@ -284,7 +283,7 @@ pub(crate) fn unspelled(e: &Expression, axis_order: &HashMap<Name, usize>) -> Ke
     expression_key(e, &mut |e| match &**e {
         Expr::Var(name) => axis_order
             .get(name)
-            .map(|index| Key::tuple([Key::str(ExprKind::Var.text()), Key::Int(*index as i64)])),
+            .map(|index| Key::tuple([Key::str(ExprType::Var.text()), Key::Int(*index as i64)])),
         _ => None,
     })
 }
@@ -299,7 +298,7 @@ mod tests {
     /// The extent digest spells an expression in the Python order's old form (`BinaryExpr`, `FuncCallExpr`, ...);
     /// the stored goldens' decisions are addressed in it, so each kind's spelling is pinned through its digest.
     #[test]
-    fn the_extent_digest_spells_every_expression_kind_as_it_always_did() {
+    fn the_extent_digest_spells_every_expression_type_as_it_always_did() {
         let samples = [
             Expression::var("n"),
             Expression::int(4096),

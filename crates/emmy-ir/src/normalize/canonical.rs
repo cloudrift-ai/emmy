@@ -67,7 +67,7 @@ impl SequentialScope {
         let mut exported: Vec<Name> = Vec::new();
         for child in &children {
             let scalar = carried_out(child);
-            for here in child.of_kinds(&[Kind::Accum, Kind::Carry]) {
+            for here in child.of_types(&[StatementType::Accum, StatementType::Carry]) {
                 match &**here.stmt() {
                     Statement::Carry(c) => exported.push(c.name.clone()),
                     Statement::Accum(a) if scalar.contains(&a.name) => {
@@ -463,13 +463,13 @@ mod tests {
                         out[] = total
                         "
                     )));
-                    let [ref initial] = renamed.of_kinds(&[Kind::Init])[..] else {
+                    let [ref initial] = renamed.of_types(&[StatementType::Init])[..] else {
                         panic!("one init")
                     };
-                    let [ref update] = renamed.of_kinds(&[Kind::Accum])[..] else {
+                    let [ref update] = renamed.of_types(&[StatementType::Accum])[..] else {
                         panic!("one update")
                     };
-                    let [ref output] = renamed.of_kinds(&[Kind::Write])[..] else {
+                    let [ref output] = renamed.of_types(&[StatementType::Write])[..] else {
                         panic!("one write")
                     };
                     let (

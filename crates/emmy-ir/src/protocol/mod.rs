@@ -468,7 +468,7 @@ impl Statement {
         if rewriter.short || rewriter.bodies.len() > 0 {
             return Err(Error::Value(format!(
                 "{}.with_bodies: {} bodies for {} child bodies",
-                this.kind(),
+                this.ty(),
                 count,
                 this.nested().len()
             )));
@@ -809,7 +809,7 @@ mod tests {
 
     use super::*;
     use crate::expr::parse::parse;
-    use crate::field::Ty;
+    use crate::field::FieldType;
     use crate::identity::canonicalize_identity;
     use crate::normalize::testing::{body, stmt_text, strs, text};
     use crate::text::parse_statement;
@@ -876,10 +876,10 @@ mod tests {
     /// The examples, one per kind.
     fn examples() -> Vec<Arc<Statement>> {
         let examples: Vec<Arc<Statement>> = EXAMPLES.iter().map(|text| statement(text)).collect();
-        let kinds: Vec<Kind> = examples.iter().map(|stmt| stmt.kind()).collect();
+        let statement_types: Vec<StatementType> = examples.iter().map(|stmt| stmt.ty()).collect();
         assert_eq!(
-            kinds,
-            Kind::ALL,
+            statement_types,
+            StatementType::ALL,
             "one example per kind, in declaration order"
         );
         examples
@@ -892,10 +892,10 @@ mod tests {
             .collect()
     }
 
-    fn example(kind: Kind) -> Arc<Statement> {
+    fn example(kind: StatementType) -> Arc<Statement> {
         examples()
             .into_iter()
-            .find(|stmt| stmt.kind() == kind)
+            .find(|stmt| stmt.ty() == kind)
             .unwrap()
     }
 
@@ -957,14 +957,14 @@ mod tests {
     }
 
     #[test]
-    fn a_kind_holds_its_elementwise_operation_as_op() {
+    fn a_statement_type_holds_its_elementwise_operation_as_op() {
         // The clustered identity reads a statement's operation by the name `op`, in every layer.
-        let is_op = |ty: &Ty| match ty {
-            Ty::Op => true,
-            Ty::Opt(inner) => **inner == Ty::Op,
+        let is_op = |ty: &FieldType| match ty {
+            FieldType::ElementwiseOp => true,
+            FieldType::Opt(inner) => **inner == FieldType::ElementwiseOp,
             _ => false,
         };
-        let held: Vec<(&str, &str)> = Kind::ALL
+        let held: Vec<(&str, &str)> = StatementType::ALL
             .iter()
             .flat_map(|kind| {
                 kind.fields()
@@ -1015,7 +1015,7 @@ mod tests {
         // What a declared kind reads and defines follows a rename; the buffers it reads and writes follow a buffer
         // rename, the ones a carried statement or an epilogue reads included.
         for stmt in kernel_examples() {
-            let kind = stmt.kind();
+            let kind = stmt.ty();
             let renamed = suffixed(&stmt, "_");
             assert_eq!(
                 owned(&renamed.deps()),
@@ -1083,7 +1083,7 @@ mod tests {
     fn a_carried_program_hides_its_own_names() {
         // A combine a statement carries reads the state and its shuffled copy and binds temporaries; the statement
         // reads the state alone.
-        let halve = example(Kind::TreeHalve);
+        let halve = example(StatementType::TreeHalve);
         assert_eq!(strs(&halve.deps()), ["acc"]);
         assert!(halve.defines().is_empty());
         let Statement::TreeHalve(moved) = &*suffixed(&halve, "_") else {
@@ -1095,7 +1095,7 @@ mod tests {
     #[test]
     fn a_term_keeps_its_names_and_follows_a_substitution() {
         // A store's epilogue names are its own: a rename leaves them and reaches the coordinates its indices read.
-        let store = example(Kind::RegStore);
+        let store = example(StatementType::RegStore);
         let sigma = HashMap::from([(Name::from("i"), expression("i + 4"))]);
         let names = names_by(&store, |name| format!("{name}_"));
         let Statement::RegStore(moved) = &*rewritten(&store, &names, &sigma) else {
@@ -1150,7 +1150,7 @@ mod tests {
     fn a_statement_rebuilds_as_itself() {
         // Every rebuilding member, given what its reading half returned, gives back an equal statement.
         for stmt in examples() {
-            let kind = stmt.kind();
+            let kind = stmt.ty();
             assert_eq!(*kept(&stmt), *stmt, "{kind}");
             assert_eq!(
                 *Statement::with_bodies(&stmt, stmt.nested()).unwrap(),
@@ -1168,11 +1168,13 @@ mod tests {
     }
 
     /// Whether a value of type `ty` is one `want` accepts, or holds one in an option, a tuple or a sequence.
-    fn holds(ty: &Ty, want: &dyn Fn(&Ty) -> bool) -> bool {
+    fn holds(ty: &FieldType, want: &dyn Fn(&FieldType) -> bool) -> bool {
         want(ty)
             || match ty {
-                Ty::Opt(inner) | Ty::Seq(inner) | Ty::NumOr(inner) => holds(inner, want),
-                Ty::Tuple(items) => items.iter().any(|item| holds(item, want)),
+                FieldType::Opt(inner) | FieldType::Seq(inner) | FieldType::NumOr(inner) => {
+                    holds(inner, want)
+                }
+                FieldType::Tuple(items) => items.iter().any(|item| holds(item, want)),
                 _ => false,
             }
     }
@@ -1182,7 +1184,7 @@ mod tests {
         // `expressions` lists every expression of the statement and `map_expressions` reaches each one in that
         // order. A walk visits a field that plays a role, so every field that holds an expression plays EXPRESSION
         // and every field that holds statements plays BODY, TERM or STMTS: then the walk reaches every one.
-        let declared = Kind::ALL
+        let declared = StatementType::ALL
             .iter()
             .flat_map(|kind| {
                 kind.fields()
@@ -1203,14 +1205,14 @@ mod tests {
             );
         for (owner, field, ty) in declared {
             let ty = ty.unwrap();
-            if holds(&ty, &|ty| *ty == Ty::Expr) {
+            if holds(&ty, &|ty| *ty == FieldType::Expr) {
                 assert!(
                     field.roles.contains_any(EXPRESSION),
                     "{owner}.{}",
                     field.name
                 );
             }
-            if holds(&ty, &|ty| *ty == Ty::Block) {
+            if holds(&ty, &|ty| *ty == FieldType::Block) {
                 assert!(
                     field.roles.contains_any(BODY.or(TERM).or(STMTS)),
                     "{owner}.{}",
@@ -1219,7 +1221,7 @@ mod tests {
             }
         }
         for stmt in examples() {
-            let kind = stmt.kind();
+            let kind = stmt.ty();
             let markers: Vec<Expression> = (0..stmt.expressions().len())
                 .map(|index| Expression::var(&format!("e{index}")))
                 .collect();

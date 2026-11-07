@@ -478,7 +478,7 @@ pub fn place_values(body: &Body) -> Result<Body> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::elementwise::{Elementwise, Op};
+    use crate::elementwise::{ElementwiseOp, Operation};
     use crate::normalize::normalize_body;
     use crate::normalize::testing::*;
 
@@ -505,7 +505,7 @@ mod tests {
     fn written(stmt: &Statement) -> &Name {
         match stmt {
             Statement::Write(write) if write.values.len() == 1 => &write.values[0],
-            _ => panic!("not a scalar write: {}", stmt.kind()),
+            _ => panic!("not a scalar write: {}", stmt.ty()),
         }
     }
 
@@ -563,7 +563,7 @@ mod tests {
                 .clone();
             for result in [renamed, eliminated] {
                 let nest = Body::new(vec![result]);
-                let branches = nest.of_kinds(&[Kind::Cond]);
+                let branches = nest.of_types(&[StatementType::Cond]);
                 let Statement::Cond(branch) = &**branches[0].stmt() else {
                     unreachable!()
                 };
@@ -591,7 +591,7 @@ mod tests {
             out[0] = b
             ",
         );
-        assert_eq!(kinds(&out), ["Let", "Select", "Assign", "Write"]);
+        assert_eq!(statement_types(&out), ["Let", "Select", "Assign", "Write"]);
         let Statement::Write(write) = &*out.stmts()[3] else {
             unreachable!()
         };
@@ -855,10 +855,10 @@ mod tests {
                 o[a] = x
             ",
         );
-        assert_eq!(kinds(&out), ["Load", "Loop"]);
+        assert_eq!(statement_types(&out), ["Load", "Loop"]);
         assert_eq!(load_names(&out), ["x"]);
         assert_eq!(axis(&out.stmts()[1]), "a");
-        assert_eq!(kinds(&inner(&out.stmts()[1])), ["Write"]);
+        assert_eq!(statement_types(&inner(&out.stmts()[1])), ["Write"]);
     }
 
     #[test]
@@ -876,11 +876,16 @@ mod tests {
                 out[a] = v
             ",
         );
-        assert_eq!(kinds(&out), ["Loop", "Assign", "Loop"], "{}", text(&out));
+        assert_eq!(
+            statement_types(&out),
+            ["Loop", "Assign", "Loop"],
+            "{}",
+            text(&out)
+        );
         assert_eq!(axis(&out.stmts()[0]), "b");
         assert_eq!(stmt_text(&out.stmts()[1]), "v = exp(acc)");
         assert_eq!(axis(&out.stmts()[2]), "a");
-        assert_eq!(kinds(&inner(&out.stmts()[2])), ["Write"]);
+        assert_eq!(statement_types(&inner(&out.stmts()[2])), ["Write"]);
         assert_eq!(accum_names(&inner(&out.stmts()[0])), ["acc"]);
     }
 
@@ -909,10 +914,10 @@ mod tests {
                 o[a] = x
             ",
         );
-        assert_eq!(kinds(&out), ["Load", "StridedLoop"]);
+        assert_eq!(statement_types(&out), ["Load", "StridedLoop"]);
         assert_eq!(load_names(&out), ["x"]);
         assert_eq!(axis(&out.stmts()[1]), "a");
-        assert_eq!(kinds(&inner(&out.stmts()[1])), ["Write"]);
+        assert_eq!(statement_types(&inner(&out.stmts()[1])), ["Write"]);
     }
 
     #[test]
@@ -928,7 +933,7 @@ mod tests {
             ",
         );
         assert_eq!(
-            kinds(&out),
+            statement_types(&out),
             ["StridedLoop", "Assign", "Loop"],
             "{}",
             text(&out)
@@ -936,7 +941,7 @@ mod tests {
         assert_eq!(axis(&out.stmts()[0]), "b");
         assert_eq!(stmt_text(&out.stmts()[1]), "v = exp(acc)");
         assert_eq!(axis(&out.stmts()[2]), "a");
-        assert_eq!(kinds(&inner(&out.stmts()[2])), ["Write"]);
+        assert_eq!(statement_types(&inner(&out.stmts()[2])), ["Write"]);
     }
 
     #[test]
@@ -971,9 +976,9 @@ mod tests {
                 Q[i] = staged
             ",
         );
-        assert_eq!(kinds(&out), ["Loop"]);
+        assert_eq!(statement_types(&out), ["Loop"]);
         assert_eq!(
-            kinds(&inner(&out.stmts()[0])),
+            statement_types(&inner(&out.stmts()[0])),
             ["Write", "Load", "Sync", "Load", "Write", "Write"]
         );
     }
@@ -1000,7 +1005,7 @@ mod tests {
             ",
         );
         assert_eq!(
-            kinds(&out),
+            statement_types(&out),
             ["Load", "Loop", "Loop", "Assign", "Write"],
             "{}",
             text(&out)
@@ -1033,7 +1038,7 @@ mod tests {
         );
         assert_eq!(loop_axes(&out), ["a"]);
         let inner_a = inner(&out.stmts()[0]);
-        assert_eq!(kinds(&inner_a), ["Loop", "Assign", "Write"]);
+        assert_eq!(statement_types(&inner_a), ["Loop", "Assign", "Write"]);
         assert_eq!(accum_names(&inner(&inner_a.stmts()[0])), ["acc1"]);
         let Statement::Assign(read) = &*inner_a.stmts()[1] else {
             unreachable!()
@@ -1121,7 +1126,7 @@ mod tests {
         assert!(
             out.stmts()
                 .iter()
-                .any(|stmt| matches!(&**stmt, Statement::Assign(a) if a.op == Op::Known(Elementwise::Exp))),
+                .any(|stmt| matches!(&**stmt, Statement::Assign(a) if a.op == ElementwiseOp::Known(Operation::Exp))),
             "{}",
             text(&out)
         );
@@ -1142,7 +1147,7 @@ mod tests {
             branch("b", "right")
         ));
         assert_eq!(
-            kinds(&out),
+            statement_types(&out),
             ["Load", "Load", "Assign", "Cond"],
             "{}",
             text(&out)
@@ -1150,9 +1155,9 @@ mod tests {
         let Statement::Assign(shared) = &*out.stmts()[2] else {
             unreachable!()
         };
-        assert_eq!(shared.op, Op::Known(Elementwise::Exp));
+        assert_eq!(shared.op, ElementwiseOp::Known(Operation::Exp));
         for arm in out.stmts()[3].nested() {
-            assert_eq!(kinds(&arm), ["Load", "Affine", "Write"]);
+            assert_eq!(statement_types(&arm), ["Load", "Affine", "Write"]);
             let Statement::Affine(sum) = &*arm.stmts()[1] else {
                 unreachable!()
             };
@@ -1219,7 +1224,10 @@ mod tests {
         let [reduce] = reduces[..] else {
             panic!("one reduce loop: {}", text(&out))
         };
-        assert_eq!(kinds(&inner(reduce)), ["Load", "Load", "Assign", "Accum"]);
+        assert_eq!(
+            statement_types(&inner(reduce)),
+            ["Load", "Load", "Assign", "Accum"]
+        );
         let product = outer
             .stmts()
             .iter()

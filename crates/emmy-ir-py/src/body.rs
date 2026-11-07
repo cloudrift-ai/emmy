@@ -16,7 +16,7 @@ use crate::convert::{
     IntoPyErr, PyField, Slots, cached, located, slots, statement_from_py, str_tuple, translate,
 };
 use crate::expression::{PyExpression, renames_from_py};
-use crate::statement::{PyStatement, kind_of, statements_from_py, wrap_statement};
+use crate::statement::{PyStatement, statement_type_of, statements_from_py, wrap_statement};
 
 /// The wrappers a body's statements hand back, so a statement read twice is one object however many wrappers the body
 /// has. The table is keyed by the body's shared allocation and lives on this side of the boundary: the crate holds no
@@ -367,7 +367,7 @@ impl PyBody {
         None
     }
 
-    /// Elementwise, as a sequence renders.
+    /// Operation, as a sequence renders.
     fn structural_form<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyTuple>> {
         PyTuple::new(py, PyBody::items(py, &self.body)?)
     }
@@ -518,15 +518,15 @@ impl PyBody {
         py: Python<'py>,
         types: &Bound<'py, PyTuple>,
     ) -> PyResult<Bound<'py, PyTuple>> {
-        let mut kinds: Vec<emmy_ir::statement::Kind> = Vec::new();
+        let mut kinds: Vec<emmy_ir::statement::StatementType> = Vec::new();
         for item in types.iter() {
             let cls = item
                 .cast::<PyType>()
                 .map_err(|_| PyTypeError::new_err("iter_of_type takes statement classes"))?;
-            match kind_of(cls) {
+            match statement_type_of(cls) {
                 Some(kind) => kinds.push(kind),
                 None if cls.is(py.get_type::<PyStatement>()) => {
-                    kinds.extend(emmy_ir::statement::Kind::ALL.iter().copied())
+                    kinds.extend(emmy_ir::statement::StatementType::ALL.iter().copied())
                 }
                 None => {
                     return Err(PyTypeError::new_err(format!(
@@ -538,7 +538,7 @@ impl PyBody {
         }
         let items: PyResult<Vec<Bound<'py, PyAny>>> = self
             .body
-            .of_kinds(&kinds)
+            .of_types(&kinds)
             .iter()
             .map(|here| wrap_ref(py, here))
             .collect();
@@ -943,7 +943,10 @@ pub fn dtype_promote(op_name: &str, arg_dtypes: Vec<String>) -> PyResult<String>
         .iter()
         .map(|d| d.parse().py())
         .collect::<PyResult<_>>()?;
-    let promoted = emmy_ir::dtype::promote(emmy_ir::elementwise::Op::new(op_name).known(), &dtypes);
+    let promoted = emmy_ir::dtype::promote(
+        emmy_ir::elementwise::ElementwiseOp::new(op_name).known(),
+        &dtypes,
+    );
     Ok(promoted.text().to_string())
 }
 

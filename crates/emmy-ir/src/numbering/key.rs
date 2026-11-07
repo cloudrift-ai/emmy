@@ -5,7 +5,7 @@ use std::sync::Arc;
 use crate::Name;
 use crate::closed_set;
 use crate::expr::Num;
-use crate::expr::{Expr, ExprKind, Expression};
+use crate::expr::{Expr, ExprType, Expression};
 
 /// Digest material: a tree of primitives, hashed to a number and ordered totally.
 #[derive(Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Debug)]
@@ -135,39 +135,39 @@ pub fn expression_key(e: &Expression, leaf: &mut dyn FnMut(&Expression) -> Optio
         return key;
     }
     match &**e {
-        Expr::Var(name) => Key::tuple([Key::str(ExprKind::Var.text()), Key::Str(name.clone())]),
+        Expr::Var(name) => Key::tuple([Key::str(ExprType::Var.text()), Key::Str(name.clone())]),
         Expr::Literal(lit) => Key::tuple([
-            Key::str(ExprKind::Literal.text()),
+            Key::str(ExprType::Literal.text()),
             Key::num(lit.value),
             Key::str(lit.dtype.text()),
         ]),
         Expr::Builtin(builtin) => {
-            Key::tuple([Key::str(ExprKind::Builtin.text()), Key::str(builtin.text())])
+            Key::tuple([Key::str(ExprType::Builtin.text()), Key::str(builtin.text())])
         }
         Expr::Binary(op, l, r) => Key::tuple([
-            Key::str(ExprKind::Binary.text()),
+            Key::str(ExprType::Binary.text()),
             Key::str(op.text()),
             expression_key(l, leaf),
             expression_key(r, leaf),
         ]),
         Expr::Call(name, args) => Key::tuple([
-            Key::str(ExprKind::Call.text()),
+            Key::str(ExprType::Call.text()),
             Key::Str(name.clone()),
             Key::Tuple(args.iter().map(|a| expression_key(a, leaf)).collect()),
         ]),
         Expr::Ternary(a, b, c) => Key::tuple([
-            Key::str(ExprKind::Ternary.text()),
+            Key::str(ExprType::Ternary.text()),
             expression_key(a, leaf),
             expression_key(b, leaf),
             expression_key(c, leaf),
         ]),
         Expr::Cast(dtype, inner) => Key::tuple([
-            Key::str(ExprKind::Cast.text()),
+            Key::str(ExprType::Cast.text()),
             Key::str(&dtype.to_string()),
             expression_key(inner, leaf),
         ]),
         Expr::FlatIndex(buffer, index) => Key::tuple([
-            Key::str(ExprKind::FlatIndex.text()),
+            Key::str(ExprType::FlatIndex.text()),
             Key::Str(buffer.clone()),
             Key::Tuple(index.iter().map(|a| expression_key(a, leaf)).collect()),
         ]),

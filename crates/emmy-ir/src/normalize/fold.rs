@@ -8,7 +8,7 @@ use super::{assign, with_bodies};
 use crate::Name;
 use crate::body::Body;
 use crate::dtype::promote;
-use crate::elementwise::{AffineRole, Elementwise, Op};
+use crate::elementwise::{AffineRole, ElementwiseOp, Operation};
 use crate::expr::Expression;
 use crate::field::{DType, Float, Names};
 use crate::numbering::Key;
@@ -25,7 +25,7 @@ pub fn fold_trivial_selects(body: &Body) -> Body {
         {
             return Some(assign(
                 &s.name,
-                Op::Known(Elementwise::Copy),
+                ElementwiseOp::Known(Operation::Copy),
                 vec![s.branches[0].value.clone()],
                 None,
             ));
@@ -179,7 +179,7 @@ pub fn fold_affine(body: &Body, exposed: &HashSet<Name>) -> Body {
         };
         match stmt {
             Statement::Assign(a) => promote(a.op.known(), &of(&a.args)),
-            Statement::Affine(a) => promote(Some(Elementwise::Add), &of(&a.args)),
+            Statement::Affine(a) => promote(Some(Operation::Add), &of(&a.args)),
             _ => DType::F32,
         }
     }
@@ -198,7 +198,7 @@ pub fn fold_affine(body: &Body, exposed: &HashSet<Name>) -> Body {
         if live.len() == 1 && live[0].1 == 1.0 && offset == 0.0 {
             return assign(
                 &name,
-                Op::Known(Elementwise::Copy),
+                ElementwiseOp::Known(Operation::Copy),
                 vec![live[0].0.clone()],
                 root.dtype().cloned(),
             );

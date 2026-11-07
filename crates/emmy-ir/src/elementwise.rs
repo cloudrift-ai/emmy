@@ -42,9 +42,9 @@ pub enum Eval {
     Ternary(fn(f32, f32, f32) -> f32),
 }
 
-/// Everything the compiler knows of a known operation, in one row of the table `OPS` indexes by `Elementwise`.
+/// Everything the compiler knows of a known operation, in one row of the table `OPS` indexes by `Operation`.
 #[derive(Clone, Copy)]
-pub struct OpInfo {
+pub struct OperationInfo {
     /// A binary combine where `op(a, b) == op(b, a)`.
     pub commutative: bool,
     /// A binary combine where `op(op(a, b), c) == op(a, op(b, c))`: the reassociable reduce combines.
@@ -52,7 +52,7 @@ pub struct OpInfo {
     /// The reducer's neutral element; `seed` is what a kernel initializes with.
     pub neutral: Option<f64>,
     /// The compute-unit cluster representative: the clustered identity collapses operations sharing a GPU unit.
-    pub cluster: Option<Elementwise>,
+    pub cluster: Option<Operation>,
     /// Arithmetic on integer operands stays in the integer family (the dtype promotion rule).
     pub integer: bool,
     /// The copy alias: the one operation the alias reads of normalization (placement, the ties, the constant fold)
@@ -69,8 +69,8 @@ pub struct OpInfo {
     pub eval: Eval,
 }
 
-impl OpInfo {
-    const DEFAULT: OpInfo = OpInfo {
+impl OperationInfo {
+    const DEFAULT: OperationInfo = OperationInfo {
         commutative: false,
         associative: false,
         neutral: None,
@@ -89,23 +89,23 @@ impl OpInfo {
 const SEED_BOUND: f64 = 1e30;
 
 /// The known operations: one list declares each variant, its spelling and its properties, and generates the enum,
-/// its `Display`/`FromStr` pair and the table. A property left out takes `OpInfo::DEFAULT`'s value.
+/// its `Display`/`FromStr` pair and the table. A property left out takes `OperationInfo::DEFAULT`'s value.
 macro_rules! operations {
     ($( $Variant:ident = $text:literal { $( $field:ident : $value:expr ),* $(,)? }, )*) => {
         closed_set! {
             /// The operations the compiler knows a property of, by spelling; a spelling outside the set is an
-            /// [`Op::Other`].
-            pub enum Elementwise ("elementwise operation") { $( $Variant = $text, )* }
+            /// [`ElementwiseOp::Other`].
+            pub enum Operation ("elementwise operation") { $( $Variant = $text, )* }
         }
 
-        /// The properties of every known operation, in `Elementwise` order.
-        pub static OPS: [OpInfo; Elementwise::ALL.len()] = [
-            $( OpInfo { $( $field: $value, )* ..OpInfo::DEFAULT }, )*
+        /// The properties of every known operation, in `Operation` order.
+        pub static OPS: [OperationInfo; Operation::ALL.len()] = [
+            $( OperationInfo { $( $field: $value, )* ..OperationInfo::DEFAULT }, )*
         ];
     };
 }
 
-use Elementwise as E;
+use Operation as E;
 
 operations! {
     Add = "add" { commutative: true, associative: true, neutral: Some(0.0), cluster: Some(E::Multiply), integer: true, affine: Some(AffineRole::Sum), eval: Eval::Binary(|a, b| a + b) },
@@ -181,14 +181,14 @@ operations! {
 }
 
 /// Spellings that mean an operation the renderers know under another name, normalized at construction.
-pub const ALIASES: [(&str, Elementwise); 2] = [
-    ("__rshift__", Elementwise::RightShift),
-    ("bitwise_right_shift", Elementwise::RightShift),
+pub const ALIASES: [(&str, Operation); 2] = [
+    ("__rshift__", Operation::RightShift),
+    ("bitwise_right_shift", Operation::RightShift),
 ];
 
-impl Elementwise {
+impl Operation {
     /// The row of the table: every property in one place.
-    pub fn info(self) -> &'static OpInfo {
+    pub fn info(self) -> &'static OperationInfo {
         &OPS[self as usize]
     }
 
@@ -213,41 +213,41 @@ impl Elementwise {
 }
 
 /// An elementwise operation as a statement holds it: one the compiler knows by property, or any other spelling a
-/// renderer knows. Built through [`Op::new`] or from an [`Elementwise`]: `Other` is for a spelling the enum lacks,
+/// renderer knows. Built through [`ElementwiseOp::new`] or from an [`Operation`]: `Other` is for a spelling the enum lacks,
 /// and an `Other` built by hand with a known spelling would never equal its `Known` twin.
 #[derive(Clone, PartialEq, Eq, Hash, Debug)]
-pub enum Op {
-    Known(Elementwise),
+pub enum ElementwiseOp {
+    Known(Operation),
     Other(Name),
 }
 
-impl Op {
-    pub fn new(name: &str) -> Op {
+impl ElementwiseOp {
+    pub fn new(name: &str) -> ElementwiseOp {
         let name = ALIASES
             .iter()
             .find(|(alias, _)| *alias == name)
             .map_or(name, |(_, canonical)| canonical.text());
         name.parse()
-            .map_or_else(|_| Op::Other(name.into()), Op::Known)
+            .map_or_else(|_| ElementwiseOp::Other(name.into()), ElementwiseOp::Known)
     }
 
     pub fn name(&self) -> &str {
         match self {
-            Op::Known(op) => op.text(),
-            Op::Other(name) => name,
+            ElementwiseOp::Known(op) => op.text(),
+            ElementwiseOp::Other(name) => name,
         }
     }
 
-    pub fn known(&self) -> Option<Elementwise> {
+    pub fn known(&self) -> Option<Operation> {
         match self {
-            Op::Known(op) => Some(*op),
-            Op::Other(_) => None,
+            ElementwiseOp::Known(op) => Some(*op),
+            ElementwiseOp::Other(_) => None,
         }
     }
 
     /// The known operation's properties; `Other` has none.
-    pub fn info(&self) -> Option<&'static OpInfo> {
-        self.known().map(Elementwise::info)
+    pub fn info(&self) -> Option<&'static OperationInfo> {
+        self.known().map(Operation::info)
     }
 
     pub fn commutative(&self) -> bool {
@@ -265,7 +265,7 @@ impl Op {
 
     /// The neutral element as a kernel initializes it.
     pub fn seed(&self) -> Option<f64> {
-        self.known().and_then(Elementwise::seed)
+        self.known().and_then(Operation::seed)
     }
 
     /// The operation returns its one operand unchanged.
@@ -279,33 +279,33 @@ impl Op {
     }
 
     /// The op's compute-unit cluster representative; the op itself when no cluster lists it.
-    pub fn cluster_representative(&self) -> Op {
+    pub fn cluster_representative(&self) -> ElementwiseOp {
         match self.info().and_then(|info| info.cluster) {
-            Some(representative) => Op::Known(representative),
+            Some(representative) => ElementwiseOp::Known(representative),
             None => self.clone(),
         }
     }
 }
 
-impl From<Elementwise> for Op {
-    fn from(op: Elementwise) -> Op {
-        Op::Known(op)
+impl From<Operation> for ElementwiseOp {
+    fn from(op: Operation) -> ElementwiseOp {
+        ElementwiseOp::Known(op)
     }
 }
 
-impl From<&str> for Op {
-    fn from(name: &str) -> Op {
-        Op::new(name)
+impl From<&str> for ElementwiseOp {
+    fn from(name: &str) -> ElementwiseOp {
+        ElementwiseOp::new(name)
     }
 }
 
-impl fmt::Display for Op {
+impl fmt::Display for ElementwiseOp {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(self.name())
     }
 }
 
-pub type Ops = Arc<[Op]>;
+pub type ElementwiseOps = Arc<[ElementwiseOp]>;
 
 #[cfg(test)]
 mod tests {
@@ -313,13 +313,13 @@ mod tests {
 
     #[test]
     fn the_table_is_in_enum_order_and_spells_every_operation() {
-        for op in Elementwise::ALL {
-            assert_eq!(op.text().parse::<Elementwise>().unwrap(), *op);
+        for op in Operation::ALL {
+            assert_eq!(op.text().parse::<Operation>().unwrap(), *op);
         }
-        assert!(Elementwise::Copy.info().copies && !Elementwise::Positive.info().copies);
-        assert!(Elementwise::Maximum.info().selecting && !Elementwise::Add.info().selecting);
-        assert_eq!(Elementwise::Maximum.evaluate_f32(&[1.0, f32::NAN]), None);
-        let texts: Vec<&str> = Elementwise::ALL.iter().map(|op| op.text()).collect();
+        assert!(Operation::Copy.info().copies && !Operation::Positive.info().copies);
+        assert!(Operation::Maximum.info().selecting && !Operation::Add.info().selecting);
+        assert_eq!(Operation::Maximum.evaluate_f32(&[1.0, f32::NAN]), None);
+        let texts: Vec<&str> = Operation::ALL.iter().map(|op| op.text()).collect();
         assert_eq!(
             texts,
             [
@@ -394,14 +394,17 @@ mod tests {
                 "bitwise_count",
             ]
         );
-        assert_eq!(Elementwise::Maximum.info().neutral, Some(f64::NEG_INFINITY));
-        assert_eq!(Elementwise::Maximum.seed(), Some(-1e30));
-        assert_eq!(Elementwise::Minimum.seed(), Some(1e30));
-        assert_eq!(Elementwise::Add.seed(), Some(0.0));
-        assert_eq!(Elementwise::Add.evaluate_f32(&[1.5, 2.0]), Some(3.5));
-        assert_eq!(Elementwise::Add.evaluate_f32(&[1.5]), None);
-        assert_eq!(Elementwise::Where.evaluate_f32(&[0.0, 1.0, 2.0]), Some(2.0));
-        assert_eq!(Op::new("__rshift__"), Op::Known(Elementwise::RightShift));
-        assert!(Op::new("unknown_op").info().is_none());
+        assert_eq!(Operation::Maximum.info().neutral, Some(f64::NEG_INFINITY));
+        assert_eq!(Operation::Maximum.seed(), Some(-1e30));
+        assert_eq!(Operation::Minimum.seed(), Some(1e30));
+        assert_eq!(Operation::Add.seed(), Some(0.0));
+        assert_eq!(Operation::Add.evaluate_f32(&[1.5, 2.0]), Some(3.5));
+        assert_eq!(Operation::Add.evaluate_f32(&[1.5]), None);
+        assert_eq!(Operation::Where.evaluate_f32(&[0.0, 1.0, 2.0]), Some(2.0));
+        assert_eq!(
+            ElementwiseOp::new("__rshift__"),
+            ElementwiseOp::Known(Operation::RightShift)
+        );
+        assert!(ElementwiseOp::new("unknown_op").info().is_none());
     }
 }

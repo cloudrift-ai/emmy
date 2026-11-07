@@ -7,7 +7,7 @@ use std::sync::Arc;
 
 use crate::axis::Axis;
 use crate::body::{Body, MemoKey};
-use crate::elementwise::Op;
+use crate::elementwise::ElementwiseOp;
 use crate::expr::{Expression, Interval, SimplifyCtx};
 use crate::field::DType;
 use crate::memo::BODY_MEMO_CAPACITY;
@@ -54,7 +54,7 @@ pub fn normalize_body(body: &Body) -> Result<Body> {
 /// The normal form, computed afresh.
 pub fn normalize_uncached(body: &Body) -> Result<Body> {
     // The normal form holds every operation: a call is storage sharing inside fusion, which expands it.
-    if !body.of_kinds(&[Kind::Call]).is_empty() {
+    if !body.of_types(&[StatementType::Call]).is_empty() {
         return Err(Error::Value(
             "a body that holds a subroutine call has no normal form; fusion expands its calls"
                 .into(),
@@ -116,7 +116,7 @@ fn substituted(stmt: &Arc<Statement>, name: &Name, value: Expression) -> Arc<Sta
     Statement::substitute(stmt, &HashMap::from([(name.clone(), value)]))
 }
 
-fn assign(name: &Name, op: Op, args: Vec<Name>, dtype: Option<DType>) -> Arc<Statement> {
+fn assign(name: &Name, op: ElementwiseOp, args: Vec<Name>, dtype: Option<DType>) -> Arc<Statement> {
     Arc::new(Statement::Assign(Assign {
         name: name.clone(),
         op,
@@ -547,8 +547,8 @@ pub(crate) mod testing {
         statement_text(stmt).unwrap()
     }
 
-    pub(crate) fn kinds(body: &Body) -> Vec<&'static str> {
-        body.stmts().iter().map(|stmt| stmt.kind().name()).collect()
+    pub(crate) fn statement_types(body: &Body) -> Vec<&'static str> {
+        body.stmts().iter().map(|stmt| stmt.ty().name()).collect()
     }
 
     /// Every order of `items`.
@@ -581,7 +581,7 @@ pub(crate) mod testing {
     pub(crate) fn inner(stmt: &Statement) -> Body {
         match stmt.nested().as_slice() {
             [first, ..] => first.clone(),
-            [] => panic!("not a statement over a body: {}", stmt.kind()),
+            [] => panic!("not a statement over a body: {}", stmt.ty()),
         }
     }
 
@@ -589,7 +589,7 @@ pub(crate) mod testing {
         match stmt {
             Statement::Loop(l) => &l.axis.name,
             Statement::StridedLoop(l) => &l.axis.name,
-            _ => panic!("not a loop: {}", stmt.kind()),
+            _ => panic!("not a loop: {}", stmt.ty()),
         }
     }
 

@@ -5,9 +5,9 @@ use std::sync::Arc;
 
 use crate::axis::{Axis, Dim, Window};
 use crate::body::{Body, Subroutine};
-use crate::elementwise::Op;
+use crate::elementwise::ElementwiseOp;
 use crate::expr::{Expression, Lit, Num, Parser, TokenKind};
-use crate::field::{DType, Float, NumOr, Ty, Value, Values};
+use crate::field::{DType, FieldType, Float, NumOr, Value, Values};
 use crate::protocol::finished;
 use crate::statement::*;
 use crate::{Error, Name, Result};
@@ -269,7 +269,7 @@ impl Line {
             .parser
             .tokens
             .last()
-            .is_some_and(|t| t.kind == TokenKind::Op && t.text == ":");
+            .is_some_and(|t| t.kind == TokenKind::ElementwiseOp && t.text == ":");
         if !ends_block && !nested.is_empty() {
             return Err(Error::Value(format!(
                 "line {}: unexpected indentation",
@@ -278,7 +278,7 @@ impl Line {
         }
         if let Some(token) = self.parser.peek(0)
             && token.kind == TokenKind::Name
-            && let Ok(kind) = token.text.parse::<Kind>()
+            && let Ok(kind) = token.text.parse::<StatementType>()
             && kind.layer() != Layer::Shared
             && (self.parser.at("(", 1) || self.parser.at(":", 1) || self.parser.peek(1).is_none())
         {
@@ -337,7 +337,7 @@ impl Line {
             return self.end(Arc::new(stmt));
         }
         if self.parser.accept("<-") {
-            let op = Op::new(&self.name()?);
+            let op = ElementwiseOp::new(&self.name()?);
             self.parser.require("(")?;
             let operands = self.names(Some(")"))?;
             let [base, value] = &operands[..] else {
@@ -451,7 +451,7 @@ impl Line {
             && token.kind == TokenKind::Name
             && self.parser.at("(", 1)
         {
-            let op = Op::new(&token.text);
+            let op = ElementwiseOp::new(&token.text);
             self.parser.index += 2;
             let args = self.names(Some(")"))?;
             return self.end(Arc::new(Statement::Assign(Assign {
@@ -468,7 +468,7 @@ impl Line {
     /// A kind of another layer: its header's fields, then its blocks among the rows under it.
     fn declared(
         &mut self,
-        kind: Kind,
+        kind: StatementType,
         nested: &[Row],
         subs: &mut HashMap<Name, Arc<Subroutine>>,
     ) -> Result<Arc<Statement>> {
@@ -516,7 +516,7 @@ impl Line {
         &mut self,
         kind: &str,
         fields: &[FieldInfo],
-        ty_of: &dyn Fn(&str) -> Option<Ty>,
+        ty_of: &dyn Fn(&str) -> Option<FieldType>,
     ) -> Result<Values> {
         let mut values = Values::default();
         if self.parser.accept("(") {
@@ -551,19 +551,19 @@ impl Line {
     }
 
     /// A value of the declared type `ty`.
-    fn typed(&mut self, ty: &Ty) -> Result<Value> {
+    fn typed(&mut self, ty: &FieldType) -> Result<Value> {
         match ty {
-            Ty::Opt(inner) => {
+            FieldType::Opt(inner) => {
                 if self.word("none") {
                     return Ok(Value::None);
                 }
                 self.typed(inner)
             }
-            Ty::NumOr(inner) => match self.parser.number()? {
+            FieldType::NumOr(inner) => match self.parser.number()? {
                 Some(lit) => Ok(Value::Number(lit.value)),
                 None => self.typed(inner),
             },
-            Ty::Seq(inner) => {
+            FieldType::Seq(inner) => {
                 self.parser.require("(")?;
                 let mut out = Vec::new();
                 while !self.parser.accept(")") {
@@ -574,7 +574,7 @@ impl Line {
                 }
                 Ok(Value::Tuple(out))
             }
-            Ty::Tuple(items) => {
+            FieldType::Tuple(items) => {
                 self.parser.require("(")?;
                 let mut out = Vec::new();
                 for (position, item) in items.iter().enumerate() {
@@ -586,18 +586,20 @@ impl Line {
                 self.parser.require(")")?;
                 Ok(Value::Tuple(out))
             }
-            Ty::Bool => {
+            FieldType::Bool => {
                 if !(self.parser.at_word("true", 0) || self.parser.at_word("false", 0)) {
                     return Err(self.parser.error("expected true or false"));
                 }
                 Ok(Value::Bool(self.parser.take()?.text == "true"))
             }
-            Ty::Int => Ok(Value::Number(Num::Int(self.value()? as i64))),
-            Ty::Float => Ok(Value::Number(Num::Float(self.value()?))),
-            Ty::Name | Ty::DType | Ty::Op => Ok(Value::Name(self.name()?)),
-            Ty::Expr => Ok(Value::Expr(self.parser.expression()?)),
-            Ty::Axis => Ok(Value::Axis(self.whole_axis()?)),
-            Ty::Record(record) => {
+            FieldType::Int => Ok(Value::Number(Num::Int(self.value()? as i64))),
+            FieldType::Float => Ok(Value::Number(Num::Float(self.value()?))),
+            FieldType::Name | FieldType::DType | FieldType::ElementwiseOp => {
+                Ok(Value::Name(self.name()?))
+            }
+            FieldType::Expr => Ok(Value::Expr(self.parser.expression()?)),
+            FieldType::Axis => Ok(Value::Axis(self.whole_axis()?)),
+            FieldType::Record(record) => {
                 if &*self.name()? != *record {
                     return Err(self.parser.error(&format!("expected a {record}")));
                 }
@@ -608,7 +610,7 @@ impl Line {
                     self.record(record, fields, &|field| record_field_ty(record, field))?;
                 Ok(Value::Record(record.to_string(), values))
             }
-            Ty::Block | Ty::Subroutine => Err(self
+            FieldType::Block | FieldType::Subroutine => Err(self
                 .parser
                 .error(&format!("a field of type {ty:?} is not read on a header"))),
         }
@@ -775,7 +777,7 @@ impl Line {
 }
 
 /// The type a record's field is read by.
-fn record_field_ty(record: &str, field: &str) -> Option<Ty> {
+fn record_field_ty(record: &str, field: &str) -> Option<FieldType> {
     match record {
         SelectBranch::NAME => SelectBranch::field_ty(field),
         FragmentArg::NAME => FragmentArg::field_ty(field),

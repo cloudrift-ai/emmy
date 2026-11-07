@@ -6,7 +6,7 @@ use std::sync::{Arc, OnceLock};
 
 use emmy_ir::axis::{Axis, Dim, Window};
 use emmy_ir::body::Body;
-use emmy_ir::elementwise::Op;
+use emmy_ir::elementwise::ElementwiseOp;
 use emmy_ir::expr::{Expression, Num};
 use emmy_ir::field::{DType, Float, Int2, NumOr, Shape3, SubroutineRef};
 use emmy_ir::statement::{FragmentArg, SelectBranch, Statement};
@@ -244,7 +244,7 @@ pub fn dtype_to_py<'py>(py: Python<'py>, dtype: &DType) -> PyResult<Bound<'py, P
     DTYPE_GET.get(py)?.call1((dtype.text(),))
 }
 
-pub fn op_to_py<'py>(py: Python<'py>, op: &Op) -> PyResult<Bound<'py, PyAny>> {
+pub fn op_to_py<'py>(py: Python<'py>, op: &ElementwiseOp) -> PyResult<Bound<'py, PyAny>> {
     ELEMENTWISE.get(py)?.call1((op.name(),))
 }
 
@@ -502,7 +502,7 @@ impl PyField for Arc<[FragmentArg]> {
     }
 }
 
-impl PyField for Op {
+impl PyField for ElementwiseOp {
     fn to_py(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
         Ok(op_to_py(py, self)?.unbind())
     }
@@ -511,23 +511,23 @@ impl PyField for Op {
             // Construction validates the name and gives the object the reads hand back.
             let op = ELEMENTWISE.get(value.py())?.call1((text,))?;
             let name: String = op.getattr("name")?.extract()?;
-            return Ok((Op::new(&name), Some(op.unbind())));
+            return Ok((ElementwiseOp::new(&name), Some(op.unbind())));
         }
         let name: String = value.getattr("name")?.extract()?;
-        Ok((Op::new(&name), Some(value.clone().unbind())))
+        Ok((ElementwiseOp::new(&name), Some(value.clone().unbind())))
     }
 }
 
-impl PyField for Arc<[Op]> {
+impl PyField for Arc<[ElementwiseOp]> {
     fn to_py(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
         let wrapped: PyResult<Vec<Py<PyAny>>> = self.iter().map(|op| op.to_py(py)).collect();
         Ok(PyTuple::new(py, wrapped?)?.into_any().unbind())
     }
     fn from_py(value: &Bound<'_, PyAny>) -> PyResult<Extracted<Self>> {
         let parts = items(value, "a tuple of ops")?;
-        let ops: PyResult<Vec<Op>> = parts
+        let ops: PyResult<Vec<ElementwiseOp>> = parts
             .iter()
-            .map(|item| Op::from_py(item).map(|(op, _)| op))
+            .map(|item| ElementwiseOp::from_py(item).map(|(op, _)| op))
             .collect();
         Ok((ops?.into(), None))
     }

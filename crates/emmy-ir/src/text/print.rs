@@ -246,10 +246,10 @@ pub fn lines(stmt: &Statement, indent: &str, out: &mut Vec<String>) -> Result<()
     Ok(())
 }
 
-/// `Kind(field=value, …)` over the fields that are not at their default and hold no statements.
+/// `StatementType(field=value, …)` over the fields that are not at their default and hold no statements.
 fn header(stmt: &Statement) -> Result<String> {
     let fields = stmt.header_fields()?;
-    let mut out = stmt.kind().to_string();
+    let mut out = stmt.ty().to_string();
     if !fields.is_empty() {
         out.push('(');
         out.push_str(
@@ -348,7 +348,7 @@ fn definition_text(sub: &Subroutine) -> Result<Vec<String>> {
 /// The subroutines `body` calls, a callee ahead of its caller, each name once; two subroutines of one name are
 /// refused unless they are one definition bound to other buffers.
 fn subroutines(body: &Body, found: &mut Vec<Arc<Subroutine>>) -> Result<()> {
-    for here in body.of_kinds(&[Kind::Call]) {
+    for here in body.of_types(&[StatementType::Call]) {
         let Statement::Call(call) = &**here.stmt() else {
             continue;
         };

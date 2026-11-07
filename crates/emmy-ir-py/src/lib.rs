@@ -11,14 +11,14 @@ mod statement;
 
 /// The elementwise tables the Python `ElementwiseImpl` reads, each a view of the operations' properties.
 fn elementwise_tables(m: &Bound<'_, PyModule>) -> PyResult<()> {
-    use emmy_ir::elementwise::{ALIASES, Elementwise, OpInfo};
+    use emmy_ir::elementwise::{ALIASES, Operation, OperationInfo};
     let py = m.py();
-    fn texts(keep: fn(&OpInfo) -> bool) -> Vec<&'static str> {
-        Elementwise::ALL
+    fn texts(keep: fn(&OperationInfo) -> bool) -> Vec<&'static str> {
+        Operation::ALL
             .iter()
             .copied()
             .filter(|op| keep(op.info()))
-            .map(Elementwise::text)
+            .map(Operation::text)
             .collect()
     }
     m.add(
@@ -35,14 +35,14 @@ fn elementwise_tables(m: &Bound<'_, PyModule>) -> PyResult<()> {
     )?;
     // What a kernel seeds a reduction with: the bounded stand-in of an unbounded neutral element.
     let identity = PyDict::new(py);
-    for op in Elementwise::ALL {
+    for op in Operation::ALL {
         if let Some(value) = op.seed() {
             identity.set_item(op.text(), value)?;
         }
     }
     m.add("OP_IDENTITY", identity)?;
     let clusters = PyDict::new(py);
-    for op in Elementwise::ALL {
+    for op in Operation::ALL {
         if let Some(representative) = op.info().cluster {
             clusters.set_item(op.text(), representative.text())?;
         }
@@ -63,7 +63,7 @@ fn elementwise_tables(m: &Bound<'_, PyModule>) -> PyResult<()> {
 #[pymodule(name = "emmy_ir")]
 fn emmy_ir_module(m: &Bound<'_, PyModule>) -> PyResult<()> {
     expression::register(m)?;
-    statement::register_kinds(m)?;
+    statement::register_statement_types(m)?;
     m.add_function(wrap_pyfunction!(statement::_statement_from_text, m)?)?;
     body::register(m)?;
     elementwise_tables(m)?;

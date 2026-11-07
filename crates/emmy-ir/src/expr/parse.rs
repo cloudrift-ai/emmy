@@ -11,7 +11,7 @@ pub enum TokenKind {
     Number,
     Name,
     Quoted,
-    Op,
+    ElementwiseOp,
 }
 
 #[derive(Clone, Debug)]
@@ -143,7 +143,7 @@ impl Parser {
             {
                 Some(p) => {
                     tokens.push(Token {
-                        kind: TokenKind::Op,
+                        kind: TokenKind::ElementwiseOp,
                         text: p.to_string(),
                         position,
                     });
@@ -190,7 +190,7 @@ impl Parser {
 
     pub fn at(&self, op: &str, ahead: usize) -> bool {
         self.peek(ahead)
-            .is_some_and(|t| t.kind == TokenKind::Op && t.text == op)
+            .is_some_and(|t| t.kind == TokenKind::ElementwiseOp && t.text == op)
     }
 
     pub fn at_word(&self, word: &str, ahead: usize) -> bool {
@@ -262,7 +262,7 @@ impl Parser {
     fn binary(&mut self, least: u8) -> Result<Expression> {
         let mut left = self.operand()?;
         while let Some(token) = self.peek(0) {
-            if token.kind != TokenKind::Op {
+            if token.kind != TokenKind::ElementwiseOp {
                 break;
             }
             let Ok(op) = token.text.parse::<BinOp>() else {
@@ -364,7 +364,7 @@ impl Parser {
                 }
                 Ok(Expression::new(Expr::Var(token.text.into())))
             }
-            TokenKind::Op if token.text == "(" => {
+            TokenKind::ElementwiseOp if token.text == "(" => {
                 // ``(dtype)`` followed by an operand is a cast; the writer never parenthesizes a lone name otherwise.
                 if let Some(next) = self.peek(0)
                     && next.kind == TokenKind::Name
@@ -440,7 +440,7 @@ mod tests {
     }
 
     #[test]
-    fn every_expression_kind_prints_its_text_and_reads_back() {
+    fn every_expression_type_prints_its_text_and_reads_back() {
         let cases = [
             (var("s"), "s"),
             (

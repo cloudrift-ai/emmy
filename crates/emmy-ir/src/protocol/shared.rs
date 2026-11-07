@@ -2,7 +2,7 @@
 //! and its binary form, a select's mask, the literal a statement binds.
 
 use crate::body::Body;
-use crate::elementwise::{Elementwise, Op};
+use crate::elementwise::{ElementwiseOp, Operation};
 use crate::expr::{Expr, Expression, LitType};
 use crate::field::{AxisRef, Names, NumOr};
 use crate::statement::*;
@@ -171,11 +171,11 @@ impl Affine {
                 self.out.push(Arc::new(Statement::Let(let_)));
                 name
             }
-            fn step(&mut self, op: Elementwise, args: Vec<Name>) -> Name {
+            fn step(&mut self, op: Operation, args: Vec<Name>) -> Name {
                 let name = self.fresh();
                 let assign = Assign {
                     name: name.clone(),
-                    op: Op::Known(op),
+                    op: ElementwiseOp::Known(op),
                     args: args.into(),
                     dtype: self.affine.dtype,
                 };
@@ -197,16 +197,16 @@ impl Affine {
                 arg.clone()
             } else {
                 let literal = chain.bound(coefficient.abs());
-                chain.step(Elementwise::Multiply, vec![arg.clone(), literal])
+                chain.step(Operation::Multiply, vec![arg.clone(), literal])
             };
             total = Some(match total {
                 None if coefficient > 0.0 => term,
-                None => chain.step(Elementwise::Negative, vec![term]),
+                None => chain.step(Operation::Negative, vec![term]),
                 Some(current) => chain.step(
                     if coefficient > 0.0 {
-                        Elementwise::Add
+                        Operation::Add
                     } else {
-                        Elementwise::Subtract
+                        Operation::Subtract
                     },
                     vec![current, term],
                 ),
@@ -220,9 +220,9 @@ impl Affine {
             let literal = chain.bound(self.offset.0.abs());
             total = chain.step(
                 if self.offset.0 > 0.0 {
-                    Elementwise::Add
+                    Operation::Add
                 } else {
-                    Elementwise::Subtract
+                    Operation::Subtract
                 },
                 vec![total, literal],
             );
@@ -239,7 +239,7 @@ impl Affine {
             }
             _ => out.push(Arc::new(Statement::Assign(Assign {
                 name: self.name.clone(),
-                op: Op::Known(Elementwise::Copy),
+                op: ElementwiseOp::Known(Operation::Copy),
                 args: Names::from([total]),
                 dtype: self.dtype,
             }))),

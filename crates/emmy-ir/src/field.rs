@@ -8,7 +8,7 @@ use std::sync::Arc;
 use crate::axis::Axis;
 use crate::axis::spell_axis;
 use crate::body::Body;
-use crate::elementwise::Op;
+use crate::elementwise::ElementwiseOp;
 use crate::expr::{Expression, Num, float_repr, hash_f64, same_f64, spell_name};
 use crate::statement::{
     AXIS, AXIS_NAME, BODY, BUFFERS, EXPRESSION, FragmentArg, NAMES, Roles, STMTS, SelectBranch,
@@ -35,7 +35,7 @@ pub type Axes = Arc<[AxisRef]>;
 pub type Stmts = Arc<[Arc<Statement>]>;
 pub type Branches = Arc<[SelectBranch]>;
 pub type FragmentArgs = Arc<[FragmentArg]>;
-pub type Ops = Arc<[Op]>;
+pub type ElementwiseOps = Arc<[ElementwiseOp]>;
 pub type Ints = Arc<[i64]>;
 pub type Floats = Arc<[Float]>;
 
@@ -134,22 +134,22 @@ pub trait Rewriter {
 
 /// How a header field is read.
 #[derive(Clone, Debug, PartialEq)]
-pub enum Ty {
+pub enum FieldType {
     Name,
     Int,
     Float,
     Bool,
     DType,
-    Op,
+    ElementwiseOp,
     Expr,
     Axis,
     Block,
     Subroutine,
-    Opt(Box<Ty>),
-    Seq(Box<Ty>),
-    Tuple(Vec<Ty>),
+    Opt(Box<FieldType>),
+    Seq(Box<FieldType>),
+    Tuple(Vec<FieldType>),
     Record(&'static str),
-    NumOr(Box<Ty>),
+    NumOr(Box<FieldType>),
 }
 
 /// A value the reader collected, typed by what it read.
@@ -202,7 +202,7 @@ impl Values {
 /// What every field type does: it is visited and rewritten by the roles of its field, spelled on a header and read
 /// back by its type.
 pub trait Field: Clone + PartialEq + Eq + Hash + std::fmt::Debug + Sized + 'static {
-    fn ty() -> Ty;
+    fn ty() -> FieldType;
     fn visit(&self, roles: Roles, visitor: &mut dyn Visitor);
     fn rewrite(&self, roles: Roles, rewriter: &mut dyn Rewriter) -> Self;
     /// The same value, by identity where the value is shared: what tells a rebuild that changed nothing.
@@ -217,12 +217,12 @@ pub trait Field: Clone + PartialEq + Eq + Hash + std::fmt::Debug + Sized + 'stat
     fn is_block() -> bool {
         false
     }
-    /// This field as an operation: `Op` answers.
-    fn as_op(&self) -> Option<&Op> {
+    /// This field as an operation: `ElementwiseOp` answers.
+    fn as_op(&self) -> Option<&ElementwiseOp> {
         None
     }
     /// This field with `op` in place of the operation it is; itself when it is none.
-    fn with_op(&self, _op: &Op) -> Self {
+    fn with_op(&self, _op: &ElementwiseOp) -> Self {
         self.clone()
     }
     /// This field as a dtype: `DType` answers, and an `Option` holding one.
@@ -271,8 +271,8 @@ fn rewrite_seq<T: Field>(items: &Arc<[T]>, roles: Roles, rewriter: &mut dyn Rewr
 }
 
 impl Field for Name {
-    fn ty() -> Ty {
-        Ty::Name
+    fn ty() -> FieldType {
+        FieldType::Name
     }
     fn visit(&self, roles: Roles, visitor: &mut dyn Visitor) {
         if roles != Roles::NONE {
@@ -305,8 +305,8 @@ impl Field for Name {
 }
 
 impl<T: Field> Field for Arc<[T]> {
-    fn ty() -> Ty {
-        Ty::Seq(Box::new(T::ty()))
+    fn ty() -> FieldType {
+        FieldType::Seq(Box::new(T::ty()))
     }
     fn visit(&self, roles: Roles, visitor: &mut dyn Visitor) {
         for item in self.iter() {
@@ -335,8 +335,8 @@ impl<T: Field> Field for Arc<[T]> {
 }
 
 impl<T: Field> Field for Option<T> {
-    fn ty() -> Ty {
-        Ty::Opt(Box::new(T::ty()))
+    fn ty() -> FieldType {
+        FieldType::Opt(Box::new(T::ty()))
     }
     fn visit(&self, roles: Roles, visitor: &mut dyn Visitor) {
         if let Some(value) = self {
@@ -380,8 +380,8 @@ impl<T: Field> Field for Option<T> {
 }
 
 impl<A: Field, B: Field> Field for (A, B) {
-    fn ty() -> Ty {
-        Ty::Tuple(vec![A::ty(), B::ty()])
+    fn ty() -> FieldType {
+        FieldType::Tuple(vec![A::ty(), B::ty()])
     }
     fn visit(&self, roles: Roles, visitor: &mut dyn Visitor) {
         self.0.visit(roles, visitor);
@@ -418,8 +418,8 @@ impl<A: Field, B: Field> Field for (A, B) {
 }
 
 impl Field for Expression {
-    fn ty() -> Ty {
-        Ty::Expr
+    fn ty() -> FieldType {
+        FieldType::Expr
     }
     fn visit(&self, roles: Roles, visitor: &mut dyn Visitor) {
         if roles != Roles::NONE {
@@ -449,8 +449,8 @@ impl Field for Expression {
 }
 
 impl Field for AxisRef {
-    fn ty() -> Ty {
-        Ty::Axis
+    fn ty() -> FieldType {
+        FieldType::Axis
     }
     fn visit(&self, roles: Roles, visitor: &mut dyn Visitor) {
         if roles.contains_any(AXIS) {
@@ -480,8 +480,8 @@ impl Field for AxisRef {
 }
 
 impl Field for Body {
-    fn ty() -> Ty {
-        Ty::Block
+    fn ty() -> FieldType {
+        FieldType::Block
     }
     fn visit(&self, roles: Roles, visitor: &mut dyn Visitor) {
         if roles.contains_any(BODY.or(TERM)) {
@@ -519,8 +519,8 @@ impl Field for Body {
 }
 
 impl Field for Stmts {
-    fn ty() -> Ty {
-        Ty::Block
+    fn ty() -> FieldType {
+        FieldType::Block
     }
     fn visit(&self, roles: Roles, visitor: &mut dyn Visitor) {
         if roles.contains_any(STMTS) {
@@ -587,7 +587,7 @@ macro_rules! plain_field {
     };
     (@visit $ty:ty, $tag:expr, |$this:ident, $out:ident| $spell:expr, |$value:ident| $read:expr, { $visit:item } $(, $extra:item)*) => {
         impl Field for $ty {
-            fn ty() -> Ty {
+            fn ty() -> FieldType {
                 $tag
             }
             $visit
@@ -609,7 +609,7 @@ macro_rules! plain_field {
 
 plain_field!(
     i64,
-    Ty::Int,
+    FieldType::Int,
     |this, out| out.push_str(&this.to_string()),
     |value| match value {
         Value::Number(number) => number.as_int(),
@@ -619,7 +619,7 @@ plain_field!(
 
 plain_field!(
     bool,
-    Ty::Bool,
+    FieldType::Bool,
     |this, out| out.push_str(if *this { "true" } else { "false" }),
     |value| match value {
         Value::Bool(flag) => Ok(flag),
@@ -629,7 +629,7 @@ plain_field!(
 
 plain_field!(
     Float,
-    Ty::Float,
+    FieldType::Float,
     |this, out| out.push_str(&spell_number(this.0)),
     |value| match value {
         Value::Number(number) => Ok(Float(number.as_f64())),
@@ -658,31 +658,31 @@ macro_rules! vocabulary_field {
 
 vocabulary_field!(
     DType,
-    Ty::DType,
+    FieldType::DType,
     fn as_dtype(&self) -> Option<&DType> {
         Some(self)
     }
 );
 
 plain_field!(
-    Op,
-    Ty::Op,
+    ElementwiseOp,
+    FieldType::ElementwiseOp,
     |this, out| out.push_str(&spell_stmt_name(this.name())?),
     |value| match value {
-        Value::Name(name) => Ok(Op::new(&name)),
+        Value::Name(name) => Ok(ElementwiseOp::new(&name)),
         other => Err(other.mismatch("an elementwise op")),
     },
-    fn as_op(&self) -> Option<&Op> {
+    fn as_op(&self) -> Option<&ElementwiseOp> {
         Some(self)
     },
-    fn with_op(&self, op: &Op) -> Self {
+    fn with_op(&self, op: &ElementwiseOp) -> Self {
         op.clone()
     }
 );
 
 plain_field!(
     Shape3,
-    Ty::Tuple(vec![Ty::Int, Ty::Int, Ty::Int]),
+    FieldType::Tuple(vec![FieldType::Int, FieldType::Int, FieldType::Int]),
     |this, out| out.push_str(&format!("({}, {}, {})", this.0, this.1, this.2)),
     |value| {
         let items: Vec<i64> = seq_from_value(value)?;
@@ -695,7 +695,7 @@ plain_field!(
 
 plain_field!(
     Int2,
-    Ty::Tuple(vec![Ty::Int, Ty::Int]),
+    FieldType::Tuple(vec![FieldType::Int, FieldType::Int]),
     |this, out| out.push_str(&format!("({}, {})", this.0, this.1)),
     |value| {
         let items: Vec<i64> = seq_from_value(value)?;
@@ -707,8 +707,8 @@ plain_field!(
 );
 
 impl Field for SubroutineRef {
-    fn ty() -> Ty {
-        Ty::Subroutine
+    fn ty() -> FieldType {
+        FieldType::Subroutine
     }
     fn visit(&self, _roles: Roles, _visitor: &mut dyn Visitor) {}
     fn rewrite(&self, _roles: Roles, _rewriter: &mut dyn Rewriter) -> Self {
@@ -725,8 +725,8 @@ impl Field for SubroutineRef {
 }
 
 impl<T: Field> Field for NumOr<T> {
-    fn ty() -> Ty {
-        Ty::NumOr(Box::new(T::ty()))
+    fn ty() -> FieldType {
+        FieldType::NumOr(Box::new(T::ty()))
     }
     fn visit(&self, roles: Roles, visitor: &mut dyn Visitor) {
         match self {

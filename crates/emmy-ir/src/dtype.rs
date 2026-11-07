@@ -2,7 +2,7 @@
 //! name, which is what every rule here reads.
 
 use crate::closed_set;
-use crate::elementwise::Elementwise;
+use crate::elementwise::Operation;
 
 closed_set! {
     /// An element type: the compiler's `DataType` registry, by canonical name, the two packed pairs included.
@@ -56,7 +56,7 @@ impl DType {
 
 /// Promote an elementwise op's argument dtypes to one result dtype: the common integer dtype by the C rank and sign
 /// rule for integer arithmetic on integers, `f16` when every argument is `f16`, else `f32`.
-pub fn promote(op: Option<Elementwise>, arg_dtypes: &[DType]) -> DType {
+pub fn promote(op: Option<Operation>, arg_dtypes: &[DType]) -> DType {
     if !arg_dtypes.is_empty()
         && op.is_some_and(|op| op.info().integer)
         && arg_dtypes.iter().all(|d| d.is_integer())
@@ -98,14 +98,14 @@ mod tests {
             ]
         );
         assert_eq!(
-            promote(Some(Elementwise::Add), &[DType::I32, DType::U16]),
+            promote(Some(Operation::Add), &[DType::I32, DType::U16]),
             DType::I32
         );
         assert_eq!(
-            promote(Some(Elementwise::Add), &[DType::U32, DType::I16]),
+            promote(Some(Operation::Add), &[DType::U32, DType::I16]),
             DType::U32
         );
-        assert_eq!(promote(Some(Elementwise::Exp), &[DType::I32]), DType::F32);
+        assert_eq!(promote(Some(Operation::Exp), &[DType::I32]), DType::F32);
         assert_eq!(promote(None, &[DType::F16, DType::F16]), DType::F16);
     }
 }

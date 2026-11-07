@@ -111,7 +111,7 @@ macro_rules! define_py_exprs {
             fn value<'py>(slf: &Bound<'py, Self>) -> PyResult<Bound<'py, PyAny>> {
                 let base = slf.as_super().get();
                 let Expr::Literal(lit) = &*base.expr else {
-                    return Err(kind_error($name));
+                    return Err(expr_type_error($name));
                 };
                 base.slot(slf.py(), 0, || num_to_py(slf.py(), lit.value))
             }
@@ -120,7 +120,7 @@ macro_rules! define_py_exprs {
             fn dtype<'py>(slf: &Bound<'py, Self>) -> PyResult<Bound<'py, PyAny>> {
                 let base = slf.as_super().get();
                 let Expr::Literal(lit) = &*base.expr else {
-                    return Err(kind_error($name));
+                    return Err(expr_type_error($name));
                 };
                 base.slot(slf.py(), 1, || {
                     Ok(PyString::new(slf.py(), lit.dtype.text()).into_any().unbind())
@@ -140,7 +140,7 @@ macro_rules! define_py_exprs {
                 const FIELDS: &[&str] = &[ $( stringify!($all), )* ];
                 let base = slf.as_super().get();
                 let Expr::$Variant($($all),*) = &*base.expr else {
-                    return Err(kind_error($name));
+                    return Err(expr_type_error($name));
                 };
                 let slot = FIELDS.iter().position(|f| *f == stringify!($field)).unwrap_or(0);
                 base.slot(slf.py(), slot, || PyExprField::to_py($field, slf.py()))
@@ -452,7 +452,7 @@ impl PyExpression {
     }
 }
 
-fn kind_error(kind: &str) -> PyErr {
+fn expr_type_error(kind: &str) -> PyErr {
     PyTypeError::new_err(format!("not a {kind}"))
 }
 
@@ -507,7 +507,7 @@ impl PyBinaryExpression {
     #[getter]
     fn precedence(slf: &Bound<'_, Self>) -> PyResult<u8> {
         let Expr::Binary(op, ..) = &*slf.as_super().get().expr else {
-            return Err(kind_error("BinaryExpression"));
+            return Err(expr_type_error("BinaryExpression"));
         };
         Ok(op.precedence())
     }
