@@ -2,12 +2,12 @@
 //! Pure `Body → Body` steps and the one driver, `normalize_body`, memoized by the body's content. Normalization
 //! answers to no knob, pin or evidence; a transform something decides is a pipeline pass.
 
-pub mod order;
-
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::sync::{Arc, Mutex, OnceLock};
 
-use crate::body::{Body, Normalized, exposed_defines, free_names, free_ssa, ordered_sibling_defs};
+use crate::body::{
+    Body, Normalized, exposed_defines, free_names, free_ssa, ordered_sibling_defs, unique,
+};
 use crate::expr::{BinOp, Expr, Expression, Interval, Lit, Num, SimplifyCtx, affine_form};
 use crate::kinds::axis::{Axis, Dim};
 use crate::kinds::dtype::{is_float, promote};
@@ -15,11 +15,9 @@ use crate::kinds::elementwise::{Op, evaluate_f32};
 use crate::kinds::field::{AxisRef, DType, Float, Names, NumOr};
 use crate::kinds::*;
 use crate::memo::Memo;
-use crate::normalize::order::{is_protocol, ordering_constraints, topological_sort};
-use crate::numbering::{
-    Key, Number, Numbering, Param, distinct, ptr, roles, scope_tree, value_numbers,
-};
-use crate::protocol::{literal_binding, unique};
+use crate::numbering::{Key, Number, Numbering, Param, roles, statement_tree, value_numbers};
+use crate::order::{is_protocol, ordering_constraints, topological_sort};
+use crate::protocol::literal_binding;
 use crate::text::{body_text, structural_body_text};
 use crate::{Error, Name, Result, locked};
 
@@ -86,7 +84,7 @@ pub fn normalize_body(body: &Body) -> Result<Body> {
 /// The normal form, computed afresh.
 pub fn normalize_uncached(body: &Body) -> Result<Body> {
     // The normal form holds every operation: a call is storage sharing inside fusion, which expands it.
-    if !body.of_kinds(&["Call"]).is_empty() {
+    if !body.of_kinds(&[Kind::Call]).is_empty() {
         return Err(Error::Value(
             "a body that holds a subroutine call has no normal form; fusion expands its calls"
                 .into(),
@@ -247,14 +245,14 @@ mod tests {
             .unwrap();
         let b = parse_body("for j in 0..4:\n    q = load r[j]\n    w = exp(q)\n    res[j] = w")
             .unwrap();
-        let ia = crate::numbering::identity::canonicalize_identity(&a, false, None).unwrap();
-        let ib = crate::numbering::identity::canonicalize_identity(&b, false, None).unwrap();
+        let ia = crate::identity::canonicalize_identity(&a, false, None).unwrap();
+        let ib = crate::identity::canonicalize_identity(&b, false, None).unwrap();
         assert_eq!(ia.key, ib.key);
         assert_eq!(ia.arguments, vec![Name::from("p"), Name::from("out")]);
         let c = parse_body("for j in 0..4:\n    q = load r[j]\n    w = log(q)\n    res[j] = w")
             .unwrap();
         assert_ne!(
-            crate::numbering::identity::canonicalize_identity(&c, false, None)
+            crate::identity::canonicalize_identity(&c, false, None)
                 .unwrap()
                 .key,
             ia.key
@@ -441,14 +439,14 @@ pub(crate) mod testing {
     }
 
     pub(crate) fn kinds(body: &Body) -> Vec<&'static str> {
-        body.stmts().iter().map(|stmt| stmt.kind_name()).collect()
+        body.stmts().iter().map(|stmt| stmt.kind().name()).collect()
     }
 
     /// The body a loop holds, or a branch's taken arm.
     pub(crate) fn inner(stmt: &Statement) -> Body {
         match stmt.nested().as_slice() {
             [first, ..] => first.clone(),
-            [] => panic!("not a statement over a body: {}", stmt.kind_name()),
+            [] => panic!("not a statement over a body: {}", stmt.kind()),
         }
     }
 
@@ -456,7 +454,7 @@ pub(crate) mod testing {
         match stmt {
             Statement::Loop(l) => &l.axis.name,
             Statement::StridedLoop(l) => &l.axis.name,
-            _ => panic!("not a loop: {}", stmt.kind_name()),
+            _ => panic!("not a loop: {}", stmt.kind()),
         }
     }
 

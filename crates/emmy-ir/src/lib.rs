@@ -6,10 +6,12 @@ use std::sync::Arc;
 
 pub mod body;
 pub mod expr;
+pub mod identity;
 pub mod kinds;
 pub mod memo;
 pub mod normalize;
 pub mod numbering;
+pub mod order;
 pub mod protocol;
 pub mod text;
 

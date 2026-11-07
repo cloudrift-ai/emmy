@@ -57,7 +57,7 @@ pub(crate) fn sibling_shape(stmt: &Arc<Statement>) -> Key {
                 .collect::<Vec<_>>()
         })
         .unwrap_or_else(|_| vec![Key::str(&structural_text(&shell))]);
-    Key::tuple([Key::str(stmt.kind_name()), Key::Tuple(fields)])
+    Key::tuple([Key::str(stmt.kind().name()), Key::Tuple(fields)])
 }
 
 /// The whole subtree with names abstracted and buffers spelled: the tie-break between siblings of one shape, so
@@ -110,7 +110,7 @@ pub(crate) fn extent_digest(expression: &Expression) -> String {
                     Num::Float(v) => crate::expr::float_repr(v),
                     Num::Bool(v) => if v { "True" } else { "False" }.to_string(),
                 };
-                format!("('Literal', {value}, {})", python_repr(&lit.dtype))
+                format!("('Literal', {value}, {})", python_repr(lit.dtype.name()))
             }
             Expr::Builtin(name) => format!("('Builtin', {})", python_repr(name)),
             Expr::Binary(op, left, right) => {
@@ -188,7 +188,7 @@ pub(crate) fn operand_ranks(
     let mut cone = HashMap::new();
     cone_sizes(result, &mut cone);
     let mut operand: HashMap<Name, Key> = HashMap::new();
-    for (before, after) in placed.iter_stmts().iter().zip(result.iter_stmts()) {
+    for (before, after) in placed.iter_refs().iter().zip(result.iter_stmts()) {
         if let Some(ordinal) = numbering.ordinal_of(before)
             && let Some((number, params)) = &numbering.numbers[ordinal]
         {

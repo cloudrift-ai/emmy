@@ -6,15 +6,27 @@ use std::hash::{Hash, Hasher};
 use std::sync::Arc;
 
 use crate::body::Body;
-use crate::expr::{Expression, Num, float_repr, hash_f64};
+use crate::expr::{Expression, Num, float_repr, hash_f64, spell_name};
 use crate::kinds::axis::Axis;
+use crate::kinds::axis::spell_axis;
 use crate::kinds::elementwise::Op;
 use crate::kinds::{
     AXIS, AXIS_NAME, BODY, BUFFERS, EXPRESSION, FragmentArg, NAMES, STMTS, SelectBranch, Statement,
     TERM,
 };
-use crate::text::{spell_axis, spell_stmt_name};
 use crate::{Error, Name, Result};
+
+/// Words the reader gives a meaning, so a name spelled like one is written between backticks.
+pub const KEYWORDS: [&str; 26] = [
+    "for", "in", "if", "else", "let", "init", "zero", "load", "pre", "select", "when", "over",
+    "seed", "step", "until", "window", "carried", "swizzle", "words", "unroll", "sub", "call",
+    "true", "false", "none", "in",
+];
+
+/// A name as a statement's text spells it: bare, or between backticks when it reads as a keyword or is no identifier.
+pub fn spell_stmt_name(name: &str) -> Result<String> {
+    spell_name(name, &KEYWORDS)
+}
 
 pub type Names = Arc<[Name]>;
 pub type Exprs = Arc<[Expression]>;

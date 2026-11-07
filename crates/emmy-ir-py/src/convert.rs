@@ -65,6 +65,8 @@ pub static WINDOW: Imported = Imported::new("emmy.compiler.ir.axis", "Window");
 pub static DIM: Imported = Imported::new("emmy.compiler.dim", "Dim");
 pub static DTYPE_GET: Imported = Imported::new("emmy.compiler.dtype", "get");
 pub static ELEMENTWISE: Imported = Imported::new("emmy.compiler.ir.elementwise", "ElementwiseImpl");
+pub static PARSE: Imported = Imported::new("emmy.emmy_ir", "parse");
+pub static STATEMENT_FROM_TEXT: Imported = Imported::new("emmy.emmy_ir", "_statement_from_text");
 
 /// The value a field holds, and the Python object to hold beside it when the one given is already canonical.
 pub type Extracted<T> = (T, Option<Py<PyAny>>);
@@ -73,12 +75,20 @@ pub fn str_tuple<'py>(py: Python<'py>, names: &[Name]) -> PyResult<Bound<'py, Py
     PyTuple::new(py, names.iter().map(|name| PyString::new(py, name)))
 }
 
-pub fn num_to_py(py: Python<'_>, value: Num) -> Py<PyAny> {
+pub fn num_to_py(py: Python<'_>, value: Num) -> PyResult<Py<PyAny>> {
     match value {
-        Num::Int(v) => v.into_pyobject(py).unwrap().into_any().unbind(),
-        Num::Float(v) => PyFloat::new(py, v).into_any().unbind(),
-        Num::Bool(v) => PyBool::new(py, v).to_owned().into_any().unbind(),
+        Num::Int(v) => Ok(v.into_pyobject(py)?.into_any().unbind()),
+        Num::Float(v) => Ok(PyFloat::new(py, v).into_any().unbind()),
+        Num::Bool(v) => Ok(PyBool::new(py, v).to_owned().into_any().unbind()),
     }
+}
+
+/// The name of `value`'s type, for an error message.
+pub fn type_name(value: &Bound<'_, PyAny>) -> String {
+    value
+        .get_type()
+        .name()
+        .map_or_else(|_| "?".to_string(), |name| name.to_string())
 }
 
 pub fn num_from_py(value: &Bound<'_, PyAny>) -> PyResult<Num> {
@@ -113,12 +123,13 @@ pub fn expression_from_py(value: &Bound<'_, PyAny>) -> PyResult<Expression> {
     )))
 }
 
-/// An expression's text when `value` is one of ours, else the text `str()` gives it (an expression of another
-/// module during a migration).
 fn expression_from_any(value: &Bound<'_, PyAny>) -> PyResult<Expression> {
     match value.cast::<PyExpression>() {
         Ok(expression) => Ok(expression.get().expr.clone()),
-        Err(_) => emmy_ir::expr::parse(value.str()?.to_str()?).py(),
+        Err(_) => Err(PyTypeError::new_err(format!(
+            "expected an Expression, got {}",
+            type_name(value)
+        ))),
     }
 }
 
@@ -250,10 +261,7 @@ impl PyField for Name {
     }
     fn from_py(value: &Bound<'_, PyAny>) -> PyResult<Extracted<Self>> {
         let text = value.cast::<PyString>().map_err(|_| {
-            PyTypeError::new_err(format!(
-                "expected a name, got {}",
-                value.get_type().name().unwrap()
-            ))
+            PyTypeError::new_err(format!("expected a name, got {}", type_name(value)))
         })?;
         Ok((
             text.to_str()?.into(),
@@ -434,7 +442,7 @@ impl PyField for Arc<[SelectBranch]> {
                     .map_err(|_| {
                         PyTypeError::new_err(format!(
                             "expected a SelectBranch, got {}",
-                            item.get_type().name().unwrap()
+                            type_name(item)
                         ))
                     })
             })
@@ -466,7 +474,7 @@ impl PyField for Arc<[FragmentArg]> {
                     .map_err(|_| {
                         PyTypeError::new_err(format!(
                             "expected a FragmentArg, got {}",
-                            item.get_type().name().unwrap()
+                            type_name(item)
                         ))
                     })
             })
@@ -643,7 +651,7 @@ impl PyField for Int2 {
 impl<T: PyField> PyField for NumOr<T> {
     fn to_py(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
         match self {
-            NumOr::Num(number) => Ok(num_to_py(py, *number)),
+            NumOr::Num(number) => num_to_py(py, *number),
             NumOr::Value(value) => value.to_py(py),
         }
     }
@@ -690,6 +698,5 @@ pub fn cached<'py>(
         return Ok(found.bind(py).clone());
     }
     let value = make()?;
-    let _ = slot.set(value);
-    Ok(slot.get().unwrap().bind(py).clone())
+    Ok(slot.get_or_init(|| value).bind(py).clone())
 }

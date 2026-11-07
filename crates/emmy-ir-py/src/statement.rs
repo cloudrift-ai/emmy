@@ -18,8 +18,8 @@ use pyo3::types::{PyDict, PyFrozenSet, PyString, PyTuple, PyType};
 
 use crate::body::PyBody;
 use crate::convert::{
-    IntoPyErr, PyField, Slots, axis_from_py, axis_to_py, cached, expression_from_py, slots,
-    statement_from_py, str_tuple,
+    IntoPyErr, PyField, STATEMENT_FROM_TEXT, Slots, axis_from_py, axis_to_py, cached,
+    expression_from_py, slots, statement_from_py, str_tuple,
 };
 use crate::expression::{PyExpression, mapping_from_py, renames_from_py};
 
@@ -53,7 +53,7 @@ impl PyStatement {
             Some(index) => self.field(py, index),
             None => Err(PyAttributeError::new_err(format!(
                 "{} has no field {name}",
-                self.stmt.kind_name()
+                self.stmt.kind()
             ))),
         }
     }
@@ -309,7 +309,7 @@ impl PyStatement {
     fn structural_form<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyTuple>> {
         let fields = self.stmt.fields();
         let mut parts: Vec<Bound<'py, PyAny>> =
-            vec![PyString::new(py, self.stmt.kind_name()).into_any()];
+            vec![PyString::new(py, self.stmt.kind().name()).into_any()];
         let header: HashMap<&str, String> = self.stmt.header_fields().py()?.into_iter().collect();
         let blocks: HashMap<&str, ()> = self
             .stmt
@@ -353,9 +353,8 @@ impl PyStatement {
     }
 
     fn __reduce__<'py>(slf: &Bound<'py, Self>) -> PyResult<(Bound<'py, PyAny>, (String,))> {
-        let module = slf.py().import("emmy.emmy_ir")?;
         Ok((
-            module.getattr("_statement_from_text")?,
+            STATEMENT_FROM_TEXT.get(slf.py())?.clone(),
             (statement_text(&slf.get().stmt).py()?,),
         ))
     }
@@ -681,8 +680,8 @@ macro_rules! define_py_kinds {
         }
 
         /// The kind class of each kind name, for `iter_of_type`.
-        pub fn kind_of(cls: &Bound<'_, PyType>) -> Option<&'static str> {
-            $( if cls.is(&cls.py().get_type::<$Kind>()) { return Some(stringify!($Kind)); } )*
+        pub fn kind_of(cls: &Bound<'_, PyType>) -> Option<emmy_ir::kinds::Kind> {
+            $( if cls.is(&cls.py().get_type::<$Kind>()) { return Some(emmy_ir::kinds::Kind::$Kind); } )*
             None
         }
 
@@ -949,8 +948,11 @@ impl StridedLoop {
 }
 
 /// The names of every kind, for the module's listing.
-pub fn kind_names() -> &'static [&'static str] {
-    emmy_ir::kinds::KIND_NAMES
+pub fn kind_names() -> Vec<&'static str> {
+    emmy_ir::kinds::Kind::ALL
+        .iter()
+        .map(|kind| kind.name())
+        .collect()
 }
 
 /// Every statement a Python iterable holds.

@@ -6,10 +6,8 @@ use std::collections::{HashMap, HashSet};
 use std::hash::{Hash, Hasher};
 use std::sync::{Arc, Mutex, OnceLock};
 
-use crate::kinds::Statement;
 use crate::kinds::field::{Axes, Names};
-use crate::numbering::Key;
-use crate::protocol::{Renaming, seeded_accumulators, unique};
+use crate::kinds::{Kind, Statement};
 use crate::{Error, Name, Result, locked};
 
 /// What `Body::map` applies: a statement to the statements that replace it, or `None` to drop it.
@@ -76,14 +74,9 @@ pub struct BodyData {
     definitions: OnceLock<HashMap<Name, StmtRef>>,
     axis_names: OnceLock<HashSet<Name>>,
     ssa_uses: OnceLock<HashSet<Name>>,
-    by_kind: Mutex<HashMap<Vec<&'static str>, Vec<StmtRef>>>,
+    by_kind: Mutex<HashMap<Vec<Kind>, Vec<StmtRef>>>,
     pub(crate) normalized: OnceLock<Normalized>,
-    pub(crate) identities: Mutex<
-        Vec<(
-            crate::numbering::identity::IdentityKey,
-            crate::numbering::identity::Identity,
-        )>,
-    >,
+    pub(crate) identities: Mutex<Vec<(crate::identity::IdentityKey, crate::identity::Identity)>>,
 }
 
 /// What a body knows of its normal form once it was taken: that it is its own, or which body it is. Never the body's
@@ -304,32 +297,6 @@ impl Body {
         if same { self.clone() } else { Body::new(out) }
     }
 
-    /// This body with every external buffer renamed through `mapping`.
-    pub fn rename_buffers(&self, mapping: &HashMap<Name, Name>) -> Body {
-        let renaming = Renaming::new(mapping);
-        let result =
-            self.map_stmts(&mut |stmt| Some(Statement::rename_buffers_with(stmt, &renaming)));
-        if result.ptr_eq(self) {
-            return self.clone();
-        }
-        // An injective spelling-only rename keeps the normal form a body is its own.
-        if matches!(self.0.normalized.get(), Some(Normalized::Itself)) {
-            let resources: Vec<Name> = unique(
-                self.iter_stmts()
-                    .iter()
-                    .flat_map(|s| s.external_reads().into_iter().chain(s.external_writes())),
-            );
-            let renamed: HashSet<Name> = resources
-                .iter()
-                .map(|name| mapping.get(name).cloned().unwrap_or_else(|| name.clone()))
-                .collect();
-            if renamed.len() == resources.len() {
-                let _ = result.0.normalized.set(Normalized::Itself);
-            }
-        }
-        result
-    }
-
     // --- def-use readings -----------------------------------------------------------------------
 
     /// Accumulator and carried-state names, each once, in structural order.
@@ -464,14 +431,14 @@ impl Body {
     }
 
     /// The statements of the given kinds, pre-order, cached per kind set.
-    pub fn of_kinds(&self, kinds: &[&'static str]) -> Vec<StmtRef> {
+    pub fn of_kinds(&self, kinds: &[Kind]) -> Vec<StmtRef> {
         let key = kinds.to_vec();
         if let Some(found) = locked(&self.0.by_kind).get(&key) {
             return found.clone();
         }
         let mut out = Vec::new();
         self.walk(&mut |here| {
-            if kinds.contains(&here.stmt().kind_name()) {
+            if kinds.contains(&here.stmt().kind()) {
                 out.push(here.clone());
             }
         });
@@ -480,23 +447,23 @@ impl Body {
     }
 
     pub fn loads(&self) -> Vec<StmtRef> {
-        self.of_kinds(&["Load"])
+        self.of_kinds(&[Kind::Load])
     }
 
     pub fn writes(&self) -> Vec<StmtRef> {
-        self.of_kinds(&["Write"])
+        self.of_kinds(&[Kind::Write])
     }
 
     pub fn carries(&self) -> Vec<StmtRef> {
-        self.of_kinds(&["Carry"])
+        self.of_kinds(&[Kind::Carry])
     }
 
     pub fn accums(&self) -> Vec<StmtRef> {
-        self.of_kinds(&["Accum"])
+        self.of_kinds(&[Kind::Accum])
     }
 
     pub fn loops(&self) -> Vec<StmtRef> {
-        self.of_kinds(&["Loop"])
+        self.of_kinds(&[Kind::Loop])
     }
 
     // --- cones and orders -------------------------------------------------------------------------
@@ -539,10 +506,10 @@ impl Body {
 
     /// Kahn's order over indexed predecessor sets, as source indices; source order breaks ties, a priority may rank
     /// first. A cycle leaves the order unchanged.
-    pub fn topological_permutation(
+    pub fn topological_permutation<P: Ord>(
         &self,
         incoming: &[HashSet<usize>],
-        priority: Option<&dyn Fn(usize) -> Key>,
+        priority: Option<&dyn Fn(usize) -> P>,
     ) -> Vec<usize> {
         let n = self.len();
         let mut successors: Vec<Vec<usize>> = vec![Vec::new(); n];
@@ -552,9 +519,8 @@ impl Body {
                 successors[source].push(target);
             }
         }
-        let key =
-            |index: usize| -> (Key, usize) { (priority.map_or(Key::None, |p| p(index)), index) };
-        let mut ready: std::collections::BinaryHeap<std::cmp::Reverse<(Key, usize)>> = (0..n)
+        let key = |index: usize| -> (Option<P>, usize) { (priority.map(|p| p(index)), index) };
+        let mut ready: std::collections::BinaryHeap<std::cmp::Reverse<(Option<P>, usize)>> = (0..n)
             .filter(|&i| degree[i] == 0)
             .map(|i| std::cmp::Reverse(key(i)))
             .collect();
@@ -576,7 +542,7 @@ impl Body {
     }
 
     pub fn topological_order(&self, incoming: &[HashSet<usize>]) -> Body {
-        let order = self.topological_permutation(incoming, None);
+        let order = self.topological_permutation::<()>(incoming, None);
         if order
             .iter()
             .enumerate()
@@ -591,63 +557,25 @@ impl Body {
                 .collect(),
         )
     }
-
-    /// Shared SSA definitions assembled once and adjacent independent reduction loops merged.
-    pub fn coalesce(&self) -> Body {
-        let mut out: Vec<Arc<Statement>> = Vec::new();
-        let mut seen: Vec<Arc<Statement>> = Vec::new();
-        let mut folded: HashSet<Name> = HashSet::new();
-        for stmt in self.stmts() {
-            let mut stmt = stmt.clone();
-            if stmt.has_side_effects() {
-                seen.clear();
-                folded.clear();
-            } else if !exposed_defines(&stmt).is_empty() {
-                if seen.iter().any(|s| **s == *stmt) {
-                    continue;
-                }
-                seen.push(stmt.clone());
-                let accumulators: HashSet<Name> = seeded_accumulators(&stmt).into_iter().collect();
-                if !accumulators.is_disjoint(&folded) {
-                    if accumulators.is_subset(&folded) {
-                        continue;
-                    }
-                    let wanted: Vec<Name> = accumulators.difference(&folded).cloned().collect();
-                    if let Some((_, body)) = loop_parts(&stmt) {
-                        let (members, _) = body.backward_cone(&wanted);
-                        let kept = Body::new(members.iter().map(|m| m.stmt().clone()).collect());
-                        stmt = Statement::rebuild_bodies(&stmt, vec![kept]);
-                    }
-                }
-            }
-            if let Some(prior) = out.last()
-                && let (Some((prior_reduce, prior_body)), Some((stmt_reduce, stmt_body))) =
-                    (loop_parts(prior), loop_parts(&stmt))
-                && prior_reduce
-                && stmt_reduce
-                && !(prior.has_side_effects() || stmt.has_side_effects())
-                && *Statement::rebuild_bodies(prior, vec![stmt_body.clone()]) == *stmt
-                && free_names(&stmt)
-                    .iter()
-                    .all(|name| !prior_body.definitions().contains_key(name))
-            {
-                let merged = prior_body.concat(stmt_body.stmts()).coalesce();
-                stmt = Statement::rebuild_bodies(prior, vec![merged]);
-                out.pop();
-            }
-            folded.extend(seeded_accumulators(&stmt));
-            out.push(stmt);
-        }
-        Body::new(out)
-    }
 }
 
-fn loop_parts(stmt: &Statement) -> Option<(bool, &Body)> {
+pub fn loop_parts(stmt: &Statement) -> Option<(bool, &Body)> {
     match stmt {
         Statement::Loop(l) => Some((l.is_reduce(), &l.body)),
         Statement::StridedLoop(l) => Some((l.is_reduce(), &l.body)),
         _ => None,
     }
+}
+
+/// Names each listed once, in first appearance.
+pub fn unique(names: impl IntoIterator<Item = Name>) -> Vec<Name> {
+    let mut out: Vec<Name> = Vec::new();
+    for name in names {
+        if !out.contains(&name) {
+            out.push(name);
+        }
+    }
+    out
 }
 
 /// Names visible to siblings in structural body order: a leaf's own definitions, a block's exported states.

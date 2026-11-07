@@ -268,8 +268,7 @@ impl Line {
         }
         if let Some(token) = self.parser.peek(0)
             && token.kind == TokenKind::Name
-            && KIND_NAMES.contains(&token.text.as_str())
-            && Statement::fields_of(&token.text).is_some_and(|_| true)
+            && token.text.parse::<Kind>().is_ok()
             && (self.parser.at("(", 1) || self.parser.at(":", 1) || self.parser.peek(1).is_none())
             && !is_shared_kind(&token.text)
         {
@@ -444,10 +443,11 @@ impl Line {
         nested: &[Row],
         subs: &mut HashMap<Name, Arc<Subroutine>>,
     ) -> Result<Arc<Statement>> {
-        let Some(fields) = Statement::fields_of(kind) else {
-            return Err(self.parser.error(&format!("no statement kind {kind}")));
-        };
-        let mut values = self.record(kind, fields)?;
+        let kind: Kind = kind
+            .parse()
+            .map_err(|err: Error| self.parser.error(&err.to_string()))?;
+        let fields = kind.fields();
+        let mut values = self.record(kind.name(), fields)?;
         self.parser.accept(":");
         self.end(())?;
         let mut body: Vec<Row> = Vec::new();
@@ -481,7 +481,7 @@ impl Line {
             }
             values.set("body", Value::Body(block(&body, subs)?))?;
         }
-        let stmt = Statement::from_values(kind, values)?;
+        let stmt = kind.from_values(values)?;
         Ok(Arc::new(finished(stmt)?))
     }
 
@@ -750,11 +750,14 @@ fn is_shared_kind(name: &str) -> bool {
 }
 
 fn field_type(kind: &str, field: &str) -> Option<Ty> {
-    Statement::field_ty(kind, field).or_else(|| match kind {
-        SelectBranch::NAME => SelectBranch::field_ty(field),
-        FragmentArg::NAME => FragmentArg::field_ty(field),
-        _ => None,
-    })
+    kind.parse::<Kind>()
+        .ok()
+        .and_then(|kind| kind.field_ty(field))
+        .or_else(|| match kind {
+            SelectBranch::NAME => SelectBranch::field_ty(field),
+            FragmentArg::NAME => FragmentArg::field_ty(field),
+            _ => None,
+        })
 }
 
 fn record_fields(record: &str) -> Option<&'static [FieldInfo]> {

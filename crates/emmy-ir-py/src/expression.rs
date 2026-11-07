@@ -4,12 +4,14 @@ use std::collections::HashMap;
 use std::sync::{Arc, OnceLock};
 
 use emmy_ir::Name;
-use emmy_ir::expr::{BinOp, Expr, Expression, Interval, Lit, Num, SimplifyCtx};
+use emmy_ir::expr::{BinOp, Expr, Expression, Interval, Lit, LitType, Num, SimplifyCtx};
 use pyo3::exceptions::{PyTypeError, PyValueError};
 use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyFrozenSet, PyList, PyString, PyTuple};
 
-use crate::convert::{IntoPyErr, PyField, cached, expression_from_py, num_from_py, num_to_py};
+use crate::convert::{
+    IntoPyErr, PARSE, PyField, cached, expression_from_py, num_from_py, num_to_py,
+};
 
 /// The base class of every expression node: the shared tree, and the Python objects its fields hand back.
 #[pyclass(
@@ -81,7 +83,7 @@ fn coerce(value: &Bound<'_, PyAny>) -> PyResult<Expression> {
     }
     match num_from_py(value) {
         Ok(Num::Float(v)) => Ok(Expression::float(v)),
-        Ok(number) => Ok(Expression::literal(number, "int")),
+        Ok(number) => Ok(Expression::literal(number, LitType::Int)),
         Err(_) => Err(PyTypeError::new_err(format!(
             "an expression combines with an expression or a number, not {}",
             value.get_type().name()?
@@ -153,8 +155,10 @@ impl PyExpression {
     }
 
     fn __reduce__<'py>(slf: &Bound<'py, Self>) -> PyResult<(Bound<'py, PyAny>, (String,))> {
-        let module = slf.py().import("emmy.emmy_ir")?;
-        Ok((module.getattr("parse")?, (slf.get().expr.try_text().py()?,)))
+        Ok((
+            PARSE.get(slf.py())?.clone(),
+            (slf.get().expr.try_text().py()?,),
+        ))
     }
 
     fn __add__(&self, other: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
@@ -386,7 +390,7 @@ impl PyLiteral {
         let number = num_from_py(value)?;
         let expr = Expression::new(Expr::Literal(Lit {
             value: number,
-            dtype: dtype.into(),
+            dtype: dtype.parse::<LitType>().py()?,
         }));
         Ok(PyClassInitializer::from(PyExpression::base(expr)).add_subclass(PyLiteral))
     }
@@ -397,7 +401,7 @@ impl PyLiteral {
         let Expr::Literal(lit) = &*base.expr else {
             return Err(kind_error("Literal"));
         };
-        base.slot(slf.py(), 0, || Ok(num_to_py(slf.py(), lit.value)))
+        base.slot(slf.py(), 0, || num_to_py(slf.py(), lit.value))
     }
 
     #[getter]
@@ -407,7 +411,9 @@ impl PyLiteral {
             return Err(kind_error("Literal"));
         };
         base.slot(slf.py(), 1, || {
-            Ok(PyString::new(slf.py(), &lit.dtype).into_any().unbind())
+            Ok(PyString::new(slf.py(), lit.dtype.name())
+                .into_any()
+                .unbind())
         })
     }
 }

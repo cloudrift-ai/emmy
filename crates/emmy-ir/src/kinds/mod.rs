@@ -1067,16 +1067,62 @@ macro_rules! define_kinds {
             $( $Kind($Kind), )*
         }
 
-        /// The names of every kind, in declaration order.
-        pub const KIND_NAMES: &[&str] = &[ $( stringify!($Kind), )* ];
+        /// Every statement kind by name, in declaration order.
+        #[derive(Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Debug)]
+        pub enum Kind {
+            $( $Kind, )*
+        }
+
+        impl Kind {
+            /// Every kind, in declaration order.
+            pub const ALL: &[Kind] = &[ $( Kind::$Kind, )* ];
+
+            pub fn name(self) -> &'static str {
+                match self { $( Kind::$Kind => $Kind::NAME, )* }
+            }
+
+            pub fn layer(self) -> Layer {
+                match self { $( Kind::$Kind => $Kind::LAYER, )* }
+            }
+
+            pub fn fields(self) -> &'static [FieldInfo] {
+                match self { $( Kind::$Kind => $Kind::FIELDS, )* }
+            }
+
+            pub fn field_ty(self, field: &str) -> Option<$crate::kinds::field::Ty> {
+                match self { $( Kind::$Kind => $Kind::field_ty(field), )* }
+            }
+
+            /// A statement of this kind from its field values.
+            pub fn from_values(self, values: $crate::kinds::field::Values) -> $crate::Result<Statement> {
+                match self { $( Kind::$Kind => Ok(Statement::$Kind($Kind::from_values(values)?)), )* }
+            }
+        }
+
+        impl std::str::FromStr for Kind {
+            type Err = $crate::Error;
+
+            fn from_str(name: &str) -> $crate::Result<Kind> {
+                match name {
+                    $( stringify!($Kind) => Ok(Kind::$Kind), )*
+                    _ => Err($crate::Error::Value(format!("no statement kind {name}"))),
+                }
+            }
+        }
+
+        impl std::fmt::Display for Kind {
+            fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                f.write_str(self.name())
+            }
+        }
 
         impl Statement {
-            pub fn kind_name(&self) -> &'static str {
-                match self { $( Statement::$Kind(_) => $Kind::NAME, )* }
+            pub fn kind(&self) -> Kind {
+                match self { $( Statement::$Kind(_) => Kind::$Kind, )* }
             }
 
             pub fn layer(&self) -> Layer {
-                match self { $( Statement::$Kind(_) => $Kind::LAYER, )* }
+                self.kind().layer()
             }
 
             pub fn flags(&self) -> u32 {
@@ -1084,29 +1130,7 @@ macro_rules! define_kinds {
             }
 
             pub fn fields(&self) -> &'static [FieldInfo] {
-                match self { $( Statement::$Kind(_) => $Kind::FIELDS, )* }
-            }
-
-            /// The fields of the kind called `name`, or `None` for no kind.
-            pub fn fields_of(name: &str) -> Option<&'static [FieldInfo]> {
-                match name {
-                    $( stringify!($Kind) => Some($Kind::FIELDS), )*
-                    _ => None,
-                }
-            }
-
-            pub fn field_ty(kind: &str, field: &str) -> Option<$crate::kinds::field::Ty> {
-                match kind {
-                    $( stringify!($Kind) => $Kind::field_ty(field), )*
-                    _ => None,
-                }
-            }
-
-            pub fn from_values(kind: &str, values: $crate::kinds::field::Values) -> $crate::Result<Statement> {
-                match kind {
-                    $( stringify!($Kind) => Ok(Statement::$Kind($Kind::from_values(values)?)), )*
-                    _ => Err($crate::Error::Value(format!("no statement kind {kind}"))),
-                }
+                self.kind().fields()
             }
 
             pub fn visit(&self, visitor: &mut dyn $crate::kinds::field::Visitor) {

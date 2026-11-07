@@ -366,7 +366,44 @@ pub fn apply_binop(op: BinOp, left: Num, right: Num) -> Result<Num> {
 #[derive(Clone, PartialEq, Eq, Hash, Debug)]
 pub struct Lit {
     pub value: Num,
-    pub dtype: Name,
+    pub dtype: LitType,
+}
+
+/// The type a literal is spelled in.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+pub enum LitType {
+    Int,
+    Float,
+    Bool,
+}
+
+impl LitType {
+    pub fn name(self) -> &'static str {
+        match self {
+            LitType::Int => "int",
+            LitType::Float => "float",
+            LitType::Bool => "bool",
+        }
+    }
+}
+
+impl std::fmt::Display for LitType {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.name())
+    }
+}
+
+impl std::str::FromStr for LitType {
+    type Err = Error;
+
+    fn from_str(name: &str) -> Result<LitType> {
+        match name {
+            "int" => Ok(LitType::Int),
+            "float" => Ok(LitType::Float),
+            "bool" => Ok(LitType::Bool),
+            _ => Err(Error::Value(format!("no literal type {name}"))),
+        }
+    }
 }
 
 /// One node of an expression tree.
@@ -452,22 +489,19 @@ impl Expression {
     pub fn int(value: i64) -> Expression {
         Expression::new(Expr::Literal(Lit {
             value: Num::Int(value),
-            dtype: "int".into(),
+            dtype: LitType::Int,
         }))
     }
 
     pub fn float(value: f64) -> Expression {
         Expression::new(Expr::Literal(Lit {
             value: Num::Float(value),
-            dtype: "float".into(),
+            dtype: LitType::Float,
         }))
     }
 
-    pub fn literal(value: Num, dtype: &str) -> Expression {
-        Expression::new(Expr::Literal(Lit {
-            value,
-            dtype: dtype.into(),
-        }))
+    pub fn literal(value: Num, dtype: LitType) -> Expression {
+        Expression::new(Expr::Literal(Lit { value, dtype }))
     }
 
     pub fn binary(op: BinOp, left: Expression, right: Expression) -> Expression {
@@ -511,7 +545,9 @@ impl Expression {
     /// A positive int literal of dtype `int` (what the simplifier takes a divisor or a factor from).
     pub fn int_literal(&self) -> Option<i64> {
         match &**self {
-            Expr::Literal(Lit { value, dtype }) if &**dtype == "int" && value.is_integral() => {
+            Expr::Literal(Lit { value, dtype })
+                if *dtype == LitType::Int && value.is_integral() =>
+            {
                 value.as_int().ok()
             }
             _ => None,
@@ -1027,16 +1063,15 @@ pub fn spell_name(name: &str, reserved: &[&str]) -> Result<String> {
 
 /// A literal written by its dtype: `3`, `0.5` / `2.0` / `inf`, `true`.
 pub fn literal_text(lit: &Lit) -> Result<String> {
-    match &*lit.dtype {
-        "bool" => Ok(if lit.value.truthy() { "true" } else { "false" }.into()),
-        "int" if lit.value.as_f64().fract() == 0.0 && lit.value.as_f64().is_finite() => {
+    match lit.dtype {
+        LitType::Bool => Ok(if lit.value.truthy() { "true" } else { "false" }.into()),
+        LitType::Int if lit.value.as_f64().fract() == 0.0 && lit.value.as_f64().is_finite() => {
             Ok(lit.value.as_int()?.to_string())
         }
-        "float" => Ok(float_repr(lit.value.as_f64())),
-        dtype => Err(Error::Value(format!(
-            "the literal {} of dtype {} has no spelling",
-            num_repr(lit.value),
-            python_repr(dtype)
+        LitType::Float => Ok(float_repr(lit.value.as_f64())),
+        LitType::Int => Err(Error::Value(format!(
+            "the literal {} of dtype int has no spelling",
+            num_repr(lit.value)
         ))),
     }
 }

@@ -10,7 +10,6 @@
 //! Statements are numbered by position in the pre-order walk, so no statement is keyed by object identity.
 
 pub mod digest;
-pub mod identity;
 pub mod key;
 pub mod values;
 
@@ -24,7 +23,8 @@ use std::sync::Arc;
 use crate::body::{Body, StmtRef};
 use crate::expr::{Expr, Expression, Num};
 use crate::kinds::Statement;
+use crate::kinds::axis::spell_axis;
 use crate::kinds::field::NumOr;
-use crate::normalize::order::ordering_constraints;
-use crate::text::{spell_axis, structural_text};
+use crate::order::ordering_constraints;
+use crate::text::structural_text;
 use crate::{Name, locked};

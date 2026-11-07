@@ -56,7 +56,7 @@ impl SequentialScope {
         let mut exported: Vec<Name> = Vec::new();
         for child in &children {
             let scalar = carried_out(child);
-            for here in child.of_kinds(&["Accum", "Carry"]) {
+            for here in child.of_kinds(&[Kind::Accum, Kind::Carry]) {
                 match &**here.stmt() {
                     Statement::Carry(c) => exported.push(c.name.clone()),
                     Statement::Accum(a) if scalar.contains(&a.name) => {
@@ -193,7 +193,8 @@ fn ordered(body: &Body, numbering: &Numbering) -> Body {
         .iter()
         .zip(rebuilt.stmts())
         .zip(&shapes)
-        .map(|((stmt, built), own)| {
+        .enumerate()
+        .map(|(index, ((stmt, built), own))| {
             let children = stmt.nested();
             let category = if !children.is_empty() && stmt.has_side_effects() {
                 2
@@ -206,10 +207,10 @@ fn ordered(body: &Body, numbering: &Numbering) -> Body {
                 Key::str("")
             };
             if !children.is_empty() {
-                let tree = scope_tree(numbering, &Body::new(vec![stmt.clone()]), &mut effects);
+                let tree = statement_tree(numbering, &body.at(index), &mut effects);
                 Key::tuple([Key::Int(category), own.clone(), spelled, Key::Num(tree)])
             } else {
-                let (number, params) = numbering.numbers[numbering.ordinal(stmt)]
+                let (number, params) = numbering.numbers[numbering.ordinal(&body.at(index))]
                     .as_ref()
                     .map_or((Key::None, Vec::new()), |(n, p)| (Key::Num(*n), p.clone()));
                 Key::tuple([
@@ -234,7 +235,7 @@ fn ordered(body: &Body, numbering: &Numbering) -> Body {
 }
 
 pub fn canonical_order(body: &Body) -> Result<Body> {
-    let stmts = distinct(&canonicalize_expressions(body, &[])?);
+    let stmts = canonicalize_expressions(body, &[])?;
     let role = roles(&stmts, None);
     let numbering = value_numbers(&stmts, &|name| {
         role.get(name)
@@ -305,7 +306,7 @@ fn unspelled(e: &Expression, axis_order: &HashMap<Name, usize>) -> Key {
         Expr::Literal(Lit { value, dtype }) => Key::tuple([
             Key::str("Literal"),
             Key::num(*value),
-            Key::Str(dtype.clone()),
+            Key::str(dtype.name()),
         ]),
         Expr::Builtin(name) => Key::tuple([Key::str("Builtin"), Key::Str(name.clone())]),
         Expr::Binary(op, l, r) => Key::tuple([
@@ -536,13 +537,13 @@ mod tests {
                         out[] = total
                         "
                     )));
-                    let [ref initial] = renamed.of_kinds(&["Init"])[..] else {
+                    let [ref initial] = renamed.of_kinds(&[Kind::Init])[..] else {
                         panic!("one init")
                     };
-                    let [ref update] = renamed.of_kinds(&["Accum"])[..] else {
+                    let [ref update] = renamed.of_kinds(&[Kind::Accum])[..] else {
                         panic!("one update")
                     };
-                    let [ref output] = renamed.of_kinds(&["Write"])[..] else {
+                    let [ref output] = renamed.of_kinds(&[Kind::Write])[..] else {
                         panic!("one write")
                     };
                     let (

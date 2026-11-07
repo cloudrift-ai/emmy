@@ -2,29 +2,14 @@
 
 use super::*;
 
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub enum StmtKind {
-    Load,
-    Assign,
-    Init,
-    Reduce,
-    Select,
-    Store,
-    Carry,
-    Pre,
-    Other,
-    Block,
-}
-
 /// One body's numbering, by statement ordinal in pre-order.
 #[derive(Default, Debug)]
 pub struct Numbering {
-    /// Statement (by the address of its shared object) → ordinal.
-    pub index: HashMap<usize, usize>,
+    /// Statement (by its position) → ordinal.
+    pub index: HashMap<StmtRef, usize>,
     pub refs: Vec<StmtRef>,
     /// Leaf statement → (number, parameters).
     pub numbers: Vec<Option<(Number, Vec<Param>)>>,
-    pub kind: Vec<StmtKind>,
     /// Block statement → (header, parameters).
     pub blocks: Vec<Option<(Key, Vec<Param>)>>,
     /// Statement → the statements defining the names it reads.
@@ -38,18 +23,13 @@ pub struct Numbering {
     pub(super) trees: std::sync::Mutex<HashMap<usize, Vec<Number>>>,
 }
 
-/// The address a numbering keys a statement by: that of its shared object, which `distinct` makes unique.
-pub fn ptr(stmt: &Arc<Statement>) -> usize {
-    Arc::as_ptr(stmt) as usize
-}
-
 impl Numbering {
-    pub fn ordinal(&self, stmt: &Arc<Statement>) -> usize {
-        self.index[&ptr(stmt)]
+    pub fn ordinal(&self, here: &StmtRef) -> usize {
+        self.index[here]
     }
 
-    pub fn ordinal_of(&self, stmt: &Arc<Statement>) -> Option<usize> {
-        self.index.get(&ptr(stmt)).copied()
+    pub fn ordinal_of(&self, here: &StmtRef) -> Option<usize> {
+        self.index.get(here).copied()
     }
 
     /// The number applied to its coordinate expressions as spelled.
@@ -99,7 +79,7 @@ fn descriptor(axis: &crate::kinds::axis::Axis, stmt: &Statement) -> Key {
     let flags = match stmt {
         Statement::Loop(l) => Key::tuple([Key::Bool(l.unroll), Key::Bool(l.seed)]),
         Statement::StridedLoop(l) => Key::tuple([Key::Bool(l.unroll), Key::Bool(l.seed)]),
-        other => Key::str(other.kind_name()),
+        other => Key::str(other.kind().name()),
     };
     Key::tuple([extent, window, flags])
 }
@@ -149,7 +129,7 @@ impl Context<'_> {
             Expr::Literal(lit) => Key::tuple([
                 Key::str("Literal"),
                 Key::num(lit.value),
-                Key::Str(lit.dtype.clone()),
+                Key::str(lit.dtype.name()),
             ]),
             Expr::Builtin(name) => Key::tuple([Key::str("Builtin"), Key::Str(name.clone())]),
             Expr::Binary(op, l, r) => Key::tuple([
@@ -206,7 +186,7 @@ impl Context<'_> {
             Expr::Literal(lit) => Key::tuple([
                 Key::str("Literal"),
                 Key::num(lit.value),
-                Key::Str(lit.dtype.clone()),
+                Key::str(lit.dtype.name()),
             ]),
             Expr::Builtin(name) => Key::tuple([Key::str("Builtin"), Key::Str(name.clone())]),
             Expr::Binary(op, l, r) => {
@@ -470,14 +450,7 @@ impl Context<'_> {
         (number, kept)
     }
 
-    fn define(
-        &mut self,
-        ordinal: usize,
-        stmt: &Statement,
-        names: &[Name],
-        value: Value,
-        kind: StmtKind,
-    ) {
+    fn define(&mut self, ordinal: usize, stmt: &Statement, names: &[Name], value: Value) {
         self.out.sources[ordinal] = stmt
             .deps()
             .iter()
@@ -488,7 +461,6 @@ impl Context<'_> {
             self.defined_by.insert(name.clone(), ordinal);
         }
         self.out.numbers[ordinal] = Some(value);
-        self.out.kind[ordinal] = kind;
     }
 
     /// Any statement kind: its shape with names abstracted, its expressions as parameters and operands.
@@ -559,10 +531,9 @@ impl Context<'_> {
             let here = body.at(index);
             let stmt = here.stmt().clone();
             let ordinal = self.out.refs.len();
-            self.out.index.insert(ptr(&stmt), ordinal);
+            self.out.index.insert(here.clone(), ordinal);
             self.out.refs.push(here);
             self.out.numbers.push(None);
-            self.out.kind.push(StmtKind::Other);
             self.out.blocks.push(None);
             self.out.sources.push(Vec::new());
             let mut touched: Vec<Name> = Vec::new();
@@ -589,7 +560,7 @@ impl Context<'_> {
                     ]);
                     let value = self.compose("load", payload, ops, &params, &[], false);
                     let names = s.names.to_vec();
-                    self.define(ordinal, &stmt, &names, value, StmtKind::Load);
+                    self.define(ordinal, &stmt, &names, value);
                 }
                 Statement::Assign(s) => {
                     let ops: Vec<Value> = s
@@ -616,13 +587,7 @@ impl Context<'_> {
                         Key::Tuple(frees),
                     ]);
                     let value = self.compose("assign", payload, ops, &[], &[], commutative);
-                    self.define(
-                        ordinal,
-                        &stmt,
-                        std::slice::from_ref(&s.name),
-                        value,
-                        StmtKind::Assign,
-                    );
+                    self.define(ordinal, &stmt, std::slice::from_ref(&s.name), value);
                 }
                 Statement::Affine(s) => {
                     // Each term numbers as its coefficient over its value, and the sum lists the terms by number.
@@ -651,24 +616,12 @@ impl Context<'_> {
                         Key::option(s.dtype.as_ref().map(|d| d.name())),
                     ]);
                     let value = self.compose("affine", payload, ops, &[], &[], true);
-                    self.define(
-                        ordinal,
-                        &stmt,
-                        std::slice::from_ref(&s.name),
-                        value,
-                        StmtKind::Assign,
-                    );
+                    self.define(ordinal, &stmt, std::slice::from_ref(&s.name), value);
                 }
                 Statement::Init(s) => {
                     let payload = Key::tuple([Key::float(s.identity.0), Key::str(s.dtype.name())]);
                     let value = self.compose("init", payload, vec![], &[], &[], false);
-                    self.define(
-                        ordinal,
-                        &stmt,
-                        std::slice::from_ref(&s.name),
-                        value,
-                        StmtKind::Init,
-                    );
+                    self.define(ordinal, &stmt, std::slice::from_ref(&s.name), value);
                 }
                 Statement::Accum(s) => {
                     let redirected = s.base.as_ref().is_some_and(|base| *base != s.name);
@@ -693,13 +646,7 @@ impl Context<'_> {
                         Key::tuple([value_key, base_key]),
                     ]);
                     let value = self.compose("reduce", payload, ops, &params, &bound, false);
-                    self.define(
-                        ordinal,
-                        &stmt,
-                        std::slice::from_ref(&s.name),
-                        value,
-                        StmtKind::Reduce,
-                    );
+                    self.define(ordinal, &stmt, std::slice::from_ref(&s.name), value);
                 }
                 Statement::Select(s) => {
                     let mut payload = Vec::new();
@@ -711,13 +658,7 @@ impl Context<'_> {
                     }
                     let value =
                         self.compose("select", Key::Tuple(payload), ops, &params, &[], false);
-                    self.define(
-                        ordinal,
-                        &stmt,
-                        std::slice::from_ref(&s.name),
-                        value,
-                        StmtKind::Select,
-                    );
+                    self.define(ordinal, &stmt, std::slice::from_ref(&s.name), value);
                 }
                 Statement::Write(s) => {
                     let index: Vec<Key> = s
@@ -744,7 +685,7 @@ impl Context<'_> {
                         Key::Str(s.swizzle.clone()),
                     ]);
                     let value = self.compose("store", payload, ops, &params, &[], false);
-                    self.define(ordinal, &stmt, &[], value.clone(), StmtKind::Store);
+                    self.define(ordinal, &stmt, &[], value.clone());
                     self.out.stores.push(value);
                 }
                 Statement::Carry(s) => {
@@ -767,13 +708,7 @@ impl Context<'_> {
                         Key::option(s.dtype.as_ref().map(|d| d.name())),
                     ]);
                     let value = self.compose("carry", payload, ops, &params, &[], false);
-                    self.define(
-                        ordinal,
-                        &stmt,
-                        std::slice::from_ref(&s.name),
-                        value,
-                        StmtKind::Carry,
-                    );
+                    self.define(ordinal, &stmt, std::slice::from_ref(&s.name), value);
                 }
                 Statement::Pre(s) => {
                     let index: Vec<Key> = s
@@ -790,13 +725,7 @@ impl Context<'_> {
                         &[],
                         false,
                     );
-                    self.define(
-                        ordinal,
-                        &stmt,
-                        std::slice::from_ref(&s.name),
-                        value,
-                        StmtKind::Pre,
-                    );
+                    self.define(ordinal, &stmt, std::slice::from_ref(&s.name), value);
                 }
                 _ if !stmt.nested().is_empty() => {
                     let header = match &*stmt {
@@ -819,7 +748,6 @@ impl Context<'_> {
                         }
                     };
                     self.out.blocks[ordinal] = Some((header, params));
-                    self.out.kind[ordinal] = StmtKind::Block;
                     self.out.sources[ordinal] = stmt
                         .deps()
                         .iter()
@@ -878,7 +806,7 @@ impl Context<'_> {
                         .chain(stmt.local_decls())
                         .collect();
                     let value = self.compose("other", shape, ops, &params, &[], false);
-                    self.define(ordinal, &stmt, &defined, value, StmtKind::Other);
+                    self.define(ordinal, &stmt, &defined, value);
                 }
             }
             for name in touched {
@@ -921,35 +849,7 @@ fn for_each_product<T: Clone>(groups: &[Vec<T>], f: &mut dyn FnMut(&[T])) {
     walk(groups, &mut Vec::new(), f);
 }
 
-/// `body` with every statement its own object: a numbering is keyed by object, and a body may hold one shared
-/// statement twice.
-pub fn distinct(body: &Body) -> Body {
-    let mut seen: HashSet<usize> = HashSet::new();
-    let mut repeated = false;
-    body.walk(&mut |here| {
-        if !seen.insert(ptr(here.stmt())) {
-            repeated = true;
-        }
-    });
-    if !repeated {
-        return body.clone();
-    }
-    fn copy(stmt: &Arc<Statement>) -> Arc<Statement> {
-        let nested = stmt.nested();
-        if nested.is_empty() {
-            return Arc::new((**stmt).clone());
-        }
-        let bodies: Vec<Body> = nested
-            .iter()
-            .map(|body| Body::new(body.stmts().iter().map(copy).collect()))
-            .collect();
-        Arc::new((*Statement::rebuild_bodies(stmt, bodies)).clone())
-    }
-    Body::new(body.stmts().iter().map(copy).collect())
-}
-
-/// Number every statement of `body`, which holds every statement once (`distinct`); `resource_key` spells a buffer
-/// or carried state in a payload.
+/// Number every statement of `body`; `resource_key` spells a buffer or carried state in a payload.
 pub fn value_numbers(body: &Body, resource_key: &dyn Fn(&Name) -> Key) -> Numbering {
     let mut context = Context {
         out: Numbering::default(),

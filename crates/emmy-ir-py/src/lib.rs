@@ -45,7 +45,7 @@ fn emmy_ir_module(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(statement::_statement_from_text, m)?)?;
     body::register(m)?;
     elementwise_tables(m)?;
-    m.add("KIND_NAMES", statement::kind_names().to_vec())?;
+    m.add("KIND_NAMES", statement::kind_names())?;
     m.add(
         "INTEGER_DTYPES",
         PyFrozenSet::new(m.py(), emmy_ir::kinds::dtype::INTEGER_NAMES.iter())?,
