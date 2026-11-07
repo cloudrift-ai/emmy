@@ -226,12 +226,48 @@ runs on the remote Linux host it deploys to, never to the local CLI.
 
 ## Rust
 
-Use the checked-in Cargo lockfile and standard Rustfmt formatting. Keep unsafe CUDA calls inside the runtime's CUDA
-module and document the ownership and synchronization that make each call valid. Validate artifact metadata before
-submission, and keep HTTP dependencies out of the execution runtime. Run Cargo tests and Clippy for native changes.
+Use the checked-in Cargo lockfile. Keep unsafe CUDA calls inside the runtime's CUDA module and document the ownership
+and synchronization that make each call valid. Validate artifact metadata before submission, and keep HTTP
+dependencies out of the execution runtime. Run Cargo tests and Clippy for native changes (`make test-native`,
+`make lint-native`); Clippy runs with every warning an error.
+
+### Error handling
+
+Do not use `.unwrap()`, `.expect()`, `unreachable!()` or `panic!()` in library or extension code. Propagate errors
+with `?`, or handle the case explicitly: a lookup that cannot miss takes `unwrap_or` / `map_or` with the value the
+caller can live with, a poisoned lock is reopened (`lock().unwrap_or_else(PoisonError::into_inner)`), an invariant
+that holds by construction is restated as a total function rather than asserted. Exceptions:
+
+- **Tests** — `.unwrap()` is fine for brevity.
+- **Binaries** — `.expect()` is acceptable for startup configuration and argument parsing, where aborting is the
+  right answer.
+
+A PyO3 extension maps every crate error onto the Python exception of the same name (`ValueError`, `TypeError`,
+`KeyError`, `ZeroDivisionError`, `NotImplementedError`) at the boundary, once, and never panics across it.
+
+### Prefer functional style
+
+Use `Option` / `Result` combinators and iterator methods instead of verbose `match` blocks where it improves
+readability: `map`, `and_then`, `unwrap_or`, `transpose`, `filter_map`, `flat_map`, `fold`, `collect`. Use `match`
+when there are side effects, several statements per arm, or when it genuinely reads better.
+
+### Formatting and imports
+
+Rust code is formatted with the standard rustfmt configuration; run `cargo fmt --all` before committing. Group
+`use` lines in three blocks separated by a blank line — the standard library, external crates, this crate — and
+merge one crate's imports into one `use` tree per module path, as the `imports_granularity = "Crate"` and
+`group_imports = "StdExternalCrate"` rustfmt options would (they are nightly-only, so the grouping is kept by hand).
+
+### Constants
 
 Define protocol versions, resource limits, defaults, and unit conversions as named `const` values near the top of
 their owning Rust file, after imports. Ordinary indices, zero initialization, and explicit test data may stay inline.
+
+### Shared, immutable data
+
+A value many objects hold (a name, a body, an expression) is an `Arc`; a rebuild that changes nothing returns the
+object it was given, so a caller can tell a change by pointer. Derived readings of an immutable value live beside it
+in a `OnceLock`, computed on first use, never in a table keyed off another object.
 
 ## Commit Messages
 

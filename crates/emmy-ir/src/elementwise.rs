@@ -7,14 +7,26 @@ use std::sync::Arc;
 use crate::Name;
 
 /// Binary combines where `op(a, b) == op(b, a)`.
-pub const COMMUTATIVE: [&str; 7] = ["add", "multiply", "maximum", "minimum", "amax", "sum", "prod"];
+pub const COMMUTATIVE: [&str; 7] = [
+    "add", "multiply", "maximum", "minimum", "amax", "sum", "prod",
+];
 /// Binary combines where `op(op(a, b), c) == op(a, op(b, c))`: the reassociable reduce combines.
 pub const ASSOCIATIVE: [&str; 7] = COMMUTATIVE;
 /// Reducer neutral elements.
-pub const IDENTITY: [(&str, f64); 7] =
-    [("add", 0.0), ("sum", 0.0), ("multiply", 1.0), ("prod", 1.0), ("maximum", -1e30), ("amax", -1e30), ("minimum", 1e30)];
+pub const IDENTITY: [(&str, f64); 7] = [
+    ("add", 0.0),
+    ("sum", 0.0),
+    ("multiply", 1.0),
+    ("prod", 1.0),
+    ("maximum", -1e30),
+    ("amax", -1e30),
+    ("minimum", 1e30),
+];
 /// Spellings that mean an op the renderers know under another name, normalized at construction.
-pub const ALIASES: [(&str, &str); 2] = [("__rshift__", "right_shift"), ("bitwise_right_shift", "right_shift")];
+pub const ALIASES: [(&str, &str); 2] = [
+    ("__rshift__", "right_shift"),
+    ("bitwise_right_shift", "right_shift"),
+];
 
 /// Each op name's compute-unit cluster representative: the clustered identity collapses ops that share a GPU
 /// functional unit.
@@ -75,11 +87,17 @@ pub struct Op {
 
 impl Op {
     pub fn new(name: &str) -> Op {
-        let name = ALIASES.iter().find(|(alias, _)| *alias == name).map_or(name, |(_, canonical)| canonical);
+        let name = ALIASES
+            .iter()
+            .find(|(alias, _)| *alias == name)
+            .map_or(name, |(_, canonical)| canonical);
         Op {
             name: name.into(),
             commutative: COMMUTATIVE.contains(&name),
-            identity: IDENTITY.iter().find(|(op, _)| *op == name).map(|(_, value)| *value),
+            identity: IDENTITY
+                .iter()
+                .find(|(op, _)| *op == name)
+                .map(|(_, value)| *value),
         }
     }
 
@@ -122,7 +140,13 @@ pub type Ops = Arc<[Op]>;
 /// form here (it stays as written) or a result that is not finite.
 pub fn evaluate_f32(name: &str, args: &[f32]) -> Option<f32> {
     let one = || args.first().copied();
-    let two = || if args.len() == 2 { Some((args[0], args[1])) } else { None };
+    let two = || {
+        if args.len() == 2 {
+            Some((args[0], args[1]))
+        } else {
+            None
+        }
+    };
     let erf = |x: f32| libm::erff(x);
     let value = match name {
         "copy" | "pad" | "positive" | "bitcast" => one()?,
@@ -154,7 +178,13 @@ pub fn evaluate_f32(name: &str, args: &[f32]) -> Option<f32> {
         "rint" | "round" => libm::rintf(one()?),
         "sign" => {
             let x = one()?;
-            if x > 0.0 { 1.0 } else if x < 0.0 { -1.0 } else { 0.0 }
+            if x > 0.0 {
+                1.0
+            } else if x < 0.0 {
+                -1.0
+            } else {
+                0.0
+            }
         }
         "relu" => one()?.max(0.0),
         "sigmoid" => 1.0 / (1.0 + (-one()?).exp()),
@@ -171,7 +201,9 @@ pub fn evaluate_f32(name: &str, args: &[f32]) -> Option<f32> {
         }
         "gelu_tanh" => {
             let x = one()?;
-            0.5 * x * (1.0 + ((2.0f32 / std::f32::consts::PI).sqrt() * (x + 0.044715 * x * x * x)).tanh())
+            0.5 * x
+                * (1.0
+                    + ((2.0f32 / std::f32::consts::PI).sqrt() * (x + 0.044715 * x * x * x)).tanh())
         }
         "add" => two().map(|(a, b)| a + b)?,
         "subtract" => two().map(|(a, b)| a - b)?,

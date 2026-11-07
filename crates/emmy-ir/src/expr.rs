@@ -83,7 +83,11 @@ impl Hash for Num {
 /// Hash a float the way its equality compares: `0.0` and `-0.0` alike, every NaN alike.
 pub fn hash_f64<H: Hasher>(value: f64, state: &mut H) {
     let value = if value == 0.0 { 0.0 } else { value };
-    if value.is_nan() { u64::MAX.hash(state) } else { value.to_bits().hash(state) }
+    if value.is_nan() {
+        u64::MAX.hash(state)
+    } else {
+        value.to_bits().hash(state)
+    }
 }
 
 /// Python's `repr(float)`: the shortest digits that read back, positional for exponents in `-4..16`, else `d.de±XX`.
@@ -92,14 +96,22 @@ pub fn float_repr(value: f64) -> String {
         return "nan".into();
     }
     if value.is_infinite() {
-        return if value < 0.0 { "-inf".into() } else { "inf".into() };
+        return if value < 0.0 {
+            "-inf".into()
+        } else {
+            "inf".into()
+        };
     }
     if value == 0.0 {
-        return if value.is_sign_negative() { "-0.0".into() } else { "0.0".into() };
+        return if value.is_sign_negative() {
+            "-0.0".into()
+        } else {
+            "0.0".into()
+        };
     }
     let sci = format!("{value:e}");
-    let (mantissa, exponent) = sci.split_once('e').expect("an exponent");
-    let exponent: i32 = exponent.parse().expect("an integer exponent");
+    let (mantissa, exponent) = sci.split_once('e').unwrap_or((&sci, "0"));
+    let exponent: i32 = exponent.parse().unwrap_or(0);
     let negative = mantissa.starts_with('-');
     let digits: String = mantissa.chars().filter(|c| c.is_ascii_digit()).collect();
     let mut out = String::new();
@@ -129,7 +141,12 @@ pub fn float_repr(value: f64) -> String {
             out.push('.');
             out.push_str(&digits[1..]);
         }
-        let _ = write!(out, "e{}{:02}", if exponent < 0 { '-' } else { '+' }, exponent.abs());
+        let _ = write!(
+            out,
+            "e{}{:02}",
+            if exponent < 0 { '-' } else { '+' },
+            exponent.abs()
+        );
     }
     out
 }
@@ -216,7 +233,15 @@ impl BinOp {
             BinOp::Or => 1,
             BinOp::And => 2,
             BinOp::Eq | BinOp::Ne => 3,
-            BinOp::Lt | BinOp::Gt | BinOp::Le | BinOp::Ge | BinOp::Xor | BinOp::BitAnd | BinOp::BitOr | BinOp::Shl | BinOp::Shr => 4,
+            BinOp::Lt
+            | BinOp::Gt
+            | BinOp::Le
+            | BinOp::Ge
+            | BinOp::Xor
+            | BinOp::BitAnd
+            | BinOp::BitOr
+            | BinOp::Shl
+            | BinOp::Shr => 4,
             BinOp::Add | BinOp::Sub => 5,
             BinOp::Mul | BinOp::Div | BinOp::FloorDiv | BinOp::Mod => 6,
         }
@@ -227,46 +252,73 @@ impl BinOp {
     }
 
     pub fn is_comparison(self) -> bool {
-        matches!(self, BinOp::Lt | BinOp::Le | BinOp::Gt | BinOp::Ge | BinOp::Eq)
+        matches!(
+            self,
+            BinOp::Lt | BinOp::Le | BinOp::Gt | BinOp::Ge | BinOp::Eq
+        )
     }
 }
 
 /// Python's `apply_binop` over two evaluated numbers: integer floor division for `/` and `//`, logical `&&` / `||`
 /// on truth values, a bool for every comparison.
 pub fn apply_binop(op: BinOp, left: Num, right: Num) -> Result<Num> {
-    fn arith(left: Num, right: Num, int: impl Fn(i64, i64) -> Option<i64>, float: impl Fn(f64, f64) -> f64) -> Result<Num> {
+    fn arith(
+        left: Num,
+        right: Num,
+        int: impl Fn(i64, i64) -> Option<i64>,
+        float: impl Fn(f64, f64) -> f64,
+    ) -> Result<Num> {
         if left.is_integral() && right.is_integral() {
             let (a, b) = (left.as_int()?, right.as_int()?);
-            return int(a, b).map(Num::Int).ok_or_else(|| Error::Value("integer overflow".into()));
+            return int(a, b)
+                .map(Num::Int)
+                .ok_or_else(|| Error::Value("integer overflow".into()));
         }
         Ok(Num::Float(float(left.as_f64(), right.as_f64())))
     }
     fn ints(left: Num, right: Num) -> Result<(i64, i64)> {
         if !(left.is_integral() && right.is_integral()) {
-            return Err(Error::Type("unsupported operand type(s) for a bit operation: float".into()));
+            return Err(Error::Type(
+                "unsupported operand type(s) for a bit operation: float".into(),
+            ));
         }
         Ok((left.as_int()?, right.as_int()?))
     }
-    fn bits(left: Num, right: Num, bools: impl Fn(bool, bool) -> bool, ints_fn: impl Fn(i64, i64) -> Option<i64>) -> Result<Num> {
+    fn bits(
+        left: Num,
+        right: Num,
+        bools: impl Fn(bool, bool) -> bool,
+        ints_fn: impl Fn(i64, i64) -> Option<i64>,
+    ) -> Result<Num> {
         if let (Num::Bool(a), Num::Bool(b)) = (left, right) {
             return Ok(Num::Bool(bools(a, b)));
         }
         let (a, b) = ints(left, right)?;
-        ints_fn(a, b).map(Num::Int).ok_or_else(|| Error::Value("integer overflow".into()))
+        ints_fn(a, b)
+            .map(Num::Int)
+            .ok_or_else(|| Error::Value("integer overflow".into()))
     }
     let floor_div = |a: i64, b: i64| -> Result<i64> {
         if b == 0 {
             return Err(Error::ZeroDivision);
         }
         let q = a / b;
-        Ok(if a % b != 0 && ((a < 0) != (b < 0)) { q - 1 } else { q })
+        Ok(if a % b != 0 && ((a < 0) != (b < 0)) {
+            q - 1
+        } else {
+            q
+        })
     };
     let py_mod = |a: i64, b: i64| -> Result<i64> {
         if b == 0 {
             return Err(Error::ZeroDivision);
         }
         let r = a % b;
-        Ok(if r != 0 && ((r < 0) != (b < 0)) { r + b } else { r })
+        Ok(if r != 0 && ((r < 0) != (b < 0)) {
+            r + b
+        } else {
+            r
+        })
     };
     match op {
         BinOp::Add => arith(left, right, |a, b| a.checked_add(b), |a, b| a + b),
@@ -289,14 +341,20 @@ pub fn apply_binop(op: BinOp, left: Num, right: Num) -> Result<Num> {
             if !(0..64).contains(&b) {
                 return Err(Error::Value("shift out of range".into()));
             }
-            a.checked_shl(b as u32).map(Num::Int).ok_or_else(|| Error::Value("integer overflow".into()))
+            a.checked_shl(b as u32)
+                .map(Num::Int)
+                .ok_or_else(|| Error::Value("integer overflow".into()))
         }
         BinOp::Shr => {
             let (a, b) = ints(left, right)?;
             if b < 0 {
                 return Err(Error::Value("negative shift count".into()));
             }
-            Ok(Num::Int(if b >= 64 { if a < 0 { -1 } else { 0 } } else { a >> b }))
+            Ok(Num::Int(if b >= 64 {
+                if a < 0 { -1 } else { 0 }
+            } else {
+                a >> b
+            }))
         }
         BinOp::Ne => Err(Error::Value("Unknown BinOp: !=".into())),
     }
@@ -392,15 +450,24 @@ impl Expression {
     }
 
     pub fn int(value: i64) -> Expression {
-        Expression::new(Expr::Literal(Lit { value: Num::Int(value), dtype: "int".into() }))
+        Expression::new(Expr::Literal(Lit {
+            value: Num::Int(value),
+            dtype: "int".into(),
+        }))
     }
 
     pub fn float(value: f64) -> Expression {
-        Expression::new(Expr::Literal(Lit { value: Num::Float(value), dtype: "float".into() }))
+        Expression::new(Expr::Literal(Lit {
+            value: Num::Float(value),
+            dtype: "float".into(),
+        }))
     }
 
     pub fn literal(value: Num, dtype: &str) -> Expression {
-        Expression::new(Expr::Literal(Lit { value, dtype: dtype.into() }))
+        Expression::new(Expr::Literal(Lit {
+            value,
+            dtype: dtype.into(),
+        }))
     }
 
     pub fn binary(op: BinOp, left: Expression, right: Expression) -> Expression {
@@ -444,7 +511,9 @@ impl Expression {
     /// A positive int literal of dtype `int` (what the simplifier takes a divisor or a factor from).
     pub fn int_literal(&self) -> Option<i64> {
         match &**self {
-            Expr::Literal(Lit { value, dtype }) if &**dtype == "int" && value.is_integral() => value.as_int().ok(),
+            Expr::Literal(Lit { value, dtype }) if &**dtype == "int" && value.is_integral() => {
+                value.as_int().ok()
+            }
             _ => None,
         }
     }
@@ -467,11 +536,10 @@ impl Expression {
 
     // --- the text ---------------------------------------------------------------------------------
 
-    /// The expression's text: `parse`'s inverse, what it is on the wire and in every listing.
+    /// The expression's text: `parse`'s inverse, what it is on the wire and in every listing. An expression with no
+    /// text (an operator with no spelling, a name holding a backtick) renders as its debug form.
     pub fn text(&self) -> String {
-        let mut out = String::new();
-        self.spell(0, &mut out).expect("every expression this crate builds has a text");
-        out
+        self.try_text().unwrap_or_else(|_| format!("{:?}", self.0))
     }
 
     /// The text, or the reason the expression has none (an operator with no spelling, a name with a backtick).
@@ -568,15 +636,25 @@ impl Expression {
 
     /// This node over `children` (as many as `children` returned), itself when none changed.
     pub fn with_children(&self, children: Vec<Expression>) -> Result<Expression> {
-        let same = |items: &[Expression]| items.iter().zip(&children).all(|(old, new)| Arc::ptr_eq(&old.0, &new.0));
+        let same = |items: &[Expression]| {
+            items
+                .iter()
+                .zip(&children)
+                .all(|(old, new)| Arc::ptr_eq(&old.0, &new.0))
+        };
         let count = self.children().len();
         if children.len() != count {
-            return Err(Error::Value(format!("an expression with {count} children cannot take {}", children.len())));
+            return Err(Error::Value(format!(
+                "an expression with {count} children cannot take {}",
+                children.len()
+            )));
         }
         Ok(match &**self {
             Expr::Var(_) | Expr::Literal(_) | Expr::Builtin(_) => self.clone(),
             Expr::Binary(op, l, r) if same(&[l.clone(), r.clone()]) => self.clone(),
-            Expr::Binary(op, _, _) => Expression::new(Expr::Binary(*op, children[0].clone(), children[1].clone())),
+            Expr::Binary(op, _, _) => {
+                Expression::new(Expr::Binary(*op, children[0].clone(), children[1].clone()))
+            }
             Expr::Call(name, args) => {
                 if same(args) {
                     self.clone()
@@ -592,7 +670,11 @@ impl Expression {
                 }
             }
             Expr::Ternary(a, b, c) if same(&[a.clone(), b.clone(), c.clone()]) => self.clone(),
-            Expr::Ternary(..) => Expression::new(Expr::Ternary(children[0].clone(), children[1].clone(), children[2].clone())),
+            Expr::Ternary(..) => Expression::new(Expr::Ternary(
+                children[0].clone(),
+                children[1].clone(),
+                children[2].clone(),
+            )),
             Expr::Cast(dtype, inner) => {
                 if same(std::slice::from_ref(inner)) {
                     self.clone()
@@ -601,6 +683,54 @@ impl Expression {
                 }
             }
         })
+    }
+
+    /// This node with `f` applied to each child; itself when every child comes back as it was.
+    pub fn map_children(&self, f: &mut dyn FnMut(&Expression) -> Expression) -> Expression {
+        let same = |old: &Expression, new: &Expression| Arc::ptr_eq(&old.0, &new.0);
+        match &**self {
+            Expr::Var(_) | Expr::Literal(_) | Expr::Builtin(_) => self.clone(),
+            Expr::Binary(op, l, r) => {
+                let (nl, nr) = (f(l), f(r));
+                if same(l, &nl) && same(r, &nr) {
+                    self.clone()
+                } else {
+                    Expression::new(Expr::Binary(*op, nl, nr))
+                }
+            }
+            Expr::Call(name, args) => {
+                let new: Vec<Expression> = args.iter().map(&mut *f).collect();
+                if new.iter().zip(args.iter()).all(|(n, o)| same(o, n)) {
+                    self.clone()
+                } else {
+                    Expression::new(Expr::Call(name.clone(), new.into()))
+                }
+            }
+            Expr::FlatIndex(name, args) => {
+                let new: Vec<Expression> = args.iter().map(&mut *f).collect();
+                if new.iter().zip(args.iter()).all(|(n, o)| same(o, n)) {
+                    self.clone()
+                } else {
+                    Expression::new(Expr::FlatIndex(name.clone(), new.into()))
+                }
+            }
+            Expr::Ternary(a, b, c) => {
+                let (na, nb, nc) = (f(a), f(b), f(c));
+                if same(a, &na) && same(b, &nb) && same(c, &nc) {
+                    self.clone()
+                } else {
+                    Expression::new(Expr::Ternary(na, nb, nc))
+                }
+            }
+            Expr::Cast(dtype, inner) => {
+                let new = f(inner);
+                if same(inner, &new) {
+                    self.clone()
+                } else {
+                    Expression::new(Expr::Cast(dtype.clone(), new))
+                }
+            }
+        }
     }
 
     /// Pre-order walk over the tree, itself first.
@@ -614,7 +744,9 @@ impl Expression {
                     walk(l, out);
                     walk(r, out);
                 }
-                Expr::Call(_, args) | Expr::FlatIndex(_, args) => args.iter().for_each(|a| walk(a, out)),
+                Expr::Call(_, args) | Expr::FlatIndex(_, args) => {
+                    args.iter().for_each(|a| walk(a, out))
+                }
                 Expr::Ternary(a, b, c) => {
                     walk(a, out);
                     walk(b, out);
@@ -646,7 +778,9 @@ impl Expression {
                 l.collect_free_vars(out);
                 r.collect_free_vars(out);
             }
-            Expr::Call(_, args) | Expr::FlatIndex(_, args) => args.iter().for_each(|a| a.collect_free_vars(out)),
+            Expr::Call(_, args) | Expr::FlatIndex(_, args) => {
+                args.iter().for_each(|a| a.collect_free_vars(out))
+            }
             Expr::Ternary(a, b, c) => {
                 a.collect_free_vars(out);
                 b.collect_free_vars(out);
@@ -675,10 +809,7 @@ impl Expression {
         match &**self {
             Expr::Var(name) => mapping.get(name).cloned().unwrap_or_else(|| self.clone()),
             Expr::Literal(_) | Expr::Builtin(_) => self.clone(),
-            _ => {
-                let children: Vec<Expression> = self.children().iter().map(|c| c.substitute(mapping)).collect();
-                self.with_children(children).expect("the same arity")
-            }
+            _ => self.map_children(&mut |c| c.substitute(mapping)),
         }
     }
 
@@ -690,10 +821,7 @@ impl Expression {
                 _ => self.clone(),
             },
             Expr::Literal(_) | Expr::Builtin(_) => self.clone(),
-            _ => {
-                let children: Vec<Expression> = self.children().iter().map(|c| c.rename(rename)).collect();
-                self.with_children(children).expect("the same arity")
-            }
+            _ => self.map_children(&mut |c| c.rename(rename)),
         }
     }
 
@@ -705,10 +833,10 @@ impl Expression {
         self.rename(&mut |name| mapping.get(name).cloned())
     }
 
-    /// Bottom-up map: `fn` applied to every subterm once its children are rebuilt.
-    pub fn rebuild(&self, f: &mut dyn FnMut(Expression) -> Result<Expression>) -> Result<Expression> {
-        let children: Result<Vec<Expression>> = self.children().iter().map(|c| c.rebuild(f)).collect();
-        f(self.with_children(children?)?)
+    /// Bottom-up map: `f` applied to every subterm once its children are rebuilt.
+    pub fn rebuild(&self, f: &mut dyn FnMut(Expression) -> Expression) -> Expression {
+        let rebuilt = self.map_children(&mut |c| c.rebuild(f));
+        f(rebuilt)
     }
 
     /// The buffers the flat indices inside this expression name, each once.
@@ -727,11 +855,18 @@ impl Expression {
     /// Evaluate a closed expression (no variables, no built-ins).
     pub fn eval(&self, env: &HashMap<Name, Num>) -> Result<Num> {
         match &**self {
-            Expr::Var(name) => env.get(name).copied().ok_or_else(|| Error::Key(name.to_string())),
+            Expr::Var(name) => env
+                .get(name)
+                .copied()
+                .ok_or_else(|| Error::Key(name.to_string())),
             Expr::Literal(lit) => Ok(lit.value),
-            Expr::Builtin(name) => Err(Error::NotImplemented(format!("Builtin {name:?} is GPU-only; cannot eval"))),
+            Expr::Builtin(name) => Err(Error::NotImplemented(format!(
+                "Builtin {name:?} is GPU-only; cannot eval"
+            ))),
             Expr::Binary(op, l, r) => apply_binop(*op, l.eval(env)?, r.eval(env)?),
-            Expr::Call(name, _) => Err(Error::NotImplemented(format!("no host evaluation of {name}"))),
+            Expr::Call(name, _) => Err(Error::NotImplemented(format!(
+                "no host evaluation of {name}"
+            ))),
             Expr::Ternary(c, t, f) => {
                 if c.eval(env)?.truthy() {
                     t.eval(env)
@@ -741,7 +876,11 @@ impl Expression {
             }
             Expr::Cast(dtype, inner) => {
                 let value = inner.eval(env)?;
-                Ok(if &**dtype == "int" { Num::Int(value.as_int()?) } else { value })
+                Ok(if &**dtype == "int" {
+                    Num::Int(value.as_int()?)
+                } else {
+                    value
+                })
             }
             Expr::FlatIndex(..) => Err(Error::Type("FlatIndex has no host evaluation".into())),
         }
@@ -756,7 +895,16 @@ impl Expression {
             Expr::Literal(lit) => lit.value.int().map(|v| Interval::new(v as i128, v as i128)),
             Expr::Binary(op, left, right) => {
                 let (la, lb) = (left.range(ctx), right.range(ctx));
-                let logical = matches!(op, BinOp::Lt | BinOp::Le | BinOp::Gt | BinOp::Ge | BinOp::Eq | BinOp::And | BinOp::Or);
+                let logical = matches!(
+                    op,
+                    BinOp::Lt
+                        | BinOp::Le
+                        | BinOp::Gt
+                        | BinOp::Ge
+                        | BinOp::Eq
+                        | BinOp::And
+                        | BinOp::Or
+                );
                 let (Some(la), Some(lb)) = (la, lb) else {
                     return logical.then_some(Interval::new(0, 1));
                 };
@@ -765,12 +913,16 @@ impl Expression {
                     BinOp::Sub => Some(Interval::new(la.lo - lb.hi, la.hi - lb.lo)),
                     BinOp::Mul => {
                         let prods = [la.lo * lb.lo, la.lo * lb.hi, la.hi * lb.lo, la.hi * lb.hi];
-                        Some(Interval::new(*prods.iter().min().unwrap(), *prods.iter().max().unwrap()))
+                        Some(Interval::new(
+                            prods.iter().copied().fold(i128::MAX, i128::min),
+                            prods.iter().copied().fold(i128::MIN, i128::max),
+                        ))
                     }
-                    BinOp::Div | BinOp::FloorDiv => {
-                        (lb.lo == lb.hi && lb.lo > 0).then(|| Interval::new(la.lo.div_euclid(lb.lo), la.hi.div_euclid(lb.lo)))
+                    BinOp::Div | BinOp::FloorDiv => (lb.lo == lb.hi && lb.lo > 0)
+                        .then(|| Interval::new(la.lo.div_euclid(lb.lo), la.hi.div_euclid(lb.lo))),
+                    BinOp::Mod => {
+                        (lb.lo == lb.hi && lb.lo > 0).then(|| Interval::new(0, lb.lo - 1))
                     }
-                    BinOp::Mod => (lb.lo == lb.hi && lb.lo > 0).then(|| Interval::new(0, lb.lo - 1)),
                     _ if logical => Some(Interval::new(0, 1)),
                     _ => None,
                 }
@@ -788,7 +940,11 @@ impl Expression {
             Expr::Call(name, args) => {
                 let new: Result<Vec<Expression>> = args.iter().map(|a| a.simplify(ctx)).collect();
                 let new = new?;
-                if new.iter().zip(args.iter()).all(|(a, b)| Arc::ptr_eq(&a.0, &b.0)) {
+                if new
+                    .iter()
+                    .zip(args.iter())
+                    .all(|(a, b)| Arc::ptr_eq(&a.0, &b.0))
+                {
                     Ok(self.clone())
                 } else {
                     Ok(Expression::new(Expr::Call(name.clone(), new.into())))
@@ -823,7 +979,10 @@ impl Expression {
             }
             Expr::FlatIndex(buffer, index) => {
                 let new: Result<Vec<Expression>> = index.iter().map(|e| e.simplify(ctx)).collect();
-                Ok(Expression::new(Expr::FlatIndex(buffer.clone(), new?.into())))
+                Ok(Expression::new(Expr::FlatIndex(
+                    buffer.clone(),
+                    new?.into(),
+                )))
             }
         }
     }
@@ -837,7 +996,8 @@ fn is_identifier(name: &str) -> bool {
     let first = parts.next().unwrap_or("");
     let word = |part: &str| {
         let mut chars = part.chars();
-        matches!(chars.next(), Some(c) if c.is_alphabetic() || c == '_') && chars.all(|c| c.is_alphanumeric() || c == '_')
+        matches!(chars.next(), Some(c) if c.is_alphabetic() || c == '_')
+            && chars.all(|c| c.is_alphanumeric() || c == '_')
     };
     match (word(first), parts.next(), parts.next()) {
         (true, None, _) => true,
@@ -849,11 +1009,18 @@ fn is_identifier(name: &str) -> bool {
 /// `name` as the reader reads a name back: bare when it is an identifier with no other meaning, else between
 /// backticks (a `$0` port, a name that is also a built-in or a keyword).
 pub fn spell_name(name: &str, reserved: &[&str]) -> Result<String> {
-    if is_identifier(name) && !is_builtin(name) && !RESERVED.contains(&name) && !reserved.contains(&name) {
+    if is_identifier(name)
+        && !is_builtin(name)
+        && !RESERVED.contains(&name)
+        && !reserved.contains(&name)
+    {
         return Ok(name.to_string());
     }
     if name.contains('`') || name.contains('\n') {
-        return Err(Error::Value(format!("the name {} has no spelling", python_repr(name))));
+        return Err(Error::Value(format!(
+            "the name {} has no spelling",
+            python_repr(name)
+        )));
     }
     Ok(format!("`{name}`"))
 }
@@ -862,9 +1029,15 @@ pub fn spell_name(name: &str, reserved: &[&str]) -> Result<String> {
 pub fn literal_text(lit: &Lit) -> Result<String> {
     match &*lit.dtype {
         "bool" => Ok(if lit.value.truthy() { "true" } else { "false" }.into()),
-        "int" if lit.value.as_f64().fract() == 0.0 && lit.value.as_f64().is_finite() => Ok(lit.value.as_int()?.to_string()),
+        "int" if lit.value.as_f64().fract() == 0.0 && lit.value.as_f64().is_finite() => {
+            Ok(lit.value.as_int()?.to_string())
+        }
         "float" => Ok(float_repr(lit.value.as_f64())),
-        dtype => Err(Error::Value(format!("the literal {} of dtype {} has no spelling", num_repr(lit.value), python_repr(dtype)))),
+        dtype => Err(Error::Value(format!(
+            "the literal {} of dtype {} has no spelling",
+            num_repr(lit.value),
+            python_repr(dtype)
+        ))),
     }
 }
 
@@ -879,7 +1052,11 @@ pub fn num_repr(value: Num) -> String {
 
 /// Python's `repr` of a string.
 pub fn python_repr(text: &str) -> String {
-    let quote = if text.contains('\'') && !text.contains('"') { '"' } else { '\'' };
+    let quote = if text.contains('\'') && !text.contains('"') {
+        '"'
+    } else {
+        '\''
+    };
     let mut out = String::new();
     out.push(quote);
     for c in text.chars() {
@@ -915,7 +1092,13 @@ fn fold_binop_literals(op: BinOp, left: &Lit, right: &Lit) -> Result<Expression>
     Ok(Expression::float(folded.as_f64()))
 }
 
-fn simplify_binary(this: &Expression, op: BinOp, left: &Expression, right: &Expression, ctx: &SimplifyCtx) -> Result<Expression> {
+fn simplify_binary(
+    this: &Expression,
+    op: BinOp,
+    left: &Expression,
+    right: &Expression,
+    ctx: &SimplifyCtx,
+) -> Result<Expression> {
     let (orig_left, orig_right) = (left, right);
     let left = left.simplify(ctx)?;
     let right = right.simplify(ctx)?;
@@ -970,7 +1153,12 @@ fn simplify_binary(this: &Expression, op: BinOp, left: &Expression, right: &Expr
                 {
                     // Positive constant quotient chains have one denominator in index normal form.
                     let product = apply_binop(BinOp::Mul, *value, Num::Int(n))?;
-                    return Expression::binary(BinOp::Div, inner_left.clone(), Expression::literal(product, "int")).simplify(ctx);
+                    return Expression::binary(
+                        BinOp::Div,
+                        inner_left.clone(),
+                        Expression::literal(product, "int"),
+                    )
+                    .simplify(ctx);
                 }
                 if let Some((q, _)) = div_mod_decompose(&left, n, ctx)? {
                     return Ok(q);
@@ -1085,7 +1273,12 @@ fn gcd(mut a: i64, mut b: i64) -> i64 {
     a.abs()
 }
 
-fn cancel_common_factors(op: BinOp, left: &Expression, right: &Expression, ctx: &SimplifyCtx) -> Option<Expression> {
+fn cancel_common_factors(
+    op: BinOp,
+    left: &Expression,
+    right: &Expression,
+    ctx: &SimplifyCtx,
+) -> Option<Expression> {
     let (l_factors, mut l_k) = multiplicative_factors(left);
     let (r_factors, mut r_k) = multiplicative_factors(right);
     let mut cancelled = false;
@@ -1094,7 +1287,10 @@ fn cancel_common_factors(op: BinOp, left: &Expression, right: &Expression, ctx: 
     let mut common_factors = Vec::new();
     let mut common_int = 1;
     for f in l_factors {
-        match r_remaining.iter().position(|rf| f == *rf && is_positive(&f, ctx)) {
+        match r_remaining
+            .iter()
+            .position(|rf| f == *rf && is_positive(&f, ctx))
+        {
             Some(index) => {
                 r_remaining.remove(index);
                 cancelled = true;
@@ -1130,7 +1326,11 @@ fn cancel_common_factors(op: BinOp, left: &Expression, right: &Expression, ctx: 
         }
         let common = rebuild_product(&common_factors, common_int);
         let modulo = Expression::binary(BinOp::Mod, new_left, new_right);
-        return Some(if common.is_one() { modulo } else { Expression::binary(BinOp::Mul, common, modulo) });
+        return Some(if common.is_one() {
+            modulo
+        } else {
+            Expression::binary(BinOp::Mul, common, modulo)
+        });
     }
     Some(Expression::binary(op, new_left, new_right))
 }
@@ -1168,12 +1368,18 @@ fn scaled_term(e: &Expression, ops: &[BinOp]) -> Option<(Expression, i64, i64)> 
 }
 
 /// Fold `(x / c) * (c·k) + (x % c) * k → x * k` inside an additive chain.
-fn fold_divmod_recompose(left: &Expression, right: &Expression, ctx: &SimplifyCtx) -> Result<Option<Expression>> {
+fn fold_divmod_recompose(
+    left: &Expression,
+    right: &Expression,
+    ctx: &SimplifyCtx,
+) -> Result<Option<Expression>> {
     let mut terms = Vec::new();
     addend_chain(left, &mut terms);
     addend_chain(right, &mut terms);
     for (i, t1) in terms.iter().enumerate() {
-        let Some((x, c, a)) = scaled_term(t1, &[BinOp::Div, BinOp::FloorDiv]) else { continue };
+        let Some((x, c, a)) = scaled_term(t1, &[BinOp::Div, BinOp::FloorDiv]) else {
+            continue;
+        };
         if a % c != 0 {
             continue;
         }
@@ -1186,7 +1392,11 @@ fn fold_divmod_recompose(left: &Expression, right: &Expression, ctx: &SimplifyCt
                 Some((rx, rc, rk)) if rx == x && rc == c && rk == k => {}
                 _ => continue,
             }
-            let mut out = if k == 1 { x.clone() } else { Expression::binary(BinOp::Mul, x.clone(), Expression::int(k)) };
+            let mut out = if k == 1 {
+                x.clone()
+            } else {
+                Expression::binary(BinOp::Mul, x.clone(), Expression::int(k))
+            };
             for (pos, t) in terms.iter().enumerate() {
                 if pos != i && pos != j {
                     out = Expression::binary(BinOp::Add, out, t.clone());
@@ -1199,24 +1409,40 @@ fn fold_divmod_recompose(left: &Expression, right: &Expression, ctx: &SimplifyCt
 }
 
 /// `expression` as `n * q + r` with `0 <= r < n`, both proven from operand ranges.
-fn div_mod_decompose(expression: &Expression, n: i64, ctx: &SimplifyCtx) -> Result<Option<(Expression, Expression)>> {
+fn div_mod_decompose(
+    expression: &Expression,
+    n: i64,
+    ctx: &SimplifyCtx,
+) -> Result<Option<(Expression, Expression)>> {
     if let Some(value) = expression.int_literal().filter(|v| *v >= 0) {
-        return Ok(Some((Expression::int(value.div_euclid(n)), Expression::int(value.rem_euclid(n)))));
+        return Ok(Some((
+            Expression::int(value.div_euclid(n)),
+            Expression::int(value.rem_euclid(n)),
+        )));
     }
     if let Expr::Binary(BinOp::Mul, left, right) = &**expression {
         for (k_side, other_side) in [(right, left), (left, right)] {
-            let Some(k) = k_side.int_literal().filter(|k| *k > 0) else { continue };
-            if !other_side.range(ctx).is_some_and(|rng| rng.lo >= 0) {
+            let Some(k) = k_side.int_literal().filter(|k| *k > 0) else {
+                continue;
+            };
+            if other_side.range(ctx).is_none_or(|rng| rng.lo < 0) {
                 continue;
             }
             if k % n == 0 {
-                let q = Expression::binary(BinOp::Mul, other_side.clone(), Expression::int(k / n)).simplify(ctx)?;
+                let q = Expression::binary(BinOp::Mul, other_side.clone(), Expression::int(k / n))
+                    .simplify(ctx)?;
                 return Ok(Some((q, Expression::int(0))));
             }
             if n % k == 0 {
                 let d = Expression::int(n / k);
-                let q = Expression::binary(BinOp::Div, other_side.clone(), d.clone()).simplify(ctx)?;
-                let r = Expression::binary(BinOp::Mul, Expression::binary(BinOp::Mod, other_side.clone(), d), Expression::int(k)).simplify(ctx)?;
+                let q =
+                    Expression::binary(BinOp::Div, other_side.clone(), d.clone()).simplify(ctx)?;
+                let r = Expression::binary(
+                    BinOp::Mul,
+                    Expression::binary(BinOp::Mod, other_side.clone(), d),
+                    Expression::int(k),
+                )
+                .simplify(ctx)?;
                 return Ok(Some((q, r)));
             }
         }
@@ -1235,9 +1461,13 @@ fn div_mod_decompose(expression: &Expression, n: i64, ctx: &SimplifyCtx) -> Resu
         {
             l = split_addend(left, n, ctx)?;
         }
-        let (Some((ql, rl)), Some((qr, rr))) = (l, r) else { return Ok(None) };
+        let (Some((ql, rl)), Some((qr, rr))) = (l, r) else {
+            return Ok(None);
+        };
         let r_sum = Expression::binary(BinOp::Add, rl, rr).simplify(ctx)?;
-        let Some(rng) = r_sum.range(ctx) else { return Ok(None) };
+        let Some(rng) = r_sum.range(ctx) else {
+            return Ok(None);
+        };
         if rng.lo < 0 || rng.hi >= n as i128 {
             return Ok(None);
         }
@@ -1255,13 +1485,20 @@ fn div_mod_decompose(expression: &Expression, n: i64, ctx: &SimplifyCtx) -> Resu
         && let Some(d) = divisor.int_literal().filter(|d| *d > 0)
         && let Some((q_inner, r_inner)) = div_mod_decompose(left, n * d, ctx)?
     {
-        return Ok(Some((q_inner, Expression::binary(*op, r_inner, divisor.clone()).simplify(ctx)?)));
+        return Ok(Some((
+            q_inner,
+            Expression::binary(*op, r_inner, divisor.clone()).simplify(ctx)?,
+        )));
     }
     Ok(None)
 }
 
-fn split_addend(expression: &Expression, n: i64, ctx: &SimplifyCtx) -> Result<Option<(Expression, Expression)>> {
-    if !expression.range(ctx).is_some_and(|rng| rng.lo >= 0) {
+fn split_addend(
+    expression: &Expression,
+    n: i64,
+    ctx: &SimplifyCtx,
+) -> Result<Option<(Expression, Expression)>> {
+    if expression.range(ctx).is_none_or(|rng| rng.lo < 0) {
         return Ok(None);
     }
     let lit = Expression::int(n);
@@ -1271,21 +1508,40 @@ fn split_addend(expression: &Expression, n: i64, ctx: &SimplifyCtx) -> Result<Op
     )))
 }
 
-fn mod_below_divisor(left: &Expression, right: &Expression, ctx: &SimplifyCtx) -> Result<Option<Expression>> {
-    let Expr::Var(name) = &**left else { return Ok(None) };
-    let Some(bound) = ctx.bounds.get(name) else { return Ok(None) };
+fn mod_below_divisor(
+    left: &Expression,
+    right: &Expression,
+    ctx: &SimplifyCtx,
+) -> Result<Option<Expression>> {
+    let Expr::Var(name) = &**left else {
+        return Ok(None);
+    };
+    let Some(bound) = ctx.bounds.get(name) else {
+        return Ok(None);
+    };
     if bound.simplify(ctx)? != *right {
         return Ok(None);
     }
-    Ok(left.range(ctx).filter(|rng| rng.lo >= 0).map(|_| left.clone()))
+    Ok(left
+        .range(ctx)
+        .filter(|rng| rng.lo >= 0)
+        .map(|_| left.clone()))
 }
 
 fn static_cmp(op: BinOp, la: Interval, lb: Interval) -> Option<bool> {
     match op {
-        BinOp::Lt => (la.hi < lb.lo).then_some(true).or((la.lo >= lb.hi).then_some(false)),
-        BinOp::Le => (la.hi <= lb.lo).then_some(true).or((la.lo > lb.hi).then_some(false)),
-        BinOp::Gt => (la.lo > lb.hi).then_some(true).or((la.hi <= lb.lo).then_some(false)),
-        BinOp::Ge => (la.lo >= lb.hi).then_some(true).or((la.hi < lb.lo).then_some(false)),
+        BinOp::Lt => (la.hi < lb.lo)
+            .then_some(true)
+            .or((la.lo >= lb.hi).then_some(false)),
+        BinOp::Le => (la.hi <= lb.lo)
+            .then_some(true)
+            .or((la.lo > lb.hi).then_some(false)),
+        BinOp::Gt => (la.lo > lb.hi)
+            .then_some(true)
+            .or((la.hi <= lb.lo).then_some(false)),
+        BinOp::Ge => (la.lo >= lb.hi)
+            .then_some(true)
+            .or((la.hi < lb.lo).then_some(false)),
         BinOp::Eq => {
             if la.hi < lb.lo || la.lo > lb.hi {
                 Some(false)
@@ -1340,7 +1596,10 @@ impl SimplifyCtx {
 // --- the affine form ------------------------------------------------------------------------------
 
 /// `expression` as `anchor + Σ coeffs[v]·v` over `vars`; `None` when it is not affine in them.
-pub fn affine_form(expression: &Expression, vars: &dyn Fn(&str) -> bool) -> Option<(Expression, BTreeMap<Name, i64>)> {
+pub fn affine_form(
+    expression: &Expression,
+    vars: &dyn Fn(&str) -> bool,
+) -> Option<(Expression, BTreeMap<Name, i64>)> {
     let uses = |e: &Expression| e.free_vars().into_iter().any(|name| vars(&name));
     if !uses(expression) {
         return Some((expression.clone(), BTreeMap::new()));
@@ -1365,7 +1624,7 @@ pub fn affine_form(expression: &Expression, vars: &dyn Fn(&str) -> bool) -> Opti
                 return None;
             }
             let (side, mult) = if l_uses { (left, right) } else { (right, left) };
-            let Some(Lit { value, .. }) = mult.as_literal() else { return None };
+            let Lit { value, .. } = mult.as_literal()?;
             if !value.is_integral() {
                 return None;
             }
@@ -1376,7 +1635,13 @@ pub fn affine_form(expression: &Expression, vars: &dyn Fn(&str) -> bool) -> Opti
             } else {
                 Expression::binary(BinOp::Mul, mult.clone(), sub_anchor)
             };
-            Some((anchor, sub_coeffs.into_iter().map(|(v, c)| (v, c * factor)).collect()))
+            Some((
+                anchor,
+                sub_coeffs
+                    .into_iter()
+                    .map(|(v, c)| (v, c * factor))
+                    .collect(),
+            ))
         }
         _ => None,
     }
@@ -1390,14 +1655,21 @@ pub fn split_anchor(expression: &Expression) -> Option<(i64, Expression)> {
     let mut rest = Expression::int(0);
     for (name, coeff) in coeffs {
         let variable = Expression::new(Expr::Var(name));
-        let term = if coeff == 1 { variable } else { Expression::binary(BinOp::Mul, variable, Expression::int(coeff)) };
+        let term = if coeff == 1 {
+            variable
+        } else {
+            Expression::binary(BinOp::Mul, variable, Expression::int(coeff))
+        };
         rest = Expression::binary(BinOp::Add, rest, term);
     }
     Some((anchor, rest))
 }
 
 /// An upper bound on the number of distinct coordinate tuples `expressions` take over `var_extents`.
-pub fn index_set_size(expressions: &[Expression], var_extents: &HashMap<Name, i64>) -> Option<i128> {
+pub fn index_set_size(
+    expressions: &[Expression],
+    var_extents: &HashMap<Name, i64>,
+) -> Option<i128> {
     let mut total: i128 = 1;
     for e in expressions {
         let (_, coeffs) = affine_form(e, &|name| var_extents.contains_key(name))?;
@@ -1429,8 +1701,8 @@ pub struct Token {
 
 /// Operators and punctuation an expression's text uses.
 pub const PUNCTUATION: [&str; 26] = [
-    "||", "&&", "==", "!=", "<=", ">=", "<<", ">>", "//", "-", "+", "*", "/", "%", "<", ">", "^", "&", "|", "?", ":", "(", ")", ",", "[",
-    "]",
+    "||", "&&", "==", "!=", "<=", ">=", "<<", ">>", "//", "-", "+", "*", "/", "%", "<", ">", "^",
+    "&", "|", "?", ":", "(", ")", ",", "[", "]",
 ];
 
 /// The reader of an expression's text. Text that holds expressions among other things (a statement) is read by a
@@ -1451,7 +1723,9 @@ impl Parser {
         let bytes = text.as_bytes();
         let mut position = 0;
         while position < bytes.len() {
-            let c = text[position..].chars().next().unwrap();
+            let Some(c) = text[position..].chars().next() else {
+                break;
+            };
             if c.is_whitespace() {
                 position += c.len_utf8();
                 continue;
@@ -1463,10 +1737,19 @@ impl Parser {
                 let digits = |s: &str| s.chars().take_while(|c| c.is_ascii_digit()).count();
                 end += digits(rest);
                 // A number needs a digit after its point, so ``0..4`` is a number, two dots and a number.
-                if text[end..].starts_with('.') && text[end + 1..].chars().next().is_some_and(|c| c.is_ascii_digit()) {
+                if text[end..].starts_with('.')
+                    && text[end + 1..]
+                        .chars()
+                        .next()
+                        .is_some_and(|c| c.is_ascii_digit())
+                {
                     end += 1 + digits(&text[end + 1..]);
                 }
-                if let Some(e) = text[end..].chars().next().filter(|c| *c == 'e' || *c == 'E') {
+                if let Some(e) = text[end..]
+                    .chars()
+                    .next()
+                    .filter(|c| *c == 'e' || *c == 'E')
+                {
                     let mut probe = end + e.len_utf8();
                     if text[probe..].starts_with('+') || text[probe..].starts_with('-') {
                         probe += 1;
@@ -1476,18 +1759,36 @@ impl Parser {
                         end = probe + count;
                     }
                 }
-                tokens.push(Token { kind: TokenKind::Number, text: text[start..end].to_string(), position: start });
+                tokens.push(Token {
+                    kind: TokenKind::Number,
+                    text: text[start..end].to_string(),
+                    position: start,
+                });
                 position = end;
                 continue;
             }
             if c.is_alphabetic() || c == '_' {
                 let start = position;
-                let word = |s: &str| s.chars().take_while(|c| c.is_alphanumeric() || *c == '_').map(char::len_utf8).sum::<usize>();
+                let word = |s: &str| {
+                    s.chars()
+                        .take_while(|c| c.is_alphanumeric() || *c == '_')
+                        .map(char::len_utf8)
+                        .sum::<usize>()
+                };
                 let mut end = position + word(&text[position..]);
-                if text[end..].starts_with('.') && text[end + 1..].chars().next().is_some_and(|c| c.is_alphabetic() || c == '_') {
+                if text[end..].starts_with('.')
+                    && text[end + 1..]
+                        .chars()
+                        .next()
+                        .is_some_and(|c| c.is_alphabetic() || c == '_')
+                {
                     end += 1 + word(&text[end + 1..]);
                 }
-                tokens.push(Token { kind: TokenKind::Name, text: text[start..end].to_string(), position: start });
+                tokens.push(Token {
+                    kind: TokenKind::Name,
+                    text: text[start..end].to_string(),
+                    position: start,
+                });
                 position = end;
                 continue;
             }
@@ -1501,27 +1802,48 @@ impl Parser {
                 if quoted.is_empty() || quoted.contains('\n') {
                     return Err(Parser::error_at("unexpected character", start, text));
                 }
-                tokens.push(Token { kind: TokenKind::Quoted, text: quoted.to_string(), position: start + 1 });
+                tokens.push(Token {
+                    kind: TokenKind::Quoted,
+                    text: quoted.to_string(),
+                    position: start + 1,
+                });
                 position += close + 2;
                 continue;
             }
-            match punctuation.iter().find(|p| text[position..].starts_with(**p)) {
+            match punctuation
+                .iter()
+                .find(|p| text[position..].starts_with(**p))
+            {
                 Some(p) => {
-                    tokens.push(Token { kind: TokenKind::Op, text: p.to_string(), position });
+                    tokens.push(Token {
+                        kind: TokenKind::Op,
+                        text: p.to_string(),
+                        position,
+                    });
                     position += p.len();
                 }
                 None => return Err(Parser::error_at("unexpected character", position, text)),
             }
         }
-        Ok(Parser { text: text.to_string(), tokens, index: 0 })
+        Ok(Parser {
+            text: text.to_string(),
+            tokens,
+            index: 0,
+        })
     }
 
     fn error_at(message: &str, position: usize, text: &str) -> Error {
-        Error::Value(format!("{message} at position {position} of {}", python_repr(text)))
+        Error::Value(format!(
+            "{message} at position {position} of {}",
+            python_repr(text)
+        ))
     }
 
     pub fn error(&self, message: &str) -> Error {
-        let position = self.tokens.get(self.index).map_or(self.text.len(), |t| t.position);
+        let position = self
+            .tokens
+            .get(self.index)
+            .map_or(self.text.len(), |t| t.position);
         Parser::error_at(message, position, &self.text)
     }
 
@@ -1530,17 +1852,22 @@ impl Parser {
     }
 
     pub fn take(&mut self) -> Result<Token> {
-        let token = self.peek(0).cloned().ok_or_else(|| self.error("unexpected end"))?;
+        let token = self
+            .peek(0)
+            .cloned()
+            .ok_or_else(|| self.error("unexpected end"))?;
         self.index += 1;
         Ok(token)
     }
 
     pub fn at(&self, op: &str, ahead: usize) -> bool {
-        self.peek(ahead).is_some_and(|t| t.kind == TokenKind::Op && t.text == op)
+        self.peek(ahead)
+            .is_some_and(|t| t.kind == TokenKind::Op && t.text == op)
     }
 
     pub fn at_word(&self, word: &str, ahead: usize) -> bool {
-        self.peek(ahead).is_some_and(|t| t.kind == TokenKind::Name && t.text == word)
+        self.peek(ahead)
+            .is_some_and(|t| t.kind == TokenKind::Name && t.text == word)
     }
 
     pub fn accept(&mut self, op: &str) -> bool {
@@ -1551,7 +1878,7 @@ impl Parser {
         false
     }
 
-    pub fn expect(&mut self, op: &str) -> Result<()> {
+    pub fn require(&mut self, op: &str) -> Result<()> {
         if !self.accept(op) {
             return Err(self.error(&format!("expected {}", python_repr(op))));
         }
@@ -1568,7 +1895,7 @@ impl Parser {
             return Ok(cond);
         }
         let if_true = self.expression()?;
-        self.expect(":")?;
+        self.require(":")?;
         let if_false = self.expression()?;
         Ok(Expression::new(Expr::Ternary(cond, if_true, if_false)))
     }
@@ -1578,7 +1905,7 @@ impl Parser {
         let mut items = Vec::new();
         while !self.accept(close) {
             if !items.is_empty() {
-                self.expect(",")?;
+                self.require(",")?;
             }
             items.push(self.expression()?);
         }
@@ -1587,12 +1914,13 @@ impl Parser {
 
     fn binary(&mut self, least: u8) -> Result<Expression> {
         let mut left = self.operand()?;
-        loop {
-            let Some(token) = self.peek(0) else { break };
+        while let Some(token) = self.peek(0) {
             if token.kind != TokenKind::Op {
                 break;
             }
-            let Some(op) = BinOp::parse(&token.text) else { break };
+            let Some(op) = BinOp::parse(&token.text) else {
+                break;
+            };
             if op.precedence() < least {
                 break;
             }
@@ -1607,21 +1935,38 @@ impl Parser {
     pub fn number(&mut self) -> Result<Option<Lit>> {
         let sign = self.at("-", 0);
         let ahead = sign as usize;
-        let Some(token) = self.peek(ahead) else { return Ok(None) };
+        let Some(token) = self.peek(ahead) else {
+            return Ok(None);
+        };
         let literal = match token.kind {
             TokenKind::Number => {
                 let text = format!("{}{}", if sign { "-" } else { "" }, token.text);
                 if token.text.contains(['.', 'e', 'E']) {
                     let value: f64 = text.parse().map_err(|_| self.error("not a number"))?;
-                    Lit { value: Num::Float(value), dtype: "float".into() }
+                    Lit {
+                        value: Num::Float(value),
+                        dtype: "float".into(),
+                    }
                 } else {
-                    let value: i64 = text.parse().map_err(|_| self.error("integer out of range"))?;
-                    Lit { value: Num::Int(value), dtype: "int".into() }
+                    let value: i64 = text
+                        .parse()
+                        .map_err(|_| self.error("integer out of range"))?;
+                    Lit {
+                        value: Num::Int(value),
+                        dtype: "int".into(),
+                    }
                 }
             }
             TokenKind::Name if token.text == "inf" || token.text == "nan" => {
-                let value = if token.text == "inf" { f64::INFINITY } else { f64::NAN };
-                Lit { value: Num::Float(if sign { -value } else { value }), dtype: "float".into() }
+                let value = if token.text == "inf" {
+                    f64::INFINITY
+                } else {
+                    f64::NAN
+                };
+                Lit {
+                    value: Num::Float(if sign { -value } else { value }),
+                    dtype: "float".into(),
+                }
             }
             _ => return Ok(None),
         };
@@ -1638,7 +1983,10 @@ impl Parser {
             TokenKind::Quoted => {
                 if self.accept("[") {
                     let index = self.expressions("]")?;
-                    return Ok(Expression::new(Expr::FlatIndex(token.text.into(), index.into())));
+                    return Ok(Expression::new(Expr::FlatIndex(
+                        token.text.into(),
+                        index.into(),
+                    )));
                 }
                 Ok(Expression::new(Expr::Var(token.text.into())))
             }
@@ -1652,7 +2000,10 @@ impl Parser {
                 }
                 if self.accept("[") {
                     let index = self.expressions("]")?;
-                    return Ok(Expression::new(Expr::FlatIndex(token.text.into(), index.into())));
+                    return Ok(Expression::new(Expr::FlatIndex(
+                        token.text.into(),
+                        index.into(),
+                    )));
                 }
                 if is_builtin(&token.text) {
                     return Ok(Expression::new(Expr::Builtin(token.text.into())));
@@ -1672,7 +2023,7 @@ impl Parser {
                     return Ok(Expression::new(Expr::Cast(dtype, inner)));
                 }
                 let inner = self.expression()?;
-                self.expect(")")?;
+                self.require(")")?;
                 Ok(inner)
             }
             _ => {
@@ -1683,7 +2034,12 @@ impl Parser {
     }
 
     fn starts_operand(&self, ahead: usize) -> bool {
-        self.peek(ahead).is_some_and(|t| matches!(t.kind, TokenKind::Number | TokenKind::Name | TokenKind::Quoted) || t.text == "(")
+        self.peek(ahead).is_some_and(|t| {
+            matches!(
+                t.kind,
+                TokenKind::Number | TokenKind::Name | TokenKind::Quoted
+            ) || t.text == "("
+        })
     }
 }
 
@@ -1760,7 +2116,9 @@ mod tests {
 
     #[test]
     fn ranges_decide_comparisons_and_divisions() {
-        let ctx = SimplifyCtx::empty().extend("i", Interval::new(0, 7), None).extend("k", Interval::new(0, 1), None);
+        let ctx = SimplifyCtx::empty()
+            .extend("i", Interval::new(0, 7), None)
+            .extend("k", Interval::new(0, 1), None);
         let e = parse("i < 8").unwrap().simplify(&ctx).unwrap();
         assert_eq!(e.text(), "1");
         let e = parse("(i * 2 + k) / 2").unwrap().simplify(&ctx).unwrap();

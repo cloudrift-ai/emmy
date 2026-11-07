@@ -19,8 +19,9 @@ pub const INDENT: &str = "    ";
 
 /// Words the reader gives a meaning, so a name spelled like one is written between backticks.
 pub const KEYWORDS: [&str; 26] = [
-    "for", "in", "if", "else", "let", "init", "zero", "load", "pre", "select", "when", "over", "seed", "step", "until", "window", "carried",
-    "swizzle", "words", "unroll", "sub", "call", "true", "false", "none", "in",
+    "for", "in", "if", "else", "let", "init", "zero", "load", "pre", "select", "when", "over",
+    "seed", "step", "until", "window", "carried", "swizzle", "words", "unroll", "sub", "call",
+    "true", "false", "none", "in",
 ];
 
 /// A name as a statement's text spells it: bare, or between backticks when it reads as a keyword or is no identifier.
@@ -29,32 +30,52 @@ pub fn spell_stmt_name(name: &str) -> Result<String> {
 }
 
 fn names(items: &[Name]) -> Result<String> {
-    Ok(items.iter().map(|name| spell_stmt_name(name)).collect::<Result<Vec<_>>>()?.join(", "))
+    Ok(items
+        .iter()
+        .map(|name| spell_stmt_name(name))
+        .collect::<Result<Vec<_>>>()?
+        .join(", "))
 }
 
 fn typed(dtype: &Option<DType>) -> String {
-    dtype.as_ref().map_or_else(String::new, |d| format!("{} ", d.name()))
+    dtype
+        .as_ref()
+        .map_or_else(String::new, |d| format!("{} ", d.name()))
 }
 
 fn index(items: &[Expression]) -> Result<String> {
-    Ok(format!("[{}]", items.iter().map(|e| e.try_text()).collect::<Result<Vec<_>>>()?.join(", ")))
+    Ok(format!(
+        "[{}]",
+        items
+            .iter()
+            .map(|e| e.try_text())
+            .collect::<Result<Vec<_>>>()?
+            .join(", ")
+    ))
 }
 
 /// `name in start..extent`, with the hint when it is not the default, and the window.
 pub fn spell_axis(axis: &Axis, start: Option<&str>) -> Result<String> {
     let mut extent = axis.extent.expression.try_text()?;
-    if axis.extent.hint != axis.extent.default_hint() {
-        if let Some(hint) = axis.extent.hint {
-            extent.push_str(&format!("~{hint}"));
-        }
+    if axis.extent.hint != axis.extent.default_hint()
+        && let Some(hint) = axis.extent.hint
+    {
+        extent.push_str(&format!("~{hint}"));
     }
-    let mut out = format!("{} in {}..{}", spell_stmt_name(&axis.name)?, start.unwrap_or("0"), extent);
+    let mut out = format!(
+        "{} in {}..{}",
+        spell_stmt_name(&axis.name)?,
+        start.unwrap_or("0"),
+        extent
+    );
     out.push_str(&spell_window(axis.window.as_ref())?);
     Ok(out)
 }
 
 fn spell_window(window: Option<&Window>) -> Result<String> {
-    let Some(window) = window else { return Ok(String::new()) };
+    let Some(window) = window else {
+        return Ok(String::new());
+    };
     let mut parts: Vec<String> = Vec::new();
     if let Some(parent) = &window.parent {
         parts.push(format!("parent={}", spell_axis(parent, None)?));
@@ -72,19 +93,32 @@ fn spell_window(window: Option<&Window>) -> Result<String> {
 }
 
 fn flags(unroll: bool, seed: bool) -> String {
-    format!("{}{}:", if unroll { " unroll=true" } else { "" }, if seed { "" } else { " seed=false" })
+    format!(
+        "{}{}:",
+        if unroll { " unroll=true" } else { "" },
+        if seed { "" } else { " seed=false" }
+    )
 }
 
 fn affine(stmt: &Affine) -> Result<String> {
     let mut terms: Vec<(f64, String)> = Vec::new();
     for (c, arg) in stmt.terms() {
         let name = spell_stmt_name(arg)?;
-        terms.push((c, if c.abs() == 1.0 { name } else { format!("{}*{}", spell_number(c.abs()), name) }));
+        terms.push((
+            c,
+            if c.abs() == 1.0 {
+                name
+            } else {
+                format!("{}*{}", spell_number(c.abs()), name)
+            },
+        ));
     }
     if stmt.offset.0 != 0.0 {
         terms.push((stmt.offset.0, spell_number(stmt.offset.0.abs())));
     }
-    let (head, rest) = terms.split_first().expect("an affine has a term");
+    let Some((head, rest)) = terms.split_first() else {
+        return Ok(String::new());
+    };
     let mut out = format!("{}{}", if head.0 < 0.0 { "-" } else { "" }, head.1);
     for (c, term) in rest {
         out.push_str(&format!(" {} {}", if *c < 0.0 { "-" } else { "+" }, term));
@@ -97,16 +131,57 @@ pub fn lines(stmt: &Statement, indent: &str, out: &mut Vec<String>) -> Result<()
     let inner = format!("{indent}{INDENT}");
     let text = match stmt {
         Statement::Load(s) => {
-            let carried = if s.carried.is_empty() { String::new() } else { format!(" carried={}", s.carried) };
-            format!("{}{} = load {}{}{}", typed(&s.dtype), names(&s.names)?, spell_stmt_name(&s.input)?, index(&s.index)?, carried)
+            let carried = if s.carried.is_empty() {
+                String::new()
+            } else {
+                format!(" carried={}", s.carried)
+            };
+            format!(
+                "{}{} = load {}{}{}",
+                typed(&s.dtype),
+                names(&s.names)?,
+                spell_stmt_name(&s.input)?,
+                index(&s.index)?,
+                carried
+            )
         }
-        Statement::Pre(s) => format!("{} = pre {}{}", spell_stmt_name(&s.name)?, spell_stmt_name(&s.carrier)?, index(&s.index)?),
-        Statement::Assign(s) => format!("{}{} = {}({})", typed(&s.dtype), spell_stmt_name(&s.name)?, s.op.name, names(&s.args)?),
-        Statement::Affine(s) => format!("{}{} = {}", typed(&s.dtype), spell_stmt_name(&s.name)?, affine(s)?),
-        Statement::Let(s) => format!("let {}{} = {}", typed(&s.dtype), spell_stmt_name(&s.name)?, s.value.try_text()?),
-        Statement::Init(s) => format!("init {} {} = {}", s.dtype.name(), spell_stmt_name(&s.name)?, spell_number(s.identity.0)),
+        Statement::Pre(s) => format!(
+            "{} = pre {}{}",
+            spell_stmt_name(&s.name)?,
+            spell_stmt_name(&s.carrier)?,
+            index(&s.index)?
+        ),
+        Statement::Assign(s) => format!(
+            "{}{} = {}({})",
+            typed(&s.dtype),
+            spell_stmt_name(&s.name)?,
+            s.op.name,
+            names(&s.args)?
+        ),
+        Statement::Affine(s) => format!(
+            "{}{} = {}",
+            typed(&s.dtype),
+            spell_stmt_name(&s.name)?,
+            affine(s)?
+        ),
+        Statement::Let(s) => format!(
+            "let {}{} = {}",
+            typed(&s.dtype),
+            spell_stmt_name(&s.name)?,
+            s.value.try_text()?
+        ),
+        Statement::Init(s) => format!(
+            "init {} {} = {}",
+            s.dtype.name(),
+            spell_stmt_name(&s.name)?,
+            spell_number(s.identity.0)
+        ),
         Statement::Accum(s) => {
-            let over = if s.axes.is_empty() { String::new() } else { format!(" over {}", names(&s.axes)?) };
+            let over = if s.axes.is_empty() {
+                String::new()
+            } else {
+                format!(" over {}", names(&s.axes)?)
+            };
             let base = s.base.as_ref().unwrap_or(&s.name);
             format!(
                 "{}{} <- {}({}){}",
@@ -122,24 +197,57 @@ pub fn lines(stmt: &Statement, indent: &str, out: &mut Vec<String>) -> Result<()
                 NumOr::Num(n) => spell_number(n.as_f64()),
                 NumOr::Value(name) => spell_stmt_name(name)?,
             };
-            format!("{}{}{} <- {} seed {}", typed(&s.dtype), spell_stmt_name(&s.name)?, index(&s.index)?, spell_stmt_name(&s.value)?, seed)
+            format!(
+                "{}{}{} <- {} seed {}",
+                typed(&s.dtype),
+                spell_stmt_name(&s.name)?,
+                index(&s.index)?,
+                spell_stmt_name(&s.value)?,
+                seed
+            )
         }
         Statement::Write(s) => {
-            let value = if s.values.len() > 1 { format!("({})", names(&s.values)?) } else { spell_stmt_name(&s.values[0])? };
-            let swizzle = if &*s.swizzle != "NONE" { format!(" swizzle={}", spell_stmt_name(&s.swizzle)?) } else { String::new() };
+            let value = if s.values.len() > 1 {
+                format!("({})", names(&s.values)?)
+            } else {
+                spell_stmt_name(&s.values[0])?
+            };
+            let swizzle = if &*s.swizzle != "NONE" {
+                format!(" swizzle={}", spell_stmt_name(&s.swizzle)?)
+            } else {
+                String::new()
+            };
             let store = if s.atomic { "+=" } else { "=" };
-            format!("{}{}{} {} {}{}", typed(&s.value_dtype), spell_stmt_name(&s.output)?, index(&s.index)?, store, value, swizzle)
+            format!(
+                "{}{}{} {} {}{}",
+                typed(&s.value_dtype),
+                spell_stmt_name(&s.output)?,
+                index(&s.index)?,
+                store,
+                value,
+                swizzle
+            )
         }
         Statement::Select(s) => {
             out.push(format!("{indent}{} = select:", spell_stmt_name(&s.name)?));
             for branch in s.branches.iter() {
-                out.push(format!("{inner}{} when {}", spell_stmt_name(&branch.value)?, branch.select.try_text()?));
+                out.push(format!(
+                    "{inner}{} when {}",
+                    spell_stmt_name(&branch.value)?,
+                    branch.select.try_text()?
+                ));
             }
             return Ok(());
         }
-        Statement::ZeroPrologue(s) => format!("zero {} words={}", spell_stmt_name(&s.dst)?, s.words),
+        Statement::ZeroPrologue(s) => {
+            format!("zero {} words={}", spell_stmt_name(&s.dst)?, s.words)
+        }
         Statement::Loop(s) => {
-            out.push(format!("{indent}for {}{}", spell_axis(&s.axis, None)?, flags(s.unroll, s.seed)));
+            out.push(format!(
+                "{indent}for {}{}",
+                spell_axis(&s.axis, None)?,
+                flags(s.unroll, s.seed)
+            ));
             return body_lines(&s.body, &inner, out);
         }
         Statement::StridedLoop(s) => {
@@ -153,7 +261,11 @@ pub fn lines(stmt: &Statement, indent: &str, out: &mut Vec<String>) -> Result<()
             };
             let start = s.start.try_text()?;
             // The window follows the extent, so spell the axis without it and add it after the step.
-            let bare = Axis { name: s.axis.name.clone(), extent: s.axis.extent.clone(), window: None };
+            let bare = Axis {
+                name: s.axis.name.clone(),
+                extent: s.axis.extent.clone(),
+                window: None,
+            };
             out.push(format!(
                 "{indent}for {} step {}{}{}{}",
                 spell_axis(&bare, Some(&start))?,
@@ -174,8 +286,19 @@ pub fn lines(stmt: &Statement, indent: &str, out: &mut Vec<String>) -> Result<()
             return Ok(());
         }
         Statement::Call(s) => {
-            let args = s.args.iter().map(|a| a.try_text()).collect::<Result<Vec<_>>>()?.join(", ");
-            format!("{} = call {}[{}]({})", spell_stmt_name(&s.name)?, spell_stmt_name(&s.target.name)?, names(&s.target.buffers)?, args)
+            let args = s
+                .args
+                .iter()
+                .map(|a| a.try_text())
+                .collect::<Result<Vec<_>>>()?
+                .join(", ");
+            format!(
+                "{} = call {}[{}]({})",
+                spell_stmt_name(&s.name)?,
+                spell_stmt_name(&s.target.name)?,
+                names(&s.target.buffers)?,
+                args
+            )
         }
         _ => return declared_lines(stmt, indent, out),
     };
@@ -189,7 +312,13 @@ fn header(stmt: &Statement) -> Result<String> {
     let mut out = stmt.kind_name().to_string();
     if !fields.is_empty() {
         out.push('(');
-        out.push_str(&fields.iter().map(|(name, text)| format!("{name}={text}")).collect::<Vec<_>>().join(", "));
+        out.push_str(
+            &fields
+                .iter()
+                .map(|(name, text)| format!("{name}={text}"))
+                .collect::<Vec<_>>()
+                .join(", "),
+        );
         out.push(')');
     }
     Ok(out)
@@ -198,7 +327,11 @@ fn header(stmt: &Statement) -> Result<String> {
 fn declared_lines(stmt: &Statement, indent: &str, out: &mut Vec<String>) -> Result<()> {
     let inner = format!("{indent}{INDENT}");
     let blocks = stmt.block_fields();
-    out.push(format!("{indent}{}{}", header(stmt)?, if blocks.is_empty() { "" } else { ":" }));
+    out.push(format!(
+        "{indent}{}{}",
+        header(stmt)?,
+        if blocks.is_empty() { "" } else { ":" }
+    ));
     for (name, stmts) in blocks {
         if name == "body" {
             stmts_lines(&stmts, &inner, out)?;
@@ -239,9 +372,30 @@ pub fn statement_text(stmt: &Arc<Statement>) -> Result<String> {
     body_text(&Body::new(vec![stmt.clone()]))
 }
 
+/// A statement's text as digest material: its text, or its debug form for one that has no text (a name with a
+/// backtick), which is as structural.
+pub fn structural_text(stmt: &Arc<Statement>) -> String {
+    statement_text(stmt).unwrap_or_else(|_| format!("{stmt:?}"))
+}
+
+/// A body's text as digest material (`structural_text` over a body).
+pub fn structural_body_text(body: &Body) -> String {
+    body_text(body).unwrap_or_else(|_| format!("{body:?}"))
+}
+
 fn definition(sub: &Subroutine, out: &mut Vec<String>) -> Result<()> {
-    let axes = sub.axes.iter().map(|axis| spell_axis(axis, None)).collect::<Result<Vec<_>>>()?.join(", ");
-    out.push(format!("sub {}({}) -> {}:", spell_stmt_name(&sub.name)?, axes, spell_stmt_name(&sub.result)?));
+    let axes = sub
+        .axes
+        .iter()
+        .map(|axis| spell_axis(axis, None))
+        .collect::<Result<Vec<_>>>()?
+        .join(", ");
+    out.push(format!(
+        "sub {}({}) -> {}:",
+        spell_stmt_name(&sub.name)?,
+        axes,
+        spell_stmt_name(&sub.result)?
+    ));
     body_lines(&sub.body, INDENT, out)
 }
 
@@ -255,15 +409,22 @@ fn definition_text(sub: &Subroutine) -> Result<Vec<String>> {
 /// refused unless they are one definition bound to other buffers.
 fn subroutines(body: &Body, found: &mut Vec<Arc<Subroutine>>) -> Result<()> {
     for here in body.of_kinds(&["Call"]) {
-        let Statement::Call(call) = &**here.stmt() else { continue };
+        let Statement::Call(call) = &**here.stmt() else {
+            continue;
+        };
         let target = &call.target.0;
         subroutines(&target.body, found)?;
         match found.iter().find(|sub| sub.name == target.name) {
             None => found.push(target.clone()),
             Some(first) if Arc::ptr_eq(first, target) => {}
             Some(first) => {
-                if definition_text(&first.with_buffers(target.buffers.clone()))? != definition_text(target)? {
-                    return Err(Error::Value(format!("two subroutines are named {:?}: a body's text defines a name once", &*first.name)));
+                if definition_text(&first.with_buffers(target.buffers.clone()))?
+                    != definition_text(target)?
+                {
+                    return Err(Error::Value(format!(
+                        "two subroutines are named {:?}: a body's text defines a name once",
+                        &*first.name
+                    )));
                 }
             }
         }
@@ -281,7 +442,13 @@ pub fn parse_body(text: &str) -> Result<Body> {
         .lines()
         .enumerate()
         .filter(|(_, line)| !line.trim().is_empty())
-        .map(|(number, line)| (line.len() - line.trim_start_matches(' ').len(), number + 1, line.trim()))
+        .map(|(number, line)| {
+            (
+                line.len() - line.trim_start_matches(' ').len(),
+                number + 1,
+                line.trim(),
+            )
+        })
         .collect();
     let mut subs = HashMap::new();
     block(&rows, &mut subs)
@@ -292,13 +459,19 @@ pub fn parse_statement(text: &str) -> Result<Arc<Statement>> {
     let body = parse_body(text)?;
     match body.stmts() {
         [stmt] => Ok(stmt.clone()),
-        _ => Err(Error::Value(format!("expected one statement, got {}", body.len()))),
+        _ => Err(Error::Value(format!(
+            "expected one statement, got {}",
+            body.len()
+        ))),
     }
 }
 
 /// `rows` split after the leading ones indented deeper than `depth`.
 fn under<'a, 'b>(rows: &'b [Row<'a>], depth: usize) -> (&'b [Row<'a>], &'b [Row<'a>]) {
-    let cut = rows.iter().position(|row| row.0 <= depth).unwrap_or(rows.len());
+    let cut = rows
+        .iter()
+        .position(|row| row.0 <= depth)
+        .unwrap_or(rows.len());
     rows.split_at(cut)
 }
 
@@ -316,7 +489,11 @@ fn block(mut rows: &[Row], subs: &mut HashMap<Name, Arc<Subroutine>>) -> Result<
     while let Some(((indent, number, text), rest)) = rows.split_first() {
         let (nested, mut rest) = under(rest, depth);
         let mut orelse: &[Row] = &[];
-        if text.starts_with("if ") && rest.first().is_some_and(|row| row.2.replace(' ', "") == "else:") {
+        if text.starts_with("if ")
+            && rest
+                .first()
+                .is_some_and(|row| row.2.replace(' ', "") == "else:")
+        {
             (orelse, rest) = under(&rest[1..], depth);
         }
         rows = rest;
@@ -346,7 +523,9 @@ const LINE_PUNCTUATION: [&str; 6] = ["<-", "->", "+=", "=", "..", "~"];
 
 impl Line {
     fn new(text: &str) -> Result<Line> {
-        Ok(Line { parser: Parser::new(text, &LINE_PUNCTUATION)? })
+        Ok(Line {
+            parser: Parser::new(text, &LINE_PUNCTUATION)?,
+        })
     }
 
     fn word(&mut self, word: &str) -> bool {
@@ -378,7 +557,7 @@ impl Line {
             out.push(self.name()?);
         }
         if let Some(close) = close {
-            self.parser.expect(close)?;
+            self.parser.require(close)?;
         }
         Ok(out)
     }
@@ -425,7 +604,7 @@ impl Line {
             return Err(self.parser.error("expected 'in'"));
         }
         let start = self.parser.expression()?;
-        self.parser.expect("..")?;
+        self.parser.require("..")?;
         let dim = self.dim()?;
         Ok((name, start, dim))
     }
@@ -437,23 +616,31 @@ impl Line {
             return Err(self.parser.error("an axis starts at 0"));
         }
         let window = self.window()?;
-        Ok(Arc::new(Axis { name, extent, window }))
+        Ok(Arc::new(Axis {
+            name,
+            extent,
+            window,
+        }))
     }
 
-    fn subroutine(&mut self, nested: &[Row], subs: &mut HashMap<Name, Arc<Subroutine>>) -> Result<Arc<Subroutine>> {
+    fn subroutine(
+        &mut self,
+        nested: &[Row],
+        subs: &mut HashMap<Name, Arc<Subroutine>>,
+    ) -> Result<Arc<Subroutine>> {
         self.parser.index += 1;
         let name = self.name()?;
-        self.parser.expect("(")?;
+        self.parser.require("(")?;
         let mut axes = Vec::new();
         while !self.parser.accept(")") {
             if !axes.is_empty() {
-                self.parser.expect(",")?;
+                self.parser.require(",")?;
             }
             axes.push(self.whole_axis()?);
         }
-        self.parser.expect("->")?;
+        self.parser.require("->")?;
         let result = self.name()?;
-        self.parser.expect(":")?;
+        self.parser.require(":")?;
         let body = block(nested, subs)?;
         let sub = Subroutine::new(name, axes.into(), body, result)?;
         self.end(sub)
@@ -468,29 +655,48 @@ impl Line {
         let mut any = false;
         while !self.parser.accept(")") {
             if any {
-                self.parser.expect(",")?;
+                self.parser.require(",")?;
             }
             any = true;
             let key = self.name()?;
-            self.parser.expect("=")?;
+            self.parser.require("=")?;
             match &*key {
                 "parent" => window.parent = Some(self.whole_axis()?),
                 "base" => window.base = Some(self.parser.expression()?),
                 "bound" => window.bound = Some(self.parser.expression()?),
-                "partition" if self.parser.at_word("true", 0) || self.parser.at_word("false", 0) => {
+                "partition"
+                    if self.parser.at_word("true", 0) || self.parser.at_word("false", 0) =>
+                {
                     window.partition = self.parser.take()?.text == "true";
                 }
-                other => return Err(self.parser.error(&format!("no window part {}", crate::expr::python_repr(other)))),
+                other => {
+                    return Err(self.parser.error(&format!(
+                        "no window part {}",
+                        crate::expr::python_repr(other)
+                    )));
+                }
             }
         }
         Ok(Some(window))
     }
 
     /// The statement this line spells, `nested` the rows of its block (`orelse` those of an `else`).
-    fn statement(&mut self, nested: &[Row], orelse: &[Row], subs: &mut HashMap<Name, Arc<Subroutine>>) -> Result<Arc<Statement>> {
-        let ends_block = self.parser.tokens.last().is_some_and(|t| t.kind == TokenKind::Op && t.text == ":");
+    fn statement(
+        &mut self,
+        nested: &[Row],
+        orelse: &[Row],
+        subs: &mut HashMap<Name, Arc<Subroutine>>,
+    ) -> Result<Arc<Statement>> {
+        let ends_block = self
+            .parser
+            .tokens
+            .last()
+            .is_some_and(|t| t.kind == TokenKind::Op && t.text == ":");
         if !ends_block && !nested.is_empty() {
-            return Err(Error::Value(format!("line {}: unexpected indentation", nested[0].1)));
+            return Err(Error::Value(format!(
+                "line {}: unexpected indentation",
+                nested[0].1
+            )));
         }
         if let Some(token) = self.parser.peek(0)
             && token.kind == TokenKind::Name
@@ -509,23 +715,33 @@ impl Line {
         }
         if self.word("if") {
             let cond = self.parser.expression()?;
-            self.parser.expect(":")?;
+            self.parser.require(":")?;
             let body = block(nested, subs)?;
             let else_body = block(orelse, subs)?;
-            return self.end(Arc::new(Statement::Cond(Cond { cond, body, else_body })));
+            return self.end(Arc::new(Statement::Cond(Cond {
+                cond,
+                body,
+                else_body,
+            })));
         }
         if self.word("let") {
             let (dtype, name) = self.typed_name()?;
-            self.parser.expect("=")?;
+            self.parser.require("=")?;
             let value = self.parser.expression()?;
             return self.end(Arc::new(Statement::Let(Let { name, value, dtype })));
         }
         if self.word("init") {
             let (dtype, name) = self.typed_name()?;
-            self.parser.expect("=")?;
-            let Some(dtype) = dtype else { return Err(self.parser.error("an init names its dtype")) };
+            self.parser.require("=")?;
+            let Some(dtype) = dtype else {
+                return Err(self.parser.error("an init names its dtype"));
+            };
             let identity = Float(self.value()?);
-            return self.end(Arc::new(Statement::Init(Init { name, identity, dtype })));
+            return self.end(Arc::new(Statement::Init(Init {
+                name,
+                identity,
+                dtype,
+            })));
         }
         if self.word("zero") {
             let dst = self.name()?;
@@ -533,7 +749,10 @@ impl Line {
                 return Err(self.parser.error("expected words=N"));
             }
             let words = self.value()? as i64;
-            return self.end(Arc::new(Statement::ZeroPrologue(ZeroPrologue { dst, words })));
+            return self.end(Arc::new(Statement::ZeroPrologue(ZeroPrologue {
+                dst,
+                words,
+            })));
         }
         let (dtype, name) = self.typed_name()?;
         if self.parser.accept("[") {
@@ -543,11 +762,21 @@ impl Line {
         }
         if self.parser.accept("<-") {
             let op = Op::new(&self.name()?);
-            self.parser.expect("(")?;
+            self.parser.require("(")?;
             let operands = self.names(Some(")"))?;
-            let [base, value] = &operands[..] else { return Err(self.parser.error("an accumulation has two operands")) };
-            let axes: Vec<Name> = if self.word("over") { self.names(None)? } else { vec![] };
-            let base = if *base == name { None } else { Some(base.clone()) };
+            let [base, value] = &operands[..] else {
+                return Err(self.parser.error("an accumulation has two operands"));
+            };
+            let axes: Vec<Name> = if self.word("over") {
+                self.names(None)?
+            } else {
+                vec![]
+            };
+            let base = if *base == name {
+                None
+            } else {
+                Some(base.clone())
+            };
             let accum = Accum::checked(name, value.clone(), op, dtype, axes.into(), base);
             return self.end(Arc::new(Statement::Accum(accum)));
         }
@@ -555,30 +784,41 @@ impl Line {
         if self.parser.accept(",") {
             defined.extend(self.names(None)?);
         }
-        self.parser.expect("=")?;
+        self.parser.require("=")?;
         if self.parser.at_word("load", 0) && !self.parser.at("(", 1) {
             self.parser.index += 1;
             let buffer = self.name()?;
-            self.parser.expect("[")?;
+            self.parser.require("[")?;
             let index = self.parser.expressions("]")?;
-            let carried = if self.word("carried") && self.parser.accept("=") { self.name()? } else { Name::from("") };
+            let carried = if self.word("carried") && self.parser.accept("=") {
+                self.name()?
+            } else {
+                Name::from("")
+            };
             let load = Load::checked(defined.into(), buffer, index.into(), dtype, carried)?;
             return self.end(Arc::new(Statement::Load(load)));
         }
-        if defined.len() > 1 {
+        let [name] = &defined[..] else {
             return Err(self.parser.error("only a load binds several names"));
-        }
-        let name = defined.pop().unwrap();
+        };
+        let name = name.clone();
         if self.parser.at_word("call", 0) && !self.parser.at("(", 1) {
             self.parser.index += 1;
             let label = self.name()?;
             let Some(target) = subs.get(&label).cloned() else {
-                return Err(self.parser.error(&format!("no subroutine {} is defined above", crate::expr::python_repr(&label))));
+                return Err(self.parser.error(&format!(
+                    "no subroutine {} is defined above",
+                    crate::expr::python_repr(&label)
+                )));
             };
-            self.parser.expect("[")?;
+            self.parser.require("[")?;
             let buffers = self.names(Some("]"))?;
-            self.parser.expect("(")?;
-            let target = if buffers[..] == target.buffers[..] { target } else { target.with_buffers(buffers.into()) };
+            self.parser.require("(")?;
+            let target = if buffers[..] == target.buffers[..] {
+                target
+            } else {
+                target.with_buffers(buffers.into())
+            };
             let args = self.parser.expressions(")")?;
             let call = Call::checked(name, crate::field::SubroutineRef(target), args.into())?;
             return self.end(Arc::new(Statement::Call(call)));
@@ -586,15 +826,23 @@ impl Line {
         if self.parser.at_word("pre", 0) && !self.parser.at("(", 1) {
             self.parser.index += 1;
             let carrier = self.name()?;
-            self.parser.expect("[")?;
+            self.parser.require("[")?;
             let index = self.parser.expressions("]")?;
-            return self.end(Arc::new(Statement::Pre(Pre { name, carrier, index: index.into() })));
+            return self.end(Arc::new(Statement::Pre(Pre {
+                name,
+                carrier,
+                index: index.into(),
+            })));
         }
         if self.parser.at_word("select", 0) && self.parser.at(":", 1) {
             self.parser.index += 2;
             let mut branches = Vec::new();
             for (_, number, text) in nested {
-                branches.push(Line::new(text).and_then(|mut line| line.branch()).map_err(|err| at_line(*number, err))?);
+                branches.push(
+                    Line::new(text)
+                        .and_then(|mut line| line.branch())
+                        .map_err(|err| at_line(*number, err))?,
+                );
             }
             let select = Select::checked(name, branches.into())?;
             return self.end(Arc::new(Statement::Select(select)));
@@ -606,15 +854,27 @@ impl Line {
             let op = Op::new(&token.text);
             self.parser.index += 2;
             let args = self.names(Some(")"))?;
-            return self.end(Arc::new(Statement::Assign(Assign { name, op, args: args.into(), dtype })));
+            return self.end(Arc::new(Statement::Assign(Assign {
+                name,
+                op,
+                args: args.into(),
+                dtype,
+            })));
         }
         let affine = self.affine(name, dtype)?;
         self.end(Arc::new(Statement::Affine(affine)))
     }
 
     /// A kind of another layer: its header's fields, then its blocks among the rows under it.
-    fn declared(&mut self, kind: &str, nested: &[Row], subs: &mut HashMap<Name, Arc<Subroutine>>) -> Result<Arc<Statement>> {
-        let fields = Statement::fields_of(kind).expect("a known kind");
+    fn declared(
+        &mut self,
+        kind: &str,
+        nested: &[Row],
+        subs: &mut HashMap<Name, Arc<Subroutine>>,
+    ) -> Result<Arc<Statement>> {
+        let Some(fields) = Statement::fields_of(kind) else {
+            return Err(self.parser.error(&format!("no statement kind {kind}")));
+        };
         let mut values = self.record(kind, fields)?;
         self.parser.accept(":");
         self.end(())?;
@@ -623,7 +883,10 @@ impl Line {
         while let Some((row, after)) = rest.split_first() {
             let (rows, after) = under(after, row.0);
             rest = after;
-            let label = row.2.strip_suffix(':').filter(|label| fields.iter().any(|f| f.name == *label && f.is_block()));
+            let label = row
+                .2
+                .strip_suffix(':')
+                .filter(|label| fields.iter().any(|f| f.name == *label && f.is_block()));
             match label {
                 None => {
                     body.push(*row);
@@ -631,13 +894,18 @@ impl Line {
                 }
                 Some(label) => {
                     let stmts = block(rows, subs)?;
-                    values.set(label, Value::Stmts(stmts.stmts().to_vec())).map_err(|err| at_line(row.1, err))?;
+                    values
+                        .set(label, Value::Stmts(stmts.stmts().to_vec()))
+                        .map_err(|err| at_line(row.1, err))?;
                 }
             }
         }
         if !body.is_empty() {
             if !fields.iter().any(|f| f.name == "body") {
-                return Err(Error::Value(format!("line {}: a {kind} holds no body", body[0].1)));
+                return Err(Error::Value(format!(
+                    "line {}: a {kind} holds no body",
+                    body[0].1
+                )));
             }
             values.set("body", Value::Body(block(&body, subs)?))?;
         }
@@ -652,16 +920,26 @@ impl Line {
             let mut any = false;
             while !self.parser.accept(")") {
                 if any {
-                    self.parser.expect(",")?;
+                    self.parser.require(",")?;
                 }
                 any = true;
                 let key = self.name()?;
-                let field = fields.iter().find(|f| f.name == &*key).filter(|f| !f.is_block());
+                let field = fields
+                    .iter()
+                    .find(|f| f.name == &*key)
+                    .filter(|f| !f.is_block());
                 let Some(field) = field else {
-                    return Err(self.parser.error(&format!("a {kind} has no field {} on its header", crate::expr::python_repr(&key))));
+                    return Err(self.parser.error(&format!(
+                        "a {kind} has no field {} on its header",
+                        crate::expr::python_repr(&key)
+                    )));
                 };
-                self.parser.expect("=")?;
-                let ty = field_type(kind, field.name).expect("a declared field");
+                self.parser.require("=")?;
+                let Some(ty) = field_type(kind, field.name) else {
+                    return Err(self
+                        .parser
+                        .error(&format!("{kind} has no field {}", field.name)));
+                };
                 let value = self.typed(&ty)?;
                 values.set(field.name, value)?;
             }
@@ -683,26 +961,26 @@ impl Line {
                 None => self.typed(inner),
             },
             Ty::Seq(inner) => {
-                self.parser.expect("(")?;
+                self.parser.require("(")?;
                 let mut out = Vec::new();
                 while !self.parser.accept(")") {
                     if !out.is_empty() {
-                        self.parser.expect(",")?;
+                        self.parser.require(",")?;
                     }
                     out.push(self.typed(inner)?);
                 }
                 Ok(Value::Tuple(out))
             }
             Ty::Tuple(items) => {
-                self.parser.expect("(")?;
+                self.parser.require("(")?;
                 let mut out = Vec::new();
                 for (position, item) in items.iter().enumerate() {
                     if position > 0 {
-                        self.parser.expect(",")?;
+                        self.parser.require(",")?;
                     }
                     out.push(self.typed(item)?);
                 }
-                self.parser.expect(")")?;
+                self.parser.require(")")?;
                 Ok(Value::Tuple(out))
             }
             Ty::Bool => {
@@ -720,11 +998,15 @@ impl Line {
                 if &*self.name()? != *record {
                     return Err(self.parser.error(&format!("expected a {record}")));
                 }
-                let fields = record_fields(record).expect("a known record");
+                let Some(fields) = record_fields(record) else {
+                    return Err(self.parser.error(&format!("no record {record}")));
+                };
                 let values = self.record(record, fields)?;
                 Ok(Value::Record(record.to_string(), values))
             }
-            Ty::Block | Ty::Subroutine => Err(self.parser.error(&format!("a field of type {ty:?} is not read on a header"))),
+            Ty::Block | Ty::Subroutine => Err(self
+                .parser
+                .error(&format!("a field of type {ty:?} is not read on a header"))),
         }
     }
 
@@ -754,7 +1036,12 @@ impl Line {
     }
 
     /// What follows `name[index]`: a carried state's next value, or a write.
-    fn store(&mut self, dtype: Option<DType>, name: Name, index: crate::field::Exprs) -> Result<Statement> {
+    fn store(
+        &mut self,
+        dtype: Option<DType>,
+        name: Name,
+        index: crate::field::Exprs,
+    ) -> Result<Statement> {
         if self.parser.accept("<-") {
             let value = self.name()?;
             if !self.word("seed") {
@@ -764,15 +1051,36 @@ impl Line {
                 Some(lit) => NumOr::Num(Num::Float(lit.value.as_f64())),
                 None => NumOr::Value(self.name()?),
             };
-            return Ok(Statement::Carry(Carry { name, value, index, seed, dtype }));
+            return Ok(Statement::Carry(Carry {
+                name,
+                value,
+                index,
+                seed,
+                dtype,
+            }));
         }
         let atomic = self.parser.accept("+=");
         if !atomic {
-            self.parser.expect("=")?;
+            self.parser.require("=")?;
         }
-        let values = if self.parser.accept("(") { self.names(Some(")"))? } else { vec![self.name()?] };
-        let swizzle = if self.word("swizzle") && self.parser.accept("=") { self.name()? } else { Name::from("NONE") };
-        Ok(Statement::Write(Write::checked(name, index, values.into(), dtype, atomic, swizzle)?))
+        let values = if self.parser.accept("(") {
+            self.names(Some(")"))?
+        } else {
+            vec![self.name()?]
+        };
+        let swizzle = if self.word("swizzle") && self.parser.accept("=") {
+            self.name()?
+        } else {
+            Name::from("NONE")
+        };
+        Ok(Statement::Write(Write::checked(
+            name,
+            index,
+            values.into(),
+            dtype,
+            atomic,
+            swizzle,
+        )?))
     }
 
     fn affine(&mut self, name: Name, dtype: Option<DType>) -> Result<Affine> {
@@ -785,13 +1093,17 @@ impl Line {
                 return Err(self.parser.error("expected '+' or '-'"));
             }
             let sign = if negative { -1.0 } else { 1.0 };
-            let literal = self.parser.number()?;
-            if literal.is_none() || self.parser.accept("*") {
-                args.push(self.name()?);
-                coefficients.push(Float(sign * literal.map_or(1.0, |lit: Lit| lit.value.as_f64())));
-            } else {
-                offset = sign * literal.unwrap().value.as_f64();
-                break;
+            match self.parser.number()? {
+                Some(literal) if !self.parser.accept("*") => {
+                    offset = sign * literal.value.as_f64();
+                    break;
+                }
+                literal => {
+                    args.push(self.name()?);
+                    coefficients.push(Float(
+                        sign * literal.map_or(1.0, |lit: Lit| lit.value.as_f64()),
+                    ));
+                }
             }
         }
         Affine::checked(name, args.into(), coefficients.into(), Float(offset), dtype)
@@ -799,28 +1111,69 @@ impl Line {
 
     fn loop_(&mut self, body: Body) -> Result<Arc<Statement>> {
         let (name, start, extent) = self.axis()?;
-        let step = if self.word("step") { Some(self.parser.expression()?) } else { None };
-        let end = if self.word("until") { Some(self.parser.expression()?) } else { None };
+        let step = if self.word("step") {
+            Some(self.parser.expression()?)
+        } else {
+            None
+        };
+        let end = if self.word("until") {
+            Some(self.parser.expression()?)
+        } else {
+            None
+        };
         let window = self.window()?;
-        let axis = Arc::new(Axis { name, extent, window });
+        let axis = Arc::new(Axis {
+            name,
+            extent,
+            window,
+        });
         let unroll = self.flag("unroll")?.unwrap_or(false);
         let seed = self.flag("seed")?.unwrap_or(true);
-        self.parser.expect(":")?;
+        self.parser.require(":")?;
         if let Some(step) = step {
-            let loop_ = StridedLoop { axis, start, step: NumOr::Value(step), body, unroll, end, seed };
+            let loop_ = StridedLoop {
+                axis,
+                start,
+                step: NumOr::Value(step),
+                body,
+                unroll,
+                end,
+                seed,
+            };
             return self.end(Arc::new(Statement::StridedLoop(loop_)));
         }
         if start != Expression::int(0) || end.is_some() {
-            return Err(self.parser.error("a loop that does not start at 0, or stops early, names its step"));
+            return Err(self
+                .parser
+                .error("a loop that does not start at 0, or stops early, names its step"));
         }
-        self.end(Arc::new(Statement::Loop(Loop { axis, body, unroll, seed })))
+        self.end(Arc::new(Statement::Loop(Loop {
+            axis,
+            body,
+            unroll,
+            seed,
+        })))
     }
 }
 
 fn is_shared_kind(name: &str) -> bool {
     matches!(
         name,
-        "Load" | "Assign" | "Affine" | "Accum" | "Carry" | "Pre" | "Init" | "Let" | "Write" | "Select" | "ZeroPrologue" | "Loop" | "StridedLoop" | "Cond" | "Call"
+        "Load"
+            | "Assign"
+            | "Affine"
+            | "Accum"
+            | "Carry"
+            | "Pre"
+            | "Init"
+            | "Let"
+            | "Write"
+            | "Select"
+            | "ZeroPrologue"
+            | "Loop"
+            | "StridedLoop"
+            | "Cond"
+            | "Call"
     )
 }
 
@@ -847,7 +1200,10 @@ pub fn number_text(value: f64) -> String {
 
 /// A literal expression, for a `Let` built from a bare number.
 pub fn float_literal(value: f64) -> Expression {
-    Expression::new(Expr::Literal(Lit { value: Num::Float(value), dtype: "float".into() }))
+    Expression::new(Expr::Literal(Lit {
+        value: Num::Float(value),
+        dtype: "float".into(),
+    }))
 }
 
 #[cfg(test)]
@@ -914,7 +1270,13 @@ mod tests {
         let body = parse_body(CALLS).unwrap();
         assert_eq!(body_text(&body).unwrap(), CALLS);
         let calls = body.of_kinds(&["Call"]);
-        let targets: Vec<_> = calls.iter().map(|c| match &**c.stmt() { Statement::Call(call) => call.target.0.clone(), _ => unreachable!() }).collect();
+        let targets: Vec<_> = calls
+            .iter()
+            .map(|c| match &**c.stmt() {
+                Statement::Call(call) => call.target.0.clone(),
+                _ => unreachable!(),
+            })
+            .collect();
         assert!(Arc::ptr_eq(&targets[0], &targets[1]) && !Arc::ptr_eq(&targets[0], &targets[2]));
     }
 
@@ -924,12 +1286,20 @@ mod tests {
             ("y[a0] = v\n    z[a0] = v", "line 2: unexpected indentation"),
             ("v = 1", "line 1: "),
             ("for a0 in 2..4:", "line 1: "),
-            ("a, b = multiply(x, y)", "line 1: only a load binds several names"),
+            (
+                "a, b = multiply(x, y)",
+                "line 1: only a load binds several names",
+            ),
             ("v = x + ", "line 1: unexpected end"),
             ("y[a0] = v extra", "line 1: unexpected text"),
-            ("p = call missing[a](i)", "line 1: no subroutine 'missing' is defined above"),
+            (
+                "p = call missing[a](i)",
+                "line 1: no subroutine 'missing' is defined above",
+            ),
         ] {
-            let err = parse_body(text).err().unwrap_or_else(|| panic!("{text} parsed"));
+            let err = parse_body(text)
+                .err()
+                .unwrap_or_else(|| panic!("{text} parsed"));
             assert!(err.to_string().starts_with(message), "{text}: {err}");
         }
     }

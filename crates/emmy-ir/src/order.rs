@@ -42,13 +42,23 @@ fn resources(stmt: &Statement) -> (HashSet<Name>, HashSet<Name>, HashSet<Name>) 
 /// A no-dataflow, non-pure leaf: an ordered execution protocol (a barrier, an async commit), pinned relative to
 /// every sibling.
 pub fn is_protocol(stmt: &Statement) -> bool {
-    !stmt.is_pure() && stmt.nested().is_empty() && stmt.defines().is_empty() && stmt.deps().is_empty()
+    !stmt.is_pure()
+        && stmt.nested().is_empty()
+        && stmt.defines().is_empty()
+        && stmt.deps().is_empty()
 }
 
 /// Dependency and, when requested, effect predecessors for one lexical scope.
-pub fn ordering_constraints(body: &Body, effects: bool, redefinitions: bool) -> Vec<HashSet<usize>> {
+pub fn ordering_constraints(
+    body: &Body,
+    effects: bool,
+    redefinitions: bool,
+) -> Vec<HashSet<usize>> {
     let stmts = body.stmts();
-    let defs_uses: Vec<(Vec<Name>, HashSet<Name>)> = stmts.iter().map(|stmt| (ordered_sibling_defs(stmt), free_ssa(stmt))).collect();
+    let defs_uses: Vec<(Vec<Name>, HashSet<Name>)> = stmts
+        .iter()
+        .map(|stmt| (ordered_sibling_defs(stmt), free_ssa(stmt)))
+        .collect();
     let mut definitions: HashMap<&Name, Vec<usize>> = HashMap::new();
     for (index, (defines, _)) in defs_uses.iter().enumerate() {
         for name in defines {
@@ -67,7 +77,11 @@ pub fn ordering_constraints(body: &Body, effects: bool, redefinitions: bool) -> 
     };
     let mut incoming: Vec<HashSet<usize>> = Vec::with_capacity(stmts.len());
     for (index, (_, uses)) in defs_uses.iter().enumerate() {
-        incoming.push(uses.iter().filter_map(|name| defining_stmt(name, index)).collect());
+        incoming.push(
+            uses.iter()
+                .filter_map(|name| defining_stmt(name, index))
+                .collect(),
+        );
     }
     if redefinitions {
         for (reader, (_, uses)) in defs_uses.iter().enumerate() {
@@ -110,20 +124,22 @@ pub fn ordering_constraints(body: &Body, effects: bool, redefinitions: bool) -> 
                 last_state.insert(name.clone(), index);
             }
         }
-        let protocol: HashSet<usize> = (0..stmts.len()).filter(|&index| is_protocol(&stmts[index])).collect();
+        let protocol: HashSet<usize> = (0..stmts.len())
+            .filter(|&index| is_protocol(&stmts[index]))
+            .collect();
         let mut preceding: Vec<usize> = Vec::new();
         let mut previous_protocol: Option<usize> = None;
-        for index in 0..stmts.len() {
+        for (index, sources) in incoming.iter_mut().enumerate() {
             if protocol.contains(&index) {
-                incoming[index].extend(preceding.iter().copied());
+                sources.extend(preceding.iter().copied());
                 if let Some(previous) = previous_protocol {
-                    incoming[index].insert(previous);
+                    sources.insert(previous);
                 }
                 preceding.clear();
                 previous_protocol = Some(index);
             } else {
                 if let Some(previous) = previous_protocol {
-                    incoming[index].insert(previous);
+                    sources.insert(previous);
                 }
                 preceding.push(index);
             }
@@ -139,7 +155,7 @@ pub fn topological_sort(body: &Body) -> Body {
         if nested.is_empty() {
             return stmt.clone();
         }
-        Statement::with_bodies(stmt, nested.iter().map(topological_sort).collect()).expect("the same count")
+        Statement::rebuild_bodies(stmt, nested.iter().map(topological_sort).collect())
     });
     sorted.topological_order(&ordering_constraints(&sorted, false, false))
 }

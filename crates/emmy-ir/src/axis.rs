@@ -29,7 +29,10 @@ impl Dim {
     }
 
     pub fn static_(value: i64) -> Dim {
-        Dim { expression: Expression::int(value), hint: None }
+        Dim {
+            expression: Expression::int(value),
+            hint: None,
+        }
     }
 
     pub fn is_static(&self) -> bool {
@@ -85,7 +88,11 @@ pub struct Axis {
 
 impl Axis {
     pub fn new(name: &str, extent: Dim, window: Option<Window>) -> Arc<Axis> {
-        Arc::new(Axis { name: name.into(), extent, window })
+        Arc::new(Axis {
+            name: name.into(),
+            extent,
+            window,
+        })
     }
 
     pub fn source_axis(&self) -> Option<&Arc<Axis>> {
@@ -108,7 +115,10 @@ impl Axis {
 
     /// The static extent, or the hint when symbolic.
     pub fn hint_extent(&self) -> i64 {
-        self.extent.as_static().or(self.extent.hint).unwrap_or(DEFAULT_SEQ_HINT)
+        self.extent
+            .as_static()
+            .or(self.extent.hint)
+            .unwrap_or(DEFAULT_SEQ_HINT)
     }
 
     /// This axis with its name and every name its window spells mapped through `rename`.
@@ -117,7 +127,10 @@ impl Axis {
             let window = axis.window.as_ref().map(|window| {
                 let parent = window.parent.as_ref().map(|parent| {
                     if depth > 32 {
-                        Arc::new(Axis { name: rename(&parent.name).unwrap_or_else(|| parent.name.clone()), ..(**parent).clone() })
+                        Arc::new(Axis {
+                            name: rename(&parent.name).unwrap_or_else(|| parent.name.clone()),
+                            ..(**parent).clone()
+                        })
                     } else {
                         Arc::new(tree(parent, rename, depth + 1))
                     }
@@ -129,7 +142,11 @@ impl Axis {
                     partition: window.partition,
                 }
             });
-            Axis { name: rename(&axis.name).unwrap_or_else(|| axis.name.clone()), extent: axis.extent.clone(), window }
+            Axis {
+                name: rename(&axis.name).unwrap_or_else(|| axis.name.clone()),
+                extent: axis.extent.clone(),
+                window,
+            }
         }
         Arc::new(tree(self, rename, 0))
     }
