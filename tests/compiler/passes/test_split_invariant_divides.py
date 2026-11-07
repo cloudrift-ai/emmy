@@ -7,7 +7,7 @@ import pytest
 
 from emmy.compiler.dtype import BF16, F16, F32, F64, I32
 from emmy.compiler.ir.axis import Axis
-from emmy.compiler.ir.expr import Var
+from emmy.compiler.ir.expression import Var
 from emmy.compiler.ir.kernel import KernelOp
 from emmy.compiler.ir.stmt import Assign, Body, Load, Loop, Write, normalize_body
 from emmy.compiler.pipeline import RuleSkipped

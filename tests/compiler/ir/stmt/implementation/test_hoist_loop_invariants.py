@@ -7,7 +7,7 @@ point at the pass itself rather than upstream lowering.
 from __future__ import annotations
 
 from emmy.compiler.ir.axis import Axis
-from emmy.compiler.ir.expr import Literal, Var
+from emmy.compiler.ir.expression import Literal, Var
 from emmy.compiler.ir.stmt import Accum, Assign, Body, Load, Loop, StridedLoop, Write, normalize_body
 from emmy.compiler.ir.stmt.normalize import place_values
 

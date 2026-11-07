@@ -1,4 +1,4 @@
-""":class:`Lambda` — formation (the ``Stmt.pure`` gate, results-defined, closedness), α-invariance
+""":class:`Lambda` — formation (the ``Statement.pure`` gate, results-defined, closedness), α-invariance
 by canonical renumbering, and the componentwise program a plain fold's combine is."""
 
 from __future__ import annotations
@@ -6,12 +6,12 @@ from __future__ import annotations
 import pytest
 
 from emmy.compiler.ir.axis import Axis
-from emmy.compiler.ir.expr import BinaryExpr, Literal, Var
+from emmy.compiler.ir.expression import BinaryExpr, Literal, Var
 from emmy.compiler.ir.pure import Lambda
 from emmy.compiler.ir.pure.twist import SOFTMAX
 from emmy.compiler.ir.stmt import Accum, Assign, Body, Init, Let, Load, Loop, Select, SelectBranch, Write
 
-# --- Lambda formation: the Stmt.pure gate + results-defined ------------------------------------- #
+# --- Lambda formation: the Statement.pure gate + results-defined ------------------------------------- #
 
 
 def test_lambda_accepts_pure_stmts_and_defines_results() -> None:
@@ -60,7 +60,7 @@ def test_lambda_orders_the_definition_read_by_a_predicate_first() -> None:
     ids=lambda s: type(s).__name__,
 )
 def test_lambda_rejects_impure_stmt_kinds(stmt) -> None:
-    """The conservative ``Stmt.pure`` default: effectful / scope-bound kinds never enter a stored
+    """The conservative ``Statement.pure`` default: effectful / scope-bound kinds never enter a stored
     lambda body — the purity-erosion guard."""
     with pytest.raises(ValueError, match="pure"):
         Lambda(params=("x",), body=Body((stmt,)), results=("x",))

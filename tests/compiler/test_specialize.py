@@ -3,7 +3,7 @@ import numpy as np
 from emmy.compiler.dim import Dim
 from emmy.compiler.graph import Graph, Tensor
 from emmy.compiler.ir.base import ConstantOp, InputOp
-from emmy.compiler.ir.expr import Literal, placeholder
+from emmy.compiler.ir.expression import Literal, placeholder
 from emmy.compiler.ir.frontend.ir import ReshapeOp, SliceOp
 from emmy.compiler.ir.tensor.ir import IndexMapOp, IndexSource
 from emmy.compiler.specialize import rehint_program, specialize_program
@@ -57,7 +57,7 @@ def test_rehint_program_keeps_the_hint_of_a_dim_over_no_measured_name():
     """A kernel's identity rehints its program at no sizes: a dim spelled as an expression (a split's slice of a
     symbolic stream) keeps its hint, and takes its value once the sizes name its symbol."""
     keys = Dim("keys", hint=64)
-    slices = Dim((keys.expr + 31) / 32, hint=2)
+    slices = Dim((keys.expression + 31) / 32, hint=2)
     graph = Graph()
     graph.add_node(InputOp(), [], Tensor("x", (slices, 8)), node_id="x")
     graph.inputs = graph.outputs = ["x"]

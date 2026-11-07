@@ -16,10 +16,10 @@ The emission is exercised the way ``_factor._bind``'s output-tiled arm makes it 
 from __future__ import annotations
 
 from emmy.compiler.ir.axis import Axis
-from emmy.compiler.ir.expr import Var
+from emmy.compiler.ir.expression import Var
 from emmy.compiler.ir.pure.fold import Fold
 from emmy.compiler.ir.schedule import Tile
-from emmy.compiler.ir.stmt import Assign, Body, Load, Stmt, Write
+from emmy.compiler.ir.stmt import Assign, Body, Load, Statement, Write
 from emmy.compiler.pipeline.passes.lowering.kernel._atom import reduce_codegen, store_sink
 from emmy.compiler.pipeline.passes.lowering.kernel._tiling import atomize, grid_tile, register_tile, unit_tile
 from tests.compiler.terms import contraction, projection
@@ -69,16 +69,16 @@ def _unbound(tile) -> set[str]:
     """The names the tile body reads without defining them or binding them as an axis. Anything left
     is an identifier the rendered kernel would not define."""
     body = Body(tile.body)
-    reads = {v for s in body.iter() for v in (*s.deps(), *(fv for e in s.exprs() for fv in e.free_vars()))}
+    reads = {v for s in body.iter() for v in (*s.deps(), *(fv for e in s.expressions() for fv in e.free_vars()))}
     defined = {n for s in body.iter() for n in s.defines()}
     return reads - defined - set(body.axis_names) - {a.name for a in tile.axes}
 
 
-def _loads_of(tile, buf: str) -> tuple[Stmt, ...]:
+def _loads_of(tile, buf: str) -> tuple[Statement, ...]:
     return tuple(s for s in Body(tile.body).loads if s.input == buf)
 
 
-def _muls(tile) -> list[Stmt]:
+def _muls(tile) -> list[Statement]:
     return [s for s in Body(tile.body).iter() if isinstance(s, Assign) and s.name.startswith("acc__v")]
 
 

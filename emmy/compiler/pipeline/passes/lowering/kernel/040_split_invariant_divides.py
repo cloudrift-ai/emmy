@@ -10,7 +10,7 @@ from itertools import count
 from emmy.compiler.dtype import BF16, F16, F32, F64
 from emmy.compiler.graph import Node
 from emmy.compiler.ir.kernel import KernelOp
-from emmy.compiler.ir.stmt import Accum, Assign, Body, Cond, Init, Loop, Stmt, StridedLoop, ordering_constraints
+from emmy.compiler.ir.stmt import Accum, Assign, Body, Cond, Init, Loop, Statement, StridedLoop, ordering_constraints
 from emmy.compiler.pipeline import Pattern, RuleSkipped
 from emmy.compiler.pipeline.search.space import FAST_MATH, precision_pin
 
@@ -32,7 +32,7 @@ def split_invariant_divides(body: Body) -> Body:
     names = set(axes)
     fresh = (f"recip_{i}" for i in count() if f"recip_{i}" not in names)
 
-    def split(stmt: Stmt):
+    def split(stmt: Statement):
         if isinstance(stmt, Assign) and stmt.op.name == "divide" and stmt.dtype in (F16, BF16, F32, F64):
             numerator, divisor = stmt.args
             if axes.get(divisor, frozenset()) < axes.get(numerator, frozenset()):
@@ -67,17 +67,17 @@ def _hoist_loop_invariants(stmts: Body) -> Body:
     stmts = Body.coerce(stmts)
     name_axes = stmts.axis_dependencies
     axis_names = stmts.axis_names
-    axis_deps: dict[int, tuple[Stmt, frozenset[str]]] = {}
+    axis_deps: dict[int, tuple[Statement, frozenset[str]]] = {}
 
-    def _axis_deps(s: Stmt) -> frozenset[str]:
+    def _axis_deps(s: Statement) -> frozenset[str]:
         """Axes read by one immutable subtree, computed bottom-up once."""
         key = id(s)
         cached = axis_deps.get(key)
         if cached is not None and cached[0] is s:
             return cached[1]
         reads = set(s.deps())
-        for expr in s.exprs():
-            reads.update(expr.free_vars())
+        for expression in s.expressions():
+            reads.update(expression.free_vars())
         deps = reads & axis_names
         for name in reads:
             deps.update(name_axes.get(name, frozenset()))
@@ -87,7 +87,7 @@ def _hoist_loop_invariants(stmts: Body) -> Body:
         axis_deps[key] = (s, result)
         return result
 
-    def _hoistable(s: Stmt, axis: str) -> bool:
+    def _hoistable(s: Statement, axis: str) -> bool:
         # Accum / Init are scope-bound to their enclosing Loop's reduction (an Init seeds an
         # Accum or a Carrier's state per output cell) — they can't move alone, but the
         # whole enclosing block can. Side-effecting stmts (Write, or any block containing a
@@ -96,7 +96,7 @@ def _hoist_loop_invariants(stmts: Body) -> Body:
             return False
         return axis not in _axis_deps(s)
 
-    def _closed_under_constraints(inner: list[Stmt], candidates: set[int]) -> set[int]:
+    def _closed_under_constraints(inner: list[Statement], candidates: set[int]) -> set[int]:
         """``candidates`` less every statement that must follow one that stays.
 
         A nested reduction can export an accumulator that varies with none of the outer axes
@@ -111,8 +111,8 @@ def _hoist_loop_invariants(stmts: Body) -> Body:
             candidates -= pinned
         return candidates
 
-    def walk(body: Body) -> list[Stmt]:
-        new_body: list[Stmt] = []
+    def walk(body: Body) -> list[Statement]:
+        new_body: list[Statement] = []
         for s in body:
             if isinstance(s, (Loop, StridedLoop)):
                 inner = walk(s.body)

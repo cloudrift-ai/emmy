@@ -2,7 +2,7 @@
 
 from emmy.compiler.ir.axis import Axis
 from emmy.compiler.ir.elementwise import ElementwiseImpl
-from emmy.compiler.ir.expr import Literal, Var
+from emmy.compiler.ir.expression import Literal, Var
 from emmy.compiler.ir.kernel.ir import Smem, pack_smem, swizzle_fn, swizzle_xor
 from emmy.compiler.ir.pure.fold import Fold
 from emmy.compiler.ir.stmt import Accum, Assign, Body, Load, Loop

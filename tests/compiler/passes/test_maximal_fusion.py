@@ -114,7 +114,7 @@ def _chain_beside_a_sibling(stages: dict[str, LoopOp], widths: dict[str, int] | 
     ``(graph, the chain's last state)``."""
     from dataclasses import replace
 
-    from emmy.compiler.ir.expr import Literal, Var
+    from emmy.compiler.ir.expression import Literal, Var
     from emmy.compiler.ir.loop import Assign, Axis, Load, Write
 
     axis = Axis("i", 8)
@@ -215,7 +215,7 @@ def test_a_chain_the_roller_does_not_roll_is_an_error_not_a_smaller_region():
     """Every stage of this chain has a shape of its own, so no two are states of one recurrence
     and nothing rolls; the region the chain multiplies in raises at the splicer's construction
     bound. Nothing catches it — the kernel set is never a fall-through."""
-    from emmy.compiler.ir.expr import BinaryExpr, Literal, Var
+    from emmy.compiler.ir.expression import BinaryExpr, Literal, Var
     from emmy.compiler.ir.loop import Assign, Axis, Load, UnfusableStmt, Write
 
     stages: dict[str, LoopOp] = {}

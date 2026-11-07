@@ -6,14 +6,14 @@ from collections.abc import Callable, Mapping
 
 from emmy.compiler.ir.axis import Axis
 from emmy.compiler.ir.sigma import Sigma
-from emmy.compiler.ir.stmt.base import Stmt, _axis_identity
+from emmy.compiler.ir.stmt.base import Statement, _axis_identity
 from emmy.compiler.ir.stmt.body import Body
 
 Rename = Callable[[str], str]
 AxisFn = Callable[[Axis], Axis]
 
 
-def rename_free(stmt: Stmt, alias: Mapping[str, str]) -> Stmt:
+def rename_free(stmt: Statement, alias: Mapping[str, str]) -> Statement:
     """:func:`rewrite` under an alias map, made **hygienic**: the rename stops at a nested scope
     that re-binds one of the aliased names.
 

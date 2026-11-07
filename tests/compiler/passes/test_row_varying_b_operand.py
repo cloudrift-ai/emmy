@@ -19,7 +19,7 @@ from emmy.compiler.context import Context
 from emmy.compiler.dim import Dim
 from emmy.compiler.graph import Tensor
 from emmy.compiler.ir.axis import Axis
-from emmy.compiler.ir.expr import Expr, Literal, Var
+from emmy.compiler.ir.expression import Expression, Literal, Var
 from emmy.compiler.ir.kernel.ir import LdmatrixLoad
 from emmy.compiler.ir.schedule import Placement, Tile, Work
 from emmy.compiler.ir.schedule.classic import ClassicProblem
@@ -36,14 +36,14 @@ def _lit(value: int) -> Literal:
     return Literal(value, "int")
 
 
-def _row_residue(sibling: Expr, own: Expr) -> Expr:
+def _row_residue(sibling: Expression, own: Expression) -> Expression:
     """``((s·1024 + o) / 128 % 8) · 128 + (s·1024 + o) % 128`` — value-equal to ``o`` for ``o < 1024``."""
     flat = sibling * _lit(1024) + own
     return (flat / _lit(128)) % _lit(8) * _lit(128) + flat % _lit(128)
 
 
-def _free(exprs) -> set[str]:
-    return set().union(*(set(e.free_vars()) for e in exprs))
+def _free(expressions) -> set[str]:
+    return set().union(*(set(e.free_vars()) for e in expressions))
 
 
 def _fragment_loads(a: Load, b: Load, atom: str, inputs=None) -> dict[str, LdmatrixLoad]:

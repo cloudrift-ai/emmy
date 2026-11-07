@@ -16,7 +16,7 @@ import pytest
 from emmy.compiler.dtype import F16, DataType
 from emmy.compiler.graph import Graph
 from emmy.compiler.ir.base import InputOp
-from emmy.compiler.ir.expr import BinaryExpr, Literal, Var
+from emmy.compiler.ir.expression import BinaryExpr, Literal, Var
 from emmy.compiler.ir.loop import (
     Accum,
     Affine,
@@ -648,7 +648,7 @@ def test_consumer_extra_input_source_remap():
 
 def test_live_axes_computed():
     """``BodyAnalysis.live_axes`` captures axes transitively used through each
-    dep's Expr subtrees. For Accum, the reduce axis is excluded.
+    dep's Expression subtrees. For Accum, the reduce axis is excluded.
 
     Normalization canonicalizes SSA and axis names (``Load→in0``,
     ``Accum→acc0``; free axes first then reduce axes), so we assert on
@@ -868,12 +868,12 @@ def test_output_equivalence_cluster_retargets_reduce_through_copy_chain(monkeypa
     graph.add_node(first_copy, ["y"], Tensor("mid", (3, 2)), node_id="mid")
     graph.add_node(second_copy, ["mid"], Tensor("out", (6,)), node_id="out")
     graph.outputs = ["out"]
-    eval_expr = BinaryExpr.eval
+    eval_expression = BinaryExpr.eval
 
     def reject_coordinate_evaluation(expression, env):
         if env:
             pytest.fail("output equivalence must not enumerate coordinates")
-        return eval_expr(expression, env)
+        return eval_expression(expression, env)
 
     monkeypatch.setattr(BinaryExpr, "eval", reject_coordinate_evaluation)
 

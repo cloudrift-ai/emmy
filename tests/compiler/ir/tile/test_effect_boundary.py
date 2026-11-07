@@ -12,7 +12,7 @@ from __future__ import annotations
 
 from emmy.compiler.dim import Dim
 from emmy.compiler.ir.axis import Axis
-from emmy.compiler.ir.expr import Var
+from emmy.compiler.ir.expression import Var
 from emmy.compiler.ir.stmt import Accum, Assign, Body, Init, Load, Loop, Write
 from emmy.compiler.ir.tile import OutputSpec, apply_output_specs, extract_output_specs
 

@@ -494,7 +494,7 @@ tier cannot erase "tensor cores were on offer here" from the rows it does enumer
 
 **The session kernel cache.** Greedy lowering of one fused kernel is a function — Loop-IR program in,
 lowered `KernelOp` out — and `pipeline/kernel_cache.py` memoizes it at its boundary: `tile/lift/005`
-fetches a finished lowering (io rebound through `Stmt.rename_buffers`) before the lift, and
+fetches a finished lowering (io rebound through `Statement.rename_buffers`) before the lift, and
 `lowering/cuda/001` harvests every single-kernel lowering just before the per-graph negotiations
 (zero-init delegation, rendering) that deliberately sit below the boundary. Caller-owned on
 `Context.kernel_cache` (nothing installs it by default), greedy-only (tune strips it, pricing probes
@@ -665,7 +665,7 @@ the wrong row, the weight load carries a third grid axis, and the warp/mma tiers
 search budget can reach a schedule family that does not exist. The canonicalization re-fuses a free pair via
 the bijective reindexing `p → f/Q, q → f%Q` (semantics-preserving unconditionally) and keeps the result only
 when every access folds clean: operand composites collapse to the bare fused axis (the `(f/Q)·Q + f%Q → f`
-recomposition fold in `Expr.simplify`), and a store spelling the pair as separate buffer dims keeps the honest
+recomposition fold in `Expression.simplify`), and a store spelling the pair as separate buffer dims keeps the honest
 split-store spelling — `[…, f/Q, f%Q]` when the buffer's row-major flatten folds it back to an affine address,
 or the permuted `[…, f/Q, …, f%Q]` of a transposed output. The pair need not be adjacent: free loops are
 parallel, so the perfectly-nested free loops between them (the `transpose(1, 2)` every attention projection

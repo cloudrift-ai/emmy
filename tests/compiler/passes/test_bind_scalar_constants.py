@@ -10,7 +10,7 @@ from emmy.compiler.dtype import BF16, F16, F32, F64, I32
 from emmy.compiler.graph import Graph, Tensor
 from emmy.compiler.ir.base import ConstantOp, InputOp
 from emmy.compiler.ir.cuda import CudaOp
-from emmy.compiler.ir.expr import Literal, Var
+from emmy.compiler.ir.expression import Literal, Var
 from emmy.compiler.ir.loop import Assign, Axis, Load, Loop, LoopOp, Write
 from emmy.compiler.ir.stmt import Let
 from emmy.compiler.pipeline import CUDA_PASSES, LOOP_PASSES, Pipeline

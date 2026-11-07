@@ -8,7 +8,7 @@ import pytest
 from emmy.compiler.dim import Dim
 from emmy.compiler.graph import Tensor
 from emmy.compiler.ir.axis import Axis, Window
-from emmy.compiler.ir.expr import Var
+from emmy.compiler.ir.expression import Var
 from emmy.compiler.ir.loop import LoopOp
 from emmy.compiler.ir.stmt import Assign, Write
 from emmy.compiler.ir.tile import OutputSpec, Placement, TileOp

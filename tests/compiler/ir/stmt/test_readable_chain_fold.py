@@ -31,7 +31,7 @@ def test_fold_inlines_single_use_temp(monkeypatch) -> None:
 
 
 def test_fold_keeps_target_rendered_bitcast_named(monkeypatch) -> None:
-    """A bitcast is rendered by the target-aware ``Assign`` path, not ``op_to_expr``."""
+    """A bitcast is rendered by the target-aware ``Assign`` path, not ``op_to_expression``."""
     monkeypatch.setenv("EMMY_READABLE", "1")
     lines = _render(
         """

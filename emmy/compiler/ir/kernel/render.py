@@ -2,7 +2,7 @@
 
 Builds a CUDA ``RenderCtx`` (intrinsic + GPU-builtin spelling tables,
 per-buf shapes), emits the ``extern "C" __global__ __launch_bounds__(N)
-void`` signature, then walks the body — every Stmt's own ``render``
+void`` signature, then walks the body — every Statement's own ``render``
 method does the per-line emission.
 """
 

@@ -15,7 +15,7 @@ from emmy.compiler.context import Context
 from emmy.compiler.dtype import F16, F32, DataType
 from emmy.compiler.graph import Graph, Tensor
 from emmy.compiler.ir.base import InputOp
-from emmy.compiler.ir.expr import Var
+from emmy.compiler.ir.expression import Var
 from emmy.compiler.ir.loop import Accum, Assign, Axis, Load, Loop, LoopOp, Write
 from emmy.compiler.ir.stmt import Body
 from emmy.compiler.ir.tensor.ir import ElementwiseOp

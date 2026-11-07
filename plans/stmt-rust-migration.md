@@ -18,6 +18,13 @@ line-by-line translation.
 5. **No statement kind is ever a Python class on a Rust base**, not even as a step on the way.
 6. **Text everywhere.** A body's wire form is its text; tests state bodies as text and assert on printed text; an
    expression field crosses the boundary as its text. No reader of the old wire form exists.
+7. **Every kind is a struct in the crate** (option A below), and **the port lands as one PR** that replaces the Python
+   implementation: no PR adds Rust beside Python, and nothing is declared in both.
+8. **A second extension**, the compiler's own (a name like `emmy-ir`), beside the optional runtime extension.
+9. **Rust folds constants.** The kernels whose folded constant moves are counted first and re-recorded.
+10. **Kernel IR kinds print and read through their declarations**; every Kernel IR listing may change shape.
+11. **An expression's identity is its text**, not its class name, so the identity moves once with the port and never
+    again on a rename; the four concrete expression classes take full names then.
 
 ## The module when the port starts
 
@@ -27,8 +34,8 @@ The preparation is Python only and changes no kernel. Most of it is merged or in
   imports a submodule. The compiler constructs a statement at 566 sites and tests a statement's kind at 401.
 - 5,039 lines: normalization 1,427, value numbering 536, the order and identity 222, `Body` 679, the text 483, the
   kinds 888, the protocol 641, the package file and two helpers 163.
-- Every kind is declared: a class under the `@kind` decorator whose fields carry a type and a role
-  (`role("defines")`, `role("expr", "reads")`, ...). The decorator makes it a frozen dataclass and writes every
+- Every kind is declared: a class under the `@statement` decorator whose fields carry a type and a role
+  (`role("defines")`, `role("expression", "reads")`, ...). The decorator makes it a frozen dataclass and writes every
   protocol member from the roles, for all 45 kinds: the 15 shared ones and Kernel IR's 30. Four members no role gives
   are stated on their kinds and pinned by a test.
 - A body has one text, read back by `parse_body` to an equal body. It is the wire form in every golden, corpus case
@@ -39,12 +46,12 @@ The preparation is Python only and changes no kernel. Most of it is merged or in
 
 | Python today | Rust | Notes |
 | --- | --- | --- |
-| A kind: frozen dataclass, fields with `role(...)` | A struct per kind, all in one `enum Stmt` | The role table carries over one to one. See "Kinds". |
-| The `@kind` decorator: members generated from the roles when the class is defined | A derive on the struct: the same members generated when the crate is built | The decorator is the derive's Python form. |
-| `Stmt.rewrite`, `rename`, `substitute`, `rename_buffers`, `map_exprs`, `with_bodies` | One generated "rebuild with these parts changed" per kind, and thin functions over it | Today these are six entry points over one field walk. |
+| A kind: frozen dataclass, fields with `role(...)` | A struct per kind, all in one `enum Statement` | The role table carries over one to one. See "Kinds". |
+| The `@statement` decorator: members generated from the roles when the class is defined | A derive on the struct: the same members generated when the crate is built | The decorator is the derive's Python form. |
+| `Statement.rewrite`, `rename`, `substitute`, `rename_buffers`, `map_expressions`, `with_bodies` | One generated "rebuild with these parts changed" per kind, and thin functions over it | Today these are six entry points over one field walk. |
 | `Body`: a sequence with content equality | A shared, immutable slice of statements | A member read twice from Python is one object. |
 | About twenty cached readings on `Body` (`definitions`, `ssa_uses`, `loads`, ...) | Fields of the body's shared data, each computed once on first use | Rust can keep a derived value inside the object; Python cannot see the difference. |
-| `Expr` and its subclasses (`ir/expr.py`, outside the module) | The crate's own expression type: parse, print, substitute, simplify, the affine form | Python keeps its class. A field crosses as text. See "Expressions". |
+| `Expression` and its subclasses (`ir/expression.py`, outside the module) | The crate's own expression type: parse, print, substitute, simplify, the affine form | Python keeps its class. A field crosses as text. See "Expressions". |
 | `Axis`, `Window`, `Dim`, a dtype, an elementwise op | Plain values of the crate | They cross as their text or their name, like an expression. |
 | `text.py`: printer and reader | The crate's printer and reader | The stored files do not change. |
 | Value numbering, the order, identity (`values.py`, `order.py`, `identity.py`) | Functions of the crate over `&Body` | Statements are numbered by position, so no statement is keyed by object identity. |
@@ -52,25 +59,20 @@ The preparation is Python only and changes no kernel. Most of it is merged or in
 | The normal-form and identity memos, keyed by a body's text | A table inside the crate keyed by the body's hash | Hashing a body of 20 statements again is 15 ns against 2,765 ns today. |
 | The structural form (`structural.py`) of a statement | Generated with the kind, feeding the identity digest | The digest value may move (decision 2). |
 | `Call`, `Subroutine` | Two more kinds; a subroutine is shared data | Needed only by the one normalization step fusion runs on a body with calls. |
-| `Fold` answering part of the statement protocol | Stays in Python | Open question below. |
+| `Fold`, a Tile IR term that holds `Lambda` bodies | Stays in Python; its `rewrite` is its own entry and it answers no statement member | A Python term holding Rust bodies is the allowed direction of the boundary. |
 
 ### Kinds
 
-Two ways to carry the declarations over. Both keep the role table as it is.
+Every kind is a struct in the crate (decision 7). The 45 declarations are transcribed once as Rust structs, Kernel
+IR's included: they are data, a few hundred lines, and the Python declarations are deleted in the same PR. The
+extension exports a class per kind with the same name, the same keyword constructor and the same field reads, so the
+71 importing files do not change. A layer adds a kind by adding a struct. This is the fastest form and the one the
+trial measured. The role of a field can be an attribute on the field or the field's type (a name that is defined and a
+name that is read being two types); that choice is made when the crate's first kinds are written.
 
-- **A. Every kind is a struct in the crate (recommended).** The 45 declarations are rewritten once as Rust structs,
-  Kernel IR's included: they are data, a few hundred lines. The extension exports a class per kind with the same name,
-  the same keyword constructor and the same field reads, so the 71 importing files do not change. A layer adds a kind
-  by adding a struct. This is the fastest form and the one the trial measured.
-- **B. Kinds stay declared in Python, and the decorator registers them.** The Python `@kind` decorator keeps its
-  syntax and its implementation moves to Rust: it hands the crate the kind's name, fields and roles, and gets back a
-  class the crate created. A layer keeps declaring its kinds in Python. The crate then stores every statement as a
-  generic record and reads fields by position, which costs speed in the steps that know the shared kinds, and creating
-  classes at run time under the stable ABI is low-level work.
-
-A is one path and the simpler crate. B is worth its cost only if layers must add kinds without touching Rust. In
-either case the role of a field can be an attribute on the field or the field's type (a name that is defined and a name
-that is read being two types); that choice is made when the crate's first kinds are written.
+The alternative, kinds declared in Python and registered with the crate by the decorator, was rejected: it keeps a
+Python class per kind, stores every statement as a generic record read by position, and creates classes at run time
+under the stable ABI.
 
 ### The boundary
 
@@ -89,9 +91,9 @@ that is read being two types); that choice is made when the crate's first kinds 
 A fifth of normalization runs in expression code the module does not own, so expressions cannot stay behind a call
 into Python. The crate has its own expression type and the two meet through text:
 
-- Python builds a statement with its `Expr` objects; the binding takes each one's text and looks the Rust expression
-  up in a table. A read hands back the Python object it was built with, or parses the text once.
-- 88 files build and match the Python `Expr` and keep doing so.
+- Python builds a statement with its `Expression` objects; the binding takes each one's text and looks the Rust
+  expression up in a table. A read hands back the Python object it was built with, or parses the text once.
+- 88 files build and match the Python `Expression` and keep doing so.
 - Until the Python simplifier calls the Rust one there are two simplifiers. A test that both give the same text over
   every stored expression holds them together.
 
@@ -119,10 +121,14 @@ Both implementations exist until the switch and never share an object: a body go
 | --- | --- |
 | Plain constructors: `Load` and `Write` take their fields as declared; no string, tuple or number is converted after construction | open; 62 compiler sites, and about 1,080 test sites once the tests are text |
 | The tests of the passes state bodies as text | open; about 100 files, 3,244 hand-built statements |
-| Kernel IR kinds print and read through their declarations | open; it changes every Kernel IR listing, so the owner decides |
+| Kernel IR kinds print and read through their declarations | done (decision 10); the thirty hand-written printers are gone |
 | Loopify compares statements without listing their fields | open |
 | The debug dump stores a body as its text, not as `repr` read back by `eval` | open |
 | A fixture that yields the raw bodies of a corpus lowering | open; rules 1 to 3 run over it |
+| `Fold` stops answering the statement protocol; the walks that reach one become functions over the interface | done (`Fold` keeps a `rewrite` of its own; nothing else was read) |
+| An expression's structural form is its text; the four concrete expression classes take full names | open; moves every identity once (decision 11): the tune DB version and its pinned identities move with it |
+| No Tile layer table is keyed on a statement or a body | open; check, convert the caller if one is |
+| The kernels whose folded constant would move under a Rust fold are counted | open; decision 9 re-records them |
 
 ### 1. Expressions and their text
 
@@ -164,8 +170,9 @@ golden's fresh lowering (8.2 s when the one-pass normalization landed).
 
 ### 6. The switch
 
-The extension exports the classes and functions under the module's 36 names, `emmy/compiler/ir/stmt/__init__.py`
-re-exports them, and the Python implementation is deleted in the same PR. The tune DB version moves.
+Steps 1 to 5 are built on one branch and land together (decision 7). The extension exports the classes and functions
+under the module's 36 names, `emmy/compiler/ir/stmt/__init__.py` re-exports them, and the Python implementation is
+deleted in the same PR. The tune DB version moves.
 
 Verify: the full suite on a card; `emmy golden check` on every repository golden; the corpus regenerates with no
 verdict change; `git diff --stat main -- emmy/` is negative by about 5,000 lines.
@@ -204,17 +211,8 @@ rename, never by copy over the old file.
 
 ## Questions still open
 
-- **A or B for the kinds.** Recommended: A.
-- **One extension or two.** The runtime extension is optional at build time and the compiler cannot be. That argues
-  for a second extension beside it, built by the same `make setup`.
-- **`Fold`.** It is not a statement and a body refuses it, but it answers part of the statement protocol so shared
-  walks can reach it. Find which exported functions are handed one today; each stays a Python function over the
-  module's interface or stops taking it.
-- **Constant folding.** Keeping every stored kernel's rows (rule 1) asks for the same folded constants. The choices:
-  fold in Python before a body crosses, fold in Rust and re-record the kernels whose constant moves, or let Rust call
-  NumPy, which decision 4 rules out. Count the kernels that would move before choosing.
-- **Tables stored on objects.** The Tile layer still keeps tables on objects it does not own. Check whether any of
-  them is a statement or a body; convert that caller before the switch.
+None. The five that were open (where the kinds are declared, one extension or two, constant folding, the Kernel IR
+text, the expression class names) are decisions 7 to 11; what each asks for is in the preparation table.
 
 ## Not in this plan
 

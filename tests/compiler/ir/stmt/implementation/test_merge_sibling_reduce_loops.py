@@ -12,7 +12,7 @@ then merge must concatenate the bodies into one K-loop.
 from __future__ import annotations
 
 from emmy.compiler.ir.axis import Axis
-from emmy.compiler.ir.expr import BinaryExpr, Literal, Var
+from emmy.compiler.ir.expression import BinaryExpr, Literal, Var
 from emmy.compiler.ir.stmt import Accum, Assign, Body, Load, Loop, Write, normalize_body
 from emmy.compiler.ir.stmt.normalize import _unify_siblings, merge_sibling_reduce_loops
 

@@ -1,7 +1,7 @@
 """Tests for Load deduplication during body normalization."""
 
 from emmy.compiler.ir.axis import Axis
-from emmy.compiler.ir.expr import BinaryExpr, Literal, Var
+from emmy.compiler.ir.expression import BinaryExpr, Literal, Var
 from emmy.compiler.ir.stmt import Accum, Affine, Assign, Body, Cond, Init, Let, Load, Loop, Select, SelectBranch, Write, normalize_body
 from emmy.compiler.ir.stmt.normalize import place_values
 

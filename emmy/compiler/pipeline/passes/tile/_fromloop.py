@@ -15,12 +15,12 @@ from typing import TYPE_CHECKING
 
 from emmy.compiler.dtype import F32
 from emmy.compiler.ir.axis import Axis
-from emmy.compiler.ir.expr import BinaryExpr, Expr, Literal, TernaryExpr, Var
+from emmy.compiler.ir.expression import BinaryExpr, Expression, Literal, TernaryExpr, Var
 from emmy.compiler.ir.loop import LoopOp
 from emmy.compiler.ir.pure import Lambda
 from emmy.compiler.ir.pure.fold import EXTENTS, Fold, binding_extents
 from emmy.compiler.ir.sigma import Sigma
-from emmy.compiler.ir.stmt import Accum, Affine, Assign, Body, Carry, Init, Let, Load, Loop, Pre, Select, SelectBranch, Stmt, Write
+from emmy.compiler.ir.stmt import Accum, Affine, Assign, Body, Carry, Init, Let, Load, Loop, Pre, Select, SelectBranch, Statement, Write
 from emmy.compiler.ir.tile import Placement, TileOp, extract_output_specs
 from emmy.compiler.ir.tile.ir import guarded_store
 
@@ -182,7 +182,7 @@ def _decode_split(arg: str, plain: Body, defs: dict, exposed: dict, k_name: str)
     if slab is None or (slab.load.dtype is not None and slab.load.dtype.name != decode.op.decodes):
         return None
     seen = {id(decode)} | {id(stmt) for stmt in spine}
-    stmts: list[Stmt] = []
+    stmts: list[Statement] = []
     terms: list[Fold] = []
     for leaf in leaves:
         if leaf == varying[0]:
@@ -310,7 +310,7 @@ def _hoisted(fold: Fold, names: tuple[str, ...], hoists: dict, axes: tuple, leve
     inner = {name: f"{name}__sum" for index, name in enumerate(names) if index in hoists}
     fold = replace(fold, base=fold.base.rename(inner))
     terms: list[Fold] = [fold]
-    epilogue: list[Stmt] = []
+    epilogue: list[Statement] = []
     for index, name in enumerate(names):
         current = inner.get(name, name)
         factors = [factor for hoist in hoists.get(index, ()) for factor in hoist.factors]
@@ -421,7 +421,9 @@ def lift_body(body, axes: tuple = (), levels: tuple = (), carriers: dict | None 
             results = tuple(dict.fromkeys(value for write in writes for value in write.values if value in defined))
             # A store's coordinates and guard read values of the cell too (a scatter's row): the term exposes them.
             guards = tuple(member.cond for member in cell if guarded_store(member) is not None)
-            read = {name for expr in (*(index for write in writes for index in write.index), *guards) for name in expr.free_vars()}
+            read = {
+                name for expression in (*(index for write in writes for index in write.index), *guards) for name in expression.free_vars()
+            }
             results += tuple(sorted((defined & (retained.ssa_uses | read)) - set(results)))
             if results:
                 operands, lift = _close((), (), pure, results, (*axes, stmt.axis), inner_levels)
@@ -522,13 +524,13 @@ def scan_from_loop(loop: Loop, axes: tuple = (), levels: tuple = ()) -> tuple[Fo
     return fold, renamed
 
 
-def _observers(step: tuple, stored: tuple[str, ...], names: tuple[str, ...], axis: str) -> tuple[tuple[Stmt, ...], tuple]:
+def _observers(step: tuple, stored: tuple[str, ...], names: tuple[str, ...], axis: str) -> tuple[tuple[Statement, ...], tuple]:
     """Split the step of a scan into the statements that compute its STORED values from the carried
     state — a per-step tap reading only the state, the axis and its own definitions, in step order —
     and the rest. A stored value that is the state itself needs no statement; one that reads anything
     the step computes is no observation of the state and is refused."""
     defined = {name: stmt for stmt in step for name in stmt.defines()}
-    taken: dict[int, Stmt] = {}
+    taken: dict[int, Statement] = {}
     pending = [value for value in stored if value not in names]
     while pending:
         value = pending.pop()
@@ -562,7 +564,7 @@ def _slabs(step: tuple, carriers: dict, known: frozenset[str]) -> tuple[tuple[Fo
     only the arithmetic here left that index declared as a coordinate the kernel could hand no
     extent."""
     defined = {name for stmt in step for name in stmt.defines()} | known
-    gathers = {id(stmt) for stmt in step if isinstance(stmt, Load) and any(expr.free_vars() & defined for expr in stmt.index)}
+    gathers = {id(stmt) for stmt in step if isinstance(stmt, Load) and any(expression.free_vars() & defined for expression in stmt.index)}
     slabs = tuple(
         Fold.carrier_read(stmt, carriers[stmt.carrier]) if isinstance(stmt, Pre) else Fold.slab(stmt)
         for stmt in step
@@ -582,7 +584,7 @@ def _carried_from_loop(loop: Loop, axes: tuple, levels: tuple) -> tuple[Fold, tu
     loop = _stamp_axes(loop)
     cells: list[Axis] = []
 
-    def flatten(body: Body) -> list[Stmt]:
+    def flatten(body: Body) -> list[Statement]:
         # The chain of loops over the cells, from the carrying loop down to the level that defines
         # the state; a free loop beside that chain is an output SWEEP of the step (the delta rule's
         # corrected values, over the chunk's rows beside the state's), left as one.
@@ -606,7 +608,7 @@ def _carried_from_loop(loop: Loop, axes: tuple, levels: tuple) -> tuple[Fold, tu
     # state; the term's cells are the axes alone, so the reads and the definition drop it too.
     unit = tuple(position for position, e in enumerate(defined[0].index) if not isinstance(e, Var))
 
-    def strip(stmt: Stmt) -> Stmt:
+    def strip(stmt: Statement) -> Statement:
         if isinstance(stmt, Carry) or (isinstance(stmt, Pre) and stmt.carrier in loop.carries):
             return stmt.replace(index=tuple(e for position, e in enumerate(stmt.index) if position not in unit))
         return stmt
@@ -672,8 +674,8 @@ def stored_states(loop: Loop, outer: tuple[Axis, ...]) -> dict[str, tuple[Carry,
             continue
         carry = carries[value]
         cells = {cell.name for cell in carry.index if isinstance(cell, Var)}
-        names = [expr.name for expr in stmt.index if isinstance(expr, Var)]
-        plain = all(isinstance(expr, Var) or expr == Literal(0, "int") for expr in stmt.index)
+        names = [expression.name for expression in stmt.index if isinstance(expression, Var)]
+        plain = all(isinstance(expression, Var) or expression == Literal(0, "int") for expression in stmt.index)
         if plain and len(set(names)) == len(names) and set(names) == fixed | cells:
             out.setdefault(carry.name, (carry, stmt))
     return out
@@ -697,14 +699,14 @@ def states_as_buffers(body: Body, prefix: str, inputs: Mapping[str, Tensor]) -> 
     serial: list[Axis] = []
     shapes: dict[str, tuple] = {}
 
-    def read(stmt: Pre, time: Axis, outer: tuple[Axis, ...], seeds: dict[str, float | str], stored: dict) -> tuple[Stmt, ...]:
+    def read(stmt: Pre, time: Axis, outer: tuple[Axis, ...], seeds: dict[str, float | str], stored: dict) -> tuple[Statement, ...]:
         step = Var(time.name)
         after_first = BinaryExpr(">", step, Literal(0, "int"))
         previous = TernaryExpr(after_first, step - Literal(1, "int"), Literal(0, "int"))
         if stmt.carrier in stored:
             carry, write = stored[stmt.carrier]
             cells = {cell.name: at for cell, at in zip(carry.index, stmt.index, strict=True) if isinstance(cell, Var)}
-            buffer, index = write.output, tuple(expr.substitute({time.name: previous, **cells}) for expr in write.index)
+            buffer, index = write.output, tuple(expression.substitute({time.name: previous, **cells}) for expression in write.index)
         else:
             buffer, index = f"{prefix}__{stmt.carrier}", (previous, *(Var(axis.name) for axis in outer), *stmt.index)
         held, seed = f"{stmt.name}__prev", f"{stmt.name}__seed"
@@ -712,7 +714,7 @@ def states_as_buffers(body: Body, prefix: str, inputs: Mapping[str, Tensor]) -> 
         # The seed is a buffer of the state's shape (the tensor an unrolled loop started from) or a constant.
         if isinstance(start, str):
             cell = (*(Var(axis.name) for axis in outer), *stmt.index)
-            seeded: Stmt = Load(name=seed, input=start, index=seed_index(cell, inputs[start].shape))
+            seeded: Statement = Load(name=seed, input=start, index=seed_index(cell, inputs[start].shape))
         else:
             seeded = Let(name=seed, value=Literal(start))
         return (
@@ -721,14 +723,14 @@ def states_as_buffers(body: Body, prefix: str, inputs: Mapping[str, Tensor]) -> 
             Select(name=stmt.name, branches=(SelectBranch(held, after_first), SelectBranch(seed, Literal(True, "bool")))),
         )
 
-    def define(stmt: Carry, time: Axis, outer: tuple[Axis, ...], stored: dict) -> tuple[Stmt, ...]:
+    def define(stmt: Carry, time: Axis, outer: tuple[Axis, ...], stored: dict) -> tuple[Statement, ...]:
         if stmt.name in stored:
             return ()
         index = (Var(time.name), *(Var(axis.name) for axis in outer), *stmt.index)
         return (Write(output=f"{prefix}__{stmt.name}", index=index, value=stmt.value),)
 
     def walk(stmts: Body, outer: tuple[Axis, ...], time: Axis | None, seeds: dict[str, float | str], stored: dict) -> Body:
-        out: list[Stmt] = []
+        out: list[Statement] = []
         for stmt in stmts:
             if isinstance(stmt, Pre):
                 if stmt.carrier not in seeds:
@@ -756,10 +758,10 @@ def states_as_buffers(body: Body, prefix: str, inputs: Mapping[str, Tensor]) -> 
     return walk(Body.coerce(body), (), None, {}, {}), tuple(serial), shapes
 
 
-def _peel(body: Body) -> tuple[list, list[Stmt]]:
+def _peel(body: Body) -> tuple[list, list[Statement]]:
     """Peel the outer parallel loop chain into placement axes."""
     axes = []
-    prefix: list[Stmt] = []
+    prefix: list[Statement] = []
     current = list(body)
     while True:
         index = 0
@@ -807,7 +809,7 @@ def lift_loop_op(op: LoopOp, *, name: str = "", body: Body | None = None, serial
     a size-one free axis, so the one caller that restores one (``_row``) hands its body here.
     ``serial`` names the peeled axes that are the kernel's time (:func:`states_as_buffers`).
     """
-    with binding_extents(name for tensor in op.inputs.values() for dim in tensor.shape for name in dim.expr.free_vars()):
+    with binding_extents(name for tensor in op.inputs.values() for dim in tensor.shape for name in dim.expression.free_vars()):
         return _lift_loop_op(op, name, body, serial)
 
 
@@ -846,7 +848,7 @@ def _lift_loop_op(op: LoopOp, name: str, body, serial: tuple[Axis, ...]) -> Tile
     )
 
 
-def seed_index(cell: tuple[Expr, ...], shape: tuple) -> tuple[Expr, ...]:
+def seed_index(cell: tuple[Expression, ...], shape: tuple) -> tuple[Expression, ...]:
     """A seed read at ``cell``, one coordinate per dim of the seed tensor (``shape``). The state's cells
     are its axes alone: a size-one dim, which normalization pins to ``0`` in every index over the state,
     holds no cell (``_carried_from_loop``). The seed keeps that dim, so it reads ``0`` there."""

@@ -3,7 +3,7 @@
 ``_tile_reduce_axis`` copies the reduce body once per register chain, suffixing per-copy SSA
 names. A name the body READS but does not DEFINE is one shared value (a hoisted scalar load, a
 provider chain emitted ahead of the loop) — renaming its uses emits an undefined identifier at
-nvcc. The Expr channel (``s.exprs()``) was already protected; ``Assign`` args travel the
+nvcc. The Expression channel (``s.expressions()``) was already protected; ``Assign`` args travel the
 SSA-deps channel (``s.deps()``), surfaced by DeepSeek-V4 post4096's two-cut piece
 (``identifier "in3__r1" is undefined``).
 """
@@ -18,7 +18,7 @@ import pytest
 from emmy.compiler.dtype import F16, F32
 from emmy.compiler.graph import Node, Tensor
 from emmy.compiler.ir.axis import Axis
-from emmy.compiler.ir.expr import BinaryExpr, Literal, Var
+from emmy.compiler.ir.expression import BinaryExpr, Literal, Var
 from emmy.compiler.ir.kernel import KernelOp
 from emmy.compiler.ir.schedule import Reduce
 from emmy.compiler.ir.stmt import Accum, Assign, Body, Init, Load, Loop, Select, SelectBranch
@@ -29,7 +29,7 @@ def _names_read(stmts) -> set[str]:
     out: set[str] = set()
     for s in stmts:
         out.update(s.deps())
-        for e in s.exprs():
+        for e in s.expressions():
             out.update(e.free_vars())
         for b in s.nested():
             out |= _names_read(b)

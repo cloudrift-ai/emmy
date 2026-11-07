@@ -53,7 +53,7 @@ from functools import cached_property
 
 from emmy.compiler.ir.atom import SCALAR_ATOM, Atom, AtomKind, atom_for
 from emmy.compiler.ir.axis import Axis
-from emmy.compiler.ir.expr import Expr, Literal
+from emmy.compiler.ir.expression import Expression, Literal
 
 # ===========================================================================================
 # The one rule every codec below shares. Each value type parses and spells its own grammar by
@@ -1016,9 +1016,9 @@ class Raster:
 _RASTER_RE = re.compile(r"g([mn])(\d+)")
 
 
-def _ext_expr(axis: Axis) -> Expr:
-    """The axis extent as an ``Expr`` — a literal int (static) or the symbolic ``Dim`` expr."""
-    return Literal(axis.extent.as_static(), "int") if axis.extent.is_static else axis.extent.expr
+def _ext_expression(axis: Axis) -> Expression:
+    """The axis extent as an ``Expression`` — a literal int (static) or the symbolic ``Dim`` expression."""
+    return Literal(axis.extent.as_static(), "int") if axis.extent.is_static else axis.extent.expression
 
 
 def _overhangs(axis: Axis, tile: int) -> bool:
@@ -1059,9 +1059,9 @@ class Side:
         return _overhangs(self.axis, self.tile)
 
     @property
-    def ext(self) -> Expr:
-        """The axis extent as an ``Expr`` — a static literal or the symbolic ``Dim`` expr."""
-        return _ext_expr(self.axis)
+    def ext(self) -> Expression:
+        """The axis extent as an ``Expression`` — a static literal or the symbolic ``Dim`` expression."""
+        return _ext_expression(self.axis)
 
 
 __all__ = [

@@ -5,10 +5,10 @@ from __future__ import annotations
 from itertools import product
 
 from emmy.compiler.ir.axis import Axis
-from emmy.compiler.ir.expr import BinaryExpr, Literal, Var
+from emmy.compiler.ir.expression import BinaryExpr, Literal, Var
 from emmy.compiler.ir.stmt import Accum, Assign, Body, Cond, Load, Loop, Select, SelectBranch, Write, normalize_body
 from emmy.compiler.ir.stmt.normalize import (
-    _canonicalize_exprs,
+    _canonicalize_expressions,
     _normalize_body,
     drop_unread_values,
     fold_affine,
@@ -64,7 +64,7 @@ def test_a_commutative_comparison_orders_its_axes_by_binding_not_spelling() -> N
                 ),
             )
         )
-        return _canonicalize_exprs(body)[0].body[0].body[1].cond
+        return _canonicalize_expressions(body)[0].body[0].body[1].cond
 
     assert condition("a10", "a5") == BinaryExpr("==", Var("a10"), Var("a5"))
     assert condition("a5", "a10") == BinaryExpr("==", Var("a5"), Var("a10"))

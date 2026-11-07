@@ -10,8 +10,8 @@ from __future__ import annotations
 import dataclasses
 
 from emmy.compiler.dtype import F32
-from emmy.compiler.ir.expr import Literal, Var
-from emmy.compiler.ir.stmt import Body, Load, Stmt, Write
+from emmy.compiler.ir.expression import Literal, Var
+from emmy.compiler.ir.stmt import Body, Load, Statement, Write
 from emmy.compiler.structural import form, record_form
 from emmy.compiler.wire import Wire, decode, encode, register, rewrite
 
@@ -67,7 +67,7 @@ class Holder(Wire):
     anything: object = None
 
 
-class Scaled(Stmt):
+class Scaled(Statement):
     """A statement kind written by hand: ``name = value`` over a span. A statement is not on the wire (a body's wire
     form is its text), so it supplies its structural form and nothing else."""
 
@@ -89,7 +89,7 @@ class Scaled(Stmt):
     def defines(self) -> tuple[str, ...]:
         return (self.name,)
 
-    def _rewrite(self, rename, sigma, axis_fn):  # noqa: ANN001, ANN202 — see ``Stmt.rewrite``
+    def _rewrite(self, rename, sigma, axis_fn):  # noqa: ANN001, ANN202 — see ``Statement.rewrite``
         return Scaled(rename(self.name), rename(self.value), self.span)
 
     def pretty(self, indent: str = "") -> list[str]:

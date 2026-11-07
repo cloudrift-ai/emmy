@@ -10,7 +10,7 @@ from __future__ import annotations
 from collections.abc import Mapping
 from dataclasses import dataclass
 
-from emmy.compiler.ir.stmt.base import Stmt
+from emmy.compiler.ir.stmt.base import Statement
 from emmy.compiler.ir.stmt.body import Body, Memo
 from emmy.compiler.ir.stmt.leaves import Affine, Assign
 from emmy.compiler.ir.stmt.normalize import normalize_body
@@ -69,7 +69,7 @@ def _canonicalize_op_clusters(stmts: Body) -> Body:
     """
     from emmy.compiler.ir.elementwise import ElementwiseImpl, cluster_representative  # noqa: PLC0415
 
-    def fn(s: Stmt) -> Stmt:
+    def fn(s: Statement) -> Statement:
         if isinstance(s, Affine):  # a sum is FMA-class work; which coefficients it carries is not the cluster's business
             return Assign(s.name, cluster_representative(ElementwiseImpl("add")), s.args, s.dtype)
         op = getattr(s, "op", None)

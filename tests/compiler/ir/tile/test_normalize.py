@@ -12,7 +12,7 @@ from emmy.compiler.dim import Dim
 from emmy.compiler.graph import Graph, Tensor
 from emmy.compiler.ir.axis import Axis
 from emmy.compiler.ir.elementwise import ElementwiseImpl
-from emmy.compiler.ir.expr import Literal, Var
+from emmy.compiler.ir.expression import Literal, Var
 from emmy.compiler.ir.loop import LoopOp
 from emmy.compiler.ir.pure import Fold, Lambda
 from emmy.compiler.ir.stmt import Accum, Assign, Body, Let, Load, Loop, Write

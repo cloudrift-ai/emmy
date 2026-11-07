@@ -12,7 +12,7 @@ import numpy as np
 import pytest
 
 from emmy.compiler.ir.axis import Axis
-from emmy.compiler.ir.expr import BinaryExpr, Literal, Var
+from emmy.compiler.ir.expression import BinaryExpr, Literal, Var
 from emmy.compiler.ir.loop import LoopOp
 from emmy.compiler.ir.sigma import Sigma
 from emmy.compiler.ir.stmt import Accum, Assign, Body, Cond, Load, Loop, Write, normalize_body, ordering_constraints

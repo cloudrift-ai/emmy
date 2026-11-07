@@ -234,7 +234,7 @@ def _inspector_plan(graph, node, name: str, axis: int, page: int, pages: int):
     from emmy.compiler.dtype import I32  # noqa: PLC0415
     from emmy.compiler.graph import Graph, Tensor  # noqa: PLC0415
     from emmy.compiler.ir.base import InputOp  # noqa: PLC0415
-    from emmy.compiler.ir.expr import BinaryExpr, CastExpr, Literal  # noqa: PLC0415
+    from emmy.compiler.ir.expression import BinaryExpr, CastExpr, Literal  # noqa: PLC0415
     from emmy.compiler.ir.loop import Load, Loop, LoopOp, Write  # noqa: PLC0415
     from emmy.compiler.ir.stmt import (
         Body,  # noqa: PLC0415
@@ -258,7 +258,7 @@ def _inspector_plan(graph, node, name: str, axis: int, page: int, pages: int):
         changed = False
         for s in body.iter():
             if set(s.defines()) & needed:
-                more = set(s.deps()) | {var for expr in s.exprs() for var in expr.free_vars()}
+                more = set(s.deps()) | {var for expression in s.expressions() for var in expression.free_vars()}
                 if more - needed:
                     needed |= more
                     changed = True

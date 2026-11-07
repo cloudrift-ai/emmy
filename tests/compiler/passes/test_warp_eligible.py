@@ -15,7 +15,7 @@ from emmy.compiler.context import Context
 from emmy.compiler.graph import Graph, Tensor
 from emmy.compiler.ir.axis import Axis
 from emmy.compiler.ir.base import InputOp
-from emmy.compiler.ir.expr import Literal
+from emmy.compiler.ir.expression import Literal
 from emmy.compiler.ir.frontend.ir import MatmulOp
 from emmy.compiler.ir.stmt import Assign, Let
 from emmy.compiler.ir.tile import Placement, TileOp

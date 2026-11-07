@@ -6,7 +6,7 @@ from emmy.compiler.dim import Dim
 from emmy.compiler.dtype import F16
 from emmy.compiler.graph import Tensor
 from emmy.compiler.ir.axis import Axis
-from emmy.compiler.ir.expr import Literal, Var
+from emmy.compiler.ir.expression import Literal, Var
 from emmy.compiler.ir.stmt import Body, Load, Loop
 
 _coalescing_axis = import_module("emmy.compiler.pipeline.passes.lowering.kernel._factor")._coalescing_axis

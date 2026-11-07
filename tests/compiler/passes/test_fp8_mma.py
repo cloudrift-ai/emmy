@@ -28,7 +28,7 @@ from emmy.compiler.ir.atom import ATOM_REGISTRY, atom_for, atoms_for
 from emmy.compiler.ir.axis import Axis
 from emmy.compiler.ir.base import ConstantOp, InputOp
 from emmy.compiler.ir.elementwise import ElementwiseImpl
-from emmy.compiler.ir.expr import Literal, Var
+from emmy.compiler.ir.expression import Literal, Var
 from emmy.compiler.ir.frontend.ir import LinearOp
 from emmy.compiler.ir.schedule import Placement, Tile, Work
 from emmy.compiler.ir.schedule.classic import refusals as sched

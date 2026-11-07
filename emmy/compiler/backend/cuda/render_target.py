@@ -6,7 +6,7 @@ type names (``float`` / ``__half`` / fixed-width integer carriers), conversion i
 (``expf`` / ``hexp``, ``fmaxf`` / ``__hmax``, ...), and the set of
 ops with native fp16 forms.
 
-The Stmt renderer in :mod:`emmy.compiler.ir.stmt` calls into a
+The Statement renderer in :mod:`emmy.compiler.ir.stmt` calls into a
 :class:`CudaRenderTarget` instance attached to ``RenderCtx``; the
 hardcoded ``__half2``/``__float2half`` strings that used to live next
 to ``Load`` / ``Assign`` / ``Write`` are gone.
@@ -59,7 +59,7 @@ _INTEGER_NATIVE_OPS = frozenset(
 _F8_DTYPES = ("f8e4m3", "f8e5m2")
 
 # Intrinsic spellings — per dtype.  Keys are abstract op names emitted
-# by ``op_to_expr`` (``"exp"``, ``"fmax"``, ``"fabs"``, ...).
+# by ``op_to_expression`` (``"exp"``, ``"fmax"``, ``"fabs"``, ...).
 _INTRINSIC_F32: dict[str, str] = {
     "divide_rn_f32": "__fdiv_rn",
     "exp": "expf",

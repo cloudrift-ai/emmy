@@ -29,7 +29,7 @@ from emmy.compiler.dtype import BF16, F16, F32
 from emmy.compiler.graph import Graph, Tensor
 from emmy.compiler.ir.axis import Axis
 from emmy.compiler.ir.base import InputOp
-from emmy.compiler.ir.expr import Literal, Var
+from emmy.compiler.ir.expression import Literal, Var
 from emmy.compiler.ir.frontend.ir import MatmulOp
 from emmy.compiler.ir.pure.fold import Fold
 from emmy.compiler.ir.stmt import Load, Loop, Write
@@ -385,7 +385,7 @@ def test_sweep_resident_head_fold_refuses_the_split(monkeypatch) -> None:
     from types import SimpleNamespace
 
     from emmy.compiler.ir.axis import Axis
-    from emmy.compiler.ir.expr import Var
+    from emmy.compiler.ir.expression import Var
     from emmy.compiler.ir.stmt import Assign, Load, Write
     from emmy.compiler.ir.tile import OutputSpec, Placement
     from emmy.compiler.ir.tile.ops import head

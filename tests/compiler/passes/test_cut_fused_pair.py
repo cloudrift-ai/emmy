@@ -11,7 +11,7 @@ import pytest
 
 from emmy.compiler.ir.axis import Axis
 from emmy.compiler.ir.elementwise import ElementwiseImpl
-from emmy.compiler.ir.expr import Var
+from emmy.compiler.ir.expression import Var
 from emmy.compiler.ir.stmt import Assign
 from emmy.compiler.pipeline.passes.tile._cut import _fused_pair_factor, _split_fused_pair
 from tests.compiler.terms import contraction, projection, slab

@@ -11,7 +11,7 @@ from emmy.compiler.dtype import F16, F32
 from emmy.compiler.graph import Tensor
 from emmy.compiler.ir.axis import Axis, Window
 from emmy.compiler.ir.elementwise import ElementwiseImpl
-from emmy.compiler.ir.expr import Var
+from emmy.compiler.ir.expression import Var
 from emmy.compiler.ir.schedule import Reduce, ScheduleContext, ScheduleRefused, Stage, Tile, Work
 from emmy.compiler.ir.schedule import schedule as advance_schedule
 from emmy.compiler.ir.schedule.catalog import coop_reduce_moves, scalar_tile_moves
@@ -165,7 +165,7 @@ def test_eight_output_lanes_are_offered_on_volta_and_lower_with_their_own_grid()
 
 def _deferred_softmax_merge(count: int) -> TileOp:
     """Finished workspace states, including a ragged partition count, with one rounded output."""
-    from emmy.compiler.ir.expr import Literal
+    from emmy.compiler.ir.expression import Literal
     from emmy.compiler.ir.pure import Fold, Lambda
     from emmy.compiler.ir.pure.twist import SOFTMAX, Twist
 

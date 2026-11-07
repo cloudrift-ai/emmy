@@ -20,7 +20,7 @@ from emmy.compiler.graph import Graph, Tensor
 from emmy.compiler.ir.axis import Axis
 from emmy.compiler.ir.base import InputOp
 from emmy.compiler.ir.cuda import CudaOp
-from emmy.compiler.ir.expr import BinaryExpr, Literal, Var
+from emmy.compiler.ir.expression import BinaryExpr, Literal, Var
 from emmy.compiler.ir.loop import LoopOp
 from emmy.compiler.ir.stmt import Accum, Assign, Body, Load, Loop, Write
 from emmy.compiler.pipeline import CUDA_PASSES, Pipeline

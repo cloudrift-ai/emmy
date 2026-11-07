@@ -30,7 +30,7 @@ from emmy.compiler.ir.stmt import Assign, Body, Load
 
 
 def _idx_vars(index) -> set[str]:
-    """Every free Var name across an index tuple's exprs."""
+    """Every free Var name across an index tuple's expressions."""
     return {v for e in index for v in e.free_vars()}
 
 
@@ -76,15 +76,15 @@ class PackedKBlockB:
         return max(1, bk_elems // self.block)
 
 
-def k_block_guard(expr, k_name: str) -> tuple[bool, set[int]]:
-    """Walk ``expr`` for the k-block-invariance proof: ``(k_seen_naked, guards)``.
+def k_block_guard(expression, k_name: str) -> tuple[bool, set[int]]:
+    """Walk ``expression`` for the k-block-invariance proof: ``(k_seen_naked, guards)``.
 
     A ``k`` occurrence is GUARDED by ``(X + k) / B`` (a literal ``B``) when ``X`` is a
     provable multiple of ``B`` — only then is the floor constant on aligned k blocks of
     ``B``. Any shape this walk does not prove declines the match; the operand then stays
     a generic computed B, never a wrong one.
     """
-    from emmy.compiler.ir.expr import BinaryExpr, CastExpr, Literal, Var  # noqa: PLC0415
+    from emmy.compiler.ir.expression import BinaryExpr, CastExpr, Literal, Var  # noqa: PLC0415
 
     def multiple_of(e, b: int) -> bool:
         if isinstance(e, Literal):
@@ -102,7 +102,7 @@ def k_block_guard(expr, k_name: str) -> tuple[bool, set[int]]:
         if isinstance(e, Literal) or e is None:
             return False, set()
         if isinstance(e, CastExpr):
-            return walk(e.expr)
+            return walk(e.expression)
         if isinstance(e, BinaryExpr):
             ln, lg = walk(e.left)
             rn, rg = walk(e.right)
@@ -113,7 +113,7 @@ def k_block_guard(expr, k_name: str) -> tuple[bool, set[int]]:
                 if free is not None and all(multiple_of(f, b) for f in free):
                     return rn, lg | rg | {b}
             return ln or rn, lg | rg
-        return True, set()  # an unmodeled expr containing anything: treat as naked — decline upstream
+        return True, set()  # an unmodeled expression containing anything: treat as naked — decline upstream
 
     def _k_free_addends(e, k):
         # The additive terms of ``e`` that do not reference k; None if the k term is not
@@ -128,7 +128,7 @@ def k_block_guard(expr, k_name: str) -> tuple[bool, set[int]]:
         naked, _ = walk(e)
         return None if naked else [e]
 
-    return walk(expr)
+    return walk(expression)
 
 
 def match_packed_kblock_b(cone: list, k_name: str, inputs, *, codes_may_compute: bool = False) -> PackedKBlockB | None:
@@ -197,8 +197,8 @@ def match_packed_kblock_b(cone: list, k_name: str, inputs, *, codes_may_compute:
     factor = factors[0]
     blocks: set[int] = set()
     for st in sides[factor]:
-        exprs = st.index if isinstance(st, Load) else ()
-        for e in exprs:
+        expressions = st.index if isinstance(st, Load) else ()
+        for e in expressions:
             naked, guards = k_block_guard(e, k_name)
             if naked:
                 return None

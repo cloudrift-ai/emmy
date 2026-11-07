@@ -2,7 +2,7 @@
 
 ``_dedup_loads`` collapses identical scalar ``Load``\\ s in one statement list and rewires the
 dropped names to the survivor. The rewrite has to reach *into* nested scopes — an epilogue cell's
-output sweep consumes the loads hoisted above it — but ``Stmt.rewrite`` renames a stmt's own
+output sweep consumes the loads hoisted above it — but ``Statement.rewrite`` renames a stmt's own
 bindings as well as its reads and descends unconditionally, while SSA names bound inside a ``Loop``
 body are scoped to that body.
 
@@ -14,7 +14,7 @@ sweeps or conditions, so the capture was reachable in principle.
 """
 
 from emmy.compiler.ir.axis import Axis
-from emmy.compiler.ir.expr import Literal
+from emmy.compiler.ir.expression import Literal
 from emmy.compiler.ir.stmt import Assign, Body, Load, Loop
 from emmy.compiler.pipeline.passes.lowering.kernel._atom import _dedup_loads
 

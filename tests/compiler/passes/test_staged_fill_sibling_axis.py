@@ -23,7 +23,7 @@ from emmy.compiler.dim import Dim
 from emmy.compiler.dtype import F16, F32, U8
 from emmy.compiler.ir.axis import Axis
 from emmy.compiler.ir.elementwise import ElementwiseImpl
-from emmy.compiler.ir.expr import Expr, Literal, TernaryExpr, Var
+from emmy.compiler.ir.expression import Expression, Literal, TernaryExpr, Var
 from emmy.compiler.ir.schedule import Tile, Work
 from emmy.compiler.ir.schedule.packing import PackedKBlockB
 from emmy.compiler.ir.schedule.staging import copied_b
@@ -40,7 +40,7 @@ def _lit(n: int) -> Literal:
     return Literal(n, "int")
 
 
-def _row_residue(sibling: Expr, own: Expr) -> Expr:
+def _row_residue(sibling: Expression, own: Expression) -> Expression:
     """The flat-index reshape residue: ``((s·1024 + o) / 128 % 8) · 128 + (s·1024 + o) % 128`` —
     value-equal to ``o`` for ``o < 1024`` (the ``s`` term is a multiple of both moduli)."""
     flat = sibling * _lit(1024) + own
@@ -52,8 +52,8 @@ def _mn(m: int = 32, n: int = 1024, m_name: str = "m"):
     return tile.at(Axis(m_name, Dim(m)), Axis("n", Dim(n))).mn
 
 
-def _free(exprs) -> set[str]:
-    return set().union(*(set(e.free_vars()) for e in exprs))
+def _free(expressions) -> set[str]:
+    return set().union(*(set(e.free_vars()) for e in expressions))
 
 
 def _assert_sibling_bound(op, sibling_name: str, block_name: str) -> None:

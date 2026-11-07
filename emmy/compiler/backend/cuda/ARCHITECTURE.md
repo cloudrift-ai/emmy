@@ -268,7 +268,7 @@ emmy-only bench (`benchmark_program` — `run --bench`'s pinned golden / `--ab`
 rows; an optional `run_inputs` ndarray dict adds one pre-bench execution on those inputs with the
 outputs shipped back — the pinned-row wrong-answer gate's measurement side); otherwise it's the
 deployable eager / torch.compile / emmy comparison — `("trace_args", {code/input/adapter/layer/seq_len/dynamic})` →
-`load_or_trace` rebuilds the real module (HF id or `--code` expr) → `bench_full_model_real` (for a
+`load_or_trace` rebuilds the real module (HF id or `--code` expression) → `bench_full_model_real` (for a
 symbolic graph the torch closures run on hint-**tiled** example inputs — `commands/run._hint_sized_inputs`
 grows every symbolic input axis to its `Dim` hint by repeating the trace values, the same size the
 emmy side resolves to when benching without inputs, so the full-model table compares one shape; the

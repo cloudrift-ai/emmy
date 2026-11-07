@@ -18,7 +18,7 @@ them — never from the term; (e) a λ that is not closed says what it captures.
 from __future__ import annotations
 
 from emmy.compiler.ir.axis import Axis
-from emmy.compiler.ir.expr import Literal, Var
+from emmy.compiler.ir.expression import Literal, Var
 from emmy.compiler.ir.pure import Fold, Lambda
 from emmy.compiler.ir.schedule import Placement, Raster, Reduce, Schedule, Stage, Tile, Work
 from emmy.compiler.ir.schedule.classic import (

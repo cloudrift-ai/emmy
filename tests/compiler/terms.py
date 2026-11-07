@@ -16,7 +16,7 @@ from __future__ import annotations
 
 from emmy.compiler.ir.axis import Axis
 from emmy.compiler.ir.elementwise import ElementwiseImpl
-from emmy.compiler.ir.expr import Var
+from emmy.compiler.ir.expression import Var
 from emmy.compiler.ir.pure import Fold, Lambda
 from emmy.compiler.ir.stmt import Assign, Body, Load
 
