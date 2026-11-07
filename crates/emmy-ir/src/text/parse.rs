@@ -5,9 +5,10 @@ use std::sync::Arc;
 
 use crate::axis::{Axis, Dim, Window};
 use crate::body::{Body, Subroutine};
+use crate::dtype::DType;
 use crate::elementwise::ElementwiseOp;
 use crate::expr::{Expression, Lit, Num, Parser, TokenKind};
-use crate::field::{DType, FieldType, Float, NumOr, Value, Values};
+use crate::field::{FieldType, Float, NumOr, Value, Values};
 use crate::protocol::finished;
 use crate::statement::*;
 use crate::{Error, Name, Result};

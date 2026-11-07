@@ -4,9 +4,20 @@
 use std::hash::{Hash, Hasher};
 use std::sync::Arc;
 
-use crate::expr::{Expr, Expression, Num};
-use crate::field::spell_stmt_name;
+use crate::expr::{Expr, Expression, Num, spell_name};
 use crate::{Name, Result};
+
+/// Words the reader gives a meaning, so a name spelled like one is written between backticks.
+pub const KEYWORDS: [&str; 25] = [
+    "for", "in", "if", "else", "let", "init", "zero", "load", "pre", "select", "when", "over",
+    "seed", "step", "until", "window", "carried", "swizzle", "words", "unroll", "sub", "call",
+    "true", "false", "none",
+];
+
+/// A name as a statement's text spells it: bare, or between backticks when it reads as a keyword or is no identifier.
+pub fn spell_stmt_name(name: &str) -> Result<String> {
+    spell_name(name, &KEYWORDS)
+}
 
 /// The expected size of a symbolic dim when none is supplied.
 pub const DEFAULT_SEQ_HINT: i64 = 512;

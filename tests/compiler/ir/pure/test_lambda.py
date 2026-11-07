@@ -63,8 +63,8 @@ def test_lambda_orders_the_definition_read_by_a_predicate_first() -> None:
     ],
     ids=lambda s: type(s).__name__,
 )
-def test_lambda_rejects_impure_stmt_kinds(stmt) -> None:
-    """The conservative ``Statement.pure`` default: effectful / scope-bound kinds never enter a stored
+def test_lambda_rejects_impure_statement_types(stmt) -> None:
+    """The conservative ``Statement.pure`` default: effectful / scope-bound statement types never enter a stored
     lambda body — the purity-erosion guard."""
     with pytest.raises(ValueError, match="pure"):
         Lambda(params=("x",), body=Body((stmt,)), results=("x",))

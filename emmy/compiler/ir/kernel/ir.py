@@ -69,7 +69,7 @@ from emmy.compiler.ir.stmt import (
     StridedLoop,
     Write,
 )
-from emmy.emmy_ir import (  # the Kernel IR kinds, declared with the shared ones in the emmy-ir crate
+from emmy.emmy_ir import (  # the Kernel IR statement types, declared with the shared ones in the emmy-ir crate
     BlockScaleLoad,
     CpAsyncCommit,
     CpAsyncCopy,

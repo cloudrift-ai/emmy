@@ -34,7 +34,7 @@ merged, and it becomes `Assign` rescale temps plus one `Accum` per state compone
 lowering needs statements (the REG-tree merge, the cooperative tail, the cross-CTA finalize loop);
 the serial step is the same derivation at the injected singleton. There is no `StateMerge` type: the term is the
 `Lambda` the fold already stores,
-and a rendering function is not a kind.
+and a rendering function is not a statement type.
 
 The invariant is what stops facts from acquiring a second home. A term that renders itself needs
 no private spelling of anything the statements already carry:

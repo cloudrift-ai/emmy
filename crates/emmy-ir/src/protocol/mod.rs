@@ -810,7 +810,7 @@ mod tests {
 
     use super::*;
     use crate::expr::parse::parse;
-    use crate::field::FieldType;
+    use crate::field::{Exprs, FieldType, Names, NumOr};
     use crate::identity::canonicalize_identity;
     use crate::normalize::testing::{body, stmt_text, strs, text};
     use crate::text::parse_statement;

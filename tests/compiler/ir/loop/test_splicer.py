@@ -29,7 +29,7 @@ def _loop(text: str) -> LoopOp:
     return LoopOp(body=parse_body(text))
 
 
-def _count_kind(op: LoopOp, cls: type) -> int:
+def _count_type(op: LoopOp, cls: type) -> int:
     return sum(1 for s in op.body.iter() if isinstance(s, cls))
 
 
@@ -323,7 +323,7 @@ def test_reduction_producer():
     merged = _splice_loop_ops(producer, consumer, source="src_0")
     assert merged is not None
     # The Accum survives in the merged body.
-    assert _count_kind(merged, Accum) == 1
+    assert _count_type(merged, Accum) == 1
     # Elementwise chain includes the producer-load copy + the consumer's exp.
     assert "exp" in _elementwise_fns(merged)
 
@@ -671,7 +671,7 @@ def test_output_equivalence_cluster_retargets_reduce_through_copy_chain(monkeypa
     assert result is not None
     merged, external = result
     assert external == ["x"]
-    assert _count_kind(merged, Accum) == 1
+    assert _count_type(merged, Accum) == 1
     assert [write.output for write in merged.writes] == ["out"]
     assert len(merged.writes[0].index) == 1
     assert "/" not in str(merged.writes[0].index[0]) and "%" not in str(merged.writes[0].index[0])
@@ -830,7 +830,7 @@ def test_shared_load_dedup_into_reduce():
     merged = _splice_loop_ops(producer, consumer, source="src_0")
     assert merged is not None  # would have failed pre-fix with SSA validation error
     # Reduce + full silu chain + final multiply should all materialize once.
-    assert _count_kind(merged, Accum) == 1
+    assert _count_type(merged, Accum) == 1
     fns = _elementwise_fns(merged)
     for op in ("exp", "reciprocal", "multiply"):
         assert op in fns, f"missing {op} in merged body: {fns}"
@@ -904,7 +904,7 @@ def test_shallow_affine_recurrence_still_fuses():
     loops, edges, roots = _affine_recurrence_chain(4)
     merged = splice_loops(loops=loops, splice_edges=edges, roots=roots)
     assert merged is not None
-    assert _count_kind(merged, Write) == 1  # one root — every stage inlined
+    assert _count_type(merged, Write) == 1  # one root — every stage inlined
 
 
 def test_deep_affine_recurrence_raises_past_the_binding_ratio():

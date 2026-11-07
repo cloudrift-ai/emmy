@@ -101,11 +101,6 @@ fn sigma_from_py(value: &Bound<'_, PyAny>) -> PyResult<HashMap<Name, Expression>
     mapping_from_py(&value.getattr("mapping")?)
 }
 
-/// Wraps the Python object of a statement, the same for a statement reached again through its body.
-pub fn wrap_statement(py: Python<'_>, stmt: &Arc<Statement>) -> PyResult<Py<PyAny>> {
-    wrap_statement_holding(py, stmt, Vec::new())
-}
-
 fn same_or_wrap<'py>(
     slf: &Bound<'py, PyStatement>,
     rebuilt: Arc<Statement>,
@@ -605,8 +600,8 @@ macro_rules! define_py_statement_types {
         }
 
         /// The Python object of `stmt`, an instance of its statement type's class.
-        pub fn wrap_statement_holding(py: Python<'_>, stmt: &Arc<Statement>, held: Vec<Option<Py<PyAny>>>) -> PyResult<Py<PyAny>> {
-            let base = PyClassInitializer::from(PyStatement::new(stmt.clone(), held));
+        pub fn wrap_statement(py: Python<'_>, stmt: &Arc<Statement>) -> PyResult<Py<PyAny>> {
+            let base = PyClassInitializer::from(PyStatement::new(stmt.clone(), Vec::new()));
             Ok(match &**stmt {
                 $( Statement::$StatementType(_) => Py::new(py, base.add_subclass($StatementType))?.into_any(), )*
             })
@@ -721,6 +716,7 @@ mod generated {
     use super::*;
     use emmy_ir::Name;
     use emmy_ir::body::Body;
+    use emmy_ir::dtype::DType;
     use emmy_ir::elementwise::ElementwiseOp;
     use emmy_ir::field::*;
 

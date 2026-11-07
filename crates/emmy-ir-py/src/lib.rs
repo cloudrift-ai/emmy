@@ -55,7 +55,7 @@ fn elementwise_tables(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add("OP_ALIASES", aliases)?;
     m.add(
         "DTYPES",
-        PyFrozenSet::new(py, emmy_ir::field::DType::ALL.iter().map(|d| d.text()))?,
+        PyFrozenSet::new(py, emmy_ir::dtype::DType::ALL.iter().map(|d| d.text()))?,
     )?;
     Ok(())
 }

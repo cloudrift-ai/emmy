@@ -1,6 +1,6 @@
-"""C-family source for statement bodies: the render context, index flattening, and one render function per kind.
+"""C-family source for statement bodies: the render context, index flattening, and one render function per statement type.
 
-``render_stmt`` dispatches on the statement kind. The kinds every IR shares register here; Kernel IR registers its
+``render_stmt`` dispatches on the statement type. The statement types every IR shares register here; Kernel IR registers its
 own beside their classes. ``render_body`` is the entry point the CUDA kernel renderer and the Loop IR runner call.
 """
 
@@ -743,11 +743,11 @@ NEXT_STEP = "__next"
 
 @singledispatch
 def render_stmt(stmt: Statement, ctx: RenderCtx) -> list[str]:
-    """Indented C / CUDA source lines for one statement, dispatched on its kind.
+    """Indented C / CUDA source lines for one statement, dispatched on its statement type.
 
     A block statement recurses through :func:`render_body` with ``ctx.child()``; a leaf returns its
     lines. ``ctx`` carries the target's intrinsic and builtin tables, the current indent, and the
-    buffer shapes an index flattens over. Each layer registers the kinds it defines.
+    buffer shapes an index flattens over. Each layer registers the statement types it defines.
     """
     raise NotImplementedError(f"render not registered for {type(stmt).__name__}")
 

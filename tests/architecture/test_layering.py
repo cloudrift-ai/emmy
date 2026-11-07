@@ -173,18 +173,18 @@ def test_the_statement_module_exports_a_pinned_list() -> None:
     """The statement module's interface is this list. A name added here is a decision, not a convenience."""
     import emmy.compiler.ir.stmt as stmt
 
-    kinds = ["Statement", "Load", "Assign", "Affine", "Accum", "Carry", "Pre", "Init", "Let", "Write", "Select", "SelectBranch"]
-    kinds += ["ZeroPrologue", "Loop", "StridedLoop", "Cond"]
+    statement_types = ["Statement", "Load", "Assign", "Affine", "Accum", "Carry", "Pre", "Init", "Let", "Write", "Select", "SelectBranch"]
+    statement_types += ["ZeroPrologue", "Loop", "StridedLoop", "Cond"]
     containers = ["Body", "Identity", "OutputSpec"]
     functions = ["normalize_body", "canonicalize_identity", "free_names", "exposed_defines", "rename_free", "binary"]
     functions += ["clear_memos", "memo_stats"]
     functions += ["mask_select_predicate", "pretty_body", "parse_body", "ordering_constraints", "dtype_promote"]
-    # Normalization steps a pass calls on its own, and the two kinds fusion assembles a region with.
+    # Normalization steps a pass calls on its own, and the two statement types fusion assembles a region with.
     steps = ["fold_affine", "simplify_body", "prepare_body"]
     assembly = ["Call", "Subroutine"]
-    # The names of a kind's fields, for the one pass that generalizes whole statements.
+    # The names of a statement type's fields, for the one pass that generalizes whole statements.
     declaring = ["fields_of"]
-    assert sorted(stmt.__all__) == sorted(kinds + containers + functions + steps + assembly + declaring)
+    assert sorted(stmt.__all__) == sorted(statement_types + containers + functions + steps + assembly + declaring)
 
 
 def test_the_statement_module_depends_on_expressions_and_values_only() -> None:
@@ -462,7 +462,7 @@ def test_nothing_reaches_into_the_scheduler_for_identity() -> None:
     assert not offenders, "read kernel identity off the Op interface (Op.deploy_identity)\n" + "\n".join(offenders)
 
 
-def _kernel_kinds() -> list[type]:
+def _kernel_statement_types() -> list[type]:
     import emmy.compiler.ir.kernel.ir as kernel_ir
     from emmy.compiler.ir.stmt import Statement
 
@@ -474,20 +474,22 @@ def _kernel_kinds() -> list[type]:
 
 
 def test_a_kernel_ir_kind_is_declared_not_programmed() -> None:
-    """A Kernel IR statement kind is data: fields with their roles, how it prints, and at most a constructor check,
-    declared in the emmy-ir crate with the shared kinds. The statement protocol follows from the roles; what rendering
+    """A Kernel IR statement type is data: fields with their roles, how it prints, and at most a constructor check,
+    declared in the emmy-ir crate with the shared statement types. The statement protocol follows from the roles; what rendering
     or a lowering asks of a statement beyond that is a function over it, beside the render functions, never a
     Python member attached to the class."""
     import types
 
-    kinds = _kernel_kinds()
+    statement_types = _kernel_statement_types()
     offenders = [
         f"{cls.__name__}.{name}"
-        for cls in kinds
+        for cls in statement_types
         for name, member in vars(cls).items()
         if isinstance(member, (types.FunctionType, property, functools.cached_property, staticmethod, classmethod))
     ]
-    assert len(kinds) == 30 and all(cls.__module__ == "emmy.compiler.ir.kernel.ir" and "_fields" in vars(cls) for cls in kinds)
+    assert len(statement_types) == 30 and all(
+        cls.__module__ == "emmy.compiler.ir.kernel.ir" and "_fields" in vars(cls) for cls in statement_types
+    )
     assert not offenders, "state these as field roles, or move them to functions over the statement:\n" + "\n".join(sorted(offenders))
 
 

@@ -939,7 +939,7 @@ pub fn ordering_constraints<'py>(
 /// Promote an elementwise op's argument dtypes to one result dtype.
 #[pyfunction]
 pub fn dtype_promote(op_name: &str, arg_dtypes: Vec<String>) -> PyResult<String> {
-    let dtypes: Vec<emmy_ir::field::DType> = arg_dtypes
+    let dtypes: Vec<emmy_ir::dtype::DType> = arg_dtypes
         .iter()
         .map(|d| d.parse().py())
         .collect::<PyResult<_>>()?;

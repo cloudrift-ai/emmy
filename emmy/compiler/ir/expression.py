@@ -7,7 +7,7 @@ Backend-agnostic expression sublanguage used by:
 - Tile IR (``ir.tile``): array indices, loop bounds, ternary selects.
 
 The expression types are implemented in Rust (the ``emmy-ir`` crate, reached through ``emmy.emmy_ir``) and exported
-here: the ``Expression`` base and its eight kinds, the simplification context and the affine-form helpers. On the wire
+here: the ``Expression`` base and its eight types, the simplification context and the affine-form helpers. On the wire
 an expression is its C-like text, ``((a5 / 128) * 128) + a6`` written as ``a5 / 128 * 128 + a6`` with parentheses only
 where precedence needs them (:func:`parse` reads it back), and that text is also its structural identity. The members
 that take a Python function or evaluate against host values — ``rename`` by a function, ``rebuild``, ``eval`` — are

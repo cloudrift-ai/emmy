@@ -500,7 +500,7 @@ under the edge split, symbolic-seq SDPA lowered a kernel reading twelve names it
 **A bridged seam value keeps its own dtype.** A computed operand's cone splits at its K seam into a row-invariant
 prologue and a per-cell body. Only external cell reads load bridged results; locally defined values are not reloaded.
 The smem rows declare each bridged value's dtype (`cone_stat_dtypes`, typed the way `edge_dtypes`
-types an edge's results; a name whose statement kind carries no dtype keeps the float default). Declaring every row
+types an edge's results; a name whose statement type carries no dtype keeps the float default). Declaring every row
 `float` decides the CELL's arithmetic too: a value that crosses as an integer — a pack's shift amount, a nibble
 mask — returns as f32, and the bit operations reading it have no f32 spelling at all, so the kernel fails to render
 rather than computing something wrong.

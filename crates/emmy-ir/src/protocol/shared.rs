@@ -2,6 +2,7 @@
 //! sum's terms and its binary form, a select's mask, the literal a statement binds.
 
 use crate::body::Body;
+use crate::dtype::DType;
 use crate::elementwise::{ElementwiseOp, Operation};
 use crate::expr::{Expr, Expression, LitType};
 use crate::field::{AxisRef, Names, NumOr};

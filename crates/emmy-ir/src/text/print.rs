@@ -3,10 +3,12 @@
 use std::sync::Arc;
 
 use super::INDENT;
+use crate::axis::spell_stmt_name;
 use crate::axis::{Axis, spell_axis, spell_window};
 use crate::body::{Body, Subroutine};
+use crate::dtype::DType;
 use crate::expr::Expression;
-use crate::field::{DType, NumOr, spell_number, spell_stmt_name};
+use crate::field::{NumOr, spell_number};
 use crate::statement::*;
 use crate::{Error, Name, Result};
 

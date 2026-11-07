@@ -17,7 +17,7 @@ its loads.
 
 Algorithm. Seed: every selected root ``Write``. Each iteration pops
 one pending dep and emits its def, queueing that def's own deps.
-Resolution dispatches on stmt kind:
+Resolution dispatches on the statement type:
 
 - **Load on a splice edge** — emit a copy alias at the demand scope;
   σ is solved by pairing target's ``Write.index`` against the reader's

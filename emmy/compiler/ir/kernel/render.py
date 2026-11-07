@@ -1523,7 +1523,7 @@ def render_kernelop(
         if n not in literals and (n in kernel_op.inputs or n in kernel_op.outputs)
     }
     # A buffer whose one page spans it is addressed like the flat buffer it replaces: its base is
-    # the table's only entry, resolved once in the preamble, so every statement kind — a staged
+    # the table's only entry, resolved once in the preamble, so every statement type — a staged
     # copy, a descriptor, a fragment store — works over it unchanged.
     whole = {n for n, p in paged.items() if spans_one_page(tensors[n].shape, p.axis, p.page)}
     ctx.memory = {n: p for n, p in paged.items() if n not in whole}

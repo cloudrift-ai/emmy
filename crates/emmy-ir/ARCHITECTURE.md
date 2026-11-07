@@ -14,17 +14,17 @@ body and the normal form ARE; this file says how the crate holds them.
 The module tree follows the design, one module per concept, and the modules stand in a tower: each imports only the ones
 below it, `field`, `statement` and `body` aside, which define each other's types. From the bottom: `expr/` (the tree,
 its text, the simplifier's walk and the range analysis in `mod.rs`, the simplifier's rewrite rules and the affine form
-in `simplify.rs`, the reader in `parse.rs`), `axis.rs` (axes with their speller), `dtype.rs` (the dtype set and
-promotion), `elementwise.rs` (the operation table), `field.rs` (the `Field` trait and the field value types),
-`statement.rs` (the declaration list of the statement types and its macros), `body.rs`, `protocol/` (the protocol in
-`mod.rs`, what the shared statement types answer beyond their fields in `shared.rs`, the construction checks in
-`checks.rs`), `text/` (the printer in `print.rs`, the reader in `parse.rs`, what both spell in `mod.rs`), `order.rs`
-(the dependency constraints; the sort they feed is a `Body` method), `numbering/` (the `Key` tree and its hash in
-`key.rs`, the value numbering in `values.rs`, the scope-tree digest in `digest.rs`), `normalize/` (the driver and the
-helpers the steps share in `mod.rs`, the steps by what they do: `axes`, `fold`, `siblings`, `simplify`, `place`,
-`canonical`, and every tie-break in `ties.rs`), `identity.rs` (the identity of a body's normal form) and `memo.rs`, the
-memo store every memo is declared in. Every file imports what it uses by name; no child module takes its parent's
-imports.
+in `simplify.rs`, the reader in `parse.rs`), `memo.rs` (the memo store every memo is declared in), `elementwise.rs` (the
+operation table), `dtype.rs` (the dtype set and promotion, which reads the table), `axis.rs` (axes with their speller,
+and the keywords a statement's text reserves), `numbering/key.rs` (the `Key` tree and its hash, over expressions alone),
+`field.rs` (the `Field` trait and the field value types), `statement.rs` (the declaration list of the statement types
+and its macros), `body.rs`, `protocol/` (the protocol in `mod.rs`, what the shared statement types answer beyond their
+fields in `shared.rs`, the construction checks in `checks.rs`), `text/` (the printer in `print.rs`, the reader in
+`parse.rs`, what both spell in `mod.rs`), `order.rs` (the dependency constraints; the sort they feed is a `Body`
+method), the rest of `numbering/` (the value numbering in `values.rs`, the scope-tree digest in `digest.rs`),
+`normalize/` (the driver and the helpers the steps share in `mod.rs`, the steps by what they do: `axes`, `fold`,
+`siblings`, `simplify`, `place`, `canonical`, and every tie-break in `ties.rs`) and `identity.rs` (the identity of a
+body's normal form). Every file imports what it uses by name; no child module takes its parent's imports.
 
 ## Data
 

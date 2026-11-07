@@ -7,9 +7,9 @@ use std::sync::Arc;
 
 use crate::axis::Axis;
 use crate::body::{Body, MemoKey};
+use crate::dtype::DType;
 use crate::elementwise::ElementwiseOp;
 use crate::expr::{Expression, Interval, SimplifyCtx};
-use crate::field::DType;
 use crate::memo::BODY_MEMO_CAPACITY;
 use crate::order::topological_sort;
 use crate::statement::*;

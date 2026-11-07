@@ -131,8 +131,9 @@ kind" lines stay), the two lines in `emmy/compiler/ir/tile/ARCHITECTURE.md` and
 > one list in the `emmy-ir` crate, fifteen shared and thirty of the Kernel IR; each is a Rust struct and a Python class
 > of the same name. A statement is one instance of its type in a body.
 
-After this phase `grep -rniw kind crates/emmy-ir crates/emmy-ir-py emmy/compiler/ir/stmt tests/compiler/ir/stmt`
-returns the lexer and nothing else.
+After this phase `grep -rniw kind crates/emmy-ir crates/emmy-ir-py emmy/compiler/ir tests/compiler/ir tests/architecture`
+returns the lexer (`TokenKind`), the `FragmentArg` field named `kind` (stored text and a Python field, so it keeps its
+name), the tile IR's node kinds and the PTX `.kind::` qualifiers, and nothing else.
 
 ## Phase 4: storage
 

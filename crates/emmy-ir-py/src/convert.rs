@@ -6,9 +6,10 @@ use std::sync::{Arc, OnceLock};
 
 use emmy_ir::axis::{Axis, Dim, Window};
 use emmy_ir::body::Body;
+use emmy_ir::dtype::DType;
 use emmy_ir::elementwise::ElementwiseOp;
 use emmy_ir::expr::{Expression, Num};
-use emmy_ir::field::{DType, Float, Int2, NumOr, Shape3, SubroutineRef};
+use emmy_ir::field::{Float, Int2, NumOr, Shape3, SubroutineRef};
 use emmy_ir::statement::{FragmentArg, SelectBranch, Statement};
 use emmy_ir::{Error, Name};
 use pyo3::exceptions::{

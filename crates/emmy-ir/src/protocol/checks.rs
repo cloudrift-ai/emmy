@@ -137,6 +137,7 @@ pub fn finished(stmt: Statement) -> Result<Statement> {
 mod tests {
     use super::*;
     use crate::Name;
+    use crate::field::{Names, Shape3};
     use crate::text::parse_statement;
 
     /// A wgmma cell over eight C fragments at m64n64k16, its A operand named by `a_operand`.

@@ -1123,7 +1123,7 @@ macro_rules! define_statement_types {
 
             /// The dtype a statement's `dtype` field holds: the value-defining shared statement types, and TreeHalve,
             /// WarpShuffle, FragmentRowReduce and RegFragment, whose field is typed `DType` too.
-            pub fn dtype(&self) -> Option<&$crate::field::DType> {
+            pub fn dtype(&self) -> Option<&$crate::dtype::DType> {
                 match self { $( Statement::$StatementType(k) => k.dtype(), )* }
             }
 
@@ -1254,7 +1254,7 @@ macro_rules! define_statement_types {
         }
 
         /// The dtype a value-defining statement stamps: its `dtype` field, when it has one of that type.
-        pub fn dtype(&self) -> Option<&$crate::field::DType> {
+        pub fn dtype(&self) -> Option<&$crate::dtype::DType> {
             $( if stringify!($field) == "dtype" { return <$ty as $crate::field::Field>::as_dtype(&self.$field); } )*
             None
         }
@@ -1295,11 +1295,12 @@ macro_rules! define_statement_types {
 
 use crate::Name;
 use crate::body::Body;
+use crate::dtype::DType;
 use crate::elementwise::ElementwiseOp;
 use crate::expr::Expression;
-pub use crate::field::{
-    Axes, AxisRef, Branches, DType, ElementwiseOps, Exprs, Float, Floats, FragmentArgs, Int2, Ints,
-    Names, NumOr, Shape3, Stmts, SubroutineRef,
+use crate::field::{
+    Axes, AxisRef, Branches, ElementwiseOps, Exprs, Float, Floats, FragmentArgs, Int2, Ints, Names,
+    NumOr, Shape3, Stmts, SubroutineRef,
 };
 
 with_statement_types!(define_statement_types);
