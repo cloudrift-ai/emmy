@@ -131,7 +131,7 @@ def test_normalization_has_one_entry_point() -> None:
     assert steps == {"normalize_body", "fold_affine", "simplify_body", "prepare_body"}
     package = _REPO_ROOT / "emmy" / "compiler" / "ir" / "stmt"
     assert sorted(path.name for path in package.glob("*.py")) == ["__init__.py"], "the statement package is its exports and the glue"
-    crate = (_REPO_ROOT / "crates" / "emmy-ir" / "src" / "normalize.rs").read_text()
+    crate = (_REPO_ROOT / "crates" / "emmy-ir" / "src" / "normalize" / "mod.rs").read_text()
     assert "pub fn normalize_body(" in crate
 
 

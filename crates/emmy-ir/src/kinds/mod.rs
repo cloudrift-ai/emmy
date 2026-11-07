@@ -9,6 +9,11 @@
 //! and `RECORD` for records whose own fields play roles. A number where a name, a buffer or an expression is expected
 //! is plain data ([`NumOr`]). A field with no role is plain data.
 
+pub mod axis;
+pub mod dtype;
+pub mod elementwise;
+pub mod field;
+
 /// Roles, as bits.
 pub const DEFINES: u32 = 1 << 0;
 pub const READS: u32 = 1 << 1;
@@ -932,18 +937,18 @@ macro_rules! define_kinds {
                 ];
 
                 /// Visit every role-playing value of this statement, in field order.
-                pub fn visit(&self, visitor: &mut dyn $crate::field::Visitor) {
-                    $( <$ty as $crate::field::Field>::visit(&self.$field, 0 $(| $role)*, visitor); )*
+                pub fn visit(&self, visitor: &mut dyn $crate::kinds::field::Visitor) {
+                    $( <$ty as $crate::kinds::field::Field>::visit(&self.$field, 0 $(| $role)*, visitor); )*
                 }
 
                 /// This statement with every role-playing value passed through `rewriter`.
-                pub fn rewrite(&self, rewriter: &mut dyn $crate::field::Rewriter) -> $Kind {
-                    $Kind { $( $field: <$ty as $crate::field::Field>::rewrite(&self.$field, 0 $(| $role)*, rewriter), )* }
+                pub fn rewrite(&self, rewriter: &mut dyn $crate::kinds::field::Rewriter) -> $Kind {
+                    $Kind { $( $field: <$ty as $crate::kinds::field::Field>::rewrite(&self.$field, 0 $(| $role)*, rewriter), )* }
                 }
 
                 /// Whether `other` holds the same values, field by field, by identity where a field is shared.
                 pub fn same(&self, other: &$Kind) -> bool {
-                    true $( && <$ty as $crate::field::Field>::same(&self.$field, &other.$field) )*
+                    true $( && <$ty as $crate::kinds::field::Field>::same(&self.$field, &other.$field) )*
                 }
 
                 /// Each field's header text, `None` for a block field or one at its default.
@@ -951,11 +956,11 @@ macro_rules! define_kinds {
                     #[allow(unused_mut)]
                     let mut out = Vec::new();
                     $(
-                        if !<$ty as $crate::field::Field>::is_block() {
+                        if !<$ty as $crate::kinds::field::Field>::is_block() {
                             let at_default = define_kinds!(@at_default self $field $ty $(= $default)?);
                             if !at_default {
                                 let mut text = String::new();
-                                <$ty as $crate::field::Field>::spell(&self.$field, &mut text)?;
+                                <$ty as $crate::kinds::field::Field>::spell(&self.$field, &mut text)?;
                                 out.push((stringify!($field), text));
                             }
                         }
@@ -968,10 +973,10 @@ macro_rules! define_kinds {
                     #[allow(unused_mut)]
                     let mut out = Vec::new();
                     $(
-                        if <$ty as $crate::field::Field>::is_block() {
+                        if <$ty as $crate::kinds::field::Field>::is_block() {
                             let at_default = define_kinds!(@at_default self $field $ty $(= $default)?);
                             if !at_default {
-                                out.push((stringify!($field), <$ty as $crate::field::Field>::block(&self.$field)));
+                                out.push((stringify!($field), <$ty as $crate::kinds::field::Field>::block(&self.$field)));
                             }
                         }
                     )*
@@ -979,15 +984,15 @@ macro_rules! define_kinds {
                 }
 
                 /// The type a field is read by.
-                pub fn field_ty(name: &str) -> Option<$crate::field::Ty> {
+                pub fn field_ty(name: &str) -> Option<$crate::kinds::field::Ty> {
                     match name {
-                        $( stringify!($field) => Some(<$ty as $crate::field::Field>::ty()), )*
+                        $( stringify!($field) => Some(<$ty as $crate::kinds::field::Field>::ty()), )*
                         _ => None,
                     }
                 }
 
                 /// Build from the values the text reader collected, defaults filling what the text left out.
-                pub fn from_values(mut values: $crate::field::Values) -> $crate::Result<$Kind> {
+                pub fn from_values(mut values: $crate::kinds::field::Values) -> $crate::Result<$Kind> {
                     #[allow(unused_mut, unused_variables)]
                     let out = $Kind {
                         $( $field: define_kinds!(@take values $Kind $field $ty $(= $default)?), )*
@@ -1012,16 +1017,16 @@ macro_rules! define_kinds {
                     $( FieldInfo { name: stringify!($rfield), roles: 0 $(| $rrole)*, has_default: $crate::__has_default!($($rdefault)?) }, )*
                 ];
 
-                pub fn visit(&self, visitor: &mut dyn $crate::field::Visitor) {
-                    $( <$rty as $crate::field::Field>::visit(&self.$rfield, 0 $(| $rrole)*, visitor); )*
+                pub fn visit(&self, visitor: &mut dyn $crate::kinds::field::Visitor) {
+                    $( <$rty as $crate::kinds::field::Field>::visit(&self.$rfield, 0 $(| $rrole)*, visitor); )*
                 }
 
-                pub fn rewrite(&self, rewriter: &mut dyn $crate::field::Rewriter) -> $Record {
-                    $Record { $( $rfield: <$rty as $crate::field::Field>::rewrite(&self.$rfield, 0 $(| $rrole)*, rewriter), )* }
+                pub fn rewrite(&self, rewriter: &mut dyn $crate::kinds::field::Rewriter) -> $Record {
+                    $Record { $( $rfield: <$rty as $crate::kinds::field::Field>::rewrite(&self.$rfield, 0 $(| $rrole)*, rewriter), )* }
                 }
 
                 pub fn same(&self, other: &$Record) -> bool {
-                    true $( && <$rty as $crate::field::Field>::same(&self.$rfield, &other.$rfield) )*
+                    true $( && <$rty as $crate::kinds::field::Field>::same(&self.$rfield, &other.$rfield) )*
                 }
 
                 pub fn header_fields(&self) -> $crate::Result<Vec<(&'static str, String)>> {
@@ -1031,21 +1036,21 @@ macro_rules! define_kinds {
                         let at_default = define_kinds!(@at_default self $rfield $rty $(= $rdefault)?);
                         if !at_default {
                             let mut text = String::new();
-                            <$rty as $crate::field::Field>::spell(&self.$rfield, &mut text)?;
+                            <$rty as $crate::kinds::field::Field>::spell(&self.$rfield, &mut text)?;
                             out.push((stringify!($rfield), text));
                         }
                     )*
                     Ok(out)
                 }
 
-                pub fn field_ty(name: &str) -> Option<$crate::field::Ty> {
+                pub fn field_ty(name: &str) -> Option<$crate::kinds::field::Ty> {
                     match name {
-                        $( stringify!($rfield) => Some(<$rty as $crate::field::Field>::ty()), )*
+                        $( stringify!($rfield) => Some(<$rty as $crate::kinds::field::Field>::ty()), )*
                         _ => None,
                     }
                 }
 
-                pub fn from_values(mut values: $crate::field::Values) -> $crate::Result<$Record> {
+                pub fn from_values(mut values: $crate::kinds::field::Values) -> $crate::Result<$Record> {
                     #[allow(unused_mut, unused_variables)]
                     let out = $Record {
                         $( $rfield: define_kinds!(@take values $Record $rfield $rty $(= $rdefault)?), )*
@@ -1090,25 +1095,25 @@ macro_rules! define_kinds {
                 }
             }
 
-            pub fn field_ty(kind: &str, field: &str) -> Option<$crate::field::Ty> {
+            pub fn field_ty(kind: &str, field: &str) -> Option<$crate::kinds::field::Ty> {
                 match kind {
                     $( stringify!($Kind) => $Kind::field_ty(field), )*
                     _ => None,
                 }
             }
 
-            pub fn from_values(kind: &str, values: $crate::field::Values) -> $crate::Result<Statement> {
+            pub fn from_values(kind: &str, values: $crate::kinds::field::Values) -> $crate::Result<Statement> {
                 match kind {
                     $( stringify!($Kind) => Ok(Statement::$Kind($Kind::from_values(values)?)), )*
                     _ => Err($crate::Error::Value(format!("no statement kind {kind}"))),
                 }
             }
 
-            pub fn visit(&self, visitor: &mut dyn $crate::field::Visitor) {
+            pub fn visit(&self, visitor: &mut dyn $crate::kinds::field::Visitor) {
                 match self { $( Statement::$Kind(k) => k.visit(visitor), )* }
             }
 
-            pub fn rewrite_fields(&self, rewriter: &mut dyn $crate::field::Rewriter) -> Statement {
+            pub fn rewrite_fields(&self, rewriter: &mut dyn $crate::kinds::field::Rewriter) -> Statement {
                 match self { $( Statement::$Kind(k) => Statement::$Kind(k.rewrite(rewriter)), )* }
             }
 
@@ -1139,18 +1144,18 @@ macro_rules! define_kinds {
     (@layer shared) => { Layer::Shared };
     (@layer kernel) => { Layer::Kernel };
     (@at_default $self:ident $field:ident $ty:ty = $default:expr) => {
-        <$ty as $crate::field::Field>::equals(&$self.$field, &$default)
+        <$ty as $crate::kinds::field::Field>::equals(&$self.$field, &$default)
     };
     (@at_default $self:ident $field:ident $ty:ty) => { false };
     (@take $values:ident $kind:ident $field:ident $ty:ty = $default:expr) => {
         match $values.take(stringify!($field)) {
-            Some(value) => <$ty as $crate::field::Field>::from_value(value)?,
+            Some(value) => <$ty as $crate::kinds::field::Field>::from_value(value)?,
             None => $default,
         }
     };
     (@take $values:ident $kind:ident $field:ident $ty:ty) => {
         match $values.take(stringify!($field)) {
-            Some(value) => <$ty as $crate::field::Field>::from_value(value)?,
+            Some(value) => <$ty as $crate::kinds::field::Field>::from_value(value)?,
             None => return Err($crate::Error::Value(format!("{} requires {}", stringify!($kind), stringify!($field)))),
         }
     };
@@ -1158,9 +1163,9 @@ macro_rules! define_kinds {
 
 use crate::Name;
 use crate::body::Body;
-use crate::elementwise::Op;
 use crate::expr::Expression;
-pub use crate::field::{
+use crate::kinds::elementwise::Op;
+pub use crate::kinds::field::{
     Axes, AxisRef, Branches, DType, Exprs, Float, Floats, FragmentArgs, Int2, Ints, Names, NumOr,
     Ops, Shape3, Stmts, SubroutineRef,
 };

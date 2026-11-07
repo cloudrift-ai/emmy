@@ -6,11 +6,11 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use crate::axis::{Axis, Dim, Window};
 use crate::body::{Body, Subroutine};
-use crate::elementwise::Op;
 use crate::expr::{Expr, Expression, Lit, Num, Parser, TokenKind, spell_name};
-use crate::field::{DType, Float, NumOr, Ty, Value, Values, spell_number};
+use crate::kinds::axis::{Axis, Dim, Window};
+use crate::kinds::elementwise::Op;
+use crate::kinds::field::{DType, Float, NumOr, Ty, Value, Values, spell_number};
 use crate::kinds::*;
 use crate::protocol::finished;
 use crate::{Error, Name, Result};
@@ -820,7 +820,11 @@ impl Line {
                 target.with_buffers(buffers.into())
             };
             let args = self.parser.expressions(")")?;
-            let call = Call::checked(name, crate::field::SubroutineRef(target), args.into())?;
+            let call = Call::checked(
+                name,
+                crate::kinds::field::SubroutineRef(target),
+                args.into(),
+            )?;
             return self.end(Arc::new(Statement::Call(call)));
         }
         if self.parser.at_word("pre", 0) && !self.parser.at("(", 1) {
@@ -1040,7 +1044,7 @@ impl Line {
         &mut self,
         dtype: Option<DType>,
         name: Name,
-        index: crate::field::Exprs,
+        index: crate::kinds::field::Exprs,
     ) -> Result<Statement> {
         if self.parser.accept("<-") {
             let value = self.name()?;

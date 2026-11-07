@@ -8,11 +8,13 @@ use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
-use crate::axis::Axis;
 use crate::body::{Body, Subroutine};
-use crate::elementwise::Op;
 use crate::expr::{Expr, Expression};
-use crate::field::{AxisRef, DType, Exprs, Float, Names, NumOr, Rewriter, SubroutineRef, Visitor};
+use crate::kinds::axis::Axis;
+use crate::kinds::elementwise::Op;
+use crate::kinds::field::{
+    AxisRef, DType, Exprs, Float, Names, NumOr, Rewriter, SubroutineRef, Visitor,
+};
 use crate::kinds::*;
 use crate::{Error, Name, Result};
 
@@ -863,7 +865,7 @@ impl Affine {
         if coefficients.iter().any(|c| c.0 == 0.0) {
             let shown: Vec<String> = coefficients
                 .iter()
-                .map(|c| crate::field::spell_number(c.0))
+                .map(|c| crate::kinds::field::spell_number(c.0))
                 .collect();
             return Err(Error::Value(format!(
                 "Affine {name:?} carries a zero coefficient: ({})",
@@ -1111,7 +1113,7 @@ impl Accum {
 }
 
 impl Select {
-    pub fn checked(name: Name, branches: crate::field::Branches) -> Result<Select> {
+    pub fn checked(name: Name, branches: crate::kinds::field::Branches) -> Result<Select> {
         if branches.is_empty() {
             return Err(Error::Value("Select.branches must be non-empty".into()));
         }
@@ -1143,7 +1145,7 @@ impl Tile {
 
 impl WgmmaMma {
     pub fn check(&self) -> Result<()> {
-        let crate::field::Shape3(m, n, k) = self.shape;
+        let crate::kinds::field::Shape3(m, n, k) = self.shape;
         if (m, k) != (64, 16) || n % 8 != 0 || !(8..=256).contains(&n) {
             return Err(Error::Value(format!(
                 "wgmma: the shape is m64n<8..256, a multiple of 8>k16, got ({m}, {n}, {k})"

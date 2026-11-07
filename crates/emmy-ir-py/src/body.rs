@@ -17,22 +17,55 @@ use crate::convert::{
 use crate::expression::{PyExpression, renames_from_py};
 use crate::statement::{PyStatement, kind_of, statements_from_py, wrap_statement};
 
-/// The wrappers a body's statements hand back, kept with the body so a statement read twice is one object.
-type Wrappers = Box<[OnceLock<Py<PyAny>>]>;
+/// The wrappers a body's statements hand back, so a statement read twice is one object however many wrappers the body
+/// has. The table is keyed by the body's shared allocation and lives on this side of the boundary: the crate holds no
+/// Python object. An entry outlives its body only until the next purge.
+type Wrappers = Arc<[OnceLock<Py<PyAny>>]>;
 
-fn wrappers(body: &Body) -> &Wrappers {
-    let ext = body
-        .0
-        .ext
-        .get_or_init(|| Box::new(slots(body.len())) as Box<dyn std::any::Any + Send + Sync>);
-    match ext.downcast_ref::<Wrappers>() {
-        Some(found) => found,
-        None => {
-            // The slot was taken by another holder; a fresh table is as good, only the sharing is lost.
-            static EMPTY: OnceLock<Wrappers> = OnceLock::new();
-            EMPTY.get_or_init(|| slots(0))
+/// A table of per-object state on this side of the boundary, keyed by the shared object's address while it lives:
+/// a body's statement wrappers, a subroutine's one Python object. An entry outlives its object only until the next
+/// purge.
+struct Tables<T, V> {
+    entries: HashMap<usize, (std::sync::Weak<T>, V)>,
+}
+
+impl<T, V> Tables<T, V> {
+    fn new() -> Tables<T, V> {
+        Tables {
+            entries: HashMap::new(),
         }
     }
+
+    fn get<R>(&self, object: &Arc<T>, read: impl FnOnce(&V) -> R) -> Option<R> {
+        let (alive, value) = self.entries.get(&(Arc::as_ptr(object) as usize))?;
+        alive
+            .upgrade()
+            .filter(|found| Arc::ptr_eq(found, object))
+            .map(|_| read(value))
+    }
+
+    fn insert(&mut self, object: &Arc<T>, value: V) {
+        if self.entries.len() % 1024 == 1023 {
+            self.entries
+                .retain(|_, (alive, _)| alive.strong_count() > 0);
+        }
+        self.entries.insert(
+            Arc::as_ptr(object) as usize,
+            (Arc::downgrade(object), value),
+        );
+    }
+}
+
+static WRAPPERS: OnceLock<Mutex<Tables<emmy_ir::body::BodyData, Wrappers>>> = OnceLock::new();
+
+fn wrappers(body: &Body) -> Wrappers {
+    let mut tables = emmy_ir::locked(WRAPPERS.get_or_init(|| Mutex::new(Tables::new())));
+    if let Some(table) = tables.get(&body.0, Wrappers::clone) {
+        return table;
+    }
+    let table: Wrappers = (0..body.len()).map(|_| OnceLock::new()).collect();
+    tables.insert(&body.0, table.clone());
+    table
 }
 
 /// An immutable sequence of statements, built from any iterable.
@@ -86,7 +119,10 @@ impl PyBody {
 }
 
 pub fn wrap_ref<'py>(py: Python<'py>, here: &StmtRef) -> PyResult<Bound<'py, PyAny>> {
-    PyBody::item(py, &here.body, here.index)
+    match here.body() {
+        Some(body) => PyBody::item(py, &body, here.index),
+        None => Ok(wrap_statement(py, here.stmt())?.into_bound(py)),
+    }
 }
 
 fn frozenset<'py>(
@@ -323,7 +359,7 @@ impl PyBody {
     fn definitions<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyDict>> {
         let out = PyDict::new(py);
         let mut entries: Vec<(&Name, &StmtRef)> = self.body.definitions().iter().collect();
-        entries.sort_by(|a, b| a.0.cmp(b.0));
+        entries.sort_by_key(|entry| entry.0);
         for (name, here) in entries {
             out.set_item(&**name, wrap_ref(py, here)?)?;
         }
@@ -487,8 +523,12 @@ impl PyBody {
                     .collect::<PyResult<_>>()
             })
             .transpose()?;
-        let identity =
-            emmy_ir::identity::canonicalize_identity(&self.body, cluster, colors.as_ref()).py()?;
+        let identity = emmy_ir::numbering::identity::canonicalize_identity(
+            &self.body,
+            cluster,
+            colors.as_ref(),
+        )
+        .py()?;
         Ok((identity.key, str_tuple(py, &identity.arguments)?))
     }
 }
@@ -527,18 +567,19 @@ pub struct PySubroutine {
     slots: Slots,
 }
 
-type WeakSlot = Mutex<Option<Py<PyAny>>>;
+/// The weak reference to each subroutine's one Python object, keyed by the subroutine's address while it lives.
+static SUBROUTINES: OnceLock<Mutex<Tables<Subroutine, Py<PyAny>>>> = OnceLock::new();
+
+fn subroutines() -> &'static Mutex<Tables<Subroutine, Py<PyAny>>> {
+    SUBROUTINES.get_or_init(|| Mutex::new(Tables::new()))
+}
 
 impl PySubroutine {
     /// The one Python object of `sub` while any reference to it lives.
     pub fn wrap<'py>(py: Python<'py>, sub: &Arc<Subroutine>) -> PyResult<Bound<'py, PySubroutine>> {
-        let weak = sub.ext.get_or_init(|| {
-            Box::new(Mutex::new(None::<Py<PyAny>>)) as Box<dyn std::any::Any + Send + Sync>
-        });
-        let slot = weak.downcast_ref::<WeakSlot>();
-        if let Some(slot) = slot
-            && let Some(reference) = emmy_ir::locked(slot).as_ref()
-        {
+        let remembered =
+            emmy_ir::locked(subroutines()).get(sub, |reference| reference.clone_ref(py));
+        if let Some(reference) = remembered {
             let alive = reference.bind(py).call0()?;
             if let Ok(found) = alive.cast::<PySubroutine>() {
                 return Ok(found.clone());
@@ -551,10 +592,8 @@ impl PySubroutine {
                 slots: slots(4),
             },
         )?;
-        if let Some(slot) = slot {
-            let reference = py.import("weakref")?.getattr("ref")?.call1((&wrapper,))?;
-            *emmy_ir::locked(slot) = Some(reference.unbind());
-        }
+        let reference = py.import("weakref")?.getattr("ref")?.call1((&wrapper,))?;
+        emmy_ir::locked(subroutines()).insert(sub, reference.unbind());
         Ok(wrapper)
     }
 }
@@ -568,7 +607,7 @@ impl PySubroutine {
         body: &Bound<'_, PyAny>,
         result: &str,
     ) -> PyResult<PySubroutine> {
-        let (axes, _) = <emmy_ir::field::Axes as PyField>::from_py(axes)?;
+        let (axes, _) = <emmy_ir::kinds::field::Axes as PyField>::from_py(axes)?;
         let body = PyBody::from_iterable(body)?;
         let sub = Subroutine::new(name.into(), axes, body, result.into()).py()?;
         Ok(PySubroutine {
@@ -620,7 +659,7 @@ impl PySubroutine {
         py: Python<'py>,
         buffers: &Bound<'py, PyAny>,
     ) -> PyResult<Bound<'py, PySubroutine>> {
-        let (buffers, _) = <emmy_ir::field::Names as PyField>::from_py(buffers)?;
+        let (buffers, _) = <emmy_ir::kinds::field::Names as PyField>::from_py(buffers)?;
         if buffers.len() != self.sub.buffers.len() {
             return Err(PyValueError::new_err(format!(
                 "{} buffers for {} captured",
@@ -882,7 +921,7 @@ pub fn ordering_constraints<'py>(
 ) -> PyResult<Bound<'py, PyList>> {
     let body = PyBody::from_iterable(body)?;
     let sets: PyResult<Vec<Bound<'py, PySet>>> =
-        emmy_ir::order::ordering_constraints(&body, effects, redefinitions)
+        emmy_ir::normalize::order::ordering_constraints(&body, effects, redefinitions)
             .iter()
             .map(|sources| PySet::new(py, sources.iter()))
             .collect();
@@ -893,14 +932,14 @@ pub fn ordering_constraints<'py>(
 #[pyfunction]
 pub fn dtype_promote(op_name: &str, arg_dtypes: Vec<String>) -> String {
     let dtypes: Vec<&str> = arg_dtypes.iter().map(|d| d.as_str()).collect();
-    emmy_ir::dtype::promote(op_name, &dtypes).to_string()
+    emmy_ir::kinds::dtype::promote(op_name, &dtypes).to_string()
 }
 
 /// Forget every memoized normal form and identity (the tests of the memos use it).
 #[pyfunction]
 pub fn clear_memos() {
     emmy_ir::normalize::clear_memo();
-    emmy_ir::identity::clear_memo();
+    emmy_ir::numbering::identity::clear_memo();
 }
 
 /// The carried states a loop over `body` carries, each with its cell shape.
