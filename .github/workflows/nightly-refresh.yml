@@ -620,9 +620,52 @@ jobs:
             "$DISCOVERY_SUMMARY"
           git config --unset-all credential.helper || true
 
+  # Every row of the measurement freeze compiled under its own schedule, the card's file as the compile's golden
+  # evidence, on the files the prior job's fold left on main. A freeze stores no program a restamp could lower afresh,
+  # so this is the check it admits. Reported, not gated: a row the compiler no longer realizes is evidence no compile
+  # takes, and the summary counts them per card.
+  freeze:
+    needs: prior
+    if: always()
+    runs-on:
+      group: ubuntu-runners
+    timeout-minutes: 120
+    permissions:
+      contents: read
+    outputs:
+      summary: ${{ steps.summary.outputs.summary }}
+    steps:
+      # The branch's tip, not the commit the run started on: the fold may have landed card files since.
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.ref_name }}
+          persist-credentials: false
+
+      - name: Fetch the measurement freeze from LFS
+        run: git lfs pull --include="emmy/compiler/pipeline/search/freezes/*"
+
+      - uses: ./.github/actions/setup-emmy
+
+      - name: Realize the measurement freeze
+        continue-on-error: true
+        run: |
+          mkdir -p _data
+          ./venv/bin/emmy golden realize emmy/compiler/pipeline/search/freezes --json _data/realize.json
+
+      - name: Summarize the realization
+        id: summary
+        if: always()
+        run: |
+          summary="No report; open the run."
+          if [ -f _data/realize.json ]; then
+            summary=$(jq -r -f .github/workflows/scripts/freeze_realized.jq _data/realize.json)
+          fi
+          echo "$summary"
+          echo "summary=$summary" >> "$GITHUB_OUTPUT"
+
   notify:
     name: Notify Discord
-    needs: [durations, prior, gaps, fill, discover]
+    needs: [durations, prior, freeze, gaps, fill, discover]
     if: ${{ always() }}
     runs-on: ubuntu-latest
     timeout-minutes: 5
@@ -636,6 +679,8 @@ jobs:
       PRIOR_RESULT: ${{ needs.prior.result }}
       SCHEDULE_PRIOR: ${{ needs.prior.outputs.schedule }}
       PLACEMENT_PRIOR: ${{ needs.prior.outputs.placement }}
+      FREEZE_RESULT: ${{ needs.freeze.result }}
+      MEASUREMENT_FREEZE: ${{ needs.freeze.outputs.summary }}
       GAPS_RESULT: ${{ needs.gaps.result }}
       FILL_RESULT: ${{ needs.fill.result }}
       GOLDEN_FILL: ${{ needs.fill.outputs.summary }}

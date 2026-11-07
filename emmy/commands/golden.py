@@ -7,8 +7,11 @@ JSON; it reads the file and judges nothing.
 
 ``check`` says what a restamp would change: a kernel the fresh lowering keys differently, a decision it no longer
 takes the same way, a row whose measurement is of a kernel the compiler no longer builds. ``restamp`` writes that
-rewrite (``search/golden/restamp.py`` decides what each row keeps). Both are GPU-free and default to every
-repository golden; the ``refresh-golden`` skill is the flow around them, including what needs a card.
+rewrite (``search/golden/restamp.py`` decides what each row keeps). ``realize`` compiles every row that has a
+schedule under it, the file as the compile's golden evidence, and names the rows the compiler no longer realizes —
+the check a measurement freeze admits, having no program to restamp from (``search/golden/realize.py``). All three
+are GPU-free and default to every repository golden; the ``refresh-golden`` skill is the flow around the first two,
+including what needs a card.
 """
 
 from __future__ import annotations
@@ -55,6 +58,23 @@ def register_golden_command(subparsers) -> None:
     )
     pr.add_argument("paths", nargs="*", help="Golden files to restamp. Default: every repository golden.")
     pr.set_defaults(func=handle_golden_restamp)
+
+    pz = sub.add_parser(
+        "realize",
+        help="Compile every row that has a schedule under it, the file as the compile's golden evidence, and say which "
+        "rows the compiler no longer realizes",
+    )
+    pz.add_argument(
+        "paths", nargs="*", help="Golden files, or directories searched for them (a measurement freeze). Default: every repository golden."
+    )
+    pz.add_argument("--jobs", type=int, help="Worker processes compiling rows side by side (default: EMMY_WORKERS, one per core).")
+    pz.add_argument(
+        "--json",
+        dest="json_out",
+        metavar="PATH",
+        help="Write each file's report — its rows, and the ones that do not realize with the reason — as JSON to PATH ('-' for stdout).",
+    )
+    pz.set_defaults(func=handle_golden_realize)
 
 
 def _goldens(paths: list[str]) -> list[Path]:
@@ -108,6 +128,25 @@ def handle_golden_restamp(args) -> None:
             continue
         fresh.dump(path, overwrite=True)
     if failed:
+        sys.exit(1)
+
+
+def handle_golden_realize(args) -> None:
+    from emmy.compiler.pipeline.search.golden.realize import realize  # noqa: PLC0415
+
+    reports = realize(_goldens(args.paths), jobs=args.jobs)
+    for report in reports:
+        if not report.failed:
+            continue
+        logger.error("%s: %d of %d rows do not realize", report.file, len(report.failed), report.rows)
+        for name, kernel, reason in report.failed[:_SHOWN]:
+            logger.error("  %s (%s): %s", name, kernel, reason)
+        if len(report.failed) > _SHOWN:
+            logger.error("  ... and %d more", len(report.failed) - _SHOWN)
+    if args.json_out:
+        text = json.dumps([report.wire() for report in reports], indent=2)
+        print(text) if args.json_out == "-" else Path(args.json_out).write_text(text + "\n")
+    if any(report.failed for report in reports):
         sys.exit(1)
 
 

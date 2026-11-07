@@ -204,8 +204,9 @@ freezes the same rows into one file beside the card's under `emmy/compiler/pipel
 measurement freeze the repository keeps, one golden file per card in git LFS: `--repository` reads it beside the
 goldens, and the nightly refresh reports the prior's regret over its pools. Commit the tune's file with your change
 (run `git lfs install` once on the machine that commits); the nightly refresh folds the files into each card's file
-on `main`. A tune on a rented card writes the file into the copy there: copy it back next to the card's file, as you
-do the working golden. `EMMY_FREEZE_DIR` names another directory or, set empty, none.
+on `main`, then compiles every row of the freeze under its own schedule and posts the rows the compiler no longer
+realizes (`emmy golden realize`). A tune on a rented card writes the file into the copy there: copy it back next to
+the card's file, as you do the working golden. `EMMY_FREEZE_DIR` names another directory or, set empty, none.
 
 A tune DB from a machine with no checkout is merged by hand (`~/.cache/emmy/autotune.db`, or the file `EMMY_TUNE_DB`
 names, copied over):
