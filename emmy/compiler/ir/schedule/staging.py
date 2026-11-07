@@ -66,14 +66,35 @@ def stage_target(stage: Stage, ctx) -> str | None:
 SPLIT_COPY_DEPTH = 2
 
 
-def chunk_slab_pad(tile: Tile, stage: Stage) -> int:
-    """The row pad, in elements, of a chunk-tier slab the Volta blocking copy fills.
+def chunk_slab_dtype(tile: Tile, stage: Stage, stored):
+    """The element dtype a chunk-tier slab holds for an operand stored as ``stored`` (``None``: not
+    known, read as the atom's own), or ``None`` when no slab takes it.
+
+    An operand stored at the atom's B dtype stages verbatim on every transport. A 1-byte (fp8)
+    operand under a 16-bit ``mma.sync`` cell stages as a RAW BYTE slab on cp.async, and its fragment
+    reads convert per element, as its gmem-direct load does — the contraction tier's W8A16 reading,
+    applied to an FP8 key-value cache. Its 16 B copies replace the one-byte gmem loads the direct
+    read issues per element. The blocking copy and TMA keep the verbatim rule: the Volta drain
+    gathers f16 slabs, and a descriptor read would take the bytes for 16-bit values."""
+    atom = tile.atom.operand_dtype("b")
+    if stored is None or stored == atom:
+        return atom
+    if stage.transport == "smem-async" and stored.nbytes == 1 and stored.logical_elems == 1 and atom.nbytes == 2 and not tile.atom.is_wgmma:
+        return stored
+    return None
+
+
+def chunk_slab_pad(tile: Tile, stage: Stage, elem=None) -> int:
+    """The row pad, in elements, of a chunk-tier slab: the Volta blocking copy's, or a byte slab's.
 
     The Volta drain gathers each lane's four halves at ``row · ldm``, one row per lane, and the
     chunk tier's slabs are 64 B or 256 B rows: unpadded, every row of a fragment starts on the same
     bank and one read serializes eight or sixteen ways. Sixteen bytes of pad keep the fill's 16 B
-    vector stores aligned and spread the rows to a two-way conflict at worst. The copy transports
-    of the newer atoms swizzle their slabs instead, and pad nothing."""
+    vector stores aligned and spread the rows to a two-way conflict at worst. A byte slab
+    (:func:`chunk_slab_dtype`) takes the contraction tier's ``BYTE_SLAB_PAD`` for the same reason:
+    its byte gathers read no swizzled slab. The other copy slabs swizzle instead, and pad nothing."""
+    if elem is not None and elem.nbytes == 1:
+        return BYTE_SLAB_PAD
     return 8 if stage.transport == "smem" and tile.atom.sync_copy_staging else 0
 
 
@@ -150,8 +171,8 @@ _PACKED_FRAGMENT_DTYPES = ("f16", "bf16")
 
 
 def chunk_key_stage(tile: Tile, stage: Stage, inputs, producer, producer_k, k_axis: Axis) -> tuple | None:
-    """The chunk tier's SECOND streamed slab — its score's KEY — as ``(load, span)``, or ``None``
-    when the streamed value slabs alone.
+    """The chunk tier's SECOND streamed slab — its score's KEY — as ``(load, span, elem)``, or ``None``
+    when the streamed value slabs alone; ``elem`` is the slab's element dtype (:func:`chunk_slab_dtype`).
 
     A chunk carrier reads TWO operands along its key axis: the score's key and the value it
     streams. Both are B-shaped slabs of ``bk_elems`` key rows, so this asks the value's own
@@ -174,10 +195,11 @@ def chunk_key_stage(tile: Tile, stage: Stage, inputs, producer, producer_k, k_ax
     slab = key.as_slab() if key is not None else None
     if slab is None or producer_k.name not in slab.load.index[-1].free_vars():
         return None  # the score's contraction span must be the key's gmem inner dim (the fill's chunk)
-    stored = inputs.get(slab.load.input) if inputs else None
-    if stored is not None and stored.dtype != tile.atom.operand_dtype("b"):
-        return None
-    span, nbytes = producer_k.extent.as_static(), tile.atom.operand_dtype("b").nbytes
+    elem = chunk_slab_dtype(tile, stage, _stored_dtype(inputs, slab.load.input))
+    span = producer_k.extent.as_static()
+    if elem is None or (elem.nbytes == 1 and span % 16):
+        return None  # a byte slab copies 16 B chunks along the span
+    nbytes = elem.nbytes
     bk_elems = tile.bk * tile.atom.atom_k
     # The key rows its slab by key and runs its copy chunks along the score's span, so a SYMBOLIC
     # key extent enters neither the chunk width nor the gmem row stride — the value's own
@@ -193,7 +215,12 @@ def chunk_key_stage(tile: Tile, stage: Stage, inputs, producer, producer_k, k_ax
             and _warp_tma(k_axis, producer_k, span, bk_elems, nbytes, nbytes, False, False, ragged=ragged)
         )
     )
-    return (slab.load, span) if copies else None
+    return (slab.load, span, elem) if copies else None
+
+
+def _stored_dtype(inputs, name: str):
+    stored = inputs.get(name) if inputs else None
+    return stored.dtype if stored is not None else None
 
 
 def _chunk_warp_stage(
@@ -209,9 +236,8 @@ def _chunk_warp_stage(
     stored tile at the fragment lane map.
 
     The eligibility gates are the generic arm's B half, asked of each operand that has a slab. An
-    operand whose stored dtype is not the atom's declines rather than staging a converting slab:
-    the chunk drain reads 16-bit fragments, and the gmem-direct fragment load converts per element
-    correctly today.
+    operand stored at another dtype than the atom's takes the slab :func:`chunk_slab_dtype` names
+    for it — an FP8 cache a byte slab on cp.async, its 16 B rows padded — or declines.
 
     The synchronous ``smem`` transport is the Volta atom's blocking vector copy. It stages the same
     slabs, row-padded (:func:`chunk_slab_pad`) because the Volta drain has no swizzled read, and rings
@@ -228,11 +254,13 @@ def _chunk_warp_stage(
     slab = c.streamed.as_slab()
     if view is None or slab is None:
         return None
-    b_nbytes = atom.operand_dtype("b").nbytes
-    stored = inputs.get(slab.load.input) if inputs else None
-    if stored is not None and stored.dtype != atom.operand_dtype("b"):
+    elem = chunk_slab_dtype(tile, stage, _stored_dtype(inputs, slab.load.input))
+    if elem is None:
         return None
+    b_nbytes = elem.nbytes
     bk_elems = tile.bk * atom.atom_k
+    if b_nbytes == 1 and (bk_elems if view.b_trans else n.tile) % 16:
+        return None  # a byte slab copies 16 B chunks along its inner span
     # A SYMBOLIC key extent stages when the slab's gmem geometry never reads it. A K-MAJOR value —
     # the ordinary attention layout — rows the slab by key and runs its copy chunks along the head
     # dim, so the extent enters neither the chunk width nor the gmem row stride, and the last chunk
@@ -255,12 +283,13 @@ def _chunk_warp_stage(
     sync_ok = stage.transport == "smem" and atom.sync_copy_staging and vector_copy_ok
     if not (tma_ok or cp_ok or sync_ok):
         return None
-    pad = chunk_slab_pad(tile, stage)
+    pad = chunk_slab_pad(tile, stage, elem)
     b_rows, b_cols = (n.tile, bk_elems) if view.b_trans else (bk_elems, n.tile)
     slot_bytes = b_rows * (b_cols + pad) * b_nbytes
     key = chunk_key_stage(tile, stage, inputs, producer, producer_k, k_axis)
     if key is not None:
-        slot_bytes += bk_elems * (key[1] + pad) * b_nbytes
+        _, span, key_elem = key
+        slot_bytes += bk_elems * (span + chunk_slab_pad(tile, stage, key_elem)) * key_elem.nbytes
     if slot_bytes > budget:
         return None
     # A RAGGED stream keeps the single-buffer ring the tail discipline above was written for.

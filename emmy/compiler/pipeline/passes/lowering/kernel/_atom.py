@@ -72,7 +72,7 @@ from emmy.compiler.ir.schedule import Side, Stage, Tile
 from emmy.compiler.ir.schedule.classic.refusals import chunk_partial_columns
 from emmy.compiler.ir.schedule.mask import cell_uniform, coordinate_aliases, select_masks
 from emmy.compiler.ir.schedule.packing import block_scaled_atom, packed_readings
-from emmy.compiler.ir.schedule.staging import chunk_key_stage, chunk_slab_pad, copied_b
+from emmy.compiler.ir.schedule.staging import chunk_key_stage, chunk_slab_dtype, chunk_slab_pad, copied_b
 from emmy.compiler.ir.sigma import Sigma
 from emmy.compiler.ir.stmt import (
     Accum,
@@ -3162,8 +3162,10 @@ class _FlashOps(_MmaOps):
         elem = self.tile.atom.operand_dtype("b")
         load = self.c.streamed.as_slab().load
         trans = self.c.as_contraction().b_trans
-        # The Volta blocking copy pads its rows instead: its drain reads no swizzled slab.
-        pad = chunk_slab_pad(self.tile, self.stage.choice)
+        stored = self.inputs.get(load.input) if self.inputs else None
+        v_elem = chunk_slab_dtype(self.tile, self.stage.choice, stored.dtype if stored is not None else None)
+        # The Volta blocking copy and a byte slab pad their rows instead: their drains read no swizzled slab.
+        pad = chunk_slab_pad(self.tile, self.stage.choice, v_elem)
         swizzle = "NONE" if pad else self.slab_swizzles(mn, elem.nbytes)[1]
         (value,) = _slab_operands(
             index_srcs=(None, load.index),
@@ -3173,7 +3175,7 @@ class _FlashOps(_MmaOps):
             bk_elems=bk,
             base=_tile_base(mn),
             swizzles=("NONE", swizzle),
-            elems=(None, elem),
+            elems=(None, v_elem),
             b_trans=trans,
             b_atoms=self.b_atoms(mn),
             pads=(0, pad),
@@ -3181,7 +3183,8 @@ class _FlashOps(_MmaOps):
         )
         key = None
         if (staged_key := self._key_stage()) is not None:
-            k_load, span = staged_key
+            k_load, span, k_elem = staged_key
+            k_pad = chunk_slab_pad(self.tile, self.stage.choice, k_elem)
             span_axis = self._score_k
             side = Side(axis=span_axis, tile=span, units=1, reg=1, block=span_axis.name + "_b", unit=span_axis.name + "_u")
             # A warp-group score reads the key through a descriptor, whose K step stays inside one
@@ -3195,10 +3198,10 @@ class _FlashOps(_MmaOps):
                 bk_elems=bk,
                 base=(Literal(0, "int"), _tile_base(mn)[1]),
                 b_atoms=atoms,
-                swizzles=("NONE" if pad else self.slab_swizzle(span // atoms, elem.nbytes), "NONE"),
-                elems=(elem, None),
+                swizzles=("NONE" if k_pad else self.slab_swizzle(span // atoms, elem.nbytes), "NONE"),
+                elems=(k_elem, None),
                 rows=(False, trans),
-                pads=(pad, 0),
+                pads=(k_pad, 0),
                 roles=(0,),
             )
         cta = _cta(mn, self.tile.atom.lanes, self.tile.launch_threads)
@@ -3517,6 +3520,7 @@ class _FlashOps(_MmaOps):
             ldm=key.shape[1] + key.pad_cols,
             swizzle=key.swizzle,
             b_trans=True,
+            byte_slab=key.elem_bytes == 1,
             fragment_layout=atom.fragment_layout,
         )
 
@@ -3685,6 +3689,7 @@ class _FlashOps(_MmaOps):
             ldm=value.shape[1] + value.pad_cols,
             swizzle=value.swizzle,
             b_trans=trans,
+            byte_slab=value.elem_bytes == 1,
             fragment_layout=atom.fragment_layout,
         )
 
