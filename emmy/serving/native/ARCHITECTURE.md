@@ -202,9 +202,11 @@ a scatter into a windowed buffer leaves its store no grid. The attention program
 context. Its programs compile with the window symbolic, once per range of windows (`WINDOW_RANGES`): a short range
 from the runtime's smallest window and a long one, each priced at one window, its hint, where its golden rows bench
 and its pick is made. A kernel's identity has no sizes, so both ranges' programs lower to one kernel with rows at
-two bindings, and a long window's split is measured where it runs instead of at the short one. The long range's twins
-are named apart (`attend64-long-native`). The runtime runs a step's range's program (runtime `ARCHITECTURE.md`); the
-card's measurements set the boundary. The
+two bindings, and a long window's split is measured where it runs instead of at the short one; a pick reads only the
+rows at its own window. A bench puts a program's rows last in the window it is priced at (`position` is the window
+less the rows), since a causal chunk reads keys only up to its rows. The long range's twins are named apart
+(`attend64-long-native`). The runtime runs a step's range's program (runtime `ARCHITECTURE.md`). The long range
+starts at 16,384, where on the RTX 5090 its picks stop losing to the short range's in the 27B's verify step. The
 cache is paged along its positions only when a page (`export_model(page_tokens=…)`, `emmy generate --page-tokens`) is
 shorter than the context; the runtime then allocates every page at load and binds the tables (see the runtime's
 paged-buffer contract). The default page spans the context, which is the flat buffer; a smaller page changes only the

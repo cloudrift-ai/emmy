@@ -29,8 +29,9 @@ WINDOW = "cache_tokens"
 #: the window's hint there, so its rows are measured and its pick made at that window, and a step runs its window's
 #: range's program. Each range is its twins' name suffix, its first window and its price; it ends below the next range's
 #: first window, the last at the context. A step's window is a multiple of 4,096 from 4,096 (runtime
-#: ``ARCHITECTURE.md``, "Cached generation"), the short range's price. The card's measurements set the boundary.
-WINDOW_RANGES = (("", 1, 4096), ("-long", 32768, 131072))
+#: ``ARCHITECTURE.md``, "Cached generation"), the short range's price. The long range starts where its picks stop
+#: losing to the short range's in the step every token runs, the 27B's verify step on the RTX 5090: at 16,384.
+WINDOW_RANGES = (("", 1, 4096), ("-long", 16384, 131072))
 #: e4m3's largest finite value: a cache store saturates to it, as vLLM's does.
 FP8_MAX = 448.0
 MODEL_TYPES = ("qwen3", "qwen3_5_text", "qwen3_5_moe_text")
