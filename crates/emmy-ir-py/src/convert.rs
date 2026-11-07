@@ -12,7 +12,7 @@ use emmy_ir::kinds::field::{DType, Float, Int2, NumOr, Shape3, SubroutineRef};
 use emmy_ir::kinds::{FragmentArg, SelectBranch, Statement};
 use emmy_ir::{Error, Name};
 use pyo3::exceptions::{
-    PyKeyError, PyNotImplementedError, PyTypeError, PyValueError, PyZeroDivisionError,
+    PyException, PyKeyError, PyNotImplementedError, PyTypeError, PyValueError, PyZeroDivisionError,
 };
 use pyo3::prelude::*;
 use pyo3::sync::PyOnceLock;
@@ -32,6 +32,16 @@ pub fn translate(error: Error) -> PyErr {
         Error::ZeroDivision => PyZeroDivisionError::new_err("integer division or modulo by zero"),
         Error::NotImplemented(m) => PyNotImplementedError::new_err(m),
     }
+}
+
+/// `err` with `where_` ahead of its message, of its own type (a `ValueError` stays one); an exception that is no
+/// `Exception`, a `KeyboardInterrupt`, passes through untouched.
+pub fn located(py: Python<'_>, where_: &str, err: PyErr) -> PyErr {
+    if !err.is_instance_of::<PyException>(py) {
+        return err;
+    }
+    let message = err.value(py).to_string();
+    PyErr::from_type(err.get_type(py), format!("{where_}: {message}"))
 }
 
 pub trait IntoPyErr<T> {

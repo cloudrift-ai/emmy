@@ -19,7 +19,7 @@ use pyo3::types::{PyDict, PyFrozenSet, PyString, PyTuple, PyType};
 use crate::body::PyBody;
 use crate::convert::{
     IntoPyErr, PyField, STATEMENT_FROM_TEXT, Slots, axis_from_py, axis_to_py, cached,
-    expression_from_py, slots, statement_from_py, str_tuple,
+    expression_from_py, located, slots, statement_from_py, str_tuple,
 };
 use crate::expression::{PyExpression, mapping_from_py, renames_from_py};
 
@@ -461,7 +461,7 @@ macro_rules! define_py_kinds {
                         let $field: $ty = match given.take(stringify!($field), k::Roles::NONE $(.or(k::$role))*)? {
                             Some(value) => {
                                 let (value, kept) = <$ty as PyField>::from_py(&value)
-                                    .map_err(|err| PyTypeError::new_err(format!("{}.{}: {}", stringify!($Kind), stringify!($field), err)))?;
+                                    .map_err(|err| located(value.py(), &format!("{}.{}", stringify!($Kind), stringify!($field)), err))?;
                                 held.push(kept);
                                 value
                             }
@@ -487,7 +487,7 @@ macro_rules! define_py_kinds {
                         let $field: $ty = match changes.get_item(stringify!($field))? {
                             Some(value) => {
                                 let (value, kept) = <$ty as PyField>::from_py(&value)
-                                    .map_err(|err| PyTypeError::new_err(format!("{}.{}: {}", stringify!($Kind), stringify!($field), err)))?;
+                                    .map_err(|err| located(value.py(), &format!("{}.{}", stringify!($Kind), stringify!($field)), err))?;
                                 held.push(kept);
                                 value
                             }
@@ -584,7 +584,7 @@ macro_rules! define_py_kinds {
                         let $rfield: $rty = match given.take(stringify!($rfield), k::Roles::NONE $(.or(k::$rrole))*)? {
                             Some(value) => {
                                 let (value, kept) = <$rty as PyField>::from_py(&value)
-                                    .map_err(|err| PyTypeError::new_err(format!("{}.{}: {}", stringify!($Record), stringify!($rfield), err)))?;
+                                    .map_err(|err| located(value.py(), &format!("{}.{}", stringify!($Record), stringify!($rfield)), err))?;
                                 held.push(kept);
                                 value
                             }
@@ -612,7 +612,7 @@ macro_rules! define_py_kinds {
                     $(
                         let $rfield: $rty = match changes.get_item(stringify!($rfield))? {
                             Some(value) => <$rty as PyField>::from_py(&value)
-                                .map_err(|err| PyTypeError::new_err(format!("{}.{}: {}", stringify!($Record), stringify!($rfield), err)))?.0,
+                                .map_err(|err| located(value.py(), &format!("{}.{}", stringify!($Record), stringify!($rfield)), err))?.0,
                             None => current.$rfield.clone(),
                         };
                     )*
