@@ -2,7 +2,7 @@
 
 Covers:
 - static-static folds to a static Dim (matches today's int math byte-for-byte)
-- static-symbolic / symbolic-symbolic compose into BinaryExpr-backed Dims
+- static-symbolic / symbolic-symbolic compose into BinaryExpression-backed Dims
 - algebraic identities (``*1``, ``+0``) collapse
 - ``Dim(32) == 32`` and ``Dim('s') == 's'`` ergonomics preserved
 - composite Dims compare structurally, never to bare int/str
@@ -12,7 +12,7 @@ Covers:
 from __future__ import annotations
 
 from emmy.compiler.dim import Dim
-from emmy.compiler.ir.expression import BinaryExpr, Literal, Var
+from emmy.compiler.ir.expression import BinaryExpression, Literal, Var
 
 
 def test_static_static_arithmetic_folds():
@@ -25,8 +25,8 @@ def test_static_static_arithmetic_folds():
 
 
 def test_symbolic_compose_keeps_binary_expression():
-    assert (Dim("s") * Dim(2)).expression == BinaryExpr("*", Var("s"), Literal(2, "int"))
-    assert (Dim("s") + Dim("s")).expression == BinaryExpr("+", Var("s"), Var("s"))
+    assert (Dim("s") * Dim(2)).expression == BinaryExpression("*", Var("s"), Literal(2, "int"))
+    assert (Dim("s") + Dim("s")).expression == BinaryExpression("+", Var("s"), Var("s"))
 
 
 def test_algebraic_identities_collapse():
@@ -51,7 +51,9 @@ def test_ceil_div_static_folds_to_int_ceil():
 
 def test_ceil_div_symbolic_builds_composite_expression():
     # ``(seq + (b - 1)) // b`` — the launch resolver evals it from sym_values.
-    assert Dim("seq").ceil_div(16).expression == BinaryExpr("/", BinaryExpr("+", Var("seq"), Literal(15, "int")), Literal(16, "int"))
+    assert Dim("seq").ceil_div(16).expression == BinaryExpression(
+        "/", BinaryExpression("+", Var("seq"), Literal(15, "int")), Literal(16, "int")
+    )
     # Degenerate divisor 1 collapses to the bare axis (matches the symbolic-serial passthrough).
     assert Dim("seq").ceil_div(1).expression == Var("seq")
 

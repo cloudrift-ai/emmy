@@ -32,8 +32,9 @@ relevant `ARCHITECTURE.md` before answering.
 ## Prerequisites
 
 - Python 3.12+ with `venv`
-- A Rust toolchain (`cargo`): compiled programs execute through the Rust runtime, which `make setup` builds into the
-  package as the `emmy.emmy_runtime` extension; use the README architecture index for the runtime's design.
+- A Rust toolchain (`cargo`): compiled programs execute through the Rust runtime (the `emmy.emmy_runtime`
+  extension), and the compiler's statements and expressions are the `emmy.emmy_ir` extension; `make setup` builds
+  both into the package. Use the README architecture index for their design.
 - `make setup` to create the virtual environment and install dependencies
 - Docker and Docker Compose for local deployments
 - `HF_TOKEN` environment variable for HuggingFace model downloads
@@ -180,8 +181,8 @@ filename: no suffix means every stage must pass, `_xfail_<stage>` means it is a 
   case.
 - A **stale case** failure means the lowering or a schedule codec changed and the stored kernels are no longer what
   the program lowers to. `make test` detects this on its own, on any machine; `make test-corpus-regen` is the fix —
-  the same restamp every golden gets. It refuses to write when a case's verdict also changed; that refusal is the
-  signal, not an obstacle to work around.
+  the same restamp every golden gets. It refuses to write when the restamped case's verdict contradicts its filename;
+  that refusal is the signal, not an obstacle to work around.
 - **The corpus never asks for something this machine cannot do.** With no GPU, the only obligation is the stale case
   above, and it is always fixable where you are: `realized` runs at the case's declared capability, while `built` and
   `correct` run only on a card whose capability equals it.

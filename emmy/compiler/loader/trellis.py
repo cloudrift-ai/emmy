@@ -13,7 +13,7 @@ import numpy as np
 
 from emmy.compiler.graph import Graph, Tensor
 from emmy.compiler.ir.base import ConstantOp
-from emmy.compiler.ir.expression import BinaryExpr, Literal, TernaryExpr, placeholder
+from emmy.compiler.ir.expression import BinaryExpression, Literal, TernaryExpression, placeholder
 from emmy.compiler.ir.frontend.ir import MatmulOp, ReshapeOp, SliceOp, TransposeOp
 from emmy.compiler.ir.tensor.ir import (
     BitcastOp,
@@ -142,7 +142,7 @@ def _unpack_windows(b: _Builder, codes: str) -> tuple[str, int, int]:
     # Adding one full modulus before ``%`` makes the dividend non-negative
     # for every K/step, so Python evaluation and rendered C agree exactly.
     start = ((step + 1) * K - 16 + modulus) % modulus
-    word_idx = BinaryExpr("//", start, Literal(32, "int"))
+    word_idx = BinaryExpression("//", start, Literal(32, "int"))
     next_idx = (word_idx + 1) % (8 * K)
     leading = tuple(placeholder(i) for i in range(len(lead) + 2))
     lo = b.indexed(words, shape, leading + (word_idx,), "window_lo")
@@ -354,7 +354,7 @@ def spell_factored_linear(
         last = len(x_shape) - 1
         coord = placeholder(last)
         in_bounds = coord.lt(Literal(k, "int"))
-        clamped = TernaryExpr(cond=in_bounds, if_true=coord, if_false=Literal(0, "int"))
+        clamped = TernaryExpression(cond=in_bounds, if_true=coord, if_false=Literal(0, "int"))
         x_coords = tuple(placeholder(i) for i in range(last)) + (clamped,)
         zero = b.scalar("x_pad_zero", 0.0, x_node.output.dtype.name)
         exec_x = graph.add_node(

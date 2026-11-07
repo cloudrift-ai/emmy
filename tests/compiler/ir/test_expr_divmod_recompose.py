@@ -1,4 +1,4 @@
-"""The split-index recomposition fold in ``BinaryExpr.simplify``: ``(x/c)*c + x%c → x``.
+"""The split-index recomposition fold in ``BinaryExpression.simplify``: ``(x/c)*c + x%c → x``.
 
 The free-axis re-fusion the tile lift applies spells a split store's coordinates as ``f/Q`` and
 ``f%Q`` in separate buffer dims; the row-major address flatten then produces exactly
@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import pytest
 
-from emmy.compiler.ir.expression import BinaryExpr, Literal, SimplifyCtx, Var
+from emmy.compiler.ir.expression import BinaryExpression, Literal, SimplifyCtx, Var
 
 
 def _simplify(e):
@@ -23,7 +23,7 @@ def _lit(v: int) -> Literal:
 
 def test_bare_pair_recomposes():
     f = Var("f")
-    e = BinaryExpr("+", BinaryExpr("*", BinaryExpr("//", f, _lit(512)), _lit(512)), BinaryExpr("%", f, _lit(512)))
+    e = BinaryExpression("+", BinaryExpression("*", BinaryExpression("//", f, _lit(512)), _lit(512)), BinaryExpression("%", f, _lit(512)))
     assert _simplify(e) == f
 
 
@@ -31,9 +31,9 @@ def test_bare_pair_recomposes():
 def test_scaled_pair_preserves_value(c: int, k: int):
     """``(f/c)*(c·k) + (f%c)·k`` folds to ``f·k`` — numerically pinned over a range."""
     f = Var("f")
-    quot = BinaryExpr("*", BinaryExpr("//", f, _lit(c)), _lit(c * k))
-    rem = BinaryExpr("%", f, _lit(c)) if k == 1 else BinaryExpr("*", BinaryExpr("%", f, _lit(c)), _lit(k))
-    e = BinaryExpr("+", quot, rem)
+    quot = BinaryExpression("*", BinaryExpression("//", f, _lit(c)), _lit(c * k))
+    rem = BinaryExpression("%", f, _lit(c)) if k == 1 else BinaryExpression("*", BinaryExpression("%", f, _lit(c)), _lit(k))
+    e = BinaryExpression("+", quot, rem)
     s = _simplify(e)
     assert "%" not in str(s) and "//" not in str(s) and "/" not in str(s)
     for v in range(0, 4 * c + 3):
@@ -44,10 +44,12 @@ def test_pair_inside_longer_chain():
     """Other addends survive around the recomposed pair — the flattened store address shape
     (``row·N + (f/Q)·Q + f%Q``)."""
     f, row = Var("f"), Var("row")
-    e = BinaryExpr(
+    e = BinaryExpression(
         "+",
-        BinaryExpr("+", BinaryExpr("*", row, _lit(12288)), BinaryExpr("*", BinaryExpr("//", f, _lit(512)), _lit(512))),
-        BinaryExpr("%", f, _lit(512)),
+        BinaryExpression(
+            "+", BinaryExpression("*", row, _lit(12288)), BinaryExpression("*", BinaryExpression("//", f, _lit(512)), _lit(512))
+        ),
+        BinaryExpression("%", f, _lit(512)),
     )
     s = _simplify(e)
     assert "%" not in str(s)
@@ -57,7 +59,7 @@ def test_pair_inside_longer_chain():
 
 def test_mismatched_divisors_do_not_fold():
     f = Var("f")
-    e = BinaryExpr("+", BinaryExpr("*", BinaryExpr("//", f, _lit(512)), _lit(512)), BinaryExpr("%", f, _lit(256)))
+    e = BinaryExpression("+", BinaryExpression("*", BinaryExpression("//", f, _lit(512)), _lit(512)), BinaryExpression("%", f, _lit(256)))
     s = _simplify(e)
     for v in (0, 255, 256, 511, 513):
         assert e.eval({"f": v}) == s.eval({"f": v})
@@ -67,7 +69,7 @@ def test_mismatched_divisors_do_not_fold():
 def test_mismatched_scale_does_not_fold():
     """``(f/c)*a + f%c`` with ``a`` not a multiple of ``c`` stays as-is."""
     f = Var("f")
-    e = BinaryExpr("+", BinaryExpr("*", BinaryExpr("//", f, _lit(512)), _lit(500)), BinaryExpr("%", f, _lit(512)))
+    e = BinaryExpression("+", BinaryExpression("*", BinaryExpression("//", f, _lit(512)), _lit(500)), BinaryExpression("%", f, _lit(512)))
     s = _simplify(e)
     for v in (0, 511, 512, 1025):
         assert e.eval({"f": v}) == s.eval({"f": v})
@@ -76,6 +78,6 @@ def test_mismatched_scale_does_not_fold():
 
 def test_different_dividends_do_not_fold():
     f, g = Var("f"), Var("g")
-    e = BinaryExpr("+", BinaryExpr("*", BinaryExpr("//", f, _lit(64)), _lit(64)), BinaryExpr("%", g, _lit(64)))
+    e = BinaryExpression("+", BinaryExpression("*", BinaryExpression("//", f, _lit(64)), _lit(64)), BinaryExpression("%", g, _lit(64)))
     s = _simplify(e)
     assert "%" in str(s)

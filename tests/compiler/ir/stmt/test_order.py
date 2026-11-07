@@ -9,7 +9,7 @@ from emmy.compiler.ir.stmt import Body, canonicalize_identity, normalize_body, o
 from tests.compiler.ir.stmt import listing
 
 
-def test_kahn_tie_break_is_optional() -> None:
+def test_topological_order_keeps_an_order_the_constraints_allow() -> None:
     body = parse_body(
         """
         right = exp(x)
@@ -18,12 +18,6 @@ def test_kahn_tie_break_is_optional() -> None:
     )
     incoming = (frozenset(), frozenset())
     assert body.topological_order(incoming) == body
-    assert str(body.topological_order(incoming, lambda _index, stmt: str(stmt))) == listing(
-        """
-        left = abs(x)
-        right = exp(x)
-        """
-    )
 
 
 def test_effect_constraints_keep_only_intervening_resource_hazards() -> None:

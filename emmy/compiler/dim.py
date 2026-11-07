@@ -4,7 +4,7 @@ Every Dim carries a shape expression:
 
 - ``Dim(32)`` wraps ``Literal(32, "int")`` — a static extent.
 - ``Dim("seq_len")`` wraps ``Var("seq_len")`` — an atomic symbolic extent.
-- ``Dim(seq) * Dim(2)`` wraps ``BinaryExpr("*", Var("seq"), Literal(2))`` —
+- ``Dim(seq) * Dim(2)`` wraps ``BinaryExpression("*", Var("seq"), Literal(2))`` —
   a composite symbolic extent. Operators on Dim dispatch to ``Expression`` and
   eagerly fold via ``Expression.simplify``: ``Dim(32) * Dim(64) → Dim(Literal(2048))``,
   ``Dim("s") * Dim(1) → Dim(Var("s"))``.
@@ -39,7 +39,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from emmy.compiler.ir.expression import BinaryExpr, Expression, Interval, Literal, SimplifyCtx, Var
+from emmy.compiler.ir.expression import BinaryExpression, Expression, Interval, Literal, SimplifyCtx, Var
 from emmy.compiler.wire import Wire
 
 # Default "expected size" for a symbolic dim when none is supplied explicitly.
@@ -128,7 +128,7 @@ class Dim(Wire):
         # Explicit hint wins; otherwise inherit when wrapping an existing Dim,
         # and finally fall back to ``DEFAULT_SEQ_HINT`` for an atomic symbolic
         # dim (a single ``Var``) so the planner always sees an expected size.
-        # Composite (``BinaryExpr``) and static (``Literal``) dims keep ``None``.
+        # Composite (``BinaryExpression``) and static (``Literal``) dims keep ``None``.
         if hint is None and isinstance(value, Dim):
             hint = value.hint
         if hint is None and isinstance(expression, Var):
@@ -174,34 +174,34 @@ class Dim(Wire):
     # ---- arithmetic — eager-fold via Expression.simplify -----------------------
 
     def __add__(self, other: int | Dim) -> Dim:
-        return Dim(_simplify(BinaryExpr("+", self.expression, _coerce_expression(other))))
+        return Dim(_simplify(BinaryExpression("+", self.expression, _coerce_expression(other))))
 
     def __radd__(self, other: int | Dim) -> Dim:
-        return Dim(_simplify(BinaryExpr("+", _coerce_expression(other), self.expression)))
+        return Dim(_simplify(BinaryExpression("+", _coerce_expression(other), self.expression)))
 
     def __sub__(self, other: int | Dim) -> Dim:
-        return Dim(_simplify(BinaryExpr("-", self.expression, _coerce_expression(other))))
+        return Dim(_simplify(BinaryExpression("-", self.expression, _coerce_expression(other))))
 
     def __rsub__(self, other: int | Dim) -> Dim:
-        return Dim(_simplify(BinaryExpr("-", _coerce_expression(other), self.expression)))
+        return Dim(_simplify(BinaryExpression("-", _coerce_expression(other), self.expression)))
 
     def __mul__(self, other: int | Dim) -> Dim:
-        return Dim(_simplify(BinaryExpr("*", self.expression, _coerce_expression(other))))
+        return Dim(_simplify(BinaryExpression("*", self.expression, _coerce_expression(other))))
 
     def __rmul__(self, other: int | Dim) -> Dim:
-        return Dim(_simplify(BinaryExpr("*", _coerce_expression(other), self.expression)))
+        return Dim(_simplify(BinaryExpression("*", _coerce_expression(other), self.expression)))
 
     def __floordiv__(self, other: int | Dim) -> Dim:
-        return Dim(_simplify(BinaryExpr("//", self.expression, _coerce_expression(other))))
+        return Dim(_simplify(BinaryExpression("//", self.expression, _coerce_expression(other))))
 
     def __rfloordiv__(self, other: int | Dim) -> Dim:
-        return Dim(_simplify(BinaryExpr("//", _coerce_expression(other), self.expression)))
+        return Dim(_simplify(BinaryExpression("//", _coerce_expression(other), self.expression)))
 
     def __mod__(self, other: int | Dim) -> Dim:
-        return Dim(_simplify(BinaryExpr("%", self.expression, _coerce_expression(other))))
+        return Dim(_simplify(BinaryExpression("%", self.expression, _coerce_expression(other))))
 
     def __rmod__(self, other: int | Dim) -> Dim:
-        return Dim(_simplify(BinaryExpr("%", _coerce_expression(other), self.expression)))
+        return Dim(_simplify(BinaryExpression("%", _coerce_expression(other), self.expression)))
 
     def ceil_div(self, other: int | Dim) -> Dim:
         """Ceiling division ``ceil(self / other)``, as ``(self + (other - 1)) // other``.
@@ -222,7 +222,7 @@ class Dim(Wire):
             return self.expression == other.expression
         # Back-compat ergonomics: ``Dim(32) == 32`` and ``Dim("s") == "s"``
         # keep working so test assertions and existing pass code don't churn.
-        # Composite dims (``BinaryExpr``-backed) never compare equal to bare
+        # Composite dims (``BinaryExpression``-backed) never compare equal to bare
         # int/str — they only compare structurally to other Dims.
         if isinstance(other, bool):
             return NotImplemented
@@ -241,7 +241,7 @@ class Dim(Wire):
     def __hash__(self) -> int:
         # Hash on the canonical Expression so Dim(32) and Dim(Literal(32, "int"))
         # hash identically. Atomic Vars and Literals are themselves frozen
-        # and hashable; composite BinaryExpr is hashable post-M0.
+        # and hashable; composite BinaryExpression is hashable post-M0.
         return hash(self.expression)
 
     def __repr__(self) -> str:

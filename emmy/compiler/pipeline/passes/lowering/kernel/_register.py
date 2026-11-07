@@ -5,7 +5,7 @@ from __future__ import annotations
 from emmy.compiler.dtype import F32
 from emmy.compiler.ir.axis import Axis
 from emmy.compiler.ir.elementwise import ElementwiseImpl
-from emmy.compiler.ir.expression import BinaryExpr, Literal, SimplifyCtx, TernaryExpr, Var
+from emmy.compiler.ir.expression import BinaryExpression, Literal, SimplifyCtx, TernaryExpression, Var
 from emmy.compiler.ir.kernel.ir import (
     COORD,
     FRAG,
@@ -129,7 +129,9 @@ class _Fragments:
             # Clamp memory coordinates before masking a padded fragment. The padded value
             # is zero at the operand boundary, so it contributes the reduction's identity.
             clipped = {
-                name: TernaryExpr(BinaryExpr("<", coord, Literal(self.extents[name], "int")), coord, Literal(self.extents[name] - 1, "int"))
+                name: TernaryExpression(
+                    BinaryExpression("<", coord, Literal(self.extents[name], "int")), coord, Literal(self.extents[name] - 1, "int")
+                )
                 for name, coord in coords.items()
             }
             for stmt in binary(node.lift.body):
@@ -147,7 +149,7 @@ class _Fragments:
                         seeded = self.apply("copy", ((seed, seed_index(index, self.tile.inputs[seed].shape)),), (GMEM,), rb, cb)
                     else:
                         seeded = Literal(float(seed))
-                    first = BinaryExpr(">", Var(self.program.time), Literal(0, "int"))
+                    first = BinaryExpression(">", Var(self.program.time), Literal(0, "int"))
                     kinds = (COORD, FRAG, UNIFORM if isinstance(seeded, Literal) else FRAG)
                     env[stmt.name] = self.apply("where", (first, self.states[cb.value // self.width], seeded), kinds, rb, cb)
                 elif isinstance(stmt, Load):
@@ -183,13 +185,13 @@ class _Fragments:
         # Only partial fragments need an element mask. A complete excess warp row is
         # harmless: loads clamp coordinates and stores guard the output's row extent.
         conditions = [
-            BinaryExpr("<", Var(coord), Literal(self.extents[axis], "int"))
+            BinaryExpression("<", Var(coord), Literal(self.extents[axis], "int"))
             for axis, coord, width in ((row, FRAG_ROW, self.atom.atom_m), (col, FRAG_COL, self.width))
             if self.extents[axis] % width
         ]
         if not conditions:
             return self.fragment(value)
-        cond = conditions[0] if len(conditions) == 1 else BinaryExpr("&&", *conditions)
+        cond = conditions[0] if len(conditions) == 1 else BinaryExpression("&&", *conditions)
         return self.apply("where", (cond, value, Literal(0.0)), (COORD, UNIFORM if isinstance(value, Literal) else FRAG, UNIFORM), rb, cb)
 
     def contract(self, node, row, col, rb, cb):

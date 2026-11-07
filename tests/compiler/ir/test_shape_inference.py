@@ -11,7 +11,7 @@ parallel.
 from __future__ import annotations
 
 from emmy.compiler.dim import Dim
-from emmy.compiler.ir.expression import BinaryExpr, Literal, Var
+from emmy.compiler.ir.expression import BinaryExpression, Literal, Var
 from emmy.compiler.ir.frontend.ir import (
     CatOp,
     LinearOp,
@@ -122,7 +122,7 @@ def test_cat_symbolic_axis_stays_symbolic():
     out = CatOp().infer_output_shape([(Dim(1), Dim("S")), (Dim(1), Dim("S"))])
     expected_last = Dim("S") + Dim("S")
     assert out == (Dim(1), expected_last)
-    assert out[1].expression == BinaryExpr("+", Var("S"), Var("S"))
+    assert out[1].expression == BinaryExpression("+", Var("S"), Var("S"))
 
 
 def test_reshape_minus_one_inferred_static():

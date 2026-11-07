@@ -20,7 +20,7 @@ from dataclasses import replace
 from math import prod
 
 from emmy.compiler.ir.axis import Axis
-from emmy.compiler.ir.expression import BinaryExpr, Expression, Interval, Literal, SimplifyCtx, Var, affine_form
+from emmy.compiler.ir.expression import BinaryExpression, Expression, Interval, Literal, SimplifyCtx, Var, affine_form
 from emmy.compiler.ir.loop import LoopOp
 from emmy.compiler.ir.pure import Fold
 from emmy.compiler.ir.pure.lam import Lambda
@@ -176,8 +176,8 @@ class FoldingSigma(Sigma):
         super().__init__(mapping)
         object.__setattr__(self, "_ctx", ctx)
 
-    def apply(self, expression):
-        return expression.substitute(self.mapping).simplify(self._ctx)
+    def after(self, expression):
+        return expression.simplify(self._ctx)
 
 
 def _paired_by_loads(tile: TileOp) -> TileOp:
@@ -443,9 +443,9 @@ def _align_owned_sweeps(piece: TileOp) -> TileOp:
             stride = prod(follower.extent.as_static() for follower in remaining[i + 1 :])
             expression = flat
             if stride > 1:
-                expression = BinaryExpr("/", expression, Literal(stride, "int"))
+                expression = BinaryExpression("/", expression, Literal(stride, "int"))
             if i:
-                expression = BinaryExpr("%", expression, Literal(axis.extent.as_static(), "int"))
+                expression = BinaryExpression("%", expression, Literal(axis.extent.as_static(), "int"))
             substitution[axis.name] = expression
         return Sigma(substitution)
 

@@ -1,4 +1,4 @@
-"""Regression tests for ``%`` factor-cancellation in ``BinaryExpr.simplify``.
+"""Regression tests for ``%`` factor-cancellation in ``BinaryExpression.simplify``.
 
 ``_cancel_common_factors`` cancels a positive factor ``c`` common to both sides
 of ``/`` // ``%``. For division ``(c·x)/(c·y) == x/y`` — the factor cancels
@@ -13,7 +13,7 @@ from __future__ import annotations
 
 import pytest
 
-from emmy.compiler.ir.expression import BinaryExpr, Literal, SimplifyCtx, Var
+from emmy.compiler.ir.expression import BinaryExpression, Literal, SimplifyCtx, Var
 
 
 def _simplify(e):
@@ -28,7 +28,7 @@ def test_mod_factor_cancellation_preserves_value(coeff: int, modulus: int):
     """``(f * coeff) % modulus`` must stay numerically equal after simplify,
     for every ``f`` — the modulo factor-cancel keeps the ``× gcd`` scale."""
     f = Var("f")
-    e = BinaryExpr("%", BinaryExpr("*", f, Literal(coeff, "int")), Literal(modulus, "int"))
+    e = BinaryExpression("%", BinaryExpression("*", f, Literal(coeff, "int")), Literal(modulus, "int"))
     s = _simplify(e)
     for v in range(0, 256):
         assert e.eval({"f": v}) == s.eval({"f": v}), f"mismatch at f={v}: {e} vs {s}"
@@ -38,7 +38,7 @@ def test_mod_cancel_specific_shape():
     """The exact shape that broke vectorized cp.async: ``(f*8) % 64`` ⇒
     ``8 * (f % 8)``, not ``f % 8``."""
     f = Var("f")
-    e = BinaryExpr("%", BinaryExpr("*", f, Literal(8, "int")), Literal(64, "int"))
+    e = BinaryExpression("%", BinaryExpression("*", f, Literal(8, "int")), Literal(64, "int"))
     s = _simplify(e)
     # f=1 ⇒ 8, not 1 (the old bug returned 1).
     assert s.eval({"f": 1}) == 8
@@ -48,7 +48,7 @@ def test_mod_cancel_specific_shape():
 def test_div_factor_cancellation_unchanged():
     """Division still cancels the factor outright — ``(f*8) / 64 == f / 8``."""
     f = Var("f")
-    e = BinaryExpr("/", BinaryExpr("*", f, Literal(8, "int")), Literal(64, "int"))
+    e = BinaryExpression("/", BinaryExpression("*", f, Literal(8, "int")), Literal(64, "int"))
     s = _simplify(e)
     for v in range(0, 256):
         assert e.eval({"f": v}) == s.eval({"f": v})

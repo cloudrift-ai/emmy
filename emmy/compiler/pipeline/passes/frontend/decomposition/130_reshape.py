@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from emmy.compiler.dim import Dim
 from emmy.compiler.graph import Graph, Node, Tensor
-from emmy.compiler.ir.expression import BinaryExpr, Literal, SimplifyCtx, Var, placeholder
+from emmy.compiler.ir.expression import BinaryExpression, Literal, SimplifyCtx, Var, placeholder
 from emmy.compiler.ir.frontend.ir import ReshapeOp
 from emmy.compiler.pipeline import Match, Pattern
 from emmy.compiler.pipeline.passes.frontend.decomposition._helpers import open_fragment, single_indexmap
@@ -39,9 +39,9 @@ def _reshape_coord_map(in_shape: tuple, out_shape: tuple):
     out_stride: object = Literal(1, "int")
     for d in range(out_ndim - 1, -1, -1):
         stride_simplified = out_stride.simplify(SimplifyCtx.empty())
-        term = placeholder(d) if _is_one(stride_simplified) else BinaryExpr("*", placeholder(d), stride_simplified)
-        flat = term if flat is None else BinaryExpr("+", term, flat)
-        out_stride = BinaryExpr("*", out_stride, _to_expression(out_shape[d]))
+        term = placeholder(d) if _is_one(stride_simplified) else BinaryExpression("*", placeholder(d), stride_simplified)
+        flat = term if flat is None else BinaryExpression("+", term, flat)
+        out_stride = BinaryExpression("*", out_stride, _to_expression(out_shape[d]))
 
     if flat is None:
         flat = Literal(0, "int")
@@ -50,12 +50,12 @@ def _reshape_coord_map(in_shape: tuple, out_shape: tuple):
     in_stride: object = Literal(1, "int")
     for j in range(in_ndim - 1, -1, -1):
         stride_j = in_stride.simplify(SimplifyCtx.empty())
-        coord = flat if _is_one(stride_j) else BinaryExpr("/", flat, stride_j)
+        coord = flat if _is_one(stride_j) else BinaryExpression("/", flat, stride_j)
         dim_j = _to_expression(in_shape[j])
         if j > 0:
-            coord = BinaryExpr("%", coord, dim_j)
+            coord = BinaryExpression("%", coord, dim_j)
         coords.insert(0, coord.simplify(SimplifyCtx.empty()))
-        in_stride = BinaryExpr("*", in_stride, dim_j)
+        in_stride = BinaryExpression("*", in_stride, dim_j)
 
     return tuple(coords)
 

@@ -25,7 +25,7 @@ from dataclasses import replace
 
 from emmy.compiler.dim import Dim
 from emmy.compiler.graph import Node
-from emmy.compiler.ir.expression import BinaryExpr, Literal, Var
+from emmy.compiler.ir.expression import BinaryExpression, Literal, Var
 from emmy.compiler.ir.kernel import KernelOp
 from emmy.compiler.ir.kernel.ir import ELEM_COL, ELEM_ROW, FRAG_COL, FRAG_ROW
 from emmy.compiler.ir.pure.fold import EXTENTS
@@ -155,9 +155,9 @@ def _pointwise_strip(tile: TileOp, materialized):
 
         sigma = Sigma(
             {
-                inner.name: BinaryExpr(
+                inner.name: BinaryExpression(
                     "+",
-                    BinaryExpr("*", Var(inner.name), Literal(width, "int")),
+                    BinaryExpression("*", Var(inner.name), Literal(width, "int")),
                     Literal(offset, "int"),
                 )
             }

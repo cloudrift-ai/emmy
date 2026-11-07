@@ -16,6 +16,7 @@ from emmy.compiler.ir.base import ConstantOp, InputOp
 from emmy.compiler.ir.expression import Literal, placeholder
 from emmy.compiler.ir.frontend.ir import LinearOp, RmsNormOp
 from emmy.compiler.ir.loop import Accum, Affine, Assign, Load, LoopOp, Select, Write
+from emmy.compiler.ir.render import render_expression
 from emmy.compiler.ir.stmt import parse_body
 from emmy.compiler.ir.tensor.ir import ElementwiseOp, GatherOp, IndexMapOp, IndexSource, ReduceOp, ScanOp
 from emmy.compiler.pipeline import Pipeline
@@ -114,7 +115,7 @@ def test_multisource_indexmap_lowers_unconditional_branch_as_bool():
     lowered = Pipeline.build(["loop/lowering"]).run(graph)
     select = next(stmt for stmt in _kernel_nodes(lowered)[0].op.body.iter() if isinstance(stmt, Select))
     assert select.branches[-1].select == Literal(True, "bool")
-    assert select.branches[-1].select.render(None) == "1"
+    assert render_expression(select.branches[-1].select, None) == "1"
     _assert_close(_run(graph, inputs), _run(lowered, inputs))
 
     restored = Graph.from_wire(json.loads(json.dumps(lowered.to_wire())))

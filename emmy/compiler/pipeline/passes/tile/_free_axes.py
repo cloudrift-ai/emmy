@@ -38,22 +38,31 @@ from __future__ import annotations
 
 from emmy.compiler.ir.address import split_pair
 from emmy.compiler.ir.axis import Axis
-from emmy.compiler.ir.expression import BinaryExpr, CastExpr, Expression, FuncCallExpr, Literal, SimplifyCtx, TernaryExpr, Var
+from emmy.compiler.ir.expression import (
+    BinaryExpression,
+    CastExpression,
+    Expression,
+    FunctionCallExpression,
+    Literal,
+    SimplifyCtx,
+    TernaryExpression,
+    Var,
+)
 from emmy.compiler.ir.sigma import Sigma
 from emmy.compiler.ir.stmt import Body, Load, Loop, Write, simplify_body
 
 
 def _no_divmod_on(e: Expression, name: str) -> bool:
     """No ``/`` / ``%`` subterm of ``e`` has ``name`` in its dividend — the residue detector."""
-    if isinstance(e, BinaryExpr):
+    if isinstance(e, BinaryExpression):
         if e.op in ("/", "//", "%") and name in e.left.free_vars():
             return False
         return _no_divmod_on(e.left, name) and _no_divmod_on(e.right, name)
-    if isinstance(e, TernaryExpr):
+    if isinstance(e, TernaryExpression):
         return all(_no_divmod_on(x, name) for x in (e.cond, e.if_true, e.if_false))
-    if isinstance(e, CastExpr):
+    if isinstance(e, CastExpression):
         return _no_divmod_on(e.expression, name)
-    if isinstance(e, FuncCallExpr):
+    if isinstance(e, FunctionCallExpression):
         return all(_no_divmod_on(a, name) for a in e.args)
     return True
 
@@ -73,7 +82,7 @@ def _access_ok(index: tuple, shape, fname: str, store: bool = False) -> bool:
     flat: Expression = Literal(0, "int")
     stride = 1
     for e, d in zip(reversed(index), reversed(list(shape)), strict=True):
-        flat = BinaryExpr("+", flat, BinaryExpr("*", e, Literal(stride, "int")))
+        flat = BinaryExpression("+", flat, BinaryExpression("*", e, Literal(stride, "int")))
         stride *= d.as_static()
     return _no_divmod_on(flat.simplify(SimplifyCtx.empty()), fname)
 
@@ -109,7 +118,7 @@ def _fuse_pair(outer: Loop, inner: Loop, shapes: dict, between: tuple[Loop, ...]
             return None  # an inner loop shadows a pair name — substitution would capture
     f = Var(q.name)
     lit = Literal(small, "int")
-    sigma = Sigma({p.name: BinaryExpr("//", f, lit), q.name: BinaryExpr("%", f, lit)})
+    sigma = Sigma({p.name: BinaryExpression("//", f, lit), q.name: BinaryExpression("%", f, lit)})
     body = Body(tuple(s.substitute(sigma) for s in inner.body))
     fused = Loop(axis=Axis(q.name, big * small), body=body, unroll=outer.unroll or inner.unroll, seed=inner.seed)
     (fused,) = simplify_body((fused,))
@@ -150,15 +159,15 @@ def _reads_whole(e: Expression, name: str) -> bool:
     """Whether ``e`` reads ``name`` outside every ``/`` / ``%`` dividend."""
     if isinstance(e, Var):
         return e.name == name
-    if isinstance(e, BinaryExpr):
+    if isinstance(e, BinaryExpression):
         if e.op in ("/", "//", "%"):
             return _reads_whole(e.right, name)
         return _reads_whole(e.left, name) or _reads_whole(e.right, name)
-    if isinstance(e, TernaryExpr):
+    if isinstance(e, TernaryExpression):
         return any(_reads_whole(x, name) for x in (e.cond, e.if_true, e.if_false))
-    if isinstance(e, CastExpr):
+    if isinstance(e, CastExpression):
         return _reads_whole(e.expression, name)
-    if isinstance(e, FuncCallExpr):
+    if isinstance(e, FunctionCallExpression):
         return any(_reads_whole(a, name) for a in e.args)
     return False
 
@@ -170,7 +179,7 @@ def _divisors(loads, name: str) -> dict[int, set[str]]:
         for index in load.index:
             for expression in index.subterms():
                 if (
-                    isinstance(expression, BinaryExpr)
+                    isinstance(expression, BinaryExpression)
                     and expression.op in ("/", "//", "%")
                     and expression.left == Var(name)
                     and isinstance(expression.right, Literal)

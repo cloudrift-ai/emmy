@@ -219,9 +219,11 @@ Four rules make it load-bearing:
    spelling. Loading fails loudly on `STAGE=d2/ring`, `WORK=zzz9x9`, `TILE=mma_m64n64k64_…` or `REDUCE=g2z`, while a
    canonical but unreachable pin (`WORK=w7x13`, `TILE=…/f99x99/k8`) parses cleanly and falls through to `realized`,
    where a genuine lockout belongs.
-3. **Refuse to write when a verdict changed.** If one commit re-keys a kernel and breaks realization, regeneration
-   fixes the first and must not let the second ride along. It names the affected cases and exits non-zero; resolving
-   them is a review conversation, not a mechanical step.
+3. **Refuse to write when the verdict contradicts the filename.** If one commit re-keys a kernel and breaks
+   realization, regeneration fixes the first and must not let the second ride along; a gap that closed is a file to
+   rename. The restamped case is what is judged — a stale route spelling makes the stored half unreplayable, which says
+   nothing about the case. It names the affected cases and exits non-zero; resolving them is a review conversation,
+   not a mechanical step.
 4. **Keep the note.** A case's evidence citation is the file's `note` field, not a comment, so a regeneration and
    every dump carry it.
 

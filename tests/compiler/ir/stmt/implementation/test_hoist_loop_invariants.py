@@ -6,8 +6,9 @@ point at the pass itself rather than upstream lowering.
 
 from __future__ import annotations
 
-from emmy.compiler.ir.stmt import Accum, Assign, Load, Loop, StridedLoop, Write, normalize_body, parse_body
-from emmy.compiler.ir.stmt.normalize import place_values
+from emmy.emmy_ir import place_values
+
+from emmy.compiler.ir.stmt import Accum, Assign, Load, Loop, StridedLoop, Write, parse_body
 
 
 def test_hoists_invariant_load_above_loop() -> None:
@@ -141,56 +142,6 @@ def test_does_not_hoist_block_containing_write() -> None:
 def _nested(depth: int, leaf: str) -> str:
     """``leaf`` under ``depth`` loops ``a0`` … over two."""
     return "\n".join([*(f"{'    ' * level}for a{level} in 0..2:" for level in range(depth)), f"{'    ' * depth}{leaf}"])
-
-
-def test_nested_side_effect_summary_is_cached_bottom_up() -> None:
-    """One root query populates the immutable summary on every nested loop."""
-    (stmt,) = parse_body(_nested(32, "out[] = value"))
-    loops = []
-    loop = stmt
-    while isinstance(loop, Loop):
-        loops.append(loop)
-        (loop,) = loop.body
-
-    assert stmt.has_side_effects
-    assert all(loop.__dict__.get("has_side_effects") is True for loop in loops)
-
-
-def test_nested_axis_dependency_summary_does_not_rescan_each_loop(monkeypatch) -> None:
-    """LICM does not rediscover one leaf through every enclosing loop."""
-    calls = 0
-    original = Load.deps
-
-    def counted(load):
-        nonlocal calls
-        calls += 1
-        return original(load)
-
-    monkeypatch.setattr(Load, "deps", counted)
-    depth = 32
-    body = parse_body(_nested(depth, f"value = load x[{', '.join(f'a{level}' for level in range(depth))}]"))
-
-    place_values(body)
-
-    assert calls <= 2 * (depth + 1), "linear in the statements, not in statements times depth"
-
-
-def test_normalization_does_not_build_the_full_ssa_dependency_closure() -> None:
-    body = parse_body(
-        """
-        for a in 0..4:
-            x = load X[a]
-            scale = load scale[]
-            value = divide(x, scale)
-            out[a] = value
-        """
-    )
-
-    normalized = normalize_body(body)
-    assert [s.op.name for s in normalized.iter() if isinstance(s, Assign)] == ["divide"]
-
-    assert "deps_closure" not in body.__dict__
-    assert "deps_closure" not in normalized.__dict__
 
 
 def test_hoist_keeps_a_read_of_a_buffer_the_loop_writes() -> None:

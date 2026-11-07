@@ -1648,7 +1648,7 @@ def _spell_dynamic_activation(graph: Graph, activation: str, fmt: str, group: in
     broadcasts back onto K by ``k / group``, so the encode, decode and the value every consumer
     reads keep the activation's own layout and no reshape of the value ever needs a copy. ``None``
     when K cannot carry the group (symbolic, or not a multiple of it)."""
-    from emmy.compiler.ir.expression import BinaryExpr, Literal, placeholder  # noqa: PLC0415
+    from emmy.compiler.ir.expression import BinaryExpression, Literal, placeholder  # noqa: PLC0415
     from emmy.compiler.ir.frontend.ir import ReshapeOp  # noqa: PLC0415
     from emmy.compiler.ir.tensor.ir import ElementwiseOp, IndexMapOp, IndexSource, ReduceOp  # noqa: PLC0415
     from emmy.compiler.pipeline.passes.frontend.decomposition._broadcast import broadcast_to  # noqa: PLC0415
@@ -1697,7 +1697,7 @@ def _spell_dynamic_activation(graph: Graph, activation: str, fmt: str, group: in
         scale_bc = broadcast_to(graph, scale, shape)
     else:
         d = len(shape) - 1
-        by_group = (*(placeholder(i) for i in range(d)), BinaryExpr("/", placeholder(d), Literal(group, "int")), Literal(0, "int"))
+        by_group = (*(placeholder(i) for i in range(d)), BinaryExpression("/", placeholder(d), Literal(group, "int")), Literal(0, "int"))
         scale_bc = graph.add_node(
             op=IndexMapOp(out_shape=shape, sources=(IndexSource(input_idx=0, coord_map=by_group),)),
             inputs=[scale],

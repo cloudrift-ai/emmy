@@ -12,7 +12,7 @@ from emmy.compiler.dtype import F32
 from emmy.compiler.dtype import get as dtype_get
 from emmy.compiler.graph import Node
 from emmy.compiler.ir.axis import Axis
-from emmy.compiler.ir.expression import BinaryExpr, Builtin, Literal, SimplifyCtx, TernaryExpr, Var
+from emmy.compiler.ir.expression import BinaryExpression, Builtin, Literal, SimplifyCtx, TernaryExpression, Var
 from emmy.compiler.ir.kernel import KernelOp, Smem, Sync, Tile
 from emmy.compiler.ir.stmt import (
     Accum,
@@ -45,7 +45,7 @@ _materialize = import_module("emmy.compiler.pipeline.passes.lowering.kernel.010_
 def _conjuncts(expression):
     return (
         _conjuncts(expression.left) | _conjuncts(expression.right)
-        if isinstance(expression, BinaryExpr) and expression.op == "&&"
+        if isinstance(expression, BinaryExpression) and expression.op == "&&"
         else frozenset((expression,))
     )
 
@@ -70,7 +70,7 @@ def _owned(body, carry):
                     need(branch.value, remaining)
                 else:
                     need(branch.value, {path | _conjuncts(branch.select) for path in remaining})
-                    remaining = {path | {BinaryExpr("==", branch.select, Literal(0, "int"))} for path in remaining}
+                    remaining = {path | {BinaryExpression("==", branch.select, Literal(0, "int"))} for path in remaining}
         elif isinstance(stmt, (Affine, Assign, Accum)):
             for name in stmt.deps():
                 if name != stmt.name:
@@ -88,7 +88,7 @@ def _owned(body, carry):
             coordinate = read.index[dim]
             for path in demand.get(read.name, {frozenset()}):
                 value = coordinate
-                while isinstance(value, TernaryExpr) and _conjuncts(value.cond) <= path:
+                while isinstance(value, TernaryExpression) and _conjuncts(value.cond) <= path:
                     value = value.if_true
                 if value != cell:
                     return tuple(owned)
@@ -160,7 +160,7 @@ def _resident(op, program, retained=frozenset()):
     shape = tuple(n.as_static() for n in dimensions)
     shared = "_carry"
     parity = Var(loop.axis.name) % Literal(2, "int")
-    before = BinaryExpr(">", Var(loop.axis.name), Literal(0, "int"))
+    before = BinaryExpression(">", Var(loop.axis.name), Literal(0, "int"))
     stores = [s for s in tile.body.iter() if isinstance(s, Write) and s.output == port]
     if not stores or any(s.atomic or not s.is_scalar for s in stores):
         return None
@@ -208,12 +208,12 @@ def _resident(op, program, retained=frozenset()):
         start, end = Literal(0, "int"), axis.extent_expression()
         if predicate is not None:
             for condition in _conjuncts(predicate):
-                if not isinstance(condition, BinaryExpr):
+                if not isinstance(condition, BinaryExpression):
                     continue
                 if condition.op == "<" and condition.left == Var(axis.name) and condition.right.free_vars() <= {*batch, loop.axis.name}:
-                    end = TernaryExpr(condition.right.lt(end), condition.right, end)
+                    end = TernaryExpression(condition.right.lt(end), condition.right, end)
                 if condition.op == "<=" and condition.right == Var(axis.name) and condition.left.free_vars() <= {*batch, loop.axis.name}:
-                    start = TernaryExpr(start.lt(condition.left), condition.left, start)
+                    start = TernaryExpression(start.lt(condition.left), condition.left, start)
         step = Body((StridedLoop(axis, start, Literal(1, "int"), step, end=end),))
     step = Body((Loop(loop.axis, (*copying, *step, Sync())),))
     cell = Var("_carry_cell")
@@ -221,7 +221,7 @@ def _resident(op, program, retained=frozenset()):
     stride = prod(shape)
     for extent in shape:
         stride //= extent
-        suffix.append(BinaryExpr("/", cell, Literal(stride, "int")) % Literal(extent, "int"))
+        suffix.append(BinaryExpression("/", cell, Literal(stride, "int")) % Literal(extent, "int"))
     initial = (*(Var(name) for name in batch), *suffix)
     if isinstance(carry.seed, str):
         seed = Load(("_carry_seed",), carry.seed, seed_index(initial, op.inputs[carry.seed].shape), dtype=op.inputs[carry.seed].dtype)
@@ -396,7 +396,7 @@ def _parallel_copy(op, program, step, shared, parity, shape, batch, threads, dty
     stride = prod(shape)
     for extent in shape:
         stride //= extent
-        indices.append(BinaryExpr("/", cell, Literal(stride, "int")) % Literal(extent, "int"))
+        indices.append(BinaryExpression("/", cell, Literal(stride, "int")) % Literal(extent, "int"))
     load = Load(("_carry_old",), shared, (parity, *indices), dtype=dtype)
     stores = [Write(shared, (Literal(1, "int") - parity, *indices), ("_carry_old",), value_dtype=dtype)]
     coordinates = (*(Var(name) for name in batch), *indices)

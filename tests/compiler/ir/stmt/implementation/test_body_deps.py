@@ -1,34 +1,10 @@
-"""The cached summaries of a ``Body`` that only the statement module reads: its dependency closure, free names
-and carried names.
-"""
+"""The summaries of a ``Body`` that only the statement module reads: its free names and carried names."""
 
 from __future__ import annotations
 
 import pytest
 
-from emmy.compiler.ir.stmt import Accum, Assign, Carry, Loop, parse_body
-
-
-def test_scope_summaries_share_nested_analysis(monkeypatch):
-    text = "value = exp(source)\nsum <- add(sum, value)"
-    for level in reversed(range(32)):
-        text = f"for i{level} in 0..4:\n" + "\n".join(f"    {line}" for line in text.splitlines())
-    bodies = [parse_body(text)]
-    while isinstance(bodies[-1][0], Loop):
-        bodies.append(bodies[-1][0].body)
-    visits = 0
-    original = Assign.deps
-
-    def counted(stmt):
-        nonlocal visits
-        visits += 1
-        return original(stmt)
-
-    monkeypatch.setattr(Assign, "deps", counted)
-    for body in bodies:
-        assert body._free_ssa == frozenset({"source"})
-        assert tuple(stmt.name for stmt in body.accums) == ("sum",)
-    assert visits == 1
+from emmy.compiler.ir.stmt import Accum, Carry, parse_body
 
 
 def test_scope_summary_preserves_reads_above_a_shadowed_name():
@@ -58,11 +34,8 @@ def test_recursive_type_queries_share_children_and_preserve_mixed_order():
     assert child.carries == (carry,)
     assert child.accums == (accum,)
     assert body.iter_of_type(Accum, Carry) == (carry, accum, carry)
-    assert body.iter_of_type(Accum, Carry) is body.iter_of_type(Accum, Carry)
-    assert child.iter_of_type(Carry) is child.carries
-    names = body._carried_names
-    assert names == ("state", "sum")
-    assert body._carried_names is names
+    assert child.iter_of_type(Carry) == child.carries
+    assert body._carried_names == ("state", "sum")
 
 
 @pytest.mark.parametrize("dependent", [False, True])

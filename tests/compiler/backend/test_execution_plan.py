@@ -29,7 +29,7 @@ from emmy.compiler.backend.plan import (
 from emmy.compiler.graph import Graph, Tensor
 from emmy.compiler.ir.base import ConstantOp, InputOp
 from emmy.compiler.ir.cuda import CudaOp, TmaDescMeta
-from emmy.compiler.ir.expression import BinaryExpr, Literal, Var
+from emmy.compiler.ir.expression import BinaryExpression, Literal, Var
 from emmy.compiler.ir.frontend.ir import ReshapeOp, TransposeOp
 from emmy.compiler.ir.tensor.ir import ElementwiseOp
 from emmy.compiler.loader.binder import apply_load_ops
@@ -48,7 +48,7 @@ def _sample_graph() -> Graph:
         node_id="w",
     )
     g.add_node(op=ConstantOp(name="div", context_value=Var("seq_len")), inputs=[], output=Tensor("div", (1,)), node_id="div")
-    ceil_div = BinaryExpr("//", BinaryExpr("+", Var("seq_len"), Literal(15, "int")), Literal(16, "int"))
+    ceil_div = BinaryExpression("//", BinaryExpression("+", Var("seq_len"), Literal(15, "int")), Literal(16, "int"))
     g.add_node(
         op=CudaOp(
             kernel_source="__global__ void k_test() {}",
@@ -318,11 +318,11 @@ def test_reciprocal_load_op_rebinds_after_plan_json_round_trip():
 
 def _slice_index_map(out_shape, spans):
     """A single-source ``IndexMapOp`` reading ``spans`` (per-axis ``(start, step)``)."""
-    from emmy.compiler.ir.expression import BinaryExpr, Literal, Var
+    from emmy.compiler.ir.expression import BinaryExpression, Literal, Var
     from emmy.compiler.ir.tensor.ir import IndexMapOp, IndexSource
 
     coords = tuple(
-        BinaryExpr("+", BinaryExpr("*", Var(f"out_coord_{i}"), Literal(step, "int")), Literal(start, "int"))
+        BinaryExpression("+", BinaryExpression("*", Var(f"out_coord_{i}"), Literal(step, "int")), Literal(start, "int"))
         for i, (start, step) in enumerate(spans)
     )
     return IndexMapOp(out_shape=out_shape, sources=(IndexSource(input_idx=0, coord_map=coords),))

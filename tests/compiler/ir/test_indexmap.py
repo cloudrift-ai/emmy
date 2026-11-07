@@ -2,9 +2,9 @@
 
 from emmy.compiler.ir.expression import (
     PLACEHOLDER_PREFIX,
-    BinaryExpr,
+    BinaryExpression,
     Literal,
-    TernaryExpr,
+    TernaryExpression,
     Var,
     is_placeholder,
     placeholder,
@@ -47,24 +47,24 @@ def test_substitute_passes_unmapped_vars():
 
 def test_substitute_leaves_literal_alone():
     expression = Literal(5, "int")
-    assert expression.substitute({}) is expression
+    assert expression.substitute({}) == expression
 
 
 def test_substitute_rewrites_binop():
     expression = placeholder(0) + Literal(7, "int")
     result = expression.substitute({placeholder(0).name: Var("row")})
-    assert isinstance(result, BinaryExpr) and result.op == "+"
+    assert isinstance(result, BinaryExpression) and result.op == "+"
     assert isinstance(result.left, Var) and result.left.name == "row"
     assert isinstance(result.right, Literal) and result.right.value == 7
 
 
 def test_substitute_rewrites_ternary():
     cond = placeholder(0).lt(Literal(64, "int"))
-    expression = TernaryExpr(cond, placeholder(0), placeholder(0) - Literal(64, "int"))
+    expression = TernaryExpression(cond, placeholder(0), placeholder(0) - Literal(64, "int"))
     result = expression.substitute({placeholder(0).name: Var("col")})
-    assert isinstance(result, TernaryExpr)
+    assert isinstance(result, TernaryExpression)
     assert isinstance(result.if_true, Var) and result.if_true.name == "col"
-    assert isinstance(result.if_false, BinaryExpr) and result.if_false.op == "-"
+    assert isinstance(result.if_false, BinaryExpression) and result.if_false.op == "-"
 
 
 # ---------- IndexMapOp.is_identity ----------

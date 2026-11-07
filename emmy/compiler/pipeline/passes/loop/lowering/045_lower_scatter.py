@@ -23,7 +23,7 @@ from __future__ import annotations
 
 from emmy.compiler.graph import Graph, Node, Tensor
 from emmy.compiler.ir.base import InputOp
-from emmy.compiler.ir.expression import BinaryExpr, CastExpr, Literal, TernaryExpr, Var, placeholder
+from emmy.compiler.ir.expression import BinaryExpression, CastExpression, Literal, TernaryExpression, Var, placeholder
 from emmy.compiler.ir.loop import Axis, Cond, Load, Loop, LoopOp, Write
 from emmy.compiler.ir.stmt import Body
 from emmy.compiler.ir.tensor.ir import IndexMapOp, IndexSource, ScatterOp
@@ -51,8 +51,8 @@ def rewrite(match: Match, root: Node, inp_dest: Node, inp_idx: Node, inp_values:
     idx_shape = tuple(inp_idx.output.shape)
     value_shape = tuple(inp_values.output.shape)
     extent = dest_shape[axis].expression
-    index = CastExpr("int", Var("idx"))
-    index = TernaryExpr(index.lt(0), index + extent, index)
+    index = CastExpression("int", Var("idx"))
+    index = TernaryExpression(index.lt(0), index + extent, index)
 
     if len(idx_shape) == rank:
         # torch.scatter: idx, values and the destination share a rank; the loop walks the values, and
@@ -79,7 +79,7 @@ def rewrite(match: Match, root: Node, inp_dest: Node, inp_idx: Node, inp_values:
     inner: Body = (
         Load(names=("idx",), input=inp_idx.id, index=idx_index),
         Load(names=("val",), input=inp_values.id, index=value_index),
-        Cond(cond=BinaryExpr("<", index, extent), body=(Write(output=f"loop_{root.id}", index=out_index, values=("val",)),)),
+        Cond(cond=BinaryExpression("<", index, extent), body=(Write(output=f"loop_{root.id}", index=out_index, values=("val",)),)),
     )
     body: Body = inner
     for a in reversed(axes):

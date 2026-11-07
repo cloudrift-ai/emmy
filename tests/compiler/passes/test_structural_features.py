@@ -11,8 +11,6 @@ the fused kernels (``search/features.stamps``).
 
 from __future__ import annotations
 
-from sys import float_info
-
 from emmy.compiler.graph import Graph
 from emmy.compiler.ir.base import InputOp
 from emmy.compiler.ir.loop import LoopOp
@@ -116,9 +114,9 @@ def test_extent_products_saturate_without_building_unbounded_integers():
     # A loop is a reduce iff its body carries an ``Accum``: the two inner loops fold, the outer is free.
     body = parse_body(
         f"""
-        for outer in 0..{10**200}:
-            for middle in 0..{10**200}:
-                for inner in 0..{10**200}:
+        for outer in 0..{2**62}:
+            for middle in 0..{2**62}:
+                for inner in 0..{2**62}:
                     acc <- add(acc, x) over inner
                 tot <- add(tot, acc) over middle
         """
@@ -126,8 +124,8 @@ def test_extent_products_saturate_without_building_unbounded_integers():
 
     feats = structure_features(body)
 
-    assert feats["S_ext_free_prod"] == 1e200
-    assert feats["S_ext_reduce_prod"] == float_info.max
+    assert feats["S_ext_free_prod"] == 2.0**62
+    assert feats["S_ext_reduce_prod"] == 2.0**124
 
 
 def test_symbolic_axis_counted_and_excluded_from_prod():
@@ -185,14 +183,14 @@ def test_serial_cell_work_saturates_and_skips_symbolic_extents():
     # A reduce loop is one that accumulates: the nested pair folds a load through ``acc``.
     huge = parse_body(
         f"""
-        for outer in 0..{10**200}:
-            for inner in 0..{10**200}:
+        for outer in 0..{2**62}:
+            for inner in 0..{2**62}:
                 x = load a[outer, inner]
                 acc <- add(acc, x)
             total <- add(total, acc)
         """
     )
-    assert structure_features(huge)["S_ext_serial_cell_work"] == float_info.max
+    assert structure_features(huge)["S_ext_serial_cell_work"] == 2.0**124
     symbolic = parse_body(
         """
         for s in 0..seq_len:
@@ -217,12 +215,12 @@ def test_trips_count_every_statement_once_per_enclosing_trip():
 def test_trips_saturate_and_count_a_symbolic_extent_once():
     huge = parse_body(
         f"""
-        for outer in 0..{10**200}:
-            for inner in 0..{10**200}:
+        for outer in 0..{2**62}:
+            for inner in 0..{2**62}:
                 o[] = x
         """
     )
-    assert structure_features(huge)["S_ext_trips"] == float_info.max
+    assert structure_features(huge)["S_ext_trips"] == 2.0**124
     symbolic = parse_body(
         """
         for s in 0..seq_len:

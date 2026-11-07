@@ -10,7 +10,17 @@ import pytest
 from emmy.compiler.dim import Dim
 from emmy.compiler.graph import Graph
 from emmy.compiler.ir.base import ConstantOp, InputOp
-from emmy.compiler.ir.expression import BinaryExpr, Builtin, CastExpr, Expression, FlatIndex, FuncCallExpr, Literal, TernaryExpr, Var
+from emmy.compiler.ir.expression import (
+    BinaryExpression,
+    Builtin,
+    CastExpression,
+    Expression,
+    FlatIndex,
+    FunctionCallExpression,
+    Literal,
+    TernaryExpression,
+    Var,
+)
 from emmy.compiler.ir.frontend.ir import (
     CatOp,
     Conv1dOp,
@@ -57,29 +67,31 @@ from emmy.compiler.wire import decode, encode, intern
         (Literal(2, "float"), "2.0"),
         (Literal(1e-05), "1e-05"),
         (Literal(True, "bool"), "true"),
-        (BinaryExpr("+", Var("s"), Literal(2, "int")), "s + 2"),
-        (BinaryExpr("+", Var("a1"), Literal(-1, "int")), "a1 + -1"),
+        (BinaryExpression("+", Var("s"), Literal(2, "int")), "s + 2"),
+        (BinaryExpression("+", Var("a1"), Literal(-1, "int")), "a1 + -1"),
         (
-            BinaryExpr("+", BinaryExpr("*", BinaryExpr("/", Var("a5"), Literal(128, "int")), Literal(128, "int")), Var("a6")),
+            BinaryExpression(
+                "+", BinaryExpression("*", BinaryExpression("/", Var("a5"), Literal(128, "int")), Literal(128, "int")), Var("a6")
+            ),
             "a5 / 128 * 128 + a6",
         ),
-        (BinaryExpr("-", Var("a"), BinaryExpr("-", Var("b"), Var("c"))), "a - (b - c)"),
-        (BinaryExpr("*", BinaryExpr("+", Var("a"), Var("b")), Var("c")), "(a + b) * c"),
-        (BinaryExpr("^", Var("a"), BinaryExpr("+", Var("b"), Var("c"))), "a ^ b + c"),
-        (BinaryExpr("+", BinaryExpr("^", Var("a"), Var("b")), Var("c")), "(a ^ b) + c"),
-        (BinaryExpr("&", Var("a"), BinaryExpr("*", Var("b"), Var("c"))), "a & b * c"),
-        (BinaryExpr("*", BinaryExpr("&", Var("a"), Var("b")), Var("c")), "(a & b) * c"),
-        (BinaryExpr("//", Var("a"), Literal(2, "int")), "a // 2"),
-        (FuncCallExpr("maximum", (Var("x"), Literal(0.0))), "maximum(x, 0.0)"),
-        (TernaryExpr(Var("p"), Literal(1, "int"), Literal(0, "int")), "p ? 1 : 0"),
-        (BinaryExpr("+", TernaryExpr(Var("p"), Var("a"), Var("b")), Literal(1, "int")), "(p ? a : b) + 1"),
-        (CastExpr("int", Var("x")), "(int)x"),
-        (CastExpr("int", BinaryExpr("+", Var("x"), Literal(1, "int"))), "(int)(x + 1)"),
-        (CastExpr("int", Literal(-1, "int")), "(int)(-1)"),
+        (BinaryExpression("-", Var("a"), BinaryExpression("-", Var("b"), Var("c"))), "a - (b - c)"),
+        (BinaryExpression("*", BinaryExpression("+", Var("a"), Var("b")), Var("c")), "(a + b) * c"),
+        (BinaryExpression("^", Var("a"), BinaryExpression("+", Var("b"), Var("c"))), "a ^ b + c"),
+        (BinaryExpression("+", BinaryExpression("^", Var("a"), Var("b")), Var("c")), "(a ^ b) + c"),
+        (BinaryExpression("&", Var("a"), BinaryExpression("*", Var("b"), Var("c"))), "a & b * c"),
+        (BinaryExpression("*", BinaryExpression("&", Var("a"), Var("b")), Var("c")), "(a & b) * c"),
+        (BinaryExpression("//", Var("a"), Literal(2, "int")), "a // 2"),
+        (FunctionCallExpression("maximum", (Var("x"), Literal(0.0))), "maximum(x, 0.0)"),
+        (TernaryExpression(Var("p"), Literal(1, "int"), Literal(0, "int")), "p ? 1 : 0"),
+        (BinaryExpression("+", TernaryExpression(Var("p"), Var("a"), Var("b")), Literal(1, "int")), "(p ? a : b) + 1"),
+        (CastExpression("int", Var("x")), "(int)x"),
+        (CastExpression("int", BinaryExpression("+", Var("x"), Literal(1, "int"))), "(int)(x + 1)"),
+        (CastExpression("int", Literal(-1, "int")), "(int)(-1)"),
         (Literal(float("-inf")), "-inf"),
-        (BinaryExpr("*", Var("x"), Literal(float("inf"))), "x * inf"),
-        (FlatIndex("w", (Var("a0"), BinaryExpr("+", Var("a1"), Literal(1, "int")))), "w[a0, a1 + 1]"),
-        (BinaryExpr("+", FlatIndex("w", (Var("a0"),)), Literal(4, "int")), "w[a0] + 4"),
+        (BinaryExpression("*", Var("x"), Literal(float("inf"))), "x * inf"),
+        (FlatIndex("w", (Var("a0"), BinaryExpression("+", Var("a1"), Literal(1, "int")))), "w[a0, a1 + 1]"),
+        (BinaryExpression("+", FlatIndex("w", (Var("a0"),)), Literal(4, "int")), "w[a0] + 4"),
         (Var("$0"), "`$0`"),
         (Var("thread_idx.x"), "`thread_idx.x`"),
         (Var("true"), "`true`"),
@@ -104,7 +116,7 @@ def test_a_name_holding_a_backtick_has_no_text():
 
 
 def test_dimension_round_trip_preserves_composite_expression_and_hint():
-    dims = [Dim(32), Dim("seq", hint=17), Dim(BinaryExpr("*", Var("seq"), Literal(2, "int")))]
+    dims = [Dim(32), Dim("seq", hint=17), Dim(BinaryExpression("*", Var("seq"), Literal(2, "int")))]
     restored = [Dim.from_wire(dim.to_wire()) for dim in dims]
     assert [dim.expression for dim in restored] == [dim.expression for dim in dims]
     assert [dim.hint for dim in restored] == [dim.hint for dim in dims]
@@ -143,8 +155,8 @@ def test_dimension_round_trip_preserves_composite_expression_and_hint():
             sources=(
                 IndexSource(
                     input_idx=0,
-                    coord_map=(Var("out_coord_0"), BinaryExpr("%", Var("out_coord_1"), Literal(4, "int"))),
-                    select=BinaryExpr("<", Var("out_coord_0"), Var("seq")),
+                    coord_map=(Var("out_coord_0"), BinaryExpression("%", Var("out_coord_1"), Literal(4, "int"))),
+                    select=BinaryExpression("<", Var("out_coord_0"), Var("seq")),
                 ),
             ),
         ),
@@ -249,7 +261,7 @@ def test_program_rejects_unknown_ops_and_fields():
 
 
 def test_loop_graph_round_trip_preserves_structural_body_and_composite_dims() -> None:
-    extent = Dim(BinaryExpr("*", Var("seq"), Literal(2, "int")))
+    extent = Dim(BinaryExpression("*", Var("seq"), Literal(2, "int")))
     body = parse_body(
         """
         for a0 in 0..seq * 2:

@@ -18,7 +18,7 @@ times as many, most of them by zero.
 """
 
 from emmy.compiler.graph import Graph, Node, Tensor
-from emmy.compiler.ir.expression import BinaryExpr, Literal, placeholder
+from emmy.compiler.ir.expression import BinaryExpression, Literal, placeholder
 from emmy.compiler.ir.frontend.ir import ConvTranspose1dOp, MatmulOp
 from emmy.compiler.ir.tensor.ir import ElementwiseOp
 from emmy.compiler.pipeline import Match, Pattern
@@ -50,8 +50,8 @@ def rewrite(match: Match, root: Node, inp_x: Node, inp_w: Node, inp_bias: Node |
         frag,
         inp_x,
         out_shape=(batch, phase_taps * channels, positions),
-        channel=BinaryExpr("%", stacked, lit(channels)),
-        length=BinaryExpr("-", placeholder(2), BinaryExpr("/", stacked, lit(channels))),
+        channel=BinaryExpression("%", stacked, lit(channels)),
+        length=BinaryExpression("-", placeholder(2), BinaryExpression("/", stacked, lit(channels))),
         in_length=length,
         name=f"{out.name}_im2col",
     )
@@ -61,9 +61,13 @@ def rewrite(match: Match, root: Node, inp_x: Node, inp_w: Node, inp_bias: Node |
         inp_w,
         out_shape=(out_channels * stride, phase_taps * channels),
         coord_map=[
-            BinaryExpr("%", column, lit(channels)),
-            BinaryExpr("/", row, lit(stride)),
-            BinaryExpr("+", BinaryExpr("*", BinaryExpr("/", column, lit(channels)), lit(stride)), BinaryExpr("%", row, lit(stride))),
+            BinaryExpression("%", column, lit(channels)),
+            BinaryExpression("/", row, lit(stride)),
+            BinaryExpression(
+                "+",
+                BinaryExpression("*", BinaryExpression("/", column, lit(channels)), lit(stride)),
+                BinaryExpression("%", row, lit(stride)),
+            ),
         ],
         name=f"{out.name}_w_phase",
     )
@@ -72,15 +76,15 @@ def rewrite(match: Match, root: Node, inp_x: Node, inp_w: Node, inp_bias: Node |
         inputs=[phase_w, col],
         output=Tensor(f"{out.name}_phases", (batch, out_channels * stride, positions), out.dtype),
     )
-    shifted = BinaryExpr("+", placeholder(2), lit(op.padding)) if op.padding else placeholder(2)
+    shifted = BinaryExpression("+", placeholder(2), lit(op.padding)) if op.padding else placeholder(2)
     acc = single_indexmap(
         frag,
         phases,
         out_shape=tuple(out.shape),
         coord_map=[
             placeholder(0),
-            BinaryExpr("+", BinaryExpr("*", placeholder(1), lit(stride)), BinaryExpr("%", shifted, lit(stride))),
-            BinaryExpr("/", shifted, lit(stride)),
+            BinaryExpression("+", BinaryExpression("*", placeholder(1), lit(stride)), BinaryExpression("%", shifted, lit(stride))),
+            BinaryExpression("/", shifted, lit(stride)),
         ],
         name=f"{out.name}_interleave" if inp_bias else out.name,
     )

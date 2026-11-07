@@ -50,9 +50,9 @@ def test_a_base_the_reading_cannot_prove_keeps_the_whole_index() -> None:
     assert swizzled_slab_index("B128@7", 128, "L", Literal(16, "int"), Literal(8, "int"), ctx, lane_rows=16, lane_col_mod=16) is None
     assert swizzled_slab_index("NONE", 128, "L", row, col, ctx, lane_rows=16, lane_col_mod=16) is None
     slot = Var("_slot")  # a ring slot's row offset is a multiple of the slab's rows, whatever the slot
-    from emmy.compiler.ir.expression import BinaryExpr
+    from emmy.compiler.ir.expression import BinaryExpression
 
-    ring = BinaryExpr("+", BinaryExpr("*", slot, Literal(64, "int")), Literal(16, "int"))
+    ring = BinaryExpression("+", BinaryExpression("*", slot, Literal(64, "int")), Literal(16, "int"))
     assert swizzled_slab_index("B128@7", 128, "L", ring, col, ctx, lane_rows=16, lane_col_mod=16) is not None
 
 

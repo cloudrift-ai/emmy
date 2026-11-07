@@ -41,7 +41,7 @@ from emmy.compiler.ir.address import clamp_to, gmem_axis_step
 from emmy.compiler.ir.axis import Axis, Window
 from emmy.compiler.ir.base import InputOp
 from emmy.compiler.ir.elementwise import ElementwiseImpl
-from emmy.compiler.ir.expression import BinaryExpr, Literal, Var
+from emmy.compiler.ir.expression import BinaryExpression, Literal, Var
 from emmy.compiler.ir.loop import LoopOp
 from emmy.compiler.ir.pure import Lambda
 from emmy.compiler.ir.pure.fold import Fold
@@ -97,7 +97,7 @@ def _slice_length(k_axis: Axis, width: int):
     """The positions one partition's slice of the stream spans: ``K/w``, or ``⌈K/w⌉`` of a symbolic stream."""
     if k_axis.extent.is_static:
         return Literal(k_axis.extent.as_static() // width, "int")
-    return BinaryExpr("/", BinaryExpr("+", k_axis.extent.expression, Literal(width - 1, "int")), Literal(width, "int"))
+    return BinaryExpression("/", BinaryExpression("+", k_axis.extent.expression, Literal(width - 1, "int")), Literal(width, "int"))
 
 
 def _clamped(k_axis: Axis, position):
@@ -117,7 +117,7 @@ def _masked(fold: Fold, k_axis: Axis, position) -> Fold:
     end = k_axis.extent.expression
     stmts: list[Statement] = []
     if fold.twist is None:
-        inside = BinaryExpr("<", position, end)
+        inside = BinaryExpression("<", position, end)
         results = []
         for name, seed in zip(fold.lift.results, fold.init, strict=True):
             stmts += [
@@ -443,7 +443,9 @@ def realize_carry_split(match: Match, root: Node, cta: int) -> Graph:
     loop, before, after = body[position], tuple(body[:position]), tuple(body[position + 1 :])
     part, probe = Axis("_part", Dim(cta)), Axis("_probe", Dim(2))
     sliced = replace(loop.axis, extent=Dim(steps), window=Window(parent=loop.axis.source_axis or loop.axis, partition=True))
-    sigma = Sigma({loop.axis.name: BinaryExpr("+", BinaryExpr("*", Var(part.name), Literal(steps, "int")), Var(loop.axis.name))})
+    sigma = Sigma(
+        {loop.axis.name: BinaryExpression("+", BinaryExpression("*", Var(part.name), Literal(steps, "int")), Var(loop.axis.name))}
+    )
     step = Body(tuple(stmt.substitute(sigma) for stmt in loop.body))
     probe_seed, probe_states, starts = f"{out.name}__probe_seed", f"{out.name}__probe", f"{out.name}__start"
 
@@ -474,9 +476,9 @@ def realize_carry_split(match: Match, root: Node, cta: int) -> Graph:
     probe_body = Body((*before, *_nest(walk, (sliced, probe, part)), *after))
     # The probe's seeds: zero, and the identity between the mixed and the kept cell — ones
     # everywhere for a step reading its own cell alone, whose map is diagonal.
-    hit = BinaryExpr(">", Var(probe.name), Literal(0, "int"))
+    hit = BinaryExpression(">", Var(probe.name), Literal(0, "int"))
     if view.mixed is not None:
-        hit = BinaryExpr("&&", hit, BinaryExpr("==", own[view.mixed], own[view.kept]))
+        hit = BinaryExpression("&&", hit, BinaryExpression("==", own[view.mixed], own[view.kept]))
     seed_body = Body(
         (
             Let(name="_one", value=1.0),
@@ -578,7 +580,7 @@ def _slice_fold(fold: Fold, axis: Axis, width: int, split: Axis) -> tuple[Axis, 
     """``(the sliced axis, the same monoid Fold over one CTA's absolute contiguous slice)`` — the
     generic (non-contraction) slicer: the whole fold rides ``Fold.rewrite`` under the σ-offset."""
     b = _slice_length(axis, width)
-    offset = BinaryExpr("+", Var(axis.name), BinaryExpr("*", Var(_SPLIT), b))
+    offset = BinaryExpression("+", Var(axis.name), BinaryExpression("*", Var(_SPLIT), b))
     sigma = Sigma({axis.name: _clamped(axis, offset)})
     sliced_axis = replace(axis, extent=Dim(b), window=Window(parent=axis.source_axis or axis, partition=True))
     # RE-DERIVED over a narrower axis, not renamed and not substituted-through: the fold keeps its
@@ -596,7 +598,7 @@ def _slice_fold(fold: Fold, axis: Axis, width: int, split: Axis) -> tuple[Axis, 
     return sliced_axis, _masked(replace(fold, operands=operands, lift=lift), axis, offset)
 
 
-def _factor_k(k_axis: Axis, w: int) -> tuple[Axis, Axis, Sigma, BinaryExpr]:
+def _factor_k(k_axis: Axis, w: int) -> tuple[Axis, Axis, Sigma, BinaryExpression]:
     """Factor a contraction axis into ``ksplit × kslice``. ``ksplit`` (extent ``w``, name
     ``_<k>_ks``) becomes the partial's lead grid axis, parallelized across CTAs and combined in
     the finalize; ``kslice`` (extent ``K/w``, or ``⌈K/w⌉`` of a symbolic axis, the ORIGINAL name)
@@ -608,7 +610,7 @@ def _factor_k(k_axis: Axis, w: int) -> tuple[Axis, Axis, Sigma, BinaryExpr]:
     b = _slice_length(k_axis, w)
     ksplit = Axis(name=f"_{k_axis.name}_ks", extent=Dim(w))
     kslice = replace(k_axis, extent=Dim(b), window=Window(parent=k_axis.source_axis or k_axis, partition=True))
-    position = BinaryExpr("+", BinaryExpr("*", Var(ksplit.name), b), Var(k_axis.name))
+    position = BinaryExpression("+", BinaryExpression("*", Var(ksplit.name), b), Var(k_axis.name))
     return ksplit, kslice, Sigma({k_axis.name: _clamped(k_axis, position)}), position
 
 

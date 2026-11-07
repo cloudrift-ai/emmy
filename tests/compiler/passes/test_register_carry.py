@@ -306,11 +306,11 @@ def test_gmem_fragment_loads_keep_their_constant_offset_in_the_pointer():
     24 bytes there, while CUDA 13 folded the same source into 189 registers. ``&k[base] + 2048``
     is one pointer and a load immediate on both (179 registers on CUDA 12.9)."""
     from emmy.compiler.dim import Dim
-    from emmy.compiler.ir.expression import BinaryExpr, Literal, Var
+    from emmy.compiler.ir.expression import BinaryExpression, Literal, Var
     from emmy.compiler.ir.render import RenderCtx
 
     ctx = RenderCtx(shapes={"k": (Dim(4), Dim(64), Dim(128))}, buffer_dtypes={"k": "f32"}, ssa_dtypes={"r": "f16"})
-    row = BinaryExpr("+", BinaryExpr("*", Var("a0"), Literal(64, "int")), Literal(16, "int"))
+    row = BinaryExpression("+", BinaryExpression("*", Var("a0"), Literal(64, "int")), Literal(16, "int"))
     load = LdmatrixLoad(frag="r", src_buffer="k", src_index=(Var("a1"), row, Literal(8, "int")), role="b", staged=False, ldm=128)
     (line,) = render_stmt(load, ctx)
     assert line.strip() == "emmy_mma_load_b_gmem<float, __half>(r, &k[a1 * 8192 + a0 * 64 * 128] + 2056, 128);"

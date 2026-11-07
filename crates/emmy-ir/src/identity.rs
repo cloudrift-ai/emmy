@@ -8,6 +8,7 @@ use crate::body::Body;
 use crate::elementwise::Op;
 use crate::kinds::{Assign, Statement};
 use crate::normalize::normalize_body;
+use crate::text::body_text;
 use crate::values::{digest, hex};
 use crate::{Name, Result, locked};
 
@@ -56,8 +57,10 @@ fn canonicalize_op_clusters(body: &Body) -> Body {
     })
 }
 
+/// The identities of the bodies met in this process, keyed by text under the content hash: body equality leaves the
+/// axis windows out, the text spells them.
 struct Memo {
-    store: HashMap<(u64, IdentityKey), Vec<(Body, Identity)>>,
+    store: HashMap<(u64, IdentityKey), Vec<(String, Identity)>>,
     order: std::collections::VecDeque<(u64, IdentityKey)>,
 }
 
@@ -102,13 +105,14 @@ pub fn canonicalize_identity(
         return Ok(identity.clone());
     }
     let memo_key = (stmts.content_hash(), key.clone());
+    let text = body_text(&stmts)?;
     let remembered = locked(identities())
         .store
         .get(&memo_key)
         .and_then(|entries| {
             entries
                 .iter()
-                .find(|(b, _)| *b == stmts)
+                .find(|(t, _)| *t == text)
                 .map(|(_, i)| i.clone())
         });
     if let Some(identity) = remembered {
@@ -125,7 +129,7 @@ pub fn canonicalize_identity(
     memo.store
         .entry(memo_key.clone())
         .or_default()
-        .push((stmts.clone(), identity.clone()));
+        .push((text, identity.clone()));
     memo.order.push_back(memo_key);
     while memo.order.len() > MEMO_SIZE {
         let Some(oldest) = memo.order.pop_front() else {

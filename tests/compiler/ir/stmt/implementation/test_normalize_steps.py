@@ -5,16 +5,17 @@ from __future__ import annotations
 from itertools import product
 from textwrap import indent
 
-from emmy.compiler.ir.stmt import Body, normalize_body, parse_body
-from emmy.compiler.ir.stmt.normalize import (
-    _canonicalize_expressions,
-    _normalize_body,
+from emmy.emmy_ir import (
+    canonicalize_expressions,
     drop_unread_values,
     fold_affine,
     fold_trivial_selects,
+    normalize_uncached,
     prepare_body,
     rename_ssa_sequential,
 )
+
+from emmy.compiler.ir.stmt import Body, normalize_body, parse_body
 
 
 def test_atomic_partition_axis_order_converges_independently_of_affine_spelling() -> None:
@@ -54,7 +55,7 @@ def test_a_commutative_comparison_orders_its_axes_by_binding_not_spelling() -> N
                         O[{outer}, {inner}] = x
             """
         )
-        return str(_canonicalize_expressions(body)[0].body[0].body[1].cond)
+        return str(canonicalize_expressions(body)[0].body[0].body[1].cond)
 
     assert condition("a10", "a5") == "a10 == a5"
     assert condition("a5", "a10") == "a5 == a10"
@@ -75,8 +76,8 @@ def test_normal_form_is_a_fixed_point_when_the_order_breaks_a_tie_by_spelling() 
                     reshape_5[0, a0, a2 / 64, a2 % 64, a7] = v146
         """
     )
-    once = _normalize_body(body)
-    assert repr(_normalize_body(once)) == repr(once)
+    once = normalize_uncached(body)
+    assert repr(normalize_uncached(once)) == repr(once)
 
 
 def _one_key_softmax() -> Body:
@@ -165,4 +166,4 @@ def test_a_reduction_only_another_bindings_readers_kept_alive_is_dropped() -> No
     body = parse_body(f"for i in 0..8:\n    for j in 0..3:{cone('W1', 'o1')}{cone('W2', 'o2')}{writes}")
     normalized = normalize_body(body)
     assert len(normalized.accums) == 3
-    assert _normalize_body(normalized) == normalized
+    assert normalize_uncached(normalized) == normalized

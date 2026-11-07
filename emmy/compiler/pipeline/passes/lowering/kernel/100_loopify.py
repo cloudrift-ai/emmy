@@ -60,11 +60,11 @@ from itertools import count
 from emmy import config
 from emmy.compiler.graph import Node
 from emmy.compiler.ir.axis import Axis
-from emmy.compiler.ir.expression import BinaryExpr, Expression, Literal, Var
+from emmy.compiler.ir.expression import BinaryExpression, Expression, Literal, Var
 from emmy.compiler.ir.kernel import KernelOp
 from emmy.compiler.ir.kernel.ir import FRAG, FragmentApply, FragmentArg, RegFragment
 from emmy.compiler.ir.pure import Lambda
-from emmy.compiler.ir.stmt import Body, Statement, StridedLoop, fields_of
+from emmy.compiler.ir.stmt import Body, SelectBranch, Statement, StridedLoop, fields_of
 from emmy.compiler.pipeline import Pattern, RuleSkipped
 from emmy.compiler.pipeline.passes.lowering.kernel._atom import unroll_ok_n
 from emmy.compiler.pipeline.search.space import LOOPIFY
@@ -173,7 +173,7 @@ def _is_int(x) -> bool:
 def _peel(v):
     """Split an Expression into ``(base, trailing_int_const)`` — ``kv0`` → ``(kv0, 0)``, ``kv0 + 8`` →
     ``(kv0, 8)`` — so a constant-folded ``+ 0`` reconciles with a sibling's ``+ c``."""
-    if isinstance(v, BinaryExpr) and v.op == "+" and isinstance(v.right, Literal) and _is_int(v.right.value):
+    if isinstance(v, BinaryExpression) and v.op == "+" and isinstance(v.right, Literal) and _is_int(v.right.value):
         return v.left, v.right.value
     return v, 0
 
@@ -183,8 +183,8 @@ def _init_kwargs(cls) -> frozenset[str] | None:
     """The keyword names ``cls.__init__`` accepts, or ``None`` when it takes ``**kwargs`` (any name).
 
     Guards the generic dataclass re-roll below: it reconstructs a node as ``type(v0)(**{field: ...})``,
-    which is only valid when every ``init`` field name is also a constructor parameter. Most IR nodes
-    (``Expression`` subclasses, stmts) satisfy that, but ``Dim`` does not — it is ``dataclass(init=False)``
+    which is only valid when every ``init`` field name is also a constructor parameter. Most dataclass
+    nodes satisfy that, but ``Dim`` does not — it is ``dataclass(init=False)``
     with a hand-written ``__init__(self, value, *, hint)`` whose param ``value`` populates the ``expression``
     field, so ``Dim(expression=...)`` raises ``TypeError``. A run whose divergence bottoms out in such a node
     is simply declined (``_FAIL``) rather than crashed on."""
@@ -226,7 +226,7 @@ def _reroll(vals: list, loopvar: str, frag_stems: set[str]):
         return _recurse_seq(vals, loopvar, frag_stems, tuple)
     if isinstance(v0, Lambda):
         return _FAIL  # a closed term binds only its params, so it cannot read the loop var — decline
-    if isinstance(v0, Statement) and all(type(v) is type(v0) for v in vals):
+    if isinstance(v0, (Statement, SelectBranch, FragmentArg)) and all(type(v) is type(v0) for v in vals):
         changes = {}
         for name in fields_of(type(v0)):
             sub = _reroll([getattr(v, name) for v in vals], loopvar, frag_stems)
@@ -234,7 +234,16 @@ def _reroll(vals: list, loopvar: str, frag_stems: set[str]):
                 return _FAIL
             changes[name] = sub
         return v0.replace(**changes)
-    if all(type(v) is type(v0) for v in vals) and (isinstance(v0, Expression) or is_dataclass(v0)):
+    if isinstance(v0, Expression) and all(type(v) is type(v0) for v in vals):
+        if isinstance(v0, Var):
+            name = _reroll([v.name for v in vals], loopvar, frag_stems)
+            return _FAIL if name is _FAIL else Var(name)
+        children = [v.children() for v in vals]
+        if any(len(c) != len(children[0]) or v.with_children(children[0]) != v0 for v, c in zip(vals, children, strict=True)):
+            return _FAIL  # a different arity, or a leaf field — the operator, a dtype, a call's name — diverges
+        sub = _recurse_seq(children, loopvar, frag_stems, tuple)
+        return _FAIL if sub is _FAIL else v0.with_children(sub)
+    if all(type(v) is type(v0) for v in vals) and is_dataclass(v0):
         accepted = _init_kwargs(type(v0))
         kw = {}
         for f in fields(v0):
@@ -255,7 +264,7 @@ def _reroll(vals: list, loopvar: str, frag_stems: set[str]):
         step = consts[1] - consts[0]
         if base_t is not _FAIL and all(c == consts[0] + i * step for i, c in enumerate(consts)):
             tail = _affine(consts[0], step, loopvar, "int")
-            return base_t if tail is None else BinaryExpr("+", base_t, tail)
+            return base_t if tail is None else BinaryExpression("+", base_t, tail)
     return _FAIL
 
 
@@ -271,8 +280,8 @@ def _affine(base: int, step: int, loopvar: str, dtype: str):
     0``, ``None`` when both are zero (a pure ``+ 0`` that folds away)."""
     if step == 0:
         return None if base == 0 else Literal(base, dtype)
-    term = BinaryExpr("*", Var(loopvar), Literal(step, "int"))
-    return term if base == 0 else BinaryExpr("+", Literal(base, dtype), term)
+    term = BinaryExpression("*", Var(loopvar), Literal(step, "int"))
+    return term if base == 0 else BinaryExpression("+", Literal(base, dtype), term)
 
 
 def _families_in(tmpl, loopvar: str, out: set[str]) -> None:
@@ -284,10 +293,15 @@ def _families_in(tmpl, loopvar: str, out: set[str]) -> None:
     elif isinstance(tmpl, (tuple, Body)):
         for v in tmpl:
             _families_in(v, loopvar, out)
-    elif isinstance(tmpl, Statement):
+    elif isinstance(tmpl, (Statement, SelectBranch, FragmentArg)):
         for name in fields_of(type(tmpl)):
             _families_in(getattr(tmpl, name), loopvar, out)
-    elif isinstance(tmpl, Expression) or is_dataclass(tmpl):
+    elif isinstance(tmpl, Var):
+        _families_in(tmpl.name, loopvar, out)
+    elif isinstance(tmpl, Expression):
+        for child in tmpl.children():
+            _families_in(child, loopvar, out)
+    elif is_dataclass(tmpl):
         for f in fields(tmpl):
             if f.init:
                 _families_in(getattr(tmpl, f.name), loopvar, out)

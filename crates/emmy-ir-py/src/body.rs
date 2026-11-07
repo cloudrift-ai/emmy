@@ -142,6 +142,12 @@ impl PyBody {
         self.body.len()
     }
 
+    fn __reversed__<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+        let mut items = PyBody::items(py, &self.body)?;
+        items.reverse();
+        Ok(PyList::new(py, items)?.into_any().try_iter()?.into_any())
+    }
+
     fn __iter__<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
         Ok(PyList::new(py, PyBody::items(py, &self.body)?)?
             .into_any()
@@ -194,10 +200,6 @@ impl PyBody {
 
     /// The body's text, which `parse_body` reads back to an equal body.
     fn __str__(&self) -> PyResult<String> {
-        body_text(&self.body).py()
-    }
-
-    fn __repr__(&self) -> PyResult<String> {
         body_text(&self.body).py()
     }
 
@@ -326,6 +328,24 @@ impl PyBody {
             out.set_item(&**name, wrap_ref(py, here)?)?;
         }
         Ok(out)
+    }
+
+    /// Accumulator and carried-state names, each once, in structural order.
+    #[getter]
+    fn _carried_names<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyTuple>> {
+        str_tuple(py, self.body.carried_names())
+    }
+
+    /// Bindings at this scope, including states exported by nested statements.
+    #[getter]
+    fn _local_defs<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyFrozenSet>> {
+        frozenset(py, self.body.local_defs().iter().cloned())
+    }
+
+    /// SSA reads from the enclosing scope, excluding this scope's definitions and exported states.
+    #[getter]
+    fn _free_ssa<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyFrozenSet>> {
+        frozenset(py, self.body.free_ssa().iter().cloned())
     }
 
     #[getter]
@@ -647,11 +667,14 @@ pub fn pretty_body(body: &Bound<'_, PyAny>, indent: &str) -> PyResult<Vec<String
     Ok(out)
 }
 
-/// The executable normal form of a body.
+/// The executable normal form of a body: the body itself when it is its own normal form.
 #[pyfunction]
 pub fn normalize_body<'py>(body: &Bound<'py, PyAny>) -> PyResult<Bound<'py, PyBody>> {
     let normal = emmy_ir::normalize::normalize_body(&PyBody::from_iterable(body)?).py()?;
-    PyBody::wrap(body.py(), &normal)
+    match body.cast::<PyBody>() {
+        Ok(given) if given.get().body.ptr_eq(&normal) => Ok(given.clone()),
+        _ => PyBody::wrap(body.py(), &normal),
+    }
 }
 
 #[pyfunction]
@@ -757,6 +780,24 @@ step!(
     "Dependency-valid statement order, commutative operand order and names.",
     fallible
 );
+
+/// Canonicalize integer expressions using lexical binding order, never axis spelling.
+#[pyfunction]
+#[pyo3(signature = (body, axes = None))]
+pub fn canonicalize_expressions<'py>(
+    body: &Bound<'py, PyAny>,
+    axes: Option<Vec<String>>,
+) -> PyResult<Bound<'py, PyBody>> {
+    let axes: Vec<Name> = axes
+        .unwrap_or_default()
+        .into_iter()
+        .map(Name::from)
+        .collect();
+    PyBody::wrap(
+        body.py(),
+        &emmy_ir::normalize::canonicalize_expressions(&PyBody::from_iterable(body)?, &axes).py()?,
+    )
+}
 
 /// Normalization computed afresh, without the memo.
 #[pyfunction]
@@ -904,6 +945,7 @@ pub fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(place_values, m)?)?;
     m.add_function(wrap_pyfunction!(rename_ssa_sequential, m)?)?;
     m.add_function(wrap_pyfunction!(canonical_order, m)?)?;
+    m.add_function(wrap_pyfunction!(canonicalize_expressions, m)?)?;
     m.add_function(wrap_pyfunction!(free_names_py, m)?)?;
     m.add_function(wrap_pyfunction!(exposed_defines_py, m)?)?;
     m.add_function(wrap_pyfunction!(rename_free, m)?)?;

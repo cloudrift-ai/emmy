@@ -25,6 +25,7 @@ import numpy as np
 
 from emmy.compiler.dtype import decode_f4, decode_f8, encode_f4, encode_f8
 from emmy.compiler.wire import Wire
+from emmy.emmy_ir import ASSOCIATIVE_OPS, COMMUTATIVE_OPS, OP_ALIASES, OP_CLUSTERS, OP_IDENTITY
 
 
 # Names whose callable isn't a plain ``getattr(np, name)`` — non-numpy
@@ -110,10 +111,7 @@ _NAME_TO_FN: dict[str, object] = {
 # int4 or trellis decode cone could be written as a traced expression at all -- which meant a
 # miscompilation reachable only through such a cone could not be minimized outside a real
 # checkpoint.
-_ALIASES: dict[str, str] = {
-    "__rshift__": "right_shift",
-    "bitwise_right_shift": "right_shift",
-}
+_ALIASES: dict[str, str] = dict(OP_ALIASES)
 
 _ARITY: dict[str, int] = {
     # ``np.where`` is a regular function rather than a ufunc, so it has no ``nin`` metadata.
@@ -154,23 +152,15 @@ class ElementwiseImpl(Wire):
         return cls(value)
 
     # Commutative ops — binary combines where ``op(a, b) == op(b, a)``.
-    _COMMUTATIVE: frozenset[str] = frozenset({"add", "multiply", "maximum", "minimum", "amax", "sum", "prod"})
+    _COMMUTATIVE: frozenset[str] = COMMUTATIVE_OPS
     # Associative ops — binary combines where ``op(op(a, b), c) == op(a, op(b, c))``.
     # The reassociable reduce combines: a reduction over one of these may be
     # split / reordered (split-K, cooperative tree-combine) without changing
     # the result. ``subtract`` / ``divide`` are deliberately absent.
-    _ASSOCIATIVE: frozenset[str] = frozenset({"add", "multiply", "maximum", "minimum", "amax", "sum", "prod"})
+    _ASSOCIATIVE: frozenset[str] = ASSOCIATIVE_OPS
     # Reducer neutral elements — only meaningful when used as an Accum
     # combine or a ReduceOp.
-    _IDENTITY: dict[str, float] = {
-        "add": 0.0,
-        "sum": 0.0,
-        "multiply": 1.0,
-        "prod": 1.0,
-        "maximum": -1e30,
-        "amax": -1e30,
-        "minimum": 1e30,
-    }
+    _IDENTITY: dict[str, float] = dict(OP_IDENTITY)
     # Selecting ops *choose* an existing input value (max/min family) rather
     # than accumulate magnitude — so an Accum over one may stay in the input
     # dtype, and the flash recognizer's rowmax keys off it. The single source
@@ -369,53 +359,7 @@ def reduce_spelling(op) -> ReduceSpelling:
 #   information for the search.)
 # - **copy** (rep ``copy``) — passthrough; its own bucket so a no-op
 #   doesn't get collapsed with arithmetic.
-_OP_CLUSTERS: dict[str, str] = {
-    # fma — the representative is the product: a sum would fold with its neighbours into one flat sum under
-    # normalization and lose the tree the exact body had, while a product of two values folds with nothing.
-    "add": "multiply",
-    "sum": "multiply",
-    "subtract": "multiply",
-    "sub": "multiply",
-    "negative": "multiply",
-    "multiply": "multiply",
-    "prod": "multiply",
-    "abs": "multiply",
-    "fma": "multiply",
-    # compare
-    "maximum": "maximum",
-    "minimum": "maximum",
-    "amax": "maximum",
-    "sign": "maximum",
-    # sfu_div
-    "divide": "divide",
-    "divide_rn_f32": "divide",
-    "true_divide": "divide",
-    "floor_divide": "divide",
-    "remainder": "divide",
-    "mod": "divide",
-    "reciprocal": "divide",
-    # sfu_trans
-    "sqrt": "exp",
-    "rsqrt": "exp",
-    "exp": "exp",
-    "log": "exp",
-    "log2": "exp",
-    "log10": "exp",
-    "sin": "exp",
-    "cos": "exp",
-    "tan": "exp",
-    "tanh": "exp",
-    "sigmoid": "exp",
-    "silu": "exp",
-    "softplus": "exp",
-    "erf": "exp",
-    "gelu": "exp",
-    "gelu_tanh": "exp",
-    "pow": "exp",
-    "relu": "exp",
-    # passthrough
-    "copy": "copy",
-}
+_OP_CLUSTERS: dict[str, str] = dict(OP_CLUSTERS)
 
 
 def cluster_representative(op: ElementwiseImpl) -> ElementwiseImpl:
