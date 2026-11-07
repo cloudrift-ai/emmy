@@ -4,6 +4,8 @@
 use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyFrozenSet};
 
+#[cfg(feature = "alloc-count")]
+mod alloc_count;
 mod body;
 mod convert;
 mod expression;
@@ -67,5 +69,7 @@ fn emmy_ir_module(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(statement::_statement_from_text, m)?)?;
     body::register(m)?;
     elementwise_tables(m)?;
+    #[cfg(feature = "alloc-count")]
+    m.add_function(wrap_pyfunction!(alloc_count::alloc_count, m)?)?;
     Ok(())
 }
