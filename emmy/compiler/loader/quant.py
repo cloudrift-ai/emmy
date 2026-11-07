@@ -1063,7 +1063,7 @@ def _f4_pair_table(graph: Graph, *, name: str, out_name: str, dtype) -> str:
     node id: row ``b`` holds byte ``b``'s low and high e2m1 values, concatenated along a trailing
     axis of 2. Shared by the weight speller and the static activation speller, so both decode
     chains read one table shape."""
-    from emmy.compiler.ir.expr import Literal, placeholder  # noqa: PLC0415
+    from emmy.compiler.ir.expression import Literal, placeholder  # noqa: PLC0415
     from emmy.compiler.ir.tensor.ir import ElementwiseOp, IndexMapOp, IndexSource, RangeOp  # noqa: PLC0415
     from emmy.compiler.pipeline.passes.frontend.decomposition._broadcast import broadcast_to  # noqa: PLC0415
     from emmy.compiler.tensor import Tensor  # noqa: PLC0415
@@ -1648,7 +1648,7 @@ def _spell_dynamic_activation(graph: Graph, activation: str, fmt: str, group: in
     broadcasts back onto K by ``k / group``, so the encode, decode and the value every consumer
     reads keep the activation's own layout and no reshape of the value ever needs a copy. ``None``
     when K cannot carry the group (symbolic, or not a multiple of it)."""
-    from emmy.compiler.ir.expr import BinaryExpr, Literal, placeholder  # noqa: PLC0415
+    from emmy.compiler.ir.expression import BinaryExpr, Literal, placeholder  # noqa: PLC0415
     from emmy.compiler.ir.frontend.ir import ReshapeOp  # noqa: PLC0415
     from emmy.compiler.ir.tensor.ir import ElementwiseOp, IndexMapOp, IndexSource, ReduceOp  # noqa: PLC0415
     from emmy.compiler.pipeline.passes.frontend.decomposition._broadcast import broadcast_to  # noqa: PLC0415
@@ -1957,7 +1957,7 @@ def _spell_static_fp4_quantize(
     shared activation reaches its matmuls as the packed pair beside e4m3 scales — the two leaves
     a packed weight constant already offers — instead of as a 16-bit dense buffer with the codes
     dissolved into the producer."""
-    from emmy.compiler.ir.expr import Literal, placeholder  # noqa: PLC0415
+    from emmy.compiler.ir.expression import Literal, placeholder  # noqa: PLC0415
     from emmy.compiler.ir.frontend.ir import ReshapeOp  # noqa: PLC0415
     from emmy.compiler.ir.tensor.ir import ElementwiseOp, IndexMapOp, IndexSource, ReduceOp  # noqa: PLC0415
     from emmy.compiler.pipeline.passes.frontend.decomposition._broadcast import broadcast_to  # noqa: PLC0415

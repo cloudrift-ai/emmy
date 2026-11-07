@@ -163,67 +163,51 @@ def _lookup_op_class(name: str) -> type[Op] | None:
 def _serialize_field(v):
     """Flatten non-JSON-friendly op field values to a JSON-compatible form.
 
-    Special cases:
-
     - ``ir.elementwise.ElementwiseImpl`` → its ``name`` string.
     - ``Dim`` → the stable Torch-wire dimension mapping, tagged so atomic and
       composite expressions round-trip through op fields.
-    - ``ir.stmt.Body`` → the underlying ``stmts`` tuple. Body is an
-      in-memory wrapper; on disk we keep the tuple-of-stmts form so
-      ``_deserialize_field``'s list-of-Stmt-reprs path keeps working
-      unchanged. ``LoopOp.__post_init__`` / ``TileOp.__post_init__``
-      coerce the tuple back to Body on load.
-    - Nested ``Op`` instances (e.g. ``ConstantOp.load_ops``) →
-      ``{"__op__": ClassName, "fields": {...}}`` dicts; tuples/lists of
-      Ops recurse element-wise.
+    - An ``Expression``, a ``Statement`` or an ``IndexSource`` → its eval-able ``repr``, at any depth of a list,
+      tuple or mapping.
+    - A ``Body`` is its text (``Body.to_wire``), read back by ``Body.from_wire``; an ``Expression`` field
+      (``ConstantOp.context_value``) is its text too.
+    - ``ConstantOp.source_graph`` — a nested mini-graph round-trips through the graph's own dict form, tagged.
+    - Nested ``Op`` instances (e.g. ``ConstantOp.load_ops``) → ``{"__op__": ClassName, "fields": {...}}``.
 
-    Everything else passes through. ``_deserialize_field`` reverses
-    this on load.
+    Everything else passes through. ``_deserialize_field`` reverses this on load.
     """
     from emmy.compiler.dim import Dim
     from emmy.compiler.ir.elementwise import ElementwiseImpl
-    from emmy.compiler.ir.stmt import Body
+    from emmy.compiler.ir.expression import Expression
+    from emmy.compiler.ir.stmt import Body, Statement
     from emmy.compiler.ir.tensor.ir import IndexSource
 
-    # ``IndexSource`` (IndexMapOp.sources) is a plain dataclass holding ``Expr``
-    # objects — serialize as eval-able repr strings, the same round-trip the
-    # body-Stmt path uses, so it survives JSON instead of being stringified by
-    # ``json.dumps(default=str)`` (which ``_deserialize_field`` couldn't reverse).
-    if isinstance(v, IndexSource):
+    if isinstance(v, (Body, Expression)):
+        return v.to_wire()
+    if isinstance(v, (Statement, IndexSource)):
         return repr(v)
-    # ``ConstantOp.source_graph`` — a nested mini-graph field round-trips
-    # through the graph's own dict form, tagged so ``_deserialize_field`` can
-    # tell it from an ordinary dict-valued op field.
     if isinstance(v, Graph):
         return {"__graph__": v.to_dict()}
-    if isinstance(v, (list, tuple)) and v and all(isinstance(x, IndexSource) for x in v):
-        return [repr(x) for x in v]
     if isinstance(v, ElementwiseImpl):
         return v.name
     if isinstance(v, Dim):
         return {"__dim__": v.to_wire()}
-    if isinstance(v, Body):
-        # A plain tuple, so JSON encodes element-by-element.
-        return tuple(v)
     if isinstance(v, Op):
-        return {
-            "__op__": type(v).__name__,
-            "fields": _serialize_op_fields(v),
-        }
-    if isinstance(v, (list, tuple)) and v and all(isinstance(x, Op) for x in v):
-        return [_serialize_field(x) for x in v]
-    if isinstance(v, (list, tuple)) and v and any(isinstance(x, Dim) for x in v):
-        return [_serialize_field(x) for x in v]
+        return {"__op__": type(v).__name__, "fields": _serialize_op_fields(v)}
+    nested = (Expression, Statement, IndexSource, Op, Dim, list, tuple, dict)
+    if isinstance(v, (list, tuple)):
+        return [_serialize_field(x) if isinstance(x, nested) else x for x in v]
+    if isinstance(v, dict):
+        return {key: _serialize_field(x) if isinstance(x, (Expression, Statement, list, tuple, dict)) else x for key, x in v.items()}
     return v
 
 
 def _deserialize_field(k, v):
     """Reverse of ``_serialize_field``: rehydrate the ``op`` field name
-    back to ``ElementwiseImpl``, and eval Stmt-repr strings (produced by
+    back to ``ElementwiseImpl``, and eval Statement-repr strings (produced by
     ``json.dumps(..., default=str)`` against dataclass Stmts) back into
-    Stmt instances. Nested-op dicts (``{"__op__": ..., "fields": ...}``)
+    Statement instances. Nested-op dicts (``{"__op__": ..., "fields": ...}``)
     are reconstructed via ``_lookup_op_class``. The eval scope mirrors
-    the IR's ``__all__`` exports — same classes the Stmt reprs reference."""
+    the IR's ``__all__`` exports — same classes the Statement reprs reference."""
     from emmy.compiler.ir.elementwise import ElementwiseImpl
 
     if isinstance(v, dict) and set(v) == {"__dim__"}:
@@ -233,8 +217,16 @@ def _deserialize_field(k, v):
 
     if k == "op" and isinstance(v, str):
         # A bare name (``"add"``) is an ``ElementwiseImpl``; a constructor repr
-        # (``"Fold(...)"`` — the ``TileOp.op`` node tree) is eval'd back like a Stmt repr.
+        # (``"Fold(...)"`` — the ``TileOp.op`` node tree) is eval'd back like a Statement repr.
         return _eval_stmt(v) if "(" in v else ElementwiseImpl(v)
+    if k == "body" and isinstance(v, str):
+        from emmy.compiler.ir.stmt import Body  # noqa: PLC0415
+
+        return Body.from_wire(v)
+    if k == "context_value" and isinstance(v, str):
+        from emmy.compiler.ir.expression import Expression  # noqa: PLC0415
+
+        return Expression.from_wire(v)
     # ``TileOp``'s schedule descriptors serialize as constructor-repr strings
     # (``Placement(...)`` / ``Tile(...)`` / ``Reduce(...)`` / ``Stage(...)`` /
     # ``WarpSpec(...)``); ``None`` fields round-trip as JSON null. Eval a string only when it
@@ -242,8 +234,6 @@ def _deserialize_field(k, v):
     # (a name / path / C source) that merely looks like ``Name(...)`` is never eval'd.
     if isinstance(v, str):
         return _maybe_eval_ctor(v)
-    if k == "body" and isinstance(v, list) and v and all(isinstance(e, str) for e in v):
-        return tuple(_eval_stmt(e) for e in v)
     if k == "sources" and isinstance(v, list) and v and all(isinstance(e, str) and e.startswith("IndexSource(") for e in v):
         return tuple(_eval_stmt(e) for e in v)
     if isinstance(v, dict) and "__graph__" in v:
@@ -303,7 +293,7 @@ def _pure_lambda(params=(), body=(), results=()):
 
 
 def _stmt_eval_scope() -> dict:
-    """Lazy-built eval scope for Stmt-repr strings."""
+    """Lazy-built eval scope for Statement-repr strings."""
     global _STMT_EVAL_SCOPE
     if _STMT_EVAL_SCOPE is not None:
         return _STMT_EVAL_SCOPE
@@ -315,7 +305,7 @@ def _stmt_eval_scope() -> dict:
     from emmy.compiler.dtype import DataType, StructuredType
     from emmy.compiler.ir.axis import Axis, Window
     from emmy.compiler.ir.elementwise import ElementwiseImpl
-    from emmy.compiler.ir.expr import (
+    from emmy.compiler.ir.expression import (
         BinaryExpr,
         Builtin,
         CastExpr,
@@ -386,7 +376,7 @@ def _stmt_eval_scope() -> dict:
     # The stored Fold term and ordinary IR descriptors round-trip through repr-string fields. The
     # classic schedule is deliberately excluded: ``_serialize_op_fields`` and
     # ``_deserialize_op`` route it through the strict site codec instead. Auto-populate every
-    # public class from these modules (``setdefault`` so explicit stmt/expr entries win on a name
+    # public class from these modules (``setdefault`` so explicit stmt/expression entries win on a name
     # clash); a new ordinary IR field needs no edit here.
     import emmy.compiler.ir.atom as _atom_mod  # noqa: PLC0415
     import emmy.compiler.ir.axis as _axis_mod  # noqa: PLC0415
@@ -1186,10 +1176,10 @@ class Graph(Wire):
         (``shape[d] == Var(name)``); first-seen position wins. Inputs absent from
         ``input_data`` — or with fewer runtime dims than declared — are skipped, and a
         name no supplied input binds takes its hint (:meth:`symbolic_hints`).
-        Downstream (possibly composite) shapes then resolve via ``dim.expr.eval(env)``."""
+        Downstream (possibly composite) shapes then resolve via ``dim.expression.eval(env)``."""
         import numpy as np  # noqa: PLC0415
 
-        from emmy.compiler.ir.expr import Var  # noqa: PLC0415
+        from emmy.compiler.ir.expression import Var  # noqa: PLC0415
 
         input_data = input_data or {}
         env: dict[str, int] = {}
@@ -1199,8 +1189,8 @@ class Graph(Wire):
                 continue
             arr_shape = np.asarray(input_data[nid]).shape
             for i, d in enumerate(t.shape):
-                if isinstance(d.expr, Var) and i < len(arr_shape):
-                    env.setdefault(d.expr.name, int(arr_shape[i]))
+                if isinstance(d.expression, Var) and i < len(arr_shape):
+                    env.setdefault(d.expression.name, int(arr_shape[i]))
         return {**self.symbolic_hints(), **env}
 
     def symbolic_bindings(self) -> dict[str, tuple[str, int]]:
@@ -1216,7 +1206,7 @@ class Graph(Wire):
         atomic axis somewhere (the slab's own ``seq_q`` axis, the sibling P operand, …).
         Only a name that appears *exclusively* in composite dims is unrecoverable — that
         raises."""
-        from emmy.compiler.ir.expr import Var  # noqa: PLC0415
+        from emmy.compiler.ir.expression import Var  # noqa: PLC0415
 
         bindings: dict[str, tuple[str, int]] = {}
         composite_names: set[str] = set()
@@ -1224,10 +1214,10 @@ class Graph(Wire):
             for d, dim in enumerate(self.buffer(nid).shape):
                 if dim.is_static:
                     continue
-                if isinstance(dim.expr, Var):
-                    bindings.setdefault(dim.expr.name, (nid, d))
+                if isinstance(dim.expression, Var):
+                    bindings.setdefault(dim.expression.name, (nid, d))
                 else:
-                    composite_names |= dim.expr.free_vars()
+                    composite_names |= dim.expression.free_vars()
         unrecoverable = composite_names - bindings.keys()
         if unrecoverable:
             raise ValueError(
@@ -1242,7 +1232,7 @@ class Graph(Wire):
         input carries. Used as the fallback bench size when no ``input_data`` is supplied (the
         autotuner case)."""
         from emmy.compiler.ir.axis import Axis  # noqa: PLC0415
-        from emmy.compiler.ir.expr import Var  # noqa: PLC0415
+        from emmy.compiler.ir.expression import Var  # noqa: PLC0415
         from emmy.compiler.ir.stmt import Loop  # noqa: PLC0415
 
         dims = [dim for nid in self.inputs for dim in self.buffer(nid).shape]
@@ -1257,8 +1247,8 @@ class Graph(Wire):
                 op = getattr(op, "source", None)
         hints: dict[str, int] = {}
         for dim in dims:
-            if isinstance(dim.expr, Var) and dim.hint is not None:
-                hints.setdefault(dim.expr.name, dim.hint)
+            if isinstance(dim.expression, Var) and dim.hint is not None:
+                hints.setdefault(dim.expression.name, dim.hint)
         return hints
 
     def structural_key(self) -> str:
@@ -1500,7 +1490,7 @@ class Graph(Wire):
                         # them via ``Dim(value)``. Composite Dims (BinaryExpr-backed,
                         # e.g. a CatOp output or the demoted symbolic-N B operand's
                         # ``round_up(seq_len, 64)`` TMA-padded inner extent) serialize
-                        # to their pretty expr string so a ``EMMY_DUMP_DIR`` dump
+                        # to their pretty expression string so a ``EMMY_DUMP_DIR`` dump
                         # of a dynamic-attention graph doesn't crash; they don't
                         # round-trip back through ``run --ir`` (the string isn't
                         # re-parsed) — a debug-dump artifact only, matching the prior
@@ -1528,11 +1518,11 @@ def _dim_to_json(d):
     """Serialize a ``Dim`` for the JSON dump. Atomic dims (static int / symbolic
     ``Var`` name) return their scalar ``value`` and round-trip via ``Dim(value)``;
     a composite ``Dim`` (``BinaryExpr``-backed) has no scalar value, so it falls
-    back to the pretty expr string (a debug-dump artifact — see ``to_dict``)."""
+    back to the pretty expression string (a debug-dump artifact — see ``to_dict``)."""
     try:
         return d.value
     except TypeError:
-        return d.expr.pretty()
+        return str(d.expression)
 
 
 def _rename_alias(node: Node, old: str, new: str) -> None:
@@ -1665,7 +1655,7 @@ def _fmt_indexmap(node: Node, graph: Graph) -> str:
     visually distinct from scalar slices. Everything else (multi-source,
     selected reads, many dims) falls back to ``indexmap(src0, src1, ...)``.
     """
-    from emmy.compiler.ir.expr import PLACEHOLDER_PREFIX, Literal, Var
+    from emmy.compiler.ir.expression import PLACEHOLDER_PREFIX, Literal, Var
 
     op = node.op
     sources = op.sources
@@ -1689,5 +1679,5 @@ def _fmt_indexmap(node: Node, graph: Graph) -> str:
         if isinstance(e, Literal) and e.value == 0 and dim < len(input_shape) and input_shape[dim] == 1:
             coord_strs.append("na")
         else:
-            coord_strs.append(e.substitute(placeholder_rename).pretty())
+            coord_strs.append(str(e.substitute(placeholder_rename)))
     return f"{input_name}[{', '.join(coord_strs)}]"

@@ -22,8 +22,7 @@ from emmy.compiler.graph import Graph, Tensor
 from emmy.compiler.ir.atom import ATOM_REGISTRY, atoms_for, wide_accumulate
 from emmy.compiler.ir.axis import Axis
 from emmy.compiler.ir.base import InputOp
-from emmy.compiler.ir.elementwise import ElementwiseImpl
-from emmy.compiler.ir.expr import Literal, Var
+from emmy.compiler.ir.expression import Literal, Var
 from emmy.compiler.ir.frontend.ir import MatmulOp
 from emmy.compiler.ir.kernel.ir import Smem, TmaDescriptor, WgmmaDescriptor
 from emmy.compiler.ir.schedule import Stage, Tile, Work
@@ -31,7 +30,7 @@ from emmy.compiler.ir.schedule.classic import ClassicProblem, ClassicScheduleCon
 from emmy.compiler.ir.schedule.classic import refusals as classic
 from emmy.compiler.ir.schedule.classic.refusals import _wgmma_refusal
 from emmy.compiler.ir.schedule.classic.sites import _stage_candidates
-from emmy.compiler.ir.stmt import Assign, Load
+from emmy.compiler.ir.stmt import Load, parse_body
 from emmy.compiler.ir.tile import Placement, TileOp
 from emmy.compiler.pipeline import TILE_PASSES, Pipeline
 from emmy.compiler.pipeline.passes.lowering.kernel._atom import _slab_operands, _sync_operands, _tile_base, _wgmma_drain
@@ -96,9 +95,9 @@ def _matmul(b_trans: bool = False) -> TileOp:
     """A bf16 matmul whose B is N-contiguous (``[K, N]``) or, with ``b_trans``, K-contiguous (``[N, K]``,
     the serving ``F.linear`` weight layout)."""
     m, n, k = Axis("m", M), Axis("n", N), Axis("k", K)
-    a = Load(name="a_e", input="a", index=(Var("m"), Var("k")))
-    b_index, b_shape = ((Var("n"), Var("k")), (N, K)) if b_trans else ((Var("k"), Var("n")), (K, N))
-    root = contraction(k, a, (Load(name="b_e", input="b", index=b_index), "acc"))
+    b_index, b_shape = ("n, k", (N, K)) if b_trans else ("k, n", (K, N))
+    a, b = parse_body(f"a_e = load a[m, k]\nb_e = load b[{b_index}]")
+    root = contraction(k, a, (b, "acc"))
     return TileOp(
         op=root,
         place=Placement(free=(m, n)),
@@ -213,8 +212,8 @@ def _lit(n: int) -> Literal:
     return Literal(n, "int")
 
 
-def _at(expr, **env: int) -> int:
-    return expr.eval(dict(env))
+def _at(expression, **env: int) -> int:
+    return expression.eval(dict(env))
 
 
 def _atom_major_operands():
@@ -270,9 +269,8 @@ def test_a_computed_n_contiguous_b_fills_atom_major() -> None:
     """The ``smem`` compute fill writes the same stacked slab: cell ``(70, 3)`` of the two-atom B evaluates
     its producer at K row 6, column 3 of the second atom."""
     mn, ka, _ = _atom_major_operands()
-    a = Load(name="a_e", input="a", index=(Var("m"), Var("k")), dtype=BF16)
-    w = Load(name="w_e", input="w", index=(Var("k"), Var("n")), dtype=BF16)
-    b = projection(body=(w, Assign(name="bv", op=ElementwiseImpl("multiply"), args=("w_e", "w_e"))), results=("bv",))
+    [a] = parse_body("bf16 a_e = load a[m, k]")
+    b = projection(body=parse_body("bf16 w_e = load w[k, n]\nbv = multiply(w_e, w_e)"), results=("bv",))
     c = contraction(ka, a, (b, "acc"))
     _, sync_ops, _, _ = _sync_operands(c, 64, mn, CtaTile(linear_tid=Var("_t"), n_threads=256), ("B128", "B128"), k_axis=ka, b_atoms=2)
     b_op = next(op for op in sync_ops if op.tag == "b")

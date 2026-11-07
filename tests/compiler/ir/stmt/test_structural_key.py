@@ -8,11 +8,23 @@ from __future__ import annotations
 
 from itertools import permutations, product
 
-from emmy.compiler.dim import Dim
-from emmy.compiler.dtype import F32
-from emmy.compiler.ir.axis import Axis, Window
-from emmy.compiler.ir.expr import BinaryExpr, Literal, Var
-from emmy.compiler.ir.stmt import Accum, Affine, Assign, Body, Cond, Init, Let, Load, Loop, Write, canonicalize_identity, normalize_body
+from emmy.compiler.ir.stmt import Body, canonicalize_identity, normalize_body, parse_body
+
+
+def _key(body: Body | str) -> str:
+    """The exact identity of a body, or of the body a text spells."""
+    return (parse_body(body) if isinstance(body, str) else body).structural_key(structural=False)
+
+
+def _normal(body: Body | str) -> str:
+    """The text of the normal form of a body, or of the body a text spells."""
+    return str(normalize_body(parse_body(body) if isinstance(body, str) else body))
+
+
+def _loop(axis: str, extent: int, *lines: str) -> str:
+    """The text of one loop over ``lines``, each of which may itself span several lines."""
+    return "\n".join([f"for {axis} in 0..{extent}:", *(f"    {line}" for block in lines for line in block.splitlines())])
+
 
 # ---------------------------------------------------------------------------
 # sort_commutative_args
@@ -20,37 +32,28 @@ from emmy.compiler.ir.stmt import Accum, Affine, Assign, Body, Cond, Init, Let, 
 
 
 def test_affine_index_equivalence_and_cse_have_one_exact_identity() -> None:
-    keys = set()
-    for row, column in (("i", "j"), ("z", "q")):
-        i, j = Var(row), Var(column)
-        forms = (i + 2 * j + 3, 3 + j + (i + j), 3 * (i + j + 1) - (2 * i + j))
+    keys, normals = set(), set()
+    for i, j in (("i", "j"), ("z", "q")):
+        forms = (f"{i} + 2 * {j} + 3", f"3 + {j} + ({i} + {j})", f"3 * ({i} + {j} + 1) - (2 * {i} + {j})")
         for first, second in product(forms, repeat=2):
-            body = Body(
-                (
-                    Loop(
-                        axis=Axis(row, 4),
-                        body=(
-                            Loop(
-                                axis=Axis(column, 4),
-                                body=(
-                                    Load(name="a", input="x", index=(first,)),
-                                    Load(name="b", input="x", index=(second,)),
-                                    Assign(name="left", op="exp", args=("a",)),
-                                    Assign(name="right", op="exp", args=("b",)),
-                                    Assign(name="sum", op="add", args=("right", "left")),
-                                    Write(output="out", index=(i, j), value="sum"),
-                                ),
-                            ),
-                        ),
-                    ),
-                )
-            )
-            normalized = normalize_body(body)
-            assert len(normalized.loads) == 1
-            assert len([s for s in normalized.iter() if isinstance(s, (Assign, Affine))]) == 2
-            assert normalize_body(Body(tuple(normalized))) == normalized
-            keys.add(body.structural_key(structural=False))
+            body = f"""
+                for {i} in 0..4:
+                    for {j} in 0..4:
+                        a = load x[{first}]
+                        b = load x[{second}]
+                        left = exp(a)
+                        right = exp(b)
+                        sum = add(right, left)
+                        out[{i}, {j}] = sum
+                """
+            keys.add(_key(body))
+            normals.add(_normal(body))
     assert len(keys) == 1
+    (normal,) = normals
+    lines = [line.strip() for line in normal.splitlines()]
+    assert sum(" = load " in line for line in lines) == 1
+    assert sum(not line.startswith("for ") and " = load " not in line and not line.startswith("out[") for line in lines) == 2
+    assert _normal(normal) == normal
 
 
 # ---------------------------------------------------------------------------
@@ -60,82 +63,52 @@ def test_affine_index_equivalence_and_cse_have_one_exact_identity() -> None:
 
 def _matmul_body(input_x: str, input_y: str, output: str) -> Body:
     """Tiny multiply-and-write body parameterized by buffer names."""
-    a = Axis("a", 4)
-    return Body(
-        (
-            Loop(
-                axis=a,
-                body=(
-                    Load(name="x", input=input_x, index=(Var("a"),)),
-                    Load(name="y", input=input_y, index=(Var("a"),)),
-                    Assign(name="z", op="multiply", args=("x", "y")),
-                    Write(output=output, index=(Var("a"),), value="z"),
-                ),
-            ),
-        )
+    return parse_body(
+        f"""
+        for a in 0..4:
+            x = load {input_x}[a]
+            y = load {input_y}[a]
+            z = multiply(x, y)
+            {output}[a] = z
+        """
     )
 
 
 def test_structural_key_equal_for_renamed_buffers() -> None:
     a = _matmul_body("X", "Y", "O")
     b = _matmul_body("foo", "bar", "baz")
-    assert normalize_body(a) != normalize_body(b)
+    assert _normal(a) != _normal(b)
     assert a.structural_key() == b.structural_key()
 
 
 def test_structural_key_equal_for_swapped_commutative_args() -> None:
-    a = Axis("a", 4)
-    body_xy = Body(
-        (
-            Loop(
-                axis=a,
-                body=(
-                    Load(name="lx", input="X", index=(Var("a"),)),
-                    Load(name="ly", input="Y", index=(Var("a"),)),
-                    Assign(name="z", op="add", args=("lx", "ly")),
-                    Write(output="O", index=(Var("a"),), value="z"),
-                ),
-            ),
-        )
+    body_xy = parse_body(
+        """
+        for a in 0..4:
+            lx = load X[a]
+            ly = load Y[a]
+            z = add(lx, ly)
+            O[a] = z
+        """
     )
-    body_yx = Body(
-        (
-            Loop(
-                axis=a,
-                body=(
-                    Load(name="ly", input="Y", index=(Var("a"),)),
-                    Load(name="lx", input="X", index=(Var("a"),)),
-                    Assign(name="z", op="add", args=("ly", "lx")),
-                    Write(output="O", index=(Var("a"),), value="z"),
-                ),
-            ),
-        )
+    body_yx = parse_body(
+        """
+        for a in 0..4:
+            ly = load Y[a]
+            lx = load X[a]
+            z = add(ly, lx)
+            O[a] = z
+        """
     )
-    assert normalize_body(body_xy) == normalize_body(body_yx)
+    assert _normal(body_xy) == _normal(body_yx)
     assert body_xy.structural_key() == body_yx.structural_key()
 
 
 def _pointwise_body(*, inputs: tuple[tuple[str, str, str], ...], op: str, args: tuple[str, ...]) -> Body:
     """One pointwise kernel with an authored load order over row/column arguments."""
-    row, column = Axis("row", 4), Axis("column", 4)
-    loads = tuple(Load(name=value, input=buffer, index=(Var(index),)) for value, buffer, index in inputs)
-    return Body(
-        (
-            Loop(
-                axis=row,
-                body=(
-                    Loop(
-                        axis=column,
-                        body=(
-                            *loads,
-                            Assign(name="result", op=op, args=args),
-                            Write(output="output", index=(Var("row"), Var("column")), value="result"),
-                        ),
-                    ),
-                ),
-            ),
-        )
-    )
+    loads = (f"{value} = load {buffer}[{index}]" for value, buffer, index in inputs)
+    inner = _loop("column", 4, *loads, f"result = {op}({', '.join(args)})", "output[row, column] = result")
+    return parse_body(_loop("row", 4, inner))
 
 
 def test_structural_key_equal_when_arguments_and_their_loads_are_reordered() -> None:
@@ -150,460 +123,312 @@ def test_structural_key_equal_when_arguments_and_their_loads_are_reordered() -> 
         op="multiply",
         args=("renamed_key", "renamed_query"),
     )
-    assert query_first.structural_key(structural=False) == key_first.structural_key(structural=False)
+    assert _key(query_first) == _key(key_first)
 
 
 def test_structural_key_equal_for_reordered_independent_operations() -> None:
     """Every valid topological order of pure definitions has one identity."""
-    load = Load(name="input", input="input_buffer", index=(Var("element"),))
-    absolute = Assign(name="absolute", op="abs", args=("input",))
-    negated = Assign(name="negated", op="negative", args=("input",))
-    combine = Assign(name="result", op="add", args=("absolute", "negated"))
-    write = Write(output="output", index=(Var("element"),), value="result")
-    axis = Axis("element", 4)
+    load = "input = load input_buffer[element]"
+    absolute = "absolute = abs(input)"
+    negated = "negated = negative(input)"
+    combine = "result = add(absolute, negated)"
+    write = "output[element] = result"
     valid_orders = tuple(
         order
         for order in permutations((load, absolute, negated, combine))
         if order.index(load) < order.index(absolute) < order.index(combine)
         and order.index(load) < order.index(negated) < order.index(combine)
     )
-    normalized = {normalize_body(Body((Loop(axis=axis, body=(*order, write)),))) for order in valid_orders}
-    keys = {Body((Loop(axis=axis, body=(*order, write)),)).structural_key(structural=False) for order in valid_orders}
-    assert len(normalized) == 1
-    assert len(keys) == 1
+    bodies = [_loop("element", 4, *order, write) for order in valid_orders]
+    assert len(valid_orders) == 2
+    assert len({_normal(body) for body in bodies}) == 1
+    assert len({_key(body) for body in bodies}) == 1
 
 
 def test_structural_key_equal_for_permuted_same_shape_arguments() -> None:
     """Argument roles, not same-shaped Loads or their names, fix the canonical buffer order."""
     entries = (("x", "X", "row"), ("y", "Y", "row"), ("z", "Z", "row"))
-    keys = {
-        _pointwise_body(inputs=order, op="where", args=("x", "y", "z")).structural_key(structural=False) for order in permutations(entries)
-    }
+    keys = {_key(_pointwise_body(inputs=order, op="where", args=("x", "y", "z"))) for order in permutations(entries)}
     assert len(keys) == 1
 
 
 def test_structural_key_equal_when_duplicate_producers_are_reordered() -> None:
     """Use roles disambiguate equal producers without relying on which duplicate came first."""
-    load = Load(name="input", input="input_buffer", index=(Var("element"),))
-    first = Assign(name="first", op="abs", args=("input",))
-    second = Assign(name="second", op="abs", args=("input",))
-    exponential = Assign(name="exponential", op="exp", args=("first",))
-    logarithm = Assign(name="logarithm", op="log", args=("second",))
-    result = Assign(name="result", op="subtract", args=("exponential", "logarithm"))
-    write = Write(output="output", index=(Var("element"),), value="result")
-    axis = Axis("element", 4)
-    one = Body((Loop(axis=axis, body=(load, first, second, exponential, logarithm, result, write)),))
-    two = Body((Loop(axis=axis, body=(load, second, first, exponential, logarithm, result, write)),))
-    assert one.structural_key(structural=False) == two.structural_key(structural=False)
+    load = "input = load input_buffer[element]"
+    first = "first = abs(input)"
+    second = "second = abs(input)"
+    tail = ("exponential = exp(first)", "logarithm = log(second)", "result = subtract(exponential, logarithm)", "output[element] = result")
+    assert _key(_loop("element", 4, load, first, second, *tail)) == _key(_loop("element", 4, load, second, first, *tail))
 
 
 def test_structural_key_equal_when_pure_work_moves_across_a_write() -> None:
     """An unrelated write does not pin a pure definition to one side of it."""
-    axis = Axis("element", 4)
-    load = Load(name="x", input="X", index=(Var("element"),))
-    absolute = Assign(name="absolute", op="abs", args=("x",))
-    exponential = Assign(name="exponential", op="exp", args=("x",))
-    write_a = Write(output="A", index=(Var("element"),), value="absolute")
-    write_b = Write(output="B", index=(Var("element"),), value="exponential")
-    one = Body((Loop(axis=axis, body=(load, absolute, write_a, exponential, write_b)),))
-    two = Body((Loop(axis=axis, body=(load, absolute, exponential, write_a, write_b)),))
-    assert one.structural_key(structural=False) == two.structural_key(structural=False)
+    load = "x = load X[element]"
+    absolute = "absolute = abs(x)"
+    exponential = "exponential = exp(x)"
+    write_a = "A[element] = absolute"
+    write_b = "B[element] = exponential"
+    one = _loop("element", 4, load, absolute, write_a, exponential, write_b)
+    two = _loop("element", 4, load, absolute, exponential, write_a, write_b)
+    assert _key(one) == _key(two)
 
 
 def test_structural_key_equal_for_reordered_independent_read_write_chains() -> None:
     """Buffer role discovery cannot invent aliases among unrelated chains."""
-    axis = Axis("element", 4)
-    chain_one = (
-        Load(name="scalar", input="Scalar", index=()),
-        Write(output="Vector", index=(Var("element"),), value="scalar"),
-    )
-    chain_two = (
-        Load(name="element_value", input="Input", index=(Var("element"),)),
-        Write(output="ScalarOutput", index=(), value="element_value"),
-    )
-    one = Body((Loop(axis=axis, body=(*chain_one, *chain_two)),))
-    two = Body((Loop(axis=axis, body=(*chain_two, *chain_one)),))
-    assert one.structural_key(structural=False) == two.structural_key(structural=False)
+    chain_one = ("scalar = load Scalar[]", "Vector[element] = scalar")
+    chain_two = ("element_value = load Input[element]", "ScalarOutput[] = element_value")
+    assert _key(_loop("element", 4, *chain_one, *chain_two)) == _key(_loop("element", 4, *chain_two, *chain_one))
 
 
 def test_structural_key_equal_for_reordered_independent_writes() -> None:
     """Writes to distinct buffers are dependency-independent effects."""
-    axis = Axis("element", 4)
-    load = Load(name="x", input="X", index=(Var("element"),))
-    absolute = Assign(name="absolute", op="abs", args=("x",))
-    exponential = Assign(name="exponential", op="exp", args=("x",))
-    write_a = Write(output="A", index=(Var("element"),), value="absolute")
-    write_b = Write(output="B", index=(Var("element"),), value="exponential")
-    one = Body((Loop(axis=axis, body=(load, absolute, exponential, write_a, write_b)),))
-    two = Body((Loop(axis=axis, body=(load, absolute, exponential, write_b, write_a)),))
-    assert one.structural_key(structural=False) == two.structural_key(structural=False)
+    prefix = ("x = load X[element]", "absolute = abs(x)", "exponential = exp(x)")
+    write_a = "A[element] = absolute"
+    write_b = "B[element] = exponential"
+    assert _key(_loop("element", 4, *prefix, write_a, write_b)) == _key(_loop("element", 4, *prefix, write_b, write_a))
 
 
 def test_structural_key_equal_for_reordered_independent_accumulators() -> None:
     """Updates of distinct reduction states have no ordering edge."""
-    axis = Axis("reduce", 4)
-    load_x = Load(name="x", input="X", index=(Var("reduce"),))
-    load_y = Load(name="y", input="Y", index=(Var("reduce"),))
-    accum_x = Accum(name="sum_x", value="x", axes=("reduce",))
-    accum_y = Accum(name="sum_y", value="y", axes=("reduce",))
-    writes = (Write(output="A", index=(), value="sum_x"), Write(output="B", index=(), value="sum_y"))
-    one = Body((Loop(axis=axis, body=(load_x, load_y, accum_x, accum_y)), *writes))
-    two = Body((Loop(axis=axis, body=(load_x, load_y, accum_y, accum_x)), *writes))
-    assert one.structural_key(structural=False) == two.structural_key(structural=False)
+    loads = ("x = load X[reduce]", "y = load Y[reduce]")
+    accum_x = "sum_x <- add(sum_x, x) over reduce"
+    accum_y = "sum_y <- add(sum_y, y) over reduce"
+    writes = "A[] = sum_x\nB[] = sum_y"
+    one = _loop("reduce", 4, *loads, accum_x, accum_y) + "\n" + writes
+    two = _loop("reduce", 4, *loads, accum_y, accum_x) + "\n" + writes
+    assert _key(one) == _key(two)
 
 
 def test_structural_key_equal_for_reordered_reduction_axis_metadata() -> None:
     """Reduction-axis metadata is set-like, not an authored-order constraint."""
 
-    def make(axes: tuple[str, ...]) -> Body:
-        inner = Body(
-            (
-                Load(name="x", input="X", index=(Var("row"), Var("column"))),
-                Accum(name="total", value="x", axes=axes),
-            )
-        )
-        return Body(
-            (
-                Loop(axis=Axis("row", 4), body=(Loop(axis=Axis("column", 4), body=inner),)),
-                Write(output="O", index=(), value="total"),
-            )
-        )
+    def make(axes: str) -> str:
+        return f"""
+            for row in 0..4:
+                for column in 0..4:
+                    x = load X[row, column]
+                    total <- add(total, x) over {axes}
+            O[] = total
+            """
 
-    assert make(("row", "column")).structural_key(structural=False) == make(("column", "row")).structural_key(structural=False)
-    inner = Body((Load(name="x", input="X", index=(Var("row"), Var("column"))), Accum(name="total", value="x", axes=("column",))))
-    per_row_cell = (Loop(axis=Axis("column", 4), body=inner), Write(output="O", index=(Var("row"),), value="total"))
-    per_row = Body((Loop(axis=Axis("row", 4), body=per_row_cell),))
-    assert make(("row", "column")).structural_key(structural=False) != per_row.structural_key(structural=False)
+    per_row = """
+        for row in 0..4:
+            for column in 0..4:
+                x = load X[row, column]
+                total <- add(total, x) over column
+            O[row] = total
+        """
+    assert _key(make("row, column")) == _key(make("column, row"))
+    assert _key(make("row, column")) != _key(per_row)
 
 
 def test_structural_key_equal_for_ambiguous_free_axis_renaming() -> None:
     """Axis spelling cannot decide a loop order when scalar output geometry does not."""
 
-    def make(outer: str, inner: str) -> Body:
-        terminal = Body(
-            (
-                Load(name="x", input="X", index=(Var(outer), Var(inner))),
-                Write(output="O", index=(), value="x"),
-            )
-        )
-        return Body((Loop(axis=Axis(outer, 2), body=(Loop(axis=Axis(inner, 3), body=terminal),)),))
+    def make(outer: str, inner: str) -> str:
+        return f"""
+            for {outer} in 0..2:
+                for {inner} in 0..3:
+                    x = load X[{outer}, {inner}]
+                    O[] = x
+            """
 
-    assert normalize_body(make("z", "a")) == normalize_body(make("a", "z"))
-    assert make("z", "a").structural_key(structural=False) == make("a", "z").structural_key(structural=False)
+    assert _normal(make("z", "a")) == _normal(make("a", "z"))
+    assert _key(make("z", "a")) == _key(make("a", "z"))
 
 
 def test_normalize_body_keeps_shared_axes_outside_known_output_geometry() -> None:
     """A composed batch coordinate stays outside matrix rows and columns after alpha-renaming."""
 
-    def make(names: tuple[str, str, str], order: tuple[int, int, int]) -> Body:
+    def make(names: tuple[str, str, str], order: tuple[int, int, int]) -> str:
         batch, row, column = names
-        divisor = Literal(3, "int")
-        index = (BinaryExpr("//", Var(batch), divisor), BinaryExpr("%", Var(batch), divisor), Var(row), Var(column))
-        result = Body((Load(name="x", input="X", index=index), Write(output="O", index=index, value="x")))
-        axes = (Axis(batch, 6), Axis(row, 128), Axis(column, 128))
+        index = f"{batch} // 3, {batch} % 3, {row}, {column}"
+        result = f"x = load X[{index}]\nO[{index}] = x"
+        axes = ((batch, 6), (row, 128), (column, 128))
         for position in reversed(order):
-            result = Body((Loop(axis=axes[position], body=result),))
+            result = _loop(*axes[position], result)
         return result
 
-    first = normalize_body(make(("batch", "row", "column"), (0, 1, 2)))
-    second = normalize_body(make(("b", "m", "n"), (2, 0, 1)))
-
-    def extents(body: Body) -> tuple[Dim, ...]:
-        result = []
-        while len(body) == 1 and isinstance(body[0], Loop):
-            result.append(body[0].axis.extent)
-            body = body[0].body
-        return tuple(result)
-
+    first = _normal(make(("batch", "row", "column"), (0, 1, 2)))
+    second = _normal(make(("b", "m", "n"), (2, 0, 1)))
     assert first == second
-    assert extents(first) == (Dim(6), Dim(128), Dim(128))
+    # The three loops nest in that order: each header one level deeper, the batch outermost.
+    headers = first.splitlines()[:3]
+    assert [header.index("for ") for header in headers] == [0, 4, 8]
+    assert [header.split(" in ")[1] for header in headers] == ["0..6:", "0..128:", "0..128:"]
 
 
 def test_structural_key_equal_for_renamed_and_reordered_axis_windows() -> None:
     """Axis and parent provenance names cannot choose the order of otherwise ambiguous loops."""
 
-    def make(names: tuple[str, str], parents: tuple[str, str], reverse: bool) -> Body:
-        axes = (
-            Axis(
-                names[0],
-                4,
-                window=Window(
-                    parent=Axis(parents[0], 8),
-                    base=Var(parents[0]),
-                    bound=BinaryExpr("+", Var(parents[0]), Literal(4, "int")),
-                ),
-            ),
-            Axis(
-                names[1],
-                4,
-                window=Window(
-                    parent=Axis(parents[1], 8),
-                    base=BinaryExpr("+", Var(parents[1]), Literal(4, "int")),
-                    bound=BinaryExpr("+", Var(parents[1]), Literal(8, "int")),
-                    partition=True,
-                ),
-            ),
+    def make(names: tuple[str, str], parents: tuple[str, str], reverse: bool) -> str:
+        loops = (
+            f"for {names[0]} in 0..4 window(parent={parents[0]} in 0..8, base={parents[0]}, bound={parents[0]} + 4):",
+            f"for {names[1]} in 0..4 window(parent={parents[1]} in 0..8, base={parents[1]} + 4, bound={parents[1]} + 8, partition=true):",
         )
-        terminal = Body((Load(name="x", input="X", index=()), Write(output="O", index=(), value="x")))
-        for axis in reversed(tuple(reversed(axes)) if reverse else axes):
-            terminal = Body((Loop(axis=axis, body=terminal),))
-        return terminal
+        outer, inner = reversed(loops) if reverse else loops
+        return "\n".join([outer, f"    {inner}", "        x = load X[]", "        O[] = x"])
 
-    assert make(("outer", "inner"), ("source_a", "source_b"), False).structural_key(structural=False) == make(
-        ("renamed_outer", "renamed_inner"), ("renamed_a", "renamed_b"), True
-    ).structural_key(structural=False)
+    assert _key(make(("outer", "inner"), ("source_a", "source_b"), False)) == _key(
+        make(("renamed_outer", "renamed_inner"), ("renamed_a", "renamed_b"), True)
+    )
 
 
 def test_structural_key_distinguishes_axis_windows_even_when_bodies_compare_equal() -> None:
-    """The key includes codegen-relevant fields excluded from dataclass equality."""
+    """The key includes codegen-relevant fields excluded from equality."""
 
-    def make(window: Window) -> Body:
-        axis = Axis("element", 4, window=window)
-        return Body(
-            (
-                Loop(
-                    axis=axis,
-                    body=(
-                        Load(name="x", input="X", index=(Var("element"),)),
-                        Write(output="O", index=(Var("element"),), value="x"),
-                    ),
-                ),
-            )
+    def make(window: str) -> Body:
+        return parse_body(
+            f"""
+            for element in 0..4 window({window}):
+                x = load X[element]
+                O[element] = x
+            """
         )
 
-    first = make(Window(parent=Axis("source", 8), base=Literal(0, "int"), bound=Literal(4, "int")))
-    second = make(
-        Window(
-            parent=Axis("other_source", 8),
-            base=Literal(4, "int"),
-            bound=Literal(8, "int"),
-            partition=True,
-        )
-    )
+    first = make("parent=source in 0..8, base=0, bound=4")
+    second = make("parent=other_source in 0..8, base=4, bound=8, partition=true")
     assert first == second
-    assert first.structural_key(structural=False) != second.structural_key(structural=False)
+    assert _key(first) != _key(second)
 
 
 def test_structural_key_ignores_symbolic_dimension_hints() -> None:
     """An expected size guides tuning but does not change the kernel's structural identity."""
 
-    def make(hint: int) -> Body:
-        axis = Axis("element", Dim("size", hint=hint))
-        return Body(
-            (
-                Loop(
-                    axis=axis,
-                    body=(
-                        Load(name="x", input="X", index=(Var("element"),)),
-                        Write(output="O", index=(Var("element"),), value="x"),
-                    ),
-                ),
-            )
-        )
+    def make(hint: int) -> str:
+        return f"""
+            for element in 0..size~{hint}:
+                x = load X[element]
+                O[element] = x
+            """
 
-    assert make(32).structural_key(structural=False) == make(64).structural_key(structural=False)
+    assert _key(make(32)) == _key(make(64))
 
 
 def test_structural_key_equal_for_renamed_condition_and_reduction_axis() -> None:
     """Every axis reference follows its binder through conditions and reduction metadata."""
 
-    def make(element: str, reduce: str, predicate: str, value: str, total: str) -> Body:
-        reduction = Loop(
-            axis=Axis(reduce, 4),
-            body=(
-                Load(name=value, input="X", index=(Var(element), Var(reduce))),
-                Accum(name=total, value=value, axes=(reduce,)),
-            ),
-        )
-        return Body(
-            (
-                Loop(
-                    axis=Axis(element, 4),
-                    body=(
-                        Load(name=predicate, input="Mask", index=(Var(element),)),
-                        reduction,
-                        Cond(
-                            cond=Var(predicate),
-                            body=(Write(output="O", index=(Var(element),), value=total),),
-                        ),
-                    ),
-                ),
-            )
-        )
+    def make(element: str, reduce: str, predicate: str, value: str, total: str) -> str:
+        return f"""
+            for {element} in 0..4:
+                {predicate} = load Mask[{element}]
+                for {reduce} in 0..4:
+                    {value} = load X[{element}, {reduce}]
+                    {total} <- add({total}, {value}) over {reduce}
+                if {predicate}:
+                    O[{element}] = {total}
+            """
 
-    assert make("row", "k", "predicate", "value", "total").structural_key(structural=False) == make(
-        "renamed_row", "renamed_k", "renamed_predicate", "renamed_value", "renamed_total"
-    ).structural_key(structural=False)
+    assert _key(make("row", "k", "predicate", "value", "total")) == _key(
+        make("renamed_row", "renamed_k", "renamed_predicate", "renamed_value", "renamed_total")
+    )
 
 
 def test_structural_key_equal_for_renamed_exported_accumulators() -> None:
     """Several exported states are allocated in body order, never source-name set order."""
 
-    def make(total: str, maximum: str) -> Body:
-        reduction = Loop(
-            axis=Axis("reduce", 4),
-            body=(
-                Load(name="x", input="X", index=(Var("reduce"),)),
-                Load(name="y", input="Y", index=(Var("reduce"),)),
-                Assign(name="absolute", op="abs", args=("x",)),
-                Assign(name="exponential", op="exp", args=("y",)),
-                Accum(name=total, value="absolute", op="add", axes=("reduce",)),
-                Accum(name=maximum, value="exponential", op="maximum", axes=("reduce",)),
-            ),
-        )
-        return Body(
-            (
-                reduction,
-                Write(output="Sum", index=(), value=total),
-                Write(output="Max", index=(), value=maximum),
-            )
-        )
+    def make(total: str, maximum: str) -> str:
+        return f"""
+            for reduce in 0..4:
+                x = load X[reduce]
+                y = load Y[reduce]
+                absolute = abs(x)
+                exponential = exp(y)
+                {total} <- add({total}, absolute) over reduce
+                {maximum} <- maximum({maximum}, exponential) over reduce
+            Sum[] = {total}
+            Max[] = {maximum}
+            """
 
-    assert make("total", "maximum").structural_key(structural=False) == make("alpha_ssa_0", "alpha_ssa_1").structural_key(structural=False)
+    assert _key(make("total", "maximum")) == _key(make("alpha_ssa_0", "alpha_ssa_1"))
 
 
 def test_structural_key_equal_for_equivalent_index_and_comparison_expressions() -> None:
     """Identity canonicalizes commutative expressions and comparison duals."""
 
-    def make(index, condition) -> Body:
-        return Body(
-            (
-                Loop(
-                    axis=Axis("element", 8),
-                    body=(
-                        Load(name="x", input="X", index=(index,)),
-                        Cond(condition, body=(Write(output="O", index=(Var("element"),), value="x"),)),
-                    ),
-                ),
-            )
-        )
+    def make(index: str, condition: str) -> str:
+        return f"""
+            for element in 0..8:
+                x = load X[{index}]
+                if {condition}:
+                    O[element] = x
+            """
 
-    element, one, four = Var("element"), Literal(1, "int"), Literal(4, "int")
-    left = make(BinaryExpr("+", element, one), BinaryExpr("<", element, four))
-    right = make(BinaryExpr("+", one, element), BinaryExpr(">", four, element))
-    assert normalize_body(left) == normalize_body(right)
-    assert left.structural_key(structural=False) == right.structural_key(structural=False)
+    left = make("element + 1", "element < 4")
+    right = make("1 + element", "4 > element")
+    assert _normal(left) == _normal(right)
+    assert _key(left) == _key(right)
+
+
+def _indexed(index: str) -> str:
+    """A loop that reads ``X`` at ``index`` and stores the value in a scalar."""
+    return f"""
+        for element in 0..8:
+            x = load X[{index}]
+            O[] = x
+        """
 
 
 def test_structural_key_equal_for_affine_index_spellings() -> None:
     """Constant folding and association do not split equivalent affine addresses."""
-    element = Var("element")
-    one, two, three, six = (Literal(value, "int") for value in (1, 2, 3, 6))
-
-    def key(index) -> str:
-        return Body(
-            (
-                Loop(
-                    axis=Axis("element", 8),
-                    body=(Load(name="x", input="X", index=(index,)), Write(output="O", index=(), value="x")),
-                ),
-            )
-        ).structural_key(structural=False)
-
-    assert key(BinaryExpr("+", BinaryExpr("+", element, one), two)) == key(BinaryExpr("+", element, three))
-    assert key(BinaryExpr("*", BinaryExpr("*", element, two), three)) == key(BinaryExpr("*", element, six))
-    assert key(BinaryExpr("-", element, one)) == key(BinaryExpr("+", element, Literal(-1, "int")))
+    assert _key(_indexed("element + 1 + 2")) == _key(_indexed("element + 3"))
+    assert _key(_indexed("element * 2 * 3")) == _key(_indexed("element * 6"))
+    assert _key(_indexed("element - 1")) == _key(_indexed("element + -1"))
 
 
 def test_structural_key_distinguishes_noncommutative_index_expressions() -> None:
     """Identity does not reorder subtraction operands."""
-    axis = Axis("element", 8)
-    one = Literal(1, "int")
-
-    def make(index) -> Body:
-        return Body(
-            (
-                Loop(
-                    axis=axis,
-                    body=(Load(name="x", input="X", index=(index,)), Write(output="O", index=(), value="x")),
-                ),
-            )
-        )
-
-    assert make(BinaryExpr("-", Var("element"), one)).structural_key(structural=False) != make(
-        BinaryExpr("-", one, Var("element"))
-    ).structural_key(structural=False)
+    assert _key(_indexed("element - 1")) != _key(_indexed("1 - element"))
 
 
 def test_structural_key_distinguishes_reassociated_ssa_arithmetic() -> None:
     """Affine coordinate folding cannot collapse a floating-point SSA operation tree."""
 
-    def make(value: BinaryExpr) -> Body:
-        return Body(
-            (
-                Load(name="x", input="X", index=()),
-                Cond(
-                    BinaryExpr("<", value, Literal(0.0)),
-                    body=(Write(output="O", index=(), value="x"),),
-                ),
-            )
-        )
+    def make(value: str) -> str:
+        return f"""
+            x = load X[]
+            if {value} < 0.0:
+                O[] = x
+            """
 
-    x = Var("x")
-    associated = BinaryExpr("+", BinaryExpr("+", x, Literal(1.0)), Literal(2.0))
-    folded = BinaryExpr("+", x, Literal(3.0))
-    assert make(associated).structural_key(structural=False) != make(folded).structural_key(structural=False)
+    assert _key(make("x + 1.0 + 2.0")) != _key(make("x + 3.0"))
 
 
 def test_structural_key_equal_for_renamed_const_and_init() -> None:
     """All definition-bearing Loop IR statements participate in alpha-renaming."""
 
-    def make(constant: str, initial: str) -> Body:
-        return Body(
-            (
-                Let(name=constant, value=2),
-                Init(name=initial, identity=0, dtype=F32),
-                Assign(name="result", op="add", args=(constant, initial)),
-                Write(output="O", index=(), value="result"),
-            )
-        )
+    def make(constant: str, initial: str) -> str:
+        return f"""
+            let {constant} = 2.0
+            init f32 {initial} = 0
+            result = add({constant}, {initial})
+            O[] = result
+            """
 
-    assert make("constant", "initial").structural_key(structural=False) == make("renamed_constant", "renamed_initial").structural_key(
-        structural=False
-    )
+    assert _key(make("constant", "initial")) == _key(make("renamed_constant", "renamed_initial"))
 
 
 def test_structural_key_equal_for_renamed_vector_load_lanes() -> None:
     """Vector Load lane binders are alpha-renamed together."""
 
-    def make(names: tuple[str, str]) -> Body:
-        return Body(
-            (
-                Load(names=names, input="X", index=()),
-                Assign(name="result", op="add", args=names),
-                Write(output="O", index=(), value="result"),
-            )
-        )
+    def make(first: str, second: str) -> str:
+        return f"""
+            {first}, {second} = load X[]
+            result = add({first}, {second})
+            O[] = result
+            """
 
-    assert make(("x0", "x1")).structural_key(structural=False) == make(("renamed0", "renamed1")).structural_key(structural=False)
+    assert _key(make("x0", "x1")) == _key(make("renamed0", "renamed1"))
 
 
 def test_structural_key_equal_when_sibling_scopes_reuse_local_names() -> None:
     """A spelling reused in sibling scopes still denotes two lexical binders."""
 
-    def make(
-        axes: tuple[str, str],
-        values: tuple[str, str],
-        buffers: tuple[str, str],
-        outputs: tuple[str, str],
-    ) -> Body:
-        return Body(
-            tuple(
-                Loop(
-                    axis=Axis(axis, 4),
-                    body=(
-                        Load(name=value, input=input_buffer, index=(Var(axis),)),
-                        Assign(
-                            name=f"{value}_result",
-                            op=operation,
-                            args=(value,),
-                        ),
-                        Write(output=output, index=(Var(axis),), value=f"{value}_result"),
-                    ),
-                )
-                for axis, value, input_buffer, output, operation in zip(axes, values, buffers, outputs, ("abs", "exp"), strict=True)
-            )
-        )
+    def make(axes: tuple[str, str], values: tuple[str, str], buffers: tuple[str, str], outputs: tuple[str, str]) -> list[str]:
+        return [
+            _loop(axis, 4, f"{value} = load {buffer}[{axis}]", f"{value}_result = {op}({value})", f"{output}[{axis}] = {value}_result")
+            for axis, value, buffer, output, op in zip(axes, values, buffers, outputs, ("abs", "exp"), strict=True)
+        ]
 
     reused = make(("i", "i"), ("x", "x"), ("A", "B"), ("OA", "OB"))
     distinct = make(
@@ -612,61 +437,39 @@ def test_structural_key_equal_when_sibling_scopes_reuse_local_names() -> None:
         ("left_input", "right_input"),
         ("left_output", "right_output"),
     )
-    renamed_and_reordered = Body(
-        reversed(
-            make(
-                ("renamed_left_axis", "renamed_right_axis"),
-                ("renamed_left_value", "renamed_right_value"),
-                ("renamed_left_input", "renamed_right_input"),
-                ("renamed_left_output", "renamed_right_output"),
-            )
+    renamed_and_reordered = reversed(
+        make(
+            ("renamed_left_axis", "renamed_right_axis"),
+            ("renamed_left_value", "renamed_right_value"),
+            ("renamed_left_input", "renamed_right_input"),
+            ("renamed_left_output", "renamed_right_output"),
         )
     )
-    assert (
-        len(
-            {
-                reused.structural_key(structural=False),
-                distinct.structural_key(structural=False),
-                renamed_and_reordered.structural_key(structural=False),
-            }
-        )
-        == 1
-    )
+    assert len({_key("\n".join(loops)) for loops in (reused, distinct, renamed_and_reordered)}) == 1
 
 
 def test_normalize_body_canonicalizes_nested_scope_orders_independently() -> None:
     """Two ambiguous child scopes do not multiply their order choices or leak alpha names."""
 
-    def make(axis: str, *, reverse_scopes: bool, reverse_left: bool, reverse_right: bool) -> Body:
-        def child(
-            stem: str,
-            source: str,
-            outputs: tuple[str, str],
-            operations: tuple[str, str],
-            reverse: bool,
-        ) -> Cond:
+    def make(axis: str, *, reverse_scopes: bool, reverse_left: bool, reverse_right: bool) -> str:
+        def child(stem: str, source: str, outputs: tuple[str, str], operations: tuple[str, str], reverse: bool) -> str:
             value = f"{stem}_input"
-            chains = tuple(
-                (
-                    Assign(name=f"{stem}_value_{index}", op=operation, args=(value,)),
-                    Write(output=output, index=(Var(axis),), value=f"{stem}_value_{index}"),
-                )
+            chains = [
+                (f"{stem}_value_{index} = {operation}({value})", f"{output}[{axis}] = {stem}_value_{index}")
                 for index, (operation, output) in enumerate(zip(operations, outputs, strict=True))
-            )
+            ]
             ordered = reversed(chains) if reverse else chains
-            return Cond(
-                cond=BinaryExpr("<", Var(axis), Literal(4, "int")),
-                body=(Load(name=value, input=source, index=(Var(axis),)), *(stmt for chain in ordered for stmt in chain)),
-            )
+            lines = (f"{value} = load {source}[{axis}]", *(line for chain in ordered for line in chain))
+            return "\n".join([f"if {axis} < 4:", *(f"    {line}" for line in lines)])
 
         scopes = (
             child("left", "X", ("A0", "A1"), ("abs", "negative"), reverse_left),
             child("right", "Y", ("B0", "B1"), ("exp", "reciprocal"), reverse_right),
         )
-        return Body((Loop(axis=Axis(axis, 4), body=tuple(reversed(scopes)) if reverse_scopes else scopes),))
+        return _loop(axis, 4, *(reversed(scopes) if reverse_scopes else scopes))
 
     normalized = {
-        normalize_body(
+        _normal(
             make(
                 "renamed_axis" if renamed else "element",
                 reverse_scopes=reverse_scopes,
@@ -683,20 +486,16 @@ def test_normalize_body_canonicalizes_outer_captures_before_nested_order() -> No
     """A nested order cannot depend on the source spelling of an outer SSA value."""
 
     def make(left: str) -> Body:
-        return Body(
-            (
-                Load(name=left, input="X", index=()),
-                Load(name="right", input="Y", index=()),
-                Cond(
-                    cond=Literal(1, "int"),
-                    body=(
-                        Assign(name="left_abs", op="abs", args=(left,)),
-                        Assign(name="right_abs", op="abs", args=("right",)),
-                        Assign(name="result", op="add", args=("left_abs", "right_abs")),
-                        Write(output="O", index=(), value="result"),
-                    ),
-                ),
-            )
+        return parse_body(
+            f"""
+            {left} = load X[]
+            right = load Y[]
+            if 1:
+                left_abs = abs({left})
+                right_abs = abs(right)
+                result = add(left_abs, right_abs)
+                O[] = result
+            """
         )
 
     canonical = normalize_body(make("x"))
@@ -706,129 +505,73 @@ def test_normalize_body_canonicalizes_outer_captures_before_nested_order() -> No
 
 
 def test_structural_key_equal_when_a_copy_alias_precedes_a_sibling_scope() -> None:
-    def make(reuse_names: bool) -> Body:
+    def make(reuse_names: bool) -> str:
         right_axis = "i" if reuse_names else "j"
         right_input = "x" if reuse_names else "right_input"
         right_result = "y" if reuse_names else "right_result"
-        return Body(
-            (
-                Loop(
-                    axis=Axis("i", 4),
-                    body=(
-                        Load(name="x", input="A", index=(Var("i"),)),
-                        Assign(name="y", op="copy", args=("x",)),
-                        Write(output="OA", index=(Var("i"),), value="y"),
-                    ),
-                ),
-                Loop(
-                    axis=Axis(right_axis, 4),
-                    body=(
-                        Load(name=right_input, input="B", index=(Var(right_axis),)),
-                        Assign(name=right_result, op="exp", args=(right_input,)),
-                        Write(output="OB", index=(Var(right_axis),), value=right_result),
-                    ),
-                ),
-            )
-        )
+        return f"""
+            for i in 0..4:
+                x = load A[i]
+                y = copy(x)
+                OA[i] = y
+            for {right_axis} in 0..4:
+                {right_input} = load B[{right_axis}]
+                {right_result} = exp({right_input})
+                OB[{right_axis}] = {right_result}
+            """
 
-    assert make(True).structural_key(structural=False) == make(False).structural_key(structural=False)
+    assert _key(make(True)) == _key(make(False))
 
 
 def test_structural_key_handles_large_symmetric_partitions() -> None:
     """Exact symmetry does not trigger factorial buffer, producer, or axis searches."""
-    axis = Axis("element", 4)
-    loads = tuple(Load(name=f"x{i}", input=f"X{i}", index=(Var("element"),)) for i in range(9))
-    buffers = Body(
-        (
-            Loop(
-                axis=axis,
-                body=(
-                    *loads,
-                    Assign(name="result", op="add", args=tuple(f"x{i}" for i in range(9))),
-                    Write(output="O", index=(Var("element"),), value="result"),
-                ),
-            ),
-        )
+    loads = (f"x{i} = load X{i}[element]" for i in range(9))
+    buffers = _loop("element", 4, *loads, f"result = add({', '.join(f'x{i}' for i in range(9))})", "O[element] = result")
+    producers = (f"p{i} = abs(x)" for i in range(9))
+    duplicate_producers = _loop(
+        "element",
+        4,
+        "x = load X[element]",
+        *producers,
+        f"result = add({', '.join(f'p{i}' for i in range(9))})",
+        "O[element] = result",
     )
-    load = Load(name="x", input="X", index=(Var("element"),))
-    producers = tuple(Assign(name=f"p{i}", op="abs", args=("x",)) for i in range(9))
-    duplicate_producers = Body(
-        (
-            Loop(
-                axis=axis,
-                body=(
-                    load,
-                    *producers,
-                    Assign(name="result", op="add", args=tuple(f"p{i}" for i in range(9))),
-                    Write(output="O", index=(Var("element"),), value="result"),
-                ),
-            ),
-        )
-    )
-    nested = Body((Load(name="x", input="X", index=()), Write(output="O", index=(), value="x")))
+    nested = "x = load X[]\nO[] = x"
     for i in reversed(range(9)):
-        nested = Body((Loop(axis=Axis(f"axis{i}", 2), body=nested),))
+        nested = _loop(f"axis{i}", 2, nested)
 
-    assert (
-        len(
-            {
-                buffers.structural_key(structural=False),
-                duplicate_producers.structural_key(structural=False),
-                nested.structural_key(structural=False),
-            }
-        )
-        == 3
-    )
+    assert len({_key(buffers), _key(duplicate_producers), _key(nested)}) == 3
 
 
 def test_normalize_body_refines_large_asymmetric_sibling_partition() -> None:
     """Graph context splits a local-form tie before the exact ordering fallback."""
 
-    def make(prefix: str, *, reverse: bool) -> Body:
-        constants = tuple(Let(name=f"{prefix}_source_{index}", value=index) for index in range(9))
-        consumers = tuple(
-            Cond(
-                cond=Literal(1, "int"),
-                body=(Assign(name=f"{prefix}_value_{index}", op="abs", args=(f"{prefix}_source_{index}",)),),
-            )
-            for index in range(9)
-        )
-        return Body((*constants, *(reversed(consumers) if reverse else consumers)))
+    def make(prefix: str, *, reverse: bool) -> str:
+        constants = [f"let {prefix}_source_{index} = {index}.0" for index in range(9)]
+        consumers = [f"if 1:\n    {prefix}_value_{index} = abs({prefix}_source_{index})" for index in range(9)]
+        return "\n".join([*constants, *(reversed(consumers) if reverse else consumers)])
 
-    assert normalize_body(make("first", reverse=False)) == normalize_body(make("renamed", reverse=True))
+    assert _normal(make("first", reverse=False)) == _normal(make("renamed", reverse=True))
 
 
 def test_normalize_body_keeps_independent_sibling_scopes_together() -> None:
     """Ready blocks stay ahead of leaf epilogues so normalization does not widen scheduling."""
-    first = Loop(
-        axis=Axis("first_axis", 4),
-        body=(
-            Load(name="first_input", input="X", index=(Var("first_axis"),)),
-            Accum(name="first_sum", value="first_input", axes=("first_axis",)),
-        ),
+    normal = _normal(
+        """
+        for first_axis in 0..4:
+            first_input = load X[first_axis]
+            first_sum <- add(first_sum, first_input) over first_axis
+        first_result = abs(first_sum)
+        for second_axis in 0..4:
+            second_input = load Y[second_axis]
+            second_sum <- add(second_sum, second_input) over second_axis
+        second_result = exp(second_sum)
+        O0[] = first_result
+        O1[] = second_result
+        """
     )
-    second = Loop(
-        axis=Axis("second_axis", 4),
-        body=(
-            Load(name="second_input", input="Y", index=(Var("second_axis"),)),
-            Accum(name="second_sum", value="second_input", axes=("second_axis",)),
-        ),
-    )
-    normalized = normalize_body(
-        Body(
-            (
-                first,
-                Assign(name="first_result", op="abs", args=("first_sum",)),
-                second,
-                Assign(name="second_result", op="exp", args=("second_sum",)),
-                Write(output="O0", index=(), value="first_result"),
-                Write(output="O1", index=(), value="second_result"),
-            )
-        )
-    )
-
-    assert isinstance(normalized[0], Loop)
-    assert isinstance(normalized[1], Loop)
+    first, second, *_ = (line for line in normal.splitlines() if not line.startswith(" "))
+    assert first.startswith("for ") and second.startswith("for ")
 
 
 def test_structural_key_distinguishes_reordered_noncommutative_arguments() -> None:
@@ -836,141 +579,99 @@ def test_structural_key_distinguishes_reordered_noncommutative_arguments() -> No
     inputs = (("left", "left_buffer", "row"), ("right", "right_buffer", "column"))
     left_minus_right = _pointwise_body(inputs=inputs, op="subtract", args=("left", "right"))
     right_minus_left = _pointwise_body(inputs=inputs, op="subtract", args=("right", "left"))
-    assert left_minus_right.structural_key(structural=False) != right_minus_left.structural_key(structural=False)
+    assert _key(left_minus_right) != _key(right_minus_left)
 
 
 def test_structural_key_folds_repeated_computation() -> None:
     """A pure statement spelled twice over the same names is one value: normalization keeps the
     first and aliases the second, so the two spellings are one kernel and one key."""
-    axis = Axis("element", 4)
-    load = Load(name="input", input="input_buffer", index=(Var("element"),))
-    first = Assign(name="first", op="abs", args=("input",))
-    second = Assign(name="second", op="abs", args=("input",))
-    repeated = Body(
-        (
-            Loop(
-                axis=axis,
-                body=(
-                    load,
-                    first,
-                    second,
-                    Assign(name="result", op="add", args=("first", "second")),
-                    Write(output="output", index=(Var("element"),), value="result"),
-                ),
-            ),
-        )
-    )
-    shared = Body(
-        (
-            Loop(
-                axis=axis,
-                body=(
-                    load,
-                    first,
-                    Assign(name="result", op="add", args=("first", "first")),
-                    Write(output="output", index=(Var("element"),), value="result"),
-                ),
-            ),
-        )
-    )
-    assert repeated.structural_key(structural=False) == shared.structural_key(structural=False)
+    repeated = """
+        for element in 0..4:
+            input = load input_buffer[element]
+            first = abs(input)
+            second = abs(input)
+            result = add(first, second)
+            output[element] = result
+        """
+    shared = """
+        for element in 0..4:
+            input = load input_buffer[element]
+            first = abs(input)
+            result = add(first, first)
+            output[element] = result
+        """
+    assert _key(repeated) == _key(shared)
 
 
 def test_structural_key_preserves_effect_order() -> None:
     """Writes to the same buffer retain their order even when their operands are independent."""
-    axis = Axis("element", 4)
-    load_x = Load(name="x", input="X", index=(Var("element"),))
-    load_y = Load(name="y", input="Y", index=(Var("element"),))
-    absolute = Assign(name="absolute", op="abs", args=("x",))
-    exponential = Assign(name="exponential", op="exp", args=("y",))
-    write_x = Write(output="output", index=(Var("element"),), value="absolute")
-    write_y = Write(output="output", index=(Var("element"),), value="exponential")
-    xy = Body((Loop(axis=axis, body=(load_x, load_y, absolute, exponential, write_x, write_y)),))
-    yx = Body((Loop(axis=axis, body=(load_x, load_y, absolute, exponential, write_y, write_x)),))
-    assert xy.structural_key(structural=False) != yx.structural_key(structural=False)
+    prefix = ("x = load X[element]", "y = load Y[element]", "absolute = abs(x)", "exponential = exp(y)")
+    write_x = "output[element] = absolute"
+    write_y = "output[element] = exponential"
+    assert _key(_loop("element", 4, *prefix, write_x, write_y)) != _key(_loop("element", 4, *prefix, write_y, write_x))
 
 
 def test_structural_key_preserves_a_read_across_a_write_to_its_buffer() -> None:
-    prefix = (
-        Load(name="old", input="B", index=()),
-        Let(name="replacement", value=7),
-        Write(output="P", index=(), value="old"),
-    )
-    write = Write(output="B", index=(), value="replacement")
-    read = Load(name="new", input="B", index=())
-    observe = Write(output="O", index=(), value="new")
-    after_write = Body((*prefix, write, read, observe))
-    before_write = Body((*prefix, read, write, observe))
-
-    assert after_write.structural_key(structural=False) != before_write.structural_key(structural=False)
+    prefix = ("old = load B[]", "let replacement = 7.0", "P[] = old")
+    write = "B[] = replacement"
+    read = "new = load B[]"
+    observe = "O[] = new"
+    after_write = "\n".join([*prefix, write, read, observe])
+    before_write = "\n".join([*prefix, read, write, observe])
+    assert _key(after_write) != _key(before_write)
 
 
 def test_structural_key_preserves_shared_accumulator_order() -> None:
     """Updates to one reduction state retain their execution order."""
-    axis = Axis("reduce", 4)
-    prefix = (
-        Load(name="x", input="X", index=(Var("reduce"),)),
-        Load(name="y", input="Y", index=(Var("reduce"),)),
-        Assign(name="absolute", op="abs", args=("x",)),
-        Assign(name="exponential", op="exp", args=("y",)),
-    )
-    absolute = Accum(name="total", value="absolute", axes=("reduce",))
-    exponential = Accum(name="total", value="exponential", axes=("reduce",))
-    suffix = (Write(output="O", index=(), value="total"),)
-    one = Body((Loop(axis=axis, body=(*prefix, absolute, exponential)), *suffix))
-    two = Body((Loop(axis=axis, body=(*prefix, exponential, absolute)), *suffix))
-    assert one.structural_key(structural=False) != two.structural_key(structural=False)
+    prefix = ("x = load X[reduce]", "y = load Y[reduce]", "absolute = abs(x)", "exponential = exp(y)")
+    absolute = "total <- add(total, absolute) over reduce"
+    exponential = "total <- add(total, exponential) over reduce"
+    one = _loop("reduce", 4, *prefix, absolute, exponential) + "\nO[] = total"
+    two = _loop("reduce", 4, *prefix, exponential, absolute) + "\nO[] = total"
+    assert _key(one) != _key(two)
 
 
 def test_structural_key_preserves_when_accumulator_state_is_observed() -> None:
     """A state read remains after the update whose value it observes."""
-    prefix = (
-        Init(name="total", identity=0, dtype=F32),
-        Let(name="first", value=1),
-        Let(name="second", value=2),
-        Accum(name="total", value="first"),
-    )
-    final_update = Accum(name="total", value="second")
-    observe = Write(output="O", index=(), value="total")
-    after_both = Body((*prefix, final_update, observe))
-    between = Body((*prefix, observe, final_update))
-    assert after_both.structural_key(structural=False) != between.structural_key(structural=False)
+    prefix = ("init f32 total = 0", "let first = 1.0", "let second = 2.0", "total <- add(total, first)")
+    final_update = "total <- add(total, second)"
+    observe = "O[] = total"
+    after_both = "\n".join([*prefix, final_update, observe])
+    between = "\n".join([*prefix, observe, final_update])
+    assert _key(after_both) != _key(between)
 
 
 def test_structural_key_distinguishes_reduction_seed_policy() -> None:
     """A reduction seed changes execution and must remain in exact identity."""
-    axis = Axis("reduce", 4)
-    body = (
-        Load(name="x", input="X", index=(Var("reduce"),)),
-        Accum(name="total", value="x", axes=("reduce",)),
-    )
-    seeded = Body((Loop(axis=axis, body=body, seed=True), Write(output="O", index=(), value="total")))
-    continuing = Body((Loop(axis=axis, body=body, seed=False), Write(output="O", index=(), value="total")))
-    assert seeded.structural_key(structural=False) != continuing.structural_key(structural=False)
+
+    def make(flags: str) -> str:
+        return f"""
+            for reduce in 0..4{flags}:
+                x = load X[reduce]
+                total <- add(total, x) over reduce
+            O[] = total
+            """
+
+    assert _key(make("")) != _key(make(" seed=false"))
 
 
 def test_structural_key_distinguishes_buffer_aliasing() -> None:
     """Two argument names and one argument used twice are different signatures."""
     separate = _pointwise_body(inputs=(("left", "X", "row"), ("right", "Y", "column")), op="multiply", args=("left", "right"))
     aliased = _pointwise_body(inputs=(("left", "X", "row"), ("right", "X", "column")), op="multiply", args=("left", "right"))
-    assert separate.structural_key(structural=False) != aliased.structural_key(structural=False)
+    assert _key(separate) != _key(aliased)
 
 
 def _binary_body(op: str, args: tuple[str, str] = ("x", "y")) -> Body:
     """Two-operand body builder used by the op-clustering tests below."""
-    a = Axis("a", 4)
-    return Body(
-        (
-            Loop(
-                axis=a,
-                body=(
-                    Load(name="x", input="X", index=(Var("a"),)),
-                    Load(name="y", input="Y", index=(Var("a"),)),
-                    Assign(name="z", op=op, args=args),
-                    Write(output="O", index=(Var("a"),), value="z"),
-                ),
-            ),
-        )
+    return parse_body(
+        f"""
+        for a in 0..4:
+            x = load X[a]
+            y = load Y[a]
+            z = {op}({", ".join(args)})
+            O[a] = z
+        """
     )
 
 
@@ -994,7 +695,7 @@ def test_normalize_body_does_not_cluster_operations() -> None:
     add = _binary_body("add")
     subtract = _binary_body("subtract")
 
-    assert normalize_body(add) != normalize_body(subtract)
+    assert _normal(add) != _normal(subtract)
     assert add.structural_key() == subtract.structural_key()
 
 
@@ -1028,27 +729,18 @@ def test_identity_coordinate_order_survives_axis_rename() -> None:
     """Renaming axes across lexical order must not re-key a saved kernel's measured evidence."""
     keys = set()
     for outer, inner in (("a9", "a10"), ("outer", "inner"), ("i", "j")):
-        index = BinaryExpr("+", BinaryExpr("*", Literal(128, "int"), Var(outer)), Var(inner))
-        body = Body(
-            (
-                Loop(
-                    Axis(outer, 40),
-                    (
-                        Loop(
-                            Axis(inner, 128),
-                            (
-                                Load(name="v", input="X", index=(index,)),
-                                Write(output="Y", index=(Var(outer), Var(inner)), value="v"),
-                            ),
-                        ),
-                    ),
-                ),
-            )
+        body = parse_body(
+            f"""
+            for {outer} in 0..40:
+                for {inner} in 0..128:
+                    v = load X[128 * {outer} + {inner}]
+                    Y[{outer}, {inner}] = v
+            """
         )
         canonical = canonicalize_identity(body)
         assert canonicalize_identity(normalize_body(body)).key == canonical.key
-        normalized = normalize_body(body)
-        assert normalize_body(Body(tuple(normalized))) == normalized
+        normal = _normal(body)
+        assert _normal(normal) == normal
         keys.add(canonical.key)
     assert len(keys) == 1
 

@@ -62,19 +62,18 @@ def test_register_schedule_round_trip_and_precision_gate(target):
 
 def test_register_storage_refuses_cross_warp_state_reads():
     from emmy.compiler.ir.loop import LoopOp
-    from emmy.compiler.ir.stmt import Pre
-    from tests.compiler.ir.test_carried_state import _step, c, i, j, k
+    from emmy.compiler.ir.stmt import parse_body
+    from tests.compiler.ir.test_carried_state import _step
 
     graph = _graph()
-    body = _step((c, i, j)).map(lambda s: s.replace(index=(i, k)) if isinstance(s, Pre) and s.index == (k, j) else s)
+    body = _step("c, i, j").map(lambda s: parse_body("other = pre S[i, k]") if str(s) == "other = pre S[k, j]" else s)
     graph.nodes["out"].op = LoopOp(body=body)
     (tile,) = (n.op for n in _lift(graph).nodes.values() if isinstance(n.op, TileOp))
     assert tile.register_program is None
 
 
 def test_register_step_keeps_a_time_coordinate_read_by_its_lift():
-    from emmy.compiler.ir.expr import Var
-    from emmy.compiler.ir.stmt import Assign, Body, Load
+    from emmy.compiler.ir.stmt import Assign, Body, parse_body
 
     (tile,) = (n.op for n in _lift(_graph()).nodes.values() if isinstance(n.op, TileOp))
     (carrying,) = (site.node for site in tile.sites if site.node.carries)
@@ -85,7 +84,7 @@ def test_register_step_keeps_a_time_coordinate_read_by_its_lift():
             lift,
             body=Body(
                 (
-                    Load(name="phase", input="D", index=(Var(carrying.axis),)),
+                    *parse_body(f"phase = load D[{carrying.axis}]"),
                     *[
                         replace(stmt, args=(stmt.args[0], "phase")) if isinstance(stmt, Assign) and stmt.name == lift.results[0] else stmt
                         for stmt in lift.body
@@ -131,7 +130,7 @@ def test_chunk_loop_is_inside_one_launch(target):
 
 def _with_output_batch_axis(graph, batch_extent):
     from emmy.compiler.dim import Dim
-    from emmy.compiler.ir.expr import Literal
+    from emmy.compiler.ir.expression import Literal
     from emmy.compiler.ir.stmt import Write
 
     node = graph.nodes["out"]
@@ -185,7 +184,7 @@ def test_register_fork_keeps_the_carrier_when_classic_is_also_offered():
 @pytest.mark.parametrize("target", [(7, 0), (12, 0)], ids=["volta", "modern"])
 @pytest.mark.parametrize("stride", [1, 2])
 def test_register_operands_use_direct_loads_when_the_address_allows_it(target, stride):
-    from emmy.compiler.ir.expr import Literal
+    from emmy.compiler.ir.expression import Literal
     from emmy.compiler.ir.stmt import Load
 
     graph = _graph()
@@ -275,7 +274,7 @@ def test_register_state_starts_from_the_seed_tensor_on_cuda(unit, unit_batch):
 def test_seed_tensor_keeps_unit_dimensions_on_cuda(register):
     from emmy.compiler.backend.cuda.program import run_program
     from emmy.compiler.dim import Dim
-    from emmy.compiler.ir.expr import Literal
+    from emmy.compiler.ir.expression import Literal
     from emmy.compiler.ir.stmt import Carry, Pre
 
     source = _graph(seed="S0")
@@ -307,7 +306,7 @@ def test_gmem_fragment_loads_keep_their_constant_offset_in_the_pointer():
     24 bytes there, while CUDA 13 folded the same source into 189 registers. ``&k[base] + 2048``
     is one pointer and a load immediate on both (179 registers on CUDA 12.9)."""
     from emmy.compiler.dim import Dim
-    from emmy.compiler.ir.expr import BinaryExpr, Literal, Var
+    from emmy.compiler.ir.expression import BinaryExpr, Literal, Var
     from emmy.compiler.ir.render import RenderCtx
 
     ctx = RenderCtx(shapes={"k": (Dim(4), Dim(64), Dim(128))}, buffer_dtypes={"k": "f32"}, ssa_dtypes={"r": "f16"})

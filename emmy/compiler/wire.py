@@ -2,14 +2,15 @@
 
 A class joins the wire through :func:`register`, with its tag, its two wire functions and the parts the rewrite goes
 into. Mixing in :class:`Wire` registers a class as it is defined and supplies all of them for a dataclass: its init
-fields, minus the ones it names in ``wire_skip``, written by their annotations. A field whose annotation names one wire class
-holds that class's payload bare; a field whose annotation is a base class, a union of classes or ``Any`` holds
-``{tag: payload}``, so the reader knows which class to build; a field at its default is omitted; a field annotated
-``dict`` is an opaque payload kept as it is (a program pool's entries). A class whose wire is not its fields — a dim,
-a tensor, a body, a graph, a leaf type — overrides ``to_wire`` / ``from_wire``. ``wire_tag`` names the class on the
-wire, the class name by default; every wire class registers its tag when it is defined, so a tagged payload decodes
-without anyone listing the classes; a subclass that inherits its base's codec goes by the base's tag (an expression
-node is its text). The walker refuses an unknown or missing key by path.
+fields, minus the ones it names in ``wire_skip``, written by their annotations. A field whose annotation names one
+wire class holds that class's payload bare; a field whose annotation is a base class, a union of classes or ``Any``
+holds ``{tag: payload}``, so the reader knows which class to build; a field at its default is omitted; a field
+annotated ``dict`` is an opaque payload kept as it is (a program pool's entries). A class whose wire is not its fields
+— a dim, a tensor, a graph, a leaf type, an expression or a body (each its text) — overrides ``to_wire`` /
+``from_wire``. ``wire_tag`` names the class on the wire, the class name by default; every wire class registers its tag
+when it is defined, so a tagged payload decodes without anyone listing the classes; a subclass that inherits its
+base's codec goes by the base's tag (an expression node is its text). The walker refuses an unknown or missing key by
+path.
 """
 
 from __future__ import annotations
@@ -63,7 +64,7 @@ def register(cls: type) -> None:
     _NAMESPACE[cls.__name__] = cls
     owner = next(base for base in cls.__mro__ if "to_wire" in base.__dict__)
     if owner not in (cls, Wire) and "wire_tag" not in cls.__dict__:
-        # A subclass written by its base's codec goes by the base's tag: an ``Expr`` node is its text.
+        # A subclass written by its base's codec goes by the base's tag: an ``Expression`` node is its text.
         _TAG_OF[cls] = _TAG_OF[owner]
         return
     tag = cls.__dict__.get("wire_tag") or cls.__name__
@@ -429,7 +430,7 @@ def kernel_wire(tile) -> dict:
 def symbolic_vars(wire: dict) -> set[str]:
     """The symbolic dim vars a kernel wire's buffers name — the keys a measurement of it binds
     (:func:`kernel_bindings`), and what a piece keeps of its parent's bindings."""
-    from emmy.compiler.ir.expr import Expr  # noqa: PLC0415
+    from emmy.compiler.ir.expression import Expression  # noqa: PLC0415
 
     out: set[str] = set()
     for node in wire["nodes"]:
@@ -438,7 +439,7 @@ def symbolic_vars(wire: dict) -> set[str]:
                 if isinstance(dim, dict) and "sym" in dim:
                     out.add(str(dim["sym"]))
                 elif isinstance(dim, dict) and "expr" in dim:
-                    out |= Expr.from_wire(dim["expr"]).free_vars()
+                    out |= Expression.from_wire(dim["expr"]).free_vars()
     return out
 
 
@@ -451,7 +452,7 @@ def symbolic_bindings(tensors: Iterable, extents: Iterable = ()) -> dict[str, in
     bindings: dict[str, int] = {}
     for dim in (*(dim for tensor in tensors for dim in tensor.shape), *extents):
         if isinstance(dim, Dim) and not dim.is_static:
-            for var in dim.expr.free_vars():
+            for var in dim.expression.free_vars():
                 bindings.setdefault(var, dim.hint or DEFAULT_SEQ_HINT)
     return bindings
 

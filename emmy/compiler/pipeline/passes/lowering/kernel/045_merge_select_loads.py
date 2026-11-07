@@ -26,9 +26,9 @@ from collections import Counter
 from dataclasses import replace
 
 from emmy.compiler.graph import Node
-from emmy.compiler.ir.expr import Expr, Literal, TernaryExpr
+from emmy.compiler.ir.expression import Expression, Literal, TernaryExpr
 from emmy.compiler.ir.kernel import KernelOp
-from emmy.compiler.ir.stmt import Assign, Body, Let, Load, Select, SelectBranch, Stmt
+from emmy.compiler.ir.stmt import Assign, Body, Let, Load, Select, SelectBranch, Statement
 from emmy.compiler.pipeline import Pattern, RuleSkipped
 
 PATTERN = [Pattern("root", KernelOp)]
@@ -43,7 +43,7 @@ def rewrite(root: Node) -> KernelOp:
     return replace(op, body=body)
 
 
-def _reads(stmt: Stmt) -> tuple[str, ...]:
+def _reads(stmt: Statement) -> tuple[str, ...]:
     """Every SSA name ``stmt`` reads, its own block bodies' reads left to their statements."""
     return tuple(stmt.deps())
 
@@ -103,7 +103,7 @@ def _merge(stmts: list, position: int, uses: Counter) -> list | None:
     if not _match(stmts, defs, a_name, b_name, cone_a, cone_b, pairs):
         return None
     # The merged chain replaces branch A's statements in A's order; branch B's are dropped.
-    merged: dict[int, Stmt] = {}
+    merged: dict[int, Statement] = {}
     for i in sorted(cone_a):
         stmt = stmts[i]
         if isinstance(stmt, Load):
@@ -114,7 +114,7 @@ def _merge(stmts: list, position: int, uses: Counter) -> list | None:
             merged[i] = stmt.replace(index=index)
         else:
             merged[i] = stmt
-    out: list[Stmt] = []
+    out: list[Statement] = []
     for i, stmt in enumerate(stmts):
         if i in cone_b:
             continue
@@ -138,7 +138,7 @@ def _merge(stmts: list, position: int, uses: Counter) -> list | None:
     return out
 
 
-def _safe(stmts: list, defs: dict, cone: set[int], cond: Expr) -> bool:
+def _safe(stmts: list, defs: dict, cone: set[int], cond: Expression) -> bool:
     """No effect between the two chains, and the predicate defined before them."""
     first = min(cone)
     pure = all(isinstance(s, (Assign, Let, Load, Select)) for s in stmts[first : max(cone) + 1])
@@ -187,20 +187,20 @@ def _match(stmts: list, defs: dict, a: str, b: str, cone_a: set, cone_b: set, pa
     return ok
 
 
-def _select_index(cond: Expr, a: Expr, b: Expr) -> Expr:
+def _select_index(cond: Expression, a: Expression, b: Expression) -> Expression:
     """``cond ? a : b`` with every select on ``cond`` inside each arm resolved to its own side."""
     if a == b:
         return a
     return TernaryExpr(cond, _resolve(a, cond, True), _resolve(b, cond, False))
 
 
-def _resolve(expr: Expr, cond: Expr, value: bool) -> Expr:
-    if isinstance(expr, TernaryExpr) and expr.cond == cond:
-        return _resolve(expr.if_true if value else expr.if_false, cond, value)
-    fields = getattr(expr, "__dataclass_fields__", {})
+def _resolve(expression: Expression, cond: Expression, value: bool) -> Expression:
+    if isinstance(expression, TernaryExpr) and expression.cond == cond:
+        return _resolve(expression.if_true if value else expression.if_false, cond, value)
+    fields = getattr(expression, "__dataclass_fields__", {})
     changed = {
-        name: _resolve(getattr(expr, name), cond, value)
+        name: _resolve(getattr(expression, name), cond, value)
         for name in fields
-        if isinstance(getattr(expr, name), Expr) and not isinstance(getattr(expr, name), Literal)
+        if isinstance(getattr(expression, name), Expression) and not isinstance(getattr(expression, name), Literal)
     }
-    return replace(expr, **changed) if changed else expr
+    return replace(expression, **changed) if changed else expression

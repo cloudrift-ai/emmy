@@ -25,9 +25,8 @@ from emmy.compiler.dtype import F32
 from emmy.compiler.graph import Graph, Node, Tensor
 from emmy.compiler.ir.axis import Axis
 from emmy.compiler.ir.base import InputOp
-from emmy.compiler.ir.expr import Var
 from emmy.compiler.ir.schedule import Placement
-from emmy.compiler.ir.stmt import Assign, Load, OutputSpec, Write
+from emmy.compiler.ir.stmt import Load, OutputSpec, parse_body
 from emmy.compiler.ir.tile import TileOp
 from emmy.compiler.pipeline.passes.tile._cut import cuttable_seams, join_pairs, realize
 from tests.compiler.helpers import case_target_tile
@@ -46,18 +45,18 @@ def _kernel(store_input: bool) -> tuple[Graph, Node]:
     both = reduction(
         _COL,
         (cell,),
-        (Assign(name="lo__v", op="copy", args=("cell",)), Assign(name="hi__v", op="multiply", args=("cell", "cell"))),
+        parse_body("lo__v = copy(cell)\nhi__v = multiply(cell, cell)"),
         ("lo", "hi"),
     )
     root = projection(
         (both, cell) if store_input else (both,),
-        (Assign(name="squared", op="multiply", args=("lo", "lo")),),
+        parse_body("squared = multiply(lo, lo)"),
         results=("squared",),
     )
-    stores = (OutputSpec(Write(output="square", index=(Var("m"),), value="squared")),)
+    stores = (OutputSpec(*parse_body("square[m] = squared")),)
     outputs = [Tensor("square", (8,), dtype=F32)]
     if store_input:
-        stores += (OutputSpec(Write(output="copied", index=(Var("m"), Var("k")), value="cell"), sweep=(_ROW, _COL)),)
+        stores += (OutputSpec(*parse_body("copied[m, k] = cell"), sweep=(_ROW, _COL)),)
         outputs.append(Tensor("copied", (8, 32), dtype=F32))
     tile = TileOp(
         op=root,

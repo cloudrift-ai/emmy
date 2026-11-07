@@ -2,7 +2,7 @@
 
 A lambda is a PURE term: explicit binders over the reused stmt vocabulary, an A-normal-form
 let-chain in ``body``, the returned defs named by ``results``. It binds; it never executes.
-Nothing here is a :class:`~emmy.compiler.ir.stmt.base.Stmt` — see ``ir/ARCHITECTURE.md`` for the
+Nothing here is a :class:`~emmy.compiler.ir.stmt.base.Statement` — see ``ir/ARCHITECTURE.md`` for the
 invariant and for how a pure term reaches a statement position (it is RENDERED to stmts, never
 spliced in as one).
 """
@@ -12,7 +12,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from emmy.compiler.ir.elementwise import ElementwiseImpl
-from emmy.compiler.ir.stmt import Affine, Assign, Body, Load, Stmt, exposed_defines, free_names, pretty_body
+from emmy.compiler.ir.stmt import Affine, Assign, Body, Load, Statement, exposed_defines, free_names, pretty_body
 from emmy.compiler.wire import Wire
 
 
@@ -53,7 +53,7 @@ def _normalize_body(body: Body) -> Body:
     directly."""
     ordered = _canonical_body_order(body)
 
-    def sort(stmt: Stmt) -> Stmt:
+    def sort(stmt: Statement) -> Statement:
         if isinstance(stmt, Assign) and stmt.op.commutative and len(stmt.args) > 1:
             return stmt.replace(args=tuple(sorted(stmt.args)))
         if isinstance(stmt, Affine) and len(stmt.args) > 1:
@@ -72,7 +72,7 @@ class Lambda(Wire):
     (replacing every ``out`` / last-def convention).
 
     ``__post_init__`` validates the LOCAL formation invariant: every body stmt passes the
-    :attr:`Stmt.pure` trait (declared on the interface, conservative ``False`` default —
+    :attr:`Statement.pure` trait (declared on the interface, conservative ``False`` default —
     ``Load`` / ``Assign`` and the structural nodes opt in; ``Accum`` / ``Write`` / ``Init`` /
     ``Loop`` never do; no isinstance whitelist, so a new stmt kind is excluded until it declares
     itself), every result is defined, and every value or coordinate read is bound. Scope-aware

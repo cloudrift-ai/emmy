@@ -14,7 +14,7 @@ from typing import TYPE_CHECKING
 from frozendict import frozendict
 
 from emmy.compiler.ir.atom import ATOM_REGISTRY
-from emmy.compiler.ir.expr import Literal, Var
+from emmy.compiler.ir.expression import Literal, Var
 from emmy.compiler.ir.pure import Fold, Lambda
 from emmy.compiler.ir.schedule.base import Schedule, ScheduleContext, ScheduleProblem, ScheduleRefused, Site
 from emmy.compiler.ir.schedule.choices import Tile, Work

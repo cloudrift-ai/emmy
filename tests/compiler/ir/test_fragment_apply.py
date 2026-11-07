@@ -1,7 +1,7 @@
 """``FragmentApply``'s coordinate and global-memory operand kinds — the fragment-tier mask and bias."""
 
 from emmy.compiler.ir.elementwise import ElementwiseImpl
-from emmy.compiler.ir.expr import BinaryExpr, Literal, Var
+from emmy.compiler.ir.expression import BinaryExpr, Literal, Var
 from emmy.compiler.ir.kernel.ir import COORD, FRAG, FRAG_COL, FRAG_ROW, GMEM, UNIFORM, FragmentApply, FragmentArg, fragment_args
 from emmy.compiler.ir.render import RenderCtx, render_stmt
 from emmy.compiler.ir.sigma import Sigma
@@ -48,9 +48,9 @@ def test_rewrite_substitutes_bases_and_templates_but_not_the_reserved_coordinate
     rewritten = _causal_mask().rewrite(lambda n: {"s": "s9"}.get(n, n), sigma)
     assert rewritten.out == "s9" and rewritten.args[2] == FragmentArg(FRAG, ("s9",))
     assert rewritten.row_base == Var("a1")
-    assert rewritten.args[0].exprs == (BinaryExpr(">", Var(FRAG_COL), Var(FRAG_ROW)),), "the reserved vars are not local axes"
+    assert rewritten.args[0].expressions == (BinaryExpr(">", Var(FRAG_COL), Var(FRAG_ROW)),), "the reserved vars are not local axes"
     assert rewritten.deps() == ("s9",), "a predicate and a literal contribute no SSA reads"
-    assert rewritten.exprs()[0] == rewritten.args[0].exprs[0]
+    assert rewritten.expressions()[0] == rewritten.args[0].expressions[0]
 
 
 def test_plain_operands_keep_the_unrolled_loop_form() -> None:

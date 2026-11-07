@@ -3,7 +3,7 @@
   {"inputs":["x"],"outputs":["relu"],"nodes":[{"id":"x","op":"input","outputs":[["x","f32",[512,4096]]]},{"id":"relu","op":"tensor.elementwise","attrs":{"op":"relu"},"inputs":["x"],"outputs":[["relu","f32",[512,4096]]]}]}
  ],
  "kernels": [
-  {"loop_ir":{"inputs":["x"],"outputs":["relu"],"nodes":[{"id":"x","op":"input","outputs":[["x","f32",[512,4096]]]},{"id":"relu","op":"loop","attrs":{"body":[{"Loop":{"axis":{"name":"a0","extent":2097152},"body":[{"Load":{"names":["in0"],"input":"x","index":["a0 / 4096","a0 % 4096"]}},{"Assign":{"name":"v0","op":"relu","args":["in0"]}},{"Write":{"output":"relu","index":["a0 / 4096","a0 % 4096"],"values":["v0"]}}]}}],"name":"k_relu_pointwise"},"inputs":["x"],"outputs":[["relu","f32",[512,4096]]]}]},"name":"k_relu_pointwise","formed":true,"traced":0,"origins":["relu"]}
+  {"loop_ir":{"inputs":["x"],"outputs":["relu"],"nodes":[{"id":"x","op":"input","outputs":[["x","f32",[512,4096]]]},{"id":"relu","op":"loop","attrs":{"body":"for a0 in 0..2097152:\n    in0 = load x[a0 / 4096, a0 % 4096]\n    v0 = relu(in0)\n    relu[a0 / 4096, a0 % 4096] = v0","name":"k_relu_pointwise"},"inputs":["x"],"outputs":[["relu","f32",[512,4096]]]}]},"name":"k_relu_pointwise","formed":true,"traced":0,"origins":["relu"]}
  ],
  "rows": [
   {"name":"k_relu_pointwise","kernel":"k_relu_pointwise","pins":{"FAST_MATH":false},"knobs":{"WORK":"","TILE":"","RASTER":""}}

@@ -41,7 +41,7 @@ from emmy.compiler.ir.address import clamp_to, gmem_axis_step
 from emmy.compiler.ir.axis import Axis, Window
 from emmy.compiler.ir.base import InputOp
 from emmy.compiler.ir.elementwise import ElementwiseImpl
-from emmy.compiler.ir.expr import BinaryExpr, Literal, Var
+from emmy.compiler.ir.expression import BinaryExpr, Literal, Var
 from emmy.compiler.ir.loop import LoopOp
 from emmy.compiler.ir.pure import Lambda
 from emmy.compiler.ir.pure.fold import Fold
@@ -49,7 +49,7 @@ from emmy.compiler.ir.pure.twist import Twist
 from emmy.compiler.ir.schedule import Reduce, Work
 from emmy.compiler.ir.schedule.catalog import splitk_moves
 from emmy.compiler.ir.sigma import Sigma
-from emmy.compiler.ir.stmt import Accum, Affine, Assign, Body, Carry, Let, Load, Loop, Pre, Select, SelectBranch, Stmt, Write
+from emmy.compiler.ir.stmt import Accum, Affine, Assign, Body, Carry, Let, Load, Loop, Pre, Select, SelectBranch, Statement, Write
 from emmy.compiler.ir.tile import OutputSpec, Placement, TileOp
 from emmy.compiler.ir.tile.ops import Sched, carries_partition, head, projection_regions, projection_root, projection_tail
 from emmy.compiler.pipeline import Match
@@ -97,13 +97,13 @@ def _slice_length(k_axis: Axis, width: int):
     """The positions one partition's slice of the stream spans: ``K/w``, or ``⌈K/w⌉`` of a symbolic stream."""
     if k_axis.extent.is_static:
         return Literal(k_axis.extent.as_static() // width, "int")
-    return BinaryExpr("/", BinaryExpr("+", k_axis.extent.expr, Literal(width - 1, "int")), Literal(width, "int"))
+    return BinaryExpr("/", BinaryExpr("+", k_axis.extent.expression, Literal(width - 1, "int")), Literal(width, "int"))
 
 
 def _clamped(k_axis: Axis, position):
     """``position`` as the stream's loads read it: a symbolic stream's overhanging slice reads its last position
     (:func:`~emmy.compiler.ir.address.clamp_to`, which the gmem-direct fragment loaders read back)."""
-    return position if k_axis.extent.is_static else clamp_to(position, k_axis.extent.expr)
+    return position if k_axis.extent.is_static else clamp_to(position, k_axis.extent.expression)
 
 
 def _masked(fold: Fold, k_axis: Axis, position) -> Fold:
@@ -114,8 +114,8 @@ def _masked(fold: Fold, k_axis: Axis, position) -> Fold:
     state the combine then scales away."""
     if k_axis.extent.is_static:
         return fold
-    end = k_axis.extent.expr
-    stmts: list[Stmt] = []
+    end = k_axis.extent.expression
+    stmts: list[Statement] = []
     if fold.twist is None:
         inside = BinaryExpr("<", position, end)
         results = []
@@ -467,7 +467,7 @@ def realize_carry_split(match: Match, root: Node, cta: int) -> Graph:
         if isinstance(stmt, Loop) and not stmt.is_reduce and not stmt.body.carries and not stmt.body.iter_of_type(Write):
             return None  # an output sweep with nothing left to store
         if isinstance(stmt, Carry):
-            return (stmt, Write(output=probe_states, index=(Var(probe.name), Var(part.name), Var(sliced.name), *own), value=stmt.value))
+            return (stmt, Write(output=probe_states, index=(Var(probe.name), Var(part.name), Var(sliced.name), *own), values=(stmt.value,)))
         return stmt
 
     walk = indexed(step, (probe, part), probe_seed).map(probed)
@@ -482,7 +482,7 @@ def realize_carry_split(match: Match, root: Node, cta: int) -> Graph:
             Let(name="_one", value=1.0),
             Let(name="_zero", value=0.0),
             Select(name="_seed", branches=(SelectBranch("_one", hit), SelectBranch("_zero", Literal(True, "bool")))),
-            Write(output=probe_seed, index=(Var(probe.name), Var(part.name), *own), value="_seed"),
+            Write(output=probe_seed, index=(Var(probe.name), Var(part.name), *own), values=("_seed",)),
         )
     )
     seed_kernel = _nest(seed_body, (probe, part, *cell_axes))
@@ -492,14 +492,14 @@ def realize_carry_split(match: Match, root: Node, cta: int) -> Graph:
     last = Literal(steps - 1, "int")
     carried = f"{state}__across"
 
-    def at(position: int | None, expr) -> tuple:
-        return tuple(expr if index == position else coordinate for index, coordinate in enumerate(own))
+    def at(position: int | None, expression) -> tuple:
+        return tuple(expression if index == position else coordinate for index, coordinate in enumerate(own))
 
     def applied(along) -> tuple:
         # ``A_p`` at this cell's row and column ``along`` times the state at column ``along``.
         return (
-            Load(name="_one_walk", input=probe_states, index=(Literal(1, "int"), Var(part.name), last, *at(view.kept, along))),
-            Load(name="_zero_walk", input=probe_states, index=(Literal(0, "int"), Var(part.name), last, *at(view.kept, along))),
+            Load(names=("_one_walk",), input=probe_states, index=(Literal(1, "int"), Var(part.name), last, *at(view.kept, along))),
+            Load(names=("_zero_walk",), input=probe_states, index=(Literal(0, "int"), Var(part.name), last, *at(view.kept, along))),
             Assign(name="_a", op="subtract", args=("_one_walk", "_zero_walk")),
             Pre(name="_s", carrier=carried, index=at(view.mixed, along)),
             Assign(name="_as", op="multiply", args=("_a", "_s")),
@@ -516,11 +516,11 @@ def realize_carry_split(match: Match, root: Node, cta: int) -> Graph:
         Body(
             (
                 *mapped,
-                Load(name="_b", input=probe_states, index=(Literal(0, "int"), Var(part.name), last, *own)),
+                Load(names=("_b",), input=probe_states, index=(Literal(0, "int"), Var(part.name), last, *own)),
                 Pre(name="_from", carrier=carried, index=own),
                 Assign(name="_next", op="add", args=(product, "_b")),
                 Carry(name=carried, value="_next", index=own, seed=node.init[0]),
-                Write(output=starts, index=(Var(part.name), *own), value="_from"),
+                Write(output=starts, index=(Var(part.name), *own), values=("_from",)),
             )
         ),
         (part, *cell_axes),
@@ -926,7 +926,7 @@ def realize_split(match: Match, root: Node, cta: int, finalize: str) -> Graph:
     # saturate outlier partials to ±inf before the combine and costs the mantissa of every
     # partition sum).
     def output_stride(axis):
-        steps = (gmem_axis_step(Load("", store.write.output, store.write.index), axis.name, tile.outputs) for store in stores)
+        steps = (gmem_axis_step(Load(("",), store.write.output, store.write.index), axis.name, tile.outputs) for store in stores)
         return min((abs(step[0]) for step in steps if step is not None and step[0]), default=float("inf"))
 
     # Preserve the output's contiguous axes across the split. Free-axis order is a traversal
@@ -944,7 +944,7 @@ def realize_split(match: Match, root: Node, cta: int, finalize: str) -> Graph:
     # --- partial kernel: reduce a CTA's slice, write its carrier state to the workspace. The
     # split axis joins as a lead grid axis via the partial tile's OWN placement — the view derives
     # lead axes from the placement, so nothing is restamped on the node.
-    ws_stores = tuple(OutputSpec(write=Write(output=ws_name, index=ws_index(i), value=states[i])) for i in range(n_comp))
+    ws_stores = tuple(OutputSpec(write=Write(output=ws_name, index=ws_index(i), values=(states[i],))) for i in range(n_comp))
     # The partial and the finalize keep the name of the kernel they split, so a kernel pin naming a
     # piece (``place_<token>_1``) still names both halves of its split; an unnamed kernel (a route's
     # uncut root) keeps launching under its graph node's id, which a ``node_`` pin names.
@@ -959,14 +959,14 @@ def realize_split(match: Match, root: Node, cta: int, finalize: str) -> Graph:
     # finalize too and its workspace collides with the partial's (``<out>__partial`` exists).
     fin_axis = replace(split, window=Window(parent=split, partition=True))
     other = tuple(f"{nm}__p" for nm in states)
-    loads = tuple(Load(name=other[i], input=ws_name, index=ws_index(i)) for i in range(n_comp))
+    loads = tuple(Load(names=(other[i],), input=ws_name, index=ws_index(i)) for i in range(n_comp))
     fin_fold = _state_fold(fin_axis, partial_fold, loads)
     fin_stores = stores
     if not fin_stores:
         # A bare carrier's grid-cell store is materializer glue; the finalize spells it over the
         # value the region exposes, or the carrier's primary state.
         out_val = region.exposes[0] if region.exposes else states[0]
-        fin_stores = (OutputSpec(write=Write(output=out.name, index=cell, value=out_val)),)
+        fin_stores = (OutputSpec(write=Write(output=out.name, index=cell, values=(out_val,))),)
     # The finalize is stamped AFTER the workspace joins the fragment: it reads that buffer, and a
     # kernel's structural features fold in its operands' dtypes, which only resolve once the
     # buffer is a graph node.

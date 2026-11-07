@@ -14,7 +14,7 @@ from emmy.compiler.dim import Dim
 from emmy.compiler.dtype import BF16, F16, F32, F64
 from emmy.compiler.graph import Graph, Tensor
 from emmy.compiler.ir.base import ConstantOp, InputOp
-from emmy.compiler.ir.expr import Literal, placeholder
+from emmy.compiler.ir.expression import Literal, placeholder
 from emmy.compiler.ir.frontend.ir import (
     CatOp,
     LayerNormOp,
@@ -832,9 +832,9 @@ def test_slice_negative_start_normalizes_symbolic():
 
     rewritten = _apply(g, "140_slice.py")
     (imap,) = [n.op for n in rewritten.nodes.values() if isinstance(n.op, IndexMapOp)]
-    offset_expr = imap.sources[0].coord_map[1]
-    assert "s" in offset_expr.free_vars(), f"symbolic extent must appear in the offset: {offset_expr!r}"
-    assert offset_expr == placeholder(1) + (Dim("s") + (-1)).expr
+    offset_expression = imap.sources[0].coord_map[1]
+    assert "s" in offset_expression.free_vars(), f"symbolic extent must appear in the offset: {offset_expression!r}"
+    assert offset_expression == placeholder(1) + (Dim("s") + (-1)).expression
 
 
 # ===================================================================

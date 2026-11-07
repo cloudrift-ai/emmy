@@ -13,7 +13,7 @@ Distinct from :mod:`emmy.compiler.target`, which represents the
 
 The CUDA backend uses :class:`CudaRenderTarget`; the float32-reference
 Loop runner uses :class:`LoopRenderTarget`. Add one implementation per
-backend that shares the Stmt renderer.
+backend that shares the Statement renderer.
 """
 
 from __future__ import annotations

@@ -18,7 +18,7 @@ from emmy.compiler.dtype import get as resolve_dtype
 from emmy.compiler.graph import Graph, Tensor
 from emmy.compiler.ir.base import ConstantOp, InputOp
 from emmy.compiler.ir.elementwise import ElementwiseImpl, is_elementwise
-from emmy.compiler.ir.expr import BinaryExpr, Literal, TernaryExpr, placeholder
+from emmy.compiler.ir.expression import BinaryExpr, Literal, TernaryExpr, placeholder
 from emmy.compiler.ir.frontend.ir import (
     CatOp,
     Conv1dOp,
@@ -308,7 +308,7 @@ def _sym_rename_map(exported, dynamic_shapes: dict) -> dict[str, str]:
             if axis >= len(val.shape):
                 continue
             sym_int = val.shape[axis]
-            # ``SymInt`` carries the symbol via ``.node.expr`` (sympy
+            # ``SymInt`` carries the symbol via ``.node.expression`` (sympy
             # ``Symbol``); ``str(symbol)`` is the internal name like ``s0``.
             sym_name = _symint_name(sym_int)
             if sym_name is None:
@@ -325,10 +325,10 @@ def _symint_name(value) -> str | None:
     node = getattr(value, "node", None)
     if node is None:
         return None
-    expr = getattr(node, "expr", None) or node
+    expression = getattr(node, "expression", None) or node
     # Sympy Symbols stringify to their name (``s0``); compound expressions
     # would stringify to e.g. ``2*s0`` — we only support plain symbols today.
-    return str(expr)
+    return str(expression)
 
 
 def _wrap_shape(raw_shape, sym_rename: dict[str, str] | None = None):
@@ -1458,7 +1458,7 @@ def _handle_call_function(g: Graph, fx_node: Any, node_map: dict[str, NodeRef], 
         for offset in range(len(raw_pad) // 2):
             axis = len(input_shape) - offset - 1
             coords[axis] = coords[axis] - Literal(raw_pad[2 * offset], "int")
-            inside = BinaryExpr("&&", BinaryExpr(">=", coords[axis], Literal(0, "int")), coords[axis].lt(input_shape[axis].expr))
+            inside = BinaryExpr("&&", BinaryExpr(">=", coords[axis], Literal(0, "int")), coords[axis].lt(input_shape[axis].expression))
             valid = BinaryExpr("&&", valid, inside)
         zero = g.add_node(ConstantOp(name=f"{name}_zero", value=0), [], Tensor(f"{name}_zero", (1,), dtype), node_id=f"{name}_zero")
         sources = (IndexSource(input_idx=1, coord_map=(Literal(0, "int"),)),)

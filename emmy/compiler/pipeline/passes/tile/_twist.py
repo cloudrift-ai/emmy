@@ -9,10 +9,10 @@ from __future__ import annotations
 import logging
 from dataclasses import replace
 
-from emmy.compiler.ir.expr import Literal
+from emmy.compiler.ir.expression import Literal
 from emmy.compiler.ir.pure import Fold, Lambda
 from emmy.compiler.ir.pure.twist import RECIPES
-from emmy.compiler.ir.stmt import Affine, Assign, Body, Let, Load, Stmt
+from emmy.compiler.ir.stmt import Affine, Assign, Body, Let, Load, Statement
 from emmy.compiler.pipeline.passes.tile._fromloop import product_spine
 
 logger = logging.getLogger(__name__)
@@ -135,7 +135,7 @@ def _hoist_invariant(fold: Fold) -> tuple[Fold, Fold] | None:
         results=(value,),
     )
     inner = replace(fold, operands=operands, lift=lift, base=fold.base.rename({state: inner_state}))
-    epilogue: list[Stmt] = [*factors]  # the literal factors, bound where the epilogue reads them
+    epilogue: list[Statement] = [*factors]  # the literal factors, bound where the epilogue reads them
     current = inner_state
     for index, leaf in enumerate(invariant):
         name = state if index == len(invariant) - 1 else f"{state}__c{index}"

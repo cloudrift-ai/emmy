@@ -20,11 +20,11 @@ from __future__ import annotations
 from dataclasses import replace
 
 from emmy.compiler.graph import Node
-from emmy.compiler.ir.expr import BinaryExpr, Interval, Literal, SimplifyCtx
+from emmy.compiler.ir.expression import BinaryExpr, Interval, Literal, SimplifyCtx
 from emmy.compiler.ir.kernel import KernelOp
 from emmy.compiler.ir.kernel.ir import Tile
 from emmy.compiler.ir.sigma import Sigma
-from emmy.compiler.ir.stmt import Accum, Assign, Body, Init, Let, Load, Select, Stmt, StridedLoop, Write
+from emmy.compiler.ir.stmt import Accum, Assign, Body, Init, Let, Load, Select, Statement, StridedLoop, Write
 from emmy.compiler.pipeline import Pattern, RuleSkipped
 
 PATTERN = [Pattern("root", KernelOp)]
@@ -45,7 +45,7 @@ def rewrite(root: Node) -> KernelOp:
 
 
 def _walk(body: Body, written: frozenset[str], ctx: SimplifyCtx) -> Body:
-    stmts: list[Stmt] = []
+    stmts: list[Statement] = []
     for stmt in body:
         inner = ctx
         if isinstance(stmt, Tile):
@@ -56,7 +56,7 @@ def _walk(body: Body, written: frozenset[str], ctx: SimplifyCtx) -> Body:
         if nested:
             stmt = stmt.with_bodies(tuple(_walk(b, written, inner) for b in nested))
         stmts.append(stmt)
-    unrolled: list[Stmt] = []
+    unrolled: list[Statement] = []
     loops = 0
     for stmt in stmts:
         trips = _trips(stmt, ctx)
@@ -76,7 +76,7 @@ def _walk(body: Body, written: frozenset[str], ctx: SimplifyCtx) -> Body:
     return Body(tuple(_reuse(unrolled, written, ctx)))
 
 
-def _trips(stmt: Stmt, ctx: SimplifyCtx) -> int | None:
+def _trips(stmt: Statement, ctx: SimplifyCtx) -> int | None:
     """How many trips a short lane loop takes, or ``None`` when it is not one this pass unrolls."""
     if not isinstance(stmt, StridedLoop) or stmt.end is not None or not stmt.axis.extent.is_static:
         return None
@@ -94,9 +94,9 @@ def _trips(stmt: Stmt, ctx: SimplifyCtx) -> int | None:
     return extent // step
 
 
-def _unroll(loop: StridedLoop, trips: int, tag: str) -> list[Stmt]:
+def _unroll(loop: StridedLoop, trips: int, tag: str) -> list[Statement]:
     carried = {s.name for s in loop.body if isinstance(s, Accum)}
-    out: list[Stmt] = []
+    out: list[Statement] = []
     if loop.seed:
         seen: set[str] = set()
         for s in loop.body:
@@ -113,12 +113,12 @@ def _unroll(loop: StridedLoop, trips: int, tag: str) -> list[Stmt]:
     return out
 
 
-def _reuse(stmts: list[Stmt], written: frozenset[str], ctx: SimplifyCtx) -> list[Stmt]:
+def _reuse(stmts: list[Statement], written: frozenset[str], ctx: SimplifyCtx) -> list[Statement]:
     """Drop every scalar load of a read-only buffer an earlier load of this body already read,
     renaming its uses to the earlier value."""
     seen: dict[tuple, str] = {}
     rename: dict[str, str] = {}
-    out: list[Stmt] = []
+    out: list[Statement] = []
     for stmt in stmts:
         if rename:
             # A name the statement defines, itself or anywhere in a nested body (a staging loop unrolled
@@ -138,14 +138,14 @@ def _reuse(stmts: list[Stmt], written: frozenset[str], ctx: SimplifyCtx) -> list
     return out
 
 
-def _canonical(expr):
+def _canonical(expression):
     """A comparison key for an index: its affine form over its free variables when it has one."""
-    from emmy.compiler.ir.expr import affine_form  # noqa: PLC0415
+    from emmy.compiler.ir.expression import affine_form  # noqa: PLC0415
 
-    names = expr.free_vars()
-    form = affine_form(expr, names) if names else None
+    names = expression.free_vars()
+    form = affine_form(expression, names) if names else None
     if form is None:
-        return expr.pretty()
+        return str(expression)
     anchor, coeffs = form
     anchor = anchor.simplify(SimplifyCtx.empty())
-    return (anchor.pretty(), tuple(sorted((name, c) for name, c in coeffs.items() if c)))
+    return (str(anchor), tuple(sorted((name, c) for name, c in coeffs.items() if c)))

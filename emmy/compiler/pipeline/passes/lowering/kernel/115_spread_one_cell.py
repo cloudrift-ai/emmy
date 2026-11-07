@@ -18,10 +18,10 @@ from __future__ import annotations
 from dataclasses import replace
 
 from emmy.compiler.graph import Node
-from emmy.compiler.ir.expr import Var
+from emmy.compiler.ir.expression import Var
 from emmy.compiler.ir.kernel import KernelOp, Tile
 from emmy.compiler.ir.kernel.ir import Sync
-from emmy.compiler.ir.stmt import Body, Load, Loop, Stmt, StridedLoop, Write
+from emmy.compiler.ir.stmt import Body, Load, Loop, Statement, StridedLoop, Write
 from emmy.compiler.pipeline import Pattern, RuleSkipped
 
 PATTERN = [Pattern("root", KernelOp)]
@@ -35,7 +35,7 @@ def rewrite(root: Node) -> KernelOp:
     (tile,) = tiles
     if not any(isinstance(stmt, Loop) and not stmt.is_reduce for stmt in tile.body):
         raise RuleSkipped("no free loop to spread")
-    body: list[Stmt] = []
+    body: list[Statement] = []
     written: set[str] = set()
     for stmt in tile.body:
         if written & _reads(stmt):
@@ -50,15 +50,15 @@ def rewrite(root: Node) -> KernelOp:
     return replace(op, body=Body(tuple(spread if stmt is tile else stmt for stmt in op.body)))
 
 
-def _reads(stmt: Stmt) -> set[str]:
+def _reads(stmt: Statement) -> set[str]:
     return {s.input for s in _walk(stmt) if isinstance(s, Load)}
 
 
-def _writes(stmt: Stmt) -> set[str]:
+def _writes(stmt: Statement) -> set[str]:
     return {s.output for s in _walk(stmt) if isinstance(s, Write)}
 
 
-def _walk(stmt: Stmt):
+def _walk(stmt: Statement):
     yield stmt
     for body in stmt.nested():
         for child in body:

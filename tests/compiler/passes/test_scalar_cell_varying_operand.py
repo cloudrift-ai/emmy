@@ -16,10 +16,9 @@ The emission is exercised the way ``_factor._bind``'s output-tiled arm makes it 
 from __future__ import annotations
 
 from emmy.compiler.ir.axis import Axis
-from emmy.compiler.ir.expr import Var
 from emmy.compiler.ir.pure.fold import Fold
 from emmy.compiler.ir.schedule import Tile
-from emmy.compiler.ir.stmt import Assign, Body, Load, Stmt, Write
+from emmy.compiler.ir.stmt import Assign, Body, Load, Statement, parse_body
 from emmy.compiler.pipeline.passes.lowering.kernel._atom import reduce_codegen, store_sink
 from emmy.compiler.pipeline.passes.lowering.kernel._tiling import atomize, grid_tile, register_tile, unit_tile
 from tests.compiler.terms import contraction, projection
@@ -30,21 +29,21 @@ _PLAN = Tile(units=(2, 2), regs=(2, 2))  # a scalar 2×2 thread tile of 2×2 reg
 
 def _a_load() -> Load:
     """The ordinary A edge — indexed by its own ``(m, k)``, so it is shared down the register row."""
-    return Load(name="a", input="A", index=(Var("m"), Var("k")))
+    [load] = parse_body("a = load A[m, k]")
+    return load
 
 
 def _b_load() -> Load:
     """The ordinary B edge, ``k``-major — a ``k``-last slab beside a computed edge would be read as
     the pair's A by formation, and these pin what the A side of the tile does with a computed A."""
-    return Load(name="b", input="B", index=(Var("k"), Var("n")))
+    [load] = parse_body("b = load B[k, n]")
+    return load
 
 
-def _cone(name: str, buf: str, index: tuple) -> Fold:
+def _cone(name: str, buf: str, index: str) -> Fold:
     """A computed operand edge (an inline producer cone) whose load carries ``index`` — the o_proj
     shape's broadcast A when ``index`` mentions n."""
-    return projection(
-        (), (Load(name=f"{name}_l", input=buf, index=index), Assign(name=name, op="multiply", args=(f"{name}_l", f"{name}_l")))
-    )
+    return projection((), parse_body(f"{name}_l = load {buf}[{index}]\n{name} = multiply({name}_l, {name}_l)"))
 
 
 def _tile(a, b, *channels):
@@ -53,7 +52,7 @@ def _tile(a, b, *channels):
     plan = _PLAN.at(_M, _N)
     mn = plan.mn
     state, reduce_region = reduce_codegen(c, plan, k_axis=_K, axes=(_M, _N, _K))
-    epilogue = Body(tuple(Write(output=f"out{i}", index=(Var("m"), Var("n")), value=acc) for i, acc in enumerate(c.combine.results)))
+    epilogue = parse_body("\n".join(f"out{i}[m, n] = {acc}" for i, acc in enumerate(c.combine.results)))
     return grid_tile(
         unit_tile(register_tile(atomize(plan.atom.shape[:2]), mn), mn),
         mn=mn,
@@ -69,16 +68,16 @@ def _unbound(tile) -> set[str]:
     """The names the tile body reads without defining them or binding them as an axis. Anything left
     is an identifier the rendered kernel would not define."""
     body = Body(tile.body)
-    reads = {v for s in body.iter() for v in (*s.deps(), *(fv for e in s.exprs() for fv in e.free_vars()))}
+    reads = {v for s in body.iter() for v in (*s.deps(), *(fv for e in s.expressions() for fv in e.free_vars()))}
     defined = {n for s in body.iter() for n in s.defines()}
     return reads - defined - set(body.axis_names) - {a.name for a in tile.axes}
 
 
-def _loads_of(tile, buf: str) -> tuple[Stmt, ...]:
+def _loads_of(tile, buf: str) -> tuple[Statement, ...]:
     return tuple(s for s in Body(tile.body).loads if s.input == buf)
 
 
-def _muls(tile) -> list[Stmt]:
+def _muls(tile) -> list[Statement]:
     return [s for s in Body(tile.body).iter() if isinstance(s, Assign) and s.name.startswith("acc__v")]
 
 
@@ -95,7 +94,7 @@ def _cells(mn) -> list[tuple[int, int]]:
 def test_a_operand_varying_along_n_is_read_per_cell() -> None:
     """The reproducer. A's cone reads n, so each register cell gets its own copy, σ-bound to BOTH
     coordinates — no axis name survives free, and each cell's multiply reads its own value."""
-    tile, mn = _tile(_cone("a", "A", (Var("m"), Var("k"), Var("n"))), _b_load())
+    tile, mn = _tile(_cone("a", "A", "m, k, n"), _b_load())
     assert _unbound(tile) == set()
     assert len(_loads_of(tile, "A")) == len(_cells(mn))
     assert _factors(tile) == {frozenset((f"a__ar{i}_{j}", f"b__bc{j}")) for i, j in _cells(mn)}
@@ -104,7 +103,7 @@ def test_a_operand_varying_along_n_is_read_per_cell() -> None:
 def test_b_operand_varying_along_m_is_read_per_cell() -> None:
     """The mirror hazard on the B side — a computed B whose cone reads m cannot be shared across the
     column either."""
-    tile, mn = _tile(_a_load(), _cone("b", "B", (Var("n"), Var("k"), Var("m"))))
+    tile, mn = _tile(_a_load(), _cone("b", "B", "n, k, m"))
     assert _unbound(tile) == set()
     assert len(_loads_of(tile, "B")) == len(_cells(mn))
     assert _factors(tile) == {frozenset((f"a__ar{i}", f"b__bc{i}_{j}")) for i, j in _cells(mn)}
@@ -113,7 +112,7 @@ def test_b_operand_varying_along_m_is_read_per_cell() -> None:
 def test_computed_a_shared_along_n_is_read_once_per_register_row() -> None:
     """The f32 fallback's useful case: A is computed but independent of n, so the scalar tile
     evaluates it once per register row and every column contracts with that same value."""
-    tile, mn = _tile(_cone("a", "A", (Var("m"), Var("k"))), _b_load())
+    tile, mn = _tile(_cone("a", "A", "m, k"), _b_load())
     assert _unbound(tile) == set()
     assert len(_loads_of(tile, "A")) == mn[0].reg
     assert _factors(tile) == {frozenset((f"a__ar{i}", f"b__bc{j}")) for i, j in _cells(mn)}
@@ -130,7 +129,7 @@ def test_materialized_operands_keep_the_row_and_column_reuse() -> None:
 
 
 def test_two_product_channels_reuse_a_rows_and_b_columns() -> None:
-    tile, mn = _tile(_a_load(), _b_load(), (_cone("b2", "B2", (Var("n"), Var("k"))), "acc2"))
+    tile, mn = _tile(_a_load(), _b_load(), (_cone("b2", "B2", "n, k"), "acc2"))
     assert _unbound(tile) == set()
     assert len(_loads_of(tile, "A")) == mn[0].reg
     assert len(_loads_of(tile, "B")) == len(_loads_of(tile, "B2")) == mn[1].reg
@@ -144,7 +143,7 @@ def test_a_cell_varying_operand_cannot_share_a_staged_slab() -> None:
     from emmy.compiler.ir.schedule.staging import resolve_scalar_stage  # noqa: PLC0415
     from emmy.compiler.tensor import Tensor  # noqa: PLC0415
 
-    a = _cone("a", "A", (Var("m"), Var("k"), Var("n")))
+    a = _cone("a", "A", "m, k, n")
     c = contraction(_K, a, (_b_load(), "acc"))
     inputs = {"A": Tensor("A", (8, 4, 8), dtype=F32), "B": Tensor("B", (4, 8), dtype=F32)}
     assert resolve_scalar_stage(c, _PLAN.at(_M, _N), Stage(depth=1, transport="smem"), inputs, 48 * 1024, _K) is None

@@ -8,7 +8,7 @@ consumer without rescheduling across the block.
 
 This pass approximates that pattern via a peephole "sink each Load to just
 before its first consumer" reorder on every body that holds a Load + Assign
-cluster. ``Stmt.defines`` / ``Stmt.deps`` carry the SSA dependency
+cluster. ``Statement.defines`` / ``Statement.deps`` carry the SSA dependency
 information; we walk forward, identify each Load's first consumer position,
 and re-emit:
 
@@ -37,7 +37,7 @@ from dataclasses import replace
 
 from emmy.compiler.graph import Node
 from emmy.compiler.ir.kernel import KernelOp
-from emmy.compiler.ir.stmt import Assign, Body, Cond, Load, Stmt
+from emmy.compiler.ir.stmt import Assign, Body, Cond, Load, Statement
 from emmy.compiler.pipeline import Pattern, RuleSkipped
 from emmy.compiler.pipeline.search.space import INTERLEAVE_LOADS
 
@@ -64,7 +64,7 @@ def _walk(body: Body) -> tuple[Body, bool]:
     """Recurse into block stmts' nested bodies first, then check
     whether this body has a Load + Assign cluster of its own — if so,
     apply the sink-loads peephole."""
-    new_stmts: list[Stmt] = []
+    new_stmts: list[Statement] = []
     nested_changed = False
     for s in body:
         nested = s.nested()
@@ -149,7 +149,7 @@ def _sink_loads(body: Body) -> Body:
         return _sink_loads(Body(stmts))
 
     emitted: set[int] = set()
-    out: list[Stmt] = []
+    out: list[Statement] = []
 
     # Loads with no consumer in this body stay at the top (consumed by
     # a sibling / outer scope; sinking them would cross boundaries).
@@ -184,7 +184,7 @@ def _sink_loads(body: Body) -> Body:
     return Body(tuple(out))
 
 
-def _nested_deps(stmt: Stmt) -> frozenset[str]:
+def _nested_deps(stmt: Statement) -> frozenset[str]:
     """Return SSA dependencies used anywhere in ``stmt``'s lexical subtree."""
     deps = set(stmt.deps())
     for nested in stmt.nested():

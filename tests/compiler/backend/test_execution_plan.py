@@ -29,7 +29,7 @@ from emmy.compiler.backend.plan import (
 from emmy.compiler.graph import Graph, Tensor
 from emmy.compiler.ir.base import ConstantOp, InputOp
 from emmy.compiler.ir.cuda import CudaOp, TmaDescMeta
-from emmy.compiler.ir.expr import BinaryExpr, Literal, Var
+from emmy.compiler.ir.expression import BinaryExpr, Literal, Var
 from emmy.compiler.ir.frontend.ir import ReshapeOp, TransposeOp
 from emmy.compiler.ir.tensor.ir import ElementwiseOp
 from emmy.compiler.loader.binder import apply_load_ops
@@ -202,11 +202,11 @@ def test_plan_format_version_gate():
         plan_from_dict(d)
 
 
-def test_grid_expr_survives_round_trip():
+def test_grid_expression_survives_round_trip():
     plan = plan_from_graph(_sample_graph())
     restored = plan_from_dict(json.loads(json.dumps(plan_to_dict(plan))))
     (launch,) = restored.launches
-    # The composite ceil-div factor must come back as a real Expr (evaluable), not a string.
+    # The composite ceil-div factor must come back as a real Expression (evaluable), not a string.
     (factor,) = launch.grid[0]
     assert factor.eval({"seq_len": 33}) == 3
     assert launch.grid[1] == ("seq_len", 2)
@@ -318,7 +318,7 @@ def test_reciprocal_load_op_rebinds_after_plan_json_round_trip():
 
 def _slice_index_map(out_shape, spans):
     """A single-source ``IndexMapOp`` reading ``spans`` (per-axis ``(start, step)``)."""
-    from emmy.compiler.ir.expr import BinaryExpr, Literal, Var
+    from emmy.compiler.ir.expression import BinaryExpr, Literal, Var
     from emmy.compiler.ir.tensor.ir import IndexMapOp, IndexSource
 
     coords = tuple(
@@ -343,7 +343,7 @@ def test_slice_index_map_encodes_and_matches_the_binder(shape, spans):
 def test_non_affine_index_map_stays_outside_the_vocabulary():
     """A transposing index map is NOT a slice — it must encode as ``None`` rather than as a
     silently wrong per-axis read."""
-    from emmy.compiler.ir.expr import Var
+    from emmy.compiler.ir.expression import Var
     from emmy.compiler.ir.tensor.ir import IndexMapOp, IndexSource
 
     swap = IndexMapOp(out_shape=(3, 2), sources=(IndexSource(input_idx=0, coord_map=(Var("out_coord_1"), Var("out_coord_0"))),))

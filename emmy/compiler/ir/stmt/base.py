@@ -1,4 +1,4 @@
-"""``Stmt``, the abstract base of every IR body statement, and the dtype rule its kinds share.
+"""``Statement``, the abstract base of every IR body statement, and the dtype rule its kinds share.
 
 Concrete kinds live in ``leaves`` (pure compute) and ``blocks`` (control flow); ``Body`` and the body-level
 normalization live in ``body`` and ``normalize``.
@@ -13,16 +13,12 @@ from typing import TYPE_CHECKING
 
 from emmy.compiler.dtype import INTEGER_NAMES
 from emmy.compiler.ir.axis import Axis
-from emmy.compiler.ir.expr import Expr
+from emmy.compiler.ir.expression import Expression
 from emmy.compiler.ir.sigma import Sigma
 from emmy.compiler.structural import Structural
-from emmy.compiler.wire import Wire
 
 if TYPE_CHECKING:
     from emmy.compiler.ir.stmt.body import Body
-
-
-INDENT = "    "
 
 
 _INTEGER_ELEMENTWISE_OPS = frozenset(
@@ -74,14 +70,8 @@ def dtype_promote(op_name: str, arg_dtypes: list[str]) -> str:
     return "f32"
 
 
-def spell_literal(value: float) -> str:
-    """The one spelling of a literal: an integer without a point, anything else as Python repr."""
-    value = float(value)
-    return str(int(value)) if value.is_integer() and abs(value) < 2**53 else repr(value)
-
-
 def _identity_rename(name: str) -> str:
-    """Default SSA rename — :meth:`Stmt.substitute` renames nothing."""
+    """Default SSA rename — :meth:`Statement.substitute` renames nothing."""
     return name
 
 
@@ -91,20 +81,22 @@ def _axis_identity(a: Axis) -> Axis:
 
 
 # ---------------------------------------------------------------------------
-# Stmt — abstract base
+# Statement — abstract base
 # ---------------------------------------------------------------------------
 
 
-class Stmt(Wire):
+class Statement:
     """Base class for IR body statements.
 
-    Every concrete Stmt implements:
+    Every concrete Statement implements:
 
     - ``deps()`` — SSA names this stmt reads.
     - ``rewrite(rename_ssa, sigma)`` — return a copy with SSA names mapped
-      through ``rename_ssa`` and Expr subterms σ-substituted.
+      through ``rename_ssa`` and Expression subterms σ-substituted.
     - ``nested()`` — child statement bodies for tree traversal (default:
       no children; block-structured stmts override).
+
+    ``str(stmt)`` is its text. A kind outside the statement module says its own lines in ``pretty(indent)``.
     """
 
     # Held, not inherited: a ``Protocol`` base brings a metaclass that makes every ``isinstance`` on a kind run
@@ -115,16 +107,14 @@ class Stmt(Wire):
     # ``Lambda`` body (the λ-foldMap term vocabulary). Declared on the interface with a
     # CONSERVATIVE ``False`` default and per-class opt-in (no isinstance whitelist): ``Load`` /
     # ``Assign`` declare pure; the effectful / scope-bound kinds (``Accum``, ``Write``, ``Init``,
-    # ``Loop``…) never do; the structural nodes (``Fold`` / zero-axis ``Fold``) declare pure — a term is a
-    # value, its internals are its own. A NEW stmt kind is excluded from lambdas until it
-    # declares itself. ``Lambda.__post_init__`` is the enforcing formation gate.
+    # ``Loop``…) never do. A NEW stmt kind is excluded from lambdas until it declares itself.
+    # ``Lambda.__post_init__`` is the enforcing formation gate.
     pure: bool = False
 
     # Rolled-deps trait — True iff :meth:`deps` already reports the ENTIRE subtree's reads,
     # scope-correctly (every nested lambda's params subtracted). A read walk then takes ``deps()``
     # and must not re-walk ``nested()``: the flat re-walk cannot see an inner lambda's params, so
-    # a factored operand cone's result read inside the lift leaks out as a phantom capture.
-    # Conservative default; ``Fold`` (the memoized scoped rollup) opts in.
+    # a subroutine's own params leak out as phantom captures. Conservative default; ``Call`` opts in.
     deps_deep: bool = False
 
     def deps(self) -> tuple[str, ...]:
@@ -165,7 +155,7 @@ class Stmt(Wire):
         about the surrounding declarations."""
         return ()
 
-    def rename_buffers(self, rename) -> Stmt:  # noqa: ANN001 — any str->str mapping
+    def rename_buffers(self, rename) -> Statement:  # noqa: ANN001 — any str->str mapping
         """This stmt with every external-buffer field renamed through ``rename`` (a
         ``str -> str`` mapping; absent names keep). Default: identity — the counterpart of
         :meth:`external_reads` / :meth:`external_writes`, overridden by exactly the leaves that
@@ -197,7 +187,7 @@ class Stmt(Wire):
         buffers — materialized into an ``Smem`` later)."""
         return ()
 
-    def rename(self, names) -> Stmt:
+    def rename(self, names) -> Statement:
         """α-RENAME this subtree — binders and uses, SSA names and axis names, through one map.
 
         Capture-free by construction: a binder renamed is renamed everywhere it scopes, so the
@@ -213,8 +203,8 @@ class Stmt(Wire):
         def rename_name(name: str) -> str:
             return lookup(name, name) if lookup is not None else names(name)
 
-        def rename_expr(expr: Expr | None) -> Expr | None:
-            return None if expr is None else expr.rename(rename_name)
+        def rename_expression(expression: Expression | None) -> Expression | None:
+            return None if expression is None else expression.rename(rename_name)
 
         def rename_axis_tree(axis: Axis, seen: frozenset[int]) -> Axis:
             window = axis.window
@@ -229,14 +219,14 @@ class Stmt(Wire):
                 window = replace(
                     window,
                     parent=parent,
-                    base=rename_expr(window.base),
-                    bound=rename_expr(window.bound),
+                    base=rename_expression(window.base),
+                    bound=rename_expression(window.bound),
                 )
             return replace(axis, name=rename_name(axis.name), window=window)
 
         return self.rewrite(rename_name, Sigma.IDENTITY, lambda axis: rename_axis_tree(axis, frozenset()))
 
-    def substitute(self, coords: Sigma) -> Stmt:
+    def substitute(self, coords: Sigma) -> Statement:
         """β-SUBSTITUTE free coordinates by expressions — the split's reindex, the per-cell fill.
 
         Stops at a scope that re-binds a substituted name: that binder introduces a DIFFERENT
@@ -250,9 +240,9 @@ class Stmt(Wire):
         rename_ssa: Callable[[str], str],
         sigma: Sigma = Sigma.IDENTITY,
         axis_fn: Callable[[Axis], Axis] = _axis_identity,
-    ) -> Stmt:
+    ) -> Statement:
         """Rename, σ-substitute and axis-map this subtree: every SSA name (binding and reads) through
-        ``rename_ssa``, every Expr subterm through ``sigma``, every loop axis through ``axis_fn``. Prefer
+        ``rename_ssa``, every Expression subterm through ``sigma``, every loop axis through ``axis_fn``. Prefer
         :meth:`rename` / :meth:`substitute`, which say which of the two operations a caller means.
 
         σ is applied HYGIENICALLY: the mapping for a name this stmt binds is dropped before its
@@ -303,7 +293,7 @@ class Stmt(Wire):
         ``has_side_effects`` on the wrapper."""
         return any(c.has_side_effects for sub in self.nested() for c in sub)
 
-    def with_bodies(self, bodies: tuple[Body, ...]) -> Stmt:
+    def with_bodies(self, bodies: tuple[Body, ...]) -> Statement:
         """Write-side counterpart to :meth:`nested`. Return a copy of this
         stmt with its child bodies replaced by ``bodies`` (positionally
         matching :meth:`nested`'s order).
@@ -316,61 +306,50 @@ class Stmt(Wire):
         assert not bodies, f"{type(self).__name__}.with_bodies: leaf stmt got {len(bodies)} bodies"
         return self
 
-    def binds_axes(self) -> frozenset[str]:
-        """Axes this stmt introduces into scope for its nested bodies.
+    def bound_axes(self) -> tuple[Axis, ...]:
+        """The axes this stmt binds for its nested bodies, in field order. Default: ``()``."""
+        return ()
 
-        Default: ``frozenset()`` (no axis binding). ``Loop`` / ``StridedLoop``
-        return ``{self.axis.name}``; ``Tile`` returns the axis names of every
-        ``BoundAxis``; ``Cond`` keeps the default. Used by ``Body.fold``
-        to thread the bound-axis set through the def-use walk without an
-        isinstance ladder over the block-stmt set.
+    def binds_axes(self) -> frozenset[str]:
+        """The names this stmt introduces into scope for its nested bodies: the names of :meth:`bound_axes`, and any
+        other name the kind hoists (a ``StridedLoop``'s ``<axis>_end``).
+
+        Default: ``frozenset()`` (no axis binding). Used by ``Body.fold`` to thread the bound-axis set through the
+        def-use walk without an isinstance ladder over the block-stmt set.
         """
         return frozenset()
 
-    def exprs(self) -> Iterable[Expr]:
-        """Direct Expr fields of this stmt (non-recursive into nested bodies).
+    def expressions(self) -> Iterable[Expression]:
+        """Direct Expression fields of this stmt (non-recursive into nested bodies).
 
         Default: ``()``. Concrete stmts override to surface their carried
-        Expr trees: ``Load`` / ``Write`` yield ``self.index``; ``Select``
+        Expression trees: ``Load`` / ``Write`` yield ``self.index``; ``Select``
         yields each branch's predicate; ``Cond`` yields ``self.cond``;
         ``StridedLoop`` yields ``self.start`` and ``self.step`` (when an
-        ``Expr``); Tile-IR ``Stage`` yields its source-index template.
-        ``Loop`` / ``Tile`` keep the default — their Exprs live inside
+        ``Expression``); Tile-IR ``Stage`` yields its source-index template.
+        ``Loop`` / ``Tile`` keep the default — their Expressions live inside
         their bodies, which the fold's tree traversal reaches separately.
 
         The third slice of the per-stmt analysis surface alongside
         :meth:`deps` (SSA reads) and :meth:`nested` (child bodies). The
-        fold callback uses ``exprs()`` to pull free Vars at each stmt
+        fold callback uses ``expressions()`` to pull free Vars at each stmt
         for direct axis contributions, with ``free_vars()`` filtered by
         the ``bound`` set threaded through :meth:`binds_axes`.
         """
         return ()
 
-    def replace(self, **changes) -> Stmt:  # noqa: ANN003 — field values
+    def replace(self, **changes) -> Statement:  # noqa: ANN003 — field values
         """A copy of this stmt with the named fields changed — the one way a statement is edited."""
         return replace(self, **changes)
 
-    def with_exprs(self, exprs: tuple[Expr, ...]) -> Stmt:
-        """Write-side counterpart to :meth:`exprs`: this stmt with its expressions replaced by ``exprs``,
-        positionally. A kind that reports expressions and is met by an expression map overrides it."""
-        if exprs:
-            raise NotImplementedError(f"{type(self).__name__} cannot be rebuilt from mapped expressions")
+    def map_expressions(self, fn: Callable[[Expression], Expression]) -> Statement:
+        """Write-side counterpart to :meth:`expressions`: this stmt with ``fn`` applied to each of its own expressions — an
+        index, a predicate, a stride — and not to nested bodies, which :meth:`Body.map` reaches on its own. The
+        statement itself when no expression changes. Default: no expression, so ``self``."""
         return self
 
-    def pretty(self, indent: str = "") -> list[str]:
-        """Render this stmt as a list of indented lines.
+    def __str__(self) -> str:
+        """This stmt's text (:mod:`emmy.compiler.ir.stmt.text`)."""
+        from emmy.compiler.ir.stmt.text import lines  # noqa: PLC0415 — the text module imports every kind
 
-        Block-structured stmts recurse into their bodies via
-        ``child.pretty(indent + INDENT)``; leaves return a single line.
-        Subclasses override to control formatting; default surfaces the
-        class name as a placeholder for any stmt that forgot to override.
-        """
-        return [f"{indent}<unrecognized {type(self).__name__}>"]
-
-
-def pretty_body(body: Body, indent: str = "") -> list[str]:
-    """Flatten ``stmt.pretty(indent)`` over a body sequence."""
-    out: list[str] = []
-    for s in body:
-        out.extend(s.pretty(indent))
-    return out
+        return "\n".join(lines(self))

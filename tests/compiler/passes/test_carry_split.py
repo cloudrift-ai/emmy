@@ -16,14 +16,14 @@ import pytest
 
 from emmy.compiler.ir.loop import LoopOp
 from emmy.compiler.ir.loop.runner import execute_loop_op_cpp
-from emmy.compiler.ir.stmt import Assign
+from emmy.compiler.ir.stmt import Assign, parse_body
 from emmy.compiler.ir.tile import TileOp
 from emmy.compiler.ir.tile.ops import carries_partition, head
 from emmy.compiler.pipeline import CUDA_PASSES, Pipeline
 from emmy.compiler.pipeline.passes.tile._split import split_forks
 from emmy.compiler.pipeline.search.pins import pinned_knobs
 from tests.compiler.helpers import requires_cuda
-from tests.compiler.ir.test_carried_state import N, _graph, _inputs, _reference, _step, c, i, j
+from tests.compiler.ir.test_carried_state import N, _graph, _inputs, _reference, _step
 
 STEPS = 8
 
@@ -80,8 +80,8 @@ def test_the_walk_is_offered_its_split_and_declines_it_by_default() -> None:
     forks = split_forks(Match(graph=lifted, root_node_id=node.id, rule=None), node)
     assert [fork.knobs for fork in forks] == [{"REDUCE@map.1/scan": v} for v in ("", "g2k", "g4k", "g8k")]
 
-    squared = _step((c, i, j), steps=STEPS).map(
-        lambda s: Assign(name="kept", op="multiply", args=("own", "own")) if isinstance(s, Assign) and s.name == "kept" else s
+    squared = _step("c, i, j", steps=STEPS).map(
+        lambda s: parse_body("kept = multiply(own, own)") if isinstance(s, Assign) and s.name == "kept" else s
     )
     graph = _graph(steps=STEPS)
     graph.nodes["out"].op = LoopOp(body=squared)
@@ -96,15 +96,10 @@ def test_a_coefficient_that_varies_with_the_kept_cell_offers_no_split() -> None:
     to every column, so the step is not read as affine and offers nothing."""
     from emmy.compiler.graph import Graph, Tensor  # noqa: PLC0415
     from emmy.compiler.ir.base import InputOp  # noqa: PLC0415
-    from emmy.compiler.ir.stmt import Load  # noqa: PLC0415
     from emmy.compiler.pipeline import Match  # noqa: PLC0415
 
-    per_column = _step((c, i, j), steps=STEPS).map(
-        lambda s: (
-            (Load(name="dj", input="D2", index=(c, j)), Assign(name="kept", op="multiply", args=("own", "dj")))
-            if isinstance(s, Assign) and s.name == "kept"
-            else s
-        )
+    per_column = _step("c, i, j", steps=STEPS).map(
+        lambda s: parse_body("dj = load D2[c, j]\nkept = multiply(own, dj)") if isinstance(s, Assign) and s.name == "kept" else s
     )
     graph = Graph()
     for name, shape in (("D", (STEPS,)), ("W", (N, N)), ("U", (STEPS, N, N)), ("D2", (STEPS, N))):

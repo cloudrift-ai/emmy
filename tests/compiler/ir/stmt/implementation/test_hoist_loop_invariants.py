@@ -6,15 +6,18 @@ point at the pass itself rather than upstream lowering.
 
 from __future__ import annotations
 
-from emmy.compiler.ir.axis import Axis
-from emmy.compiler.ir.expr import Literal, Var
-from emmy.compiler.ir.stmt import Accum, Assign, Body, Load, Loop, StridedLoop, Write, normalize_body
+from emmy.compiler.ir.stmt import Accum, Assign, Load, Loop, StridedLoop, Write, normalize_body, parse_body
 from emmy.compiler.ir.stmt.normalize import place_values
 
 
 def test_hoists_invariant_load_above_loop() -> None:
-    a = Axis("a", 4)
-    body = (Loop(axis=a, body=(Load(name="x", input="X", index=()), Write(output="o", index=(Var("a"),), value="x"))),)
+    body = parse_body(
+        """
+        for a in 0..4:
+            x = load X[]
+            o[a] = x
+        """
+    )
 
     out = place_values(body)
 
@@ -30,23 +33,15 @@ def test_hoists_inner_loop_and_consumer_together() -> None:
     axis, and a downstream Assign consumes its Accum result. Both must move
     above the outer Loop together — hoisting only the Assign would leave it
     referencing an Accum still defined inside the outer Loop body."""
-    a = Axis("a", 4)
-    b = Axis("b", 8)
-    body = (
-        Loop(
-            axis=a,
-            body=(
-                Loop(
-                    axis=b,
-                    body=(
-                        Load(name="xb", input="X", index=(Var("b"),)),
-                        Accum(name="acc", value="xb"),
-                    ),
-                ),
-                Assign(name="v", op="exp", args=("acc",)),
-                Write(output="out", index=(Var("a"),), value="v"),
-            ),
-        ),
+    body = parse_body(
+        """
+        for a in 0..4:
+            for b in 0..8:
+                xb = load X[b]
+                acc <- add(acc, xb)
+            v = exp(acc)
+            out[a] = v
+        """
     )
 
     out = place_values(body)
@@ -62,22 +57,14 @@ def test_hoists_inner_loop_and_consumer_together() -> None:
 
 
 def test_keeps_inner_loop_when_it_references_outer_axis() -> None:
-    a = Axis("a", 4)
-    b = Axis("b", 8)
-    body = (
-        Loop(
-            axis=a,
-            body=(
-                Loop(
-                    axis=b,
-                    body=(
-                        Load(name="xab", input="X", index=(Var("a"), Var("b"))),
-                        Accum(name="acc", value="xab"),
-                    ),
-                ),
-                Write(output="out", index=(Var("a"),), value="acc"),
-            ),
-        ),
+    body = parse_body(
+        """
+        for a in 0..4:
+            for b in 0..8:
+                xab = load X[a, b]
+                acc <- add(acc, xab)
+            out[a] = acc
+        """
     )
 
     out = place_values(body)
@@ -91,14 +78,12 @@ def test_keeps_inner_loop_when_it_references_outer_axis() -> None:
 def test_hoists_invariant_load_above_strided_loop() -> None:
     """A ``StridedLoop`` is the same kind of sequential axis-binder as ``Loop``;
     hoisting partitions its body the same way."""
-    a = Axis("a", 4)
-    body = (
-        StridedLoop(
-            axis=a,
-            start=Literal(0, "int"),
-            step=Literal(1, "int"),
-            body=(Load(name="x", input="X", index=()), Write(output="o", index=(Var("a"),), value="x")),
-        ),
+    body = parse_body(
+        """
+        for a in 0..4 step 1:
+            x = load X[]
+            o[a] = x
+        """
     )
 
     out = place_values(body)
@@ -112,25 +97,15 @@ def test_hoists_invariant_load_above_strided_loop() -> None:
 
 def test_hoists_inner_strided_loop_and_consumer_together() -> None:
     """Same shape as the Loop-block test, but the inner reduce is a ``StridedLoop``."""
-    a = Axis("a", 4)
-    b = Axis("b", 8)
-    body = (
-        Loop(
-            axis=a,
-            body=(
-                StridedLoop(
-                    axis=b,
-                    start=Literal(0, "int"),
-                    step=Literal(1, "int"),
-                    body=(
-                        Load(name="xb", input="X", index=(Var("b"),)),
-                        Accum(name="acc", value="xb"),
-                    ),
-                ),
-                Assign(name="v", op="exp", args=("acc",)),
-                Write(output="out", index=(Var("a"),), value="v"),
-            ),
-        ),
+    body = parse_body(
+        """
+        for a in 0..4:
+            for b in 0..8 step 1:
+                xb = load X[b]
+                acc <- add(acc, xb)
+            v = exp(acc)
+            out[a] = v
+        """
     )
 
     out = place_values(body)
@@ -146,22 +121,14 @@ def test_hoists_inner_strided_loop_and_consumer_together() -> None:
 def test_does_not_hoist_block_containing_write() -> None:
     """Inner Loop has no axis dependency on the outer axis but contains a
     Write — hoisting would change observable side-effect count, so it stays."""
-    a = Axis("a", 4)
-    b = Axis("b", 8)
-    body = (
-        Loop(
-            axis=a,
-            body=(
-                Loop(
-                    axis=b,
-                    body=(
-                        Load(name="xb", input="X", index=(Var("b"),)),
-                        Write(output="scratch", index=(Var("b"),), value="xb"),
-                    ),
-                ),
-                Write(output="out", index=(Var("a"),), value="xb"),
-            ),
-        ),
+    body = parse_body(
+        """
+        for a in 0..4:
+            for b in 0..8:
+                xb = load X[b]
+                scratch[b] = xb
+            out[a] = xb
+        """
     )
 
     out = place_values(body)
@@ -171,13 +138,19 @@ def test_does_not_hoist_block_containing_write() -> None:
     assert any(isinstance(s, Loop) and s.axis.name == "b" for s in inner)
 
 
+def _nested(depth: int, leaf: str) -> str:
+    """``leaf`` under ``depth`` loops ``a0`` … over two."""
+    return "\n".join([*(f"{'    ' * level}for a{level} in 0..2:" for level in range(depth)), f"{'    ' * depth}{leaf}"])
+
+
 def test_nested_side_effect_summary_is_cached_bottom_up() -> None:
     """One root query populates the immutable summary on every nested loop."""
-    stmt = Write(output="out", index=(), value="value")
+    (stmt,) = parse_body(_nested(32, "out[] = value"))
     loops = []
-    for depth in range(32):
-        stmt = Loop(axis=Axis(f"a{depth}", 2), body=(stmt,))
-        loops.append(stmt)
+    loop = stmt
+    while isinstance(loop, Loop):
+        loops.append(loop)
+        (loop,) = loop.body
 
     assert stmt.has_side_effects
     assert all(loop.__dict__.get("has_side_effects") is True for loop in loops)
@@ -194,29 +167,23 @@ def test_nested_axis_dependency_summary_does_not_rescan_each_loop(monkeypatch) -
         return original(load)
 
     monkeypatch.setattr(Load, "deps", counted)
-    axes = tuple(Axis(f"a{depth}", 2) for depth in range(32))
-    body = (Load(name="value", input="x", index=tuple(Var(axis.name) for axis in axes)),)
-    for axis in reversed(axes):
-        body = (Loop(axis=axis, body=body),)
+    depth = 32
+    body = parse_body(_nested(depth, f"value = load x[{', '.join(f'a{level}' for level in range(depth))}]"))
 
     place_values(body)
 
-    assert calls <= 2 * (len(axes) + 1), "linear in the statements, not in statements times depth"
+    assert calls <= 2 * (depth + 1), "linear in the statements, not in statements times depth"
 
 
 def test_normalization_does_not_build_the_full_ssa_dependency_closure() -> None:
-    body = Body(
-        (
-            Loop(
-                axis=Axis("a", 4),
-                body=(
-                    Load(name="x", input="X", index=(Var("a"),)),
-                    Load(name="scale", input="scale", index=()),
-                    Assign(name="value", op="divide", args=("x", "scale")),
-                    Write(output="out", index=(Var("a"),), value="value"),
-                ),
-            ),
-        )
+    body = parse_body(
+        """
+        for a in 0..4:
+            x = load X[a]
+            scale = load scale[]
+            value = divide(x, scale)
+            out[a] = value
+        """
     )
 
     normalized = normalize_body(body)
@@ -229,22 +196,18 @@ def test_normalization_does_not_build_the_full_ssa_dependency_closure() -> None:
 def test_hoist_keeps_a_read_of_a_buffer_the_loop_writes() -> None:
     """Axis-invariance alone does not earn a hoist: a read behind a write to its own buffer, or
     behind an ordered execution protocol, follows the scope's ordering constraints and stays."""
-    from emmy.compiler.ir.kernel.ir import Sync
+    import emmy.compiler.ir.kernel.ir  # noqa: F401  # declares ``Sync`` for the reader
 
-    body = Body(
-        (
-            Loop(
-                axis=Axis("i", 4),
-                body=(
-                    Write(output="O", index=(Literal(0, "int"),), value="one"),
-                    Load(name="back", input="O", index=(Literal(0, "int"),)),
-                    Sync(),
-                    Load(name="staged", input="S", index=(Literal(0, "int"),)),
-                    Write(output="P", index=(Var("i"),), value="back"),
-                    Write(output="Q", index=(Var("i"),), value="staged"),
-                ),
-            ),
-        )
+    body = parse_body(
+        """
+        for i in 0..4:
+            O[0] = one
+            back = load O[0]
+            Sync
+            staged = load S[0]
+            P[i] = back
+            Q[i] = staged
+        """
     )
     (loop,) = place_values(body)
     assert [type(stmt).__name__ for stmt in loop.body] == ["Write", "Load", "Sync", "Load", "Write", "Write"]
@@ -255,26 +218,20 @@ def test_escaped_reduce_loop_keeps_its_state_at_the_scope_it_moved_to() -> None:
     they must not settle it at their own scope: the read of ``accc`` inside ``b`` would otherwise pin the ``a``
     loop below its own scope and the read of ``acca`` after it would index a scope that does not exist.
     The shape is a GDN decoder layer's fused normalization (Qwen3.5-9B, layer 0)."""
-    a, b, c = Axis("a", 4), Axis("b", 4), Axis("c", 4)
-    body = (
-        Load(name="z", input="Z", index=()),
-        Loop(
-            axis=a,
-            body=(
-                Loop(
-                    axis=b,
-                    body=(
-                        Loop(axis=c, body=(Accum(name="accc", value="z"),)),
-                        Load(name="x", input="X", index=(Var("a"), Var("b"))),
-                        Assign(name="v1", op="add", args=("accc", "x")),
-                        Accum(name="accb", value="v1"),
-                    ),
-                ),
-                Accum(name="acca", value="accb"),
-            ),
-        ),
-        Assign(name="v3", op="exp", args=("acca",)),
-        Write(output="Y", index=(), value="v3"),
+    body = parse_body(
+        """
+        z = load Z[]
+        for a in 0..4:
+            for b in 0..4:
+                for c in 0..4:
+                    accc <- add(accc, z)
+                x = load X[a, b]
+                v1 = add(accc, x)
+                accb <- add(accb, v1)
+            acca <- add(acca, accb)
+        v3 = exp(acca)
+        Y[] = v3
+        """
     )
 
     out = place_values(body)
@@ -288,24 +245,17 @@ def test_escaped_reduce_loop_keeps_its_state_at_the_scope_it_moved_to() -> None:
 def test_folded_reduction_is_read_at_its_representatives_scope() -> None:
     """Two seeded reductions of one value in one loop are one reduction: the second's name aliases the first.
     A read of that name after the loop sees the first's scope, not the loop body the dropped update sat in."""
-    a, b = Axis("a", 4), Axis("b", 4)
-    body = (
-        Loop(
-            axis=a,
-            body=(
-                Loop(
-                    axis=b,
-                    body=(
-                        Load(name="x", input="X", index=(Var("a"), Var("b"))),
-                        Accum(name="acc1", value="x"),
-                        Load(name="y", input="X", index=(Var("a"), Var("b"))),
-                        Accum(name="acc2", value="y"),
-                    ),
-                ),
-                Assign(name="v", op="add", args=("acc1", "acc2")),
-                Write(output="Y", index=(Var("a"),), value="v"),
-            ),
-        ),
+    body = parse_body(
+        """
+        for a in 0..4:
+            for b in 0..4:
+                x = load X[a, b]
+                acc1 <- add(acc1, x)
+                y = load X[a, b]
+                acc2 <- add(acc2, y)
+            v = add(acc1, acc2)
+            Y[a] = v
+        """
     )
 
     out = place_values(body)
