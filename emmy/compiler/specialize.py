@@ -9,7 +9,7 @@ from emmy.compiler.dim import Dim
 from emmy.compiler.graph import Graph
 from emmy.compiler.ir.expr import Expr, Interval, Literal, SimplifyCtx, Var
 from emmy.compiler.ir.frontend.ir import ReshapeOp, SliceOp
-from emmy.compiler.ir.stmt import Body, map_exprs
+from emmy.compiler.ir.stmt import Body
 from emmy.compiler.wire import rewrite
 
 
@@ -25,7 +25,7 @@ def _rewrite_graph(graph: Graph, fn: Callable[[object], object | None]) -> Graph
 def _rewrite_body(body: Body, fn: Callable[[object], object | None]) -> Body:
     """``body`` with ``fn`` applied to every expression and inside every loop axis: what the rewrite reaches in a
     body, which is no wire object's fields but the statement module's own."""
-    mapped = body.map(lambda stmt: map_exprs(stmt, lambda expr: rewrite(expr, fn)))
+    mapped = body.map(lambda stmt: stmt.map_exprs(lambda expr: rewrite(expr, fn)))
     return Body(stmt.rewrite(lambda name: name, axis_fn=lambda axis: rewrite(axis, fn)) for stmt in mapped)
 
 

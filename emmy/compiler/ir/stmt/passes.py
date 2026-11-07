@@ -1,25 +1,16 @@
-"""Rewrites over one statement that the statement protocol does not carry: an expression map and a hygienic rename."""
+"""The rewrite over one statement that the statement protocol does not carry: a hygienic rename."""
 
 from __future__ import annotations
 
 from collections.abc import Callable, Mapping
 
 from emmy.compiler.ir.axis import Axis
-from emmy.compiler.ir.expr import Expr
 from emmy.compiler.ir.sigma import Sigma
 from emmy.compiler.ir.stmt.base import Stmt, _axis_identity
 from emmy.compiler.ir.stmt.body import Body
 
 Rename = Callable[[str], str]
 AxisFn = Callable[[Axis], Axis]
-
-
-def map_exprs(stmt: Stmt, fn: Callable[[Expr], Expr]) -> Stmt:
-    """``stmt`` with ``fn`` applied to each of its own expressions — an index, a predicate, a
-    stride — and not to nested bodies, which :meth:`Body.map` reaches on its own."""
-    old = tuple(stmt.exprs())
-    new = tuple(fn(expr) for expr in old)
-    return stmt if new == old else stmt.with_exprs(new)
 
 
 def rename_free(stmt: Stmt, alias: Mapping[str, str]) -> Stmt:
@@ -51,7 +42,7 @@ def rename_free(stmt: Stmt, alias: Mapping[str, str]) -> Stmt:
         # substituting, so dropping outer ``b = a`` cannot capture the use of b as an inner a.
         captured = bound.intersection(pruned.values())
         if captured:
-            used = set(b.ssa_defs | b.ssa_uses | b.axis_names) | set(alias) | set(alias.values())
+            used = set(b.definitions.keys() | b.ssa_uses | b.axis_names) | set(alias) | set(alias.values())
             renames = {}
             for name in sorted(captured):
                 fresh = name + "_local"

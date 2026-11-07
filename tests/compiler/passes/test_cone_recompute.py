@@ -56,7 +56,7 @@ def test_the_seam_lowers_a_twice_read_fold_once() -> None:
     assert len(loops) == 1
     defined = [name for stmt in cell for name in stmt.defines()]
     assert len(defined) == len(set(defined)), defined
-    assert {"inv", "out"} <= Body(cell).ssa_defs
+    assert {"inv", "out"} <= Body(cell).definitions.keys()
 
 
 def test_the_prologue_lowers_a_shared_statistic_once() -> None:
@@ -77,8 +77,8 @@ def test_the_prologue_lowers_a_shared_statistic_once() -> None:
     assert [stmt for stmt in pro if isinstance(stmt, Loop)] == [stmt for stmt in pro if isinstance(stmt, Loop)][:1]
     defined = [name for stmt in pro for name in stmt.defines()]
     assert len(defined) == len(set(defined)), defined
-    assert {"acc0", "r1", "r2"} <= Body(pro).ssa_defs
-    assert "acc0" not in Body(cell).ssa_defs
+    assert {"acc0", "r1", "r2"} <= Body(pro).definitions.keys()
+    assert "acc0" not in Body(cell).definitions
 
 
 def test_dedup_keeps_a_repeated_effect_and_the_first_definition() -> None:
@@ -112,7 +112,7 @@ def test_the_seam_does_not_bridge_a_statistic_the_cell_defines() -> None:
         results=("out",),
     )
     pro, cell, stats, chunk = cone_seam(cone, K.name, axes=(M, N, K, J))
-    assert "acc0" in Body(cell).ssa_defs
+    assert "acc0" in Body(cell).definitions
     assert pro == stats == chunk == ()
 
 

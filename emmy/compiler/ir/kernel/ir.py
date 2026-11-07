@@ -61,7 +61,6 @@ from emmy.compiler.ir.stmt import (
     Assign,
     Body,
     Cond,
-    Declared,
     Load,
     Loop,
     Select,
@@ -69,6 +68,7 @@ from emmy.compiler.ir.stmt import (
     Stmt,
     StridedLoop,
     Write,
+    kind,
     pretty_body,
     role,
 )
@@ -122,8 +122,8 @@ def _render_grid_axis_decode(axes: tuple[Axis, ...], idx_expr: str, ctx: RenderC
 # ---------------------------------------------------------------------------
 
 
-@dataclass(frozen=True)
-class Smem(Declared):
+@kind
+class Smem(Stmt):
     """Declare a per-block ``__shared__`` array.
 
     Renders to ``__shared__ [__align__(N)] <dtype> <name>[<prod(extents)>];``.
@@ -180,8 +180,8 @@ def _(stmt: Smem, ctx: RenderCtx) -> list[str]:
     return [f"{_pad(ctx.indent)}__shared__ {ali}{stmt.dtype} {stmt.name}[{total}];"]
 
 
-@dataclass(frozen=True)
-class Sync(Declared):
+@kind
+class Sync(Stmt):
     """Thread-group barrier.
 
     ``barrier_id == 0`` (default): ``__syncthreads();`` — CTA-wide.
@@ -226,8 +226,8 @@ def _(stmt: Sync, ctx: RenderCtx) -> list[str]:
     return [f'{pad}asm volatile("bar.sync {stmt.barrier_id}, {stmt.count};\\n" ::: "memory");']
 
 
-@dataclass(frozen=True)
-class Tile(Declared):
+@kind
+class Tile(Stmt):
     """Tile coordinate binding — one GPU thread per output element.
 
     The kernel-IR realization of a :class:`~emmy.compiler.ir.tile.TileOp`'s
@@ -527,8 +527,8 @@ def _(node: Tile, ctx: RenderCtx) -> list[str]:
     return out
 
 
-@dataclass(frozen=True)
-class CpAsyncCopy(Declared):
+@kind
+class CpAsyncCopy(Stmt):
     """Issue one ``cp.async.{ca,cg}.shared.global`` instruction.
 
     Replaces the per-thread ``Load(reg) + Write(smem)`` pair in cooperative
@@ -605,8 +605,8 @@ def _(node: CpAsyncCopy, ctx: RenderCtx) -> list[str]:
     return [f"{pad}{call};"]
 
 
-@dataclass(frozen=True)
-class CpAsyncCommit(Declared):
+@kind
+class CpAsyncCommit(Stmt):
     """``cp.async.commit_group;`` — finalize the preceding cp.async copies
     issued by this thread into a commit group. Pairs with
     ``CpAsyncWait`` to wait for that group to drain."""
@@ -620,8 +620,8 @@ def _(stmt: CpAsyncCommit, ctx: RenderCtx) -> list[str]:
     return [f"{_pad(ctx.indent)}emmy_cp_async_commit();"]
 
 
-@dataclass(frozen=True)
-class CpAsyncWait(Declared):
+@kind
+class CpAsyncWait(Stmt):
     """``cp.async.wait_group N;`` — block this thread until ≤ N cp.async
     groups remain in flight. ``group=0`` waits for everything (synchronous
     style); larger values stagger waits for software pipelining."""
@@ -637,8 +637,8 @@ def _(stmt: CpAsyncWait, ctx: RenderCtx) -> list[str]:
     return [f"{_pad(ctx.indent)}emmy_cp_async_wait<{stmt.group}>();"]
 
 
-@dataclass(frozen=True)
-class TmaDescriptor(Declared):
+@kind
+class TmaDescriptor(Stmt):
     """Host-built ``CUtensorMap`` descriptor for a TMA box copy.
 
     Declarative — renders nothing inside the kernel. The CUDA backend
@@ -670,8 +670,8 @@ def _(stmt: TmaDescriptor, ctx: RenderCtx) -> list[str]:
     return []
 
 
-@dataclass(frozen=True)
-class TmaLoad(Declared):
+@kind
+class TmaLoad(Stmt):
     """``cp.async.bulk.tensor.<rank>d`` — single-thread box copy.
 
     Issued by exactly one thread of the CTA (the materializer wraps this
@@ -711,8 +711,8 @@ def _(node: TmaLoad, ctx: RenderCtx) -> list[str]:
     ]
 
 
-@dataclass(frozen=True)
-class MbarrierInit(Declared):
+@kind
+class MbarrierInit(Stmt):
     """``mbarrier.init.shared.b64 [&mbar[slot]], count;`` — one-shot init.
 
     With ``slot=None``: initializes a scalar mbarrier (single-slot path).
@@ -737,8 +737,8 @@ def _(stmt: MbarrierInit, ctx: RenderCtx) -> list[str]:
     return [f"{pad}mbarrier_init({addr}, {stmt.count});"]
 
 
-@dataclass(frozen=True)
-class MbarrierArriveExpectTx(Declared):
+@kind
+class MbarrierArriveExpectTx(Stmt):
     """``mbarrier.arrive.expect_tx.shared.b64`` — declare the expected
     transaction byte count for the in-flight TMA copy on this barrier.
     With per-slot mbarrier arrays, ``slot`` selects the ring buffer slot."""
@@ -759,8 +759,8 @@ def _(stmt: MbarrierArriveExpectTx, ctx: RenderCtx) -> list[str]:
     return [f"{pad}mbarrier_arrive_expect_tx({addr}, {stmt.bytes_});"]
 
 
-@dataclass(frozen=True)
-class MbarrierArrive(Declared):
+@kind
+class MbarrierArrive(Stmt):
     """``mbarrier.arrive.shared.b64`` — simple arrive (no transaction-byte
     count). Used by warp-specialized consumer warps to signal "slot empty"
     so the producer can refill it on the next ring iteration. The producer
@@ -782,8 +782,8 @@ def _(stmt: MbarrierArrive, ctx: RenderCtx) -> list[str]:
     return [f"{pad}mbarrier_arrive({addr});"]
 
 
-@dataclass(frozen=True)
-class SetMaxNReg(Declared):
+@kind
+class SetMaxNReg(Stmt):
     """``setmaxnreg.{inc,dec}.sync.aligned.u32 N;`` — Hopper+ register-budget
     redistribution. ``direction="dec"`` shrinks the calling warp's max
     register count to ``count`` (returning registers to the pool);
@@ -808,8 +808,8 @@ def _(stmt: SetMaxNReg, ctx: RenderCtx) -> list[str]:
     return [f'{pad}asm volatile("setmaxnreg.{stmt.direction}.sync.aligned.u32 {stmt.count};\\n");']
 
 
-@dataclass(frozen=True)
-class MbarrierWait(Declared):
+@kind
+class MbarrierWait(Stmt):
     """``mbarrier.try_wait.parity.shared.b64`` — block until the barrier's
     parity flips for ``phase``. Replaces ``CpAsyncWait + Sync`` for TMA
     transports — mbarrier arrival already provides CTA-wide visibility.
@@ -832,8 +832,8 @@ def _(stmt: MbarrierWait, ctx: RenderCtx) -> list[str]:
     return [f"{pad}mbarrier_wait_parity({addr}, {phase_expr});"]
 
 
-@dataclass(frozen=True)
-class TreeHalve(Declared):
+@kind
+class TreeHalve(Stmt):
     """Cross-thread combine of a (possibly multi-component) monoid state over a
     PRE-POPULATED power-of-two smem tree — the > warp_size fallback for
     :class:`WarpShuffle`.
@@ -940,8 +940,8 @@ def _(stmt: TreeHalve, ctx: RenderCtx) -> list[str]:
     return out
 
 
-@dataclass(frozen=True)
-class WarpShuffle(Declared):
+@kind
+class WarpShuffle(Stmt):
     """Cross-thread combine of a (possibly multi-component) monoid state over
     ``length`` lanes via ``__shfl_xor_sync`` — a register-only butterfly (no smem,
     no syncthreads).
@@ -1013,8 +1013,8 @@ def _(stmt: WarpShuffle, ctx: RenderCtx) -> list[str]:
     return out
 
 
-@dataclass(frozen=True)
-class WarpBroadcast(Declared):
+@kind
+class WarpBroadcast(Stmt):
     """Broadcast the last lane's state within each aligned lane group, in place."""
 
     state: tuple[str, ...] = role("reads")
@@ -1158,8 +1158,8 @@ def fragment_args(args: tuple, kinds: tuple[str, ...]) -> tuple[FragmentArg, ...
     return tuple(one(arg, kind) for arg, kind in zip(args, kinds, strict=True))
 
 
-@dataclass(frozen=True)
-class FragmentApply(Declared):
+@kind
+class FragmentApply(Stmt):
     """The one per-element pointwise node over an ``mma.sync`` C fragment — the fragment-tier
     sibling of the scalar ``Assign``.
 
@@ -1307,8 +1307,8 @@ def _(stmt: FragmentApply, ctx: RenderCtx) -> list[str]:
     return lines
 
 
-@dataclass(frozen=True)
-class FragmentRowReduce(Declared):
+@kind
+class FragmentRowReduce(Stmt):
     """Per-ROW reduction over one warp's ``mma.sync`` C fragments — the chunk pivot and the
     per-row channel partials the twisted carrier's atom tier folds (``_atom._FlashOps``).
 
@@ -1398,8 +1398,8 @@ def _mma_sync_nregs(role: str, shape: tuple[int, int, int], dtype: DataType | No
     raise ValueError(f"mma.sync: unsupported role {role!r}; expected 'a', 'b', or 'c'")
 
 
-@dataclass(frozen=True)
-class RegFragment(Declared):
+@kind
+class RegFragment(Stmt):
     """Declare an mma.sync per-thread register array.
 
     mma.sync multiplicands are explicit per-lane register arrays —
@@ -1620,8 +1620,8 @@ def smem_layout_index(mode: str, flat: str, buffer: str, ctx: RenderCtx, indices
     return flat if not swizzle_xor(mode) else f"{swizzle_fn(mode)}({flat})"
 
 
-@dataclass(frozen=True)
-class BlockScaleLoad(Declared):
+@kind
+class BlockScaleLoad(Stmt):
     """Load one lane's b32 of ue4m3 block scales for the block-scaled fp4 mma.
 
     The instruction takes its per-16-element scales as two ordinary register operands beside the
@@ -1664,8 +1664,8 @@ def _(node: BlockScaleLoad, ctx: RenderCtx) -> list[str]:
     return [f"{_pad(ctx.indent)}{node.frag} = emmy_mma_load_sf{node.role}_f4({src}, {node.ldm});"]
 
 
-@dataclass(frozen=True)
-class LdmatrixLoad(Declared):
+@kind
+class LdmatrixLoad(Stmt):
     """``ldmatrix.sync.aligned.m8n8.x{2,4}[.trans].b16`` — load one operand
     fragment from smem into a per-thread register array.
 
@@ -1993,8 +1993,8 @@ def _(node: LdmatrixLoad, ctx: RenderCtx) -> list[str]:
     return [f"{_pad(ctx.indent)}emmy_ldmatrix_x2_trans({node.frag}, {addr});"]
 
 
-@dataclass(frozen=True)
-class MmaSyncPtx(Declared):
+@kind
+class MmaSyncPtx(Stmt):
     """``mma.sync.aligned.m{M}n{N}k{K}.row.col.f32.{ab}.{ab}.f32`` — one
     tensor-core MMA via inline PTX (the ``s16816`` instruction).
 
@@ -2050,8 +2050,8 @@ def _(stmt: MmaSyncPtx, ctx: RenderCtx) -> list[str]:
     return [f"{_pad(ctx.indent)}{wrapper}({stmt.c_frag}, {stmt.a_frag}, {stmt.b_frag}, {stmt.c_frag});"]
 
 
-@dataclass(frozen=True)
-class FragmentPromote(Declared):
+@kind
+class FragmentPromote(Stmt):
     """Fold an f16-accumulate mma **C fragment** into its f32 **shadow fragment** and rezero it —
     the chunked-accumulation promote of the ``_f16acc`` atom family: the mma chain accumulates at
     the full f16-accumulate HMMA rate, and every K chunk this promote-adds the packed f16 partials
@@ -2076,8 +2076,8 @@ def _(stmt: FragmentPromote, ctx: RenderCtx) -> list[str]:
     return [f"{_pad(ctx.indent)}emmy_mma_promote_f16acc{suffix}({stmt.dst}, {stmt.src});"]
 
 
-@dataclass(frozen=True)
-class FragmentRepack(Declared):
+@kind
+class FragmentRepack(Stmt):
     """Convert mma **C fragments** into one 16-bit operand fragment in registers.
 
     The m16n8k16 layout takes two k-adjacent C fragments whose lanes already align with A. The
@@ -2132,8 +2132,8 @@ def wgmma_descriptor_bits(addr: int, lbo: int, sbo: int, mode: int) -> int:
     return ((addr >> 4) & 0x3FFF) | (((lbo >> 4) & 0x3FFF) << 16) | (((sbo >> 4) & 0x3FFF) << 32) | (mode << 62)
 
 
-@dataclass(frozen=True)
-class WgmmaDescriptor(Declared):
+@kind
+class WgmmaDescriptor(Stmt):
     """``unsigned long long name = emmy_wgmma_desc(...)`` — the shared-memory matrix descriptor a
     ``wgmma.mma_async`` operand is read through (:func:`wgmma_descriptor_bits`). Replaces
     :class:`LdmatrixLoad` on a descriptor-fed operand: the tensor core reads the slab itself, so no
@@ -2161,8 +2161,8 @@ def _(stmt: WgmmaDescriptor, ctx: RenderCtx) -> list[str]:
     return [f"{_pad(ctx.indent)}unsigned long long {stmt.name} = emmy_wgmma_desc({args});"]
 
 
-@dataclass(frozen=True)
-class WgmmaMma(Declared):
+@kind
+class WgmmaMma(Stmt):
     """``wgmma.mma_async.sync.aligned.m64n{N}k16.f32.{ab}.{ab}`` — one warp-group tensor-core MMA,
     issued asynchronously by the four warps of a group together.
 
@@ -2228,8 +2228,8 @@ def _(stmt: WgmmaMma, ctx: RenderCtx) -> list[str]:
     return [f"{_pad(ctx.indent)}{wgmma_wrapper(stmt)}{tnsp}({', '.join(stmt.c_frags)}, {_wgmma_a(stmt)}, {stmt.b_desc}, {stmt.scale_d});"]
 
 
-@dataclass(frozen=True)
-class WgmmaFence(Declared):
+@kind
+class WgmmaFence(Stmt):
     """``wgmma.fence.sync.aligned`` — orders the group's earlier register and shared-memory accesses
     before the ``wgmma.mma_async`` that follows. The lowering issues it before the first cell after
     anything else touched the accumulator (the epilogue, the softmax rescale)."""
@@ -2243,8 +2243,8 @@ def _(stmt: WgmmaFence, ctx: RenderCtx) -> list[str]:
     return [f'{_pad(ctx.indent)}asm volatile("wgmma.fence.sync.aligned;\\n" ::: "memory");']
 
 
-@dataclass(frozen=True)
-class WgmmaCommit(Declared):
+@kind
+class WgmmaCommit(Stmt):
     """``wgmma.commit_group.sync.aligned`` — closes the ``wgmma.mma_async`` cells issued since the
     last commit into one group for :class:`WgmmaWait` to count. The lowering commits after a
     chunk's cells."""
@@ -2258,8 +2258,8 @@ def _(stmt: WgmmaCommit, ctx: RenderCtx) -> list[str]:
     return [f'{_pad(ctx.indent)}asm volatile("wgmma.commit_group.sync.aligned;\\n" ::: "memory");']
 
 
-@dataclass(frozen=True)
-class WgmmaWait(Declared):
+@kind
+class WgmmaWait(Stmt):
     """``wgmma.wait_group.sync.aligned N`` — block until at most ``group`` committed groups are still
     in flight. Carries no deps: the accumulator it completes is the ``c_frags`` of the cells before
     it, and the lowering places the wait before any read of those fragments and before the slot's
@@ -2277,8 +2277,8 @@ def _(stmt: WgmmaWait, ctx: RenderCtx) -> list[str]:
     return [f'{_pad(ctx.indent)}asm volatile("wgmma.wait_group.sync.aligned {stmt.group};\\n" ::: "memory");']
 
 
-@dataclass(frozen=True)
-class RegStore(Declared):
+@kind
+class RegStore(Stmt):
     """Store an mma.sync f32 accumulator array to the output buffer with a
     per-lane epilogue downconvert.
 

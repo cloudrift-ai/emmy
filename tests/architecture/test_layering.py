@@ -186,13 +186,13 @@ def test_the_statement_module_exports_a_pinned_list() -> None:
     kinds = ["Stmt", "Load", "Assign", "Affine", "Accum", "Carry", "Pre", "Init", "Let", "Write", "Select", "SelectBranch"]
     kinds += ["ZeroPrologue", "Loop", "StridedLoop", "Cond"]
     containers = ["Body", "OutputSpec"]
-    functions = ["normalize_body", "canonicalize_identity", "free_names", "exposed_defines", "rename_free", "map_exprs", "binary"]
+    functions = ["normalize_body", "canonicalize_identity", "free_names", "exposed_defines", "rename_free", "binary"]
     functions += ["mask_select_predicate", "pretty_body", "parse_body", "ordering_constraints", "dtype_promote"]
     # Normalization steps a pass calls on its own, and the two kinds fusion assembles a region with.
     steps = ["fold_affine", "simplify_body", "prepare_body"]
     assembly = ["Call", "Subroutine"]
-    # What a layer declares a kind of its own with: the base that computes the protocol, and a field's role.
-    declaring = ["Declared", "role"]
+    # What a layer declares a kind of its own with: the decorator that writes the protocol, and a field's role.
+    declaring = ["kind", "role"]
     assert sorted(stmt.__all__) == sorted(kinds + containers + functions + steps + assembly + declaring)
 
 
@@ -560,19 +560,18 @@ def _kernel_kinds() -> list[type]:
 
 def test_a_kernel_ir_kind_is_declared_not_programmed() -> None:
     """A Kernel IR statement kind is data: fields with their roles, how it prints, and at most a constructor check.
-    The statement protocol follows from the roles (``Declared``); what rendering or a lowering asks of a statement
+    The statement protocol follows from the roles (``@kind``); what rendering or a lowering asks of a statement
     beyond that is a function over it, beside the render functions."""
-    from emmy.compiler.ir.stmt import Declared
-
     offenders = [
         f"{cls.__name__}.{name}"
         for cls in _kernel_kinds()
         for name, member in vars(cls).items()
         if (callable(member) or isinstance(member, (property, functools.cached_property, staticmethod, classmethod)))
         and name not in ("pretty", "__post_init__")
+        and not getattr(member, "derived", False)
         and not (name.startswith("__") and name != "__post_init__")
     ]
-    assert len(_kernel_kinds()) == 30 and all(issubclass(cls, Declared) for cls in _kernel_kinds())
+    assert len(_kernel_kinds()) == 30 and all(cls._rewrite.derived for cls in _kernel_kinds())
     assert not offenders, "state these as field roles, or move them to functions over the statement:\n" + "\n".join(sorted(offenders))
 
 

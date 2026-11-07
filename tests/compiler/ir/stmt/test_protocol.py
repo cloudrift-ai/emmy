@@ -22,7 +22,6 @@ from emmy.compiler.ir.stmt import (
     Call,
     Carry,
     Cond,
-    Declared,
     Init,
     Let,
     Load,
@@ -35,7 +34,6 @@ from emmy.compiler.ir.stmt import (
     Subroutine,
     Write,
     ZeroPrologue,
-    map_exprs,
     parse_body,
 )
 
@@ -49,7 +47,7 @@ def _kinds() -> list[type]:
             yield sub
             yield from subclasses(sub)
 
-    return sorted((cls for cls in set(subclasses(Stmt)) if cls is not Declared), key=lambda cls: cls.__qualname__)
+    return sorted(set(subclasses(Stmt)), key=lambda cls: cls.__qualname__)
 
 
 def test_a_kind_check_is_native() -> None:
@@ -83,8 +81,8 @@ def test_every_kind_states_the_protocol() -> None:
             missing.append(f"{cls.__name__}: pretty")
         if (cls.nested is Stmt.nested) != (cls.with_bodies is Stmt.with_bodies):
             missing.append(f"{cls.__name__}: nested and with_bodies come together")
-        if (cls.exprs is Stmt.exprs) != (cls.with_exprs is Stmt.with_exprs):
-            missing.append(f"{cls.__name__}: exprs and with_exprs come together")
+        if (cls.exprs is Stmt.exprs) != (cls.map_exprs is Stmt.map_exprs):
+            missing.append(f"{cls.__name__}: exprs and map_exprs come together")
     assert not missing, "these statement kinds leave part of the protocol unstated:\n" + "\n".join(missing)
 
 
@@ -192,16 +190,57 @@ _ALL_EXAMPLES = _EXAMPLES + _KERNEL_EXAMPLES
 
 def test_every_exported_kind_has_an_example() -> None:
     exported = {kind for name in stmt_pkg.__all__ if isinstance(kind := getattr(stmt_pkg, name), type) and issubclass(kind, Stmt)}
-    assert {type(example) for example in _EXAMPLES} == exported - {Stmt, Declared}
+    assert {type(example) for example in _EXAMPLES} == exported - {Stmt}
     kernel = {kind for kind in _kinds() if kind.__module__ == kernel_ir.__name__}
     assert {type(example) for example in _KERNEL_EXAMPLES} == kernel
+
+
+_PROTOCOL = ("deps", "defines", "external_reads", "external_writes", "local_decls", "bound_axes", "binds_axes", "exprs")
+_PROTOCOL += ("map_exprs", "nested", "with_bodies", "rename_buffers", "_rewrite")
+
+
+def _stated(cls: type) -> set[str]:
+    """The protocol members ``cls`` writes itself: the ones ``@kind`` did not derive from its fields' roles."""
+    return {name for name in _PROTOCOL if name in vars(cls) and not getattr(vars(cls)[name], "derived", False)}
 
 
 @pytest.mark.parametrize("stmt", _KERNEL_EXAMPLES, ids=lambda stmt: type(stmt).__name__)
 def test_a_declared_kind_states_only_its_fields(stmt) -> None:
     """A Kernel IR kind is declared: its protocol members are the ones its fields' roles give it."""
-    stated = set(vars(type(stmt))) & {name for name in vars(Declared) if not name.startswith("__")}
-    assert not stated
+    assert type(stmt)._rewrite.derived and not _stated(type(stmt))
+
+
+# The protocol members a shared kind states itself, because no role gives them.
+_STATED = {
+    Accum: {"_rewrite"},  # its reduced axes follow a substitution that splits an axis
+    Let: {"external_reads", "rename_buffers"},  # the buffers a flat index inside its expression names
+    Call: {"external_reads", "rename_buffers"},  # the buffers its subroutine reads
+    StridedLoop: {"binds_axes"},  # the ``<axis>_end`` name an ``end`` override hoists
+}
+
+
+@pytest.mark.parametrize("stmt", _EXAMPLES, ids=lambda stmt: type(stmt).__name__)
+def test_a_shared_kind_states_only_what_no_role_gives(stmt) -> None:
+    """A shared kind is declared too: every protocol member but the few listed follows from its fields' roles."""
+    assert _stated(type(stmt)) == _STATED.get(type(stmt), set())
+
+
+def test_a_number_in_a_role_field_is_plain_data() -> None:
+    """A constant stride is no expression and a literal seed is no buffer."""
+    loop = StridedLoop(_K, Var("t"), 4, (Load("x", "a", (Var("k"),)),))
+    assert loop.exprs() == (Var("t"),) and loop.rewrite(lambda name: f"{name}_").step == 4
+    carry = Carry("state", "value", (Var("i"),), 0.5)
+    assert carry.external_reads() == () and carry.rename_buffers({"state": "other"}) is carry
+    assert carry.replace(seed="init").external_reads() == ("init",)
+
+
+def test_a_field_read_through_lists_each_name_once() -> None:
+    """The names an index or a predicate mentions are reads, listed in field order beside the names a field holds."""
+    write = Write("out", (Var("i"), BinaryExpr("+", Var("i"), Var("gather"))), "value")
+    assert write.deps() == ("i", "gather", "value")
+    select = Select("picked", (SelectBranch("x", _BELOW), SelectBranch("y", BinaryExpr(">=", Var("i"), Literal(2, "int")))))
+    assert select.deps() == ("x", "i", "y")
+    assert Carry("state", "value", (Var("i"),), 0.0).deps() == ("value",)
 
 
 @pytest.mark.parametrize("stmt", _KERNEL_EXAMPLES, ids=lambda stmt: type(stmt).__name__)
@@ -255,8 +294,7 @@ def test_a_statement_rebuilds_as_itself(stmt) -> None:
     """Every rebuilding member, given what its reading half returned, gives back an equal statement."""
     assert stmt.rewrite(lambda name: name) == stmt
     assert stmt.with_bodies(stmt.nested()) == stmt
-    assert stmt.with_exprs(tuple(stmt.exprs())) == stmt
-    assert map_exprs(stmt, lambda expr: expr) is stmt
+    assert stmt.map_exprs(lambda expr: expr) is stmt
     assert stmt.rename_buffers({}) == stmt
 
 
@@ -275,15 +313,16 @@ def _held_exprs(value, child_bodies=()) -> list:
 
 @pytest.mark.parametrize("stmt", _ALL_EXAMPLES, ids=lambda stmt: type(stmt).__name__)
 def test_an_expression_map_reaches_every_expression_a_statement_holds(stmt) -> None:
-    """``exprs`` lists every expression of the statement and ``with_exprs`` puts each one back in its place."""
+    """``exprs`` lists every expression of the statement and ``map_exprs`` reaches each one in that order."""
     held = _held_exprs(stmt)
     assert sorted(map(repr, stmt.exprs())) == sorted(map(repr, held))
     markers = tuple(Var(f"e{index}") for index in range(len(held)))
     fresh = iter(markers)
-    mapped = map_exprs(stmt, lambda _expr: next(fresh))
+    mapped = stmt.map_exprs(lambda _expr: next(fresh))
     assert tuple(mapped.exprs()) == markers
     assert sorted(map(repr, _held_exprs(mapped))) == sorted(map(repr, markers))
-    assert mapped.with_exprs(tuple(stmt.exprs())) == stmt
+    back = iter(stmt.exprs())
+    assert mapped.map_exprs(lambda _expr: next(back)) == stmt
 
 
 @pytest.mark.parametrize("stmt", _STORED, ids=lambda stmt: type(stmt).__name__)
@@ -298,7 +337,7 @@ def test_a_rename_reaches_names_and_expressions() -> None:
     load, write = parse_body("x = load a[i]\nout[i] = x")
     assert str(load.rename(names)) == "x2 = load a[j]"
     assert str(write.rename(names)) == "out[j] = x2"
-    assert str(map_exprs(load, lambda expr: expr.rename(lambda name: names.get(name, name)))) == "x = load a[j]"
+    assert str(load.map_exprs(lambda expr: expr.rename(lambda name: names.get(name, name)))) == "x = load a[j]"
 
 
 def test_a_body_is_an_immutable_sequence_of_its_statements() -> None:

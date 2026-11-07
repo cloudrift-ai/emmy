@@ -31,7 +31,7 @@ from emmy.compiler.ir.kernel.ir import ELEM_COL, ELEM_ROW, FRAG_COL, FRAG_ROW
 from emmy.compiler.ir.pure.fold import EXTENTS
 from emmy.compiler.ir.schedule.register import RegisterMaterialization
 from emmy.compiler.ir.sigma import Sigma
-from emmy.compiler.ir.stmt import Affine, Assign, Body, Let, Load, Write, free_names
+from emmy.compiler.ir.stmt import Affine, Assign, Body, Let, Load, Write, exposed_defines, free_names
 from emmy.compiler.ir.tile import TileOp
 from emmy.compiler.ir.tile.ops import UnbindableProjection, reduce_plan, sched_of
 from emmy.compiler.pipeline import Match, Pattern, RuleSkipped
@@ -144,7 +144,7 @@ def _pointwise_strip(tile: TileOp, materialized):
     width = plan.reg_n
     if not inner.extent.is_static or inner.extent.as_static() % width:
         raise ValueError("pointwise TILE must divide the static inner free extent")
-    definitions = {name for stmt in materialized.body for name in Body((stmt,)).ssa_defs}
+    definitions = {name for stmt in materialized.body for name in exposed_defines(stmt)}
     loads = []
     computes = []
     writes = []

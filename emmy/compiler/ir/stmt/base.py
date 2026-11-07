@@ -308,14 +308,16 @@ class Stmt:
         assert not bodies, f"{type(self).__name__}.with_bodies: leaf stmt got {len(bodies)} bodies"
         return self
 
-    def binds_axes(self) -> frozenset[str]:
-        """Axes this stmt introduces into scope for its nested bodies.
+    def bound_axes(self) -> tuple[Axis, ...]:
+        """The axes this stmt binds for its nested bodies, in field order. Default: ``()``."""
+        return ()
 
-        Default: ``frozenset()`` (no axis binding). ``Loop`` / ``StridedLoop``
-        return ``{self.axis.name}``; ``Tile`` returns the axis names of every
-        ``BoundAxis``; ``Cond`` keeps the default. Used by ``Body.fold``
-        to thread the bound-axis set through the def-use walk without an
-        isinstance ladder over the block-stmt set.
+    def binds_axes(self) -> frozenset[str]:
+        """The names this stmt introduces into scope for its nested bodies: the names of :meth:`bound_axes`, and any
+        other name the kind hoists (a ``StridedLoop``'s ``<axis>_end``).
+
+        Default: ``frozenset()`` (no axis binding). Used by ``Body.fold`` to thread the bound-axis set through the
+        def-use walk without an isinstance ladder over the block-stmt set.
         """
         return frozenset()
 
@@ -342,11 +344,10 @@ class Stmt:
         """A copy of this stmt with the named fields changed — the one way a statement is edited."""
         return replace(self, **changes)
 
-    def with_exprs(self, exprs: tuple[Expr, ...]) -> Stmt:
-        """Write-side counterpart to :meth:`exprs`: this stmt with its expressions replaced by ``exprs``,
-        positionally. A kind that reports expressions and is met by an expression map overrides it."""
-        if exprs:
-            raise NotImplementedError(f"{type(self).__name__} cannot be rebuilt from mapped expressions")
+    def map_exprs(self, fn: Callable[[Expr], Expr]) -> Stmt:
+        """Write-side counterpart to :meth:`exprs`: this stmt with ``fn`` applied to each of its own expressions — an
+        index, a predicate, a stride — and not to nested bodies, which :meth:`Body.map` reaches on its own. The
+        statement itself when no expression changes. Default: no expression, so ``self``."""
         return self
 
     def __str__(self) -> str:

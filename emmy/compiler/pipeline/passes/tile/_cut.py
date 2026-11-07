@@ -1491,7 +1491,7 @@ def _defined_values(root: Fold, skip: int | None = None) -> set[str]:
         if id(node) in seen or id(node) == skip:
             continue
         seen.add(id(node))
-        out |= set(node.exposes) | node.step().ssa_defs
+        out |= set(node.exposes) | node.step().definitions.keys()
         pending.extend(node.operands)
     return out
 
@@ -2223,7 +2223,7 @@ def realize(match: Match, root: Node, seams, *, joins: tuple = ()) -> Graph:
     parent_fold = _without_identity_casts(parent_fold, stored)
     # A store reads a value the replaced root binds or defines. A name the cut re-spelled in one region can still be
     # exposed unchanged by another region that computes the same name in place; a store of that region keeps it.
-    visible = {*parent_fold.lift.params, *parent_fold.applied.params, *parent_fold.exposes, *parent_fold.step().ssa_defs}
+    visible = {*parent_fold.lift.params, *parent_fold.applied.params, *parent_fold.exposes, *parent_fold.step().definitions}
     respelled = {old: new for old, new in read_names.items() if new in visible or old not in visible}
     specs = tuple(
         # The seam renames what a store writes AND what its coordinates and guard name (a scatter's row).

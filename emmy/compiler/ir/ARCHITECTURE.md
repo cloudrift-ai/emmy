@@ -235,43 +235,50 @@ clustered identity reads it by that name.
 `ir/stmt/` is the vocabulary all three IRs share, so the rest of the compiler uses it through one package and
 nothing else: no submodule path, no private name. The package exports the statement kinds, `Body` and `OutputSpec`,
 `normalize_body` and `canonicalize_identity`, a few functions over statements (`free_names`, `exposed_defines`,
-`rename_free`, `map_exprs`, `binary`, `mask_select_predicate`, `ordering_constraints`, `dtype_promote`), the text
+`rename_free`, `binary`, `mask_select_predicate`, `ordering_constraints`, `dtype_promote`), the text
 form (`pretty_body`, `parse_body`), three normalization steps a caller may run on its own (`fold_affine`, `simplify_body`,
 `prepare_body`), the two kinds fusion's body assembly in `ir/loop/` builds a region with (`Call`, `Subroutine`), and
-what a layer declares a kind of its own with (`Declared`, `role`). The module itself imports expressions, axes,
+what a layer declares a kind of its own with (`kind`, `role`). The module itself imports expressions, axes,
 dtypes and the structural and wire forms: no op, tensor, graph, backend or pipeline.
 `tests/architecture/test_layering.py` pins the export list and both directions.
 
-**The statement protocol** is what a kind owes, all of it methods on the kind. The shared kinds state these by
-hand; a layer adds a kind of its own by declaring it (below), and nothing else:
+**The statement protocol** is what a kind owes, all of it methods on the kind. No kind writes them: the shared
+kinds are declared (below), and a layer adds a kind of its own by declaring it, and nothing else:
 
 | Group | Members |
 | --- | --- |
 | Traits | `pure`, `deps_deep`, `has_side_effects` |
-| Reads and writes | `deps`, `defines`, `external_reads`, `external_writes`, `local_decls`, `binds_axes` |
-| Structure | `nested` with `with_bodies`; `exprs` with `with_exprs` |
+| Reads and writes | `deps`, `defines`, `external_reads`, `external_writes`, `local_decls`, `bound_axes`, `binds_axes` |
+| Structure | `nested` with `with_bodies`; `exprs` with `map_exprs` |
 | Rebuilding | `_rewrite` (behind `rewrite`, `rename` and `substitute`), `rename_buffers`, `replace` |
 | Display and storage | the text (a kind of another layer: `pretty`); a body's text is its wire form |
 
-Each reading member has a rebuilding half: `with_bodies` takes what `nested` returned, `with_exprs` what `exprs`
-returned. `rewrite` is the one entry for renaming and substitution; it drops the substitutions a statement's own
-binder shadows and hands the rest to the kind's `_rewrite`. `exprs` lists every expression a kind holds and
-`with_exprs` rebuilds it from them. `tests/compiler/ir/stmt/test_protocol.py` checks that every kind in every layer
-states the protocol, and the rebuilding halves on an example of each shared kind and each Kernel IR kind.
+Each reading member has a rebuilding half: `with_bodies` takes what `nested` returned, and `map_exprs` applies a
+function to each expression `exprs` lists, in that order. `bound_axes` are the axes a kind binds and `binds_axes`
+the names it brings into scope, which are those axes' names and any other name it hoists. `rewrite` is the one
+entry for renaming and substitution; it drops the substitutions a statement's own binder shadows and hands the rest
+to the kind's `_rewrite`. `tests/compiler/ir/stmt/test_protocol.py` checks that every kind in every layer states the
+protocol, and the rebuilding halves on an example of each shared kind and each Kernel IR kind.
 
-**A declared kind** is a statement kind stated as data: a frozen dataclass on `Declared` whose fields carry a type
+**A declared kind** is a statement kind stated as data: a class under the `@kind` decorator whose fields carry a type
 and, through `role(...)`, what the field is to the rest of the compiler. The roles are names the statement defines,
 reads, updates in place or binds for its own use; buffers it reads, writes or declares kernel-local; expressions;
 axes it binds and names that follow them; a child body; statements it carries; the body of a pure term; and records
-whose own fields play roles. A field with no role is plain data. `Declared` computes every protocol member from the
-roles, in field order, so a declared kind writes none: what it reads is its `reads` and `updates` fields, a rename
-maps every name field and every expression, a buffer rename maps the buffer fields, and so on. Two roles hold
-statements that are not a child body. Carried statements (`stmts`: the cells a `RegStore` stores with it, the
+whose own fields play roles. A field with no role is plain data. `@kind` makes the class a frozen dataclass and
+writes every protocol member from the roles once, when the class is defined, so a declared kind writes none: what
+it reads is its `reads` and `updates` fields, a rename maps every name field and every expression, a buffer rename
+maps the buffer fields, and so on. Two roles hold statements that are not a child body. Carried statements (`stmts`: the cells a `RegStore` stores with it, the
 combine of a `TreeHalve`) are part of the statement: they are rewritten with it and their buffers, expressions and
 free reads are its own, a name one of them defines or the statement binds being hidden. A term (`term`: a
 `RegStore`'s epilogue) keeps its statements' names private: a rename reaches only the coordinates its expressions
-read. Kernel IR declares all of its kinds this way; a kind whose member the roles cannot give is a missing role, not
-a hand-written member.
+read. An expression field that is also a `reads` field is read through: the names its expressions mention are
+names the statement reads (a `Load`'s index, a `Select`'s predicates, a `Cond`'s condition). A number where a
+name, a buffer or an expression is expected is plain data (a constant stride, a literal seed).
+
+The shared kinds and the Kernel IR kinds are all declared. A kind whose member the roles cannot give is a missing
+role, not a hand-written member; the shared kinds state four, which `test_protocol.py` pins: an `Accum`'s reduced
+axes follow a substitution that splits an axis, a `Let` and a `Call` read buffers their fields do not name (inside
+an expression, through the subroutine), and a `StridedLoop` with an `end` binds one more name than its axis.
 
 Behaviour that is not on this list lives outside the module as a function over statements. CUDA rendering is the
 main case: `ir/render.py` holds the render context, the index flattening and one render function per kind,
@@ -285,10 +292,10 @@ field that holds one defaults to a `Body`. `Body.structural_key()` uses the comp
 including identity-relevant fields such as `Axis.window` that may deliberately be excluded from general equality.
 Its exact and clustered keys, and its executable normal forms, are cached on that `Body`; there is no equality-keyed
 shared cache that could alias distinct metadata. Callers use its walks (`iter`, `map`, `fold`, `iter_of_type`,
-`loads`, `writes`, `carries`, `accums`, `loops`), its def-use readings (`definitions`, `ssa_defs`, `ssa_uses`,
-`axis_names`, `axis_dependencies`, `depends_on`, `backward_cone`), its orders (`topological_order`, `coalesce`),
-`rename_buffers`, and its identity (`identity`, `structural_key`, `census`, `literals_abstracted`,
-`literal_free_key`).
+`loads`, `writes`, `carries`, `accums`, `loops`), its def-use readings (`definitions`, `ssa_uses`, `axis_names`,
+`axis_dependencies`, `backward_cone`), its orders (`topological_order`, `coalesce`), `rename_buffers`, and its
+identity (`identity`, `structural_key`). The names a body defines are the keys of `definitions`; the names one
+statement makes visible are `exposed_defines`.
 
 **A body has one text**, which is also its wire form. `str(body)` is it and `parse_body` reads it back to an equal
 body, so the text says
@@ -716,7 +723,7 @@ normalization refuses a body that holds a call, so validation, executable identi
 lifting never meet one. Placement then shares common producers across definitions, and operation clustering starts
 from that CSE form. Subroutine boundaries never limit fusion.
 
-- `topo_sort_siblings` — stable Kahn reorder so SSA defs precede their uses
+- `topological_sort` — stable Kahn reorder so SSA defs precede their uses
   within each body (fixes splicer-produced use-before-def).
 - `drop_size_one_free_axes` — inline extent-1 free Loops.
 - `drop_size_one_reduce_axes` — collapse a canonical extent-1 reduction to its single monoid update. This includes

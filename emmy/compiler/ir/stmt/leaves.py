@@ -17,9 +17,10 @@ from emmy.compiler.ir.elementwise import ElementwiseImpl
 from emmy.compiler.ir.expr import BinaryExpr, Expr, FlatIndex, Literal, Var
 from emmy.compiler.ir.sigma import Sigma
 from emmy.compiler.ir.stmt.base import Stmt
+from emmy.compiler.ir.stmt.declared import kind, rewrite_by_roles, role
 
 
-@dataclass(frozen=True, init=False)
+@kind(init=False)
 class Load(Stmt):
     """Read a value (or N consecutive values) from an external input buffer.
 
@@ -59,9 +60,11 @@ class Load(Stmt):
     serializes the loads behind it (a 128x128 partial 84 us against 67).
     """
 
-    names: tuple[str, ...]
-    input: str
-    index: tuple[Expr, ...]
+    names: tuple[str, ...] = role("defines")
+    input: str = role("buffer_read")
+    # Read through: a data-dependent (gather) index like ``weight[(int)in0, a]`` reads ``in0``. Axis names appear
+    # among the reads too; every consumer resolves a read against the body's definitions, where axes are absent.
+    index: tuple[Expr, ...] = role("expr", "reads")
     dtype: DataType | None
     carried: str = ""  # a default, so a Load that does not set it renders (and keys) as before
 
@@ -114,43 +117,8 @@ class Load(Stmt):
     def is_scalar(self) -> bool:
         return len(self.names) == 1
 
-    def deps(self) -> tuple[str, ...]:
-        # SSA names this Load reads through its *index* — a data-dependent
-        # (gather) index like ``weight[(int)in0, a]`` reads ``in0``. Returns
-        # the index Exprs' free Vars (first-use order, de-duped). Axis-name
-        # Vars (``a0``, ``a1``) appear too, but every consumer resolves deps
-        # against the body's ``definitions``, where axes are absent — so they
-        # pass through as no-ops, exactly as ``Expr.rename`` and
-        # the dataflow helpers already assume.
-        return tuple(dict.fromkeys(v for e in self.index for v in e.free_vars()))
 
-    def defines(self) -> tuple[str, ...]:
-        return self.names
-
-    def external_reads(self) -> tuple[str, ...]:
-        return (self.input,)
-
-    def rename_buffers(self, rename):  # noqa: ANN001 — see ``Stmt.rename_buffers``
-        new = rename.get(self.input, self.input)
-        return self if new == self.input else self.replace(input=new)
-
-    def exprs(self) -> tuple[Expr, ...]:
-        return self.index
-
-    def with_exprs(self, exprs: tuple[Expr, ...]) -> Stmt:
-        return self.replace(index=exprs)
-
-    def is_literal(self, literal_constants: dict[str, float]) -> bool:
-        return self.input in literal_constants
-
-    def _rewrite(self, rename, sigma, axis_fn):  # noqa: ANN001, ANN202 — see ``Stmt.rewrite``
-        return self.replace(
-            names=tuple(rename(n) for n in self.names),
-            index=tuple(sigma.apply(e).rename(rename) for e in self.index),
-        )
-
-
-@dataclass(frozen=True)
+@kind
 class Assign(Stmt):
     """Pure SSA body statement: ``name = op(args)``.
 
@@ -166,9 +134,9 @@ class Assign(Stmt):
     in ``__half`` end to end without spurious promotions.
     """
 
-    name: str
+    name: str = role("defines")
     op: ElementwiseImpl
-    args: tuple[str, ...]
+    args: tuple[str, ...] = role("reads")
     dtype: DataType | None = None
 
     pure = True  # a pure value binding — legal inside a stored ``Lambda`` body
@@ -177,17 +145,8 @@ class Assign(Stmt):
         if isinstance(self.op, str):
             object.__setattr__(self, "op", ElementwiseImpl(self.op))
 
-    def deps(self) -> tuple[str, ...]:
-        return self.args
 
-    def defines(self) -> tuple[str, ...]:
-        return (self.name,)
-
-    def _rewrite(self, rename, sigma, axis_fn):  # noqa: ANN001, ANN202 — see ``Stmt.rewrite``
-        return Assign(name=rename(self.name), op=self.op, args=tuple(rename(a) for a in self.args), dtype=self.dtype)
-
-
-@dataclass(frozen=True)
+@kind
 class Affine(Stmt):
     """Pure SSA body statement: ``name = offset + Σ coefficient·arg``.
 
@@ -198,8 +157,8 @@ class Affine(Stmt):
     literal operand is a coefficient or the ``offset``. A product of two values stays an ``Assign``.
     """
 
-    name: str
-    args: tuple[str, ...]
+    name: str = role("defines")
+    args: tuple[str, ...] = role("reads")
     coefficients: tuple[float, ...]
     offset: float = 0.0
     dtype: DataType | None = None
@@ -219,12 +178,6 @@ class Affine(Stmt):
     @property
     def terms(self) -> tuple[tuple[float, str], ...]:
         return tuple(zip(self.coefficients, self.args, strict=True))
-
-    def deps(self) -> tuple[str, ...]:
-        return self.args
-
-    def defines(self) -> tuple[str, ...]:
-        return (self.name,)
 
     def as_assigns(self) -> list[Stmt]:
         """The same value as binary ``Assign``s over ``Let``-bound literals, the last one named ``name``: for a
@@ -257,9 +210,6 @@ class Affine(Stmt):
             out.append(Assign(self.name, "copy", (total,), self.dtype))
         return out
 
-    def _rewrite(self, rename, sigma, axis_fn):  # noqa: ANN001, ANN202 — see ``Stmt.rewrite``
-        return self.replace(name=rename(self.name), args=tuple(rename(a) for a in self.args))
-
 
 def binary(stmts) -> tuple[Stmt, ...]:  # noqa: ANN001 — any iterable of Stmt
     """``stmts`` with every ``Affine`` spelled as its binary ``Assign``s, for a lowering that evaluates one
@@ -284,7 +234,7 @@ def _rewrite_axis_name(name: str, sigma: Sigma) -> tuple[str, ...]:
     return tuple(sorted(replacement.free_vars()))
 
 
-@dataclass(frozen=True)
+@kind
 class Accum(Stmt):
     """Reduce accumulator — declares-and-folds in one statement.
 
@@ -310,8 +260,8 @@ class Accum(Stmt):
     tuple = legacy/handwritten path with no reduction-axis info.
     """
 
-    name: str
-    value: str
+    name: str = role("defines")  # the carried read of ``name`` is implicit, as in the default fold
+    value: str = role("reads")
     op: ElementwiseImpl = field(default_factory=lambda: ElementwiseImpl("add"))
     # Optional accumulator dtype. ``None`` in Loop IR — derived at lowering
     # time. The Init-placement pass freezes this to a concrete
@@ -329,7 +279,7 @@ class Accum(Stmt):
     # binding ``base`` (e.g. ``lm = l·alpha``), so the fold itself stays an ``Accum``
     # whose seed is still ``op.identity``. The seed (and ``Loop``'s render's per-Accum
     # init) is unchanged — ``base`` only redirects the in-loop left operand.
-    base: str | None = None
+    base: str | None = role("reads", default=None)
 
     def __post_init__(self) -> None:
         if isinstance(self.op, str):
@@ -342,29 +292,6 @@ class Accum(Stmt):
         """Identity value for the accumulator (from the op's metadata)."""
         identity = self.op.identity
         return Literal(identity if identity is not None else 0.0)
-
-    def deps(self) -> tuple[str, ...]:
-        # ``base`` (when it redirects the left operand) is a same-scope read; the
-        # carried ``name`` read is implicit (loop-carried), like the default fold.
-        if self.base is not None and self.base != self.name:
-            return (self.value, self.base)
-        return (self.value,)
-
-    def defines(self) -> tuple[str, ...]:
-        return (self.name,)
-
-    def carried_names(self) -> tuple[str, ...]:
-        return (self.name,)
-
-    def combine_operands(self) -> tuple[str, ...]:
-        return (f"{self.name}__o",)
-
-    def combine_partials(self) -> tuple[Assign, ...]:
-        """The scalar op-fold of two partials: ``name = op(name, name__o)`` — the
-        same combine the cooperative / split-K realizations apply, reified as a
-        one-``Assign`` program so the decomposition move reads it uniformly with
-        the stored combine's state⊕state re-emission."""
-        return (Assign(name=self.name, op=self.op, args=(self.name, f"{self.name}__o"), dtype=self.dtype),)
 
     # Algebraic traits forward to the scalar combine op — a ``max`` Accum and a
     # ``sum`` Accum differ, and ``self.op`` is the source of truth.
@@ -381,19 +308,14 @@ class Accum(Stmt):
         return self.op.has_identity
 
     def _rewrite(self, rename, sigma, axis_fn):  # noqa: ANN001, ANN202 — see ``Stmt.rewrite``
-        new_axes = tuple(sorted({rename(n) for old in self.axes for n in _rewrite_axis_name(old, sigma)}))
-        return Accum(
-            name=rename(self.name),
-            value=rename(self.value),
-            op=self.op,
-            dtype=self.dtype,
-            axes=new_axes,
-            base=rename(self.base) if self.base is not None else None,
-        )
+        # The reduced axes are names a substitution can split, which no role says.
+        axes = tuple(sorted({rename(n) for old in self.axes for n in _rewrite_axis_name(old, sigma)}))
+        rewritten = rewrite_by_roles(self, rename, sigma, axis_fn)
+        return rewritten if axes == self.axes else rewritten.replace(axes=axes)
 
 
 #: The suffix of the slot a :class:`Carry` defines during a step.
-@dataclass(frozen=True)
+@kind
 class Carry(Stmt):
     """The next value of one cell of a CARRIED STATE: ``name[index] <- value``.
 
@@ -408,19 +330,13 @@ class Carry(Stmt):
     cannot. One statement defines a state; a cell it skips keeps its value.
     """
 
-    name: str
-    value: str
-    index: tuple[Expr, ...]
+    name: str = role("defines")
+    value: str = role("reads")
+    index: tuple[Expr, ...] = role("expr")
     #: What the state holds before the first step: a constant, or the name of a buffer of the
     #: state's shape read cell by cell — the tensor an unrolled loop started from.
-    seed: float | str
+    seed: float | str = role("buffer_read")
     dtype: DataType | None = None
-
-    def external_reads(self) -> tuple[str, ...]:
-        return (self.seed,) if isinstance(self.seed, str) else ()
-
-    def rename_buffers(self, rename):  # noqa: ANN001 — see ``Stmt.rename_buffers``
-        return self.replace(seed=rename.get(self.seed, self.seed)) if isinstance(self.seed, str) else self
 
     @property
     def cells(self) -> tuple[str, ...]:
@@ -428,27 +344,8 @@ class Carry(Stmt):
         normalization leaves where a size-one axis stood."""
         return tuple(e.name for e in self.index if isinstance(e, Var))
 
-    def deps(self) -> tuple[str, ...]:
-        return (self.value,)
 
-    def defines(self) -> tuple[str, ...]:
-        return (self.name,)
-
-    def carried_names(self) -> tuple[str, ...]:
-        return (self.name,)
-
-    def exprs(self) -> tuple[Expr, ...]:
-        return self.index
-
-    def with_exprs(self, exprs: tuple[Expr, ...]) -> Stmt:
-        return self.replace(index=exprs)
-
-    def _rewrite(self, rename, sigma, axis_fn):  # noqa: ANN001, ANN202 — see ``Stmt.rewrite``
-        index = tuple(sigma.apply(e).rename(rename) for e in self.index)
-        return Carry(name=rename(self.name), value=rename(self.value), index=index, seed=self.seed, dtype=self.dtype)
-
-
-@dataclass(frozen=True)
+@kind
 class Pre(Stmt):
     """A read of one cell of a carried state: ``name = carrier[index]``.
 
@@ -463,27 +360,12 @@ class Pre(Stmt):
 
     pure = True
 
-    name: str
-    carrier: str
-    index: tuple[Expr, ...]
-
-    def deps(self) -> tuple[str, ...]:
-        return tuple(dict.fromkeys((self.carrier, *(v for e in self.index for v in e.free_vars()))))
-
-    def defines(self) -> tuple[str, ...]:
-        return (self.name,)
-
-    def exprs(self) -> tuple[Expr, ...]:
-        return self.index
-
-    def with_exprs(self, exprs: tuple[Expr, ...]) -> Stmt:
-        return self.replace(index=exprs)
-
-    def _rewrite(self, rename, sigma, axis_fn):  # noqa: ANN001, ANN202 — see ``Stmt.rewrite``
-        return Pre(name=rename(self.name), carrier=rename(self.carrier), index=tuple(sigma.apply(e).rename(rename) for e in self.index))
+    name: str = role("defines")
+    carrier: str = role("reads")
+    index: tuple[Expr, ...] = role("expr", "reads")
 
 
-@dataclass(frozen=True)
+@kind
 class Init(Stmt):
     """Explicit accumulator / carried-state seed at this scope:
     ``<dtype> <name> = <identity>;`` — a scope-local declaration.
@@ -496,7 +378,7 @@ class Init(Stmt):
     (one scalar — 0 / 1 / -inf), held directly.
     """
 
-    name: str
+    name: str = role("defines")
     identity: float
     # Accumulator / state dtype — required. Placing an ``Init`` is the freeze
     # point; the pass that emits it must commit to a concrete dtype. The
@@ -510,19 +392,8 @@ class Init(Stmt):
 
             object.__setattr__(self, "dtype", _get(self.dtype))
 
-    def deps(self) -> tuple[str, ...]:
-        return ()
 
-    def defines(self) -> tuple[str, ...]:
-        return (self.name,)
-
-    def _rewrite(self, rename, sigma, axis_fn):  # noqa: ANN001, ANN202 — see ``Stmt.rewrite``
-        # ``identity`` is a constant scalar — only the name moves. Renamed in lockstep with
-        # the fold's ``Accum`` (registered above) so the seed stays paired.
-        return Init(name=rename(self.name), identity=self.identity, dtype=self.dtype)
-
-
-@dataclass(frozen=True)
+@kind
 class Let(Stmt):
     """A pure binding of one expression to an SSA name: ``<dtype> <name> = <value>;``.
 
@@ -537,25 +408,13 @@ class Let(Stmt):
 
     pure = True
 
-    name: str
-    value: Expr
+    name: str = role("defines")
+    value: Expr = role("expr", "reads")
     dtype: DataType | None = None
 
     def __post_init__(self) -> None:
         if isinstance(self.value, (int, float)):
             object.__setattr__(self, "value", Literal(float(self.value)))
-
-    def deps(self) -> tuple[str, ...]:
-        return tuple(dict.fromkeys(self.value.free_vars()))
-
-    def defines(self) -> tuple[str, ...]:
-        return (self.name,)
-
-    def exprs(self) -> tuple[Expr, ...]:
-        return (self.value,)
-
-    def with_exprs(self, exprs: tuple[Expr, ...]) -> Stmt:
-        return self.replace(value=exprs[0])
 
     def external_reads(self) -> tuple[str, ...]:
         return tuple(dict.fromkeys(e.buffer for e in self.value.subterms() if isinstance(e, FlatIndex)))
@@ -564,11 +423,8 @@ class Let(Stmt):
         value = self.value.rebuild(lambda e: replace(e, buffer=rename.get(e.buffer, e.buffer)) if isinstance(e, FlatIndex) else e)
         return self if value == self.value else self.replace(value=value)
 
-    def _rewrite(self, rename, sigma, axis_fn):  # noqa: ANN001, ANN202 — see ``Stmt.rewrite``
-        return Let(name=rename(self.name), value=sigma.apply(self.value).rename(rename), dtype=self.dtype)
 
-
-@dataclass(frozen=True, init=False)
+@kind(init=False)
 class Write(Stmt):
     """Write an SSA value (or N consecutive values) to ``output``.
 
@@ -594,9 +450,9 @@ class Write(Stmt):
     instead of querying ``ctx.ssa_dtypes`` at render time.
     """
 
-    output: str
-    index: tuple[Expr, ...]
-    values: tuple[str, ...]
+    output: str = role("buffer_write")
+    index: tuple[Expr, ...] = role("expr", "reads")
+    values: tuple[str, ...] = role("reads")
     value_dtype: DataType | None
     # An ``atomicAdd`` reduce-write (cross-CTA split-reduce, ``030_cut``'s atomic finalize):
     # every contributing CTA adds its partial into the SAME output cell, so the store is an
@@ -662,51 +518,23 @@ class Write(Stmt):
     def is_scalar(self) -> bool:
         return len(self.values) == 1
 
-    def deps(self) -> tuple[str, ...]:
-        # The stored values, then the SSA names the index reads — a scatter ``out[(int)idx] = v``
-        # reads ``idx``. Axis Vars pass through as no-ops, exactly as in ``Load.deps``.
-        return tuple(dict.fromkeys((*self.values, *(v for e in self.index for v in e.free_vars()))))
-
-    def external_writes(self) -> tuple[str, ...]:
-        return (self.output,)
-
-    def rename_buffers(self, rename):  # noqa: ANN001 — see ``Stmt.rename_buffers``
-        new = rename.get(self.output, self.output)
-        return self if new == self.output else self.replace(output=new)
-
-    def exprs(self) -> tuple[Expr, ...]:
-        return self.index
-
-    def with_exprs(self, exprs: tuple[Expr, ...]) -> Stmt:
-        return self.replace(index=exprs)
-
     @cached_property
     def has_side_effects(self) -> bool:
         return True
-
-    def _rewrite(self, rename, sigma, axis_fn):  # noqa: ANN001, ANN202 — see ``Stmt.rewrite``
-        return Write(
-            output=self.output,
-            index=tuple(sigma.apply(e).rename(rename) for e in self.index),
-            values=tuple(rename(n) for n in self.values),
-            value_dtype=self.value_dtype,
-            atomic=self.atomic,
-            swizzle=self.swizzle,
-        )
 
 
 @dataclass(frozen=True)
 class SelectBranch:
     """One branch of a ``Select`` body statement."""
 
-    value: str  # SSA name when predicate holds
-    select: Expr  # predicate over axis Vars
+    value: str = role("reads")  # SSA name when predicate holds
+    select: Expr = role("expr", "reads")  # predicate over axis Vars
 
     def replace(self, **changes) -> SelectBranch:  # noqa: ANN003 — field values
         return replace(self, **changes)
 
 
-@dataclass(frozen=True)
+@kind
 class Select(Stmt):
     """Coord-predicated value binding — replaces Mux.
 
@@ -718,33 +546,12 @@ class Select(Stmt):
 
     pure = True  # a coord-predicated value binding — no effect; legal inside a stored ``Lambda``
 
-    name: str
-    branches: tuple[SelectBranch, ...]
+    name: str = role("defines")
+    branches: tuple[SelectBranch, ...] = role("record")
 
     def __post_init__(self) -> None:
         if not self.branches:
             raise ValueError("Select.branches must be non-empty")
-
-    def deps(self) -> tuple[str, ...]:
-        return tuple(dict.fromkeys(name for b in self.branches for name in (b.value, *sorted(b.select.free_vars()))))
-
-    def defines(self) -> tuple[str, ...]:
-        return (self.name,)
-
-    def exprs(self) -> tuple[Expr, ...]:
-        return tuple(b.select for b in self.branches)
-
-    def with_exprs(self, exprs: tuple[Expr, ...]) -> Stmt:
-        return self.replace(branches=tuple(SelectBranch(b.value, select) for b, select in zip(self.branches, exprs, strict=True)))
-
-    def _rewrite(self, rename, sigma, axis_fn):  # noqa: ANN001, ANN202 — see ``Stmt.rewrite``
-        # A branch condition reads coordinates exactly as a Load index does: σ first, then the rename
-        # — an axis renumbering that reached the indices and not the conditions left the causal mask
-        # comparing loop variables its kernel no longer bound.
-        return Select(
-            name=rename(self.name),
-            branches=tuple(SelectBranch(value=rename(b.value), select=sigma.apply(b.select).rename(rename)) for b in self.branches),
-        )
 
 
 def mask_select_predicate(select: Select) -> Expr | None:
@@ -767,7 +574,7 @@ def mask_select_predicate(select: Select) -> Expr | None:
     return mask.select
 
 
-@dataclass(frozen=True)
+@kind
 class ZeroPrologue(Stmt):
     """Zero another launch's atomic accumulator from THIS kernel — the delegated zero-init
     (``lowering/cuda/005_delegate_zero_init``).
@@ -788,25 +595,12 @@ class ZeroPrologue(Stmt):
     the downstream kernel's own output). The slab planner learns the earlier first-write
     through ``CudaOp.zero_prologues`` instead."""
 
-    dst: str  # the delegated buffer (the downstream kernel's atomic accumulator)
+    dst: str = role("buffer_write")  # the delegated buffer (the downstream kernel's atomic accumulator)
     words: int  # 32-bit word count (nbytes / 4; the delegating rule guarantees divisibility)
-
-    def external_writes(self) -> tuple[str, ...]:
-        return (self.dst,)
-
-    def rename_buffers(self, rename):  # noqa: ANN001 — see ``Stmt.rename_buffers``
-        new = rename.get(self.dst, self.dst)
-        return self if new == self.dst else self.replace(dst=new)
 
     @cached_property
     def has_side_effects(self) -> bool:
         return True
-
-    def _rewrite(self, rename, sigma, axis_fn):  # noqa: ANN001, ANN202 — see ``Stmt.rewrite``
-        # Buffer name + word count only — like ``Write.output``, ``dst`` is a buffer, and buffers
-        # are not SSA names this rewrite renames. Identity, so a body carrying a delegated
-        # zero-init can normalize (``structural_key`` / ``cache_key`` on the carrying kernel).
-        return self
 
 
 @dataclass(frozen=True)

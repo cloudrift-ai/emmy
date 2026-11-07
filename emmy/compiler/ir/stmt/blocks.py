@@ -6,13 +6,13 @@ Each carries a child body (or two, for ``Cond``) and overrides
 
 from __future__ import annotations
 
-from dataclasses import dataclass
 from functools import cached_property
 
 from emmy.compiler.ir.axis import Axis
 from emmy.compiler.ir.expr import Expr, Var
 from emmy.compiler.ir.stmt.base import Stmt
 from emmy.compiler.ir.stmt.body import Body
+from emmy.compiler.ir.stmt.declared import kind, role
 from emmy.compiler.ir.stmt.leaves import Accum, Carry
 
 # The loop-carried reduce accumulators — a Loop is a *reduce* loop iff its immediate
@@ -43,7 +43,7 @@ def carried_cells(body: Body) -> dict[str, tuple[int | Axis, ...]]:
     return out
 
 
-@dataclass(frozen=True)
+@kind
 class Loop(Stmt):
     """Explicit iteration block — one loop over an axis.
 
@@ -69,8 +69,8 @@ class Loop(Stmt):
     ``Accum``\\ s in the body are the loop-level spelling; a loop folds iff its body carries one.
     """
 
-    axis: Axis
-    body: Body
+    axis: Axis = role("axis")
+    body: Body = role("body")
     unroll: bool = False
     seed: bool = True  # emit the per-Accum ``<acc> = identity;`` seed before the loop; False when a
     # nested drain whose accumulators are pre-seeded once outside an enclosing loop (the staged
@@ -81,19 +81,6 @@ class Loop(Stmt):
         # forcing every construction site to wrap explicitly.
         if not isinstance(self.body, Body):
             object.__setattr__(self, "body", Body(self.body))
-
-    def deps(self) -> tuple[str, ...]:
-        return ()
-
-    def nested(self) -> tuple[Body, ...]:
-        return (self.body,)
-
-    def with_bodies(self, bodies: tuple[Body, ...]) -> Stmt:
-        (body,) = bodies
-        return Loop(axis=self.axis, body=body, unroll=self.unroll, seed=self.seed)
-
-    def binds_axes(self) -> frozenset[str]:
-        return frozenset({self.axis.name})
 
     @cached_property
     def carries(self) -> dict[str, tuple[int | Axis, ...]]:
@@ -107,19 +94,8 @@ class Loop(Stmt):
         A loop over a state's CELLS carries nothing: it is a free loop the step runs under."""
         return any(isinstance(s, _CARRIERS) for s in self.body) or bool(self.carries)
 
-    def _rewrite(self, rename, sigma, axis_fn):  # noqa: ANN001, ANN202 — see ``Stmt.rewrite``
-        # Preserve the reduce ``role`` annotation through σ-offsets / axis-renames. The loop carries
-        # no algebra — the fold's ⊕ lives on the ``Fold`` node, whose own rewrite handler renames the
-        # stored combine in lockstep (``Lambda.rename``).
-        return Loop(
-            axis=axis_fn(self.axis),
-            body=tuple(c.rewrite(rename, sigma, axis_fn) for c in self.body),
-            unroll=self.unroll,
-            seed=self.seed,
-        )
 
-
-@dataclass(frozen=True)
+@kind
 class StridedLoop(Stmt):
     """Strided iteration: ``for (axis = start; axis < axis.extent; axis += step)``.
 
@@ -137,12 +113,12 @@ class StridedLoop(Stmt):
     Reduction detection mirrors ``Loop``: a ``StridedLoop`` is a
     reduce-loop iff its body contains an ``Accum``."""
 
-    axis: Axis
-    start: Expr
-    step: Expr
-    body: Body
+    axis: Axis = role("axis")
+    start: Expr = role("expr")
+    step: Expr = role("expr")
+    body: Body = role("body")
     unroll: bool = False
-    end: Expr | None = None
+    end: Expr | None = role("expr", default=None)
     seed: bool = True  # emit the per-``Accum`` identity seed before the loop; False when the
     # carrier this loop folds is declared once OUTSIDE it at a seed the term names and the ⊕'s
     # identity does not (a twisted carrier's pivot seeds at the term's own ``init``, not at
@@ -152,36 +128,9 @@ class StridedLoop(Stmt):
         if not isinstance(self.body, Body):
             object.__setattr__(self, "body", Body(self.body))
 
-    def deps(self) -> tuple[str, ...]:
-        return ()
-
-    def nested(self) -> tuple[Body, ...]:
-        return (self.body,)
-
-    def with_bodies(self, bodies: tuple[Body, ...]) -> Stmt:
-        (body,) = bodies
-        return StridedLoop(
-            axis=self.axis,
-            start=self.start,
-            step=self.step,
-            body=body,
-            unroll=self.unroll,
-            end=self.end,
-            seed=self.seed,
-        )
-
     def binds_axes(self) -> frozenset[str]:
         # An ``end`` override is hoisted into the for-init as ``<var>_end``, which the body may read.
         return frozenset({self.axis.name, f"{self.axis.name}_end"} if self.end is not None else {self.axis.name})
-
-    def exprs(self) -> tuple[Expr, ...]:
-        out = (self.start, self.step) if isinstance(self.step, Expr) else (self.start,)
-        return (*out, self.end) if self.end is not None else out
-
-    def with_exprs(self, exprs: tuple[Expr, ...]) -> Stmt:
-        start, *rest = exprs
-        step = rest.pop(0) if isinstance(self.step, Expr) else self.step
-        return self.replace(start=start, step=step, end=rest[0] if rest else None)
 
     @property
     def is_reduce(self) -> bool:
@@ -189,23 +138,8 @@ class StridedLoop(Stmt):
         read off the body, never annotated."""
         return any(isinstance(s, _CARRIERS) for s in self.body)
 
-    def _rewrite(self, rename, sigma, axis_fn):  # noqa: ANN001, ANN202 — see ``Stmt.rewrite``
-        def _expr(expr: Expr) -> Expr:
-            return sigma.apply(expr).rename(rename)
 
-        step = _expr(self.step) if isinstance(self.step, Expr) else self.step
-        return StridedLoop(
-            axis=axis_fn(self.axis),
-            start=_expr(self.start),
-            step=step,
-            body=tuple(c.rewrite(rename, sigma, axis_fn) for c in self.body),
-            unroll=self.unroll,
-            end=_expr(self.end) if self.end is not None else None,
-            seed=self.seed,
-        )
-
-
-@dataclass(frozen=True)
+@kind
 class Cond(Stmt):
     """Conditional block — ``if (cond) { body } [else { else_body }]``.
 
@@ -224,9 +158,9 @@ class Cond(Stmt):
     own deps; the recursive walker picks them up.
     """
 
-    cond: Expr
-    body: Body
-    else_body: Body = Body()
+    cond: Expr = role("expr", "reads")
+    body: Body = role("body")
+    else_body: Body = role("body", default=Body())
 
     def __post_init__(self) -> None:
 
@@ -234,26 +168,3 @@ class Cond(Stmt):
             object.__setattr__(self, "body", Body(self.body))
         if not isinstance(self.else_body, Body):
             object.__setattr__(self, "else_body", Body(self.else_body))
-
-    def deps(self) -> tuple[str, ...]:
-        return tuple(self.cond.free_vars())
-
-    def nested(self) -> tuple[Body, ...]:
-        return (self.body, self.else_body)
-
-    def with_bodies(self, bodies: tuple[Body, ...]) -> Stmt:
-        body, else_body = bodies
-        return Cond(cond=self.cond, body=body, else_body=else_body)
-
-    def exprs(self) -> tuple[Expr, ...]:
-        return (self.cond,)
-
-    def with_exprs(self, exprs: tuple[Expr, ...]) -> Stmt:
-        return self.replace(cond=exprs[0])
-
-    def _rewrite(self, rename, sigma, axis_fn):  # noqa: ANN001, ANN202 — see ``Stmt.rewrite``
-        return Cond(
-            cond=sigma.apply(self.cond).rename(rename),
-            body=tuple(c.rewrite(rename, sigma, axis_fn) for c in self.body),
-            else_body=tuple(c.rewrite(rename, sigma, axis_fn) for c in self.else_body),
-        )

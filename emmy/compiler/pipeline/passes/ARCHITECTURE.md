@@ -795,8 +795,8 @@ chain `f_j(f_{j−1}(… f_1(0)))` as its own operand cone, so the state is re-d
 `j`'s stored.
 
 `loop/fusion/005_roll_recurrence` rolls it BEFORE fusion inlines it, while the structure is still plain. The states
-are a chain of nodes of one shape — the same body once its integer literals are taken out (`Body.literal_free_key`:
-load anchors, mask bounds, static loop extents) — each depending on the last. A step is what lies between two of
+are a chain of nodes of one shape — the same body once its integer literals are taken out (load
+anchors, mask bounds, static loop extents) — each depending on the last. A step is what lies between two of
 them, `ancestors(S_{j+1}) − ancestors(S_j)`; the first step is what the first state needs beyond what every step
 reads, and its state is the seed: the one buffer of the state's shape whose ancestry, taken out, leaves a first step
 shaped like every later one — the zeros the loop was seeded with, or the tensor it started from (a softmax before a

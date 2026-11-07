@@ -551,7 +551,7 @@ def render_body(body: Body, ctx: RenderCtx) -> list[str]:
         for s in body:
             # Literal-const Loads are always scalar (the vectorize pass
             # excludes literal-const buffers from its widening logic).
-            if isinstance(s, Load) and s.is_scalar and s.is_literal(ctx.literal_constants) and not _integer_load(s):
+            if isinstance(s, Load) and s.is_scalar and s.input in ctx.literal_constants and not _integer_load(s):
                 new_map[s.name] = ctx.literal_constants[s.input]
                 changed = True
         if changed:
@@ -631,7 +631,7 @@ def render_body(body: Body, ctx: RenderCtx) -> list[str]:
 
     out: list[str] = []
     for s in body:
-        if isinstance(s, Load) and s.is_scalar and s.name in ctx.literal_ssa and s.is_literal(ctx.literal_constants):
+        if isinstance(s, Load) and s.is_scalar and s.name in ctx.literal_ssa and s.input in ctx.literal_constants:
             continue  # its value inlines at every use site
         if isinstance(s, Assign) and s.name in inlined:
             continue  # folded into its consumer

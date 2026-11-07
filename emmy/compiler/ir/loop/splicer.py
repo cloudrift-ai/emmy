@@ -53,7 +53,7 @@ before-use. The exception is the dedup case: when a stmt's operand
 hits an existing binding emitted earlier in the worklist, the new stmt
 still prepends above the existing one — landing above its own dep.
 That sibling inversion is fixed up by the generic
-``topo_sort_siblings`` pass in :mod:`emmy.compiler.ir.stmt.normalize`,
+``topological_sort`` step of body normalization,
 which runs inside ``LoopOp.__post_init__`` — so the splicer doesn't
 need its own ordering pass; constructing the ``LoopOp`` is enough.
 """
