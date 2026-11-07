@@ -217,7 +217,7 @@ fn ordered(body: &Body, numbering: &Numbering) -> Result<Body> {
         .collect();
     let incoming = ordering_constraints(&rebuilt, true, true);
     let order =
-        rebuilt.topological_permutation(&incoming, Some(&|index| priorities[index].clone()))?;
+        rebuilt.topological_permutation(&incoming, Some(&|index| priorities[index].clone()));
     Ok(rebuilt.rebuilt(
         order
             .into_iter()

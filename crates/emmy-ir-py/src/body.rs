@@ -349,9 +349,9 @@ impl PyBody {
 
     /// Kahn's order over indexed predecessor sets, as source indices.
     fn _topological_permutation(&self, incoming: &Bound<'_, PyAny>) -> PyResult<Vec<usize>> {
-        self.body
-            .topological_permutation::<()>(&incoming_from_py(incoming)?, None)
-            .py()
+        Ok(self
+            .body
+            .topological_permutation::<()>(&incoming_from_py(incoming)?, None))
     }
 
     /// This body in topological order under `incoming`.
@@ -369,8 +369,7 @@ impl PyBody {
         let ordered = slf
             .get()
             .body
-            .topological_order(&incoming_from_py(incoming)?)
-            .py()?;
+            .topological_order(&incoming_from_py(incoming)?);
         if ordered.ptr_eq(&slf.get().body) {
             return Ok(slf.clone());
         }

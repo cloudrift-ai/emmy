@@ -5,9 +5,9 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
+use crate::Name;
 use crate::body::{Body, free_ssa, ordered_sibling_defs};
 use crate::kinds::Statement;
-use crate::{Name, Result};
 
 /// The buffers a statement reads and writes and the carried states it updates, over its whole subtree.
 fn resources(stmt: &Statement) -> (HashSet<Name>, HashSet<Name>, HashSet<Name>) {
@@ -149,15 +149,14 @@ pub fn ordering_constraints(
 }
 
 /// Stable recursive dependency sort used before structural normalization.
-pub fn topological_sort(body: &Body) -> Result<Body> {
-    let sorted = body.try_map_each(&mut |stmt| {
+pub fn topological_sort(body: &Body) -> Body {
+    let sorted = body.map_each(&mut |stmt| {
         let nested = stmt.nested();
         if nested.is_empty() {
-            return Ok(stmt.clone());
+            return stmt.clone();
         }
-        let bodies: Result<Vec<Body>> = nested.iter().map(topological_sort).collect();
-        Ok(Statement::rebuild_bodies(stmt, bodies?))
-    })?;
+        Statement::rebuild_bodies(stmt, nested.iter().map(topological_sort).collect())
+    });
     sorted.topological_order(&ordering_constraints(&sorted, false, false))
 }
 
