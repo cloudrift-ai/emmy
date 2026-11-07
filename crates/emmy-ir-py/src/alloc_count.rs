@@ -1,6 +1,6 @@
 //! A counting allocator, built in with the `alloc-count` feature: how many heap allocations the process made, how
-//! many bytes they asked for and how many distinct names it interned, read from Python as `alloc_count()`. The measurement behind a storage change in the
-//! crate; a wheel is built without it.
+//! many bytes they asked for and how many distinct names it interned, read from Python as `alloc_count()`. The
+//! measurement behind a storage change in the crate; a wheel is built without it.
 
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -36,9 +36,10 @@ static ALLOCATOR: Counting = Counting;
 
 /// The heap allocations the extension has made so far and the bytes they asked for.
 #[pyfunction]
-pub fn alloc_count() -> (u64, u64) {
+pub fn alloc_count() -> (u64, u64, usize) {
     (
         ALLOCATIONS.load(Ordering::Relaxed),
         BYTES.load(Ordering::Relaxed),
+        emmy_ir::Name::interned(),
     )
 }

@@ -863,9 +863,9 @@ impl Expression {
         (**self).each_child(&mut |child| child.collect_free_vars(out));
     }
 
-    pub fn reads(&self, name: &str) -> bool {
+    pub fn reads(&self, name: Name) -> bool {
         if let Expr::Var(n) = &**self {
-            return &**n == name;
+            return *n == name;
         }
         let mut found = false;
         (**self).each_child(&mut |child| found |= child.reads(name));
@@ -885,9 +885,9 @@ impl Expression {
     }
 
     /// Every free variable's name mapped through `rename`; a name the function keeps passes through.
-    pub fn rename(&self, rename: &mut dyn FnMut(&str) -> Option<Name>) -> Expression {
+    pub fn rename(&self, rename: &mut dyn FnMut(Name) -> Option<Name>) -> Expression {
         match &**self {
-            Expr::Var(name) => match rename(name) {
+            Expr::Var(name) => match rename(*name) {
                 Some(new) if new != *name => Expression::new(Expr::Var(new)),
                 _ => self.clone(),
             },
@@ -901,7 +901,7 @@ impl Expression {
         if mapping.is_empty() {
             return self.clone();
         }
-        self.rename(&mut |name| mapping.get(&Name::new(name)).cloned())
+        self.rename(&mut |name| mapping.get(&name).copied())
     }
 
     /// Bottom-up map: `f` applied to every subterm once its children are rebuilt.

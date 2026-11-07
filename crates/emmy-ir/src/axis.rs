@@ -134,13 +134,13 @@ impl Axis {
     }
 
     /// This axis with its name and every name its window spells mapped through `rename`.
-    pub fn renamed(&self, rename: &mut dyn FnMut(&str) -> Option<Name>) -> Arc<Axis> {
-        fn tree(axis: &Axis, rename: &mut dyn FnMut(&str) -> Option<Name>, depth: usize) -> Axis {
+    pub fn renamed(&self, rename: &mut dyn FnMut(Name) -> Option<Name>) -> Arc<Axis> {
+        fn tree(axis: &Axis, rename: &mut dyn FnMut(Name) -> Option<Name>, depth: usize) -> Axis {
             let window = axis.window.as_ref().map(|window| {
                 let parent = window.parent.as_ref().map(|parent| {
                     if depth > 32 {
                         Arc::new(Axis {
-                            name: rename(&parent.name).unwrap_or_else(|| parent.name),
+                            name: rename(parent.name).unwrap_or(parent.name),
                             ..(**parent).clone()
                         })
                     } else {
@@ -155,7 +155,7 @@ impl Axis {
                 }
             });
             Axis {
-                name: rename(&axis.name).unwrap_or(axis.name),
+                name: rename(axis.name).unwrap_or(axis.name),
                 extent: axis.extent.clone(),
                 window,
             }

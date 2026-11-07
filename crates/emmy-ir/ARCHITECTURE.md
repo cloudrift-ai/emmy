@@ -12,32 +12,32 @@ body and the normal form ARE; this file says how the crate holds them.
 ## Layout
 
 The module tree follows the design, one module per concept, and the modules stand in a tower: each imports only the ones
-below it, `field`, `statement` and `body` aside, which define each other's types. From the bottom: `expr/` (the tree,
-its text, the simplifier's walk and the range analysis in `mod.rs`, the simplifier's rewrite rules and the affine form
-in `simplify.rs`, the reader in `parse.rs`), `memo.rs` (the memo store every memo is declared in), `elementwise.rs` (the
-operation table), `dtype.rs` (the dtype set and promotion, which reads the table), `axis.rs` (axes with their speller,
-and the keywords a statement's text reserves), `numbering/key.rs` (the `Key` tree and its hash, over expressions alone),
-`field.rs` (the `Field` trait and the field value types), `statement.rs` (the declaration list of the statement types
-and its macros), `body.rs`, `protocol/` (the protocol in `mod.rs`, what the shared statement types answer beyond their
-fields in `shared.rs`, the construction checks in `checks.rs`), `text/` (the printer in `print.rs`, the reader in
-`parse.rs`, what both spell in `mod.rs`), `order.rs` (the dependency constraints; the sort they feed is a `Body`
-method), the rest of `numbering/` (the value numbering in `values.rs`, the scope-tree digest in `digest.rs`),
-`normalize/` (the driver and the helpers the steps share in `mod.rs`, the steps by what they do: `axes`, `fold`,
-`siblings`, `simplify`, `place`, `canonical`, and every tie-break in `ties.rs`) and `identity.rs` (the identity of a
-body's normal form). Every file imports what it uses by name; no child module takes its parent's imports.
+below it, `field`, `statement` and `body` aside, which define each other's types. From the bottom: `name.rs` (interned
+names), `expr/` (the tree, its text, the simplifier's walk and the range analysis in `mod.rs`, the simplifier's rewrite
+rules and the affine form in `simplify.rs`, the reader in `parse.rs`), `memo.rs` (the memo store every memo is declared
+in), `elementwise.rs` (the operation table), `dtype.rs` (the dtype set and promotion, which reads the table), `axis.rs`
+(axes with their speller, and the keywords a statement's text reserves), `numbering/key.rs` (the `Key` tree and its
+hash, over expressions alone), `field.rs` (the `Field` trait and the field value types), `statement.rs` (the declaration
+list of the statement types and its macros), `body.rs`, `protocol/` (the protocol in `mod.rs`, what the shared statement
+types answer beyond their fields in `shared.rs`, the construction checks in `checks.rs`), `text/` (the printer in
+`print.rs`, the reader in `parse.rs`, what both spell in `mod.rs`), `order.rs` (the dependency constraints; the sort
+they feed is a `Body` method), the rest of `numbering/` (the value numbering in `values.rs`, the scope-tree digest in
+`digest.rs`), `normalize/` (the driver and the helpers the steps share in `mod.rs`, the steps by what they do: `axes`,
+`fold`, `siblings`, `simplify`, `place`, `canonical`, and every tie-break in `ties.rs`) and `identity.rs` (the identity
+of a body's normal form). Every file imports what it uses by name; no child module takes its parent's imports.
 
 ## Data
 
-- A name is an interned symbol (`name.rs`); a tuple of names, expressions or axes an `Arc<[…]>`; an expression an `Arc<Node>` (its tree
-  with its height); a body an `Arc<BodyData>`. A rebuild that changes nothing returns the object it was given, so
-  every walk tells a change by pointer and a Python wrapper can hand back the same object.
-- **Names** (`name.rs`): a name is a symbol into one process-wide table, interned on construction (`Name::new`,
-  `From<&str>`), so equality and hashing are integer compares and a copy is a word; `Deref<Target = str>` and `Display`
-  resolve its text, and a name orders by its text, as the canonical order sorts names and as every digest spells them
-  (`Key::Str` holds a name and feeds its text bytes), so an interned name moves no identity. The table never frees; a
-  lowering mints names a body at a time, and the distinct names of the A100 golden's fresh lowering and the corpus stay
-  in the tens of thousands. A map keyed by names is looked up by a name, so a text looks itself up by interning first
-  (`map.get(&Name::new(text))`).
+- A name is an interned symbol (`name.rs`); a tuple of names, expressions or axes an `Arc<[…]>`; an expression an
+  `Arc<Node>` (its tree with its height); a body an `Arc<BodyData>`. A rebuild that changes nothing returns the object
+  it was given, so every walk tells a change by pointer and a Python wrapper can hand back the same object.
+- **Names** (`name.rs`): a name is its text, kept once in one process-wide table that never frees (`Name::new`,
+  `From<&str>`), so equality and hashing compare the pointer, a copy is a word and `Deref<Target = str>` costs nothing;
+  a name orders by its text, as the canonical order sorts names and as every digest spells them (`Key::Str` holds a name
+  and feeds its text bytes), so an interned name moves no identity. Only names are interned: a text that is digest
+  material and not a name (a body's text, a statement's spelling, an axis header) is a `Key::Text`, which hashes the
+  same bytes and is kept by no table. A lowering mints names a body at a time; the A100 golden's fresh lowering and the
+  corpus together intern some twenty thousand.
 - **Expressions** (`expr/`): eight expression types declared once in the `with_exprs!` macro (the variant, its Python
   class and its fields), which generates the `enum Expr`, the walks every expression type answers through its fields
   (children, height, the rebuilds) and, in the extension, the classes with a getter per field; the printer and the

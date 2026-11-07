@@ -12,8 +12,8 @@ use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyFrozenSet, PyList, PyString, PyTuple};
 
 use crate::convert::{
-    IntoPyErr, PARSE, PyField, cached, expression_from_py, located, num_from_py, num_to_py,
-    translate,
+    IntoPyErr, PARSE, PyField, cached, expression_from_py, located, name_from_py, num_from_py,
+    num_to_py, translate,
 };
 
 /// The base class of every expression node: the shared tree, and the Python objects its fields hand back.
@@ -203,7 +203,7 @@ pub fn mapping_from_py(value: &Bound<'_, PyAny>) -> PyResult<HashMap<Name, Expre
         .map_err(|_| PyTypeError::new_err("expected a dict of name -> Expression"))?;
     let mut out = HashMap::new();
     for (key, item) in dict.iter() {
-        out.insert(key.extract::<String>()?.into(), expression_from_py(&item)?);
+        out.insert(name_from_py(&key)?, expression_from_py(&item)?);
     }
     Ok(out)
 }
@@ -214,10 +214,7 @@ pub fn renames_from_py(value: &Bound<'_, PyAny>) -> PyResult<HashMap<Name, Name>
         .map_err(|_| PyTypeError::new_err("expected a dict of name -> name"))?;
     let mut out = HashMap::new();
     for (key, item) in dict.iter() {
-        out.insert(
-            key.extract::<String>()?.into(),
-            item.extract::<String>()?.into(),
-        );
+        out.insert(name_from_py(&key)?, name_from_py(&item)?);
     }
     Ok(out)
 }
@@ -640,13 +637,13 @@ impl PySimplifyCtx {
                     .map_err(|_| PyTypeError::new_err("ranges hold Interval values"))?
                     .get()
                     .interval;
-                ctx.ranges.insert(key.extract::<String>()?.into(), interval);
+                ctx.ranges.insert(name_from_py(&key)?, interval);
             }
         }
         if let Some(bounds) = bounds {
             for (key, value) in bounds.iter() {
                 ctx.bounds
-                    .insert(key.extract::<String>()?.into(), expression_from_py(&value)?);
+                    .insert(name_from_py(&key)?, expression_from_py(&value)?);
             }
         }
         Ok(PySimplifyCtx { ctx })
@@ -733,13 +730,13 @@ pub fn affine_form<'py>(
     expression: &Bound<'py, PyAny>,
     vars: &Bound<'py, PyAny>,
 ) -> PyResult<Option<(Bound<'py, PyAny>, Bound<'py, PyDict>)>> {
-    let names: Vec<String> = vars
+    let names: Vec<Name> = vars
         .try_iter()?
-        .map(|item| item?.extract::<String>())
+        .map(|item| name_from_py(&item?))
         .collect::<PyResult<_>>()?;
     let expression = expression_from_py(expression)?;
     let Some((anchor, coeffs)) =
-        emmy_ir::expr::affine_form(&expression, &|name| names.iter().any(|n| n == name))
+        emmy_ir::expr::affine_form(&expression, &|name| names.contains(&name))
     else {
         return Ok(None);
     };
@@ -774,7 +771,7 @@ pub fn index_set_size(
         .collect();
     let mut extents: HashMap<Name, i64> = HashMap::new();
     for (key, value) in var_extents.iter() {
-        extents.insert(key.extract::<String>()?.into(), value.extract()?);
+        extents.insert(name_from_py(&key)?, value.extract()?);
     }
     Ok(emmy_ir::expr::index_set_size(&expressions?, &extents))
 }

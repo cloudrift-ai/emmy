@@ -270,6 +270,14 @@ pub trait PyField: Sized {
     fn from_py(value: &Bound<'_, PyAny>) -> PyResult<Extracted<Self>>;
 }
 
+/// A Python string as a name, interned without a copy.
+pub fn name_from_py(value: &Bound<'_, PyAny>) -> PyResult<Name> {
+    let text = value
+        .cast::<PyString>()
+        .map_err(|_| PyTypeError::new_err(format!("expected a name, got {}", type_name(value))))?;
+    Ok(Name::new(text.to_str()?))
+}
+
 impl PyField for Name {
     fn to_py(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
         Ok(PyString::new(py, self).into_any().unbind())

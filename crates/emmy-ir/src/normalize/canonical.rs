@@ -278,8 +278,7 @@ fn affine(expression: Expression, axis_order: &HashMap<Name, usize>) -> Result<E
     if variables.is_empty() || !variables.iter().all(|v| axis_order.contains_key(v)) {
         return Ok(expression);
     }
-    let Some((anchor, coefficients)) =
-        affine_form(&expression, &|name| variables.iter().any(|v| &**v == name))
+    let Some((anchor, coefficients)) = affine_form(&expression, &|name| variables.contains(&name))
     else {
         return Ok(expression);
     };

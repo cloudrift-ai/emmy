@@ -10,7 +10,7 @@ pub mod expr;
 pub mod field;
 pub mod identity;
 pub mod memo;
-pub mod name;
+mod name;
 pub mod normalize;
 pub mod numbering;
 pub mod order;
@@ -102,17 +102,5 @@ macro_rules! closed_set {
 pub fn locked<T>(mutex: &std::sync::Mutex<T>) -> std::sync::MutexGuard<'_, T> {
     mutex
         .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
-}
-
-/// A read-write lock's read guard, reopened when a panic elsewhere poisoned it (see [`locked`]).
-pub fn locked_read<T>(lock: &std::sync::RwLock<T>) -> std::sync::RwLockReadGuard<'_, T> {
-    lock.read()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
-}
-
-/// A read-write lock's write guard, reopened when a panic elsewhere poisoned it (see [`locked`]).
-pub fn locked_write<T>(lock: &std::sync::RwLock<T>) -> std::sync::RwLockWriteGuard<'_, T> {
-    lock.write()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
 }

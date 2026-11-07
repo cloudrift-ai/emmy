@@ -101,10 +101,10 @@ pub(crate) fn output_storage_depth(stmts: &Body, axis: &Name) -> Option<usize> {
         };
         let mut positions = Vec::new();
         for (position, expression) in w.index.iter().enumerate() {
-            if !expression.reads(axis) {
+            if !expression.reads(*axis) {
                 continue;
             }
-            if let Some((_, coeffs)) = affine_form(expression, &|name| name == &**axis)
+            if let Some((_, coeffs)) = affine_form(expression, &|name| name == **axis)
                 && coeffs.get(axis).copied().unwrap_or(0) != 1
             {
                 return None;
@@ -252,7 +252,7 @@ pub fn canonicalize_free_axis_order(body: &Body) -> Result<Body> {
                 return Ok(Key::None);
             };
             Ok(Key::tuple([
-                Key::str(&crate::axis::spell_axis(&renamed.axis, None)?),
+                Key::text(crate::axis::spell_axis(&renamed.axis, None)?),
                 Key::Bool(renamed.unroll),
                 Key::Bool(renamed.seed),
             ]))

@@ -535,9 +535,9 @@ impl SimplifyCtx {
 /// `expression` as `anchor + Σ coeffs[v]·v` over `vars`; `None` when it is not affine in them.
 pub fn affine_form(
     expression: &Expression,
-    vars: &dyn Fn(&str) -> bool,
+    vars: &dyn Fn(Name) -> bool,
 ) -> Option<(Expression, BTreeMap<Name, i64>)> {
-    let uses = |e: &Expression| e.free_vars().into_iter().any(|name| vars(&name));
+    let uses = |e: &Expression| e.free_vars().into_iter().any(vars);
     if !uses(expression) {
         return Some((expression.clone(), BTreeMap::new()));
     }
@@ -590,7 +590,7 @@ pub fn affine_form(
 /// `expression` as `(its integer anchor, the rest)`, or `None` when it is not affine with a literal anchor.
 pub fn split_anchor(expression: &Expression) -> Option<(i64, Expression)> {
     let free = expression.free_vars();
-    let (anchor, coeffs) = affine_form(expression, &|name| free.iter().any(|n| &**n == name))?;
+    let (anchor, coeffs) = affine_form(expression, &|name| free.contains(&name))?;
     let anchor = anchor.eval(&HashMap::new()).ok()?.as_int().ok()?;
     let mut rest = Expression::int(0);
     for (name, coeff) in coeffs {
@@ -612,7 +612,7 @@ pub fn index_set_size(
 ) -> Option<i128> {
     let mut total: i128 = 1;
     for e in expressions {
-        let (_, coeffs) = affine_form(e, &|name| var_extents.contains_key(&Name::new(name)))?;
+        let (_, coeffs) = affine_form(e, &|name| var_extents.contains_key(&name))?;
         let mut size: i128 = 1;
         for (v, c) in coeffs {
             let span = (c as i128)

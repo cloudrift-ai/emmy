@@ -8,7 +8,7 @@ use std::sync::{Arc, Mutex, OnceLock};
 
 use crate::expr::{Expression, Num};
 use crate::field::{Axes, AxisRef, Names, Visitor};
-use crate::numbering::{Key, expression_key};
+use crate::numbering::key::{Key, expression_key};
 use crate::statement::{Roles, Statement, StatementType};
 use crate::{Error, Name, Result, infallible, locked};
 

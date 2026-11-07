@@ -45,7 +45,7 @@ def cone_stat_dtypes(pro: tuple, stats: tuple[str, ...], inputs) -> dict[str, ob
     amount, a nibble mask — comes back f32, and the bit operations reading it have no f32 spelling.
 
     Typed the same way :func:`edge_dtypes` types an edge's results, over the prologue's flat stmt
-    list. A name whose stmt kind carries no dtype is absent from the result; its row keeps the
+    list. A name whose statement type carries no dtype is absent from the result; its row keeps the
     float default."""
     env: dict[str, object] = {}
     for stmt in pro:

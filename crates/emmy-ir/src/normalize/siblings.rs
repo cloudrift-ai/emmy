@@ -23,7 +23,7 @@ pub(crate) fn reduce_axis_source_positions(body: &Body, axis: &Name) -> Result<B
             continue;
         };
         for (dim, e) in load.index.iter().enumerate() {
-            match affine_form(e, &|name| name == &**axis) {
+            match affine_form(e, &|name| name == **axis) {
                 Some((anchor, coeffs)) => {
                     let coeff = coeffs.get(axis).copied().unwrap_or(0);
                     if coeff != 0 {
@@ -36,7 +36,7 @@ pub(crate) fn reduce_axis_source_positions(body: &Body, axis: &Name) -> Result<B
                         ]));
                     }
                 }
-                None if e.reads(axis) => {
+                None if e.reads(*axis) => {
                     let spelled = e
                         .substitute(&HashMap::from([(
                             *axis,

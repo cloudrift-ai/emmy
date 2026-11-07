@@ -24,7 +24,7 @@ pub fn rename_free(stmt: &Arc<Statement>, alias: &HashMap<Name, Name>) -> Arc<St
     } else {
         with_bodies(stmt, bodies.iter().map(|_| Body::empty()).collect())
     };
-    let rename = |name: &str| alias.get(&Name::new(name)).cloned();
+    let rename = |name: Name| alias.get(&name).copied();
     let empty = HashMap::new();
     let renamed = Statement::rewrite(
         &shell,

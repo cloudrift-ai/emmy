@@ -132,8 +132,10 @@ kind" lines stay), the two lines in `emmy/compiler/ir/tile/ARCHITECTURE.md` and
 > of the same name. A statement is one instance of its type in a body.
 
 After this phase `grep -rniw kind crates/emmy-ir crates/emmy-ir-py emmy/compiler/ir tests/compiler/ir tests/architecture`
-returns the lexer (`TokenKind`), the `FragmentArg` field named `kind` (stored text and a Python field, so it keeps its
-name), the tile IR's node kinds and the PTX `.kind::` qualifiers, and nothing else.
+returns nothing that means a statement type. What keeps the word means something else: the lexer's `TokenKind`, the
+`FragmentArg` field named `kind` (stored text and a Python field), the graph's op kind, an atom's kind, `Work.kind`,
+the pure fold's classification, provenance keys, the `Lambda` binder kind, `tile/path.kind`, the tile IR's node kinds
+and the PTX `.kind::` qualifiers.
 
 ## Phase 4: storage
 

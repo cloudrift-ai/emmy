@@ -13,7 +13,8 @@ use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyFrozenSet, PyList, PySet, PySlice, PyString, PyTuple, PyType};
 
 use crate::convert::{
-    IntoPyErr, PyField, Slots, cached, located, slots, statement_from_py, str_tuple, translate,
+    IntoPyErr, PyField, Slots, cached, located, name_from_py, slots, statement_from_py, str_tuple,
+    translate,
 };
 use crate::expression::{PyExpression, renames_from_py};
 use crate::statement::{PyStatement, statement_type_of, statements_from_py, wrap_statement};
@@ -447,10 +448,8 @@ impl PyBody {
 
     /// The backward dependence cone of `roots` over this body's immediate statements.
     fn backward_cone(&self, py: Python<'_>, roots: &Bound<'_, PyAny>) -> PyResult<PyCone> {
-        let roots: PyResult<Vec<Name>> = roots
-            .try_iter()?
-            .map(|item| item?.extract::<String>().map(Name::from))
-            .collect();
+        let roots: PyResult<Vec<Name>> =
+            roots.try_iter()?.map(|item| name_from_py(&item?)).collect();
         let (members, external) = self.body.backward_cone(&roots?);
         let members: PyResult<Vec<Bound<'_, PyAny>>> =
             members.iter().map(|here| wrap_ref(py, here)).collect();
@@ -611,7 +610,7 @@ impl PyBody {
         let colors: Option<HashMap<Name, String>> = colors
             .map(|dict| {
                 dict.iter()
-                    .map(|(k, v)| Ok((Name::from(k.extract::<String>()?), v.extract::<String>()?)))
+                    .map(|(k, v)| Ok((name_from_py(&k)?, v.extract::<String>()?)))
                     .collect::<PyResult<_>>()
             })
             .transpose()?;
@@ -836,7 +835,7 @@ pub fn fold_affine<'py>(
     let exposed: HashSet<Name> = match exposed {
         Some(names) => names
             .try_iter()?
-            .map(|item| item?.extract::<String>().map(Name::from))
+            .map(|item| name_from_py(&item?))
             .collect::<PyResult<_>>()?,
         None => HashSet::new(),
     };

@@ -74,7 +74,7 @@ class Lambda(Wire):
     ``__post_init__`` validates the LOCAL formation invariant: every body stmt passes the
     :attr:`Statement.pure` trait (declared on the interface, conservative ``False`` default —
     ``Load`` / ``Assign`` and the structural nodes opt in; ``Accum`` / ``Write`` / ``Init`` /
-    ``Loop`` never do; no isinstance whitelist, so a new stmt kind is excluded until it declares
+    ``Loop`` never do; no isinstance whitelist, so a new statement type is excluded until it declares
     itself), every result is defined, and every value or coordinate read is bound. Scope-aware
     ``free_names`` supplies both the construction check and canonical statement ordering.
 
@@ -96,7 +96,7 @@ class Lambda(Wire):
             object.__setattr__(self, "results", tuple(self.results))
         impure = [type(s).__name__ for s in self.body if not s.pure]
         if impure:
-            raise ValueError(f"Lambda body must be pure — impure stmt kind(s): {impure}")
+            raise ValueError(f"Lambda body must be pure — impure statement type(s): {impure}")
         defined = set(self.params)
         for s in self.body:
             defined |= exposed_defines(s)

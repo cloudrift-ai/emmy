@@ -25,12 +25,12 @@ use crate::{Error, Name, Result};
 /// What a rewrite does to a statement: every SSA name through `rename`, every expression through `sigma`, every
 /// bound axis through `axis_fn`. A `None` from `rename` keeps the name.
 pub struct Rewrite<'a> {
-    pub rename: &'a dyn Fn(&str) -> Option<Name>,
+    pub rename: &'a dyn Fn(Name) -> Option<Name>,
     pub sigma: &'a HashMap<Name, Expression>,
     pub axis_fn: Option<&'a dyn Fn(&AxisRef) -> AxisRef>,
 }
 
-fn keep(_name: &str) -> Option<Name> {
+fn keep(_name: Name) -> Option<Name> {
     None
 }
 
@@ -253,7 +253,7 @@ struct RewriteFields<'a, 'b> {
 impl Rewriter for RewriteFields<'_, '_> {
     fn name(&mut self, roles: Roles, name: &Name) -> Name {
         if roles.contains_any(NAMES) {
-            return (self.rewrite.rename)(name).unwrap_or(*name);
+            return (self.rewrite.rename)(*name).unwrap_or(*name);
         }
         if roles.contains_any(AXIS_NAME) {
             let Some(axis_fn) = self.rewrite.axis_fn else {
@@ -302,7 +302,7 @@ impl Rewriter for RewriteFields<'_, '_> {
                 let moved = Statement::rewrite(stmt, &inner);
                 Statement::map_expressions(&moved, &mut |expression| {
                     expression.rename(&mut |name| {
-                        if defined.contains(&Name::new(name)) {
+                        if defined.contains(&name) {
                             None
                         } else {
                             rename(name)
@@ -612,7 +612,7 @@ impl Statement {
                 .axes
                 .iter()
                 .flat_map(|name| rewrite_axis_name(name, rewrite.sigma))
-                .map(|name| (rewrite.rename)(&name).unwrap_or(name))
+                .map(|name| (rewrite.rename)(name).unwrap_or(name))
                 .collect();
             axes.sort();
             axes.dedup();
@@ -632,13 +632,13 @@ impl Statement {
         if mapping.is_empty() {
             return this.clone();
         }
-        Statement::rename_with(this, &|name| mapping.get(&Name::new(name)).cloned())
+        Statement::rename_with(this, &|name| mapping.get(&name).copied())
     }
 
     /// `rename` through a function; `None` keeps a name.
     pub fn rename_with(
         this: &Arc<Statement>,
-        rename: &dyn Fn(&str) -> Option<Name>,
+        rename: &dyn Fn(Name) -> Option<Name>,
     ) -> Arc<Statement> {
         let axis_fn = |axis: &AxisRef| axis.renamed(&mut |name| rename(name));
         let empty = HashMap::new();
@@ -915,7 +915,7 @@ mod tests {
         Statement::rewrite(
             stmt,
             &Rewrite {
-                rename: &|name| names.get(&Name::new(name)).cloned(),
+                rename: &|name| names.get(&name).copied(),
                 sigma,
                 axis_fn: None,
             },
@@ -1372,7 +1372,7 @@ mod tests {
         let names = names_by(&halve, str::to_string);
         let same_axis = |axis: &AxisRef| axis.clone();
         let rewrite = Rewrite {
-            rename: &|name| names.get(&Name::new(name)).cloned(),
+            rename: &|name| names.get(&name).copied(),
             sigma: &HashMap::new(),
             axis_fn: Some(&same_axis),
         };

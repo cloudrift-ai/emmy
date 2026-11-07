@@ -47,7 +47,7 @@ pub(crate) fn sibling_shape(stmt: &Arc<Statement>) -> Result<Key> {
         .header_fields()?
         .into_iter()
         .map(|(name, text)| match extent {
-            Some(expression) if name == "axis" => Key::Str(extent_digest(expression).into()),
+            Some(expression) if name == "axis" => Key::text(extent_digest(expression)),
             _ => field_key(shell.ty().field_ty(name), &text),
         })
         .collect::<Vec<_>>();
@@ -59,7 +59,7 @@ pub(crate) fn sibling_shape(stmt: &Arc<Statement>) -> Result<Key> {
 pub(crate) fn sibling_spelling(stmt: &Arc<Statement>) -> Key {
     let renamed = Statement::rename_with(stmt, &|_| Some(Name::from("__name__")));
     let body = Body::new(vec![renamed]).map_stmts(&mut |s| Some(unlisted(s)));
-    Key::str(&crate::text::structural_body_text(&body))
+    Key::text(crate::text::structural_body_text(&body))
 }
 
 /// A header field's key: its text, and for a sequence field whether it holds one element, which sorts after longer
@@ -79,9 +79,12 @@ fn field_key(ty: Option<FieldType>, text: &str) -> Key {
                 _ => {}
             }
         }
-        return Key::tuple([Key::Int(i64::from(!top_level_comma)), Key::str(text)]);
+        return Key::tuple([
+            Key::Int(i64::from(!top_level_comma)),
+            Key::text(text.to_string()),
+        ]);
     }
-    Key::str(text)
+    Key::text(text.to_string())
 }
 
 /// The digest the Python order keyed a loop's extent by: SHA-256 of the Python `repr` of the extent's structural

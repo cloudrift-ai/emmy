@@ -108,8 +108,8 @@ fn depths(key: &Key, out: &mut Vec<usize>) {
 }
 
 impl Context<'_> {
-    fn depth_of(&self, name: &str) -> Option<usize> {
-        self.binding.iter().rposition(|bound| &**bound == name)
+    fn depth_of(&self, name: Name) -> Option<usize> {
+        self.binding.iter().rposition(|bound| *bound == name)
     }
 
     fn reads_axis(&self, e: &Expression) -> bool {
@@ -132,7 +132,7 @@ impl Context<'_> {
     fn by_depth(&self, e: &Expression) -> Key {
         expression_key(e, &mut |e| match &**e {
             Expr::Var(name) => self
-                .depth_of(name)
+                .depth_of(*name)
                 .map(|depth| Key::tuple([Key::str(ExprType::Var.text()), Key::Int(depth as i64)])),
             _ => None,
         })
@@ -269,7 +269,7 @@ impl Context<'_> {
         if !bound.is_empty() {
             let mut bound_depths: Vec<usize> = bound
                 .iter()
-                .filter_map(|name| self.depth_of(name))
+                .filter_map(|name| self.depth_of(*name))
                 .collect();
             bound_depths.sort_unstable();
             bound_depths.dedup();
@@ -399,6 +399,9 @@ impl Context<'_> {
             .map(|e| self.abstract_(e, params, ops, touched))
             .collect();
         let mut names: HashMap<Name, Name> = HashMap::new();
+        // An operand's spelling is the debug text of its value key, which holds a value number: the shell is printed
+        // with a stand-in name per operand and the spelling put back in the text, so no such text is interned.
+        let mut spellings: Vec<(Name, String)> = Vec::new();
         let defined: Vec<Name> = stmt
             .defines()
             .into_iter()
@@ -412,7 +415,7 @@ impl Context<'_> {
                 continue;
             }
             let key = self.operand(&name, ops, touched);
-            names.insert(name, format!("{key:?}").into());
+            names.insert(name, placeholder(&mut spellings, format!("{key:?}")));
         }
         for name in self.axes.keys() {
             names.entry(*name).or_insert_with(|| "$axis".into());
@@ -433,7 +436,7 @@ impl Context<'_> {
             } else {
                 self.resource(&name, Tag::Buffer, touched)
             };
-            names.insert(name, format!("{key:?}").into());
+            names.insert(name, placeholder(&mut spellings, format!("{key:?}")));
         }
         let nested = stmt.nested();
         let shell = if nested.is_empty() {
@@ -444,7 +447,11 @@ impl Context<'_> {
         let marker = Expression::var("$expr");
         let shell = Statement::map_expressions(&shell, &mut |_| marker.clone());
         let shell = Statement::rename_buffers(&Statement::rename(&shell, &names), &names);
-        Key::tuple([Key::str(&structural_text(&shell)), Key::Tuple(expressions)])
+        let mut text = structural_text(&shell);
+        for (stand_in, spelling) in spellings {
+            text = text.replace(&format!("`{stand_in}`"), &format!("`{spelling}`"));
+        }
+        Key::tuple([Key::text(text), Key::Tuple(expressions)])
     }
 
     fn visit(&mut self, body: &Body) {
@@ -872,6 +879,14 @@ pub fn value_numbers(body: &Body, resource_key: &dyn Fn(&Name) -> Key) -> Number
     };
     context.visit(body);
     context.out
+}
+
+/// The stand-in name for the `index`th spelling a shell replaces an operand's name with: a bounded set, which the
+/// printed text spells between backticks like the spelling it stands for.
+fn placeholder(spellings: &mut Vec<(Name, String)>, spelling: String) -> Name {
+    let stand_in = Name::new(&format!("$o{}", spellings.len()));
+    spellings.push((stand_in, spelling));
+    stand_in
 }
 
 #[cfg(test)]
