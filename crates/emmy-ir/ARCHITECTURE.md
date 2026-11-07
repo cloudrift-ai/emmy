@@ -14,14 +14,15 @@ body and the normal form ARE; this file says how the crate holds them.
 The module tree follows the design, one module per concept, and the modules stand in a tower: each imports only the
 ones below it, `kinds` and `body` aside, which define each other's types. From the bottom: `expr/` (the tree and its
 text in `mod.rs`, the simplifier and affine form in `simplify.rs`, the reader in `parse.rs`), `kinds/` (the kind list
-and its macros in `mod.rs`, the `Field` trait in `field.rs`, axes with their speller, dtypes and the elementwise tables
-beside it), `body.rs`, `protocol.rs`, `text/` (the printer in `print.rs`, the reader in `parse.rs`, what both spell in
-`mod.rs`), `order.rs` (the dependency constraints and sort), `numbering/` (the `Key` tree and its hash in `key.rs`, the
-value numbering in `values.rs`, the scope-tree digest in `digest.rs`), `normalize/` (the driver and the helpers the
-steps share in `mod.rs`, the steps by what they do: `axes`, `fold`, `siblings`, `simplify`, `place`, `canonical`, and
-every tie-break in `ties.rs`), `identity.rs` (the identity of a body's normal form) and `memo.rs`, the one bounded memo
-both the normal form and the identity are kept in. Every file imports what it uses by name; no child module takes its
-parent's imports.
+and its macros in `mod.rs`, the `Field` trait in `field.rs`, axes with their speller, dtypes and the elementwise
+tables beside it), `body.rs`, `protocol/` (the protocol in `mod.rs`, what the shared kinds answer beyond their fields
+in `kinds.rs`, the construction checks in `checks.rs`), `text/` (the printer in `print.rs`, the reader in `parse.rs`,
+what both spell in `mod.rs`), `order.rs` (the dependency constraints and sort), `numbering/` (the `Key` tree and its
+hash in `key.rs`, the value numbering in `values.rs`, the scope-tree digest in `digest.rs`), `normalize/` (the driver
+and the helpers the steps share in `mod.rs`, the steps by what they do: `axes`, `fold`, `siblings`, `simplify`,
+`place`, `canonical`, and every tie-break in `ties.rs`), `identity.rs` (the identity of a body's normal form) and
+`memo.rs`, the one bounded memo both the normal form and the identity are kept in. Every file imports what it uses by
+name; no child module takes its parent's imports.
 
 ## Data
 
@@ -48,14 +49,15 @@ parent's imports.
 
 ## Protocol and body
 
-`protocol.rs` writes the statement protocol once over the roles: `deps`, `defines`, the buffers, `expressions`,
+`protocol/` writes the statement protocol once over the roles: `deps`, `defines`, the buffers, `expressions`,
 `bound_axes` / `binds_axes`, `nested` / `with_bodies`, `try_map_expressions` / `with_expressions`, `rename_buffers`
 (one `Renaming` per body, so a subroutine two calls share is renamed once; the body's renaming and `coalesce` live
 here too), and `rewrite` behind
 `rename` (α, through binders) and `substitute` (β, hygienic: a mapping a statement's own binder shadows is dropped for
 its subtree). The four members no role gives are stated by kind there: an `Accum`'s reduced axes follow a splitting
 substitution, a `Let` and a `Call` read buffers inside an expression or through a subroutine, a `StridedLoop` with an
-`end` binds `<axis>_end`. The constructors' checks (`checked`, `finished`) are the ones Python's `__post_init__` made.
+`end` binds `<axis>_end`. A kind that checks itself does so over its own fields (`validate`), and `finished` runs the
+check for every constructor: the ones Python's `__post_init__` made.
 
 `body.rs` is `Body`: the statements, a content hash, and every def-use reading computed once on first use and kept
 with the body (`definitions`, `carried_names`, `local_defs`, `free_ssa`, `axis_names`, `ssa_uses`, the kind filters),

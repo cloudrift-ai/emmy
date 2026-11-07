@@ -240,10 +240,11 @@ form (`pretty_body`, `parse_body`), three normalization steps a caller may run o
 `prepare_body`), the two kinds fusion's body assembly in `ir/loop/` builds a region with (`Call`, `Subroutine`), and
 the names of a kind's fields (`fields_of`). The kinds, `Body`, the protocol, the text, the value numbering and the
 normalization are implemented in Rust — the `emmy-ir` crate, reached through the `emmy.emmy_ir` extension
-(`crates/emmy-ir/ARCHITECTURE.md`) — and the package is the glue over them: it re-exports the names and writes the
-few members that take a Python function (`rename` by a function, `rewrite` under a `Sigma`, `Body.map`, `Body.fold`,
-the identity with its typed roles). The module itself imports expressions, axes, the sigma and the wire form: no op,
-tensor, graph, backend or pipeline. `tests/architecture/test_layering.py` pins the export list and both directions.
+(`crates/emmy-ir/ARCHITECTURE.md`) — and the package is the glue over them: `__init__.py` re-exports the names, and
+`glue.py` writes the few members that take a Python function and keep its results (`rename` by a function, `rewrite`
+under a `Sigma`, `Body.fold`, the identity with its typed roles); `Body.map` and `map_expressions` call their function
+from Rust. The package imports expressions, axes, the sigma and the wire form: no op, tensor, graph, backend or
+pipeline. `tests/architecture/test_layering.py` pins the export list and both directions.
 
 **The statement protocol** is what a kind owes, all of it methods on the kind. No kind writes them: the shared
 kinds are declared (below), and a layer adds a kind of its own by declaring it, and nothing else:

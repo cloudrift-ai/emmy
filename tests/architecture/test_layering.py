@@ -130,7 +130,7 @@ def test_normalization_has_one_entry_point() -> None:
     steps = {name for name in stmt.__all__ if name in ("normalize_body", "fold_affine", "simplify_body", "prepare_body")}
     assert steps == {"normalize_body", "fold_affine", "simplify_body", "prepare_body"}
     package = _REPO_ROOT / "emmy" / "compiler" / "ir" / "stmt"
-    assert sorted(path.name for path in package.glob("*.py")) == ["__init__.py"], "the statement package is its exports and the glue"
+    assert sorted(path.name for path in package.glob("*.py")) == ["__init__.py", "glue.py"], "the statement package is its exports and the glue"
     crate = (_REPO_ROOT / "crates" / "emmy-ir" / "src" / "normalize" / "mod.rs").read_text()
     assert "pub fn normalize_body(" in crate
 
@@ -174,7 +174,7 @@ def test_the_statement_module_exports_a_pinned_list() -> None:
 
     kinds = ["Statement", "Load", "Assign", "Affine", "Accum", "Carry", "Pre", "Init", "Let", "Write", "Select", "SelectBranch"]
     kinds += ["ZeroPrologue", "Loop", "StridedLoop", "Cond"]
-    containers = ["Body", "OutputSpec"]
+    containers = ["Body", "Identity", "OutputSpec"]
     functions = ["normalize_body", "canonicalize_identity", "free_names", "exposed_defines", "rename_free", "binary"]
     functions += ["mask_select_predicate", "pretty_body", "parse_body", "ordering_constraints", "dtype_promote"]
     # Normalization steps a pass calls on its own, and the two kinds fusion assembles a region with.
