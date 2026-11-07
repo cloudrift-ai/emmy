@@ -67,6 +67,8 @@ pub struct OperationInfo {
     /// Its value on `f32` operands, as NumPy computes it for `np.float32` scalars (a NaN operand gives NaN, which
     /// no fold takes).
     pub eval: Eval,
+    /// The infix spelling an expression gives it, and how tightly that binds (higher binds tighter).
+    pub infix: Option<(&'static str, u8)>,
 }
 
 impl OperationInfo {
@@ -80,6 +82,7 @@ impl OperationInfo {
         selecting: false,
         affine: None,
         eval: Eval::None,
+        infix: None,
     };
 }
 
@@ -108,12 +111,12 @@ macro_rules! operations {
 use Operation as E;
 
 operations! {
-    Add = "add" { commutative: true, associative: true, neutral: Some(0.0), cluster: Some(E::Multiply), integer: true, affine: Some(AffineRole::Sum), eval: Eval::Binary(|a, b| a + b) },
+    Add = "add" { commutative: true, associative: true, neutral: Some(0.0), cluster: Some(E::Multiply), integer: true, affine: Some(AffineRole::Sum), eval: Eval::Binary(|a, b| a + b), infix: Some(("+", 5)) },
     Sum = "sum" { commutative: true, associative: true, neutral: Some(0.0), cluster: Some(E::Multiply) },
-    Subtract = "subtract" { cluster: Some(E::Multiply), integer: true, affine: Some(AffineRole::Difference), eval: Eval::Binary(|a, b| a - b) },
+    Subtract = "subtract" { cluster: Some(E::Multiply), integer: true, affine: Some(AffineRole::Difference), eval: Eval::Binary(|a, b| a - b), infix: Some(("-", 5)) },
     Sub = "sub" { cluster: Some(E::Multiply) },
     Negative = "negative" { cluster: Some(E::Multiply), integer: true, affine: Some(AffineRole::Negation), eval: Eval::Unary(|x| -x) },
-    Multiply = "multiply" { commutative: true, associative: true, neutral: Some(1.0), cluster: Some(E::Multiply), integer: true, affine: Some(AffineRole::Scale), eval: Eval::Binary(|a, b| a * b) },
+    Multiply = "multiply" { commutative: true, associative: true, neutral: Some(1.0), cluster: Some(E::Multiply), integer: true, affine: Some(AffineRole::Scale), eval: Eval::Binary(|a, b| a * b), infix: Some(("*", 6)) },
     Prod = "prod" { commutative: true, associative: true, neutral: Some(1.0), cluster: Some(E::Multiply) },
     Fma = "fma" { cluster: Some(E::Multiply) },
     Square = "square" { cluster: Some(E::Multiply), eval: Eval::Unary(|x| x * x) },
@@ -126,11 +129,11 @@ operations! {
     Fmax = "fmax" { cluster: Some(E::Maximum), eval: Eval::Binary(f32::max) },
     Fmin = "fmin" { cluster: Some(E::Maximum), eval: Eval::Binary(f32::min) },
     Sign = "sign" { cluster: Some(E::Maximum), eval: Eval::Unary(|x| if x > 0.0 { 1.0 } else if x < 0.0 { -1.0 } else { 0.0 }) },
-    Divide = "divide" { cluster: Some(E::Divide), affine: Some(AffineRole::Quotient), eval: Eval::Binary(|a, b| a / b) },
+    Divide = "divide" { cluster: Some(E::Divide), affine: Some(AffineRole::Quotient), eval: Eval::Binary(|a, b| a / b), infix: Some(("/", 6)) },
     DivideRnF32 = "divide_rn_f32" { cluster: Some(E::Divide), eval: Eval::Binary(|a, b| a / b) },
     TrueDivide = "true_divide" { cluster: Some(E::Divide), eval: Eval::Binary(|a, b| a / b) },
-    FloorDivide = "floor_divide" { cluster: Some(E::Divide), integer: true, eval: Eval::Binary(|a, b| (a / b).floor()) },
-    Remainder = "remainder" { cluster: Some(E::Divide), integer: true, eval: Eval::Binary(|a, b| a - (a / b).floor() * b) },
+    FloorDivide = "floor_divide" { cluster: Some(E::Divide), integer: true, eval: Eval::Binary(|a, b| (a / b).floor()), infix: Some(("//", 6)) },
+    Remainder = "remainder" { cluster: Some(E::Divide), integer: true, eval: Eval::Binary(|a, b| a - (a / b).floor() * b), infix: Some(("%", 6)) },
     Mod = "mod" { cluster: Some(E::Divide), integer: true, eval: Eval::Binary(|a, b| a - (a / b).floor() * b) },
     Reciprocal = "reciprocal" { cluster: Some(E::Divide), eval: Eval::Unary(|x| 1.0 / x) },
     Sqrt = "sqrt" { cluster: Some(E::Exp), eval: Eval::Unary(f32::sqrt) },
@@ -172,11 +175,19 @@ operations! {
     Pad = "pad" { eval: Eval::Unary(|x| x) },
     Positive = "positive" { eval: Eval::Unary(|x| x) },
     Bitcast = "bitcast" { eval: Eval::Unary(|x| x) },
-    LeftShift = "left_shift" { integer: true },
-    RightShift = "right_shift" { integer: true },
-    BitwiseAnd = "bitwise_and" { integer: true },
-    BitwiseOr = "bitwise_or" { integer: true },
-    BitwiseXor = "bitwise_xor" { integer: true },
+    LeftShift = "left_shift" { integer: true, infix: Some(("<<", 4)) },
+    RightShift = "right_shift" { integer: true, infix: Some((">>", 4)) },
+    BitwiseAnd = "bitwise_and" { integer: true, infix: Some(("&", 4)) },
+    BitwiseOr = "bitwise_or" { integer: true, infix: Some(("|", 4)) },
+    BitwiseXor = "bitwise_xor" { integer: true, infix: Some(("^", 4)) },
+    Less = "less" { infix: Some(("<", 4)) },
+    Greater = "greater" { infix: Some((">", 4)) },
+    LessEqual = "less_equal" { infix: Some(("<=", 4)) },
+    GreaterEqual = "greater_equal" { infix: Some((">=", 4)) },
+    Equal = "equal" { commutative: true, infix: Some(("==", 3)) },
+    NotEqual = "not_equal" { commutative: true, infix: Some(("!=", 3)) },
+    LogicalAnd = "logical_and" { commutative: true, associative: true, infix: Some(("&&", 2)) },
+    LogicalOr = "logical_or" { commutative: true, associative: true, infix: Some(("||", 1)) },
     BitwiseCount = "bitwise_count" { integer: true },
 }
 
@@ -187,6 +198,40 @@ pub const ALIASES: [(&str, Operation); 2] = [
 ];
 
 impl Operation {
+    /// The infix spelling an expression gives this operation, when it has one (`+`, `<`, `&&`, …).
+    pub fn infix(self) -> Option<&'static str> {
+        self.info().infix.map(|(text, _)| text)
+    }
+
+    /// How tightly the infix binds: higher binds tighter; an operation with no infix binds like a call.
+    pub fn precedence(self) -> u8 {
+        self.info().infix.map_or(7, |(_, precedence)| precedence)
+    }
+
+    /// The operation an infix spelling names.
+    pub fn from_infix(text: &str) -> Option<Operation> {
+        Operation::ALL
+            .iter()
+            .copied()
+            .find(|op| op.infix() == Some(text))
+    }
+
+    pub fn is_division(self) -> bool {
+        matches!(self, Operation::Divide | Operation::FloorDivide)
+    }
+
+    /// An ordering comparison or equality: the operators a predicate's two sides meet through.
+    pub fn is_comparison(self) -> bool {
+        matches!(
+            self,
+            Operation::Less
+                | Operation::LessEqual
+                | Operation::Greater
+                | Operation::GreaterEqual
+                | Operation::Equal
+        )
+    }
+
     /// The row of the table: every property in one place.
     pub fn info(self) -> &'static OperationInfo {
         &OPS[self as usize]
@@ -391,6 +436,14 @@ mod tests {
                 "bitwise_and",
                 "bitwise_or",
                 "bitwise_xor",
+                "less",
+                "greater",
+                "less_equal",
+                "greater_equal",
+                "equal",
+                "not_equal",
+                "logical_and",
+                "logical_or",
                 "bitwise_count",
             ]
         );

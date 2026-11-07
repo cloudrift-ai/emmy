@@ -13,6 +13,7 @@ use std::hash::{Hash, Hasher};
 use std::sync::{Arc, OnceLock};
 
 use crate::closed_set;
+use crate::elementwise::Operation;
 use crate::{Error, Name, Result};
 
 // --- numbers --------------------------------------------------------------------------------------
@@ -160,50 +161,9 @@ pub fn float_repr(value: f64) -> String {
 
 // --- operators ------------------------------------------------------------------------------------
 
-closed_set! {
-    /// A binary operator, by its spelling; `precedence` says how tightly it binds (higher binds tighter).
-    pub enum BinOp ("binary operator") {
-        Or = "||", And = "&&", Eq = "==", Ne = "!=", Lt = "<", Gt = ">", Le = "<=", Ge = ">=",
-        Xor = "^", BitAnd = "&", BitOr = "|", Shl = "<<", Shr = ">>",
-        Add = "+", Sub = "-", Mul = "*", Div = "/", FloorDiv = "//", Mod = "%",
-    }
-}
-
-impl BinOp {
-    pub fn precedence(self) -> u8 {
-        match self {
-            BinOp::Or => 1,
-            BinOp::And => 2,
-            BinOp::Eq | BinOp::Ne => 3,
-            BinOp::Lt
-            | BinOp::Gt
-            | BinOp::Le
-            | BinOp::Ge
-            | BinOp::Xor
-            | BinOp::BitAnd
-            | BinOp::BitOr
-            | BinOp::Shl
-            | BinOp::Shr => 4,
-            BinOp::Add | BinOp::Sub => 5,
-            BinOp::Mul | BinOp::Div | BinOp::FloorDiv | BinOp::Mod => 6,
-        }
-    }
-
-    pub fn is_division(self) -> bool {
-        matches!(self, BinOp::Div | BinOp::FloorDiv)
-    }
-
-    pub fn is_comparison(self) -> bool {
-        matches!(
-            self,
-            BinOp::Lt | BinOp::Le | BinOp::Gt | BinOp::Ge | BinOp::Eq
-        )
-    }
-}
-
 /// Python's `apply_binop` over two evaluated numbers: integer floor division for `/` and `//`, logical `&&` / `||`
 /// on truth values, a bool for every comparison.
-pub fn apply_binop(op: BinOp, left: Num, right: Num) -> Result<Num> {
+pub fn apply_binop(op: Operation, left: Num, right: Num) -> Result<Num> {
     fn arith(
         left: Num,
         right: Num,
@@ -268,23 +228,25 @@ pub fn apply_binop(op: BinOp, left: Num, right: Num) -> Result<Num> {
         })
     };
     match op {
-        BinOp::Add => arith(left, right, |a, b| a.checked_add(b), |a, b| a + b),
-        BinOp::Sub => arith(left, right, |a, b| a.checked_sub(b), |a, b| a - b),
-        BinOp::Mul => arith(left, right, |a, b| a.checked_mul(b), |a, b| a * b),
-        BinOp::Div | BinOp::FloorDiv => Ok(Num::Int(floor_div(left.as_int()?, right.as_int()?)?)),
-        BinOp::Mod => Ok(Num::Int(py_mod(left.as_int()?, right.as_int()?)?)),
-        BinOp::Lt => Ok(Num::Bool(left.as_f64() < right.as_f64())),
-        BinOp::Le => Ok(Num::Bool(left.as_f64() <= right.as_f64())),
-        BinOp::Gt => Ok(Num::Bool(left.as_f64() > right.as_f64())),
-        BinOp::Ge => Ok(Num::Bool(left.as_f64() >= right.as_f64())),
-        BinOp::Eq => Ok(Num::Bool(left.as_f64() == right.as_f64())),
-        BinOp::Ne => Ok(Num::Bool(left.as_f64() != right.as_f64())),
-        BinOp::And => Ok(Num::Bool(left.truthy() && right.truthy())),
-        BinOp::Or => Ok(Num::Bool(left.truthy() || right.truthy())),
-        BinOp::BitAnd => bits(left, right, |a, b| a & b, |a, b| Some(a & b)),
-        BinOp::BitOr => bits(left, right, |a, b| a | b, |a, b| Some(a | b)),
-        BinOp::Xor => bits(left, right, |a, b| a ^ b, |a, b| Some(a ^ b)),
-        BinOp::Shl => {
+        Operation::Add => arith(left, right, |a, b| a.checked_add(b), |a, b| a + b),
+        Operation::Subtract => arith(left, right, |a, b| a.checked_sub(b), |a, b| a - b),
+        Operation::Multiply => arith(left, right, |a, b| a.checked_mul(b), |a, b| a * b),
+        Operation::Divide | Operation::FloorDivide => {
+            Ok(Num::Int(floor_div(left.as_int()?, right.as_int()?)?))
+        }
+        Operation::Remainder => Ok(Num::Int(py_mod(left.as_int()?, right.as_int()?)?)),
+        Operation::Less => Ok(Num::Bool(left.as_f64() < right.as_f64())),
+        Operation::LessEqual => Ok(Num::Bool(left.as_f64() <= right.as_f64())),
+        Operation::Greater => Ok(Num::Bool(left.as_f64() > right.as_f64())),
+        Operation::GreaterEqual => Ok(Num::Bool(left.as_f64() >= right.as_f64())),
+        Operation::Equal => Ok(Num::Bool(left.as_f64() == right.as_f64())),
+        Operation::NotEqual => Ok(Num::Bool(left.as_f64() != right.as_f64())),
+        Operation::LogicalAnd => Ok(Num::Bool(left.truthy() && right.truthy())),
+        Operation::LogicalOr => Ok(Num::Bool(left.truthy() || right.truthy())),
+        Operation::BitwiseAnd => bits(left, right, |a, b| a & b, |a, b| Some(a & b)),
+        Operation::BitwiseOr => bits(left, right, |a, b| a | b, |a, b| Some(a | b)),
+        Operation::BitwiseXor => bits(left, right, |a, b| a ^ b, |a, b| Some(a ^ b)),
+        Operation::LeftShift => {
             let (a, b) = ints(left, right)?;
             if !(0..64).contains(&b) {
                 return Err(Error::Value("shift out of range".into()));
@@ -294,7 +256,7 @@ pub fn apply_binop(op: BinOp, left: Num, right: Num) -> Result<Num> {
                 .map(Num::Int)
                 .ok_or_else(|| Error::Value("integer overflow".into()))
         }
-        BinOp::Shr => {
+        Operation::RightShift => {
             let (a, b) = ints(left, right)?;
             if b < 0 {
                 return Err(Error::Value("negative shift count".into()));
@@ -305,6 +267,7 @@ pub fn apply_binop(op: BinOp, left: Num, right: Num) -> Result<Num> {
                 a >> b
             }))
         }
+        _ => Err(Error::Value(format!("{op} has no infix form to evaluate"))),
     }
 }
 
@@ -368,7 +331,7 @@ macro_rules! with_exprs {
             Literal as PyLiteral "Literal" { lit: Lit },
             /// A GPU built-in with no host form.
             Builtin as PyBuiltin "Builtin" { name: Builtin },
-            Binary as PyBinaryExpression "BinaryExpression" { op: BinOp, left: Expression, right: Expression },
+            Binary as PyBinaryExpression "BinaryExpression" { op: Operation, left: Expression, right: Expression },
             /// A call of a named function over its arguments.
             Call as PyFunctionCallExpression "FunctionCallExpression" { name: Name, args: Arc<[Expression]> },
             Ternary as PyTernaryExpression "TernaryExpression" { cond: Expression, if_true: Expression, if_false: Expression },
@@ -398,7 +361,7 @@ pub trait ExprField: Clone {
 
 impl ExprField for Name {}
 impl ExprField for Lit {}
-impl ExprField for BinOp {}
+impl ExprField for Operation {}
 impl ExprField for Builtin {}
 impl ExprField for CastTarget {}
 
@@ -678,7 +641,7 @@ impl Expression {
         Expression::new(Expr::Literal(Lit { value, dtype }))
     }
 
-    pub fn binary(op: BinOp, left: Expression, right: Expression) -> Expression {
+    pub fn binary(op: Operation, left: Expression, right: Expression) -> Expression {
         Expression::new(Expr::Binary(op, left, right))
     }
 
@@ -778,7 +741,7 @@ impl Expression {
                     out.push('(');
                 }
                 left.spell(prec, out)?;
-                let _ = write!(out, " {} ", op.text());
+                let _ = write!(out, " {} ", op.infix().unwrap_or(op.text()));
                 right.spell(prec + 1, out)?;
                 if paren {
                     out.push(')');
@@ -968,27 +931,27 @@ impl Expression {
                 let (la, lb) = (left.range(ctx), right.range(ctx));
                 let logical = matches!(
                     op,
-                    BinOp::Lt
-                        | BinOp::Le
-                        | BinOp::Gt
-                        | BinOp::Ge
-                        | BinOp::Eq
-                        | BinOp::And
-                        | BinOp::Or
+                    Operation::Less
+                        | Operation::LessEqual
+                        | Operation::Greater
+                        | Operation::GreaterEqual
+                        | Operation::Equal
+                        | Operation::LogicalAnd
+                        | Operation::LogicalOr
                 );
                 let (Some(la), Some(lb)) = (la, lb) else {
                     return logical.then_some(Interval::new(0, 1));
                 };
                 match op {
-                    BinOp::Add => Some(Interval::new(
+                    Operation::Add => Some(Interval::new(
                         la.lo.checked_add(lb.lo)?,
                         la.hi.checked_add(lb.hi)?,
                     )),
-                    BinOp::Sub => Some(Interval::new(
+                    Operation::Subtract => Some(Interval::new(
                         la.lo.checked_sub(lb.hi)?,
                         la.hi.checked_sub(lb.lo)?,
                     )),
-                    BinOp::Mul => {
+                    Operation::Multiply => {
                         let prods = [
                             la.lo.checked_mul(lb.lo)?,
                             la.lo.checked_mul(lb.hi)?,
@@ -1000,9 +963,9 @@ impl Expression {
                             prods.iter().copied().fold(i128::MIN, i128::max),
                         ))
                     }
-                    BinOp::Div | BinOp::FloorDiv => (lb.lo == lb.hi && lb.lo > 0)
+                    Operation::Divide | Operation::FloorDivide => (lb.lo == lb.hi && lb.lo > 0)
                         .then(|| Interval::new(la.lo.div_euclid(lb.lo), la.hi.div_euclid(lb.lo))),
-                    BinOp::Mod => {
+                    Operation::Remainder => {
                         (lb.lo == lb.hi && lb.lo > 0).then(|| Interval::new(0, lb.lo - 1))
                     }
                     _ if logical => Some(Interval::new(0, 1)),
@@ -1200,12 +1163,12 @@ mod tests {
                 "warp_size",
             ]
         );
-        let operators: Vec<&str> = BinOp::ALL.iter().map(|op| op.text()).collect();
+        let operators: Vec<&str> = Operation::ALL.iter().filter_map(|op| op.infix()).collect();
         assert_eq!(
             operators,
             [
-                "||", "&&", "==", "!=", "<", ">", "<=", ">=", "^", "&", "|", "<<", ">>", "+", "-",
-                "*", "/", "//", "%"
+                "+", "-", "*", "/", "//", "%", "<<", ">>", "&", "|", "^", "<", ">", "<=", ">=",
+                "==", "!=", "&&", "||"
             ]
         );
         let literal_types: Vec<&str> = LitType::ALL.iter().map(|t| t.text()).collect();
@@ -1214,7 +1177,7 @@ mod tests {
             Expression::var("x"),
             Expression::int(1),
             Expression::new(Expr::Builtin(Builtin::WarpSize)),
-            Expression::binary(BinOp::Add, Expression::var("x"), Expression::int(1)),
+            Expression::binary(Operation::Add, Expression::var("x"), Expression::int(1)),
             Expression::new(Expr::Call("f".into(), Arc::from([]))),
             Expression::new(Expr::Ternary(
                 Expression::var("c"),
@@ -1248,7 +1211,7 @@ mod tests {
     fn chain(depth: usize) -> Expression {
         let mut chain = Expression::var("a");
         for _ in 0..depth {
-            chain = Expression::binary(BinOp::Add, chain, Expression::int(1));
+            chain = Expression::binary(Operation::Add, chain, Expression::int(1));
         }
         chain
     }
@@ -1473,15 +1436,15 @@ mod tests {
     #[test]
     fn the_constant_fold_refuses_what_overflows_an_integer() {
         let least = Num::Int(i64::MIN);
-        assert!(apply_binop(BinOp::Div, least, Num::Int(-1)).is_err());
-        assert!(apply_binop(BinOp::Mod, least, Num::Int(-1)).is_err());
-        assert!(apply_binop(BinOp::Shl, Num::Int(3), Num::Int(62)).is_err());
+        assert!(apply_binop(Operation::Divide, least, Num::Int(-1)).is_err());
+        assert!(apply_binop(Operation::Remainder, least, Num::Int(-1)).is_err());
+        assert!(apply_binop(Operation::LeftShift, Num::Int(3), Num::Int(62)).is_err());
         assert_eq!(
-            apply_binop(BinOp::Shl, Num::Int(3), Num::Int(2)).ok(),
+            apply_binop(Operation::LeftShift, Num::Int(3), Num::Int(2)).ok(),
             Some(Num::Int(12))
         );
         assert_eq!(
-            apply_binop(BinOp::Mod, Num::Int(-7), Num::Int(3)).ok(),
+            apply_binop(Operation::Remainder, Num::Int(-7), Num::Int(3)).ok(),
             Some(Num::Int(2))
         );
     }
@@ -1643,12 +1606,16 @@ mod tests {
 
     #[test]
     fn substitute_rewrites_a_binary_expression() {
-        let e = Expression::binary(BinOp::Add, Expression::placeholder(0), Expression::int(7));
+        let e = Expression::binary(
+            Operation::Add,
+            Expression::placeholder(0),
+            Expression::int(7),
+        );
         let result = e.substitute(&placeholder_to(0, "row"));
         let Expr::Binary(op, left, right) = &*result else {
             panic!("not a binary expression: {result}");
         };
-        assert_eq!(*op, BinOp::Add);
+        assert_eq!(*op, Operation::Add);
         assert_eq!(var_name(left), Some("row"));
         assert_eq!(right.literal_value(), Some(Num::Int(7)));
     }
@@ -1656,8 +1623,8 @@ mod tests {
     #[test]
     fn substitute_rewrites_a_ternary() {
         let p0 = Expression::placeholder(0);
-        let cond = Expression::binary(BinOp::Lt, p0.clone(), Expression::int(64));
-        let wrapped = Expression::binary(BinOp::Sub, p0.clone(), Expression::int(64));
+        let cond = Expression::binary(Operation::Less, p0.clone(), Expression::int(64));
+        let wrapped = Expression::binary(Operation::Subtract, p0.clone(), Expression::int(64));
         let e = Expression::new(Expr::Ternary(cond, p0, wrapped));
         let result = e.substitute(&placeholder_to(0, "col"));
         let Expr::Ternary(_, if_true, if_false) = &*result else {
@@ -1665,7 +1632,7 @@ mod tests {
         };
         assert_eq!(var_name(if_true), Some("col"));
         assert!(
-            matches!(&**if_false, Expr::Binary(BinOp::Sub, ..)),
+            matches!(&**if_false, Expr::Binary(Operation::Subtract, ..)),
             "{if_false}"
         );
     }

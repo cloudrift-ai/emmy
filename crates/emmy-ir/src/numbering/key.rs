@@ -154,7 +154,7 @@ pub fn expression_key(e: &Expression, leaf: &mut dyn FnMut(&Expression) -> Optio
         }
         Expr::Binary(op, l, r) => Key::tuple([
             Key::str(ExprType::Binary.text()),
-            Key::str(op.text()),
+            Key::str(op.infix().unwrap_or(op.text())),
             expression_key(l, leaf),
             expression_key(r, leaf),
         ]),

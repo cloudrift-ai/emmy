@@ -275,12 +275,11 @@ pub fn mask_select_predicate(select: &Select) -> Option<Expression> {
     };
     let (mut op, mut left, mut right) = (*mask_op, mask_left.clone(), mask_right.clone());
     if *keep_left == right && *keep_right == left {
-        use crate::expr::BinOp::*;
         op = match op {
-            Lt => Gt,
-            Le => Ge,
-            Gt => Lt,
-            Ge => Le,
+            Operation::Less => Operation::Greater,
+            Operation::LessEqual => Operation::GreaterEqual,
+            Operation::Greater => Operation::Less,
+            Operation::GreaterEqual => Operation::LessEqual,
             _ => return None,
         };
         std::mem::swap(&mut left, &mut right);
@@ -288,8 +287,11 @@ pub fn mask_select_predicate(select: &Select) -> Option<Expression> {
     if *keep_left != left || *keep_right != right {
         return None;
     }
-    use crate::expr::BinOp::*;
-    if !matches!((keep_op, op), (Lt, Ge) | (Le, Gt) | (Gt, Le) | (Ge, Lt)) {
+    use Operation::{Greater, GreaterEqual, Less, LessEqual};
+    if !matches!(
+        (keep_op, op),
+        (Less, GreaterEqual) | (LessEqual, Greater) | (Greater, LessEqual) | (GreaterEqual, Less)
+    ) {
         return None;
     }
     Some(mask.select.clone())

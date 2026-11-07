@@ -5,14 +5,14 @@ use std::collections::HashMap;
 use std::hash::Hash;
 use std::sync::Arc;
 
-use super::{BinOp, Expr, Expression, Lit, LitType, Num, apply_binop};
+use super::{Expr, Expression, Lit, LitType, Num, Operation, apply_binop};
 use crate::{Name, Result};
 
 use std::collections::BTreeMap;
 
 // --- the simplifier's helpers ---------------------------------------------------------------------
 
-pub(super) fn fold_binop_literals(op: BinOp, left: &Lit, right: &Lit) -> Result<Expression> {
+pub(super) fn fold_binop_literals(op: Operation, left: &Lit, right: &Lit) -> Result<Expression> {
     let folded = apply_binop(op, left.value, right.value)?;
     if let Num::Bool(flag) = folded {
         return Ok(Expression::int(flag as i64));
@@ -28,7 +28,7 @@ pub(super) fn fold_binop_literals(op: BinOp, left: &Lit, right: &Lit) -> Result<
 
 pub(super) fn simplify_binary(
     this: &Expression,
-    op: BinOp,
+    op: Operation,
     left: &Expression,
     right: &Expression,
     ctx: &SimplifyCtx,
@@ -40,7 +40,7 @@ pub(super) fn simplify_binary(
         return fold_binop_literals(op, l, r);
     }
     match op {
-        BinOp::Add => {
+        Operation::Add => {
             if left.is_zero() {
                 return Ok(right);
             }
@@ -51,7 +51,7 @@ pub(super) fn simplify_binary(
                 return Ok(recomposed);
             }
         }
-        BinOp::Sub => {
+        Operation::Subtract => {
             if right.is_zero() {
                 return Ok(left);
             }
@@ -59,7 +59,7 @@ pub(super) fn simplify_binary(
                 return Ok(Expression::int(0));
             }
         }
-        BinOp::Mul => {
+        Operation::Multiply => {
             if left.is_zero() || right.is_zero() {
                 return Ok(Expression::int(0));
             }
@@ -70,7 +70,7 @@ pub(super) fn simplify_binary(
                 return Ok(left);
             }
         }
-        BinOp::Div | BinOp::FloorDiv => {
+        Operation::Divide | Operation::FloorDivide => {
             if right.is_one() {
                 return Ok(left);
             }
@@ -85,10 +85,10 @@ pub(super) fn simplify_binary(
                     && value.as_f64() > 0.0
                     && inner_left.range(ctx).is_some_and(|bounds| bounds.lo >= 0)
                     // Positive constant quotient chains have one denominator in index normal form.
-                    && let Ok(product) = apply_binop(BinOp::Mul, *value, Num::Int(n))
+                    && let Ok(product) = apply_binop(Operation::Multiply, *value, Num::Int(n))
                 {
                     return Expression::binary(
-                        BinOp::Div,
+                        Operation::Divide,
                         inner_left.clone(),
                         Expression::literal(product, LitType::Int),
                     )
@@ -97,15 +97,17 @@ pub(super) fn simplify_binary(
                 if let Some((q, _)) = div_mod_decompose(&left, n, ctx)? {
                     return Ok(q);
                 }
-                if op == BinOp::FloorDiv && left.range(ctx).is_some_and(|bounds| bounds.lo >= 0) {
-                    return Ok(Expression::binary(BinOp::Div, left, right));
+                if op == Operation::FloorDivide
+                    && left.range(ctx).is_some_and(|bounds| bounds.lo >= 0)
+                {
+                    return Ok(Expression::binary(Operation::Divide, left, right));
                 }
             }
             if let Some(cancelled) = cancel_common_factors(op, &left, &right, ctx) {
                 return Ok(cancelled);
             }
         }
-        BinOp::Mod => {
+        Operation::Remainder => {
             if right.is_one() || left.is_zero() {
                 return Ok(Expression::int(0));
             }
@@ -120,7 +122,7 @@ pub(super) fn simplify_binary(
                 return Ok(cancelled);
             }
         }
-        BinOp::And => {
+        Operation::LogicalAnd => {
             if left.is_truthy() {
                 return Ok(right);
             }
@@ -131,7 +133,7 @@ pub(super) fn simplify_binary(
                 return Ok(Expression::int(0));
             }
         }
-        BinOp::Or => {
+        Operation::LogicalOr => {
             if left.is_falsy() {
                 return Ok(right);
             }
@@ -142,7 +144,11 @@ pub(super) fn simplify_binary(
                 return Ok(Expression::int(1));
             }
         }
-        BinOp::Lt | BinOp::Le | BinOp::Gt | BinOp::Ge | BinOp::Eq => {
+        Operation::Less
+        | Operation::LessEqual
+        | Operation::Greater
+        | Operation::GreaterEqual
+        | Operation::Equal => {
             if let (Some(la), Some(lb)) = (left.range(ctx), right.range(ctx))
                 && let Some(decided) = static_cmp(op, la, lb)
             {
@@ -165,7 +171,7 @@ pub(super) fn multiplicative_factors(expression: &Expression) -> (Vec<Expression
     {
         return (vec![], value.as_int().unwrap_or(0));
     }
-    if let Expr::Binary(BinOp::Mul, left, right) = &**expression {
+    if let Expr::Binary(Operation::Multiply, left, right) = &**expression {
         let (mut lf, lk) = multiplicative_factors(left);
         let (rf, rk) = multiplicative_factors(right);
         if let Some(k) = lk.checked_mul(rk) {
@@ -194,10 +200,10 @@ pub(super) fn rebuild_product(factors: &[Expression], k: i64) -> Expression {
     }
     let mut out = factors[0].clone();
     for f in &factors[1..] {
-        out = Expression::binary(BinOp::Mul, out, f.clone());
+        out = Expression::binary(Operation::Multiply, out, f.clone());
     }
     if k != 1 {
-        out = Expression::binary(BinOp::Mul, out, Expression::int(k));
+        out = Expression::binary(Operation::Multiply, out, Expression::int(k));
     }
     out
 }
@@ -210,7 +216,7 @@ pub(super) fn gcd(mut a: i64, mut b: i64) -> i64 {
 }
 
 pub(super) fn cancel_common_factors(
-    op: BinOp,
+    op: Operation,
     left: &Expression,
     right: &Expression,
     ctx: &SimplifyCtx,
@@ -256,23 +262,23 @@ pub(super) fn cancel_common_factors(
         if new_left.is_zero() {
             return Some(Expression::int(0));
         }
-    } else if op == BinOp::Mod {
+    } else if op == Operation::Remainder {
         if new_right.is_one() || new_left.is_zero() {
             return Some(Expression::int(0));
         }
         let common = rebuild_product(&common_factors, common_int);
-        let modulo = Expression::binary(BinOp::Mod, new_left, new_right);
+        let modulo = Expression::binary(Operation::Remainder, new_left, new_right);
         return Some(if common.is_one() {
             modulo
         } else {
-            Expression::binary(BinOp::Mul, common, modulo)
+            Expression::binary(Operation::Multiply, common, modulo)
         });
     }
     Some(Expression::binary(op, new_left, new_right))
 }
 
 pub(super) fn addend_chain(e: &Expression, out: &mut Vec<Expression>) {
-    if let Expr::Binary(BinOp::Add, l, r) = &**e {
+    if let Expr::Binary(Operation::Add, l, r) = &**e {
         addend_chain(l, out);
         addend_chain(r, out);
     } else {
@@ -282,10 +288,10 @@ pub(super) fn addend_chain(e: &Expression, out: &mut Vec<Expression>) {
 
 /// `e` as `(x <op> c) * a` (either `*` operand order, bare form `a = 1`), `op` among `ops`, `c` and `a` positive int
 /// literals: `(x, c, a)`.
-pub(super) fn scaled_term(e: &Expression, ops: &[BinOp]) -> Option<(Expression, i64, i64)> {
+pub(super) fn scaled_term(e: &Expression, ops: &[Operation]) -> Option<(Expression, i64, i64)> {
     let mut a = 1;
     let mut e = e.clone();
-    if let Expr::Binary(BinOp::Mul, left, right) = &*e.clone() {
+    if let Expr::Binary(Operation::Multiply, left, right) = &*e.clone() {
         for (lit_side, other) in [(right, left), (left, right)] {
             if let Some(value) = lit_side.int_literal().filter(|v| *v > 0) {
                 a = value;
@@ -313,7 +319,7 @@ pub(super) fn fold_divmod_recompose(
     addend_chain(left, &mut terms);
     addend_chain(right, &mut terms);
     for (i, t1) in terms.iter().enumerate() {
-        let Some((x, c, a)) = scaled_term(t1, &[BinOp::Div, BinOp::FloorDiv]) else {
+        let Some((x, c, a)) = scaled_term(t1, &[Operation::Divide, Operation::FloorDivide]) else {
             continue;
         };
         if a % c != 0 {
@@ -324,18 +330,18 @@ pub(super) fn fold_divmod_recompose(
             if j == i {
                 continue;
             }
-            match scaled_term(t2, &[BinOp::Mod]) {
+            match scaled_term(t2, &[Operation::Remainder]) {
                 Some((rx, rc, rk)) if rx == x && rc == c && rk == k => {}
                 _ => continue,
             }
             let mut out = if k == 1 {
                 x.clone()
             } else {
-                Expression::binary(BinOp::Mul, x.clone(), Expression::int(k))
+                Expression::binary(Operation::Multiply, x.clone(), Expression::int(k))
             };
             for (pos, t) in terms.iter().enumerate() {
                 if pos != i && pos != j {
-                    out = Expression::binary(BinOp::Add, out, t.clone());
+                    out = Expression::binary(Operation::Add, out, t.clone());
                 }
             }
             return Ok(Some(out.simplify(ctx)?));
@@ -356,7 +362,7 @@ pub(super) fn div_mod_decompose(
             Expression::int(value.rem_euclid(n)),
         )));
     }
-    if let Expr::Binary(BinOp::Mul, left, right) = &**expression {
+    if let Expr::Binary(Operation::Multiply, left, right) = &**expression {
         for (k_side, other_side) in [(right, left), (left, right)] {
             let Some(k) = k_side.int_literal().filter(|k| *k > 0) else {
                 continue;
@@ -365,17 +371,21 @@ pub(super) fn div_mod_decompose(
                 continue;
             }
             if k % n == 0 {
-                let q = Expression::binary(BinOp::Mul, other_side.clone(), Expression::int(k / n))
-                    .simplify(ctx)?;
+                let q = Expression::binary(
+                    Operation::Multiply,
+                    other_side.clone(),
+                    Expression::int(k / n),
+                )
+                .simplify(ctx)?;
                 return Ok(Some((q, Expression::int(0))));
             }
             if n % k == 0 {
                 let d = Expression::int(n / k);
-                let q =
-                    Expression::binary(BinOp::Div, other_side.clone(), d.clone()).simplify(ctx)?;
+                let q = Expression::binary(Operation::Divide, other_side.clone(), d.clone())
+                    .simplify(ctx)?;
                 let r = Expression::binary(
-                    BinOp::Mul,
-                    Expression::binary(BinOp::Mod, other_side.clone(), d),
+                    Operation::Multiply,
+                    Expression::binary(Operation::Remainder, other_side.clone(), d),
                     Expression::int(k),
                 )
                 .simplify(ctx)?;
@@ -383,7 +393,7 @@ pub(super) fn div_mod_decompose(
             }
         }
     }
-    if let Expr::Binary(BinOp::Add, left, right) = &**expression {
+    if let Expr::Binary(Operation::Add, left, right) = &**expression {
         let mut l = div_mod_decompose(left, n, ctx)?;
         let mut r = div_mod_decompose(right, n, ctx)?;
         if let Some((_, rl)) = &l
@@ -400,14 +410,14 @@ pub(super) fn div_mod_decompose(
         let (Some((ql, rl)), Some((qr, rr))) = (l, r) else {
             return Ok(None);
         };
-        let r_sum = Expression::binary(BinOp::Add, rl, rr).simplify(ctx)?;
+        let r_sum = Expression::binary(Operation::Add, rl, rr).simplify(ctx)?;
         let Some(rng) = r_sum.range(ctx) else {
             return Ok(None);
         };
         if rng.lo < 0 || rng.hi >= n as i128 {
             return Ok(None);
         }
-        let q = Expression::binary(BinOp::Add, ql, qr).simplify(ctx)?;
+        let q = Expression::binary(Operation::Add, ql, qr).simplify(ctx)?;
         return Ok(Some((q, r_sum)));
     }
     if let Some(rng) = expression.range(ctx)
@@ -440,8 +450,8 @@ pub(super) fn split_addend(
     }
     let lit = Expression::int(n);
     Ok(Some((
-        Expression::binary(BinOp::Div, expression.clone(), lit.clone()).simplify(ctx)?,
-        Expression::binary(BinOp::Mod, expression.clone(), lit).simplify(ctx)?,
+        Expression::binary(Operation::Divide, expression.clone(), lit.clone()).simplify(ctx)?,
+        Expression::binary(Operation::Remainder, expression.clone(), lit).simplify(ctx)?,
     )))
 }
 
@@ -465,21 +475,21 @@ pub(super) fn mod_below_divisor(
         .map(|_| left.clone()))
 }
 
-pub(super) fn static_cmp(op: BinOp, la: Interval, lb: Interval) -> Option<bool> {
+pub(super) fn static_cmp(op: Operation, la: Interval, lb: Interval) -> Option<bool> {
     match op {
-        BinOp::Lt => (la.hi < lb.lo)
+        Operation::Less => (la.hi < lb.lo)
             .then_some(true)
             .or((la.lo >= lb.hi).then_some(false)),
-        BinOp::Le => (la.hi <= lb.lo)
+        Operation::LessEqual => (la.hi <= lb.lo)
             .then_some(true)
             .or((la.lo > lb.hi).then_some(false)),
-        BinOp::Gt => (la.lo > lb.hi)
+        Operation::Greater => (la.lo > lb.hi)
             .then_some(true)
             .or((la.hi <= lb.lo).then_some(false)),
-        BinOp::Ge => (la.lo >= lb.hi)
+        Operation::GreaterEqual => (la.lo >= lb.hi)
             .then_some(true)
             .or((la.hi < lb.lo).then_some(false)),
-        BinOp::Eq => {
+        Operation::Equal => {
             if la.hi < lb.lo || la.lo > lb.hi {
                 Some(false)
             } else if la.lo == la.hi && la.hi == lb.lo && lb.lo == lb.hi {
@@ -543,10 +553,10 @@ pub fn affine_form(
     }
     match &**expression {
         Expr::Var(name) => Some((Expression::int(0), BTreeMap::from([(*name, 1)]))),
-        Expr::Binary(op @ (BinOp::Add | BinOp::Sub), left, right) => {
+        Expr::Binary(op @ (Operation::Add | Operation::Subtract), left, right) => {
             let (l_anchor, l_coeffs) = affine_form(left, vars)?;
             let (r_anchor, r_coeffs) = affine_form(right, vars)?;
-            let sign = if *op == BinOp::Add { 1 } else { -1 };
+            let sign = if *op == Operation::Add { 1 } else { -1 };
             let anchor = Expression::binary(*op, l_anchor, r_anchor);
             let mut coeffs = l_coeffs;
             for (v, c) in r_coeffs {
@@ -560,7 +570,7 @@ pub fn affine_form(
             coeffs.retain(|_, c| *c != 0);
             Some((anchor, coeffs))
         }
-        Expr::Binary(BinOp::Mul, left, right) => {
+        Expr::Binary(Operation::Multiply, left, right) => {
             let (l_uses, r_uses) = (uses(left), uses(right));
             if l_uses && r_uses {
                 return None;
@@ -573,9 +583,9 @@ pub fn affine_form(
             let factor = value.as_int().ok()?;
             let (sub_anchor, sub_coeffs) = affine_form(side, vars)?;
             let anchor = if l_uses {
-                Expression::binary(BinOp::Mul, sub_anchor, mult.clone())
+                Expression::binary(Operation::Multiply, sub_anchor, mult.clone())
             } else {
-                Expression::binary(BinOp::Mul, mult.clone(), sub_anchor)
+                Expression::binary(Operation::Multiply, mult.clone(), sub_anchor)
             };
             let coeffs = sub_coeffs
                 .into_iter()
@@ -598,9 +608,9 @@ pub fn split_anchor(expression: &Expression) -> Option<(i64, Expression)> {
         let term = if coeff == 1 {
             variable
         } else {
-            Expression::binary(BinOp::Mul, variable, Expression::int(coeff))
+            Expression::binary(Operation::Multiply, variable, Expression::int(coeff))
         };
-        rest = Expression::binary(BinOp::Add, rest, term);
+        rest = Expression::binary(Operation::Add, rest, term);
     }
     Some((anchor, rest))
 }
@@ -630,8 +640,12 @@ mod tests {
     use super::*;
 
     /// `(f * coeff) <op> divisor`.
-    fn scaled(op: BinOp, coeff: i64, divisor: i64) -> Expression {
-        let product = Expression::binary(BinOp::Mul, Expression::var("f"), Expression::int(coeff));
+    fn scaled(op: Operation, coeff: i64, divisor: i64) -> Expression {
+        let product = Expression::binary(
+            Operation::Multiply,
+            Expression::var("f"),
+            Expression::int(coeff),
+        );
         Expression::binary(op, product, Expression::int(divisor))
     }
 
@@ -644,7 +658,7 @@ mod tests {
     #[test]
     fn the_modulo_factor_cancel_keeps_the_value() {
         for (coeff, modulus) in [(8, 64), (2, 4), (3, 6), (4, 16), (16, 128), (2, 8), (5, 10)] {
-            let e = scaled(BinOp::Mod, coeff, modulus);
+            let e = scaled(Operation::Remainder, coeff, modulus);
             let s = e.simplify(&SimplifyCtx::empty()).unwrap();
             for v in 0..256 {
                 assert_eq!(at(&e, v), at(&s, v), "mismatch at f={v}: {e} vs {s}");
@@ -655,7 +669,7 @@ mod tests {
     /// The shape that broke vectorized cp.async: `(f*8) % 64` is `8 * (f % 8)`, not `f % 8`.
     #[test]
     fn the_modulo_factor_cancel_keeps_the_common_factor() {
-        let s = scaled(BinOp::Mod, 8, 64)
+        let s = scaled(Operation::Remainder, 8, 64)
             .simplify(&SimplifyCtx::empty())
             .unwrap();
         assert_eq!(at(&s, 1), Num::Int(8));
@@ -665,7 +679,7 @@ mod tests {
     /// Division cancels the factor outright: `(f*8) / 64 == f / 8`.
     #[test]
     fn the_division_factor_cancel_keeps_the_value() {
-        let e = scaled(BinOp::Div, 8, 64);
+        let e = scaled(Operation::Divide, 8, 64);
         let s = e.simplify(&SimplifyCtx::empty()).unwrap();
         for v in 0..256 {
             assert_eq!(at(&e, v), at(&s, v), "mismatch at f={v}: {e} vs {s}");

@@ -7,7 +7,8 @@ use std::sync::Arc;
 use super::ties;
 use super::{carried_out, unify_siblings, with_bodies};
 use crate::body::{Body, free_names, unique};
-use crate::expr::{BinOp, Expr, Expression, SimplifyCtx, affine_form};
+use crate::elementwise::Operation;
+use crate::expr::{Expr, Expression, SimplifyCtx, affine_form};
 use crate::field::Float;
 use crate::numbering::{Key, Numbering, roles, statement_tree, value_numbers};
 use crate::order::ordering_constraints;
@@ -291,7 +292,7 @@ fn affine(expression: Expression, axis_order: &HashMap<Name, usize>) -> Result<E
         terms.push(if *coefficient == 1 {
             variable
         } else {
-            Expression::binary(BinOp::Mul, Expression::int(*coefficient), variable)
+            Expression::binary(Operation::Multiply, Expression::int(*coefficient), variable)
         });
     }
     if !anchor.is_zero() {
@@ -302,7 +303,7 @@ fn affine(expression: Expression, axis_order: &HashMap<Name, usize>) -> Result<E
         return Ok(Expression::int(0));
     };
     for term in terms {
-        result = Expression::binary(BinOp::Add, result, term);
+        result = Expression::binary(Operation::Add, result, term);
     }
     Ok(result)
 }
@@ -314,12 +315,12 @@ fn rewrite(e: &Expression, axis_order: &HashMap<Name, usize>) -> Result<Expressi
             let (mut left, mut right) = (rewrite(left, axis_order)?, rewrite(right, axis_order)?);
             let mut op = *op;
             match op {
-                BinOp::Gt => {
-                    op = BinOp::Lt;
+                Operation::Greater => {
+                    op = Operation::Less;
                     std::mem::swap(&mut left, &mut right);
                 }
-                BinOp::Ge => {
-                    op = BinOp::Le;
+                Operation::GreaterEqual => {
+                    op = Operation::LessEqual;
                     std::mem::swap(&mut left, &mut right);
                 }
                 _ => {}
@@ -330,7 +331,10 @@ fn rewrite(e: &Expression, axis_order: &HashMap<Name, usize>) -> Result<Expressi
                 std::mem::swap(&mut left, &mut right);
             }
             let result = Expression::binary(op, left, right);
-            if matches!(op, BinOp::Add | BinOp::Sub | BinOp::Mul) {
+            if matches!(
+                op,
+                Operation::Add | Operation::Subtract | Operation::Multiply
+            ) {
                 affine(result, axis_order)?
             } else {
                 result

@@ -12,7 +12,8 @@ use super::with_bodies;
 use crate::Name;
 use crate::Result;
 use crate::body::Body;
-use crate::expr::{BinOp, Expr, ExprType, Expression, Num, python_repr};
+use crate::elementwise::Operation;
+use crate::expr::{Expr, ExprType, Expression, Num, python_repr};
 use crate::field::{FieldType, Float};
 use crate::numbering::{Key, Numbering, expression_key};
 use crate::statement::{Affine, Statement};
@@ -117,7 +118,7 @@ pub(crate) fn extent_digest(expression: &Expression) -> String {
             Expr::Binary(op, left, right) => {
                 format!(
                     "('BinaryExpr', {}, {}, {})",
-                    python_repr(op.text()),
+                    python_repr(op.infix().unwrap_or(op.text())),
                     form(left),
                     form(right)
                 )
@@ -266,18 +267,18 @@ pub(crate) fn term_key(operand: Key, name: &Name, coefficient: f64) -> (Key, Nam
 }
 
 /// Whether `op`'s operands may trade places.
-pub(crate) fn commutative(op: BinOp) -> bool {
+pub(crate) fn commutative(op: Operation) -> bool {
     matches!(
         op,
-        BinOp::Add
-            | BinOp::Mul
-            | BinOp::Eq
-            | BinOp::Ne
-            | BinOp::And
-            | BinOp::Or
-            | BinOp::BitAnd
-            | BinOp::BitOr
-            | BinOp::Xor
+        Operation::Add
+            | Operation::Multiply
+            | Operation::Equal
+            | Operation::NotEqual
+            | Operation::LogicalAnd
+            | Operation::LogicalOr
+            | Operation::BitwiseAnd
+            | Operation::BitwiseOr
+            | Operation::BitwiseXor
     )
 }
 

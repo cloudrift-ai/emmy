@@ -4,8 +4,9 @@ use std::collections::HashMap;
 use std::sync::{Arc, OnceLock};
 
 use emmy_ir::Name;
+use emmy_ir::elementwise::Operation;
 use emmy_ir::expr::{
-    BinOp, Builtin, CastTarget, Expr, Expression, Interval, Lit, LitType, Num, SimplifyCtx,
+    Builtin, CastTarget, Expr, Expression, Interval, Lit, LitType, Num, SimplifyCtx,
 };
 use pyo3::exceptions::{PyTypeError, PyValueError};
 use pyo3::prelude::*;
@@ -40,9 +41,11 @@ impl PyExprField for Name {
     }
 }
 
-impl PyExprField for BinOp {
+impl PyExprField for Operation {
     fn to_py(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
-        Ok(PyString::new(py, self.text()).into_any().unbind())
+        Ok(PyString::new(py, self.infix().unwrap_or(self.text()))
+            .into_any()
+            .unbind())
     }
 }
 
@@ -184,7 +187,7 @@ fn coerce(value: &Bound<'_, PyAny>) -> PyResult<Expression> {
     }
 }
 
-fn binary(op: BinOp, left: Expression, right: Expression) -> Expression {
+fn binary(op: Operation, left: Expression, right: Expression) -> Expression {
     Expression::binary(op, left, right)
 }
 
@@ -254,63 +257,63 @@ impl PyExpression {
     fn __add__(&self, other: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
         Ok(PyExpression::wrap(
             other.py(),
-            &binary(BinOp::Add, self.expr.clone(), coerce(other)?),
+            &binary(Operation::Add, self.expr.clone(), coerce(other)?),
         )?
         .unbind())
     }
     fn __radd__(&self, other: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
         Ok(PyExpression::wrap(
             other.py(),
-            &binary(BinOp::Add, coerce(other)?, self.expr.clone()),
+            &binary(Operation::Add, coerce(other)?, self.expr.clone()),
         )?
         .unbind())
     }
     fn __sub__(&self, other: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
         Ok(PyExpression::wrap(
             other.py(),
-            &binary(BinOp::Sub, self.expr.clone(), coerce(other)?),
+            &binary(Operation::Subtract, self.expr.clone(), coerce(other)?),
         )?
         .unbind())
     }
     fn __rsub__(&self, other: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
         Ok(PyExpression::wrap(
             other.py(),
-            &binary(BinOp::Sub, coerce(other)?, self.expr.clone()),
+            &binary(Operation::Subtract, coerce(other)?, self.expr.clone()),
         )?
         .unbind())
     }
     fn __mul__(&self, other: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
         Ok(PyExpression::wrap(
             other.py(),
-            &binary(BinOp::Mul, self.expr.clone(), coerce(other)?),
+            &binary(Operation::Multiply, self.expr.clone(), coerce(other)?),
         )?
         .unbind())
     }
     fn __rmul__(&self, other: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
         Ok(PyExpression::wrap(
             other.py(),
-            &binary(BinOp::Mul, coerce(other)?, self.expr.clone()),
+            &binary(Operation::Multiply, coerce(other)?, self.expr.clone()),
         )?
         .unbind())
     }
     fn __truediv__(&self, other: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
         Ok(PyExpression::wrap(
             other.py(),
-            &binary(BinOp::Div, self.expr.clone(), coerce(other)?),
+            &binary(Operation::Divide, self.expr.clone(), coerce(other)?),
         )?
         .unbind())
     }
     fn __mod__(&self, other: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
         Ok(PyExpression::wrap(
             other.py(),
-            &binary(BinOp::Mod, self.expr.clone(), coerce(other)?),
+            &binary(Operation::Remainder, self.expr.clone(), coerce(other)?),
         )?
         .unbind())
     }
     fn __neg__(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
         Ok(PyExpression::wrap(
             py,
-            &binary(BinOp::Sub, Expression::int(0), self.expr.clone()),
+            &binary(Operation::Subtract, Expression::int(0), self.expr.clone()),
         )?
         .unbind())
     }
@@ -319,7 +322,7 @@ impl PyExpression {
     fn lt(&self, other: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
         Ok(PyExpression::wrap(
             other.py(),
-            &binary(BinOp::Lt, self.expr.clone(), coerce(other)?),
+            &binary(Operation::Less, self.expr.clone(), coerce(other)?),
         )?
         .unbind())
     }
@@ -495,7 +498,8 @@ impl PyBinaryExpression {
         left: &Bound<'_, PyAny>,
         right: &Bound<'_, PyAny>,
     ) -> PyResult<PyClassInitializer<Self>> {
-        let op: BinOp = op.parse().py()?;
+        let op = Operation::from_infix(op)
+            .ok_or_else(|| PyValueError::new_err(format!("no binary operator {op:?}")))?;
         let expr = binary(op, expression_from_py(left)?, expression_from_py(right)?);
         Ok(PyClassInitializer::from(PyExpression::base(expr)?).add_subclass(PyBinaryExpression))
     }

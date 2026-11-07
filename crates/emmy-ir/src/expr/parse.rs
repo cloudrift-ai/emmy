@@ -1,7 +1,8 @@
 //! The reader: the tokenizer and the parser that take an expression's text back, and that the body text's reader
 //! extends with the statement punctuation.
 
-use super::{BinOp, Builtin, CastTarget, Expr, Expression, Lit, LitType, Num, python_repr};
+use super::{Builtin, CastTarget, Expr, Expression, Lit, LitType, Num, python_repr};
+use crate::elementwise::Operation;
 use crate::{Error, Result};
 
 // --- the reader -----------------------------------------------------------------------------------
@@ -265,7 +266,7 @@ impl Parser {
             if token.kind != TokenKind::Op {
                 break;
             }
-            let Ok(op) = token.text.parse::<BinOp>() else {
+            let Some(op) = Operation::from_infix(&token.text) else {
                 break;
             };
             if op.precedence() < least {
@@ -424,7 +425,7 @@ mod tests {
     }
 
     fn binary(op: &str, left: Expression, right: Expression) -> Expression {
-        Expression::binary(op.parse().unwrap(), left, right)
+        Expression::binary(Operation::from_infix(op).unwrap(), left, right)
     }
 
     fn ternary(cond: Expression, if_true: Expression, if_false: Expression) -> Expression {
