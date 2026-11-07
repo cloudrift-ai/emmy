@@ -12,9 +12,7 @@ use crate::body::{Body, Normalized, Subroutine, exposed_defines, free_names, loo
 use crate::expr::{Expr, Expression, LitType};
 use crate::kinds::axis::Axis;
 use crate::kinds::elementwise::Op;
-use crate::kinds::field::{
-    AxisRef, DType, Exprs, Float, Names, NumOr, Rewriter, SubroutineRef, Visitor,
-};
+use crate::kinds::field::{AxisRef, Names, NumOr, Rewriter, SubroutineRef, Visitor};
 use crate::kinds::*;
 use crate::{Error, Name, Result};
 
@@ -672,62 +670,6 @@ impl Statement {
         )
     }
 
-    /// The elementwise operation a kind applies, held as `op`.
-    pub fn op(&self) -> Option<&Op> {
-        match self {
-            Statement::Assign(s) => Some(&s.op),
-            Statement::Accum(s) => Some(&s.op),
-            Statement::FragmentApply(s) => Some(&s.op),
-            Statement::FragmentRowReduce(s) => Some(&s.op),
-            _ => None,
-        }
-    }
-
-    /// This statement with another `op`, for a kind that holds one.
-    pub fn with_op(&self, op: Op) -> Statement {
-        match self {
-            Statement::Assign(s) => Statement::Assign(Assign { op, ..s.clone() }),
-            Statement::Accum(s) => Statement::Accum(Accum { op, ..s.clone() }),
-            Statement::FragmentApply(s) => {
-                Statement::FragmentApply(FragmentApply { op, ..s.clone() })
-            }
-            Statement::FragmentRowReduce(s) => {
-                Statement::FragmentRowReduce(FragmentRowReduce { op, ..s.clone() })
-            }
-            _ => self.clone(),
-        }
-    }
-
-    /// The dtype a value-defining kind stamps, when it has one.
-    pub fn dtype(&self) -> Option<&DType> {
-        match self {
-            Statement::Load(s) => s.dtype.as_ref(),
-            Statement::Assign(s) => s.dtype.as_ref(),
-            Statement::Affine(s) => s.dtype.as_ref(),
-            Statement::Accum(s) => s.dtype.as_ref(),
-            Statement::Carry(s) => s.dtype.as_ref(),
-            Statement::Let(s) => s.dtype.as_ref(),
-            Statement::Init(s) => Some(&s.dtype),
-            _ => None,
-        }
-    }
-
-    /// The one name a single-value kind defines.
-    pub fn name(&self) -> Option<&Name> {
-        match self {
-            Statement::Assign(s) => Some(&s.name),
-            Statement::Affine(s) => Some(&s.name),
-            Statement::Accum(s) => Some(&s.name),
-            Statement::Carry(s) => Some(&s.name),
-            Statement::Pre(s) => Some(&s.name),
-            Statement::Init(s) => Some(&s.name),
-            Statement::Let(s) => Some(&s.name),
-            Statement::Select(s) => Some(&s.name),
-            Statement::Call(s) => Some(&s.name),
-            _ => None,
-        }
-    }
-
     pub fn is_block(&self) -> bool {
         matches!(
             self,
@@ -850,28 +792,24 @@ impl Affine {
             .map(|(c, arg)| (c.0, arg))
     }
 
-    /// Construct with Python's checks: equal lengths, at least one term, no zero coefficient.
-    pub fn checked(
-        name: Name,
-        args: Names,
-        coefficients: Floats,
-        offset: Float,
-        dtype: Option<DType>,
-    ) -> Result<Affine> {
-        if args.len() != coefficients.len() {
+    /// Python's checks: equal lengths, at least one term, no zero coefficient.
+    pub fn validate(&self) -> Result<()> {
+        let name = &self.name;
+        if self.args.len() != self.coefficients.len() {
             return Err(Error::Value(format!(
                 "Affine {name:?}: {} args and {} coefficients",
-                args.len(),
-                coefficients.len()
+                self.args.len(),
+                self.coefficients.len()
             )));
         }
-        if args.is_empty() {
+        if self.args.is_empty() {
             return Err(Error::Value(format!(
                 "Affine {name:?} has no term: a constant is a Let"
             )));
         }
-        if coefficients.iter().any(|c| c.0 == 0.0) {
-            let shown: Vec<String> = coefficients
+        if self.coefficients.iter().any(|c| c.0 == 0.0) {
+            let shown: Vec<String> = self
+                .coefficients
                 .iter()
                 .map(|c| crate::kinds::field::spell_number(c.0))
                 .collect();
@@ -880,13 +818,7 @@ impl Affine {
                 shown.join(", ")
             )));
         }
-        Ok(Affine {
-            name,
-            args,
-            coefficients,
-            offset,
-            dtype,
-        })
+        Ok(())
     }
 
     /// The same value as binary `Assign`s over `Let`-bound literals, the last one named `name`.
@@ -1048,100 +980,60 @@ pub fn literal_binding(stmt: &Statement) -> Option<(&Name, f64)> {
     None
 }
 
-/// Constructors with the checks Python's `__post_init__` made.
+/// The checks Python's `__post_init__` made, each kind over its own fields.
 impl Load {
-    pub fn checked(
-        names: Names,
-        input: Name,
-        index: Exprs,
-        dtype: Option<DType>,
-        carried: Name,
-    ) -> Result<Load> {
-        if names.is_empty() {
+    pub fn validate(&self) -> Result<()> {
+        if self.names.is_empty() {
             return Err(Error::Value("Load.names must be non-empty".into()));
         }
-        Ok(Load {
-            names,
-            input,
-            index,
-            dtype,
-            carried,
-        })
+        Ok(())
     }
 }
 
 impl Write {
-    pub fn checked(
-        output: Name,
-        index: Exprs,
-        values: Names,
-        value_dtype: Option<DType>,
-        atomic: bool,
-        swizzle: Name,
-    ) -> Result<Write> {
-        if values.is_empty() {
+    pub fn validate(&self) -> Result<()> {
+        if self.values.is_empty() {
             return Err(Error::Value("Write.values must be non-empty".into()));
         }
-        if atomic && values.len() != 1 {
+        if self.atomic && self.values.len() != 1 {
             return Err(Error::Value(
                 "an atomic Write is scalar (one value per atomicAdd)".into(),
             ));
         }
-        Ok(Write {
-            output,
-            index,
-            values,
-            value_dtype,
-            atomic,
-            swizzle,
-        })
+        Ok(())
     }
 }
 
 impl Accum {
-    pub fn checked(
-        name: Name,
-        value: Name,
-        op: Op,
-        dtype: Option<DType>,
-        axes: Names,
-        base: Option<Name>,
-    ) -> Accum {
-        // The ordinary self-fold has one spelling.
-        let base = base.filter(|b| *b != name);
-        Accum {
-            name,
-            value,
-            op,
-            dtype,
-            axes,
-            base,
-        }
+    /// The ordinary self-fold has one spelling: a base that is the state itself is no base.
+    pub fn normalized(self) -> Accum {
+        let base = self.base.filter(|b| *b != self.name);
+        Accum { base, ..self }
     }
 }
 
 impl Select {
-    pub fn checked(name: Name, branches: crate::kinds::field::Branches) -> Result<Select> {
-        if branches.is_empty() {
+    pub fn validate(&self) -> Result<()> {
+        if self.branches.is_empty() {
             return Err(Error::Value("Select.branches must be non-empty".into()));
         }
-        Ok(Select { name, branches })
+        Ok(())
     }
 }
 
 impl Call {
-    pub fn checked(name: Name, target: SubroutineRef, args: Exprs) -> Result<Call> {
-        if args.len() != target.axes.len() {
+    pub fn validate(&self) -> Result<()> {
+        if self.args.len() != self.target.axes.len() {
             return Err(Error::Value(
                 "subroutine arguments do not match its parameters".into(),
             ));
         }
-        Ok(Call { name, target, args })
+        Ok(())
     }
 }
 
 impl Tile {
-    pub fn check(&self) -> Result<()> {
+    pub fn validate(&self) -> Result<()> {
         if self.aux_threads != 0 && self.block_threads.is_none() {
             return Err(Error::Value(
                 "Tile.aux_threads requires a cooperative block_threads".into(),
@@ -1152,7 +1044,7 @@ impl Tile {
 }
 
 impl WgmmaMma {
-    pub fn check(&self) -> Result<()> {
+    pub fn validate(&self) -> Result<()> {
         let crate::kinds::field::Shape3(m, n, k) = self.shape;
         if (m, k) != (64, 16) || n % 8 != 0 || !(8..=256).contains(&n) {
             return Err(Error::Value(format!(
@@ -1183,37 +1075,13 @@ impl WgmmaMma {
 /// The checks a kind makes on construction, by kind: what Python's `__post_init__` refused.
 pub fn check(stmt: &Statement) -> Result<()> {
     match stmt {
-        Statement::Load(s) => Load::checked(
-            s.names.clone(),
-            s.input.clone(),
-            s.index.clone(),
-            s.dtype.clone(),
-            s.carried.clone(),
-        )
-        .map(|_| ()),
-        Statement::Write(s) => Write::checked(
-            s.output.clone(),
-            s.index.clone(),
-            s.values.clone(),
-            s.value_dtype.clone(),
-            s.atomic,
-            s.swizzle.clone(),
-        )
-        .map(|_| ()),
-        Statement::Affine(s) => Affine::checked(
-            s.name.clone(),
-            s.args.clone(),
-            s.coefficients.clone(),
-            s.offset,
-            s.dtype.clone(),
-        )
-        .map(|_| ()),
-        Statement::Select(s) => Select::checked(s.name.clone(), s.branches.clone()).map(|_| ()),
-        Statement::Call(s) => {
-            Call::checked(s.name.clone(), s.target.clone(), s.args.clone()).map(|_| ())
-        }
-        Statement::Tile(s) => s.check(),
-        Statement::WgmmaMma(s) => s.check(),
+        Statement::Load(s) => s.validate(),
+        Statement::Write(s) => s.validate(),
+        Statement::Affine(s) => s.validate(),
+        Statement::Select(s) => s.validate(),
+        Statement::Call(s) => s.validate(),
+        Statement::Tile(s) => s.validate(),
+        Statement::WgmmaMma(s) => s.validate(),
         Statement::TreeHalve(s) => carried_kind(&s.combine_states, Kind::Assign),
         Statement::WarpShuffle(s) => carried_kind(&s.combine_states, Kind::Assign),
         Statement::RegStore(s) => carried_kind(&s.run, Kind::RegStore),
@@ -1235,9 +1103,7 @@ fn carried_kind(stmts: &[Arc<Statement>], kind: Kind) -> Result<()> {
 pub fn finished(stmt: Statement) -> Result<Statement> {
     check(&stmt)?;
     Ok(match stmt {
-        Statement::Accum(a) => Statement::Accum(Accum::checked(
-            a.name, a.value, a.op, a.dtype, a.axes, a.base,
-        )),
+        Statement::Accum(a) => Statement::Accum(a.normalized()),
         other => other,
     })
 }

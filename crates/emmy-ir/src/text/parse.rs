@@ -354,7 +354,15 @@ impl Line {
             } else {
                 Some(base.clone())
             };
-            let accum = Accum::checked(name, value.clone(), op, dtype, axes.into(), base);
+            let accum = Accum {
+                name,
+                value: value.clone(),
+                op,
+                dtype,
+                axes: axes.into(),
+                base,
+            }
+            .normalized();
             return self.end(Arc::new(Statement::Accum(accum)));
         }
         let mut defined = vec![name];
@@ -372,7 +380,14 @@ impl Line {
             } else {
                 Name::from("")
             };
-            let load = Load::checked(defined.into(), buffer, index.into(), dtype, carried)?;
+            let load = Load {
+                names: defined.into(),
+                input: buffer,
+                index: index.into(),
+                dtype,
+                carried,
+            };
+            load.validate()?;
             return self.end(Arc::new(Statement::Load(load)));
         }
         let [name] = &defined[..] else {
@@ -397,11 +412,12 @@ impl Line {
                 target.with_buffers(buffers.into())
             };
             let args = self.parser.expressions(")")?;
-            let call = Call::checked(
+            let call = Call {
                 name,
-                crate::kinds::field::SubroutineRef(target),
-                args.into(),
-            )?;
+                target: crate::kinds::field::SubroutineRef(target),
+                args: args.into(),
+            };
+            call.validate()?;
             return self.end(Arc::new(Statement::Call(call)));
         }
         if self.parser.at_word("pre", 0) && !self.parser.at("(", 1) {
@@ -425,7 +441,11 @@ impl Line {
                         .map_err(|err| at_line(*number, err))?,
                 );
             }
-            let select = Select::checked(name, branches.into())?;
+            let select = Select {
+                name,
+                branches: branches.into(),
+            };
+            select.validate()?;
             return self.end(Arc::new(Statement::Select(select)));
         }
         if let Some(token) = self.parser.peek(0)
@@ -655,14 +675,16 @@ impl Line {
         } else {
             Name::from("NONE")
         };
-        Ok(Statement::Write(Write::checked(
-            name,
+        let write = Write {
+            output: name,
             index,
-            values.into(),
-            dtype,
+            values: values.into(),
+            value_dtype: dtype,
             atomic,
             swizzle,
-        )?))
+        };
+        write.validate()?;
+        Ok(Statement::Write(write))
     }
 
     fn affine(&mut self, name: Name, dtype: Option<DType>) -> Result<Affine> {
@@ -688,7 +710,15 @@ impl Line {
                 }
             }
         }
-        Affine::checked(name, args.into(), coefficients.into(), Float(offset), dtype)
+        let affine = Affine {
+            name,
+            args: args.into(),
+            coefficients: coefficients.into(),
+            offset: Float(offset),
+            dtype,
+        };
+        affine.validate()?;
+        Ok(affine)
     }
 
     fn loop_(&mut self, body: Body) -> Result<Arc<Statement>> {
