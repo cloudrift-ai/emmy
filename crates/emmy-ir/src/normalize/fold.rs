@@ -466,3 +466,22 @@ pub fn fold_affine(body: &Body, exposed: &HashSet<Name>) -> Body {
         _ => Some(stmt.clone()),
     })
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::normalize::testing::*;
+
+    #[test]
+    fn unread_values_leave_with_everything_only_they_read() {
+        // A dropped value leaves its operands unread in turn: one call drops the whole chain.
+        let chain = ["y = load Y[i]", "a = exp(y)", "b = exp(a)", "c = exp(b)"];
+        let kept = ["x = load X[i]", "O[i] = x"];
+        let looped =
+            |parts: &[&str]| body(&format!("for i in 0..8:\n{}", indented(&parts.join("\n"))));
+        assert_eq!(
+            drop_unread_values(&looped(&[chain.as_slice(), kept.as_slice()].concat())),
+            looped(&kept)
+        );
+    }
+}

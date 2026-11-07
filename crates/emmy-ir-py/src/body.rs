@@ -11,9 +11,7 @@ use pyo3::exceptions::{PyIndexError, PyTypeError, PyValueError};
 use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyFrozenSet, PyList, PySet, PySlice, PyString, PyTuple, PyType};
 
-use crate::convert::{
-    IntoPyErr, PyField, Slots, axis_to_py, cached, slots, statement_from_py, str_tuple,
-};
+use crate::convert::{IntoPyErr, PyField, Slots, cached, slots, statement_from_py, str_tuple};
 use crate::expression::{PyExpression, renames_from_py};
 use crate::statement::{PyStatement, kind_of, statements_from_py, wrap_statement};
 
@@ -752,92 +750,6 @@ pub fn fold_affine<'py>(
     )
 }
 
-macro_rules! step {
-    ($name:ident, $doc:literal) => {
-        #[doc = $doc]
-        #[pyfunction]
-        pub fn $name<'py>(body: &Bound<'py, PyAny>) -> PyResult<Bound<'py, PyBody>> {
-            PyBody::wrap(
-                body.py(),
-                &emmy_ir::normalize::$name(&PyBody::from_iterable(body)?),
-            )
-        }
-    };
-    ($name:ident, $doc:literal, fallible) => {
-        #[doc = $doc]
-        #[pyfunction]
-        pub fn $name<'py>(body: &Bound<'py, PyAny>) -> PyResult<Bound<'py, PyBody>> {
-            PyBody::wrap(
-                body.py(),
-                &emmy_ir::normalize::$name(&PyBody::from_iterable(body)?).py()?,
-            )
-        }
-    };
-}
-
-step!(
-    drop_size_one_free_axes,
-    "Inline every free loop of extent one."
-);
-step!(
-    drop_size_one_reduce_axes,
-    "Inline a canonical extent-one reduction as its single update."
-);
-step!(
-    canonicalize_free_axis_order,
-    "Sort an outer free-loop chain by row-major output storage order.",
-    fallible
-);
-step!(
-    fold_trivial_selects,
-    "A Select whose branches all bind one value is a copy of it."
-);
-step!(
-    fold_constants,
-    "Evaluate every operation whose operands are all literals."
-);
-step!(
-    drop_unread_values,
-    "Drop every pure statement whose values nothing reads."
-);
-step!(
-    merge_sibling_reduce_loops,
-    "Merge sibling reduce loops with one axis into one loop."
-);
-step!(
-    unify_siblings,
-    "Rename reduce-axis vars across sibling reduce loops whose Load positions overlap."
-);
-step!(
-    place_values,
-    "Place every pure value once, at the shallowest scope on its consumers' path.",
-    fallible
-);
-step!(rename_ssa_sequential, "Canonicalize names in a fused body.");
-step!(
-    canonical_order,
-    "Dependency-valid statement order, commutative operand order and names.",
-    fallible
-);
-
-/// Canonicalize integer expressions using lexical binding order, never axis spelling.
-#[pyfunction]
-#[pyo3(signature = (body, axes = None))]
-pub fn canonicalize_expressions<'py>(
-    body: &Bound<'py, PyAny>,
-    axes: Option<Vec<String>>,
-) -> PyResult<Bound<'py, PyBody>> {
-    let axes: Vec<Name> = axes
-        .unwrap_or_default()
-        .into_iter()
-        .map(Name::from)
-        .collect();
-    PyBody::wrap(
-        body.py(),
-        &emmy_ir::normalize::canonicalize_expressions(&PyBody::from_iterable(body)?, &axes).py()?,
-    )
-}
-
 /// Normalization computed afresh, without the memo.
 #[pyfunction]
 pub fn normalize_uncached<'py>(body: &Bound<'py, PyAny>) -> PyResult<Bound<'py, PyBody>> {
@@ -935,33 +847,6 @@ pub fn dtype_promote(op_name: &str, arg_dtypes: Vec<String>) -> String {
     emmy_ir::kinds::dtype::promote(op_name, &dtypes).to_string()
 }
 
-/// Forget every memoized normal form and identity (the tests of the memos use it).
-#[pyfunction]
-pub fn clear_memos() {
-    emmy_ir::normalize::clear_memo();
-    emmy_ir::numbering::identity::clear_memo();
-}
-
-/// The carried states a loop over `body` carries, each with its cell shape.
-#[pyfunction]
-pub fn carried_cells<'py>(
-    py: Python<'py>,
-    body: &Bound<'py, PyAny>,
-) -> PyResult<Bound<'py, PyDict>> {
-    let out = PyDict::new(py);
-    for (name, shape) in emmy_ir::protocol::carried_cells(&PyBody::from_iterable(body)?) {
-        let entries: PyResult<Vec<Bound<'py, PyAny>>> = shape
-            .iter()
-            .map(|cell| match cell {
-                Some(axis) => axis_to_py(py, axis),
-                None => Ok(1i64.into_pyobject(py)?.into_any()),
-            })
-            .collect();
-        out.set_item(&*name, PyTuple::new(py, entries?)?)?;
-    }
-    Ok(out)
-}
-
 pub fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyBody>()?;
     m.add_class::<PyCone>()?;
@@ -973,18 +858,6 @@ pub fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(prepare_body, m)?)?;
     m.add_function(wrap_pyfunction!(simplify_body, m)?)?;
     m.add_function(wrap_pyfunction!(fold_affine, m)?)?;
-    m.add_function(wrap_pyfunction!(drop_size_one_free_axes, m)?)?;
-    m.add_function(wrap_pyfunction!(drop_size_one_reduce_axes, m)?)?;
-    m.add_function(wrap_pyfunction!(canonicalize_free_axis_order, m)?)?;
-    m.add_function(wrap_pyfunction!(fold_trivial_selects, m)?)?;
-    m.add_function(wrap_pyfunction!(fold_constants, m)?)?;
-    m.add_function(wrap_pyfunction!(drop_unread_values, m)?)?;
-    m.add_function(wrap_pyfunction!(merge_sibling_reduce_loops, m)?)?;
-    m.add_function(wrap_pyfunction!(unify_siblings, m)?)?;
-    m.add_function(wrap_pyfunction!(place_values, m)?)?;
-    m.add_function(wrap_pyfunction!(rename_ssa_sequential, m)?)?;
-    m.add_function(wrap_pyfunction!(canonical_order, m)?)?;
-    m.add_function(wrap_pyfunction!(canonicalize_expressions, m)?)?;
     m.add_function(wrap_pyfunction!(free_names_py, m)?)?;
     m.add_function(wrap_pyfunction!(exposed_defines_py, m)?)?;
     m.add_function(wrap_pyfunction!(rename_free, m)?)?;
@@ -992,7 +865,5 @@ pub fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(mask_select_predicate, m)?)?;
     m.add_function(wrap_pyfunction!(ordering_constraints, m)?)?;
     m.add_function(wrap_pyfunction!(dtype_promote, m)?)?;
-    m.add_function(wrap_pyfunction!(clear_memos, m)?)?;
-    m.add_function(wrap_pyfunction!(carried_cells, m)?)?;
     Ok(())
 }

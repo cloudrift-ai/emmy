@@ -465,3 +465,550 @@ pub fn place_values(body: &Body) -> Result<Body> {
     debug_assert!(escaped.is_empty());
     Ok(Body::new(kept))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::normalize::testing::*;
+
+    fn placed(text: &str) -> Body {
+        place_values(&body(text)).unwrap()
+    }
+
+    fn unchanged(text: &str) {
+        let given = body(text);
+        assert_eq!(place_values(&given).unwrap(), given, "{text}");
+    }
+
+    /// The first name of every load in the tree, pre-order.
+    fn load_names(body: &Body) -> Vec<String> {
+        body.loads()
+            .iter()
+            .filter_map(|here| match &**here.stmt() {
+                Statement::Load(l) => Some(l.names[0].to_string()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn typed_copy_is_a_cast_not_an_alias() {
+        unchanged("f32 wide = copy(narrow)");
+    }
+
+    #[test]
+    fn copy_aliases_do_not_leak_between_sibling_scopes() {
+        let out = placed(
+            "
+            for i in 0..4:
+                x = load A[i]
+                y = copy(x)
+                OA[i] = y
+            for i in 0..4:
+                x = load B[i]
+                y = exp(x)
+                OB[i] = y
+            ",
+        );
+        assert_eq!(stmt_text(&inner(&out.stmts()[1]).stmts()[1]), "y = exp(x)");
+    }
+
+    #[test]
+    fn rename_free_and_placement_reach_nested_statements() {
+        for depth in [2, 24] {
+            let mut spelled = String::from(
+                "if outer:\n    shadow = exp(outer)\n    left[] = shadow\nelse:\n    right[] = outer",
+            );
+            for level in 0..depth {
+                spelled = format!("for i{level} in 0..4:\n{}", indented(&spelled));
+            }
+            let alias = HashMap::from([
+                (Name::from("outer"), Name::from("renamed")),
+                (Name::from("shadow"), Name::from("wrong")),
+            ]);
+            let renamed = rename_free(&body(&spelled).stmts()[0], &alias);
+            let eliminated = placed(&format!(
+                "outer = copy(renamed)\nshadow = copy(wrong)\n{spelled}"
+            ))
+            .stmts()[0]
+                .clone();
+            for result in [renamed, eliminated] {
+                let nest = Body::new(vec![result]);
+                let branches = nest.of_kinds(&["Cond"]);
+                let Statement::Cond(branch) = &**branches[0].stmt() else {
+                    unreachable!()
+                };
+                assert_eq!(branch.cond.text(), "renamed");
+                assert_eq!(text(&branch.body), "shadow = exp(renamed)\nleft[] = shadow");
+                assert_eq!(text(&branch.else_body), "right[] = renamed");
+            }
+        }
+    }
+
+    #[test]
+    fn cse_shares_selections_and_their_downstream_cones() {
+        let out = placed(
+            "
+            let `zero` = 0
+            let other_zero = 0
+            left = select:
+                x when p
+                `zero` when 1
+            right = select:
+                x when p
+                other_zero when 1
+            a = exp(left)
+            b = exp(right)
+            out[0] = b
+            ",
+        );
+        assert_eq!(kinds(&out), ["Let", "Select", "Assign", "Write"]);
+        let Statement::Write(write) = &*out.stmts()[3] else {
+            unreachable!()
+        };
+        assert_eq!(strs(&write.values), ["a"]);
+    }
+
+    #[test]
+    fn cse_selection_predicates_observe_rebound_coordinates() {
+        unchanged(
+            "
+            a = select:
+                x when k
+                y when 1
+            for k in 0..4:
+                b = select:
+                    x when k
+                    y when 1
+                out[k] = b
+            ",
+        );
+    }
+
+    #[test]
+    fn cse_does_not_drop_repeated_accumulator_updates() {
+        unchanged(
+            "
+            for k in 0..8:
+                sum <- add(sum, x) over k
+                sum <- add(sum, x) over k
+            ",
+        );
+    }
+
+    #[test]
+    fn cse_does_not_alias_distinct_unseeded_accumulators() {
+        unchanged(
+            "
+            for k in 0..8 seed=false:
+                left <- add(left, x) over k
+                right <- add(right, x) over k
+            ",
+        );
+    }
+
+    #[test]
+    fn cse_partial_state_changes_invalidate_dependent_values() {
+        unchanged(
+            "
+            for k in 0..8:
+                before = exp(sum)
+                sum <- add(sum, x) over k
+                after = exp(sum)
+                out[k] = after
+            ",
+        );
+    }
+
+    #[test]
+    fn cse_nested_state_changes_invalidate_enclosing_values() {
+        unchanged(
+            "
+            before = exp(sum)
+            for k in 0..4 seed=false:
+                sum <- add(sum, x) over k
+            after = exp(sum)
+            out[0] = after
+            ",
+        );
+    }
+
+    #[test]
+    fn cse_does_not_reuse_a_staged_load_assignment() {
+        unchanged("value = load x[0]\nvalue = load x[0] carried=load");
+    }
+
+    #[test]
+    fn cse_removes_repeated_copies_of_one_binding() {
+        let out = placed(
+            "
+            value = load x[0]
+            first[0] = value
+            value = load x[0]
+            second[0] = value
+            ",
+        );
+        assert_eq!(
+            text(&out),
+            "value = load x[0]\nfirst[0] = value\nsecond[0] = value"
+        );
+    }
+
+    #[test]
+    fn cse_never_aliases_a_value_to_an_overwritten_representative() {
+        unchanged(
+            "
+            value = load x[0]
+            copy = load x[0]
+            value = load y[0]
+            out[0] = copy
+            ",
+        );
+        unchanged("value = exp(value)\nvalue = exp(value)");
+    }
+
+    #[test]
+    fn cse_does_not_merge_reductions_with_distinct_explicit_seeds() {
+        unchanged(
+            "
+            init f32 left = 0
+            init f32 right = 1
+            for k in 0..8:
+                left <- add(left, x)
+                right <- add(right, x)
+            ",
+        );
+    }
+
+    #[test]
+    fn common_branch_load_cannot_cross_a_write_on_either_path() {
+        let read = "    value = load x[0]\n    out[0] = value\n";
+        let write = "    x[0] = replacement\n";
+        for (left, right) in [
+            (format!("{write}{read}"), read.to_string()),
+            (read.to_string(), format!("{write}{read}")),
+        ] {
+            unchanged(&format!("if predicate:\n{left}else:\n{right}"));
+        }
+    }
+
+    #[test]
+    fn dedup_loads_closes_commutative_chains_after_aliasing() {
+        // An alias that reverses sorted operands must not hide the rest of a duplicate chain.
+        let out = placed(
+            "
+            z = load X[0]
+            a = load X[0]
+            m = load Y[0]
+            z1 = multiply(m, z)
+            a1 = multiply(a, m)
+            z2 = add(m, z1)
+            a2 = add(a1, m)
+            left = subtract(m, z1)
+            right = subtract(a1, m)
+            O[0] = a2
+            L[0] = left
+            R[0] = right
+            ",
+        );
+        let assigned: Vec<&str> = out
+            .stmts()
+            .iter()
+            .filter_map(|stmt| match &**stmt {
+                Statement::Assign(a) => Some(&*a.name),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(assigned, ["z1", "z2", "left", "right"]);
+        let n = out.len();
+        assert_eq!(stmt_text(&out.stmts()[n - 4]), "right = subtract(z1, m)");
+        assert_eq!(stmt_text(&out.stmts()[n - 3]), "O[0] = z2");
+        assert_eq!(place_values(&out).unwrap(), out);
+    }
+
+    #[test]
+    fn dedup_loads_still_rewires_an_inner_use_of_the_dropped_name() {
+        // The loop only reads the dropped name, so the alias must reach inside.
+        let out = placed(
+            "
+            in0 = load const[0]
+            in1 = load const[0]
+            for a in 0..4:
+                v = add(in0, in1)
+            ",
+        );
+        assert_eq!(load_names(&out), ["in0"]);
+        let assigns: Vec<String> = out
+            .iter_stmts()
+            .iter()
+            .filter(|stmt| matches!(&***stmt, Statement::Assign(_)))
+            .map(stmt_text)
+            .collect();
+        assert_eq!(assigns, ["v = add(in0, in0)"]);
+    }
+
+    #[test]
+    fn cse_reuses_a_dominating_read_until_the_write_on_that_branch() {
+        let out = placed(
+            "
+            old = load x[0]
+            if p:
+                before = load x[0]
+                out[0] = before
+                x[0] = replacement
+                after = load x[0]
+                new[0] = after
+            ",
+        );
+        assert_eq!(
+            stmt_text(&inner(&out.stmts()[1]).stmts()[0]),
+            "out[0] = old"
+        );
+        assert_eq!(load_names(&out), ["old", "after"]);
+    }
+
+    #[test]
+    fn dedup_loads_rewires_every_vector_lane() {
+        let out = placed(
+            "
+            x0, x1 = load X[0]
+            y0, y1 = load X[0]
+            sum = add(y0, y1)
+            ",
+        );
+        assert_eq!(text(&out), "x0, x1 = load X[0]\nsum = add(x0, x1)");
+    }
+
+    #[test]
+    fn dedup_loads_invalidates_a_read_after_writing_its_buffer() {
+        let out = placed(
+            "
+            old = load B[0]
+            replacement = load R[0]
+            B[0] = replacement
+            new = load B[0]
+            O[0] = new
+            ",
+        );
+        let from_b: Vec<&str> = out
+            .stmts()
+            .iter()
+            .filter_map(|stmt| match &**stmt {
+                Statement::Load(l) if &*l.input == "B" => Some(&*l.names[0]),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(from_b, ["old", "new"]);
+    }
+
+    #[test]
+    fn dedup_loads_does_not_reuse_a_read_across_a_loop_that_writes_its_buffer() {
+        let out = placed(
+            "
+            before = load B[0]
+            for a in 0..4:
+                current = load B[0]
+                B[0] = current
+            ",
+        );
+        assert_eq!(
+            stmt_text(&inner(&out.stmts()[1]).stmts()[0]),
+            "current = load B[0]"
+        );
+    }
+
+    #[test]
+    fn hoists_invariant_load_above_loop() {
+        let out = placed(
+            "
+            for a in 0..4:
+                x = load X[]
+                o[a] = x
+            ",
+        );
+        assert_eq!(kinds(&out), ["Load", "Loop"]);
+        assert_eq!(load_names(&out), ["x"]);
+        assert_eq!(axis(&out.stmts()[1]), "a");
+        assert_eq!(kinds(&inner(&out.stmts()[1])), ["Write"]);
+    }
+
+    #[test]
+    fn hoists_inner_loop_and_consumer_together() {
+        // An inner reduce loop invariant in the outer axis and the statement that consumes its accumulator move
+        // above the outer loop together: hoisting only the consumer would leave it reading an accumulator still
+        // defined inside the outer loop's body.
+        let out = placed(
+            "
+            for a in 0..4:
+                for b in 0..8:
+                    xb = load X[b]
+                    acc <- add(acc, xb)
+                v = exp(acc)
+                out[a] = v
+            ",
+        );
+        assert_eq!(kinds(&out), ["Loop", "Assign", "Loop"], "{}", text(&out));
+        assert_eq!(axis(&out.stmts()[0]), "b");
+        assert_eq!(stmt_text(&out.stmts()[1]), "v = exp(acc)");
+        assert_eq!(axis(&out.stmts()[2]), "a");
+        assert_eq!(kinds(&inner(&out.stmts()[2])), ["Write"]);
+        assert_eq!(accum_names(&inner(&out.stmts()[0])), ["acc"]);
+    }
+
+    #[test]
+    fn keeps_inner_loop_when_it_references_outer_axis() {
+        let out = placed(
+            "
+            for a in 0..4:
+                for b in 0..8:
+                    xab = load X[a, b]
+                    acc <- add(acc, xab)
+                out[a] = acc
+            ",
+        );
+        assert_eq!(loop_axes(&out), ["a"]);
+        assert_eq!(loop_axes(&inner(&out.stmts()[0])), ["b"]);
+    }
+
+    #[test]
+    fn hoists_invariant_load_above_strided_loop() {
+        // A strided loop binds a sequential axis the way a loop does, so it partitions its body the same way.
+        let out = placed(
+            "
+            for a in 0..4 step 1:
+                x = load X[]
+                o[a] = x
+            ",
+        );
+        assert_eq!(kinds(&out), ["Load", "StridedLoop"]);
+        assert_eq!(load_names(&out), ["x"]);
+        assert_eq!(axis(&out.stmts()[1]), "a");
+        assert_eq!(kinds(&inner(&out.stmts()[1])), ["Write"]);
+    }
+
+    #[test]
+    fn hoists_inner_strided_loop_and_consumer_together() {
+        let out = placed(
+            "
+            for a in 0..4:
+                for b in 0..8 step 1:
+                    xb = load X[b]
+                    acc <- add(acc, xb)
+                v = exp(acc)
+                out[a] = v
+            ",
+        );
+        assert_eq!(
+            kinds(&out),
+            ["StridedLoop", "Assign", "Loop"],
+            "{}",
+            text(&out)
+        );
+        assert_eq!(axis(&out.stmts()[0]), "b");
+        assert_eq!(stmt_text(&out.stmts()[1]), "v = exp(acc)");
+        assert_eq!(axis(&out.stmts()[2]), "a");
+        assert_eq!(kinds(&inner(&out.stmts()[2])), ["Write"]);
+    }
+
+    #[test]
+    fn does_not_hoist_block_containing_write() {
+        // The inner loop reads nothing of the outer axis but holds a write: hoisting it would change how often the
+        // write happens, so it stays.
+        let out = placed(
+            "
+            for a in 0..4:
+                for b in 0..8:
+                    xb = load X[b]
+                    scratch[b] = xb
+                out[a] = xb
+            ",
+        );
+        assert_eq!(loop_axes(&out), ["a"]);
+        assert_eq!(loop_axes(&inner(&out.stmts()[0])), ["b"]);
+    }
+
+    #[test]
+    fn hoist_keeps_a_read_of_a_buffer_the_loop_writes() {
+        // Axis-invariance alone earns no hoist: a read behind a write to its own buffer, or behind an ordered
+        // execution protocol, follows the scope's ordering constraints and stays.
+        let out = placed(
+            "
+            for i in 0..4:
+                O[0] = one
+                back = load O[0]
+                Sync
+                staged = load S[0]
+                P[i] = back
+                Q[i] = staged
+            ",
+        );
+        assert_eq!(kinds(&out), ["Loop"]);
+        assert_eq!(
+            kinds(&inner(&out.stmts()[0])),
+            ["Write", "Load", "Sync", "Load", "Write", "Write"]
+        );
+    }
+
+    #[test]
+    fn escaped_reduce_loop_keeps_its_state_at_the_scope_it_moved_to() {
+        // An invariant reduce loop two scopes down moves to the top. The loops it left no longer hold its state,
+        // so they must not settle it at their own scope: the read of `accc` inside `b` would otherwise pin the `a`
+        // loop below its own scope and the read of `acca` after it would index a scope that does not exist. The
+        // shape is a GDN decoder layer's fused normalization (Qwen3.5-9B, layer 0).
+        let out = placed(
+            "
+            z = load Z[]
+            for a in 0..4:
+                for b in 0..4:
+                    for c in 0..4:
+                        accc <- add(accc, z)
+                    x = load X[a, b]
+                    v1 = add(accc, x)
+                    accb <- add(accb, v1)
+                acca <- add(acca, accb)
+            v3 = exp(acca)
+            Y[] = v3
+            ",
+        );
+        assert_eq!(
+            kinds(&out),
+            ["Load", "Loop", "Loop", "Assign", "Write"],
+            "{}",
+            text(&out)
+        );
+        assert_eq!(axis(&out.stmts()[1]), "c");
+        assert_eq!(axis(&out.stmts()[2]), "a");
+        let inner_b = inner(&inner(&out.stmts()[2]).stmts()[0]);
+        assert!(
+            inner_b.stmts().iter().any(
+                |stmt| matches!(&**stmt, Statement::Assign(a) if strs(&a.args) == ["accc", "x"])
+            )
+        );
+    }
+
+    #[test]
+    fn folded_reduction_is_read_at_its_representatives_scope() {
+        // Two seeded reductions of one value in one loop are one reduction: the second's name aliases the first.
+        // A read of that name after the loop sees the first's scope, not the loop body the dropped update sat in.
+        let out = placed(
+            "
+            for a in 0..4:
+                for b in 0..4:
+                    x = load X[a, b]
+                    acc1 <- add(acc1, x)
+                    y = load X[a, b]
+                    acc2 <- add(acc2, y)
+                v = add(acc1, acc2)
+                Y[a] = v
+            ",
+        );
+        assert_eq!(loop_axes(&out), ["a"]);
+        let inner_a = inner(&out.stmts()[0]);
+        assert_eq!(kinds(&inner_a), ["Loop", "Assign", "Write"]);
+        assert_eq!(accum_names(&inner(&inner_a.stmts()[0])), ["acc1"]);
+        let Statement::Assign(read) = &*inner_a.stmts()[1] else {
+            unreachable!()
+        };
+        assert_eq!(strs(&read.args), ["acc1", "acc1"]);
+    }
+}

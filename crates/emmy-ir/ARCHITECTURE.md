@@ -2,10 +2,12 @@
 
 `emmy-ir` implements what `emmy/compiler/ir/stmt` and `emmy/compiler/ir/expression.py` export: the expression kinds
 and their text, the forty-five statement kinds, `Body`, the body text, the statement protocol, value numbering,
-identity and body normalization. Pure Rust, no Python in it, so `cargo test -p emmy-ir` runs it alone. The extension
-beside it, `emmy-ir-py`, is the `emmy.emmy_ir` module those two Python packages re-export from; `make setup` builds it
-into the package like the runtime extension. Design: `ir/ARCHITECTURE.md` owns what a statement, a body and the normal
-form ARE; this file says how the crate holds them.
+identity and body normalization. Pure Rust, no Python in it, so `cargo test -p emmy-ir` runs it alone, and the tests
+of the normalization steps sit beside the steps there. The extension beside it, `emmy-ir-py`, is the `emmy.emmy_ir`
+module those two Python packages re-export from; `make setup` builds it into the package like the runtime extension.
+It exports the driver (`normalize_body`, `normalize_uncached`, `prepare_body`) and the steps a pass calls on its own
+(`fold_affine`, `simplify_body`, `rename_free`), no other step. Design: `ir/ARCHITECTURE.md` owns what a statement, a
+body and the normal form ARE; this file says how the crate holds them.
 
 ## Layout
 
@@ -14,8 +16,8 @@ simplifier and affine form in `simplify.rs`, the reader in `parse.rs`), `kinds/`
 `mod.rs`, the `Field` trait in `field.rs`, axes, dtypes and the elementwise tables beside it), `body.rs`, `text.rs`,
 `protocol.rs`, `numbering/` (the value numbering and digest in `mod.rs`, the identity in `identity.rs`), `normalize/`
 (the driver and the helpers the steps share in `mod.rs`, the steps by what they do: `axes`, `fold`, `siblings`,
-`simplify`, `place`, `canonical`, the dependency order in `order.rs` and the tie-breaks in `ties.rs`) and `memo.rs`, the one bounded memo both
-the normal form and the identity are kept in.
+`simplify`, `place`, `canonical`, the dependency order in `order.rs` and the tie-breaks in `ties.rs`) and `memo.rs`,
+the one bounded memo both the normal form and the identity are kept in.
 
 ## Data
 
