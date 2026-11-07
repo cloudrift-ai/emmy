@@ -413,18 +413,164 @@ impl std::str::FromStr for LitType {
     }
 }
 
-/// One node of an expression tree.
-#[derive(Clone, PartialEq, Eq, Hash, Debug)]
-pub enum Expr {
-    Var(Name),
-    Literal(Lit),
-    Builtin(Name),
-    Binary(BinOp, Expression, Expression),
-    Call(Name, Arc<[Expression]>),
-    Ternary(Expression, Expression, Expression),
-    Cast(Name, Expression),
-    FlatIndex(Name, Arc<[Expression]>),
+/// Every expression kind, declared once: the variant, the Python class it is (its struct and its name) and its
+/// fields in order. `$callback` receives the list and generates from it: the enum and its walks here, the classes in
+/// the extension. The digest spells a node by the variant's name, so this list is also the digest's.
+#[macro_export]
+macro_rules! with_exprs {
+    ($callback:ident) => {
+        $callback! {
+            /// A variable: an SSA value, an axis or a free name.
+            Var as PyVar "Var" { name: Name },
+            /// A number with the type it is spelled in.
+            Literal as PyLiteral "Literal" { lit: Lit },
+            /// A GPU built-in with no host form.
+            Builtin as PyBuiltin "Builtin" { name: Name },
+            Binary as PyBinaryExpression "BinaryExpression" { op: BinOp, left: Expression, right: Expression },
+            /// A call of a named function over its arguments.
+            Call as PyFunctionCallExpression "FunctionCallExpression" { name: Name, args: Arc<[Expression]> },
+            Ternary as PyTernaryExpression "TernaryExpression" { cond: Expression, if_true: Expression, if_false: Expression },
+            Cast as PyCastExpression "CastExpression" { dtype: Name, expression: Expression },
+            /// A buffer read at a flat index: one coordinate per dimension.
+            FlatIndex as PyFlatIndex "FlatIndex" { buffer: Name, index: Arc<[Expression]> },
+        }
+    };
 }
+
+/// What a field of an expression node is to the walks: a child expression, several, or a leaf datum.
+pub trait ExprField: Clone {
+    fn each_child(&self, _f: &mut dyn FnMut(&Expression)) {}
+    fn each_child_mut(&mut self, _f: &mut dyn FnMut(&mut Expression)) {}
+    fn height(&self) -> u32 {
+        0
+    }
+    /// This field with `f` on each child; `None` when every child came back the same object.
+    fn mapped(&self, _f: &mut dyn FnMut(&Expression) -> Expression) -> Option<Self> {
+        None
+    }
+    /// This field over the next children of `items`; `None` when they are the ones it holds.
+    fn taken(&self, _items: &mut dyn Iterator<Item = Expression>) -> Option<Self> {
+        None
+    }
+}
+
+impl ExprField for Name {}
+impl ExprField for Lit {}
+impl ExprField for BinOp {}
+
+impl ExprField for Expression {
+    fn each_child(&self, f: &mut dyn FnMut(&Expression)) {
+        f(self);
+    }
+    fn each_child_mut(&mut self, f: &mut dyn FnMut(&mut Expression)) {
+        f(self);
+    }
+    fn height(&self) -> u32 {
+        Expression::height(self)
+    }
+    fn mapped(&self, f: &mut dyn FnMut(&Expression) -> Expression) -> Option<Self> {
+        let new = f(self);
+        (!Arc::ptr_eq(&new.0, &self.0)).then_some(new)
+    }
+    fn taken(&self, items: &mut dyn Iterator<Item = Expression>) -> Option<Self> {
+        items.next().filter(|new| !Arc::ptr_eq(&new.0, &self.0))
+    }
+}
+
+impl ExprField for Arc<[Expression]> {
+    fn each_child(&self, f: &mut dyn FnMut(&Expression)) {
+        self.iter().for_each(f);
+    }
+    fn each_child_mut(&mut self, f: &mut dyn FnMut(&mut Expression)) {
+        if let Some(items) = Arc::get_mut(self) {
+            items.iter_mut().for_each(f);
+        }
+    }
+    fn height(&self) -> u32 {
+        self.iter().map(Expression::height).max().unwrap_or(0)
+    }
+    fn mapped(&self, f: &mut dyn FnMut(&Expression) -> Expression) -> Option<Self> {
+        let new: Vec<Expression> = self.iter().map(&mut *f).collect();
+        let same = new
+            .iter()
+            .zip(self.iter())
+            .all(|(n, o)| Arc::ptr_eq(&n.0, &o.0));
+        (!same).then(|| new.into())
+    }
+    fn taken(&self, items: &mut dyn Iterator<Item = Expression>) -> Option<Self> {
+        let new: Vec<Expression> = items.take(self.len()).collect();
+        let same = new.len() == self.len()
+            && new
+                .iter()
+                .zip(self.iter())
+                .all(|(n, o)| Arc::ptr_eq(&n.0, &o.0));
+        (!same).then(|| new.into())
+    }
+}
+
+/// The core's callback: the `Expr` enum and the walks every kind answers through its fields.
+macro_rules! define_exprs {
+    ($( $(#[doc = $doc:literal])* $Variant:ident as $Py:ident $name:literal { $( $field:ident : $ty:ty ),* } ,)*) => {
+        /// One node of an expression tree.
+        #[derive(Clone, PartialEq, Eq, Hash, Debug)]
+        pub enum Expr {
+            $( $(#[doc = $doc])* $Variant( $($ty),* ), )*
+        }
+
+        #[allow(unused_variables, unused_mut, unused_assignments)]
+        impl Expr {
+            /// The kind's name, which is the tag the digest spells it by.
+            pub fn kind_name(&self) -> &'static str {
+                match self { $( Expr::$Variant(..) => stringify!($Variant), )* }
+            }
+
+            /// `f` on each child, in field order.
+            pub fn each_child(&self, f: &mut dyn FnMut(&Expression)) {
+                match self { $( Expr::$Variant($($field),*) => { $( ExprField::each_child($field, f); )* } )* }
+            }
+
+            fn each_child_mut(&mut self, f: &mut dyn FnMut(&mut Expression)) {
+                match self { $( Expr::$Variant($($field),*) => { $( ExprField::each_child_mut($field, f); )* } )* }
+            }
+
+            /// The height of the tree under this node: the tallest child's, zero for a leaf.
+            fn below(&self) -> u32 {
+                match self { $( Expr::$Variant($($field),*) => 0 $(.max(ExprField::height($field)))*, )* }
+            }
+        }
+
+        #[allow(unused_variables, unused_mut, unused_assignments)]
+        impl Expression {
+            /// This node with `f` applied to each child; itself when every child comes back as it was.
+            pub fn map_children(&self, f: &mut dyn FnMut(&Expression) -> Expression) -> Expression {
+                match &**self { $( Expr::$Variant($($field),*) => {
+                    let mut changed = false;
+                    $( let $field = match ExprField::mapped($field, f) { Some(new) => { changed = true; new } None => $field.clone() }; )*
+                    if changed { Expression::new(Expr::$Variant($($field),*)) } else { self.clone() }
+                } )* }
+            }
+
+            /// This node over `children` (as many as `children` returned), itself when none changed.
+            pub fn with_children(&self, children: Vec<Expression>) -> Result<Expression> {
+                let count = self.children().len();
+                if children.len() != count {
+                    return Err(Error::Value(format!(
+                        "an expression with {count} children cannot take {}",
+                        children.len()
+                    )));
+                }
+                let mut items = children.into_iter();
+                Ok(match &**self { $( Expr::$Variant($($field),*) => {
+                    let mut changed = false;
+                    $( let $field = match ExprField::taken($field, &mut items) { Some(new) => { changed = true; new } None => $field.clone() }; )*
+                    if changed { Expression::new(Expr::$Variant($($field),*)) } else { self.clone() }
+                } )* })
+            }
+        }
+    };
+}
+
+with_exprs!(define_exprs);
 
 /// A shared, immutable expression.
 #[derive(Clone, Debug)]
@@ -452,29 +598,6 @@ fn leaf() -> Expression {
     LEAF.get_or_init(|| Expression::int(0)).clone()
 }
 
-impl Expr {
-    fn children_mut(&mut self, f: &mut dyn FnMut(&mut Expression)) {
-        match self {
-            Expr::Var(_) | Expr::Literal(_) | Expr::Builtin(_) => {}
-            Expr::Binary(_, left, right) => {
-                f(left);
-                f(right);
-            }
-            Expr::Ternary(a, b, c) => {
-                f(a);
-                f(b);
-                f(c);
-            }
-            Expr::Cast(_, inner) => f(inner),
-            Expr::Call(_, args) | Expr::FlatIndex(_, args) => {
-                if let Some(items) = Arc::get_mut(args) {
-                    items.iter_mut().for_each(f);
-                }
-            }
-        }
-    }
-}
-
 impl Drop for Expression {
     /// A chain of nested expressions drops level by level: a node dropped `DROP_DEPTH` levels down sets its
     /// children aside, and the outermost drop takes them up once it has unwound, so no chain overflows the stack.
@@ -493,12 +616,12 @@ impl Drop for Expression {
         if depth >= DROP_DEPTH {
             DEFERRED.with(|deferred| {
                 let mut deferred = deferred.borrow_mut();
-                node.children_mut(&mut |child| deferred.push(std::mem::replace(child, leaf())));
+                node.each_child_mut(&mut |child| deferred.push(std::mem::replace(child, leaf())));
             });
             return;
         }
         DROPPING.with(|d| d.set(depth + 1));
-        node.children_mut(&mut |child| drop(std::mem::replace(child, leaf())));
+        node.each_child_mut(&mut |child| drop(std::mem::replace(child, leaf())));
         DROPPING.with(|d| d.set(depth));
         if depth == 0 {
             while let Some(expression) = DEFERRED.with(|deferred| deferred.borrow_mut().pop()) {
@@ -564,19 +687,8 @@ pub const PLACEHOLDER_PREFIX: &str = "out_coord_";
 
 impl Expression {
     pub fn new(expr: Expr) -> Expression {
-        let below = match &expr {
-            Expr::Var(_) | Expr::Literal(_) | Expr::Builtin(_) => 0,
-            Expr::Binary(_, left, right) => left.height().max(right.height()),
-            Expr::Ternary(a, b, c) => a.height().max(b.height()).max(c.height()),
-            Expr::Cast(_, inner) => inner.height(),
-            Expr::Call(_, args) | Expr::FlatIndex(_, args) => {
-                args.iter().map(Expression::height).max().unwrap_or(0)
-            }
-        };
-        Expression(Arc::new(Node {
-            expr,
-            height: below + 1,
-        }))
+        let height = expr.below() + 1;
+        Expression(Arc::new(Node { expr, height }))
     }
 
     /// How many levels this tree nests: one for a leaf.
@@ -775,112 +887,9 @@ impl Expression {
 
     /// The expression's children, in field order.
     pub fn children(&self) -> Vec<Expression> {
-        match &**self {
-            Expr::Var(_) | Expr::Literal(_) | Expr::Builtin(_) => vec![],
-            Expr::Binary(_, left, right) => vec![left.clone(), right.clone()],
-            Expr::Call(_, args) | Expr::FlatIndex(_, args) => args.to_vec(),
-            Expr::Ternary(a, b, c) => vec![a.clone(), b.clone(), c.clone()],
-            Expr::Cast(_, inner) => vec![inner.clone()],
-        }
-    }
-
-    /// This node over `children` (as many as `children` returned), itself when none changed.
-    pub fn with_children(&self, children: Vec<Expression>) -> Result<Expression> {
-        let same = |items: &[Expression]| {
-            items
-                .iter()
-                .zip(&children)
-                .all(|(old, new)| Arc::ptr_eq(&old.0, &new.0))
-        };
-        let count = self.children().len();
-        if children.len() != count {
-            return Err(Error::Value(format!(
-                "an expression with {count} children cannot take {}",
-                children.len()
-            )));
-        }
-        Ok(match &**self {
-            Expr::Var(_) | Expr::Literal(_) | Expr::Builtin(_) => self.clone(),
-            Expr::Binary(op, l, r) if same(&[l.clone(), r.clone()]) => self.clone(),
-            Expr::Binary(op, _, _) => {
-                Expression::new(Expr::Binary(*op, children[0].clone(), children[1].clone()))
-            }
-            Expr::Call(name, args) => {
-                if same(args) {
-                    self.clone()
-                } else {
-                    Expression::new(Expr::Call(name.clone(), children.into()))
-                }
-            }
-            Expr::FlatIndex(name, args) => {
-                if same(args) {
-                    self.clone()
-                } else {
-                    Expression::new(Expr::FlatIndex(name.clone(), children.into()))
-                }
-            }
-            Expr::Ternary(a, b, c) if same(&[a.clone(), b.clone(), c.clone()]) => self.clone(),
-            Expr::Ternary(..) => Expression::new(Expr::Ternary(
-                children[0].clone(),
-                children[1].clone(),
-                children[2].clone(),
-            )),
-            Expr::Cast(dtype, inner) => {
-                if same(std::slice::from_ref(inner)) {
-                    self.clone()
-                } else {
-                    Expression::new(Expr::Cast(dtype.clone(), children[0].clone()))
-                }
-            }
-        })
-    }
-
-    /// This node with `f` applied to each child; itself when every child comes back as it was.
-    pub fn map_children(&self, f: &mut dyn FnMut(&Expression) -> Expression) -> Expression {
-        let same = |old: &Expression, new: &Expression| Arc::ptr_eq(&old.0, &new.0);
-        match &**self {
-            Expr::Var(_) | Expr::Literal(_) | Expr::Builtin(_) => self.clone(),
-            Expr::Binary(op, l, r) => {
-                let (nl, nr) = (f(l), f(r));
-                if same(l, &nl) && same(r, &nr) {
-                    self.clone()
-                } else {
-                    Expression::new(Expr::Binary(*op, nl, nr))
-                }
-            }
-            Expr::Call(name, args) => {
-                let new: Vec<Expression> = args.iter().map(&mut *f).collect();
-                if new.iter().zip(args.iter()).all(|(n, o)| same(o, n)) {
-                    self.clone()
-                } else {
-                    Expression::new(Expr::Call(name.clone(), new.into()))
-                }
-            }
-            Expr::FlatIndex(name, args) => {
-                let new: Vec<Expression> = args.iter().map(&mut *f).collect();
-                if new.iter().zip(args.iter()).all(|(n, o)| same(o, n)) {
-                    self.clone()
-                } else {
-                    Expression::new(Expr::FlatIndex(name.clone(), new.into()))
-                }
-            }
-            Expr::Ternary(a, b, c) => {
-                let (na, nb, nc) = (f(a), f(b), f(c));
-                if same(a, &na) && same(b, &nb) && same(c, &nc) {
-                    self.clone()
-                } else {
-                    Expression::new(Expr::Ternary(na, nb, nc))
-                }
-            }
-            Expr::Cast(dtype, inner) => {
-                let new = f(inner);
-                if same(inner, &new) {
-                    self.clone()
-                } else {
-                    Expression::new(Expr::Cast(dtype.clone(), new))
-                }
-            }
-        }
+        let mut out = Vec::new();
+        (**self).each_child(&mut |child| out.push(child.clone()));
+        out
     }
 
     /// Pre-order walk over the tree, itself first.
@@ -888,22 +897,7 @@ impl Expression {
         let mut out = Vec::new();
         fn walk(e: &Expression, out: &mut Vec<Expression>) {
             out.push(e.clone());
-            match &**e {
-                Expr::Var(_) | Expr::Literal(_) | Expr::Builtin(_) => {}
-                Expr::Binary(_, l, r) => {
-                    walk(l, out);
-                    walk(r, out);
-                }
-                Expr::Call(_, args) | Expr::FlatIndex(_, args) => {
-                    args.iter().for_each(|a| walk(a, out))
-                }
-                Expr::Ternary(a, b, c) => {
-                    walk(a, out);
-                    walk(b, out);
-                    walk(c, out);
-                }
-                Expr::Cast(_, inner) => walk(inner, out),
-            }
+            (**e).each_child(&mut |child| walk(child, out));
         }
         walk(self, &mut out);
         out
@@ -917,38 +911,22 @@ impl Expression {
     }
 
     pub fn collect_free_vars(&self, out: &mut Vec<Name>) {
-        match &**self {
-            Expr::Var(name) => {
-                if !out.iter().any(|n| n == name) {
-                    out.push(name.clone());
-                }
+        if let Expr::Var(name) = &**self {
+            if !out.iter().any(|n| n == name) {
+                out.push(name.clone());
             }
-            Expr::Literal(_) | Expr::Builtin(_) => {}
-            Expr::Binary(_, l, r) => {
-                l.collect_free_vars(out);
-                r.collect_free_vars(out);
-            }
-            Expr::Call(_, args) | Expr::FlatIndex(_, args) => {
-                args.iter().for_each(|a| a.collect_free_vars(out))
-            }
-            Expr::Ternary(a, b, c) => {
-                a.collect_free_vars(out);
-                b.collect_free_vars(out);
-                c.collect_free_vars(out);
-            }
-            Expr::Cast(_, inner) => inner.collect_free_vars(out),
+            return;
         }
+        (**self).each_child(&mut |child| child.collect_free_vars(out));
     }
 
     pub fn reads(&self, name: &str) -> bool {
-        match &**self {
-            Expr::Var(n) => &**n == name,
-            Expr::Literal(_) | Expr::Builtin(_) => false,
-            Expr::Binary(_, l, r) => l.reads(name) || r.reads(name),
-            Expr::Call(_, args) | Expr::FlatIndex(_, args) => args.iter().any(|a| a.reads(name)),
-            Expr::Ternary(a, b, c) => a.reads(name) || b.reads(name) || c.reads(name),
-            Expr::Cast(_, inner) => inner.reads(name),
+        if let Expr::Var(n) = &**self {
+            return &**n == name;
         }
+        let mut found = false;
+        (**self).each_child(&mut |child| found |= child.reads(name));
+        found
     }
 
     /// `Var(name)` subterms replaced by `mapping[name]`; names the mapping lacks pass through.

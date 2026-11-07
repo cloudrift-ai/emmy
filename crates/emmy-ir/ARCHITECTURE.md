@@ -30,7 +30,9 @@ child module takes its parent's imports.
 - A name is an `Arc<str>`; a tuple of names, expressions or axes an `Arc<[…]>`; an expression an `Arc<Expr>`; a body an
   `Arc<BodyData>`. A rebuild that changes nothing returns the object it was given, so every walk tells a change by
   pointer and a Python wrapper can hand back the same object.
-- **Expressions** (`expr/`): eight kinds in one `enum Expr`, the printer and the reader (exact inverses, the text being
+- **Expressions** (`expr/`): eight kinds declared once in the `with_exprs!` macro (the variant, its Python class and
+  its fields), which generates the `enum Expr`, the walks every kind answers through its fields (children, height,
+  the rebuilds) and, in the extension, the classes with a getter per field; the printer and the reader (exact inverses, the text being
   the one wire and structural form), substitution, renaming, the simplifier under a `SimplifyCtx` of ranges and
   symbolic bounds, the range analysis, the affine form. A literal keeps Python's number model (`Num`: int, float or
   bool, equal by value) because a stored kernel's text spells it that way, and is typed by a `LitType`. Integer

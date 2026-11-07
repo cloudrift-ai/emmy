@@ -26,63 +26,110 @@ pub struct PyExpression {
     slots: [OnceLock<Py<PyAny>>; 3],
 }
 
-/// The expression classes: one per kind of expression, each with a getter per part of the kind, read once and kept
-/// in the expression's slots. The constructors follow, one per class, since no two take the same arguments.
-macro_rules! expression_classes {
-    ($( $Py:ident $name:literal : $Variant:ident $bind:tt |$py:ident| { $( $getter:ident = $slot:literal => $value:expr; )* } )*) => { $(
-        #[pyclass(extends = PyExpression, frozen, module = "emmy.compiler.ir.expression", name = $name)]
-        pub struct $Py;
+/// What a field of an expression node hands Python: a name or an operator as a string, a child as its class, several
+/// as a tuple.
+trait PyExprField {
+    fn to_py(&self, py: Python<'_>) -> PyResult<Py<PyAny>>;
+}
 
+impl PyExprField for Name {
+    fn to_py(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        Ok(PyString::new(py, self).into_any().unbind())
+    }
+}
+
+impl PyExprField for BinOp {
+    fn to_py(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        Ok(PyString::new(py, self.text()).into_any().unbind())
+    }
+}
+
+impl PyExprField for Expression {
+    fn to_py(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        Ok(PyExpression::wrap(py, self)?.unbind())
+    }
+}
+
+impl PyExprField for Arc<[Expression]> {
+    fn to_py(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        PyField::to_py(self, py)
+    }
+}
+
+/// The extension's callback over the expression kinds: one class per kind with a getter per field, the one wrap of an
+/// expression into its class, and the registration. A literal's two parts have getters of their own, since the node
+/// holds them as one value.
+macro_rules! define_py_exprs {
+    ($( $(#[doc = $doc:literal])* $Variant:ident as $Py:ident $name:literal { $( $field:ident : $ty:ty ),* } ,)*) => {
+        $(
+            $(#[doc = $doc])*
+            #[pyclass(extends = PyExpression, frozen, module = "emmy.compiler.ir.expression", name = $name)]
+            pub struct $Py;
+
+            define_py_exprs!(@getters $Variant $Py $name { $( $field : $ty ),* } { $( $field : $ty ),* });
+        )*
+
+        impl PyExpression {
+            /// The Python object of `expr`: an instance of its kind's class.
+            pub fn wrap<'py>(py: Python<'py>, expr: &Expression) -> PyResult<Bound<'py, PyAny>> {
+                let base = PyClassInitializer::from(PyExpression::base(expr.clone()));
+                Ok(match &**expr {
+                    $( Expr::$Variant(..) => Bound::new(py, base.add_subclass($Py))?.into_any(), )*
+                })
+            }
+        }
+
+        fn register_classes(m: &Bound<'_, PyModule>) -> PyResult<()> {
+            $( m.add_class::<$Py>()?; )*
+            Ok(())
+        }
+    };
+    (@getters Literal $Py:ident $name:literal $fields:tt $all:tt) => {
         #[pymethods]
-        impl $Py { $(
+        impl $Py {
             #[getter]
-            #[allow(unused_variables)]
-            fn $getter<'py>(slf: &Bound<'py, Self>) -> PyResult<Bound<'py, PyAny>> {
+            fn value<'py>(slf: &Bound<'py, Self>) -> PyResult<Bound<'py, PyAny>> {
                 let base = slf.as_super().get();
-                let $py = slf.py();
-                let Expr::$Variant $bind = &*base.expr else {
+                let Expr::Literal(lit) = &*base.expr else {
                     return Err(kind_error($name));
                 };
-                base.slot($py, $slot, || $value)
+                base.slot(slf.py(), 0, || num_to_py(slf.py(), lit.value))
             }
-        )* }
-    )* };
+
+            #[getter]
+            fn dtype<'py>(slf: &Bound<'py, Self>) -> PyResult<Bound<'py, PyAny>> {
+                let base = slf.as_super().get();
+                let Expr::Literal(lit) = &*base.expr else {
+                    return Err(kind_error($name));
+                };
+                base.slot(slf.py(), 1, || {
+                    Ok(PyString::new(slf.py(), lit.dtype.name()).into_any().unbind())
+                })
+            }
+        }
+    };
+    (@getters $Variant:ident $Py:ident $name:literal { $( $field:ident : $ty:ty ),* } $all:tt) => {
+        $( define_py_exprs!(@getter $Variant $Py $name $all $field); )*
+    };
+    (@getter $Variant:ident $Py:ident $name:literal { $( $all:ident : $ty:ty ),* } $field:ident) => {
+        #[pymethods]
+        impl $Py {
+            #[getter]
+            #[allow(unused_variables)]
+            fn $field<'py>(slf: &Bound<'py, Self>) -> PyResult<Bound<'py, PyAny>> {
+                const FIELDS: &[&str] = &[ $( stringify!($all), )* ];
+                let base = slf.as_super().get();
+                let Expr::$Variant($($all),*) = &*base.expr else {
+                    return Err(kind_error($name));
+                };
+                let slot = FIELDS.iter().position(|f| *f == stringify!($field)).unwrap_or(0);
+                base.slot(slf.py(), slot, || PyExprField::to_py($field, slf.py()))
+            }
+        }
+    };
 }
 
-expression_classes! {
-    PyVar "Var": Var(name) |py| {
-        name = 0 => Ok(PyString::new(py, name).into_any().unbind());
-    }
-    PyLiteral "Literal": Literal(lit) |py| {
-        value = 0 => num_to_py(py, lit.value);
-        dtype = 1 => Ok(PyString::new(py, lit.dtype.name()).into_any().unbind());
-    }
-    PyBuiltin "Builtin": Builtin(name) |py| {
-        name = 0 => Ok(PyString::new(py, name).into_any().unbind());
-    }
-    PyBinaryExpression "BinaryExpression": Binary(op, left, right) |py| {
-        op = 0 => Ok(PyString::new(py, op.text()).into_any().unbind());
-        left = 1 => Ok(PyExpression::wrap(py, left)?.unbind());
-        right = 2 => Ok(PyExpression::wrap(py, right)?.unbind());
-    }
-    PyFunctionCallExpression "FunctionCallExpression": Call(name, args) |py| {
-        name = 0 => Ok(PyString::new(py, name).into_any().unbind());
-        args = 1 => args.to_py(py);
-    }
-    PyTernaryExpression "TernaryExpression": Ternary(cond, if_true, if_false) |py| {
-        cond = 0 => Ok(PyExpression::wrap(py, cond)?.unbind());
-        if_true = 1 => Ok(PyExpression::wrap(py, if_true)?.unbind());
-        if_false = 2 => Ok(PyExpression::wrap(py, if_false)?.unbind());
-    }
-    PyCastExpression "CastExpression": Cast(dtype, inner) |py| {
-        dtype = 0 => Ok(PyString::new(py, dtype).into_any().unbind());
-        expression = 1 => Ok(PyExpression::wrap(py, inner)?.unbind());
-    }
-    PyFlatIndex "FlatIndex": FlatIndex(buffer, index) |py| {
-        buffer = 0 => Ok(PyString::new(py, buffer).into_any().unbind());
-        index = 1 => index.to_py(py);
-    }
-}
+emmy_ir::with_exprs!(define_py_exprs);
 
 impl PyExpression {
     fn base(expr: Expression) -> PyExpression {
@@ -90,23 +137,6 @@ impl PyExpression {
             expr,
             slots: [OnceLock::new(), OnceLock::new(), OnceLock::new()],
         }
-    }
-
-    /// The Python object of `expr`: an instance of its kind's class.
-    pub fn wrap<'py>(py: Python<'py>, expr: &Expression) -> PyResult<Bound<'py, PyAny>> {
-        let base = PyClassInitializer::from(PyExpression::base(expr.clone()));
-        Ok(match &**expr {
-            Expr::Var(_) => Bound::new(py, base.add_subclass(PyVar))?.into_any(),
-            Expr::Literal(_) => Bound::new(py, base.add_subclass(PyLiteral))?.into_any(),
-            Expr::Builtin(_) => Bound::new(py, base.add_subclass(PyBuiltin))?.into_any(),
-            Expr::Binary(..) => Bound::new(py, base.add_subclass(PyBinaryExpression))?.into_any(),
-            Expr::Call(..) => {
-                Bound::new(py, base.add_subclass(PyFunctionCallExpression))?.into_any()
-            }
-            Expr::Ternary(..) => Bound::new(py, base.add_subclass(PyTernaryExpression))?.into_any(),
-            Expr::Cast(..) => Bound::new(py, base.add_subclass(PyCastExpression))?.into_any(),
-            Expr::FlatIndex(..) => Bound::new(py, base.add_subclass(PyFlatIndex))?.into_any(),
-        })
     }
 
     fn slot<'py>(
@@ -765,14 +795,7 @@ pub fn builtin_names<'py>(py: Python<'py>) -> PyResult<Bound<'py, PyFrozenSet>> 
 
 pub fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyExpression>()?;
-    m.add_class::<PyVar>()?;
-    m.add_class::<PyLiteral>()?;
-    m.add_class::<PyBuiltin>()?;
-    m.add_class::<PyBinaryExpression>()?;
-    m.add_class::<PyFunctionCallExpression>()?;
-    m.add_class::<PyTernaryExpression>()?;
-    m.add_class::<PyCastExpression>()?;
-    m.add_class::<PyFlatIndex>()?;
+    register_classes(m)?;
     m.add_class::<PyInterval>()?;
     m.add_class::<PySimplifyCtx>()?;
     m.add_function(wrap_pyfunction!(parse, m)?)?;
