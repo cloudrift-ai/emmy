@@ -82,7 +82,7 @@ pub fn fold_constants(body: &Body) -> Body {
             }
             out.push(stmt);
         }
-        Body::new(out)
+        body.rebuilt(out)
     }
     scope(body, &HashMap::new())
 }
@@ -456,7 +456,7 @@ pub fn fold_affine(body: &Body, exposed: &HashSet<Name>) -> Body {
                 out.push(rewritten.get(&index).cloned().unwrap_or(stmt));
             }
         }
-        Body::new(out)
+        body.rebuilt(out)
     }
 
     let folded = scope(body, &HashMap::new(), &HashMap::new(), &counts);

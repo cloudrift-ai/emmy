@@ -323,26 +323,7 @@ impl Context<'_> {
                     _ => groups.push(vec![value]),
                 }
             }
-            let flat: Vec<Value> = groups.iter().flatten().cloned().collect();
-            ops = if groups.iter().any(|group| group.len() > 1) {
-                let arrangements: Vec<Vec<Vec<Value>>> =
-                    groups.iter().map(|group| permutations(group)).collect();
-                let mut best: Option<(Vec<Key>, Vec<Value>)> = None;
-                for_each_product(&arrangements, &mut |choice| {
-                    let order: Vec<Value> = choice
-                        .iter()
-                        .flat_map(|group| group.iter().cloned())
-                        .collect();
-                    let (parent, mapped) = Context::laid_out(&order, params);
-                    let key = vec![Key::Tuple(mapped), Key::Tuple(parent)];
-                    if best.as_ref().is_none_or(|(best_key, _)| key < *best_key) {
-                        best = Some((key, order));
-                    }
-                });
-                best.map_or(flat, |(_, order)| order)
-            } else {
-                flat
-            };
+            ops = least_layout(&groups, params);
         }
         let (parent, mapped) = Context::laid_out(&ops, params);
         let mut reduced = Key::Tuple(vec![]);
@@ -818,6 +799,94 @@ impl Context<'_> {
     }
 }
 
+/// How many orders of one operation's operands are tried for the least layout before the order is built position by
+/// position.
+const EXHAUSTIVE_LAYOUTS: usize = 362_880;
+
+/// The operands of a commutative operation, grouped by number, in the order whose layout key is least. Every order
+/// is tried while the groups allow at most [`EXHAUSTIVE_LAYOUTS`] of them; a larger operation, an unrolled window
+/// sum over a dozen shifted reads, takes the greedy order, which the full search never reached.
+fn least_layout(groups: &[Vec<Value>], params: &[Param]) -> Vec<Value> {
+    if groups.iter().all(|group| group.len() <= 1) {
+        return groups.iter().flatten().cloned().collect();
+    }
+    let arrangements = groups
+        .iter()
+        .try_fold(1usize, |n, group| n.checked_mul(factorial(group.len())?));
+    match arrangements {
+        Some(n) if n <= EXHAUSTIVE_LAYOUTS => exhaustive_layout(groups, params),
+        _ => greedy_layout(groups, params),
+    }
+}
+
+fn factorial(n: usize) -> Option<usize> {
+    (1..=n).try_fold(1usize, |acc, k| acc.checked_mul(k))
+}
+
+/// The least layout key over every order of every group.
+fn exhaustive_layout(groups: &[Vec<Value>], params: &[Param]) -> Vec<Value> {
+    let arrangements: Vec<Vec<Vec<Value>>> =
+        groups.iter().map(|group| permutations(group)).collect();
+    let mut best: Option<(Vec<Key>, Vec<Value>)> = None;
+    for_each_product(&arrangements, &mut |choice| {
+        let order: Vec<Value> = choice
+            .iter()
+            .flat_map(|group| group.iter().cloned())
+            .collect();
+        let (parent, mapped) = Context::laid_out(&order, params);
+        let key = vec![Key::Tuple(mapped), Key::Tuple(parent)];
+        if best.as_ref().is_none_or(|(best_key, _)| key < *best_key) {
+            best = Some((key, order));
+        }
+    });
+    best.map_or_else(
+        || groups.iter().flatten().cloned().collect(),
+        |(_, order)| order,
+    )
+}
+
+/// The order built position by position: each position takes the remaining operand of its group whose layout entry,
+/// then whose new parameters, are least. Two operands that tie on both are equal and interchangeable.
+fn greedy_layout(groups: &[Vec<Value>], params: &[Param]) -> Vec<Value> {
+    let mut parent: Vec<Param> = params.to_vec();
+    let mut order: Vec<Value> = Vec::new();
+    for group in groups {
+        let mut remaining: Vec<Value> = group.clone();
+        while !remaining.is_empty() {
+            let mut best: Option<(Vec<Key>, Vec<Param>, usize)> = None;
+            for (index, (_, its)) in remaining.iter().enumerate() {
+                let mut appended: Vec<Param> = Vec::new();
+                let mut positions: Vec<Key> = Vec::with_capacity(its.len());
+                for param in its {
+                    let position = match parent.iter().position(|p| p == param) {
+                        Some(p) => p,
+                        None => match appended.iter().position(|p| p == param) {
+                            Some(p) => parent.len() + p,
+                            None => {
+                                appended.push(param.clone());
+                                parent.len() + appended.len() - 1
+                            }
+                        },
+                    };
+                    positions.push(Key::Int(position as i64));
+                }
+                if best
+                    .as_ref()
+                    .is_none_or(|(entry, added, _)| (&positions, &appended) < (entry, added))
+                {
+                    best = Some((positions, appended, index));
+                }
+            }
+            let Some((_, appended, index)) = best else {
+                break;
+            };
+            parent.extend(appended);
+            order.push(remaining.remove(index));
+        }
+    }
+    order
+}
+
 fn permutations<T: Clone>(items: &[T]) -> Vec<Vec<T>> {
     if items.len() <= 1 {
         return vec![items.to_vec()];
@@ -865,4 +934,43 @@ pub fn value_numbers(body: &Body, resource_key: &dyn Fn(&Name) -> Key) -> Number
     };
     context.visit(body);
     context.out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn operand(number: u128, params: &[i64]) -> Value {
+        (
+            number,
+            params
+                .iter()
+                .map(|p| Key::tuple([Key::str("Var"), Key::Int(*p)]))
+                .collect(),
+        )
+    }
+
+    #[test]
+    fn the_greedy_layout_of_shifted_reads_is_the_one_every_order_gives() {
+        // Six reads of one buffer at six coordinates, scrambled: the least layout reads them in coordinate order.
+        let coordinates = [3, 1, 5, 0, 2, 4];
+        let groups = vec![
+            vec![operand(2, &[9])],
+            coordinates.iter().map(|c| operand(7, &[*c])).collect(),
+        ];
+        let params = vec![Key::tuple([Key::str("Var"), Key::Int(9)])];
+        let greedy = greedy_layout(&groups, &params);
+        assert_eq!(greedy, exhaustive_layout(&groups, &params));
+        assert_eq!(greedy, least_layout(&groups, &params));
+    }
+
+    #[test]
+    fn sixteen_operands_of_one_number_are_laid_out_at_once() {
+        let group: Vec<Value> = (0..16).rev().map(|i| operand(7, &[i])).collect();
+        let start = std::time::Instant::now();
+        let order = least_layout(&[group], &[]);
+        assert!(start.elapsed() < std::time::Duration::from_millis(100));
+        let sorted: Vec<Value> = (0..16).map(|i| operand(7, &[i])).collect();
+        assert_eq!(order, sorted);
+    }
 }

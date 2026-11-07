@@ -165,8 +165,10 @@ pub(super) fn multiplicative_factors(expression: &Expression) -> (Vec<Expression
     if let Expr::Binary(BinOp::Mul, left, right) = &**expression {
         let (mut lf, lk) = multiplicative_factors(left);
         let (rf, rk) = multiplicative_factors(right);
-        lf.extend(rf);
-        return (lf, lk.wrapping_mul(rk));
+        if let Some(k) = lk.checked_mul(rk) {
+            lf.extend(rf);
+            return (lf, k);
+        }
     }
     (vec![expression.clone()], 1)
 }
@@ -414,7 +416,8 @@ pub(super) fn div_mod_decompose(
     if let Expr::Binary(op, left, divisor) = &**expression
         && op.is_division()
         && let Some(d) = divisor.int_literal().filter(|d| *d > 0)
-        && let Some((q_inner, r_inner)) = div_mod_decompose(left, n * d, ctx)?
+        && let Some(nd) = n.checked_mul(d)
+        && let Some((q_inner, r_inner)) = div_mod_decompose(left, nd, ctx)?
     {
         return Ok(Some((
             q_inner,
@@ -544,7 +547,12 @@ pub fn affine_form(
             let anchor = Expression::binary(*op, l_anchor, r_anchor);
             let mut coeffs = l_coeffs;
             for (v, c) in r_coeffs {
-                *coeffs.entry(v).or_insert(0) += sign * c;
+                let sum = coeffs
+                    .get(&v)
+                    .copied()
+                    .unwrap_or(0)
+                    .checked_add(c.checked_mul(sign)?)?;
+                coeffs.insert(v, sum);
             }
             coeffs.retain(|_, c| *c != 0);
             Some((anchor, coeffs))
@@ -566,13 +574,11 @@ pub fn affine_form(
             } else {
                 Expression::binary(BinOp::Mul, mult.clone(), sub_anchor)
             };
-            Some((
-                anchor,
-                sub_coeffs
-                    .into_iter()
-                    .map(|(v, c)| (v, c * factor))
-                    .collect(),
-            ))
+            let coeffs = sub_coeffs
+                .into_iter()
+                .map(|(v, c)| Some((v, c.checked_mul(factor)?)))
+                .collect::<Option<_>>()?;
+            Some((anchor, coeffs))
         }
         _ => None,
     }

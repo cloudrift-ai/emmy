@@ -12,7 +12,7 @@ pub fn simplify_body(body: &Body) -> Result<Body> {
         .iter()
         .map(|s| simplify_stmt(s, &ctx))
         .collect();
-    Ok(Body::new(stmts?))
+    Ok(body.rebuilt(stmts?))
 }
 
 pub(crate) fn simplify_stmt(stmt: &Arc<Statement>, ctx: &SimplifyCtx) -> Result<Arc<Statement>> {
@@ -48,7 +48,7 @@ pub(crate) fn simplify_stmt(stmt: &Arc<Statement>, ctx: &SimplifyCtx) -> Result<
 pub(crate) fn simplify_in(body: &Body, ctx: &SimplifyCtx) -> Result<Body> {
     let stmts: Result<Vec<Arc<Statement>>> =
         body.stmts().iter().map(|s| simplify_stmt(s, ctx)).collect();
-    Ok(Body::new(stmts?))
+    Ok(body.rebuilt(stmts?))
 }
 
 /// `s` without the branches its simplified predicates decide.
