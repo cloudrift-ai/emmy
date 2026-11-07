@@ -160,3 +160,109 @@ pub fn topological_sort(body: &Body) -> Result<Body> {
     })?;
     sorted.topological_order(&ordering_constraints(&sorted, false, false))
 }
+
+#[cfg(test)]
+mod tests {
+    use std::collections::HashSet;
+
+    use super::ordering_constraints;
+    use crate::identity::canonicalize_identity;
+    use crate::normalize::normalize_body;
+    use crate::normalize::testing::*;
+
+    #[test]
+    fn effect_constraints_keep_only_intervening_resource_hazards() {
+        let writes = body(
+            &(0..100)
+                .map(|i| format!("X[] = value_{i}"))
+                .collect::<Vec<_>>()
+                .join("\n"),
+        );
+        let incoming = ordering_constraints(&writes, true, true);
+        assert_eq!(incoming[0], HashSet::new());
+        for (index, sources) in incoming.iter().enumerate().skip(1) {
+            assert_eq!(*sources, HashSet::from([index - 1]));
+        }
+        let incoming = ordering_constraints(
+            &body(
+                "
+                X[] = first
+                left = load X[]
+                right = load X[]
+                X[] = second
+                tail = load X[]
+                ",
+            ),
+            true,
+            true,
+        );
+        let expected: Vec<HashSet<usize>> = [vec![], vec![0], vec![0], vec![0, 1, 2], vec![3]]
+            .into_iter()
+            .map(HashSet::from_iter)
+            .collect();
+        assert_eq!(incoming, expected);
+    }
+
+    #[test]
+    fn the_order_of_protocol_statements_is_identity() {
+        let protocols = [
+            "CpAsyncCommit\nCpAsyncWait\nSync",
+            "CpAsyncWait\nCpAsyncCommit\nSync",
+            "WgmmaFence\nWgmmaCommit\nWgmmaWait",
+            "WgmmaCommit\nWgmmaFence\nWgmmaWait",
+        ];
+        let keys: HashSet<String> = protocols
+            .iter()
+            .map(|text| canonicalize_identity(&body(text), false, None).unwrap().key)
+            .collect();
+        assert_eq!(keys.len(), protocols.len());
+    }
+
+    #[test]
+    fn the_identity_combines_a_buffer_rename_with_a_nested_reordering() {
+        let make = |reverse: bool, renamed: bool| {
+            let axis = if renamed { "renamed_axis" } else { "axis" };
+            let names = if renamed {
+                ["renamed_left", "renamed_right"]
+            } else {
+                ["left", "right"]
+            };
+            let buffers = if renamed {
+                ["renamed_X", "renamed_Y"]
+            } else {
+                ["X", "Y"]
+            };
+            let mut chains: Vec<String> = names
+                .iter()
+                .zip(buffers)
+                .map(|(name, buffer)| {
+                    format!(
+                        "\n    if {axis} < 4:\n        {name} = load {buffer}[{axis}]\n        {name}_value = abs({name})\n        {buffer}_output[{axis}] = {name}_value"
+                    )
+                })
+                .collect();
+            if reverse {
+                chains.reverse();
+            }
+            body(&format!("for {axis} in 0..4:{}", chains.concat()))
+        };
+        let keys: HashSet<String> = [false, true]
+            .into_iter()
+            .flat_map(|reverse| {
+                [false, true]
+                    .into_iter()
+                    .map(move |renamed| (reverse, renamed))
+            })
+            .map(|(reverse, renamed)| {
+                canonicalize_identity(
+                    &normalize_body(&make(reverse, renamed)).unwrap(),
+                    false,
+                    None,
+                )
+                .unwrap()
+                .key
+            })
+            .collect();
+        assert_eq!(keys.len(), 1);
+    }
+}
