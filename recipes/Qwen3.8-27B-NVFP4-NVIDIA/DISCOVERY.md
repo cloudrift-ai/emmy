@@ -1,5 +1,49 @@
 # Qwen3.8-27B-NVFP4 (NVIDIA) discovery
 
+## The FP8 cache staged into shared memory: milestone 5 met, 6 still missed (2026-11-07)
+
+Native attention's FP8 key-value cache now copies into shared memory, 16 bytes per copy, before the tensor-core fold
+reads it; it was read one byte per load, which kept every fold at 255 registers with spills (#1366, on #1352). Recorded
+and gated on the card and host of the section below (vast.ai, x16 RTX 5090, EPYC 9655, a 46-CPU quota, driver
+610.57). Every attention twin was swept over its neighbouring key splits and four tiles with the cache staged, and the
+compile's pick recorded. The client, prompts and settings are the section below's. The pack exports under strict
+evidence, every twin compiles strictly from the golden, and `emmy eval golden --serving-config` deploys every twin from
+the golden rows alone.
+
+| twin | at 4,096 | at 131,072 |
+|---|---|---|
+| `attend1` (decode) | g32k, 11.1 µs (27.7) | g64k, 205 µs (581) |
+| `attend3` (verify) | g32k, 22.5 µs (54.9) | g64k, 487 µs (1,413) |
+| `attend16` | g16k, 41.7 µs (141) | g32k, 974 µs (6,516) |
+| `attend64` (chunk) | g8k, 73.0 µs (195) | g32k, 1,590 µs (5,126) |
+
+The section below's times are in brackets. The one-row decode's split piece reads its 268 MB cache in 189 µs, about
+1.4 TB/s; at one warp per CTA it took 170 µs staged against 502 µs read directly. g128k, which the compiler does not
+offer, measured 2% faster than g64k at one row and 7% at three.
+
+| | this branch | the section below |
+|---|---|---|
+| TPOT / TTFT, 256-token prompt | 8.68 ms / 0.151 s | 9.44 ms / 0.154 s |
+| first token, 257-token prompt | 0.172 s | 0.177 s |
+| TPOT / TTFT, 7,680-token prompt | 8.55 ms / 4.62 s | 9.72 ms / 4.88 s |
+| TPOT / TTFT, 197,632-token prompt | 14.7 ms / 188 s | 23.7 ms / 318 s |
+| TPOT / TTFT, 261,632-token prompt | 17.7 ms / 277 s | 32.7 ms / 505 s |
+| drafts accepted at 256 / 7,680 / 197,632 / 261,632 | 75 / 79 / 71 / 64% | 70 / 71 / 79 / 62% |
+| device memory at rest | 27.9 GiB | 27.9 GiB |
+| GSM8K strict / flexible match | 0.715 / 0.765 | |
+
+- **Milestone 5, met.** The attention term of the 197,632-token first token is 69.9 s of GPU time (`nsys
+  --cuda-graph-trace=node`, 3,092 chunks), against at most 117 s (200 s in the section below). The full window's first
+  token is 277 s, against at most 450 s.
+- **Milestone 6, missed.** The captured verify step takes 35.5 ms at 197,632 positions (attention 14.3 ms) against
+  21.1 ms at the 4,096 window (attention 0.41 ms): +14.4 ms, where the bound is about 8 ms (+38.9 in the section
+  below). The three-row verify reads the cache once per row, three reads where one would do: its twin at 131,072 takes
+  487 µs against the one-row decode's 205.
+- **The short cells did not get slower.** The 256- and 7,680-token cells are faster on both TPOT and first token.
+- **GSM8K holds,** inside one standard error (0.032) of main's 0.730 / 0.750 on 2026-11-06; the section below did not
+  run it.
+- Drafts accepted is the share of drafted tokens a step kept, read off the gaps between streamed tokens.
+
 ## Attention priced per range of windows: milestones 5 and 6 again (2026-11-07)
 
 Native attention now compiles once per range of windows, priced at 4,096 and at 131,072 cached tokens, and a step runs
