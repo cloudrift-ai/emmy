@@ -334,11 +334,13 @@ _EMPTY_MEASURED = _Measured({}, {})
 
 def _measured_at(ok: dict, kernel: str | None, bindings: dict) -> list[tuple[dict, float]]:
     """The measured rows of ``kernel`` at ``bindings``, the sizes the compile binds its symbolic dims to
-    (:func:`~emmy.compiler.wire.kernel_bindings`): a dynamic kernel measured at several sizes (native's attention,
-    priced per range of windows) ranks by its rows at its own, never by a faster size's. A kernel with no row at its
-    own sizes ranks by every row it has, as a kernel measured at one size always has."""
+    (:func:`~emmy.compiler.wire.kernel_bindings`): a row measured at other sizes timed another run of the kernel.
+    Native's attention, priced per range of windows, is one kernel measured at two windows, and its unsplit fold at
+    131,072 must not rank at its 4,096 time. A row that names no size (a dynamic kernel's, recorded before rows
+    named one) stays evidence at every size."""
     by_size = ok.get(kernel) or {}
-    return by_size.get(tuple(sorted(bindings.items()))) or [row for rows in by_size.values() for row in rows]
+    key = tuple(sorted(bindings.items()))
+    return [*by_size.get(key, ()), *(by_size.get((), ()) if key else ())]
 
 
 def _kernel_rows(ok: dict, op) -> list[tuple[dict, float]]:
