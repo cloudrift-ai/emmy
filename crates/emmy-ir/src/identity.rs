@@ -125,22 +125,6 @@ mod tests {
     }
 
     /// Every order of `items`.
-    fn permutations<T: Clone>(items: &[T]) -> Vec<Vec<T>> {
-        if items.is_empty() {
-            return vec![Vec::new()];
-        }
-        (0..items.len())
-            .flat_map(|first| {
-                let mut rest = items.to_vec();
-                let head = rest.remove(first);
-                permutations(&rest).into_iter().map(move |mut order| {
-                    order.insert(0, head.clone());
-                    order
-                })
-            })
-            .collect()
-    }
-
     /// A tiny multiply-and-write body over the buffers named.
     fn matmul(input_x: &str, input_y: &str, output: &str) -> String {
         format!(

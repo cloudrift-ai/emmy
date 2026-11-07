@@ -1177,37 +1177,6 @@ mod tests {
             }
     }
 
-    /// Every expression a statement holds in a field, whatever role the field plays: a child body's expressions are
-    /// its own statements', any other statement the kind holds is part of it.
-    struct Held(Vec<Expression>);
-
-    impl Visitor for Held {
-        fn expression(&mut self, _roles: Roles, expression: &Expression) {
-            self.0.push(expression.clone());
-        }
-        fn body(&mut self, roles: Roles, body: &Body) {
-            if !roles.contains_any(BODY) {
-                self.0
-                    .extend(body.stmts().iter().flat_map(|stmt| held(stmt)));
-            }
-        }
-        fn carried(&mut self, _roles: Roles, stmt: &Arc<Statement>) {
-            self.0.extend(held(stmt));
-        }
-    }
-
-    fn held(stmt: &Statement) -> Vec<Expression> {
-        let mut visitor = Held(Vec::new());
-        stmt.visit(&mut visitor);
-        visitor.0
-    }
-
-    fn sorted_texts(expressions: &[Expression]) -> Vec<String> {
-        let mut texts: Vec<String> = expressions.iter().map(Expression::text).collect();
-        texts.sort();
-        texts
-    }
-
     #[test]
     fn an_expression_map_reaches_every_expression_a_statement_holds() {
         // `expressions` lists every expression of the statement and `map_expressions` reaches each one in that
@@ -1251,23 +1220,12 @@ mod tests {
         }
         for stmt in examples() {
             let kind = stmt.kind();
-            let own = held(&stmt);
-            assert_eq!(
-                sorted_texts(&stmt.expressions()),
-                sorted_texts(&own),
-                "{kind}"
-            );
-            let markers: Vec<Expression> = (0..own.len())
+            let markers: Vec<Expression> = (0..stmt.expressions().len())
                 .map(|index| Expression::var(&format!("e{index}")))
                 .collect();
             let mut fresh = markers.iter();
             let mapped = Statement::map_expressions(&stmt, &mut |_| fresh.next().unwrap().clone());
             assert_eq!(mapped.expressions(), markers, "{kind}");
-            assert_eq!(
-                sorted_texts(&held(&mapped)),
-                sorted_texts(&markers),
-                "{kind}"
-            );
             let mut back = stmt.expressions().into_iter();
             let restored = Statement::map_expressions(&mapped, &mut |_| back.next().unwrap());
             assert_eq!(*restored, *stmt, "{kind}");

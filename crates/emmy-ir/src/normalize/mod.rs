@@ -141,6 +141,7 @@ pub use simplify::*;
 
 #[cfg(test)]
 mod tests {
+    use super::testing::eval_int;
     use super::*;
     use crate::expr::parse as parse_expression;
     use crate::kinds::axis::Dim;
@@ -372,14 +373,6 @@ for k in 0..3:
         extend_simplify_ctx(&ctx, &Axis::new("a2", Dim::static_(stride), None))
     }
 
-    fn eval_int(e: &Expression, env: &[(&str, i64)]) -> i64 {
-        let env: HashMap<Name, crate::expr::Num> = env
-            .iter()
-            .map(|(name, value)| (Name::from(*name), crate::expr::Num::Int(*value)))
-            .collect();
-        e.eval(&env).unwrap().as_int().unwrap()
-    }
-
     #[test]
     fn a_bare_var_modulo_its_symbolic_extent_folds() {
         let ctx = extend_simplify_ctx(&SimplifyCtx::empty(), &symbolic_axis("a0", "seq_len"));
@@ -555,6 +548,32 @@ pub(crate) mod testing {
 
     pub(crate) fn kinds(body: &Body) -> Vec<&'static str> {
         body.stmts().iter().map(|stmt| stmt.kind().name()).collect()
+    }
+
+    /// Every order of `items`.
+    pub(crate) fn permutations<T: Clone>(items: &[T]) -> Vec<Vec<T>> {
+        if items.is_empty() {
+            return vec![Vec::new()];
+        }
+        (0..items.len())
+            .flat_map(|index| {
+                let mut rest = items.to_vec();
+                let first = rest.remove(index);
+                permutations(&rest).into_iter().map(move |mut tail| {
+                    tail.insert(0, first.clone());
+                    tail
+                })
+            })
+            .collect()
+    }
+
+    /// `e` evaluated over integer bindings.
+    pub(crate) fn eval_int(e: &crate::expr::Expression, env: &[(&str, i64)]) -> i64 {
+        let env: std::collections::HashMap<Name, crate::expr::Num> = env
+            .iter()
+            .map(|(name, value)| (Name::from(*name), crate::expr::Num::Int(*value)))
+            .collect();
+        e.eval(&env).unwrap().as_int().unwrap()
     }
 
     /// The body a loop holds, or a branch's taken arm.
