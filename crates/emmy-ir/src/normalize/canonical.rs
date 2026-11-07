@@ -166,6 +166,73 @@ pub(crate) fn unlisted(stmt: &Arc<Statement>) -> Arc<Statement> {
     stmt.clone()
 }
 
+/// `body` with every scope's members in the canonical order: dependency-valid, then by the sibling's category, its
+/// shape, its spelling where shapes tie, and its number or scope tree.
+fn ordered(body: &Body, numbering: &Numbering) -> Body {
+    let rebuilt = body.map_each(&mut |stmt| {
+        let nested = stmt.nested();
+        if nested.is_empty() {
+            return stmt.clone();
+        }
+        with_bodies(
+            stmt,
+            nested
+                .iter()
+                .map(|child| ordered(child, numbering))
+                .collect(),
+        )
+    });
+    let shapes: Vec<Key> = body.stmts().iter().map(ties::sibling_shape).collect();
+    let mut ties: HashMap<&Key, usize> = HashMap::new();
+    for own in &shapes {
+        *ties.entry(own).or_default() += 1;
+    }
+    let mut effects = HashMap::new();
+    let priorities: Vec<Key> = body
+        .stmts()
+        .iter()
+        .zip(rebuilt.stmts())
+        .zip(&shapes)
+        .map(|((stmt, built), own)| {
+            let children = stmt.nested();
+            let category = if !children.is_empty() && stmt.has_side_effects() {
+                2
+            } else {
+                children.is_empty() as i64
+            };
+            let spelled = if ties[own] > 1 {
+                ties::sibling_spelling(built)
+            } else {
+                Key::str("")
+            };
+            if !children.is_empty() {
+                let tree = scope_tree(numbering, &Body::new(vec![stmt.clone()]), &mut effects);
+                Key::tuple([Key::Int(category), own.clone(), spelled, Key::Num(tree)])
+            } else {
+                let (number, params) = numbering.numbers[numbering.ordinal(stmt)]
+                    .as_ref()
+                    .map_or((Key::None, Vec::new()), |(n, p)| (Key::Num(*n), p.clone()));
+                Key::tuple([
+                    Key::Int(category),
+                    own.clone(),
+                    spelled,
+                    number,
+                    Key::Tuple(params),
+                ])
+            }
+        })
+        .collect();
+    let incoming = ordering_constraints(&rebuilt, true, true);
+    let order =
+        rebuilt.topological_permutation(&incoming, Some(&|index| priorities[index].clone()));
+    Body::new(
+        order
+            .into_iter()
+            .map(|index| rebuilt.stmts()[index].clone())
+            .collect(),
+    )
+}
+
 pub fn canonical_order(body: &Body) -> Result<Body> {
     let stmts = distinct(&canonicalize_expressions(body, &[])?);
     let role = roles(&stmts, None);
@@ -173,78 +240,7 @@ pub fn canonical_order(body: &Body) -> Result<Body> {
         role.get(name)
             .map_or_else(|| Key::Str(name.clone()), |r| Key::Int(*r as i64))
     });
-    let shape = ties::sibling_shape;
-    let spelling = ties::sibling_spelling;
-    fn ordered(
-        body: &Body,
-        numbering: &Numbering,
-        shape: &dyn Fn(&Arc<Statement>) -> Key,
-        spelling: &dyn Fn(&Arc<Statement>) -> Key,
-    ) -> Body {
-        let rebuilt = body.map_each(&mut |stmt| {
-            let nested = stmt.nested();
-            if nested.is_empty() {
-                return stmt.clone();
-            }
-            with_bodies(
-                stmt,
-                nested
-                    .iter()
-                    .map(|child| ordered(child, numbering, shape, spelling))
-                    .collect(),
-            )
-        });
-        let shapes: Vec<Key> = body.stmts().iter().map(shape).collect();
-        let mut ties: HashMap<&Key, usize> = HashMap::new();
-        for own in &shapes {
-            *ties.entry(own).or_default() += 1;
-        }
-        let mut effects = HashMap::new();
-        let priorities: Vec<Key> = body
-            .stmts()
-            .iter()
-            .zip(rebuilt.stmts())
-            .zip(&shapes)
-            .map(|((stmt, built), own)| {
-                let children = stmt.nested();
-                let category = if !children.is_empty() && stmt.has_side_effects() {
-                    2
-                } else {
-                    children.is_empty() as i64
-                };
-                let spelled = if ties[own] > 1 {
-                    spelling(built)
-                } else {
-                    Key::str("")
-                };
-                if !children.is_empty() {
-                    let tree = scope_tree(numbering, &Body::new(vec![stmt.clone()]), &mut effects);
-                    Key::tuple([Key::Int(category), own.clone(), spelled, Key::Num(tree)])
-                } else {
-                    let (number, params) = numbering.numbers[numbering.ordinal(stmt)]
-                        .as_ref()
-                        .map_or((Key::None, Vec::new()), |(n, p)| (Key::Num(*n), p.clone()));
-                    Key::tuple([
-                        Key::Int(category),
-                        own.clone(),
-                        spelled,
-                        number,
-                        Key::Tuple(params),
-                    ])
-                }
-            })
-            .collect();
-        let incoming = ordering_constraints(&rebuilt, true, true);
-        let order =
-            rebuilt.topological_permutation(&incoming, Some(&|index| priorities[index].clone()));
-        Body::new(
-            order
-                .into_iter()
-                .map(|index| rebuilt.stmts()[index].clone())
-                .collect(),
-        )
-    }
-    let placed = ordered(&stmts, &numbering, &shape, &spelling);
+    let placed = ordered(&stmts, &numbering);
     let result = rename_ssa_sequential(&placed);
     let operand = ties::operand_ranks(&placed, &result, &numbering);
     let operand_key = |name: &Name| operand.get(name).cloned().unwrap_or_else(ties::unranked);
@@ -283,6 +279,146 @@ pub fn canonical_order(body: &Body) -> Result<Body> {
     Ok(unify_siblings(&unified))
 }
 
+/// Whether `op`'s operands may trade places.
+fn commutative(op: BinOp) -> bool {
+    matches!(
+        op,
+        BinOp::Add
+            | BinOp::Mul
+            | BinOp::Eq
+            | BinOp::Ne
+            | BinOp::And
+            | BinOp::Or
+            | BinOp::BitAnd
+            | BinOp::BitOr
+            | BinOp::Xor
+    )
+}
+
+/// An expression's form with every bound axis spelled by its binding position: the order of two operands.
+fn unspelled(e: &Expression, axis_order: &HashMap<Name, usize>) -> Key {
+    match &**e {
+        Expr::Var(name) => match axis_order.get(name) {
+            Some(index) => Key::tuple([Key::str("Var"), Key::Int(*index as i64)]),
+            None => Key::tuple([Key::str("Var"), Key::Str(name.clone())]),
+        },
+        Expr::Literal(Lit { value, dtype }) => Key::tuple([
+            Key::str("Literal"),
+            Key::num(*value),
+            Key::Str(dtype.clone()),
+        ]),
+        Expr::Builtin(name) => Key::tuple([Key::str("Builtin"), Key::Str(name.clone())]),
+        Expr::Binary(op, l, r) => Key::tuple([
+            Key::str("Binary"),
+            Key::str(op.text()),
+            unspelled(l, axis_order),
+            unspelled(r, axis_order),
+        ]),
+        Expr::Call(name, args) => Key::tuple([
+            Key::str("Call"),
+            Key::Str(name.clone()),
+            Key::tuple(args.iter().map(|a| unspelled(a, axis_order))),
+        ]),
+        Expr::Ternary(a, b, c) => Key::tuple([
+            Key::str("Ternary"),
+            unspelled(a, axis_order),
+            unspelled(b, axis_order),
+            unspelled(c, axis_order),
+        ]),
+        Expr::Cast(dtype, inner) => Key::tuple([
+            Key::str("Cast"),
+            Key::Str(dtype.clone()),
+            unspelled(inner, axis_order),
+        ]),
+        Expr::FlatIndex(buffer, index) => Key::tuple([
+            Key::str("FlatIndex"),
+            Key::Str(buffer.clone()),
+            Key::tuple(index.iter().map(|a| unspelled(a, axis_order))),
+        ]),
+    }
+}
+
+/// A sum over bound axes with its terms in binding order and its anchor last.
+fn affine(expression: Expression, axis_order: &HashMap<Name, usize>) -> Result<Expression> {
+    let variables = expression.free_vars();
+    // Reassociation and coefficient folding are exact for integer coordinates; an SSA value may be floating point.
+    if variables.is_empty() || !variables.iter().all(|v| axis_order.contains_key(v)) {
+        return Ok(expression);
+    }
+    let Some((anchor, coefficients)) =
+        affine_form(&expression, &|name| variables.iter().any(|v| &**v == name))
+    else {
+        return Ok(expression);
+    };
+    let anchor = anchor.simplify(&SimplifyCtx::empty())?;
+    let mut sorted: Vec<(&Name, &i64)> = coefficients.iter().collect();
+    sorted.sort_by_key(|(name, _)| axis_order[*name]);
+    let mut terms: Vec<Expression> = Vec::new();
+    for (name, coefficient) in sorted {
+        let variable = Expression::new(Expr::Var(name.clone()));
+        terms.push(if *coefficient == 1 {
+            variable
+        } else {
+            Expression::binary(BinOp::Mul, Expression::int(*coefficient), variable)
+        });
+    }
+    if !anchor.is_zero() {
+        terms.push(anchor);
+    }
+    let mut terms = terms.into_iter();
+    let Some(mut result) = terms.next() else {
+        return Ok(Expression::int(0));
+    };
+    for term in terms {
+        result = Expression::binary(BinOp::Add, result, term);
+    }
+    Ok(result)
+}
+
+/// `e` canonicalized: comparisons as `<` and `<=`, commutative operands ordered, sums in affine form.
+fn rewrite(e: &Expression, axis_order: &HashMap<Name, usize>) -> Result<Expression> {
+    Ok(match &**e {
+        Expr::Binary(op, left, right) => {
+            let (mut left, mut right) = (rewrite(left, axis_order)?, rewrite(right, axis_order)?);
+            let mut op = *op;
+            match op {
+                BinOp::Gt => {
+                    op = BinOp::Lt;
+                    std::mem::swap(&mut left, &mut right);
+                }
+                BinOp::Ge => {
+                    op = BinOp::Le;
+                    std::mem::swap(&mut left, &mut right);
+                }
+                _ => {}
+            }
+            if commutative(op) && unspelled(&right, axis_order) < unspelled(&left, axis_order) {
+                std::mem::swap(&mut left, &mut right);
+            }
+            let result = Expression::binary(op, left, right);
+            if matches!(op, BinOp::Add | BinOp::Sub | BinOp::Mul) {
+                affine(result, axis_order)?
+            } else {
+                result
+            }
+        }
+        Expr::Call(name, args) => {
+            let args: Result<Vec<Expression>> =
+                args.iter().map(|a| rewrite(a, axis_order)).collect();
+            Expression::new(Expr::Call(name.clone(), args?.into()))
+        }
+        Expr::Ternary(a, b, c) => Expression::new(Expr::Ternary(
+            rewrite(a, axis_order)?,
+            rewrite(b, axis_order)?,
+            rewrite(c, axis_order)?,
+        )),
+        Expr::Cast(dtype, inner) => {
+            Expression::new(Expr::Cast(dtype.clone(), rewrite(inner, axis_order)?))
+        }
+        _ => e.clone(),
+    })
+}
+
 /// Canonicalize integer expressions using lexical binding order, never axis spelling.
 pub fn canonicalize_expressions(body: &Body, axes: &[Name]) -> Result<Body> {
     let axis_order: HashMap<Name, usize> = axes
@@ -290,166 +426,19 @@ pub fn canonicalize_expressions(body: &Body, axes: &[Name]) -> Result<Body> {
         .enumerate()
         .map(|(i, name)| (name.clone(), i))
         .collect();
-    let commutative = |op: BinOp| {
-        matches!(
-            op,
-            BinOp::Add
-                | BinOp::Mul
-                | BinOp::Eq
-                | BinOp::Ne
-                | BinOp::And
-                | BinOp::Or
-                | BinOp::BitAnd
-                | BinOp::BitOr
-                | BinOp::Xor
-        )
-    };
-    fn unspelled(e: &Expression, axis_order: &HashMap<Name, usize>) -> Key {
-        match &**e {
-            Expr::Var(name) => match axis_order.get(name) {
-                Some(index) => Key::tuple([Key::str("Var"), Key::Int(*index as i64)]),
-                None => Key::tuple([Key::str("Var"), Key::Str(name.clone())]),
-            },
-            Expr::Literal(Lit { value, dtype }) => Key::tuple([
-                Key::str("Literal"),
-                Key::num(*value),
-                Key::Str(dtype.clone()),
-            ]),
-            Expr::Builtin(name) => Key::tuple([Key::str("Builtin"), Key::Str(name.clone())]),
-            Expr::Binary(op, l, r) => Key::tuple([
-                Key::str("Binary"),
-                Key::str(op.text()),
-                unspelled(l, axis_order),
-                unspelled(r, axis_order),
-            ]),
-            Expr::Call(name, args) => Key::tuple([
-                Key::str("Call"),
-                Key::Str(name.clone()),
-                Key::tuple(args.iter().map(|a| unspelled(a, axis_order))),
-            ]),
-            Expr::Ternary(a, b, c) => Key::tuple([
-                Key::str("Ternary"),
-                unspelled(a, axis_order),
-                unspelled(b, axis_order),
-                unspelled(c, axis_order),
-            ]),
-            Expr::Cast(dtype, inner) => Key::tuple([
-                Key::str("Cast"),
-                Key::Str(dtype.clone()),
-                unspelled(inner, axis_order),
-            ]),
-            Expr::FlatIndex(buffer, index) => Key::tuple([
-                Key::str("FlatIndex"),
-                Key::Str(buffer.clone()),
-                Key::tuple(index.iter().map(|a| unspelled(a, axis_order))),
-            ]),
-        }
-    }
-    let affine = |expression: Expression| -> Result<Expression> {
-        let variables = expression.free_vars();
-        // Reassociation and coefficient folding are exact for integer coordinates; an SSA value may be floating point.
-        if variables.is_empty() || !variables.iter().all(|v| axis_order.contains_key(v)) {
-            return Ok(expression);
-        }
-        let Some((anchor, coefficients)) =
-            affine_form(&expression, &|name| variables.iter().any(|v| &**v == name))
-        else {
-            return Ok(expression);
-        };
-        let anchor = anchor.simplify(&SimplifyCtx::empty())?;
-        let mut sorted: Vec<(&Name, &i64)> = coefficients.iter().collect();
-        sorted.sort_by_key(|(name, _)| axis_order[*name]);
-        let mut terms: Vec<Expression> = Vec::new();
-        for (name, coefficient) in sorted {
-            let variable = Expression::new(Expr::Var(name.clone()));
-            terms.push(if *coefficient == 1 {
-                variable
-            } else {
-                Expression::binary(BinOp::Mul, Expression::int(*coefficient), variable)
-            });
-        }
-        if !anchor.is_zero() {
-            terms.push(anchor);
-        }
-        let mut terms = terms.into_iter();
-        let Some(mut result) = terms.next() else {
-            return Ok(Expression::int(0));
-        };
-        for term in terms {
-            result = Expression::binary(BinOp::Add, result, term);
-        }
-        Ok(result)
-    };
-    fn rewrite(
-        e: &Expression,
-        affine: &dyn Fn(Expression) -> Result<Expression>,
-        commutative: &dyn Fn(BinOp) -> bool,
-        axis_order: &HashMap<Name, usize>,
-    ) -> Result<Expression> {
-        Ok(match &**e {
-            Expr::Binary(op, left, right) => {
-                let (mut left, mut right) = (
-                    rewrite(left, affine, commutative, axis_order)?,
-                    rewrite(right, affine, commutative, axis_order)?,
-                );
-                let mut op = *op;
-                match op {
-                    BinOp::Gt => {
-                        op = BinOp::Lt;
-                        std::mem::swap(&mut left, &mut right);
-                    }
-                    BinOp::Ge => {
-                        op = BinOp::Le;
-                        std::mem::swap(&mut left, &mut right);
-                    }
-                    _ => {}
-                }
-                if commutative(op) && unspelled(&right, axis_order) < unspelled(&left, axis_order) {
-                    std::mem::swap(&mut left, &mut right);
-                }
-                let result = Expression::binary(op, left, right);
-                if matches!(op, BinOp::Add | BinOp::Sub | BinOp::Mul) {
-                    affine(result)?
-                } else {
-                    result
-                }
-            }
-            Expr::Call(name, args) => {
-                let args: Result<Vec<Expression>> = args
-                    .iter()
-                    .map(|a| rewrite(a, affine, commutative, axis_order))
-                    .collect();
-                Expression::new(Expr::Call(name.clone(), args?.into()))
-            }
-            Expr::Ternary(a, b, c) => Expression::new(Expr::Ternary(
-                rewrite(a, affine, commutative, axis_order)?,
-                rewrite(b, affine, commutative, axis_order)?,
-                rewrite(c, affine, commutative, axis_order)?,
-            )),
-            Expr::Cast(dtype, inner) => Expression::new(Expr::Cast(
-                dtype.clone(),
-                rewrite(inner, affine, commutative, axis_order)?,
-            )),
-            _ => e.clone(),
-        })
-    }
     let mut failure: Option<Error> = None;
     let out: Vec<Arc<Statement>> = body
         .stmts()
         .iter()
         .map(|stmt| {
-            let rewritten = Statement::map_expressions(stmt, &mut |e| match rewrite(
-                e,
-                &affine,
-                &commutative,
-                &axis_order,
-            ) {
-                Ok(done) => done,
-                Err(err) => {
-                    failure = Some(err);
-                    e.clone()
-                }
-            });
+            let rewritten =
+                Statement::map_expressions(stmt, &mut |e| match rewrite(e, &axis_order) {
+                    Ok(done) => done,
+                    Err(err) => {
+                        failure = Some(err);
+                        e.clone()
+                    }
+                });
             let mut bound: Vec<Name> = axes.to_vec();
             bound.extend(stmt.bound_axes().iter().map(|axis| axis.name.clone()));
             let nested = rewritten.nested();

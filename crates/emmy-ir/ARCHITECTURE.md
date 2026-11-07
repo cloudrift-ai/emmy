@@ -13,11 +13,12 @@ body and the normal form ARE; this file says how the crate holds them.
 
 The module tree follows the design, one module per concept: `expr/` (the tree and its text in `mod.rs`, the
 simplifier and affine form in `simplify.rs`, the reader in `parse.rs`), `kinds/` (the kind list and its macros in
-`mod.rs`, the `Field` trait in `field.rs`, axes, dtypes and the elementwise tables beside it), `body.rs`, `text.rs`,
-`protocol.rs`, `numbering/` (the value numbering and digest in `mod.rs`, the identity in `identity.rs`), `normalize/`
-(the driver and the helpers the steps share in `mod.rs`, the steps by what they do: `axes`, `fold`, `siblings`,
-`simplify`, `place`, `canonical`, the dependency order in `order.rs` and the tie-breaks in `ties.rs`) and `memo.rs`,
-the one bounded memo both the normal form and the identity are kept in.
+`mod.rs`, the `Field` trait in `field.rs`, axes, dtypes and the elementwise tables beside it), `body.rs`, `text/` (the
+printer in `print.rs`, the reader in `parse.rs`, what both spell in `mod.rs`), `protocol.rs`, `numbering/` (the `Key`
+tree and its hash in `key.rs`, the value numbering in `values.rs`, the scope-tree digest in `digest.rs`, the identity
+in `identity.rs`), `normalize/` (the driver and the helpers the steps share in `mod.rs`, the steps by what they do:
+`axes`, `fold`, `siblings`, `simplify`, `place`, `canonical`, the dependency order in `order.rs` and the tie-breaks in
+`ties.rs`) and `memo.rs`, the one bounded memo both the normal form and the identity are kept in.
 
 ## Data
 
@@ -63,13 +64,13 @@ is a `Parser` over the expression tokenizer with the statement punctuation added
 
 ## Numbering, identity, normalization
 
-`numbering/mod.rs` is the value numbering (`value_numbers`), the scope-tree hash, the use-keyed buffer roles and the digest.
-Statements are keyed by the address of their shared object (`distinct` makes a body's statements unique first), digest
-material is a `Key` tree hashed with BLAKE3 (`Number`, 128 bits), and every order among ties is by `Key`'s total
-order. `identity.rs` memoizes the identity per body and per coloring. `normalize/` holds the steps and the driver
-`normalize_body`; `canonical_order` and `place_values` are the two steps that read the numbering. Both memos are
-`memo::Memo`, keyed by the body's text under its content hash and bounded by entry count: body equality leaves the
-axis windows out, the text spells them, and a window is identity material.
+`numbering/values.rs` is the value numbering (`value_numbers`); `digest.rs` the scope-tree hash, the use-keyed buffer
+roles and the digest. Statements are keyed by the address of their shared object (`distinct` makes a body's statements
+unique first), digest material is a `Key` tree hashed with BLAKE3 (`Number`, 128 bits), and every order among ties is
+by `Key`'s total order. `identity.rs` memoizes the identity per body and per coloring. `normalize/` holds the steps
+and the driver `normalize_body`; `canonical_order` and `place_values` are the two steps that read the numbering. Both
+memos are `memo::Memo`, keyed by the body's text under its content hash and bounded by entry count: body equality
+leaves the axis windows out, the text spells them, and a window is identity material.
 
 The canonical order decides what the digest leaves open, and the lift of a body into terms reads that order: sibling
 regions are addressed by position in every recorded cut decision, and a product's operand order is its orientation
