@@ -14,35 +14,74 @@ pub mod dtype;
 pub mod elementwise;
 pub mod field;
 
-/// Roles, as bits.
-pub const DEFINES: u32 = 1 << 0;
-pub const READS: u32 = 1 << 1;
-pub const UPDATES: u32 = 1 << 2;
-pub const LOCAL: u32 = 1 << 3;
-pub const BUFFER_READ: u32 = 1 << 4;
-pub const BUFFER_WRITE: u32 = 1 << 5;
-pub const LOCAL_BUFFER: u32 = 1 << 6;
-pub const EXPRESSION: u32 = 1 << 7;
-pub const AXIS: u32 = 1 << 8;
-pub const AXIS_NAME: u32 = 1 << 9;
-pub const BODY: u32 = 1 << 10;
-pub const STMTS: u32 = 1 << 11;
-pub const TERM: u32 = 1 << 12;
-pub const RECORD: u32 = 1 << 13;
-/// A constructor flag, not a role: the field is given by keyword only (an `Init`'s dtype).
-pub const KW_ONLY: u32 = 1 << 20;
+/// The roles a field's values play, as a set.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+pub struct Roles(u32);
+
+impl Roles {
+    pub const NONE: Roles = Roles(0);
+
+    pub const fn or(self, other: Roles) -> Roles {
+        Roles(self.0 | other.0)
+    }
+
+    /// Whether any role of `other` is one of these.
+    pub const fn contains_any(self, other: Roles) -> bool {
+        self.0 & other.0 != 0
+    }
+}
+
+impl std::ops::BitOr for Roles {
+    type Output = Roles;
+
+    fn bitor(self, other: Roles) -> Roles {
+        self.or(other)
+    }
+}
+
+pub const DEFINES: Roles = Roles(1 << 0);
+pub const READS: Roles = Roles(1 << 1);
+pub const UPDATES: Roles = Roles(1 << 2);
+pub const LOCAL: Roles = Roles(1 << 3);
+pub const BUFFER_READ: Roles = Roles(1 << 4);
+pub const BUFFER_WRITE: Roles = Roles(1 << 5);
+pub const LOCAL_BUFFER: Roles = Roles(1 << 6);
+pub const EXPRESSION: Roles = Roles(1 << 7);
+pub const AXIS: Roles = Roles(1 << 8);
+pub const AXIS_NAME: Roles = Roles(1 << 9);
+pub const BODY: Roles = Roles(1 << 10);
+pub const STMTS: Roles = Roles(1 << 11);
+pub const TERM: Roles = Roles(1 << 12);
+pub const RECORD: Roles = Roles(1 << 13);
+/// A constructor property carried with the roles: the field is given by keyword only (an `Init`'s dtype).
+pub const KW_ONLY: Roles = Roles(1 << 20);
 
 /// The SSA-name roles a rename maps.
-pub const NAMES: u32 = DEFINES | READS | UPDATES | LOCAL;
-pub const DEFINING: u32 = DEFINES | UPDATES;
-pub const READING: u32 = READS | UPDATES;
-pub const BUFFERS: u32 = BUFFER_READ | BUFFER_WRITE;
-pub const CARRIED: u32 = STMTS | TERM;
+pub const NAMES: Roles = DEFINES.or(READS).or(UPDATES).or(LOCAL);
+pub const DEFINING: Roles = DEFINES.or(UPDATES);
+pub const READING: Roles = READS.or(UPDATES);
+pub const BUFFERS: Roles = BUFFER_READ.or(BUFFER_WRITE);
+pub const CARRIED: Roles = STMTS.or(TERM);
 
-/// Kind flags.
-pub const PURE: u32 = 1;
-pub const SIDE_EFFECTS: u32 = 2;
-pub const DEPS_DEEP: u32 = 4;
+/// What a kind is as a whole, as a set of flags.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+pub struct KindFlags(u32);
+
+impl KindFlags {
+    pub const NONE: KindFlags = KindFlags(0);
+
+    pub const fn or(self, other: KindFlags) -> KindFlags {
+        KindFlags(self.0 | other.0)
+    }
+
+    pub const fn contains(self, other: KindFlags) -> bool {
+        self.0 & other.0 != 0
+    }
+}
+
+pub const PURE: KindFlags = KindFlags(1);
+pub const SIDE_EFFECTS: KindFlags = KindFlags(2);
+pub const DEPS_DEEP: KindFlags = KindFlags(4);
 
 /// Every statement kind and record, declared once. `$callback` receives the list and generates from it.
 #[macro_export]
@@ -129,7 +168,7 @@ macro_rules! with_kinds {
                 /// the wrapping reduce `Loop`) and propagated by every rewrite that renames axes via Sigma. Used by the escape-
                 /// analysis helper to derive cross-thread cooperativity (`Accum.axes ∩ enclosing ThreadTile.axes`); empty tuple =
                 /// legacy/handwritten path with no reduction-axis info.
-                shared Accum {0} {
+                shared Accum {} {
                     name: Name [DEFINES],
                     value: Name [READS],
                     op: Op [] = Op::new("add"),
@@ -147,7 +186,7 @@ macro_rules! with_kinds {
                 /// the loops over the cells, which is what lets a step read OTHER cells of its own state (a delta rule's `k @ S`)
                 /// through :class:`Pre`; a scalar `Accum` lives inside the cell loops and cannot. One statement defines a state;
                 /// a cell it skips keeps its value.
-                shared Carry {0} {
+                shared Carry {} {
                     name: Name [DEFINES],
                     value: Name [READS],
                     index: Exprs [EXPRESSION],
@@ -176,7 +215,7 @@ macro_rules! with_kinds {
                 /// identity as an SSA name to select, so the masked ILP copy (`lowering/kernel/_factor`) and the compute fill's K
                 /// mask (`lowering/kernel/_atom._k_masked`) each bind one. `identity` is the neutral element (one scalar — 0 / 1
                 /// / -inf), held directly.
-                shared Init {0} {
+                shared Init {} {
                     name: Name [DEFINES],
                     identity: Float [],
                     dtype: DType [KW_ONLY],
@@ -264,7 +303,7 @@ macro_rules! with_kinds {
                 /// The loop carries NO algebra — the fold's ⊕ lives on the :class:`~emmy.compiler.ir.pure.fold.Fold` node's
                 /// stored `combine`, and the dissolved fold `Accum`\ s in the body are the loop-level spelling; a loop folds iff
                 /// its body carries one.
-                shared Loop {0} {
+                shared Loop {} {
                     axis: AxisRef [AXIS],
                     body: Body [BODY],
                     unroll: bool [] = false,
@@ -281,7 +320,7 @@ macro_rules! with_kinds {
                 /// analysis-visible range; `end` must never exceed it.
                 ///
                 /// Reduction detection mirrors `Loop`: a `StridedLoop` is a reduce-loop iff its body contains an `Accum`.
-                shared StridedLoop {0} {
+                shared StridedLoop {} {
                     axis: AxisRef [AXIS],
                     start: Expression [EXPRESSION],
                     step: NumOr<Expression> [EXPRESSION],
@@ -302,7 +341,7 @@ macro_rules! with_kinds {
                 /// `deps` are the SSA names referenced inside `cond` — the splicer / dataflow analyses need them to thread the
                 /// predicate's reads through. Names referenced inside `body` / `else_body` are the body stmts' own deps; the
                 /// recursive walker picks them up.
-                shared Cond {0} {
+                shared Cond {} {
                     cond: Expression [EXPRESSION | READS],
                     body: Body [BODY],
                     else_body: Body [BODY] = Body::empty(),
@@ -325,7 +364,7 @@ macro_rules! with_kinds {
                 /// `align` is an optional explicit byte alignment. TMA destinations (`cp.async.bulk.tensor`) require 16-byte
                 /// aligned smem; the materializer sets `align=16` on TMA-target slabs. Default 0 means "no explicit alignment" —
                 /// falls back to the dtype's natural alignment.
-                kernel Smem {0} {
+                kernel Smem {} {
                     name: Name [LOCAL_BUFFER],
                     extents: Ints [],
                     dtype: Name [] = Name::from("float"),
@@ -345,7 +384,7 @@ macro_rules! with_kinds {
                 /// threads execute the sync — `__syncthreads()` would be CUDA UB because the enclosing `if (warp < P)` condition
                 /// diverges across warps. The count must equal the number of threads that actually arrive at this barrier in
                 /// flight.
-                kernel Sync {0} {
+                kernel Sync {} {
                     barrier_id: i64 [] = 0,
                     count: Option<i64> [] = None,
                     warp: bool [] = false,
@@ -379,7 +418,7 @@ macro_rules! with_kinds {
                 /// an aux thread wraps onto the CTA's first cells — its BLOCK-axis vars (functions of `blockIdx` alone) are
                 /// correct (the producer fill needs the CTA tile origin), its unit/lane vars alias a compute cell and are never
                 /// read (the producer branch guards on the raw `threadIdx.x`, and the store side is guarded to compute threads).
-                kernel Tile {0} {
+                kernel Tile {} {
                     axes: Axes [AXIS],
                     body: Body [BODY],
                     block_threads: Option<i64> [] = None,
@@ -403,7 +442,7 @@ macro_rules! with_kinds {
                 /// Renders to inline PTX. The asm reads the smem address via `cvta.to.shared.u32` and the global pointer as a
                 /// 64-bit value; indices flatten via `render_index` against the buffer's declared shape (same as `Load` /
                 /// `Write`).
-                kernel CpAsyncCopy {0} {
+                kernel CpAsyncCopy {} {
                     smem: Name [],
                     smem_index: Exprs [EXPRESSION],
                     src: Name [BUFFER_READ],
@@ -416,10 +455,10 @@ macro_rules! with_kinds {
                 }
                 /// `cp.async.commit_group;` — finalize the preceding cp.async copies issued by this thread into a commit group.
                 /// Pairs with `CpAsyncWait` to wait for that group to drain.
-                kernel CpAsyncCommit {0} {}
+                kernel CpAsyncCommit {} {}
                 /// `cp.async.wait_group N;` — block this thread until ≤ N cp.async groups remain in flight. `group=0` waits for
                 /// everything (synchronous style); larger values stagger waits for software pipelining.
-                kernel CpAsyncWait {0} {
+                kernel CpAsyncWait {} {
                     group: i64 [] = 0,
                 }
                 /// Host-built `CUtensorMap` descriptor for a TMA box copy.
@@ -429,7 +468,7 @@ macro_rules! with_kinds {
                 /// descriptor as a `__grid_constant__` kernel arg. `name` matches the parameter name referenced by sibling
                 /// `TmaLoad` stmts. `src_buf` names the global buffer the descriptor addresses (used by the kernel-arg pipeline
                 /// to add `src_buf` to the parameter list).
-                kernel TmaDescriptor {0} {
+                kernel TmaDescriptor {} {
                     name: Name [],
                     src_buf: Name [BUFFER_READ],
                     src_shape: Ints [],
@@ -443,7 +482,7 @@ macro_rules! with_kinds {
                 /// come from the staging Statement's `origin` (CTA-uniform); destination is the dynamic-phase smem slab. Pairs
                 /// with `MbarrierArriveExpectTx` (issued immediately before) and `MbarrierWait` (issued by every consumer
                 /// thread).
-                kernel TmaLoad {0} {
+                kernel TmaLoad {} {
                     smem: Name [],
                     smem_index: Exprs [EXPRESSION],
                     desc: Name [],
@@ -456,14 +495,14 @@ macro_rules! with_kinds {
                 /// With `slot=None`: initializes a scalar mbarrier (single-slot path). With `slot=Expression`: initializes one
                 /// element of a per-slot mbarrier array. The materializer emits one `MbarrierInit` per literal slot index in the
                 /// buffer count, hoisted to the kernel prologue inside `Cond(threadIdx.x == 0, [...]) + Sync()`.
-                kernel MbarrierInit {0} {
+                kernel MbarrierInit {} {
                     mbar: Name [],
                     count: i64 [] = 1,
                     slot: Option<Expression> [EXPRESSION] = None,
                 }
                 /// `mbarrier.arrive.expect_tx.shared.b64` — declare the expected transaction byte count for the in-flight TMA
                 /// copy on this barrier. With per-slot mbarrier arrays, `slot` selects the ring buffer slot.
-                kernel MbarrierArriveExpectTx {0} {
+                kernel MbarrierArriveExpectTx {} {
                     mbar: Name [],
                     bytes_: i64 [],
                     slot: Option<Expression> [EXPRESSION] = None,
@@ -471,7 +510,7 @@ macro_rules! with_kinds {
                 /// `mbarrier.arrive.shared.b64` — simple arrive (no transaction-byte count). Used by warp-specialized consumer
                 /// warps to signal "slot empty" so the producer can refill it on the next ring iteration. The producer side uses
                 /// `MbarrierArriveExpectTx` instead (which declares the incoming TMA byte count).
-                kernel MbarrierArrive {0} {
+                kernel MbarrierArrive {} {
                     mbar: Name [],
                     slot: Option<Expression> [EXPRESSION] = None,
                 }
@@ -482,14 +521,14 @@ macro_rules! with_kinds {
                 ///
                 /// Requires sm_90+. On older targets NVCC rejects the instruction at compile time — only a warp-specialized
                 /// materialization emits this Statement, and that path is already TMA-gated to sm_90+ anyway.
-                kernel SetMaxNReg {0} {
+                kernel SetMaxNReg {} {
                     count: i64 [],
                     direction: Name [],
                 }
                 /// `mbarrier.try_wait.parity.shared.b64` — block until the barrier's parity flips for `phase`. Replaces
                 /// `CpAsyncWait + Sync` for TMA transports — mbarrier arrival already provides CTA-wide visibility. `slot`
                 /// selects the ring buffer slot when the mbarrier is an array.
-                kernel MbarrierWait {0} {
+                kernel MbarrierWait {} {
                     mbar: Name [],
                     phase: Expression [EXPRESSION],
                     slot: Option<Expression> [EXPRESSION] = None,
@@ -508,7 +547,7 @@ macro_rules! with_kinds {
                 /// Named-barrier support: `barrier_id > 0` routes the per-iter sync to `bar.sync <id>, <count>` instead of
                 /// `__syncthreads()` — required inside a warp-specialized consumer branch (a __syncthreads on a warp-divergent
                 /// cond is UB).
-                kernel TreeHalve {0} {
+                kernel TreeHalve {} {
                     bufs: Names [],
                     state: Names [READS],
                     state_b: Names [LOCAL],
@@ -541,7 +580,7 @@ macro_rules! with_kinds {
                 /// reduce has no data-dependent divergence and the only enclosing guard is warp-uniform), so `__activemask()`
                 /// returns exactly the participating lanes — correct for a partial warp, a full warp, AND a non-warp-multiple
                 /// block's partial final warp (where no single static literal mask is correct per warp).
-                kernel WarpShuffle {0} {
+                kernel WarpShuffle {} {
                     state: Names [READS],
                     state_b: Names [LOCAL],
                     combine_states: Stmts [STMTS],
@@ -550,7 +589,7 @@ macro_rules! with_kinds {
                     prefix: bool [] = false,
                 }
                 /// Broadcast the last lane's state within each aligned lane group, in place.
-                kernel WarpBroadcast {0} {
+                kernel WarpBroadcast {} {
                     state: Names [READS],
                     length: i64 [],
                 }
@@ -579,7 +618,7 @@ macro_rules! with_kinds {
                 /// `float out[4]` decl — `out` must be a FRAG arg).
                 ///
                 /// `layout` names the atom's C-fragment geometry (:func:`frag_layout`).
-                kernel FragmentApply {0} {
+                kernel FragmentApply {} {
                     out: Name [DEFINES],
                     op: Op [],
                     args: FragmentArgs [RECORD],
@@ -601,7 +640,7 @@ macro_rules! with_kinds {
                 /// this folds WITHIN one warp's fragments along the atom's N direction, keyed on the PTX C layout. It is why the
                 /// tier requires the chunk to sit inside one warp column (`n_units == 1` on the score): a reduction that crossed
                 /// warps would need smem.
-                kernel FragmentRowReduce {0} {
+                kernel FragmentRowReduce {} {
                     top: Name [DEFINES],
                     bot: Name [DEFINES],
                     frags: Names [READS],
@@ -624,7 +663,7 @@ macro_rules! with_kinds {
                 /// name[n_regs]` form, byte-identical. A family of SCALAR registers (`nregs == 0` — the fp4 block-scale
                 /// fragments) arrays to one dimension, `unsigned name[count]`, because its member is the register itself and not
                 /// an array of them.
-                kernel RegFragment {0} {
+                kernel RegFragment {} {
                     name: Name [DEFINES | LOCAL_BUFFER],
                     role: Name [],
                     shape: Shape3 [],
@@ -648,7 +687,7 @@ macro_rules! with_kinds {
                 /// Distinct from :class:`LdmatrixLoad`'s `scale_buffer`, which is the OTHER way to spend a block scale: there the
                 /// k16 drain folds it into a 16-bit fragment and no scale reaches the instruction. These two never appear on one
                 /// operand.
-                kernel BlockScaleLoad {0} {
+                kernel BlockScaleLoad {} {
                     frag: Name [DEFINES],
                     src_buffer: Name [BUFFER_READ],
                     src_index: Exprs [EXPRESSION],
@@ -676,7 +715,7 @@ macro_rules! with_kinds {
                 /// helper, which clamps the lane coordinate to the `bound - base` in-range elements — the gmem-direct analogue of
                 /// the staged slab-fill clamp, so an unstaged masked cell still lowers instead of reading past the runtime-sized
                 /// buffer. Clamped lanes read duplicates; their stores are masked by the RegStore guards.
-                kernel LdmatrixLoad {0} {
+                kernel LdmatrixLoad {} {
                     frag: Name [UPDATES],
                     src_buffer: Name [BUFFER_READ],
                     src_index: Exprs [EXPRESSION],
@@ -705,7 +744,7 @@ macro_rules! with_kinds {
                 /// picks the matching `emmy_mma_…` wrapper. `c_dtype` is the accumulator element type: `"f32"` (the default —
                 /// `float c[4]`) or `"f16"` (the f16-accumulate atom — packed `unsigned c[2]`, full HMMA rate on the consumer
                 /// dies; the lowering pairs it with a periodic :class:`FragmentPromote` into an f32 shadow fragment).
-                kernel MmaSyncPtx {0} {
+                kernel MmaSyncPtx {} {
                     c_frag: Name [UPDATES],
                     a_frag: Name [READS],
                     b_frag: Name [READS],
@@ -723,7 +762,7 @@ macro_rules! with_kinds {
                 /// is the f32 shadow the store / epilogue reads; `src` is the packed f16 mma accumulator. The fragment layout
                 /// selects their register counts and, on Volta, the warp shuffles that align their different lane maps. Both are
                 /// defined here (`src` is rezeroed), so reorderings keep the promote pinned between the mma chain and the store.
-                kernel FragmentPromote {0} {
+                kernel FragmentPromote {} {
                     dst: Name [UPDATES],
                     src: Name [UPDATES],
                     fragment_layout: Name [] = Name::from("m16n8k16"),
@@ -735,7 +774,7 @@ macro_rules! with_kinds {
                 /// The emitter gates on the atom's C→A/C→B repack capabilities at schedule time. The m16n8k16 f16 B layout takes
                 /// one C fragment and exchanges its packed column pairs between lanes. Every lane of the warp must participate in
                 /// that exchange.
-                kernel FragmentRepack {0} {
+                kernel FragmentRepack {} {
                     frag: Name [DEFINES],
                     srcs: Names [READS],
                     ab_dtype: Name [] = Name::from("f16"),
@@ -748,7 +787,7 @@ macro_rules! with_kinds {
                 /// operand: the tensor core reads the slab itself, so no per-lane registers are filled. `smem_index` (elements
                 /// into `smem`) selects the ring slot and the k step; `lbo_bytes` / `sbo_bytes` are the leading / stride byte
                 /// offsets between core matrices, which the lowering derives from the slab's layout.
-                kernel WgmmaDescriptor {0} {
+                kernel WgmmaDescriptor {} {
                     name: Name [DEFINES],
                     smem: Name [BUFFER_READ],
                     smem_index: Option<Expression> [EXPRESSION],
@@ -769,7 +808,7 @@ macro_rules! with_kinds {
                 ///
                 /// The discipline around the cells (:class:`WgmmaFence`, :class:`WgmmaCommit`, :class:`WgmmaWait`) is the
                 /// lowering's: nothing here orders the accumulator read.
-                kernel WgmmaMma {0} {
+                kernel WgmmaMma {} {
                     c_frags: Names [UPDATES],
                     b_desc: Name [READS],
                     shape: Shape3 [],
@@ -783,15 +822,15 @@ macro_rules! with_kinds {
                 /// `wgmma.fence.sync.aligned` — orders the group's earlier register and shared-memory accesses before the
                 /// `wgmma.mma_async` that follows. The lowering issues it before the first cell after anything else touched the
                 /// accumulator (the epilogue, the softmax rescale).
-                kernel WgmmaFence {0} {}
+                kernel WgmmaFence {} {}
                 /// `wgmma.commit_group.sync.aligned` — closes the `wgmma.mma_async` cells issued since the last commit into one
                 /// group for :class:`WgmmaWait` to count. The lowering commits after a chunk's cells.
-                kernel WgmmaCommit {0} {}
+                kernel WgmmaCommit {} {}
                 /// `wgmma.wait_group.sync.aligned N` — block until at most `group` committed groups are still in flight. Carries
                 /// no deps: the accumulator it completes is the `c_frags` of the cells before it, and the lowering places the
                 /// wait before any read of those fragments and before the slot's release on the "empty" mbarrier. The redundant-
                 /// sync and ldmatrix-pairing passes treat it as a barrier.
-                kernel WgmmaWait {0} {
+                kernel WgmmaWait {} {
                     group: i64 [] = 0,
                 }
                 /// Store an mma.sync f32 accumulator array to the output buffer with a per-lane epilogue downconvert.
@@ -835,7 +874,7 @@ macro_rules! with_kinds {
                 /// finalize on the mma tier: every split partition's C fragment adds into the (per-launch zero-init'd) output.
                 /// f16 / bf16 keep the vectorized row pair (native packed-pair `atomicAdd`); an f32 destination has no packed
                 /// atomic below sm_90, so it drops to per-element scalar `atomicAdd`\ s.
-                kernel RegStore {0} {
+                kernel RegStore {} {
                     dst_buffer: Name [BUFFER_WRITE],
                     dst_index: Exprs [EXPRESSION],
                     frag: Name [READS],
@@ -892,14 +931,14 @@ pub enum Layer {
 #[derive(Clone, Copy, Debug)]
 pub struct FieldInfo {
     pub name: &'static str,
-    pub roles: u32,
+    pub roles: Roles,
     pub has_default: bool,
 }
 
 impl FieldInfo {
     /// A block field: spelled as statements under the header, not on it.
     pub fn is_block(&self) -> bool {
-        self.roles & (BODY | TERM | STMTS) != 0
+        self.roles.contains_any(BODY.or(TERM).or(STMTS))
     }
 }
 
@@ -931,19 +970,19 @@ macro_rules! define_kinds {
             impl $Kind {
                 pub const NAME: &'static str = stringify!($Kind);
                 pub const LAYER: Layer = define_kinds!(@layer $layer);
-                pub const FLAGS: u32 = 0 $(| $flag)*;
+                pub const FLAGS: KindFlags = KindFlags::NONE $(.or($flag))*;
                 pub const FIELDS: &'static [FieldInfo] = &[
-                    $( FieldInfo { name: stringify!($field), roles: 0 $(| $role)*, has_default: $crate::__has_default!($($default)?) }, )*
+                    $( FieldInfo { name: stringify!($field), roles: Roles::NONE $(.or($role))*, has_default: $crate::__has_default!($($default)?) }, )*
                 ];
 
                 /// Visit every role-playing value of this statement, in field order.
                 pub fn visit(&self, visitor: &mut dyn $crate::kinds::field::Visitor) {
-                    $( <$ty as $crate::kinds::field::Field>::visit(&self.$field, 0 $(| $role)*, visitor); )*
+                    $( <$ty as $crate::kinds::field::Field>::visit(&self.$field, Roles::NONE $(.or($role))*, visitor); )*
                 }
 
                 /// This statement with every role-playing value passed through `rewriter`.
                 pub fn rewrite(&self, rewriter: &mut dyn $crate::kinds::field::Rewriter) -> $Kind {
-                    $Kind { $( $field: <$ty as $crate::kinds::field::Field>::rewrite(&self.$field, 0 $(| $role)*, rewriter), )* }
+                    $Kind { $( $field: <$ty as $crate::kinds::field::Field>::rewrite(&self.$field, Roles::NONE $(.or($role))*, rewriter), )* }
                 }
 
                 /// Whether `other` holds the same values, field by field, by identity where a field is shared.
@@ -1014,15 +1053,15 @@ macro_rules! define_kinds {
             impl $Record {
                 pub const NAME: &'static str = stringify!($Record);
                 pub const FIELDS: &'static [FieldInfo] = &[
-                    $( FieldInfo { name: stringify!($rfield), roles: 0 $(| $rrole)*, has_default: $crate::__has_default!($($rdefault)?) }, )*
+                    $( FieldInfo { name: stringify!($rfield), roles: Roles::NONE $(.or($rrole))*, has_default: $crate::__has_default!($($rdefault)?) }, )*
                 ];
 
                 pub fn visit(&self, visitor: &mut dyn $crate::kinds::field::Visitor) {
-                    $( <$rty as $crate::kinds::field::Field>::visit(&self.$rfield, 0 $(| $rrole)*, visitor); )*
+                    $( <$rty as $crate::kinds::field::Field>::visit(&self.$rfield, Roles::NONE $(.or($rrole))*, visitor); )*
                 }
 
                 pub fn rewrite(&self, rewriter: &mut dyn $crate::kinds::field::Rewriter) -> $Record {
-                    $Record { $( $rfield: <$rty as $crate::kinds::field::Field>::rewrite(&self.$rfield, 0 $(| $rrole)*, rewriter), )* }
+                    $Record { $( $rfield: <$rty as $crate::kinds::field::Field>::rewrite(&self.$rfield, Roles::NONE $(.or($rrole))*, rewriter), )* }
                 }
 
                 pub fn same(&self, other: &$Record) -> bool {
@@ -1125,7 +1164,7 @@ macro_rules! define_kinds {
                 self.kind().layer()
             }
 
-            pub fn flags(&self) -> u32 {
+            pub fn flags(&self) -> KindFlags {
                 match self { $( Statement::$Kind(_) => $Kind::FLAGS, )* }
             }
 

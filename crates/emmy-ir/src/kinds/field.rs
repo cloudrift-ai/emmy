@@ -11,8 +11,8 @@ use crate::kinds::axis::Axis;
 use crate::kinds::axis::spell_axis;
 use crate::kinds::elementwise::Op;
 use crate::kinds::{
-    AXIS, AXIS_NAME, BODY, BUFFERS, EXPRESSION, FragmentArg, NAMES, STMTS, SelectBranch, Statement,
-    TERM,
+    AXIS, AXIS_NAME, BODY, BUFFERS, EXPRESSION, FragmentArg, NAMES, Roles, STMTS, SelectBranch,
+    Statement, TERM,
 };
 use crate::{Error, Name, Result};
 
@@ -114,28 +114,28 @@ impl std::ops::Deref for SubroutineRef {
 
 /// Reads every role-playing value of a statement, told the roles of the field it sits in.
 pub trait Visitor {
-    fn name(&mut self, _roles: u32, _name: &Name) {}
-    fn expression(&mut self, _roles: u32, _expression: &Expression) {}
-    fn axis(&mut self, _roles: u32, _axis: &AxisRef) {}
-    fn body(&mut self, _roles: u32, _body: &Body) {}
-    fn carried(&mut self, _roles: u32, _stmt: &Arc<Statement>) {}
+    fn name(&mut self, _roles: Roles, _name: &Name) {}
+    fn expression(&mut self, _roles: Roles, _expression: &Expression) {}
+    fn axis(&mut self, _roles: Roles, _axis: &AxisRef) {}
+    fn body(&mut self, _roles: Roles, _body: &Body) {}
+    fn carried(&mut self, _roles: Roles, _stmt: &Arc<Statement>) {}
 }
 
 /// Rebuilds a statement value by value; the default keeps each.
 pub trait Rewriter {
-    fn name(&mut self, _roles: u32, name: &Name) -> Name {
+    fn name(&mut self, _roles: Roles, name: &Name) -> Name {
         name.clone()
     }
-    fn expression(&mut self, _roles: u32, expression: &Expression) -> Expression {
+    fn expression(&mut self, _roles: Roles, expression: &Expression) -> Expression {
         expression.clone()
     }
-    fn axis(&mut self, _roles: u32, axis: &AxisRef) -> AxisRef {
+    fn axis(&mut self, _roles: Roles, axis: &AxisRef) -> AxisRef {
         axis.clone()
     }
-    fn body(&mut self, _roles: u32, body: &Body) -> Body {
+    fn body(&mut self, _roles: Roles, body: &Body) -> Body {
         body.clone()
     }
-    fn carried(&mut self, _roles: u32, stmt: &Arc<Statement>) -> Arc<Statement> {
+    fn carried(&mut self, _roles: Roles, stmt: &Arc<Statement>) -> Arc<Statement> {
         stmt.clone()
     }
 }
@@ -213,8 +213,8 @@ impl Values {
 /// back by its type.
 pub trait Field: Clone + PartialEq + Eq + Hash + std::fmt::Debug + Sized + 'static {
     fn ty() -> Ty;
-    fn visit(&self, roles: u32, visitor: &mut dyn Visitor);
-    fn rewrite(&self, roles: u32, rewriter: &mut dyn Rewriter) -> Self;
+    fn visit(&self, roles: Roles, visitor: &mut dyn Visitor);
+    fn rewrite(&self, roles: Roles, rewriter: &mut dyn Rewriter) -> Self;
     /// The same value, by identity where the value is shared: what tells a rebuild that changed nothing.
     fn same(&self, other: &Self) -> bool {
         self == other
@@ -252,7 +252,7 @@ fn seq_from_value<T: Field>(value: Value) -> Result<Vec<T>> {
     }
 }
 
-fn rewrite_seq<T: Field>(items: &Arc<[T]>, roles: u32, rewriter: &mut dyn Rewriter) -> Arc<[T]> {
+fn rewrite_seq<T: Field>(items: &Arc<[T]>, roles: Roles, rewriter: &mut dyn Rewriter) -> Arc<[T]> {
     let out: Vec<T> = items
         .iter()
         .map(|item| item.rewrite(roles, rewriter))
@@ -268,13 +268,13 @@ impl Field for Name {
     fn ty() -> Ty {
         Ty::Name
     }
-    fn visit(&self, roles: u32, visitor: &mut dyn Visitor) {
-        if roles != 0 {
+    fn visit(&self, roles: Roles, visitor: &mut dyn Visitor) {
+        if roles != Roles::NONE {
             visitor.name(roles, self);
         }
     }
-    fn rewrite(&self, roles: u32, rewriter: &mut dyn Rewriter) -> Self {
-        if roles & (NAMES | BUFFERS | AXIS_NAME) != 0 {
+    fn rewrite(&self, roles: Roles, rewriter: &mut dyn Rewriter) -> Self {
+        if roles.contains_any(NAMES.or(BUFFERS).or(AXIS_NAME)) {
             rewriter.name(roles, self)
         } else {
             self.clone()
@@ -299,12 +299,12 @@ impl<T: Field> Field for Arc<[T]> {
     fn ty() -> Ty {
         Ty::Seq(Box::new(T::ty()))
     }
-    fn visit(&self, roles: u32, visitor: &mut dyn Visitor) {
+    fn visit(&self, roles: Roles, visitor: &mut dyn Visitor) {
         for item in self.iter() {
             item.visit(roles, visitor);
         }
     }
-    fn rewrite(&self, roles: u32, rewriter: &mut dyn Rewriter) -> Self {
+    fn rewrite(&self, roles: Roles, rewriter: &mut dyn Rewriter) -> Self {
         rewrite_seq(self, roles, rewriter)
     }
     fn same(&self, other: &Self) -> bool {
@@ -329,12 +329,12 @@ impl<T: Field> Field for Option<T> {
     fn ty() -> Ty {
         Ty::Opt(Box::new(T::ty()))
     }
-    fn visit(&self, roles: u32, visitor: &mut dyn Visitor) {
+    fn visit(&self, roles: Roles, visitor: &mut dyn Visitor) {
         if let Some(value) = self {
             value.visit(roles, visitor);
         }
     }
-    fn rewrite(&self, roles: u32, rewriter: &mut dyn Rewriter) -> Self {
+    fn rewrite(&self, roles: Roles, rewriter: &mut dyn Rewriter) -> Self {
         self.as_ref().map(|value| value.rewrite(roles, rewriter))
     }
     fn same(&self, other: &Self) -> bool {
@@ -371,11 +371,11 @@ impl<A: Field, B: Field> Field for (A, B) {
     fn ty() -> Ty {
         Ty::Tuple(vec![A::ty(), B::ty()])
     }
-    fn visit(&self, roles: u32, visitor: &mut dyn Visitor) {
+    fn visit(&self, roles: Roles, visitor: &mut dyn Visitor) {
         self.0.visit(roles, visitor);
         self.1.visit(roles, visitor);
     }
-    fn rewrite(&self, roles: u32, rewriter: &mut dyn Rewriter) -> Self {
+    fn rewrite(&self, roles: Roles, rewriter: &mut dyn Rewriter) -> Self {
         (
             self.0.rewrite(roles, rewriter),
             self.1.rewrite(roles, rewriter),
@@ -409,13 +409,13 @@ impl Field for Expression {
     fn ty() -> Ty {
         Ty::Expr
     }
-    fn visit(&self, roles: u32, visitor: &mut dyn Visitor) {
-        if roles != 0 {
+    fn visit(&self, roles: Roles, visitor: &mut dyn Visitor) {
+        if roles != Roles::NONE {
             visitor.expression(roles, self);
         }
     }
-    fn rewrite(&self, roles: u32, rewriter: &mut dyn Rewriter) -> Self {
-        if roles & EXPRESSION != 0 {
+    fn rewrite(&self, roles: Roles, rewriter: &mut dyn Rewriter) -> Self {
+        if roles.contains_any(EXPRESSION) {
             rewriter.expression(roles, self)
         } else {
             self.clone()
@@ -440,13 +440,13 @@ impl Field for AxisRef {
     fn ty() -> Ty {
         Ty::Axis
     }
-    fn visit(&self, roles: u32, visitor: &mut dyn Visitor) {
-        if roles & AXIS != 0 {
+    fn visit(&self, roles: Roles, visitor: &mut dyn Visitor) {
+        if roles.contains_any(AXIS) {
             visitor.axis(roles, self);
         }
     }
-    fn rewrite(&self, roles: u32, rewriter: &mut dyn Rewriter) -> Self {
-        if roles & AXIS != 0 {
+    fn rewrite(&self, roles: Roles, rewriter: &mut dyn Rewriter) -> Self {
+        if roles.contains_any(AXIS) {
             rewriter.axis(roles, self)
         } else {
             self.clone()
@@ -471,13 +471,13 @@ impl Field for Body {
     fn ty() -> Ty {
         Ty::Block
     }
-    fn visit(&self, roles: u32, visitor: &mut dyn Visitor) {
-        if roles & (BODY | TERM) != 0 {
+    fn visit(&self, roles: Roles, visitor: &mut dyn Visitor) {
+        if roles.contains_any(BODY.or(TERM)) {
             visitor.body(roles, self);
         }
     }
-    fn rewrite(&self, roles: u32, rewriter: &mut dyn Rewriter) -> Self {
-        if roles & (BODY | TERM) != 0 {
+    fn rewrite(&self, roles: Roles, rewriter: &mut dyn Rewriter) -> Self {
+        if roles.contains_any(BODY.or(TERM)) {
             rewriter.body(roles, self)
         } else {
             self.clone()
@@ -510,15 +510,15 @@ impl Field for Stmts {
     fn ty() -> Ty {
         Ty::Block
     }
-    fn visit(&self, roles: u32, visitor: &mut dyn Visitor) {
-        if roles & STMTS != 0 {
+    fn visit(&self, roles: Roles, visitor: &mut dyn Visitor) {
+        if roles.contains_any(STMTS) {
             for stmt in self.iter() {
                 visitor.carried(roles, stmt);
             }
         }
     }
-    fn rewrite(&self, roles: u32, rewriter: &mut dyn Rewriter) -> Self {
-        if roles & STMTS == 0 {
+    fn rewrite(&self, roles: Roles, rewriter: &mut dyn Rewriter) -> Self {
+        if !roles.contains_any(STMTS) {
             return self.clone();
         }
         let out: Vec<Arc<Statement>> = self
@@ -569,10 +569,10 @@ macro_rules! record_field {
             fn ty() -> Ty {
                 Ty::Record($Record::NAME)
             }
-            fn visit(&self, _roles: u32, visitor: &mut dyn Visitor) {
+            fn visit(&self, _roles: Roles, visitor: &mut dyn Visitor) {
                 $Record::visit(self, visitor);
             }
-            fn rewrite(&self, _roles: u32, rewriter: &mut dyn Rewriter) -> Self {
+            fn rewrite(&self, _roles: Roles, rewriter: &mut dyn Rewriter) -> Self {
                 $Record::rewrite(self, rewriter)
             }
             fn same(&self, other: &Self) -> bool {
@@ -616,8 +616,8 @@ macro_rules! plain_field {
             fn ty() -> Ty {
                 $tag
             }
-            fn visit(&self, _roles: u32, _visitor: &mut dyn Visitor) {}
-            fn rewrite(&self, _roles: u32, _rewriter: &mut dyn Rewriter) -> Self {
+            fn visit(&self, _roles: Roles, _visitor: &mut dyn Visitor) {}
+            fn rewrite(&self, _roles: Roles, _rewriter: &mut dyn Rewriter) -> Self {
                 self.clone()
             }
             fn spell(&self, $out: &mut String) -> Result<()> {
@@ -712,8 +712,8 @@ impl Field for SubroutineRef {
     fn ty() -> Ty {
         Ty::Subroutine
     }
-    fn visit(&self, _roles: u32, _visitor: &mut dyn Visitor) {}
-    fn rewrite(&self, _roles: u32, _rewriter: &mut dyn Rewriter) -> Self {
+    fn visit(&self, _roles: Roles, _visitor: &mut dyn Visitor) {}
+    fn rewrite(&self, _roles: Roles, _rewriter: &mut dyn Rewriter) -> Self {
         self.clone()
     }
     fn spell(&self, _out: &mut String) -> Result<()> {
@@ -730,12 +730,12 @@ impl<T: Field> Field for NumOr<T> {
     fn ty() -> Ty {
         Ty::NumOr(Box::new(T::ty()))
     }
-    fn visit(&self, roles: u32, visitor: &mut dyn Visitor) {
+    fn visit(&self, roles: Roles, visitor: &mut dyn Visitor) {
         if let NumOr::Value(value) = self {
             value.visit(roles, visitor);
         }
     }
-    fn rewrite(&self, roles: u32, rewriter: &mut dyn Rewriter) -> Self {
+    fn rewrite(&self, roles: Roles, rewriter: &mut dyn Rewriter) -> Self {
         match self {
             NumOr::Num(_) => self.clone(),
             NumOr::Value(value) => NumOr::Value(value.rewrite(roles, rewriter)),

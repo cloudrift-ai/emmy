@@ -178,7 +178,7 @@ impl PyStatement {
     fn nested<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyTuple>> {
         let mut items = Vec::new();
         for (index, field) in self.stmt.fields().iter().enumerate() {
-            if field.roles & emmy_ir::kinds::BODY != 0 {
+            if field.roles.contains_any(emmy_ir::kinds::BODY) {
                 items.push(self.field(py, index)?);
             }
         }
@@ -398,13 +398,17 @@ struct Arguments<'a, 'py> {
 
 impl<'py> Arguments<'_, 'py> {
     /// The argument for `field`, by keyword or by position, `None` when it was not given.
-    fn take(&mut self, field: &str, roles: u32) -> PyResult<Option<Bound<'py, PyAny>>> {
+    fn take(
+        &mut self,
+        field: &str,
+        roles: emmy_ir::kinds::Roles,
+    ) -> PyResult<Option<Bound<'py, PyAny>>> {
         if let Some(kwargs) = self.kwargs
             && let Some(value) = kwargs.get_item(field)?
         {
             return Ok(Some(value));
         }
-        if roles & emmy_ir::kinds::KW_ONLY != 0 {
+        if roles.contains_any(emmy_ir::kinds::KW_ONLY) {
             return Ok(None);
         }
         if self.positional < self.args.len() {
@@ -419,7 +423,7 @@ impl<'py> Arguments<'_, 'py> {
         let allowed = self
             .fields
             .iter()
-            .filter(|f| f.roles & emmy_ir::kinds::KW_ONLY == 0)
+            .filter(|f| !f.roles.contains_any(emmy_ir::kinds::KW_ONLY))
             .count();
         if self.args.len() > allowed {
             return Err(too_many(self.kind, allowed));
@@ -454,7 +458,7 @@ macro_rules! define_py_kinds {
                     let mut given = Arguments { kind: k::$Kind::NAME, fields: k::$Kind::FIELDS, args, kwargs, positional: 0 };
                     let mut held: Vec<Option<Py<PyAny>>> = Vec::with_capacity(k::$Kind::FIELDS.len());
                     $(
-                        let $field: $ty = match given.take(stringify!($field), 0 $(| k::$role)*)? {
+                        let $field: $ty = match given.take(stringify!($field), k::Roles::NONE $(.or(k::$role))*)? {
                             Some(value) => {
                                 let (value, kept) = <$ty as PyField>::from_py(&value)
                                     .map_err(|err| PyTypeError::new_err(format!("{}.{}: {}", stringify!($Kind), stringify!($field), err)))?;
@@ -532,13 +536,13 @@ macro_rules! define_py_kinds {
                 /// A pure value binding: a legal member of a stored term.
                 #[classattr]
                 fn pure() -> bool {
-                    emmy_ir::kinds::$Kind::FLAGS & emmy_ir::kinds::PURE != 0
+                    emmy_ir::kinds::$Kind::FLAGS.contains(emmy_ir::kinds::PURE)
                 }
 
                 /// `deps` already reports the whole subtree's reads.
                 #[classattr]
                 fn deps_deep() -> bool {
-                    emmy_ir::kinds::$Kind::FLAGS & emmy_ir::kinds::DEPS_DEEP != 0
+                    emmy_ir::kinds::$Kind::FLAGS.contains(emmy_ir::kinds::DEPS_DEEP)
                 }
 
                 $(
@@ -577,7 +581,7 @@ macro_rules! define_py_kinds {
                     let mut given = Arguments { kind: k::$Record::NAME, fields: k::$Record::FIELDS, args, kwargs, positional: 0 };
                     let mut held: Vec<Option<Py<PyAny>>> = Vec::new();
                     $(
-                        let $rfield: $rty = match given.take(stringify!($rfield), 0 $(| k::$rrole)*)? {
+                        let $rfield: $rty = match given.take(stringify!($rfield), k::Roles::NONE $(.or(k::$rrole))*)? {
                             Some(value) => {
                                 let (value, kept) = <$rty as PyField>::from_py(&value)
                                     .map_err(|err| PyTypeError::new_err(format!("{}.{}: {}", stringify!($Record), stringify!($rfield), err)))?;
