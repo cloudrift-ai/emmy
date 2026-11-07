@@ -1,15 +1,14 @@
 //! What a declared kind's fields are made of, and the one trait every field type implements: how it is visited and
 //! rewritten by role, spelled on a header and read back by its type.
 
-use std::any::Any;
 use std::collections::HashMap;
 use std::hash::{Hash, Hasher};
-use std::sync::{Arc, OnceLock};
+use std::sync::Arc;
 
-use crate::axis::Axis;
 use crate::body::Body;
-use crate::elementwise::Op;
 use crate::expr::{Expression, Num, float_repr, hash_f64};
+use crate::kinds::axis::Axis;
+use crate::kinds::elementwise::Op;
 use crate::kinds::{
     AXIS, AXIS_NAME, BODY, BUFFERS, EXPRESSION, FragmentArg, NAMES, STMTS, SelectBranch, Statement,
     TERM,
@@ -98,9 +97,6 @@ impl std::ops::Deref for SubroutineRef {
         &self.0
     }
 }
-
-/// A side slot the extension keeps per shared object (its Python wrappers), opaque to the crate.
-pub type Ext = OnceLock<Box<dyn Any + Send + Sync>>;
 
 // --- walks ----------------------------------------------------------------------------------------
 

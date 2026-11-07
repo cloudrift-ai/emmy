@@ -8,7 +8,7 @@ use std::sync::Arc;
 use emmy_ir::Name;
 use emmy_ir::body::Body;
 use emmy_ir::expr::Expression;
-use emmy_ir::field::{Rewriter, Visitor};
+use emmy_ir::kinds::field::{Rewriter, Visitor};
 use emmy_ir::kinds::{FieldInfo, Statement};
 use emmy_ir::protocol::{Rewrite, finished};
 use emmy_ir::text::{parse_statement, statement_text};
@@ -265,7 +265,10 @@ impl PyStatement {
             .map(sigma_from_py)
             .transpose()?
             .unwrap_or_default();
-        let mut pairs: Vec<(Arc<emmy_ir::axis::Axis>, Arc<emmy_ir::axis::Axis>)> = Vec::new();
+        let mut pairs: Vec<(
+            Arc<emmy_ir::kinds::axis::Axis>,
+            Arc<emmy_ir::kinds::axis::Axis>,
+        )> = Vec::new();
         if let Some(axes) = axes.filter(|a| !a.is_none()) {
             for pair in axes.try_iter()? {
                 let (old, new): (Bound<'py, PyAny>, Bound<'py, PyAny>) = pair?.extract()?;
@@ -273,7 +276,7 @@ impl PyStatement {
             }
         }
         let rename = |name: &str| names.get(name).cloned();
-        let axis_fn = |axis: &Arc<emmy_ir::axis::Axis>| {
+        let axis_fn = |axis: &Arc<emmy_ir::kinds::axis::Axis>| {
             pairs
                 .iter()
                 .find(|(old, _)| **old == **axis && old.window == axis.window)
@@ -715,8 +718,8 @@ mod generated {
     use super::*;
     use emmy_ir::Name;
     use emmy_ir::body::Body;
-    use emmy_ir::elementwise::Op;
-    use emmy_ir::field::{
+    use emmy_ir::kinds::elementwise::Op;
+    use emmy_ir::kinds::field::{
         Axes, AxisRef, Branches, DType, Exprs, Float, Floats, FragmentArgs, Int2, Ints, Names,
         NumOr, Ops, Shape3, Stmts, SubroutineRef,
     };
@@ -897,7 +900,7 @@ impl Carry {
 
 fn carries_dict<'py>(
     py: Python<'py>,
-    cells: Vec<(Name, Vec<Option<Arc<emmy_ir::axis::Axis>>>)>,
+    cells: Vec<(Name, Vec<Option<Arc<emmy_ir::kinds::axis::Axis>>>)>,
 ) -> PyResult<Bound<'py, PyDict>> {
     let out = PyDict::new(py);
     for (name, shape) in cells {

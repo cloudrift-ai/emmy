@@ -4,10 +4,14 @@
 
 use std::sync::Arc;
 
-pub mod axis;
-pub mod dtype;
-pub mod elementwise;
+pub mod body;
 pub mod expr;
+pub mod kinds;
+pub mod memo;
+pub mod normalize;
+pub mod numbering;
+pub mod protocol;
+pub mod text;
 
 /// A name: an SSA value, an axis, a buffer. Shared, so a rename that keeps a name copies a pointer.
 pub type Name = Arc<str>;
@@ -48,12 +52,3 @@ pub fn locked<T>(mutex: &std::sync::Mutex<T>) -> std::sync::MutexGuard<'_, T> {
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
 }
-pub mod body;
-pub mod field;
-pub mod identity;
-pub mod kinds;
-pub mod normalize;
-pub mod order;
-pub mod protocol;
-pub mod text;
-pub mod values;

@@ -7,23 +7,33 @@ beside it, `emmy-ir-py`, is the `emmy.emmy_ir` module those two Python packages 
 into the package like the runtime extension. Design: `ir/ARCHITECTURE.md` owns what a statement, a body and the normal
 form ARE; this file says how the crate holds them.
 
+## Layout
+
+The module tree follows the design, one module per concept: `expr/` (the tree and its text in `mod.rs`, the
+simplifier and affine form in `simplify.rs`, the reader in `parse.rs`), `kinds/` (the kind list and its macros in
+`mod.rs`, the `Field` trait in `field.rs`, axes, dtypes and the elementwise tables beside it), `body.rs`, `text.rs`,
+`protocol.rs`, `numbering/` (the value numbering and digest in `mod.rs`, the identity in `identity.rs`), `normalize/`
+(the driver and the helpers the steps share in `mod.rs`, the steps by what they do: `axes`, `fold`, `siblings`,
+`simplify`, `place`, `canonical`, and the dependency order in `order.rs`) and `memo.rs`, the one bounded memo both
+the normal form and the identity are kept in.
+
 ## Data
 
 - A name is an `Arc<str>`; a tuple of names, expressions or axes an `Arc<[…]>`; an expression an `Arc<Expr>`; a body an
   `Arc<BodyData>`. A rebuild that changes nothing returns the object it was given, so every walk tells a change by
   pointer and a Python wrapper can hand back the same object.
-- **Expressions** (`expr.rs`): eight kinds in one `enum Expr`, the printer and the reader (exact inverses, the text being
+- **Expressions** (`expr/`): eight kinds in one `enum Expr`, the printer and the reader (exact inverses, the text being
   the one wire and structural form), substitution, renaming, the simplifier under a `SimplifyCtx` of ranges and
   symbolic bounds, the range analysis, the affine form. A literal keeps Python's number model (`Num`: int, float or
   bool, equal by value) because a stored kernel's text spells it that way.
-- **Kinds** (`kinds.rs`): every kind is a struct declared once in the `with_kinds!` macro — its fields, each with a type,
+- **Kinds** (`kinds/mod.rs`): every kind is a struct declared once in the `with_kinds!` macro — its fields, each with a type,
   the roles it plays (`DEFINES`, `READS`, `EXPRESSION`, `AXIS`, `BODY`, `STMTS`, `TERM`, `RECORD`, …) and a default — and
   the Python extension generates its classes from the same list. `define_kinds!` turns the list into the structs, the
   `enum Statement` and, per kind, the role-driven walks (`visit`, `rewrite`, the header fields the text prints).
-- **Fields** (`field.rs`): one trait, `Field`, every field type implements: how it is visited and rewritten by role,
+- **Fields** (`kinds/field.rs`): one trait, `Field`, every field type implements: how it is visited and rewritten by role,
   spelled on a declared kind's header and read back by its `Ty`. A number where a name or an expression is expected
   (`NumOr<T>`) is plain data. A record (`SelectBranch`, `FragmentArg`) is a struct whose own fields play roles.
-- **Axes** (`axis.rs`): `Axis` (name, `Dim`, window), equal by name and extent as the Python class is; the window is
+- **Axes** (`kinds/axis.rs`): `Axis` (name, `Dim`, window), equal by name and extent as the Python class is; the window is
   provenance. The Python `Axis`, `Dim`, `DataType` and `ElementwiseImpl` objects stay Python classes: a statement holds
   a name (or an axis's parts) and the extension makes the object on first read.
 
@@ -51,13 +61,13 @@ is a `Parser` over the expression tokenizer with the statement punctuation added
 
 ## Numbering, identity, normalization
 
-`values.rs` is the value numbering (`value_numbers`), the scope-tree hash, the use-keyed buffer roles and the digest.
+`numbering/mod.rs` is the value numbering (`value_numbers`), the scope-tree hash, the use-keyed buffer roles and the digest.
 Statements are keyed by the address of their shared object (`distinct` makes a body's statements unique first), digest
 material is a `Key` tree hashed with BLAKE3 (`Number`, 128 bits), and every order among ties is by `Key`'s total
-order. `identity.rs` memoizes the identity per body and per coloring. `normalize.rs` holds the steps and the driver
-`normalize_body`, memoized in a bounded table; `canonical_order` and `place_values` are the two steps that read the
-numbering. Both memos are keyed by the body's text under its content hash: body equality leaves the axis windows out,
-the text spells them, and a window is identity material.
+order. `identity.rs` memoizes the identity per body and per coloring. `normalize/` holds the steps and the driver
+`normalize_body`; `canonical_order` and `place_values` are the two steps that read the numbering. Both memos are
+`memo::Memo`, keyed by the body's text under its content hash and bounded by entry count: body equality leaves the
+axis windows out, the text spells them, and a window is identity material.
 
 The canonical order decides what the digest leaves open, and the lift of a body into terms reads that order: sibling
 regions are addressed by position in every recorded cut decision, and a product's operand order is its orientation

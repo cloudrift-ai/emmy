@@ -6,25 +6,34 @@ use std::collections::{HashMap, HashSet};
 use std::hash::{Hash, Hasher};
 use std::sync::{Arc, Mutex, OnceLock};
 
-use crate::field::{Axes, Ext, Names};
 use crate::kinds::Statement;
+use crate::kinds::field::{Axes, Names};
+use crate::numbering::Key;
 use crate::protocol::{Renaming, seeded_accumulators, unique};
-use crate::values::Key;
 use crate::{Error, Name, Result, locked};
 
 /// What `Body::map` applies: a statement to the statements that replace it, or `None` to drop it.
 pub type MapFn<'a> = dyn FnMut(&Arc<Statement>) -> Option<Vec<Arc<Statement>>> + 'a;
 
-/// One statement inside a body: the body that holds it directly and its position there.
+/// One statement inside a body: the body that holds it directly and its position there. It holds the statement and
+/// only a weak reference to the body, so a body may keep references to its own statements without keeping itself
+/// alive.
 #[derive(Clone)]
 pub struct StmtRef {
-    pub body: Body,
+    stmt: Arc<Statement>,
+    body: std::sync::Weak<BodyData>,
+    holder: usize,
     pub index: usize,
 }
 
 impl StmtRef {
     pub fn stmt(&self) -> &Arc<Statement> {
-        &self.body.stmts()[self.index]
+        &self.stmt
+    }
+
+    /// The body that holds the statement, while it lives.
+    pub fn body(&self) -> Option<Body> {
+        self.body.upgrade().map(Body)
     }
 }
 
@@ -38,18 +47,13 @@ impl std::ops::Deref for StmtRef {
 
 impl std::fmt::Debug for StmtRef {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(
-            f,
-            "StmtRef({:p}, {})",
-            Arc::as_ptr(&self.body.0),
-            self.index
-        )
+        write!(f, "StmtRef({:#x}, {})", self.holder, self.index)
     }
 }
 
 impl PartialEq for StmtRef {
     fn eq(&self, other: &Self) -> bool {
-        self.body.ptr_eq(&other.body) && self.index == other.index
+        self.holder == other.holder && self.index == other.index
     }
 }
 
@@ -57,7 +61,7 @@ impl Eq for StmtRef {}
 
 impl Hash for StmtRef {
     fn hash<H: Hasher>(&self, state: &mut H) {
-        (Arc::as_ptr(&self.body.0) as usize).hash(state);
+        self.holder.hash(state);
         self.index.hash(state);
     }
 }
@@ -73,10 +77,21 @@ pub struct BodyData {
     axis_names: OnceLock<HashSet<Name>>,
     ssa_uses: OnceLock<HashSet<Name>>,
     by_kind: Mutex<HashMap<Vec<&'static str>, Vec<StmtRef>>>,
-    pub(crate) normalized: OnceLock<Body>,
-    pub(crate) identities: Mutex<Vec<(crate::identity::IdentityKey, crate::identity::Identity)>>,
-    /// The extension's wrappers for these statements.
-    pub ext: Ext,
+    pub(crate) normalized: OnceLock<Normalized>,
+    pub(crate) identities: Mutex<
+        Vec<(
+            crate::numbering::identity::IdentityKey,
+            crate::numbering::identity::Identity,
+        )>,
+    >,
+}
+
+/// What a body knows of its normal form once it was taken: that it is its own, or which body it is. Never the body's
+/// own `Arc`, which would keep it alive forever.
+#[derive(Clone)]
+pub(crate) enum Normalized {
+    Itself,
+    Other(Body),
 }
 
 /// An immutable sequence of statements. Two bodies with equal statements are equal and hash alike; a slice or a
@@ -140,7 +155,6 @@ impl Body {
             by_kind: Mutex::new(HashMap::new()),
             normalized: OnceLock::new(),
             identities: Mutex::new(Vec::new()),
-            ext: OnceLock::new(),
         }))
     }
 
@@ -175,7 +189,9 @@ impl Body {
 
     pub fn at(&self, index: usize) -> StmtRef {
         StmtRef {
-            body: self.clone(),
+            stmt: self.stmts()[index].clone(),
+            body: Arc::downgrade(&self.0),
+            holder: Arc::as_ptr(&self.0) as usize,
             index,
         }
     }
@@ -297,12 +313,7 @@ impl Body {
             return self.clone();
         }
         // An injective spelling-only rename keeps the normal form a body is its own.
-        if self
-            .0
-            .normalized
-            .get()
-            .is_some_and(|normal| normal.ptr_eq(self))
-        {
+        if matches!(self.0.normalized.get(), Some(Normalized::Itself)) {
             let resources: Vec<Name> = unique(
                 self.iter_stmts()
                     .iter()
@@ -313,7 +324,7 @@ impl Body {
                 .map(|name| mapping.get(name).cloned().unwrap_or_else(|| name.clone()))
                 .collect();
             if renamed.len() == resources.len() {
-                let _ = result.0.normalized.set(result.clone());
+                let _ = result.0.normalized.set(Normalized::Itself);
             }
         }
         result
@@ -722,7 +733,6 @@ pub struct Subroutine {
     pub result: Name,
     /// The buffers the body reads, each once, in first appearance.
     pub buffers: Names,
-    pub ext: Ext,
 }
 
 impl std::fmt::Debug for Subroutine {
@@ -753,7 +763,6 @@ impl Subroutine {
             body,
             result,
             buffers,
-            ext: OnceLock::new(),
         }))
     }
 
@@ -776,7 +785,6 @@ impl Subroutine {
             body,
             result: self.result.clone(),
             buffers,
-            ext: OnceLock::new(),
         })
     }
 }

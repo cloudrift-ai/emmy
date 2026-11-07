@@ -9,14 +9,16 @@
 //!
 //! Statements are numbered by position in the pre-order walk, so no statement is keyed by object identity.
 
+pub mod identity;
+
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use crate::body::{Body, StmtRef};
 use crate::expr::{Expr, Expression, Num};
-use crate::field::NumOr;
 use crate::kinds::Statement;
-use crate::order::ordering_constraints;
+use crate::kinds::field::NumOr;
+use crate::normalize::order::ordering_constraints;
 use crate::text::{spell_axis, structural_text};
 use crate::{Name, locked};
 
@@ -196,7 +198,7 @@ struct Context<'a> {
     depths_of: HashMap<Param, Vec<usize>>,
 }
 
-fn descriptor(axis: &crate::axis::Axis, stmt: &Statement) -> Key {
+fn descriptor(axis: &crate::kinds::axis::Axis, stmt: &Statement) -> Key {
     let extent = Key::str(&axis.extent.expression.text());
     let window = match &axis.window {
         None => Key::None,
@@ -447,7 +449,7 @@ impl Context<'_> {
         commutative: bool,
     ) -> Value {
         if commutative {
-            ops.sort_by(|a, b| a.0.cmp(&b.0));
+            ops.sort_by_key(|op| op.0);
             let mut groups: Vec<Vec<Value>> = Vec::new();
             for value in ops {
                 match groups.last_mut() {
@@ -1394,6 +1396,6 @@ pub fn hex(number: Number) -> String {
 }
 
 /// The text an axis spells, for a descriptor.
-pub fn axis_text(axis: &crate::axis::Axis) -> String {
+pub fn axis_text(axis: &crate::kinds::axis::Axis) -> String {
     spell_axis(axis, None).unwrap_or_default()
 }

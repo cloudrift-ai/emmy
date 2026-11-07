@@ -5,11 +5,12 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex, OnceLock};
 
 use crate::body::Body;
-use crate::elementwise::Op;
+use crate::kinds::elementwise::Op;
 use crate::kinds::{Assign, Statement};
+use crate::memo::Memo;
 use crate::normalize::normalize_body;
+use crate::numbering::{digest, hex};
 use crate::text::body_text;
-use crate::values::{digest, hex};
 use crate::{Name, Result, locked};
 
 /// How many identities the process keeps: a cut's arms lower the same pieces again and again.
@@ -57,27 +58,14 @@ fn canonicalize_op_clusters(body: &Body) -> Body {
     })
 }
 
-/// The identities of the bodies met in this process, keyed by text under the content hash: body equality leaves the
-/// axis windows out, the text spells them.
-struct Memo {
-    store: HashMap<(u64, IdentityKey), Vec<(String, Identity)>>,
-    order: std::collections::VecDeque<(u64, IdentityKey)>,
-}
-
-fn identities() -> &'static Mutex<Memo> {
-    static MEMO: OnceLock<Mutex<Memo>> = OnceLock::new();
-    MEMO.get_or_init(|| {
-        Mutex::new(Memo {
-            store: HashMap::new(),
-            order: std::collections::VecDeque::new(),
-        })
-    })
+/// The identities of the bodies met in this process, per coloring.
+fn identities() -> &'static Mutex<Memo<(u64, IdentityKey), Identity>> {
+    static MEMO: OnceLock<Mutex<Memo<(u64, IdentityKey), Identity>>> = OnceLock::new();
+    MEMO.get_or_init(|| Mutex::new(Memo::new(MEMO_SIZE)))
 }
 
 pub fn clear_memo() {
-    let mut memo = locked(identities());
-    memo.store.clear();
-    memo.order.clear();
+    locked(identities()).clear();
 }
 
 /// Key the normal form of `body`, optionally with operations collapsed to compute-unit clusters. `colors` types
@@ -106,15 +94,7 @@ pub fn canonicalize_identity(
     }
     let memo_key = (stmts.content_hash(), key.clone());
     let text = body_text(&stmts)?;
-    let remembered = locked(identities())
-        .store
-        .get(&memo_key)
-        .and_then(|entries| {
-            entries
-                .iter()
-                .find(|(t, _)| *t == text)
-                .map(|(_, i)| i.clone())
-        });
+    let remembered = locked(identities()).get(&memo_key, &text);
     if let Some(identity) = remembered {
         locked(&stmts.0.identities).push((key, identity.clone()));
         return Ok(identity);
@@ -125,22 +105,6 @@ pub fn canonicalize_identity(
         arguments,
     };
     locked(&stmts.0.identities).push((key, identity.clone()));
-    let mut memo = locked(identities());
-    memo.store
-        .entry(memo_key.clone())
-        .or_default()
-        .push((text, identity.clone()));
-    memo.order.push_back(memo_key);
-    while memo.order.len() > MEMO_SIZE {
-        let Some(oldest) = memo.order.pop_front() else {
-            break;
-        };
-        if let Some(entries) = memo.store.get_mut(&oldest) {
-            entries.remove(0);
-            if entries.is_empty() {
-                memo.store.remove(&oldest);
-            }
-        }
-    }
+    locked(identities()).put(memo_key, text, identity.clone());
     Ok(identity)
 }

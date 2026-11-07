@@ -34,6 +34,7 @@ from emmy.compiler.ir.stmt import (
     Write,
     ZeroPrologue,
     fields_of,
+    normalize_body,
     parse_body,
 )
 
@@ -150,6 +151,17 @@ _ALL_EXAMPLES = _EXAMPLES + _KERNEL_EXAMPLES
 def test_a_body_is_no_tuple() -> None:
     """A tuple never equals a body."""
     assert not issubclass(Body, tuple) and Body() != ()
+
+
+def test_a_statement_read_through_two_wrappers_of_one_body_is_one_object() -> None:
+    """A statement placed in a body is the same object every time it is read, through every wrapper of that body: the
+    normal form is cached with the body, so two calls hand back two wrappers of one body, and passes key side tables
+    by statement."""
+    body = parse_body("x = load X[a]\ny = exp(x)\nO[a] = y")
+    first, second = normalize_body(body), normalize_body(body)
+    assert first == second and [stmt for stmt in first] == [stmt for stmt in second]
+    assert all(a is b for a, b in zip(first, second, strict=True))
+    assert first[0] is first[0] and first[-1].nested() == second[-1].nested()
 
 
 def test_a_kind_holds_its_elementwise_operation_as_op() -> None:
