@@ -242,7 +242,7 @@ pub fn canonical_order(body: &Body) -> Result<Body> {
     let operand = ties::operand_ranks(&placed, &result, &numbering);
     let operand_key = |name: &Name| operand.get(name).cloned().unwrap_or_else(ties::unranked);
     let listed = result.map_stmts(&mut |stmt| match &**stmt {
-        Statement::Assign(a) if a.op.commutative && a.args.len() > 1 => {
+        Statement::Assign(a) if a.op.commutative() && a.args.len() > 1 => {
             let mut args: Vec<Name> = a.args.to_vec();
             args.sort_by_cached_key(|name| (operand_key(name), name.clone()));
             Some(Arc::new(Statement::Assign(Assign {

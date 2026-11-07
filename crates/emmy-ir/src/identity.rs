@@ -4,9 +4,10 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use crate::body::{Body, Exact};
-use crate::kinds::elementwise::Op;
+use crate::body::{Body, MemoKey};
+use crate::kinds::elementwise::{Elementwise, Op};
 use crate::kinds::{Assign, Statement};
+use crate::memo::BODY_MEMO_CAPACITY;
 use crate::normalize::normalize_body;
 use crate::numbering::{digest, hex};
 use crate::{Name, Result, memo};
@@ -34,9 +35,9 @@ fn canonicalize_op_clusters(body: &Body) -> Body {
             // A sum is FMA-class work; which coefficients it carries is not the cluster's business.
             Statement::Affine(a) => Arc::new(Statement::Assign(Assign {
                 name: a.name.clone(),
-                op: Op::new("add").cluster_representative(),
+                op: Op::Known(Elementwise::Add).cluster_representative(),
                 args: a.args.clone(),
-                dtype: a.dtype.clone(),
+                dtype: a.dtype,
             })),
             other => match other.op() {
                 Some(op) => {
@@ -56,7 +57,7 @@ fn canonicalize_op_clusters(body: &Body) -> Body {
 memo! {
     /// The identities of the normal forms met in this process, per coloring: a cut's arms lower the same pieces
     /// again and again.
-    pub fn identities() -> Memo<(Exact, IdentityKey), Identity> [capacity = 16_384]
+    pub fn identities() -> Memo<(MemoKey, IdentityKey), Identity> [capacity = BODY_MEMO_CAPACITY, policy = S3Fifo]
 }
 
 /// Key the normal form of `body`, optionally with operations collapsed to compute-unit clusters. `colors` types
@@ -80,7 +81,7 @@ pub fn canonicalize_identity(
         cluster,
         colors: colors_key,
     };
-    identities().get_or_try_insert(&(Exact(stmts.clone()), key), || {
+    identities().get_or_try_insert(&(MemoKey(stmts.clone()), key), || {
         let (tree, arguments) = digest(&stmts, colors);
         Ok(Identity {
             key: hex(tree),

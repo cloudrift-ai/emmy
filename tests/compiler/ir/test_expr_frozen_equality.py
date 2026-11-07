@@ -54,8 +54,8 @@ def test_ternary_and_cast_hashable():
 
 
 def test_builtin_hashable():
-    assert Builtin("tid.x") == Builtin("tid.x")
-    assert hash(Builtin("tid.x")) == hash(Builtin("tid.x"))
+    assert Builtin("thread_idx.x") == Builtin("thread_idx.x")
+    assert hash(Builtin("thread_idx.x")) == hash(Builtin("thread_idx.x"))
 
 
 def test_var_is_frozen():

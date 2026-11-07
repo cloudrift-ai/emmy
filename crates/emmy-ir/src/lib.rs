@@ -59,6 +59,42 @@ pub fn value_error(message: impl Into<String>) -> Error {
     Error::Value(message.into())
 }
 
+/// A closed set of spellings as an enum: one text per variant, `Display` and `FromStr` over them, and `ALL` in
+/// declaration order. Strings of the set exist only where the text is read or written.
+#[macro_export]
+macro_rules! closed_set {
+    ($(#[$attr:meta])* $vis:vis enum $Name:ident ($what:literal) { $( $Variant:ident = $text:literal, )* }) => {
+        $(#[$attr])*
+        #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+        $vis enum $Name { $( $Variant, )* }
+
+        impl $Name {
+            pub const ALL: &[$Name] = &[ $( $Name::$Variant, )* ];
+
+            pub fn text(self) -> &'static str {
+                match self { $( $Name::$Variant => $text, )* }
+            }
+        }
+
+        impl std::fmt::Display for $Name {
+            fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                f.write_str(self.text())
+            }
+        }
+
+        impl std::str::FromStr for $Name {
+            type Err = $crate::Error;
+
+            fn from_str(text: &str) -> $crate::Result<$Name> {
+                match text {
+                    $( $text => Ok($Name::$Variant), )*
+                    _ => Err($crate::Error::Value(format!(concat!("no ", $what, " {}"), text))),
+                }
+            }
+        }
+    };
+}
+
 /// A lock's guard, reopened when a panic elsewhere poisoned it: the data behind every lock here is a memo, which a
 /// torn update cannot leave inconsistent.
 pub fn locked<T>(mutex: &std::sync::Mutex<T>) -> std::sync::MutexGuard<'_, T> {

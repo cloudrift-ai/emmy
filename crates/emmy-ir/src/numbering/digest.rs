@@ -3,7 +3,7 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
-use super::{Key, Number, Numbering, hash_parts, value_numbers};
+use super::{Key, Number, Numbering, Tag, hash_parts, value_numbers};
 use crate::body::{Body, StmtRef};
 use crate::order::ordering_constraints;
 use crate::{Name, locked};
@@ -77,7 +77,7 @@ fn member_tree(
                 }
             };
             hash_parts([
-                Key::str("block"),
+                Key::tag(Tag::Block),
                 header.clone(),
                 Key::Tuple(params.clone()),
                 Key::Tuple(children.into_iter().map(Key::Num).collect()),
@@ -89,7 +89,7 @@ fn member_tree(
                 .as_ref()
                 .map_or((Key::None, Vec::new()), |(n, p)| (Key::Num(*n), p.clone()));
             hash_parts([
-                Key::str("stmt"),
+                Key::tag(Tag::Stmt),
                 number,
                 Key::Tuple(params),
                 Key::Tuple(preceding),
@@ -157,18 +157,18 @@ impl Keyed<'_> {
     fn key(&self, name: &Name) -> Key {
         if let Some(r) = self.rank.get(name) {
             return Key::tuple([
-                Key::str("fixed"),
+                Key::tag(Tag::Fixed),
                 Key::Int(*r as i64),
                 paint(self.colors, name),
             ]);
         }
         let tag = if self.pick == Some(name) {
-            "pick"
+            Tag::Pick
         } else {
-            "open"
+            Tag::Open
         };
         Key::tuple([
-            Key::str(tag),
+            Key::tag(tag),
             paint(self.colors, name),
             self.cell.get(name).cloned().unwrap_or(Key::None),
         ])

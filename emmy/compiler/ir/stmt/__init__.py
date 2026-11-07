@@ -52,6 +52,7 @@ mask_select_predicate = _ir.mask_select_predicate
 ordering_constraints = _ir.ordering_constraints
 dtype_promote = _ir.dtype_promote
 clear_memos = _ir.clear_memos
+clear_memo = _ir.clear_memo
 memo_stats = _ir.memo_stats
 
 _register(Body)
@@ -87,6 +88,7 @@ __all__ = [
     "ZeroPrologue",
     "binary",
     "canonicalize_identity",
+    "clear_memo",
     "clear_memos",
     "dtype_promote",
     "exposed_defines",

@@ -8,8 +8,8 @@ use super::{assign, with_bodies};
 use crate::Name;
 use crate::body::Body;
 use crate::expr::Expression;
-use crate::kinds::dtype::{is_float, promote};
-use crate::kinds::elementwise::evaluate_f32;
+use crate::kinds::dtype::promote;
+use crate::kinds::elementwise::{Elementwise, Op};
 use crate::kinds::field::{DType, Float, Names};
 use crate::kinds::*;
 use crate::numbering::Key;
@@ -25,7 +25,7 @@ pub fn fold_trivial_selects(body: &Body) -> Body {
         {
             return Some(assign(
                 &s.name,
-                "copy",
+                Op::Known(Elementwise::Copy),
                 vec![s.branches[0].value.clone()],
                 None,
             ));
@@ -38,7 +38,7 @@ pub(crate) fn let_literal(name: &Name, value: f64, dtype: Option<DType>) -> Arc<
     Arc::new(Statement::Let(Let {
         name: name.clone(),
         value: Expression::float(value),
-        dtype: Some(dtype.unwrap_or_else(|| DType::new("f32"))),
+        dtype: Some(dtype.unwrap_or(DType::F32)),
     }))
 }
 
@@ -47,16 +47,16 @@ pub fn fold_constants(body: &Body) -> Body {
     fn evaluated(stmt: &Assign, env: &HashMap<Name, f64>) -> Option<f64> {
         if stmt.args.is_empty()
             || stmt.args.iter().any(|arg| !env.contains_key(arg))
-            || stmt.dtype.as_ref().is_some_and(|d| !is_float(d.name()))
+            || stmt.dtype.is_some_and(|d| !d.is_float())
         {
             return None;
         }
         let values: Vec<f64> = stmt.args.iter().map(|arg| env[arg]).collect();
-        if &*stmt.op.name == "copy" {
+        if stmt.op.is(Elementwise::Copy) {
             return Some(values[0]);
         }
         let args: Vec<f32> = values.iter().map(|v| *v as f32).collect();
-        evaluate_f32(&stmt.op.name, &args).map(|v| v as f64)
+        stmt.op.known()?.evaluate_f32(&args).map(|v| v as f64)
     }
     fn scope(body: &Body, env: &HashMap<Name, f64>) -> Body {
         let mut env = env.clone();
@@ -72,14 +72,14 @@ pub fn fold_constants(body: &Body) -> Body {
             }
             let folded = match &*stmt {
                 Statement::Assign(a) => {
-                    evaluated(a, &env).map(|value| (a.name.clone(), value, a.dtype.clone()))
+                    evaluated(a, &env).map(|value| (a.name.clone(), value, a.dtype))
                 }
                 Statement::Affine(a) if a.args.iter().all(|arg| env.contains_key(arg)) => {
                     let mut sum = 0.0;
                     for (coefficient, arg) in a.terms() {
                         sum += coefficient * env[arg];
                     }
-                    Some((a.name.clone(), a.offset.0 + sum, a.dtype.clone()))
+                    Some((a.name.clone(), a.offset.0 + sum, a.dtype))
                 }
                 _ => None,
             };
@@ -163,26 +163,24 @@ pub fn drop_unread_values(body: &Body) -> Body {
     }
 }
 
-pub(crate) const AFFINE_OPS: [&str; 5] = ["add", "subtract", "negative", "multiply", "divide"];
-
 /// Fold every maximal single-reader cone of `add`, `subtract`, `negative`, literal `multiply`, literal `divide` and
 /// `Affine` into one `Affine`.
 pub fn fold_affine(body: &Body, exposed: &HashSet<Name>) -> Body {
     let counts = read_counts(body, exposed);
 
-    fn dtype_of(stmt: &Statement, dtypes: &HashMap<Name, Name>) -> Name {
+    fn dtype_of(stmt: &Statement, dtypes: &HashMap<Name, DType>) -> DType {
         if let Some(stamped) = stmt.dtype() {
-            return stamped.0.clone();
+            return *stamped;
         }
-        let of = |args: &Names| -> Vec<&str> {
+        let of = |args: &Names| -> Vec<DType> {
             args.iter()
-                .map(|arg| dtypes.get(arg).map_or("f32", |d| &**d))
+                .map(|arg| dtypes.get(arg).copied().unwrap_or(DType::F32))
                 .collect()
         };
         match stmt {
-            Statement::Assign(a) => promote(&a.op.name, &of(&a.args)),
-            Statement::Affine(a) => promote("add", &of(&a.args)),
-            _ => "f32".into(),
+            Statement::Assign(a) => promote(a.op.known(), &of(&a.args)),
+            Statement::Affine(a) => promote(Some(Elementwise::Add), &of(&a.args)),
+            _ => DType::F32,
         }
     }
 
@@ -200,7 +198,7 @@ pub fn fold_affine(body: &Body, exposed: &HashSet<Name>) -> Body {
         if live.len() == 1 && live[0].1 == 1.0 && offset == 0.0 {
             return assign(
                 &name,
-                "copy",
+                Op::Known(Elementwise::Copy),
                 vec![live[0].0.clone()],
                 root.dtype().cloned(),
             );
@@ -237,7 +235,7 @@ pub fn fold_affine(body: &Body, exposed: &HashSet<Name>) -> Body {
 
     fn scope(
         body: &Body,
-        dtypes: &HashMap<Name, Name>,
+        dtypes: &HashMap<Name, DType>,
         literals: &HashMap<Name, f64>,
         counts: &HashMap<Name, usize>,
     ) -> Body {
@@ -287,16 +285,17 @@ pub fn fold_affine(body: &Body, exposed: &HashSet<Name>) -> Body {
             match &*stmts[index] {
                 Statement::Affine(_) => true,
                 Statement::Assign(a) => {
-                    let op = &*a.op.name;
-                    if !AFFINE_OPS.contains(&op)
-                        || a.args.len() != if op == "negative" { 1 } else { 2 }
-                    {
+                    let Some(op) = a.op.known().filter(|op| op.affine()) else {
+                        return false;
+                    };
+                    if a.args.len() != if op == Elementwise::Negative { 1 } else { 2 } {
                         return false;
                     }
-                    if op == "divide" {
+                    if op == Elementwise::Divide {
                         return values[index].get(&a.args[1]).is_some_and(|v| *v != 0.0);
                     }
-                    op != "multiply" || a.args.iter().any(|arg| values[index].contains_key(arg))
+                    op != Elementwise::Multiply
+                        || a.args.iter().any(|arg| values[index].contains_key(arg))
                 }
                 _ => false,
             }
@@ -305,7 +304,7 @@ pub fn fold_affine(body: &Body, exposed: &HashSet<Name>) -> Body {
             .filter(|&i| {
                 affine(i)
                     && value_name(i)
-                        .is_some_and(|name| dtypes.get(name).is_some_and(|d| is_float(d)))
+                        .is_some_and(|name| dtypes.get(name).is_some_and(|d| d.is_float()))
             })
             .collect();
         let mut read_by: HashMap<usize, usize> = HashMap::new();
@@ -375,12 +374,14 @@ pub fn fold_affine(body: &Body, exposed: &HashSet<Name>) -> Body {
                             self.collect(index, arg, scale * coefficient, terms, offset);
                         }
                     }
-                    Statement::Assign(a) => match (&*a.op.name, &a.args[..]) {
-                        ("negative", [x]) => self.collect(index, x, -scale, terms, offset),
-                        ("divide", [x, d]) => {
+                    Statement::Assign(a) => match (a.op.known(), &a.args[..]) {
+                        (Some(Elementwise::Negative), [x]) => {
+                            self.collect(index, x, -scale, terms, offset)
+                        }
+                        (Some(Elementwise::Divide), [x, d]) => {
                             self.collect(index, x, scale / self.values[index][d], terms, offset)
                         }
-                        ("multiply", [left, right]) => {
+                        (Some(Elementwise::Multiply), [left, right]) => {
                             if let Some(value) = self.values[index].get(left) {
                                 self.collect(index, right, scale * value, terms, offset);
                             } else {
@@ -398,7 +399,11 @@ pub fn fold_affine(body: &Body, exposed: &HashSet<Name>) -> Body {
                             self.collect(
                                 index,
                                 a1,
-                                if op == "subtract" { -scale } else { scale },
+                                if op == Some(Elementwise::Subtract) {
+                                    -scale
+                                } else {
+                                    scale
+                                },
                                 terms,
                                 offset,
                             );

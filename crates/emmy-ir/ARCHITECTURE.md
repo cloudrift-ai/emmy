@@ -43,14 +43,24 @@ parent's imports.
   `enum Statement`, the `enum Kind` (one variant per kind, with its name, layer and fields; what a body's kind queries
   and the reader take) and, per kind, the role-driven walks (`visit`, `rewrite`, the header fields the text prints).
   Roles are a `Roles` set and a kind's flags a `KindFlags` set, two types that cannot be mistaken for one another.
-  `KW_ONLY`, a constructor property, rides in the roles set as the one bit no walk reads. A kind is a block when a
+  `KW_ONLY`, a constructor property, is declared beside a field's roles and lands in the field's `kw_only`, not in
+  the set. A kind is a block when a
   field of it plays `BODY`. The kinds-wide accessors (`op`, `dtype`, `name`) are the `Field` trait's: a field type
   that is one answers, every other field's default is none. A test pins the digest of the declaration list, the names
   and field orders every stored text spells.
 - **Fields** (`kinds/field.rs`): one trait, `Field`, every field type implements: how it is visited and rewritten by role,
   spelled on a declared kind's header and read back by its `Ty`. A number where a name is expected (`NumOr<T>`, a
-  carry's literal seed) is plain data. A record (`SelectBranch`, `FragmentArg`) is declared in the same list with a layer of
-  its own, a struct whose own fields play roles and a `Field` of the kind that holds it.
+  carry's literal seed) is plain data. A record (`SelectBranch`, `FragmentArg`) is declared in the same list with a
+  layer of its own, a struct whose own fields play roles and a `Field` of the kind that holds it. Every closed set of
+  spellings is an enum declared with `closed_set!` (one text per variant, `Display` and `FromStr` over them): the
+  dtypes (`DType`, `kinds/dtype.rs`, with the promotion rule), the kernel vocabularies a field holds (`Swizzle`,
+  `RasterOrient`, `FragmentLayout`, `Role`), the GPU built-ins (`expr::Builtin`), a cast's target (`LitType`) and the
+  digest's tags (`numbering::Tag`, whose texts a test pins, since they are identity material). An elementwise
+  operation is `Op::Known(Elementwise)`, an enum of the operations the compiler knows a property of (commutative,
+  associative, the neutral element, the cluster, integer arithmetic, an affine role, the host evaluator), or
+  `Op::Other(name)` for a spelling only a renderer knows. A string of any of these sets exists where the text is read
+  or written, at the Python boundary, and nowhere else; the renderer's own vocabularies (a shared-memory slab's C
+  type, an MMA wrapper's `ab_dtype`) stay names the crate carries and never reads.
 - **Axes** (`kinds/axis.rs`): `Axis` (name, `Dim`, window), equal by name and extent as the Python class is; the window is
   provenance. The Python `Axis`, `Dim`, `DataType` and `ElementwiseImpl` objects stay Python classes: a statement holds
   a name (or an axis's parts) and the extension makes the object on first read.
@@ -101,18 +111,23 @@ statement objects it permuted.
 ## Memos
 
 What a process remembers across bodies is a `memo::Memo`, declared with the `memo!` macro that names its capacity in
-entries (`normal_forms` in the normalization driver, `identities` in `identity.rs`, both 16,384) and lists it in one
-registry, so every memo is inspected (entries, hits, misses) and cleared from one place (`memo::stats`,
-`memo::clear_all`; `emmy_ir.memo_stats()` and `emmy_ir.clear_memos()` in Python, for a test worker or a process pool
-that starts clean). The caches are `quick_cache`'s: bounded by entry count, sharded so no lock is held across a
-computation, evicting by its S3-FIFO policy, and one asker computes a missing value while a second asker of the same
-key waits for it. A memo's key is the body's exact form, `body::Exact`: equal when the statements are and every axis
-is exactly, hint and window included, which body equality leaves out, with a hash computed once and kept with the
-body; no key is a printed text. A body also keeps the one normal form it was given (`normal_form`,
-`remember_normal_form`, `is_normal`, `mark_normal` in `body.rs`), so a body normalized twice costs one lookup and a
-protocol rewrite that keeps a normal form says so through that API. The extension's wrapper tables (a body's
-statement wrappers, a subroutine's one Python object) are listed in the same registry: not bounded, since a live
-object keeps its one wrapper, but purged of dead entries every 1,024 inserts and on `clear_all`.
+entries and its eviction policy (`normal_forms` in the normalization driver, `identities` in `identity.rs`, both
+`BODY_MEMO_CAPACITY` under `S3Fifo`, the one policy `quick_cache` offers) and lists it in one registry through
+`memo::declared`, so every store is inspected (entries, hits, misses) and cleared from one place (`memo::stats`,
+`memo::clear`, `memo::clear_all`; `emmy_ir.memo_stats()`, `emmy_ir.clear_memo(name)` and `emmy_ir.clear_memos()` in
+Python, for a test worker or a process pool that starts clean). The caches are `quick_cache`'s: bounded by entry
+count, sharded so no lock is held across a computation, and one asker computes a missing value while a second asker
+of the same key waits for it, so a computation that asked its own memo for the key it is computing would wait on
+itself; `get_or_try_insert` refuses that with an error (no normalization step recurses into `normalize_body` today).
+A memo's key is the body's exact form, `body::MemoKey`: equal when the statements are and so is everything body
+equality leaves out, every axis's hint and window, every expression's literals and every number a field holds by
+their bits (a signed zero keys apart from zero, every NaN alike, as the digest keys them), with a hash computed once
+and kept with the body by one walk of the subtree; no key is a printed text. A body also keeps the one normal form it
+was given (`normal_form`, `remember_normal_form`, `is_normal`, `mark_normal` in `body.rs`), so a body normalized
+twice costs one lookup and a protocol rewrite that keeps a normal form says so through that API. The extension's
+wrapper tables (a body's statement wrappers, a subroutine's one Python object) are listed in the same registry: not
+bounded, since a live object keeps its one wrapper, but purged of dead entries when their size reaches a multiple of
+1,024 and on `clear_all`.
 
 The canonical order decides what the digest leaves open, and the lift of a body into terms reads that order: sibling
 regions are addressed by position in every recorded cut decision, and a product's operand order is its orientation

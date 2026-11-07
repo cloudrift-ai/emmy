@@ -115,6 +115,7 @@ impl<T: Send + Sync, V: Send> Store for Table<T, V> {
             name: tables.name,
             entries: tables.entries.len(),
             capacity: None,
+            policy: None,
             hits: tables.hits,
             misses: tables.misses,
         }
@@ -131,9 +132,7 @@ fn tables<T: Send + Sync + 'static, V: Send + 'static>(
     listed: &'static Once,
     name: &'static str,
 ) -> &'static Table<T, V> {
-    let tables = cell.get_or_init(|| Table(Mutex::new(Tables::new(name))));
-    listed.call_once(|| emmy_ir::memo::register(tables));
-    tables
+    emmy_ir::memo::declared(cell, listed, || Table(Mutex::new(Tables::new(name))))
 }
 
 static WRAPPERS: OnceLock<Table<emmy_ir::body::BodyData, Wrappers>> = OnceLock::new();
@@ -940,9 +939,16 @@ pub fn ordering_constraints<'py>(
 
 /// Promote an elementwise op's argument dtypes to one result dtype.
 #[pyfunction]
-pub fn dtype_promote(op_name: &str, arg_dtypes: Vec<String>) -> String {
-    let dtypes: Vec<&str> = arg_dtypes.iter().map(|d| d.as_str()).collect();
-    emmy_ir::kinds::dtype::promote(op_name, &dtypes).to_string()
+pub fn dtype_promote(op_name: &str, arg_dtypes: Vec<String>) -> PyResult<String> {
+    let dtypes: Vec<emmy_ir::kinds::field::DType> = arg_dtypes
+        .iter()
+        .map(|d| d.parse().py())
+        .collect::<PyResult<_>>()?;
+    let promoted = emmy_ir::kinds::dtype::promote(
+        emmy_ir::kinds::elementwise::Op::new(op_name).known(),
+        &dtypes,
+    );
+    Ok(promoted.text().to_string())
 }
 
 pub fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
@@ -964,8 +970,21 @@ pub fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(ordering_constraints, m)?)?;
     m.add_function(wrap_pyfunction!(dtype_promote, m)?)?;
     m.add_function(wrap_pyfunction!(clear_memos, m)?)?;
+    m.add_function(wrap_pyfunction!(clear_memo, m)?)?;
     m.add_function(wrap_pyfunction!(memo_stats, m)?)?;
     Ok(())
+}
+
+/// Clear the one memo `name` names (a `name` of `memo_stats()`); `KeyError` for a name no memo has.
+#[pyfunction]
+fn clear_memo(name: &str) -> PyResult<()> {
+    if emmy_ir::memo::clear(name) {
+        Ok(())
+    } else {
+        Err(pyo3::exceptions::PyKeyError::new_err(format!(
+            "no memo {name}"
+        )))
+    }
 }
 
 /// Forget every memoized normal form and identity and purge the wrapper tables: what a test worker or a process
@@ -975,8 +994,8 @@ fn clear_memos() {
     emmy_ir::memo::clear_all();
 }
 
-/// Every memo's figures: a list of dicts with `name`, `entries`, `capacity` (None for an unbounded table), `hits`
-/// and `misses`.
+/// Every memo's figures: a list of dicts with `name`, `entries`, `capacity` and `policy` (None for an unbounded
+/// table), `hits` and `misses`.
 #[pyfunction]
 fn memo_stats<'py>(py: Python<'py>) -> PyResult<Bound<'py, PyList>> {
     let out = PyList::empty(py);
@@ -985,6 +1004,7 @@ fn memo_stats<'py>(py: Python<'py>) -> PyResult<Bound<'py, PyList>> {
         item.set_item("name", stats.name)?;
         item.set_item("entries", stats.entries)?;
         item.set_item("capacity", stats.capacity)?;
+        item.set_item("policy", stats.policy.map(|policy| format!("{policy:?}")))?;
         item.set_item("hits", stats.hits)?;
         item.set_item("misses", stats.misses)?;
         out.append(item)?;

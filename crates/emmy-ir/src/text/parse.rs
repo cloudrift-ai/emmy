@@ -632,9 +632,13 @@ impl Line {
             && first.kind == TokenKind::Name
             && matches!(following.kind, TokenKind::Name | TokenKind::Quoted)
         {
+            let dtype: DType = first
+                .text
+                .parse()
+                .map_err(|_| self.parser.error(&format!("no dtype {}", first.text)))?;
             self.parser.index += 1;
             let name = self.name()?;
-            return Ok((Some(DType(first.text.into())), name));
+            return Ok((Some(dtype), name));
         }
         Ok((None, self.name()?))
     }
@@ -673,9 +677,11 @@ impl Line {
             vec![self.name()?]
         };
         let swizzle = if self.word("swizzle") && self.parser.accept("=") {
-            self.name()?
+            let name = self.name()?;
+            name.parse()
+                .map_err(|_| self.parser.error(&format!("no swizzle {name}")))?
         } else {
-            Name::from("NONE")
+            Swizzle::NONE
         };
         let write = Write {
             output: name,

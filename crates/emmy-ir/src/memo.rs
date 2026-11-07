@@ -1,56 +1,75 @@
 //! The memos: what a process remembers across bodies, as one store of declared caches. A memo is declared with
-//! [`memo!`], which names its capacity in entries, and registers itself in one list, so every memo is inspected
-//! (entries, hits, misses) and cleared from one place: [`stats`] and [`clear_all`] here, their exports in Python.
-//! The caches are `quick_cache`'s: sharded, locked per shard and never across a computation, bounded by entry
-//! count, evicting by its S3-FIFO policy (a probation queue ahead of the main one and a ghost list of what left, so
-//! a body met once does not push out one met many times). A key is a body's exact form (`body::Exact`), never its
-//! text.
+//! [`memo!`], which names its capacity in entries and its eviction policy, and registers itself in one list, so
+//! every memo is inspected (entries, hits, misses) and cleared from one place: [`stats`], [`clear`] and
+//! [`clear_all`] here, their exports in Python. The caches are `quick_cache`'s: sharded, locked per shard and never
+//! across a computation, bounded by entry count. A key is a body's exact form (`body::MemoKey`), never its text.
+//!
+//! A computation that asks its own memo for the key it is computing would wait on itself forever (the cache parks a
+//! second asker of a key until the first inserts); [`Memo::get_or_try_insert`] refuses that with an error instead.
 
-use std::hash::Hash;
-use std::sync::Mutex;
+use std::cell::RefCell;
+use std::collections::HashSet;
+use std::hash::{Hash, Hasher};
+use std::sync::{Mutex, Once, OnceLock};
 
 use quick_cache::sync::Cache;
 
-use crate::locked;
+use crate::{Error, locked};
+
+/// How many bodies the body-keyed memos keep: a cut's arms lower the same pieces again and again.
+pub const BODY_MEMO_CAPACITY: usize = 16_384;
+
+/// How a memo past its capacity chooses what to forget. `quick_cache` offers the one policy; the declaration names
+/// it so a memo's policy is read and changed where its capacity is.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Policy {
+    /// A small probation queue ahead of the main one and a ghost list of what left: an entry met once does not push
+    /// out one met many times.
+    S3Fifo,
+}
 
 /// One declared memo: a bounded cache under a name.
 pub struct Memo<K, V> {
     name: &'static str,
+    policy: Policy,
     cache: Cache<K, V>,
 }
 
+thread_local! {
+    /// The keys this thread is computing a value for, by memo and key hash.
+    static COMPUTING: RefCell<HashSet<(&'static str, u64)>> = RefCell::new(HashSet::new());
+}
+
 impl<K: Eq + Hash + Clone, V: Clone> Memo<K, V> {
-    pub fn new(name: &'static str, capacity: usize) -> Memo<K, V> {
+    pub fn new(name: &'static str, capacity: usize, policy: Policy) -> Memo<K, V> {
         Memo {
             name,
+            policy,
             cache: Cache::new(capacity),
         }
     }
 
-    pub fn get(&self, key: &K) -> Option<V> {
-        self.cache.get(key)
-    }
-
-    pub fn insert(&self, key: K, value: V) {
-        self.cache.insert(key, value);
-    }
-
     /// The value under `key`, computed by `compute` once when the memo has none; a second asker of one key waits
-    /// for the first's result instead of computing it again.
-    pub fn get_or_try_insert<E>(
+    /// for the first's result instead of computing it again. A computation that asks for its own key is an error.
+    pub fn get_or_try_insert<E: From<Error>>(
         &self,
         key: &K,
         compute: impl FnOnce() -> Result<V, E>,
     ) -> Result<V, E> {
-        self.cache.get_or_insert_with(key, compute)
-    }
-
-    pub fn len(&self) -> usize {
-        self.cache.len()
-    }
-
-    pub fn is_empty(&self) -> bool {
-        self.cache.is_empty()
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        key.hash(&mut hasher);
+        let computing = (self.name, hasher.finish());
+        let entered = COMPUTING.with(|keys| keys.borrow_mut().insert(computing));
+        if !entered {
+            return Err(Error::Value(format!(
+                "the {} memo was asked for a key it is computing",
+                self.name
+            ))
+            .into());
+        }
+        let result = self.cache.get_or_insert_with(key, compute);
+        COMPUTING.with(|keys| keys.borrow_mut().remove(&computing));
+        result
     }
 
     pub fn clear(&self) {
@@ -62,19 +81,21 @@ impl<K: Eq + Hash + Clone, V: Clone> Memo<K, V> {
             name: self.name,
             entries: self.cache.len(),
             capacity: Some(self.cache.capacity()),
+            policy: Some(self.policy),
             hits: self.cache.hits(),
             misses: self.cache.misses(),
         }
     }
 }
 
-/// What a memo reports.
+/// What a store reports.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Stats {
     pub name: &'static str,
     pub entries: usize,
-    /// The bound, when the store has one.
+    /// The bound and its policy, when the store has one.
     pub capacity: Option<u64>,
+    pub policy: Option<Policy>,
     pub hits: u64,
     pub misses: u64,
 }
@@ -101,45 +122,64 @@ fn registry() -> &'static Mutex<Vec<&'static dyn Store>> {
     &REGISTRY
 }
 
-/// List `store`: declared memos register themselves on first use.
-pub fn register(store: &'static dyn Store) {
-    locked(registry()).push(store);
+/// The one store under `cell`, built by `init` on first use and listed once: what every declaration goes through.
+pub fn declared<S: Store + 'static>(
+    cell: &'static OnceLock<S>,
+    listed: &'static Once,
+    init: impl FnOnce() -> S,
+) -> &'static S {
+    let store = cell.get_or_init(init);
+    listed.call_once(|| locked(registry()).push(store));
+    store
+}
+
+fn stores() -> Vec<&'static dyn Store> {
+    locked(registry()).clone()
 }
 
 /// Every registered store's figures.
 pub fn stats() -> Vec<Stats> {
-    let stores: Vec<&'static dyn Store> = locked(registry()).clone();
-    stores.iter().map(|store| store.stats()).collect()
+    stores().iter().map(|store| store.stats()).collect()
+}
+
+/// Clear the store named `name`; whether one is.
+pub fn clear(name: &str) -> bool {
+    match stores().iter().find(|store| store.stats().name == name) {
+        Some(store) => {
+            store.clear();
+            true
+        }
+        None => false,
+    }
 }
 
 /// Clear every registered store. The registry's lock is not held while a store clears: a table's purge drops Python
 /// objects whose finalizers may come back here.
 pub fn clear_all() {
-    let stores: Vec<&'static dyn Store> = locked(registry()).clone();
-    for store in stores {
+    for store in stores() {
         store.clear();
     }
 }
 
-/// Declare a memo: a function returning the one `Memo` of its name, built on first use with the capacity stated and
-/// registered for `stats` and `clear_all`.
+/// Declare a memo: a function returning the one `Memo` of its name, built on first use with the capacity and the
+/// policy stated and registered for `stats`, `clear` and `clear_all`.
 ///
 /// ```ignore
 /// memo! {
 ///     /// The normal forms of the bodies met in this process.
-///     pub fn normal_forms() -> Memo<Exact, Body> [capacity = 16_384]
+///     pub fn normal_forms() -> Memo<MemoKey, Body> [capacity = BODY_MEMO_CAPACITY, policy = S3Fifo]
 /// }
 /// ```
 #[macro_export]
 macro_rules! memo {
-    ($(#[$attr:meta])* $vis:vis fn $name:ident() -> Memo<$K:ty, $V:ty> [capacity = $capacity:expr]) => {
+    ($(#[$attr:meta])* $vis:vis fn $name:ident() -> Memo<$K:ty, $V:ty> [capacity = $capacity:expr, policy = $policy:ident]) => {
         $(#[$attr])*
         $vis fn $name() -> &'static $crate::memo::Memo<$K, $V> {
             static MEMO: std::sync::OnceLock<$crate::memo::Memo<$K, $V>> = std::sync::OnceLock::new();
-            static REGISTERED: std::sync::Once = std::sync::Once::new();
-            let memo = MEMO.get_or_init(|| $crate::memo::Memo::new(stringify!($name), $capacity));
-            REGISTERED.call_once(|| $crate::memo::register(memo));
-            memo
+            static LISTED: std::sync::Once = std::sync::Once::new();
+            $crate::memo::declared(&MEMO, &LISTED, || {
+                $crate::memo::Memo::new(stringify!($name), $capacity, $crate::memo::Policy::$policy)
+            })
         }
     };
 }
@@ -149,42 +189,69 @@ mod tests {
     use super::*;
 
     memo! {
-        /// A memo of this test's own.
-        fn squares() -> Memo<u64, u64> [capacity = 8]
+        /// A memo of the bound test's own.
+        fn squares() -> Memo<u64, u64> [capacity = 8, policy = S3Fifo]
+    }
+
+    memo! {
+        /// A memo of the registry test's own.
+        fn cubes() -> Memo<u64, u64> [capacity = 8, policy = S3Fifo]
+    }
+
+    memo! {
+        /// A memo of the recursion test's own.
+        fn loops() -> Memo<u64, u64> [capacity = 8, policy = S3Fifo]
+    }
+
+    fn square(n: u64) -> Result<u64, Error> {
+        Ok(n * n)
     }
 
     #[test]
     fn a_memo_is_bounded_and_counts_what_it_answers() {
-        squares().clear();
         for n in 0..64u64 {
-            let value = squares().get_or_try_insert(&n, || Ok::<u64, ()>(n * n));
-            assert_eq!(value, Ok(n * n));
+            assert_eq!(squares().get_or_try_insert(&n, || square(n)), Ok(n * n));
         }
         let stats = squares().stats();
-        assert_eq!(stats.name, "squares");
+        assert_eq!(
+            (stats.name, stats.capacity, stats.policy),
+            ("squares", Some(8), Some(Policy::S3Fifo))
+        );
         assert!(stats.entries <= 8, "{stats:?}");
-        assert_eq!(stats.capacity, Some(8));
         assert!(stats.misses >= 64, "{stats:?}");
         assert_eq!(stats.hits, 0);
-        let kept = (0..64u64).filter(|n| squares().get(n).is_some()).count();
-        assert_eq!(kept, squares().len());
+        // A probe that refuses to compute inserts nothing: a hit answers, a miss errors.
+        let miss = || Err::<u64, Error>(Error::Value("a miss".into()));
+        let kept = (0..64u64)
+            .filter(|n| squares().get_or_try_insert(n, miss).is_ok())
+            .count();
+        assert_eq!(kept, stats.entries);
         assert_eq!(squares().stats().hits, kept as u64);
     }
 
     #[test]
     fn the_registry_lists_and_clears_every_memo() {
-        squares().insert(3, 9);
-        assert!(
-            stats()
-                .iter()
-                .any(|s| s.name == "squares" && s.entries >= 1)
+        assert_eq!(
+            cubes().get_or_try_insert(&3, || Ok::<u64, Error>(27)),
+            Ok(27)
+        );
+        assert!(stats().iter().any(|s| s.name == "cubes" && s.entries == 1));
+        assert!(clear("cubes"));
+        assert!(!clear("no such memo"));
+        assert!(stats().iter().any(|s| s.name == "cubes" && s.entries == 0));
+        assert_eq!(
+            cubes().get_or_try_insert(&3, || Ok::<u64, Error>(27)),
+            Ok(27)
         );
         clear_all();
-        assert!(squares().is_empty());
-        assert!(
-            stats()
-                .iter()
-                .any(|s| s.name == "squares" && s.entries == 0)
-        );
+        assert!(stats().iter().any(|s| s.name == "cubes" && s.entries == 0));
+    }
+
+    #[test]
+    fn a_computation_that_asks_for_its_own_key_is_refused() {
+        let nested =
+            loops().get_or_try_insert(&1, || loops().get_or_try_insert(&1, || Ok::<u64, Error>(1)));
+        assert!(nested.is_err());
+        assert_eq!(loops().get_or_try_insert(&1, || Ok::<u64, Error>(1)), Ok(1));
     }
 }

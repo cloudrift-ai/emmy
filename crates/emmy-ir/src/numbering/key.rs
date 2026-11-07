@@ -3,6 +3,7 @@
 use std::sync::Arc;
 
 use crate::Name;
+use crate::closed_set;
 use crate::expr::Num;
 use crate::expr::{Expr, Expression};
 
@@ -20,9 +21,27 @@ pub enum Key {
 
 pub type Number = u128;
 
+closed_set! {
+    /// The tags digest material carries, each spelled as the Python digest spelled it: a tag's text is identity
+    /// material and never changes.
+    pub enum Tag ("digest tag") {
+        Block = "block", Stmt = "stmt", Fixed = "fixed", Pick = "pick", Open = "open",
+        Var = "Var", Literal = "Literal", Builtin = "Builtin", Binary = "Binary", Call = "Call", Ternary = "Ternary",
+        Cast = "Cast", FlatIndex = "FlatIndex",
+        Expr = "expr", Coordinate = "c", Operand = "v", Free = "free", State = "state", Buffer = "buffer",
+        Bound = "bound", Parameter = "parameter",
+        Load = "load", Assign = "assign", Term = "term", Affine = "affine", Init = "init", Reduce = "reduce",
+        Select = "select", Store = "store", Carry = "carry", Pre = "pre", Loop = "loop", Cond = "cond", Other = "other",
+    }
+}
+
 impl Key {
     pub fn str(text: &str) -> Key {
         Key::Str(text.into())
+    }
+
+    pub fn tag(tag: Tag) -> Key {
+        Key::Str(tag.text().into())
     }
 
     pub fn float(value: f64) -> Key {
@@ -117,39 +136,89 @@ pub fn expression_key(e: &Expression, leaf: &mut dyn FnMut(&Expression) -> Optio
         return key;
     }
     match &**e {
-        Expr::Var(name) => Key::tuple([Key::str("Var"), Key::Str(name.clone())]),
+        Expr::Var(name) => Key::tuple([Key::tag(Tag::Var), Key::Str(name.clone())]),
         Expr::Literal(lit) => Key::tuple([
-            Key::str("Literal"),
+            Key::tag(Tag::Literal),
             Key::num(lit.value),
             Key::str(lit.dtype.name()),
         ]),
-        Expr::Builtin(name) => Key::tuple([Key::str("Builtin"), Key::Str(name.clone())]),
+        Expr::Builtin(builtin) => Key::tuple([Key::tag(Tag::Builtin), Key::str(builtin.text())]),
         Expr::Binary(op, l, r) => Key::tuple([
-            Key::str("Binary"),
+            Key::tag(Tag::Binary),
             Key::str(op.text()),
             expression_key(l, leaf),
             expression_key(r, leaf),
         ]),
         Expr::Call(name, args) => Key::tuple([
-            Key::str("Call"),
+            Key::tag(Tag::Call),
             Key::Str(name.clone()),
             Key::Tuple(args.iter().map(|a| expression_key(a, leaf)).collect()),
         ]),
         Expr::Ternary(a, b, c) => Key::tuple([
-            Key::str("Ternary"),
+            Key::tag(Tag::Ternary),
             expression_key(a, leaf),
             expression_key(b, leaf),
             expression_key(c, leaf),
         ]),
         Expr::Cast(dtype, inner) => Key::tuple([
-            Key::str("Cast"),
+            Key::tag(Tag::Cast),
             Key::Str(dtype.clone()),
             expression_key(inner, leaf),
         ]),
         Expr::FlatIndex(buffer, index) => Key::tuple([
-            Key::str("FlatIndex"),
+            Key::tag(Tag::FlatIndex),
             Key::Str(buffer.clone()),
             Key::Tuple(index.iter().map(|a| expression_key(a, leaf)).collect()),
         ]),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Tag;
+
+    /// A tag's text is identity material: this list is what every stored identity was digested with.
+    #[test]
+    fn every_digest_tag_spells_as_it_always_did() {
+        let texts: Vec<&str> = Tag::ALL.iter().map(|tag| tag.text()).collect();
+        assert_eq!(
+            texts,
+            [
+                "block",
+                "stmt",
+                "fixed",
+                "pick",
+                "open",
+                "Var",
+                "Literal",
+                "Builtin",
+                "Binary",
+                "Call",
+                "Ternary",
+                "Cast",
+                "FlatIndex",
+                "expr",
+                "c",
+                "v",
+                "free",
+                "state",
+                "buffer",
+                "bound",
+                "parameter",
+                "load",
+                "assign",
+                "term",
+                "affine",
+                "init",
+                "reduce",
+                "select",
+                "store",
+                "carry",
+                "pre",
+                "loop",
+                "cond",
+                "other",
+            ]
+        );
     }
 }

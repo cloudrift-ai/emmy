@@ -1,7 +1,7 @@
 //! The reader: the tokenizer and the parser that take an expression's text back, and that the body text's reader
 //! extends with the statement punctuation.
 
-use super::{BinOp, Expr, Expression, Lit, LitType, Num, is_builtin, python_repr};
+use super::{BinOp, Builtin, Expr, Expression, Lit, LitType, Num, python_repr};
 use crate::{Error, Name, Result};
 
 // --- the reader -----------------------------------------------------------------------------------
@@ -359,8 +359,8 @@ impl Parser {
                         index.into(),
                     )));
                 }
-                if is_builtin(&token.text) {
-                    return Ok(Expression::new(Expr::Builtin(token.text.into())));
+                if let Ok(builtin) = token.text.parse::<Builtin>() {
+                    return Ok(Expression::new(Expr::Builtin(builtin)));
                 }
                 Ok(Expression::new(Expr::Var(token.text.into())))
             }
@@ -444,7 +444,7 @@ mod tests {
         let cases = [
             (var("s"), "s"),
             (
-                Expression::new(Expr::Builtin("thread_idx.x".into())),
+                Expression::new(Expr::Builtin(Builtin::ThreadIdxX)),
                 "thread_idx.x",
             ),
             (int(3), "3"),

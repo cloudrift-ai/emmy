@@ -1,16 +1,17 @@
 //! Body normalization: the canonical form every Loop IR body takes at construction and inside every identity.
-//! Pure `Body → Body` steps and the one driver, `normalize_body`, memoized by the body's content. Normalization
+//! Pure `Body → Body` steps and the one driver, `normalize_body`, memoized by the body's exact form. Normalization
 //! answers to no knob, pin or evidence; a transform something decides is a pipeline pass.
 
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
-use crate::body::{Body, Exact};
+use crate::body::{Body, MemoKey};
 use crate::expr::{Expression, Interval, SimplifyCtx};
 use crate::kinds::axis::Axis;
 use crate::kinds::elementwise::Op;
 use crate::kinds::field::DType;
 use crate::kinds::*;
+use crate::memo::BODY_MEMO_CAPACITY;
 use crate::order::topological_sort;
 use crate::{Error, Name, Result, memo};
 
@@ -36,7 +37,7 @@ pub fn extend_simplify_ctx(ctx: &SimplifyCtx, axis: &Axis) -> SimplifyCtx {
 
 memo! {
     /// The normal forms of the bodies met in this process, by their exact form.
-    pub fn normal_forms() -> Memo<Exact, Body> [capacity = 16_384]
+    pub fn normal_forms() -> Memo<MemoKey, Body> [capacity = BODY_MEMO_CAPACITY, policy = S3Fifo]
 }
 
 /// The executable normal form of `body`: what the body already knows, else the memo's, else computed and kept.
@@ -45,7 +46,7 @@ pub fn normalize_body(body: &Body) -> Result<Body> {
         return Ok(normal);
     }
     let normal =
-        normal_forms().get_or_try_insert(&Exact(body.clone()), || normalize_uncached(body))?;
+        normal_forms().get_or_try_insert(&MemoKey(body.clone()), || normalize_uncached(body))?;
     body.remember_normal_form(&normal);
     Ok(normal)
 }
@@ -115,10 +116,10 @@ fn substituted(stmt: &Arc<Statement>, name: &Name, value: Expression) -> Arc<Sta
     Statement::substitute(stmt, &HashMap::from([(name.clone(), value)]))
 }
 
-fn assign(name: &Name, op: &str, args: Vec<Name>, dtype: Option<DType>) -> Arc<Statement> {
+fn assign(name: &Name, op: Op, args: Vec<Name>, dtype: Option<DType>) -> Arc<Statement> {
     Arc::new(Statement::Assign(Assign {
         name: name.clone(),
-        op: Op::new(op),
+        op,
         args: args.into(),
         dtype,
     }))

@@ -4,7 +4,7 @@ use std::collections::HashMap;
 use std::sync::{Arc, OnceLock};
 
 use emmy_ir::Name;
-use emmy_ir::expr::{BinOp, Expr, Expression, Interval, Lit, LitType, Num, SimplifyCtx};
+use emmy_ir::expr::{BinOp, Builtin, Expr, Expression, Interval, Lit, LitType, Num, SimplifyCtx};
 use pyo3::exceptions::{PyTypeError, PyValueError};
 use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyFrozenSet, PyList, PyString, PyTuple};
@@ -41,6 +41,18 @@ impl PyExprField for Name {
 impl PyExprField for BinOp {
     fn to_py(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
         Ok(PyString::new(py, self.text()).into_any().unbind())
+    }
+}
+
+impl PyExprField for Builtin {
+    fn to_py(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        Ok(PyString::new(py, self.text()).into_any().unbind())
+    }
+}
+
+impl PyExprField for LitType {
+    fn to_py(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        Ok(PyString::new(py, self.name()).into_any().unbind())
     }
 }
 
@@ -465,7 +477,7 @@ impl PyLiteral {
 impl PyBuiltin {
     #[new]
     fn new(name: &str) -> PyResult<PyClassInitializer<Self>> {
-        let expr = Expression::new(Expr::Builtin(name.into()));
+        let expr = Expression::new(Expr::Builtin(name.parse().py()?));
         Ok(PyClassInitializer::from(PyExpression::base(expr)?).add_subclass(PyBuiltin))
     }
 }
@@ -779,9 +791,9 @@ pub fn is_placeholder(expression: &Bound<'_, PyAny>, d: Option<usize>) -> bool {
 pub fn builtin_names<'py>(py: Python<'py>) -> PyResult<Bound<'py, PyFrozenSet>> {
     PyFrozenSet::new(
         py,
-        emmy_ir::expr::BUILTINS
+        Builtin::ALL
             .iter()
-            .map(|name| PyString::new(py, name)),
+            .map(|builtin| PyString::new(py, builtin.text())),
     )
 }
 
