@@ -1,0 +1,1446 @@
+"""Shared expression AST + coordinate-expression helpers.
+
+Backend-agnostic expression sublanguage used by:
+
+- ``IndexMapOp.coord_map`` (``ir.tensor.ir``): affine output→input coord maps.
+- ``Mux.select`` / ``MuxBranch.select`` (``ir.loop``): coord predicates.
+- Tile IR (``ir.tile``): array indices, loop bounds, ternary selects.
+
+The ``Expression`` base class adds Python operator overloading so expressions can be
+built as arithmetic (``Var("i") * 4 + Var("j")``) and comparisons
+(``Var("i").lt(Var("n"))``). Each concrete node implements ``eval(env)`` for
+evaluation against a name → value environment (scalars or ndarrays).
+
+Each node also implements ``substitute(mapping)`` (replace named
+``Var`` nodes with another Expression) and ``free_vars()`` (Var-name set);
+the placeholder helpers (``placeholder``, ``is_placeholder``) build
+on the same AST.
+"""
+
+from __future__ import annotations
+
+import re
+from dataclasses import dataclass, field, fields, replace
+from functools import cached_property
+
+import numpy as np
+
+from emmy.compiler.structural import form
+from emmy.compiler.wire import Wire
+
+# ---------------------------------------------------------------------------
+# The base class: operators and the wire
+# ---------------------------------------------------------------------------
+
+
+class Expression(Wire):
+    """The base class of every expression node: arithmetic and comparison operators, and the wire.
+
+    The operators return BinaryExpr nodes, enabling::
+
+        Var("row") * Var("cols") + Var("j")   # → BinaryExpr("+", BinaryExpr("*", ...), ...)
+        Var("i").lt(Var("n"))                   # → BinaryExpr("<", ...)
+
+    On the wire an expression is its C-like text, ``((a5 / 128) * 128) + a6`` written as
+    ``a5 / 128 * 128 + a6`` — parentheses only where :data:`_PRECEDENCE` needs them (:func:`parse`).
+    """
+
+    wire_tag = "expr"
+
+    def to_wire(self) -> str:
+        return str(self)
+
+    @classmethod
+    def from_wire(cls, value: object, where: str = "expression") -> Expression:
+        if not isinstance(value, str):
+            raise ValueError(f"{where} must be an expression's text, got {value!r}")
+        try:
+            expression = parse(value)
+        except ValueError as exc:
+            raise ValueError(f"{where}: {exc}") from exc
+        if not isinstance(expression, cls):
+            raise ValueError(f"{where} must be a {cls.__name__}, got {value!r}")
+        return expression
+
+    def __add__(self, other: Expression) -> BinaryExpr:
+        return BinaryExpr("+", self, _coerce(other))
+
+    def __radd__(self, other: Expression) -> BinaryExpr:
+        return BinaryExpr("+", _coerce(other), self)
+
+    def __sub__(self, other: Expression) -> BinaryExpr:
+        return BinaryExpr("-", self, _coerce(other))
+
+    def __rsub__(self, other: Expression) -> BinaryExpr:
+        return BinaryExpr("-", _coerce(other), self)
+
+    def __mul__(self, other: Expression) -> BinaryExpr:
+        return BinaryExpr("*", self, _coerce(other))
+
+    def __rmul__(self, other: Expression) -> BinaryExpr:
+        return BinaryExpr("*", _coerce(other), self)
+
+    def __truediv__(self, other: Expression) -> BinaryExpr:
+        return BinaryExpr("/", self, _coerce(other))
+
+    def __mod__(self, other: Expression) -> BinaryExpr:
+        return BinaryExpr("%", self, _coerce(other))
+
+    def __neg__(self) -> BinaryExpr:
+        return BinaryExpr("-", Literal(0, "int"), self)
+
+    def lt(self, other: Expression) -> BinaryExpr:
+        """Less-than (``<``)."""
+        return BinaryExpr("<", self, _coerce(other))
+
+    def __str__(self) -> str:
+        """The expression's text (:func:`parse`'s inverse): what it is on the wire and in every listing."""
+        return _spell(self, 0)
+
+    def substitute(self, mapping: dict[str, Expression]) -> Expression:
+        """Replace ``Var(name)`` subterms with ``mapping[name]``.
+
+        Walks the expression tree non-destructively. Used at lowering
+        time (placeholder coords → kernel output coords) and at
+        composition time (outer IndexMap placeholders → inner
+        coord_map). Vars not present in ``mapping`` are left unchanged.
+        Default raises; concrete subclasses override.
+        """
+        raise NotImplementedError(f"{type(self).__name__}.substitute not implemented")
+
+    def rename(self, rename) -> Expression:  # noqa: ANN001 — a ``str -> str`` function
+        """This expression with every free variable's name mapped through ``rename``.
+
+        A rewrite applies it to an index or a predicate, so a value an indirect index reads (a gather's
+        ``x[a0, (int)in0]``) follows the rename of its definition. A name the function keeps passes through.
+        """
+        mapping = {n: Var(rename(n)) for n in self.free_vars() if rename(n) != n}
+        return self.substitute(mapping) if mapping else self
+
+    @cached_property
+    def form(self) -> object:
+        """:func:`~emmy.compiler.structural.form` of this expression, rendered once: value numbering reads every
+        index of a body at every numbering of it."""
+        return form(self)
+
+    def free_vars(self) -> frozenset[str]:
+        """Return the set of ``Var.name`` strings appearing anywhere in this Expression."""
+        raise NotImplementedError(f"{type(self).__name__}.free_vars not implemented")
+
+    def render(self, ctx, parent_prec: int = 0) -> str:  # type: ignore[override]
+        """Emit a target-language (C / CUDA) expression string.
+
+        Concrete subclasses override. The ``ctx`` is duck-typed against
+        :class:`emmy.compiler.ir.render.RenderCtx` (intrinsic /
+        builtin spelling tables, optional shape map). ``parent_prec``
+        drives parenthesization in nested ``BinaryExpr`` chains.
+        """
+        raise NotImplementedError(f"{type(self).__name__}.render not implemented")
+
+    def simplify(self, ctx: SimplifyCtx) -> Expression:
+        """Bottom-up rewrite: constant-fold literals, drop algebraic
+        identities (``x+0``, ``x*1``, ``x-x``, etc.), collapse static
+        comparisons via ``ctx.ranges``. Pure; idempotent."""
+        raise NotImplementedError(f"{type(self).__name__}.simplify not implemented")
+
+    def range(self, ctx: SimplifyCtx) -> Interval | None:
+        """Conservative integer-range analysis. ``None`` when unknown.
+        Subclasses override; default surfaces missing implementations."""
+        return None
+
+    def subterms(self):
+        """Pre-order walk over this expression's tree, itself first."""
+        yield self
+        for f in fields(self):
+            v = getattr(self, f.name)
+            for child in v if isinstance(v, (tuple, list)) else (v,):
+                if isinstance(child, Expression):
+                    yield from child.subterms()
+
+    def rebuild(self, fn) -> Expression:  # noqa: ANN001 — Expression -> Expression
+        """Bottom-up map: ``fn`` applied to every subterm once its children are rebuilt."""
+        changes = {}
+        for f in fields(self):
+            v = getattr(self, f.name)
+            if isinstance(v, Expression):
+                new = v.rebuild(fn)
+            elif isinstance(v, (tuple, list)) and any(isinstance(c, Expression) for c in v):
+                new = type(v)(c.rebuild(fn) if isinstance(c, Expression) else c for c in v)
+            else:
+                continue
+            if new != v:
+                changes[f.name] = new
+        return fn(replace(self, **changes) if changes else self)
+
+
+def subst_index(index: tuple, sub: dict) -> tuple:
+    """A store template's index with named iteration vars replaced by this cell's expressions —
+    the ONE step every per-cell store emitter shares.
+
+    A tiled cell writes its own coordinates into an index the recognition captured once: the warp
+    flash realizer substitutes the query row base and the column literal, its state store the row
+    expression alone, and the scalar chain the register-strip ordinal. Only the substitution map
+    differs, and spelling the walk at each site is how one of them silently stops matching a Var
+    the others still rewrite. A non-``Var`` element passes through untouched."""
+    return tuple(sub.get(e.name, e) if isinstance(e, Var) else e for e in index)
+
+
+def _coerce(v: Expression | int | float) -> Expression:
+    """Coerce Python int/float to Literal for operator overloading."""
+    if isinstance(v, int):
+        return Literal(v, "int")
+    if isinstance(v, float):
+        return Literal(v)
+    return v
+
+
+def apply_binop(op: str, lv: object, rv: object) -> object:
+    """Apply a BinOp to two already-evaluated values.
+
+    Pure helper — no env coupling. Shared by ``BinOp.eval`` (numpy-aware
+    evaluation) and ``ir.simplify`` (constant folding on Literal children).
+    Values may be scalars or numpy ndarrays; arithmetic composes via numpy
+    broadcasting. Integer floor division is used for both ``/`` and ``//``.
+    """
+    if op == "+":
+        return lv + rv
+    if op == "-":
+        return lv - rv
+    if op == "*":
+        return lv * rv
+    if op in ("/", "//"):
+        try:
+            return int(lv) // int(rv)
+        except TypeError:
+            return lv // rv
+    if op == "%":
+        try:
+            return int(lv) % int(rv)
+        except TypeError:
+            return lv % rv
+    if op == "<":
+        return lv < rv
+    if op == "<=":
+        return lv <= rv
+    if op == ">":
+        return lv > rv
+    if op == ">=":
+        return lv >= rv
+    if op == "==":
+        return lv == rv
+    if op == "&&":
+        try:
+            return bool(lv) and bool(rv)
+        except (TypeError, ValueError):
+            import numpy as np
+
+            return np.logical_and(lv, rv)
+    if op == "||":
+        try:
+            return bool(lv) or bool(rv)
+        except (TypeError, ValueError):
+            import numpy as np
+
+            return np.logical_or(lv, rv)
+    if op == "&":
+        return lv & rv
+    if op == "|":
+        return lv | rv
+    if op == "^":
+        return lv ^ rv
+    if op == "<<":
+        return lv << rv
+    if op == ">>":
+        return lv >> rv
+    raise ValueError(f"Unknown BinOp: {op}")
+
+
+# ---------------------------------------------------------------------------
+# Expression types
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class Var(Expression):
+    """Variable reference."""
+
+    name: str
+
+    def eval(self, env: dict[str, object]) -> object:
+        return env[self.name]
+
+    def substitute(self, mapping: dict[str, Expression]) -> Expression:
+        return mapping.get(self.name, self)
+
+    def free_vars(self) -> frozenset[str]:
+        return frozenset({self.name})
+
+    def render(self, ctx, parent_prec: int = 0) -> str:
+        # If this SSA name was bound by a literal-constant Load, inline the
+        # literal value instead of emitting the variable name. ``render_body``
+        # populates ``literal_ssa`` after scanning the body and skips the
+        # corresponding ``Load`` decl.
+        lit_map = getattr(ctx, "literal_ssa", None)
+        if lit_map and self.name in lit_map:
+            return _float_lit(lit_map[self.name])
+        # A single-use scalar temp folded into its consumer (readability, EMMY_READABLE): inline the
+        # temp's rendered sub-expression, like the literal case above (``render_body`` populated it and
+        # skipped the temp's ``Assign``).
+        inl = getattr(ctx, "inline_expressions", None)
+        if inl and self.name in inl:
+            return inl[self.name]
+        return self.name
+
+    def simplify(self, ctx: SimplifyCtx) -> Expression:
+        return self
+
+    def range(self, ctx: SimplifyCtx) -> Interval | None:
+        return ctx.ranges.get(self.name)
+
+
+@dataclass(frozen=True)
+class Literal(Expression):
+    """Numeric constant."""
+
+    value: int | float | bool
+    dtype: str = "float"
+
+    def eval(self, env: dict[str, object]) -> object:
+        return self.value
+
+    def substitute(self, mapping: dict[str, Expression]) -> Expression:
+        return self
+
+    def free_vars(self) -> frozenset[str]:
+        return frozenset()
+
+    def render(self, ctx, parent_prec: int = 0) -> str:
+        if isinstance(self.value, float) or self.dtype == "float":
+            txt = _float_lit(float(self.value))
+            # Float literals embedded in a non-default-dtype expression
+            # must compose with the surrounding-typed operands; delegate
+            # the wrapping decision to the target (e.g. wrap with
+            # ``__float2half`` for fp16). Int literals (loop bounds /
+            # shape coords) are unaffected — they only go through the
+            # int branch below.
+            if ctx is not None:
+                wrap_dt = getattr(ctx, "literal_default_dtype", None)
+                target = getattr(ctx, "target", None)
+                if wrap_dt is not None and target is not None:
+                    return target.literal(txt, wrap_dt)
+            return txt
+        v = int(self.value)
+        return f"{v}LL" if abs(v) > 32768 else str(v)
+
+    def simplify(self, ctx: SimplifyCtx) -> Expression:
+        return self
+
+    def range(self, ctx: SimplifyCtx) -> Interval | None:
+        if isinstance(self.value, int) and not isinstance(self.value, bool):
+            return Interval(self.value, self.value)
+        return None
+
+
+@dataclass(frozen=True)
+class BinaryExpr(Expression):
+    """Binary operation.
+
+    Evaluates ``left`` and ``right`` in ``env`` then applies the op.
+    Values may be scalars or numpy ndarrays; arithmetic composes via
+    numpy broadcasting. Integer floor division is used for both ``/``
+    and ``//``. Logical ``&&`` / ``||`` fall back to ``np.logical_and``
+    / ``np.logical_or`` when the operand is an ndarray (scalar bool
+    coercion would raise).
+    """
+
+    op: str  # "+", "-", "*", "/", "//", "%", "<", "<=", ">", ">=", "==", "&&", "||", "^"
+    left: Expression
+    right: Expression
+
+    def eval(self, env: dict[str, object]) -> object:
+        # Single source of binary-op semantics: ``apply_binop`` (also used by
+        # constant folding) — eval only supplies the evaluated operands.
+        return apply_binop(self.op, self.left.eval(env), self.right.eval(env))
+
+    def substitute(self, mapping: dict[str, Expression]) -> Expression:
+        return BinaryExpr(self.op, self.left.substitute(mapping), self.right.substitute(mapping))
+
+    def free_vars(self) -> frozenset[str]:
+        return self.left.free_vars() | self.right.free_vars()
+
+    def render(self, ctx, parent_prec: int = 0) -> str:
+        prec = _PRECEDENCE.get(self.op, 10)
+        left = self.left.render(ctx, prec)
+        right = self.right.render(ctx, prec + 1)
+        # ``//`` is Python floor-div; C integer division ``/`` floors for the
+        # non-negative operands shape arithmetic produces.
+        c_op = "/" if self.op == "//" else self.op
+        result = f"{left} {c_op} {right}"
+        return f"({result})" if prec < parent_prec else result
+
+    def simplify(self, ctx: SimplifyCtx) -> Expression:
+        left = self.left.simplify(ctx)
+        right = self.right.simplify(ctx)
+        op = self.op
+
+        if isinstance(left, Literal) and isinstance(right, Literal):
+            return _fold_binop_literals(op, left, right)
+
+        if op == "+":
+            if _is_zero(left):
+                return right
+            if _is_zero(right):
+                return left
+            recomposed = _fold_divmod_recompose(left, right, ctx)
+            if recomposed is not None:
+                return recomposed
+        elif op == "-":
+            if _is_zero(right):
+                return left
+            if left == right:
+                return _make_int_literal(0)
+        elif op == "*":
+            if _is_zero(left) or _is_zero(right):
+                return _make_int_literal(0)
+            if _is_one(left):
+                return right
+            if _is_one(right):
+                return left
+        elif op in ("/", "//"):
+            if _is_one(right):
+                return left
+            if _is_zero(left):
+                return _make_int_literal(0)
+            if isinstance(right, Literal) and right.dtype == "int" and isinstance(right.value, int) and right.value > 1:
+                if (
+                    isinstance(left, BinaryExpr)
+                    and left.op in ("/", "//")
+                    and isinstance(left.right, Literal)
+                    and left.right.dtype == "int"
+                    and left.right.value > 0
+                    and (bounds := left.left.range(ctx)) is not None
+                    and bounds.lo >= 0
+                ):
+                    # Positive constant quotient chains have one denominator in index normal form.
+                    return BinaryExpr("/", left.left, Literal(left.right.value * right.value, "int")).simplify(ctx)
+                decomp = _div_mod_decompose(left, right.value, ctx)
+                if decomp is not None:
+                    return decomp[0]
+                if op == "//" and (bounds := left.range(ctx)) is not None and bounds.lo >= 0:
+                    return BinaryExpr("/", left, right)
+            cancelled = _cancel_common_factors(op, left, right, ctx)
+            if cancelled is not None:
+                return cancelled
+        elif op == "%":
+            if _is_one(right) or _is_zero(left):
+                return _make_int_literal(0)
+            if isinstance(right, Literal) and right.dtype == "int" and isinstance(right.value, int) and right.value > 1:
+                decomp = _div_mod_decompose(left, right.value, ctx)
+                if decomp is not None:
+                    return decomp[1]
+            else:
+                below = _mod_below_divisor(left, right, ctx)
+                if below is not None:
+                    return below
+            cancelled = _cancel_common_factors(op, left, right, ctx)
+            if cancelled is not None:
+                return cancelled
+        elif op == "&&":
+            if _is_truthy(left):
+                return right
+            if _is_truthy(right):
+                return left
+            if _is_falsy(left) or _is_falsy(right):
+                return _make_int_literal(0)
+        elif op == "||":
+            if _is_falsy(left):
+                return right
+            if _is_falsy(right):
+                return left
+            if _is_truthy(left) or _is_truthy(right):
+                return _make_int_literal(1)
+        elif op in ("<", "<=", ">", ">=", "=="):
+            la = left.range(ctx)
+            lb = right.range(ctx)
+            if la is not None and lb is not None:
+                decided = _static_cmp(op, la, lb)
+                if decided is not None:
+                    return _make_int_literal(1 if decided else 0)
+
+        if left is self.left and right is self.right:
+            return self
+        return BinaryExpr(op, left, right)
+
+    def range(self, ctx: SimplifyCtx) -> Interval | None:
+        la = self.left.range(ctx)
+        lb = self.right.range(ctx)
+        op = self.op
+        if la is None or lb is None:
+            if op in ("<", "<=", ">", ">=", "==", "&&", "||"):
+                return Interval(0, 1)
+            return None
+        if op == "+":
+            return Interval(la.lo + lb.lo, la.hi + lb.hi)
+        if op == "-":
+            return Interval(la.lo - lb.hi, la.hi - lb.lo)
+        if op == "*":
+            prods = [la.lo * lb.lo, la.lo * lb.hi, la.hi * lb.lo, la.hi * lb.hi]
+            return Interval(min(prods), max(prods))
+        if op in ("/", "//"):
+            if lb.lo == lb.hi and lb.lo > 0:
+                return Interval(la.lo // lb.lo, la.hi // lb.lo)
+            return None
+        if op == "%":
+            if lb.lo == lb.hi and lb.lo > 0:
+                # assuming nonneg dividend, which holds for every loop index
+                return Interval(0, lb.lo - 1)
+            return None
+        if op in ("<", "<=", ">", ">=", "==", "&&", "||"):
+            return Interval(0, 1)
+        return None
+
+
+#: Every GPU built-in's name — the renderer's ``_BUILTIN_TO_CUDA`` spells each. The expression reader tells a
+#: built-in from a variable by this set, so no variable may take one of these names.
+BUILTINS = frozenset({f"{kind}.{axis}" for kind in ("thread_idx", "block_idx", "block_dim", "grid_dim") for axis in "xyz"} | {"warp_size"})
+
+
+@dataclass(frozen=True)
+class Builtin(Expression):
+    """GPU built-in variable (threadIdx.x, blockIdx.y, blockDim.x, etc.).
+
+    Not evaluable outside a kernel — GPU codegen substitutes these at emit
+    time. Calling ``eval`` raises.
+    """
+
+    name: str
+
+    def eval(self, env: dict[str, object]) -> object:
+        raise NotImplementedError(f"Builtin {self.name!r} is GPU-only; cannot eval in numpy")
+
+    def substitute(self, mapping: dict[str, Expression]) -> Expression:
+        return self
+
+    def free_vars(self) -> frozenset[str]:
+        return frozenset()
+
+    def render(self, ctx, parent_prec: int = 0) -> str:
+        spelling = ctx.builtins.get(self.name) if ctx is not None else None
+        if spelling is None:
+            raise ValueError(f"render: Builtin {self.name!r} has no target spelling in ctx.builtins")
+        return spelling
+
+    def simplify(self, ctx: SimplifyCtx) -> Expression:
+        return self
+
+
+@dataclass(frozen=True)
+class FuncCallExpr(Expression):
+    """Intrinsic / math function call.
+
+    ``name`` is an ``ElementwiseImpl`` registry name (numpy-aligned: ``exp`` /
+    ``tanh`` / ``maximum`` / ``reciprocal`` / …). ``FuncCallExpr.eval`` pulls
+    the pre-bound callable off the registered ``ElementwiseImpl``; the CUDA
+    emitter's ``_translate_intrinsic`` rewrites the same name to the
+    ``f``-suffixed libm spelling at source-render time.
+    """
+
+    name: str
+    args: tuple[Expression, ...]
+
+    def eval(self, env: dict[str, object]) -> object:
+        from emmy.compiler.ir.elementwise import ElementwiseImpl
+
+        try:
+            op = ElementwiseImpl(self.name)
+        except ValueError as e:
+            raise NotImplementedError(f"FuncCallExpr.eval: unknown intrinsic {self.name!r}") from e
+        return op(*(a.eval(env) for a in self.args))
+
+    def substitute(self, mapping: dict[str, Expression]) -> Expression:
+        return FuncCallExpr(self.name, tuple(a.substitute(mapping) for a in self.args))
+
+    def free_vars(self) -> frozenset[str]:
+        out: frozenset[str] = frozenset()
+        for a in self.args:
+            out |= a.free_vars()
+        return out
+
+    def render(self, ctx, parent_prec: int = 0) -> str:
+        spelling = ctx.intrinsics.get(self.name, self.name) if ctx is not None else self.name
+        args = ", ".join(a.render(ctx) for a in self.args)
+        return f"{spelling}({args})"
+
+    def simplify(self, ctx: SimplifyCtx) -> Expression:
+        new_args = tuple(a.simplify(ctx) for a in self.args)
+        if all(x is y for x, y in zip(new_args, self.args, strict=True)):
+            return self
+        return FuncCallExpr(self.name, new_args)
+
+
+@dataclass(frozen=True)
+class TernaryExpr(Expression):
+    """TernaryExpr expression: cond ? if_true : if_false.
+
+    Uses Python's conditional: when ``cond`` evaluates to an ndarray,
+    callers that want elementwise selection should use ``np.where``
+    directly; ``TernaryExpr.eval`` only supports scalar ``cond``.
+    """
+
+    cond: Expression
+    if_true: Expression
+    if_false: Expression
+
+    def eval(self, env: dict[str, object]) -> object:
+        cond = self.cond.eval(env)
+        if np.ndim(cond) == 0:
+            return self.if_true.eval(env) if bool(cond) else self.if_false.eval(env)
+        return np.where(cond, self.if_true.eval(env), self.if_false.eval(env))
+
+    def substitute(self, mapping: dict[str, Expression]) -> Expression:
+        return TernaryExpr(self.cond.substitute(mapping), self.if_true.substitute(mapping), self.if_false.substitute(mapping))
+
+    def free_vars(self) -> frozenset[str]:
+        return self.cond.free_vars() | self.if_true.free_vars() | self.if_false.free_vars()
+
+    def render(self, ctx, parent_prec: int = 0) -> str:
+        c = self.cond.render(ctx)
+        t = self.if_true.render(ctx)
+        f = self.if_false.render(ctx)
+        return f"(({c}) ? ({t}) : ({f}))"
+
+    def simplify(self, ctx: SimplifyCtx) -> Expression:
+        cond = self.cond.simplify(ctx)
+        if _is_truthy(cond):
+            return self.if_true.simplify(ctx)
+        if _is_falsy(cond):
+            return self.if_false.simplify(ctx)
+        a = self.if_true.simplify(ctx)
+        b = self.if_false.simplify(ctx)
+        if a == b:
+            return a
+        if cond is self.cond and a is self.if_true and b is self.if_false:
+            return self
+        return TernaryExpr(cond, a, b)
+
+
+@dataclass(frozen=True)
+class CastExpr(Expression):
+    """Type cast of an inner expression to ``dtype`` (e.g. ``"int"``, ``"float"``)."""
+
+    dtype: str
+    expression: Expression
+
+    def eval(self, env: dict[str, object]) -> object:
+        v = self.expression.eval(env)
+        if self.dtype == "int":
+            return np.asarray(v).astype(np.int64) if hasattr(v, "__array__") else int(v)
+        return v
+
+    def substitute(self, mapping: dict[str, Expression]) -> Expression:
+        return CastExpr(self.dtype, self.expression.substitute(mapping))
+
+    def free_vars(self) -> frozenset[str]:
+        return self.expression.free_vars()
+
+    def render(self, ctx, parent_prec: int = 0) -> str:
+        return f"(({self.dtype})({self.expression.render(ctx)}))"
+
+    def simplify(self, ctx: SimplifyCtx) -> Expression:
+        inner = self.expression.simplify(ctx)
+        if isinstance(inner, Literal) and self.dtype == "int":
+            return _make_int_literal(int(inner.value))
+        if inner is self.expression:
+            return self
+        return CastExpr(self.dtype, inner)
+
+
+@dataclass(frozen=True)
+class FlatIndex(Expression):
+    """The row-major element offset of coordinate ``index`` in ``buffer``.
+
+    Flattened against the buffer's declared shape when rendered — Kernel IR never bakes shapes
+    in — so it only ever appears in a kernel body, bound by a ``Let`` and reused across a copy's
+    trips where the address arithmetic would otherwise be repeated."""
+
+    buffer: str
+    index: tuple[Expression, ...]
+
+    def eval(self, env: dict[str, object]) -> object:
+        raise TypeError("FlatIndex has no host evaluation: the buffer shape is a render-time fact")
+
+    def substitute(self, mapping: dict[str, Expression]) -> Expression:
+        return FlatIndex(self.buffer, tuple(e.substitute(mapping) for e in self.index))
+
+    def free_vars(self) -> frozenset[str]:
+        return frozenset().union(*(e.free_vars() for e in self.index))
+
+    def render(self, ctx, parent_prec: int = 0) -> str:
+        from emmy.compiler.ir.render import render_index  # noqa: PLC0415 — the render module imports expression
+
+        text = render_index(self.buffer, self.index, ctx)
+        return f"({text})" if parent_prec > 0 else text
+
+    def simplify(self, ctx: SimplifyCtx) -> Expression:
+        return FlatIndex(self.buffer, tuple(e.simplify(ctx) for e in self.index))
+
+    def range(self, ctx: SimplifyCtx) -> Interval | None:
+        return None
+
+
+# ---------------------------------------------------------------------------
+# Render helpers — shared C / CUDA literal formatting + operator precedence
+# ---------------------------------------------------------------------------
+
+
+_PRECEDENCE: dict[str, int] = {
+    "||": 1,
+    "&&": 2,
+    "==": 3,
+    "!=": 3,
+    "<": 4,
+    ">": 4,
+    "<=": 4,
+    ">=": 4,
+    "^": 4,  # bitwise XOR — match relational so ``a ^ b + c`` always parens
+    "&": 4,  # bitwise AND — same intent: ``a & b * c`` must paren as ``(a & b) * c``
+    "|": 4,  # bitwise OR — symmetric with ``&`` / ``^``
+    "<<": 4,
+    ">>": 4,
+    "+": 5,
+    "-": 5,
+    "*": 6,
+    "/": 6,
+    "//": 6,  # integer floor-div — renders as C ``/`` (truncation == floor for ≥0)
+    "%": 6,
+}
+
+
+def _float_lit(v: float) -> str:
+    """C / CUDA float literal — always carries a decimal so ``0.0`` renders
+    as ``0.0f`` not the invalid ``0f``, and large/scientific values keep
+    their exponent."""
+    s = repr(float(v))
+    if "." not in s and "e" not in s and "E" not in s and "inf" not in s and "nan" not in s:
+        s += ".0"
+    return f"{s}f"
+
+
+# ---------------------------------------------------------------------------
+# The text an expression is on the wire
+# ---------------------------------------------------------------------------
+
+#: How tightly an atom binds: a cast's operand is written at this level, so anything but an atom is parenthesized.
+_ATOM = 100
+_NAME = re.compile(r"[A-Za-z_]\w*(?:\.[A-Za-z_]\w*)?")
+#: Names the reader gives a meaning of their own, so a variable or a buffer of that name is written quoted.
+_RESERVED = frozenset({"true", "false", "inf", "nan"})
+
+
+def spell_name(name: str, reserved: frozenset[str] = frozenset()) -> str:
+    """``name`` as the reader reads a name back: bare when it is an identifier with no other meaning, else between
+    backticks (a ``$0`` port, a name that is also a built-in or a keyword)."""
+    if _NAME.fullmatch(name) and name not in BUILTINS and name not in _RESERVED and name not in reserved:
+        return name
+    if "`" in name or "\n" in name:
+        raise ValueError(f"the name {name!r} has no spelling")
+    return f"`{name}`"
+
+
+def _spell(expression: Expression, parent: int) -> str:
+    """``expression``'s text, parenthesized when it binds looser than ``parent`` (a binary operator's precedence, a
+    ternary's 0, :data:`_ATOM`)."""
+    match expression:
+        case Var(name):
+            return spell_name(name)
+        case Builtin(name):
+            if name not in BUILTINS:
+                raise ValueError(f"{name!r} is no GPU built-in")
+            return name
+        case Literal(value, dtype):
+            text = _literal_text(value, dtype)
+            return f"({text})" if text.startswith("-") and parent == _ATOM else text
+        case BinaryExpr(op, left, right):
+            if op not in _PRECEDENCE:
+                raise ValueError(f"the operator {op!r} has no spelling")
+            prec = _PRECEDENCE[op]
+            text = f"{_spell(left, prec)} {op} {_spell(right, prec + 1)}"
+            return f"({text})" if prec < parent else text
+        case FuncCallExpr(name, args):
+            return f"{name}({', '.join(_spell(arg, 0) for arg in args)})"
+        case TernaryExpr(cond, if_true, if_false):
+            text = f"{_spell(cond, 1)} ? {_spell(if_true, 0)} : {_spell(if_false, 0)}"
+            return f"({text})" if parent > 0 else text
+        case CastExpr(dtype, inner):
+            return f"({dtype}){_spell(inner, _ATOM)}"
+        case FlatIndex(buffer, index):
+            return f"{spell_name(buffer)}[{', '.join(_spell(e, 0) for e in index)}]"
+    raise ValueError(f"a {type(expression).__name__} has no spelling")
+
+
+def _literal_text(value: object, dtype: str) -> str:
+    """A literal written by its dtype: ``3``, ``0.5`` / ``2.0`` / ``inf`` (a point, an exponent or a word), ``true``."""
+    if dtype == "bool":
+        return "true" if value else "false"
+    if dtype == "int" and int(value) == value:
+        return str(int(value))
+    if dtype == "float":
+        return repr(float(value))
+    raise ValueError(f"the literal {value!r} of dtype {dtype!r} has no spelling")
+
+
+def parse(text: str) -> Expression:
+    """The expression ``text`` spells — ``str(expression)``'s inverse, by precedence climbing over :data:`_PRECEDENCE`.
+    A parse error names its position in the text."""
+    parser = Parser(text)
+    expression = parser.expression()
+    if parser.peek() is not None:
+        raise parser.error("unexpected text")
+    return expression
+
+
+class Parser:
+    """The reader of an expression's text. Text that holds expressions among other things (a statement) is read by
+    a subclass: it adds its own punctuation to :attr:`PUNCTUATION` and takes each expression with
+    :meth:`expression`, which stops at the first token no expression continues with."""
+
+    #: Operators and punctuation, longest first where one starts another.
+    PUNCTUATION: tuple[str, ...] = ("||", "&&", "==", "!=", "<=", ">=", "<<", ">>", "//", *"-+*/%<>^&|?:(),[]")
+    _TOKENS: dict[type, re.Pattern] = {}
+
+    def __init__(self, text: str) -> None:
+        self.text = text
+        self.tokens: list[tuple[str, str, int]] = []
+        pattern = self._pattern()
+        position = 0
+        while text[position:].strip():
+            match = pattern.match(text, position)
+            if match is None:
+                raise self.error("unexpected character", len(text) - len(text[position:].lstrip()))
+            kind = match.lastgroup
+            self.tokens.append((kind, match.group(kind), match.start(kind)))
+            position = match.end()
+        self.index = 0
+
+    @classmethod
+    def _pattern(cls) -> re.Pattern:
+        if cls not in Parser._TOKENS:
+            ops = "|".join(re.escape(op) for op in sorted(cls.PUNCTUATION, key=len, reverse=True))
+            # A number needs a digit after its point, so ``0..4`` is a number, two dots and a number.
+            Parser._TOKENS[cls] = re.compile(
+                r"\s*(?:(?P<number>\d+(?:\.\d+)?(?:[eE][+-]?\d+)?)|(?P<name>" + _NAME.pattern + r")|`(?P<quoted>[^`\n]+)`"
+                rf"|(?P<op>{ops}))"
+            )
+        return Parser._TOKENS[cls]
+
+    def error(self, message: str, position: int | None = None) -> ValueError:
+        if position is None:
+            position = self.tokens[self.index][2] if self.index < len(self.tokens) else len(self.text)
+        return ValueError(f"{message} at position {position} of {self.text!r}")
+
+    def peek(self, ahead: int = 0) -> tuple[str, str, int] | None:
+        index = self.index + ahead
+        return self.tokens[index] if index < len(self.tokens) else None
+
+    def take(self) -> tuple[str, str, int]:
+        token = self.peek()
+        if token is None:
+            raise self.error("unexpected end")
+        self.index += 1
+        return token
+
+    def expect(self, op: str) -> None:
+        if not self.accept(op):
+            raise self.error(f"expected {op!r}")
+
+    def accept(self, op: str) -> bool:
+        """Step over ``op`` when it is next."""
+        if not self.at(op):
+            return False
+        self.index += 1
+        return True
+
+    def at(self, op: str, ahead: int = 0) -> bool:
+        token = self.peek(ahead)
+        return token is not None and token[:2] == ("op", op)
+
+    def expression(self) -> Expression:
+        cond = self.binary(1)
+        if not self.accept("?"):
+            return cond
+        if_true = self.expression()
+        self.expect(":")
+        return TernaryExpr(cond, if_true, self.expression())
+
+    def expressions(self, close: str) -> tuple[Expression, ...]:
+        """A comma-separated list of expressions up to ``close``, which is consumed."""
+        items: list[Expression] = []
+        while not self.accept(close):
+            if items:
+                self.expect(",")
+            items.append(self.expression())
+        return tuple(items)
+
+    def binary(self, least: int) -> Expression:
+        left = self.operand()
+        while (token := self.peek()) is not None and token[0] == "op" and _PRECEDENCE.get(token[1], 0) >= least:
+            self.index += 1
+            left = BinaryExpr(token[1], left, self.binary(_PRECEDENCE[token[1]] + 1))
+        return left
+
+    def number(self) -> Literal | None:
+        """The number next in the text, signed or not, or ``None`` when what is next is no number."""
+        sign = "-" if self.at("-") else ""
+        kind, value, _position = self.peek(len(sign)) or ("", "", 0)
+        if kind == "number":
+            literal = Literal(float(sign + value), "float") if any(mark in value for mark in ".eE") else Literal(int(sign + value), "int")
+        elif kind == "name" and value in ("inf", "nan"):
+            literal = Literal(float(sign + value), "float")
+        else:
+            return None
+        self.index += len(sign) + 1
+        return literal
+
+    def operand(self) -> Expression:
+        if (literal := self.number()) is not None:
+            return literal
+        kind, value, _position = self.take()
+        if kind == "quoted":
+            return FlatIndex(value, self.expressions("]")) if self.accept("[") else Var(value)
+        if kind == "name":
+            if value in ("true", "false"):
+                return Literal(value == "true", "bool")
+            if self.accept("("):
+                return FuncCallExpr(value, self.expressions(")"))
+            if self.accept("["):
+                return FlatIndex(value, self.expressions("]"))
+            return Builtin(value) if value in BUILTINS else Var(value)
+        if kind == "op" and value == "(":
+            # ``(dtype)`` followed by an operand is a cast; the writer never parenthesizes a lone name otherwise.
+            if (token := self.peek()) is not None and token[0] == "name" and self.at(")", 1) and self._starts_operand(2):
+                self.index += 2
+                return CastExpr(token[1], self.operand())
+            inner = self.expression()
+            self.expect(")")
+            return inner
+        self.index -= 1
+        raise self.error("expected an operand")
+
+    def _starts_operand(self, ahead: int) -> bool:
+        token = self.peek(ahead)
+        return token is not None and (token[0] in ("number", "name", "quoted") or token[1] == "(")
+
+
+# ---------------------------------------------------------------------------
+# Simplification context + helpers
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class Interval:
+    """Closed integer interval ``[lo, hi]`` — used for static range analysis
+    that drives comparison folding (``i < N`` where ``i ∈ [0, N-1]`` → ``1``)."""
+
+    lo: int
+    hi: int
+
+
+@dataclass
+class SimplifyCtx:
+    """Range info available at a given scope. Immutable per-call; callers
+    push into a nested scope by calling :meth:`extend` to get a fresh ctx
+    (so the pass stays pure).
+
+    ``ranges`` carries integer ``Interval`` bounds (drives comparison folding
+    and the ``_div_mod_decompose`` non-negativity / ``r < n`` checks).
+    ``bounds`` carries a *symbolic* exclusive upper bound per name — an ``Expression``
+    ``B`` with ``var < B`` known — so a modulo by a non-literal divisor folds
+    (``i % seq_len → i`` when ``i`` is a loop axis whose extent is ``seq_len``).
+    A static integer interval can't represent ``< seq_len`` for a symbolic
+    ``seq_len``; ``bounds`` fills that gap without making ``Interval`` symbolic."""
+
+    ranges: dict[str, Interval]
+    bounds: dict[str, Expression] = field(default_factory=dict)
+
+    @classmethod
+    def empty(cls) -> SimplifyCtx:
+        return cls({}, {})
+
+    def extend(self, name: str, interval: Interval, bound: Expression | None = None) -> SimplifyCtx:
+        new_bounds = self.bounds if bound is None else {**self.bounds, name: bound}
+        return SimplifyCtx({**self.ranges, name: interval}, new_bounds)
+
+
+def _make_int_literal(v: int) -> Literal:
+    return Literal(int(v), "int")
+
+
+def _is_zero(e: object) -> bool:
+    return isinstance(e, Literal) and e.value == 0
+
+
+def _is_one(e: object) -> bool:
+    return isinstance(e, Literal) and e.value == 1
+
+
+def _is_truthy(e: object) -> bool:
+    return isinstance(e, Literal) and bool(e.value)
+
+
+def _is_falsy(e: object) -> bool:
+    return isinstance(e, Literal) and not bool(e.value)
+
+
+def _fold_binop_literals(op: str, left: Literal, right: Literal) -> Literal:
+    """Constant-fold a ``BinaryExpr`` whose children are both ``Literal``.
+    Preserves int dtype when both operands are int and the result is integral."""
+    folded = BinaryExpr(op, left, right).eval({})
+    if isinstance(folded, bool):
+        return _make_int_literal(1 if folded else 0)
+    both_int = left.dtype == "int" and right.dtype == "int"
+    if isinstance(folded, int) and both_int:
+        return _make_int_literal(folded)
+    return Literal(float(folded), "float")
+
+
+def _multiplicative_factors(expression: Expression) -> tuple[list[Expression], int]:
+    """Flatten an ``Expression`` tree of ``*`` into ``([non-int factors], int coefficient)``.
+
+    ``(a * 4) * b`` → ``([Var('a'), Var('b')], 4)``. Used by
+    ``_cancel_common_factors`` to canonicalize both sides of ``//`` / ``%``
+    before checking for cancellation.
+    """
+    if isinstance(expression, Literal) and expression.dtype == "int" and isinstance(expression.value, int):
+        return [], expression.value
+    if isinstance(expression, BinaryExpr) and expression.op == "*":
+        lf, lk = _multiplicative_factors(expression.left)
+        rf, rk = _multiplicative_factors(expression.right)
+        return lf + rf, lk * rk
+    return [expression], 1
+
+
+def _is_positive(expression: Expression, ctx: SimplifyCtx) -> bool:
+    """Conservatively decide whether ``expression`` is provably ``>= 1``.
+
+    Used to gate factor cancellation in ``a // b → ...`` — cancelling a
+    shared factor is unsound if that factor could be zero. Shape vars are
+    flagged via ``SimplifyCtx.ranges`` by ``Dim._simplify``."""
+    if isinstance(expression, Literal) and isinstance(expression.value, int):
+        return expression.value >= 1
+    rng = expression.range(ctx)
+    return rng is not None and rng.lo >= 1
+
+
+def _rebuild_product(factors: list[Expression], k: int) -> Expression:
+    """Inverse of ``_multiplicative_factors``: reassemble into an ``Expression``."""
+    if k == 0:
+        return _make_int_literal(0)
+    if not factors:
+        return _make_int_literal(k)
+    out: Expression = factors[0]
+    for f in factors[1:]:
+        out = BinaryExpr("*", out, f)
+    if k != 1:
+        out = BinaryExpr("*", out, _make_int_literal(k))
+    return out
+
+
+def _cancel_common_factors(op: str, left: Expression, right: Expression, ctx: SimplifyCtx) -> Expression | None:
+    """Try to simplify ``left op right`` (``op in {"/", "//", "%"}``) by
+    cancelling positive multiplicative factors common to both sides.
+
+    For ``(s * 128) // (s * 4)`` with ``s >= 1`` (from ``ctx.ranges``):
+    cancels the ``s`` and gcds the integer parts → ``32``. Returns ``None``
+    when no cancellation applies, letting the caller fall through to the
+    default ``BinaryExpr(op, left, right)`` path.
+    """
+    import math  # noqa: PLC0415
+
+    L_factors, L_k = _multiplicative_factors(left)
+    R_factors, R_k = _multiplicative_factors(right)
+
+    cancelled = False
+    R_remaining = list(R_factors)
+    L_remaining: list[Expression] = []
+    common_factors: list[Expression] = []  # factors removed from BOTH sides (for the % identity)
+    common_int = 1
+    for f in L_factors:
+        matched_idx = None
+        for i, rf in enumerate(R_remaining):
+            if f == rf and _is_positive(f, ctx):
+                matched_idx = i
+                break
+        if matched_idx is not None:
+            R_remaining.pop(matched_idx)
+            cancelled = True
+            common_factors.append(f)
+        else:
+            L_remaining.append(f)
+
+    if L_k > 0 and R_k > 0:
+        g = math.gcd(L_k, R_k)
+        if g > 1:
+            L_k //= g
+            R_k //= g
+            cancelled = True
+            common_int = g
+
+    if not cancelled:
+        return None
+
+    new_left = _rebuild_product(L_remaining, L_k)
+    new_right = _rebuild_product(R_remaining, R_k)
+    if op in ("/", "//"):
+        # (c·x) / (c·y) == x / y — the common factor cancels outright.
+        if _is_one(new_right):
+            return new_left
+        if _is_zero(new_left):
+            return _make_int_literal(0)
+    elif op == "%":
+        if _is_one(new_right) or _is_zero(new_left):
+            return _make_int_literal(0)
+        # (c·x) % (c·y) == c · (x % y) — the common factor does NOT cancel out
+        # of a modulo; it scales the remainder. Multiplying it back is the fix
+        # for the old ``(f*8) % 64 → f % 8`` bug (should be ``8 * (f % 8)``).
+        common = _rebuild_product(common_factors, common_int)
+        mod = BinaryExpr("%", new_left, new_right)
+        return mod if _is_one(common) else BinaryExpr("*", common, mod)
+    return BinaryExpr(op, new_left, new_right)
+
+
+def _addend_chain(e: Expression) -> list[Expression]:
+    """Flatten a ``+`` tree into its addend list, left-to-right."""
+    if isinstance(e, BinaryExpr) and e.op == "+":
+        return _addend_chain(e.left) + _addend_chain(e.right)
+    return [e]
+
+
+def _scaled_term(e: Expression, ops: tuple[str, ...]) -> tuple[Expression, int, int] | None:
+    """Read ``e`` as ``(x <op> c) * a`` — either ``*`` operand order, bare form ``a = 1`` —
+    with ``op`` one of ``ops`` and both ``c`` and ``a`` positive int literals. Returns
+    ``(x, c, a)`` or ``None``."""
+    a = 1
+    if isinstance(e, BinaryExpr) and e.op == "*":
+        for lit_side, other in ((e.right, e.left), (e.left, e.right)):
+            if isinstance(lit_side, Literal) and lit_side.dtype == "int" and isinstance(lit_side.value, int) and lit_side.value > 0:
+                a, e = lit_side.value, other
+                break
+    if isinstance(e, BinaryExpr) and e.op in ops:
+        c = e.right
+        if isinstance(c, Literal) and c.dtype == "int" and isinstance(c.value, int) and c.value > 1:
+            return e.left, c.value, a
+    return None
+
+
+def _fold_divmod_recompose(left: Expression, right: Expression, ctx: SimplifyCtx) -> Expression | None:
+    """Fold the split-index recomposition ``(x / c) * (c·k) + (x % c) * k → x * k`` inside an
+    additive chain (any term positions; ``k = 1`` is the common bare pair). The identity is
+    unconditional for C integer semantics — ``(x / c) * c + x % c == x`` holds for every int
+    ``x`` under truncated *and* floor division — so no range guard is needed; the int-literal
+    dtype checks keep float arithmetic out. Returns the re-simplified sum, or ``None``."""
+    terms = _addend_chain(left) + _addend_chain(right)
+    for i, t1 in enumerate(terms):
+        q = _scaled_term(t1, ("/", "//"))
+        if q is None:
+            continue
+        x, c, a = q
+        if a % c:
+            continue
+        k = a // c
+        for j, t2 in enumerate(terms):
+            if j == i:
+                continue
+            r = _scaled_term(t2, ("%",))
+            if r is None or r != (x, c, k):
+                continue
+            out: Expression = x if k == 1 else BinaryExpr("*", x, _make_int_literal(k))
+            for t in (t for pos, t in enumerate(terms) if pos not in (i, j)):
+                out = BinaryExpr("+", out, t)
+            return out.simplify(ctx)
+    return None
+
+
+def _div_mod_decompose(expression: Expression, n: int, ctx: SimplifyCtx) -> tuple[Expression, Expression] | None:
+    """Try to express ``expression`` as ``n * q + r`` with ``0 <= r < n``, both
+    proven from operand ranges. Used by ``BinaryExpr.simplify`` to fold
+    ``expression / Lit(n)`` → ``q`` and ``expression % Lit(n)`` → ``r`` when the
+    decomposition succeeds; returns ``None`` to signal "give up, keep
+    the original ``/`` or ``%``".
+    Cleans up collapsed-reshape indices like ``((X*N + Y) / N) % M``
+    that compose-indexmaps emits, where range bounds make the div/mod
+    pure strength-reduction, and sees through a division already standing
+    in the way — the shape a sub-byte-packed operand address arrives in.
+
+    Every arm proves its operands non-negative, so a successful return
+    carries that as an invariant; :func:`_split_addend` rests on it.
+    """
+    if isinstance(expression, Literal) and expression.dtype == "int" and isinstance(expression.value, int) and expression.value >= 0:
+        return (_make_int_literal(expression.value // n), _make_int_literal(expression.value % n))
+    if isinstance(expression, BinaryExpr) and expression.op == "*":
+        for k_side, other_side in ((expression.right, expression.left), (expression.left, expression.right)):
+            if not (isinstance(k_side, Literal) and k_side.dtype == "int" and isinstance(k_side.value, int)):
+                continue
+            if k_side.value <= 0:
+                continue
+            rng = other_side.range(ctx)
+            if rng is None or rng.lo < 0:
+                continue
+            k = k_side.value
+            if k % n == 0:
+                q_expression = BinaryExpr("*", other_side, _make_int_literal(k // n)).simplify(ctx)
+                return (q_expression, _make_int_literal(0))
+            if n % k == 0:
+                # ``x*k = n*(x / d) + k*(x % d)`` for ``d = n/k``: the collapsed-reshape index
+                # ``(head*128 + col) / 1024`` (a GQA group fold over the head-dim sweep) reads as
+                # ``head / 8`` once the remainder ``(head % 8)*128 + col`` proves below ``n``.
+                d = _make_int_literal(n // k)
+                q_expression = BinaryExpr("/", other_side, d).simplify(ctx)
+                r_expression = BinaryExpr("*", BinaryExpr("%", other_side, d), _make_int_literal(k)).simplify(ctx)
+                return (q_expression, r_expression)
+    if isinstance(expression, BinaryExpr) and expression.op == "+":
+        L = _div_mod_decompose(expression.left, n, ctx)
+        R = _div_mod_decompose(expression.right, n, ctx)
+        # An addend that is a clean multiple of ``n`` leaves the WHOLE remainder to its partner, so
+        # the partner needs no closed form of its own — the definition carries it (:func:`_split_addend`).
+        # Any other pairing sums two live remainders, and two live remainders never prove below ``n``.
+        if L is not None and R is None and _is_zero(L[1]):
+            R = _split_addend(expression.right, n, ctx)
+        elif R is not None and L is None and _is_zero(R[1]):
+            L = _split_addend(expression.left, n, ctx)
+        if L is None or R is None:
+            return None
+        ql, rl = L
+        qr, rr = R
+        r_sum = BinaryExpr("+", rl, rr).simplify(ctx)
+        rng = r_sum.range(ctx)
+        if rng is None or rng.lo < 0 or rng.hi >= n:
+            return None
+        q = BinaryExpr("+", ql, qr).simplify(ctx)
+        return (q, r_sum)
+    rng = expression.range(ctx)
+    if rng is not None and rng.lo >= 0 and rng.hi < n:
+        return (_make_int_literal(0), expression)
+    if isinstance(expression, BinaryExpr) and expression.op in ("/", "//"):
+        # A division already standing between us and the sum: ``(A / d) = n·q + r`` follows from
+        # ``A = (n·d)·q + R``, since ``n·d·q`` is divisible by ``d`` and ``R < n·d`` leaves
+        # ``R / d < n``. This is how a pair-packed operand address separates — an NVFP4 weight
+        # spells ``((row·K + k) / 2) % (K/2)``, and asking the flat offset for its ``K``-decomposition
+        # answers with the row on the quotient side and ``k / 2`` as the remainder, freeing every
+        # consumer that needs the row axis outside a div/mod.
+        divisor = expression.right
+        if isinstance(divisor, Literal) and divisor.dtype == "int" and isinstance(divisor.value, int) and divisor.value > 0:
+            inner = _div_mod_decompose(expression.left, n * divisor.value, ctx)
+            if inner is not None:
+                q_inner, r_inner = inner
+                return (q_inner, BinaryExpr(expression.op, r_inner, divisor).simplify(ctx))
+    return None
+
+
+def _split_addend(expression: Expression, n: int, ctx: SimplifyCtx) -> tuple[Expression, Expression] | None:
+    """One addend as ``n·q + r`` through the DEFINITION ``expression = n·(expression/n) + expression%n``, for a sum
+    whose OTHER addend is a clean multiple of ``n``.
+
+    Sound for a non-negative ``expression`` — every :func:`_div_mod_decompose` arm proves its operands
+    non-negative, so this restates that invariant on the arm that gave up. Restating an addend
+    simplifies nothing by itself; what it buys is the partner. A packed operand address adds a row
+    term that IS a multiple of the divisor to a reduce term that is not, and once the reduce term
+    carries its own quotient and remainder the row cancels out of both — which is the point, since a
+    consumer asking whether the row axis survives outside a div/mod then gets ``no``."""
+    rng = expression.range(ctx)
+    if rng is None or rng.lo < 0:
+        return None
+    lit = _make_int_literal(n)
+    return (BinaryExpr("/", expression, lit).simplify(ctx), BinaryExpr("%", expression, lit).simplify(ctx))
+
+
+def _mod_below_divisor(left: Expression, right: Expression, ctx: SimplifyCtx) -> Expression | None:
+    """Fold ``left % D`` → ``left`` for a *non-literal* divisor ``D`` when
+    ``0 <= left < D`` is provable — the symbolic-extent counterpart of the
+    ``_div_mod_decompose`` modulo path (which only handles a literal ``n``).
+
+    Covers the collapsed-reshape seq coordinate ``i % seq_len`` left behind by
+    compose-indexmaps: after the inner ``(i*stride + feat) / stride`` folds to
+    ``i`` (a loop var whose extent is exactly ``seq_len``, so ``i ∈ [0,
+    seq_len)``), the outer ``% seq_len`` is a no-op. A static ``seq_len``
+    constant-folds it away; a symbolic one otherwise survives as a runtime
+    integer modulo (the slow delinearized gmem index). ``D``'s exclusive
+    bound is read from ``SimplifyCtx.bounds`` (registered per loop axis)."""
+    if not isinstance(left, Var):
+        return None
+    bound = ctx.bounds.get(left.name)
+    if bound is None or bound.simplify(ctx) != right:
+        return None
+    rng = left.range(ctx)
+    if rng is not None and rng.lo >= 0:
+        return left
+    return None
+
+
+def _static_cmp(op: str, la: Interval, lb: Interval) -> bool | None:
+    """Decide a comparison statically from operand ranges, or return ``None``."""
+    if op == "<":
+        if la.hi < lb.lo:
+            return True
+        if la.lo >= lb.hi:
+            return False
+        return None
+    if op == "<=":
+        if la.hi <= lb.lo:
+            return True
+        if la.lo > lb.hi:
+            return False
+        return None
+    if op == ">":
+        if la.lo > lb.hi:
+            return True
+        if la.hi <= lb.lo:
+            return False
+        return None
+    if op == ">=":
+        if la.lo >= lb.hi:
+            return True
+        if la.hi < lb.lo:
+            return False
+        return None
+    if op == "==":
+        if la.hi < lb.lo or la.lo > lb.hi:
+            return False
+        if la.lo == la.hi == lb.lo == lb.hi:
+            return True
+        return None
+    return None
+
+
+# ---------------------------------------------------------------------------
+# Coordinate-expression helpers for IndexMapOp
+# ---------------------------------------------------------------------------
+#
+# ``IndexMapOp`` (in ``ir.tensor.ir``) describes layout-only ops (slice, cat,
+# transpose, reshape, unsqueeze) by mapping output coordinates to input
+# coordinates via the ``Expression`` AST above. Convention: an IndexMap's
+# ``coord_map[i]`` is an ``Expression`` over placeholder variables
+# ``Var("out_coord_0")``, ``Var("out_coord_1")``, ... — one per output
+# dimension. At lowering time the placeholders are substituted with the
+# ``Expression``s that the kernel uses for its actual output coordinates.
+
+
+def split_anchor(expression: Expression) -> tuple[int, Expression] | None:
+    """``expression`` as ``(its integer anchor, the rest)`` — ``a + 4`` is ``(4, a)`` — or ``None`` when it
+    is not affine in its variables with a literal anchor. Two reads of one tensor at successive
+    offsets share the rest and differ in the anchor."""
+    form = affine_form(expression, expression.free_vars())
+    if form is None:
+        return None
+    try:
+        anchor = int(form[0].eval({}))
+    except (KeyError, TypeError, ValueError):
+        return None
+    rest: Expression = Literal(0, "int")
+    for name, coeff in sorted(form[1].items()):
+        rest = BinaryExpr("+", rest, Var(name) if coeff == 1 else BinaryExpr("*", Var(name), Literal(coeff, "int")))
+    return anchor, rest
+
+
+def affine_form(expression: Expression, vars: frozenset[str] | set[str]) -> tuple[Expression, dict[str, int]] | None:
+    """Decompose ``expression`` as ``anchor + sum(coeffs[v] * Var(v))`` over the given var set.
+
+    Returns ``(anchor, coeffs)`` where ``anchor`` is the part of ``expression`` that's
+    free of ``vars`` (with each ``Var(v)`` substituted to 0) and ``coeffs[v]`` is
+    the integer coefficient of ``Var(v)``. Returns ``None`` when ``expression`` isn't
+    affine in ``vars`` — i.e. it contains a non-additive use of one of those
+    vars (``v / N``, ``v % N``, ``v * v``, ``v`` inside a ternary or call) or
+    a non-literal-int coefficient.
+
+    Vars not in ``vars`` are treated as opaque constants and accumulate into
+    ``anchor`` unchanged. Missing vars in ``coeffs`` mean coefficient 0.
+    """
+    if not (expression.free_vars() & set(vars)):
+        return expression, {}  # opaque w.r.t. ``vars`` — folds into the anchor
+    if isinstance(expression, Var):
+        return Literal(0, "int"), {expression.name: 1}  # expression.name in vars (else above)
+    if isinstance(expression, BinaryExpr) and expression.op in ("+", "-"):
+        left = affine_form(expression.left, vars)
+        right = affine_form(expression.right, vars)
+        if left is None or right is None:
+            return None
+        l_anchor, l_coeffs = left
+        r_anchor, r_coeffs = right
+        sign = 1 if expression.op == "+" else -1
+        anchor = BinaryExpr(expression.op, l_anchor, r_anchor)
+        coeffs = dict(l_coeffs)
+        for v, c in r_coeffs.items():
+            coeffs[v] = coeffs.get(v, 0) + sign * c
+        return anchor, {v: c for v, c in coeffs.items() if c != 0}
+    if isinstance(expression, BinaryExpr) and expression.op == "*":
+        l_uses = expression.left.free_vars() & vars
+        r_uses = expression.right.free_vars() & vars
+        if l_uses and r_uses:
+            return None  # var * var — non-affine
+        side, mult = (expression.right, expression.left) if not l_uses else (expression.left, expression.right)
+        if not (isinstance(mult, Literal) and isinstance(mult.value, int)):
+            return None  # symbolic multiplier — would yield non-int coeff
+        sub = affine_form(side, vars)
+        if sub is None:
+            return None
+        sub_anchor, sub_coeffs = sub
+        anchor = BinaryExpr("*", sub_anchor, mult) if not l_uses else BinaryExpr("*", mult, sub_anchor)
+        return anchor, {v: c * mult.value for v, c in sub_coeffs.items()}
+    if expression.free_vars() & set(vars):
+        return None  # vars appear inside a non-affine context (div, mod, ternary, ...)
+    return expression, {}
+
+
+def index_set_size(expressions: tuple[Expression, ...], var_extents: dict[str, int]) -> int | None:
+    """Upper bound on ``|{tuple(e(env) for e in expressions) : env in extents}|``.
+
+    For each Expression, decompose to affine form over ``var_extents.keys()``. The
+    per-dim projection size is bounded by ``1 + sum(|c_v| * (extent_v - 1))``
+    over the var coefficients in that dim — this is tight when the affine
+    form's coefficients align (rare false positive only across correlated
+    dims). The total is the product over dims (over-counts when dims are
+    correlated, fine as an upper bound). Returns ``None`` if any expression isn't
+    affine in ``var_extents``.
+
+    Used by staging to compute reuse: ``work / index_set_size`` over a
+    Load's index gives the per-element fan-in, i.e., how many threads /
+    iterations read the same source value.
+    """
+    var_set = frozenset(var_extents)
+    total = 1
+    for e in expressions:
+        form = affine_form(e, var_set)
+        if form is None:
+            return None
+        _, coeffs = form
+        size = 1
+        for v, c in coeffs.items():
+            size += abs(c) * (var_extents[v] - 1)
+        total *= size
+    return total
+
+
+PLACEHOLDER_PREFIX = "out_coord_"
+
+
+def placeholder(d: int) -> Var:
+    """Return the placeholder variable for output coordinate axis ``d``."""
+    return Var(f"{PLACEHOLDER_PREFIX}{d}")
+
+
+def is_placeholder(expression: object, d: int | None = None) -> bool:
+    """Check if ``expression`` is a placeholder ``Var``. If ``d`` is given, check that axis."""
+    if not isinstance(expression, Var):
+        return False
+    if not expression.name.startswith(PLACEHOLDER_PREFIX):
+        return False
+    if d is None:
+        return True
+    return expression.name == f"{PLACEHOLDER_PREFIX}{d}"
+
+
+# ---------------------------------------------------------------------------
+# Free functions — numpy callables for intrinsics numpy itself doesn't expose
+# under the same name. ``resolve_fn`` tries this module first (so our ``max``
+# means elementwise maximum, not the reduction ``np.max``) then falls back to
+# ``numpy``.
+# ---------------------------------------------------------------------------

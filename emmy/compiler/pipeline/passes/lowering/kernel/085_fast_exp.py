@@ -16,7 +16,7 @@ from emmy.compiler.graph import Node
 from emmy.compiler.ir.elementwise import ElementwiseImpl
 from emmy.compiler.ir.kernel import KernelOp
 from emmy.compiler.ir.kernel.ir import RegStore
-from emmy.compiler.ir.stmt import Stmt
+from emmy.compiler.ir.stmt import Statement
 from emmy.compiler.pipeline import Pattern, RuleSkipped
 from emmy.compiler.pipeline.search.space import FAST_EXP, precision_pin
 
@@ -34,7 +34,7 @@ def rewrite(root: Node) -> KernelOp | None:
     return replace(op, body=op.body.map(_lower_exp), knobs={**op.knobs, FAST_EXP.name: True})
 
 
-def _lower_exp(stmt: Stmt) -> Stmt:
+def _lower_exp(stmt: Statement) -> Statement:
     if isinstance(stmt, RegStore) and stmt.epilogue is not None:
         # The store's lambda has its own SSA scope; it is not a nested statement body.
         stmt = stmt.replace(epilogue=stmt.epilogue.map(_lower_exp))

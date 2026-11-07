@@ -24,12 +24,12 @@ from emmy.compiler.dtype import BF16, F8E4M3, F16, F32, F4E2M1x2
 from emmy.compiler.graph import Tensor
 from emmy.compiler.ir.address import BYTE_SLAB_PAD
 from emmy.compiler.ir.axis import Axis
-from emmy.compiler.ir.expr import BinaryExpr, CastExpr, Literal, Var
+from emmy.compiler.ir.expression import Literal
 from emmy.compiler.ir.pure import Fold
 from emmy.compiler.ir.schedule import Stage, Tile, Work
 from emmy.compiler.ir.schedule.packing import packed_readings
 from emmy.compiler.ir.schedule.staging import resolve_warp_stage
-from emmy.compiler.ir.stmt import Assign, Load
+from emmy.compiler.ir.stmt import Load, parse_body
 from tests.compiler.helpers import literal_classic_context, requires_cuda, requires_sm
 from tests.compiler.terms import contraction, projection
 
@@ -50,22 +50,21 @@ def _packed_cone(k: int, *, block: int = 16, k_last: bool = True, row: str = "n"
 
     ``k_last=False`` swaps the bits load's index so the packed axis is the ROW — the layout the
     drain cannot read."""
-    n, kv = Var(row), Var("k")
-    q = prefix
-    flat = BinaryExpr("+", BinaryExpr("*", n, _lit(k)), kv)
-    sblock = BinaryExpr("%", BinaryExpr("/", flat, _lit(block)), _lit(k // block))
-    byte = BinaryExpr("%", BinaryExpr("/", flat, _lit(2)), _lit(k // 2))
-    pair = BinaryExpr("%", flat, _lit(2))
-    bits_index = (n, byte) if k_last else (byte, n)
-    body = (
-        Load(name=f"{q}in0", input=f"{q}w_scale_2", index=(_lit(0), _lit(0)), dtype=None),
-        Load(name=f"{q}in1", input=f"{q}w_scale_bits", index=(n, sblock), dtype=None),
-        Load(name=f"{q}in2", input=f"{q}w_bits", index=bits_index, dtype=None),
-        Assign(name=f"{q}v0", op="from_f8e4m3", args=(f"{q}in1",)),
-        Assign(name=f"{q}v1", op="copy", args=(f"{q}in2",)),
-        Assign(name=f"{q}v2", op="multiply", args=(f"{q}in0", f"{q}v0")),
-        Load(name=f"{q}in3", input=f"{q}w_f4_pairs", index=(CastExpr(dtype="int", expr=Var(f"{q}v1")), pair), dtype=None),
-        Assign(name=f"{q}v3", op="multiply", args=(f"{q}in3", f"{q}v2")),
+    n, q = row, prefix
+    flat = f"({n} * {k} + k)"
+    byte = f"{flat} / 2 % {k // 2}"
+    bits_index = f"{n}, {byte}" if k_last else f"{byte}, {n}"
+    body = parse_body(
+        f"""
+        {q}in0 = load {q}w_scale_2[0, 0]
+        {q}in1 = load {q}w_scale_bits[{n}, {flat} / {block} % {k // block}]
+        {q}in2 = load {q}w_bits[{bits_index}]
+        {q}v0 = from_f8e4m3({q}in1)
+        {q}v1 = copy({q}in2)
+        {q}v2 = multiply({q}in0, {q}v0)
+        {q}in3 = load {q}w_f4_pairs[(int){q}v1, {flat} % 2]
+        {q}v3 = multiply({q}in3, {q}v2)
+        """
     )
     return projection(body=body)
 
@@ -73,7 +72,7 @@ def _packed_cone(k: int, *, block: int = 16, k_last: bool = True, row: str = "n"
 def _node(*, m=512, n=4096, k=4096, block=16, a_dtype=F16, k_last=True):
     """``x[m, k] @ decode(packed w)`` — a contraction whose B is the packed decode cone."""
     axes = (Axis("m", Dim(m)), Axis("n", Dim(n)))
-    a = Load(name="a", input="x", index=(Var("m"), Var("k")), dtype=a_dtype)
+    (a,) = parse_body(f"{a_dtype.name} a = load x[m, k]")
     ka = Axis("k", Dim(k))
     node = contraction(ka, a, (_packed_cone(k, block=block, k_last=k_last), "acc"))
     inputs = {
@@ -110,8 +109,12 @@ def test_match_packed_b_node_reads_the_cone_off_the_contraction():
 
 def test_match_packed_b_node_declines_a_materialized_b():
     """An ordinary matmul has no cone to recognize — the packed reading never applies to it."""
-    a = Load(name="a", input="x", index=(Var("m"), Var("k")), dtype=F16)
-    b = Load(name="wb", input="w", index=(Var("n"), Var("k")), dtype=F16)
+    a, b = parse_body(
+        """
+        f16 a = load x[m, k]
+        f16 wb = load w[n, k]
+        """
+    )
     node = contraction(Axis("k", Dim(4096)), a, (b, "acc"))
     inputs = {"x": Tensor("x", (512, 4096), F16), "w": Tensor("w", (4096, 4096), F16)}
     assert _packed(node, inputs)[0] is None
@@ -138,7 +141,7 @@ def _two_channel_node(*, m=512, n=4096, k=4096, blocks=(16, 16)):
     weights, one accumulator each. What a quantized SwiGLU MLP binds to once its two projections
     fuse through the multiply they feed."""
     axes = (Axis("m", Dim(m)), Axis("n", Dim(n)))
-    a = Load(name="a", input="x", index=(Var("m"), Var("k")), dtype=F16)
+    (a,) = parse_body("f16 a = load x[m, k]")
     ka = Axis("k", Dim(k))
     node = contraction(
         ka,
@@ -475,16 +478,12 @@ def test_packed_b_declines_a_byte_row_under_sixteen():
 def _rows(node, inputs, axes, ka, pins=None):
     """The ``STAGE`` rows the schedule offers this node at a warp tile, as resolved spellings."""
     from emmy.compiler.context import Context
-    from emmy.compiler.ir.stmt import Write
     from emmy.compiler.ir.tile import Placement, TileOp
     from emmy.compiler.ir.tile.ir import OutputSpec
 
     # One store per carried state: the single-channel node exposes ``acc``, a two-channel one
     # ``acc0`` and ``acc1``, and the kernel writes each to its own output.
-    specs = tuple(
-        OutputSpec(write=Write(output=f"y{i}" if i else "y", index=(Var("m"), Var("n")), value=state))
-        for i, state in enumerate(node.combine.results)
-    )
+    specs = tuple(OutputSpec(write=parse_body(f"y{i or ''}[m, n] = {state}")[0]) for i, state in enumerate(node.combine.results))
     op = TileOp(
         op=projection((node,)),
         name="y",
@@ -1027,7 +1026,7 @@ def test_packed_cut_pieces_orient_the_activation_as_a(tmp_path):
         assert {f"{name}_bits" for name in _CUT_WIDTHS} & _reads(b) and "x" not in _reads(b), _reads(b)
         view = node.as_contraction()
         (spec,) = tile.output_specs
-        assert spec.write.index == (Var(view.left), Var(view.right)), "the output stays [token, weight row]"
+        assert [str(e) for e in spec.write.index] == [view.left, view.right], "the output stays [token, weight row]"
 
 
 @pytest.mark.parametrize("stage", ["d2/smem-async", "d2/smem-tma"])
@@ -1256,7 +1255,6 @@ def test_native_fp4_runtime_rows_reuse_one_compilation(k):
     from emmy.compiler.context import Context
     from emmy.compiler.graph import Graph
     from emmy.compiler.ir.base import InputOp
-    from emmy.compiler.ir.stmt import Write
     from emmy.compiler.ir.tile import OutputSpec, Placement, TileOp
     from emmy.compiler.pipeline import CUDA_PASSES, Pipeline
     from emmy.compiler.pipeline.search.pins import pinned_knobs
@@ -1269,7 +1267,7 @@ def test_native_fp4_runtime_rows_reuse_one_compilation(k):
         place=Placement(free=axes),
         axes=(*axes, ka),
         inputs=inputs,
-        output_specs=(OutputSpec(Write(output="y", index=(Var("m"), Var("n")), value="acc")),),
+        output_specs=(OutputSpec(parse_body("y[m, n] = acc")[0]),),
     )
     graph = Graph()
     for name, tensor in inputs.items():
@@ -1351,7 +1349,6 @@ def test_fp4_tma_leaves_computed_activation_codes_to_cp_async():
 
 def test_a_packed_byte_slab_refuses_a_producer_band_under_tma():
     from emmy.compiler.context import Context
-    from emmy.compiler.ir.stmt import Write
     from emmy.compiler.ir.tile import Placement, TileOp
     from emmy.compiler.ir.tile.ir import OutputSpec
 
@@ -1362,7 +1359,7 @@ def test_a_packed_byte_slab_refuses_a_producer_band_under_tma():
         place=Placement(free=axes),
         axes=(*axes, ka),
         inputs=inputs,
-        output_specs=(OutputSpec(write=Write(output="y", index=(Var("m"), Var("n")), value="acc")),),
+        output_specs=(OutputSpec(write=parse_body("y[m, n] = acc")[0]),),
     )
     target = Context.from_target((9, 0))
     from emmy.compiler.ir.schedule.classic import ClassicProblem
@@ -1407,7 +1404,6 @@ def test_native_fp4_unit_n_matches_decoded_numpy(rows, k):
     from emmy.compiler.context import Context
     from emmy.compiler.graph import Graph
     from emmy.compiler.ir.base import InputOp
-    from emmy.compiler.ir.stmt import Write
     from emmy.compiler.ir.tile import Placement, TileOp
     from emmy.compiler.ir.tile.ir import OutputSpec
     from emmy.compiler.pipeline import CUDA_PASSES, Pipeline
@@ -1420,7 +1416,7 @@ def test_native_fp4_unit_n_matches_decoded_numpy(rows, k):
         place=Placement(free=axes),
         axes=(*axes, ka),
         inputs=inputs,
-        output_specs=(OutputSpec(write=Write(output="y", index=(Var("m"), Var("n")), value="acc")),),
+        output_specs=(OutputSpec(write=parse_body("y[m, n] = acc")[0]),),
     )
     graph = Graph()
     for name, tensor in inputs.items():

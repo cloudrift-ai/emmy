@@ -4,13 +4,10 @@ from importlib import import_module
 
 import pytest
 
-from emmy.compiler.dim import Dim
 from emmy.compiler.dtype import BF16, F16, F32
-from emmy.compiler.ir.axis import Axis
-from emmy.compiler.ir.elementwise import ElementwiseImpl
-from emmy.compiler.ir.expr import Literal
+from emmy.compiler.ir.expression import Literal
 from emmy.compiler.ir.kernel import KernelOp
-from emmy.compiler.ir.stmt import Accum, Assign, Body, Load, Loop
+from emmy.compiler.ir.stmt import Body, Load, parse_body
 
 _vectorize_loads = import_module("emmy.compiler.pipeline.passes.lowering.kernel.050_vectorize_loads")._vectorize_body
 _vectorize_stores = import_module("emmy.compiler.pipeline.passes.lowering.kernel.080_vectorize_stores")._vectorize_body
@@ -20,13 +17,13 @@ _pair_ldmatrix = import_module("emmy.compiler.pipeline.passes.lowering.kernel.09
 
 
 def test_noop_kernel_peepholes_reuse_the_body() -> None:
-    inner = Body(
-        (
-            Load(name="x", input="input", index=(Literal(0, "int"),), dtype=F32),
-            Assign(name="y", op=ElementwiseImpl("abs"), args=("x",), dtype=F32),
-        )
+    body = parse_body(
+        """
+        for k in 0..4:
+            f32 x = load input[0]
+            f32 y = abs(x)
+        """
     )
-    body = Body((Loop(axis=Axis("k", Dim(4)), body=inner),))
     op = KernelOp(body=body)
     interleaved, interleave_changed = _interleave._walk(body)
     paired, pair_changed = _pair_ldmatrix(body)
@@ -39,36 +36,34 @@ def test_noop_kernel_peepholes_reuse_the_body() -> None:
 
 def test_interleave_keeps_load_before_nested_consumer() -> None:
     """A load used in a serial reduction loop must remain in the enclosing scope."""
-    invariant = Load(name="epsilon", input="epsilon_buffer", index=(Literal(0, "int"),), dtype=F32)
-    loop = Loop(
-        axis=Axis("k", Dim(4)),
-        body=Body(
-            (
-                Load(name="x", input="input", index=(Literal(0, "int"),), dtype=F32),
-                Assign(name="sum_term", op=ElementwiseImpl("add"), args=("epsilon", "x"), dtype=F32),
-                Accum(name="sum", value="sum_term", op=ElementwiseImpl("add"), dtype=F32),
-            )
-        ),
+    body = parse_body(
+        """
+        f32 epsilon = load epsilon_buffer[0]
+        for k in 0..4:
+            f32 x = load input[0]
+            f32 sum_term = add(epsilon, x)
+            f32 sum <- add(sum, sum_term)
+        f32 result = add(sum, epsilon)
+        """
     )
-    trailing = Assign(name="result", op=ElementwiseImpl("add"), args=("sum", "epsilon"), dtype=F32)
+    invariant, loop, _ = body
 
-    reordered = tuple(_sink_loads(Body((invariant, loop, trailing))))
+    reordered = tuple(_sink_loads(body))
 
     assert reordered.index(invariant) < reordered.index(loop)
 
 
-def _unrolled_pointwise(*, between=(), dtype=F16) -> Body:
+def _unrolled_pointwise(*, between: str = "", dtype=F16) -> Body:
     """Four unrolled cells of ``out = x * x``: each cell loads its 16-bit element and squares it
-    before the next cell's load, as the unroller emits a pointwise body."""
-    from emmy.compiler.ir.expr import Var
-
-    stmts = []
+    before the next cell's load, as the unroller emits a pointwise body; ``between`` is the text of
+    the statements that sit between the third cell's load and its square."""
+    lines = []
     for u in range(4):
-        stmts.append(Load(name=f"x{u}", input="x", index=(Var("a0") * Literal(4, "int") + Literal(u, "int"),), dtype=dtype))
+        lines.append(f"{dtype.name} x{u} = load x[a0 * 4 + {u}]")
         if u == 2:
-            stmts.extend(between)
-        stmts.append(Assign(name=f"y{u}", op=ElementwiseImpl("multiply"), args=(f"x{u}", f"x{u}"), dtype=dtype))
-    return Body(tuple(stmts))
+            lines.append(between)
+        lines.append(f"{dtype.name} y{u} = multiply(x{u}, x{u})")
+    return parse_body("\n".join(lines))
 
 
 @pytest.mark.parametrize("dtype", [F16, BF16], ids=lambda dtype: dtype.name)
@@ -85,18 +80,16 @@ def test_interleaved_loads_of_one_buffer_widen(dtype) -> None:
 
 def test_vector_loads_and_stores_require_aligned_row_offsets() -> None:
     from emmy.compiler.graph import Tensor
-    from emmy.compiler.ir.expr import Var
-    from emmy.compiler.ir.stmt import Write
 
     for columns, row, aligned in (
-        (3, Var("row"), False),
-        (4, Var("row"), True),
-        (3, Literal(1, "int"), False),
-        (3, Literal(2, "int"), True),
+        (3, "row", False),
+        (4, "row", True),
+        (3, "1", False),
+        (3, "2", True),
     ):
         tensor = Tensor("x", (4, columns), F32)
-        loads = Body(tuple(Load(name=f"v{i}", input="x", index=(row, Literal(i, "int")), dtype=F32) for i in range(2)))
-        stores = Body(tuple(Write(output="x", index=(row, Literal(i, "int")), value=f"v{i}", value_dtype=F32) for i in range(2)))
+        loads = parse_body("\n".join(f"f32 v{i} = load x[{row}, {i}]" for i in range(2)))
+        stores = parse_body("\n".join(f"f32 x[{row}, {i}] = v{i}" for i in range(2)))
         op = KernelOp(body=loads, inputs={"x": tensor}, outputs={"x": tensor})
         assert len(_vectorize_loads(op, loads)) == (1 if aligned else 2)
         assert len(_vectorize_stores(op, stores)) == (1 if aligned else 2)
@@ -104,7 +97,7 @@ def test_vector_loads_and_stores_require_aligned_row_offsets() -> None:
 
 def test_vector_alignment_recomposes_split_coordinates() -> None:
     from emmy.compiler.graph import Tensor
-    from emmy.compiler.ir.expr import BinaryExpr, Var
+    from emmy.compiler.ir.expression import BinaryExpr, Var
     from emmy.compiler.pipeline.passes.lowering.kernel._vector import vector_run
 
     tensor = Tensor("x", (4, 8), F32)
@@ -118,10 +111,10 @@ def test_a_gathered_selector_term_is_an_unknown_integer() -> None:
     """A routed expert's weight run starts at a gathered selector times the expert's stride, behind the gather's sign
     wrap. That term has no affine form, but it is an integer, so a stride that is a multiple of the width keeps the
     run aligned, and an odd one does not."""
-    from emmy.compiler.ir.expr import BinaryExpr, CastExpr, TernaryExpr, Var
+    from emmy.compiler.ir.expression import BinaryExpr, CastExpr, TernaryExpr, Var
     from emmy.compiler.pipeline.passes.lowering.kernel._vector import vector_run
 
-    sel = CastExpr(dtype="int", expr=Var("in0"))
+    sel = CastExpr(dtype="int", expression=Var("in0"))
     wrap = TernaryExpr(BinaryExpr("<", sel, Literal(0, "int")), BinaryExpr("+", sel, Literal(512, "int")), sel)
 
     def run(stride: int) -> list:
@@ -136,44 +129,32 @@ def test_a_strided_loop_variable_carries_its_alignment() -> None:
     """``coop/v<n>``: a lane starting at ``lane * 8`` and striding 1024 reads aligned runs of eight, so
     the loop variable's unit coefficient still proves an aligned vector. A lane starting at ``lane``
     proves nothing."""
-    from emmy.compiler.dtype import F16
     from emmy.compiler.graph import Tensor
-    from emmy.compiler.ir.axis import Axis
-    from emmy.compiler.ir.expr import BinaryExpr, Var
-    from emmy.compiler.ir.stmt import StridedLoop
 
     tensor = Tensor("w", (4, 1024), F16)
-    for start, widened in ((BinaryExpr("*", Var("lane"), Literal(8, "int")), True), (Var("lane"), False)):
-        index = lambda i: (Var("row"), BinaryExpr("+", Var("k"), Literal(i, "int")) if i else Var("k"))  # noqa: E731
-        loads = Body(tuple(Load(name=f"w{i}", input="w", index=index(i), dtype=F16) for i in range(8)))
-        loop = StridedLoop(axis=Axis("k", 1024), start=start, step=Literal(1024, "int"), body=loads)
-        op = KernelOp(body=Body((loop,)), inputs={"w": tensor}, outputs={})
+    for start, widened in (("lane * 8", True), ("lane", False)):
+        loads = "\n".join(f"    f16 w{i} = load w[row, k + {i}]" if i else "    f16 w0 = load w[row, k]" for i in range(8))
+        body = parse_body(f"for k in {start}..1024 step 1024:\n{loads}")
+        op = KernelOp(body=body, inputs={"w": tensor}, outputs={})
         (out,) = _vectorize_loads(op, op.body)
         assert len(out.body) == (1 if widened else 8)
 
 
 def test_a_load_whose_index_is_computed_in_between_stays_put() -> None:
     """A later load moves up only when its index needs nothing defined in between."""
-    from emmy.compiler.dtype import F16
-    from emmy.compiler.ir.expr import Var
-
-    body = Body(
-        (
-            Load(name="x0", input="x", index=(Var("a0") * Literal(2, "int"),), dtype=F16),
-            Assign(name="j", op=ElementwiseImpl("abs"), args=("x0",), dtype=F16),
-            Load(name="x1", input="x", index=(Var("a0") * Literal(2, "int") + Var("j"),), dtype=F16),
-        )
+    body = parse_body(
+        """
+        f16 x0 = load x[a0 * 2]
+        f16 j = abs(x0)
+        f16 x1 = load x[a0 * 2 + j]
+        """
     )
     assert _vectorize_loads(KernelOp(body=body), body) is body
 
 
 def test_a_write_to_the_buffer_in_between_stops_the_run() -> None:
     """A load never moves above a store into its own buffer."""
-    from emmy.compiler.ir.expr import Var
-    from emmy.compiler.ir.stmt import Write
-
-    store = Write(output="x", index=(Var("a0"),), values=("y0",))
-    out = _vectorize_loads(KernelOp(body=Body(())), _unrolled_pointwise(between=(store,)))
+    out = _vectorize_loads(KernelOp(body=Body(())), _unrolled_pointwise(between="x[a0] = y0"))
 
     widths = sorted(len(stmt.names) for stmt in out if isinstance(stmt, Load))
     assert widths == [1, 1, 2], "x0 and x1 pair up; x3 cannot move above the store to meet x2"
@@ -185,17 +166,12 @@ def test_ring_slot_transposed_b_fragments_pair() -> None:
     The row is ``slot * rows + (warp_row + 8)``: the +8 sits inside the chain, and the slot term is
     not affine. Left unpaired, every F.linear GEMM drained B with twice the ldmatrix count in its
     main loop."""
-    from emmy.compiler.ir.expr import Var
-    from emmy.compiler.ir.kernel.ir import LdmatrixLoad
 
-    slot = (Var("_ks") / Literal(32, "int")) % Literal(4, "int") * Literal(64, "int")
-    warp_row = Var("a1_u") * Literal(32, "int")
+    def drain(frag: str, n: int) -> str:
+        row = f"_ks / 32 % 4 * 64 + (a1_u * 32 + {n})"
+        return f"LdmatrixLoad(frag={frag}, src_buffer=_b_smem, src_index=({row}, 0), role=b, ldm=32, b_trans=true)"
 
-    def drain(frag: str, n: int) -> LdmatrixLoad:
-        row = slot + (warp_row + Literal(n, "int"))
-        return LdmatrixLoad(frag=frag, src_buffer="_b_smem", src_index=(row, Literal(0, "int")), role="b", ldm=32, b_trans=True)
-
-    paired, changed = _pair_ldmatrix(Body((drain("b0", 0), drain("b1", 8), drain("b2", 16), drain("b3", 24))))
+    paired, changed = _pair_ldmatrix(parse_body("\n".join((drain("b0", 0), drain("b1", 8), drain("b2", 16), drain("b3", 24)))))
 
     assert changed
     assert [(s.frag, s.pair_frag) for s in paired] == [("b0", "b1"), ("b2", "b3")]

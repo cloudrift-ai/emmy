@@ -10,7 +10,7 @@ never needed — ``out.shape`` carries the extent, symbolic or static.
 
 from emmy.compiler.graph import Graph, Node, Tensor
 from emmy.compiler.ir.base import ConstantOp
-from emmy.compiler.ir.expr import Literal, placeholder
+from emmy.compiler.ir.expression import Literal, placeholder
 from emmy.compiler.ir.frontend.ir import SliceOp
 from emmy.compiler.pipeline import Match, Pattern, RuleSkipped
 from emmy.compiler.pipeline.passes.frontend.decomposition._helpers import open_fragment, single_indexmap
@@ -46,7 +46,7 @@ def rewrite(match: Match, root: Node, inp_x: Node, inp_dim: Node | None, inp_sta
     # eager-folds a static extent to a plain Literal; a symbolic one (``x[:, -1:, :]``
     # on a dynamic seq_len) yields ``seq_len - 1``, which the kernel receives as a
     # runtime ``int`` arg (see ``_symbolic_runtime_args``).
-    offset = (in_shape[norm_dim] + start).expr if start < 0 else Literal(start, "int")
+    offset = (in_shape[norm_dim] + start).expression if start < 0 else Literal(start, "int")
 
     coord_map = []
     for i in range(ndim):

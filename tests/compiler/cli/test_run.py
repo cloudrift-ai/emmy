@@ -2447,7 +2447,7 @@ def test_print_kernel_stats_uses_execution_symbolic_environment(capsys):
     from emmy.commands.run import _print_kernel_stats
     from emmy.compiler.graph import Graph, Tensor
     from emmy.compiler.ir.cuda.ir import CudaOp
-    from emmy.compiler.ir.expr import Var
+    from emmy.compiler.ir.expression import Var
 
     graph = Graph()
     graph.add_node(

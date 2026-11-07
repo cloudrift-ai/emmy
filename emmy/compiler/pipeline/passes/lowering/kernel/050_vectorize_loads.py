@@ -56,9 +56,9 @@ from math import gcd
 
 from emmy.compiler.backend.cuda.render_target import CudaRenderTarget
 from emmy.compiler.graph import Node
-from emmy.compiler.ir.expr import BinaryExpr, Expr, Literal, SimplifyCtx, Var, affine_form
+from emmy.compiler.ir.expression import BinaryExpr, Expression, Literal, SimplifyCtx, Var, affine_form
 from emmy.compiler.ir.kernel import KernelOp
-from emmy.compiler.ir.stmt import Body, Load, Stmt, StridedLoop, map_exprs
+from emmy.compiler.ir.stmt import Body, Load, Statement, StridedLoop
 from emmy.compiler.pipeline import Pattern, RuleSkipped
 from emmy.compiler.pipeline.passes.lowering.kernel._vector import strided_alignment, vector_run
 from emmy.compiler.pipeline.search.space import VECTORIZE_LOADS
@@ -90,7 +90,7 @@ def _vectorize_body(top: KernelOp, body: Body, aligned: dict[str, int] | None = 
     constant-input filtering can resolve against the surrounding op, and
     ``aligned`` — the alignment of each enclosing strided loop's variable."""
     aligned = aligned or {}
-    descended: list[Stmt] = []
+    descended: list[Statement] = []
     for s in body:
         nested = s.nested()
         if nested:
@@ -99,8 +99,8 @@ def _vectorize_body(top: KernelOp, body: Body, aligned: dict[str, int] | None = 
         else:
             descended.append(s)
 
-    descended = [map_exprs(s, lambda e: _fold_run_offset(e, aligned)) if isinstance(s, Load) else s for s in descended]
-    out: list[Stmt] = []
+    descended = [s.map_expressions(lambda e: _fold_run_offset(e, aligned)) if isinstance(s, Load) else s for s in descended]
+    out: list[Statement] = []
     taken: set[int] = set()
     for i, stmt in enumerate(descended):
         if i in taken:
@@ -118,7 +118,7 @@ def _vectorize_body(top: KernelOp, body: Body, aligned: dict[str, int] | None = 
     return body if vectorized == body else vectorized
 
 
-def _movable_loads(stmts: list[Stmt], start: int) -> list[int]:
+def _movable_loads(stmts: list[Statement], start: int) -> list[int]:
     """Positions of the Load at ``start`` and of every later scalar Load of the same buffer that
     can move up to ``start``: no stmt between defines a name its index reads, and none writes
     the buffer. A stmt with a nested body ends the search — it may write anything."""
@@ -135,7 +135,7 @@ def _movable_loads(stmts: list[Stmt], start: int) -> list[int]:
     return group
 
 
-def _try_vec_load(stmts: Iterable[Stmt], start: int, n: int, top: KernelOp, aligned: dict[str, int]) -> Load | None:
+def _try_vec_load(stmts: Iterable[Statement], start: int, n: int, top: KernelOp, aligned: dict[str, int]) -> Load | None:
     """If ``stmts[start:start+n]`` matches the consecutive-Load pattern
     and the target supports ``vector_type(elem_dtype, n)`` for the
     source buffer's dtype, return the widened :class:`Load`. Otherwise
@@ -185,14 +185,14 @@ def _try_vec_load(stmts: Iterable[Stmt], start: int, n: int, top: KernelOp, alig
     )
 
 
-def _fold_run_offset(expr: Expr, aligned: dict[str, int]) -> Expr:
+def _fold_run_offset(expression: Expression, aligned: dict[str, int]) -> Expression:
     """``(Y + r) / d`` as ``Y / d`` where ``Y`` is a non-negative multiple of ``g`` (its variables' coefficients
     times their known alignment), ``g`` divides ``d`` and ``0 < r < g``: the elements of a lane's run then read
     a block scale at one index, the run's own."""
-    if not isinstance(expr, BinaryExpr):
-        return expr
-    left, right = _fold_run_offset(expr.left, aligned), _fold_run_offset(expr.right, aligned)
-    if expr.op == "/" and isinstance(right, Literal) and isinstance(right.value, int) and right.value > 0:
+    if not isinstance(expression, BinaryExpr):
+        return expression
+    left, right = _fold_run_offset(expression.left, aligned), _fold_run_offset(expression.right, aligned)
+    if expression.op == "/" and isinstance(right, Literal) and isinstance(right.value, int) and right.value > 0:
         form = affine_form(left, left.free_vars())
         anchor = form[0].simplify(SimplifyCtx.empty()) if form is not None else None
         if isinstance(anchor, Literal) and isinstance(anchor.value, int) and anchor.value >= 0 and form[1]:
@@ -201,13 +201,13 @@ def _fold_run_offset(expr: Expr, aligned: dict[str, int]) -> Expr:
                 offset = anchor.value % gcd(right.value, *terms)
                 if offset:
                     left = _affine(form[1], anchor.value - offset)
-    return expr if (left, right) == (expr.left, expr.right) else BinaryExpr(expr.op, left, right)
+    return expression if (left, right) == (expression.left, expression.right) else BinaryExpr(expression.op, left, right)
 
 
-def _affine(coefficients: dict[str, int], constant: int) -> Expr:
+def _affine(coefficients: dict[str, int], constant: int) -> Expression:
     """``Σ c·v + constant`` spelled the way the run's first element spells it."""
     terms = [Var(v) if c == 1 else BinaryExpr("*", Var(v), Literal(c, "int")) for v, c in coefficients.items()]
-    expr = terms[0]
+    expression = terms[0]
     for term in terms[1:]:
-        expr = BinaryExpr("+", expr, term)
-    return BinaryExpr("+", expr, Literal(constant, "int")) if constant else expr
+        expression = BinaryExpr("+", expression, term)
+    return BinaryExpr("+", expression, Literal(constant, "int")) if constant else expression

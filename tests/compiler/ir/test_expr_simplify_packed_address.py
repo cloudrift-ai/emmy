@@ -18,7 +18,7 @@ from __future__ import annotations
 
 import pytest
 
-from emmy.compiler.ir.expr import BinaryExpr, Interval, Literal, SimplifyCtx, Var
+from emmy.compiler.ir.expression import BinaryExpr, Interval, Literal, SimplifyCtx, Var
 
 K, N, BLOCK = 4096, 12288, 16  # reduce extent, row extent, NVFP4 scale block
 
@@ -62,7 +62,7 @@ def test_packed_modulo_drops_the_row_axis():
     """``((n·K + k) / 2) % (K/2) → k/2``: the row axis leaves the expression entirely."""
     e = BinaryExpr("%", BinaryExpr("/", _flat(), _lit(2)), _lit(K // 2))
     s = e.simplify(_ctx())
-    assert "n" not in s.free_vars(), f"row axis survived: {s.pretty()}"
+    assert "n" not in s.free_vars(), f"row axis survived: {s}"
     _same_value(e, s, "packed modulo")
 
 
@@ -71,7 +71,7 @@ def test_packed_quotient_is_the_row_axis():
     from its quotient side."""
     e = BinaryExpr("/", BinaryExpr("/", _flat(), _lit(2)), _lit(K // 2))
     s = e.simplify(_ctx())
-    assert s == Var("n"), f"expected the bare row axis, got {s.pretty()}"
+    assert s == Var("n"), f"expected the bare row axis, got {s}"
 
 
 def test_scale_block_index_drops_the_row_axis():
@@ -79,7 +79,7 @@ def test_scale_block_index_drops_the_row_axis():
     one packed weight feeds both addresses, so both must fold or neither helps."""
     e = BinaryExpr("%", BinaryExpr("/", _flat(), _lit(BLOCK)), _lit(K // BLOCK))
     s = e.simplify(_ctx())
-    assert "n" not in s.free_vars(), f"row axis survived: {s.pretty()}"
+    assert "n" not in s.free_vars(), f"row axis survived: {s}"
     _same_value(e, s, "block-scale index")
 
 
@@ -89,7 +89,7 @@ def test_row_major_flatten_of_the_packed_load_loses_its_residue():
     packed = BinaryExpr("%", BinaryExpr("/", _flat(), _lit(2)), _lit(K // 2))
     flat = BinaryExpr("+", BinaryExpr("*", Var("n"), _lit(K // 2)), packed)
     s = flat.simplify(_ctx())
-    assert "%" not in s.pretty(), f"residue survived: {s.pretty()}"
+    assert "%" not in str(s), f"residue survived: {s}"
     _same_value(flat, s, "row-major flatten")
 
 
@@ -118,4 +118,4 @@ def test_wider_reduce_range_stays_value_exact(k_hi: int):
     for nv in (0, 1, 2, 37):
         for kv in (0, 1, min(K - 1, k_hi), k_hi):
             env = {"n": nv, "k": kv}
-            assert e.eval(env) == s.eval(env), f"k_hi={k_hi}: mismatch at n={nv} k={kv}: {s.pretty()}"
+            assert e.eval(env) == s.eval(env), f"k_hi={k_hi}: mismatch at n={nv} k={kv}: {s}"

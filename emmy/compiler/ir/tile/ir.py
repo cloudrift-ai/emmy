@@ -38,7 +38,7 @@ from frozendict import frozendict
 from emmy.compiler.dim import Dim
 from emmy.compiler.ir.axis import Axis
 from emmy.compiler.ir.base import Op, buffer_types
-from emmy.compiler.ir.expr import BinaryExpr, Interval, Literal, SimplifyCtx, Var
+from emmy.compiler.ir.expression import BinaryExpr, Interval, Literal, SimplifyCtx, Var
 from emmy.compiler.ir.pure.fold import Fold, binding_extents
 from emmy.compiler.ir.schedule import Placement, WarpSpec
 from emmy.compiler.ir.schedule.base import Schedule
@@ -49,7 +49,7 @@ from emmy.compiler.ir.schedule.views import (
     NodeId,
     contraction_facts,
 )
-from emmy.compiler.ir.stmt import Body, Cond, Load, Loop, OutputSpec, Stmt, Write
+from emmy.compiler.ir.stmt import Body, Cond, Load, Loop, OutputSpec, Statement, Write
 from emmy.compiler.ir.tile.boundary import apply_output_specs
 from emmy.compiler.ir.tile.normalize import normalize_fold_tree
 from emmy.compiler.ir.tile.ops import Sched, chain_members, kernel_roots, refused_roots
@@ -82,25 +82,28 @@ def _dense_axis_suffix(index: tuple, name: str) -> bool:
         return False
     stride = 1
     for position in reversed(range(len(index))):
-        expr = index[position]
+        expression = index[position]
         dim = None
         if position:
             if not (
-                isinstance(expr, BinaryExpr)
-                and expr.op == "%"
-                and isinstance(expr.right, Literal)
-                and isinstance(expr.right.value, int)
-                and expr.right.value > 0
+                isinstance(expression, BinaryExpr)
+                and expression.op == "%"
+                and isinstance(expression.right, Literal)
+                and isinstance(expression.right.value, int)
+                and expression.right.value > 0
             ):
                 return False
-            expr, dim = expr.left, expr.right.value
+            expression, dim = expression.left, expression.right.value
         if stride != 1:
             if not (
-                isinstance(expr, BinaryExpr) and expr.op in ("/", "//") and isinstance(expr.right, Literal) and expr.right.value == stride
+                isinstance(expression, BinaryExpr)
+                and expression.op in ("/", "//")
+                and isinstance(expression.right, Literal)
+                and expression.right.value == stride
             ):
                 return False
-            expr = expr.left
-        if expr != Var(name):
+            expression = expression.left
+        if expression != Var(name):
             return False
         if dim is not None:
             stride *= dim
@@ -189,15 +192,18 @@ def _implicit_unit_row(specs: tuple[OutputSpec, ...], free: tuple[Axis, ...]) ->
         return None
     for spec in specs:
         index = spec.write.index
-        split = next((position for position, expr in enumerate(index) if not (isinstance(expr, Literal) and expr.value == 0)), len(index))
-        suffix = tuple(expr for expr in index[split:] if not (isinstance(expr, Literal) and expr.value == 0))
+        split = next(
+            (position for position, expression in enumerate(index) if not (isinstance(expression, Literal) and expression.value == 0)),
+            len(index),
+        )
+        suffix = tuple(expression for expression in index[split:] if not (isinstance(expression, Literal) and expression.value == 0))
         dense = _dense_axis_suffix(suffix, columns[0]) if len(columns) == 1 else suffix == tuple(Var(name) for name in columns)
         if split == 0 or not dense:
             return None
     return Axis("_um", Dim(1))
 
 
-def guarded_store(stmt: Stmt) -> Write | None:
+def guarded_store(stmt: Statement) -> Write | None:
     """The one ``Write`` a bare ``Cond`` guards — a store that runs only where its predicate holds."""
     if isinstance(stmt, Cond) and not stmt.else_body and len(stmt.body) == 1 and isinstance(stmt.body[0], Write):
         return stmt.body[0]
@@ -239,7 +245,7 @@ def _sweep_specs(loop: Loop, outer: tuple) -> tuple[list, list[OutputSpec]] | No
     return (inner, tail) if tail and all(s.pure for s in inner) else None
 
 
-def extract_output_specs(stmts) -> tuple[tuple[Stmt, ...], tuple[OutputSpec, ...]] | None:
+def extract_output_specs(stmts) -> tuple[tuple[Statement, ...], tuple[OutputSpec, ...]] | None:
     """Split an effectful projection stmt stream into ``(pure stmts, OutputSpec decorations)`` — the
     conversion-side inverse of :func:`apply_output_specs`, valid ONLY when the reconstitution
     round-trips byte-identically (checked here; ``None`` otherwise). The trailing run of root
@@ -768,7 +774,7 @@ class TileOp(Op):
             *(dim for tensor in (*self.inputs.values(), *self.outputs.values()) for dim in tensor.shape),
             *(a.extent for a in self.axes),
         )
-        return frozenset(name for dim in dims for name in dim.expr.free_vars())
+        return frozenset(name for dim in dims for name in dim.expression.free_vars())
 
     def axis_of(self, name: str) -> Axis:
         """The axis table's entry for ``name`` — a reduce axis's extent and window, a free axis's extent."""

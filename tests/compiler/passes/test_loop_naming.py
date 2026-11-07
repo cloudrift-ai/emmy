@@ -14,30 +14,23 @@ import importlib
 from emmy.compiler import provenance as prov
 from emmy.compiler.graph import Graph, Tensor
 from emmy.compiler.ir.base import InputOp
-from emmy.compiler.ir.expr import Var
 from emmy.compiler.ir.frontend.ir import RmsNormOp
-from emmy.compiler.ir.loop import Axis, Load, Loop, LoopOp, Write
+from emmy.compiler.ir.loop import LoopOp
+from emmy.compiler.ir.stmt import parse_body
 from emmy.compiler.pipeline import LOOP_PASSES, Pipeline
 
 _STAMP_MODULE = importlib.import_module("emmy.compiler.pipeline.passes.loop.stamp.010_stamp_loop_names")
 
 
 def _pointwise_loop() -> LoopOp:
-    i, j = Axis("i", 4), Axis("j", 8)
     return LoopOp(
-        body=(
-            Loop(
-                axis=i,
-                body=(
-                    Loop(
-                        axis=j,
-                        body=(
-                            Load(name="x_v", input="x", index=(Var("i"), Var("j"))),
-                            Write(output="o", index=(Var("i"), Var("j")), value="x_v"),
-                        ),
-                    ),
-                ),
-            ),
+        body=parse_body(
+            """
+            for i in 0..4:
+                for j in 0..8:
+                    x_v = load x[i, j]
+                    o[i, j] = x_v
+            """
         )
     )
 

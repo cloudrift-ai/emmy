@@ -3,7 +3,7 @@
 ``_tile_reduce_axis`` copies the reduce body once per register chain, suffixing per-copy SSA
 names. A name the body READS but does not DEFINE is one shared value (a hoisted scalar load, a
 provider chain emitted ahead of the loop) — renaming its uses emits an undefined identifier at
-nvcc. The Expr channel (``s.exprs()``) was already protected; ``Assign`` args travel the
+nvcc. The Expression channel (``s.expressions()``) was already protected; ``Assign`` args travel the
 SSA-deps channel (``s.deps()``), surfaced by DeepSeek-V4 post4096's two-cut piece
 (``identifier "in3__r1" is undefined``).
 """
@@ -18,10 +18,9 @@ import pytest
 from emmy.compiler.dtype import F16, F32
 from emmy.compiler.graph import Node, Tensor
 from emmy.compiler.ir.axis import Axis
-from emmy.compiler.ir.expr import BinaryExpr, Literal, Var
 from emmy.compiler.ir.kernel import KernelOp
 from emmy.compiler.ir.schedule import Reduce
-from emmy.compiler.ir.stmt import Accum, Assign, Body, Init, Load, Loop, Select, SelectBranch
+from emmy.compiler.ir.stmt import Accum, Body, parse_body
 from emmy.compiler.pipeline.passes.lowering.kernel._factor import Ctx, _tile_reduce_axis, combine_tail
 
 
@@ -29,7 +28,7 @@ def _names_read(stmts) -> set[str]:
     out: set[str] = set()
     for s in stmts:
         out.update(s.deps())
-        for e in s.exprs():
+        for e in s.expressions():
             out.update(e.free_vars())
         for b in s.nested():
             out |= _names_read(b)
@@ -41,9 +40,8 @@ def test_an_external_ssa_read_is_shared_by_every_ilp_copy() -> None:
 
     # ``alpha`` is a per-row value the fold closes over through an operand term — hoisted ahead
     # of the loop by the lowering, one binding every ILP copy reads.
-    alpha = projection((), (Load(name="alpha", input="s", index=(Var("m"),)),), results=("alpha",))
-    scaled = Assign(name="acc__v", op="multiply", args=("x_e", "alpha"))
-    red = reduction("k", (slab("x_e", "x", "m", "k"), alpha), (scaled,), ("acc",))
+    alpha = projection((), parse_body("alpha = load s[m]"), results=("alpha",))
+    red = reduction("k", (slab("x_e", "x", "m", "k"), alpha), parse_body("acc__v = multiply(x_e, alpha)"), ("acc",))
     axes = (Axis("m", 4), Axis("k", 128))
     sched = SimpleNamespace(
         get=lambda *_: None, tile=SimpleNamespace(axes=axes), axis_of=lambda name: next(a for a in axes if a.name == name)
@@ -66,33 +64,11 @@ def test_ilp_merge_keeps_the_streaming_accumulator_dtype(op, dtype, masked):
     from tests.compiler.terms import reduction, slab
 
     axis = Axis("k", 2)
-    fold = reduction(axis, (slab("x_e", "x", "k"),), (Assign("acc__v", "copy", ("x_e",)),), ("acc",), op)
-    tail = (
-        (
-            Init(name="b__id", identity=-1e30, dtype=F32),
-            Select(
-                name="b__m",
-                branches=(SelectBranch("b", BinaryExpr("<", Var("k") + 2, Literal(3, "int"))), SelectBranch("b__id", Literal(1, "int"))),
-            ),
-        )
-        if masked
-        else ()
-    )
-    body = Body(
-        (
-            Loop(
-                axis=axis,
-                body=(
-                    Load(name="a", input="x", index=(Var("k"),)),
-                    Accum(name="acc", value="a", op=op),
-                    Load(name="b", input="x", index=(Var("k") + 2,)),
-                    *tail,
-                    Accum(name="acc__r1", value="b__m" if masked else "b", op=op),
-                ),
-            ),
-            *combine_tail(fold, reg=2, coop=1, lane=None),
-        )
-    )
+    fold = reduction(axis, (slab("x_e", "x", "k"),), parse_body("acc__v = copy(x_e)"), ("acc",), op)
+    tail = ["init f32 b__id = -1e+30", "b__m = select:", "    b when k + 2 < 3", "    b__id when 1"] if masked else []
+    step = ["a = load x[k]", f"acc <- {op}(acc, a)", "b = load x[k + 2]", *tail, f"acc__r1 <- {op}(acc__r1, {'b__m' if masked else 'b'})"]
+    loop = parse_body("\n".join(["for k in 0..2:", *(f"    {line}" for line in step)]))
+    body = Body((*loop, *combine_tail(fold, reg=2, coop=1, lane=None)))
     kernel = KernelOp(name="ilp_merge", body=body, inputs={"x": Tensor("x", (4,), F16)})
     stamped = import_module("emmy.compiler.pipeline.passes.lowering.kernel.030_stamp_types").rewrite(
         Node(id="out", op=kernel, inputs=["x"], outputs=())

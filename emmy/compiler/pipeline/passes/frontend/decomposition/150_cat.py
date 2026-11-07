@@ -21,7 +21,7 @@ chain never picks it.
 
 from emmy.compiler.graph import Graph, Node, Tensor
 from emmy.compiler.ir.base import ConstantOp
-from emmy.compiler.ir.expr import Literal, TernaryExpr, placeholder
+from emmy.compiler.ir.expression import Literal, TernaryExpr, placeholder
 from emmy.compiler.ir.frontend.ir import CatOp
 from emmy.compiler.ir.tensor.ir import IndexMapOp, IndexSource
 from emmy.compiler.pipeline import Match, Pattern, RuleSkipped

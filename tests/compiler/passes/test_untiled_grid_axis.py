@@ -70,6 +70,6 @@ def test_a_sibling_outputs_grid_axis_stays_bound() -> None:
 
     assert len(kernels) == 1, "the pinned fuse arm must give this shape one kernel for the untiled axis to arise"
     node = kernels[0]
-    bound = {*node.inputs, *node.buffer_names(), *_TOKENS.expr.free_vars()}
+    bound = {*node.inputs, *node.buffer_names(), *_TOKENS.expression.free_vars()}
     free = set().union(*(free_names(stmt) for stmt in node.op.body))
     assert free <= bound, f"kernel body reads names the kernel never binds: {sorted(free - bound)}"

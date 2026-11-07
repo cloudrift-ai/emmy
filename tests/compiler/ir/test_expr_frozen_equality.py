@@ -1,6 +1,6 @@
-"""Lock in that ``Expr`` nodes are frozen + structurally hashable.
+"""Lock in that ``Expression`` nodes are frozen + structurally hashable.
 
-Required so ``Dim`` (which will carry an ``Expr``) keeps a stable
+Required so ``Dim`` (which will carry an ``Expression``) keeps a stable
 ``__hash__`` across construction paths and survives use as a dict key /
 set member in ``Axis`` and graph structural keys.
 """
@@ -11,7 +11,7 @@ from dataclasses import FrozenInstanceError
 
 import pytest
 
-from emmy.compiler.ir.expr import (
+from emmy.compiler.ir.expression import (
     BinaryExpr,
     Builtin,
     CastExpr,
@@ -34,7 +34,7 @@ def test_literal_structural_equality():
     assert hash(Literal(1, "int")) == hash(Literal(1, "int"))
 
 
-def test_binary_expr_structural_equality():
+def test_binary_expression_structural_equality():
     e1 = BinaryExpr("+", Var("a"), Literal(2, "int"))
     e2 = BinaryExpr("+", Var("a"), Literal(2, "int"))
     assert e1 == e2
@@ -66,7 +66,7 @@ def test_var_is_frozen():
         v.name = "y"  # type: ignore[misc]
 
 
-def test_binary_expr_is_frozen():
+def test_binary_expression_is_frozen():
     e = BinaryExpr("+", Var("a"), Literal(1, "int"))
     with pytest.raises(FrozenInstanceError):
         e.op = "-"  # type: ignore[misc]
@@ -77,7 +77,7 @@ def test_funccallexpr_args_is_tuple():
     assert isinstance(f.args, tuple)
 
 
-def test_expr_works_as_dict_key():
+def test_expression_works_as_dict_key():
     """Used to key ``SimplifyCtx.ranges``, hash-cache equivalent subexpressions, etc."""
     d: dict[object, int] = {}
     d[BinaryExpr("+", Var("a"), Literal(1, "int"))] = 7

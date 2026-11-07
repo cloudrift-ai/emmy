@@ -10,13 +10,9 @@ from __future__ import annotations
 
 from dataclasses import replace
 
-from emmy.compiler.dim import Dim
 from emmy.compiler.graph import Graph, Tensor
-from emmy.compiler.ir.axis import Axis
-from emmy.compiler.ir.elementwise import ElementwiseImpl
-from emmy.compiler.ir.expr import Var
 from emmy.compiler.ir.loop import LoopOp
-from emmy.compiler.ir.stmt import Accum, Assign, Body, Load, Loop, Write
+from emmy.compiler.ir.stmt import Body, parse_body
 from emmy.compiler.pipeline import Pipeline
 
 
@@ -28,23 +24,22 @@ def _tile(body: Body):
 
 
 def _matmul_tile(epilogue_op: str | None = None, k_extent: int = 128, n_outer: bool = False):
-    m, n, k = Axis("m", Dim(32)), Axis("n", Dim(64)), Axis("k", Dim(k_extent))
-    inner = Body(
-        (
-            Load(name="xv", input="x", index=(Var("m"), Var("k"))),
-            Load(name="wv", input="w", index=(Var("n"), Var("k"))),
-            Assign(name="prod", op=ElementwiseImpl("multiply"), args=("xv", "wv")),
-            Accum(name="acc", value="prod", op=ElementwiseImpl("add"), axes=("k",)),
+    result, epilogue = ("acc", "") if epilogue_op is None else ("outv", f"\n                outv = {epilogue_op}(acc)")
+    outer, inner = ("n in 0..64", "m in 0..32") if n_outer else ("m in 0..32", "n in 0..64")
+    return _tile(
+        parse_body(
+            f"""
+        for {outer}:
+            for {inner}:
+                for k in 0..{k_extent}:
+                    xv = load x[m, k]
+                    wv = load w[n, k]
+                    prod = multiply(xv, wv)
+                    acc <- add(acc, prod) over k{epilogue}
+                out[m, n] = {result}
+        """
         )
     )
-    result = "acc"
-    epilogue = ()
-    if epilogue_op is not None:
-        epilogue = (Assign(name="outv", op=ElementwiseImpl(epilogue_op), args=("acc",)),)
-        result = "outv"
-    cell = (Loop(axis=k, body=inner), *epilogue, Write(output="out", index=(Var("m"), Var("n")), value=result))
-    outer, inner_axis = (n, m) if n_outer else (m, n)
-    return _tile(Body((Loop(axis=outer, body=Body((Loop(axis=inner_axis, body=Body(cell)),))),)))
 
 
 def test_cluster_sibling_epilogues_share_the_structural_key_but_not_the_exact_one() -> None:

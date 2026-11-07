@@ -35,7 +35,7 @@ from __future__ import annotations
 from dataclasses import replace
 
 from emmy.compiler.graph import Node
-from emmy.compiler.ir.expr import BinaryExpr, Expr, Literal, SimplifyCtx, affine_form
+from emmy.compiler.ir.expression import BinaryExpr, Expression, Literal, SimplifyCtx, affine_form
 from emmy.compiler.ir.kernel import KernelOp
 from emmy.compiler.ir.kernel.ir import (
     VOLTA_B_CONGRUOUS,
@@ -48,7 +48,7 @@ from emmy.compiler.ir.kernel.ir import (
     WgmmaMma,
     WgmmaWait,
 )
-from emmy.compiler.ir.stmt import Body, Cond, Loop, Stmt, StridedLoop, Write
+from emmy.compiler.ir.stmt import Body, Cond, Loop, Statement, StridedLoop, Write
 from emmy.compiler.pipeline import Pattern, RuleSkipped
 from emmy.compiler.pipeline.search.space import PAIR_LDMATRIX
 
@@ -74,7 +74,7 @@ def rewrite(root: Node) -> KernelOp | None:
 
 
 def _walk(body: Body) -> tuple[Body, bool]:
-    stmts: list[Stmt] = []
+    stmts: list[Statement] = []
     changed = False
     for s in body:
         nested = s.nested()
@@ -93,7 +93,7 @@ def _walk(body: Body) -> tuple[Body, bool]:
     return Body(tuple(paired)), True
 
 
-def _split(e: Expr) -> tuple[tuple[str, ...], int]:
+def _split(e: Expression) -> tuple[tuple[str, ...], int]:
     """``e`` as the terms of its ``+`` chain and the sum of their integer literals. The literal can
     sit anywhere in the chain: a ring drain's row is ``slot * rows + (warp_row + 8)``, which a
     top-level ``base + constant`` split never sees. Terms compare by their rendered form, order
@@ -106,7 +106,7 @@ def _split(e: Expr) -> tuple[tuple[str, ...], int]:
     return (repr(e),), 0
 
 
-def _delta(a: Expr, b: Expr) -> int | None:
+def _delta(a: Expression, b: Expression) -> int | None:
     """The structural constant difference ``b - a``, or ``None`` (not provably constant)."""
     if a == b:
         return 0
@@ -120,7 +120,7 @@ def _delta(a: Expr, b: Expr) -> int | None:
     return bc - ac if ab == bb else None
 
 
-def _candidate(s: Stmt) -> bool:
+def _candidate(s: Statement) -> bool:
     # A staged byte-slab (fp8) drain is a cooperative gather, not an ldmatrix — nothing to pair.
     if not isinstance(s, LdmatrixLoad) or not s.staged or s.byte_slab or s.pair_frag is not None or len(s.src_index) != 2:
         return False
@@ -154,7 +154,7 @@ def _pairs_with(a: LdmatrixLoad, b: LdmatrixLoad) -> bool:
     return row_d == 0 and col_d == _ATOM8  # K-major slab: same K row, cols adjacent
 
 
-def _blocks(s: Stmt, a_frag: str, moved_frag: str | None, moved_deps: set[str]) -> bool:
+def _blocks(s: Statement, a_frag: str, moved_frag: str | None, moved_deps: set[str]) -> bool:
     """An intervening stmt that forbids moving the partner load up to the pair position: a
     barrier / control / slab-writing stmt; a redefinition of either fragment; a READ of the
     moved fragment (its pre-move value — e.g. the previous streaming step's — would be
@@ -170,7 +170,7 @@ def _blocks(s: Stmt, a_frag: str, moved_frag: str | None, moved_deps: set[str]) 
     return bool(defs & moved_deps)
 
 
-def _pair(stmts: list[Stmt]) -> list[Stmt] | None:
+def _pair(stmts: list[Statement]) -> list[Statement] | None:
     out = list(stmts)
     changed = False
     i = 0

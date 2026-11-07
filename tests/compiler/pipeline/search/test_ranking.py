@@ -9,9 +9,7 @@ import pytest
 from emmy.compiler.context import Context
 from emmy.compiler.graph import Graph
 from emmy.compiler.ir.axis import Axis
-from emmy.compiler.ir.expr import BinaryExpr, Literal, Var
 from emmy.compiler.ir.schedule import Placement
-from emmy.compiler.ir.stmt import Select, SelectBranch
 from emmy.compiler.ir.tile import TileOp
 from emmy.compiler.pipeline.fork import DeferredFork, Fork
 from emmy.compiler.pipeline.pipeline import ForkPoint
@@ -120,11 +118,12 @@ def test_placement_separates_contraction_roots_from_equal_loop_histograms() -> N
     m, n, k = Axis("m", 4), Axis("n", 8), Axis("k", 16)
     b = slab("b", "w", "k", "n")
     product = contraction(k, slab("a", "x", "m", "k"), (b, "acc0"), (b, "acc1"))
-    selected = Select(
-        name="masked",
-        branches=(SelectBranch("acc0", BinaryExpr("<", Var("n"), Literal(4, "int"))), SelectBranch("acc1", Literal(1, "int"))),
-    )
-    roots = (product, projection((product,), (selected,), results=("masked", "acc1")))
+    selected = """
+        masked = select:
+            acc0 when n < 4
+            acc1 when 1
+        """
+    roots = (product, projection((product,), selected, results=("masked", "acc1")))
     tiles = [TileOp(op=root, place=Placement(free=(m, n)), axes=(m, n, k)) for root in roots]
     rows = [Featurizer({}).features(tile, pieces=tile) for tile in tiles]
 

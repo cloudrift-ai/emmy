@@ -1,4 +1,4 @@
-"""``Dim`` arithmetic — eager-fold via ``Expr.simplify``.
+"""``Dim`` arithmetic — eager-fold via ``Expression.simplify``.
 
 Covers:
 - static-static folds to a static Dim (matches today's int math byte-for-byte)
@@ -12,28 +12,28 @@ Covers:
 from __future__ import annotations
 
 from emmy.compiler.dim import Dim
-from emmy.compiler.ir.expr import BinaryExpr, Literal, Var
+from emmy.compiler.ir.expression import BinaryExpr, Literal, Var
 
 
 def test_static_static_arithmetic_folds():
     assert Dim(32) * Dim(64) == Dim(2048)
-    assert (Dim(32) * Dim(64)).expr == Literal(2048, "int")
+    assert (Dim(32) * Dim(64)).expression == Literal(2048, "int")
     assert Dim(7) + Dim(5) == Dim(12)
     assert Dim(20) - Dim(3) == Dim(17)
     assert Dim(64) // Dim(2) == Dim(32)
     assert Dim(10) % Dim(3) == Dim(1)
 
 
-def test_symbolic_compose_keeps_binary_expr():
-    assert (Dim("s") * Dim(2)).expr == BinaryExpr("*", Var("s"), Literal(2, "int"))
-    assert (Dim("s") + Dim("s")).expr == BinaryExpr("+", Var("s"), Var("s"))
+def test_symbolic_compose_keeps_binary_expression():
+    assert (Dim("s") * Dim(2)).expression == BinaryExpr("*", Var("s"), Literal(2, "int"))
+    assert (Dim("s") + Dim("s")).expression == BinaryExpr("+", Var("s"), Var("s"))
 
 
 def test_algebraic_identities_collapse():
-    assert (Dim("s") * Dim(1)).expr == Var("s")
-    assert (Dim("s") + Dim(0)).expr == Var("s")
-    assert (Dim("s") * Dim(0)).expr == Literal(0, "int")
-    assert (Dim(1) * Dim("s")).expr == Var("s")
+    assert (Dim("s") * Dim(1)).expression == Var("s")
+    assert (Dim("s") + Dim(0)).expression == Var("s")
+    assert (Dim("s") * Dim(0)).expression == Literal(0, "int")
+    assert (Dim(1) * Dim("s")).expression == Var("s")
 
 
 def test_int_dim_arithmetic_ergonomic():
@@ -49,11 +49,11 @@ def test_ceil_div_static_folds_to_int_ceil():
         assert got.is_static and got.as_static() == -(-ext // div), (ext, div)
 
 
-def test_ceil_div_symbolic_builds_composite_expr():
+def test_ceil_div_symbolic_builds_composite_expression():
     # ``(seq + (b - 1)) // b`` — the launch resolver evals it from sym_values.
-    assert Dim("seq").ceil_div(16).expr == BinaryExpr("/", BinaryExpr("+", Var("seq"), Literal(15, "int")), Literal(16, "int"))
+    assert Dim("seq").ceil_div(16).expression == BinaryExpr("/", BinaryExpr("+", Var("seq"), Literal(15, "int")), Literal(16, "int"))
     # Degenerate divisor 1 collapses to the bare axis (matches the symbolic-serial passthrough).
-    assert Dim("seq").ceil_div(1).expr == Var("seq")
+    assert Dim("seq").ceil_div(1).expression == Var("seq")
 
 
 def test_equality_with_bare_int_and_str():
@@ -105,7 +105,7 @@ def test_str_renders_transparently():
     assert str(Dim("s")) == "s"
 
 
-def test_dim_from_expr():
+def test_dim_from_expression():
     assert Dim(Var("s")) == Dim("s")
     assert Dim(Literal(32, "int")) == Dim(32)
 

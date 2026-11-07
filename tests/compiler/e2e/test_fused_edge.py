@@ -44,7 +44,7 @@ _WARP_WORK = "w1x1"
 @pytest.mark.parametrize("columns", [13, 16])
 def test_interleaved_weight_channels_use_gathers_before_mma(stage, channels, columns):
     from emmy.compiler.backend.cuda.backend import CudaBackend
-    from emmy.compiler.ir.expr import placeholder
+    from emmy.compiler.ir.expression import placeholder
     from emmy.compiler.ir.tensor.ir import IndexMapOp, IndexSource
     from emmy.compiler.pipeline.search.pins import pinned_knobs
 
