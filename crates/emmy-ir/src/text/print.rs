@@ -2,11 +2,6 @@
 
 use super::*;
 
-/// A name as a statement's text spells it: bare, or between backticks when it reads as a keyword or is no identifier.
-pub fn spell_stmt_name(name: &str) -> Result<String> {
-    spell_name(name, &KEYWORDS)
-}
-
 fn names(items: &[Name]) -> Result<String> {
     Ok(items
         .iter()
@@ -30,44 +25,6 @@ fn index(items: &[Expression]) -> Result<String> {
             .collect::<Result<Vec<_>>>()?
             .join(", ")
     ))
-}
-
-/// `name in start..extent`, with the hint when it is not the default, and the window.
-pub fn spell_axis(axis: &Axis, start: Option<&str>) -> Result<String> {
-    let mut extent = axis.extent.expression.try_text()?;
-    if axis.extent.hint != axis.extent.default_hint()
-        && let Some(hint) = axis.extent.hint
-    {
-        extent.push_str(&format!("~{hint}"));
-    }
-    let mut out = format!(
-        "{} in {}..{}",
-        spell_stmt_name(&axis.name)?,
-        start.unwrap_or("0"),
-        extent
-    );
-    out.push_str(&spell_window(axis.window.as_ref())?);
-    Ok(out)
-}
-
-fn spell_window(window: Option<&Window>) -> Result<String> {
-    let Some(window) = window else {
-        return Ok(String::new());
-    };
-    let mut parts: Vec<String> = Vec::new();
-    if let Some(parent) = &window.parent {
-        parts.push(format!("parent={}", spell_axis(parent, None)?));
-    }
-    if let Some(base) = &window.base {
-        parts.push(format!("base={}", base.try_text()?));
-    }
-    if let Some(bound) = &window.bound {
-        parts.push(format!("bound={}", bound.try_text()?));
-    }
-    if window.partition {
-        parts.push("partition=true".into());
-    }
-    Ok(format!(" window({})", parts.join(", ")))
 }
 
 fn flags(unroll: bool, seed: bool) -> String {
@@ -287,7 +244,7 @@ pub fn lines(stmt: &Statement, indent: &str, out: &mut Vec<String>) -> Result<()
 /// `Kind(field=value, …)` over the fields that are not at their default and hold no statements.
 fn header(stmt: &Statement) -> Result<String> {
     let fields = stmt.header_fields()?;
-    let mut out = stmt.kind_name().to_string();
+    let mut out = stmt.kind().to_string();
     if !fields.is_empty() {
         out.push('(');
         out.push_str(
@@ -386,7 +343,7 @@ fn definition_text(sub: &Subroutine) -> Result<Vec<String>> {
 /// The subroutines `body` calls, a callee ahead of its caller, each name once; two subroutines of one name are
 /// refused unless they are one definition bound to other buffers.
 fn subroutines(body: &Body, found: &mut Vec<Arc<Subroutine>>) -> Result<()> {
-    for here in body.of_kinds(&["Call"]) {
+    for here in body.of_kinds(&[Kind::Call]) {
         let Statement::Call(call) = &**here.stmt() else {
             continue;
         };

@@ -249,7 +249,7 @@ pub fn canonicalize_free_axis_order(body: &Body) -> Result<Body> {
                 return Key::None;
             };
             Key::tuple([
-                Key::str(&crate::text::spell_axis(&renamed.axis, None).unwrap_or_default()),
+                Key::str(&crate::kinds::axis::spell_axis(&renamed.axis, None).unwrap_or_default()),
                 Key::Bool(renamed.unroll),
                 Key::Bool(renamed.seed),
             ])

@@ -8,8 +8,8 @@ use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
-use crate::body::{Body, Subroutine};
-use crate::expr::{Expr, Expression};
+use crate::body::{Body, Normalized, Subroutine, exposed_defines, free_names, loop_parts, unique};
+use crate::expr::{Expr, Expression, LitType};
 use crate::kinds::axis::Axis;
 use crate::kinds::elementwise::Op;
 use crate::kinds::field::{
@@ -28,17 +28,6 @@ pub struct Rewrite<'a> {
 
 fn keep(_name: &str) -> Option<Name> {
     None
-}
-
-/// Names each listed once, in first appearance.
-pub fn unique(names: impl IntoIterator<Item = Name>) -> Vec<Name> {
-    let mut out: Vec<Name> = Vec::new();
-    for name in names {
-        if !out.contains(&name) {
-            out.push(name);
-        }
-    }
-    out
 }
 
 fn sorted_free_vars(expression: &Expression) -> Vec<Name> {
@@ -475,7 +464,7 @@ impl Statement {
         if rewriter.short || rewriter.bodies.len() > 0 {
             return Err(Error::Value(format!(
                 "{}.with_bodies: {} bodies for {} child bodies",
-                this.kind_name(),
+                this.kind(),
                 count,
                 this.nested().len()
             )));
@@ -1032,7 +1021,7 @@ pub fn literal_of(stmt: &Statement) -> Option<f64> {
 pub fn literal_binding(stmt: &Statement) -> Option<(&Name, f64)> {
     if let Statement::Let(let_) = stmt
         && let Expr::Literal(lit) = &*let_.value
-        && &*lit.dtype == "float"
+        && lit.dtype == LitType::Float
         && let_.dtype.as_ref().is_none_or(|d| d.name() == "f32")
     {
         return Some((&let_.name, lit.value.as_f64()));
@@ -1206,18 +1195,18 @@ pub fn check(stmt: &Statement) -> Result<()> {
         }
         Statement::Tile(s) => s.check(),
         Statement::WgmmaMma(s) => s.check(),
-        Statement::TreeHalve(s) => carried_kind(&s.combine_states, "Assign"),
-        Statement::WarpShuffle(s) => carried_kind(&s.combine_states, "Assign"),
-        Statement::RegStore(s) => carried_kind(&s.run, "RegStore"),
+        Statement::TreeHalve(s) => carried_kind(&s.combine_states, Kind::Assign),
+        Statement::WarpShuffle(s) => carried_kind(&s.combine_states, Kind::Assign),
+        Statement::RegStore(s) => carried_kind(&s.run, Kind::RegStore),
         _ => Ok(()),
     }
 }
 
-fn carried_kind(stmts: &[Arc<Statement>], kind: &str) -> Result<()> {
-    match stmts.iter().find(|s| s.kind_name() != kind) {
+fn carried_kind(stmts: &[Arc<Statement>], kind: Kind) -> Result<()> {
+    match stmts.iter().find(|s| s.kind() != kind) {
         Some(other) => Err(Error::Type(format!(
             "expected {kind} statements, got a {}",
-            other.kind_name()
+            other.kind()
         ))),
         None => Ok(()),
     }
@@ -1289,4 +1278,81 @@ impl Statement {
 
 pub fn axis_named(axis: &Axis) -> &Name {
     &axis.name
+}
+
+impl Body {
+    /// This body with every external buffer renamed through `mapping`.
+    pub fn rename_buffers(&self, mapping: &HashMap<Name, Name>) -> Body {
+        let renaming = Renaming::new(mapping);
+        let result =
+            self.map_stmts(&mut |stmt| Some(Statement::rename_buffers_with(stmt, &renaming)));
+        if result.ptr_eq(self) {
+            return self.clone();
+        }
+        // An injective spelling-only rename keeps the normal form a body is its own.
+        if matches!(self.0.normalized.get(), Some(Normalized::Itself)) {
+            let resources: Vec<Name> = unique(
+                self.iter_stmts()
+                    .iter()
+                    .flat_map(|s| s.external_reads().into_iter().chain(s.external_writes())),
+            );
+            let renamed: HashSet<Name> = resources
+                .iter()
+                .map(|name| mapping.get(name).cloned().unwrap_or_else(|| name.clone()))
+                .collect();
+            if renamed.len() == resources.len() {
+                let _ = result.0.normalized.set(Normalized::Itself);
+            }
+        }
+        result
+    }
+
+    /// Shared SSA definitions assembled once and adjacent independent reduction loops merged.
+    pub fn coalesce(&self) -> Body {
+        let mut out: Vec<Arc<Statement>> = Vec::new();
+        let mut seen: Vec<Arc<Statement>> = Vec::new();
+        let mut folded: HashSet<Name> = HashSet::new();
+        for stmt in self.stmts() {
+            let mut stmt = stmt.clone();
+            if stmt.has_side_effects() {
+                seen.clear();
+                folded.clear();
+            } else if !exposed_defines(&stmt).is_empty() {
+                if seen.iter().any(|s| **s == *stmt) {
+                    continue;
+                }
+                seen.push(stmt.clone());
+                let accumulators: HashSet<Name> = seeded_accumulators(&stmt).into_iter().collect();
+                if !accumulators.is_disjoint(&folded) {
+                    if accumulators.is_subset(&folded) {
+                        continue;
+                    }
+                    let wanted: Vec<Name> = accumulators.difference(&folded).cloned().collect();
+                    if let Some((_, body)) = loop_parts(&stmt) {
+                        let (members, _) = body.backward_cone(&wanted);
+                        let kept = Body::new(members.iter().map(|m| m.stmt().clone()).collect());
+                        stmt = Statement::rebuild_bodies(&stmt, vec![kept]);
+                    }
+                }
+            }
+            if let Some(prior) = out.last()
+                && let (Some((prior_reduce, prior_body)), Some((stmt_reduce, stmt_body))) =
+                    (loop_parts(prior), loop_parts(&stmt))
+                && prior_reduce
+                && stmt_reduce
+                && !(prior.has_side_effects() || stmt.has_side_effects())
+                && *Statement::rebuild_bodies(prior, vec![stmt_body.clone()]) == *stmt
+                && free_names(&stmt)
+                    .iter()
+                    .all(|name| !prior_body.definitions().contains_key(name))
+            {
+                let merged = prior_body.concat(stmt_body.stmts()).coalesce();
+                stmt = Statement::rebuild_bodies(prior, vec![merged]);
+                out.pop();
+            }
+            folded.extend(seeded_accumulators(&stmt));
+            out.push(stmt);
+        }
+        Body::new(out)
+    }
 }

@@ -29,53 +29,67 @@ pub fn scope_tree(numbering: &Numbering, body: &Body, effects: &mut Effects) -> 
         .clone();
     let mut members: Vec<Number> = Vec::with_capacity(body.len());
     for (index, sources) in order.iter().enumerate() {
-        let here = body.at(index);
-        let ordinal = numbering.ordinal(here.stmt());
         let mut preceding: Vec<Key> = sources
             .iter()
             .map(|source| Key::Num(members[*source]))
             .collect();
         preceding.sort();
-        let member = match &numbering.blocks[ordinal] {
-            Some((header, params)) => {
-                let children = locked(&numbering.trees).get(&ordinal).cloned();
-                let children = match children {
-                    Some(children) => children,
-                    None => {
-                        let children: Vec<Number> = here
-                            .stmt()
-                            .nested()
-                            .iter()
-                            .map(|child| scope_tree(numbering, child, effects))
-                            .collect();
-                        locked(&numbering.trees).insert(ordinal, children.clone());
-                        children
-                    }
-                };
-                hash_parts([
-                    Key::str("block"),
-                    header.clone(),
-                    Key::Tuple(params.clone()),
-                    Key::Tuple(children.into_iter().map(Key::Num).collect()),
-                    Key::Tuple(preceding),
-                ])
-            }
-            None => {
-                let (number, params) = numbering.numbers[ordinal]
-                    .as_ref()
-                    .map_or((Key::None, Vec::new()), |(n, p)| (Key::Num(*n), p.clone()));
-                hash_parts([
-                    Key::str("stmt"),
-                    number,
-                    Key::Tuple(params),
-                    Key::Tuple(preceding),
-                ])
-            }
-        };
-        members.push(member);
+        members.push(member_tree(numbering, &body.at(index), preceding, effects));
     }
     members.sort_unstable();
     hash_parts(members.into_iter().map(Key::Num))
+}
+
+/// The scope tree of a body holding `here` alone.
+pub fn statement_tree(numbering: &Numbering, here: &StmtRef, effects: &mut Effects) -> Number {
+    hash_parts([Key::Num(member_tree(numbering, here, Vec::new(), effects))])
+}
+
+/// One member of a scope: a block by its header, its children's trees and the members it follows for an effect, a
+/// leaf by its number, its coordinates and those members.
+fn member_tree(
+    numbering: &Numbering,
+    here: &StmtRef,
+    preceding: Vec<Key>,
+    effects: &mut Effects,
+) -> Number {
+    let ordinal = numbering.ordinal(here);
+    match &numbering.blocks[ordinal] {
+        Some((header, params)) => {
+            let children = locked(&numbering.trees).get(&ordinal).cloned();
+            let children = match children {
+                Some(children) => children,
+                None => {
+                    let children: Vec<Number> = here
+                        .stmt()
+                        .nested()
+                        .iter()
+                        .map(|child| scope_tree(numbering, child, effects))
+                        .collect();
+                    locked(&numbering.trees).insert(ordinal, children.clone());
+                    children
+                }
+            };
+            hash_parts([
+                Key::str("block"),
+                header.clone(),
+                Key::Tuple(params.clone()),
+                Key::Tuple(children.into_iter().map(Key::Num).collect()),
+                Key::Tuple(preceding),
+            ])
+        }
+        None => {
+            let (number, params) = numbering.numbers[ordinal]
+                .as_ref()
+                .map_or((Key::None, Vec::new()), |(n, p)| (Key::Num(*n), p.clone()));
+            hash_parts([
+                Key::str("stmt"),
+                number,
+                Key::Tuple(params),
+                Key::Tuple(preceding),
+            ])
+        }
+    }
 }
 
 /// Every resource's forward cone at statement grain: the sorted numbers of every statement that reads, directly or

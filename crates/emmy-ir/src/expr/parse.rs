@@ -267,7 +267,7 @@ impl Parser {
                     let value: f64 = text.parse().map_err(|_| self.error("not a number"))?;
                     Lit {
                         value: Num::Float(value),
-                        dtype: "float".into(),
+                        dtype: LitType::Float,
                     }
                 } else {
                     let value: i64 = text
@@ -275,7 +275,7 @@ impl Parser {
                         .map_err(|_| self.error("integer out of range"))?;
                     Lit {
                         value: Num::Int(value),
-                        dtype: "int".into(),
+                        dtype: LitType::Int,
                     }
                 }
             }
@@ -287,7 +287,7 @@ impl Parser {
                 };
                 Lit {
                     value: Num::Float(if sign { -value } else { value }),
-                    dtype: "float".into(),
+                    dtype: LitType::Float,
                 }
             }
             _ => return Ok(None),
@@ -314,7 +314,10 @@ impl Parser {
             }
             TokenKind::Name => {
                 if token.text == "true" || token.text == "false" {
-                    return Ok(Expression::literal(Num::Bool(token.text == "true"), "bool"));
+                    return Ok(Expression::literal(
+                        Num::Bool(token.text == "true"),
+                        LitType::Bool,
+                    ));
                 }
                 if self.accept("(") {
                     let args = self.expressions(")")?;

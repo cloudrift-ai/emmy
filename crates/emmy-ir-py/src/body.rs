@@ -322,7 +322,7 @@ impl PyBody {
     fn _topological_permutation(&self, incoming: &Bound<'_, PyAny>) -> PyResult<Vec<usize>> {
         Ok(self
             .body
-            .topological_permutation(&incoming_from_py(incoming)?, None))
+            .topological_permutation::<()>(&incoming_from_py(incoming)?, None))
     }
 
     /// This body in topological order under `incoming`.
@@ -424,7 +424,7 @@ impl PyBody {
         py: Python<'py>,
         types: &Bound<'py, PyTuple>,
     ) -> PyResult<Bound<'py, PyTuple>> {
-        let mut kinds: Vec<&'static str> = Vec::new();
+        let mut kinds: Vec<emmy_ir::kinds::Kind> = Vec::new();
         for item in types.iter() {
             let cls = item
                 .cast::<PyType>()
@@ -432,7 +432,7 @@ impl PyBody {
             match kind_of(cls) {
                 Some(kind) => kinds.push(kind),
                 None if cls.is(py.get_type::<PyStatement>()) => {
-                    kinds.extend(emmy_ir::kinds::KIND_NAMES.iter().copied())
+                    kinds.extend(emmy_ir::kinds::Kind::ALL.iter().copied())
                 }
                 None => {
                     return Err(PyTypeError::new_err(format!(
@@ -521,12 +521,8 @@ impl PyBody {
                     .collect::<PyResult<_>>()
             })
             .transpose()?;
-        let identity = emmy_ir::numbering::identity::canonicalize_identity(
-            &self.body,
-            cluster,
-            colors.as_ref(),
-        )
-        .py()?;
+        let identity =
+            emmy_ir::identity::canonicalize_identity(&self.body, cluster, colors.as_ref()).py()?;
         Ok((identity.key, str_tuple(py, &identity.arguments)?))
     }
 }
@@ -833,7 +829,7 @@ pub fn ordering_constraints<'py>(
 ) -> PyResult<Bound<'py, PyList>> {
     let body = PyBody::from_iterable(body)?;
     let sets: PyResult<Vec<Bound<'py, PySet>>> =
-        emmy_ir::normalize::order::ordering_constraints(&body, effects, redefinitions)
+        emmy_ir::order::ordering_constraints(&body, effects, redefinitions)
             .iter()
             .map(|sources| PySet::new(py, sources.iter()))
             .collect();

@@ -4,8 +4,9 @@
 use std::hash::{Hash, Hasher};
 use std::sync::Arc;
 
-use crate::Name;
 use crate::expr::{Expr, Expression, Num};
+use crate::kinds::field::spell_stmt_name;
+use crate::{Name, Result};
 
 /// The expected size of a symbolic dim when none is supplied.
 pub const DEFAULT_SEQ_HINT: i64 = 512;
@@ -165,4 +166,42 @@ impl Hash for Axis {
         self.name.hash(state);
         self.extent.hash(state);
     }
+}
+
+/// `name in start..extent`, with the hint when it is not the default, and the window.
+pub fn spell_axis(axis: &Axis, start: Option<&str>) -> Result<String> {
+    let mut extent = axis.extent.expression.try_text()?;
+    if axis.extent.hint != axis.extent.default_hint()
+        && let Some(hint) = axis.extent.hint
+    {
+        extent.push_str(&format!("~{hint}"));
+    }
+    let mut out = format!(
+        "{} in {}..{}",
+        spell_stmt_name(&axis.name)?,
+        start.unwrap_or("0"),
+        extent
+    );
+    out.push_str(&spell_window(axis.window.as_ref())?);
+    Ok(out)
+}
+
+pub fn spell_window(window: Option<&Window>) -> Result<String> {
+    let Some(window) = window else {
+        return Ok(String::new());
+    };
+    let mut parts: Vec<String> = Vec::new();
+    if let Some(parent) = &window.parent {
+        parts.push(format!("parent={}", spell_axis(parent, None)?));
+    }
+    if let Some(base) = &window.base {
+        parts.push(format!("base={}", base.try_text()?));
+    }
+    if let Some(bound) = &window.bound {
+        parts.push(format!("bound={}", bound.try_text()?));
+    }
+    if window.partition {
+        parts.push("partition=true".into());
+    }
+    Ok(format!(" window({})", parts.join(", ")))
 }

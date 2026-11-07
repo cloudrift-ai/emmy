@@ -13,22 +13,15 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use crate::body::{Body, Subroutine};
-use crate::expr::{Expr, Expression, Lit, Num, Parser, TokenKind, spell_name};
-use crate::kinds::axis::{Axis, Dim, Window};
+use crate::expr::{Expr, Expression, Lit, LitType, Num, Parser, TokenKind};
+use crate::kinds::axis::{Axis, Dim, Window, spell_axis, spell_window};
 use crate::kinds::elementwise::Op;
-use crate::kinds::field::{DType, Float, NumOr, Ty, Value, Values, spell_number};
+use crate::kinds::field::{DType, Float, NumOr, Ty, Value, Values, spell_number, spell_stmt_name};
 use crate::kinds::*;
 use crate::protocol::finished;
 use crate::{Error, Name, Result};
 
 pub const INDENT: &str = "    ";
-
-/// Words the reader gives a meaning, so a name spelled like one is written between backticks.
-pub const KEYWORDS: [&str; 26] = [
-    "for", "in", "if", "else", "let", "init", "zero", "load", "pre", "select", "when", "over",
-    "seed", "step", "until", "window", "carried", "swizzle", "words", "unroll", "sub", "call",
-    "true", "false", "none", "in",
-];
 
 /// A literal number's expression text as a statement spells it (for the Python side's `spell_number`).
 pub fn number_text(value: f64) -> String {
@@ -39,7 +32,7 @@ pub fn number_text(value: f64) -> String {
 pub fn float_literal(value: f64) -> Expression {
     Expression::new(Expr::Literal(Lit {
         value: Num::Float(value),
-        dtype: "float".into(),
+        dtype: LitType::Float,
     }))
 }
 
@@ -106,7 +99,7 @@ mod tests {
     fn calls_read_back() {
         let body = parse_body(CALLS).unwrap();
         assert_eq!(body_text(&body).unwrap(), CALLS);
-        let calls = body.of_kinds(&["Call"]);
+        let calls = body.of_kinds(&[Kind::Call]);
         let targets: Vec<_> = calls
             .iter()
             .map(|c| match &**c.stmt() {

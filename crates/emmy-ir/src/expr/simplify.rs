@@ -14,7 +14,7 @@ pub(super) fn fold_binop_literals(op: BinOp, left: &Lit, right: &Lit) -> Result<
     if let Num::Bool(flag) = folded {
         return Ok(Expression::int(flag as i64));
     }
-    let both_int = &*left.dtype == "int" && &*right.dtype == "int";
+    let both_int = left.dtype == LitType::Int && right.dtype == LitType::Int;
     if let Num::Int(v) = folded
         && both_int
     {
@@ -78,7 +78,7 @@ pub(super) fn simplify_binary(
                 if let Expr::Binary(inner_op, inner_left, inner_right) = &*left
                     && inner_op.is_division()
                     && let Some(Lit { value, dtype }) = inner_right.as_literal()
-                    && &**dtype == "int"
+                    && *dtype == LitType::Int
                     && value.as_f64() > 0.0
                     && inner_left.range(ctx).is_some_and(|bounds| bounds.lo >= 0)
                 {
@@ -87,7 +87,7 @@ pub(super) fn simplify_binary(
                     return Expression::binary(
                         BinOp::Div,
                         inner_left.clone(),
-                        Expression::literal(product, "int"),
+                        Expression::literal(product, LitType::Int),
                     )
                     .simplify(ctx);
                 }
@@ -157,7 +157,7 @@ pub(super) fn simplify_binary(
 /// Flatten a tree of `*` into its non-int factors and its int coefficient.
 pub(super) fn multiplicative_factors(expression: &Expression) -> (Vec<Expression>, i64) {
     if let Some(Lit { value, dtype }) = expression.as_literal()
-        && &**dtype == "int"
+        && *dtype == LitType::Int
         && value.is_integral()
     {
         return (vec![], value.as_int().unwrap_or(0));
