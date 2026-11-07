@@ -368,6 +368,26 @@ What the session changes for the milestones:
    Qwen3.6's window step bounded the same way at its own cache's read time, the number fixed from 1's split;
    short cells unchanged. Needs 1, 5.
 
+   The off-card half is in a draft PR, checked on the RTX 4080. Before #1324 the decode route cut the score
+   out, scanned the window again for the statistics and again for the probabilities, and split only the value
+   product, every query head reading its key-value head's values. #1324 already splits the twisted fold across the
+   window, so a finalize combines the slices' partial states. What it kept is the per-head spelling: its remainder ran
+   per query head and per output column, re-reading the values six times and repeating the softmax rescale for every
+   column. A decode or verify step now spells attention per key-value head, `[rows, kv_heads, group, ...]`, the output
+   the bytes of `[rows, heads * head_dim]`. A kernel's axes follow its output's storage order, so the group (6 on the
+   27B, 8 on Qwen3.6) is the axis the chunk tier folds as its rows, and no read of a key or value depends on it. The
+   step's rows stay on the grid: a verify step reads each slice once per row, from CTAs launched side by side; whether
+   the L2 serves those repeats is the card's question. The prefill chunks keep the per-head spelling, so 5's rows at 16
+   and 64 (27B) and 4 and 64 (Qwen3.6) stand. The four new twins (`attend1`, `attend3` of both recipes) lower at
+   sm_120, and on the 4080 they match the per-head twin at every position and window, whole and split four ways, with
+   either cache, at one CTA per row, key-value head and slice (`f1x32` covers the 256-wide head in one warp). Both
+   recipe goldens carry the new programs and their target kernels with no rows; #1324's decode routes for those
+   programs went with them (19 and 18 measured rows). The hardware golden keeps its old traces, as 2's head did.
+   The record waits for the per-window-range pricing (Decisions; #1352): on the 4080, under one pinned fold at one
+   row, the fastest key split is 8 slices at 512 positions, 32 at 4,096 and 128 at 131,072, and the grouped spelling
+   has a sixth (27B) or an eighth (Qwen3.6) of the per-head spelling's CTAs per split width, so one pick at the
+   512-token hint underfills the card at 197,632. The four programs record at both window prices.
+
 7. **The width-3 Gated DeltaNet step toward its floor.** gdn3rows is 14.3 ms against a 6.9 ms floor after #1282:
    the weight readers run 1.0-1.4 TB/s, the same readers the one-row program runs 5-10 us faster (qkv 38.4 us for
    52 MB, gate_up 70 for 94.7 MB), and the recurrence keeps two ideas #1288 left (the seed read on the step's
@@ -583,10 +603,10 @@ The record and measurement milestones share rented x16 RTX 5090 sessions instead
   attend 1/3/16/64, Qwen3.6's attend 1/3/4/64) on top of #1313's chunk kernels, so strict native export refuses
   until that rental records attention at every width — before 4's gate and before any native measurement. It
   records the head rows, both recipes' rope rows (3 re-keys Qwen3.6's rope too) and the folded prefill attention
-  route with its split arm. 6's per-key-value-head re-spell re-keys the decode attention this rental records: land
-  6's module change before it, or accept recording decode attention twice. Done: 2's head rows on a rented card
-  (#1322), 3's, 4's and 5's rows on the dev-box 5090 (#1324), and the gates of 3, 4 and 5 on a rented x16 card on
-  2026-11-06. 6 and 7 share a second: decode attention at one and three rows for both models, then the width-3 GDN
+  route with its split arm. 6's per-key-value-head re-spell re-keyed the decode attention #1324 recorded, so decode
+  attention records twice. Done: 2's head rows on a rented card (#1322), 3's, 4's and 5's rows on the dev-box 5090
+  (#1324), and the gates of 3, 4 and 5 on a rented x16 card on 2026-11-06. 6 and 7 share a second: decode attention
+  at one and three rows for both models, at both window prices (6's PR lists what to measure), then the width-3 GDN
   tune in the step. 9's wide-width records are a third, after 8's floor is read.
 - Qwen3.6's 13 and 14 share one rental; 15's overlap check rides it when the runtime lands in time, else it takes a
   short rental of its own before 16's gate session.

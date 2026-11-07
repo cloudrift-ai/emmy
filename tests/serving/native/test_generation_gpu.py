@@ -779,7 +779,7 @@ def test_attention_reads_only_the_written_cache_prefix(cache):
 
     window = torch.export.Dim(WINDOW, min=1, max=context)
     examples = (torch.zeros(1, heads * d, dtype=torch.float16), torch.zeros(512, kv, d, dtype=dtype), torch.zeros(512, kv, d, dtype=dtype))
-    module = attend_module(heads, kv, d, 1)
+    module = attend_module(heads, kv, d, 1, grouped=True)  # the decode step's spelling
     shapes = {n: {0: window} if n in ("keys", "values") else {} for n in inspect.signature(module.forward).parameters}
     compiled = CudaBackend().compile(trace_module(module, (*examples, torch.zeros(1, dtype=torch.int64)), dynamic_shapes=shapes))
     with gpu_lock():
