@@ -298,18 +298,18 @@ picks the kernel set from the evidence, and a routing row alone prices nothing.
 Replay remints the stored path to address fresh child names. Each cut keeps its parent's kernel and remainder-step
 scope, including a bare cut recorded on a child with one site.
 
-`run --golden PATH` without `--realization` walks every target kernel of the file once per input regime its rows
-record, in one process. Measured rows whose kernel is the complete target also run as pinned schedules; descendant
-rows remain evidence for their own pieces, even when a descendant's name selects the target. Proposals remain
-unbenched. A piece a decision minted runs with its target, not as a target of its own; the target is named by the
-shortest row name on it or on its pieces — the seed a record run wrote the set under. A failing target does not stop
-the walk. Every target reports, and the command exits non-zero at the end naming the failures. It parses and validates
-the document once and hands that object to each name's resolution step, because a whole-model inventory is large
-enough that re-reading it per target dominates the replay. Only this read-only replay path shares a document; a record
-write-back loads its own copy under the file's lock. The walk compiles a family's twins narrowest first, each with the
-weight layouts the twins before it bound, as serving builds them; `--realization NAME` gets the same scope by
-compiling its narrower twins first, from the file's evidence and with no hand-pinned decision, so a record or tune of
-one wide twin measures the kernels serving deploys.
+`run --golden PATH` without `--realization` walks every target kernel of the file once per input regime and set of
+sizes its rows record, in one process; a kernel two programs price at two sizes runs at each. Measured rows whose
+kernel is the complete target also run as pinned schedules; descendant rows remain evidence for their own pieces, even
+when a descendant's name selects the target. Proposals remain unbenched. A piece a decision minted runs with its
+target, not as a target of its own; the target is named by the shortest row name on it or on its pieces — the seed a
+record run wrote the set under. A failing target does not stop the walk. Every target reports, and the command exits
+non-zero at the end naming the failures. It parses and validates the document once and hands that object to each
+name's resolution step, because a whole-model inventory is large enough that re-reading it per target dominates the
+replay. Only this read-only replay path shares a document; a record write-back loads its own copy under the file's
+lock. The walk compiles a family's twins narrowest first, each with the weight layouts the twins before it bound, as
+serving builds them; `--realization NAME` gets the same scope by compiling its narrower twins first, from the file's
+evidence and with no hand-pinned decision, so a record or tune of one wide twin measures the kernels serving deploys.
 
 The in-model audit uses those serving twins for every architecture, DeepSeek V4 included (its layers take the
 attention-sublayer seam; see `emmy/serving/ARCHITECTURE.md`).

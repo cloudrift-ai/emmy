@@ -1105,8 +1105,8 @@ mod tests {
 
     #[test]
     fn a_step_attends_through_its_window_ranges_program() {
-        // One layer's attention priced for a short and a long range of windows, split at 32,768
-        // positions as the export splits them: each launch runs only in its range.
+        // One layer's attention priced for a short and a long range of windows, split here at
+        // 32,768 positions: each launch runs only in its range.
         let attend = |id: &str, first: i64, last: i64| {
             serde_json::json!({"node_id": id, "kernel": "attend", "args": ["q", "y"],
                 "grid": [[1], [1], [1]], "block": [[32], [1], [1]],
