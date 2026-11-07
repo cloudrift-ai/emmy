@@ -62,11 +62,11 @@ def rewrite(match: Match, root: Node) -> Graph | None:
         Loop(
             axis=reduce_axis,
             body=(
-                Load(name="in0", input=src_id, index=load_index),
+                Load(names=("in0",), input=src_id, index=load_index),
                 Accum(name="acc", value="in0", op=combine, axes=(reduce_axis_name,)),
             ),
         ),
-        Write(output=f"loop_{root.id}", index=write_index, value="acc"),
+        Write(output=f"loop_{root.id}", index=write_index, values=("acc",)),
     )
     body: Body = inner
     for a in reversed(free_axes):

@@ -42,7 +42,7 @@ def rewrite(match: Match, root: Node) -> Graph | None:
         idx = _identity_index(inp_shape, axes)
         name = f"in{i}"
         load_names.append(name)
-        load_stmts.append(Load(name=name, input=inp_id, index=idx))
+        load_stmts.append(Load(names=(name,), input=inp_id, index=idx))
 
     write_index = tuple(Var(a.name) for a in axes)
     if isinstance(root.op, ElementwiseOp):
@@ -61,7 +61,7 @@ def rewrite(match: Match, root: Node) -> Graph | None:
     inner: Body = (
         *load_stmts,
         Assign(name="v", op=op, args=tuple(load_names), dtype=assign_dtype),
-        Write(output=f"loop_{root.id}", index=write_index, value="v"),
+        Write(output=f"loop_{root.id}", index=write_index, values=("v",)),
     )
     # Nest the body in free-axis Loops (outer axis wraps the innermost).
     body: Body = inner

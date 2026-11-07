@@ -185,13 +185,8 @@ def test_cuda_op_tma_descriptors_roundtrip():
 
 
 def test_kernel_op_windowed_axis_roundtrip():
-    """A dumped kernel-stage graph must rehydrate a ``Tile`` whose axes carry a ``Window``.
-
-    ``repr(Axis)`` spells the ``window`` field in full, so every register-tiled or cross-CTA-split
-    kernel dumps ``Window(parent=Axis(...), partition=...)`` inside ``KernelOp.body``.
-    ``Window`` lives in ``ir/axis.py``, which the eval scope's auto-populate loop did not cover, so
-    ``Graph.from_dict`` on ``07_lowering_kernel.json`` raised ``NameError: name 'Window' is not
-    defined`` — and with it every ``emmy run --ir <kernel.json>``."""
+    """A dumped kernel-stage graph stores its Kernel IR body as the body's text and rehydrates a ``Tile`` whose
+    axes carry a ``Window`` from it, so ``emmy run --ir <kernel.json>`` reads what the dump wrote."""
     import json
 
     from emmy.compiler.ir.axis import Axis, Window
@@ -208,9 +203,12 @@ def test_kernel_op_windowed_axis_roundtrip():
     g.add_node(op=KernelOp(body=(body,), name="k_x"), inputs=[x], output=Tensor("out", (512, 4096), "f16"), node_id="out")
     g.inputs, g.outputs = [x], ["out"]
 
-    loaded = Graph.from_dict(json.loads(json.dumps(g.to_dict(), default=str)))  # the EMMY_DUMP_DIR disk round-trip
+    dumped = g.to_dict()
+    assert dumped["nodes"]["out"]["op_fields"]["body"] == str(g.nodes["out"].op.body)
+    loaded = Graph.from_dict(json.loads(json.dumps(dumped, default=str)))  # the EMMY_DUMP_DIR disk round-trip
     op = loaded.nodes["out"].op
     assert isinstance(op, KernelOp), f"expected KernelOp, got {op!r}"
+    assert op.body == g.nodes["out"].op.body
     (tile,) = op.body
     assert isinstance(tile.axes[0].window, Window), f"expected a rehydrated Window, got {tile.axes[0].window!r}"
     assert tile.axes[0].source_axis.name == "a0"
@@ -231,11 +229,10 @@ def test_tile_op_scalar_atom_schedule_roundtrip(monkeypatch):
         KernelSchedule,
         ProjectionSchedule,
     )
-    from emmy.compiler.ir.stmt import Let
     from emmy.compiler.ir.tile import TileOp
     from tests.compiler.terms import projection
 
-    fold = projection(body=(Let(name="zero", value=0.0),))
+    fold = projection(body="let `zero` = 0.0")
     source = TileOp(op=fold)
     context = ClassicScheduleContext(source)
     classic = Schedule(
@@ -288,14 +285,19 @@ def test_tile_op_twisted_recipe_roundtrip():
     from emmy.compiler.ir.pure import Fold, Lambda
     from emmy.compiler.ir.pure.twist import SOFTMAX, Channel, Twist
     from emmy.compiler.ir.schedule import Placement
-    from emmy.compiler.ir.stmt import Assign, Body, Let
+    from emmy.compiler.ir.stmt import parse_body
     from emmy.compiler.ir.tile import TileOp
     from tests.compiler.terms import projection, slab
 
     m, k = Axis("m", 4), Axis("k", 128)
     lift = Lambda.closing(
         ("k", "y"),
-        Body((Assign(name="s", op="copy", args=("y",)), Let(name="one", value=1.0))),
+        parse_body(
+            """
+            s = copy(y)
+            let one = 1.0
+            """
+        ),
         ("s", "one"),
     )
     carrier = Fold(
@@ -305,7 +307,7 @@ def test_tile_op_twisted_recipe_roundtrip():
         base=Lambda.componentwise(SOFTMAX.base[:2], ("pivot", "total")),
         twist=Twist(recipe=SOFTMAX, channels=(0,)),
     )
-    root = projection((carrier,), (Assign(name="out", op="divide", args=("total", "pivot")),))
+    root = projection((carrier,), "out = divide(total, pivot)")
     graph = Graph()
     y = graph.add_node(InputOp(), [], Tensor("y", (4, 128), "f32"), node_id="y")
     graph.add_node(
@@ -476,21 +478,16 @@ def test_mimo_rename_node_keeps_aux_buffer():
 
 def test_rename_node_rewrites_load_in_nested_fold_lambda() -> None:
     from emmy.compiler.ir.axis import Axis
-    from emmy.compiler.ir.expression import Var
     from emmy.compiler.ir.pure import Fold, Lambda
-    from emmy.compiler.ir.stmt import Assign, Body, Load
+    from emmy.compiler.ir.stmt import Body, parse_body
     from emmy.compiler.ir.tile import Placement, TileOp
 
     def addition(name: str) -> Lambda:
         other = f"{name}__o"
-        return Lambda(
-            params=(name, other),
-            body=Body((Assign(name=name, op="add", args=(name, other)),)),
-            results=(name,),
-        )
+        return Lambda(params=(name, other), body=parse_body(f"{name} = add({name}, {other})"), results=(name,))
 
     inner = Fold(
-        lift=Lambda.closing(("k",), Body((Load(name="value", input="x", index=(Var("m"), Var("k"))),)), ("value",)),
+        lift=Lambda.closing(("k",), parse_body("value = load x[m, k]"), ("value",)),
         init=(0.0,),
         base=addition("inner_acc"),
     )
@@ -518,21 +515,18 @@ def test_rename_node_rewrites_load_in_nested_fold_lambda() -> None:
 
 def test_rename_node_does_not_renormalize_a_loop_body(monkeypatch) -> None:
     import emmy.compiler.ir.stmt as stmt
-    from emmy.compiler.ir.axis import Axis
-    from emmy.compiler.ir.expression import Var
-    from emmy.compiler.ir.loop import Load, Loop, LoopOp, Write
+    from emmy.compiler.ir.loop import LoopOp
+    from emmy.compiler.ir.stmt import parse_body
 
     graph = Graph()
     graph.add_node(InputOp(), [], Tensor("x", (4,)), node_id="x")
     loop = LoopOp(
-        body=(
-            Loop(
-                axis=Axis("a", 4),
-                body=(
-                    Load(name="value", input="x", index=(Var("a"),)),
-                    Write(output="out", index=(Var("a"),), value="value"),
-                ),
-            ),
+        body=parse_body(
+            """
+            for a in 0..4:
+                value = load x[a]
+                out[a] = value
+            """
         )
     )
     graph.add_node(loop, ["x"], Tensor("out", (4,)), node_id="out")

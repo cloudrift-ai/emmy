@@ -33,7 +33,7 @@ identity stay here, with the two kinds fusion assembles a region with (``Call``,
 from emmy.compiler.ir.stmt.base import Statement, dtype_promote
 from emmy.compiler.ir.stmt.blocks import Cond, Loop, StridedLoop
 from emmy.compiler.ir.stmt.body import Body, exposed_defines, free_names
-from emmy.compiler.ir.stmt.declared import role, statement
+from emmy.compiler.ir.stmt.declared import fields_of, role, statement
 from emmy.compiler.ir.stmt.identity import canonicalize_identity
 from emmy.compiler.ir.stmt.leaves import (
     Accum,
@@ -83,6 +83,7 @@ __all__ = [
     "canonicalize_identity",
     "dtype_promote",
     "exposed_defines",
+    "fields_of",
     "fold_affine",
     "free_names",
     "statement",

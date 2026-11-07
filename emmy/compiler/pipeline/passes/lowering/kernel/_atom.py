@@ -1011,7 +1011,7 @@ def _a_slab_operand(
                 k = BinaryExpr("+", k0, col)
                 sigma = Sigma({m_name: m_coord(row), k_name: k_coord(k)})
                 name = f"{load.name}__af"
-                stmts = [Load(name=name, input=load.input, index=tuple(sigma.apply(e) for e in load.index), dtype=load.dtype)]
+                stmts = [Load(names=(name,), input=load.input, index=tuple(sigma.apply(e) for e in load.index), dtype=load.dtype)]
                 return _k_masked(stmts, name, k, k_ext)
 
             return SyncOperand(tag="a", shape=shape, value=a_value, swizzle=swizzle), False, []
@@ -1647,7 +1647,7 @@ def _staged(ops: _AtomOps, cells, offset, mn: tuple[Side, Side]):
             alpha = ""
             for ld in (*bs_pair.a.alpha, *side.alpha):
                 leaf = f"_bs_alpha_l{counter}"
-                alpha_stmts.append(Load(name=leaf, input=ld.input, index=ld.index, dtype=ld.dtype))
+                alpha_stmts.append(Load(names=(leaf,), input=ld.input, index=ld.index, dtype=ld.dtype))
                 step = f"_bs_alpha{counter}"
                 alpha_stmts.append(
                     Assign(name=step, op="copy", args=(leaf,)) if not alpha else Assign(name=step, op="multiply", args=(alpha, leaf))
@@ -2033,7 +2033,7 @@ class _AtomOps:
 
     def store_stride(self, write: Write, axis: Axis) -> int:
         """The fragment coordinate's physical stride, including coefficients inside a dimension."""
-        step = gmem_axis_step(Load("", write.output, write.index), axis.name, self.outputs)
+        step = gmem_axis_step(Load(("",), write.output, write.index), axis.name, self.outputs)
         return step[0] if step is not None else 0
 
     @property

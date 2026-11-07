@@ -88,27 +88,21 @@ def test_float_precision_boundaries_use_host_cpp_spelling():
 
 def test_multi_output_runner_uses_each_write_scope():
     from emmy.compiler.backend.loop import LoopBackend
-    from emmy.compiler.ir.expression import Var
-    from emmy.compiler.ir.loop import Assign, Axis, Load, Loop, LoopOp, Write
+    from emmy.compiler.ir.loop import LoopOp
+    from emmy.compiler.ir.stmt import parse_body
 
     loop = LoopOp(
-        body=(
-            Loop(
-                axis=Axis("i", 3),
-                body=(
-                    Load(name="xv", input="x", index=(Var("i"),)),
-                    Assign(name="neg", op="negative", args=("xv",)),
-                    Write(output="small", index=(Var("i"),), value="neg"),
-                ),
-            ),
-            Loop(
-                axis=Axis("j", 5),
-                body=(
-                    Load(name="yv", input="y", index=(Var("j"),)),
-                    Assign(name="mag", op="abs", args=("yv",)),
-                    Write(output="large", index=(Var("j"),), value="mag"),
-                ),
-            ),
+        body=parse_body(
+            """
+            for i in 0..3:
+                xv = load x[i]
+                neg = negative(xv)
+                small[i] = neg
+            for j in 0..5:
+                yv = load y[j]
+                mag = abs(yv)
+                large[j] = mag
+            """
         )
     )
     graph = Graph()

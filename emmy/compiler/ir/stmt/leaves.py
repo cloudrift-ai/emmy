@@ -20,7 +20,7 @@ from emmy.compiler.ir.stmt.base import Statement
 from emmy.compiler.ir.stmt.declared import rewrite_by_roles, role, statement
 
 
-@statement(init=False)
+@statement
 class Load(Statement):
     """Read a value (or N consecutive values) from an external input buffer.
 
@@ -31,10 +31,8 @@ class Load(Statement):
     Loads into one Load with ``len(names) > 1``. Every pass before that
     produces scalar Loads and can keep using ``s.name`` / ``s.index``.
 
-    The constructor accepts either ``name="x"`` (scalar shorthand,
-    normalized to ``names=("x",)``) or ``names=(...)`` directly. Use
-    ``.is_vector`` / ``.is_scalar`` / ``.width`` / ``.name`` (asserts
-    scalar) / ``.names`` to test shape.
+    A load takes its fields as declared: ``names`` is a tuple, one name for a scalar load. Use
+    ``.is_vector`` / ``.is_scalar`` / ``.width`` / ``.name`` (asserts scalar) / ``.names`` to test shape.
 
     A scalar Load is rendered as a literal binding (``float name =
     <value>;``) when ``ctx.literal_constants`` carries a value for
@@ -65,38 +63,14 @@ class Load(Statement):
     # Read through: a data-dependent (gather) index like ``weight[(int)in0, a]`` reads ``in0``. Axis names appear
     # among the reads too; every consumer resolves a read against the body's definitions, where axes are absent.
     index: tuple[Expression, ...] = role("expression", "reads")
-    dtype: DataType | None
+    dtype: DataType | None = None
     carried: str = ""  # a default, so a Load that does not set it renders (and keys) as before
 
     pure = True  # a pure value binding — legal inside a stored ``Lambda`` body
 
-    def __init__(
-        self,
-        name: str | None = None,
-        input: str | None = None,
-        index: tuple[Expression, ...] | None = None,
-        *,
-        names: tuple[str, ...] | None = None,
-        dtype: DataType | None = None,
-        carried: str = "",
-    ) -> None:
-        if names is None:
-            if name is None:
-                raise TypeError("Load requires either `name=` (scalar) or `names=` (vector)")
-            names = (name,)
-        elif name is not None:
-            raise TypeError("Load: pass `name=` xor `names=`, not both")
-        if input is None:
-            raise TypeError("Load requires `input=`")
-        if index is None:
-            raise TypeError("Load requires `index=`")
-        if not names:
+    def __post_init__(self) -> None:
+        if not self.names:
             raise ValueError("Load.names must be non-empty")
-        object.__setattr__(self, "names", tuple(names))
-        object.__setattr__(self, "input", input)
-        object.__setattr__(self, "index", tuple(index))
-        object.__setattr__(self, "dtype", dtype)
-        object.__setattr__(self, "carried", carried)
 
     @property
     def name(self) -> str:
@@ -424,7 +398,7 @@ class Let(Statement):
         return self if value == self.value else self.replace(value=value)
 
 
-@statement(init=False)
+@statement
 class Write(Statement):
     """Write an SSA value (or N consecutive values) to ``output``.
 
@@ -436,10 +410,8 @@ class Write(Statement):
     that produces scalar Writes and can keep using ``s.value`` /
     ``s.index``.
 
-    The constructor accepts either ``value="v"`` (scalar shorthand,
-    normalized to ``values=("v",)``) or ``values=(...)`` directly. Use
-    ``.is_vector`` / ``.is_scalar`` / ``.width`` / ``.value`` (asserts
-    scalar) / ``.values`` to test shape.
+    A write takes its fields as declared: ``values`` is a tuple, one name for a scalar write. Use
+    ``.is_vector`` / ``.is_scalar`` / ``.width`` / ``.value`` (asserts scalar) / ``.values`` to test shape.
 
     ``output`` is the destination buffer's name (matches the owning graph
     node's id, or — for multi-output kernels — one of its output buffer
@@ -453,51 +425,25 @@ class Write(Statement):
     output: str = role("buffer_write")
     index: tuple[Expression, ...] = role("expression", "reads")
     values: tuple[str, ...] = role("reads")
-    value_dtype: DataType | None
+    value_dtype: DataType | None = None
     # An ``atomicAdd`` reduce-write (cross-CTA split-reduce, ``030_cut``'s atomic finalize):
     # every contributing CTA adds its partial into the SAME output cell, so the store is an
     # atomic accumulate (the output is zero-init'd per launch — ``CudaOp.zero_outputs``).
     # Scalar only; never vectorized (each lane needs its own ``atomicAdd``).
-    atomic: bool
+    atomic: bool = False
     # Software smem slab swizzle mode ("NONE"/"B32"/"B64"/"B128") — the sync compute-fill's
     # producer-side XOR: the flattened destination element index passes through
     # ``emmy_swizzle_<mode>`` exactly like a :class:`~emmy.compiler.ir.kernel.ir.CpAsyncCopy`
     # fill, so the ``LdmatrixLoad`` drain reads the slab back through the identical
     # permutation. Intra-chunk bits (0..2) pass through the XOR, so a ≤8-element vectorized
     # Write stays inside its relocated 16-byte chunk. "NONE" (every non-slab Write) is inert.
-    swizzle: str
+    swizzle: str = "NONE"
 
-    def __init__(
-        self,
-        output: str | None = None,
-        index: tuple[Expression, ...] | None = None,
-        value: str | None = None,
-        *,
-        values: tuple[str, ...] | None = None,
-        value_dtype: DataType | None = None,
-        atomic: bool = False,
-        swizzle: str = "NONE",
-    ) -> None:
-        if values is None:
-            if value is None:
-                raise TypeError("Write requires either `value=` (scalar) or `values=` (vector)")
-            values = (value,)
-        elif value is not None:
-            raise TypeError("Write: pass `value=` xor `values=`, not both")
-        if output is None:
-            raise TypeError("Write requires `output=`")
-        if index is None:
-            raise TypeError("Write requires `index=`")
-        if not values:
+    def __post_init__(self) -> None:
+        if not self.values:
             raise ValueError("Write.values must be non-empty")
-        if atomic and len(values) != 1:
+        if self.atomic and len(self.values) != 1:
             raise ValueError("an atomic Write is scalar (one value per atomicAdd)")
-        object.__setattr__(self, "output", output)
-        object.__setattr__(self, "index", tuple(index))
-        object.__setattr__(self, "values", tuple(values))
-        object.__setattr__(self, "value_dtype", value_dtype)
-        object.__setattr__(self, "atomic", atomic)
-        object.__setattr__(self, "swizzle", swizzle)
 
     @property
     def value(self) -> str:

@@ -8,33 +8,25 @@ itself rather than some upstream lowering quirk.
 
 from __future__ import annotations
 
-from dataclasses import replace
-
 import numpy as np
 import pytest
 
 from emmy.compiler.dtype import F16, DataType
 from emmy.compiler.graph import Graph
 from emmy.compiler.ir.base import InputOp
-from emmy.compiler.ir.expression import BinaryExpr, Literal, Var
-from emmy.compiler.ir.loop import (
-    Accum,
-    Affine,
-    Assign,
-    Axis,
-    Load,
-    Loop,
-    LoopOp,
-    UnfusableStmt,
-    Write,
-    splice_graph,
-    splice_loops,
-)
+from emmy.compiler.ir.expression import BinaryExpr
+from emmy.compiler.ir.loop import Accum, Affine, Assign, Load, Loop, LoopOp, UnfusableStmt, Write, splice_graph, splice_loops
+from emmy.compiler.ir.stmt import parse_body
 from emmy.compiler.tensor import Tensor
 
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
+
+def _loop(text: str) -> LoopOp:
+    """A Loop op over the body ``text`` states."""
+    return LoopOp(body=parse_body(text))
 
 
 def _count_kind(op: LoopOp, cls: type) -> int:
@@ -62,19 +54,16 @@ def _splice_loop_ops(producer: LoopOp, consumer: LoopOp, source: str) -> LoopOp 
 
 
 def test_splicing_independent_row_sums_keeps_lexically_reused_accumulators_distinct() -> None:
-    def rows(buffer: str, extent: int) -> Loop:
-        return Loop(
-            Axis("row", extent),
-            (
-                Loop(
-                    Axis("k", 3),
-                    (Load("value", buffer, (Var("row"), Var("k"))), Accum("total", "value", axes=("k",))),
-                ),
-                Write(f"{buffer}_sum", (Var("row"),), "total"),
-            ),
-        )
+    def rows(buffer: str, extent: int) -> str:
+        return f"""
+for row in 0..{extent}:
+    for k in 0..3:
+        value = load {buffer}[row, k]
+        total <- add(total, value) over k
+    {buffer}_sum[row] = total
+"""
 
-    op = LoopOp(body=(rows("x", 2), rows("y", 4)))
+    op = _loop(rows("x", 2) + rows("y", 4))
     accums = [stmt.name for stmt in op.body.iter() if isinstance(stmt, Accum)]
     assert len(set(accums)) == 2
     merged = splice_loops({"root": op}, {}, roots=(("root", "x_sum"), ("root", "y_sum")))
@@ -86,22 +75,15 @@ def test_splicing_independent_row_sums_keeps_lexically_reused_accumulators_disti
 
 
 def test_normalization_preserves_explicit_state_through_a_conditional_update() -> None:
-    from emmy.compiler.dtype import F32
-    from emmy.compiler.ir.stmt import Cond, Init
-
-    op = LoopOp(
-        body=(
-            Init("total", 10.0, dtype=F32),
-            Loop(
-                Axis("k", 4),
-                (
-                    Load("x", "x", (Var("k"),)),
-                    Cond(BinaryExpr("<", Var("k"), Literal(2)), (Accum("total", "x", axes=("k",)),)),
-                ),
-                seed=False,
-            ),
-            Write("sum", (Literal(0, dtype="int"),), "total"),
-        )
+    op = _loop(
+        """
+        init f32 total = 10
+        for k in 0..4 seed=false:
+            x = load x[k]
+            if k < 2.0:
+                total <- add(total, x) over k
+        sum[0] = total
+        """
     )
     actual = op.forward(np.array([1, 2, 100, 100], dtype=np.float32))
     np.testing.assert_array_equal(actual, np.array([13], dtype=np.float32))
@@ -111,42 +93,26 @@ def test_normalization_preserves_explicit_state_through_a_conditional_update() -
 # ---------------------------------------------------------------------------
 
 
-def _reduce_producer(*, source: str, output: str, rounds_to: DataType | None = None) -> LoopOp:
-    """A bare sum reduce storing to ``output``, with its store rounding spelled when narrowing.
+def _reduce_producer(*, source: str, output: str, rounds_to: DataType | None = None, op: str = "add") -> LoopOp:
+    """A bare ``op`` reduce storing to ``output``, with its store rounding spelled when narrowing.
 
     ``loop/lowering/090_spell_store_rounding`` is what spells it in the real pipeline; these tests
     splice hand-built kernels, so they state it directly — the splicer's contract is to PRESERVE a
     spelled conversion, never to re-derive one from the buffer.
     """
     acc, stored = f"{output}_sum", f"{output}__st"
-    tail: tuple = (Write(output=output, index=(Var("a0"),), value=acc),)
+    tail = f"{output}[a0] = {acc}"
     if rounds_to is not None:
-        tail = (
-            Assign(name=stored, op="copy", args=(acc,), dtype=rounds_to),
-            Write(output=output, index=(Var("a0"),), value=stored),
-        )
-    return LoopOp(
-        body=(
-            Loop(
-                axis=A0,
-                body=(
-                    Loop(
-                        axis=K,
-                        body=(
-                            Load(name=f"{output}_value", input=source, index=(Var("a0"), Var("k"))),
-                            Accum(name=acc, value=f"{output}_value", op="add"),
-                        ),
-                    ),
-                    *tail,
-                ),
-            ),
-        ),
+        tail = f"{rounds_to.name} {stored} = copy({acc})\n    {output}[a0] = {stored}"
+    return _loop(
+        f"""
+for a0 in 0..4:
+    for k in 0..16:
+        {output}_value = load {source}[a0, k]
+        {acc} <- {op}({acc}, {output}_value)
+    {tail}
+"""
     )
-
-
-A0 = Axis("a0", 4)
-A1 = Axis("a1", 8)
-K = Axis("k", 16)
 
 
 def _splice_graph_producer(
@@ -156,17 +122,13 @@ def _splice_graph_producer(
     output_shape: tuple[int, ...],
     edge_dtype: DataType,
 ) -> LoopOp:
-    consumer = LoopOp(
-        body=(
-            Loop(
-                axis=A0,
-                body=(
-                    Load(name="value", input="producer", index=(Var("a0"),)),
-                    Assign(name="activated", op="silu", args=("value",)),
-                    Write(output="consumer", index=(Var("a0"),), value="activated"),
-                ),
-            ),
-        ),
+    consumer = _loop(
+        """
+        for a0 in 0..4:
+            value = load producer[a0]
+            activated = silu(value)
+            consumer[a0] = activated
+        """
     )
     graph = Graph()
     graph.add_node(InputOp(), [], Tensor("x", input_shape, F16), node_id="x")
@@ -187,29 +149,21 @@ def _splice_graph_producer(
 
 def test_pointwise_chain():
     """producer: y = exp(x)  ;  consumer: z = add(y, y)."""
-    producer = LoopOp(
-        body=(
-            Loop(
-                axis=A0,
-                body=(
-                    Load(name="x", input="src_0", index=(Var("a0"),)),
-                    Assign(name="y", op="exp", args=("x",)),
-                    Write(output="out_0", index=(Var("a0"),), value="y"),
-                ),
-            ),
-        ),
+    producer = _loop(
+        """
+        for a0 in 0..4:
+            x = load src_0[a0]
+            y = exp(x)
+            out_0[a0] = y
+        """
     )
-    consumer = LoopOp(
-        body=(
-            Loop(
-                axis=A0,
-                body=(
-                    Load(name="yv", input="src_0", index=(Var("a0"),)),
-                    Assign(name="z", op="add", args=("yv", "yv")),
-                    Write(output="out_0", index=(Var("a0"),), value="z"),
-                ),
-            ),
-        ),
+    consumer = _loop(
+        """
+        for a0 in 0..4:
+            yv = load src_0[a0]
+            z = add(yv, yv)
+            out_0[a0] = z
+        """
     )
 
     merged = _splice_loop_ops(producer, consumer, source="src_0")
@@ -233,31 +187,23 @@ def test_pointwise_chain():
 
 def test_shared_intermediate_deduped():
     """Two consumer refs to the same producer value under identity σ share one binding."""
-    producer = LoopOp(
-        body=(
-            Loop(
-                axis=A0,
-                body=(
-                    Load(name="x", input="src_0", index=(Var("a0"),)),
-                    Assign(name="y", op="exp", args=("x",)),
-                    Write(output="out_0", index=(Var("a0"),), value="y"),
-                ),
-            ),
-        ),
+    producer = _loop(
+        """
+        for a0 in 0..4:
+            x = load src_0[a0]
+            y = exp(x)
+            out_0[a0] = y
+        """
     )
     # Consumer loads producer twice at the same index — both solve σ = {a0: a0}.
-    consumer = LoopOp(
-        body=(
-            Loop(
-                axis=A0,
-                body=(
-                    Load(name="ya", input="src_0", index=(Var("a0"),)),
-                    Load(name="yb", input="src_0", index=(Var("a0"),)),
-                    Assign(name="z", op="add", args=("ya", "yb")),
-                    Write(output="out_0", index=(Var("a0"),), value="z"),
-                ),
-            ),
-        ),
+    consumer = _loop(
+        """
+        for a0 in 0..4:
+            ya = load src_0[a0]
+            yb = load src_0[a0]
+            z = add(ya, yb)
+            out_0[a0] = z
+        """
     )
 
     merged = _splice_loop_ops(producer, consumer, source="src_0")
@@ -271,45 +217,26 @@ def test_shared_intermediate_deduped():
 def test_reductions_share_dependencies_in_cse_form(dependent, offset):
     """Independent reductions share upstream work; a finalized maximum stays outside its consumer's sum."""
 
-    producer = LoopOp(
-        body=(
-            Loop(
-                axis=A0,
-                body=(
-                    Loop(
-                        axis=Axis("j", 16 + offset),
-                        body=(
-                            Load(name="x", input="X", index=(Var("a0"), Var("j"))),
-                            Assign(name="e", op="exp", args=("x",)),
-                            Write(output="P", index=(Var("a0"), Var("j")), value="e"),
-                        ),
-                    ),
-                ),
-            ),
-        ),
+    producer = _loop(
+        f"""
+        for a0 in 0..4:
+            for j in 0..{16 + offset}:
+                x = load X[a0, j]
+                e = exp(x)
+                P[a0, j] = e
+        """
     )
-    left = _reduce_producer(source="P", output="left")
-    left = replace(left, body=left.body.map(lambda s: s.replace(op="maximum") if isinstance(s, Accum) else s))
-    prefix = (Load(name="m", input="left", index=(Var("a0"),)),) if dependent else ()
-    subtract = (Assign(name="shifted", op="subtract", args=("p", "m")),) if dependent else ()
-    right = LoopOp(
-        body=(
-            Loop(
-                axis=A0,
-                body=(
-                    *prefix,
-                    Loop(
-                        axis=K,
-                        body=(
-                            Load(name="p", input="P", index=(Var("a0"), Var("k") + Literal(offset, "int"))),
-                            *subtract,
-                            Accum(name="total", value="shifted" if dependent else "p", op="add"),
-                        ),
-                    ),
-                    Write(output="right", index=(Var("a0"),), value="total"),
-                ),
-            ),
-        ),
+    left = _reduce_producer(source="P", output="left", op="maximum")
+    right = _loop(
+        f"""
+        for a0 in 0..4:
+            {"m = load left[a0]" if dependent else ""}
+            for k in 0..16:
+                p = load P[a0, k + {offset}]
+                {"shifted = subtract(p, m)" if dependent else ""}
+                total <- add(total, {"shifted" if dependent else "p"})
+            right[a0] = total
+        """
     )
     edges = {("left", "P"): ("producer", "P"), ("right", "P"): ("producer", "P")}
     if dependent:
@@ -340,43 +267,26 @@ def test_different_indices_emit_twice():
     """Consumer loads a 2D producer with two different index permutations —
     the two σs are distinct, so the producer's chain materializes twice."""
     # Producer axes (a0, a1); writes y[a0, a1] = exp(x[a0, a1]).
-    A1_same = Axis("a1", 4)  # square so the transposed load is well-typed.
-    A0_same = Axis("a0", 4)
-    producer = LoopOp(
-        body=(
-            Loop(
-                axis=A0_same,
-                body=(
-                    Loop(
-                        axis=A1_same,
-                        body=(
-                            Load(name="x", input="src_0", index=(Var("a0"), Var("a1"))),
-                            Assign(name="y", op="exp", args=("x",)),
-                            Write(output="out_0", index=(Var("a0"), Var("a1")), value="y"),
-                        ),
-                    ),
-                ),
-            ),
-        ),
+    # Square axes so the transposed load is well-typed.
+    producer = _loop(
+        """
+        for a0 in 0..4:
+            for a1 in 0..4:
+                x = load src_0[a0, a1]
+                y = exp(x)
+                out_0[a0, a1] = y
+        """
     )
     # Consumer reads the producer at (a0, a1) and (a1, a0) — transposed.
-    consumer = LoopOp(
-        body=(
-            Loop(
-                axis=A0_same,
-                body=(
-                    Loop(
-                        axis=A1_same,
-                        body=(
-                            Load(name="ya", input="src_0", index=(Var("a0"), Var("a1"))),
-                            Load(name="yb", input="src_0", index=(Var("a1"), Var("a0"))),
-                            Assign(name="z", op="add", args=("ya", "yb")),
-                            Write(output="out_0", index=(Var("a0"), Var("a1")), value="z"),
-                        ),
-                    ),
-                ),
-            ),
-        ),
+    consumer = _loop(
+        """
+        for a0 in 0..4:
+            for a1 in 0..4:
+                ya = load src_0[a0, a1]
+                yb = load src_0[a1, a0]
+                z = add(ya, yb)
+                out_0[a0, a1] = z
+        """
     )
 
     merged = _splice_loop_ops(producer, consumer, source="src_0")
@@ -392,34 +302,22 @@ def test_different_indices_emit_twice():
 
 def test_reduction_producer():
     """Producer: s = sum_k x[a0,k]. Consumer: y = exp(s[a0])."""
-    producer = LoopOp(
-        body=(
-            Loop(
-                axis=A0,
-                body=(
-                    Loop(
-                        axis=K,
-                        body=(
-                            Load(name="x", input="src_0", index=(Var("a0"), Var("k"))),
-                            Accum(name="s", value="x", op="add"),
-                        ),
-                    ),
-                    Write(output="out_0", index=(Var("a0"),), value="s"),
-                ),
-            ),
-        ),
+    producer = _loop(
+        """
+        for a0 in 0..4:
+            for k in 0..16:
+                x = load src_0[a0, k]
+                s <- add(s, x)
+            out_0[a0] = s
+        """
     )
-    consumer = LoopOp(
-        body=(
-            Loop(
-                axis=A0,
-                body=(
-                    Load(name="sv", input="src_0", index=(Var("a0"),)),
-                    Assign(name="y", op="exp", args=("sv",)),
-                    Write(output="out_0", index=(Var("a0"),), value="y"),
-                ),
-            ),
-        ),
+    consumer = _loop(
+        """
+        for a0 in 0..4:
+            sv = load src_0[a0]
+            y = exp(sv)
+            out_0[a0] = y
+        """
     )
 
     merged = _splice_loop_ops(producer, consumer, source="src_0")
@@ -441,16 +339,12 @@ def test_graph_splice_preserves_a_spelled_store_rounding(rounds_to: DataType | N
 
 def test_graph_splice_load_output_needs_no_conversion():
     """A pass-through value is already represented at the loaded input dtype."""
-    producer = LoopOp(
-        body=(
-            Loop(
-                axis=A0,
-                body=(
-                    Load(name="x", input="x", index=(Var("a0"),)),
-                    Write(output="producer", index=(Var("a0"),), value="x"),
-                ),
-            ),
-        ),
+    producer = _loop(
+        """
+        for a0 in 0..4:
+            x = load x[a0]
+            producer[a0] = x
+        """
     )
     merged = _splice_graph_producer(producer, input_shape=(4,), output_shape=(4,), edge_dtype=F16)
     aliases = [stmt for stmt in merged.body.iter() if isinstance(stmt, Assign) and stmt.op.name == "copy"]
@@ -461,33 +355,25 @@ def test_graph_splice_load_output_needs_no_conversion():
 def test_graph_splice_preserves_multi_reduction_output_dtypes(rounds_to: DataType | None, expected_aliases: int):
     """Sibling reductions each keep their own spelled rounding through one shared projection."""
 
-    consumer = LoopOp(
-        body=(
-            Loop(
-                axis=A0,
-                body=(
-                    Load(name="left_value", input="left", index=(Var("a0"),)),
-                    Load(name="right_value", input="right", index=(Var("a0"),)),
-                    Load(name="aux_value", input="aux", index=(Var("a0"),)),
-                    Assign(name="activated", op="silu", args=("left_value",)),
-                    Assign(name="product", op="multiply", args=("activated", "right_value")),
-                    Assign(name="result", op="add", args=("product", "aux_value")),
-                    Write(output="consumer", index=(Var("a0"),), value="result"),
-                ),
-            ),
-        ),
+    consumer = _loop(
+        """
+        for a0 in 0..4:
+            left_value = load left[a0]
+            right_value = load right[a0]
+            aux_value = load aux[a0]
+            activated = silu(left_value)
+            product = multiply(activated, right_value)
+            result = add(product, aux_value)
+            consumer[a0] = result
+        """
     )
-    pointwise = LoopOp(
-        body=(
-            Loop(
-                axis=A0,
-                body=(
-                    Load(name="z_value", input="z", index=(Var("a0"),)),
-                    Assign(name="exp_value", op="exp", args=("z_value",), dtype=F16),
-                    Write(output="aux", index=(Var("a0"),), value="exp_value"),
-                ),
-            ),
-        ),
+    pointwise = _loop(
+        """
+        for a0 in 0..4:
+            z_value = load z[a0]
+            f16 exp_value = exp(z_value)
+            aux[a0] = exp_value
+        """
     )
     graph = Graph()
     graph.add_node(InputOp(), [], Tensor("x", (4, 16), F16), node_id="x")
@@ -530,43 +416,27 @@ def test_graph_splice_typed_boundary_roundtrips():
 
 
 def _prefix_scan(*, source: str, output: str) -> LoopOp:
-    return LoopOp(
-        body=(
-            Loop(
-                axis=A0,
-                body=(
-                    Loop(
-                        axis=A1,
-                        body=(
-                            Load(name="x", input=source, index=(Var("a0"), Var("a1"))),
-                            Accum(name="prefix", value="x", op="add"),
-                            Write(output=output, index=(Var("a0"), Var("a1")), value="prefix"),
-                        ),
-                    ),
-                ),
-            ),
-        ),
+    return _loop(
+        f"""
+        for a0 in 0..4:
+            for a1 in 0..8:
+                x = load {source}[a0, a1]
+                prefix <- add(prefix, x)
+                {output}[a0, a1] = prefix
+        """
     )
 
 
 def test_ordered_prefix_root_declines_splice():
     """Rebuilding a root from its Writes must not move a prefix output after the reduce loop."""
-    producer = LoopOp(
-        body=(
-            Loop(
-                axis=A0,
-                body=(
-                    Loop(
-                        axis=A1,
-                        body=(
-                            Load(name="x", input="X", index=(Var("a0"), Var("a1"))),
-                            Assign(name="y", op="negative", args=("x",)),
-                            Write(output="P", index=(Var("a0"), Var("a1")), value="y"),
-                        ),
-                    ),
-                ),
-            ),
-        ),
+    producer = _loop(
+        """
+        for a0 in 0..4:
+            for a1 in 0..8:
+                x = load X[a0, a1]
+                y = negative(x)
+                P[a0, a1] = y
+        """
     )
 
     with pytest.raises(UnfusableStmt, match="observes running accumulator"):
@@ -575,22 +445,14 @@ def test_ordered_prefix_root_declines_splice():
 
 def test_ordered_prefix_producer_declines_splice():
     """Resolving a producer edge must not replace its prefix output with one final reduction."""
-    consumer = LoopOp(
-        body=(
-            Loop(
-                axis=A0,
-                body=(
-                    Loop(
-                        axis=A1,
-                        body=(
-                            Load(name="x", input="P", index=(Var("a0"), Var("a1"))),
-                            Assign(name="y", op="negative", args=("x",)),
-                            Write(output="OUT", index=(Var("a0"), Var("a1")), value="y"),
-                        ),
-                    ),
-                ),
-            ),
-        ),
+    consumer = _loop(
+        """
+        for a0 in 0..4:
+            for a1 in 0..8:
+                x = load P[a0, a1]
+                y = negative(x)
+                OUT[a0, a1] = y
+        """
     )
 
     with pytest.raises(UnfusableStmt, match="observes running accumulator"):
@@ -606,30 +468,23 @@ def test_consumer_extra_input_source_remap():
     """Consumer has producer at source 0 and an unrelated buffer at source 1;
     after splice, that unrelated buffer should load from merged source 1
     (producer's input is at 0)."""
-    producer = LoopOp(
-        body=(
-            Loop(
-                axis=A0,
-                body=(
-                    Load(name="x", input="src_0", index=(Var("a0"),)),
-                    Assign(name="y", op="exp", args=("x",)),
-                    Write(output="out_0", index=(Var("a0"),), value="y"),
-                ),
-            ),
-        ),
+    producer = _loop(
+        """
+        for a0 in 0..4:
+            x = load src_0[a0]
+            y = exp(x)
+            out_0[a0] = y
+        """
     )
-    consumer = LoopOp(
-        body=(
-            Loop(
-                axis=A0,
-                body=(
-                    Load(name="yv", input="src_0", index=(Var("a0"),)),  # from producer
-                    Load(name="b", input="src_1", index=(Var("a0"),)),  # unrelated
-                    Assign(name="z", op="add", args=("yv", "b")),
-                    Write(output="out_0", index=(Var("a0"),), value="z"),
-                ),
-            ),
-        ),
+    # ``yv`` reads the producer; ``b`` is unrelated.
+    consumer = _loop(
+        """
+        for a0 in 0..4:
+            yv = load src_0[a0]
+            b = load src_1[a0]
+            z = add(yv, b)
+            out_0[a0] = z
+        """
     )
 
     merged = _splice_loop_ops(producer, consumer, source="src_0")
@@ -655,22 +510,14 @@ def test_live_axes_computed():
     ``meta.scopes`` (now the post-reduce binding scope for Accum) and
     ``meta.reduce_axes`` rather than pre-normalize names.
     """
-    op = LoopOp(
-        body=(
-            Loop(
-                axis=A0,
-                body=(
-                    Loop(
-                        axis=K,
-                        body=(
-                            Load(name="x", input="src_0", index=(Var("a0"), Var("k"))),
-                            Accum(name="s", value="x", op="add"),
-                        ),
-                    ),
-                    Write(output="out_0", index=(Var("a0"),), value="s"),
-                ),
-            ),
-        ),
+    op = _loop(
+        """
+        for a0 in 0..4:
+            for k in 0..16:
+                x = load src_0[a0, k]
+                s <- add(s, x)
+            out_0[a0] = s
+        """
     )
     meta = op.analyze()
     [(load_name, load_scope)] = [(n, s) for n, s in meta.scopes.items() if isinstance(meta.defs[n], Load)]
@@ -693,42 +540,30 @@ def test_chain_three_loops():
     """Fuse a → b → c in one splice call. ``a`` is pointwise exp, ``b`` negates
     the result, ``c`` adds a bias. The merged kernel should contain exp, neg,
     add — with one Load for x (a's input) and one for bias (c's extra input)."""
-    a = LoopOp(
-        body=(
-            Loop(
-                axis=A0,
-                body=(
-                    Load(name="x", input="X", index=(Var("a0"),)),
-                    Assign(name="y", op="exp", args=("x",)),
-                    Write(output="A", index=(Var("a0"),), value="y"),
-                ),
-            ),
-        ),
+    a = _loop(
+        """
+        for a0 in 0..4:
+            x = load X[a0]
+            y = exp(x)
+            A[a0] = y
+        """
     )
-    b = LoopOp(
-        body=(
-            Loop(
-                axis=A0,
-                body=(
-                    Load(name="av", input="A", index=(Var("a0"),)),
-                    Assign(name="y", op="negative", args=("av",)),
-                    Write(output="B", index=(Var("a0"),), value="y"),
-                ),
-            ),
-        ),
+    b = _loop(
+        """
+        for a0 in 0..4:
+            av = load A[a0]
+            y = negative(av)
+            B[a0] = y
+        """
     )
-    c = LoopOp(
-        body=(
-            Loop(
-                axis=A0,
-                body=(
-                    Load(name="bv", input="B", index=(Var("a0"),)),
-                    Load(name="bias", input="BIAS", index=(Var("a0"),)),
-                    Assign(name="y", op="add", args=("bv", "bias")),
-                    Write(output="C", index=(Var("a0"),), value="y"),
-                ),
-            ),
-        ),
+    c = _loop(
+        """
+        for a0 in 0..4:
+            bv = load B[a0]
+            bias = load BIAS[a0]
+            y = add(bv, bias)
+            C[a0] = y
+        """
     )
 
     merged = splice_loops(
@@ -753,31 +588,23 @@ def test_chain_three_loops():
 
 def test_separate_roots_share_upstream_definition():
     """Two terminal loops seed one worklist, so their common producer emits once."""
-    producer = LoopOp(
-        body=(
-            Loop(
-                axis=A0,
-                body=(
-                    Load(name="x", input="X", index=(Var("a0"),)),
-                    Assign(name="p", op="exp", args=("x",)),
-                    Write(output="P", index=(Var("a0"),), value="p"),
-                ),
-            ),
-        )
+    producer = _loop(
+        """
+        for a0 in 0..4:
+            x = load X[a0]
+            p = exp(x)
+            P[a0] = p
+        """
     )
 
     def consumer(output: str, op: str) -> LoopOp:
-        return LoopOp(
-            body=(
-                Loop(
-                    axis=A0,
-                    body=(
-                        Load(name="p", input="P", index=(Var("a0"),)),
-                        Assign(name="out", op=op, args=("p",)),
-                        Write(output=output, index=(Var("a0"),), value="out"),
-                    ),
-                ),
-            )
+        return _loop(
+            f"""
+            for a0 in 0..4:
+                p = load P[a0]
+                out = {op}(p)
+                {output}[a0] = out
+            """
         )
 
     graph = Graph()
@@ -797,70 +624,32 @@ def test_separate_roots_share_upstream_definition():
 
 def test_output_equivalence_cluster_retargets_reduce_through_copy_chain(monkeypatch):
     """Flat-address-identical output copies collapse without inlining the reduction at their loads."""
-    i, j, k = Var("i"), Var("j"), Var("k")
-    producer = LoopOp(
-        body=(
-            Loop(
-                axis=Axis("i", 2),
-                body=(
-                    Loop(
-                        axis=Axis("k", 3),
-                        body=(
-                            Load(name="xk", input="x", index=(i, k)),
-                            Accum(name="total", value="xk", op="add", axes=("k",)),
-                        ),
-                    ),
-                    Loop(
-                        axis=Axis("j", 3),
-                        body=(
-                            Load(name="xj", input="x", index=(i, j)),
-                            Assign(name="scaled", op="multiply", args=("xj", "total")),
-                            Write(output="y", index=(i, j), value="scaled"),
-                        ),
-                    ),
-                ),
-            ),
-        )
+    producer = _loop(
+        """
+        for i in 0..2:
+            for k in 0..3:
+                xk = load x[i, k]
+                total <- add(total, xk) over k
+            for j in 0..3:
+                xj = load x[i, j]
+                scaled = multiply(xj, total)
+                y[i, j] = scaled
+        """
     )
-    p, q = Var("p"), Var("q")
-    first_copy = LoopOp(
-        body=(
-            Loop(
-                axis=Axis("p", 3),
-                body=(
-                    Loop(
-                        axis=Axis("q", 2),
-                        body=(
-                            Load(
-                                name="mid_value",
-                                input="y",
-                                index=(
-                                    BinaryExpr("/", BinaryExpr("+", BinaryExpr("*", p, Literal(2, "int")), q), Literal(3, "int")),
-                                    BinaryExpr("%", BinaryExpr("+", BinaryExpr("*", p, Literal(2, "int")), q), Literal(3, "int")),
-                                ),
-                            ),
-                            Write(output="mid", index=(p, q), value="mid_value"),
-                        ),
-                    ),
-                ),
-            ),
-        )
+    first_copy = _loop(
+        """
+        for p in 0..3:
+            for q in 0..2:
+                mid_value = load y[(p * 2 + q) / 3, (p * 2 + q) % 3]
+                mid[p, q] = mid_value
+        """
     )
-    r = Var("r")
-    second_copy = LoopOp(
-        body=(
-            Loop(
-                axis=Axis("r", 6),
-                body=(
-                    Load(
-                        name="out_value",
-                        input="mid",
-                        index=(BinaryExpr("/", r, Literal(2, "int")), BinaryExpr("%", r, Literal(2, "int"))),
-                    ),
-                    Write(output="out", index=(r,), value="out_value"),
-                ),
-            ),
-        )
+    second_copy = _loop(
+        """
+        for r in 0..6:
+            out_value = load mid[r / 2, r % 2]
+            out[r] = out_value
+        """
     )
     graph = Graph()
     graph.add_node(InputOp(), [], Tensor("x", (2, 3)), node_id="x")
@@ -890,39 +679,21 @@ def test_output_equivalence_cluster_retargets_reduce_through_copy_chain(monkeypa
 
 def test_output_equivalence_retargets_transpose_in_canonical_storage_order():
     """A proven permutation retargets the Write and adopts canonical output-storage order."""
-    i, j = Var("i"), Var("j")
-    producer = LoopOp(
-        body=(
-            Loop(
-                axis=Axis("i", 2),
-                body=(
-                    Loop(
-                        axis=Axis("j", 3),
-                        body=(
-                            Load(name="value", input="x", index=(i, j)),
-                            Write(output="y", index=(i, j), value="value"),
-                        ),
-                    ),
-                ),
-            ),
-        )
+    producer = _loop(
+        """
+        for i in 0..2:
+            for j in 0..3:
+                value = load x[i, j]
+                y[i, j] = value
+        """
     )
-    p, q = Var("p"), Var("q")
-    transpose = LoopOp(
-        body=(
-            Loop(
-                axis=Axis("p", 3),
-                body=(
-                    Loop(
-                        axis=Axis("q", 2),
-                        body=(
-                            Load(name="transposed", input="y", index=(q, p)),
-                            Write(output="out", index=(p, q), value="transposed"),
-                        ),
-                    ),
-                ),
-            ),
-        )
+    transpose = _loop(
+        """
+        for p in 0..3:
+            for q in 0..2:
+                transposed = load y[q, p]
+                out[p, q] = transposed
+        """
     )
     graph = Graph()
     graph.add_node(InputOp(), [], Tensor("x", (2, 3)), node_id="x")
@@ -943,33 +714,25 @@ def test_output_equivalence_retargets_transpose_in_canonical_storage_order():
 def test_multi_output_root_preserves_all_writes():
     """A root whose body contains Writes at multiple output indices should
     seed each of them — the merged kernel carries all Writes."""
-    producer = LoopOp(
-        body=(
-            Loop(
-                axis=A0,
-                body=(
-                    Load(name="x", input="src_0", index=(Var("a0"),)),
-                    Assign(name="y", op="exp", args=("x",)),
-                    Write(output="out_0", index=(Var("a0"),), value="y"),
-                ),
-            ),
-        ),
+    producer = _loop(
+        """
+        for a0 in 0..4:
+            x = load src_0[a0]
+            y = exp(x)
+            out_0[a0] = y
+        """
     )
     # Consumer produces two outputs: a negation and an absolute value — both
     # reading the producer.
-    consumer = LoopOp(
-        body=(
-            Loop(
-                axis=A0,
-                body=(
-                    Load(name="yv", input="out_0", index=(Var("a0"),)),
-                    Assign(name="z0", op="negative", args=("yv",)),
-                    Assign(name="z1", op="abs", args=("yv",)),
-                    Write(output="C0", index=(Var("a0"),), value="z0"),
-                    Write(output="C1", index=(Var("a0"),), value="z1"),
-                ),
-            ),
-        ),
+    consumer = _loop(
+        """
+        for a0 in 0..4:
+            yv = load out_0[a0]
+            z0 = negative(yv)
+            z1 = abs(yv)
+            C0[a0] = z0
+            C1[a0] = z1
+        """
     )
 
     merged = _splice_loop_ops(producer, consumer, source="out_0")
@@ -988,33 +751,25 @@ def test_multi_output_splice_target():
     splice edges read each output. The target's expression chain reconstructs
     separately for each output via the standard worklist walk."""
     # Target: T0 = exp(x), T1 = neg(x). Two outputs.
-    target = LoopOp(
-        body=(
-            Loop(
-                axis=A0,
-                body=(
-                    Load(name="x", input="X", index=(Var("a0"),)),
-                    Assign(name="y0", op="exp", args=("x",)),
-                    Assign(name="y1", op="negative", args=("x",)),
-                    Write(output="T0", index=(Var("a0"),), value="y0"),
-                    Write(output="T1", index=(Var("a0"),), value="y1"),
-                ),
-            ),
-        ),
+    target = _loop(
+        """
+        for a0 in 0..4:
+            x = load X[a0]
+            y0 = exp(x)
+            y1 = negative(x)
+            T0[a0] = y0
+            T1[a0] = y1
+        """
     )
     # Sink: z = add(T0, T1). Two consumer Loads each pointing at one target output.
-    sink = LoopOp(
-        body=(
-            Loop(
-                axis=A0,
-                body=(
-                    Load(name="a", input="T0", index=(Var("a0"),)),
-                    Load(name="b", input="T1", index=(Var("a0"),)),
-                    Assign(name="z", op="add", args=("a", "b")),
-                    Write(output="OUT", index=(Var("a0"),), value="z"),
-                ),
-            ),
-        ),
+    sink = _loop(
+        """
+        for a0 in 0..4:
+            a = load T0[a0]
+            b = load T1[a0]
+            z = add(a, b)
+            OUT[a0] = z
+        """
     )
 
     merged = splice_loops(
@@ -1046,43 +801,31 @@ def test_shared_load_dedup_into_reduce():
     existing binding emitted earlier for ``v0``; if the splicer prepends naïvely
     the new stmt lands above its own dep. The merged body must keep SSA in
     topological order across the reduce boundary."""
-    producer = LoopOp(
-        body=(
-            Loop(
-                axis=A0,
-                body=(
-                    Load(name="in_", input="src_0", index=(Var("a0"),)),
-                    Assign(name="v0", op="negative", args=("in_",)),
-                    Assign(name="v1", op="exp", args=("v0",)),
-                    Assign(name="v2", op="add", args=("v1", "v1")),
-                    Assign(name="v3", op="reciprocal", args=("v2",)),
-                    Assign(name="v4", op="multiply", args=("in_", "v3")),
-                    Write(output="out_0", index=(Var("a0"),), value="v4"),
-                ),
-            ),
-        ),
+    producer = _loop(
+        """
+        for a0 in 0..4:
+            in_ = load src_0[a0]
+            v0 = negative(in_)
+            v1 = exp(v0)
+            v2 = add(v1, v1)
+            v3 = reciprocal(v2)
+            v4 = multiply(in_, v3)
+            out_0[a0] = v4
+        """
     )
     # Consumer: matmul-style reduce over a1. The producer's output is loaded
     # inside the reduce loop, so the spliced chain has to be ordered correctly
     # within the (a0, a1) reduce scope.
-    consumer = LoopOp(
-        body=(
-            Loop(
-                axis=A0,
-                body=(
-                    Loop(
-                        axis=A1,
-                        body=(
-                            Load(name="pv", input="src_0", index=(Var("a1"),)),
-                            Load(name="w", input="src_1", index=(Var("a1"), Var("a0"))),
-                            Assign(name="prod", op="multiply", args=("pv", "w")),
-                            Accum(name="acc", value="prod", op="add"),
-                        ),
-                    ),
-                    Write(output="out_0", index=(Var("a0"),), value="acc"),
-                ),
-            ),
-        ),
+    consumer = _loop(
+        """
+        for a0 in 0..4:
+            for a1 in 0..8:
+                pv = load src_0[a1]
+                w = load src_1[a1, a0]
+                prod = multiply(pv, w)
+                acc <- add(acc, prod)
+            out_0[a0] = acc
+        """
     )
     merged = _splice_loop_ops(producer, consumer, source="src_0")
     assert merged is not None  # would have failed pre-fix with SSA validation error
@@ -1097,29 +840,21 @@ def test_shared_load_dedup_into_reduce():
 def test_literal_producer_write_index():
     """Producer writes at (a0, 0); consumer reads at (a0, 0). The Literal dim
     contributes no σ binding and shouldn't block splicing."""
-    producer = LoopOp(
-        body=(
-            Loop(
-                axis=A0,
-                body=(
-                    Load(name="x", input="src_0", index=(Var("a0"),)),
-                    Assign(name="y", op="exp", args=("x",)),
-                    Write(output="out_0", index=(Var("a0"), Literal(0)), value="y"),
-                ),
-            ),
-        ),
+    producer = _loop(
+        """
+        for a0 in 0..4:
+            x = load src_0[a0]
+            y = exp(x)
+            out_0[a0, 0.0] = y
+        """
     )
-    consumer = LoopOp(
-        body=(
-            Loop(
-                axis=A0,
-                body=(
-                    Load(name="yv", input="src_0", index=(Var("a0"), Literal(0))),
-                    Assign(name="z", op="negative", args=("yv",)),
-                    Write(output="out_0", index=(Var("a0"),), value="z"),
-                ),
-            ),
-        ),
+    consumer = _loop(
+        """
+        for a0 in 0..4:
+            yv = load src_0[a0, 0.0]
+            z = negative(yv)
+            out_0[a0] = z
+        """
     )
 
     merged = _splice_loop_ops(producer, consumer, source="src_0")
@@ -1145,25 +880,18 @@ def _affine_recurrence_chain(depth: int) -> tuple[dict[str, LoopOp], dict, tuple
     DeepSeek-V4 Sinkhorn shape minimized — the merge that made 4.5M distinct bindings from 2,287
     input statements and never finished constructing.
     """
-    axis = Axis("i", 8)
     loops: dict[str, LoopOp] = {}
     edges: dict = {}
     for k in range(depth):
         src = "b0" if k == 0 else f"s{k - 1}"
-        left = BinaryExpr("+", BinaryExpr("*", Literal(2, "int"), Var("i")), Literal(1, "int"))
-        right = BinaryExpr("+", BinaryExpr("*", Literal(3, "int"), Var("i")), Literal(2, "int"))
-        loops[f"s{k}"] = LoopOp(
-            body=(
-                Loop(
-                    axis=axis,
-                    body=(
-                        Load(name=f"x{k}", input=src, index=(left,)),
-                        Load(name=f"y{k}", input=src, index=(right,)),
-                        Assign(name=f"v{k}", op="add", args=(f"x{k}", f"y{k}")),
-                        Write(output=f"s{k}", index=(Var("i"),), value=f"v{k}"),
-                    ),
-                ),
-            ),
+        loops[f"s{k}"] = _loop(
+            f"""
+            for i in 0..8:
+                x{k} = load {src}[2 * i + 1]
+                y{k} = load {src}[3 * i + 2]
+                v{k} = add(x{k}, y{k})
+                s{k}[i] = v{k}
+            """
         )
         if k:
             edges[(f"s{k}", f"s{k - 1}")] = (f"s{k - 1}", f"s{k - 1}")

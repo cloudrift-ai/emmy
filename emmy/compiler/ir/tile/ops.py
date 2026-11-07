@@ -331,7 +331,7 @@ class Sched:
             def rank(item):
                 position, axis = item
                 steps = (
-                    gmem_axis_step(Load("", spec.write.output, spec.write.index), axis.name, self.tile.outputs)
+                    gmem_axis_step(Load(("",), spec.write.output, spec.write.index), axis.name, self.tile.outputs)
                     for spec in self.tile.output_specs
                 )
                 return min((abs(step[0]) for step in steps if step is not None and step[0]), default=float("inf")), -position

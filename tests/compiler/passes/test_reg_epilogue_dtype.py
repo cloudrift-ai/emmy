@@ -5,11 +5,11 @@ import pytest
 
 from emmy.compiler.dtype import F16, F32, I32
 from emmy.compiler.ir.elementwise import ElementwiseImpl
-from emmy.compiler.ir.expression import Literal, Var
+from emmy.compiler.ir.expression import Var
 from emmy.compiler.ir.kernel.ir import RegStore
 from emmy.compiler.ir.render import RenderCtx, render_stmt
 from emmy.compiler.ir.sigma import Sigma
-from emmy.compiler.ir.stmt import Assign, Let, Write
+from emmy.compiler.ir.stmt import Assign, parse_body
 from emmy.compiler.pipeline import RuleSkipped
 from emmy.compiler.pipeline.passes.lowering.kernel._atom import _warp_epilogue
 from tests.compiler.helpers import requires_cuda, requires_sm, requires_sm90
@@ -76,8 +76,10 @@ def test_packed_fp4_epilogue_reads_each_elements_block_scale(runtime_rows) -> No
     np.testing.assert_array_equal(got, expected)
 
 
-def _render(*assigns) -> tuple[str, object]:
-    tail = [*assigns, Write(output="out", index=(Var("m"), Var("n")), value=assigns[-1].name)]
+def _render(chain: str) -> tuple[str, object]:
+    """Render the register epilogue of the projection ``chain`` (a body's text) feeding ``out[m, n]``."""
+    chain = parse_body(chain)
+    tail = [*chain, *parse_body(f"out[m, n] = {chain[-1].name}")]
     epilogue = _warp_epilogue(tail, "acc", "m", "n", Sigma.IDENTITY)
     assert epilogue
     store = RegStore(dst_buffer="out", dst_index=(Var("m"), Var("n")), frag="_c", shape=(16, 8, 16), ldm=16, **epilogue)
@@ -87,8 +89,10 @@ def _render(*assigns) -> tuple[str, object]:
 
 def test_typed_copy_narrows_the_fragment_value_before_its_consumer() -> None:
     source, epilogue = _render(
-        Assign(name="narrow", op=ElementwiseImpl("copy"), args=("acc",), dtype=F16),
-        Assign(name="result", op=ElementwiseImpl("copy"), args=("narrow",)),
+        """
+        f16 narrow = copy(acc)
+        result = copy(narrow)
+        """
     )
 
     assert epilogue[0].dtype is F16
@@ -97,7 +101,7 @@ def test_typed_copy_narrows_the_fragment_value_before_its_consumer() -> None:
 
 
 def test_untyped_copy_keeps_the_existing_f32_epilogue() -> None:
-    source, epilogue = _render(Assign(name="result", op=ElementwiseImpl("copy"), args=("acc",)))
+    source, epilogue = _render("result = copy(acc)")
 
     assert epilogue[0].dtype is None
     assert "const float result_e0 = _c[0];" in source
@@ -106,19 +110,31 @@ def test_untyped_copy_keeps_the_existing_f32_epilogue() -> None:
 
 def test_typed_literal_binding_survives_fragment_epilogue_rendering() -> None:
     source, epilogue = _render(
-        Let("scale", Literal(0.125), dtype=F32),
-        Assign("result", "multiply", ("acc", "scale")),
+        """
+        let f32 scale = 0.125
+        result = multiply(acc, scale)
+        """
     )
-    assert epilogue[0] == Let("scale", Literal(0.125), dtype=F32)
+    assert str(epilogue[0]) == "let f32 scale = 0.125"
     assert "const float scale_e0 = 0.125f;" in source
     assert "const float result_e0 = _c[0] * scale_e0;" in source
 
 
 def test_fragment_epilogue_substitutes_binding_coordinates_and_rejects_unbound_values() -> None:
-    source, _ = _render(Let("column", Var("n"), dtype=I32), Assign("result", "multiply", ("acc", "column")))
+    source, _ = _render(
+        """
+        let i32 column = n
+        result = multiply(acc, column)
+        """
+    )
     assert "const int column_e0 = n + (_t * 2 + 0);" in source
     with pytest.raises(RuleSkipped, match="projection epilogue reads.*missing"):
-        _render(Let("scale", Var("missing"), dtype=F32), Assign("result", "multiply", ("acc", "scale")))
+        _render(
+            """
+            let f32 scale = missing
+            result = multiply(acc, scale)
+            """
+        )
 
 
 @pytest.mark.parametrize("fast_math", [False, True])
@@ -165,14 +181,7 @@ def test_fast_exp_policy_reaches_generated_fragment_epilogues(monkeypatch, fast_
 
 
 def test_transposed_fragment_store_uses_both_output_strides() -> None:
-    store = RegStore(
-        dst_buffer="out",
-        dst_index=(Var("n"), Var("m")),
-        frag="_c",
-        shape=(16, 8, 16),
-        row_dim=1,
-        col_dim=0,
-    )
+    (store,) = parse_body("RegStore(dst_buffer=out, dst_index=(n, m), frag=_c, shape=(16, 8, 16), row_dim=1, col_dim=0)")
     source = "\n".join(render_stmt(store, RenderCtx(shapes={"out": (16, 16)}, buffer_dtypes={"out": "f16"})))
 
     assert "reinterpret_cast<__half2*>" not in source
@@ -183,17 +192,15 @@ def test_transposed_fragment_store_uses_both_output_strides() -> None:
 def test_a_mask_over_an_op_result_renders_after_that_op() -> None:
     """A causal mask may select a value the chain computes (a scaled score), not only a loaded one:
     the ternary renders once that op has run."""
-    from emmy.compiler.ir.expression import BinaryExpr, Literal
-    from emmy.compiler.ir.stmt import Load, Select, SelectBranch
-
     source, _ = _render(
-        Load(name="ninf", input="neg_inf", index=(Literal(0, "int"),)),
-        Assign(name="scaled", op=ElementwiseImpl("multiply"), args=("acc", "acc")),
-        Select(
-            name="masked",
-            branches=(SelectBranch("scaled", BinaryExpr("<=", Var("n"), Var("m"))), SelectBranch("ninf", Literal(1, "int"))),
-        ),
-        Assign(name="result", op=ElementwiseImpl("copy"), args=("masked",)),
+        """
+        ninf = load neg_inf[0]
+        scaled = multiply(acc, acc)
+        masked = select:
+            scaled when n <= m
+            ninf when 1
+        result = copy(masked)
+        """
     )
 
     assert source.index("scaled_e0 =") < source.index("masked_e0 = ((") < source.index("result_e0 = masked_e0")
@@ -202,17 +209,15 @@ def test_a_mask_over_an_op_result_renders_after_that_op() -> None:
 def test_a_mask_over_a_narrowed_value_widens_both_branches() -> None:
     """A chain op keeps the tail's dtype, so a mask over a narrowed value converts back: a ternary
     mixing ``__half`` and ``float`` does not compile."""
-    from emmy.compiler.ir.expression import BinaryExpr, Literal
-    from emmy.compiler.ir.stmt import Load, Select, SelectBranch
-
     source, _ = _render(
-        Load(name="ninf", input="neg_inf", index=(Literal(0, "int"),)),
-        Assign(name="narrow", op=ElementwiseImpl("copy"), args=("acc",), dtype=F16),
-        Select(
-            name="masked",
-            branches=(SelectBranch("narrow", BinaryExpr("<=", Var("n"), Var("m"))), SelectBranch("ninf", Literal(1, "int"))),
-        ),
-        Assign(name="result", op=ElementwiseImpl("copy"), args=("masked",)),
+        """
+        ninf = load neg_inf[0]
+        f16 narrow = copy(acc)
+        masked = select:
+            narrow when n <= m
+            ninf when 1
+        result = copy(masked)
+        """
     )
 
     assert "const __half narrow_e0 = __float2half(_c[0]);" in source
@@ -221,15 +226,14 @@ def test_a_mask_over_a_narrowed_value_widens_both_branches() -> None:
 
 def test_integer_load_in_fragment_epilogue_keeps_shift_operands_integer() -> None:
     """A packed output's shift amount must reach the epilogue as an integer, like a scalar Load."""
-    from emmy.compiler.ir.expression import Literal
-    from emmy.compiler.ir.stmt import Load
-
-    tail = [
-        Load(name="shift", input="shift", index=(Literal(0, "int"),), dtype=I32),
-        Assign(name="code", op="to_f4e2m1", args=("acc",), dtype=I32),
-        Assign(name="bits", op="left_shift", args=("code", "shift"), dtype=I32),
-        Write(output="out", index=(Var("m"), Var("n")), value="bits"),
-    ]
+    tail = parse_body(
+        """
+        i32 shift = load shift[0]
+        i32 code = to_f4e2m1(acc)
+        i32 bits = left_shift(code, shift)
+        out[m, n] = bits
+        """
+    )
     epilogue = _warp_epilogue(tail, "acc", "m", "n", Sigma.IDENTITY)
     assert epilogue
     store = RegStore(dst_buffer="out", dst_index=(Var("m"), Var("n")), frag="_c", shape=(16, 8, 16), ldm=16, **epilogue)

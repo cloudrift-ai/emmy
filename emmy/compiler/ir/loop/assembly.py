@@ -196,7 +196,7 @@ class Program:
         builder.resolve()
         # A temporary output keeps the returned value live while aliases and unit reductions
         # simplify. It is removed before forming the read-only subroutine.
-        body = prepare_body(Body((*builder.finish(), Write(output="_return", index=(), value=result))))
+        body = prepare_body(Body((*builder.finish(), Write(output="_return", index=(), values=(result,)))))
         returned = next(stmt for stmt in body if isinstance(stmt, Write))
         return Subroutine(f"{origin}_{name}", params, Body(stmt for stmt in body if stmt is not returned), returned.value)
 
@@ -289,7 +289,7 @@ class Splicer(BodyBuilder):
             store = Write(
                 output=w.output,
                 index=tuple(e.substitute(rename) for e in w.index),
-                value=v_bound,
+                values=(v_bound,),
                 value_dtype=w.value_dtype,
                 atomic=w.atomic,
                 swizzle=w.swizzle,

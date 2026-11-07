@@ -10,39 +10,30 @@ of a name inside it, without leaking that spelling out."""
 
 from __future__ import annotations
 
-from emmy.compiler.ir.axis import Axis
 from emmy.compiler.ir.elementwise import ElementwiseImpl
-from emmy.compiler.ir.expression import Var
-from emmy.compiler.ir.stmt import Accum, Assign, Body, Load, Loop, Write
+from emmy.compiler.ir.stmt import Assign, Body, Loop, Write, parse_body
 from emmy.compiler.pipeline.passes.lowering.kernel._factor import _one_value_per_name
-
-
-def _cell(acc: str) -> Assign:
-    return Assign(name="v", op=ElementwiseImpl("add"), args=(acc, "eps"))
-
-
-def _reduce(acc: str, source: str) -> Loop:
-    load = Load(name=f"x_{acc}", input=source, index=(Var("k"),))
-    fold = Accum(name=acc, value=f"x_{acc}", op=ElementwiseImpl("add"), axes=("k",))
-    return Loop(axis=Axis("k", 4), body=Body((load, fold)))
 
 
 def _sweep_loop() -> Loop:
     """The projection over the output sweep: a copy of the root's reduce (its accumulator already
     re-spelled) and the cell it derives, a consumer, then the projection's own cell and store."""
-    return Loop(
-        axis=Axis("a", 4),
-        body=Body(
-            (
-                _reduce("acc__s1", "x"),
-                _cell("acc__s1"),
-                Assign(name="w", op=ElementwiseImpl("multiply"), args=("v", "v")),
-                _reduce("acc", "x"),
-                _cell("acc"),
-                Write(output="y", index=(Var("a"),), value="v"),
-            )
-        ),
+    [loop] = parse_body(
+        """
+        for a in 0..4:
+            for k in 0..4:
+                x_acc__s1 = load x[k]
+                acc__s1 <- add(acc__s1, x_acc__s1) over k
+            v = add(acc__s1, eps)
+            w = multiply(v, v)
+            for k in 0..4:
+                x_acc = load x[k]
+                acc <- add(acc, x_acc) over k
+            v = add(acc, eps)
+            y[a] = v
+        """
     )
+    return loop
 
 
 def _defines(body: Body) -> list[str]:
@@ -65,18 +56,16 @@ def test_a_read_ahead_of_a_nested_second_binding_keeps_the_outer_name() -> None:
     """A loop reads the value bound around it, then binds that name inside to a different statement.
     The read means the outer value, so it keeps the outer name; the pass re-spells only the
     loop-local binding and the reads after it."""
-    outer = Assign(name="v", op=ElementwiseImpl("exp"), args=("x",))
-    loop = Loop(
-        axis=Axis("a", 4),
-        body=Body(
-            (
-                Assign(name="u", op=ElementwiseImpl("multiply"), args=("v", "v")),
-                Write(output="y", index=(Var("a"),), value="u"),
-                Load(name="w", input="z", index=(Var("a"),)),
-                Assign(name="v", op=ElementwiseImpl("exp"), args=("w",)),
-                Write(output="t", index=(Var("a"),), value="v"),
-            )
-        ),
+    outer, loop = parse_body(
+        """
+        v = exp(x)
+        for a in 0..4:
+            u = multiply(v, v)
+            y[a] = u
+            w = load z[a]
+            v = exp(w)
+            t[a] = v
+        """
     )
     kept, swept = _one_value_per_name([outer, loop])
     assert kept == outer

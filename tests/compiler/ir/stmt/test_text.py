@@ -37,10 +37,10 @@ A0, A1, ONE = Var("a0"), Var("a1"), Literal(1, "int")
 K = Axis("k", 64)
 
 STATEMENTS = [
-    (Load("in0", "x", (A0, A1 + ONE)), "in0 = load x[a0, a1 + 1]"),
+    (Load(("in0",), "x", (A0, A1 + ONE)), "in0 = load x[a0, a1 + 1]"),
     (Load(names=("in0", "in1"), input="x", index=(A0,), dtype=F8E4M3), "f8e4m3 in0, in1 = load x[a0]"),
-    (Load("in0", "x", (A0,), carried="unpack"), "in0 = load x[a0] carried=unpack"),
-    (Load("in0", "model.layers.0.weight", (A0,)), "in0 = load `model.layers.0.weight`[a0]"),
+    (Load(("in0",), "x", (A0,), carried="unpack"), "in0 = load x[a0] carried=unpack"),
+    (Load(("in0",), "model.layers.0.weight", (A0,)), "in0 = load `model.layers.0.weight`[a0]"),
     (Pre("p", "state", (A0, Literal(0, "int"))), "p = pre state[a0, 0]"),
     (Assign("v1", "multiply", ("in0", "in1")), "v1 = multiply(in0, in1)"),
     (Assign("v1", "exp", ("in0",), F16), "f16 v1 = exp(in0)"),
@@ -57,10 +57,10 @@ STATEMENTS = [
     (Accum("acc0", "v1", base="scaled"), "acc0 <- add(scaled, v1)"),
     (Carry("state", "v", (A0, A1), 0.0), "state[a0, a1] <- v seed 0"),
     (Carry("state", "v", (A0,), "state_in", F32), "f32 state[a0] <- v seed state_in"),
-    (Write("y", (A0, A1), "v"), "y[a0, a1] = v"),
+    (Write("y", (A0, A1), ("v",)), "y[a0, a1] = v"),
     (Write("y", (A0,), values=("v0", "v1"), value_dtype=F16), "f16 y[a0] = (v0, v1)"),
-    (Write("y", (A0,), "v", atomic=True), "y[a0] += v"),
-    (Write("slab", (A0,), "v", swizzle="B32"), "slab[a0] = v swizzle=B32"),
+    (Write("y", (A0,), ("v",), atomic=True), "y[a0] += v"),
+    (Write("slab", (A0,), ("v",), swizzle="B32"), "slab[a0] = v swizzle=B32"),
     (ZeroPrologue("acc", 1024), "zero acc words=1024"),
     (
         Select("v3", (SelectBranch("x", A0.lt(ONE)), SelectBranch("y", BinaryExpr(">=", A0, ONE)))),
@@ -70,7 +70,7 @@ STATEMENTS = [
             y when a0 >= 1""",
     ),
     (
-        Loop(Axis("a0", 4), (Write("y", (A0,), "v"),)),
+        Loop(Axis("a0", 4), (Write("y", (A0,), ("v",)),)),
         """\
         for a0 in 0..4:
             y[a0] = v""",
@@ -84,7 +84,7 @@ STATEMENTS = [
     (Loop(Axis("kb", 16, window=Window(base=A0, bound=A0 + ONE)), ()), "for kb in 0..16 window(base=a0, bound=a0 + 1):"),
     (Loop(Axis("kb", 16, window=Window()), ()), "for kb in 0..16 window():"),
     (
-        StridedLoop(K, Var("t"), Literal(32, "int"), (Write("y", (Var("k"),), "v"),)),
+        StridedLoop(K, Var("t"), Literal(32, "int"), (Write("y", (Var("k"),), ("v",)),)),
         """\
         for k in t..64 step 32:
             y[k] = v""",
@@ -94,7 +94,7 @@ STATEMENTS = [
         "for k in 0..64 step 8 until k_end unroll=true:",
     ),
     (
-        Cond(A0.lt(ONE), (Write("y", (A0,), "v"),), (Write("y", (A0,), "w"),)),
+        Cond(A0.lt(ONE), (Write("y", (A0,), ("v",)),), (Write("y", (A0,), ("w",)),)),
         """\
         if a0 < 1:
             y[a0] = v
@@ -203,7 +203,7 @@ def test_a_call_that_does_not_fit_its_subroutine_is_refused(text, message):
 def test_two_subroutines_of_one_name_have_no_text():
     def sub(buffer: str) -> Subroutine:
         return Subroutine(
-            "f", (Axis("r", 4),), (Load("x", buffer, (Var("r"),)), Assign("y", "exp" if buffer == "a" else "log", ("x",))), "y"
+            "f", (Axis("r", 4),), (Load(("x",), buffer, (Var("r"),)), Assign("y", "exp" if buffer == "a" else "log", ("x",))), "y"
         )
 
     body = Body((Call("p", sub("a"), (A0,)), Call("q", sub("b"), (A0,))))

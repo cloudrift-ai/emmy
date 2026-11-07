@@ -436,8 +436,8 @@ def sync_row_fill(
     fills above."""
     fe = Axis(name=f"_{slab}_f", extent=extent)
     val = f"_{slab}_v"
-    load = Load(name=val, input=src, index=(*grid_vars, Var(fe.name)))
-    write = Write(output=slab, index=(Var(fe.name),), value=val)
+    load = Load(names=(val,), input=src, index=(*grid_vars, Var(fe.name)))
+    write = Write(output=slab, index=(Var(fe.name),), values=(val,))
     loop = StridedLoop(axis=fe, start=linear_tid, step=_lit(n_threads), body=Body((load, write)), unroll=False)
     return [Smem(name=slab, extents=(extent,), dtype=dtype), loop, Sync()]
 
@@ -480,7 +480,7 @@ def sync_stat_fill(
     ``declare=False`` leaves the rows' declarations out — a per-chunk statistic refills rows the
     kernel declared once, ahead of its K loop (:func:`stat_rows`)."""
     decls: list[Statement] = stat_rows(stats, slab_of, row_axis, dtype, dtypes) if declare else []
-    writes = tuple(Write(output=slab_of(nm), index=(Var(row_axis.name),), value=nm) for nm in stats)
+    writes = tuple(Write(output=slab_of(nm), index=(Var(row_axis.name),), values=(nm,)) for nm in stats)
     rl_i = next((i for i, s in enumerate(row_body) if isinstance(s, Loop) and s.is_reduce), None)
     if rl_i is None or stat is None or cta.n_threads % 32 or cta.n_threads < 32:
         body = (*row_body, *writes)

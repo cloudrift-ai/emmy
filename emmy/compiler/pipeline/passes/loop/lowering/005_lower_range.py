@@ -21,7 +21,10 @@ def rewrite(match: Match, root: Node) -> Graph:
     if root.op.length is None:
         raise RuleSkipped("a static range folds to a constant")
     axis = Axis(name="a0", extent=root.op.length)
-    body = (Let("v", Var(axis.name), dtype=get_dtype(root.op.dtype)), Write(output=f"loop_{root.id}", index=(Var(axis.name),), value="v"))
+    body = (
+        Let("v", Var(axis.name), dtype=get_dtype(root.op.dtype)),
+        Write(output=f"loop_{root.id}", index=(Var(axis.name),), values=("v",)),
+    )
     kernel = LoopOp(body=Body((Loop(axis=axis, body=Body(body)),)))
     frag = Graph()
     out_id = frag.add_node(kernel, [], Tensor(root.output.name, root.output.shape, root.output.dtype), node_id=f"loop_{root.id}")

@@ -62,19 +62,18 @@ def test_register_schedule_round_trip_and_precision_gate(target):
 
 def test_register_storage_refuses_cross_warp_state_reads():
     from emmy.compiler.ir.loop import LoopOp
-    from emmy.compiler.ir.stmt import Pre
-    from tests.compiler.ir.test_carried_state import _step, c, i, j, k
+    from emmy.compiler.ir.stmt import parse_body
+    from tests.compiler.ir.test_carried_state import _step
 
     graph = _graph()
-    body = _step((c, i, j)).map(lambda s: s.replace(index=(i, k)) if isinstance(s, Pre) and s.index == (k, j) else s)
+    body = _step("c, i, j").map(lambda s: parse_body("other = pre S[i, k]") if str(s) == "other = pre S[k, j]" else s)
     graph.nodes["out"].op = LoopOp(body=body)
     (tile,) = (n.op for n in _lift(graph).nodes.values() if isinstance(n.op, TileOp))
     assert tile.register_program is None
 
 
 def test_register_step_keeps_a_time_coordinate_read_by_its_lift():
-    from emmy.compiler.ir.expression import Var
-    from emmy.compiler.ir.stmt import Assign, Body, Load
+    from emmy.compiler.ir.stmt import Assign, Body, parse_body
 
     (tile,) = (n.op for n in _lift(_graph()).nodes.values() if isinstance(n.op, TileOp))
     (carrying,) = (site.node for site in tile.sites if site.node.carries)
@@ -85,7 +84,7 @@ def test_register_step_keeps_a_time_coordinate_read_by_its_lift():
             lift,
             body=Body(
                 (
-                    Load(name="phase", input="D", index=(Var(carrying.axis),)),
+                    *parse_body(f"phase = load D[{carrying.axis}]"),
                     *[
                         replace(stmt, args=(stmt.args[0], "phase")) if isinstance(stmt, Assign) and stmt.name == lift.results[0] else stmt
                         for stmt in lift.body

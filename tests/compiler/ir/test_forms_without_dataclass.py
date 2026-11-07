@@ -9,9 +9,8 @@ from __future__ import annotations
 
 import dataclasses
 
-from emmy.compiler.dtype import F32
-from emmy.compiler.ir.expression import Literal, Var
-from emmy.compiler.ir.stmt import Body, Load, Statement, Write
+from emmy.compiler.ir.expression import Literal
+from emmy.compiler.ir.stmt import Body, Statement, parse_body
 from emmy.compiler.structural import form, record_form
 from emmy.compiler.wire import Wire, decode, encode, register, rewrite
 
@@ -100,13 +99,7 @@ class Scaled(Statement):
 
 
 def _body(x: str = "x", y: str = "y", span: Span | None = None) -> Body:
-    return Body(
-        (
-            Load(x, "a", (Var("i"),), dtype=F32),
-            Scaled(y, x, span or Span(1, 4)),
-            Write(output="out", index=(Var("i"),), value=y),
-        )
-    )
+    return Body((*parse_body(f"f32 {x} = load a[i]"), Scaled(y, x, span or Span(1, 4)), *parse_body(f"out[i] = {y}")))
 
 
 def test_a_registered_class_round_trips_the_wire_tagged_and_by_annotation() -> None:

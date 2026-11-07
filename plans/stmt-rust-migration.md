@@ -25,12 +25,14 @@ line-by-line translation.
 10. **Kernel IR kinds print and read through their declarations**; every Kernel IR listing may change shape.
 11. **An expression's identity is its text**, not its class name, so the identity moves once with the port and never
     again on a rename; the four concrete expression classes take full names then.
+12. **The expression module moves too**, in the same PR: one expression type, in Rust, and no text bridge between
+    two.
 
 ## The module when the port starts
 
 The preparation is Python only and changes no kernel. Most of it is merged or in review (#1334 to #1348).
 
-- One package, 36 exported names, 20 of them classes. 71 compiler files and 117 test files import it, and nothing
+- One package, 37 exported names, 20 of them classes. 71 compiler files and 117 test files import it, and nothing
   imports a submodule. The compiler constructs a statement at 566 sites and tests a statement's kind at 401.
 - 5,039 lines: normalization 1,427, value numbering 536, the order and identity 222, `Body` 679, the text 483, the
   kinds 888, the protocol 641, the package file and two helpers 163.
@@ -51,8 +53,8 @@ The preparation is Python only and changes no kernel. Most of it is merged or in
 | `Statement.rewrite`, `rename`, `substitute`, `rename_buffers`, `map_expressions`, `with_bodies` | One generated "rebuild with these parts changed" per kind, and thin functions over it | Today these are six entry points over one field walk. |
 | `Body`: a sequence with content equality | A shared, immutable slice of statements | A member read twice from Python is one object. |
 | About twenty cached readings on `Body` (`definitions`, `ssa_uses`, `loads`, ...) | Fields of the body's shared data, each computed once on first use | Rust can keep a derived value inside the object; Python cannot see the difference. |
-| `Expression` and its subclasses (`ir/expression.py`, outside the module) | The crate's own expression type: parse, print, substitute, simplify, the affine form | Python keeps its class. A field crosses as text. See "Expressions". |
-| `Axis`, `Window`, `Dim`, a dtype, an elementwise op | Plain values of the crate | They cross as their text or their name, like an expression. |
+| `Expression` and its eight kinds (`ir/expression.py`, outside the module) | Structs and classes of the crate: parse, print, substitute, simplify, the affine form, evaluation | Moves with the statements (decision 12). See "Expressions". |
+| `Axis`, `Window`, `Dim`, a dtype, an elementwise op | Plain values of the crate | They cross as their text or their name. |
 | `text.py`: printer and reader | The crate's printer and reader | The stored files do not change. |
 | Value numbering, the order, identity (`values.py`, `order.py`, `identity.py`) | Functions of the crate over `&Body` | Statements are numbered by position, so no statement is keyed by object identity. |
 | Normalization (`normalize.py`) | Functions of the crate, `Body` in and `Body` out | Same steps, same driver. |
@@ -88,14 +90,17 @@ under the stable ABI.
 
 ### Expressions
 
-A fifth of normalization runs in expression code the module does not own, so expressions cannot stay behind a call
-into Python. The crate has its own expression type and the two meet through text:
+The expression module (`ir/expression.py`, 1,446 lines: eight kinds, the parser and printer, the simplifier, the
+affine forms, evaluation) moves with the statements (decision 12). A fifth of normalization is expression work, so
+the crate needs the type and the simplifier anyway; keeping a Python class beside them would mean two expression
+types meeting through text and two simplifiers held together by a test. One type instead:
 
-- Python builds a statement with its `Expression` objects; the binding takes each one's text and looks the Rust
-  expression up in a table. A read hands back the Python object it was built with, or parses the text once.
-- 88 files build and match the Python `Expression` and keep doing so.
-- Until the Python simplifier calls the Rust one there are two simplifiers. A test that both give the same text over
-  every stored expression holds them together.
+- Each kind is a struct and a class of its own, as the statement kinds are, so the 156 importing files and the
+  200 places that check a kind and read its fields keep working; a read hands back the Python object (the boundary
+  rule). The Python operator methods (`Var("i") + 1`, `.lt`) are methods on the Rust class.
+- What reads expressions stays in Python: the CUDA renderer and the analyses over an expression's fields.
+- The four short class names take their full names, and an expression's structural form becomes its text
+  (decision 11), in the same PR.
 
 ## What replaces bit-exactness
 
@@ -119,21 +124,22 @@ Both implementations exist until the switch and never share an object: a body go
 
 | Step | State |
 | --- | --- |
-| Plain constructors: `Load` and `Write` take their fields as declared; no string, tuple or number is converted after construction | open; 62 compiler sites, and about 1,080 test sites once the tests are text |
-| The tests of the passes state bodies as text | open; about 100 files, 3,244 hand-built statements |
+| Plain constructors: `Load` and `Write` take their fields as declared; no string, tuple or number is converted after construction | done: every site passes `names=(…,)` / `values=(…,)`; the two `__init__` methods are gone, a `__post_init__` refuses an empty tuple and a vector atomic write |
+| The tests of the passes state bodies as text | done: 97 files; what stays constructed is the subject of its test (the text and protocol tests, a kind the reader does not know, an invalid value) |
 | Kernel IR kinds print and read through their declarations | done (decision 10); the thirty hand-written printers are gone |
-| Loopify compares statements without listing their fields | open |
-| The debug dump stores a body as its text, not as `repr` read back by `eval` | open |
-| A fixture that yields the raw bodies of a corpus lowering | open; rules 1 to 3 run over it |
+| Loopify compares statements without listing their fields | done; it reads `fields_of` and rebuilds through `replace` |
+| The debug dump stores a body as its text, not as `repr` read back by `eval` | done; the Tile layer's term and output specs still dump as `repr` |
+| A fixture that yields the raw bodies of a corpus lowering | done: `helpers.raw_bodies(case)` catches every body handed to normalization; `tests/compiler/ir/stmt/test_raw_bodies.py` states rules 1 and 3 over it in Python, the port adds rule 2 |
 | `Fold` stops answering the statement protocol; the walks that reach one become functions over the interface | done (`Fold` keeps a `rewrite` of its own; nothing else was read) |
 | An expression's structural form is its text; the four concrete expression classes take full names | open; moves every identity once (decision 11): the tune DB version and its pinned identities move with it |
-| No Tile layer table is keyed on a statement or a body | open; check, convert the caller if one is |
-| The kernels whose folded constant would move under a Rust fold are counted | open; decision 9 re-records them |
+| No Tile layer table is keyed on a statement or a body | done: none is stored. Four places (`tile/boundary.py`, `passes/tile/_twist.py`, `_fromloop.py`) hold a set of `id(stmt)` within one call to tell equal statements apart, which holds as long as a body hands back the same Python object on every read (the boundary rule above); `TileOp._node_ids` keys terms, which stay in Python |
+| The kernels whose folded constant would move under a Rust fold are counted | done for the corpus: the fold evaluates `+ - * /` in f64 (`Affine`) and an elementwise op in f32 through NumPy; over all 258 cases the only op beyond those is `exp`, twice, on `0` (`exp(s - s)`), which every libm gives exactly, so no corpus kernel moves. The repository goldens were not counted (their fresh lowering takes ten minutes); the same spy over them is the count to take before the switch |
 
 ### 1. Expressions and their text
 
-The crate, pure Rust with no Python in it, so `cargo test` runs it. Its expression type with the printer, the reader,
-substitution, simplification and the affine form.
+The crate, pure Rust with no Python in it, so `cargo test` runs it. The eight expression kinds with the printer, the
+reader, substitution, simplification, the affine form and evaluation; the extension exports a class per kind with the
+Python operator methods, so the compiler builds and reads expressions as it does today.
 
 Verify: every expression in every stored file reads and prints back to the same text, and simplifies to the text the
 Python simplifier gives.
@@ -171,7 +177,7 @@ golden's fresh lowering (8.2 s when the one-pass normalization landed).
 ### 6. The switch
 
 Steps 1 to 5 are built on one branch and land together (decision 7). The extension exports the classes and functions
-under the module's 36 names, `emmy/compiler/ir/stmt/__init__.py` re-exports them, and the Python implementation is
+under the module's 37 names, `emmy/compiler/ir/stmt/__init__.py` re-exports them, and the Python implementation is
 deleted in the same PR. The tune DB version moves.
 
 Verify: the full suite on a card; `emmy golden check` on every repository golden; the corpus regenerates with no
@@ -216,5 +222,4 @@ text, the expression class names) are decisions 7 to 11; what each asks for is i
 
 ## Not in this plan
 
-- The Python expression class moving to Rust. It stays, and meets the crate through text.
 - Any speedup in Python.

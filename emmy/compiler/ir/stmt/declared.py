@@ -64,6 +64,14 @@ def role(*roles: str, default: object = MISSING) -> Field:
 KINDS: dict[str, type] = {}
 
 
+@cache
+def fields_of(cls: type) -> tuple[str, ...]:
+    """The names of the fields a declared kind holds, in declaration order: what ``stmt.replace(**changes)`` takes.
+    The one way the rest of the compiler sees a statement as a record — a pass that generalizes whole statements
+    reads each field by name and rebuilds through ``replace``."""
+    return tuple(f.name for f in fields(cls) if f.init)
+
+
 @dataclass_transform(frozen_default=True, field_specifiers=(role, field))
 def statement(cls: type | None = None, /, **options: bool):  # noqa: ANN201 — the class, or the decorator that takes it
     """Declare a statement kind: ``cls`` becomes a frozen dataclass (``options`` go to ``dataclass``) and gets every

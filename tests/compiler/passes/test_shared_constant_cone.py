@@ -21,11 +21,10 @@ from importlib import import_module
 import pytest
 
 from emmy.compiler.context import Context
-from emmy.compiler.dtype import F16, F32
+from emmy.compiler.dtype import F16
 from emmy.compiler.graph import Graph, Tensor
 from emmy.compiler.ir.axis import Axis
 from emmy.compiler.ir.base import InputOp
-from emmy.compiler.ir.expression import Literal
 from emmy.compiler.ir.frontend.ir import LinearOp, SliceOp
 from emmy.compiler.ir.schedule import Placement, Raster, Reduce, Stage, Tile, Work, derive_inventory
 from emmy.compiler.ir.schedule.base import Schedule
@@ -36,7 +35,7 @@ from emmy.compiler.ir.schedule.classic import (
     ProjectionSchedule,
     ReductionSchedule,
 )
-from emmy.compiler.ir.stmt import Accum, Assign, Body, Let, Load
+from emmy.compiler.ir.stmt import Accum, Assign, parse_body
 from emmy.compiler.ir.tensor.ir import ElementwiseOp
 from emmy.compiler.ir.tile import TileOp
 from emmy.compiler.pipeline import CUDA_PASSES, Pipeline
@@ -134,8 +133,12 @@ def test_sibling_cones_share_one_declaration_of_a_broadcast_constant(_scalar_tie
 
 def test_a_name_rebound_to_a_different_address_survives_as_the_fault_it_is() -> None:
     """Only an exact repeat is dead. A same-name rebind of a DIFFERENT address must reach nvcc."""
-    zero = (Literal(0, "int"),)
-    body = Body((Load(name="in0", input="a", index=zero), Load(name="in0", input="b", index=zero)))
+    body = parse_body(
+        """
+        in0 = load a[0]
+        in0 = load b[0]
+        """
+    )
 
     assert [stmt.input for stmt in materialize._drop_repeated_declarations(body)] == ["a", "b"]
 
@@ -146,13 +149,12 @@ def test_sibling_cones_share_one_declaration_of_a_derived_value() -> None:
     DeepSeek-V4's post block is a chain of normalizations; a placement cut lands two cones of one
     ``1 / (sum + eps)`` at the kernel's own scope, and the second reciprocal redeclares the first's
     name. nvcc rejects it exactly as it rejects the repeated load."""
-    zero = (Literal(0, "int"),)
-    body = Body(
-        (
-            Load(name="in0", input="s", index=zero),
-            Assign(name="v0", op="reciprocal", args=("in0",)),
-            Assign(name="v0", op="reciprocal", args=("in0",)),
-        )
+    body = parse_body(
+        """
+        in0 = load s[0]
+        v0 = reciprocal(in0)
+        v0 = reciprocal(in0)
+        """
     )
 
     assert [stmt.name for stmt in materialize._drop_repeated_declarations(body)] == ["in0", "v0"]
@@ -160,15 +162,21 @@ def test_sibling_cones_share_one_declaration_of_a_derived_value() -> None:
 
 @pytest.mark.parametrize("value", [3840.0, 1e-6, -0.0])
 def test_sibling_cones_share_one_typed_literal_declaration(value) -> None:
-    literal = Let("v0", Literal(value), dtype=F32)
-    body = Body((literal, Assign("first", "reciprocal", ("v0",)), literal, Assign("second", "reciprocal", ("v0",))))
+    body = parse_body(
+        f"""
+        let f32 v0 = {value!r}
+        first = reciprocal(v0)
+        let f32 v0 = {value!r}
+        second = reciprocal(v0)
+        """
+    )
 
     assert list(materialize._drop_repeated_declarations(body)) == [body[0], body[1], body[3]]
 
 
-@pytest.mark.parametrize("other", [Let("v0", Literal(0.0), dtype=F32), Let("v0", Literal(-0.0), dtype=F16)])
+@pytest.mark.parametrize("other", ["let f32 v0 = 0.0", "let f16 v0 = -0.0"])
 def test_a_literal_rebound_to_different_bits_or_dtype_remains_a_fault(other) -> None:
-    body = Body((Let("v0", Literal(-0.0), dtype=F32), other))
+    body = parse_body(f"let f32 v0 = -0.0\n{other}")
 
     assert len(materialize._drop_repeated_declarations(body)) == 2
 
@@ -176,13 +184,12 @@ def test_a_literal_rebound_to_different_bits_or_dtype_remains_a_fault(other) -> 
 def test_a_same_dtype_copy_of_the_bound_value_is_a_repeat() -> None:
     """A placement cut on softmax's maximum binds ``v0`` to the workspace read in one cone and to a
     same-dtype copy of a second read of it in the sibling: one value spelled twice (nvcc: already declared)."""
-    zero = (Literal(0, "int"),)
-    body = Body(
-        (
-            Load(name="v0", input="ws", index=zero),
-            Load(name="acc0", input="ws", index=zero),
-            Assign(name="v0", op="copy", args=("acc0",), dtype=F16),
-        )
+    body = parse_body(
+        """
+        v0 = load ws[0]
+        acc0 = load ws[0]
+        f16 v0 = copy(acc0)
+        """
     )
 
     assert [stmt.name for stmt in materialize._drop_repeated_declarations(body)] == ["v0", "acc0"]
@@ -190,13 +197,12 @@ def test_a_same_dtype_copy_of_the_bound_value_is_a_repeat() -> None:
 
 def test_a_converting_copy_under_a_bound_name_survives_as_the_fault_it_is() -> None:
     """A copy that changes the dtype is a different value: the rebind must reach nvcc."""
-    zero = (Literal(0, "int"),)
-    body = Body(
-        (
-            Load(name="v0", input="ws", index=zero, dtype=F32),
-            Load(name="acc0", input="ws", index=zero, dtype=F32),
-            Assign(name="v0", op="copy", args=("acc0",), dtype=F16),
-        )
+    body = parse_body(
+        """
+        f32 v0 = load ws[0]
+        f32 acc0 = load ws[0]
+        f16 v0 = copy(acc0)
+        """
     )
 
     assert [stmt.name for stmt in materialize._drop_repeated_declarations(body)] == ["v0", "acc0", "v0"]
@@ -204,7 +210,12 @@ def test_a_converting_copy_under_a_bound_name_survives_as_the_fault_it_is() -> N
 
 def test_a_name_rebound_to_a_different_expression_survives_as_the_fault_it_is() -> None:
     """The same rule from the other side: two VALUES under one name stay two statements."""
-    body = Body((Assign(name="v0", op="reciprocal", args=("a",)), Assign(name="v0", op="reciprocal", args=("b",))))
+    body = parse_body(
+        """
+        v0 = reciprocal(a)
+        v0 = reciprocal(b)
+        """
+    )
 
     assert [stmt.args for stmt in materialize._drop_repeated_declarations(body)] == [("a",), ("b",)]
 
@@ -218,12 +229,16 @@ def test_two_cones_that_bind_one_name_to_two_values_are_re_spelled() -> None:
     materialized and its structural twin computing in place, so the two derive one name from
     different operands and nvcc rejects the second declaration.
     """
-    body = [
-        Assign(name="v0", op="add", args=("a", "b")),
-        Assign(name="out0", op="reciprocal", args=("v0",)),
-        Assign(name="v0", op="add", args=("ws", "b")),
-        Assign(name="out1", op="reciprocal", args=("v0",)),
-    ]
+    body = list(
+        parse_body(
+            """
+            v0 = add(a, b)
+            out0 = reciprocal(v0)
+            v0 = add(ws, b)
+            out1 = reciprocal(v0)
+            """
+        )
+    )
 
     spelled = factor._one_value_per_name(body)
     names = [stmt.name for stmt in spelled]
@@ -235,7 +250,7 @@ def test_two_cones_that_bind_one_name_to_two_values_are_re_spelled() -> None:
 
 def test_two_cones_that_agree_keep_one_spelling() -> None:
     """Nothing moves while the cones agree, or the dedup above would stop collapsing them."""
-    body = [Assign(name="v0", op="add", args=("a", "b"))] * 2
+    body = list(parse_body("v0 = add(a, b)")) * 2
 
     assert [stmt.name for stmt in factor._one_value_per_name(body)] == ["v0", "v0"]
 
@@ -243,25 +258,24 @@ def test_two_cones_that_agree_keep_one_spelling() -> None:
 def test_serial_nested_projections_re_spell_distinct_values_in_one_scope() -> None:
     """A cut workspace and its fused twin may derive different values under one original SSA name."""
     free, reduce_axis = Axis("m", 4), Axis("k", 8)
-    red = reduction(
-        reduce_axis,
-        (slab("x_e", "x", "m", "k"),),
-        (Assign(name="acc__v", op="copy", args=("x_e",)),),
-        ("acc",),
-    )
+    red = reduction(reduce_axis, (slab("x_e", "x", "m", "k"),), parse_body("acc__v = copy(x_e)"), ("acc",))
     inner = projection(
         (red, slab("ws", "cutbuf", "m"), slab("eps", "eps")),
-        (
-            Assign(name="v", op="add", args=("ws", "eps")),
-            Assign(name="inner_out", op="multiply", args=("acc", "v")),
+        parse_body(
+            """
+            v = add(ws, eps)
+            inner_out = multiply(acc, v)
+            """
         ),
         results=("inner_out",),
     )
     root = projection(
         (inner, slab("base", "base", "m")),
-        (
-            Assign(name="v", op="add", args=("inner_out", "base")),
-            Assign(name="out", op="reciprocal", args=("v",)),
+        parse_body(
+            """
+            v = add(inner_out, base)
+            out = reciprocal(v)
+            """
         ),
         results=("out",),
     )
@@ -277,22 +291,15 @@ def test_serial_nested_projections_re_spell_distinct_values_in_one_scope() -> No
 def test_serial_root_and_projection_tail_re_spell_distinct_values_in_one_scope() -> None:
     """A serial fold's hoisted provider and its projection tail cannot redeclare one SSA name."""
     free, reduce_axis = Axis("m", 4), Axis("k", 8)
-    provider = projection(
-        (slab("base", "base", "m"), slab("eps", "eps")),
-        (Assign(name="v", op="add", args=("base", "eps")),),
-        results=("v",),
-    )
-    red = reduction(
-        reduce_axis,
-        (slab("x_e", "x", "m", "k"), provider),
-        (Assign(name="acc__v", op="multiply", args=("x_e", "v")),),
-        ("acc",),
-    )
+    provider = projection((slab("base", "base", "m"), slab("eps", "eps")), parse_body("v = add(base, eps)"), results=("v",))
+    red = reduction(reduce_axis, (slab("x_e", "x", "m", "k"), provider), parse_body("acc__v = multiply(x_e, v)"), ("acc",))
     root = projection(
         (red, slab("ws", "cutbuf", "m")),
-        (
-            Assign(name="v", op="add", args=("acc", "ws")),
-            Assign(name="out", op="reciprocal", args=("v",)),
+        parse_body(
+            """
+            v = add(acc, ws)
+            out = reciprocal(v)
+            """
         ),
         results=("out",),
     )
@@ -312,11 +319,11 @@ def test_projection_lowers_overlapping_carriers_together(coop) -> None:
     shared = reduction(
         reduce_axis,
         (slab("x_e", "x", "m", "k"),),
-        tuple(Assign(name=f"{name}__v", op="multiply", args=("x_e", "x_e")) for name in ("a", "b", "c")),
+        parse_body("\n".join(f"{name}__v = multiply(x_e, x_e)" for name in ("a", "b", "c"))),
         ("a", "b", "c"),
     )
-    left = projection((shared,), (Assign(name="left", op="add", args=("a", "b")),))
-    root = projection((shared, left), (Assign(name="out", op="multiply", args=("c", "left")),))
+    left = projection((shared,), parse_body("left = add(a, b)"))
+    root = projection((shared, left), parse_body("out = multiply(c, left)"))
 
     tile = _serial_tile(root, free, reduce_axis)
     tile = replace(

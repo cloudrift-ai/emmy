@@ -4,9 +4,7 @@ import json
 
 import pytest
 
-from emmy.compiler.ir.axis import Axis
-from emmy.compiler.ir.expression import Literal, Var
-from emmy.compiler.ir.stmt import Accum, Assign, Body, Cond, Load, Loop, Write, free_names, normalize_body
+from emmy.compiler.ir.stmt import Assign, Body, Cond, Load, free_names, normalize_body, parse_body
 from emmy.compiler.ir.stmt.normalize import _normalize_body
 from tests.compiler.realization.helpers import CASES_DIR, case_files
 
@@ -64,28 +62,30 @@ def test_corpus_kernels_have_no_available_duplicates(path):
 
 @pytest.mark.parametrize("nested", [False, True])
 def test_audit_rejects_an_available_duplicate(nested):
-    first = Load("first", "x", (Literal(0, "int"),))
-    duplicate = Load("second", "x", (Literal(0, "int"),))
+    duplicate = "for i in 0..4:\n    second = load x[0]" if nested else "second = load x[0]"
     with pytest.raises(AssertionError, match="available duplicate"):
-        _assert_scoped_cse(Body((first, Loop(Axis("i", 4), (duplicate,)) if nested else duplicate)))
+        _assert_scoped_cse(parse_body(f"first = load x[0]\n{duplicate}"))
 
 
 def test_audit_respects_writes_and_shadowing():
-    first = Load("first", "x", (Var("i"),))
-    duplicate = Load("second", "x", (Var("i"),))
-    _assert_scoped_cse(Body((first, Write("x", (Var("i"),), "first"), duplicate)))
-    _assert_scoped_cse(Body((first, Loop(Axis("i", 4), (duplicate,)))))
+    _assert_scoped_cse(parse_body("first = load x[i]\nx[i] = first\nsecond = load x[i]"))
+    _assert_scoped_cse(parse_body("first = load x[i]\nfor i in 0..4:\n    second = load x[i]"))
 
 
 def test_audit_rejects_repeated_copies_but_respects_self_updates():
-    load = Load("value", "x", (Literal(0, "int"),))
     with pytest.raises(AssertionError, match="duplicate binding"):
-        _assert_scoped_cse(Body((load, load)))
-    update = Assign("value", "exp", ("value",))
-    _assert_scoped_cse(Body((update, update)))
+        _assert_scoped_cse(parse_body("value = load x[0]\nvalue = load x[0]"))
+    _assert_scoped_cse(parse_body("value = exp(value)\nvalue = exp(value)"))
 
 
 def test_audit_respects_carried_state_updates():
     _assert_scoped_cse(
-        Body((Assign("before", "exp", ("sum",)), Loop(Axis("k", 4), (Accum("sum", "x"),), seed=False), Assign("after", "exp", ("sum",))))
+        parse_body(
+            """
+            before = exp(sum)
+            for k in 0..4 seed=false:
+                sum <- add(sum, x)
+            after = exp(sum)
+            """
+        )
     )

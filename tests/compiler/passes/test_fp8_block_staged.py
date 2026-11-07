@@ -17,10 +17,9 @@ import pytest
 
 from emmy.compiler.dtype import F8E4M3, F32
 from emmy.compiler.graph import Tensor
-from emmy.compiler.ir.expression import BinaryExpr, Literal, Var
 from emmy.compiler.ir.schedule.packing import match_packed_kblock_b
 from emmy.compiler.ir.schedule.views import cone_seam
-from emmy.compiler.ir.stmt import Assign, Load
+from emmy.compiler.ir.stmt import parse_body
 from tests.compiler.helpers import requires_cuda, requires_sm
 
 pytest.importorskip("torch")
@@ -66,18 +65,22 @@ def _lower(graph, pins):
 
 @pytest.mark.parametrize(
     ("scale_index", "block"),
-    [((Var("n"),), None), ((BinaryExpr("/", Var("n"), Literal(128, "int")), BinaryExpr("/", Var("k"), Literal(128, "int"))), 128)],
+    [("n", None), ("n / 128, k / 128", 128)],
 )
 def test_an_fp8_weight_reads_as_one_value_bytes_only_under_a_k_block_scale(scale_index, block):
     """The decode cast of a stored fp8 byte times its scale: a scale that changes along K is a
     128-block reading one byte per element; one constant along K is not — it moves onto the
     epilogue instead."""
-    cone = [
-        Load(name="in0", input="w_scale", index=scale_index, dtype=None),
-        Load(name="in1", input="w_bits", index=(Var("n"), Var("k")), dtype=None),
-        Assign(name="v0", op="from_f8e4m3", args=("in1",)),
-        Assign(name="v1", op="multiply", args=("in0", "v0")),
-    ]
+    cone = list(
+        parse_body(
+            f"""
+            in0 = load w_scale[{scale_index}]
+            in1 = load w_bits[n, k]
+            v0 = from_f8e4m3(in1)
+            v1 = multiply(in0, v0)
+            """
+        )
+    )
     inputs = {"w_bits": Tensor("w_bits", (256, 256), F8E4M3), "w_scale": Tensor("w_scale", (2, 2) if block else (256,), F32)}
     read = match_packed_kblock_b(cone, "k", inputs)
     if block is None:
@@ -206,26 +209,26 @@ def test_the_fused_quantize_matches_the_cut_one_bit_for_bit(tmp_path):
     assert np.array_equal(fused, cut)
 
 
-def _block_fp8_node(a_index: tuple, a_shape: tuple, *, n: int = 256, k: int = 256):
+def _block_fp8_node(a_index: str, a_shape: tuple, *, n: int = 256, k: int = 256):
     """``x @ decode(w)`` over a 128x128 block-scaled fp8 weight, the activation ``x`` read at ``a_index``."""
     from emmy.compiler.dim import Dim
     from emmy.compiler.dtype import BF16
     from emmy.compiler.ir.axis import Axis
     from tests.compiler.terms import contraction, projection
 
-    def block(axis: str):
-        return BinaryExpr("/", Var(axis), Literal(128, "int"))
-
     cone = projection(
-        body=(
-            Load(name="in0", input="w_scale", index=(block("n"), block("k")), dtype=None),
-            Load(name="in1", input="w_bits", index=(Var("n"), Var("k")), dtype=None),
-            Assign(name="v0", op="from_f8e4m3", args=("in1",)),
-            Assign(name="v1", op="multiply", args=("in0", "v0")),
+        body=parse_body(
+            """
+            in0 = load w_scale[n / 128, k / 128]
+            in1 = load w_bits[n, k]
+            v0 = from_f8e4m3(in1)
+            v1 = multiply(in0, v0)
+            """
         )
     )
     ka = Axis("k", Dim(k))
-    node = contraction(ka, Load(name="a", input="x", index=a_index, dtype=BF16), (cone, "acc"))
+    [a] = parse_body(f"bf16 a = load x[{a_index}]")
+    node = contraction(ka, a, (cone, "acc"))
     inputs = {
         "x": Tensor("x", a_shape, BF16),
         "w_bits": Tensor("w_bits", (n, k), F8E4M3),
@@ -234,7 +237,7 @@ def _block_fp8_node(a_index: tuple, a_shape: tuple, *, n: int = 256, k: int = 25
     return node, inputs, (Axis("m", Dim(16)), Axis("n", Dim(n))), ka
 
 
-@pytest.mark.parametrize(("a_index", "a_shape", "tma"), [((Var("m"), Var("k")), (16, 256), True), ((Var("k"),), (256,), False)])
+@pytest.mark.parametrize(("a_index", "a_shape", "tma"), [("m, k", (16, 256), True), ("k", (256,), False)])
 def test_a_row_less_activation_declines_the_tma_byte_slab(a_index, a_shape, tma):
     """A TMA box copies rows of each operand's gmem tensor. A width-1 product reads its activation as a bare vector,
     which no box of rows can address, so the byte-slab stage never offers TMA there (the descriptor refused it at

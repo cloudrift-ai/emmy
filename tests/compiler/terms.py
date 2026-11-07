@@ -9,16 +9,16 @@ over a hand-built reduce — is spelled here in that same vocabulary, so it read
 results, and a term binds names only. Pass the reduce axis to ``TileOp(axes=...)`` beside the free axes.
 
 A ``Load`` is accepted wherever an operand edge is expected and becomes its slab; there is no other
-non-term input, so a reader of the built term never meets a statement in ``operands``.
+non-term input, so a reader of the built term never meets a statement in ``operands``. A body is given as
+its text (``parse_body`` reads it) or as statements.
 """
 
 from __future__ import annotations
 
 from emmy.compiler.ir.axis import Axis
 from emmy.compiler.ir.elementwise import ElementwiseImpl
-from emmy.compiler.ir.expression import Var
 from emmy.compiler.ir.pure import Fold, Lambda
-from emmy.compiler.ir.stmt import Assign, Body, Load
+from emmy.compiler.ir.stmt import Body, Load, parse_body
 
 
 def term(edge: Fold | Load) -> Fold:
@@ -27,8 +27,13 @@ def term(edge: Fold | Load) -> Fold:
 
 
 def slab(name: str, buffer: str, *index) -> Fold:
-    """One gmem read ``buffer[index]`` as a term; a ``str`` coordinate spells the ``Var`` of that name."""
-    return Fold.slab(Load(name=name, input=buffer, index=tuple(Var(i) if isinstance(i, str) else i for i in index)))
+    """One gmem read ``buffer[index]`` as a term; a ``str`` coordinate is the text of that index expression."""
+    return Fold.slab(parse_body(f"{name} = load {buffer}[{', '.join(str(i) for i in index)}]")[0])
+
+
+def _body(body) -> Body:
+    """A body given as its text or as statements."""
+    return parse_body(body) if isinstance(body, str) else Body.coerce(body)
 
 
 def _bound(operands: tuple[Fold, ...]) -> tuple[str, ...]:
@@ -45,7 +50,7 @@ def projection(operands: tuple = (), body=(), results: tuple[str, ...] | None = 
     name, and every coordinate it indexes stays a free coordinate of the term; ``results`` default to the
     body's last definition, or with no body the first bound operand result (a pass-through)."""
     operands = tuple(term(edge) for edge in operands)
-    body = Body.coerce(body)
+    body = _body(body)
     bound = _bound(operands)
     if results is None:
         last = next((stmt.defines()[-1] for stmt in reversed(body) if stmt.defines()), None)
@@ -60,7 +65,7 @@ def reduction(axis: Axis | str, operands: tuple, body, accs: tuple[str, ...], op
     operands = tuple(term(edge) for edge in operands)
     name = axis.name if isinstance(axis, Axis) else axis
     ops = tuple(_impl(op) for op in (ops if isinstance(ops, tuple) else (ops,) * len(accs)))
-    lift = Lambda.closing((name, *_bound(operands)), body, tuple(f"{acc}__v" for acc in accs))
+    lift = Lambda.closing((name, *_bound(operands)), _body(body), tuple(f"{acc}__v" for acc in accs))
     return Fold(operands=operands, lift=lift, init=tuple(op.identity for op in ops), base=Lambda.componentwise(ops, accs))
 
 
@@ -75,5 +80,5 @@ def contraction(axis: Axis | str, a: Fold | Load, *channels: tuple[Fold | Load, 
     for b, _ in pairs:
         if all(b is not edge for edge in operands):
             operands.append(b)
-    products = tuple(Assign(name=f"{acc}__v", op=_impl(product), args=(a.exposes[0], b.exposes[0])) for b, acc in pairs)
+    products = "\n".join(f"{acc}__v = {_impl(product).name}({a.exposes[0]}, {b.exposes[0]})" for b, acc in pairs)
     return reduction(axis, tuple(operands), products, tuple(acc for _, acc in pairs), plus)
