@@ -3,18 +3,16 @@
 //! answers to no knob, pin or evidence; a transform something decides is a pipeline pass.
 
 use std::collections::{HashMap, HashSet};
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::Arc;
 
-use crate::body::{Body, Normalized};
+use crate::body::{Body, Exact};
 use crate::expr::{Expression, Interval, SimplifyCtx};
 use crate::kinds::axis::Axis;
 use crate::kinds::elementwise::Op;
 use crate::kinds::field::DType;
 use crate::kinds::*;
-use crate::memo::Memo;
 use crate::order::topological_sort;
-use crate::text::body_text;
-use crate::{Error, Name, Result, locked};
+use crate::{Error, Name, Result, memo};
 
 const SYMBOLIC_AXIS_HI: i128 = 1 << 30;
 
@@ -36,39 +34,19 @@ pub fn extend_simplify_ctx(ctx: &SimplifyCtx, axis: &Axis) -> SimplifyCtx {
 
 // --- the memo -------------------------------------------------------------------------------------------
 
-/// The normal forms of the bodies met in this process.
-fn normal_forms() -> &'static Mutex<Memo<u64, Body>> {
-    static MEMO: OnceLock<Mutex<Memo<u64, Body>>> = OnceLock::new();
-    MEMO.get_or_init(|| Mutex::new(Memo::new(16384)))
+memo! {
+    /// The normal forms of the bodies met in this process, by their exact form.
+    pub fn normal_forms() -> Memo<Exact, Body> [capacity = 16_384]
 }
 
-/// Forget every memoized normal form (the tests of the memo use it).
-pub fn clear_memo() {
-    locked(normal_forms()).clear();
-}
-
-/// The executable normal form of `body`, cached on the body and its fixed point, and memoized by text.
+/// The executable normal form of `body`: what the body already knows, else the memo's, else computed and kept.
 pub fn normalize_body(body: &Body) -> Result<Body> {
-    if let Some(normal) = body.0.normalized.get() {
-        return Ok(match normal {
-            Normalized::Itself => body.clone(),
-            Normalized::Other(normal) => normal.clone(),
-        });
+    if let Some(normal) = body.normal_form() {
+        return Ok(normal);
     }
-    let text = body_text(body)?;
-    let found = locked(normal_forms()).get(&body.content_hash(), &text);
-    let normal = match found {
-        Some(found) => found,
-        None => {
-            let computed = normalize_uncached(body)?;
-            locked(normal_forms()).put(body.content_hash(), text, computed.clone());
-            computed
-        }
-    };
-    let _ = normal.0.normalized.set(Normalized::Itself);
-    if !normal.ptr_eq(body) {
-        let _ = body.0.normalized.set(Normalized::Other(normal.clone()));
-    }
+    let normal =
+        normal_forms().get_or_try_insert(&Exact(body.clone()), || normalize_uncached(body))?;
+    body.remember_normal_form(&normal);
     Ok(normal)
 }
 
@@ -200,7 +178,7 @@ for k in 0..3:
         let weak = Arc::downgrade(&normal.0);
         drop(normal);
         drop(body);
-        clear_memo();
+        normal_forms().clear();
         assert!(weak.upgrade().is_none(), "a body holds no Arc to itself");
     }
 

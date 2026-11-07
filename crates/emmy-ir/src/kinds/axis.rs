@@ -168,6 +168,51 @@ impl Hash for Axis {
     }
 }
 
+impl Axis {
+    /// Equal with the hint and the window too, through every parent: what a memo keys on, since both are identity
+    /// material though neither is part of equality.
+    pub fn exact_eq(&self, other: &Axis) -> bool {
+        self == other
+            && self.extent.hint == other.extent.hint
+            && match (&self.window, &other.window) {
+                (None, None) => true,
+                (Some(a), Some(b)) => {
+                    a.base == b.base
+                        && a.bound == b.bound
+                        && a.partition == b.partition
+                        && match (&a.parent, &b.parent) {
+                            (None, None) => true,
+                            (Some(p), Some(q)) => p.exact_eq(q),
+                            _ => false,
+                        }
+                }
+                _ => false,
+            }
+    }
+
+    /// The hash `exact_eq` agrees with.
+    pub fn exact_hash<H: Hasher>(&self, state: &mut H) {
+        self.hash(state);
+        self.extent.hint.hash(state);
+        match &self.window {
+            None => false.hash(state),
+            Some(window) => {
+                true.hash(state);
+                window.base.hash(state);
+                window.bound.hash(state);
+                window.partition.hash(state);
+                match &window.parent {
+                    None => false.hash(state),
+                    Some(parent) => {
+                        true.hash(state);
+                        parent.exact_hash(state);
+                    }
+                }
+            }
+        }
+    }
+}
+
 /// `name in start..extent`, with the hint when it is not the default, and the window.
 pub fn spell_axis(axis: &Axis, start: Option<&str>) -> Result<String> {
     let mut extent = axis.extent.expression.try_text()?;
