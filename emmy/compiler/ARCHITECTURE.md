@@ -110,8 +110,8 @@ reader — the context key, the `H_fast_math` feature, the tune DB's regime, the
 
 - **Layer 1** — no GPU, no CUDA, no backend imports. Dialect ops
   implement `infer_output_shape(input_shapes)` and a numpy `forward()`.
-- **Layer 2** — operates on `Graph` + Loop IR only. Every `LoopOp`'s
-  `__post_init__` canonicalizes its body (`ir/stmt/normalize.py`).
+- **Layer 2** — operates on `Graph` + Loop IR only. Every `LoopOp` body is normalized at construction
+  (`normalize_body`, the `emmy-ir` crate's `normalize` module).
 - **Layer 3** — backends are the only place GPU specifics live.
 
 ## Shared invariants
@@ -119,8 +119,8 @@ reader — the context key, the `H_fast_math` feature, the tune DB's regime, the
 - **Shape lives on the graph**, not on the op — `node.output.shape`. Each shape element is a `Dim`
   (`compiler/dim.py`) that wraps an `Expression` from `ir/expression.py`: static (`Dim(32)` → `Literal(32)`), atomic
   symbolic (`Dim("seq_len")` → `Var("seq_len")`), or composite from arithmetic (`Dim("S") * Dim(2)` →
-  `BinaryExpr("*", Var("S"), Literal(2))`). `Dim` overloads `+`/`-`/`*`/`//`/`%` and eager-folds via
-  `Expression.simplify` — static math matches plain int math byte-for-byte; symbolic stays as `BinaryExpr`. It
+  `BinaryExpression("*", Var("S"), Literal(2))`). `Dim` overloads `+`/`-`/`*`/`//`/`%` and eager-folds via
+  `Expression.simplify` — static math matches plain int math byte-for-byte; symbolic stays as `BinaryExpression`. It
   also exposes `ceil_div` (`(self + (b-1))//b`): the single masked-tile grid-extent formula for both
   regimes — it folds to the integer ceil (`-(-E//b)`) for a static dim and builds the composite ceil-div
   `Expression` for a symbolic one, so the partition planner's masked block-axis / masked-K sites need no

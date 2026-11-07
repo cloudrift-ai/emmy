@@ -81,14 +81,15 @@ The passes `ARCHITECTURE.md` owns the design; `tests/compiler/passes/test_maxima
 
 ## Compiler Invariant: Normalization Carries No Knob
 
-Body normalization (`ir/stmt/normalize.py`, the `normalize_body` driver) is the canonical form every Loop IR body
-takes at construction and inside every identity digest. It runs the same on every body, so it answers to no knob, pin
-or evidence, and nothing under `ir/` imports the pipeline that holds them.
+Body normalization (the `normalize` module of the `emmy-ir` crate, behind the one entry point `normalize_body` the
+`ir/stmt` package exports) is the canonical form every Loop IR body takes at construction and inside every identity
+digest. It runs the same on every body, so it answers to no knob, pin or evidence, and nothing under `ir/` imports the
+pipeline that holds them.
 
 - **A transform that something decides is a pipeline pass.** A knob the search sets, a pin, a pass stage: the
   transform lives in the pass file that owns the decision under `pipeline/passes/`, even when it is a pure body → body
-  function another pass could reuse. Every function in `normalize.py` runs inside `normalize_body`; one that does not
-  is a pass in the wrong place.
+  function another pass could reuse. Every step of the crate's `normalize` module runs inside `normalize_body`; one
+  that does not is a pass in the wrong place.
 - **A pass may call a normalization step; normalization never calls a pass.**
 - **Nothing is added to normalization to make a kernel faster.** A canonical form moves every kernel identity and
   every golden; whether a transform pays is the knob's evidence question. A simplification that always removes work

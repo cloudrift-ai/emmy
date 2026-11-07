@@ -37,43 +37,41 @@ parent's imports.
   ranges and symbolic bounds, the range analysis, the affine form. A literal keeps Python's number model (`Num`: int,
   float or bool, equal by value) because a stored kernel's text spells it that way, and is typed by a `LitType`.
   Integer rewrites are checked: a product that would overflow declines the rewrite rather than fold wrong.
-- **Kinds** (`kinds/mod.rs`): every kind is a struct declared once in the `with_kinds!` macro — its fields, each with a type,
-  the roles it plays (`DEFINES`, `READS`, `EXPRESSION`, `AXIS`, `BODY`, `STMTS`, `TERM`, `RECORD`, …) and a default — and
-  the Python extension generates its classes from the same list. `define_kinds!` turns the list into the structs, the
-  `enum Statement`, the `enum Kind` (one variant per kind, with its name, layer and fields; what a body's kind queries
-  and the reader take) and, per kind, the role-driven walks (`visit`, `rewrite`, the header fields the text prints).
-  Roles are a `Roles` set and a kind's flags a `KindFlags` set, two types that cannot be mistaken for one another.
-  `KW_ONLY`, a constructor property, is declared beside a field's roles and lands in the field's `kw_only`, not in
-  the set. A kind is a block when a
-  field of it plays `BODY`. The kinds-wide accessors (`op`, `dtype`, `name`) are the `Field` trait's: a field type
-  that is one answers, every other field's default is none. A test pins the digest of the declaration list, the names
-  and field orders every stored text spells.
-- **Fields** (`kinds/field.rs`): one trait, `Field`, every field type implements: how it is visited and rewritten by role,
-  spelled on a declared kind's header and read back by its `Ty`. A number where a name is expected (`NumOr<T>`, a
+- **Kinds** (`kinds/mod.rs`): every kind is a struct declared once in the `with_kinds!` macro — its fields, each with a
+  type, the roles it plays (`DEFINES`, `READS`, `EXPRESSION`, `AXIS`, `BODY`, `STMTS`, `TERM`, `RECORD`, …) and a
+  default — and the Python extension generates its classes from the same list. `define_kinds!` turns the list into the
+  structs, the `enum Statement`, the `enum Kind` (one variant per kind, with its name, layer and fields; what a body's
+  kind queries and the reader take) and, per kind, the role-driven walks (`visit`, `rewrite`, the header fields the text
+  prints). Roles are a `Roles` set and a kind's flags a `KindFlags` set, two types that cannot be mistaken for one
+  another. `KW_ONLY`, a constructor property, is declared beside a field's roles and lands in the field's `kw_only`, not
+  in the set. A kind is a block when a field of it plays `BODY`. The kinds-wide accessors (`op`, `dtype`, `name`) are
+  the `Field` trait's: a field type that is one answers, every other field's default is none. A test pins the digest of
+  the declaration list, the names and field orders every stored text spells.
+- **Fields** (`kinds/field.rs`): one trait, `Field`, every field type implements: how it is visited and rewritten by
+  role, spelled on a declared kind's header and read back by its `Ty`. A number where a name is expected (`NumOr<T>`, a
   carry's literal seed) is plain data. A record (`SelectBranch`, `FragmentArg`) is declared in the same list with a
   layer of its own, a struct whose own fields play roles and a `Field` of the kind that holds it. Every closed set of
-  spellings the crate branches on is an enum declared with `closed_set!` (one text per variant, `Display` and
-  `FromStr` over them, a test pinning every text, since each is a stored spelling or identity material): the dtypes
-  (`DType`, `kinds/dtype.rs`, with the promotion rule; the extension exports the set as `DTYPES` and a Python test
-  holds it equal to the `DataType` registry), the binary operators and literal types (`BinOp`, `LitType`), the GPU
-  built-ins (`expr::Builtin`), the expression kinds (`ExprKind`, generated from the one expression list; the digest
-  spells a node by it) and the digest's other tags (`numbering::Tag`). A cast's target is `CastTarget`: a literal
-  type the simplifier folds through, or any other C type the renderer spells. A value the crate only carries stays
-  a name: a slab's swizzle, a tile's raster orientation, a fragment's layout and role, a slab's or an MMA wrapper's
-  C type. An elementwise operation is `Op::Known(Elementwise)` or `Op::Other(name)`, a spelling only a renderer
-  knows. The known operations are one declaration (`operations!` in `kinds/elementwise.rs`): each variant with its
-  spelling and its properties,
-  which generates the enum, its `Display`/`FromStr` pair and the table `OPS` the enum indexes, one `OpInfo` row per
-  operation (commutative, associative, the neutral element, the cluster representative, integer arithmetic, whether
-  it copies its operand, its affine role, its host evaluator). Every reader of an operation's nature (the affine
-  fold, the alias reads of placement and the ties, the dtype promotion, the clustered identity, the Python tables)
-  reads a property; none matches a name. The neutral element is the real one (`-inf` for a maximum) and `seed` is
-  what a kernel initializes with, the bounded stand-in `±1e30` the CUDA source spells (and two recipe goldens'
-  bodies, as `-1e+30`; the hardware goldens and the corpus seed no maximum). A
-  string of any of these sets exists where the text is read or written, at the Python boundary, and nowhere else.
-- **Axes** (`kinds/axis.rs`): `Axis` (name, `Dim`, window), equal by name and extent as the Python class is; the window is
-  provenance. The Python `Axis`, `Dim`, `DataType` and `ElementwiseImpl` objects stay Python classes: a statement holds
-  a name (or an axis's parts) and the extension makes the object on first read.
+  spellings the crate branches on is an enum declared with `closed_set!` (one text per variant, `Display` and `FromStr`
+  over them, a test pinning every text, since each is a stored spelling or identity material): the dtypes (`DType`,
+  `kinds/dtype.rs`, with the promotion rule; the extension exports the set as `DTYPES` and a Python test holds it equal
+  to the `DataType` registry), the binary operators and literal types (`BinOp`, `LitType`), the GPU built-ins
+  (`expr::Builtin`), the expression kinds (`ExprKind`, generated from the one expression list; the digest spells a node
+  by it) and the digest's other tags (`numbering::Tag`). A cast's target is `CastTarget`: a literal type the simplifier
+  folds through, or any other C type the renderer spells. A value the crate only carries stays a name: a slab's swizzle,
+  a tile's raster orientation, a fragment's layout and role, a slab's or an MMA wrapper's C type. An elementwise
+  operation is `Op::Known(Elementwise)` or `Op::Other(name)`, a spelling only a renderer knows. The known operations are
+  one declaration (`operations!` in `kinds/elementwise.rs`): each variant with its spelling and its properties, which
+  generates the enum, its `Display`/`FromStr` pair and the table `OPS` the enum indexes, one `OpInfo` row per operation
+  (commutative, associative, the neutral element, the cluster representative, integer arithmetic, whether it copies its
+  operand, its affine role, its host evaluator). Every reader of an operation's nature (the affine fold, the alias reads
+  of placement and the ties, the dtype promotion, the clustered identity, the Python tables) reads a property; none
+  matches a name. The neutral element is the real one (`-inf` for a maximum) and `seed` is what a kernel initializes
+  with, the bounded stand-in `±1e30` the CUDA source spells (and two recipe goldens' bodies, as `-1e+30`; the hardware
+  goldens and the corpus seed no maximum). A string of any of these sets exists where the text is read or written, at
+  the Python boundary, and nowhere else.
+- **Axes** (`kinds/axis.rs`): `Axis` (name, `Dim`, window), equal by name and extent as the Python class is; the window
+  is provenance. The Python `Axis`, `Dim`, `DataType` and `ElementwiseImpl` objects stay Python classes: a statement
+  holds a name (or an axis's parts) and the extension makes the object on first read.
 
 ## Protocol and body
 

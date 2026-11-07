@@ -61,7 +61,7 @@ deleted gate is a template for its return, so it is deleted with the code rather
 ## A knob lives in its pass
 
 The transform a knob, a pin or an evidence row decides lives in the pass that reads that decision, and nowhere else.
-Body normalization (`ir/stmt/normalize.py`) is the opposite kind of code: the canonical form every Loop IR body
+Body normalization (the `emmy-ir` crate's `normalize` module, `normalize_body`) is the opposite kind of code: the canonical form every Loop IR body
 takes at construction and every identity digest takes, which can answer to nothing the pipeline chooses, and `ir/`
 imports no pipeline module. A pass may call a normalization step as a mechanical helper; moving a pass's transform into the normalization
 module so another pass can reuse it inverts that direction and leaves a transform no normalization step runs

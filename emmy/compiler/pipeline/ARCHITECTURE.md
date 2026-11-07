@@ -1161,7 +1161,8 @@ one, at the seam that mints the most stored pieces again and at none on a tie be
 one kernel set are one re-spelling, the first taken); a seam a re-keyed parent still offers but whose pieces are
 neither the stored ones nor read and write as they do (a chain of single cuts peeling the projections off one kernel,
 in another order) is re-spelled the same way — and is otherwise dropped with its pieces' rows, as is a decision the
-fresh parent takes with another arm or that mints another number of pieces; a row whose kernel was re-keyed keeps its schedule and loses its measurement — a proposal,
+fresh parent takes with another arm or that mints another number of pieces; a row whose kernel was re-keyed keeps its
+schedule and loses its measurement — a proposal,
 no evidence until a record run on the card measures it again. A whole-target latency is
 cleared exactly when a kernel of the set it names is re-keyed or dropped, whichever row carries it; one written before
 latencies named their set is filled once, with every kernel the file's decisions reach from its row's target, and
