@@ -1,7 +1,17 @@
 //! The axis steps: a free loop of extent one is inlined, a canonical extent-one reduction is its single update, and an
 //! outer free-loop chain takes row-major output storage order.
 
-use super::*;
+use std::collections::{BTreeMap, HashMap, HashSet};
+use std::sync::Arc;
+
+use super::{assign, canonicalize_expressions, rename_ssa_sequential, substituted, with_bodies};
+use crate::body::Body;
+use crate::expr::{Expr, Expression, affine_form};
+use crate::kinds::field::AxisRef;
+use crate::kinds::*;
+use crate::numbering::Key;
+use crate::text::structural_body_text;
+use crate::{Name, Result};
 
 // --- size-one axes ----------------------------------------------------------------------------------------
 

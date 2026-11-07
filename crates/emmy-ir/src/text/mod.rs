@@ -9,23 +9,14 @@ pub mod print;
 pub use parse::*;
 pub use print::*;
 
-use std::collections::HashMap;
-use std::sync::Arc;
-
-use crate::body::{Body, Subroutine};
-use crate::expr::{Expression, Lit, Num, Parser, TokenKind};
-use crate::kinds::axis::{Axis, Dim, Window, spell_axis, spell_window};
-use crate::kinds::elementwise::Op;
-use crate::kinds::field::{DType, Float, NumOr, Ty, Value, Values, spell_number, spell_stmt_name};
-use crate::kinds::*;
-use crate::protocol::finished;
-use crate::{Error, Name, Result};
-
 pub const INDENT: &str = "    ";
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+
     use super::*;
+    use crate::kinds::{Kind, Statement};
 
     const STATEMENTS: &[&str] = &[
         "in0 = load x[a0, a1 + 1]",

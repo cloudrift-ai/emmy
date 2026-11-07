@@ -1,8 +1,8 @@
 //! The reader: the tokenizer and the parser that take an expression's text back, and that the body text's reader
 //! extends with the statement punctuation.
 
-use super::*;
-use crate::{Error, Result};
+use super::{BinOp, Expr, Expression, Lit, LitType, Num, is_builtin, python_repr};
+use crate::{Error, Name, Result};
 
 // --- the reader -----------------------------------------------------------------------------------
 

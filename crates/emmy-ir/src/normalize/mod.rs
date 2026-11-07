@@ -2,21 +2,18 @@
 //! Pure `Body → Body` steps and the one driver, `normalize_body`, memoized by the body's content. Normalization
 //! answers to no knob, pin or evidence; a transform something decides is a pipeline pass.
 
-use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
+use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex, OnceLock};
 
-use crate::body::{Body, Normalized, exposed_defines, free_names, unique};
-use crate::expr::{BinOp, Expr, Expression, Interval, SimplifyCtx, affine_form};
-use crate::kinds::axis::{Axis, Dim};
-use crate::kinds::dtype::{is_float, promote};
-use crate::kinds::elementwise::{Op, evaluate_f32};
-use crate::kinds::field::{AxisRef, DType, Float, Names};
+use crate::body::{Body, Normalized};
+use crate::expr::{Expression, Interval, SimplifyCtx};
+use crate::kinds::axis::Axis;
+use crate::kinds::elementwise::Op;
+use crate::kinds::field::DType;
 use crate::kinds::*;
 use crate::memo::Memo;
-use crate::numbering::{Key, Number, Numbering, Param, roles, statement_tree, value_numbers};
-use crate::order::{is_protocol, ordering_constraints, topological_sort};
-use crate::protocol::literal_binding;
-use crate::text::{body_text, structural_body_text};
+use crate::order::topological_sort;
+use crate::text::body_text;
 use crate::{Error, Name, Result, locked};
 
 const SYMBOLIC_AXIS_HI: i128 = 1 << 30;
@@ -323,6 +320,39 @@ mod tests {
                 out[i] = v
             ",
         )
+    }
+
+    #[test]
+    fn the_operand_order_of_a_normal_form_is_final() {
+        // A gate/up pair: the order ranks a product's operands through the numbering of the body it permuted, and a
+        // rank lost there flipped the operands on every second normalization.
+        let normal = normalize_uncached(&testing::body(
+            "
+            let f32 v0 = 1.0
+            for a0 in 0..128:
+                for a1 in 0..512:
+                    for a2 in 0..512:
+                        in0 = load wg[a1, a2]
+                        in1 = load wu[a1, a2]
+                        in2 = load x[a0, a2]
+                        f32 v1 = multiply(in0, in2)
+                        acc0 <- add(acc0, v1) over a2
+                        f32 v2 = multiply(in1, in2)
+                        acc1 <- add(acc1, v2) over a2
+                    f16 v3 = copy(acc1)
+                    f16 v4 = copy(acc0)
+                    f32 v5 = copy(v4)
+                    v6 = negative(v5)
+                    v7 = exp(v6)
+                    v8 = add(v7, v0)
+                    f16 v9 = divide(v5, v8)
+                    v10 = multiply(v3, v9)
+                    o[a0, a1] = v10
+            ",
+        ))
+        .unwrap();
+        let again = normalize_uncached(&normal).unwrap();
+        assert_eq!(body_text(&again).unwrap(), body_text(&normal).unwrap());
     }
 
     #[test]

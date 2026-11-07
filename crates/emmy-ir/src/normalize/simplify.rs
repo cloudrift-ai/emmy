@@ -1,6 +1,12 @@
 //! Expression simplification over a body, each expression under the ranges of the axes in scope.
 
-use super::*;
+use std::sync::Arc;
+
+use super::{extend_simplify_ctx, with_bodies};
+use crate::Result;
+use crate::body::Body;
+use crate::expr::SimplifyCtx;
+use crate::kinds::*;
 
 // --- expression simplification ----------------------------------------------------------------------------
 

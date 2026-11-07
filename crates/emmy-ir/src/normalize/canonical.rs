@@ -1,7 +1,18 @@
 //! The canonical order: sequential names, a dependency-valid statement order with commutative operand order from the
 //! value numbering, and integer expressions canonicalized by lexical binding order.
 
-use super::*;
+use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
+
+use super::ties;
+use super::{carried_out, unify_siblings, with_bodies};
+use crate::body::{Body, free_names, unique};
+use crate::expr::{BinOp, Expr, Expression, SimplifyCtx, affine_form};
+use crate::kinds::field::Float;
+use crate::kinds::*;
+use crate::numbering::{Key, Numbering, roles, statement_tree, value_numbers};
+use crate::order::ordering_constraints;
+use crate::{Name, Result};
 
 // --- sequential names -----------------------------------------------------------------------------------
 

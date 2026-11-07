@@ -1,6 +1,15 @@
 //! The value numbering: every statement's number and parameters, by its ordinal in the pre-order walk.
 
-use super::*;
+use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
+
+use super::{Key, Number, Param, hash_parts};
+use crate::Name;
+use crate::body::{Body, StmtRef};
+use crate::expr::{Expr, Expression};
+use crate::kinds::Statement;
+use crate::kinds::field::NumOr;
+use crate::text::structural_text;
 
 /// One body's numbering, by statement ordinal in pre-order.
 #[derive(Default, Debug)]
