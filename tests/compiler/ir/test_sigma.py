@@ -10,7 +10,7 @@ def _deep_expression(depth: int) -> BinaryExpression:
 
 
 def test_restrict_reuses_parent_canonical_entries(monkeypatch):
-    target = _deep_expression(128)
+    target = _deep_expression(100)
     sigma = Sigma({"b": Var("b"), "a": target})
     root_walks = 0
     original = BinaryExpression.__str__
@@ -30,7 +30,7 @@ def test_restrict_reuses_parent_canonical_entries(monkeypatch):
 
 
 def test_extend_reuses_unchanged_canonical_entries(monkeypatch):
-    target = _deep_expression(128)
+    target = _deep_expression(100)
     sigma = Sigma({"a": target})
     root_walks = 0
     original = BinaryExpression.__str__

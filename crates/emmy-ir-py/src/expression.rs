@@ -72,7 +72,7 @@ macro_rules! define_py_exprs {
         impl PyExpression {
             /// The Python object of `expr`: an instance of its kind's class.
             pub fn wrap<'py>(py: Python<'py>, expr: &Expression) -> PyResult<Bound<'py, PyAny>> {
-                let base = PyClassInitializer::from(PyExpression::base(expr.clone()));
+                let base = PyClassInitializer::from(PyExpression::base(expr.clone())?);
                 Ok(match &**expr {
                     $( Expr::$Variant(..) => Bound::new(py, base.add_subclass($Py))?.into_any(), )*
                 })
@@ -132,11 +132,12 @@ macro_rules! define_py_exprs {
 emmy_ir::with_exprs!(define_py_exprs);
 
 impl PyExpression {
-    fn base(expr: Expression) -> PyExpression {
-        PyExpression {
-            expr,
+    /// The base of every expression object: the one place a tree too deep for the compiler's walks is refused.
+    fn base(expr: Expression) -> PyResult<PyExpression> {
+        Ok(PyExpression {
+            expr: expr.bounded().py()?,
             slots: [OnceLock::new(), OnceLock::new(), OnceLock::new()],
-        }
+        })
     }
 
     fn slot<'py>(
@@ -438,8 +439,11 @@ fn kind_error(kind: &str) -> PyErr {
 #[pymethods]
 impl PyVar {
     #[new]
-    fn new(name: &str) -> PyClassInitializer<Self> {
-        PyClassInitializer::from(PyExpression::base(Expression::var(name))).add_subclass(PyVar)
+    fn new(name: &str) -> PyResult<PyClassInitializer<Self>> {
+        Ok(
+            PyClassInitializer::from(PyExpression::base(Expression::var(name))?)
+                .add_subclass(PyVar),
+        )
     }
 }
 
@@ -453,18 +457,16 @@ impl PyLiteral {
             value: number,
             dtype: dtype.parse::<LitType>().py()?,
         }));
-        Ok(PyClassInitializer::from(PyExpression::base(expr)).add_subclass(PyLiteral))
+        Ok(PyClassInitializer::from(PyExpression::base(expr)?).add_subclass(PyLiteral))
     }
 }
 
 #[pymethods]
 impl PyBuiltin {
     #[new]
-    fn new(name: &str) -> PyClassInitializer<Self> {
-        PyClassInitializer::from(PyExpression::base(Expression::new(Expr::Builtin(
-            name.into(),
-        ))))
-        .add_subclass(PyBuiltin)
+    fn new(name: &str) -> PyResult<PyClassInitializer<Self>> {
+        let expr = Expression::new(Expr::Builtin(name.into()));
+        Ok(PyClassInitializer::from(PyExpression::base(expr)?).add_subclass(PyBuiltin))
     }
 }
 
@@ -481,10 +483,8 @@ impl PyBinaryExpression {
                 "the operator {op:?} has no spelling"
             )));
         };
-        let expr = binary(op, expression_from_py(left)?, expression_from_py(right)?)
-            .bounded()
-            .py()?;
-        Ok(PyClassInitializer::from(PyExpression::base(expr)).add_subclass(PyBinaryExpression))
+        let expr = binary(op, expression_from_py(left)?, expression_from_py(right)?);
+        Ok(PyClassInitializer::from(PyExpression::base(expr)?).add_subclass(PyBinaryExpression))
     }
 
     /// How tightly the operator binds; the renderer parenthesizes by it.
@@ -505,10 +505,8 @@ impl PyFunctionCallExpression {
             .try_iter()?
             .map(|item| expression_from_py(&item?))
             .collect();
-        let expr = Expression::new(Expr::Call(name.into(), args?.into()))
-            .bounded()
-            .py()?;
-        Ok(PyClassInitializer::from(PyExpression::base(expr))
+        let expr = Expression::new(Expr::Call(name.into(), args?.into()));
+        Ok(PyClassInitializer::from(PyExpression::base(expr)?)
             .add_subclass(PyFunctionCallExpression))
     }
 }
@@ -525,10 +523,8 @@ impl PyTernaryExpression {
             expression_from_py(cond)?,
             expression_from_py(if_true)?,
             expression_from_py(if_false)?,
-        ))
-        .bounded()
-        .py()?;
-        Ok(PyClassInitializer::from(PyExpression::base(expr)).add_subclass(PyTernaryExpression))
+        ));
+        Ok(PyClassInitializer::from(PyExpression::base(expr)?).add_subclass(PyTernaryExpression))
     }
 }
 
@@ -536,10 +532,8 @@ impl PyTernaryExpression {
 impl PyCastExpression {
     #[new]
     fn new(dtype: &str, expression: &Bound<'_, PyAny>) -> PyResult<PyClassInitializer<Self>> {
-        let expr = Expression::new(Expr::Cast(dtype.into(), expression_from_py(expression)?))
-            .bounded()
-            .py()?;
-        Ok(PyClassInitializer::from(PyExpression::base(expr)).add_subclass(PyCastExpression))
+        let expr = Expression::new(Expr::Cast(dtype.into(), expression_from_py(expression)?));
+        Ok(PyClassInitializer::from(PyExpression::base(expr)?).add_subclass(PyCastExpression))
     }
 }
 
@@ -551,10 +545,8 @@ impl PyFlatIndex {
             .try_iter()?
             .map(|item| expression_from_py(&item?))
             .collect();
-        let expr = Expression::new(Expr::FlatIndex(buffer.into(), index?.into()))
-            .bounded()
-            .py()?;
-        Ok(PyClassInitializer::from(PyExpression::base(expr)).add_subclass(PyFlatIndex))
+        let expr = Expression::new(Expr::FlatIndex(buffer.into(), index?.into()));
+        Ok(PyClassInitializer::from(PyExpression::base(expr)?).add_subclass(PyFlatIndex))
     }
 }
 

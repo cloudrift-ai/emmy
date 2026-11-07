@@ -27,16 +27,16 @@ child module takes its parent's imports.
 
 ## Data
 
-- A name is an `Arc<str>`; a tuple of names, expressions or axes an `Arc<[…]>`; an expression an `Arc<Expr>`; a body an
-  `Arc<BodyData>`. A rebuild that changes nothing returns the object it was given, so every walk tells a change by
-  pointer and a Python wrapper can hand back the same object.
+- A name is an `Arc<str>`; a tuple of names, expressions or axes an `Arc<[…]>`; an expression an `Arc<Node>` (its tree
+  with its height); a body an `Arc<BodyData>`. A rebuild that changes nothing returns the object it was given, so
+  every walk tells a change by pointer and a Python wrapper can hand back the same object.
 - **Expressions** (`expr/`): eight kinds declared once in the `with_exprs!` macro (the variant, its Python class and
-  its fields), which generates the `enum Expr`, the walks every kind answers through its fields (children, height,
-  the rebuilds) and, in the extension, the classes with a getter per field; the printer and the reader (exact inverses, the text being
-  the one wire and structural form), substitution, renaming, the simplifier under a `SimplifyCtx` of ranges and
-  symbolic bounds, the range analysis, the affine form. A literal keeps Python's number model (`Num`: int, float or
-  bool, equal by value) because a stored kernel's text spells it that way, and is typed by a `LitType`. Integer
-  rewrites are checked: a product that would overflow declines the rewrite rather than fold wrong.
+  its fields), which generates the `enum Expr`, the walks every kind answers through its fields (children, height, the
+  rebuilds) and, in the extension, the classes with a getter per field; the printer and the reader (exact inverses,
+  the text being the one wire and structural form), substitution, renaming, the simplifier under a `SimplifyCtx` of
+  ranges and symbolic bounds, the range analysis, the affine form. A literal keeps Python's number model (`Num`: int,
+  float or bool, equal by value) because a stored kernel's text spells it that way, and is typed by a `LitType`.
+  Integer rewrites are checked: a product that would overflow declines the rewrite rather than fold wrong.
 - **Kinds** (`kinds/mod.rs`): every kind is a struct declared once in the `with_kinds!` macro — its fields, each with a type,
   the roles it plays (`DEFINES`, `READS`, `EXPRESSION`, `AXIS`, `BODY`, `STMTS`, `TERM`, `RECORD`, …) and a default — and
   the Python extension generates its classes from the same list. `define_kinds!` turns the list into the structs, the
@@ -112,10 +112,11 @@ Rust order breaks by the text.
 ## Errors
 
 A function that can refuse returns `Result<T, Error>`; the error kinds map one to one onto the Python exceptions the
-extension raises (`ValueError`, `TypeError`, `KeyError`, `ZeroDivisionError`, `NotImplementedError`). Library code
-holds no `unwrap` or `expect` (STYLE.md, Rust): a lock that may be poisoned is reopened, an invariant that holds by
-construction is a total function (`rebuild_bodies`, `map_children`), and digest material falls back to a debug form
-where a name has no text, and an axis with no text spells as the empty text. An expression carries the height of its
-tree; the reader and the constructors refuse one higher than 256 levels (`RecursionError` on the Python side) rather
-than let a later walk overflow the stack, and a chain of expressions drops level by level. An error met while a Python
-value converts keeps its own type across the boundary, with the kind and field ahead of its message.
+extension raises (`ValueError`, `TypeError`, `KeyError`, `ZeroDivisionError`, `NotImplementedError`,
+`RecursionError`). Library code holds no `unwrap` or `expect` (STYLE.md, Rust): a lock that may be poisoned is
+reopened, an invariant that holds by construction is a total function (`rebuild_bodies`, `map_children`), and digest
+material falls back to a debug form where a name has no text, and an axis with no text spells as the empty text. An
+expression carries the height of its tree; the reader and the one base of every Python expression object refuse one
+higher than 256 levels (`RecursionError`), whatever built it, rather than let a later walk overflow the stack, and a
+chain of expressions drops level by level. An error met while a Python value converts keeps its own type across the
+boundary, with the kind and field ahead of its message.

@@ -516,12 +516,13 @@ impl Body {
     }
 
     /// Kahn's order over indexed predecessor sets, as source indices; source order breaks ties, a priority may rank
-    /// first. A cycle is an error.
+    /// first. Constraints that hold a cycle (a carried value read ahead of its update inside one scope, as Kernel IR
+    /// spells a loop-carried state) leave the source order: no sort reorders what it cannot order.
     pub fn topological_permutation<P: Ord>(
         &self,
         incoming: &[HashSet<usize>],
         priority: Option<&dyn Fn(usize) -> P>,
-    ) -> Result<Vec<usize>> {
+    ) -> Vec<usize> {
         let n = self.len();
         let mut successors: Vec<Vec<usize>> = vec![Vec::new(); n];
         let mut degree: Vec<usize> = incoming.iter().map(|sources| sources.len()).collect();
@@ -546,22 +547,21 @@ impl Body {
             }
         }
         if ordered.len() == n {
-            Ok(ordered)
+            ordered
         } else {
-            Err(Error::Value(
-                "the statements depend on each other in a cycle".into(),
-            ))
+            (0..n).collect()
         }
     }
 
-    pub fn topological_order(&self, incoming: &[HashSet<usize>]) -> Result<Body> {
-        let order = self.topological_permutation::<()>(incoming, None)?;
-        Ok(self.rebuilt(
+    /// This body in an order `incoming` allows, source order breaking ties.
+    pub fn topological_order(&self, incoming: &[HashSet<usize>]) -> Body {
+        let order = self.topological_permutation::<()>(incoming, None);
+        self.rebuilt(
             order
                 .into_iter()
                 .map(|index| self.stmts()[index].clone())
                 .collect(),
-        ))
+        )
     }
 }
 
