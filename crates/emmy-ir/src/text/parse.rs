@@ -84,7 +84,9 @@ fn block(mut rows: &[Row], subs: &mut HashMap<Name, Arc<Subroutine>>) -> Result<
                 let sub = Line::new(text)?.subroutine(nested, subs)?;
                 subs.insert(sub.name, sub);
             } else {
-                out.push(Line::new(text)?.statement(nested, orelse, subs)?);
+                let stmt = Line::new(text)?.statement(nested, orelse, subs)?;
+                stmt.check()?;
+                out.push(stmt);
             }
             Ok(())
         })();

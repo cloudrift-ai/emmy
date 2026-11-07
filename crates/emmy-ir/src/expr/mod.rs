@@ -281,6 +281,86 @@ pub struct Lit {
 }
 
 closed_set! {
+    /// The two kinds of scalar arithmetic the IR has, as predicates over the operation table that every node of an
+    /// expression must satisfy. `Index` is integer arithmetic over axes, GPU built-ins, integer literals and names: the
+    /// affine operations, division and remainder, minimum and maximum, the comparisons and logical
+    /// operators, the bitwise operators and shifts, select, cast and a buffer's flat index. `Value` is any operation of
+    /// the table over SSA names and literals, with no built-in and no buffer index. A field declares the class it
+    /// admits beside its roles; a field with no class admits any expression.
+    pub enum ExprClass ("expression class") { Index = "Index", Value = "Value", }
+}
+
+impl ExprClass {
+    /// `expression` as a member of this class, or why it is not.
+    pub fn check(self, expression: &Expression) -> Result<()> {
+        self.admits(expression).map_err(|why| {
+            Error::Value(format!(
+                "{} is not an {self} expression: {why}",
+                expression
+                    .try_text()
+                    .unwrap_or_else(|_| format!("{expression:?}"))
+            ))
+        })
+    }
+
+    fn admits(self, expression: &Expression) -> std::result::Result<(), String> {
+        match (self, &**expression) {
+            (_, Expr::Var(_)) => Ok(()),
+            (ExprClass::Index, Expr::Literal(lit)) if !matches!(lit.dtype, LitType::Float) => {
+                Ok(())
+            }
+            (ExprClass::Index, Expr::Literal(lit)) => Err(format!("a {} literal", lit.dtype)),
+            (ExprClass::Value, Expr::Literal(_)) => Ok(()),
+            (ExprClass::Index, Expr::Builtin(_)) => Ok(()),
+            (ExprClass::Value, Expr::Builtin(builtin)) => Err(format!("the built-in {builtin}")),
+            (ExprClass::Index, Expr::FlatIndex(_, indices)) => {
+                indices.iter().try_for_each(|e| self.admits(e))
+            }
+            (ExprClass::Value, Expr::FlatIndex(buffer, _)) => Err(format!("an index of {buffer}")),
+            (_, Expr::Binary(op, left, right)) => {
+                if !self.admits_operation(*op) {
+                    return Err(format!("the operation {op}"));
+                }
+                self.admits(left)?;
+                self.admits(right)
+            }
+            (_, Expr::Call(name, args)) => match crate::elementwise::ElementwiseOp::new(name) {
+                crate::elementwise::ElementwiseOp::Known(op) if self.admits_operation(op) => {
+                    args.iter().try_for_each(|e| self.admits(e))
+                }
+                _ => Err(format!("a call of {name}")),
+            },
+            (_, Expr::Ternary(cond, if_true, if_false)) => {
+                self.admits(cond)?;
+                self.admits(if_true)?;
+                self.admits(if_false)
+            }
+            (_, Expr::Cast(_, inner)) => self.admits(inner),
+        }
+    }
+
+    fn admits_operation(self, op: Operation) -> bool {
+        match self {
+            ExprClass::Value => true,
+            ExprClass::Index => {
+                op.info().affine.is_some()
+                    || op.is_division()
+                    || op.is_comparison()
+                    || op.info().integer
+                    || matches!(
+                        op,
+                        Operation::Minimum
+                            | Operation::Maximum
+                            | Operation::NotEqual
+                            | Operation::LogicalAnd
+                            | Operation::LogicalOr
+                    )
+            }
+        }
+    }
+}
+
+closed_set! {
     /// The type a literal is spelled in.
     pub enum LitType ("literal type") { Int = "int", Float = "float", Bool = "bool", }
 }

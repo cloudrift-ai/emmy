@@ -114,7 +114,7 @@ macro_rules! with_statement_types {
                 shared Load {PURE | CHECKED} {
                     names: Names [DEFINES],
                     input: Name [BUFFER_READ],
-                    index: Exprs [EXPRESSION | READS],
+                    index: Exprs [EXPRESSION | READS] : Index,
                     dtype: Option<DType> [] = None,
                     carried: Name [] = Name::from(""),
                 }
@@ -184,7 +184,7 @@ macro_rules! with_statement_types {
                 shared Carry {} {
                     name: Name [DEFINES],
                     value: Name [READS],
-                    index: Exprs [EXPRESSION],
+                    index: Exprs [EXPRESSION] : Index,
                     seed: NumOr<Name> [BUFFER_READ],
                     dtype: Option<DType> [] = None,
                 }
@@ -200,7 +200,7 @@ macro_rules! with_statement_types {
                 shared Pre {PURE} {
                     name: Name [DEFINES],
                     carrier: Name [READS],
-                    index: Exprs [EXPRESSION | READS],
+                    index: Exprs [EXPRESSION | READS] : Index,
                 }
                 /// Explicit accumulator / carried-state seed at this scope: `<dtype> <name> = <identity>;` — a scope-local
                 /// declaration.
@@ -226,7 +226,7 @@ macro_rules! with_statement_types {
                 /// to a float `Literal`.
                 shared Let {PURE} {
                     name: Name [DEFINES],
-                    value: Expression [EXPRESSION | READS],
+                    value: Expression [EXPRESSION | READS] : Value,
                     dtype: Option<DType> [] = None,
                 }
                 /// Write an SSA value (or N consecutive values) to `output`.
@@ -246,7 +246,7 @@ macro_rules! with_statement_types {
                 /// downstream passes read it instead of querying `ctx.ssa_dtypes` at render time.
                 shared Write {SIDE_EFFECTS | CHECKED} {
                     output: Name [BUFFER_WRITE],
-                    index: Exprs [EXPRESSION | READS],
+                    index: Exprs [EXPRESSION | READS] : Index,
                     values: Names [READS],
                     value_dtype: Option<DType> [] = None,
                     atomic: bool [] = false,
@@ -317,11 +317,11 @@ macro_rules! with_statement_types {
                 /// Reduction detection mirrors `Loop`: a `StridedLoop` is a reduce-loop iff its body contains an `Accum`.
                 shared StridedLoop {} {
                     axis: AxisRef [AXIS],
-                    start: Expression [EXPRESSION],
-                    step: Expression [EXPRESSION],
+                    start: Expression [EXPRESSION] : Index,
+                    step: Expression [EXPRESSION] : Index,
                     body: Body [BODY],
                     unroll: bool [] = false,
-                    end: Option<Expression> [EXPRESSION] = None,
+                    end: Option<Expression> [EXPRESSION] : Index = None,
                     seed: bool [] = true,
                 }
                 /// Conditional block — `if (cond) { body } [else { else_body }]`.
@@ -348,7 +348,7 @@ macro_rules! with_statement_types {
                 shared Call {DEPS_DEEP | CHECKED} {
                     name: Name [DEFINES],
                     target: SubroutineRef [],
-                    args: Exprs [EXPRESSION | READS],
+                    args: Exprs [EXPRESSION | READS] : Index,
                 }
                 /// Declare a per-block `__shared__` array.
                 ///
@@ -439,14 +439,14 @@ macro_rules! with_statement_types {
                 /// `Write`).
                 kernel CpAsyncCopy {} {
                     smem: Name [],
-                    smem_index: Exprs [EXPRESSION],
+                    smem_index: Exprs [EXPRESSION] : Index,
                     src: Name [BUFFER_READ],
-                    src_index: Exprs [EXPRESSION],
+                    src_index: Exprs [EXPRESSION] : Index,
                     nbytes: i64 [] = 4,
                     swizzle: Name [] = Name::from("NONE"),
                     lane_index: Option<Exprs> [EXPRESSION] = None,
                     lane_rows: i64 [] = 0,
-                    valid: Option<Expression> [EXPRESSION] = None,
+                    valid: Option<Expression> [EXPRESSION] : Index = None,
                 }
                 /// `cp.async.commit_group;` — finalize the preceding cp.async copies issued by this thread into a commit group.
                 /// Pairs with `CpAsyncWait` to wait for that group to drain.
@@ -479,11 +479,11 @@ macro_rules! with_statement_types {
                 /// thread).
                 kernel TmaLoad {} {
                     smem: Name [],
-                    smem_index: Exprs [EXPRESSION],
+                    smem_index: Exprs [EXPRESSION] : Index,
                     desc: Name [],
-                    coords: Exprs [EXPRESSION],
+                    coords: Exprs [EXPRESSION] : Index,
                     mbar: Name [],
-                    mbar_slot: Option<Expression> [EXPRESSION] = None,
+                    mbar_slot: Option<Expression> [EXPRESSION] : Index = None,
                 }
                 /// `mbarrier.init.shared.b64 [&mbar[slot]], count;` — one-shot init.
                 ///
@@ -493,21 +493,21 @@ macro_rules! with_statement_types {
                 kernel MbarrierInit {} {
                     mbar: Name [],
                     count: i64 [] = 1,
-                    slot: Option<Expression> [EXPRESSION] = None,
+                    slot: Option<Expression> [EXPRESSION] : Index = None,
                 }
                 /// `mbarrier.arrive.expect_tx.shared.b64` — declare the expected transaction byte count for the in-flight TMA
                 /// copy on this barrier. With per-slot mbarrier arrays, `slot` selects the ring buffer slot.
                 kernel MbarrierArriveExpectTx {} {
                     mbar: Name [],
                     bytes_: i64 [],
-                    slot: Option<Expression> [EXPRESSION] = None,
+                    slot: Option<Expression> [EXPRESSION] : Index = None,
                 }
                 /// `mbarrier.arrive.shared.b64` — simple arrive (no transaction-byte count). Used by warp-specialized consumer
                 /// warps to signal "slot empty" so the producer can refill it on the next ring iteration. The producer side uses
                 /// `MbarrierArriveExpectTx` instead (which declares the incoming TMA byte count).
                 kernel MbarrierArrive {} {
                     mbar: Name [],
-                    slot: Option<Expression> [EXPRESSION] = None,
+                    slot: Option<Expression> [EXPRESSION] : Index = None,
                 }
                 /// `setmaxnreg.{inc,dec}.sync.aligned.u32 N;` — Hopper+ register-budget redistribution. `direction="dec"` shrinks
                 /// the calling warp's max register count to `count` (returning registers to the pool); `direction="inc"` claims
@@ -525,8 +525,8 @@ macro_rules! with_statement_types {
                 /// selects the ring buffer slot when the mbarrier is an array.
                 kernel MbarrierWait {} {
                     mbar: Name [],
-                    phase: Expression [EXPRESSION],
-                    slot: Option<Expression> [EXPRESSION] = None,
+                    phase: Expression [EXPRESSION] : Index,
+                    slot: Option<Expression> [EXPRESSION] : Index = None,
                 }
                 /// Cross-thread combine of a (possibly multi-component) monoid state over a PRE-POPULATED power-of-two smem tree
                 /// — the > warp_size fallback for :class:`WarpShuffle`.
@@ -620,8 +620,8 @@ macro_rules! with_statement_types {
                     in_place: bool [] = false,
                     layout: Name [] = Name::from("m16n8k16"),
                     post: ElementwiseOps [] = ElementwiseOps::from([]),
-                    row_base: Option<Expression> [EXPRESSION] = None,
-                    col_base: Option<Expression> [EXPRESSION] = None,
+                    row_base: Option<Expression> [EXPRESSION] : Index = None,
+                    col_base: Option<Expression> [EXPRESSION] : Index = None,
                 }
                 /// Per-ROW reduction over one warp's `mma.sync` C fragments — the chunk pivot and the per-row channel partials
                 /// the twisted carrier's atom tier folds (`_atom._FlashOps`).
@@ -685,7 +685,7 @@ macro_rules! with_statement_types {
                 kernel BlockScaleLoad {} {
                     frag: Name [DEFINES],
                     src_buffer: Name [BUFFER_READ],
-                    src_index: Exprs [EXPRESSION],
+                    src_index: Exprs [EXPRESSION] : Index,
                     role: Name [],
                     ldm: i64 [] = 0,
                 }
@@ -713,7 +713,7 @@ macro_rules! with_statement_types {
                 kernel LdmatrixLoad {} {
                     frag: Name [UPDATES],
                     src_buffer: Name [BUFFER_READ],
-                    src_index: Exprs [EXPRESSION],
+                    src_index: Exprs [EXPRESSION] : Index,
                     role: Name [],
                     ldm: i64 [] = 0,
                     swizzle: Name [] = Name::from("NONE"),
@@ -724,7 +724,7 @@ macro_rules! with_statement_types {
                     pair_frag: Option<Name> [UPDATES] = None,
                     byte_slab: bool [] = false,
                     scale_buffer: Option<Name> [BUFFER_READ] = None,
-                    scale_index: Exprs [EXPRESSION] = Exprs::from([]),
+                    scale_index: Exprs [EXPRESSION] : Index = Exprs::from([]),
                     scale_ldm: i64 [] = 0,
                     fragment_layout: Name [] = Name::from("m16n8k16"),
                     fragment_index: i64 [] = 0,
@@ -785,7 +785,7 @@ macro_rules! with_statement_types {
                 kernel WgmmaDescriptor {} {
                     name: Name [DEFINES],
                     smem: Name [BUFFER_READ],
-                    smem_index: Option<Expression> [EXPRESSION],
+                    smem_index: Option<Expression> [EXPRESSION] : Index,
                     swizzle: Name [],
                     lbo_bytes: i64 [],
                     sbo_bytes: i64 [],
@@ -871,7 +871,7 @@ macro_rules! with_statement_types {
                 /// atomic below sm_90, so it drops to per-element scalar `atomicAdd`\ s.
                 kernel RegStore {CHECKED} {
                     dst_buffer: Name [BUFFER_WRITE],
-                    dst_index: Exprs [EXPRESSION],
+                    dst_index: Exprs [EXPRESSION] : Index,
                     frag: Name [READS],
                     shape: Shape3 [],
                     ldm: i64 [] = 0,
@@ -930,6 +930,26 @@ pub struct FieldInfo {
     pub has_default: bool,
     /// Given by keyword only in the Python constructor (an `Init`'s dtype): `KW_ONLY` in the declaration, no role.
     pub kw_only: bool,
+    /// The expression class every expression the field holds must belong to, when the declaration names one.
+    pub class: Option<crate::expr::ExprClass>,
+}
+
+/// Every expression `field` holds is of `class`, or the first that is not is the error.
+pub fn classed<T: crate::field::Field>(
+    class: crate::expr::ExprClass,
+    field: &T,
+) -> crate::Result<()> {
+    struct Check(crate::expr::ExprClass, crate::Result<()>);
+    impl crate::field::Visitor for Check {
+        fn expression(&mut self, _roles: Roles, expression: &crate::expr::Expression) {
+            if self.1.is_ok() {
+                self.1 = self.0.check(expression);
+            }
+        }
+    }
+    let mut check = Check(class, Ok(()));
+    field.visit(EXPRESSION, &mut check);
+    check.1
 }
 
 impl FieldInfo {
@@ -937,6 +957,17 @@ impl FieldInfo {
     pub fn is_block(&self) -> bool {
         self.roles.contains_any(BODY.or(TERM).or(STMTS))
     }
+}
+
+#[doc(hidden)]
+#[macro_export]
+macro_rules! __expr_class {
+    () => {
+        None
+    };
+    ($class:ident) => {
+        Some($crate::expr::ExprClass::$class)
+    };
 }
 
 #[doc(hidden)]
@@ -953,8 +984,8 @@ macro_rules! __has_default {
 /// The core's callback: the structs, the `Statement` enum and the generic walks.
 macro_rules! define_statement_types {
     (
-        statement_types { $( $(#[doc = $doc:literal])* $layer:ident $StatementType:ident {$($flag:tt)|*} { $( $field:ident : $ty:ty [$($role:ident)|*] $(= $default:expr)? ,)* } )* }
-        records { $( $(#[doc = $rdoc:literal])* $rlayer:ident $Record:ident { $( $rfield:ident : $rty:ty [$($rrole:ident)|*] $(= $rdefault:expr)? ,)* } )* }
+        statement_types { $( $(#[doc = $doc:literal])* $layer:ident $StatementType:ident {$($flag:tt)|*} { $( $field:ident : $ty:ty [$($role:ident)|*] $(: $class:ident)? $(= $default:expr)? ,)* } )* }
+        records { $( $(#[doc = $rdoc:literal])* $rlayer:ident $Record:ident { $( $rfield:ident : $rty:ty [$($rrole:ident)|*] $(: $rclass:ident)? $(= $rdefault:expr)? ,)* } )* }
     ) => {
         $(
             $(#[doc = $doc])*
@@ -967,7 +998,7 @@ macro_rules! define_statement_types {
             impl $StatementType {
                 pub const LAYER: Layer = define_statement_types!(@layer $layer);
                 pub const FLAGS: StatementFlags = StatementFlags::NONE $(.or($flag))*;
-                define_statement_types!(@fields $StatementType { $( $field : $ty [$($role)|*] $(= $default)? ,)* });
+                define_statement_types!(@fields $StatementType { $( $field : $ty [$($role)|*] $(: $class)? $(= $default)? ,)* });
             }
 
             impl<'a> TryFrom<&'a Statement> for &'a $StatementType {
@@ -993,7 +1024,7 @@ macro_rules! define_statement_types {
             #[allow(non_upper_case_globals, dead_code, unused_variables, unused_mut)]
             impl $Record {
                 pub const LAYER: Layer = define_statement_types!(@layer $rlayer);
-                define_statement_types!(@fields $Record { $( $rfield : $rty [$($rrole)|*] $(= $rdefault)? ,)* });
+                define_statement_types!(@fields $Record { $( $rfield : $rty [$($rrole)|*] $(: $rclass)? $(= $rdefault)? ,)* });
             }
 
             /// A record is a field of the statement type that holds it: spelled on the header as its name over its own
@@ -1133,10 +1164,13 @@ macro_rules! define_statement_types {
                 match self { $( Statement::$StatementType(k) => k.name(), )* }
             }
 
-            /// The checks a statement makes on construction: `validate` of every `CHECKED` statement type, nothing for
-            /// the others.
+            /// The checks a statement makes on construction: every expression a classed field holds is of its class,
+            /// and `validate` of every `CHECKED` statement type.
             pub fn check(&self) -> $crate::Result<()> {
-                match self { $( Statement::$StatementType(k) => define_statement_types!(@check k {$($flag)|*}), )* }
+                match self { $( Statement::$StatementType(k) => {
+                    $( define_statement_types!(@classed k.$field $($class)?); )*
+                    define_statement_types!(@check k {$($flag)|*})
+                } )* }
             }
 
             pub fn visit(&self, visitor: &mut dyn $crate::field::Visitor) {
@@ -1171,10 +1205,10 @@ macro_rules! define_statement_types {
             }
         )*
     };
-    (@fields $Type:ident { $( $field:ident : $ty:ty [$($role:ident)|*] $(= $default:expr)? ,)* }) => {
+    (@fields $Type:ident { $( $field:ident : $ty:ty [$($role:ident)|*] $(: $class:ident)? $(= $default:expr)? ,)* }) => {
         pub const NAME: &'static str = stringify!($Type);
         pub const FIELDS: &'static [FieldInfo] = &[
-            $( FieldInfo { name: stringify!($field), roles: Roles::NONE $(.or(define_statement_types!(@role $role)))*, has_default: $crate::__has_default!($($default)?), kw_only: define_statement_types!(@kw_only $($role)|*) }, )*
+            $( FieldInfo { name: stringify!($field), roles: Roles::NONE $(.or(define_statement_types!(@role $role)))*, has_default: $crate::__has_default!($($default)?), kw_only: define_statement_types!(@kw_only $($role)|*), class: $crate::__expr_class!($($class)?) }, )*
         ];
 
         /// Visit every role-playing value, in field order.
@@ -1272,6 +1306,10 @@ macro_rules! define_statement_types {
     (@kw_only) => { false };
     (@kw_only KW_ONLY $(| $rest:ident)*) => { true };
     (@kw_only $role:ident $(| $rest:ident)*) => { define_statement_types!(@kw_only $($rest)|*) };
+    (@classed $k:ident.$field:ident) => {};
+    (@classed $k:ident.$field:ident $class:ident) => {
+        $crate::statement::classed($crate::expr::ExprClass::$class, &$k.$field)?;
+    };
     (@check $k:ident {}) => {{ let _ = &$k; Ok(()) }};
     (@check $k:ident {CHECKED $(| $rest:tt)*}) => { $k.validate() };
     (@check $k:ident {$flag:tt $(| $rest:tt)*}) => { define_statement_types!(@check $k {$($rest)|*}) };
@@ -1314,20 +1352,28 @@ mod tests {
     #[test]
     fn the_declarations_are_pinned() {
         let mut listing = String::new();
+        fn spelled(fields: &[FieldInfo]) -> String {
+            fields
+                .iter()
+                .map(|f| {
+                    f.class
+                        .map_or_else(|| f.name.to_string(), |class| format!("{}:{class}", f.name))
+                })
+                .collect::<Vec<_>>()
+                .join(" ")
+        }
         for ty in StatementType::ALL {
-            let fields: Vec<&str> = ty.fields().iter().map(|f| f.name).collect();
-            listing.push_str(&format!("{} {}\n", ty.name(), fields.join(" ")));
+            listing.push_str(&format!("{} {}\n", ty.name(), spelled(ty.fields())));
         }
         for (name, fields) in [
             (SelectBranch::NAME, SelectBranch::FIELDS),
             (FragmentArg::NAME, FragmentArg::FIELDS),
         ] {
-            let fields: Vec<&str> = fields.iter().map(|f| f.name).collect();
-            listing.push_str(&format!("{name} {}\n", fields.join(" ")));
+            listing.push_str(&format!("{name} {}\n", spelled(fields)));
         }
         assert_eq!(
             blake3::hash(listing.as_bytes()).to_hex().as_str(),
-            "d768243b85f496eff1748ec5c140db448a54bf3af4c747de59a310c24a656bd5",
+            "c30e4c0f29d95bddae19db4de26e7fb2c49c1269b88980890a361c06a75ad573",
             "{listing}"
         );
     }

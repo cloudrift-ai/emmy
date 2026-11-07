@@ -437,8 +437,8 @@ impl<'py> Arguments<'_, 'py> {
 
 macro_rules! define_py_statement_types {
     (
-        statement_types { $( $(#[doc = $doc:literal])* $layer:ident $StatementType:ident {$($flag:tt)|*} { $( $field:ident : $ty:ty [$($role:ident)|*] $(= $default:expr)? ,)* } )* }
-        records { $( $(#[doc = $rdoc:literal])* $rlayer:ident $Record:ident { $( $rfield:ident : $rty:ty [$($rrole:ident)|*] $(= $rdefault:expr)? ,)* } )* }
+        statement_types { $( $(#[doc = $doc:literal])* $layer:ident $StatementType:ident {$($flag:tt)|*} { $( $field:ident : $ty:ty [$($role:ident)|*] $(: $class:ident)? $(= $default:expr)? ,)* } )* }
+        records { $( $(#[doc = $rdoc:literal])* $rlayer:ident $Record:ident { $( $rfield:ident : $rty:ty [$($rrole:ident)|*] $(: $rclass:ident)? $(= $rdefault:expr)? ,)* } )* }
     ) => {
         $(
             define_py_statement_types!(@class $layer $StatementType $(#[doc = $doc])*);
@@ -647,7 +647,7 @@ macro_rules! define_py_statement_types {
         }
     };
     // The constructor's fields: each by keyword or position, converted and kept, or its default.
-    (@given $Type:ident $args:ident $kwargs:ident $held:ident { $( $field:ident : $ty:ty [$($role:ident)|*] $(= $default:expr)? ,)* }) => {{
+    (@given $Type:ident $args:ident $kwargs:ident $held:ident { $( $field:ident : $ty:ty [$($role:ident)|*] $(: $class:ident)? $(= $default:expr)? ,)* }) => {{
         use emmy_ir::statement as k;
         let mut given = Arguments { type_name: k::$Type::NAME, fields: k::$Type::FIELDS, args: $args, kwargs: $kwargs, positional: 0 };
         let out = k::$Type {
@@ -663,7 +663,7 @@ macro_rules! define_py_statement_types {
         out
     }};
     // A copy's fields: each from `changes`, converted and kept, or the current value with the object kept so far.
-    (@changed $Type:ident $current:ident $changes:ident $held:ident ($kept:expr) { $( $field:ident : $ty:ty [$($role:ident)|*] $(= $default:expr)? ,)* }) => {{
+    (@changed $Type:ident $current:ident $changes:ident $held:ident ($kept:expr) { $( $field:ident : $ty:ty [$($role:ident)|*] $(: $class:ident)? $(= $default:expr)? ,)* }) => {{
         use emmy_ir::statement as k;
         only_fields(k::$Type::NAME, k::$Type::FIELDS, $changes)?;
         let kept = $kept;

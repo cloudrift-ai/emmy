@@ -192,9 +192,11 @@ operations! {
 }
 
 /// Spellings that mean an operation the renderers know under another name, normalized at construction.
-pub const ALIASES: [(&str, Operation); 2] = [
+pub const ALIASES: [(&str, Operation); 4] = [
     ("__rshift__", Operation::RightShift),
     ("bitwise_right_shift", Operation::RightShift),
+    ("min", Operation::Minimum),
+    ("max", Operation::Maximum),
 ];
 
 impl Operation {
