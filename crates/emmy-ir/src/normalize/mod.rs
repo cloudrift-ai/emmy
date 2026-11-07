@@ -8,9 +8,7 @@ use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::sync::{Arc, Mutex, OnceLock};
 
 use crate::body::{Body, Normalized, exposed_defines, free_names, free_ssa, ordered_sibling_defs};
-use crate::expr::{
-    BinOp, Expr, Expression, Interval, Lit, Num, SimplifyCtx, affine_form, python_repr,
-};
+use crate::expr::{BinOp, Expr, Expression, Interval, Lit, Num, SimplifyCtx, affine_form};
 use crate::kinds::axis::{Axis, Dim};
 use crate::kinds::dtype::{is_float, promote};
 use crate::kinds::elementwise::{Op, evaluate_f32};
@@ -22,7 +20,7 @@ use crate::numbering::{
     Key, Number, Numbering, Param, distinct, ptr, roles, scope_tree, value_numbers,
 };
 use crate::protocol::{literal_binding, unique};
-use crate::text::{body_text, structural_body_text, structural_text};
+use crate::text::{body_text, structural_body_text};
 use crate::{Error, Name, Result, locked};
 
 const SYMBOLIC_AXIS_HI: i128 = 1 << 30;
@@ -165,6 +163,7 @@ pub mod fold;
 pub mod place;
 pub mod siblings;
 pub mod simplify;
+pub mod ties;
 
 pub use axes::*;
 pub use canonical::*;

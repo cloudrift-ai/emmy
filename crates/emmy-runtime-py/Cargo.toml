@@ -7,6 +7,10 @@ license = "Apache-2.0"
 [lib]
 name = "emmy_runtime"
 crate-type = ["cdylib"]
+# An extension module links no Python of its own: its tests are the Python suite, and a test harness for it would
+# not link.
+test = false
+doctest = false
 
 [dependencies]
 anyhow = "1"

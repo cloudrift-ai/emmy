@@ -14,7 +14,7 @@ simplifier and affine form in `simplify.rs`, the reader in `parse.rs`), `kinds/`
 `mod.rs`, the `Field` trait in `field.rs`, axes, dtypes and the elementwise tables beside it), `body.rs`, `text.rs`,
 `protocol.rs`, `numbering/` (the value numbering and digest in `mod.rs`, the identity in `identity.rs`), `normalize/`
 (the driver and the helpers the steps share in `mod.rs`, the steps by what they do: `axes`, `fold`, `siblings`,
-`simplify`, `place`, `canonical`, and the dependency order in `order.rs`) and `memo.rs`, the one bounded memo both
+`simplify`, `place`, `canonical`, the dependency order in `order.rs` and the tie-breaks in `ties.rs`) and `memo.rs`, the one bounded memo both
 the normal form and the identity are kept in.
 
 ## Data
@@ -71,12 +71,12 @@ axis windows out, the text spells them, and a window is identity material.
 
 The canonical order decides what the digest leaves open, and the lift of a body into terms reads that order: sibling
 regions are addressed by position in every recorded cut decision, and a product's operand order is its orientation
-where neither operand owns an output axis. So the ties are broken the way the stored goldens were spelled. Siblings a
-scope may place either way sort by kind name, then by their fields in declaration order with names abstracted, so
-every store follows the values it reads and an `Assign`'s operation decides before its dtype; sibling loops sort by a
-digest of their extent (`extent_digest`), the one the Python order used. A commutative operation lists accumulators,
-then loads and the copies that widen them, then computed values, then the copies that read a reduction's result, then
-by value.
+where neither operand owns an output axis. So the ties are broken the way the stored goldens were spelled, and
+`normalize/ties.rs` states each rule with its reason: siblings a scope may place either way sort by kind name, then by
+their fields in declaration order with names abstracted and a one-element tuple after longer ones, so every store
+follows the values it reads and an `Assign`'s operation decides before its dtype; sibling loops sort by a digest of
+their extent, the one the Python order used; a commutative operation lists accumulators, then loads and the copies that
+widen them, then computed values with the deeper cone first, then by value. Changing a rule is a restamp decision.
 
 What the port keeps of the Python implementation: stored kernels keep their rows, two raw bodies share an identity in
 Rust exactly when they did in Python, the normal form is final. The text of a normal form, the order among ties and
