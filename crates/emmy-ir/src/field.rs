@@ -10,7 +10,10 @@ use crate::axis::Axis;
 use crate::body::Body;
 use crate::elementwise::Op;
 use crate::expr::{Expression, Num, float_repr, hash_f64};
-use crate::kinds::{AXIS, AXIS_NAME, BODY, BUFFERS, EXPRESSION, FragmentArg, NAMES, SelectBranch, STMTS, Statement, TERM};
+use crate::kinds::{
+    AXIS, AXIS_NAME, BODY, BUFFERS, EXPRESSION, FragmentArg, NAMES, STMTS, SelectBranch, Statement,
+    TERM,
+};
 use crate::text::{spell_axis, spell_stmt_name};
 use crate::{Error, Name, Result};
 
@@ -242,8 +245,15 @@ fn seq_from_value<T: Field>(value: Value) -> Result<Vec<T>> {
 }
 
 fn rewrite_seq<T: Field>(items: &Arc<[T]>, roles: u32, rewriter: &mut dyn Rewriter) -> Arc<[T]> {
-    let out: Vec<T> = items.iter().map(|item| item.rewrite(roles, rewriter)).collect();
-    if out.iter().zip(items.iter()).all(|(new, old)| new.same(old)) { items.clone() } else { out.into() }
+    let out: Vec<T> = items
+        .iter()
+        .map(|item| item.rewrite(roles, rewriter))
+        .collect();
+    if out.iter().zip(items.iter()).all(|(new, old)| new.same(old)) {
+        items.clone()
+    } else {
+        out.into()
+    }
 }
 
 impl Field for Name {
@@ -256,7 +266,11 @@ impl Field for Name {
         }
     }
     fn rewrite(&self, roles: u32, rewriter: &mut dyn Rewriter) -> Self {
-        if roles & (NAMES | BUFFERS | AXIS_NAME) != 0 { rewriter.name(roles, self) } else { self.clone() }
+        if roles & (NAMES | BUFFERS | AXIS_NAME) != 0 {
+            rewriter.name(roles, self)
+        } else {
+            self.clone()
+        }
     }
     fn same(&self, other: &Self) -> bool {
         Arc::ptr_eq(self, other) || self == other
@@ -286,7 +300,8 @@ impl<T: Field> Field for Arc<[T]> {
         rewrite_seq(self, roles, rewriter)
     }
     fn same(&self, other: &Self) -> bool {
-        Arc::ptr_eq(self, other) || (self.len() == other.len() && self.iter().zip(other.iter()).all(|(a, b)| a.same(b)))
+        Arc::ptr_eq(self, other)
+            || (self.len() == other.len() && self.iter().zip(other.iter()).all(|(a, b)| a.same(b)))
     }
     fn spell(&self, out: &mut String) -> Result<()> {
         spell_seq(self, out)
@@ -353,7 +368,10 @@ impl<A: Field, B: Field> Field for (A, B) {
         self.1.visit(roles, visitor);
     }
     fn rewrite(&self, roles: u32, rewriter: &mut dyn Rewriter) -> Self {
-        (self.0.rewrite(roles, rewriter), self.1.rewrite(roles, rewriter))
+        (
+            self.0.rewrite(roles, rewriter),
+            self.1.rewrite(roles, rewriter),
+        )
     }
     fn same(&self, other: &Self) -> bool {
         self.0.same(&other.0) && self.1.same(&other.1)
@@ -369,8 +387,10 @@ impl<A: Field, B: Field> Field for (A, B) {
     fn from_value(value: Value) -> Result<Self> {
         match value {
             Value::Tuple(items) if items.len() == 2 => {
-                let mut items = items.into_iter();
-                Ok((A::from_value(items.next().unwrap())?, B::from_value(items.next().unwrap())?))
+                let [a, b]: [Value; 2] = items
+                    .try_into()
+                    .map_err(|_| Error::Value("expected a pair".into()))?;
+                Ok((A::from_value(a)?, B::from_value(b)?))
             }
             other => Err(other.mismatch("a pair")),
         }
@@ -387,7 +407,11 @@ impl Field for Expression {
         }
     }
     fn rewrite(&self, roles: u32, rewriter: &mut dyn Rewriter) -> Self {
-        if roles & EXPRESSION != 0 { rewriter.expression(roles, self) } else { self.clone() }
+        if roles & EXPRESSION != 0 {
+            rewriter.expression(roles, self)
+        } else {
+            self.clone()
+        }
     }
     fn same(&self, other: &Self) -> bool {
         self == other
@@ -414,7 +438,11 @@ impl Field for AxisRef {
         }
     }
     fn rewrite(&self, roles: u32, rewriter: &mut dyn Rewriter) -> Self {
-        if roles & AXIS != 0 { rewriter.axis(roles, self) } else { self.clone() }
+        if roles & AXIS != 0 {
+            rewriter.axis(roles, self)
+        } else {
+            self.clone()
+        }
     }
     fn same(&self, other: &Self) -> bool {
         Arc::ptr_eq(self, other) || self == other
@@ -441,13 +469,19 @@ impl Field for Body {
         }
     }
     fn rewrite(&self, roles: u32, rewriter: &mut dyn Rewriter) -> Self {
-        if roles & (BODY | TERM) != 0 { rewriter.body(roles, self) } else { self.clone() }
+        if roles & (BODY | TERM) != 0 {
+            rewriter.body(roles, self)
+        } else {
+            self.clone()
+        }
     }
     fn same(&self, other: &Self) -> bool {
         self.ptr_eq(other)
     }
     fn spell(&self, _out: &mut String) -> Result<()> {
-        Err(Error::Value("a body is spelled as a block, not on a header".into()))
+        Err(Error::Value(
+            "a body is spelled as a block, not on a header".into(),
+        ))
     }
     fn from_value(value: Value) -> Result<Self> {
         match value {
@@ -479,14 +513,32 @@ impl Field for Stmts {
         if roles & STMTS == 0 {
             return self.clone();
         }
-        let out: Vec<Arc<Statement>> = self.iter().map(|stmt| rewriter.carried(roles, stmt)).collect();
-        if out.iter().zip(self.iter()).all(|(new, old)| Arc::ptr_eq(new, old)) { self.clone() } else { out.into() }
+        let out: Vec<Arc<Statement>> = self
+            .iter()
+            .map(|stmt| rewriter.carried(roles, stmt))
+            .collect();
+        if out
+            .iter()
+            .zip(self.iter())
+            .all(|(new, old)| Arc::ptr_eq(new, old))
+        {
+            self.clone()
+        } else {
+            out.into()
+        }
     }
     fn same(&self, other: &Self) -> bool {
-        Arc::ptr_eq(self, other) || (self.len() == other.len() && self.iter().zip(other.iter()).all(|(a, b)| Arc::ptr_eq(a, b) || a == b))
+        Arc::ptr_eq(self, other)
+            || (self.len() == other.len()
+                && self
+                    .iter()
+                    .zip(other.iter())
+                    .all(|(a, b)| Arc::ptr_eq(a, b) || a == b))
     }
     fn spell(&self, _out: &mut String) -> Result<()> {
-        Err(Error::Value("carried statements are spelled as a block, not on a header".into()))
+        Err(Error::Value(
+            "carried statements are spelled as a block, not on a header".into(),
+        ))
     }
     fn from_value(value: Value) -> Result<Self> {
         match value {
@@ -537,7 +589,9 @@ macro_rules! record_field {
             }
             fn from_value(value: Value) -> Result<Self> {
                 match value {
-                    Value::Record(kind, values) if kind == $Record::NAME => $Record::from_values(values),
+                    Value::Record(kind, values) if kind == $Record::NAME => {
+                        $Record::from_values(values)
+                    }
                     other => Err(other.mismatch(concat!("a ", stringify!($Record)))),
                 }
             }
@@ -570,46 +624,81 @@ macro_rules! plain_field {
     };
 }
 
-plain_field!(i64, Ty::Int, |this, out| out.push_str(&this.to_string()), |value| match value {
-    Value::Number(number) => number.as_int(),
-    other => Err(other.mismatch("an integer")),
-});
-
-plain_field!(bool, Ty::Bool, |this, out| out.push_str(if *this { "true" } else { "false" }), |value| match value {
-    Value::Bool(flag) => Ok(flag),
-    other => Err(other.mismatch("true or false")),
-});
-
-plain_field!(Float, Ty::Float, |this, out| out.push_str(&spell_number(this.0)), |value| match value {
-    Value::Number(number) => Ok(Float(number.as_f64())),
-    other => Err(other.mismatch("a number")),
-});
-
-plain_field!(DType, Ty::DType, |this, out| out.push_str(&spell_stmt_name(&this.0)?), |value| match value {
-    Value::Name(name) => Ok(DType(name)),
-    other => Err(other.mismatch("a dtype")),
-});
-
-plain_field!(Op, Ty::Op, |this, out| out.push_str(&spell_stmt_name(&this.name)?), |value| match value {
-    Value::Name(name) => Ok(Op::new(&name)),
-    other => Err(other.mismatch("an elementwise op")),
-});
-
-plain_field!(Shape3, Ty::Tuple(vec![Ty::Int, Ty::Int, Ty::Int]), |this, out| out.push_str(&format!("({}, {}, {})", this.0, this.1, this.2)), |value| {
-    let items: Vec<i64> = seq_from_value(value)?;
-    match items[..] {
-        [a, b, c] => Ok(Shape3(a, b, c)),
-        _ => Err(Error::Value("a shape is three integers".into())),
+plain_field!(
+    i64,
+    Ty::Int,
+    |this, out| out.push_str(&this.to_string()),
+    |value| match value {
+        Value::Number(number) => number.as_int(),
+        other => Err(other.mismatch("an integer")),
     }
-});
+);
 
-plain_field!(Int2, Ty::Tuple(vec![Ty::Int, Ty::Int]), |this, out| out.push_str(&format!("({}, {})", this.0, this.1)), |value| {
-    let items: Vec<i64> = seq_from_value(value)?;
-    match items[..] {
-        [a, b] => Ok(Int2(a, b)),
-        _ => Err(Error::Value("two integers".into())),
+plain_field!(
+    bool,
+    Ty::Bool,
+    |this, out| out.push_str(if *this { "true" } else { "false" }),
+    |value| match value {
+        Value::Bool(flag) => Ok(flag),
+        other => Err(other.mismatch("true or false")),
     }
-});
+);
+
+plain_field!(
+    Float,
+    Ty::Float,
+    |this, out| out.push_str(&spell_number(this.0)),
+    |value| match value {
+        Value::Number(number) => Ok(Float(number.as_f64())),
+        other => Err(other.mismatch("a number")),
+    }
+);
+
+plain_field!(
+    DType,
+    Ty::DType,
+    |this, out| out.push_str(&spell_stmt_name(&this.0)?),
+    |value| match value {
+        Value::Name(name) => Ok(DType(name)),
+        other => Err(other.mismatch("a dtype")),
+    }
+);
+
+plain_field!(
+    Op,
+    Ty::Op,
+    |this, out| out.push_str(&spell_stmt_name(&this.name)?),
+    |value| match value {
+        Value::Name(name) => Ok(Op::new(&name)),
+        other => Err(other.mismatch("an elementwise op")),
+    }
+);
+
+plain_field!(
+    Shape3,
+    Ty::Tuple(vec![Ty::Int, Ty::Int, Ty::Int]),
+    |this, out| out.push_str(&format!("({}, {}, {})", this.0, this.1, this.2)),
+    |value| {
+        let items: Vec<i64> = seq_from_value(value)?;
+        match items[..] {
+            [a, b, c] => Ok(Shape3(a, b, c)),
+            _ => Err(Error::Value("a shape is three integers".into())),
+        }
+    }
+);
+
+plain_field!(
+    Int2,
+    Ty::Tuple(vec![Ty::Int, Ty::Int]),
+    |this, out| out.push_str(&format!("({}, {})", this.0, this.1)),
+    |value| {
+        let items: Vec<i64> = seq_from_value(value)?;
+        match items[..] {
+            [a, b] => Ok(Int2(a, b)),
+            _ => Err(Error::Value("two integers".into())),
+        }
+    }
+);
 
 impl Field for SubroutineRef {
     fn ty() -> Ty {
@@ -620,7 +709,9 @@ impl Field for SubroutineRef {
         self.clone()
     }
     fn spell(&self, _out: &mut String) -> Result<()> {
-        Err(Error::Value("a subroutine is defined ahead of its calls, not on a header".into()))
+        Err(Error::Value(
+            "a subroutine is defined ahead of its calls, not on a header".into(),
+        ))
     }
     fn from_value(value: Value) -> Result<Self> {
         Err(value.mismatch("a subroutine"))
@@ -668,5 +759,9 @@ impl<T: Field> Field for NumOr<T> {
 
 /// The one spelling of a number a statement holds: an integer without a point, anything else as Python writes it.
 pub fn spell_number(value: f64) -> String {
-    if value.fract() == 0.0 && value.abs() < 9007199254740992.0 { (value as i64).to_string() } else { float_repr(value) }
+    if value.fract() == 0.0 && value.abs() < 9007199254740992.0 {
+        (value as i64).to_string()
+    } else {
+        float_repr(value)
+    }
 }

@@ -40,12 +40,20 @@ pub type Result<T> = std::result::Result<T, Error>;
 pub fn value_error(message: impl Into<String>) -> Error {
     Error::Value(message.into())
 }
+
+/// A lock's guard, reopened when a panic elsewhere poisoned it: the data behind every lock here is a memo, which a
+/// torn update cannot leave inconsistent.
+pub fn locked<T>(mutex: &std::sync::Mutex<T>) -> std::sync::MutexGuard<'_, T> {
+    mutex
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
 pub mod body;
 pub mod field;
 pub mod identity;
 pub mod kinds;
+pub mod normalize;
+pub mod order;
 pub mod protocol;
 pub mod text;
-pub mod order;
 pub mod values;
-pub mod normalize;

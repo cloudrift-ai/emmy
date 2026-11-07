@@ -10,7 +10,10 @@ use crate::field::{Axes, Ext, Names};
 use crate::kinds::Statement;
 use crate::protocol::{seeded_accumulators, unique};
 use crate::values::Key;
-use crate::{Error, Name, Result};
+use crate::{Error, Name, Result, locked};
+
+/// What `Body::map` applies: a statement to the statements that replace it, or `None` to drop it.
+pub type MapFn<'a> = dyn FnMut(&Arc<Statement>) -> Option<Vec<Arc<Statement>>> + 'a;
 
 /// One statement inside a body: the body that holds it directly and its position there.
 #[derive(Clone)]
@@ -35,7 +38,12 @@ impl std::ops::Deref for StmtRef {
 
 impl std::fmt::Debug for StmtRef {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "StmtRef({:p}, {})", Arc::as_ptr(&self.body.0), self.index)
+        write!(
+            f,
+            "StmtRef({:p}, {})",
+            Arc::as_ptr(&self.body.0),
+            self.index
+        )
     }
 }
 
@@ -89,7 +97,11 @@ impl PartialEq for Body {
         }
         self.0.hash == other.0.hash
             && self.len() == other.len()
-            && self.stmts().iter().zip(other.stmts()).all(|(a, b)| Arc::ptr_eq(a, b) || a == b)
+            && self
+                .stmts()
+                .iter()
+                .zip(other.stmts())
+                .all(|(a, b)| Arc::ptr_eq(a, b) || a == b)
     }
 }
 
@@ -162,7 +174,10 @@ impl Body {
     }
 
     pub fn at(&self, index: usize) -> StmtRef {
-        StmtRef { body: self.clone(), index }
+        StmtRef {
+            body: self.clone(),
+            index,
+        }
     }
 
     pub fn slice(&self, start: usize, end: usize) -> Body {
@@ -206,13 +221,21 @@ impl Body {
 
     /// `f` applied to each statement; this body itself when every statement comes back as it was.
     pub fn map_each(&self, f: &mut dyn FnMut(&Arc<Statement>) -> Arc<Statement>) -> Body {
-        let stmts: Vec<Arc<Statement>> = self.stmts().iter().map(|stmt| f(stmt)).collect();
-        if stmts.iter().zip(self.stmts()).all(|(new, old)| Arc::ptr_eq(new, old)) { self.clone() } else { Body::new(stmts) }
+        let stmts: Vec<Arc<Statement>> = self.stmts().iter().map(&mut *f).collect();
+        if stmts
+            .iter()
+            .zip(self.stmts())
+            .all(|(new, old)| Arc::ptr_eq(new, old))
+        {
+            self.clone()
+        } else {
+            Body::new(stmts)
+        }
     }
 
     /// The recursive 1:N transformer: each block's bodies are mapped first, then `f` on the children-rewritten
     /// statement, which it keeps, drops (`None`) or replaces by several.
-    pub fn map(&self, f: &mut dyn FnMut(&Arc<Statement>) -> Option<Vec<Arc<Statement>>>) -> Body {
+    pub fn map(&self, f: &mut MapFn<'_>) -> Body {
         let mut out = Vec::new();
         let mut changed = false;
         for stmt in self.stmts() {
@@ -221,7 +244,7 @@ impl Body {
                 stmt.clone()
             } else {
                 let bodies: Vec<Body> = nested.iter().map(|body| body.map(f)).collect();
-                Statement::with_bodies(stmt, bodies).expect("the same count")
+                Statement::rebuild_bodies(stmt, bodies)
             };
             match f(&descended) {
                 None => changed = true,
@@ -233,7 +256,11 @@ impl Body {
                 }
             }
         }
-        if changed { Body::new(out) } else { self.clone() }
+        if changed {
+            Body::new(out)
+        } else {
+            self.clone()
+        }
     }
 
     /// `map` whose function keeps, drops or replaces one statement by one.
@@ -246,7 +273,7 @@ impl Body {
                 stmt.clone()
             } else {
                 let bodies: Vec<Body> = nested.iter().map(|body| body.map_stmts(f)).collect();
-                Statement::with_bodies(stmt, bodies).expect("the same count")
+                Statement::rebuild_bodies(stmt, bodies)
             };
             match f(&descended) {
                 Some(kept) => {
@@ -268,9 +295,21 @@ impl Body {
             return self.clone();
         }
         // An injective spelling-only rename keeps the normal form a body is its own.
-        if self.0.normalized.get().is_some_and(|normal| normal.ptr_eq(self)) {
-            let resources: Vec<Name> = unique(self.iter_stmts().iter().flat_map(|s| s.external_reads().into_iter().chain(s.external_writes())));
-            let renamed: HashSet<Name> = resources.iter().map(|name| mapping.get(name).cloned().unwrap_or_else(|| name.clone())).collect();
+        if self
+            .0
+            .normalized
+            .get()
+            .is_some_and(|normal| normal.ptr_eq(self))
+        {
+            let resources: Vec<Name> = unique(
+                self.iter_stmts()
+                    .iter()
+                    .flat_map(|s| s.external_reads().into_iter().chain(s.external_writes())),
+            );
+            let renamed: HashSet<Name> = resources
+                .iter()
+                .map(|name| mapping.get(name).cloned().unwrap_or_else(|| name.clone()))
+                .collect();
             if renamed.len() == resources.len() {
                 let _ = result.0.normalized.set(result.clone());
             }
@@ -299,7 +338,12 @@ impl Body {
 
     /// Bindings at this scope, including states exported by nested statements.
     pub fn local_defs(&self) -> &HashSet<Name> {
-        self.0.local_defs.get_or_init(|| self.stmts().iter().flat_map(|stmt| ordered_sibling_defs(stmt)).collect())
+        self.0.local_defs.get_or_init(|| {
+            self.stmts()
+                .iter()
+                .flat_map(|stmt| ordered_sibling_defs(stmt))
+                .collect()
+        })
     }
 
     /// SSA reads from the enclosing scope, excluding this scope's definitions and exported states.
@@ -351,7 +395,11 @@ impl Body {
     pub fn axis_dependencies(&self) -> HashMap<Name, HashSet<Name>> {
         let axis_names = self.axis_names();
         let mut dependencies: HashMap<Name, HashSet<Name>> = HashMap::new();
-        fn walk(body: &Body, axis_names: &HashSet<Name>, dependencies: &mut HashMap<Name, HashSet<Name>>) {
+        fn walk(
+            body: &Body,
+            axis_names: &HashSet<Name>,
+            dependencies: &mut HashMap<Name, HashSet<Name>>,
+        ) {
             for stmt in body.stmts() {
                 for child in stmt.nested() {
                     walk(&child, axis_names, dependencies);
@@ -360,7 +408,8 @@ impl Body {
                     Statement::Loop(l) => {
                         for child in l.body.stmts() {
                             if let Statement::Accum(a) = &**child {
-                                let mut axes = dependencies.get(&a.value).cloned().unwrap_or_default();
+                                let mut axes =
+                                    dependencies.get(&a.value).cloned().unwrap_or_default();
                                 axes.remove(&l.axis.name);
                                 dependencies.insert(a.name.clone(), axes);
                             }
@@ -382,7 +431,11 @@ impl Body {
                 for expression in stmt.expressions() {
                     reads.extend(expression.free_vars());
                 }
-                let mut axes: HashSet<Name> = reads.iter().filter(|name| axis_names.contains(*name)).cloned().collect();
+                let mut axes: HashSet<Name> = reads
+                    .iter()
+                    .filter(|name| axis_names.contains(*name))
+                    .cloned()
+                    .collect();
                 for name in &reads {
                     if let Some(found) = dependencies.get(name) {
                         axes.extend(found.iter().cloned());
@@ -400,7 +453,7 @@ impl Body {
     /// The statements of the given kinds, pre-order, cached per kind set.
     pub fn of_kinds(&self, kinds: &[&'static str]) -> Vec<StmtRef> {
         let key = kinds.to_vec();
-        if let Some(found) = self.0.by_kind.lock().unwrap().get(&key) {
+        if let Some(found) = locked(&self.0.by_kind).get(&key) {
             return found.clone();
         }
         let mut out = Vec::new();
@@ -409,7 +462,7 @@ impl Body {
                 out.push(here.clone());
             }
         });
-        self.0.by_kind.lock().unwrap().insert(key, out.clone());
+        locked(&self.0.by_kind).insert(key, out.clone());
         out
     }
 
@@ -462,12 +515,22 @@ impl Body {
             pending.extend(free_names(&self.stmts()[index]));
         }
         external.sort();
-        ((0..self.len()).filter(|index| members.contains(index)).map(|index| self.at(index)).collect(), external)
+        (
+            (0..self.len())
+                .filter(|index| members.contains(index))
+                .map(|index| self.at(index))
+                .collect(),
+            external,
+        )
     }
 
     /// Kahn's order over indexed predecessor sets, as source indices; source order breaks ties, a priority may rank
     /// first. A cycle leaves the order unchanged.
-    pub fn topological_permutation(&self, incoming: &[HashSet<usize>], priority: Option<&dyn Fn(usize) -> Key>) -> Vec<usize> {
+    pub fn topological_permutation(
+        &self,
+        incoming: &[HashSet<usize>],
+        priority: Option<&dyn Fn(usize) -> Key>,
+    ) -> Vec<usize> {
         let n = self.len();
         let mut successors: Vec<Vec<usize>> = vec![Vec::new(); n];
         let mut degree: Vec<usize> = incoming.iter().map(|sources| sources.len()).collect();
@@ -476,9 +539,12 @@ impl Body {
                 successors[source].push(target);
             }
         }
-        let key = |index: usize| -> (Key, usize) { (priority.map_or(Key::None, |p| p(index)), index) };
-        let mut ready: std::collections::BinaryHeap<std::cmp::Reverse<(Key, usize)>> =
-            (0..n).filter(|&i| degree[i] == 0).map(|i| std::cmp::Reverse(key(i))).collect();
+        let key =
+            |index: usize| -> (Key, usize) { (priority.map_or(Key::None, |p| p(index)), index) };
+        let mut ready: std::collections::BinaryHeap<std::cmp::Reverse<(Key, usize)>> = (0..n)
+            .filter(|&i| degree[i] == 0)
+            .map(|i| std::cmp::Reverse(key(i)))
+            .collect();
         let mut ordered = Vec::with_capacity(n);
         while let Some(std::cmp::Reverse((_, selected))) = ready.pop() {
             ordered.push(selected);
@@ -489,15 +555,28 @@ impl Body {
                 }
             }
         }
-        if ordered.len() == n { ordered } else { (0..n).collect() }
+        if ordered.len() == n {
+            ordered
+        } else {
+            (0..n).collect()
+        }
     }
 
     pub fn topological_order(&self, incoming: &[HashSet<usize>]) -> Body {
         let order = self.topological_permutation(incoming, None);
-        if order.iter().enumerate().all(|(position, &index)| position == index) {
+        if order
+            .iter()
+            .enumerate()
+            .all(|(position, &index)| position == index)
+        {
             return self.clone();
         }
-        Body::new(order.into_iter().map(|index| self.stmts()[index].clone()).collect())
+        Body::new(
+            order
+                .into_iter()
+                .map(|index| self.stmts()[index].clone())
+                .collect(),
+        )
     }
 
     /// Shared SSA definitions assembled once and adjacent independent reduction loops merged.
@@ -521,26 +600,26 @@ impl Body {
                         continue;
                     }
                     let wanted: Vec<Name> = accumulators.difference(&folded).cloned().collect();
-                    let body = match &*stmt {
-                        Statement::Loop(l) => &l.body,
-                        Statement::StridedLoop(l) => &l.body,
-                        _ => unreachable!("a seeded accumulator belongs to a loop"),
-                    };
-                    let (members, _) = body.backward_cone(&wanted);
-                    let kept = Body::new(members.iter().map(|m| m.stmt().clone()).collect());
-                    stmt = Statement::with_bodies(&stmt, vec![kept]).expect("one body");
+                    if let Some((_, body)) = loop_parts(&stmt) {
+                        let (members, _) = body.backward_cone(&wanted);
+                        let kept = Body::new(members.iter().map(|m| m.stmt().clone()).collect());
+                        stmt = Statement::rebuild_bodies(&stmt, vec![kept]);
+                    }
                 }
             }
             if let Some(prior) = out.last()
-                && let (Some((prior_reduce, prior_body)), Some((stmt_reduce, stmt_body))) = (loop_parts(prior), loop_parts(&stmt))
+                && let (Some((prior_reduce, prior_body)), Some((stmt_reduce, stmt_body))) =
+                    (loop_parts(prior), loop_parts(&stmt))
                 && prior_reduce
                 && stmt_reduce
                 && !(prior.has_side_effects() || stmt.has_side_effects())
-                && *Statement::with_bodies(prior, vec![stmt_body.clone()]).expect("one body") == *stmt
-                && free_names(&stmt).iter().all(|name| !prior_body.definitions().contains_key(name))
+                && *Statement::rebuild_bodies(prior, vec![stmt_body.clone()]) == *stmt
+                && free_names(&stmt)
+                    .iter()
+                    .all(|name| !prior_body.definitions().contains_key(name))
             {
                 let merged = prior_body.concat(stmt_body.stmts()).coalesce();
-                stmt = Statement::with_bodies(prior, vec![merged]).expect("one body");
+                stmt = Statement::rebuild_bodies(prior, vec![merged]);
                 out.pop();
             }
             folded.extend(seeded_accumulators(&stmt));
@@ -564,7 +643,11 @@ pub fn ordered_sibling_defs(stmt: &Statement) -> Vec<Name> {
     if children.is_empty() {
         return stmt.defines();
     }
-    unique(children.iter().flat_map(|child| child.carried_names().iter().cloned()))
+    unique(
+        children
+            .iter()
+            .flat_map(|child| child.carried_names().iter().cloned()),
+    )
 }
 
 /// SSA names `stmt` reads from the scope around it.
@@ -594,7 +677,12 @@ pub fn exposed_defines(stmt: &Statement) -> Vec<Name> {
 pub fn free_names(stmt: &Statement) -> Vec<Name> {
     let mut reads: Vec<Name> = Vec::new();
     let mut defs: HashSet<Name> = HashSet::new();
-    fn walk(stmt: &Statement, bound: &HashSet<Name>, reads: &mut Vec<Name>, defs: &mut HashSet<Name>) {
+    fn walk(
+        stmt: &Statement,
+        bound: &HashSet<Name>,
+        reads: &mut Vec<Name>,
+        defs: &mut HashSet<Name>,
+    ) {
         for name in stmt.deps() {
             if !bound.contains(&name) && !reads.contains(&name) {
                 reads.push(name);
@@ -647,10 +735,24 @@ impl Subroutine {
             return Err(Error::Value("a fusion subroutine must be read-only".into()));
         }
         if !body.definitions().contains_key(&result) {
-            return Err(Error::Value("a fusion subroutine must define its result".into()));
+            return Err(Error::Value(
+                "a fusion subroutine must define its result".into(),
+            ));
         }
-        let buffers: Names = unique(body.iter_stmts().iter().flat_map(|stmt| stmt.external_reads())).into();
-        Ok(Arc::new(Subroutine { name, axes, body, result, buffers, ext: OnceLock::new() }))
+        let buffers: Names = unique(
+            body.iter_stmts()
+                .iter()
+                .flat_map(|stmt| stmt.external_reads()),
+        )
+        .into();
+        Ok(Arc::new(Subroutine {
+            name,
+            axes,
+            body,
+            result,
+            buffers,
+            ext: OnceLock::new(),
+        }))
     }
 
     pub fn params(&self) -> Vec<Name> {
@@ -659,8 +761,20 @@ impl Subroutine {
 
     /// Rebind the captured buffers once for all calls sharing this definition.
     pub fn with_buffers(&self, buffers: Names) -> Arc<Subroutine> {
-        let mapping: HashMap<Name, Name> = self.buffers.iter().cloned().zip(buffers.iter().cloned()).collect();
+        let mapping: HashMap<Name, Name> = self
+            .buffers
+            .iter()
+            .cloned()
+            .zip(buffers.iter().cloned())
+            .collect();
         let body = self.body.rename_buffers(&mapping);
-        Arc::new(Subroutine { name: self.name.clone(), axes: self.axes.clone(), body, result: self.result.clone(), buffers, ext: OnceLock::new() })
+        Arc::new(Subroutine {
+            name: self.name.clone(),
+            axes: self.axes.clone(),
+            body,
+            result: self.result.clone(),
+            buffers,
+            ext: OnceLock::new(),
+        })
     }
 }

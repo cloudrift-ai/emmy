@@ -177,7 +177,11 @@ impl Rewriter for MapExpressions<'_> {
         (self.0)(expression)
     }
     fn body(&mut self, roles: u32, body: &Body) -> Body {
-        if roles & TERM != 0 { body.map_each(&mut |stmt| Statement::map_expressions(stmt, self.0)) } else { body.clone() }
+        if roles & TERM != 0 {
+            body.map_each(&mut |stmt| Statement::map_expressions(stmt, self.0))
+        } else {
+            body.clone()
+        }
     }
     fn carried(&mut self, _roles: u32, stmt: &Arc<Statement>) -> Arc<Statement> {
         Statement::map_expressions(stmt, self.0)
@@ -188,10 +192,18 @@ struct RenameBuffers<'a>(&'a HashMap<Name, Name>);
 
 impl Rewriter for RenameBuffers<'_> {
     fn name(&mut self, roles: u32, name: &Name) -> Name {
-        if roles & BUFFERS != 0 { self.0.get(name).cloned().unwrap_or_else(|| name.clone()) } else { name.clone() }
+        if roles & BUFFERS != 0 {
+            self.0.get(name).cloned().unwrap_or_else(|| name.clone())
+        } else {
+            name.clone()
+        }
     }
     fn body(&mut self, roles: u32, body: &Body) -> Body {
-        if roles & TERM != 0 { body.map_each(&mut |stmt| Statement::rename_buffers(stmt, self.0)) } else { body.clone() }
+        if roles & TERM != 0 {
+            body.map_each(&mut |stmt| Statement::rename_buffers(stmt, self.0))
+        } else {
+            body.clone()
+        }
     }
     fn carried(&mut self, _roles: u32, stmt: &Arc<Statement>) -> Arc<Statement> {
         Statement::rename_buffers(stmt, self.0)
@@ -210,16 +222,24 @@ impl Rewriter for RewriteFields<'_, '_> {
             return (self.rewrite.rename)(name).unwrap_or_else(|| name.clone());
         }
         if roles & AXIS_NAME != 0 {
-            let Some(axis_fn) = self.rewrite.axis_fn else { return name.clone() };
+            let Some(axis_fn) = self.rewrite.axis_fn else {
+                return name.clone();
+            };
             let axes = self.axis_names.get_or_insert_with(|| {
-                self.this.bound_axes().into_iter().map(|axis| (axis.name.clone(), axis_fn(&axis).name.clone())).collect()
+                self.this
+                    .bound_axes()
+                    .into_iter()
+                    .map(|axis| (axis.name.clone(), axis_fn(&axis).name.clone()))
+                    .collect()
             });
             return axes.get(name).cloned().unwrap_or_else(|| name.clone());
         }
         name.clone()
     }
     fn expression(&mut self, _roles: u32, expression: &Expression) -> Expression {
-        expression.substitute(self.rewrite.sigma).rename(&mut |name| (self.rewrite.rename)(name))
+        expression
+            .substitute(self.rewrite.sigma)
+            .rename(&mut |name| (self.rewrite.rename)(name))
     }
     fn axis(&mut self, _roles: u32, axis: &AxisRef) -> AxisRef {
         match self.rewrite.axis_fn {
@@ -233,13 +253,27 @@ impl Rewriter for RewriteFields<'_, '_> {
         }
         if roles & TERM != 0 {
             // Its statements' names are its own; a coordinate its expressions read is not.
-            let defined: HashSet<Name> = body.stmts().iter().flat_map(|stmt| stmt.defines()).collect();
-            let inner = Rewrite { rename: &keep, sigma: self.rewrite.sigma, axis_fn: self.rewrite.axis_fn };
+            let defined: HashSet<Name> = body
+                .stmts()
+                .iter()
+                .flat_map(|stmt| stmt.defines())
+                .collect();
+            let inner = Rewrite {
+                rename: &keep,
+                sigma: self.rewrite.sigma,
+                axis_fn: self.rewrite.axis_fn,
+            };
             let rename = self.rewrite.rename;
             return body.map_each(&mut |stmt| {
                 let moved = Statement::rewrite(stmt, &inner);
                 Statement::map_expressions(&moved, &mut |expression| {
-                    expression.rename(&mut |name| if defined.contains(name) { None } else { rename(name) })
+                    expression.rename(&mut |name| {
+                        if defined.contains(name) {
+                            None
+                        } else {
+                            rename(name)
+                        }
+                    })
                 })
             });
         }
@@ -275,14 +309,25 @@ impl Statement {
 
     /// The SSA names this statement reads.
     pub fn deps(&self) -> Vec<Name> {
-        let mut visitor = Deps { reads: Vec::new(), locals: Vec::new(), carried: Vec::new() };
+        let mut visitor = Deps {
+            reads: Vec::new(),
+            locals: Vec::new(),
+            carried: Vec::new(),
+        };
         self.visit(&mut visitor);
-        let Deps { mut reads, locals, carried } = visitor;
+        let Deps {
+            mut reads,
+            locals,
+            carried,
+        } = visitor;
         if !carried.is_empty() {
             // The carried statements are a scope of their own: one's definition hides the next one's read of it.
             let mut hidden: HashSet<Name> = reads.iter().cloned().chain(locals).collect();
             for stmt in carried {
-                let fresh: Vec<Name> = unique(stmt.deps()).into_iter().filter(|dep| !hidden.contains(dep)).collect();
+                let fresh: Vec<Name> = unique(stmt.deps())
+                    .into_iter()
+                    .filter(|dep| !hidden.contains(dep))
+                    .collect();
                 reads.extend(fresh);
                 hidden.extend(reads.iter().cloned());
                 hidden.extend(stmt.defines());
@@ -293,7 +338,10 @@ impl Statement {
 
     /// The SSA names this statement defines.
     pub fn defines(&self) -> Vec<Name> {
-        let mut visitor = NamesByRole { roles: DEFINING, out: Vec::new() };
+        let mut visitor = NamesByRole {
+            roles: DEFINING,
+            out: Vec::new(),
+        };
         self.visit(&mut visitor);
         visitor.out
     }
@@ -304,7 +352,11 @@ impl Statement {
             Statement::Let(let_) => let_.value.flat_buffers(),
             Statement::Call(call) => call.target.buffers.to_vec(),
             _ => {
-                let mut visitor = Carried { roles: BUFFER_READ, own: Vec::new(), member: &Statement::external_reads };
+                let mut visitor = Carried {
+                    roles: BUFFER_READ,
+                    own: Vec::new(),
+                    member: &Statement::external_reads,
+                };
                 self.visit(&mut visitor);
                 unique(visitor.own)
             }
@@ -313,14 +365,21 @@ impl Statement {
 
     /// The external buffers this statement writes, each once.
     pub fn external_writes(&self) -> Vec<Name> {
-        let mut visitor = Carried { roles: BUFFER_WRITE, own: Vec::new(), member: &Statement::external_writes };
+        let mut visitor = Carried {
+            roles: BUFFER_WRITE,
+            own: Vec::new(),
+            member: &Statement::external_writes,
+        };
         self.visit(&mut visitor);
         unique(visitor.own)
     }
 
     /// The buffers this statement declares kernel-local.
     pub fn local_decls(&self) -> Vec<Name> {
-        let mut visitor = NamesByRole { roles: LOCAL_BUFFER, out: Vec::new() };
+        let mut visitor = NamesByRole {
+            roles: LOCAL_BUFFER,
+            out: Vec::new(),
+        };
         self.visit(&mut visitor);
         visitor.out
     }
@@ -341,7 +400,11 @@ impl Statement {
 
     /// The names this statement brings into scope for its child bodies.
     pub fn binds_axes(&self) -> Vec<Name> {
-        let mut names: Vec<Name> = self.bound_axes().iter().map(|axis| axis.name.clone()).collect();
+        let mut names: Vec<Name> = self
+            .bound_axes()
+            .iter()
+            .map(|axis| axis.name.clone())
+            .collect();
         if let Statement::StridedLoop(loop_) = self
             && loop_.end.is_some()
         {
@@ -357,21 +420,55 @@ impl Statement {
         visitor.0
     }
 
-    /// This statement over `bodies`, positionally matching `nested`.
+    /// This statement over `bodies`, positionally matching `nested`; refused when the counts disagree.
     pub fn with_bodies(this: &Arc<Statement>, bodies: Vec<Body>) -> Result<Arc<Statement>> {
         let count = bodies.len();
-        let mut rewriter = WithBodies { bodies: bodies.into_iter(), short: false };
+        let mut rewriter = WithBodies {
+            bodies: bodies.into_iter(),
+            short: false,
+        };
         let new = this.rewrite_fields(&mut rewriter);
         if rewriter.short || rewriter.bodies.len() > 0 {
-            return Err(Error::Value(format!("{}.with_bodies: {} bodies for {} child bodies", this.kind_name(), count, this.nested().len())));
+            return Err(Error::Value(format!(
+                "{}.with_bodies: {} bodies for {} child bodies",
+                this.kind_name(),
+                count,
+                this.nested().len()
+            )));
         }
-        Ok(if new.same(this) { this.clone() } else { Arc::new(new) })
+        Ok(if new.same(this) {
+            this.clone()
+        } else {
+            Arc::new(new)
+        })
+    }
+
+    /// `with_bodies` for a caller that built one body per child body: a count that disagrees keeps the statement's
+    /// own bodies for the positions it does not cover.
+    pub fn rebuild_bodies(this: &Arc<Statement>, bodies: Vec<Body>) -> Arc<Statement> {
+        let mut rewriter = WithBodies {
+            bodies: bodies.into_iter(),
+            short: false,
+        };
+        let new = this.rewrite_fields(&mut rewriter);
+        if new.same(this) {
+            this.clone()
+        } else {
+            Arc::new(new)
+        }
     }
 
     /// This statement with `f` applied to each of its own expressions; itself when none changes.
-    pub fn map_expressions(this: &Arc<Statement>, f: &mut dyn FnMut(&Expression) -> Expression) -> Arc<Statement> {
+    pub fn map_expressions(
+        this: &Arc<Statement>,
+        f: &mut dyn FnMut(&Expression) -> Expression,
+    ) -> Arc<Statement> {
         let new = this.rewrite_fields(&mut MapExpressions(f));
-        if new.same(this) { this.clone() } else { Arc::new(new) }
+        if new.same(this) {
+            this.clone()
+        } else {
+            Arc::new(new)
+        }
     }
 
     /// This statement with every buffer renamed through `mapping`; itself when none changes.
@@ -381,30 +478,47 @@ impl Statement {
         }
         match &**this {
             Statement::Let(let_) => {
-                let value = let_
-                    .value
-                    .rebuild(&mut |e| {
-                        Ok(match &*e {
-                            Expr::FlatIndex(buffer, index) if mapping.contains_key(buffer) => {
-                                Expression::new(Expr::FlatIndex(mapping[buffer].clone(), index.clone()))
-                            }
-                            _ => e,
-                        })
-                    })
-                    .expect("a rebuild that fails nothing");
-                if value == let_.value { this.clone() } else { Arc::new(Statement::Let(Let { value, ..let_.clone() })) }
+                let value = let_.value.rebuild(&mut |e| match &*e {
+                    Expr::FlatIndex(buffer, index) => match mapping.get(buffer) {
+                        Some(renamed) => {
+                            Expression::new(Expr::FlatIndex(renamed.clone(), index.clone()))
+                        }
+                        None => e,
+                    },
+                    _ => e,
+                });
+                if value == let_.value {
+                    this.clone()
+                } else {
+                    Arc::new(Statement::Let(Let {
+                        value,
+                        ..let_.clone()
+                    }))
+                }
             }
             Statement::Call(call) => {
-                let buffers: Vec<Name> = call.target.buffers.iter().map(|name| mapping.get(name).cloned().unwrap_or_else(|| name.clone())).collect();
+                let buffers: Vec<Name> = call
+                    .target
+                    .buffers
+                    .iter()
+                    .map(|name| mapping.get(name).cloned().unwrap_or_else(|| name.clone()))
+                    .collect();
                 if buffers[..] == call.target.buffers[..] {
                     return this.clone();
                 }
                 let target = SubroutineRef(call.target.with_buffers(buffers.into()));
-                Arc::new(Statement::Call(Call { target, ..call.clone() }))
+                Arc::new(Statement::Call(Call {
+                    target,
+                    ..call.clone()
+                }))
             }
             _ => {
                 let new = this.rewrite_fields(&mut RenameBuffers(mapping));
-                if new.same(this) { this.clone() } else { Arc::new(new) }
+                if new.same(this) {
+                    this.clone()
+                } else {
+                    Arc::new(new)
+                }
             }
         }
     }
@@ -415,16 +529,32 @@ impl Statement {
         let shadowed: Vec<Name> = if rewrite.sigma.is_empty() {
             Vec::new()
         } else {
-            this.binds_axes().into_iter().filter(|name| rewrite.sigma.contains_key(name)).collect()
+            this.binds_axes()
+                .into_iter()
+                .filter(|name| rewrite.sigma.contains_key(name))
+                .collect()
         };
         let restricted: HashMap<Name, Expression>;
         let rewrite = if shadowed.is_empty() {
             rewrite
         } else {
-            restricted = rewrite.sigma.iter().filter(|(name, _)| !shadowed.contains(name)).map(|(k, v)| (k.clone(), v.clone())).collect();
-            &Rewrite { rename: rewrite.rename, sigma: &restricted, axis_fn: rewrite.axis_fn }
+            restricted = rewrite
+                .sigma
+                .iter()
+                .filter(|(name, _)| !shadowed.contains(name))
+                .map(|(k, v)| (k.clone(), v.clone()))
+                .collect();
+            &Rewrite {
+                rename: rewrite.rename,
+                sigma: &restricted,
+                axis_fn: rewrite.axis_fn,
+            }
         };
-        let mut rewriter = RewriteFields { rewrite, this, axis_names: None };
+        let mut rewriter = RewriteFields {
+            rewrite,
+            this,
+            axis_names: None,
+        };
         let mut new = this.rewrite_fields(&mut rewriter);
         if let Statement::Accum(accum) = &mut new
             && let Statement::Accum(old) = &**this
@@ -442,7 +572,11 @@ impl Statement {
                 accum.axes = axes.into();
             }
         }
-        if new.same(this) { this.clone() } else { Arc::new(new) }
+        if new.same(this) {
+            this.clone()
+        } else {
+            Arc::new(new)
+        }
     }
 
     /// α-rename this subtree, binders and uses, SSA names and axis names, through one map.
@@ -454,10 +588,20 @@ impl Statement {
     }
 
     /// `rename` through a function; `None` keeps a name.
-    pub fn rename_with(this: &Arc<Statement>, rename: &dyn Fn(&str) -> Option<Name>) -> Arc<Statement> {
+    pub fn rename_with(
+        this: &Arc<Statement>,
+        rename: &dyn Fn(&str) -> Option<Name>,
+    ) -> Arc<Statement> {
         let axis_fn = |axis: &AxisRef| axis.renamed(&mut |name| rename(name));
         let empty = HashMap::new();
-        Statement::rewrite(this, &Rewrite { rename, sigma: &empty, axis_fn: Some(&axis_fn) })
+        Statement::rewrite(
+            this,
+            &Rewrite {
+                rename,
+                sigma: &empty,
+                axis_fn: Some(&axis_fn),
+            },
+        )
     }
 
     /// β-substitute free coordinates by expressions, stopping at a scope that re-binds a substituted name.
@@ -465,7 +609,14 @@ impl Statement {
         if sigma.is_empty() {
             return this.clone();
         }
-        Statement::rewrite(this, &Rewrite { rename: &keep, sigma, axis_fn: None })
+        Statement::rewrite(
+            this,
+            &Rewrite {
+                rename: &keep,
+                sigma,
+                axis_fn: None,
+            },
+        )
     }
 
     /// The elementwise operation a kind applies, held as `op`.
@@ -484,8 +635,12 @@ impl Statement {
         match self {
             Statement::Assign(s) => Statement::Assign(Assign { op, ..s.clone() }),
             Statement::Accum(s) => Statement::Accum(Accum { op, ..s.clone() }),
-            Statement::FragmentApply(s) => Statement::FragmentApply(FragmentApply { op, ..s.clone() }),
-            Statement::FragmentRowReduce(s) => Statement::FragmentRowReduce(FragmentRowReduce { op, ..s.clone() }),
+            Statement::FragmentApply(s) => {
+                Statement::FragmentApply(FragmentApply { op, ..s.clone() })
+            }
+            Statement::FragmentRowReduce(s) => {
+                Statement::FragmentRowReduce(FragmentRowReduce { op, ..s.clone() })
+            }
             _ => self.clone(),
         }
     }
@@ -521,7 +676,13 @@ impl Statement {
     }
 
     pub fn is_block(&self) -> bool {
-        matches!(self, Statement::Loop(_) | Statement::StridedLoop(_) | Statement::Cond(_) | Statement::Tile(_))
+        matches!(
+            self,
+            Statement::Loop(_)
+                | Statement::StridedLoop(_)
+                | Statement::Cond(_)
+                | Statement::Tile(_)
+        )
     }
 }
 
@@ -537,7 +698,13 @@ pub fn seeded_accumulators(stmt: &Statement) -> Vec<Name> {
     if !seed || !body.carries().is_empty() {
         return vec![];
     }
-    body.stmts().iter().filter_map(|s| match &**s { Statement::Accum(a) => Some(a.name.clone()), _ => None }).collect()
+    body.stmts()
+        .iter()
+        .filter_map(|s| match &**s {
+            Statement::Accum(a) => Some(a.name.clone()),
+            _ => None,
+        })
+        .collect()
 }
 
 /// The carried states a loop over `body` carries, each with its cell shape: an axis per index position, `None`
@@ -547,13 +714,21 @@ pub fn carried_cells(body: &Body) -> Vec<(Name, Vec<Option<AxisRef>>)> {
         return vec![];
     }
     let mut out: Vec<(Name, Vec<Option<AxisRef>>)> = Vec::new();
-    fn walk(body: &Body, inner: &HashMap<Name, AxisRef>, out: &mut Vec<(Name, Vec<Option<AxisRef>>)>) {
+    fn walk(
+        body: &Body,
+        inner: &HashMap<Name, AxisRef>,
+        out: &mut Vec<(Name, Vec<Option<AxisRef>>)>,
+    ) {
         for stmt in body.stmts() {
             if let Statement::Carry(carry) = &**stmt {
                 let cells: HashSet<&Name> = carry.cells().into_iter().collect();
                 let keys: HashSet<&Name> = inner.keys().collect();
                 if cells == keys {
-                    let shape = carry.index.iter().map(|e| e.as_var().and_then(|name| inner.get(name).cloned())).collect();
+                    let shape = carry
+                        .index
+                        .iter()
+                        .map(|e| e.as_var().and_then(|name| inner.get(name).cloned()))
+                        .collect();
                     match out.iter_mut().find(|(name, _)| *name == carry.name) {
                         Some(entry) => entry.1 = shape,
                         None => out.push((carry.name.clone(), shape)),
@@ -583,13 +758,20 @@ impl Loop {
 
     /// A loop is a reduce loop iff it carries something: an `Accum` in its immediate body, or a state.
     pub fn is_reduce(&self) -> bool {
-        self.body.stmts().iter().any(|s| matches!(**s, Statement::Accum(_))) || !self.carries().is_empty()
+        self.body
+            .stmts()
+            .iter()
+            .any(|s| matches!(**s, Statement::Accum(_)))
+            || !self.carries().is_empty()
     }
 }
 
 impl StridedLoop {
     pub fn is_reduce(&self) -> bool {
-        self.body.stmts().iter().any(|s| matches!(**s, Statement::Accum(_)))
+        self.body
+            .stmts()
+            .iter()
+            .any(|s| matches!(**s, Statement::Accum(_)))
     }
 }
 
@@ -609,22 +791,49 @@ impl Accum {
 
 impl Affine {
     pub fn terms(&self) -> impl Iterator<Item = (f64, &Name)> {
-        self.coefficients.iter().zip(self.args.iter()).map(|(c, arg)| (c.0, arg))
+        self.coefficients
+            .iter()
+            .zip(self.args.iter())
+            .map(|(c, arg)| (c.0, arg))
     }
 
     /// Construct with Python's checks: equal lengths, at least one term, no zero coefficient.
-    pub fn checked(name: Name, args: Names, coefficients: Floats, offset: Float, dtype: Option<DType>) -> Result<Affine> {
+    pub fn checked(
+        name: Name,
+        args: Names,
+        coefficients: Floats,
+        offset: Float,
+        dtype: Option<DType>,
+    ) -> Result<Affine> {
         if args.len() != coefficients.len() {
-            return Err(Error::Value(format!("Affine {name:?}: {} args and {} coefficients", args.len(), coefficients.len())));
+            return Err(Error::Value(format!(
+                "Affine {name:?}: {} args and {} coefficients",
+                args.len(),
+                coefficients.len()
+            )));
         }
         if args.is_empty() {
-            return Err(Error::Value(format!("Affine {name:?} has no term: a constant is a Let")));
+            return Err(Error::Value(format!(
+                "Affine {name:?} has no term: a constant is a Let"
+            )));
         }
         if coefficients.iter().any(|c| c.0 == 0.0) {
-            let shown: Vec<String> = coefficients.iter().map(|c| crate::field::spell_number(c.0)).collect();
-            return Err(Error::Value(format!("Affine {name:?} carries a zero coefficient: ({})", shown.join(", "))));
+            let shown: Vec<String> = coefficients
+                .iter()
+                .map(|c| crate::field::spell_number(c.0))
+                .collect();
+            return Err(Error::Value(format!(
+                "Affine {name:?} carries a zero coefficient: ({})",
+                shown.join(", ")
+            )));
         }
-        Ok(Affine { name, args, coefficients, offset, dtype })
+        Ok(Affine {
+            name,
+            args,
+            coefficients,
+            offset,
+            dtype,
+        })
     }
 
     /// The same value as binary `Assign`s over `Let`-bound literals, the last one named `name`.
@@ -642,18 +851,31 @@ impl Affine {
             }
             fn bound(&mut self, value: f64) -> Name {
                 let name = self.fresh();
-                let let_ = Let { name: name.clone(), value: Expression::float(value), dtype: self.affine.dtype.clone() };
+                let let_ = Let {
+                    name: name.clone(),
+                    value: Expression::float(value),
+                    dtype: self.affine.dtype.clone(),
+                };
                 self.out.push(Arc::new(Statement::Let(let_)));
                 name
             }
             fn step(&mut self, op: &str, args: Vec<Name>) -> Name {
                 let name = self.fresh();
-                let assign = Assign { name: name.clone(), op: Op::new(op), args: args.into(), dtype: self.affine.dtype.clone() };
+                let assign = Assign {
+                    name: name.clone(),
+                    op: Op::new(op),
+                    args: args.into(),
+                    dtype: self.affine.dtype.clone(),
+                };
                 self.out.push(Arc::new(Statement::Assign(assign)));
                 name
             }
         }
-        let mut chain = Chain { affine: self, out: Vec::new(), counter: 0 };
+        let mut chain = Chain {
+            affine: self,
+            out: Vec::new(),
+            counter: 0,
+        };
         let mut total: Option<Name> = None;
         // A positive term leads when there is one, so the chain opens with a value rather than a negation.
         let mut terms: Vec<(f64, &Name)> = self.terms().collect();
@@ -668,22 +890,36 @@ impl Affine {
             total = Some(match total {
                 None if coefficient > 0.0 => term,
                 None => chain.step("negative", vec![term]),
-                Some(current) => chain.step(if coefficient > 0.0 { "add" } else { "subtract" }, vec![current, term]),
+                Some(current) => chain.step(
+                    if coefficient > 0.0 { "add" } else { "subtract" },
+                    vec![current, term],
+                ),
             });
         }
+        // An affine has a term (its constructor refuses none), so the chain holds a total here.
+        let Some(mut total) = total else {
+            return chain.out;
+        };
         if self.offset.0 != 0.0 {
             let literal = chain.bound(self.offset.0.abs());
-            total = Some(chain.step(if self.offset.0 > 0.0 { "add" } else { "subtract" }, vec![total.unwrap(), literal]));
+            total = chain.step(
+                if self.offset.0 > 0.0 {
+                    "add"
+                } else {
+                    "subtract"
+                },
+                vec![total, literal],
+            );
         }
-        let total = total.expect("an affine has a term");
         let mut out = chain.out;
-        match out.last() {
+        match out.last_mut() {
             Some(last) if last.name() == Some(&total) => {
-                let renamed = match &**last {
-                    Statement::Assign(a) => Statement::Assign(Assign { name: self.name.clone(), ..a.clone() }),
-                    other => other.clone(),
-                };
-                *out.last_mut().unwrap() = Arc::new(renamed);
+                if let Statement::Assign(a) = &**last {
+                    *last = Arc::new(Statement::Assign(Assign {
+                        name: self.name.clone(),
+                        ..a.clone()
+                    }));
+                }
             }
             _ => out.push(Arc::new(Statement::Assign(Assign {
                 name: self.name.clone(),
@@ -713,7 +949,11 @@ pub fn mask_select_predicate(select: &Select) -> Option<Expression> {
         return None;
     }
     let (keep, mask) = (&select.branches[0], &select.branches[1]);
-    let (Expr::Binary(keep_op, keep_left, keep_right), Expr::Binary(mask_op, mask_left, mask_right)) = (&*keep.select, &*mask.select) else {
+    let (
+        Expr::Binary(keep_op, keep_left, keep_right),
+        Expr::Binary(mask_op, mask_left, mask_right),
+    ) = (&*keep.select, &*mask.select)
+    else {
         return None;
     };
     let (mut op, mut left, mut right) = (*mask_op, mask_left.clone(), mask_right.clone());
@@ -740,43 +980,90 @@ pub fn mask_select_predicate(select: &Select) -> Option<Expression> {
 
 /// A `Let` of a float literal at the default precision: the number it binds its name to, else `None`.
 pub fn literal_of(stmt: &Statement) -> Option<f64> {
+    literal_binding(stmt).map(|(_, value)| value)
+}
+
+/// `literal_of` with the name it binds.
+pub fn literal_binding(stmt: &Statement) -> Option<(&Name, f64)> {
     if let Statement::Let(let_) = stmt
         && let Expr::Literal(lit) = &*let_.value
         && &*lit.dtype == "float"
         && let_.dtype.as_ref().is_none_or(|d| d.name() == "f32")
     {
-        return Some(lit.value.as_f64());
+        return Some((&let_.name, lit.value.as_f64()));
     }
     None
 }
 
 /// Constructors with the checks Python's `__post_init__` made.
 impl Load {
-    pub fn checked(names: Names, input: Name, index: Exprs, dtype: Option<DType>, carried: Name) -> Result<Load> {
+    pub fn checked(
+        names: Names,
+        input: Name,
+        index: Exprs,
+        dtype: Option<DType>,
+        carried: Name,
+    ) -> Result<Load> {
         if names.is_empty() {
             return Err(Error::Value("Load.names must be non-empty".into()));
         }
-        Ok(Load { names, input, index, dtype, carried })
+        Ok(Load {
+            names,
+            input,
+            index,
+            dtype,
+            carried,
+        })
     }
 }
 
 impl Write {
-    pub fn checked(output: Name, index: Exprs, values: Names, value_dtype: Option<DType>, atomic: bool, swizzle: Name) -> Result<Write> {
+    pub fn checked(
+        output: Name,
+        index: Exprs,
+        values: Names,
+        value_dtype: Option<DType>,
+        atomic: bool,
+        swizzle: Name,
+    ) -> Result<Write> {
         if values.is_empty() {
             return Err(Error::Value("Write.values must be non-empty".into()));
         }
         if atomic && values.len() != 1 {
-            return Err(Error::Value("an atomic Write is scalar (one value per atomicAdd)".into()));
+            return Err(Error::Value(
+                "an atomic Write is scalar (one value per atomicAdd)".into(),
+            ));
         }
-        Ok(Write { output, index, values, value_dtype, atomic, swizzle })
+        Ok(Write {
+            output,
+            index,
+            values,
+            value_dtype,
+            atomic,
+            swizzle,
+        })
     }
 }
 
 impl Accum {
-    pub fn checked(name: Name, value: Name, op: Op, dtype: Option<DType>, axes: Names, base: Option<Name>) -> Accum {
+    pub fn checked(
+        name: Name,
+        value: Name,
+        op: Op,
+        dtype: Option<DType>,
+        axes: Names,
+        base: Option<Name>,
+    ) -> Accum {
         // The ordinary self-fold has one spelling.
         let base = base.filter(|b| *b != name);
-        Accum { name, value, op, dtype, axes, base }
+        Accum {
+            name,
+            value,
+            op,
+            dtype,
+            axes,
+            base,
+        }
     }
 }
 
@@ -792,7 +1079,9 @@ impl Select {
 impl Call {
     pub fn checked(name: Name, target: SubroutineRef, args: Exprs) -> Result<Call> {
         if args.len() != target.axes.len() {
-            return Err(Error::Value("subroutine arguments do not match its parameters".into()));
+            return Err(Error::Value(
+                "subroutine arguments do not match its parameters".into(),
+            ));
         }
         Ok(Call { name, target, args })
     }
@@ -801,7 +1090,9 @@ impl Call {
 impl Tile {
     pub fn check(&self) -> Result<()> {
         if self.aux_threads != 0 && self.block_threads.is_none() {
-            return Err(Error::Value("Tile.aux_threads requires a cooperative block_threads".into()));
+            return Err(Error::Value(
+                "Tile.aux_threads requires a cooperative block_threads".into(),
+            ));
         }
         Ok(())
     }
@@ -811,16 +1102,26 @@ impl WgmmaMma {
     pub fn check(&self) -> Result<()> {
         let crate::field::Shape3(m, n, k) = self.shape;
         if (m, k) != (64, 16) || n % 8 != 0 || !(8..=256).contains(&n) {
-            return Err(Error::Value(format!("wgmma: the shape is m64n<8..256, a multiple of 8>k16, got ({m}, {n}, {k})")));
+            return Err(Error::Value(format!(
+                "wgmma: the shape is m64n<8..256, a multiple of 8>k16, got ({m}, {n}, {k})"
+            )));
         }
         if self.c_frags.len() as i64 != n / 8 {
-            return Err(Error::Value(format!("wgmma m64n{n}: the accumulator is {} m16n8 C fragments, got {}", n / 8, self.c_frags.len())));
+            return Err(Error::Value(format!(
+                "wgmma m64n{n}: the accumulator is {} m16n8 C fragments, got {}",
+                n / 8,
+                self.c_frags.len()
+            )));
         }
         if self.a_desc.is_none() == self.a_frag.is_none() {
-            return Err(Error::Value("wgmma: exactly one of a_desc / a_frag names the A operand".into()));
+            return Err(Error::Value(
+                "wgmma: exactly one of a_desc / a_frag names the A operand".into(),
+            ));
         }
         if self.a_frag.is_some() && self.trans_a != 0 {
-            return Err(Error::Value("wgmma: the register-form A operand is K-major (no transpose bit)".into()));
+            return Err(Error::Value(
+                "wgmma: the register-form A operand is K-major (no transpose bit)".into(),
+            ));
         }
         Ok(())
     }
@@ -829,13 +1130,35 @@ impl WgmmaMma {
 /// The checks a kind makes on construction, by kind: what Python's `__post_init__` refused.
 pub fn check(stmt: &Statement) -> Result<()> {
     match stmt {
-        Statement::Load(s) => Load::checked(s.names.clone(), s.input.clone(), s.index.clone(), s.dtype.clone(), s.carried.clone()).map(|_| ()),
-        Statement::Write(s) => {
-            Write::checked(s.output.clone(), s.index.clone(), s.values.clone(), s.value_dtype.clone(), s.atomic, s.swizzle.clone()).map(|_| ())
-        }
-        Statement::Affine(s) => Affine::checked(s.name.clone(), s.args.clone(), s.coefficients.clone(), s.offset, s.dtype.clone()).map(|_| ()),
+        Statement::Load(s) => Load::checked(
+            s.names.clone(),
+            s.input.clone(),
+            s.index.clone(),
+            s.dtype.clone(),
+            s.carried.clone(),
+        )
+        .map(|_| ()),
+        Statement::Write(s) => Write::checked(
+            s.output.clone(),
+            s.index.clone(),
+            s.values.clone(),
+            s.value_dtype.clone(),
+            s.atomic,
+            s.swizzle.clone(),
+        )
+        .map(|_| ()),
+        Statement::Affine(s) => Affine::checked(
+            s.name.clone(),
+            s.args.clone(),
+            s.coefficients.clone(),
+            s.offset,
+            s.dtype.clone(),
+        )
+        .map(|_| ()),
         Statement::Select(s) => Select::checked(s.name.clone(), s.branches.clone()).map(|_| ()),
-        Statement::Call(s) => Call::checked(s.name.clone(), s.target.clone(), s.args.clone()).map(|_| ()),
+        Statement::Call(s) => {
+            Call::checked(s.name.clone(), s.target.clone(), s.args.clone()).map(|_| ())
+        }
         Statement::Tile(s) => s.check(),
         Statement::WgmmaMma(s) => s.check(),
         Statement::TreeHalve(s) => carried_kind(&s.combine_states, "Assign"),
@@ -847,7 +1170,10 @@ pub fn check(stmt: &Statement) -> Result<()> {
 
 fn carried_kind(stmts: &[Arc<Statement>], kind: &str) -> Result<()> {
     match stmts.iter().find(|s| s.kind_name() != kind) {
-        Some(other) => Err(Error::Type(format!("expected {kind} statements, got a {}", other.kind_name()))),
+        Some(other) => Err(Error::Type(format!(
+            "expected {kind} statements, got a {}",
+            other.kind_name()
+        ))),
         None => Ok(()),
     }
 }
@@ -856,7 +1182,9 @@ fn carried_kind(stmts: &[Arc<Statement>], kind: &str) -> Result<()> {
 pub fn finished(stmt: Statement) -> Result<Statement> {
     check(&stmt)?;
     Ok(match stmt {
-        Statement::Accum(a) => Statement::Accum(Accum::checked(a.name, a.value, a.op, a.dtype, a.axes, a.base)),
+        Statement::Accum(a) => Statement::Accum(Accum::checked(
+            a.name, a.value, a.op, a.dtype, a.axes, a.base,
+        )),
         other => other,
     })
 }

@@ -701,10 +701,13 @@ macro_rules! define_kinds {
     };
 }
 
-pub use crate::field::{Axes, AxisRef, Branches, DType, Exprs, Float, Floats, FragmentArgs, Int2, Ints, Names, NumOr, Ops, Shape3, Stmts, SubroutineRef};
 use crate::Name;
 use crate::body::Body;
 use crate::elementwise::Op;
 use crate::expr::Expression;
+pub use crate::field::{
+    Axes, AxisRef, Branches, DType, Exprs, Float, Floats, FragmentArgs, Int2, Ints, Names, NumOr,
+    Ops, Shape3, Stmts, SubroutineRef,
+};
 
 with_kinds!(define_kinds);

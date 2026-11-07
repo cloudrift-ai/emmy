@@ -10,4 +10,4 @@ crate-type = ["cdylib"]
 
 [dependencies]
 emmy-ir = { path = "../emmy-ir" }
-pyo3 = { version = "0.29", features = ["extension-module", "abi3-py312"] }
+pyo3 = { version = "0.29", features = ["extension-module", "abi3-py312", "multiple-pymethods"] }

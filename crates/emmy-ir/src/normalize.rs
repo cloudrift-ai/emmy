@@ -13,18 +13,26 @@ use crate::expr::{BinOp, Expr, Expression, Interval, Lit, Num, SimplifyCtx, affi
 use crate::field::{AxisRef, DType, Float, Names, NumOr};
 use crate::kinds::*;
 use crate::order::{is_protocol, ordering_constraints, topological_sort};
-use crate::protocol::{literal_of, unique};
-use crate::text::body_text;
+use crate::protocol::{literal_binding, unique};
+use crate::text::{structural_body_text, structural_text};
 use crate::values::{Key, Number, Numbering, distinct, ptr, roles, scope_tree, value_numbers};
-use crate::{Error, Name, Result};
+use crate::{Error, Name, Result, locked};
 
 const SYMBOLIC_AXIS_HI: i128 = 1 << 30;
 
 /// Push an iteration axis `[0, extent)` into a simplification context so index expressions over it fold.
 pub fn extend_simplify_ctx(ctx: &SimplifyCtx, axis: &Axis) -> SimplifyCtx {
     match axis.extent.as_static() {
-        Some(n) => ctx.extend(&axis.name, Interval::new(0, n as i128 - 1), Some(Expression::int(n))),
-        None => ctx.extend(&axis.name, Interval::new(0, SYMBOLIC_AXIS_HI), Some(axis.extent.expression.clone())),
+        Some(n) => ctx.extend(
+            &axis.name,
+            Interval::new(0, n as i128 - 1),
+            Some(Expression::int(n)),
+        ),
+        None => ctx.extend(
+            &axis.name,
+            Interval::new(0, SYMBOLIC_AXIS_HI),
+            Some(axis.extent.expression.clone()),
+        ),
     }
 }
 
@@ -39,18 +47,31 @@ struct Memo {
 
 impl Memo {
     fn new(maxsize: usize) -> Memo {
-        Memo { maxsize, store: HashMap::new(), order: std::collections::VecDeque::new() }
+        Memo {
+            maxsize,
+            store: HashMap::new(),
+            order: std::collections::VecDeque::new(),
+        }
     }
 
     fn get(&self, body: &Body) -> Option<Body> {
-        self.store.get(&body.content_hash())?.iter().find(|(key, _)| key == body).map(|(_, value)| value.clone())
+        self.store
+            .get(&body.content_hash())?
+            .iter()
+            .find(|(key, _)| key == body)
+            .map(|(_, value)| value.clone())
     }
 
     fn put(&mut self, body: &Body, value: Body) {
-        self.store.entry(body.content_hash()).or_default().push((body.clone(), value));
+        self.store
+            .entry(body.content_hash())
+            .or_default()
+            .push((body.clone(), value));
         self.order.push_back((body.content_hash(), body.clone()));
         while self.order.len() > self.maxsize {
-            let (hash, oldest) = self.order.pop_front().unwrap();
+            let Some((hash, oldest)) = self.order.pop_front() else {
+                break;
+            };
             if let Some(entries) = self.store.get_mut(&hash) {
                 entries.retain(|(key, _)| !key.ptr_eq(&oldest));
                 if entries.is_empty() {
@@ -73,7 +94,7 @@ fn normal_forms() -> &'static Mutex<Memo> {
 
 /// Forget every memoized normal form (the tests of the memo use it).
 pub fn clear_memo() {
-    normal_forms().lock().unwrap().clear();
+    locked(normal_forms()).clear();
 }
 
 /// The executable normal form of `body`, cached on the body and its fixed point, and memoized by content.
@@ -81,12 +102,12 @@ pub fn normalize_body(body: &Body) -> Result<Body> {
     if let Some(normal) = body.0.normalized.get() {
         return Ok(normal.clone());
     }
-    let found = normal_forms().lock().unwrap().get(body);
+    let found = locked(normal_forms()).get(body);
     let normal = match found {
         Some(found) => found,
         None => {
             let computed = normalize_uncached(body)?;
-            normal_forms().lock().unwrap().put(body, computed.clone());
+            locked(normal_forms()).put(body, computed.clone());
             computed
         }
     };
@@ -99,7 +120,10 @@ pub fn normalize_body(body: &Body) -> Result<Body> {
 pub fn normalize_uncached(body: &Body) -> Result<Body> {
     // The normal form holds every operation: a call is storage sharing inside fusion, which expands it.
     if !body.of_kinds(&["Call"]).is_empty() {
-        return Err(Error::Value("a body that holds a subroutine call has no normal form; fusion expands its calls".into()));
+        return Err(Error::Value(
+            "a body that holds a subroutine call has no normal form; fusion expands its calls"
+                .into(),
+        ));
     }
     // Motion can put two lexical bindings in one scope. Give them distinct names first.
     let mut stmts = rename_ssa_sequential(&topological_sort(body));
@@ -120,7 +144,10 @@ pub fn normalize_uncached(body: &Body) -> Result<Body> {
     }
     let mut lines = Vec::new();
     crate::text::body_lines(&stmts, "  ", &mut lines)?;
-    Err(Error::Value(format!("the normal form did not settle in eight rounds:\n{}", lines.join("\n"))))
+    Err(Error::Value(format!(
+        "the normal form did not settle in eight rounds:\n{}",
+        lines.join("\n")
+    )))
 }
 
 /// The exact simplifications, then every value placed once; the three run until the first two leave a placed body
@@ -135,7 +162,8 @@ pub fn prepare_body(body: &Body) -> Result<Body> {
     stmts = drop_unread_values(&stmts);
     let mut placed: Option<Body> = None;
     loop {
-        let simplified = canonicalize_expressions(&simplify_body(&merge_sibling_reduce_loops(&stmts)?)?, &[])?;
+        let simplified =
+            canonicalize_expressions(&simplify_body(&merge_sibling_reduce_loops(&stmts))?, &[])?;
         if placed.as_ref() == Some(&simplified) {
             return Ok(simplified);
         }
@@ -146,7 +174,7 @@ pub fn prepare_body(body: &Body) -> Result<Body> {
 }
 
 fn with_bodies(stmt: &Arc<Statement>, bodies: Vec<Body>) -> Arc<Statement> {
-    Statement::with_bodies(stmt, bodies).expect("the same count")
+    Statement::rebuild_bodies(stmt, bodies)
 }
 
 fn substituted(stmt: &Arc<Statement>, name: &Name, value: Expression) -> Arc<Statement> {
@@ -154,7 +182,12 @@ fn substituted(stmt: &Arc<Statement>, name: &Name, value: Expression) -> Arc<Sta
 }
 
 fn assign(name: &Name, op: &str, args: Vec<Name>, dtype: Option<DType>) -> Arc<Statement> {
-    Arc::new(Statement::Assign(Assign { name: name.clone(), op: Op::new(op), args: args.into(), dtype }))
+    Arc::new(Statement::Assign(Assign {
+        name: name.clone(),
+        op: Op::new(op),
+        args: args.into(),
+        dtype,
+    }))
 }
 
 // --- size-one axes ----------------------------------------------------------------------------------------
@@ -166,7 +199,13 @@ pub fn drop_size_one_free_axes(body: &Body) -> Body {
             && l.axis.extent.as_static() == Some(1)
             && !l.is_reduce()
         {
-            return Some(l.body.stmts().iter().map(|c| substituted(c, &l.axis.name, Expression::int(0))).collect());
+            return Some(
+                l.body
+                    .stmts()
+                    .iter()
+                    .map(|c| substituted(c, &l.axis.name, Expression::int(0)))
+                    .collect(),
+            );
         }
         Some(vec![stmt.clone()])
     })
@@ -175,13 +214,29 @@ pub fn drop_size_one_free_axes(body: &Body) -> Body {
 /// Inline a canonical extent-one reduction as its single update.
 pub fn drop_size_one_reduce_axes(body: &Body) -> Body {
     body.map(&mut |stmt| {
-        let Statement::Loop(l) = &**stmt else { return Some(vec![stmt.clone()]) };
+        let Statement::Loop(l) = &**stmt else {
+            return Some(vec![stmt.clone()]);
+        };
         if !(l.is_reduce() && l.axis.extent.as_static() == Some(1)) {
             return Some(vec![stmt.clone()]);
         }
-        let accums: Vec<&Accum> = l.body.stmts().iter().filter_map(|m| match &**m { Statement::Accum(a) => Some(a), _ => None }).collect();
+        let accums: Vec<&Accum> = l
+            .body
+            .stmts()
+            .iter()
+            .filter_map(|m| match &**m {
+                Statement::Accum(a) => Some(a),
+                _ => None,
+            })
+            .collect();
         let names: HashSet<&Name> = accums.iter().map(|a| &a.name).collect();
-        if accums.is_empty() || names.len() != accums.len() || l.body.stmts().iter().any(|m| !(m.is_pure() || matches!(**m, Statement::Accum(_)))) {
+        if accums.is_empty()
+            || names.len() != accums.len()
+            || l.body
+                .stmts()
+                .iter()
+                .any(|m| !(m.is_pure() || matches!(**m, Statement::Accum(_))))
+        {
             return Some(vec![stmt.clone()]);
         }
         let mut out = Vec::new();
@@ -193,9 +248,19 @@ pub fn drop_size_one_reduce_axes(body: &Body) -> Body {
                         if a.op.identity.is_none() {
                             return Some(vec![stmt.clone()]);
                         }
-                        out.push(assign(&a.name, "copy", vec![a.value.clone()], a.dtype.clone()));
+                        out.push(assign(
+                            &a.name,
+                            "copy",
+                            vec![a.value.clone()],
+                            a.dtype.clone(),
+                        ));
                     }
-                    Some(base) => out.push(assign(&a.name, &a.op.name, vec![base.clone(), a.value.clone()], a.dtype.clone())),
+                    Some(base) => out.push(assign(
+                        &a.name,
+                        &a.op.name,
+                        vec![base.clone(), a.value.clone()],
+                        a.dtype.clone(),
+                    )),
                 },
                 _ => out.push(member),
             }
@@ -210,7 +275,9 @@ pub fn drop_size_one_reduce_axes(body: &Body) -> Body {
 fn output_storage_depth(stmts: &Body, axis: &Name) -> Option<usize> {
     let mut depths: Vec<usize> = Vec::new();
     for write in stmts.writes() {
-        let Statement::Write(w) = &**write.stmt() else { continue };
+        let Statement::Write(w) = &**write.stmt() else {
+            continue;
+        };
         let mut positions = Vec::new();
         for (position, expression) in w.index.iter().enumerate() {
             if !expression.reads(axis) {
@@ -234,20 +301,36 @@ fn output_storage_depth(stmts: &Body, axis: &Name) -> Option<usize> {
 }
 
 fn loop_over(axis: AxisRef, body: Body, unroll: bool, seed: bool) -> Body {
-    Body::new(vec![Arc::new(Statement::Loop(Loop { axis, body, unroll, seed }))])
+    Body::new(vec![Arc::new(Statement::Loop(Loop {
+        axis,
+        body,
+        unroll,
+        seed,
+    }))])
 }
 
 /// Permute distinct items once modulo transpositions proven to preserve the whole form.
-fn orders_modulo_transpositions<T: Clone>(items: &[T], interchangeable: &dyn Fn(&T, &T) -> bool) -> Vec<Vec<T>> {
+fn orders_modulo_transpositions<T: Clone>(
+    items: &[T],
+    interchangeable: &dyn Fn(&T, &T) -> bool,
+) -> Vec<Vec<T>> {
     let mut classes: Vec<Vec<T>> = Vec::new();
     for item in items {
-        match classes.iter_mut().find(|group| interchangeable(item, &group[0])) {
+        match classes
+            .iter_mut()
+            .find(|group| interchangeable(item, &group[0]))
+        {
             Some(group) => group.push(item.clone()),
             None => classes.push(vec![item.clone()]),
         }
     }
     let mut out = Vec::new();
-    fn walk<T: Clone>(classes: &[Vec<T>], remaining: &mut Vec<usize>, positions: &mut Vec<usize>, out: &mut Vec<Vec<T>>) {
+    fn walk<T: Clone>(
+        classes: &[Vec<T>],
+        remaining: &mut Vec<usize>,
+        positions: &mut Vec<usize>,
+        out: &mut Vec<Vec<T>>,
+    ) {
         if remaining.iter().all(|count| *count == 0) {
             let mut offsets = vec![0; classes.len()];
             let mut order = Vec::new();
@@ -275,12 +358,20 @@ fn orders_modulo_transpositions<T: Clone>(items: &[T], interchangeable: &dyn Fn(
 }
 
 fn rename_axes(body: &Body, mapping: &HashMap<Name, Name>) -> Body {
-    let sigma: HashMap<Name, Expression> = mapping.iter().map(|(name, replacement)| (name.clone(), Expression::new(Expr::Var(replacement.clone())))).collect();
+    let sigma: HashMap<Name, Expression> = mapping
+        .iter()
+        .map(|(name, replacement)| {
+            (
+                name.clone(),
+                Expression::new(Expr::Var(replacement.clone())),
+            )
+        })
+        .collect();
     body.map_each(&mut |stmt| Statement::substitute(stmt, &sigma))
 }
 
 fn text_key(body: &Body) -> Key {
-    Key::str(&body_text(body).expect("a body has a text"))
+    Key::str(&structural_body_text(body))
 }
 
 /// Sort an outer free-loop chain by row-major output storage order; where the writes do not order it, by the least
@@ -305,25 +396,50 @@ pub fn canonicalize_free_axis_order(body: &Body) -> Result<Body> {
             if nested.is_empty() {
                 return Ok(stmt.clone());
             }
-            Ok(with_bodies(stmt, nested.iter().map(canonicalize_free_axis_order).collect::<Result<Vec<_>>>()?))
+            Ok(with_bodies(
+                stmt,
+                nested
+                    .iter()
+                    .map(canonicalize_free_axis_order)
+                    .collect::<Result<Vec<_>>>()?,
+            ))
         })
         .collect::<Result<Vec<_>>>()?;
     let terminal = Body::new(terminal);
-    let depths: Vec<Option<usize>> = chain.iter().map(|l| output_storage_depth(&terminal, &l.axis.name)).collect();
+    let depths: Vec<Option<usize>> = chain
+        .iter()
+        .map(|l| output_storage_depth(&terminal, &l.axis.name))
+        .collect();
     let distinct_depths: HashSet<Option<usize>> = depths.iter().copied().collect();
-    let sorted: Vec<Loop> = if depths.iter().all(|d| d.is_some()) && distinct_depths.len() == depths.len() {
-        let mut pairs: Vec<(usize, Loop)> = depths.iter().map(|d| d.unwrap()).zip(chain.iter().cloned()).collect();
+    let sorted: Vec<Loop> = if depths.iter().all(|d| d.is_some())
+        && distinct_depths.len() == depths.len()
+    {
+        let mut pairs: Vec<(usize, Loop)> = depths
+            .iter()
+            .flatten()
+            .copied()
+            .zip(chain.iter().cloned())
+            .collect();
         pairs.sort_by_key(|(depth, _)| std::cmp::Reverse(*depth));
         pairs.into_iter().map(|(_, l)| l).collect()
     } else {
         let axis_metadata = |l: &Loop| -> Key {
-            let mut mapping: HashMap<Name, Name> = HashMap::from([(l.axis.name.clone(), Name::from("__axis__"))]);
+            let mut mapping: HashMap<Name, Name> =
+                HashMap::from([(l.axis.name.clone(), Name::from("__axis__"))]);
             for (depth, source) in l.axis.sources().iter().enumerate() {
-                mapping.entry(source.name.clone()).or_insert_with(|| format!("__parent{depth}__").into());
+                mapping
+                    .entry(source.name.clone())
+                    .or_insert_with(|| format!("__parent{depth}__").into());
             }
             let renamed = Statement::rename(&Arc::new(Statement::Loop(l.clone())), &mapping);
-            let Statement::Loop(renamed) = &*renamed else { unreachable!() };
-            Key::tuple([Key::str(&crate::text::spell_axis(&renamed.axis, None).unwrap_or_default()), Key::Bool(renamed.unroll), Key::Bool(renamed.seed)])
+            let Statement::Loop(renamed) = &*renamed else {
+                return Key::None;
+            };
+            Key::tuple([
+                Key::str(&crate::text::spell_axis(&renamed.axis, None).unwrap_or_default()),
+                Key::Bool(renamed.unroll),
+                Key::Bool(renamed.seed),
+            ])
         };
         let mut source_counts: HashMap<Name, usize> = HashMap::new();
         for l in &chain {
@@ -333,23 +449,50 @@ pub fn canonicalize_free_axis_order(body: &Body) -> Result<Body> {
         }
         let mut role_of: HashMap<Name, Key> = HashMap::new();
         for (focus, depth) in chain.iter().zip(&depths) {
-            let mapping: HashMap<Name, Name> =
-                chain.iter().map(|l| (l.axis.name.clone(), Name::from(if l.axis.name == focus.axis.name { "__self__" } else { "__other__" }))).collect();
+            let mapping: HashMap<Name, Name> = chain
+                .iter()
+                .map(|l| {
+                    (
+                        l.axis.name.clone(),
+                        Name::from(if l.axis.name == focus.axis.name {
+                            "__self__"
+                        } else {
+                            "__other__"
+                        }),
+                    )
+                })
+                .collect();
             // The current nest orders affine sums too; compare roles independently of that order to avoid cycles.
-            let focused = canonicalize_expressions(&rename_axes(&terminal, &mapping), &[Name::from("__self__"), Name::from("__other__")])?;
-            let source_arity = focus.axis.source_axis().map_or(1, |source| source_counts[&source.name]);
+            let focused = canonicalize_expressions(
+                &rename_axes(&terminal, &mapping),
+                &[Name::from("__self__"), Name::from("__other__")],
+            )?;
+            let source_arity = focus
+                .axis
+                .source_axis()
+                .map_or(1, |source| source_counts[&source.name]);
             // A coordinate carried by a consistent output position has a fixed row-major role; an unresolved one
             // stays outside the known output suffix, then its structural role breaks ties.
             let storage_order = match depth {
                 None => Key::tuple([Key::Int(0), Key::Int(0)]),
                 Some(d) => Key::tuple([Key::Int(1), Key::Int(-(*d as i64))]),
             };
-            let role = Key::tuple([storage_order, Key::tuple([axis_metadata(focus), Key::Int(source_arity as i64), text_key(&focused)])]);
+            let role = Key::tuple([
+                storage_order,
+                Key::tuple([
+                    axis_metadata(focus),
+                    Key::Int(source_arity as i64),
+                    text_key(&focused),
+                ]),
+            ]);
             role_of.insert(focus.axis.name.clone(), role);
         }
         let mut groups: BTreeMap<Key, Vec<Loop>> = BTreeMap::new();
         for l in &chain {
-            groups.entry(role_of[&l.axis.name].clone()).or_default().push(l.clone());
+            groups
+                .entry(role_of[&l.axis.name].clone())
+                .or_default()
+                .push(l.clone());
         }
         let interchangeable = |left: &Loop, right: &Loop| -> bool {
             if axis_metadata(left) != axis_metadata(right) {
@@ -363,7 +506,10 @@ pub fn canonicalize_free_axis_order(body: &Body) -> Result<Body> {
             }
             let swapped = rename_axes(
                 &terminal,
-                &HashMap::from([(left.axis.name.clone(), right.axis.name.clone()), (right.axis.name.clone(), left.axis.name.clone())]),
+                &HashMap::from([
+                    (left.axis.name.clone(), right.axis.name.clone()),
+                    (right.axis.name.clone(), left.axis.name.clone()),
+                ]),
             );
             swapped == terminal
         };
@@ -374,7 +520,10 @@ pub fn canonicalize_free_axis_order(body: &Body) -> Result<Body> {
             }
             text_key(&rename_ssa_sequential(&result))
         };
-        let per_group: Vec<Vec<Vec<Loop>>> = groups.values().map(|group| orders_modulo_transpositions(group, &interchangeable)).collect();
+        let per_group: Vec<Vec<Vec<Loop>>> = groups
+            .values()
+            .map(|group| orders_modulo_transpositions(group, &interchangeable))
+            .collect();
         let mut best: Option<(Key, Vec<Loop>)> = None;
         fn product(groups: &[Vec<Vec<Loop>>], chosen: &mut Vec<Loop>, f: &mut dyn FnMut(&[Loop])) {
             if groups.is_empty() {
@@ -411,20 +560,32 @@ pub fn fold_trivial_selects(body: &Body) -> Body {
         if let Statement::Select(s) = &**stmt
             && s.branches.iter().all(|b| b.value == s.branches[0].value)
         {
-            return Some(assign(&s.name, "copy", vec![s.branches[0].value.clone()], None));
+            return Some(assign(
+                &s.name,
+                "copy",
+                vec![s.branches[0].value.clone()],
+                None,
+            ));
         }
         Some(stmt.clone())
     })
 }
 
 fn let_literal(name: &Name, value: f64, dtype: Option<DType>) -> Arc<Statement> {
-    Arc::new(Statement::Let(Let { name: name.clone(), value: Expression::float(value), dtype: Some(dtype.unwrap_or_else(|| DType::new("f32"))) }))
+    Arc::new(Statement::Let(Let {
+        name: name.clone(),
+        value: Expression::float(value),
+        dtype: Some(dtype.unwrap_or_else(|| DType::new("f32"))),
+    }))
 }
 
 /// Evaluate every operation whose operands are all literals into the literal it computes.
 pub fn fold_constants(body: &Body) -> Body {
     fn evaluated(stmt: &Assign, env: &HashMap<Name, f64>) -> Option<f64> {
-        if stmt.args.is_empty() || stmt.args.iter().any(|arg| !env.contains_key(arg)) || stmt.dtype.as_ref().is_some_and(|d| !is_float(d.name())) {
+        if stmt.args.is_empty()
+            || stmt.args.iter().any(|arg| !env.contains_key(arg))
+            || stmt.dtype.as_ref().is_some_and(|d| !is_float(d.name()))
+        {
             return None;
         }
         let values: Vec<f64> = stmt.args.iter().map(|arg| env[arg]).collect();
@@ -441,27 +602,32 @@ pub fn fold_constants(body: &Body) -> Body {
             let mut stmt = stmt.clone();
             let nested = stmt.nested();
             if !nested.is_empty() {
-                stmt = with_bodies(&stmt, nested.iter().map(|child| scope(child, &env)).collect());
+                stmt = with_bodies(
+                    &stmt,
+                    nested.iter().map(|child| scope(child, &env)).collect(),
+                );
             }
-            let value = match &*stmt {
-                Statement::Assign(a) => evaluated(a, &env),
+            let folded = match &*stmt {
+                Statement::Assign(a) => {
+                    evaluated(a, &env).map(|value| (a.name.clone(), value, a.dtype.clone()))
+                }
                 Statement::Affine(a) if a.args.iter().all(|arg| env.contains_key(arg)) => {
                     let mut sum = 0.0;
                     for (coefficient, arg) in a.terms() {
                         sum += coefficient * env[arg];
                     }
-                    Some(a.offset.0 + sum)
+                    Some((a.name.clone(), a.offset.0 + sum, a.dtype.clone()))
                 }
                 _ => None,
             };
-            if let Some(value) = value {
-                stmt = let_literal(stmt.name().expect("a value"), value, stmt.dtype().cloned());
+            if let Some((name, value, dtype)) = folded {
+                stmt = let_literal(&name, value, dtype);
             }
             for name in stmt.defines() {
                 env.remove(&name);
             }
-            if let Some(value) = literal_of(&stmt) {
-                env.insert(stmt.name().unwrap().clone(), value);
+            if let Some((name, value)) = literal_binding(&stmt) {
+                env.insert(name.clone(), value);
             }
             out.push(stmt);
         }
@@ -495,7 +661,12 @@ fn read_counts(body: &Body, exposed: &HashSet<Name>) -> HashMap<Name, usize> {
 fn is_droppable_pure(stmt: &Statement) -> bool {
     match stmt {
         Statement::Load(l) => l.carried.is_empty(),
-        Statement::Accum(_) | Statement::Affine(_) | Statement::Assign(_) | Statement::Init(_) | Statement::Let(_) | Statement::Select(_) => true,
+        Statement::Accum(_)
+        | Statement::Affine(_)
+        | Statement::Assign(_)
+        | Statement::Init(_)
+        | Statement::Let(_)
+        | Statement::Select(_) => true,
         _ => false,
     }
 }
@@ -511,7 +682,11 @@ pub fn drop_unread_values(body: &Body) -> Body {
         let reads = read_counts(&stmts, &HashSet::new());
         let mut dropped = false;
         stmts = stmts.map_stmts(&mut |stmt| {
-            let unread = is_droppable_pure(stmt) && !stmt.defines().iter().any(|name| reads.get(name).is_some_and(|c| *c > 0));
+            let unread = is_droppable_pure(stmt)
+                && !stmt
+                    .defines()
+                    .iter()
+                    .any(|name| reads.get(name).is_some_and(|c| *c > 0));
             let nested = stmt.nested();
             if unread || (!nested.is_empty() && nested.iter().all(|b| b.is_empty())) {
                 dropped = true;
@@ -536,7 +711,11 @@ pub fn fold_affine(body: &Body, exposed: &HashSet<Name>) -> Body {
         if let Some(stamped) = stmt.dtype() {
             return stamped.0.clone();
         }
-        let of = |args: &Names| -> Vec<&str> { args.iter().map(|arg| dtypes.get(arg).map_or("f32", |d| &**d)).collect() };
+        let of = |args: &Names| -> Vec<&str> {
+            args.iter()
+                .map(|arg| dtypes.get(arg).map_or("f32", |d| &**d))
+                .collect()
+        };
         match stmt {
             Statement::Assign(a) => promote(&a.op.name, &of(&a.args)),
             Statement::Affine(a) => promote("add", &of(&a.args)),
@@ -544,14 +723,24 @@ pub fn fold_affine(body: &Body, exposed: &HashSet<Name>) -> Body {
         }
     }
 
-    fn emitted(root: &Statement, terms: &[(Name, f64)], offset: f64) -> Arc<Statement> {
+    fn emitted(
+        root: &Statement,
+        name: &Name,
+        terms: &[(Name, f64)],
+        offset: f64,
+    ) -> Arc<Statement> {
         let live: Vec<(Name, f64)> = terms.iter().filter(|(_, c)| *c != 0.0).cloned().collect();
-        let name = root.name().expect("a value").clone();
+        let name = name.clone();
         if live.is_empty() {
             return let_literal(&name, offset, root.dtype().cloned());
         }
         if live.len() == 1 && live[0].1 == 1.0 && offset == 0.0 {
-            return assign(&name, "copy", vec![live[0].0.clone()], root.dtype().cloned());
+            return assign(
+                &name,
+                "copy",
+                vec![live[0].0.clone()],
+                root.dtype().cloned(),
+            );
         }
         Arc::new(Statement::Affine(Affine {
             name,
@@ -567,17 +756,28 @@ pub fn fold_affine(body: &Body, exposed: &HashSet<Name>) -> Body {
         match (a, b) {
             (Statement::Affine(a), Statement::Affine(b)) => {
                 let sorted = |x: &Affine| {
-                    let mut terms: Vec<(Key, Name)> = x.terms().map(|(c, arg)| (Key::float(c), arg.clone())).collect();
+                    let mut terms: Vec<(Key, Name)> = x
+                        .terms()
+                        .map(|(c, arg)| (Key::float(c), arg.clone()))
+                        .collect();
                     terms.sort();
                     terms
                 };
-                sorted(a) == sorted(b) && a.offset == b.offset && a.dtype == b.dtype && a.name == b.name
+                sorted(a) == sorted(b)
+                    && a.offset == b.offset
+                    && a.dtype == b.dtype
+                    && a.name == b.name
             }
             _ => a == b,
         }
     }
 
-    fn scope(body: &Body, dtypes: &HashMap<Name, Name>, literals: &HashMap<Name, f64>, counts: &HashMap<Name, usize>) -> Body {
+    fn scope(
+        body: &Body,
+        dtypes: &HashMap<Name, Name>,
+        literals: &HashMap<Name, f64>,
+        counts: &HashMap<Name, usize>,
+    ) -> Body {
         let stmts = body.stmts();
         let mut dtypes = dtypes.clone();
         let mut literals = literals.clone();
@@ -591,23 +791,43 @@ pub fn fold_affine(body: &Body, exposed: &HashSet<Name>) -> Body {
                 Statement::Assign(_) | Statement::Affine(_) => stmt.deps(),
                 _ => vec![],
             };
-            binds.push(reads.iter().filter_map(|arg| current.get(arg).map(|i| (arg.clone(), *i))).collect());
-            values.push(reads.iter().filter_map(|arg| literals.get(arg).map(|v| (arg.clone(), *v))).collect());
+            binds.push(
+                reads
+                    .iter()
+                    .filter_map(|arg| current.get(arg).map(|i| (arg.clone(), *i)))
+                    .collect(),
+            );
+            values.push(
+                reads
+                    .iter()
+                    .filter_map(|arg| literals.get(arg).map(|v| (arg.clone(), *v)))
+                    .collect(),
+            );
             for name in stmt.defines() {
                 current.insert(name.clone(), index);
                 dtypes.insert(name.clone(), dtype_of(stmt, &dtypes));
                 literals.remove(&name);
             }
-            if let Some(number) = literal_of(stmt) {
-                literals.insert(stmt.name().unwrap().clone(), number);
+            if let Some((name, number)) = literal_binding(stmt) {
+                literals.insert(name.clone(), number);
             }
         }
+        // The one name a cone member defines: an assign's or an affine's.
+        let value_name = |index: usize| -> Option<&Name> {
+            match &*stmts[index] {
+                Statement::Assign(a) => Some(&a.name),
+                Statement::Affine(a) => Some(&a.name),
+                _ => None,
+            }
+        };
         let affine = |index: usize| -> bool {
             match &*stmts[index] {
                 Statement::Affine(_) => true,
                 Statement::Assign(a) => {
                     let op = &*a.op.name;
-                    if !AFFINE_OPS.contains(&op) || a.args.len() != if op == "negative" { 1 } else { 2 } {
+                    if !AFFINE_OPS.contains(&op)
+                        || a.args.len() != if op == "negative" { 1 } else { 2 }
+                    {
                         return false;
                     }
                     if op == "divide" {
@@ -618,7 +838,13 @@ pub fn fold_affine(body: &Body, exposed: &HashSet<Name>) -> Body {
                 _ => false,
             }
         };
-        let cone: HashSet<usize> = (0..stmts.len()).filter(|&i| affine(i) && is_float(&dtypes[stmts[i].name().unwrap()])).collect();
+        let cone: HashSet<usize> = (0..stmts.len())
+            .filter(|&i| {
+                affine(i)
+                    && value_name(i)
+                        .is_some_and(|name| dtypes.get(name).is_some_and(|d| is_float(d)))
+            })
+            .collect();
         let mut read_by: HashMap<usize, usize> = HashMap::new();
         let mut reader: HashMap<usize, usize> = HashMap::new();
         for &index in &cone {
@@ -631,10 +857,15 @@ pub fn fold_affine(body: &Body, exposed: &HashSet<Name>) -> Body {
             .iter()
             .copied()
             .filter(|&index| {
-                let name = stmts[index].name().unwrap();
+                let (Some(name), Some(consumer)) = (
+                    value_name(index),
+                    reader.get(&index).and_then(|r| value_name(*r)),
+                ) else {
+                    return false;
+                };
                 counts.get(name).copied().unwrap_or(0) == 1
                     && read_by.get(&index).copied().unwrap_or(0) == 1
-                    && dtypes[name] == dtypes[stmts[reader[&index]].name().unwrap()]
+                    && dtypes.get(name) == dtypes.get(consumer)
             })
             .collect();
 
@@ -645,10 +876,20 @@ pub fn fold_affine(body: &Body, exposed: &HashSet<Name>) -> Body {
             absorbed: &'a HashSet<usize>,
         }
         impl Fold<'_> {
-            fn collect(&self, index: usize, arg: &Name, scale: f64, terms: &mut Vec<(Name, f64)>, offset: &mut f64) {
+            fn collect(
+                &self,
+                index: usize,
+                arg: &Name,
+                scale: f64,
+                terms: &mut Vec<(Name, f64)>,
+                offset: &mut f64,
+            ) {
                 if let Some(value) = self.values[index].get(arg) {
                     *offset += scale * value;
-                } else if let Some(bound) = self.binds[index].get(arg).filter(|b| self.absorbed.contains(b)) {
+                } else if let Some(bound) = self.binds[index]
+                    .get(arg)
+                    .filter(|b| self.absorbed.contains(b))
+                {
                     self.expand(*bound, scale, terms, offset);
                 } else {
                     match terms.iter_mut().find(|(name, _)| name == arg) {
@@ -657,7 +898,13 @@ pub fn fold_affine(body: &Body, exposed: &HashSet<Name>) -> Body {
                     }
                 }
             }
-            fn expand(&self, index: usize, scale: f64, terms: &mut Vec<(Name, f64)>, offset: &mut f64) {
+            fn expand(
+                &self,
+                index: usize,
+                scale: f64,
+                terms: &mut Vec<(Name, f64)>,
+                offset: &mut f64,
+            ) {
                 match &*self.stmts[index] {
                     Statement::Affine(a) => {
                         *offset += scale * a.offset.0;
@@ -667,44 +914,75 @@ pub fn fold_affine(body: &Body, exposed: &HashSet<Name>) -> Body {
                     }
                     Statement::Assign(a) => match (&*a.op.name, &a.args[..]) {
                         ("negative", [x]) => self.collect(index, x, -scale, terms, offset),
-                        ("divide", [x, d]) => self.collect(index, x, scale / self.values[index][d], terms, offset),
+                        ("divide", [x, d]) => {
+                            self.collect(index, x, scale / self.values[index][d], terms, offset)
+                        }
                         ("multiply", [left, right]) => {
                             if let Some(value) = self.values[index].get(left) {
                                 self.collect(index, right, scale * value, terms, offset);
                             } else {
-                                self.collect(index, left, scale * self.values[index][right], terms, offset);
+                                self.collect(
+                                    index,
+                                    left,
+                                    scale * self.values[index][right],
+                                    terms,
+                                    offset,
+                                );
                             }
                         }
                         (op, [a0, a1]) => {
                             self.collect(index, a0, scale, terms, offset);
-                            self.collect(index, a1, if op == "subtract" { -scale } else { scale }, terms, offset);
+                            self.collect(
+                                index,
+                                a1,
+                                if op == "subtract" { -scale } else { scale },
+                                terms,
+                                offset,
+                            );
                         }
-                        _ => unreachable!("an affine assign has one or two arguments"),
+                        _ => {} // a cone member is a unary negation or a binary operation
                     },
-                    _ => unreachable!("only assigns and affines are in a cone"),
+                    _ => {} // only assigns and affines are in a cone
                 }
             }
             fn members(&self, root: usize) -> HashSet<usize> {
                 let mut found = HashSet::new();
-                let mut pending: Vec<usize> = self.binds[root].values().copied().filter(|b| self.absorbed.contains(b)).collect();
+                let mut pending: Vec<usize> = self.binds[root]
+                    .values()
+                    .copied()
+                    .filter(|b| self.absorbed.contains(b))
+                    .collect();
                 while let Some(index) = pending.pop() {
                     if found.insert(index) {
-                        pending.extend(self.binds[index].values().copied().filter(|b| self.absorbed.contains(b)));
+                        pending.extend(
+                            self.binds[index]
+                                .values()
+                                .copied()
+                                .filter(|b| self.absorbed.contains(b)),
+                        );
                     }
                 }
                 found
             }
         }
-        let fold = Fold { stmts, binds: &binds, values: &values, absorbed: &absorbed };
+        let fold = Fold {
+            stmts,
+            binds: &binds,
+            values: &values,
+            absorbed: &absorbed,
+        };
         let mut rewritten: HashMap<usize, Arc<Statement>> = HashMap::new();
         let mut dropped: HashSet<usize> = HashSet::new();
         let mut roots: Vec<usize> = cone.difference(&absorbed).copied().collect();
         roots.sort_unstable();
         for root in roots {
+            let Some(name) = value_name(root) else {
+                continue;
+            };
             let mut terms: Vec<(Name, f64)> = Vec::new();
             let mut offset = 0.0;
             fold.expand(root, 1.0, &mut terms, &mut offset);
-            let folded = emitted(&stmts[root], &terms, offset);
+            let folded = emitted(&stmts[root], name, &terms, offset);
             if !same(&folded, &stmts[root]) {
                 rewritten.insert(root, folded);
                 dropped.extend(fold.members(root));
@@ -715,7 +993,13 @@ pub fn fold_affine(body: &Body, exposed: &HashSet<Name>) -> Body {
             let mut stmt = stmt.clone();
             let nested = stmt.nested();
             if !nested.is_empty() {
-                stmt = with_bodies(&stmt, nested.iter().map(|child| scope(child, &dtypes, &literals, counts)).collect());
+                stmt = with_bodies(
+                    &stmt,
+                    nested
+                        .iter()
+                        .map(|child| scope(child, &dtypes, &literals, counts))
+                        .collect(),
+                );
             }
             if !dropped.contains(&index) {
                 out.push(rewritten.get(&index).cloned().unwrap_or(stmt));
@@ -726,11 +1010,9 @@ pub fn fold_affine(body: &Body, exposed: &HashSet<Name>) -> Body {
 
     let folded = scope(body, &HashMap::new(), &HashMap::new(), &counts);
     let reads = read_counts(&folded, exposed);
-    folded.map_stmts(&mut |stmt| {
-        if literal_of(stmt).is_some() && reads.get(stmt.name().unwrap()).copied().unwrap_or(0) == 0 {
-            return None;
-        }
-        Some(stmt.clone())
+    folded.map_stmts(&mut |stmt| match literal_binding(stmt) {
+        Some((name, _)) if reads.get(name).copied().unwrap_or(0) == 0 => None,
+        _ => Some(stmt.clone()),
     })
 }
 
@@ -742,7 +1024,9 @@ const REDUCE_AXIS_PLACEHOLDER: &str = "__reduce_axis__";
 fn reduce_axis_source_positions(body: &Body, axis: &Name) -> BTreeSet<Key> {
     let mut out = BTreeSet::new();
     for here in body.loads() {
-        let Statement::Load(load) = &**here.stmt() else { continue };
+        let Statement::Load(load) = &**here.stmt() else {
+            continue;
+        };
         for (dim, e) in load.index.iter().enumerate() {
             match affine_form(e, &|name| name == &**axis) {
                 Some((anchor, coeffs)) => {
@@ -759,10 +1043,18 @@ fn reduce_axis_source_positions(body: &Body, axis: &Name) -> BTreeSet<Key> {
                 }
                 None if e.reads(axis) => {
                     let spelled = e
-                        .substitute(&HashMap::from([(axis.clone(), Expression::var(REDUCE_AXIS_PLACEHOLDER))]))
+                        .substitute(&HashMap::from([(
+                            axis.clone(),
+                            Expression::var(REDUCE_AXIS_PLACEHOLDER),
+                        )]))
                         .simplify(&SimplifyCtx::empty())
                         .unwrap_or_else(|_| e.clone());
-                    out.insert(Key::tuple([Key::str("composite"), Key::Str(load.input.clone()), Key::Int(dim as i64), Key::str(&spelled.text())]));
+                    out.insert(Key::tuple([
+                        Key::str("composite"),
+                        Key::Str(load.input.clone()),
+                        Key::Int(dim as i64),
+                        Key::str(&spelled.text()),
+                    ]));
                 }
                 None => {}
             }
@@ -781,7 +1073,12 @@ pub fn unify_siblings(body: &Body) -> Body {
         {
             let positions = reduce_axis_source_positions(&l.body, &l.axis.name);
             if !positions.is_empty() {
-                entries.push((i, l.axis.name.clone(), l.axis.extent.expression.clone(), positions));
+                entries.push((
+                    i,
+                    l.axis.name.clone(),
+                    l.axis.extent.expression.clone(),
+                    positions,
+                ));
             }
         }
     }
@@ -817,20 +1114,45 @@ pub fn unify_siblings(body: &Body) -> Body {
         if canonical == *axis_name {
             continue;
         }
-        let Statement::Loop(l) = &*stmts[*index] else { unreachable!() };
+        let Statement::Loop(l) = &*stmts[*index] else {
+            continue;
+        };
         // A RENAME, binders and uses through one map, which is why it may pass through the very scopes it renames.
-        let new_axis = Arc::new(Axis { name: canonical.clone(), extent: Dim { expression: extent.clone(), hint: l.axis.extent.hint }, window: l.axis.window.clone() });
+        let new_axis = Arc::new(Axis {
+            name: canonical.clone(),
+            extent: Dim {
+                expression: extent.clone(),
+                hint: l.axis.extent.hint,
+            },
+            window: l.axis.window.clone(),
+        });
         let mapping = HashMap::from([(l.axis.name.clone(), canonical.clone())]);
         let renamed = l.body.map_each(&mut |s| Statement::rename(s, &mapping));
-        stmts[*index] = Arc::new(Statement::Loop(Loop { axis: new_axis, body: renamed, unroll: l.unroll, seed: l.seed }));
+        stmts[*index] = Arc::new(Statement::Loop(Loop {
+            axis: new_axis,
+            body: renamed,
+            unroll: l.unroll,
+            seed: l.seed,
+        }));
         changed = true;
     }
-    if changed { Body::new(stmts) } else { body.clone() }
+    if changed {
+        Body::new(stmts)
+    } else {
+        body.clone()
+    }
 }
 
 /// The names a loop over `body` still binds after it closes.
 fn carried_out(body: &Body) -> HashSet<Name> {
-    let mut out: HashSet<Name> = body.stmts().iter().filter_map(|s| match &**s { Statement::Accum(a) => Some(a.name.clone()), _ => None }).collect();
+    let mut out: HashSet<Name> = body
+        .stmts()
+        .iter()
+        .filter_map(|s| match &**s {
+            Statement::Accum(a) => Some(a.name.clone()),
+            _ => None,
+        })
+        .collect();
     for stmt in body.stmts() {
         match &**stmt {
             Statement::Loop(l) if !l.seed => out.extend(carried_out(&l.body)),
@@ -854,7 +1176,10 @@ fn rename_apart(body: &Body, clashing: &HashSet<Name>, taken: &HashSet<Name>) ->
     let mut sorted: Vec<&Name> = clashing.iter().collect();
     sorted.sort();
     for name in sorted {
-        let fresh = (1..).map(|n| Name::from(format!("{name}__m{n}"))).find(|candidate| !used.contains(candidate)).unwrap();
+        let fresh = (1..)
+            .map(|n| Name::from(format!("{name}__m{n}")))
+            .find(|candidate| !used.contains(candidate))
+            .unwrap_or_else(|| name.clone());
         used.insert(fresh.clone());
         mapping.insert(name.clone(), fresh);
     }
@@ -886,8 +1211,15 @@ fn merge_sibling_reduce_loops_here(body: &Body) -> Body {
             if consumed.contains(&j) {
                 continue;
             }
-            let Statement::Loop(t) = &*items[j] else { continue };
-            if !(t.is_reduce() && t.axis.name == merged.axis.name && t.axis.extent == merged.axis.extent && t.unroll == merged.unroll && t.seed == merged.seed) {
+            let Statement::Loop(t) = &*items[j] else {
+                continue;
+            };
+            if !(t.is_reduce()
+                && t.axis.name == merged.axis.name
+                && t.axis.extent == merged.axis.extent
+                && t.unroll == merged.unroll
+                && t.seed == merged.seed)
+            {
                 continue;
             }
             // ONE reading of what the incoming loop needs from around it: the names it reads and does not bind.
@@ -899,41 +1231,55 @@ fn merge_sibling_reduce_loops_here(body: &Body) -> Body {
             let incoming = t.body.clone();
             // What is left of the shared spellings is a COLLISION, not a dependence: rename the incoming copy apart,
             // unless the loop still binds the name after it closes.
-            let clashing: HashSet<Name> = merged_defs.intersection(&incoming.definitions().keys().cloned().collect()).cloned().collect();
+            let clashing: HashSet<Name> = merged_defs
+                .intersection(&incoming.definitions().keys().cloned().collect())
+                .cloned()
+                .collect();
             if !clashing.is_disjoint(&carried_out(&incoming)) {
                 continue;
             }
             let mut between_defs: HashSet<Name> = HashSet::new();
-            for k in i + 1..j {
+            for (k, between) in items.iter().enumerate().take(j).skip(i + 1) {
                 if !consumed.contains(&k) {
-                    between_defs.extend(exposed_defines(&items[k]));
+                    between_defs.extend(exposed_defines(between));
                 }
             }
             if !between_defs.is_disjoint(&reads) {
                 continue;
             }
             let renamed = rename_apart(&incoming, &clashing, &merged_defs);
-            merged = Loop { axis: merged.axis.clone(), body: merged.body.concat(renamed.stmts()), unroll: merged.unroll, seed: merged.seed };
+            merged = Loop {
+                axis: merged.axis.clone(),
+                body: merged.body.concat(renamed.stmts()),
+                unroll: merged.unroll,
+                seed: merged.seed,
+            };
             consumed.insert(j);
             changed = true;
         }
-        out.push(if consumed.is_empty() && !changed { s.clone() } else { Arc::new(Statement::Loop(merged)) });
+        out.push(if consumed.is_empty() && !changed {
+            s.clone()
+        } else {
+            Arc::new(Statement::Loop(merged))
+        });
     }
-    if changed { Body::new(out) } else { body.clone() }
+    if changed {
+        Body::new(out)
+    } else {
+        body.clone()
+    }
 }
 
 /// Merge sibling reduce loops with one axis into one loop whose body is the concatenation; parents before children.
-pub fn merge_sibling_reduce_loops(body: &Body) -> Result<Body> {
+pub fn merge_sibling_reduce_loops(body: &Body) -> Body {
     let merged = merge_sibling_reduce_loops_here(&unify_siblings(body));
-    let out = merged.map_each(&mut |s| {
+    merged.map_each(&mut |s| {
         let nested = s.nested();
         if nested.is_empty() {
             return s.clone();
         }
-        let bodies: Vec<Body> = nested.iter().map(|b| merge_sibling_reduce_loops(b).expect("merging fails nothing")).collect();
-        with_bodies(s, bodies)
-    });
-    Ok(out)
+        with_bodies(s, nested.iter().map(merge_sibling_reduce_loops).collect())
+    })
 }
 
 // --- expression simplification ----------------------------------------------------------------------------
@@ -941,7 +1287,11 @@ pub fn merge_sibling_reduce_loops(body: &Body) -> Result<Body> {
 /// Simplify every expression inside a body, each under the value ranges of the loop axes around it.
 pub fn simplify_body(body: &Body) -> Result<Body> {
     let ctx = SimplifyCtx::empty();
-    let stmts: Result<Vec<Arc<Statement>>> = body.stmts().iter().map(|s| simplify_stmt(s, &ctx)).collect();
+    let stmts: Result<Vec<Arc<Statement>>> = body
+        .stmts()
+        .iter()
+        .map(|s| simplify_stmt(s, &ctx))
+        .collect();
     Ok(Body::new(stmts?))
 }
 
@@ -967,32 +1317,44 @@ fn simplify_stmt(stmt: &Arc<Statement>, ctx: &SimplifyCtx) -> Result<Arc<Stateme
             let inner = extend_simplify_ctx(ctx, &l.axis);
             Ok(with_bodies(&stmt, vec![simplify_in(&l.body, &inner)?]))
         }
-        Statement::Cond(c) => Ok(with_bodies(&stmt, vec![simplify_in(&c.body, ctx)?, simplify_in(&c.else_body, ctx)?])),
+        Statement::Cond(c) => Ok(with_bodies(
+            &stmt,
+            vec![simplify_in(&c.body, ctx)?, simplify_in(&c.else_body, ctx)?],
+        )),
         _ => Ok(stmt),
     }
 }
 
 fn simplify_in(body: &Body, ctx: &SimplifyCtx) -> Result<Body> {
-    let stmts: Result<Vec<Arc<Statement>>> = body.stmts().iter().map(|s| simplify_stmt(s, ctx)).collect();
+    let stmts: Result<Vec<Arc<Statement>>> =
+        body.stmts().iter().map(|s| simplify_stmt(s, ctx)).collect();
     Ok(Body::new(stmts?))
 }
 
 /// `s` without the branches its simplified predicates decide.
 fn decided(s: &Select) -> Select {
     let mut kept: Vec<SelectBranch> = Vec::new();
-    let (last, rest) = s.branches.split_last().expect("a select has a branch");
+    let Some((last, rest)) = s.branches.split_last() else {
+        return s.clone();
+    };
     for branch in rest {
         match branch.select.literal_value() {
             None => kept.push(branch.clone()),
             Some(value) if value.truthy() => {
                 kept.push(branch.clone());
-                return Select { name: s.name.clone(), branches: kept.into() };
+                return Select {
+                    name: s.name.clone(),
+                    branches: kept.into(),
+                };
             }
             Some(_) => {}
         }
     }
     kept.push(last.clone());
-    Select { name: s.name.clone(), branches: kept.into() }
+    Select {
+        name: s.name.clone(),
+        branches: kept.into(),
+    }
 }
 
 // --- placement -----------------------------------------------------------------------------------------------
@@ -1003,10 +1365,21 @@ pub fn rename_free(stmt: &Arc<Statement>, alias: &HashMap<Name, Name>) -> Arc<St
         return stmt.clone();
     }
     let bodies = stmt.nested();
-    let shell = if bodies.is_empty() { stmt.clone() } else { with_bodies(stmt, bodies.iter().map(|_| Body::empty()).collect()) };
+    let shell = if bodies.is_empty() {
+        stmt.clone()
+    } else {
+        with_bodies(stmt, bodies.iter().map(|_| Body::empty()).collect())
+    };
     let rename = |name: &str| alias.get(name).cloned();
     let empty = HashMap::new();
-    let renamed = Statement::rewrite(&shell, &crate::protocol::Rewrite { rename: &rename, sigma: &empty, axis_fn: None });
+    let renamed = Statement::rewrite(
+        &shell,
+        &crate::protocol::Rewrite {
+            rename: &rename,
+            sigma: &empty,
+            axis_fn: None,
+        },
+    );
     if bodies.is_empty() {
         return renamed;
     }
@@ -1014,9 +1387,17 @@ pub fn rename_free(stmt: &Arc<Statement>, alias: &HashMap<Name, Name>) -> Arc<St
     let mut inner = Vec::new();
     for b in bodies {
         let bound = b.local_defs();
-        let pruned: HashMap<Name, Name> = alias.iter().filter(|(k, _)| !bound.contains(*k) && !binds.contains(*k)).map(|(k, v)| (k.clone(), v.clone())).collect();
+        let pruned: HashMap<Name, Name> = alias
+            .iter()
+            .filter(|(k, _)| !bound.contains(*k) && !binds.contains(*k))
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect();
         // The surviving value may itself be shadowed here: rename the local binding before substituting.
-        let mut captured: Vec<Name> = bound.iter().filter(|name| pruned.values().any(|v| v == *name)).cloned().collect();
+        let mut captured: Vec<Name> = bound
+            .iter()
+            .filter(|name| pruned.values().any(|v| v == *name))
+            .cloned()
+            .collect();
         let mut b = b.clone();
         if !captured.is_empty() {
             captured.sort();
@@ -1072,6 +1453,8 @@ pub fn place_values(body: &Body) -> Result<Body> {
         seeds: HashSet<Name>,
     }
     type Walked = (Vec<Arc<Statement>>, Vec<(usize, Arc<Statement>)>, Marks);
+    /// A block placed: the statement where it stays (or `None` when it moved up), what moved up, its marks.
+    type Placed = (Option<Arc<Statement>>, Vec<(usize, Arc<Statement>)>, Marks);
     impl Placer<'_> {
         fn bump(&mut self, name: &Name, depth: usize) {
             let v = self.version.entry(name.clone()).or_insert(0);
@@ -1079,17 +1462,26 @@ pub fn place_values(body: &Body) -> Result<Body> {
             self.version_depth.insert((name.clone(), *v), depth);
         }
         fn read_of(&self, name: &Name) -> Marks {
-            if self.written.contains(name) { BTreeSet::from([(name.clone(), self.version.get(name).copied().unwrap_or(0))]) } else { BTreeSet::new() }
+            if self.written.contains(name) {
+                BTreeSet::from([(name.clone(), self.version.get(name).copied().unwrap_or(0))])
+            } else {
+                BTreeSet::new()
+            }
         }
         fn depth_of(&self, name: &Name) -> usize {
             let name = self.alias.get(name).unwrap_or(name);
             if let Some(depth) = self.defined.get(name) {
                 return *depth;
             }
-            (0..self.binders.len()).rev().find(|depth| self.binders[*depth].contains(name)).unwrap_or(0)
+            (0..self.binders.len())
+                .rev()
+                .find(|depth| self.binders[*depth].contains(name))
+                .unwrap_or(0)
         }
         fn pure(stmt: &Statement) -> bool {
-            (stmt.is_pure() || matches!(stmt, Statement::Call(_))) && stmt.nested().is_empty() && !matches!(stmt, Statement::Load(l) if !l.carried.is_empty())
+            (stmt.is_pure() || matches!(stmt, Statement::Call(_)))
+                && stmt.nested().is_empty()
+                && !matches!(stmt, Statement::Load(l) if !l.carried.is_empty())
         }
         fn reads(stmt: &Statement) -> HashSet<Name> {
             let mut out: HashSet<Name> = stmt.deps().into_iter().collect();
@@ -1134,7 +1526,9 @@ pub fn place_values(body: &Body) -> Result<Body> {
             out
         }
         fn lookup(&self, key: &PlaceKey, depth: usize) -> Option<Vec<Name>> {
-            self.available[..=depth].iter().find_map(|scope| scope.get(key).cloned())
+            self.available[..=depth]
+                .iter()
+                .find_map(|scope| scope.get(key).cloned())
         }
         fn walk(&mut self, body: &Body, depth: usize, seeded: bool) -> Result<Walked> {
             let mut kept: Vec<Arc<Statement>> = Vec::new();
@@ -1149,8 +1543,14 @@ pub fn place_values(body: &Body) -> Result<Body> {
             let uses = body.ssa_uses();
             // A carried state read ahead of its update in this scope is the previous step's: it lives here.
             for stmt in body.stmts() {
-                if let Statement::Accum(_) | Statement::Carry(_) = &**stmt {
-                    self.defined.entry(stmt.name().unwrap().clone()).or_insert(depth);
+                match &**stmt {
+                    Statement::Accum(a) => {
+                        self.defined.entry(a.name.clone()).or_insert(depth);
+                    }
+                    Statement::Carry(c) => {
+                        self.defined.entry(c.name.clone()).or_insert(depth);
+                    }
+                    _ => {}
                 }
             }
             for stmt in body.stmts() {
@@ -1162,10 +1562,17 @@ pub fn place_values(body: &Body) -> Result<Body> {
                     && a.args.len() == 1
                     && a.dtype.is_none()
                 {
-                    let source = self.alias.get(&a.args[0]).cloned().unwrap_or_else(|| a.args[0].clone());
+                    let source = self
+                        .alias
+                        .get(&a.args[0])
+                        .cloned()
+                        .unwrap_or_else(|| a.args[0].clone());
                     self.alias.insert(a.name.clone(), source.clone());
-                    let (depth_of, marks) = (self.depth_of(&source), self.taint.get(&source).cloned().unwrap_or_default());
-                    self.settle(&[a.name.clone()], depth_of, &marks);
+                    let (depth_of, marks) = (
+                        self.depth_of(&source),
+                        self.taint.get(&source).cloned().unwrap_or_default(),
+                    );
+                    self.settle(std::slice::from_ref(&a.name), depth_of, &marks);
                     continue;
                 }
                 if !stmt.nested().is_empty() {
@@ -1185,14 +1592,20 @@ pub fn place_values(body: &Body) -> Result<Body> {
                 }
                 let marks = self.own_taint(stmt);
                 marks_here.extend(marks.iter().cloned());
-                let number = self.numbering.numbers[self.numbering.ordinal(stmt)].as_ref().expect("a leaf is numbered").0;
+                let number = self.numbering.numbers[self.numbering.ordinal(stmt)]
+                    .as_ref()
+                    .map_or(0, |value| value.0);
                 let key: PlaceKey = (number, marks.clone());
                 let defines = stmt.defines();
                 if Placer::pure(stmt) {
                     if let Some(names) = self.lookup(&key, depth) {
                         // A repeated copy of one binding changes nothing; another binding of the value reads the first,
                         // unless that one is rebound later.
-                        if names == defines || names.iter().all(|name| counts.get(name).copied().unwrap_or(0) <= 1) {
+                        if names == defines
+                            || names
+                                .iter()
+                                .all(|name| counts.get(name).copied().unwrap_or(0) <= 1)
+                        {
                             if names != defines {
                                 for (own, other) in defines.iter().zip(&names) {
                                     self.alias.insert(own.clone(), other.clone());
@@ -1205,7 +1618,9 @@ pub fn place_values(body: &Body) -> Result<Body> {
                     }
                     let where_ = self.target(depth, &Placer::reads(stmt), &marks);
                     self.settle(&defines, where_, &marks);
-                    self.available[where_].entry(key.clone()).or_insert_with(|| defines.clone());
+                    self.available[where_]
+                        .entry(key.clone())
+                        .or_insert_with(|| defines.clone());
                     let emitted = rename_free(stmt, &self.alias);
                     self.key_of.insert(ptr(&emitted), key);
                     if where_ == depth {
@@ -1216,12 +1631,13 @@ pub fn place_values(body: &Body) -> Result<Body> {
                     continue;
                 }
                 if let Statement::Accum(a) = &**stmt {
-                    let reduction = seeded && counts.get(&a.name).copied().unwrap_or(0) == 1 && !uses.contains(&a.name) && !self.seeds.contains(&a.name);
-                    if reduction
-                        && let Some(names) = self.available[depth].get(&key).cloned()
-                    {
+                    let reduction = seeded
+                        && counts.get(&a.name).copied().unwrap_or(0) == 1
+                        && !uses.contains(&a.name)
+                        && !self.seeds.contains(&a.name);
+                    if reduction && let Some(names) = self.available[depth].get(&key).cloned() {
                         self.alias.insert(a.name.clone(), names[0].clone());
-                        self.settle(&[a.name.clone()], depth, &marks);
+                        self.settle(std::slice::from_ref(&a.name), depth, &marks);
                         continue;
                     }
                     if reduction {
@@ -1246,10 +1662,12 @@ pub fn place_values(body: &Body) -> Result<Body> {
             }
             Ok((kept, escaped, marks_here))
         }
-        fn block(&mut self, stmt: &Arc<Statement>, depth: usize) -> Result<(Option<Arc<Statement>>, Vec<(usize, Arc<Statement>)>, Marks)> {
+        fn block(&mut self, stmt: &Arc<Statement>, depth: usize) -> Result<Placed> {
             let nested = stmt.nested();
-            let members: Vec<Arc<Statement>> = nested.iter().flat_map(|child| child.iter_stmts()).collect();
-            let mut writes: HashSet<Name> = members.iter().flat_map(|m| m.external_writes()).collect();
+            let members: Vec<Arc<Statement>> =
+                nested.iter().flat_map(|child| child.iter_stmts()).collect();
+            let mut writes: HashSet<Name> =
+                members.iter().flat_map(|m| m.external_writes()).collect();
             for member in &members {
                 if let Statement::Carry(c) = &**member {
                     writes.insert(c.name.clone());
@@ -1273,7 +1691,8 @@ pub fn place_values(body: &Body) -> Result<Body> {
                 _ => (false, false),
             };
             self.binders.push(stmt.binds_axes().into_iter().collect());
-            self.floor.push(if scope { self.floor[depth] } else { depth + 1 });
+            self.floor
+                .push(if scope { self.floor[depth] } else { depth + 1 });
             let seeded = scope && seed;
             let entered = self.version.clone();
             let mut children: Vec<Walked> = Vec::new();
@@ -1286,7 +1705,10 @@ pub fn place_values(body: &Body) -> Result<Body> {
                 self.available.pop();
             }
             self.version = entered;
-            let mut up: Vec<(usize, Arc<Statement>)> = children.iter().flat_map(|(_, escaped, _)| escaped.iter().cloned()).collect();
+            let mut up: Vec<(usize, Arc<Statement>)> = children
+                .iter()
+                .flat_map(|(_, escaped, _)| escaped.iter().cloned())
+                .collect();
             if is_cond && children.iter().all(|(kept, _, _)| !kept.is_empty()) {
                 up.extend(self.common(&mut children, depth));
             }
@@ -1301,12 +1723,27 @@ pub fn place_values(body: &Body) -> Result<Body> {
             for (_, _, child_marks) in &children {
                 marks.extend(child_marks.iter().cloned());
             }
-            let shell = rename_free(&with_bodies(stmt, nested.iter().map(|_| Body::empty()).collect()), &self.alias);
-            let built = with_bodies(&shell, children.iter().map(|(kept, _, _)| Body::new(kept.clone())).collect());
+            let shell = rename_free(
+                &with_bodies(stmt, nested.iter().map(|_| Body::empty()).collect()),
+                &self.alias,
+            );
+            let built = with_bodies(
+                &shell,
+                children
+                    .iter()
+                    .map(|(kept, _, _)| Body::new(kept.clone()))
+                    .collect(),
+            );
             // The states the block still holds: a nested block that escaped settled its own at the scope it moved to.
-            let exported: Vec<Name> = built.nested().iter().flat_map(|child| child.carried_names().to_vec()).collect();
+            let exported: Vec<Name> = built
+                .nested()
+                .iter()
+                .flat_map(|child| child.carried_names().to_vec())
+                .collect();
             let mut where_ = depth;
-            if !stmt.has_side_effects() && !members.iter().any(|m| matches!(**m, Statement::Carry(_))) {
+            if !stmt.has_side_effects()
+                && !members.iter().any(|m| matches!(**m, Statement::Carry(_)))
+            {
                 where_ = self.target(depth, &free_names(&built).into_iter().collect(), &marks);
             }
             self.settle(&exported, where_, &marks);
@@ -1317,7 +1754,11 @@ pub fn place_values(body: &Body) -> Result<Body> {
             Ok((Some(built), up, marks))
         }
         /// Values both branches of a condition compute, with their operands held ahead of it, move ahead of it.
-        fn common(&mut self, children: &mut [Walked], depth: usize) -> Vec<(usize, Arc<Statement>)> {
+        fn common(
+            &mut self,
+            children: &mut [Walked],
+            depth: usize,
+        ) -> Vec<(usize, Arc<Statement>)> {
             let else_kept: Vec<Arc<Statement>> = children[1].0.clone();
             let mut in_else: HashMap<PlaceKey, usize> = HashMap::new();
             for (index, stmt) in else_kept.iter().enumerate() {
@@ -1350,7 +1791,12 @@ pub fn place_values(body: &Body) -> Result<Body> {
                 remaining.push(stmt);
             }
             children[0].0 = remaining;
-            children[1].0 = else_kept.iter().enumerate().filter(|(index, _)| !taken.contains(index)).map(|(_, stmt)| rename_free(stmt, &self.alias)).collect();
+            children[1].0 = else_kept
+                .iter()
+                .enumerate()
+                .filter(|(index, _)| !taken.contains(index))
+                .map(|(_, stmt)| rename_free(stmt, &self.alias))
+                .collect();
             hoisted
         }
     }
@@ -1427,10 +1873,12 @@ impl SequentialScope {
         for child in &children {
             let scalar = carried_out(child);
             for here in child.of_kinds(&["Accum", "Carry"]) {
-                let member = here.stmt();
-                let name = member.name().unwrap();
-                if matches!(**member, Statement::Carry(_)) || scalar.contains(name) {
-                    exported.push(name.clone());
+                match &**here.stmt() {
+                    Statement::Carry(c) => exported.push(c.name.clone()),
+                    Statement::Accum(a) if scalar.contains(&a.name) => {
+                        exported.push(a.name.clone())
+                    }
+                    _ => {}
                 }
             }
         }
@@ -1451,14 +1899,19 @@ impl SequentialScope {
         for axis in stmt.bound_axes() {
             for source in axis.sources() {
                 if !self.sources.contains_key(&source.name) {
-                    self.sources.insert(source.name.clone(), counters.fresh("p"));
+                    self.sources
+                        .insert(source.name.clone(), counters.fresh("p"));
                 }
             }
         }
         let mut names = self.ssa.clone();
         names.extend(self.sources.iter().map(|(k, v)| (k.clone(), v.clone())));
         names.extend(axes.iter().map(|(k, v)| (k.clone(), v.clone())));
-        let shell = if children.is_empty() { stmt.clone() } else { with_bodies(stmt, children.iter().map(|_| Body::empty()).collect()) };
+        let shell = if children.is_empty() {
+            stmt.clone()
+        } else {
+            with_bodies(stmt, children.iter().map(|_| Body::empty()).collect())
+        };
         let renamed = Statement::rename(&shell, &names);
         if children.is_empty() {
             return renamed;
@@ -1472,7 +1925,11 @@ impl SequentialScope {
                 owned: HashSet::new(),
                 fixed: exported.iter().cloned().collect(),
             };
-            let members: Vec<Arc<Statement>> = child.stmts().iter().map(|member| scope.step(counters, member)).collect();
+            let members: Vec<Arc<Statement>> = child
+                .stmts()
+                .iter()
+                .map(|member| scope.step(counters, member))
+                .collect();
             self.sources.extend(scope.sources);
             renamed_children.push(Body::new(members));
         }
@@ -1491,9 +1948,23 @@ pub fn rename_ssa_sequential(body: &Body) -> Body {
     for name in body.definitions().keys() {
         reserved.remove(name);
     }
-    let mut counters = Counters { counts: HashMap::new(), reserved };
-    let mut scope = SequentialScope { ssa: HashMap::new(), sources: HashMap::new(), inherited_axes: HashMap::new(), owned: HashSet::new(), fixed: HashSet::new() };
-    Body::new(body.stmts().iter().map(|stmt| scope.step(&mut counters, stmt)).collect())
+    let mut counters = Counters {
+        counts: HashMap::new(),
+        reserved,
+    };
+    let mut scope = SequentialScope {
+        ssa: HashMap::new(),
+        sources: HashMap::new(),
+        inherited_axes: HashMap::new(),
+        owned: HashSet::new(),
+        fixed: HashSet::new(),
+    };
+    Body::new(
+        body.stmts()
+            .iter()
+            .map(|stmt| scope.step(&mut counters, stmt))
+            .collect(),
+    )
 }
 
 // --- the canonical order --------------------------------------------------------------------------------
@@ -1503,7 +1974,10 @@ fn unlisted(stmt: &Arc<Statement>) -> Arc<Statement> {
     if let Statement::Affine(a) = &**stmt {
         let mut coefficients: Vec<Float> = a.coefficients.to_vec();
         coefficients.sort_by(|x, y| x.0.total_cmp(&y.0));
-        return Arc::new(Statement::Affine(Affine { coefficients: coefficients.into(), ..a.clone() }));
+        return Arc::new(Statement::Affine(Affine {
+            coefficients: coefficients.into(),
+            ..a.clone()
+        }));
     }
     stmt.clone()
 }
@@ -1512,7 +1986,10 @@ fn unlisted(stmt: &Arc<Statement>) -> Arc<Statement> {
 pub fn canonical_order(body: &Body) -> Result<Body> {
     let stmts = distinct(&canonicalize_expressions(body, &[])?);
     let role = roles(&stmts, None);
-    let numbering = value_numbers(&stmts, &|name| role.get(name).map_or_else(|| Key::Str(name.clone()), |r| Key::Int(*r as i64)));
+    let numbering = value_numbers(&stmts, &|name| {
+        role.get(name)
+            .map_or_else(|| Key::Str(name.clone()), |r| Key::Int(*r as i64))
+    });
     let slot = |_: &str| Some(Name::from("__slot__"));
     let slots: HashMap<Name, Name> = HashMap::new();
     let _ = &slots;
@@ -1520,14 +1997,22 @@ pub fn canonical_order(body: &Body) -> Result<Body> {
     // A statement's own shape with every name and buffer one placeholder.
     let shape = |stmt: &Arc<Statement>| -> Key {
         let children = stmt.nested();
-        let shell = if children.is_empty() { stmt.clone() } else { with_bodies(stmt, children.iter().map(|_| Body::empty()).collect()) };
+        let shell = if children.is_empty() {
+            stmt.clone()
+        } else {
+            with_bodies(stmt, children.iter().map(|_| Body::empty()).collect())
+        };
         let renamed = Statement::rename_with(&shell, &slot);
         let mut buffers: HashMap<Name, Name> = HashMap::new();
-        for name in renamed.external_reads().into_iter().chain(renamed.external_writes()) {
+        for name in renamed
+            .external_reads()
+            .into_iter()
+            .chain(renamed.external_writes())
+        {
             buffers.insert(name, Name::from("__slot__"));
         }
         let shell = unlisted(&Statement::rename_buffers(&renamed, &buffers));
-        Key::str(&crate::text::statement_text(&shell).expect("a shell has a text"))
+        Key::str(&structural_text(&shell))
     };
     // The whole subtree with names abstracted and buffers spelled: the tie-break between siblings of one shape.
     let spelling = |stmt: &Arc<Statement>| -> Key {
@@ -1535,13 +2020,24 @@ pub fn canonical_order(body: &Body) -> Result<Body> {
         let body = Body::new(vec![renamed]).map_stmts(&mut |s| Some(unlisted(s)));
         text_key(&body)
     };
-    fn ordered(body: &Body, numbering: &Numbering, shape: &dyn Fn(&Arc<Statement>) -> Key, spelling: &dyn Fn(&Arc<Statement>) -> Key) -> Body {
+    fn ordered(
+        body: &Body,
+        numbering: &Numbering,
+        shape: &dyn Fn(&Arc<Statement>) -> Key,
+        spelling: &dyn Fn(&Arc<Statement>) -> Key,
+    ) -> Body {
         let rebuilt = body.map_each(&mut |stmt| {
             let nested = stmt.nested();
             if nested.is_empty() {
                 return stmt.clone();
             }
-            with_bodies(stmt, nested.iter().map(|child| ordered(child, numbering, shape, spelling)).collect())
+            with_bodies(
+                stmt,
+                nested
+                    .iter()
+                    .map(|child| ordered(child, numbering, shape, spelling))
+                    .collect(),
+            )
         });
         let shapes: Vec<Key> = body.stmts().iter().map(shape).collect();
         let mut ties: HashMap<&Key, usize> = HashMap::new();
@@ -1556,20 +2052,42 @@ pub fn canonical_order(body: &Body) -> Result<Body> {
             .zip(&shapes)
             .map(|((stmt, built), own)| {
                 let children = stmt.nested();
-                let category = if !children.is_empty() && stmt.has_side_effects() { 2 } else { children.is_empty() as i64 };
-                let spelled = if ties[own] > 1 { spelling(built) } else { Key::str("") };
+                let category = if !children.is_empty() && stmt.has_side_effects() {
+                    2
+                } else {
+                    children.is_empty() as i64
+                };
+                let spelled = if ties[own] > 1 {
+                    spelling(built)
+                } else {
+                    Key::str("")
+                };
                 if !children.is_empty() {
                     let tree = scope_tree(numbering, &Body::new(vec![stmt.clone()]), &mut effects);
                     Key::tuple([Key::Int(category), own.clone(), spelled, Key::Num(tree)])
                 } else {
-                    let (number, params) = numbering.numbers[numbering.ordinal(stmt)].as_ref().expect("a leaf is numbered");
-                    Key::tuple([Key::Int(category), own.clone(), spelled, Key::Num(*number), Key::Tuple(params.clone())])
+                    let (number, params) = numbering.numbers[numbering.ordinal(stmt)]
+                        .as_ref()
+                        .map_or((Key::None, Vec::new()), |(n, p)| (Key::Num(*n), p.clone()));
+                    Key::tuple([
+                        Key::Int(category),
+                        own.clone(),
+                        spelled,
+                        number,
+                        Key::Tuple(params),
+                    ])
                 }
             })
             .collect();
         let incoming = ordering_constraints(&rebuilt, true, true);
-        let order = rebuilt.topological_permutation(&incoming, Some(&|index| priorities[index].clone()));
-        Body::new(order.into_iter().map(|index| rebuilt.stmts()[index].clone()).collect())
+        let order =
+            rebuilt.topological_permutation(&incoming, Some(&|index| priorities[index].clone()));
+        Body::new(
+            order
+                .into_iter()
+                .map(|index| rebuilt.stmts()[index].clone())
+                .collect(),
+        )
     }
     let placed = ordered(&stmts, &numbering, &shape, &spelling);
     let result = rename_ssa_sequential(&placed);
@@ -1586,29 +2104,42 @@ pub fn canonical_order(body: &Body) -> Result<Body> {
                 _ => 2,
             };
             for name in after.defines() {
-                operand.insert(name, Key::tuple([Key::Int(rank), Key::Num(*number), Key::Tuple(params.clone())]));
+                operand.insert(
+                    name,
+                    Key::tuple([
+                        Key::Int(rank),
+                        Key::Num(*number),
+                        Key::Tuple(params.clone()),
+                    ]),
+                );
             }
         }
     }
-    let operand_key = |name: &Name| operand.get(name).cloned().unwrap_or_else(|| Key::tuple([Key::Int(3), Key::str("")]));
-    let listed = result.map_stmts(&mut |stmt| {
-        match &**stmt {
-            Statement::Assign(a) if a.op.commutative && a.args.len() > 1 => {
-                let mut args: Vec<Name> = a.args.to_vec();
-                args.sort_by_cached_key(|name| (operand_key(name), name.clone()));
-                Some(Arc::new(Statement::Assign(Assign { args: args.into(), ..a.clone() })))
-            }
-            Statement::Affine(a) if a.args.len() > 1 => {
-                let mut terms: Vec<(f64, Name)> = a.terms().map(|(c, arg)| (c, arg.clone())).collect();
-                terms.sort_by_cached_key(|(c, name)| (operand_key(name), name.clone(), Key::float(*c)));
-                Some(Arc::new(Statement::Affine(Affine {
-                    args: terms.iter().map(|(_, n)| n.clone()).collect(),
-                    coefficients: terms.iter().map(|(c, _)| Float(*c)).collect(),
-                    ..a.clone()
-                })))
-            }
-            _ => Some(stmt.clone()),
+    let operand_key = |name: &Name| {
+        operand
+            .get(name)
+            .cloned()
+            .unwrap_or_else(|| Key::tuple([Key::Int(3), Key::str("")]))
+    };
+    let listed = result.map_stmts(&mut |stmt| match &**stmt {
+        Statement::Assign(a) if a.op.commutative && a.args.len() > 1 => {
+            let mut args: Vec<Name> = a.args.to_vec();
+            args.sort_by_cached_key(|name| (operand_key(name), name.clone()));
+            Some(Arc::new(Statement::Assign(Assign {
+                args: args.into(),
+                ..a.clone()
+            })))
         }
+        Statement::Affine(a) if a.args.len() > 1 => {
+            let mut terms: Vec<(f64, Name)> = a.terms().map(|(c, arg)| (c, arg.clone())).collect();
+            terms.sort_by_cached_key(|(c, name)| (operand_key(name), name.clone(), Key::float(*c)));
+            Some(Arc::new(Statement::Affine(Affine {
+                args: terms.iter().map(|(_, n)| n.clone()).collect(),
+                coefficients: terms.iter().map(|(c, _)| Float(*c)).collect(),
+                ..a.clone()
+            })))
+        }
+        _ => Some(stmt.clone()),
     });
     // Sequential naming separates lexical binders. Restore shared reduction dimensions without merging dependent
     // loops or changing the order.
@@ -1617,30 +2148,74 @@ pub fn canonical_order(body: &Body) -> Result<Body> {
         if nested.is_empty() {
             return Some(stmt.clone());
         }
-        Some(with_bodies(stmt, nested.iter().map(unify_siblings).collect()))
+        Some(with_bodies(
+            stmt,
+            nested.iter().map(unify_siblings).collect(),
+        ))
     });
     Ok(unify_siblings(&unified))
 }
 
 /// Canonicalize integer expressions using lexical binding order, never axis spelling.
 pub fn canonicalize_expressions(body: &Body, axes: &[Name]) -> Result<Body> {
-    let axis_order: HashMap<Name, usize> = axes.iter().enumerate().map(|(i, name)| (name.clone(), i)).collect();
-    let commutative = |op: BinOp| matches!(op, BinOp::Add | BinOp::Mul | BinOp::Eq | BinOp::Ne | BinOp::And | BinOp::Or | BinOp::BitAnd | BinOp::BitOr | BinOp::Xor);
+    let axis_order: HashMap<Name, usize> = axes
+        .iter()
+        .enumerate()
+        .map(|(i, name)| (name.clone(), i))
+        .collect();
+    let commutative = |op: BinOp| {
+        matches!(
+            op,
+            BinOp::Add
+                | BinOp::Mul
+                | BinOp::Eq
+                | BinOp::Ne
+                | BinOp::And
+                | BinOp::Or
+                | BinOp::BitAnd
+                | BinOp::BitOr
+                | BinOp::Xor
+        )
+    };
     fn unspelled(e: &Expression, axis_order: &HashMap<Name, usize>) -> Key {
         match &**e {
             Expr::Var(name) => match axis_order.get(name) {
                 Some(index) => Key::tuple([Key::str("Var"), Key::Int(*index as i64)]),
                 None => Key::tuple([Key::str("Var"), Key::Str(name.clone())]),
             },
-            Expr::Literal(Lit { value, dtype }) => Key::tuple([Key::str("Literal"), Key::num(*value), Key::Str(dtype.clone())]),
+            Expr::Literal(Lit { value, dtype }) => Key::tuple([
+                Key::str("Literal"),
+                Key::num(*value),
+                Key::Str(dtype.clone()),
+            ]),
             Expr::Builtin(name) => Key::tuple([Key::str("Builtin"), Key::Str(name.clone())]),
-            Expr::Binary(op, l, r) => Key::tuple([Key::str("Binary"), Key::str(op.text()), unspelled(l, axis_order), unspelled(r, axis_order)]),
-            Expr::Call(name, args) => Key::tuple([Key::str("Call"), Key::Str(name.clone()), Key::tuple(args.iter().map(|a| unspelled(a, axis_order)))]),
-            Expr::Ternary(a, b, c) => Key::tuple([Key::str("Ternary"), unspelled(a, axis_order), unspelled(b, axis_order), unspelled(c, axis_order)]),
-            Expr::Cast(dtype, inner) => Key::tuple([Key::str("Cast"), Key::Str(dtype.clone()), unspelled(inner, axis_order)]),
-            Expr::FlatIndex(buffer, index) => {
-                Key::tuple([Key::str("FlatIndex"), Key::Str(buffer.clone()), Key::tuple(index.iter().map(|a| unspelled(a, axis_order)))])
-            }
+            Expr::Binary(op, l, r) => Key::tuple([
+                Key::str("Binary"),
+                Key::str(op.text()),
+                unspelled(l, axis_order),
+                unspelled(r, axis_order),
+            ]),
+            Expr::Call(name, args) => Key::tuple([
+                Key::str("Call"),
+                Key::Str(name.clone()),
+                Key::tuple(args.iter().map(|a| unspelled(a, axis_order))),
+            ]),
+            Expr::Ternary(a, b, c) => Key::tuple([
+                Key::str("Ternary"),
+                unspelled(a, axis_order),
+                unspelled(b, axis_order),
+                unspelled(c, axis_order),
+            ]),
+            Expr::Cast(dtype, inner) => Key::tuple([
+                Key::str("Cast"),
+                Key::Str(dtype.clone()),
+                unspelled(inner, axis_order),
+            ]),
+            Expr::FlatIndex(buffer, index) => Key::tuple([
+                Key::str("FlatIndex"),
+                Key::Str(buffer.clone()),
+                Key::tuple(index.iter().map(|a| unspelled(a, axis_order))),
+            ]),
         }
     }
     let affine = |expression: Expression| -> Result<Expression> {
@@ -1649,29 +2224,47 @@ pub fn canonicalize_expressions(body: &Body, axes: &[Name]) -> Result<Body> {
         if variables.is_empty() || !variables.iter().all(|v| axis_order.contains_key(v)) {
             return Ok(expression);
         }
-        let Some((anchor, coefficients)) = affine_form(&expression, &|name| variables.iter().any(|v| &**v == name)) else { return Ok(expression) };
+        let Some((anchor, coefficients)) =
+            affine_form(&expression, &|name| variables.iter().any(|v| &**v == name))
+        else {
+            return Ok(expression);
+        };
         let anchor = anchor.simplify(&SimplifyCtx::empty())?;
         let mut sorted: Vec<(&Name, &i64)> = coefficients.iter().collect();
         sorted.sort_by_key(|(name, _)| axis_order[*name]);
         let mut terms: Vec<Expression> = Vec::new();
         for (name, coefficient) in sorted {
             let variable = Expression::new(Expr::Var(name.clone()));
-            terms.push(if *coefficient == 1 { variable } else { Expression::binary(BinOp::Mul, Expression::int(*coefficient), variable) });
+            terms.push(if *coefficient == 1 {
+                variable
+            } else {
+                Expression::binary(BinOp::Mul, Expression::int(*coefficient), variable)
+            });
         }
         if !anchor.is_zero() {
             terms.push(anchor);
         }
         let mut terms = terms.into_iter();
-        let Some(mut result) = terms.next() else { return Ok(Expression::int(0)) };
+        let Some(mut result) = terms.next() else {
+            return Ok(Expression::int(0));
+        };
         for term in terms {
             result = Expression::binary(BinOp::Add, result, term);
         }
         Ok(result)
     };
-    fn rewrite(e: &Expression, affine: &dyn Fn(Expression) -> Result<Expression>, commutative: &dyn Fn(BinOp) -> bool, axis_order: &HashMap<Name, usize>) -> Result<Expression> {
+    fn rewrite(
+        e: &Expression,
+        affine: &dyn Fn(Expression) -> Result<Expression>,
+        commutative: &dyn Fn(BinOp) -> bool,
+        axis_order: &HashMap<Name, usize>,
+    ) -> Result<Expression> {
         Ok(match &**e {
             Expr::Binary(op, left, right) => {
-                let (mut left, mut right) = (rewrite(left, affine, commutative, axis_order)?, rewrite(right, affine, commutative, axis_order)?);
+                let (mut left, mut right) = (
+                    rewrite(left, affine, commutative, axis_order)?,
+                    rewrite(right, affine, commutative, axis_order)?,
+                );
                 let mut op = *op;
                 match op {
                     BinOp::Gt => {
@@ -1688,10 +2281,17 @@ pub fn canonicalize_expressions(body: &Body, axes: &[Name]) -> Result<Body> {
                     std::mem::swap(&mut left, &mut right);
                 }
                 let result = Expression::binary(op, left, right);
-                if matches!(op, BinOp::Add | BinOp::Sub | BinOp::Mul) { affine(result)? } else { result }
+                if matches!(op, BinOp::Add | BinOp::Sub | BinOp::Mul) {
+                    affine(result)?
+                } else {
+                    result
+                }
             }
             Expr::Call(name, args) => {
-                let args: Result<Vec<Expression>> = args.iter().map(|a| rewrite(a, affine, commutative, axis_order)).collect();
+                let args: Result<Vec<Expression>> = args
+                    .iter()
+                    .map(|a| rewrite(a, affine, commutative, axis_order))
+                    .collect();
                 Expression::new(Expr::Call(name.clone(), args?.into()))
             }
             Expr::Ternary(a, b, c) => Expression::new(Expr::Ternary(
@@ -1699,7 +2299,10 @@ pub fn canonicalize_expressions(body: &Body, axes: &[Name]) -> Result<Body> {
                 rewrite(b, affine, commutative, axis_order)?,
                 rewrite(c, affine, commutative, axis_order)?,
             )),
-            Expr::Cast(dtype, inner) => Expression::new(Expr::Cast(dtype.clone(), rewrite(inner, affine, commutative, axis_order)?)),
+            Expr::Cast(dtype, inner) => Expression::new(Expr::Cast(
+                dtype.clone(),
+                rewrite(inner, affine, commutative, axis_order)?,
+            )),
             _ => e.clone(),
         })
     }
@@ -1708,7 +2311,12 @@ pub fn canonicalize_expressions(body: &Body, axes: &[Name]) -> Result<Body> {
         .stmts()
         .iter()
         .map(|stmt| {
-            let rewritten = Statement::map_expressions(stmt, &mut |e| match rewrite(e, &affine, &commutative, &axis_order) {
+            let rewritten = Statement::map_expressions(stmt, &mut |e| match rewrite(
+                e,
+                &affine,
+                &commutative,
+                &axis_order,
+            ) {
                 Ok(done) => done,
                 Err(err) => {
                     failure = Some(err);
@@ -1721,7 +2329,10 @@ pub fn canonicalize_expressions(body: &Body, axes: &[Name]) -> Result<Body> {
             if nested.is_empty() {
                 return Ok(rewritten);
             }
-            let bodies: Result<Vec<Body>> = nested.iter().map(|child| canonicalize_expressions(child, &bound)).collect();
+            let bodies: Result<Vec<Body>> = nested
+                .iter()
+                .map(|child| canonicalize_expressions(child, &bound))
+                .collect();
             Ok(with_bodies(&rewritten, bodies?))
         })
         .collect::<Result<_>>()?;
@@ -1758,33 +2369,48 @@ pub fn step_of(step: &NumOr<Expression>) -> Option<&Expression> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::text::parse_body;
+    use crate::text::{body_text, parse_body};
 
     fn normal(text: &str) -> String {
         let body = parse_body(text).unwrap();
         let normal = normalize_body(&body).unwrap_or_else(|err| panic!("{err}"));
-        assert_eq!(normalize_uncached(&normal).unwrap(), normal, "the normal form is final");
+        assert_eq!(
+            normalize_uncached(&normal).unwrap(),
+            normal,
+            "the normal form is final"
+        );
         body_text(&normal).unwrap()
     }
 
     #[test]
     fn a_body_normalizes_and_settles() {
-        let text = normal("for i in 0..4:\n    for k in 0..8:\n        x = load a[i, k]\n        y = exp(x)\n        s <- add(s, y) over k\n    out[i] = s");
+        let text = normal(
+            "for i in 0..4:\n    for k in 0..8:\n        x = load a[i, k]\n        y = exp(x)\n        s <- add(s, y) over k\n    out[i] = s",
+        );
         assert!(text.contains("acc0 <- add(acc0, v0) over a1"), "{text}");
-        let folded = normal("for i in 0..4:\n    x = load a[i]\n    let c = 2.0\n    y = multiply(x, c)\n    z = add(y, x)\n    out[i] = z");
+        let folded = normal(
+            "for i in 0..4:\n    x = load a[i]\n    let c = 2.0\n    y = multiply(x, c)\n    z = add(y, x)\n    out[i] = z",
+        );
         assert!(folded.contains("v0 = 3*in0"), "{folded}");
     }
 
     #[test]
     fn renamed_bodies_share_an_identity() {
-        let a = parse_body("for i in 0..4:\n    x = load p[i]\n    y = exp(x)\n    out[i] = y").unwrap();
-        let b = parse_body("for j in 0..4:\n    q = load r[j]\n    w = exp(q)\n    res[j] = w").unwrap();
+        let a = parse_body("for i in 0..4:\n    x = load p[i]\n    y = exp(x)\n    out[i] = y")
+            .unwrap();
+        let b = parse_body("for j in 0..4:\n    q = load r[j]\n    w = exp(q)\n    res[j] = w")
+            .unwrap();
         let ia = crate::identity::canonicalize_identity(&a, false, None).unwrap();
         let ib = crate::identity::canonicalize_identity(&b, false, None).unwrap();
         assert_eq!(ia.key, ib.key);
         assert_eq!(ia.arguments, vec![Name::from("p"), Name::from("out")]);
-        let c = parse_body("for j in 0..4:\n    q = load r[j]\n    w = log(q)\n    res[j] = w").unwrap();
-        assert_ne!(crate::identity::canonicalize_identity(&c, false, None).unwrap().key, ia.key);
+        let c = parse_body("for j in 0..4:\n    q = load r[j]\n    w = log(q)\n    res[j] = w")
+            .unwrap();
+        assert_ne!(
+            crate::identity::canonicalize_identity(&c, false, None)
+                .unwrap()
+                .key,
+            ia.key
+        );
     }
 }
-

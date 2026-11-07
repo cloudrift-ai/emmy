@@ -46,10 +46,27 @@ fn width(name: &str) -> i32 {
 /// Promote an elementwise op's argument dtypes to one result dtype: the common integer dtype by the C rank and sign
 /// rule for integer arithmetic on integers, `f16` when every argument is `f16`, else `f32`.
 pub fn promote(op_name: &str, arg_dtypes: &[&str]) -> Name {
-    if !arg_dtypes.is_empty() && INTEGER_ELEMENTWISE_OPS.contains(&op_name) && arg_dtypes.iter().all(|d| is_integer(d)) {
-        let signed = arg_dtypes.iter().filter(|d| d.starts_with('i')).map(|d| width(d)).max().unwrap_or(0);
-        let unsigned = arg_dtypes.iter().filter(|d| d.starts_with('u')).map(|d| width(d)).max().unwrap_or(0);
-        return if unsigned >= signed { format!("u{unsigned}").into() } else { format!("i{signed}").into() };
+    if !arg_dtypes.is_empty()
+        && INTEGER_ELEMENTWISE_OPS.contains(&op_name)
+        && arg_dtypes.iter().all(|d| is_integer(d))
+    {
+        let signed = arg_dtypes
+            .iter()
+            .filter(|d| d.starts_with('i'))
+            .map(|d| width(d))
+            .max()
+            .unwrap_or(0);
+        let unsigned = arg_dtypes
+            .iter()
+            .filter(|d| d.starts_with('u'))
+            .map(|d| width(d))
+            .max()
+            .unwrap_or(0);
+        return if unsigned >= signed {
+            format!("u{unsigned}").into()
+        } else {
+            format!("i{signed}").into()
+        };
     }
     if !arg_dtypes.is_empty() && arg_dtypes.iter().all(|d| *d == "f16") {
         return "f16".into();

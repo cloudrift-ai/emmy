@@ -9,7 +9,10 @@ use crate::elementwise::Op;
 use crate::kinds::{Assign, Statement};
 use crate::normalize::normalize_body;
 use crate::values::{digest, hex};
-use crate::{Name, Result};
+use crate::{Name, Result, locked};
+
+/// How many identities the process keeps: a cut's arms lower the same pieces again and again.
+const MEMO_SIZE: usize = 16384;
 
 /// What an identity was computed under: the clustered reading or the exact one, and each buffer's color.
 #[derive(Clone, PartialEq, Eq, Hash, Debug)]
@@ -41,7 +44,11 @@ fn canonicalize_op_clusters(body: &Body) -> Body {
             other => match other.op() {
                 Some(op) => {
                     let representative = op.cluster_representative();
-                    if representative != *op { Arc::new(other.with_op(representative)) } else { stmt.clone() }
+                    if representative != *op {
+                        Arc::new(other.with_op(representative))
+                    } else {
+                        stmt.clone()
+                    }
                 }
                 None => stmt.clone(),
             },
@@ -56,49 +63,74 @@ struct Memo {
 
 fn identities() -> &'static Mutex<Memo> {
     static MEMO: OnceLock<Mutex<Memo>> = OnceLock::new();
-    MEMO.get_or_init(|| Mutex::new(Memo { store: HashMap::new(), order: std::collections::VecDeque::new() }))
+    MEMO.get_or_init(|| {
+        Mutex::new(Memo {
+            store: HashMap::new(),
+            order: std::collections::VecDeque::new(),
+        })
+    })
 }
 
 pub fn clear_memo() {
-    let mut memo = identities().lock().unwrap();
+    let mut memo = locked(identities());
     memo.store.clear();
     memo.order.clear();
 }
 
 /// Key the normal form of `body`, optionally with operations collapsed to compute-unit clusters. `colors` types
 /// each external buffer, so differently typed roles never share a rank.
-pub fn canonicalize_identity(body: &Body, cluster: bool, colors: Option<&HashMap<Name, String>>) -> Result<Identity> {
+pub fn canonicalize_identity(
+    body: &Body,
+    cluster: bool,
+    colors: Option<&HashMap<Name, String>>,
+) -> Result<Identity> {
     let mut stmts = normalize_body(body)?;
     if cluster {
         stmts = normalize_body(&canonicalize_op_clusters(&stmts))?;
     }
     let colors_key = colors.map(|c| {
-        let mut sorted: Vec<(Name, String)> = c.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
+        let mut sorted: Vec<(Name, String)> =
+            c.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
         sorted.sort();
         sorted
     });
-    let key = IdentityKey { cluster, colors: colors_key };
-    {
-        let found = stmts.0.identities.lock().unwrap();
-        if let Some((_, identity)) = found.iter().find(|(k, _)| *k == key) {
-            return Ok(identity.clone());
-        }
-    }
-    let memo_key = (stmts.content_hash(), key.clone());
-    if let Some(entries) = identities().lock().unwrap().store.get(&memo_key)
-        && let Some((_, identity)) = entries.iter().find(|(b, _)| *b == stmts)
-    {
-        stmts.0.identities.lock().unwrap().push((key, identity.clone()));
+    let key = IdentityKey {
+        cluster,
+        colors: colors_key,
+    };
+    if let Some((_, identity)) = locked(&stmts.0.identities).iter().find(|(k, _)| *k == key) {
         return Ok(identity.clone());
     }
+    let memo_key = (stmts.content_hash(), key.clone());
+    let remembered = locked(identities())
+        .store
+        .get(&memo_key)
+        .and_then(|entries| {
+            entries
+                .iter()
+                .find(|(b, _)| *b == stmts)
+                .map(|(_, i)| i.clone())
+        });
+    if let Some(identity) = remembered {
+        locked(&stmts.0.identities).push((key, identity.clone()));
+        return Ok(identity);
+    }
     let (tree, arguments) = digest(&stmts, colors);
-    let identity = Identity { key: hex(tree), arguments };
-    stmts.0.identities.lock().unwrap().push((key, identity.clone()));
-    let mut memo = identities().lock().unwrap();
-    memo.store.entry(memo_key.clone()).or_default().push((stmts.clone(), identity.clone()));
+    let identity = Identity {
+        key: hex(tree),
+        arguments,
+    };
+    locked(&stmts.0.identities).push((key, identity.clone()));
+    let mut memo = locked(identities());
+    memo.store
+        .entry(memo_key.clone())
+        .or_default()
+        .push((stmts.clone(), identity.clone()));
     memo.order.push_back(memo_key);
-    while memo.order.len() > 16384 {
-        let oldest = memo.order.pop_front().unwrap();
+    while memo.order.len() > MEMO_SIZE {
+        let Some(oldest) = memo.order.pop_front() else {
+            break;
+        };
         if let Some(entries) = memo.store.get_mut(&oldest) {
             entries.remove(0);
             if entries.is_empty() {

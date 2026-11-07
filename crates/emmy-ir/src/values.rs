@@ -12,13 +12,13 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
-use crate::Name;
 use crate::body::{Body, StmtRef};
 use crate::expr::{Expr, Expression, Num};
 use crate::field::NumOr;
 use crate::kinds::Statement;
 use crate::order::ordering_constraints;
-use crate::text::{spell_axis, statement_text};
+use crate::text::{spell_axis, structural_text};
+use crate::{Name, locked};
 
 /// Digest material: a tree of primitives, hashed to a number and ordered totally.
 #[derive(Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Debug)]
@@ -95,7 +95,9 @@ impl Key {
         let mut hasher = blake3::Hasher::new();
         self.feed(&mut hasher);
         let bytes = hasher.finalize();
-        u128::from_le_bytes(bytes.as_bytes()[..16].try_into().unwrap())
+        let mut head = [0u8; 16];
+        head.copy_from_slice(&bytes.as_bytes()[..16]);
+        u128::from_le_bytes(head)
     }
 }
 
@@ -251,20 +253,50 @@ impl Context<'_> {
                 Some(depth) => Key::tuple([Key::str("Var"), Key::Int(depth as i64)]),
                 None => Key::tuple([Key::str("Var"), Key::Str(name.clone())]),
             },
-            Expr::Literal(lit) => Key::tuple([Key::str("Literal"), Key::num(lit.value), Key::Str(lit.dtype.clone())]),
+            Expr::Literal(lit) => Key::tuple([
+                Key::str("Literal"),
+                Key::num(lit.value),
+                Key::Str(lit.dtype.clone()),
+            ]),
             Expr::Builtin(name) => Key::tuple([Key::str("Builtin"), Key::Str(name.clone())]),
-            Expr::Binary(op, l, r) => Key::tuple([Key::str("Binary"), Key::str(op.text()), self.by_depth(l), self.by_depth(r)]),
-            Expr::Call(name, args) => Key::tuple([Key::str("Call"), Key::Str(name.clone()), Key::tuple(args.iter().map(|a| self.by_depth(a)))]),
-            Expr::Ternary(a, b, c) => Key::tuple([Key::str("Ternary"), self.by_depth(a), self.by_depth(b), self.by_depth(c)]),
-            Expr::Cast(dtype, inner) => Key::tuple([Key::str("Cast"), Key::Str(dtype.clone()), self.by_depth(inner)]),
-            Expr::FlatIndex(buffer, index) => {
-                Key::tuple([Key::str("FlatIndex"), Key::Str(buffer.clone()), Key::tuple(index.iter().map(|a| self.by_depth(a)))])
-            }
+            Expr::Binary(op, l, r) => Key::tuple([
+                Key::str("Binary"),
+                Key::str(op.text()),
+                self.by_depth(l),
+                self.by_depth(r),
+            ]),
+            Expr::Call(name, args) => Key::tuple([
+                Key::str("Call"),
+                Key::Str(name.clone()),
+                Key::tuple(args.iter().map(|a| self.by_depth(a))),
+            ]),
+            Expr::Ternary(a, b, c) => Key::tuple([
+                Key::str("Ternary"),
+                self.by_depth(a),
+                self.by_depth(b),
+                self.by_depth(c),
+            ]),
+            Expr::Cast(dtype, inner) => Key::tuple([
+                Key::str("Cast"),
+                Key::Str(dtype.clone()),
+                self.by_depth(inner),
+            ]),
+            Expr::FlatIndex(buffer, index) => Key::tuple([
+                Key::str("FlatIndex"),
+                Key::Str(buffer.clone()),
+                Key::tuple(index.iter().map(|a| self.by_depth(a))),
+            ]),
         }
     }
 
     /// The expression with every maximal coordinate-only subexpression a parameter and every SSA read an operand.
-    fn abstract_(&mut self, e: &Expression, params: &mut Vec<Param>, ops: &mut Vec<Value>, touched: &mut Vec<Name>) -> Key {
+    fn abstract_(
+        &mut self,
+        e: &Expression,
+        params: &mut Vec<Param>,
+        ops: &mut Vec<Value>,
+        touched: &mut Vec<Name>,
+    ) -> Key {
         if self.reads_axis(e) && self.coordinate_only(e) {
             let key = Key::tuple([Key::str("expr"), self.by_depth(e)]);
             let index = match params.iter().position(|p| *p == key) {
@@ -278,27 +310,49 @@ impl Context<'_> {
         }
         match &**e {
             Expr::Var(name) => self.operand(name, ops, touched),
-            Expr::Literal(lit) => Key::tuple([Key::str("Literal"), Key::num(lit.value), Key::Str(lit.dtype.clone())]),
+            Expr::Literal(lit) => Key::tuple([
+                Key::str("Literal"),
+                Key::num(lit.value),
+                Key::Str(lit.dtype.clone()),
+            ]),
             Expr::Builtin(name) => Key::tuple([Key::str("Builtin"), Key::Str(name.clone())]),
             Expr::Binary(op, l, r) => {
-                let (l, r) = (self.abstract_(l, params, ops, touched), self.abstract_(r, params, ops, touched));
+                let (l, r) = (
+                    self.abstract_(l, params, ops, touched),
+                    self.abstract_(r, params, ops, touched),
+                );
                 Key::tuple([Key::str("Binary"), Key::str(op.text()), l, r])
             }
             Expr::Call(name, args) => {
-                let args: Vec<Key> = args.iter().map(|a| self.abstract_(a, params, ops, touched)).collect();
+                let args: Vec<Key> = args
+                    .iter()
+                    .map(|a| self.abstract_(a, params, ops, touched))
+                    .collect();
                 Key::tuple([Key::str("Call"), Key::Str(name.clone()), Key::Tuple(args)])
             }
             Expr::Ternary(a, b, c) => {
                 let parts = [a, b, c].map(|x| self.abstract_(x, params, ops, touched));
-                Key::tuple([Key::str("Ternary"), parts[0].clone(), parts[1].clone(), parts[2].clone()])
+                Key::tuple([
+                    Key::str("Ternary"),
+                    parts[0].clone(),
+                    parts[1].clone(),
+                    parts[2].clone(),
+                ])
             }
             Expr::Cast(dtype, inner) => {
                 let inner = self.abstract_(inner, params, ops, touched);
                 Key::tuple([Key::str("Cast"), Key::Str(dtype.clone()), inner])
             }
             Expr::FlatIndex(buffer, index) => {
-                let index: Vec<Key> = index.iter().map(|a| self.abstract_(a, params, ops, touched)).collect();
-                Key::tuple([Key::str("FlatIndex"), Key::Str(buffer.clone()), Key::Tuple(index)])
+                let index: Vec<Key> = index
+                    .iter()
+                    .map(|a| self.abstract_(a, params, ops, touched))
+                    .collect();
+                Key::tuple([
+                    Key::str("FlatIndex"),
+                    Key::Str(buffer.clone()),
+                    Key::Tuple(index),
+                ])
             }
         }
     }
@@ -318,11 +372,19 @@ impl Context<'_> {
     /// An operation's argument no statement ahead of it binds: a carried state read ahead of its update, keyed by
     /// use, or a name free in the body, spelled.
     fn unbound(&mut self, name: &Name, touched: &mut Vec<Name>) -> Key {
-        if self.carried.contains(name) { self.resource(name, "state", touched) } else { Key::Str(name.clone()) }
+        if self.carried.contains(name) {
+            self.resource(name, "state", touched)
+        } else {
+            Key::Str(name.clone())
+        }
     }
 
     fn resource(&mut self, name: &Name, kind: &str, touched: &mut Vec<Name>) -> Key {
-        let held = if kind == "state" { &mut self.out.states } else { &mut self.out.buffers };
+        let held = if kind == "state" {
+            &mut self.out.states
+        } else {
+            &mut self.out.buffers
+        };
         if !held.contains(name) {
             held.push(name.clone());
         }
@@ -356,14 +418,29 @@ impl Context<'_> {
                     parent.push(param.clone());
                 }
             }
-            let positions = its.iter().map(|param| Key::Int(parent.iter().position(|p| p == param).unwrap() as i64));
+            let positions = its.iter().map(|param| {
+                Key::Int(
+                    parent
+                        .iter()
+                        .position(|p| p == param)
+                        .map_or(-1, |p| p as i64),
+                )
+            });
             mapped.push(Key::tuple([Key::Num(*number), Key::tuple(positions)]));
         }
         (parent, mapped)
     }
 
     /// Number `kind`/`payload` over `ops`, unifying parameters by their expression; `bound` axes reduce.
-    fn compose(&mut self, kind: &str, payload: Key, mut ops: Vec<Value>, params: &[Param], bound: &[Name], commutative: bool) -> Value {
+    fn compose(
+        &mut self,
+        kind: &str,
+        payload: Key,
+        mut ops: Vec<Value>,
+        params: &[Param],
+        bound: &[Name],
+        commutative: bool,
+    ) -> Value {
         if commutative {
             ops.sort_by(|a, b| a.0.cmp(&b.0));
             let mut groups: Vec<Vec<Value>> = Vec::new();
@@ -373,38 +450,59 @@ impl Context<'_> {
                     _ => groups.push(vec![value]),
                 }
             }
-            if groups.iter().any(|group| group.len() > 1) {
-                let arrangements: Vec<Vec<Vec<Value>>> = groups.iter().map(|group| permutations(group)).collect();
+            let flat: Vec<Value> = groups.iter().flatten().cloned().collect();
+            ops = if groups.iter().any(|group| group.len() > 1) {
+                let arrangements: Vec<Vec<Vec<Value>>> =
+                    groups.iter().map(|group| permutations(group)).collect();
                 let mut best: Option<(Vec<Key>, Vec<Value>)> = None;
                 for_each_product(&arrangements, &mut |choice| {
-                    let order: Vec<Value> = choice.iter().flat_map(|group| group.iter().cloned()).collect();
+                    let order: Vec<Value> = choice
+                        .iter()
+                        .flat_map(|group| group.iter().cloned())
+                        .collect();
                     let (parent, mapped) = Context::laid_out(&order, params);
                     let key = vec![Key::Tuple(mapped), Key::Tuple(parent)];
                     if best.as_ref().is_none_or(|(best_key, _)| key < *best_key) {
                         best = Some((key, order));
                     }
                 });
-                ops = best.unwrap().1;
+                best.map_or(flat, |(_, order)| order)
             } else {
-                ops = groups.into_iter().flatten().collect();
-            }
+                flat
+            };
         }
         let (parent, mapped) = Context::laid_out(&ops, params);
         let mut reduced = Key::Tuple(vec![]);
         let mut kept: Vec<Param> = parent.clone();
         if !bound.is_empty() {
-            let mut bound_depths: Vec<usize> = bound.iter().filter_map(|name| self.depth_of(name)).collect();
+            let mut bound_depths: Vec<usize> = bound
+                .iter()
+                .filter_map(|name| self.depth_of(name))
+                .collect();
             bound_depths.sort_unstable();
             bound_depths.dedup();
-            let reads_bound = |this: &mut Context, param: &Param| this.param_depths(param).iter().any(|d| bound_depths.contains(d));
-            let reduced_indices: Vec<usize> = (0..parent.len()).filter(|&i| reads_bound(self, &parent[i])).collect();
-            kept = parent.iter().filter(|param| !reads_bound(self, param)).cloned().collect();
+            let reads_bound = |this: &mut Context, param: &Param| {
+                this.param_depths(param)
+                    .iter()
+                    .any(|d| bound_depths.contains(d))
+            };
+            let reduced_indices: Vec<usize> = (0..parent.len())
+                .filter(|&i| reads_bound(self, &parent[i]))
+                .collect();
+            kept = parent
+                .iter()
+                .filter(|param| !reads_bound(self, param))
+                .cloned()
+                .collect();
             for param in &parent {
                 if reads_bound(self, param) {
                     // A bound composite still reads its free coordinates: they stay as bare parameters of the reduce.
                     for depth in self.param_depths(param) {
                         if !bound_depths.contains(&depth) {
-                            let bare = Key::tuple([Key::str("expr"), Key::tuple([Key::str("Var"), Key::Int(depth as i64)])]);
+                            let bare = Key::tuple([
+                                Key::str("expr"),
+                                Key::tuple([Key::str("Var"), Key::Int(depth as i64)]),
+                            ]);
                             if !kept.contains(&bare) {
                                 kept.push(bare);
                             }
@@ -422,10 +520,18 @@ impl Context<'_> {
                             return Key::tuple([Key::str("bound"), Key::Int(position as i64)]);
                         }
                         let bare = Key::tuple([Key::str("expr"), value.clone()]);
-                        let position = kept.iter().position(|p| *p == bare).expect("a bare parameter was kept");
-                        return Key::tuple([Key::str("parameter"), Key::Int(position as i64)]);
+                        let position = kept
+                            .iter()
+                            .position(|p| *p == bare)
+                            .map_or(-1, |p| p as i64);
+                        return Key::tuple([Key::str("parameter"), Key::Int(position)]);
                     }
-                    return Key::Tuple(parts.iter().map(|part| bound_form(part, bound_depths, kept)).collect());
+                    return Key::Tuple(
+                        parts
+                            .iter()
+                            .map(|part| bound_form(part, bound_depths, kept))
+                            .collect(),
+                    );
                 }
                 value.clone()
             }
@@ -437,7 +543,10 @@ impl Context<'_> {
                             Key::Tuple(parts) if parts.len() == 2 => &parts[1],
                             other => other,
                         };
-                        Key::tuple([Key::Int(index as i64), bound_form(form, &bound_depths, &kept)])
+                        Key::tuple([
+                            Key::Int(index as i64),
+                            bound_form(form, &bound_depths, &kept),
+                        ])
                     })
                     .collect(),
             );
@@ -454,13 +563,33 @@ impl Context<'_> {
                 }
             }
         }
-        let number = hash_parts([Key::str(kind), payload, Key::Tuple(mapped), reduced, Key::Tuple(domain)]);
-        self.out.operands.entry(number).or_insert_with(|| ops.iter().map(|(n, _)| *n).collect());
+        let number = hash_parts([
+            Key::str(kind),
+            payload,
+            Key::Tuple(mapped),
+            reduced,
+            Key::Tuple(domain),
+        ]);
+        self.out
+            .operands
+            .entry(number)
+            .or_insert_with(|| ops.iter().map(|(n, _)| *n).collect());
         (number, kept)
     }
 
-    fn define(&mut self, ordinal: usize, stmt: &Statement, names: &[Name], value: Value, kind: StmtKind) {
-        self.out.sources[ordinal] = stmt.deps().iter().filter_map(|name| self.defined_by.get(name).copied()).collect();
+    fn define(
+        &mut self,
+        ordinal: usize,
+        stmt: &Statement,
+        names: &[Name],
+        value: Value,
+        kind: StmtKind,
+    ) {
+        self.out.sources[ordinal] = stmt
+            .deps()
+            .iter()
+            .filter_map(|name| self.defined_by.get(name).copied())
+            .collect();
         for name in names {
             self.env.insert(name.clone(), value.clone());
             self.defined_by.insert(name.clone(), ordinal);
@@ -470,18 +599,33 @@ impl Context<'_> {
     }
 
     /// Any statement kind: its shape with names abstracted, its expressions as parameters and operands.
-    fn generic(&mut self, stmt: &Arc<Statement>, ops: &mut Vec<Value>, params: &mut Vec<Param>, touched: &mut Vec<Name>) -> Key {
-        let expressions: Vec<Key> = stmt.expressions().iter().map(|e| self.abstract_(e, params, ops, touched)).collect();
+    fn generic(
+        &mut self,
+        stmt: &Arc<Statement>,
+        ops: &mut Vec<Value>,
+        params: &mut Vec<Param>,
+        touched: &mut Vec<Name>,
+    ) -> Key {
+        let expressions: Vec<Key> = stmt
+            .expressions()
+            .iter()
+            .map(|e| self.abstract_(e, params, ops, touched))
+            .collect();
         let mut names: HashMap<Name, Name> = HashMap::new();
-        let defined: Vec<Name> = stmt.defines().into_iter().chain(stmt.local_decls()).collect();
+        let defined: Vec<Name> = stmt
+            .defines()
+            .into_iter()
+            .chain(stmt.local_decls())
+            .collect();
         for (index, name) in defined.iter().enumerate() {
             names.insert(name.clone(), format!("$d{index}").into());
         }
         for name in stmt.deps() {
-            if !names.contains_key(&name) {
-                let key = self.operand(&name, ops, touched);
-                names.insert(name, format!("{key:?}").into());
+            if names.contains_key(&name) {
+                continue;
             }
+            let key = self.operand(&name, ops, touched);
+            names.insert(name, format!("{key:?}").into());
         }
         for name in self.axes.keys() {
             names.entry(name.clone()).or_insert_with(|| "$axis".into());
@@ -489,22 +633,31 @@ impl Context<'_> {
         for (index, axis) in stmt.bound_axes().iter().enumerate() {
             names.insert(axis.name.clone(), format!("$b{index}").into());
         }
-        for name in stmt.external_reads().into_iter().chain(stmt.external_writes()) {
-            if !names.contains_key(&name) {
-                let key = if self.env.contains_key(&name) { self.operand(&name, ops, touched) } else { self.resource(&name, "buffer", touched) };
-                names.insert(name, format!("{key:?}").into());
+        for name in stmt
+            .external_reads()
+            .into_iter()
+            .chain(stmt.external_writes())
+        {
+            if names.contains_key(&name) {
+                continue;
             }
+            let key = if self.env.contains_key(&name) {
+                self.operand(&name, ops, touched)
+            } else {
+                self.resource(&name, "buffer", touched)
+            };
+            names.insert(name, format!("{key:?}").into());
         }
         let nested = stmt.nested();
         let shell = if nested.is_empty() {
             stmt.clone()
         } else {
-            Statement::with_bodies(stmt, nested.iter().map(|_| Body::empty()).collect()).expect("the same count")
+            Statement::rebuild_bodies(stmt, nested.iter().map(|_| Body::empty()).collect())
         };
         let marker = Expression::var("$expr");
         let shell = Statement::map_expressions(&shell, &mut |_| marker.clone());
         let shell = Statement::rename_buffers(&Statement::rename(&shell, &names), &names);
-        Key::tuple([Key::str(&statement_text(&shell).expect("a shell has a text")), Key::Tuple(expressions)])
+        Key::tuple([Key::str(&structural_text(&shell)), Key::Tuple(expressions)])
     }
 
     fn visit(&mut self, body: &Body) {
@@ -524,7 +677,11 @@ impl Context<'_> {
             let mut ops: Vec<Value> = Vec::new();
             match &*stmt {
                 Statement::Load(s) => {
-                    let index: Vec<Key> = s.index.iter().map(|e| self.abstract_(e, &mut params, &mut ops, &mut touched)).collect();
+                    let index: Vec<Key> = s
+                        .index
+                        .iter()
+                        .map(|e| self.abstract_(e, &mut params, &mut ops, &mut touched))
+                        .collect();
                     let buffer = if self.env.contains_key(&s.input) {
                         self.operand(&s.input, &mut ops, &mut touched)
                     } else {
@@ -542,7 +699,11 @@ impl Context<'_> {
                     self.define(ordinal, &stmt, &names, value, StmtKind::Load);
                 }
                 Statement::Assign(s) => {
-                    let ops: Vec<Value> = s.args.iter().filter_map(|arg| self.env.get(arg).cloned()).collect();
+                    let ops: Vec<Value> = s
+                        .args
+                        .iter()
+                        .filter_map(|arg| self.env.get(arg).cloned())
+                        .collect();
                     let commutative = s.op.commutative;
                     let mut frees: Vec<Key> = s
                         .args
@@ -556,9 +717,19 @@ impl Context<'_> {
                     if commutative {
                         frees.sort();
                     }
-                    let payload = Key::tuple([Key::Str(s.op.name.clone()), Key::option(s.dtype.as_ref().map(|d| d.name())), Key::Tuple(frees)]);
+                    let payload = Key::tuple([
+                        Key::Str(s.op.name.clone()),
+                        Key::option(s.dtype.as_ref().map(|d| d.name())),
+                        Key::Tuple(frees),
+                    ]);
                     let value = self.compose("assign", payload, ops, &[], &[], commutative);
-                    self.define(ordinal, &stmt, &[s.name.clone()], value, StmtKind::Assign);
+                    self.define(
+                        ordinal,
+                        &stmt,
+                        std::slice::from_ref(&s.name),
+                        value,
+                        StmtKind::Assign,
+                    );
                 }
                 Statement::Affine(s) => {
                     // Each term numbers as its coefficient over its value, and the sum lists the terms by number.
@@ -566,7 +737,14 @@ impl Context<'_> {
                     let mut frees: Vec<Key> = Vec::new();
                     for (coefficient, arg) in s.terms() {
                         match self.env.get(arg).cloned() {
-                            Some(value) => ops.push(self.compose("term", Key::tuple([Key::float(coefficient)]), vec![value], &[], &[], false)),
+                            Some(value) => ops.push(self.compose(
+                                "term",
+                                Key::tuple([Key::float(coefficient)]),
+                                vec![value],
+                                &[],
+                                &[],
+                                false,
+                            )),
                             None => {
                                 let key = self.unbound(arg, &mut touched);
                                 frees.push(Key::tuple([Key::float(coefficient), key]));
@@ -574,21 +752,47 @@ impl Context<'_> {
                         }
                     }
                     frees.sort();
-                    let payload = Key::tuple([Key::float(s.offset.0), Key::Tuple(frees), Key::option(s.dtype.as_ref().map(|d| d.name()))]);
+                    let payload = Key::tuple([
+                        Key::float(s.offset.0),
+                        Key::Tuple(frees),
+                        Key::option(s.dtype.as_ref().map(|d| d.name())),
+                    ]);
                     let value = self.compose("affine", payload, ops, &[], &[], true);
-                    self.define(ordinal, &stmt, &[s.name.clone()], value, StmtKind::Assign);
+                    self.define(
+                        ordinal,
+                        &stmt,
+                        std::slice::from_ref(&s.name),
+                        value,
+                        StmtKind::Assign,
+                    );
                 }
                 Statement::Init(s) => {
                     let payload = Key::tuple([Key::float(s.identity.0), Key::str(s.dtype.name())]);
                     let value = self.compose("init", payload, vec![], &[], &[], false);
-                    self.define(ordinal, &stmt, &[s.name.clone()], value, StmtKind::Init);
+                    self.define(
+                        ordinal,
+                        &stmt,
+                        std::slice::from_ref(&s.name),
+                        value,
+                        StmtKind::Init,
+                    );
                 }
                 Statement::Accum(s) => {
                     let redirected = s.base.as_ref().is_some_and(|base| *base != s.name);
                     let value_key = self.operand(&s.value, &mut ops, &mut touched);
-                    let base_key = if redirected { self.operand(s.base.as_ref().unwrap(), &mut ops, &mut touched) } else { Key::None };
-                    let bound: Vec<Name> = if s.axes.is_empty() { self.loops.last().cloned().into_iter().collect() } else { s.axes.to_vec() };
-                    let descriptors: Vec<Key> = bound.iter().map(|axis| self.axes.get(axis).cloned().unwrap_or(Key::None)).collect();
+                    let base_key = match &s.base {
+                        Some(base) if redirected => self.operand(base, &mut ops, &mut touched),
+                        _ => Key::None,
+                    };
+                    let bound: Vec<Name> = if s.axes.is_empty() {
+                        self.loops.last().cloned().into_iter().collect()
+                    } else {
+                        s.axes.to_vec()
+                    };
+                    let descriptors: Vec<Key> = bound
+                        .iter()
+                        .map(|axis| self.axes.get(axis).cloned().unwrap_or(Key::None))
+                        .collect();
                     let payload = Key::tuple([
                         Key::Str(s.op.name.clone()),
                         Key::option(s.dtype.as_ref().map(|d| d.name())),
@@ -596,21 +800,43 @@ impl Context<'_> {
                         Key::tuple([value_key, base_key]),
                     ]);
                     let value = self.compose("reduce", payload, ops, &params, &bound, false);
-                    self.define(ordinal, &stmt, &[s.name.clone()], value, StmtKind::Reduce);
+                    self.define(
+                        ordinal,
+                        &stmt,
+                        std::slice::from_ref(&s.name),
+                        value,
+                        StmtKind::Reduce,
+                    );
                 }
                 Statement::Select(s) => {
                     let mut payload = Vec::new();
                     for branch in s.branches.iter() {
                         let value = self.operand(&branch.value, &mut ops, &mut touched);
-                        let select = self.abstract_(&branch.select, &mut params, &mut ops, &mut touched);
+                        let select =
+                            self.abstract_(&branch.select, &mut params, &mut ops, &mut touched);
                         payload.push(Key::tuple([value, select]));
                     }
-                    let value = self.compose("select", Key::Tuple(payload), ops, &params, &[], false);
-                    self.define(ordinal, &stmt, &[s.name.clone()], value, StmtKind::Select);
+                    let value =
+                        self.compose("select", Key::Tuple(payload), ops, &params, &[], false);
+                    self.define(
+                        ordinal,
+                        &stmt,
+                        std::slice::from_ref(&s.name),
+                        value,
+                        StmtKind::Select,
+                    );
                 }
                 Statement::Write(s) => {
-                    let index: Vec<Key> = s.index.iter().map(|e| self.abstract_(e, &mut params, &mut ops, &mut touched)).collect();
-                    let values: Vec<Key> = s.values.iter().map(|name| self.operand(name, &mut ops, &mut touched)).collect();
+                    let index: Vec<Key> = s
+                        .index
+                        .iter()
+                        .map(|e| self.abstract_(e, &mut params, &mut ops, &mut touched))
+                        .collect();
+                    let values: Vec<Key> = s
+                        .values
+                        .iter()
+                        .map(|name| self.operand(name, &mut ops, &mut touched))
+                        .collect();
                     let buffer = if self.env.contains_key(&s.output) {
                         self.operand(&s.output, &mut ops, &mut touched)
                     } else {
@@ -630,44 +856,88 @@ impl Context<'_> {
                 }
                 Statement::Carry(s) => {
                     let value_key = self.operand(&s.value, &mut ops, &mut touched);
-                    let index: Vec<Key> = s.index.iter().map(|e| self.abstract_(e, &mut params, &mut ops, &mut touched)).collect();
+                    let index: Vec<Key> = s
+                        .index
+                        .iter()
+                        .map(|e| self.abstract_(e, &mut params, &mut ops, &mut touched))
+                        .collect();
                     let seed = match &s.seed {
                         NumOr::Value(name) => self.resource(name, "buffer", &mut touched),
                         NumOr::Num(number) => Key::num(*number),
                     };
                     let state = self.resource(&s.name, "state", &mut touched);
-                    let payload = Key::tuple([state, Key::Tuple(index), value_key, seed, Key::option(s.dtype.as_ref().map(|d| d.name()))]);
+                    let payload = Key::tuple([
+                        state,
+                        Key::Tuple(index),
+                        value_key,
+                        seed,
+                        Key::option(s.dtype.as_ref().map(|d| d.name())),
+                    ]);
                     let value = self.compose("carry", payload, ops, &params, &[], false);
-                    self.define(ordinal, &stmt, &[s.name.clone()], value, StmtKind::Carry);
+                    self.define(
+                        ordinal,
+                        &stmt,
+                        std::slice::from_ref(&s.name),
+                        value,
+                        StmtKind::Carry,
+                    );
                 }
                 Statement::Pre(s) => {
-                    let index: Vec<Key> = s.index.iter().map(|e| self.abstract_(e, &mut params, &mut ops, &mut touched)).collect();
+                    let index: Vec<Key> = s
+                        .index
+                        .iter()
+                        .map(|e| self.abstract_(e, &mut params, &mut ops, &mut touched))
+                        .collect();
                     let state = self.resource(&s.carrier, "state", &mut touched);
-                    let value = self.compose("pre", Key::tuple([state, Key::Tuple(index)]), ops, &params, &[], false);
-                    self.define(ordinal, &stmt, &[s.name.clone()], value, StmtKind::Pre);
+                    let value = self.compose(
+                        "pre",
+                        Key::tuple([state, Key::Tuple(index)]),
+                        ops,
+                        &params,
+                        &[],
+                        false,
+                    );
+                    self.define(
+                        ordinal,
+                        &stmt,
+                        std::slice::from_ref(&s.name),
+                        value,
+                        StmtKind::Pre,
+                    );
                 }
                 _ if !stmt.nested().is_empty() => {
                     let header = match &*stmt {
-                        Statement::Loop(l) => Key::tuple([Key::str("loop"), descriptor(&l.axis, &stmt)]),
+                        Statement::Loop(l) => {
+                            Key::tuple([Key::str("loop"), descriptor(&l.axis, &stmt)])
+                        }
                         Statement::Cond(c) => {
                             let cond = self.abstract_(&c.cond, &mut params, &mut ops, &mut touched);
-                            let (number, kept) = self.compose("cond", Key::tuple([cond]), ops, &params, &[], false);
+                            let (number, kept) =
+                                self.compose("cond", Key::tuple([cond]), ops, &params, &[], false);
                             params = kept;
                             Key::tuple([Key::str("cond"), Key::Num(number)])
                         }
                         _ => {
                             let shape = self.generic(&stmt, &mut ops, &mut params, &mut touched);
-                            let (number, kept) = self.compose("block", shape, ops, &params, &[], false);
+                            let (number, kept) =
+                                self.compose("block", shape, ops, &params, &[], false);
                             params = kept;
                             Key::tuple([Key::str("block"), Key::Num(number)])
                         }
                     };
                     self.out.blocks[ordinal] = Some((header, params));
                     self.out.kind[ordinal] = StmtKind::Block;
-                    self.out.sources[ordinal] = stmt.deps().iter().filter_map(|name| self.defined_by.get(name).copied()).collect();
+                    self.out.sources[ordinal] = stmt
+                        .deps()
+                        .iter()
+                        .filter_map(|name| self.defined_by.get(name).copied())
+                        .collect();
                     let bound = stmt.bound_axes();
                     let saved_env = self.env.clone();
-                    let saved_axes: Vec<(Name, Option<Key>)> = bound.iter().map(|axis| (axis.name.clone(), self.axes.get(&axis.name).cloned())).collect();
+                    let saved_axes: Vec<(Name, Option<Key>)> = bound
+                        .iter()
+                        .map(|axis| (axis.name.clone(), self.axes.get(&axis.name).cloned()))
+                        .collect();
                     for axis in &bound {
                         self.axes.insert(axis.name.clone(), descriptor(axis, &stmt));
                         self.binding.push(axis.name.clone());
@@ -709,7 +979,11 @@ impl Context<'_> {
                 }
                 _ => {
                     let shape = self.generic(&stmt, &mut ops, &mut params, &mut touched);
-                    let defined: Vec<Name> = stmt.defines().into_iter().chain(stmt.local_decls()).collect();
+                    let defined: Vec<Name> = stmt
+                        .defines()
+                        .into_iter()
+                        .chain(stmt.local_decls())
+                        .collect();
                     let value = self.compose("other", shape, ops, &params, &[], false);
                     self.define(ordinal, &stmt, &defined, value, StmtKind::Other);
                 }
@@ -772,8 +1046,11 @@ pub fn distinct(body: &Body) -> Body {
         if nested.is_empty() {
             return Arc::new((**stmt).clone());
         }
-        let bodies: Vec<Body> = nested.iter().map(|body| Body::new(body.stmts().iter().map(copy).collect())).collect();
-        Arc::new((*Statement::with_bodies(stmt, bodies).expect("the same count")).clone())
+        let bodies: Vec<Body> = nested
+            .iter()
+            .map(|body| Body::new(body.stmts().iter().map(copy).collect()))
+            .collect();
+        Arc::new((*Statement::rebuild_bodies(stmt, bodies)).clone())
     }
     Body::new(body.stmts().iter().map(copy).collect())
 }
@@ -805,7 +1082,11 @@ pub fn spelled_key(name: &Name) -> Key {
 pub fn effect_order(body: &Body) -> Vec<HashSet<usize>> {
     let ordered = ordering_constraints(body, true, true);
     let dataflow = ordering_constraints(body, false, true);
-    ordered.into_iter().zip(dataflow).map(|(o, d)| o.difference(&d).copied().collect()).collect()
+    ordered
+        .into_iter()
+        .zip(dataflow)
+        .map(|(o, d)| o.difference(&d).copied().collect())
+        .collect()
 }
 
 /// Memoized effect orders, by scope, across the numberings of one body.
@@ -818,21 +1099,32 @@ fn body_key(body: &Body) -> usize {
 /// The hash of `body`'s scope tree: each block by its header and its children, each leaf by its number and its
 /// coordinates, each scope's members sorted.
 pub fn scope_tree(numbering: &Numbering, body: &Body, effects: &mut Effects) -> Number {
-    let order = effects.entry(body_key(body)).or_insert_with(|| effect_order(body)).clone();
+    let order = effects
+        .entry(body_key(body))
+        .or_insert_with(|| effect_order(body))
+        .clone();
     let mut members: Vec<Number> = Vec::with_capacity(body.len());
-    for index in 0..body.len() {
+    for (index, sources) in order.iter().enumerate() {
         let here = body.at(index);
         let ordinal = numbering.ordinal(here.stmt());
-        let mut preceding: Vec<Key> = order[index].iter().map(|source| Key::Num(members[*source])).collect();
+        let mut preceding: Vec<Key> = sources
+            .iter()
+            .map(|source| Key::Num(members[*source]))
+            .collect();
         preceding.sort();
         let member = match &numbering.blocks[ordinal] {
             Some((header, params)) => {
-                let children = numbering.trees.lock().unwrap().get(&ordinal).cloned();
+                let children = locked(&numbering.trees).get(&ordinal).cloned();
                 let children = match children {
                     Some(children) => children,
                     None => {
-                        let children: Vec<Number> = here.stmt().nested().iter().map(|child| scope_tree(numbering, child, effects)).collect();
-                        numbering.trees.lock().unwrap().insert(ordinal, children.clone());
+                        let children: Vec<Number> = here
+                            .stmt()
+                            .nested()
+                            .iter()
+                            .map(|child| scope_tree(numbering, child, effects))
+                            .collect();
+                        locked(&numbering.trees).insert(ordinal, children.clone());
                         children
                     }
                 };
@@ -845,8 +1137,15 @@ pub fn scope_tree(numbering: &Numbering, body: &Body, effects: &mut Effects) -> 
                 ])
             }
             None => {
-                let (number, params) = numbering.numbers[ordinal].as_ref().expect("a leaf is numbered");
-                hash_parts([Key::str("stmt"), Key::Num(*number), Key::Tuple(params.clone()), Key::Tuple(preceding)])
+                let (number, params) = numbering.numbers[ordinal]
+                    .as_ref()
+                    .map_or((Key::None, Vec::new()), |(n, p)| (Key::Num(*n), p.clone()));
+                hash_parts([
+                    Key::str("stmt"),
+                    number,
+                    Key::Tuple(params),
+                    Key::Tuple(preceding),
+                ])
             }
         };
         members.push(member);
@@ -867,7 +1166,9 @@ fn downstream(numbering: &Numbering) -> HashMap<Name, Vec<Key>> {
     let number = |stmt: usize| -> Key {
         match &numbering.numbers[stmt] {
             Some((number, _)) => Key::Num(*number),
-            None => numbering.blocks[stmt].as_ref().map_or(Key::None, |(header, _)| header.clone()),
+            None => numbering.blocks[stmt]
+                .as_ref()
+                .map_or(Key::None, |(header, _)| header.clone()),
         }
     };
     let mut out = HashMap::new();
@@ -894,7 +1195,9 @@ type Cells = HashMap<Name, Key>;
 pub type Colors<'a> = Option<&'a HashMap<Name, String>>;
 
 fn paint(colors: Colors, name: &Name) -> Key {
-    colors.and_then(|c| c.get(name)).map_or(Key::None, |text| Key::str(text))
+    colors
+        .and_then(|c| c.get(name))
+        .map_or(Key::None, |text| Key::str(text))
 }
 
 /// How a buffer or state is spelled in a payload during one numbering: fixed by its rank, picked out, or open with
@@ -909,10 +1212,22 @@ struct Keyed<'a> {
 impl Keyed<'_> {
     fn key(&self, name: &Name) -> Key {
         if let Some(r) = self.rank.get(name) {
-            return Key::tuple([Key::str("fixed"), Key::Int(*r as i64), paint(self.colors, name)]);
+            return Key::tuple([
+                Key::str("fixed"),
+                Key::Int(*r as i64),
+                paint(self.colors, name),
+            ]);
         }
-        let tag = if self.pick == Some(name) { "pick" } else { "open" };
-        Key::tuple([Key::str(tag), paint(self.colors, name), self.cell.get(name).cloned().unwrap_or(Key::None)])
+        let tag = if self.pick == Some(name) {
+            "pick"
+        } else {
+            "open"
+        };
+        Key::tuple([
+            Key::str(tag),
+            paint(self.colors, name),
+            self.cell.get(name).cloned().unwrap_or(Key::None),
+        ])
     }
 }
 
@@ -935,7 +1250,17 @@ fn partition(cells: &Cells) -> Vec<Vec<Name>> {
 /// Number until the open resources' cells stop splitting: each is colored by its type and by everything downstream
 /// of it. `cell` is updated in place.
 fn cells(body: &Body, colors: Colors, rank: &HashMap<Name, usize>, cell: &mut Cells) -> Numbering {
-    let number = |cell: &Cells| value_numbers(body, &|name| Keyed { colors, rank, cell, pick: None }.key(name));
+    let number = |cell: &Cells| {
+        value_numbers(body, &|name| {
+            Keyed {
+                colors,
+                rank,
+                cell,
+                pick: None,
+            }
+            .key(name)
+        })
+    };
     let mut numbering = number(cell);
     loop {
         let down = downstream(&numbering);
@@ -944,7 +1269,15 @@ fn cells(body: &Body, colors: Colors, rank: &HashMap<Name, usize>, cell: &mut Ce
             .iter()
             .chain(numbering.states.iter())
             .filter(|name| !rank.contains_key(*name))
-            .map(|name| (name.clone(), Key::tuple([paint(colors, name), Key::Tuple(down.get(name).cloned().unwrap_or_default())])))
+            .map(|name| {
+                (
+                    name.clone(),
+                    Key::tuple([
+                        paint(colors, name),
+                        Key::Tuple(down.get(name).cloned().unwrap_or_default()),
+                    ]),
+                )
+            })
             .collect();
         if partition(&fresh) == partition(cell) {
             return numbering;
@@ -961,7 +1294,14 @@ pub fn roles(body: &Body, colors: Colors) -> HashMap<Name, usize> {
     let mut values: Vec<&Key> = cell.values().collect();
     values.sort();
     values.dedup();
-    cell.iter().map(|(name, value)| (name.clone(), values.iter().position(|v| *v == value).unwrap())).collect()
+    cell.iter()
+        .map(|(name, value)| {
+            (
+                name.clone(),
+                values.iter().position(|v| *v == value).unwrap_or(0),
+            )
+        })
+        .collect()
 }
 
 /// The body's identity and its external buffers in role order.
@@ -970,11 +1310,20 @@ pub fn digest(body: &Body, colors: Colors) -> (Number, Vec<Name>) {
     let mut cell: Cells = HashMap::new();
     let mut effects: Effects = HashMap::new();
     let numbering = cells(body, colors, &rank, &mut cell);
-    let names: Vec<Name> = numbering.buffers.iter().chain(numbering.states.iter()).cloned().collect();
+    let names: Vec<Name> = numbering
+        .buffers
+        .iter()
+        .chain(numbering.states.iter())
+        .cloned()
+        .collect();
     while rank.len() < names.len() {
         // One round ranks every cell in cell order: a singleton outright, a tie by the certificates of its members
         // under this round's coloring; only a member interchangeable with another sends the round back to refine.
-        let mut unranked: Vec<Name> = names.iter().filter(|name| !rank.contains_key(*name)).cloned().collect();
+        let mut unranked: Vec<Name> = names
+            .iter()
+            .filter(|name| !rank.contains_key(*name))
+            .cloned()
+            .collect();
         unranked.sort_by(|a, b| cell[a].cmp(&cell[b]).then_with(|| a.cmp(b)));
         let mut position = 0;
         while position < unranked.len() {
@@ -992,8 +1341,14 @@ pub fn digest(body: &Body, colors: Colors) -> (Number, Vec<Name>) {
             let certificate: HashMap<Name, Number> = group
                 .iter()
                 .map(|name| {
-                    let keyed = Keyed { colors, rank: &rank, cell: &cell, pick: Some(name) };
-                    let tree = scope_tree(&value_numbers(body, &|n| keyed.key(n)), body, &mut effects);
+                    let keyed = Keyed {
+                        colors,
+                        rank: &rank,
+                        cell: &cell,
+                        pick: Some(name),
+                    };
+                    let tree =
+                        scope_tree(&value_numbers(body, &|n| keyed.key(n)), body, &mut effects);
                     (name.clone(), tree)
                 })
                 .collect();
@@ -1001,7 +1356,12 @@ pub fn digest(body: &Body, colors: Colors) -> (Number, Vec<Name>) {
             for name in &group {
                 let r = rank.len();
                 rank.insert(name.clone(), r);
-                if group.iter().filter(|other| certificate[*other] == certificate[name]).count() > 1 {
+                if group
+                    .iter()
+                    .filter(|other| certificate[*other] == certificate[name])
+                    .count()
+                    > 1
+                {
                     break; // interchangeable with another: fix this one and refine before looking at the rest
                 }
             }
@@ -1010,7 +1370,12 @@ pub fn digest(body: &Body, colors: Colors) -> (Number, Vec<Name>) {
             cells(body, colors, &rank, &mut cell);
         }
     }
-    let keyed = Keyed { colors, rank: &rank, cell: &cell, pick: None };
+    let keyed = Keyed {
+        colors,
+        rank: &rank,
+        cell: &cell,
+        pick: None,
+    };
     let final_numbering = value_numbers(body, &|n| keyed.key(n));
     let tree = scope_tree(&final_numbering, body, &mut effects);
     let mut buffers = final_numbering.buffers.clone();
