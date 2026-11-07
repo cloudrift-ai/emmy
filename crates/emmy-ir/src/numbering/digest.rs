@@ -5,7 +5,6 @@ use std::sync::Arc;
 
 use super::{Key, Number, Numbering, hash_parts, value_numbers};
 use crate::body::{Body, StmtRef};
-use crate::kinds::axis::spell_axis;
 use crate::order::ordering_constraints;
 use crate::{Name, locked};
 
@@ -326,9 +325,4 @@ pub fn digest(body: &Body, colors: Colors) -> (Number, Vec<Name>) {
     let mut buffers = final_numbering.buffers.clone();
     buffers.sort_by_key(|name| rank[name]);
     (tree, buffers)
-}
-
-/// The text an axis spells, for a descriptor.
-pub fn axis_text(axis: &crate::kinds::axis::Axis) -> String {
-    spell_axis(axis, None).unwrap_or_default()
 }

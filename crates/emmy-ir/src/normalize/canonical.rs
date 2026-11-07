@@ -178,7 +178,11 @@ fn ordered(body: &Body, numbering: &Numbering) -> Result<Body> {
             .collect();
         Ok(with_bodies(stmt, bodies?))
     })?;
-    let shapes: Vec<Key> = body.stmts().iter().map(ties::sibling_shape).collect();
+    let shapes: Vec<Key> = body
+        .stmts()
+        .iter()
+        .map(ties::sibling_shape)
+        .collect::<Result<_>>()?;
     let mut ties: HashMap<&Key, usize> = HashMap::new();
     for own in &shapes {
         *ties.entry(own).or_default() += 1;

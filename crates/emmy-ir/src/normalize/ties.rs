@@ -10,18 +10,18 @@ use std::sync::Arc;
 
 use super::with_bodies;
 use crate::Name;
+use crate::Result;
 use crate::body::Body;
 use crate::expr::{BinOp, Expr, Expression, Num, python_repr};
 use crate::kinds::field::{Float, Ty};
 use crate::kinds::{Affine, Statement};
 use crate::numbering::{Key, Numbering, expression_key};
-use crate::text::structural_text;
 
 /// A statement's own shape with every name and buffer one placeholder: its kind, then its fields in declaration order.
 /// Kinds sort by name, which puts every store after the values it reads, as the Python order's structural form had
 /// it, and one kind's statements sort by their first differing field, so an `Assign`'s operation decides before its
 /// dtype. A loop's axis field is its extent's digest ([`extent_digest`]).
-pub(crate) fn sibling_shape(stmt: &Arc<Statement>) -> Key {
+pub(crate) fn sibling_shape(stmt: &Arc<Statement>) -> Result<Key> {
     let children = stmt.nested();
     let shell = if children.is_empty() {
         stmt.clone()
@@ -44,20 +44,17 @@ pub(crate) fn sibling_shape(stmt: &Arc<Statement>) -> Key {
         _ => None,
     };
     let fields = shell
-        .header_fields()
-        .map(|fields| {
-            fields
-                .into_iter()
-                .map(|(name, text)| match extent {
-                    Some(expression) if name == "axis" => {
-                        Key::Str(extent_digest(expression).into())
-                    }
-                    _ => field_key(shell.kind().field_ty(name), &text),
-                })
-                .collect::<Vec<_>>()
+        .header_fields()?
+        .into_iter()
+        .map(|(name, text)| match extent {
+            Some(expression) if name == "axis" => Key::Str(extent_digest(expression).into()),
+            _ => field_key(shell.kind().field_ty(name), &text),
         })
-        .unwrap_or_else(|_| vec![Key::str(&structural_text(&shell))]);
-    Key::tuple([Key::str(stmt.kind().name()), Key::Tuple(fields)])
+        .collect::<Vec<_>>();
+    Ok(Key::tuple([
+        Key::str(stmt.kind().name()),
+        Key::Tuple(fields),
+    ]))
 }
 
 /// The whole subtree with names abstracted and buffers spelled: the tie-break between siblings of one shape, so

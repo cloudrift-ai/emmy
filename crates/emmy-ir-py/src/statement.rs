@@ -8,7 +8,6 @@ use std::sync::Arc;
 use emmy_ir::Name;
 use emmy_ir::body::Body;
 use emmy_ir::expr::Expression;
-use emmy_ir::kinds::field::{Rewriter, Visitor};
 use emmy_ir::kinds::{FieldInfo, Statement};
 use emmy_ir::protocol::{Rewrite, finished};
 use emmy_ir::text::{parse_statement, statement_text};
@@ -65,10 +64,10 @@ impl PyStatement {
 }
 
 /// The index of `name` in `names`, at compile time.
-pub const fn position(names: &[&str], name: &str) -> usize {
+pub const fn position(fields: &[FieldInfo], name: &str) -> usize {
     let mut index = 0;
-    while index < names.len() {
-        if str_eq(names[index], name) {
+    while index < fields.len() {
+        if str_eq(fields[index].name, name) {
             return index;
         }
         index += 1;
@@ -453,69 +452,26 @@ impl<'py> Arguments<'_, 'py> {
 macro_rules! define_py_kinds {
     (
         kinds { $( $(#[doc = $doc:literal])* $layer:ident $Kind:ident {$($flag:tt)|*} { $( $field:ident : $ty:ty [$($role:ident)|*] $(= $default:expr)? ,)* } )* }
-        records { $( $(#[doc = $rdoc:literal])* $Record:ident { $( $rfield:ident : $rty:ty [$($rrole:ident)|*] $(= $rdefault:expr)? ,)* } )* }
+        records { $( $(#[doc = $rdoc:literal])* $rlayer:ident $Record:ident { $( $rfield:ident : $rty:ty [$($rrole:ident)|*] $(= $rdefault:expr)? ,)* } )* }
     ) => {
         $(
             define_py_kinds!(@class $layer $Kind $(#[doc = $doc])*);
 
-            #[allow(non_upper_case_globals, unused_variables, unused_mut, clippy::too_many_arguments)]
+            #[allow(non_upper_case_globals, unused_variables, unused_mut)]
             impl $Kind {
-                const FIELD_NAMES: &'static [&'static str] = &[ $( stringify!($field), )* ];
-
                 /// The statement the constructor arguments build, and the objects it keeps beside its fields.
-                fn build(py: Python<'_>, args: &Bound<'_, PyTuple>, kwargs: Option<&Bound<'_, PyDict>>) -> PyResult<(Statement, Vec<Option<Py<PyAny>>>)> {
-                    use emmy_ir::kinds as k;
-                    let mut given = Arguments { kind: k::$Kind::NAME, fields: k::$Kind::FIELDS, args, kwargs, positional: 0 };
-                    let mut held: Vec<Option<Py<PyAny>>> = Vec::with_capacity(k::$Kind::FIELDS.len());
-                    $(
-                        let $field: $ty = match given.take(stringify!($field), k::Roles::NONE $(.or(k::$role))*)? {
-                            Some(value) => {
-                                let (value, kept) = <$ty as PyField>::from_py(&value)
-                                    .map_err(|err| located(value.py(), &format!("{}.{}", stringify!($Kind), stringify!($field)), err))?;
-                                held.push(kept);
-                                value
-                            }
-                            None => {
-                                held.push(None);
-                                define_py_kinds!(@default $Kind $field $(= $default)?)
-                            }
-                        };
-                    )*
-                    given.finish()?;
-                    let stmt = finished(Statement::$Kind(k::$Kind { $( $field, )* })).py()?;
-                    Ok((stmt, held))
+                fn build(args: &Bound<'_, PyTuple>, kwargs: Option<&Bound<'_, PyDict>>) -> PyResult<(Statement, Held)> {
+                    let mut held = Held::new();
+                    let kind = define_py_kinds!(@given $Kind args kwargs held { $( $field : $ty [$($role)|*] $(= $default)? ,)* });
+                    Ok((finished(Statement::$Kind(kind)).py()?, held))
                 }
 
                 /// This statement with the named fields changed.
-                fn rebuild(base: &PyStatement, py: Python<'_>, changes: &Bound<'_, PyDict>) -> PyResult<(Statement, Vec<Option<Py<PyAny>>>)> {
-                    use emmy_ir::kinds as k;
+                fn rebuild(base: &PyStatement, py: Python<'_>, changes: &Bound<'_, PyDict>) -> PyResult<(Statement, Held)> {
                     let Statement::$Kind(current) = &*base.stmt else { return Err(PyTypeError::new_err("not a ".to_owned() + stringify!($Kind))) };
-                    let mut held: Vec<Option<Py<PyAny>>> = Vec::with_capacity(k::$Kind::FIELDS.len());
-                    #[allow(unused_assignments)]
-                    let mut index = 0usize;
-                    $(
-                        let $field: $ty = match changes.get_item(stringify!($field))? {
-                            Some(value) => {
-                                let (value, kept) = <$ty as PyField>::from_py(&value)
-                                    .map_err(|err| located(value.py(), &format!("{}.{}", stringify!($Kind), stringify!($field)), err))?;
-                                held.push(kept);
-                                value
-                            }
-                            None => {
-                                held.push(base.held(py, index));
-                                current.$field.clone()
-                            }
-                        };
-                        index += 1;
-                    )*
-                    for key in changes.keys() {
-                        let key: String = key.extract()?;
-                        if !k::$Kind::FIELDS.iter().any(|f| f.name == key) {
-                            return Err(unexpected(stringify!($Kind), &key));
-                        }
-                    }
-                    let stmt = finished(Statement::$Kind(k::$Kind { $( $field, )* })).py()?;
-                    Ok((stmt, held))
+                    let mut held = Held::new();
+                    let kind = define_py_kinds!(@changed $Kind current changes held (|index| base.held(py, index)) { $( $field : $ty [$($role)|*] $(= $default)? ,)* });
+                    Ok((finished(Statement::$Kind(kind)).py()?, held))
                 }
             }
 
@@ -523,8 +479,8 @@ macro_rules! define_py_kinds {
             impl $Kind {
                 #[new]
                 #[pyo3(signature = (*args, **kwargs))]
-                fn new(py: Python<'_>, args: &Bound<'_, PyTuple>, kwargs: Option<&Bound<'_, PyDict>>) -> PyResult<PyClassInitializer<Self>> {
-                    let (stmt, held) = Self::build(py, args, kwargs)?;
+                fn new(args: &Bound<'_, PyTuple>, kwargs: Option<&Bound<'_, PyDict>>) -> PyResult<PyClassInitializer<Self>> {
+                    let (stmt, held) = Self::build(args, kwargs)?;
                     Ok(PyClassInitializer::from(PyStatement::new(Arc::new(stmt), held)).add_subclass($Kind))
                 }
 
@@ -558,7 +514,7 @@ macro_rules! define_py_kinds {
                 $(
                     #[getter]
                     fn $field<'py>(slf: &Bound<'py, Self>) -> PyResult<Bound<'py, PyAny>> {
-                        const INDEX: usize = position($Kind::FIELD_NAMES, stringify!($field));
+                        const INDEX: usize = position(emmy_ir::kinds::$Kind::FIELDS, stringify!($field));
                         slf.as_super().get().field(slf.py(), INDEX)
                     }
                 )*
@@ -566,18 +522,22 @@ macro_rules! define_py_kinds {
         )*
 
         $(
-            $(#[doc = $rdoc])*
-            #[pyclass(frozen, module = "emmy.compiler.ir.stmt")]
-            pub struct $Record {
-                pub record: emmy_ir::kinds::$Record,
-                slots: Slots,
-            }
+            define_py_kinds!(@record $rlayer $Record $(#[doc = $rdoc])*);
 
             impl $Record {
-                const FIELD_NAMES: &'static [&'static str] = &[ $( stringify!($rfield), )* ];
-
                 pub fn new_from(record: emmy_ir::kinds::$Record) -> $Record {
                     $Record { slots: slots(emmy_ir::kinds::$Record::FIELDS.len()), record }
+                }
+
+                /// The record with the Python objects its fields came from kept beside them.
+                fn with_held(record: emmy_ir::kinds::$Record, held: Held) -> $Record {
+                    let out = $Record::new_from(record);
+                    for (slot, value) in out.slots.iter().zip(held) {
+                        if let Some(value) = value {
+                            let _ = slot.set(value);
+                        }
+                    }
+                    out
                 }
             }
 
@@ -586,53 +546,21 @@ macro_rules! define_py_kinds {
             impl $Record {
                 #[new]
                 #[pyo3(signature = (*args, **kwargs))]
-                fn new(py: Python<'_>, args: &Bound<'_, PyTuple>, kwargs: Option<&Bound<'_, PyDict>>) -> PyResult<$Record> {
-                    use emmy_ir::kinds as k;
-                    let mut given = Arguments { kind: k::$Record::NAME, fields: k::$Record::FIELDS, args, kwargs, positional: 0 };
-                    let mut held: Vec<Option<Py<PyAny>>> = Vec::new();
-                    $(
-                        let $rfield: $rty = match given.take(stringify!($rfield), k::Roles::NONE $(.or(k::$rrole))*)? {
-                            Some(value) => {
-                                let (value, kept) = <$rty as PyField>::from_py(&value)
-                                    .map_err(|err| located(value.py(), &format!("{}.{}", stringify!($Record), stringify!($rfield)), err))?;
-                                held.push(kept);
-                                value
-                            }
-                            None => {
-                                held.push(None);
-                                define_py_kinds!(@default $Record $rfield $(= $rdefault)?)
-                            }
-                        };
-                    )*
-                    given.finish()?;
-                    let out = $Record::new_from(k::$Record { $( $rfield, )* });
-                    for (slot, value) in out.slots.iter().zip(held) {
-                        if let Some(value) = value {
-                            let _ = slot.set(value);
-                        }
-                    }
-                    Ok(out)
+                fn new(args: &Bound<'_, PyTuple>, kwargs: Option<&Bound<'_, PyDict>>) -> PyResult<$Record> {
+                    let mut held = Held::new();
+                    let record = define_py_kinds!(@given $Record args kwargs held { $( $rfield : $rty [$($rrole)|*] $(= $rdefault)? ,)* });
+                    Ok($Record::with_held(record, held))
                 }
 
+                /// A copy with the named fields changed; itself when nothing changes.
                 #[pyo3(signature = (**changes))]
-                fn replace(slf: &Bound<'_, Self>, changes: Option<&Bound<'_, PyDict>>) -> PyResult<$Record> {
-                    use emmy_ir::kinds as k;
-                    let current = &slf.get().record;
-                    let Some(changes) = changes else { return Ok($Record::new_from(current.clone())) };
-                    $(
-                        let $rfield: $rty = match changes.get_item(stringify!($rfield))? {
-                            Some(value) => <$rty as PyField>::from_py(&value)
-                                .map_err(|err| located(value.py(), &format!("{}.{}", stringify!($Record), stringify!($rfield)), err))?.0,
-                            None => current.$rfield.clone(),
-                        };
-                    )*
-                    for key in changes.keys() {
-                        let key: String = key.extract()?;
-                        if !k::$Record::FIELDS.iter().any(|f| f.name == key) {
-                            return Err(unexpected(stringify!($Record), &key));
-                        }
-                    }
-                    Ok($Record::new_from(k::$Record { $( $rfield, )* }))
+                fn replace<'py>(slf: &Bound<'py, Self>, changes: Option<&Bound<'py, PyDict>>) -> PyResult<Bound<'py, Self>> {
+                    let Some(changes) = changes.filter(|c| !c.is_empty()) else { return Ok(slf.clone()) };
+                    let this = slf.get();
+                    let current = &this.record;
+                    let mut held = Held::new();
+                    let record = define_py_kinds!(@changed $Record current changes held (|index: usize| this.slots[index].get().map(|value| value.clone_ref(slf.py()))) { $( $rfield : $rty [$($rrole)|*] $(= $rdefault)? ,)* });
+                    Bound::new(slf.py(), $Record::with_held(record, held))
                 }
 
                 #[classattr]
@@ -643,7 +571,7 @@ macro_rules! define_py_kinds {
                 $(
                     #[getter]
                     fn $rfield<'py>(slf: &Bound<'py, Self>) -> PyResult<Bound<'py, PyAny>> {
-                        const INDEX: usize = position($Record::FIELD_NAMES, stringify!($rfield));
+                        const INDEX: usize = position(emmy_ir::kinds::$Record::FIELDS, stringify!($rfield));
                         let this = slf.get();
                         cached(slf.py(), &this.slots[INDEX], || <$rty as PyField>::to_py(&this.record.$rfield, slf.py()))
                     }
@@ -716,17 +644,85 @@ macro_rules! define_py_kinds {
         #[pyclass(extends = PyStatement, frozen, module = "emmy.compiler.ir.kernel.ir")]
         pub struct $Kind;
     };
+    (@record shared $Record:ident $(#[doc = $doc:literal])*) => {
+        $(#[doc = $doc])*
+        #[pyclass(frozen, module = "emmy.compiler.ir.stmt")]
+        pub struct $Record {
+            pub record: emmy_ir::kinds::$Record,
+            slots: Slots,
+        }
+    };
+    (@record kernel $Record:ident $(#[doc = $doc:literal])*) => {
+        $(#[doc = $doc])*
+        #[pyclass(frozen, module = "emmy.compiler.ir.kernel.ir")]
+        pub struct $Record {
+            pub record: emmy_ir::kinds::$Record,
+            slots: Slots,
+        }
+    };
+    // The constructor's fields: each by keyword or position, converted and kept, or its default.
+    (@given $Type:ident $args:ident $kwargs:ident $held:ident { $( $field:ident : $ty:ty [$($role:ident)|*] $(= $default:expr)? ,)* }) => {{
+        use emmy_ir::kinds as k;
+        let mut given = Arguments { kind: k::$Type::NAME, fields: k::$Type::FIELDS, args: $args, kwargs: $kwargs, positional: 0 };
+        let out = k::$Type {
+            $( $field: match given.take(stringify!($field), k::Roles::NONE $(.or(k::$role))*)? {
+                Some(value) => define_py_kinds!(@convert $Type $field [$ty] value $held),
+                None => {
+                    $held.push(None);
+                    define_py_kinds!(@default $Type $field $(= $default)?)
+                }
+            }, )*
+        };
+        given.finish()?;
+        out
+    }};
+    // A copy's fields: each from `changes`, converted and kept, or the current value with the object kept so far.
+    (@changed $Type:ident $current:ident $changes:ident $held:ident ($kept:expr) { $( $field:ident : $ty:ty [$($role:ident)|*] $(= $default:expr)? ,)* }) => {{
+        use emmy_ir::kinds as k;
+        only_fields(k::$Type::NAME, k::$Type::FIELDS, $changes)?;
+        let kept = $kept;
+        #[allow(unused_assignments)]
+        let mut index = 0usize;
+        k::$Type {
+            $( $field: {
+                let value = match $changes.get_item(stringify!($field))? {
+                    Some(value) => define_py_kinds!(@convert $Type $field [$ty] value $held),
+                    None => {
+                        $held.push(kept(index));
+                        $current.$field.clone()
+                    }
+                };
+                index += 1;
+                value
+            }, )*
+        }
+    }};
+    (@convert $Type:ident $field:ident [$ty:ty] $value:ident $held:ident) => {{
+        let (value, kept) = <$ty as PyField>::from_py(&$value)
+            .map_err(|err| located($value.py(), &format!("{}.{}", stringify!($Type), stringify!($field)), err))?;
+        $held.push(kept);
+        value
+    }};
     (@default $Kind:ident $field:ident = $default:expr) => { $default };
     (@default $Kind:ident $field:ident) => { return Err(missing(stringify!($Kind), stringify!($field))) };
 }
 
-#[allow(
-    unused_imports,
-    unused_variables,
-    unused_assignments,
-    unused_mut,
-    dead_code
-)]
+/// The Python objects a statement's fields came from, one slot per field.
+type Held = Vec<Option<Py<PyAny>>>;
+
+/// Every key of `changes` names a field of the kind.
+fn only_fields(kind: &str, fields: &[FieldInfo], changes: &Bound<'_, PyDict>) -> PyResult<()> {
+    for key in changes.keys() {
+        let key: String = key.extract()?;
+        if !fields.iter().any(|f| f.name == key) {
+            return Err(unexpected(kind, &key));
+        }
+    }
+    Ok(())
+}
+
+/// The generated classes: a kind with no field leaves the per-field locals of its constructors unused.
+#[allow(unused_variables, unused_assignments, unused_mut)]
 mod generated {
     use super::*;
     use emmy_ir::Name;
@@ -966,7 +962,3 @@ pub fn statements_from_py(value: &Bound<'_, PyAny>) -> PyResult<Vec<Arc<Statemen
         .map(|item| statement_from_py(&item?))
         .collect()
 }
-
-/// Visitors and rewriters are the crate's; this module only wraps.
-#[allow(dead_code)]
-fn _traits_in_scope(_v: &dyn Visitor, _r: &dyn Rewriter) {}

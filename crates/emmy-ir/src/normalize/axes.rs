@@ -246,7 +246,7 @@ pub fn canonicalize_free_axis_order(body: &Body) -> Result<Body> {
         pairs.sort_by_key(|(depth, _)| std::cmp::Reverse(*depth));
         pairs.into_iter().map(|(_, l)| l).collect()
     } else {
-        let axis_metadata = |l: &Loop| -> Key {
+        let axis_metadata = |l: &Loop| -> Result<Key> {
             let mut mapping: HashMap<Name, Name> =
                 HashMap::from([(l.axis.name.clone(), Name::from("__axis__"))]);
             for (depth, source) in l.axis.sources().iter().enumerate() {
@@ -256,14 +256,18 @@ pub fn canonicalize_free_axis_order(body: &Body) -> Result<Body> {
             }
             let renamed = Statement::rename(&Arc::new(Statement::Loop(l.clone())), &mapping);
             let Statement::Loop(renamed) = &*renamed else {
-                return Key::None;
+                return Ok(Key::None);
             };
-            Key::tuple([
-                Key::str(&crate::kinds::axis::spell_axis(&renamed.axis, None).unwrap_or_default()),
+            Ok(Key::tuple([
+                Key::str(&crate::kinds::axis::spell_axis(&renamed.axis, None)?),
                 Key::Bool(renamed.unroll),
                 Key::Bool(renamed.seed),
-            ])
+            ]))
         };
+        let metadata: HashMap<Name, Key> = chain
+            .iter()
+            .map(|l| Ok((l.axis.name.clone(), axis_metadata(l)?)))
+            .collect::<Result<_>>()?;
         let mut source_counts: HashMap<Name, usize> = HashMap::new();
         for l in &chain {
             if let Some(source) = l.axis.source_axis() {
@@ -302,7 +306,7 @@ pub fn canonicalize_free_axis_order(body: &Body) -> Result<Body> {
             let role = Key::tuple([
                 storage_order,
                 Key::tuple([
-                    axis_metadata(focus),
+                    metadata[&focus.axis.name].clone(),
                     Key::Int(source_arity as i64),
                     text_key(&focused),
                 ]),
@@ -318,7 +322,7 @@ pub fn canonicalize_free_axis_order(body: &Body) -> Result<Body> {
                 .push(l.clone());
         }
         let interchangeable = |left: &Loop, right: &Loop| -> bool {
-            if axis_metadata(left) != axis_metadata(right) {
+            if metadata[&left.axis.name] != metadata[&right.axis.name] {
                 return false;
             }
             if let (Some(ls), Some(rs)) = (left.axis.source_axis(), right.axis.source_axis())

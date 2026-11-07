@@ -96,20 +96,21 @@ impl WgmmaMma {
     }
 }
 
-/// The checks a kind makes on construction, by kind: what Python's `__post_init__` refused.
-pub fn check(stmt: &Statement) -> Result<()> {
-    match stmt {
-        Statement::Load(s) => s.validate(),
-        Statement::Write(s) => s.validate(),
-        Statement::Affine(s) => s.validate(),
-        Statement::Select(s) => s.validate(),
-        Statement::Call(s) => s.validate(),
-        Statement::Tile(s) => s.validate(),
-        Statement::WgmmaMma(s) => s.validate(),
-        Statement::TreeHalve(s) => carried_kind(&s.combine_states, Kind::Assign),
-        Statement::WarpShuffle(s) => carried_kind(&s.combine_states, Kind::Assign),
-        Statement::RegStore(s) => carried_kind(&s.run, Kind::RegStore),
-        _ => Ok(()),
+impl TreeHalve {
+    pub fn validate(&self) -> Result<()> {
+        carried_kind(&self.combine_states, Kind::Assign)
+    }
+}
+
+impl WarpShuffle {
+    pub fn validate(&self) -> Result<()> {
+        carried_kind(&self.combine_states, Kind::Assign)
+    }
+}
+
+impl RegStore {
+    pub fn validate(&self) -> Result<()> {
+        carried_kind(&self.run, Kind::RegStore)
     }
 }
 
@@ -125,7 +126,7 @@ fn carried_kind(stmts: &[Arc<Statement>], kind: Kind) -> Result<()> {
 
 /// A statement with its `Accum` base normalized and its carried numbers settled: what every constructor returns.
 pub fn finished(stmt: Statement) -> Result<Statement> {
-    check(&stmt)?;
+    stmt.check()?;
     Ok(match stmt {
         Statement::Accum(a) => Statement::Accum(a.normalized()),
         other => other,

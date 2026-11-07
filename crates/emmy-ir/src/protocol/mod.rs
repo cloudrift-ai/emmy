@@ -675,14 +675,9 @@ impl Statement {
         )
     }
 
+    /// A kind with a body field: what the text indents statements under.
     pub fn is_block(&self) -> bool {
-        matches!(
-            self,
-            Statement::Loop(_)
-                | Statement::StridedLoop(_)
-                | Statement::Cond(_)
-                | Statement::Tile(_)
-        )
+        self.fields().iter().any(|f| f.roles.contains_any(BODY))
     }
 }
 
