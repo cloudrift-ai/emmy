@@ -326,8 +326,8 @@ documentation is the grammar. A kind of another layer (the Kernel IR's thirty) p
 the fields not at their default as `field=value` in parentheses, and one indented block per field that holds
 statements — `Smem(name=s_x, extents=(64, 64), dtype=f16)`, `Tile(axes=(a0 in 0..64), block_threads=128):` over its
 body. Each value is spelled by its type and read by the field's declared type, so a layer that adds a kind adds no
-printer and no reader. `tests/compiler/ir/stmt/test_text.py` holds both directions over every kind, every corpus
-kernel and the Kernel IR of six corpus lowerings that reach every Kernel IR kind.
+printer and no reader. The crate's text tests hold both directions over one example of every kind, and
+`tests/compiler/ir/stmt/test_text.py` over every corpus kernel and the Kernel IR of six corpus lowerings.
 
 The tests under `tests/compiler/ir/stmt/` state what goes into the module and what comes out, and hold for any
 implementation of it. The ones under `tests/compiler/ir/stmt/implementation/` read this implementation's own

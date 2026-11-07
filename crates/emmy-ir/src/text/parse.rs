@@ -748,7 +748,7 @@ impl Line {
             let loop_ = StridedLoop {
                 axis,
                 start,
-                step: NumOr::Value(step),
+                step,
                 body,
                 unroll,
                 end,

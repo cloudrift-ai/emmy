@@ -1,8 +1,7 @@
 """Unit tests for structural feature extraction
 (``search/features.structure_features``).
 
-Hand-written ``Body`` fixtures (same style as ``tests/compiler/ir/stmt/
-test_structural_key.py``) exercise the skeleton histogram, the extent-free
+Hand-written ``Body`` fixtures (bodies as text) exercise the skeleton histogram, the extent-free
 invariant, the ``S_ext_*`` extent block, and the ``S_dtype_*`` multiset; a
 second group compiles real frontend graphs (triple-matmul, matmul + epilogue,
 attention-like) through the loop passes and checks the features computed from

@@ -165,9 +165,80 @@ mod tests {
     use std::collections::HashSet;
 
     use super::ordering_constraints;
+    use crate::body::Body;
     use crate::identity::canonicalize_identity;
-    use crate::normalize::normalize_body;
     use crate::normalize::testing::*;
+    use crate::normalize::{normalize_body, normalize_uncached};
+
+    /// Every order of `items`.
+    fn permutations<T: Clone>(items: &[T]) -> Vec<Vec<T>> {
+        if items.is_empty() {
+            return vec![Vec::new()];
+        }
+        (0..items.len())
+            .flat_map(|index| {
+                let mut rest = items.to_vec();
+                let first = rest.remove(index);
+                permutations(&rest).into_iter().map(move |mut tail| {
+                    tail.insert(0, first.clone());
+                    tail
+                })
+            })
+            .collect()
+    }
+
+    #[test]
+    fn every_order_of_a_small_body_normalizes_to_one_form() {
+        let statements = body(
+            "
+            x = load X[]
+            absolute = abs(x)
+            y = load Y[]
+            result = add(absolute, y)
+            O[] = result
+            ",
+        );
+        let forms: Vec<Body> = permutations(statements.stmts())
+            .into_iter()
+            .map(|order| normalize_body(&Body::new(order)).unwrap())
+            .collect();
+        assert_eq!(forms.len(), 120);
+        assert!(forms.iter().all(|form| *form == forms[0]));
+    }
+
+    #[test]
+    fn the_executable_order_ignores_the_iteration_order_of_a_statements_buffers() {
+        // Two projections of one normalized input, symmetric but for their weight buffer: which one comes first must
+        // not follow the order a set of buffer names iterates in, which every set's own hash keys decide. A fused
+        // two-projection serving kernel re-spelled on every boot. Each normal form is taken afresh, so every one
+        // runs over sets with keys of their own.
+        let projection = |weight: &str| {
+            let k = format!("k_{weight}");
+            format!(
+                "
+        for {k} in 0..8:
+            x_{weight} = load X[i, {k}]
+            n_{weight} = load N[{k}]
+            w_{weight} = load {weight}[{k}, j]
+            s_{weight} = multiply(scale, x_{weight})
+            t_{weight} = multiply(n_{weight}, s_{weight})
+            p_{weight} = multiply(t_{weight}, w_{weight})
+            acc_{weight} <- add(acc_{weight}, p_{weight}) over {k}"
+            )
+        };
+        let weights = ["W_up", "W_gate"];
+        let spelled = format!(
+            "for i in 0..4:\n    for j in 0..4:{}{}",
+            weights.map(projection).concat(),
+            weights
+                .map(|w| format!("\n        O_{w}[i, j] = acc_{w}"))
+                .concat()
+        );
+        let forms: HashSet<String> = (0..8)
+            .map(|_| text(&normalize_uncached(&body(&spelled)).unwrap()))
+            .collect();
+        assert_eq!(forms.len(), 1);
+    }
 
     #[test]
     fn effect_constraints_keep_only_intervening_resource_hazards() {

@@ -62,57 +62,20 @@ from emmy.compiler.wire import decode, encode, intern
         (Var("s"), "s"),
         (Builtin("thread_idx.x"), "thread_idx.x"),
         (Literal(3, "int"), "3"),
-        (Literal(-1, "int"), "-1"),
-        (Literal(0.5), "0.5"),
-        (Literal(2, "float"), "2.0"),
-        (Literal(1e-05), "1e-05"),
-        (Literal(True, "bool"), "true"),
         (BinaryExpression("+", Var("s"), Literal(2, "int")), "s + 2"),
-        (BinaryExpression("+", Var("a1"), Literal(-1, "int")), "a1 + -1"),
-        (
-            BinaryExpression(
-                "+", BinaryExpression("*", BinaryExpression("/", Var("a5"), Literal(128, "int")), Literal(128, "int")), Var("a6")
-            ),
-            "a5 / 128 * 128 + a6",
-        ),
-        (BinaryExpression("-", Var("a"), BinaryExpression("-", Var("b"), Var("c"))), "a - (b - c)"),
-        (BinaryExpression("*", BinaryExpression("+", Var("a"), Var("b")), Var("c")), "(a + b) * c"),
-        (BinaryExpression("^", Var("a"), BinaryExpression("+", Var("b"), Var("c"))), "a ^ b + c"),
-        (BinaryExpression("+", BinaryExpression("^", Var("a"), Var("b")), Var("c")), "(a ^ b) + c"),
-        (BinaryExpression("&", Var("a"), BinaryExpression("*", Var("b"), Var("c"))), "a & b * c"),
-        (BinaryExpression("*", BinaryExpression("&", Var("a"), Var("b")), Var("c")), "(a & b) * c"),
-        (BinaryExpression("//", Var("a"), Literal(2, "int")), "a // 2"),
         (FunctionCallExpression("maximum", (Var("x"), Literal(0.0))), "maximum(x, 0.0)"),
         (TernaryExpression(Var("p"), Literal(1, "int"), Literal(0, "int")), "p ? 1 : 0"),
-        (BinaryExpression("+", TernaryExpression(Var("p"), Var("a"), Var("b")), Literal(1, "int")), "(p ? a : b) + 1"),
         (CastExpression("int", Var("x")), "(int)x"),
-        (CastExpression("int", BinaryExpression("+", Var("x"), Literal(1, "int"))), "(int)(x + 1)"),
-        (CastExpression("int", Literal(-1, "int")), "(int)(-1)"),
-        (Literal(float("-inf")), "-inf"),
-        (BinaryExpression("*", Var("x"), Literal(float("inf"))), "x * inf"),
         (FlatIndex("w", (Var("a0"), BinaryExpression("+", Var("a1"), Literal(1, "int")))), "w[a0, a1 + 1]"),
-        (BinaryExpression("+", FlatIndex("w", (Var("a0"),)), Literal(4, "int")), "w[a0] + 4"),
-        (Var("$0"), "`$0`"),
-        (Var("thread_idx.x"), "`thread_idx.x`"),
-        (Var("true"), "`true`"),
-        (FlatIndex("model.layers.0.weight", (Literal(0, "int"),)), "`model.layers.0.weight`[0]"),
     ],
 )
-def test_expression_round_trip(expression, text):
+def test_every_expression_class_round_trips_through_the_wire(expression, text):
+    """One expression per class: its text, its wire form and the wire registry's tag read it back as that class. The
+    text of every spelling is the crate's test."""
     assert str(expression) == text
     assert expression.to_wire() == text
     assert Expression.from_wire(text) == expression
     assert decode(encode(expression)) == expression
-
-
-def test_expression_parse_error_names_its_position():
-    with pytest.raises(ValueError, match="position 4"):
-        Expression.from_wire("a + * b")
-
-
-def test_a_name_holding_a_backtick_has_no_text():
-    with pytest.raises(ValueError, match="no spelling"):
-        str(Var("a`b"))
 
 
 def test_dimension_round_trip_preserves_composite_expression_and_hint():

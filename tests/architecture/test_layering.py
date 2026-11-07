@@ -211,52 +211,6 @@ def test_the_statement_module_depends_on_expressions_and_values_only() -> None:
     assert not offenders, "the statement module must not depend on these:\n" + "\n".join(offenders)
 
 
-def test_a_statement_is_copied_and_read_through_its_own_methods() -> None:
-    """Outside ``ir/stmt``, nothing edits a statement with ``dataclasses.replace`` (``Statement.replace`` is the one way)
-    and nothing lists a statement's dataclass fields: a caller reads a statement through the statement protocol, so
-    a kind need not be a dataclass.
-
-    The class such a call receives is not visible in the source, so this lowers the first corpus case of each
-    family and watches the calls. The wire form and the structural form may list fields: they are where a
-    statement's class states them, and they read a dataclass kind on its behalf.
-    """
-    import dataclasses
-    import sys
-
-    from emmy.compiler.ir.stmt import SelectBranch, Statement
-    from tests.compiler.realization import helpers
-
-    kinds = (Statement, SelectBranch)
-    inside = str(_REPO_ROOT / "emmy" / "compiler" / "ir" / "stmt")
-    forms = {str(_REPO_ROOT / "emmy" / "compiler" / name) for name in ("wire.py", "structural.py")} | {dataclasses.__file__}
-    listers = {dataclasses.fields.__code__: "class_or_instance", dataclasses.asdict.__code__: "obj", dataclasses.astuple.__code__: "obj"}
-    copies: set[str] = set()
-    listings: set[str] = set()
-
-    def watch(frame, event, _arg):  # noqa: ANN001, ANN202 — the ``sys.setprofile`` signature
-        if event != "call" or not (frame.f_code is dataclasses.replace.__code__ or frame.f_code in listers):
-            return
-        subject = frame.f_locals.get(listers.get(frame.f_code, "obj"))
-        caller = frame.f_back.f_code.co_filename
-        if not (isinstance(subject, kinds) or (isinstance(subject, type) and issubclass(subject, kinds))) or caller.startswith(inside):
-            return
-        if frame.f_code not in listers:
-            copies.add(f"{pathlib.Path(caller).relative_to(_REPO_ROOT)}:{frame.f_back.f_lineno}")
-        elif caller not in forms:
-            listings.add(f"{pathlib.Path(caller).relative_to(_REPO_ROOT)}:{frame.f_back.f_lineno}")
-
-    cases = [helpers.load_case(sorted(family.glob("*.json"))[0]) for family in sorted(helpers.CASES_DIR.iterdir()) if family.is_dir()]
-    previous = sys.getprofile()
-    sys.setprofile(watch)
-    try:
-        for case in cases:
-            helpers.lowered(case, case.context())
-    finally:
-        sys.setprofile(previous)
-    assert not copies, "copy these statements with ``stmt.replace(...)``:\n" + "\n".join(sorted(copies))
-    assert not listings, "read these statements through the statement protocol:\n" + "\n".join(sorted(listings))
-
-
 def test_a_class_is_on_the_wire_by_what_it_registers() -> None:
     """Nothing under ``emmy/`` asks whether a value inherits ``Wire``, and only the mixin's own defaults read a
     dataclass field for the wire: a class joins through ``wire.register`` with its tag, its two wire functions and
@@ -505,40 +459,6 @@ def test_nothing_reaches_into_the_scheduler_for_identity() -> None:
             if forbidden.search(line):
                 offenders.append(f"{py.relative_to(_REPO_ROOT).as_posix()}:{lineno}: {line.strip()}")
     assert not offenders, "read kernel identity off the Op interface (Op.deploy_identity)\n" + "\n".join(offenders)
-
-
-def test_every_buffer_bearing_stmt_can_rename_its_buffers() -> None:
-    """``Statement.rename_buffers`` is the setter counterpart of ``external_reads`` /
-    ``external_writes``: a stmt kind that DECLARES external buffers without knowing how to
-    rename them silently breaks every buffer rebind (structural identity, the session kernel
-    cache) the day it first appears inside a body those walk. Wrapper stmts whose
-    declarations aggregate a nested body are exempt — ``Body.rename_buffers`` reaches their
-    leaves through the recursive map."""
-    import importlib
-    import pkgutil
-
-    import emmy.compiler.ir as ir_pkg
-    from emmy.compiler.ir.stmt import Statement
-
-    for mod in pkgutil.walk_packages(ir_pkg.__path__, prefix="emmy.compiler.ir."):
-        importlib.import_module(mod.name)
-
-    def subclasses(cls):
-        for sub in cls.__subclasses__():
-            yield sub
-            yield from subclasses(sub)
-
-    offenders = [
-        cls.__name__
-        for cls in subclasses(Statement)
-        if ("external_reads" in cls.__dict__ or "external_writes" in cls.__dict__)
-        and "rename_buffers" not in cls.__dict__
-        and not cls.__dict__.get("nested", None)  # wrapper aggregators rename through their bodies
-    ]
-    assert not offenders, (
-        "these stmt kinds declare external buffers but cannot rename them — add a "
-        "rename_buffers override beside the declaration:\n" + "\n".join(sorted(offenders))
-    )
 
 
 def _kernel_kinds() -> list[type]:

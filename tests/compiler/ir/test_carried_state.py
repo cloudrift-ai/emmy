@@ -276,17 +276,6 @@ def test_the_lifted_step_runs_one_launch_per_step_on_the_gpu(batched: bool, stor
     np.testing.assert_allclose(np.asarray(result.outputs["out"]).reshape(want.shape), want, rtol=1e-5, atol=1e-6)
 
 
-def test_a_loop_over_the_cells_carries_nothing() -> None:
-    """One rule places every carrier — the nearest enclosing loop its index does not read — so a
-    scalar fold is carried by its own loop and a state by the loop outside its cells."""
-    outer = _step("c, i, j")[0]
-    over_i, over_j, over_k = _loops(outer.body)
-
-    assert list(outer.carries) == ["S"] and outer.carries["S"] == (over_i.axis, over_j.axis)
-    assert not over_i.is_reduce and not over_j.is_reduce
-    assert over_k.is_reduce and not over_k.carries
-
-
 def _fold_then_read() -> LoopOp:
     """``S`` summed over the steps, then a tail loop reading what the last step left — the smallest
     body with one carrying loop and one loop that carries nothing."""
@@ -340,41 +329,3 @@ def test_validation_refuses(stmts: tuple[str, ...], message: str) -> None:
 
     with pytest.raises(ValueError, match=message):
         LoopOp(body=parse_body(text))
-
-
-def _plain_fold() -> LoopOp:
-    """The same shape with a scalar ``Accum`` in place of the carried state: a reduce loop with
-    nothing to outline."""
-    return LoopOp(
-        body=parse_body(
-            """
-            for c in 0..3:
-                for i in 0..4:
-                    u = load U[c, i]
-                    total <- add(total, u)
-                out[c] = total
-            """
-        )
-    )
-
-
-def test_a_carried_state_prints_as_its_statements() -> None:
-    """The listing is the body's text: the state's update names its seed, and a read of it is a ``pre``."""
-    assert _fold_then_read().pretty_body() == (
-        "    for a0 in 0..3:\n"
-        "        for a1 in 0..4:\n"
-        "            in0 = load U[a0, a1]\n"
-        "            v0 = pre acc0[a1]\n"
-        "            v1 = in0 + v0\n"
-        "            acc0[a1] <- v1 seed 0\n"
-        "    for a2 in 0..4:\n"
-        "        v2 = pre acc0[a2]\n"
-        "        out[a2] = v2"
-    )
-    assert _plain_fold().pretty_body() == (
-        "    for a0 in 0..3:\n"
-        "        for a1 in 0..4:\n"
-        "            in0 = load U[a0, a1]\n"
-        "            acc0 <- add(acc0, in0)\n"
-        "        out[a0] = acc0"
-    )

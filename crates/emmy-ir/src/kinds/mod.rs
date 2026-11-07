@@ -325,7 +325,7 @@ macro_rules! with_kinds {
                 shared StridedLoop {} {
                     axis: AxisRef [AXIS],
                     start: Expression [EXPRESSION],
-                    step: NumOr<Expression> [EXPRESSION],
+                    step: Expression [EXPRESSION],
                     body: Body [BODY],
                     unroll: bool [] = false,
                     end: Option<Expression> [EXPRESSION] = None,

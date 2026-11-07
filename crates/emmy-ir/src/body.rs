@@ -726,7 +726,268 @@ impl Subroutine {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::normalize::testing::{accum_names, body, indented, inner, strs};
     use crate::text::parse_body;
+
+    fn names(list: &[&str]) -> HashSet<Name> {
+        list.iter().map(|name| Name::from(*name)).collect()
+    }
+
+    fn roots(list: &[&str]) -> Vec<Name> {
+        list.iter().map(|name| Name::from(*name)).collect()
+    }
+
+    /// A demoted-matmul cell: `p = cone(x) * w` with a plain B load.
+    fn cell() -> Body {
+        body(
+            "
+            a0 = load x[m, k]
+            a1 = negative(a0)
+            b = load w[k, n]
+            p = multiply(a1, b)
+            acc <- add(acc, p)
+            ",
+        )
+    }
+
+    #[test]
+    fn a_topological_order_keeps_an_order_the_constraints_allow() {
+        let given = body(
+            "
+            right = exp(x)
+            left = abs(x)
+            ",
+        );
+        assert_eq!(
+            given.topological_order(&[HashSet::new(), HashSet::new()]),
+            given
+        );
+    }
+
+    #[test]
+    fn a_scope_keeps_the_reads_above_a_name_it_shadows() {
+        let given = body(
+            "
+            use = abs(outer)
+            for i in 0..4:
+                outer = exp(source)
+            ",
+        );
+        assert_eq!(*inner(&given.stmts()[1]).free_ssa(), names(&["source"]));
+        assert_eq!(*given.free_ssa(), names(&["outer", "source"]));
+    }
+
+    #[test]
+    fn kind_queries_share_children_and_keep_a_mixed_order() {
+        let given = body(
+            "
+            for i in 0..4:
+                state[] <- value seed 0
+                sum <- add(sum, value)
+            state[] <- value seed 0
+            ",
+        );
+        let child = inner(&given.stmts()[0]);
+        let (carry, accum) = (child.at(0), child.at(1));
+        assert_eq!(child.carries(), std::slice::from_ref(&carry));
+        assert_eq!(child.accums(), std::slice::from_ref(&accum));
+        assert_eq!(
+            given.of_kinds(&[Kind::Accum, Kind::Carry]),
+            [carry, accum, given.at(1)]
+        );
+        assert_eq!(child.of_kinds(&[Kind::Carry]), child.carries());
+        assert_eq!(strs(given.carried_names()), ["state", "sum"]);
+    }
+
+    #[test]
+    fn coalesce_keeps_the_loop_of_a_reduction_that_reads_a_finalized_one() {
+        for dependent in [false, true] {
+            for strided in [false, true] {
+                let header = format!("for k in 0..8{}:", if strided { " step 1" } else { "" });
+                let mut second = vec!["v = load x[k]".to_string()];
+                if dependent {
+                    second.push("shifted = subtract(v, maximum)".to_string());
+                }
+                second.push(format!(
+                    "sum <- add(sum, {})",
+                    if dependent { "shifted" } else { "v" }
+                ));
+                let coalesced = body(&format!(
+                    "{header}\n    v = load x[k]\n    maximum <- maximum(maximum, v)\n{header}\n{}",
+                    indented(&second.join("\n"))
+                ))
+                .coalesce();
+                let expected = if dependent { 2 } else { 1 };
+                assert_eq!(
+                    coalesced.len(),
+                    expected,
+                    "dependent={dependent} strided={strided}"
+                );
+                assert_eq!(coalesced.loads().len(), expected);
+                assert_eq!(strs(coalesced.carried_names()), ["maximum", "sum"]);
+            }
+        }
+    }
+
+    #[test]
+    fn coalesce_declares_a_shared_fold_once_when_one_lowering_fuses_it() {
+        // One cone edge lowers the shared fold `a` alone; another fuses `a` and its sibling `b` into one pass over
+        // the same axis. In either order the scope declares `a` once and still folds `b` (the GDN in_proj
+        // projections, read through two edges of one computed-A cone).
+        for fused_first in [false, true] {
+            for strided in [false, true] {
+                let head = if strided {
+                    "for k in 0..8 step 1:"
+                } else {
+                    "for k in 0..8:"
+                };
+                let alone = format!(
+                    "{head}\n    x = load xs[k]\n    wa = load was[k]\n    pa = multiply(x, wa)\n    a <- add(a, pa)"
+                );
+                let fused = format!(
+                    "{alone}\n    wb = load wbs[k]\n    pb = multiply(x, wb)\n    b <- add(b, pb)"
+                );
+                let (first, second) = if fused_first {
+                    (&fused, &alone)
+                } else {
+                    (&alone, &fused)
+                };
+                // A statement between the two lowerings, as in the cone: the loops stay apart.
+                let coalesced = body(&format!("{first}\nbetween = exp(a)\n{second}")).coalesce();
+                let loops: Vec<&Body> = coalesced
+                    .stmts()
+                    .iter()
+                    .filter_map(|stmt| loop_parts(stmt).map(|(_, body)| body))
+                    .collect();
+                let mut accumulators: Vec<String> =
+                    loops.iter().flat_map(|body| accum_names(body)).collect();
+                accumulators.sort();
+                assert_eq!(
+                    accumulators,
+                    ["a", "b"],
+                    "fused_first={fused_first} strided={strided}"
+                );
+                // The pass that keeps `b` alone drops `a`'s own reads and keeps the one `b` shares.
+                let folding_b: Vec<&&Body> = loops
+                    .iter()
+                    .filter(|body| body.definitions().contains_key("b"))
+                    .collect();
+                let [last] = folding_b[..] else {
+                    panic!("one loop folds b: {}", folding_b.len())
+                };
+                assert_eq!(last.definitions().contains_key("wa"), fused_first);
+                assert!(last.definitions().contains_key("x"));
+            }
+        }
+    }
+
+    #[test]
+    fn axis_dependencies_stay_compact_through_a_long_ssa_chain() {
+        // Axis dependence grows with definitions times axes, not transitive SSA edges.
+        let chain_length = 4096;
+        let mut lines = vec![
+            "for a in 0..4:".to_string(),
+            "    v0 = load x[a]".to_string(),
+        ];
+        lines.extend((1..=chain_length).map(|i| format!("    v{i} = negative(v{})", i - 1)));
+        let dependencies = body(&lines.join("\n")).axis_dependencies();
+        assert_eq!(dependencies.len(), chain_length + 1);
+        assert_eq!(
+            dependencies.values().map(HashSet::len).sum::<usize>(),
+            chain_length + 1
+        );
+        assert!(dependencies.values().all(|axes| *axes == names(&["a"])));
+    }
+
+    #[test]
+    fn axis_dependencies_remove_only_the_closed_reduce_axis() {
+        let dependencies = body(
+            "
+            for a in 0..8:
+                for k in 0..32:
+                    value = load x[a, k]
+                    acc <- add(acc, value)
+            ",
+        )
+        .axis_dependencies();
+        assert_eq!(dependencies["value"], names(&["a", "k"]));
+        assert_eq!(dependencies["acc"], names(&["a"]));
+    }
+
+    #[test]
+    fn axis_dependencies_keep_a_strided_partial_axis() {
+        let dependencies = body(
+            "
+            for k in start..32 step step:
+                value = load x[k]
+                partial <- add(partial, value)
+            ",
+        )
+        .axis_dependencies();
+        assert_eq!(dependencies["partial"], names(&["k"]));
+    }
+
+    #[test]
+    fn a_backward_cone_lists_its_members_in_body_order() {
+        let (members, _) = cell().backward_cone(&roots(&["a1"]));
+        let defined: Vec<Name> = members
+            .iter()
+            .map(|member| member.defines()[0].clone())
+            .collect();
+        assert_eq!(strs(&defined), ["a0", "a1"]);
+    }
+
+    #[test]
+    fn a_backward_cone_reads_its_axes_from_outside_and_resolves_its_chain_inside() {
+        // The cone reads its index axes from the enclosing scope; the resolved SSA chain (a0) is internal, the
+        // untouched B side absent entirely.
+        let (_, external) = cell().backward_cone(&roots(&["a1"]));
+        assert_eq!(strs(&external), ["k", "m"]);
+    }
+
+    #[test]
+    fn a_backward_cone_root_defined_elsewhere_is_external() {
+        // A root from another scope level yields no members and surfaces as an external read: the chaining signal,
+        // not an error.
+        let (members, external) = cell().backward_cone(&roots(&["stat"]));
+        assert!(members.is_empty());
+        assert_eq!(strs(&external), ["stat"]);
+    }
+
+    #[test]
+    fn a_reduce_loop_joins_a_backward_cone_whole() {
+        // A reduce loop resolves through its exposed accumulator and joins as one member; its own loop axis is
+        // internal, the row axis it reads is not.
+        let given = body(
+            "
+            for r in 0..32:
+                s0 = load x[m, r]
+                stat <- maximum(stat, s0)
+            e = exp(stat)
+            ",
+        );
+        let (members, external) = given.backward_cone(&roots(&["e"]));
+        assert_eq!(members, [given.at(0), given.at(1)]);
+        assert!(!strs(&external).contains(&"r"));
+        assert!(strs(&external).contains(&"m"));
+    }
+
+    #[test]
+    fn an_axis_a_backward_cone_reads_only_in_a_select_predicate_is_external() {
+        // An axis reaching the cone only through a select predicate counts as read: materializing without it would
+        // drop a real dependence (the rotate-half rotary shape).
+        let given = body(
+            "
+            a0 = load x[k]
+            a1 = load x[m]
+            v = select:
+                a0 when n < m
+                a1 when m
+            ",
+        );
+        let (_, external) = given.backward_cone(&roots(&["v"]));
+        assert!(strs(&external).contains(&"n"));
+    }
 
     #[test]
     fn a_failing_walk_returns_its_error_and_builds_nothing() {
