@@ -8,7 +8,7 @@ from frozendict import frozendict
 from emmy.compiler.ir.elementwise import ElementwiseImpl
 from emmy.compiler.ir.expression import Literal, Var
 from emmy.compiler.ir.loop import Affine, Assign, Axis, Loop, LoopOp, Select
-from emmy.compiler.ir.stmt import parse_body
+from emmy.compiler.ir.stmt import normalize_body, parse_body
 
 
 def _loop(text: str) -> LoopOp:
@@ -76,7 +76,7 @@ def test_injective_buffer_rename_preserves_normal_form_cache() -> None:
 
     rename = {"X": "z_input", "Y": "a_input", "O": "renamed_output"}
     renamed = op.rename_buffers(rename)
-    assert renamed.body._normalized is renamed.body
+    assert normalize_body(renamed.body) is renamed.body
     assert replace(renamed, outputs=renamed.outputs).body is renamed.body
     assert tuple(load.input for load in renamed.loads) == tuple(rename[load.input] for load in op.loads)
     assert renamed.identity_key() == op.identity_key()
@@ -86,7 +86,7 @@ def test_aliasing_buffer_rename_does_not_preserve_normal_form_cache() -> None:
     op = _loop(_SUM_OF_TWO)
 
     renamed = op.rename_buffers({"X": "input", "Y": "input"})
-    assert "_normalized" not in renamed.body.__dict__
+    assert normalize_body(renamed.body) is not renamed.body
 
 
 def test_update_synthesizes_accum_decl():

@@ -237,21 +237,21 @@ class _Fn:
             if e.name in self.vars:
                 return b.load(self.vars[e.name], typ=F32)
             raise Unsupported(f"unbound variable {e.name}")
-        if k == "CastExpr":
+        if k == "CastExpression":
             v = self.expression(e.expression)
             if e.dtype in ("float", "f32"):
                 return v if v.type == F32 else b.sitofp(self.integer(v), F32)
             if e.dtype == "int":
                 return b.fptosi(v, I64) if v.type == F32 else self.integer(v)
             raise Unsupported(f"cast to {e.dtype}")
-        if k == "TernaryExpr":
+        if k == "TernaryExpression":
             on_true, on_false = self.expression(e.if_true), self.expression(e.if_false)
             if F32 in (on_true.type, on_false.type):
                 on_true, on_false = self.real(on_true), self.real(on_false)
             else:
                 on_true, on_false = self.integer(on_true), self.integer(on_false)
             return b.select(self.pred(e.cond), on_true, on_false)
-        if k == "BinaryExpr":
+        if k == "BinaryExpression":
             op = e.op
             if op in ("&&", "||"):
                 return (b.and_ if op == "&&" else b.or_)(self.pred(e.left), self.pred(e.right))
@@ -903,9 +903,9 @@ def _tiled(part, nest, accums, red_loop, par_loops, post, lo, hi, rows_block, co
 def _lane_body(stmts, red: str, block: str, lanes: int, lane: int, blocks: int) -> list:
     """``stmts`` with the reduce index ``red`` spelled ``lanes * block + lane`` and every expression simplified, so an
     index that is constant across a block's lanes (a block scale's) reads ``block`` alone."""
-    from emmy.compiler.ir.expression import BinaryExpr, Interval, Literal, SimplifyCtx, Var  # noqa: PLC0415
+    from emmy.compiler.ir.expression import BinaryExpression, Interval, Literal, SimplifyCtx, Var  # noqa: PLC0415
 
-    at = BinaryExpr("+", BinaryExpr("*", Var(block), Literal(lanes, "int")), Literal(lane, "int"))
+    at = BinaryExpression("+", BinaryExpression("*", Var(block), Literal(lanes, "int")), Literal(lane, "int"))
     ctx = SimplifyCtx.empty().extend(block, Interval(0, blocks - 1))
     return [s.map_expressions(lambda e: e.substitute({red: at}).simplify(ctx)) for s in stmts]
 

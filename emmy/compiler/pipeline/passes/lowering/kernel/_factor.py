@@ -52,7 +52,7 @@ from emmy.compiler.dtype import F32
 from emmy.compiler.ir.address import clamp_to
 from emmy.compiler.ir.axis import Axis, Window
 from emmy.compiler.ir.elementwise import ElementwiseImpl
-from emmy.compiler.ir.expression import BinaryExpr, Literal, TernaryExpr, Var
+from emmy.compiler.ir.expression import BinaryExpression, Literal, TernaryExpression, Var
 from emmy.compiler.ir.kernel import Tile
 from emmy.compiler.ir.kernel.ir import Smem, Sync, TreeHalve, WarpBroadcast, WarpShuffle
 from emmy.compiler.ir.pure.fold import Fold
@@ -730,7 +730,7 @@ def _mask_streamed(
 
     Either way the streamed ``Load`` index is already wrapped in-bounds (``% extent`` via the
     caller's σ), so the read itself is safe."""
-    cond = BinaryExpr("<", BinaryExpr("+", Var(axis), Literal(offset, "int")), extent)
+    cond = BinaryExpression("<", BinaryExpression("+", Var(axis), Literal(offset, "int")), extent)
     out: list[Statement] = []
     if stream_identity is not None:
         term, identity = stream_identity
@@ -774,8 +774,8 @@ def _replicate(
     if r == 0:
         return list(body)
     offset = r * coop
-    shifted = BinaryExpr("+", Var(axis.name), Literal(offset, "int"))
-    index_expression = BinaryExpr("%", shifted, axis.extent_expression()) if masked else shifted
+    shifted = BinaryExpression("+", Var(axis.name), Literal(offset, "int"))
+    index_expression = BinaryExpression("%", shifted, axis.extent_expression()) if masked else shifted
     sigma = Sigma({axis.name: index_expression})
     out = copy_cell(body, sigma, f"__r{r}", protected)
     if not masked:
@@ -842,12 +842,12 @@ def emit_combine(
         if n_threads > warp_size:
             # The flat tree's high bits fold first. Rotate the warp bits to keep the same
             # within-warp, then cross-warp order as the ordinary cooperative combine.
-            slot = BinaryExpr(
+            slot = BinaryExpression(
                 "+",
-                BinaryExpr("*", slot % warp_size, Literal(n_threads // warp_size, "int")),
-                BinaryExpr("/", slot, Literal(warp_size, "int")),
+                BinaryExpression("*", slot % warp_size, Literal(n_threads // warp_size, "int")),
+                BinaryExpression("/", slot, Literal(warp_size, "int")),
             )
-        idx = BinaryExpr("+", BinaryExpr("*", slot, Literal(scale, "int")), Var(iv))
+        idx = BinaryExpression("+", BinaryExpression("*", slot, Literal(scale, "int")), Var(iv))
         out: list[Statement] = [Smem(name=b, extents=(n_threads * scale,), dtype=smem_c) for b in bufs]
         out += [Write(output=b, index=(idx,), values=(st,)) for b, st in zip(bufs, state, strict=True)]
         out.append(Sync())
@@ -872,7 +872,7 @@ def emit_combine(
                 # Lane-0 of each warp stages that warp's broadcast state, indexed by ``warp``.
                 out.append(
                     Cond(
-                        cond=BinaryExpr("==", Var("lane"), Literal(0, "int")),
+                        cond=BinaryExpression("==", Var("lane"), Literal(0, "int")),
                         body=tuple(Write(output=b, index=(Var("warp"),), values=(st,)) for b, st in zip(bufs, state, strict=True)),
                     )
                 )
@@ -935,10 +935,10 @@ def _tile_reduce_axis_transposed(
     if GUARD_REDUCTIONS.narrow((True,))[0]:
         guarded = _guard_reductions._guard(Body((*hoisted, rloop, *tail)), frozenset(ax.name for ax in (*grid, *ctx.serial)))
         candidate = guarded[len(hoisted)]
-    predicate = candidate.end.cond if isinstance(candidate, StridedLoop) and isinstance(candidate.end, TernaryExpr) else None
+    predicate = candidate.end.cond if isinstance(candidate, StridedLoop) and isinstance(candidate.end, TernaryExpression) else None
 
     def uniform_parts(expression):
-        if isinstance(expression, BinaryExpr) and expression.op == "&&":
+        if isinstance(expression, BinaryExpression) and expression.op == "&&":
             return (*uniform_parts(expression.left), *uniform_parts(expression.right))
         return (expression,) if out_ax.name not in expression.free_vars() else ()
 
@@ -957,11 +957,13 @@ def _tile_reduce_axis_transposed(
     # column (a duplicate sweep, in-bounds) and their store is discarded by the guard below — the
     # same masked-overhang contract the tiled contraction's ``clamp_to`` / ``Cond`` pair states.
     span = lanes_n * columns
-    base = BinaryExpr("+", BinaryExpr("*", Var(blk_name), Literal(span, "int")), BinaryExpr("*", Var(n_lane.name), Literal(columns, "int")))
+    base = BinaryExpression(
+        "+", BinaryExpression("*", Var(blk_name), Literal(span, "int")), BinaryExpression("*", Var(n_lane.name), Literal(columns, "int"))
+    )
     cells = (
-        [BinaryExpr("+", base, Literal(j, "int")) for j in range(columns)]
+        [BinaryExpression("+", base, Literal(j, "int")) for j in range(columns)]
         if columns > 1
-        else [BinaryExpr("+", BinaryExpr("*", Var(blk_name), Literal(lanes_n, "int")), Var(n_lane.name))]
+        else [BinaryExpression("+", BinaryExpression("*", Var(blk_name), Literal(lanes_n, "int")), Var(n_lane.name))]
     )
     out_ext = out_ax.extent_expression()
     overhang = not (out_ax.extent.is_static and out_ax.extent.as_static() % span == 0)
@@ -1005,7 +1007,7 @@ def _tile_reduce_axis_transposed(
         body += copy_cell(copies, read, suffix, per_column)
         # The guarded projection: in range by the guard, so no clamp.
         store = copy_cell(tail_stmts, Sigma({out_ax.name: cell}), suffix, per_column)
-        stores += [Cond(cond=BinaryExpr("<", cell, out_ext), body=tuple(store))] if overhang else store
+        stores += [Cond(cond=BinaryExpression("<", cell, out_ext), body=tuple(store))] if overhang else store
     strided = StridedLoop(axis=axis, start=start, step=Literal(stride, "int"), body=Body(tuple(body)), unroll=_lane_unroll(axis, stride))
 
     merge: list[Statement] = [st for r in range(1, reg) for st in op.merge(tuple(f"{n}__r{r}" for n in view.states))]
@@ -1013,13 +1015,13 @@ def _tile_reduce_axis_transposed(
         merge += emit_combine(_column_states(op, columns), t=k_co.name, n_threads=k_ways, inner=(n_lane.name, lanes_n))
 
     if k_co is not None:
-        stores = [Cond(cond=BinaryExpr("==", Var(k_co.name), Literal(0, "int")), body=tuple(stores))]
+        stores = [Cond(cond=BinaryExpression("==", Var(k_co.name), Literal(0, "int")), body=tuple(stores))]
 
     lanes_axes = ((k_co,) if k_co is not None else ()) + (n_lane,)
     if uniform:
         condition = uniform[0]
         for part in uniform[1:]:
-            condition = BinaryExpr("&&", condition, part)
+            condition = BinaryExpression("&&", condition, part)
         # Output-axis predicates can differ between lanes. Only their independent conjuncts
         # guard the collective; every thread reaches its barriers together. Seeds stay visible
         # to the projection even when the whole block skips the reduction.
@@ -1098,7 +1100,7 @@ def _strided_fold(op: Fold, rloop, plan, ctx: Ctx, lane: Axis | None) -> list[St
     masked = reg > 1 and not (axis.extent.is_static and axis.extent.as_static() % (run if run > 1 else stride) == 0)
     start = Literal(0, "int") if lane is None else Var(lane.name)
     if run > 1 and lane is not None:
-        start = BinaryExpr("*", start, Literal(run, "int"))
+        start = BinaryExpression("*", start, Literal(run, "int"))
 
     # The reduce loop: ``reg`` interleaved accumulator chains (ILP), striding the axis by
     # ``coop·reg`` from the lane's start. The dissolved fold ``Accum``\\ s seed each copy's
@@ -1190,7 +1192,7 @@ def _lane_close(tail: list[Statement], lane: Axis | None, coop: int, ctx: Ctx, o
         body_tail = list(tail)  # reduce-bearing scalar tail: identical per lane, stores deterministic
     else:
         stored = with_store(tail, ctx.output, ctx.grid, out_val)
-        body_tail = [Cond(cond=BinaryExpr("==", Var(lane.name), Literal(0, "int")), body=tuple(stored))]
+        body_tail = [Cond(cond=BinaryExpression("==", Var(lane.name), Literal(0, "int")), body=tuple(stored))]
     return body_tail
 
 
@@ -1263,10 +1265,10 @@ def _scan_fold(op: Fold, rloop: Loop, plan: Reduce, lane: Axis) -> list[Statemen
     state = op.combine.results
     previous = tuple(f"{name}__previous" for name in state)
     chunk = Axis(name=f"{axis.name}_chunk", extent=axis.extent)
-    coordinate = BinaryExpr("+", Var(chunk.name), Var(lane.name))
-    valid = BinaryExpr("<", coordinate, axis.extent_expression())
+    coordinate = BinaryExpression("+", Var(chunk.name), Var(lane.name))
+    valid = BinaryExpression("<", coordinate, axis.extent_expression())
     padded = not (axis.extent.is_static and axis.extent.as_static() % width == 0)
-    read = Sigma({axis.name: BinaryExpr("%", coordinate, axis.extent_expression()) if padded else coordinate})
+    read = Sigma({axis.name: BinaryExpression("%", coordinate, axis.extent_expression()) if padded else coordinate})
     last = max(i for i, stmt in enumerate(rloop.body) if isinstance(stmt, Accum) and stmt.name in state)
     body: list[Statement] = [Assign(name=other, op="copy", args=(name,), dtype=F32) for name, other in zip(state, previous, strict=True)]
     for stmt in rloop.body[: last + 1]:

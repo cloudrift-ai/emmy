@@ -14,7 +14,7 @@ permissions:
 
 jobs:
   build:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04  # the wheel's platform tag follows the runner's glibc; see tests.yml
     outputs:
       version: ${{ steps.version.outputs.version }}
     steps:

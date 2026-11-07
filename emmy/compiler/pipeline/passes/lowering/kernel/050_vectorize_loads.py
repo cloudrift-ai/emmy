@@ -56,7 +56,7 @@ from math import gcd
 
 from emmy.compiler.backend.cuda.render_target import CudaRenderTarget
 from emmy.compiler.graph import Node
-from emmy.compiler.ir.expression import BinaryExpr, Expression, Literal, SimplifyCtx, Var, affine_form
+from emmy.compiler.ir.expression import BinaryExpression, Expression, Literal, SimplifyCtx, Var, affine_form
 from emmy.compiler.ir.kernel import KernelOp
 from emmy.compiler.ir.stmt import Body, Load, Statement, StridedLoop
 from emmy.compiler.pipeline import Pattern, RuleSkipped
@@ -189,7 +189,7 @@ def _fold_run_offset(expression: Expression, aligned: dict[str, int]) -> Express
     """``(Y + r) / d`` as ``Y / d`` where ``Y`` is a non-negative multiple of ``g`` (its variables' coefficients
     times their known alignment), ``g`` divides ``d`` and ``0 < r < g``: the elements of a lane's run then read
     a block scale at one index, the run's own."""
-    if not isinstance(expression, BinaryExpr):
+    if not isinstance(expression, BinaryExpression):
         return expression
     left, right = _fold_run_offset(expression.left, aligned), _fold_run_offset(expression.right, aligned)
     if expression.op == "/" and isinstance(right, Literal) and isinstance(right.value, int) and right.value > 0:
@@ -201,13 +201,13 @@ def _fold_run_offset(expression: Expression, aligned: dict[str, int]) -> Express
                 offset = anchor.value % gcd(right.value, *terms)
                 if offset:
                     left = _affine(form[1], anchor.value - offset)
-    return expression if (left, right) == (expression.left, expression.right) else BinaryExpr(expression.op, left, right)
+    return expression if (left, right) == (expression.left, expression.right) else BinaryExpression(expression.op, left, right)
 
 
 def _affine(coefficients: dict[str, int], constant: int) -> Expression:
     """``Σ c·v + constant`` spelled the way the run's first element spells it."""
-    terms = [Var(v) if c == 1 else BinaryExpr("*", Var(v), Literal(c, "int")) for v, c in coefficients.items()]
+    terms = [Var(v) if c == 1 else BinaryExpression("*", Var(v), Literal(c, "int")) for v, c in coefficients.items()]
     expression = terms[0]
     for term in terms[1:]:
-        expression = BinaryExpr("+", expression, term)
-    return BinaryExpr("+", expression, Literal(constant, "int")) if constant else expression
+        expression = BinaryExpression("+", expression, term)
+    return BinaryExpression("+", expression, Literal(constant, "int")) if constant else expression

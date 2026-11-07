@@ -35,7 +35,7 @@ from __future__ import annotations
 from dataclasses import replace
 
 from emmy.compiler.graph import Node
-from emmy.compiler.ir.expression import BinaryExpr, Expression, Literal, SimplifyCtx, affine_form
+from emmy.compiler.ir.expression import BinaryExpression, Expression, Literal, SimplifyCtx, affine_form
 from emmy.compiler.ir.kernel import KernelOp
 from emmy.compiler.ir.kernel.ir import (
     VOLTA_B_CONGRUOUS,
@@ -98,7 +98,7 @@ def _split(e: Expression) -> tuple[tuple[str, ...], int]:
     sit anywhere in the chain: a ring drain's row is ``slot * rows + (warp_row + 8)``, which a
     top-level ``base + constant`` split never sees. Terms compare by their rendered form, order
     free."""
-    if isinstance(e, BinaryExpr) and e.op == "+":
+    if isinstance(e, BinaryExpression) and e.op == "+":
         (lt, lc), (rt, rc) = _split(e.left), _split(e.right)
         return tuple(sorted(lt + rt)), lc + rc
     if isinstance(e, Literal) and isinstance(e.value, int):
@@ -113,7 +113,7 @@ def _delta(a: Expression, b: Expression) -> int | None:
     free = a.free_vars() | b.free_vars()
     af, bf = affine_form(a, free), affine_form(b, free)
     if af is not None and bf is not None and af[1] == bf[1]:
-        diff = BinaryExpr("-", bf[0], af[0]).simplify(SimplifyCtx.empty())
+        diff = BinaryExpression("-", bf[0], af[0]).simplify(SimplifyCtx.empty())
         if isinstance(diff, Literal) and isinstance(diff.value, int):
             return diff.value
     (ab, ac), (bb, bc) = _split(a), _split(b)

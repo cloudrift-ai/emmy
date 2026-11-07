@@ -238,10 +238,13 @@ nothing else: no submodule path, no private name. The package exports the statem
 `rename_free`, `binary`, `mask_select_predicate`, `ordering_constraints`, `dtype_promote`), the text
 form (`pretty_body`, `parse_body`), three normalization steps a caller may run on its own (`fold_affine`, `simplify_body`,
 `prepare_body`), the two kinds fusion's body assembly in `ir/loop/` builds a region with (`Call`, `Subroutine`), and
-what a layer declares a kind of its own with (`statement`, `role`) and the names of a kind's fields (`fields_of`).
-The module itself imports expressions, axes, dtypes and the structural and wire forms: no op, tensor, graph,
-backend or pipeline.
-`tests/architecture/test_layering.py` pins the export list and both directions.
+the names of a kind's fields (`fields_of`). The kinds, `Body`, the protocol, the text, the value numbering and the
+normalization are implemented in Rust — the `emmy-ir` crate, reached through the `emmy.emmy_ir` extension
+(`crates/emmy-ir/ARCHITECTURE.md`) — and the package is the glue over them: `__init__.py` re-exports the names, and
+`glue.py` writes the few members that take a Python function and keep its results (`rename` by a function, `rewrite`
+under a `Sigma`, `Body.fold`, the identity with its typed roles); `Body.map` and `map_expressions` call their function
+from Rust. The package imports expressions, axes, the sigma and the wire form: no op, tensor, graph, backend or
+pipeline. `tests/architecture/test_layering.py` pins the export list and both directions.
 
 **The statement protocol** is what a kind owes, all of it methods on the kind. No kind writes them: the shared
 kinds are declared (below), and a layer adds a kind of its own by declaring it, and nothing else:
@@ -261,12 +264,13 @@ entry for renaming and substitution; it drops the substitutions a statement's ow
 to the kind's `_rewrite`. `tests/compiler/ir/stmt/test_protocol.py` checks that every kind in every layer states the
 protocol, and the rebuilding halves on an example of each shared kind and each Kernel IR kind.
 
-**A declared kind** is a statement kind stated as data: a class under the `@statement` decorator whose fields carry a
-type and, through `role(...)`, what the field is to the rest of the compiler. The roles are names the statement defines,
+**A declared kind** is a statement kind stated as data: a struct in the crate's one kind list (`with_kinds!`) whose
+fields carry a type and the roles that say what the field is to the rest of the compiler. The roles are names the statement defines,
 reads, updates in place or binds for its own use; buffers it reads, writes or declares kernel-local; expressions;
 axes it binds and names that follow them; a child body; statements it carries; the body of a pure term; and records
-whose own fields play roles. A field with no role is plain data. `@statement` makes the class a frozen dataclass and
-writes every protocol member from the roles once, when the class is defined, so a declared kind writes none: what
+whose own fields play roles. A field with no role is plain data. The crate writes every protocol member from the
+roles once, and the extension generates the Python class of every kind from the same list, so a declared kind writes
+none and no kind is ever a Python class: what
 it reads is its `reads` and `updates` fields, a rename maps every name field and every expression, a buffer rename
 maps the buffer fields, and so on. Two roles hold statements that are not a child body. Carried statements (`stmts`: the cells a `RegStore` stores with it, the
 combine of a `TreeHalve`) are part of the statement: they are rewritten with it and their buffers, expressions and
@@ -276,8 +280,8 @@ read. An expression field that is also a `reads` field is read through: the name
 names the statement reads (a `Load`'s index, a `Select`'s predicates, a `Cond`'s condition). A number where a
 name, a buffer or an expression is expected is plain data (a constant stride, a literal seed).
 
-The shared kinds and the Kernel IR kinds are all declared. A kind whose member the roles cannot give is a missing
-role, not a hand-written member; the shared kinds state four, which `test_protocol.py` pins: an `Accum`'s reduced
+The shared kinds and the Kernel IR kinds are all declared, in one list. A kind whose member the roles cannot give
+is a missing role, not a hand-written member; the shared kinds state four, which `test_protocol.py` pins: an `Accum`'s reduced
 axes follow a substitution that splits an axis, a `Let` and a `Call` read buffers their fields do not name (inside
 an expression, through the subroutine), and a `StridedLoop` with an `end` binds one more name than its axis.
 
@@ -289,10 +293,11 @@ dispatched on the kind; Kernel IR registers its own kinds beside their classes.
 two bodies with equal statements are equal and hash alike; a statement placed in a body is the same object every
 time it is read, which passes rely on when they key side tables by statement; it survives the wire form and
 pickling. It is not a `tuple` and equals none: of a sequence it has a length, iteration, indexing and slicing, and a
-field that holds one defaults to a `Body`. `Body.structural_key()` uses the complete `structural.form`,
-including identity-relevant fields such as `Axis.window` that may deliberately be excluded from general equality.
-Its exact and clustered keys, and its executable normal forms, are cached on that `Body`; there is no equality-keyed
-shared cache that could alias distinct metadata. Callers use its walks (`iter`, `map`, `fold`, `iter_of_type`,
+field that holds one defaults to a `Body`. Its identity reads an axis's window, which equality leaves out: two bodies
+may be equal and key apart. Its executable normal form is cached on that `Body`; the memos shared across bodies (the
+normal forms, the identities) are keyed by the body's exact form, which reads the windows, hints and the bits of every
+number, never by equality or by text.
+Callers use its walks (`iter`, `map`, `fold`, `iter_of_type`,
 `loads`, `writes`, `carries`, `accums`, `loops`), its def-use readings (`definitions`, `ssa_uses`, `axis_names`,
 `axis_dependencies`, `backward_cone`), its orders (`topological_order`, `coalesce`), `rename_buffers`, and its
 identity (`identity`, `structural_key`). The names a body defines are the keys of `definitions`; the names one
@@ -317,17 +322,18 @@ for a0 in 0..4:
 A subroutine a call names is defined once, ahead of the statements, and the call spells the buffers it binds. Since
 subroutines compare by object, what a text read back keeps is which calls share one.
 
-The printer and the reader sit side by side in one file, one clause per shared kind, and its docstring is the
-grammar. A kind of another layer (the Kernel IR's thirty) prints and reads through its declaration: its class name,
+The printer and the reader sit side by side in one file of the crate, one clause per shared kind, and its
+documentation is the grammar. A kind of another layer (the Kernel IR's thirty) prints and reads through its declaration: its class name,
 the fields not at their default as `field=value` in parentheses, and one indented block per field that holds
 statements — `Smem(name=s_x, extents=(64, 64), dtype=f16)`, `Tile(axes=(a0 in 0..64), block_threads=128):` over its
 body. Each value is spelled by its type and read by the field's declared type, so a layer that adds a kind adds no
-printer and no reader. `tests/compiler/ir/stmt/test_text.py` holds both directions over every kind, every corpus
-kernel and the Kernel IR of six corpus lowerings that reach every Kernel IR kind.
+printer and no reader. The crate's text tests hold both directions over one example of every kind, and
+`tests/compiler/ir/stmt/test_text.py` over every corpus kernel and the Kernel IR of six corpus lowerings.
 
 The tests under `tests/compiler/ir/stmt/` state what goes into the module and what comes out, and hold for any
-implementation of it. The ones under `tests/compiler/ir/stmt/implementation/` call its inner steps and leave with
-this implementation.
+implementation of it. The ones under `tests/compiler/ir/stmt/implementation/` read this implementation's own
+summaries and memo and leave with it. The inner steps of normalization are tested beside their Rust, in
+`crates/emmy-ir` (`cargo test -p emmy-ir`); the extension exports the driver and the steps a pass calls, no other.
 
 ## `base.py`
 
@@ -356,9 +362,8 @@ expressions among other things is read by a subclass of `Parser`, which takes ea
 
 | Symbol                                                                       | Role                                                                     |
 |------------------------------------------------------------------------------|--------------------------------------------------------------------------|
-| `Var`, `Literal`, `BinaryExpr`, `Builtin`, `FuncCallExpr`, `TernaryExpr`, `CastExpr`, `FlatIndex` | Expression nodes. Each has `eval(env) → value/ndarray`, `substitute(mapping)`, `free_vars()`, plus the generic tree walks `subterms()` / `rebuild(fn)`. `FlatIndex` is a buffer coordinate's row-major offset, flattened against the buffer's shape at render time; it only appears in a kernel body. |
-| `_ExprOps`                                                                   | Mixin: Python operator overloading for expression building; default `NotImplementedError` for `pretty`/`substitute`/`free_vars`. |
-| `Expression`                                                                       | Union type alias.                                                        |
+| `Var`, `Literal`, `BinaryExpression`, `Builtin`, `FunctionCallExpression`, `TernaryExpression`, `CastExpression`, `FlatIndex` | Expression nodes, implemented in the `emmy-ir` crate and exported here. Each has `eval(env) → value/ndarray`, `substitute(mapping)`, `free_vars()`, plus the generic tree walks `subterms()` / `children()` / `rebuild(fn)`, and the Python operators build them. `FlatIndex` is a buffer coordinate's row-major offset, flattened against the buffer's shape at render time; it only appears in a kernel body. |
+| `Expression`                                                                       | The base class. Its text is its wire form and its structural form; `repr` is the constructor form the graph's dict form reads back. |
 | `PLACEHOLDER_PREFIX`, `placeholder`, `is_placeholder`                        | Convention for output-coord placeholders in coord maps.                  |
 
 ## `frontend/ir.py`
@@ -639,7 +644,7 @@ Fragment epilogues retain these bindings through the shared statement renderer, 
 substitution and storage dtype. An atomic split's projection may use a binding independent of the carried state;
 binding a state-dependent expression does not by itself prove that the projection distributes over addition.
 
-Dependence cones (`ir/stmt/body.py`): `Body.backward_cone(roots)` builds a `Cone` —
+Dependence cones: `Body.backward_cone(roots)` builds a `Cone` —
 the subset of the body's immediate stmts closed under SSA dependence (a wrapper joins as a unit; internally-bound
 axes excluded), plus `external_reads`, the names read from outside (axis vars and enclosing/sibling scopes alike).
 Construction never fails: unresolved names are data, and chaining scope levels means seeding the next level's
@@ -695,7 +700,7 @@ across a tree by design (a cone statistic's axis may spell the same as the enclo
 a `Loop` / reducing `Fold` binder that re-binds a substituted name, and is what the smem compute fill substitutes
 cell coordinates through.
 
-### `ir/stmt/normalize.py` — executable body normalization
+### Body normalization — `emmy-ir`'s `normalize.rs`
 
 Normalization is a canonical form, not a pipeline pass. It runs the same on every body, at construction and inside
 every identity digest, and answers to no knob, pin or evidence; nothing under `ir/` imports the pipeline that holds
@@ -770,7 +775,7 @@ from that CSE form. Subroutine boundaries never limit fusion.
   blocked twisted carrier; subsequent normalization collapses the duplicate loads, and the lowering passes stage both
   weight tensors symmetrically.
 - `place_values` — every pure value once, at the shallowest loop scope on its consumers' path that binds its
-  coordinates and holds its operands. Values are told apart by number (`ir/stmt/values.py`): the same function of the
+  coordinates and holds its operands. Values are told apart by number (the value numbering below): the same function of the
   same coordinate expressions is one value whatever it is called, so a second computation a scope can already see
   reads the first, a copy aliases its source, and a block without a side effect moves with everything it still holds.
   This one step is loop-invariant motion, load and expression dedup, copy-alias elimination and common-branch motion:
@@ -821,7 +826,7 @@ from that CSE form. Subroutine boundaries never limit fusion.
   on its own output because nothing it sorts by reads what it decides: a statement's shape and a block's spelled
   subtree read a sum's coefficients sorted and the block's children already ordered, and no number reads a name.
 
-### `ir/stmt/values.py` — value numbering
+### Value numbering — `emmy-ir`'s `values.rs`
 
 A statement's number is its kind and payload (op, dtype, resource) over its operands' numbers, with every maximal
 coordinate-only index expression a parameter numbered by first appearance across the statement and its operands and
@@ -835,7 +840,7 @@ state an operation reads ahead of its update — the previous step's value — i
 a state; only a name free in the body is spelled. The same
 number applied to the same coordinate expressions in one scope is one instance — what placement computes once.
 
-### `ir/stmt/identity.py` — structural identity
+### Structural identity — `emmy-ir`'s `identity.rs`
 
 `Body.identity()` takes the executable normal form (`normalize_body`) and keys its scope tree (`values.digest`):
 every block a node described by its kind and its extent or predicate, every leaf an instance with its coordinates
@@ -1006,13 +1011,15 @@ Reuses `Tile` + leaf stmts from Tile IR; adds hardware primitives
 materialized from scheduling decisions. `KernelOp` carries the body
 directly (no separate AST class).
 
-A Kernel IR statement kind is data: a declared kind (see the statement module's interface). Its class holds fields
-with their roles, how it prints and at most a constructor check; what rendering or the CUDA lowering asks of a
-statement beyond that (a grid's size, a fragment's register count, a store's element addresses) is a function over the
-statement, beside the kind's render function. Every field has a type from one closed set: strings, numbers, booleans,
-expressions, axes, dtypes, elementwise ops, bodies, statements, records of such fields (`FragmentArg`, one operand of
-a `FragmentApply`), and tuples and optionals of those. A fragment layout is therefore named, not held: the kind stores
-the atom's layout name and rendering looks the geometry up. `tests/architecture/test_layering.py` guards both.
+A Kernel IR statement kind is data: a declared kind (see the statement module's interface), stated in the crate's
+kind list beside the shared kinds and imported here as a class. The kind holds fields with their roles, how it
+prints and at most a constructor check; what rendering or the CUDA lowering asks of a statement beyond that (a grid's
+size, a fragment's register count, a store's element addresses) is a function over the statement, beside the kind's
+render function, never a member attached to the class. Every field has a type from one closed set — strings,
+numbers, booleans, expressions, axes, dtypes, elementwise ops, bodies, statements, records of such fields
+(`FragmentArg`, one operand of a `FragmentApply`), and tuples and optionals of those — which is the set the crate's
+`Field` trait is implemented for. A fragment layout is therefore named, not held: the kind stores the atom's layout
+name and rendering looks the geometry up. `tests/architecture/test_layering.py` guards the members.
 
 | Symbol             | Role                                                              |
 |--------------------|-------------------------------------------------------------------|

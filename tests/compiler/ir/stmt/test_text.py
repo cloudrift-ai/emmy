@@ -1,4 +1,6 @@
-"""A body's text: ``str`` and ``parse_body`` are exact inverses, over every statement kind and every stored kernel."""
+"""A body's text at the Python boundary: a statement built through the Python constructors (dtype objects, a dim's hint,
+a window) prints as its text and reads back; every stored kernel and lowered Kernel IR round-trips. The text of each
+kind on its own is the crate's test."""
 
 import json
 from textwrap import dedent
@@ -8,13 +10,12 @@ import pytest
 from emmy.compiler.dim import Dim
 from emmy.compiler.dtype import F8E4M3, F16, F32
 from emmy.compiler.ir.axis import Axis, Window
-from emmy.compiler.ir.expression import BinaryExpr, Literal, Var
+from emmy.compiler.ir.expression import BinaryExpression, Literal, Var
 from emmy.compiler.ir.stmt import (
     Accum,
     Affine,
     Assign,
     Body,
-    Call,
     Carry,
     Cond,
     Init,
@@ -26,7 +27,6 @@ from emmy.compiler.ir.stmt import (
     SelectBranch,
     Statement,
     StridedLoop,
-    Subroutine,
     Write,
     ZeroPrologue,
     parse_body,
@@ -63,7 +63,7 @@ STATEMENTS = [
     (Write("slab", (A0,), ("v",), swizzle="B32"), "slab[a0] = v swizzle=B32"),
     (ZeroPrologue("acc", 1024), "zero acc words=1024"),
     (
-        Select("v3", (SelectBranch("x", A0.lt(ONE)), SelectBranch("y", BinaryExpr(">=", A0, ONE)))),
+        Select("v3", (SelectBranch("x", A0.lt(ONE)), SelectBranch("y", BinaryExpression(">=", A0, ONE)))),
         """\
         v3 = select:
             x when a0 < 1
@@ -116,99 +116,6 @@ def test_a_statement_and_its_text_read_each_other_back(stmt, text):
     text = dedent(text)
     assert str(stmt) == text
     assert _exact(parse_body(text)) == _exact(Body((stmt,)))
-
-
-def test_a_body_is_its_statements_one_under_another():
-    text = dedent(
-        """\
-        let f32 v0 = 0.125
-        for a0 in 0..4:
-            for a1 in 0..8:
-                in0 = load x[a0, a1]
-                v1 = 2*in0 + v0
-                acc0 <- add(acc0, v1) over a1
-            y[a0] = acc0"""
-    )
-    body = parse_body(text)
-    assert str(body) == text
-    assert [type(stmt).__name__ for stmt in body.iter()] == ["Let", "Loop", "Loop", "Load", "Affine", "Accum", "Write"]
-    assert parse_body("") == Body() and str(Body()) == ""
-
-
-def test_the_reader_takes_any_consistent_indentation_and_blank_lines():
-    assert parse_body("\n  for a0 in 0..4:\n\n      y[a0] = v\n") == parse_body("for a0 in 0..4:\n    y[a0] = v")
-
-
-@pytest.mark.parametrize(
-    ("text", "message"),
-    [
-        ("y[a0] = v\n    z[a0] = v", "line 2: unexpected indentation"),
-        ("for a0 in 0..4:\n        y[a0] = v\n    z[a0] = v", "line 3: unexpected indentation"),
-        ("v = 1", "line 1: .*no term"),
-        ("y[a0] = v\nv1 = multiply(a, b", "line 2: expected"),
-        ("v = select:\n    x where a0 < 1", "line 2: expected 'when'"),
-        ("for a0 in 2..4:", "line 1: .*names its step"),
-        ("else:", "line 1"),
-        ("a, b = multiply(x, y)", "line 1: only a load binds several names"),
-        ("v = x + ", "line 1: unexpected end"),
-        ("y[a0] = v extra", "line 1: unexpected text"),
-    ],
-)
-def test_a_reading_error_names_its_line(text, message):
-    with pytest.raises(ValueError, match=message):
-        parse_body(text)
-
-
-CALLS = """\
-sub inner(r in 0..4) -> s:
-    for k in 0..8:
-        x = load a[r, k]
-        s <- add(s, x) over k
-sub outer(r in 0..4, c in 0..2 window(parent=cc in 0..4)) -> t:
-    u = call inner[a](r)
-    w = load b[c]
-    t = multiply(u, w)
-for i in 0..4:
-    p = call outer[a, b](i, 0)
-    q = call outer[a, b](i, 1)
-    z = call outer[m, b](i, 1)
-    v = p + q + z
-    y[i] = v"""
-
-
-def test_a_call_names_a_subroutine_defined_once_ahead_of_it():
-    """Subroutines compare by object, so reading a text back keeps which calls share one, and the text itself."""
-    body = parse_body(CALLS)
-    assert str(body) == CALLS
-    p, q, z = (stmt.target for stmt in body.iter_of_type(Call))
-    assert p is q and p.name == z.name == "outer"
-    assert (p.buffers, z.buffers, p.params, p.result) == (("a", "b"), ("m", "b"), ("r", "c"), "t")
-    assert p.axes[1].window.parent.name == "cc"
-    assert str(parse_body(str(body))) == CALLS
-
-
-@pytest.mark.parametrize(
-    ("text", "message"),
-    [
-        ("p = call missing[a](i)", "line 1: no subroutine 'missing' is defined above"),
-        ("sub f(r in 0..4) -> s:\n    x = load a[r]\np = call f[a](0)", "line 1: .*must define its result"),
-        ("sub f(r in 0..4) -> x:\n    x = load a[r]\np = call f[a](0, 1)", "line 3: .*do not match its parameters"),
-    ],
-)
-def test_a_call_that_does_not_fit_its_subroutine_is_refused(text, message):
-    with pytest.raises(ValueError, match=message):
-        parse_body(text)
-
-
-def test_two_subroutines_of_one_name_have_no_text():
-    def sub(buffer: str) -> Subroutine:
-        return Subroutine(
-            "f", (Axis("r", 4),), (Load(("x",), buffer, (Var("r"),)), Assign("y", "exp" if buffer == "a" else "log", ("x",))), "y"
-        )
-
-    body = Body((Call("p", sub("a"), (A0,)), Call("q", sub("b"), (A0,))))
-    with pytest.raises(ValueError, match="two subroutines are named 'f'"):
-        str(body)
 
 
 def _stored_bodies(value) -> list:

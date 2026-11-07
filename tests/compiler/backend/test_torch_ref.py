@@ -9,7 +9,7 @@ from emmy.compiler.backend import torch_ref
 from emmy.compiler.backend.numpy import NumpyBackend
 from emmy.compiler.graph import Graph, Tensor
 from emmy.compiler.ir.base import ConstantOp, InputOp
-from emmy.compiler.ir.expression import BinaryExpr, Literal, TernaryExpr, placeholder
+from emmy.compiler.ir.expression import BinaryExpression, Literal, TernaryExpression, placeholder
 from emmy.compiler.ir.frontend.ir import LinearOp, MatmulOp, RmsNormOp, SoftmaxOp
 from emmy.compiler.ir.tensor.ir import ElementwiseOp, GatherOp, IndexMapOp, IndexSource, RangeOp, ReduceOp, ScanOp, ScatterOp
 
@@ -259,7 +259,7 @@ def test_where_accepts_bool_scalar_broadcast_through_triangular_indexmap():
                 IndexSource(
                     input_idx=0,
                     coord_map=(Literal(0, "int"),),
-                    select=BinaryExpr(">=", placeholder(1), placeholder(0)),
+                    select=BinaryExpression(">=", placeholder(1), placeholder(0)),
                 ),
                 IndexSource(input_idx=1, coord_map=(Literal(0, "int"),)),
             ),
@@ -469,7 +469,7 @@ def test_indexmap_cat_with_select():
     s1 = IndexSource(
         input_idx=1,
         coord_map=(placeholder(0), placeholder(1) - Literal(2, "int")),
-        select=BinaryExpr(">=", placeholder(1), Literal(2, "int")),
+        select=BinaryExpression(">=", placeholder(1), Literal(2, "int")),
     )
     g = _imap_graph([(4, 2), (4, 2)], (4, 4), (s0, s1))
     _assert_matches_numpy(g, {"in0": _rng().standard_normal((4, 2)), "in1": _rng().standard_normal((4, 2))})
@@ -478,9 +478,9 @@ def test_indexmap_cat_with_select():
 def test_indexmap_recurrence_patch_uses_tensor_ternary_coordinates():
     # Insert a two-cell recurrence update into columns 1:3 of a larger carried state.
     column = placeholder(1)
-    bounds = BinaryExpr("&&", BinaryExpr(">=", column, Literal(1, "int")), column.lt(Literal(3, "int")))
-    in_patch = BinaryExpr("&&", Literal(True, "bool"), bounds)
-    patch_column = TernaryExpr(in_patch, column - Literal(1, "int"), Literal(0, "int"))
+    bounds = BinaryExpression("&&", BinaryExpression(">=", column, Literal(1, "int")), column.lt(Literal(3, "int")))
+    in_patch = BinaryExpression("&&", Literal(True, "bool"), bounds)
+    patch_column = TernaryExpression(in_patch, column - Literal(1, "int"), Literal(0, "int"))
     sources = (
         IndexSource(input_idx=0, coord_map=(placeholder(0), patch_column), select=in_patch),
         IndexSource(input_idx=1, coord_map=(placeholder(0), column)),
@@ -494,7 +494,7 @@ def test_indexmap_recurrence_patch_uses_tensor_ternary_coordinates():
 
 @pytest.mark.parametrize(("condition", "expected"), [(1, 7), (0, 9)])
 def test_index_expression_ternary_preserves_scalar_condition(condition, expected):
-    expression = TernaryExpr(Literal(condition, "int"), Literal(7, "int"), Literal(9, "int"))
+    expression = TernaryExpression(Literal(condition, "int"), Literal(7, "int"), Literal(9, "int"))
 
     assert torch_ref._idx_expression(expression, {}) == expected
 

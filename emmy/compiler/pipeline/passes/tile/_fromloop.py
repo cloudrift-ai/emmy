@@ -15,7 +15,7 @@ from typing import TYPE_CHECKING
 
 from emmy.compiler.dtype import F32
 from emmy.compiler.ir.axis import Axis
-from emmy.compiler.ir.expression import BinaryExpr, Expression, Literal, TernaryExpr, Var
+from emmy.compiler.ir.expression import BinaryExpression, Expression, Literal, TernaryExpression, Var
 from emmy.compiler.ir.loop import LoopOp
 from emmy.compiler.ir.pure import Lambda
 from emmy.compiler.ir.pure.fold import EXTENTS, Fold, binding_extents
@@ -701,8 +701,8 @@ def states_as_buffers(body: Body, prefix: str, inputs: Mapping[str, Tensor]) -> 
 
     def read(stmt: Pre, time: Axis, outer: tuple[Axis, ...], seeds: dict[str, float | str], stored: dict) -> tuple[Statement, ...]:
         step = Var(time.name)
-        after_first = BinaryExpr(">", step, Literal(0, "int"))
-        previous = TernaryExpr(after_first, step - Literal(1, "int"), Literal(0, "int"))
+        after_first = BinaryExpression(">", step, Literal(0, "int"))
+        previous = TernaryExpression(after_first, step - Literal(1, "int"), Literal(0, "int"))
         if stmt.carrier in stored:
             carry, write = stored[stmt.carrier]
             cells = {cell.name: at for cell, at in zip(carry.index, stmt.index, strict=True) if isinstance(cell, Var)}

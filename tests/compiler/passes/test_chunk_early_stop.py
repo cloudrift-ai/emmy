@@ -12,7 +12,7 @@ from emmy.compiler.context import Context
 from emmy.compiler.dim import Dim
 from emmy.compiler.ir.axis import Axis
 from emmy.compiler.ir.cuda import CudaOp
-from emmy.compiler.ir.expression import BinaryExpr, Literal, TernaryExpr, Var
+from emmy.compiler.ir.expression import BinaryExpression, Literal, TernaryExpression, Var
 from emmy.compiler.ir.frontend.ir import SdpaOp
 from emmy.compiler.ir.stmt import Select, parse_body
 from emmy.compiler.pipeline import CUDA_PASSES, Pipeline
@@ -58,7 +58,7 @@ def _pretty(expression) -> str:
 def test_a_causal_mask_stops_the_stream_at_the_block_end() -> None:
     first, end = _bounds(_masked_score(CAUSAL))
     assert first is None
-    assert isinstance(end, TernaryExpr), "the stop is the block end clamped to the extent"
+    assert isinstance(end, TernaryExpression), "the stop is the block end clamped to the extent"
     assert _pretty(end.if_true) == _pretty(ROW_BLOCK.block_end())
     assert _pretty(end.if_false) == "512"
 
@@ -66,9 +66,9 @@ def test_a_causal_mask_stops_the_stream_at_the_block_end() -> None:
 def test_a_band_starts_the_stream_on_the_chunk_holding_the_first_row_near_edge() -> None:
     first, end = _bounds(_masked_score(BAND))
     assert end is None
-    edge = BinaryExpr("-", ROW_BLOCK.block_base(), Literal(31, "int"))  # key <= row - 32 masks every key below row - 31
-    clamped = TernaryExpr(cond=BinaryExpr(">", edge, Literal(0, "int")), if_true=edge, if_false=Literal(0, "int"))
-    assert _pretty(first) == _pretty(BinaryExpr("*", BinaryExpr("/", clamped, Literal(BK, "int")), Literal(BK, "int")))
+    edge = BinaryExpression("-", ROW_BLOCK.block_base(), Literal(31, "int"))  # key <= row - 32 masks every key below row - 31
+    clamped = TernaryExpression(cond=BinaryExpression(">", edge, Literal(0, "int")), if_true=edge, if_false=Literal(0, "int"))
+    assert _pretty(first) == _pretty(BinaryExpression("*", BinaryExpression("/", clamped, Literal(BK, "int")), Literal(BK, "int")))
 
 
 def test_a_causal_band_bounds_both_ends_whichever_mask_comes_first() -> None:
@@ -89,7 +89,7 @@ def test_a_comparison_canonicalized_by_swapping_operands_still_bounds_the_stream
 
 def test_a_lead_on_the_row_side_pushes_the_stop_out_and_a_strict_mask_pulls_it_in() -> None:
     _, lagged = _bounds(_masked_score(_mask("v1", "<=", ">", row_lead=32)))
-    assert _pretty(lagged.if_true) == _pretty(BinaryExpr("+", ROW_BLOCK.block_end(), Literal(32, "int")))
+    assert _pretty(lagged.if_true) == _pretty(BinaryExpression("+", ROW_BLOCK.block_end(), Literal(32, "int")))
     _, strict = _bounds(_masked_score(_mask("v1", "<", ">=", row_lead=1)))
     assert _pretty(strict.if_true) == _pretty(ROW_BLOCK.block_end()), "key >= row + 1 masks the same keys as key > row"
 
@@ -188,7 +188,7 @@ def test_a_position_read_from_memory_bounds_the_stream_at_runtime() -> None:
     [select] = parse_body("v1 = select:\n    `zero` when -1 * a1 + a2 <= in0\n    fill when -1 * a1 + a2 > in0")
     first, end = _mask_key_bounds(_masked_score(select), "s2", KEY, "a1", ROW_BLOCK, BK, frozenset({"in0"}))
     assert first is None
-    shift = BinaryExpr("-", Literal(0, "int"), BinaryExpr("-", Literal(0, "int"), Var("in0")))  # the anchor, ``-in0``, negated
-    lead = TernaryExpr(cond=BinaryExpr(">", shift, Literal(0, "int")), if_true=shift, if_false=Literal(0, "int"))
-    assert _pretty(end.if_true) == _pretty(BinaryExpr("+", ROW_BLOCK.block_end(), lead))
+    shift = BinaryExpression("-", Literal(0, "int"), BinaryExpression("-", Literal(0, "int"), Var("in0")))  # the anchor, ``-in0``, negated
+    lead = TernaryExpression(cond=BinaryExpression(">", shift, Literal(0, "int")), if_true=shift, if_false=Literal(0, "int"))
+    assert _pretty(end.if_true) == _pretty(BinaryExpression("+", ROW_BLOCK.block_end(), lead))
     assert _bounds(_masked_score(select)) == (None, None), "a value the caller does not name as uniform bounds nothing"

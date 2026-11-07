@@ -1,8 +1,7 @@
 """The wire form and the structural form of a class that is no dataclass: what it supplies, and what it gets.
 
 A class joins the wire with its tag, its two wire functions and its parts, and enters an identity with its own
-structural form. Neither form reads a dataclass field of it, and the wire does not ask it to inherit ``Wire``. A
-statement kind written by hand enters an identity the same way.
+structural form. Neither form reads a dataclass field of it, and the wire does not ask it to inherit ``Wire``.
 """
 
 from __future__ import annotations
@@ -10,7 +9,7 @@ from __future__ import annotations
 import dataclasses
 
 from emmy.compiler.ir.expression import Literal
-from emmy.compiler.ir.stmt import Body, Statement, parse_body
+from emmy.compiler.ir.stmt import Assign
 from emmy.compiler.structural import form, record_form
 from emmy.compiler.wire import Wire, decode, encode, register, rewrite
 
@@ -66,42 +65,6 @@ class Holder(Wire):
     anything: object = None
 
 
-class Scaled(Statement):
-    """A statement kind written by hand: ``name = value`` over a span. A statement is not on the wire (a body's wire
-    form is its text), so it supplies its structural form and nothing else."""
-
-    def __init__(self, name: str, value: str, span: Span) -> None:
-        self.name, self.value, self.span = name, value, span
-
-    def __eq__(self, other: object) -> bool:
-        return type(other) is Scaled and (self.name, self.value, self.span) == (other.name, other.value, other.span)
-
-    def __hash__(self) -> int:
-        return hash((self.name, self.value, self.span))
-
-    def __repr__(self) -> str:
-        return f"Scaled({self.name!r}, {self.value!r}, {self.span!r})"
-
-    def deps(self) -> tuple[str, ...]:
-        return (self.value,)
-
-    def defines(self) -> tuple[str, ...]:
-        return (self.name,)
-
-    def _rewrite(self, rename, sigma, axis_fn):  # noqa: ANN001, ANN202 — see ``Statement.rewrite``
-        return Scaled(rename(self.name), rename(self.value), self.span)
-
-    def pretty(self, indent: str = "") -> list[str]:
-        return [f"{indent}{self.name} = scaled({self.value}, {self.span!r})"]
-
-    def structural_form(self) -> tuple:
-        return record_form("Scaled", [(part, dataclasses.MISSING) for part in (self.name, self.value, self.span)])
-
-
-def _body(x: str = "x", y: str = "y", span: Span | None = None) -> Body:
-    return Body((*parse_body(f"f32 {x} = load a[i]"), Scaled(y, x, span or Span(1, 4)), *parse_body(f"out[i] = {y}")))
-
-
 def test_a_registered_class_round_trips_the_wire_tagged_and_by_annotation() -> None:
     assert encode(Span(1, 4)) == {"test.span": [1, 4]}
     assert decode(encode(Span(1, 4))) == Span(1, 4)
@@ -125,12 +88,5 @@ def test_a_class_with_its_own_form_is_keyed_the_way_a_dataclass_is() -> None:
     assert form(Span(1, 4)) == ("Span", 1, 4)
     for span, data in ((Span(1), SpanData(1)), (Span(1, 4), SpanData(1, 4)), (Span(0, 0), SpanData(0, 0))):
         assert form(span)[1:] == form(data)[1:]
-    assert form(Scaled("y", "x", Span(1))) == ("Scaled", "y", "x", ("Span", 1))
+    assert form(Assign("y", "multiply", ("x", "s")))[:2] == ("Assign", "y") and len(form(Assign("y", "multiply", ("x", "s")))) == 4
     assert form((Literal(1, "int"), Span(1))) == (form(Literal(1, "int")), ("Span", 1))
-
-
-def test_a_hand_written_statement_kind_enters_an_identity() -> None:
-    key = _body().structural_key(structural=False)
-    assert _body("p", "q").structural_key(structural=False) == key
-    assert _body(span=Span(2, 4)).structural_key(structural=False) != key
-    assert _body().structural_key() == _body("p", "q").structural_key()

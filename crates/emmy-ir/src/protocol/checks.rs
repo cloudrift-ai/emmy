@@ -1,0 +1,183 @@
+//! The checks a kind makes on construction, each over its own fields: what Python's `__post_init__` refused.
+
+use crate::kinds::*;
+use crate::{Error, Result};
+use std::sync::Arc;
+
+/// The checks Python's `__post_init__` made, each kind over its own fields.
+impl Load {
+    pub fn validate(&self) -> Result<()> {
+        if self.names.is_empty() {
+            return Err(Error::Value("Load.names must be non-empty".into()));
+        }
+        Ok(())
+    }
+}
+
+impl Write {
+    pub fn validate(&self) -> Result<()> {
+        if self.values.is_empty() {
+            return Err(Error::Value("Write.values must be non-empty".into()));
+        }
+        if self.atomic && self.values.len() != 1 {
+            return Err(Error::Value(
+                "an atomic Write is scalar (one value per atomicAdd)".into(),
+            ));
+        }
+        Ok(())
+    }
+}
+
+impl Accum {
+    /// The ordinary self-fold has one spelling: a base that is the state itself is no base.
+    pub fn normalized(self) -> Accum {
+        let base = self.base.filter(|b| *b != self.name);
+        Accum { base, ..self }
+    }
+}
+
+impl Select {
+    pub fn validate(&self) -> Result<()> {
+        if self.branches.is_empty() {
+            return Err(Error::Value("Select.branches must be non-empty".into()));
+        }
+        Ok(())
+    }
+}
+
+impl Call {
+    pub fn validate(&self) -> Result<()> {
+        if self.args.len() != self.target.axes.len() {
+            return Err(Error::Value(
+                "subroutine arguments do not match its parameters".into(),
+            ));
+        }
+        Ok(())
+    }
+}
+
+impl Tile {
+    pub fn validate(&self) -> Result<()> {
+        if self.aux_threads != 0 && self.block_threads.is_none() {
+            return Err(Error::Value(
+                "Tile.aux_threads requires a cooperative block_threads".into(),
+            ));
+        }
+        Ok(())
+    }
+}
+
+impl WgmmaMma {
+    pub fn validate(&self) -> Result<()> {
+        let crate::kinds::field::Shape3(m, n, k) = self.shape;
+        if (m, k) != (64, 16) || n % 8 != 0 || !(8..=256).contains(&n) {
+            return Err(Error::Value(format!(
+                "wgmma: the shape is m64n<8..256, a multiple of 8>k16, got ({m}, {n}, {k})"
+            )));
+        }
+        if self.c_frags.len() as i64 != n / 8 {
+            return Err(Error::Value(format!(
+                "wgmma m64n{n}: the accumulator is {} m16n8 C fragments, got {}",
+                n / 8,
+                self.c_frags.len()
+            )));
+        }
+        if self.a_desc.is_none() == self.a_frag.is_none() {
+            return Err(Error::Value(
+                "wgmma: exactly one of a_desc / a_frag names the A operand".into(),
+            ));
+        }
+        if self.a_frag.is_some() && self.trans_a != 0 {
+            return Err(Error::Value(
+                "wgmma: the register-form A operand is K-major (no transpose bit)".into(),
+            ));
+        }
+        Ok(())
+    }
+}
+
+impl TreeHalve {
+    pub fn validate(&self) -> Result<()> {
+        carried_kind(&self.combine_states, Kind::Assign)
+    }
+}
+
+impl WarpShuffle {
+    pub fn validate(&self) -> Result<()> {
+        carried_kind(&self.combine_states, Kind::Assign)
+    }
+}
+
+impl RegStore {
+    pub fn validate(&self) -> Result<()> {
+        carried_kind(&self.run, Kind::RegStore)
+    }
+}
+
+fn carried_kind(stmts: &[Arc<Statement>], kind: Kind) -> Result<()> {
+    match stmts.iter().find(|s| s.kind() != kind) {
+        Some(other) => Err(Error::Type(format!(
+            "expected {kind} statements, got a {}",
+            other.kind()
+        ))),
+        None => Ok(()),
+    }
+}
+
+/// A statement with its `Accum` base normalized and its carried numbers settled: what every constructor returns.
+pub fn finished(stmt: Statement) -> Result<Statement> {
+    stmt.check()?;
+    Ok(match stmt {
+        Statement::Accum(a) => Statement::Accum(a.normalized()),
+        other => other,
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::Name;
+    use crate::text::parse_statement;
+
+    /// A wgmma cell over eight C fragments at m64n64k16, its A operand named by `a_operand`.
+    fn cell(a_operand: &str) -> WgmmaMma {
+        let stmt = parse_statement(&format!(
+            "WgmmaMma(c_frags=(c0, c1, c2, c3, c4, c5, c6, c7), b_desc=bD, shape=(64, 64, 16), {a_operand})"
+        ))
+        .unwrap();
+        <&WgmmaMma>::try_from(&*stmt).unwrap().clone()
+    }
+
+    /// What the constructor's checks refuse `cell` with: a value error's message.
+    fn refusal(cell: WgmmaMma) -> String {
+        match finished(Statement::WgmmaMma(cell)) {
+            Err(Error::Value(message)) => message,
+            other => panic!("not refused with a value error: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn the_cell_rejects_malformed_operands() {
+        let both = WgmmaMma {
+            a_frag: Some("a".into()),
+            ..cell("a_desc=aD")
+        };
+        assert!(refusal(both).contains("exactly one of a_desc / a_frag"));
+        let sixteen = WgmmaMma {
+            c_frags: (0..16).map(|j| Name::from(format!("c{j}"))).collect(),
+            ..cell("a_desc=aD")
+        };
+        assert!(refusal(sixteen).contains("8 m16n8 C fragments"));
+        let transposed = WgmmaMma {
+            trans_a: 1,
+            ..cell("a_frag=a")
+        };
+        assert!(refusal(transposed).contains("K-major"));
+        let mma_sync = WgmmaMma {
+            c_frags: Names::from([Name::from("c0")]),
+            shape: Shape3(16, 8, 16),
+            ..cell("a_desc=aD")
+        };
+        assert!(refusal(mma_sync).contains("m64n"));
+    }
+}

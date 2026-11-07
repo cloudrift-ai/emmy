@@ -12,6 +12,7 @@ Lives at the top of ``ir/`` rather than under any one IR package because
 
 from __future__ import annotations
 
+import copy
 from dataclasses import dataclass, field
 
 from emmy.compiler.ir.expression import Expression, SimplifyCtx
@@ -29,6 +30,11 @@ class Sigma:
     str(expression))`` pairs — so two Sigmas built from different dicts
     that denote the same substitution compare equal and share a hash
     bucket.
+
+    ``after`` is the extension point: a subclass that does more than substitute (fold under a range context,
+    abstract a read to a coordinate) overrides it, and ``Statement.rewrite`` applies it to every expression of the
+    subtree once the mapping has landed, under the mapping's hygiene, with the subclass's state carried through
+    ``restrict``.
     """
 
     mapping: dict[str, Expression] = field(default_factory=dict)
@@ -37,16 +43,19 @@ class Sigma:
         key = tuple(sorted((k, str(v)) for k, v in self.mapping.items()))
         object.__setattr__(self, "_key", key)
 
-    @classmethod
-    def _from_key(cls, mapping: dict[str, Expression], key: tuple[tuple[str, str], ...]) -> Sigma:
-        """Construct a derived substitution whose canonical entries are already known."""
-        sigma = object.__new__(cls)
+    def _from_key(self, mapping: dict[str, Expression], key: tuple[tuple[str, str], ...]) -> Sigma:
+        """A derived substitution whose canonical entries are already known, with this one's other state."""
+        sigma = copy.copy(self)
         object.__setattr__(sigma, "mapping", mapping)
         object.__setattr__(sigma, "_key", key)
         return sigma
 
     def apply(self, e: Expression) -> Expression:
-        return e.substitute(self.mapping)
+        return self.after(e.substitute(self.mapping))
+
+    def after(self, e: Expression) -> Expression:
+        """What this substitution does to an expression once its mapping has landed: nothing."""
+        return e
 
     def reduce(self, e: Expression, ctx: SimplifyCtx) -> Expression:
         """Substitute then simplify under ``ctx``. Use when the substitution

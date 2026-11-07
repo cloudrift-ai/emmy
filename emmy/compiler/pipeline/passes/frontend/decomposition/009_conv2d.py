@@ -11,7 +11,7 @@ reshape restores the two output axes.
 
 from emmy.compiler.graph import Graph, Node, Tensor
 from emmy.compiler.ir.base import ConstantOp
-from emmy.compiler.ir.expression import BinaryExpr, Literal, TernaryExpr, placeholder
+from emmy.compiler.ir.expression import BinaryExpression, Literal, TernaryExpression, placeholder
 from emmy.compiler.ir.frontend.ir import Conv2dOp, MatmulOp, ReshapeOp
 from emmy.compiler.ir.tensor.ir import ElementwiseOp, IndexMapOp, IndexSource
 from emmy.compiler.pipeline import Match, Pattern
@@ -35,10 +35,10 @@ def rewrite(match: Match, root: Node, inp_x: Node, inp_w: Node, inp_bias: Node |
         return Literal(value, "int")
 
     def div(a, b: int):
-        return BinaryExpr("/", a, lit(b))
+        return BinaryExpression("/", a, lit(b))
 
     def mod(a, b: int):
-        return BinaryExpr("%", a, lit(b))
+        return BinaryExpression("%", a, lit(b))
 
     stacked, position = placeholder(1), placeholder(2)
     tap = div(stacked, channels)
@@ -46,18 +46,20 @@ def rewrite(match: Match, root: Node, inp_x: Node, inp_w: Node, inp_bias: Node |
     for axis, (out_pos, kernel_pos, extent) in enumerate(
         ((div(position, out_w), div(tap, kernel_w), in_h), (mod(position, out_w), mod(tap, kernel_w), in_w))
     ):
-        coord = BinaryExpr("+", BinaryExpr("*", out_pos, lit(op.stride[axis])), BinaryExpr("*", kernel_pos, lit(op.dilation[axis])))
+        coord = BinaryExpression(
+            "+", BinaryExpression("*", out_pos, lit(op.stride[axis])), BinaryExpression("*", kernel_pos, lit(op.dilation[axis]))
+        )
         if op.padding[axis]:
-            coord = BinaryExpr("-", coord, lit(op.padding[axis]))
-            inside = BinaryExpr("&&", BinaryExpr(">=", coord, lit(0)), BinaryExpr("<", coord, lit(extent)))
+            coord = BinaryExpression("-", coord, lit(op.padding[axis]))
+            inside = BinaryExpression("&&", BinaryExpression(">=", coord, lit(0)), BinaryExpression("<", coord, lit(extent)))
             conds.append(inside)
             # Clamp the off-domain coord so the post-fusion unconditional Load stays in range.
-            coord = TernaryExpr(cond=inside, if_true=coord, if_false=lit(0))
+            coord = TernaryExpression(cond=inside, if_true=coord, if_false=lit(0))
         coords.append(coord)
     col_shape = (batch, taps * channels, out_h * out_w)
     coord_map = (placeholder(0), mod(stacked, channels), *coords)
     if conds:
-        in_bounds = conds[0] if len(conds) == 1 else BinaryExpr("&&", *conds)
+        in_bounds = conds[0] if len(conds) == 1 else BinaryExpression("&&", *conds)
         zero = frag.add_node(
             op=ConstantOp(name=f"{out.name}_zero", value=0.0), inputs=[], output=Tensor(f"{out.name}_zero", (1,), inp_x.output.dtype)
         )

@@ -31,7 +31,7 @@ from collections.abc import Callable
 from dataclasses import dataclass, replace
 
 from emmy.compiler.ir.axis import Axis, Window
-from emmy.compiler.ir.expression import BinaryExpr, Builtin, Expression, Literal, Var
+from emmy.compiler.ir.expression import BinaryExpression, Builtin, Expression, Literal, Var
 from emmy.compiler.ir.kernel import Tile
 from emmy.compiler.ir.schedule import Side
 from emmy.compiler.ir.stmt import Body, Cond, Statement
@@ -64,10 +64,10 @@ class AxisOffset:
         reg_term = Literal(r * self.atom_dim, "int")
         if self.unit_var is not None:  # block·(units·reg·atom) + unit·(reg·atom) + r·atom
             tile = self.unit_count * self.reg * self.atom_dim
-            e = BinaryExpr("*", Var(self.block_var), Literal(tile, "int"))
-            e = BinaryExpr("+", e, BinaryExpr("*", Var(self.unit_var), Literal(self.reg * self.atom_dim, "int")))
-            return BinaryExpr("+", e, reg_term)
-        return BinaryExpr("+", BinaryExpr("*", Var(self.block_var), Literal(self.reg, "int")), reg_term)  # no unit level
+            e = BinaryExpression("*", Var(self.block_var), Literal(tile, "int"))
+            e = BinaryExpression("+", e, BinaryExpression("*", Var(self.unit_var), Literal(self.reg * self.atom_dim, "int")))
+            return BinaryExpression("+", e, reg_term)
+        return BinaryExpression("+", BinaryExpression("*", Var(self.block_var), Literal(self.reg, "int")), reg_term)  # no unit level
 
     @property
     def block_tile(self) -> int:
@@ -77,12 +77,12 @@ class AxisOffset:
     def block_base(self) -> Expression:
         """The start of this CTA's tile along the axis — ``block·tile`` in the grid var alone, so it
         is CTA-uniform wherever :meth:`base` is not."""
-        return BinaryExpr("*", Var(self.block_var), Literal(self.block_tile, "int"))
+        return BinaryExpression("*", Var(self.block_var), Literal(self.block_tile, "int"))
 
     def block_end(self) -> Expression:
         """The exclusive end of this CTA's tile along the axis — ``(block + 1)·tile``, CTA-uniform like
         :meth:`block_base`."""
-        return BinaryExpr("*", BinaryExpr("+", Var(self.block_var), Literal(1, "int")), Literal(self.block_tile, "int"))
+        return BinaryExpression("*", BinaryExpression("+", Var(self.block_var), Literal(1, "int")), Literal(self.block_tile, "int"))
 
 
 @dataclass(frozen=True)
@@ -164,7 +164,7 @@ def grid_tile(
     aux_threads = 0
     if workers is not None:
         aux_threads = 32 * workers.producer_warps
-        stores = [Cond(cond=BinaryExpr("<", Builtin("thread_idx.x"), Literal(block_threads, "int")), body=tuple(stores))]
+        stores = [Cond(cond=BinaryExpression("<", Builtin("thread_idx.x"), Literal(block_threads, "int")), body=tuple(stores))]
     # A 2-D-tiled output (both mn Sides bound) marks its (m, n) block axes as
     # rasterization-eligible — the structural fact only this seal knows; whether (and how) the
     # CTA order actually groups them is the resolved ``RASTER`` codec threaded down off the

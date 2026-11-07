@@ -97,12 +97,12 @@ def test_vector_loads_and_stores_require_aligned_row_offsets() -> None:
 
 def test_vector_alignment_recomposes_split_coordinates() -> None:
     from emmy.compiler.graph import Tensor
-    from emmy.compiler.ir.expression import BinaryExpr, Var
+    from emmy.compiler.ir.expression import BinaryExpression, Var
     from emmy.compiler.pipeline.passes.lowering.kernel._vector import vector_run
 
     tensor = Tensor("x", (4, 8), F32)
     cells = [Var("i") * Literal(4, "int") + Literal(offset, "int") for offset in range(4)]
-    split = [(BinaryExpr("//", cell, Literal(8, "int")), BinaryExpr("%", cell, Literal(8, "int"))) for cell in cells]
+    split = [(BinaryExpression("//", cell, Literal(8, "int")), BinaryExpression("%", cell, Literal(8, "int"))) for cell in cells]
     assert vector_run(split, tensor, 4)
     assert not vector_run([(Var("row"), Literal(i, "int")) for i in range(2)], None, 2)
 
@@ -111,15 +111,17 @@ def test_a_gathered_selector_term_is_an_unknown_integer() -> None:
     """A routed expert's weight run starts at a gathered selector times the expert's stride, behind the gather's sign
     wrap. That term has no affine form, but it is an integer, so a stride that is a multiple of the width keeps the
     run aligned, and an odd one does not."""
-    from emmy.compiler.ir.expression import BinaryExpr, CastExpr, TernaryExpr, Var
+    from emmy.compiler.ir.expression import BinaryExpression, CastExpression, TernaryExpression, Var
     from emmy.compiler.pipeline.passes.lowering.kernel._vector import vector_run
 
-    sel = CastExpr(dtype="int", expression=Var("in0"))
-    wrap = TernaryExpr(BinaryExpr("<", sel, Literal(0, "int")), BinaryExpr("+", sel, Literal(512, "int")), sel)
+    sel = CastExpression(dtype="int", expression=Var("in0"))
+    wrap = TernaryExpression(BinaryExpression("<", sel, Literal(0, "int")), BinaryExpression("+", sel, Literal(512, "int")), sel)
 
     def run(stride: int) -> list:
-        base = BinaryExpr("+", BinaryExpr("*", wrap, Literal(stride, "int")), BinaryExpr("*", Var("lane"), Literal(4, "int")))
-        return [(BinaryExpr("+", base, Literal(i, "int")) if i else base,) for i in range(4)]
+        base = BinaryExpression(
+            "+", BinaryExpression("*", wrap, Literal(stride, "int")), BinaryExpression("*", Var("lane"), Literal(4, "int"))
+        )
+        return [(BinaryExpression("+", base, Literal(i, "int")) if i else base,) for i in range(4)]
 
     assert vector_run(run(409600), None, 4)
     assert not vector_run(run(409601), None, 4)

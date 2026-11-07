@@ -548,7 +548,7 @@ def test_a_moved_seam_over_a_re_keyed_piece_keeps_the_cut_whose_other_pieces_it_
     from emmy.commands.trace import graph_from_code
 
     code = "(lambda x: (torch.sigmoid(x) * torch.tanh(x)).sum(-1))(torch.randn(4, 64, dtype=torch.float16))"
-    document, route = _routed(inventory_document(graph_from_code(code)[0], (12, 0)), {"PLACE@map.1/reduce.2/map": "cut"})
+    document, route = _routed(inventory_document(graph_from_code(code)[0], (12, 0)), {"PLACE@map.1/reduce.1/map": "cut"})
     producer, consumer = (document.kernel(ref) for ref in route.children)
     stale = replace(consumer, loop_ir=json.loads(json.dumps(consumer.loop_ir).replace("tanh(", "exp(")))
     assert stale.exact_identity != consumer.exact_identity
@@ -558,7 +558,7 @@ def test_a_moved_seam_over_a_re_keyed_piece_keeps_the_cut_whose_other_pieces_it_
         routing=[replace(route, arm={"PLACE@map.1/reduce.3/map": "cut"})],
     )
     fresh, report = restamp(moved)
-    assert report.respelled == [f"{route.parent} PLACE@map.1/reduce.3/map -> PLACE@map.1/reduce.2/map"]
+    assert report.respelled == [f"{route.parent} PLACE@map.1/reduce.3/map -> PLACE@map.1/reduce.1/map"]
     assert fresh.routing == document.routing
     assert fresh.kernel(producer.ref).exact_identity == producer.exact_identity
     assert all(row.measured for row in fresh.rows if row.kernel == producer.ref)
@@ -1422,12 +1422,12 @@ def test_copies_read_at_shifted_columns_cluster_onto_the_plain_read() -> None:
     """RoPE's rotate-half reads one projection at its own column and at the two half-shifted ones:
     one value at three addresses. The plain copy computes it, and each shifted copy reads its
     workspace at the column expression it spelled."""
-    from emmy.compiler.ir.expression import TernaryExpr
+    from emmy.compiler.ir.expression import TernaryExpression
     from emmy.compiler.pipeline.passes.tile._cut import _cluster_value_seams
 
     n, low = Var("n"), Var("n").lt(4)
-    lower = TernaryExpr(cond=low, if_true=Literal(0, "int"), if_false=n + Literal(-4, "int"))
-    upper = Literal(4, "int") + TernaryExpr(cond=low, if_true=n, if_false=Literal(0, "int"))
+    lower = TernaryExpression(cond=low, if_true=Literal(0, "int"), if_false=n + Literal(-4, "int"))
+    upper = Literal(4, "int") + TernaryExpression(cond=low, if_true=n, if_false=Literal(0, "int"))
     seams = [_column_seam(lower, "PLACE@map.1/inner"), _column_seam(upper, "PLACE@map.2/inner"), _column_seam(n, "PLACE@map.3/inner")]
 
     (clustered,) = _cluster_value_seams(seams, (Axis("n", 8), Axis("k", 8)))
@@ -1448,11 +1448,11 @@ def test_a_column_read_past_the_plain_copy_is_not_its_value() -> None:
 def test_a_copy_storing_c_of_every_d_cells_reads_the_plain_copy_at_its_stored_address() -> None:
     """A copy reading its column only as ``m // 4`` and ``m % 2`` stores two of every four cells: over 16 columns it
     is the plain 8-column value, and reads that copy's workspace where its own would store the cell."""
-    from emmy.compiler.ir.expression import BinaryExpr
+    from emmy.compiler.ir.expression import BinaryExpression
     from emmy.compiler.pipeline.passes.tile._cut import _cluster_value_seams
 
     m = Var("m")
-    stored = (m / 4) * 2 + BinaryExpr("%", m, Literal(2, "int"))
+    stored = (m / 4) * 2 + BinaryExpression("%", m, Literal(2, "int"))
     node = projection((), f"w = load w[{stored}, k]", results=("w",))
     folded = CutSite(node=node, spelling="PLACE@map.1/inner", axes=(Axis("m", 16), Axis("k", 8)), dtypes=(F16,))
 

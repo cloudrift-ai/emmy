@@ -10,7 +10,7 @@ import math
 from emmy.compiler.dtype import F32
 from emmy.compiler.graph import Graph, Node, Tensor
 from emmy.compiler.ir.base import ConstantOp
-from emmy.compiler.ir.expression import BinaryExpr, Literal, placeholder
+from emmy.compiler.ir.expression import BinaryExpression, Literal, placeholder
 from emmy.compiler.ir.frontend.ir import SdpaOp, TransposeOp
 from emmy.compiler.ir.tensor.ir import ElementwiseOp, IndexMapOp, IndexSource
 from emmy.compiler.pipeline import Match, Pattern
@@ -28,9 +28,9 @@ PATTERN = [Pattern("root", SdpaOp)]
 _NEG = {"<=": ">", ">": "<=", "<": ">=", ">=": "<"}
 
 
-def _negate(e: BinaryExpr) -> BinaryExpr:
+def _negate(e: BinaryExpression) -> BinaryExpression:
     """The complement of a single comparison predicate (integer coordinates)."""
-    return BinaryExpr(_NEG[e.op], e.left, e.right)
+    return BinaryExpression(_NEG[e.op], e.left, e.right)
 
 
 def _maybe_gqa(frag: Graph, src: Node | str, q_batch: tuple, src_batch: tuple, target_last_dims: tuple, *, name: str) -> Node | str:
@@ -159,7 +159,7 @@ def rewrite(match: Match, root: Node, inp_q: Node, inp_k: Node, inp_v: Node, inp
     # explicit mask, so both appear only on a stamped SDPA — there the coord mask is bit-neutral
     # (the bias already holds -inf above the diagonal) and drives the lowering's stream end.
     if root.op.is_causal:
-        _coord_mask(BinaryExpr("<=", j_var, i_var), "_c")
+        _coord_mask(BinaryExpression("<=", j_var, i_var), "_c")
     # Sliding-window band: add -1e9 where key_pos ≤ query_pos − window (keep kv > m − W). The
     # stamped band is synthesized even alongside an explicit bias — bit-neutral there (the bias
     # already holds -inf on that region) and it is what the lowering skips key blocks off.
@@ -170,7 +170,7 @@ def rewrite(match: Match, root: Node, inp_q: Node, inp_k: Node, inp_v: Node, inp
     # cut and the softmax·P@V falls to the unstructured sequential lowering (the layer-0
     # ``seq 512 < window 1024`` gemma trace deployed a grid-1 kernel that "hangs").
     if window is not None and not (seq_len.is_static and window >= seq_len.as_static()):
-        _coord_mask(BinaryExpr(">", j_var, BinaryExpr("-", i_var, Literal(window, "int"))), "_b")
+        _coord_mask(BinaryExpression(">", j_var, BinaryExpression("-", i_var, Literal(window, "int"))), "_b")
 
     softmax = softmax_decompose(frag, scaled_id, -1, name=f"{name}_softmax")
 

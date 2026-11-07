@@ -256,6 +256,12 @@ class Backend(ABC):
             bufs = node.buffer_names()
             if len(results) != len(bufs):
                 raise ValueError(f"node {nid!r}: forward returned {len(results)} values for {len(bufs)} outputs")
+            # An op that names its outputs returns them in its own order, which a body's canonical order may have
+            # moved away from the node's: match them by name.
+            op_outputs = tuple(getattr(node.op, "outputs", ()))
+            if set(op_outputs) == {t.name for t in node.outputs} and len(op_outputs) == len(bufs):
+                by_name = dict(zip(op_outputs, results, strict=True))
+                results = tuple(by_name[t.name] for t in node.outputs)
             for buf, t, r in zip(bufs, node.outputs, results, strict=True):
                 values[buf] = _coerce(r, _shape_of(t), t.dtype, preserve_bits=isinstance(node.op, BitcastOp))
 

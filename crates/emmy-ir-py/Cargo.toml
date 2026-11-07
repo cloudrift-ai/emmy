@@ -1,0 +1,17 @@
+[package]
+name = "emmy-ir-py"
+version = "0.1.0"
+edition = "2024"
+license = "Apache-2.0"
+
+[lib]
+name = "emmy_ir"
+crate-type = ["cdylib"]
+# An extension module links no Python of its own: its tests are the Python suite, and a test harness for it would
+# not link.
+test = false
+doctest = false
+
+[dependencies]
+emmy-ir = { path = "../emmy-ir" }
+pyo3 = { version = "0.29", features = ["extension-module", "abi3-py312", "multiple-pymethods"] }

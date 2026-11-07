@@ -5,7 +5,7 @@ from __future__ import annotations
 from dataclasses import replace
 
 from emmy.compiler.graph import Node
-from emmy.compiler.ir.expression import BinaryExpr, Expression, Literal, SimplifyCtx, TernaryExpr
+from emmy.compiler.ir.expression import BinaryExpression, Expression, Literal, SimplifyCtx, TernaryExpression
 from emmy.compiler.ir.kernel import KernelOp
 from emmy.compiler.ir.stmt import Accum, Assign, Body, Load, Loop, Select, StridedLoop, free_names
 from emmy.compiler.pipeline import Pattern, RuleSkipped
@@ -24,7 +24,7 @@ def rewrite(root: Node) -> KernelOp:
 
 
 def _boolean(op: str, left: Expression, right: Expression) -> Expression:
-    return left if left == right and op in ("&&", "||") else BinaryExpr(op, left, right).simplify(SimplifyCtx(ranges={}))
+    return left if left == right and op in ("&&", "||") else BinaryExpression(op, left, right).simplify(SimplifyCtx(ranges={}))
 
 
 def _guard(body: Body, axes: frozenset[str] = frozenset()) -> Body:
@@ -75,7 +75,7 @@ def _guard(body: Body, axes: frozenset[str] = frozenset()) -> Body:
                     end = stmt.end if isinstance(stmt, StridedLoop) and stmt.end is not None else stmt.axis.extent_expression()
                     if isinstance(stmt, Loop):
                         stmt = StridedLoop(stmt.axis, _FALSE, _TRUE, stmt.body, unroll=stmt.unroll, seed=stmt.seed)
-                    stmt = stmt.replace(end=TernaryExpr(wanted, end, _FALSE))
+                    stmt = stmt.replace(end=TernaryExpression(wanted, end, _FALSE))
             for name in free_names(stmt):
                 need(name, _TRUE)
         rewritten.append(stmt)

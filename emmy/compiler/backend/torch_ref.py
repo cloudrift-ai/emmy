@@ -375,14 +375,14 @@ def _idx_expression(e, env: dict):
         return env[e.name]
     if cls == "Literal":
         return e.value
-    if cls == "TernaryExpr":
+    if cls == "TernaryExpression":
         cond = _idx_expression(e.cond, env)
         if_true = _idx_expression(e.if_true, env)
         if_false = _idx_expression(e.if_false, env)
         if not torch.is_tensor(cond):
             return if_true if cond else if_false
         return torch.where(cond, if_true, if_false)
-    if cls == "BinaryExpr":
+    if cls == "BinaryExpression":
         lo, ro = _idx_expression(e.left, env), _idx_expression(e.right, env)
         op = e.op
         ops = {

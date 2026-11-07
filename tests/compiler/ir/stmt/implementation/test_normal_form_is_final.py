@@ -7,10 +7,10 @@ from __future__ import annotations
 from pathlib import Path
 
 import pytest
+from emmy.emmy_ir import normalize_uncached
 
 from emmy.compiler.graph import Graph
 from emmy.compiler.ir.loop import LoopOp
-from emmy.compiler.ir.stmt.normalize import _normalize_body
 from emmy.compiler.pipeline.search.golden import GoldenFile
 from emmy.compiler.pipeline.search.golden.repository import _RECORDS_DIR, repository_golden_paths
 from tests.compiler.realization import helpers as corpus
@@ -29,7 +29,7 @@ def _not_final(path: Path) -> list[str]:
         kernel.ref
         for kernel in GoldenFile.load(path).kernels
         for node in Graph.from_wire(kernel.loop_ir).nodes.values()
-        if isinstance(node.op, LoopOp) and _normalize_body(node.op.body) != node.op.body
+        if isinstance(node.op, LoopOp) and normalize_uncached(node.op.body) != node.op.body
     ]
 
 

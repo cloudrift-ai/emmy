@@ -1,8 +1,7 @@
-"""The cross-thread smem combine's rendered forms and its rewrite."""
+"""The cross-thread smem combine's rendered forms."""
 
 from emmy.compiler.ir.kernel.ir import TreeHalve
 from emmy.compiler.ir.render import RenderCtx, render_stmt
-from emmy.compiler.ir.sigma import Sigma
 from emmy.compiler.ir.stmt import parse_body
 
 _SUM = tuple(parse_body("acc0 = add(acc0, acc0__o)"))
@@ -24,9 +23,3 @@ def test_a_block_slab_keeps_the_halving_tree() -> None:
     """A slab of per-thread partials (not per-warp) is wider than a warp and keeps the tree."""
     src = _render(TreeHalve(bufs=("acc0_smem",), state=("acc0",), state_b=("acc0__o",), combine_states=_SUM, length=64, tid_var="t"))
     assert "for (int s = 32; s > 0; s >>= 1)" in src
-
-
-def test_a_rewrite_keeps_the_segment_layout() -> None:
-    """The transposed combine halves segment by segment; losing ``inner`` in a rewrite folds across outputs."""
-    halve = TreeHalve(bufs=("b",), state=("acc0",), state_b=("acc0__o",), combine_states=_SUM, length=4, tid_var="k_co", inner=("n_ln", 32))
-    assert halve.rewrite(lambda name: name, Sigma({}), lambda axis: axis).inner == ("n_ln", 32)

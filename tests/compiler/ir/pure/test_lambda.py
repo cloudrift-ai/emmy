@@ -58,7 +58,7 @@ def test_lambda_orders_the_definition_read_by_a_predicate_first() -> None:
     [
         Accum(name="acc", value="x", op="add"),
         Write(output="out", index=(Var("m"),), values=("x",)),
-        Init(name="acc", identity=0.0, dtype=None),
+        Init(name="acc", identity=0.0, dtype="float32"),
         Loop(axis=Axis("k", 4), body=Body(())),
     ],
     ids=lambda s: type(s).__name__,

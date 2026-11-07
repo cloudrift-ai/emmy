@@ -337,7 +337,7 @@ def test_stmt_eval_scope_reads_non_finite_literals():
 
 
 def test_to_dict_serializes_composite_shape_dim():
-    """A node whose output shape carries a COMPOSITE Dim (``BinaryExpr``-backed —
+    """A node whose output shape carries a COMPOSITE Dim (``BinaryExpression``-backed —
     e.g. the demoted symbolic-N B operand's TMA-padded ``round_up(seq_len, 64)``
     inner extent, or a CatOp output) must not crash ``to_dict``: the dump path
     serializes it to its pretty expression string. Atomic dims (int / Var name) still
@@ -381,9 +381,9 @@ def test_to_dict_roundtrips_an_expression_field_through_the_dump():
     import json
 
     from emmy.compiler.ir.base import ConstantOp
-    from emmy.compiler.ir.expression import BinaryExpr, Literal, Var
+    from emmy.compiler.ir.expression import BinaryExpression, Literal, Var
 
-    scale = BinaryExpr("*", Var("seq_len"), Literal(2, "int"))
+    scale = BinaryExpression("*", Var("seq_len"), Literal(2, "int"))
     g = Graph()
     g.add_node(op=ConstantOp(name="c", context_value=scale), inputs=[], output=Tensor("c", ()), node_id="c")
     g.outputs = ["c"]

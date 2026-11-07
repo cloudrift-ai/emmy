@@ -10,7 +10,7 @@ coordinates and the uniform values, folded into the predicate as the expression 
 
 from __future__ import annotations
 
-from emmy.compiler.ir.expression import BinaryExpr, Expression, Literal, Var
+from emmy.compiler.ir.expression import BinaryExpression, Expression, Literal, Var
 from emmy.compiler.ir.pure.fold import Fold
 from emmy.compiler.ir.stmt import Affine, Assign, Let, Select, SelectBranch, Statement
 
@@ -48,7 +48,7 @@ def select_masks(
     coords: dict[str, Expression] = dict(aliases)
     aliased = {name for expression in aliases.values() for name in expression.free_vars() if name in axes}
     scalars: dict[str, Expression] = {}
-    predicates: dict[str, BinaryExpr] = {}
+    predicates: dict[str, BinaryExpression] = {}
 
     def term(name: str) -> Expression | None:
         if name in coords:
@@ -74,22 +74,22 @@ def select_masks(
                 return None
             expression: Expression | None = None
             for t, coefficient in zip(terms, stmt.coefficients, strict=True):
-                scaled = t if coefficient == 1 else BinaryExpr("*", Literal(int(coefficient), "int"), t)
-                expression = scaled if expression is None else BinaryExpr("+", expression, scaled)
+                scaled = t if coefficient == 1 else BinaryExpression("*", Literal(int(coefficient), "int"), t)
+                expression = scaled if expression is None else BinaryExpression("+", expression, scaled)
             coords[stmt.name] = expression
             continue
         if isinstance(stmt, Assign) and stmt.op.name in _COMPARE and reads & coords.keys():
             left, right = (term(arg) for arg in stmt.args)
             if left is None or right is None:
                 return None
-            predicates[stmt.name] = BinaryExpr(_COMPARE[stmt.op.name], left, right)
+            predicates[stmt.name] = BinaryExpression(_COMPARE[stmt.op.name], left, right)
             continue
         if isinstance(stmt, Assign) and stmt.op.name == "where" and stmt.args[0] in predicates:
             keep, fill = stmt.args[1:]
             if not {keep, fill} <= uniform | scalars.keys():
                 return None
             predicate = predicates[stmt.args[0]]
-            negated = BinaryExpr(_NEGATE[predicate.op], predicate.left, predicate.right)
+            negated = BinaryExpression(_NEGATE[predicate.op], predicate.left, predicate.right)
             branches = (SelectBranch(value=keep, select=predicate), SelectBranch(value=fill, select=negated))
             out.append(Select(name=stmt.name, branches=branches))
             continue

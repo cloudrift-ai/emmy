@@ -47,15 +47,20 @@ def test_a_masked_m_edge_zero_fills_the_rows_past_it(monkeypatch) -> None:
 
 def test_a_rewrite_keeps_the_zero_fill_predicate() -> None:
     """Coordinate substitution reaches a copy's ``valid`` predicate."""
-    from emmy.compiler.ir.expression import BinaryExpr, Literal, Var  # noqa: PLC0415
+    from emmy.compiler.ir.expression import BinaryExpression, Literal, Var  # noqa: PLC0415
     from emmy.compiler.ir.kernel.ir import CpAsyncCopy  # noqa: PLC0415
     from emmy.compiler.ir.sigma import Sigma  # noqa: PLC0415
 
     sigma = Sigma({"r": Literal(5, "int")})
     copy = CpAsyncCopy(
-        smem="s", smem_index=(Var("r"),), src="a", src_index=(Var("r"),), nbytes=16, valid=BinaryExpr("<", Var("r"), Literal(8, "int"))
+        smem="s",
+        smem_index=(Var("r"),),
+        src="a",
+        src_index=(Var("r"),),
+        nbytes=16,
+        valid=BinaryExpression("<", Var("r"), Literal(8, "int")),
     )
-    assert str(copy.rewrite(lambda n: n, sigma).valid) == str(BinaryExpr("<", Literal(5, "int"), Literal(8, "int")))
+    assert str(copy.rewrite(lambda n: n, sigma).valid) == str(BinaryExpression("<", Literal(5, "int"), Literal(8, "int")))
 
 
 @requires_cuda

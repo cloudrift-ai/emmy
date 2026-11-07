@@ -18,7 +18,7 @@ from emmy.compiler.dtype import get as resolve_dtype
 from emmy.compiler.graph import Graph, Tensor
 from emmy.compiler.ir.base import ConstantOp, InputOp
 from emmy.compiler.ir.elementwise import ElementwiseImpl, is_elementwise
-from emmy.compiler.ir.expression import BinaryExpr, Literal, TernaryExpr, placeholder
+from emmy.compiler.ir.expression import BinaryExpression, Literal, TernaryExpression, placeholder
 from emmy.compiler.ir.frontend.ir import (
     CatOp,
     Conv1dOp,
@@ -1066,7 +1066,7 @@ def _handle_call_function(g: Graph, fx_node: Any, node_map: dict[str, NodeRef], 
                     IndexSource(
                         input_idx=0,
                         coord_map=(Literal(0, "int"),),
-                        select=BinaryExpr("==", placeholder(0), placeholder(1)),
+                        select=BinaryExpression("==", placeholder(0), placeholder(1)),
                     ),
                     IndexSource(input_idx=1, coord_map=(Literal(0, "int"),)),
                 ),
@@ -1312,9 +1312,11 @@ def _handle_call_function(g: Graph, fx_node: Any, node_map: dict[str, NodeRef], 
         for axis, extent in enumerate(base_shape):
             lo, hi = (start, end) if axis == dim else (0, extent)
             coord = placeholder(axis)
-            select = BinaryExpr("&&", select, BinaryExpr("&&", BinaryExpr(">=", coord, Literal(lo, "int")), coord.lt(Literal(hi, "int"))))
+            select = BinaryExpression(
+                "&&", select, BinaryExpression("&&", BinaryExpression(">=", coord, Literal(lo, "int")), coord.lt(Literal(hi, "int")))
+            )
         src_coords = [
-            TernaryExpr(select, placeholder(a) - Literal(start, "int") if a == dim and start else placeholder(a), Literal(0, "int"))
+            TernaryExpression(select, placeholder(a) - Literal(start, "int") if a == dim and start else placeholder(a), Literal(0, "int"))
             for a in range(len(base_shape))
             if not (a == dim and op_name == "select_scatter")
         ]
@@ -1369,8 +1371,8 @@ def _handle_call_function(g: Graph, fx_node: Any, node_map: dict[str, NodeRef], 
 
         row = placeholder(len(shape) - 2)
         column = placeholder(len(shape) - 1)
-        boundary = row if diagonal == 0 else BinaryExpr("+", row, Literal(diagonal, "int"))
-        keep = BinaryExpr(">=", column, boundary) if op_name == "triu" else BinaryExpr("<=", column, boundary)
+        boundary = row if diagonal == 0 else BinaryExpression("+", row, Literal(diagonal, "int"))
+        keep = BinaryExpression(">=", column, boundary) if op_name == "triu" else BinaryExpression("<=", column, boundary)
         identity = tuple(placeholder(axis) for axis in range(len(shape)))
         zero_name = f"{name}_zero"
         zero_id = g.add_node(
@@ -1458,12 +1460,14 @@ def _handle_call_function(g: Graph, fx_node: Any, node_map: dict[str, NodeRef], 
         for offset in range(len(raw_pad) // 2):
             axis = len(input_shape) - offset - 1
             coords[axis] = coords[axis] - Literal(raw_pad[2 * offset], "int")
-            inside = BinaryExpr("&&", BinaryExpr(">=", coords[axis], Literal(0, "int")), coords[axis].lt(input_shape[axis].expression))
-            valid = BinaryExpr("&&", valid, inside)
+            inside = BinaryExpression(
+                "&&", BinaryExpression(">=", coords[axis], Literal(0, "int")), coords[axis].lt(input_shape[axis].expression)
+            )
+            valid = BinaryExpression("&&", valid, inside)
         zero = g.add_node(ConstantOp(name=f"{name}_zero", value=0), [], Tensor(f"{name}_zero", (1,), dtype), node_id=f"{name}_zero")
         sources = (IndexSource(input_idx=1, coord_map=(Literal(0, "int"),)),)
         if not any(size == 0 for size in input_shape):
-            safe = tuple(TernaryExpr(valid, coord, Literal(0, "int")) for coord in coords)
+            safe = tuple(TernaryExpression(valid, coord, Literal(0, "int")) for coord in coords)
             sources = (IndexSource(input_idx=0, coord_map=safe, select=valid), *sources)
         node_map[name] = g.add_node(
             IndexMapOp(out_shape=shape, sources=sources), [input_ids[0], zero], Tensor(name, shape, dtype), node_id=name
@@ -1757,7 +1761,7 @@ def _handle_call_function(g: Graph, fx_node: Any, node_map: dict[str, NodeRef], 
         sources = []
         coord_map = tuple(placeholder(axis if axis < dim else axis + 1) for axis in range(output_rank - 1))
         for index in range(len(tensor_ids)):
-            select = BinaryExpr("==", placeholder(dim), Literal(index, "int")) if index < len(tensor_ids) - 1 else None
+            select = BinaryExpression("==", placeholder(dim), Literal(index, "int")) if index < len(tensor_ids) - 1 else None
             sources.append(IndexSource(input_idx=index, coord_map=coord_map, select=select))
         nid = g.add_node(
             op=IndexMapOp(out_shape=shape, sources=tuple(sources)),

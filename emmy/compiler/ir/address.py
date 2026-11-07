@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import math
 
-from emmy.compiler.ir.expression import BinaryExpr, Expression, Literal, TernaryExpr, Var, affine_form
+from emmy.compiler.ir.expression import BinaryExpression, Expression, Literal, TernaryExpression, Var, affine_form
 from emmy.compiler.ir.stmt import Load
 
 # Row pad (in ELEMENTS = bytes) for a cp.async-staged 1-byte (fp8) operand slab. The cooperative
@@ -35,28 +35,30 @@ def add(*terms) -> Expression:
         e = Literal(t, "int") if isinstance(t, int) else t
         if isinstance(e, Literal) and e.value == 0:
             continue
-        out = e if out is None else BinaryExpr("+", out, e)
+        out = e if out is None else BinaryExpression("+", out, e)
     return out if out is not None else Literal(0, "int")
 
 
 def mul(a, b: int) -> Expression:
     """``a · b`` as an Expression, folding the ``b in {0, 1}`` degenerate cases."""
-    return add() if b == 0 else (a if b == 1 else BinaryExpr("*", a if not isinstance(a, int) else Literal(a, "int"), Literal(b, "int")))
+    return (
+        add() if b == 0 else (a if b == 1 else BinaryExpression("*", a if not isinstance(a, int) else Literal(a, "int"), Literal(b, "int")))
+    )
 
 
 def clamp_to(position: Expression, extent: Expression) -> Expression:
     """``position`` clamped onto a stream's last position — ``position < extent ? position : extent − 1`` — the
     index an overhanging read takes through a stream or an output sweep: the read stays in bounds with a duplicate,
     and the fold masks what it folds there or the guard discards the store. :func:`clamped` reads it back."""
-    return TernaryExpr(BinaryExpr("<", position, extent), position, BinaryExpr("-", extent, Literal(1, "int")))
+    return TernaryExpression(BinaryExpression("<", position, extent), position, BinaryExpression("-", extent, Literal(1, "int")))
 
 
 def clamped(expression: Expression) -> tuple[Expression, Expression] | None:
     """``(position, extent)`` when ``expression`` is :func:`clamp_to` of them, else ``None``."""
-    if not isinstance(expression, TernaryExpr) or not isinstance(expression.cond, BinaryExpr) or expression.cond.op != "<":
+    if not isinstance(expression, TernaryExpression) or not isinstance(expression.cond, BinaryExpression) or expression.cond.op != "<":
         return None
     position, extent = expression.cond.left, expression.cond.right
-    if expression.if_true == position and expression.if_false == BinaryExpr("-", extent, Literal(1, "int")):
+    if expression.if_true == position and expression.if_false == BinaryExpression("-", extent, Literal(1, "int")):
         return position, extent
     return None
 
@@ -73,7 +75,7 @@ def clamp_bound(load: Load, axis_name: str) -> Expression | None:
     for e in load.index:
         c = clamped(e)
         if c is not None and axis_name in c[0].free_vars():
-            return BinaryExpr("-", c[1], c[0].substitute({axis_name: Literal(0, "int")}))
+            return BinaryExpression("-", c[1], c[0].substitute({axis_name: Literal(0, "int")}))
     return None
 
 
@@ -172,9 +174,9 @@ def _divisible(expression: Expression, n: int) -> bool:
     or carrying a literal factor that is. Conservative: an opaque var answers no."""
     if (v := _int_lit(expression)) is not None:
         return v % n == 0
-    if isinstance(expression, BinaryExpr) and expression.op in ("+", "-"):
+    if isinstance(expression, BinaryExpression) and expression.op in ("+", "-"):
         return _divisible(expression.left, n) and _divisible(expression.right, n)
-    if isinstance(expression, BinaryExpr) and expression.op == "*":
+    if isinstance(expression, BinaryExpression) and expression.op == "*":
         return _divisible(expression.left, n) or _divisible(expression.right, n)
     return False
 
@@ -197,7 +199,7 @@ def _axis_step(expression: Expression, axis: str) -> tuple[int, int] | None:
         return 0, 0
     if isinstance(expression, Var):
         return 1, 0
-    if not isinstance(expression, BinaryExpr):
+    if not isinstance(expression, BinaryExpression):
         return None
     if expression.op in ("+", "-"):
         left, right = _axis_step(expression.left, axis), _axis_step(expression.right, axis)
@@ -252,11 +254,11 @@ def _delinearized(index: tuple, shape: tuple) -> Expression | None:
         if dims[j].as_static() == 1:
             continue  # a size-1 source dim reads Literal(0) and strides nothing
         if j > 0:  # every non-leading coordinate carries its own ``% dim_j``
-            if not (isinstance(e, BinaryExpr) and e.op == "%" and _int_lit(e.right) == dims[j].as_static()):
+            if not (isinstance(e, BinaryExpression) and e.op == "%" and _int_lit(e.right) == dims[j].as_static()):
                 return None
             e = e.left
         if strides[j] != 1:
-            if not (isinstance(e, BinaryExpr) and e.op == "/" and _int_lit(e.right) == strides[j]):
+            if not (isinstance(e, BinaryExpression) and e.op == "/" and _int_lit(e.right) == strides[j]):
                 return None
             e = e.left
         if flat is None:
@@ -275,7 +277,7 @@ def split_pair(index: tuple, name: str) -> int | None:
         return None
     parts: dict[str, int] = {}
     for e in carrying:
-        if not (isinstance(e, BinaryExpr) and e.op in ("/", "//", "%") and e.left == Var(name) and isinstance(e.right, Literal)):
+        if not (isinstance(e, BinaryExpression) and e.op in ("/", "//", "%") and e.left == Var(name) and isinstance(e.right, Literal)):
             return None
         parts["/" if e.op == "//" else e.op] = int(e.right.value)
     return parts["/"] if set(parts) == {"/", "%"} and parts["/"] == parts["%"] else None
@@ -294,7 +296,7 @@ def split_addressable(index: tuple, shape, name: str, atom_ext: int, trailing: b
         return True
     q = split_pair(index, name)
     inner = index[dims[1]]
-    if q is None or not (isinstance(inner, BinaryExpr) and inner.op == "%"):
+    if q is None or not (isinstance(inner, BinaryExpression) and inner.op == "%"):
         return False  # not a bare f/Q, f%Q pair, or the quotient dim is the inner one
     if trailing and dims[1] != len(index) - 1:
         return False  # the remainder dim is not the contiguous one

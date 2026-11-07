@@ -84,12 +84,12 @@ def k_block_guard(expression, k_name: str) -> tuple[bool, set[int]]:
     ``B``. Any shape this walk does not prove declines the match; the operand then stays
     a generic computed B, never a wrong one.
     """
-    from emmy.compiler.ir.expression import BinaryExpr, CastExpr, Literal, Var  # noqa: PLC0415
+    from emmy.compiler.ir.expression import BinaryExpression, CastExpression, Literal, Var  # noqa: PLC0415
 
     def multiple_of(e, b: int) -> bool:
         if isinstance(e, Literal):
             return isinstance(e.value, int) and e.value % b == 0
-        if isinstance(e, BinaryExpr):
+        if isinstance(e, BinaryExpression):
             if e.op == "*":
                 return multiple_of(e.left, b) or multiple_of(e.right, b)
             if e.op == "+":
@@ -101,9 +101,9 @@ def k_block_guard(expression, k_name: str) -> tuple[bool, set[int]]:
             return e.name == k_name, set()
         if isinstance(e, Literal) or e is None:
             return False, set()
-        if isinstance(e, CastExpr):
+        if isinstance(e, CastExpression):
             return walk(e.expression)
-        if isinstance(e, BinaryExpr):
+        if isinstance(e, BinaryExpression):
             ln, lg = walk(e.left)
             rn, rg = walk(e.right)
             if e.op == "/" and isinstance(e.right, Literal) and isinstance(e.right.value, int) and ln:
@@ -120,7 +120,7 @@ def k_block_guard(expression, k_name: str) -> tuple[bool, set[int]]:
         # a bare ``Var(k)`` addend (a scaled k does not stride unit blocks).
         if isinstance(e, Var):
             return [] if e.name == k else None
-        if isinstance(e, BinaryExpr) and e.op == "+":
+        if isinstance(e, BinaryExpression) and e.op == "+":
             left, right = _k_free_addends(e.left, k), _k_free_addends(e.right, k)
             if left is None or right is None:
                 return None

@@ -22,7 +22,7 @@ from emmy.compiler.dtype import F8E4M3, F16, F32, DataType
 from emmy.compiler.graph import Tensor
 from emmy.compiler.ir.address import BYTE_SLAB_PAD
 from emmy.compiler.ir.axis import Axis
-from emmy.compiler.ir.expression import BinaryExpr, Literal, Var
+from emmy.compiler.ir.expression import BinaryExpression, Literal, Var
 from emmy.compiler.ir.schedule import Stage, Tile, Work
 from emmy.compiler.ir.schedule.catalog import stage_moves
 from emmy.compiler.ir.schedule.staging import resolve_warp_stage
@@ -204,22 +204,22 @@ def _drain_max_way(rows: int, cols: int, pad: int, reads) -> int:
 
 def _lane_expressions():
     lane = Var("_t")
-    return BinaryExpr("/", lane, Literal(4, "int")), BinaryExpr("%", lane, Literal(4, "int"))
+    return BinaryExpression("/", lane, Literal(4, "int")), BinaryExpression("%", lane, Literal(4, "int"))
 
 
 def _k16_trans_reads(grp, tig):
     # emmy_mma_load_b_smem_trans_f8_f16: one fp8x2 (2 B) load per k-half — model its first byte
     # (the pair shares the bank word).
-    return [(grp, BinaryExpr("+", BinaryExpr("*", tig, Literal(2, "int")), Literal(8 * i, "int"))) for i in (0, 1)]
+    return [(grp, BinaryExpression("+", BinaryExpression("*", tig, Literal(2, "int")), Literal(8 * i, "int"))) for i in (0, 1)]
 
 
 def _k32_reads(grp, tig, *, a_side: bool):
     # the u32 loads: (row, 4*tig + 16*half) — A visits rows grp / grp+8, trans-B row grp.
     out = []
     for i in range(4 if a_side else 2):
-        row = BinaryExpr("+", grp, Literal(8 * (i & 1), "int")) if a_side else grp
+        row = BinaryExpression("+", grp, Literal(8 * (i & 1), "int")) if a_side else grp
         half = (16 if (i & 2) else 0) if a_side else (16 if i else 0)
-        out.append((row, BinaryExpr("+", BinaryExpr("*", tig, Literal(4, "int")), Literal(half, "int"))))
+        out.append((row, BinaryExpression("+", BinaryExpression("*", tig, Literal(4, "int")), Literal(half, "int"))))
     return out
 
 

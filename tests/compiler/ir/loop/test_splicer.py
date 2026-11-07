@@ -14,7 +14,7 @@ import pytest
 from emmy.compiler.dtype import F16, DataType
 from emmy.compiler.graph import Graph
 from emmy.compiler.ir.base import InputOp
-from emmy.compiler.ir.expression import BinaryExpr
+from emmy.compiler.ir.expression import BinaryExpression
 from emmy.compiler.ir.loop import Accum, Affine, Assign, Load, Loop, LoopOp, UnfusableStmt, Write, splice_graph, splice_loops
 from emmy.compiler.ir.stmt import parse_body
 from emmy.compiler.tensor import Tensor
@@ -657,14 +657,14 @@ def test_output_equivalence_cluster_retargets_reduce_through_copy_chain(monkeypa
     graph.add_node(first_copy, ["y"], Tensor("mid", (3, 2)), node_id="mid")
     graph.add_node(second_copy, ["mid"], Tensor("out", (6,)), node_id="out")
     graph.outputs = ["out"]
-    eval_expression = BinaryExpr.eval
+    eval_expression = BinaryExpression.eval
 
     def reject_coordinate_evaluation(expression, env):
         if env:
             pytest.fail("output equivalence must not enumerate coordinates")
         return eval_expression(expression, env)
 
-    monkeypatch.setattr(BinaryExpr, "eval", reject_coordinate_evaluation)
+    monkeypatch.setattr(BinaryExpression, "eval", reject_coordinate_evaluation)
 
     result = splice_graph(graph)
 

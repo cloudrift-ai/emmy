@@ -2,8 +2,8 @@
 ops that share a GPU compute unit so :attr:`Body.structural_key` can
 treat (e.g.) ``add`` and ``subtract`` as the same kernel shape.
 
-End-to-end clustering behaviour at the Body level is covered by
-``tests/compiler/ir/stmt/test_structural_key.py``. These tests pin
+End-to-end clustering behaviour at the Body level is covered by the
+``emmy-ir`` crate's identity tests. These tests pin
 down the mapping itself so a future contributor reshuffling the
 ``_OP_CLUSTERS`` table can't silently break the semantics autotune
 relies on.

@@ -90,7 +90,7 @@ class ReshapeOp(Op):
         known = tuple(d for d in self.shape if d != -1)
         # Inferred axis takes whatever the remaining product needs. ``Dim``
         # arithmetic eager-folds the all-static case to a Literal int; mixed
-        # static/symbolic produces a ``BinaryExpr`` Dim that resolves at launch.
+        # static/symbolic produces a ``BinaryExpression`` Dim that resolves at launch.
         # ``_numel`` bootstraps the accumulator with ``Dim(1)``, so a raw-int
         # input shape still yields a ``Dim`` result.
         numel = self._numel

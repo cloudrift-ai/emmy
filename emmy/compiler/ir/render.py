@@ -17,7 +17,18 @@ from emmy.compiler.dim import DYNAMIC_DIM_MAX, Dim
 from emmy.compiler.dtype import F32, INTEGER_NAMES
 from emmy.compiler.ir.axis import Axis
 from emmy.compiler.ir.elementwise import reduce_spelling
-from emmy.compiler.ir.expression import BinaryExpr, CastExpr, Expression, FuncCallExpr, Literal, SimplifyCtx, TernaryExpr, Var, _float_lit
+from emmy.compiler.ir.expression import (
+    BinaryExpression,
+    Builtin,
+    CastExpression,
+    Expression,
+    FlatIndex,
+    FunctionCallExpression,
+    Literal,
+    SimplifyCtx,
+    TernaryExpression,
+    Var,
+)
 from emmy.compiler.ir.stmt import (
     Accum,
     Affine,
@@ -77,7 +88,7 @@ class RenderCtx:
     vector load shapes). Everything else here is generic walk state.
 
     ``intrinsics`` / ``builtins`` keep the legacy abstract→spelling
-    indirection used by ``FuncCallExpr.render`` / ``Builtin.render``
+    indirection used by ``FunctionCallExpression.render`` / ``Builtin.render``
     for symbols that don't vary by dtype (``thread_idx.x`` →
     ``threadIdx.x``, etc.). Dtype-aware lookups go through
     ``ctx.target.intrinsic(...)`` instead.
@@ -229,27 +240,27 @@ def op_to_expression(fn: str, inputs: list[Expression], *, dtype: str | None = N
 
     Emits abstract intrinsic names (``"exp"``, ``"fmax"``, ``"fabs"``, ...)
     that targets translate to libm / CUDA spellings via
-    ``RenderCtx.intrinsics`` at ``FuncCallExpr.render`` time. ``dtype``
+    ``RenderCtx.intrinsics`` at ``FunctionCallExpression.render`` time. ``dtype``
     distinguishes integer bit manipulation from the traced mask convention:
     integer ``bitwise_and``/``bitwise_or`` render as ``&``/``|``, while the
     historical f32 mask path remains logical ``&&``/``||``.
     """
     if dtype in INTEGER_NAMES and fn in _INTEGER_BINARY_OP:
-        return BinaryExpr(_INTEGER_BINARY_OP[fn], inputs[0], inputs[1])
+        return BinaryExpression(_INTEGER_BINARY_OP[fn], inputs[0], inputs[1])
     if dtype in INTEGER_NAMES and fn == "bitwise_count":
-        return FuncCallExpr("bitwise_count", tuple(inputs))
+        return FunctionCallExpression("bitwise_count", tuple(inputs))
     if fn in _BINARY_OP:
-        return BinaryExpr(_BINARY_OP[fn], inputs[0], inputs[1])
+        return BinaryExpression(_BINARY_OP[fn], inputs[0], inputs[1])
     if fn == "divide_rn_f32":
-        return FuncCallExpr(fn, tuple(inputs))
+        return FunctionCallExpression(fn, tuple(inputs))
     if fn == "maximum":
-        return FuncCallExpr("fmax", tuple(inputs))
+        return FunctionCallExpression("fmax", tuple(inputs))
     if fn == "minimum":
-        return FuncCallExpr("fmin", tuple(inputs))
+        return FunctionCallExpression("fmin", tuple(inputs))
     if fn == "pow":
-        return FuncCallExpr("pow", tuple(inputs))
+        return FunctionCallExpression("pow", tuple(inputs))
     if fn == "negative":
-        return BinaryExpr("-", Literal(0.0, "float"), inputs[0])
+        return BinaryExpression("-", Literal(0.0, "float"), inputs[0])
     if fn in ("copy", "pad"):
         return inputs[0]
     if fn in ("from_f8e4m3", "from_f8e5m2"):
@@ -269,25 +280,25 @@ def op_to_expression(fn: str, inputs: list[Expression], *, dtype: str | None = N
         # constructor rounds; the codes here land on an ordinary integer carrier, where the same
         # identity would truncate the value instead. The render emits the rounding as a helper
         # (``_F4_ENCODE_PRELUDE``).
-        return FuncCallExpr("emmy_to_f4e2m1", (inputs[0],))
+        return FunctionCallExpression("emmy_to_f4e2m1", (inputs[0],))
     if fn == "square":
-        return BinaryExpr("*", inputs[0], inputs[0])
+        return BinaryExpression("*", inputs[0], inputs[0])
     if fn == "reciprocal":
-        return BinaryExpr("/", Literal(1.0, "float"), inputs[0])
+        return BinaryExpression("/", Literal(1.0, "float"), inputs[0])
     if fn == "relu":
-        return FuncCallExpr("fmax", (Literal(0.0, "float"), inputs[0]))
+        return FunctionCallExpression("fmax", (Literal(0.0, "float"), inputs[0]))
     if fn == "sigmoid":
-        neg_x = BinaryExpr("-", Literal(0.0, "float"), inputs[0])
-        exp_neg = FuncCallExpr("exp", (neg_x,))
-        return BinaryExpr("/", Literal(1.0, "float"), BinaryExpr("+", Literal(1.0, "float"), exp_neg))
+        neg_x = BinaryExpression("-", Literal(0.0, "float"), inputs[0])
+        exp_neg = FunctionCallExpression("exp", (neg_x,))
+        return BinaryExpression("/", Literal(1.0, "float"), BinaryExpression("+", Literal(1.0, "float"), exp_neg))
     if fn in ("exp", "exp_fast", "log", "rsqrt", "sin", "cos", "tanh", "sqrt", "erf", "floor"):
-        return FuncCallExpr(fn, tuple(inputs))
+        return FunctionCallExpression(fn, tuple(inputs))
     if fn == "abs":
-        return FuncCallExpr("fabs", tuple(inputs))
+        return FunctionCallExpression("fabs", tuple(inputs))
     if fn == "where":
         # np.where(cond, a, b) — the mask-apply tail of the explicit-mask
         # subgraph. The f32-promoted cond is C-truthy (nonzero) in ``?:``.
-        return TernaryExpr(inputs[0], inputs[1], inputs[2])
+        return TernaryExpression(inputs[0], inputs[1], inputs[2])
     if fn == "bitwise_not":
         # Torch spells ``~mask`` as bitwise_not even when ``mask`` is bool. Loop
         # IR historically promotes boolean mask SSA values to f32, so both the
@@ -299,7 +310,7 @@ def op_to_expression(fn: str, inputs: list[Expression], *, dtype: str | None = N
         if len(inputs) != 1:
             raise ValueError(f"render: bitwise_not requires one input, got {len(inputs)}")
         zero = Literal(0.0, "float") if dtype in (None, "f32") else Literal(0, "int")
-        return BinaryExpr("==", inputs[0], zero)
+        return BinaryExpression("==", inputs[0], zero)
     raise NotImplementedError(f"render: elementwise fn={fn!r} not supported")
 
 
@@ -326,8 +337,8 @@ def render_merge_program(program, state_names, ctx: RenderCtx, pad: str | None =
         # The merge runs at ``dt`` — cast any arg with a different dtype (e.g. a raw
         # ``__half`` value loaded into the partial, as in fp16 flash's ``p · v``) so
         # the operator isn't ambiguous. The cast is a no-op for matching args.
-        arg_expressions = [Var(x) if ctx.ssa_dtypes.get(x, dt) == dt else CastExpr(ty, Var(x)) for x in a.args]
-        rhs = op_to_expression(a.op.name, arg_expressions, dtype=dt).render(ctx)
+        arg_expressions = [Var(x) if ctx.ssa_dtypes.get(x, dt) == dt else CastExpression(ty, Var(x)) for x in a.args]
+        rhs = render_expression(op_to_expression(a.op.name, arg_expressions, dtype=dt), ctx)
         if a.name in sset:
             out.append(f"{pad}{a.name} = {rhs};")  # reassign carried state
         else:
@@ -339,14 +350,80 @@ def render_merge_program(program, state_names, ctx: RenderCtx, pad: str | None =
 def select_to_ternary(s: Select, dtype: str = "float") -> Expression:
     """Cast branches to their common result type, avoiding ambiguous half/float C++ conditionals."""
     branches = list(s.branches)
-    result: Expression = CastExpr(dtype, Var(branches[-1].value))
+    result: Expression = CastExpression(dtype, Var(branches[-1].value))
     for b in reversed(branches[:-1]):
-        result = TernaryExpr(cond=b.select, if_true=CastExpr(dtype, Var(b.value)), if_false=result)
+        result = TernaryExpression(cond=b.select, if_true=CastExpression(dtype, Var(b.value)), if_false=result)
     return result
 
 
 #: Largest value C ``int`` addressing can represent; past it a flat address wraps negative.
 _INT_MAX = 2**31 - 1
+
+
+def _float_lit(v: float) -> str:
+    """C / CUDA float literal — always carries a decimal so ``0.0`` renders as ``0.0f`` not the invalid ``0f``, and
+    large/scientific values keep their exponent."""
+    s = repr(float(v))
+    if "." not in s and "e" not in s and "E" not in s and "inf" not in s and "nan" not in s:
+        s += ".0"
+    return f"{s}f"
+
+
+def render_expression(expression: Expression, ctx, parent_prec: int = 0) -> str:  # noqa: ANN001 — a ``RenderCtx``
+    """Emit a target-language (C / CUDA) expression string. ``ctx`` carries the intrinsic and builtin spelling tables,
+    the literal bindings and the inlined temps; ``parent_prec`` drives parenthesization in nested binary chains."""
+    if isinstance(expression, Var):
+        # An SSA name bound by a literal-constant Load renders as the literal; a single-use temp folded into its
+        # consumer (``EMMY_READABLE``) as its rendered sub-expression. ``render_body`` populates both tables.
+        lit_map = getattr(ctx, "literal_ssa", None)
+        if lit_map and expression.name in lit_map:
+            return _float_lit(lit_map[expression.name])
+        inl = getattr(ctx, "inline_expressions", None)
+        if inl and expression.name in inl:
+            return inl[expression.name]
+        return expression.name
+    if isinstance(expression, Literal):
+        if isinstance(expression.value, float) or expression.dtype == "float":
+            txt = _float_lit(float(expression.value))
+            # A float literal embedded in a non-default-dtype expression composes with the surrounding operands: the
+            # target wraps it (``__float2half`` for fp16). Int literals only go through the branch below.
+            if ctx is not None:
+                wrap_dt = getattr(ctx, "literal_default_dtype", None)
+                target = getattr(ctx, "target", None)
+                if wrap_dt is not None and target is not None:
+                    return target.literal(txt, wrap_dt)
+            return txt
+        v = int(expression.value)
+        return f"{v}LL" if abs(v) > 32768 else str(v)
+    if isinstance(expression, BinaryExpression):
+        prec = expression.precedence
+        left = render_expression(expression.left, ctx, prec)
+        right = render_expression(expression.right, ctx, prec + 1)
+        # ``//`` is Python floor-div; C integer division ``/`` floors for the non-negative operands shape arithmetic
+        # produces.
+        c_op = "/" if expression.op == "//" else expression.op
+        result = f"{left} {c_op} {right}"
+        return f"({result})" if prec < parent_prec else result
+    if isinstance(expression, Builtin):
+        spelling = ctx.builtins.get(expression.name) if ctx is not None else None
+        if spelling is None:
+            raise ValueError(f"render: Builtin {expression.name!r} has no target spelling in ctx.builtins")
+        return spelling
+    if isinstance(expression, FunctionCallExpression):
+        spelling = ctx.intrinsics.get(expression.name, expression.name) if ctx is not None else expression.name
+        args = ", ".join(render_expression(a, ctx) for a in expression.args)
+        return f"{spelling}({args})"
+    if isinstance(expression, TernaryExpression):
+        c = render_expression(expression.cond, ctx)
+        t = render_expression(expression.if_true, ctx)
+        f = render_expression(expression.if_false, ctx)
+        return f"(({c}) ? ({t}) : ({f}))"
+    if isinstance(expression, CastExpression):
+        return f"(({expression.dtype})({render_expression(expression.expression, ctx)}))"
+    if isinstance(expression, FlatIndex):
+        text = render_index(expression.buffer, expression.index, ctx)
+        return f"({text})" if parent_prec > 0 else text
+    raise NotImplementedError(f"{type(expression).__name__} has no render")
 
 
 def render_index(buf: str, indices: tuple, ctx: RenderCtx, shape: tuple | None = None) -> str:
@@ -362,7 +439,7 @@ def render_index(buf: str, indices: tuple, ctx: RenderCtx, shape: tuple | None =
     already a flat address; any other index spells every dim of a known shape, ``0`` at a size-one dim.
     """
     flat = _flat_index(buf, indices, ctx, shape)
-    return flat if isinstance(flat, str) else flat.render(ctx)
+    return flat if isinstance(flat, str) else render_expression(flat, ctx)
 
 
 def render_address(buf: str, indices: tuple, ctx: RenderCtx) -> str:
@@ -379,22 +456,22 @@ def render_address(buf: str, indices: tuple, ctx: RenderCtx) -> str:
         return f"&{buf}[{flat}]"
     index, offset = _split_offset(flat)
     if not offset:
-        return f"&{buf}[{flat.render(ctx)}]"
-    return f"&{buf}[{(index or Literal(0, 'int')).render(ctx)}] + {offset}"
+        return f"&{buf}[{render_expression(flat, ctx)}]"
+    return f"&{buf}[{render_expression((index or Literal(0, 'int')), ctx)}] + {offset}"
 
 
 def _split_offset(e: Expression) -> tuple[Expression | None, int]:
     """``e`` as ``index + offset``, the constant taken through ``+`` and ``* literal``."""
     if isinstance(e, Literal) and e.dtype == "int":
         return None, int(e.value)
-    if isinstance(e, BinaryExpr) and e.op == "+":
+    if isinstance(e, BinaryExpression) and e.op == "+":
         (left, a), (right, b) = _split_offset(e.left), _split_offset(e.right)
-        return (left if right is None else right if left is None else BinaryExpr("+", left, right)), a + b
-    if isinstance(e, BinaryExpr) and e.op == "*":
+        return (left if right is None else right if left is None else BinaryExpression("+", left, right)), a + b
+    if isinstance(e, BinaryExpression) and e.op == "*":
         for term, scale in ((e.left, e.right), (e.right, e.left)):
             if isinstance(scale, Literal) and scale.dtype == "int":
                 index, offset = _split_offset(term)
-                return (None if index is None else BinaryExpr("*", index, scale)), offset * int(scale.value)
+                return (None if index is None else BinaryExpression("*", index, scale)), offset * int(scale.value)
     return e, 0
 
 
@@ -414,17 +491,17 @@ def _flat_index(buf: str, indices: tuple, ctx: RenderCtx, shape: tuple | None = 
     for d, idx in enumerate(indices):
         stride: Expression = Literal(1, "int")
         for k in range(d + 1, len(shape)):
-            stride = BinaryExpr("*", stride, _to_expression(shape[k]))
+            stride = BinaryExpression("*", stride, _to_expression(shape[k]))
         stride = stride.simplify(SimplifyCtx.empty())
         if wide:
             # Widen the TERM, not the finished sum: `(long long)(a*b + c*d)` computes the whole
             # sum in `int` and widens an already-wrapped result. Casting the index makes each
             # multiply 64-bit, and the accumulating `+` chain stays 64-bit by promotion.
-            i_src = idx.simplify(SimplifyCtx.empty()).render(ctx)
-            parts.append(f"(long long)({i_src})" if _is_one(stride) else f"(long long)({i_src}) * ({stride.render(ctx)})")
+            i_src = render_expression(idx.simplify(SimplifyCtx.empty()), ctx)
+            parts.append(f"(long long)({i_src})" if _is_one(stride) else f"(long long)({i_src}) * ({render_expression(stride, ctx)})")
             continue
-        term: Expression = idx if _is_one(stride) else BinaryExpr("*", idx, stride)
-        flat = term if flat is None else BinaryExpr("+", flat, term)
+        term: Expression = idx if _is_one(stride) else BinaryExpression("*", idx, stride)
+        flat = term if flat is None else BinaryExpression("+", flat, term)
     if wide:
         return "(" + " + ".join(parts) + ")"
     assert flat is not None
@@ -469,14 +546,14 @@ class Paged:
     vectorizable: ClassVar[bool] = False
 
     def base(self, index: tuple, ctx: RenderCtx) -> str:
-        page = BinaryExpr("//", index[self.axis], Literal(self.page, "int"))
-        return f"{self.name}__pages[{page.simplify(SimplifyCtx.empty()).render(ctx)}]"
+        page = BinaryExpression("//", index[self.axis], Literal(self.page, "int"))
+        return f"{self.name}__pages[{render_expression(page.simplify(SimplifyCtx.empty()), ctx)}]"
 
     def flat(self, index: tuple, ctx: RenderCtx) -> str:
         shape = ctx.shapes.get(self.name)
         if shape is None or len(shape) != len(index):
             raise ValueError(f"paged buffer {self.name!r} needs a declared shape matching its {len(index)} indices; got {shape}")
-        within = BinaryExpr("%", index[self.axis], Literal(self.page, "int"))
+        within = BinaryExpression("%", index[self.axis], Literal(self.page, "int"))
         inside = tuple(within if d == self.axis else idx for d, idx in enumerate(index))
         return render_index(self.name, inside, ctx, shape=(*shape[: self.axis], self.page, *shape[self.axis + 1 :]))
 
@@ -616,8 +693,8 @@ def render_body(body: Body, ctx: RenderCtx) -> list[str]:
                 [Var(a) for a in s.args],
                 dtype=s.dtype.name if s.dtype is not None else None,
             )
-            rendered = expression.render(replace(ctx, inline_expressions=inline))
-            inline[s.name] = f"({rendered})" if isinstance(expression, (BinaryExpr, TernaryExpr)) else rendered
+            rendered = render_expression(expression, replace(ctx, inline_expressions=inline))
+            inline[s.name] = f"({rendered})" if isinstance(expression, (BinaryExpression, TernaryExpression)) else rendered
             if s.dtype is not None:
                 # The defining Assign is omitted below, so its normal render path cannot
                 # register the SSA dtype. Preserve it for the consumer: otherwise an inlined
@@ -692,7 +769,7 @@ def _args_at_dtype(target, args: tuple[str, ...], arg_dtypes: list[str], dst_dt:
     Expressions ready to drop into ``op_to_expression``. Args already at ``dst_dt``
     pass through as bare ``Var``s. Mismatched args are wrapped in the
     target's conversion intrinsic (e.g. ``__half2float(name)``) by
-    parsing ``target.convert``'s output back into a ``FuncCallExpr`` so
+    parsing ``target.convert``'s output back into a ``FunctionCallExpression`` so
     it composes with the Expression renderer."""
 
     out: list[Expression] = []
@@ -703,7 +780,7 @@ def _args_at_dtype(target, args: tuple[str, ...], arg_dtypes: list[str], dst_dt:
         converted = target.convert(a, dt, dst_dt)
         paren = converted.index("(") if "(" in converted else -1
         if paren > 0 and converted.endswith(")"):
-            out.append(FuncCallExpr(converted[:paren], [Var(a)]))
+            out.append(FunctionCallExpression(converted[:paren], [Var(a)]))
         else:
             out.append(Var(a))
     return out
@@ -712,14 +789,14 @@ def _args_at_dtype(target, args: tuple[str, ...], arg_dtypes: list[str], dst_dt:
 def _dtype_intrinsics(target, result_dt: str, expression: Expression) -> dict[str, str]:
     """Per-dtype intrinsic overrides for the abstract op names that
     appear inside ``expression``. The Expression renderer reads ``ctx.intrinsics``
-    when resolving ``FuncCallExpr.name`` to a target spelling; we patch
+    when resolving ``FunctionCallExpression.name`` to a target spelling; we patch
     in the dtype-specific spellings while rendering the fp16-native
     path."""
 
     overrides: dict[str, str] = {}
 
     def collect(node):
-        if isinstance(node, FuncCallExpr):
+        if isinstance(node, FunctionCallExpression):
             overrides[node.name] = target.intrinsic(node.name, result_dt)
             for a in node.args:
                 collect(a)
@@ -766,7 +843,7 @@ def _(stmt: Load, ctx: RenderCtx) -> list[str]:
         # Each name's value is computed from its flat table index (``emmy_f4_pair``), exact in every float dtype.
         out = []
         for k, nm in enumerate(stmt.names):
-            idx_k = (*stmt.index[:-1], BinaryExpr("+", stmt.index[-1], Literal(k, "int"))) if k else stmt.index
+            idx_k = (*stmt.index[:-1], BinaryExpression("+", stmt.index[-1], Literal(k, "int"))) if k else stmt.index
             value = f"emmy_f4_pair({render_index(stmt.input, idx_k, ctx)})"
             if src_dt != "f16":
                 value = ctx.target.convert(ctx.target.convert(value, "f16", "f32"), "f32", src_dt)
@@ -786,7 +863,7 @@ def _(stmt: Load, ctx: RenderCtx) -> list[str]:
         decl = "" if stmt.carried else f"{ctx.type_name(src_dt)} "
         out: list[str] = []
         for k, nm in enumerate(stmt.names):
-            idx_k = (*stmt.index[:-1], BinaryExpr("+", stmt.index[-1], Literal(k, "int"))) if k else stmt.index
+            idx_k = (*stmt.index[:-1], BinaryExpression("+", stmt.index[-1], Literal(k, "int"))) if k else stmt.index
             ctx.ssa_dtypes[nm] = src_dt
             out.append(f"{pad}{decl}{nm} = {mem.base(idx_k, ctx)}[{mem.flat(idx_k, ctx)}];")
         return out
@@ -847,9 +924,9 @@ def _(stmt: Assign, ctx: RenderCtx) -> list[str]:
 
     def build(operands: list[Expression], dtype: str) -> Expression:
         expression = op_to_expression(op_name, operands, dtype=dtype)
-        if dtype != "f32" and isinstance(expression, BinaryExpr) and ctx.target.intrinsic(op_name, dtype) != op_name:
+        if dtype != "f32" and isinstance(expression, BinaryExpression) and ctx.target.intrinsic(op_name, dtype) != op_name:
             # A target that spells this operator as a call (CUDA's non-contracting f16 ``_rn`` ops).
-            expression = FuncCallExpr(op_name, tuple(operands))
+            expression = FunctionCallExpression(op_name, tuple(operands))
         return expression
 
     return _render_promoted(ctx, stmt.name, op_name, stmt.args, arg_dtypes, result_dt, build)
@@ -881,7 +958,7 @@ def _render_promoted(
         ctx.intrinsics = {**saved_intr, **_dtype_intrinsics(ctx.target, result_dt, expression)}
         ctx.literal_default_dtype = result_dt
         try:
-            body = expression.render(ctx)
+            body = render_expression(expression, ctx)
         finally:
             ctx.intrinsics = saved_intr
             ctx.literal_default_dtype = saved_lit
@@ -889,7 +966,7 @@ def _render_promoted(
         return [f"{pad}{ctx.type_name(result_dt)} {name} = {body};"]
 
     # f32 / no-native path: promote args to f32, render in f32, then convert the result back when narrower.
-    body_str = build(_args_at_dtype(ctx.target, args, arg_dtypes, "f32"), "f32").render(ctx)
+    body_str = render_expression(build(_args_at_dtype(ctx.target, args, arg_dtypes, "f32"), "f32"), ctx)
     if result_dt != "f32":
         body_str = ctx.target.convert(body_str, "f32", result_dt)
     ctx.ssa_dtypes[name] = result_dt
@@ -904,14 +981,14 @@ def _(stmt: Affine, ctx: RenderCtx) -> list[str]:
     def build(operands: list[Expression], dtype: str) -> Expression:
         expression: Expression | None = None
         for coefficient, operand in zip(stmt.coefficients, operands, strict=True):
-            term = operand if abs(coefficient) == 1 else BinaryExpr("*", Literal(abs(coefficient), "float"), operand)
+            term = operand if abs(coefficient) == 1 else BinaryExpression("*", Literal(abs(coefficient), "float"), operand)
             if expression is None:
-                expression = term if coefficient > 0 else BinaryExpr("-", Literal(0.0, "float"), term)
+                expression = term if coefficient > 0 else BinaryExpression("-", Literal(0.0, "float"), term)
             else:
-                expression = BinaryExpr("+" if coefficient > 0 else "-", expression, term)
+                expression = BinaryExpression("+" if coefficient > 0 else "-", expression, term)
         if stmt.offset != 0 or expression is None:
             literal = Literal(abs(stmt.offset), "float")
-            expression = literal if expression is None else BinaryExpr("+" if stmt.offset > 0 else "-", expression, literal)
+            expression = literal if expression is None else BinaryExpression("+" if stmt.offset > 0 else "-", expression, literal)
         return expression
 
     return _render_promoted(ctx, stmt.name, "add", stmt.args, arg_dtypes, result_dt, build)
@@ -965,9 +1042,9 @@ def _(stmt: Init, ctx: RenderCtx) -> list[str]:
 @render_stmt.register
 def _(stmt: Let, ctx: RenderCtx) -> list[str]:
     if stmt.dtype is None:
-        return [f"{_pad(ctx.indent)}auto {stmt.name} = {stmt.value.render(ctx)};"]
+        return [f"{_pad(ctx.indent)}auto {stmt.name} = {render_expression(stmt.value, ctx)};"]
     ctx.ssa_dtypes[stmt.name] = stmt.dtype.name
-    value = ctx.identity_literal(stmt.value.value, stmt.dtype) if isinstance(stmt.value, Literal) else stmt.value.render(ctx)
+    value = ctx.identity_literal(stmt.value.value, stmt.dtype) if isinstance(stmt.value, Literal) else render_expression(stmt.value, ctx)
     return [f"{_pad(ctx.indent)}{ctx.type_name(stmt.dtype)} {stmt.name} = {value};"]
 
 
@@ -1014,7 +1091,7 @@ def _(stmt: Write, ctx: RenderCtx) -> list[str]:
         # render's job is to always produce valid code.
         lines: list[str] = []
         for k in range(n):
-            idx_k = tuple(stmt.index[:-1]) + (BinaryExpr("+", stmt.index[-1], Literal(k, "int")),)
+            idx_k = tuple(stmt.index[:-1]) + (BinaryExpression("+", stmt.index[-1], Literal(k, "int")),)
             flat = _swizzled(stmt, mem.flat(idx_k, ctx), ctx, idx_k)
             lines.append(f"{pad}{mem.base(idx_k, ctx)}[{flat}] = {converted[k]};")
         return lines
@@ -1061,7 +1138,7 @@ def _(stmt: Write, ctx: RenderCtx) -> list[str]:
         elem_type = ctx.type_name(out_dt)
         arr = temp
         init = ", ".join(converted)
-        idx_hi = (*stmt.index[:-1], BinaryExpr("+", stmt.index[-1], Literal(4, "int")))
+        idx_hi = (*stmt.index[:-1], BinaryExpression("+", stmt.index[-1], Literal(4, "int")))
         flat_hi = _swizzled(stmt, render_index(stmt.output, idx_hi, ctx), ctx, idx_hi)
         return [
             f"{pad}{elem_type} {arr}[{n}] = {{ {init} }};",
@@ -1085,7 +1162,7 @@ def _(stmt: Select, ctx: RenderCtx) -> list[str]:
     ctx.ssa_dtypes[stmt.name] = dtype
     ty = ctx.type_name(dtype)
     expression = select_to_ternary(stmt, ty)
-    return [f"{_pad(ctx.indent)}{ty} {stmt.name} = {expression.render(ctx)};"]
+    return [f"{_pad(ctx.indent)}{ty} {stmt.name} = {render_expression(expression, ctx)};"]
 
 
 @render_stmt.register
@@ -1173,7 +1250,7 @@ def _extent_c(ax: Axis, ctx: RenderCtx) -> str:
         return str(ext)
     # Parenthesize: the extent lands as a ``%`` / ``/`` operand in the decode
     # (``idx % (seq_len+31)/32`` would otherwise mis-associate).
-    return f"({ext.expression.render(ctx)})"
+    return f"({render_expression(ext.expression, ctx)})"
 
 
 @render_stmt.register
@@ -1194,8 +1271,8 @@ def _(stmt: StridedLoop, ctx: RenderCtx) -> list[str]:
                 out.append(f"{pad}{ctx.type_name(s.dtype)} {s.name} = {ctx.identity_literal(identity, s.dtype)};")
             ctx.ssa_dtypes[s.name] = (s.dtype or F32).name
     var = stmt.axis.name
-    start_str = stmt.start.render(ctx)
-    step_str = stmt.step.render(ctx) if isinstance(stmt.step, Expression) else str(stmt.step)
+    start_str = render_expression(stmt.start, ctx)
+    step_str = render_expression(stmt.step, ctx)
     # ``_extent_c`` renders a symbolic bound (a cooperative reduce over a dynamic
     # ``seq_len`` strides each lane to the runtime extent — the ``< seq_len`` bound is the
     # masked tail, idle lanes folding the carrier identity) as the C name, a static one as
@@ -1206,14 +1283,14 @@ def _(stmt: StridedLoop, ctx: RenderCtx) -> list[str]:
         # Hoist the override bound into the for-init (``<var>_end``, referenceable by body
         # stmts — the staged prefetch clamp) so a non-literal bound is evaluated once, not
         # per iteration / per use (the inline form measurably spills on the flash stream).
-        init = f"int {var} = {start_str}, {var}_end = {stmt.end.render(ctx)}"
+        init = f"int {var} = {start_str}, {var}_end = {render_expression(stmt.end, ctx)}"
         out.append(f"{pad}for ({init}; {var} < {var}_end; {var} += {step_str}) {{")
     else:
         out.append(f"{pad}for (int {var} = {start_str}; {var} < {_extent_c(stmt.axis, ctx)}; {var} += {step_str}) {{")
     inner = ctx.child()
-    if isinstance(stmt.start, Literal) and isinstance(stmt.step, Literal | int):
-        step = stmt.step.value if isinstance(stmt.step, Literal) else stmt.step
-        if isinstance(stmt.start.value, int) and isinstance(step, int) and (stride := math.gcd(stmt.start.value, step)):
+    if isinstance(stmt.start, Literal) and isinstance(stmt.step, Literal):
+        start, step = stmt.start.value, stmt.step.value
+        if isinstance(start, int) and isinstance(step, int) and (stride := math.gcd(start, step)):
             inner.aligned[var] = stride
     out.extend(render_body(stmt.body, inner))
     out.append(f"{pad}}}")
@@ -1223,7 +1300,7 @@ def _(stmt: StridedLoop, ctx: RenderCtx) -> list[str]:
 @render_stmt.register
 def _(stmt: Cond, ctx: RenderCtx) -> list[str]:
     pad = _pad(ctx.indent)
-    cond = stmt.cond.render(ctx)
+    cond = render_expression(stmt.cond, ctx)
     inner = ctx.child()
     body = render_body(stmt.body, inner)
     out = [f"{pad}if ({cond}) {{", *body, f"{pad}}}"]
