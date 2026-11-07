@@ -106,7 +106,7 @@ def test_a_pointwise_term_has_no_view() -> None:
 def test_a_matmul_lowers_to_one_loop_with_both_operands_riding_the_step() -> None:
     """Both operands index ``k``, so both are re-read per step and nothing hoists."""
     (loop,) = _matmul().lower(axes=SCOPE)
-    assert isinstance(loop, Loop) and loop.axis is K_AXIS
+    assert isinstance(loop, Loop) and loop.axis == K_AXIS
     assert [stmt.input for stmt in loop.body if isinstance(stmt, Load)] == ["x", "w"]
     assert [stmt.name for stmt in loop.body if isinstance(stmt, Accum)] == ["acc"]
 

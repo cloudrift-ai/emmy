@@ -3,7 +3,7 @@
 One subpackage per IR level:
 
 - ``base``     — ``Op`` base class + ``InputOp`` / ``ConstantOp`` sentinels.
-- ``expression``     — shared expression AST (``Var``, ``BinaryExpr``, ...) +
+- ``expression``     — shared expression AST (``Var``, ``BinaryExpression``, ...) +
                  coord-expression helpers for ``IndexMapOp``.
 - ``frontend`` — Torch-captured ops (``LinearOp``, ``MatmulOp``, ``SdpaOp``,
                  ``MeanOp``, ``UnsqueezeOp``, ``TransposeOp``, ``ReshapeOp``,

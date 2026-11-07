@@ -4,11 +4,12 @@
 //! gives are stated here by kind: an `Accum`'s reduced axes follow a substitution that splits an axis, a `Let` and
 //! a `Call` read buffers their fields do not name, a `StridedLoop` with an `end` binds one more name than its axis.
 
+use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use crate::axis::Axis;
-use crate::body::Body;
+use crate::body::{Body, Subroutine};
 use crate::elementwise::Op;
 use crate::expr::{Expr, Expression};
 use crate::field::{AxisRef, DType, Exprs, Float, Names, NumOr, Rewriter, SubroutineRef, Visitor};
@@ -188,25 +189,66 @@ impl Rewriter for MapExpressions<'_> {
     }
 }
 
-struct RenameBuffers<'a>(&'a HashMap<Name, Name>);
+/// A buffer renaming in progress: the mapping, and each shared subroutine renamed once, however many calls name it.
+pub struct Renaming<'a> {
+    mapping: &'a HashMap<Name, Name>,
+    subroutines: RefCell<HashMap<usize, Arc<Subroutine>>>,
+}
 
-impl Rewriter for RenameBuffers<'_> {
+impl<'a> Renaming<'a> {
+    pub fn new(mapping: &'a HashMap<Name, Name>) -> Renaming<'a> {
+        Renaming {
+            mapping,
+            subroutines: RefCell::new(HashMap::new()),
+        }
+    }
+
+    fn rename(&self, name: &Name) -> Name {
+        self.mapping
+            .get(name)
+            .cloned()
+            .unwrap_or_else(|| name.clone())
+    }
+
+    fn subroutine(&self, target: &Arc<Subroutine>) -> Arc<Subroutine> {
+        let key = Arc::as_ptr(target) as usize;
+        if let Some(renamed) = self.subroutines.borrow().get(&key) {
+            return renamed.clone();
+        }
+        let buffers: Vec<Name> = target
+            .buffers
+            .iter()
+            .map(|name| self.rename(name))
+            .collect();
+        let renamed = if buffers[..] == target.buffers[..] {
+            target.clone()
+        } else {
+            target.with_buffers(buffers.into())
+        };
+        self.subroutines.borrow_mut().insert(key, renamed.clone());
+        renamed
+    }
+}
+
+struct RenameBuffers<'a, 'b>(&'b Renaming<'a>);
+
+impl Rewriter for RenameBuffers<'_, '_> {
     fn name(&mut self, roles: u32, name: &Name) -> Name {
         if roles & BUFFERS != 0 {
-            self.0.get(name).cloned().unwrap_or_else(|| name.clone())
+            self.0.rename(name)
         } else {
             name.clone()
         }
     }
     fn body(&mut self, roles: u32, body: &Body) -> Body {
         if roles & TERM != 0 {
-            body.map_each(&mut |stmt| Statement::rename_buffers(stmt, self.0))
+            body.map_each(&mut |stmt| Statement::rename_buffers_with(stmt, self.0))
         } else {
             body.clone()
         }
     }
     fn carried(&mut self, _roles: u32, stmt: &Arc<Statement>) -> Arc<Statement> {
-        Statement::rename_buffers(stmt, self.0)
+        Statement::rename_buffers_with(stmt, self.0)
     }
 }
 
@@ -473,6 +515,13 @@ impl Statement {
 
     /// This statement with every buffer renamed through `mapping`; itself when none changes.
     pub fn rename_buffers(this: &Arc<Statement>, mapping: &HashMap<Name, Name>) -> Arc<Statement> {
+        Statement::rename_buffers_with(this, &Renaming::new(mapping))
+    }
+
+    /// `rename_buffers` inside one renaming: a body renames every statement through the same one, so a subroutine
+    /// two calls share stays one definition.
+    pub fn rename_buffers_with(this: &Arc<Statement>, renaming: &Renaming<'_>) -> Arc<Statement> {
+        let mapping = renaming.mapping;
         if mapping.is_empty() {
             return this.clone();
         }
@@ -497,23 +546,17 @@ impl Statement {
                 }
             }
             Statement::Call(call) => {
-                let buffers: Vec<Name> = call
-                    .target
-                    .buffers
-                    .iter()
-                    .map(|name| mapping.get(name).cloned().unwrap_or_else(|| name.clone()))
-                    .collect();
-                if buffers[..] == call.target.buffers[..] {
+                let target = renaming.subroutine(&call.target.0);
+                if Arc::ptr_eq(&target, &call.target.0) {
                     return this.clone();
                 }
-                let target = SubroutineRef(call.target.with_buffers(buffers.into()));
                 Arc::new(Statement::Call(Call {
-                    target,
+                    target: SubroutineRef(target),
                     ..call.clone()
                 }))
             }
             _ => {
-                let new = this.rewrite_fields(&mut RenameBuffers(mapping));
+                let new = this.rewrite_fields(&mut RenameBuffers(renaming));
                 if new.same(this) {
                     this.clone()
                 } else {

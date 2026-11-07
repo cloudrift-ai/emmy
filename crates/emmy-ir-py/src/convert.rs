@@ -97,14 +97,20 @@ pub fn num_from_py(value: &Bound<'_, PyAny>) -> PyResult<Num> {
     )))
 }
 
+/// The expression `value` holds; a bare number is a float literal, as a `Let` of a number binds one.
 pub fn expression_from_py(value: &Bound<'_, PyAny>) -> PyResult<Expression> {
-    match value.cast::<PyExpression>() {
-        Ok(expression) => Ok(expression.get().expr.clone()),
-        Err(_) => Err(PyTypeError::new_err(format!(
-            "expected an Expression, got {}",
-            value.get_type().name()?
-        ))),
+    if let Ok(expression) = value.cast::<PyExpression>() {
+        return Ok(expression.get().expr.clone());
     }
+    if !value.is_instance_of::<PyBool>()
+        && (value.is_instance_of::<PyInt>() || value.is_instance_of::<PyFloat>())
+    {
+        return Ok(Expression::float(num_from_py(value)?.as_f64()));
+    }
+    Err(PyTypeError::new_err(format!(
+        "expected an Expression, got {}",
+        value.get_type().name()?
+    )))
 }
 
 /// An expression's text when `value` is one of ours, else the text `str()` gives it (an expression of another
@@ -318,7 +324,11 @@ impl PyField for Expression {
         Ok(PyExpression::wrap(py, self)?.unbind())
     }
     fn from_py(value: &Bound<'_, PyAny>) -> PyResult<Extracted<Self>> {
-        Ok((expression_from_py(value)?, Some(value.clone().unbind())))
+        // A bare number is coerced to a literal; the literal, not the number, is what a read hands back.
+        let held = value
+            .is_instance_of::<PyExpression>()
+            .then(|| value.clone().unbind());
+        Ok((expression_from_py(value)?, held))
     }
 }
 

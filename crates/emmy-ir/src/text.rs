@@ -422,8 +422,8 @@ fn subroutines(body: &Body, found: &mut Vec<Arc<Subroutine>>) -> Result<()> {
                     != definition_text(target)?
                 {
                     return Err(Error::Value(format!(
-                        "two subroutines are named {:?}: a body's text defines a name once",
-                        &*first.name
+                        "two subroutines are named {}: a body's text defines a name once",
+                        crate::expr::python_repr(&first.name)
                     )));
                 }
             }

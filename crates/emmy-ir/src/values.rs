@@ -40,7 +40,12 @@ impl Key {
     }
 
     pub fn float(value: f64) -> Key {
-        Key::Float((if value == 0.0 { 0.0 } else { value }).to_bits())
+        // The bits, so a signed zero keys apart from zero as its text does; every NaN alike.
+        Key::Float(if value.is_nan() {
+            f64::NAN.to_bits()
+        } else {
+            value.to_bits()
+        })
     }
 
     pub fn tuple(parts: impl IntoIterator<Item = Key>) -> Key {

@@ -139,10 +139,6 @@ impl PyExpression {
         self.expr.try_text().py()
     }
 
-    fn __repr__(&self) -> PyResult<String> {
-        self.expr.try_text().py()
-    }
-
     fn __eq__(&self, other: &Bound<'_, PyAny>) -> bool {
         other
             .cast::<PyExpression>()

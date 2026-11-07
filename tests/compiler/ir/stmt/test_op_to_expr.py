@@ -4,7 +4,7 @@ import numpy as np
 import pytest
 
 from emmy.compiler.ir.elementwise import ElementwiseImpl
-from emmy.compiler.ir.expression import BinaryExpr, FuncCallExpr, Literal, TernaryExpr
+from emmy.compiler.ir.expression import BinaryExpression, FunctionCallExpression, Literal, TernaryExpression
 from emmy.compiler.ir.render import op_to_expression
 from emmy.compiler.ir.stmt import dtype_promote
 
@@ -17,9 +17,9 @@ def test_square_renders_to_self_multiply():
     """
     x = Literal(3.0, "float")
     e = op_to_expression("square", [x])
-    assert isinstance(e, BinaryExpr)
+    assert isinstance(e, BinaryExpression)
     assert e.op == "*"
-    assert e.left is x and e.right is x
+    assert e.left == x and e.right == x
 
 
 def test_copy_is_identity_passthrough():
@@ -45,7 +45,7 @@ def test_sin_cos_render_as_intrinsics():
     x = Literal(1.0, "float")
     for name in ("sin", "cos"):
         expression = op_to_expression(name, [x])
-        assert isinstance(expression, FuncCallExpr)
+        assert isinstance(expression, FunctionCallExpression)
         assert expression.name == name
 
 
@@ -66,17 +66,17 @@ def test_mask_ops_render():
         ("bitwise_and", "&&"),
     ]:
         e = op_to_expression(name, [a, b])
-        assert isinstance(e, BinaryExpr) and e.op == c_op
+        assert isinstance(e, BinaryExpression) and e.op == c_op
 
     w = op_to_expression("where", [a, b, Literal(3.0, "float")])
-    assert isinstance(w, TernaryExpr) and w.cond is a
+    assert isinstance(w, TernaryExpression) and w.cond == a
 
 
 def test_boolean_bitwise_not_is_logical_zero_test_and_integer_fails_closed():
     a = Literal(1.0, "float")
     for dtype in (None, "f32", "bool"):
         expression = op_to_expression("bitwise_not", [a], dtype=dtype)
-        assert isinstance(expression, BinaryExpr) and expression.op == "=="
+        assert isinstance(expression, BinaryExpression) and expression.op == "=="
 
     import pytest
 
@@ -97,7 +97,7 @@ def test_integer_ops_keep_integer_spelling_without_changing_mask_semantics():
         ("bitwise_xor", "^"),
     ]:
         expression = op_to_expression(name, [a, b], dtype="u32")
-        assert isinstance(expression, BinaryExpr) and expression.op == c_op
+        assert isinstance(expression, BinaryExpression) and expression.op == c_op
 
     assert op_to_expression("bitwise_and", [a, b]).op == "&&"
     assert op_to_expression("bitwise_or", [a, b]).op == "||"
@@ -117,4 +117,4 @@ def test_integer_elementwise_promotion_is_operation_specific():
 def test_integer_bitwise_count_stays_an_abstract_intrinsic():
     value = Literal(7, "int")
     expression = op_to_expression("bitwise_count", [value], dtype="u32")
-    assert isinstance(expression, FuncCallExpr) and expression.name == "bitwise_count" and expression.args == (value,)
+    assert isinstance(expression, FunctionCallExpression) and expression.name == "bitwise_count" and expression.args == (value,)

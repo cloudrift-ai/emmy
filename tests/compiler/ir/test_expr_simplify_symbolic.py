@@ -1,4 +1,4 @@
-"""Tests for symbolic-divisor modulo folding in ``BinaryExpr.simplify``.
+"""Tests for symbolic-divisor modulo folding in ``BinaryExpression.simplify``.
 
 A collapsed reshape composed with a matmul read emits a delinearized index like
 ``((i * stride + feat) // stride) % seq_len`` for the seq coordinate. When
@@ -17,16 +17,16 @@ axes. These tests pin the fold and its safety guards.
 from __future__ import annotations
 
 from emmy.compiler.ir.axis import Axis, extend_simplify_ctx
-from emmy.compiler.ir.expression import BinaryExpr, Interval, Literal, SimplifyCtx, Var
+from emmy.compiler.ir.expression import BinaryExpression, Interval, Literal, SimplifyCtx, Var
 
 
-def _flat_seq_coord(stride: int) -> BinaryExpr:
+def _flat_seq_coord(stride: int) -> BinaryExpression:
     """``((a0 * stride + a2) // stride) % seq_len`` — the delinearized seq
     coordinate the o_proj / P@V repack producers carry (stride = collapsed
     feature width: 2048 for o_proj, 1024 for P@V)."""
     a0, a2, sl = Var("a0"), Var("a2"), Var("seq_len")
-    flat = BinaryExpr("+", BinaryExpr("*", a0, Literal(stride, "int")), a2)
-    return BinaryExpr("%", BinaryExpr("//", flat, Literal(stride, "int")), sl)
+    flat = BinaryExpression("+", BinaryExpression("*", a0, Literal(stride, "int")), a2)
+    return BinaryExpression("%", BinaryExpression("//", flat, Literal(stride, "int")), sl)
 
 
 def _loop_ctx(stride: int) -> SimplifyCtx:
@@ -42,7 +42,7 @@ def test_bare_var_mod_symbolic_extent_folds():
     """``a0 % seq_len → a0`` when ``a0``'s loop extent is exactly ``seq_len``."""
     a0, sl = Var("a0"), Var("seq_len")
     ctx = extend_simplify_ctx(SimplifyCtx.empty(), Axis("a0", "seq_len"))
-    assert BinaryExpr("%", a0, sl).simplify(ctx) == a0
+    assert BinaryExpression("%", a0, sl).simplify(ctx) == a0
 
 
 def test_collapsed_seq_coord_folds_to_row():
@@ -71,14 +71,14 @@ def test_no_fold_without_bound():
     fold must not fire on un-bounded operands."""
     b, sl = Var("b"), Var("seq_len")
     ctx = SimplifyCtx({"b": Interval(0, 1 << 30)})  # range but no bounds entry
-    assert BinaryExpr("%", b, sl).simplify(ctx) == BinaryExpr("%", b, sl)
+    assert BinaryExpression("%", b, sl).simplify(ctx) == BinaryExpression("%", b, sl)
 
 
 def test_no_fold_on_bound_mismatch():
     """``a0 % other`` does NOT fold when the divisor differs from a0's extent."""
     a0 = Var("a0")
     ctx = extend_simplify_ctx(SimplifyCtx.empty(), Axis("a0", "seq_len"))
-    e = BinaryExpr("%", a0, Var("other"))
+    e = BinaryExpression("%", a0, Var("other"))
     assert e.simplify(ctx) == e
 
 
@@ -103,12 +103,12 @@ def test_segmented_k_collapses_oproj_delinearized_read():
     from emmy.compiler.ir.sigma import Sigma
 
     a0, a2 = Var("a0"), Var("a2")
-    flat = BinaryExpr("+", BinaryExpr("*", a0, Literal(2048, "int")), a2)
-    head = BinaryExpr("%", BinaryExpr("//", flat, Literal(128, "int")), Literal(16, "int"))
-    seq = BinaryExpr("%", BinaryExpr("//", flat, Literal(2048, "int")), Var("seq_len"))
-    dim = BinaryExpr("%", flat, Literal(128, "int"))
+    flat = BinaryExpression("+", BinaryExpression("*", a0, Literal(2048, "int")), a2)
+    head = BinaryExpression("%", BinaryExpression("//", flat, Literal(128, "int")), Literal(16, "int"))
+    seq = BinaryExpression("%", BinaryExpression("//", flat, Literal(2048, "int")), Var("seq_len"))
+    dim = BinaryExpression("%", flat, Literal(128, "int"))
 
-    seg = Sigma({"a2": BinaryExpr("+", BinaryExpr("*", Var("a2_o"), Literal(128, "int")), Var("a2_i"))})
+    seg = Sigma({"a2": BinaryExpression("+", BinaryExpression("*", Var("a2_o"), Literal(128, "int")), Var("a2_i"))})
     ctx = SimplifyCtx.empty()
     ctx = extend_simplify_ctx(ctx, Axis("a0", "seq_len"))
     ctx = extend_simplify_ctx(ctx, Axis("a2_o", 16))
@@ -125,7 +125,7 @@ def test_static_axis_unchanged_behavior():
     ctx = extend_simplify_ctx(SimplifyCtx.empty(), Axis("a", 32))
     assert ctx.ranges["a"] == Interval(0, 31)
     # i % 32 with i in [0,32) folds to i (literal path).
-    assert BinaryExpr("%", Var("a"), Literal(32, "int")).simplify(ctx) == Var("a")
+    assert BinaryExpression("%", Var("a"), Literal(32, "int")).simplify(ctx) == Var("a")
 
 
 def test_scaled_term_div_folds_through_a_larger_divisor():
@@ -133,7 +133,9 @@ def test_scaled_term_div_folds_through_a_larger_divisor():
     decode sweep. Unfolded, every statistic indexed by it looked column-dependent and was replayed
     per head-dim column by fusion."""
     ctx = extend_simplify_ctx(extend_simplify_ctx(SimplifyCtx.empty(), Axis("h", 64)), Axis("c", 128))
-    idx = BinaryExpr("+", BinaryExpr("*", Var("h"), Literal(128, "int")), Var("c"))
-    assert BinaryExpr("/", idx, Literal(1024, "int")).simplify(ctx) == BinaryExpr("/", Var("h"), Literal(8, "int"))
-    rem = BinaryExpr("%", idx, Literal(1024, "int")).simplify(ctx)
-    assert rem == BinaryExpr("+", BinaryExpr("*", BinaryExpr("%", Var("h"), Literal(8, "int")), Literal(128, "int")), Var("c"))
+    idx = BinaryExpression("+", BinaryExpression("*", Var("h"), Literal(128, "int")), Var("c"))
+    assert BinaryExpression("/", idx, Literal(1024, "int")).simplify(ctx) == BinaryExpression("/", Var("h"), Literal(8, "int"))
+    rem = BinaryExpression("%", idx, Literal(1024, "int")).simplify(ctx)
+    assert rem == BinaryExpression(
+        "+", BinaryExpression("*", BinaryExpression("%", Var("h"), Literal(8, "int")), Literal(128, "int")), Var("c")
+    )

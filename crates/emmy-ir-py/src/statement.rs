@@ -247,13 +247,13 @@ impl PyStatement {
     }
 
     /// Rename, substitute and map axes in one rewrite: `names` maps SSA and axis names, `sigma` substitutes
-    /// expressions, `axes` maps a bound axis (by its text) to its replacement.
+    /// expressions, `axes` pairs each bound axis of the subtree with its replacement.
     #[pyo3(signature = (names = None, sigma = None, axes = None))]
     fn _rewrite<'py>(
         slf: &Bound<'py, Self>,
         names: Option<&Bound<'py, PyAny>>,
         sigma: Option<&Bound<'py, PyAny>>,
-        axes: Option<&Bound<'py, PyDict>>,
+        axes: Option<&Bound<'py, PyAny>>,
     ) -> PyResult<Bound<'py, PyAny>> {
         let names = names
             .filter(|n| !n.is_none())
@@ -265,23 +265,24 @@ impl PyStatement {
             .map(sigma_from_py)
             .transpose()?
             .unwrap_or_default();
-        let mut by_text: HashMap<String, Arc<emmy_ir::axis::Axis>> = HashMap::new();
-        if let Some(axes) = axes {
-            for (key, value) in axes.iter() {
-                by_text.insert(key.extract()?, axis_from_py(&value, 0)?);
+        let mut pairs: Vec<(Arc<emmy_ir::axis::Axis>, Arc<emmy_ir::axis::Axis>)> = Vec::new();
+        if let Some(axes) = axes.filter(|a| !a.is_none()) {
+            for pair in axes.try_iter()? {
+                let (old, new): (Bound<'py, PyAny>, Bound<'py, PyAny>) = pair?.extract()?;
+                pairs.push((axis_from_py(&old, 0)?, axis_from_py(&new, 0)?));
             }
         }
         let rename = |name: &str| names.get(name).cloned();
         let axis_fn = |axis: &Arc<emmy_ir::axis::Axis>| {
-            emmy_ir::text::spell_axis(axis, None)
-                .ok()
-                .and_then(|text| by_text.get(&text).cloned())
-                .unwrap_or_else(|| axis.clone())
+            pairs
+                .iter()
+                .find(|(old, _)| **old == **axis && old.window == axis.window)
+                .map_or_else(|| axis.clone(), |(_, new)| new.clone())
         };
         let rewrite = Rewrite {
             rename: &rename,
             sigma: &sigma,
-            axis_fn: if by_text.is_empty() {
+            axis_fn: if pairs.is_empty() {
                 None
             } else {
                 Some(&axis_fn)
@@ -291,7 +292,7 @@ impl PyStatement {
     }
 
     /// Every SSA and axis name this subtree spells: what a rename by a function is asked about.
-    fn names<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyTuple>> {
+    fn _names<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyTuple>> {
         names_tuple(py, &self.stmt.names())
     }
 
@@ -332,10 +333,6 @@ impl PyStatement {
     }
 
     fn __str__(&self) -> PyResult<String> {
-        statement_text(&self.stmt).py()
-    }
-
-    fn __repr__(&self) -> PyResult<String> {
         statement_text(&self.stmt).py()
     }
 
@@ -645,12 +642,6 @@ macro_rules! define_py_kinds {
                     let mut hasher = std::collections::hash_map::DefaultHasher::new();
                     self.record.hash(&mut hasher);
                     hasher.finish()
-                }
-
-                fn __repr__(&self) -> PyResult<String> {
-                    let mut out = String::new();
-                    <emmy_ir::kinds::$Record as emmy_ir::field::Field>::spell(&self.record, &mut out).py()?;
-                    Ok(out)
                 }
 
                 fn structural_form<'py>(slf: &Bound<'py, Self>) -> PyResult<Bound<'py, PyTuple>> {

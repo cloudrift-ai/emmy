@@ -9,13 +9,17 @@ use crate::axis::{Axis, Dim};
 use crate::body::{Body, exposed_defines, free_names, free_ssa, ordered_sibling_defs};
 use crate::dtype::{is_float, promote};
 use crate::elementwise::{Op, evaluate_f32};
-use crate::expr::{BinOp, Expr, Expression, Interval, Lit, Num, SimplifyCtx, affine_form};
+use crate::expr::{
+    BinOp, Expr, Expression, Interval, Lit, Num, SimplifyCtx, affine_form, python_repr,
+};
 use crate::field::{AxisRef, DType, Float, Names, NumOr};
 use crate::kinds::*;
 use crate::order::{is_protocol, ordering_constraints, topological_sort};
 use crate::protocol::{literal_binding, unique};
-use crate::text::{structural_body_text, structural_text};
-use crate::values::{Key, Number, Numbering, distinct, ptr, roles, scope_tree, value_numbers};
+use crate::text::{body_text, structural_body_text, structural_text};
+use crate::values::{
+    Key, Number, Numbering, Param, distinct, ptr, roles, scope_tree, value_numbers,
+};
 use crate::{Error, Name, Result, locked};
 
 const SYMBOLIC_AXIS_HI: i128 = 1 << 30;
@@ -38,11 +42,12 @@ pub fn extend_simplify_ctx(ctx: &SimplifyCtx, axis: &Axis) -> SimplifyCtx {
 
 // --- the memo -------------------------------------------------------------------------------------------
 
-/// A bounded memo keyed by a body's content: the normal forms of the bodies met in this process.
+/// A bounded memo keyed by a body's text: the normal forms of the bodies met in this process. The content hash finds
+/// the bucket; the text, which spells the axis windows that body equality leaves out, confirms the hit.
 struct Memo {
     maxsize: usize,
-    store: HashMap<u64, Vec<(Body, Body)>>,
-    order: std::collections::VecDeque<(u64, Body)>,
+    store: HashMap<u64, Vec<(String, Body)>>,
+    order: std::collections::VecDeque<(u64, String)>,
 }
 
 impl Memo {
@@ -55,25 +60,30 @@ impl Memo {
     }
 
     fn get(&self, body: &Body) -> Option<Body> {
-        self.store
-            .get(&body.content_hash())?
+        let entries = self.store.get(&body.content_hash())?;
+        let text = body_text(body).ok()?;
+        entries
             .iter()
-            .find(|(key, _)| key == body)
+            .find(|(key, _)| *key == text)
             .map(|(_, value)| value.clone())
     }
 
     fn put(&mut self, body: &Body, value: Body) {
+        let Ok(text) = body_text(body) else {
+            return;
+        };
+        let hash = body.content_hash();
         self.store
-            .entry(body.content_hash())
+            .entry(hash)
             .or_default()
-            .push((body.clone(), value));
-        self.order.push_back((body.content_hash(), body.clone()));
+            .push((text.clone(), value));
+        self.order.push_back((hash, text));
         while self.order.len() > self.maxsize {
             let Some((hash, oldest)) = self.order.pop_front() else {
                 break;
             };
             if let Some(entries) = self.store.get_mut(&hash) {
-                entries.retain(|(key, _)| !key.ptr_eq(&oldest));
+                entries.retain(|(key, _)| *key != oldest);
                 if entries.is_empty() {
                     self.store.remove(&hash);
                 }
@@ -97,7 +107,7 @@ pub fn clear_memo() {
     locked(normal_forms()).clear();
 }
 
-/// The executable normal form of `body`, cached on the body and its fixed point, and memoized by content.
+/// The executable normal form of `body`, cached on the body and its fixed point, and memoized by text.
 pub fn normalize_body(body: &Body) -> Result<Body> {
     if let Some(normal) = body.0.normalized.get() {
         return Ok(normal.clone());
@@ -1424,7 +1434,8 @@ pub fn rename_free(stmt: &Arc<Statement>, alias: &HashMap<Name, Name>) -> Arc<St
 }
 
 type Marks = BTreeSet<(Name, u64)>;
-type PlaceKey = (Number, Marks);
+/// What tells two values apart for placement: the number applied to its coordinates, under the versions it read.
+type PlaceKey = (Number, Vec<Param>, Marks);
 
 /// Place every pure value once, at the shallowest loop scope on its consumers' path that binds its coordinates and
 /// holds its operands; a second computation of a value a scope can already see reads the first instead.
@@ -1592,10 +1603,10 @@ pub fn place_values(body: &Body) -> Result<Body> {
                 }
                 let marks = self.own_taint(stmt);
                 marks_here.extend(marks.iter().cloned());
-                let number = self.numbering.numbers[self.numbering.ordinal(stmt)]
+                let (number, params) = self.numbering.numbers[self.numbering.ordinal(stmt)]
                     .as_ref()
-                    .map_or(0, |value| value.0);
-                let key: PlaceKey = (number, marks.clone());
+                    .map_or((0, Vec::new()), |v| (v.0, v.1.clone()));
+                let key: PlaceKey = (number, params, marks.clone());
                 let defines = stmt.defines();
                 if Placer::pure(stmt) {
                     if let Some(names) = self.lookup(&key, depth) {
@@ -1775,14 +1786,14 @@ pub fn place_values(body: &Body) -> Result<Body> {
                 if let (Some(key), Some(index)) = (key, index)
                     && !taken.contains(&index)
                 {
-                    let where_ = self.target(depth, &Placer::reads(&stmt), &key.1);
+                    let where_ = self.target(depth, &Placer::reads(&stmt), &key.2);
                     if where_ <= depth {
                         taken.insert(index);
                         for (other, own) in else_kept[index].defines().iter().zip(stmt.defines()) {
                             self.alias.insert(other.clone(), own);
                         }
                         let defines = stmt.defines();
-                        self.settle(&defines, where_, &key.1);
+                        self.settle(&defines, where_, &key.2);
                         self.available[where_].insert(key, defines);
                         hoisted.push((where_, stmt));
                         continue;
@@ -1983,6 +1994,62 @@ fn unlisted(stmt: &Arc<Statement>) -> Arc<Statement> {
 }
 
 /// Dependency-valid statement order, commutative operand order and names, all from the value numbering.
+/// The digest the Python order keyed a loop's extent by: SHA-256 of the Python `repr` of the extent's structural
+/// form in its old spelling, `(('Literal', 4096, 'int'),)`. Any stable total order over extents would do; this is the
+/// one the stored goldens' decisions are addressed in.
+fn extent_digest(expression: &Expression) -> String {
+    use sha2::Digest;
+
+    fn form(expression: &Expression) -> String {
+        fn tuple(items: &[Expression]) -> String {
+            match items {
+                [one] => format!("({},)", form(one)),
+                _ => format!(
+                    "({})",
+                    items.iter().map(form).collect::<Vec<_>>().join(", ")
+                ),
+            }
+        }
+        match &**expression {
+            Expr::Var(name) => format!("('Var', {})", python_repr(name)),
+            Expr::Literal(lit) => {
+                let value = match lit.value {
+                    Num::Int(v) => v.to_string(),
+                    Num::Float(v) => crate::expr::float_repr(v),
+                    Num::Bool(v) => if v { "True" } else { "False" }.to_string(),
+                };
+                format!("('Literal', {value}, {})", python_repr(&lit.dtype))
+            }
+            Expr::Builtin(name) => format!("('Builtin', {})", python_repr(name)),
+            Expr::Binary(op, left, right) => {
+                format!(
+                    "('BinaryExpr', {}, {}, {})",
+                    python_repr(op.text()),
+                    form(left),
+                    form(right)
+                )
+            }
+            Expr::Call(name, args) => {
+                format!("('FuncCallExpr', {}, {})", python_repr(name), tuple(args))
+            }
+            Expr::Ternary(cond, yes, no) => format!(
+                "('TernaryExpr', {}, {}, {})",
+                form(cond),
+                form(yes),
+                form(no)
+            ),
+            Expr::Cast(dtype, inner) => {
+                format!("('CastExpr', {}, {})", python_repr(dtype), form(inner))
+            }
+            Expr::FlatIndex(buffer, index) => {
+                format!("('FlatIndex', {}, {})", python_repr(buffer), tuple(index))
+            }
+        }
+    }
+    let digest = sha2::Sha256::digest(format!("({},)", form(expression)).as_bytes());
+    digest.iter().map(|byte| format!("{byte:02x}")).collect()
+}
+
 pub fn canonical_order(body: &Body) -> Result<Body> {
     let stmts = distinct(&canonicalize_expressions(body, &[])?);
     let role = roles(&stmts, None);
@@ -1994,7 +2061,11 @@ pub fn canonical_order(body: &Body) -> Result<Body> {
     let slots: HashMap<Name, Name> = HashMap::new();
     let _ = &slots;
 
-    // A statement's own shape with every name and buffer one placeholder.
+    // A statement's own shape with every name and buffer one placeholder: its kind, then its fields in declaration
+    // order. Among the leaves a scope may place in either order, kinds sort by name, which puts every store after the
+    // values it reads, and one kind's statements by their first differing field, so an `Assign`'s operation decides
+    // before its dtype. Sibling loops order by the digest of their extent, the order the stored goldens were spelled
+    // in: the lift reads sibling regions in this order, so the order is part of every recorded decision's address.
     let shape = |stmt: &Arc<Statement>| -> Key {
         let children = stmt.nested();
         let shell = if children.is_empty() {
@@ -2012,7 +2083,26 @@ pub fn canonical_order(body: &Body) -> Result<Body> {
             buffers.insert(name, Name::from("__slot__"));
         }
         let shell = unlisted(&Statement::rename_buffers(&renamed, &buffers));
-        Key::str(&structural_text(&shell))
+        let extent = match &*shell {
+            Statement::Loop(l) => Some(&l.axis.extent.expression),
+            Statement::StridedLoop(l) => Some(&l.axis.extent.expression),
+            _ => None,
+        };
+        let fields = shell
+            .header_fields()
+            .map(|fields| {
+                fields
+                    .into_iter()
+                    .map(|(name, text)| match extent {
+                        Some(expression) if name == "axis" => {
+                            Key::Str(extent_digest(expression).into())
+                        }
+                        _ => Key::Str(text.into()),
+                    })
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_else(|_| vec![Key::str(&structural_text(&shell))]);
+        Key::tuple([Key::str(stmt.kind_name()), Key::Tuple(fields)])
     };
     // The whole subtree with names abstracted and buffers spelled: the tie-break between siblings of one shape.
     let spelling = |stmt: &Arc<Statement>| -> Key {
@@ -2091,8 +2181,20 @@ pub fn canonical_order(body: &Body) -> Result<Body> {
     }
     let placed = ordered(&stmts, &numbering, &shape, &spelling);
     let result = rename_ssa_sequential(&placed);
-    // The operands of a commutative operation list accumulators, then loads, then computed values, then by value,
-    // and two operands of one value by the names the order just gave them.
+    // The operands of a commutative operation list accumulators, then loads and the copies that widen them — the
+    // lift reads a product's slab operands ahead of its computed ones, and a slab is a load or a cast of one — then
+    // computed values, then the copies that read a reduction's result — attention weights its values last — then
+    // by value, and two operands of one value by the names the order just gave them.
+    let defined_by = |kind: fn(&Statement) -> bool| -> HashSet<Name> {
+        result
+            .iter_stmts()
+            .iter()
+            .filter(|stmt| kind(stmt))
+            .flat_map(|stmt| stmt.defines())
+            .collect()
+    };
+    let loaded = defined_by(|stmt| matches!(stmt, Statement::Load(_)));
+    let accumulated = defined_by(|stmt| matches!(stmt, Statement::Accum(_)));
     let mut operand: HashMap<Name, Key> = HashMap::new();
     for (before, after) in placed.iter_stmts().iter().zip(result.iter_stmts()) {
         if let Some(ordinal) = numbering.ordinal_of(before)
@@ -2101,6 +2203,20 @@ pub fn canonical_order(body: &Body) -> Result<Body> {
             let rank = match &*after {
                 Statement::Accum(_) | Statement::Init(_) => 0,
                 Statement::Load(_) => 1,
+                Statement::Assign(a)
+                    if &*a.op.name == "copy"
+                        && a.args.len() == 1
+                        && loaded.contains(&a.args[0]) =>
+                {
+                    1
+                }
+                Statement::Assign(a)
+                    if &*a.op.name == "copy"
+                        && a.args.len() == 1
+                        && accumulated.contains(&a.args[0]) =>
+                {
+                    3
+                }
                 _ => 2,
             };
             for name in after.defines() {
@@ -2119,7 +2235,7 @@ pub fn canonical_order(body: &Body) -> Result<Body> {
         operand
             .get(name)
             .cloned()
-            .unwrap_or_else(|| Key::tuple([Key::Int(3), Key::str("")]))
+            .unwrap_or_else(|| Key::tuple([Key::Int(4), Key::str("")]))
     };
     let listed = result.map_stmts(&mut |stmt| match &**stmt {
         Statement::Assign(a) if a.op.commutative && a.args.len() > 1 => {

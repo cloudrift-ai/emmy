@@ -29,7 +29,7 @@ rather than a sequence of them.
 
 from __future__ import annotations
 
-from dataclasses import dataclass, fields, replace
+from dataclasses import dataclass, replace
 from itertools import permutations, product
 from math import gcd, prod
 
@@ -43,7 +43,7 @@ from emmy.compiler.ir.address import gmem_axis_step
 from emmy.compiler.ir.axis import Axis, Dim
 from emmy.compiler.ir.base import InputOp
 from emmy.compiler.ir.elementwise import ElementwiseImpl
-from emmy.compiler.ir.expression import BinaryExpr, Expression, Interval, Literal, SimplifyCtx, Var, affine_form
+from emmy.compiler.ir.expression import BinaryExpression, Expression, Interval, Literal, SimplifyCtx, Var, affine_form
 from emmy.compiler.ir.loop import LoopOp
 from emmy.compiler.ir.pure.fold import (
     Fold,
@@ -514,11 +514,6 @@ def _pruned(body: Body, roots: frozenset[str]) -> Body:
             return Body(tuple(reversed(kept)))
 
 
-def _children(expression) -> tuple:
-    values = (getattr(expression, f.name) for f in fields(expression))
-    return tuple(child for v in values for child in (v if isinstance(v, (tuple, list)) else (v,)) if isinstance(child, Expression))
-
-
 def _coordinate_reads(body: Body, names: tuple[str, ...]) -> dict[str, Expression]:
     """For each coordinate the cone reads through ONE expression of that coordinate alone, other
     than the coordinate itself, that expression — the index a rotate-half read computes its column
@@ -531,7 +526,7 @@ def _coordinate_reads(body: Body, names: tuple[str, ...]) -> dict[str, Expressio
         if len(own) == 1 and (name := next(iter(own))) in found:
             found[name].add(expression)
             return
-        for child in _children(expression):
+        for child in expression.children():
             visit(child)
 
     for stmt in body.iter():
@@ -544,7 +539,7 @@ class _AbstractingSigma(Sigma):
     """Replaces each coordinate's read expression by the bare coordinate — the cone as a function of
     the value its index computes. The mapping names the coordinates so a binder still shadows them."""
 
-    def apply(self, expression):
+    def after(self, expression):
         return expression.rebuild(lambda term: next((Var(name) for name, read in self._reads.items() if term == read), term))
 
 
@@ -654,7 +649,9 @@ def _coarser_quotient(term: Expression, row: Expression) -> int | None:
     same coordinate's coarser one ``x / (B·d)``: floor division composes over the non-negative coordinates a kernel
     indexes. A GQA head reads its key head at ``h / 3`` beside the value head ``h``; flattened, the row ``i / 128`` sits
     beside ``i / 384``."""
-    if not (isinstance(term, BinaryExpr) and isinstance(row, BinaryExpr) and term.op == row.op == "/" and term.left == row.left):
+    if not (
+        isinstance(term, BinaryExpression) and isinstance(row, BinaryExpression) and term.op == row.op == "/" and term.left == row.left
+    ):
         return None
     coarse, fine = term.right, row.right
     if not all(isinstance(lit, Literal) and isinstance(lit.value, int) and lit.value > 0 for lit in (coarse, fine)):
@@ -670,7 +667,7 @@ class _AbstractingRow(Sigma):
     head-major in a wider buffer reads its row ``16·b + l`` inside ``128·h + 16·b + l``, which holds
     no subterm equal to the row."""
 
-    def apply(self, expression):
+    def after(self, expression):
         return self._abstract(expression)
 
     def _abstract(self, term: Expression) -> Expression:
@@ -679,22 +676,17 @@ class _AbstractingRow(Sigma):
         if term == row or not term.free_vars() & names:
             return Var("_row") if term == row else term
         if (coarser := _coarser_quotient(term, row)) is not None:
-            return BinaryExpr("/", Var("_row"), Literal(coarser, "int"))
+            return BinaryExpression("/", Var("_row"), Literal(coarser, "int"))
         own, base = affine_form(term, names), affine_form(row, names)
         if own is not None and base is not None and own[1].keys() == base[1].keys():
             ratios = {coeff // base[1][name] for name, coeff in own[1].items() if coeff % base[1][name] == 0}
             if len(ratios) == 1 and all(coeff % base[1][name] == 0 for name, coeff in own[1].items()):
                 (scale,) = ratios
-                rest = BinaryExpr("-", own[0], BinaryExpr("*", Literal(scale, "int"), base[0]))
-                return _affine_sum(BinaryExpr("+", BinaryExpr("*", Literal(scale, "int"), Var("_row")), rest))
-        changes = {}
-        for field in fields(term):
-            value = getattr(term, field.name)
-            if isinstance(value, Expression):
-                changes[field.name] = self._abstract(value)
-            elif isinstance(value, (tuple, list)) and any(isinstance(child, Expression) for child in value):
-                changes[field.name] = type(value)(self._abstract(child) if isinstance(child, Expression) else child for child in value)
-        return replace(term, **changes) if changes else term
+                rest = BinaryExpression("-", own[0], BinaryExpression("*", Literal(scale, "int"), base[0]))
+                return _affine_sum(BinaryExpression("+", BinaryExpression("*", Literal(scale, "int"), Var("_row")), rest))
+        children = term.children()
+        abstracted = tuple(self._abstract(child) for child in children)
+        return term if abstracted == children else term.with_children(abstracted)
 
 
 def _affine_sum(expression: Expression) -> Expression:
@@ -704,13 +696,15 @@ def _affine_sum(expression: Expression) -> Expression:
     form = affine_form(expression, names)
     if form is None:
         return expression.simplify(SimplifyCtx.empty())
-    terms = [Var(name) if coeff == 1 else BinaryExpr("*", Literal(coeff, "int"), Var(name)) for name, coeff in sorted(form[1].items())]
+    terms = [
+        Var(name) if coeff == 1 else BinaryExpression("*", Literal(coeff, "int"), Var(name)) for name, coeff in sorted(form[1].items())
+    ]
     constant = int(form[0].eval({}))
     if constant or not terms:
         terms.append(Literal(constant, "int"))
     total = terms[0]
     for term in terms[1:]:
-        total = BinaryExpr("+", total, term)
+        total = BinaryExpression("+", total, term)
     return total
 
 
@@ -767,10 +761,10 @@ def _row_layout(seam: CutSite, name: str, axes: tuple) -> tuple[tuple[Expression
             if match is not None and match.extent.as_static() > 1:
                 found.append((row, (match,), match.extent.as_static()))
             continue
-        if not isinstance(row, BinaryExpr) or row.op != "+":
+        if not isinstance(row, BinaryExpression) or row.op != "+":
             continue
         for high, low in ((row.left, row.right), (row.right, row.left)):
-            if not isinstance(low, Var) or not isinstance(high, BinaryExpr) or high.op != "*":
+            if not isinstance(low, Var) or not isinstance(high, BinaryExpression) or high.op != "*":
                 continue
             for factor, upper in ((high.left, high.right), (high.right, high.left)):
                 if not isinstance(factor, Literal) or factor.dtype != "int" or not isinstance(upper, Var):
@@ -856,8 +850,8 @@ def _cluster_reindexed_contractions(seams: tuple[CutSite, ...], axes: tuple) -> 
                                 high, low = row_axes
                                 stride = Literal(low.extent.as_static(), "int")
                                 mapping += (
-                                    (high.name, BinaryExpr("/", row, stride)),
-                                    (low.name, BinaryExpr("%", row, stride)),
+                                    (high.name, BinaryExpression("/", row, stride)),
+                                    (low.name, BinaryExpression("%", row, stride)),
                                 )
                             found = (channel, mapping)
                             break
@@ -1060,7 +1054,7 @@ def _through(expression: Expression, placeholders: dict, captured: frozenset[str
     placeholder (:func:`_digits`)."""
     for component, placeholder in placeholders.items():
         if (divisor := _quotient(expression, component, by_name)) is not None:
-            return BinaryExpr("/", placeholder, Literal(divisor, "int"))
+            return BinaryExpression("/", placeholder, Literal(divisor, "int"))
     spelled = expression.rebuild(lambda term: placeholders.get(term, term))
     digits: dict[str, Expression] = {}
     for component, placeholder in placeholders.items():
@@ -1622,7 +1616,7 @@ def _workspace_layout(produced: Fold, axes: tuple) -> tuple[tuple, dict[str, tup
         if (stride := strides.get(axis.name)) is not None:
             (d, c), i = stride, Var(axis.name)
             stored[position] = replace(axis, extent=axis.extent.ceil_div(d) if c == 1 else Dim(axis.extent.as_static() // d * c))
-            index[position] = i / d if c == 1 else (i / d) * c + BinaryExpr("%", i, Literal(c, "int"))
+            index[position] = i / d if c == 1 else (i / d) * c + BinaryExpression("%", i, Literal(c, "int"))
     return tuple(stored), strides, tuple(index)
 
 
@@ -1636,7 +1630,7 @@ def _stored_cells(produced: Fold, axes: tuple, strides: dict[str, tuple[int, int
         if c == 1:
             produced = produced.rewrite(lambda name: name, Sigma({axis.name: Var(axis.name) * d}))
             continue
-        folding = _FoldingSigma({axis.name: (Var(axis.name) / c) * d + BinaryExpr("%", Var(axis.name), Literal(c, "int"))})
+        folding = _FoldingSigma({axis.name: (Var(axis.name) / c) * d + BinaryExpression("%", Var(axis.name), Literal(c, "int"))})
         object.__setattr__(folding, "_ctx", SimplifyCtx(ranges={axis.name: Interval(0, axis.extent.as_static() - 1)}))
         produced = produced.rewrite(lambda name: name, folding)
     return produced
@@ -1646,7 +1640,7 @@ def _divisor(expression, name: str) -> int | None:
     """What ``expression`` divides the bare coordinate ``name`` by through positive integer divisions, or ``None``."""
     if expression == Var(name):
         return 1
-    if not (isinstance(expression, BinaryExpr) and expression.op in ("/", "//") and isinstance(expression.right, Literal)):
+    if not (isinstance(expression, BinaryExpression) and expression.op in ("/", "//") and isinstance(expression.right, Literal)):
         return None
     if expression.right.dtype != "int" or expression.right.value <= 0 or (inner := _divisor(expression.left, name)) is None:
         return None
@@ -1661,8 +1655,8 @@ class _FoldingSigma(Sigma):
     ``i / c`` and ``i % c`` collapse to the bare split coordinates, and an index left as
     ``((hi * c) + lo) / c`` reaches the scheduler as an expression of the fused name again."""
 
-    def apply(self, expression):
-        return expression.substitute(self.mapping).simplify(self._ctx)
+    def after(self, expression):
+        return expression.simplify(self._ctx)
 
 
 def _substitute_and_fold(produced: Fold, name: str, sigma: Sigma, ctx: SimplifyCtx) -> Fold:
@@ -1713,14 +1707,14 @@ def _divmod_reads(expression, name: str) -> list[tuple[str, int]]:
     chains = {
         id(part): divisor
         for part in parts
-        if isinstance(part, BinaryExpr) and (divisor := _divisor(part, name)) is not None and divisor > 1
+        if isinstance(part, BinaryExpression) and (divisor := _divisor(part, name)) is not None and divisor > 1
     }
     inner = {id(part.left) for part in parts if id(part) in chains}
     reads = [("/", divisor) for key, divisor in chains.items() if key not in inner]
     reads += [
         ("%", int(part.right.value))
         for part in parts
-        if isinstance(part, BinaryExpr)
+        if isinstance(part, BinaryExpression)
         and part.op == "%"
         and part.left == Var(name)
         and isinstance(part.right, Literal)
@@ -1819,7 +1813,7 @@ def _split_fused_pair(produced: Fold, axes: tuple, index: tuple) -> tuple[Fold, 
     hi, lo = (f"{name}_{suffix}" for suffix in ("hi", "lo"))
     while hi in taken or lo in taken:
         hi, lo = f"{hi}_", f"{lo}_"
-    fused = BinaryExpr("+", BinaryExpr("*", Var(hi), Literal(factor, "int")), Var(lo))
+    fused = BinaryExpression("+", BinaryExpression("*", Var(hi), Literal(factor, "int")), Var(lo))
     ranges = {hi: Interval(0, extent // factor - 1), lo: Interval(0, factor - 1)}
     produced = _substitute_and_fold(produced, name, Sigma({name: fused}), SimplifyCtx(ranges=ranges))
     minted = (Axis(name=hi, extent=Dim(extent // factor)), Axis(name=lo, extent=Dim(factor)))
@@ -2448,7 +2442,7 @@ def _contraction_reads(tile: TileOp, root: Node, groups, seam_of: dict, taken: d
             if own not in taken.get(id(member), member.exposes):
                 continue
             index = tuple(
-                expression if lo == 0 else BinaryExpr("+", expression, Literal(-lo, "int"))
+                expression if lo == 0 else BinaryExpression("+", expression, Literal(-lo, "int"))
                 for expression, (lo, _) in zip(expressions, group.space, strict=True)
             )
             name = _read_name(own, token, ordinal)
@@ -2495,12 +2489,12 @@ def _digits(expression: Expression, placeholder: Var, by_name: dict) -> dict[str
         if coefficients[name] <= 0 or rest or not by_name[name].extent.is_static or quotient < by_name[name].extent.as_static():
             return {}
         radix[name] = quotient
-    flat = placeholder if offset.value == 0 else BinaryExpr("+", placeholder, Literal(-offset.value, "int"))
+    flat = placeholder if offset.value == 0 else BinaryExpression("+", placeholder, Literal(-offset.value, "int"))
 
     def digit(name):
-        return flat if coefficients[name] == 1 else BinaryExpr("/", flat, Literal(coefficients[name], "int"))
+        return flat if coefficients[name] == 1 else BinaryExpression("/", flat, Literal(coefficients[name], "int"))
 
-    return {**{name: BinaryExpr("%", digit(name), Literal(radix[name], "int")) for name in lower}, top: digit(top)}
+    return {**{name: BinaryExpression("%", digit(name), Literal(radix[name], "int")) for name in lower}, top: digit(top)}
 
 
 def _preimage(expression: Expression, placeholder: Var, span: tuple, by_name: dict, *, shared: bool = False) -> dict[str, Expression]:
@@ -2524,7 +2518,7 @@ def _preimage(expression: Expression, placeholder: Var, span: tuple, by_name: di
     if not offsets:
         return {}
     offset = min(offsets)
-    return {name: placeholder if offset == 0 else BinaryExpr("+", placeholder, Literal(offset, "int"))}
+    return {name: placeholder if offset == 0 else BinaryExpression("+", placeholder, Literal(offset, "int"))}
 
 
 def _contraction_body(tile: TileOp, group: ContractionGroup, buffer: str, others: dict, shapes: dict) -> tuple[Body, Write]:
@@ -2584,7 +2578,7 @@ def _contraction_body(tile: TileOp, group: ContractionGroup, buffer: str, others
     if body is None:
         raise ValueError(f"contraction {group.members[0][0].exposes[group.members[0][1]]}: no channel builds the space {group.space}")
     shift = {
-        f"{_PLACEHOLDER}{slot}": BinaryExpr("+", Var(f"{_PLACEHOLDER}{slot}"), Literal(lo, "int"))
+        f"{_PLACEHOLDER}{slot}": BinaryExpression("+", Var(f"{_PLACEHOLDER}{slot}"), Literal(lo, "int"))
         for slot, (lo, _) in enumerate(group.space)
         if lo
     }

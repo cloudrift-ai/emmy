@@ -36,7 +36,7 @@ from emmy.compiler.ir.address import BYTE_SLAB_PAD, clamp_bound, clamp_to, gmem_
 from emmy.compiler.ir.atom import AtomKind, wide_accumulate
 from emmy.compiler.ir.axis import Axis
 from emmy.compiler.ir.elementwise import ElementwiseImpl
-from emmy.compiler.ir.expression import BinaryExpr, Expression, Literal, SimplifyCtx, TernaryExpr, Var, affine_form
+from emmy.compiler.ir.expression import BinaryExpression, Expression, Literal, SimplifyCtx, TernaryExpression, Var, affine_form
 from emmy.compiler.ir.kernel.ir import (
     COORD,
     ELEM_COL,
@@ -178,7 +178,7 @@ def _guard(side: Side, coord: Expression):
 def _wrap(side: Side, coord: Expression) -> Expression:
     """Wrap ``coord`` in-bounds (``coord % extent``) on a masked ``side`` so an overhanging cell
     clamp-reads, else ``coord`` unchanged."""
-    return BinaryExpr("%", coord, side.ext) if side.mask else coord
+    return BinaryExpression("%", coord, side.ext) if side.mask else coord
 
 
 def _axis_dim(index: tuple, axis_name: str) -> int | None:
@@ -226,7 +226,7 @@ def _hoist_k_invariant(body, k_name: str) -> tuple[tuple, tuple]:
 
 def _addends(expression: Expression) -> tuple[Expression, ...]:
     """The terms of ``expression``'s top-level sum."""
-    if isinstance(expression, BinaryExpr) and expression.op == "+":
+    if isinstance(expression, BinaryExpression) and expression.op == "+":
         return (*_addends(expression.left), *_addends(expression.right))
     return (expression,)
 
@@ -265,7 +265,7 @@ def _direct_operand(load, inputs, *, k_name: str, own: str | None, legacy: tuple
     unit = 1
     for dim in reversed(range(len(load.index))):
         for addend in _addends(load.index[dim]):
-            address = BinaryExpr("+", address, addend if unit == 1 else BinaryExpr("*", addend, Literal(unit, "int")))
+            address = BinaryExpression("+", address, addend if unit == 1 else BinaryExpression("*", addend, Literal(unit, "int")))
         if dim == 0:
             break  # nothing strides the leading dim, so its extent never enters a stride
         extent = tensor.shape[dim]
@@ -330,7 +330,7 @@ def _warp_epilogue(tail: list[Statement], acc: str, m_name: str, n_name: str, si
     write = None
     offset = {"m": Var(ELEM_ROW), "n": Var(ELEM_COL)}
     ph = dict(sigma.mapping)
-    ph.update({name: BinaryExpr("+", sigma.apply(Var(name)), offset[role]) for role, name in (("m", m_name), ("n", n_name))})
+    ph.update({name: BinaryExpression("+", sigma.apply(Var(name)), offset[role]) for role, name in (("m", m_name), ("n", n_name))})
     for s in binary(tail):
         if isinstance(s, Load):
             index = tuple(e.substitute(ph) for e in s.index)
@@ -538,7 +538,7 @@ def _staged_inner_atom_loop(
         for frag_of, role, slab, ldm, is_row, reg, unit, adim, off, swz, b8, sc, sf_of in specs:
             assert not (b8 and swz != "NONE"), "a byte slab stays NONE-swizzle (the ldmatrix XOR is b16-indexed)"
             for x in range(reg):  # within-tile coord for register cell x: warp·(reg·adim) + x·adim
-                prim = BinaryExpr("+", BinaryExpr("*", Var(unit), Literal(reg * adim, "int")), Literal(x * adim, "int"))
+                prim = BinaryExpression("+", BinaryExpression("*", Var(unit), Literal(reg * adim, "int")), Literal(x * adim, "int"))
                 row, col = (prim, kexpr) if is_row else (kexpr, prim)
                 scale_slab, scale_index, scale_ldm = None, (), 0
                 if sc is not None:
@@ -550,10 +550,10 @@ def _staged_inner_atom_loop(
                     # slab's own offset serves. Without it the scales are read from slot 0 while
                     # the codes come from slot s, and a subset of cells is scaled by the wrong
                     # block (found live: most outputs exact, a minority off by a factor of 2-3).
-                    scale_row = BinaryExpr("+", off, prim) if (block_scaled and off is not None) else prim
-                    scale_index = (scale_row, BinaryExpr("/", kexpr, Literal(block, "int")))
+                    scale_row = BinaryExpression("+", off, prim) if (block_scaled and off is not None) else prim
+                    scale_index = (scale_row, BinaryExpression("/", kexpr, Literal(block, "int")))
                     if per_byte > 1:
-                        col = BinaryExpr("/", col, Literal(per_byte, "int"))
+                        col = BinaryExpression("/", col, Literal(per_byte, "int"))
                     if block_scaled:
                         reads.append(
                             BlockScaleLoad(
@@ -566,7 +566,7 @@ def _staged_inner_atom_loop(
                         )
                         scale_slab, scale_index, scale_ldm = None, (), 0
                 if off is not None:
-                    row = BinaryExpr("+", off, row)
+                    row = BinaryExpression("+", off, row)
                 frag = f"{frag_of(x)}{suffix}"
                 reads.append(
                     LdmatrixLoad(
@@ -663,12 +663,12 @@ def _wgmma_drain(*, operands, slot, mn, atom, bk_elems: int, frag_ns: str, n_fol
         )
 
     def flat(row: Expression, col: Expression, cols: int) -> Expression:
-        return BinaryExpr("+", BinaryExpr("*", row, Literal(cols, "int")), col)
+        return BinaryExpression("+", BinaryExpression("*", row, Literal(cols, "int")), col)
 
     def offset(base: Expression, off: Expression | None) -> Expression:
-        return base if off is None else BinaryExpr("+", off, base)
+        return base if off is None else BinaryExpression("+", off, base)
 
-    grp_row = BinaryExpr("*", BinaryExpr("/", Var(m.unit), Literal(4, "int")), Literal(64, "int"))
+    grp_row = BinaryExpression("*", BinaryExpression("/", Var(m.unit), Literal(4, "int")), Literal(64, "int"))
     a_cols = bk_elems + getattr(a_op, "pad_cols", 0)
     stmts: list[Statement] = [WgmmaFence()]
     for step in range(n_steps):
@@ -687,14 +687,14 @@ def _wgmma_drain(*, operands, slot, mn, atom, bk_elems: int, frag_ns: str, n_fol
         for f, b_op in enumerate(b_ops):
             trans = getattr(b_op, "trans", False)
             for jg in range(n.reg // cells):
-                nbase = BinaryExpr("+", BinaryExpr("*", Var(n.unit), Literal(n.reg * 8, "int")), Literal(jg * cells * 8, "int"))
+                nbase = BinaryExpression("+", BinaryExpression("*", Var(n.unit), Literal(n.reg * 8, "int")), Literal(jg * cells * 8, "int"))
                 b_desc = f"{frag_ns}_db{f}_{jg}_{step}"
                 if trans:  # K-major (tile_n × bk): the tile coordinate is the slab row, K the column
                     b_cols = bk_elems + getattr(b_op, "pad_cols", 0)
                     index, lbo, sbo = flat(offset(nbase, b_op.slot_row(slot)), kcol, b_cols), 16, 8 * b_cols * elem_bytes
                 else:  # MN-major, atom-major (atoms·bk × atom): atom ``nbase / atom`` starts ``bk`` rows per atom down
-                    row = BinaryExpr(
-                        "+", BinaryExpr("*", BinaryExpr("/", nbase, Literal(atom_cols, "int")), Literal(bk_elems, "int")), kcol
+                    row = BinaryExpression(
+                        "+", BinaryExpression("*", BinaryExpression("/", nbase, Literal(atom_cols, "int")), Literal(bk_elems, "int")), kcol
                     )
                     index = flat(offset(row, b_op.slot_row(slot)), Literal(0, "int"), atom_cols)
                     lbo, sbo = bk_elems * atom_cols * elem_bytes, 8 * atom_cols * elem_bytes
@@ -718,21 +718,21 @@ def _wgmma_drain(*, operands, slot, mn, atom, bk_elems: int, frag_ns: str, n_fol
 
 
 def _min(a: Expression, b: Expression) -> Expression:
-    return TernaryExpr(cond=BinaryExpr("<", a, b), if_true=a, if_false=b)
+    return TernaryExpression(cond=BinaryExpression("<", a, b), if_true=a, if_false=b)
 
 
 def _max(a: Expression, b: Expression) -> Expression:
-    return TernaryExpr(cond=BinaryExpr(">", a, b), if_true=a, if_false=b)
+    return TernaryExpression(cond=BinaryExpression(">", a, b), if_true=a, if_false=b)
 
 
 def _shifted(expression: Expression, by: int) -> Expression:
-    return expression if by == 0 else BinaryExpr("+" if by > 0 else "-", expression, Literal(abs(by), "int"))
+    return expression if by == 0 else BinaryExpression("+" if by > 0 else "-", expression, Literal(abs(by), "int"))
 
 
 def _side_base(side: Side) -> Expression:
     """The CTA's tile-base coordinate on ``side`` — ``block·tile`` (always in-bounds: the block
     count is ``ceil(extent / tile)``, so ``block·tile < extent``)."""
-    return BinaryExpr("*", Var(side.block), Literal(side.tile, "int"))
+    return BinaryExpression("*", Var(side.block), Literal(side.tile, "int"))
 
 
 def _sibling_sigma(sibling: Side | None) -> dict[str, Expression]:
@@ -760,8 +760,8 @@ def _slab_index(operand_index, *, tile: Side, tile_base, k_axis, tile_is_row: bo
     def at(k0):
         def gmem(row, col):
             tc, kc = (row, col) if tile_is_row else (col, row)
-            t = BinaryExpr("+", tile_base, tc)
-            k = BinaryExpr("+", k0, kc)
+            t = BinaryExpression("+", tile_base, tc)
+            k = BinaryExpression("+", k0, kc)
             # A SYMBOLIC K's last chunk overhangs the extent. Here K is the slab's OUTER dim (the
             # contiguous copy chunk runs along the tile axis), so the overhanging row clamps to the
             # last valid one exactly as a masked tile row does — a duplicate row is copied and the
@@ -789,8 +789,8 @@ def _atom_major(rows: int, atom: int):
     Composed under a fill's slab map, so every fill kind writes the stacked layout unchanged."""
 
     def cell(row: Expression, col: Expression) -> tuple[Expression, Expression]:
-        atom_at = BinaryExpr("*", BinaryExpr("/", row, Literal(rows, "int")), Literal(atom, "int"))
-        return BinaryExpr("%", row, Literal(rows, "int")), BinaryExpr("+", atom_at, col)
+        atom_at = BinaryExpression("*", BinaryExpression("/", row, Literal(rows, "int")), Literal(atom, "int"))
+        return BinaryExpression("%", row, Literal(rows, "int")), BinaryExpression("+", atom_at, col)
 
     return cell
 
@@ -908,7 +908,7 @@ def _inside(tile: Side, tile_base: Expression, is_row: bool):
     there could straddle the edge)."""
     if not tile.mask or not is_row:
         return None
-    return lambda row, col: BinaryExpr("<", BinaryExpr("+", tile_base, row), tile.ext)
+    return lambda row, col: BinaryExpression("<", BinaryExpression("+", tile_base, row), tile.ext)
 
 
 def _cta(mn: tuple[Side, Side], lanes: int, n_threads: int) -> CtaTile:
@@ -916,9 +916,9 @@ def _cta(mn: tuple[Side, Side], lanes: int, n_threads: int) -> CtaTile:
     decoded unit axis vars (never a raw threadIdx.x): unit-major ``m_unit·units_n + n_unit``,
     ``·lanes + _lane`` when the unit is a warp (``lanes > 1``; a scalar unit IS one thread)."""
     m, n = mn
-    tid = BinaryExpr("+", BinaryExpr("*", Var(m.unit), Literal(n.units, "int")), Var(n.unit))
+    tid = BinaryExpression("+", BinaryExpression("*", Var(m.unit), Literal(n.units, "int")), Var(n.unit))
     if lanes > 1:
-        tid = BinaryExpr("+", BinaryExpr("*", tid, Literal(lanes, "int")), Var("_lane"))
+        tid = BinaryExpression("+", BinaryExpression("*", tid, Literal(lanes, "int")), Var("_lane"))
     return CtaTile(linear_tid=tid, n_threads=n_threads)
 
 
@@ -952,7 +952,7 @@ def _k_masked(stmts: list[Statement], value: str, k: Expression, k_ext: Expressi
         [
             *stmts,
             Init(name=ident, identity=_ADD.identity, dtype=F32),
-            Select(name=masked, branches=(SelectBranch(value, BinaryExpr("<", k, k_ext)), SelectBranch(ident, Literal(1, "int")))),
+            Select(name=masked, branches=(SelectBranch(value, BinaryExpression("<", k, k_ext)), SelectBranch(ident, Literal(1, "int")))),
         ],
         masked,
     )
@@ -1008,7 +1008,7 @@ def _a_slab_operand(
         if converting:
 
             def a_value(k0, row, col):
-                k = BinaryExpr("+", k0, col)
+                k = BinaryExpression("+", k0, col)
                 sigma = Sigma({m_name: m_coord(row), k_name: k_coord(k)})
                 name = f"{load.name}__af"
                 stmts = [Load(names=(name,), input=load.input, index=tuple(sigma.apply(e) for e in load.index), dtype=load.dtype)]
@@ -1033,7 +1033,7 @@ def _a_slab_operand(
         return op, True, []
 
     def a_value(k0, row, col):
-        k = BinaryExpr("+", k0, col)
+        k = BinaryExpression("+", k0, col)
         # σ is hygienic (:meth:`Statement.substitute`): a cone statistic re-binding the contraction axis
         # name (attention's k-norm inside the K cone) keeps its own iteration var.
         sigma = Sigma({m_name: m_coord(row), k_name: k_coord(k)})
@@ -1124,14 +1124,14 @@ def _sync_operands(
     k_ext = k_axis.extent_expression() if not k_axis.extent.is_static else None
 
     def m_coord(row) -> Expression:
-        t = BinaryExpr("+", row_base, row)
+        t = BinaryExpression("+", row_base, row)
         return clamp_to(t, mn[0].ext) if mn[0].mask else t
 
     def k_coord(k) -> Expression:
         return clamp_to(k, k_ext) if k_ext is not None else k
 
     def n_coord(col) -> Expression:
-        t = BinaryExpr("+", col_base, col)
+        t = BinaryExpression("+", col_base, col)
         return clamp_to(t, mn[1].ext) if mn[1].mask else t
 
     a_op, a_copied, prologue = _a_slab_operand(
@@ -1187,7 +1187,7 @@ def _sync_operands(
             def b_value(k0, row, col, *, body=b_body, exposed=exposed):
                 if b_atoms > 1:
                     row, col = _atom_major(bk_elems, mn[1].tile // b_atoms)(row, col)
-                k = BinaryExpr("+", k0, row)
+                k = BinaryExpression("+", k0, row)
                 sigma = Sigma({k_name: k_coord(k), n_name: n_coord(col)})
                 return _k_masked([s.substitute(sigma) for s in body], exposed, k, k_ext)
 
@@ -1269,11 +1269,11 @@ def _packed_operands(
     block, per_byte = packed.block, packed.per_byte
 
     def n_coord(row) -> Expression:
-        t = BinaryExpr("+", col_base, row)
+        t = BinaryExpression("+", col_base, row)
         return clamp_to(t, n.ext) if n.mask else t
 
     def m_coord(row) -> Expression:
-        t = BinaryExpr("+", row_base, row)
+        t = BinaryExpression("+", row_base, row)
         return clamp_to(t, m.ext) if m.mask else t
 
     k_ext = k_axis.extent_expression() if not k_axis.extent.is_static else None
@@ -1313,7 +1313,7 @@ def _packed_operands(
         factor_cone = list(Body(tuple(edge.lower(axes=axes))).backward_cone([channel.factor]).members)
 
         def scale_value(k0, row, col):
-            k = BinaryExpr("+", k0, BinaryExpr("*", col, Literal(block, "int")))
+            k = BinaryExpression("+", k0, BinaryExpression("*", col, Literal(block, "int")))
             # The slab is CTA-shared across the m rows, so the factor cone's VALUE is m-invariant —
             # but m can still appear SYNTACTICALLY, by the second route :func:`_sibling_sigma`
             # describes: a placement cut materializes the weight's per-tensor scale into a
@@ -1346,7 +1346,7 @@ def _packed_operands(
 
         def bits_index(k0):
             def gmem(row, col):
-                return bits_at(BinaryExpr("+", k0, BinaryExpr("*", col, Literal(per_byte, "int"))), n_coord(row))
+                return bits_at(BinaryExpression("+", k0, BinaryExpression("*", col, Literal(per_byte, "int"))), n_coord(row))
 
             return gmem
 
@@ -1417,8 +1417,8 @@ def _block_scaled_operands(
         the σ substitutes the same ``k0 + 2·col`` the copied form's index arithmetic consumes."""
 
         def value(k0, row, col):
-            k = BinaryExpr("+", k0, BinaryExpr("*", col, Literal(2, "int")))
-            t = BinaryExpr("+", base, row)
+            k = BinaryExpression("+", k0, BinaryExpression("*", col, Literal(2, "int")))
+            t = BinaryExpression("+", base, row)
             sigma = Sigma({side.axis.name: clamp_to(t, side.ext) if side.mask else t, k_axis.name: k, **_sibling_sigma(sibling)})
             return [st.substitute(sigma) for st in cone], codes
 
@@ -1430,12 +1430,12 @@ def _block_scaled_operands(
             return tuple(sig.apply(e) for e in load.index)
 
         def coord(row):
-            t = BinaryExpr("+", base, row)
+            t = BinaryExpression("+", base, row)
             return clamp_to(t, side.ext) if side.mask else t
 
         def index(k0):
             def gmem(row, col):
-                k = BinaryExpr("+", k0, BinaryExpr("*", col, Literal(step, "int")))
+                k = BinaryExpression("+", k0, BinaryExpression("*", col, Literal(step, "int")))
                 return at(clamp_to(k, k_ext) if k_ext is not None else k, coord(row))
 
             return gmem
@@ -1495,10 +1495,10 @@ def _mask_add(stmt, selects: dict, frags) -> tuple[Select, str] | None:
     return (selects[selected[0]], source[0]) if len(selected) == len(source) == 1 else None
 
 
-def _mask_affine(predicate: BinaryExpr, names: frozenset[str]) -> tuple[dict[str, int], Expression] | None:
+def _mask_affine(predicate: BinaryExpression, names: frozenset[str]) -> tuple[dict[str, int], Expression] | None:
     """A comparison's ``left − right`` as integer coefficients over ``names`` plus the anchor left
     when those read zero — ``None`` unless it is affine in them."""
-    form = affine_form(BinaryExpr("-", predicate.left, predicate.right), names)
+    form = affine_form(BinaryExpression("-", predicate.left, predicate.right), names)
     return None if form is None else (form[1], form[0])
 
 
@@ -1531,7 +1531,7 @@ def _mask_key_bounds(
         affine = _mask_affine(predicate, frozenset({key.name, row})) if predicate is not None else None
         if affine is not None and affine[0] == {key.name: -1, row: 1}:
             swapped = {"<": ">", "<=": ">=", ">": "<", ">=": "<="}
-            predicate = BinaryExpr(swapped[predicate.op], predicate.right, predicate.left)
+            predicate = BinaryExpression(swapped[predicate.op], predicate.right, predicate.left)
             affine = _mask_affine(predicate, frozenset({key.name, row}))
         if affine is None or affine[0] != {key.name: 1, row: -1} or not affine[1].free_vars() <= uniform:
             continue
@@ -1539,14 +1539,14 @@ def _mask_key_bounds(
             # A uniform anchor — a position read from memory — makes the shift a runtime value, so the sign test
             # below runs at runtime too, clamped rather than dropped: a lead below zero stops at the block end, a
             # lag above zero starts at the block base, where every key past the edge is masked for every row.
-            runtime: Expression = BinaryExpr("-", Literal(0, "int"), affine[1].simplify(SimplifyCtx.empty()))
+            runtime: Expression = BinaryExpression("-", Literal(0, "int"), affine[1].simplify(SimplifyCtx.empty()))
             if predicate.op in (">", ">="):
-                lead_expression = BinaryExpr("-", runtime, Literal(1, "int")) if predicate.op == ">=" else runtime
-                stop = BinaryExpr("+", offset.block_end(), _max(lead_expression, Literal(0, "int")))
+                lead_expression = BinaryExpression("-", runtime, Literal(1, "int")) if predicate.op == ">=" else runtime
+                stop = BinaryExpression("+", offset.block_end(), _max(lead_expression, Literal(0, "int")))
                 end = stop if end is None else _min(end, stop)
             else:
-                lag_expression = BinaryExpr("+", runtime, Literal(1, "int")) if predicate.op == "<=" else runtime
-                start = BinaryExpr("+", offset.block_base(), _min(lag_expression, Literal(0, "int")))
+                lag_expression = BinaryExpression("+", runtime, Literal(1, "int")) if predicate.op == "<=" else runtime
+                start = BinaryExpression("+", offset.block_base(), _min(lag_expression, Literal(0, "int")))
                 first = start if first is None else _max(first, start)
             continue
         shift = -int(affine[1].eval({}))  # the masked branch reads ``key OP row + shift``
@@ -1563,7 +1563,7 @@ def _mask_key_bounds(
     if end is not None:
         end = _min(end, key.extent_expression())
     if first is not None:
-        first = BinaryExpr("*", BinaryExpr("/", _max(first, Literal(0, "int")), Literal(bk, "int")), Literal(bk, "int"))
+        first = BinaryExpression("*", BinaryExpression("/", _max(first, Literal(0, "int")), Literal(bk, "int")), Literal(bk, "int"))
     return first, end
 
 
@@ -1577,7 +1577,7 @@ def _chunk_stream(k_axis: Axis, bk: int):
         static = k_axis.extent.as_static()
         return static, static // bk
     extent = k_axis.extent
-    return extent, Dim(BinaryExpr("/", BinaryExpr("+", extent.expression, Literal(bk - 1, "int")), Literal(bk, "int")))
+    return extent, Dim(BinaryExpression("/", BinaryExpression("+", extent.expression, Literal(bk - 1, "int")), Literal(bk, "int")))
 
 
 def _staged(ops: _AtomOps, cells, offset, mn: tuple[Side, Side]):
@@ -1907,12 +1907,12 @@ def _scalar_sigma(mn, offset, i: int, j: int) -> Sigma:
 def _scalar_bound(mn, offset, i: int, j: int):
     """The in-bounds predicate for cell ``(i, j)`` — ``base < extent`` anded over the masked axes,
     or ``None`` when nothing overhangs."""
-    conds = [BinaryExpr("<", cell, side.ext) for side, cell in _cells(mn, offset, i, j) if side.mask]
+    conds = [BinaryExpression("<", cell, side.ext) for side, cell in _cells(mn, offset, i, j) if side.mask]
     if not conds:
         return None
     cond = conds[0]
     for c in conds[1:]:
-        cond = BinaryExpr("&&", cond, c)
+        cond = BinaryExpression("&&", cond, c)
     return cond
 
 
@@ -1952,15 +1952,15 @@ def _scalar_drain(c: Fold, cells, offset, operands, ki: str, bk_elems: int, base
     for i, j in cells:
         sfx = f"__c{i}_{j}"
         an = f"{a_name}{sfx}"
-        m_local = BinaryExpr("-", offset[0].base(i), row_base)
-        n_local = BinaryExpr("-", offset[1].base(j), col_base)
-        m_row = m_local if off_a is None else BinaryExpr("+", off_a, m_local)
+        m_local = BinaryExpression("-", offset[0].base(i), row_base)
+        n_local = BinaryExpression("-", offset[1].base(j), col_base)
+        m_row = m_local if off_a is None else BinaryExpression("+", off_a, m_local)
         body.append(Load(names=(an,), input=a_op.slab, index=(m_row, Var(ki))))
         for op, (index, _, b_name) in zip(bs, c.channel_operands(), strict=True):
             trans = getattr(op, "trans", False)
             off_b = op.slot_row(slot)
             b_row = n_local if trans else Var(ki)
-            b_row = b_row if off_b is None else BinaryExpr("+", off_b, b_row)
+            b_row = b_row if off_b is None else BinaryExpression("+", off_b, b_row)
             b_col = Var(ki) if trans else n_local
             bn, vn, cn = f"{b_name}{sfx}", f"{c.exposes[index]}__v{sfx}", f"{c.exposes[index]}{sfx}"
             body.append(Load(names=(bn,), input=op.slab, index=(b_row, b_col)))
@@ -2360,7 +2360,9 @@ class _MmaOps(_AtomOps):
                 # Already staged: the slab covers exactly this tile's M span, so the read is the
                 # warp's own within-tile row and the K-loop's column.
                 slab, ldm, swz = self.slabs[0]
-                prim = BinaryExpr("+", BinaryExpr("*", Var(m.unit), Literal(m.reg * atom.atom_m, "int")), Literal(i * atom.atom_m, "int"))
+                prim = BinaryExpression(
+                    "+", BinaryExpression("*", Var(m.unit), Literal(m.reg * atom.atom_m, "int")), Literal(i * atom.atom_m, "int")
+                )
                 return [], [
                     LdmatrixLoad(
                         frag=self.frag(f"_a{i}"),
@@ -2451,7 +2453,9 @@ class _MmaOps(_AtomOps):
                 # covers a symbolic / non-multiple K's partial last chunk.
                 promotes = _f16acc_promotes(self.tile.atom, m.reg, n.reg, 1, self.frag_ns)
                 period = atom.atom_k * _F16ACC_STEPS
-                fire = BinaryExpr("==", BinaryExpr("%", Var(k_axis.name), Literal(period, "int")), Literal(period - atom.atom_k, "int"))
+                fire = BinaryExpression(
+                    "==", BinaryExpression("%", Var(k_axis.name), Literal(period, "int")), Literal(period - atom.atom_k, "int")
+                )
                 stmts.append(Cond(cond=fire, body=tuple(promotes)))
                 tail = promotes
             return [
@@ -2825,7 +2829,7 @@ def _slab_row(operand, slot, row: Expression) -> Expression:
     same one the fill targeted (``Operand.slot_row``; ``None`` at slot 0 keeps the index free of a
     dead term, so single-buffer staging stays bit-identical to its gmem baseline)."""
     offset = operand.slot_row(slot)
-    return row if offset is None else BinaryExpr("+", offset, row)
+    return row if offset is None else BinaryExpression("+", offset, row)
 
 
 @dataclass(frozen=True)
@@ -3033,7 +3037,7 @@ class _FlashOps(_MmaOps):
                         layout=layout,
                         select_sigma=select_sigma,
                         row_base=offset[0].base(i),
-                        col_base=BinaryExpr("+", base, Literal(j * atom.atom_n, "int")),
+                        col_base=BinaryExpression("+", base, Literal(j * atom.atom_n, "int")),
                         mask_fill=self.c.base.components()[0].identity,
                     )
                     body += stmts
@@ -3045,7 +3049,7 @@ class _FlashOps(_MmaOps):
                                 op=ElementwiseImpl("where"),
                                 args=fragment_args(
                                     (
-                                        BinaryExpr(">=", Var(FRAG_COL), bound),
+                                        BinaryExpression(">=", Var(FRAG_COL), bound),
                                         Literal(float(self.c.base.components()[0].identity)),
                                         scored[i, j],
                                     ),
@@ -3053,7 +3057,7 @@ class _FlashOps(_MmaOps):
                                 ),
                                 in_place=True,
                                 layout=layout,
-                                col_base=BinaryExpr("+", base, Literal(j * atom.atom_n, "int")),
+                                col_base=BinaryExpression("+", base, Literal(j * atom.atom_n, "int")),
                             )
                         )
                 pivots[i] = _row_pair(self.frag("_g"), i)
@@ -3267,7 +3271,7 @@ class _FlashOps(_MmaOps):
         m, _ = mn
         atom, load = self._score_atom, self.c.operands[0].as_slab().load
         row = _wrap(m, Var(FRAG_ROW))
-        col = Var(FRAG_COL) if bound is None else BinaryExpr("%", Var(FRAG_COL), bound)
+        col = Var(FRAG_COL) if bound is None else BinaryExpression("%", Var(FRAG_COL), bound)
         index = tuple(Sigma({m.axis.name: row, self.k_axis.name: col}).apply(e) for e in load.index)
         out: list[Statement] = []
         for i in range(m.reg):
@@ -3281,7 +3285,7 @@ class _FlashOps(_MmaOps):
                         in_place=True,
                         layout=atom.fragment_layout,
                         row_base=offset[0].base(i),
-                        col_base=BinaryExpr("+", base, Literal(j * atom.atom_n, "int")),
+                        col_base=BinaryExpression("+", base, Literal(j * atom.atom_n, "int")),
                     )
                 )
         return out
@@ -3400,13 +3404,13 @@ class _FlashOps(_MmaOps):
         query = self._query_operand((m, None))
         q_rows = query.shape[0] // query.atoms  # the CTA's query rows: one atom's rows
         # Each warp group reads its own 64 query rows of the tile.
-        grp_row = BinaryExpr("*", BinaryExpr("/", Var(m.unit), Literal(4, "int")), Literal(64, "int"))
+        grp_row = BinaryExpression("*", BinaryExpression("/", Var(m.unit), Literal(4, "int")), Literal(64, "int"))
         out: list[Statement] = [self._frag(f"_s0_{j}", "c", atom) for j in range(cols)]
         out.append(WgmmaFence())
         for t in range(self._score_steps()):
             k0 = t * atom.atom_k
-            q_row = BinaryExpr("+", Literal(k0 // row_cols * q_rows, "int"), grp_row)
-            q_index = BinaryExpr("+", BinaryExpr("*", q_row, Literal(row_cols, "int")), Literal(k0 % row_cols, "int"))
+            q_row = BinaryExpression("+", Literal(k0 // row_cols * q_rows, "int"), grp_row)
+            q_index = BinaryExpression("+", BinaryExpression("*", q_row, Literal(row_cols, "int")), Literal(k0 % row_cols, "int"))
             q_desc = self.frag(f"_dq{t}")
             out.append(
                 WgmmaDescriptor(
@@ -3421,8 +3425,8 @@ class _FlashOps(_MmaOps):
             for jg in range(cols // cells):
                 # The step's K lies in atom ``k0 // row_cols``, stacked ``chunk`` rows per atom down.
                 nbase = Literal(k0 // row_cols * chunk + jg * cells * atom.atom_n, "int")
-                index = BinaryExpr(
-                    "+", BinaryExpr("*", _slab_row(key, slot, nbase), Literal(row_cols, "int")), Literal(k0 % row_cols, "int")
+                index = BinaryExpression(
+                    "+", BinaryExpression("*", _slab_row(key, slot, nbase), Literal(row_cols, "int")), Literal(k0 % row_cols, "int")
                 )
                 desc = self.frag(f"_dk{jg}_{t}")
                 out.append(
@@ -3492,7 +3496,7 @@ class _FlashOps(_MmaOps):
         chunk's keys, which are the score's N, and its columns the score's K — so the read is the
         plain (no ``.trans``) ldmatrix at the fragment's ``(key row, K step)`` base."""
         atom = self._score_atom
-        col = BinaryExpr("+", base, Literal(j * atom.atom_n, "int"))
+        col = BinaryExpression("+", base, Literal(j * atom.atom_n, "int"))
         if key is None:
             sigma = Sigma({self.k_axis.name: col, self._score_k.name: k})
             trans, ldm = _direct_operand(b_load, self.inputs, k_name=self._score_k.name, own=self.k_axis.name, legacy=(trans, 0))
@@ -3562,7 +3566,7 @@ class _FlashOps(_MmaOps):
             ]
 
         def drain(t: int, cols: range) -> list[Statement]:
-            row = BinaryExpr("+", base, Literal(t * atom.atom_k, "int"))
+            row = BinaryExpression("+", base, Literal(t * atom.atom_k, "int"))
             return [self._value_read(staged, slot, n, offset, j, t, v_load, row, bound) for j in cols] + [
                 MmaSyncPtx(
                     c_frag=self.frag(f"{cell}{i}_{j}"),
@@ -3622,14 +3626,16 @@ class _FlashOps(_MmaOps):
         for t in range(steps):
             kstep = Literal(t * atom.atom_k, "int")
             for jg in range(n.reg // cells):
-                nbase = BinaryExpr("+", BinaryExpr("*", Var(n.unit), Literal(n.reg * 8, "int")), Literal(jg * cells * 8, "int"))
+                nbase = BinaryExpression("+", BinaryExpression("*", Var(n.unit), Literal(n.reg * 8, "int")), Literal(jg * cells * 8, "int"))
                 if trans:  # K-major (tile_n × chunk): the value's column is the slab row, the key the column
                     cols = bk + value.pad_cols
-                    index = BinaryExpr("+", BinaryExpr("*", _slab_row(value, slot, nbase), Literal(cols, "int")), kstep)
+                    index = BinaryExpression("+", BinaryExpression("*", _slab_row(value, slot, nbase), Literal(cols, "int")), kstep)
                     lbo, sbo = 16, 8 * cols * elem_bytes
                 else:  # MN-major, atom-major: atom ``nbase / atom`` starts ``chunk`` rows down, the key step its row
-                    row = BinaryExpr("+", BinaryExpr("*", BinaryExpr("/", nbase, Literal(atom_cols, "int")), Literal(bk, "int")), kstep)
-                    index = BinaryExpr("*", _slab_row(value, slot, row), Literal(atom_cols, "int"))
+                    row = BinaryExpression(
+                        "+", BinaryExpression("*", BinaryExpression("/", nbase, Literal(atom_cols, "int")), Literal(bk, "int")), kstep
+                    )
+                    index = BinaryExpression("*", _slab_row(value, slot, row), Literal(atom_cols, "int"))
                     lbo, sbo = bk * atom_cols * elem_bytes, 8 * atom_cols * elem_bytes
                 desc = self.frag(f"_dv{jg}_{t}")
                 out.append(
@@ -3672,7 +3678,9 @@ class _FlashOps(_MmaOps):
                 k_zero=None if bound is None else (row, bound),
                 fragment_layout=atom.fragment_layout,
             )
-        within = BinaryExpr("+", BinaryExpr("*", Var(n.unit), Literal(n.reg * atom.atom_n, "int")), Literal(j * atom.atom_n, "int"))
+        within = BinaryExpression(
+            "+", BinaryExpression("*", Var(n.unit), Literal(n.reg * atom.atom_n, "int")), Literal(j * atom.atom_n, "int")
+        )
         step: Expression = Literal(t * atom.atom_k, "int")
         trans = value.trans
         slab_row = _slab_row(value, slot, within if trans else step)

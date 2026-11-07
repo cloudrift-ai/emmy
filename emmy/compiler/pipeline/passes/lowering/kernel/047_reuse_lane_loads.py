@@ -20,7 +20,7 @@ from __future__ import annotations
 from dataclasses import replace
 
 from emmy.compiler.graph import Node
-from emmy.compiler.ir.expression import BinaryExpr, Interval, Literal, SimplifyCtx
+from emmy.compiler.ir.expression import BinaryExpression, Interval, Literal, SimplifyCtx
 from emmy.compiler.ir.kernel import KernelOp
 from emmy.compiler.ir.kernel.ir import Tile
 from emmy.compiler.ir.sigma import Sigma
@@ -105,7 +105,7 @@ def _unroll(loop: StridedLoop, trips: int, tag: str) -> list[Statement]:
                 out.append(Init(s.name, s.op.identity, dtype=s.dtype))
     defined = {name for s in loop.body for name in s.defines()} - carried
     for k in range(trips):
-        coord = BinaryExpr("+", loop.start, Literal(k * loop.step.value, "int"))
+        coord = BinaryExpression("+", loop.start, Literal(k * loop.step.value, "int"))
         sigma = Sigma({loop.axis.name: coord})
         suffix = f"__u{k}{tag}"
         for s in loop.body:

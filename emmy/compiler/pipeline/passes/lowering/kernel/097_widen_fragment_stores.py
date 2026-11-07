@@ -24,7 +24,7 @@ from __future__ import annotations
 from dataclasses import replace
 
 from emmy.compiler.graph import Node
-from emmy.compiler.ir.expression import BinaryExpr, Literal, SimplifyCtx, affine_form
+from emmy.compiler.ir.expression import BinaryExpression, Literal, SimplifyCtx, affine_form
 from emmy.compiler.ir.kernel import KernelOp
 from emmy.compiler.ir.kernel.ir import RegStore, WgmmaMma
 from emmy.compiler.ir.stmt import Body, Statement
@@ -94,7 +94,7 @@ def _delta(a, b) -> int | None:
     fa, fb = affine_form(a, free), affine_form(b, free)
     if fa is None or fb is None or fa[1] != fb[1]:
         return None
-    diff = BinaryExpr("-", fb[0], fa[0]).simplify(SimplifyCtx.empty())
+    diff = BinaryExpression("-", fb[0], fa[0]).simplify(SimplifyCtx.empty())
     return diff.value if isinstance(diff, Literal) and isinstance(diff.value, int) else None
 
 

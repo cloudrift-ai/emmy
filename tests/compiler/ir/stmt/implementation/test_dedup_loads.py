@@ -1,8 +1,9 @@
 """Tests for Load deduplication during body normalization."""
 
-from emmy.compiler.ir.expression import BinaryExpr
+from emmy.emmy_ir import place_values
+
+from emmy.compiler.ir.expression import BinaryExpression
 from emmy.compiler.ir.stmt import Affine, Assign, Body, Cond, Let, Load, Loop, Select, Write, normalize_body, parse_body
-from emmy.compiler.ir.stmt.normalize import place_values
 from tests.compiler.ir.stmt import listing
 
 
@@ -30,7 +31,7 @@ def test_dedup_loads_preserves_loads_under_a_rebound_coordinate() -> None:
     np.testing.assert_allclose(actual, values / values.sum(), rtol=1e-6)
 
 
-def test_normalize_body_dedups_loads_and_rewires_gather_indices() -> None:
+def testnormalize_uncached_dedups_loads_and_rewires_gather_indices() -> None:
     body = parse_body(
         """
         for a in 0..4:
@@ -75,7 +76,7 @@ def test_normalize_hoisted_shadowed_loads_keep_their_values() -> None:
 
 def test_cse_does_not_use_expression_printing(monkeypatch) -> None:
     body = parse_body("x0 = load x[i + 1]\nx1 = load x[i + 2]")
-    monkeypatch.setattr(BinaryExpr, "__str__", lambda self: "index")
+    monkeypatch.setattr(BinaryExpression, "__str__", lambda self: "index")
     assert place_values(body) == body
 
 
@@ -401,7 +402,7 @@ def test_dedup_loads_does_not_reuse_a_read_across_a_loop_that_writes_its_buffer(
     assert str(out[1].body[0]) == "current = load B[0]"
 
 
-def test_normalize_body_dedups_identical_accumulations() -> None:
+def testnormalize_uncached_dedups_identical_accumulations() -> None:
     """Two consumers of one fused value carry two copies of its accumulation in one reduce loop
     after the splice; the second is the first under another name."""
     body = parse_body(

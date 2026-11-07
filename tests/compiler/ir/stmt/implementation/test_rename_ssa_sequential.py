@@ -16,9 +16,9 @@ gather to the wrong row.
 from __future__ import annotations
 
 import pytest
+from emmy.emmy_ir import rename_ssa_sequential
 
 from emmy.compiler.ir.stmt import Accum, Body, Init, Load, Write, parse_body
-from emmy.compiler.ir.stmt.normalize import rename_ssa_sequential
 from emmy.compiler.pipeline.passes.tile._fromloop import fold_from_loop
 
 

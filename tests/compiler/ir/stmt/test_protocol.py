@@ -1,6 +1,5 @@
 """The statement protocol: what a statement kind owes, checked over every kind in every IR layer."""
 
-import dataclasses
 import importlib
 import pickle
 import pkgutil
@@ -12,7 +11,7 @@ import emmy.compiler.ir.stmt as stmt_pkg
 from emmy.compiler.dtype import F32
 from emmy.compiler.ir.axis import Axis
 from emmy.compiler.ir.elementwise import ElementwiseImpl
-from emmy.compiler.ir.expression import BinaryExpr, Expression, Literal, Var
+from emmy.compiler.ir.expression import BinaryExpression, Expression, Literal, Var
 from emmy.compiler.ir.kernel import ir as kernel_ir
 from emmy.compiler.ir.stmt import (
     Accum,
@@ -34,6 +33,7 @@ from emmy.compiler.ir.stmt import (
     Subroutine,
     Write,
     ZeroPrologue,
+    fields_of,
     parse_body,
 )
 
@@ -55,47 +55,8 @@ def test_a_kind_check_is_native() -> None:
     assert [cls.__qualname__ for cls in (Statement, *_kinds()) if type(cls) is not type] == []
 
 
-def test_a_body_is_no_tuple_and_a_field_that_holds_one_defaults_to_a_body() -> None:
-    """A tuple never equals a body, so a tuple default on a body field would keep that field in every identity."""
-    assert not issubclass(Body, tuple) and Body() != ()
-    assert [
-        f"{kind.__qualname__}.{field.name}"
-        for kind in _kinds()
-        if dataclasses.is_dataclass(kind)
-        for field in dataclasses.fields(kind)
-        if "Body" in str(field.type) and isinstance(field.default, (tuple, list))
-    ] == []
-
-
-def test_every_kind_states_the_protocol() -> None:
-    """A kind says how it rewrites, and each reading half comes with its rebuilding half: a kind that lists child
-    bodies rebuilds from bodies; one that lists expressions rebuilds from expressions. Every kind prints through the
-    text module, a kind of another layer through its declaration."""
-    missing = []
-    for cls in _kinds():
-        if cls._rewrite is Statement._rewrite:
-            missing.append(f"{cls.__name__}: _rewrite")
-        if (cls.nested is Statement.nested) != (cls.with_bodies is Statement.with_bodies):
-            missing.append(f"{cls.__name__}: nested and with_bodies come together")
-        if (cls.expressions is Statement.expressions) != (cls.map_expressions is Statement.map_expressions):
-            missing.append(f"{cls.__name__}: expressions and map_expressions come together")
-    assert not missing, "these statement kinds leave part of the protocol unstated:\n" + "\n".join(missing)
-
-
-def test_a_kind_holds_its_elementwise_operation_as_op() -> None:
-    """The clustered identity reads a statement's operation by the name ``op``, in every layer."""
-    held = [
-        (cls.__name__, f.name)
-        for cls in _kinds()
-        if dataclasses.is_dataclass(cls)
-        for f in dataclasses.fields(cls)
-        if f.type == "ElementwiseImpl"
-    ]
-    assert {kind for kind, _ in held} >= {"Assign", "Accum"} and {name for _, name in held} == {"op"}
-
-
 _K = Axis("k", 8)
-_BELOW = BinaryExpr("<", Var("i"), Literal(2, "int"))
+_BELOW = BinaryExpression("<", Var("i"), Literal(2, "int"))
 _EXAMPLES = [
     Load(("x",), "a", (Var("i"),), dtype=F32),
     Assign("y", "exp", ("x",)),
@@ -104,7 +65,7 @@ _EXAMPLES = [
     Carry("c", "x", (Var("i"),), seed=0.0),
     Pre("p", "c", (Var("i"),)),
     Init("s", 0.0, dtype=F32),
-    Let("n", BinaryExpr("+", Var("i"), Literal(1, "int"))),
+    Let("n", BinaryExpression("+", Var("i"), Literal(1, "int"))),
     Write("out", (Var("i"),), ("x",)),
     Select("m", (SelectBranch("x", _BELOW), SelectBranch("y", Literal(1, "int")))),
     ZeroPrologue(dst="out", words=16),
@@ -124,7 +85,7 @@ _STORED = [example for example in _EXAMPLES if not isinstance(example, Call)]
 _INDEX = (Var("i"), Var("j"))
 _COMBINE = (Assign("t", "multiply", ("acc", "acc__o")), Assign("acc", "add", ("acc", "t")))
 _OPERANDS = kernel_ir.fragment_args(
-    (BinaryExpr(">", Var(kernel_ir.FRAG_COL), Var(kernel_ir.FRAG_ROW)), "u", ("r0", "r1"), "f", ("mask", _INDEX)),
+    (BinaryExpression(">", Var(kernel_ir.FRAG_COL), Var(kernel_ir.FRAG_ROW)), "u", ("r0", "r1"), "f", ("mask", _INDEX)),
     (kernel_ir.COORD, kernel_ir.UNIFORM, kernel_ir.ROW, kernel_ir.FRAG, kernel_ir.GMEM),
 )
 _KERNEL_EXAMPLES = [
@@ -186,6 +147,30 @@ _KERNEL_EXAMPLES = [
 _ALL_EXAMPLES = _EXAMPLES + _KERNEL_EXAMPLES
 
 
+def test_a_body_is_no_tuple() -> None:
+    """A tuple never equals a body."""
+    assert not issubclass(Body, tuple) and Body() != ()
+
+
+def test_a_kind_holds_its_elementwise_operation_as_op() -> None:
+    """The clustered identity reads a statement's operation by the name ``op``, in every layer."""
+    held = [
+        (type(stmt).__name__, name)
+        for stmt in _ALL_EXAMPLES
+        for name in fields_of(type(stmt))
+        if isinstance(getattr(stmt, name), ElementwiseImpl)
+    ]
+    assert {kind for kind, _ in held} >= {"Assign", "Accum"} and {name for _, name in held} == {"op"}
+
+
+def test_every_kind_reads_back_from_its_text_and_lists_its_fields() -> None:
+    """Every kind, in every layer, has a text its reader takes back, and its fields are the ones ``fields_of`` lists."""
+    for stmt in _ALL_EXAMPLES:
+        if not isinstance(stmt, Call):
+            assert parse_body(str(stmt)) == Body((stmt,))
+        assert stmt.replace(**{name: getattr(stmt, name) for name in fields_of(type(stmt))}) == stmt
+
+
 def test_every_exported_kind_has_an_example() -> None:
     exported = {kind for name in stmt_pkg.__all__ if isinstance(kind := getattr(stmt_pkg, name), type) and issubclass(kind, Statement)}
     assert {type(example) for example in _EXAMPLES} == exported - {Statement}
@@ -193,34 +178,7 @@ def test_every_exported_kind_has_an_example() -> None:
     assert {type(example) for example in _KERNEL_EXAMPLES} == kernel
 
 
-_PROTOCOL = ("deps", "defines", "external_reads", "external_writes", "local_decls", "bound_axes", "binds_axes", "expressions")
-_PROTOCOL += ("map_expressions", "nested", "with_bodies", "rename_buffers", "_rewrite")
-
-
-def _stated(cls: type) -> set[str]:
-    """The protocol members ``cls`` writes itself: the ones ``@statement`` did not derive from its fields' roles."""
-    return {name for name in _PROTOCOL if name in vars(cls) and not getattr(vars(cls)[name], "derived", False)}
-
-
-@pytest.mark.parametrize("stmt", _KERNEL_EXAMPLES, ids=lambda stmt: type(stmt).__name__)
-def test_a_declared_kind_states_only_its_fields(stmt) -> None:
-    """A Kernel IR kind is declared: its protocol members are the ones its fields' roles give it."""
-    assert type(stmt)._rewrite.derived and not _stated(type(stmt))
-
-
 # The protocol members a shared kind states itself, because no role gives them.
-_STATED = {
-    Accum: {"_rewrite"},  # its reduced axes follow a substitution that splits an axis
-    Let: {"external_reads", "rename_buffers"},  # the buffers a flat index inside its expression names
-    Call: {"external_reads", "rename_buffers"},  # the buffers its subroutine reads
-    StridedLoop: {"binds_axes"},  # the ``<axis>_end`` name an ``end`` override hoists
-}
-
-
-@pytest.mark.parametrize("stmt", _EXAMPLES, ids=lambda stmt: type(stmt).__name__)
-def test_a_shared_kind_states_only_what_no_role_gives(stmt) -> None:
-    """A shared kind is declared too: every protocol member but the few listed follows from its fields' roles."""
-    assert _stated(type(stmt)) == _STATED.get(type(stmt), set())
 
 
 def test_a_number_in_a_role_field_is_plain_data() -> None:
@@ -234,9 +192,9 @@ def test_a_number_in_a_role_field_is_plain_data() -> None:
 
 def test_a_field_read_through_lists_each_name_once() -> None:
     """The names an index or a predicate mentions are reads, listed in field order beside the names a field holds."""
-    write = Write("out", (Var("i"), BinaryExpr("+", Var("i"), Var("gather"))), ("value",))
+    write = Write("out", (Var("i"), BinaryExpression("+", Var("i"), Var("gather"))), ("value",))
     assert write.deps() == ("i", "gather", "value")
-    select = Select("picked", (SelectBranch("x", _BELOW), SelectBranch("y", BinaryExpr(">=", Var("i"), Literal(2, "int")))))
+    select = Select("picked", (SelectBranch("x", _BELOW), SelectBranch("y", BinaryExpression(">=", Var("i"), Literal(2, "int")))))
     assert select.deps() == ("x", "i", "y")
     assert Carry("state", "value", (Var("i"),), 0.0).deps() == ("value",)
 
@@ -305,7 +263,7 @@ def _held_expressions(value, child_bodies=()) -> list:
         return [expression for item in value for expression in _held_expressions(item)]
     if isinstance(value, (Statement, SelectBranch, kernel_ir.FragmentArg)):
         nested = value.nested() if isinstance(value, Statement) else ()
-        return [expression for f in dataclasses.fields(value) for expression in _held_expressions(getattr(value, f.name), nested)]
+        return [expression for name in fields_of(type(value)) for expression in _held_expressions(getattr(value, name), nested)]
     return []
 
 

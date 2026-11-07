@@ -26,7 +26,7 @@ from collections import Counter
 from dataclasses import replace
 
 from emmy.compiler.graph import Node
-from emmy.compiler.ir.expression import Expression, Literal, TernaryExpr
+from emmy.compiler.ir.expression import Expression, Literal, TernaryExpression
 from emmy.compiler.ir.kernel import KernelOp
 from emmy.compiler.ir.stmt import Assign, Body, Let, Load, Select, SelectBranch, Statement
 from emmy.compiler.pipeline import Pattern, RuleSkipped
@@ -191,11 +191,11 @@ def _select_index(cond: Expression, a: Expression, b: Expression) -> Expression:
     """``cond ? a : b`` with every select on ``cond`` inside each arm resolved to its own side."""
     if a == b:
         return a
-    return TernaryExpr(cond, _resolve(a, cond, True), _resolve(b, cond, False))
+    return TernaryExpression(cond, _resolve(a, cond, True), _resolve(b, cond, False))
 
 
 def _resolve(expression: Expression, cond: Expression, value: bool) -> Expression:
-    if isinstance(expression, TernaryExpr) and expression.cond == cond:
+    if isinstance(expression, TernaryExpression) and expression.cond == cond:
         return _resolve(expression.if_true if value else expression.if_false, cond, value)
     fields = getattr(expression, "__dataclass_fields__", {})
     changed = {

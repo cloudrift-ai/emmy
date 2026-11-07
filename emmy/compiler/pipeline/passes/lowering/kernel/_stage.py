@@ -51,14 +51,14 @@ from emmy.compiler.dim import Dim
 from emmy.compiler.dtype import I32
 from emmy.compiler.ir.axis import Axis
 from emmy.compiler.ir.expression import (
-    BinaryExpr,
+    BinaryExpression,
     Builtin,
     Expression,
     FlatIndex,
-    FuncCallExpr,
+    FunctionCallExpression,
     Literal,
     SimplifyCtx,
-    TernaryExpr,
+    TernaryExpression,
     Var,
     affine_form,
 )
@@ -83,11 +83,11 @@ from emmy.compiler.ir.stmt import Body, Cond, Let, Load, Loop, Statement, Stride
 
 
 def _mul(a: Expression, b: Expression) -> Expression:
-    return BinaryExpr("*", a, b)
+    return BinaryExpression("*", a, b)
 
 
 def _add(a: Expression, b: Expression) -> Expression:
-    return BinaryExpr("+", a, b)
+    return BinaryExpression("+", a, b)
 
 
 def _lit(n: int) -> Expression:
@@ -162,7 +162,7 @@ def cp_async_fill(
         # which the render keeps apart so the destination's swizzle is applied to the lane once
         # and the stripe base stays an immediate (the same split the ldmatrix drain takes).
         lane = _mul(cta.linear_tid, _lit(v))
-        lane_row, lane_col = BinaryExpr("/", lane, _lit(slab_cols)), BinaryExpr("%", lane, _lit(slab_cols))
+        lane_row, lane_col = BinaryExpression("/", lane, _lit(slab_cols)), BinaryExpression("%", lane, _lit(slab_cols))
         stripe_rows = stripe // slab_cols
         out: list[Statement] = []
         for trip in range(n_chunks // cta.n_threads):
@@ -183,8 +183,8 @@ def cp_async_fill(
         return out
     fe = Axis(name=f"_f{name}", extent=n_chunks)
     base = _mul(Var(fe.name), _lit(v))  # flat element offset of this chunk
-    row = BinaryExpr("/", base, _lit(slab_cols))
-    col = BinaryExpr("%", base, _lit(slab_cols))
+    row = BinaryExpression("/", base, _lit(slab_cols))
+    col = BinaryExpression("%", base, _lit(slab_cols))
     smem_row = _add(row_offset, row) if row_offset is not None else row
     copy = CpAsyncCopy(
         smem=slab,
@@ -221,8 +221,8 @@ def sync_copy_fill(
     v = _cp_async_width(cols, elem_bytes)
     fe = Axis(name=f"_f{name}", extent=(rows * cols) // v)
     base = _mul(Var(fe.name), _lit(v))
-    row = BinaryExpr("/", base, _lit(cols))
-    col = BinaryExpr("%", base, _lit(cols))
+    row = BinaryExpression("/", base, _lit(cols))
+    col = BinaryExpression("%", base, _lit(cols))
     smem_row = _add(row_offset, row) if row_offset is not None else row
     names = tuple(f"_{name}_copy{i}" for i in range(v))
     body = Body(
@@ -249,7 +249,7 @@ def _sync_copy_coords(trip: int, v: int, cols: int, cta: CtaTile) -> tuple[Expre
     """The ``(row, col)`` slab coordinates of lane-local ``trip`` — the unrolled form of the
     one-phase fill's ``for e = tid; e < chunks; e += n_threads`` stride."""
     base = _mul(_add(cta.linear_tid, _lit(trip * cta.n_threads)), _lit(v))
-    return BinaryExpr("/", base, _lit(cols)), BinaryExpr("%", base, _lit(cols))
+    return BinaryExpression("/", base, _lit(cols)), BinaryExpression("%", base, _lit(cols))
 
 
 def _staged_regs(name: str, trip: int, v: int) -> tuple[str, ...]:
@@ -284,9 +284,9 @@ def _volta_store_decl(*, op, ring: int, cta: CtaTile, elem_bytes: int) -> Let | 
     name, _, _ = plan
     row, col = _sync_copy_coords(0, 8, op.shape[1], cta)
     if op.swizzle == VOLTA_CROSSWISE:
-        value = FuncCallExpr("emmy_volta_crosswise", (row, col, _lit(ring * op.shape[0])))
+        value = FunctionCallExpression("emmy_volta_crosswise", (row, col, _lit(ring * op.shape[0])))
     else:
-        value = FuncCallExpr("emmy_volta_b_congruous", (row, col, _lit(op.shape[1])))
+        value = FunctionCallExpression("emmy_volta_b_congruous", (row, col, _lit(op.shape[1])))
     return Let(name=name, value=value, dtype=I32)
 
 
@@ -489,11 +489,11 @@ def sync_stat_fill(
     from emmy.compiler.pipeline.passes.lowering.kernel._factor import emit_combine  # noqa: PLC0415 — avoid an import cycle
 
     rl = row_body[rl_i]
-    lane = BinaryExpr("%", cta.linear_tid, _lit(32))
-    warp = BinaryExpr("/", cta.linear_tid, _lit(32))
+    lane = BinaryExpression("%", cta.linear_tid, _lit(32))
+    warp = BinaryExpression("/", cta.linear_tid, _lit(32))
     fold = StridedLoop(axis=rl.axis, start=lane, step=_lit(32), body=rl.body, unroll=False)
     combine = emit_combine(stat, t="_lane", n_threads=32)
-    guarded = Cond(cond=BinaryExpr("==", lane, _lit(0)), body=writes)
+    guarded = Cond(cond=BinaryExpression("==", lane, _lit(0)), body=writes)
     body = (*row_body[:rl_i], fold, *combine, *row_body[rl_i + 1 :], guarded)
     loop = StridedLoop(axis=row_axis, start=warp, step=_lit(cta.n_threads // 32), body=Body(body), unroll=False)
     return [*decls, loop, Sync()]
@@ -914,7 +914,7 @@ class SyncTransport:
         fa, fb = affine_form(a, free), affine_form(b, free)
         if fa is None or fb is None or fa[1] != fb[1]:
             return None
-        d = BinaryExpr("-", fb[0], fa[0]).simplify(ctx)
+        d = BinaryExpression("-", fb[0], fa[0]).simplify(ctx)
         return d.value if isinstance(d, Literal) and isinstance(d.value, int) else None
 
     @staticmethod
@@ -1036,8 +1036,8 @@ class SyncTransport:
             v = _cp_async_width(cols, op.elem_bytes or self.elem_bytes)
             fe = Axis(name=f"_f{op.tag}", extent=(rows * cols) // v)
             base = _mul(Var(fe.name), _lit(v))
-            row = BinaryExpr("/", base, _lit(cols))  # constant across the run: v divides cols
-            col = BinaryExpr("%", base, _lit(cols))
+            row = BinaryExpression("/", base, _lit(cols))  # constant across the run: v divides cols
+            col = BinaryExpression("%", base, _lit(cols))
             smem_row = row
             plans = self._run_plans(op, v)
             body: list[Statement] = []
@@ -1203,7 +1203,7 @@ class TmaTransport:
 
     @property
     def _tid0(self) -> Expression:
-        return BinaryExpr("==", self.cta.linear_tid, _lit(0))
+        return BinaryExpression("==", self.cta.linear_tid, _lit(0))
 
     @property
     def _total_bytes(self) -> int:
@@ -1245,7 +1245,7 @@ class TmaTransport:
         atom, _ = pick_swizzle_atom(inner, op.elem_bytes or self.elem_bytes)
         if atom >= inner:
             return coords
-        return (*coords[:-1], BinaryExpr("/", coords[-1], _lit(atom)), _lit(0))
+        return (*coords[:-1], BinaryExpression("/", coords[-1], _lit(atom)), _lit(0))
 
     def prologue(self, ring: int) -> list[Statement]:
         # Init every ring slot's mbarrier (one producer ``arrive`` per phase), then a CTA barrier so
@@ -1342,10 +1342,10 @@ def _producer_band_kloop(
     # here — then a CTA barrier publishes the init. The transport's own prologue is not used.
     inits = tuple(MbarrierInit(mbar=transport.mbar, count=1, slot=_lit(s)) for s in range(ring))
     inits += tuple(MbarrierInit(mbar=_EMPTY_MBAR, count=1, slot=_lit(s)) for s in range(ring))
-    pre: list[Statement] = [Cond(cond=BinaryExpr("==", tid, _lit(0)), body=inits), Sync()]
+    pre: list[Statement] = [Cond(cond=BinaryExpression("==", tid, _lit(0)), body=inits), Sync()]
 
     k0, K = "_ks", k_extent
-    i_expression = BinaryExpr("/", Var(k0), _lit(bk_elems))
+    i_expression = BinaryExpression("/", Var(k0), _lit(bk_elems))
     kaxis = Axis(name=k0, extent=K)
     setmaxnreg = (
         aux_threads % _WARP_GROUP == 0
@@ -1358,23 +1358,25 @@ def _producer_band_kloop(
     # (``c >= ring`` ⟺ ``i >= 1``) wait release generation ``c/ring - 1`` first. The empty-wait
     # rides INSIDE the transport's elected-thread fill ``Cond`` — only the thread that issues the
     # box copy needs the slot's release.
-    pref_chunk = BinaryExpr("+", i_expression, _lit(ring - 1))
-    pref_slot = BinaryExpr("%", pref_chunk, _lit(ring))
-    empty_phase = BinaryExpr("%", BinaryExpr("-", BinaryExpr("/", pref_chunk, _lit(ring)), _lit(1)), _lit(2))
+    pref_chunk = BinaryExpression("+", i_expression, _lit(ring - 1))
+    pref_slot = BinaryExpression("%", pref_chunk, _lit(ring))
+    empty_phase = BinaryExpression("%", BinaryExpression("-", BinaryExpression("/", pref_chunk, _lit(ring)), _lit(1)), _lit(2))
     if ring >= 2:
-        k0_next = BinaryExpr("+", Var(k0), _lit((ring - 1) * bk_elems))
+        k0_next = BinaryExpression("+", Var(k0), _lit((ring - 1) * bk_elems))
         if k_end is not None:  # clamp onto the last chunk this CTA drains (the causal early stop)
             end_var = Var(f"{k0}_end")  # the loop's hoisted for-init bound (StridedLoop.end)
-            last_k0 = BinaryExpr("*", BinaryExpr("/", BinaryExpr("-", end_var, _lit(1)), _lit(bk_elems)), _lit(bk_elems))
-            k0_pref = TernaryExpr(cond=BinaryExpr("<", k0_next, end_var), if_true=k0_next, if_false=last_k0)
+            last_k0 = BinaryExpression("*", BinaryExpression("/", BinaryExpression("-", end_var, _lit(1)), _lit(bk_elems)), _lit(bk_elems))
+            k0_pref = TernaryExpression(cond=BinaryExpression("<", k0_next, end_var), if_true=k0_next, if_false=last_k0)
         else:
-            k0_pref = TernaryExpr(cond=BinaryExpr("<", k0_next, _lit(K)), if_true=k0_next, if_false=_lit((n_chunks - 1) * bk_elems))
+            k0_pref = TernaryExpression(
+                cond=BinaryExpression("<", k0_next, _lit(K)), if_true=k0_next, if_false=_lit((n_chunks - 1) * bk_elems)
+            )
     else:
         k0_pref = Var(k0)
     (fill_cond,) = transport.fill(k0=k0_pref, slot=pref_slot)
     assert isinstance(fill_cond, Cond), "TmaTransport.fill is the elected-thread Cond"
     empty_wait = Cond(
-        cond=BinaryExpr(">=", i_expression, _lit(1)), body=(MbarrierWait(mbar=_EMPTY_MBAR, phase=empty_phase, slot=pref_slot),)
+        cond=BinaryExpression(">=", i_expression, _lit(1)), body=(MbarrierWait(mbar=_EMPTY_MBAR, phase=empty_phase, slot=pref_slot),)
     )
     prod_body: list[Statement] = [Cond(cond=fill_cond.cond, body=(empty_wait, *fill_cond.body))]
     prod: list[Statement] = [SetMaxNReg(_PRODUCER_REGS, "dec")] if setmaxnreg else []
@@ -1385,29 +1387,29 @@ def _producer_band_kloop(
     # Compute: wait the data parity, drain the slot, close the band on the named barrier, release.
     # A drain that leaves its group running (``in_flight``) has waited out the PREVIOUS chunk's
     # group only, so it releases that chunk's slot, one chunk late (:func:`_in_flight_kloop`).
-    read_slot = BinaryExpr("%", i_expression, _lit(ring))
-    read_phase = BinaryExpr("%", BinaryExpr("/", i_expression, _lit(ring)), _lit(2))
+    read_slot = BinaryExpression("%", i_expression, _lit(ring))
+    read_phase = BinaryExpression("%", BinaryExpression("/", i_expression, _lit(ring)), _lit(2))
     cons_body: list[Statement] = list(transport.wait(in_flight=ring - 1, slot=read_slot, phase=read_phase))
     if in_flight is None:
         cons_body += drain(read_slot)
     else:
         cons_body += [*in_flight[0](read_slot), _last_chunk(k0, bk_elems, k_extent, k_end, in_flight[1])]
     cons_body.append(Sync(barrier_id=1, count=block_threads))
-    elected = BinaryExpr("==", transport.cta.linear_tid, _lit(0))
+    elected = BinaryExpression("==", transport.cta.linear_tid, _lit(0))
     if in_flight is None:
         cons_body.append(Cond(cond=elected, body=(MbarrierArrive(mbar=_EMPTY_MBAR, slot=read_slot),)))
     else:
-        prev_slot = BinaryExpr("%", BinaryExpr("+", i_expression, _lit(ring - 1)), _lit(ring))
+        prev_slot = BinaryExpression("%", BinaryExpression("+", i_expression, _lit(ring - 1)), _lit(ring))
         cons_body.append(
             Cond(
-                cond=BinaryExpr("&&", elected, BinaryExpr(">=", i_expression, _lit(1))),
+                cond=BinaryExpression("&&", elected, BinaryExpression(">=", i_expression, _lit(1))),
                 body=(MbarrierArrive(mbar=_EMPTY_MBAR, slot=prev_slot),),
             )
         )
     cons: list[Statement] = [SetMaxNReg(_CONSUMER_REGS, "inc")] if setmaxnreg else []
     cons.append(StridedLoop(axis=kaxis, start=_lit(0), step=_lit(bk_elems), body=Body(tuple(cons_body)), unroll=False, end=k_end))
 
-    role = Cond(cond=BinaryExpr(">=", tid, _lit(block_threads)), body=tuple(prod), else_body=tuple(cons))
+    role = Cond(cond=BinaryExpression(">=", tid, _lit(block_threads)), body=tuple(prod), else_body=tuple(cons))
     return decls, [*pre, role]
 
 
@@ -1503,17 +1505,17 @@ def pipelined_kloop(
     full ``depth`` ring and clamps every fill — ring prefetch and kill-point refill alike — against
     the runtime chunk count. Returns ``(slab_decls, [prologue…, outer_loop])``."""
     symbolic = isinstance(k_extent, Dim)
-    k_pos: Expression = BinaryExpr("-", Var(k0), k_first) if k_first is not None else Var(k0)
-    i_expression = BinaryExpr("/", k_pos, _lit(bk_elems))  # chunk index of the current step (stream-relative)
+    k_pos: Expression = BinaryExpression("-", Var(k0), k_first) if k_first is not None else Var(k0)
+    i_expression = BinaryExpression("/", k_pos, _lit(bk_elems))  # chunk index of the current step (stream-relative)
 
     groups: list[_Group] = []
     for transport, depth in operands:
         ring = depth if symbolic else (min(depth, n_chunks) if n_chunks >= 2 else 1)
         if ring == 1:
-            read_slot, read_phase = _lit(0), BinaryExpr("%", i_expression, _lit(2))
+            read_slot, read_phase = _lit(0), BinaryExpression("%", i_expression, _lit(2))
         else:
-            read_slot = BinaryExpr("%", i_expression, _lit(ring))
-            read_phase = BinaryExpr("%", BinaryExpr("/", i_expression, _lit(ring)), _lit(2))
+            read_slot = BinaryExpression("%", i_expression, _lit(ring))
+            read_phase = BinaryExpression("%", BinaryExpression("/", i_expression, _lit(ring)), _lit(2))
         groups.append(_Group(transport=transport, ring=ring, read_slot=read_slot, read_phase=read_phase))
 
     segments = build_segments(tuple(g.read_slot for g in groups))
@@ -1541,18 +1543,18 @@ def pipelined_kloop(
         """The refill's chunk base — ``k0 + lag·bk``, clamped onto the last needed chunk (the
         ``k_end`` early stop reads the loop's hoisted ``<k0>_end`` for-init bound — inlining the
         raw expression per iteration measurably spills; a symbolic extent clamps at runtime)."""
-        k0_next = BinaryExpr("+", Var(k0), _lit(lag * bk_elems))
+        k0_next = BinaryExpression("+", Var(k0), _lit(lag * bk_elems))
         if k_end is not None:
             end_var = Var(f"{k0}_end")
-            last_k0 = BinaryExpr("*", BinaryExpr("/", BinaryExpr("-", end_var, _lit(1)), _lit(bk_elems)), _lit(bk_elems))
+            last_k0 = BinaryExpression("*", BinaryExpression("/", BinaryExpression("-", end_var, _lit(1)), _lit(bk_elems)), _lit(bk_elems))
             bound: Expression = end_var
         elif symbolic:
-            last_k0 = BinaryExpr("*", BinaryExpr("-", n_chunks.expression, _lit(1)), _lit(bk_elems))
+            last_k0 = BinaryExpression("*", BinaryExpression("-", n_chunks.expression, _lit(1)), _lit(bk_elems))
             bound = k_extent.expression
         else:
             last_k0 = _lit((n_chunks - 1) * bk_elems)
             bound = _lit(k_extent)
-        return TernaryExpr(cond=BinaryExpr("<", k0_next, bound), if_true=k0_next, if_false=last_k0)
+        return TernaryExpression(cond=BinaryExpression("<", k0_next, bound), if_true=k0_next, if_false=last_k0)
 
     def _prime_k0(c: int) -> Expression:
         """The prologue prime's chunk base — ``k_first + c·bk`` (plain ``c·bk`` for a zero-start
@@ -1562,10 +1564,10 @@ def pipelined_kloop(
         extent's gmem."""
         if k_first is None:
             return _lit(c * bk_elems)
-        base = BinaryExpr("+", k_first, _lit(c * bk_elems))
+        base = BinaryExpression("+", k_first, _lit(c * bk_elems))
         end: Expression = k_end if k_end is not None else (k_extent.expression if symbolic else _lit(k_extent))
-        last_k0 = BinaryExpr("*", BinaryExpr("/", BinaryExpr("-", end, _lit(1)), _lit(bk_elems)), _lit(bk_elems))
-        return TernaryExpr(cond=BinaryExpr("<", base, end), if_true=base, if_false=last_k0)
+        last_k0 = BinaryExpression("*", BinaryExpression("/", BinaryExpression("-", end, _lit(1)), _lit(bk_elems)), _lit(bk_elems))
+        return TernaryExpression(cond=BinaryExpression("<", base, end), if_true=base, if_false=last_k0)
 
     decls: list[Statement] = []
     pre: list[Statement] = []
@@ -1623,7 +1625,7 @@ def pipelined_kloop(
     body: list[Statement] = []
     for g in groups:  # top fills: the ring prefetch / the single-buffer current-chunk fill
         if g.kind == "ring":
-            g.fill_slot = BinaryExpr("%", BinaryExpr("+", i_expression, _lit(g.lag)), _lit(g.ring))
+            g.fill_slot = BinaryExpression("%", BinaryExpression("+", i_expression, _lit(g.lag)), _lit(g.ring))
             if g.back_edge:
                 continue  # its chunk ``i+1`` was issued past the previous iteration's barrier
             body += g.transport.fill(k0=_fill_k0(g.lag), slot=g.fill_slot, k0_cur=Var(k0))
@@ -1684,7 +1686,7 @@ def _carried_kloop(
     steps, loads, mmas = carried(g.read_slot)
     if steps < 2 or steps % 2:
         return None
-    _, next_loads, _ = carried(BinaryExpr("%", BinaryExpr("+", i_expression, _lit(1)), _lit(g.ring)))
+    _, next_loads, _ = carried(BinaryExpression("%", BinaryExpression("+", i_expression, _lit(1)), _lit(g.ring)))
     _, first_loads, _ = carried(_lit(0))
     in_flight = g.ring - 2  # after this step's commit, every prefetch but the next chunk's may fly
     head = [*pre, *g.transport.wait(in_flight=in_flight, slot=_lit(0), phase=_lit(0)), *first_loads(0, "_s0")]
@@ -1694,7 +1696,7 @@ def _carried_kloop(
         if step < steps - 1:
             body += loads(step + 1, other)
         else:
-            slot = BinaryExpr("%", BinaryExpr("+", i_expression, _lit(g.lag)), _lit(g.ring))
+            slot = BinaryExpression("%", BinaryExpression("+", i_expression, _lit(g.lag)), _lit(g.ring))
             body += g.transport.fill(k0=fill_k0(g.lag), slot=slot, k0_cur=Var(k0))
             body += g.transport.commit()
             body += g.transport.wait(in_flight=in_flight, slot=slot, phase=_lit(0))
@@ -1722,7 +1724,7 @@ def _in_flight_kloop(groups, in_flight, pre, i_expression, fill_k0, k0, k_extent
     if g.kind != "ring" or g.back_edge or not isinstance(g.transport, (CpAsyncTransport, TmaTransport)):
         return None
     issue, settle = in_flight
-    fill_slot = BinaryExpr("%", BinaryExpr("+", i_expression, _lit(g.lag)), _lit(g.ring))
+    fill_slot = BinaryExpression("%", BinaryExpression("+", i_expression, _lit(g.lag)), _lit(g.ring))
     body = [
         *g.transport.wait(in_flight=g.ring - 2, slot=g.read_slot, phase=g.read_phase),
         *issue(g.read_slot),
@@ -1749,7 +1751,7 @@ def _last_chunk(k0: str, bk_elems: int, k_extent, k_end: Expression | None, sett
     accumulator reads above a trailing ``wgmma.wait_group 0`` once it had unrolled the loop, and
     an H100 GEMM with a ReLU epilogue stored an eighth of its rows wrong."""
     bound = Var(f"{k0}_end") if k_end is not None else (k_extent.expression if isinstance(k_extent, Dim) else _lit(k_extent))
-    more = BinaryExpr("<", BinaryExpr("+", Var(k0), _lit(bk_elems)), bound)
+    more = BinaryExpression("<", BinaryExpression("+", Var(k0), _lit(bk_elems)), bound)
     return Cond(cond=more, body=tuple(settle(1)), else_body=tuple(settle(0)))
 
 

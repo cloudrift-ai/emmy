@@ -8,3 +8,4 @@ description = "The compiler's statement and expression vocabulary: kinds, bodies
 [dependencies]
 blake3 = "1"
 libm = "0.2"
+sha2 = "0.10"

@@ -8,7 +8,7 @@ use std::sync::{Arc, Mutex, OnceLock};
 
 use crate::field::{Axes, Ext, Names};
 use crate::kinds::Statement;
-use crate::protocol::{seeded_accumulators, unique};
+use crate::protocol::{Renaming, seeded_accumulators, unique};
 use crate::values::Key;
 use crate::{Error, Name, Result, locked};
 
@@ -290,7 +290,9 @@ impl Body {
 
     /// This body with every external buffer renamed through `mapping`.
     pub fn rename_buffers(&self, mapping: &HashMap<Name, Name>) -> Body {
-        let result = self.map_stmts(&mut |stmt| Some(Statement::rename_buffers(stmt, mapping)));
+        let renaming = Renaming::new(mapping);
+        let result =
+            self.map_stmts(&mut |stmt| Some(Statement::rename_buffers_with(stmt, &renaming)));
         if result.ptr_eq(self) {
             return self.clone();
         }

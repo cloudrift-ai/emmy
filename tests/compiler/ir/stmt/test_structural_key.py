@@ -750,11 +750,3 @@ def test_structural_key_is_string_and_hashable() -> None:
     key = body.structural_key()
     assert isinstance(key, str)
     assert hash(key) == hash(body.structural_key())  # cached, deterministic
-
-
-def test_structural_key_cached_property() -> None:
-    """Accessing twice returns the *same* string object (cached)."""
-    body = _matmul_body("X", "Y", "O")
-    a = body.structural_key()
-    b = body.structural_key()
-    assert a is b

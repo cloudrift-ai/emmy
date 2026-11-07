@@ -1,7 +1,8 @@
 """Copy aliases through value placement, one inner step of normalization."""
 
+from emmy.emmy_ir import place_values
+
 from emmy.compiler.ir.stmt import parse_body
-from emmy.compiler.ir.stmt.normalize import place_values
 
 
 def test_typed_copy_is_a_cast_not_an_alias():

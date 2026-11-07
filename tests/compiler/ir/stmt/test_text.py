@@ -8,7 +8,7 @@ import pytest
 from emmy.compiler.dim import Dim
 from emmy.compiler.dtype import F8E4M3, F16, F32
 from emmy.compiler.ir.axis import Axis, Window
-from emmy.compiler.ir.expression import BinaryExpr, Literal, Var
+from emmy.compiler.ir.expression import BinaryExpression, Literal, Var
 from emmy.compiler.ir.stmt import (
     Accum,
     Affine,
@@ -63,7 +63,7 @@ STATEMENTS = [
     (Write("slab", (A0,), ("v",), swizzle="B32"), "slab[a0] = v swizzle=B32"),
     (ZeroPrologue("acc", 1024), "zero acc words=1024"),
     (
-        Select("v3", (SelectBranch("x", A0.lt(ONE)), SelectBranch("y", BinaryExpr(">=", A0, ONE)))),
+        Select("v3", (SelectBranch("x", A0.lt(ONE)), SelectBranch("y", BinaryExpression(">=", A0, ONE)))),
         """\
         v3 = select:
             x when a0 < 1

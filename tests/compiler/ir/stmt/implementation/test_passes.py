@@ -1,10 +1,10 @@
 """Statement rewriting."""
 
 import pytest
+from emmy.emmy_ir import place_values
 
 from emmy.compiler.ir.expression import Var
 from emmy.compiler.ir.stmt import Body, Cond, Statement, parse_body, rename_free
-from emmy.compiler.ir.stmt.normalize import place_values
 from tests.compiler.ir.stmt import listing
 
 
