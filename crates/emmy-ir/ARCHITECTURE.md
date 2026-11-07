@@ -43,10 +43,14 @@ child module takes its parent's imports.
   `enum Statement`, the `enum Kind` (one variant per kind, with its name, layer and fields; what a body's kind queries
   and the reader take) and, per kind, the role-driven walks (`visit`, `rewrite`, the header fields the text prints).
   Roles are a `Roles` set and a kind's flags a `KindFlags` set, two types that cannot be mistaken for one another.
-  `KW_ONLY`, a constructor property, rides in the roles set as the one bit no walk reads.
+  `KW_ONLY`, a constructor property, rides in the roles set as the one bit no walk reads. A kind is a block when a
+  field of it plays `BODY`. The kinds-wide accessors (`op`, `dtype`, `name`) are the `Field` trait's: a field type
+  that is one answers, every other field's default is none. A test pins the digest of the declaration list, the names
+  and field orders every stored text spells.
 - **Fields** (`kinds/field.rs`): one trait, `Field`, every field type implements: how it is visited and rewritten by role,
   spelled on a declared kind's header and read back by its `Ty`. A number where a name or an expression is expected
-  (`NumOr<T>`) is plain data. A record (`SelectBranch`, `FragmentArg`) is a struct whose own fields play roles.
+  (`NumOr<T>`) is plain data. A record (`SelectBranch`, `FragmentArg`) is declared in the same list with a layer of
+  its own, a struct whose own fields play roles and a `Field` of the kind that holds it.
 - **Axes** (`kinds/axis.rs`): `Axis` (name, `Dim`, window), equal by name and extent as the Python class is; the window is
   provenance. The Python `Axis`, `Dim`, `DataType` and `ElementwiseImpl` objects stay Python classes: a statement holds
   a name (or an axis's parts) and the extension makes the object on first read.
@@ -60,8 +64,9 @@ here too), and `rewrite` behind
 `rename` (α, through binders) and `substitute` (β, hygienic: a mapping a statement's own binder shadows is dropped for
 its subtree). The four members no role gives are stated by kind there: an `Accum`'s reduced axes follow a splitting
 substitution, a `Let` and a `Call` read buffers inside an expression or through a subroutine, a `StridedLoop` with an
-`end` binds `<axis>_end`. A kind that checks itself does so over its own fields (`validate`), and `finished` runs the
-check for every constructor: the ones Python's `__post_init__` made.
+`end` binds `<axis>_end`. A kind that checks itself is flagged `CHECKED` and does so over its own fields (`validate`);
+`Statement::check` dispatches on the flag, and `finished` runs it for every constructor: the checks Python's
+`__post_init__` made.
 
 `body.rs` is `Body`: the statements, a content hash, and every def-use reading computed once on first use and kept
 with the body (`definitions`, `carried_names`, `local_defs`, `free_ssa`, `axis_names`, `ssa_uses`, the kind filters),
@@ -115,7 +120,7 @@ A function that can refuse returns `Result<T, Error>`; the error kinds map one t
 extension raises (`ValueError`, `TypeError`, `KeyError`, `ZeroDivisionError`, `NotImplementedError`,
 `RecursionError`). Library code holds no `unwrap` or `expect` (STYLE.md, Rust): a lock that may be poisoned is
 reopened, an invariant that holds by construction is a total function (`rebuild_bodies`, `map_children`), and digest
-material falls back to a debug form where a name has no text, and an axis with no text spells as the empty text. An
+material falls back to a debug form where a name has no text, and the canonical order's keys carry the error up. An
 expression carries the height of its tree; the reader and the one base of every Python expression object refuse one
 higher than 256 levels (`RecursionError`), whatever built it, rather than let a later walk overflow the stack, and a
 chain of expressions drops level by level. An error met while a Python value converts keeps its own type across the

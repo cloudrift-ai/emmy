@@ -181,7 +181,6 @@ pub(crate) fn merge_sibling_reduce_loops_here(body: &Body) -> Body {
     }
     let mut out: Vec<Arc<Statement>> = Vec::new();
     let mut consumed: HashSet<usize> = HashSet::new();
-    let mut changed = false;
     for (i, s) in items.iter().enumerate() {
         if consumed.contains(&i) {
             continue;
@@ -195,6 +194,7 @@ pub(crate) fn merge_sibling_reduce_loops_here(body: &Body) -> Body {
             continue;
         }
         let mut merged = first.clone();
+        let mut absorbed = false;
         for j in i + 1..items.len() {
             if consumed.contains(&j) {
                 continue;
@@ -243,19 +243,15 @@ pub(crate) fn merge_sibling_reduce_loops_here(body: &Body) -> Body {
                 seed: merged.seed,
             };
             consumed.insert(j);
-            changed = true;
+            absorbed = true;
         }
-        out.push(if consumed.is_empty() && !changed {
-            s.clone()
-        } else {
+        out.push(if absorbed {
             Arc::new(Statement::Loop(merged))
+        } else {
+            s.clone()
         });
     }
-    if changed {
-        Body::new(out)
-    } else {
-        body.clone()
-    }
+    body.rebuilt(out)
 }
 
 /// Merge sibling reduce loops with one axis into one loop whose body is the concatenation; parents before children.

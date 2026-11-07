@@ -82,6 +82,8 @@ impl KindFlags {
 pub const PURE: KindFlags = KindFlags(1);
 pub const SIDE_EFFECTS: KindFlags = KindFlags(2);
 pub const DEPS_DEEP: KindFlags = KindFlags(4);
+/// The kind checks its fields on construction (`validate`, in the protocol's checks).
+pub const CHECKED: KindFlags = KindFlags(8);
 
 /// Every statement kind and record, declared once. `$callback` receives the list and generates from it.
 #[macro_export]
@@ -116,7 +118,7 @@ macro_rules! with_kinds {
                 /// assigns the names from that vector and touches no memory; it sits right before the names' consumer. Measured
                 /// on the V100: unpacking at the load instead keeps every element live across the mma stream and ptxas then
                 /// serializes the loads behind it (a 128x128 partial 84 us against 67).
-                shared Load {PURE} {
+                shared Load {PURE | CHECKED} {
                     names: Names [DEFINES],
                     input: Name [BUFFER_READ],
                     index: Exprs [EXPRESSION | READS],
@@ -144,7 +146,7 @@ macro_rules! with_kinds {
                 /// n-ary, so identity lists its terms by value and there is no chain of binary operations whose shape would need
                 /// a canonical order. `args` are SSA names, one per term after normalization, no coefficient zero; a literal
                 /// operand is a coefficient or the `offset`. A product of two values stays an `Assign`.
-                shared Affine {PURE} {
+                shared Affine {PURE | CHECKED} {
                     name: Name [DEFINES],
                     args: Names [READS],
                     coefficients: Floats [],
@@ -249,7 +251,7 @@ macro_rules! with_kinds {
                 ///
                 /// `value_dtype` is optional; when set, names the SSA-value dtype being stored. Stamped by `030_stamp_types`;
                 /// downstream passes read it instead of querying `ctx.ssa_dtypes` at render time.
-                shared Write {SIDE_EFFECTS} {
+                shared Write {SIDE_EFFECTS | CHECKED} {
                     output: Name [BUFFER_WRITE],
                     index: Exprs [EXPRESSION | READS],
                     values: Names [READS],
@@ -262,7 +264,7 @@ macro_rules! with_kinds {
                 /// At each iteration coord, exactly one branch's `select` predicate should be True; its `value` is bound to
                 /// `name` in the SSA scope. Branches are expected to be disjoint; later branches act as catch-alls when no
                 /// earlier predicate matches.
-                shared Select {PURE} {
+                shared Select {PURE | CHECKED} {
                     name: Name [DEFINES],
                     branches: Branches [RECORD],
                 }
@@ -350,7 +352,7 @@ macro_rules! with_kinds {
                 ///
                 /// Fusion expands its calls before a LoopOp is built. They are not members of Tile IR lambdas, and a body that
                 /// holds one has no normal form.
-                shared Call {DEPS_DEEP} {
+                shared Call {DEPS_DEEP | CHECKED} {
                     name: Name [DEFINES],
                     target: SubroutineRef [],
                     args: Exprs [EXPRESSION | READS],
@@ -418,7 +420,7 @@ macro_rules! with_kinds {
                 /// an aux thread wraps onto the CTA's first cells — its BLOCK-axis vars (functions of `blockIdx` alone) are
                 /// correct (the producer fill needs the CTA tile origin), its unit/lane vars alias a compute cell and are never
                 /// read (the producer branch guards on the raw `threadIdx.x`, and the store side is guarded to compute threads).
-                kernel Tile {} {
+                kernel Tile {CHECKED} {
                     axes: Axes [AXIS],
                     body: Body [BODY],
                     block_threads: Option<i64> [] = None,
@@ -547,7 +549,7 @@ macro_rules! with_kinds {
                 /// Named-barrier support: `barrier_id > 0` routes the per-iter sync to `bar.sync <id>, <count>` instead of
                 /// `__syncthreads()` — required inside a warp-specialized consumer branch (a __syncthreads on a warp-divergent
                 /// cond is UB).
-                kernel TreeHalve {} {
+                kernel TreeHalve {CHECKED} {
                     bufs: Names [],
                     state: Names [READS],
                     state_b: Names [LOCAL],
@@ -580,7 +582,7 @@ macro_rules! with_kinds {
                 /// reduce has no data-dependent divergence and the only enclosing guard is warp-uniform), so `__activemask()`
                 /// returns exactly the participating lanes — correct for a partial warp, a full warp, AND a non-warp-multiple
                 /// block's partial final warp (where no single static literal mask is correct per warp).
-                kernel WarpShuffle {} {
+                kernel WarpShuffle {CHECKED} {
                     state: Names [READS],
                     state_b: Names [LOCAL],
                     combine_states: Stmts [STMTS],
@@ -808,7 +810,7 @@ macro_rules! with_kinds {
                 ///
                 /// The discipline around the cells (:class:`WgmmaFence`, :class:`WgmmaCommit`, :class:`WgmmaWait`) is the
                 /// lowering's: nothing here orders the accumulator read.
-                kernel WgmmaMma {} {
+                kernel WgmmaMma {CHECKED} {
                     c_frags: Names [UPDATES],
                     b_desc: Name [READS],
                     shape: Shape3 [],
@@ -874,7 +876,7 @@ macro_rules! with_kinds {
                 /// finalize on the mma tier: every split partition's C fragment adds into the (per-launch zero-init'd) output.
                 /// f16 / bf16 keep the vectorized row pair (native packed-pair `atomicAdd`); an f32 destination has no packed
                 /// atomic below sm_90, so it drops to per-element scalar `atomicAdd`\ s.
-                kernel RegStore {} {
+                kernel RegStore {CHECKED} {
                     dst_buffer: Name [BUFFER_WRITE],
                     dst_index: Exprs [EXPRESSION],
                     frag: Name [READS],
@@ -899,7 +901,7 @@ macro_rules! with_kinds {
             }
             records {
                 /// One branch of a `Select` body statement.
-                SelectBranch {
+                shared SelectBranch {
                     value: Name [READS],
                     select: Expression [EXPRESSION | READS],
                 }
@@ -909,7 +911,7 @@ macro_rules! with_kinds {
                 /// an SSA rename keeps them consistent with their definitions; - `UNIFORM` — `names` is the one cell-uniform
                 /// scalar, or `expressions` its one literal; - `COORD` — `expressions` is the one predicate; - `GMEM` — `buffer`
                 /// is the buffer read and `expressions` its index template.
-                FragmentArg {
+                kernel FragmentArg {
                     kind: Name [],
                     names: Names [READS] = Names::from([]),
                     expressions: Exprs [EXPRESSION] = Exprs::from([]),
@@ -957,7 +959,7 @@ macro_rules! __has_default {
 macro_rules! define_kinds {
     (
         kinds { $( $(#[doc = $doc:literal])* $layer:ident $Kind:ident {$($flag:tt)|*} { $( $field:ident : $ty:ty [$($role:ident)|*] $(= $default:expr)? ,)* } )* }
-        records { $( $(#[doc = $rdoc:literal])* $Record:ident { $( $rfield:ident : $rty:ty [$($rrole:ident)|*] $(= $rdefault:expr)? ,)* } )* }
+        records { $( $(#[doc = $rdoc:literal])* $rlayer:ident $Record:ident { $( $rfield:ident : $rty:ty [$($rrole:ident)|*] $(= $rdefault:expr)? ,)* } )* }
     ) => {
         $(
             $(#[doc = $doc])*
@@ -995,7 +997,49 @@ macro_rules! define_kinds {
 
             #[allow(non_upper_case_globals, dead_code, unused_variables, unused_mut)]
             impl $Record {
+                pub const LAYER: Layer = define_kinds!(@layer $rlayer);
                 define_kinds!(@fields $Record { $( $rfield : $rty [$($rrole)|*] $(= $rdefault)? ,)* });
+            }
+
+            /// A record is a field of the kind that holds it: spelled on the header as its name over its own fields.
+            impl $crate::kinds::field::Field for $Record {
+                fn ty() -> $crate::kinds::field::Ty {
+                    $crate::kinds::field::Ty::Record($Record::NAME)
+                }
+                fn visit(&self, _roles: Roles, visitor: &mut dyn $crate::kinds::field::Visitor) {
+                    $Record::visit(self, visitor);
+                }
+                fn rewrite(&self, _roles: Roles, rewriter: &mut dyn $crate::kinds::field::Rewriter) -> Self {
+                    $Record::rewrite(self, rewriter)
+                }
+                fn same(&self, other: &Self) -> bool {
+                    $Record::same(self, other)
+                }
+                fn spell(&self, out: &mut String) -> $crate::Result<()> {
+                    out.push_str($Record::NAME);
+                    let fields = self.header_fields()?;
+                    if !fields.is_empty() {
+                        out.push('(');
+                        for (index, (name, text)) in fields.iter().enumerate() {
+                            if index > 0 {
+                                out.push_str(", ");
+                            }
+                            out.push_str(name);
+                            out.push('=');
+                            out.push_str(text);
+                        }
+                        out.push(')');
+                    }
+                    Ok(())
+                }
+                fn from_value(value: $crate::kinds::field::Value) -> $crate::Result<Self> {
+                    match value {
+                        $crate::kinds::field::Value::Record(kind, values) if kind == $Record::NAME => {
+                            $Record::from_values(values)
+                        }
+                        other => Err(other.mismatch(concat!("a ", stringify!($Record)))),
+                    }
+                }
             }
         )*
 
@@ -1081,14 +1125,21 @@ macro_rules! define_kinds {
                 match self { $( Statement::$Kind(k) => Statement::$Kind(k.with_op(op)), )* }
             }
 
-            /// The dtype a value-defining kind stamps, when it has one.
+            /// The dtype a kind's `dtype` field holds: the value-defining shared kinds, and TreeHalve, WarpShuffle,
+            /// FragmentRowReduce and RegFragment, whose field is typed `DType` too.
             pub fn dtype(&self) -> Option<&$crate::kinds::field::DType> {
                 match self { $( Statement::$Kind(k) => k.dtype(), )* }
             }
 
-            /// The one name a single-value kind defines.
+            /// The one name a kind's defining `name` field binds: the single-value shared kinds, Call, and
+            /// RegFragment and WgmmaDescriptor.
             pub fn name(&self) -> Option<&$crate::Name> {
                 match self { $( Statement::$Kind(k) => k.name(), )* }
+            }
+
+            /// The checks a kind makes on construction: `validate` of every `CHECKED` kind, nothing for the others.
+            pub fn check(&self) -> $crate::Result<()> {
+                match self { $( Statement::$Kind(k) => define_kinds!(@check k {$($flag)|*}), )* }
             }
 
             pub fn visit(&self, visitor: &mut dyn $crate::kinds::field::Visitor) {
@@ -1219,6 +1270,9 @@ macro_rules! define_kinds {
     };
     (@layer shared) => { Layer::Shared };
     (@layer kernel) => { Layer::Kernel };
+    (@check $k:ident {}) => {{ let _ = &$k; Ok(()) }};
+    (@check $k:ident {CHECKED $(| $rest:tt)*}) => { $k.validate() };
+    (@check $k:ident {$flag:tt $(| $rest:tt)*}) => { define_kinds!(@check $k {$($rest)|*}) };
     (@at_default $self:ident $field:ident $ty:ty = $default:expr) => {
         <$ty as $crate::kinds::field::Field>::equals(&$self.$field, &$default)
     };
@@ -1247,3 +1301,31 @@ pub use crate::kinds::field::{
 };
 
 with_kinds!(define_kinds);
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The declaration list, as kinds and records with their fields in order: what every stored body's text, every
+    /// golden and every tune DB key spell. A change here is a change to all of them.
+    #[test]
+    fn the_declarations_are_pinned() {
+        let mut listing = String::new();
+        for kind in Kind::ALL {
+            let fields: Vec<&str> = kind.fields().iter().map(|f| f.name).collect();
+            listing.push_str(&format!("{} {}\n", kind.name(), fields.join(" ")));
+        }
+        for (name, fields) in [
+            (SelectBranch::NAME, SelectBranch::FIELDS),
+            (FragmentArg::NAME, FragmentArg::FIELDS),
+        ] {
+            let fields: Vec<&str> = fields.iter().map(|f| f.name).collect();
+            listing.push_str(&format!("{name} {}\n", fields.join(" ")));
+        }
+        assert_eq!(
+            blake3::hash(listing.as_bytes()).to_hex().as_str(),
+            "d768243b85f496eff1748ec5c140db448a54bf3af4c747de59a310c24a656bd5",
+            "{listing}"
+        );
+    }
+}

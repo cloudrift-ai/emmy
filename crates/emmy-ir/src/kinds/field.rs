@@ -178,7 +178,7 @@ pub enum Value {
 }
 
 impl Value {
-    fn mismatch(&self, wanted: &str) -> Error {
+    pub(crate) fn mismatch(&self, wanted: &str) -> Error {
         Error::Value(format!("expected {wanted}, got {self:?}"))
     }
 }
@@ -227,25 +227,21 @@ pub trait Field: Clone + PartialEq + Eq + Hash + std::fmt::Debug + Sized + 'stat
     fn is_block() -> bool {
         false
     }
-    /// This field as an operation, when it is one.
+    /// This field as an operation: `Op` answers.
     fn as_op(&self) -> Option<&Op> {
-        (self as &dyn std::any::Any).downcast_ref()
+        None
     }
     /// This field with `op` in place of the operation it is; itself when it is none.
-    fn with_op(&self, op: &Op) -> Self {
-        (op as &dyn std::any::Any)
-            .downcast_ref::<Self>()
-            .map_or_else(|| self.clone(), Clone::clone)
+    fn with_op(&self, _op: &Op) -> Self {
+        self.clone()
     }
-    /// This field as a dtype, when it is one or holds one.
+    /// This field as a dtype: `DType` answers, and an `Option` holding one.
     fn as_dtype(&self) -> Option<&DType> {
-        let any = self as &dyn std::any::Any;
-        any.downcast_ref::<DType>()
-            .or_else(|| any.downcast_ref::<Option<DType>>().and_then(Option::as_ref))
+        None
     }
-    /// This field as a name, when it is one.
+    /// This field as a name: `Name` answers.
     fn as_name(&self) -> Option<&Name> {
-        (self as &dyn std::any::Any).downcast_ref()
+        None
     }
     /// The statements a block field holds.
     fn block(&self) -> Vec<Arc<Statement>> {
@@ -312,6 +308,9 @@ impl Field for Name {
             Value::Name(name) => Ok(name),
             other => Err(other.mismatch("a name")),
         }
+    }
+    fn as_name(&self) -> Option<&Name> {
+        Some(self)
     }
 }
 
@@ -381,6 +380,9 @@ impl<T: Field> Field for Option<T> {
     }
     fn is_block() -> bool {
         T::is_block()
+    }
+    fn as_dtype(&self) -> Option<&DType> {
+        self.as_ref().and_then(Field::as_dtype)
     }
     fn block(&self) -> Vec<Arc<Statement>> {
         self.as_ref().map_or_else(Vec::new, |value| value.block())
@@ -583,55 +585,9 @@ impl Field for Stmts {
     }
 }
 
-macro_rules! record_field {
-    ($Record:ident) => {
-        impl Field for $Record {
-            fn ty() -> Ty {
-                Ty::Record($Record::NAME)
-            }
-            fn visit(&self, _roles: Roles, visitor: &mut dyn Visitor) {
-                $Record::visit(self, visitor);
-            }
-            fn rewrite(&self, _roles: Roles, rewriter: &mut dyn Rewriter) -> Self {
-                $Record::rewrite(self, rewriter)
-            }
-            fn same(&self, other: &Self) -> bool {
-                $Record::same(self, other)
-            }
-            fn spell(&self, out: &mut String) -> Result<()> {
-                out.push_str($Record::NAME);
-                let fields = self.header_fields()?;
-                if !fields.is_empty() {
-                    out.push('(');
-                    for (index, (name, text)) in fields.iter().enumerate() {
-                        if index > 0 {
-                            out.push_str(", ");
-                        }
-                        out.push_str(name);
-                        out.push('=');
-                        out.push_str(text);
-                    }
-                    out.push(')');
-                }
-                Ok(())
-            }
-            fn from_value(value: Value) -> Result<Self> {
-                match value {
-                    Value::Record(kind, values) if kind == $Record::NAME => {
-                        $Record::from_values(values)
-                    }
-                    other => Err(other.mismatch(concat!("a ", stringify!($Record)))),
-                }
-            }
-        }
-    };
-}
-
-record_field!(SelectBranch);
-record_field!(FragmentArg);
-
+/// A field that plays no role: its type tag, its spelling, its reading, and any accessor it answers.
 macro_rules! plain_field {
-    ($ty:ty, $tag:expr, |$this:ident, $out:ident| $spell:expr, |$value:ident| $read:expr) => {
+    ($ty:ty, $tag:expr, |$this:ident, $out:ident| $spell:expr, |$value:ident| $read:expr $(, $extra:item)*) => {
         impl Field for $ty {
             fn ty() -> Ty {
                 $tag
@@ -648,6 +604,7 @@ macro_rules! plain_field {
             fn from_value($value: Value) -> Result<Self> {
                 $read
             }
+            $( $extra )*
         }
     };
 }
@@ -689,6 +646,9 @@ plain_field!(
     |value| match value {
         Value::Name(name) => Ok(DType(name)),
         other => Err(other.mismatch("a dtype")),
+    },
+    fn as_dtype(&self) -> Option<&DType> {
+        Some(self)
     }
 );
 
@@ -699,6 +659,12 @@ plain_field!(
     |value| match value {
         Value::Name(name) => Ok(Op::new(&name)),
         other => Err(other.mismatch("an elementwise op")),
+    },
+    fn as_op(&self) -> Option<&Op> {
+        Some(self)
+    },
+    fn with_op(&self, op: &Op) -> Self {
+        op.clone()
     }
 );
 
