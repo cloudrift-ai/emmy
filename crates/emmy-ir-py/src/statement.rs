@@ -744,11 +744,12 @@ pub use generated::*;
 
 // --- what the shared kinds know beyond their fields -----------------------------------------------
 
-fn load_of(slf: &Bound<'_, Load>) -> PyResult<emmy_ir::kinds::Load> {
-    match &*slf.as_super().get().stmt {
-        Statement::Load(load) => Ok(load.clone()),
-        _ => Err(PyTypeError::new_err("not a Load")),
-    }
+/// The statement behind a kind's class, as that kind.
+fn inner<'a, K>(base: &'a PyStatement) -> PyResult<&'a K>
+where
+    &'a K: TryFrom<&'a Statement, Error = emmy_ir::Error>,
+{
+    <&K>::try_from(&*base.stmt).py()
 }
 
 #[pymethods]
@@ -756,7 +757,7 @@ impl Load {
     /// Scalar-only shorthand for `names[0]`.
     #[getter]
     fn name<'py>(slf: &Bound<'py, Self>) -> PyResult<Bound<'py, PyAny>> {
-        let load = load_of(slf)?;
+        let load = inner::<emmy_ir::kinds::Load>(slf.as_super().get())?;
         if load.names.len() != 1 {
             return Err(pyo3::exceptions::PyAssertionError::new_err(format!(
                 "Load has {} names — use .names for vector Loads",
@@ -768,24 +769,25 @@ impl Load {
 
     #[getter]
     fn width(slf: &Bound<'_, Self>) -> PyResult<usize> {
-        Ok(load_of(slf)?.names.len())
+        Ok(inner::<emmy_ir::kinds::Load>(slf.as_super().get())?
+            .names
+            .len())
     }
 
     #[getter]
     fn is_vector(slf: &Bound<'_, Self>) -> PyResult<bool> {
-        Ok(load_of(slf)?.names.len() > 1)
+        Ok(inner::<emmy_ir::kinds::Load>(slf.as_super().get())?
+            .names
+            .len()
+            > 1)
     }
 
     #[getter]
     fn is_scalar(slf: &Bound<'_, Self>) -> PyResult<bool> {
-        Ok(load_of(slf)?.names.len() == 1)
-    }
-}
-
-fn write_of(slf: &Bound<'_, Write>) -> PyResult<emmy_ir::kinds::Write> {
-    match &*slf.as_super().get().stmt {
-        Statement::Write(write) => Ok(write.clone()),
-        _ => Err(PyTypeError::new_err("not a Write")),
+        Ok(inner::<emmy_ir::kinds::Load>(slf.as_super().get())?
+            .names
+            .len()
+            == 1)
     }
 }
 
@@ -794,7 +796,7 @@ impl Write {
     /// Scalar-only shorthand for `values[0]`.
     #[getter]
     fn value<'py>(slf: &Bound<'py, Self>) -> PyResult<Bound<'py, PyAny>> {
-        let write = write_of(slf)?;
+        let write = inner::<emmy_ir::kinds::Write>(slf.as_super().get())?;
         if write.values.len() != 1 {
             return Err(pyo3::exceptions::PyAssertionError::new_err(format!(
                 "Write has {} values — use .values for vector Writes",
@@ -806,17 +808,25 @@ impl Write {
 
     #[getter]
     fn width(slf: &Bound<'_, Self>) -> PyResult<usize> {
-        Ok(write_of(slf)?.values.len())
+        Ok(inner::<emmy_ir::kinds::Write>(slf.as_super().get())?
+            .values
+            .len())
     }
 
     #[getter]
     fn is_vector(slf: &Bound<'_, Self>) -> PyResult<bool> {
-        Ok(write_of(slf)?.values.len() > 1)
+        Ok(inner::<emmy_ir::kinds::Write>(slf.as_super().get())?
+            .values
+            .len()
+            > 1)
     }
 
     #[getter]
     fn is_scalar(slf: &Bound<'_, Self>) -> PyResult<bool> {
-        Ok(write_of(slf)?.values.len() == 1)
+        Ok(inner::<emmy_ir::kinds::Write>(slf.as_super().get())?
+            .values
+            .len()
+            == 1)
     }
 }
 
@@ -825,9 +835,7 @@ impl Affine {
     /// `(coefficient, arg)` per term.
     #[getter]
     fn terms<'py>(slf: &Bound<'py, Self>) -> PyResult<Bound<'py, PyTuple>> {
-        let Statement::Affine(affine) = &*slf.as_super().get().stmt else {
-            return Err(PyTypeError::new_err("not an Affine"));
-        };
+        let affine: &emmy_ir::kinds::Affine = inner(slf.as_super().get())?;
         let items: PyResult<Vec<Bound<'py, PyTuple>>> = affine
             .terms()
             .map(|(c, arg)| {
@@ -845,9 +853,7 @@ impl Affine {
 
     /// The same value as binary `Assign`s over `Let`-bound literals, the last one named `name`.
     fn as_assigns<'py>(slf: &Bound<'py, Self>) -> PyResult<Bound<'py, pyo3::types::PyList>> {
-        let Statement::Affine(affine) = &*slf.as_super().get().stmt else {
-            return Err(PyTypeError::new_err("not an Affine"));
-        };
+        let affine: &emmy_ir::kinds::Affine = inner(slf.as_super().get())?;
         let items: PyResult<Vec<Py<PyAny>>> = affine
             .as_assigns()
             .iter()
@@ -862,33 +868,25 @@ impl Accum {
     /// The identity value of the accumulator.
     #[getter]
     fn init<'py>(slf: &Bound<'py, Self>) -> PyResult<Bound<'py, PyAny>> {
-        let Statement::Accum(accum) = &*slf.as_super().get().stmt else {
-            return Err(PyTypeError::new_err("not an Accum"));
-        };
+        let accum: &emmy_ir::kinds::Accum = inner(slf.as_super().get())?;
         PyExpression::wrap(slf.py(), &accum.init())
     }
 
     #[getter]
     fn associative(slf: &Bound<'_, Self>) -> PyResult<bool> {
-        let Statement::Accum(accum) = &*slf.as_super().get().stmt else {
-            return Err(PyTypeError::new_err("not an Accum"));
-        };
+        let accum: &emmy_ir::kinds::Accum = inner(slf.as_super().get())?;
         Ok(accum.op.associative())
     }
 
     #[getter]
     fn commutative(slf: &Bound<'_, Self>) -> PyResult<bool> {
-        let Statement::Accum(accum) = &*slf.as_super().get().stmt else {
-            return Err(PyTypeError::new_err("not an Accum"));
-        };
+        let accum: &emmy_ir::kinds::Accum = inner(slf.as_super().get())?;
         Ok(accum.op.commutative)
     }
 
     #[getter]
     fn has_identity(slf: &Bound<'_, Self>) -> PyResult<bool> {
-        let Statement::Accum(accum) = &*slf.as_super().get().stmt else {
-            return Err(PyTypeError::new_err("not an Accum"));
-        };
+        let accum: &emmy_ir::kinds::Accum = inner(slf.as_super().get())?;
         Ok(accum.op.identity.is_some())
     }
 }
@@ -898,9 +896,7 @@ impl Carry {
     /// The axes of the cell this statement defines.
     #[getter]
     fn cells<'py>(slf: &Bound<'py, Self>) -> PyResult<Bound<'py, PyTuple>> {
-        let Statement::Carry(carry) = &*slf.as_super().get().stmt else {
-            return Err(PyTypeError::new_err("not a Carry"));
-        };
+        let carry: &emmy_ir::kinds::Carry = inner(slf.as_super().get())?;
         PyTuple::new(
             slf.py(),
             carry
@@ -934,18 +930,14 @@ impl Loop {
     /// The carried states this loop carries, each with its cell shape.
     #[getter]
     fn carries<'py>(slf: &Bound<'py, Self>) -> PyResult<Bound<'py, PyDict>> {
-        let Statement::Loop(l) = &*slf.as_super().get().stmt else {
-            return Err(PyTypeError::new_err("not a Loop"));
-        };
+        let l: &emmy_ir::kinds::Loop = inner(slf.as_super().get())?;
         carries_dict(slf.py(), l.carries())
     }
 
     /// A loop is a reduce loop iff it carries something.
     #[getter]
     fn is_reduce(slf: &Bound<'_, Self>) -> PyResult<bool> {
-        let Statement::Loop(l) = &*slf.as_super().get().stmt else {
-            return Err(PyTypeError::new_err("not a Loop"));
-        };
+        let l: &emmy_ir::kinds::Loop = inner(slf.as_super().get())?;
         Ok(l.is_reduce())
     }
 }
@@ -954,9 +946,7 @@ impl Loop {
 impl StridedLoop {
     #[getter]
     fn is_reduce(slf: &Bound<'_, Self>) -> PyResult<bool> {
-        let Statement::StridedLoop(l) = &*slf.as_super().get().stmt else {
-            return Err(PyTypeError::new_err("not a StridedLoop"));
-        };
+        let l: &emmy_ir::kinds::StridedLoop = inner(slf.as_super().get())?;
         Ok(l.is_reduce())
     }
 }

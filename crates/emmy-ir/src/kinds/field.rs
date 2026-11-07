@@ -227,6 +227,26 @@ pub trait Field: Clone + PartialEq + Eq + Hash + std::fmt::Debug + Sized + 'stat
     fn is_block() -> bool {
         false
     }
+    /// This field as an operation, when it is one.
+    fn as_op(&self) -> Option<&Op> {
+        (self as &dyn std::any::Any).downcast_ref()
+    }
+    /// This field with `op` in place of the operation it is; itself when it is none.
+    fn with_op(&self, op: &Op) -> Self {
+        (op as &dyn std::any::Any)
+            .downcast_ref::<Self>()
+            .map_or_else(|| self.clone(), Clone::clone)
+    }
+    /// This field as a dtype, when it is one or holds one.
+    fn as_dtype(&self) -> Option<&DType> {
+        let any = self as &dyn std::any::Any;
+        any.downcast_ref::<DType>()
+            .or_else(|| any.downcast_ref::<Option<DType>>().and_then(Option::as_ref))
+    }
+    /// This field as a name, when it is one.
+    fn as_name(&self) -> Option<&Name> {
+        (self as &dyn std::any::Any).downcast_ref()
+    }
     /// The statements a block field holds.
     fn block(&self) -> Vec<Arc<Statement>> {
         vec![]

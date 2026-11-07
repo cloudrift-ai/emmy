@@ -968,76 +968,20 @@ macro_rules! define_kinds {
 
             #[allow(non_upper_case_globals, dead_code, unused_variables, unused_mut)]
             impl $Kind {
-                pub const NAME: &'static str = stringify!($Kind);
                 pub const LAYER: Layer = define_kinds!(@layer $layer);
                 pub const FLAGS: KindFlags = KindFlags::NONE $(.or($flag))*;
-                pub const FIELDS: &'static [FieldInfo] = &[
-                    $( FieldInfo { name: stringify!($field), roles: Roles::NONE $(.or($role))*, has_default: $crate::__has_default!($($default)?) }, )*
-                ];
+                define_kinds!(@fields $Kind { $( $field : $ty [$($role)|*] $(= $default)? ,)* });
+            }
 
-                /// Visit every role-playing value of this statement, in field order.
-                pub fn visit(&self, visitor: &mut dyn $crate::kinds::field::Visitor) {
-                    $( <$ty as $crate::kinds::field::Field>::visit(&self.$field, Roles::NONE $(.or($role))*, visitor); )*
-                }
+            impl<'a> TryFrom<&'a Statement> for &'a $Kind {
+                type Error = $crate::Error;
 
-                /// This statement with every role-playing value passed through `rewriter`.
-                pub fn rewrite(&self, rewriter: &mut dyn $crate::kinds::field::Rewriter) -> $Kind {
-                    $Kind { $( $field: <$ty as $crate::kinds::field::Field>::rewrite(&self.$field, Roles::NONE $(.or($role))*, rewriter), )* }
-                }
-
-                /// Whether `other` holds the same values, field by field, by identity where a field is shared.
-                pub fn same(&self, other: &$Kind) -> bool {
-                    true $( && <$ty as $crate::kinds::field::Field>::same(&self.$field, &other.$field) )*
-                }
-
-                /// Each field's header text, `None` for a block field or one at its default.
-                pub fn header_fields(&self) -> $crate::Result<Vec<(&'static str, String)>> {
-                    #[allow(unused_mut)]
-                    let mut out = Vec::new();
-                    $(
-                        if !<$ty as $crate::kinds::field::Field>::is_block() {
-                            let at_default = define_kinds!(@at_default self $field $ty $(= $default)?);
-                            if !at_default {
-                                let mut text = String::new();
-                                <$ty as $crate::kinds::field::Field>::spell(&self.$field, &mut text)?;
-                                out.push((stringify!($field), text));
-                            }
-                        }
-                    )*
-                    Ok(out)
-                }
-
-                /// Each block field's statements, left out at its default.
-                pub fn block_fields(&self) -> Vec<(&'static str, Vec<std::sync::Arc<Statement>>)> {
-                    #[allow(unused_mut)]
-                    let mut out = Vec::new();
-                    $(
-                        if <$ty as $crate::kinds::field::Field>::is_block() {
-                            let at_default = define_kinds!(@at_default self $field $ty $(= $default)?);
-                            if !at_default {
-                                out.push((stringify!($field), <$ty as $crate::kinds::field::Field>::block(&self.$field)));
-                            }
-                        }
-                    )*
-                    out
-                }
-
-                /// The type a field is read by.
-                pub fn field_ty(name: &str) -> Option<$crate::kinds::field::Ty> {
-                    match name {
-                        $( stringify!($field) => Some(<$ty as $crate::kinds::field::Field>::ty()), )*
-                        _ => None,
+                /// The statement as this kind, or a type error naming the kind it is.
+                fn try_from(stmt: &'a Statement) -> $crate::Result<&'a $Kind> {
+                    match stmt {
+                        Statement::$Kind(kind) => Ok(kind),
+                        other => Err($crate::Error::Type(format!("not a {}: a {}", stringify!($Kind), other.kind()))),
                     }
-                }
-
-                /// Build from the values the text reader collected, defaults filling what the text left out.
-                pub fn from_values(mut values: $crate::kinds::field::Values) -> $crate::Result<$Kind> {
-                    #[allow(unused_mut, unused_variables)]
-                    let out = $Kind {
-                        $( $field: define_kinds!(@take values $Kind $field $ty $(= $default)?), )*
-                    };
-                    values.finish(Self::NAME)?;
-                    Ok(out)
                 }
             }
         )*
@@ -1051,52 +995,7 @@ macro_rules! define_kinds {
 
             #[allow(non_upper_case_globals, dead_code, unused_variables, unused_mut)]
             impl $Record {
-                pub const NAME: &'static str = stringify!($Record);
-                pub const FIELDS: &'static [FieldInfo] = &[
-                    $( FieldInfo { name: stringify!($rfield), roles: Roles::NONE $(.or($rrole))*, has_default: $crate::__has_default!($($rdefault)?) }, )*
-                ];
-
-                pub fn visit(&self, visitor: &mut dyn $crate::kinds::field::Visitor) {
-                    $( <$rty as $crate::kinds::field::Field>::visit(&self.$rfield, Roles::NONE $(.or($rrole))*, visitor); )*
-                }
-
-                pub fn rewrite(&self, rewriter: &mut dyn $crate::kinds::field::Rewriter) -> $Record {
-                    $Record { $( $rfield: <$rty as $crate::kinds::field::Field>::rewrite(&self.$rfield, Roles::NONE $(.or($rrole))*, rewriter), )* }
-                }
-
-                pub fn same(&self, other: &$Record) -> bool {
-                    true $( && <$rty as $crate::kinds::field::Field>::same(&self.$rfield, &other.$rfield) )*
-                }
-
-                pub fn header_fields(&self) -> $crate::Result<Vec<(&'static str, String)>> {
-                    #[allow(unused_mut)]
-                    let mut out = Vec::new();
-                    $(
-                        let at_default = define_kinds!(@at_default self $rfield $rty $(= $rdefault)?);
-                        if !at_default {
-                            let mut text = String::new();
-                            <$rty as $crate::kinds::field::Field>::spell(&self.$rfield, &mut text)?;
-                            out.push((stringify!($rfield), text));
-                        }
-                    )*
-                    Ok(out)
-                }
-
-                pub fn field_ty(name: &str) -> Option<$crate::kinds::field::Ty> {
-                    match name {
-                        $( stringify!($rfield) => Some(<$rty as $crate::kinds::field::Field>::ty()), )*
-                        _ => None,
-                    }
-                }
-
-                pub fn from_values(mut values: $crate::kinds::field::Values) -> $crate::Result<$Record> {
-                    #[allow(unused_mut, unused_variables)]
-                    let out = $Record {
-                        $( $rfield: define_kinds!(@take values $Record $rfield $rty $(= $rdefault)?), )*
-                    };
-                    values.finish(Self::NAME)?;
-                    Ok(out)
-                }
+                define_kinds!(@fields $Record { $( $rfield : $rty [$($rrole)|*] $(= $rdefault)? ,)* });
             }
         )*
 
@@ -1172,6 +1071,26 @@ macro_rules! define_kinds {
                 self.kind().fields()
             }
 
+            /// The operation a kind with an `op` field holds.
+            pub fn op(&self) -> Option<&$crate::kinds::elementwise::Op> {
+                match self { $( Statement::$Kind(k) => k.op(), )* }
+            }
+
+            /// This statement with another operation, for a kind that holds one; itself for any other.
+            pub fn with_op(&self, op: $crate::kinds::elementwise::Op) -> Statement {
+                match self { $( Statement::$Kind(k) => Statement::$Kind(k.with_op(op)), )* }
+            }
+
+            /// The dtype a value-defining kind stamps, when it has one.
+            pub fn dtype(&self) -> Option<&$crate::kinds::field::DType> {
+                match self { $( Statement::$Kind(k) => k.dtype(), )* }
+            }
+
+            /// The one name a single-value kind defines.
+            pub fn name(&self) -> Option<&$crate::Name> {
+                match self { $( Statement::$Kind(k) => k.name(), )* }
+            }
+
             pub fn visit(&self, visitor: &mut dyn $crate::kinds::field::Visitor) {
                 match self { $( Statement::$Kind(k) => k.visit(visitor), )* }
             }
@@ -1203,6 +1122,100 @@ macro_rules! define_kinds {
                 }
             }
         )*
+    };
+    (@fields $Type:ident { $( $field:ident : $ty:ty [$($role:ident)|*] $(= $default:expr)? ,)* }) => {
+        pub const NAME: &'static str = stringify!($Type);
+        pub const FIELDS: &'static [FieldInfo] = &[
+            $( FieldInfo { name: stringify!($field), roles: Roles::NONE $(.or($role))*, has_default: $crate::__has_default!($($default)?) }, )*
+        ];
+
+        /// Visit every role-playing value, in field order.
+        pub fn visit(&self, visitor: &mut dyn $crate::kinds::field::Visitor) {
+            $( <$ty as $crate::kinds::field::Field>::visit(&self.$field, Roles::NONE $(.or($role))*, visitor); )*
+        }
+
+        /// The same with every role-playing value passed through `rewriter`.
+        pub fn rewrite(&self, rewriter: &mut dyn $crate::kinds::field::Rewriter) -> $Type {
+            $Type { $( $field: <$ty as $crate::kinds::field::Field>::rewrite(&self.$field, Roles::NONE $(.or($role))*, rewriter), )* }
+        }
+
+        /// Whether `other` holds the same values, field by field, by identity where a field is shared.
+        pub fn same(&self, other: &$Type) -> bool {
+            true $( && <$ty as $crate::kinds::field::Field>::same(&self.$field, &other.$field) )*
+        }
+
+        /// Each field's header text, left out for a block field or one at its default.
+        pub fn header_fields(&self) -> $crate::Result<Vec<(&'static str, String)>> {
+            #[allow(unused_mut)]
+            let mut out = Vec::new();
+            $(
+                if !<$ty as $crate::kinds::field::Field>::is_block() {
+                    let at_default = define_kinds!(@at_default self $field $ty $(= $default)?);
+                    if !at_default {
+                        let mut text = String::new();
+                        <$ty as $crate::kinds::field::Field>::spell(&self.$field, &mut text)?;
+                        out.push((stringify!($field), text));
+                    }
+                }
+            )*
+            Ok(out)
+        }
+
+        /// Each block field's statements, left out at its default.
+        pub fn block_fields(&self) -> Vec<(&'static str, Vec<std::sync::Arc<Statement>>)> {
+            #[allow(unused_mut)]
+            let mut out = Vec::new();
+            $(
+                if <$ty as $crate::kinds::field::Field>::is_block() {
+                    let at_default = define_kinds!(@at_default self $field $ty $(= $default)?);
+                    if !at_default {
+                        out.push((stringify!($field), <$ty as $crate::kinds::field::Field>::block(&self.$field)));
+                    }
+                }
+            )*
+            out
+        }
+
+        /// The type a field is read by.
+        pub fn field_ty(name: &str) -> Option<$crate::kinds::field::Ty> {
+            match name {
+                $( stringify!($field) => Some(<$ty as $crate::kinds::field::Field>::ty()), )*
+                _ => None,
+            }
+        }
+
+        /// Build from the values the text reader collected, defaults filling what the text left out.
+        pub fn from_values(mut values: $crate::kinds::field::Values) -> $crate::Result<$Type> {
+            #[allow(unused_mut, unused_variables)]
+            let out = $Type {
+                $( $field: define_kinds!(@take values $Type $field $ty $(= $default)?), )*
+            };
+            values.finish(Self::NAME)?;
+            Ok(out)
+        }
+
+        /// The operation this kind holds: its `op` field, when it has one.
+        pub fn op(&self) -> Option<&$crate::kinds::elementwise::Op> {
+            $( if stringify!($field) == "op" { return <$ty as $crate::kinds::field::Field>::as_op(&self.$field); } )*
+            None
+        }
+
+        /// The same with another operation; itself when it holds none.
+        pub fn with_op(&self, op: $crate::kinds::elementwise::Op) -> $Type {
+            $Type { $( $field: if stringify!($field) == "op" { <$ty as $crate::kinds::field::Field>::with_op(&self.$field, &op) } else { self.$field.clone() }, )* }
+        }
+
+        /// The dtype a value-defining kind stamps: its `dtype` field, when it has one of that type.
+        pub fn dtype(&self) -> Option<&$crate::kinds::field::DType> {
+            $( if stringify!($field) == "dtype" { return <$ty as $crate::kinds::field::Field>::as_dtype(&self.$field); } )*
+            None
+        }
+
+        /// The one name a single-value kind defines: its `name` field, when that field defines.
+        pub fn name(&self) -> Option<&$crate::Name> {
+            $( if stringify!($field) == "name" && (Roles::NONE $(.or($role))*).contains_any(DEFINES) { return <$ty as $crate::kinds::field::Field>::as_name(&self.$field); } )*
+            None
+        }
     };
     (@layer shared) => { Layer::Shared };
     (@layer kernel) => { Layer::Kernel };

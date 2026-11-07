@@ -26,22 +26,63 @@ pub struct PyExpression {
     slots: [OnceLock<Py<PyAny>>; 3],
 }
 
-#[pyclass(extends = PyExpression, frozen, module = "emmy.compiler.ir.expression", name = "Var")]
-pub struct PyVar;
-#[pyclass(extends = PyExpression, frozen, module = "emmy.compiler.ir.expression", name = "Literal")]
-pub struct PyLiteral;
-#[pyclass(extends = PyExpression, frozen, module = "emmy.compiler.ir.expression", name = "Builtin")]
-pub struct PyBuiltin;
-#[pyclass(extends = PyExpression, frozen, module = "emmy.compiler.ir.expression", name = "BinaryExpression")]
-pub struct PyBinaryExpression;
-#[pyclass(extends = PyExpression, frozen, module = "emmy.compiler.ir.expression", name = "FunctionCallExpression")]
-pub struct PyFunctionCallExpression;
-#[pyclass(extends = PyExpression, frozen, module = "emmy.compiler.ir.expression", name = "TernaryExpression")]
-pub struct PyTernaryExpression;
-#[pyclass(extends = PyExpression, frozen, module = "emmy.compiler.ir.expression", name = "CastExpression")]
-pub struct PyCastExpression;
-#[pyclass(extends = PyExpression, frozen, module = "emmy.compiler.ir.expression", name = "FlatIndex")]
-pub struct PyFlatIndex;
+/// The expression classes: one per kind of expression, each with a getter per part of the kind, read once and kept
+/// in the expression's slots. The constructors follow, one per class, since no two take the same arguments.
+macro_rules! expression_classes {
+    ($( $Py:ident $name:literal : $Variant:ident $bind:tt |$py:ident| { $( $getter:ident = $slot:literal => $value:expr; )* } )*) => { $(
+        #[pyclass(extends = PyExpression, frozen, module = "emmy.compiler.ir.expression", name = $name)]
+        pub struct $Py;
+
+        #[pymethods]
+        impl $Py { $(
+            #[getter]
+            #[allow(unused_variables)]
+            fn $getter<'py>(slf: &Bound<'py, Self>) -> PyResult<Bound<'py, PyAny>> {
+                let base = slf.as_super().get();
+                let $py = slf.py();
+                let Expr::$Variant $bind = &*base.expr else {
+                    return Err(kind_error($name));
+                };
+                base.slot($py, $slot, || $value)
+            }
+        )* }
+    )* };
+}
+
+expression_classes! {
+    PyVar "Var": Var(name) |py| {
+        name = 0 => Ok(PyString::new(py, name).into_any().unbind());
+    }
+    PyLiteral "Literal": Literal(lit) |py| {
+        value = 0 => num_to_py(py, lit.value);
+        dtype = 1 => Ok(PyString::new(py, lit.dtype.name()).into_any().unbind());
+    }
+    PyBuiltin "Builtin": Builtin(name) |py| {
+        name = 0 => Ok(PyString::new(py, name).into_any().unbind());
+    }
+    PyBinaryExpression "BinaryExpression": Binary(op, left, right) |py| {
+        op = 0 => Ok(PyString::new(py, op.text()).into_any().unbind());
+        left = 1 => Ok(PyExpression::wrap(py, left)?.unbind());
+        right = 2 => Ok(PyExpression::wrap(py, right)?.unbind());
+    }
+    PyFunctionCallExpression "FunctionCallExpression": Call(name, args) |py| {
+        name = 0 => Ok(PyString::new(py, name).into_any().unbind());
+        args = 1 => args.to_py(py);
+    }
+    PyTernaryExpression "TernaryExpression": Ternary(cond, if_true, if_false) |py| {
+        cond = 0 => Ok(PyExpression::wrap(py, cond)?.unbind());
+        if_true = 1 => Ok(PyExpression::wrap(py, if_true)?.unbind());
+        if_false = 2 => Ok(PyExpression::wrap(py, if_false)?.unbind());
+    }
+    PyCastExpression "CastExpression": Cast(dtype, inner) |py| {
+        dtype = 0 => Ok(PyString::new(py, dtype).into_any().unbind());
+        expression = 1 => Ok(PyExpression::wrap(py, inner)?.unbind());
+    }
+    PyFlatIndex "FlatIndex": FlatIndex(buffer, index) |py| {
+        buffer = 0 => Ok(PyString::new(py, buffer).into_any().unbind());
+        index = 1 => index.to_py(py);
+    }
+}
 
 impl PyExpression {
     fn base(expr: Expression) -> PyExpression {
@@ -370,17 +411,6 @@ impl PyVar {
     fn new(name: &str) -> PyClassInitializer<Self> {
         PyClassInitializer::from(PyExpression::base(Expression::var(name))).add_subclass(PyVar)
     }
-
-    #[getter]
-    fn name<'py>(slf: &Bound<'py, Self>) -> PyResult<Bound<'py, PyAny>> {
-        let base = slf.as_super().get();
-        let Expr::Var(name) = &*base.expr else {
-            return Err(kind_error("Var"));
-        };
-        base.slot(slf.py(), 0, || {
-            Ok(PyString::new(slf.py(), name).into_any().unbind())
-        })
-    }
 }
 
 #[pymethods]
@@ -395,28 +425,6 @@ impl PyLiteral {
         }));
         Ok(PyClassInitializer::from(PyExpression::base(expr)).add_subclass(PyLiteral))
     }
-
-    #[getter]
-    fn value<'py>(slf: &Bound<'py, Self>) -> PyResult<Bound<'py, PyAny>> {
-        let base = slf.as_super().get();
-        let Expr::Literal(lit) = &*base.expr else {
-            return Err(kind_error("Literal"));
-        };
-        base.slot(slf.py(), 0, || num_to_py(slf.py(), lit.value))
-    }
-
-    #[getter]
-    fn dtype<'py>(slf: &Bound<'py, Self>) -> PyResult<Bound<'py, PyAny>> {
-        let base = slf.as_super().get();
-        let Expr::Literal(lit) = &*base.expr else {
-            return Err(kind_error("Literal"));
-        };
-        base.slot(slf.py(), 1, || {
-            Ok(PyString::new(slf.py(), lit.dtype.name())
-                .into_any()
-                .unbind())
-        })
-    }
 }
 
 #[pymethods]
@@ -427,17 +435,6 @@ impl PyBuiltin {
             name.into(),
         ))))
         .add_subclass(PyBuiltin)
-    }
-
-    #[getter]
-    fn name<'py>(slf: &Bound<'py, Self>) -> PyResult<Bound<'py, PyAny>> {
-        let base = slf.as_super().get();
-        let Expr::Builtin(name) = &*base.expr else {
-            return Err(kind_error("Builtin"));
-        };
-        base.slot(slf.py(), 0, || {
-            Ok(PyString::new(slf.py(), name).into_any().unbind())
-        })
     }
 }
 
@@ -456,39 +453,6 @@ impl PyBinaryExpression {
         };
         let expr = binary(op, expression_from_py(left)?, expression_from_py(right)?);
         Ok(PyClassInitializer::from(PyExpression::base(expr)).add_subclass(PyBinaryExpression))
-    }
-
-    #[getter]
-    fn op<'py>(slf: &Bound<'py, Self>) -> PyResult<Bound<'py, PyAny>> {
-        let base = slf.as_super().get();
-        let Expr::Binary(op, ..) = &*base.expr else {
-            return Err(kind_error("BinaryExpression"));
-        };
-        base.slot(slf.py(), 0, || {
-            Ok(PyString::new(slf.py(), op.text()).into_any().unbind())
-        })
-    }
-
-    #[getter]
-    fn left<'py>(slf: &Bound<'py, Self>) -> PyResult<Bound<'py, PyAny>> {
-        let base = slf.as_super().get();
-        let Expr::Binary(_, left, _) = &*base.expr else {
-            return Err(kind_error("BinaryExpression"));
-        };
-        base.slot(slf.py(), 1, || {
-            Ok(PyExpression::wrap(slf.py(), left)?.unbind())
-        })
-    }
-
-    #[getter]
-    fn right<'py>(slf: &Bound<'py, Self>) -> PyResult<Bound<'py, PyAny>> {
-        let base = slf.as_super().get();
-        let Expr::Binary(_, _, right) = &*base.expr else {
-            return Err(kind_error("BinaryExpression"));
-        };
-        base.slot(slf.py(), 2, || {
-            Ok(PyExpression::wrap(slf.py(), right)?.unbind())
-        })
     }
 
     /// How tightly the operator binds; the renderer parenthesizes by it.
@@ -513,26 +477,6 @@ impl PyFunctionCallExpression {
         Ok(PyClassInitializer::from(PyExpression::base(expr))
             .add_subclass(PyFunctionCallExpression))
     }
-
-    #[getter]
-    fn name<'py>(slf: &Bound<'py, Self>) -> PyResult<Bound<'py, PyAny>> {
-        let base = slf.as_super().get();
-        let Expr::Call(name, _) = &*base.expr else {
-            return Err(kind_error("FunctionCallExpression"));
-        };
-        base.slot(slf.py(), 0, || {
-            Ok(PyString::new(slf.py(), name).into_any().unbind())
-        })
-    }
-
-    #[getter]
-    fn args<'py>(slf: &Bound<'py, Self>) -> PyResult<Bound<'py, PyAny>> {
-        let base = slf.as_super().get();
-        let Expr::Call(_, args) = &*base.expr else {
-            return Err(kind_error("FunctionCallExpression"));
-        };
-        base.slot(slf.py(), 1, || args.to_py(slf.py()))
-    }
 }
 
 #[pymethods]
@@ -550,39 +494,6 @@ impl PyTernaryExpression {
         ));
         Ok(PyClassInitializer::from(PyExpression::base(expr)).add_subclass(PyTernaryExpression))
     }
-
-    #[getter]
-    fn cond<'py>(slf: &Bound<'py, Self>) -> PyResult<Bound<'py, PyAny>> {
-        let base = slf.as_super().get();
-        let Expr::Ternary(cond, ..) = &*base.expr else {
-            return Err(kind_error("TernaryExpression"));
-        };
-        base.slot(slf.py(), 0, || {
-            Ok(PyExpression::wrap(slf.py(), cond)?.unbind())
-        })
-    }
-
-    #[getter]
-    fn if_true<'py>(slf: &Bound<'py, Self>) -> PyResult<Bound<'py, PyAny>> {
-        let base = slf.as_super().get();
-        let Expr::Ternary(_, if_true, _) = &*base.expr else {
-            return Err(kind_error("TernaryExpression"));
-        };
-        base.slot(slf.py(), 1, || {
-            Ok(PyExpression::wrap(slf.py(), if_true)?.unbind())
-        })
-    }
-
-    #[getter]
-    fn if_false<'py>(slf: &Bound<'py, Self>) -> PyResult<Bound<'py, PyAny>> {
-        let base = slf.as_super().get();
-        let Expr::Ternary(_, _, if_false) = &*base.expr else {
-            return Err(kind_error("TernaryExpression"));
-        };
-        base.slot(slf.py(), 2, || {
-            Ok(PyExpression::wrap(slf.py(), if_false)?.unbind())
-        })
-    }
 }
 
 #[pymethods]
@@ -591,28 +502,6 @@ impl PyCastExpression {
     fn new(dtype: &str, expression: &Bound<'_, PyAny>) -> PyResult<PyClassInitializer<Self>> {
         let expr = Expression::new(Expr::Cast(dtype.into(), expression_from_py(expression)?));
         Ok(PyClassInitializer::from(PyExpression::base(expr)).add_subclass(PyCastExpression))
-    }
-
-    #[getter]
-    fn dtype<'py>(slf: &Bound<'py, Self>) -> PyResult<Bound<'py, PyAny>> {
-        let base = slf.as_super().get();
-        let Expr::Cast(dtype, _) = &*base.expr else {
-            return Err(kind_error("CastExpression"));
-        };
-        base.slot(slf.py(), 0, || {
-            Ok(PyString::new(slf.py(), dtype).into_any().unbind())
-        })
-    }
-
-    #[getter]
-    fn expression<'py>(slf: &Bound<'py, Self>) -> PyResult<Bound<'py, PyAny>> {
-        let base = slf.as_super().get();
-        let Expr::Cast(_, inner) = &*base.expr else {
-            return Err(kind_error("CastExpression"));
-        };
-        base.slot(slf.py(), 1, || {
-            Ok(PyExpression::wrap(slf.py(), inner)?.unbind())
-        })
     }
 }
 
@@ -626,26 +515,6 @@ impl PyFlatIndex {
             .collect();
         let expr = Expression::new(Expr::FlatIndex(buffer.into(), index?.into()));
         Ok(PyClassInitializer::from(PyExpression::base(expr)).add_subclass(PyFlatIndex))
-    }
-
-    #[getter]
-    fn buffer<'py>(slf: &Bound<'py, Self>) -> PyResult<Bound<'py, PyAny>> {
-        let base = slf.as_super().get();
-        let Expr::FlatIndex(buffer, _) = &*base.expr else {
-            return Err(kind_error("FlatIndex"));
-        };
-        base.slot(slf.py(), 0, || {
-            Ok(PyString::new(slf.py(), buffer).into_any().unbind())
-        })
-    }
-
-    #[getter]
-    fn index<'py>(slf: &Bound<'py, Self>) -> PyResult<Bound<'py, PyAny>> {
-        let base = slf.as_super().get();
-        let Expr::FlatIndex(_, index) = &*base.expr else {
-            return Err(kind_error("FlatIndex"));
-        };
-        base.slot(slf.py(), 1, || index.to_py(slf.py()))
     }
 }
 
