@@ -1,4 +1,4 @@
-//! Value numbering of a body with coordinates abstracted, and the identity it gives a body.
+//! Value numbering of a body with coordinates abstracted: the numbers the canonical order and the identity read.
 //!
 //! A statement's NUMBER is its kind and payload over its operands' numbers, with every maximal coordinate-only index
 //! expression a PARAMETER of the statement, numbered by first appearance. A reduce binds the parameters that mention

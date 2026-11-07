@@ -4,6 +4,7 @@ use std::sync::Arc;
 
 use crate::Name;
 use crate::expr::Num;
+use crate::expr::{Expr, Expression};
 
 /// Digest material: a tree of primitives, hashed to a number and ordered totally.
 #[derive(Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Debug)]
@@ -106,4 +107,49 @@ pub fn spelled_key(name: &Name) -> Key {
 /// A hex spelling of a number, for the identity key.
 pub fn hex(number: Number) -> String {
     format!("{number:032x}")
+}
+
+/// An expression as digest material. `leaf` spells the subexpressions that have a form of their own in the caller's
+/// eyes (a variable by its binding, a coordinate-only subexpression by its parameter index) and declines the rest,
+/// which are spelled by their structure, the same way everywhere.
+pub fn expression_key(e: &Expression, leaf: &mut dyn FnMut(&Expression) -> Option<Key>) -> Key {
+    if let Some(key) = leaf(e) {
+        return key;
+    }
+    match &**e {
+        Expr::Var(name) => Key::tuple([Key::str("Var"), Key::Str(name.clone())]),
+        Expr::Literal(lit) => Key::tuple([
+            Key::str("Literal"),
+            Key::num(lit.value),
+            Key::str(lit.dtype.name()),
+        ]),
+        Expr::Builtin(name) => Key::tuple([Key::str("Builtin"), Key::Str(name.clone())]),
+        Expr::Binary(op, l, r) => Key::tuple([
+            Key::str("Binary"),
+            Key::str(op.text()),
+            expression_key(l, leaf),
+            expression_key(r, leaf),
+        ]),
+        Expr::Call(name, args) => Key::tuple([
+            Key::str("Call"),
+            Key::Str(name.clone()),
+            Key::Tuple(args.iter().map(|a| expression_key(a, leaf)).collect()),
+        ]),
+        Expr::Ternary(a, b, c) => Key::tuple([
+            Key::str("Ternary"),
+            expression_key(a, leaf),
+            expression_key(b, leaf),
+            expression_key(c, leaf),
+        ]),
+        Expr::Cast(dtype, inner) => Key::tuple([
+            Key::str("Cast"),
+            Key::Str(dtype.clone()),
+            expression_key(inner, leaf),
+        ]),
+        Expr::FlatIndex(buffer, index) => Key::tuple([
+            Key::str("FlatIndex"),
+            Key::Str(buffer.clone()),
+            Key::Tuple(index.iter().map(|a| expression_key(a, leaf)).collect()),
+        ]),
+    }
 }

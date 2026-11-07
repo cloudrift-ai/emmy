@@ -3,7 +3,7 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
-use super::{Key, Number, Param, hash_parts};
+use super::{Key, Number, Param, expression_key, hash_parts};
 use crate::Name;
 use crate::body::{Body, StmtRef};
 use crate::expr::{Expr, Expression};
@@ -130,45 +130,12 @@ impl Context<'_> {
 
     /// A rendered expression with every bound axis spelled by its binding depth.
     fn by_depth(&self, e: &Expression) -> Key {
-        match &**e {
-            Expr::Var(name) => match self.depth_of(name) {
-                Some(depth) => Key::tuple([Key::str("Var"), Key::Int(depth as i64)]),
-                None => Key::tuple([Key::str("Var"), Key::Str(name.clone())]),
-            },
-            Expr::Literal(lit) => Key::tuple([
-                Key::str("Literal"),
-                Key::num(lit.value),
-                Key::str(lit.dtype.name()),
-            ]),
-            Expr::Builtin(name) => Key::tuple([Key::str("Builtin"), Key::Str(name.clone())]),
-            Expr::Binary(op, l, r) => Key::tuple([
-                Key::str("Binary"),
-                Key::str(op.text()),
-                self.by_depth(l),
-                self.by_depth(r),
-            ]),
-            Expr::Call(name, args) => Key::tuple([
-                Key::str("Call"),
-                Key::Str(name.clone()),
-                Key::tuple(args.iter().map(|a| self.by_depth(a))),
-            ]),
-            Expr::Ternary(a, b, c) => Key::tuple([
-                Key::str("Ternary"),
-                self.by_depth(a),
-                self.by_depth(b),
-                self.by_depth(c),
-            ]),
-            Expr::Cast(dtype, inner) => Key::tuple([
-                Key::str("Cast"),
-                Key::Str(dtype.clone()),
-                self.by_depth(inner),
-            ]),
-            Expr::FlatIndex(buffer, index) => Key::tuple([
-                Key::str("FlatIndex"),
-                Key::Str(buffer.clone()),
-                Key::tuple(index.iter().map(|a| self.by_depth(a))),
-            ]),
-        }
+        expression_key(e, &mut |e| match &**e {
+            Expr::Var(name) => self
+                .depth_of(name)
+                .map(|depth| Key::tuple([Key::str("Var"), Key::Int(depth as i64)])),
+            _ => None,
+        })
     }
 
     /// The expression with every maximal coordinate-only subexpression a parameter and every SSA read an operand.
@@ -179,64 +146,23 @@ impl Context<'_> {
         ops: &mut Vec<Value>,
         touched: &mut Vec<Name>,
     ) -> Key {
-        if self.reads_axis(e) && self.coordinate_only(e) {
-            let key = Key::tuple([Key::str("expr"), self.by_depth(e)]);
-            let index = match params.iter().position(|p| *p == key) {
-                Some(index) => index,
-                None => {
-                    params.push(key);
-                    params.len() - 1
-                }
-            };
-            return Key::tuple([Key::str("c"), Key::Int(index as i64)]);
-        }
-        match &**e {
-            Expr::Var(name) => self.operand(name, ops, touched),
-            Expr::Literal(lit) => Key::tuple([
-                Key::str("Literal"),
-                Key::num(lit.value),
-                Key::str(lit.dtype.name()),
-            ]),
-            Expr::Builtin(name) => Key::tuple([Key::str("Builtin"), Key::Str(name.clone())]),
-            Expr::Binary(op, l, r) => {
-                let (l, r) = (
-                    self.abstract_(l, params, ops, touched),
-                    self.abstract_(r, params, ops, touched),
-                );
-                Key::tuple([Key::str("Binary"), Key::str(op.text()), l, r])
+        expression_key(e, &mut |e| {
+            if self.reads_axis(e) && self.coordinate_only(e) {
+                let key = Key::tuple([Key::str("expr"), self.by_depth(e)]);
+                let index = match params.iter().position(|p| *p == key) {
+                    Some(index) => index,
+                    None => {
+                        params.push(key);
+                        params.len() - 1
+                    }
+                };
+                return Some(Key::tuple([Key::str("c"), Key::Int(index as i64)]));
             }
-            Expr::Call(name, args) => {
-                let args: Vec<Key> = args
-                    .iter()
-                    .map(|a| self.abstract_(a, params, ops, touched))
-                    .collect();
-                Key::tuple([Key::str("Call"), Key::Str(name.clone()), Key::Tuple(args)])
+            match &**e {
+                Expr::Var(name) => Some(self.operand(name, ops, touched)),
+                _ => None,
             }
-            Expr::Ternary(a, b, c) => {
-                let parts = [a, b, c].map(|x| self.abstract_(x, params, ops, touched));
-                Key::tuple([
-                    Key::str("Ternary"),
-                    parts[0].clone(),
-                    parts[1].clone(),
-                    parts[2].clone(),
-                ])
-            }
-            Expr::Cast(dtype, inner) => {
-                let inner = self.abstract_(inner, params, ops, touched);
-                Key::tuple([Key::str("Cast"), Key::Str(dtype.clone()), inner])
-            }
-            Expr::FlatIndex(buffer, index) => {
-                let index: Vec<Key> = index
-                    .iter()
-                    .map(|a| self.abstract_(a, params, ops, touched))
-                    .collect();
-                Key::tuple([
-                    Key::str("FlatIndex"),
-                    Key::Str(buffer.clone()),
-                    Key::Tuple(index),
-                ])
-            }
-        }
+        })
     }
 
     fn operand(&mut self, name: &Name, ops: &mut Vec<Value>, touched: &mut Vec<Name>) -> Key {
@@ -810,11 +736,12 @@ impl Context<'_> {
 
 /// How many orders of one operation's operands are tried for the least layout before the order is built position by
 /// position.
-const EXHAUSTIVE_LAYOUTS: usize = 362_880;
+const EXHAUSTIVE_LAYOUTS: usize = 5040;
 
 /// The operands of a commutative operation, grouped by number, in the order whose layout key is least. Every order
 /// is tried while the groups allow at most [`EXHAUSTIVE_LAYOUTS`] of them; a larger operation, an unrolled window
-/// sum over a dozen shifted reads, takes the greedy order, which the full search never reached.
+/// sum over eight or more shifted reads, takes the order built position by position: canonical and independent of the
+/// input order like the full search's, but not always its minimum.
 fn least_layout(groups: &[Vec<Value>], params: &[Param]) -> Vec<Value> {
     if groups.iter().all(|group| group.len() <= 1) {
         return groups.iter().flatten().cloned().collect();
@@ -834,14 +761,10 @@ fn factorial(n: usize) -> Option<usize> {
 
 /// The least layout key over every order of every group.
 fn exhaustive_layout(groups: &[Vec<Value>], params: &[Param]) -> Vec<Value> {
-    let arrangements: Vec<Vec<Vec<Value>>> =
-        groups.iter().map(|group| permutations(group)).collect();
+    let mut groups = groups.to_vec();
     let mut best: Option<(Vec<Key>, Vec<Value>)> = None;
-    for_each_product(&arrangements, &mut |choice| {
-        let order: Vec<Value> = choice
-            .iter()
-            .flat_map(|group| group.iter().cloned())
-            .collect();
+    for_each_arrangement(&mut groups, 0, &mut |arranged| {
+        let order: Vec<Value> = arranged.iter().flatten().cloned().collect();
         let (parent, mapped) = Context::laid_out(&order, params);
         let key = vec![Key::Tuple(mapped), Key::Tuple(parent)];
         if best.as_ref().is_none_or(|(best_key, _)| key < *best_key) {
@@ -852,6 +775,31 @@ fn exhaustive_layout(groups: &[Vec<Value>], params: &[Param]) -> Vec<Value> {
         || groups.iter().flatten().cloned().collect(),
         |(_, order)| order,
     )
+}
+
+/// Every order of every group from `at` on, each given to `f` in place: a group of k costs k! swaps (Heap's
+/// algorithm), not k! copies.
+fn for_each_arrangement(groups: &mut [Vec<Value>], at: usize, f: &mut dyn FnMut(&[Vec<Value>])) {
+    if at == groups.len() {
+        f(groups);
+        return;
+    }
+    let n = groups[at].len();
+    let mut counts = vec![0usize; n];
+    for_each_arrangement(groups, at + 1, f);
+    let mut i = 1;
+    while i < n {
+        if counts[i] < i {
+            let j = if i.is_multiple_of(2) { 0 } else { counts[i] };
+            groups[at].swap(j, i);
+            for_each_arrangement(groups, at + 1, f);
+            counts[i] += 1;
+            i = 1;
+        } else {
+            counts[i] = 0;
+            i += 1;
+        }
+    }
 }
 
 /// The order built position by position: each position takes the remaining operand of its group whose layout entry,
@@ -894,37 +842,6 @@ fn greedy_layout(groups: &[Vec<Value>], params: &[Param]) -> Vec<Value> {
         }
     }
     order
-}
-
-fn permutations<T: Clone>(items: &[T]) -> Vec<Vec<T>> {
-    if items.len() <= 1 {
-        return vec![items.to_vec()];
-    }
-    let mut out = Vec::new();
-    for (index, item) in items.iter().enumerate() {
-        let mut rest = items.to_vec();
-        rest.remove(index);
-        for mut tail in permutations(&rest) {
-            tail.insert(0, item.clone());
-            out.push(tail);
-        }
-    }
-    out
-}
-
-fn for_each_product<T: Clone>(groups: &[Vec<T>], f: &mut dyn FnMut(&[T])) {
-    fn walk<T: Clone>(groups: &[Vec<T>], chosen: &mut Vec<T>, f: &mut dyn FnMut(&[T])) {
-        if chosen.len() == groups.len() {
-            f(chosen);
-            return;
-        }
-        for item in &groups[chosen.len()] {
-            chosen.push(item.clone());
-            walk(groups, chosen, f);
-            chosen.pop();
-        }
-    }
-    walk(groups, &mut Vec::new(), f);
 }
 
 /// Number every statement of `body`; `resource_key` spells a buffer or carried state in a payload.

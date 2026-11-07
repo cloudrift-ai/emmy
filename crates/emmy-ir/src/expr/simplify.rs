@@ -84,9 +84,9 @@ pub(super) fn simplify_binary(
                     && *dtype == LitType::Int
                     && value.as_f64() > 0.0
                     && inner_left.range(ctx).is_some_and(|bounds| bounds.lo >= 0)
-                {
                     // Positive constant quotient chains have one denominator in index normal form.
-                    let product = apply_binop(BinOp::Mul, *value, Num::Int(n))?;
+                    && let Ok(product) = apply_binop(BinOp::Mul, *value, Num::Int(n))
+                {
                     return Expression::binary(
                         BinOp::Div,
                         inner_left.clone(),
@@ -615,9 +615,12 @@ pub fn index_set_size(
         let (_, coeffs) = affine_form(e, &|name| var_extents.contains_key(name))?;
         let mut size: i128 = 1;
         for (v, c) in coeffs {
-            size += (c as i128).abs() * (var_extents[&v] as i128 - 1);
+            let span = (c as i128)
+                .abs()
+                .checked_mul(i128::from(*var_extents.get(&v)?) - 1)?;
+            size = size.checked_add(span)?;
         }
-        total *= size;
+        total = total.checked_mul(size)?;
     }
     Some(total)
 }

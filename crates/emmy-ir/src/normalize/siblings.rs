@@ -4,19 +4,19 @@ use std::collections::{BTreeSet, HashMap, HashSet};
 use std::sync::Arc;
 
 use super::with_bodies;
-use crate::Name;
 use crate::body::{Body, exposed_defines, free_names};
 use crate::expr::{Expression, SimplifyCtx, affine_form};
 use crate::kinds::axis::{Axis, Dim};
 use crate::kinds::*;
 use crate::numbering::Key;
+use crate::{Name, Result};
 
 // --- sibling reduce loops ---------------------------------------------------------------------------------
 
 pub(crate) const REDUCE_AXIS_PLACEHOLDER: &str = "__reduce_axis__";
 
 /// The positions where a Load index within `body` walks the reduce axis, each keyed by how it walks the dimension.
-pub(crate) fn reduce_axis_source_positions(body: &Body, axis: &Name) -> BTreeSet<Key> {
+pub(crate) fn reduce_axis_source_positions(body: &Body, axis: &Name) -> Result<BTreeSet<Key>> {
     let mut out = BTreeSet::new();
     for here in body.loads() {
         let Statement::Load(load) = &**here.stmt() else {
@@ -42,8 +42,7 @@ pub(crate) fn reduce_axis_source_positions(body: &Body, axis: &Name) -> BTreeSet
                             axis.clone(),
                             Expression::var(REDUCE_AXIS_PLACEHOLDER),
                         )]))
-                        .simplify(&SimplifyCtx::empty())
-                        .unwrap_or_else(|_| e.clone());
+                        .simplify(&SimplifyCtx::empty())?;
                     out.insert(Key::tuple([
                         Key::str("composite"),
                         Key::Str(load.input.clone()),
@@ -55,18 +54,18 @@ pub(crate) fn reduce_axis_source_positions(body: &Body, axis: &Name) -> BTreeSet
             }
         }
     }
-    out
+    Ok(out)
 }
 
 /// Rename reduce-axis vars across sibling reduce loops whose Load positions overlap, so they share one axis name.
-pub fn unify_siblings(body: &Body) -> Body {
+pub fn unify_siblings(body: &Body) -> Result<Body> {
     let mut stmts: Vec<Arc<Statement>> = body.stmts().to_vec();
     let mut entries: Vec<(usize, Name, Expression, BTreeSet<Key>)> = Vec::new();
     for (i, s) in stmts.iter().enumerate() {
         if let Statement::Loop(l) = &**s
             && l.is_reduce()
         {
-            let positions = reduce_axis_source_positions(&l.body, &l.axis.name);
+            let positions = reduce_axis_source_positions(&l.body, &l.axis.name)?;
             if !positions.is_empty() {
                 entries.push((
                     i,
@@ -78,7 +77,7 @@ pub fn unify_siblings(body: &Body) -> Body {
         }
     }
     if entries.len() < 2 {
-        return body.clone();
+        return Ok(body.clone());
     }
     let mut parent: Vec<usize> = (0..entries.len()).collect();
     fn find(parent: &mut [usize], mut x: usize) -> usize {
@@ -101,7 +100,6 @@ pub fn unify_siblings(body: &Body) -> Body {
             }
         }
     }
-    let mut changed = false;
     for k in 0..entries.len() {
         let root = find(&mut parent, k);
         let canonical = entries[root].1.clone();
@@ -129,13 +127,8 @@ pub fn unify_siblings(body: &Body) -> Body {
             unroll: l.unroll,
             seed: l.seed,
         }));
-        changed = true;
     }
-    if changed {
-        Body::new(stmts)
-    } else {
-        body.clone()
-    }
+    Ok(body.rebuilt(stmts))
 }
 
 /// The names a loop over `body` still binds after it closes.
@@ -266,14 +259,15 @@ pub(crate) fn merge_sibling_reduce_loops_here(body: &Body) -> Body {
 }
 
 /// Merge sibling reduce loops with one axis into one loop whose body is the concatenation; parents before children.
-pub fn merge_sibling_reduce_loops(body: &Body) -> Body {
-    let merged = merge_sibling_reduce_loops_here(&unify_siblings(body));
-    merged.map_each(&mut |s| {
+pub fn merge_sibling_reduce_loops(body: &Body) -> Result<Body> {
+    let merged = merge_sibling_reduce_loops_here(&unify_siblings(body)?);
+    merged.try_map_each(&mut |s| {
         let nested = s.nested();
         if nested.is_empty() {
-            return s.clone();
+            return Ok(s.clone());
         }
-        with_bodies(s, nested.iter().map(merge_sibling_reduce_loops).collect())
+        let bodies: Result<Vec<Body>> = nested.iter().map(merge_sibling_reduce_loops).collect();
+        Ok(with_bodies(s, bodies?))
     })
 }
 
@@ -313,11 +307,11 @@ mod tests {
     }
 
     fn unified(text: &str) -> Body {
-        unify_siblings(&body(text))
+        unify_siblings(&body(text)).unwrap()
     }
 
     fn merged(text: &str) -> Body {
-        merge_sibling_reduce_loops(&body(text))
+        merge_sibling_reduce_loops(&body(text)).unwrap()
     }
 
     #[test]

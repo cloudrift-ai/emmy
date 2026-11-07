@@ -11,10 +11,10 @@ use std::sync::Arc;
 use super::with_bodies;
 use crate::Name;
 use crate::body::Body;
-use crate::expr::{BinOp, Expr, Expression, Lit, Num, python_repr};
+use crate::expr::{BinOp, Expr, Expression, Num, python_repr};
 use crate::kinds::field::{Float, Ty};
 use crate::kinds::{Affine, Statement};
-use crate::numbering::{Key, Numbering};
+use crate::numbering::{Key, Numbering, expression_key};
 use crate::text::structural_text;
 
 /// A statement's own shape with every name and buffer one placeholder: its kind, then its fields in declaration order.
@@ -282,43 +282,10 @@ pub(crate) fn commutative(op: BinOp) -> bool {
 
 /// An expression's form with every bound axis spelled by its binding position: the order of two operands.
 pub(crate) fn unspelled(e: &Expression, axis_order: &HashMap<Name, usize>) -> Key {
-    match &**e {
-        Expr::Var(name) => match axis_order.get(name) {
-            Some(index) => Key::tuple([Key::str("Var"), Key::Int(*index as i64)]),
-            None => Key::tuple([Key::str("Var"), Key::Str(name.clone())]),
-        },
-        Expr::Literal(Lit { value, dtype }) => Key::tuple([
-            Key::str("Literal"),
-            Key::num(*value),
-            Key::str(dtype.name()),
-        ]),
-        Expr::Builtin(name) => Key::tuple([Key::str("Builtin"), Key::Str(name.clone())]),
-        Expr::Binary(op, l, r) => Key::tuple([
-            Key::str("Binary"),
-            Key::str(op.text()),
-            unspelled(l, axis_order),
-            unspelled(r, axis_order),
-        ]),
-        Expr::Call(name, args) => Key::tuple([
-            Key::str("Call"),
-            Key::Str(name.clone()),
-            Key::tuple(args.iter().map(|a| unspelled(a, axis_order))),
-        ]),
-        Expr::Ternary(a, b, c) => Key::tuple([
-            Key::str("Ternary"),
-            unspelled(a, axis_order),
-            unspelled(b, axis_order),
-            unspelled(c, axis_order),
-        ]),
-        Expr::Cast(dtype, inner) => Key::tuple([
-            Key::str("Cast"),
-            Key::Str(dtype.clone()),
-            unspelled(inner, axis_order),
-        ]),
-        Expr::FlatIndex(buffer, index) => Key::tuple([
-            Key::str("FlatIndex"),
-            Key::Str(buffer.clone()),
-            Key::tuple(index.iter().map(|a| unspelled(a, axis_order))),
-        ]),
-    }
+    expression_key(e, &mut |e| match &**e {
+        Expr::Var(name) => axis_order
+            .get(name)
+            .map(|index| Key::tuple([Key::str("Var"), Key::Int(*index as i64)])),
+        _ => None,
+    })
 }

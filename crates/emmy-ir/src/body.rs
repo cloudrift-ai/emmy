@@ -12,6 +12,8 @@ use crate::{Error, Name, Result, infallible, locked};
 
 /// What `Body::map` applies: a statement to the statements that replace it, or `None` to drop it.
 pub type MapFn<'a> = dyn FnMut(&Arc<Statement>) -> Option<Vec<Arc<Statement>>> + 'a;
+pub type TryMapEachFn<'a, E> =
+    dyn FnMut(&Arc<Statement>) -> std::result::Result<Arc<Statement>, E> + 'a;
 pub type TryMapStmtFn<'a, E> =
     dyn FnMut(&Arc<Statement>) -> std::result::Result<Option<Arc<Statement>>, E> + 'a;
 pub type TryMapFn<'a, E> =
@@ -80,7 +82,6 @@ pub struct BodyData {
     ssa_uses: OnceLock<HashSet<Name>>,
     by_kind: Mutex<HashMap<Vec<Kind>, Vec<StmtRef>>>,
     pub(crate) normalized: OnceLock<Normalized>,
-    pub(crate) identities: Mutex<Vec<(crate::identity::IdentityKey, crate::identity::Identity)>>,
 }
 
 /// What a body knows of its normal form once it was taken: that it is its own, or which body it is. Never the body's
@@ -151,7 +152,6 @@ impl Body {
             ssa_uses: OnceLock::new(),
             by_kind: Mutex::new(HashMap::new()),
             normalized: OnceLock::new(),
-            identities: Mutex::new(Vec::new()),
         }))
     }
 
@@ -234,8 +234,14 @@ impl Body {
 
     /// `f` applied to each statement; this body itself when every statement comes back as it was.
     pub fn map_each(&self, f: &mut dyn FnMut(&Arc<Statement>) -> Arc<Statement>) -> Body {
-        let stmts: Vec<Arc<Statement>> = self.stmts().iter().map(&mut *f).collect();
-        self.rebuilt(stmts)
+        infallible(self.try_map_each(&mut |stmt| Ok::<_, std::convert::Infallible>(f(stmt))))
+    }
+
+    /// `f` on each statement of this body, none descended into; an error ends the walk.
+    pub fn try_map_each<E>(&self, f: &mut TryMapEachFn<'_, E>) -> std::result::Result<Body, E> {
+        let stmts: std::result::Result<Vec<Arc<Statement>>, E> =
+            self.stmts().iter().map(f).collect();
+        Ok(self.rebuilt(stmts?))
     }
 
     /// This body when `stmts` are its own statements, else a body of `stmts`: a step that changed nothing keeps the
@@ -257,7 +263,6 @@ impl Body {
     /// statement, which it keeps, drops (`None`) or replaces by several. An error ends the walk.
     pub fn try_map<E>(&self, f: &mut TryMapFn<'_, E>) -> std::result::Result<Body, E> {
         let mut out = Vec::new();
-        let mut changed = false;
         for stmt in self.stmts() {
             let nested = stmt.nested();
             let descended = if nested.is_empty() {
@@ -267,21 +272,11 @@ impl Body {
                     nested.iter().map(|body| body.try_map(f)).collect();
                 Statement::rebuild_bodies(stmt, bodies?)
             };
-            match f(&descended)? {
-                None => changed = true,
-                Some(replacement) => {
-                    if !(replacement.len() == 1 && Arc::ptr_eq(&replacement[0], stmt)) {
-                        changed = true;
-                    }
-                    out.extend(replacement);
-                }
+            if let Some(replacement) = f(&descended)? {
+                out.extend(replacement);
             }
         }
-        Ok(if changed {
-            Body::new(out)
-        } else {
-            self.clone()
-        })
+        Ok(self.rebuilt(out))
     }
 
     /// `try_map` with a function that cannot fail.
@@ -292,7 +287,6 @@ impl Body {
     /// `try_map` whose function keeps, drops or replaces one statement by one.
     pub fn try_map_stmts<E>(&self, f: &mut TryMapStmtFn<'_, E>) -> std::result::Result<Body, E> {
         let mut out = Vec::new();
-        let mut same = true;
         for stmt in self.stmts() {
             let nested = stmt.nested();
             let descended = if nested.is_empty() {
@@ -302,17 +296,11 @@ impl Body {
                     nested.iter().map(|body| body.try_map_stmts(f)).collect();
                 Statement::rebuild_bodies(stmt, bodies?)
             };
-            match f(&descended)? {
-                Some(kept) => {
-                    if !Arc::ptr_eq(&kept, stmt) {
-                        same = false;
-                    }
-                    out.push(kept);
-                }
-                None => same = false,
+            if let Some(kept) = f(&descended)? {
+                out.push(kept);
             }
         }
-        Ok(if same { self.clone() } else { Body::new(out) })
+        Ok(self.rebuilt(out))
     }
 
     /// `try_map_stmts` with a function that cannot fail.
@@ -528,12 +516,12 @@ impl Body {
     }
 
     /// Kahn's order over indexed predecessor sets, as source indices; source order breaks ties, a priority may rank
-    /// first. A cycle leaves the order unchanged.
+    /// first. A cycle is an error.
     pub fn topological_permutation<P: Ord>(
         &self,
         incoming: &[HashSet<usize>],
         priority: Option<&dyn Fn(usize) -> P>,
-    ) -> Vec<usize> {
+    ) -> Result<Vec<usize>> {
         let n = self.len();
         let mut successors: Vec<Vec<usize>> = vec![Vec::new(); n];
         let mut degree: Vec<usize> = incoming.iter().map(|sources| sources.len()).collect();
@@ -558,27 +546,22 @@ impl Body {
             }
         }
         if ordered.len() == n {
-            ordered
+            Ok(ordered)
         } else {
-            (0..n).collect()
+            Err(Error::Value(
+                "the statements depend on each other in a cycle".into(),
+            ))
         }
     }
 
-    pub fn topological_order(&self, incoming: &[HashSet<usize>]) -> Body {
-        let order = self.topological_permutation::<()>(incoming, None);
-        if order
-            .iter()
-            .enumerate()
-            .all(|(position, &index)| position == index)
-        {
-            return self.clone();
-        }
-        Body::new(
+    pub fn topological_order(&self, incoming: &[HashSet<usize>]) -> Result<Body> {
+        let order = self.topological_permutation::<()>(incoming, None)?;
+        Ok(self.rebuilt(
             order
                 .into_iter()
                 .map(|index| self.stmts()[index].clone())
                 .collect(),
-        )
+        ))
     }
 }
 

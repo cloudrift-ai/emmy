@@ -278,13 +278,12 @@ impl Line {
         }
         if let Some(token) = self.parser.peek(0)
             && token.kind == TokenKind::Name
-            && token.text.parse::<Kind>().is_ok()
+            && let Ok(kind) = token.text.parse::<Kind>()
+            && kind.layer() != Layer::Shared
             && (self.parser.at("(", 1) || self.parser.at(":", 1) || self.parser.peek(1).is_none())
-            && !is_shared_kind(&token.text)
         {
-            let kind = token.text.clone();
             self.parser.index += 1;
-            return self.declared(&kind, nested, subs);
+            return self.declared(kind, nested, subs);
         }
         if self.word("for") {
             let body = block(nested, subs)?;
@@ -469,15 +468,12 @@ impl Line {
     /// A kind of another layer: its header's fields, then its blocks among the rows under it.
     fn declared(
         &mut self,
-        kind: &str,
+        kind: Kind,
         nested: &[Row],
         subs: &mut HashMap<Name, Arc<Subroutine>>,
     ) -> Result<Arc<Statement>> {
-        let kind: Kind = kind
-            .parse()
-            .map_err(|err: Error| self.parser.error(&err.to_string()))?;
         let fields = kind.fields();
-        let mut values = self.record(kind.name(), fields)?;
+        let mut values = self.record(kind.name(), fields, &|field| kind.field_ty(field))?;
         self.parser.accept(":");
         self.end(())?;
         let mut body: Vec<Row> = Vec::new();
@@ -516,7 +512,12 @@ impl Line {
     }
 
     /// The `(field=value, …)` of a declared kind or record, each value read by its field's type.
-    fn record(&mut self, kind: &str, fields: &[FieldInfo]) -> Result<Values> {
+    fn record(
+        &mut self,
+        kind: &str,
+        fields: &[FieldInfo],
+        ty_of: &dyn Fn(&str) -> Option<Ty>,
+    ) -> Result<Values> {
         let mut values = Values::default();
         if self.parser.accept("(") {
             let mut any = false;
@@ -537,7 +538,7 @@ impl Line {
                     )));
                 };
                 self.parser.require("=")?;
-                let Some(ty) = field_type(kind, field.name) else {
+                let Some(ty) = ty_of(field.name) else {
                     return Err(self
                         .parser
                         .error(&format!("{kind} has no field {}", field.name)));
@@ -603,7 +604,8 @@ impl Line {
                 let Some(fields) = record_fields(record) else {
                     return Err(self.parser.error(&format!("no record {record}")));
                 };
-                let values = self.record(record, fields)?;
+                let values =
+                    self.record(record, fields, &|field| record_field_ty(record, field))?;
                 Ok(Value::Record(record.to_string(), values))
             }
             Ty::Block | Ty::Subroutine => Err(self
@@ -768,36 +770,13 @@ impl Line {
     }
 }
 
-fn is_shared_kind(name: &str) -> bool {
-    matches!(
-        name,
-        "Load"
-            | "Assign"
-            | "Affine"
-            | "Accum"
-            | "Carry"
-            | "Pre"
-            | "Init"
-            | "Let"
-            | "Write"
-            | "Select"
-            | "ZeroPrologue"
-            | "Loop"
-            | "StridedLoop"
-            | "Cond"
-            | "Call"
-    )
-}
-
-fn field_type(kind: &str, field: &str) -> Option<Ty> {
-    kind.parse::<Kind>()
-        .ok()
-        .and_then(|kind| kind.field_ty(field))
-        .or_else(|| match kind {
-            SelectBranch::NAME => SelectBranch::field_ty(field),
-            FragmentArg::NAME => FragmentArg::field_ty(field),
-            _ => None,
-        })
+/// The type a record's field is read by.
+fn record_field_ty(record: &str, field: &str) -> Option<Ty> {
+    match record {
+        SelectBranch::NAME => SelectBranch::field_ty(field),
+        FragmentArg::NAME => FragmentArg::field_ty(field),
+        _ => None,
+    }
 }
 
 fn record_fields(record: &str) -> Option<&'static [FieldInfo]> {

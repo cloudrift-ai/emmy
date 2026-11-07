@@ -732,10 +732,7 @@ mod generated {
     use emmy_ir::Name;
     use emmy_ir::body::Body;
     use emmy_ir::kinds::elementwise::Op;
-    use emmy_ir::kinds::field::{
-        Axes, AxisRef, Branches, DType, Exprs, Float, Floats, FragmentArgs, Int2, Ints, Names,
-        NumOr, Ops, Shape3, Stmts, SubroutineRef,
-    };
+    use emmy_ir::kinds::field::*;
 
     emmy_ir::with_kinds!(define_py_kinds);
 }

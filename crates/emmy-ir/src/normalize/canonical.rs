@@ -126,7 +126,7 @@ impl SequentialScope {
                 .map(|member| scope.step(counters, member))
                 .collect();
             self.sources.extend(scope.sources);
-            renamed_children.push(Body::new(members));
+            renamed_children.push(child.rebuilt(members));
         }
         with_bodies(&renamed, renamed_children)
     }
@@ -166,20 +166,18 @@ pub fn rename_ssa_sequential(body: &Body) -> Body {
 
 /// `body` with every scope's members in the canonical order: dependency-valid, then by the sibling's category, its
 /// shape, its spelling where shapes tie, and its number or scope tree.
-fn ordered(body: &Body, numbering: &Numbering) -> Body {
-    let rebuilt = body.map_each(&mut |stmt| {
+fn ordered(body: &Body, numbering: &Numbering) -> Result<Body> {
+    let rebuilt = body.try_map_each(&mut |stmt| {
         let nested = stmt.nested();
         if nested.is_empty() {
-            return stmt.clone();
+            return Ok(stmt.clone());
         }
-        with_bodies(
-            stmt,
-            nested
-                .iter()
-                .map(|child| ordered(child, numbering))
-                .collect(),
-        )
-    });
+        let bodies: Result<Vec<Body>> = nested
+            .iter()
+            .map(|child| ordered(child, numbering))
+            .collect();
+        Ok(with_bodies(stmt, bodies?))
+    })?;
     let shapes: Vec<Key> = body.stmts().iter().map(ties::sibling_shape).collect();
     let mut ties: HashMap<&Key, usize> = HashMap::new();
     for own in &shapes {
@@ -219,13 +217,13 @@ fn ordered(body: &Body, numbering: &Numbering) -> Body {
         .collect();
     let incoming = ordering_constraints(&rebuilt, true, true);
     let order =
-        rebuilt.topological_permutation(&incoming, Some(&|index| priorities[index].clone()));
-    rebuilt.rebuilt(
+        rebuilt.topological_permutation(&incoming, Some(&|index| priorities[index].clone()))?;
+    Ok(rebuilt.rebuilt(
         order
             .into_iter()
             .map(|index| rebuilt.stmts()[index].clone())
             .collect(),
-    )
+    ))
 }
 
 pub fn canonical_order(body: &Body) -> Result<Body> {
@@ -235,7 +233,7 @@ pub fn canonical_order(body: &Body) -> Result<Body> {
         role.get(name)
             .map_or_else(|| Key::Str(name.clone()), |r| Key::Int(*r as i64))
     });
-    let placed = ordered(&stmts, &numbering);
+    let placed = ordered(&stmts, &numbering)?;
     let result = rename_ssa_sequential(&placed);
     let operand = ties::operand_ranks(&placed, &result, &numbering);
     let operand_key = |name: &Name| operand.get(name).cloned().unwrap_or_else(ties::unranked);
@@ -261,17 +259,15 @@ pub fn canonical_order(body: &Body) -> Result<Body> {
     });
     // Sequential naming separates lexical binders. Restore shared reduction dimensions without merging dependent
     // loops or changing the order.
-    let unified = listed.map_stmts(&mut |stmt| {
+    let unified = listed.try_map_stmts(&mut |stmt| {
         let nested = stmt.nested();
         if nested.is_empty() {
-            return Some(stmt.clone());
+            return Ok(Some(stmt.clone()));
         }
-        Some(with_bodies(
-            stmt,
-            nested.iter().map(unify_siblings).collect(),
-        ))
-    });
-    Ok(unify_siblings(&unified))
+        let bodies: Result<Vec<Body>> = nested.iter().map(unify_siblings).collect();
+        Ok(Some(with_bodies(stmt, bodies?)))
+    })?;
+    unify_siblings(&unified)
 }
 
 /// A sum over bound axes with its terms in binding order and its anchor last.
