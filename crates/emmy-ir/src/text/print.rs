@@ -21,7 +21,7 @@ fn names(items: &[Name]) -> Result<String> {
 fn typed(dtype: &Option<DType>) -> String {
     dtype
         .as_ref()
-        .map_or_else(String::new, |d| format!("{} ", d.name()))
+        .map_or_else(String::new, |d| format!("{} ", d.text()))
 }
 
 fn index(items: &[Expression]) -> Result<String> {
@@ -115,7 +115,7 @@ pub fn lines(stmt: &Statement, indent: &str, out: &mut Vec<String>) -> Result<()
         ),
         Statement::Init(s) => format!(
             "init {} {} = {}",
-            s.dtype.name(),
+            s.dtype.text(),
             spell_stmt_name(&s.name)?,
             spell_number(s.identity.0)
         ),
@@ -155,8 +155,8 @@ pub fn lines(stmt: &Statement, indent: &str, out: &mut Vec<String>) -> Result<()
             } else {
                 spell_stmt_name(&s.values[0])?
             };
-            let swizzle = if s.swizzle != Swizzle::NONE {
-                format!(" swizzle={}", spell_stmt_name(&s.swizzle.text())?)
+            let swizzle = if &*s.swizzle != "NONE" {
+                format!(" swizzle={}", spell_stmt_name(&s.swizzle)?)
             } else {
                 String::new()
             };

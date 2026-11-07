@@ -1,8 +1,8 @@
 //! The reader: the tokenizer and the parser that take an expression's text back, and that the body text's reader
 //! extends with the statement punctuation.
 
-use super::{BinOp, Builtin, Expr, Expression, Lit, LitType, Num, python_repr};
-use crate::{Error, Name, Result};
+use super::{BinOp, Builtin, CastTarget, Expr, Expression, Lit, LitType, Num, python_repr};
+use crate::{Error, Result};
 
 // --- the reader -----------------------------------------------------------------------------------
 
@@ -265,7 +265,7 @@ impl Parser {
             if token.kind != TokenKind::Op {
                 break;
             }
-            let Some(op) = BinOp::parse(&token.text) else {
+            let Ok(op) = token.text.parse::<BinOp>() else {
                 break;
             };
             if op.precedence() < least {
@@ -371,7 +371,7 @@ impl Parser {
                     && self.at(")", 1)
                     && self.starts_operand(2)
                 {
-                    let dtype: Name = next.text.clone().into();
+                    let dtype: CastTarget = next.text.parse()?;
                     self.index += 2;
                     let inner = self.operand()?;
                     return Ok(Expression::new(Expr::Cast(dtype, inner)));
@@ -424,7 +424,7 @@ mod tests {
     }
 
     fn binary(op: &str, left: Expression, right: Expression) -> Expression {
-        Expression::binary(BinOp::parse(op).unwrap(), left, right)
+        Expression::binary(op.parse().unwrap(), left, right)
     }
 
     fn ternary(cond: Expression, if_true: Expression, if_false: Expression) -> Expression {
@@ -432,7 +432,7 @@ mod tests {
     }
 
     fn cast(dtype: &str, inner: Expression) -> Expression {
-        Expression::new(Expr::Cast(dtype.into(), inner))
+        Expression::new(Expr::Cast(dtype.parse().unwrap(), inner))
     }
 
     fn flat_index(buffer: &str, index: Vec<Expression>) -> Expression {

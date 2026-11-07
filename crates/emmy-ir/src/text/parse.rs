@@ -677,11 +677,9 @@ impl Line {
             vec![self.name()?]
         };
         let swizzle = if self.word("swizzle") && self.parser.accept("=") {
-            let name = self.name()?;
-            name.parse()
-                .map_err(|_| self.parser.error(&format!("no swizzle {name}")))?
+            self.name()?
         } else {
-            Swizzle::NONE
+            Name::from("NONE")
         };
         let write = Write {
             output: name,

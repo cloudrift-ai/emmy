@@ -846,6 +846,8 @@ impl Subroutine {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::kinds::Affine;
+    use crate::kinds::field::{Float, Floats};
     use crate::normalize::testing::{accum_names, body, indented, inner, strs};
     use crate::text::parse_body;
 
@@ -1148,6 +1150,28 @@ mod tests {
         let seeded = parse_body("state[i] <- v seed -0.0").unwrap();
         let other_seed = parse_body("state[i] <- v seed 0.0").unwrap();
         assert_ne!(MemoKey(seeded), MemoKey(other_seed));
+        let nan_literal = parse_body("let x = nan\nO[] = x").unwrap();
+        let again = parse_body("let x = nan\nO[] = x").unwrap();
+        assert_eq!(
+            MemoKey(nan_literal.clone()),
+            MemoKey(again),
+            "a NaN literal keys like its copy"
+        );
+        let coefficient = |c: f64| {
+            Body::from_statements([Statement::Affine(Affine {
+                name: "v".into(),
+                args: Names::from(["x".into()]),
+                coefficients: Floats::from([Float(c)]),
+                offset: Float(0.0),
+                dtype: None,
+            })])
+        };
+        assert_eq!(
+            coefficient(0.0),
+            coefficient(-0.0),
+            "a coefficient compares as a float"
+        );
+        assert_ne!(MemoKey(coefficient(0.0)), MemoKey(coefficient(-0.0)));
     }
 
     #[test]

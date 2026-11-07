@@ -4,10 +4,9 @@
 //! extension's tables.
 
 use std::fmt;
-use std::str::FromStr;
 use std::sync::Arc;
 
-use crate::{Error, Name, Result};
+use crate::{Name, closed_set};
 
 /// How `fold_affine` reads an operation: as a term of a sum.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -88,32 +87,16 @@ const SEED_BOUND: f64 = 1e30;
 /// its `Display`/`FromStr` pair and the table. A property left out takes `OpInfo::DEFAULT`'s value.
 macro_rules! operations {
     ($( $Variant:ident = $text:literal { $( $field:ident : $value:expr ),* $(,)? }, )*) => {
-        #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
-        pub enum Elementwise { $( $Variant, )* }
+        closed_set! {
+            /// The operations the compiler knows a property of, by spelling; a spelling outside the set is an
+            /// [`Op::Other`].
+            pub enum Elementwise ("elementwise operation") { $( $Variant = $text, )* }
+        }
 
         /// The properties of every known operation, in `Elementwise` order.
         pub static OPS: [OpInfo; Elementwise::ALL.len()] = [
             $( OpInfo { text: $text, $( $field: $value, )* ..OpInfo::DEFAULT }, )*
         ];
-
-        impl Elementwise {
-            pub const ALL: &[Elementwise] = &[ $( Elementwise::$Variant, )* ];
-
-            pub fn text(self) -> &'static str {
-                match self { $( Elementwise::$Variant => $text, )* }
-            }
-        }
-
-        impl FromStr for Elementwise {
-            type Err = Error;
-
-            fn from_str(name: &str) -> Result<Elementwise> {
-                match name {
-                    $( $text => Ok(Elementwise::$Variant), )*
-                    _ => Err(Error::Value(format!("no elementwise operation {name}"))),
-                }
-            }
-        }
     };
 }
 
@@ -192,12 +175,6 @@ operations! {
     BitwiseCount = "bitwise_count" { integer: true },
 }
 
-impl fmt::Display for Elementwise {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(self.text())
-    }
-}
-
 /// Spellings that mean an operation the renderers know under another name, normalized at construction.
 pub const ALIASES: [(&str, Elementwise); 2] = [
     ("__rshift__", Elementwise::RightShift),
@@ -231,7 +208,8 @@ impl Elementwise {
 }
 
 /// An elementwise operation as a statement holds it: one the compiler knows by property, or any other spelling a
-/// renderer knows.
+/// renderer knows. Built through [`Op::new`] or from an [`Elementwise`]: `Other` is for a spelling the enum lacks,
+/// and an `Other` built by hand with a known spelling would never equal its `Known` twin.
 #[derive(Clone, PartialEq, Eq, Hash, Debug)]
 pub enum Op {
     Known(Elementwise),
@@ -338,6 +316,81 @@ mod tests {
             assert_eq!(OPS[index].text, op.text(), "{op:?}");
             assert_eq!(op.text().parse::<Elementwise>().unwrap(), *op);
         }
+        let texts: Vec<&str> = Elementwise::ALL.iter().map(|op| op.text()).collect();
+        assert_eq!(
+            texts,
+            [
+                "add",
+                "sum",
+                "subtract",
+                "sub",
+                "negative",
+                "multiply",
+                "prod",
+                "fma",
+                "square",
+                "abs",
+                "absolute",
+                "fabs",
+                "maximum",
+                "minimum",
+                "amax",
+                "fmax",
+                "fmin",
+                "sign",
+                "divide",
+                "divide_rn_f32",
+                "true_divide",
+                "floor_divide",
+                "remainder",
+                "mod",
+                "reciprocal",
+                "sqrt",
+                "rsqrt",
+                "exp",
+                "exp_fast",
+                "exp2",
+                "expm1",
+                "log",
+                "log2",
+                "log10",
+                "log1p",
+                "sin",
+                "cos",
+                "tan",
+                "tanh",
+                "sinh",
+                "cosh",
+                "arctan",
+                "arcsin",
+                "arccos",
+                "floor",
+                "ceil",
+                "trunc",
+                "rint",
+                "round",
+                "sigmoid",
+                "silu",
+                "softplus",
+                "erf",
+                "gelu",
+                "gelu_tanh",
+                "pow",
+                "power",
+                "relu",
+                "where",
+                "copy",
+                "pad",
+                "positive",
+                "bitcast",
+                "left_shift",
+                "right_shift",
+                "bitwise_and",
+                "bitwise_or",
+                "bitwise_xor",
+                "bitwise_count",
+            ]
+        );
         assert_eq!(Elementwise::Maximum.info().neutral, Some(f64::NEG_INFINITY));
         assert_eq!(Elementwise::Maximum.seed(), Some(-1e30));
         assert_eq!(Elementwise::Minimum.seed(), Some(1e30));

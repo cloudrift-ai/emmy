@@ -12,7 +12,7 @@ use super::with_bodies;
 use crate::Name;
 use crate::Result;
 use crate::body::Body;
-use crate::expr::{BinOp, Expr, Expression, Num, python_repr};
+use crate::expr::{BinOp, Expr, ExprKind, Expression, Num, python_repr};
 use crate::kinds::field::{Float, Ty};
 use crate::kinds::{Affine, Statement};
 use crate::numbering::{Key, Numbering, expression_key};
@@ -109,7 +109,7 @@ pub(crate) fn extent_digest(expression: &Expression) -> String {
                     Num::Float(v) => crate::expr::float_repr(v),
                     Num::Bool(v) => if v { "True" } else { "False" }.to_string(),
                 };
-                format!("('Literal', {value}, {})", python_repr(lit.dtype.name()))
+                format!("('Literal', {value}, {})", python_repr(lit.dtype.text()))
             }
             Expr::Builtin(builtin) => format!("('Builtin', {})", python_repr(builtin.text())),
             Expr::Binary(op, left, right) => {
@@ -130,7 +130,11 @@ pub(crate) fn extent_digest(expression: &Expression) -> String {
                 form(no)
             ),
             Expr::Cast(dtype, inner) => {
-                format!("('CastExpr', {}, {})", python_repr(dtype), form(inner))
+                format!(
+                    "('CastExpr', {}, {})",
+                    python_repr(&dtype.to_string()),
+                    form(inner)
+                )
             }
             Expr::FlatIndex(buffer, index) => {
                 format!("('FlatIndex', {}, {})", python_repr(buffer), tuple(index))
@@ -280,7 +284,52 @@ pub(crate) fn unspelled(e: &Expression, axis_order: &HashMap<Name, usize>) -> Ke
     expression_key(e, &mut |e| match &**e {
         Expr::Var(name) => axis_order
             .get(name)
-            .map(|index| Key::tuple([Key::str("Var"), Key::Int(*index as i64)])),
+            .map(|index| Key::tuple([Key::str(ExprKind::Var.text()), Key::Int(*index as i64)])),
         _ => None,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use super::extent_digest;
+    use crate::expr::{Builtin, CastTarget, Expr, Expression, LitType, parse};
+
+    /// The extent digest spells an expression in the Python order's old form (`BinaryExpr`, `FuncCallExpr`, ...);
+    /// the stored goldens' decisions are addressed in it, so each kind's spelling is pinned through its digest.
+    #[test]
+    fn the_extent_digest_spells_every_expression_kind_as_it_always_did() {
+        let samples = [
+            Expression::var("n"),
+            Expression::int(4096),
+            Expression::new(Expr::Builtin(Builtin::WarpSize)),
+            parse("n * 2").unwrap(),
+            Expression::new(Expr::Call("f".into(), Arc::from([Expression::var("n")]))),
+            parse("c ? 1 : 2").unwrap(),
+            Expression::new(Expr::Cast(
+                CastTarget::Known(LitType::Int),
+                Expression::var("n"),
+            )),
+            Expression::new(Expr::FlatIndex(
+                "b".into(),
+                Arc::from([Expression::var("i")]),
+            )),
+        ];
+        let digests: Vec<String> = samples.iter().map(extent_digest).collect();
+        assert_eq!(
+            digests,
+            [
+                "1d853204c55fe10c3b631736260de7badefe031a5e6643b76acf77089fce6640",
+                "d1e873473019195ecd14c66351b0fad712808041e6e157c9980d3e92a40d4ec7",
+                "a29b45df8d2919533196cea4899182ce3b44db5ce0d67f1b054fd41c1eac14c2",
+                "6851899934cf8768ae8bf8a5c9db2ae378549bbc2b0d720788738ed14a01466d",
+                "d932b5b6d247bd35b90c67c2fc9ad90cb4cb23d8e933dc280ca6088c8fe4166d",
+                "58f9b6c7f305258af077cca47134711d029c5ef10dfd3417a162c82fbcb3a1e8",
+                "d6c4a7737917bac409b76ef7cdf22a68faaeddc557b884eb9de246aea0a91268",
+                "2dbaed08deb340643afa3c16fc6ebe1c45f91906a928714cd4c3498947dcae3e",
+            ]
+            .map(String::from)
+        );
+    }
 }

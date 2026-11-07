@@ -37,7 +37,7 @@ pub fn extend_simplify_ctx(ctx: &SimplifyCtx, axis: &Axis) -> SimplifyCtx {
 
 memo! {
     /// The normal forms of the bodies met in this process, by their exact form.
-    pub fn normal_forms() -> Memo<MemoKey, Body> [capacity = BODY_MEMO_CAPACITY, policy = S3Fifo]
+    pub fn normal_forms() -> Memo<MemoKey, Body> [capacity = BODY_MEMO_CAPACITY]
 }
 
 /// The executable normal form of `body`: what the body already knows, else the memo's, else computed and kept.

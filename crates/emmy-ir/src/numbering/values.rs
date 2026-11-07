@@ -6,6 +6,7 @@ use std::sync::Arc;
 use super::{Key, Number, Param, Tag, expression_key, hash_parts};
 use crate::Name;
 use crate::body::{Body, StmtRef};
+use crate::expr::ExprKind;
 use crate::expr::{Expr, Expression};
 use crate::kinds::Statement;
 use crate::kinds::field::NumOr;
@@ -96,7 +97,7 @@ fn descriptor(axis: &crate::kinds::axis::Axis, stmt: &Statement) -> Key {
 fn depths(key: &Key, out: &mut Vec<usize>) {
     if let Key::Tuple(parts) = key {
         if let [Key::Str(tag), Key::Int(depth)] = &parts[..]
-            && &**tag == Tag::Var.text()
+            && &**tag == ExprKind::Var.text()
         {
             out.push(*depth as usize);
             return;
@@ -133,7 +134,7 @@ impl Context<'_> {
         expression_key(e, &mut |e| match &**e {
             Expr::Var(name) => self
                 .depth_of(name)
-                .map(|depth| Key::tuple([Key::tag(Tag::Var), Key::Int(depth as i64)])),
+                .map(|depth| Key::tuple([Key::str(ExprKind::Var.text()), Key::Int(depth as i64)])),
             _ => None,
         })
     }
@@ -293,7 +294,10 @@ impl Context<'_> {
                         if !bound_depths.contains(&depth) {
                             let bare = Key::tuple([
                                 Key::tag(Tag::Expr),
-                                Key::tuple([Key::tag(Tag::Var), Key::Int(depth as i64)]),
+                                Key::tuple([
+                                    Key::str(ExprKind::Var.text()),
+                                    Key::Int(depth as i64),
+                                ]),
                             ]);
                             if !kept.contains(&bare) {
                                 kept.push(bare);
@@ -305,7 +309,7 @@ impl Context<'_> {
             fn bound_form(value: &Key, bound_depths: &[usize], kept: &[Param]) -> Key {
                 if let Key::Tuple(parts) = value {
                     if let [Key::Str(tag), Key::Int(depth)] = &parts[..]
-                        && &**tag == Tag::Var.text()
+                        && &**tag == ExprKind::Var.text()
                     {
                         let depth = *depth as usize;
                         if let Some(position) = bound_depths.iter().position(|d| *d == depth) {
@@ -473,7 +477,7 @@ impl Context<'_> {
                     let payload = Key::tuple([
                         buffer,
                         Key::Tuple(index),
-                        Key::option(s.dtype.as_ref().map(|d| d.name())),
+                        Key::option(s.dtype.as_ref().map(|d| d.text())),
                         Key::Str(s.carried.clone()),
                         Key::Int(s.names.len() as i64),
                     ]);
@@ -502,7 +506,7 @@ impl Context<'_> {
                     }
                     let payload = Key::tuple([
                         Key::str(s.op.name()),
-                        Key::option(s.dtype.as_ref().map(|d| d.name())),
+                        Key::option(s.dtype.as_ref().map(|d| d.text())),
                         Key::Tuple(frees),
                     ]);
                     let value = self.compose(Tag::Assign, payload, ops, &[], &[], commutative);
@@ -532,13 +536,13 @@ impl Context<'_> {
                     let payload = Key::tuple([
                         Key::float(s.offset.0),
                         Key::Tuple(frees),
-                        Key::option(s.dtype.as_ref().map(|d| d.name())),
+                        Key::option(s.dtype.as_ref().map(|d| d.text())),
                     ]);
                     let value = self.compose(Tag::Affine, payload, ops, &[], &[], true);
                     self.define(ordinal, &stmt, std::slice::from_ref(&s.name), value);
                 }
                 Statement::Init(s) => {
-                    let payload = Key::tuple([Key::float(s.identity.0), Key::str(s.dtype.name())]);
+                    let payload = Key::tuple([Key::float(s.identity.0), Key::str(s.dtype.text())]);
                     let value = self.compose(Tag::Init, payload, vec![], &[], &[], false);
                     self.define(ordinal, &stmt, std::slice::from_ref(&s.name), value);
                 }
@@ -560,7 +564,7 @@ impl Context<'_> {
                         .collect();
                     let payload = Key::tuple([
                         Key::str(s.op.name()),
-                        Key::option(s.dtype.as_ref().map(|d| d.name())),
+                        Key::option(s.dtype.as_ref().map(|d| d.text())),
                         Key::Tuple(descriptors),
                         Key::tuple([value_key, base_key]),
                     ]);
@@ -599,9 +603,9 @@ impl Context<'_> {
                         buffer,
                         Key::Tuple(index),
                         Key::Tuple(values),
-                        Key::option(s.value_dtype.as_ref().map(|d| d.name())),
+                        Key::option(s.value_dtype.as_ref().map(|d| d.text())),
                         Key::Bool(s.atomic),
-                        Key::str(&s.swizzle.text()),
+                        Key::Str(s.swizzle.clone()),
                     ]);
                     let value = self.compose(Tag::Store, payload, ops, &params, &[], false);
                     self.define(ordinal, &stmt, &[], value.clone());
@@ -624,7 +628,7 @@ impl Context<'_> {
                         Key::Tuple(index),
                         value_key,
                         seed,
-                        Key::option(s.dtype.as_ref().map(|d| d.name())),
+                        Key::option(s.dtype.as_ref().map(|d| d.text())),
                     ]);
                     let value = self.compose(Tag::Carry, payload, ops, &params, &[], false);
                     self.define(ordinal, &stmt, std::slice::from_ref(&s.name), value);
@@ -880,7 +884,7 @@ mod tests {
             number,
             params
                 .iter()
-                .map(|p| Key::tuple([Key::tag(Tag::Var), Key::Int(*p)]))
+                .map(|p| Key::tuple([Key::str(ExprKind::Var.text()), Key::Int(*p)]))
                 .collect(),
         )
     }
@@ -893,7 +897,7 @@ mod tests {
             vec![operand(2, &[9])],
             coordinates.iter().map(|c| operand(7, &[*c])).collect(),
         ];
-        let params = vec![Key::tuple([Key::tag(Tag::Var), Key::Int(9)])];
+        let params = vec![Key::tuple([Key::str(ExprKind::Var.text()), Key::Int(9)])];
         let greedy = greedy_layout(&groups, &params);
         assert_eq!(greedy, exhaustive_layout(&groups, &params));
         assert_eq!(greedy, least_layout(&groups, &params));

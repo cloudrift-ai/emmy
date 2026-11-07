@@ -407,13 +407,13 @@ struct Arguments<'a, 'py> {
 
 impl<'py> Arguments<'_, 'py> {
     /// The argument for `field`, by keyword or by position, `None` when it was not given.
-    fn take(&mut self, field: &str) -> PyResult<Option<Bound<'py, PyAny>>> {
+    fn take(&mut self, field: &str, kw_only: bool) -> PyResult<Option<Bound<'py, PyAny>>> {
         if let Some(kwargs) = self.kwargs
             && let Some(value) = kwargs.get_item(field)?
         {
             return Ok(Some(value));
         }
-        if self.fields.iter().any(|f| f.name == field && f.kw_only) {
+        if kw_only {
             return Ok(None);
         }
         if self.positional < self.args.len() {
@@ -657,7 +657,7 @@ macro_rules! define_py_kinds {
         use emmy_ir::kinds as k;
         let mut given = Arguments { kind: k::$Type::NAME, fields: k::$Type::FIELDS, args: $args, kwargs: $kwargs, positional: 0 };
         let out = k::$Type {
-            $( $field: match given.take(stringify!($field))? {
+            $( $field: match given.take(stringify!($field), define_py_kinds!(@kw_only $($role)|*))? {
                 Some(value) => define_py_kinds!(@convert $Type $field [$ty] value $held),
                 None => {
                     $held.push(None);
@@ -695,6 +695,9 @@ macro_rules! define_py_kinds {
         $held.push(kept);
         value
     }};
+    (@kw_only) => { false };
+    (@kw_only KW_ONLY $(| $rest:ident)*) => { true };
+    (@kw_only $role:ident $(| $rest:ident)*) => { define_py_kinds!(@kw_only $($rest)|*) };
     (@default $Kind:ident $field:ident = $default:expr) => { $default };
     (@default $Kind:ident $field:ident) => { return Err(missing(stringify!($Kind), stringify!($field))) };
 }

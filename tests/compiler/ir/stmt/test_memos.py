@@ -20,8 +20,7 @@ def test_the_memos_report_their_entries_and_clear_together() -> None:
     assert stats["normal_forms"]["entries"] >= 1
     assert stats["identities"]["entries"] >= 1
     assert stats["normal_forms"]["capacity"] == stats["identities"]["capacity"] == 16384
-    assert stats["normal_forms"]["policy"] == stats["identities"]["policy"] == "S3Fifo"
-    assert stats["statement_wrappers"]["capacity"] is None and stats["statement_wrappers"]["policy"] is None
+    assert stats["statement_wrappers"]["capacity"] is None
     clear_memos()
     stats = _by_name()
     assert stats["normal_forms"]["entries"] == 0

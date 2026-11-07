@@ -160,81 +160,16 @@ pub fn float_repr(value: f64) -> String {
 
 // --- operators ------------------------------------------------------------------------------------
 
-/// A binary operator and how tightly it binds (higher binds tighter).
-#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
-pub enum BinOp {
-    Or,
-    And,
-    Eq,
-    Ne,
-    Lt,
-    Gt,
-    Le,
-    Ge,
-    Xor,
-    BitAnd,
-    BitOr,
-    Shl,
-    Shr,
-    Add,
-    Sub,
-    Mul,
-    Div,
-    FloorDiv,
-    Mod,
+closed_set! {
+    /// A binary operator, by its spelling; `precedence` says how tightly it binds (higher binds tighter).
+    pub enum BinOp ("binary operator") {
+        Or = "||", And = "&&", Eq = "==", Ne = "!=", Lt = "<", Gt = ">", Le = "<=", Ge = ">=",
+        Xor = "^", BitAnd = "&", BitOr = "|", Shl = "<<", Shr = ">>",
+        Add = "+", Sub = "-", Mul = "*", Div = "/", FloorDiv = "//", Mod = "%",
+    }
 }
 
 impl BinOp {
-    pub const ALL: [BinOp; 19] = [
-        BinOp::Or,
-        BinOp::And,
-        BinOp::Eq,
-        BinOp::Ne,
-        BinOp::Lt,
-        BinOp::Gt,
-        BinOp::Le,
-        BinOp::Ge,
-        BinOp::Xor,
-        BinOp::BitAnd,
-        BinOp::BitOr,
-        BinOp::Shl,
-        BinOp::Shr,
-        BinOp::Add,
-        BinOp::Sub,
-        BinOp::Mul,
-        BinOp::Div,
-        BinOp::FloorDiv,
-        BinOp::Mod,
-    ];
-
-    pub fn text(self) -> &'static str {
-        match self {
-            BinOp::Or => "||",
-            BinOp::And => "&&",
-            BinOp::Eq => "==",
-            BinOp::Ne => "!=",
-            BinOp::Lt => "<",
-            BinOp::Gt => ">",
-            BinOp::Le => "<=",
-            BinOp::Ge => ">=",
-            BinOp::Xor => "^",
-            BinOp::BitAnd => "&",
-            BinOp::BitOr => "|",
-            BinOp::Shl => "<<",
-            BinOp::Shr => ">>",
-            BinOp::Add => "+",
-            BinOp::Sub => "-",
-            BinOp::Mul => "*",
-            BinOp::Div => "/",
-            BinOp::FloorDiv => "//",
-            BinOp::Mod => "%",
-        }
-    }
-
-    pub fn parse(text: &str) -> Option<BinOp> {
-        BinOp::ALL.into_iter().find(|op| op.text() == text)
-    }
-
     pub fn precedence(self) -> u8 {
         match self {
             BinOp::Or => 1,
@@ -382,40 +317,41 @@ pub struct Lit {
     pub dtype: LitType,
 }
 
-/// The type a literal is spelled in.
-#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
-pub enum LitType {
-    Int,
-    Float,
-    Bool,
+closed_set! {
+    /// The type a literal is spelled in.
+    pub enum LitType ("literal type") { Int = "int", Float = "float", Bool = "bool", }
 }
 
-impl LitType {
-    pub fn name(self) -> &'static str {
+/// A cast's target: a literal type the simplifier knows (a cast to `int` of a literal folds), or any other C type
+/// the renderer spells.
+#[derive(Clone, PartialEq, Eq, Hash, Debug)]
+pub enum CastTarget {
+    Known(LitType),
+    Other(Name),
+}
+
+impl CastTarget {
+    pub fn is(&self, lit: LitType) -> bool {
+        *self == CastTarget::Known(lit)
+    }
+}
+
+impl std::fmt::Display for CastTarget {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            LitType::Int => "int",
-            LitType::Float => "float",
-            LitType::Bool => "bool",
+            CastTarget::Known(lit) => f.write_str(lit.text()),
+            CastTarget::Other(name) => f.write_str(name),
         }
     }
 }
 
-impl std::fmt::Display for LitType {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(self.name())
-    }
-}
-
-impl std::str::FromStr for LitType {
+impl std::str::FromStr for CastTarget {
     type Err = Error;
 
-    fn from_str(name: &str) -> Result<LitType> {
-        match name {
-            "int" => Ok(LitType::Int),
-            "float" => Ok(LitType::Float),
-            "bool" => Ok(LitType::Bool),
-            _ => Err(Error::Value(format!("no literal type {name}"))),
-        }
+    fn from_str(text: &str) -> Result<CastTarget> {
+        Ok(text
+            .parse()
+            .map_or_else(|_| CastTarget::Other(text.into()), CastTarget::Known))
     }
 }
 
@@ -436,7 +372,7 @@ macro_rules! with_exprs {
             /// A call of a named function over its arguments.
             Call as PyFunctionCallExpression "FunctionCallExpression" { name: Name, args: Arc<[Expression]> },
             Ternary as PyTernaryExpression "TernaryExpression" { cond: Expression, if_true: Expression, if_false: Expression },
-            Cast as PyCastExpression "CastExpression" { dtype: Name, expression: Expression },
+            Cast as PyCastExpression "CastExpression" { dtype: CastTarget, expression: Expression },
             /// A buffer read at a flat index: one coordinate per dimension.
             FlatIndex as PyFlatIndex "FlatIndex" { buffer: Name, index: Arc<[Expression]> },
         }
@@ -464,6 +400,7 @@ impl ExprField for Name {}
 impl ExprField for Lit {}
 impl ExprField for BinOp {}
 impl ExprField for Builtin {}
+impl ExprField for CastTarget {}
 
 impl ExprField for Expression {
     fn each_child(&self, f: &mut dyn FnMut(&Expression)) {
@@ -524,11 +461,25 @@ macro_rules! define_exprs {
             $( $(#[doc = $doc])* $Variant( $($ty),* ), )*
         }
 
+        /// Every expression kind by name: the tag the digest spells a node by.
+        #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+        pub enum ExprKind { $( $Variant, )* }
+
+        impl ExprKind {
+            pub const fn text(self) -> &'static str {
+                match self { $( ExprKind::$Variant => stringify!($Variant), )* }
+            }
+        }
+
         #[allow(unused_variables, unused_mut, unused_assignments)]
         impl Expr {
+            pub fn kind(&self) -> ExprKind {
+                match self { $( Expr::$Variant(..) => ExprKind::$Variant, )* }
+            }
+
             /// The kind's name, which is the tag the digest spells it by.
             pub fn kind_name(&self) -> &'static str {
-                match self { $( Expr::$Variant(..) => stringify!($Variant), )* }
+                self.kind().text()
             }
 
             /// `f` on each child, in field order.
@@ -1001,7 +952,7 @@ impl Expression {
             }
             Expr::Cast(dtype, inner) => {
                 let value = inner.eval(env)?;
-                Ok(if &**dtype == "int" {
+                Ok(if dtype.is(LitType::Int) {
                     Num::Int(value.as_int()?)
                 } else {
                     value
@@ -1110,7 +1061,7 @@ impl Expression {
             Expr::Cast(dtype, inner) => {
                 let new = inner.simplify(ctx)?;
                 if let Some(lit) = new.as_literal()
-                    && &**dtype == "int"
+                    && dtype.is(LitType::Int)
                 {
                     return Ok(Expression::int(lit.value.as_int()?));
                 }
@@ -1231,6 +1182,72 @@ pub use simplify::*;
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_built_ins_and_operators_spell_as_they_always_did() {
+        let builtins: Vec<&str> = Builtin::ALL.iter().map(|b| b.text()).collect();
+        assert_eq!(
+            builtins,
+            [
+                "thread_idx.x",
+                "thread_idx.y",
+                "thread_idx.z",
+                "block_idx.x",
+                "block_idx.y",
+                "block_idx.z",
+                "block_dim.x",
+                "block_dim.y",
+                "block_dim.z",
+                "grid_dim.x",
+                "grid_dim.y",
+                "grid_dim.z",
+                "warp_size",
+            ]
+        );
+        let operators: Vec<&str> = BinOp::ALL.iter().map(|op| op.text()).collect();
+        assert_eq!(
+            operators,
+            [
+                "||", "&&", "==", "!=", "<", ">", "<=", ">=", "^", "&", "|", "<<", ">>", "+", "-",
+                "*", "/", "//", "%"
+            ]
+        );
+        let literal_types: Vec<&str> = LitType::ALL.iter().map(|t| t.text()).collect();
+        assert_eq!(literal_types, ["int", "float", "bool"]);
+        let kinds: Vec<&str> = [
+            Expression::var("x"),
+            Expression::int(1),
+            Expression::new(Expr::Builtin(Builtin::WarpSize)),
+            Expression::binary(BinOp::Add, Expression::var("x"), Expression::int(1)),
+            Expression::new(Expr::Call("f".into(), Arc::from([]))),
+            Expression::new(Expr::Ternary(
+                Expression::var("c"),
+                Expression::int(1),
+                Expression::int(2),
+            )),
+            Expression::new(Expr::Cast(
+                CastTarget::Known(LitType::Int),
+                Expression::var("x"),
+            )),
+            Expression::new(Expr::FlatIndex("b".into(), Arc::from([]))),
+        ]
+        .iter()
+        .map(|e| e.kind_name())
+        .collect();
+        assert_eq!(
+            kinds,
+            [
+                "Var",
+                "Literal",
+                "Builtin",
+                "Binary",
+                "Call",
+                "Ternary",
+                "Cast",
+                "FlatIndex"
+            ]
+        );
+    }
     use crate::normalize::testing::eval_int;
 
     fn chain(depth: usize) -> Expression {
