@@ -1,7 +1,5 @@
 //! Digest material: the `Key` tree every number, parameter and tie is spelled in, and its hash.
 
-use std::sync::Arc;
-
 use crate::Name;
 use crate::closed_set;
 use crate::expr::Num;
@@ -14,7 +12,10 @@ pub enum Key {
     Bool(bool),
     Int(i64),
     Float(u64),
-    Str(Arc<str>),
+    /// A name, or a short text of a closed vocabulary (a tag, a dtype, an operation): interned.
+    Str(Name),
+    /// A text of its own, hashed like a `Str`: a body's text, which no table should keep.
+    Text(Box<str>),
     Num(u128),
     Tuple(Vec<Key>),
 }
@@ -36,11 +37,15 @@ closed_set! {
 
 impl Key {
     pub fn str(text: &str) -> Key {
-        Key::Str(text.into())
+        Key::Str(Name::new(text))
+    }
+
+    pub fn text(text: String) -> Key {
+        Key::Text(text.into())
     }
 
     pub fn tag(tag: Tag) -> Key {
-        Key::Str(tag.text().into())
+        Key::Str(Name::new(tag.text()))
     }
 
     pub fn float(value: f64) -> Key {
@@ -80,11 +85,8 @@ impl Key {
                 hasher.update(&[3]);
                 hasher.update(&v.to_le_bytes())
             }
-            Key::Str(s) => {
-                hasher.update(&[4]);
-                hasher.update(&(s.len() as u64).to_le_bytes());
-                hasher.update(s.as_bytes())
-            }
+            Key::Str(s) => Key::feed_text(s, hasher),
+            Key::Text(s) => Key::feed_text(s, hasher),
             Key::Num(n) => {
                 hasher.update(&[5]);
                 hasher.update(&n.to_le_bytes())
@@ -98,6 +100,12 @@ impl Key {
                 hasher
             }
         };
+    }
+
+    fn feed_text<'h>(text: &str, hasher: &'h mut blake3::Hasher) -> &'h mut blake3::Hasher {
+        hasher.update(&[4]);
+        hasher.update(&(text.len() as u64).to_le_bytes());
+        hasher.update(text.as_bytes())
     }
 
     pub fn hash(&self) -> Number {
@@ -119,7 +127,7 @@ pub fn hash_parts(parts: impl IntoIterator<Item = Key>) -> Number {
 pub type Param = Key;
 
 pub fn spelled_key(name: &Name) -> Key {
-    Key::Str(name.clone())
+    Key::Str(*name)
 }
 
 /// A hex spelling of a number, for the identity key.
@@ -135,7 +143,7 @@ pub fn expression_key(e: &Expression, leaf: &mut dyn FnMut(&Expression) -> Optio
         return key;
     }
     match &**e {
-        Expr::Var(name) => Key::tuple([Key::str(ExprType::Var.text()), Key::Str(name.clone())]),
+        Expr::Var(name) => Key::tuple([Key::str(ExprType::Var.text()), Key::Str(*name)]),
         Expr::Literal(lit) => Key::tuple([
             Key::str(ExprType::Literal.text()),
             Key::num(lit.value),
@@ -152,7 +160,7 @@ pub fn expression_key(e: &Expression, leaf: &mut dyn FnMut(&Expression) -> Optio
         ]),
         Expr::Call(name, args) => Key::tuple([
             Key::str(ExprType::Call.text()),
-            Key::Str(name.clone()),
+            Key::Str(*name),
             Key::Tuple(args.iter().map(|a| expression_key(a, leaf)).collect()),
         ]),
         Expr::Ternary(a, b, c) => Key::tuple([
@@ -168,7 +176,7 @@ pub fn expression_key(e: &Expression, leaf: &mut dyn FnMut(&Expression) -> Optio
         ]),
         Expr::FlatIndex(buffer, index) => Key::tuple([
             Key::str(ExprType::FlatIndex.text()),
-            Key::Str(buffer.clone()),
+            Key::Str(*buffer),
             Key::Tuple(index.iter().map(|a| expression_key(a, leaf)).collect()),
         ]),
     }

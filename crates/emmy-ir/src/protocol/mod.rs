@@ -49,10 +49,10 @@ struct Deps {
 impl Visitor for Deps {
     fn name(&mut self, roles: Roles, name: &Name) {
         if roles.contains_any(READING) {
-            self.reads.push(name.clone());
+            self.reads.push(*name);
         }
         if roles.contains_any(LOCAL) {
-            self.locals.push(name.clone());
+            self.locals.push(*name);
         }
     }
     fn expression(&mut self, roles: Roles, expression: &Expression) {
@@ -78,7 +78,7 @@ struct NamesByRole {
 impl Visitor for NamesByRole {
     fn name(&mut self, roles: Roles, name: &Name) {
         if roles.contains_any(self.roles) {
-            self.out.push(name.clone());
+            self.out.push(*name);
         }
     }
 }
@@ -93,7 +93,7 @@ struct Carried<'a> {
 impl Visitor for Carried<'_> {
     fn name(&mut self, roles: Roles, name: &Name) {
         if roles.contains_any(self.roles) {
-            self.own.push(name.clone());
+            self.own.push(*name);
         }
     }
     fn body(&mut self, roles: Roles, body: &Body) {
@@ -199,10 +199,7 @@ impl<'a> Renaming<'a> {
     }
 
     fn rename(&self, name: &Name) -> Name {
-        self.mapping
-            .get(name)
-            .cloned()
-            .unwrap_or_else(|| name.clone())
+        self.mapping.get(name).cloned().unwrap_or(*name)
     }
 
     fn subroutine(&self, target: &Arc<Subroutine>) -> Arc<Subroutine> {
@@ -232,7 +229,7 @@ impl Rewriter for RenameBuffers<'_, '_> {
         if roles.contains_any(BUFFERS) {
             self.0.rename(name)
         } else {
-            name.clone()
+            *name
         }
     }
     fn body(&mut self, roles: Roles, body: &Body) -> Body {
@@ -256,22 +253,22 @@ struct RewriteFields<'a, 'b> {
 impl Rewriter for RewriteFields<'_, '_> {
     fn name(&mut self, roles: Roles, name: &Name) -> Name {
         if roles.contains_any(NAMES) {
-            return (self.rewrite.rename)(name).unwrap_or_else(|| name.clone());
+            return (self.rewrite.rename)(name).unwrap_or(*name);
         }
         if roles.contains_any(AXIS_NAME) {
             let Some(axis_fn) = self.rewrite.axis_fn else {
-                return name.clone();
+                return *name;
             };
             let axes = self.axis_names.get_or_insert_with(|| {
                 self.this
                     .bound_axes()
                     .into_iter()
-                    .map(|axis| (axis.name.clone(), axis_fn(&axis).name.clone()))
+                    .map(|axis| (axis.name, axis_fn(&axis).name))
                     .collect()
             });
-            return axes.get(name).cloned().unwrap_or_else(|| name.clone());
+            return axes.get(name).cloned().unwrap_or(*name);
         }
-        name.clone()
+        *name
     }
     fn expression(&mut self, _roles: Roles, expression: &Expression) -> Expression {
         expression
@@ -305,7 +302,7 @@ impl Rewriter for RewriteFields<'_, '_> {
                 let moved = Statement::rewrite(stmt, &inner);
                 Statement::map_expressions(&moved, &mut |expression| {
                     expression.rename(&mut |name| {
-                        if defined.contains(name) {
+                        if defined.contains(&Name::new(name)) {
                             None
                         } else {
                             rename(name)
@@ -325,7 +322,7 @@ impl Rewriter for RewriteFields<'_, '_> {
 /// sorted free variables of the replacement (a split axis reduces over its sub-axes).
 fn rewrite_axis_name(name: &Name, sigma: &HashMap<Name, Expression>) -> Vec<Name> {
     match sigma.get(name) {
-        None => vec![name.clone()],
+        None => vec![*name],
         Some(replacement) => sorted_free_vars(replacement),
     }
 }
@@ -438,11 +435,7 @@ impl Statement {
 
     /// The names this statement brings into scope for its child bodies.
     pub fn binds_axes(&self) -> Vec<Name> {
-        let mut names: Vec<Name> = self
-            .bound_axes()
-            .iter()
-            .map(|axis| axis.name.clone())
-            .collect();
+        let mut names: Vec<Name> = self.bound_axes().iter().map(|axis| axis.name).collect();
         if let Statement::StridedLoop(loop_) = self
             && loop_.end.is_some()
         {
@@ -543,9 +536,7 @@ impl Statement {
             Statement::Let(let_) => {
                 let value = let_.value.rebuild(&mut |e| match &*e {
                     Expr::FlatIndex(buffer, index) => match mapping.get(buffer) {
-                        Some(renamed) => {
-                            Expression::new(Expr::FlatIndex(renamed.clone(), index.clone()))
-                        }
+                        Some(renamed) => Expression::new(Expr::FlatIndex(*renamed, index.clone())),
                         None => e,
                     },
                     _ => e,
@@ -599,7 +590,7 @@ impl Statement {
                 .sigma
                 .iter()
                 .filter(|(name, _)| !shadowed.contains(name))
-                .map(|(k, v)| (k.clone(), v.clone()))
+                .map(|(k, v)| (*k, v.clone()))
                 .collect();
             &Rewrite {
                 rename: rewrite.rename,
@@ -641,7 +632,7 @@ impl Statement {
         if mapping.is_empty() {
             return this.clone();
         }
-        Statement::rename_with(this, &|name| mapping.get(name).cloned())
+        Statement::rename_with(this, &|name| mapping.get(&Name::new(name)).cloned())
     }
 
     /// `rename` through a function; `None` keeps a name.
@@ -690,16 +681,16 @@ impl Statement {
         impl Visitor for AllNames {
             fn name(&mut self, roles: Roles, name: &Name) {
                 if roles.contains_any(NAMES.or(AXIS_NAME)) {
-                    self.0.push(name.clone());
+                    self.0.push(*name);
                 }
             }
             fn expression(&mut self, _roles: Roles, expression: &Expression) {
                 expression.collect_free_vars(&mut self.0);
             }
             fn axis(&mut self, _roles: Roles, axis: &AxisRef) {
-                self.0.push(axis.name.clone());
+                self.0.push(axis.name);
                 for source in axis.sources() {
-                    self.0.push(source.name.clone());
+                    self.0.push(source.name);
                 }
                 if let Some(window) = &axis.window {
                     for e in [&window.base, &window.bound].into_iter().flatten() {
@@ -744,7 +735,7 @@ impl Body {
             );
             let renamed: HashSet<Name> = resources
                 .iter()
-                .map(|name| mapping.get(name).cloned().unwrap_or_else(|| name.clone()))
+                .map(|name| mapping.get(name).cloned().unwrap_or(*name))
                 .collect();
             if renamed.len() == resources.len() {
                 result.mark_normal();
@@ -924,7 +915,7 @@ mod tests {
         Statement::rewrite(
             stmt,
             &Rewrite {
-                rename: &|name| names.get(name).cloned(),
+                rename: &|name| names.get(&Name::new(name)).cloned(),
                 sigma,
                 axis_fn: None,
             },
@@ -1057,7 +1048,7 @@ mod tests {
                 .collect();
             let moved = Statement::rename_buffers(&stmt, &buffers);
             let through = |names: Vec<Name>| -> Vec<Name> {
-                names.iter().map(|name| buffers[name].clone()).collect()
+                names.iter().map(|name| buffers[name]).collect()
             };
             assert_eq!(
                 moved.external_reads(),
@@ -1381,7 +1372,7 @@ mod tests {
         let names = names_by(&halve, str::to_string);
         let same_axis = |axis: &AxisRef| axis.clone();
         let rewrite = Rewrite {
-            rename: &|name| names.get(name).cloned(),
+            rename: &|name| names.get(&Name::new(name)).cloned(),
             sigma: &HashMap::new(),
             axis_fn: Some(&same_axis),
         };

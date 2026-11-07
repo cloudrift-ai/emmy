@@ -2,8 +2,6 @@
 //! and their text, value numbering, identity and normalization. Pure Rust; the Python extension beside it
 //! (`emmy-ir-py`) wraps these types as the classes `emmy.compiler.ir.stmt` and `emmy.compiler.ir.expression` export.
 
-use std::sync::Arc;
-
 pub mod axis;
 pub mod body;
 pub mod dtype;
@@ -12,6 +10,7 @@ pub mod expr;
 pub mod field;
 pub mod identity;
 pub mod memo;
+pub mod name;
 pub mod normalize;
 pub mod numbering;
 pub mod order;
@@ -19,8 +18,7 @@ pub mod protocol;
 pub mod statement;
 pub mod text;
 
-/// A name: an SSA value, an axis, a buffer. Shared, so a rename that keeps a name copies a pointer.
-pub type Name = Arc<str>;
+pub use name::Name;
 
 /// What a function of this crate refuses: a bad value, a wrong type, a division by zero, a missing key, an operation
 /// with no host form. The extension maps each onto the Python exception of the same name.
@@ -104,5 +102,17 @@ macro_rules! closed_set {
 pub fn locked<T>(mutex: &std::sync::Mutex<T>) -> std::sync::MutexGuard<'_, T> {
     mutex
         .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
+/// A read-write lock's read guard, reopened when a panic elsewhere poisoned it (see [`locked`]).
+pub fn locked_read<T>(lock: &std::sync::RwLock<T>) -> std::sync::RwLockReadGuard<'_, T> {
+    lock.read()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
+/// A read-write lock's write guard, reopened when a panic elsewhere poisoned it (see [`locked`]).
+pub fn locked_write<T>(lock: &std::sync::RwLock<T>) -> std::sync::RwLockWriteGuard<'_, T> {
+    lock.write()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
 }

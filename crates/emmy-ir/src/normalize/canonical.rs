@@ -56,8 +56,8 @@ impl SequentialScope {
         if self.owned.contains(old) || self.fixed.contains(old) {
             return;
         }
-        self.ssa.insert(old.clone(), counters.fresh(prefix));
-        self.owned.insert(old.clone());
+        self.ssa.insert(*old, counters.fresh(prefix));
+        self.owned.insert(*old);
     }
 
     /// Rename one next statement and advance this scope's allocation state.
@@ -69,10 +69,8 @@ impl SequentialScope {
             let scalar = carried_out(child);
             for here in child.of_types(&[StatementType::Accum, StatementType::Carry]) {
                 match &**here.stmt() {
-                    Statement::Carry(c) => exported.push(c.name.clone()),
-                    Statement::Accum(a) if scalar.contains(&a.name) => {
-                        exported.push(a.name.clone())
-                    }
+                    Statement::Carry(c) => exported.push(c.name),
+                    Statement::Accum(a) if scalar.contains(&a.name) => exported.push(a.name),
                     _ => {}
                 }
             }
@@ -93,15 +91,14 @@ impl SequentialScope {
         }
         for axis in stmt.bound_axes() {
             for source in axis.sources() {
-                if !self.sources.contains_key(&source.name) {
-                    self.sources
-                        .insert(source.name.clone(), counters.fresh("p"));
-                }
+                self.sources
+                    .entry(source.name)
+                    .or_insert_with(|| counters.fresh("p"));
             }
         }
         let mut names = self.ssa.clone();
-        names.extend(self.sources.iter().map(|(k, v)| (k.clone(), v.clone())));
-        names.extend(axes.iter().map(|(k, v)| (k.clone(), v.clone())));
+        names.extend(self.sources.iter().map(|(k, v)| (*k, *v)));
+        names.extend(axes.iter().map(|(k, v)| (*k, *v)));
         let shell = if children.is_empty() {
             stmt.clone()
         } else {
@@ -235,7 +232,7 @@ pub fn canonical_order(body: &Body) -> Result<Body> {
     let role = roles(&stmts, None);
     let numbering = value_numbers(&stmts, &|name| {
         role.get(name)
-            .map_or_else(|| Key::Str(name.clone()), |r| Key::Int(*r as i64))
+            .map_or_else(|| Key::Str(*name), |r| Key::Int(*r as i64))
     });
     let placed = ordered(&stmts, &numbering)?;
     let result = rename_ssa_sequential(&placed);
@@ -244,17 +241,17 @@ pub fn canonical_order(body: &Body) -> Result<Body> {
     let listed = result.map_stmts(&mut |stmt| match &**stmt {
         Statement::Assign(a) if a.op.commutative() && a.args.len() > 1 => {
             let mut args: Vec<Name> = a.args.to_vec();
-            args.sort_by_cached_key(|name| (operand_key(name), name.clone()));
+            args.sort_by_cached_key(|name| (operand_key(name), *name));
             Some(Arc::new(Statement::Assign(Assign {
                 args: args.into(),
                 ..a.clone()
             })))
         }
         Statement::Affine(a) if a.args.len() > 1 => {
-            let mut terms: Vec<(f64, Name)> = a.terms().map(|(c, arg)| (c, arg.clone())).collect();
+            let mut terms: Vec<(f64, Name)> = a.terms().map(|(c, arg)| (c, *arg)).collect();
             terms.sort_by_cached_key(|(c, name)| ties::term_key(operand_key(name), name, *c));
             Some(Arc::new(Statement::Affine(Affine {
-                args: terms.iter().map(|(_, n)| n.clone()).collect(),
+                args: terms.iter().map(|(_, n)| *n).collect(),
                 coefficients: terms.iter().map(|(c, _)| Float(*c)).collect(),
                 ..a.clone()
             })))
@@ -291,7 +288,7 @@ fn affine(expression: Expression, axis_order: &HashMap<Name, usize>) -> Result<E
     sorted.sort_by_key(|(name, _)| axis_order[*name]);
     let mut terms: Vec<Expression> = Vec::new();
     for (name, coefficient) in sorted {
-        let variable = Expression::new(Expr::Var(name.clone()));
+        let variable = Expression::new(Expr::Var(*name));
         terms.push(if *coefficient == 1 {
             variable
         } else {
@@ -343,7 +340,7 @@ fn rewrite(e: &Expression, axis_order: &HashMap<Name, usize>) -> Result<Expressi
         Expr::Call(name, args) => {
             let args: Result<Vec<Expression>> =
                 args.iter().map(|a| rewrite(a, axis_order)).collect();
-            Expression::new(Expr::Call(name.clone(), args?.into()))
+            Expression::new(Expr::Call(*name, args?.into()))
         }
         Expr::Ternary(a, b, c) => Expression::new(Expr::Ternary(
             rewrite(a, axis_order)?,
@@ -362,7 +359,7 @@ pub fn canonicalize_expressions(body: &Body, axes: &[Name]) -> Result<Body> {
     let axis_order: HashMap<Name, usize> = axes
         .iter()
         .enumerate()
-        .map(|(i, name)| (name.clone(), i))
+        .map(|(i, name)| (*name, i))
         .collect();
     let out: Vec<Arc<Statement>> = body
         .stmts()
@@ -370,7 +367,7 @@ pub fn canonicalize_expressions(body: &Body, axes: &[Name]) -> Result<Body> {
         .map(|stmt| {
             let rewritten = Statement::try_map_expressions(stmt, &mut |e| rewrite(e, &axis_order))?;
             let mut bound: Vec<Name> = axes.to_vec();
-            bound.extend(stmt.bound_axes().iter().map(|axis| axis.name.clone()));
+            bound.extend(stmt.bound_axes().iter().map(|axis| axis.name));
             let nested = rewritten.nested();
             if nested.is_empty() {
                 return Ok(rewritten);

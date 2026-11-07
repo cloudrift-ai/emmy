@@ -28,9 +28,16 @@ body's normal form). Every file imports what it uses by name; no child module ta
 
 ## Data
 
-- A name is an `Arc<str>`; a tuple of names, expressions or axes an `Arc<[…]>`; an expression an `Arc<Node>` (its tree
+- A name is an interned symbol (`name.rs`); a tuple of names, expressions or axes an `Arc<[…]>`; an expression an `Arc<Node>` (its tree
   with its height); a body an `Arc<BodyData>`. A rebuild that changes nothing returns the object it was given, so
   every walk tells a change by pointer and a Python wrapper can hand back the same object.
+- **Names** (`name.rs`): a name is a symbol into one process-wide table, interned on construction (`Name::new`,
+  `From<&str>`), so equality and hashing are integer compares and a copy is a word; `Deref<Target = str>` and `Display`
+  resolve its text, and a name orders by its text, as the canonical order sorts names and as every digest spells them
+  (`Key::Str` holds a name and feeds its text bytes), so an interned name moves no identity. The table never frees; a
+  lowering mints names a body at a time, and the distinct names of the A100 golden's fresh lowering and the corpus stay
+  in the tens of thousands. A map keyed by names is looked up by a name, so a text looks itself up by interning first
+  (`map.get(&Name::new(text))`).
 - **Expressions** (`expr/`): eight expression types declared once in the `with_exprs!` macro (the variant, its Python
   class and its fields), which generates the `enum Expr`, the walks every expression type answers through its fields
   (children, height, the rebuilds) and, in the extension, the classes with a getter per field; the printer and the

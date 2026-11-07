@@ -29,7 +29,7 @@ pub(crate) fn reduce_axis_source_positions(body: &Body, axis: &Name) -> Result<B
                     if coeff != 0 {
                         out.insert(Key::tuple([
                             Key::tag(Tag::Affine),
-                            Key::Str(load.input.clone()),
+                            Key::Str(load.input),
                             Key::Int(dim as i64),
                             Key::str(&anchor.text()),
                             Key::Int(coeff),
@@ -39,13 +39,13 @@ pub(crate) fn reduce_axis_source_positions(body: &Body, axis: &Name) -> Result<B
                 None if e.reads(axis) => {
                     let spelled = e
                         .substitute(&HashMap::from([(
-                            axis.clone(),
+                            *axis,
                             Expression::var(REDUCE_AXIS_PLACEHOLDER),
                         )]))
                         .simplify(&SimplifyCtx::empty())?;
                     out.insert(Key::tuple([
                         Key::tag(Tag::Composite),
-                        Key::Str(load.input.clone()),
+                        Key::Str(load.input),
                         Key::Int(dim as i64),
                         Key::str(&spelled.text()),
                     ]));
@@ -67,12 +67,7 @@ pub fn unify_siblings(body: &Body) -> Result<Body> {
         {
             let positions = reduce_axis_source_positions(&l.body, &l.axis.name)?;
             if !positions.is_empty() {
-                entries.push((
-                    i,
-                    l.axis.name.clone(),
-                    l.axis.extent.expression.clone(),
-                    positions,
-                ));
+                entries.push((i, l.axis.name, l.axis.extent.expression.clone(), positions));
             }
         }
     }
@@ -102,7 +97,7 @@ pub fn unify_siblings(body: &Body) -> Result<Body> {
     }
     for k in 0..entries.len() {
         let root = find(&mut parent, k);
-        let canonical = entries[root].1.clone();
+        let canonical = entries[root].1;
         let (index, axis_name, extent, _) = &entries[k];
         if canonical == *axis_name {
             continue;
@@ -112,14 +107,14 @@ pub fn unify_siblings(body: &Body) -> Result<Body> {
         };
         // A RENAME, binders and uses through one map, which is why it may pass through the very scopes it renames.
         let new_axis = Arc::new(Axis {
-            name: canonical.clone(),
+            name: canonical,
             extent: Dim {
                 expression: extent.clone(),
                 hint: l.axis.extent.hint,
             },
             window: l.axis.window.clone(),
         });
-        let mapping = HashMap::from([(l.axis.name.clone(), canonical.clone())]);
+        let mapping = HashMap::from([(l.axis.name, canonical)]);
         let renamed = l.body.map_each(&mut |s| Statement::rename(s, &mapping));
         stmts[*index] = Arc::new(Statement::Loop(Loop {
             axis: new_axis,
@@ -137,7 +132,7 @@ pub(crate) fn carried_out(body: &Body) -> HashSet<Name> {
         .stmts()
         .iter()
         .filter_map(|s| match &**s {
-            Statement::Accum(a) => Some(a.name.clone()),
+            Statement::Accum(a) => Some(a.name),
             _ => None,
         })
         .collect();
@@ -167,9 +162,9 @@ pub(crate) fn rename_apart(body: &Body, clashing: &HashSet<Name>, taken: &HashSe
         let fresh = (1..)
             .map(|n| Name::from(format!("{name}__m{n}")))
             .find(|candidate| !used.contains(candidate))
-            .unwrap_or_else(|| name.clone());
-        used.insert(fresh.clone());
-        mapping.insert(name.clone(), fresh);
+            .unwrap_or(*name);
+        used.insert(fresh);
+        mapping.insert(*name, fresh);
     }
     body.map_each(&mut |s| Statement::rename(s, &mapping))
 }

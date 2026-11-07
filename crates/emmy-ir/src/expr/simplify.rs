@@ -542,7 +542,7 @@ pub fn affine_form(
         return Some((expression.clone(), BTreeMap::new()));
     }
     match &**expression {
-        Expr::Var(name) => Some((Expression::int(0), BTreeMap::from([(name.clone(), 1)]))),
+        Expr::Var(name) => Some((Expression::int(0), BTreeMap::from([(*name, 1)]))),
         Expr::Binary(op @ (BinOp::Add | BinOp::Sub), left, right) => {
             let (l_anchor, l_coeffs) = affine_form(left, vars)?;
             let (r_anchor, r_coeffs) = affine_form(right, vars)?;
@@ -612,7 +612,7 @@ pub fn index_set_size(
 ) -> Option<i128> {
     let mut total: i128 = 1;
     for e in expressions {
-        let (_, coeffs) = affine_form(e, &|name| var_extents.contains_key(name))?;
+        let (_, coeffs) = affine_form(e, &|name| var_extents.contains_key(&Name::new(name)))?;
         let mut size: i128 = 1;
         for (v, c) in coeffs {
             let span = (c as i128)

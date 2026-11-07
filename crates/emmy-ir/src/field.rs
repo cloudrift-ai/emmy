@@ -102,7 +102,7 @@ pub trait Visitor {
 /// Rebuilds a statement value by value; the default keeps each.
 pub trait Rewriter {
     fn name(&mut self, _roles: Roles, name: &Name) -> Name {
-        name.clone()
+        *name
     }
     fn expression(&mut self, _roles: Roles, expression: &Expression) -> Expression {
         expression.clone()
@@ -273,11 +273,11 @@ impl Field for Name {
         if roles.contains_any(NAMES.or(BUFFERS).or(AXIS_NAME)) {
             rewriter.name(roles, self)
         } else {
-            self.clone()
+            *self
         }
     }
     fn same(&self, other: &Self) -> bool {
-        Arc::ptr_eq(self, other) || self == other
+        self == other
     }
     fn spell(&self, out: &mut String) -> Result<()> {
         out.push_str(&spell_stmt_name(self)?);
@@ -455,7 +455,7 @@ impl Field for AxisRef {
         }
     }
     fn same(&self, other: &Self) -> bool {
-        Arc::ptr_eq(self, other) || self == other
+        self == other
     }
     fn spell(&self, out: &mut String) -> Result<()> {
         out.push_str(&spell_axis(self, None)?);

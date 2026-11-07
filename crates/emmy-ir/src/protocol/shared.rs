@@ -24,7 +24,7 @@ pub fn seeded_accumulators(stmt: &Statement) -> Vec<Name> {
     body.stmts()
         .iter()
         .filter_map(|s| match &**s {
-            Statement::Accum(a) => Some(a.name.clone()),
+            Statement::Accum(a) => Some(a.name),
             _ => None,
         })
         .collect()
@@ -54,14 +54,14 @@ pub fn carried_cells(body: &Body) -> Vec<(Name, Vec<Option<AxisRef>>)> {
                         .collect();
                     match out.iter_mut().find(|(name, _)| *name == carry.name) {
                         Some(entry) => entry.1 = shape,
-                        None => out.push((carry.name.clone(), shape)),
+                        None => out.push((carry.name, shape)),
                     }
                 }
             }
             for child in stmt.nested() {
                 if let Statement::Loop(l) = &**stmt {
                     let mut deeper = inner.clone();
-                    deeper.insert(l.axis.name.clone(), l.axis.clone());
+                    deeper.insert(l.axis.name, l.axis.clone());
                     walk(&child, &deeper, out);
                 } else {
                     walk(&child, inner, out);
@@ -165,7 +165,7 @@ impl Affine {
             fn bound(&mut self, value: f64) -> Name {
                 let name = self.fresh();
                 let let_ = Let {
-                    name: name.clone(),
+                    name,
                     value: Expression::float(value),
                     dtype: self.affine.dtype,
                 };
@@ -175,7 +175,7 @@ impl Affine {
             fn step(&mut self, op: Operation, args: Vec<Name>) -> Name {
                 let name = self.fresh();
                 let assign = Assign {
-                    name: name.clone(),
+                    name,
                     op: ElementwiseOp::Known(op),
                     args: args.into(),
                     dtype: self.affine.dtype,
@@ -195,10 +195,10 @@ impl Affine {
         terms.sort_by_key(|(c, _)| *c < 0.0);
         for (coefficient, arg) in terms {
             let term = if coefficient.abs() == 1.0 {
-                arg.clone()
+                *arg
             } else {
                 let literal = chain.bound(coefficient.abs());
-                chain.step(Operation::Multiply, vec![arg.clone(), literal])
+                chain.step(Operation::Multiply, vec![*arg, literal])
             };
             total = Some(match total {
                 None if coefficient > 0.0 => term,
@@ -233,13 +233,13 @@ impl Affine {
             Some(last) if last.name() == Some(&total) => {
                 if let Statement::Assign(a) = &**last {
                     *last = Arc::new(Statement::Assign(Assign {
-                        name: self.name.clone(),
+                        name: self.name,
                         ..a.clone()
                     }));
                 }
             }
             _ => out.push(Arc::new(Statement::Assign(Assign {
-                name: self.name.clone(),
+                name: self.name,
                 op: ElementwiseOp::Known(Operation::Copy),
                 args: Names::from([total]),
                 dtype: self.dtype,

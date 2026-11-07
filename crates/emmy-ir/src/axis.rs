@@ -140,7 +140,7 @@ impl Axis {
                 let parent = window.parent.as_ref().map(|parent| {
                     if depth > 32 {
                         Arc::new(Axis {
-                            name: rename(&parent.name).unwrap_or_else(|| parent.name.clone()),
+                            name: rename(&parent.name).unwrap_or_else(|| parent.name),
                             ..(**parent).clone()
                         })
                     } else {
@@ -155,7 +155,7 @@ impl Axis {
                 }
             });
             Axis {
-                name: rename(&axis.name).unwrap_or_else(|| axis.name.clone()),
+                name: rename(&axis.name).unwrap_or(axis.name),
                 extent: axis.extent.clone(),
                 window,
             }

@@ -856,7 +856,7 @@ impl Expression {
     pub fn collect_free_vars(&self, out: &mut Vec<Name>) {
         if let Expr::Var(name) = &**self {
             if !out.iter().any(|n| n == name) {
-                out.push(name.clone());
+                out.push(*name);
             }
             return;
         }
@@ -901,7 +901,7 @@ impl Expression {
         if mapping.is_empty() {
             return self.clone();
         }
-        self.rename(&mut |name| mapping.get(name).cloned())
+        self.rename(&mut |name| mapping.get(&Name::new(name)).cloned())
     }
 
     /// Bottom-up map: `f` applied to every subterm once its children are rebuilt.
@@ -917,7 +917,7 @@ impl Expression {
             if let Expr::FlatIndex(buffer, _) = &*term
                 && !out.contains(buffer)
             {
-                out.push(buffer.clone());
+                out.push(*buffer);
             }
         }
         out
@@ -1029,7 +1029,7 @@ impl Expression {
                 {
                     Ok(self.clone())
                 } else {
-                    Ok(Expression::new(Expr::Call(name.clone(), new.into())))
+                    Ok(Expression::new(Expr::Call(*name, new.into())))
                 }
             }
             Expr::Ternary(cond, if_true, if_false) => {
@@ -1075,7 +1075,7 @@ impl Expression {
                 {
                     return Ok(self.clone());
                 }
-                Ok(Expression::new(Expr::FlatIndex(buffer.clone(), new.into())))
+                Ok(Expression::new(Expr::FlatIndex(*buffer, new.into())))
             }
         }
     }

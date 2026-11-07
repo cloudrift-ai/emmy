@@ -27,7 +27,7 @@ pub fn fold_trivial_selects(body: &Body) -> Body {
             return Some(assign(
                 &s.name,
                 ElementwiseOp::Known(Operation::Copy),
-                vec![s.branches[0].value.clone()],
+                vec![s.branches[0].value],
                 None,
             ));
         }
@@ -37,7 +37,7 @@ pub fn fold_trivial_selects(body: &Body) -> Body {
 
 pub(crate) fn let_literal(name: &Name, value: f64, dtype: Option<DType>) -> Arc<Statement> {
     Arc::new(Statement::Let(Let {
-        name: name.clone(),
+        name: *name,
         value: Expression::float(value),
         dtype: Some(dtype.unwrap_or(DType::F32)),
     }))
@@ -72,15 +72,13 @@ pub fn fold_constants(body: &Body) -> Body {
                 );
             }
             let folded = match &*stmt {
-                Statement::Assign(a) => {
-                    evaluated(a, &env).map(|value| (a.name.clone(), value, a.dtype))
-                }
+                Statement::Assign(a) => evaluated(a, &env).map(|value| (a.name, value, a.dtype)),
                 Statement::Affine(a) if a.args.iter().all(|arg| env.contains_key(arg)) => {
                     let mut sum = 0.0;
                     for (coefficient, arg) in a.terms() {
                         sum += coefficient * env[arg];
                     }
-                    Some((a.name.clone(), a.offset.0 + sum, a.dtype))
+                    Some((a.name, a.offset.0 + sum, a.dtype))
                 }
                 _ => None,
             };
@@ -91,7 +89,7 @@ pub fn fold_constants(body: &Body) -> Body {
                 env.remove(&name);
             }
             if let Some((name, value)) = literal_binding(&stmt) {
-                env.insert(name.clone(), value);
+                env.insert(*name, value);
             }
             out.push(stmt);
         }
@@ -102,7 +100,7 @@ pub fn fold_constants(body: &Body) -> Body {
 
 /// Every name read anywhere in `body`, counted: SSA reads and expression variables, less a statement's own definitions.
 pub(crate) fn read_counts(body: &Body, exposed: &HashSet<Name>) -> HashMap<Name, usize> {
-    let mut counts: HashMap<Name, usize> = exposed.iter().map(|name| (name.clone(), 1)).collect();
+    let mut counts: HashMap<Name, usize> = exposed.iter().map(|name| (*name, 1)).collect();
     body.walk(&mut |here| {
         let stmt = here.stmt();
         let own: HashSet<Name> = stmt.defines().into_iter().collect();
@@ -192,7 +190,7 @@ pub fn fold_affine(body: &Body, exposed: &HashSet<Name>) -> Body {
         offset: f64,
     ) -> Arc<Statement> {
         let live: Vec<(Name, f64)> = terms.iter().filter(|(_, c)| *c != 0.0).cloned().collect();
-        let name = name.clone();
+        let name = *name;
         if live.is_empty() {
             return let_literal(&name, offset, root.dtype().cloned());
         }
@@ -200,13 +198,13 @@ pub fn fold_affine(body: &Body, exposed: &HashSet<Name>) -> Body {
             return assign(
                 &name,
                 ElementwiseOp::Known(Operation::Copy),
-                vec![live[0].0.clone()],
+                vec![live[0].0],
                 root.dtype().cloned(),
             );
         }
         Arc::new(Statement::Affine(Affine {
             name,
-            args: live.iter().map(|(n, _)| n.clone()).collect(),
+            args: live.iter().map(|(n, _)| *n).collect(),
             coefficients: live.iter().map(|(_, c)| Float(*c)).collect(),
             offset: Float(offset),
             dtype: root.dtype().cloned(),
@@ -218,10 +216,8 @@ pub fn fold_affine(body: &Body, exposed: &HashSet<Name>) -> Body {
         match (a, b) {
             (Statement::Affine(a), Statement::Affine(b)) => {
                 let sorted = |x: &Affine| {
-                    let mut terms: Vec<(Key, Name)> = x
-                        .terms()
-                        .map(|(c, arg)| (Key::float(c), arg.clone()))
-                        .collect();
+                    let mut terms: Vec<(Key, Name)> =
+                        x.terms().map(|(c, arg)| (Key::float(c), *arg)).collect();
                     terms.sort();
                     terms
                 };
@@ -256,22 +252,22 @@ pub fn fold_affine(body: &Body, exposed: &HashSet<Name>) -> Body {
             binds.push(
                 reads
                     .iter()
-                    .filter_map(|arg| current.get(arg).map(|i| (arg.clone(), *i)))
+                    .filter_map(|arg| current.get(arg).map(|i| (*arg, *i)))
                     .collect(),
             );
             values.push(
                 reads
                     .iter()
-                    .filter_map(|arg| literals.get(arg).map(|v| (arg.clone(), *v)))
+                    .filter_map(|arg| literals.get(arg).map(|v| (*arg, *v)))
                     .collect(),
             );
             for name in stmt.defines() {
-                current.insert(name.clone(), index);
-                dtypes.insert(name.clone(), dtype_of(stmt, &dtypes));
+                current.insert(name, index);
+                dtypes.insert(name, dtype_of(stmt, &dtypes));
                 literals.remove(&name);
             }
             if let Some((name, number)) = literal_binding(stmt) {
-                literals.insert(name.clone(), number);
+                literals.insert(*name, number);
             }
         }
         // The one name a cone member defines: an assign's or an affine's.
@@ -361,7 +357,7 @@ pub fn fold_affine(body: &Body, exposed: &HashSet<Name>) -> Body {
                 } else {
                     match terms.iter_mut().find(|(name, _)| name == arg) {
                         Some(term) => term.1 += scale,
-                        None => terms.push((arg.clone(), scale)),
+                        None => terms.push((*arg, scale)),
                     }
                 }
             }

@@ -34,7 +34,7 @@ fn canonicalize_op_clusters(body: &Body) -> Body {
         Some(match &**stmt {
             // A sum is FMA-class work; which coefficients it carries is not the cluster's business.
             Statement::Affine(a) => Arc::new(Statement::Assign(Assign {
-                name: a.name.clone(),
+                name: a.name,
                 op: ElementwiseOp::Known(Operation::Add).cluster_representative(),
                 args: a.args.clone(),
                 dtype: a.dtype,
@@ -72,8 +72,7 @@ pub fn canonicalize_identity(
         stmts = normalize_body(&canonicalize_op_clusters(&stmts))?;
     }
     let colors_key = colors.map(|c| {
-        let mut sorted: Vec<(Name, String)> =
-            c.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
+        let mut sorted: Vec<(Name, String)> = c.iter().map(|(k, v)| (*k, v.clone())).collect();
         sorted.sort();
         sorted
     });

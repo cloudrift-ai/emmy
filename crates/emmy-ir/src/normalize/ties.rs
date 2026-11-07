@@ -159,7 +159,7 @@ pub(crate) fn cone_sizes(body: &Body, out: &mut HashMap<Name, usize>) {
                 }
             }
             for name in stmt.defines() {
-                defined.insert(name.clone(), index);
+                defined.insert(name, index);
                 out.insert(name, set.len());
             }
         } else {
@@ -259,7 +259,7 @@ pub(crate) fn sibling_category(stmt: &Statement) -> i64 {
 
 /// The key a sum's terms sort by: the operand rank, the name, the coefficient.
 pub(crate) fn term_key(operand: Key, name: &Name, coefficient: f64) -> (Key, Name, Key) {
-    (operand, name.clone(), Key::float(coefficient))
+    (operand, *name, Key::float(coefficient))
 }
 
 /// Whether `op`'s operands may trade places.

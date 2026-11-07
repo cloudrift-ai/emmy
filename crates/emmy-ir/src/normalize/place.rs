@@ -24,7 +24,7 @@ pub fn rename_free(stmt: &Arc<Statement>, alias: &HashMap<Name, Name>) -> Arc<St
     } else {
         with_bodies(stmt, bodies.iter().map(|_| Body::empty()).collect())
     };
-    let rename = |name: &str| alias.get(name).cloned();
+    let rename = |name: &str| alias.get(&Name::new(name)).cloned();
     let empty = HashMap::new();
     let renamed = Statement::rewrite(
         &shell,
@@ -44,7 +44,7 @@ pub fn rename_free(stmt: &Arc<Statement>, alias: &HashMap<Name, Name>) -> Arc<St
         let pruned: HashMap<Name, Name> = alias
             .iter()
             .filter(|(k, _)| !bound.contains(*k) && !binds.contains(*k))
-            .map(|(k, v)| (k.clone(), v.clone()))
+            .map(|(k, v)| (*k, *v))
             .collect();
         // The surviving value may itself be shadowed here: rename the local binding before substituting.
         let mut captured: Vec<Name> = bound
@@ -63,11 +63,11 @@ pub fn rename_free(stmt: &Arc<Statement>, alias: &HashMap<Name, Name>) -> Arc<St
             let mut renames: HashMap<Name, Name> = HashMap::new();
             for name in captured {
                 let mut fresh = format!("{name}_local");
-                while used.contains(&*fresh) {
+                while used.contains(&Name::new(&fresh)) {
                     fresh.push_str("_local");
                 }
                 let fresh: Name = fresh.into();
-                used.insert(fresh.clone());
+                used.insert(fresh);
                 renames.insert(name, fresh);
             }
             b = b.map_each(&mut |member| Statement::rename(member, &renames));
@@ -102,13 +102,13 @@ type Walked = (Kept, Vec<(usize, Arc<Statement>)>, Marks);
 type Placed = (Option<Arc<Statement>>, Vec<(usize, Arc<Statement>)>, Marks);
 impl Placer<'_> {
     fn bump(&mut self, name: &Name, depth: usize) {
-        let v = self.version.entry(name.clone()).or_insert(0);
+        let v = self.version.entry(*name).or_insert(0);
         *v += 1;
-        self.version_depth.insert((name.clone(), *v), depth);
+        self.version_depth.insert((*name, *v), depth);
     }
     fn read_of(&self, name: &Name) -> Marks {
         if self.written.contains(name) {
-            BTreeSet::from([(name.clone(), self.version.get(name).copied().unwrap_or(0))])
+            BTreeSet::from([(*name, self.version.get(name).copied().unwrap_or(0))])
         } else {
             BTreeSet::new()
         }
@@ -143,7 +143,7 @@ impl Placer<'_> {
                 out.extend(marks.iter().cloned());
             }
         }
-        if let Some(v) = self.version.get("") {
+        if let Some(v) = self.version.get(&Name::new("")) {
             out.insert((Name::from(""), *v));
         }
         for name in stmt.external_reads() {
@@ -156,8 +156,8 @@ impl Placer<'_> {
     }
     fn settle(&mut self, names: &[Name], depth: usize, marks: &Marks) {
         for name in names {
-            self.defined.insert(name.clone(), depth);
-            self.taint.insert(name.clone(), marks.clone());
+            self.defined.insert(*name, depth);
+            self.taint.insert(*name, marks.clone());
         }
     }
     fn target(&self, depth: usize, names: &HashSet<Name>, marks: &Marks) -> usize {
@@ -190,10 +190,10 @@ impl Placer<'_> {
         for stmt in body.stmts() {
             match &**stmt {
                 Statement::Accum(a) => {
-                    self.defined.entry(a.name.clone()).or_insert(depth);
+                    self.defined.entry(a.name).or_insert(depth);
                 }
                 Statement::Carry(c) => {
-                    self.defined.entry(c.name.clone()).or_insert(depth);
+                    self.defined.entry(c.name).or_insert(depth);
                 }
                 _ => {}
             }
@@ -213,8 +213,8 @@ impl Placer<'_> {
                     .alias
                     .get(&a.args[0])
                     .cloned()
-                    .unwrap_or_else(|| a.args[0].clone());
-                self.alias.insert(a.name.clone(), source.clone());
+                    .unwrap_or_else(|| a.args[0]);
+                self.alias.insert(a.name, source);
                 let (depth_of, marks) = (
                     self.depth_of(&source),
                     self.taint.get(&source).cloned().unwrap_or_default(),
@@ -255,7 +255,7 @@ impl Placer<'_> {
                     {
                         if names != defines {
                             for (own, other) in defines.iter().zip(&names) {
-                                self.alias.insert(own.clone(), other.clone());
+                                self.alias.insert(*own, *other);
                             }
                         }
                         let Some(&where_) = self.defined.get(&names[0]) else {
@@ -286,16 +286,16 @@ impl Placer<'_> {
                     && !uses.contains(&a.name)
                     && !self.seeds.contains(&a.name);
                 if reduction && let Some(names) = self.available[depth].get(&key).cloned() {
-                    self.alias.insert(a.name.clone(), names[0].clone());
+                    self.alias.insert(a.name, names[0]);
                     self.settle(std::slice::from_ref(&a.name), depth, &marks);
                     continue;
                 }
                 if reduction {
-                    self.available[depth].insert(key.clone(), vec![a.name.clone()]);
+                    self.available[depth].insert(key.clone(), vec![a.name]);
                 }
             }
             if let Statement::Init(i) = &**stmt {
-                self.seeds.insert(i.name.clone());
+                self.seeds.insert(i.name);
             }
             for name in stmt.external_writes() {
                 self.bump(&name, depth);
@@ -319,7 +319,7 @@ impl Placer<'_> {
         let mut writes: HashSet<Name> = members.iter().flat_map(|m| m.external_writes()).collect();
         for member in &members {
             if let Statement::Carry(c) = &**member {
-                writes.insert(c.name.clone());
+                writes.insert(c.name);
             }
             if is_protocol(member) {
                 writes.insert(Name::from(""));
@@ -424,7 +424,7 @@ impl Placer<'_> {
                 if where_ <= depth {
                     taken.insert(index);
                     for (other, own) in else_kept[index].0.defines().iter().zip(stmt.defines()) {
-                        self.alias.insert(other.clone(), own);
+                        self.alias.insert(*other, own);
                     }
                     let defines = stmt.defines();
                     self.settle(&defines, where_, &key.2);
@@ -454,7 +454,7 @@ pub fn place_values(body: &Body) -> Result<Body> {
     body.walk(&mut |here| {
         written.extend(here.stmt().external_writes());
         if let Statement::Carry(c) = &**here.stmt() {
-            written.insert(c.name.clone());
+            written.insert(c.name);
         }
     });
     let mut placer = Placer {
@@ -1088,7 +1088,7 @@ mod tests {
                 .stmts()
                 .iter()
                 .filter_map(|stmt| match &**stmt {
-                    Statement::Load(load) => Some((load.names[0].clone(), load.input.clone())),
+                    Statement::Load(load) => Some((load.names[0], load.input)),
                     _ => None,
                 })
                 .collect();
@@ -1096,12 +1096,12 @@ mod tests {
                 .writes()
                 .iter()
                 .filter_map(|here| match &**here.stmt() {
-                    Statement::Write(write) => Some((write.output.clone(), written(here).clone())),
+                    Statement::Write(write) => Some((write.output, *written(here))),
                     _ => None,
                 })
                 .collect();
-            assert_eq!(&*loads[&writes["outer"]], "x");
-            assert_eq!(&*loads[&writes["inner"]], inner_input);
+            assert_eq!(&*loads[&writes[&Name::new("outer")]], "x");
+            assert_eq!(&*loads[&writes[&Name::new("inner")]], inner_input);
             assert_eq!(loads.len(), if inner_input == "x" { 1 } else { 2 });
             assert_eq!(renormalized(&out), out);
         }

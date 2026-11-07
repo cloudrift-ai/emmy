@@ -177,7 +177,7 @@ impl Context<'_> {
             // A read of a carried state ahead of its update in the loop: the previous step's value.
             return self.resource(name, Tag::State, touched);
         }
-        Key::tuple([Key::tag(Tag::Free), Key::Str(name.clone())])
+        Key::tuple([Key::tag(Tag::Free), Key::Str(*name)])
     }
 
     /// An operation's argument no statement ahead of it binds: a carried state read ahead of its update, keyed by
@@ -186,7 +186,7 @@ impl Context<'_> {
         if self.carried.contains(name) {
             self.resource(name, Tag::State, touched)
         } else {
-            Key::Str(name.clone())
+            Key::Str(*name)
         }
     }
 
@@ -197,9 +197,9 @@ impl Context<'_> {
             &mut self.out.buffers
         };
         if !held.contains(name) {
-            held.push(name.clone());
+            held.push(*name);
         }
-        touched.push(name.clone());
+        touched.push(*name);
         Key::tuple([Key::tag(tag), (self.resource_key)(name)])
     }
 
@@ -379,8 +379,8 @@ impl Context<'_> {
             .filter_map(|name| self.defined_by.get(name).copied())
             .collect();
         for name in names {
-            self.env.insert(name.clone(), value.clone());
-            self.defined_by.insert(name.clone(), ordinal);
+            self.env.insert(*name, value.clone());
+            self.defined_by.insert(*name, ordinal);
         }
         self.out.numbers[ordinal] = Some(value);
     }
@@ -405,7 +405,7 @@ impl Context<'_> {
             .chain(stmt.local_decls())
             .collect();
         for (index, name) in defined.iter().enumerate() {
-            names.insert(name.clone(), format!("$d{index}").into());
+            names.insert(*name, format!("$d{index}").into());
         }
         for name in stmt.deps() {
             if names.contains_key(&name) {
@@ -415,10 +415,10 @@ impl Context<'_> {
             names.insert(name, format!("{key:?}").into());
         }
         for name in self.axes.keys() {
-            names.entry(name.clone()).or_insert_with(|| "$axis".into());
+            names.entry(*name).or_insert_with(|| "$axis".into());
         }
         for (index, axis) in stmt.bound_axes().iter().enumerate() {
-            names.insert(axis.name.clone(), format!("$b{index}").into());
+            names.insert(axis.name, format!("$b{index}").into());
         }
         for name in stmt
             .external_reads()
@@ -477,7 +477,7 @@ impl Context<'_> {
                         buffer,
                         Key::Tuple(index),
                         Key::option(s.dtype.as_ref().map(|d| d.text())),
-                        Key::Str(s.carried.clone()),
+                        Key::Str(s.carried),
                         Key::Int(s.names.len() as i64),
                     ]);
                     let value = self.compose(Tag::Load, payload, ops, &params, &[], false);
@@ -604,7 +604,7 @@ impl Context<'_> {
                         Key::Tuple(values),
                         Key::option(s.value_dtype.as_ref().map(|d| d.text())),
                         Key::Bool(s.atomic),
-                        Key::Str(s.swizzle.clone()),
+                        Key::Str(s.swizzle),
                     ]);
                     let value = self.compose(Tag::Store, payload, ops, &params, &[], false);
                     self.define(ordinal, &stmt, &[], value.clone());
@@ -685,15 +685,15 @@ impl Context<'_> {
                     let saved_env = self.env.clone();
                     let saved_axes: Vec<(Name, Option<Key>)> = bound
                         .iter()
-                        .map(|axis| (axis.name.clone(), self.axes.get(&axis.name).cloned()))
+                        .map(|axis| (axis.name, self.axes.get(&axis.name).cloned()))
                         .collect();
                     for axis in &bound {
-                        self.axes.insert(axis.name.clone(), descriptor(axis, &stmt));
-                        self.binding.push(axis.name.clone());
+                        self.axes.insert(axis.name, descriptor(axis, &stmt));
+                        self.binding.push(axis.name);
                     }
                     let is_loop = matches!(&*stmt, Statement::Loop(_) | Statement::StridedLoop(_));
                     if is_loop {
-                        self.loops.push(bound[0].name.clone());
+                        self.loops.push(bound[0].name);
                     }
                     self.path.push(ordinal);
                     for child in stmt.nested() {
@@ -709,7 +709,7 @@ impl Context<'_> {
                     for child in stmt.nested() {
                         for name in child.carried_names() {
                             if let Some(value) = self.env.get(name) {
-                                exported.push((name.clone(), value.clone()));
+                                exported.push((*name, value.clone()));
                             }
                         }
                     }
@@ -739,7 +739,7 @@ impl Context<'_> {
             }
             for name in touched {
                 let key = self.out.touch_key(ordinal);
-                self.out.touch.entry(name.clone()).or_default().push(key);
+                self.out.touch.entry(name).or_default().push(key);
                 self.out.touching.entry(name).or_default().push(ordinal);
             }
         }

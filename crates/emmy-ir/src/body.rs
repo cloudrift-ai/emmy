@@ -522,7 +522,7 @@ impl Body {
                                 let mut axes =
                                     dependencies.get(&a.value).cloned().unwrap_or_default();
                                 axes.remove(&l.axis.name);
-                                dependencies.insert(a.name.clone(), axes);
+                                dependencies.insert(a.name, axes);
                             }
                         }
                         continue;
@@ -531,7 +531,7 @@ impl Body {
                         for child in l.body.stmts() {
                             if let Statement::Accum(a) = &**child {
                                 let axes = dependencies.get(&a.value).cloned().unwrap_or_default();
-                                dependencies.insert(a.name.clone(), axes);
+                                dependencies.insert(a.name, axes);
                             }
                         }
                         continue;
@@ -613,7 +613,7 @@ impl Body {
         let mut pending: Vec<Name> = roots.to_vec();
         let mut seen: HashSet<Name> = HashSet::new();
         while let Some(name) = pending.pop() {
-            if !seen.insert(name.clone()) {
+            if !seen.insert(name) {
                 continue;
             }
             let Some(&index) = by_name.get(&name) else {
@@ -821,7 +821,7 @@ impl Subroutine {
     }
 
     pub fn params(&self) -> Vec<Name> {
-        self.axes.iter().map(|axis| axis.name.clone()).collect()
+        self.axes.iter().map(|axis| axis.name).collect()
     }
 
     /// Rebind the captured buffers once for all calls sharing this definition.
@@ -834,10 +834,10 @@ impl Subroutine {
             .collect();
         let body = self.body.rename_buffers(&mapping);
         Arc::new(Subroutine {
-            name: self.name.clone(),
+            name: self.name,
             axes: self.axes.clone(),
             body,
-            result: self.result.clone(),
+            result: self.result,
             buffers,
         })
     }
@@ -992,13 +992,16 @@ mod tests {
                 // The pass that keeps `b` alone drops `a`'s own reads and keeps the one `b` shares.
                 let folding_b: Vec<&&Body> = loops
                     .iter()
-                    .filter(|body| body.definitions().contains_key("b"))
+                    .filter(|body| body.definitions().contains_key(&Name::new("b")))
                     .collect();
                 let [last] = folding_b[..] else {
                     panic!("one loop folds b: {}", folding_b.len())
                 };
-                assert_eq!(last.definitions().contains_key("wa"), fused_first);
-                assert!(last.definitions().contains_key("x"));
+                assert_eq!(
+                    last.definitions().contains_key(&Name::new("wa")),
+                    fused_first
+                );
+                assert!(last.definitions().contains_key(&Name::new("x")));
             }
         }
     }
@@ -1032,8 +1035,8 @@ mod tests {
             ",
         )
         .axis_dependencies();
-        assert_eq!(dependencies["value"], names(&["a", "k"]));
-        assert_eq!(dependencies["acc"], names(&["a"]));
+        assert_eq!(dependencies[&Name::new("value")], names(&["a", "k"]));
+        assert_eq!(dependencies[&Name::new("acc")], names(&["a"]));
     }
 
     #[test]
@@ -1046,16 +1049,13 @@ mod tests {
             ",
         )
         .axis_dependencies();
-        assert_eq!(dependencies["partial"], names(&["k"]));
+        assert_eq!(dependencies[&Name::new("partial")], names(&["k"]));
     }
 
     #[test]
     fn a_backward_cone_lists_its_members_in_body_order() {
         let (members, _) = cell().backward_cone(&roots(&["a1"]));
-        let defined: Vec<Name> = members
-            .iter()
-            .map(|member| member.defines()[0].clone())
-            .collect();
+        let defined: Vec<Name> = members.iter().map(|member| member.defines()[0]).collect();
         assert_eq!(strs(&defined), ["a0", "a1"]);
     }
 

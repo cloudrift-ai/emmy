@@ -82,7 +82,7 @@ fn block(mut rows: &[Row], subs: &mut HashMap<Name, Arc<Subroutine>>) -> Result<
             }
             if text.starts_with("sub ") {
                 let sub = Line::new(text)?.subroutine(nested, subs)?;
-                subs.insert(sub.name.clone(), sub);
+                subs.insert(sub.name, sub);
             } else {
                 out.push(Line::new(text)?.statement(nested, orelse, subs)?);
             }
@@ -349,14 +349,10 @@ impl Line {
             } else {
                 vec![]
             };
-            let base = if *base == name {
-                None
-            } else {
-                Some(base.clone())
-            };
+            let base = if *base == name { None } else { Some(*base) };
             let accum = Accum {
                 name,
-                value: value.clone(),
+                value: *value,
                 op,
                 dtype,
                 axes: axes.into(),
@@ -393,7 +389,7 @@ impl Line {
         let [name] = &defined[..] else {
             return Err(self.parser.error("only a load binds several names"));
         };
-        let name = name.clone();
+        let name = *name;
         if self.parser.at_word("call", 0) && !self.parser.at("(", 1) {
             self.parser.index += 1;
             let label = self.name()?;

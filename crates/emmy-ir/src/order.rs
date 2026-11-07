@@ -25,16 +25,16 @@ fn resources(stmt: &Statement) -> (HashSet<Name>, HashSet<Name>, HashSet<Name>) 
         writes.extend(member.external_writes());
         match &**member {
             Statement::Accum(a) => {
-                state.insert(a.name.clone());
+                state.insert(a.name);
             }
             Statement::Carry(c) => {
-                state.insert(c.name.clone());
+                state.insert(c.name);
             }
             _ => {}
         }
     }
     if let Statement::Init(init) = stmt {
-        state.insert(init.name.clone());
+        state.insert(init.name);
     }
     (reads, writes, state)
 }
@@ -105,7 +105,7 @@ pub fn ordering_constraints(
                     incoming[index].insert(writer);
                 }
                 if !writes.contains(name) {
-                    readers.entry(name.clone()).or_default().insert(index);
+                    readers.entry(*name).or_default().insert(index);
                 }
             }
             for name in writes {
@@ -115,13 +115,13 @@ pub fn ordering_constraints(
                 if let Some(earlier) = readers.remove(name) {
                     incoming[index].extend(earlier);
                 }
-                last_write.insert(name.clone(), index);
+                last_write.insert(*name, index);
             }
             for name in state {
                 if let Some(&previous) = last_state.get(name) {
                     incoming[index].insert(previous);
                 }
-                last_state.insert(name.clone(), index);
+                last_state.insert(*name, index);
             }
         }
         let protocol: HashSet<usize> = (0..stmts.len())

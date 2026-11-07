@@ -133,7 +133,7 @@ pub fn lines(stmt: &Statement, indent: &str, out: &mut Vec<String>) -> Result<()
                 typed(&s.dtype),
                 spell_stmt_name(&s.name)?,
                 s.op,
-                names(&[base.clone(), s.value.clone()])?,
+                names(&[*base, s.value])?,
                 over
             )
         }
@@ -204,7 +204,7 @@ pub fn lines(stmt: &Statement, indent: &str, out: &mut Vec<String>) -> Result<()
             let start = s.start.try_text()?;
             // The window follows the extent, so spell the axis without it and add it after the step.
             let bare = Axis {
-                name: s.axis.name.clone(),
+                name: s.axis.name,
                 extent: s.axis.extent.clone(),
                 window: None,
             };

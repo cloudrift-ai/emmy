@@ -75,16 +75,13 @@ pub fn drop_size_one_reduce_axes(body: &Body) -> Body {
                         out.push(assign(
                             &a.name,
                             ElementwiseOp::Known(Operation::Copy),
-                            vec![a.value.clone()],
+                            vec![a.value],
                             a.dtype,
                         ));
                     }
-                    Some(base) => out.push(assign(
-                        &a.name,
-                        a.op.clone(),
-                        vec![base.clone(), a.value.clone()],
-                        a.dtype,
-                    )),
+                    Some(base) => {
+                        out.push(assign(&a.name, a.op.clone(), vec![*base, a.value], a.dtype))
+                    }
                 },
                 _ => out.push(member),
             }
@@ -184,18 +181,13 @@ pub(crate) fn orders_modulo_transpositions<T: Clone>(
 pub(crate) fn rename_axes(body: &Body, mapping: &HashMap<Name, Name>) -> Body {
     let sigma: HashMap<Name, Expression> = mapping
         .iter()
-        .map(|(name, replacement)| {
-            (
-                name.clone(),
-                Expression::new(Expr::Var(replacement.clone())),
-            )
-        })
+        .map(|(name, replacement)| (*name, Expression::new(Expr::Var(*replacement))))
         .collect();
     body.map_each(&mut |stmt| Statement::substitute(stmt, &sigma))
 }
 
 pub(crate) fn text_key(body: &Body) -> Key {
-    Key::str(&structural_body_text(body))
+    Key::text(structural_body_text(body))
 }
 
 /// Sort an outer free-loop chain by row-major output storage order; where the writes do not order it, by the least
@@ -249,10 +241,10 @@ pub fn canonicalize_free_axis_order(body: &Body) -> Result<Body> {
     } else {
         let axis_metadata = |l: &Loop| -> Result<Key> {
             let mut mapping: HashMap<Name, Name> =
-                HashMap::from([(l.axis.name.clone(), Name::from("__axis__"))]);
+                HashMap::from([(l.axis.name, Name::from("__axis__"))]);
             for (depth, source) in l.axis.sources().iter().enumerate() {
                 mapping
-                    .entry(source.name.clone())
+                    .entry(source.name)
                     .or_insert_with(|| format!("__parent{depth}__").into());
             }
             let renamed = Statement::rename(&Arc::new(Statement::Loop(l.clone())), &mapping);
@@ -267,12 +259,12 @@ pub fn canonicalize_free_axis_order(body: &Body) -> Result<Body> {
         };
         let metadata: HashMap<Name, Key> = chain
             .iter()
-            .map(|l| Ok((l.axis.name.clone(), axis_metadata(l)?)))
+            .map(|l| Ok((l.axis.name, axis_metadata(l)?)))
             .collect::<Result<_>>()?;
         let mut source_counts: HashMap<Name, usize> = HashMap::new();
         for l in &chain {
             if let Some(source) = l.axis.source_axis() {
-                *source_counts.entry(source.name.clone()).or_default() += 1;
+                *source_counts.entry(source.name).or_default() += 1;
             }
         }
         let mut role_of: HashMap<Name, Key> = HashMap::new();
@@ -281,7 +273,7 @@ pub fn canonicalize_free_axis_order(body: &Body) -> Result<Body> {
                 .iter()
                 .map(|l| {
                     (
-                        l.axis.name.clone(),
+                        l.axis.name,
                         Name::from(if l.axis.name == focus.axis.name {
                             "__self__"
                         } else {
@@ -312,7 +304,7 @@ pub fn canonicalize_free_axis_order(body: &Body) -> Result<Body> {
                     text_key(&focused),
                 ]),
             ]);
-            role_of.insert(focus.axis.name.clone(), role);
+            role_of.insert(focus.axis.name, role);
         }
         let mut groups: BTreeMap<Key, Vec<Loop>> = BTreeMap::new();
         for l in &chain {
@@ -336,8 +328,8 @@ pub fn canonicalize_free_axis_order(body: &Body) -> Result<Body> {
             let swapped = rename_axes(
                 &terminal,
                 &HashMap::from([
-                    (left.axis.name.clone(), right.axis.name.clone()),
-                    (right.axis.name.clone(), left.axis.name.clone()),
+                    (left.axis.name, right.axis.name),
+                    (right.axis.name, left.axis.name),
                 ]),
             );
             swapped == terminal

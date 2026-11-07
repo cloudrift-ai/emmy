@@ -265,8 +265,9 @@ their owning Rust file, after imports. Ordinary indices, zero initialization, an
 
 ### Shared, immutable data
 
-A value many objects hold (a name, a body, an expression) is an `Arc`; a rebuild that changes nothing returns the
-object it was given, so a caller can tell a change by pointer. Derived readings of an immutable value live beside it
+A tree many objects hold (a body, a statement, an expression) is an `Arc`; a rebuild that changes nothing returns the
+object it was given, so a caller can tell a change by pointer. A leaf is by value where sharing buys nothing: a name is
+an interned symbol, so a copy is a word and a compare an integer. Derived readings of an immutable value live beside it
 in a `OnceLock`, computed on first use, never in a table keyed off another object.
 
 ## Commit Messages

@@ -113,12 +113,12 @@ fn with_bodies(stmt: &Arc<Statement>, bodies: Vec<Body>) -> Arc<Statement> {
 }
 
 fn substituted(stmt: &Arc<Statement>, name: &Name, value: Expression) -> Arc<Statement> {
-    Statement::substitute(stmt, &HashMap::from([(name.clone(), value)]))
+    Statement::substitute(stmt, &HashMap::from([(*name, value)]))
 }
 
 fn assign(name: &Name, op: ElementwiseOp, args: Vec<Name>, dtype: Option<DType>) -> Arc<Statement> {
     Arc::new(Statement::Assign(Assign {
-        name: name.clone(),
+        name: *name,
         op,
         args: args.into(),
         dtype,

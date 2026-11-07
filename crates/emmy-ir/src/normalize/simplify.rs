@@ -59,7 +59,7 @@ pub(crate) fn decided(s: &Select) -> Select {
             Some(value) if value.truthy() => {
                 kept.push(branch.clone());
                 return Select {
-                    name: s.name.clone(),
+                    name: s.name,
                     branches: kept.into(),
                 };
             }
@@ -68,7 +68,7 @@ pub(crate) fn decided(s: &Select) -> Select {
     }
     kept.push(last.clone());
     Select {
-        name: s.name.clone(),
+        name: s.name,
         branches: kept.into(),
     }
 }

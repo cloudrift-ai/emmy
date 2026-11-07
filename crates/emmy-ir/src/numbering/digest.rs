@@ -128,7 +128,7 @@ fn downstream(numbering: &Numbering) -> HashMap<Name, Vec<Key>> {
         }
         let mut numbers: Vec<Key> = seen.into_iter().map(number).collect();
         numbers.sort();
-        out.insert(name.clone(), numbers);
+        out.insert(*name, numbers);
     }
     out
 }
@@ -178,7 +178,7 @@ impl Keyed<'_> {
 fn partition(cells: &Cells) -> Vec<Vec<Name>> {
     let mut groups: HashMap<&Key, Vec<Name>> = HashMap::new();
     for (name, value) in cells {
-        groups.entry(value).or_default().push(name.clone());
+        groups.entry(value).or_default().push(*name);
     }
     let mut out: Vec<Vec<Name>> = groups
         .into_values()
@@ -215,7 +215,7 @@ fn cells(body: &Body, colors: Colors, rank: &HashMap<Name, usize>, cell: &mut Ce
             .filter(|name| !rank.contains_key(*name))
             .map(|name| {
                 (
-                    name.clone(),
+                    *name,
                     Key::tuple([
                         paint(colors, name),
                         Key::Tuple(down.get(name).cloned().unwrap_or_default()),
@@ -239,12 +239,7 @@ pub fn roles(body: &Body, colors: Colors) -> HashMap<Name, usize> {
     values.sort();
     values.dedup();
     cell.iter()
-        .map(|(name, value)| {
-            (
-                name.clone(),
-                values.iter().position(|v| *v == value).unwrap_or(0),
-            )
-        })
+        .map(|(name, value)| (*name, values.iter().position(|v| *v == value).unwrap_or(0)))
         .collect()
 }
 
@@ -274,12 +269,12 @@ pub fn digest(body: &Body, colors: Colors) -> (Number, Vec<Name>) {
             let value = cell[&unranked[position]].clone();
             let mut group: Vec<Name> = Vec::new();
             while position < unranked.len() && cell[&unranked[position]] == value {
-                group.push(unranked[position].clone());
+                group.push(unranked[position]);
                 position += 1;
             }
             if group.len() == 1 {
                 let r = rank.len();
-                rank.insert(group[0].clone(), r);
+                rank.insert(group[0], r);
                 continue;
             }
             let certificate: HashMap<Name, Number> = group
@@ -293,13 +288,13 @@ pub fn digest(body: &Body, colors: Colors) -> (Number, Vec<Name>) {
                     };
                     let tree =
                         scope_tree(&value_numbers(body, &|n| keyed.key(n)), body, &mut effects);
-                    (name.clone(), tree)
+                    (*name, tree)
                 })
                 .collect();
             group.sort_by(|a, b| certificate[a].cmp(&certificate[b]).then_with(|| a.cmp(b)));
             for name in &group {
                 let r = rank.len();
-                rank.insert(name.clone(), r);
+                rank.insert(*name, r);
                 if group
                     .iter()
                     .filter(|other| certificate[*other] == certificate[name])
