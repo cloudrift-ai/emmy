@@ -207,15 +207,25 @@ impl PyStatement {
             .try_iter()?
             .map(|item| expression_from_py(&item?))
             .collect();
-        let mut items = items?.into_iter();
-        let rebuilt = Statement::map_expressions(&slf.get().stmt, &mut |e| {
-            items.next().unwrap_or_else(|| e.clone())
-        });
-        if items.next().is_some() {
+        let items = items?;
+        if items.len() > slf.get().stmt.expressions().len() {
             return Err(PyValueError::new_err(
                 "more expressions than the statement holds",
             ));
         }
+        same_or_wrap(slf, Statement::with_expressions(&slf.get().stmt, items))
+    }
+
+    /// This statement with `function` applied to each of its own expressions, in the order `expressions` lists
+    /// them; the statement itself when no expression changes.
+    fn map_expressions<'py>(
+        slf: &Bound<'py, Self>,
+        function: &Bound<'py, PyAny>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let py = slf.py();
+        let rebuilt = Statement::try_map_expressions(&slf.get().stmt, &mut |e| {
+            expression_from_py(&function.call1((PyExpression::wrap(py, e)?,))?)
+        })?;
         same_or_wrap(slf, rebuilt)
     }
 

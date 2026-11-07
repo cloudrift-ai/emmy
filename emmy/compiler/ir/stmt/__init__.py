@@ -8,9 +8,9 @@ as C / CUDA source is not statement business and lives in :mod:`emmy.compiler.ir
 
 The boundary: Rust owns the data and Python reads it through accessors; a field read hands back a held object, so a
 statement read twice from a body is one object; only strings, numbers, booleans, tuples of those and the module's own
-classes cross it. The few members that take a Python function (``rename`` by a function, ``rewrite``,
-``map_expressions``, ``Body.map``, ``Body.fold``) are written here over the Rust reads; nothing in Rust holds or calls
-a Python object.
+classes cross it. The few members that take a Python function and keep its results (``rename`` by a function,
+``rewrite``, ``Body.fold``) are written here over the Rust reads; ``Body.map`` and ``map_expressions`` call the function
+from Rust through the fallible walks and hold nothing of it afterwards.
 """
 
 from __future__ import annotations
@@ -176,31 +176,6 @@ def _apply_sigma(stmt: Statement, sigma: Sigma) -> Statement:
     return stmt.with_bodies(tuple(Body(_apply_sigma(child, sigma) for child in body) for body in nested)) if nested else stmt
 
 
-def _map_expressions(self: Statement, fn: Callable[[Expression], Expression]) -> Statement:
-    """This statement with ``fn`` applied to each of its own expressions, in the order :meth:`expressions` lists them;
-    the statement itself when no expression changes."""
-    return self._with_expressions([fn(expression) for expression in self.expressions()])
-
-
-def _map(self: Body, fn: Callable[[Statement], Statement | None | Iterable[Statement]]) -> Body:
-    """Recursive 1:N body transformer. Post-order: each block statement's nested bodies are mapped first, then ``fn``
-    is applied to the children-rewritten statement, which it keeps (a ``Statement``), drops (``None``) or replaces
-    (an iterable of statements, spliced in as they are)."""
-    out: list[Statement] = []
-    for stmt in self:
-        nested = stmt.nested()
-        if nested:
-            stmt = stmt.with_bodies(tuple(child.map(fn) for child in nested))
-        result = fn(stmt)
-        if result is None:
-            continue
-        if isinstance(result, Statement):
-            out.append(result)
-        else:
-            out.extend(result)
-    return Body(out)
-
-
 def _fold[T](self: Body, fn: Callable[[Statement, tuple[T | None, ...], frozenset[str]], T]) -> dict[int, T]:
     """Generic backward dataflow over this body's def-use DAG: ``fn(stmt, child_T, bound)`` per statement in source
     order, nested bodies before their wrapper, ``child_T`` one entry per name in ``stmt.deps()`` (``None`` for a read
@@ -252,8 +227,6 @@ _ir.FragmentArg.__repr__ = _repr
 Body.__repr__ = _repr_body
 Statement.rename = _rename
 Statement.rewrite = _rewrite
-Statement.map_expressions = _map_expressions
-Body.map = _map
 Body.fold = _fold
 Body.identity = _identity
 Body.structural_key = _structural_key

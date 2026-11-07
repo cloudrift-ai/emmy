@@ -441,6 +441,57 @@ impl PyBody {
         })
     }
 
+    /// Recursive 1:N body transformer. Post-order: each block statement's nested bodies are mapped first, then
+    /// `function` is applied to the children-rewritten statement, which it keeps (a statement), drops (`None`) or
+    /// replaces (an iterable of statements, spliced in as they are). A statement the walk did not rebuild is handed
+    /// over as the object this body hands out, and the objects `function` returns are the ones the result hands out.
+    fn map<'py>(
+        &self,
+        py: Python<'py>,
+        function: &Bound<'py, PyAny>,
+    ) -> PyResult<Bound<'py, PyBody>> {
+        let placed: HashMap<usize, StmtRef> = self
+            .body
+            .iter_refs()
+            .into_iter()
+            .map(|here| (Arc::as_ptr(here.stmt()) as usize, here))
+            .collect();
+        let mut returned: HashMap<usize, Py<PyAny>> = HashMap::new();
+        let mapped = self
+            .body
+            .try_map(&mut |stmt| -> PyResult<Option<Vec<Arc<Statement>>>> {
+                let given = match placed.get(&(Arc::as_ptr(stmt) as usize)) {
+                    Some(here) => wrap_ref(py, here)?,
+                    None => wrap_statement(py, stmt)?.into_bound(py),
+                };
+                let result = function.call1((given,))?;
+                if result.is_none() {
+                    return Ok(None);
+                }
+                let items: Vec<Bound<'py, PyAny>> = if result.is_instance_of::<PyStatement>() {
+                    vec![result]
+                } else {
+                    result.try_iter()?.collect::<PyResult<_>>()?
+                };
+                let stmts: PyResult<Vec<Arc<Statement>>> =
+                    items.iter().map(statement_from_py).collect();
+                let stmts = stmts?;
+                for (stmt, item) in stmts.iter().zip(items) {
+                    returned.insert(Arc::as_ptr(stmt) as usize, item.unbind());
+                }
+                Ok(Some(stmts))
+            })?;
+        for here in mapped.iter_refs() {
+            if let Some(item) = returned.get(&(Arc::as_ptr(here.stmt()) as usize))
+                && let Some(holder) = here.body()
+                && let Some(slot) = wrappers(&holder).get(here.index)
+            {
+                let _ = slot.set(item.clone_ref(py));
+            }
+        }
+        PyBody::wrap(py, &mapped)
+    }
+
     /// Matching statements in pre-order.
     #[pyo3(signature = (*types))]
     fn iter_of_type<'py>(

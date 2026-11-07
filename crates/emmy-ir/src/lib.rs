@@ -43,6 +43,14 @@ impl std::error::Error for Error {}
 
 pub type Result<T> = std::result::Result<T, Error>;
 
+/// The value of a result whose error type has no values: an infallible walk through a fallible one.
+pub fn infallible<T>(result: std::result::Result<T, std::convert::Infallible>) -> T {
+    match result {
+        Ok(value) => value,
+        Err(never) => match never {},
+    }
+}
+
 pub fn value_error(message: impl Into<String>) -> Error {
     Error::Value(message.into())
 }
