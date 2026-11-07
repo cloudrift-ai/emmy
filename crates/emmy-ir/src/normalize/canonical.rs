@@ -143,7 +143,7 @@ pub fn rename_ssa_sequential(body: &Body) -> Body {
         owned: HashSet::new(),
         fixed: HashSet::new(),
     };
-    Body::new(
+    body.rebuilt(
         body.stmts()
             .iter()
             .map(|stmt| scope.step(&mut counters, stmt))
@@ -226,7 +226,7 @@ fn ordered(body: &Body, numbering: &Numbering) -> Body {
     let incoming = ordering_constraints(&rebuilt, true, true);
     let order =
         rebuilt.topological_permutation(&incoming, Some(&|index| priorities[index].clone()));
-    Body::new(
+    rebuilt.rebuilt(
         order
             .into_iter()
             .map(|index| rebuilt.stmts()[index].clone())
@@ -456,7 +456,7 @@ pub fn canonicalize_expressions(body: &Body, axes: &[Name]) -> Result<Body> {
     if let Some(err) = failure {
         return Err(err);
     }
-    Ok(Body::new(out))
+    Ok(body.rebuilt(out))
 }
 
 #[cfg(test)]

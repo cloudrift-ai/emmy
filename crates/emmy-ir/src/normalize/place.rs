@@ -457,7 +457,7 @@ pub fn place_values(body: &Body) -> Result<Body> {
     };
     let (kept, escaped, _) = placer.walk(body, 0, false)?;
     debug_assert!(escaped.is_empty());
-    Ok(Body::new(kept.into_iter().map(|(stmt, _)| stmt).collect()))
+    Ok(body.rebuilt(kept.into_iter().map(|(stmt, _)| stmt).collect()))
 }
 
 #[cfg(test)]

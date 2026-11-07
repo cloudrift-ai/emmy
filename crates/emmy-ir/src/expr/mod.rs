@@ -945,10 +945,21 @@ impl Expression {
                     return logical.then_some(Interval::new(0, 1));
                 };
                 match op {
-                    BinOp::Add => Some(Interval::new(la.lo + lb.lo, la.hi + lb.hi)),
-                    BinOp::Sub => Some(Interval::new(la.lo - lb.hi, la.hi - lb.lo)),
+                    BinOp::Add => Some(Interval::new(
+                        la.lo.checked_add(lb.lo)?,
+                        la.hi.checked_add(lb.hi)?,
+                    )),
+                    BinOp::Sub => Some(Interval::new(
+                        la.lo.checked_sub(lb.hi)?,
+                        la.hi.checked_sub(lb.lo)?,
+                    )),
                     BinOp::Mul => {
-                        let prods = [la.lo * lb.lo, la.lo * lb.hi, la.hi * lb.lo, la.hi * lb.hi];
+                        let prods = [
+                            la.lo.checked_mul(lb.lo)?,
+                            la.lo.checked_mul(lb.hi)?,
+                            la.hi.checked_mul(lb.lo)?,
+                            la.hi.checked_mul(lb.hi)?,
+                        ];
                         Some(Interval::new(
                             prods.iter().copied().fold(i128::MAX, i128::min),
                             prods.iter().copied().fold(i128::MIN, i128::max),
@@ -999,6 +1010,12 @@ impl Expression {
                 if a == b {
                     return Ok(a);
                 }
+                if [(&cond, if_true), (&a, if_true), (&b, if_false)]
+                    .iter()
+                    .all(|(new, old)| Arc::ptr_eq(&new.0, &old.0))
+                {
+                    return Ok(self.clone());
+                }
                 Ok(Expression::new(Expr::Ternary(cond, a, b)))
             }
             Expr::Cast(dtype, inner) => {
@@ -1015,10 +1032,15 @@ impl Expression {
             }
             Expr::FlatIndex(buffer, index) => {
                 let new: Result<Vec<Expression>> = index.iter().map(|e| e.simplify(ctx)).collect();
-                Ok(Expression::new(Expr::FlatIndex(
-                    buffer.clone(),
-                    new?.into(),
-                )))
+                let new = new?;
+                if new
+                    .iter()
+                    .zip(index.iter())
+                    .all(|(new, old)| Arc::ptr_eq(&new.0, &old.0))
+                {
+                    return Ok(self.clone());
+                }
+                Ok(Expression::new(Expr::FlatIndex(buffer.clone(), new.into())))
             }
         }
     }
@@ -1120,6 +1142,22 @@ pub use simplify::*;
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn integer_rewrites_decline_rather_than_overflow() {
+        // 2^62 * 4 leaves i64: the product is not folded, the affine form is refused, and evaluation reports it.
+        let huge = parse("(a * 4611686018427387904) * 4").unwrap();
+        let simplified = huge.simplify(&SimplifyCtx::empty()).unwrap();
+        assert!(simplified.as_literal().is_none(), "{}", simplified.text());
+        assert!(
+            simplified.text().contains("4611686018427387904"),
+            "{}",
+            simplified.text()
+        );
+        assert!(affine_form(&huge, &|name| name == "a").is_none());
+        let env = HashMap::from([(Name::from("a"), Num::Int(1))]);
+        assert!(simplified.eval(&env).is_err());
+    }
 
     #[test]
     fn floats_print_as_python_does() {

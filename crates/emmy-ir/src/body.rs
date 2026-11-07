@@ -231,10 +231,17 @@ impl Body {
     /// `f` applied to each statement; this body itself when every statement comes back as it was.
     pub fn map_each(&self, f: &mut dyn FnMut(&Arc<Statement>) -> Arc<Statement>) -> Body {
         let stmts: Vec<Arc<Statement>> = self.stmts().iter().map(&mut *f).collect();
-        if stmts
-            .iter()
-            .zip(self.stmts())
-            .all(|(new, old)| Arc::ptr_eq(new, old))
+        self.rebuilt(stmts)
+    }
+
+    /// This body when `stmts` are its own statements, else a body of `stmts`: a step that changed nothing keeps the
+    /// body and the readings it holds.
+    pub fn rebuilt(&self, stmts: Vec<Arc<Statement>>) -> Body {
+        if stmts.len() == self.len()
+            && stmts
+                .iter()
+                .zip(self.stmts())
+                .all(|(new, old)| Arc::ptr_eq(new, old))
         {
             self.clone()
         } else {
