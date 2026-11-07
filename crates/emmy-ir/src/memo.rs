@@ -1,8 +1,10 @@
 //! The memos: what a process remembers across bodies, as one store of declared caches. A memo is declared with
-//! [`memo!`], which names its capacity in entries and its eviction policy, and registers itself in one list, so
-//! every memo is inspected (entries, hits, misses) and cleared from one place: [`stats`], [`clear`] and
-//! [`clear_all`] here, their exports in Python. The caches are `quick_cache`'s: sharded, locked per shard and never
-//! across a computation, bounded by entry count. A key is a body's exact form (`body::MemoKey`), never its text.
+//! [`memo!`], which names its capacity in entries, and registers itself in one list, so every memo is inspected
+//! (entries, hits, misses) and cleared from one place: [`stats`], [`clear`] and [`clear_all`] here, their exports in
+//! Python. The caches are `quick_cache`'s: sharded, locked per shard and never across a computation, bounded by
+//! entry count, evicting by its one policy (S3-FIFO: a probation queue ahead of the main one and a ghost list of
+//! what left, so an entry met once does not push out one met many times). A key is a body's exact form
+//! (`body::MemoKey`), never its text.
 //!
 //! A computation that asks its own memo for the key it is computing would wait on itself forever (the cache parks a
 //! second asker of a key until the first inserts); [`Memo::get_or_try_insert`] refuses that with an error instead.
@@ -19,20 +21,19 @@ use crate::{Error, locked};
 /// How many bodies the body-keyed memos keep: a cut's arms lower the same pieces again and again.
 pub const BODY_MEMO_CAPACITY: usize = 16_384;
 
-/// How a memo past its capacity chooses what to forget. `quick_cache` offers the one policy; the declaration names
-/// it so a memo's policy is read and changed where its capacity is.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub enum Policy {
-    /// A small probation queue ahead of the main one and a ghost list of what left: an entry met once does not push
-    /// out one met many times.
-    S3Fifo,
-}
-
 /// One declared memo: a bounded cache under a name.
 pub struct Memo<K, V> {
     name: &'static str,
-    policy: Policy,
     cache: Cache<K, V>,
+}
+
+/// A key this thread is computing, listed while the computation runs and unlisted when it ends, however it ends.
+struct Computing((&'static str, u64));
+
+impl Drop for Computing {
+    fn drop(&mut self) {
+        COMPUTING.with(|keys| keys.borrow_mut().remove(&self.0));
+    }
 }
 
 thread_local! {
@@ -41,10 +42,9 @@ thread_local! {
 }
 
 impl<K: Eq + Hash + Clone, V: Clone> Memo<K, V> {
-    pub fn new(name: &'static str, capacity: usize, policy: Policy) -> Memo<K, V> {
+    pub fn new(name: &'static str, capacity: usize) -> Memo<K, V> {
         Memo {
             name,
-            policy,
             cache: Cache::new(capacity),
         }
     }
@@ -59,17 +59,15 @@ impl<K: Eq + Hash + Clone, V: Clone> Memo<K, V> {
         let mut hasher = std::collections::hash_map::DefaultHasher::new();
         key.hash(&mut hasher);
         let computing = (self.name, hasher.finish());
-        let entered = COMPUTING.with(|keys| keys.borrow_mut().insert(computing));
-        if !entered {
+        if !COMPUTING.with(|keys| keys.borrow_mut().insert(computing)) {
             return Err(Error::Value(format!(
                 "the {} memo was asked for a key it is computing",
                 self.name
             ))
             .into());
         }
-        let result = self.cache.get_or_insert_with(key, compute);
-        COMPUTING.with(|keys| keys.borrow_mut().remove(&computing));
-        result
+        let _entered = Computing(computing);
+        self.cache.get_or_insert_with(key, compute)
     }
 
     pub fn clear(&self) {
@@ -81,7 +79,6 @@ impl<K: Eq + Hash + Clone, V: Clone> Memo<K, V> {
             name: self.name,
             entries: self.cache.len(),
             capacity: Some(self.cache.capacity()),
-            policy: Some(self.policy),
             hits: self.cache.hits(),
             misses: self.cache.misses(),
         }
@@ -93,9 +90,8 @@ impl<K: Eq + Hash + Clone, V: Clone> Memo<K, V> {
 pub struct Stats {
     pub name: &'static str,
     pub entries: usize,
-    /// The bound and its policy, when the store has one.
+    /// The bound, when the store has one.
     pub capacity: Option<u64>,
-    pub policy: Option<Policy>,
     pub hits: u64,
     pub misses: u64,
 }
@@ -161,24 +157,24 @@ pub fn clear_all() {
     }
 }
 
-/// Declare a memo: a function returning the one `Memo` of its name, built on first use with the capacity and the
-/// policy stated and registered for `stats`, `clear` and `clear_all`.
+/// Declare a memo: a function returning the one `Memo` of its name, built on first use with the capacity stated and
+/// registered for `stats`, `clear` and `clear_all`.
 ///
 /// ```ignore
 /// memo! {
 ///     /// The normal forms of the bodies met in this process.
-///     pub fn normal_forms() -> Memo<MemoKey, Body> [capacity = BODY_MEMO_CAPACITY, policy = S3Fifo]
+///     pub fn normal_forms() -> Memo<MemoKey, Body> [capacity = BODY_MEMO_CAPACITY]
 /// }
 /// ```
 #[macro_export]
 macro_rules! memo {
-    ($(#[$attr:meta])* $vis:vis fn $name:ident() -> Memo<$K:ty, $V:ty> [capacity = $capacity:expr, policy = $policy:ident]) => {
+    ($(#[$attr:meta])* $vis:vis fn $name:ident() -> Memo<$K:ty, $V:ty> [capacity = $capacity:expr]) => {
         $(#[$attr])*
         $vis fn $name() -> &'static $crate::memo::Memo<$K, $V> {
             static MEMO: std::sync::OnceLock<$crate::memo::Memo<$K, $V>> = std::sync::OnceLock::new();
             static LISTED: std::sync::Once = std::sync::Once::new();
             $crate::memo::declared(&MEMO, &LISTED, || {
-                $crate::memo::Memo::new(stringify!($name), $capacity, $crate::memo::Policy::$policy)
+                $crate::memo::Memo::new(stringify!($name), $capacity)
             })
         }
     };
@@ -190,17 +186,17 @@ mod tests {
 
     memo! {
         /// A memo of the bound test's own.
-        fn squares() -> Memo<u64, u64> [capacity = 8, policy = S3Fifo]
+        fn squares() -> Memo<u64, u64> [capacity = 8]
     }
 
     memo! {
         /// A memo of the registry test's own.
-        fn cubes() -> Memo<u64, u64> [capacity = 8, policy = S3Fifo]
+        fn cubes() -> Memo<u64, u64> [capacity = 8]
     }
 
     memo! {
         /// A memo of the recursion test's own.
-        fn loops() -> Memo<u64, u64> [capacity = 8, policy = S3Fifo]
+        fn loops() -> Memo<u64, u64> [capacity = 8]
     }
 
     fn square(n: u64) -> Result<u64, Error> {
@@ -213,10 +209,7 @@ mod tests {
             assert_eq!(squares().get_or_try_insert(&n, || square(n)), Ok(n * n));
         }
         let stats = squares().stats();
-        assert_eq!(
-            (stats.name, stats.capacity, stats.policy),
-            ("squares", Some(8), Some(Policy::S3Fifo))
-        );
+        assert_eq!((stats.name, stats.capacity), ("squares", Some(8)));
         assert!(stats.entries <= 8, "{stats:?}");
         assert!(stats.misses >= 64, "{stats:?}");
         assert_eq!(stats.hits, 0);

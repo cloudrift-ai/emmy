@@ -255,7 +255,7 @@ macro_rules! with_kinds {
                     values: Names [READS],
                     value_dtype: Option<DType> [] = None,
                     atomic: bool [] = false,
-                    swizzle: Swizzle [] = Swizzle::NONE,
+                    swizzle: Name [] = Name::from("NONE"),
                 }
                 /// Coord-predicated value binding — replaces Mux.
                 ///
@@ -425,7 +425,7 @@ macro_rules! with_kinds {
                     aux_threads: i64 [] = 0,
                     raster_axes: Option<(Name, Name)> [AXIS_NAME] = None,
                     raster_group: Option<i64> [] = None,
-                    raster_orient: RasterOrient [] = RasterOrient::M,
+                    raster_orient: Name [] = Name::from("m"),
                     spread: bool [] = false,
                 }
                 /// Issue one `cp.async.{ca,cg}.shared.global` instruction.
@@ -448,7 +448,7 @@ macro_rules! with_kinds {
                     src: Name [BUFFER_READ],
                     src_index: Exprs [EXPRESSION],
                     nbytes: i64 [] = 4,
-                    swizzle: Swizzle [] = Swizzle::NONE,
+                    swizzle: Name [] = Name::from("NONE"),
                     lane_index: Option<Exprs> [EXPRESSION] = None,
                     lane_rows: i64 [] = 0,
                     valid: Option<Expression> [EXPRESSION] = None,
@@ -473,7 +473,7 @@ macro_rules! with_kinds {
                     src_buf: Name [BUFFER_READ],
                     src_shape: Ints [],
                     box_extents: Ints [],
-                    swizzle: Swizzle [] = Swizzle::NONE,
+                    swizzle: Name [] = Name::from("NONE"),
                     dtype: Name [] = Name::from("float"),
                 }
                 /// `cp.async.bulk.tensor.<rank>d` — single-thread box copy.
@@ -623,7 +623,7 @@ macro_rules! with_kinds {
                     op: Op [],
                     args: FragmentArgs [RECORD],
                     in_place: bool [] = false,
-                    layout: FragmentLayout [] = FragmentLayout::M16n8k16,
+                    layout: Name [] = Name::from("m16n8k16"),
                     post: Ops [] = Ops::from([]),
                     row_base: Option<Expression> [EXPRESSION] = None,
                     col_base: Option<Expression> [EXPRESSION] = None,
@@ -645,7 +645,7 @@ macro_rules! with_kinds {
                     bot: Name [DEFINES],
                     frags: Names [READS],
                     op: Op [],
-                    layout: FragmentLayout [] = FragmentLayout::M16n8k16,
+                    layout: Name [] = Name::from("m16n8k16"),
                     dtype: DType [] = DType::F32,
                 }
                 /// Declare an mma.sync per-thread register array.
@@ -665,7 +665,7 @@ macro_rules! with_kinds {
                 /// an array of them.
                 kernel RegFragment {} {
                     name: Name [DEFINES | LOCAL_BUFFER],
-                    role: Role [],
+                    role: Name [],
                     shape: Shape3 [],
                     dtype: DType [],
                     count: i64 [] = 1,
@@ -691,7 +691,7 @@ macro_rules! with_kinds {
                     frag: Name [DEFINES],
                     src_buffer: Name [BUFFER_READ],
                     src_index: Exprs [EXPRESSION],
-                    role: Role [],
+                    role: Name [],
                     ldm: i64 [] = 0,
                 }
                 /// `ldmatrix.sync.aligned.m8n8.x{2,4}[.trans].b16` — load one operand fragment from smem into a per-thread
@@ -719,9 +719,9 @@ macro_rules! with_kinds {
                     frag: Name [UPDATES],
                     src_buffer: Name [BUFFER_READ],
                     src_index: Exprs [EXPRESSION],
-                    role: Role [],
+                    role: Name [],
                     ldm: i64 [] = 0,
-                    swizzle: Swizzle [] = Swizzle::NONE,
+                    swizzle: Name [] = Name::from("NONE"),
                     staged: bool [] = true,
                     gmem_guard: Option<(Expression, Expression)> [EXPRESSION] = None,
                     k_zero: Option<(Expression, Expression)> [EXPRESSION] = None,
@@ -731,7 +731,7 @@ macro_rules! with_kinds {
                     scale_buffer: Option<Name> [BUFFER_READ] = None,
                     scale_index: Exprs [EXPRESSION] = Exprs::from([]),
                     scale_ldm: i64 [] = 0,
-                    fragment_layout: FragmentLayout [] = FragmentLayout::M16n8k16,
+                    fragment_layout: Name [] = Name::from("m16n8k16"),
                     fragment_index: i64 [] = 0,
                 }
                 /// `mma.sync.aligned.m{M}n{N}k{K}.row.col.f32.{ab}.{ab}.f32` — one tensor-core MMA via inline PTX (the `s16816`
@@ -765,7 +765,7 @@ macro_rules! with_kinds {
                 kernel FragmentPromote {} {
                     dst: Name [UPDATES],
                     src: Name [UPDATES],
-                    fragment_layout: FragmentLayout [] = FragmentLayout::M16n8k16,
+                    fragment_layout: Name [] = Name::from("m16n8k16"),
                 }
                 /// Convert mma **C fragments** into one 16-bit operand fragment in registers.
                 ///
@@ -778,9 +778,9 @@ macro_rules! with_kinds {
                     frag: Name [DEFINES],
                     srcs: Names [READS],
                     ab_dtype: Name [] = Name::from("f16"),
-                    fragment_layout: FragmentLayout [] = FragmentLayout::M16n8k16,
+                    fragment_layout: Name [] = Name::from("m16n8k16"),
                     part: i64 [] = 0,
-                    role: Role [] = Role::A,
+                    role: Name [] = Name::from("a"),
                 }
                 /// `unsigned long long name = emmy_wgmma_desc(...)` — the shared-memory matrix descriptor a `wgmma.mma_async`
                 /// operand is read through (:func:`wgmma_descriptor_bits`). Replaces :class:`LdmatrixLoad` on a descriptor-fed
@@ -791,7 +791,7 @@ macro_rules! with_kinds {
                     name: Name [DEFINES],
                     smem: Name [BUFFER_READ],
                     smem_index: Option<Expression> [EXPRESSION],
-                    swizzle: Swizzle [],
+                    swizzle: Name [],
                     lbo_bytes: i64 [],
                     sbo_bytes: i64 [],
                 }
@@ -888,10 +888,10 @@ macro_rules! with_kinds {
                     m_guard: Option<(Expression, Expression)> [EXPRESSION] = None,
                     n_guard: Option<(Expression, Expression)> [EXPRESSION] = None,
                     atomic: bool [] = false,
-                    fragment_layout: FragmentLayout [] = FragmentLayout::M16n8k16,
+                    fragment_layout: Name [] = Name::from("m16n8k16"),
                     volta_interleaved: bool [] = false,
                     fragment_index: Int2 [] = Int2(0, 0),
-                    swizzle: Swizzle [] = Swizzle::NONE,
+                    swizzle: Name [] = Name::from("NONE"),
                     row_dim: Option<i64> [] = None,
                     col_dim: Option<i64> [] = None,
                     run: Stmts [STMTS] = Stmts::from([]),
@@ -1301,8 +1301,8 @@ use crate::body::Body;
 use crate::expr::Expression;
 use crate::kinds::elementwise::Op;
 pub use crate::kinds::field::{
-    Axes, AxisRef, Branches, DType, Exprs, Float, Floats, FragmentArgs, FragmentLayout, Int2, Ints,
-    Names, NumOr, Ops, RasterOrient, Role, Shape3, Stmts, SubroutineRef, Swizzle, SwizzleMode,
+    Axes, AxisRef, Branches, DType, Exprs, Float, Floats, FragmentArgs, Int2, Ints, Names, NumOr,
+    Ops, Shape3, Stmts, SubroutineRef,
 };
 
 with_kinds!(define_kinds);

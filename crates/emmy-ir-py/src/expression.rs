@@ -4,7 +4,9 @@ use std::collections::HashMap;
 use std::sync::{Arc, OnceLock};
 
 use emmy_ir::Name;
-use emmy_ir::expr::{BinOp, Builtin, Expr, Expression, Interval, Lit, LitType, Num, SimplifyCtx};
+use emmy_ir::expr::{
+    BinOp, Builtin, CastTarget, Expr, Expression, Interval, Lit, LitType, Num, SimplifyCtx,
+};
 use pyo3::exceptions::{PyTypeError, PyValueError};
 use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyFrozenSet, PyList, PyString, PyTuple};
@@ -50,9 +52,15 @@ impl PyExprField for Builtin {
     }
 }
 
+impl PyExprField for CastTarget {
+    fn to_py(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        Ok(PyString::new(py, &self.to_string()).into_any().unbind())
+    }
+}
+
 impl PyExprField for LitType {
     fn to_py(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
-        Ok(PyString::new(py, self.name()).into_any().unbind())
+        Ok(PyString::new(py, self.text()).into_any().unbind())
     }
 }
 
@@ -115,7 +123,7 @@ macro_rules! define_py_exprs {
                     return Err(kind_error($name));
                 };
                 base.slot(slf.py(), 1, || {
-                    Ok(PyString::new(slf.py(), lit.dtype.name()).into_any().unbind())
+                    Ok(PyString::new(slf.py(), lit.dtype.text()).into_any().unbind())
                 })
             }
         }
@@ -490,11 +498,7 @@ impl PyBinaryExpression {
         left: &Bound<'_, PyAny>,
         right: &Bound<'_, PyAny>,
     ) -> PyResult<PyClassInitializer<Self>> {
-        let Some(op) = BinOp::parse(op) else {
-            return Err(PyValueError::new_err(format!(
-                "the operator {op:?} has no spelling"
-            )));
-        };
+        let op: BinOp = op.parse().py()?;
         let expr = binary(op, expression_from_py(left)?, expression_from_py(right)?);
         Ok(PyClassInitializer::from(PyExpression::base(expr)?).add_subclass(PyBinaryExpression))
     }
@@ -544,7 +548,10 @@ impl PyTernaryExpression {
 impl PyCastExpression {
     #[new]
     fn new(dtype: &str, expression: &Bound<'_, PyAny>) -> PyResult<PyClassInitializer<Self>> {
-        let expr = Expression::new(Expr::Cast(dtype.into(), expression_from_py(expression)?));
+        let expr = Expression::new(Expr::Cast(
+            dtype.parse().py()?,
+            expression_from_py(expression)?,
+        ));
         Ok(PyClassInitializer::from(PyExpression::base(expr)?).add_subclass(PyCastExpression))
     }
 }

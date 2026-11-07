@@ -14,7 +14,7 @@ use crate::kinds::{
     AXIS, AXIS_NAME, BODY, BUFFERS, EXPRESSION, FragmentArg, NAMES, Roles, STMTS, SelectBranch,
     Statement, TERM,
 };
-use crate::{Error, Name, Result, closed_set};
+use crate::{Error, Name, Result};
 
 /// Words the reader gives a meaning, so a name spelled like one is written between backticks.
 pub const KEYWORDS: [&str; 25] = [
@@ -40,76 +40,6 @@ pub type Ints = Arc<[i64]>;
 pub type Floats = Arc<[Float]>;
 
 pub use crate::kinds::dtype::DType;
-
-closed_set! {
-    /// How a shared-memory slab's 16-byte chunks are permuted against bank conflicts.
-    pub enum SwizzleMode ("swizzle") {
-        None = "NONE", B32 = "B32", B64 = "B64", B128 = "B128", V70A = "V70A", V70B = "V70B",
-    }
-}
-
-/// A swizzle: its mode and, for a software swizzle over a slab row wider than one atom, the row shift the XOR reads
-/// at in place of the mode's own (`B128@7`).
-#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
-pub struct Swizzle {
-    pub mode: SwizzleMode,
-    pub shift: Option<u8>,
-}
-
-impl Swizzle {
-    pub const NONE: Swizzle = Swizzle {
-        mode: SwizzleMode::None,
-        shift: None,
-    };
-
-    pub fn text(self) -> String {
-        match self.shift {
-            None => self.mode.text().to_string(),
-            Some(shift) => format!("{}@{shift}", self.mode),
-        }
-    }
-}
-
-impl std::fmt::Display for Swizzle {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(&self.text())
-    }
-}
-
-impl std::str::FromStr for Swizzle {
-    type Err = Error;
-
-    fn from_str(text: &str) -> Result<Swizzle> {
-        let (mode, shift) = text
-            .split_once('@')
-            .map_or((text, None), |(m, s)| (m, Some(s)));
-        let shift = shift
-            .map(|s| {
-                s.parse::<u8>()
-                    .map_err(|_| Error::Value(format!("no swizzle shift {s}")))
-            })
-            .transpose()?;
-        Ok(Swizzle {
-            mode: mode.parse()?,
-            shift,
-        })
-    }
-}
-
-closed_set! {
-    /// Which tile axis a raster walks first.
-    pub enum RasterOrient ("raster orientation") { M = "m", N = "n", }
-}
-
-closed_set! {
-    /// The MMA fragment layout a register fragment follows.
-    pub enum FragmentLayout ("fragment layout") { M16n8k16 = "m16n8k16", M8n8k4 = "m8n8k4", Wgmma = "wgmma", }
-}
-
-closed_set! {
-    /// An MMA operand's place.
-    pub enum Role ("fragment role") { A = "a", B = "b", C = "c", }
-}
 
 /// A float with the equality a Python float has (`0.0 == -0.0`), hashable.
 #[derive(Clone, Copy, Debug)]
@@ -733,10 +663,6 @@ vocabulary_field!(
         Some(self)
     }
 );
-vocabulary_field!(Swizzle, Ty::Name);
-vocabulary_field!(RasterOrient, Ty::Name);
-vocabulary_field!(FragmentLayout, Ty::Name);
-vocabulary_field!(Role, Ty::Name);
 
 plain_field!(
     Op,

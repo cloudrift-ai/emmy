@@ -52,11 +52,16 @@ parent's imports.
   spelled on a declared kind's header and read back by its `Ty`. A number where a name is expected (`NumOr<T>`, a
   carry's literal seed) is plain data. A record (`SelectBranch`, `FragmentArg`) is declared in the same list with a
   layer of its own, a struct whose own fields play roles and a `Field` of the kind that holds it. Every closed set of
-  spellings is an enum declared with `closed_set!` (one text per variant, `Display` and `FromStr` over them): the
-  dtypes (`DType`, `kinds/dtype.rs`, with the promotion rule), the kernel vocabularies a field holds (`Swizzle`,
-  `RasterOrient`, `FragmentLayout`, `Role`), the GPU built-ins (`expr::Builtin`), a cast's target (`LitType`) and the
-  digest's tags (`numbering::Tag`, whose texts a test pins, since they are identity material). An elementwise
-  operation is `Op::Known(Elementwise)` or `Op::Other(name)`, a spelling only a renderer knows. The known operations
+  spellings the crate branches on is an enum declared with `closed_set!` (one text per variant, `Display` and
+  `FromStr` over them, a test pinning every text, since each is a stored spelling or identity material): the dtypes
+  (`DType`, `kinds/dtype.rs`, with the promotion rule; the extension exports the set as `DTYPES` and a Python test
+  holds it equal to the `DataType` registry), the binary operators and literal types (`BinOp`, `LitType`), the GPU
+  built-ins (`expr::Builtin`), the expression kinds (`ExprKind`, generated from the one expression list; the digest
+  spells a node by it) and the digest's other tags (`numbering::Tag`). A cast's target is `CastTarget`: a literal
+  type the simplifier folds through, or any other C type the renderer spells. A value the crate only carries stays
+  a name: a slab's swizzle, a tile's raster orientation, a fragment's layout and role, a slab's or an MMA wrapper's
+  C type. An elementwise operation is `Op::Known(Elementwise)` or `Op::Other(name)`, a spelling only a renderer
+  knows. The known operations
   are one declaration (`operations!` in `kinds/elementwise.rs`): each variant with its spelling and its properties,
   which generates the enum, its `Display`/`FromStr` pair and the table `OPS` the enum indexes, one `OpInfo` row per
   operation (commutative, associative, the neutral element, the cluster representative, integer arithmetic, whether
@@ -64,9 +69,7 @@ parent's imports.
   fold, the alias reads of placement and the ties, the dtype promotion, the clustered identity, the Python tables)
   reads a property; none matches a name. The neutral element is the real one (`-inf` for a maximum) and `seed` is
   what a kernel initializes with, the bounded stand-in `±1e30` the CUDA source and every stored kernel spell. A
-  string of any of these sets exists where the text is read or written, at the Python boundary, and nowhere else;
-  the renderer's own vocabularies (a shared-memory slab's C type, an MMA wrapper's `ab_dtype`) stay names the crate
-  carries and never reads.
+  string of any of these sets exists where the text is read or written, at the Python boundary, and nowhere else.
 - **Axes** (`kinds/axis.rs`): `Axis` (name, `Dim`, window), equal by name and extent as the Python class is; the window is
   provenance. The Python `Axis`, `Dim`, `DataType` and `ElementwiseImpl` objects stay Python classes: a statement holds
   a name (or an axis's parts) and the extension makes the object on first read.
@@ -117,14 +120,15 @@ statement objects it permuted.
 ## Memos
 
 What a process remembers across bodies is a `memo::Memo`, declared with the `memo!` macro that names its capacity in
-entries and its eviction policy (`normal_forms` in the normalization driver, `identities` in `identity.rs`, both
-`BODY_MEMO_CAPACITY` under `S3Fifo`, the one policy `quick_cache` offers) and lists it in one registry through
-`memo::declared`, so every store is inspected (entries, hits, misses) and cleared from one place (`memo::stats`,
-`memo::clear`, `memo::clear_all`; `emmy_ir.memo_stats()`, `emmy_ir.clear_memo(name)` and `emmy_ir.clear_memos()` in
-Python, for a test worker or a process pool that starts clean). The caches are `quick_cache`'s: bounded by entry
-count, sharded so no lock is held across a computation, and one asker computes a missing value while a second asker
-of the same key waits for it, so a computation that asked its own memo for the key it is computing would wait on
-itself; `get_or_try_insert` refuses that with an error (no normalization step recurses into `normalize_body` today).
+entries (`normal_forms` in the normalization driver, `identities` in `identity.rs`, both `BODY_MEMO_CAPACITY`) and
+lists it in one registry through `memo::declared`, so every store is inspected (entries, hits, misses) and cleared
+from one place (`memo::stats`, `memo::clear`, `memo::clear_all`; `emmy_ir.memo_stats()`, `emmy_ir.clear_memo(name)`
+and `emmy_ir.clear_memos()` in Python, for a test worker or a process pool that starts clean). The caches are
+`quick_cache`'s: bounded by entry count, evicting by its one policy (S3-FIFO), sharded so no lock is held across a
+computation, and one asker computes a missing value while a second asker of the same key waits for it, so a
+computation that asked its own memo for the key it is computing would wait on itself; `get_or_try_insert` refuses
+that with an error, and the key leaves the thread's list however the computation ends (no normalization step recurses
+into `normalize_body` today).
 A memo's key is the body's exact form, `body::MemoKey`: equal when the statements are and so is everything body
 equality leaves out, every axis's hint and window, every expression's literals and every number a field holds by
 their bits (a signed zero keys apart from zero, every NaN alike, as the digest keys them), with a hash computed once

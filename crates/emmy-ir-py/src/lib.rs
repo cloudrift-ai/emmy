@@ -49,6 +49,13 @@ fn elementwise_tables(m: &Bound<'_, PyModule>) -> PyResult<()> {
         aliases.set_item(alias, canonical.text())?;
     }
     m.add("OP_ALIASES", aliases)?;
+    m.add(
+        "DTYPES",
+        PyFrozenSet::new(
+            py,
+            emmy_ir::kinds::field::DType::ALL.iter().map(|d| d.text()),
+        )?,
+    )?;
     Ok(())
 }
 

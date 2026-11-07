@@ -57,7 +57,7 @@ fn canonicalize_op_clusters(body: &Body) -> Body {
 memo! {
     /// The identities of the normal forms met in this process, per coloring: a cut's arms lower the same pieces
     /// again and again.
-    pub fn identities() -> Memo<(MemoKey, IdentityKey), Identity> [capacity = BODY_MEMO_CAPACITY, policy = S3Fifo]
+    pub fn identities() -> Memo<(MemoKey, IdentityKey), Identity> [capacity = BODY_MEMO_CAPACITY]
 }
 
 /// Key the normal form of `body`, optionally with operations collapsed to compute-unit clusters. `colors` types

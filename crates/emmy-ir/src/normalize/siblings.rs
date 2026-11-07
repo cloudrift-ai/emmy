@@ -8,7 +8,7 @@ use crate::body::{Body, exposed_defines, free_names};
 use crate::expr::{Expression, SimplifyCtx, affine_form};
 use crate::kinds::axis::{Axis, Dim};
 use crate::kinds::*;
-use crate::numbering::Key;
+use crate::numbering::{Key, Tag};
 use crate::{Name, Result};
 
 // --- sibling reduce loops ---------------------------------------------------------------------------------
@@ -28,7 +28,7 @@ pub(crate) fn reduce_axis_source_positions(body: &Body, axis: &Name) -> Result<B
                     let coeff = coeffs.get(axis).copied().unwrap_or(0);
                     if coeff != 0 {
                         out.insert(Key::tuple([
-                            Key::str("affine"),
+                            Key::tag(Tag::Affine),
                             Key::Str(load.input.clone()),
                             Key::Int(dim as i64),
                             Key::str(&anchor.text()),
@@ -44,7 +44,7 @@ pub(crate) fn reduce_axis_source_positions(body: &Body, axis: &Name) -> Result<B
                         )]))
                         .simplify(&SimplifyCtx::empty())?;
                     out.insert(Key::tuple([
-                        Key::str("composite"),
+                        Key::tag(Tag::Composite),
                         Key::Str(load.input.clone()),
                         Key::Int(dim as i64),
                         Key::str(&spelled.text()),

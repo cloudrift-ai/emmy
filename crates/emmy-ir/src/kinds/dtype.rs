@@ -14,10 +14,6 @@ closed_set! {
 }
 
 impl DType {
-    pub fn name(self) -> &'static str {
-        self.text()
-    }
-
     /// An integer dtype: arithmetic on them stays in the integer family.
     pub fn is_integer(self) -> bool {
         use DType::*;
@@ -84,4 +80,32 @@ pub fn promote(op: Option<Elementwise>, arg_dtypes: &[DType]) -> DType {
         return DType::F16;
     }
     DType::F32
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A dtype's text is identity material and a stored body's spelling: this list is what both were written with.
+    #[test]
+    fn every_dtype_spells_as_it_always_did() {
+        let texts: Vec<&str> = DType::ALL.iter().map(|d| d.text()).collect();
+        assert_eq!(
+            texts,
+            [
+                "f32", "f16", "f64", "bf16", "f8e4m3", "f8e5m2", "i16", "i32", "i64", "u8", "u16",
+                "u32", "u64", "bool", "f16x2", "f4e2m1x2",
+            ]
+        );
+        assert_eq!(
+            promote(Some(Elementwise::Add), &[DType::I32, DType::U16]),
+            DType::I32
+        );
+        assert_eq!(
+            promote(Some(Elementwise::Add), &[DType::U32, DType::I16]),
+            DType::U32
+        );
+        assert_eq!(promote(Some(Elementwise::Exp), &[DType::I32]), DType::F32);
+        assert_eq!(promote(None, &[DType::F16, DType::F16]), DType::F16);
+    }
 }

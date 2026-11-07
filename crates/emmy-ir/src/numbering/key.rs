@@ -5,7 +5,7 @@ use std::sync::Arc;
 use crate::Name;
 use crate::closed_set;
 use crate::expr::Num;
-use crate::expr::{Expr, Expression};
+use crate::expr::{Expr, ExprKind, Expression};
 
 /// Digest material: a tree of primitives, hashed to a number and ordered totally.
 #[derive(Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Debug)]
@@ -26,12 +26,11 @@ closed_set! {
     /// material and never changes.
     pub enum Tag ("digest tag") {
         Block = "block", Stmt = "stmt", Fixed = "fixed", Pick = "pick", Open = "open",
-        Var = "Var", Literal = "Literal", Builtin = "Builtin", Binary = "Binary", Call = "Call", Ternary = "Ternary",
-        Cast = "Cast", FlatIndex = "FlatIndex",
         Expr = "expr", Coordinate = "c", Operand = "v", Free = "free", State = "state", Buffer = "buffer",
         Bound = "bound", Parameter = "parameter",
         Load = "load", Assign = "assign", Term = "term", Affine = "affine", Init = "init", Reduce = "reduce",
         Select = "select", Store = "store", Carry = "carry", Pre = "pre", Loop = "loop", Cond = "cond", Other = "other",
+        Composite = "composite",
     }
 }
 
@@ -136,37 +135,39 @@ pub fn expression_key(e: &Expression, leaf: &mut dyn FnMut(&Expression) -> Optio
         return key;
     }
     match &**e {
-        Expr::Var(name) => Key::tuple([Key::tag(Tag::Var), Key::Str(name.clone())]),
+        Expr::Var(name) => Key::tuple([Key::str(ExprKind::Var.text()), Key::Str(name.clone())]),
         Expr::Literal(lit) => Key::tuple([
-            Key::tag(Tag::Literal),
+            Key::str(ExprKind::Literal.text()),
             Key::num(lit.value),
-            Key::str(lit.dtype.name()),
+            Key::str(lit.dtype.text()),
         ]),
-        Expr::Builtin(builtin) => Key::tuple([Key::tag(Tag::Builtin), Key::str(builtin.text())]),
+        Expr::Builtin(builtin) => {
+            Key::tuple([Key::str(ExprKind::Builtin.text()), Key::str(builtin.text())])
+        }
         Expr::Binary(op, l, r) => Key::tuple([
-            Key::tag(Tag::Binary),
+            Key::str(ExprKind::Binary.text()),
             Key::str(op.text()),
             expression_key(l, leaf),
             expression_key(r, leaf),
         ]),
         Expr::Call(name, args) => Key::tuple([
-            Key::tag(Tag::Call),
+            Key::str(ExprKind::Call.text()),
             Key::Str(name.clone()),
             Key::Tuple(args.iter().map(|a| expression_key(a, leaf)).collect()),
         ]),
         Expr::Ternary(a, b, c) => Key::tuple([
-            Key::tag(Tag::Ternary),
+            Key::str(ExprKind::Ternary.text()),
             expression_key(a, leaf),
             expression_key(b, leaf),
             expression_key(c, leaf),
         ]),
         Expr::Cast(dtype, inner) => Key::tuple([
-            Key::tag(Tag::Cast),
-            Key::Str(dtype.clone()),
+            Key::str(ExprKind::Cast.text()),
+            Key::str(&dtype.to_string()),
             expression_key(inner, leaf),
         ]),
         Expr::FlatIndex(buffer, index) => Key::tuple([
-            Key::tag(Tag::FlatIndex),
+            Key::str(ExprKind::FlatIndex.text()),
             Key::Str(buffer.clone()),
             Key::Tuple(index.iter().map(|a| expression_key(a, leaf)).collect()),
         ]),
@@ -189,14 +190,6 @@ mod tests {
                 "fixed",
                 "pick",
                 "open",
-                "Var",
-                "Literal",
-                "Builtin",
-                "Binary",
-                "Call",
-                "Ternary",
-                "Cast",
-                "FlatIndex",
                 "expr",
                 "c",
                 "v",
@@ -218,6 +211,7 @@ mod tests {
                 "loop",
                 "cond",
                 "other",
+                "composite",
             ]
         );
     }

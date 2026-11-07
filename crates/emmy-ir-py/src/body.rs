@@ -115,7 +115,6 @@ impl<T: Send + Sync, V: Send> Store for Table<T, V> {
             name: tables.name,
             entries: tables.entries.len(),
             capacity: None,
-            policy: None,
             hits: tables.hits,
             misses: tables.misses,
         }
@@ -994,8 +993,8 @@ fn clear_memos() {
     emmy_ir::memo::clear_all();
 }
 
-/// Every memo's figures: a list of dicts with `name`, `entries`, `capacity` and `policy` (None for an unbounded
-/// table), `hits` and `misses`.
+/// Every memo's figures: a list of dicts with `name`, `entries`, `capacity` (None for an unbounded table), `hits`
+/// and `misses`.
 #[pyfunction]
 fn memo_stats<'py>(py: Python<'py>) -> PyResult<Bound<'py, PyList>> {
     let out = PyList::empty(py);
@@ -1004,7 +1003,6 @@ fn memo_stats<'py>(py: Python<'py>) -> PyResult<Bound<'py, PyList>> {
         item.set_item("name", stats.name)?;
         item.set_item("entries", stats.entries)?;
         item.set_item("capacity", stats.capacity)?;
-        item.set_item("policy", stats.policy.map(|policy| format!("{policy:?}")))?;
         item.set_item("hits", stats.hits)?;
         item.set_item("misses", stats.misses)?;
         out.append(item)?;
