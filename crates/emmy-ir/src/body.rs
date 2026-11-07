@@ -1,0 +1,666 @@
+//! `Body`: a shared, immutable sequence of statements with the def-use readings, walks and orders every analysis
+//! phrases itself over, each computed once on first use and kept with the body. And `Subroutine`, the shared
+//! reduction body fusion builds a region with.
+
+use std::collections::{HashMap, HashSet};
+use std::hash::{Hash, Hasher};
+use std::sync::{Arc, Mutex, OnceLock};
+
+use crate::field::{Axes, Ext, Names};
+use crate::kinds::Statement;
+use crate::protocol::{seeded_accumulators, unique};
+use crate::values::Key;
+use crate::{Error, Name, Result};
+
+/// One statement inside a body: the body that holds it directly and its position there.
+#[derive(Clone)]
+pub struct StmtRef {
+    pub body: Body,
+    pub index: usize,
+}
+
+impl StmtRef {
+    pub fn stmt(&self) -> &Arc<Statement> {
+        &self.body.stmts()[self.index]
+    }
+}
+
+impl std::ops::Deref for StmtRef {
+    type Target = Statement;
+
+    fn deref(&self) -> &Statement {
+        self.stmt()
+    }
+}
+
+impl std::fmt::Debug for StmtRef {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "StmtRef({:p}, {})", Arc::as_ptr(&self.body.0), self.index)
+    }
+}
+
+impl PartialEq for StmtRef {
+    fn eq(&self, other: &Self) -> bool {
+        self.body.ptr_eq(&other.body) && self.index == other.index
+    }
+}
+
+impl Eq for StmtRef {}
+
+impl Hash for StmtRef {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        (Arc::as_ptr(&self.body.0) as usize).hash(state);
+        self.index.hash(state);
+    }
+}
+
+pub struct BodyData {
+    stmts: Vec<Arc<Statement>>,
+    hash: u64,
+    side_effects: bool,
+    carried_names: OnceLock<Vec<Name>>,
+    local_defs: OnceLock<HashSet<Name>>,
+    free_ssa: OnceLock<HashSet<Name>>,
+    definitions: OnceLock<HashMap<Name, StmtRef>>,
+    axis_names: OnceLock<HashSet<Name>>,
+    ssa_uses: OnceLock<HashSet<Name>>,
+    by_kind: Mutex<HashMap<Vec<&'static str>, Vec<StmtRef>>>,
+    pub(crate) normalized: OnceLock<Body>,
+    pub(crate) identities: Mutex<Vec<(crate::identity::IdentityKey, crate::identity::Identity)>>,
+    /// The extension's wrappers for these statements.
+    pub ext: Ext,
+}
+
+/// An immutable sequence of statements. Two bodies with equal statements are equal and hash alike; a slice or a
+/// concatenation is a body.
+#[derive(Clone)]
+pub struct Body(pub Arc<BodyData>);
+
+impl std::fmt::Debug for Body {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_list().entries(self.stmts().iter()).finish()
+    }
+}
+
+impl PartialEq for Body {
+    fn eq(&self, other: &Self) -> bool {
+        if Arc::ptr_eq(&self.0, &other.0) {
+            return true;
+        }
+        self.0.hash == other.0.hash
+            && self.len() == other.len()
+            && self.stmts().iter().zip(other.stmts()).all(|(a, b)| Arc::ptr_eq(a, b) || a == b)
+    }
+}
+
+impl Eq for Body {}
+
+impl Hash for Body {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        self.0.hash.hash(state);
+    }
+}
+
+impl Default for Body {
+    fn default() -> Body {
+        Body::empty()
+    }
+}
+
+impl Body {
+    pub fn new(stmts: Vec<Arc<Statement>>) -> Body {
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        stmts.len().hash(&mut hasher);
+        for stmt in &stmts {
+            stmt.hash(&mut hasher);
+        }
+        let side_effects = stmts.iter().any(|stmt| stmt.has_side_effects());
+        Body(Arc::new(BodyData {
+            stmts,
+            hash: hasher.finish(),
+            side_effects,
+            carried_names: OnceLock::new(),
+            local_defs: OnceLock::new(),
+            free_ssa: OnceLock::new(),
+            definitions: OnceLock::new(),
+            axis_names: OnceLock::new(),
+            ssa_uses: OnceLock::new(),
+            by_kind: Mutex::new(HashMap::new()),
+            normalized: OnceLock::new(),
+            identities: Mutex::new(Vec::new()),
+            ext: OnceLock::new(),
+        }))
+    }
+
+    pub fn from_statements(stmts: impl IntoIterator<Item = Statement>) -> Body {
+        Body::new(stmts.into_iter().map(Arc::new).collect())
+    }
+
+    pub fn empty() -> Body {
+        static EMPTY: OnceLock<Body> = OnceLock::new();
+        EMPTY.get_or_init(|| Body::new(Vec::new())).clone()
+    }
+
+    pub fn ptr_eq(&self, other: &Body) -> bool {
+        Arc::ptr_eq(&self.0, &other.0)
+    }
+
+    pub fn stmts(&self) -> &[Arc<Statement>] {
+        &self.0.stmts
+    }
+
+    pub fn len(&self) -> usize {
+        self.0.stmts.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.0.stmts.is_empty()
+    }
+
+    pub fn content_hash(&self) -> u64 {
+        self.0.hash
+    }
+
+    pub fn at(&self, index: usize) -> StmtRef {
+        StmtRef { body: self.clone(), index }
+    }
+
+    pub fn slice(&self, start: usize, end: usize) -> Body {
+        Body::new(self.0.stmts[start..end].to_vec())
+    }
+
+    pub fn concat(&self, other: &[Arc<Statement>]) -> Body {
+        let mut stmts = self.0.stmts.clone();
+        stmts.extend(other.iter().cloned());
+        Body::new(stmts)
+    }
+
+    /// True iff a statement of this body, at any depth, writes a buffer.
+    pub fn has_side_effects(&self) -> bool {
+        self.0.side_effects
+    }
+
+    /// The statement positions of this body, then of every nested body, pre-order.
+    pub fn walk(&self, f: &mut dyn FnMut(&StmtRef)) {
+        for index in 0..self.len() {
+            let here = self.at(index);
+            f(&here);
+            for child in here.stmt().nested() {
+                child.walk(f);
+            }
+        }
+    }
+
+    pub fn iter_refs(&self) -> Vec<StmtRef> {
+        let mut out = Vec::new();
+        self.walk(&mut |here| out.push(here.clone()));
+        out
+    }
+
+    /// Every statement at any depth, pre-order.
+    pub fn iter_stmts(&self) -> Vec<Arc<Statement>> {
+        let mut out = Vec::new();
+        self.walk(&mut |here| out.push(here.stmt().clone()));
+        out
+    }
+
+    /// `f` applied to each statement; this body itself when every statement comes back as it was.
+    pub fn map_each(&self, f: &mut dyn FnMut(&Arc<Statement>) -> Arc<Statement>) -> Body {
+        let stmts: Vec<Arc<Statement>> = self.stmts().iter().map(|stmt| f(stmt)).collect();
+        if stmts.iter().zip(self.stmts()).all(|(new, old)| Arc::ptr_eq(new, old)) { self.clone() } else { Body::new(stmts) }
+    }
+
+    /// The recursive 1:N transformer: each block's bodies are mapped first, then `f` on the children-rewritten
+    /// statement, which it keeps, drops (`None`) or replaces by several.
+    pub fn map(&self, f: &mut dyn FnMut(&Arc<Statement>) -> Option<Vec<Arc<Statement>>>) -> Body {
+        let mut out = Vec::new();
+        let mut changed = false;
+        for stmt in self.stmts() {
+            let nested = stmt.nested();
+            let descended = if nested.is_empty() {
+                stmt.clone()
+            } else {
+                let bodies: Vec<Body> = nested.iter().map(|body| body.map(f)).collect();
+                Statement::with_bodies(stmt, bodies).expect("the same count")
+            };
+            match f(&descended) {
+                None => changed = true,
+                Some(replacement) => {
+                    if !(replacement.len() == 1 && Arc::ptr_eq(&replacement[0], stmt)) {
+                        changed = true;
+                    }
+                    out.extend(replacement);
+                }
+            }
+        }
+        if changed { Body::new(out) } else { self.clone() }
+    }
+
+    /// `map` whose function keeps, drops or replaces one statement by one.
+    pub fn map_stmts(&self, f: &mut dyn FnMut(&Arc<Statement>) -> Option<Arc<Statement>>) -> Body {
+        let mut out = Vec::new();
+        let mut same = true;
+        for stmt in self.stmts() {
+            let nested = stmt.nested();
+            let descended = if nested.is_empty() {
+                stmt.clone()
+            } else {
+                let bodies: Vec<Body> = nested.iter().map(|body| body.map_stmts(f)).collect();
+                Statement::with_bodies(stmt, bodies).expect("the same count")
+            };
+            match f(&descended) {
+                Some(kept) => {
+                    if !Arc::ptr_eq(&kept, stmt) {
+                        same = false;
+                    }
+                    out.push(kept);
+                }
+                None => same = false,
+            }
+        }
+        if same { self.clone() } else { Body::new(out) }
+    }
+
+    /// This body with every external buffer renamed through `mapping`.
+    pub fn rename_buffers(&self, mapping: &HashMap<Name, Name>) -> Body {
+        let result = self.map_stmts(&mut |stmt| Some(Statement::rename_buffers(stmt, mapping)));
+        if result.ptr_eq(self) {
+            return self.clone();
+        }
+        // An injective spelling-only rename keeps the normal form a body is its own.
+        if self.0.normalized.get().is_some_and(|normal| normal.ptr_eq(self)) {
+            let resources: Vec<Name> = unique(self.iter_stmts().iter().flat_map(|s| s.external_reads().into_iter().chain(s.external_writes())));
+            let renamed: HashSet<Name> = resources.iter().map(|name| mapping.get(name).cloned().unwrap_or_else(|| name.clone())).collect();
+            if renamed.len() == resources.len() {
+                let _ = result.0.normalized.set(result.clone());
+            }
+        }
+        result
+    }
+
+    // --- def-use readings -----------------------------------------------------------------------
+
+    /// Accumulator and carried-state names, each once, in structural order.
+    pub fn carried_names(&self) -> &[Name] {
+        self.0.carried_names.get_or_init(|| {
+            let mut out = Vec::new();
+            self.walk(&mut |here| {
+                if let Statement::Accum(_) | Statement::Carry(_) = &**here.stmt() {
+                    for name in here.stmt().defines() {
+                        if !out.contains(&name) {
+                            out.push(name);
+                        }
+                    }
+                }
+            });
+            out
+        })
+    }
+
+    /// Bindings at this scope, including states exported by nested statements.
+    pub fn local_defs(&self) -> &HashSet<Name> {
+        self.0.local_defs.get_or_init(|| self.stmts().iter().flat_map(|stmt| ordered_sibling_defs(stmt)).collect())
+    }
+
+    /// SSA reads from the enclosing scope, excluding this scope's definitions and exported states.
+    pub fn free_ssa(&self) -> &HashSet<Name> {
+        self.0.free_ssa.get_or_init(|| {
+            let mut reads: HashSet<Name> = HashSet::new();
+            for stmt in self.stmts() {
+                reads.extend(free_ssa(stmt));
+            }
+            for local in self.local_defs() {
+                reads.remove(local);
+            }
+            reads
+        })
+    }
+
+    /// Every SSA name produced anywhere inside this body to its defining statement (the last definer).
+    pub fn definitions(&self) -> &HashMap<Name, StmtRef> {
+        self.0.definitions.get_or_init(|| {
+            let mut out = HashMap::new();
+            self.walk(&mut |here| {
+                for name in here.stmt().defines() {
+                    out.insert(name, here.clone());
+                }
+            });
+            out
+        })
+    }
+
+    /// Every axis name bound anywhere inside this body.
+    pub fn axis_names(&self) -> &HashSet<Name> {
+        self.0.axis_names.get_or_init(|| {
+            let mut out = HashSet::new();
+            self.walk(&mut |here| out.extend(here.stmt().binds_axes()));
+            out
+        })
+    }
+
+    /// Every name a statement of this subtree reads through `deps`.
+    pub fn ssa_uses(&self) -> &HashSet<Name> {
+        self.0.ssa_uses.get_or_init(|| {
+            let mut out = HashSet::new();
+            self.walk(&mut |here| out.extend(here.stmt().deps()));
+            out
+        })
+    }
+
+    /// Each SSA definition to the axes its value depends on.
+    pub fn axis_dependencies(&self) -> HashMap<Name, HashSet<Name>> {
+        let axis_names = self.axis_names();
+        let mut dependencies: HashMap<Name, HashSet<Name>> = HashMap::new();
+        fn walk(body: &Body, axis_names: &HashSet<Name>, dependencies: &mut HashMap<Name, HashSet<Name>>) {
+            for stmt in body.stmts() {
+                for child in stmt.nested() {
+                    walk(&child, axis_names, dependencies);
+                }
+                match &**stmt {
+                    Statement::Loop(l) => {
+                        for child in l.body.stmts() {
+                            if let Statement::Accum(a) = &**child {
+                                let mut axes = dependencies.get(&a.value).cloned().unwrap_or_default();
+                                axes.remove(&l.axis.name);
+                                dependencies.insert(a.name.clone(), axes);
+                            }
+                        }
+                        continue;
+                    }
+                    Statement::StridedLoop(l) => {
+                        for child in l.body.stmts() {
+                            if let Statement::Accum(a) = &**child {
+                                let axes = dependencies.get(&a.value).cloned().unwrap_or_default();
+                                dependencies.insert(a.name.clone(), axes);
+                            }
+                        }
+                        continue;
+                    }
+                    _ => {}
+                }
+                let mut reads: HashSet<Name> = stmt.deps().into_iter().collect();
+                for expression in stmt.expressions() {
+                    reads.extend(expression.free_vars());
+                }
+                let mut axes: HashSet<Name> = reads.iter().filter(|name| axis_names.contains(*name)).cloned().collect();
+                for name in &reads {
+                    if let Some(found) = dependencies.get(name) {
+                        axes.extend(found.iter().cloned());
+                    }
+                }
+                for name in stmt.defines() {
+                    dependencies.insert(name, axes.clone());
+                }
+            }
+        }
+        walk(self, axis_names, &mut dependencies);
+        dependencies
+    }
+
+    /// The statements of the given kinds, pre-order, cached per kind set.
+    pub fn of_kinds(&self, kinds: &[&'static str]) -> Vec<StmtRef> {
+        let key = kinds.to_vec();
+        if let Some(found) = self.0.by_kind.lock().unwrap().get(&key) {
+            return found.clone();
+        }
+        let mut out = Vec::new();
+        self.walk(&mut |here| {
+            if kinds.contains(&here.stmt().kind_name()) {
+                out.push(here.clone());
+            }
+        });
+        self.0.by_kind.lock().unwrap().insert(key, out.clone());
+        out
+    }
+
+    pub fn loads(&self) -> Vec<StmtRef> {
+        self.of_kinds(&["Load"])
+    }
+
+    pub fn writes(&self) -> Vec<StmtRef> {
+        self.of_kinds(&["Write"])
+    }
+
+    pub fn carries(&self) -> Vec<StmtRef> {
+        self.of_kinds(&["Carry"])
+    }
+
+    pub fn accums(&self) -> Vec<StmtRef> {
+        self.of_kinds(&["Accum"])
+    }
+
+    pub fn loops(&self) -> Vec<StmtRef> {
+        self.of_kinds(&["Loop"])
+    }
+
+    // --- cones and orders -------------------------------------------------------------------------
+
+    /// The backward dependence cone of `roots` over this body's immediate statements: the members, in body order,
+    /// and the names resolving to no member here.
+    pub fn backward_cone(&self, roots: &[Name]) -> (Vec<StmtRef>, Vec<Name>) {
+        let mut by_name: HashMap<Name, usize> = HashMap::new();
+        for (index, stmt) in self.stmts().iter().enumerate() {
+            for name in exposed_defines(stmt) {
+                by_name.insert(name, index);
+            }
+        }
+        let mut members: HashSet<usize> = HashSet::new();
+        let mut external: Vec<Name> = Vec::new();
+        let mut pending: Vec<Name> = roots.to_vec();
+        let mut seen: HashSet<Name> = HashSet::new();
+        while let Some(name) = pending.pop() {
+            if !seen.insert(name.clone()) {
+                continue;
+            }
+            let Some(&index) = by_name.get(&name) else {
+                external.push(name);
+                continue;
+            };
+            if !members.insert(index) {
+                continue;
+            }
+            pending.extend(free_names(&self.stmts()[index]));
+        }
+        external.sort();
+        ((0..self.len()).filter(|index| members.contains(index)).map(|index| self.at(index)).collect(), external)
+    }
+
+    /// Kahn's order over indexed predecessor sets, as source indices; source order breaks ties, a priority may rank
+    /// first. A cycle leaves the order unchanged.
+    pub fn topological_permutation(&self, incoming: &[HashSet<usize>], priority: Option<&dyn Fn(usize) -> Key>) -> Vec<usize> {
+        let n = self.len();
+        let mut successors: Vec<Vec<usize>> = vec![Vec::new(); n];
+        let mut degree: Vec<usize> = incoming.iter().map(|sources| sources.len()).collect();
+        for (target, sources) in incoming.iter().enumerate() {
+            for &source in sources {
+                successors[source].push(target);
+            }
+        }
+        let key = |index: usize| -> (Key, usize) { (priority.map_or(Key::None, |p| p(index)), index) };
+        let mut ready: std::collections::BinaryHeap<std::cmp::Reverse<(Key, usize)>> =
+            (0..n).filter(|&i| degree[i] == 0).map(|i| std::cmp::Reverse(key(i))).collect();
+        let mut ordered = Vec::with_capacity(n);
+        while let Some(std::cmp::Reverse((_, selected))) = ready.pop() {
+            ordered.push(selected);
+            for &target in &successors[selected] {
+                degree[target] -= 1;
+                if degree[target] == 0 {
+                    ready.push(std::cmp::Reverse(key(target)));
+                }
+            }
+        }
+        if ordered.len() == n { ordered } else { (0..n).collect() }
+    }
+
+    pub fn topological_order(&self, incoming: &[HashSet<usize>]) -> Body {
+        let order = self.topological_permutation(incoming, None);
+        if order.iter().enumerate().all(|(position, &index)| position == index) {
+            return self.clone();
+        }
+        Body::new(order.into_iter().map(|index| self.stmts()[index].clone()).collect())
+    }
+
+    /// Shared SSA definitions assembled once and adjacent independent reduction loops merged.
+    pub fn coalesce(&self) -> Body {
+        let mut out: Vec<Arc<Statement>> = Vec::new();
+        let mut seen: Vec<Arc<Statement>> = Vec::new();
+        let mut folded: HashSet<Name> = HashSet::new();
+        for stmt in self.stmts() {
+            let mut stmt = stmt.clone();
+            if stmt.has_side_effects() {
+                seen.clear();
+                folded.clear();
+            } else if !exposed_defines(&stmt).is_empty() {
+                if seen.iter().any(|s| **s == *stmt) {
+                    continue;
+                }
+                seen.push(stmt.clone());
+                let accumulators: HashSet<Name> = seeded_accumulators(&stmt).into_iter().collect();
+                if !accumulators.is_disjoint(&folded) {
+                    if accumulators.is_subset(&folded) {
+                        continue;
+                    }
+                    let wanted: Vec<Name> = accumulators.difference(&folded).cloned().collect();
+                    let body = match &*stmt {
+                        Statement::Loop(l) => &l.body,
+                        Statement::StridedLoop(l) => &l.body,
+                        _ => unreachable!("a seeded accumulator belongs to a loop"),
+                    };
+                    let (members, _) = body.backward_cone(&wanted);
+                    let kept = Body::new(members.iter().map(|m| m.stmt().clone()).collect());
+                    stmt = Statement::with_bodies(&stmt, vec![kept]).expect("one body");
+                }
+            }
+            if let Some(prior) = out.last()
+                && let (Some((prior_reduce, prior_body)), Some((stmt_reduce, stmt_body))) = (loop_parts(prior), loop_parts(&stmt))
+                && prior_reduce
+                && stmt_reduce
+                && !(prior.has_side_effects() || stmt.has_side_effects())
+                && *Statement::with_bodies(prior, vec![stmt_body.clone()]).expect("one body") == *stmt
+                && free_names(&stmt).iter().all(|name| !prior_body.definitions().contains_key(name))
+            {
+                let merged = prior_body.concat(stmt_body.stmts()).coalesce();
+                stmt = Statement::with_bodies(prior, vec![merged]).expect("one body");
+                out.pop();
+            }
+            folded.extend(seeded_accumulators(&stmt));
+            out.push(stmt);
+        }
+        Body::new(out)
+    }
+}
+
+fn loop_parts(stmt: &Statement) -> Option<(bool, &Body)> {
+    match stmt {
+        Statement::Loop(l) => Some((l.is_reduce(), &l.body)),
+        Statement::StridedLoop(l) => Some((l.is_reduce(), &l.body)),
+        _ => None,
+    }
+}
+
+/// Names visible to siblings in structural body order: a leaf's own definitions, a block's exported states.
+pub fn ordered_sibling_defs(stmt: &Statement) -> Vec<Name> {
+    let children = stmt.nested();
+    if children.is_empty() {
+        return stmt.defines();
+    }
+    unique(children.iter().flat_map(|child| child.carried_names().iter().cloned()))
+}
+
+/// SSA names `stmt` reads from the scope around it.
+pub fn free_ssa(stmt: &Statement) -> HashSet<Name> {
+    let children = stmt.nested();
+    let mut reads: HashSet<Name> = stmt.deps().into_iter().collect();
+    if children.is_empty() || stmt.deps_deep() {
+        return reads;
+    }
+    for child in children {
+        reads.extend(child.free_ssa().iter().cloned());
+    }
+    reads
+}
+
+/// SSA names `stmt` makes visible at its own scope level: its own and every nested definition.
+pub fn exposed_defines(stmt: &Statement) -> Vec<Name> {
+    let mut out = stmt.defines();
+    for body in stmt.nested() {
+        body.walk(&mut |here| out.extend(here.stmt().defines()));
+    }
+    unique(out)
+}
+
+/// Every name the whole subtree of `stmt` reads from its enclosing scope: SSA reads and index coordinates, less
+/// what the subtree defines or binds.
+pub fn free_names(stmt: &Statement) -> Vec<Name> {
+    let mut reads: Vec<Name> = Vec::new();
+    let mut defs: HashSet<Name> = HashSet::new();
+    fn walk(stmt: &Statement, bound: &HashSet<Name>, reads: &mut Vec<Name>, defs: &mut HashSet<Name>) {
+        for name in stmt.deps() {
+            if !bound.contains(&name) && !reads.contains(&name) {
+                reads.push(name);
+            }
+        }
+        for expression in stmt.expressions() {
+            for name in expression.free_vars() {
+                if !bound.contains(&name) && !reads.contains(&name) {
+                    reads.push(name);
+                }
+            }
+        }
+        defs.extend(stmt.defines());
+        if stmt.deps_deep() {
+            return;
+        }
+        let mut inner = bound.clone();
+        inner.extend(stmt.binds_axes());
+        for body in stmt.nested() {
+            for child in body.stmts() {
+                walk(child, &inner, reads, defs);
+            }
+        }
+    }
+    walk(stmt, &HashSet::new(), &mut reads, &mut defs);
+    reads.retain(|name| !defs.contains(name));
+    reads
+}
+
+/// One shared, read-only reduction cone with explicit coordinate parameters. Compared by object.
+pub struct Subroutine {
+    pub name: Name,
+    pub axes: Axes,
+    pub body: Body,
+    pub result: Name,
+    /// The buffers the body reads, each once, in first appearance.
+    pub buffers: Names,
+    pub ext: Ext,
+}
+
+impl std::fmt::Debug for Subroutine {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "Subroutine({:?})", self.name)
+    }
+}
+
+impl Subroutine {
+    pub fn new(name: Name, axes: Axes, body: Body, result: Name) -> Result<Arc<Subroutine>> {
+        if !body.carries().is_empty() || body.stmts().iter().any(|stmt| stmt.has_side_effects()) {
+            return Err(Error::Value("a fusion subroutine must be read-only".into()));
+        }
+        if !body.definitions().contains_key(&result) {
+            return Err(Error::Value("a fusion subroutine must define its result".into()));
+        }
+        let buffers: Names = unique(body.iter_stmts().iter().flat_map(|stmt| stmt.external_reads())).into();
+        Ok(Arc::new(Subroutine { name, axes, body, result, buffers, ext: OnceLock::new() }))
+    }
+
+    pub fn params(&self) -> Vec<Name> {
+        self.axes.iter().map(|axis| axis.name.clone()).collect()
+    }
+
+    /// Rebind the captured buffers once for all calls sharing this definition.
+    pub fn with_buffers(&self, buffers: Names) -> Arc<Subroutine> {
+        let mapping: HashMap<Name, Name> = self.buffers.iter().cloned().zip(buffers.iter().cloned()).collect();
+        let body = self.body.rename_buffers(&mapping);
+        Arc::new(Subroutine { name: self.name.clone(), axes: self.axes.clone(), body, result: self.result.clone(), buffers, ext: OnceLock::new() })
+    }
+}
