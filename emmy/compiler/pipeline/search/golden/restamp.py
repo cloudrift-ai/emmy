@@ -362,7 +362,14 @@ def restamp(document: GoldenFile, *, traced: int | None = None) -> tuple[GoldenF
                     replays[_spelled(extended[: at + 1])] = (taken, pieces, offered)
                 replays.setdefault(key, (False, [], offered))
             same, kernels, offered = replays[key]
-            if not same and (found := _respelled(document, fresh[path[0].parent], path, offered.get(route.parent, set()), ctx)):
+            root = fresh[path[0].parent]
+            # A seam a re-keyed parent still offers can name another sibling now (a chain of single cuts peeling the
+            # projections off one kernel, in another order), so a spelling whose pieces are neither the stored ones
+            # nor read and write as they do is re-spelled like a lost one.
+            misnamed = same and not _stands_for([document.kernel(ref) for ref in route.children], kernels, root)
+            if (not same or misnamed) and (
+                found := _respelled(document, root, path, offered.get(route.parent, set()), ctx, misnamed=misnamed)
+            ):
                 respelled, kernels = found
                 report.respelled.extend(
                     f"{route.parent} {old} -> {new}" for old, new in zip(route.arm, respelled.arm, strict=True) if old != new
@@ -441,7 +448,7 @@ def restamp(document: GoldenFile, *, traced: int | None = None) -> tuple[GoldenF
 
 
 def _respelled(
-    document: GoldenFile, root: Kernel, path: list[RoutingRow], offered: set[str], ctx: Context
+    document: GoldenFile, root: Kernel, path: list[RoutingRow], offered: set[str], ctx: Context, *, misnamed: bool = False
 ) -> tuple[RoutingRow, list[Kernel]] | None:
     """The last route of ``path`` with its seams spelled where the fresh parent cuts its stored pieces, and those
     pieces; ``None`` when no re-spelling does. A seam address is an operand position, so a change of canonical operand
@@ -455,9 +462,11 @@ def _respelled(
     change also re-keyed a piece, the candidates whose pieces read the same target inputs and write outputs of the same
     dtypes and sizes as the stored ones, one to one, stand for the decision; sibling cones over one input match alike,
     so the one that mints the most stored pieces again is taken, and a tie takes none. Two arms that mint one set of
-    pieces are one kernel set: the first is taken."""
+    pieces are one kernel set (a seam reached through two consumers of one cone): the first is taken, on either
+    path. A ``misnamed`` arm is one the parent offers whose pieces are not the stored ones: every seam of it moves."""
     route = path[-1]
-    lost = [key for key, value in route.arm.items() if family_of(key) == "PLACE" and value == "cut" and key not in offered]
+    cuts = [key for key, value in route.arm.items() if family_of(key) == "PLACE" and value == "cut"]
+    lost = cuts if misnamed else [key for key in cuts if key not in offered]
     if not lost or not offered:
         return None
     free = sorted(offered - set(route.arm))
@@ -512,7 +521,8 @@ def _respelled(
             break
     most = max((kept for kept, _, _ in alike), default=None)
     best = [(candidate, kernels) for kept, candidate, kernels in alike if kept == most]
-    return best[0] if len(best) == 1 else None
+    sets = {tuple(sorted(kernel.exact_identity for kernel in kernels)) for _, kernels in best}
+    return best[0] if len(sets) == 1 else None
 
 
 def _segments(key: str) -> tuple[str, ...]:
@@ -623,6 +633,14 @@ def _writes(kernel: Kernel) -> tuple:
             if name in wire["outputs"]
         )
     )
+
+
+def _stands_for(stored: list[Kernel], fresh: list[Kernel], root: Kernel) -> bool:
+    """Whether the pieces ``fresh`` are the ``stored`` ones: one keeps a stored identity, or they read the target's
+    inputs and write outputs as the stored pieces do."""
+    inputs = frozenset(root.loop_ir["inputs"])
+    kept = {_identity(kernel) for kernel in stored} & {kernel.exact_identity for kernel in fresh}
+    return bool(kept) or _io(stored, inputs) == _io(fresh, inputs)
 
 
 def _io(kernels: list[Kernel], inputs: frozenset[str]) -> list[tuple]:

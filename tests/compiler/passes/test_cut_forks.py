@@ -564,6 +564,91 @@ def test_a_moved_seam_over_a_re_keyed_piece_keeps_the_cut_whose_other_pieces_it_
     assert all(row.measured for row in fresh.rows if row.kernel == producer.ref)
 
 
+def test_a_moved_seam_whose_candidates_mint_one_kernel_set_is_re_spelled_at_the_first() -> None:
+    """A cone two consumers read is offered as one seam per consumer, and every spelling cuts the same two pieces.
+    When the change re-keyed both pieces, the spellings match alike by what the pieces read and write and none mints a
+    stored piece again: a tie among spellings of one kernel set, not among kernel sets, so the first is the decision
+    and the route stays, its rows kept as proposals."""
+    import json
+
+    from emmy.commands.trace import graph_from_code
+
+    code = (
+        "(lambda x, w1, w2: (lambda r: ((x * r) @ w1, (x * r) @ w2))(torch.rsqrt((x * x).mean(-1, keepdim=True))))"
+        "(torch.randn(4, 64, dtype=torch.float16), torch.randn(64, 32, dtype=torch.float16),"
+        " torch.randn(64, 16, dtype=torch.float16))"
+    )
+    document, route = _routed(inventory_document(graph_from_code(code)[0], (12, 0)), {"PLACE@map.1/inner": "cut"})
+    producer, consumer = (document.kernel(ref) for ref in route.children)
+    stale = {
+        producer.ref: replace(producer, loop_ir=json.loads(json.dumps(producer.loop_ir).replace("rsqrt(", "sqrt("))),
+        consumer.ref: replace(consumer, loop_ir=json.loads(json.dumps(consumer.loop_ir).replace("<- add(", "<- maximum("))),
+    }
+    assert all(stale[ref].exact_identity != document.kernel(ref).exact_identity for ref in stale)
+    moved = replace(
+        document,
+        kernels=[stale.get(kernel.ref, kernel) for kernel in document.kernels],
+        routing=[replace(route, arm={"PLACE@map.9/inner": "cut"})],
+    )
+    fresh, report = restamp(moved)
+    assert report.respelled == [f"{route.parent} PLACE@map.9/inner -> PLACE@map.1/inner"]
+    assert not report.dropped_routes and fresh.routing == document.routing
+    assert sorted(report.demoted) == sorted(row.name for row in document.rows if row.kernel in stale)
+    assert {row.kernel for row in fresh.rows} == {row.kernel for row in document.rows}
+
+
+def test_a_seam_the_re_keyed_parent_still_offers_but_that_cuts_other_pieces_is_re_spelled() -> None:
+    """A chain of single cuts peels the projections off one kernel one by one, and a change of sibling order moves
+    which projection each spelling peels: the stored seam is still offered on the re-keyed parent, yet its pieces are
+    neither the stored ones nor read and write as they do. Such an arm is re-spelled like a lost one, at the nearest
+    seam whose pieces stand for the stored ones, instead of filing the stored rows under the other projection."""
+    import json
+
+    from emmy.commands.trace import graph_from_code
+
+    code = (
+        "(lambda x, wq, wk, gq, gk: (lambda h: ((h @ wq) * gq, (h @ wk) * gk))(x * torch.rsqrt((x * x).mean(-1, keepdim=True))))"
+        "(torch.randn(4, 64, dtype=torch.float16), torch.randn(64, 32, dtype=torch.float16),"
+        " torch.randn(64, 16, dtype=torch.float16), torch.randn(32, dtype=torch.float16), torch.randn(16, dtype=torch.float16))"
+    )
+    recorded, other = "PLACE@map.1/map.1/inner.1/map", "PLACE@map.1/map.1/inner.1/map.2/map"
+    document, route = _routed(inventory_document(graph_from_code(code)[0], (12, 0)), {recorded: "cut"})
+    [target] = document.targets()
+    assert other in _seams_offered(target) and _pieces_minted(target, {other: "cut"}) != _pieces_minted(target, {recorded: "cut"})
+    stale = {
+        ref: replace(document.kernel(ref), loop_ir=json.loads(json.dumps(document.kernel(ref).loop_ir).replace("multiply(", "maximum(")))
+        for ref in route.children
+    }
+    assert all(stale[ref].exact_identity != document.kernel(ref).exact_identity for ref in stale)
+    moved = replace(
+        document,
+        kernels=[stale.get(kernel.ref, kernel) for kernel in document.kernels],
+        routing=[replace(route, arm={other: "cut"})],
+    )
+    fresh, report = restamp(moved)
+    assert report.respelled == [f"{route.parent} {other} -> {recorded}"]
+    assert not report.dropped_routes and fresh.routing == document.routing
+    assert {fresh.kernel(ref).exact_identity for ref in route.children} == {document.kernel(ref).exact_identity for ref in route.children}
+
+
+def _seams_offered(target) -> set[str]:
+    """The seams ``target`` offers to cut, as a replay of a probe route records them."""
+    offered: dict[str, set[str]] = {}
+    mint(target, [RoutingRow(target.ref, {"PLACE@nowhere": "cut"}, ("a piece",))], Context.from_target((12, 0)), seams=offered)
+    return offered[target.ref]
+
+
+def _pieces_minted(target, arm: dict) -> set[str]:
+    """The identities of the pieces cutting ``target`` at ``arm`` mints."""
+    probe = RoutingRow(target.ref, arm, ("a piece",))
+    return {
+        kernel.exact_identity
+        for route, _same, kernels in mint(target, [probe], Context.from_target((12, 0)))
+        if route is probe
+        for kernel in kernels
+    }
+
+
 @requires_cuda
 def test_softmax_state_cut_is_offered_and_pinned_cut_lowers() -> None:
     offered = _offered(_softmax_graph(), frontend=True)

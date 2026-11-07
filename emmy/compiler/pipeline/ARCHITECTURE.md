@@ -1157,9 +1157,11 @@ nearest offered seams of the same kind, or a swap of two operands on its route, 
 address is an operand position, so a change of canonical operand order moves it while the computation stays; the
 pieces' identities, computed now from their stored bodies, are what the decision cut) — or, where the change
 re-keyed a piece too, pieces that read the same target inputs and write outputs of the same dtypes and sizes, one to
-one, at the seam that mints the most stored pieces again and at none on a tie — and is otherwise dropped with its
-pieces' rows, as is a decision the fresh parent takes with another arm or that mints
-another number of pieces; a row whose kernel was re-keyed keeps its schedule and loses its measurement — a proposal,
+one, at the seam that mints the most stored pieces again and at none on a tie between kernel sets (seams that mint
+one kernel set are one re-spelling, the first taken); a seam a re-keyed parent still offers but whose pieces are
+neither the stored ones nor read and write as they do (a chain of single cuts peeling the projections off one kernel,
+in another order) is re-spelled the same way — and is otherwise dropped with its pieces' rows, as is a decision the
+fresh parent takes with another arm or that mints another number of pieces; a row whose kernel was re-keyed keeps its schedule and loses its measurement — a proposal,
 no evidence until a record run on the card measures it again. A whole-target latency is
 cleared exactly when a kernel of the set it names is re-keyed or dropped, whichever row carries it; one written before
 latencies named their set is filled once, with every kernel the file's decisions reach from its row's target, and
