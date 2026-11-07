@@ -61,14 +61,15 @@ parent's imports.
   type the simplifier folds through, or any other C type the renderer spells. A value the crate only carries stays
   a name: a slab's swizzle, a tile's raster orientation, a fragment's layout and role, a slab's or an MMA wrapper's
   C type. An elementwise operation is `Op::Known(Elementwise)` or `Op::Other(name)`, a spelling only a renderer
-  knows. The known operations
-  are one declaration (`operations!` in `kinds/elementwise.rs`): each variant with its spelling and its properties,
+  knows. The known operations are one declaration (`operations!` in `kinds/elementwise.rs`): each variant with its
+  spelling and its properties,
   which generates the enum, its `Display`/`FromStr` pair and the table `OPS` the enum indexes, one `OpInfo` row per
   operation (commutative, associative, the neutral element, the cluster representative, integer arithmetic, whether
   it copies its operand, its affine role, its host evaluator). Every reader of an operation's nature (the affine
   fold, the alias reads of placement and the ties, the dtype promotion, the clustered identity, the Python tables)
   reads a property; none matches a name. The neutral element is the real one (`-inf` for a maximum) and `seed` is
-  what a kernel initializes with, the bounded stand-in `±1e30` the CUDA source and every stored kernel spell. A
+  what a kernel initializes with, the bounded stand-in `±1e30` the CUDA source spells (and two recipe goldens'
+  bodies, as `-1e+30`; the hardware goldens and the corpus seed no maximum). A
   string of any of these sets exists where the text is read or written, at the Python boundary, and nowhere else.
 - **Axes** (`kinds/axis.rs`): `Axis` (name, `Dim`, window), equal by name and extent as the Python class is; the window is
   provenance. The Python `Axis`, `Dim`, `DataType` and `ElementwiseImpl` objects stay Python classes: a statement holds
@@ -122,8 +123,8 @@ statement objects it permuted.
 What a process remembers across bodies is a `memo::Memo`, declared with the `memo!` macro that names its capacity in
 entries (`normal_forms` in the normalization driver, `identities` in `identity.rs`, both `BODY_MEMO_CAPACITY`) and
 lists it in one registry through `memo::declared`, so every store is inspected (entries, hits, misses) and cleared
-from one place (`memo::stats`, `memo::clear`, `memo::clear_all`; `emmy_ir.memo_stats()`, `emmy_ir.clear_memo(name)`
-and `emmy_ir.clear_memos()` in Python, for a test worker or a process pool that starts clean). The caches are
+from one place (`memo::stats` and `memo::clear_all`; `emmy_ir.memo_stats()` and `emmy_ir.clear_memos()` in Python,
+for a test worker or a process pool that starts clean). The caches are
 `quick_cache`'s: bounded by entry count, evicting by its one policy (S3-FIFO), sharded so no lock is held across a
 computation, and one asker computes a missing value while a second asker of the same key waits for it, so a
 computation that asked its own memo for the key it is computing would wait on itself; `get_or_try_insert` refuses

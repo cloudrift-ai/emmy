@@ -2,9 +2,7 @@
 
 from __future__ import annotations
 
-import pytest
-
-from emmy.compiler.ir.stmt import canonicalize_identity, clear_memo, clear_memos, memo_stats, normalize_body, parse_body
+from emmy.compiler.ir.stmt import canonicalize_identity, clear_memos, memo_stats, normalize_body, parse_body
 
 
 def _by_name() -> dict[str, dict]:
@@ -25,17 +23,6 @@ def test_the_memos_report_their_entries_and_clear_together() -> None:
     stats = _by_name()
     assert stats["normal_forms"]["entries"] == 0
     assert stats["identities"]["entries"] == 0
-
-
-def test_one_memo_clears_on_its_own() -> None:
-    body = parse_body("x = load X[a]\nO[a] = x")
-    normalize_body(body)
-    canonicalize_identity(body)
-    clear_memo("identities")
-    stats = _by_name()
-    assert stats["identities"]["entries"] == 0 and stats["normal_forms"]["entries"] >= 1
-    with pytest.raises(KeyError):
-        clear_memo("no such memo")
 
 
 def test_a_second_normalization_is_a_hit() -> None:
