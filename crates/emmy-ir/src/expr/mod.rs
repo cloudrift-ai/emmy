@@ -331,6 +331,7 @@ pub fn apply_binop(op: BinOp, left: Num, right: Num) -> Result<Num> {
         BinOp::Gt => Ok(Num::Bool(left.as_f64() > right.as_f64())),
         BinOp::Ge => Ok(Num::Bool(left.as_f64() >= right.as_f64())),
         BinOp::Eq => Ok(Num::Bool(left.as_f64() == right.as_f64())),
+        BinOp::Ne => Ok(Num::Bool(left.as_f64() != right.as_f64())),
         BinOp::And => Ok(Num::Bool(left.truthy() && right.truthy())),
         BinOp::Or => Ok(Num::Bool(left.truthy() || right.truthy())),
         BinOp::BitAnd => bits(left, right, |a, b| a & b, |a, b| Some(a & b)),
@@ -356,7 +357,6 @@ pub fn apply_binop(op: BinOp, left: Num, right: Num) -> Result<Num> {
                 a >> b
             }))
         }
-        BinOp::Ne => Err(Error::Value("Unknown BinOp: !=".into())),
     }
 }
 

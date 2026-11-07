@@ -153,19 +153,6 @@ pub fn rename_ssa_sequential(body: &Body) -> Body {
 
 // --- the canonical order --------------------------------------------------------------------------------
 
-/// A sum with its coefficients sorted: the order lists a sum's terms itself, so what it sorts by reads none of that.
-pub(crate) fn unlisted(stmt: &Arc<Statement>) -> Arc<Statement> {
-    if let Statement::Affine(a) = &**stmt {
-        let mut coefficients: Vec<Float> = a.coefficients.to_vec();
-        coefficients.sort_by(|x, y| x.0.total_cmp(&y.0));
-        return Arc::new(Statement::Affine(Affine {
-            coefficients: coefficients.into(),
-            ..a.clone()
-        }));
-    }
-    stmt.clone()
-}
-
 /// `body` with every scope's members in the canonical order: dependency-valid, then by the sibling's category, its
 /// shape, its spelling where shapes tie, and its number or scope tree.
 fn ordered(body: &Body, numbering: &Numbering) -> Body {
@@ -196,11 +183,7 @@ fn ordered(body: &Body, numbering: &Numbering) -> Body {
         .enumerate()
         .map(|(index, ((stmt, built), own))| {
             let children = stmt.nested();
-            let category = if !children.is_empty() && stmt.has_side_effects() {
-                2
-            } else {
-                children.is_empty() as i64
-            };
+            let category = ties::sibling_category(stmt);
             let spelled = if ties[own] > 1 {
                 ties::sibling_spelling(built)
             } else {
@@ -256,7 +239,7 @@ pub fn canonical_order(body: &Body) -> Result<Body> {
         }
         Statement::Affine(a) if a.args.len() > 1 => {
             let mut terms: Vec<(f64, Name)> = a.terms().map(|(c, arg)| (c, arg.clone())).collect();
-            terms.sort_by_cached_key(|(c, name)| (operand_key(name), name.clone(), Key::float(*c)));
+            terms.sort_by_cached_key(|(c, name)| ties::term_key(operand_key(name), name, *c));
             Some(Arc::new(Statement::Affine(Affine {
                 args: terms.iter().map(|(_, n)| n.clone()).collect(),
                 coefficients: terms.iter().map(|(c, _)| Float(*c)).collect(),
@@ -278,65 +261,6 @@ pub fn canonical_order(body: &Body) -> Result<Body> {
         ))
     });
     Ok(unify_siblings(&unified))
-}
-
-/// Whether `op`'s operands may trade places.
-fn commutative(op: BinOp) -> bool {
-    matches!(
-        op,
-        BinOp::Add
-            | BinOp::Mul
-            | BinOp::Eq
-            | BinOp::Ne
-            | BinOp::And
-            | BinOp::Or
-            | BinOp::BitAnd
-            | BinOp::BitOr
-            | BinOp::Xor
-    )
-}
-
-/// An expression's form with every bound axis spelled by its binding position: the order of two operands.
-fn unspelled(e: &Expression, axis_order: &HashMap<Name, usize>) -> Key {
-    match &**e {
-        Expr::Var(name) => match axis_order.get(name) {
-            Some(index) => Key::tuple([Key::str("Var"), Key::Int(*index as i64)]),
-            None => Key::tuple([Key::str("Var"), Key::Str(name.clone())]),
-        },
-        Expr::Literal(Lit { value, dtype }) => Key::tuple([
-            Key::str("Literal"),
-            Key::num(*value),
-            Key::str(dtype.name()),
-        ]),
-        Expr::Builtin(name) => Key::tuple([Key::str("Builtin"), Key::Str(name.clone())]),
-        Expr::Binary(op, l, r) => Key::tuple([
-            Key::str("Binary"),
-            Key::str(op.text()),
-            unspelled(l, axis_order),
-            unspelled(r, axis_order),
-        ]),
-        Expr::Call(name, args) => Key::tuple([
-            Key::str("Call"),
-            Key::Str(name.clone()),
-            Key::tuple(args.iter().map(|a| unspelled(a, axis_order))),
-        ]),
-        Expr::Ternary(a, b, c) => Key::tuple([
-            Key::str("Ternary"),
-            unspelled(a, axis_order),
-            unspelled(b, axis_order),
-            unspelled(c, axis_order),
-        ]),
-        Expr::Cast(dtype, inner) => Key::tuple([
-            Key::str("Cast"),
-            Key::Str(dtype.clone()),
-            unspelled(inner, axis_order),
-        ]),
-        Expr::FlatIndex(buffer, index) => Key::tuple([
-            Key::str("FlatIndex"),
-            Key::Str(buffer.clone()),
-            Key::tuple(index.iter().map(|a| unspelled(a, axis_order))),
-        ]),
-    }
 }
 
 /// A sum over bound axes with its terms in binding order and its anchor last.
@@ -393,7 +317,9 @@ fn rewrite(e: &Expression, axis_order: &HashMap<Name, usize>) -> Result<Expressi
                 }
                 _ => {}
             }
-            if commutative(op) && unspelled(&right, axis_order) < unspelled(&left, axis_order) {
+            if ties::commutative(op)
+                && ties::unspelled(&right, axis_order) < ties::unspelled(&left, axis_order)
+            {
                 std::mem::swap(&mut left, &mut right);
             }
             let result = Expression::binary(op, left, right);

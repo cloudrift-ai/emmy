@@ -17,10 +17,10 @@ use crate::kinds::{
 use crate::{Error, Name, Result};
 
 /// Words the reader gives a meaning, so a name spelled like one is written between backticks.
-pub const KEYWORDS: [&str; 26] = [
+pub const KEYWORDS: [&str; 25] = [
     "for", "in", "if", "else", "let", "init", "zero", "load", "pre", "select", "when", "over",
     "seed", "step", "until", "window", "carried", "swizzle", "words", "unroll", "sub", "call",
-    "true", "false", "none", "in",
+    "true", "false", "none",
 ];
 
 /// A name as a statement's text spells it: bare, or between backticks when it reads as a keyword or is no identifier.
