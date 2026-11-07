@@ -45,8 +45,6 @@ pub enum Eval {
 /// Everything the compiler knows of a known operation, in one row of the table `OPS` indexes by `Elementwise`.
 #[derive(Clone, Copy)]
 pub struct OpInfo {
-    /// The spelling: how the operation prints and reads.
-    pub text: &'static str,
     /// A binary combine where `op(a, b) == op(b, a)`.
     pub commutative: bool,
     /// A binary combine where `op(op(a, b), c) == op(a, op(b, c))`: the reassociable reduce combines.
@@ -57,30 +55,37 @@ pub struct OpInfo {
     pub cluster: Option<Elementwise>,
     /// Arithmetic on integer operands stays in the integer family (the dtype promotion rule).
     pub integer: bool,
-    /// The operation returns its one operand unchanged: an alias normalization reads through.
+    /// The copy alias: the one operation the alias reads of normalization (placement, the ties, the constant fold)
+    /// read through. `positive` and `pad` also return their operand and are not aliases: marking them would move
+    /// identities.
     pub copies: bool,
+    /// The operation chooses one of its operands (the max/min family) rather than accumulate a magnitude, so an
+    /// accumulation over it may stay in the input dtype.
+    pub selecting: bool,
     /// How `fold_affine` reads it, when it is a term of a sum.
     pub affine: Option<AffineRole>,
-    /// Its value on `f32` operands, as NumPy computes it for `np.float32` scalars.
+    /// Its value on `f32` operands, as NumPy computes it for `np.float32` scalars (a NaN operand gives NaN, which
+    /// no fold takes).
     pub eval: Eval,
 }
 
 impl OpInfo {
     const DEFAULT: OpInfo = OpInfo {
-        text: "",
         commutative: false,
         associative: false,
         neutral: None,
         cluster: None,
         integer: false,
         copies: false,
+        selecting: false,
         affine: None,
         eval: Eval::None,
     };
 }
 
-/// The finite stand-in a kernel initializes an unbounded neutral element with (the CUDA source and every stored
-/// kernel spell `-1e+30f`); a bounded one is itself.
+/// The finite stand-in a kernel initializes an unbounded neutral element with: the CUDA source spells `-1e+30f`,
+/// and two recipe goldens' bodies spell `-1e+30` (the hardware goldens and the corpus seed no maximum). A bounded
+/// neutral element is itself.
 const SEED_BOUND: f64 = 1e30;
 
 /// The known operations: one list declares each variant, its spelling and its properties, and generates the enum,
@@ -95,7 +100,7 @@ macro_rules! operations {
 
         /// The properties of every known operation, in `Elementwise` order.
         pub static OPS: [OpInfo; Elementwise::ALL.len()] = [
-            $( OpInfo { text: $text, $( $field: $value, )* ..OpInfo::DEFAULT }, )*
+            $( OpInfo { $( $field: $value, )* ..OpInfo::DEFAULT }, )*
         ];
     };
 }
@@ -115,9 +120,9 @@ operations! {
     Abs = "abs" { cluster: Some(E::Multiply), eval: Eval::Unary(f32::abs) },
     Absolute = "absolute" { eval: Eval::Unary(f32::abs) },
     Fabs = "fabs" { eval: Eval::Unary(f32::abs) },
-    Maximum = "maximum" { commutative: true, associative: true, neutral: Some(f64::NEG_INFINITY), cluster: Some(E::Maximum), eval: Eval::Binary(f32::max) },
-    Minimum = "minimum" { commutative: true, associative: true, neutral: Some(f64::INFINITY), cluster: Some(E::Maximum), eval: Eval::Binary(f32::min) },
-    Amax = "amax" { commutative: true, associative: true, neutral: Some(f64::NEG_INFINITY), cluster: Some(E::Maximum) },
+    Maximum = "maximum" { commutative: true, associative: true, neutral: Some(f64::NEG_INFINITY), cluster: Some(E::Maximum), selecting: true, eval: Eval::Binary(|a, b| if a.is_nan() || b.is_nan() { f32::NAN } else { a.max(b) }) },
+    Minimum = "minimum" { commutative: true, associative: true, neutral: Some(f64::INFINITY), cluster: Some(E::Maximum), selecting: true, eval: Eval::Binary(|a, b| if a.is_nan() || b.is_nan() { f32::NAN } else { a.min(b) }) },
+    Amax = "amax" { commutative: true, associative: true, neutral: Some(f64::NEG_INFINITY), cluster: Some(E::Maximum), selecting: true },
     Fmax = "fmax" { cluster: Some(E::Maximum), eval: Eval::Binary(f32::max) },
     Fmin = "fmin" { cluster: Some(E::Maximum), eval: Eval::Binary(f32::min) },
     Sign = "sign" { cluster: Some(E::Maximum), eval: Eval::Unary(|x| if x > 0.0 { 1.0 } else if x < 0.0 { -1.0 } else { 0.0 }) },
@@ -240,10 +245,6 @@ impl Op {
         }
     }
 
-    pub fn is(&self, op: Elementwise) -> bool {
-        *self == Op::Known(op)
-    }
-
     /// The known operation's properties; `Other` has none.
     pub fn info(&self) -> Option<&'static OpInfo> {
         self.known().map(Elementwise::info)
@@ -312,10 +313,12 @@ mod tests {
 
     #[test]
     fn the_table_is_in_enum_order_and_spells_every_operation() {
-        for (index, op) in Elementwise::ALL.iter().enumerate() {
-            assert_eq!(OPS[index].text, op.text(), "{op:?}");
+        for op in Elementwise::ALL {
             assert_eq!(op.text().parse::<Elementwise>().unwrap(), *op);
         }
+        assert!(Elementwise::Copy.info().copies && !Elementwise::Positive.info().copies);
+        assert!(Elementwise::Maximum.info().selecting && !Elementwise::Add.info().selecting);
+        assert_eq!(Elementwise::Maximum.evaluate_f32(&[1.0, f32::NAN]), None);
         let texts: Vec<&str> = Elementwise::ALL.iter().map(|op| op.text()).collect();
         assert_eq!(
             texts,

@@ -1,7 +1,6 @@
 //! The memos: what a process remembers across bodies, as one store of declared caches. A memo is declared with
 //! [`memo!`], which names its capacity in entries, and registers itself in one list, so every memo is inspected
-//! (entries, hits, misses) and cleared from one place: [`stats`], [`clear`] and [`clear_all`] here, their exports in
-//! Python. The caches are `quick_cache`'s: sharded, locked per shard and never across a computation, bounded by
+//! (entries, hits, misses) and cleared from one place: [`stats`] and [`clear_all`] here, their exports in Python. The caches are `quick_cache`'s: sharded, locked per shard and never across a computation, bounded by
 //! entry count, evicting by its one policy (S3-FIFO: a probation queue ahead of the main one and a ghost list of
 //! what left, so an entry met once does not push out one met many times). A key is a body's exact form
 //! (`body::MemoKey`), never its text.
@@ -138,17 +137,6 @@ pub fn stats() -> Vec<Stats> {
     stores().iter().map(|store| store.stats()).collect()
 }
 
-/// Clear the store named `name`; whether one is.
-pub fn clear(name: &str) -> bool {
-    match stores().iter().find(|store| store.stats().name == name) {
-        Some(store) => {
-            store.clear();
-            true
-        }
-        None => false,
-    }
-}
-
 /// Clear every registered store. The registry's lock is not held while a store clears: a table's purge drops Python
 /// objects whose finalizers may come back here.
 pub fn clear_all() {
@@ -158,7 +146,7 @@ pub fn clear_all() {
 }
 
 /// Declare a memo: a function returning the one `Memo` of its name, built on first use with the capacity stated and
-/// registered for `stats`, `clear` and `clear_all`.
+/// registered for `stats` and `clear_all`.
 ///
 /// ```ignore
 /// memo! {
@@ -229,13 +217,6 @@ mod tests {
             Ok(27)
         );
         assert!(stats().iter().any(|s| s.name == "cubes" && s.entries == 1));
-        assert!(clear("cubes"));
-        assert!(!clear("no such memo"));
-        assert!(stats().iter().any(|s| s.name == "cubes" && s.entries == 0));
-        assert_eq!(
-            cubes().get_or_try_insert(&3, || Ok::<u64, Error>(27)),
-            Ok(27)
-        );
         clear_all();
         assert!(stats().iter().any(|s| s.name == "cubes" && s.entries == 0));
     }

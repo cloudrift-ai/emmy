@@ -29,6 +29,10 @@ fn elementwise_tables(m: &Bound<'_, PyModule>) -> PyResult<()> {
         "ASSOCIATIVE_OPS",
         PyFrozenSet::new(py, texts(|info| info.associative))?,
     )?;
+    m.add(
+        "SELECTING_OPS",
+        PyFrozenSet::new(py, texts(|info| info.selecting))?,
+    )?;
     // What a kernel seeds a reduction with: the bounded stand-in of an unbounded neutral element.
     let identity = PyDict::new(py);
     for op in Elementwise::ALL {

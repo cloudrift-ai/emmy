@@ -25,7 +25,7 @@ import numpy as np
 
 from emmy.compiler.dtype import decode_f4, decode_f8, encode_f4, encode_f8
 from emmy.compiler.wire import Wire
-from emmy.emmy_ir import ASSOCIATIVE_OPS, COMMUTATIVE_OPS, OP_ALIASES, OP_CLUSTERS, OP_IDENTITY
+from emmy.emmy_ir import ASSOCIATIVE_OPS, COMMUTATIVE_OPS, OP_ALIASES, OP_CLUSTERS, OP_IDENTITY, SELECTING_OPS
 
 
 # Names whose callable isn't a plain ``getattr(np, name)`` — non-numpy
@@ -163,10 +163,10 @@ class ElementwiseImpl(Wire):
     _IDENTITY: dict[str, float] = dict(OP_IDENTITY)
     # Selecting ops *choose* an existing input value (max/min family) rather
     # than accumulate magnitude — so an Accum over one may stay in the input
-    # dtype, and the flash recognizer's rowmax keys off it. The single source
-    # for the per-op ``selecting`` trait (was a ``_SELECTING_OPS`` frozenset in
-    # ``020_place_inits``).
-    _SELECTING: frozenset[str] = frozenset({"maximum", "amax", "minimum", "max", "min"})
+    # dtype, and the flash recognizer's rowmax keys off it. The property is the
+    # operation table's; ``max`` and ``min`` are numpy spellings this side alone
+    # resolves, so they join here.
+    _SELECTING: frozenset[str] = SELECTING_OPS | frozenset({"max", "min"})
     # semiring pairing — a reduce combine ``⊕`` mapped to the products ``⊗``
     # that distribute over it (``a·(b⊕c) == a·b ⊕ a·c``), so a contraction
     # ``Σ_k a⊗b`` is a matmul over ``⊕``. Only ``(+, ×)`` is exercised today;

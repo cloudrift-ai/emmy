@@ -969,21 +969,8 @@ pub fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(ordering_constraints, m)?)?;
     m.add_function(wrap_pyfunction!(dtype_promote, m)?)?;
     m.add_function(wrap_pyfunction!(clear_memos, m)?)?;
-    m.add_function(wrap_pyfunction!(clear_memo, m)?)?;
     m.add_function(wrap_pyfunction!(memo_stats, m)?)?;
     Ok(())
-}
-
-/// Clear the one memo `name` names (a `name` of `memo_stats()`); `KeyError` for a name no memo has.
-#[pyfunction]
-fn clear_memo(name: &str) -> PyResult<()> {
-    if emmy_ir::memo::clear(name) {
-        Ok(())
-    } else {
-        Err(pyo3::exceptions::PyKeyError::new_err(format!(
-            "no memo {name}"
-        )))
-    }
 }
 
 /// Forget every memoized normal form and identity and purge the wrapper tables: what a test worker or a process

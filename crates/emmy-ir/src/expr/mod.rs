@@ -461,7 +461,7 @@ macro_rules! define_exprs {
             $( $(#[doc = $doc])* $Variant( $($ty),* ), )*
         }
 
-        /// Every expression kind by name: the tag the digest spells a node by.
+        /// Every expression kind by name: the tag the digest spells a node by (`kind().text()`).
         #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
         pub enum ExprKind { $( $Variant, )* }
 
@@ -475,11 +475,6 @@ macro_rules! define_exprs {
         impl Expr {
             pub fn kind(&self) -> ExprKind {
                 match self { $( Expr::$Variant(..) => ExprKind::$Variant, )* }
-            }
-
-            /// The kind's name, which is the tag the digest spells it by.
-            pub fn kind_name(&self) -> &'static str {
-                self.kind().text()
             }
 
             /// `f` on each child, in field order.
@@ -1182,6 +1177,7 @@ pub use simplify::*;
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::normalize::testing::eval_int;
 
     #[test]
     fn the_built_ins_and_operators_spell_as_they_always_did() {
@@ -1232,7 +1228,7 @@ mod tests {
             Expression::new(Expr::FlatIndex("b".into(), Arc::from([]))),
         ]
         .iter()
-        .map(|e| e.kind_name())
+        .map(|e| e.kind().text())
         .collect();
         assert_eq!(
             kinds,
@@ -1248,7 +1244,6 @@ mod tests {
             ]
         );
     }
-    use crate::normalize::testing::eval_int;
 
     fn chain(depth: usize) -> Expression {
         let mut chain = Expression::var("a");

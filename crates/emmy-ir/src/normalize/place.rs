@@ -478,7 +478,7 @@ pub fn place_values(body: &Body) -> Result<Body> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::kinds::elementwise::Elementwise;
+    use crate::kinds::elementwise::{Elementwise, Op};
     use crate::normalize::normalize_body;
     use crate::normalize::testing::*;
 
@@ -1121,7 +1121,7 @@ mod tests {
         assert!(
             out.stmts()
                 .iter()
-                .any(|stmt| matches!(&**stmt, Statement::Assign(a) if a.op.is(Elementwise::Exp))),
+                .any(|stmt| matches!(&**stmt, Statement::Assign(a) if a.op == Op::Known(Elementwise::Exp))),
             "{}",
             text(&out)
         );
@@ -1150,7 +1150,7 @@ mod tests {
         let Statement::Assign(shared) = &*out.stmts()[2] else {
             unreachable!()
         };
-        assert!(shared.op.is(Elementwise::Exp));
+        assert_eq!(shared.op, Op::Known(Elementwise::Exp));
         for arm in out.stmts()[3].nested() {
             assert_eq!(kinds(&arm), ["Load", "Affine", "Write"]);
             let Statement::Affine(sum) = &*arm.stmts()[1] else {
