@@ -451,7 +451,9 @@ impl PyBinaryExpression {
                 "the operator {op:?} has no spelling"
             )));
         };
-        let expr = binary(op, expression_from_py(left)?, expression_from_py(right)?);
+        let expr = binary(op, expression_from_py(left)?, expression_from_py(right)?)
+            .bounded()
+            .py()?;
         Ok(PyClassInitializer::from(PyExpression::base(expr)).add_subclass(PyBinaryExpression))
     }
 
@@ -473,7 +475,9 @@ impl PyFunctionCallExpression {
             .try_iter()?
             .map(|item| expression_from_py(&item?))
             .collect();
-        let expr = Expression::new(Expr::Call(name.into(), args?.into()));
+        let expr = Expression::new(Expr::Call(name.into(), args?.into()))
+            .bounded()
+            .py()?;
         Ok(PyClassInitializer::from(PyExpression::base(expr))
             .add_subclass(PyFunctionCallExpression))
     }
@@ -491,7 +495,9 @@ impl PyTernaryExpression {
             expression_from_py(cond)?,
             expression_from_py(if_true)?,
             expression_from_py(if_false)?,
-        ));
+        ))
+        .bounded()
+        .py()?;
         Ok(PyClassInitializer::from(PyExpression::base(expr)).add_subclass(PyTernaryExpression))
     }
 }
@@ -500,7 +506,9 @@ impl PyTernaryExpression {
 impl PyCastExpression {
     #[new]
     fn new(dtype: &str, expression: &Bound<'_, PyAny>) -> PyResult<PyClassInitializer<Self>> {
-        let expr = Expression::new(Expr::Cast(dtype.into(), expression_from_py(expression)?));
+        let expr = Expression::new(Expr::Cast(dtype.into(), expression_from_py(expression)?))
+            .bounded()
+            .py()?;
         Ok(PyClassInitializer::from(PyExpression::base(expr)).add_subclass(PyCastExpression))
     }
 }
@@ -513,7 +521,9 @@ impl PyFlatIndex {
             .try_iter()?
             .map(|item| expression_from_py(&item?))
             .collect();
-        let expr = Expression::new(Expr::FlatIndex(buffer.into(), index?.into()));
+        let expr = Expression::new(Expr::FlatIndex(buffer.into(), index?.into()))
+            .bounded()
+            .py()?;
         Ok(PyClassInitializer::from(PyExpression::base(expr)).add_subclass(PyFlatIndex))
     }
 }

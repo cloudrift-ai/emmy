@@ -303,8 +303,11 @@ pub fn apply_binop(op: BinOp, left: Num, right: Num) -> Result<Num> {
         if b == 0 {
             return Err(Error::ZeroDivision);
         }
-        let q = a / b;
-        Ok(if a % b != 0 && ((a < 0) != (b < 0)) {
+        let (q, r) = (a.checked_div(b), a.checked_rem(b));
+        let (Some(q), Some(r)) = (q, r) else {
+            return Err(Error::Value("integer overflow".into()));
+        };
+        Ok(if r != 0 && ((a < 0) != (b < 0)) {
             q - 1
         } else {
             q
@@ -314,7 +317,9 @@ pub fn apply_binop(op: BinOp, left: Num, right: Num) -> Result<Num> {
         if b == 0 {
             return Err(Error::ZeroDivision);
         }
-        let r = a % b;
+        let Some(r) = a.checked_rem(b) else {
+            return Err(Error::Value("integer overflow".into()));
+        };
         Ok(if r != 0 && ((r < 0) != (b < 0)) {
             r + b
         } else {
@@ -344,6 +349,7 @@ pub fn apply_binop(op: BinOp, left: Num, right: Num) -> Result<Num> {
                 return Err(Error::Value("shift out of range".into()));
             }
             a.checked_shl(b as u32)
+                .filter(|shifted| shifted >> b == a)
                 .map(Num::Int)
                 .ok_or_else(|| Error::Value("integer overflow".into()))
         }
@@ -422,16 +428,23 @@ pub enum Expr {
 
 /// A shared, immutable expression.
 #[derive(Clone, Debug)]
-pub struct Expression(pub Arc<Expr>);
+pub struct Expression(pub Arc<Node>);
+
+/// An expression's node: its tree and the tree's height, so what refuses a deep expression reads one number.
+#[derive(Clone, PartialEq, Eq, Hash, Debug)]
+pub struct Node {
+    pub expr: Expr,
+    pub height: u32,
+}
 
 thread_local! {
-    static SIMPLIFYING: Cell<usize> = const { Cell::new(0) };
     static DROPPING: Cell<usize> = const { Cell::new(0) };
     static DEFERRED: RefCell<Vec<Expression>> = const { RefCell::new(Vec::new()) };
 }
 
-/// How many levels a drop unwinds before the rest of a chain is set aside for the outermost drop.
-const DROP_DEPTH: usize = 128;
+/// How many levels a drop unwinds before the rest of a chain is set aside for the outermost drop: the nesting the
+/// reader and the constructors admit, so an expression they built drops in one descent.
+const DROP_DEPTH: usize = MAX_NESTING;
 
 /// The leaf a taken child leaves behind: one shared literal.
 fn leaf() -> Expression {
@@ -472,6 +485,7 @@ impl Drop for Expression {
         let Some(node) = Arc::get_mut(&mut self.0) else {
             return;
         };
+        let node = &mut node.expr;
         if matches!(node, Expr::Var(_) | Expr::Literal(_) | Expr::Builtin(_)) {
             return;
         }
@@ -496,7 +510,7 @@ impl Drop for Expression {
 
 impl PartialEq for Expression {
     fn eq(&self, other: &Self) -> bool {
-        Arc::ptr_eq(&self.0, &other.0) || *self.0 == *other.0
+        Arc::ptr_eq(&self.0, &other.0) || self.0.expr == other.0.expr
     }
 }
 
@@ -504,7 +518,7 @@ impl Eq for Expression {}
 
 impl Hash for Expression {
     fn hash<H: Hasher>(&self, state: &mut H) {
-        self.0.hash(state);
+        self.0.expr.hash(state);
     }
 }
 
@@ -512,7 +526,7 @@ impl std::ops::Deref for Expression {
     type Target = Expr;
 
     fn deref(&self) -> &Expr {
-        &self.0
+        &self.0.expr
     }
 }
 
@@ -550,7 +564,36 @@ pub const PLACEHOLDER_PREFIX: &str = "out_coord_";
 
 impl Expression {
     pub fn new(expr: Expr) -> Expression {
-        Expression(Arc::new(expr))
+        let below = match &expr {
+            Expr::Var(_) | Expr::Literal(_) | Expr::Builtin(_) => 0,
+            Expr::Binary(_, left, right) => left.height().max(right.height()),
+            Expr::Ternary(a, b, c) => a.height().max(b.height()).max(c.height()),
+            Expr::Cast(_, inner) => inner.height(),
+            Expr::Call(_, args) | Expr::FlatIndex(_, args) => {
+                args.iter().map(Expression::height).max().unwrap_or(0)
+            }
+        };
+        Expression(Arc::new(Node {
+            expr,
+            height: below + 1,
+        }))
+    }
+
+    /// How many levels this tree nests: one for a leaf.
+    pub fn height(&self) -> u32 {
+        self.0.height
+    }
+
+    /// This expression when it nests no deeper than the compiler walks, else the error the reader and the
+    /// constructors refuse it with.
+    pub fn bounded(self) -> Result<Expression> {
+        if self.height() as usize > MAX_NESTING {
+            return Err(Error::Recursion(format!(
+                "the expression nests {} levels deep; the limit is {MAX_NESTING}",
+                self.height()
+            )));
+        }
+        Ok(self)
     }
 
     pub fn var(name: &str) -> Expression {
@@ -1052,19 +1095,6 @@ impl Expression {
     /// Bottom-up rewrite: constant-fold literals, drop algebraic identities, collapse static comparisons. Pure and
     /// idempotent.
     pub fn simplify(&self, ctx: &SimplifyCtx) -> Result<Expression> {
-        let depth = SIMPLIFYING.with(Cell::get);
-        if depth >= MAX_NESTING {
-            return Err(Error::Value(
-                "the expression nests too deep to simplify".into(),
-            ));
-        }
-        SIMPLIFYING.with(|d| d.set(depth + 1));
-        let result = self.simplify_node(ctx);
-        SIMPLIFYING.with(|d| d.set(depth));
-        result
-    }
-
-    fn simplify_node(&self, ctx: &SimplifyCtx) -> Result<Expression> {
         match &**self {
             Expr::Var(_) | Expr::Literal(_) | Expr::Builtin(_) => Ok(self.clone()),
             Expr::Binary(op, left, right) => simplify_binary(self, *op, left, right, ctx),
@@ -1236,8 +1266,10 @@ mod tests {
     }
 
     #[test]
-    fn a_chain_too_deep_to_simplify_is_refused() {
-        assert!(chain(200_000).simplify(&SimplifyCtx::empty()).is_err());
+    fn a_chain_too_deep_is_refused_by_its_height() {
+        assert!(matches!(chain(200_000).bounded(), Err(Error::Recursion(_))));
+        assert!(chain(MAX_NESTING - 1).bounded().is_ok());
+        assert_eq!(chain(3).height(), 4);
     }
 
     #[test]
@@ -1250,6 +1282,22 @@ mod tests {
         let nested = format!("{}a{}", "(".repeat(5000), ")".repeat(5000));
         assert!(parse(&nested).is_err());
         assert!(parse(&format!("{}a{}", "(".repeat(50), ")".repeat(50))).is_ok());
+    }
+
+    #[test]
+    fn the_constant_fold_refuses_what_overflows_an_integer() {
+        let least = Num::Int(i64::MIN);
+        assert!(apply_binop(BinOp::Div, least, Num::Int(-1)).is_err());
+        assert!(apply_binop(BinOp::Mod, least, Num::Int(-1)).is_err());
+        assert!(apply_binop(BinOp::Shl, Num::Int(3), Num::Int(62)).is_err());
+        assert_eq!(
+            apply_binop(BinOp::Shl, Num::Int(3), Num::Int(2)).ok(),
+            Some(Num::Int(12))
+        );
+        assert_eq!(
+            apply_binop(BinOp::Mod, Num::Int(-7), Num::Int(3)).ok(),
+            Some(Num::Int(2))
+        );
     }
 
     #[test]

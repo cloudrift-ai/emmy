@@ -780,7 +780,7 @@ impl Body {
                     let wanted: Vec<Name> = accumulators.difference(&folded).cloned().collect();
                     if let Some((_, body)) = loop_parts(&stmt) {
                         let (members, _) = body.backward_cone(&wanted);
-                        let kept = Body::new(members.iter().map(|m| m.stmt().clone()).collect());
+                        let kept = body.rebuilt(members.iter().map(|m| m.stmt().clone()).collect());
                         stmt = Statement::rebuild_bodies(&stmt, vec![kept]);
                     }
                 }
@@ -803,6 +803,6 @@ impl Body {
             folded.extend(seeded_accumulators(&stmt));
             out.push(stmt);
         }
-        Body::new(out)
+        self.rebuilt(out)
     }
 }

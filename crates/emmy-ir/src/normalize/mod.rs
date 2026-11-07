@@ -55,17 +55,13 @@ pub fn normalize_body(body: &Body) -> Result<Body> {
             Normalized::Other(normal) => normal.clone(),
         });
     }
-    let text = body_text(body).ok();
-    let found = text
-        .as_deref()
-        .and_then(|text| locked(normal_forms()).get(&body.content_hash(), text));
+    let text = body_text(body)?;
+    let found = locked(normal_forms()).get(&body.content_hash(), &text);
     let normal = match found {
         Some(found) => found,
         None => {
             let computed = normalize_uncached(body)?;
-            if let Some(text) = text {
-                locked(normal_forms()).put(body.content_hash(), text, computed.clone());
-            }
+            locked(normal_forms()).put(body.content_hash(), text, computed.clone());
             computed
         }
     };
@@ -86,7 +82,7 @@ pub fn normalize_uncached(body: &Body) -> Result<Body> {
         ));
     }
     // Motion can put two lexical bindings in one scope. Give them distinct names first.
-    let mut stmts = rename_ssa_sequential(&topological_sort(body));
+    let mut stmts = rename_ssa_sequential(&topological_sort(body)?);
     // The folds feed the steps ahead of them, so the steps run again after a fold that changed the body. The order
     // permutes and names, and one step reads names: a body the order left an unread value in goes through the steps
     // again; any other is final, since the order is final on its own output.
@@ -113,7 +109,7 @@ pub fn normalize_uncached(body: &Body) -> Result<Body> {
 /// The exact simplifications, then every value placed once; the three run until the first two leave a placed body
 /// alone.
 pub fn prepare_body(body: &Body) -> Result<Body> {
-    let mut stmts = topological_sort(body);
+    let mut stmts = topological_sort(body)?;
     stmts = drop_size_one_free_axes(&stmts);
     stmts = drop_size_one_reduce_axes(&stmts);
     stmts = canonicalize_free_axis_order(&stmts)?;
@@ -123,7 +119,7 @@ pub fn prepare_body(body: &Body) -> Result<Body> {
     let mut placed: Option<Body> = None;
     loop {
         let simplified =
-            canonicalize_expressions(&simplify_body(&merge_sibling_reduce_loops(&stmts))?, &[])?;
+            canonicalize_expressions(&simplify_body(&merge_sibling_reduce_loops(&stmts)?)?, &[])?;
         if placed.as_ref() == Some(&simplified) {
             return Ok(simplified);
         }

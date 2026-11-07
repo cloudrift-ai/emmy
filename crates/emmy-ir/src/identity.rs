@@ -89,14 +89,10 @@ pub fn canonicalize_identity(
         cluster,
         colors: colors_key,
     };
-    if let Some((_, identity)) = locked(&stmts.0.identities).iter().find(|(k, _)| *k == key) {
-        return Ok(identity.clone());
-    }
     let memo_key = (stmts.content_hash(), key.clone());
     let text = body_text(&stmts)?;
     let remembered = locked(identities()).get(&memo_key, &text);
     if let Some(identity) = remembered {
-        locked(&stmts.0.identities).push((key, identity.clone()));
         return Ok(identity);
     }
     let (tree, arguments) = digest(&stmts, colors);
@@ -104,7 +100,6 @@ pub fn canonicalize_identity(
         key: hex(tree),
         arguments,
     };
-    locked(&stmts.0.identities).push((key, identity.clone()));
     locked(identities()).put(memo_key, text, identity.clone());
     Ok(identity)
 }

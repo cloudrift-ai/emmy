@@ -9,7 +9,7 @@ use crate::body::{Body, free_names};
 use crate::kinds::*;
 use crate::numbering::{Number, Numbering, Param, value_numbers};
 use crate::order::is_protocol;
-use crate::{Name, Result};
+use crate::{Error, Name, Result};
 
 // --- placement -----------------------------------------------------------------------------------------------
 
@@ -258,7 +258,11 @@ impl Placer<'_> {
                                 self.alias.insert(own.clone(), other.clone());
                             }
                         }
-                        let where_ = self.defined[&names[0]];
+                        let Some(&where_) = self.defined.get(&names[0]) else {
+                            return Err(Error::Value(
+                                "a value available for reuse was never placed".into(),
+                            ));
+                        };
                         self.settle(&defines, where_, &marks);
                         continue;
                     }
@@ -376,7 +380,10 @@ impl Placer<'_> {
             &shell,
             children
                 .iter()
-                .map(|(kept, _, _)| Body::new(kept.iter().map(|(stmt, _)| stmt.clone()).collect()))
+                .zip(&nested)
+                .map(|((kept, _, _), child)| {
+                    child.rebuilt(kept.iter().map(|(stmt, _)| stmt.clone()).collect())
+                })
                 .collect(),
         );
         // The states the block still holds: a nested block that escaped settled its own at the scope it moved to.

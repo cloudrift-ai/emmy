@@ -36,7 +36,8 @@ pub struct Parser {
     depth: usize,
 }
 
-/// How deep an expression may nest before the reader refuses it, so a pathological text cannot exhaust the stack.
+/// How deep an expression may nest: what the reader, the constructors and every walk admit, so no walk of an
+/// expression they built exhausts the stack.
 pub const MAX_NESTING: usize = 256;
 
 impl Parser {
@@ -217,11 +218,20 @@ impl Parser {
     }
 
     pub fn expression(&mut self) -> Result<Expression> {
+        self.nesting(Parser::nested_expression)?.bounded()
+    }
+
+    /// `parse` one level further in: the reader's own recursion refuses what the height of its result would, so a
+    /// text nested past `MAX_NESTING` is refused before it is built.
+    fn nesting(&mut self, parse: fn(&mut Parser) -> Result<Expression>) -> Result<Expression> {
         if self.depth >= MAX_NESTING {
-            return Err(self.error("the expression nests too deep"));
+            return Err(Error::Recursion(format!(
+                "{}: the expression nests past {MAX_NESTING} levels",
+                self.error("too deep")
+            )));
         }
         self.depth += 1;
-        let result = self.nested_expression();
+        let result = parse(self);
         self.depth -= 1;
         result
     }
@@ -312,6 +322,10 @@ impl Parser {
     }
 
     fn operand(&mut self) -> Result<Expression> {
+        self.nesting(Parser::nested_operand)
+    }
+
+    fn nested_operand(&mut self) -> Result<Expression> {
         if let Some(literal) = self.number()? {
             return Ok(Expression::new(Expr::Literal(literal)));
         }

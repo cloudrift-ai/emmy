@@ -12,7 +12,8 @@ use emmy_ir::kinds::field::{DType, Float, Int2, NumOr, Shape3, SubroutineRef};
 use emmy_ir::kinds::{FragmentArg, SelectBranch, Statement};
 use emmy_ir::{Error, Name};
 use pyo3::exceptions::{
-    PyException, PyKeyError, PyNotImplementedError, PyTypeError, PyValueError, PyZeroDivisionError,
+    PyException, PyKeyError, PyNotImplementedError, PyRecursionError, PyTypeError, PyValueError,
+    PyZeroDivisionError,
 };
 use pyo3::prelude::*;
 use pyo3::sync::PyOnceLock;
@@ -31,6 +32,7 @@ pub fn translate(error: Error) -> PyErr {
         Error::Key(m) => PyKeyError::new_err(m),
         Error::ZeroDivision => PyZeroDivisionError::new_err("integer division or modulo by zero"),
         Error::NotImplemented(m) => PyNotImplementedError::new_err(m),
+        Error::Recursion(m) => PyRecursionError::new_err(m),
     }
 }
 

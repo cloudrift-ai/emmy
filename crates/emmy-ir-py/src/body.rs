@@ -44,13 +44,17 @@ impl<T, V> Tables<T, V> {
             .map(|_| read(value))
     }
 
-    /// Remember `value` for `object`; true when the table is due for a purge.
-    fn insert(&mut self, object: &Arc<T>, value: V) -> bool {
-        self.entries.insert(
-            Arc::as_ptr(object) as usize,
-            (Arc::downgrade(object), value),
-        );
-        self.entries.len().is_multiple_of(1024)
+    /// Remember `value` for `object`: the value a dead object at the same address left, for the caller to drop
+    /// outside the lock, and whether the table is due for a purge.
+    fn insert(&mut self, object: &Arc<T>, value: V) -> (Option<V>, bool) {
+        let old = self
+            .entries
+            .insert(
+                Arc::as_ptr(object) as usize,
+                (Arc::downgrade(object), value),
+            )
+            .map(|(_, old)| old);
+        (old, self.entries.len().is_multiple_of(1024))
     }
 
     /// The values of every entry whose object is gone, removed from the table.
@@ -82,8 +86,9 @@ fn wrappers(body: &Body) -> Wrappers {
         return table;
     }
     let table: Wrappers = (0..body.len()).map(|_| OnceLock::new()).collect();
-    let due = tables.insert(&body.0, table.clone());
+    let (old, due) = tables.insert(&body.0, table.clone());
     drop(tables);
+    drop(old);
     if due {
         purge(WRAPPERS.get_or_init(|| Mutex::new(Tables::new())));
     }
@@ -344,9 +349,9 @@ impl PyBody {
 
     /// Kahn's order over indexed predecessor sets, as source indices.
     fn _topological_permutation(&self, incoming: &Bound<'_, PyAny>) -> PyResult<Vec<usize>> {
-        Ok(self
-            .body
-            .topological_permutation::<()>(&incoming_from_py(incoming)?, None))
+        self.body
+            .topological_permutation::<()>(&incoming_from_py(incoming)?, None)
+            .py()
     }
 
     /// This body in topological order under `incoming`.
@@ -364,7 +369,8 @@ impl PyBody {
         let ordered = slf
             .get()
             .body
-            .topological_order(&incoming_from_py(incoming)?);
+            .topological_order(&incoming_from_py(incoming)?)
+            .py()?;
         if ordered.ptr_eq(&slf.get().body) {
             return Ok(slf.clone());
         }
@@ -662,7 +668,9 @@ impl PySubroutine {
             },
         )?;
         let reference = py.import("weakref")?.getattr("ref")?.call1((&wrapper,))?;
-        if emmy_ir::locked(subroutines()).insert(sub, reference.unbind()) {
+        let (old, due) = emmy_ir::locked(subroutines()).insert(sub, reference.unbind());
+        drop(old);
+        if due {
             purge(subroutines());
         }
         Ok(wrapper)

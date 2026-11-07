@@ -228,7 +228,7 @@ pub fn canonicalize_free_axis_order(body: &Body) -> Result<Body> {
             ))
         })
         .collect::<Result<Vec<_>>>()?;
-    let terminal = Body::new(terminal);
+    let terminal = current.rebuilt(terminal);
     let depths: Vec<Option<usize>> = chain
         .iter()
         .map(|l| output_storage_depth(&terminal, &l.axis.name))
@@ -290,10 +290,9 @@ pub fn canonicalize_free_axis_order(body: &Body) -> Result<Body> {
                 &rename_axes(&terminal, &mapping),
                 &[Name::from("__self__"), Name::from("__other__")],
             )?;
-            let source_arity = focus
-                .axis
-                .source_axis()
-                .map_or(1, |source| source_counts[&source.name]);
+            let source_arity = focus.axis.source_axis().map_or(1, |source| {
+                source_counts.get(&source.name).copied().unwrap_or(1)
+            });
             // A coordinate carried by a consistent output position has a fixed row-major role; an unresolved one
             // stays outside the known output suffix, then its structural role breaks ties.
             let storage_order = match depth {
@@ -313,7 +312,8 @@ pub fn canonicalize_free_axis_order(body: &Body) -> Result<Body> {
         let mut groups: BTreeMap<Key, Vec<Loop>> = BTreeMap::new();
         for l in &chain {
             groups
-                .entry(role_of[&l.axis.name].clone())
+                // Every loop of the chain took its role in the loop above.
+                .entry(role_of.get(&l.axis.name).cloned().unwrap_or(Key::None))
                 .or_default()
                 .push(l.clone());
         }
@@ -323,7 +323,8 @@ pub fn canonicalize_free_axis_order(body: &Body) -> Result<Body> {
             }
             if let (Some(ls), Some(rs)) = (left.axis.source_axis(), right.axis.source_axis())
                 && ls.name != rs.name
-                && (source_counts[&ls.name] != 1 || source_counts[&rs.name] != 1)
+                && (source_counts.get(&ls.name).copied() != Some(1)
+                    || source_counts.get(&rs.name).copied() != Some(1))
             {
                 return false;
             }
@@ -368,6 +369,9 @@ pub fn canonicalize_free_axis_order(body: &Body) -> Result<Body> {
         });
         best.map_or_else(Vec::new, |(_, order)| order)
     };
+    if terminal.ptr_eq(&current) && sorted.iter().zip(&chain).all(|(a, b)| a.same(b)) {
+        return Ok(body.clone());
+    }
     let mut result = terminal;
     for l in sorted.iter().rev() {
         result = loop_over(l.axis.clone(), result, l.unroll, l.seed);

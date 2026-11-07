@@ -12,17 +12,18 @@ body and the normal form ARE; this file says how the crate holds them.
 ## Layout
 
 The module tree follows the design, one module per concept, and the modules stand in a tower: each imports only the
-ones below it, `kinds` and `body` aside, which define each other's types. From the bottom: `expr/` (the tree and its
-text in `mod.rs`, the simplifier and affine form in `simplify.rs`, the reader in `parse.rs`), `kinds/` (the kind list
-and its macros in `mod.rs`, the `Field` trait in `field.rs`, axes with their speller, dtypes and the elementwise
-tables beside it), `body.rs`, `protocol/` (the protocol in `mod.rs`, what the shared kinds answer beyond their fields
-in `kinds.rs`, the construction checks in `checks.rs`), `text/` (the printer in `print.rs`, the reader in `parse.rs`,
-what both spell in `mod.rs`), `order.rs` (the dependency constraints and sort), `numbering/` (the `Key` tree and its
-hash in `key.rs`, the value numbering in `values.rs`, the scope-tree digest in `digest.rs`), `normalize/` (the driver
-and the helpers the steps share in `mod.rs`, the steps by what they do: `axes`, `fold`, `siblings`, `simplify`,
-`place`, `canonical`, and every tie-break in `ties.rs`), `identity.rs` (the identity of a body's normal form) and
-`memo.rs`, the one bounded memo both the normal form and the identity are kept in. Every file imports what it uses by
-name; no child module takes its parent's imports.
+ones below it, `kinds` and `body` aside, which define each other's types. From the bottom: `expr/` (the tree, its
+text, the simplifier's walk and the range analysis in `mod.rs`, the simplifier's rewrite rules and the affine form in
+`simplify.rs`, the reader in `parse.rs`), `kinds/` (the kind list and its macros in `mod.rs`, the `Field` trait in
+`field.rs`, axes with their speller, dtypes and the elementwise tables beside it), `body.rs`, `protocol/` (the
+protocol in `mod.rs`, what the shared kinds answer beyond their fields in `kinds.rs`, the construction checks in
+`checks.rs`), `text/` (the printer in `print.rs`, the reader in `parse.rs`, what both spell in `mod.rs`), `order.rs`
+(the dependency constraints; the sort they feed is a `Body` method), `numbering/` (the `Key` tree and its hash in
+`key.rs`, the value numbering in `values.rs`, the scope-tree digest in `digest.rs`), `normalize/` (the driver and the
+helpers the steps share in `mod.rs`, the steps by what they do: `axes`, `fold`, `siblings`, `simplify`, `place`,
+`canonical`, and every tie-break in `ties.rs`), `identity.rs` (the identity of a body's normal form) and `memo.rs`,
+the one bounded memo both the normal form and the identity are kept in. Every file imports what it uses by name; no
+child module takes its parent's imports.
 
 ## Data
 
@@ -40,6 +41,7 @@ name; no child module takes its parent's imports.
   `enum Statement`, the `enum Kind` (one variant per kind, with its name, layer and fields; what a body's kind queries
   and the reader take) and, per kind, the role-driven walks (`visit`, `rewrite`, the header fields the text prints).
   Roles are a `Roles` set and a kind's flags a `KindFlags` set, two types that cannot be mistaken for one another.
+  `KW_ONLY`, a constructor property, rides in the roles set as the one bit no walk reads.
 - **Fields** (`kinds/field.rs`): one trait, `Field`, every field type implements: how it is visited and rewritten by role,
   spelled on a declared kind's header and read back by its `Ty`. A number where a name or an expression is expected
   (`NumOr<T>`) is plain data. A record (`SelectBranch`, `FragmentArg`) is a struct whose own fields play roles.
@@ -80,13 +82,16 @@ is a `Parser` over the expression tokenizer with the statement punctuation added
 roles and the digest. Statements are keyed by their position in the body they sit in (a `StmtRef`), so a body that
 holds one statement object twice numbers it twice and nothing is copied first; digest material is a `Key` tree hashed
 with BLAKE3 (`Number`, 128 bits), and every order among ties is by `Key`'s total order. The operands of a commutative
-operation that share a number take the order whose layout key is least: every order is tried while the groups allow
-at most 9! of them, and a larger operation (an unrolled window sum over a dozen shifted reads, which the full search
-never finished) takes the order built position by position. `identity.rs` memoizes the identity per body and per
-coloring. `normalize/` holds the steps and the driver `normalize_body`; `canonical_order` and `place_values` are the
-two steps that read the numbering, and the order ranks a product's operands through the statement objects it permuted.
-Both memos are `memo::Memo`, keyed by the body's text under its content hash and bounded by entry count: body equality
-leaves the axis windows out, the text spells them, and a window is identity material.
+operation that share a number take the order whose layout key is least under a bounded search: every order is tried
+while the groups allow at most 7! of them, generated in place, and a larger operation (an unrolled window sum over
+eight or more shifted reads, which the full search never finished) takes the order built position by position:
+canonical and independent of the input order like the full search's, but not always its minimum. The identity baseline
+over the corpus and the golden check are what shows no stored kernel's order moved. `identity.rs` memoizes the
+identity per body and per coloring. `normalize/` holds the steps and the driver `normalize_body`; `canonical_order`
+and `place_values` are the two steps that read the numbering, and the order ranks a product's operands through the
+statement objects it permuted. Both memos are `memo::Memo`, keyed by the body's text under its content hash and
+bounded by entry count: body equality leaves the axis windows out, the text spells them, and a window is identity
+material.
 
 The canonical order decides what the digest leaves open, and the lift of a body into terms reads that order: sibling
 regions are addressed by position in every recorded cut decision, and a product's operand order is its orientation
@@ -105,9 +110,10 @@ Rust order breaks by the text.
 ## Errors
 
 A function that can refuse returns `Result<T, Error>`; the error kinds map one to one onto the Python exceptions the
-extension raises (`ValueError`, `TypeError`, `KeyError`, `ZeroDivisionError`, `NotImplementedError`). Library code holds
-no `unwrap` or `expect` (STYLE.md, Rust): a lock that may be poisoned is reopened, an invariant that holds by
+extension raises (`ValueError`, `TypeError`, `KeyError`, `ZeroDivisionError`, `NotImplementedError`). Library code
+holds no `unwrap` or `expect` (STYLE.md, Rust): a lock that may be poisoned is reopened, an invariant that holds by
 construction is a total function (`rebuild_bodies`, `map_children`), and digest material falls back to a debug form
-where a name has no text. The reader and the simplifier refuse an expression nested more than 256 levels deep rather
-than overflow the stack, and a chain of expressions drops level by level. An error met while a Python value converts
-keeps its own type across the boundary, with the kind and field ahead of its message.
+where a name has no text, and an axis with no text spells as the empty text. An expression carries the height of its
+tree; the reader and the constructors refuse one higher than 256 levels (`RecursionError` on the Python side) rather
+than let a later walk overflow the stack, and a chain of expressions drops level by level. An error met while a Python
+value converts keeps its own type across the boundary, with the kind and field ahead of its message.
