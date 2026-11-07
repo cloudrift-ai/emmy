@@ -43,16 +43,16 @@ struct Deps {
 }
 
 impl Visitor for Deps {
-    fn name(&mut self, roles: u32, name: &Name) {
-        if roles & READING != 0 {
+    fn name(&mut self, roles: Roles, name: &Name) {
+        if roles.contains_any(READING) {
             self.reads.push(name.clone());
         }
-        if roles & LOCAL != 0 {
+        if roles.contains_any(LOCAL) {
             self.locals.push(name.clone());
         }
     }
-    fn expression(&mut self, roles: u32, expression: &Expression) {
-        if roles & READING != 0 {
+    fn expression(&mut self, roles: Roles, expression: &Expression) {
+        if roles.contains_any(READING) {
             // A field read through: the names its expressions mention, each listed once.
             for name in sorted_free_vars(expression) {
                 if !self.reads.contains(&name) {
@@ -61,19 +61,19 @@ impl Visitor for Deps {
             }
         }
     }
-    fn carried(&mut self, _roles: u32, stmt: &Arc<Statement>) {
+    fn carried(&mut self, _roles: Roles, stmt: &Arc<Statement>) {
         self.carried.push(stmt.clone());
     }
 }
 
 struct NamesByRole {
-    roles: u32,
+    roles: Roles,
     out: Vec<Name>,
 }
 
 impl Visitor for NamesByRole {
-    fn name(&mut self, roles: u32, name: &Name) {
-        if roles & self.roles != 0 {
+    fn name(&mut self, roles: Roles, name: &Name) {
+        if roles.contains_any(self.roles) {
             self.out.push(name.clone());
         }
     }
@@ -81,25 +81,25 @@ impl Visitor for NamesByRole {
 
 /// Collects a member over the statement's own fields and the statements it carries.
 struct Carried<'a> {
-    roles: u32,
+    roles: Roles,
     own: Vec<Name>,
     member: &'a dyn Fn(&Statement) -> Vec<Name>,
 }
 
 impl Visitor for Carried<'_> {
-    fn name(&mut self, roles: u32, name: &Name) {
-        if roles & self.roles != 0 {
+    fn name(&mut self, roles: Roles, name: &Name) {
+        if roles.contains_any(self.roles) {
             self.own.push(name.clone());
         }
     }
-    fn body(&mut self, roles: u32, body: &Body) {
-        if roles & TERM != 0 {
+    fn body(&mut self, roles: Roles, body: &Body) {
+        if roles.contains_any(TERM) {
             for stmt in body.stmts() {
                 self.own.extend((self.member)(stmt));
             }
         }
     }
-    fn carried(&mut self, _roles: u32, stmt: &Arc<Statement>) {
+    fn carried(&mut self, _roles: Roles, stmt: &Arc<Statement>) {
         self.own.extend((self.member)(stmt));
     }
 }
@@ -107,19 +107,19 @@ impl Visitor for Carried<'_> {
 struct Expressions(Vec<Expression>);
 
 impl Visitor for Expressions {
-    fn expression(&mut self, roles: u32, expression: &Expression) {
-        if roles & EXPRESSION != 0 {
+    fn expression(&mut self, roles: Roles, expression: &Expression) {
+        if roles.contains_any(EXPRESSION) {
             self.0.push(expression.clone());
         }
     }
-    fn body(&mut self, roles: u32, body: &Body) {
-        if roles & TERM != 0 {
+    fn body(&mut self, roles: Roles, body: &Body) {
+        if roles.contains_any(TERM) {
             for stmt in body.stmts() {
                 self.0.extend(stmt.expressions());
             }
         }
     }
-    fn carried(&mut self, _roles: u32, stmt: &Arc<Statement>) {
+    fn carried(&mut self, _roles: Roles, stmt: &Arc<Statement>) {
         self.0.extend(stmt.expressions());
     }
 }
@@ -127,7 +127,7 @@ impl Visitor for Expressions {
 struct BoundAxes(Vec<AxisRef>);
 
 impl Visitor for BoundAxes {
-    fn axis(&mut self, _roles: u32, axis: &AxisRef) {
+    fn axis(&mut self, _roles: Roles, axis: &AxisRef) {
         self.0.push(axis.clone());
     }
 }
@@ -135,8 +135,8 @@ impl Visitor for BoundAxes {
 struct Nested(Vec<Body>);
 
 impl Visitor for Nested {
-    fn body(&mut self, roles: u32, body: &Body) {
-        if roles & BODY != 0 {
+    fn body(&mut self, roles: Roles, body: &Body) {
+        if roles.contains_any(BODY) {
             self.0.push(body.clone());
         }
     }
@@ -148,8 +148,8 @@ struct WithBodies {
 }
 
 impl Rewriter for WithBodies {
-    fn body(&mut self, roles: u32, body: &Body) -> Body {
-        if roles & BODY == 0 {
+    fn body(&mut self, roles: Roles, body: &Body) -> Body {
+        if !roles.contains_any(BODY) {
             return body.clone();
         }
         match self.bodies.next() {
@@ -165,17 +165,17 @@ impl Rewriter for WithBodies {
 struct MapExpressions<'a>(&'a mut dyn FnMut(&Expression) -> Expression);
 
 impl Rewriter for MapExpressions<'_> {
-    fn expression(&mut self, _roles: u32, expression: &Expression) -> Expression {
+    fn expression(&mut self, _roles: Roles, expression: &Expression) -> Expression {
         (self.0)(expression)
     }
-    fn body(&mut self, roles: u32, body: &Body) -> Body {
-        if roles & TERM != 0 {
+    fn body(&mut self, roles: Roles, body: &Body) -> Body {
+        if roles.contains_any(TERM) {
             body.map_each(&mut |stmt| Statement::map_expressions(stmt, self.0))
         } else {
             body.clone()
         }
     }
-    fn carried(&mut self, _roles: u32, stmt: &Arc<Statement>) -> Arc<Statement> {
+    fn carried(&mut self, _roles: Roles, stmt: &Arc<Statement>) -> Arc<Statement> {
         Statement::map_expressions(stmt, self.0)
     }
 }
@@ -224,21 +224,21 @@ impl<'a> Renaming<'a> {
 struct RenameBuffers<'a, 'b>(&'b Renaming<'a>);
 
 impl Rewriter for RenameBuffers<'_, '_> {
-    fn name(&mut self, roles: u32, name: &Name) -> Name {
-        if roles & BUFFERS != 0 {
+    fn name(&mut self, roles: Roles, name: &Name) -> Name {
+        if roles.contains_any(BUFFERS) {
             self.0.rename(name)
         } else {
             name.clone()
         }
     }
-    fn body(&mut self, roles: u32, body: &Body) -> Body {
-        if roles & TERM != 0 {
+    fn body(&mut self, roles: Roles, body: &Body) -> Body {
+        if roles.contains_any(TERM) {
             body.map_each(&mut |stmt| Statement::rename_buffers_with(stmt, self.0))
         } else {
             body.clone()
         }
     }
-    fn carried(&mut self, _roles: u32, stmt: &Arc<Statement>) -> Arc<Statement> {
+    fn carried(&mut self, _roles: Roles, stmt: &Arc<Statement>) -> Arc<Statement> {
         Statement::rename_buffers_with(stmt, self.0)
     }
 }
@@ -250,11 +250,11 @@ struct RewriteFields<'a, 'b> {
 }
 
 impl Rewriter for RewriteFields<'_, '_> {
-    fn name(&mut self, roles: u32, name: &Name) -> Name {
-        if roles & NAMES != 0 {
+    fn name(&mut self, roles: Roles, name: &Name) -> Name {
+        if roles.contains_any(NAMES) {
             return (self.rewrite.rename)(name).unwrap_or_else(|| name.clone());
         }
-        if roles & AXIS_NAME != 0 {
+        if roles.contains_any(AXIS_NAME) {
             let Some(axis_fn) = self.rewrite.axis_fn else {
                 return name.clone();
             };
@@ -269,22 +269,22 @@ impl Rewriter for RewriteFields<'_, '_> {
         }
         name.clone()
     }
-    fn expression(&mut self, _roles: u32, expression: &Expression) -> Expression {
+    fn expression(&mut self, _roles: Roles, expression: &Expression) -> Expression {
         expression
             .substitute(self.rewrite.sigma)
             .rename(&mut |name| (self.rewrite.rename)(name))
     }
-    fn axis(&mut self, _roles: u32, axis: &AxisRef) -> AxisRef {
+    fn axis(&mut self, _roles: Roles, axis: &AxisRef) -> AxisRef {
         match self.rewrite.axis_fn {
             Some(axis_fn) => axis_fn(axis),
             None => axis.clone(),
         }
     }
-    fn body(&mut self, roles: u32, body: &Body) -> Body {
-        if roles & BODY != 0 {
+    fn body(&mut self, roles: Roles, body: &Body) -> Body {
+        if roles.contains_any(BODY) {
             return body.map_each(&mut |stmt| Statement::rewrite(stmt, self.rewrite));
         }
-        if roles & TERM != 0 {
+        if roles.contains_any(TERM) {
             // Its statements' names are its own; a coordinate its expressions read is not.
             let defined: HashSet<Name> = body
                 .stmts()
@@ -312,7 +312,7 @@ impl Rewriter for RewriteFields<'_, '_> {
         }
         body.clone()
     }
-    fn carried(&mut self, _roles: u32, stmt: &Arc<Statement>) -> Arc<Statement> {
+    fn carried(&mut self, _roles: Roles, stmt: &Arc<Statement>) -> Arc<Statement> {
         Statement::rewrite(stmt, self.rewrite)
     }
 }
@@ -328,16 +328,17 @@ fn rewrite_axis_name(name: &Name, sigma: &HashMap<Name, Expression>) -> Vec<Name
 
 impl Statement {
     pub fn is_pure(&self) -> bool {
-        self.flags() & PURE != 0
+        self.flags().contains(PURE)
     }
 
     pub fn deps_deep(&self) -> bool {
-        self.flags() & DEPS_DEEP != 0
+        self.flags().contains(DEPS_DEEP)
     }
 
     /// True iff executing this statement writes a buffer, directly or inside a child body.
     pub fn has_side_effects(&self) -> bool {
-        self.flags() & SIDE_EFFECTS != 0 || self.nested().iter().any(|body| body.has_side_effects())
+        self.flags().contains(SIDE_EFFECTS)
+            || self.nested().iter().any(|body| body.has_side_effects())
     }
 
     /// The SSA names this statement reads.
@@ -1242,15 +1243,15 @@ impl Statement {
     pub fn names(&self) -> Vec<Name> {
         struct AllNames(Vec<Name>);
         impl Visitor for AllNames {
-            fn name(&mut self, roles: u32, name: &Name) {
-                if roles & (NAMES | AXIS_NAME) != 0 {
+            fn name(&mut self, roles: Roles, name: &Name) {
+                if roles.contains_any(NAMES.or(AXIS_NAME)) {
                     self.0.push(name.clone());
                 }
             }
-            fn expression(&mut self, _roles: u32, expression: &Expression) {
+            fn expression(&mut self, _roles: Roles, expression: &Expression) {
                 expression.collect_free_vars(&mut self.0);
             }
-            fn axis(&mut self, _roles: u32, axis: &AxisRef) {
+            fn axis(&mut self, _roles: Roles, axis: &AxisRef) {
                 self.0.push(axis.name.clone());
                 for source in axis.sources() {
                     self.0.push(source.name.clone());
@@ -1261,12 +1262,12 @@ impl Statement {
                     }
                 }
             }
-            fn body(&mut self, _roles: u32, body: &Body) {
+            fn body(&mut self, _roles: Roles, body: &Body) {
                 for stmt in body.stmts() {
                     self.0.extend(stmt.names());
                 }
             }
-            fn carried(&mut self, _roles: u32, stmt: &Arc<Statement>) {
+            fn carried(&mut self, _roles: Roles, stmt: &Arc<Statement>) {
                 self.0.extend(stmt.names());
             }
         }
