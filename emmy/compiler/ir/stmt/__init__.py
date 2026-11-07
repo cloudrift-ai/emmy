@@ -54,7 +54,12 @@ dtype_promote = _ir.dtype_promote
 
 _register(Body)
 
-from emmy.compiler.ir.stmt.glue import Identity, OutputSpec, canonicalize_identity, fields_of  # noqa: E402 — the glue installs members on the classes above
+from emmy.compiler.ir.stmt.glue import (  # noqa: E402 — the glue installs members on the classes above
+    Identity,
+    OutputSpec,
+    canonicalize_identity,
+    fields_of,
+)
 
 __all__ = [
     "Accum",

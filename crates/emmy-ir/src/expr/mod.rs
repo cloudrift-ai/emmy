@@ -1284,6 +1284,212 @@ mod tests {
         assert!(parse(&format!("{}a{}", "(".repeat(50), ")".repeat(50))).is_ok());
     }
 
+    fn int(text: &str) -> Expression {
+        parse(text).unwrap()
+    }
+
+    fn eval_int(e: &Expression, env: &[(&str, i64)]) -> i64 {
+        let env: HashMap<Name, Num> = env
+            .iter()
+            .map(|(name, value)| (Name::from(*name), Num::Int(*value)))
+            .collect();
+        e.eval(&env).unwrap().as_int().unwrap()
+    }
+
+    /// `n*K + k` over the packed-weight ranges: the unpacked element offset the packed address is built from.
+    const K: i64 = 4096;
+    const N: i64 = 12288;
+    const BLOCK: i64 = 16;
+
+    fn packed_ctx(k_hi: i64) -> SimplifyCtx {
+        SimplifyCtx::empty()
+            .extend("n", Interval::new(0, i128::from(N) - 1), None)
+            .extend("k", Interval::new(0, i128::from(k_hi)), None)
+    }
+
+    fn same_value(a: &Expression, b: &Expression, what: &str) {
+        for nv in [0, 1, 7, 1023, N - 1] {
+            for kv in [0, 1, 2, 15, 16, 4095] {
+                let env = [("n", nv), ("k", kv)];
+                assert_eq!(
+                    eval_int(a, &env),
+                    eval_int(b, &env),
+                    "{what}: mismatch at n={nv} k={kv}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn constant_quotient_chains_have_one_normal_form() {
+        let ctx = SimplifyCtx::empty().extend("k", Interval::new(0, 16383), None);
+        let direct = int("k / 256").simplify(&ctx).unwrap();
+        for (outer, inner) in [("/", "/"), ("//", "/"), ("/", "//"), ("//", "//")] {
+            let nested = int(&format!("(k {inner} 128) {outer} 2"));
+            assert_eq!(nested.simplify(&ctx).unwrap(), direct);
+            for k in [0, 127, 128, 255, 256, 257, 16383] {
+                assert_eq!(
+                    eval_int(&nested, &[("k", k)]),
+                    eval_int(&direct, &[("k", k)])
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_quotient_chain_does_not_assume_unknown_operands_are_integer_indices() {
+        let nested = int("(value / 128) / 2");
+        assert_eq!(nested.simplify(&SimplifyCtx::empty()).unwrap(), nested);
+    }
+
+    #[test]
+    fn the_packed_modulo_drops_the_row_axis() {
+        // `((n*K + k) / 2) % (K/2)` is `k/2`: the row axis leaves the expression entirely.
+        let e = int(&format!("((n * {K} + k) / 2) % {}", K / 2));
+        let s = e.simplify(&packed_ctx(K - 1)).unwrap();
+        assert!(
+            !s.free_vars().iter().any(|v| &**v == "n"),
+            "row axis survived: {}",
+            s.text()
+        );
+        same_value(&e, &s, "packed modulo");
+    }
+
+    #[test]
+    fn the_packed_quotient_is_the_row_axis() {
+        let e = int(&format!("((n * {K} + k) / 2) / {}", K / 2));
+        assert_eq!(
+            e.simplify(&packed_ctx(K - 1)).unwrap(),
+            Expression::var("n")
+        );
+    }
+
+    #[test]
+    fn the_scale_block_index_drops_the_row_axis() {
+        let e = int(&format!("((n * {K} + k) / {BLOCK}) % {}", K / BLOCK));
+        let s = e.simplify(&packed_ctx(K - 1)).unwrap();
+        assert!(
+            !s.free_vars().iter().any(|v| &**v == "n"),
+            "row axis survived: {}",
+            s.text()
+        );
+        same_value(&e, &s, "block-scale index");
+    }
+
+    #[test]
+    fn a_row_major_flatten_of_the_packed_load_loses_its_residue() {
+        // `n*(K/2) + ((n*K + k)/2) % (K/2)`: no division holds the row axis afterwards.
+        let flat = int(&format!("n * {} + ((n * {K} + k) / 2) % {}", K / 2, K / 2));
+        let s = flat.simplify(&packed_ctx(K - 1)).unwrap();
+        assert!(!s.text().contains('%'), "residue survived: {}", s.text());
+        same_value(&flat, &s, "row-major flatten");
+    }
+
+    #[test]
+    fn no_range_does_not_fold_the_packed_address() {
+        // Without a range the operands are not provably non-negative: the fold declines rather than commit to a
+        // rounding direction it cannot justify.
+        let e = int(&format!("((n * {K} + k) / 2) % {}", K / 2));
+        assert_eq!(e.simplify(&SimplifyCtx::empty()).unwrap(), e);
+    }
+
+    #[test]
+    fn a_signed_row_axis_does_not_fold() {
+        let e = int(&format!("((n * {K} + k) / 2) % {}", K / 2));
+        let signed = SimplifyCtx::empty()
+            .extend("n", Interval::new(-1, i128::from(N) - 1), None)
+            .extend("k", Interval::new(0, i128::from(K) - 1), None);
+        assert_eq!(e.simplify(&signed).unwrap(), e);
+    }
+
+    #[test]
+    fn a_wider_reduce_range_stays_value_exact() {
+        let e = int(&format!("((n * {K} + k) / 2) % {}", K / 2));
+        for k_hi in [K - 1, K, K + 7, 3 * K] {
+            let s = e.simplify(&packed_ctx(k_hi)).unwrap();
+            for nv in [0, 1, 2, 37] {
+                for kv in [0, 1, (K - 1).min(k_hi), k_hi] {
+                    let env = [("n", nv), ("k", kv)];
+                    assert_eq!(
+                        eval_int(&e, &env),
+                        eval_int(&s, &env),
+                        "k_hi={k_hi}: n={nv} k={kv}: {}",
+                        s.text()
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn a_bare_divmod_pair_recomposes() {
+        let e = int("(f // 512) * 512 + f % 512");
+        assert_eq!(
+            e.simplify(&SimplifyCtx::empty()).unwrap(),
+            Expression::var("f")
+        );
+    }
+
+    #[test]
+    fn a_scaled_divmod_pair_preserves_its_value() {
+        // `(f/c)*(c*k) + (f%c)*k` folds to `f*k`.
+        for (c, k) in [(512, 1), (64, 2), (24, 512), (8, 8)] {
+            let rem = if k == 1 {
+                format!("f % {c}")
+            } else {
+                format!("(f % {c}) * {k}")
+            };
+            let e = int(&format!("(f // {c}) * {} + {rem}", c * k));
+            let s = e.simplify(&SimplifyCtx::empty()).unwrap();
+            let spelled = s.text();
+            assert!(
+                !spelled.contains('%') && !spelled.contains('/'),
+                "{spelled}"
+            );
+            for v in 0..(4 * c + 3) {
+                assert_eq!(
+                    eval_int(&e, &[("f", v)]),
+                    eval_int(&s, &[("f", v)]),
+                    "mismatch at f={v}: {spelled}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_divmod_pair_inside_a_longer_chain_recomposes() {
+        let e = int("row * 12288 + (f // 512) * 512 + f % 512");
+        let s = e.simplify(&SimplifyCtx::empty()).unwrap();
+        assert!(!s.text().contains('%'));
+        for (fv, rv) in [(0, 0), (511, 1), (513, 3), (12287, 7)] {
+            let env = [("f", fv), ("row", rv)];
+            assert_eq!(eval_int(&e, &env), eval_int(&s, &env));
+        }
+    }
+
+    #[test]
+    fn mismatched_divmod_pairs_do_not_recompose() {
+        for (text, values) in [
+            ("(f // 512) * 512 + f % 256", vec![0, 255, 256, 511, 513]),
+            ("(f // 512) * 500 + f % 512", vec![0, 511, 512, 1025]),
+        ] {
+            let e = int(text);
+            let s = e.simplify(&SimplifyCtx::empty()).unwrap();
+            for v in values {
+                assert_eq!(eval_int(&e, &[("f", v)]), eval_int(&s, &[("f", v)]));
+            }
+            assert!(
+                s.text().contains('%'),
+                "{text} must not recompose: {}",
+                s.text()
+            );
+        }
+        let s = int("(f // 64) * 64 + g % 64")
+            .simplify(&SimplifyCtx::empty())
+            .unwrap();
+        assert!(s.text().contains('%'));
+    }
+
     #[test]
     fn the_constant_fold_refuses_what_overflows_an_integer() {
         let least = Num::Int(i64::MIN);

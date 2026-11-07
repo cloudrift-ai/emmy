@@ -72,3 +72,57 @@ pub(crate) fn decided(s: &Select) -> Select {
         branches: kept.into(),
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::simplify_body;
+    use crate::normalize::testing::*;
+
+    /// The branches simplification leaves of one scatter read: the near value under `predicate`, the base buffer
+    /// otherwise. Nothing but the select reads `cone` or `far`, so a branch that left released its value.
+    fn branches(predicate: &str) -> Vec<String> {
+        let simplified = simplify_body(&body(&format!(
+            "
+            for a in 0..4:
+                near = load scattered[a]
+                far = load base[a]
+                cone = multiply(near, near)
+                v = select:
+                    cone when {predicate}
+                    far when true
+                out[a] = v
+            "
+        )))
+        .unwrap();
+        text(&simplified)
+            .lines()
+            .filter(|line| line.contains(" when "))
+            .map(|line| line.trim().to_string())
+            .collect()
+    }
+
+    #[test]
+    fn a_branch_that_can_never_hold_leaves_and_releases_its_cone() {
+        assert_eq!(branches("a < 0"), ["far when true"]);
+    }
+
+    #[test]
+    fn a_branch_that_always_holds_becomes_the_else() {
+        let values: Vec<String> = branches("a < 4")
+            .iter()
+            .map(|branch| {
+                branch
+                    .split(" when ")
+                    .next()
+                    .unwrap_or_default()
+                    .to_string()
+            })
+            .collect();
+        assert_eq!(values, ["cone"]);
+    }
+
+    #[test]
+    fn an_undecided_branch_is_kept_whole() {
+        assert_eq!(branches("a < 2"), ["cone when a < 2", "far when true"]);
+    }
+}

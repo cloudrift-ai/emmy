@@ -164,6 +164,8 @@ pub use simplify::*;
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::expr::parse as parse_expression;
+    use crate::kinds::axis::Dim;
     use crate::text::{body_text, parse_body};
 
     #[test]
@@ -349,6 +351,122 @@ mod tests {
         .unwrap();
         let again = normalize_uncached(&normal).unwrap();
         assert_eq!(body_text(&again).unwrap(), body_text(&normal).unwrap());
+    }
+
+    fn symbolic_axis(name: &str, extent: &str) -> std::sync::Arc<Axis> {
+        Axis::new(
+            name,
+            Dim::new(parse_expression(extent).unwrap(), None),
+            None,
+        )
+    }
+
+    /// `((a0 * stride + a2) // stride) % seq_len`: the delinearized sequence coordinate a collapsed reshape composed
+    /// with a matmul read carries.
+    fn flat_seq_coord(stride: i64) -> Expression {
+        parse_expression(&format!("((a0 * {stride} + a2) // {stride}) % seq_len")).unwrap()
+    }
+
+    /// The context the loop simplifier builds: `a0` over the symbolic `seq_len`, `a2` over the static `stride`.
+    fn loop_ctx(stride: i64) -> SimplifyCtx {
+        let ctx = extend_simplify_ctx(&SimplifyCtx::empty(), &symbolic_axis("a0", "seq_len"));
+        extend_simplify_ctx(&ctx, &Axis::new("a2", Dim::static_(stride), None))
+    }
+
+    fn eval_int(e: &Expression, env: &[(&str, i64)]) -> i64 {
+        let env: HashMap<Name, crate::expr::Num> = env
+            .iter()
+            .map(|(name, value)| (Name::from(*name), crate::expr::Num::Int(*value)))
+            .collect();
+        e.eval(&env).unwrap().as_int().unwrap()
+    }
+
+    #[test]
+    fn a_bare_var_modulo_its_symbolic_extent_folds() {
+        let ctx = extend_simplify_ctx(&SimplifyCtx::empty(), &symbolic_axis("a0", "seq_len"));
+        assert_eq!(
+            parse_expression("a0 % seq_len")
+                .unwrap()
+                .simplify(&ctx)
+                .unwrap(),
+            Expression::var("a0")
+        );
+    }
+
+    #[test]
+    fn a_collapsed_seq_coordinate_folds_to_its_row() {
+        for stride in [1024, 2048] {
+            let folded = flat_seq_coord(stride).simplify(&loop_ctx(stride)).unwrap();
+            assert_eq!(
+                folded,
+                Expression::var("a0"),
+                "stride={stride}: got {}",
+                folded.text()
+            );
+        }
+        // The fold is a strength reduction, not a change of value.
+        let original = flat_seq_coord(2048);
+        let folded = original.simplify(&loop_ctx(2048)).unwrap();
+        for seq_len in [7, 64, 512] {
+            for a0 in 0..seq_len {
+                for a2 in [0, 1, 1024, 2047] {
+                    let env = [("a0", a0), ("a2", a2), ("seq_len", seq_len)];
+                    assert_eq!(eval_int(&original, &env), a0);
+                    assert_eq!(eval_int(&folded, &env), a0);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn a_modulo_without_a_bound_or_with_another_divisor_stays() {
+        let e = parse_expression("b % seq_len").unwrap();
+        let ranged = SimplifyCtx::empty().extend("b", Interval::new(0, 1 << 30), None);
+        assert_eq!(e.simplify(&ranged).unwrap(), e);
+        let ctx = extend_simplify_ctx(&SimplifyCtx::empty(), &symbolic_axis("a0", "seq_len"));
+        let other = parse_expression("a0 % other").unwrap();
+        assert_eq!(other.simplify(&ctx).unwrap(), other);
+    }
+
+    #[test]
+    fn a_symbolic_axis_registers_its_sign_and_its_bound() {
+        let ctx = extend_simplify_ctx(&SimplifyCtx::empty(), &symbolic_axis("a0", "seq_len"));
+        assert_eq!(ctx.ranges[&Name::from("a0")].lo, 0);
+        assert_eq!(ctx.bounds[&Name::from("a0")], Expression::var("seq_len"));
+        let static_ctx = extend_simplify_ctx(
+            &SimplifyCtx::empty(),
+            &Axis::new("a", Dim::static_(32), None),
+        );
+        assert_eq!(static_ctx.ranges[&Name::from("a")], Interval::new(0, 31));
+        assert_eq!(
+            parse_expression("a % 32")
+                .unwrap()
+                .simplify(&static_ctx)
+                .unwrap(),
+            Expression::var("a")
+        );
+    }
+
+    #[test]
+    fn a_scaled_term_quotient_folds_through_a_larger_divisor() {
+        // `(h*128 + c) / 1024` with `c < 128` is `h / 8`: the collapsed GQA-group index of a decode sweep.
+        let ctx = extend_simplify_ctx(
+            &extend_simplify_ctx(
+                &SimplifyCtx::empty(),
+                &Axis::new("h", Dim::static_(64), None),
+            ),
+            &Axis::new("c", Dim::static_(128), None),
+        );
+        let quotient = parse_expression("(h * 128 + c) / 1024")
+            .unwrap()
+            .simplify(&ctx)
+            .unwrap();
+        assert_eq!(quotient, parse_expression("h / 8").unwrap());
+        let remainder = parse_expression("(h * 128 + c) % 1024")
+            .unwrap()
+            .simplify(&ctx)
+            .unwrap();
+        assert_eq!(remainder, parse_expression("h % 8 * 128 + c").unwrap());
     }
 
     #[test]
