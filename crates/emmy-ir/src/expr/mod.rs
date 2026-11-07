@@ -282,11 +282,11 @@ pub struct Lit {
 
 closed_set! {
     /// The two kinds of scalar arithmetic the IR has, as predicates over the operation table that every node of an
-    /// expression must satisfy. `Index` is integer arithmetic over axes, GPU built-ins, integer literals and names: the
-    /// affine operations, division and remainder, minimum and maximum, the comparisons and logical
-    /// operators, the bitwise operators and shifts, select, cast and a buffer's flat index. `Value` is any operation of
-    /// the table over SSA names and literals, with no built-in and no buffer index. A field declares the class it
-    /// admits beside its roles; a field with no class admits any expression.
+    /// expression must satisfy, one inside the other. `Value` admits every operation of the table over any operand:
+    /// SSA names, axes, GPU built-ins, literals of any type, select, cast and a buffer's flat index. `Index` is its
+    /// restriction to integer arithmetic over integer operands: the affine operations, division and remainder,
+    /// minimum and maximum, the comparisons and logical operators, the bitwise operators and shifts, over axes,
+    /// built-ins, names and integer literals. Every expression field declares the class it admits beside its roles.
     pub enum ExprClass ("expression class") { Index = "Index", Value = "Value", }
 }
 
@@ -304,6 +304,9 @@ impl ExprClass {
     }
 
     fn admits(self, expression: &Expression) -> std::result::Result<(), String> {
+        if self == ExprClass::Value {
+            return Ok(());
+        }
         match (self, &**expression) {
             (_, Expr::Var(_)) => Ok(()),
             (ExprClass::Index, Expr::Literal(lit)) if !matches!(lit.dtype, LitType::Float) => {

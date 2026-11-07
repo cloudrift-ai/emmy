@@ -259,7 +259,7 @@ macro_rules! with_statement_types {
                 /// earlier predicate matches.
                 shared Select {PURE | CHECKED} {
                     name: Name [DEFINES],
-                    branches: Branches [RECORD],
+                    branches: Branches [RECORD] : Value,
                 }
                 /// Zero another launch's atomic accumulator from THIS kernel — the delegated zero-init
                 /// (`lowering/cuda/005_delegate_zero_init`).
@@ -337,7 +337,7 @@ macro_rules! with_statement_types {
                 /// predicate's reads through. Names referenced inside `body` / `else_body` are the body stmts' own deps; the
                 /// recursive walker picks them up.
                 shared Cond {} {
-                    cond: Expression [EXPRESSION | READS],
+                    cond: Expression [EXPRESSION | READS] : Value,
                     body: Body [BODY],
                     else_body: Body [BODY] = Body::empty(),
                 }
@@ -616,7 +616,7 @@ macro_rules! with_statement_types {
                 kernel FragmentApply {} {
                     out: Name [DEFINES],
                     op: ElementwiseOp [],
-                    args: FragmentArgs [RECORD],
+                    args: FragmentArgs [RECORD] : Value,
                     in_place: bool [] = false,
                     layout: Name [] = Name::from("m16n8k16"),
                     post: ElementwiseOps [] = ElementwiseOps::from([]),
@@ -896,7 +896,7 @@ macro_rules! with_statement_types {
                 /// One branch of a `Select` body statement.
                 shared SelectBranch {
                     value: Name [READS],
-                    select: Expression [EXPRESSION | READS],
+                    select: Expression [EXPRESSION | READS] : Value,
                 }
                 /// One operand of a :class:`FragmentApply`. What it holds follows its `kind`:
                 ///
@@ -907,7 +907,7 @@ macro_rules! with_statement_types {
                 kernel FragmentArg {
                     kind: Name [],
                     names: Names [READS] = Names::from([]),
-                    expressions: Exprs [EXPRESSION] = Exprs::from([]),
+                    expressions: Exprs [EXPRESSION] : Value = Exprs::from([]),
                     buffer: Option<Name> [BUFFER_READ] = None,
                 }
             }
@@ -1373,7 +1373,7 @@ mod tests {
         }
         assert_eq!(
             blake3::hash(listing.as_bytes()).to_hex().as_str(),
-            "c30e4c0f29d95bddae19db4de26e7fb2c49c1269b88980890a361c06a75ad573",
+            "b973d9e70c9672d4095c8f08803b048b26792ee38e3a5a2c6cb7c1b1b5854bfa",
             "{listing}"
         );
     }

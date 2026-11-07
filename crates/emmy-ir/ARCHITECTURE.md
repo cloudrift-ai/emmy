@@ -46,12 +46,12 @@ of a body's normal form). Every file imports what it uses by name; no child modu
   model (`Num`: int, float or bool, equal by value) because a stored kernel's text spells it that way, and is typed by a
   `LitType`. Integer rewrites are checked: a product that would overflow declines the rewrite rather than fold wrong.
   The two kinds of scalar arithmetic the IR has are the two expression classes (`ExprClass`), each a predicate over the
-  operation table that every node of an expression must satisfy: `Index`, integer arithmetic over axes, built-ins,
-  integer literals and names (the affine operations, division and remainder by a literal, minimum and maximum, the
-  comparisons and logical operators, the bitwise operators and shifts, select, cast, a buffer's flat index), and
-  `Value`, any operation of the table over SSA names and literals. A field declares the class it admits beside its roles
-  (`index: Exprs [EXPRESSION | READS] : Index`) and construction refuses a value outside it; a field with no class
-  admits any expression.
+  operation table that every node of an expression must satisfy, one inside the other: `Value` admits every operation of
+  the table over any operand (SSA names, axes, GPU built-ins, literals of any type, select, cast, a buffer's flat
+  index), and `Index` is its restriction to integer arithmetic over integer operands (the affine operations, division
+  and remainder, minimum and maximum, the comparisons and logical operators, the bitwise operators and shifts). Every
+  expression field declares the class it admits beside its roles (`index: Exprs [EXPRESSION | READS] : Index`) and
+  construction refuses a value outside it.
 - **Statement types** (`statement.rs`): every statement type is a struct declared once in the `with_statement_types!`
   macro — its fields, each with a type, the roles it plays (`DEFINES`, `READS`, `EXPRESSION`, `AXIS`, `BODY`, `STMTS`,
   `TERM`, `RECORD`, …) and a default — and the Python extension generates its classes from the same list.

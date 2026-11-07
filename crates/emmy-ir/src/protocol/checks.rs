@@ -183,13 +183,14 @@ mod tests {
     }
 
     /// An expression field admits its class and refuses the rest: an index is integer arithmetic over axes, built-ins,
-    /// integer literals and names; a `let` value is any operation over names and literals; a condition, which compares
-    /// axes or values, has no class.
+    /// integer literals and names; a value, which a `let` binds and a condition compares, is any operation of the table
+    /// over any operand.
     #[test]
     fn a_classed_field_refuses_an_expression_outside_its_class() {
         for text in [
             "in0 = load x[a0 * 4 + (a1 // 2) % 3, a0 < 8 ? thread_idx.x : (int)n, min(a0, 7) & 1, (a1 + 1) % seq_len]",
-            "let v0 = 2.5 * v1 + exp(v2)",
+            "let v0 = 2.5 * v1 + exp(v2) - thread_idx.x",
+            "if x + 1.0 < 0.0 && a0 == 1:\n    y[a0] = v0",
             "if a0 + 1 <= n && a1 == 0:\n    y[a0] = v0",
         ] {
             parse_statement(text).unwrap_or_else(|err| panic!("{err}\n{text}"));
@@ -197,7 +198,6 @@ mod tests {
         for (text, why) in [
             ("in0 = load x[a0 + 0.5]", "a float literal"),
             ("y[exp(a0)] = v0", "a call of exp"),
-            ("let v0 = thread_idx.x + 1", "the built-in thread_idx.x"),
         ] {
             let err = parse_statement(text)
                 .err()
