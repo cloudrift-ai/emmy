@@ -3,11 +3,11 @@
 use std::sync::Arc;
 
 use super::INDENT;
+use crate::axis::{Axis, spell_axis, spell_window};
 use crate::body::{Body, Subroutine};
 use crate::expr::Expression;
-use crate::kinds::axis::{Axis, spell_axis, spell_window};
-use crate::kinds::field::{DType, NumOr, spell_number, spell_stmt_name};
-use crate::kinds::*;
+use crate::field::{DType, NumOr, spell_number, spell_stmt_name};
+use crate::statement::*;
 use crate::{Error, Name, Result};
 
 fn names(items: &[Name]) -> Result<String> {

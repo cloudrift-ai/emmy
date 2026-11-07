@@ -6,11 +6,11 @@ use std::sync::Arc;
 
 use super::{assign, canonicalize_expressions, rename_ssa_sequential, substituted, with_bodies};
 use crate::body::Body;
+use crate::elementwise::{Elementwise, Op};
 use crate::expr::{Expr, Expression, affine_form};
-use crate::kinds::elementwise::{Elementwise, Op};
-use crate::kinds::field::AxisRef;
-use crate::kinds::*;
+use crate::field::AxisRef;
 use crate::numbering::Key;
+use crate::statement::*;
 use crate::text::structural_body_text;
 use crate::{Name, Result};
 
@@ -260,7 +260,7 @@ pub fn canonicalize_free_axis_order(body: &Body) -> Result<Body> {
                 return Ok(Key::None);
             };
             Ok(Key::tuple([
-                Key::str(&crate::kinds::axis::spell_axis(&renamed.axis, None)?),
+                Key::str(&crate::axis::spell_axis(&renamed.axis, None)?),
                 Key::Bool(renamed.unroll),
                 Key::Bool(renamed.seed),
             ]))

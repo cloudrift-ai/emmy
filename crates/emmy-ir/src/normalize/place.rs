@@ -6,9 +6,9 @@ use std::sync::Arc;
 
 use super::with_bodies;
 use crate::body::{Body, free_names};
-use crate::kinds::*;
 use crate::numbering::{Number, Numbering, Param, value_numbers};
 use crate::order::is_protocol;
+use crate::statement::*;
 use crate::{Error, Name, Result};
 
 // --- placement -----------------------------------------------------------------------------------------------
@@ -478,7 +478,7 @@ pub fn place_values(body: &Body) -> Result<Body> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::kinds::elementwise::{Elementwise, Op};
+    use crate::elementwise::{Elementwise, Op};
     use crate::normalize::normalize_body;
     use crate::normalize::testing::*;
 

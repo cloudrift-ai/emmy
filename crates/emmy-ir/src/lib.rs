@@ -4,15 +4,19 @@
 
 use std::sync::Arc;
 
+pub mod axis;
 pub mod body;
+pub mod dtype;
+pub mod elementwise;
 pub mod expr;
+pub mod field;
 pub mod identity;
-pub mod kinds;
 pub mod memo;
 pub mod normalize;
 pub mod numbering;
 pub mod order;
 pub mod protocol;
+pub mod statement;
 pub mod text;
 
 /// A name: an SSA value, an axis, a buffer. Shared, so a rename that keeps a name copies a pointer.

@@ -1,6 +1,6 @@
 //! The checks a kind makes on construction, each over its own fields: what Python's `__post_init__` refused.
 
-use crate::kinds::*;
+use crate::statement::*;
 use crate::{Error, Result};
 use std::sync::Arc;
 
@@ -69,7 +69,7 @@ impl Tile {
 
 impl WgmmaMma {
     pub fn validate(&self) -> Result<()> {
-        let crate::kinds::field::Shape3(m, n, k) = self.shape;
+        let crate::field::Shape3(m, n, k) = self.shape;
         if (m, k) != (64, 16) || n % 8 != 0 || !(8..=256).contains(&n) {
             return Err(Error::Value(format!(
                 "wgmma: the shape is m64n<8..256, a multiple of 8>k16, got ({m}, {n}, {k})"

@@ -6,7 +6,7 @@ use super::{extend_simplify_ctx, with_bodies};
 use crate::Result;
 use crate::body::Body;
 use crate::expr::SimplifyCtx;
-use crate::kinds::*;
+use crate::statement::*;
 
 // --- expression simplification ----------------------------------------------------------------------------
 

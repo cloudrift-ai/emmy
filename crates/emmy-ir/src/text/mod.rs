@@ -18,8 +18,8 @@ mod tests {
 
     use super::*;
     use crate::body::{Body, Subroutine};
-    use crate::kinds::{Call, Kind};
     use crate::normalize::testing::strs;
+    use crate::statement::{Call, Kind};
 
     const STATEMENTS: &[&str] = &[
         "in0 = load x[a0, a1 + 1]",

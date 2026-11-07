@@ -8,8 +8,8 @@ use std::sync::Arc;
 use emmy_ir::Name;
 use emmy_ir::body::Body;
 use emmy_ir::expr::Expression;
-use emmy_ir::kinds::{FieldInfo, Statement};
 use emmy_ir::protocol::{Rewrite, finished};
+use emmy_ir::statement::{FieldInfo, Statement};
 use emmy_ir::text::{parse_statement, statement_text};
 use pyo3::exceptions::{PyAttributeError, PyTypeError, PyValueError};
 use pyo3::prelude::*;
@@ -177,7 +177,7 @@ impl PyStatement {
     fn nested<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyTuple>> {
         let mut items = Vec::new();
         for (index, field) in self.stmt.fields().iter().enumerate() {
-            if field.roles.contains_any(emmy_ir::kinds::BODY) {
+            if field.roles.contains_any(emmy_ir::statement::BODY) {
                 items.push(self.field(py, index)?);
             }
         }
@@ -274,10 +274,7 @@ impl PyStatement {
             .map(sigma_from_py)
             .transpose()?
             .unwrap_or_default();
-        let mut pairs: Vec<(
-            Arc<emmy_ir::kinds::axis::Axis>,
-            Arc<emmy_ir::kinds::axis::Axis>,
-        )> = Vec::new();
+        let mut pairs: Vec<(Arc<emmy_ir::axis::Axis>, Arc<emmy_ir::axis::Axis>)> = Vec::new();
         if let Some(axes) = axes.filter(|a| !a.is_none()) {
             for pair in axes.try_iter()? {
                 let (old, new): (Bound<'py, PyAny>, Bound<'py, PyAny>) = pair?.extract()?;
@@ -285,7 +282,7 @@ impl PyStatement {
             }
         }
         let rename = |name: &str| names.get(name).cloned();
-        let axis_fn = |axis: &Arc<emmy_ir::kinds::axis::Axis>| {
+        let axis_fn = |axis: &Arc<emmy_ir::axis::Axis>| {
             pairs
                 .iter()
                 .find(|(old, _)| **old == **axis && old.window == axis.window)
@@ -488,25 +485,25 @@ macro_rules! define_py_kinds {
                 /// The names of this kind's fields, in declaration order.
                 #[classattr]
                 fn _fields<'py>(py: Python<'py>) -> PyResult<Bound<'py, PyTuple>> {
-                    PyTuple::new(py, emmy_ir::kinds::$Kind::FIELDS.iter().map(|f| PyString::new(py, f.name)))
+                    PyTuple::new(py, emmy_ir::statement::$Kind::FIELDS.iter().map(|f| PyString::new(py, f.name)))
                 }
 
                 /// A pure value binding: a legal member of a stored term.
                 #[classattr]
                 fn pure() -> bool {
-                    emmy_ir::kinds::$Kind::FLAGS.contains(emmy_ir::kinds::PURE)
+                    emmy_ir::statement::$Kind::FLAGS.contains(emmy_ir::statement::PURE)
                 }
 
                 /// `deps` already reports the whole subtree's reads.
                 #[classattr]
                 fn deps_deep() -> bool {
-                    emmy_ir::kinds::$Kind::FLAGS.contains(emmy_ir::kinds::DEPS_DEEP)
+                    emmy_ir::statement::$Kind::FLAGS.contains(emmy_ir::statement::DEPS_DEEP)
                 }
 
                 $(
                     #[getter]
                     fn $field<'py>(slf: &Bound<'py, Self>) -> PyResult<Bound<'py, PyAny>> {
-                        const INDEX: usize = position(emmy_ir::kinds::$Kind::FIELDS, stringify!($field));
+                        const INDEX: usize = position(emmy_ir::statement::$Kind::FIELDS, stringify!($field));
                         slf.as_super().get().field(slf.py(), INDEX)
                     }
                 )*
@@ -517,12 +514,12 @@ macro_rules! define_py_kinds {
             define_py_kinds!(@record $rlayer $Record $(#[doc = $rdoc])*);
 
             impl $Record {
-                pub fn new_from(record: emmy_ir::kinds::$Record) -> $Record {
-                    $Record { slots: slots(emmy_ir::kinds::$Record::FIELDS.len()), record }
+                pub fn new_from(record: emmy_ir::statement::$Record) -> $Record {
+                    $Record { slots: slots(emmy_ir::statement::$Record::FIELDS.len()), record }
                 }
 
                 /// The record with the Python objects its fields came from kept beside them.
-                fn with_held(record: emmy_ir::kinds::$Record, held: Held) -> $Record {
+                fn with_held(record: emmy_ir::statement::$Record, held: Held) -> $Record {
                     let out = $Record::new_from(record);
                     for (slot, value) in out.slots.iter().zip(held) {
                         if let Some(value) = value {
@@ -557,13 +554,13 @@ macro_rules! define_py_kinds {
 
                 #[classattr]
                 fn _fields<'py>(py: Python<'py>) -> PyResult<Bound<'py, PyTuple>> {
-                    PyTuple::new(py, emmy_ir::kinds::$Record::FIELDS.iter().map(|f| PyString::new(py, f.name)))
+                    PyTuple::new(py, emmy_ir::statement::$Record::FIELDS.iter().map(|f| PyString::new(py, f.name)))
                 }
 
                 $(
                     #[getter]
                     fn $rfield<'py>(slf: &Bound<'py, Self>) -> PyResult<Bound<'py, PyAny>> {
-                        const INDEX: usize = position(emmy_ir::kinds::$Record::FIELDS, stringify!($rfield));
+                        const INDEX: usize = position(emmy_ir::statement::$Record::FIELDS, stringify!($rfield));
                         let this = slf.get();
                         cached(slf.py(), &this.slots[INDEX], || <$rty as PyField>::to_py(&this.record.$rfield, slf.py()))
                     }
@@ -614,8 +611,8 @@ macro_rules! define_py_kinds {
         }
 
         /// The kind class of each kind name, for `iter_of_type`.
-        pub fn kind_of(cls: &Bound<'_, PyType>) -> Option<emmy_ir::kinds::Kind> {
-            $( if cls.is(&cls.py().get_type::<$Kind>()) { return Some(emmy_ir::kinds::Kind::$Kind); } )*
+        pub fn kind_of(cls: &Bound<'_, PyType>) -> Option<emmy_ir::statement::Kind> {
+            $( if cls.is(&cls.py().get_type::<$Kind>()) { return Some(emmy_ir::statement::Kind::$Kind); } )*
             None
         }
 
@@ -640,7 +637,7 @@ macro_rules! define_py_kinds {
         $(#[doc = $doc])*
         #[pyclass(frozen, module = "emmy.compiler.ir.stmt")]
         pub struct $Record {
-            pub record: emmy_ir::kinds::$Record,
+            pub record: emmy_ir::statement::$Record,
             slots: Slots,
         }
     };
@@ -648,13 +645,13 @@ macro_rules! define_py_kinds {
         $(#[doc = $doc])*
         #[pyclass(frozen, module = "emmy.compiler.ir.kernel.ir")]
         pub struct $Record {
-            pub record: emmy_ir::kinds::$Record,
+            pub record: emmy_ir::statement::$Record,
             slots: Slots,
         }
     };
     // The constructor's fields: each by keyword or position, converted and kept, or its default.
     (@given $Type:ident $args:ident $kwargs:ident $held:ident { $( $field:ident : $ty:ty [$($role:ident)|*] $(= $default:expr)? ,)* }) => {{
-        use emmy_ir::kinds as k;
+        use emmy_ir::statement as k;
         let mut given = Arguments { kind: k::$Type::NAME, fields: k::$Type::FIELDS, args: $args, kwargs: $kwargs, positional: 0 };
         let out = k::$Type {
             $( $field: match given.take(stringify!($field), define_py_kinds!(@kw_only $($role)|*))? {
@@ -670,7 +667,7 @@ macro_rules! define_py_kinds {
     }};
     // A copy's fields: each from `changes`, converted and kept, or the current value with the object kept so far.
     (@changed $Type:ident $current:ident $changes:ident $held:ident ($kept:expr) { $( $field:ident : $ty:ty [$($role:ident)|*] $(= $default:expr)? ,)* }) => {{
-        use emmy_ir::kinds as k;
+        use emmy_ir::statement as k;
         only_fields(k::$Type::NAME, k::$Type::FIELDS, $changes)?;
         let kept = $kept;
         #[allow(unused_assignments)]
@@ -722,8 +719,8 @@ mod generated {
     use super::*;
     use emmy_ir::Name;
     use emmy_ir::body::Body;
-    use emmy_ir::kinds::elementwise::Op;
-    use emmy_ir::kinds::field::*;
+    use emmy_ir::elementwise::Op;
+    use emmy_ir::field::*;
 
     emmy_ir::with_kinds!(define_py_kinds);
 }
@@ -745,7 +742,7 @@ impl Load {
     /// Scalar-only shorthand for `names[0]`.
     #[getter]
     fn name<'py>(slf: &Bound<'py, Self>) -> PyResult<Bound<'py, PyAny>> {
-        let load = inner::<emmy_ir::kinds::Load>(slf.as_super().get())?;
+        let load = inner::<emmy_ir::statement::Load>(slf.as_super().get())?;
         if load.names.len() != 1 {
             return Err(pyo3::exceptions::PyAssertionError::new_err(format!(
                 "Load has {} names — use .names for vector Loads",
@@ -757,14 +754,14 @@ impl Load {
 
     #[getter]
     fn width(slf: &Bound<'_, Self>) -> PyResult<usize> {
-        Ok(inner::<emmy_ir::kinds::Load>(slf.as_super().get())?
+        Ok(inner::<emmy_ir::statement::Load>(slf.as_super().get())?
             .names
             .len())
     }
 
     #[getter]
     fn is_vector(slf: &Bound<'_, Self>) -> PyResult<bool> {
-        Ok(inner::<emmy_ir::kinds::Load>(slf.as_super().get())?
+        Ok(inner::<emmy_ir::statement::Load>(slf.as_super().get())?
             .names
             .len()
             > 1)
@@ -772,7 +769,7 @@ impl Load {
 
     #[getter]
     fn is_scalar(slf: &Bound<'_, Self>) -> PyResult<bool> {
-        Ok(inner::<emmy_ir::kinds::Load>(slf.as_super().get())?
+        Ok(inner::<emmy_ir::statement::Load>(slf.as_super().get())?
             .names
             .len()
             == 1)
@@ -784,7 +781,7 @@ impl Write {
     /// Scalar-only shorthand for `values[0]`.
     #[getter]
     fn value<'py>(slf: &Bound<'py, Self>) -> PyResult<Bound<'py, PyAny>> {
-        let write = inner::<emmy_ir::kinds::Write>(slf.as_super().get())?;
+        let write = inner::<emmy_ir::statement::Write>(slf.as_super().get())?;
         if write.values.len() != 1 {
             return Err(pyo3::exceptions::PyAssertionError::new_err(format!(
                 "Write has {} values — use .values for vector Writes",
@@ -796,14 +793,14 @@ impl Write {
 
     #[getter]
     fn width(slf: &Bound<'_, Self>) -> PyResult<usize> {
-        Ok(inner::<emmy_ir::kinds::Write>(slf.as_super().get())?
+        Ok(inner::<emmy_ir::statement::Write>(slf.as_super().get())?
             .values
             .len())
     }
 
     #[getter]
     fn is_vector(slf: &Bound<'_, Self>) -> PyResult<bool> {
-        Ok(inner::<emmy_ir::kinds::Write>(slf.as_super().get())?
+        Ok(inner::<emmy_ir::statement::Write>(slf.as_super().get())?
             .values
             .len()
             > 1)
@@ -811,7 +808,7 @@ impl Write {
 
     #[getter]
     fn is_scalar(slf: &Bound<'_, Self>) -> PyResult<bool> {
-        Ok(inner::<emmy_ir::kinds::Write>(slf.as_super().get())?
+        Ok(inner::<emmy_ir::statement::Write>(slf.as_super().get())?
             .values
             .len()
             == 1)
@@ -823,7 +820,7 @@ impl Affine {
     /// `(coefficient, arg)` per term.
     #[getter]
     fn terms<'py>(slf: &Bound<'py, Self>) -> PyResult<Bound<'py, PyTuple>> {
-        let affine: &emmy_ir::kinds::Affine = inner(slf.as_super().get())?;
+        let affine: &emmy_ir::statement::Affine = inner(slf.as_super().get())?;
         let items: PyResult<Vec<Bound<'py, PyTuple>>> = affine
             .terms()
             .map(|(c, arg)| {
@@ -841,7 +838,7 @@ impl Affine {
 
     /// The same value as binary `Assign`s over `Let`-bound literals, the last one named `name`.
     fn as_assigns<'py>(slf: &Bound<'py, Self>) -> PyResult<Bound<'py, pyo3::types::PyList>> {
-        let affine: &emmy_ir::kinds::Affine = inner(slf.as_super().get())?;
+        let affine: &emmy_ir::statement::Affine = inner(slf.as_super().get())?;
         let items: PyResult<Vec<Py<PyAny>>> = affine
             .as_assigns()
             .iter()
@@ -856,25 +853,25 @@ impl Accum {
     /// The identity value of the accumulator.
     #[getter]
     fn init<'py>(slf: &Bound<'py, Self>) -> PyResult<Bound<'py, PyAny>> {
-        let accum: &emmy_ir::kinds::Accum = inner(slf.as_super().get())?;
+        let accum: &emmy_ir::statement::Accum = inner(slf.as_super().get())?;
         PyExpression::wrap(slf.py(), &accum.init())
     }
 
     #[getter]
     fn associative(slf: &Bound<'_, Self>) -> PyResult<bool> {
-        let accum: &emmy_ir::kinds::Accum = inner(slf.as_super().get())?;
+        let accum: &emmy_ir::statement::Accum = inner(slf.as_super().get())?;
         Ok(accum.op.associative())
     }
 
     #[getter]
     fn commutative(slf: &Bound<'_, Self>) -> PyResult<bool> {
-        let accum: &emmy_ir::kinds::Accum = inner(slf.as_super().get())?;
+        let accum: &emmy_ir::statement::Accum = inner(slf.as_super().get())?;
         Ok(accum.op.commutative())
     }
 
     #[getter]
     fn has_identity(slf: &Bound<'_, Self>) -> PyResult<bool> {
-        let accum: &emmy_ir::kinds::Accum = inner(slf.as_super().get())?;
+        let accum: &emmy_ir::statement::Accum = inner(slf.as_super().get())?;
         Ok(accum.op.neutral().is_some())
     }
 }
@@ -884,7 +881,7 @@ impl Carry {
     /// The axes of the cell this statement defines.
     #[getter]
     fn cells<'py>(slf: &Bound<'py, Self>) -> PyResult<Bound<'py, PyTuple>> {
-        let carry: &emmy_ir::kinds::Carry = inner(slf.as_super().get())?;
+        let carry: &emmy_ir::statement::Carry = inner(slf.as_super().get())?;
         PyTuple::new(
             slf.py(),
             carry
@@ -897,7 +894,7 @@ impl Carry {
 
 fn carries_dict<'py>(
     py: Python<'py>,
-    cells: Vec<(Name, Vec<Option<Arc<emmy_ir::kinds::axis::Axis>>>)>,
+    cells: Vec<(Name, Vec<Option<Arc<emmy_ir::axis::Axis>>>)>,
 ) -> PyResult<Bound<'py, PyDict>> {
     let out = PyDict::new(py);
     for (name, shape) in cells {
@@ -918,14 +915,14 @@ impl Loop {
     /// The carried states this loop carries, each with its cell shape.
     #[getter]
     fn carries<'py>(slf: &Bound<'py, Self>) -> PyResult<Bound<'py, PyDict>> {
-        let l: &emmy_ir::kinds::Loop = inner(slf.as_super().get())?;
+        let l: &emmy_ir::statement::Loop = inner(slf.as_super().get())?;
         carries_dict(slf.py(), l.carries())
     }
 
     /// A loop is a reduce loop iff it carries something.
     #[getter]
     fn is_reduce(slf: &Bound<'_, Self>) -> PyResult<bool> {
-        let l: &emmy_ir::kinds::Loop = inner(slf.as_super().get())?;
+        let l: &emmy_ir::statement::Loop = inner(slf.as_super().get())?;
         Ok(l.is_reduce())
     }
 }
@@ -934,7 +931,7 @@ impl Loop {
 impl StridedLoop {
     #[getter]
     fn is_reduce(slf: &Bound<'_, Self>) -> PyResult<bool> {
-        let l: &emmy_ir::kinds::StridedLoop = inner(slf.as_super().get())?;
+        let l: &emmy_ir::statement::StridedLoop = inner(slf.as_super().get())?;
         Ok(l.is_reduce())
     }
 }

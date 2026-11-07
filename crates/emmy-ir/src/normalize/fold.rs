@@ -7,13 +7,13 @@ use std::sync::Arc;
 use super::{assign, with_bodies};
 use crate::Name;
 use crate::body::Body;
+use crate::dtype::promote;
+use crate::elementwise::{AffineRole, Elementwise, Op};
 use crate::expr::Expression;
-use crate::kinds::dtype::promote;
-use crate::kinds::elementwise::{AffineRole, Elementwise, Op};
-use crate::kinds::field::{DType, Float, Names};
-use crate::kinds::*;
+use crate::field::{DType, Float, Names};
 use crate::numbering::Key;
 use crate::protocol::literal_binding;
+use crate::statement::*;
 
 // --- folds ----------------------------------------------------------------------------------------------
 

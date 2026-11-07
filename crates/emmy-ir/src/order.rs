@@ -7,7 +7,7 @@ use std::sync::Arc;
 
 use crate::Name;
 use crate::body::{Body, free_ssa, ordered_sibling_defs};
-use crate::kinds::Statement;
+use crate::statement::Statement;
 
 /// The buffers a statement reads and writes and the carried states it updates, over its whole subtree.
 fn resources(stmt: &Statement) -> (HashSet<Name>, HashSet<Name>, HashSet<Name>) {

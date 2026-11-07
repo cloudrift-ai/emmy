@@ -3,13 +3,13 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
+use crate::axis::{Axis, Dim, Window};
 use crate::body::{Body, Subroutine};
+use crate::elementwise::Op;
 use crate::expr::{Expression, Lit, Num, Parser, TokenKind};
-use crate::kinds::axis::{Axis, Dim, Window};
-use crate::kinds::elementwise::Op;
-use crate::kinds::field::{DType, Float, NumOr, Ty, Value, Values};
-use crate::kinds::*;
+use crate::field::{DType, Float, NumOr, Ty, Value, Values};
 use crate::protocol::finished;
+use crate::statement::*;
 use crate::{Error, Name, Result};
 
 type Row<'a> = (usize, usize, &'a str);
@@ -413,7 +413,7 @@ impl Line {
             let args = self.parser.expressions(")")?;
             let call = Call {
                 name,
-                target: crate::kinds::field::SubroutineRef(target),
+                target: crate::field::SubroutineRef(target),
                 args: args.into(),
             };
             call.validate()?;
@@ -648,7 +648,7 @@ impl Line {
         &mut self,
         dtype: Option<DType>,
         name: Name,
-        index: crate::kinds::field::Exprs,
+        index: crate::field::Exprs,
     ) -> Result<Statement> {
         if self.parser.accept("<-") {
             let value = self.name()?;

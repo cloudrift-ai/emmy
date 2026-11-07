@@ -8,10 +8,10 @@ use super::ties;
 use super::{carried_out, unify_siblings, with_bodies};
 use crate::body::{Body, free_names, unique};
 use crate::expr::{BinOp, Expr, Expression, SimplifyCtx, affine_form};
-use crate::kinds::field::Float;
-use crate::kinds::*;
+use crate::field::Float;
 use crate::numbering::{Key, Numbering, roles, statement_tree, value_numbers};
 use crate::order::ordering_constraints;
+use crate::statement::*;
 use crate::{Name, Result};
 
 // --- sequential names -----------------------------------------------------------------------------------
@@ -388,8 +388,8 @@ pub fn canonicalize_expressions(body: &Body, axes: &[Name]) -> Result<Body> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::kinds::Load;
     use crate::normalize::testing::*;
+    use crate::statement::Load;
 
     fn find_load(body: &Body, input: &str) -> Load {
         body.loads()

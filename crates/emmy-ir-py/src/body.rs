@@ -5,8 +5,8 @@ use std::sync::{Arc, Mutex, Once, OnceLock};
 
 use emmy_ir::Name;
 use emmy_ir::body::{Body, StmtRef, Subroutine, exposed_defines, free_names};
-use emmy_ir::kinds::Statement;
 use emmy_ir::memo::{Stats, Store};
+use emmy_ir::statement::Statement;
 use emmy_ir::text::{body_lines, body_text, parse_body as parse_body_text};
 use pyo3::exceptions::{PyIndexError, PyTypeError, PyValueError};
 use pyo3::prelude::*;
@@ -518,7 +518,7 @@ impl PyBody {
         py: Python<'py>,
         types: &Bound<'py, PyTuple>,
     ) -> PyResult<Bound<'py, PyTuple>> {
-        let mut kinds: Vec<emmy_ir::kinds::Kind> = Vec::new();
+        let mut kinds: Vec<emmy_ir::statement::Kind> = Vec::new();
         for item in types.iter() {
             let cls = item
                 .cast::<PyType>()
@@ -526,7 +526,7 @@ impl PyBody {
             match kind_of(cls) {
                 Some(kind) => kinds.push(kind),
                 None if cls.is(py.get_type::<PyStatement>()) => {
-                    kinds.extend(emmy_ir::kinds::Kind::ALL.iter().copied())
+                    kinds.extend(emmy_ir::statement::Kind::ALL.iter().copied())
                 }
                 None => {
                     return Err(PyTypeError::new_err(format!(
@@ -701,7 +701,7 @@ impl PySubroutine {
         body: &Bound<'_, PyAny>,
         result: &str,
     ) -> PyResult<PySubroutine> {
-        let (axes, _) = <emmy_ir::kinds::field::Axes as PyField>::from_py(axes)?;
+        let (axes, _) = <emmy_ir::field::Axes as PyField>::from_py(axes)?;
         let body = PyBody::from_iterable(body)?;
         let sub = Subroutine::new(name.into(), axes, body, result.into()).py()?;
         Ok(PySubroutine {
@@ -753,7 +753,7 @@ impl PySubroutine {
         py: Python<'py>,
         buffers: &Bound<'py, PyAny>,
     ) -> PyResult<Bound<'py, PySubroutine>> {
-        let (buffers, _) = <emmy_ir::kinds::field::Names as PyField>::from_py(buffers)?;
+        let (buffers, _) = <emmy_ir::field::Names as PyField>::from_py(buffers)?;
         if buffers.len() != self.sub.buffers.len() {
             return Err(PyValueError::new_err(format!(
                 "{} buffers for {} captured",
@@ -939,14 +939,11 @@ pub fn ordering_constraints<'py>(
 /// Promote an elementwise op's argument dtypes to one result dtype.
 #[pyfunction]
 pub fn dtype_promote(op_name: &str, arg_dtypes: Vec<String>) -> PyResult<String> {
-    let dtypes: Vec<emmy_ir::kinds::field::DType> = arg_dtypes
+    let dtypes: Vec<emmy_ir::field::DType> = arg_dtypes
         .iter()
         .map(|d| d.parse().py())
         .collect::<PyResult<_>>()?;
-    let promoted = emmy_ir::kinds::dtype::promote(
-        emmy_ir::kinds::elementwise::Op::new(op_name).known(),
-        &dtypes,
-    );
+    let promoted = emmy_ir::dtype::promote(emmy_ir::elementwise::Op::new(op_name).known(), &dtypes);
     Ok(promoted.text().to_string())
 }
 

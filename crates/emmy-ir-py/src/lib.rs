@@ -11,7 +11,7 @@ mod statement;
 
 /// The elementwise tables the Python `ElementwiseImpl` reads, each a view of the operations' properties.
 fn elementwise_tables(m: &Bound<'_, PyModule>) -> PyResult<()> {
-    use emmy_ir::kinds::elementwise::{ALIASES, Elementwise, OpInfo};
+    use emmy_ir::elementwise::{ALIASES, Elementwise, OpInfo};
     let py = m.py();
     fn texts(keep: fn(&OpInfo) -> bool) -> Vec<&'static str> {
         Elementwise::ALL
@@ -55,10 +55,7 @@ fn elementwise_tables(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add("OP_ALIASES", aliases)?;
     m.add(
         "DTYPES",
-        PyFrozenSet::new(
-            py,
-            emmy_ir::kinds::field::DType::ALL.iter().map(|d| d.text()),
-        )?,
+        PyFrozenSet::new(py, emmy_ir::field::DType::ALL.iter().map(|d| d.text()))?,
     )?;
     Ok(())
 }

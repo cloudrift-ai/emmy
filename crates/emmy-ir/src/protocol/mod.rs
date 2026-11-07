@@ -5,20 +5,20 @@
 //! a `Call` read buffers their fields do not name, a `StridedLoop` with an `end` binds one more name than its axis.
 
 pub mod checks;
-pub mod kinds;
+pub mod shared;
 
 pub use checks::*;
-pub use kinds::*;
+pub use shared::*;
 
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
+use crate::axis::Axis;
 use crate::body::{Body, Subroutine, exposed_defines, free_names, loop_parts, unique};
 use crate::expr::{Expr, Expression};
-use crate::kinds::axis::Axis;
-use crate::kinds::field::{AxisRef, Rewriter, SubroutineRef, Visitor};
-use crate::kinds::*;
+use crate::field::{AxisRef, Rewriter, SubroutineRef, Visitor};
+use crate::statement::*;
 use crate::{Error, Name, Result};
 
 /// What a rewrite does to a statement: every SSA name through `rename`, every expression through `sigma`, every
@@ -809,8 +809,8 @@ mod tests {
 
     use super::*;
     use crate::expr::parse::parse;
+    use crate::field::Ty;
     use crate::identity::canonicalize_identity;
-    use crate::kinds::field::Ty;
     use crate::normalize::testing::{body, stmt_text, strs, text};
     use crate::text::parse_statement;
 

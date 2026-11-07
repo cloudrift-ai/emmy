@@ -5,11 +5,11 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use crate::body::{Body, MemoKey};
-use crate::kinds::elementwise::{Elementwise, Op};
-use crate::kinds::{Assign, Statement};
+use crate::elementwise::{Elementwise, Op};
 use crate::memo::BODY_MEMO_CAPACITY;
 use crate::normalize::normalize_body;
 use crate::numbering::{digest, hex};
+use crate::statement::{Assign, Statement};
 use crate::{Name, Result, memo};
 
 /// What an identity was computed under: the clustered reading or the exact one, and each buffer's color.

@@ -11,19 +11,19 @@ body and the normal form ARE; this file says how the crate holds them.
 
 ## Layout
 
-The module tree follows the design, one module per concept, and the modules stand in a tower: each imports only the
-ones below it, `kinds` and `body` aside, which define each other's types. From the bottom: `expr/` (the tree, its
-text, the simplifier's walk and the range analysis in `mod.rs`, the simplifier's rewrite rules and the affine form in
-`simplify.rs`, the reader in `parse.rs`), `kinds/` (the kind list and its macros in `mod.rs`, the `Field` trait in
-`field.rs`, axes with their speller, dtypes and the elementwise tables beside it), `body.rs`, `protocol/` (the
-protocol in `mod.rs`, what the shared kinds answer beyond their fields in `kinds.rs`, the construction checks in
-`checks.rs`), `text/` (the printer in `print.rs`, the reader in `parse.rs`, what both spell in `mod.rs`), `order.rs`
-(the dependency constraints; the sort they feed is a `Body` method), `numbering/` (the `Key` tree and its hash in
-`key.rs`, the value numbering in `values.rs`, the scope-tree digest in `digest.rs`), `normalize/` (the driver and the
-helpers the steps share in `mod.rs`, the steps by what they do: `axes`, `fold`, `siblings`, `simplify`, `place`,
-`canonical`, and every tie-break in `ties.rs`), `identity.rs` (the identity of a body's normal form) and `memo.rs`,
-the memo store every memo is declared in. Every file imports what it uses by name; no child module takes its
-parent's imports.
+The module tree follows the design, one module per concept, and the modules stand in a tower: each imports only the ones
+below it, `field`, `statement` and `body` aside, which define each other's types. From the bottom: `expr/` (the tree,
+its text, the simplifier's walk and the range analysis in `mod.rs`, the simplifier's rewrite rules and the affine form
+in `simplify.rs`, the reader in `parse.rs`), `axis.rs` (axes with their speller), `dtype.rs` (the dtype set and
+promotion), `elementwise.rs` (the operation table), `field.rs` (the `Field` trait and the field value types),
+`statement.rs` (the kind list and its macros), `body.rs`, `protocol/` (the protocol in `mod.rs`, what the shared kinds
+answer beyond their fields in `shared.rs`, the construction checks in `checks.rs`), `text/` (the printer in `print.rs`,
+the reader in `parse.rs`, what both spell in `mod.rs`), `order.rs` (the dependency constraints; the sort they feed is a
+`Body` method), `numbering/` (the `Key` tree and its hash in `key.rs`, the value numbering in `values.rs`, the
+scope-tree digest in `digest.rs`), `normalize/` (the driver and the helpers the steps share in `mod.rs`, the steps by
+what they do: `axes`, `fold`, `siblings`, `simplify`, `place`, `canonical`, and every tie-break in `ties.rs`),
+`identity.rs` (the identity of a body's normal form) and `memo.rs`, the memo store every memo is declared in. Every file
+imports what it uses by name; no child module takes its parent's imports.
 
 ## Data
 
@@ -37,7 +37,7 @@ parent's imports.
   ranges and symbolic bounds, the range analysis, the affine form. A literal keeps Python's number model (`Num`: int,
   float or bool, equal by value) because a stored kernel's text spells it that way, and is typed by a `LitType`.
   Integer rewrites are checked: a product that would overflow declines the rewrite rather than fold wrong.
-- **Kinds** (`kinds/mod.rs`): every kind is a struct declared once in the `with_kinds!` macro — its fields, each with a
+- **Kinds** (`statement.rs`): every kind is a struct declared once in the `with_kinds!` macro — its fields, each with a
   type, the roles it plays (`DEFINES`, `READS`, `EXPRESSION`, `AXIS`, `BODY`, `STMTS`, `TERM`, `RECORD`, …) and a
   default — and the Python extension generates its classes from the same list. `define_kinds!` turns the list into the
   structs, the `enum Statement`, the `enum Kind` (one variant per kind, with its name, layer and fields; what a body's
@@ -47,20 +47,20 @@ parent's imports.
   in the set. A kind is a block when a field of it plays `BODY`. The kinds-wide accessors (`op`, `dtype`, `name`) are
   the `Field` trait's: a field type that is one answers, every other field's default is none. A test pins the digest of
   the declaration list, the names and field orders every stored text spells.
-- **Fields** (`kinds/field.rs`): one trait, `Field`, every field type implements: how it is visited and rewritten by
+- **Fields** (`field.rs`): one trait, `Field`, every field type implements: how it is visited and rewritten by
   role, spelled on a declared kind's header and read back by its `Ty`. A number where a name is expected (`NumOr<T>`, a
   carry's literal seed) is plain data. A record (`SelectBranch`, `FragmentArg`) is declared in the same list with a
   layer of its own, a struct whose own fields play roles and a `Field` of the kind that holds it. Every closed set of
   spellings the crate branches on is an enum declared with `closed_set!` (one text per variant, `Display` and `FromStr`
   over them, a test pinning every text, since each is a stored spelling or identity material): the dtypes (`DType`,
-  `kinds/dtype.rs`, with the promotion rule; the extension exports the set as `DTYPES` and a Python test holds it equal
+  `dtype.rs`, with the promotion rule; the extension exports the set as `DTYPES` and a Python test holds it equal
   to the `DataType` registry), the binary operators and literal types (`BinOp`, `LitType`), the GPU built-ins
   (`expr::Builtin`), the expression kinds (`ExprKind`, generated from the one expression list; the digest spells a node
   by it) and the digest's other tags (`numbering::Tag`). A cast's target is `CastTarget`: a literal type the simplifier
   folds through, or any other C type the renderer spells. A value the crate only carries stays a name: a slab's swizzle,
   a tile's raster orientation, a fragment's layout and role, a slab's or an MMA wrapper's C type. An elementwise
   operation is `Op::Known(Elementwise)` or `Op::Other(name)`, a spelling only a renderer knows. The known operations are
-  one declaration (`operations!` in `kinds/elementwise.rs`): each variant with its spelling and its properties, which
+  one declaration (`operations!` in `elementwise.rs`): each variant with its spelling and its properties, which
   generates the enum, its `Display`/`FromStr` pair and the table `OPS` the enum indexes, one `OpInfo` row per operation
   (commutative, associative, the neutral element, the cluster representative, integer arithmetic, whether it copies its
   operand, its affine role, its host evaluator). Every reader of an operation's nature (the affine fold, the alias reads
@@ -69,7 +69,7 @@ parent's imports.
   with, the bounded stand-in `±1e30` the CUDA source spells (and two recipe goldens' bodies, as `-1e+30`; the hardware
   goldens and the corpus seed no maximum). A string of any of these sets exists where the text is read or written, at
   the Python boundary, and nowhere else.
-- **Axes** (`kinds/axis.rs`): `Axis` (name, `Dim`, window), equal by name and extent as the Python class is; the window
+- **Axes** (`axis.rs`): `Axis` (name, `Dim`, window), equal by name and extent as the Python class is; the window
   is provenance. The Python `Axis`, `Dim`, `DataType` and `ElementwiseImpl` objects stay Python classes: a statement
   holds a name (or an axis's parts) and the extension makes the object on first read.
 

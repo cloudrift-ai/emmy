@@ -2,7 +2,7 @@
 //! name, which is what every rule here reads.
 
 use crate::closed_set;
-use crate::kinds::elementwise::Elementwise;
+use crate::elementwise::Elementwise;
 
 closed_set! {
     /// An element type: the compiler's `DataType` registry, by canonical name, the two packed pairs included.

@@ -13,9 +13,9 @@ use crate::Name;
 use crate::Result;
 use crate::body::Body;
 use crate::expr::{BinOp, Expr, ExprKind, Expression, Num, python_repr};
-use crate::kinds::field::{Float, Ty};
-use crate::kinds::{Affine, Statement};
+use crate::field::{Float, Ty};
 use crate::numbering::{Key, Numbering, expression_key};
+use crate::statement::{Affine, Statement};
 
 /// A statement's own shape with every name and buffer one placeholder: its kind, then its fields in declaration order.
 /// Kinds sort by name, which puts every store after the values it reads, as the Python order's structural form had

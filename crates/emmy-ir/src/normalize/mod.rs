@@ -5,14 +5,14 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
+use crate::axis::Axis;
 use crate::body::{Body, MemoKey};
+use crate::elementwise::Op;
 use crate::expr::{Expression, Interval, SimplifyCtx};
-use crate::kinds::axis::Axis;
-use crate::kinds::elementwise::Op;
-use crate::kinds::field::DType;
-use crate::kinds::*;
+use crate::field::DType;
 use crate::memo::BODY_MEMO_CAPACITY;
 use crate::order::topological_sort;
+use crate::statement::*;
 use crate::{Error, Name, Result, memo};
 
 const SYMBOLIC_AXIS_HI: i128 = 1 << 30;
@@ -144,8 +144,8 @@ pub use simplify::*;
 mod tests {
     use super::testing::eval_int;
     use super::*;
+    use crate::axis::Dim;
     use crate::expr::parse as parse_expression;
-    use crate::kinds::axis::Dim;
     use crate::text::{body_text, parse_body};
 
     #[test]
@@ -532,7 +532,7 @@ pub(crate) mod testing {
 
     use crate::Name;
     use crate::body::Body;
-    use crate::kinds::Statement;
+    use crate::statement::Statement;
     use crate::text::{body_text, parse_body, statement_text};
 
     pub(crate) fn body(text: &str) -> Body {

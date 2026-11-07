@@ -7,8 +7,8 @@ use super::{Key, Number, Param, Tag, expression_key, hash_parts};
 use crate::Name;
 use crate::body::{Body, StmtRef};
 use crate::expr::{Expr, ExprKind, Expression};
-use crate::kinds::Statement;
-use crate::kinds::field::NumOr;
+use crate::field::NumOr;
+use crate::statement::Statement;
 use crate::text::structural_text;
 
 /// One body's numbering, by statement ordinal in pre-order.
@@ -73,7 +73,7 @@ struct Context<'a> {
     depths_of: HashMap<Param, Vec<usize>>,
 }
 
-fn descriptor(axis: &crate::kinds::axis::Axis, stmt: &Statement) -> Key {
+fn descriptor(axis: &crate::axis::Axis, stmt: &Statement) -> Key {
     let extent = Key::str(&axis.extent.expression.text());
     let window = match &axis.window {
         None => Key::None,

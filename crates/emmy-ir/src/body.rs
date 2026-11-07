@@ -7,9 +7,9 @@ use std::hash::{Hash, Hasher};
 use std::sync::{Arc, Mutex, OnceLock};
 
 use crate::expr::{Expression, Num};
-use crate::kinds::field::{Axes, AxisRef, Names, Visitor};
-use crate::kinds::{Kind, Roles, Statement};
+use crate::field::{Axes, AxisRef, Names, Visitor};
 use crate::numbering::{Key, expression_key};
+use crate::statement::{Kind, Roles, Statement};
 use crate::{Error, Name, Result, infallible, locked};
 
 /// What `Body::map` applies: a statement to the statements that replace it, or `None` to drop it.
@@ -846,9 +846,9 @@ impl Subroutine {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::kinds::Affine;
-    use crate::kinds::field::{Float, Floats};
+    use crate::field::{Float, Floats};
     use crate::normalize::testing::{accum_names, body, indented, inner, strs};
+    use crate::statement::Affine;
     use crate::text::parse_body;
 
     fn names(list: &[&str]) -> HashSet<Name> {

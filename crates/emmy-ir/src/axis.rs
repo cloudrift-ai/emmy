@@ -5,7 +5,7 @@ use std::hash::{Hash, Hasher};
 use std::sync::Arc;
 
 use crate::expr::{Expr, Expression, Num};
-use crate::kinds::field::spell_stmt_name;
+use crate::field::spell_stmt_name;
 use crate::{Name, Result};
 
 /// The expected size of a symbolic dim when none is supplied.

@@ -4,12 +4,12 @@
 
 use std::sync::{Arc, OnceLock};
 
+use emmy_ir::axis::{Axis, Dim, Window};
 use emmy_ir::body::Body;
+use emmy_ir::elementwise::Op;
 use emmy_ir::expr::{Expression, Num};
-use emmy_ir::kinds::axis::{Axis, Dim, Window};
-use emmy_ir::kinds::elementwise::Op;
-use emmy_ir::kinds::field::{DType, Float, Int2, NumOr, Shape3, SubroutineRef};
-use emmy_ir::kinds::{FragmentArg, SelectBranch, Statement};
+use emmy_ir::field::{DType, Float, Int2, NumOr, Shape3, SubroutineRef};
+use emmy_ir::statement::{FragmentArg, SelectBranch, Statement};
 use emmy_ir::{Error, Name};
 use pyo3::exceptions::{
     PyException, PyKeyError, PyNotImplementedError, PyRecursionError, PyTypeError, PyValueError,

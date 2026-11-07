@@ -5,12 +5,12 @@ use std::collections::HashMap;
 use std::hash::{Hash, Hasher};
 use std::sync::Arc;
 
+use crate::axis::Axis;
+use crate::axis::spell_axis;
 use crate::body::Body;
+use crate::elementwise::Op;
 use crate::expr::{Expression, Num, float_repr, hash_f64, same_f64, spell_name};
-use crate::kinds::axis::Axis;
-use crate::kinds::axis::spell_axis;
-use crate::kinds::elementwise::Op;
-use crate::kinds::{
+use crate::statement::{
     AXIS, AXIS_NAME, BODY, BUFFERS, EXPRESSION, FragmentArg, NAMES, Roles, STMTS, SelectBranch,
     Statement, TERM,
 };
@@ -39,7 +39,7 @@ pub type Ops = Arc<[Op]>;
 pub type Ints = Arc<[i64]>;
 pub type Floats = Arc<[Float]>;
 
-pub use crate::kinds::dtype::DType;
+pub use crate::dtype::DType;
 
 /// A float with the equality a Python float has (`0.0 == -0.0`), hashable.
 #[derive(Clone, Copy, Debug)]

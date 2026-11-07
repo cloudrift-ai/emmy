@@ -4,11 +4,11 @@ use std::collections::{BTreeSet, HashMap, HashSet};
 use std::sync::Arc;
 
 use super::with_bodies;
+use crate::axis::{Axis, Dim};
 use crate::body::{Body, exposed_defines, free_names};
 use crate::expr::{Expression, SimplifyCtx, affine_form};
-use crate::kinds::axis::{Axis, Dim};
-use crate::kinds::*;
 use crate::numbering::{Key, Tag};
+use crate::statement::*;
 use crate::{Name, Result};
 
 // --- sibling reduce loops ---------------------------------------------------------------------------------

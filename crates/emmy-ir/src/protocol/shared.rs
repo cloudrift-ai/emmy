@@ -2,10 +2,10 @@
 //! and its binary form, a select's mask, the literal a statement binds.
 
 use crate::body::Body;
+use crate::elementwise::{Elementwise, Op};
 use crate::expr::{Expr, Expression, LitType};
-use crate::kinds::elementwise::{Elementwise, Op};
-use crate::kinds::field::{AxisRef, Names, NumOr};
-use crate::kinds::*;
+use crate::field::{AxisRef, Names, NumOr};
+use crate::statement::*;
 use crate::{Error, Name, Result};
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
@@ -138,7 +138,7 @@ impl Affine {
             let shown: Vec<String> = self
                 .coefficients
                 .iter()
-                .map(|c| crate::kinds::field::spell_number(c.0))
+                .map(|c| crate::field::spell_number(c.0))
                 .collect();
             return Err(Error::Value(format!(
                 "Affine {name:?} carries a zero coefficient: ({})",
