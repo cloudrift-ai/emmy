@@ -8,12 +8,12 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
-use super::canonical::unlisted;
 use super::with_bodies;
 use crate::Name;
 use crate::body::Body;
-use crate::expr::{Expr, Expression, Num, python_repr};
-use crate::kinds::Statement;
+use crate::expr::{BinOp, Expr, Expression, Lit, Num, python_repr};
+use crate::kinds::field::{Float, Ty};
+use crate::kinds::{Affine, Statement};
 use crate::numbering::{Key, Numbering};
 use crate::text::structural_text;
 
@@ -52,7 +52,7 @@ pub(crate) fn sibling_shape(stmt: &Arc<Statement>) -> Key {
                     Some(expression) if name == "axis" => {
                         Key::Str(extent_digest(expression).into())
                     }
-                    _ => field_key(&text),
+                    _ => field_key(shell.kind().field_ty(name), &text),
                 })
                 .collect::<Vec<_>>()
         })
@@ -68,9 +68,11 @@ pub(crate) fn sibling_spelling(stmt: &Arc<Statement>) -> Key {
     Key::str(&crate::text::structural_body_text(&body))
 }
 
-/// Dependency-valid statement order, commutative operand order and names, all from the value numbering.
-fn field_key(text: &str) -> Key {
-    if text.starts_with('(') && text.ends_with(')') {
+/// A header field's key: its text, and for a sequence field whether it holds one element, which sorts after longer
+/// sequences, as the Python order's text of a one-element tuple did.
+fn field_key(ty: Option<Ty>, text: &str) -> Key {
+    if matches!(ty, Some(Ty::Seq(_) | Ty::Tuple(_))) && text.starts_with('(') && text.ends_with(')')
+    {
         let mut depth = 0i32;
         let mut top_level_comma = false;
         for ch in text.chars() {
@@ -224,4 +226,91 @@ pub(crate) fn operand_ranks(
 /// The key of an operand no statement of the body defines: a free name, after every defined one.
 pub(crate) fn unranked() -> Key {
     Key::tuple([Key::Int(3), Key::str("")])
+}
+
+/// A sum with its coefficients sorted: the order lists a sum's terms itself, so what it sorts by reads none of that.
+pub(crate) fn unlisted(stmt: &Arc<Statement>) -> Arc<Statement> {
+    if let Statement::Affine(a) = &**stmt {
+        let mut coefficients: Vec<Float> = a.coefficients.to_vec();
+        coefficients.sort_by(|x, y| x.0.total_cmp(&y.0));
+        return Arc::new(Statement::Affine(Affine {
+            coefficients: coefficients.into(),
+            ..a.clone()
+        }));
+    }
+    stmt.clone()
+}
+
+/// Where a sibling sorts first: leaves, then blocks, then blocks with side effects.
+pub(crate) fn sibling_category(stmt: &Statement) -> i64 {
+    let block = !stmt.nested().is_empty();
+    if block && stmt.has_side_effects() {
+        2
+    } else {
+        i64::from(!block)
+    }
+}
+
+/// The key a sum's terms sort by: the operand rank, the name, the coefficient.
+pub(crate) fn term_key(operand: Key, name: &Name, coefficient: f64) -> (Key, Name, Key) {
+    (operand, name.clone(), Key::float(coefficient))
+}
+
+/// Whether `op`'s operands may trade places.
+pub(crate) fn commutative(op: BinOp) -> bool {
+    matches!(
+        op,
+        BinOp::Add
+            | BinOp::Mul
+            | BinOp::Eq
+            | BinOp::Ne
+            | BinOp::And
+            | BinOp::Or
+            | BinOp::BitAnd
+            | BinOp::BitOr
+            | BinOp::Xor
+    )
+}
+
+/// An expression's form with every bound axis spelled by its binding position: the order of two operands.
+pub(crate) fn unspelled(e: &Expression, axis_order: &HashMap<Name, usize>) -> Key {
+    match &**e {
+        Expr::Var(name) => match axis_order.get(name) {
+            Some(index) => Key::tuple([Key::str("Var"), Key::Int(*index as i64)]),
+            None => Key::tuple([Key::str("Var"), Key::Str(name.clone())]),
+        },
+        Expr::Literal(Lit { value, dtype }) => Key::tuple([
+            Key::str("Literal"),
+            Key::num(*value),
+            Key::str(dtype.name()),
+        ]),
+        Expr::Builtin(name) => Key::tuple([Key::str("Builtin"), Key::Str(name.clone())]),
+        Expr::Binary(op, l, r) => Key::tuple([
+            Key::str("Binary"),
+            Key::str(op.text()),
+            unspelled(l, axis_order),
+            unspelled(r, axis_order),
+        ]),
+        Expr::Call(name, args) => Key::tuple([
+            Key::str("Call"),
+            Key::Str(name.clone()),
+            Key::tuple(args.iter().map(|a| unspelled(a, axis_order))),
+        ]),
+        Expr::Ternary(a, b, c) => Key::tuple([
+            Key::str("Ternary"),
+            unspelled(a, axis_order),
+            unspelled(b, axis_order),
+            unspelled(c, axis_order),
+        ]),
+        Expr::Cast(dtype, inner) => Key::tuple([
+            Key::str("Cast"),
+            Key::Str(dtype.clone()),
+            unspelled(inner, axis_order),
+        ]),
+        Expr::FlatIndex(buffer, index) => Key::tuple([
+            Key::str("FlatIndex"),
+            Key::Str(buffer.clone()),
+            Key::tuple(index.iter().map(|a| unspelled(a, axis_order))),
+        ]),
+    }
 }

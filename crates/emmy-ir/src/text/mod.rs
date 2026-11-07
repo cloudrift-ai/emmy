@@ -13,7 +13,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use crate::body::{Body, Subroutine};
-use crate::expr::{Expr, Expression, Lit, LitType, Num, Parser, TokenKind};
+use crate::expr::{Expression, Lit, Num, Parser, TokenKind};
 use crate::kinds::axis::{Axis, Dim, Window, spell_axis, spell_window};
 use crate::kinds::elementwise::Op;
 use crate::kinds::field::{DType, Float, NumOr, Ty, Value, Values, spell_number, spell_stmt_name};
@@ -22,19 +22,6 @@ use crate::protocol::finished;
 use crate::{Error, Name, Result};
 
 pub const INDENT: &str = "    ";
-
-/// A literal number's expression text as a statement spells it (for the Python side's `spell_number`).
-pub fn number_text(value: f64) -> String {
-    spell_number(value)
-}
-
-/// A literal expression, for a `Let` built from a bare number.
-pub fn float_literal(value: f64) -> Expression {
-    Expression::new(Expr::Literal(Lit {
-        value: Num::Float(value),
-        dtype: LitType::Float,
-    }))
-}
 
 #[cfg(test)]
 mod tests {

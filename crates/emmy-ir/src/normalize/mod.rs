@@ -5,14 +5,12 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::sync::{Arc, Mutex, OnceLock};
 
-use crate::body::{
-    Body, Normalized, exposed_defines, free_names, free_ssa, ordered_sibling_defs, unique,
-};
-use crate::expr::{BinOp, Expr, Expression, Interval, Lit, Num, SimplifyCtx, affine_form};
+use crate::body::{Body, Normalized, exposed_defines, free_names, unique};
+use crate::expr::{BinOp, Expr, Expression, Interval, SimplifyCtx, affine_form};
 use crate::kinds::axis::{Axis, Dim};
 use crate::kinds::dtype::{is_float, promote};
 use crate::kinds::elementwise::{Op, evaluate_f32};
-use crate::kinds::field::{AxisRef, DType, Float, Names, NumOr};
+use crate::kinds::field::{AxisRef, DType, Float, Names};
 use crate::kinds::*;
 use crate::memo::Memo;
 use crate::numbering::{Key, Number, Numbering, Param, roles, statement_tree, value_numbers};
@@ -169,32 +167,6 @@ pub use fold::*;
 pub use place::*;
 pub use siblings::*;
 pub use simplify::*;
-
-// --- helpers the steps share -------------------------------------------------------------------------------
-
-/// Every `Body` reading the normalization holds of a statement for the `coalesce` step and the readers.
-pub fn body_from_free(stmt: &Arc<Statement>) -> HashSet<Name> {
-    free_ssa(stmt)
-}
-
-pub fn sibling_defs(stmt: &Statement) -> Vec<Name> {
-    ordered_sibling_defs(stmt)
-}
-
-pub fn carried_names_out(body: &Body) -> HashSet<Name> {
-    carried_out(body)
-}
-
-pub fn placeholder_num(value: f64) -> Num {
-    Num::Float(value)
-}
-
-pub fn step_of(step: &NumOr<Expression>) -> Option<&Expression> {
-    match step {
-        NumOr::Value(e) => Some(e),
-        NumOr::Num(_) => None,
-    }
-}
 
 #[cfg(test)]
 mod tests {
