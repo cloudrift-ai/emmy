@@ -2247,3 +2247,103 @@ def test_record_greedy_cold_rows_do_not_replace_hot_measurements(tmp_path):
             )
     rows = [row for row in GoldenFile.load(path).rows if row.measured]
     assert {(bool(row.pins.get("COLD_CACHE")), row.measurements.emmy_us) for row in rows} == {(False, 1.0), (True, 3.0)}
+
+
+def test_a_kernel_priced_at_two_sizes_keeps_a_row_and_a_realization_at_each(tmp_path):
+    """Two programs that differ only in a symbolic size's hint (native's attention, priced per range of windows) lower
+    to one kernel, which keeps a row at each size: a whole-file walk benches each, and a realization's kernel and its
+    Torch twin both run at its row's size, whichever program the kernel was stored from."""
+    import torch
+
+    from emmy.commands.compile import resolve_golden_arg
+    from emmy.compiler.pipeline.search.golden import write_trace_inventories
+    from emmy.compiler.specialize import rehint_program
+    from emmy.compiler.trace.torch import trace_module
+    from emmy.compiler.wire import symbolic_bindings
+
+    class Relu(torch.nn.Module):
+        def forward(self, x):
+            return torch.relu(x)
+
+    traced = trace_module(Relu(), (torch.zeros(512, 8),), dynamic_shapes={"x": {0: torch.export.Dim("seq", min=2, max=1 << 20)}})
+    path = tmp_path / "priced.json"
+    programs = {"relu1": rehint_program(traced, {"seq": 4096}), "relu1-long": rehint_program(traced, {"seq": 131072})}
+    write_trace_inventories(programs, path, ctx=Context.from_target((8, 9)))
+    document = GoldenFile.load(path)
+    assert len(document.kernels) == 1
+    assert sorted((row.name.split(".")[0], row.bindings["seq"]) for row in document.rows) == [("relu1", 4096), ("relu1-long", 131072)]
+    assert len(document.target_rows()) == 2
+    long = next(row for row in document.rows if row.bindings["seq"] == 131072)
+    args = _args(path, realization=long.name)
+    resolve_golden_arg(args)
+    for graph in (args._golden_graph, args._golden_reference):
+        assert symbolic_bindings(node.output for node in graph.nodes.values()) == {"seq": 131072}
+
+
+def test_a_piece_whose_buffers_name_no_size_runs_at_each_size_of_its_target(tmp_path):
+    """A split's combine step reads the partials and writes the output, buffers of fixed size, yet its row records a
+    size, the default hint of a reduce axis its table keeps from its parent: it is no size of the target's, so a
+    whole-file walk benches the target at the target's two sizes and never at a third, each run with the piece."""
+    import torch
+
+    from emmy.compiler.pipeline.search.db import RoutingRow
+    from emmy.compiler.pipeline.search.golden import write_trace_inventories
+    from emmy.compiler.specialize import rehint_program
+    from emmy.compiler.trace.torch import trace_module
+    from emmy.compiler.wire import symbolic_vars
+
+    class Relu(torch.nn.Module):
+        def forward(self, x):
+            return torch.relu(x)
+
+    traced = trace_module(Relu(), (torch.zeros(512, 8),), dynamic_shapes={"x": {0: torch.export.Dim("seq", min=2, max=1 << 20)}})
+    programs = {
+        "relu1": rehint_program(traced, {"seq": 4096}),
+        "relu1-long": rehint_program(traced, {"seq": 131072}),
+        "combine": trace_module(Relu(), (torch.zeros(4, 8),)),
+    }
+    path = tmp_path / "priced.json"
+    write_trace_inventories(programs, path, ctx=Context.from_target((8, 9)))
+    with GoldenFile.edit(path) as document:
+        [target] = [kernel for kernel in document.kernels if symbolic_vars(kernel.loop_ir)]
+        [piece] = [kernel for kernel in document.kernels if not symbolic_vars(kernel.loop_ir)]
+        [combine] = [row for row in document.rows if row.kernel == piece.ref]
+        document.kernels[document.kernels.index(piece)] = replace(piece, traced=None, origins=())
+        document.rows[document.rows.index(combine)] = replace(combine, bindings={"seq": 512})
+        document.add_routing(RoutingRow(target.ref, {"REDUCE": "g2k"}, (piece.ref,)))
+
+    groups = GoldenFile.load(path).target_rows()
+    assert sorted(dict(sizes)["seq"] for _, _, sizes in groups) == [4096, 131072]
+    assert all(combine.name in {row.name for row in rows} for rows in groups.values())
+
+
+def test_a_program_appended_at_two_sizes_replays_at_each(monkeypatch, tmp_path):
+    """One symbolic program appended at two sizes lowers to one kernel, with a row at each size under a name of its
+    own: a whole-file walk runs the kernel at each size, never one size twice."""
+    import torch
+
+    from emmy.commands import run as run_mod
+    from emmy.commands.compile import resolve_golden_arg
+    from emmy.compiler.pipeline.search.golden import append_trace_inventory, write_trace_inventory
+    from emmy.compiler.specialize import rehint_program
+    from emmy.compiler.trace.torch import trace_module
+    from emmy.compiler.wire import symbolic_bindings
+
+    class Relu(torch.nn.Module):
+        def forward(self, x):
+            return torch.relu(x)
+
+    traced = trace_module(Relu(), (torch.zeros(512, 8),), dynamic_shapes={"x": {0: torch.export.Dim("seq", min=2, max=1 << 20)}})
+    path = tmp_path / "working.json"
+    ctx = Context.from_target((8, 9))
+    write_trace_inventory(rehint_program(traced, {"seq": 4096}), path, ctx=ctx)
+    append_trace_inventory(rehint_program(traced, {"seq": 131072}), path, ctx=ctx)
+    sizes = []
+
+    def run_once(args):
+        resolve_golden_arg(args)
+        sizes.append(symbolic_bindings(node.output for node in args._golden_graph.nodes.values())["seq"])
+
+    monkeypatch.setattr(run_mod, "_handle_run_once", run_once)
+    run_mod._run_golden_targets(_args(path, realization=None, ir=None, json=None))
+    assert sorted(sizes) == [4096, 131072]

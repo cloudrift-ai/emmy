@@ -150,7 +150,8 @@ programs into its step — sharing each buffer the target already holds under it
 buffer specs (one `BufferSpec` per BUFFER — a multi-output node mints one per output slot, each with its own
 role via `graph.buffer_role`), scalar/runtime constants, the launch list (`LaunchSpec.writes` names every
 buffer a launch produces; a scratch planner's first-write test reads it, falling back to `node_id` for plans
-stored before the field existed), symbolic-axis plumbing, kernel refs (source and/or a content-addressed
+stored before the field existed; `LaunchSpec.size_range` limits a launch to a range of one symbolic size, as native
+runs each range of windows' attention), symbolic-axis plumbing, kernel refs (source and/or a content-addressed
 cubin-cache key), and per-weight checkpoint bindings (`source_path` + a pack-own load-op vocabulary applied
 with pure numpy). A kernel ref also records `arch_specific` — whether it must compile for the arch-SUFFIXED
 target (`sm_120a`, `sm_90a`). Three unrelated instruction families need that suffix: TMA, which announces itself

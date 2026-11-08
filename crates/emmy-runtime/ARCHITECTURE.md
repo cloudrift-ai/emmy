@@ -338,7 +338,11 @@ Attention reads the cache to a window, the programs' symbolic `cache_tokens` axi
 at its hint, the context. Before each step the generator sets it to the positions the step reads, rounded up to a
 step of 4,096 and capped at the context (`set_env`), so attention's work grows with the request rather than the
 context. A window replays its own graph (`Executor` keeps one per environment), so a request captures one per
-4,096 positions it reaches: 64 at a 262,144-token context, within the executor's graph cache.
+4,096 positions it reaches: 64 at a 262,144-token context, within the executor's graph cache. A step holds each
+attention program once per range of windows, each priced at one window of its range (the native export's
+`WINDOW_RANGES`), and each of their launches names its range (`size_range`, the size it reads and its first and last
+value): the executor skips a launch whose range misses the environment, so a window's graph holds its range's
+attention alone. The ranges' scratch shares one slab by liveness, since they run one after the other.
 Nothing the device runs is hand-written. Its explicit `ignore_eos` control permits fixed-output serving benchmarks to
 continue after EOS; ordinary worker generation retains EOS stopping. `generate` owns the complete prompt/decode loop
 and stops at EOS or the requested output count, and returns each token with the time since the request started at
