@@ -49,6 +49,7 @@ from dataclasses import dataclass
 
 from emmy.compiler.dim import Dim
 from emmy.compiler.dtype import I32
+from emmy.compiler.ir.address import copies_aligned
 from emmy.compiler.ir.axis import Axis
 from emmy.compiler.ir.expression import (
     BinaryExpr,
@@ -830,6 +831,9 @@ class SyncTransport:
     # ``True`` → the schedule asked for a ring (``depth >= 2``), so split that blocking copy across
     # the drain. :attr:`register_staged` is the confirmed answer.
     staged: bool = False
+    # The kernel's gmem buffers by name — the shapes :meth:`_run_plans` proves a vector read's alignment against. A
+    # read of a buffer missing here stays per-cell.
+    inputs: object = None
 
     @property
     def register_staged(self) -> bool:
@@ -917,8 +921,7 @@ class SyncTransport:
         d = BinaryExpr("-", fb[0], fa[0]).simplify(ctx)
         return d.value if isinstance(d, Literal) and isinstance(d.value, int) else None
 
-    @staticmethod
-    def _run_plans(op: SyncOperand, v: int) -> list[str]:
+    def _run_plans(self, op: SyncOperand, v: int) -> list[str]:
         """Per-position emission plan for one operand's ``V``-cell fill run — ``"hoist"`` /
         ``"vector"`` / ``"cell"``. Classified by PROBING the value closure at synthetic coords
         (col 0 vs col 1; the probe stmts are planning-only, never emitted):
@@ -927,30 +930,19 @@ class SyncTransport:
           row alone) — emit once, unsuffixed, but only while its SSA deps stay outside the
           per-cell defs (a dep on a replicated name demotes it back to per-cell);
         - a scalar ``Load`` whose last-dim index advances by exactly +1 per cell, leading dims
-          col-free, and whose ``col=0, k0=0`` anchor simplifies to a ``V``-aligned literal (the
-          cone's k-indexed operand read; K-divisibility eligibility makes the buffer's k extent
-          ``V``-aligned) ⇒ the run's V scalar loads merge into ONE vector ``Load``;
+          col-free, and whose every run starts on a ``V``-element boundary of its buffer (the
+          cone's k-indexed operand read) ⇒ the run's V scalar loads merge into ONE vector ``Load``.
+          A run starts at a multiple of ``V`` along the slab col, and the chunk base ``k0`` is one
+          too, so :func:`copies_aligned` proves the rest of the address at ``k0 = 0``: a slice's
+          offset, and every leading coordinate times its row stride (a 260-wide bf16 row puts
+          every odd row 8 B off the 16 B grid);
         - anything else replicates per cell (a cone stmt whose read doesn't advance +1 with
-          the slab col — e.g. a col-strided gather)."""
-        probe_row, probe_k0, zero = Var("__srow"), Var("__sk0"), Literal(0, "int")
+          the slab col — e.g. a col-strided gather, or a vector read no shape proves aligned)."""
+        probe_row, probe_k0, probe_col, zero = Var("__srow"), Var("__sk0"), Var("__scol"), Literal(0, "int")
         s0, _ = op.value(probe_k0, probe_row, zero)
         s1, _ = op.value(probe_k0, probe_row, Literal(1, "int"))
-        sz, _ = op.value(zero, probe_row, zero)
+        sz, _ = op.value(zero, probe_row, probe_col)
         ctx = SimplifyCtx.empty()
-
-        def aligned(expression: Expression) -> bool:
-            form = affine_form(expression, expression.free_vars())
-            if form is None:
-                return False
-            anchor, coeffs = form
-            anchor = anchor.simplify(ctx)
-            return (
-                isinstance(anchor, Literal)
-                and isinstance(anchor.value, int)
-                and anchor.value % v == 0
-                and all(coeff % v == 0 for coeff in coeffs.values())
-            )
-
         plans: list[str] = []
         cell_defs: set[str] = set()
         for p, (a, b) in enumerate(zip(s0, s1, strict=True)):
@@ -967,7 +959,7 @@ class SyncTransport:
                 and all(str(x) == str(y) for x, y in zip(a.index[:-1], b.index[:-1], strict=True))
                 and step == 1
                 and isinstance(sz[p], Load)
-                and aligned(sz[p].index[-1])
+                and copies_aligned(sz[p], probe_col.name, v, self.inputs)
             ):
                 plans.append("vector")
             else:
