@@ -128,6 +128,10 @@ def _hoist_loop_invariants(stmts: Body) -> Body:
             candidates -= pinned
         return candidates
 
+    def _reads(s: Statement) -> set[str]:
+        """Every name the subtree of ``s`` reads, one it rebinds included: a self-update reads the state it carries."""
+        return set(s.deps()) | {name for body in s.nested() for c in body for name in _reads(c)}
+
     def walk(body: Body) -> list[Statement]:
         new_body: list[Statement] = []
         for s in body:
@@ -138,7 +142,7 @@ def _hoist_loop_invariants(stmts: Body) -> Body:
                 for index, c in enumerate(inner):
                     for name in c.defines():
                         first.setdefault(name, index)
-                carried = {name for index, c in enumerate(inner) for name in c.deps() if first.get(name, -1) >= index}
+                carried = {name for index, c in enumerate(inner) for name in _reads(c) if first.get(name, -1) >= index}
                 hoisted = _closed_under_constraints(inner, {index for index, c in enumerate(inner) if _hoistable(c, axis, carried)})
                 new_body.extend(c for index, c in enumerate(inner) if index in hoisted)
                 new_body.append(s.replace(body=tuple(c for index, c in enumerate(inner) if index not in hoisted)))

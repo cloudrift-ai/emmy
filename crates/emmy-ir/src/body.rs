@@ -674,12 +674,17 @@ impl Body {
             }
         }
         if ordered.len() == n {
-            Ok(ordered)
-        } else {
-            Err(Error::Value(
-                "a scope's bindings and reads order no way: a statement waits on one that waits on it".into(),
-            ))
+            return Ok(ordered);
         }
+        let placed: HashSet<usize> = ordered.iter().copied().collect();
+        let waiting: Vec<String> = (0..n)
+            .filter(|index| !placed.contains(index))
+            .map(|index| crate::text::statement_text(&self.stmts()[index]).unwrap_or_default())
+            .collect();
+        Err(Error::Value(format!(
+            "a scope's bindings and reads order no way: these wait on each other:\n{}",
+            waiting.join("\n")
+        )))
     }
 
     /// This body in an order `incoming` allows, source order breaking ties.

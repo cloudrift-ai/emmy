@@ -7,7 +7,7 @@ use std::sync::Arc;
 
 use crate::Name;
 use crate::Result;
-use crate::body::{Body, free_ssa, ordered_sibling_defs};
+use crate::body::{Body, free_ssa, loop_parts, ordered_sibling_defs};
 use crate::protocol::carried_cells;
 use crate::statement::Statement;
 
@@ -67,33 +67,44 @@ pub fn ordering_constraints(body: &Body, effects: bool) -> Vec<HashSet<usize>> {
             definitions.entry(name).or_default().push(index);
         }
     }
-    // A state whose every definition here is its next value within the step (a `Carry`, or a cell loop of the step
-    // holding one) orders nothing in this scope: a `Pre` reads the step before, whichever side of the update it sits on.
-    // The loop that carries the state produces it, and its readers follow that loop.
-    let carried: HashSet<&Name> = definitions
+    // How each name's sites define it: every site an accumulator's update, every site a carried state's next value, or
+    // bindings (a producer among them: the loop that folds or carries the name).
+    let site_kinds: Vec<HashMap<Name, Site>> = stmts.iter().map(|stmt| site_kinds(stmt)).collect();
+    let kinds: HashMap<&Name, Site> = definitions
         .iter()
-        .filter(|(name, sites)| sites.iter().all(|site| carry_site(&stmts[*site], name)))
-        .map(|(name, _)| *name)
+        .map(|(name, sites)| {
+            let mut found = sites.iter().map(|site| {
+                site_kinds[*site]
+                    .get(*name)
+                    .copied()
+                    .unwrap_or(Site::Binding)
+            });
+            let first = found.next().unwrap_or(Site::Binding);
+            let kind = if found.all(|kind| kind == first) {
+                first
+            } else {
+                Site::Binding
+            };
+            (*name, kind)
+        })
         .collect();
+    // A carried state orders nothing in its scope: a `Pre` reads the step before, whichever side of the update it
+    // sits on. The loop that carries the state produces it, and its readers follow that loop.
     let sites_of = |name: &Name| {
-        if carried.contains(name) {
+        if kinds.get(name) == Some(&Site::Carry) {
             return &[][..];
         }
         definitions.get(name).map_or(&[][..], |v| &v[..])
     };
-    // A read binds the update or binding before it. Ahead of every one: an accumulator (a state the loop carries, every
-    // site an `Accum`) reads the step before, a binding that reads its own name reads the name outside the scope, and
-    // any other read binds the first binding (a scope is order-free).
+    // A read binds the update or binding before it. Ahead of every one: an accumulator reads the step before, a binding
+    // that reads its own name reads the name outside the scope, and any other read binds the first binding (a scope
+    // is order-free).
     let defining_stmt = |name: &Name, consumer: usize| -> Option<usize> {
         let sites = sites_of(name);
         if let Some(preceding) = sites.iter().rev().find(|site| **site < consumer) {
             return Some(*preceding);
         }
-        let accumulator = !sites.is_empty()
-            && sites
-                .iter()
-                .all(|site| matches!(&*stmts[*site], Statement::Accum(_)));
-        if accumulator || sites.contains(&consumer) {
+        if kinds.get(name) == Some(&Site::Accumulator) || sites.contains(&consumer) {
             return None;
         }
         sites.first().copied()
@@ -179,35 +190,54 @@ pub fn ordering_constraints(body: &Body, effects: bool) -> Vec<HashSet<usize>> {
     incoming
 }
 
-/// Whether `stmt`'s definition of `name` is a carried state's next value within its step: a `Carry`, or a nested
-/// statement that holds the `Carry` without carrying the state itself (a cell loop of the step) and defines the name
-/// no other way.
-fn carry_site(stmt: &Statement, name: &Name) -> bool {
-    if let Statement::Carry(carry) = stmt {
-        return carry.name == *name;
+/// How a sibling statement defines a name: as a binding or a producer, which its readers follow; as an update of an
+/// accumulator, read where it stands; or as the next value of a carried state within its step, which orders nothing.
+#[derive(Clone, Copy, PartialEq)]
+enum Site {
+    Binding,
+    Accumulator,
+    Carry,
+}
+
+/// How `stmt` defines each name it exposes, in one walk of its subtree: a leaf `Accum` or `Carry`, or a block holding
+/// one, is the update it holds, unless the block is the loop that folds the accumulator or carries the state — that
+/// loop produces it. A name the walk meets no update of is a binding.
+fn site_kinds(stmt: &Statement) -> HashMap<Name, Site> {
+    let mut kinds = HashMap::new();
+    match stmt {
+        Statement::Accum(a) => {
+            kinds.insert(a.name, Site::Accumulator);
+            return kinds;
+        }
+        Statement::Carry(c) => {
+            kinds.insert(c.name, Site::Carry);
+            return kinds;
+        }
+        _ => {}
     }
-    let bodies = stmt.nested();
-    if bodies.is_empty()
-        || bodies
-            .iter()
-            .any(|body| carried_cells(body).iter().any(|(state, _)| state == name))
-    {
-        return false;
-    }
-    let (mut carry, mut other) = (false, false);
-    for body in &bodies {
-        body.walk(&mut |here| {
-            let leaf = here.stmt();
-            if leaf.nested().is_empty() && leaf.defines().contains(name) {
-                if matches!(&**leaf, Statement::Carry(_)) {
-                    carry = true;
+    let axes = stmt.binds_axes();
+    for body in stmt.nested() {
+        body.walk(&mut |here| match &**here.stmt() {
+            Statement::Accum(a) => {
+                let kind = if a.axes.iter().any(|axis| axes.contains(axis)) {
+                    Site::Binding
                 } else {
-                    other = true;
-                }
+                    Site::Accumulator
+                };
+                kinds.insert(a.name, kind);
             }
+            Statement::Carry(c) => {
+                kinds.insert(c.name, Site::Carry);
+            }
+            _ => {}
         });
     }
-    carry && !other
+    if let Some((_, body)) = loop_parts(stmt) {
+        for (state, _) in carried_cells(body) {
+            kinds.insert(state, Site::Binding);
+        }
+    }
+    kinds
 }
 
 /// Stable recursive dependency sort used before structural normalization. A name bound twice in one scope, which

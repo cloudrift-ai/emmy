@@ -52,16 +52,16 @@ pub(crate) struct SequentialScope {
     fixed: HashSet<Name>,
 }
 
-/// The names a leaf statement defines, from the names in scope before it to the names after it: after the rename under
-/// the reads' map, its definitions alone move on.
-struct Redefine<'a> {
-    fresh: &'a HashMap<Name, Name>,
+/// A leaf statement's definitions under spellings no name takes, so that one rename can then give its reads the names
+/// in scope before it and its definitions the names after it, however the two spellings coincide.
+struct Definitions<'a> {
+    temporaries: &'a HashMap<Name, Name>,
 }
 
-impl Rewriter for Redefine<'_> {
+impl Rewriter for Definitions<'_> {
     fn name(&mut self, roles: Roles, name: &Name) -> Name {
         if roles.contains_any(DEFINES) {
-            self.fresh.get(name).copied().unwrap_or(*name)
+            self.temporaries.get(name).copied().unwrap_or(*name)
         } else {
             *name
         }
@@ -104,21 +104,26 @@ impl SequentialScope {
         if children.is_empty() {
             // The reads take the names in scope before the statement, the definitions the names after it: a second
             // binding of a name this scope owns (motion can put two lexical bindings in one scope) is a value of its
-            // own, and a first binding that reads an outer name of its spelling reads the outer value.
-            let reads = self.names(&self.inherited_axes);
-            let mut fresh: HashMap<Name, Name> = HashMap::new();
-            for name in stmt.defines() {
+            // own, and a first binding that reads an outer name of its spelling reads the outer value. The definitions
+            // pass through spellings no name takes, so a definition spelled like another's sequential name is no clash.
+            let mut names = self.names(&self.inherited_axes);
+            let mut temporaries: HashMap<Name, Name> = HashMap::new();
+            for (index, name) in stmt.defines().into_iter().enumerate() {
                 if stmt.is_pure() && self.owned.contains(&name) {
                     self.ssa.insert(name, counters.fresh(ssa_prefix(stmt)));
                 } else {
                     self.allocate(counters, &name, ssa_prefix(stmt));
                 }
                 if let Some(new) = self.ssa.get(&name) {
-                    fresh.insert(reads.get(&name).copied().unwrap_or(name), *new);
+                    let temporary = Name::new(&format!("__defines__{index}"));
+                    temporaries.insert(name, temporary);
+                    names.insert(temporary, *new);
                 }
             }
-            let renamed = Statement::rename(stmt, &reads);
-            return Arc::new(renamed.rewrite_fields(&mut Redefine { fresh: &fresh }));
+            let retagged = Arc::new(stmt.rewrite_fields(&mut Definitions {
+                temporaries: &temporaries,
+            }));
+            return Statement::rename(&retagged, &names);
         }
         for name in &exported {
             self.allocate(counters, name, "acc");
@@ -741,6 +746,101 @@ Q[] = y",
         let normal = text(&normal);
         assert!(
             !normal.contains("acc") && !normal.contains("<-"),
+            "{normal}"
+        );
+    }
+
+    /// An accumulator updated under a condition is still read where it stands: the reads ahead of the update stay
+    /// ahead of it.
+    #[test]
+    fn an_accumulator_updated_under_a_condition_is_read_where_it_stands() {
+        let normal = text(
+            &normalize_body(&body(
+                "for i in 0..8:
+    for k in 0..4:
+        x = load X[i, k]
+        m_new = maximum(m, x)
+        scale = exp(m - m_new)
+        if k < 3:
+            m <- maximum(m, x) over k
+        s_old = s * scale
+        s <- add(s_old, m_new) over k
+    O[i] = s",
+            ))
+            .unwrap(),
+        );
+        let lines: Vec<&str> = normal.lines().map(str::trim).collect();
+        let at = |needle: &str| {
+            lines
+                .iter()
+                .position(|l| l.starts_with(needle))
+                .unwrap_or_else(|| panic!("{needle}: {normal}"))
+        };
+        assert!(at("v0 = maximum(acc0, in0)") < at("if "), "{normal}");
+        assert!(at("v1 = acc0 - v0") < at("if "), "{normal}");
+    }
+
+    /// A carried state's cell loop under a condition is still the step's own update: the body has a reading.
+    #[test]
+    fn a_carried_states_cell_loop_under_a_condition_orders_nothing_within_its_step() {
+        let normal = normalize_body(&body(
+            "for c in 0..3:
+    if c < 2:
+        for i in 0..4:
+            u = load U[c, i]
+            own = pre S[i]
+            next = add(own, u)
+            S[i] <- next seed 0
+for r in 0..4:
+    last = pre S[r]
+    out[r] = last",
+        ));
+        assert!(normal.is_ok(), "{normal:?}");
+    }
+
+    /// A statement that rebinds one name and binds another spelled like the first's sequential name gives each its own
+    /// name: the definitions map through the statement's own names, the reads through the scope's.
+    #[test]
+    fn a_rebind_beside_a_name_spelled_like_a_sequential_one_takes_two_names() {
+        let normal = text(
+            &normalize_body(&body(
+                "x = load A[0]\nP[] = x\nx, in0 = load B[0]\nz = add(x, in0)\nO[] = z",
+            ))
+            .unwrap(),
+        );
+        assert_eq!(
+            normal,
+            "in0, in1 = load B[0]\nv0 = in0 + in1\nin2 = load A[0]\nO[] = v0\nP[] = in2"
+        );
+    }
+
+    /// A one-step reduction's accumulator read ahead of the update through a name field (a select branch) reads the
+    /// seed too, and a masked element (`-inf`) meets the seed a kernel starts from, not the neutral element: no `NaN`.
+    #[test]
+    fn a_one_step_reductions_seed_is_the_kernels_and_reaches_a_name_field() {
+        let normal = text(
+            &normalize_body(&body(
+                "for i in 0..8:
+    for k in 0..1:
+        x = load X[i, k]
+        m_new = maximum(m, x)
+        scale = exp(m - m_new)
+        y = select:
+            m when i < 4
+            x when true
+        m <- maximum(m, x) over k
+        s_old = s * scale
+        s <- add(s_old, y) over k
+    O[i] = s",
+            ))
+            .unwrap(),
+        );
+        assert!(
+            !normal.contains("inf") && !normal.contains("acc"),
+            "{normal}"
+        );
+        assert!(
+            normal.contains("e+30") || normal.contains("e30"),
             "{normal}"
         );
     }

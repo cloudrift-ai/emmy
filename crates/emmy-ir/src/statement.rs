@@ -151,6 +151,10 @@ macro_rules! with_statement_types {
                 /// the wrapping reduce `Loop`) and propagated by every rewrite that renames axes via Sigma. Used by the escape-
                 /// analysis helper to derive cross-thread cooperativity (`Accum.axes ∩ enclosing ThreadTile.axes`); empty tuple =
                 /// legacy/handwritten path with no reduction-axis info.
+                ///
+                /// The accumulator is read where it stands: within one step of its loop, a read of `name` ahead of the update
+                /// is the value the step started from (the step before, or the seed), a read behind it the updated value. The
+                /// order keeps every read on its side of the update.
                 shared Accum {} {
                     name: Name [DEFINES],
                     value: Expression [EXPRESSION | READS] : Value,

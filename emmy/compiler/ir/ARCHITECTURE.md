@@ -805,8 +805,12 @@ from that CSE form. Subroutine boundaries never limit fusion.
   ancestors. Conditions and unseeded loops preserve the state they update, including an explicit enclosing seed.
   Axis renames reach conditions, reduction metadata, and `Window` parent/base/bound metadata as well as indices; a
   reduction's axis tuple is canonicalized as a set. SSA values travel only through the rename channel, never `sigma`,
-  so indirect indices cannot be renamed twice. Two lexical bindings of one name in one scope, which motion can
-  produce, keep their lexical reading through the order, and the sequential names tell them apart.
+  so indirect indices cannot be renamed twice. The order reads a scope lexically: two bindings of one name, which
+  motion can produce, keep their source order and a read binds the one before it (or the first, where none precedes:
+  a scope is order-free); an accumulator is read where it stands — ahead of its update the step before, behind it the
+  updated value — so the online softmax's rescale reads the old maximum beside the new one; a carried state orders
+  nothing within its step, since a `Pre` reads the step before wherever it sits, while the loop that carries the state
+  produces it. A scope whose bindings and reads wait on each other has no reading, and normalization refuses it.
 - Normalization runs its steps once and checks nothing. The steps that feed each other run to their own fixed
   point where they sit: a value placed outside its loop can expose a sibling merge, two reads placement made one can
   leave a predicate constant, and a merge exposes values to place, so the merge, the expression simplification and
