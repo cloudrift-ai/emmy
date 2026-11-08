@@ -290,9 +290,9 @@ closed_set! {
     /// a renderer knows) over any operand: SSA names, axes, GPU built-ins, literals of any type, select, cast and a
     /// buffer's flat index. `Index` is its restriction to integer arithmetic over integer operands: the affine
     /// operations, division and remainder, minimum and maximum, the comparisons and logical operators, the bitwise
-    /// operators and shifts, over axes, built-ins, names and integer literals. In either, an operation node spells its
-    /// operation one way: a `Binary` holds an operation with an infix, a `Call` never names one. Every expression
-    /// field declares the class it admits beside its roles.
+    /// operators and shifts, over axes, built-ins, names and integer literals. The class is also the coefficient domain
+    /// of the affine form its sums take: integers for an `Index`, floats for a `Value`. Every expression field declares
+    /// the class it admits beside its roles.
     pub enum ExprClass ("expression class") { Index = "Index", Value = "Value", }
 }
 

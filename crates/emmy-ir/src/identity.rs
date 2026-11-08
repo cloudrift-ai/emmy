@@ -6,7 +6,7 @@ use std::sync::Arc;
 
 use crate::body::{Body, MemoKey};
 use crate::elementwise::Operation;
-use crate::expr::Expression;
+use crate::expr::{ExprClass, Expression};
 use crate::memo::BODY_MEMO_WEIGHT;
 use crate::normalize::canonical::affine_terms;
 use crate::normalize::normalize_body;
@@ -82,7 +82,7 @@ fn clustered(value: &Expression, represent: &mut dyn FnMut(Operation) -> Operati
     };
     // The children are clustered already: a sum's terms are what the walk through its affine nodes finds.
     if op.info().affine.is_some() {
-        let terms = affine_terms(&value).terms;
+        let terms = affine_terms(&value, ExprClass::Value).terms;
         if terms.len() != 1 || terms[0].1 != value {
             let mut operands = terms.into_iter().map(|(_, term)| term);
             let Some(first) = operands.next() else {

@@ -756,9 +756,11 @@ from that CSE form. Subroutine boundaries never limit fusion.
   unread in turn, and one call drops the whole chain. A body that stores nothing is a fragment whose values are all
   its reader's, so nothing is dropped from it.
 - `fold_single_readers` — a pure `Assign` read exactly once in its scope folds into its reader's expression (an
-  `Assign`, an `Accum`, an index or a predicate), and every value is spelled in affine form: like terms summed, zero
-  terms dropped, the constant last, a division by a float literal the product by its reciprocal. `x + x`, `2 * x` and
-  `x + 3 * x - x` are then one body, `x / 2.0` and `0.5 * x` another, and `x - x` is `0`. The fold reassociates a sum
+  `Assign`, an `Accum`, an index or a predicate), and every expression is spelled in affine form: like terms summed,
+  zero terms dropped, the constant last, in the coefficient domain of its field's class — an index folds integer
+  literals alone and keeps a quotient a term, a value folds any literal and a division by a float literal into the
+  product by its reciprocal. `x + x`, `2 * x` and `x + 3 * x - x` are then one body, `x / 2.0` and `0.5 * x` another,
+  and `x - x` is `0`. The fold reassociates a sum
   and rounds a reciprocal once, which every reduce schedule and fast-math division do already; a value read more than
   once stays a statement, since sharing is what a statement expresses.
 - `merge_sibling_reduce_loops` — unify sibling reduce axes whose Load positions overlap, then merge matching Loops

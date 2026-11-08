@@ -7,8 +7,9 @@ use std::sync::Arc;
 use super::ties;
 use super::{carried_out, unify_siblings, with_bodies};
 use crate::body::{Body, free_names, unique};
-use crate::elementwise::{AffineRole, ElementwiseOp, Operation};
-use crate::expr::{Expr, Expression, LitType, SimplifyCtx, affine_form};
+use crate::elementwise::{AffineRole, Operation};
+use crate::expr::{Expr, ExprClass, Expression, LitType};
+use crate::field::Rewriter;
 use crate::numbering::{Chains, Key, Numbering, roles, statement_tree, value_numbers};
 use crate::order::ordering_constraints;
 use crate::statement::*;
@@ -243,7 +244,7 @@ pub fn canonical_order(body: &Body) -> Result<Body> {
     let operand = ties::operand_ranks(&placed, &result, &numbering);
     let operand_key = |name: &Name| operand.get(name).cloned().unwrap_or_else(ties::unranked);
     let rank = |name: &Name| operand_key(name);
-    let listed = result.map_stmts(&mut |stmt| Some(value_fields(stmt, &rank)));
+    let listed = result.map_stmts(&mut |stmt| Some(canonical_fields(stmt, &rank)));
     // Sequential naming separates lexical binders. Restore shared reduction dimensions without merging dependent
     // loops or changing the order.
     let unified = listed.try_map_stmts(&mut |stmt| {
@@ -257,122 +258,24 @@ pub fn canonical_order(body: &Body) -> Result<Body> {
     unify_siblings(&unified)
 }
 
-/// A sum over bound axes with its terms in binding order and its anchor last.
-fn affine(expression: Expression, axis_order: &HashMap<Name, usize>) -> Result<Expression> {
-    let variables = expression.free_vars();
-    // Reassociation and coefficient folding are exact for integer coordinates; an SSA value may be floating point.
-    if variables.is_empty() || !variables.iter().all(|v| axis_order.contains_key(v)) {
-        return Ok(expression);
-    }
-    let Some((anchor, coefficients)) = affine_form(&expression, &|name| variables.contains(&name))
-    else {
-        return Ok(expression);
-    };
-    let anchor = anchor.simplify(&SimplifyCtx::empty())?;
-    let mut sorted: Vec<(&Name, &i64)> = coefficients.iter().collect();
-    sorted.sort_by_key(|(name, _)| axis_order[*name]);
-    let mut terms: Vec<Expression> = Vec::new();
-    for (name, coefficient) in sorted {
-        let variable = Expression::new(Expr::Var(*name));
-        terms.push(if *coefficient == 1 {
-            variable
-        } else {
-            Expression::binary(Operation::Multiply, Expression::int(*coefficient), variable)
-        });
-    }
-    if !anchor.is_zero() {
-        terms.push(anchor);
-    }
-    let mut terms = terms.into_iter();
-    let Some(mut result) = terms.next() else {
-        return Ok(Expression::int(0));
-    };
-    for term in terms {
-        result = Expression::binary(Operation::Add, result, term);
-    }
-    Ok(result)
-}
-
-/// `e` canonicalized: comparisons as `<` and `<=`, commutative operands ordered, sums in affine form.
-fn rewrite(e: &Expression, axis_order: &HashMap<Name, usize>) -> Result<Expression> {
-    Ok(match &**e {
-        Expr::Apply(ElementwiseOp::Known(op), args) if op.infix().is_some() && args.len() == 2 => {
-            let (mut left, mut right) = (
-                rewrite(&args[0], axis_order)?,
-                rewrite(&args[1], axis_order)?,
-            );
-            let mut op = *op;
-            if matches!(op, Operation::Greater | Operation::GreaterEqual)
-                && let Some(mirrored) = op.mirror()
-            {
-                op = mirrored;
-                std::mem::swap(&mut left, &mut right);
-            }
-            if op.info().commutative
-                && ties::unspelled(&right, axis_order) < ties::unspelled(&left, axis_order)
-            {
-                std::mem::swap(&mut left, &mut right);
-            }
-            let result = Expression::binary(op, left, right);
-            if matches!(
-                op.info().affine,
-                Some(AffineRole::Sum | AffineRole::Difference | AffineRole::Scale)
-            ) {
-                affine(result, axis_order)?
-            } else {
-                result
-            }
+/// Every expression of `stmt` in canonical form, each in the coefficient domain its field's class declares
+/// (`Index`: integer coefficients, exact over coordinates; `Value`: float), its operands ranked by `rank`.
+fn canonical_fields(stmt: &Arc<Statement>, rank: &dyn Fn(&Name) -> Key) -> Arc<Statement> {
+    struct Canonical<'a>(&'a dyn Fn(&Name) -> Key);
+    impl Rewriter for Canonical<'_> {
+        fn expression(&mut self, roles: Roles, expression: &Expression) -> Expression {
+            value_canonical(
+                expression,
+                self.0,
+                class_of(roles).unwrap_or(ExprClass::Value),
+            )
         }
-        Expr::Apply(op, args) => {
-            let args: Result<Vec<Expression>> =
-                args.iter().map(|a| rewrite(a, axis_order)).collect();
-            Expression::new(Expr::Apply(op.clone(), args?.into()))
-        }
-        Expr::Ternary(a, b, c) => Expression::new(Expr::Ternary(
-            rewrite(a, axis_order)?,
-            rewrite(b, axis_order)?,
-            rewrite(c, axis_order)?,
-        )),
-        Expr::Cast(dtype, inner) => {
-            Expression::new(Expr::Cast(dtype.clone(), rewrite(inner, axis_order)?))
-        }
-        _ => e.clone(),
-    })
-}
-
-/// Canonicalize integer expressions using lexical binding order, never axis spelling.
-/// `stmt` with every Value-class field in its canonical form under `rank` (see [`value_canonical`]): the value of
-/// an assign, an accum or a let, a condition, a select's predicates. Index fields keep the index rules.
-fn value_fields(stmt: &Arc<Statement>, rank: &dyn Fn(&Name) -> Key) -> Arc<Statement> {
-    match &**stmt {
-        Statement::Assign(a) => Arc::new(Statement::Assign(Assign {
-            value: value_canonical(&a.value, &rank),
-            ..a.clone()
-        })),
-        Statement::Accum(a) => Arc::new(Statement::Accum(Accum {
-            value: value_canonical(&a.value, &rank),
-            ..a.clone()
-        })),
-        Statement::Let(l) => Arc::new(Statement::Let(Let {
-            value: value_canonical(&l.value, &rank),
-            ..l.clone()
-        })),
-        Statement::Cond(c) => Arc::new(Statement::Cond(Cond {
-            cond: value_canonical(&c.cond, &rank),
-            ..c.clone()
-        })),
-        Statement::Select(sel) => Arc::new(Statement::Select(Select {
-            branches: sel
-                .branches
-                .iter()
-                .map(|b| SelectBranch {
-                    value: b.value,
-                    select: value_canonical(&b.select, &rank),
-                })
-                .collect(),
-            ..sel.clone()
-        })),
-        _ => stmt.clone(),
+    }
+    let new = stmt.rewrite_fields(&mut Canonical(rank));
+    if new.same(stmt) {
+        stmt.clone()
+    } else {
+        Arc::new(new)
     }
 }
 
@@ -381,13 +284,17 @@ fn value_fields(stmt: &Arc<Statement>, rank: &dyn Fn(&Name) -> Key) -> Arc<State
 /// factors or divisors, like terms merged, zero terms dropped, the terms by the rank of their operands and the
 /// literal offset last. The reassociation of a sum and the rounding of a literal reciprocal are the exactness every
 /// reduce schedule and fast-math division already take.
-pub(crate) fn value_canonical(e: &Expression, rank: &dyn Fn(&Name) -> Key) -> Expression {
-    let e = e.map_children(&mut |child| value_canonical(child, rank));
+pub(crate) fn value_canonical(
+    e: &Expression,
+    rank: &dyn Fn(&Name) -> Key,
+    class: ExprClass,
+) -> Expression {
+    let e = e.map_children(&mut |child| value_canonical(child, rank, class));
     let Some((op, args)) = e.operation() else {
         return e;
     };
-    if affine_node(op, args) {
-        return affine_value(&e, rank);
+    if affine_node(op, args, class) {
+        return affine_sum(affine_terms(&e, class), rank);
     }
     if let [left, right] = args {
         let (mut op, mut left, mut right) = (op, left.clone(), right.clone());
@@ -447,40 +354,48 @@ pub struct AffineTerms {
 }
 
 /// The affine form's terms: collected through additions, subtractions, negations and literal factors or divisors.
-/// Whether an operation node is a node of the affine form: a sum, a difference, a negation, a product with a literal
-/// factor or a quotient by a literal. A product of two values or a quotient by a value is an operation like any other.
-pub fn affine_node(op: Operation, args: &[Expression]) -> bool {
-    let literal = |index: usize| matches!(args.get(index).map(|a| &**a), Some(Expr::Literal(_)));
+/// Whether an operation node is a node of the affine form in `class`'s coefficient domain: a sum, a difference, a
+/// negation, a product with a literal factor, and for a value a quotient by a literal. An `Index` folds integer
+/// literals alone and no quotient, since integer division floors; a product of two values or a quotient by a value is
+/// an operation like any other.
+pub fn affine_node(op: Operation, args: &[Expression], class: ExprClass) -> bool {
+    let literal = |index: usize| {
+        matches!(args.get(index).map(|a| &**a), Some(Expr::Literal(lit))
+            if lit.dtype != LitType::Bool && (class == ExprClass::Value || lit.dtype == LitType::Int))
+    };
     match op.info().affine {
         Some(AffineRole::Sum | AffineRole::Difference | AffineRole::Negation) => true,
         Some(AffineRole::Scale) => literal(0) || literal(1),
-        Some(AffineRole::Quotient) => literal(1),
+        Some(AffineRole::Quotient) => class == ExprClass::Value && literal(1),
         None => false,
     }
 }
 
-pub fn affine_terms(e: &Expression) -> AffineTerms {
-    fn collect(e: &Expression, scale: f64, out: &mut AffineTerms) {
+pub fn affine_terms(e: &Expression, class: ExprClass) -> AffineTerms {
+    fn collect(e: &Expression, scale: f64, class: ExprClass, out: &mut AffineTerms) {
         if let Expr::Literal(lit) = &**e
             && lit.dtype != LitType::Bool
+            && (class == ExprClass::Value || lit.dtype == LitType::Int)
         {
             out.offset += scale * lit.value.as_f64();
             return;
         }
-        if let Some((op, args)) = e.operation() {
+        if let Some((op, args)) = e.operation()
+            && affine_node(op, args, class)
+        {
             match (op.info().affine, args) {
                 (Some(AffineRole::Sum), [a, b]) => {
-                    collect(a, scale, out);
-                    collect(b, scale, out);
+                    collect(a, scale, class, out);
+                    collect(b, scale, class, out);
                     return;
                 }
                 (Some(AffineRole::Difference), [a, b]) => {
-                    collect(a, scale, out);
-                    collect(b, -scale, out);
+                    collect(a, scale, class, out);
+                    collect(b, -scale, class, out);
                     return;
                 }
                 (Some(AffineRole::Negation), [a]) => {
-                    collect(a, -scale, out);
+                    collect(a, -scale, class, out);
                     return;
                 }
                 (Some(AffineRole::Scale), [a, b]) => {
@@ -494,7 +409,7 @@ pub fn affine_terms(e: &Expression) -> AffineTerms {
                             },
                         );
                     if let Some((operand, lit)) = factor {
-                        collect(operand, scale * lit.value.as_f64(), out);
+                        collect(operand, scale * lit.value.as_f64(), class, out);
                         return;
                     }
                 }
@@ -503,7 +418,7 @@ pub fn affine_terms(e: &Expression) -> AffineTerms {
                         && lit.dtype == LitType::Float
                         && lit.value.as_f64() != 0.0
                     {
-                        collect(a, scale / lit.value.as_f64(), out);
+                        collect(a, scale / lit.value.as_f64(), class, out);
                         return;
                     }
                 }
@@ -516,15 +431,11 @@ pub fn affine_terms(e: &Expression) -> AffineTerms {
         terms: Vec::new(),
         offset: 0.0,
     };
-    collect(e, 1.0, &mut out);
+    collect(e, 1.0, class, &mut out);
     out
 }
 
 /// `e`, an affine node, as a sum in affine form: see [`value_canonical`].
-fn affine_value(e: &Expression, rank: &dyn Fn(&Name) -> Key) -> Expression {
-    affine_sum(affine_terms(e), rank)
-}
-
 /// The sum an affine form spells, its terms ordered by `rank`: the one spelling of a sum in the normal form, and the
 /// one every reader that takes a sum apart and puts it back uses.
 pub fn affine_sum(form: AffineTerms, rank: &dyn Fn(&Name) -> Key) -> Expression {
@@ -581,7 +492,7 @@ pub fn canonical_values(body: &Body) -> Body {
     Body::new(
         body.stmts()
             .iter()
-            .map(|stmt| value_fields(stmt, &|name: &Name| Key::Str(*name)))
+            .map(|stmt| canonical_fields(stmt, &|name: &Name| Key::Str(*name)))
             .collect(),
     )
 }
@@ -596,9 +507,8 @@ pub fn canonicalize_expressions(body: &Body, axes: &[Name]) -> Result<Body> {
         .stmts()
         .iter()
         .map(|stmt| {
-            let rewritten = Statement::try_map_expressions(stmt, &mut |e| rewrite(e, &axis_order))?;
             // A bound axis ranks by its binding, as the index rules order it; a value by its name until the order ranks it.
-            let rewritten = value_fields(&rewritten, &|name: &Name| match axis_order.get(name) {
+            let rewritten = canonical_fields(stmt, &|name: &Name| match axis_order.get(name) {
                 Some(index) => Key::tuple([Key::Int(0), Key::Int(*index as i64)]),
                 None => Key::tuple([Key::Int(1), Key::Str(*name)]),
             });
@@ -624,6 +534,25 @@ mod tests {
     use crate::normalize::normalize_uncached;
     use crate::normalize::testing::*;
     use crate::statement::Load;
+
+    /// One affine form, in the coefficient domain of the field's class: an index folds integer literals alone and
+    /// keeps a quotient a term, a value folds any literal and a quotient by a float literal into its reciprocal.
+    #[test]
+    fn the_affine_form_takes_its_coefficient_domain_from_the_class() {
+        let normal = normalize_uncached(&body(
+            "for a0 in 0..8:
+    in0 = load x[a0 + a0 * 2 - 1, a0 / 2 + 1]
+    v = in0 / 2.0 + in0 + 0.5 * in0
+    out[a0] = v",
+        ))
+        .unwrap();
+        let listing = text(&normal);
+        assert!(
+            listing.contains("load x[3 * a0 - 1, a0 / 2 + 1]"),
+            "{listing}"
+        );
+        assert!(listing.contains("= 2 * in0"), "{listing}");
+    }
 
     fn find_load(body: &Body, input: &str) -> Load {
         body.loads()

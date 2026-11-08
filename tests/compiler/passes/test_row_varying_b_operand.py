@@ -89,7 +89,7 @@ def test_gmem_direct_b_fragment_binds_the_row_residue(atom) -> None:
 @pytest.mark.parametrize("atom", ["mma_m8n8k4_f16_f32", "mma_m16n8k16_f16_f32"])
 def test_gmem_direct_a_fragment_binds_the_column_residue(atom) -> None:
     """The mirror on A: a value-dead ``n`` in A's index is spelled through the column's block base."""
-    a, b = parse_body(f"a = load A[m, ({_row_residue('n', 'k')}) * 0 + k]\nb = load B[k, n]")
+    a, b = parse_body(f"a = load A[m, {_row_residue('n', 'k')}]\nb = load B[k, n]")
     load = _fragment_loads(a, b, atom)["a"]
     assert "n" not in _free(load.src_index) and "n_b" in _free(load.src_index)
 

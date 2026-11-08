@@ -50,10 +50,12 @@ describe how a term is used in Emmy; they are not meant to replace a full textbo
 - **Compiler** — A program that translates code from one form into another. Emmy translates PyTorch model operations
   into CUDA code.
 - **Operation (op)** — One unit of computation, such as add, matrix multiplication, softmax, or RMSNorm.
-- **Affine form** — The canonical spelling of a sum in a value expression: like terms merged, zero terms dropped,
-  the terms ordered, a whole-number coefficient or offset spelled as the integer, the offset last (`2 * x - y + 0.5`).
-  Normalization spells every sum, difference, negation, product with a literal and quotient by a float literal this
-  way, so two spellings of the same sum are one kernel; a quotient by an integer literal floors and stays a term.
+- **Affine form** — The canonical spelling of a sum: like terms merged, zero terms dropped, the terms ordered, a
+  whole-number coefficient or offset spelled as the integer, the offset last (`2 * x - y + 0.5`). Its coefficient
+  domain is the expression class of the field: an `Index` folds integer literals alone and keeps every quotient a
+  term, since integer division floors; a `Value` folds any literal and a quotient by a float literal into its
+  reciprocal scale. Normalization spells every sum, difference, negation and literal scale this way, so two spellings
+  of the same sum are one kernel.
 - **Graph** — A representation of a program as nodes connected by data-flow edges. A node usually represents an
   operation; an edge means that one operation uses a value produced by another.
 - **Node** — One item in a graph. In Emmy, it stores an operation, the names of the input buffers it reads (usually

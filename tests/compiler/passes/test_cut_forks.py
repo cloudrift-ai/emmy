@@ -1510,9 +1510,10 @@ def test_copies_read_at_shifted_columns_cluster_onto_the_plain_read() -> None:
     from emmy.compiler.ir.expression import TernaryExpression
     from emmy.compiler.pipeline.passes.tile._cut import _cluster_value_seams
 
+    # Spelled in the index's canonical form, the one the cluster re-spells each column in: the offset last.
     n, low = Var("n"), Var("n").lt(4)
-    lower = TernaryExpression(cond=low, if_true=Literal(0, "int"), if_false=n + Literal(-4, "int"))
-    upper = Literal(4, "int") + TernaryExpression(cond=low, if_true=n, if_false=Literal(0, "int"))
+    lower = TernaryExpression(cond=low, if_true=Literal(0, "int"), if_false=n - Literal(4, "int"))
+    upper = TernaryExpression(cond=low, if_true=n, if_false=Literal(0, "int")) + Literal(4, "int")
     seams = [_column_seam(lower, "PLACE@map.1/inner"), _column_seam(upper, "PLACE@map.2/inner"), _column_seam(n, "PLACE@map.3/inner")]
 
     (clustered,) = _cluster_value_seams(seams, (Axis("n", 8), Axis("k", 8)))

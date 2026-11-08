@@ -180,11 +180,11 @@ def test_a_kernel_row_is_written_once_and_read_back_under_its_key() -> None:
 #: a contraction and a piece formed from no loop op. Re-pinning a changed corpus body does not change the DB version.
 _PINNED_IDENTITIES = {
     ("reduce/cross-cta-sum-kernel.json", "k_sum_1_reduce"): "aee18fd8b70ef8deb26b624698c57faa",
-    ("reduce/cross-cta-sum-kernel.json", "k_sum_1_reduce__partial"): "5f232e36087fff038391e6ab2cf507b3",
+    ("reduce/cross-cta-sum-kernel.json", "k_sum_1_reduce__partial"): "c6a11571d7ceafb35273b317542392b9",
     ("reduce/online-softmax-4x128.json", "k_softmax_77dd65"): "ea100f2bf3e9834ebcb885c6a8eda692",
     ("attention/sdpa-hd128-softmax-v-mma.json", "k_sdpa_441e96"): "388320db81f43719005e2d712dde4e1b",
     ("matmul/bf16-mma-sm120.json", "k_matmul_7325d9"): "e8ff6ba24c8e9ad7eb80f141616ade27",
-    ("fused/nvfp4-gate-up-requant-place-cut.json", "k_linear_reduce_105826#2"): "0efad66564284a1fd8bf2a90b9487d5a",
+    ("fused/nvfp4-gate-up-requant-place-cut.json", "k_linear_reduce_105826#2"): "da51101a8646e8288a91514ebe53c24a",
 }
 
 

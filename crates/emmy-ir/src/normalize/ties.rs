@@ -12,9 +12,9 @@ use super::with_bodies;
 use crate::Name;
 use crate::Result;
 use crate::body::Body;
-use crate::expr::{Expr, ExprType, Expression, Num, python_repr};
+use crate::expr::{Expr, Expression, Num, python_repr};
 use crate::field::FieldType;
-use crate::numbering::{Key, Numbering, expression_key};
+use crate::numbering::{Key, Numbering};
 use crate::statement::Statement;
 
 /// A statement's own shape with every name and buffer one placeholder: its statement type, then its fields in
@@ -254,16 +254,6 @@ fn widened_load(value: &Expression, loaded: &HashSet<Name>) -> bool {
         Some(_) => false,
         None => value.as_var().is_some_and(|n| loaded.contains(n)),
     }
-}
-
-/// An expression's form with every bound axis spelled by its binding position: the order of two operands.
-pub(crate) fn unspelled(e: &Expression, axis_order: &HashMap<Name, usize>) -> Key {
-    expression_key(e, &mut |e| match &**e {
-        Expr::Var(name) => axis_order
-            .get(name)
-            .map(|index| Key::tuple([Key::str(ExprType::Var.text()), Key::Int(*index as i64)])),
-        _ => None,
-    })
 }
 
 #[cfg(test)]

@@ -6,7 +6,7 @@ use std::sync::{Arc, OnceLock};
 use emmy_ir::Name;
 use emmy_ir::elementwise::{ElementwiseOp, Operation};
 use emmy_ir::expr::{
-    Builtin, CastTarget, Expr, Expression, Interval, Lit, LitType, Num, SimplifyCtx,
+    Builtin, CastTarget, Expr, ExprClass, Expression, Interval, Lit, LitType, Num, SimplifyCtx,
 };
 use pyo3::exceptions::{PyTypeError, PyValueError};
 use pyo3::prelude::*;
@@ -873,7 +873,7 @@ pub fn affine_terms<'py>(
     py: Python<'py>,
     expression: &Bound<'py, PyAny>,
 ) -> PyResult<AffineForm<'py>> {
-    let form = emmy_ir::normalize::affine_terms(&expression_from_py(expression)?);
+    let form = emmy_ir::normalize::affine_terms(&expression_from_py(expression)?, ExprClass::Value);
     let terms = form
         .terms
         .iter()
@@ -911,7 +911,7 @@ pub fn affine_node(expression: &Bound<'_, PyAny>) -> PyResult<bool> {
     let expression = expression_from_py(expression)?;
     Ok(expression
         .operation()
-        .is_some_and(|(op, args)| emmy_ir::normalize::affine_node(op, args)))
+        .is_some_and(|(op, args)| emmy_ir::normalize::affine_node(op, args, ExprClass::Value)))
 }
 
 /// `expression` as `(its integer anchor, the rest)`, or `None`.
