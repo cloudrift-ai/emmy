@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import math
 
-from emmy.compiler.ir.expression import BinaryExpr, Expression, Literal, TernaryExpr, Var, affine_form
+from emmy.compiler.ir.expression import BinaryExpr, Expression, Literal, SimplifyCtx, TernaryExpr, Var, affine_form
 from emmy.compiler.ir.stmt import Load
 
 # Row pad (in ELEMENTS = bytes) for a cp.async-staged 1-byte (fp8) operand slab. The cooperative
@@ -137,12 +137,30 @@ def gmem_row_stride(load: Load, axis_name: str, inputs) -> int | None:
     return step[0] if step is not None and step[1] == 0 and step[0] > 0 else None
 
 
+def copy_width(slab_cols: int, elem_bytes: int) -> int:
+    """Elements per vector copy (``cp.async`` or the blocking vector load) of a slab row — the widest
+    contiguous run whose byte size is a legal copy width (4 / 8 / 16) and that divides the inner
+    (contiguous) slab extent (a chunk never straddles a slab row). The slab's inner dim maps stride-1
+    to the gmem inner dim (canonical A[m,k] / B[k,n]), so a V-run is contiguous in
+    both. ``elem_bytes == 1`` (an fp8 byte slab) yields 16-element 16 B chunks —
+    the byte-staging legality requires 16-divisible inner spans, so the widest
+    width always fits. The staging lowering copies at this width and the stage resolvers prove
+    :func:`copies_aligned` at it, so both read it here."""
+    for nbytes in (16, 8, 4):
+        v = nbytes // elem_bytes
+        if v >= 1 and slab_cols % v == 0:
+            return v
+    return 1  # elem_bytes > 16 — never (1/2/4-byte element dtypes only)
+
+
 def copies_aligned(load: Load, inner: str, chunk: int, inputs) -> bool:
     """Whether every ``chunk``-element copy ``load`` makes along ``inner`` starts on a ``chunk``-element boundary of
     its buffer — the source alignment a 16 B vector copy needs. A copy starts at a multiple of ``chunk`` along
     ``inner``, so every other term of the flat address must be a provable multiple of it: a slice's offset, each
-    coordinate times its row stride. A symbolic dim counts as an unknown factor of the strides before it, and the
-    buffer's own base is aligned, as an allocation is. ``False`` for an unknown buffer."""
+    coordinate times its row stride. Each coordinate is simplified at ``inner = 0`` first, so a reshape's division and
+    modulus (a packed weight's ``(n * K + k) / 2 % (K / 2)``) fold to the offset they leave. A symbolic dim counts as
+    an unknown factor of the strides before it, and the buffer's own base is aligned, as an allocation is. ``False``
+    for an unknown buffer."""
     t = inputs.get(load.input) if inputs else None
     if t is None or len(load.index) != len(tuple(t.shape)):
         return False
@@ -150,7 +168,7 @@ def copies_aligned(load: Load, inner: str, chunk: int, inputs) -> bool:
     for pos, e in enumerate(load.index):
         stride = math.prod(d.as_static() for d in dims[pos + 1 :] if d.is_static)
         need = chunk // math.gcd(stride, chunk)
-        if need > 1 and not _divisible(e.substitute({inner: Literal(0, "int")}), need):
+        if need > 1 and not _divisible(e.substitute({inner: Literal(0, "int")}).simplify(SimplifyCtx.empty()), need):
             return False
     return True
 

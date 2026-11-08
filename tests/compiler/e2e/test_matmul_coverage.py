@@ -1829,6 +1829,51 @@ def test_transposed_a_tma_pin_is_refused(monkeypatch) -> None:
         _run_tile_pass(_imap_graph("transpose_a")[0])
 
 
+# --- a slice off the copy grid ----------------------------------------------------------------------------------------
+# A cp.async or blocking vector copy moves 16 B (narrower only when the slab row is) from where the operand's index puts
+# it, so a weight sliced one element into a padded row would read from a 2 B offset, which PTX leaves undefined. The
+# stage resolvers prove each copy's start on its own width (``copies_aligned``) and refuse a pin that would misalign it.
+
+_WARP_COPY = {"TILE": "mma_m16n8k16_bf16_f32/f2x4/k4", "WORK": "w2x2", "STAGE": "d2/smem-async", "REDUCE": ""}
+_SCALAR_COPY = {"TILE": "f2x4", "WORK": "t16x8", "STAGE": "d2/smem-async", "REDUCE": ""}
+
+
+@pytest.mark.parametrize(
+    ("dtype", "pin", "offset", "staged"),
+    [
+        ("bfloat16", _WARP_COPY, 1, False),
+        ("bfloat16", _WARP_COPY, 8, True),
+        ("float32", _SCALAR_COPY, 2, False),
+        ("float32", _SCALAR_COPY, 4, True),
+        ("float32", {**_SCALAR_COPY, "STAGE": "d1/smem"}, 2, False),
+    ],
+    ids=["warp-2B-offset", "warp-16B-offset", "scalar-8B-offset", "scalar-16B-offset", "scalar-sync-8B-offset"],
+)
+def test_a_weight_slice_stages_only_on_the_copy_grid(dtype, pin, offset, staged) -> None:
+    """GPU-free. ``x @ w[:, offset : offset + 256].t()`` over a 272-wide weight row: the copies run along K from
+    ``w[n * 272 + offset + k]``, so the pin stages only when ``offset`` keeps every 16 B copy on the 16 B grid."""
+    from emmy.commands.trace import graph_from_code  # noqa: PLC0415
+    from emmy.compiler.ir.cuda import CudaOp  # noqa: PLC0415
+    from emmy.compiler.pipeline.search.pins import pinned_knobs  # noqa: PLC0415
+
+    code = (
+        f"import torch\nx = torch.randn(64, 256, dtype=torch.{dtype})\nw = torch.randn(256, 272, dtype=torch.{dtype})\n"
+        f"x @ w[:, {offset}:{offset + 256}].t()"
+    )
+    graph = graph_from_code(code)[0]
+
+    def compile_():
+        with pinned_knobs(pin):
+            return Pipeline.build(CUDA_PASSES).run(graph, ctx=Context.from_target((12, 0)))
+
+    if not staged:
+        with pytest.raises(ValueError, match="does not resolve"):
+            compile_()
+        return
+    (source,) = [node.op.kernel_source for node in compile_().nodes.values() if isinstance(node.op, CudaOp)]
+    assert "emmy_cp_async" in source
+
+
 @requires_cuda
 def test_a_split_partition_is_never_a_fragment_column(monkeypatch):
     """A split-K partial of ``sigmoid(x) @ W.T`` at one token reads its partition coordinate in both
