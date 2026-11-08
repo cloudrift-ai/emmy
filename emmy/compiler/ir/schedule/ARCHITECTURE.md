@@ -229,8 +229,8 @@ the expectation's mma chain at the consumer-die full rate without moving the sof
 f32; the chunk partial promotes into the f32 carrier once per chunk, which is the promote cadence. The streamed
 value selects the multiplicand dtype — except a 1-byte one, which takes the 16-bit families, since the weight
 repacks from f32 registers into a 16-bit fragment whatever the value stores and the value converts per element in
-its gmem-direct fragment load (its slab declines); the score's wider accumulator does not select a different atom
-family. How many
+its fragment load: gmem-direct, or on cp.async from a byte slab (`chunk_slab_dtype`); the score's wider accumulator
+does not select a different atom family. How many
 register columns of those partials are live at once is one rule the offer and the emitter both ask
 (`chunk_partial_columns`): the whole row while the thread's register envelope holds it, else one column pair. At head
 width 256 the row is 32 fragments, and with every partial live beside the carrier and the hoisted query the thread
