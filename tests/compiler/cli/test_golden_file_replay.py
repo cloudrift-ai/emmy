@@ -2278,3 +2278,40 @@ def test_a_kernel_priced_at_two_sizes_keeps_a_row_and_a_realization_at_each(tmp_
     resolve_golden_arg(args)
     for graph in (args._golden_graph, args._golden_reference):
         assert symbolic_bindings(node.output for node in graph.nodes.values()) == {"seq": 131072}
+
+
+def test_a_piece_whose_buffers_name_no_size_runs_at_each_size_of_its_target(tmp_path):
+    """A split's combine step reads the partials and writes the output, buffers of fixed size, yet its row records a
+    size, the default hint of a reduce axis its table keeps from its parent: it is no size of the target's, so a
+    whole-file walk benches the target at the target's two sizes and never at a third, each run with the piece."""
+    import torch
+
+    from emmy.compiler.pipeline.search.db import RoutingRow
+    from emmy.compiler.pipeline.search.golden import write_trace_inventories
+    from emmy.compiler.specialize import rehint_program
+    from emmy.compiler.trace.torch import trace_module
+    from emmy.compiler.wire import symbolic_vars
+
+    class Relu(torch.nn.Module):
+        def forward(self, x):
+            return torch.relu(x)
+
+    traced = trace_module(Relu(), (torch.zeros(512, 8),), dynamic_shapes={"x": {0: torch.export.Dim("seq", min=2, max=1 << 20)}})
+    programs = {
+        "relu1": rehint_program(traced, {"seq": 4096}),
+        "relu1-long": rehint_program(traced, {"seq": 131072}),
+        "combine": trace_module(Relu(), (torch.zeros(4, 8),)),
+    }
+    path = tmp_path / "priced.json"
+    write_trace_inventories(programs, path, ctx=Context.from_target((8, 9)))
+    with GoldenFile.edit(path) as document:
+        [target] = [kernel for kernel in document.kernels if symbolic_vars(kernel.loop_ir)]
+        [piece] = [kernel for kernel in document.kernels if not symbolic_vars(kernel.loop_ir)]
+        [combine] = [row for row in document.rows if row.kernel == piece.ref]
+        document.kernels[document.kernels.index(piece)] = replace(piece, traced=None, origins=())
+        document.rows[document.rows.index(combine)] = replace(combine, bindings={"seq": 512})
+        document.add_routing(RoutingRow(target.ref, {"REDUCE": "g2k"}, (piece.ref,)))
+
+    groups = GoldenFile.load(path).target_rows()
+    assert sorted(dict(sizes)["seq"] for _, _, sizes in groups) == [4096, 131072]
+    assert all(combine.name in {row.name for row in rows} for rows in groups.values())
