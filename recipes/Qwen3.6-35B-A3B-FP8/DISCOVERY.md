@@ -1,5 +1,34 @@
 # Qwen3.6-35B-A3B-FP8 discovery
 
+## The FP8 cache staged into shared memory (2026-11-07)
+
+Native attention's FP8 key-value cache now copies into shared memory before the tensor-core fold reads it (#1366, on
+#1352). Recorded on the card and with the protocol of the 27B's section of the same name (fast math off); the pack
+exports under strict evidence, every twin compiles strictly from the golden, and `emmy eval golden` deploys every twin
+from the golden rows alone. The section below's times are in brackets.
+
+| twin | at 4,096 | at 131,072 |
+|---|---|---|
+| `attend1` (decode) | g32k, 10.0 µs (18.0) | g64k, 111 µs (413) |
+| `attend3` (verify) | g16k, 15.5 µs (29.3) | g64k, 277 µs (815) |
+| `attend4` | g16k, 24.6 µs (129) | g64k, 561 µs (4,954) |
+| `attend64` (chunk) | g8k, 54.4 µs (137) | g16k, 1,046 µs (3,594) |
+
+g128k, which the compiler does not offer, measured 23% slower than g64k at one row and 4% faster at three.
+
+| | this branch | the section below |
+|---|---|---|
+| TPOT / TTFT, 256-token prompt | 20.4 ms / 5.58 s | 20.9 ms / 5.58 s |
+| first token, 257-token prompt | 5.48 s | 5.62 s |
+| TPOT / TTFT, 7,680-token prompt | 20.9 ms / 169 s | 21.2 ms / 167 s |
+| drafts accepted at 256 / 7,680 | 76 / 79% | 75 / 85% |
+| device memory at rest | 23.0 GiB | 23.0 GiB |
+| GSM8K strict / flexible match | 0.460 / 0.475 | |
+
+The short cells hold. GSM8K holds too, against main's 0.455 / 0.460 on 2026-11-06 (standard error 0.035); the section
+below did not run it. The window step was not served, as in the section below: a prompt that reaches the long range
+prefills for over an hour. Its verify twin's attention now takes 277 µs a layer at 131,072 positions.
+
 ## Attention priced per range of windows (2026-11-07)
 
 Native attention now compiles once per range of windows, priced at 4,096 and at 131,072 cached tokens, the long range
