@@ -696,7 +696,8 @@ class _AbstractingRow(Sigma):
 
 def _affine_sum(expression: Expression) -> Expression:
     """``expression`` spelled as its terms in name order and one constant, so equal values spell alike; an expression
-    that is not affine in its names keeps its simplified spelling."""
+    that is not affine in its names keeps its simplified spelling. The constant keeps its kind: a value's float offset
+    is no integer, and two channels differing only in it are two channels."""
     names = expression.free_vars()
     form = affine_form(expression, names)
     if form is None:
@@ -704,9 +705,9 @@ def _affine_sum(expression: Expression) -> Expression:
     terms = [
         Var(name) if coeff == 1 else BinaryExpression("*", Literal(coeff, "int"), Var(name)) for name, coeff in sorted(form[1].items())
     ]
-    constant = int(form[0].eval({}))
+    constant = form[0].eval({})
     if constant or not terms:
-        terms.append(Literal(constant, "int"))
+        terms.append(Literal(constant, "int" if type(constant) is int else "float"))
     total = terms[0]
     for term in terms[1:]:
         total = BinaryExpression("+", total, term)

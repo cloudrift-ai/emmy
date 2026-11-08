@@ -2963,3 +2963,14 @@ def test_parallel_split_preserves_every_output_buffer() -> None:
     assert result.outputs == ["out0", "consumer"]
     assert result.nodes["consumer"].inputs == ["out1"]
     assert result.buffer("out1") is not None
+
+
+def test_the_row_abstraction_keeps_a_float_offset() -> None:
+    """The row abstraction's affine spelling keeps a constant's kind: a value's float offset is no integer to truncate,
+    so two channels differing only in that offset get two keys, while two spellings of one value get one."""
+    from emmy.compiler.ir.expression import parse
+    from emmy.compiler.pipeline.passes.tile._cut import _affine_sum
+
+    assert _affine_sum(parse("2 * a0 + 0.25")) != _affine_sum(parse("2 * a0 + 0.75"))
+    assert _affine_sum(parse("2 * a0 + 0.25")) == _affine_sum(parse("0.25 + a0 * 2"))
+    assert _affine_sum(parse("2 * a0 + 3")) == _affine_sum(parse("3 + a0 * 2"))
