@@ -193,17 +193,18 @@ pub fn ordering_constraints(body: &Body, effects: bool) -> Vec<HashSet<usize>> {
 /// How a sibling statement defines a name: as a binding or a producer, which its readers follow; as an update of an
 /// accumulator, read where it stands; or as the next value of a carried state within its step, which orders nothing.
 #[derive(Clone, Copy, PartialEq)]
-enum Site {
+pub(crate) enum Site {
     Binding,
     Accumulator,
     Carry,
 }
 
 /// How `stmt` defines each name it exposes, in one walk of its subtree. A leaf `Accum` or `Carry`, or a block holding
-/// one, is the update it holds, unless the block holds the loop that folds the accumulator (a loop on the path to it
-/// binds one of its axes, or any loop when it names none) or carries the state (`carried_cells`) — that loop produces
-/// the value and its readers follow the block. A name the walk meets no update of is a binding.
-fn site_kinds(stmt: &Statement) -> HashMap<Name, Site> {
+/// one, is the update it holds, unless the block holds the loops that fold the accumulator (the loops on the path to
+/// it bind every one of its axes, or any loop when it names none) or carries the state (`carried_cells`) — that block
+/// produces the value and its readers follow it. A fold whose outer axis is bound outside the block is an update of the
+/// block's scope, whatever loops the block holds. A name the walk meets no update of is a binding.
+pub(crate) fn site_kinds(stmt: &Statement) -> HashMap<Name, Site> {
     fn walk(
         stmt: &Statement,
         bound: &HashSet<Name>,
@@ -215,7 +216,7 @@ fn site_kinds(stmt: &Statement) -> HashMap<Name, Site> {
                 let folded = if a.axes.is_empty() {
                     under_loop
                 } else {
-                    a.axes.iter().any(|axis| bound.contains(axis))
+                    a.axes.iter().all(|axis| bound.contains(axis))
                 };
                 kinds.insert(
                     a.name,

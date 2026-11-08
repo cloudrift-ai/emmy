@@ -68,12 +68,16 @@ pub fn drop_size_one_reduce_axes(body: &Body) -> Body {
         let mut taken: HashSet<Name> = l.body.ssa_uses().clone();
         l.body.walk(&mut |here| taken.extend(here.stmt().defines()));
         let mut seeds: HashMap<Name, Name> = HashMap::new();
+        let mut starts: HashMap<Name, Expression> = HashMap::new();
         let mut out: Vec<Arc<Statement>> = Vec::new();
         for a in &accums {
             let read = l.body.stmts().iter().any(|m| {
                 !matches!(&**m, Statement::Accum(x) if x.name == a.name)
                     && free_ssa(m).contains(&a.name)
             });
+            if let Some(base) = &a.base {
+                starts.insert(a.name, Expression::var(base));
+            }
             if !(read || a.base.is_none()) {
                 continue;
             }
@@ -89,6 +93,9 @@ pub fn drop_size_one_reduce_axes(body: &Body) -> Body {
                 index += 1;
             };
             seeds.insert(a.name, bound);
+            starts
+                .entry(a.name)
+                .or_insert_with(|| Expression::var(&bound));
             out.push(Arc::new(Statement::Let(Let {
                 name: bound,
                 value: Expression::float(seed),
@@ -97,26 +104,20 @@ pub fn drop_size_one_reduce_axes(body: &Body) -> Body {
         }
         for member in l.body.stmts() {
             let member = substituted(member, &l.axis.name, Expression::int(0));
-            let seed = match &*member {
-                Statement::Accum(a) => seeds.remove(&a.name),
-                _ => None,
-            };
+            if let Statement::Accum(a) = &*member {
+                seeds.remove(&a.name);
+            }
             let member = if seeds.is_empty() {
                 member
             } else {
                 Statement::rename_with(&member, &|name| seeds.get(&name).copied())
             };
             match &*member {
-                // The one update folds the seed the loop started from (a base is the step's own running value): a
-                // sum's zero and a product's one fold away, a maximum keeps the one operation the loop ran.
+                // The one update folds the value it started from — its base (the step's own running value) or the
+                // bound seed: a sum's zero and a product's one fold away, a maximum keeps the one operation the loop ran.
                 Statement::Accum(a) => {
-                    let Some(op) = a.op.known() else {
+                    let (Some(op), Some(start)) = (a.op.known(), starts.remove(&a.name)) else {
                         return Some(vec![stmt.clone()]);
-                    };
-                    let start = match (&a.base, seed) {
-                        (Some(base), _) => Expression::var(base),
-                        (None, Some(seed)) => Expression::var(&seed),
-                        (None, None) => return Some(vec![stmt.clone()]),
                     };
                     let combined = Expression::apply(op, vec![start, a.value.clone()]);
                     out.push(assign(&a.name, combined, a.dtype))

@@ -911,12 +911,25 @@ for r in 0..4:
         }
     }
 
+    /// The normal form of `src`, with the read spelled `read` inside the step (behind its loop head `step`) and ahead
+    /// of the update spelled `update`: a read of the step before, neither hoisted out of the step nor moved behind the
+    /// update.
+    fn read_stays_ahead(src: &str, step: &str, read: &str, update: &str) -> String {
+        let normal = text(&normalize_body(&body(src)).unwrap());
+        let head = normal.find(step).expect(&normal);
+        let at = normal.find(read).expect(&normal);
+        let updated = normal.find(update).expect(&normal);
+        assert!(head < at && at < updated, "{normal}");
+        normal
+    }
+
     /// An accumulator folded by the enclosing loop and updated inside a map loop of the step (the P·V accumulation of
-    /// an attention step) is still an update site: a read of the step before stays ahead of the map loop.
+    /// an attention step) is still an update site: a read of the step before stays ahead of the map loop, whether it
+    /// also reads the step's own values or the accumulator alone (which placement alone could hoist).
     #[test]
     fn an_update_inside_a_map_loop_of_the_step_is_read_where_it_stands() {
-        let normal = text(
-            &normalize_body(&body(
+        for (src, read) in [
+            (
                 "for i in 0..8:
     for k in 0..4:
         x = load X[i, k]
@@ -927,12 +940,131 @@ for r in 0..4:
             w = v * x
             acc <- add(acc, w) over k
     O[i] = acc",
-            ))
-            .unwrap(),
+                "acc0 * in0",
+            ),
+            (
+                "for i in 0..8:
+    for k in 0..4:
+        x = load X[i, k]
+        r = acc * 2
+        R[i, k] = r
+        for d in 0..2 seed=false:
+            v = load V[k, d]
+            w = v * x
+            acc <- add(acc, w) over k
+    O[i] = acc",
+                "2 * acc0",
+            ),
+        ] {
+            read_stays_ahead(src, "for a1", read, "<- add");
+        }
+    }
+
+    /// A fold over two axes whose outer axis is the step's: the block holding the inner loop updates the accumulator
+    /// in the step's scope, bare or under a condition, and a read ahead of it stays the step before's.
+    #[test]
+    fn a_fold_whose_outer_axis_is_the_steps_is_an_update_of_the_step() {
+        read_stays_ahead(
+            "for i in 0..8:
+    for k in 0..4:
+        x = load X[i, k]
+        r = acc * x
+        R[i, k] = r
+        for j in 0..2 seed=false:
+            v = load V[i, k, j]
+            acc <- add(acc, v) over k, j
+    O[i] = acc",
+            "for a1",
+            "acc0 * in0",
+            "<- add",
         );
-        let read = normal.find("v0 = acc0 * in0").expect(&normal);
-        let update = normal.find("<- add").expect(&normal);
-        assert!(read < update, "{normal}");
+        read_stays_ahead(
+            "for i in 0..8:
+    for k in 0..4:
+        x = load X[i, k]
+        r = m * 2
+        R[i, k] = r
+        if k < 2:
+            for j in 0..2 seed=false:
+                y = load Y[i, k, j]
+                m <- maximum(m, y) over k, j
+    O[i] = m",
+            "for a1",
+            "2 * acc0",
+            "<- maximum",
+        );
+    }
+
+    /// An update under a condition, alone or beside a second one, is read where it stands: a read of the accumulator
+    /// alone ahead of the condition stays in the step (placement reads the update site as the order does).
+    #[test]
+    fn an_update_under_a_condition_keeps_a_read_of_the_accumulator_alone_in_the_step() {
+        read_stays_ahead(
+            "for i in 0..8:
+    for k in 0..4:
+        x = load X[i, k]
+        r = m * 2
+        R[i, k] = r
+        if k < 2:
+            m <- maximum(m, x) over k
+    O[i] = m",
+            "for a1",
+            "2 * acc0",
+            "<- maximum",
+        );
+        read_stays_ahead(
+            "for i in 0..8:
+    for k in 0..4:
+        x = load X[i, k]
+        y = load Y[i, k]
+        r = m * 2
+        R[i, k] = r
+        if k < 2:
+            m <- maximum(m, x) over k
+            m <- maximum(m, y) over k
+    O[i] = m",
+            "for a1",
+            "2 * acc0",
+            "<- maximum",
+        );
+    }
+
+    /// A block holding a bare update and a two-axis fold of one name reads as an update whichever comes first (the two
+    /// updates keep their source order, as the sites of one name do): the read stays ahead in both spellings.
+    #[test]
+    fn a_blocks_site_kind_does_not_depend_on_the_order_inside_it() {
+        read_stays_ahead(
+            "for i in 0..8:
+    for k in 0..4:
+        x = load X[i, k]
+        r = m * 2
+        R[i, k] = r
+        if k < 2:
+            m <- maximum(m, x) over k
+            for j in 0..2 seed=false:
+                y = load Y[i, k, j]
+                m <- maximum(m, y) over k, j
+    O[i] = m",
+            "for a1",
+            "2 * acc0",
+            "<- maximum",
+        );
+        read_stays_ahead(
+            "for i in 0..8:
+    for k in 0..4:
+        x = load X[i, k]
+        r = m * 2
+        R[i, k] = r
+        if k < 2:
+            for j in 0..2 seed=false:
+                y = load Y[i, k, j]
+                m <- maximum(m, y) over k, j
+            m <- maximum(m, x) over k
+    O[i] = m",
+            "for a1",
+            "2 * acc0",
+            "<- maximum",
+        );
     }
 
     /// One affine form, in the coefficient domain of the field's class: an index folds integer literals alone and

@@ -8,7 +8,7 @@ use super::with_bodies;
 use crate::body::{Body, free_names};
 use crate::expr::Expression;
 use crate::numbering::{Number, Numbering, Param, value_numbers};
-use crate::order::is_protocol;
+use crate::order::{Site, is_protocol, site_kinds};
 use crate::statement::*;
 use crate::{Error, Name, Result};
 
@@ -187,16 +187,14 @@ impl Placer<'_> {
             }
         }
         let uses = body.ssa_uses();
-        // A carried state read ahead of its update in this scope is the previous step's: it lives here.
+        // A carried state read ahead of its update in this scope is the previous step's: it lives here. The order's
+        // reading of an update site is the one reading: a leaf, or a block holding the update under a condition or
+        // inside a map loop of the step.
         for stmt in body.stmts() {
-            match &**stmt {
-                Statement::Accum(a) => {
-                    self.defined.entry(a.name).or_insert(depth);
+            for (name, kind) in site_kinds(stmt) {
+                if kind != Site::Binding {
+                    self.defined.entry(name).or_insert(depth);
                 }
-                Statement::Carry(c) => {
-                    self.defined.entry(c.name).or_insert(depth);
-                }
-                _ => {}
             }
         }
         for index in 0..body.len() {
