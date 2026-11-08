@@ -24,7 +24,7 @@ from __future__ import annotations
 
 from dataclasses import replace
 
-from emmy.compiler.ir.address import BYTE_SLAB_PAD, gmem_axis_step
+from emmy.compiler.ir.address import BYTE_SLAB_PAD, copies_aligned, gmem_axis_step
 from emmy.compiler.ir.axis import Axis
 from emmy.compiler.ir.expression import affine_form
 from emmy.compiler.ir.pure.fold import Fold
@@ -39,6 +39,7 @@ _TMA_ALIGN = 16  # the NONE-swizzle box-copy rule: 16 B-aligned inner dim and in
 
 # cp.async needs a >= 4 B contiguous chunk, so a 2 B/elem slab's inner dim must be even.
 _CP_ASYNC_MIN_ELEMS = 2
+_COPY_BYTES = 16  # one cp.async or blocking vector copy
 
 
 def _decline(why: list[str] | None, reason: str) -> None:
@@ -208,6 +209,7 @@ def chunk_key_stage(tile: Tile, stage: Stage, inputs, producer, producer_k, k_ax
     ragged = not k_axis.extent.is_static
     copies = (
         _warp_vector_copy(k_axis, span, bk_elems, False, False, ragged=ragged)
+        and copies_aligned(slab.load, producer_k.name, _COPY_BYTES // nbytes, inputs)
         if stage.transport == "smem-async" or (stage.transport == "smem" and tile.atom.sync_copy_staging)
         else (
             stage.transport == "smem-tma"
@@ -266,7 +268,11 @@ def _chunk_warp_stage(
     # zero and the duplicate value rows fold to nothing. A TRANSPOSED value strides its gmem rows
     # BY the key extent, so it keeps the static, chunk-divisible demand every staged operand makes.
     ragged = not k_axis.extent.is_static and not view.b_trans
-    vector_copy_ok = _warp_vector_copy(k_axis, n.tile, bk_elems, n.mask, view.b_trans, ragged=ragged)
+    # A vector copy moves 16 B from where the slab's index puts it, so a slice's offset or a row stride off the 16 B
+    # grid would misalign it; a TMA box takes element coordinates and needs no such proof.
+    vector_copy_ok = _warp_vector_copy(k_axis, n.tile, bk_elems, n.mask, view.b_trans, ragged=ragged) and copies_aligned(
+        slab.load, k_axis.name if view.b_trans else n.axis.name, _COPY_BYTES // b_nbytes, inputs
+    )
     tma_ok = (
         stage.transport == "smem-tma"
         and _tma_operand_box(slab.load.index, n.axis.name, k_axis.name)

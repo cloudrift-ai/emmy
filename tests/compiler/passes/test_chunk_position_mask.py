@@ -53,16 +53,23 @@ def _flash(cell: str, stage: str | None, split: str = "") -> dict[str, str]:
     return {"PLACE": "fuse", "WORK": "w4x1", "REDUCE@map.1/map.1/twist": split, **{k.replace("@", f"@{site}"): v for k, v in pins.items()}}
 
 
-def _attention(cache=torch.bfloat16, heads=HEADS):
-    """Native's 64-row attention twin over a symbolic window, traced as the export traces it."""
-    module = attend_module(heads, KV, D, ROWS)
+def _attention(cache=torch.bfloat16, heads=HEADS, offset=0, row=D):
+    """Native's 64-row attention twin over a symbolic window, traced as the export traces it. ``offset`` and ``row``
+    read each head's dims as a slice of a padded cache row."""
+    attend = attend_module(heads, KV, D, ROWS)
+
+    class Sliced(torch.nn.Module):
+        def forward(self, q, keys, values, position):
+            return attend(q, keys[:, :, offset : offset + D], values[:, :, offset : offset + D], position)
+
+    module = attend if (offset, row) == (0, D) else Sliced()
     window = torch.export.Dim(WINDOW, min=ROWS, max=CONTEXT)
     shapes = {n: {0: window} if n in ("keys", "values") else {} for n in inspect.signature(module.forward).parameters}
     # Two tensors, not one twice: the tracer takes a shared example tensor as one aliased input.
     examples = (
         torch.zeros(ROWS, heads * D, dtype=torch.bfloat16),
-        torch.zeros(512, KV, D, dtype=cache),
-        torch.zeros(512, KV, D, dtype=cache),
+        torch.zeros(512, KV, row, dtype=cache),
+        torch.zeros(512, KV, row, dtype=cache),
     )
     return module, trace_module(module, (*examples, torch.zeros(1, dtype=torch.int64)), dynamic_shapes=shapes)
 
@@ -136,6 +143,34 @@ def test_a_staged_key_is_read_only_by_a_cell_that_converts_it(cache, target, sco
     (source,) = [node.op.kernel_source for node in compiled.nodes.values() if isinstance(node.op, CudaOp)]
     assert all(text in source for text in spelled), spelled
     assert ("wgmma" in source) == ("wgmma" in spelled)
+
+
+@pytest.mark.parametrize(
+    ("cache", "offset", "row", "staged"),
+    [
+        (torch.float8_e4m3fn, 16, D + 16, True),
+        (torch.float8_e4m3fn, 1, D + 16, False),
+        (torch.float8_e4m3fn, 0, D + 8, False),
+        (torch.bfloat16, 8, D + 16, True),
+        (torch.bfloat16, 1, D + 16, False),
+    ],
+    ids=["fp8-16B-offset", "fp8-1B-offset", "fp8-136B-rows", "bf16-16B-offset", "bf16-2B-offset"],
+)
+def test_a_cache_slice_stages_only_on_the_16_byte_grid(cache, offset, row, staged) -> None:
+    """GPU-free. A cp.async copy moves 16 B from the address the cache's index names, so a slice of a padded cache
+    stages only when its offset and its row strides keep every copy on the 16 B grid; else the pin does not resolve."""
+    _, graph = _attention(cache, offset=offset, row=row)
+
+    def compile_():
+        with pinned_knobs(_flash("mma_m16n8k16_bf16_f32", BYTES)):
+            return Pipeline.build(CUDA_PASSES).run(graph, ctx=Context.from_target((12, 0)))
+
+    if not staged:
+        with pytest.raises(ValueError, match="does not resolve"):
+            compile_()
+        return
+    (source,) = [node.op.kernel_source for node in compile_().nodes.values() if isinstance(node.op, CudaOp)]
+    assert "emmy_cp_async" in source
 
 
 @requires_cuda
