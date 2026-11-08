@@ -199,7 +199,9 @@ def match_packed_kblock_b(cone: list, k_name: str, inputs, *, codes_may_compute:
 
         def decode(operand) -> Load | None:
             """The stored byte ``operand`` is the dtype's decode of, else ``None``."""
-            node = defs[operand.name].value if isinstance(operand, Var) and isinstance(defs.get(operand.name), Assign) else operand
+            if not isinstance(operand, Var) or not isinstance(defs.get(operand.name), Assign):
+                return None
+            node = defs[operand.name].value
             cast = node.operation
             if cast is None or cast.decodes is None or len(node.operands) != 1:
                 return None
@@ -214,7 +216,7 @@ def match_packed_kblock_b(cone: list, k_name: str, inputs, *, codes_may_compute:
         ((gathered, bits),) = decoded.items()
         if inputs[bits.input].dtype.nbytes != 1:
             return None
-        table = defs[gathered.name] if isinstance(gathered, Var) else root
+        table = defs[gathered.name]
         codes, per_byte, decoding = None, 1, [gathered]
     if len(decoding) != 1:
         return None

@@ -765,8 +765,8 @@ from that CSE form. Subroutine boundaries never limit fusion.
   `x / 2.0` and `0.5 * x` another, and `x - x` is `0`. The affine form reassociates a sum and rounds a reciprocal
   once, which every reduce schedule and fast-math division do already. A chain of named temps and one tree are one
   body up to the single-reader guard — a sum two statements read stays a definition — so the readers of the normal
-  form (the tile lift, the kernel passes, the renderer) read one operation per statement; a kernel pass that builds a
-  nested value renders it as temps of its own.
+  form (the tile lift, the kernel passes, the renderer) read one operation per statement; the renderer spells a nested
+  value a kernel pass built as temps of its own.
 - `merge_sibling_reduce_loops` — unify sibling reduce axes whose Load positions overlap, then merge matching Loops
   before descending into their children. A parent merge therefore exposes child reductions to the same walk.
   Overlapping reductions share one canonical axis name (softmax's max + sum sweeps; the two matmul reductions in
@@ -812,11 +812,11 @@ from that CSE form. Subroutine boundaries never limit fusion.
   leave a predicate constant, and a merge exposes values to place, so the merge, the expression simplification and
   placement run until the first two leave a placed body alone. The split feeds the steps ahead of it — a definition
   it makes can be placed, and a region it joins can leave a value unread — so the steps run again after a split that
-  changed the body, and only then. The order runs last, once, with one exception: the unread-value drop reads by name, and a cut
-  can splice one cone twice under the same names, so a value only its namesake's readers kept alive is unread only
-  once the order has given every binding its own name. A body the order left such a value in goes through the steps
-  again. What keeps this honest is a test, not a loop: the normal form of
-  every kernel a repository golden or the realization corpus stores is one normalization leaves alone
+  changed the body, and only then. The order runs last, once, with one exception: the unread-value drop reads by
+  name, and a cut can splice one cone twice under the same names, so a value only its namesake's readers kept alive
+  is unread only once the order has given every binding its own name. A body the order left such a value in goes
+  through the steps again. What keeps this honest is a test, not a loop: the normal form of every kernel a repository
+  golden or the realization corpus stores is one normalization leaves alone
   (`tests/compiler/ir/stmt/implementation/test_normal_form_is_final.py`). A form that was not final would give two
   spellings of one body two texts, and no error.
 - Legal motion and merging expose availability; equality alone never moves a value across a scope or an effect. This

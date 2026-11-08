@@ -48,14 +48,10 @@ pub fn is_protocol(stmt: &Statement) -> bool {
         && stmt.deps().is_empty()
 }
 
-/// Dependency and, when requested, effect predecessors for one lexical scope. With `redefinitions`, a name bound more
-/// than once in the scope reads lexically: a read binds the definition before it and precedes the next one; without,
-/// every read binds the first definition.
-pub fn ordering_constraints(
-    body: &Body,
-    effects: bool,
-    redefinitions: bool,
-) -> Vec<HashSet<usize>> {
+/// Dependency and, when requested, effect predecessors for one lexical scope. A name bound more than once in the
+/// scope reads lexically: a read binds the definition before it, or the first one when none precedes it (a scope is
+/// order-free), and precedes every later binding of the name.
+pub fn ordering_constraints(body: &Body, effects: bool) -> Vec<HashSet<usize>> {
     let stmts = body.stmts();
     let defs_uses: Vec<(Vec<Name>, HashSet<Name>)> = stmts
         .iter()
@@ -67,11 +63,9 @@ pub fn ordering_constraints(
             definitions.entry(name).or_default().push(index);
         }
     }
+    let sites_of = |name: &Name| definitions.get(name).map_or(&[][..], |v| &v[..]);
     let defining_stmt = |name: &Name, consumer: usize| -> Option<usize> {
-        let sites = definitions.get(name).map_or(&[][..], |v| &v[..]);
-        if !redefinitions {
-            return sites.first().copied().filter(|site| *site != consumer);
-        }
+        let sites = sites_of(name);
         if let Some(preceding) = sites.iter().rev().find(|site| **site < consumer) {
             return Some(*preceding);
         }
@@ -85,19 +79,16 @@ pub fn ordering_constraints(
                 .collect(),
         );
     }
-    if redefinitions {
-        // A read bound to a definition ahead of it precedes the next binding of the name. A read ahead of every
-        // binding (a scope is order-free) binds the first and orders nothing more.
-        for (reader, (_, uses)) in defs_uses.iter().enumerate() {
-            for name in uses {
-                let sites = definitions.get(name).map_or(&[][..], |v| &v[..]);
-                if !sites.iter().any(|site| *site < reader) {
-                    continue;
-                }
-                for &later in sites {
-                    if later > reader {
-                        incoming[later].insert(reader);
-                    }
+    // A read precedes every binding of its name after the one it binds: a value read between two bindings stays
+    // between them, and a read ahead of every binding sits between the first and the second.
+    for (reader, (_, uses)) in defs_uses.iter().enumerate() {
+        for name in uses {
+            let Some(bound) = defining_stmt(name, reader) else {
+                continue;
+            };
+            for &later in sites_of(name) {
+                if later > bound && later != reader {
+                    incoming[later].insert(reader);
                 }
             }
         }
@@ -166,7 +157,7 @@ pub fn topological_sort(body: &Body) -> Body {
         }
         Statement::rebuild_bodies(stmt, nested.iter().map(topological_sort).collect())
     });
-    sorted.topological_order(&ordering_constraints(&sorted, false, true))
+    sorted.topological_order(&ordering_constraints(&sorted, false))
 }
 
 #[cfg(test)]
@@ -241,7 +232,7 @@ mod tests {
                 .collect::<Vec<_>>()
                 .join("\n"),
         );
-        let incoming = ordering_constraints(&writes, true, true);
+        let incoming = ordering_constraints(&writes, true);
         assert_eq!(incoming[0], HashSet::new());
         for (index, sources) in incoming.iter().enumerate().skip(1) {
             assert_eq!(*sources, HashSet::from([index - 1]));
@@ -256,7 +247,6 @@ mod tests {
                 tail = load X[]
                 ",
             ),
-            true,
             true,
         );
         let expected: Vec<HashSet<usize>> = [vec![], vec![0], vec![0], vec![0, 1, 2], vec![3]]

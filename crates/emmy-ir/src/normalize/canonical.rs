@@ -103,30 +103,33 @@ impl SequentialScope {
         let exported = unique(exported);
         if children.is_empty() {
             // A second binding of a name this scope owns (motion can put two lexical bindings in one scope) is a
-            // value of its own: its reads take the names before it, its definition a fresh one.
+            // value of its own: the statement's reads take the names before it, its definition a fresh one.
+            let defines = stmt.defines();
+            let rebound: Vec<Name> = if stmt.is_pure() {
+                defines
+                    .iter()
+                    .copied()
+                    .filter(|name| self.owned.contains(name))
+                    .collect()
+            } else {
+                Vec::new()
+            };
+            for name in &defines {
+                self.allocate(counters, name, ssa_prefix(stmt));
+            }
+            if rebound.is_empty() {
+                return Statement::rename(stmt, &self.names(&self.inherited_axes));
+            }
             let reads = self.names(&self.inherited_axes);
-            let rebinds = matches!(
-                &**stmt,
-                Statement::Assign(_)
-                    | Statement::Let(_)
-                    | Statement::Load(_)
-                    | Statement::Select(_)
-            );
-            let mut fresh: HashMap<Name, Name> = HashMap::new();
-            for name in stmt.defines() {
-                if rebinds && self.owned.contains(&name) {
+            let fresh: HashMap<Name, Name> = rebound
+                .iter()
+                .map(|name| {
                     let next = counters.fresh(ssa_prefix(stmt));
-                    fresh.insert(reads[&name], next);
-                    self.ssa.insert(name, next);
-                } else {
-                    self.allocate(counters, &name, ssa_prefix(stmt));
-                }
-            }
-            let names = self.names(&self.inherited_axes);
-            let renamed = Statement::rename(stmt, if fresh.is_empty() { &names } else { &reads });
-            if fresh.is_empty() {
-                return renamed;
-            }
+                    self.ssa.insert(*name, next);
+                    (reads[name], next)
+                })
+                .collect();
+            let renamed = Statement::rename(stmt, &reads);
             return Arc::new(renamed.rewrite_fields(&mut Redefine { fresh: &fresh }));
         }
         for name in &exported {
@@ -254,7 +257,7 @@ fn ordered(body: &Body, numbering: &Numbering) -> Result<Body> {
             }
         })
         .collect();
-    let incoming = ordering_constraints(&rebuilt, true, true);
+    let incoming = ordering_constraints(&rebuilt, true);
     let order =
         rebuilt.topological_permutation(&incoming, Some(&|index| priorities[index].clone()));
     Ok(rebuilt.rebuilt(
@@ -601,6 +604,27 @@ mod tests {
         in1 = load Z[a0, a1]
         v2 = sqrt(in1)
         O[a0, a1] = v2"
+        );
+    }
+
+    /// A read ahead of every binding of a twice-bound name (a scope is order-free) binds the first binding and stays
+    /// ahead of the second, whatever else it waits on.
+    #[test]
+    fn an_order_free_read_of_a_rebound_name_binds_the_first_binding() {
+        let normal = text(
+            &normalize_body(&body(
+                "w = add(y, z)
+y = load A[]
+y = negative(y)
+z = load B[]
+O[] = w
+Q[] = y",
+            ))
+            .unwrap(),
+        );
+        assert_eq!(
+            normal,
+            "in0 = load A[]\nv0 = -in0\nin1 = load B[]\nv1 = in0 + in1\nO[] = v1\nQ[] = v0"
         );
     }
 

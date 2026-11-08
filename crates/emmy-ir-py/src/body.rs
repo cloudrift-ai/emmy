@@ -919,16 +919,15 @@ pub fn mask_select_predicate<'py>(
 
 /// Dependency and, when requested, effect predecessors for one lexical scope.
 #[pyfunction]
-#[pyo3(signature = (body, *, effects, redefinitions = true))]
+#[pyo3(signature = (body, *, effects))]
 pub fn ordering_constraints<'py>(
     py: Python<'py>,
     body: &Bound<'py, PyAny>,
     effects: bool,
-    redefinitions: bool,
 ) -> PyResult<Bound<'py, PyList>> {
     let body = PyBody::from_iterable(body)?;
     let sets: PyResult<Vec<Bound<'py, PySet>>> =
-        emmy_ir::order::ordering_constraints(&body, effects, redefinitions)
+        emmy_ir::order::ordering_constraints(&body, effects)
             .iter()
             .map(|sources| PySet::new(py, sources.iter()))
             .collect();

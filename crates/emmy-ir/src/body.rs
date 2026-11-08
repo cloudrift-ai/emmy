@@ -642,8 +642,8 @@ impl Body {
     }
 
     /// Kahn's order over indexed predecessor sets, as source indices; source order breaks ties, a priority may rank
-    /// first. Constraints that hold a cycle (a carried value read ahead of its update inside one scope, as Kernel IR
-    /// spells a loop-carried state) leave the source order: no sort reorders what it cannot order.
+    /// first. Constraints that hold a cycle (an update of a carried value that reads what a read ahead of it defines,
+    /// as Kernel IR can spell a loop-carried state) leave the source order: no sort reorders what it cannot order.
     pub fn topological_permutation<P: Ord>(
         &self,
         incoming: &[HashSet<usize>],

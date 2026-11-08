@@ -88,11 +88,11 @@ post-decomposition Python source file for known format names.
 the normal form's one sum, is one node) and an accumulation a name or a literal to sum (the lift names the literal),
 which is the granularity of the tile IR's nodes, so a body and its chain spelling lift to the same Fold tree and the
 cones, the edges between them and the seams `030_cut` offers do not depend on how a program was spelled
-(`test_total_lift.py` pins it). `010_lift` reads a Loop IR carried state as a fold that carries it, and the classic schedule's fork realizes that
-fold as a serial kernel (`states_as_buffers`): the loop that carries the state becomes `Placement.serial`, the state
-a buffer the node owns and keeps every step of, a `Pre` read a load one launch back (the seed at the first), and the
-`Carry` a store of its value at this step. The step's own algebra is
-untouched, so a contraction over the previous state lifts as a contraction whose B slab is that buffer. A serial
+(`test_total_lift.py` pins it). `010_lift` reads a Loop IR carried state as a fold that carries it, and the classic
+schedule's fork realizes that fold as a serial kernel (`states_as_buffers`): the loop that carries the state becomes
+`Placement.serial`, the state a buffer the node owns and keeps every step of, a `Pre` read a load one launch back (the
+seed at the first), and the `Carry` a store of its value at this step. The step's own algebra is untouched, so a
+contraction over the previous state lifts as a contraction whose B slab is that buffer. A serial
 kernel stays ONE kernel — `030_cut` offers it no cut and no split — because the runner launches one kernel's steps
 to completion before the next kernel's first, so pieces could not interleave step by step. The register schedule
 can realize that same ordered axis inside a CTA when every state read stays within its warp's rows. Its schedule

@@ -10,8 +10,8 @@ use crate::{Name, locked};
 
 /// Per member of `body`, the members it must follow for an effect and not for a value.
 pub fn effect_order(body: &Body) -> Vec<HashSet<usize>> {
-    let ordered = ordering_constraints(body, true, true);
-    let dataflow = ordering_constraints(body, false, true);
+    let ordered = ordering_constraints(body, true);
+    let dataflow = ordering_constraints(body, false);
     ordered
         .into_iter()
         .zip(dataflow)

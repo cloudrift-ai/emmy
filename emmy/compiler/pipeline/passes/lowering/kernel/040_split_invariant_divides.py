@@ -4,6 +4,7 @@ Run after dtype stamping so integer division stays exact. Keep this policy out o
 normalization: structural identity must not depend on the live arithmetic flags.
 """
 
+from collections import Counter
 from dataclasses import replace
 from itertools import count
 
@@ -99,12 +100,15 @@ def _hoist_loop_invariants(stmts: Body) -> Body:
         axis_deps[key] = (s, result)
         return result
 
-    def _hoistable(s: Statement, axis: str) -> bool:
+    def _hoistable(s: Statement, axis: str, rebound: set[str]) -> bool:
         # Accum / Init are scope-bound to their enclosing Loop's reduction (an Init seeds an
         # Accum or a Carrier's state per output cell) — they can't move alone, but the
         # whole enclosing block can. Side-effecting stmts (Write, or any block containing a
-        # Write) pin their iteration count and stay put.
+        # Write) pin their iteration count and stay put. A name bound more than once in the
+        # scope is a state the loop carries by reassignment: its bindings and its readers stay.
         if isinstance(s, (Accum, Init)) or s.has_side_effects:
+            return False
+        if rebound & {*s.defines(), *s.deps()}:
             return False
         return axis not in _axis_deps(s)
 
@@ -129,7 +133,9 @@ def _hoist_loop_invariants(stmts: Body) -> Body:
             if isinstance(s, (Loop, StridedLoop)):
                 inner = walk(s.body)
                 axis = s.axis.name
-                hoisted = _closed_under_constraints(inner, {index for index, c in enumerate(inner) if _hoistable(c, axis)})
+                bound = Counter(name for c in inner for name in c.defines())
+                rebound = {name for name, count in bound.items() if count > 1}
+                hoisted = _closed_under_constraints(inner, {index for index, c in enumerate(inner) if _hoistable(c, axis, rebound)})
                 new_body.extend(c for index, c in enumerate(inner) if index in hoisted)
                 new_body.append(s.replace(body=tuple(c for index, c in enumerate(inner) if index not in hoisted)))
             elif isinstance(s, Cond):
