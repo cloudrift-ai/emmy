@@ -12,6 +12,6 @@
   {"parent":"k_linear_reduce_105826","arm":{"PLACE@map.1/map.2/reduce.1/inner":"cut"},"children":["k_linear_reduce_105826__place_3ef07d857f","k_linear_reduce_105826#2"]}
  ],
  "rows": [
-  {"name":"k_linear_reduce.4ee8d02336ac","kernel":"k_linear_reduce_105826#2","pins":{"FAST_MATH":false},"knobs":{"TILE@map.1/map.2/reduce.1/inner":"","TILE@map.2/map.2/reduce.1/inner":"","REDUCE@map.1/map.2/reduce":"","REDUCE@map.1/map.2/reduce.1/inner":"","REDUCE@map.2/map.2/reduce":"","REDUCE@map.2/map.2/reduce.1/inner":"","STAGE@map.1/map.2/reduce.1/inner":"","STAGE@map.2/map.2/reduce.1/inner":"","WORK":"","RASTER":""}},
+  {"name":"k_linear_reduce.4ee8d02336ac","kernel":"k_linear_reduce_105826#2","pins":{"FAST_MATH":false},"knobs":{"REDUCE@map.1/map.2/reduce":"","REDUCE@map.2/map.2/reduce":"","WORK":"","RASTER":""}},
   {"name":"k_linear_reduce.530f577c6ee3","kernel":"k_linear_reduce_105826__place_3ef07d857f","pins":{"FAST_MATH":false},"knobs":{"WORK":"w2x1","TILE":"mma_m16n8k64_e2m1_f32/f1x4/k8","REDUCE":"","STAGE":"d1/smem-async","RASTER":""}}
  ]}

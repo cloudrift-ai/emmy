@@ -57,9 +57,10 @@ Read the reason on each line:
   node re-read as another kind), or the cut mints another number of pieces. A restamp drops the decision with its
   pieces' rows.
 - `demoted to a proposal NAME` — a measured row whose kernel was re-keyed: the schedule stays, the microseconds go.
-- `row NAME: KEY names no site of REF` — a scoped schedule key (`TILE@…`, `REDUCE@…`, `STAGE@…`) the kernel's fresh
-  tile no longer offers: the lift spells sites by their path from the root, and a node the lift now forms before it
-  moved the path. The row is kept as it is and a strict replay cannot realize it until the key is re-spelled.
+- `re-spelled row NAME OLD -> NEW` — a scoped schedule key (`TILE@…`, `REDUCE@…`, `STAGE@…`) the kernel's fresh tile
+  no longer offers, moved as a seam is: to the one offered key of its family and kind one segment away (a node the
+  lift now forms before the site moved its operand index). `dropped key NAME: KEY names no site of REF` is a key no
+  such rule maps to exactly one site, removed from its row.
 
 To see what moved in one program, compare the stored body (the kernel's `loop_ir` entry in the file) with the fresh
 one:
@@ -86,7 +87,8 @@ until measured again. It refuses to write a file nothing survives in. Read its r
 | Report line | Meaning | Next |
 | --- | --- | --- |
 | `demoted to a proposal NAME` | the kernel changed under the row | measure it again on the card (step 3) |
-| `row NAME: KEY names no site of REF` | the row's site path moved | re-spell the key onto the fresh tile's site, or drop the row |
+| `re-spelled row NAME OLD -> NEW` | the row's site address moved by an operand index | measure it again on the card (step 3) |
+| `dropped key NAME: KEY names no site of REF` | the key's site is not one segment away from any offered site | the row keeps its other keys; measure it again (step 3) |
 | `re-spelled seam PARENT OLD -> NEW` | the seam moved, and the new seam cuts the same pieces, or pieces that read and write alike | where a piece shows as demoted too, compare the fresh cut's operands |
 | `dropped decision …` | the fresh parent takes no such decision | record the fresh kernel set (step 3) |
 | `dropped kernel NAME: no fresh kernel writes its outputs` | the layer regrouped | trace and record the fresh kernels (step 4) |

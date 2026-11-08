@@ -12,6 +12,6 @@
   {"parent":"k_mean_a43cda","arm":{"PLACE@map.2/map.1/map.1/reduce.1/inner+map.1/map":"cut"},"children":["k_mean_a43cda__place_e709bac18c","k_mean_a43cda#2"]}
  ],
  "rows": [
-  {"name":"k_mean_a43cda.8a4af0c2b2de","kernel":"k_mean_a43cda__place_e709bac18c","pins":{"FAST_MATH":true},"knobs":{"TILE@map.1/inner":"","TILE@map.1/inner.2/map.3/map.1/inner":"","REDUCE@map.1/inner":"","REDUCE@map.1/inner.2/map.3/map.1/inner":"","STAGE@map.1/inner":"","STAGE@map.1/inner.2/map.3/map.1/inner":"","WORK":"","RASTER":""}},
+  {"name":"k_mean_a43cda.8a4af0c2b2de","kernel":"k_mean_a43cda__place_e709bac18c","pins":{"FAST_MATH":true},"knobs":{"TILE@map.1/inner":"","TILE@map.1/inner.1/map.3/map.1/inner":"","REDUCE@map.1/inner":"","REDUCE@map.1/inner.1/map.3/map.1/inner":"","STAGE@map.1/inner":"","STAGE@map.1/inner.1/map.3/map.1/inner":"","WORK":"","RASTER":""}},
   {"name":"k_mean_a43cda.7cb71ce4fd16","kernel":"k_mean_a43cda#2","pins":{"FAST_MATH":true},"knobs":{"WORK":"","REDUCE":"","RASTER":""}}
  ]}
