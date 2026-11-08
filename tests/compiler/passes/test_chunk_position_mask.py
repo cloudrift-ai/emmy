@@ -53,21 +53,23 @@ def _flash(cell: str, stage: str | None, split: str = "") -> dict[str, str]:
     return {"PLACE": "fuse", "WORK": "w4x1", "REDUCE@map.1/map.1/twist": split, **{k.replace("@", f"@{site}"): v for k, v in pins.items()}}
 
 
-def _attention(cache=torch.bfloat16, heads=HEADS, offset=0, row=D):
+def _attention(cache=torch.bfloat16, heads=HEADS, offset=0, row=D, query=None):
     """Native's 64-row attention twin over a symbolic window, traced as the export traces it. ``offset`` and ``row``
-    read each head's dims as a slice of a padded cache row."""
+    read each head's dims as a slice of a padded cache row; ``query`` reads the queries as a slice at that offset of
+    a row 16 elements wider."""
     attend = attend_module(heads, KV, D, ROWS)
 
     class Sliced(torch.nn.Module):
         def forward(self, q, keys, values, position):
+            q = q if query is None else q[:, query : query + heads * D]
             return attend(q, keys[:, :, offset : offset + D], values[:, :, offset : offset + D], position)
 
-    module = attend if (offset, row) == (0, D) else Sliced()
+    module = attend if (offset, row, query) == (0, D, None) else Sliced()
     window = torch.export.Dim(WINDOW, min=ROWS, max=CONTEXT)
     shapes = {n: {0: window} if n in ("keys", "values") else {} for n in inspect.signature(module.forward).parameters}
     # Two tensors, not one twice: the tracer takes a shared example tensor as one aliased input.
     examples = (
-        torch.zeros(ROWS, heads * D, dtype=torch.bfloat16),
+        torch.zeros(ROWS, heads * D + (0 if query is None else 16), dtype=torch.bfloat16),
         torch.zeros(512, KV, row, dtype=cache),
         torch.zeros(512, KV, row, dtype=cache),
     )
@@ -171,6 +173,18 @@ def test_a_cache_slice_stages_only_on_the_16_byte_grid(cache, offset, row, stage
         return
     (source,) = [node.op.kernel_source for node in compile_().nodes.values() if isinstance(node.op, CudaOp)]
     assert "emmy_cp_async" in source
+
+
+@pytest.mark.parametrize(("query", "wgmma"), [(8, True), (1, False)], ids=["16B-offset", "2B-offset"])
+def test_a_warp_group_score_takes_a_query_slice_only_on_the_16_byte_grid(query, wgmma) -> None:
+    """GPU-free. A warp-group score reads its query off a slab the kernel copies on cp.async ahead of the chunk loop,
+    so a query sliced off the 16 B grid keeps the ``mma.sync`` score, whose fragments load straight from gmem."""
+    _, graph = _attention(query=query)
+    pins = {**_flash("mma_m16n8k16_bf16_f32", BYTES), "TILE@map.1/map.1/twist.1/inner": "wgmma_m64n64k16_bf16_f32/f1x8/k4"}
+    with pinned_knobs(pins):
+        compiled = Pipeline.build(CUDA_PASSES).run(graph, ctx=Context.from_target((9, 0)))
+    (source,) = [node.op.kernel_source for node in compiled.nodes.values() if isinstance(node.op, CudaOp)]
+    assert ("wgmma" in source) is wgmma
 
 
 @requires_cuda

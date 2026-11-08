@@ -138,14 +138,10 @@ def gmem_row_stride(load: Load, axis_name: str, inputs) -> int | None:
 
 
 def copy_width(slab_cols: int, elem_bytes: int) -> int:
-    """Elements per vector copy (``cp.async`` or the blocking vector load) of a slab row — the widest
-    contiguous run whose byte size is a legal copy width (4 / 8 / 16) and that divides the inner
-    (contiguous) slab extent (a chunk never straddles a slab row). The slab's inner dim maps stride-1
-    to the gmem inner dim (canonical A[m,k] / B[k,n]), so a V-run is contiguous in
-    both. ``elem_bytes == 1`` (an fp8 byte slab) yields 16-element 16 B chunks —
-    the byte-staging legality requires 16-divisible inner spans, so the widest
-    width always fits. The staging lowering copies at this width and the stage resolvers prove
-    :func:`copies_aligned` at it, so both read it here."""
+    """Elements per vector copy (``cp.async`` or the blocking vector load) of a slab row ``slab_cols`` elements
+    wide: the widest run whose byte size is a legal copy width (16, 8 or 4) and that divides the row, so a copy
+    never straddles one. A byte slab's rows are 16-divisible by its staging rules, so it copies 16 elements. The
+    staging lowering copies at this width and the stage resolvers prove :func:`copies_aligned` at it."""
     for nbytes in (16, 8, 4):
         v = nbytes // elem_bytes
         if v >= 1 and slab_cols % v == 0:
@@ -153,24 +149,25 @@ def copy_width(slab_cols: int, elem_bytes: int) -> int:
     return 1  # elem_bytes > 16 — never (1/2/4-byte element dtypes only)
 
 
-def copies_aligned(load: Load, inner: str, chunk: int, inputs) -> bool:
+def copies_aligned(load: Load, inner: str, chunk: int, inputs, *, per: int = 1) -> bool:
     """Whether every ``chunk``-element copy ``load`` makes along ``inner`` starts on a ``chunk``-element boundary of
-    its buffer — the source alignment a 16 B vector copy needs. A copy starts at a multiple of ``chunk`` along
-    ``inner``, so every other term of the flat address must be a provable multiple of it: a slice's offset, each
-    coordinate times its row stride. Each coordinate is simplified at ``inner = 0`` first, so a reshape's division and
-    modulus (a packed weight's ``(n * K + k) / 2 % (K / 2)``) fold to the offset they leave. A symbolic dim counts as
-    an unknown factor of the strides before it, and the buffer's own base is aligned, as an allocation is. ``False``
-    for an unknown buffer."""
+    its buffer — the source alignment a vector copy of that width needs. A copy starts where ``inner`` is a multiple
+    of ``chunk · per`` (``per`` is how many ``inner`` positions one stored element holds: two for a packed byte), so
+    the flat address at ``inner = chunk · per · j`` must be a provable multiple of ``chunk`` for every ``j``. The
+    proof reads the whole address, simplified: a slice's offset, a row stride off the grid, and ``inner`` split across
+    dims at a pitch off it (a slice reshaped flat) each leave a term it cannot prove, while a dense reshape's quotient
+    and remainder recombine. A symbolic dim is an unknown factor of the strides before it, and the buffer's own base
+    is aligned, as an allocation is. ``False`` for an unknown buffer."""
     t = inputs.get(load.input) if inputs else None
     if t is None or len(load.index) != len(tuple(t.shape)):
         return False
-    dims = tuple(t.shape)
-    for pos, e in enumerate(load.index):
-        stride = math.prod(d.as_static() for d in dims[pos + 1 :] if d.is_static)
-        need = chunk // math.gcd(stride, chunk)
-        if need > 1 and not _divisible(e.substitute({inner: Literal(0, "int")}).simplify(SimplifyCtx.empty()), need):
-            return False
-    return True
+    start = {inner: BinaryExpr("*", Literal(chunk * per, "int"), Var("__copy"))}
+    address, stride = Literal(0, "int"), Literal(1, "int")
+    for pos in reversed(range(len(load.index))):
+        address = BinaryExpr("+", address, BinaryExpr("*", load.index[pos].substitute(start), stride))
+        dim = t.shape[pos]
+        stride = BinaryExpr("*", stride, Literal(dim.as_static(), "int") if dim.is_static else Var(f"__dim{pos}"))
+    return _divisible(address.simplify(SimplifyCtx.empty()), chunk)
 
 
 def reads_declared_rows(load: Load, axis_name: str) -> bool:
@@ -204,14 +201,28 @@ def _int_lit(e: Expression) -> int | None:
 
 
 def _divisible(expression: Expression, n: int) -> bool:
-    """Whether ``expression`` is PROVABLY a multiple of ``n`` — every additive term literal-``n``-divisible
-    or carrying a literal factor that is. Conservative: an opaque var answers no."""
+    """Whether ``expression`` is PROVABLY a multiple of ``n``: every additive term is; a product's literal factor
+    ``c`` leaves ``n / gcd(c, n)`` to the other factor, and any other product needs one factor that is; a quotient
+    ``a / c`` is when ``a`` is a multiple of ``c · n``, a remainder ``a % c`` when both ``a`` and ``c`` are. Each rule
+    holds for any integer operands under C's truncating division. Conservative: an opaque var answers no."""
+    if n == 1:
+        return True
     if (v := _int_lit(expression)) is not None:
         return v % n == 0
-    if isinstance(expression, BinaryExpr) and expression.op in ("+", "-"):
+    if not isinstance(expression, BinaryExpr):
+        return False
+    if expression.op in ("+", "-"):
         return _divisible(expression.left, n) and _divisible(expression.right, n)
-    if isinstance(expression, BinaryExpr) and expression.op == "*":
+    if expression.op == "*":
+        for side, other in ((expression.left, expression.right), (expression.right, expression.left)):
+            if (c := _int_lit(other)) is not None:
+                return _divisible(side, n // math.gcd(c, n))
         return _divisible(expression.left, n) or _divisible(expression.right, n)
+    if (c := _int_lit(expression.right)) is not None and c > 0:
+        if expression.op == "/":
+            return _divisible(expression.left, c * n)
+        if expression.op == "%":
+            return c % n == 0 and _divisible(expression.left, n)
     return False
 
 

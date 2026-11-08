@@ -1829,37 +1829,58 @@ def test_transposed_a_tma_pin_is_refused(monkeypatch) -> None:
         _run_tile_pass(_imap_graph("transpose_a")[0])
 
 
-# --- a slice off the copy grid ----------------------------------------------------------------------------------------
+# --- an operand off the copy grid -------------------------------------------------------------------------------------
 # A cp.async or blocking vector copy moves 16 B (narrower only when the slab row is) from where the operand's index puts
 # it, so a weight sliced one element into a padded row would read from a 2 B offset, which PTX leaves undefined. The
-# stage resolvers prove each copy's start on its own width (``copies_aligned``) and refuse a pin that would misalign it.
+# stage resolvers prove the whole address of every copy's start on its own width (``copies_aligned``) and refuse a pin
+# that would misalign it.
 
 _WARP_COPY = {"TILE": "mma_m16n8k16_bf16_f32/f2x4/k4", "WORK": "w2x2", "STAGE": "d2/smem-async", "REDUCE": ""}
+_WARP_FILL = {**_WARP_COPY, "STAGE": "d1/smem", "PLACE": "fuse"}
 _SCALAR_COPY = {"TILE": "f2x4", "WORK": "t16x8", "STAGE": "d2/smem-async", "REDUCE": ""}
+_SCALAR_SYNC = {**_SCALAR_COPY, "STAGE": "d1/smem"}
 
 
 @pytest.mark.parametrize(
-    ("dtype", "pin", "offset", "staged"),
+    ("x", "w", "expression", "dtype", "pin", "staged"),
     [
-        ("bfloat16", _WARP_COPY, 1, False),
-        ("bfloat16", _WARP_COPY, 8, True),
-        ("float32", _SCALAR_COPY, 2, False),
-        ("float32", _SCALAR_COPY, 4, True),
-        ("float32", {**_SCALAR_COPY, "STAGE": "d1/smem"}, 2, False),
+        ((64, 256), (256, 272), "x @ w[:, 1:257].t()", "bfloat16", _WARP_COPY, False),
+        ((64, 256), (256, 272), "x @ w[:, 8:264].t()", "bfloat16", _WARP_COPY, True),
+        ((64, 256), (256, 260), "x @ w[:, :256].t()", "bfloat16", _WARP_COPY, False),
+        ((64, 272), (256, 256), "x[:, 1:257] @ w.t()", "bfloat16", _WARP_COPY, False),
+        ((64, 16, 17), (256, 256), "x[:, :, :16].reshape(64, 256) @ w", "bfloat16", _WARP_COPY, False),
+        ((1024, 15), (256, 256), "x.reshape(60, 256) @ w", "bfloat16", _WARP_COPY, True),
+        ((64, 256), (256, 272), "(x * 2.0) @ w[:, 1:257].t()", "bfloat16", _WARP_FILL, False),
+        ((64, 256), (256, 272), "(x * 2.0) @ w[:, 8:264].t()", "bfloat16", _WARP_FILL, True),
+        ((64, 256), (256, 272), "x @ w[:, 2:258].t()", "float32", _SCALAR_COPY, False),
+        ((64, 256), (256, 272), "x @ w[:, 4:260].t()", "float32", _SCALAR_COPY, True),
+        ((64, 256), (256, 272), "x @ w[:, 2:258].t()", "float32", _SCALAR_SYNC, False),
+        ((64, 256), (256, 272), "x @ w[:, 4:260].t()", "float32", _SCALAR_SYNC, True),
     ],
-    ids=["warp-2B-offset", "warp-16B-offset", "scalar-8B-offset", "scalar-16B-offset", "scalar-sync-8B-offset"],
+    ids=[
+        "warp-2B-offset",
+        "warp-16B-offset",
+        "warp-520B-row-pitch",
+        "warp-sliced-a",
+        "warp-slice-reshaped-flat",
+        "warp-dense-reshape-across-rows",
+        "fill-2B-offset",
+        "fill-16B-offset",
+        "scalar-8B-offset",
+        "scalar-16B-offset",
+        "scalar-sync-8B-offset",
+        "scalar-sync-16B-offset",
+    ],
 )
-def test_a_weight_slice_stages_only_on_the_copy_grid(dtype, pin, offset, staged) -> None:
-    """GPU-free. ``x @ w[:, offset : offset + 256].t()`` over a 272-wide weight row: the copies run along K from
-    ``w[n * 272 + offset + k]``, so the pin stages only when ``offset`` keeps every 16 B copy on the 16 B grid."""
+def test_an_operand_stages_only_on_the_copy_grid(x, w, expression, dtype, pin, staged) -> None:
+    """GPU-free. A copy runs along K (or N for a canonical B) from where the operand's index puts it, so the pin stages
+    only when every copy's whole address stays on the copy's own grid: a slice's offset, a row pitch, or K split
+    across rows at a pitch off the grid each refuse it, and a dense reshape whose rows recombine on the grid stages."""
     from emmy.commands.trace import graph_from_code  # noqa: PLC0415
     from emmy.compiler.ir.cuda import CudaOp  # noqa: PLC0415
     from emmy.compiler.pipeline.search.pins import pinned_knobs  # noqa: PLC0415
 
-    code = (
-        f"import torch\nx = torch.randn(64, 256, dtype=torch.{dtype})\nw = torch.randn(256, 272, dtype=torch.{dtype})\n"
-        f"x @ w[:, {offset}:{offset + 256}].t()"
-    )
+    code = f"import torch\nx = torch.randn{x}.to(torch.{dtype})\nw = torch.randn{w}.to(torch.{dtype})\n{expression}"
     graph = graph_from_code(code)[0]
 
     def compile_():
@@ -1871,7 +1892,7 @@ def test_a_weight_slice_stages_only_on_the_copy_grid(dtype, pin, offset, staged)
             compile_()
         return
     (source,) = [node.op.kernel_source for node in compile_().nodes.values() if isinstance(node.op, CudaOp)]
-    assert "emmy_cp_async" in source
+    assert "_smem[" in source
 
 
 @requires_cuda

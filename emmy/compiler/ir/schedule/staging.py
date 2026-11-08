@@ -136,23 +136,26 @@ def _warp_vector_copy(k_axis: Axis, tile_n: int, bk_elems: int, mask_n: bool, b_
     return bk_elems % _CP_ASYNC_MIN_ELEMS == 0 and (b_trans or tile_n % _CP_ASYNC_MIN_ELEMS == 0)
 
 
-def _copies_aligned(a, bs, tile: Tile, k_axis: Axis, bk_elems: int, b_trans: bool, nbytes: tuple[int, int], inputs) -> bool:
-    """Whether every vector copy (cp.async or the blocking vector load) a matmul stage makes of the
-    stored ``a`` edge (``None`` when it is not copied) and the stored ``bs`` edges starts on its own
-    width in gmem. A copy moves :func:`copy_width` elements of its slab row from where the operand's
-    index puts it, along K for A and a transposed B and along N for a canonical B, so a slice's
-    offset or a row stride off that grid would misalign it (:func:`copies_aligned`). A TMA box takes
-    element coordinates and needs no such proof; a computed edge is filled, not copied. With no
-    ``inputs`` (a structural scheduler fixture) there is no layout to prove against, as
-    :func:`computed_operand_copy_dtype` reads it; the lowering path always supplies them."""
-    if not inputs:
-        return True
-    b_inner, b_row = (k_axis.name, bk_elems) if b_trans else (tile.n.axis.name, tile.n.tile)
-    copied = (*(((a, k_axis.name, bk_elems, nbytes[0]),) if a is not None else ()), *((b, b_inner, b_row, nbytes[1]) for b in bs))
-    return all(
-        edge.as_slab() is None or copies_aligned(edge.as_slab().load, inner, copy_width(row, width), inputs)
-        for edge, inner, row, width in copied
+def vector_copies_aligned(copies, inputs) -> bool:
+    """Whether every vector copy (cp.async or the blocking vector load) a stage makes starts on its own width in gmem.
+    ``copies`` holds one ``(load, inner, row, nbytes, per)`` per copied slab: each copy moves :func:`copy_width`
+    elements of the slab's ``row``-element rows along ``inner`` from where the load's index puts it, ``per`` ``inner``
+    positions to a stored element (:func:`copies_aligned`), so a slice's offset or a row pitch off that grid would
+    misalign it. A TMA box takes element coordinates and needs no such proof. With no ``inputs`` (a structural
+    scheduler fixture) there is no layout to prove against, as :func:`computed_operand_copy_dtype` reads it; the
+    lowering path always supplies them."""
+    return not inputs or all(
+        copies_aligned(load, inner, copy_width(row, nbytes), inputs, per=per) for load, inner, row, nbytes, per in copies
     )
+
+
+def _contraction_copies(a, bs, tile: Tile, k_axis: Axis, bk_elems: int, b_trans: bool, nbytes: tuple[int, int]) -> tuple:
+    """The copies a matmul stage makes of its stored ``a`` edge (``None`` when it is not copied) and ``bs`` edges, as
+    :func:`vector_copies_aligned` reads them: A along K, B along K when transposed and along N otherwise. A computed
+    edge is filled, not copied."""
+    b_inner, b_row = (k_axis.name, bk_elems) if b_trans else (tile.n.axis.name, tile.n.tile)
+    edges = (*(((a, k_axis.name, bk_elems, nbytes[0]),) if a is not None else ()), *((b, b_inner, b_row, nbytes[1]) for b in bs))
+    return tuple((edge.as_slab().load, inner, row, width, 1) for edge, inner, row, width in edges if edge.as_slab() is not None)
 
 
 def _warp_tma(
@@ -227,7 +230,7 @@ def chunk_key_stage(tile: Tile, stage: Stage, inputs, producer, producer_k, k_ax
     ragged = not k_axis.extent.is_static
     copies = (
         _warp_vector_copy(k_axis, span, bk_elems, False, False, ragged=ragged)
-        and copies_aligned(slab.load, producer_k.name, copy_width(span, nbytes), inputs)
+        and vector_copies_aligned(((slab.load, producer_k.name, span, nbytes, 1),), inputs)
         if stage.transport == "smem-async" or (stage.transport == "smem" and tile.atom.sync_copy_staging)
         else (
             stage.transport == "smem-tma"
@@ -286,10 +289,9 @@ def _chunk_warp_stage(
     # zero and the duplicate value rows fold to nothing. A TRANSPOSED value strides its gmem rows
     # BY the key extent, so it keeps the static, chunk-divisible demand every staged operand makes.
     ragged = not k_axis.extent.is_static and not view.b_trans
-    # A vector copy moves 16 B from where the slab's index puts it, so a slice's offset or a row stride off the 16 B
-    # grid would misalign it; a TMA box takes element coordinates and needs no such proof.
-    vector_copy_ok = _warp_vector_copy(k_axis, n.tile, bk_elems, n.mask, view.b_trans, ragged=ragged) and copies_aligned(
-        slab.load, k_axis.name if view.b_trans else n.axis.name, copy_width(bk_elems if view.b_trans else n.tile, b_nbytes), inputs
+    inner, row = (k_axis.name, bk_elems) if view.b_trans else (n.axis.name, n.tile)
+    vector_copy_ok = _warp_vector_copy(k_axis, n.tile, bk_elems, n.mask, view.b_trans, ragged=ragged) and vector_copies_aligned(
+        ((slab.load, inner, row, b_nbytes, 1),), inputs
     )
     tma_ok = (
         stage.transport == "smem-tma"
@@ -392,10 +394,9 @@ def _packed_warp_stage(c: Fold, tile: Tile, stage: Stage, budget: int, packed, i
     # 16 B-aligned inner span and gmem row stride per operand at its OWN width. The byte side is
     # already 16-divisible by the rule above; A's is ``bk_elems`` and ``k`` at two bytes each.
     pad = 0 if stage.transport == "smem-tma" else BYTE_SLAB_PAD
-    if stage.transport == "smem-async" and not (
-        _copies_aligned(c.operands[0], (), tile, k_axis, bk_elems, False, (a_dtype.nbytes, 1), inputs)
-        and all(copies_aligned(channel.bits, k_axis.name, copy_width(bk_elems // per_byte, 1), inputs) for channel in channels)
-    ):
+    bits = tuple((channel.bits, k_axis.name, bk_elems // per_byte, 1, per_byte) for channel in channels)
+    a_copy = _contraction_copies(c.operands[0], (), tile, k_axis, bk_elems, False, (a_dtype.nbytes, 1))
+    if stage.transport == "smem-async" and not vector_copies_aligned((*a_copy, *bits), inputs):
         return None
     if stage.transport == "smem-tma":
         a_slab = c.operands[0].as_slab()
@@ -503,9 +504,9 @@ def _block_scaled_warp_stage(c: Fold, tile: Tile, stage: Stage, budget: int, pai
         return None
     if tma and max(tile.m.tile, tile.n.tile, bk_elems // 2) > _TMA_MAX_BOX:
         return None
-    copied = [(side.bits, bk_elems // 2) for side in (pair.a, *pair.b) if side.bits is not None]
-    copied += [(side.scale, bk_elems // block) for side in (pair.a, *pair.b)]
-    if not tma and not all(copies_aligned(load, k_axis.name, copy_width(row, 1), inputs) for load, row in copied):
+    codes = tuple((side.bits, k_axis.name, bk_elems // 2, 1, 2) for side in (pair.a, *pair.b) if side.bits is not None)
+    scales = tuple((side.scale, k_axis.name, bk_elems // block, 1, block) for side in (pair.a, *pair.b))
+    if not tma and not vector_copies_aligned((*codes, *scales), inputs):
         return None
     pad = 0 if tma else BYTE_SLAB_PAD
     rows = (tile.m.tile, *(tile.n.tile for _ in pair.b))
@@ -615,8 +616,9 @@ def resolve_warp_stage(
         and box_ok
         and _warp_tma(k_axis, n.axis, n.tile, bk_elems, a_nbytes, b_nbytes, n.mask, c.as_contraction().b_trans)
     )
-    vector_copy_ok = _warp_vector_copy(k_axis, n.tile, bk_elems, n.mask, c.as_contraction().b_trans) and _copies_aligned(
-        c.operands[0], b_edges, tile, k_axis, bk_elems, c.as_contraction().b_trans, (a_nbytes, b_nbytes), inputs
+    copies = _contraction_copies(c.operands[0], b_edges, tile, k_axis, bk_elems, c.as_contraction().b_trans, (a_nbytes, b_nbytes))
+    vector_copy_ok = _warp_vector_copy(k_axis, n.tile, bk_elems, n.mask, c.as_contraction().b_trans) and vector_copies_aligned(
+        copies, inputs
     )
     cp_ok = stage.transport == "smem-async" and vector_copy_ok
     sync_ok = sync_copy and vector_copy_ok
@@ -720,8 +722,8 @@ def resolve_scalar_stage(
     stored_b = tuple(edge for (_, edge), copy in zip(channels, copied, strict=True) if copy)
 
     def aligned(bk):  # a TMA box takes element coordinates; the copies need their own width's grid
-        return stage.transport == "smem-tma" or _copies_aligned(
-            c.operands[0], stored_b, tile, k_axis, bk, b_trans, (elem_bytes, b_bytes), inputs
+        return stage.transport == "smem-tma" or vector_copies_aligned(
+            _contraction_copies(c.operands[0], stored_b, tile, k_axis, bk, b_trans, (elem_bytes, b_bytes)), inputs
         )
 
     _, _, stats, chunk = (seam if seam is not None else cone_seam(c.operands[0], k_axis.name, axes)) if a is None else ((), (), (), ())
@@ -982,14 +984,16 @@ def resolve_fill_stage(
         ):
             _decline(why, "a copied slab has no valid TMA box: it needs static, tile-divisible K and N and 16 B-aligned rows")
             return None
-    elif not _copies_aligned(
-        c.operands[0] if a_copied else None,
-        tuple(edge for edge in c.operands[1:] if copied_b(c, edge, inputs)),
-        tile,
-        k_axis,
-        bk_elems,
-        c.as_contraction().b_trans,
-        (a_nbytes, b_nbytes),
+    elif not vector_copies_aligned(
+        _contraction_copies(
+            c.operands[0] if a_copied else None,
+            tuple(edge for edge in c.operands[1:] if copied_b(c, edge, inputs)),
+            tile,
+            k_axis,
+            bk_elems,
+            c.as_contraction().b_trans,
+            (a_nbytes, b_nbytes),
+        ),
         inputs,
     ):
         _decline(why, "a copied slab's vector copies would start off their own width in gmem (a slice's offset or a row stride)")
@@ -1014,4 +1018,5 @@ __all__ = [
     "resolve_scalar_stage",
     "resolve_warp_stage",
     "stage_target",
+    "vector_copies_aligned",
 ]
