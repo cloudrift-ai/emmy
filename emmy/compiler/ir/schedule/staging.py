@@ -66,9 +66,9 @@ def stage_target(stage: Stage, ctx) -> str | None:
 SPLIT_COPY_DEPTH = 2
 
 
-def chunk_slab_dtype(tile: Tile, stage: Stage, stored):
-    """The element dtype a chunk-tier slab holds for an operand stored as ``stored`` (``None``: not
-    known, read as the atom's own), or ``None`` when no slab takes it.
+def chunk_slab_dtype(tile: Tile, stage: Stage, inputs, name: str):
+    """The element dtype a chunk-tier slab holds for the operand loaded from ``name`` (one not among
+    ``inputs`` reads as the atom's own), or ``None`` when no slab takes it.
 
     An operand stored at the atom's B dtype stages verbatim on every transport. A 1-byte (fp8)
     operand under a 16-bit ``mma.sync`` cell stages as a RAW BYTE slab on cp.async, and its fragment
@@ -77,6 +77,7 @@ def chunk_slab_dtype(tile: Tile, stage: Stage, stored):
     read issues per element. The blocking copy and TMA keep the verbatim rule: the Volta drain
     gathers f16 slabs, and a descriptor read would take the bytes for 16-bit values."""
     atom = tile.atom.operand_dtype("b")
+    stored = inputs[name].dtype if inputs and name in inputs else None
     if stored is None or stored == atom:
         return atom
     if stage.transport == "smem-async" and stored.nbytes == 1 and stored.logical_elems == 1 and atom.nbytes == 2 and not tile.atom.is_wgmma:
@@ -84,7 +85,7 @@ def chunk_slab_dtype(tile: Tile, stage: Stage, stored):
     return None
 
 
-def chunk_slab_pad(tile: Tile, stage: Stage, elem=None) -> int:
+def chunk_slab_pad(tile: Tile, stage: Stage, elem) -> int:
     """The row pad, in elements, of a chunk-tier slab: the Volta blocking copy's, or a byte slab's.
 
     The Volta drain gathers each lane's four halves at ``row · ldm``, one row per lane, and the
@@ -93,7 +94,7 @@ def chunk_slab_pad(tile: Tile, stage: Stage, elem=None) -> int:
     vector stores aligned and spread the rows to a two-way conflict at worst. A byte slab
     (:func:`chunk_slab_dtype`) takes the contraction tier's ``BYTE_SLAB_PAD`` for the same reason:
     its byte gathers read no swizzled slab. The other copy slabs swizzle instead, and pad nothing."""
-    if elem is not None and elem.nbytes == 1:
+    if elem.nbytes == 1:
         return BYTE_SLAB_PAD
     return 8 if stage.transport == "smem" and tile.atom.sync_copy_staging else 0
 
@@ -195,7 +196,7 @@ def chunk_key_stage(tile: Tile, stage: Stage, inputs, producer, producer_k, k_ax
     slab = key.as_slab() if key is not None else None
     if slab is None or producer_k.name not in slab.load.index[-1].free_vars():
         return None  # the score's contraction span must be the key's gmem inner dim (the fill's chunk)
-    elem = chunk_slab_dtype(tile, stage, _stored_dtype(inputs, slab.load.input))
+    elem = chunk_slab_dtype(tile, stage, inputs, slab.load.input)
     span = producer_k.extent.as_static()
     if elem is None or (elem.nbytes == 1 and span % 16):
         return None  # a byte slab copies 16 B chunks along the span
@@ -216,11 +217,6 @@ def chunk_key_stage(tile: Tile, stage: Stage, inputs, producer, producer_k, k_ax
         )
     )
     return (slab.load, span, elem) if copies else None
-
-
-def _stored_dtype(inputs, name: str):
-    stored = inputs.get(name) if inputs else None
-    return stored.dtype if stored is not None else None
 
 
 def _chunk_warp_stage(
@@ -254,7 +250,7 @@ def _chunk_warp_stage(
     slab = c.streamed.as_slab()
     if view is None or slab is None:
         return None
-    elem = chunk_slab_dtype(tile, stage, _stored_dtype(inputs, slab.load.input))
+    elem = chunk_slab_dtype(tile, stage, inputs, slab.load.input)
     if elem is None:
         return None
     b_nbytes = elem.nbytes

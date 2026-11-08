@@ -55,6 +55,7 @@ from .refusals import (
     _warp_atoms,
     _warp_plans,
     _wgmma_refusal,
+    _wgmma_slab_refusal,
     fill_stage_moves,
     fill_tma_moves,
 )
@@ -229,8 +230,12 @@ def _contraction_support(tile_op, site: NodeId, node: NodeSchedule, edges, geome
     resolved_stage = None
     # A site below a kernel root reads through its root's transport, so its own direct stage is no
     # gmem read: a warp-group score's operands are the chunk tier's shared-memory slabs.
-    own = None if site in tile_op.nested_sites else stage
-    if _wgmma_refusal(node.tile, own) is not None or _multi_fold_direct_refusal(fold, node.tile, stage) is not None:
+    nested = site in tile_op.nested_sites
+    if (
+        _wgmma_refusal(node.tile, None if nested else stage) is not None
+        or (nested and _wgmma_slab_refusal(fold, node.tile, tile_op.inputs) is not None)
+        or _multi_fold_direct_refusal(fold, node.tile, stage) is not None
+    ):
         return None
     if view.as_contraction() is None or not node.tile.is_tiled:
         if not stage.is_direct:

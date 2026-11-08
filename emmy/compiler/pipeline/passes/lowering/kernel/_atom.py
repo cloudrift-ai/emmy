@@ -3162,8 +3162,7 @@ class _FlashOps(_MmaOps):
         elem = self.tile.atom.operand_dtype("b")
         load = self.c.streamed.as_slab().load
         trans = self.c.as_contraction().b_trans
-        stored = self.inputs.get(load.input) if self.inputs else None
-        v_elem = chunk_slab_dtype(self.tile, self.stage.choice, stored.dtype if stored is not None else None)
+        v_elem = chunk_slab_dtype(self.tile, self.stage.choice, self.inputs, load.input)
         # The Volta blocking copy and a byte slab pad their rows instead: their drains read no swizzled slab.
         pad = chunk_slab_pad(self.tile, self.stage.choice, v_elem)
         swizzle = "NONE" if pad else self.slab_swizzles(mn, elem.nbytes)[1]
@@ -3251,7 +3250,7 @@ class _FlashOps(_MmaOps):
         return next(axis for axis in self.axes if axis.name == self.inner[0].axis)
 
     def _key_stage(self):
-        """The score key's staged ``(load, span)``, or ``None`` — the resolver's own statement
+        """The score key's staged ``(load, span, elem)``, or ``None`` — the resolver's own statement
         (:func:`chunk_key_stage`), so the sized ring and the emitted slabs cannot disagree."""
         if self.stage is None or self.inner is None:
             return None

@@ -534,11 +534,13 @@ every chunk 16 B-aligned and takes the drain from 4-way bank conflicts to ≤ 2-
 TMA byte slab (the U8 `CUtensorMap`) deposits dense and eats the measured conflicts. Legality
 (`resolve_warp_stage`'s byte arm): 16-divisible inner spans (and, canonical-B, a 16-divisible gmem row stride N);
 the multi-channel sync compute-fill and the scalar resolver still decline 1-byte elements. The chunk tier stages an
-FP8 key-value cache the same way, its key and its value both, on cp.async only (`chunk_slab_dtype`): the key's
-(k, k+1) pairs take the fp8x2 convert and the K-major value the per-element gather. Read gmem-direct, the cache cost
-one byte load per element — about 1,150 loads a thread per 64-key chunk at head width 256, each holding a register
-until it converts — and every attention fold sat at 255 registers with spills. Staged, the 27B one-row decode piece
-at 131,072 cached tokens runs 431 us against 845 on an RTX 4080, about 87% of the card's bandwidth.
+FP8 key-value cache the same way, its key and its value both, on cp.async only (`chunk_slab_dtype`): an f16 cell
+converts the key's (k, k+1) pairs with one fp8x2 convert, and a bf16 cell's key and every K-major value element
+convert one by one. A warp-group score cannot read that key, since its descriptor converts nothing
+(`_wgmma_slab_refusal`). Read gmem-direct, the cache cost one byte load per element — about 1,150 loads a thread per
+64-key chunk at head width 256, each holding a register until it converts — and every attention fold sat at 255
+registers with spills. Staged, the 27B one-row decode piece at 131,072 cached tokens runs 431 us against 845 on an
+RTX 4080, about 87% of the card's bandwidth.
 
 **Staged packed-pair (NVFP4) weights — the byte slab plus a block-scale slab.** A packed weight is a COMPUTED B, so
 the general reading above already covers it: the compute fill evaluates its decode cone per slab cell. That reading

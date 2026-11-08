@@ -13,14 +13,14 @@ import torch
 
 from emmy.compiler.backend.gpu_lock import gpu_lock
 from emmy.compiler.context import Context
-from emmy.compiler.dtype import BF16, F8E4M3, decode_bf16
+from emmy.compiler.dtype import F8E4M3, decode_bf16
 from emmy.compiler.ir.cuda import CudaOp
 from emmy.compiler.ir.pure.fold import Fold
 from emmy.compiler.ir.schedule import Stage, Tile, Work
 from emmy.compiler.ir.schedule.classic import refusals
 from emmy.compiler.ir.schedule.staging import chunk_slab_dtype, chunk_slab_pad
 from emmy.compiler.ir.tile import TileOp
-from emmy.compiler.pipeline import LOOP_PASSES, Pipeline
+from emmy.compiler.pipeline import CUDA_PASSES, LOOP_PASSES, Pipeline
 from emmy.compiler.pipeline.passes.tile._split import split_forks
 from emmy.compiler.pipeline.search.pins import pinned_knobs
 from emmy.compiler.trace.torch import trace_module
@@ -108,10 +108,34 @@ def test_an_fp8_cache_takes_a_16_bit_cell_whose_value_load_converts() -> None:
     assert twist.chunked()
     assert refusals._node_refusal(root.op, ctx, twist, True) is None
     assert set(refusals._warp_atoms(root.op, ctx, twist)) >= {cell for _cache, cell, _stage in CELLS.values()}
-    tile = Tile.parse("mma_m16n8k16_f16_f16/f1x16/k4", Work.parse("w4x1"))
-    assert chunk_slab_dtype(tile, Stage.parse(BYTES), F8E4M3) == F8E4M3 and chunk_slab_pad(tile, Stage.parse(BYTES), F8E4M3) == 16
-    assert chunk_slab_dtype(tile, Stage.parse("d1/smem-tma"), F8E4M3) is None
-    assert chunk_slab_dtype(tile, Stage.parse(BYTES), BF16) is None, "a 16-bit cache under an f16 cell stages nothing"
+    tile, inputs = Tile.parse("mma_m16n8k16_f16_f16/f1x16/k4", Work.parse("w4x1")), root.op.inputs
+    assert chunk_slab_dtype(tile, Stage.parse(BYTES), inputs, "keys") == F8E4M3
+    assert chunk_slab_pad(tile, Stage.parse(BYTES), F8E4M3) == 16
+    assert chunk_slab_dtype(tile, Stage.parse("d1/smem-tma"), inputs, "keys") is None
+    bf16_inputs = _twist(_attention()[1])[0].op.inputs
+    assert chunk_slab_dtype(tile, Stage.parse(BYTES), bf16_inputs, "keys") is None, "a 16-bit cache under an f16 cell stages nothing"
+
+
+@pytest.mark.parametrize(
+    ("cache", "target", "score", "spelled"),
+    [
+        (torch.float8_e4m3fn, (12, 0), "mma_m16n8k16_bf16_f32", ("__nv_fp8_e4m3 _a_smem", "emmy_cp_async")),
+        (torch.bfloat16, (9, 0), "wgmma_m64n64k16_bf16_f32", ("__nv_bfloat16 _a_smem", "emmy_cp_async", "wgmma")),
+        (torch.float8_e4m3fn, (9, 0), "wgmma_m64n64k16_bf16_f32", ()),
+    ],
+    ids=["fp8-mma", "bf16-wgmma", "fp8-wgmma"],
+)
+def test_a_staged_key_is_read_only_by_a_cell_that_converts_it(cache, target, score, spelled) -> None:
+    """GPU-free. Under the staged pins an FP8 key stages as a byte slab on cp.async, which the ``mma.sync`` score
+    converts as it reads. A warp-group score reads its key slab through a descriptor, which converts nothing: it takes
+    a bf16 key, and refuses an FP8 one, so no kernel reads the key's bytes as bf16."""
+    _, graph = _attention(cache)
+    pins = {**_flash("mma_m16n8k16_bf16_f32", BYTES), "TILE@map.1/map.1/twist.1/inner": f"{score}/f1x8/k4"}
+    with pinned_knobs(pins):
+        compiled = Pipeline.build(CUDA_PASSES).run(graph, ctx=Context.from_target(target))
+    (source,) = [node.op.kernel_source for node in compiled.nodes.values() if isinstance(node.op, CudaOp)]
+    assert all(text in source for text in spelled), spelled
+    assert ("wgmma" in source) == ("wgmma" in spelled)
 
 
 @requires_cuda
