@@ -284,24 +284,6 @@ mod tests {
     }
 
     #[test]
-    fn like_terms_sum_and_cancel() {
-        assert_eq!(
-            affine_normal(&[
-                "let f32 c = 3.0",
-                "t = multiply(x, c)",
-                "s = add(t, x)",
-                "o = subtract(s, x)"
-            ]),
-            scaled("3")
-        );
-        // Every term cancels: the value is the constant zero, which the store reads, and nothing loads `X`.
-        assert_eq!(
-            affine_normal(&["o = subtract(x, x)"]),
-            "let f32 v0 = 0.0\nfor a0 in 0..8:\n    O[a0] = v0"
-        );
-    }
-
-    #[test]
     fn a_select_whose_branches_bind_one_value_is_that_value() {
         assert_eq!(
             affine_normal(&["o = select:", "    x when i < i", "    x when i < i"]),

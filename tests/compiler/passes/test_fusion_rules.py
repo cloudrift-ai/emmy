@@ -102,9 +102,8 @@ def _assign_fns(body) -> list[str]:
 
 
 def _affine_shapes(body) -> list[tuple[tuple[float, ...], float]]:
-    """Every sum's top-level shape in a body: the operation names along its affine spine (``add``, ``subtract``,
-    ``negative``) with the literal coefficients and offsets it carries, sorted — the folded form a sum, difference or
-    negation takes once every single-use value folded into its reader."""
+    """Every sum's top-level shape in a body: the literal coefficients and the offset of each affine region, sorted —
+    the one node the normal form spells a sum, difference, negation or literal scale as."""
     return sorted(shape for s in body.iter() if isinstance(s, (Assign, Accum)) for shape in _spine(s.value))
 
 

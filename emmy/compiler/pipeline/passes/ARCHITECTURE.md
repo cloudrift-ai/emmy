@@ -85,9 +85,10 @@ post-decomposition Python source file for known format names.
 ## The tile scheduler: one stored tree
 
 `010_lift` lifts a Loop IR body node by node: the normal form gives every definition one operation (an affine region,
-the normal form's one sum, is one node) and an accumulation a name to sum, which is the granularity of the tile IR's
-nodes, so a body and its chain spelling lift to the same Fold tree and the cones, the edges between them and the seams
-`030_cut` offers do not depend on how a program was spelled (`test_total_lift.py` pins it). `010_lift` reads a Loop IR carried state as a fold that carries it, and the classic schedule's fork realizes that
+the normal form's one sum, is one node) and an accumulation a name or a literal to sum (the lift names the literal),
+which is the granularity of the tile IR's nodes, so a body and its chain spelling lift to the same Fold tree and the
+cones, the edges between them and the seams `030_cut` offers do not depend on how a program was spelled
+(`test_total_lift.py` pins it). `010_lift` reads a Loop IR carried state as a fold that carries it, and the classic schedule's fork realizes that
 fold as a serial kernel (`states_as_buffers`): the loop that carries the state becomes `Placement.serial`, the state
 a buffer the node owns and keeps every step of, a `Pre` read a load one launch back (the seed at the first), and the
 `Carry` a store of its value at this step. The step's own algebra is

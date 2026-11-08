@@ -55,7 +55,9 @@ describe how a term is used in Emmy; they are not meant to replace a full textbo
   domain is the expression class of the field: an `Index` folds integer literals alone and keeps every quotient a
   term, since integer division floors; a `Value` folds any literal and a quotient by a float literal into its
   reciprocal scale. Normalization spells every sum, difference, negation and literal scale this way, so two spellings
-  of the same sum are one kernel.
+  of the same sum are one kernel. An **affine region** is the part of an expression the form covers: the sum with its
+  differences, negations and literal scales, down to the names, literals and other operations it reads, which the
+  normal form spells as one node of a definition.
 - **Graph** — A representation of a program as nodes connected by data-flow edges. A node usually represents an
   operation; an edge means that one operation uses a value produced by another.
 - **Node** — One item in a graph. In Emmy, it stores an operation, the names of the input buffers it reads (usually

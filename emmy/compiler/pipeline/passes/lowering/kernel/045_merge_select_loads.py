@@ -26,7 +26,7 @@ from collections import Counter
 from dataclasses import replace
 
 from emmy.compiler.graph import Node
-from emmy.compiler.ir.expression import Expression, Literal, TernaryExpression, Var, apply
+from emmy.compiler.ir.expression import Expression, Literal, TernaryExpression, Var
 from emmy.compiler.ir.kernel import KernelOp
 from emmy.compiler.ir.stmt import Assign, Body, Let, Load, Select, SelectBranch, Statement
 from emmy.compiler.pipeline import Pattern, RuleSkipped
@@ -86,7 +86,6 @@ def _merge(stmts: list, position: int, uses: Counter) -> list | None:
         return None
     first, other = select.branches
     cond = first.select
-    stmts, position = _named_operands(stmts, position, uses, (first.value, other.value))
     defs = {name: i for i, stmt in enumerate(stmts[:position]) for name in stmt.defines()}
     wrapped, inner = _peel(stmts, defs, first.value, other.value)
     if inner is None:
@@ -144,26 +143,6 @@ def _safe(stmts: list, defs: dict, cone: set[int], cond: Expression) -> bool:
     first = min(cone)
     pure = all(isinstance(s, (Assign, Let, Load, Select)) for s in stmts[first : max(cone) + 1])
     return pure and all(defs.get(name, -1) < first for name in cond.free_vars())
-
-
-def _named_operands(stmts: list, position: int, uses: Counter, values: tuple[str, ...]) -> tuple[list, int]:
-    """``stmts`` with a branch value's unary operation applied to a name: the operand the normal form folded under it
-    (``-(x * s)``) becomes a statement of its own ahead, so the two chains compare and merge by name. The select's
-    position moves with the insertions."""
-    out = list(stmts)
-    for value in values:
-        index = next((i for i, stmt in enumerate(out[:position]) if value in stmt.defines()), None)
-        stmt = out[index] if index is not None else None
-        if not isinstance(stmt, Assign) or stmt.value.operation is None or len(stmt.value.operands) != 1:
-            continue
-        (operand,) = stmt.value.operands
-        if isinstance(operand, Var):
-            continue
-        name = f"{stmt.name}__e0"
-        uses[name] += 1
-        out[index : index + 1] = [Assign(name, operand, stmt.dtype), stmt.replace(value=apply(stmt.value.operation, name))]
-        position += 1
-    return out, position
 
 
 def _over(stmt: Assign, name: str) -> Assign:

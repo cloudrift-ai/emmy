@@ -49,10 +49,10 @@ class PackedKBlockB:
 
     bits: Load | None
     table: Load | Assign
-    #: The factor operand as the root product multiplies it: a name, or the value the normal form folded into the
-    #: product; :meth:`factor_program` names it either way.
+    #: The factor operand as the root product multiplies it: a name, or a literal scale; :meth:`factor_program` names
+    #: it either way.
     factor: Expression
-    #: The root product's name, which names a folded factor's binding.
+    #: The root product's name, which names a literal factor's binding.
     root: str
     block: int
     #: Logical k elements per stored byte — two for a packed pair, one for an fp8 byte. The slab's
@@ -77,7 +77,7 @@ class PackedKBlockB:
 
     def factor_program(self, cone) -> tuple[list, str]:
         """The statements of ``cone`` the factor reads, and the name the factor goes by: its own when it is a name,
-        else the binding of the folded value, named after the root product."""
+        else the binding of the literal, named after the root product."""
         stmts = list(Body(tuple(cone)).backward_cone(sorted(self.factor.free_vars())).members)
         if isinstance(self.factor, Var):
             return stmts, self.factor.name
@@ -193,9 +193,8 @@ def match_packed_kblock_b(cone: list, k_name: str, inputs, *, codes_may_compute:
         # One multiply operand's cone holds the gather; the other is the factor.
         decoding = [o for o, sub in sides.items() if any(st is table for st in sub) or o.free_vars() & set(table.defines())]
     else:
-        # The fp8 byte: its decode cast is itself one of the root's two factors — folded into the product, or a
-        # statement the product names — so the other one is the scale; a decode feeding anything else (a decoded
-        # scale byte) is not it.
+        # The fp8 byte: its decode cast is itself one of the root's two factors — a statement the product names — so
+        # the other one is the scale; a decode feeding anything else (a decoded scale byte) is not it.
         stored = {ld.names[0]: ld for ld in loads if len(ld.names) == 1 and inputs.get(ld.input) is not None}
 
         def decode(operand) -> Load | None:

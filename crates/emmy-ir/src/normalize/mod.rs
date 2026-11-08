@@ -51,79 +51,6 @@ pub fn normalize_body(body: &Body) -> Result<Body> {
     Ok(normal)
 }
 
-/// `body` with every name bound more than once in one scope given a name of its own at each later binding, the reads
-/// between two bindings reading the one before them: two lexical bindings of one name are two values. A binding in a
-/// deeper scope shadows; the order handles it.
-fn rebind_lexically(body: &Body) -> Body {
-    struct Rebind<'a> {
-        reads: &'a HashMap<Name, Name>,
-        defines: &'a HashMap<Name, Name>,
-    }
-    impl crate::field::Rewriter for Rebind<'_> {
-        fn name(&mut self, roles: Roles, name: &Name) -> Name {
-            let map = if roles.contains_any(DEFINES) {
-                self.defines
-            } else {
-                self.reads
-            };
-            map.get(name).copied().unwrap_or(*name)
-        }
-        fn expression(&mut self, _roles: Roles, expression: &Expression) -> Expression {
-            expression.rename(&mut |name| self.reads.get(&name).copied())
-        }
-    }
-    fn scope(body: &Body, current: &HashMap<Name, Name>, taken: &mut HashSet<Name>) -> Body {
-        let mut current = current.clone();
-        let mut seen: HashSet<Name> = HashSet::new();
-        let out = body
-            .stmts()
-            .iter()
-            .map(|stmt| {
-                let rebinds = matches!(
-                    &**stmt,
-                    Statement::Assign(_)
-                        | Statement::Let(_)
-                        | Statement::Load(_)
-                        | Statement::Select(_)
-                );
-                let mut defines: HashMap<Name, Name> = HashMap::new();
-                for name in stmt.defines() {
-                    if rebinds && !seen.insert(name) {
-                        let fresh = (2..)
-                            .map(|n| Name::new(&format!("{name}__{n}")))
-                            .find(|candidate| !taken.contains(candidate))
-                            .unwrap_or(name);
-                        taken.insert(fresh);
-                        defines.insert(name, fresh);
-                    }
-                }
-                let renamed = Arc::new(stmt.rewrite_fields(&mut Rebind {
-                    reads: &current,
-                    defines: &defines,
-                }));
-                let nested = renamed.nested();
-                let renamed = if nested.is_empty() {
-                    renamed
-                } else {
-                    with_bodies(
-                        &renamed,
-                        nested
-                            .iter()
-                            .map(|child| scope(child, &current, taken))
-                            .collect(),
-                    )
-                };
-                current.extend(defines);
-                renamed
-            })
-            .collect();
-        body.rebuilt(out)
-    }
-    let mut taken: HashSet<Name> = body.ssa_uses().clone();
-    body.walk(&mut |here| taken.extend(here.stmt().defines()));
-    scope(body, &HashMap::new(), &mut taken)
-}
-
 /// The normal form, computed afresh.
 pub fn normalize_uncached(body: &Body) -> Result<Body> {
     // The normal form holds every operation: a call is storage sharing inside fusion, which expands it.
@@ -133,8 +60,9 @@ pub fn normalize_uncached(body: &Body) -> Result<Body> {
                 .into(),
         ));
     }
-    // Motion can put two lexical bindings in one scope. Give them distinct names first.
-    let mut stmts = rename_ssa_sequential(&topological_sort(&rebind_lexically(body)));
+    // Motion can put two lexical bindings of one name in one scope; the order keeps their lexical reading and the
+    // sequential names tell them apart.
+    let mut stmts = rename_ssa_sequential(&topological_sort(body));
     // The split feeds the steps ahead of it, so the steps run again after a split that changed the body. The order
     // permutes and names, and the operand order inside a value reads the ranks the order gives, which the order in
     // turn spells by: the form is final when one whole round leaves the body alone.

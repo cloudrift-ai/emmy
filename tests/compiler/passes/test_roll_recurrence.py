@@ -91,6 +91,16 @@ def test_an_unrolled_delta_rule_rolls_into_one_kernel_that_carries_its_state() -
     assert reads == [0, 1, 2] and all(len(op.body.accums) == 1 for op in readers)
 
 
+def test_a_step_with_a_float_offset_rolls() -> None:
+    """The literal abstraction lifts integer anchors alone: a step's float offset (an epsilon the normal form spells
+    inside the sum) stays as spelled instead of truncating to an integer, so the first step advanced zero times is
+    still the first step and the chain rolls."""
+    code = _delta().replace("S = S * torch.exp(gc) + kc.transpose(1, 2) @ vc", "S = S * torch.exp(gc) + kc.transpose(1, 2) @ vc + 1e-3")
+    graph, _, _ = graph_from_code(code)
+    graph = Pipeline.build(LOOP_PASSES).run(graph)
+    assert len(_carriers(graph)) == 1
+
+
 def _run(graph) -> dict[str, np.ndarray]:
     rng = np.random.default_rng(0)
     arrays: dict[str, np.ndarray] = {}

@@ -254,7 +254,7 @@ def test_ssa_rejects_undefined_arg():
         )
 
 
-def test_two_lexical_bindings_of_one_name_are_one_definition():
+def test_two_lexical_bindings_of_one_name_are_two_values():
     """A name bound twice in one scope (the second reading the first) is two values: the normal form renames them
     apart, one definition each."""
     k = _loop(

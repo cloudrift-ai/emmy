@@ -612,7 +612,7 @@ names it recognizes the pair by canonical form (`Fold.fuse`), never by a stored 
 | `Axis`                       | Named iteration variable (`name`, `extent`). Defined in `ir/axis.py`, re-exported here. Carries an optional `window` (`Window` — the `parent` axis this one is a slice of, and whether the slice is a cross-CTA `partition`; its `base` / `bound` are declared but unused, kept only because recorded split identities spell them): the ONE windowing concept, and never a range — a loop's data-independent `start` / `end` is the kernel loop's own (`StridedLoop`), derived where it opens; `source_axis` is the derived compat read (`window.parent`). Excluded from equality / hashing. |
 | `LoopOp`                     | One kernel. Stored field: `body` (nested `Loop` tree). Computed: `axes`, `loads`, `accums`.                       |
 | `Load`                       | Body-form external read: `name = load(input)[index...]`. `input` matches the producing graph node's id.           |
-| `Assign`                     | The one scalar definition: `name = value`, `value` an expression over names and literals (`exp(x) * 2.0 - y`), with an optional `dtype`. A sum is a value in affine form; an alias is a bare name. |
+| `Assign`                     | The one scalar definition: `name = value`, `value` one operation over names and literals (`exp(x)`, `2 * x - y`: an affine region is one node), with an optional `dtype`. |
 | `Accum`                      | Reduce accumulator: `name = op(name, value)` inside a reduce `Loop`. Initialized to its op's identity. ``axes`` lists the reduction axis names — propagated through Sigma renames (including σ-splits via `Expression.free_vars()`); the escape-analysis helper derives cross-thread cooperativity from ``axes ∩ enclosing ThreadTile.axes``. |
 | `Carry`                      | The next value of one cell of a carried state: `name[index...] <- value`, holding `seed` before the first step. No op: a state folds nothing. |
 | `Pre`                        | Read of one cell of a carried state: `name = pre carrier[index...]`, the previous step's value inside the loop that carries it. |
@@ -634,9 +634,8 @@ recurse via `pretty_body`).
 CUDA scalar rendering goes through `op_to_expression` in `ir/render.py`. Boolean masks retain the historical f32 SSA
 convention, so Torch's `bitwise_not` spelling renders as logical zero-test (`mask == 0`); explicitly bool-stamped values
 use the same semantics. Integer complement is not inferred from that name and fails closed until it has a typed
-consumer. The optional readable-source fold keeps a single-use `Assign` named when any argument's stamped dtype differs
-from the result dtype, so the target-aware render of an `Assign` remains responsible for conversions such as
-`__half2float`.
+consumer. The target-aware render of an `Assign` is responsible for conversions such as `__half2float` when an
+argument's stamped dtype differs from the result dtype.
 
 `Select` uses the common dtype of its branch values, and type propagation gives its consumers that same dtype.
 Selecting between two FP16 values must preserve the rounding of a subsequent FP16 product; promoting the selection
@@ -755,17 +754,19 @@ from that CSE form. Subroutine boundaries never limit fusion.
   this way, the dot product that fed it and the loop that summed it included: a dropped value leaves its operands
   unread in turn, and one call drops the whole chain. A body that stores nothing is a fragment whose values are all
   its reader's, so nothing is dropped from it.
-- `one_operation_per_definition` — every definition is one operation over names and literals: a nested operation
-  node of an `Assign`'s value is a definition of its own ahead of its reader, an `Accum` sums a name or a literal, an
-  alias (a definition that is a bare name) is read through, and a literal definition is spelled where an expression
-  reads it. An affine region is one node: every expression is spelled in affine form — like terms summed, zero terms
-  dropped, the constant last, in the coefficient domain of its field's class (an index folds integer literals alone
-  and keeps a quotient a term, a value folds any literal and a division by a float literal into the product by its
-  reciprocal) — and an affine definition read once inside an affine reader joins the reader's region, so `x + x`,
-  `2 * x` and `t = 3 * x; s = t + x; o = s - x` are one body, `x / 2.0` and `0.5 * x` another, and `x - x` is `0`.
-  The affine form reassociates a sum and rounds a reciprocal once, which every reduce schedule and fast-math division
-  do already. A chain of named temps and one tree are then one body, so the readers of the normal form (the tile lift,
-  the fragment tier, the renderer) take one operation per statement as given.
+- `one_operation_per_definition` — every definition is one operation over names and literals: a nested node of an
+  `Assign`'s value that is no name, literal or node of the value's own affine region (a comparison, a select, a cast,
+  any operation) is a definition of its own ahead of its reader, and an `Accum` sums a name or a literal. An affine
+  region is one node, as a sum is one operation: `canonicalize_expressions` spells every expression in affine form
+  — like terms summed, zero terms dropped, the constant last, in the coefficient domain of its field's class (an index
+  folds integer literals alone and keeps a quotient a term, a value folds any literal and a division by a float
+  literal into the product by its reciprocal) — and this step joins an affine definition read exactly once, inside an
+  affine reader, into the reader's region, so `x + x`, `2 * x` and `t = 3 * x; s = t + x; o = s - x` are one body,
+  `x / 2.0` and `0.5 * x` another, and `x - x` is `0`. The affine form reassociates a sum and rounds a reciprocal
+  once, which every reduce schedule and fast-math division do already. A chain of named temps and one tree are one
+  body up to the single-reader guard — a sum two statements read stays a definition — so the readers of the normal
+  form (the tile lift, the kernel passes, the renderer) read one operation per statement; a kernel pass that builds a
+  nested value renders it as temps of its own.
 - `merge_sibling_reduce_loops` — unify sibling reduce axes whose Load positions overlap, then merge matching Loops
   before descending into their children. A parent merge therefore exposes child reductions to the same walk.
   Overlapping reductions share one canonical axis name (softmax's max + sum sweeps; the two matmul reductions in
@@ -804,14 +805,14 @@ from that CSE form. Subroutine boundaries never limit fusion.
   ancestors. Conditions and unseeded loops preserve the state they update, including an explicit enclosing seed.
   Axis renames reach conditions, reduction metadata, and `Window` parent/base/bound metadata as well as indices; a
   reduction's axis tuple is canonicalized as a set. SSA values travel only through the rename channel, never `sigma`,
-  so indirect indices cannot be renamed twice. Normalization separates lexical bindings before motion can put them
-  in one scope, then assigns canonical names again after ordering the result.
+  so indirect indices cannot be renamed twice. Two lexical bindings of one name in one scope, which motion can
+  produce, keep their lexical reading through the order, and the sequential names tell them apart.
 - Normalization runs its steps once and checks nothing. The steps that feed each other run to their own fixed
   point where they sit: a value placed outside its loop can expose a sibling merge, two reads placement made one can
   leave a predicate constant, and a merge exposes values to place, so the merge, the expression simplification and
-  placement run until the first two leave a placed body alone. The folds feed the steps ahead of them — a fold can
-  leave a value unread or change what orders the free axes — so the steps run again after a fold that changed the
-  body, and only then. The order runs last, once, with one exception: the unread-value drop reads by name, and a cut
+  placement run until the first two leave a placed body alone. The split feeds the steps ahead of it — a definition
+  it makes can be placed, and a region it joins can leave a value unread — so the steps run again after a split that
+  changed the body, and only then. The order runs last, once, with one exception: the unread-value drop reads by name, and a cut
   can splice one cone twice under the same names, so a value only its namesake's readers kept alive is unread only
   once the order has given every binding its own name. A body the order left such a value in goes through the steps
   again. What keeps this honest is a test, not a loop: the normal form of

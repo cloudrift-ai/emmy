@@ -86,34 +86,23 @@ def select_masks(
             return name
         return None
 
-    def selected(stmt: Assign) -> Expression | None:
-        """``stmt``'s value with every ``where`` over a coordinate predicate spelled as a ``Select`` statement — the
-        value itself when it is one, else a name the sum reads — or ``None`` when a branch is no uniform value."""
-        masks = 0
-
-        def rewrite(node: Expression) -> Expression:
-            nonlocal masks
-            op = node.operation
-            if op is None or op.name != "where":
-                return node
-            cond, keep, fill = node.operands
-            predicate = predicates.get(cond.name) if isinstance(cond, Var) else comparison(cond)
-            if predicate is None:
-                return node
-            name = stmt.name if node == stmt.value else f"{stmt.name}__m{masks}"
-            masks += 1
-            keep_name, fill_name = branch(keep, f"{name}__keep"), branch(fill, f"{name}__fill")
-            if keep_name is None or fill_name is None:
-                raise ValueError("a mask branch that is no uniform value")
-            negated = apply(_NEGATED[predicate.operation.name], *predicate.operands)
-            branches = (SelectBranch(value=keep_name, select=predicate), SelectBranch(value=fill_name, select=negated))
-            out.append(Select(name=name, branches=branches))
-            return Var(name)
-
-        try:
-            return stmt.value.rebuild(rewrite)
-        except ValueError:
+    def selected(stmt: Assign) -> bool | None:
+        """Whether ``stmt``'s value is a ``where`` over a coordinate predicate, then spelled as a coordinate ``Select``
+        statement of ``stmt``'s name; ``None`` when a branch of one is no uniform value."""
+        op = stmt.value.operation
+        if op is None or op.name != "where":
+            return False
+        cond, keep, fill = stmt.value.operands
+        predicate = predicates.get(cond.name) if isinstance(cond, Var) else None
+        if predicate is None:
+            return False
+        keep_name, fill_name = branch(keep, f"{stmt.name}__keep"), branch(fill, f"{stmt.name}__fill")
+        if keep_name is None or fill_name is None:
             return None
+        negated = apply(_NEGATED[predicate.operation.name], *predicate.operands)
+        branches = (SelectBranch(value=keep_name, select=predicate), SelectBranch(value=fill_name, select=negated))
+        out.append(Select(name=stmt.name, branches=branches))
+        return True
 
     out: list[Statement] = []
     for stmt in stmts:
@@ -140,15 +129,12 @@ def select_masks(
             coords[stmt.name] = coordinate
             continue
         if isinstance(stmt, Assign):
-            # A ``where`` over a coordinate predicate — the value itself, or a term of the sum the value is after the
-            # normal form folded the mask into its reader — is a coordinate ``Select`` the sum reads by name.
-            value = selected(stmt)
-            if value is None:
+            # A ``where`` over a coordinate predicate is a coordinate ``Select`` of the statement's name.
+            masked = selected(stmt)
+            if masked is None:
                 return None
-            if value == Var(stmt.name):
-                continue  # the value was the mask, now a Select statement of that name
-            stmt = stmt.replace(value=value)
-            reads = set(stmt.deps())
+            if masked:
+                continue
         if reads & (coords.keys() | predicates.keys() | aliased):
             return None  # a coordinate read outside a mask
         out.append(stmt)

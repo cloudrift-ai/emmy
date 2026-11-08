@@ -220,18 +220,19 @@ class Lambda(Wire):
     def canonical(self) -> Lambda:
         """The α-canonical form: every definition one operation (a result stays a statement, as a reader outside the
         body reads it), then params renumbered to ``_p0…`` and internal defs to ``_v0…`` in walk order; free names (and
-        float results) pass through unchanged. Deterministic and blind to how a program was spelled — as a chain of
-        named temps or as one tree — so two lambdas computing one thing have EQUAL canonical forms: the α-invariant
-        equality/hash substrate (:meth:`alpha_eq`)."""
-        folded = Lambda(params=self.params, body=one_operation_per_definition(self.body, frozenset(self.results)), results=self.results)
+        float results) pass through unchanged. Deterministic and blind to whether a program was spelled as a chain of
+        named temps or as one tree, up to the normal form's single-reader guard (a sum two statements read stays a
+        definition), so two lambdas computing one thing have EQUAL canonical forms: the α-invariant equality/hash
+        substrate (:meth:`alpha_eq`)."""
+        split = Lambda(params=self.params, body=one_operation_per_definition(self.body, frozenset(self.results)), results=self.results)
         mapping = {p: f"_p{i}" for i, p in enumerate(self.params)}
         n = 0
-        for s in folded.body.iter():
+        for s in split.body.iter():
             for d in s.defines():
                 if d not in mapping:
                     mapping[d] = f"_v{n}"
                     n += 1
-        return folded.rename(mapping)
+        return split.rename(mapping)
 
     def alpha_eq(self, other: Lambda) -> bool:
         """α-invariant equality — canonical forms compared structurally."""

@@ -11,6 +11,7 @@ epilogue — so the bilinear reading is canonical by construction. There is no r
 from __future__ import annotations
 
 from dataclasses import dataclass, field, replace
+from itertools import count
 from typing import TYPE_CHECKING
 
 from emmy.compiler.dtype import F32
@@ -205,7 +206,8 @@ def _decode_split(arg: str, plain: Body, defs: dict, exposed: dict, k_name: str)
     varying = [leaf for leaf in leaves if varies(leaf)]
     if len(varying) != 1:
         return None
-    # The decode is the one varying leaf: a name the step defines (the lift names every operation node).
+    # The decode is the one varying leaf: the argument's own value when the argument is a bare decode, else a name the
+    # step defines (the normal form names every operation node).
     named = defs.get(varying[0].name) if isinstance(varying[0], Var) else None
     decode = named.value if isinstance(named, Assign) else varying[0]
     code = decode.operands[0] if decode.operation is not None and len(decode.operands) == 1 else None
@@ -238,11 +240,14 @@ def _decode_split(arg: str, plain: Body, defs: dict, exposed: dict, k_name: str)
 def _accums_sum_names(body: Body) -> Body:
     """``body`` with every accumulation summing a name: the normal form lets an ``Accum`` sum a literal, and the lift's
     step reads the summed value by name, so a literal takes a definition of its own ahead of the accumulation."""
+    taken = set(body.ssa_uses) | {name for stmt in body.iter() for name in stmt.defines()}
     out: list[Statement] = []
     for stmt in body:
         if isinstance(stmt, Accum) and isinstance(stmt.value, Literal):
-            out.append(Assign(f"{stmt.name}__e0", stmt.value))
-            stmt = stmt.replace(value=Var(f"{stmt.name}__e0"))
+            name = next(f"{stmt.name}__e{index}" for index in count() if f"{stmt.name}__e{index}" not in taken)
+            taken.add(name)
+            out.append(Assign(name, stmt.value))
+            stmt = stmt.replace(value=Var(name))
         out.append(stmt)
     return Body(tuple(out))
 

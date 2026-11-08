@@ -167,21 +167,12 @@ def storage_frontier(node: Fold) -> Frontier | None:
         if node.operation is not None
         and node.operation.decodes is not None
         and len(node.operands) == 1
-        and (not isinstance(node.operands[0], Var) or node.operands[0].name in computed)
+        and isinstance(node.operands[0], Var)
+        and node.operands[0].name in computed
     ]
     if len(decodes) != 1:
         return None
-    (decode, decoding), encoded = decodes[0], decodes[0][1].operands[0]
-    if isinstance(encoded, Var):
-        frontier = encoded.name
-    else:
-        # The normal form folded the encode into the decode that reads it: the frontier is a definition again.
-        frontier = f"{decode.name}__code"
-        named = decode.replace(value=decode.value.rebuild(lambda e: Var(frontier) if e == encoded else e))
-        stmts = [named if stmt is decode else stmt for stmt in body]
-        stmts.insert(stmts.index(named), Assign(frontier, encoded))
-        body = Body(tuple(stmts))
-        decode = named
+    (decode, decoding), frontier = decodes[0], decodes[0][1].operands[0].name
     prefix = tuple(body.backward_cone((frontier,)).members)
     remaining = Body(stmt for stmt in body if frontier not in stmt.defines())
     residue = tuple(remaining.backward_cone(lift.results).members)

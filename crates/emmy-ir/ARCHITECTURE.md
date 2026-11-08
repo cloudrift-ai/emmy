@@ -23,7 +23,7 @@ types answer beyond their fields in `shared.rs`, the construction checks in `che
 `print.rs`, the reader in `parse.rs`, what both spell in `mod.rs`), `order.rs` (the dependency constraints; the sort
 they feed is a `Body` method), the rest of `numbering/` (the value numbering in `values.rs`, the scope-tree digest in
 `digest.rs`), `normalize/` (the driver and the helpers the steps share in `mod.rs`, the steps by what they do: `axes`,
-`fold`, `siblings`, `simplify`, `place`, `canonical`, and every tie-break in `ties.rs`) and `identity.rs` (the identity
+`fold`, `definitions`, `siblings`, `simplify`, `place`, `canonical`, and every tie-break in `ties.rs`) and `identity.rs` (the identity
 of a body's normal form). Every file imports what it uses by name; no child module takes its parent's imports.
 
 ## Data

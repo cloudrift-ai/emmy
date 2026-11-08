@@ -48,7 +48,9 @@ pub fn is_protocol(stmt: &Statement) -> bool {
         && stmt.deps().is_empty()
 }
 
-/// Dependency and, when requested, effect predecessors for one lexical scope.
+/// Dependency and, when requested, effect predecessors for one lexical scope. With `redefinitions`, a name bound more
+/// than once in the scope reads lexically: a read binds the definition before it and precedes the next one; without,
+/// every read binds the first definition.
 pub fn ordering_constraints(
     body: &Body,
     effects: bool,
@@ -84,9 +86,15 @@ pub fn ordering_constraints(
         );
     }
     if redefinitions {
+        // A read bound to a definition ahead of it precedes the next binding of the name. A read ahead of every
+        // binding (a scope is order-free) binds the first and orders nothing more.
         for (reader, (_, uses)) in defs_uses.iter().enumerate() {
             for name in uses {
-                for &later in definitions.get(name).map_or(&[][..], |v| &v[..]) {
+                let sites = definitions.get(name).map_or(&[][..], |v| &v[..]);
+                if !sites.iter().any(|site| *site < reader) {
+                    continue;
+                }
+                for &later in sites {
                     if later > reader {
                         incoming[later].insert(reader);
                     }
@@ -148,7 +156,8 @@ pub fn ordering_constraints(
     incoming
 }
 
-/// Stable recursive dependency sort used before structural normalization.
+/// Stable recursive dependency sort used before structural normalization. A name bound twice in one scope, which
+/// motion can produce, keeps its lexical reading: the reads between the two bindings stay between them.
 pub fn topological_sort(body: &Body) -> Body {
     let sorted = body.map_each(&mut |stmt| {
         let nested = stmt.nested();
@@ -157,7 +166,7 @@ pub fn topological_sort(body: &Body) -> Body {
         }
         Statement::rebuild_bodies(stmt, nested.iter().map(topological_sort).collect())
     });
-    sorted.topological_order(&ordering_constraints(&sorted, false, false))
+    sorted.topological_order(&ordering_constraints(&sorted, false, true))
 }
 
 #[cfg(test)]

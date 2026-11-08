@@ -52,6 +52,22 @@ pub(crate) struct SequentialScope {
     fixed: HashSet<Name>,
 }
 
+/// The names a leaf statement defines again: a second binding of a name this scope owns reads the binding before it
+/// and defines a value of its own, so after the rename its definitions alone move on to the fresh names.
+struct Redefine<'a> {
+    fresh: &'a HashMap<Name, Name>,
+}
+
+impl Rewriter for Redefine<'_> {
+    fn name(&mut self, roles: Roles, name: &Name) -> Name {
+        if roles.contains_any(DEFINES) {
+            self.fresh.get(name).copied().unwrap_or(*name)
+        } else {
+            *name
+        }
+    }
+}
+
 impl SequentialScope {
     fn allocate(&mut self, counters: &mut Counters, old: &Name, prefix: &'static str) {
         if self.owned.contains(old) || self.fixed.contains(old) {
@@ -59,6 +75,14 @@ impl SequentialScope {
         }
         self.ssa.insert(*old, counters.fresh(prefix));
         self.owned.insert(*old);
+    }
+
+    /// Every name in scope to its sequential name: the values, the window parents and the axes.
+    fn names(&self, axes: &HashMap<Name, Name>) -> HashMap<Name, Name> {
+        let mut names = self.ssa.clone();
+        names.extend(self.sources.iter().map(|(k, v)| (*k, *v)));
+        names.extend(axes.iter().map(|(k, v)| (*k, *v)));
+        names
     }
 
     /// Rename one next statement and advance this scope's allocation state.
@@ -77,14 +101,36 @@ impl SequentialScope {
             }
         }
         let exported = unique(exported);
-        if !children.is_empty() {
-            for name in &exported {
-                self.allocate(counters, name, "acc");
-            }
-        } else {
+        if children.is_empty() {
+            // A second binding of a name this scope owns (motion can put two lexical bindings in one scope) is a
+            // value of its own: its reads take the names before it, its definition a fresh one.
+            let reads = self.names(&self.inherited_axes);
+            let rebinds = matches!(
+                &**stmt,
+                Statement::Assign(_)
+                    | Statement::Let(_)
+                    | Statement::Load(_)
+                    | Statement::Select(_)
+            );
+            let mut fresh: HashMap<Name, Name> = HashMap::new();
             for name in stmt.defines() {
-                self.allocate(counters, &name, ssa_prefix(stmt));
+                if rebinds && self.owned.contains(&name) {
+                    let next = counters.fresh(ssa_prefix(stmt));
+                    fresh.insert(reads[&name], next);
+                    self.ssa.insert(name, next);
+                } else {
+                    self.allocate(counters, &name, ssa_prefix(stmt));
+                }
             }
+            let names = self.names(&self.inherited_axes);
+            let renamed = Statement::rename(stmt, if fresh.is_empty() { &names } else { &reads });
+            if fresh.is_empty() {
+                return renamed;
+            }
+            return Arc::new(renamed.rewrite_fields(&mut Redefine { fresh: &fresh }));
+        }
+        for name in &exported {
+            self.allocate(counters, name, "acc");
         }
         let mut axes = self.inherited_axes.clone();
         for old in stmt.binds_axes() {
@@ -97,18 +143,9 @@ impl SequentialScope {
                     .or_insert_with(|| counters.fresh("p"));
             }
         }
-        let mut names = self.ssa.clone();
-        names.extend(self.sources.iter().map(|(k, v)| (*k, *v)));
-        names.extend(axes.iter().map(|(k, v)| (*k, *v)));
-        let shell = if children.is_empty() {
-            stmt.clone()
-        } else {
-            with_bodies(stmt, children.iter().map(|_| Body::empty()).collect())
-        };
+        let names = self.names(&axes);
+        let shell = with_bodies(stmt, children.iter().map(|_| Body::empty()).collect());
         let renamed = Statement::rename(&shell, &names);
-        if children.is_empty() {
-            return renamed;
-        }
         let mut renamed_children = Vec::new();
         for child in &children {
             let mut scope = SequentialScope {
@@ -531,9 +568,41 @@ pub fn canonicalize_expressions(body: &Body, axes: &[Name]) -> Result<Body> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::normalize::normalize_uncached;
     use crate::normalize::testing::*;
+    use crate::normalize::{normalize_body, normalize_uncached};
     use crate::statement::Load;
+
+    /// Two lexical bindings of one name in one scope are two values: the reads between them read the one before,
+    /// and a binding in a deeper scope shadows neither.
+    #[test]
+    fn two_lexical_bindings_of_one_name_are_two_values() {
+        let normal = text(
+            &normalize_body(&body(
+                "for i in 0..4:
+    x = load X[i]
+    y = exp(x)
+    y = negative(y)
+    for j in 0..8:
+        y = load Z[i, j]
+        w = sqrt(y)
+        O[i, j] = w
+    P[i] = y",
+            ))
+            .unwrap(),
+        );
+        assert_eq!(
+            normal,
+            "for a0 in 0..4:
+    in0 = load X[a0]
+    v0 = exp(in0)
+    v1 = -v0
+    P[a0] = v1
+    for a1 in 0..8:
+        in1 = load Z[a0, a1]
+        v2 = sqrt(in1)
+        O[a0, a1] = v2"
+        );
+    }
 
     /// One affine form, in the coefficient domain of the field's class: an index folds integer literals alone and
     /// keeps a quotient a term, a value folds any literal and a quotient by a float literal into its reciprocal.

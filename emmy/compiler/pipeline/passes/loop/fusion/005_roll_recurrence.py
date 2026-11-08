@@ -85,14 +85,15 @@ def _literals_abstracted(body: Body) -> tuple[Body, tuple[int, ...]]:
     def lift(expression):
         # An affine index carries its anchor whole, a zero one included: ``a`` and ``a + 4`` are
         # one shape read at two offsets, and normalization spells the first without the ``+ 0``.
+        # A value's float offset (``acc + 1e-6``) is no integer literal and stays as spelled.
         if isinstance(expression, Literal):
             return abstract(expression)
         form = affine_form(expression, expression.free_vars())
         try:
-            anchor = int(form[0].eval({})) if form is not None else None
+            anchor = form[0].eval({}) if form is not None else None
         except (KeyError, TypeError, ValueError):
             anchor = None
-        if anchor is None:
+        if type(anchor) is not int:
             return expression.rebuild(abstract)
         rest = None
         for name, coeff in sorted(form[1].items()):
