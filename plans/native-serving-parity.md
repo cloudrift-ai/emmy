@@ -362,6 +362,12 @@ What the session changes for the milestones:
    takes 5.1 ms at 131,072 positions where one cache read per query head at bandwidth is under 1 ms. The unstaged
    FP8 cache is the second risk above; staging it is #1366.
 
+   Gated again on 2026-11-07 with the FP8 cache staged into byte slabs on cp.async (#1366; both DISCOVERYs), met.
+   The attention term is 69.9 s against 117 s, the 197,632-token first token 188 s (TPOT 14.7 ms), the full window's
+   277 s against 450 s; the cells within 4,096 positions got faster. The unstaged cache was the limit: one byte load
+   per element, about 1,150 a thread per 64-key chunk, each holding a register. At 131,072 positions the 64-row chunk
+   takes 1.59 ms (5.1 before) and the one-row decode reads its cache at about 1.4 TB/s. GSM8K holds on both models.
+
 6. **Long-window decode attention: one cache read per key-value group, a combine that does not rescan the
    window.** The 27B step grows +48 ms from 7,680 to 197,632 positions; stock grows +4. Two named causes: the
    attention program runs per query head, so each key-value head's cache is read six times, and the partial
@@ -401,6 +407,11 @@ What the session changes for the milestones:
    of bandwidth; a 128-way split measured faster on every decode and verify twin, and no compile offers it (the
    ledger's 2026-11-07 item). Qwen3.6's window step was not served: a prompt that reaches the long range prefills for
    over an hour.
+
+   Gated again on 2026-11-07 with the FP8 cache staged (#1366), missed. The verify step takes 35.5 ms at 197,632
+   positions, 14.3 ms of it attention, against 21.1 ms at the 4,096 window: +14.4 ms against ~8. The step's three rows
+   each read every slice: at 131,072 the three-row twin takes 487 us against the one-row twin's 205. What is left is
+   one cache read per step, the step's rows folded into the fold's rows beside the group, so a slice is read once.
 
 7. **The width-3 Gated DeltaNet step toward its floor.** gdn3rows is 14.3 ms against a 6.9 ms floor after #1282:
    the weight readers run 1.0-1.4 TB/s, the same readers the one-row program runs 5-10 us faster (qkv 38.4 us for
@@ -731,8 +742,8 @@ measured rows it may be too slow to use, and onboarding it is its own task, not 
   there is gmem-direct and the plain compute fill. Today this binds little: of the 27B's 23 attention rows 22 are
   unstaged and one is `d2/smem-async`, and Qwen3.6's 19 split the same way, 18 and one. It binds the folded attention
   of 5 over a bf16 cache, which stages through cp.async, so over several pages that form may lose its speed or have
-  no legal schedule; the fold over an FP8 cache reads gmem-direct since #1321, which paging does not touch, at a
-  speed nobody has measured. So 19 recommends one page per request, 20
+  no legal schedule; since #1366 the fold over an FP8 cache stages through cp.async too, and over several pages it
+  falls back to the gmem-direct read, 2-3x slower. So 19 recommends one page per request, 20
   makes the capped window count as one page, 5 and 6 stay off TMA, and batched attention over N regions is new work in
   21. If 13's renderer change lands, cp.async opens up over several pages as well.
 - **Attention is priced per window range** (owner, 2026-11-06, after 5's gate). One pick, measured at the symbolic
@@ -830,7 +841,8 @@ Open items:
   at one size by its rows at another.
 - (2026-11-07, #1352) Key splits stop at 64 ways (`SPLITK_WIDTHS`). At 131,072 positions a 128-way split measured
   faster on every decode and verify twin (27B one row 475 against 581 us, Qwen3.6 286 against 413) and no compile can
-  deploy it; offering it moves every split fork's ballot. Not decided.
+  deploy it; offering it moves every split fork's ballot. Closed by #1366: with the FP8 cache staged, 128 ways
+  against 64 measured +2% (one row) and +7% (three rows) on the 27B and -23% and +4% on Qwen3.6, so it is not offered.
 - (2026-11-07, #1352) A split's finalize piece keeps its parent's axis table, whose cache-size axes carry the default
   hint, so its rows sit at 512 cached tokens whatever the window it was recorded at. On a stored kernel the re-hint
   never reaches those axes: a statement rebuild keeps an axis whose hint alone changed, since a hint takes no part in

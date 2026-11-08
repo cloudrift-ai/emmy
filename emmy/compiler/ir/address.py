@@ -137,6 +137,24 @@ def gmem_row_stride(load: Load, axis_name: str, inputs) -> int | None:
     return step[0] if step is not None and step[1] == 0 and step[0] > 0 else None
 
 
+def copies_aligned(load: Load, inner: str, chunk: int, inputs) -> bool:
+    """Whether every ``chunk``-element copy ``load`` makes along ``inner`` starts on a ``chunk``-element boundary of
+    its buffer — the source alignment a 16 B vector copy needs. A copy starts at a multiple of ``chunk`` along
+    ``inner``, so every other term of the flat address must be a provable multiple of it: a slice's offset, each
+    coordinate times its row stride. A symbolic dim counts as an unknown factor of the strides before it, and the
+    buffer's own base is aligned, as an allocation is. ``False`` for an unknown buffer."""
+    t = inputs.get(load.input) if inputs else None
+    if t is None or len(load.index) != len(tuple(t.shape)):
+        return False
+    dims = tuple(t.shape)
+    for pos, e in enumerate(load.index):
+        stride = math.prod(d.as_static() for d in dims[pos + 1 :] if d.is_static)
+        need = chunk // math.gcd(stride, chunk)
+        if need > 1 and not _divisible(e.substitute({inner: Literal(0, "int")}), need):
+            return False
+    return True
+
+
 def reads_declared_rows(load: Load, axis_name: str) -> bool:
     """Whether the operand's row step IS the buffer's DECLARED trailing extent — the reading a
     loader falls back on when it is handed no stride (``ir._resolve_ldm``), and the only one that

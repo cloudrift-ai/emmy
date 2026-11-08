@@ -13,12 +13,14 @@ import torch
 
 from emmy.compiler.backend.gpu_lock import gpu_lock
 from emmy.compiler.context import Context
-from emmy.compiler.dtype import decode_bf16
+from emmy.compiler.dtype import F8E4M3, decode_bf16
 from emmy.compiler.ir.cuda import CudaOp
 from emmy.compiler.ir.pure.fold import Fold
+from emmy.compiler.ir.schedule import Stage, Tile, Work
 from emmy.compiler.ir.schedule.classic import refusals
+from emmy.compiler.ir.schedule.staging import chunk_slab_dtype, chunk_slab_pad
 from emmy.compiler.ir.tile import TileOp
-from emmy.compiler.pipeline import LOOP_PASSES, Pipeline
+from emmy.compiler.pipeline import CUDA_PASSES, LOOP_PASSES, Pipeline
 from emmy.compiler.pipeline.passes.tile._split import split_forks
 from emmy.compiler.pipeline.search.pins import pinned_knobs
 from emmy.compiler.trace.torch import trace_module
@@ -31,33 +33,43 @@ HEADS, KV, D, ROWS, CONTEXT = 4, 2, 128, 64, 1024
 WIDE = 192
 STOP = "__ck_end"  # the chunk loop's bound, a variable its header carries only when a mask bounds the stream
 SPLIT = "g4k"  # a key split across the window: four CTAs per head, each over a quarter of the keys
-CELLS = {  # the twist's cell; the score inner stays bf16_f32, the query's own width
-    "bf16": (torch.bfloat16, "mma_m16n8k16_bf16_f32"),
-    "fp8": (torch.float8_e4m3fn, "mma_m16n8k16_bf16_f32"),
-    "fp8-f16": (torch.float8_e4m3fn, "mma_m16n8k16_f16_f32"),
-    "fp8-f16acc": (torch.float8_e4m3fn, "mma_m16n8k16_f16_f16"),
+BYTES = "d1/smem-async"  # an FP8 cache copied verbatim into byte slabs, its fragment reads converting
+CELLS = {  # the twist's cell and an FP8 cache's transport; the score inner stays bf16_f32, the query's own width
+    "bf16": (torch.bfloat16, "mma_m16n8k16_bf16_f32", None),
+    "fp8": (torch.float8_e4m3fn, "mma_m16n8k16_bf16_f32", ""),
+    "fp8-f16": (torch.float8_e4m3fn, "mma_m16n8k16_f16_f32", ""),
+    "fp8-f16acc": (torch.float8_e4m3fn, "mma_m16n8k16_f16_f16", ""),
+    "fp8-staged": (torch.float8_e4m3fn, "mma_m16n8k16_bf16_f32", BYTES),
+    "fp8-f16acc-staged": (torch.float8_e4m3fn, "mma_m16n8k16_f16_f16", BYTES),
 }
 
 
-def _flash(cell: str, cache, split: str = "") -> dict[str, str]:
+def _flash(cell: str, stage: str | None, split: str = "") -> dict[str, str]:
     """The chunk tier's pins on the twin, or on the partial piece of its key split, whose site keys drop the map prefix."""
     pins = {"TILE@twist": f"{cell}/f1x16/k4", "TILE@twist.1/inner": "mma_m16n8k16_bf16_f32/f1x8/k4"}
-    if cache != torch.bfloat16:
-        pins["STAGE@twist"] = ""  # an FP8 value stages no slab
+    if stage is not None:
+        pins["STAGE@twist"] = stage
     site = "" if split else "map.1/map.1/"
     return {"PLACE": "fuse", "WORK": "w4x1", "REDUCE@map.1/map.1/twist": split, **{k.replace("@", f"@{site}"): v for k, v in pins.items()}}
 
 
-def _attention(cache=torch.bfloat16, heads=HEADS):
-    """Native's 64-row attention twin over a symbolic window, traced as the export traces it."""
-    module = attend_module(heads, KV, D, ROWS)
+def _attention(cache=torch.bfloat16, heads=HEADS, offset=0, row=D):
+    """Native's 64-row attention twin over a symbolic window, traced as the export traces it. ``offset`` and ``row``
+    read each head's dims as a slice of a padded cache row."""
+    attend = attend_module(heads, KV, D, ROWS)
+
+    class Sliced(torch.nn.Module):
+        def forward(self, q, keys, values, position):
+            return attend(q, keys[:, :, offset : offset + D], values[:, :, offset : offset + D], position)
+
+    module = attend if (offset, row) == (0, D) else Sliced()
     window = torch.export.Dim(WINDOW, min=ROWS, max=CONTEXT)
     shapes = {n: {0: window} if n in ("keys", "values") else {} for n in inspect.signature(module.forward).parameters}
     # Two tensors, not one twice: the tracer takes a shared example tensor as one aliased input.
     examples = (
         torch.zeros(ROWS, heads * D, dtype=torch.bfloat16),
-        torch.zeros(512, KV, D, dtype=cache),
-        torch.zeros(512, KV, D, dtype=cache),
+        torch.zeros(512, KV, row, dtype=cache),
+        torch.zeros(512, KV, row, dtype=cache),
     )
     return module, trace_module(module, (*examples, torch.zeros(1, dtype=torch.int64)), dynamic_shapes=shapes)
 
@@ -96,12 +108,69 @@ def test_the_key_split_is_offered_across_the_symbolic_window() -> None:
 
 def test_an_fp8_cache_takes_a_16_bit_cell_whose_value_load_converts() -> None:
     """The weight repacks from f32 registers into a 16-bit fragment whatever the cache stores; an FP8 value converts
-    in its gmem-direct fragment load, so the 16-bit families are offered and no staged slab is."""
+    in its fragment load, so the 16-bit families are offered. On cp.async the cache also stages, its key and value
+    copied into byte slabs whose rows take the 16-byte pad; a blocking copy or a TMA box takes no byte slab."""
     _, graph = _attention(torch.float8_e4m3fn)
     root, ctx, twist = _twist(graph)
     assert twist.chunked()
     assert refusals._node_refusal(root.op, ctx, twist, True) is None
-    assert set(refusals._warp_atoms(root.op, ctx, twist)) >= {cell for _cache, cell in CELLS.values()}
+    assert set(refusals._warp_atoms(root.op, ctx, twist)) >= {cell for _cache, cell, _stage in CELLS.values()}
+    tile, inputs = Tile.parse("mma_m16n8k16_f16_f16/f1x16/k4", Work.parse("w4x1")), root.op.inputs
+    assert chunk_slab_dtype(tile, Stage.parse(BYTES), inputs, "keys") == F8E4M3
+    assert chunk_slab_pad(tile, Stage.parse(BYTES), F8E4M3) == 16
+    assert chunk_slab_dtype(tile, Stage.parse("d1/smem-tma"), inputs, "keys") is None
+    bf16_inputs = _twist(_attention()[1])[0].op.inputs
+    assert chunk_slab_dtype(tile, Stage.parse(BYTES), bf16_inputs, "keys") is None, "a 16-bit cache under an f16 cell stages nothing"
+
+
+@pytest.mark.parametrize(
+    ("cache", "target", "score", "spelled"),
+    [
+        (torch.float8_e4m3fn, (12, 0), "mma_m16n8k16_bf16_f32", ("__nv_fp8_e4m3 _a_smem", "emmy_cp_async")),
+        (torch.bfloat16, (9, 0), "wgmma_m64n64k16_bf16_f32", ("__nv_bfloat16 _a_smem", "emmy_cp_async", "wgmma")),
+        (torch.float8_e4m3fn, (9, 0), "wgmma_m64n64k16_bf16_f32", ()),
+    ],
+    ids=["fp8-mma", "bf16-wgmma", "fp8-wgmma"],
+)
+def test_a_staged_key_is_read_only_by_a_cell_that_converts_it(cache, target, score, spelled) -> None:
+    """GPU-free. Under the staged pins an FP8 key stages as a byte slab on cp.async, which the ``mma.sync`` score
+    converts as it reads. A warp-group score reads its key slab through a descriptor, which converts nothing: it takes
+    a bf16 key, and refuses an FP8 one, so no kernel reads the key's bytes as bf16."""
+    _, graph = _attention(cache)
+    pins = {**_flash("mma_m16n8k16_bf16_f32", BYTES), "TILE@map.1/map.1/twist.1/inner": f"{score}/f1x8/k4"}
+    with pinned_knobs(pins):
+        compiled = Pipeline.build(CUDA_PASSES).run(graph, ctx=Context.from_target(target))
+    (source,) = [node.op.kernel_source for node in compiled.nodes.values() if isinstance(node.op, CudaOp)]
+    assert all(text in source for text in spelled), spelled
+    assert ("wgmma" in source) == ("wgmma" in spelled)
+
+
+@pytest.mark.parametrize(
+    ("cache", "offset", "row", "staged"),
+    [
+        (torch.float8_e4m3fn, 16, D + 16, True),
+        (torch.float8_e4m3fn, 1, D + 16, False),
+        (torch.float8_e4m3fn, 0, D + 8, False),
+        (torch.bfloat16, 8, D + 16, True),
+        (torch.bfloat16, 1, D + 16, False),
+    ],
+    ids=["fp8-16B-offset", "fp8-1B-offset", "fp8-136B-rows", "bf16-16B-offset", "bf16-2B-offset"],
+)
+def test_a_cache_slice_stages_only_on_the_16_byte_grid(cache, offset, row, staged) -> None:
+    """GPU-free. A cp.async copy moves 16 B from the address the cache's index names, so a slice of a padded cache
+    stages only when its offset and its row strides keep every copy on the 16 B grid; else the pin does not resolve."""
+    _, graph = _attention(cache, offset=offset, row=row)
+
+    def compile_():
+        with pinned_knobs(_flash("mma_m16n8k16_bf16_f32", BYTES)):
+            return Pipeline.build(CUDA_PASSES).run(graph, ctx=Context.from_target((12, 0)))
+
+    if not staged:
+        with pytest.raises(ValueError, match="does not resolve"):
+            compile_()
+        return
+    (source,) = [node.op.kernel_source for node in compile_().nodes.values() if isinstance(node.op, CudaOp)]
+    assert "emmy_cp_async" in source
 
 
 @requires_cuda
@@ -115,14 +184,16 @@ def test_the_folded_attention_matches_the_twin_over_the_causal_prefix(cell, head
     from emmy.compiler.backend.cuda.backend import CudaBackend
     from emmy.compiler.backend.cuda.program import CompiledProgram
 
-    cache, atom = CELLS[cell]
+    cache, atom, stage = CELLS[cell]
     module, graph = _attention(cache, heads)
-    with pinned_knobs(_flash(atom, cache, split)):
+    with pinned_knobs(_flash(atom, stage, split)):
         compiled = CudaBackend().compile(graph)
     sources = [node.op.kernel_source for node in compiled.nodes.values() if isinstance(node.op, CudaOp)]
     assert len(sources) == (2 if split else 1), "the chunk tier's one kernel, or the split's partial and finalize"
     source = sources[0]
     assert "mma.sync" in source and "__ck" in source, "the chunk tier folds the stream, or each slice of it"
+    if stage is not None:
+        assert ("emmy_cp_async" in source) == bool(stage), "an FP8 cache stages exactly when its row spells a transport"
     assert (STOP in source) == (heads == WIDE), "the position bounds the stream on a launch of more than one wave"
     rng = np.random.default_rng(7)
     query = torch.from_numpy(rng.normal(size=(ROWS, heads * D)).astype(np.float32)).to(torch.bfloat16)
