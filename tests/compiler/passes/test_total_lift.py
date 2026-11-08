@@ -463,9 +463,9 @@ def test_a_sum_ahead_of_an_inner_parallel_loop_peels_onto_the_placement() -> Non
 
 
 def test_an_affine_chain_of_statements_lifts_as_one_node() -> None:
-    """A sum spread over statements (``t = a + b; u = t - c``) is one affine region: the normal form folds it into
-    one sum and the lift keeps that sum one node, as the affine form is one operation; the operations around it
-    (``exp``, the product) are nodes of their own."""
+    """A sum spread over statements (``t = a + b; u = t - c``) is one affine region: the normal form joins it into
+    one sum, one node of the lift, as the affine form is one operation; the operations around it (``exp``, the
+    product) are nodes of their own."""
     tile = _tile(
         parse_body(
             """
@@ -482,14 +482,27 @@ def test_an_affine_chain_of_statements_lifts_as_one_node() -> None:
         )
     )
     values = [stmt.value for stmt in tile.op.lift.body if isinstance(stmt, Assign)]
-    assert [str(value) for value in values] == ["in0 + in1 - in2", "exp(v0__e0)", "2 * v0__e1"], [str(v) for v in values]
+    assert [str(value) for value in values] == ["in0 + in1 - in2", "exp(v0)", "2 * v1"], [str(v) for v in values]
 
 
-def test_a_body_lifts_to_one_fold_tree_before_and_after_the_fold() -> None:
-    """The lift forms one node per operation, whatever the Loop IR spelling: the normal form folds a value read once
-    into its reader, and the chain spelling of the same program names every value. Both lift to the same Fold tree,
-    which is what keeps the cones, the edges and the seams independent of the fold."""
-    # The chain spelling of the normal form below, under the normal form's own names: every value a statement.
+def test_a_tree_spelling_and_its_chain_lift_to_one_fold_tree() -> None:
+    """The lift forms one node per operation, whatever the Loop IR spelling: the normal form gives every definition one
+    operation, so a program spelled as trees and the same program spelled as a chain of named values are one body, and
+    both lift to the same Fold tree, which is what keeps the cones, the edges and the seams independent of the spelling."""
+    tree = parse_body(
+        """
+        for a0 in 0..32:
+            in0 = load r[a0]
+            for a1 in 0..64:
+                for a2 in 0..128:
+                    in1 = load w[a1, a2]
+                    in2 = load x[a0, a2]
+                    acc0 <- add(acc0, exp(in2) * in0 * in1) over a2
+                in3 = load s[a1]
+                out[a0, a1] = v0
+                v0 = acc0 * in3 + in3
+        """
+    )
     chain = parse_body(
         """
         for a0 in 0..32:
@@ -508,8 +521,9 @@ def test_a_body_lifts_to_one_fold_tree_before_and_after_the_fold() -> None:
                 out[a0, a1] = v0
         """
     )
-    op = LoopOp(body=chain)  # normalized at construction: the single-use values fold into their readers
-    assert "acc0 <- add(acc0, exp(in2) * in0 * in1) over a2" in str(op.body)
-    folded, spelled = lift_loop_op(op, name="k"), lift_loop_op(op, name="k", body=chain)
-    assert folded.op.canonical() == spelled.op.canonical()
-    assert {seam.spelling for seam in cuttable_seams(folded)} == {seam.spelling for seam in cuttable_seams(spelled)}
+    op, spelled = LoopOp(body=tree), LoopOp(body=chain)  # normalized at construction
+    assert op.body == spelled.body
+    assert "acc0 <- add(acc0, v2) over a2" in str(op.body) and "v4 = in3 + v3" in str(op.body), str(op.body)
+    lifted, from_chain = lift_loop_op(op, name="k"), lift_loop_op(spelled, name="k", body=chain)
+    assert lifted.op.canonical() == from_chain.op.canonical()
+    assert {seam.spelling for seam in cuttable_seams(lifted)} == {seam.spelling for seam in cuttable_seams(from_chain)}

@@ -19,8 +19,8 @@ from emmy.compiler.ir.stmt import (
     Load,
     canonical_values,
     exposed_defines,
-    fold_single_readers,
     free_names,
+    one_operation_per_definition,
     pretty_body,
 )
 from emmy.compiler.wire import Wire
@@ -218,12 +218,12 @@ class Lambda(Wire):
         )
 
     def canonical(self) -> Lambda:
-        """The α-canonical form: every value read once folded into its reader (a result stays a statement, as a
-        reader outside the body reads it), then params renumbered to ``_p0…`` and internal defs to ``_v0…`` in walk
-        order; free names (and float results) pass through unchanged. Deterministic and blind to how a program was
-        spelled — as a chain of named temps or as one tree — so two lambdas computing one thing have EQUAL canonical
-        forms: the α-invariant equality/hash substrate (:meth:`alpha_eq`)."""
-        folded = Lambda(params=self.params, body=fold_single_readers(self.body, frozenset(self.results)), results=self.results)
+        """The α-canonical form: every definition one operation (a result stays a statement, as a reader outside the
+        body reads it), then params renumbered to ``_p0…`` and internal defs to ``_v0…`` in walk order; free names (and
+        float results) pass through unchanged. Deterministic and blind to how a program was spelled — as a chain of
+        named temps or as one tree — so two lambdas computing one thing have EQUAL canonical forms: the α-invariant
+        equality/hash substrate (:meth:`alpha_eq`)."""
+        folded = Lambda(params=self.params, body=one_operation_per_definition(self.body, frozenset(self.results)), results=self.results)
         mapping = {p: f"_p{i}" for i, p in enumerate(self.params)}
         n = 0
         for s in folded.body.iter():

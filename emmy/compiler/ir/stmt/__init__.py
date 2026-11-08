@@ -40,7 +40,7 @@ ZeroPrologue = _ir.ZeroPrologue
 parse_body = _ir.parse_body
 pretty_body = _ir.pretty_body
 normalize_body = _ir.normalize_body
-fold_single_readers = _ir.fold_single_readers
+one_operation_per_definition = _ir.one_operation_per_definition
 canonical_values = _ir.canonical_values
 simplify_body = _ir.simplify_body
 prepare_body = _ir.prepare_body
@@ -89,7 +89,7 @@ __all__ = [
     "dtype_promote",
     "exposed_defines",
     "fields_of",
-    "fold_single_readers",
+    "one_operation_per_definition",
     "free_names",
     "mask_select_predicate",
     "memo_stats",

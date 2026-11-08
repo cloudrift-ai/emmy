@@ -123,9 +123,8 @@ macro_rules! with_statement_types {
                     carried: Name [] = Name::from(""),
                 }
                 /// The one scalar definition: `name = value`, a pure value of the `Value` class over SSA names and
-                /// literals, any operation of the table. A sum is an `Assign` whose value is in affine form; a value
-                /// read once folds into its reader's expression, a value read twice stays a statement, which is what a
-                /// statement expresses: sharing. `dtype` overrides the promotion of the operands when set: the
+                /// literals, one operation of the table: the normal form gives every nested operation node a definition
+                /// of its own, and a sum in affine form is one node. `dtype` overrides the promotion of the operands when set: the
                 /// `demote_to_write_dtype` Kernel IR pass stamps it on an `Assign` whose result only feeds dtype-narrower
                 /// consumers, so a softmax or RMSNorm epilogue feeding an `__half*` store computes in `__half` end to
                 /// end without spurious promotions.

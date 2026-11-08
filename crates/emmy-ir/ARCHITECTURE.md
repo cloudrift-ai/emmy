@@ -6,7 +6,7 @@ identity and body normalization. Pure Rust, no Python in it, so `cargo test -p e
 of the normalization steps sit beside the steps there. The extension beside it, `emmy-ir-py`, is the `emmy.emmy_ir`
 module those two Python packages re-export from; `make setup` builds it into the package like the runtime extension.
 It exports the driver (`normalize_body`, `normalize_uncached`, `prepare_body`) and the steps a pass calls on its own
-(`fold_single_readers`, `canonical_values`, `simplify_body`, `rename_free`), no other step. Design: `ir/ARCHITECTURE.md` owns what a statement, a
+(`one_operation_per_definition`, `canonical_values`, `simplify_body`, `rename_free`), no other step. Design: `ir/ARCHITECTURE.md` owns what a statement, a
 body and the normal form ARE; this file says how the crate holds them.
 
 ## Layout

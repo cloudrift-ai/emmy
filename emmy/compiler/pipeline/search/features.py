@@ -72,9 +72,9 @@ CTX_PREFIX = "H_"
 # Version 12 lets a 1-byte scalar A pair with a 16-bit B through the converting shared-memory fill. Stored kernels
 # that read such an A (an FP8 weight against an f16 activation) can thereby gain a tensor-core schedule and change
 # S_warp_eligible without changing their exact kernel identity.
-# Version 13 is the one-scalar-definition normal form: an ``Assign`` holds an expression, a value read once folds into
-# its reader, and the pointwise work is the operation nodes of every ``Assign`` and ``Accum`` value. Earlier datasets
-# and weights must be rebuilt.
+# Version 13 is the one-scalar-definition normal form: an ``Assign`` holds one operation (a sum in affine form one node),
+# an ``Accum`` sums a name, and the pointwise work is the operation nodes of every ``Assign`` and ``Accum`` value. Earlier
+# datasets and weights must be rebuilt.
 FEATURIZER_VERSION = 13
 
 # The features that name a candidate's regime rather than describe it — the ``S_ext_n_symbolic_axis`` stamp a

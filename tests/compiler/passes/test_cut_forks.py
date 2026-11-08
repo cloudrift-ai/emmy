@@ -550,7 +550,7 @@ def test_a_moved_seam_over_a_re_keyed_piece_keeps_the_cut_whose_other_pieces_it_
     code = "(lambda x: (torch.sigmoid(x) * torch.tanh(x)).sum(-1))(torch.randn(4, 64, dtype=torch.float16))"
     document, route = _routed(inventory_document(graph_from_code(code)[0], (12, 0)), {"PLACE@map.1/reduce.1/map": "cut"})
     producer, consumer = (document.kernel(ref) for ref in route.children)
-    stale = replace(consumer, loop_ir=json.loads(json.dumps(consumer.loop_ir).replace("tanh(", "exp(")))
+    stale = replace(consumer, loop_ir=json.loads(json.dumps(consumer.loop_ir).replace("sigmoid(", "exp(")))
     assert stale.exact_identity != consumer.exact_identity
     moved = replace(
         document,

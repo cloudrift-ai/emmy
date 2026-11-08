@@ -835,8 +835,8 @@ def _(stmt: Assign, ctx: RenderCtx) -> list[str]:
 
 def _render_value(name: str, value: Expression, dtype: str | None, ctx: RenderCtx) -> list[str]:
     """``name = value`` at ``dtype`` (``None``: the promotion of the operands), one C statement per operation node of
-    the value: a nested node is a temp of its own, declared ahead, as it was a statement of its own before the normal
-    form folded it into its one reader. nvcc sees the same program either way."""
+    the value: the normal form gives a Loop IR definition one operation, and a nested node a kernel pass built is a
+    temp of its own, declared ahead. nvcc sees the same program either way."""
     lines: list[str] = []
     temps = count()
 

@@ -181,10 +181,10 @@ def test_a_kernel_row_is_written_once_and_read_back_under_its_key() -> None:
 _PINNED_IDENTITIES = {
     ("reduce/cross-cta-sum-kernel.json", "k_sum_1_reduce"): "aee18fd8b70ef8deb26b624698c57faa",
     ("reduce/cross-cta-sum-kernel.json", "k_sum_1_reduce__partial"): "c6a11571d7ceafb35273b317542392b9",
-    ("reduce/online-softmax-4x128.json", "k_softmax_77dd65"): "ea100f2bf3e9834ebcb885c6a8eda692",
-    ("attention/sdpa-hd128-softmax-v-mma.json", "k_sdpa_441e96"): "388320db81f43719005e2d712dde4e1b",
-    ("matmul/bf16-mma-sm120.json", "k_matmul_7325d9"): "e8ff6ba24c8e9ad7eb80f141616ade27",
-    ("fused/nvfp4-gate-up-requant-place-cut.json", "k_linear_reduce_105826#2"): "da51101a8646e8288a91514ebe53c24a",
+    ("reduce/online-softmax-4x128.json", "k_softmax_77dd65"): "c61706b002192e2be14d9cba58ad939f",
+    ("attention/sdpa-hd128-softmax-v-mma.json", "k_sdpa_441e96"): "3abd4ecf331b388a366032912ffe8ffc",
+    ("matmul/bf16-mma-sm120.json", "k_matmul_7325d9"): "954a87376449a67967b4e7e30dd4575c",
+    ("fused/nvfp4-gate-up-requant-place-cut.json", "k_linear_reduce_105826#2"): "ec06e3b375443c246773c0f34104df1a",
 }
 
 

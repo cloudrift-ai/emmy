@@ -200,9 +200,10 @@ def test_silu_uses_the_input_opmath_dtype(dtype, opmath_dtype):
 def test_silu_f16_lifting_keeps_one_widening_and_one_final_narrowing():
     result = Pipeline.build(LOOP_PASSES).run(_make_silu_graph(F16))
     loop = next(n.op for n in result.nodes.values() if isinstance(n.op, LoopOp))
-    widening, narrowing = [stmt for stmt in loop.body.iter() if isinstance(stmt, Assign)]
-    # The widening is a typed alias of the loaded value; the narrowing is the one definition the negation, the exp
-    # and the ``1 + exp`` sum folded into.
+    assigns = [stmt for stmt in loop.body.iter() if isinstance(stmt, Assign)]
+    widening, narrowing = assigns[0], assigns[-1]
+    # The widening is a typed alias of the loaded value; the narrowing is the last definition, one operation each
+    # (the negation's sum, the exp, the division) between them.
     assert isinstance(widening.value, Var) and widening.dtype == F32
     assert narrowing.value.operation.name == "divide" and narrowing.dtype == F16
     operations = {

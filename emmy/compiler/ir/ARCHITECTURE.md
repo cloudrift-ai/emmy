@@ -236,7 +236,7 @@ by that name.
 nothing else: no submodule path, no private name. The package exports the statement types, `Body` and `OutputSpec`,
 `normalize_body` and `canonicalize_identity`, a few functions over statements (`free_names`, `exposed_defines`,
 `rename_free`, `binary`, `mask_select_predicate`, `ordering_constraints`, `dtype_promote`), the text form
-(`pretty_body`, `parse_body`), four normalization steps a caller may run on its own (`fold_single_readers`, `canonical_values`, `simplify_body`,
+(`pretty_body`, `parse_body`), four normalization steps a caller may run on its own (`one_operation_per_definition`, `canonical_values`, `simplify_body`,
 `prepare_body`), the two statement types fusion's body assembly in `ir/loop/` builds a region with (`Call`,
 `Subroutine`), and the names of a statement type's fields (`fields_of`). The statement types, `Body`, the protocol, the
 text, the value numbering and the normalization are implemented in Rust — the `emmy-ir` crate, reached through the
@@ -755,14 +755,17 @@ from that CSE form. Subroutine boundaries never limit fusion.
   this way, the dot product that fed it and the loop that summed it included: a dropped value leaves its operands
   unread in turn, and one call drops the whole chain. A body that stores nothing is a fragment whose values are all
   its reader's, so nothing is dropped from it.
-- `fold_single_readers` — a pure `Assign` read exactly once in its scope folds into its reader's expression (an
-  `Assign`, an `Accum`, an index or a predicate), and every expression is spelled in affine form: like terms summed,
-  zero terms dropped, the constant last, in the coefficient domain of its field's class — an index folds integer
-  literals alone and keeps a quotient a term, a value folds any literal and a division by a float literal into the
-  product by its reciprocal. `x + x`, `2 * x` and `x + 3 * x - x` are then one body, `x / 2.0` and `0.5 * x` another,
-  and `x - x` is `0`. The fold reassociates a sum
-  and rounds a reciprocal once, which every reduce schedule and fast-math division do already; a value read more than
-  once stays a statement, since sharing is what a statement expresses.
+- `one_operation_per_definition` — every definition is one operation over names and literals: a nested operation
+  node of an `Assign`'s value is a definition of its own ahead of its reader, an `Accum` sums a name or a literal, an
+  alias (a definition that is a bare name) is read through, and a literal definition is spelled where an expression
+  reads it. An affine region is one node: every expression is spelled in affine form — like terms summed, zero terms
+  dropped, the constant last, in the coefficient domain of its field's class (an index folds integer literals alone
+  and keeps a quotient a term, a value folds any literal and a division by a float literal into the product by its
+  reciprocal) — and an affine definition read once inside an affine reader joins the reader's region, so `x + x`,
+  `2 * x` and `t = 3 * x; s = t + x; o = s - x` are one body, `x / 2.0` and `0.5 * x` another, and `x - x` is `0`.
+  The affine form reassociates a sum and rounds a reciprocal once, which every reduce schedule and fast-math division
+  do already. A chain of named temps and one tree are then one body, so the readers of the normal form (the tile lift,
+  the fragment tier, the renderer) take one operation per statement as given.
 - `merge_sibling_reduce_loops` — unify sibling reduce axes whose Load positions overlap, then merge matching Loops
   before descending into their children. A parent merge therefore exposes child reductions to the same walk.
   Overlapping reductions share one canonical axis name (softmax's max + sum sweeps; the two matmul reductions in

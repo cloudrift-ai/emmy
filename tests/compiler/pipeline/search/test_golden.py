@@ -74,9 +74,11 @@ def test_restamp_respells_a_rows_site_keys_as_it_does_a_seam() -> None:
 
     document = GoldenFile.load(Path(__file__).resolve().parents[2] / "realization/cases/fused/gdn-recurrence-state-kv.json")
     (row,) = document.rows
-    nested = "map.1/inner.1/map.3/map.1/inner"
+    nested = max((key for key in row.knobs if key.startswith("TILE@")), key=len).partition("@")[2]
     assert {key for key in row.knobs if nested in key} == {f"{family}@{nested}" for family in ("TILE", "REDUCE", "STAGE")}
-    shifted = {key.replace("inner.1/map.3", "inner.2/map.3"): value for key, value in row.knobs.items()}
+    head, _, tail = nested.partition("/map.3")  # ``map.1/inner.N``: the nested reduce one operand index over
+    moved = f"{head[:-1]}{int(head[-1]) + 1}/map.3{tail}"
+    shifted = {key.replace(nested, moved): value for key, value in row.knobs.items()}
     fresh, report = restamp(replace(document, rows=[replace(row, knobs=shifted)]))
     assert fresh.rows[0].knobs == row.knobs and not report.dropped_rows
     assert report.respelled_rows == [f"{row.name} {old} -> {new}" for old, new in zip(shifted, row.knobs, strict=True) if old != new]

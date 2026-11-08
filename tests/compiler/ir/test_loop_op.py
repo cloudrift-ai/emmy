@@ -163,8 +163,8 @@ def test_kernel_matmul():
             out_0[a0] = dot
         """
     )
-    # 2 Loads + Accum (over the product, read once) + Write — accumulator info is carried on Accum.op now.
-    assert sum(1 for s in k if not isinstance(s, Loop)) == 4
+    # 2 Loads + the product + Accum (over its name) + Write — accumulator info is carried on Accum.op now.
+    assert sum(1 for s in k if not isinstance(s, Loop)) == 5
 
 
 def test_kernel_matmul_bias():
@@ -181,8 +181,8 @@ def test_kernel_matmul_bias():
             out_0[a0] = out
         """
     )
-    # 3 Loads + Accum (over the product) + Assign + Write (no decl stmt — Accum carries op).
-    assert sum(1 for s in k if not isinstance(s, Loop)) == 6
+    # 3 Loads + the product + Accum (over its name) + Assign + Write (no decl stmt — Accum carries op).
+    assert sum(1 for s in k if not isinstance(s, Loop)) == 7
 
 
 def test_kernel_softmax_two_accumulators():
@@ -217,8 +217,8 @@ def test_kernel_unary_chain():
             out_0[a0] = exp
         """
     )
-    # 1 Load + one Assign (the negation folds into the exp that reads it) + Write.
-    assert sum(1 for s in k if not isinstance(s, Loop)) == 3
+    # 1 Load + two Assigns (one operation each) + Write.
+    assert sum(1 for s in k if not isinstance(s, Loop)) == 4
 
 
 def test_kernel_scatter_output_via_select():
@@ -256,7 +256,7 @@ def test_ssa_rejects_undefined_arg():
 
 def test_two_lexical_bindings_of_one_name_are_one_definition():
     """A name bound twice in one scope (the second reading the first) is two values: the normal form renames them
-    apart, and the first, read once, folds into the second."""
+    apart, one definition each."""
     k = _loop(
         """
         for a0 in 0..4:
@@ -266,7 +266,7 @@ def test_two_lexical_bindings_of_one_name_are_one_definition():
             out_0[a0] = y
         """
     )
-    assert [str(s.value) for s in k.body[0].body if isinstance(s, Assign)] == ["-exp(in0)"]
+    assert [str(s.value) for s in k.body[0].body if isinstance(s, Assign)] == ["exp(in0)", "-v0"]
 
 
 def test_ssa_topo_sorts_forward_reference():
@@ -282,9 +282,9 @@ def test_ssa_topo_sorts_forward_reference():
             out_0[a0] = a
         """
     )
-    # After normalization the single-use ``exp`` (originally "b") folds into the sum that reads it: one definition.
+    # After normalization the ``exp`` (originally "b") is defined ahead of the sum that reads it.
     values = [str(s.value) for s in k.body[0].body if isinstance(s, Assign)]
-    assert values == ["exp(in0) + in0"], values
+    assert values == ["exp(in0)", "in0 + v0"], values
 
 
 def test_ssa_allows_input_name_reuse_in_multiple_args():
@@ -298,8 +298,8 @@ def test_ssa_allows_input_name_reuse_in_multiple_args():
             out_0[a0] = c
         """
     )
-    # 1 Load + one definition (the exp and the negation fold into the sum) + 1 Write.
-    assert sum(1 for s in k if not isinstance(s, Loop)) == 3
+    # 1 Load + the exp, and the sum with the negation (one affine region) + 1 Write.
+    assert sum(1 for s in k if not isinstance(s, Loop)) == 4
 
 
 def test_update_op_conflict_rejected():

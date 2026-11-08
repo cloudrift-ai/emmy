@@ -258,7 +258,7 @@ mod tests {
             })
             .count();
         assert_eq!(loads, 1, "{only}");
-        assert_eq!(computed, 1, "{only}");
+        assert_eq!(computed, 2, "{only}"); // the exponential, and twice it
         assert_eq!(normal(&only), only);
     }
 

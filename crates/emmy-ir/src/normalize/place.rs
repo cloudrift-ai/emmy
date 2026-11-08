@@ -1245,7 +1245,10 @@ mod tests {
         let [reduce] = reduces[..] else {
             panic!("one reduce loop: {}", text(&out))
         };
-        assert_eq!(statement_types(&inner(reduce)), ["Load", "Load", "Accum"]);
+        assert_eq!(
+            statement_types(&inner(reduce)),
+            ["Load", "Load", "Assign", "Accum"]
+        );
         let product = outer
             .stmts()
             .iter()
@@ -1255,6 +1258,6 @@ mod tests {
             })
             .next_back()
             .unwrap();
-        assert_eq!(product.value.text(), "v0 * v0");
+        assert_eq!(product.value.text(), "v1 * v1");
     }
 }

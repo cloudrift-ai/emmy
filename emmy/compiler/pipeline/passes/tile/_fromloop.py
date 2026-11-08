@@ -15,7 +15,7 @@ from typing import TYPE_CHECKING
 
 from emmy.compiler.dtype import F32
 from emmy.compiler.ir.axis import Axis
-from emmy.compiler.ir.expression import BinaryExpression, Expression, Literal, TernaryExpression, Var, affine_node, apply
+from emmy.compiler.ir.expression import BinaryExpression, Expression, Literal, TernaryExpression, Var, apply
 from emmy.compiler.ir.loop import LoopOp
 from emmy.compiler.ir.pure import Lambda
 from emmy.compiler.ir.pure.fold import EXTENTS, Fold, binding_extents
@@ -235,54 +235,22 @@ def _decode_split(arg: str, plain: Body, defs: dict, exposed: dict, k_name: str)
     return exposed[code.name], _Hoist(tuple(dict.fromkeys(terms)), tuple(stmts), factors)
 
 
-def _operand_names(product: Assign) -> tuple[str, ...]:
-    """The names a product's operands read: every operand of a lifted step's product is a name (:func:`_one_per_node`)."""
-    return tuple(operand.name for operand in product.value.operands if isinstance(operand, Var))
-
-
-def _one_per_node(body: Body) -> Body:
-    """``body`` with one definition per operation node: every nested operation node of an ``Assign``'s value is a
-    definition of its own ahead of its reader, named after it (``v__e0``, ``v__e1``, …), and an ``Accum`` sums a name.
-    An affine region (sums, differences, negations and literal scales, the normal form's affine form) is one node, as a
-    sum is one operation. The Loop IR's normal form folds a value read once into its reader; the tile IR's nodes are
-    one operation each, so the lift translates between the two granularities here, once, and every cone, edge and seam
-    it forms downstream is the one the chain spelling gave. Nested bodies are lifted by their own call."""
-    taken = set(body.ssa_uses) | {name for stmt in body.iter() for name in stmt.defines()}
+def _accums_sum_names(body: Body) -> Body:
+    """``body`` with every accumulation summing a name: the normal form lets an ``Accum`` sum a literal, and the lift's
+    step reads the summed value by name, so a literal takes a definition of its own ahead of the accumulation."""
     out: list[Statement] = []
-
-    def fresh(base: str) -> str:
-        index = 0
-        while f"{base}__e{index}" in taken:
-            index += 1
-        taken.add(f"{base}__e{index}")
-        return f"{base}__e{index}"
-
-    def part(node: Expression, base: str, in_affine: bool) -> Expression:
-        """``node`` with the operation nodes below it defined, itself defined too unless it is the root or a node of
-        the enclosing affine region."""
-        affine = affine_node(node)
-        rebuilt = node.with_children([part(child, base, affine) for child in node.children()])
-        if rebuilt.operation is None or (in_affine and affine):
-            return rebuilt
-        name = fresh(base)
-        out.append(Assign(name, rebuilt))
-        return Var(name)
-
     for stmt in body:
-        if isinstance(stmt, Assign):
-            affine = affine_node(stmt.value)
-            value = stmt.value.with_children([part(child, stmt.name, affine) for child in stmt.value.children()])
-            out.append(stmt if value == stmt.value else stmt.replace(value=value))
-        elif isinstance(stmt, Accum) and not isinstance(stmt.value, Var):
-            value = part(stmt.value, stmt.name, False)
-            if not isinstance(value, Var):
-                name = fresh(stmt.name)
-                out.append(Assign(name, value))
-                value = Var(name)
-            out.append(stmt.replace(value=value))
-        else:
-            out.append(stmt)
+        if isinstance(stmt, Accum) and isinstance(stmt.value, Literal):
+            out.append(Assign(f"{stmt.name}__e0", stmt.value))
+            stmt = stmt.replace(value=Var(f"{stmt.name}__e0"))
+        out.append(stmt)
     return Body(tuple(out))
+
+
+def _operand_names(product: Assign) -> tuple[str, ...]:
+    """The names a product's operands read: every operand of a lifted step's product is a name (the normal form's one
+    operation per definition)."""
+    return tuple(operand.name for operand in product.value.operands if isinstance(operand, Var))
 
 
 def _factor_products(
@@ -479,7 +447,7 @@ def lift_body(body, axes: tuple = (), levels: tuple = (), carriers: dict | None 
     inner_levels = (*levels, level)
     edges: list = []
     bound = {axis.name for axis in axes}  # one coordinate per name: a sibling sweep reusing one is renamed apart
-    for stmt in _one_per_node(Body.coerce(body)):
+    for stmt in _accums_sum_names(Body.coerce(body)):
         if isinstance(stmt, Loop) and not stmt.is_reduce:
             if stmt.axis.name in bound:
                 stmt = _renamed_sweep(stmt, bound)

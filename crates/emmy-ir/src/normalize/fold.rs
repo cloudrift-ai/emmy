@@ -1,8 +1,7 @@
-//! The folds: a select whose branches bind one value, a literal into the expressions that read it, a value nothing
-//! reads, and a value read once into its reader's expression.
+//! The folds: a select whose branches bind one value, a literal into the expressions that read it, and a value nothing
+//! reads.
 
 use std::collections::{HashMap, HashSet};
-use std::sync::Arc;
 
 use super::{assign, with_bodies};
 use crate::Name;
@@ -128,123 +127,12 @@ pub fn drop_unread_values(body: &Body) -> Body {
     }
 }
 
-/// A pure value read once folds into its reader's expression, chains deep, until the one reader reads it by name (a
-/// store, a select branch, a carry) or from another scope, a dtype stamps it, or the reader's class or the depth bound
-/// refuses the folded expression. A value read twice stays a statement: sharing is what a statement expresses.
-/// `exposed` names are read once more, from outside the body.
-pub fn fold_single_readers(body: &Body, exposed: &HashSet<Name>) -> Body {
-    fn scope(body: &Body, counts: &HashMap<Name, usize>) -> Body {
-        let mut stmts: Vec<Arc<Statement>> = body.stmts().to_vec();
-        for stmt in &mut stmts {
-            let nested = stmt.nested();
-            if !nested.is_empty() {
-                *stmt = with_bodies(
-                    stmt,
-                    nested.iter().map(|child| scope(child, counts)).collect(),
-                );
-            }
-        }
-        // Two definitions of one value are the numbering's to merge into a value read twice, not the fold's to spell
-        // twice.
-        let mut seen: HashMap<Expression, usize> = HashMap::new();
-        for stmt in &stmts {
-            if let Statement::Assign(a) = &**stmt {
-                *seen.entry(a.value.clone()).or_default() += 1;
-            }
-        }
-        let mut index = 0;
-        while index < stmts.len() {
-            let Statement::Assign(assign) = &*stmts[index] else {
-                index += 1;
-                continue;
-            };
-            if assign.dtype.is_some()
-                || counts.get(&assign.name).copied().unwrap_or(0) != 1
-                || seen.get(&assign.value).copied().unwrap_or(0) > 1
-            {
-                index += 1;
-                continue;
-            }
-            let reader = stmts
-                .iter()
-                .enumerate()
-                .skip(index + 1)
-                .find(|(_, stmt)| stmt.expressions().iter().any(|e| e.reads(assign.name)));
-            let Some((at, reader)) = reader else {
-                index += 1;
-                continue;
-            };
-            // A statement between the definition and its reader that redefines a name the value reads (an
-            // accumulator's update after a read of its previous step) would change what the reader computes.
-            if stmts[index + 1..at]
-                .iter()
-                .any(|stmt| stmt.defines().iter().any(|name| assign.value.reads(*name)))
-            {
-                index += 1;
-                continue;
-            }
-            let folded = Statement::substitute(
-                reader,
-                &HashMap::from([(assign.name, assign.value.clone())]),
-            );
-            let fits = folded
-                .expressions()
-                .iter()
-                .all(|e| e.clone().bounded().is_ok())
-                && folded.check().is_ok();
-            if !fits {
-                index += 1;
-                continue;
-            }
-            stmts[at] = folded;
-            stmts.remove(index);
-            // The reader may itself be a value read once; it is looked at when the walk reaches it.
-        }
-        body.rebuilt(stmts)
-    }
-    scope(body, &read_counts(body, exposed))
-}
-
 #[cfg(test)]
 mod tests {
     use super::drop_unread_values;
     use crate::identity::canonicalize_identity;
     use crate::normalize::normalize_body;
     use crate::normalize::testing::*;
-
-    /// A value read once folds into its reader only while nothing between them redefines a name it reads: a read of
-    /// an accumulator between two updates observes the first, and folding it past the second would make it observe
-    /// both.
-    #[test]
-    fn a_read_of_an_accumulator_does_not_fold_past_the_next_update() {
-        let observed = |reader_after_second_update: bool| {
-            let read = "v = total * 2.0";
-            let reader = "w = v + 1.0";
-            let second = "total <- add(total, second)";
-            let order = if reader_after_second_update {
-                [read, second, reader]
-            } else {
-                [read, reader, second]
-            };
-            body(&format!(
-                "init f32 total = 0\nlet first = 1.0\nlet second = 2.0\ntotal <- add(total, first)\n{}\nO[] = w",
-                order.join("\n")
-            ))
-        };
-        let kept = text(&normalize_body(&observed(true)).unwrap());
-        let lines: Vec<&str> = kept.lines().collect();
-        let read = lines
-            .iter()
-            .position(|line| line.contains("= 2 * acc0"))
-            .unwrap();
-        let second = lines
-            .iter()
-            .rposition(|line| line.contains("<- add("))
-            .unwrap();
-        assert!(read < second && !kept.contains("2 * acc0 + 1"), "{kept}");
-        let folded = text(&normalize_body(&observed(false)).unwrap());
-        assert!(folded.contains("2 * acc0 + 1"), "{folded}");
-    }
 
     #[test]
     fn unread_values_leave_with_everything_only_they_read() {

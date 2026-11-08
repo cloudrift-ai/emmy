@@ -32,7 +32,7 @@ _POST_DECOMPOSITION_ROOTS = (
 
 
 # The normalization entry point and the steps a pass may run on its own.
-_STEPS = ("normalize_body", "fold_single_readers", "canonical_values", "simplify_body", "prepare_body")
+_STEPS = ("normalize_body", "one_operation_per_definition", "canonical_values", "simplify_body", "prepare_body")
 
 
 def test_checkpoint_format_names_stop_at_frontend_decomposition() -> None:

@@ -826,10 +826,11 @@ pub fn simplify_body<'py>(body: &Bound<'py, PyAny>) -> PyResult<Bound<'py, PyBod
     )
 }
 
-/// Fold every pure value read once into its reader's expression; `exposed` names count as read once more.
+/// Every definition one operation over names and literals, nested nodes defined ahead of their reader and an affine
+/// region one node; `exposed` names keep their statements.
 #[pyfunction]
 #[pyo3(signature = (body, exposed = None))]
-pub fn fold_single_readers<'py>(
+pub fn one_operation_per_definition<'py>(
     body: &Bound<'py, PyAny>,
     exposed: Option<&Bound<'py, PyAny>>,
 ) -> PyResult<Bound<'py, PyBody>> {
@@ -842,7 +843,7 @@ pub fn fold_single_readers<'py>(
     };
     PyBody::wrap(
         body.py(),
-        &emmy_ir::normalize::fold_single_readers(&PyBody::from_iterable(body)?, &exposed),
+        &emmy_ir::normalize::one_operation_per_definition(&PyBody::from_iterable(body)?, &exposed),
     )
 }
 
@@ -958,7 +959,7 @@ pub fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(normalize_uncached, m)?)?;
     m.add_function(wrap_pyfunction!(prepare_body, m)?)?;
     m.add_function(wrap_pyfunction!(simplify_body, m)?)?;
-    m.add_function(wrap_pyfunction!(fold_single_readers, m)?)?;
+    m.add_function(wrap_pyfunction!(one_operation_per_definition, m)?)?;
     m.add_function(wrap_pyfunction!(canonical_values, m)?)?;
     m.add_function(wrap_pyfunction!(free_names_py, m)?)?;
     m.add_function(wrap_pyfunction!(exposed_defines_py, m)?)?;

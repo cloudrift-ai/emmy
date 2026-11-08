@@ -51,6 +51,79 @@ pub fn normalize_body(body: &Body) -> Result<Body> {
     Ok(normal)
 }
 
+/// `body` with every name bound more than once in one scope given a name of its own at each later binding, the reads
+/// between two bindings reading the one before them: two lexical bindings of one name are two values. A binding in a
+/// deeper scope shadows; the order handles it.
+fn rebind_lexically(body: &Body) -> Body {
+    struct Rebind<'a> {
+        reads: &'a HashMap<Name, Name>,
+        defines: &'a HashMap<Name, Name>,
+    }
+    impl crate::field::Rewriter for Rebind<'_> {
+        fn name(&mut self, roles: Roles, name: &Name) -> Name {
+            let map = if roles.contains_any(DEFINES) {
+                self.defines
+            } else {
+                self.reads
+            };
+            map.get(name).copied().unwrap_or(*name)
+        }
+        fn expression(&mut self, _roles: Roles, expression: &Expression) -> Expression {
+            expression.rename(&mut |name| self.reads.get(&name).copied())
+        }
+    }
+    fn scope(body: &Body, current: &HashMap<Name, Name>, taken: &mut HashSet<Name>) -> Body {
+        let mut current = current.clone();
+        let mut seen: HashSet<Name> = HashSet::new();
+        let out = body
+            .stmts()
+            .iter()
+            .map(|stmt| {
+                let rebinds = matches!(
+                    &**stmt,
+                    Statement::Assign(_)
+                        | Statement::Let(_)
+                        | Statement::Load(_)
+                        | Statement::Select(_)
+                );
+                let mut defines: HashMap<Name, Name> = HashMap::new();
+                for name in stmt.defines() {
+                    if rebinds && !seen.insert(name) {
+                        let fresh = (2..)
+                            .map(|n| Name::new(&format!("{name}__{n}")))
+                            .find(|candidate| !taken.contains(candidate))
+                            .unwrap_or(name);
+                        taken.insert(fresh);
+                        defines.insert(name, fresh);
+                    }
+                }
+                let renamed = Arc::new(stmt.rewrite_fields(&mut Rebind {
+                    reads: &current,
+                    defines: &defines,
+                }));
+                let nested = renamed.nested();
+                let renamed = if nested.is_empty() {
+                    renamed
+                } else {
+                    with_bodies(
+                        &renamed,
+                        nested
+                            .iter()
+                            .map(|child| scope(child, &current, taken))
+                            .collect(),
+                    )
+                };
+                current.extend(defines);
+                renamed
+            })
+            .collect();
+        body.rebuilt(out)
+    }
+    let mut taken: HashSet<Name> = body.ssa_uses().clone();
+    body.walk(&mut |here| taken.extend(here.stmt().defines()));
+    scope(body, &HashMap::new(), &mut taken)
+}
+
 /// The normal form, computed afresh.
 pub fn normalize_uncached(body: &Body) -> Result<Body> {
     // The normal form holds every operation: a call is storage sharing inside fusion, which expands it.
@@ -61,15 +134,15 @@ pub fn normalize_uncached(body: &Body) -> Result<Body> {
         ));
     }
     // Motion can put two lexical bindings in one scope. Give them distinct names first.
-    let mut stmts = rename_ssa_sequential(&topological_sort(body));
-    // The folds feed the steps ahead of them, so the steps run again after a fold that changed the body. The order
+    let mut stmts = rename_ssa_sequential(&topological_sort(&rebind_lexically(body)));
+    // The split feeds the steps ahead of it, so the steps run again after a split that changed the body. The order
     // permutes and names, and the operand order inside a value reads the ranks the order gives, which the order in
     // turn spells by: the form is final when one whole round leaves the body alone.
     for _ in 0..8 {
         let prepared = prepare_body(&stmts)?;
-        let folded = fold_single_readers(&fold_trivial_selects(&prepared), &HashSet::new());
-        if folded != prepared {
-            stmts = folded;
+        let split = one_operation_per_definition(&fold_trivial_selects(&prepared), &HashSet::new());
+        if split != prepared {
+            stmts = split;
             continue;
         }
         let next = drop_unread_values(&canonical_order(&prepared)?);
@@ -131,6 +204,7 @@ fn assign(name: &Name, value: Expression, dtype: Option<DType>) -> Arc<Statement
 
 pub mod axes;
 pub mod canonical;
+pub mod definitions;
 pub mod fold;
 pub mod place;
 pub mod siblings;
@@ -139,6 +213,7 @@ pub mod ties;
 
 pub use axes::*;
 pub use canonical::*;
+pub use definitions::*;
 pub use fold::*;
 pub use place::*;
 pub use siblings::*;
@@ -205,7 +280,7 @@ for k in 0..3:
             "for i in 0..4:\n    for k in 0..8:\n        x = load a[i, k]\n        y = exp(x)\n        s <- add(s, y) over k\n    out[i] = s",
         );
         assert!(
-            text.contains("acc0 <- add(acc0, exp(in0)) over a1"),
+            text.contains("v0 = exp(in0)\n") && text.contains("acc0 <- add(acc0, v0) over a1"),
             "{text}"
         );
         let folded = normal(
@@ -470,22 +545,23 @@ for k in 0..3:
     }
 
     #[test]
-    fn no_step_changes_a_prepared_body_the_folds_leave_alone() {
-        // The driver runs the steps again only after a fold changed the body, so a prepared body the folds leave
+    fn no_step_changes_a_prepared_body_the_split_leaves_alone() {
+        // The driver runs the steps again only after the split changed the body, so a prepared body the split leaves
         // alone has to be one every step leaves alone.
         for given in [one_key_softmax(), equal_gather_index()] {
             let mut prepared = rename_ssa_sequential(&given);
             let mut settled = false;
             for _ in 0..8 {
                 prepared = prepare_body(&prepared).unwrap();
-                let folded = fold_single_readers(&fold_trivial_selects(&prepared), &HashSet::new());
-                if folded == prepared {
+                let split =
+                    one_operation_per_definition(&fold_trivial_selects(&prepared), &HashSet::new());
+                if split == prepared {
                     settled = true;
                     break;
                 }
-                prepared = folded;
+                prepared = split;
             }
-            assert!(settled, "the folds did not settle");
+            assert!(settled, "the split did not settle");
             assert_eq!(prepare_body(&prepared).unwrap(), prepared);
         }
     }
