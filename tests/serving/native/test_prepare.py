@@ -446,6 +446,27 @@ def test_native_programs_are_the_twins_a_native_serving_config_adds(tmp_path):
     assert [(row.name, dict(row.pins)["FAST_MATH"]) for row in realizations] == [("m64.fm", True)]
 
 
+def test_attention_is_traced_once_per_window_range_at_its_price():
+    """A context that reaches the long range traces every attention program once per range of windows, priced at the
+    range's window, and names the long range's twin apart (a context short of it traces the short range alone: the
+    tiny model's own, in the twins test above)."""
+    import torch
+
+    from emmy.compiler.wire import symbolic_bindings
+    from emmy.serving.native.prepare import WINDOW, trace_programs
+    from emmy.serving.twins import twin_width
+
+    model = qwen3_5_moe_model(max_position_embeddings=262144).to(torch.bfloat16)
+    twins = trace_programs(model, prefill_size=3, decode_width=4)
+    attention = {
+        name: symbolic_bindings(node.output for node in g.nodes.values()) for name, g in twins.items() if name.startswith("attend")
+    }
+    assert attention == {
+        f"attend{rows}{suffix}-native": {WINDOW: price} for rows in (1, 3) for suffix, price in (("", 4096), ("-long", 131072))
+    }
+    assert twin_width("attend3-long-native") == 3
+
+
 def test_a_native_serving_config_traces_native_twins_as_its_export_would(tmp_path, monkeypatch):
     """``SERVE_NATIVE`` adds native's programs to the twins, traced with the config's expert budget and in the dtype
     ``emmy serve --native`` exports: the checkpoint's when ``--dtype`` names none, where the plugin's twins take FP16."""

@@ -114,6 +114,9 @@ class LaunchSpec:
     # ``[lo, hi)`` of an ``extent``-long axis, and a ``"reduce"`` launch combines per-thread
     # partials in its kernel's ``finish``. ``None`` on every CUDA launch.
     cpu: dict | None = None
+    # ``(symbol, first, last)``: the launch runs only while that symbolic size lies in ``[first, last]``, as each of
+    # native's attention programs runs in its range of windows. ``None`` runs at every size.
+    size_range: tuple[str, int, int] | None = None
 
 
 @dataclass
@@ -673,6 +676,7 @@ def plan_to_dict(plan: ExecutionPlan) -> dict:
                 **({"writes": list(lc.writes)} if lc.writes else {}),
                 "runtime_args": list(lc.runtime_args),
                 **({"serial": [[name, extent] for name, extent in lc.serial]} if lc.serial else {}),
+                **({"size_range": list(lc.size_range)} if lc.size_range else {}),
                 **(
                     {"cpu": dict(lc.cpu)}
                     if lc.cpu is not None
@@ -767,6 +771,7 @@ def plan_from_dict(d: dict) -> ExecutionPlan:
                 runtime_args=tuple(lc.get("runtime_args", ())),
                 serial=tuple((name, int(extent)) for name, extent in lc.get("serial", ())),
                 cpu=lc.get("cpu"),
+                size_range=tuple(lc["size_range"]) if "size_range" in lc else None,
             )
             for lc in d["launches"]
         ],

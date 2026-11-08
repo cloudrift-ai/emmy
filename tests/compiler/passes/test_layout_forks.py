@@ -257,7 +257,7 @@ def test_layout_prices_its_own_measured_kernel_and_not_its_child_route() -> None
         best_per_op_time=lambda *_args, **_kwargs: None,
         has_perf=lambda *_args, **_kwargs: True,
     )
-    index = _Measured({source_key: [({"WORK": "t128"}, 17.0)]}, {})
+    index = _Measured({source_key: {(): [({"WORK": "t128"}, 17.0)]}}, {})
     prices = {option.knobs["LAYOUT@w"]: us for option, us in _layout_candidates(point, index, db)}
     assert prices == {"folded": 20.0, "source": 17.0}
     assert _route_candidates(point, _EMPTY_MEASURED, db) == []
@@ -315,7 +315,7 @@ def test_a_layout_arm_is_priced_over_every_reader_it_settles() -> None:
     assert len({folded, source_key, other_folded, other_source}) == 4
 
     def prices(rows: dict[str, float]) -> dict[str, float]:
-        index = _Measured({kernel: [({"WORK": "t32"}, us)] for kernel, us in rows.items()}, {})
+        index = _Measured({kernel: {(): [({"WORK": "t32"}, us)]} for kernel, us in rows.items()}, {})
         return {option.knobs["LAYOUT@w"]: us for option, us in _layout_candidates(point, index, None)}
 
     # The root alone prefers the source layout; the program does not.
@@ -359,7 +359,7 @@ def test_a_reader_still_to_cut_prices_a_layout_arm_by_the_cut_recorded_on_it() -
     point = ForkPoint(match=match, options=options, root_op=root.op.with_io(graph, root), ctx=ctx)
     source = next(option for option in options if option.knobs.get("LAYOUT@w") == "source").materialize()
     node = next(node for node in source.nodes.values() if isinstance(node.op, TileOp))
-    index = _Measured({node.op.with_io(source, node).identity_key(structural=False, with_io=True): [({"WORK": "t32"}, 5.0)]}, {})
+    index = _Measured({node.op.with_io(source, node).identity_key(structural=False, with_io=True): {(): [({"WORK": "t32"}, 5.0)]}}, {})
     # The root in the source layout and the reader's cut are measured; the root folded is not.
     assert [(option.knobs, us) for option, us in _layout_candidates(point, index, db)] == [({"LAYOUT@w": "source"}, 15.0)]
 

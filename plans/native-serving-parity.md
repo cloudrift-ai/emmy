@@ -355,6 +355,13 @@ What the session changes for the milestones:
    0.460 / 0.460. Decode attention, priced at 512 too, got slower at long windows, which 6 owns: the verify step at
    197,632 positions takes 95.6 ms, 75 ms of it attention, so TPOT there went from 26.5 to 42.9 ms.
 
+   Gated again on a rented x16 RTX 5090 on 2026-11-07 with attention priced per window range (#1352; both
+   DISCOVERYs), missed. The attention term is 200 s against 117 s, the 197,632-token first token 318 s (TPOT 23.7
+   ms), the full window's 505 s against 450 s; the cells within 4,096 positions are unchanged. What is left is the
+   kernel: every attention fold runs at 255 registers with local-memory spills and 17% occupancy, and the 64-row chunk
+   takes 5.1 ms at 131,072 positions where one cache read per query head at bandwidth is under 1 ms. The unstaged
+   FP8 cache is the second risk above; staging it is #1366.
+
 6. **Long-window decode attention: one cache read per key-value group, a combine that does not rescan the
    window.** The 27B step grows +48 ms from 7,680 to 197,632 positions; stock grows +4. Two named causes: the
    attention program runs per query head, so each key-value head's cache is read six times, and the partial
@@ -387,6 +394,13 @@ What the session changes for the milestones:
    row, the fastest key split is 8 slices at 512 positions, 32 at 4,096 and 128 at 131,072, and the grouped spelling
    has a sixth (27B) or an eighth (Qwen3.6) of the per-head spelling's CTAs per split width, so one pick at the
    512-token hint underfills the card at 197,632. The four programs record at both window prices.
+
+   Recorded at both prices and gated on 2026-11-07 (#1352), missed. The 27B's verify step takes 60.7 ms at 197,632
+   positions, 39.6 ms of it attention, against 21.9 ms at the 4,096 window: +38.9 ms against ~8 (+73.7 before). At
+   131,072 the one-row twin splits 64 ways in 581 us (27B) and 413 us (Qwen3.6), reading its cache at about a quarter
+   of bandwidth; a 128-way split measured faster on every decode and verify twin, and no compile offers it (the
+   ledger's 2026-11-07 item). Qwen3.6's window step was not served: a prompt that reaches the long range prefills for
+   over an hour.
 
 7. **The width-3 Gated DeltaNet step toward its floor.** gdn3rows is 14.3 ms against a 6.9 ms floor after #1282:
    the weight readers run 1.0-1.4 TB/s, the same readers the one-row program runs 5-10 us faster (qkv 38.4 us for
@@ -729,7 +743,8 @@ measured rows it may be too slow to use, and onboarding it is its own task, not 
   its kernels and gains rows at a second binding, and the long price benches through `emmy run --golden` directly,
   with no pinned pack. One price at a long window was rejected: on the 4080 the best one-row key split moves 4x
   between 4,096 and 131,072 positions (#1329), so the short cells would pay. Two ranges first; the boundary comes from
-  the card's measurements. 5's prefill and 6's decode both take it.
+  the card's measurements. 5's prefill and 6's decode both take it. Landed with #1352: priced at 4,096 and 131,072,
+  the long range from 16,384, where its picks stop losing in the 27B's verify step on the RTX 5090.
 - **Prefix caching stays out** of every comparison and out of the batching scope, as the measured sessions ran
   (`--no-enable-prefix-caching` on stock).
 - **Two promotions, not one.** The single-request promotion (17) does not wait for batching: the stretch's
@@ -810,7 +825,17 @@ Open items:
   route, a score cut and a 16-way key split, takes 4.3 ms a layer at 197,632 positions, 75 ms of a 95.6 ms step. Not
   measured: whether a wider split or another route wins at long windows; `emmy run --golden --kernel` benches a
   kernel at its stored bindings only. 5 and 6 both need picks that hold at the windows their gates name. Decided:
-  attention is priced per window range (Decisions).
+  attention is priced per window range (Decisions). Closed by #1352, which also found that every prefill attention row
+  before it was a position-zero time (a bench drew the chunk's position near zero) and that a compile ranked a kernel
+  at one size by its rows at another.
+- (2026-11-07, #1352) Key splits stop at 64 ways (`SPLITK_WIDTHS`). At 131,072 positions a 128-way split measured
+  faster on every decode and verify twin (27B one row 475 against 581 us, Qwen3.6 286 against 413) and no compile can
+  deploy it; offering it moves every split fork's ballot. Not decided.
+- (2026-11-07, #1352) A split's finalize piece keeps its parent's axis table, whose cache-size axes carry the default
+  hint, so its rows sit at 512 cached tokens whatever the window it was recorded at. On a stored kernel the re-hint
+  never reaches those axes: a statement rebuild keeps an axis whose hint alone changed, since a hint takes no part in
+  equality. Harmless to the picks, which compute the same 512, and to a golden walk, which counts a row at every size
+  of its target when its kernel's buffers name none of the row's sizes. Not fixed.
 - (2026-11-06) The 27B's native server leaves a median 2.6 ms between a prompt's 64-row chunk launches on an idle host
   (nsys at 7,680 tokens), about 8 s of the 197,632-token first token, and 3.7 ms while exports compiled on the host.
   Not investigated.

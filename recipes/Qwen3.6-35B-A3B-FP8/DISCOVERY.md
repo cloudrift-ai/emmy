@@ -1,5 +1,35 @@
 # Qwen3.6-35B-A3B-FP8 discovery
 
+## Attention priced per range of windows (2026-11-07)
+
+Native attention now compiles once per range of windows, priced at 4,096 and at 131,072 cached tokens, the long range
+from 16,384 (#1352, on #1329's grouped decode attention). Recorded on the card and with the protocol of the 27B's
+2026-11-07 section (fast math off); the pack exports under strict evidence and `emmy eval golden` deploys every twin
+from the golden rows alone.
+
+| twin | at 4,096 | at 131,072 |
+|---|---|---|
+| `attend1` (decode) | g32k, 18.0 µs | g64k, 413 µs |
+| `attend3` (verify) | g32k, 29.3 µs | g64k, 815 µs |
+| `attend4` | g8k, 129 µs | g64k, 4,954 µs |
+| `attend64` (chunk) | g8k, 137 µs | g32k, 3,594 µs |
+
+| | this branch | 2026-11-06 (main) |
+|---|---|---|
+| TPOT / TTFT, 256-token prompt | 20.9 ms / 5.58 s | 20.5 ms / 6.12 s |
+| first token, 257-token prompt | 5.62 s | 6.16 s |
+| TPOT / TTFT, 7,680-token prompt | 21.2 ms / 167 s | 21.7 ms / 185 s |
+| drafts accepted at 256 / 7,680 | 75 / 85% | 80 / 73% |
+| device memory at rest | 23.0 GiB | 23.0 GiB |
+
+- **The short cells.** The drafted step takes 51.1 ms at 256 tokens against about 53 ms on 2026-11-06, and 55.9 ms at
+  7,680 against about 53.4 ms (+5%); both prompts get their first token sooner. TPOT follows the drafts accepted, which
+  the attention's numerics move on these prompts.
+- **The window step was not served.** A prompt that reaches the long range takes more than an hour to prefill here
+  (7,385 s at 261,632 tokens on 2026-11-01), so the verify step at a long window is read from its twin: its attention
+  takes 815 µs a layer at 131,072 positions against 29.3 µs at 4,096. g128k measured 691 µs there, and the compiler
+  offers splits up to g64k.
+
 ## The gates of milestones 4 and 5 (2026-11-06)
 
 The parity plan's milestone 4 (prefill ends at the prompt's last token) and the numerics half of milestone 5 (the folded

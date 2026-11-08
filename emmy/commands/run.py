@@ -994,7 +994,7 @@ def _targets_in_build_order(document, target_rows) -> list[tuple[str, dict, str,
             dict(pins),
             target,
         )
-        for (target, pins), rows in target_rows.items()
+        for (target, pins, _), rows in target_rows.items()
     ]
     traced = {kernel.ref: kernel.traced for kernel in document.targets()}
     ctx = Context.from_target(tuple(document.compute_cap), gpu_name=document.gpu_name or None)
@@ -3127,6 +3127,16 @@ def _random_input_values(rng, shape, dtype, *, name: str | None = None):
     return rng.standard_normal(shape, dtype=np.float32)
 
 
+def _chunk_position(graph, static) -> int | None:
+    """The ``position`` a bench gives a native step's program, whose rows start there in its cache (``q``, ``keys``):
+    the window's last chunk, the one its attention is priced for. Drawn at random the rows sit at the cache's start,
+    where a causal chunk stops after a few keys, and its time says nothing of the window. ``None`` for any other
+    program; ``static`` gives a shape's sizes at the bench's bindings."""
+    if not {"q", "keys", "position"} <= graph.nodes.keys():
+        return None
+    return static(graph.nodes["keys"].output.shape)[0] - static(graph.nodes["q"].output.shape)[0]
+
+
 async def bench_lowered_vs_torch(
     frontend,
     lowered,
@@ -3223,9 +3233,12 @@ async def bench_lowered_vs_torch(
 
     input_data: dict[str, object] = {}
     input_tensors: dict[str, object] = {}
+    position = _chunk_position(lowered, _static)
     for nid, node in lowered.nodes.items():
         if isinstance(node.op, InputOp):
             arr = _random_input_values(rng, _static(node.output.shape), node.output.dtype, name=nid)
+            if nid == "position" and position is not None:
+                arr = np.full(arr.shape, position)
             # Keep the ndarray shape (no flatten) — a symbolic graph's launch
             # reads the runtime seq_len off the input array's shape.
             input_data[nid] = arr
