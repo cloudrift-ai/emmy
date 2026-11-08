@@ -117,14 +117,12 @@ pub fn mask_select_predicate(select: &Select) -> Option<Expression> {
         return None;
     }
     let (keep, mask) = (&select.branches[0], &select.branches[1]);
-    let (
-        Expr::Binary(keep_op, keep_left, keep_right),
-        Expr::Binary(mask_op, mask_left, mask_right),
-    ) = (&*keep.select, &*mask.select)
+    let (Some((keep_op, keep_left, keep_right)), Some((mask_op, mask_left, mask_right))) =
+        (keep.select.as_binary(), mask.select.as_binary())
     else {
         return None;
     };
-    let (mut op, mut left, mut right) = (*mask_op, mask_left.clone(), mask_right.clone());
+    let (mut op, mut left, mut right) = (mask_op, mask_left.clone(), mask_right.clone());
     if *keep_left == right && *keep_right == left {
         op = op.mirror()?;
         std::mem::swap(&mut left, &mut right);

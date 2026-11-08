@@ -78,7 +78,7 @@ pub(super) fn simplify_binary(
                 return Ok(Expression::int(0));
             }
             if let Some(n) = right.int_literal().filter(|n| *n > 1) {
-                if let Expr::Binary(inner_op, inner_left, inner_right) = &*left
+                if let Some((inner_op, inner_left, inner_right)) = left.as_binary()
                     && inner_op.is_division()
                     && let Some(Lit { value, dtype }) = inner_right.as_literal()
                     && *dtype == LitType::Int
@@ -171,7 +171,7 @@ pub(super) fn multiplicative_factors(expression: &Expression) -> (Vec<Expression
     {
         return (vec![], value.as_int().unwrap_or(0));
     }
-    if let Expr::Binary(Operation::Multiply, left, right) = &**expression {
+    if let Some((Operation::Multiply, left, right)) = expression.as_binary() {
         let (mut lf, lk) = multiplicative_factors(left);
         let (rf, rk) = multiplicative_factors(right);
         if let Some(k) = lk.checked_mul(rk) {
@@ -278,7 +278,7 @@ pub(super) fn cancel_common_factors(
 }
 
 pub(super) fn addend_chain(e: &Expression, out: &mut Vec<Expression>) {
-    if let Expr::Binary(Operation::Add, l, r) = &**e {
+    if let Some((Operation::Add, l, r)) = e.as_binary() {
         addend_chain(l, out);
         addend_chain(r, out);
     } else {
@@ -291,7 +291,8 @@ pub(super) fn addend_chain(e: &Expression, out: &mut Vec<Expression>) {
 pub(super) fn scaled_term(e: &Expression, ops: &[Operation]) -> Option<(Expression, i64, i64)> {
     let mut a = 1;
     let mut e = e.clone();
-    if let Expr::Binary(Operation::Multiply, left, right) = &*e.clone() {
+    let scaled = e.clone();
+    if let Some((Operation::Multiply, left, right)) = scaled.as_binary() {
         for (lit_side, other) in [(right, left), (left, right)] {
             if let Some(value) = lit_side.int_literal().filter(|v| *v > 0) {
                 a = value;
@@ -300,8 +301,8 @@ pub(super) fn scaled_term(e: &Expression, ops: &[Operation]) -> Option<(Expressi
             }
         }
     }
-    if let Expr::Binary(op, left, right) = &*e
-        && ops.contains(op)
+    if let Some((op, left, right)) = e.as_binary()
+        && ops.contains(&op)
         && let Some(c) = right.int_literal().filter(|c| *c > 1)
     {
         return Some((left.clone(), c, a));
@@ -362,7 +363,7 @@ pub(super) fn div_mod_decompose(
             Expression::int(value.rem_euclid(n)),
         )));
     }
-    if let Expr::Binary(Operation::Multiply, left, right) = &**expression {
+    if let Some((Operation::Multiply, left, right)) = expression.as_binary() {
         for (k_side, other_side) in [(right, left), (left, right)] {
             let Some(k) = k_side.int_literal().filter(|k| *k > 0) else {
                 continue;
@@ -393,7 +394,7 @@ pub(super) fn div_mod_decompose(
             }
         }
     }
-    if let Expr::Binary(Operation::Add, left, right) = &**expression {
+    if let Some((Operation::Add, left, right)) = expression.as_binary() {
         let mut l = div_mod_decompose(left, n, ctx)?;
         let mut r = div_mod_decompose(right, n, ctx)?;
         if let Some((_, rl)) = &l
@@ -426,7 +427,7 @@ pub(super) fn div_mod_decompose(
     {
         return Ok(Some((Expression::int(0), expression.clone())));
     }
-    if let Expr::Binary(op, left, divisor) = &**expression
+    if let Some((op, left, divisor)) = expression.as_binary()
         && op.is_division()
         && let Some(d) = divisor.int_literal().filter(|d| *d > 0)
         && let Some(nd) = n.checked_mul(d)
@@ -434,7 +435,7 @@ pub(super) fn div_mod_decompose(
     {
         return Ok(Some((
             q_inner,
-            Expression::binary(*op, r_inner, divisor.clone()).simplify(ctx)?,
+            Expression::binary(op, r_inner, divisor.clone()).simplify(ctx)?,
         )));
     }
     Ok(None)
@@ -551,13 +552,15 @@ pub fn affine_form(
     if !uses(expression) {
         return Some((expression.clone(), BTreeMap::new()));
     }
-    match &**expression {
-        Expr::Var(name) => Some((Expression::int(0), BTreeMap::from([(*name, 1)]))),
-        Expr::Binary(op @ (Operation::Add | Operation::Subtract), left, right) => {
+    if let Expr::Var(name) = &**expression {
+        return Some((Expression::int(0), BTreeMap::from([(*name, 1)])));
+    }
+    match expression.as_binary() {
+        Some((op @ (Operation::Add | Operation::Subtract), left, right)) => {
             let (l_anchor, l_coeffs) = affine_form(left, vars)?;
             let (r_anchor, r_coeffs) = affine_form(right, vars)?;
-            let sign = if *op == Operation::Add { 1 } else { -1 };
-            let anchor = Expression::binary(*op, l_anchor, r_anchor);
+            let sign = if op == Operation::Add { 1 } else { -1 };
+            let anchor = Expression::binary(op, l_anchor, r_anchor);
             let mut coeffs = l_coeffs;
             for (v, c) in r_coeffs {
                 let sum = coeffs
@@ -570,7 +573,7 @@ pub fn affine_form(
             coeffs.retain(|_, c| *c != 0);
             Some((anchor, coeffs))
         }
-        Expr::Binary(Operation::Multiply, left, right) => {
+        Some((Operation::Multiply, left, right)) => {
             let (l_uses, r_uses) = (uses(left), uses(right));
             if l_uses && r_uses {
                 return None;

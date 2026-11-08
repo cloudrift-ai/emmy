@@ -2,7 +2,7 @@
 //! extends with the statement punctuation.
 
 use super::{Builtin, CastTarget, Expr, Expression, Lit, LitType, Num, python_repr};
-use crate::elementwise::{ElementwiseOp, Operation};
+use crate::elementwise::Operation;
 use crate::{Error, Result};
 
 // --- the reader -----------------------------------------------------------------------------------
@@ -359,11 +359,7 @@ impl Parser {
                 }
                 if self.accept("(") {
                     let args = self.expressions(")")?;
-                    // A call of a known operation is the node the constructors build: one operation, one node.
-                    if let ElementwiseOp::Known(op) = ElementwiseOp::new(&token.text) {
-                        return Ok(Expression::apply(op, args));
-                    }
-                    return Ok(Expression::new(Expr::Call(token.text.into(), args.into())));
+                    return Ok(Expression::call(&token.text, args));
                 }
                 if self.accept("[") {
                     let index = self.expressions("]")?;
@@ -502,10 +498,7 @@ mod tests {
             ),
             (binary("//", var("a"), int(2)), "a // 2"),
             (
-                Expression::new(Expr::Call(
-                    "maximum".into(),
-                    vec![var("x"), float(0.0)].into(),
-                )),
+                Expression::call("maximum", vec![var("x"), float(0.0)]),
                 "maximum(x, 0.0)",
             ),
             (ternary(var("p"), int(1), int(0)), "p ? 1 : 0"),

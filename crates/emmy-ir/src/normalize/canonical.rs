@@ -7,7 +7,7 @@ use std::sync::Arc;
 use super::ties;
 use super::{carried_out, unify_siblings, with_bodies};
 use crate::body::{Body, free_names, unique};
-use crate::elementwise::{AffineRole, Operation};
+use crate::elementwise::{AffineRole, ElementwiseOp, Operation};
 use crate::expr::{Expr, Expression, LitType, SimplifyCtx, affine_form};
 use crate::numbering::{Chains, Key, Numbering, roles, statement_tree, value_numbers};
 use crate::order::ordering_constraints;
@@ -296,8 +296,11 @@ fn affine(expression: Expression, axis_order: &HashMap<Name, usize>) -> Result<E
 /// `e` canonicalized: comparisons as `<` and `<=`, commutative operands ordered, sums in affine form.
 fn rewrite(e: &Expression, axis_order: &HashMap<Name, usize>) -> Result<Expression> {
     Ok(match &**e {
-        Expr::Binary(op, left, right) => {
-            let (mut left, mut right) = (rewrite(left, axis_order)?, rewrite(right, axis_order)?);
+        Expr::Apply(ElementwiseOp::Known(op), args) if op.infix().is_some() && args.len() == 2 => {
+            let (mut left, mut right) = (
+                rewrite(&args[0], axis_order)?,
+                rewrite(&args[1], axis_order)?,
+            );
             let mut op = *op;
             if matches!(op, Operation::Greater | Operation::GreaterEqual)
                 && let Some(mirrored) = op.mirror()
@@ -320,10 +323,10 @@ fn rewrite(e: &Expression, axis_order: &HashMap<Name, usize>) -> Result<Expressi
                 result
             }
         }
-        Expr::Call(name, args) => {
+        Expr::Apply(op, args) => {
             let args: Result<Vec<Expression>> =
                 args.iter().map(|a| rewrite(a, axis_order)).collect();
-            Expression::new(Expr::Call(*name, args?.into()))
+            Expression::new(Expr::Apply(op.clone(), args?.into()))
         }
         Expr::Ternary(a, b, c) => Expression::new(Expr::Ternary(
             rewrite(a, axis_order)?,
@@ -383,10 +386,10 @@ pub(crate) fn value_canonical(e: &Expression, rank: &dyn Fn(&Name) -> Key) -> Ex
     let Some((op, args)) = e.operation() else {
         return e;
     };
-    if affine_node(op, &args) {
+    if affine_node(op, args) {
         return affine_value(&e, rank);
     }
-    if let [left, right] = &args[..] {
+    if let [left, right] = args {
         let (mut op, mut left, mut right) = (op, left.clone(), right.clone());
         if matches!(op, Operation::Greater | Operation::GreaterEqual)
             && let Some(mirrored) = op.mirror()
@@ -465,7 +468,7 @@ pub fn affine_terms(e: &Expression) -> AffineTerms {
             return;
         }
         if let Some((op, args)) = e.operation() {
-            match (op.info().affine, &args[..]) {
+            match (op.info().affine, args) {
                 (Some(AffineRole::Sum), [a, b]) => {
                     collect(a, scale, out);
                     collect(b, scale, out);

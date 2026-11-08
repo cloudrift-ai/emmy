@@ -38,9 +38,13 @@ of a body's normal form). Every file imports what it uses by name; no child modu
   material and not a name (a body's text, a statement's spelling, an axis header) is a `Key::Text`, which hashes the
   same bytes and is kept by no table. A lowering mints names a body at a time; the A100 golden's fresh lowering and the
   corpus together intern some twenty thousand.
-- **Expressions** (`expr/`): eight expression types declared once in the `with_exprs!` macro (the variant, its Python
+- **Expressions** (`expr/`): seven expression types declared once in the `with_exprs!` macro (the variant, its Python
   class and its fields), which generates the `enum Expr`, the walks every expression type answers through its fields
-  (children, height, the rebuilds) and, in the extension, the classes with a getter per field; the printer and the
+  (children, height, the rebuilds) and, in the extension, the classes with a getter per field. An operation over its
+  operands is one node, `Apply(ElementwiseOp, args)`, whether the table knows the operation or only a renderer does,
+  and whether the text spells it as an operator or a call is the printer's concern; Python sees an operator over two
+  operands as `BinaryExpression` (`op`, `left`, `right`) and every other application as `FunctionCallExpression`
+  (`name`, `args`), two views over the one node. The printer and the
   reader (exact inverses, the text being the one wire and structural form), substitution, renaming, the simplifier under
   a `SimplifyCtx` of ranges and symbolic bounds, the range analysis, the affine form. A literal keeps Python's number
   model (`Num`: int, float or bool, equal by value) because a stored kernel's text spells it that way, and is typed by a
@@ -50,8 +54,7 @@ of a body's normal form). Every file imports what it uses by name; no child modu
   (the table's, and a spelling only a renderer knows) over any operand (SSA names, axes, GPU built-ins, literals of any
   type, select, cast, a buffer's flat index), and `Index` is its restriction to integer arithmetic over integer operands
   (the affine operations, division and remainder, minimum and maximum, the comparisons and logical operators, the
-  bitwise operators and shifts). In either, an operation node spells its operation one way: a `Binary` holds an
-  operation with an infix and a `Call` never names one. Every expression field declares the class it admits beside its
+  bitwise operators and shifts). Every expression field declares the class it admits beside its
   roles (`index: Exprs [EXPRESSION | READS] : Index`, a record's fields their own), a field has a class exactly when it
   plays `EXPRESSION`, and construction refuses a value outside it, naming the field. The text spells an operator by
   its infix, a negation as the prefix `-x` (over a literal it stays the call `negative(3.0)`, which the reader would

@@ -180,11 +180,11 @@ def test_a_kernel_row_is_written_once_and_read_back_under_its_key() -> None:
 #: a contraction and a piece formed from no loop op. Re-pinning a changed corpus body does not change the DB version.
 _PINNED_IDENTITIES = {
     ("reduce/cross-cta-sum-kernel.json", "k_sum_1_reduce"): "aee18fd8b70ef8deb26b624698c57faa",
-    ("reduce/cross-cta-sum-kernel.json", "k_sum_1_reduce__partial"): "900bdd27b260b9f1ddf1fa3026eba4a8",
-    ("reduce/online-softmax-4x128.json", "k_softmax_77dd65"): "7e8ca233a3fd4b3dba2e5008f90d37e9",
-    ("attention/sdpa-hd128-softmax-v-mma.json", "k_sdpa_441e96"): "bfe61ad0f19867b9ba95e18872fde838",
-    ("matmul/bf16-mma-sm120.json", "k_matmul_7325d9"): "b8603217595622c88e41e47c31f5aca9",
-    ("fused/nvfp4-gate-up-requant-place-cut.json", "k_linear_reduce_105826#2"): "1152859783e124a0d11d0c8aa467a789",
+    ("reduce/cross-cta-sum-kernel.json", "k_sum_1_reduce__partial"): "5f232e36087fff038391e6ab2cf507b3",
+    ("reduce/online-softmax-4x128.json", "k_softmax_77dd65"): "ea100f2bf3e9834ebcb885c6a8eda692",
+    ("attention/sdpa-hd128-softmax-v-mma.json", "k_sdpa_441e96"): "388320db81f43719005e2d712dde4e1b",
+    ("matmul/bf16-mma-sm120.json", "k_matmul_7325d9"): "e8ff6ba24c8e9ad7eb80f141616ade27",
+    ("fused/nvfp4-gate-up-requant-place-cut.json", "k_linear_reduce_105826#2"): "0efad66564284a1fd8bf2a90b9487d5a",
 }
 
 

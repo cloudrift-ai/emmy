@@ -152,15 +152,9 @@ pub fn expression_key(e: &Expression, leaf: &mut dyn FnMut(&Expression) -> Optio
         Expr::Builtin(builtin) => {
             Key::tuple([Key::str(ExprType::Builtin.text()), Key::str(builtin.text())])
         }
-        Expr::Binary(op, l, r) => Key::tuple([
-            Key::str(ExprType::Binary.text()),
-            Key::str(op.spelling()),
-            expression_key(l, leaf),
-            expression_key(r, leaf),
-        ]),
-        Expr::Call(name, args) => Key::tuple([
-            Key::str(ExprType::Call.text()),
-            Key::Str(*name),
+        Expr::Apply(op, args) => Key::tuple([
+            Key::str(ExprType::Apply.text()),
+            Key::str(op.name()),
             Key::Tuple(args.iter().map(|a| expression_key(a, leaf)).collect()),
         ]),
         Expr::Ternary(a, b, c) => Key::tuple([

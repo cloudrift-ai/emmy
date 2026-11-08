@@ -41,9 +41,9 @@ impl PyExprField for Name {
     }
 }
 
-impl PyExprField for Operation {
+impl PyExprField for ElementwiseOp {
     fn to_py(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
-        Ok(PyString::new(py, self.spelling()).into_any().unbind())
+        Ok(PyString::new(py, self.name()).into_any().unbind())
     }
 }
 
@@ -95,6 +95,10 @@ macro_rules! define_py_exprs {
             pub fn wrap<'py>(py: Python<'py>, expr: &Expression) -> PyResult<Bound<'py, PyAny>> {
                 let base = PyClassInitializer::from(PyExpression::base(expr.clone())?);
                 Ok(match &**expr {
+                    // An operator over two operands is the `BinaryExpression` view of the one `Apply` node.
+                    Expr::Apply(..) if expr.as_binary().is_some() => {
+                        Bound::new(py, base.add_subclass(PyBinaryExpression))?.into_any()
+                    }
                     $( Expr::$Variant(..) => Bound::new(py, base.add_subclass($Py))?.into_any(), )*
                 })
             }
@@ -102,6 +106,7 @@ macro_rules! define_py_exprs {
 
         fn register_classes(m: &Bound<'_, PyModule>) -> PyResult<()> {
             $( m.add_class::<$Py>()?; )*
+            m.add_class::<PyBinaryExpression>()?;
             Ok(())
         }
     };
@@ -126,6 +131,29 @@ macro_rules! define_py_exprs {
                 base.slot(slf.py(), 1, || {
                     Ok(PyString::new(slf.py(), lit.dtype.text()).into_any().unbind())
                 })
+            }
+        }
+    };
+    (@getters Apply $Py:ident $name:literal $fields:tt $all:tt) => {
+        #[pymethods]
+        impl $Py {
+            /// The operation's name: the table's, or the spelling only a renderer knows.
+            #[getter]
+            fn name<'py>(slf: &Bound<'py, Self>) -> PyResult<Bound<'py, PyAny>> {
+                let base = slf.as_super().get();
+                let Expr::Apply(op, _) = &*base.expr else {
+                    return Err(expr_type_error($name));
+                };
+                base.slot(slf.py(), 0, || PyExprField::to_py(op, slf.py()))
+            }
+
+            #[getter]
+            fn args<'py>(slf: &Bound<'py, Self>) -> PyResult<Bound<'py, PyAny>> {
+                let base = slf.as_super().get();
+                let Expr::Apply(_, args) = &*base.expr else {
+                    return Err(expr_type_error($name));
+                };
+                base.slot(slf.py(), 1, || PyExprField::to_py(args, slf.py()))
             }
         }
     };
@@ -368,20 +396,17 @@ impl PyExpression {
     /// index.
     #[getter]
     fn operation(&self, py: Python<'_>) -> PyResult<Option<Py<PyAny>>> {
-        let op = match &*self.expr {
-            Expr::Binary(op, ..) => ElementwiseOp::Known(*op),
-            Expr::Call(name, _) => ElementwiseOp::new(name),
-            _ => return Ok(None),
+        let Expr::Apply(op, _) = &*self.expr else {
+            return Ok(None);
         };
-        Ok(Some(op_to_py(py, &op)?.unbind()))
+        Ok(Some(op_to_py(py, op)?.unbind()))
     }
 
     /// The operands of an operation node, in order; empty for any other node.
     #[getter]
     fn operands<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyTuple>> {
         let operands: Vec<Expression> = match &*self.expr {
-            Expr::Binary(_, left, right) => vec![left.clone(), right.clone()],
-            Expr::Call(_, args) => args.to_vec(),
+            Expr::Apply(_, args) => args.to_vec(),
             _ => vec![],
         };
         let items: PyResult<Vec<Bound<'py, PyAny>>> =
@@ -514,6 +539,21 @@ impl PyBuiltin {
     }
 }
 
+/// An operator of the table over two operands: the view Python takes of an `Apply` node whose operation has an infix
+/// spelling and two operands, with the operator's spelling and its two sides as fields.
+#[pyclass(extends = PyExpression, frozen, module = "emmy.compiler.ir.expression", name = "BinaryExpression")]
+pub struct PyBinaryExpression;
+
+impl PyBinaryExpression {
+    fn sides(slf: &Bound<'_, Self>) -> PyResult<(Operation, Expression, Expression)> {
+        let base = slf.as_super().get();
+        let Some((op, left, right)) = base.expr.as_binary() else {
+            return Err(expr_type_error("BinaryExpression"));
+        };
+        Ok((op, left.clone(), right.clone()))
+    }
+}
+
 #[pymethods]
 impl PyBinaryExpression {
     #[new]
@@ -528,13 +568,35 @@ impl PyBinaryExpression {
         Ok(PyClassInitializer::from(PyExpression::base(expr)?).add_subclass(PyBinaryExpression))
     }
 
+    /// The operator's spelling (`+`, `//`, `<`).
+    #[getter]
+    fn op<'py>(slf: &Bound<'py, Self>) -> PyResult<Bound<'py, PyAny>> {
+        let (op, _, _) = Self::sides(slf)?;
+        slf.as_super().get().slot(slf.py(), 0, || {
+            Ok(PyString::new(slf.py(), op.spelling()).into_any().unbind())
+        })
+    }
+
+    #[getter]
+    fn left<'py>(slf: &Bound<'py, Self>) -> PyResult<Bound<'py, PyAny>> {
+        let (_, left, _) = Self::sides(slf)?;
+        slf.as_super()
+            .get()
+            .slot(slf.py(), 1, || PyExprField::to_py(&left, slf.py()))
+    }
+
+    #[getter]
+    fn right<'py>(slf: &Bound<'py, Self>) -> PyResult<Bound<'py, PyAny>> {
+        let (_, _, right) = Self::sides(slf)?;
+        slf.as_super()
+            .get()
+            .slot(slf.py(), 2, || PyExprField::to_py(&right, slf.py()))
+    }
+
     /// How tightly the operator binds; the renderer parenthesizes by it.
     #[getter]
     fn precedence(slf: &Bound<'_, Self>) -> PyResult<u8> {
-        let Expr::Binary(op, ..) = &*slf.as_super().get().expr else {
-            return Err(expr_type_error("BinaryExpression"));
-        };
-        Ok(op.precedence())
+        Ok(Self::sides(slf)?.0.precedence())
     }
 }
 
@@ -546,7 +608,9 @@ impl PyFunctionCallExpression {
             .try_iter()?
             .map(|item| expression_from_py(&item?))
             .collect();
-        let expr = Expression::new(Expr::Call(name.into(), args?.into()));
+        // The class is the view the caller asked for: a renderer builds a call of an operator on purpose, to spell it
+        // as the target's intrinsic.
+        let expr = Expression::call(name, args?);
         Ok(PyClassInitializer::from(PyExpression::base(expr)?)
             .add_subclass(PyFunctionCallExpression))
     }
@@ -756,10 +820,7 @@ pub fn apply(
         .iter()
         .map(|item| expression_from_py(&item))
         .collect::<PyResult<_>>()?;
-    let expr = match ElementwiseOp::new(&name) {
-        ElementwiseOp::Known(op) => Expression::apply(op, operands),
-        ElementwiseOp::Other(_) => Expression::new(Expr::Call(Name::new(&name), operands.into())),
-    };
+    let expr = Expression::call(&name, operands);
     Ok(PyExpression::wrap(py, &expr)?.unbind())
 }
 
@@ -850,7 +911,7 @@ pub fn affine_node(expression: &Bound<'_, PyAny>) -> PyResult<bool> {
     let expression = expression_from_py(expression)?;
     Ok(expression
         .operation()
-        .is_some_and(|(op, args)| emmy_ir::normalize::affine_node(op, &args)))
+        .is_some_and(|(op, args)| emmy_ir::normalize::affine_node(op, args)))
 }
 
 /// `expression` as `(its integer anchor, the rest)`, or `None`.

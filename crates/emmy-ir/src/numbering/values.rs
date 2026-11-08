@@ -170,7 +170,7 @@ impl Context<'_> {
             if op.info().associative && self.chains == Chains::Flat {
                 associative_terms(e, op, &mut terms);
             } else {
-                terms = args;
+                terms = args.to_vec();
             }
             // Each side is keyed once, into parameter, operand and resource lists of its own, and the sides are
             // laid into this node's lists in the order of what they compute: a parameter or resource first met
@@ -221,17 +221,13 @@ impl Context<'_> {
                 }
             }
             return Key::tuple([
-                Key::str(ExprType::Binary.text()),
-                Key::str(op.spelling()),
+                Key::str(ExprType::Apply.text()),
+                Key::str(op.text()),
                 Key::Tuple(keys),
             ]);
         }
         match &**e {
-            Expr::Binary(..)
-            | Expr::Call(..)
-            | Expr::Ternary(..)
-            | Expr::Cast(..)
-            | Expr::FlatIndex(..)
+            Expr::Apply(..) | Expr::Ternary(..) | Expr::Cast(..) | Expr::FlatIndex(..)
                 if !(self.reads_axis(e) && self.coordinate_only(e)) =>
             {
                 let children: Vec<Key> = e
@@ -240,10 +236,9 @@ impl Context<'_> {
                     .map(|child| self.value_key(child, params, ops, touched))
                     .collect();
                 let head = match &**e {
-                    Expr::Binary(op, ..) => {
-                        vec![Key::str(ExprType::Binary.text()), Key::str(op.spelling())]
+                    Expr::Apply(op, _) => {
+                        vec![Key::str(ExprType::Apply.text()), Key::str(op.name())]
                     }
-                    Expr::Call(name, _) => vec![Key::str(ExprType::Call.text()), Key::Str(*name)],
                     Expr::Ternary(..) => vec![Key::str(ExprType::Ternary.text())],
                     Expr::Cast(target, _) => vec![
                         Key::str(ExprType::Cast.text()),
@@ -963,7 +958,7 @@ fn placeholder(spellings: &mut Vec<(Name, String)>, spelling: String) -> Name {
 fn associative_terms(e: &Expression, op: Operation, out: &mut Vec<Expression>) {
     match e.operation() {
         Some((nested, args)) if nested == op && args.len() == 2 => {
-            for arg in &args {
+            for arg in args {
                 associative_terms(arg, op, out);
             }
         }

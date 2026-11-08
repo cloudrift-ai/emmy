@@ -96,7 +96,7 @@ fn clustered(value: &Expression, represent: &mut dyn FnMut(Operation) -> Operati
     if new == op {
         value
     } else {
-        Expression::apply(new, args)
+        Expression::apply(new, args.to_vec())
     }
 }
 

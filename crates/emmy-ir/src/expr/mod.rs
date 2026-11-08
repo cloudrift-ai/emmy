@@ -310,26 +310,6 @@ impl ExprClass {
     }
 
     fn admits(self, expression: &Expression) -> std::result::Result<(), String> {
-        // Both classes: an operation node spells its operation one way. A `Binary` holds an operation with an infix;
-        // a `Call` never names one.
-        match &**expression {
-            Expr::Binary(op, ..) if op.infix().is_none() => {
-                return Err(format!(
-                    "the operation {op} as an operator, which it has no spelling for"
-                ));
-            }
-            Expr::Call(name, _) => {
-                if let ElementwiseOp::Known(op) = ElementwiseOp::new(name)
-                    && op.infix().is_some()
-                {
-                    return Err(format!(
-                        "a call of {name}, which is spelled {}",
-                        op.spelling()
-                    ));
-                }
-            }
-            _ => {}
-        }
         match self {
             ExprClass::Value => Ok(()),
             ExprClass::Index => {
@@ -340,15 +320,10 @@ impl ExprClass {
                     Expr::Literal(lit) if lit.dtype != LitType::Float => Ok(()),
                     Expr::Literal(lit) => Err(format!("a {} literal", lit.dtype)),
                     Expr::FlatIndex(_, indices) => children(indices),
-                    Expr::Binary(op, left, right) if self.admits_operation(*op) => {
-                        self.admits(left)?;
-                        self.admits(right)
+                    Expr::Apply(ElementwiseOp::Known(op), args) if self.admits_operation(*op) => {
+                        children(args)
                     }
-                    Expr::Binary(op, ..) => Err(format!("the operation {op}")),
-                    Expr::Call(name, args) => match ElementwiseOp::new(name) {
-                        ElementwiseOp::Known(op) if self.admits_operation(op) => children(args),
-                        _ => Err(format!("a call of {name}")),
-                    },
+                    Expr::Apply(op, _) => Err(format!("the operation {op}")),
                     Expr::Ternary(cond, if_true, if_false) => {
                         self.admits(cond)?;
                         self.admits(if_true)?;
@@ -426,9 +401,10 @@ macro_rules! with_exprs {
             Literal as PyLiteral "Literal" { lit: Lit },
             /// A GPU built-in with no host form.
             Builtin as PyBuiltin "Builtin" { name: Builtin },
-            Binary as PyBinaryExpression "BinaryExpression" { op: Operation, left: Expression, right: Expression },
-            /// A call of a named function over its arguments.
-            Call as PyFunctionCallExpression "FunctionCallExpression" { name: Name, args: Arc<[Expression]> },
+            /// An operation applied to its operands: one of the table, or a name only a renderer knows. Whether it is
+            /// spelled as an operator or a call is the printer's concern; Python sees the infix two-operand nodes as
+            /// `BinaryExpression` and the rest as `FunctionCallExpression`, views over this one node.
+            Apply as PyFunctionCallExpression "FunctionCallExpression" { op: ElementwiseOp, args: Arc<[Expression]> },
             Ternary as PyTernaryExpression "TernaryExpression" { cond: Expression, if_true: Expression, if_false: Expression },
             Cast as PyCastExpression "CastExpression" { dtype: CastTarget, expression: Expression },
             /// A buffer read at a flat index: one coordinate per dimension.
@@ -456,7 +432,7 @@ pub trait ExprField: Clone {
 
 impl ExprField for Name {}
 impl ExprField for Lit {}
-impl ExprField for Operation {}
+impl ExprField for ElementwiseOp {}
 impl ExprField for Builtin {}
 impl ExprField for CastTarget {}
 
@@ -743,7 +719,31 @@ impl Expression {
     }
 
     pub fn binary(op: Operation, left: Expression, right: Expression) -> Expression {
-        Expression::new(Expr::Binary(op, left, right))
+        Expression::new(Expr::Apply(
+            ElementwiseOp::Known(op),
+            Arc::from([left, right]),
+        ))
+    }
+
+    /// A call of `name` over `args`: an operation of the table by its name, else a spelling only a renderer knows.
+    pub fn call(name: &str, args: Vec<Expression>) -> Expression {
+        match ElementwiseOp::new(name) {
+            ElementwiseOp::Known(op) => Expression::apply(op, args),
+            other => Expression::new(Expr::Apply(other, args.into())),
+        }
+    }
+
+    /// An operator node: an operation of the table with an infix spelling over its two operands.
+    pub fn as_binary(&self) -> Option<(Operation, &Expression, &Expression)> {
+        match &**self {
+            Expr::Apply(ElementwiseOp::Known(op), args) if op.infix().is_some() => {
+                match &args[..] {
+                    [left, right] => Some((*op, left, right)),
+                    _ => None,
+                }
+            }
+            _ => None,
+        }
     }
 
     /// The placeholder variable for output coordinate axis `d`.
@@ -768,29 +768,24 @@ impl Expression {
         }
     }
 
-    /// The operation this node applies, with its operands: an infix node, or a call of an operation of the table.
-    pub fn operation(&self) -> Option<(Operation, Vec<Expression>)> {
+    /// The operation of the table this node applies, with its operands; `None` for any other node, a call of a name
+    /// only a renderer knows included.
+    pub fn operation(&self) -> Option<(Operation, &[Expression])> {
         match &**self {
-            Expr::Binary(op, left, right) => Some((*op, vec![left.clone(), right.clone()])),
-            Expr::Call(name, args) => match ElementwiseOp::new(name) {
-                ElementwiseOp::Known(op) => Some((op, args.to_vec())),
-                ElementwiseOp::Other(_) => None,
-            },
+            Expr::Apply(ElementwiseOp::Known(op), args) => Some((*op, args)),
             _ => None,
         }
     }
 
-    /// `op` applied to `args`: the infix node when the operation has an infix and two operands, a left-nested chain
-    /// of it when it is associative and has more, else a call. One operation, one node: the reader builds the same.
+    /// `op` applied to `args`: one node, except that an associative operator over more than two operands is its
+    /// left-nested chain, the shape the reader gives `a + b + c`. One operation, one node: the reader builds the same.
     pub fn apply(op: Operation, args: Vec<Expression>) -> Expression {
-        if op.infix().is_some() && (args.len() == 2 || (args.len() > 2 && op.info().associative)) {
+        if op.infix().is_some() && args.len() > 2 && op.info().associative {
             let mut operands = args.into_iter();
-            if let Some(first) = operands.next() {
-                return operands.fold(first, |sum, term| Expression::binary(op, sum, term));
-            }
-            return Expression::new(Expr::Call(Name::new(op.text()), Vec::new().into()));
+            let first = operands.next().unwrap_or_else(|| Expression::int(0));
+            return operands.fold(first, |sum, term| Expression::binary(op, sum, term));
         }
-        Expression::new(Expr::Call(Name::new(op.text()), args.into()))
+        Expression::new(Expr::Apply(ElementwiseOp::Known(op), args.into()))
     }
 
     pub fn as_var(&self) -> Option<&Name> {
@@ -860,30 +855,31 @@ impl Expression {
                     out.push_str(&text);
                 }
             }
-            Expr::Binary(op, left, right) => {
+            // An operator with two operands is spelled infix; a negation as its prefix, except over a literal, which
+            // the reader would take as a signed number; every other application as a call.
+            Expr::Apply(ElementwiseOp::Known(op), args)
+                if op.infix().is_some() && args.len() == 2 =>
+            {
                 let prec = op.precedence();
                 let paren = prec < parent;
                 if paren {
                     out.push('(');
                 }
-                left.spell(prec, out)?;
+                args[0].spell(prec, out)?;
                 let _ = write!(out, " {} ", op.spelling());
-                right.spell(prec + 1, out)?;
+                args[1].spell(prec + 1, out)?;
                 if paren {
                     out.push(')');
                 }
             }
-            // A negation is spelled as its prefix, except over a literal, which the reader would take as a signed number.
-            Expr::Call(name, args)
-                if ElementwiseOp::new(name) == ElementwiseOp::Known(Operation::Negative)
-                    && args.len() == 1
-                    && !matches!(*args[0], Expr::Literal(_)) =>
+            Expr::Apply(ElementwiseOp::Known(Operation::Negative), args)
+                if args.len() == 1 && !matches!(*args[0], Expr::Literal(_)) =>
             {
                 out.push('-');
                 args[0].spell(ATOM, out)?;
             }
-            Expr::Call(name, args) => {
-                let _ = write!(out, "{name}(");
+            Expr::Apply(op, args) => {
+                let _ = write!(out, "{}(", op.name());
                 for (index, arg) in args.iter().enumerate() {
                     if index > 0 {
                         out.push_str(", ");
@@ -1032,9 +1028,14 @@ impl Expression {
             Expr::Builtin(builtin) => Err(Error::NotImplemented(format!(
                 "Builtin {builtin} is GPU-only; cannot eval"
             ))),
-            Expr::Binary(op, l, r) => apply_binop(*op, l.eval(env)?, r.eval(env)?),
-            Expr::Call(name, _) => Err(Error::NotImplemented(format!(
-                "no host evaluation of {name}"
+            Expr::Apply(ElementwiseOp::Known(op), args)
+                if op.infix().is_some() && args.len() == 2 =>
+            {
+                apply_binop(*op, args[0].eval(env)?, args[1].eval(env)?)
+            }
+            Expr::Apply(op, _) => Err(Error::NotImplemented(format!(
+                "no host evaluation of {}",
+                op.name()
             ))),
             Expr::Ternary(c, t, f) => {
                 if c.eval(env)?.truthy() {
@@ -1062,8 +1063,8 @@ impl Expression {
         match &**self {
             Expr::Var(name) => ctx.ranges.get(name).copied(),
             Expr::Literal(lit) => lit.value.int().map(|v| Interval::new(v as i128, v as i128)),
-            Expr::Binary(op, left, right) => {
-                let (la, lb) = (left.range(ctx), right.range(ctx));
+            Expr::Apply(ElementwiseOp::Known(op), args) if args.len() == 2 => {
+                let (la, lb) = (args[0].range(ctx), args[1].range(ctx));
                 let logical = matches!(
                     op,
                     Operation::Less
@@ -1117,12 +1118,16 @@ impl Expression {
     pub fn simplify(&self, ctx: &SimplifyCtx) -> Result<Expression> {
         match &**self {
             Expr::Var(_) | Expr::Literal(_) | Expr::Builtin(_) => Ok(self.clone()),
-            Expr::Binary(op, left, right) => simplify_binary(self, *op, left, right, ctx),
-            Expr::Call(name, args) => {
+            Expr::Apply(ElementwiseOp::Known(op), args)
+                if op.infix().is_some() && args.len() == 2 =>
+            {
+                simplify_binary(self, *op, &args[0], &args[1], ctx)
+            }
+            Expr::Apply(name, args) => {
                 let new: Result<Vec<Expression>> = args.iter().map(|a| a.simplify(ctx)).collect();
                 let new = new?;
                 // A copy of a value is the value: the cast a copy stood for is the definition's dtype.
-                if let ElementwiseOp::Known(op) = ElementwiseOp::new(name)
+                if let ElementwiseOp::Known(op) = name
                     && op.info().copies
                     && let [operand] = &new[..]
                 {
@@ -1130,7 +1135,7 @@ impl Expression {
                 }
                 // An operation over float literals is the literal the host computes on `f32`, as the stored kernels
                 // were folded; an integer operand stays, since its arithmetic is the index rules' business.
-                if let ElementwiseOp::Known(op) = ElementwiseOp::new(name)
+                if let ElementwiseOp::Known(op) = name
                     && !new.is_empty()
                     && let Some(values) = new
                         .iter()
@@ -1152,7 +1157,7 @@ impl Expression {
                 {
                     Ok(self.clone())
                 } else {
-                    Ok(Expression::new(Expr::Call(*name, new.into())))
+                    Ok(Expression::new(Expr::Apply(name.clone(), new.into())))
                 }
             }
             Expr::Ternary(cond, if_true, if_false) => {
@@ -1338,7 +1343,7 @@ mod tests {
             Expression::int(1),
             Expression::new(Expr::Builtin(Builtin::WarpSize)),
             Expression::binary(Operation::Add, Expression::var("x"), Expression::int(1)),
-            Expression::new(Expr::Call("f".into(), Arc::from([]))),
+            Expression::call("f", Vec::new()),
             Expression::new(Expr::Ternary(
                 Expression::var("c"),
                 Expression::int(1),
@@ -1359,8 +1364,8 @@ mod tests {
                 "Var",
                 "Literal",
                 "Builtin",
-                "Binary",
-                "Call",
+                "Apply",
+                "Apply",
                 "Ternary",
                 "Cast",
                 "FlatIndex"
@@ -1772,10 +1777,10 @@ mod tests {
             Expression::int(7),
         );
         let result = e.substitute(&placeholder_to(0, "row"));
-        let Expr::Binary(op, left, right) = &*result else {
+        let Some((op, left, right)) = result.as_binary() else {
             panic!("not a binary expression: {result}");
         };
-        assert_eq!(*op, Operation::Add);
+        assert_eq!(op, Operation::Add);
         assert_eq!(var_name(left), Some("row"));
         assert_eq!(right.literal_value(), Some(Num::Int(7)));
     }
@@ -1792,7 +1797,7 @@ mod tests {
         };
         assert_eq!(var_name(if_true), Some("col"));
         assert!(
-            matches!(&**if_false, Expr::Binary(Operation::Subtract, ..)),
+            matches!(if_false.as_binary(), Some((Operation::Subtract, ..))),
             "{if_false}"
         );
     }

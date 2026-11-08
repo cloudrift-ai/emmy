@@ -10,12 +10,12 @@ coordinates and the uniform values, folded into the predicate as the expression 
 
 from __future__ import annotations
 
-from emmy.compiler.ir.expression import BinaryExpression, Expression, Literal, Var
+from emmy.compiler.ir.expression import Expression, Literal, Var, apply
 from emmy.compiler.ir.pure.fold import Fold
 from emmy.compiler.ir.stmt import Assign, Let, Select, SelectBranch, Statement
 
-_COMPARE = {"less": "<", "less_equal": "<=", "greater": ">", "greater_equal": ">="}
-_NEGATE = {"<": ">=", "<=": ">", ">": "<=", ">=": "<"}
+#: Each ordered comparison and the comparison that is its negation.
+_NEGATED = {"less": "greater_equal", "less_equal": "greater", "greater": "less_equal", "greater_equal": "less"}
 
 
 def cell_uniform(axes, node: Fold, coord_axes: frozenset[str] | set[str]) -> frozenset[str]:
@@ -48,7 +48,7 @@ def select_masks(
     coords: dict[str, Expression] = dict(aliases)
     aliased = {name for expression in aliases.values() for name in expression.free_vars() if name in axes}
     scalars: dict[str, Expression] = {}
-    predicates: dict[str, BinaryExpression] = {}
+    predicates: dict[str, Expression] = {}
 
     def term(name: str) -> Expression | None:
         if name in coords:
@@ -66,15 +66,15 @@ def select_masks(
             return None
         return expression.substitute(terms)
 
-    def comparison(expression: Expression) -> BinaryExpression | None:
+    def comparison(expression: Expression) -> Expression | None:
         """An ordered comparison over resolved sides, as the predicate it is; ``None`` for any other value."""
         op = expression.operation
-        if op is None or op.name not in _COMPARE:
+        if op is None or op.name not in _NEGATED:
             return None
         left, right = (resolved(operand) for operand in expression.operands)
         if left is None or right is None:
             return None
-        return BinaryExpression(_COMPARE[op.name], left, right)
+        return apply(op.name, left, right)
 
     def branch(operand: Expression, name: str) -> str | None:
         """The name a select branch carries: a uniform value, a bound scalar, or a literal bound here."""
@@ -105,7 +105,7 @@ def select_masks(
             keep_name, fill_name = branch(keep, f"{name}__keep"), branch(fill, f"{name}__fill")
             if keep_name is None or fill_name is None:
                 raise ValueError("a mask branch that is no uniform value")
-            negated = BinaryExpression(_NEGATE[predicate.op], predicate.left, predicate.right)
+            negated = apply(_NEGATED[predicate.operation.name], *predicate.operands)
             branches = (SelectBranch(value=keep_name, select=predicate), SelectBranch(value=fill_name, select=negated))
             out.append(Select(name=name, branches=branches))
             return Var(name)
@@ -126,7 +126,7 @@ def select_masks(
         reads = set(stmt.deps())
         op = stmt.value.operation if isinstance(stmt, Assign) else None
         if isinstance(stmt, Assign) and reads & coords.keys():
-            if op is not None and op.name in _COMPARE:
+            if op is not None and op.name in _NEGATED:
                 predicate = comparison(stmt.value)
                 if predicate is None:
                     return None

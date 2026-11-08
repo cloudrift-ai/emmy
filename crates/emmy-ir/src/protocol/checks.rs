@@ -197,7 +197,7 @@ mod tests {
         }
         for (text, why) in [
             ("in0 = load x[a0 + 0.5]", "a float literal"),
-            ("y[exp(a0)] = v0", "a call of exp"),
+            ("y[exp(a0)] = v0", "the operation exp"),
         ] {
             let err = parse_statement(text)
                 .err()

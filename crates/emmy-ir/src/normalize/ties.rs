@@ -114,17 +114,19 @@ pub(crate) fn extent_digest(expression: &Expression) -> String {
                 format!("('Literal', {value}, {})", python_repr(lit.dtype.text()))
             }
             Expr::Builtin(builtin) => format!("('Builtin', {})", python_repr(builtin.text())),
-            Expr::Binary(op, left, right) => {
-                format!(
+            Expr::Apply(op, args) => match expression.as_binary() {
+                Some((op, left, right)) => format!(
                     "('BinaryExpr', {}, {}, {})",
                     python_repr(op.spelling()),
                     form(left),
                     form(right)
-                )
-            }
-            Expr::Call(name, args) => {
-                format!("('FuncCallExpr', {}, {})", python_repr(name), tuple(args))
-            }
+                ),
+                None => format!(
+                    "('FuncCallExpr', {}, {})",
+                    python_repr(op.name()),
+                    tuple(args)
+                ),
+            },
             Expr::Ternary(cond, yes, no) => format!(
                 "('TernaryExpr', {}, {}, {})",
                 form(cond),
@@ -247,7 +249,7 @@ pub(crate) fn sibling_category(stmt: &Statement) -> i64 {
 fn widened_load(value: &Expression, loaded: &HashSet<Name>) -> bool {
     match value.operation() {
         Some((op, args)) if op.info().copies => {
-            matches!(&args[..], [arg] if arg.as_var().is_some_and(|n| loaded.contains(n)))
+            matches!(args, [arg] if arg.as_var().is_some_and(|n| loaded.contains(n)))
         }
         Some(_) => false,
         None => value.as_var().is_some_and(|n| loaded.contains(n)),
@@ -280,7 +282,7 @@ mod tests {
             Expression::int(4096),
             Expression::new(Expr::Builtin(Builtin::WarpSize)),
             parse("n * 2").unwrap(),
-            Expression::new(Expr::Call("f".into(), Arc::from([Expression::var("n")]))),
+            Expression::call("f", vec![Expression::var("n")]),
             parse("c ? 1 : 2").unwrap(),
             Expression::new(Expr::Cast(
                 CastTarget::Known(LitType::Int),
