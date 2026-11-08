@@ -860,6 +860,29 @@ for r in 0..4:
         );
     }
 
+    /// A one-step accumulator whose base names a sibling accumulator updated later in the step reads that sibling's
+    /// seed, as the loop's first step did: the product with a zero-seeded sum's start is zero, not a free name.
+    #[test]
+    fn a_one_step_base_naming_a_later_sibling_reads_its_seed() {
+        let normal = text(
+            &normalize_body(&body(
+                "for i in 0..8:
+    for k in 0..1:
+        x = load X[i, k]
+        y = load Y[i, k]
+        s <- multiply(t, x) over k
+        t <- add(t, y) over k
+    S[i] = s
+    T[i] = t",
+            ))
+            .unwrap(),
+        );
+        assert!(
+            normal.contains("= 0.0") && !normal.contains("acc") && !normal.contains("<-"),
+            "{normal}"
+        );
+    }
+
     /// A sum's zero and a product's one fold away: a one-step sum is its one addend.
     #[test]
     fn a_one_step_sums_seed_folds_away() {
@@ -911,16 +934,15 @@ for r in 0..4:
         }
     }
 
-    /// The normal form of `src`, with the read spelled `read` inside the step (behind its loop head `step`) and ahead
+    /// The normal form of `src` keeps the read spelled `read` inside the step (behind the inner loop's head) and ahead
     /// of the update spelled `update`: a read of the step before, neither hoisted out of the step nor moved behind the
     /// update.
-    fn read_stays_ahead(src: &str, step: &str, read: &str, update: &str) -> String {
+    fn read_stays_ahead(src: &str, read: &str, update: &str) {
         let normal = text(&normalize_body(&body(src)).unwrap());
-        let head = normal.find(step).expect(&normal);
+        let head = normal.find("for a1").expect(&normal);
         let at = normal.find(read).expect(&normal);
         let updated = normal.find(update).expect(&normal);
         assert!(head < at && at < updated, "{normal}");
-        normal
     }
 
     /// An accumulator folded by the enclosing loop and updated inside a map loop of the step (the P·V accumulation of
@@ -956,7 +978,7 @@ for r in 0..4:
                 "2 * acc0",
             ),
         ] {
-            read_stays_ahead(src, "for a1", read, "<- add");
+            read_stays_ahead(src, read, "<- add");
         }
     }
 
@@ -974,7 +996,6 @@ for r in 0..4:
             v = load V[i, k, j]
             acc <- add(acc, v) over k, j
     O[i] = acc",
-            "for a1",
             "acc0 * in0",
             "<- add",
         );
@@ -989,7 +1010,6 @@ for r in 0..4:
                 y = load Y[i, k, j]
                 m <- maximum(m, y) over k, j
     O[i] = m",
-            "for a1",
             "2 * acc0",
             "<- maximum",
         );
@@ -1008,7 +1028,6 @@ for r in 0..4:
         if k < 2:
             m <- maximum(m, x) over k
     O[i] = m",
-            "for a1",
             "2 * acc0",
             "<- maximum",
         );
@@ -1023,7 +1042,6 @@ for r in 0..4:
             m <- maximum(m, x) over k
             m <- maximum(m, y) over k
     O[i] = m",
-            "for a1",
             "2 * acc0",
             "<- maximum",
         );
@@ -1045,7 +1063,6 @@ for r in 0..4:
                 y = load Y[i, k, j]
                 m <- maximum(m, y) over k, j
     O[i] = m",
-            "for a1",
             "2 * acc0",
             "<- maximum",
         );
@@ -1061,7 +1078,6 @@ for r in 0..4:
                 m <- maximum(m, y) over k, j
             m <- maximum(m, x) over k
     O[i] = m",
-            "for a1",
             "2 * acc0",
             "<- maximum",
         );
