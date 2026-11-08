@@ -52,8 +52,8 @@ pub(crate) struct SequentialScope {
     fixed: HashSet<Name>,
 }
 
-/// The names a leaf statement defines again: a second binding of a name this scope owns reads the binding before it
-/// and defines a value of its own, so after the rename its definitions alone move on to the fresh names.
+/// The names a leaf statement defines, from the names in scope before it to the names after it: after the rename under
+/// the reads' map, its definitions alone move on.
 struct Redefine<'a> {
     fresh: &'a HashMap<Name, Name>,
 }
@@ -102,33 +102,21 @@ impl SequentialScope {
         }
         let exported = unique(exported);
         if children.is_empty() {
-            // A second binding of a name this scope owns (motion can put two lexical bindings in one scope) is a
-            // value of its own: the statement's reads take the names before it, its definition a fresh one.
-            let defines = stmt.defines();
-            let rebound: Vec<Name> = if stmt.is_pure() {
-                defines
-                    .iter()
-                    .copied()
-                    .filter(|name| self.owned.contains(name))
-                    .collect()
-            } else {
-                Vec::new()
-            };
-            for name in &defines {
-                self.allocate(counters, name, ssa_prefix(stmt));
-            }
-            if rebound.is_empty() {
-                return Statement::rename(stmt, &self.names(&self.inherited_axes));
-            }
+            // The reads take the names in scope before the statement, the definitions the names after it: a second
+            // binding of a name this scope owns (motion can put two lexical bindings in one scope) is a value of its
+            // own, and a first binding that reads an outer name of its spelling reads the outer value.
             let reads = self.names(&self.inherited_axes);
-            let fresh: HashMap<Name, Name> = rebound
-                .iter()
-                .map(|name| {
-                    let next = counters.fresh(ssa_prefix(stmt));
-                    self.ssa.insert(*name, next);
-                    (reads[name], next)
-                })
-                .collect();
+            let mut fresh: HashMap<Name, Name> = HashMap::new();
+            for name in stmt.defines() {
+                if stmt.is_pure() && self.owned.contains(&name) {
+                    self.ssa.insert(name, counters.fresh(ssa_prefix(stmt)));
+                } else {
+                    self.allocate(counters, &name, ssa_prefix(stmt));
+                }
+                if let Some(new) = self.ssa.get(&name) {
+                    fresh.insert(reads.get(&name).copied().unwrap_or(name), *new);
+                }
+            }
             let renamed = Statement::rename(stmt, &reads);
             return Arc::new(renamed.rewrite_fields(&mut Redefine { fresh: &fresh }));
         }
@@ -259,7 +247,7 @@ fn ordered(body: &Body, numbering: &Numbering) -> Result<Body> {
         .collect();
     let incoming = ordering_constraints(&rebuilt, true);
     let order =
-        rebuilt.topological_permutation(&incoming, Some(&|index| priorities[index].clone()));
+        rebuilt.topological_permutation(&incoming, Some(&|index| priorities[index].clone()))?;
     Ok(rebuilt.rebuilt(
         order
             .into_iter()
@@ -625,6 +613,135 @@ Q[] = y",
         assert_eq!(
             normal,
             "in0 = load A[]\nv0 = -in0\nin1 = load B[]\nv1 = in0 + in1\nO[] = v1\nQ[] = v0"
+        );
+    }
+
+    /// A statement that binds a name again beside one it binds for the first time (a multi-name load) gives each its
+    /// own sequential name.
+    #[test]
+    fn a_first_binding_beside_a_rebind_takes_a_sequential_name() {
+        let normal = text(
+            &normalize_body(&body(
+                "x = load A[0]\nP[] = x\nx, y = load B[0]\nz = add(x, y)\nO[] = z",
+            ))
+            .unwrap(),
+        );
+        assert_eq!(
+            normal,
+            "in0, in1 = load B[0]\nv0 = in0 + in1\nin2 = load A[0]\nO[] = v0\nP[] = in2"
+        );
+    }
+
+    /// A first binding that reads an outer name of its own spelling reads the outer value.
+    #[test]
+    fn a_first_binding_reading_an_outer_name_of_its_spelling_reads_the_outer_value() {
+        let normal = text(
+            &normalize_body(&body(
+                "y = load A[]\nfor i in 0..4:\n    y = negative(y)\n    O[i] = y",
+            ))
+            .unwrap(),
+        );
+        assert_eq!(
+            normal,
+            "in0 = load A[]\nv0 = -in0\nfor a0 in 0..4:\n    O[a0] = v0"
+        );
+    }
+
+    /// The bindings of one name keep their source order: a binding that reads forward still sits where it was
+    /// written, and the readers of a later binding read that binding.
+    #[test]
+    fn the_bindings_of_one_name_keep_their_source_order() {
+        let normal =
+            text(&normalize_body(&body("y = negative(y)\ny = load A[]\nO[] = y")).unwrap());
+        assert_eq!(normal, "in0 = load A[]\nO[] = in0");
+    }
+
+    /// A scope whose bindings and reads wait on each other is an error, not a body in source order.
+    #[test]
+    fn a_cycle_through_the_bindings_is_an_error() {
+        let cyclic = body("w = add(y, z)\ny = load A[]\ny = negative(y)\nz = exp(y)\nO[] = w");
+        assert!(normalize_body(&cyclic).is_err());
+    }
+
+    /// A carried state orders nothing within its step: the update and the reads of the step before take the canonical
+    /// order whichever side of each other they were written on.
+    #[test]
+    fn a_carried_state_orders_nothing_within_its_step() {
+        let step = |lines: &str| {
+            text(
+                &normalize_body(&body(&format!(
+                    "for c in 0..3:\n    for i in 0..4:\n        u = load U[c, i]\n{lines}\nfor r in 0..4:\n    last = pre S[r]\n    out[r] = last"
+                )))
+                .unwrap(),
+            )
+        };
+        let read_first =
+            step("        own = pre S[i]\n        next = add(own, u)\n        S[i] <- next seed 0");
+        let update_first =
+            step("        S[i] <- next seed 0\n        own = pre S[i]\n        next = add(own, u)");
+        assert_eq!(read_first, update_first);
+        assert!(read_first.contains("v0 = pre acc0[a1]\n"), "{read_first}");
+    }
+
+    /// An accumulator is read where it stands: a read ahead of its update takes the step before and stays ahead of
+    /// the update, a read behind it the updated value — the online softmax's rescale reads the old maximum and the new
+    /// one in one step, and its sum's update reads what reads the sum, which is no cycle.
+    #[test]
+    fn an_accumulator_is_read_where_it_stands() {
+        let normal = text(
+            &normalize_body(&body(
+                "for i in 0..8:
+    for k in 0..4:
+        x = load X[i, k]
+        m_new = maximum(m, x)
+        scale = exp(m - m_new)
+        p = exp(x - m_new)
+        m <- maximum(m, x) over k
+        s_old = s * scale
+        s <- add(s_old, p) over k
+    O[i] = s",
+            ))
+            .unwrap(),
+        );
+        let lines: Vec<&str> = normal.lines().map(str::trim).collect();
+        let at = |needle: &str| {
+            lines
+                .iter()
+                .position(|l| l.starts_with(needle))
+                .unwrap_or_else(|| panic!("{needle}: {normal}"))
+        };
+        assert!(
+            at("v0 = maximum(acc0, in0)") < at("acc0 <- maximum(acc0, in0) over a1"),
+            "{normal}"
+        );
+        assert!(
+            at("v1 = acc0 - v0") < at("acc0 <- maximum(acc0, in0) over a1"),
+            "{normal}"
+        );
+        assert!(normal.contains("acc1 * "), "{normal}");
+    }
+
+    /// A one-step reduction is its update, and a read of its accumulator ahead of the update reads the seed: the
+    /// online softmax's first step rescales by `exp(-inf)` and starts its sum from zero.
+    #[test]
+    fn a_one_step_reduction_reads_its_seed_ahead_of_its_update() {
+        let normal = normalize_body(&body(
+            "for i in 0..8:
+    for k in 0..1:
+        x = load X[i, k]
+        m_new = maximum(m, x)
+        scale = exp(m - m_new)
+        p = exp(x - m_new)
+        m <- maximum(m, x) over k
+        s_old = s * scale
+        s <- add(s_old, p) over k
+    O[i] = s",
+        ))
+        .unwrap();
+        let normal = text(&normal);
+        assert!(
+            !normal.contains("acc") && !normal.contains("<-"),
+            "{normal}"
         );
     }
 

@@ -525,7 +525,7 @@ def test_a_moved_seam_over_a_re_keyed_piece_is_re_spelled_by_what_its_pieces_rea
 
     document, route = _routed(_sdpa_document(), {"PLACE@map.1/twist.1/inner": "cut"})
     reader = document.kernel(route.children[-1])
-    stale = replace(reader, loop_ir=json.loads(json.dumps(reader.loop_ir).replace("0.25 * in0", "0.5 * in0")))
+    stale = replace(reader, loop_ir=json.loads(json.dumps(reader.loop_ir).replace("0.25 * ", "0.5 * ")))
     assert stale.exact_identity != reader.exact_identity
     moved = replace(
         document,

@@ -62,7 +62,7 @@ pub fn normalize_uncached(body: &Body) -> Result<Body> {
     }
     // Motion can put two lexical bindings of one name in one scope; the order keeps their lexical reading and the
     // sequential names tell them apart.
-    let mut stmts = rename_ssa_sequential(&topological_sort(body));
+    let mut stmts = rename_ssa_sequential(&topological_sort(body)?);
     // The split feeds the steps ahead of it, so the steps run again after a split that changed the body. The order
     // permutes and names, and the operand order inside a value reads the ranks the order gives, which the order in
     // turn spells by: the form is final when one whole round leaves the body alone.
@@ -90,7 +90,7 @@ pub fn normalize_uncached(body: &Body) -> Result<Body> {
 /// The exact simplifications, then every value placed once; the three run until the first two leave a placed body
 /// alone.
 pub fn prepare_body(body: &Body) -> Result<Body> {
-    let mut stmts = topological_sort(body);
+    let mut stmts = topological_sort(body)?;
     stmts = drop_size_one_free_axes(&stmts);
     stmts = drop_size_one_reduce_axes(&stmts);
     stmts = canonicalize_free_axis_order(&stmts)?;

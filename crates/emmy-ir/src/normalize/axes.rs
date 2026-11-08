@@ -5,7 +5,7 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::Arc;
 
 use super::{assign, canonicalize_expressions, rename_ssa_sequential, substituted, with_bodies};
-use crate::body::Body;
+use crate::body::{Body, free_ssa};
 use crate::expr::{Expr, Expression, affine_form};
 use crate::field::AxisRef;
 use crate::numbering::Key;
@@ -34,7 +34,8 @@ pub fn drop_size_one_free_axes(body: &Body) -> Body {
     })
 }
 
-/// Inline a canonical extent-one reduction as its single update.
+/// Inline a canonical extent-one reduction as its single update. A read of an accumulator ahead of its update reads
+/// the step before, which the one step has none of: it reads the seed, the operation's neutral element.
 pub fn drop_size_one_reduce_axes(body: &Body) -> Body {
     body.map(&mut |stmt| {
         let Statement::Loop(l) = &**stmt else {
@@ -62,27 +63,43 @@ pub fn drop_size_one_reduce_axes(body: &Body) -> Body {
         {
             return Some(vec![stmt.clone()]);
         }
+        // The step before the one step is the seed: the operation's neutral element, which a read of the accumulator
+        // ahead of its update takes (a base names the step's own running value, not the seed).
+        let mut seeds: HashMap<Name, Expression> = HashMap::new();
+        for a in &accums {
+            let read = l.body.stmts().iter().any(|m| {
+                !matches!(&**m, Statement::Accum(x) if x.name == a.name)
+                    && free_ssa(m).contains(&a.name)
+            });
+            match a.op.neutral() {
+                Some(neutral) => {
+                    seeds.insert(a.name, Expression::float(neutral));
+                }
+                None if a.base.is_none() || read => return Some(vec![stmt.clone()]),
+                None => {}
+            }
+        }
         let mut out = Vec::new();
         for member in l.body.stmts() {
             let member = substituted(member, &l.axis.name, Expression::int(0));
+            let member = Statement::substitute(&member, &seeds);
             match &*member {
-                Statement::Accum(a) => match &a.base {
-                    None => {
-                        if a.op.neutral().is_none() {
-                            return Some(vec![stmt.clone()]);
+                Statement::Accum(a) => {
+                    seeds.remove(&a.name);
+                    match &a.base {
+                        None => out.push(assign(&a.name, a.value.clone(), a.dtype)),
+                        Some(base) => {
+                            let combined = match a.op.known() {
+                                Some(op) => Expression::apply(
+                                    op,
+                                    vec![Expression::var(base), a.value.clone()],
+                                ),
+                                None => return Some(vec![stmt.clone()]),
+                            };
+                            out.push(assign(&a.name, combined, a.dtype))
                         }
-                        out.push(assign(&a.name, a.value.clone(), a.dtype));
                     }
-                    Some(base) => {
-                        let combined = match a.op.known() {
-                            Some(op) => {
-                                Expression::apply(op, vec![Expression::var(base), a.value.clone()])
-                            }
-                            None => return Some(vec![stmt.clone()]),
-                        };
-                        out.push(assign(&a.name, combined, a.dtype))
-                    }
-                },
+                }
                 _ => out.push(member),
             }
         }

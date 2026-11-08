@@ -6,7 +6,9 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use crate::Name;
+use crate::Result;
 use crate::body::{Body, free_ssa, ordered_sibling_defs};
+use crate::protocol::carried_cells;
 use crate::statement::Statement;
 
 /// The buffers a statement reads and writes and the carried states it updates, over its whole subtree.
@@ -49,8 +51,10 @@ pub fn is_protocol(stmt: &Statement) -> bool {
 }
 
 /// Dependency and, when requested, effect predecessors for one lexical scope. A name bound more than once in the
-/// scope reads lexically: a read binds the definition before it, or the first one when none precedes it (a scope is
-/// order-free), and precedes every later binding of the name.
+/// scope reads lexically: its bindings keep their source order, a read binds the definition before it, or the first one
+/// when none precedes it (a scope is order-free), and precedes every later binding of the name. An accumulator is read
+/// where it stands: ahead of its update the step before, behind it the updated value. A state carried through `Carry`
+/// orders nothing in its scope: a `Pre` reads the step before wherever it sits.
 pub fn ordering_constraints(body: &Body, effects: bool) -> Vec<HashSet<usize>> {
     let stmts = body.stmts();
     let defs_uses: Vec<(Vec<Name>, HashSet<Name>)> = stmts
@@ -63,13 +67,36 @@ pub fn ordering_constraints(body: &Body, effects: bool) -> Vec<HashSet<usize>> {
             definitions.entry(name).or_default().push(index);
         }
     }
-    let sites_of = |name: &Name| definitions.get(name).map_or(&[][..], |v| &v[..]);
+    // A state whose every definition here is its next value within the step (a `Carry`, or a cell loop of the step
+    // holding one) orders nothing in this scope: a `Pre` reads the step before, whichever side of the update it sits on.
+    // The loop that carries the state produces it, and its readers follow that loop.
+    let carried: HashSet<&Name> = definitions
+        .iter()
+        .filter(|(name, sites)| sites.iter().all(|site| carry_site(&stmts[*site], name)))
+        .map(|(name, _)| *name)
+        .collect();
+    let sites_of = |name: &Name| {
+        if carried.contains(name) {
+            return &[][..];
+        }
+        definitions.get(name).map_or(&[][..], |v| &v[..])
+    };
+    // A read binds the update or binding before it. Ahead of every one: an accumulator (a state the loop carries, every
+    // site an `Accum`) reads the step before, a binding that reads its own name reads the name outside the scope, and
+    // any other read binds the first binding (a scope is order-free).
     let defining_stmt = |name: &Name, consumer: usize| -> Option<usize> {
         let sites = sites_of(name);
         if let Some(preceding) = sites.iter().rev().find(|site| **site < consumer) {
             return Some(*preceding);
         }
-        sites.iter().copied().find(|site| *site != consumer)
+        let accumulator = !sites.is_empty()
+            && sites
+                .iter()
+                .all(|site| matches!(&*stmts[*site], Statement::Accum(_)));
+        if accumulator || sites.contains(&consumer) {
+            return None;
+        }
+        sites.first().copied()
     };
     let mut incoming: Vec<HashSet<usize>> = Vec::with_capacity(stmts.len());
     for (index, (_, uses)) in defs_uses.iter().enumerate() {
@@ -79,15 +106,20 @@ pub fn ordering_constraints(body: &Body, effects: bool) -> Vec<HashSet<usize>> {
                 .collect(),
         );
     }
-    // A read precedes every binding of its name after the one it binds: a value read between two bindings stays
-    // between them, and a read ahead of every binding sits between the first and the second.
+    // The bindings of one name keep their source order: a binding that reads forward still sits where it was written.
+    for name in definitions.keys() {
+        for pair in sites_of(name).windows(2) {
+            incoming[pair[1]].insert(pair[0]);
+        }
+    }
+    // A read precedes every update or binding of its name after the one it binds: a value read between two stays
+    // between them, a read ahead of every binding sits between the first and the second, and a read of an accumulator
+    // ahead of its update stays ahead of it.
     for (reader, (_, uses)) in defs_uses.iter().enumerate() {
         for name in uses {
-            let Some(bound) = defining_stmt(name, reader) else {
-                continue;
-            };
+            let from = defining_stmt(name, reader).unwrap_or(reader);
             for &later in sites_of(name) {
-                if later > bound && later != reader {
+                if later > from && later != reader {
                     incoming[later].insert(reader);
                 }
             }
@@ -147,16 +179,49 @@ pub fn ordering_constraints(body: &Body, effects: bool) -> Vec<HashSet<usize>> {
     incoming
 }
 
+/// Whether `stmt`'s definition of `name` is a carried state's next value within its step: a `Carry`, or a nested
+/// statement that holds the `Carry` without carrying the state itself (a cell loop of the step) and defines the name
+/// no other way.
+fn carry_site(stmt: &Statement, name: &Name) -> bool {
+    if let Statement::Carry(carry) = stmt {
+        return carry.name == *name;
+    }
+    let bodies = stmt.nested();
+    if bodies.is_empty()
+        || bodies
+            .iter()
+            .any(|body| carried_cells(body).iter().any(|(state, _)| state == name))
+    {
+        return false;
+    }
+    let (mut carry, mut other) = (false, false);
+    for body in &bodies {
+        body.walk(&mut |here| {
+            let leaf = here.stmt();
+            if leaf.nested().is_empty() && leaf.defines().contains(name) {
+                if matches!(&**leaf, Statement::Carry(_)) {
+                    carry = true;
+                } else {
+                    other = true;
+                }
+            }
+        });
+    }
+    carry && !other
+}
+
 /// Stable recursive dependency sort used before structural normalization. A name bound twice in one scope, which
-/// motion can produce, keeps its lexical reading: the reads between the two bindings stay between them.
-pub fn topological_sort(body: &Body) -> Body {
-    let sorted = body.map_each(&mut |stmt| {
+/// motion can produce, keeps its lexical reading: the reads between the two bindings stay between them. A scope whose
+/// bindings and reads wait on each other is an error.
+pub fn topological_sort(body: &Body) -> Result<Body> {
+    let sorted = body.try_map_each(&mut |stmt| {
         let nested = stmt.nested();
         if nested.is_empty() {
-            return stmt.clone();
+            return Ok(stmt.clone());
         }
-        Statement::rebuild_bodies(stmt, nested.iter().map(topological_sort).collect())
-    });
+        let bodies: Result<Vec<Body>> = nested.iter().map(topological_sort).collect();
+        Ok(Statement::rebuild_bodies(stmt, bodies?))
+    })?;
     sorted.topological_order(&ordering_constraints(&sorted, false))
 }
 

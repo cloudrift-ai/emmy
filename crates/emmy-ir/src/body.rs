@@ -642,13 +642,14 @@ impl Body {
     }
 
     /// Kahn's order over indexed predecessor sets, as source indices; source order breaks ties, a priority may rank
-    /// first. Constraints that hold a cycle (an update of a carried value that reads what a read ahead of it defines,
-    /// as Kernel IR can spell a loop-carried state) leave the source order: no sort reorders what it cannot order.
+    /// first. Constraints that hold a cycle are an error: normalization sorts Loop IR, whose carried state orders
+    /// nothing within its step, so a scope whose bindings and reads wait on each other (a read ahead of two bindings
+    /// of its name that also reads what the second defines) has no reading, and taking the source order would hide it.
     pub fn topological_permutation<P: Ord>(
         &self,
         incoming: &[HashSet<usize>],
         priority: Option<&dyn Fn(usize) -> P>,
-    ) -> Vec<usize> {
+    ) -> Result<Vec<usize>> {
         let n = self.len();
         let mut successors: Vec<Vec<usize>> = vec![Vec::new(); n];
         let mut degree: Vec<usize> = incoming.iter().map(|sources| sources.len()).collect();
@@ -673,21 +674,23 @@ impl Body {
             }
         }
         if ordered.len() == n {
-            ordered
+            Ok(ordered)
         } else {
-            (0..n).collect()
+            Err(Error::Value(
+                "a scope's bindings and reads order no way: a statement waits on one that waits on it".into(),
+            ))
         }
     }
 
     /// This body in an order `incoming` allows, source order breaking ties.
-    pub fn topological_order(&self, incoming: &[HashSet<usize>]) -> Body {
-        let order = self.topological_permutation::<()>(incoming, None);
-        self.rebuilt(
+    pub fn topological_order(&self, incoming: &[HashSet<usize>]) -> Result<Body> {
+        let order = self.topological_permutation::<()>(incoming, None)?;
+        Ok(self.rebuilt(
             order
                 .into_iter()
                 .map(|index| self.stmts()[index].clone())
                 .collect(),
-        )
+        ))
     }
 }
 
@@ -902,7 +905,9 @@ mod tests {
             ",
         );
         assert_eq!(
-            given.topological_order(&[HashSet::new(), HashSet::new()]),
+            given
+                .topological_order(&[HashSet::new(), HashSet::new()])
+                .unwrap(),
             given
         );
     }
