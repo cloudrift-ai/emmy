@@ -831,8 +831,11 @@ Open items:
 - (2026-11-07, #1352) Key splits stop at 64 ways (`SPLITK_WIDTHS`). At 131,072 positions a 128-way split measured
   faster on every decode and verify twin (27B one row 475 against 581 us, Qwen3.6 286 against 413) and no compile can
   deploy it; offering it moves every split fork's ballot. Not decided.
-- (2026-11-07, #1352) A split's finalize piece is minted at the default hint, so its rows sit at 512 cached tokens
-  whatever the window it was recorded at. Harmless to the picks, which price the piece at its own rows. Not fixed.
+- (2026-11-07, #1352) A split's finalize piece keeps its parent's axis table, whose cache-size axes carry the default
+  hint, so its rows sit at 512 cached tokens whatever the window it was recorded at. On a stored kernel the re-hint
+  never reaches those axes: a statement rebuild keeps an axis whose hint alone changed, since a hint takes no part in
+  equality. Harmless to the picks, which compute the same 512, and to a golden walk, which counts a row at every size
+  of its target when its kernel's buffers name none of the row's sizes. Not fixed.
 - (2026-11-06) The 27B's native server leaves a median 2.6 ms between a prompt's 64-row chunk launches on an idle host
   (nsys at 7,680 tokens), about 8 s of the 197,632-token first token, and 3.7 ms while exports compiled on the host.
   Not investigated.

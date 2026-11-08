@@ -138,18 +138,21 @@ def _append(graph, *, ctx, document: GoldenFile, name_prefix: str | None = None,
             stored_before = len(document.kernels)
             stored = document.add_kernel(kernel)
             added += len(document.kernels) - stored_before
+            sizes = kernel_bindings(tile)
             for template in group:
                 pins = dict(template.get("pins", {}))
                 # Two programs may lower to one kernel at two sets of sizes (native's attention priced per range of
-                # windows): each set takes its own row.
-                if any((row.kernel, row.pins, row.bindings) == (stored.ref, pins, kernel_bindings(tile)) for row in document.rows):
+                # windows): each set takes its own row, under a name of its own, since a name selects a realization.
+                if any((row.kernel, row.pins, row.bindings) == (stored.ref, pins, sizes) for row in document.rows):
                     continue
                 name = f"{name_prefix}.{tile.name}" if name_prefix else tile.name
                 if template.get("name"):
                     name = f"{name}.{template['name']}"
                 if any(row.name == name and row.kernel != stored.ref for row in document.rows):
                     name = f"{name}.{stored.exact_identity[:12]}"
-                document.rows.append(Row(name=name, kernel=stored.ref, bindings=kernel_bindings(tile), pins=pins))
+                if any(row.name == name and row.pins == pins and row.bindings != sizes for row in document.rows):
+                    name = ".".join((name, *(f"{var}{size}" for var, size in sorted(sizes.items()))))
+                document.rows.append(Row(name=name, kernel=stored.ref, bindings=sizes, pins=pins))
     return added
 
 

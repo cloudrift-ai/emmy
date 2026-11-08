@@ -312,16 +312,35 @@ class GoldenFile(Wire):
         return [kernel for kernel in self.kernels if kernel.traced is not None]
 
     def target_rows(self) -> dict[tuple, list[Row]]:
-        """The rows of each target kernel, by ``(target ref, sorted pins, sorted bindings)``: a target's own rows and
-        its pieces' rows in one input regime and at one set of sizes — what one ``run --golden PATH`` realization
-        benches, named by its shortest row name."""
+        """The rows of each target kernel, by ``(target ref, sorted pins, sorted sizes)``: a target's own rows and its
+        pieces' rows in one input regime and at one set of sizes — what one ``run --golden PATH`` realization benches,
+        named by its shortest row name. A row's sizes are the bindings its own kernel's buffers name
+        (:func:`~emmy.compiler.wire.symbolic_vars`). A row with none — a split's combine step, whose row records a
+        reduce axis its table keeps from its parent, or a row recorded before rows named a size — counts at every size
+        of its target, as it does in a compile's pick, so it joins each of the target's groups in its regime instead
+        of making one of its own."""
+        from emmy.compiler.wire import symbolic_vars  # noqa: PLC0415
+
         targets = {kernel.ref for kernel in self.targets()}
+        own: dict[str, set[str]] = {}  # each kernel's sizes, read for the rows that record any
         out: dict[tuple, list[Row]] = {}
+        sizeless: list[tuple[tuple, Row]] = []
         for row in self.rows:
             path = self.path_to(row.kernel)
             root = path[0].parent if path else row.kernel
-            if root in targets:
-                out.setdefault((root, tuple(sorted(row.pins.items())), tuple(sorted(row.bindings.items()))), []).append(row)
+            if root not in targets:
+                continue
+            regime = (root, tuple(sorted(row.pins.items())))
+            if row.bindings and row.kernel not in own:
+                own[row.kernel] = symbolic_vars(self.kernel(row.kernel).loop_ir)
+            sizes = tuple(sorted((var, size) for var, size in row.bindings.items() if var in own[row.kernel]))
+            if not sizes:
+                sizeless.append((regime, row))
+            else:
+                out.setdefault((*regime, sizes), []).append(row)
+        for regime, row in sizeless:
+            for key in [key for key in out if key[:2] == regime] or [(*regime, ())]:
+                out.setdefault(key, []).append(row)
         return out
 
     def rows_of(self, name: str) -> list[Row]:
