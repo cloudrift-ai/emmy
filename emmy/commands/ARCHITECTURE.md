@@ -299,9 +299,11 @@ Replay remints the stored path to address fresh child names. Each cut keeps its 
 scope, including a bare cut recorded on a child with one site.
 
 `run --golden PATH` without `--realization` walks every target kernel of the file once per input regime and set of
-sizes its rows record, in one process; a kernel two programs price at two sizes runs at each. Measured rows whose
-kernel is the complete target also run as pinned schedules; descendant rows remain evidence for their own pieces, even
-when a descendant's name selects the target. Proposals remain unbenched. A piece a decision minted runs with its
+sizes its rows record, in one process; a kernel two programs price at two sizes runs at each, under a row name per
+size, since a name selects the run. A row whose kernel's buffers name none of its sizes (a split's combine step) runs
+at every size of its target. Measured rows whose kernel is the complete target also run as pinned schedules;
+descendant rows remain evidence for their own pieces, even when a descendant's name selects the target. Proposals
+remain unbenched. A piece a decision minted runs with its
 target, not as a target of its own; the target is named by the shortest row name on it or on its pieces — the seed a
 record run wrote the set under. A failing target does not stop the walk. Every target reports, and the command exits
 non-zero at the end naming the failures. It parses and validates the document once and hands that object to each

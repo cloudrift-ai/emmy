@@ -2315,3 +2315,35 @@ def test_a_piece_whose_buffers_name_no_size_runs_at_each_size_of_its_target(tmp_
     groups = GoldenFile.load(path).target_rows()
     assert sorted(dict(sizes)["seq"] for _, _, sizes in groups) == [4096, 131072]
     assert all(combine.name in {row.name for row in rows} for rows in groups.values())
+
+
+def test_a_program_appended_at_two_sizes_replays_at_each(monkeypatch, tmp_path):
+    """One symbolic program appended at two sizes lowers to one kernel, with a row at each size under a name of its
+    own: a whole-file walk runs the kernel at each size, never one size twice."""
+    import torch
+
+    from emmy.commands import run as run_mod
+    from emmy.commands.compile import resolve_golden_arg
+    from emmy.compiler.pipeline.search.golden import append_trace_inventory, write_trace_inventory
+    from emmy.compiler.specialize import rehint_program
+    from emmy.compiler.trace.torch import trace_module
+    from emmy.compiler.wire import symbolic_bindings
+
+    class Relu(torch.nn.Module):
+        def forward(self, x):
+            return torch.relu(x)
+
+    traced = trace_module(Relu(), (torch.zeros(512, 8),), dynamic_shapes={"x": {0: torch.export.Dim("seq", min=2, max=1 << 20)}})
+    path = tmp_path / "working.json"
+    ctx = Context.from_target((8, 9))
+    write_trace_inventory(rehint_program(traced, {"seq": 4096}), path, ctx=ctx)
+    append_trace_inventory(rehint_program(traced, {"seq": 131072}), path, ctx=ctx)
+    sizes = []
+
+    def run_once(args):
+        resolve_golden_arg(args)
+        sizes.append(symbolic_bindings(node.output for node in args._golden_graph.nodes.values())["seq"])
+
+    monkeypatch.setattr(run_mod, "_handle_run_once", run_once)
+    run_mod._run_golden_targets(_args(path, realization=None, ir=None, json=None))
+    assert sorted(sizes) == [4096, 131072]
