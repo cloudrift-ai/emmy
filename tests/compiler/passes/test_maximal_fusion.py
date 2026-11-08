@@ -6,7 +6,7 @@ import pytest
 from emmy.compiler.graph import Graph, Tensor
 from emmy.compiler.ir.base import InputOp
 from emmy.compiler.ir.frontend.ir import LinearOp
-from emmy.compiler.ir.loop import Loop, LoopOp
+from emmy.compiler.ir.loop import Assign, Loop, LoopOp
 from emmy.compiler.ir.stmt import parse_body
 from emmy.compiler.pipeline import LOOP_PASSES, Pipeline
 from tests.compiler.passes.test_roll_recurrence import _SINKHORN, _delta
@@ -441,7 +441,7 @@ def test_a_kernel_written_in_place_fuses_what_it_stores_and_bounds_what_it_write
     # the value it stores, and ``y + x`` reading the scatter's output.
     assert scatter.output.alias in kernels and scatter.output.alias in scatter.inputs
     assert len(kernels) == 3, sorted(kernels)
-    assert any(getattr(stmt, "op", None) is not None and "tanh" in str(stmt) for stmt in scatter.op.body.iter())
+    assert any(isinstance(stmt, Assign) and "tanh" in str(stmt.value) for stmt in scatter.op.body.iter())
 
 
 def test_a_kernel_stored_over_a_buffer_computes_nothing_from_it() -> None:

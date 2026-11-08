@@ -13,17 +13,38 @@ use std::collections::HashSet;
 use std::hash::{Hash, Hasher};
 use std::sync::{Mutex, Once, OnceLock};
 
+use quick_cache::Weighter;
 use quick_cache::sync::Cache;
 
 use crate::{Error, locked};
 
-/// How many bodies the body-keyed memos keep: a cut's arms lower the same pieces again and again.
-pub const BODY_MEMO_CAPACITY: usize = 16_384;
+/// How many statements the body-keyed memos keep between them, each body weighing its statement count: a cut's arms
+/// lower the same pieces again and again, and a whole-layer body is thousands of statements, so the bound is on what
+/// the memo holds rather than on how many bodies.
+pub const BODY_MEMO_WEIGHT: u64 = 1_000_000;
+
+/// How many entries a memo of small values keeps.
+pub const SMALL_MEMO_CAPACITY: usize = 16_384;
+
+/// The weight of an entry: a function of its key and value, so a memo is bounded by what it holds.
+pub struct Weigh<K, V>(pub fn(&K, &V) -> u64);
+
+impl<K, V> Clone for Weigh<K, V> {
+    fn clone(&self) -> Self {
+        Weigh(self.0)
+    }
+}
+
+impl<K, V> Weighter<K, V> for Weigh<K, V> {
+    fn weight(&self, key: &K, val: &V) -> u64 {
+        (self.0)(key, val)
+    }
+}
 
 /// One declared memo: a bounded cache under a name.
 pub struct Memo<K, V> {
     name: &'static str,
-    cache: Cache<K, V>,
+    cache: Cache<K, V, Weigh<K, V>>,
 }
 
 /// A key this thread is computing, listed while the computation runs and unlisted when it ends, however it ends.
@@ -41,10 +62,22 @@ thread_local! {
 }
 
 impl<K: Eq + Hash + Clone, V: Clone> Memo<K, V> {
+    /// A memo of `capacity` entries, each weighing one.
     pub fn new(name: &'static str, capacity: usize) -> Memo<K, V> {
+        Memo::weighted(name, capacity, capacity as u64, |_, _| 1)
+    }
+
+    /// A memo holding at most `capacity` of weight, each entry weighing what `weigh` says of it; `entries` is how
+    /// many it is sized for.
+    pub fn weighted(
+        name: &'static str,
+        entries: usize,
+        capacity: u64,
+        weigh: fn(&K, &V) -> u64,
+    ) -> Memo<K, V> {
         Memo {
             name,
-            cache: Cache::new(capacity),
+            cache: Cache::with_weighter(entries, capacity, Weigh(weigh)),
         }
     }
 
@@ -78,6 +111,7 @@ impl<K: Eq + Hash + Clone, V: Clone> Memo<K, V> {
             name: self.name,
             entries: self.cache.len(),
             capacity: Some(self.cache.capacity()),
+            weight: Some(self.cache.weight()),
             hits: self.cache.hits(),
             misses: self.cache.misses(),
         }
@@ -89,8 +123,10 @@ impl<K: Eq + Hash + Clone, V: Clone> Memo<K, V> {
 pub struct Stats {
     pub name: &'static str,
     pub entries: usize,
-    /// The bound, when the store has one.
+    /// The bound, when the store has one: on the weight the entries hold between them.
     pub capacity: Option<u64>,
+    /// The weight the entries hold now, when the store is bounded.
+    pub weight: Option<u64>,
     pub hits: u64,
     pub misses: u64,
 }
@@ -151,9 +187,11 @@ pub fn clear_all() {
 /// ```ignore
 /// memo! {
 ///     /// The normal forms of the bodies met in this process.
-///     pub fn normal_forms() -> Memo<MemoKey, Body> [capacity = BODY_MEMO_CAPACITY]
+///     pub fn normal_forms() -> Memo<MemoKey, Body> [weight = BODY_MEMO_WEIGHT, by = body_weight]
 /// }
 /// ```
+///
+/// `[capacity = N]` bounds the memo by entries; `[weight = W, by = f]` by the weight `f(&key, &value)` gives each.
 #[macro_export]
 macro_rules! memo {
     ($(#[$attr:meta])* $vis:vis fn $name:ident() -> Memo<$K:ty, $V:ty> [capacity = $capacity:expr]) => {
@@ -163,6 +201,16 @@ macro_rules! memo {
             static LISTED: std::sync::Once = std::sync::Once::new();
             $crate::memo::declared(&MEMO, &LISTED, || {
                 $crate::memo::Memo::new(stringify!($name), $capacity)
+            })
+        }
+    };
+    ($(#[$attr:meta])* $vis:vis fn $name:ident() -> Memo<$K:ty, $V:ty> [weight = $weight:expr, by = $weigh:expr]) => {
+        $(#[$attr])*
+        $vis fn $name() -> &'static $crate::memo::Memo<$K, $V> {
+            static MEMO: std::sync::OnceLock<$crate::memo::Memo<$K, $V>> = std::sync::OnceLock::new();
+            static LISTED: std::sync::Once = std::sync::Once::new();
+            $crate::memo::declared(&MEMO, &LISTED, || {
+                $crate::memo::Memo::weighted(stringify!($name), 1024, $weight, $weigh)
             })
         }
     };

@@ -29,7 +29,7 @@ closed_set! {
         Block = "block", Stmt = "stmt", Fixed = "fixed", Pick = "pick", Open = "open",
         Expr = "expr", Coordinate = "c", Operand = "v", Free = "free", State = "state", Buffer = "buffer",
         Bound = "bound", Parameter = "parameter",
-        Load = "load", Assign = "assign", Term = "term", Affine = "affine", Init = "init", Reduce = "reduce",
+        Load = "load", Assign = "assign", Affine = "affine", Init = "init", Reduce = "reduce",
         Select = "select", Store = "store", Carry = "carry", Pre = "pre", Loop = "loop", Cond = "cond", Other = "other",
         Composite = "composite",
     }
@@ -154,7 +154,7 @@ pub fn expression_key(e: &Expression, leaf: &mut dyn FnMut(&Expression) -> Optio
         }
         Expr::Binary(op, l, r) => Key::tuple([
             Key::str(ExprType::Binary.text()),
-            Key::str(op.infix().unwrap_or(op.text())),
+            Key::str(op.spelling()),
             expression_key(l, leaf),
             expression_key(r, leaf),
         ]),
@@ -208,7 +208,6 @@ mod tests {
                 "parameter",
                 "load",
                 "assign",
-                "term",
                 "affine",
                 "init",
                 "reduce",

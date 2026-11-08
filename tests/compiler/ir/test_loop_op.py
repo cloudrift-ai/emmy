@@ -6,8 +6,8 @@ import pytest
 from frozendict import frozendict
 
 from emmy.compiler.ir.elementwise import ElementwiseImpl
-from emmy.compiler.ir.expression import Literal, Var
-from emmy.compiler.ir.loop import Affine, Assign, Axis, Loop, LoopOp, Select
+from emmy.compiler.ir.expression import Literal, Var, apply
+from emmy.compiler.ir.loop import Assign, Axis, Loop, LoopOp, Select
 from emmy.compiler.ir.stmt import normalize_body, parse_body
 
 
@@ -114,10 +114,10 @@ def test_update_synthesizes_accum_decl():
 
 
 def test_assign_construction():
-    a = Assign("out", ElementwiseImpl("add"), args=("a", "b"))
+    a = Assign("out", apply(ElementwiseImpl("add"), "a", "b"))
     assert a.name == "out"
-    assert a.op.name == "add"
-    assert a.args == ("a", "b")
+    assert a.value.operation.name == "add"
+    assert [operand.name for operand in a.value.operands] == ["a", "b"]
 
 
 # ---------------------------------------------------------------------------
@@ -163,8 +163,8 @@ def test_kernel_matmul():
             out_0[a0] = dot
         """
     )
-    # 2 Loads + Assign + Accum + Write — accumulator info is carried on Accum.op now.
-    assert sum(1 for s in k if not isinstance(s, Loop)) == 5
+    # 2 Loads + Accum (over the product, read once) + Write — accumulator info is carried on Accum.op now.
+    assert sum(1 for s in k if not isinstance(s, Loop)) == 4
 
 
 def test_kernel_matmul_bias():
@@ -181,8 +181,8 @@ def test_kernel_matmul_bias():
             out_0[a0] = out
         """
     )
-    # 3 Loads + Assign + Accum + Assign + Write (no decl stmt — Accum carries op).
-    assert sum(1 for s in k if not isinstance(s, Loop)) == 7
+    # 3 Loads + Accum (over the product) + Assign + Write (no decl stmt — Accum carries op).
+    assert sum(1 for s in k if not isinstance(s, Loop)) == 6
 
 
 def test_kernel_softmax_two_accumulators():
@@ -217,8 +217,8 @@ def test_kernel_unary_chain():
             out_0[a0] = exp
         """
     )
-    # 1 Load + 2 Assigns + Write.
-    assert sum(1 for s in k if not isinstance(s, Loop)) == 4
+    # 1 Load + one Assign (the negation folds into the exp that reads it) + Write.
+    assert sum(1 for s in k if not isinstance(s, Loop)) == 3
 
 
 def test_kernel_scatter_output_via_select():
@@ -254,17 +254,19 @@ def test_ssa_rejects_undefined_arg():
         )
 
 
-def test_ssa_rejects_duplicate_name():
-    with pytest.raises(ValueError, match="already defined"):
-        _loop(
-            """
-            for a0 in 0..4:
-                in0_1 = load src_0[a0]
-                y = exp(in0_1)
-                y = negative(y)
-                out_0[a0] = y
-            """
-        )
+def test_two_lexical_bindings_of_one_name_are_one_definition():
+    """A name bound twice in one scope (the second reading the first) is two values: the normal form renames them
+    apart, and the first, read once, folds into the second."""
+    k = _loop(
+        """
+        for a0 in 0..4:
+            in0_1 = load src_0[a0]
+            y = exp(in0_1)
+            y = negative(y)
+            out_0[a0] = y
+        """
+    )
+    assert [str(s.value) for s in k.body[0].body if isinstance(s, Assign)] == ["-exp(in0)"]
 
 
 def test_ssa_topo_sorts_forward_reference():
@@ -280,10 +282,9 @@ def test_ssa_topo_sorts_forward_reference():
             out_0[a0] = a
         """
     )
-    # After normalization the rename pass canonicalizes to v0, v1; the
-    # exp-Assign (originally "b") must precede the Affine sum that uses it.
-    kinds = [s.op.name if isinstance(s, Assign) else type(s).__name__ for s in k.body[0].body if isinstance(s, (Assign, Affine))]
-    assert kinds == ["exp", "Affine"], kinds
+    # After normalization the single-use ``exp`` (originally "b") folds into the sum that reads it: one definition.
+    values = [str(s.value) for s in k.body[0].body if isinstance(s, Assign)]
+    assert values == ["exp(in0) + in0"], values
 
 
 def test_ssa_allows_input_name_reuse_in_multiple_args():
@@ -297,8 +298,8 @@ def test_ssa_allows_input_name_reuse_in_multiple_args():
             out_0[a0] = c
         """
     )
-    # 1 Load + exp + one Affine (the negation folded into the sum) + 1 Write.
-    assert sum(1 for s in k if not isinstance(s, Loop)) == 4
+    # 1 Load + one definition (the exp and the negation fold into the sum) + 1 Write.
+    assert sum(1 for s in k if not isinstance(s, Loop)) == 3
 
 
 def test_update_op_conflict_rejected():

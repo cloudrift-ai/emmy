@@ -16,7 +16,6 @@ from emmy.compiler.ir.expression import BinaryExpression, Builtin, Literal, Simp
 from emmy.compiler.ir.kernel import KernelOp, Smem, Sync, Tile
 from emmy.compiler.ir.stmt import (
     Accum,
-    Affine,
     Assign,
     Body,
     Carry,
@@ -71,7 +70,7 @@ def _owned(body, carry):
                 else:
                     need(branch.value, {path | _conjuncts(branch.select) for path in remaining})
                     remaining = {path | {BinaryExpression("==", branch.select, Literal(0, "int"))} for path in remaining}
-        elif isinstance(stmt, (Affine, Assign, Accum)):
+        elif isinstance(stmt, (Assign, Accum)):
             for name in stmt.deps():
                 if name != stmt.name:
                     need(name, wanted)
@@ -109,7 +108,7 @@ def _program(op):
                 loop = loops[0]
                 carries = tuple(s for s in loop.body.iter() if isinstance(s, Carry))
                 if len(carries) != 1 or any(
-                    not isinstance(s, (Loop, Let, Load, Pre, Affine, Assign, Select, Accum, Carry, Write)) for s in loop.body.iter()
+                    not isinstance(s, (Loop, Let, Load, Pre, Assign, Select, Accum, Carry, Write)) for s in loop.body.iter()
                 ):
                     return None
                 carry = carries[0]
@@ -160,7 +159,8 @@ def _resident(op, program, retained=frozenset()):
     shape = tuple(n.as_static() for n in dimensions)
     shared = "_carry"
     parity = Var(loop.axis.name) % Literal(2, "int")
-    before = BinaryExpression(">", Var(loop.axis.name), Literal(0, "int"))
+    # The first-step predicate as the lowering spells it and as the normal form mirrors it.
+    before = (BinaryExpression(">", Var(loop.axis.name), Literal(0, "int")), BinaryExpression("<", Literal(0, "int"), Var(loop.axis.name)))
     stores = [s for s in tile.body.iter() if isinstance(s, Write) and s.output == port]
     if not stores or any(s.atomic or not s.is_scalar for s in stores):
         return None
@@ -174,7 +174,7 @@ def _resident(op, program, retained=frozenset()):
         discarded = set()
         out = []
         for stmt in body:
-            if isinstance(stmt, Select) and len(stmt.branches) == 2 and stmt.branches[0].select == before:
+            if isinstance(stmt, Select) and len(stmt.branches) == 2 and stmt.branches[0].select in before:
                 held = defs.get(stmt.branches[0].value)
                 seed = defs.get(stmt.branches[1].value)
                 if held is not None and held.input == port and seed is not None and seed.input == carry.seed:
@@ -182,7 +182,7 @@ def _resident(op, program, retained=frozenset()):
                     if promoted == tensor.dtype:
                         if uses[seed.name] == 1:
                             discarded.add(seed.name)
-                        stmt = Assign(stmt.name, "copy", (held.name,), dtype=promoted)
+                        stmt = Assign(stmt.name, Var(held.name), dtype=promoted)
             if isinstance(stmt, Load) and stmt.input == port:
                 stmt = stmt.replace(input=shared, index=(parity, *cells_of(stmt.index)), dtype=tensor.dtype)
             elif isinstance(stmt, Write) and stmt.output == port:
@@ -300,7 +300,7 @@ def _guard_stores(body: Body, types=None) -> Body:
             not moved
             or branches[0] & branches[1]
             or any(
-                not isinstance(stmt, (Affine, Assign, Let, Load, Select, Write)) or getattr(stmt, "output", None) in reads
+                not isinstance(stmt, (Assign, Let, Load, Select, Write)) or getattr(stmt, "output", None) in reads
                 for i, stmt in enumerate(stmts[:position])
                 if min(moved) <= i and i not in moved
             )
@@ -316,7 +316,7 @@ def _guard_stores(body: Body, types=None) -> Body:
                 if isinstance(stmt, Load):
                     stmt = stmt.replace(index=tuple(_resolve(e.simplify(SimplifyCtx.empty()), cond, truth) for e in stmt.index))
                 chain.append(stmt)
-            chain.append(Assign(select.name, "copy", (branch.value,), dtype=types.get(select.name, F32)))
+            chain.append(Assign(select.name, Var(branch.value), dtype=types.get(select.name, F32)))
             guarded.append(_guard_stores(Body((*chain, *continuation, *stores)), types))
         replacement = Cond(cond, guarded[0], guarded[1])
         stmts = [stmt for i, stmt in enumerate(stmts) if i not in moved and not position <= i < end]
@@ -338,10 +338,10 @@ def _parallel_copy(op, program, step, shared, parity, shape, batch, threads, dty
         return None
     for store in outputs:
         value = store.value
-        while isinstance(defs.get(value), Assign) and defs[value].op.name == "copy":
+        while isinstance(defs.get(value), Assign) and isinstance(defs[value].value, Var):
             if defs[value].dtype not in (None, dtype):
                 return None
-            value = defs[value].args[0]
+            value = defs[value].value.name
         if value != carry.value or op.outputs[store.output].dtype != dtype:
             return None
 
@@ -357,15 +357,15 @@ def _parallel_copy(op, program, step, shared, parity, shape, batch, threads, dty
             stmt = definitions.get(name)
             if isinstance(stmt, Load) and stmt.input == shared:
                 return stmt.index
-            if isinstance(stmt, Assign) and stmt.op.name == "copy" and stmt.dtype in (None, dtype):
-                return address(stmt.args[0])
+            if isinstance(stmt, Assign) and isinstance(stmt.value, Var) and stmt.dtype in (None, dtype):
+                return address(stmt.value.name)
             return None
 
         for s in body:
             if isinstance(s, Load) and s.input == shared:
                 values[s.name] = s.index
-            elif isinstance(s, Assign) and s.op.name == "copy" and s.dtype in (None, dtype) and address(s.args[0]) is not None:
-                values[s.name] = address(s.args[0])
+            elif isinstance(s, Assign) and isinstance(s.value, Var) and s.dtype in (None, dtype) and address(s.value.name) is not None:
+                values[s.name] = address(s.value.name)
             elif isinstance(s, Write) and address(s.value) is not None:
                 stores.append(s)
                 if s.output == shared and s.index[1:] != address(s.value)[1:]:

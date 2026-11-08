@@ -352,6 +352,13 @@ impl Body {
         out
     }
 
+    /// How many statements the body holds, nested ones included: the weight a memo gives it.
+    pub fn statement_count(&self) -> usize {
+        let mut count = 0;
+        self.walk(&mut |_| count += 1);
+        count
+    }
+
     /// `f` applied to each statement; this body itself when every statement comes back as it was.
     pub fn map_each(&self, f: &mut dyn FnMut(&Arc<Statement>) -> Arc<Statement>) -> Body {
         infallible(self.try_map_each(&mut |stmt| Ok::<_, std::convert::Infallible>(f(stmt))))
@@ -519,8 +526,7 @@ impl Body {
                     Statement::Loop(l) => {
                         for child in l.body.stmts() {
                             if let Statement::Accum(a) = &**child {
-                                let mut axes =
-                                    dependencies.get(&a.value).cloned().unwrap_or_default();
+                                let mut axes = read_dependencies(&a.value, dependencies);
                                 axes.remove(&l.axis.name);
                                 dependencies.insert(a.name, axes);
                             }
@@ -530,7 +536,7 @@ impl Body {
                     Statement::StridedLoop(l) => {
                         for child in l.body.stmts() {
                             if let Statement::Accum(a) = &**child {
-                                let axes = dependencies.get(&a.value).cloned().unwrap_or_default();
+                                let axes = read_dependencies(&a.value, dependencies);
                                 dependencies.insert(a.name, axes);
                             }
                         }
@@ -755,7 +761,8 @@ pub fn free_names(stmt: &Statement) -> Vec<Name> {
                 reads.push(name);
             }
         }
-        for expression in stmt.expressions() {
+        // A program the statement carries (a combine) reads under its own binders, which `deps` already scopes.
+        for expression in stmt.own_expressions() {
             for name in expression.free_vars() {
                 if !bound.contains(&name) && !reads.contains(&name) {
                     reads.push(name);
@@ -843,12 +850,26 @@ impl Subroutine {
     }
 }
 
+/// The axes the names a value expression reads depend on, united.
+fn read_dependencies(
+    value: &Expression,
+    dependencies: &HashMap<Name, HashSet<Name>>,
+) -> HashSet<Name> {
+    value
+        .free_vars()
+        .iter()
+        .filter_map(|name| dependencies.get(name))
+        .flatten()
+        .copied()
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::field::{Float, Floats};
+    use crate::elementwise::Operation;
     use crate::normalize::testing::{accum_names, body, indented, inner, strs};
-    use crate::statement::Affine;
+    use crate::statement::Assign;
     use crate::text::parse_body;
 
     fn names(list: &[&str]) -> HashSet<Name> {
@@ -1158,11 +1179,12 @@ mod tests {
             "a NaN literal keys like its copy"
         );
         let coefficient = |c: f64| {
-            Body::from_statements([Statement::Affine(Affine {
+            Body::from_statements([Statement::Assign(Assign {
                 name: "v".into(),
-                args: Names::from(["x".into()]),
-                coefficients: Floats::from([Float(c)]),
-                offset: Float(0.0),
+                value: Expression::apply(
+                    Operation::Multiply,
+                    vec![Expression::float(c), Expression::var("x")],
+                ),
                 dtype: None,
             })])
         };

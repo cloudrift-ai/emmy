@@ -119,6 +119,19 @@ def classic_node_key(sites, family: str, site: NodeId) -> str:
     return family if len(family_sites) == 1 else f"{family}@{sites.sites[site].path}"
 
 
+def classic_keys(tile_op) -> tuple[str, ...]:
+    """The row keys a kernel's classic schedule spells, in canonical encoding order: the kernel's ``WORK`` and
+    ``RASTER``, one ``TILE`` and one ``REDUCE`` key per site of the family, one ``STAGE`` key per staged consumer."""
+    stage_consumers = tuple(dict.fromkeys(edge[0] for edge in tile_op.stage_edges))
+    return (
+        "WORK",
+        "RASTER",
+        *(classic_node_key(tile_op, "TILE", site) for site in tile_op.family_sites["TILE"]),
+        *(classic_node_key(tile_op, "REDUCE", site) for site in tile_op.family_sites["REDUCE"]),
+        *(classic_stage_key(tile_op, next(edge for edge in tile_op.stage_edges if edge[0] == site)) for site in stage_consumers),
+    )
+
+
 def classic_stage_key(sites, edge: EdgeSite) -> str:
     """Return the canonical key for one staged consumer: bare for one consumer, else its route."""
     if edge not in sites.stage_edges:

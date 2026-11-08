@@ -197,7 +197,9 @@ def _recorded_layout_after_cut(*, fixed_reader=False, source=None):
     graph = Pipeline.build(["tile/lift"]).run(graph, ctx=ctx, db=None)
     target = definition(graph.nodes["y"].op.with_io(graph, graph.nodes["y"]), "y", traced=0, origins=("y",))
     taken = []
-    operand_cut = {"PLACE@map.1/inner.3/map" if fixed_reader else "PLACE": "cut"}
+    # The reduce's results are stored in the other order, so a map permutes them above it and the reduce is a seam of
+    # its own beside the squared operand's: the operand cut names its seam.
+    operand_cut = {"PLACE@map.1/inner.3/map": "cut"}
 
     def decide(point):
         if not taken:

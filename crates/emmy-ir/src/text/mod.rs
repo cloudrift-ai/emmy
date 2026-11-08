@@ -28,13 +28,13 @@ mod tests {
         "in0 = load x[a0] carried=unpack",
         "in0 = load `model.layers.0.weight`[a0]",
         "p = pre state[a0, 0]",
-        "v1 = multiply(in0, in1)",
+        "v1 = in0 * in1",
         "f16 v1 = exp(in0)",
         "`load` = copy(`for`)",
         "v2 = x",
-        "v2 = -x + 0.5*y",
-        "f32 v2 = 2*x - y + 1e-06",
-        "v2 = 3*x - 4",
+        "v2 = -x + 0.5 * y",
+        "f32 v2 = 2 * x - y + 1e-06",
+        "v2 = 3 * x - 4",
         "let v0 = 0.125",
         "let f32 i = a0 * 4 + a1",
         "init f32 acc = -inf",
@@ -61,9 +61,9 @@ mod tests {
         "if a0 < 1:",
         "SetMaxNReg(count=232, direction=inc)",
         "Smem(name=s_x, extents=(64, 64), dtype=f16)",
-        "Tile(axes=(a0 in 0..64, a1 in 0..64), block_threads=128):\n    RegStore(dst_buffer=y, dst_index=(a0, a1), frag=c0, shape=(16, 8, 8)):\n        epilogue:\n            v1 = multiply(v0, s)\n        run:\n            RegStore(dst_buffer=y, dst_index=(a0, a1 + 8), frag=c1, shape=(16, 8, 8))",
+        "Tile(axes=(a0 in 0..64, a1 in 0..64), block_threads=128):\n    RegStore(dst_buffer=y, dst_index=(a0, a1), frag=c0, shape=(16, 8, 8)):\n        epilogue:\n            v1 = v0 * s\n        run:\n            RegStore(dst_buffer=y, dst_index=(a0, a1 + 8), frag=c1, shape=(16, 8, 8))",
         "FragmentApply(out=o, op=where, args=(FragmentArg(kind=coord, expressions=(_vc > _vr)), FragmentArg(kind=gmem, expressions=(i, j), buffer=mask)), row_base=q)",
-        "TreeHalve(bufs=(b), state=(acc), state_b=(acc__o), length=8, tid_var=t):\n    combine_states:\n        t = multiply(acc, acc__o)\n        acc = add(acc, t)",
+        "TreeHalve(bufs=(b), state=(acc), state_b=(acc__o), length=8, tid_var=t):\n    combine_states:\n        t = acc * acc__o\n        acc = acc + t",
         // The other Kernel IR statement types, and the two with the most fields at their fullest.
         "Sync",
         "CpAsyncCopy(smem=s, smem_index=(i, j), src=a, src_index=(i, j), lane_index=(i, j), valid=i < 2)",
@@ -75,7 +75,7 @@ mod tests {
         "MbarrierArriveExpectTx(mbar=mb, bytes_=64, slot=p)",
         "MbarrierArrive(mbar=mb, slot=p)",
         "MbarrierWait(mbar=mb, phase=ph, slot=p)",
-        "WarpShuffle(state=(acc), state_b=(acc__o), length=8):\n    combine_states:\n        t = multiply(acc, acc__o)\n        acc = add(acc, t)",
+        "WarpShuffle(state=(acc), state_b=(acc__o), length=8):\n    combine_states:\n        t = acc * acc__o\n        acc = acc + t",
         "WarpBroadcast(state=(acc), length=8)",
         "FragmentApply(out=o, op=where, args=(FragmentArg(kind=coord, expressions=(__fcol > __frow)), FragmentArg(kind=uniform, names=(u)), FragmentArg(kind=row, names=(r0, r1)), FragmentArg(kind=frag, names=(f)), FragmentArg(kind=gmem, expressions=(i, j), buffer=mask)), row_base=q, col_base=kv)",
         "FragmentRowReduce(top=t0, bot=b0, frags=(f0, f1), op=maximum)",
@@ -90,10 +90,10 @@ mod tests {
         "WgmmaFence",
         "WgmmaCommit",
         "WgmmaWait",
-        "RegStore(dst_buffer=out, dst_index=(i, j), frag=c, shape=(16, 8, 16), epilogue_params=(acc), epilogue_result=y, extra_frags=(c2), m_guard=(i, j), n_guard=(i, j)):\n    epilogue:\n        r = load res[i, j]\n        y = add(acc, r)\n    run:\n        RegStore(dst_buffer=out, dst_index=(i, j), frag=d, shape=(16, 8, 16))",
+        "RegStore(dst_buffer=out, dst_index=(i, j), frag=c, shape=(16, 8, 16), epilogue_params=(acc), epilogue_result=y, extra_frags=(c2), m_guard=(i, j), n_guard=(i, j)):\n    epilogue:\n        r = load res[i, j]\n        y = acc + r\n    run:\n        RegStore(dst_buffer=out, dst_index=(i, j), frag=d, shape=(16, 8, 16))",
     ];
 
-    const CALLS: &str = "sub inner(r in 0..4) -> s:\n    for k in 0..8:\n        x = load a[r, k]\n        s <- add(s, x) over k\nsub outer(r in 0..4, c in 0..2 window(parent=cc in 0..4)) -> t:\n    u = call inner[a](r)\n    w = load b[c]\n    t = multiply(u, w)\nfor i in 0..4:\n    p = call outer[a, b](i, 0)\n    q = call outer[a, b](i, 1)\n    z = call outer[m, b](i, 1)\n    v = p + q + z\n    y[i] = v";
+    const CALLS: &str = "sub inner(r in 0..4) -> s:\n    for k in 0..8:\n        x = load a[r, k]\n        s <- add(s, x) over k\nsub outer(r in 0..4, c in 0..2 window(parent=cc in 0..4)) -> t:\n    u = call inner[a](r)\n    w = load b[c]\n    t = u * w\nfor i in 0..4:\n    p = call outer[a, b](i, 0)\n    q = call outer[a, b](i, 1)\n    z = call outer[m, b](i, 1)\n    v = p + q + z\n    y[i] = v";
 
     /// The subroutine each call of `body` names, in order.
     fn targets(body: &Body) -> Vec<Arc<Subroutine>> {
@@ -135,7 +135,7 @@ mod tests {
 
     #[test]
     fn a_body_is_its_statements_one_under_another() {
-        let text = "let f32 v0 = 0.125\nfor a0 in 0..4:\n    for a1 in 0..8:\n        in0 = load x[a0, a1]\n        v1 = 2*in0 + v0\n        acc0 <- add(acc0, v1) over a1\n    y[a0] = acc0";
+        let text = "let f32 v0 = 0.125\nfor a0 in 0..4:\n    for a1 in 0..8:\n        in0 = load x[a0, a1]\n        v1 = 2 * in0 + v0\n        acc0 <- add(acc0, v1) over a1\n    y[a0] = acc0";
         let body = parse_body(text).unwrap();
         assert_eq!(body_text(&body).unwrap(), text);
         let types: Vec<StatementType> = body.iter_stmts().iter().map(|stmt| stmt.ty()).collect();
@@ -146,7 +146,7 @@ mod tests {
                 StatementType::Loop,
                 StatementType::Loop,
                 StatementType::Load,
-                StatementType::Affine,
+                StatementType::Assign,
                 StatementType::Accum,
                 StatementType::Write
             ]
@@ -172,7 +172,6 @@ mod tests {
                 3,
                 "unexpected indentation",
             ),
-            ("v = 1", 1, "no term"),
             ("y[a0] = v\nv1 = multiply(a, b", 2, "expected"),
             ("v = select:\n    x where a0 < 1", 2, "expected 'when'"),
             ("for a0 in 2..4:", 1, "names its step"),

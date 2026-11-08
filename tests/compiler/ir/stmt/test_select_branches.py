@@ -40,7 +40,7 @@ def test_select_preserves_the_common_type_in_its_consumers(left, right, result, 
         Node(id="out", op=op, inputs=["lhs", "rhs"], outputs=(output,))
     )
     lines = str(stamped.body).splitlines()
-    assert f"{result.name} product = multiply(chosen, a)" in lines
+    assert f"{result.name} product = chosen * a" in lines
     assert f"{result.name} out[0] = product" in lines
     ctx = RenderCtx(ssa_dtypes={"a": left.name, "b": right.name})
     assert render_stmt(selection, ctx)[0].startswith(f"    {ctype} chosen = ")

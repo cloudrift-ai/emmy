@@ -1551,8 +1551,8 @@ def _element_values(node: RegStore, ctx: RenderCtx) -> tuple[list[list[str]], li
                 local = st.rewrite(
                     lambda name, st=st, i=i, env=env: f"{name}_e{i}" if name == st.name else env.get(name, name), Sigma(coord)
                 )
-                rendered = render_stmt(local, replace(ctx, indent=0))[0]
-                lines.append(f"const {rendered}")
+                # A value renders as one C temp per operation node; every line is this element's.
+                lines.extend(f"const {rendered}" for rendered in render_stmt(local, replace(ctx, indent=0)))
                 env[st.name] = f"{st.name}_e{i}"
         per_elem.append(lines)
         vals.append(env[node.epilogue_result])

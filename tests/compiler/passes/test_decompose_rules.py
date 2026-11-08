@@ -14,7 +14,7 @@ from emmy.compiler.dim import Dim
 from emmy.compiler.dtype import BF16, F16, F32, F64
 from emmy.compiler.graph import Graph, Tensor
 from emmy.compiler.ir.base import ConstantOp, InputOp
-from emmy.compiler.ir.expression import Literal, placeholder
+from emmy.compiler.ir.expression import Literal, Var, placeholder
 from emmy.compiler.ir.frontend.ir import (
     CatOp,
     LayerNormOp,
@@ -30,7 +30,7 @@ from emmy.compiler.ir.frontend.ir import (
     UnsqueezeOp,
 )
 from emmy.compiler.ir.loop import LoopOp
-from emmy.compiler.ir.stmt import Affine, Assign
+from emmy.compiler.ir.stmt import Assign
 from emmy.compiler.ir.tensor.ir import ElementwiseOp, IndexMapOp, ReduceOp
 from emmy.compiler.pipeline import LOOP_PASSES, Pipeline
 
@@ -200,20 +200,15 @@ def test_silu_uses_the_input_opmath_dtype(dtype, opmath_dtype):
 def test_silu_f16_lifting_keeps_one_widening_and_one_final_narrowing():
     result = Pipeline.build(LOOP_PASSES).run(_make_silu_graph(F16))
     loop = next(n.op for n in result.nodes.values() if isinstance(n.op, LoopOp))
-    assigns = [
-        (stmt.op.name if isinstance(stmt, Assign) else type(stmt).__name__, stmt.dtype)
-        for stmt in loop.body.iter()
-        if isinstance(stmt, (Assign, Affine))
-    ]
-
-    # The negation and the ``1 + exp`` sum are Affine statements.
-    assert assigns == [
-        ("copy", F32),
-        ("Affine", None),
-        ("exp", None),
-        ("Affine", None),
-        ("divide", F16),
-    ]
+    widening, narrowing = [stmt for stmt in loop.body.iter() if isinstance(stmt, Assign)]
+    # The widening is a typed alias of the loaded value; the narrowing is the one definition the negation, the exp
+    # and the ``1 + exp`` sum folded into.
+    assert isinstance(widening.value, Var) and widening.dtype == F32
+    assert narrowing.value.operation.name == "divide" and narrowing.dtype == F16
+    operations = {
+        node.operation.name for stmt in loop.body.iter() if isinstance(stmt, Assign) for node in stmt.value.subterms() if node.operation
+    }
+    assert {"negative", "exp", "add", "divide"} <= operations
 
 
 def test_silu_correctness():

@@ -188,7 +188,7 @@ mod tests {
     #[test]
     fn a_classed_field_refuses_an_expression_outside_its_class() {
         for text in [
-            "in0 = load x[a0 * 4 + (a1 // 2) % 3, a0 < 8 ? thread_idx.x : (int)n, min(a0, 7) & 1, (a1 + 1) % seq_len]",
+            "in0 = load x[a0 * 4 + (a1 // 2) % 3, a0 < 8 ? thread_idx.x : (int)n, minimum(a0, 7) & 1, (a1 + 1) % seq_len]",
             "let v0 = 2.5 * v1 + exp(v2) - thread_idx.x",
             "if x + 1.0 < 0.0 && a0 == 1:\n    y[a0] = v0",
             "if a0 + 1 <= n && a1 == 0:\n    y[a0] = v0",

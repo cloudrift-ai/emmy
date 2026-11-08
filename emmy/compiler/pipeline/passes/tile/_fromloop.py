@@ -15,12 +15,26 @@ from typing import TYPE_CHECKING
 
 from emmy.compiler.dtype import F32
 from emmy.compiler.ir.axis import Axis
-from emmy.compiler.ir.expression import BinaryExpression, Expression, Literal, TernaryExpression, Var
+from emmy.compiler.ir.expression import BinaryExpression, Expression, Literal, TernaryExpression, Var, apply
 from emmy.compiler.ir.loop import LoopOp
 from emmy.compiler.ir.pure import Lambda
 from emmy.compiler.ir.pure.fold import EXTENTS, Fold, binding_extents
 from emmy.compiler.ir.sigma import Sigma
-from emmy.compiler.ir.stmt import Accum, Affine, Assign, Body, Carry, Init, Let, Load, Loop, Pre, Select, SelectBranch, Statement, Write
+from emmy.compiler.ir.stmt import (
+    Accum,
+    Assign,
+    Body,
+    Carry,
+    Init,
+    Let,
+    Load,
+    Loop,
+    Pre,
+    Select,
+    SelectBranch,
+    Statement,
+    Write,
+)
 from emmy.compiler.ir.tile import Placement, TileOp, extract_output_specs
 from emmy.compiler.ir.tile.ir import guarded_store
 
@@ -116,32 +130,41 @@ def _close(lead: tuple, operands: tuple, body, results: tuple, scope: tuple, lev
     return operands, lift
 
 
-def product_spine(defs: dict, name: str, *, divide: bool = False):
-    """Flatten the ``⊗`` spine defining ``name`` into ``(leaf names, spine statements)`` — the
-    spine recognized by the ``semiring_product`` TRAIT, never an op-name list. ``divide``
-    additionally admits a division on the numerator side: ``(Σ x)/c`` equals ``Σ (x/c)`` for a
-    fold-invariant ``c``, but nothing licenses moving a fold into a denominator, so the divisor is a
-    leaf and only the numerator continues the spine. ``None`` when a spine node is not binary; a
-    name with no product above it is the one-leaf product."""
-    spine: list = []
-    leaves: list[str] = []
+def product_spine(
+    value: Expression, defs: dict, *, divide: bool = False
+) -> tuple[tuple[Expression, ...], tuple[Expression, ...], tuple[Statement, ...]]:
+    """Flatten the ``⊗`` spine of ``value`` into ``(leaves, divisors, followed)`` — the spine recognized by the
+    ``semiring_product`` TRAIT, never an op-name list, through the definitions in ``defs`` a name on the spine
+    stands for (``followed``: the statements the spine runs through, which a caller checks nothing else reads). A
+    leaf is an operand that is no product: a name, a literal or another operation. ``divide`` additionally admits a
+    division on the numerator side: ``(Σ x)/c`` equals ``Σ (x/c)`` for a fold-invariant ``c``, but nothing licenses
+    moving a fold into a denominator, so the divisor is a leaf and only the numerator continues the spine. A value
+    with no product above it is the one-leaf product."""
+    leaves: list[Expression] = []
+    divisors: list[Expression] = []
+    followed: list[Statement] = []
 
-    def walk(current: str) -> bool:
-        stmt = defs.get(current)
-        if isinstance(stmt, Assign):
-            if stmt.op.semiring_product:
-                if len(stmt.args) != 2:
-                    return False
-                spine.append(stmt)
-                return all(walk(arg) for arg in stmt.args)
-            if divide and stmt.op.name == "divide" and len(stmt.args) == 2:
-                spine.append(stmt)
-                leaves.append(stmt.args[1])
-                return walk(stmt.args[0])
+    def walk(current: Expression) -> None:
+        op = current.operation
+        if isinstance(current, Var) and isinstance(stmt := defs.get(current.name), Assign) and stmt.dtype is None:
+            inner = stmt.value.operation
+            if inner is not None and (inner.semiring_product or (divide and inner.name == "divide")) and len(stmt.value.operands) == 2:
+                followed.append(stmt)
+                walk(stmt.value)
+                return
+        if op is not None and op.semiring_product and len(current.operands) == 2:
+            for operand in current.operands:
+                walk(operand)
+            return
+        if divide and op is not None and op.name == "divide" and len(current.operands) == 2:
+            divisors.append(current.operands[1])
+            leaves.append(current.operands[1])
+            walk(current.operands[0])
+            return
         leaves.append(current)
-        return True
 
-    return (tuple(leaves), tuple(spine)) if walk(name) else None
+    walk(value)
+    return tuple(leaves), tuple(divisors), tuple(followed)
 
 
 @dataclass
@@ -163,41 +186,117 @@ def _decode_split(arg: str, plain: Body, defs: dict, exposed: dict, k_name: str)
     element by dtype, the mma fragment loaders included), and the invariant factors commute out
     onto the accumulator: the same reassociation category as split-K. Only a decode licenses it,
     so an ordinary floating-point factor chain is never reassociated here."""
-    flattened = product_spine(defs, arg, divide=True)
-    leaves, spine = flattened if flattened is not None else ((arg,), ())
+    stmt = defs.get(arg)
+    if not isinstance(stmt, Assign):
+        return None
+    leaves, divisors, followed = product_spine(stmt.value, defs, divide=True)
 
-    def varies(leaf: str) -> bool:
-        if leaf in exposed:
-            return k_name in exposed[leaf].free_axes
-        if leaf not in defs:
-            return False  # an enclosing value — bound above the reduce loop
-        reads = plain.backward_cone((leaf,)).external_reads
-        return k_name in reads or any(k_name in exposed[name].free_axes for name in reads if name in exposed)
+    def varies(leaf: Expression) -> bool:
+        for name in leaf.free_vars():
+            if name in exposed:
+                if k_name in exposed[name].free_axes:
+                    return True
+            elif name in defs:
+                reads = plain.backward_cone((name,)).external_reads
+                if k_name in reads or any(k_name in exposed[read].free_axes for read in reads if read in exposed):
+                    return True
+        return False
 
     varying = [leaf for leaf in leaves if varies(leaf)]
-    decode = defs.get(varying[0]) if len(varying) == 1 else None
-    if not isinstance(decode, Assign) or decode.op.decodes is None or len(decode.args) != 1:
+    if len(varying) != 1:
         return None
-    slab = exposed[decode.args[0]].as_slab() if decode.args[0] in exposed else None
-    if slab is None or (slab.load.dtype is not None and slab.load.dtype.name != decode.op.decodes):
+    # The decode is the one varying leaf: a name the step defines (the lift names every operation node).
+    named = defs.get(varying[0].name) if isinstance(varying[0], Var) else None
+    decode = named.value if isinstance(named, Assign) else varying[0]
+    code = decode.operands[0] if decode.operation is not None and len(decode.operands) == 1 else None
+    if decode.operation is None or decode.operation.decodes is None or not isinstance(code, Var) or code.name not in exposed:
         return None
-    seen = {id(decode)} | {id(stmt) for stmt in spine}
+    slab = exposed[code.name].as_slab()
+    if slab is None or (slab.load.dtype is not None and slab.load.dtype.name != decode.operation.decodes):
+        return None
+    seen = {id(stmt), *(id(member) for member in followed), *([id(named)] if named is not None else [])}
     stmts: list[Statement] = []
     terms: list[Fold] = []
     for leaf in leaves:
-        if leaf == varying[0]:
+        if leaf is varying[0]:
             continue
-        if leaf in exposed:
-            terms.append(exposed[leaf])
-        elif leaf in defs:
-            stmts.extend(stmt for stmt in plain.backward_cone((leaf,)).members if id(stmt) not in seen)
-            seen.update(id(stmt) for stmt in stmts)
-    if any(id(stmt) not in seen for stmt in plain.backward_cone((arg,)).members):
+        for name in leaf.free_vars():
+            if name in exposed:
+                terms.append(exposed[name])
+            elif name in defs:
+                stmts.extend(member for member in plain.backward_cone((name,)).members if id(member) not in seen)
+                seen.update(id(member) for member in stmts)
+    if any(id(member) not in seen for member in plain.backward_cone((arg,)).members):
         return None
-    terms.extend(exposed[name] for stmt in stmts for name in stmt.deps() if name in exposed and all(exposed[name] is not t for t in terms))
-    divisors = {stmt.args[1] for stmt in spine if stmt.op.name == "divide"}
-    factors = tuple((leaf, leaf in divisors) for leaf in leaves if leaf != varying[0])
-    return exposed[decode.args[0]], _Hoist(tuple(terms), tuple(stmts), factors)
+    terms.extend(
+        exposed[name] for member in stmts for name in member.deps() if name in exposed and all(exposed[name] is not t for t in terms)
+    )
+    factors = tuple((leaf, leaf in divisors) for leaf in leaves if leaf is not varying[0])
+    return exposed[code.name], _Hoist(tuple(dict.fromkeys(terms)), tuple(stmts), factors)
+
+
+def _operand_names(product: Assign) -> tuple[str, ...]:
+    """The names a product's operands read: every operand of a lifted step's product is a name (:func:`_one_per_node`)."""
+    return tuple(operand.name for operand in product.value.operands if isinstance(operand, Var))
+
+
+def _one_per_node(body: Body) -> Body:
+    """``body`` with one definition per operation node: every nested operation node of an ``Assign``'s value is a
+    definition of its own ahead of its reader, named after it (``v__e0``, ``v__e1``, …), and an ``Accum`` sums a name.
+    An affine region (sums, differences, negations and literal scales, the normal form's affine form) is one node, as a
+    sum is one operation. The Loop IR's normal form folds a value read once into its reader; the tile IR's nodes are
+    one operation each, so the lift translates between the two granularities here, once, and every cone, edge and seam
+    it forms downstream is the one the chain spelling gave. Nested bodies are lifted by their own call."""
+    taken = set(body.ssa_uses) | {name for stmt in body.iter() for name in stmt.defines()}
+    out: list[Statement] = []
+
+    def fresh(base: str) -> str:
+        index = 0
+        while f"{base}__e{index}" in taken:
+            index += 1
+        taken.add(f"{base}__e{index}")
+        return f"{base}__e{index}"
+
+    def part(node: Expression, base: str, in_affine: bool) -> Expression:
+        """``node`` with the operation nodes below it defined, itself defined too unless it is the root or a node of
+        the enclosing affine region."""
+        affine = _affine_node(node)
+        rebuilt = node.with_children([part(child, base, affine) for child in node.children()])
+        if rebuilt.operation is None or (in_affine and affine):
+            return rebuilt
+        name = fresh(base)
+        out.append(Assign(name, rebuilt))
+        return Var(name)
+
+    for stmt in body:
+        if isinstance(stmt, Assign):
+            affine = _affine_node(stmt.value)
+            value = stmt.value.with_children([part(child, stmt.name, affine) for child in stmt.value.children()])
+            out.append(stmt if value == stmt.value else stmt.replace(value=value))
+        elif isinstance(stmt, Accum) and not isinstance(stmt.value, Var):
+            value = part(stmt.value, stmt.name, False)
+            if not isinstance(value, Var):
+                name = fresh(stmt.name)
+                out.append(Assign(name, value))
+                value = Var(name)
+            out.append(stmt.replace(value=value))
+        else:
+            out.append(stmt)
+    return Body(tuple(out))
+
+
+def _affine_node(node: Expression) -> bool:
+    """Whether ``node`` is a node of an affine region: a sum, a difference, a negation, or a product or quotient with a
+    literal factor."""
+    op = node.operation
+    if op is None:
+        return False
+    if op.name in ("add", "subtract", "negative"):
+        return True
+    operands = node.operands
+    if op.name == "multiply":
+        return any(isinstance(operand, Literal) for operand in operands)
+    return op.name == "divide" and len(operands) == 2 and isinstance(operands[1], Literal)
 
 
 def _factor_products(
@@ -225,13 +324,14 @@ def _factor_products(
         return unfactored
     defs = plain.definitions
     products = [defs.get(value) for value in values]
-    if any(not isinstance(product, Assign) or len(set(product.args)) != 2 for product in products):
+    if any(not isinstance(product, Assign) or len(set(_operand_names(product))) != 2 for product in products):
         return unfactored
-    if any(product.op != products[0].op or not product.op.distributes_over(plus) for product in products):
+    operation = products[0].value.operation
+    if any(product.value.operation != operation or not product.value.operation.distributes_over(plus) for product in products):
         return unfactored
     product_ids = {id(product) for product in products}
     exposed = {name: term for term in terms for name in term.exposes}
-    computed = tuple(dict.fromkeys(arg for product in products for arg in product.args if arg in defs))
+    computed = tuple(dict.fromkeys(arg for product in products for arg in _operand_names(product) if arg in defs))
     if any(id(defs[arg]) in product_ids for arg in computed):
         return unfactored
     cones = {arg: plain.backward_cone((arg,)) for arg in computed}
@@ -247,7 +347,7 @@ def _factor_products(
             edge_of[arg], hoists[arg] = split
     # A split argument's product reads the raw slab in its place.
     raw_names = {arg: edge.exposes[0] for arg, edge in edge_of.items()}
-    products = [product.replace(args=tuple(raw_names.get(name, name) for name in product.args)) for product in products]
+    products = [product.replace(value=product.value.rename(raw_names)) for product in products]
     # Overlapping cones are one term exposing every root they share members with.
     groups: list[list[str]] = []
     for arg in (arg for arg in computed if arg not in edge_of):
@@ -261,7 +361,7 @@ def _factor_products(
         else:
             groups.append([arg])
     consumed: set[int] = set()
-    arguments = tuple(dict.fromkeys(arg for product in products for arg in product.args))
+    arguments = tuple(dict.fromkeys(arg for product in products for arg in _operand_names(product)))
     for group in groups:
         cone = plain.backward_cone(tuple(group))
         reads = tuple(term for term in terms if any(name in cone.external_reads for name in term.exposes))
@@ -273,7 +373,9 @@ def _factor_products(
         results = tuple(arg for arg in arguments if arg in group or arg in passed)  # as the products read them
         operands, lift = _close((), reads, Body(cone.members), results, scope, levels)
         edge_of.update((arg, Fold(operands=operands, lift=lift)) for arg in results)
-    pairs = [tuple(edge_of.get(arg) or exposed.get(arg) for arg in product.args) for product in products]  # raw names are exposed
+    pairs = [
+        tuple(edge_of.get(arg) or exposed.get(arg) for arg in _operand_names(product)) for product in products
+    ]  # raw names are exposed
     # Alpha-equal argument edges (two loads of one slab, two spellings of one cone) are ONE edge:
     # the first survives and the later products read its names, so the channels share A outright.
     survivors: dict[tuple, Fold] = {}
@@ -290,14 +392,15 @@ def _factor_products(
 
     pairs = [tuple(unified(edge) for edge in pair) for pair in pairs]
     if renames:
-        products = [product.replace(args=tuple(renames.get(name, name) for name in product.args)) for product in products]
+        products = [product.replace(value=product.value.rename(renames)) for product in products]
     ordered = _orient(pairs, tuple(axis.name for axis in axes))
     split_names = {raw: arg for arg, raw in raw_names.items()}
     consumed.update(id(term) for hoist in hoists.values() for term in hoist.terms)  # a factor's slab rides the epilogue
     consumed -= {id(edge) for edge in ordered}
     leftover = tuple(term for term in terms if id(term) not in consumed and all(term is not edge for edge in ordered))
     per_state = {
-        index: tuple(hoists[split_names[name]] for name in product.args if name in split_names) for index, product in enumerate(products)
+        index: tuple(hoists[split_names[name]] for name in _operand_names(product) if name in split_names)
+        for index, product in enumerate(products)
     }
     hoisted = {index: hoist for index, hoist in per_state.items() if any(h.factors for h in hoist)}  # a bare decode has no epilogue
     return (*ordered, *leftover), Body(tuple(products)), hoisted
@@ -319,7 +422,7 @@ def _hoisted(fold: Fold, names: tuple[str, ...], hoists: dict, axes: tuple, leve
             epilogue.extend(stmt for stmt in hoist.stmts if all(stmt is not held for held in epilogue))
         for position, (leaf, divide) in enumerate(factors):
             result = name if position == len(factors) - 1 else f"{name}__c{position}"
-            epilogue.append(Assign(name=result, op="divide" if divide else "multiply", args=(current, leaf)))
+            epilogue.append(Assign(result, apply("divide" if divide else "multiply", current, leaf)))
             current = result
     operands, lift = _close((), tuple(terms), Body(tuple(epilogue)), names, axes, levels)
     return Fold(operands=operands, lift=lift)
@@ -327,8 +430,9 @@ def _hoisted(fold: Fold, names: tuple[str, ...], hoists: dict, axes: tuple, leve
 
 def _orient(pairs: list[tuple], axes: tuple[str, ...]) -> tuple[Fold, ...]:
     """The unique edges the products read, A first: the edge every channel shares, else — for one
-    channel — the edge whose own output axis comes earlier in ``axes``. An argument no edge here
-    supplies (an enclosing value ``_close`` binds later) leaves the order as read."""
+    channel — the edge whose earliest own output axis comes earlier in ``axes`` (the normal form orders a
+    product's operands by name, so the order as read decides nothing). An argument no edge here supplies (an
+    enclosing value ``_close`` binds later) leaves the order as read."""
     edges: list[Fold] = []
     for pair in pairs:
         edges.extend(edge for edge in pair if edge is not None and all(edge is not seen for seen in edges))
@@ -341,9 +445,10 @@ def _orient(pairs: list[tuple], axes: tuple[str, ...]) -> tuple[Fold, ...]:
         left, right = pairs[0]
         left_only, right_only = left.free_axes - right.free_axes, right.free_axes - left.free_axes
         lead = None
-        if len(left_only) == 1 and len(right_only) == 1:
+        if left_only and right_only:
             position = {name: index for index, name in enumerate(axes)}
-            lead = left if position.get(next(iter(left_only)), len(axes)) <= position.get(next(iter(right_only)), len(axes)) else right
+            earliest = [min(position.get(name, len(axes)) for name in own) for own in (left_only, right_only)]
+            lead = left if earliest[0] <= earliest[1] else right
     return tuple(edges) if lead is None else (lead, *(edge for edge in edges if edge is not lead))
 
 
@@ -388,7 +493,7 @@ def lift_body(body, axes: tuple = (), levels: tuple = (), carriers: dict | None 
     inner_levels = (*levels, level)
     edges: list = []
     bound = {axis.name for axis in axes}  # one coordinate per name: a sibling sweep reusing one is renamed apart
-    for stmt in Body.coerce(body):
+    for stmt in _one_per_node(Body.coerce(body)):
         if isinstance(stmt, Loop) and not stmt.is_reduce:
             if stmt.axis.name in bound:
                 stmt = _renamed_sweep(stmt, bound)
@@ -489,6 +594,7 @@ def scan_from_loop(loop: Loop, axes: tuple = (), levels: tuple = ()) -> tuple[Fo
     # STORED value from the carried state — the rounding a narrowing store spells — observes the state
     # as the store does; it belongs to the observer below, not to the step.
     step = tuple(stmt for stmt in body if not isinstance(stmt, Accum) and id(stmt) not in write_ids)
+    values = tuple(stmt.value.name for stmt in accums)  # one definition per node: every Accum sums a name
     observed, step = _observers(step, tuple(dict.fromkeys(value for stmt in writes for value in stmt.values)), names, loop.axis.name)
     # Every ``Load`` in the step becomes a SLAB — a term declaring the coordinates it indexes —
     # and a semiring step's product ARGUMENTS become operand edges too (:func:`_factor_products`):
@@ -501,7 +607,7 @@ def scan_from_loop(loop: Loop, axes: tuple = (), levels: tuple = ()) -> tuple[Fo
     # a code read from gmem indexes the next table read, and reading only the arithmetic
     # here left that index declared as a coordinate the kernel could hand no extent.
     slabs, plain = _slabs(step, levels[-1].carriers if levels else {}, _values_in_scope(levels))
-    values, ops = tuple(stmt.value for stmt in accums), tuple(stmt.op for stmt in accums)
+    ops = tuple(stmt.op for stmt in accums)
     edges, plain, hoists = _factor_products(plain, values, ops, (*edges, *slabs), scope, levels, axes, hoist=not writes)
     # FORM the lift closed: a value the step reads from an enclosing level arrives as an operand;
     # the coordinates it reads outright (a mask's ``Select``) stay free — at the construction
@@ -516,7 +622,7 @@ def scan_from_loop(loop: Loop, axes: tuple = (), levels: tuple = ()) -> tuple[Fo
     stored = tuple(dict.fromkeys(value for stmt in writes for value in stmt.values))
     observe = Lambda(
         params=(loop.axis.name, *names),
-        body=Body((*observed, *(Assign(name=f"{value}__obs", op="copy", args=(value,)) for value in stored))),
+        body=Body((*observed, *(Assign(f"{value}__obs", Var(value)) for value in stored))),
         results=tuple(f"{value}__obs" for value in stored),
     )
     fold = Fold(operands=edges, lift=lift, init=init, base=combine, observe=observe)
@@ -628,7 +734,7 @@ def _carried_from_loop(loop: Loop, axes: tuple, levels: tuple) -> tuple[Fold, tu
     skip = {id(stmt) for stmt in (*carried, *writes, *sweeps)}
     slabs, plain = _slabs(tuple(stmt for stmt in body if id(stmt) not in skip), carriers, _values_in_scope(levels))
     observed = {value: f"{value}__obs" for stmt in writes for value in stmt.values}
-    plain = Body((*plain, *(Assign(name=fresh, op="copy", args=(value,)) for value, fresh in observed.items())))
+    plain = Body((*plain, *(Assign(fresh, Var(value)) for value, fresh in observed.items())))
     results = (*(carry.value for carry in carried), *observed.values(), *swept)
     edges, lift = _close((loop.axis.name,), (*edges, *slabs), plain, results, scope, levels)
     names = tuple(carry.name for carry in carried)
@@ -662,7 +768,7 @@ def stored_states(loop: Loop, outer: tuple[Axis, ...]) -> dict[str, tuple[Carry,
     fixed = {loop.axis.name, *(axis.name for axis in outer)}
     stmts = tuple(loop.body.iter())
     carries = {s.value: s for s in stmts if isinstance(s, Carry) and s.name in loop.carries}
-    copies = {s.name: s.args[0] for s in stmts if isinstance(s, Assign) and s.op.name == "copy" and s.dtype in (None, F32)}
+    copies = {s.name: s.value.name for s in stmts if isinstance(s, Assign) and isinstance(s.value, Var) and s.dtype in (None, F32)}
     out: dict[str, tuple[Carry, Write]] = {}
     for stmt in stmts:
         if not (isinstance(stmt, Write) and stmt.is_scalar and not stmt.atomic):
@@ -765,7 +871,7 @@ def _peel(body: Body) -> tuple[list, list[Statement]]:
     current = list(body)
     while True:
         index = 0
-        while index < len(current) and isinstance(current[index], (Load, Affine, Assign, Init, Let, Select)):
+        while index < len(current) and isinstance(current[index], (Load, Assign, Init, Let, Select)):
             index += 1
         head, rest = current[:index], current[index:]
         if len(rest) != 1 or not isinstance(rest[0], Loop) or rest[0].is_reduce:

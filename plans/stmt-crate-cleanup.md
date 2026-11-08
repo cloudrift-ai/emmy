@@ -171,8 +171,9 @@ lowering that emits the wrong thing, a finding to fix in the lowering, never a r
    comparisons, the logical and bitwise operators) goes; a binary expression node holds an `Operation`, and the table
    gains an infix spelling column for the operators that have one, so expression text is unchanged. The affine role
    is already a column (`Sum`, `Difference`, `Negation`, `Scale`, `Quotient`), and so are the properties the classes
-   below read, so no second operation enum exists in the crate. The simplifier's rules match on properties, as the
-   normalization steps already do, never on operator variants.
+   below read, so no second operation enum exists in the crate. Rules about neutral elements and commutativity read the
+   table, as the normalization steps already do; algebra specific to one operation (interval arithmetic, a static
+   comparison) may match it.
 2. **Two classes, one expression type.** A `closed_set!` of classes, each a predicate over the table that every
    operation node in an expression must satisfy:
    - `Index`: integer arithmetic over axes, GPU built-ins, literals and names: the affine operations, floor division

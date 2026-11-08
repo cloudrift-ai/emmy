@@ -93,7 +93,7 @@ pipeline that holds them.
 - **A pass may call a normalization step; normalization never calls a pass.**
 - **Nothing is added to normalization to make a kernel faster.** A canonical form moves every kernel identity and
   every golden; whether a transform pays is the knob's evidence question. A simplification that always removes work
-  and never adds any is a canonical form, like constant folding or the fold of a sum into one `Affine` statement:
+  and never adds any is a canonical form, like constant folding or the fold of a sum into its affine form:
   it decides nothing, and it is exact up to the reassociation of a sum and the rounding of a literal reciprocal,
   which every reduce schedule and fast-math division already take.
 

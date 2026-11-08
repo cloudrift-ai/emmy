@@ -116,6 +116,7 @@ impl<T: Send + Sync, V: Send> Store for Table<T, V> {
             name: tables.name,
             entries: tables.entries.len(),
             capacity: None,
+            weight: None,
             hits: tables.hits,
             misses: tables.misses,
         }
@@ -825,10 +826,10 @@ pub fn simplify_body<'py>(body: &Bound<'py, PyAny>) -> PyResult<Bound<'py, PyBod
     )
 }
 
-/// Fold every maximal single-reader affine cone into one `Affine`; `exposed` names count as read.
+/// Fold every pure value read once into its reader's expression; `exposed` names count as read once more.
 #[pyfunction]
 #[pyo3(signature = (body, exposed = None))]
-pub fn fold_affine<'py>(
+pub fn fold_single_readers<'py>(
     body: &Bound<'py, PyAny>,
     exposed: Option<&Bound<'py, PyAny>>,
 ) -> PyResult<Bound<'py, PyBody>> {
@@ -841,7 +842,16 @@ pub fn fold_affine<'py>(
     };
     PyBody::wrap(
         body.py(),
-        &emmy_ir::normalize::fold_affine(&PyBody::from_iterable(body)?, &exposed),
+        &emmy_ir::normalize::fold_single_readers(&PyBody::from_iterable(body)?, &exposed),
+    )
+}
+
+/// Every value expression in its canonical spelling under the names as they stand.
+#[pyfunction]
+pub fn canonical_values<'py>(body: &Bound<'py, PyAny>) -> PyResult<Bound<'py, PyBody>> {
+    PyBody::wrap(
+        body.py(),
+        &emmy_ir::normalize::canonical_values(&PyBody::from_iterable(body)?),
     )
 }
 
@@ -889,17 +899,6 @@ pub fn rename_free<'py>(
         return Ok(stmt.clone());
     }
     Ok(wrap_statement(py, &renamed)?.into_bound(py))
-}
-
-/// `stmts` with every `Affine` spelled as its binary `Assign`s.
-#[pyfunction]
-pub fn binary<'py>(py: Python<'py>, stmts: &Bound<'py, PyAny>) -> PyResult<Bound<'py, PyTuple>> {
-    let stmts = statements_from_py(stmts)?;
-    let items: PyResult<Vec<Py<PyAny>>> = emmy_ir::protocol::binary(&stmts)
-        .iter()
-        .map(|s| wrap_statement(py, s))
-        .collect();
-    PyTuple::new(py, items?)
 }
 
 /// The mask branch of an ordered two-way comparison, or `None`.
@@ -959,11 +958,11 @@ pub fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(normalize_uncached, m)?)?;
     m.add_function(wrap_pyfunction!(prepare_body, m)?)?;
     m.add_function(wrap_pyfunction!(simplify_body, m)?)?;
-    m.add_function(wrap_pyfunction!(fold_affine, m)?)?;
+    m.add_function(wrap_pyfunction!(fold_single_readers, m)?)?;
+    m.add_function(wrap_pyfunction!(canonical_values, m)?)?;
     m.add_function(wrap_pyfunction!(free_names_py, m)?)?;
     m.add_function(wrap_pyfunction!(exposed_defines_py, m)?)?;
     m.add_function(wrap_pyfunction!(rename_free, m)?)?;
-    m.add_function(wrap_pyfunction!(binary, m)?)?;
     m.add_function(wrap_pyfunction!(mask_select_predicate, m)?)?;
     m.add_function(wrap_pyfunction!(ordering_constraints, m)?)?;
     m.add_function(wrap_pyfunction!(dtype_promote, m)?)?;
@@ -989,6 +988,7 @@ fn memo_stats<'py>(py: Python<'py>) -> PyResult<Bound<'py, PyList>> {
         item.set_item("name", stats.name)?;
         item.set_item("entries", stats.entries)?;
         item.set_item("capacity", stats.capacity)?;
+        item.set_item("weight", stats.weight)?;
         item.set_item("hits", stats.hits)?;
         item.set_item("misses", stats.misses)?;
         out.append(item)?;

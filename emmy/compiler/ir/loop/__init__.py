@@ -7,7 +7,6 @@ Common types are re-exported here for Loop IR callers.
 
 from emmy.compiler.ir.loop.ir import (
     Accum,
-    Affine,
     Assign,
     Axis,
     BodyAnalysis,
@@ -26,7 +25,6 @@ from emmy.compiler.ir.sigma import Sigma
 
 __all__ = [
     "Accum",
-    "Affine",
     "Assign",
     "Axis",
     "Cond",

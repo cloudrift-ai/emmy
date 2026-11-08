@@ -12,11 +12,10 @@ use super::with_bodies;
 use crate::Name;
 use crate::Result;
 use crate::body::Body;
-use crate::elementwise::Operation;
 use crate::expr::{Expr, ExprType, Expression, Num, python_repr};
-use crate::field::{FieldType, Float};
+use crate::field::FieldType;
 use crate::numbering::{Key, Numbering, expression_key};
-use crate::statement::{Affine, Statement};
+use crate::statement::Statement;
 
 /// A statement's own shape with every name and buffer one placeholder: its statement type, then its fields in
 /// declaration order. Statement types sort by name, which puts every store after the values it reads, as the Python
@@ -38,7 +37,7 @@ pub(crate) fn sibling_shape(stmt: &Arc<Statement>) -> Result<Key> {
     {
         buffers.insert(name, Name::from("__slot__"));
     }
-    let shell = unlisted(&Statement::rename_buffers(&renamed, &buffers));
+    let shell = Statement::rename_buffers(&renamed, &buffers);
     let extent = match &*shell {
         Statement::Loop(l) => Some(&l.axis.extent.expression),
         Statement::StridedLoop(l) => Some(&l.axis.extent.expression),
@@ -59,7 +58,7 @@ pub(crate) fn sibling_shape(stmt: &Arc<Statement>) -> Result<Key> {
 /// symmetric siblings order by the buffers they touch.
 pub(crate) fn sibling_spelling(stmt: &Arc<Statement>) -> Key {
     let renamed = Statement::rename_with(stmt, &|_| Some(Name::from("__name__")));
-    let body = Body::new(vec![renamed]).map_stmts(&mut |s| Some(unlisted(s)));
+    let body = Body::new(vec![renamed]);
     Key::text(crate::text::structural_body_text(&body))
 }
 
@@ -118,7 +117,7 @@ pub(crate) fn extent_digest(expression: &Expression) -> String {
             Expr::Binary(op, left, right) => {
                 format!(
                     "('BinaryExpr', {}, {}, {})",
-                    python_repr(op.infix().unwrap_or(op.text())),
+                    python_repr(op.spelling()),
                     form(left),
                     form(right)
                 )
@@ -209,11 +208,7 @@ pub(crate) fn operand_ranks(
             let rank = match &*after {
                 Statement::Accum(_) | Statement::Init(_) => 0,
                 Statement::Load(_) => 1,
-                Statement::Assign(a)
-                    if a.op.copies() && a.args.len() == 1 && loaded.contains(&a.args[0]) =>
-                {
-                    1
-                }
+                Statement::Assign(a) if widened_load(&a.value, &loaded) => 1,
                 _ => 2,
             };
             for name in after.defines() {
@@ -238,19 +233,6 @@ pub(crate) fn unranked() -> Key {
     Key::tuple([Key::Int(3), Key::str("")])
 }
 
-/// A sum with its coefficients sorted: the order lists a sum's terms itself, so what it sorts by reads none of that.
-pub(crate) fn unlisted(stmt: &Arc<Statement>) -> Arc<Statement> {
-    if let Statement::Affine(a) = &**stmt {
-        let mut coefficients: Vec<Float> = a.coefficients.to_vec();
-        coefficients.sort_by(|x, y| x.0.total_cmp(&y.0));
-        return Arc::new(Statement::Affine(Affine {
-            coefficients: coefficients.into(),
-            ..a.clone()
-        }));
-    }
-    stmt.clone()
-}
-
 /// Where a sibling sorts first: leaves, then blocks, then blocks with side effects.
 pub(crate) fn sibling_category(stmt: &Statement) -> i64 {
     let block = !stmt.nested().is_empty();
@@ -261,25 +243,15 @@ pub(crate) fn sibling_category(stmt: &Statement) -> i64 {
     }
 }
 
-/// The key a sum's terms sort by: the operand rank, the name, the coefficient.
-pub(crate) fn term_key(operand: Key, name: &Name, coefficient: f64) -> (Key, Name, Key) {
-    (operand, *name, Key::float(coefficient))
-}
-
-/// Whether `op`'s operands may trade places.
-pub(crate) fn commutative(op: Operation) -> bool {
-    matches!(
-        op,
-        Operation::Add
-            | Operation::Multiply
-            | Operation::Equal
-            | Operation::NotEqual
-            | Operation::LogicalAnd
-            | Operation::LogicalOr
-            | Operation::BitwiseAnd
-            | Operation::BitwiseOr
-            | Operation::BitwiseXor
-    )
+/// A copy of a load, or a load's name itself: a slab the lift reads ahead of the computed operands.
+fn widened_load(value: &Expression, loaded: &HashSet<Name>) -> bool {
+    match value.operation() {
+        Some((op, args)) if op.info().copies => {
+            matches!(&args[..], [arg] if arg.as_var().is_some_and(|n| loaded.contains(n)))
+        }
+        Some(_) => false,
+        None => value.as_var().is_some_and(|n| loaded.contains(n)),
+    }
 }
 
 /// An expression's form with every bound axis spelled by its binding position: the order of two operands.

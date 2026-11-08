@@ -262,9 +262,12 @@ def _advanced(abstract: Body, literals: tuple[int, ...], deltas: tuple[int, ...]
             if stmt.op.identity is None:
                 raise RuleSkipped(f"{stmt.op.name} has no identity to fold past a step's bound")
             idle, contributed = f"{stmt.name}__idle{masked}", f"{stmt.name}__in{masked}"
+            # A branch carries a name: the folded value is bound first unless it is one already.
+            bound = () if isinstance(stmt.value, Var) else (Assign(f"{stmt.name}__v{masked}", stmt.value),)
+            value = stmt.value.name if isinstance(stmt.value, Var) else bound[0].name
             masked += 1
-            select = Select(name=contributed, branches=(SelectBranch(stmt.value, within), SelectBranch(idle, Literal(True, "bool"))))
-            return (Let(name=idle, value=stmt.init), select, stmt.replace(value=contributed))
+            select = Select(name=contributed, branches=(SelectBranch(value, within), SelectBranch(idle, Literal(True, "bool"))))
+            return (Let(name=idle, value=stmt.init), *bound, select, stmt.replace(value=contributed))
 
         return past_the_bound
 

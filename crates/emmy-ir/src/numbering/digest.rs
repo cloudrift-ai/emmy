@@ -3,7 +3,7 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
-use super::{Key, Number, Numbering, Tag, hash_parts, value_numbers};
+use super::{Chains, Key, Number, Numbering, Tag, hash_parts, value_numbers};
 use crate::body::{Body, StmtRef};
 use crate::order::ordering_constraints;
 use crate::{Name, locked};
@@ -193,17 +193,27 @@ fn partition(cells: &Cells) -> Vec<Vec<Name>> {
 
 /// Number until the open resources' cells stop splitting: each is colored by its type and by everything downstream
 /// of it. `cell` is updated in place.
-fn cells(body: &Body, colors: Colors, rank: &HashMap<Name, usize>, cell: &mut Cells) -> Numbering {
+fn cells(
+    body: &Body,
+    colors: Colors,
+    rank: &HashMap<Name, usize>,
+    cell: &mut Cells,
+    chains: Chains,
+) -> Numbering {
     let number = |cell: &Cells| {
-        value_numbers(body, &|name| {
-            Keyed {
-                colors,
-                rank,
-                cell,
-                pick: None,
-            }
-            .key(name)
-        })
+        value_numbers(
+            body,
+            &|name| {
+                Keyed {
+                    colors,
+                    rank,
+                    cell,
+                    pick: None,
+                }
+                .key(name)
+            },
+            chains,
+        )
     };
     let mut numbering = number(cell);
     loop {
@@ -234,7 +244,7 @@ fn cells(body: &Body, colors: Colors, rank: &HashMap<Name, usize>, cell: &mut Ce
 /// Every buffer's and carried state's role at a glance: the rank of its cell of use among the cells.
 pub fn roles(body: &Body, colors: Colors) -> HashMap<Name, usize> {
     let mut cell: Cells = HashMap::new();
-    cells(body, colors, &HashMap::new(), &mut cell);
+    cells(body, colors, &HashMap::new(), &mut cell, Chains::Flat);
     let mut values: Vec<&Key> = cell.values().collect();
     values.sort();
     values.dedup();
@@ -244,11 +254,11 @@ pub fn roles(body: &Body, colors: Colors) -> HashMap<Name, usize> {
 }
 
 /// The body's identity and its external buffers in role order.
-pub fn digest(body: &Body, colors: Colors) -> (Number, Vec<Name>) {
+pub fn digest(body: &Body, colors: Colors, chains: Chains) -> (Number, Vec<Name>) {
     let mut rank: HashMap<Name, usize> = HashMap::new();
     let mut cell: Cells = HashMap::new();
     let mut effects: Effects = HashMap::new();
-    let numbering = cells(body, colors, &rank, &mut cell);
+    let numbering = cells(body, colors, &rank, &mut cell, chains);
     let names: Vec<Name> = numbering
         .buffers
         .iter()
@@ -286,8 +296,11 @@ pub fn digest(body: &Body, colors: Colors) -> (Number, Vec<Name>) {
                         cell: &cell,
                         pick: Some(name),
                     };
-                    let tree =
-                        scope_tree(&value_numbers(body, &|n| keyed.key(n)), body, &mut effects);
+                    let tree = scope_tree(
+                        &value_numbers(body, &|n| keyed.key(n), chains),
+                        body,
+                        &mut effects,
+                    );
                     (*name, tree)
                 })
                 .collect();
@@ -306,7 +319,7 @@ pub fn digest(body: &Body, colors: Colors) -> (Number, Vec<Name>) {
             }
         }
         if rank.len() < names.len() {
-            cells(body, colors, &rank, &mut cell);
+            cells(body, colors, &rank, &mut cell, chains);
         }
     }
     let keyed = Keyed {
@@ -315,7 +328,7 @@ pub fn digest(body: &Body, colors: Colors) -> (Number, Vec<Name>) {
         cell: &cell,
         pick: None,
     };
-    let final_numbering = value_numbers(body, &|n| keyed.key(n));
+    let final_numbering = value_numbers(body, &|n| keyed.key(n), chains);
     let tree = scope_tree(&final_numbering, body, &mut effects);
     let mut buffers = final_numbering.buffers.clone();
     buffers.sort_by_key(|name| rank[name]);

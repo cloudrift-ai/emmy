@@ -17,8 +17,10 @@ def test_the_memos_report_their_entries_and_clear_together() -> None:
     stats = _by_name()
     assert stats["normal_forms"]["entries"] >= 1
     assert stats["identities"]["entries"] >= 1
-    assert stats["normal_forms"]["capacity"] == stats["identities"]["capacity"] == 16384
-    assert stats["statement_wrappers"]["capacity"] is None
+    # The body memos are bounded by the statements they hold between them, and report how many they hold now.
+    assert stats["normal_forms"]["capacity"] == stats["identities"]["capacity"] == 1_000_000
+    assert 0 < stats["normal_forms"]["weight"] <= stats["normal_forms"]["capacity"]
+    assert stats["statement_wrappers"]["capacity"] is None and stats["statement_wrappers"]["weight"] is None
     clear_memos()
     stats = _by_name()
     assert stats["normal_forms"]["entries"] == 0

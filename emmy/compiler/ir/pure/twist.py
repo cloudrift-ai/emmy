@@ -31,8 +31,9 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+from emmy.compiler.ir.expression import Var, apply
 from emmy.compiler.ir.pure.lam import Lambda
-from emmy.compiler.ir.stmt import Affine, Assign, Body, Let, Statement
+from emmy.compiler.ir.stmt import Assign, Body, Let, Statement
 
 
 @dataclass(frozen=True)
@@ -164,8 +165,8 @@ class Recipe:
                 names[self.scale.results[0]] = f"{key}__{state}_{tag}"
                 body.extend(self.scale.rename(lambda name, names=names, state=state: names.get(name, f"{key}__{state}_{name}")).body)
                 sides.append(names[self.scale.results[0]])
-            body.append(Assign(name=state, op=op, args=tuple(sides)))
-        body.append(Assign(name=states[0], op="copy", args=(pivot,)))
+            body.append(Assign(state, apply(op, *sides)))
+        body.append(Assign(states[0], Var(pivot)))
         return Lambda(params=states + other, body=Body(body), results=states)
 
 
@@ -180,14 +181,14 @@ def _const(name: str, value: float) -> Lambda:
 SOFTMAX = Recipe(
     name="softmax",
     base=("maximum", "add", "add"),
-    lift=_lam(("s", "v"), (Assign("e", "exp", ("s",)), Assign("ev", "multiply", ("e", "v"))), "s", "e", "ev"),
+    lift=_lam(("s", "v"), (Assign("e", apply("exp", "s")), Assign("ev", apply("multiply", "e", "v"))), "s", "e", "ev"),
     psi=_lam(
         ("m", "D", "O"),
         (
-            Assign("nm", "negative", ("m",)),
-            Assign("f", "exp", ("nm",)),
-            Assign("d", "multiply", ("D", "f")),
-            Assign("o", "multiply", ("O", "f")),
+            Assign("nm", apply("negative", "m")),
+            Assign("f", apply("exp", "nm")),
+            Assign("d", apply("multiply", "D", "f")),
+            Assign("o", apply("multiply", "O", "f")),
         ),
         "m",
         "d",
@@ -195,7 +196,7 @@ SOFTMAX = Recipe(
     ),
     psi_inv=_lam(
         ("m", "d", "o"),
-        (Assign("f", "exp", ("m",)), Assign("D", "multiply", ("d", "f")), Assign("O", "multiply", ("o", "f"))),
+        (Assign("f", apply("exp", "m")), Assign("D", apply("multiply", "d", "f")), Assign("O", apply("multiply", "o", "f"))),
         "m",
         "D",
         "O",
@@ -204,14 +205,14 @@ SOFTMAX = Recipe(
         # The denominator: one weight per element, ``exp(s − m)``; at the singleton the pivot is
         # the score, so the channel injects ``1``.
         Channel(
-            pattern=_lam(("s", "g"), (Affine("d", ("s", "g"), (1.0, -1.0)), Assign("w", "exp", ("d",))), "w"),
+            pattern=_lam(("s", "g"), (Assign("w", apply("exp", apply("subtract", "s", "g"))),), "w"),
             injection=_lam(("s",), (Let(name="one", value=1.0),), "one"),
         ),
         # An expectation: the weight times a streamed value; it injects the value itself.
         Channel(
             pattern=_lam(
                 ("s", "g", "v"),
-                (Affine("d", ("s", "g"), (1.0, -1.0)), Assign("w", "exp", ("d",)), Assign("p", "multiply", ("w", "v"))),
+                (Assign("p", apply("multiply", apply("exp", apply("subtract", "s", "g")), "v")),),
                 "p",
             ),
             injection=_lam(("s", "v"), (), "v"),
@@ -222,18 +223,18 @@ SOFTMAX = Recipe(
     advance=_lam(
         ("g", "g_o"),
         (
-            Assign("gn", "maximum", ("g", "g_o")),
-            Assign("dg", "subtract", ("g", "gn")),
-            Assign("alpha", "exp", ("dg",)),
-            Assign("dg_o", "subtract", ("g_o", "gn")),
-            Assign("beta", "exp", ("dg_o",)),
+            Assign("gn", apply("maximum", "g", "g_o")),
+            Assign("dg", apply("subtract", "g", "gn")),
+            Assign("alpha", apply("exp", "dg")),
+            Assign("dg_o", apply("subtract", "g_o", "gn")),
+            Assign("beta", apply("exp", "dg_o")),
         ),
         "gn",
         "alpha",
         "beta",
     ),
     # A side moves to the advanced pivot by its factor; the channels' ⊕ (a sum) then joins the two.
-    scale=_lam(("s", "f"), (Assign("sa", "multiply", ("s", "f")),), "sa"),
+    scale=_lam(("s", "f"), (Assign("sa", apply("multiply", "s", "f")),), "sa"),
 )
 
 # Welford's variance: ``mean = Σ_k x_k / N`` then ``Σ_k (x_k − mean)²``, fused into the carrier
@@ -244,10 +245,10 @@ SOFTMAX = Recipe(
 WELFORD = Recipe(
     name="welford",
     base=("add", "add", "add", "add"),
-    lift=_lam(("s", "c"), (Let(name="one", value=1.0), Assign("sq", "multiply", ("s", "s"))), "s", "one", "s", "sq"),
+    lift=_lam(("s", "c"), (Let(name="one", value=1.0), Assign("sq", apply("multiply", "s", "s"))), "s", "one", "s", "sq"),
     psi=_lam(
         ("S", "n", "T", "W"),
-        (Assign("mu", "divide", ("T", "n")), Assign("Tmu", "multiply", ("T", "mu")), Assign("M2", "subtract", ("W", "Tmu"))),
+        (Assign("mu", apply("divide", "T", "n")), Assign("Tmu", apply("multiply", "T", "mu")), Assign("M2", apply("subtract", "W", "Tmu"))),
         "S",
         "n",
         "mu",
@@ -255,7 +256,7 @@ WELFORD = Recipe(
     ),
     psi_inv=_lam(
         ("S", "n", "mu", "M2"),
-        (Assign("T", "multiply", ("n", "mu")), Assign("Tmu", "multiply", ("T", "mu")), Assign("W", "add", ("M2", "Tmu"))),
+        (Assign("T", apply("multiply", "n", "mu")), Assign("Tmu", apply("multiply", "T", "mu")), Assign("W", apply("add", "M2", "Tmu"))),
         "S",
         "n",
         "T",
@@ -271,7 +272,7 @@ WELFORD = Recipe(
         Channel(
             pattern=_lam(
                 ("s", "g", "c"),
-                (Assign("m", "multiply", ("g", "c")), Affine("d", ("s", "m"), (1.0, -1.0)), Assign("sq", "multiply", ("d", "d"))),
+                (Assign("d", apply("subtract", "s", apply("multiply", "g", "c"))), Assign("sq", apply("multiply", "d", "d"))),
                 "sq",
             ),
             injection=_const("zero", 0.0),
@@ -280,19 +281,19 @@ WELFORD = Recipe(
     combine=_lam(
         ("g", "n", "m", "q", "g__o", "n__o", "m__o", "q__o"),
         (
-            Assign("tn", "add", ("n", "n__o")),
-            Assign("d", "subtract", ("m__o", "m")),
-            Assign("w", "divide", ("n__o", "tn")),
-            Assign("dw", "multiply", ("d", "w")),
-            Assign("nn", "multiply", ("n", "n__o")),
-            Assign("r", "divide", ("nn", "tn")),
-            Assign("dd", "multiply", ("d", "d")),
-            Assign("corr", "multiply", ("dd", "r")),
-            Assign("q1", "add", ("q", "q__o")),
-            Assign("g", "add", ("g", "g__o")),
-            Assign("m", "add", ("m", "dw")),
-            Assign("q", "add", ("q1", "corr")),
-            Assign("n", "copy", ("tn",)),
+            Assign("tn", apply("add", "n", "n__o")),
+            Assign("d", apply("subtract", "m__o", "m")),
+            Assign("w", apply("divide", "n__o", "tn")),
+            Assign("dw", apply("multiply", "d", "w")),
+            Assign("nn", apply("multiply", "n", "n__o")),
+            Assign("r", apply("divide", "nn", "tn")),
+            Assign("dd", apply("multiply", "d", "d")),
+            Assign("corr", apply("multiply", "dd", "r")),
+            Assign("q1", apply("add", "q", "q__o")),
+            Assign("g", apply("add", "g", "g__o")),
+            Assign("m", apply("add", "m", "dw")),
+            Assign("q", apply("add", "q1", "corr")),
+            Assign("n", Var("tn")),
         ),
         "g",
         "n",

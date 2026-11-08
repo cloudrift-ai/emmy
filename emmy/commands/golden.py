@@ -78,6 +78,8 @@ def handle_golden_check(args) -> None:
         # lifts to, which no file edit expresses, so the report decides as well as the file.
         if fresh == document and not report.changed:
             logger.info("%s: current (%d kernels)", path, len(document.kernels))
+            for reason in report.misnamed_rows:
+                logger.warning("%s: row %s", path, reason)
             continue
         failed = True
         lines = report.lines()

@@ -22,6 +22,28 @@ use crate::field::{AxisRef, Rewriter, SubroutineRef, Visitor};
 use crate::statement::*;
 use crate::{Error, Name, Result};
 
+/// Inside a term, the coordinates its index expressions read follow the outer rename, less the names the term
+/// defines; its value expressions read the term's own names and keep them, as its name fields do.
+struct Coordinates<'a> {
+    rename: &'a dyn Fn(Name) -> Option<Name>,
+    defined: &'a HashSet<Name>,
+}
+
+impl Rewriter for Coordinates<'_> {
+    fn expression(&mut self, roles: Roles, expression: &Expression) -> Expression {
+        if roles.contains_any(VALUE) {
+            return expression.clone();
+        }
+        expression.rename(&mut |name| {
+            if self.defined.contains(&name) {
+                None
+            } else {
+                (self.rename)(name)
+            }
+        })
+    }
+}
+
 /// What a rewrite does to a statement: every SSA name through `rename`, every expression through `sigma`, every
 /// bound axis through `axis_fn`. A `None` from `rename` keeps the name.
 pub struct Rewrite<'a> {
@@ -125,6 +147,18 @@ impl Visitor for Expressions {
     }
     fn carried(&mut self, _roles: Roles, stmt: &Arc<Statement>) {
         self.0.extend(stmt.expressions());
+    }
+}
+
+/// The expressions of a statement's own fields alone: what the statement reads itself, not what a program it carries
+/// (a combine, a term) computes under its own binders.
+struct OwnExpressions(Vec<Expression>);
+
+impl Visitor for OwnExpressions {
+    fn expression(&mut self, roles: Roles, expression: &Expression) {
+        if roles.contains_any(EXPRESSION) {
+            self.0.push(expression.clone());
+        }
     }
 }
 
@@ -300,15 +334,10 @@ impl Rewriter for RewriteFields<'_, '_> {
             let rename = self.rewrite.rename;
             return body.map_each(&mut |stmt| {
                 let moved = Statement::rewrite(stmt, &inner);
-                Statement::map_expressions(&moved, &mut |expression| {
-                    expression.rename(&mut |name| {
-                        if defined.contains(&name) {
-                            None
-                        } else {
-                            rename(name)
-                        }
-                    })
-                })
+                Arc::new(moved.rewrite_fields(&mut Coordinates {
+                    rename,
+                    defined: &defined,
+                }))
             });
         }
         body.clone()
@@ -422,6 +451,13 @@ impl Statement {
     /// This statement's own expressions, in field order, the carried statements' included.
     pub fn expressions(&self) -> Vec<Expression> {
         let mut visitor = Expressions(Vec::new());
+        self.visit(&mut visitor);
+        visitor.0
+    }
+
+    /// The expressions of this statement's own fields, a carried program's left to its own scope.
+    pub fn own_expressions(&self) -> Vec<Expression> {
+        let mut visitor = OwnExpressions(Vec::new());
         self.visit(&mut visitor);
         visitor.0
     }
@@ -810,7 +846,6 @@ mod tests {
     const EXAMPLES: &[&str] = &[
         "f32 x = load a[i]",
         "y = exp(x)",
-        "z = 2*x - y + 0.5",
         "s <- add(s, x)",
         "c[i] <- x seed 0",
         "p = pre c[i]",
@@ -836,8 +871,8 @@ mod tests {
         "MbarrierArrive(mbar=mb, slot=p)",
         "SetMaxNReg(count=64, direction=dec)",
         "MbarrierWait(mbar=mb, phase=ph, slot=p)",
-        "TreeHalve(bufs=(b), state=(acc), state_b=(acc__o), length=8, tid_var=t):\n    combine_states:\n        t = multiply(acc, acc__o)\n        acc = add(acc, t)",
-        "WarpShuffle(state=(acc), state_b=(acc__o), length=8):\n    combine_states:\n        t = multiply(acc, acc__o)\n        acc = add(acc, t)",
+        "TreeHalve(bufs=(b), state=(acc), state_b=(acc__o), length=8, tid_var=t):\n    combine_states:\n        t = acc * acc__o\n        acc = add(acc, t)",
+        "WarpShuffle(state=(acc), state_b=(acc__o), length=8):\n    combine_states:\n        t = acc * acc__o\n        acc = add(acc, t)",
         "WarpBroadcast(state=(acc), length=8)",
         "FragmentApply(out=o, op=where, args=(FragmentArg(kind=coord, expressions=(__fcol > __frow)), FragmentArg(kind=uniform, names=(u)), FragmentArg(kind=row, names=(r0, r1)), FragmentArg(kind=frag, names=(f)), FragmentArg(kind=gmem, expressions=(i, j), buffer=mask)), row_base=q, col_base=kv)",
         "FragmentRowReduce(top=t0, bot=b0, frags=(f0, f1), op=maximum)",
@@ -964,10 +999,7 @@ mod tests {
             .collect();
         let types: HashSet<&str> = held.iter().map(|(ty, _)| *ty).collect();
         let names: HashSet<&str> = held.iter().map(|(_, name)| *name).collect();
-        assert!(
-            types.is_superset(&HashSet::from(["Assign", "Accum"])),
-            "{held:?}"
-        );
+        assert!(types.is_superset(&HashSet::from(["Accum"])), "{held:?}");
         assert_eq!(names, HashSet::from(["op"]));
     }
 

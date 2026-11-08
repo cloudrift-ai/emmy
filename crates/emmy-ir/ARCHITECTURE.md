@@ -6,7 +6,7 @@ identity and body normalization. Pure Rust, no Python in it, so `cargo test -p e
 of the normalization steps sit beside the steps there. The extension beside it, `emmy-ir-py`, is the `emmy.emmy_ir`
 module those two Python packages re-export from; `make setup` builds it into the package like the runtime extension.
 It exports the driver (`normalize_body`, `normalize_uncached`, `prepare_body`) and the steps a pass calls on its own
-(`fold_affine`, `simplify_body`, `rename_free`), no other step. Design: `ir/ARCHITECTURE.md` owns what a statement, a
+(`fold_single_readers`, `canonical_values`, `simplify_body`, `rename_free`), no other step. Design: `ir/ARCHITECTURE.md` owns what a statement, a
 body and the normal form ARE; this file says how the crate holds them.
 
 ## Layout
@@ -46,12 +46,18 @@ of a body's normal form). Every file imports what it uses by name; no child modu
   model (`Num`: int, float or bool, equal by value) because a stored kernel's text spells it that way, and is typed by a
   `LitType`. Integer rewrites are checked: a product that would overflow declines the rewrite rather than fold wrong.
   The two kinds of scalar arithmetic the IR has are the two expression classes (`ExprClass`), each a predicate over the
-  operation table that every node of an expression must satisfy, one inside the other: `Value` admits every operation of
-  the table over any operand (SSA names, axes, GPU built-ins, literals of any type, select, cast, a buffer's flat
-  index), and `Index` is its restriction to integer arithmetic over integer operands (the affine operations, division
-  and remainder, minimum and maximum, the comparisons and logical operators, the bitwise operators and shifts). Every
-  expression field declares the class it admits beside its roles (`index: Exprs [EXPRESSION | READS] : Index`) and
-  construction refuses a value outside it.
+  operation table that every node of an expression must satisfy, one inside the other: `Value` admits every operation
+  (the table's, and a spelling only a renderer knows) over any operand (SSA names, axes, GPU built-ins, literals of any
+  type, select, cast, a buffer's flat index), and `Index` is its restriction to integer arithmetic over integer operands
+  (the affine operations, division and remainder, minimum and maximum, the comparisons and logical operators, the
+  bitwise operators and shifts). In either, an operation node spells its operation one way: a `Binary` holds an
+  operation with an infix and a `Call` never names one. Every expression field declares the class it admits beside its
+  roles (`index: Exprs [EXPRESSION | READS] : Index`, a record's fields their own), a field has a class exactly when it
+  plays `EXPRESSION`, and construction refuses a value outside it, naming the field. The text spells an operator by
+  its infix, a negation as the prefix `-x` (over a literal it stays the call `negative(3.0)`, which the reader would
+  otherwise take as a signed number), every other operation as a call; a name that is a word of the reader's grammar
+  (`load`, `for`, `step`, …) is written between backticks wherever it stands, on a statement line or inside an
+  expression, so the reserved words are the expression layer's.
 - **Statement types** (`statement.rs`): every statement type is a struct declared once in the `with_statement_types!`
   macro — its fields, each with a type, the roles it plays (`DEFINES`, `READS`, `EXPRESSION`, `AXIS`, `BODY`, `STMTS`,
   `TERM`, `RECORD`, …) and a default — and the Python extension generates its classes from the same list.
@@ -71,7 +77,7 @@ of a body's normal form). Every file imports what it uses by name; no child modu
   holds it. Every closed set of spellings the crate branches on is an enum declared with `closed_set!` (one text per
   variant, `Display` and `FromStr` over them, a test pinning every text, since each is a stored spelling or identity
   material): the dtypes (`DType`, `dtype.rs`, with the promotion rule; the extension exports the set as `DTYPES` and a
-  Python test holds it equal to the `DataType` registry), the binary operators and literal types (`BinOp`, `LitType`),
+  Python test holds it equal to the `DataType` registry), the literal types (`LitType`),
   the GPU built-ins (`expr::Builtin`), the expression types (`ExprType`, generated from the one expression list; the
   digest spells a node by it) and the digest's other tags (`numbering::Tag`). A cast's target is `CastTarget`: a literal
   type the simplifier folds through, or any other C type the renderer spells. A value the crate only carries stays a
@@ -80,7 +86,8 @@ of a body's normal form). Every file imports what it uses by name; no child modu
   renderer knows. The known operations are one declaration (`operations!` in `elementwise.rs`): each variant with its
   spelling and its properties, which generates the enum, its `Display`/`FromStr` pair and the table `OPS` the enum
   indexes, one `OperationInfo` row per operation (commutative, associative, the neutral element, the cluster
-  representative, integer arithmetic, whether it copies its operand, its affine role, its host evaluator). Every reader
+  representative, integer arithmetic, whether it copies or selects its operand, its affine role, its host evaluator,
+  its infix spelling and precedence). Every reader
   of an operation's nature (the affine fold, the alias reads of placement and the ties, the dtype promotion, the
   clustered identity, the Python tables) reads a property; none matches a name. The neutral element is the real one
   (`-inf` for a maximum) and `seed` is what a kernel initializes with, the bounded stand-in `±1e30` the CUDA source
@@ -132,17 +139,22 @@ canonical and independent of the input order like the full search's, but not alw
 over the corpus and the golden check are what shows no stored kernel's order moved. `identity.rs` memoizes the
 identity per body and per coloring. `normalize/` holds the steps and the driver `normalize_body`; `canonical_order`
 and `place_values` are the two steps that read the numbering, and the order ranks a product's operands through the
-statement objects it permuted.
+statement objects it permuted. A commutative node's two sides enter the digest in content order (an operand's whole
+value, its number with its parameters), keyed twice: once to learn the order on state rolled back, once in it, so a
+parameter or buffer first met inside the node takes the index the content gives it. Two loads of one buffer that tie
+on rank order the normal form by their names, and the identity stays the same whatever the buffers are called.
 
 ## Memos
 
-What a process remembers across bodies is a `memo::Memo`, declared with the `memo!` macro that names its capacity in
-entries (`normal_forms` in the normalization driver, `identities` in `identity.rs`, both `BODY_MEMO_CAPACITY`) and
-lists it in one registry through `memo::declared`, so every store is inspected (entries, hits, misses) and cleared
-from one place (`memo::stats` and `memo::clear_all`; `emmy_ir.memo_stats()` and `emmy_ir.clear_memos()` in Python,
-for a test worker or a process pool that starts clean). The caches are
-`quick_cache`'s: bounded by entry count, evicting by its one policy (S3-FIFO), sharded so no lock is held across a
-computation, and one asker computes a missing value while a second asker of the same key waits for it, so a
+What a process remembers across bodies is a `memo::Memo`, declared with the `memo!` macro that names its bound, in
+entries (`[capacity = N]`) or in the weight its entries hold between them (`[weight = W, by = f]`, `f` the weight of an
+entry from its key and value), and lists it in one registry through `memo::declared`, so every store is inspected
+(entries, weight, hits, misses) and cleared from one place (`memo::stats` and `memo::clear_all`;
+`emmy_ir.memo_stats()` and `emmy_ir.clear_memos()` in Python, for a test worker or a process pool that starts clean).
+The body-keyed memos (`normal_forms` in the normalization driver, `identities` in `identity.rs`) weigh an entry by the
+statements of the bodies it holds, bounded by `BODY_MEMO_WEIGHT` between them, since a whole-layer body is thousands
+of statements and a bound by entry count let a process that lowers many goldens hold gigabytes of normal forms. The
+caches are `quick_cache`'s: evicting by its one policy (S3-FIFO), sharded so no lock is held across a computation, and one asker computes a missing value while a second asker of the same key waits for it, so a
 computation that asked its own memo for the key it is computing would wait on itself; `get_or_try_insert` refuses
 that with an error, and the key leaves the thread's list however the computation ends (no normalization step recurses
 into `normalize_body` today).
@@ -164,6 +176,13 @@ then by their fields in declaration order with names abstracted and a one-elemen
 store follows the values it reads and an `Assign`'s operation decides before its dtype; sibling loops sort by a digest
 of their extent, the one the Python order used; a commutative operation lists accumulators, then loads and the copies
 that widen them, then computed values with the deeper cone first, then by value. Changing a rule is a restamp decision.
+The order permutes and names, and the operand order inside a value reads the ranks the order gives, which the order in
+turn spells by; so `normalize_uncached` runs its rounds until one whole round leaves the body alone, and refuses a body
+that does not settle in eight. For that to settle, a number must not read what the order decides: the numbering keys a
+chain of one associative commutative operation as one node over every term (`Chains::Flat`), so the two associations
+the term order can give a sum number alike; the exact identity is keyed the same way. The clustered identity keeps the
+chain (`Chains::Kept`): it spells every FMA-class tree as a chain of one representative, and the shape of that chain is
+what tells `a * b - c` from `a * c - b` when the buffers are typed.
 
 What the port keeps of the Python implementation: stored kernels keep their rows, two raw bodies share an identity in
 Rust exactly when they did in Python, the normal form is final. The text of a normal form, the order among ties and

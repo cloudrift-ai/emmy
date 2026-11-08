@@ -13,9 +13,9 @@ import pytest
 from emmy.compiler.backend.numpy import NumpyBackend
 from emmy.compiler.graph import Graph, Tensor
 from emmy.compiler.ir.base import ConstantOp, InputOp
-from emmy.compiler.ir.expression import Literal, placeholder
+from emmy.compiler.ir.expression import Literal, Var, placeholder
 from emmy.compiler.ir.frontend.ir import LinearOp, RmsNormOp
-from emmy.compiler.ir.loop import Accum, Affine, Assign, Load, LoopOp, Select, Write
+from emmy.compiler.ir.loop import Accum, Assign, Load, LoopOp, Select, Write
 from emmy.compiler.ir.render import render_expression
 from emmy.compiler.ir.stmt import parse_body
 from emmy.compiler.ir.tensor.ir import ElementwiseOp, GatherOp, IndexMapOp, IndexSource, ReduceOp, ScanOp
@@ -60,18 +60,85 @@ def _kernel_nodes(graph: Graph) -> list:
     return [n for n in graph.nodes.values() if isinstance(n.op, LoopOp)]
 
 
+def _is_copy(stmt) -> bool:
+    """An ``Assign`` that copies one name: an alias (a bare name) or a typed ``copy`` that spells a rounding."""
+    if not isinstance(stmt, Assign):
+        return False
+    op = stmt.value.operation
+    return isinstance(stmt.value, Var) or (op is not None and op.name == "copy" and len(stmt.value.operands) == 1)
+
+
+def _spine(value, out=None):
+    """The shape of every maximal sum in ``value``, outermost first: its sorted literal coefficients and its offset, one
+    entry per affine region (additions, subtractions, negations and literal scales), the analog of one sum statement.
+    A term below a non-affine operation (``exp(-x)``) is its own region."""
+    out = [] if out is None else out
+    op = value.operation
+    name = op.name if op is not None else None
+    scaled = name == "multiply" and any(isinstance(operand, Literal) for operand in value.operands)
+    if name in ("add", "subtract", "negative") or scaled:
+        terms: list = []
+        offset = _terms(value, 1.0, terms)
+        out.append((tuple(sorted(coefficient for coefficient, _ in terms)), offset))
+        for _, leaf in terms:
+            _spine(leaf, out)
+    else:
+        for child in value.children():
+            _spine(child, out)
+    return out
+
+
+def _terms(value, scale: float, terms: list) -> float:
+    """Collect ``value``'s affine terms as ``(coefficient, leaf)`` under ``scale``; the literal offset is returned."""
+    if isinstance(value, Literal):
+        return scale * float(value.value)
+    op = value.operation
+    name = op.name if op is not None else None
+    operands = value.operands
+    if name == "add":
+        return sum(_terms(operand, scale, terms) for operand in operands)
+    if name == "subtract":
+        return _terms(operands[0], scale, terms) + _terms(operands[1], -scale, terms)
+    if name == "negative":
+        return _terms(operands[0], -scale, terms)
+    if name == "multiply" and any(isinstance(operand, Literal) for operand in operands):
+        literal, other = sorted(operands, key=lambda operand: not isinstance(operand, Literal))
+        return _terms(other, scale * float(literal.value), terms)
+    terms.append((scale, value))
+    return 0.0
+
+
+def _operations(body) -> list[str]:
+    """The elementwise operations a body computes beyond its sums: every operation node of an ``Assign`` or ``Accum``
+    value that is not part of an affine region (an addition, a subtraction, a negation, a literal scale)."""
+    names = []
+    for stmt in body.iter():
+        if not isinstance(stmt, (Assign, Accum)):
+            continue
+        for node in stmt.value.subterms():
+            op = node.operation
+            if op is None or op.name in ("add", "subtract", "negative"):
+                continue
+            if op.name == "multiply" and any(isinstance(operand, Literal) for operand in node.operands):
+                continue
+            names.append(op.name)
+    return names
+
+
 def _assign_fns(body) -> list[str]:
-    return [s.op.name for s in body.iter() if isinstance(s, Assign)]
+    return _operations(body)
 
 
 def _affine_shapes(body) -> list[tuple[tuple[float, ...], float]]:
-    """Every Affine's sorted coefficients and offset: the folded form a sum, difference or negation takes."""
-    return sorted((tuple(sorted(s.coefficients)), s.offset) for s in body.iter() if isinstance(s, Affine))
+    """Every sum's top-level shape in a body: the operation names along its affine spine (``add``, ``subtract``,
+    ``negative``) with the literal coefficients and offsets it carries, sorted — the folded form a sum, difference or
+    negation takes once every single-use value folded into its reader."""
+    return sorted(shape for s in body.iter() if isinstance(s, (Assign, Accum)) for shape in _spine(s.value))
 
 
 def _count_copies(body) -> int:
-    """Count identity ``Assign(op=copy)`` statements in a LoopOp body."""
-    return sum(1 for s in body.iter() if isinstance(s, Assign) and s.op.name == "copy")
+    """Count alias ``Assign`` statements (a value that is a bare name) in a LoopOp body."""
+    return sum(1 for s in body.iter() if _is_copy(s))
 
 
 def _has_update(body) -> bool:
@@ -264,7 +331,7 @@ def test_typed_copy_fanout_fuses_after_contraction_halves_join():
 
     result = _fuse(g)
     (kernel,) = _kernel_nodes(result)
-    assert "copy" in _assign_fns(kernel.op.body)
+    assert any(_is_copy(s) for s in kernel.op.body.iter())
     assert any(isinstance(stmt, Accum) for stmt in kernel.op.body.iter())
 
 
@@ -309,8 +376,8 @@ def test_transcendental_is_not_duplicated_across_contraction_columns():
         if isinstance(node, Fold):
             for child in (*node.operands, *node.lift.body):
                 fold_ops(child, acc)
-        elif getattr(node, "op", None) is not None:
-            acc.append(node.op.name)
+        elif isinstance(node, Assign):
+            acc.extend(sub.operation.name for sub in node.value.subterms() if sub.operation is not None)
         return acc
 
     with pinned_knobs({"PLACE@inner.1/map": "cut"}):
@@ -579,7 +646,7 @@ def test_ssa_invariants_hold():
         from emmy.compiler.ir.loop import Accum, Load
 
         for s in k.op:
-            if isinstance(s, (Assign, Affine)):
+            if isinstance(s, Assign):
                 for arg in s.deps():
                     assert arg in defined, f"arg {arg!r} not defined before use in {s.name}"
                 defined.add(s.name)
@@ -708,7 +775,7 @@ def test_softmax_has_both_accumulators():
 
 
 def _is_pure_indexmap(op: LoopOp) -> bool:
-    return not any(isinstance(s, (Affine, Assign, Accum)) for s in op.body.iter())
+    return not any(isinstance(s, (Assign, Accum)) for s in op.body.iter())
 
 
 def _pure_indexmap_kernels(graph: Graph) -> list:

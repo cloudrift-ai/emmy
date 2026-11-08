@@ -2,7 +2,7 @@
 //! extends with the statement punctuation.
 
 use super::{Builtin, CastTarget, Expr, Expression, Lit, LitType, Num, python_repr};
-use crate::elementwise::Operation;
+use crate::elementwise::{ElementwiseOp, Operation};
 use crate::{Error, Result};
 
 // --- the reader -----------------------------------------------------------------------------------
@@ -22,11 +22,14 @@ pub struct Token {
     pub position: usize,
 }
 
-/// Operators and punctuation an expression's text uses.
-pub const PUNCTUATION: [&str; 26] = [
-    "||", "&&", "==", "!=", "<=", ">=", "<<", ">>", "//", "-", "+", "*", "/", "%", "<", ">", "^",
-    "&", "|", "?", ":", "(", ")", ",", "[", "]",
-];
+/// The punctuation an expression's text uses: the operators the table spells, the select, the brackets and the comma.
+pub fn punctuation() -> Vec<&'static str> {
+    Operation::ALL
+        .iter()
+        .filter_map(|op| op.infix())
+        .chain(["?", ":", "(", ")", ",", "[", "]"])
+        .collect()
+}
 
 /// The reader of an expression's text. Text that holds expressions among other things (a statement) is read by a
 /// parser built with more punctuation, which takes each expression with [`Parser::expression`].
@@ -44,7 +47,7 @@ pub const MAX_NESTING: usize = 256;
 impl Parser {
     /// Tokenize `text` with the expression punctuation plus `extra` (longest first where one starts another).
     pub fn new(text: &str, extra: &[&str]) -> Result<Parser> {
-        let mut punctuation: Vec<&str> = PUNCTUATION.to_vec();
+        let mut punctuation: Vec<&str> = punctuation();
         punctuation.extend(extra.iter().copied());
         punctuation.sort_by_key(|p| std::cmp::Reverse(p.len()));
         let mut tokens = Vec::new();
@@ -330,6 +333,11 @@ impl Parser {
         if let Some(literal) = self.number()? {
             return Ok(Expression::new(Expr::Literal(literal)));
         }
+        // A minus ahead of anything but a number is the negation of the operand it precedes.
+        if self.accept("-") {
+            let inner = self.operand()?;
+            return Ok(Expression::apply(Operation::Negative, vec![inner]));
+        }
         let token = self.take()?;
         match token.kind {
             TokenKind::Quoted => {
@@ -351,6 +359,10 @@ impl Parser {
                 }
                 if self.accept("(") {
                     let args = self.expressions(")")?;
+                    // A call of a known operation is the node the constructors build: one operation, one node.
+                    if let ElementwiseOp::Known(op) = ElementwiseOp::new(&token.text) {
+                        return Ok(Expression::apply(op, args));
+                    }
                     return Ok(Expression::new(Expr::Call(token.text.into(), args.into())));
                 }
                 if self.accept("[") {

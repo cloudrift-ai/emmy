@@ -28,6 +28,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field, replace
 from functools import partial
+from itertools import count
 
 from emmy.compiler.backend.cuda.dtype import cuda_name
 from emmy.compiler.dim import Dim
@@ -36,7 +37,7 @@ from emmy.compiler.ir.address import BYTE_SLAB_PAD, clamp_bound, clamp_to, gmem_
 from emmy.compiler.ir.atom import AtomKind, wide_accumulate
 from emmy.compiler.ir.axis import Axis
 from emmy.compiler.ir.elementwise import ElementwiseImpl
-from emmy.compiler.ir.expression import BinaryExpression, Expression, Literal, SimplifyCtx, TernaryExpression, Var, affine_form
+from emmy.compiler.ir.expression import BinaryExpression, Expression, Literal, SimplifyCtx, TernaryExpression, Var, affine_form, apply
 from emmy.compiler.ir.kernel.ir import (
     COORD,
     ELEM_COL,
@@ -88,7 +89,6 @@ from emmy.compiler.ir.stmt import (
     Statement,
     StridedLoop,
     Write,
-    binary,
     exposed_defines,
     free_names,
     mask_select_predicate,
@@ -331,7 +331,7 @@ def _warp_epilogue(tail: list[Statement], acc: str, m_name: str, n_name: str, si
     offset = {"m": Var(ELEM_ROW), "n": Var(ELEM_COL)}
     ph = dict(sigma.mapping)
     ph.update({name: BinaryExpression("+", sigma.apply(Var(name)), offset[role]) for role, name in (("m", m_name), ("n", n_name))})
-    for s in binary(tail):
+    for s in tail:
         if isinstance(s, Load):
             index = tuple(e.substitute(ph) for e in s.index)
             body.append(Load(names=s.names, input=s.input, index=index, dtype=s.dtype))
@@ -1310,7 +1310,7 @@ def _packed_operands(
         stages byte-identical slabs to before."""
         # Just the scale factor's own stmts, not the whole decode cone: the bits copy verbatim, so
         # the compute fill evaluates only what feeds the factor.
-        factor_cone = list(Body(tuple(edge.lower(axes=axes))).backward_cone([channel.factor]).members)
+        factor_cone, factor_name = channel.factor_program(edge.lower(axes=axes))
 
         def scale_value(k0, row, col):
             k = BinaryExpression("+", k0, BinaryExpression("*", col, Literal(block, "int")))
@@ -1324,7 +1324,7 @@ def _packed_operands(
             # block-scale factor cone re-binds these names today, but the safe spelling costs
             # nothing and the cone is whatever the speller wrote.
             sigma = Sigma({n.axis.name: n_coord(row), k_axis.name: k, **_sibling_sigma(m)})
-            return [s.substitute(sigma) for s in factor_cone], channel.factor
+            return [s.substitute(sigma) for s in factor_cone], factor_name
 
         scale_op = SyncOperand(tag=f"{tag}s", shape=(n.tile, channel.scale_cols(bk_elems)), value=scale_value, **f32_scale)
 
@@ -1488,11 +1488,40 @@ def _mask_add(stmt, selects: dict, frags) -> tuple[Select, str] | None:
     """The coordinate mask ``stmt`` adds to a fragment value, with the value's name — the statement
     pair the chunk tier lands as a coordinate-masking ``FragmentApply`` and reads for its stream bounds — or ``None``
     for any other statement."""
-    if not isinstance(stmt, Assign) or stmt.op.name != "add":
+    op = stmt.value.operation if isinstance(stmt, Assign) else None
+    if op is None or op.name != "add":
         return None
-    selected = [arg for arg in stmt.args if arg in selects]
-    source = [arg for arg in stmt.args if arg in frags]
+    names = [operand.name for operand in stmt.value.operands if isinstance(operand, Var)]
+    selected = [name for name in names if name in selects]
+    source = [name for name in names if name in frags]
     return (selects[selected[0]], source[0]) if len(selected) == len(source) == 1 else None
+
+
+def _one_operation(stmts) -> list[Statement]:
+    """``stmts`` with every ``Assign`` and ``Accum`` value one operation over names and literals: a nested operation
+    node becomes a temp of its own, declared ahead, since a fragment program evaluates one operation at a time."""
+    out: list[Statement] = []
+    for stmt in stmts:
+        if not isinstance(stmt, (Assign, Accum)):
+            out.append(stmt)
+            continue
+        temps = count()
+
+        def leaf(node: Expression, stmt=stmt, temps=temps) -> Expression:
+            if node.operation is None:
+                return node
+            operands = [leaf(child) for child in node.operands]
+            name = f"{stmt.name}__e{next(temps)}"
+            out.append(Assign(name, apply(node.operation.name, *operands)))
+            return Var(name)
+
+        if isinstance(stmt, Accum):
+            out.append(stmt.replace(value=leaf(stmt.value)))
+        elif stmt.value.operation is None:
+            out.append(stmt)
+        else:
+            out.append(stmt.replace(value=apply(stmt.value.operation.name, *(leaf(child) for child in stmt.value.operands))))
+    return out
 
 
 def _mask_affine(predicate: BinaryExpression, names: frozenset[str]) -> tuple[dict[str, int], Expression] | None:
@@ -1523,8 +1552,8 @@ def _mask_key_bounds(
     fragments = {held}  # the score and every value the prefix derives from it (its scaling, say)
     first: Expression | None = None
     end: Expression | None = None
-    for stmt in binary(stmts):  # a mask added inside a sum is one operation of its binary spelling
-        if isinstance(stmt, Assign) and set(stmt.args) & fragments:
+    for stmt in _one_operation(stmts):  # a mask added inside a sum is one operation of its spelling
+        if isinstance(stmt, Assign) and stmt.value.free_vars() & fragments:
             fragments.add(stmt.name)
         masked = _mask_add(stmt, selects, fragments)
         predicate = mask_select_predicate(masked[0]) if masked is not None else None
@@ -1649,9 +1678,7 @@ def _staged(ops: _AtomOps, cells, offset, mn: tuple[Side, Side]):
                 leaf = f"_bs_alpha_l{counter}"
                 alpha_stmts.append(Load(names=(leaf,), input=ld.input, index=ld.index, dtype=ld.dtype))
                 step = f"_bs_alpha{counter}"
-                alpha_stmts.append(
-                    Assign(name=step, op="copy", args=(leaf,)) if not alpha else Assign(name=step, op="multiply", args=(alpha, leaf))
-                )
+                alpha_stmts.append(Assign(step, Var(leaf)) if not alpha else Assign(step, apply("multiply", alpha, leaf)))
                 alpha = step
                 counter += 1
             alpha_of.append(alpha)
@@ -1964,7 +1991,7 @@ def _scalar_drain(c: Fold, cells, offset, operands, ki: str, bk_elems: int, base
             b_col = Var(ki) if trans else n_local
             bn, vn, cn = f"{b_name}{sfx}", f"{c.exposes[index]}__v{sfx}", f"{c.exposes[index]}{sfx}"
             body.append(Load(names=(bn,), input=op.slab, index=(b_row, b_col)))
-            body.append(Assign(name=vn, op=_MUL, args=(bn, an)))
+            body.append(Assign(vn, apply(_MUL, bn, an)))
             body.append(Accum(name=cn, value=vn, op=_ADD, axes=(ki,)))
     body = _dedup_loads(body)
     # seed=False: the accumulators are pre-seeded once by _ScalarOps.state outside the outer slab loop, so
@@ -2739,7 +2766,7 @@ def _residence(
     frags, rows, memo = dict(frags), dict(rows), memo if memo is not None else {}
     frag_tag = tag if frag_tag is None else frag_tag
     selects: dict[str, Select] = {}
-    stmts = binary(stmts)  # a sum is evaluated one operation at a time here
+    stmts = _one_operation(stmts)  # a sum is evaluated one operation at a time here
     for stmt in stmts:
         if isinstance(stmt, Select) and select_sigma is not None:
             selects[stmt.name] = stmt
@@ -2756,7 +2783,10 @@ def _residence(
             # take the carrier's finite identity, so an all-masked chunk never sees ``-inf - -inf``.
             out.append(
                 FragmentApply(
-                    out=name, op=stmt.op, args=fragment_args((frags[source], mask.branches[0].value), (FRAG, UNIFORM)), layout=layout
+                    out=name,
+                    op=stmt.value.operation,
+                    args=fragment_args((frags[source], mask.branches[0].value), (FRAG, UNIFORM)),
+                    layout=layout,
                 )
             )
             out.append(
@@ -2777,7 +2807,19 @@ def _residence(
             if not frags_only:
                 out.append(stmt)  # a uniform leaf — a scalar Load, the same value for every element
             continue
-        reads = (stmt.base or stmt.name, stmt.value) if accum else stmt.args
+        op = stmt.op if accum else stmt.value.operation
+        if op is None:
+            # An alias names the same fragment or row pair, never a second one; a literal is a uniform leaf.
+            if isinstance(stmt.value, Var) and stmt.value.name in frags:
+                frags[stmt.name] = frags[stmt.value.name]
+            elif isinstance(stmt.value, Var) and stmt.value.name in rows:
+                rows[stmt.name] = rows[stmt.value.name]
+            elif not frags_only:
+                out.append(stmt)
+            continue
+        operands = [stmt.value] if accum else list(stmt.value.operands)
+        operands = [operand.name if isinstance(operand, Var) else operand for operand in operands]
+        reads = (stmt.base or stmt.name, *operands) if accum else operands
         kinds = [FRAG if a in frags else ROW if a in rows else UNIFORM for a in reads]
         if FRAG in kinds:
             args = [frags[a] if k == FRAG else rows[a] if k == ROW else a for a, k in zip(reads, kinds, strict=True)]
@@ -2785,13 +2827,13 @@ def _residence(
             if target is not None:
                 if len(args) > 1 and target not in args:
                     args, kinds = [target, *args[1:]], [FRAG, *kinds[1:]]
-                elif len(args) > 1 and not stmt.op.commutative and args.index(target) != 0:
-                    raise RuleSkipped(f"the carrier's accumulator reaches a non-commutative {stmt.op.name} in the chunk merge")
+                elif len(args) > 1 and not op.commutative and args.index(target) != 0:
+                    raise RuleSkipped(f"the carrier's accumulator reaches a non-commutative {op.name} in the chunk merge")
                 elif len(args) > 1:
                     lead = args.index(target)
                     args = [args[lead], *args[:lead], *args[lead + 1 :]]
                     kinds = [kinds[lead], *kinds[:lead], *kinds[lead + 1 :]]
-            key = (stmt.op.name, tuple(args), tuple(kinds))
+            key = (op.name, tuple(args), tuple(kinds))
             if target is None and key in memo:
                 frags[stmt.name] = memo[key]
                 continue
@@ -2799,7 +2841,7 @@ def _residence(
             out.append(
                 FragmentApply(
                     out=name,
-                    op=stmt.op,
+                    op=op,
                     args=fragment_args(tuple(args), tuple(kinds)),
                     in_place=target is not None,
                     layout=layout,
@@ -2814,7 +2856,9 @@ def _residence(
                 bound = tuple(rows[a][half] if a in rows else a for a in reads)
                 if not frags_only:
                     out.append(
-                        Accum(name=target, value=bound[1], op=stmt.op, base=bound[0]) if accum else stmt.replace(name=target, args=bound)
+                        Accum(name=target, value=bound[1], op=op, base=bound[0])
+                        if accum
+                        else Assign(target, apply(op.name, *bound), stmt.dtype)
                     )
             rows[stmt.name] = pair
         elif not frags_only:
@@ -3077,6 +3121,7 @@ class _FlashOps(_MmaOps):
                 if index == 0:
                     continue
                 stmts, result = self._pattern(index)
+                stmts = _one_operation(stmts)  # the product's weight is a fragment of its own, whatever the pattern folded
                 product = stmts[-1] if index == self._bilinear else None
                 for i in range(m.reg):
                     folded = []
@@ -3093,7 +3138,7 @@ class _FlashOps(_MmaOps):
                         if product is None:
                             folded.append(frags[result])
                             continue
-                        (held,) = [arg for arg in product.args if arg in frags]
+                        (held,) = [arg.name for arg in product.value.operands if isinstance(arg, Var) and arg.name in frags]
                         weights[i, j] = frags[held]
                     if product is None:
                         partial = (f"{self.frag(state)}__p{i}_0", f"{self.frag(state)}__p{i}_1")

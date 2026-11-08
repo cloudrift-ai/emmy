@@ -6,6 +6,7 @@ use std::sync::Arc;
 use super::{Key, Number, Param, Tag, expression_key, hash_parts};
 use crate::Name;
 use crate::body::{Body, StmtRef};
+use crate::elementwise::Operation;
 use crate::expr::{Expr, ExprType, Expression};
 use crate::field::NumOr;
 use crate::statement::Statement;
@@ -60,9 +61,20 @@ impl Numbering {
 
 type Value = (Number, Vec<Param>);
 
+/// How a chain of one associative commutative operation is keyed: as one node over every term (`Flat`: two
+/// associations of one sum number alike, which the normal form's order needs, since it orders a sum's terms by the
+/// ranks the numbering gives), or as the tree it is spelled as (`Kept`: the clustered identity spells every FMA-class
+/// tree as a chain of one representative, and which operand each term was is the tree's shape).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Chains {
+    Flat,
+    Kept,
+}
+
 struct Context<'a> {
     out: Numbering,
     resource_key: &'a dyn Fn(&Name) -> Key,
+    chains: Chains,
     env: HashMap<Name, Value>,
     axes: HashMap<Name, Key>,
     loops: Vec<Name>,
@@ -138,6 +150,95 @@ impl Context<'_> {
         })
     }
 
+    /// A value expression as digest material: `abstract_`, with a commutative node's operands in the order of what
+    /// they compute rather than how they are spelled, so two spellings of one value number alike. A chain of one
+    /// associative commutative operation is one node over every term it sums, so two associations of one sum number
+    /// alike too: the normal form orders a sum's terms by ranks the numbering gives, and a number that read the
+    /// association would move with the order it decides.
+    fn value_key(
+        &mut self,
+        e: &Expression,
+        params: &mut Vec<Param>,
+        ops: &mut Vec<Value>,
+        touched: &mut Vec<Name>,
+    ) -> Key {
+        if let Some((op, args)) = e.operation()
+            && op.info().commutative
+            && args.len() == 2
+        {
+            let mut terms: Vec<Expression> = Vec::new();
+            if op.info().associative && self.chains == Chains::Flat {
+                associative_terms(e, op, &mut terms);
+            } else {
+                terms = args;
+            }
+            // The sides are keyed twice: once to learn their content order, on state that is then rolled back, and
+            // once in that order, so a parameter or resource first met inside this node takes the index the content
+            // order gives it and not the one the spelling would.
+            let marks = (
+                self.out.buffers.len(),
+                self.out.states.len(),
+                params.len(),
+                touched.len(),
+            );
+            let mut sides: Vec<(Key, &Expression)> = Vec::new();
+            for side in &terms {
+                let mut own: Vec<Value> = Vec::new();
+                let key = self.value_key(side, params, &mut own, touched);
+                sides.push((by_content(&key, &own, params), side));
+            }
+            sides.sort_by(|a, b| a.0.cmp(&b.0));
+            self.out.buffers.truncate(marks.0);
+            self.out.states.truncate(marks.1);
+            params.truncate(marks.2);
+            touched.truncate(marks.3);
+            let mut keys = Vec::new();
+            for (_, side) in sides {
+                let mut own: Vec<Value> = Vec::new();
+                let key = self.value_key(side, params, &mut own, touched);
+                keys.push(shifted(&key, ops.len() as i64));
+                ops.extend(own);
+            }
+            return Key::tuple([
+                Key::str(ExprType::Binary.text()),
+                Key::str(op.spelling()),
+                Key::Tuple(keys),
+            ]);
+        }
+        match &**e {
+            Expr::Binary(..)
+            | Expr::Call(..)
+            | Expr::Ternary(..)
+            | Expr::Cast(..)
+            | Expr::FlatIndex(..)
+                if !(self.reads_axis(e) && self.coordinate_only(e)) =>
+            {
+                let children: Vec<Key> = e
+                    .children()
+                    .iter()
+                    .map(|child| self.value_key(child, params, ops, touched))
+                    .collect();
+                let head = match &**e {
+                    Expr::Binary(op, ..) => {
+                        vec![Key::str(ExprType::Binary.text()), Key::str(op.spelling())]
+                    }
+                    Expr::Call(name, _) => vec![Key::str(ExprType::Call.text()), Key::Str(*name)],
+                    Expr::Ternary(..) => vec![Key::str(ExprType::Ternary.text())],
+                    Expr::Cast(target, _) => vec![
+                        Key::str(ExprType::Cast.text()),
+                        Key::str(&target.to_string()),
+                    ],
+                    Expr::FlatIndex(buffer, _) => {
+                        vec![Key::str(ExprType::FlatIndex.text()), Key::Str(*buffer)]
+                    }
+                    _ => vec![],
+                };
+                Key::tuple(head.into_iter().chain([Key::Tuple(children)]))
+            }
+            _ => self.abstract_(e, params, ops, touched),
+        }
+    }
+
     /// The expression with every maximal coordinate-only subexpression a parameter and every SSA read an operand.
     fn abstract_(
         &mut self,
@@ -178,16 +279,6 @@ impl Context<'_> {
             return self.resource(name, Tag::State, touched);
         }
         Key::tuple([Key::tag(Tag::Free), Key::Str(*name)])
-    }
-
-    /// An operation's argument no statement ahead of it binds: a carried state read ahead of its update, keyed by
-    /// use, or a name free in the body, spelled.
-    fn unbound(&mut self, name: &Name, touched: &mut Vec<Name>) -> Key {
-        if self.carried.contains(name) {
-            self.resource(name, Tag::State, touched)
-        } else {
-            Key::Str(*name)
-        }
     }
 
     fn resource(&mut self, name: &Name, tag: Tag, touched: &mut Vec<Name>) -> Key {
@@ -492,59 +583,11 @@ impl Context<'_> {
                     self.define(ordinal, &stmt, &names, value);
                 }
                 Statement::Assign(s) => {
-                    let ops: Vec<Value> = s
-                        .args
-                        .iter()
-                        .filter_map(|arg| self.env.get(arg).cloned())
-                        .collect();
-                    let commutative = s.op.commutative();
-                    let mut frees: Vec<Key> = s
-                        .args
-                        .iter()
-                        .filter(|arg| !self.env.contains_key(*arg))
-                        .cloned()
-                        .collect::<Vec<_>>()
-                        .iter()
-                        .map(|arg| self.unbound(arg, &mut touched))
-                        .collect();
-                    if commutative {
-                        frees.sort();
-                    }
                     let payload = Key::tuple([
-                        Key::str(s.op.name()),
                         Key::option(s.dtype.as_ref().map(|d| d.text())),
-                        Key::Tuple(frees),
+                        self.value_key(&s.value, &mut params, &mut ops, &mut touched),
                     ]);
-                    let value = self.compose(Tag::Assign, payload, ops, &[], &[], commutative);
-                    self.define(ordinal, &stmt, std::slice::from_ref(&s.name), value);
-                }
-                Statement::Affine(s) => {
-                    // Each term numbers as its coefficient over its value, and the sum lists the terms by number.
-                    let mut ops: Vec<Value> = Vec::new();
-                    let mut frees: Vec<Key> = Vec::new();
-                    for (coefficient, arg) in s.terms() {
-                        match self.env.get(arg).cloned() {
-                            Some(value) => ops.push(self.compose(
-                                Tag::Term,
-                                Key::tuple([Key::float(coefficient)]),
-                                vec![value],
-                                &[],
-                                &[],
-                                false,
-                            )),
-                            None => {
-                                let key = self.unbound(arg, &mut touched);
-                                frees.push(Key::tuple([Key::float(coefficient), key]));
-                            }
-                        }
-                    }
-                    frees.sort();
-                    let payload = Key::tuple([
-                        Key::float(s.offset.0),
-                        Key::Tuple(frees),
-                        Key::option(s.dtype.as_ref().map(|d| d.text())),
-                    ]);
-                    let value = self.compose(Tag::Affine, payload, ops, &[], &[], true);
+                    let value = self.compose(Tag::Assign, payload, ops, &params, &[], false);
                     self.define(ordinal, &stmt, std::slice::from_ref(&s.name), value);
                 }
                 Statement::Init(s) => {
@@ -554,7 +597,7 @@ impl Context<'_> {
                 }
                 Statement::Accum(s) => {
                     let redirected = s.base.as_ref().is_some_and(|base| *base != s.name);
-                    let value_key = self.operand(&s.value, &mut ops, &mut touched);
+                    let value_key = self.value_key(&s.value, &mut params, &mut ops, &mut touched);
                     let base_key = match &s.base {
                         Some(base) if redirected => self.operand(base, &mut ops, &mut touched),
                         _ => Key::None,
@@ -864,10 +907,15 @@ fn greedy_layout(groups: &[Vec<Value>], params: &[Param]) -> Vec<Value> {
 }
 
 /// Number every statement of `body`; `resource_key` spells a buffer or carried state in a payload.
-pub fn value_numbers(body: &Body, resource_key: &dyn Fn(&Name) -> Key) -> Numbering {
+pub fn value_numbers(
+    body: &Body,
+    resource_key: &dyn Fn(&Name) -> Key,
+    chains: Chains,
+) -> Numbering {
     let mut context = Context {
         out: Numbering::default(),
         resource_key,
+        chains,
         env: HashMap::new(),
         axes: HashMap::new(),
         loops: Vec::new(),
@@ -887,6 +935,60 @@ fn placeholder(spellings: &mut Vec<(Name, String)>, spelling: String) -> Name {
     let stand_in = Name::new(&format!("$o{}", spellings.len()));
     spellings.push((stand_in, spelling));
     stand_in
+}
+
+/// The terms a chain of the associative operation `op` combines, in spelled order: the operands of every nested
+/// `op` node, left to right.
+fn associative_terms(e: &Expression, op: Operation, out: &mut Vec<Expression>) {
+    match e.operation() {
+        Some((nested, args)) if nested == op && args.len() == 2 => {
+            for arg in &args {
+                associative_terms(arg, op, out);
+            }
+        }
+        _ => out.push(e.clone()),
+    }
+}
+
+/// `key` with every operand placeholder replaced by the number of the value it stands for, and every coordinate
+/// placeholder by its parameter: what an operand computes, for ordering two operands of one commutative node.
+fn by_content(key: &Key, ops: &[Value], params: &[Param]) -> Key {
+    match key {
+        Key::Tuple(parts) => match &parts[..] {
+            // The whole value, its parameters with its number: two operands that tie on the number alone can still
+            // differ in what they bind, and the material the digest keeps carries both.
+            [tag, Key::Int(index)] if *tag == Key::tag(Tag::Operand) => {
+                ops.get(*index as usize).map_or_else(
+                    || key.clone(),
+                    |value| Key::tuple([Key::Num(value.0), Key::Tuple(value.1.clone())]),
+                )
+            }
+            [tag, Key::Int(index)] if *tag == Key::tag(Tag::Coordinate) => params
+                .get(*index as usize)
+                .cloned()
+                .unwrap_or_else(|| key.clone()),
+            _ => Key::Tuple(
+                parts
+                    .iter()
+                    .map(|part| by_content(part, ops, params))
+                    .collect(),
+            ),
+        },
+        other => other.clone(),
+    }
+}
+
+/// `key` with every operand placeholder moved `by` positions: a side's operands appended after the other side's.
+fn shifted(key: &Key, by: i64) -> Key {
+    match key {
+        Key::Tuple(parts) => match &parts[..] {
+            [tag, Key::Int(index)] if *tag == Key::tag(Tag::Operand) => {
+                Key::tuple([tag.clone(), Key::Int(index + by)])
+            }
+            _ => Key::Tuple(parts.iter().map(|part| shifted(part, by)).collect()),
+        },
+        other => other.clone(),
+    }
 }
 
 #[cfg(test)]
@@ -915,6 +1017,36 @@ mod tests {
         let greedy = greedy_layout(&groups, &params);
         assert_eq!(greedy, exhaustive_layout(&groups, &params));
         assert_eq!(greedy, least_layout(&groups, &params));
+    }
+
+    #[test]
+    fn a_chain_of_one_associative_operation_numbers_alike_under_every_association() {
+        // The normal form orders a sum's terms by ranks this numbering gives: a number that read the association
+        // would move with the order it decides, and the form would never settle.
+        let parse = |sum: &str| {
+            crate::text::parse_body(&format!(
+                "x = load p[0]\ny = load q[0]\nz = load r[0]\nv = {sum}\nout[0] = v"
+            ))
+            .unwrap()
+        };
+        let numbered = |sum: &str| {
+            let body = parse(sum);
+            let numbering = value_numbers(&body, &|name| Key::Str(*name), Chains::Flat);
+            numbering.numbers[3].clone().unwrap()
+        };
+        let reference = numbered("(x + y) + z");
+        for spelling in ["x + (y + z)", "(x + z) + y", "z + (y + x)", "y + x + z"] {
+            assert_eq!(numbered(spelling), reference, "{spelling}");
+        }
+        assert_ne!(numbered("(x - y) + z"), reference);
+        assert_ne!(numbered("(x + y) * z"), reference);
+        // Kept, the two associations are two trees.
+        let kept = |sum: &str| {
+            value_numbers(&parse(sum), &|name| Key::Str(*name), Chains::Kept).numbers[3]
+                .clone()
+                .unwrap()
+        };
+        assert_ne!(kept("(x + y) + z"), kept("x + (y + z)"));
     }
 
     #[test]

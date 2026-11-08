@@ -13,7 +13,7 @@ use std::hash::{Hash, Hasher};
 use std::sync::{Arc, OnceLock};
 
 use crate::closed_set;
-use crate::elementwise::Operation;
+use crate::elementwise::{ElementwiseOp, Operation};
 use crate::{Error, Name, Result};
 
 // --- numbers --------------------------------------------------------------------------------------
@@ -231,6 +231,10 @@ pub fn apply_binop(op: Operation, left: Num, right: Num) -> Result<Num> {
         Operation::Add => arith(left, right, |a, b| a.checked_add(b), |a, b| a + b),
         Operation::Subtract => arith(left, right, |a, b| a.checked_sub(b), |a, b| a - b),
         Operation::Multiply => arith(left, right, |a, b| a.checked_mul(b), |a, b| a * b),
+        // Division over integers is the index quotient, which floors; over anything else it is the true quotient.
+        Operation::Divide if !(left.is_integral() && right.is_integral()) => {
+            Ok(Num::Float(left.as_f64() / right.as_f64()))
+        }
         Operation::Divide | Operation::FloorDivide => {
             Ok(Num::Int(floor_div(left.as_int()?, right.as_int()?)?))
         }
@@ -282,11 +286,13 @@ pub struct Lit {
 
 closed_set! {
     /// The two kinds of scalar arithmetic the IR has, as predicates over the operation table that every node of an
-    /// expression must satisfy, one inside the other. `Value` admits every operation of the table over any operand:
-    /// SSA names, axes, GPU built-ins, literals of any type, select, cast and a buffer's flat index. `Index` is its
-    /// restriction to integer arithmetic over integer operands: the affine operations, division and remainder,
-    /// minimum and maximum, the comparisons and logical operators, the bitwise operators and shifts, over axes,
-    /// built-ins, names and integer literals. Every expression field declares the class it admits beside its roles.
+    /// expression must satisfy, one inside the other. `Value` admits every operation (the table's, and a spelling only
+    /// a renderer knows) over any operand: SSA names, axes, GPU built-ins, literals of any type, select, cast and a
+    /// buffer's flat index. `Index` is its restriction to integer arithmetic over integer operands: the affine
+    /// operations, division and remainder, minimum and maximum, the comparisons and logical operators, the bitwise
+    /// operators and shifts, over axes, built-ins, names and integer literals. In either, an operation node spells its
+    /// operation one way: a `Binary` holds an operation with an infix, a `Call` never names one. Every expression
+    /// field declares the class it admits beside its roles.
     pub enum ExprClass ("expression class") { Index = "Index", Value = "Value", }
 }
 
@@ -295,7 +301,7 @@ impl ExprClass {
     pub fn check(self, expression: &Expression) -> Result<()> {
         self.admits(expression).map_err(|why| {
             Error::Value(format!(
-                "{} is not an {self} expression: {why}",
+                "{} is not an expression of class {self}: {why}",
                 expression
                     .try_text()
                     .unwrap_or_else(|_| format!("{expression:?}"))
@@ -304,60 +310,66 @@ impl ExprClass {
     }
 
     fn admits(self, expression: &Expression) -> std::result::Result<(), String> {
-        if self == ExprClass::Value {
-            return Ok(());
+        // Both classes: an operation node spells its operation one way. A `Binary` holds an operation with an infix;
+        // a `Call` never names one.
+        match &**expression {
+            Expr::Binary(op, ..) if op.infix().is_none() => {
+                return Err(format!(
+                    "the operation {op} as an operator, which it has no spelling for"
+                ));
+            }
+            Expr::Call(name, _) => {
+                if let ElementwiseOp::Known(op) = ElementwiseOp::new(name)
+                    && op.infix().is_some()
+                {
+                    return Err(format!(
+                        "a call of {name}, which is spelled {}",
+                        op.spelling()
+                    ));
+                }
+            }
+            _ => {}
         }
-        match (self, &**expression) {
-            (_, Expr::Var(_)) => Ok(()),
-            (ExprClass::Index, Expr::Literal(lit)) if !matches!(lit.dtype, LitType::Float) => {
-                Ok(())
-            }
-            (ExprClass::Index, Expr::Literal(lit)) => Err(format!("a {} literal", lit.dtype)),
-            (ExprClass::Value, Expr::Literal(_)) => Ok(()),
-            (ExprClass::Index, Expr::Builtin(_)) => Ok(()),
-            (ExprClass::Value, Expr::Builtin(builtin)) => Err(format!("the built-in {builtin}")),
-            (ExprClass::Index, Expr::FlatIndex(_, indices)) => {
-                indices.iter().try_for_each(|e| self.admits(e))
-            }
-            (ExprClass::Value, Expr::FlatIndex(buffer, _)) => Err(format!("an index of {buffer}")),
-            (_, Expr::Binary(op, left, right)) => {
-                if !self.admits_operation(*op) {
-                    return Err(format!("the operation {op}"));
+        match self {
+            ExprClass::Value => Ok(()),
+            ExprClass::Index => {
+                let children =
+                    |children: &[Expression]| children.iter().try_for_each(|e| self.admits(e));
+                match &**expression {
+                    Expr::Var(_) | Expr::Builtin(_) => Ok(()),
+                    Expr::Literal(lit) if lit.dtype != LitType::Float => Ok(()),
+                    Expr::Literal(lit) => Err(format!("a {} literal", lit.dtype)),
+                    Expr::FlatIndex(_, indices) => children(indices),
+                    Expr::Binary(op, left, right) if self.admits_operation(*op) => {
+                        self.admits(left)?;
+                        self.admits(right)
+                    }
+                    Expr::Binary(op, ..) => Err(format!("the operation {op}")),
+                    Expr::Call(name, args) => match ElementwiseOp::new(name) {
+                        ElementwiseOp::Known(op) if self.admits_operation(op) => children(args),
+                        _ => Err(format!("a call of {name}")),
+                    },
+                    Expr::Ternary(cond, if_true, if_false) => {
+                        self.admits(cond)?;
+                        self.admits(if_true)?;
+                        self.admits(if_false)
+                    }
+                    Expr::Cast(_, inner) => self.admits(inner),
                 }
-                self.admits(left)?;
-                self.admits(right)
             }
-            (_, Expr::Call(name, args)) => match crate::elementwise::ElementwiseOp::new(name) {
-                crate::elementwise::ElementwiseOp::Known(op) if self.admits_operation(op) => {
-                    args.iter().try_for_each(|e| self.admits(e))
-                }
-                _ => Err(format!("a call of {name}")),
-            },
-            (_, Expr::Ternary(cond, if_true, if_false)) => {
-                self.admits(cond)?;
-                self.admits(if_true)?;
-                self.admits(if_false)
-            }
-            (_, Expr::Cast(_, inner)) => self.admits(inner),
         }
     }
 
+    /// The integer arithmetic: every operator (the affine operations, division and remainder, the comparisons, the
+    /// logical and bitwise operators and the shifts), negation, and minimum and maximum.
     fn admits_operation(self, op: Operation) -> bool {
         match self {
             ExprClass::Value => true,
             ExprClass::Index => {
-                op.info().affine.is_some()
-                    || op.is_division()
-                    || op.is_comparison()
+                op.infix().is_some()
                     || op.info().integer
-                    || matches!(
-                        op,
-                        Operation::Minimum
-                            | Operation::Maximum
-                            | Operation::NotEqual
-                            | Operation::LogicalAnd
-                            | Operation::LogicalOr
-                    )
+                    || op.info().affine.is_some()
+                    || matches!(op, Operation::Minimum | Operation::Maximum)
             }
         }
     }
@@ -675,7 +687,13 @@ pub fn is_builtin(name: &str) -> bool {
 }
 
 /// Names the reader gives a meaning of their own, so a variable of that name is written quoted.
-const RESERVED: [&str; 4] = ["true", "false", "inf", "nan"];
+/// Words the text reader gives a meaning, in an expression or on a statement line, so a name spelled like one is
+/// written between backticks wherever it stands.
+const RESERVED: [&str; 27] = [
+    "true", "false", "inf", "nan", "none", "for", "in", "if", "else", "let", "init", "zero",
+    "load", "pre", "select", "when", "over", "seed", "step", "until", "window", "carried",
+    "swizzle", "words", "unroll", "sub", "call",
+];
 
 pub const PLACEHOLDER_PREFIX: &str = "out_coord_";
 
@@ -747,6 +765,47 @@ impl Expression {
         match &**self {
             Expr::Literal(lit) => Some(lit),
             _ => None,
+        }
+    }
+
+    /// The operation this node applies, with its operands: an infix node, or a call of an operation of the table.
+    pub fn operation(&self) -> Option<(Operation, Vec<Expression>)> {
+        match &**self {
+            Expr::Binary(op, left, right) => Some((*op, vec![left.clone(), right.clone()])),
+            Expr::Call(name, args) => match ElementwiseOp::new(name) {
+                ElementwiseOp::Known(op) => Some((op, args.to_vec())),
+                ElementwiseOp::Other(_) => None,
+            },
+            _ => None,
+        }
+    }
+
+    /// `op` applied to `args`: the infix node when the operation has an infix and two operands, a left-nested chain
+    /// of it when it is associative and has more, else a call. One operation, one node: the reader builds the same.
+    pub fn apply(op: Operation, args: Vec<Expression>) -> Expression {
+        if op.infix().is_some() && (args.len() == 2 || (args.len() > 2 && op.info().associative)) {
+            let mut operands = args.into_iter();
+            if let Some(first) = operands.next() {
+                return operands.fold(first, |sum, term| Expression::binary(op, sum, term));
+            }
+            return Expression::new(Expr::Call(Name::new(op.text()), Vec::new().into()));
+        }
+        Expression::new(Expr::Call(Name::new(op.text()), args.into()))
+    }
+
+    /// Every operation node mapped through `f`, bottom-up; the tree is kept where `f` keeps every operation.
+    pub fn map_operations(&self, f: &mut dyn FnMut(Operation) -> Operation) -> Expression {
+        let mapped = self.map_children(&mut |child| child.map_operations(f));
+        match mapped.operation() {
+            Some((op, args)) => {
+                let new = f(op);
+                if new == op {
+                    mapped
+                } else {
+                    Expression::apply(new, args)
+                }
+            }
+            None => mapped,
         }
     }
 
@@ -824,11 +883,20 @@ impl Expression {
                     out.push('(');
                 }
                 left.spell(prec, out)?;
-                let _ = write!(out, " {} ", op.infix().unwrap_or(op.text()));
+                let _ = write!(out, " {} ", op.spelling());
                 right.spell(prec + 1, out)?;
                 if paren {
                     out.push(')');
                 }
+            }
+            // A negation is spelled as its prefix, except over a literal, which the reader would take as a signed number.
+            Expr::Call(name, args)
+                if ElementwiseOp::new(name) == ElementwiseOp::Known(Operation::Negative)
+                    && args.len() == 1
+                    && !matches!(*args[0], Expr::Literal(_)) =>
+            {
+                out.push('-');
+                args[0].spell(ATOM, out)?;
             }
             Expr::Call(name, args) => {
                 let _ = write!(out, "{name}(");
@@ -1019,6 +1087,7 @@ impl Expression {
                         | Operation::Greater
                         | Operation::GreaterEqual
                         | Operation::Equal
+                        | Operation::NotEqual
                         | Operation::LogicalAnd
                         | Operation::LogicalOr
                 );
@@ -1068,6 +1137,30 @@ impl Expression {
             Expr::Call(name, args) => {
                 let new: Result<Vec<Expression>> = args.iter().map(|a| a.simplify(ctx)).collect();
                 let new = new?;
+                // A copy of a value is the value: the cast a copy stood for is the definition's dtype.
+                if let ElementwiseOp::Known(op) = ElementwiseOp::new(name)
+                    && op.info().copies
+                    && let [operand] = &new[..]
+                {
+                    return Ok(operand.clone());
+                }
+                // An operation over float literals is the literal the host computes on `f32`, as the stored kernels
+                // were folded; an integer operand stays, since its arithmetic is the index rules' business.
+                if let ElementwiseOp::Known(op) = ElementwiseOp::new(name)
+                    && !new.is_empty()
+                    && let Some(values) = new
+                        .iter()
+                        .map(|a| match &**a {
+                            Expr::Literal(lit) if lit.dtype == LitType::Float => {
+                                Some(lit.value.as_f64() as f32)
+                            }
+                            _ => None,
+                        })
+                        .collect::<Option<Vec<f32>>>()
+                    && let Some(value) = op.evaluate_f32(&values)
+                {
+                    return Ok(Expression::float(f64::from(value)));
+                }
                 if new
                     .iter()
                     .zip(args.iter())

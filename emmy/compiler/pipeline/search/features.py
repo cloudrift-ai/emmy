@@ -20,7 +20,7 @@ from sys import float_info
 from types import MappingProxyType
 from typing import TYPE_CHECKING
 
-from emmy.compiler.ir.stmt import Assign, Body, Cond, Loop, binary
+from emmy.compiler.ir.stmt import Accum, Assign, Body, Cond, Loop
 from emmy.compiler.pipeline.knob import _SITE_FAMILIES, KnobType, axis_of, family_of, family_value, get
 from emmy.compiler.wire import kernel_tile
 
@@ -72,7 +72,10 @@ CTX_PREFIX = "H_"
 # Version 12 lets a 1-byte scalar A pair with a 16-bit B through the converting shared-memory fill. Stored kernels
 # that read such an A (an FP8 weight against an f16 activation) can thereby gain a tensor-core schedule and change
 # S_warp_eligible without changing their exact kernel identity.
-FEATURIZER_VERSION = 12
+# Version 13 is the one-scalar-definition normal form: an ``Assign`` holds an expression, a value read once folds into
+# its reader, and the pointwise work is the operation nodes of every ``Assign`` and ``Accum`` value. Earlier datasets
+# and weights must be rebuilt.
+FEATURIZER_VERSION = 13
 
 # The features that name a candidate's regime rather than describe it — the ``S_ext_n_symbolic_axis`` stamp a
 # masked-tile (symbolic-axis) kernel carries. The stamp VOCABULARY belongs here with the rest of the feature
@@ -984,11 +987,12 @@ def _skeleton(body: Body, buffers: Mapping | None) -> dict[str, float]:
     feats["S_n_write"] = len(body.writes)
     feats["S_n_accum"] = len(body.accums)
     feats["S_n_cond"] = len(body.iter_of_type(Cond))
-    # A sum is one ``Affine`` statement in the stored body; the work it stands for is its binary spelling.
-    assigns = [s for s in binary(body.iter()) if isinstance(s, Assign)]
-    feats["S_n_assign"] = len(assigns)
-    for s in assigns:
-        feats[f"S_pw_{s.op.name}"] += 1
+    # A definition holds a tree in the stored body; the work it stands for is its operation nodes, one each.
+    values = [s.value for s in body.iter() if isinstance(s, (Assign, Accum))]
+    operations = [node.operation for value in values for node in value.subterms() if node.operation is not None]
+    feats["S_n_assign"] = len(operations)
+    for op in operations:
+        feats[f"S_pw_{op.name}"] += 1
     for s in body.accums:
         feats[f"S_reduce_{s.op.name}"] += 1
     loops = body.loops

@@ -236,7 +236,7 @@ by that name.
 nothing else: no submodule path, no private name. The package exports the statement types, `Body` and `OutputSpec`,
 `normalize_body` and `canonicalize_identity`, a few functions over statements (`free_names`, `exposed_defines`,
 `rename_free`, `binary`, `mask_select_predicate`, `ordering_constraints`, `dtype_promote`), the text form
-(`pretty_body`, `parse_body`), three normalization steps a caller may run on its own (`fold_affine`, `simplify_body`,
+(`pretty_body`, `parse_body`), four normalization steps a caller may run on its own (`fold_single_readers`, `canonical_values`, `simplify_body`,
 `prepare_body`), the two statement types fusion's body assembly in `ir/loop/` builds a region with (`Call`,
 `Subroutine`), and the names of a statement type's fields (`fields_of`). The statement types, `Body`, the protocol, the
 text, the value numbering and the normalization are implemented in Rust — the `emmy-ir` crate, reached through the
@@ -610,8 +610,7 @@ names it recognizes the pair by canonical form (`Fold.fuse`), never by a stored 
 | `Axis`                       | Named iteration variable (`name`, `extent`). Defined in `ir/axis.py`, re-exported here. Carries an optional `window` (`Window` — the `parent` axis this one is a slice of, and whether the slice is a cross-CTA `partition`; its `base` / `bound` are declared but unused, kept only because recorded split identities spell them): the ONE windowing concept, and never a range — a loop's data-independent `start` / `end` is the kernel loop's own (`StridedLoop`), derived where it opens; `source_axis` is the derived compat read (`window.parent`). Excluded from equality / hashing. |
 | `LoopOp`                     | One kernel. Stored field: `body` (nested `Loop` tree). Computed: `axes`, `loads`, `accums`.                       |
 | `Load`                       | Body-form external read: `name = load(input)[index...]`. `input` matches the producing graph node's id.           |
-| `Assign`                     | SSA body stmt: `name = op(args)` with `op: ElementwiseImpl`.                                                      |
-| `Affine`                     | `name = offset + Σ coefficient·arg` — the one statement for a sum, a difference, a negation or a product with a literal (a `Let` binding a number); normalization folds every such cone into it (`fold_affine`), so `add`, `subtract` and `negative` never survive a floating cone and `x + x`, `2 * x` and `x + 3 * x - x` are one body. Identity sorts its terms by value. Kernel IR spells it as binary `Assign`s over `Let`-bound literals (`010_materialize`). |
+| `Assign`                     | The one scalar definition: `name = value`, `value` an expression over names and literals (`exp(x) * 2.0 - y`), with an optional `dtype`. A sum is a value in affine form; an alias is a bare name. |
 | `Accum`                      | Reduce accumulator: `name = op(name, value)` inside a reduce `Loop`. Initialized to its op's identity. ``axes`` lists the reduction axis names — propagated through Sigma renames (including σ-splits via `Expression.free_vars()`); the escape-analysis helper derives cross-thread cooperativity from ``axes ∩ enclosing ThreadTile.axes``. |
 | `Carry`                      | The next value of one cell of a carried state: `name[index...] <- value`, holding `seed` before the first step. No op: a state folds nothing. |
 | `Pre`                        | Read of one cell of a carried state: `name = pre carrier[index...]`, the previous step's value inside the loop that carries it. |
@@ -754,13 +753,12 @@ from that CSE form. Subroutine boundaries never limit fusion.
   this way, the dot product that fed it and the loop that summed it included: a dropped value leaves its operands
   unread in turn, and one call drops the whole chain. A body that stores nothing is a fragment whose values are all
   its reader's, so nothing is dropped from it.
-- `fold_affine` — every maximal single-reader cone of `add`, `subtract`, `negative`, literal `multiply`, literal
-  `divide` and `Affine` over floating values becomes one `Affine`: like terms summed, zero terms dropped, the constant
-  its offset, a division by a literal the product by its reciprocal, a single unit term with no offset a `copy`.
-  `x + x`, `2 * x` and `x + 3 * x - x` are then one body, `x / 2` and `0.5 * x` another, and `x - x` is `0`. The fold
-  reassociates a sum and rounds a reciprocal once, which every reduce schedule and fast-math division do already; a
-  value read more than once, read by a non-affine operation, read outside its scope or of another dtype stays a
-  term. A literal the fold leaves unread is dropped. The terms' order is the canonical order's business, by value.
+- `fold_single_readers` — a pure `Assign` read exactly once in its scope folds into its reader's expression (an
+  `Assign`, an `Accum`, an index or a predicate), and every value is spelled in affine form: like terms summed, zero
+  terms dropped, the constant last, a division by a float literal the product by its reciprocal. `x + x`, `2 * x` and
+  `x + 3 * x - x` are then one body, `x / 2.0` and `0.5 * x` another, and `x - x` is `0`. The fold reassociates a sum
+  and rounds a reciprocal once, which every reduce schedule and fast-math division do already; a value read more than
+  once stays a statement, since sharing is what a statement expresses.
 - `merge_sibling_reduce_loops` — unify sibling reduce axes whose Load positions overlap, then merge matching Loops
   before descending into their children. A parent merge therefore exposes child reductions to the same walk.
   Overlapping reductions share one canonical axis name (softmax's max + sum sweeps; the two matmul reductions in

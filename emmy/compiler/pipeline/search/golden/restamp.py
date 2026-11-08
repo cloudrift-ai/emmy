@@ -20,7 +20,9 @@ piece (two programs' kernel sets sharing a kernel, say) now mint different kerne
 the stored kernel keep it and its rows, whatever order the file lists them in, and every other decision is
 re-pointed to the kernel it mints; so a restamp of one program and of the whole file agree on whether that
 program's kernel set is current. A row's whole-target latency names the kernel set it timed, and is cleared exactly
-when one of those kernels is re-keyed or dropped.
+when one of those kernels is re-keyed or dropped. A row's scoped schedule keys are inputs the lift spells (a site's
+path from the root); the restamp re-spells no schedule, so a key the kernel's fresh tile no longer offers is kept and
+reported, since a strict replay cannot realize the row.
 """
 
 from __future__ import annotations
@@ -34,6 +36,7 @@ from math import prod
 from emmy.compiler import pipeline
 from emmy.compiler.context import Context
 from emmy.compiler.graph import Graph
+from emmy.compiler.ir.schedule.classic.schedule import CLASSIC_FAMILIES, classic_keys
 from emmy.compiler.ir.tile import TileOp
 from emmy.compiler.ir.tile.ops import UnbindableProjection
 from emmy.compiler.pipeline import Pipeline
@@ -224,6 +227,9 @@ class Report:
     filled_latencies: list[str] = field(default_factory=list)
     cleared_latencies: list[str] = field(default_factory=list)
     dropped_rows: list[str] = field(default_factory=list)
+    #: Rows whose scoped schedule keys name no site of their kernel's fresh tile: kept as they are, since the restamp
+    #: re-spells no schedule, and reported, since a strict replay cannot realize them.
+    misnamed_rows: list[str] = field(default_factory=list)
 
     @property
     def changed(self) -> bool:
@@ -252,6 +258,7 @@ class Report:
         out.extend(f"filled the kernel set of the whole-target latency {name}" for name in self.filled_latencies)
         out.extend(f"cleared whole-target latency {reason}" for reason in self.cleared_latencies)
         out.extend(f"dropped row {reason}" for reason in self.dropped_rows)
+        out.extend(f"row {reason}" for reason in self.misnamed_rows)
         return out
 
 
@@ -422,12 +429,28 @@ def restamp(document: GoldenFile, *, traced: int | None = None) -> tuple[GoldenF
             return f"{ref} is gone"
         return f"{ref} was re-keyed" if fresh.get(ref) not in (None, document.kernel(ref)) else None
 
+    offered: dict[tuple, frozenset[str]] = {}
+
+    def keys_of(ref: str, bindings: Mapping[str, int]) -> frozenset[str] | None:
+        """The schedule keys the surviving kernel ``ref`` offers at ``bindings``: the row keys of its tile's codec.
+        ``None`` for a kernel formed from no loop op, whose tile only its parent's decisions reach."""
+        key = (ref, tuple(sorted(bindings.items())))
+        if key not in offered:
+            kernel = next(kernel for kernel in kernels if kernel.ref == ref)
+            offered[key] = frozenset(classic_keys(kernel.op(bindings))) if kernel.formed else None
+        return offered[key]
+
     rows: list[Row] = []
     for row in document.rows:
         if row.kernel not in stored_as:
             report.dropped_rows.append(f"{row.name}: its kernel is gone")
             continue
         fresh_row = replace(row, kernel=stored_as[row.kernel])
+        for key in row.knobs or {}:
+            family, _, path = key.partition("@")
+            keys = keys_of(fresh_row.kernel, row.bindings) if path and family in CLASSIC_FAMILIES else None
+            if keys is not None and key not in keys:
+                report.misnamed_rows.append(f"{row.name}: {key} names no site of {fresh_row.kernel}")
         if row.measurements is not None and stale(row.kernel) is not None:
             fresh_row = replace(fresh_row, measurements=None)
             report.demoted.append(row.name)

@@ -15,6 +15,7 @@ from emmy.compiler.context import Context
 from emmy.compiler.dtype import F16, F32, DataType
 from emmy.compiler.graph import Graph, Tensor
 from emmy.compiler.ir.base import InputOp
+from emmy.compiler.ir.expression import Var
 from emmy.compiler.ir.loop import Accum, Assign, LoopOp, Write
 from emmy.compiler.ir.stmt import Body, parse_body
 from emmy.compiler.ir.tensor.ir import ElementwiseOp
@@ -23,6 +24,20 @@ from emmy.compiler.pipeline import TILE_PASSES, Pipeline
 from emmy.compiler.pipeline.search.pins import pinned_knobs
 
 _RULE = "090_spell_store_rounding"
+
+
+def _names(stmt) -> tuple[str, ...]:
+    """The names an ``Assign``'s value reads as direct operands (a bare-name value is its one operand)."""
+    operands = (stmt.value,) if isinstance(stmt.value, Var) else stmt.value.operands
+    return tuple(operand.name for operand in operands)
+
+
+def _is_copy(stmt) -> bool:
+    """An ``Assign`` that copies one name: an alias (a bare name) or a typed ``copy`` that spells a rounding."""
+    if not isinstance(stmt, Assign):
+        return False
+    op = stmt.value.operation
+    return isinstance(stmt.value, Var) or (op is not None and op.name == "copy" and len(stmt.value.operands) == 1)
 
 
 def _reduce_kernel() -> LoopOp:
@@ -124,7 +139,7 @@ def _run(kernel: LoopOp, out: Tensor, *, input_shape: tuple = (4, 16), consumed:
 
 
 def _conversions(op: LoopOp) -> list[DataType]:
-    return [s.dtype for s in op.body.iter() if isinstance(s, Assign) and s.op.name == "copy" and s.dtype is not None]
+    return [s.dtype for s in op.body.iter() if _is_copy(s) and s.dtype is not None]
 
 
 def test_narrowing_store_to_a_real_buffer_spells_its_rounding() -> None:
@@ -132,10 +147,10 @@ def test_narrowing_store_to_a_real_buffer_spells_its_rounding() -> None:
     op = _run(_reduce_kernel(), Tensor("out", (4,), F16))
     assert _conversions(op) == [F16]
     write = next(s for s in op.body.iter() if isinstance(s, Write))
-    converted = next(s for s in op.body.iter() if isinstance(s, Assign) and s.op.name == "copy")
+    converted = next(s for s in op.body.iter() if _is_copy(s))
     accum = next(s for s in op.body.iter() if isinstance(s, Accum))
     assert write.value == converted.name  # the store reads the rounded value...
-    assert converted.args == (accum.name,)  # ...which converts the accumulator
+    assert _names(converted) == (accum.name,)  # ...which converts the accumulator
 
 
 def test_transient_buffer_spells_nothing() -> None:
@@ -187,7 +202,7 @@ def test_public_copy_of_private_reduction_keeps_its_rounding_through_placement()
         placed = Pipeline.build(TILE_PASSES).run(graph, ctx=Context.from_target((7, 0)))
     tiles = [node.op for node in placed.nodes.values() if isinstance(node.op, TileOp)]
     consumer = next(tile for tile in tiles if "out" in tile.outputs)
-    copies = [stmt.dtype for stmt in Body(consumer.op.lower()).iter() if isinstance(stmt, Assign) and stmt.op.name == "copy"]
+    copies = [stmt.dtype for stmt in Body(consumer.op.lower()).iter() if _is_copy(stmt)]
     assert len(tiles) == 2
     assert copies == [F16]
 

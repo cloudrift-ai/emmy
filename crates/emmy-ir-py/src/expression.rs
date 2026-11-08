@@ -4,7 +4,7 @@ use std::collections::HashMap;
 use std::sync::{Arc, OnceLock};
 
 use emmy_ir::Name;
-use emmy_ir::elementwise::Operation;
+use emmy_ir::elementwise::{ElementwiseOp, Operation};
 use emmy_ir::expr::{
     Builtin, CastTarget, Expr, Expression, Interval, Lit, LitType, Num, SimplifyCtx,
 };
@@ -13,8 +13,8 @@ use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyFrozenSet, PyList, PyString, PyTuple};
 
 use crate::convert::{
-    IntoPyErr, PARSE, PyField, cached, expression_from_py, located, name_from_py, num_from_py,
-    num_to_py, translate,
+    ELEMENTWISE, IntoPyErr, PARSE, PyField, cached, expression_from_py, located, name_from_py,
+    num_from_py, num_to_py, op_to_py, translate,
 };
 
 /// The base class of every expression node: the shared tree, and the Python objects its fields hand back.
@@ -43,9 +43,7 @@ impl PyExprField for Name {
 
 impl PyExprField for Operation {
     fn to_py(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
-        Ok(PyString::new(py, self.infix().unwrap_or(self.text()))
-            .into_any()
-            .unbind())
+        Ok(PyString::new(py, self.spelling()).into_any().unbind())
     }
 }
 
@@ -363,6 +361,32 @@ impl PyExpression {
             .map(|e| PyExpression::wrap(py, e))
             .collect();
         PyList::new(py, items?)
+    }
+
+    /// The elementwise operation an operation node applies: a binary node's operation, a call's name (the table's,
+    /// or a spelling only a renderer knows). `None` for a name, a literal, a built-in, a select, a cast or a flat
+    /// index.
+    #[getter]
+    fn operation(&self, py: Python<'_>) -> PyResult<Option<Py<PyAny>>> {
+        let op = match &*self.expr {
+            Expr::Binary(op, ..) => ElementwiseOp::Known(*op),
+            Expr::Call(name, _) => ElementwiseOp::new(name),
+            _ => return Ok(None),
+        };
+        Ok(Some(op_to_py(py, &op)?.unbind()))
+    }
+
+    /// The operands of an operation node, in order; empty for any other node.
+    #[getter]
+    fn operands<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyTuple>> {
+        let operands: Vec<Expression> = match &*self.expr {
+            Expr::Binary(_, left, right) => vec![left.clone(), right.clone()],
+            Expr::Call(_, args) => args.to_vec(),
+            _ => vec![],
+        };
+        let items: PyResult<Vec<Bound<'py, PyAny>>> =
+            operands.iter().map(|e| PyExpression::wrap(py, e)).collect();
+        PyTuple::new(py, items?)
     }
 
     /// The direct children, in field order.
@@ -712,6 +736,33 @@ pub fn parse(py: Python<'_>, text: &str) -> PyResult<Py<PyAny>> {
     Ok(PyExpression::wrap(py, &emmy_ir::expr::parse(text).py()?)?.unbind())
 }
 
+/// `op` (an `ElementwiseImpl` or its name) applied to `args`: the node the constructors build, a binary node for an
+/// operator over two operands, a chain of it for an associative one over more, else a call. An operand given as a
+/// name is that variable; a number is a literal.
+#[pyfunction]
+#[pyo3(signature = (op, *args))]
+pub fn apply(
+    py: Python<'_>,
+    op: &Bound<'_, PyAny>,
+    args: &Bound<'_, PyTuple>,
+) -> PyResult<Py<PyAny>> {
+    // Construction through the Python class validates the name and takes its canonical spelling.
+    let op = match op.cast::<PyString>() {
+        Ok(text) => ELEMENTWISE.get(py)?.call1((text,))?,
+        Err(_) => op.clone(),
+    };
+    let name: String = op.getattr("name")?.extract()?;
+    let operands: Vec<Expression> = args
+        .iter()
+        .map(|item| expression_from_py(&item))
+        .collect::<PyResult<_>>()?;
+    let expr = match ElementwiseOp::new(&name) {
+        ElementwiseOp::Known(op) => Expression::apply(op, operands),
+        ElementwiseOp::Other(_) => Expression::new(Expr::Call(Name::new(&name), operands.into())),
+    };
+    Ok(PyExpression::wrap(py, &expr)?.unbind())
+}
+
 /// `name` as the reader reads a name back: bare, or between backticks.
 #[pyfunction]
 #[pyo3(signature = (name, reserved = None))]
@@ -811,6 +862,7 @@ pub fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyInterval>()?;
     m.add_class::<PySimplifyCtx>()?;
     m.add_function(wrap_pyfunction!(parse, m)?)?;
+    m.add_function(wrap_pyfunction!(apply, m)?)?;
     m.add_function(wrap_pyfunction!(spell_name, m)?)?;
     m.add_function(wrap_pyfunction!(affine_form, m)?)?;
     m.add_function(wrap_pyfunction!(split_anchor, m)?)?;

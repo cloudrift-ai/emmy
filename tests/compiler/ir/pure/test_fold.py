@@ -467,7 +467,7 @@ def test_a_componentwise_merge_is_one_accum_per_state() -> None:
     lift = Lambda.closing(("k", "y"), body, ("a0", "a1"))
     fold = Fold(operands=(slab("y", "y", "m", "k"),), lift=lift, init=init, base=combine)
     stmts = fold.merge(("acc0__p", "acc1__p"))
-    assert [(s.name, s.op.name, s.value) for s in stmts] == [("acc0", "add", "acc0__p"), ("acc1", "maximum", "acc1__p")]
+    assert [(s.name, s.op.name, str(s.value)) for s in stmts] == [("acc0", "add", "acc0__p"), ("acc1", "maximum", "acc1__p")]
     assert [s.op.identity for s in stmts] == [0.0, -1e30], "the seed the identity placement will emit"
     assert fold.as_reduction().ops is not None and not fold.as_reduction().twisted
 
@@ -536,11 +536,11 @@ def test_a_consumer_names_what_it_binds_and_rendering_spells_the_operand() -> No
     over a passed-through operand value renders with it. Two spellings of one binding are one
     term: equal canonical forms, equal lowered bodies."""
     y = slab("y", "y", "m", "k")
-    lift = Lambda.closing(("k", "value"), parse_body("acc__v = copy(value)"), ("acc__v",))
+    lift = Lambda.closing(("k", "value"), parse_body("acc__v = value"), ("acc__v",))
     fold = Fold(operands=(y,), lift=lift, init=(0.0,), base=Lambda.componentwise(("add",), ("acc",)))
     assert fold.bindings == (("value", y, 0),) and fold.applied.params == ("k", "y")
     (loop,) = fold.lower(axes=SCOPE)
-    assert [stmt.args for stmt in loop.body if isinstance(stmt, Assign)] == [("y",)]
+    assert [str(stmt.value) for stmt in loop.body if isinstance(stmt, Assign)] == ["y"]
     spelled = replace(fold, lift=lift.rename({"value": "y"}))
     assert fold.canonical() == spelled.canonical() and fold.lower(axes=SCOPE) == spelled.lower(axes=SCOPE)
     # A projection passing the state through exposes the state's own name, and its store follows.

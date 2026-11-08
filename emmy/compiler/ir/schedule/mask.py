@@ -12,7 +12,7 @@ from __future__ import annotations
 
 from emmy.compiler.ir.expression import BinaryExpression, Expression, Literal, Var
 from emmy.compiler.ir.pure.fold import Fold
-from emmy.compiler.ir.stmt import Affine, Assign, Let, Select, SelectBranch, Statement
+from emmy.compiler.ir.stmt import Assign, Let, Select, SelectBranch, Statement
 
 _COMPARE = {"less": "<", "less_equal": "<=", "greater": ">", "greater_equal": ">="}
 _NEGATE = {"<": ">=", "<=": ">", ">": "<=", ">=": "<"}
@@ -59,6 +59,62 @@ def select_masks(
             return Var(name)
         return None
 
+    def resolved(expression: Expression) -> Expression | None:
+        """``expression`` with every name it reads spelled by ``term``; ``None`` when one resolves to nothing."""
+        terms = {name: term(name) for name in expression.free_vars()}
+        if any(t is None for t in terms.values()):
+            return None
+        return expression.substitute(terms)
+
+    def comparison(expression: Expression) -> BinaryExpression | None:
+        """An ordered comparison over resolved sides, as the predicate it is; ``None`` for any other value."""
+        op = expression.operation
+        if op is None or op.name not in _COMPARE:
+            return None
+        left, right = (resolved(operand) for operand in expression.operands)
+        if left is None or right is None:
+            return None
+        return BinaryExpression(_COMPARE[op.name], left, right)
+
+    def branch(operand: Expression, name: str) -> str | None:
+        """The name a select branch carries: a uniform value, a bound scalar, or a literal bound here."""
+        if isinstance(operand, Var):
+            return operand.name if operand.name in uniform | scalars.keys() else None
+        if isinstance(operand, Literal):
+            scalars[name] = operand
+            out.append(Let(name, operand))
+            return name
+        return None
+
+    def selected(stmt: Assign) -> Expression | None:
+        """``stmt``'s value with every ``where`` over a coordinate predicate spelled as a ``Select`` statement — the
+        value itself when it is one, else a name the sum reads — or ``None`` when a branch is no uniform value."""
+        masks = 0
+
+        def rewrite(node: Expression) -> Expression:
+            nonlocal masks
+            op = node.operation
+            if op is None or op.name != "where":
+                return node
+            cond, keep, fill = node.operands
+            predicate = predicates.get(cond.name) if isinstance(cond, Var) else comparison(cond)
+            if predicate is None:
+                return node
+            name = stmt.name if node == stmt.value else f"{stmt.name}__m{masks}"
+            masks += 1
+            keep_name, fill_name = branch(keep, f"{name}__keep"), branch(fill, f"{name}__fill")
+            if keep_name is None or fill_name is None:
+                raise ValueError("a mask branch that is no uniform value")
+            negated = BinaryExpression(_NEGATE[predicate.op], predicate.left, predicate.right)
+            branches = (SelectBranch(value=keep_name, select=predicate), SelectBranch(value=fill_name, select=negated))
+            out.append(Select(name=name, branches=branches))
+            return Var(name)
+
+        try:
+            return stmt.value.rebuild(rewrite)
+        except ValueError:
+            return None
+
     out: list[Statement] = []
     for stmt in stmts:
         if isinstance(stmt, Let) and stmt.name in coords:
@@ -68,32 +124,49 @@ def select_masks(
             out.append(stmt)
             continue
         reads = set(stmt.deps())
-        if isinstance(stmt, Affine) and reads & coords.keys():
-            terms = [term(arg) for arg in stmt.args]
-            if any(t is None for t in terms) or any(not float(c).is_integer() for c in stmt.coefficients) or stmt.offset:
+        op = stmt.value.operation if isinstance(stmt, Assign) else None
+        if isinstance(stmt, Assign) and reads & coords.keys():
+            if op is not None and op.name in _COMPARE:
+                predicate = comparison(stmt.value)
+                if predicate is None:
+                    return None
+                predicates[stmt.name] = predicate
+                continue
+            # A coordinate computed from coordinates: the mask's ``key - row``, a split piece's absolute key.
+            coordinate = resolved(stmt.value)
+            coordinate = _integral(coordinate) if coordinate is not None else None
+            if coordinate is None:
                 return None
-            expression: Expression | None = None
-            for t, coefficient in zip(terms, stmt.coefficients, strict=True):
-                scaled = t if coefficient == 1 else BinaryExpression("*", Literal(int(coefficient), "int"), t)
-                expression = scaled if expression is None else BinaryExpression("+", expression, scaled)
-            coords[stmt.name] = expression
+            coords[stmt.name] = coordinate
             continue
-        if isinstance(stmt, Assign) and stmt.op.name in _COMPARE and reads & coords.keys():
-            left, right = (term(arg) for arg in stmt.args)
-            if left is None or right is None:
+        if isinstance(stmt, Assign):
+            # A ``where`` over a coordinate predicate — the value itself, or a term of the sum the value is after the
+            # normal form folded the mask into its reader — is a coordinate ``Select`` the sum reads by name.
+            value = selected(stmt)
+            if value is None:
                 return None
-            predicates[stmt.name] = BinaryExpression(_COMPARE[stmt.op.name], left, right)
-            continue
-        if isinstance(stmt, Assign) and stmt.op.name == "where" and stmt.args[0] in predicates:
-            keep, fill = stmt.args[1:]
-            if not {keep, fill} <= uniform | scalars.keys():
-                return None
-            predicate = predicates[stmt.args[0]]
-            negated = BinaryExpression(_NEGATE[predicate.op], predicate.left, predicate.right)
-            branches = (SelectBranch(value=keep, select=predicate), SelectBranch(value=fill, select=negated))
-            out.append(Select(name=stmt.name, branches=branches))
-            continue
+            if value == Var(stmt.name):
+                continue  # the value was the mask, now a Select statement of that name
+            stmt = stmt.replace(value=value)
+            reads = set(stmt.deps())
         if reads & (coords.keys() | predicates.keys() | aliased):
             return None  # a coordinate read outside a mask
         out.append(stmt)
     return out
+
+
+def _integral(expression: Expression) -> Expression | None:
+    """``expression`` as a coordinate: a float literal that is a whole number becomes the integer; any other float
+    literal makes it no coordinate (``None``)."""
+
+    def integer(node: Expression) -> Expression:
+        if isinstance(node, Literal) and node.dtype == "float":
+            if not float(node.value).is_integer():
+                raise ValueError("a fractional coefficient")
+            return Literal(int(node.value), "int")
+        return node
+
+    try:
+        return expression.rebuild(integer)
+    except ValueError:
+        return None

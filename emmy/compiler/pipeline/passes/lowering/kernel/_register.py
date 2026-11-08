@@ -23,7 +23,7 @@ from emmy.compiler.ir.kernel.ir import (
     Tile,
     fragment_args,
 )
-from emmy.compiler.ir.stmt import Assign, Body, Let, Load, Pre, Select, StridedLoop, binary
+from emmy.compiler.ir.stmt import Assign, Body, Let, Load, Pre, Select, StridedLoop
 from emmy.compiler.pipeline.passes.tile._fromloop import seed_index
 
 from ._atom import _direct_operand
@@ -134,7 +134,19 @@ class _Fragments:
                 )
                 for name, coord in coords.items()
             }
-            for stmt in binary(node.lift.body):
+
+            def evaluate(expression):
+                """A value at its fragment: a name's (an alias names the same fragment, never a second one), a literal
+                as itself, an operation node applied to its operands' fragments."""
+                if isinstance(expression, Var):
+                    return env[expression.name]
+                if isinstance(expression, Literal):
+                    return expression
+                args = tuple(evaluate(operand) for operand in expression.operands)
+                kinds = tuple(UNIFORM if isinstance(arg, Literal) else FRAG for arg in args)
+                return self.apply(expression.operation.name, args, kinds)
+
+            for stmt in node.lift.body:
                 if isinstance(stmt, Let):
                     env[stmt.name] = stmt.value
                 elif isinstance(stmt, Pre):
@@ -155,12 +167,8 @@ class _Fragments:
                 elif isinstance(stmt, Load):
                     index = tuple(e.substitute(clipped).simplify(SimplifyCtx.empty()) for e in stmt.index)
                     env[stmt.name] = self.apply("copy", ((stmt.input, index),), (GMEM,), rb, cb)
-                elif isinstance(stmt, Assign) and stmt.op.name == "copy":
-                    env[stmt.name] = env[stmt.args[0]]  # a name for the same fragment, never a second one
                 elif isinstance(stmt, Assign):
-                    args = tuple(env[name] for name in stmt.args)
-                    kinds = tuple(UNIFORM if isinstance(arg, Literal) else FRAG for arg in args)
-                    env[stmt.name] = self.apply(stmt.op.name, args, kinds)
+                    env[stmt.name] = evaluate(stmt.value)
                 elif isinstance(stmt, Select):
                     value = env[stmt.branches[-1].value]
                     for branch in reversed(stmt.branches[:-1]):

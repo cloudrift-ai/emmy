@@ -50,9 +50,10 @@ describe how a term is used in Emmy; they are not meant to replace a full textbo
 - **Compiler** — A program that translates code from one form into another. Emmy translates PyTorch model operations
   into CUDA code.
 - **Operation (op)** — One unit of computation, such as add, matrix multiplication, softmax, or RMSNorm.
-- **Affine statement** — The Loop IR statement `name = offset + Σ coefficient·arg`: one statement for a sum, a
-  difference, a negation or a product with a literal. Normalization folds every such chain into one, so two spellings
-  of the same sum are one kernel.
+- **Affine form** — The canonical spelling of a sum in a value expression: like terms merged, zero terms dropped,
+  the terms ordered, a whole-number coefficient or offset spelled as the integer, the offset last (`2 * x - y + 0.5`).
+  Normalization spells every sum, difference, negation, product with a literal and quotient by a float literal this
+  way, so two spellings of the same sum are one kernel; a quotient by an integer literal floors and stays a term.
 - **Graph** — A representation of a program as nodes connected by data-flow edges. A node usually represents an
   operation; an edge means that one operation uses a value produced by another.
 - **Node** — One item in a graph. In Emmy, it stores an operation, the names of the input buffers it reads (usually
@@ -99,6 +100,10 @@ describe how a term is used in Emmy; they are not meant to replace a full textbo
 - **Statement type** — The type a Loop IR statement belongs to: `Loop`, `Load`, `Accum`, … Forty-five are declared in
   one list in the `emmy-ir` crate, fifteen shared and thirty of the Kernel IR; each is a Rust struct and a Python class
   of the same name. A statement is one instance of its type in a body.
+- **Expression class** — Which of the two kinds of scalar arithmetic an expression field admits: `Index`, integer
+  arithmetic over integer operands (an index, an extent, a guard), or `Value`, every operation over any operand (the
+  value an `Assign` or an `Accum` computes, a condition). Every expression field of a statement type declares one, and
+  construction refuses an expression outside it.
 - **Rewrite rule** — A small compiler transformation. It recognizes a pattern, such as RMSNorm, and replaces it with
   equivalent lower-level operations.
 - **Pipeline** — An ordered sequence of compiler passes. The output of one stage becomes the input to the next.

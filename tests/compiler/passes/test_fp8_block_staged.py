@@ -86,7 +86,7 @@ def test_an_fp8_weight_reads_as_one_value_bytes_only_under_a_k_block_scale(scale
     if block is None:
         assert read is None
     else:
-        assert (read.per_byte, read.block, read.bits.input, read.factor) == (1, 128, "w_bits", "in0")
+        assert (read.per_byte, read.block, read.bits.input, str(read.factor)) == (1, 128, "w_bits", "in0")
 
 
 def test_the_cut_linear_lowers_to_the_fp8_byte_slab(tmp_path):

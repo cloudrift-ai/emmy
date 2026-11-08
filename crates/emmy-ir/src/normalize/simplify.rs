@@ -5,7 +5,8 @@ use std::sync::Arc;
 use super::{extend_simplify_ctx, with_bodies};
 use crate::Result;
 use crate::body::Body;
-use crate::expr::SimplifyCtx;
+use crate::dtype::DType;
+use crate::expr::{Expr, Expression, LitType, SimplifyCtx};
 use crate::statement::*;
 
 // --- expression simplification ----------------------------------------------------------------------------
@@ -24,6 +25,21 @@ pub fn simplify_body(body: &Body) -> Result<Body> {
 pub(crate) fn simplify_stmt(stmt: &Arc<Statement>, ctx: &SimplifyCtx) -> Result<Arc<Statement>> {
     let stmt = Statement::try_map_expressions(stmt, &mut |e| e.simplify(ctx))?;
     match &*stmt {
+        // A value that is a literal is a constant: a `Let`, typed as the value promotes (`f32` by default), its
+        // literal a float where the type is.
+        Statement::Assign(a) if let Expr::Literal(lit) = &*a.value => {
+            let dtype = a.dtype.unwrap_or(DType::F32);
+            let value = if dtype.is_float() && lit.dtype != LitType::Float {
+                Expression::float(lit.value.as_f64())
+            } else {
+                a.value.clone()
+            };
+            Ok(Arc::new(Statement::Let(Let {
+                name: a.name,
+                value,
+                dtype: Some(dtype),
+            })))
+        }
         Statement::Select(s) => Ok(Arc::new(Statement::Select(decided(s)))),
         Statement::Loop(l) => {
             let inner = extend_simplify_ctx(ctx, &l.axis);

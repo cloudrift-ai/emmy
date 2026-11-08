@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import dataclasses
 
-from emmy.compiler.ir.expression import Literal
+from emmy.compiler.ir.expression import Literal, apply
 from emmy.compiler.ir.stmt import Assign
 from emmy.compiler.structural import form, record_form
 from emmy.compiler.wire import Wire, decode, encode, register, rewrite
@@ -88,5 +88,7 @@ def test_a_class_with_its_own_form_is_keyed_the_way_a_dataclass_is() -> None:
     assert form(Span(1, 4)) == ("Span", 1, 4)
     for span, data in ((Span(1), SpanData(1)), (Span(1, 4), SpanData(1, 4)), (Span(0, 0), SpanData(0, 0))):
         assert form(span)[1:] == form(data)[1:]
-    assert form(Assign("y", "multiply", ("x", "s")))[:2] == ("Assign", "y") and len(form(Assign("y", "multiply", ("x", "s")))) == 4
+    assert (
+        form(Assign("y", apply("multiply", "x", "s")))[:2] == ("Assign", "y") and len(form(Assign("y", apply("multiply", "x", "s")))) == 3
+    )
     assert form((Literal(1, "int"), Span(1))) == (form(Literal(1, "int")), ("Span", 1))

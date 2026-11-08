@@ -752,13 +752,26 @@ def _mask_streamed(
         return out
     for s in body:
         if isinstance(s, Accum):
-            ident, masked = f"{s.value}__id", f"{s.value}__m"
+            ident, masked = f"{s.name}__id", f"{s.name}__m"
             out.append(Init(name=ident, identity=s.op.identity, dtype=F32))
-            out.append(Select(name=masked, branches=(SelectBranch(s.value, cond), SelectBranch(ident, Literal(1, "int")))))
+            out.extend(_named(s, f"{s.name}__v"))
+            kept = SelectBranch(_named_value(s, f"{s.name}__v"), cond)
+            out.append(Select(name=masked, branches=(kept, SelectBranch(ident, Literal(1, "int")))))
             out.append(s.replace(value=masked))
         else:
             out.append(s)
     return out
+
+
+def _named(accum: Accum, name: str) -> list[Statement]:
+    """The statement binding an accumulation's operand to ``name`` where a select branch needs a name: none when
+    the operand is a name already."""
+    return [] if isinstance(accum.value, Var) else [Assign(name, accum.value, dtype=F32)]
+
+
+def _named_value(accum: Accum, name: str) -> str:
+    """The name an accumulation's operand goes by after :func:`_named`."""
+    return accum.value.name if isinstance(accum.value, Var) else name
 
 
 def _replicate(
@@ -1270,15 +1283,17 @@ def _scan_fold(op: Fold, rloop: Loop, plan: Reduce, lane: Axis) -> list[Statemen
     padded = not (axis.extent.is_static and axis.extent.as_static() % width == 0)
     read = Sigma({axis.name: BinaryExpression("%", coordinate, axis.extent_expression()) if padded else coordinate})
     last = max(i for i, stmt in enumerate(rloop.body) if isinstance(stmt, Accum) and stmt.name in state)
-    body: list[Statement] = [Assign(name=other, op="copy", args=(name,), dtype=F32) for name, other in zip(state, previous, strict=True)]
+    body: list[Statement] = [Assign(other, Var(name), dtype=F32) for name, other in zip(state, previous, strict=True)]
     for stmt in rloop.body[: last + 1]:
         stmt = stmt.rewrite(lambda name: name, sigma=read)
         if isinstance(stmt, Accum) and stmt.name in state:
             empty = f"{stmt.name}__empty"
             body.append(Init(name=empty, identity=stmt.op.identity, dtype=F32))
             if padded:
-                masked = f"{stmt.value}__scan_mask"
-                body.append(Select(name=masked, branches=(SelectBranch(stmt.value, valid), SelectBranch(empty, Literal(1, "int")))))
+                masked = f"{stmt.name}__scan_mask"
+                body.extend(_named(stmt, f"{stmt.name}__v"))
+                kept = SelectBranch(_named_value(stmt, f"{stmt.name}__v"), valid)
+                body.append(Select(name=masked, branches=(kept, SelectBranch(empty, Literal(1, "int")))))
                 stmt = stmt.replace(value=masked)
             stmt = stmt.replace(base=empty, axes=(chunk.name,), dtype=F32)
         body.append(stmt)

@@ -14,8 +14,8 @@ import pytest
 from emmy.compiler.dtype import F16, DataType
 from emmy.compiler.graph import Graph
 from emmy.compiler.ir.base import InputOp
-from emmy.compiler.ir.expression import BinaryExpression
-from emmy.compiler.ir.loop import Accum, Affine, Assign, Load, Loop, LoopOp, UnfusableStmt, Write, splice_graph, splice_loops
+from emmy.compiler.ir.expression import BinaryExpression, Literal, Var
+from emmy.compiler.ir.loop import Accum, Assign, Load, Loop, LoopOp, UnfusableStmt, Write, splice_graph, splice_loops
 from emmy.compiler.ir.stmt import parse_body
 from emmy.compiler.tensor import Tensor
 
@@ -33,13 +33,78 @@ def _count_type(op: LoopOp, cls: type) -> int:
     return sum(1 for s in op.body.iter() if isinstance(s, cls))
 
 
+def _is_copy(stmt) -> bool:
+    """An ``Assign`` that copies one name: an alias (a bare name) or a typed ``copy`` that spells a rounding."""
+    if not isinstance(stmt, Assign):
+        return False
+    op = stmt.value.operation
+    return isinstance(stmt.value, Var) or (op is not None and op.name == "copy" and len(stmt.value.operands) == 1)
+
+
+def _spine(value, out=None):
+    """The shape of every maximal sum in ``value``, outermost first: its sorted literal coefficients and its offset, one
+    entry per affine region (additions, subtractions, negations and literal scales), the analog of one sum statement.
+    A term below a non-affine operation (``exp(-x)``) is its own region."""
+    out = [] if out is None else out
+    op = value.operation
+    name = op.name if op is not None else None
+    scaled = name == "multiply" and any(isinstance(operand, Literal) for operand in value.operands)
+    if name in ("add", "subtract", "negative") or scaled:
+        terms: list = []
+        offset = _terms(value, 1.0, terms)
+        out.append((tuple(sorted(coefficient for coefficient, _ in terms)), offset))
+        for _, leaf in terms:
+            _spine(leaf, out)
+    else:
+        for child in value.children():
+            _spine(child, out)
+    return out
+
+
+def _terms(value, scale: float, terms: list) -> float:
+    """Collect ``value``'s affine terms as ``(coefficient, leaf)`` under ``scale``; the literal offset is returned."""
+    if isinstance(value, Literal):
+        return scale * float(value.value)
+    op = value.operation
+    name = op.name if op is not None else None
+    operands = value.operands
+    if name == "add":
+        return sum(_terms(operand, scale, terms) for operand in operands)
+    if name == "subtract":
+        return _terms(operands[0], scale, terms) + _terms(operands[1], -scale, terms)
+    if name == "negative":
+        return _terms(operands[0], -scale, terms)
+    if name == "multiply" and any(isinstance(operand, Literal) for operand in operands):
+        literal, other = sorted(operands, key=lambda operand: not isinstance(operand, Literal))
+        return _terms(other, scale * float(literal.value), terms)
+    terms.append((scale, value))
+    return 0.0
+
+
+def _operations(body) -> list[str]:
+    """The elementwise operations a body computes beyond its sums: every operation node of an ``Assign`` or ``Accum``
+    value that is not part of an affine region (an addition, a subtraction, a negation, a literal scale)."""
+    names = []
+    for stmt in body.iter():
+        if not isinstance(stmt, (Assign, Accum)):
+            continue
+        for node in stmt.value.subterms():
+            op = node.operation
+            if op is None or op.name in ("add", "subtract", "negative"):
+                continue
+            if op.name == "multiply" and any(isinstance(operand, Literal) for operand in node.operands):
+                continue
+            names.append(op.name)
+    return names
+
+
 def _elementwise_fns(op: LoopOp) -> list[str]:
-    return [s.op.name for s in op.body.iter() if isinstance(s, Assign)]
+    return _operations(op.body)
 
 
 def _affine_shapes(op: LoopOp) -> list[tuple[tuple[float, ...], float]]:
-    """Every Affine's sorted coefficients and offset: the folded form a sum, difference or negation takes."""
-    return sorted((tuple(sorted(s.coefficients)), s.offset) for s in op.body.iter() if isinstance(s, Affine))
+    """Every sum's top-level shape in a body (see ``test_fusion_rules._affine_shapes``)."""
+    return sorted(shape for s in op.body.iter() if isinstance(s, (Assign, Accum)) for shape in _spine(s.value))
 
 
 def _splice_loop_ops(producer: LoopOp, consumer: LoopOp, source: str) -> LoopOp | None:
@@ -333,7 +398,7 @@ def test_graph_splice_preserves_a_spelled_store_rounding(rounds_to: DataType | N
     """Fusing a store away must not delete the rounding it spelled — and must invent none."""
     producer = _reduce_producer(source="x", output="producer", rounds_to=rounds_to)
     merged = _splice_graph_producer(producer, input_shape=(4, 16), output_shape=(4,), edge_dtype=F16)
-    typed = [c.dtype for c in merged.body.iter() if isinstance(c, Assign) and c.op.name == "copy" and c.dtype is not None]
+    typed = [c.dtype for c in merged.body.iter() if _is_copy(c) and c.dtype is not None]
     assert typed == ([rounds_to] if rounds_to is not None else [])
 
 
@@ -347,7 +412,7 @@ def test_graph_splice_load_output_needs_no_conversion():
         """
     )
     merged = _splice_graph_producer(producer, input_shape=(4,), output_shape=(4,), edge_dtype=F16)
-    aliases = [stmt for stmt in merged.body.iter() if isinstance(stmt, Assign) and stmt.op.name == "copy"]
+    aliases = [stmt for stmt in merged.body.iter() if _is_copy(stmt)]
     assert aliases == []
 
 
@@ -389,10 +454,10 @@ def test_graph_splice_preserves_multi_reduction_output_dtypes(rounds_to: DataTyp
     assert result is not None
     merged, external = result
     assert external == ["x", "y", "z"]
-    typed = [c.dtype for c in merged.body.iter() if isinstance(c, Assign) and c.op.name == "copy" and c.dtype is not None]
+    typed = [c.dtype for c in merged.body.iter() if _is_copy(c) and c.dtype is not None]
     assert len(typed) == expected_aliases
     assert set(typed) <= {F16}
-    pointwise_result = next(stmt for stmt in merged.body.iter() if isinstance(stmt, Assign) and stmt.op.name == "exp")
+    pointwise_result = next(stmt for stmt in merged.body.iter() if isinstance(stmt, Assign) and "exp" in str(stmt.value))
     assert pointwise_result.dtype == F16
 
 
@@ -406,7 +471,7 @@ def test_graph_splice_typed_boundary_roundtrips():
     graph.outputs = ["consumer"]
 
     restored = Graph.from_dict(graph.to_dict()).nodes["consumer"].op
-    typed = [c.dtype for c in restored.body.iter() if isinstance(c, Assign) and c.op.name == "copy" and c.dtype is not None]
+    typed = [c.dtype for c in restored.body.iter() if _is_copy(c) and c.dtype is not None]
     assert typed == [F16]
 
 
@@ -845,13 +910,13 @@ def test_literal_producer_write_index():
         for a0 in 0..4:
             x = load src_0[a0]
             y = exp(x)
-            out_0[a0, 0.0] = y
+            out_0[a0, 0] = y
         """
     )
     consumer = _loop(
         """
         for a0 in 0..4:
-            yv = load src_0[a0, 0.0]
+            yv = load src_0[a0, 0]
             z = negative(yv)
             out_0[a0] = z
         """

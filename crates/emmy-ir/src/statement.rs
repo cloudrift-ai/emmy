@@ -48,6 +48,10 @@ pub const BODY: Roles = Roles(1 << 10);
 pub const STMTS: Roles = Roles(1 << 11);
 pub const TERM: Roles = Roles(1 << 12);
 pub const RECORD: Roles = Roles(1 << 13);
+/// The field's expressions are of the `Index` class (the declaration's `: Index`).
+pub const INDEX: Roles = Roles(1 << 14);
+/// The field's expressions are of the `Value` class (the declaration's `: Value`).
+pub const VALUE: Roles = Roles(1 << 15);
 
 /// The SSA-name roles a rename maps.
 pub const NAMES: Roles = DEFINES.or(READS).or(UPDATES).or(LOCAL);
@@ -118,37 +122,22 @@ macro_rules! with_statement_types {
                     dtype: Option<DType> [] = None,
                     carried: Name [] = Name::from(""),
                 }
-                /// Pure SSA body statement: `name = op(args)`.
-                ///
-                /// `op` is an `ElementwiseImpl` — the elementwise combine (add / mul / exp / ...). Reductions live in `Accum`.
-                /// `args` reference `$N` ports, an `Accum.name` (reads current / finalized acc value), or prior SSA names.
-                ///
-                /// `dtype` is optional and overrides the default `promote(args)` rule when set. The `demote_to_write_dtype`
-                /// Kernel-IR pass stamps it on Assigns whose results only feed dtype-narrower consumers, so a softmax / RMSNorm
-                /// epilogue feeding an `__half*` Write computes in `__half` end to end without spurious promotions.
+                /// The one scalar definition: `name = value`, a pure value of the `Value` class over SSA names and
+                /// literals, any operation of the table. A sum is an `Assign` whose value is in affine form; a value
+                /// read once folds into its reader's expression, a value read twice stays a statement, which is what a
+                /// statement expresses: sharing. `dtype` overrides the promotion of the operands when set: the
+                /// `demote_to_write_dtype` Kernel IR pass stamps it on an `Assign` whose result only feeds dtype-narrower
+                /// consumers, so a softmax or RMSNorm epilogue feeding an `__half*` store computes in `__half` end to
+                /// end without spurious promotions.
                 shared Assign {PURE} {
                     name: Name [DEFINES],
-                    op: ElementwiseOp [],
-                    args: Names [READS],
-                    dtype: Option<DType> [] = None,
-                }
-                /// Pure SSA body statement: `name = offset + Σ coefficient·arg`.
-                ///
-                /// The one statement for a sum, a difference, a negation or a product with a literal: normalization folds every
-                /// such cone into one `Affine` (`fold_affine`), so `x + x`, `2 * x` and `x + 3 * x - x` are one body. It is
-                /// n-ary, so identity lists its terms by value and there is no chain of binary operations whose shape would need
-                /// a canonical order. `args` are SSA names, one per term after normalization, no coefficient zero; a literal
-                /// operand is a coefficient or the `offset`. A product of two values stays an `Assign`.
-                shared Affine {PURE | CHECKED} {
-                    name: Name [DEFINES],
-                    args: Names [READS],
-                    coefficients: Floats [],
-                    offset: Float [] = Float(0.0),
+                    value: Expression [EXPRESSION | READS] : Value,
                     dtype: Option<DType> [] = None,
                 }
                 /// Reduce accumulator — declares-and-folds in one statement.
                 ///
-                /// Semantics: `name = op(name, value)` inside the enclosing reduce `Loop`. Before the first iteration `name` is
+                /// Semantics: `name = op(name, value)` inside the enclosing reduce `Loop`, `value` a `Value` expression, so
+                /// `acc += a * b` is one statement; the reduce combine `op` is the statement's effect and stays its own field. Before the first iteration `name` is
                 /// initialized to `op.identity` (the combine's neutral element). After the Loop completes, `name` is an SSA
                 /// binding visible in the enclosing scope, carrying the finalized reduced value.
                 ///
@@ -165,7 +154,7 @@ macro_rules! with_statement_types {
                 /// legacy/handwritten path with no reduction-axis info.
                 shared Accum {} {
                     name: Name [DEFINES],
-                    value: Name [READS],
+                    value: Expression [EXPRESSION | READS] : Value,
                     op: ElementwiseOp [] = ElementwiseOp::Known($crate::elementwise::Operation::Add),
                     dtype: Option<DType> [] = None,
                     axes: Names [] = Names::from([]),
@@ -259,7 +248,7 @@ macro_rules! with_statement_types {
                 /// earlier predicate matches.
                 shared Select {PURE | CHECKED} {
                     name: Name [DEFINES],
-                    branches: Branches [RECORD] : Value,
+                    branches: Branches [RECORD],
                 }
                 /// Zero another launch's atomic accumulator from THIS kernel — the delegated zero-init
                 /// (`lowering/cuda/005_delegate_zero_init`).
@@ -444,7 +433,7 @@ macro_rules! with_statement_types {
                     src_index: Exprs [EXPRESSION] : Index,
                     nbytes: i64 [] = 4,
                     swizzle: Name [] = Name::from("NONE"),
-                    lane_index: Option<Exprs> [EXPRESSION] = None,
+                    lane_index: Option<Exprs> [EXPRESSION] : Index = None,
                     lane_rows: i64 [] = 0,
                     valid: Option<Expression> [EXPRESSION] : Index = None,
                 }
@@ -616,7 +605,7 @@ macro_rules! with_statement_types {
                 kernel FragmentApply {} {
                     out: Name [DEFINES],
                     op: ElementwiseOp [],
-                    args: FragmentArgs [RECORD] : Value,
+                    args: FragmentArgs [RECORD],
                     in_place: bool [] = false,
                     layout: Name [] = Name::from("m16n8k16"),
                     post: ElementwiseOps [] = ElementwiseOps::from([]),
@@ -718,8 +707,8 @@ macro_rules! with_statement_types {
                     ldm: i64 [] = 0,
                     swizzle: Name [] = Name::from("NONE"),
                     staged: bool [] = true,
-                    gmem_guard: Option<(Expression, Expression)> [EXPRESSION] = None,
-                    k_zero: Option<(Expression, Expression)> [EXPRESSION] = None,
+                    gmem_guard: Option<(Expression, Expression)> [EXPRESSION] : Index = None,
+                    k_zero: Option<(Expression, Expression)> [EXPRESSION] : Index = None,
                     b_trans: bool [] = false,
                     pair_frag: Option<Name> [UPDATES] = None,
                     byte_slab: bool [] = false,
@@ -880,8 +869,8 @@ macro_rules! with_statement_types {
                     epilogue_params: Names [] = Names::from([]),
                     epilogue_result: Option<Name> [] = None,
                     extra_frags: Names [READS] = Names::from([]),
-                    m_guard: Option<(Expression, Expression)> [EXPRESSION] = None,
-                    n_guard: Option<(Expression, Expression)> [EXPRESSION] = None,
+                    m_guard: Option<(Expression, Expression)> [EXPRESSION] : Index = None,
+                    n_guard: Option<(Expression, Expression)> [EXPRESSION] : Index = None,
                     atomic: bool [] = false,
                     fragment_layout: Name [] = Name::from("m16n8k16"),
                     volta_interleaved: bool [] = false,
@@ -934,22 +923,41 @@ pub struct FieldInfo {
     pub class: Option<crate::expr::ExprClass>,
 }
 
-/// Every expression `field` holds is of `class`, or the first that is not is the error.
-pub fn classed<T: crate::field::Field>(
-    class: crate::expr::ExprClass,
-    field: &T,
-) -> crate::Result<()> {
-    struct Check(crate::expr::ExprClass, crate::Result<()>);
+/// The class an expression field's roles declare, when they declare one.
+pub fn class_of(roles: Roles) -> Option<crate::expr::ExprClass> {
+    if roles.contains_any(INDEX) {
+        Some(crate::expr::ExprClass::Index)
+    } else if roles.contains_any(VALUE) {
+        Some(crate::expr::ExprClass::Value)
+    } else {
+        None
+    }
+}
+
+/// Every expression `field` holds, visited under `roles`, is of the class its roles declare (a record's fields
+/// under their own), or the first that is not is the error, named by `label` (`Load.index`). An expression field
+/// that declares no class is an error of the declaration.
+pub fn classed<T: crate::field::Field>(field: &T, roles: Roles, label: &str) -> crate::Result<()> {
+    struct Check(crate::Result<()>);
     impl crate::field::Visitor for Check {
-        fn expression(&mut self, _roles: Roles, expression: &crate::expr::Expression) {
-            if self.1.is_ok() {
-                self.1 = self.0.check(expression);
+        fn expression(&mut self, roles: Roles, expression: &crate::expr::Expression) {
+            if self.0.is_err() || !roles.contains_any(EXPRESSION) {
+                return;
             }
+            self.0 = match class_of(roles) {
+                Some(class) => class.check(expression),
+                None => Err(crate::Error::Value(
+                    "an expression field that declares no class".into(),
+                )),
+            };
         }
     }
-    let mut check = Check(class, Ok(()));
-    field.visit(EXPRESSION, &mut check);
-    check.1
+    let mut check = Check(Ok(()));
+    field.visit(roles, &mut check);
+    check.0.map_err(|err| match err {
+        crate::Error::Value(message) => crate::Error::Value(format!("{label}: {message}")),
+        other => other,
+    })
 }
 
 impl FieldInfo {
@@ -967,6 +975,20 @@ macro_rules! __expr_class {
     };
     ($class:ident) => {
         Some($crate::expr::ExprClass::$class)
+    };
+}
+
+#[doc(hidden)]
+#[macro_export]
+macro_rules! __class_role {
+    () => {
+        $crate::statement::Roles::NONE
+    };
+    (Index) => {
+        $crate::statement::INDEX
+    };
+    (Value) => {
+        $crate::statement::VALUE
     };
 }
 
@@ -1168,7 +1190,7 @@ macro_rules! define_statement_types {
             /// and `validate` of every `CHECKED` statement type.
             pub fn check(&self) -> $crate::Result<()> {
                 match self { $( Statement::$StatementType(k) => {
-                    $( define_statement_types!(@classed k.$field $($class)?); )*
+                    $( $crate::statement::classed(&k.$field, Roles::NONE $(.or(define_statement_types!(@role $role)))*.or($crate::__class_role!($($class)?)), concat!(stringify!($StatementType), ".", stringify!($field)))?; )*
                     define_statement_types!(@check k {$($flag)|*})
                 } )* }
             }
@@ -1208,17 +1230,17 @@ macro_rules! define_statement_types {
     (@fields $Type:ident { $( $field:ident : $ty:ty [$($role:ident)|*] $(: $class:ident)? $(= $default:expr)? ,)* }) => {
         pub const NAME: &'static str = stringify!($Type);
         pub const FIELDS: &'static [FieldInfo] = &[
-            $( FieldInfo { name: stringify!($field), roles: Roles::NONE $(.or(define_statement_types!(@role $role)))*, has_default: $crate::__has_default!($($default)?), kw_only: define_statement_types!(@kw_only $($role)|*), class: $crate::__expr_class!($($class)?) }, )*
+            $( FieldInfo { name: stringify!($field), roles: Roles::NONE $(.or(define_statement_types!(@role $role)))*.or($crate::__class_role!($($class)?)), has_default: $crate::__has_default!($($default)?), kw_only: define_statement_types!(@kw_only $($role)|*), class: $crate::__expr_class!($($class)?) }, )*
         ];
 
         /// Visit every role-playing value, in field order.
         pub fn visit(&self, visitor: &mut dyn $crate::field::Visitor) {
-            $( <$ty as $crate::field::Field>::visit(&self.$field, Roles::NONE $(.or(define_statement_types!(@role $role)))*, visitor); )*
+            $( <$ty as $crate::field::Field>::visit(&self.$field, Roles::NONE $(.or(define_statement_types!(@role $role)))*.or($crate::__class_role!($($class)?)), visitor); )*
         }
 
         /// The same with every role-playing value passed through `rewriter`.
         pub fn rewrite(&self, rewriter: &mut dyn $crate::field::Rewriter) -> $Type {
-            $Type { $( $field: <$ty as $crate::field::Field>::rewrite(&self.$field, Roles::NONE $(.or(define_statement_types!(@role $role)))*, rewriter), )* }
+            $Type { $( $field: <$ty as $crate::field::Field>::rewrite(&self.$field, Roles::NONE $(.or(define_statement_types!(@role $role)))*.or($crate::__class_role!($($class)?)), rewriter), )* }
         }
 
         /// Whether `other` holds the same values, field by field, by identity where a field is shared.
@@ -1295,7 +1317,7 @@ macro_rules! define_statement_types {
 
         /// The one name a single-value statement defines: its `name` field, when that field defines.
         pub fn name(&self) -> Option<&$crate::Name> {
-            $( if stringify!($field) == "name" && (Roles::NONE $(.or(define_statement_types!(@role $role)))*).contains_any(DEFINES) { return <$ty as $crate::field::Field>::as_name(&self.$field); } )*
+            $( if stringify!($field) == "name" && (Roles::NONE $(.or(define_statement_types!(@role $role)))*.or($crate::__class_role!($($class)?))).contains_any(DEFINES) { return <$ty as $crate::field::Field>::as_name(&self.$field); } )*
             None
         }
     };
@@ -1306,10 +1328,6 @@ macro_rules! define_statement_types {
     (@kw_only) => { false };
     (@kw_only KW_ONLY $(| $rest:ident)*) => { true };
     (@kw_only $role:ident $(| $rest:ident)*) => { define_statement_types!(@kw_only $($rest)|*) };
-    (@classed $k:ident.$field:ident) => {};
-    (@classed $k:ident.$field:ident $class:ident) => {
-        $crate::statement::classed($crate::expr::ExprClass::$class, &$k.$field)?;
-    };
     (@check $k:ident {}) => {{ let _ = &$k; Ok(()) }};
     (@check $k:ident {CHECKED $(| $rest:tt)*}) => { $k.validate() };
     (@check $k:ident {$flag:tt $(| $rest:tt)*}) => { define_statement_types!(@check $k {$($rest)|*}) };
@@ -1337,8 +1355,8 @@ use crate::dtype::DType;
 use crate::elementwise::ElementwiseOp;
 use crate::expr::Expression;
 use crate::field::{
-    Axes, AxisRef, Branches, ElementwiseOps, Exprs, Float, Floats, FragmentArgs, Int2, Ints, Names,
-    NumOr, Shape3, Stmts, SubroutineRef,
+    Axes, AxisRef, Branches, ElementwiseOps, Exprs, Float, FragmentArgs, Int2, Ints, Names, NumOr,
+    Shape3, Stmts, SubroutineRef,
 };
 
 with_statement_types!(define_statement_types);
@@ -1373,8 +1391,33 @@ mod tests {
         }
         assert_eq!(
             blake3::hash(listing.as_bytes()).to_hex().as_str(),
-            "b973d9e70c9672d4095c8f08803b048b26792ee38e3a5a2c6cb7c1b1b5854bfa",
+            "f3d5e7918178e3202a93f607d93db4b332d5ccdaa6a31e8429b3f012e810b18b",
             "{listing}"
         );
+    }
+
+    /// A field has a class exactly when it plays `EXPRESSION`: the check reads the class from the roles, so an
+    /// expression field without one would refuse every statement, and a class on anything else would check nothing.
+    #[test]
+    fn a_field_has_a_class_exactly_when_it_holds_expressions() {
+        let records = [
+            (SelectBranch::NAME, SelectBranch::FIELDS),
+            (FragmentArg::NAME, FragmentArg::FIELDS),
+        ];
+        let fields = StatementType::ALL
+            .iter()
+            .map(|ty| (ty.name(), ty.fields()))
+            .chain(records);
+        for (name, fields) in fields {
+            for field in fields {
+                assert_eq!(
+                    field.roles.contains_any(EXPRESSION),
+                    field.class.is_some(),
+                    "{name}.{}",
+                    field.name
+                );
+                assert_eq!(class_of(field.roles), field.class, "{name}.{}", field.name);
+            }
+        }
     }
 }

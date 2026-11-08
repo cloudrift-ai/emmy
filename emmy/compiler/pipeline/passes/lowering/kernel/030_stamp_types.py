@@ -10,9 +10,8 @@ Stamping rules:
 - ``Load(input=B)`` — ``dtype = B``'s buffer dtype, read off the op's
   ``inputs`` / ``outputs`` (matcher-populated graph Tensors). A Load against
   a locally-declared buffer (smem) keeps the render-time fallback.
-- ``Assign(op, args)`` — ``dtype = dtype_promote(op.name, [ssa[a] for a in
-  args])``, the same rule ``Assign``'s render applies inline. Same-arg squares
-  and ``pow`` are promoted to f32 (overflow guard, below).
+- ``Assign(value)`` — the promotion of the value's operands node by node (``promoted_dtype``), the same rule
+  ``Assign``'s render applies. A square ``x * x`` and ``pow`` are promoted to f32 (overflow guard, below).
 - ``Write(output, value)`` — ``value_dtype = ssa[value]``. The destination
   buffer dtype stays a render-time concern; only the value side is stamped.
 - ``Accum`` / ``Init`` are already typed — register
@@ -31,9 +30,9 @@ from dataclasses import dataclass, field, replace
 from emmy.compiler.dtype import F16, F32, DataType
 from emmy.compiler.dtype import get as dtype_get
 from emmy.compiler.graph import Node
-from emmy.compiler.ir.expression import Literal
+from emmy.compiler.ir.expression import Expression, Literal, promoted_dtype
 from emmy.compiler.ir.kernel import KernelOp
-from emmy.compiler.ir.stmt import Accum, Affine, Assign, Body, Init, Let, Load, Select, Statement, Write, dtype_promote
+from emmy.compiler.ir.stmt import Accum, Assign, Body, Init, Let, Load, Select, Statement, Write, dtype_promote
 from emmy.compiler.pipeline import Pattern, RuleSkipped
 
 PATTERN = [Pattern("root", KernelOp)]
@@ -89,8 +88,6 @@ def _stamp_stmt(s: Statement, ctx: _StampCtx) -> Statement:
         return _stamp_load(s, ctx)
     if isinstance(s, Assign):
         return _stamp_assign(s, ctx)
-    if isinstance(s, Affine):
-        return _stamp_affine(s, ctx)
     if isinstance(s, Select):
         ctx.ssa_dtypes[s.name] = dtype_get(dtype_promote("add", [(ctx.ssa_dtypes.get(b.value) or F32).name for b in s.branches]))
         return s
@@ -130,7 +127,7 @@ def _stamp_accum(s: Accum, ctx: _StampCtx) -> Accum:
     if s.dtype is not None:
         ctx.ssa_dtypes[s.name] = s.dtype
         return s
-    value_dt = ctx.ssa_dtypes.get(s.value) or F32
+    value_dt = dtype_get(promoted_dtype(s.value, lambda name: _stamped(ctx, name)))
     dt = ctx.ssa_dtypes.get(s.name) or (value_dt if s.op.selecting else F32)
     ctx.ssa_dtypes[s.name] = dt
     return s.replace(dtype=dt)
@@ -146,9 +143,13 @@ def _stamp_load(s: Load, ctx: _StampCtx) -> Load:
     return s
 
 
+def _stamped(ctx: _StampCtx, name: str) -> str | None:
+    dt = ctx.ssa_dtypes.get(name)
+    return None if dt is None else dt.name
+
+
 def _stamp_assign(s: Assign, ctx: _StampCtx) -> Assign:
-    arg_dtypes = [(ctx.ssa_dtypes.get(a) or F32).name for a in s.args]
-    result_dt = dtype_get(dtype_promote(s.op.name, arg_dtypes))
+    result_dt = dtype_get(promoted_dtype(s.value, lambda name: _stamped(ctx, name)))
     if s.dtype is not None and result_dt.np.kind not in "iu":
         ctx.ssa_dtypes[s.name] = s.dtype
         return s
@@ -161,28 +162,22 @@ def _stamp_assign(s: Assign, ctx: _StampCtx) -> Assign:
     # (RMSNorm's mean-of-squares). torch computes that reduction in fp32; do
     # the same here. Matmul products already carry an explicit compute dtype;
     # this fallback promotes only an untyped same-arg square / pow.
-    if result_dt == F16 and _is_overflow_prone(s):
+    if result_dt == F16 and _is_overflow_prone(s.value):
         result_dt = F32
     ctx.ssa_dtypes[s.name] = result_dt
     return s.replace(dtype=result_dt) if s.dtype != result_dt else s
 
 
-def _stamp_affine(s: Affine, ctx: _StampCtx) -> Affine:
-    """A sum computes at the promotion of its terms; its literal coefficients take that dtype."""
-    if s.dtype is not None:
-        ctx.ssa_dtypes[s.name] = s.dtype
-        return s
-    result_dt = dtype_get(dtype_promote("add", [(ctx.ssa_dtypes.get(a) or F32).name for a in s.args]))
-    ctx.ssa_dtypes[s.name] = result_dt
-    return s.replace(dtype=result_dt)
-
-
-def _is_overflow_prone(s: Assign) -> bool:
-    """True for elementwise ops that can overflow fp16 from in-range inputs —
-    the square ``multiply(a, a)`` and any ``pow``. Distinct-arg products are excluded."""
-    if s.op.name == "pow":
-        return True
-    return s.op.semiring_product and len(s.args) == 2 and s.args[0] == s.args[1]
+def _is_overflow_prone(value: Expression) -> bool:
+    """True when the value holds an operation that can overflow fp16 from in-range inputs — a square ``x * x`` or any
+    ``pow``. Distinct-operand products are excluded."""
+    for node in value.subterms():
+        op = node.operation
+        if op is None:
+            continue
+        if op.name == "pow" or (op.semiring_product and len(node.operands) == 2 and node.operands[0] == node.operands[1]):
+            return True
+    return False
 
 
 def _stamp_write(s: Write, ctx: _StampCtx) -> Write:

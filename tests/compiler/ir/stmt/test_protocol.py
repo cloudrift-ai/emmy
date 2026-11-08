@@ -13,11 +13,10 @@ import emmy.compiler.ir.stmt as stmt_pkg
 from emmy.compiler.dtype import F32
 from emmy.compiler.ir.axis import Axis
 from emmy.compiler.ir.elementwise import ElementwiseImpl
-from emmy.compiler.ir.expression import BinaryExpression, Expression, Literal, Var
+from emmy.compiler.ir.expression import BinaryExpression, Expression, Literal, Var, apply
 from emmy.compiler.ir.kernel import ir as kernel_ir
 from emmy.compiler.ir.stmt import (
     Accum,
-    Affine,
     Assign,
     Body,
     Call,
@@ -62,8 +61,8 @@ _K = Axis("k", 8)
 _BELOW = BinaryExpression("<", Var("i"), Literal(2, "int"))
 _EXAMPLES = [
     Load(("x",), "a", (Var("i"),), dtype=F32),
-    Assign("y", "exp", ("x",)),
-    Affine("z", ("x", "y"), (2.0, -1.0), offset=0.5),
+    Assign("y", apply("exp", "x")),
+    Assign("z", apply("add", apply("multiply", 2.0, "x"), apply("negative", "y"), 0.5)),
     Accum("s", "x", "add"),
     Carry("c", "x", (Var("i"),), seed=0.0),
     Pre("p", "c", (Var("i"),)),
@@ -86,7 +85,7 @@ _STORED = [example for example in _EXAMPLES if not isinstance(example, Call)]
 
 
 _INDEX = (Var("i"), Var("j"))
-_COMBINE = (Assign("t", "multiply", ("acc", "acc__o")), Assign("acc", "add", ("acc", "t")))
+_COMBINE = (Assign("t", apply("multiply", "acc", "acc__o")), Assign("acc", apply("add", "acc", "t")))
 _OPERANDS = kernel_ir.fragment_args(
     (BinaryExpression(">", Var(kernel_ir.FRAG_COL), Var(kernel_ir.FRAG_ROW)), "u", ("r0", "r1"), "f", ("mask", _INDEX)),
     (kernel_ir.COORD, kernel_ir.UNIFORM, kernel_ir.ROW, kernel_ir.FRAG, kernel_ir.GMEM),
@@ -138,7 +137,7 @@ _KERNEL_EXAMPLES = [
         dst_index=_INDEX,
         frag="c",
         shape=(16, 8, 16),
-        epilogue=Body((Load(("r",), "res", _INDEX), Assign("y", "add", ("acc", "r")))),
+        epilogue=Body((Load(("r",), "res", _INDEX), Assign("y", apply("add", "acc", "r")))),
         epilogue_params=("acc",),
         epilogue_result="y",
         extra_frags=("c2",),
@@ -167,15 +166,16 @@ def test_a_statement_read_through_two_wrappers_of_one_body_is_one_object() -> No
 
 
 def test_a_statement_type_holds_its_elementwise_operation_as_op() -> None:
-    """The clustered identity reads a statement's operation by the name ``op``, in every layer: what the Python getter
-    hands back is the operation object."""
+    """A statement that applies one elementwise operation of its own (a reduction's combine, a fragment operation)
+    holds it by the name ``op``, in every layer: what the Python getter hands back is the operation object. A value's
+    operations are its expression's nodes."""
     held = [
         (type(stmt).__name__, name)
         for stmt in _ALL_EXAMPLES
         for name in fields_of(type(stmt))
         if isinstance(getattr(stmt, name), ElementwiseImpl)
     ]
-    assert {type_name for type_name, _ in held} >= {"Assign", "Accum"} and {name for _, name in held} == {"op"}
+    assert {type_name for type_name, _ in held} >= {"Accum"} and {name for _, name in held} == {"op"}
 
 
 def test_a_number_in_a_role_field_is_plain_data() -> None:

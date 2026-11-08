@@ -10,10 +10,9 @@ import pytest
 from emmy.compiler.dim import Dim
 from emmy.compiler.dtype import F8E4M3, F16, F32
 from emmy.compiler.ir.axis import Axis, Window
-from emmy.compiler.ir.expression import BinaryExpression, Literal, Var
+from emmy.compiler.ir.expression import BinaryExpression, Literal, Var, apply, parse
 from emmy.compiler.ir.stmt import (
     Accum,
-    Affine,
     Assign,
     Body,
     Carry,
@@ -42,13 +41,12 @@ STATEMENTS = [
     (Load(("in0",), "x", (A0,), carried="unpack"), "in0 = load x[a0] carried=unpack"),
     (Load(("in0",), "model.layers.0.weight", (A0,)), "in0 = load `model.layers.0.weight`[a0]"),
     (Pre("p", "state", (A0, Literal(0, "int"))), "p = pre state[a0, 0]"),
-    (Assign("v1", "multiply", ("in0", "in1")), "v1 = multiply(in0, in1)"),
-    (Assign("v1", "exp", ("in0",), F16), "f16 v1 = exp(in0)"),
-    (Assign("load", "copy", ("for",)), "`load` = copy(`for`)"),
-    (Affine("v2", ("x",), (1,)), "v2 = x"),
-    (Affine("v2", ("x", "y"), (-1, 0.5)), "v2 = -x + 0.5*y"),
-    (Affine("v2", ("x", "y"), (2, -1), 1e-06, F32), "f32 v2 = 2*x - y + 1e-06"),
-    (Affine("v2", ("x",), (3,), -4), "v2 = 3*x - 4"),
+    (Assign("v1", apply("multiply", "in0", "in1")), "v1 = in0 * in1"),
+    (Assign("v1", apply("exp", "in0"), F16), "f16 v1 = exp(in0)"),
+    (Assign("load", Var("for")), "`load` = `for`"),
+    (Assign("v2", parse("0.5 * y - x")), "v2 = 0.5 * y - x"),
+    (Assign("v2", parse("2.0 * x - y + 1e-06"), F32), "f32 v2 = 2.0 * x - y + 1e-06"),
+    (Assign("v2", apply("add", apply("exp", "x"), 3.0)), "v2 = exp(x) + 3.0"),
     (Let("v0", Literal(0.125)), "let v0 = 0.125"),
     (Let("i", A0 * Literal(4, "int") + A1, F32), "let f32 i = a0 * 4 + a1"),
     (Init("acc", float("-inf"), dtype=F32), "init f32 acc = -inf"),

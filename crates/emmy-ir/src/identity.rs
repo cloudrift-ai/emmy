@@ -5,11 +5,13 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use crate::body::{Body, MemoKey};
-use crate::elementwise::{ElementwiseOp, Operation};
-use crate::memo::BODY_MEMO_CAPACITY;
+use crate::elementwise::Operation;
+use crate::expr::Expression;
+use crate::memo::BODY_MEMO_WEIGHT;
+use crate::normalize::canonical::affine_terms;
 use crate::normalize::normalize_body;
-use crate::numbering::{digest, hex};
-use crate::statement::{Assign, Statement};
+use crate::numbering::{Chains, digest, hex};
+use crate::statement::{Accum, Assign, Statement};
 use crate::{Name, Result, memo};
 
 /// What an identity was computed under: the clustered reading or the exact one, and each buffer's color.
@@ -31,14 +33,30 @@ pub struct Identity {
 /// and must not be executed.
 fn canonicalize_op_clusters(body: &Body) -> Body {
     body.map_stmts(&mut |stmt| {
+        let mut represent = |op: Operation| op.info().cluster.unwrap_or(op);
         Some(match &**stmt {
-            // A sum is FMA-class work; which coefficients it carries is not the cluster's business.
-            Statement::Affine(a) => Arc::new(Statement::Assign(Assign {
-                name: a.name,
-                op: ElementwiseOp::Known(Operation::Add).cluster_representative(),
-                args: a.args.clone(),
-                dtype: a.dtype,
-            })),
+            // A value's operations are the clusters they run on; which operation of a cluster is not its business.
+            Statement::Assign(a) => {
+                let value = clustered(&a.value, &mut represent);
+                if Arc::ptr_eq(&value.0, &a.value.0) {
+                    stmt.clone()
+                } else {
+                    Arc::new(Statement::Assign(Assign { value, ..a.clone() }))
+                }
+            }
+            Statement::Accum(a) => {
+                let value = clustered(&a.value, &mut represent);
+                let op = a.op.cluster_representative();
+                if Arc::ptr_eq(&value.0, &a.value.0) && op == a.op {
+                    stmt.clone()
+                } else {
+                    Arc::new(Statement::Accum(Accum {
+                        value,
+                        op,
+                        ..a.clone()
+                    }))
+                }
+            }
             other => match other.op() {
                 Some(op) => {
                     let representative = op.cluster_representative();
@@ -54,10 +72,38 @@ fn canonicalize_op_clusters(body: &Body) -> Body {
     })
 }
 
+/// `value` with every operation its cluster representative, and every sum a chain of the representative over its
+/// operands alone: a sum is FMA-class work, and which coefficients, signs or offset it carries is not the cluster's
+/// business.
+fn clustered(value: &Expression, represent: &mut dyn FnMut(Operation) -> Operation) -> Expression {
+    let value = value.map_children(&mut |child| clustered(child, represent));
+    let Some((op, args)) = value.operation() else {
+        return value;
+    };
+    // The children are clustered already: a sum's terms are what the walk through its affine nodes finds.
+    if op.info().affine.is_some() {
+        let terms = affine_terms(&value).terms;
+        if terms.len() != 1 || terms[0].1 != value {
+            let mut operands = terms.into_iter().map(|(_, term)| term);
+            let Some(first) = operands.next() else {
+                return value;
+            };
+            let add = represent(Operation::Add);
+            return operands.fold(first, |sum, term| Expression::apply(add, vec![sum, term]));
+        }
+    }
+    let new = represent(op);
+    if new == op {
+        value
+    } else {
+        Expression::apply(new, args)
+    }
+}
+
 memo! {
     /// The identities of the normal forms met in this process, per coloring: a cut's arms lower the same pieces
-    /// again and again.
-    pub fn identities() -> Memo<(MemoKey, IdentityKey), Identity> [capacity = BODY_MEMO_CAPACITY]
+    /// again and again. An entry weighs the statements of the body it keys.
+    pub fn identities() -> Memo<(MemoKey, IdentityKey), Identity> [weight = BODY_MEMO_WEIGHT, by = |key, _| key.0.0.statement_count() as u64]
 }
 
 /// Key the normal form of `body`, optionally with operations collapsed to compute-unit clusters. `colors` types
@@ -81,7 +127,13 @@ pub fn canonicalize_identity(
         colors: colors_key,
     };
     identities().get_or_try_insert(&(MemoKey(stmts.clone()), key), || {
-        let (tree, arguments) = digest(&stmts, colors);
+        // The exact identity is one up to the association of a sum; the clustered one spells every FMA-class tree
+        // as a chain of one representative, whose shape says which operand each term was.
+        let (tree, arguments) = digest(
+            &stmts,
+            colors,
+            if cluster { Chains::Kept } else { Chains::Flat },
+        );
         Ok(Identity {
             key: hex(tree),
             arguments,
@@ -206,8 +258,40 @@ mod tests {
             })
             .count();
         assert_eq!(loads, 1, "{only}");
-        assert_eq!(computed, 2, "{only}");
+        assert_eq!(computed, 1, "{only}");
         assert_eq!(normal(&only), only);
+    }
+
+    #[test]
+    fn renamed_buffers_share_a_clustered_identity_when_two_loads_tie() {
+        // Two loads of one buffer at two coordinates feed two accumulations the clustered reading cannot tell apart,
+        // so the sides of their products tie on rank and the normal form orders them by the names the buffers'
+        // spellings gave the loads. The digest numbers a commutative node's sides in content order, so the identity
+        // is the same whatever the buffers are called.
+        let template = "
+            for k in 0..3:
+                for c in 0..8:
+                    for k_s1 in 0..16:
+                        wv_s2 = load {m}[(c + 4) % 8, k_s1]
+                        xv_s1 = load {i}[k, k_s1]
+                        wv_s1 = load {m}[c, k_s1]
+                        sum_s2 <- add(sum_s2, xv_s1 * wv_s2) over k_s1
+                        sum_s1 <- add(sum_s1, xv_s1 * wv_s1) over k_s1
+                    v = sum_s1 + sum_s2
+                    {o}[k, c] = v
+        ";
+        let spelled = |m: &str, i: &str, o: &str| {
+            template
+                .replace("{m}", m)
+                .replace("{i}", i)
+                .replace("{o}", o)
+        };
+        let (a, b) = (
+            spelled("weight", "x", "out"),
+            spelled("matrix", "input", "output"),
+        );
+        assert_eq!(key(&a), key(&b));
+        assert_eq!(clustered_key(&a), clustered_key(&b));
     }
 
     #[test]
@@ -642,9 +726,10 @@ mod tests {
         assert_ne!(key(&indexed("element - 1")), key(&indexed("1 - element")));
     }
 
-    /// Affine coordinate folding cannot collapse a floating-point SSA operation tree.
+    /// A value sum is in affine form whatever its spelling: the reassociation of a sum is an exactness every reduce
+    /// schedule already takes (the normalization invariant), so the two spellings are one body.
     #[test]
-    fn floating_point_arithmetic_on_values_is_not_reassociated() {
+    fn a_value_sum_is_in_affine_form_whatever_its_spelling() {
         let make = |value: &str| {
             format!(
                 "
@@ -654,7 +739,7 @@ mod tests {
                 "
             )
         };
-        assert_ne!(key(&make("x + 1.0 + 2.0")), key(&make("x + 3.0")));
+        assert_eq!(key(&make("x + 1.0 + 2.0")), key(&make("x + 3.0")));
     }
 
     /// Every statement that defines a name takes part in alpha-renaming.

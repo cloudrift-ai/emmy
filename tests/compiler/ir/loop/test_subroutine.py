@@ -116,7 +116,7 @@ def test_normalization_drops_an_unused_value_the_expansion_kept_beside_output_wr
     body = parse_body(f"{_body(0)}\nunused = exp(external)")
     normalized = normalize_body(expand_calls(body))
     assert len(normalized.writes) == 1
-    assert not any(isinstance(stmt, Assign) and stmt.op.name == "exp" for stmt in normalized.iter())
+    assert not any(isinstance(stmt, Assign) and "exp" in str(stmt.value) for stmt in normalized.iter())
 
 
 def test_formal_coordinates_do_not_capture_canonical_axis_names():

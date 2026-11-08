@@ -3,7 +3,7 @@
 After fusion, each ``LoopOp`` describes the compute for one GPU kernel as
 an SSA program over a named iteration space:
 
-    body              : Body   — SSA body: Assign | Affine | Accum | Write | Select | Loop | Load
+    body              : Body   — SSA body: Assign | Accum | Write | Select | Loop | Load
     axes              : computed property  — iteration space walked from body's Loop tree
     reduce_axis_names : computed property  — names of axes whose Loop wraps an Accum
     loads             : computed property  — body-form Load stmts (external reads)
@@ -45,7 +45,6 @@ from emmy.compiler.ir.elementwise import ElementwiseImpl
 from emmy.compiler.ir.loop.analysis import BodyAnalysis, Scope  # noqa: F401 — public Loop IR aliases
 from emmy.compiler.ir.stmt import (  # noqa: F401  (re-exported via __init__)  # noqa: F401 — public Loop IR aliases
     Accum,
-    Affine,
     Assign,
     Body,
     Carry,
@@ -359,9 +358,9 @@ def _validate(loop: LoopOp) -> None:
         exported_accs: set[str] = set()
         for stmt in stmts:
             if isinstance(stmt, Assign):
-                for arg in stmt.args:
+                for arg in sorted(stmt.value.free_vars()):
                     if arg not in defined:
-                        raise ValueError(f"Assign {stmt.name!r}: arg {arg!r} not defined")
+                        raise ValueError(f"Assign {stmt.name!r}: {arg!r} not defined")
                     if arg in celled:
                         raise ValueError(f"Assign {stmt.name!r}: {arg!r} is a carried state — read one cell with Pre")
                 if stmt.name in defined:
@@ -393,8 +392,9 @@ def _validate(loop: LoopOp) -> None:
                     raise ValueError(f"Pre {stmt.name!r}: name already defined")
                 defined.add(stmt.name)
             elif isinstance(stmt, Accum):
-                if stmt.value not in defined and stmt.name != stmt.value:
-                    raise ValueError(f"Accum: value {stmt.value!r} not defined")
+                for arg in sorted(stmt.value.free_vars()):
+                    if arg not in defined and arg != stmt.name:
+                        raise ValueError(f"Accum {stmt.name!r}: {arg!r} not defined")
                 # Each Accum implicitly declares / extends an accumulator.
                 # Repeated Updates to same target must share op.
                 prev_op = target_ops.get(stmt.name)
@@ -403,13 +403,6 @@ def _validate(loop: LoopOp) -> None:
                 target_ops[stmt.name] = stmt.op
                 defined.add(stmt.name)
                 exported_accs.add(stmt.name)
-            elif isinstance(stmt, Affine):
-                for arg in stmt.args:
-                    if arg not in defined:
-                        raise ValueError(f"Affine {stmt.name!r}: arg {arg!r} not defined")
-                if stmt.name in defined:
-                    raise ValueError(f"Affine {stmt.name!r}: name already defined")
-                defined.add(stmt.name)
             elif isinstance(stmt, Select):
                 for b in stmt.branches:
                     if b.value not in defined:

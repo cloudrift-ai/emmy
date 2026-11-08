@@ -40,8 +40,7 @@ from emmy.compiler.graph import Graph, Node, Tensor
 from emmy.compiler.ir.address import clamp_to, gmem_axis_step
 from emmy.compiler.ir.axis import Axis, Window
 from emmy.compiler.ir.base import InputOp
-from emmy.compiler.ir.elementwise import ElementwiseImpl
-from emmy.compiler.ir.expression import BinaryExpression, Literal, Var
+from emmy.compiler.ir.expression import BinaryExpression, Literal, Var, apply
 from emmy.compiler.ir.loop import LoopOp
 from emmy.compiler.ir.pure import Lambda
 from emmy.compiler.ir.pure.fold import Fold
@@ -49,7 +48,7 @@ from emmy.compiler.ir.pure.twist import Twist
 from emmy.compiler.ir.schedule import Reduce, Work
 from emmy.compiler.ir.schedule.catalog import splitk_moves
 from emmy.compiler.ir.sigma import Sigma
-from emmy.compiler.ir.stmt import Accum, Affine, Assign, Body, Carry, Let, Load, Loop, Pre, Select, SelectBranch, Statement, Write
+from emmy.compiler.ir.stmt import Accum, Assign, Body, Carry, Let, Load, Loop, Pre, Select, SelectBranch, Statement, Write
 from emmy.compiler.ir.tile import OutputSpec, Placement, TileOp
 from emmy.compiler.ir.tile.ops import Sched, carries_partition, head, projection_regions, projection_root, projection_tail
 from emmy.compiler.pipeline import Match
@@ -132,9 +131,9 @@ def _masked(fold: Fold, k_axis: Axis, position) -> Fold:
             Let(name=f"{score}__end", value=end),
             Let(name=f"{score}__keep", value=Literal(0.0, "float")),
             Let(name=f"{score}__fill", value=Literal(float(fold.init[0]), "float")),
-            Assign(name=f"{score}__inside", op=ElementwiseImpl("less"), args=(f"{score}__key", f"{score}__end")),
-            Assign(name=f"{score}__mask", op=ElementwiseImpl("where"), args=(f"{score}__inside", f"{score}__keep", f"{score}__fill")),
-            Affine(name=f"{score}__in", args=(score, f"{score}__mask"), coefficients=(1.0, 1.0), offset=0.0),
+            Assign(f"{score}__inside", apply("less", f"{score}__key", f"{score}__end")),
+            Assign(f"{score}__mask", apply("where", f"{score}__inside", f"{score}__keep", f"{score}__fill")),
+            Assign(f"{score}__in", apply("add", score, f"{score}__mask")),
         ]
         results = [f"{score}__in", *channels]
     body = Body((*fold.lift.body, *stmts))
@@ -502,9 +501,9 @@ def realize_carry_split(match: Match, root: Node, cta: int) -> Graph:
         return (
             Load(names=("_one_walk",), input=probe_states, index=(Literal(1, "int"), Var(part.name), last, *at(view.kept, along))),
             Load(names=("_zero_walk",), input=probe_states, index=(Literal(0, "int"), Var(part.name), last, *at(view.kept, along))),
-            Assign(name="_a", op="subtract", args=("_one_walk", "_zero_walk")),
+            Assign("_a", apply("subtract", "_one_walk", "_zero_walk")),
             Pre(name="_s", carrier=carried, index=at(view.mixed, along)),
-            Assign(name="_as", op="multiply", args=("_a", "_s")),
+            Assign("_as", apply("multiply", "_a", "_s")),
         )
 
     if view.mixed is None:
@@ -520,7 +519,7 @@ def realize_carry_split(match: Match, root: Node, cta: int) -> Graph:
                 *mapped,
                 Load(names=("_b",), input=probe_states, index=(Literal(0, "int"), Var(part.name), last, *own)),
                 Pre(name="_from", carrier=carried, index=own),
-                Assign(name="_next", op="add", args=(product, "_b")),
+                Assign("_next", apply("add", product, "_b")),
                 Carry(name=carried, value="_next", index=own, seed=node.init[0]),
                 Write(output=starts, index=(Var(part.name), *own), values=("_from",)),
             )
@@ -1011,21 +1010,37 @@ def projection_distributes(body, states: tuple[str, ...]) -> bool:
             if s.value.free_vars() & linear:
                 return False
             continue  # a literal or coordinate expression independent of the carried state
-        if isinstance(s, Affine):
-            hot = [a for a in s.args if a in linear]
-            if not hot:
-                continue
-            if len(hot) == len(s.args) and s.offset == 0:
-                linear.add(s.name)  # a sum of scaled state values — ``mean``'s ``/N`` — is still linear-homogeneous
-                continue
-            return False  # an offset or a state-independent term breaks distributivity
         if not isinstance(s, Assign):
             return False  # an unfamiliar projection stmt — can't prove distributivity
-        hot = [a for a in s.args if a in linear]
-        if not hot:
+        kind = _homogeneity(s.value, linear)
+        if kind == "constant":
             continue  # state-independent — a constant w.r.t. the split
-        if len(hot) == 1 and (s.op.name == "multiply" or s.op.name == "divide" and s.args[0] in linear):
-            linear.add(s.name)  # state · constant or state / constant — still linear-homogeneous
-            continue
-        return False  # offset / inverse / nonlinear of a state value breaks distributivity
+        if kind is None:
+            return False  # offset / inverse / nonlinear of a state value breaks distributivity
+        linear.add(s.name)
     return False  # no Write reached
+
+
+def _homogeneity(value, linear: set[str]) -> str | None:
+    """How ``value`` depends on the carried state: ``"linear"`` for a linear-homogeneous function of the ``linear``
+    names (a sum of them, one scaled or divided by a constant), ``"constant"`` for none of them, ``None`` for anything
+    else (an offset beside a state term, a product of two state values, a nonlinear unary of one)."""
+    if isinstance(value, Var):
+        return "linear" if value.name in linear else "constant"
+    if isinstance(value, Literal):
+        return "constant"
+    op = value.operation
+    if op is None:
+        return None
+    kinds = [_homogeneity(operand, linear) for operand in value.operands]
+    if any(kind is None for kind in kinds):
+        return None
+    if all(kind == "constant" for kind in kinds):
+        return "constant"
+    if op.name in ("add", "subtract", "negative"):
+        return "linear" if all(kind == "linear" for kind in kinds) else None
+    if op.name == "multiply" and kinds.count("linear") == 1:
+        return "linear"
+    if op.name == "divide" and kinds == ["linear", "constant"]:
+        return "linear"
+    return None

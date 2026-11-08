@@ -127,7 +127,7 @@ def test_fragment_epilogue_substitutes_binding_coordinates_and_rejects_unbound_v
         result = multiply(acc, column)
         """
     )
-    assert "const int column_e0 = n + (_t * 2 + 0);" in source
+    assert "const int column_e0 = _t * 2 + 0 + n;" in source
     with pytest.raises(RuleSkipped, match="projection epilogue reads.*missing"):
         _render(
             """
@@ -170,7 +170,13 @@ def test_fast_exp_policy_reaches_generated_fragment_epilogues(monkeypatch, fast_
         for store in stores:
             for cell in (store, *store.run):
                 assert cell.epilogue is not None
-                ops = [stmt.op.name for stmt in cell.epilogue if isinstance(stmt, Assign)]
+                ops = [
+                    node.operation.name
+                    for stmt in cell.epilogue
+                    if isinstance(stmt, Assign)
+                    for node in stmt.value.subterms()
+                    if node.operation
+                ]
                 assert expected in ops and ("exp" if enabled else "exp_fast") not in ops
         compiled = Pipeline.build([FINAL_LOWERING_PASS]).run(lowered, ctx=ctx)
     (source,) = [node.op.kernel_source for node in compiled.nodes.values() if isinstance(node.op, CudaOp)]
@@ -221,7 +227,7 @@ def test_a_mask_over_a_narrowed_value_widens_both_branches() -> None:
     )
 
     assert "const __half narrow_e0 = __float2half(_c[0]);" in source
-    assert "const float masked_e0 = ((n + (_t * 2 + 0) <= m + _g) ? __half2float(narrow_e0) : ninf_e0);" in source
+    assert "const float masked_e0 = ((_t * 2 + 0 + n <= _g + m) ? __half2float(narrow_e0) : ninf_e0);" in source
 
 
 def test_integer_load_in_fragment_epilogue_keeps_shift_operands_integer() -> None:

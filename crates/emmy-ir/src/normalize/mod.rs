@@ -8,9 +8,8 @@ use std::sync::Arc;
 use crate::axis::Axis;
 use crate::body::{Body, MemoKey};
 use crate::dtype::DType;
-use crate::elementwise::ElementwiseOp;
 use crate::expr::{Expression, Interval, SimplifyCtx};
-use crate::memo::BODY_MEMO_CAPACITY;
+use crate::memo::BODY_MEMO_WEIGHT;
 use crate::order::topological_sort;
 use crate::statement::*;
 use crate::{Error, Name, Result, memo};
@@ -36,8 +35,9 @@ pub fn extend_simplify_ctx(ctx: &SimplifyCtx, axis: &Axis) -> SimplifyCtx {
 // --- the memo -------------------------------------------------------------------------------------------
 
 memo! {
-    /// The normal forms of the bodies met in this process, by their exact form.
-    pub fn normal_forms() -> Memo<MemoKey, Body> [capacity = BODY_MEMO_CAPACITY]
+    /// The normal forms of the bodies met in this process, by their exact form; each weighs the statements of the
+    /// body it keys and the normal form it holds.
+    pub fn normal_forms() -> Memo<MemoKey, Body> [weight = BODY_MEMO_WEIGHT, by = |key, normal| (key.0.statement_count() + normal.statement_count()) as u64]
 }
 
 /// The executable normal form of `body`: what the body already knows, else the memo's, else computed and kept.
@@ -63,19 +63,20 @@ pub fn normalize_uncached(body: &Body) -> Result<Body> {
     // Motion can put two lexical bindings in one scope. Give them distinct names first.
     let mut stmts = rename_ssa_sequential(&topological_sort(body));
     // The folds feed the steps ahead of them, so the steps run again after a fold that changed the body. The order
-    // permutes and names, and one step reads names: a body the order left an unread value in goes through the steps
-    // again; any other is final, since the order is final on its own output.
+    // permutes and names, and the operand order inside a value reads the ranks the order gives, which the order in
+    // turn spells by: the form is final when one whole round leaves the body alone.
     for _ in 0..8 {
         let prepared = prepare_body(&stmts)?;
-        stmts = fold_affine(&fold_trivial_selects(&prepared), &HashSet::new());
-        if stmts != prepared {
+        let folded = fold_single_readers(&fold_trivial_selects(&prepared), &HashSet::new());
+        if folded != prepared {
+            stmts = folded;
             continue;
         }
-        let ordered = canonical_order(&prepared)?;
-        stmts = drop_unread_values(&ordered);
-        if stmts == ordered {
-            return Ok(ordered);
+        let next = drop_unread_values(&canonical_order(&prepared)?);
+        if next == stmts {
+            return Ok(next);
         }
+        stmts = next;
     }
     let mut lines = Vec::new();
     crate::text::body_lines(&stmts, "  ", &mut lines)?;
@@ -93,12 +94,16 @@ pub fn prepare_body(body: &Body) -> Result<Body> {
     stmts = drop_size_one_reduce_axes(&stmts);
     stmts = canonicalize_free_axis_order(&stmts)?;
     stmts = fold_trivial_selects(&stmts);
-    stmts = fold_constants(&stmts);
+    stmts = inline_literals(&stmts);
     stmts = drop_unread_values(&stmts);
     let mut placed: Option<Body> = None;
     loop {
-        let simplified =
-            canonicalize_expressions(&simplify_body(&merge_sibling_reduce_loops(&stmts)?)?, &[])?;
+        let simplified = canonicalize_expressions(
+            &drop_unread_values(&simplify_body(&inline_literals(
+                &merge_sibling_reduce_loops(&stmts)?,
+            ))?),
+            &[],
+        )?;
         if placed.as_ref() == Some(&simplified) {
             return Ok(simplified);
         }
@@ -116,11 +121,10 @@ fn substituted(stmt: &Arc<Statement>, name: &Name, value: Expression) -> Arc<Sta
     Statement::substitute(stmt, &HashMap::from([(*name, value)]))
 }
 
-fn assign(name: &Name, op: ElementwiseOp, args: Vec<Name>, dtype: Option<DType>) -> Arc<Statement> {
+fn assign(name: &Name, value: Expression, dtype: Option<DType>) -> Arc<Statement> {
     Arc::new(Statement::Assign(Assign {
         name: *name,
-        op,
-        args: args.into(),
+        value,
         dtype,
     }))
 }
@@ -200,11 +204,14 @@ for k in 0..3:
         let text = normal(
             "for i in 0..4:\n    for k in 0..8:\n        x = load a[i, k]\n        y = exp(x)\n        s <- add(s, y) over k\n    out[i] = s",
         );
-        assert!(text.contains("acc0 <- add(acc0, v0) over a1"), "{text}");
+        assert!(
+            text.contains("acc0 <- add(acc0, exp(in0)) over a1"),
+            "{text}"
+        );
         let folded = normal(
             "for i in 0..4:\n    x = load a[i]\n    let c = 2.0\n    y = multiply(x, c)\n    z = add(y, x)\n    out[i] = z",
         );
-        assert!(folded.contains("v0 = 3*in0"), "{folded}");
+        assert!(folded.contains("v0 = 3 * in0"), "{folded}");
     }
 
     #[test]
@@ -471,7 +478,7 @@ for k in 0..3:
             let mut settled = false;
             for _ in 0..8 {
                 prepared = prepare_body(&prepared).unwrap();
-                let folded = fold_affine(&fold_trivial_selects(&prepared), &HashSet::new());
+                let folded = fold_single_readers(&fold_trivial_selects(&prepared), &HashSet::new());
                 if folded == prepared {
                     settled = true;
                     break;

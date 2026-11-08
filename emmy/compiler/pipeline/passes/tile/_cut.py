@@ -42,7 +42,6 @@ from emmy.compiler.graph import Graph, Node
 from emmy.compiler.ir.address import gmem_axis_step
 from emmy.compiler.ir.axis import Axis, Dim
 from emmy.compiler.ir.base import InputOp
-from emmy.compiler.ir.elementwise import ElementwiseImpl
 from emmy.compiler.ir.expression import BinaryExpression, Expression, Interval, Literal, SimplifyCtx, Var, affine_form
 from emmy.compiler.ir.loop import LoopOp
 from emmy.compiler.ir.pure.fold import (
@@ -51,7 +50,7 @@ from emmy.compiler.ir.pure.fold import (
 from emmy.compiler.ir.pure.lam import Lambda
 from emmy.compiler.ir.schedule.packing import match_packed_pair_node
 from emmy.compiler.ir.sigma import Sigma
-from emmy.compiler.ir.stmt import Affine, Assign, Body, Let, Load, Loop, Write
+from emmy.compiler.ir.stmt import Assign, Body, Let, Load, Loop, Write
 from emmy.compiler.ir.tile import OutputSpec, Placement, TileOp
 from emmy.compiler.ir.tile.ops import (
     UnbindableProjection,
@@ -156,24 +155,39 @@ def storage_frontier(node: Fold) -> Frontier | None:
         return None
     lift = node.applied
     body = lift.body
-    if any(not isinstance(stmt, (Load, Affine, Assign, Let)) for stmt in body):
+    if any(not isinstance(stmt, (Load, Assign, Let)) for stmt in body):
         return None
-    computed = {name for stmt in body if isinstance(stmt, (Affine, Assign)) for name in stmt.defines()}
+    computed = {name for stmt in body if isinstance(stmt, Assign) for name in stmt.defines()}
+    # A decode of a value the body computes: a node whose operand is a computed name, or a computation of its own.
     decodes = [
-        stmt
+        (stmt, node)
         for stmt in body
-        if isinstance(stmt, Assign) and stmt.op.decodes is not None and len(stmt.args) == 1 and stmt.args[0] in computed
+        if isinstance(stmt, Assign)
+        for node in stmt.value.subterms()
+        if node.operation is not None
+        and node.operation.decodes is not None
+        and len(node.operands) == 1
+        and (not isinstance(node.operands[0], Var) or node.operands[0].name in computed)
     ]
     if len(decodes) != 1:
         return None
-    decode = decodes[0]
-    frontier = decode.args[0]
+    (decode, decoding), encoded = decodes[0], decodes[0][1].operands[0]
+    if isinstance(encoded, Var):
+        frontier = encoded.name
+    else:
+        # The normal form folded the encode into the decode that reads it: the frontier is a definition again.
+        frontier = f"{decode.name}__code"
+        named = decode.replace(value=decode.value.rebuild(lambda e: Var(frontier) if e == encoded else e))
+        stmts = [named if stmt is decode else stmt for stmt in body]
+        stmts.insert(stmts.index(named), Assign(frontier, encoded))
+        body = Body(tuple(stmts))
+        decode = named
     prefix = tuple(body.backward_cone((frontier,)).members)
     remaining = Body(stmt for stmt in body if frontier not in stmt.defines())
     residue = tuple(remaining.backward_cone(lift.results).members)
     if decode not in residue:
         return None
-    result = get_dtype(decode.op.decodes)
+    result = get_dtype(decoding.operation.decodes)
 
     operands = tuple(edge for edge in node.operands if set(edge.exposes) & Body(prefix).ssa_uses)
     params = tuple(name for edge in operands for name in edge.exposes)
@@ -222,7 +236,7 @@ def _narrowed_reads(tile: TileOp) -> dict[str, object]:
     casts: dict[str, set] = {}
     for site in sites(tile.op):
         for stmt in site.node.lift.body.iter():
-            narrowing = isinstance(stmt, Assign) and stmt.op == ElementwiseImpl("copy") and stmt.dtype is not None and len(stmt.args) == 1
+            narrowing = isinstance(stmt, Assign) and isinstance(stmt.value, Var) and stmt.dtype is not None
             for name in Body((stmt,)).ssa_uses:
                 casts.setdefault(name, set()).add(stmt.dtype if narrowing and stmt.dtype.nbytes < 4 else None)
     for store in tile.output_specs:
@@ -884,14 +898,15 @@ _PLACEHOLDER = "_p"
 
 def _signature(stmt) -> tuple:
     """What a statement computes, ignoring the names it reads: a cheap key two definitions of one value share."""
-    return (type(stmt).__name__, getattr(stmt, "op", None), len(getattr(stmt, "args", ())))
+    value = stmt.value if isinstance(stmt, Assign) else None
+    return (type(stmt).__name__, str(value.rename(dict.fromkeys(value.free_vars(), "_"))) if value is not None else None)
 
 
 def _inline_cone(host: Fold, name: str) -> Fold | None:
     """The value ``name`` that ``host``'s lift defines, as a term of its own: the statements it reads through and the
     operand edges they bind. ``None`` when the cone holds anything but loads and straight-line statements."""
     members = tuple(host.lift.body.backward_cone((name,)).members)
-    if any(not isinstance(stmt, (Load, Affine, Assign, Let)) for stmt in members):
+    if any(not isinstance(stmt, (Load, Assign, Let)) for stmt in members):
         return None
     used = Body(members).ssa_uses
     params = host.lift.params[1 if host.base is not None else 0 :]
@@ -949,7 +964,7 @@ def _inline_copies(tile: TileOp, seams: tuple[CutSite, ...], all_sites, outer: t
             continue
         scope = tuple(dict.fromkeys((*outer, *site.scope, *((host.axis,) if host.axis is not None else ()))))
         for stmt in host.lift.body:
-            if not isinstance(stmt, (Assign, Affine)) or _signature(stmt) not in signatures or stmt.name in host.lift.results:
+            if not isinstance(stmt, Assign) or _signature(stmt) not in signatures or stmt.name in host.lift.results:
                 continue
             cone = _inline_cone(host, stmt.name)
             if cone is None or not cone.free_axes <= set(scope):
@@ -1475,7 +1490,7 @@ def _without_identity_casts(node: Fold, dtypes: dict[str, object]) -> Fold:
             continue
         (stmt,) = proj.lift.body
         slab = proj.operands[0].as_slab() if isinstance(proj.operands[0], Fold) else None
-        if slab is None or not isinstance(stmt, Assign) or stmt.op != ElementwiseImpl("copy") or stmt.args != proj.lift.params[:1]:
+        if slab is None or not isinstance(stmt, Assign) or not isinstance(stmt.value, Var) or (stmt.value.name,) != proj.lift.params[:1]:
             continue
         if dtypes.get(slab.load.input) == stmt.dtype:
             targets[id(proj)] = (Fold.slab(slab.load.replace(names=(stmt.name,))),)

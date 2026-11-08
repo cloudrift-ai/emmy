@@ -63,6 +63,24 @@ def test_a_cut_piece_is_the_kernel_its_stored_definition_lifts_to() -> None:
         assert piece.exact_identity == KernelDef(loop_ir=piece.loop_ir, name=piece.name, formed=piece.formed).exact_identity, piece.name
 
 
+def test_restamp_names_a_row_key_no_fresh_site_answers_to() -> None:
+    """A row's scoped schedule key is an input the lift spells; one the fresh tile no longer offers is kept — the restamp
+    re-spells no schedule — and reported, since a strict replay cannot realize it."""
+    from dataclasses import replace
+
+    from emmy.compiler.pipeline.search.golden.restamp import restamp
+
+    document = GoldenFile.load(Path(__file__).resolve().parents[2] / "realization/cases/fused/gdn-recurrence-state-kv.json")
+    (row,) = document.rows
+    key = max((key for key in row.knobs if key.startswith("TILE@")), key=len)
+    family, _, path = key.partition("@")
+    moved = {(f"{family}@{path[:-1]}9" if k == key else k): v for k, v in row.knobs.items()}
+    fresh, report = restamp(replace(document, rows=[replace(row, knobs=moved)]))
+    assert not report.changed and fresh.rows[0].knobs == moved
+    assert report.misnamed_rows == [f"{row.name}: {family}@{path[:-1]}9 names no site of {row.kernel}"]
+    assert not restamp(document)[1].misnamed_rows
+
+
 def test_lora_serving_golden_replays_nested_cuts() -> None:
     path = (
         Path(__file__).resolve().parents[4] / "experiments/Meta-Llama-3.1-8B-Instruct/lora_v100_sxm3_32gb/golden/v100_sxm3_sm70_lora8.json"

@@ -14,7 +14,7 @@ from __future__ import annotations
 from emmy.compiler.graph import Graph, Node, Tensor
 from emmy.compiler.ir.base import InputOp
 from emmy.compiler.ir.elementwise import ElementwiseImpl
-from emmy.compiler.ir.expression import Expression, Literal, Var
+from emmy.compiler.ir.expression import Expression, Literal, Var, apply
 from emmy.compiler.ir.loop import Assign, Axis, Load, Loop, LoopOp, Statement, Write
 from emmy.compiler.ir.stmt import Body, dtype_promote
 from emmy.compiler.ir.tensor.ir import BitcastOp, ElementwiseOp
@@ -60,7 +60,7 @@ def rewrite(match: Match, root: Node) -> Graph | None:
     assign_dtype = root.output.dtype if op.name == "bitcast" or root.output.dtype.name != promoted else None
     inner: Body = (
         *load_stmts,
-        Assign(name="v", op=op, args=tuple(load_names), dtype=assign_dtype),
+        Assign("v", apply(op, *load_names), dtype=assign_dtype),
         Write(output=f"loop_{root.id}", index=write_index, values=("v",)),
     )
     # Nest the body in free-axis Loops (outer axis wraps the innermost).

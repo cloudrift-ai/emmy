@@ -814,39 +814,6 @@ impl Write {
 }
 
 #[pymethods]
-impl Affine {
-    /// `(coefficient, arg)` per term.
-    #[getter]
-    fn terms<'py>(slf: &Bound<'py, Self>) -> PyResult<Bound<'py, PyTuple>> {
-        let affine: &emmy_ir::statement::Affine = inner(slf.as_super().get())?;
-        let items: PyResult<Vec<Bound<'py, PyTuple>>> = affine
-            .terms()
-            .map(|(c, arg)| {
-                PyTuple::new(
-                    slf.py(),
-                    [
-                        c.into_pyobject(slf.py())?.into_any(),
-                        PyString::new(slf.py(), arg).into_any(),
-                    ],
-                )
-            })
-            .collect();
-        PyTuple::new(slf.py(), items?)
-    }
-
-    /// The same value as binary `Assign`s over `Let`-bound literals, the last one named `name`.
-    fn as_assigns<'py>(slf: &Bound<'py, Self>) -> PyResult<Bound<'py, pyo3::types::PyList>> {
-        let affine: &emmy_ir::statement::Affine = inner(slf.as_super().get())?;
-        let items: PyResult<Vec<Py<PyAny>>> = affine
-            .as_assigns()
-            .iter()
-            .map(|stmt| wrap_statement(slf.py(), stmt))
-            .collect();
-        pyo3::types::PyList::new(slf.py(), items?)
-    }
-}
-
-#[pymethods]
 impl Accum {
     /// The identity value of the accumulator.
     #[getter]

@@ -45,32 +45,6 @@ fn flags(unroll: bool, seed: bool) -> String {
     )
 }
 
-fn affine(stmt: &Affine) -> Result<String> {
-    let mut terms: Vec<(f64, String)> = Vec::new();
-    for (c, arg) in stmt.terms() {
-        let name = spell_stmt_name(arg)?;
-        terms.push((
-            c,
-            if c.abs() == 1.0 {
-                name
-            } else {
-                format!("{}*{}", spell_number(c.abs()), name)
-            },
-        ));
-    }
-    if stmt.offset.0 != 0.0 {
-        terms.push((stmt.offset.0, spell_number(stmt.offset.0.abs())));
-    }
-    let Some((head, rest)) = terms.split_first() else {
-        return Ok(String::new());
-    };
-    let mut out = format!("{}{}", if head.0 < 0.0 { "-" } else { "" }, head.1);
-    for (c, term) in rest {
-        out.push_str(&format!(" {} {}", if *c < 0.0 { "-" } else { "+" }, term));
-    }
-    Ok(out)
-}
-
 /// `stmt`'s text as lines, each starting with `indent`.
 pub fn lines(stmt: &Statement, indent: &str, out: &mut Vec<String>) -> Result<()> {
     let inner = format!("{indent}{INDENT}");
@@ -97,17 +71,10 @@ pub fn lines(stmt: &Statement, indent: &str, out: &mut Vec<String>) -> Result<()
             index(&s.index)?
         ),
         Statement::Assign(s) => format!(
-            "{}{} = {}({})",
-            typed(&s.dtype),
-            spell_stmt_name(&s.name)?,
-            s.op,
-            names(&s.args)?
-        ),
-        Statement::Affine(s) => format!(
             "{}{} = {}",
             typed(&s.dtype),
             spell_stmt_name(&s.name)?,
-            affine(s)?
+            s.value.try_text()?
         ),
         Statement::Let(s) => format!(
             "let {}{} = {}",
@@ -129,11 +96,12 @@ pub fn lines(stmt: &Statement, indent: &str, out: &mut Vec<String>) -> Result<()
             };
             let base = s.base.as_ref().unwrap_or(&s.name);
             format!(
-                "{}{} <- {}({}){}",
+                "{}{} <- {}({}, {}){}",
                 typed(&s.dtype),
                 spell_stmt_name(&s.name)?,
                 s.op,
-                names(&[*base, s.value])?,
+                spell_stmt_name(base)?,
+                s.value.try_text()?,
                 over
             )
         }

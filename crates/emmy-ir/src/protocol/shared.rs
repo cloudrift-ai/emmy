@@ -1,15 +1,14 @@
 //! What the shared statement types answer beyond their fields: the states a loop carries, a reduction's seed, a
 //! sum's terms and its binary form, a select's mask, the literal a statement binds.
 
+use crate::Name;
 use crate::body::Body;
 use crate::dtype::DType;
-use crate::elementwise::{ElementwiseOp, Operation};
+use crate::elementwise::Operation;
 use crate::expr::{Expr, Expression, LitType};
-use crate::field::{AxisRef, Names, NumOr};
+use crate::field::{AxisRef, NumOr};
 use crate::statement::*;
-use crate::{Error, Name, Result};
 use std::collections::{HashMap, HashSet};
-use std::sync::Arc;
 
 /// The seeded accumulators a reduce loop declares in its enclosing scope: the `Accum` targets of its immediate body.
 pub fn seeded_accumulators(stmt: &Statement) -> Vec<Name> {
@@ -112,154 +111,6 @@ impl Accum {
     }
 }
 
-impl Affine {
-    pub fn terms(&self) -> impl Iterator<Item = (f64, &Name)> {
-        self.coefficients
-            .iter()
-            .zip(self.args.iter())
-            .map(|(c, arg)| (c.0, arg))
-    }
-
-    /// Python's checks: equal lengths, at least one term, no zero coefficient.
-    pub fn validate(&self) -> Result<()> {
-        let name = &self.name;
-        if self.args.len() != self.coefficients.len() {
-            return Err(Error::Value(format!(
-                "Affine {name:?}: {} args and {} coefficients",
-                self.args.len(),
-                self.coefficients.len()
-            )));
-        }
-        if self.args.is_empty() {
-            return Err(Error::Value(format!(
-                "Affine {name:?} has no term: a constant is a Let"
-            )));
-        }
-        if self.coefficients.iter().any(|c| c.0 == 0.0) {
-            let shown: Vec<String> = self
-                .coefficients
-                .iter()
-                .map(|c| crate::field::spell_number(c.0))
-                .collect();
-            return Err(Error::Value(format!(
-                "Affine {name:?} carries a zero coefficient: ({})",
-                shown.join(", ")
-            )));
-        }
-        Ok(())
-    }
-
-    /// The same value as binary `Assign`s over `Let`-bound literals, the last one named `name`.
-    pub fn as_assigns(&self) -> Vec<Arc<Statement>> {
-        struct Chain<'a> {
-            affine: &'a Affine,
-            out: Vec<Arc<Statement>>,
-            counter: usize,
-        }
-        impl Chain<'_> {
-            fn fresh(&mut self) -> Name {
-                let name: Name = format!("{}__t{}", self.affine.name, self.counter).into();
-                self.counter += 1;
-                name
-            }
-            fn bound(&mut self, value: f64) -> Name {
-                let name = self.fresh();
-                let let_ = Let {
-                    name,
-                    value: Expression::float(value),
-                    dtype: self.affine.dtype,
-                };
-                self.out.push(Arc::new(Statement::Let(let_)));
-                name
-            }
-            fn step(&mut self, op: Operation, args: Vec<Name>) -> Name {
-                let name = self.fresh();
-                let assign = Assign {
-                    name,
-                    op: ElementwiseOp::Known(op),
-                    args: args.into(),
-                    dtype: self.affine.dtype,
-                };
-                self.out.push(Arc::new(Statement::Assign(assign)));
-                name
-            }
-        }
-        let mut chain = Chain {
-            affine: self,
-            out: Vec::new(),
-            counter: 0,
-        };
-        let mut total: Option<Name> = None;
-        // A positive term leads when there is one, so the chain opens with a value rather than a negation.
-        let mut terms: Vec<(f64, &Name)> = self.terms().collect();
-        terms.sort_by_key(|(c, _)| *c < 0.0);
-        for (coefficient, arg) in terms {
-            let term = if coefficient.abs() == 1.0 {
-                *arg
-            } else {
-                let literal = chain.bound(coefficient.abs());
-                chain.step(Operation::Multiply, vec![*arg, literal])
-            };
-            total = Some(match total {
-                None if coefficient > 0.0 => term,
-                None => chain.step(Operation::Negative, vec![term]),
-                Some(current) => chain.step(
-                    if coefficient > 0.0 {
-                        Operation::Add
-                    } else {
-                        Operation::Subtract
-                    },
-                    vec![current, term],
-                ),
-            });
-        }
-        // An affine has a term (its constructor refuses none), so the chain holds a total here.
-        let Some(mut total) = total else {
-            return chain.out;
-        };
-        if self.offset.0 != 0.0 {
-            let literal = chain.bound(self.offset.0.abs());
-            total = chain.step(
-                if self.offset.0 > 0.0 {
-                    Operation::Add
-                } else {
-                    Operation::Subtract
-                },
-                vec![total, literal],
-            );
-        }
-        let mut out = chain.out;
-        match out.last_mut() {
-            Some(last) if last.name() == Some(&total) => {
-                if let Statement::Assign(a) = &**last {
-                    *last = Arc::new(Statement::Assign(Assign {
-                        name: self.name,
-                        ..a.clone()
-                    }));
-                }
-            }
-            _ => out.push(Arc::new(Statement::Assign(Assign {
-                name: self.name,
-                op: ElementwiseOp::Known(Operation::Copy),
-                args: Names::from([total]),
-                dtype: self.dtype,
-            }))),
-        }
-        out
-    }
-}
-
-/// `stmts` with every `Affine` spelled as its binary `Assign`s; the other statements pass through.
-pub fn binary(stmts: &[Arc<Statement>]) -> Vec<Arc<Statement>> {
-    stmts
-        .iter()
-        .flat_map(|stmt| match &**stmt {
-            Statement::Affine(affine) => affine.as_assigns(),
-            _ => vec![stmt.clone()],
-        })
-        .collect()
-}
-
 /// The mask branch of an ordered two-way comparison, or `None` for another `Select` form.
 pub fn mask_select_predicate(select: &Select) -> Option<Expression> {
     if select.branches.len() != 2 {
@@ -275,13 +126,7 @@ pub fn mask_select_predicate(select: &Select) -> Option<Expression> {
     };
     let (mut op, mut left, mut right) = (*mask_op, mask_left.clone(), mask_right.clone());
     if *keep_left == right && *keep_right == left {
-        op = match op {
-            Operation::Less => Operation::Greater,
-            Operation::LessEqual => Operation::GreaterEqual,
-            Operation::Greater => Operation::Less,
-            Operation::GreaterEqual => Operation::LessEqual,
-            _ => return None,
-        };
+        op = op.mirror()?;
         std::mem::swap(&mut left, &mut right);
     }
     if *keep_left != left || *keep_right != right {

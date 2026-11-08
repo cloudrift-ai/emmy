@@ -6,7 +6,6 @@ use std::sync::Arc;
 
 use super::{assign, canonicalize_expressions, rename_ssa_sequential, substituted, with_bodies};
 use crate::body::Body;
-use crate::elementwise::{ElementwiseOp, Operation};
 use crate::expr::{Expr, Expression, affine_form};
 use crate::field::AxisRef;
 use crate::numbering::Key;
@@ -72,15 +71,16 @@ pub fn drop_size_one_reduce_axes(body: &Body) -> Body {
                         if a.op.neutral().is_none() {
                             return Some(vec![stmt.clone()]);
                         }
-                        out.push(assign(
-                            &a.name,
-                            ElementwiseOp::Known(Operation::Copy),
-                            vec![a.value],
-                            a.dtype,
-                        ));
+                        out.push(assign(&a.name, a.value.clone(), a.dtype));
                     }
                     Some(base) => {
-                        out.push(assign(&a.name, a.op.clone(), vec![*base, a.value], a.dtype))
+                        let combined = match a.op.known() {
+                            Some(op) => {
+                                Expression::apply(op, vec![Expression::var(base), a.value.clone()])
+                            }
+                            None => return Some(vec![stmt.clone()]),
+                        };
+                        out.push(assign(&a.name, combined, a.dtype))
                     }
                 },
                 _ => out.push(member),

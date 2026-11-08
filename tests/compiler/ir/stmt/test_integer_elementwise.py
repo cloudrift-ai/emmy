@@ -41,6 +41,21 @@ def _stamped(result: str) -> list[str]:
     return str(stamped.body).splitlines()
 
 
+# The infix each integer operation is spelled by in a body's text and in C.
+_SYMBOL = {
+    "add": "+",
+    "subtract": "-",
+    "multiply": "*",
+    "floor_divide": "//",
+    "remainder": "%",
+    "left_shift": "<<",
+    "right_shift": ">>",
+    "bitwise_and": "&",
+    "bitwise_or": "|",
+    "bitwise_xor": "^",
+}
+
+
 @pytest.mark.parametrize(
     ("op", "symbol"),
     [
@@ -72,12 +87,12 @@ def test_f32_bitwise_names_remain_logical_masks():
 )
 def test_stamp_types_preserves_integer_assign_and_write(op):
     lines = _stamped(f"result = {op}(a, b)")
-    assert f"u32 result = {op}(a, b)" in lines
+    assert f"u32 result = a {_SYMBOL[op]} b" in lines
     assert "u32 out[0] = result" in lines
 
 
 def test_stamp_types_repairs_a_stale_float_stamp_on_integer_algebra():
-    assert "u32 result = left_shift(a, b)" in _stamped("f32 result = left_shift(a, b)")
+    assert "u32 result = a << b" in _stamped("f32 result = left_shift(a, b)")
 
 
 def test_an_integer_constant_load_keeps_its_dtype_when_it_folds_to_a_literal():

@@ -192,11 +192,9 @@ operations! {
 }
 
 /// Spellings that mean an operation the renderers know under another name, normalized at construction.
-pub const ALIASES: [(&str, Operation); 4] = [
+pub const ALIASES: [(&str, Operation); 2] = [
     ("__rshift__", Operation::RightShift),
     ("bitwise_right_shift", Operation::RightShift),
-    ("min", Operation::Minimum),
-    ("max", Operation::Maximum),
 ];
 
 impl Operation {
@@ -210,6 +208,24 @@ impl Operation {
         self.info().infix.map_or(7, |(_, precedence)| precedence)
     }
 
+    /// The one spelling a node gives this operation: its infix where it has one, else its name. A `Binary` node holds
+    /// an operation with an infix and a `Call` never names one (the class check holds both), so a node's operation
+    /// has one spelling.
+    pub fn spelling(self) -> &'static str {
+        self.infix().unwrap_or(self.text())
+    }
+
+    /// The comparison with its sides swapped (`a < b` is `b > a`), for an ordering comparison.
+    pub fn mirror(self) -> Option<Operation> {
+        Some(match self {
+            Operation::Less => Operation::Greater,
+            Operation::Greater => Operation::Less,
+            Operation::LessEqual => Operation::GreaterEqual,
+            Operation::GreaterEqual => Operation::LessEqual,
+            _ => return None,
+        })
+    }
+
     /// The operation an infix spelling names.
     pub fn from_infix(text: &str) -> Option<Operation> {
         Operation::ALL
@@ -220,18 +236,6 @@ impl Operation {
 
     pub fn is_division(self) -> bool {
         matches!(self, Operation::Divide | Operation::FloorDivide)
-    }
-
-    /// An ordering comparison or equality: the operators a predicate's two sides meet through.
-    pub fn is_comparison(self) -> bool {
-        matches!(
-            self,
-            Operation::Less
-                | Operation::LessEqual
-                | Operation::Greater
-                | Operation::GreaterEqual
-                | Operation::Equal
-        )
     }
 
     /// The row of the table: every property in one place.

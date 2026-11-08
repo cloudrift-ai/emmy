@@ -7,7 +7,7 @@ use crate::axis::{Axis, Dim, Window};
 use crate::body::{Body, Subroutine};
 use crate::dtype::DType;
 use crate::elementwise::ElementwiseOp;
-use crate::expr::{Expression, Lit, Num, Parser, TokenKind};
+use crate::expr::{Expression, Num, Parser, TokenKind};
 use crate::field::{FieldType, Float, NumOr, Value, Values};
 use crate::protocol::finished;
 use crate::statement::*;
@@ -85,8 +85,7 @@ fn block(mut rows: &[Row], subs: &mut HashMap<Name, Arc<Subroutine>>) -> Result<
                 subs.insert(sub.name, sub);
             } else {
                 let stmt = Line::new(text)?.statement(nested, orelse, subs)?;
-                stmt.check()?;
-                out.push(stmt);
+                out.push(Arc::new(finished(Arc::unwrap_or_clone(stmt))?));
             }
             Ok(())
         })();
@@ -342,25 +341,24 @@ impl Line {
         if self.parser.accept("<-") {
             let op = ElementwiseOp::new(&self.name()?);
             self.parser.require("(")?;
-            let operands = self.names(Some(")"))?;
-            let [base, value] = &operands[..] else {
-                return Err(self.parser.error("an accumulation has two operands"));
-            };
+            let base = self.name()?;
+            self.parser.require(",")?;
+            let value = self.parser.expression()?;
+            self.parser.require(")")?;
             let axes: Vec<Name> = if self.word("over") {
                 self.names(None)?
             } else {
                 vec![]
             };
-            let base = if *base == name { None } else { Some(*base) };
+            let base = if base == name { None } else { Some(base) };
             let accum = Accum {
                 name,
-                value: *value,
+                value,
                 op,
                 dtype,
                 axes: axes.into(),
                 base,
-            }
-            .normalized();
+            };
             return self.end(Arc::new(Statement::Accum(accum)));
         }
         let mut defined = vec![name];
@@ -385,7 +383,6 @@ impl Line {
                 dtype,
                 carried,
             };
-            load.validate()?;
             return self.end(Arc::new(Statement::Load(load)));
         }
         let [name] = &defined[..] else {
@@ -415,7 +412,6 @@ impl Line {
                 target: crate::field::SubroutineRef(target),
                 args: args.into(),
             };
-            call.validate()?;
             return self.end(Arc::new(Statement::Call(call)));
         }
         if self.parser.at_word("pre", 0) && !self.parser.at("(", 1) {
@@ -443,25 +439,10 @@ impl Line {
                 name,
                 branches: branches.into(),
             };
-            select.validate()?;
             return self.end(Arc::new(Statement::Select(select)));
         }
-        if let Some(token) = self.parser.peek(0)
-            && token.kind == TokenKind::Name
-            && self.parser.at("(", 1)
-        {
-            let op = ElementwiseOp::new(&token.text);
-            self.parser.index += 2;
-            let args = self.names(Some(")"))?;
-            return self.end(Arc::new(Statement::Assign(Assign {
-                name,
-                op,
-                args: args.into(),
-                dtype,
-            })));
-        }
-        let affine = self.affine(name, dtype)?;
-        self.end(Arc::new(Statement::Affine(affine)))
+        let value = self.parser.expression()?;
+        self.end(Arc::new(Statement::Assign(Assign { name, value, dtype })))
     }
 
     /// A statement type of another layer: its header's fields, then its blocks among the rows under it.
@@ -506,8 +487,7 @@ impl Line {
             }
             values.set("body", Value::Body(block(&body, subs)?))?;
         }
-        let stmt = ty.from_values(values)?;
-        Ok(Arc::new(finished(stmt)?))
+        Ok(Arc::new(ty.from_values(values)?))
     }
 
     /// The `(field=value, …)` of a declared statement type or record, each value read by its field's type.
@@ -690,42 +670,7 @@ impl Line {
             atomic,
             swizzle,
         };
-        write.validate()?;
         Ok(Statement::Write(write))
-    }
-
-    fn affine(&mut self, name: Name, dtype: Option<DType>) -> Result<Affine> {
-        let mut args: Vec<Name> = Vec::new();
-        let mut coefficients: Vec<Float> = Vec::new();
-        let mut offset = 0.0;
-        while !self.parser.done() {
-            let negative = self.parser.accept("-");
-            if !negative && (!args.is_empty() || offset != 0.0) && !self.parser.accept("+") {
-                return Err(self.parser.error("expected '+' or '-'"));
-            }
-            let sign = if negative { -1.0 } else { 1.0 };
-            match self.parser.number()? {
-                Some(literal) if !self.parser.accept("*") => {
-                    offset = sign * literal.value.as_f64();
-                    break;
-                }
-                literal => {
-                    args.push(self.name()?);
-                    coefficients.push(Float(
-                        sign * literal.map_or(1.0, |lit: Lit| lit.value.as_f64()),
-                    ));
-                }
-            }
-        }
-        let affine = Affine {
-            name,
-            args: args.into(),
-            coefficients: coefficients.into(),
-            offset: Float(offset),
-            dtype,
-        };
-        affine.validate()?;
-        Ok(affine)
     }
 
     fn loop_(&mut self, body: Body) -> Result<Arc<Statement>> {

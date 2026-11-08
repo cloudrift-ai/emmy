@@ -21,7 +21,6 @@ from emmy.compiler.wire import register as _register
 Statement = _ir.Statement
 Body = _ir.Body
 Accum = _ir.Accum
-Affine = _ir.Affine
 Assign = _ir.Assign
 Call = _ir.Call
 Carry = _ir.Carry
@@ -41,13 +40,13 @@ ZeroPrologue = _ir.ZeroPrologue
 parse_body = _ir.parse_body
 pretty_body = _ir.pretty_body
 normalize_body = _ir.normalize_body
-fold_affine = _ir.fold_affine
+fold_single_readers = _ir.fold_single_readers
+canonical_values = _ir.canonical_values
 simplify_body = _ir.simplify_body
 prepare_body = _ir.prepare_body
 free_names = _ir.free_names
 exposed_defines = _ir.exposed_defines
 rename_free = _ir.rename_free
-binary = _ir.binary
 mask_select_predicate = _ir.mask_select_predicate
 ordering_constraints = _ir.ordering_constraints
 dtype_promote = _ir.dtype_promote
@@ -65,7 +64,6 @@ from emmy.compiler.ir.stmt.glue import (  # noqa: E402 — the glue installs mem
 
 __all__ = [
     "Accum",
-    "Affine",
     "Assign",
     "Body",
     "Call",
@@ -85,13 +83,13 @@ __all__ = [
     "Subroutine",
     "Write",
     "ZeroPrologue",
-    "binary",
+    "canonical_values",
     "canonicalize_identity",
     "clear_memos",
     "dtype_promote",
     "exposed_defines",
     "fields_of",
-    "fold_affine",
+    "fold_single_readers",
     "free_names",
     "mask_select_predicate",
     "memo_stats",

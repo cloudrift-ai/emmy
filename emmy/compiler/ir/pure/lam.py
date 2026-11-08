@@ -12,7 +12,17 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from emmy.compiler.ir.elementwise import ElementwiseImpl
-from emmy.compiler.ir.stmt import Affine, Assign, Body, Load, Statement, exposed_defines, free_names, pretty_body
+from emmy.compiler.ir.expression import Var, apply
+from emmy.compiler.ir.stmt import (
+    Assign,
+    Body,
+    Load,
+    canonical_values,
+    exposed_defines,
+    fold_single_readers,
+    free_names,
+    pretty_body,
+)
 from emmy.compiler.wire import Wire
 
 
@@ -23,12 +33,12 @@ def _canonical_body_order(body: Body) -> Body:
         return body
 
     def token(stmt) -> tuple:
-        op = getattr(stmt, "op", None)
+        op = stmt.value.operation if isinstance(stmt, Assign) else None
         return (
             type(stmt).__name__,
-            getattr(op, "name", "") if op is not None else "",
+            op.name if op is not None else "",
             stmt.input if isinstance(stmt, Load) else "",
-            len(getattr(stmt, "args", ()) or ()),
+            len(stmt.value.operands) if isinstance(stmt, Assign) else 0,
         )
 
     definitions = [exposed_defines(stmt) for stmt in stmts]
@@ -48,20 +58,10 @@ def _canonical_body_order(body: Body) -> Body:
 
 def _normalize_body(body: Body) -> Body:
     """The construction canonicalization of a pure body — an idempotent transform, applied by
-    :meth:`Lambda.__post_init__`: a dependency-safe statement order and sorted commutative arguments (an
-    ``Affine``'s terms among them), the context-independent storage invariants a term's structural identity reads
-    directly."""
-    ordered = _canonical_body_order(body)
-
-    def sort(stmt: Statement) -> Statement:
-        if isinstance(stmt, Assign) and stmt.op.commutative and len(stmt.args) > 1:
-            return stmt.replace(args=tuple(sorted(stmt.args)))
-        if isinstance(stmt, Affine) and len(stmt.args) > 1:
-            terms = sorted(stmt.terms, key=lambda term: term[1])
-            return stmt.replace(args=tuple(arg for _, arg in terms), coefficients=tuple(c for c, _ in terms))
-        return stmt
-
-    return Body(sort(stmt) for stmt in ordered)
+    :meth:`Lambda.__post_init__`: a dependency-safe statement order and every value spelled in the normal form's
+    canonical form under the body's names (commutative operands and a sum's terms by rank), the context-independent
+    storage invariants a term's structural identity reads directly."""
+    return canonical_values(_canonical_body_order(body))
 
 
 @dataclass(frozen=True)
@@ -147,7 +147,7 @@ class Lambda(Wire):
         ``nᵢ = ⊕ᵢ(nᵢ, nᵢ__o)``: ``S × S → S`` with the second operand spelled ``<n>__o``, a plain
         fold's combine, the shape :meth:`components` reads back."""
         other = tuple(f"{name}__o" for name in names)
-        body = Body(tuple(Assign(name=name, op=op, args=(name, second)) for name, op, second in zip(names, ops, other, strict=True)))
+        body = Body(tuple(Assign(name, apply(op, name, second)) for name, op, second in zip(names, ops, other, strict=True)))
         return cls(params=(*names, *other), body=body, results=tuple(names))
 
     def components(self) -> tuple[ElementwiseImpl, ...] | None:
@@ -161,9 +161,11 @@ class Lambda(Wire):
         ops = []
         for index, result in enumerate(self.results):
             stmt, pair = definitions.get(result), (self.params[index], self.params[n + index])
-            if not isinstance(stmt, Assign) or (stmt.args != pair and not (stmt.op.commutative and stmt.args == pair[::-1])):
+            op = stmt.value.operation if isinstance(stmt, Assign) else None
+            operands = tuple(operand.name if isinstance(operand, Var) else None for operand in stmt.value.operands) if op else ()
+            if op is None or (operands != pair and not (op.commutative and operands == pair[::-1])):
                 return None
-            ops.append(stmt.op)
+            ops.append(op)
         return tuple(ops)
 
     @property
@@ -216,18 +218,20 @@ class Lambda(Wire):
         )
 
     def canonical(self) -> Lambda:
-        """The α-canonical form: params renumber to ``_p0…`` and internal defs to ``_v0…`` in
-        walk order; free names (and float results) pass through unchanged. Deterministic, so two
-        lambdas equal up to bound-name choice have EQUAL canonical forms — the α-invariant
-        equality/hash substrate (:meth:`alpha_eq`)."""
+        """The α-canonical form: every value read once folded into its reader (a result stays a statement, as a
+        reader outside the body reads it), then params renumbered to ``_p0…`` and internal defs to ``_v0…`` in walk
+        order; free names (and float results) pass through unchanged. Deterministic and blind to how a program was
+        spelled — as a chain of named temps or as one tree — so two lambdas computing one thing have EQUAL canonical
+        forms: the α-invariant equality/hash substrate (:meth:`alpha_eq`)."""
+        folded = Lambda(params=self.params, body=fold_single_readers(self.body, frozenset(self.results)), results=self.results)
         mapping = {p: f"_p{i}" for i, p in enumerate(self.params)}
         n = 0
-        for s in self.body.iter():
+        for s in folded.body.iter():
             for d in s.defines():
                 if d not in mapping:
                     mapping[d] = f"_v{n}"
                     n += 1
-        return self.rename(mapping)
+        return folded.rename(mapping)
 
     def alpha_eq(self, other: Lambda) -> bool:
         """α-invariant equality — canonical forms compared structurally."""

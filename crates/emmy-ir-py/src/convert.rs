@@ -120,11 +120,14 @@ pub fn num_from_py(value: &Bound<'_, PyAny>) -> PyResult<Num> {
     )))
 }
 
-/// The expression `value` holds; a bare number is a literal of its own type: an integer stays an integer (a strided
-/// loop's `step=4` spells `step 4`), a float is a float literal.
+/// The expression `value` holds; a bare name is that variable, and a bare number is a literal of its own type: an
+/// integer stays an integer (a strided loop's `step=4` spells `step 4`), a float is a float literal.
 pub fn expression_from_py(value: &Bound<'_, PyAny>) -> PyResult<Expression> {
     if let Ok(expression) = value.cast::<PyExpression>() {
         return Ok(expression.get().expr.clone());
+    }
+    if let Ok(text) = value.cast::<PyString>() {
+        return Ok(Expression::var(text.to_str()?));
     }
     if !value.is_instance_of::<PyBool>() && value.is_instance_of::<PyInt>() {
         return Ok(Expression::int(value.extract::<i64>()?));

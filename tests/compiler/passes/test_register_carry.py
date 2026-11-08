@@ -9,6 +9,7 @@ from emmy.compiler.context import Context
 from emmy.compiler.graph import Graph
 from emmy.compiler.ir.base import InputOp
 from emmy.compiler.ir.cuda import CudaOp
+from emmy.compiler.ir.expression import apply
 from emmy.compiler.ir.kernel.ir import FragmentPromote, FragmentRepack, LdmatrixLoad, MmaSyncPtx, RegFragment
 from emmy.compiler.ir.render import render_stmt
 from emmy.compiler.ir.schedule import Stage
@@ -86,7 +87,9 @@ def test_register_step_keeps_a_time_coordinate_read_by_its_lift():
                 (
                     *parse_body(f"phase = load D[{carrying.axis}]"),
                     *[
-                        replace(stmt, args=(stmt.args[0], "phase")) if isinstance(stmt, Assign) and stmt.name == lift.results[0] else stmt
+                        stmt.replace(value=apply(stmt.value.operation, stmt.value.operands[0], "phase"))
+                        if isinstance(stmt, Assign) and stmt.name == lift.results[0]
+                        else stmt
                         for stmt in lift.body
                     ],
                 )

@@ -525,7 +525,7 @@ def test_a_moved_seam_over_a_re_keyed_piece_is_re_spelled_by_what_its_pieces_rea
 
     document, route = _routed(_sdpa_document(), {"PLACE@map.1/twist.1/inner": "cut"})
     reader = document.kernel(route.children[-1])
-    stale = replace(reader, loop_ir=json.loads(json.dumps(reader.loop_ir).replace("0.25*in0", "0.5*in0")))
+    stale = replace(reader, loop_ir=json.loads(json.dumps(reader.loop_ir).replace("0.25 * in0", "0.5 * in0")))
     assert stale.exact_identity != reader.exact_identity
     moved = replace(
         document,
@@ -616,7 +616,7 @@ def test_a_seam_the_re_keyed_parent_still_offers_but_that_cuts_other_pieces_is_r
     [target] = document.targets()
     assert other in _seams_offered(target) and _pieces_minted(target, {other: "cut"}) != _pieces_minted(target, {recorded: "cut"})
     stale = {
-        ref: replace(document.kernel(ref), loop_ir=json.loads(json.dumps(document.kernel(ref).loop_ir).replace("multiply(", "maximum(")))
+        ref: replace(document.kernel(ref), loop_ir=json.loads(json.dumps(document.kernel(ref).loop_ir).replace(" * ", " + ")))
         for ref in route.children
     }
     assert all(stale[ref].exact_identity != document.kernel(ref).exact_identity for ref in stale)
@@ -1553,7 +1553,7 @@ def test_a_conversion_to_the_dtype_a_workspace_stores_reads_the_workspace_itself
     from emmy.compiler.dtype import F32
     from emmy.compiler.pipeline.passes.tile._cut import _without_identity_casts
 
-    rounded = projection((slab("x", "ws", "m"),), "f16 y = copy(x)", ("y",))
+    rounded = projection((slab("x", "ws", "m"),), "f16 y = x", ("y",))
     root = projection((rounded,), "z = exp(y)", ("z",))
 
     kept = _without_identity_casts(root, {"ws": F16}).operands[0]

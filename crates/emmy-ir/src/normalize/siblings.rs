@@ -420,7 +420,7 @@ mod tests {
             .stmts()
             .iter()
             .filter_map(|stmt| match &**stmt {
-                Statement::Accum(a) => Some((&*a.name, &*a.value)),
+                Statement::Accum(a) => Some((&*a.name, a.value.as_var().map_or("", |n| &**n))),
                 _ => None,
             })
             .collect();

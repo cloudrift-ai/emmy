@@ -6,11 +6,18 @@ from types import SimpleNamespace
 import pytest
 
 from emmy.compiler.dtype import BF16, F16, F32, F64, I32
+from emmy.compiler.ir.expression import Var
 from emmy.compiler.ir.kernel import KernelOp
 from emmy.compiler.ir.stmt import Assign, normalize_body, parse_body
 from emmy.compiler.pipeline import RuleSkipped
 
 rule = import_module("emmy.compiler.pipeline.passes.lowering.kernel.040_split_invariant_divides")
+
+
+def _names(stmt) -> tuple[str, ...]:
+    """The names an ``Assign``'s value reads as direct operands (a bare-name value is its one operand)."""
+    operands = (stmt.value,) if isinstance(stmt.value, Var) else stmt.value.operands
+    return tuple(operand.name for operand in operands)
 
 
 def _body(dtype=F32, *, varying=False, divide="divide"):
@@ -39,13 +46,13 @@ def test_reciprocal_hoisting_follows_fast_math(monkeypatch, dtype, enabled):
     else:
         result = rule.rewrite(root)
         reciprocal = next(s for s in result.body if isinstance(s, Assign))
-        assert reciprocal.op.name == "reciprocal" and reciprocal.dtype == dtype
+        assert reciprocal.value.operation.name == "reciprocal" and reciprocal.dtype == dtype
         assert reciprocal.name != "recip_0"
-        multiply = next(s for s in result.body.iter() if isinstance(s, Assign) and s.op.name == "multiply")
-        assert multiply.args == ("recip_0", reciprocal.name) and multiply.dtype == dtype
+        multiply = next(s for s in result.body.iter() if isinstance(s, Assign) and s.value.operation.name == "multiply")
+        assert _names(multiply) == ("recip_0", reciprocal.name) and multiply.dtype == dtype
         with pytest.raises(RuleSkipped, match="no invariant"):
             rule.rewrite(SimpleNamespace(op=result))
-    assert [s.op.name for s in normalize_body(body).iter() if isinstance(s, Assign)] == ["divide"]
+    assert [s.value.operation.name for s in normalize_body(body).iter() if isinstance(s, Assign)] == ["divide"]
 
 
 @pytest.mark.parametrize(("dtype", "varying"), [(I32, False), (F32, True)])

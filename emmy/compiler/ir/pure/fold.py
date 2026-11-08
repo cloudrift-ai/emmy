@@ -36,11 +36,11 @@ from functools import cached_property
 
 from emmy.compiler.ir.axis import Axis
 from emmy.compiler.ir.elementwise import ElementwiseImpl
-from emmy.compiler.ir.expression import Literal, Var
+from emmy.compiler.ir.expression import Expression, Literal, Var, apply
 from emmy.compiler.ir.pure.lam import Lambda
 from emmy.compiler.ir.pure.twist import Recipe, Twist
 from emmy.compiler.ir.sigma import Sigma
-from emmy.compiler.ir.stmt import Accum, Affine, Assign, Body, Carry, Let, Load, Loop, OutputSpec, Pre, Select, Statement, free_names
+from emmy.compiler.ir.stmt import Accum, Assign, Body, Carry, Let, Load, Loop, OutputSpec, Pre, Select, Statement, free_names
 from emmy.utils import cached_method
 
 #: The symbolic extents of the program being compiled. The launch binds them, so a term reads one free — like a
@@ -341,9 +341,9 @@ class Fold:
         # product both arguments are shared, so the layout rule decides: A reads ``[…, k]``, its
         # reduction axis last, which lets a fragment load stride its rows contiguously. Binding is
         # positional, so the lift's params move with the operands; the body reads by name.
-        if len(self.operands) >= 2 and lam.body and all(isinstance(stmt, Assign) and len(stmt.args) == 2 for stmt in lam.body):
+        if len(self.operands) >= 2 and lam.body and all(isinstance(stmt, Assign) and len(stmt.value.operands) == 2 for stmt in lam.body):
             by_name = {param: edge for param, edge, _ in self.bindings}
-            arguments = [product.args for product in lam.body]
+            arguments = [_operand_names(product.value) for product in lam.body]
             if len(arguments) > 1:
                 shared = [by_name[name] for name in arguments[0] if name in by_name and all(name in args for args in arguments[1:])]
                 a_edge = shared[0] if len(shared) == 1 else None
@@ -658,7 +658,7 @@ class Fold:
             return None
         channel, b_edge = channels[0]
         based = self.based()
-        product = _channel_product(based, based.results[channel])[1].op
+        product = _channel_product(based, based.results[channel])[1].value.operation
         plus = self.base.components()[channel]
         a_edge = self.operands[0]
         a_space, b_space = a_edge.free_axes, b_edge.free_axes
@@ -745,7 +745,7 @@ class Fold:
         # and what comes before it is the weight the mma's A operand carries.
         channel = recipe.channels[twist.channels[self.bilinear_channels()[0][0] - 1]]
         product = channel.pattern.body[-1] if channel.pattern.body else None
-        return isinstance(product, Assign) and len(product.args) == 2 and product.name == channel.pattern.results[0]
+        return isinstance(product, Assign) and len(product.value.operands) == 2 and product.name == channel.pattern.results[0]
 
     @cached_method
     def bilinear_channels(self) -> tuple[tuple[int, Fold], ...]:
@@ -795,18 +795,23 @@ class Fold:
         out: list[tuple[int, Fold, str]] = []
         for index, result in enumerate(based.results):
             cone, product = _channel_product(based, result)
-            if product is None or len(product.args) != 2:
+            if product is None or len(product.value.operands) != 2:
                 continue  # a state the carrier passes through, or one whose cone ends in no product
             plus = pluses[index]
             if not (plus.associative and plus.commutative and plus.has_identity):
                 continue
             if self.twist is None and self.init[index] != plus.identity:
                 continue  # a planar fold seeds the ⊕ itself; a recipe's base is a monoid by construction
-            if not product.op.distributes_over(plus):
+            if not product.value.operation.distributes_over(plus):
                 continue
-            left = [arg for arg in product.args if _over_a(arg, cone, a_names, uniform | a_edge.free_axes)]
-            right = [arg for arg in product.args if (edge := by_name.get(arg)) is not None and edge is not a_edge and edge.free_axes]
-            if len(left) != 1 or len(right) != 1 or left[0] == right[0]:
+            operands = product.value.operands
+            left = [arg for arg in operands if _over_a(arg, cone, a_names, uniform | a_edge.free_axes)]
+            right = [
+                arg.name
+                for arg in operands
+                if isinstance(arg, Var) and (edge := by_name.get(arg.name)) is not None and edge is not a_edge and edge.free_axes
+            ]
+            if len(left) != 1 or len(right) != 1 or left[0] == Var(right[0]):
                 continue  # a square, or a product that does not multiply A by exactly one other edge
             out.append((index, by_name[right[0]], right[0]))
         return tuple(out)
@@ -1000,25 +1005,44 @@ class Fold:
         applied = list(self.combine.rename(named).body)
         definitions = {stmt.name: stmt for stmt in applied if stmt.name not in view.states}  # temps; a state's rewrite is not a def
 
-        def reads(name: str, state: str) -> bool:
-            stmt = definitions.get(name)
-            return name == state or (stmt is not None and any(reads(arg, state) for arg in stmt.args))
+        def reads(expression: Expression, state: str) -> bool:
+            """Whether the expression reads the state, through the temps it names."""
+            for name in expression.free_vars():
+                stmt = definitions.get(name)
+                if name == state or (stmt is not None and reads(stmt.value, state)):
+                    return True
+            return False
+
+        def summands(expression: Expression) -> list[Expression]:
+            """The terms a sum adds, through its additions: the affine form flattens ``(q + q__o) + corr``."""
+            op = expression.operation
+            if op is not None and op.name == "add":
+                return [term for operand in expression.operands for term in summands(operand)]
+            return [expression]
 
         out: list[Statement] = []
         for stmt in applied:
             if stmt.name not in view.states:
                 out.append(stmt)
                 continue
-            state, args = stmt.name, stmt.args
-            if stmt.op.name == "copy" and (pivot := definitions.get(args[0])) is not None and state in pivot.args:
+            state, value = stmt.name, stmt.value
+            if isinstance(value, Var) and (pivot := definitions.get(value.name)) is not None and Var(state) in pivot.value.operands:
                 # The pivot's final write copies its own ``maximum`` temp: accumulate that maximum.
-                stmt, args = pivot, pivot.args
-            if state in args:
-                value = next(arg for arg in args if arg != state) if args != (state, state) else state
-                out.append(Accum(name=state, value=value, op=stmt.op))
-            else:
-                base, value = args if reads(args[0], state) else (args[1], args[0])
-                out.append(Accum(name=state, value=value, op=stmt.op, base=base))
+                value = pivot.value
+            op, operands = value.operation, value.operands
+            terms = summands(value) if op is not None and op.name == "add" else list(operands)
+            if Var(state) in terms:
+                # ``state ⊕ rest``: the rest accumulates into the state.
+                terms.remove(Var(state))
+                rest = Var(state) if not terms else terms[0] if len(terms) == 1 else apply(op, *terms)
+                out.append(Accum(name=state, value=rest, op=op))
+                continue
+            base, value = operands if reads(operands[0], state) else (operands[1], operands[0])
+            if not isinstance(base, Var):
+                # A rescaled old state (``l · α``) is the ``Accum``'s base, which names a value: bind it.
+                out.append(Assign(f"{other[0]}__{state}_base", base))
+                base = Var(f"{other[0]}__{state}_base")
+            out.append(Accum(name=state, value=value, op=op, base=base.name))
         return Body(tuple(out))
 
     @cached_method
@@ -1199,10 +1223,10 @@ class Fold:
                 # Statement by statement, so a channel BINDS what the body already computes rather
                 # than spelling it again: softmax's denominator and its expectation share the whole
                 # weight prefix, and instantiating each cone whole put two ``exp(s)`` in one lift.
-                have = {(stmt.op, stmt.args): stmt.name for stmt in body if isinstance(stmt, Assign)}
+                have = {stmt.value: stmt.name for stmt in body if isinstance(stmt, Assign)}
                 for stmt in injection.body:
                     spelled = stmt.rewrite(lambda read, names=names: names.get(read, read))
-                    if isinstance(spelled, Assign) and (prior := have.get((spelled.op, spelled.args))) is not None:
+                    if isinstance(spelled, Assign) and (prior := have.get(spelled.value)) is not None:
                         names[stmt.name] = prior
                         continue
                     fresh = stmt.name if stmt.name not in taken else f"{name}__{stmt.name}"
@@ -1211,7 +1235,7 @@ class Fold:
                     body.append(spelled)
                     taken.add(fresh)
                     if isinstance(spelled, Assign):
-                        have[(spelled.op, spelled.args)] = fresh
+                        have[spelled.value] = fresh
                 if name in pview.states:
                     slot = pview.states.index(name)
                     bound_roles = {**roles, recipe.lift.params[0]: x}
@@ -1724,6 +1748,17 @@ def _affine_classes(
     def of(value: str) -> tuple[str, bool]:
         return env.get(value, ("free", value == name))  # a coordinate, a literal name: free of the state
 
+    def classify(expression: Expression) -> tuple[str, bool]:
+        """A value's class, node by node: a name's, a literal's (free), an operation's by its operands'."""
+        if isinstance(expression, Var):
+            return of(expression.name)
+        if isinstance(expression, Literal):
+            return "free", False
+        op = expression.operation
+        if op is None:
+            return "non", False
+        return combine(op.name, tuple(classify(operand) for operand in expression.operands))
+
     def combine(op: str, args: tuple[tuple[str, bool], ...]) -> tuple[str, bool]:
         kinds = tuple(kind for kind, _ in args)
         if all(kind == "free" for kind in kinds):
@@ -1742,9 +1777,7 @@ def _affine_classes(
         if isinstance(stmt, Fold):
             env.update(_affine_classes(stmt, state, reads, memo, kept))
         elif isinstance(stmt, Assign):
-            env[stmt.name] = combine(stmt.op.name, tuple(of(arg) for arg in stmt.args))
-        elif isinstance(stmt, Affine):
-            env[stmt.name] = combine("add", tuple(of(arg) for arg in stmt.args))
+            env[stmt.name] = classify(stmt.value)
         elif isinstance(stmt, Load):
             coordinates = tuple(of(var) for expression in stmt.index for var in expression.free_vars())
             env[stmt.name] = ("non", False) if any(kind != "free" for kind, _ in coordinates) else ("free", any(v for _, v in coordinates))
@@ -1773,6 +1806,11 @@ def _affine_classes(
     return out
 
 
+def _operand_names(value: Expression) -> tuple[str, ...]:
+    """The names a product's operands read directly: every operand that is a name."""
+    return tuple(operand.name for operand in value.operands if isinstance(operand, Var))
+
+
 def _channel_product(lift: Lambda, result: str) -> tuple[Lambda, Assign | None]:
     """One carried state's cone and the ``Assign`` that ENDS it — the product a bilinear channel
     contributes, or ``None`` when the state is a pass-through or its cone ends in something else.
@@ -1785,8 +1823,8 @@ def _channel_product(lift: Lambda, result: str) -> tuple[Lambda, Assign | None]:
     return cone, stmt if isinstance(stmt, Assign) else None
 
 
-def _over_a(name: str, cone: Lambda, a_names: set[str], available: set[str]) -> bool:
-    """Whether ``name`` is the A factor of ``cone``'s product — a component ``operands[0]`` binds,
+def _over_a(operand: Expression, cone: Lambda, a_names: set[str], available: set[str]) -> bool:
+    """Whether ``operand`` is the A factor of ``cone``'s product — a component ``operands[0]`` binds,
     or a value the cone computes from those components, A's coordinates and uniform values.
 
     The second reading is what lets a carrier read bilinear before its weight is reified. It walks
@@ -1796,9 +1834,7 @@ def _over_a(name: str, cone: Lambda, a_names: set[str], available: set[str]) -> 
     ``available`` includes A's free coordinates and components of coordinate-free operands. A mask
     over A's coordinates or a uniform scale adds no dependence outside A; a coordinate exclusive
     to B does, and must refuse the contraction."""
-    if name in a_names:
-        return True
-    reads = set(cone.cone(name).params)
+    reads = set().union(*(cone.cone(name).params for name in operand.free_vars()))
     return bool(reads & a_names) and reads <= a_names | available
 
 

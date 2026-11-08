@@ -7,9 +7,8 @@ afterwards.
 ## `010_materialize` — bind the schedule to threads (and expand the contraction)
 
 `010_materialize` is a thin wrapper: after the split-survivor assert it makes **one** call to `_factor.factorize(tile,
-root)`, the entry to the recursive emitter, spells every `Affine` statement of the finished body as its binary
-`Assign`s over `Let`-bound literals — Kernel IR evaluates one operation at a time, so no kernel pass meets a sum —
-then passes it through `_drop_repeated_declarations` — the emitted body's one legality guard. Operand cones splice
+root)`, the entry to the recursive emitter, then passes the finished body through `_drop_repeated_declarations` —
+the emitted body's one legality guard. Operand cones splice
 INDEPENDENTLY (`Fold.spliced_step`), so two sibling cones reading one shared broadcast constant each carry their own
 copy of its `buf[0]` `Load`, under the same SSA name and at the same address; flattened into one loop body that is two
 C declarations of one name, which nvcc rejects (*already declared in the current scope*). The repeat binds nothing

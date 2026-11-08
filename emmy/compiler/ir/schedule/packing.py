@@ -26,6 +26,7 @@ from dataclasses import dataclass, replace
 
 from frozendict import frozendict
 
+from emmy.compiler.ir.expression import Expression, Var
 from emmy.compiler.ir.stmt import Assign, Body, Load
 
 
@@ -40,15 +41,19 @@ class PackedKBlockB:
 
     ``bits`` is the 1-byte storage Load, ``table`` the statement that decodes it — for a
     packed-pair dtype (``logical_elems == 2``) the data-dependent pair-value gather it feeds, for
-    an fp8 byte (one element each) the dtype's own decode cast — ``factor`` the SSA name of the
-    scale factor, and ``block`` the k extent the factor is constant on. The packed byte-slab offer
+    an fp8 byte (one element each) the statement holding the dtype's decode cast — ``factor`` the
+    scale factor the product multiplies, and ``block`` the k extent the factor is constant on. The packed byte-slab offer
     consumes this: the bits stage raw, and the drain decodes them and multiplies the factor into
     the decoded values at the fragment load (one factor read per k block).
     """
 
     bits: Load | None
     table: Load | Assign
-    factor: str
+    #: The factor operand as the root product multiplies it: a name, or the value the normal form folded into the
+    #: product; :meth:`factor_program` names it either way.
+    factor: Expression
+    #: The root product's name, which names a folded factor's binding.
+    root: str
     block: int
     #: Logical k elements per stored byte — two for a packed pair, one for an fp8 byte. The slab's
     #: byte columns and the drain's k-to-column step both divide by it.
@@ -69,6 +74,15 @@ class PackedKBlockB:
     def channels(self) -> tuple:
         """Every channel's reading in channel order, this one first."""
         return (self, *self.siblings)
+
+    def factor_program(self, cone) -> tuple[list, str]:
+        """The statements of ``cone`` the factor reads, and the name the factor goes by: its own when it is a name,
+        else the binding of the folded value, named after the root product."""
+        stmts = list(Body(tuple(cone)).backward_cone(sorted(self.factor.free_vars())).members)
+        if isinstance(self.factor, Var):
+            return stmts, self.factor.name
+        name = f"{self.root}__factor"
+        return [*stmts, Assign(name, self.factor)], name
 
     def scale_cols(self, bk_elems: int) -> int:
         """The scale slab's columns per chunk: one per block the chunk spans, and a single one when
@@ -113,6 +127,9 @@ def k_block_guard(expression, k_name: str) -> tuple[bool, set[int]]:
                 if free is not None and all(multiple_of(f, b) for f in free):
                     return rn, lg | rg | {b}
             return ln or rn, lg | rg
+        if e.operation is not None:  # a call: k is guarded inside it exactly where its operands prove it
+            walked = [walk(operand) for operand in e.operands]
+            return any(naked for naked, _ in walked), set().union(*(guards for _, guards in walked))
         return True, set()  # an unmodeled expression containing anything: treat as naked — decline upstream
 
     def _k_free_addends(e, k):
@@ -151,8 +168,13 @@ def match_packed_kblock_b(cone: list, k_name: str, inputs, *, codes_may_compute:
     if not cone or inputs is None:
         return None
     root = cone[-1]
-    if not isinstance(root, Assign) or root.op.name != "multiply" or len(root.args) != 2:
+    op = root.value.operation if isinstance(root, Assign) else None
+    if op is None or op.name != "multiply" or len(root.value.operands) != 2:
         return None
+    operands = root.value.operands
+    defs = {name: st for st in cone for name in st.defines()}
+    body = Body(tuple(cone))
+    sides = {operand: list(body.backward_cone(sorted(operand.free_vars())).members) for operand in operands}
     loads = [st for st in cone if isinstance(st, Load)]
     packed = [ld for ld in loads if getattr(inputs.get(ld.input), "dtype", None) is not None and inputs[ld.input].dtype.logical_elems == 2]
     computed = (
@@ -168,32 +190,38 @@ def match_packed_kblock_b(cone: list, k_name: str, inputs, *, codes_may_compute:
         if len(gathers) != 1:
             return None
         table, per_byte = gathers[0], 2
+        # One multiply operand's cone holds the gather; the other is the factor.
+        decoding = [o for o, sub in sides.items() if any(st is table for st in sub) or o.free_vars() & set(table.defines())]
     else:
-        # The fp8 byte: its decode cast is itself one of the root's two factors, so the
-        # other one is the scale — a decode feeding anything else (a decoded scale byte) is not it.
+        # The fp8 byte: its decode cast is itself one of the root's two factors — folded into the product, or a
+        # statement the product names — so the other one is the scale; a decode feeding anything else (a decoded
+        # scale byte) is not it.
         stored = {ld.names[0]: ld for ld in loads if len(ld.names) == 1 and inputs.get(ld.input) is not None}
-        decodes = [
-            st
-            for st in cone
-            if isinstance(st, Assign)
-            and st.name in root.args
-            and len(st.args) == 1
-            and st.args[0] in stored
-            and st.op.decodes == inputs[stored[st.args[0]].input].dtype.name
-        ]
-        if len(decodes) != 1 or inputs[stored[decodes[0].args[0]].input].dtype.nbytes != 1:
+
+        def decode(operand) -> Load | None:
+            """The stored byte ``operand`` is the dtype's decode of, else ``None``."""
+            node = defs[operand.name].value if isinstance(operand, Var) and isinstance(defs.get(operand.name), Assign) else operand
+            cast = node.operation
+            if cast is None or cast.decodes is None or len(node.operands) != 1:
+                return None
+            (byte,) = node.operands
+            if not isinstance(byte, Var) or byte.name not in stored or cast.decodes != inputs[stored[byte.name].input].dtype.name:
+                return None
+            return stored[byte.name]
+
+        decoded = {operand: byte for operand in operands if (byte := decode(operand)) is not None}
+        if len(decoded) != 1:
             return None
-        table, bits, codes, per_byte = decodes[0], stored[decodes[0].args[0]], None, 1
-    # One multiply arg's cone holds the decode; the other is the factor. The backward cone is the
-    # tree-native reading — it replaced the old forward ``map_cone`` walk, and answers the same
-    # question here: which stmts does this argument depend on.
-    sides = {arg: list(Body(tuple(cone)).backward_cone([arg]).members) for arg in root.args}
-    gather_args = [a for a, sub in sides.items() if any(st is table for st in sub) or a in table.defines()]
-    if len(gather_args) != 1:
+        ((gathered, bits),) = decoded.items()
+        if inputs[bits.input].dtype.nbytes != 1:
+            return None
+        table = defs[gathered.name] if isinstance(gathered, Var) else root
+        codes, per_byte, decoding = None, 1, [gathered]
+    if len(decoding) != 1:
         return None
-    factors = [a for a in root.args if a != gather_args[0]]
+    factors = [o for o in operands if o != decoding[0]]
     if len(factors) != 1:
-        return None  # multiply(x, x): the gathered value on both args leaves no factor
+        return None  # multiply(x, x): the gathered value on both operands leaves no factor
     factor = factors[0]
     blocks: set[int] = set()
     for st in sides[factor]:
@@ -205,7 +233,7 @@ def match_packed_kblock_b(cone: list, k_name: str, inputs, *, codes_may_compute:
             blocks |= guards
     if len(blocks) != 1:
         return None
-    return PackedKBlockB(bits=bits, table=table, factor=factor, block=next(iter(blocks)), per_byte=per_byte, codes=codes)
+    return PackedKBlockB(bits=bits, table=table, factor=factor, root=root.name, block=next(iter(blocks)), per_byte=per_byte, codes=codes)
 
 
 @dataclass(frozen=True)
@@ -262,7 +290,7 @@ def _split_block_scale(read: PackedKBlockB, cone: list, k_name: str, inputs) -> 
     Anything else declines, and the operand keeps the decode-based readings.
     """
     codes_cone = () if read.codes is None else tuple(Body(tuple(cone)).backward_cone([read.codes]).members)
-    factor_cone = list(Body(tuple(cone)).backward_cone([read.factor]).members)
+    factor_cone, _ = read.factor_program(cone)
     loads = [st for st in factor_cone if isinstance(st, Load)]
     scales = [ld for ld in loads if k_name in _idx_vars(ld.index)]
     if len(scales) != 1:

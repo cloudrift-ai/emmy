@@ -14,9 +14,10 @@ from dataclasses import replace
 
 from emmy.compiler.graph import Node
 from emmy.compiler.ir.elementwise import ElementwiseImpl
+from emmy.compiler.ir.expression import apply
 from emmy.compiler.ir.kernel import KernelOp
 from emmy.compiler.ir.kernel.ir import RegStore
-from emmy.compiler.ir.stmt import Statement
+from emmy.compiler.ir.stmt import Assign, Statement
 from emmy.compiler.pipeline import Pattern, RuleSkipped
 from emmy.compiler.pipeline.search.space import FAST_EXP, precision_pin
 
@@ -38,5 +39,13 @@ def _lower_exp(stmt: Statement) -> Statement:
     if isinstance(stmt, RegStore) and stmt.epilogue is not None:
         # The store's lambda has its own SSA scope; it is not a nested statement body.
         stmt = stmt.replace(epilogue=stmt.epilogue.map(_lower_exp))
+    if isinstance(stmt, Assign):
+        value = stmt.value.rebuild(lambda node: apply(_FAST, *node.operands) if _is_exp(node) else node)
+        return stmt if value == stmt.value else stmt.replace(value=value)
     op = getattr(stmt, "op", None)
     return stmt.replace(op=_FAST) if isinstance(op, ElementwiseImpl) and op.name == "exp" else stmt
+
+
+def _is_exp(node) -> bool:
+    op = node.operation
+    return op is not None and op.name == "exp"

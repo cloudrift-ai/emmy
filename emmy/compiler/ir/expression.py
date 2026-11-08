@@ -36,6 +36,7 @@ Interval = _ir.Interval
 SimplifyCtx = _ir.SimplifyCtx
 
 parse = _ir.parse
+apply = _ir.apply
 spell_name = _ir.spell_name
 affine_form = _ir.affine_form
 split_anchor = _ir.split_anchor
@@ -49,6 +50,24 @@ for _cls in (Expression, Var, Literal, Builtin, BinaryExpression, FunctionCallEx
     _register(_cls)
 
 
+def promoted_dtype(expression: Expression, dtype_of: Callable[[str], str | None]) -> str:
+    """The dtype a value expression computes at: a name's dtype by ``dtype_of`` (f32 when it has none), f32 for a
+    float literal, i32 for an integer one, and for an operation node the table's promotion of its operands' dtypes,
+    the rule one-operation definitions always rendered by. A select promotes its branches; a cast to ``int`` is i32."""
+    if isinstance(expression, Var):
+        return dtype_of(expression.name) or "f32"
+    if isinstance(expression, Literal):
+        return "f32" if expression.dtype == "float" else "i32"
+    op = expression.operation
+    if op is not None:
+        return _ir.dtype_promote(op.name, [promoted_dtype(operand, dtype_of) for operand in expression.operands])
+    if isinstance(expression, TernaryExpression):
+        return _ir.dtype_promote("add", [promoted_dtype(expression.if_true, dtype_of), promoted_dtype(expression.if_false, dtype_of)])
+    if isinstance(expression, CastExpression):
+        return "i32" if expression.dtype == "int" else "f32"
+    return "i32"
+
+
 def apply_binop(op: str, lv: object, rv: object) -> object:
     """Apply a binary operator to two already-evaluated values, scalars or numpy arrays; integer floor division is
     used for both ``/`` and ``//``, and ``&&`` / ``||`` fall back to the elementwise logical ops on arrays."""
@@ -58,7 +77,12 @@ def apply_binop(op: str, lv: object, rv: object) -> object:
         return lv - rv
     if op == "*":
         return lv * rv
-    if op in ("/", "//"):
+    if op == "/":
+        # Integer operands (scalars or arrays) floor, as the index quotient does; anything else is the true quotient.
+        if all(np.issubdtype(np.asarray(v).dtype, np.integer) for v in (lv, rv)):
+            return lv // rv
+        return lv / rv
+    if op == "//":
         try:
             return int(lv) // int(rv)
         except TypeError:

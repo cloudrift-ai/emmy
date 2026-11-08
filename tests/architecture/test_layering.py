@@ -31,6 +31,10 @@ _POST_DECOMPOSITION_ROOTS = (
 )
 
 
+# The normalization entry point and the steps a pass may run on its own.
+_STEPS = ("normalize_body", "fold_single_readers", "canonical_values", "simplify_body", "prepare_body")
+
+
 def test_checkpoint_format_names_stop_at_frontend_decomposition() -> None:
     """Checkpoint-format implementation details may not enter downstream dialects or passes."""
     forbidden = re.compile(r"\b(?:trellis|exl3)\b", re.IGNORECASE)
@@ -124,11 +128,11 @@ def test_ir_does_not_import_pipeline() -> None:
 def test_normalization_has_one_entry_point() -> None:
     """Body normalization is the canonical form every Loop IR body and every identity digest takes; it answers to no
     knob, pin or evidence. It lives in the ``emmy-ir`` crate behind one entry point, ``normalize_body``; the package
-    exports beside it only the three steps a pass may run on its own, and holds no transform of its own."""
+    exports beside it only the four steps a pass may run on its own, and holds no transform of its own."""
     import emmy.compiler.ir.stmt as stmt
 
-    steps = {name for name in stmt.__all__ if name in ("normalize_body", "fold_affine", "simplify_body", "prepare_body")}
-    assert steps == {"normalize_body", "fold_affine", "simplify_body", "prepare_body"}
+    steps = {name for name in stmt.__all__ if name in _STEPS}
+    assert steps == set(_STEPS)
     package = _REPO_ROOT / "emmy" / "compiler" / "ir" / "stmt"
     modules = sorted(path.name for path in package.glob("*.py"))
     assert modules == ["__init__.py", "glue.py"], "the statement package is its exports and the glue"
@@ -173,14 +177,14 @@ def test_the_statement_module_exports_a_pinned_list() -> None:
     """The statement module's interface is this list. A name added here is a decision, not a convenience."""
     import emmy.compiler.ir.stmt as stmt
 
-    statement_types = ["Statement", "Load", "Assign", "Affine", "Accum", "Carry", "Pre", "Init", "Let", "Write", "Select", "SelectBranch"]
+    statement_types = ["Statement", "Load", "Assign", "Accum", "Carry", "Pre", "Init", "Let", "Write", "Select", "SelectBranch"]
     statement_types += ["ZeroPrologue", "Loop", "StridedLoop", "Cond"]
     containers = ["Body", "Identity", "OutputSpec"]
-    functions = ["normalize_body", "canonicalize_identity", "free_names", "exposed_defines", "rename_free", "binary"]
+    functions = ["canonicalize_identity", "free_names", "exposed_defines", "rename_free"]
     functions += ["clear_memos", "memo_stats"]
     functions += ["mask_select_predicate", "pretty_body", "parse_body", "ordering_constraints", "dtype_promote"]
     # Normalization steps a pass calls on its own, and the two statement types fusion assembles a region with.
-    steps = ["fold_affine", "simplify_body", "prepare_body"]
+    steps = list(_STEPS)
     assembly = ["Call", "Subroutine"]
     # The names of a statement type's fields, for the one pass that generalizes whole statements.
     declaring = ["fields_of"]

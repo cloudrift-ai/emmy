@@ -148,7 +148,7 @@ def test_cone_reads_a_param_as_what_came_in_not_as_the_bodys_write_back() -> Non
     beta = combine.cone("m__o__beta")
     assert beta.params == ("m", "m__o")
     assert [stmt.name for stmt in beta.body] == ["m__o__gn", "m__o__dg_o", "m__o__beta"]
-    assert all(stmt.op.name != "copy" for stmt in beta.body)
+    assert all(not isinstance(stmt.value, Var) for stmt in beta.body)
     # The channel's rescale reads its OWN state the same way — as the param, never as its result.
     assert "l" in combine.cone("m__o__l_sa").params
 
@@ -159,14 +159,14 @@ def test_rename_maps_params_body_and_results_in_lockstep() -> None:
         body=parse_body(
             """
             t = maximum(m, m__o)
-            m = copy(t)
+            m = t
             """
         ),
         results=("m",),
     )
     renamed = fn.rename({"m": "acc", "m__o": "acc__o", "t": "acc__t"})
     assert renamed.params == ("acc", "acc__o") and renamed.results == ("acc",)
-    assert [(stmt.name, stmt.args) for stmt in renamed.body] == [("acc__t", ("acc", "acc__o")), ("acc", ("acc__t",))]
+    assert [(stmt.name, str(stmt.value)) for stmt in renamed.body] == [("acc__t", "maximum(acc, acc__o)"), ("acc", "acc__t")]
     assert fn.rename(lambda name: name) == fn
     assert fn.alpha_eq(renamed)
 

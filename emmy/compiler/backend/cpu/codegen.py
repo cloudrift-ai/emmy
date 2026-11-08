@@ -93,7 +93,9 @@ def _cost(stmts) -> int:
             total += (extent.value if isinstance(extent.value, int) else (extent.hint or 512)) * _cost(s.body)
         elif _kind(s) == "Cond":
             total += _cost(s.body) + _cost(s.else_body or ())
-        elif _kind(s) == "Assign" and s.op.name in EXPENSIVE_OPS:
+        elif _kind(s) == "Assign" and any(
+            node.operation is not None and node.operation.name in EXPENSIVE_OPS for node in s.value.subterms()
+        ):
             total += 8
         else:
             total += 1
@@ -112,7 +114,7 @@ def _loop_sizes(stmts) -> set[str]:
 
 def _check_leaves(stmts) -> None:
     for s in stmts:
-        if _kind(s) not in ("Load", "Assign", "Affine", "Accum", "Write"):
+        if _kind(s) not in ("Load", "Assign", "Accum", "Write"):
             raise Unsupported(f"statement {_kind(s)}")
         if _kind(s) == "Write" and s.atomic:
             raise Unsupported("atomic write")
@@ -131,7 +133,7 @@ def _nest(body) -> _Nest:
         if len(inner) > 1:
             raise Unsupported("sibling loops")
         idx = level_body.index(inner[0])
-        if any(_kind(s) not in ("Load", "Assign", "Affine") for s in level_body[:idx]):
+        if any(_kind(s) not in ("Load", "Assign") for s in level_body[:idx]):
             raise Unsupported("statements before a nested loop")
         pre[level], post[level] = level_body[:idx], level_body[idx + 1 :]
         loops.append(inner[0])
@@ -353,6 +355,14 @@ class _Fn:
         except (TypeError, ValueError):
             raise Unsupported(f"operand {arg!r}") from None
 
+    def scalar(self, expression, acc_index=None):
+        """A value expression at f32: a name's slot, a literal, or an operation over its operands' values."""
+        if _kind(expression) == "Var":
+            return self.value(expression.name, acc_index)
+        if _kind(expression) == "Literal":
+            return self.value(expression.value, acc_index)
+        return self.elementwise(expression.operation.name, [self.scalar(operand, acc_index) for operand in expression.operands])
+
     def intrinsic(self, name):
         arity = 2 if name in ("llvm.maxnum", "llvm.minnum", "llvm.pow") else 1
         return self.m.declare_intrinsic(name, [F32], ir.FunctionType(F32, [F32] * arity))
@@ -500,15 +510,11 @@ class _Fn:
                 raw = self.b.load(self.element(s.input, s.index), typ=STORAGE[dt])
                 self.b.store(self.widen(raw, dt), self.slot(s.names[0]))
             elif k == "Assign":
-                result = self.elementwise(s.op.name, [self.value(a, acc_index) for a in s.args])
-                self.b.store(self.round_to(result, str(s.dtype)), self.slot(s.name))
-            elif k == "Affine":
-                # One operation at a time, the way Kernel IR spells a sum.
-                self.leaves(s.as_assigns(), acc_index, serial=serial)
+                self.b.store(self.round_to(self.scalar(s.value, acc_index), str(s.dtype)), self.slot(s.name))
             elif k == "Accum":
                 where = self.addr(s.name, acc_index)
                 cur = self.value(s.base, acc_index) if s.base is not None else self.b.load(where, typ=F32)
-                self.b.store(self.combine(s.op.name, cur, self.value(s.value, acc_index)), where)
+                self.b.store(self.combine(s.op.name, cur, self.scalar(s.value, acc_index)), where)
             elif k == "Select":
                 result = self.value(s.branches[-1].value, acc_index)
                 for branch in reversed(s.branches[:-1]):
@@ -684,7 +690,7 @@ def _observes_running_value(stmts, accums) -> bool:
     for s in stmts:
         if _kind(s) == "Write":
             return True
-        reads = {s.value} | ({s.base} - {s.name} if s.base else set()) if _kind(s) == "Accum" else set(s.deps())
+        reads = set(s.value.free_vars()) | ({s.base} - {s.name} if s.base else set()) if _kind(s) == "Accum" else set(s.deps())
         if names & reads:
             return True
     return False
@@ -702,7 +708,7 @@ def _serial(loop, buffers, shapes, dtypes, size_names):
     while split is not None and _ext(split) == 1 and len(split.body) == 1 and _kind(split.body[0]) == "Loop":
         part.axes[split.axis.name] = ir.Constant(I64, 0)
         split = split.body[0]
-    if split is None or any(_kind(s) not in ("Load", "Assign", "Affine", "Let") for s in head) or not _independent(split):
+    if split is None or any(_kind(s) not in ("Load", "Assign", "Let") for s in head) or not _independent(split):
         part.serial(body)
         part.finalize()
         return str(m), Plan("serial", "range", 1, 0, False, size_names)

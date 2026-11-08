@@ -6,6 +6,7 @@ use std::sync::Arc;
 
 use super::with_bodies;
 use crate::body::{Body, free_names};
+use crate::expr::Expression;
 use crate::numbering::{Number, Numbering, Param, value_numbers};
 use crate::order::is_protocol;
 use crate::statement::*;
@@ -205,15 +206,10 @@ impl Placer<'_> {
                 self.alias.remove(&name);
             }
             if let Statement::Assign(a) = &**stmt
-                && a.op.copies()
-                && a.args.len() == 1
                 && a.dtype.is_none()
+                && let Some(read) = alias_read(&a.value)
             {
-                let source = self
-                    .alias
-                    .get(&a.args[0])
-                    .cloned()
-                    .unwrap_or_else(|| a.args[0]);
+                let source = self.alias.get(&read).copied().unwrap_or(read);
                 self.alias.insert(a.name, source);
                 let (depth_of, marks) = (
                     self.depth_of(&source),
@@ -449,7 +445,11 @@ impl Placer<'_> {
 /// Place every pure value once, at the shallowest loop scope on its consumers' path that binds its coordinates and
 /// holds its operands; a second computation of a value a scope can already see reads the first instead.
 pub fn place_values(body: &Body) -> Result<Body> {
-    let numbering = value_numbers(body, &crate::numbering::spelled_key);
+    let numbering = value_numbers(
+        body,
+        &crate::numbering::spelled_key,
+        crate::numbering::Chains::Flat,
+    );
     let mut written: HashSet<Name> = HashSet::new();
     body.walk(&mut |here| {
         written.extend(here.stmt().external_writes());
@@ -475,12 +475,35 @@ pub fn place_values(body: &Body) -> Result<Body> {
     Ok(body.rebuilt(kept.into_iter().map(|(stmt, _)| stmt).collect()))
 }
 
+/// The name a value is an alias of: the name itself, or the one operand of a copy.
+fn alias_read(value: &Expression) -> Option<Name> {
+    if let Some(name) = value.as_var() {
+        return Some(*name);
+    }
+    match value.operation() {
+        Some((op, args)) if op.info().copies && args.len() == 1 => args[0].as_var().copied(),
+        _ => None,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::elementwise::{ElementwiseOp, Operation};
+    use crate::elementwise::Operation;
     use crate::normalize::normalize_body;
     use crate::normalize::testing::*;
+
+    /// The names a value reads, sorted.
+    fn reads(value: &Expression) -> Vec<String> {
+        let mut out: Vec<String> = value.free_vars().iter().map(|n| n.to_string()).collect();
+        out.sort();
+        out
+    }
+
+    /// Whether `value` applies `op` at its root.
+    fn applies(value: &Expression, op: Operation) -> bool {
+        value.operation().is_some_and(|(applied, _)| applied == op)
+    }
 
     fn placed(text: &str) -> Body {
         place_values(&body(text)).unwrap()
@@ -750,7 +773,7 @@ mod tests {
             .collect();
         assert_eq!(assigned, ["z1", "z2", "left", "right"]);
         let n = out.len();
-        assert_eq!(stmt_text(&out.stmts()[n - 4]), "right = subtract(z1, m)");
+        assert_eq!(stmt_text(&out.stmts()[n - 4]), "right = z1 - m");
         assert_eq!(stmt_text(&out.stmts()[n - 3]), "O[0] = z2");
         assert_eq!(place_values(&out).unwrap(), out);
     }
@@ -773,7 +796,7 @@ mod tests {
             .filter(|stmt| matches!(&***stmt, Statement::Assign(_)))
             .map(stmt_text)
             .collect();
-        assert_eq!(assigns, ["v = add(in0, in0)"]);
+        assert_eq!(assigns, ["v = in0 + in0"]);
     }
 
     #[test]
@@ -805,7 +828,7 @@ mod tests {
             sum = add(y0, y1)
             ",
         );
-        assert_eq!(text(&out), "x0, x1 = load X[0]\nsum = add(x0, x1)");
+        assert_eq!(text(&out), "x0, x1 = load X[0]\nsum = x0 + x1");
     }
 
     #[test]
@@ -1013,11 +1036,9 @@ mod tests {
         assert_eq!(axis(&out.stmts()[1]), "c");
         assert_eq!(axis(&out.stmts()[2]), "a");
         let inner_b = inner(&inner(&out.stmts()[2]).stmts()[0]);
-        assert!(
-            inner_b.stmts().iter().any(
-                |stmt| matches!(&**stmt, Statement::Assign(a) if strs(&a.args) == ["accc", "x"])
-            )
-        );
+        assert!(inner_b.stmts().iter().any(
+            |stmt| matches!(&**stmt, Statement::Assign(a) if reads(&a.value) == ["accc", "x"])
+        ));
     }
 
     #[test]
@@ -1043,7 +1064,7 @@ mod tests {
         let Statement::Assign(read) = &*inner_a.stmts()[1] else {
             unreachable!()
         };
-        assert_eq!(strs(&read.args), ["acc1", "acc1"]);
+        assert_eq!(read.value.text(), "acc1 + acc1");
     }
 
     #[test]
@@ -1068,7 +1089,7 @@ mod tests {
             .map(stmt_text)
             .collect();
         assert_eq!(loads, ["in0 = load indices[a0]", "in1 = load values[in0]"]);
-        assert_eq!(stmt_text(&looped.stmts()[looped.len() - 2]), "v0 = 2*in1");
+        assert_eq!(stmt_text(&looped.stmts()[looped.len() - 2]), "v0 = 2 * in1");
     }
 
     #[test]
@@ -1124,9 +1145,9 @@ mod tests {
             ",
         );
         assert!(
-            out.stmts()
-                .iter()
-                .any(|stmt| matches!(&**stmt, Statement::Assign(a) if a.op == ElementwiseOp::Known(Operation::Exp))),
+            out.stmts().iter().any(
+                |stmt| matches!(&**stmt, Statement::Assign(a) if applies(&a.value, Operation::Exp))
+            ),
             "{}",
             text(&out)
         );
@@ -1155,13 +1176,13 @@ mod tests {
         let Statement::Assign(shared) = &*out.stmts()[2] else {
             unreachable!()
         };
-        assert_eq!(shared.op, ElementwiseOp::Known(Operation::Exp));
+        assert!(applies(&shared.value, Operation::Exp));
         for arm in out.stmts()[3].nested() {
-            assert_eq!(statement_types(&arm), ["Load", "Affine", "Write"]);
-            let Statement::Affine(sum) = &*arm.stmts()[1] else {
+            assert_eq!(statement_types(&arm), ["Load", "Assign", "Write"]);
+            let Statement::Assign(sum) = &*arm.stmts()[1] else {
                 unreachable!()
             };
-            assert!(sum.args.contains(&shared.name));
+            assert!(sum.value.free_vars().contains(&shared.name));
         }
         assert_eq!(renormalized(&out), out);
     }
@@ -1224,10 +1245,7 @@ mod tests {
         let [reduce] = reduces[..] else {
             panic!("one reduce loop: {}", text(&out))
         };
-        assert_eq!(
-            statement_types(&inner(reduce)),
-            ["Load", "Load", "Assign", "Accum"]
-        );
+        assert_eq!(statement_types(&inner(reduce)), ["Load", "Load", "Accum"]);
         let product = outer
             .stmts()
             .iter()
@@ -1237,6 +1255,6 @@ mod tests {
             })
             .next_back()
             .unwrap();
-        assert_eq!(strs(&product.args), ["v1", "v1"]);
+        assert_eq!(product.value.text(), "v0 * v0");
     }
 }
