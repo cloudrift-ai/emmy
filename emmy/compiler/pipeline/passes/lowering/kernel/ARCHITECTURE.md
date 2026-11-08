@@ -537,9 +537,9 @@ the multi-channel sync compute-fill and the scalar resolver still decline 1-byte
 FP8 key-value cache the same way, its key and its value both, on cp.async only (`chunk_slab_dtype`): an f16 cell
 converts the key's (k, k+1) pairs with one fp8x2 convert, and a bf16 cell's key and every K-major value element
 convert one by one. A warp-group score cannot read that key, since its descriptor converts nothing
-(`_wgmma_slab_refusal`). Each 16 B copy reads where the cache's index puts it, so the chunk tier stages a key or value
-only when a slice's offset and every row stride keep the copies on the 16 B grid (`copies_aligned`); a slice one byte
-into a padded row reads gmem-direct. Read gmem-direct, the cache cost one byte load per element — about 1,150 loads
+(`_wgmma_slab_refusal`). Like every vector copy a stage makes, each 16 B copy must start on its own width in gmem
+(`vector_copies_aligned`, the schedule `ARCHITECTURE.md`), so a key or value sliced one byte into a padded row reads
+gmem-direct. Read gmem-direct, the cache cost one byte load per element — about 1,150 loads
 a thread per 64-key chunk at head width 256, each holding a register until it converts — and every attention fold sat
 at 255 registers with spills. Staged, the 27B one-row decode piece at 131,072 cached tokens runs 431 us against 845 on
 an RTX 4080, about 87% of the card's bandwidth.
