@@ -52,22 +52,6 @@ pub(crate) struct SequentialScope {
     fixed: HashSet<Name>,
 }
 
-/// A leaf statement's definitions under spellings no name takes, so that one rename can then give its reads the names
-/// in scope before it and its definitions the names after it, however the two spellings coincide.
-struct Definitions<'a> {
-    temporaries: &'a HashMap<Name, Name>,
-}
-
-impl Rewriter for Definitions<'_> {
-    fn name(&mut self, roles: Roles, name: &Name) -> Name {
-        if roles.contains_any(DEFINES) {
-            self.temporaries.get(name).copied().unwrap_or(*name)
-        } else {
-            *name
-        }
-    }
-}
-
 impl SequentialScope {
     fn allocate(&mut self, counters: &mut Counters, old: &Name, prefix: &'static str) {
         if self.owned.contains(old) || self.fixed.contains(old) {
@@ -104,26 +88,28 @@ impl SequentialScope {
         if children.is_empty() {
             // The reads take the names in scope before the statement, the definitions the names after it: a second
             // binding of a name this scope owns (motion can put two lexical bindings in one scope) is a value of its
-            // own, and a first binding that reads an outer name of its spelling reads the outer value. The definitions
-            // pass through spellings no name takes, so a definition spelled like another's sequential name is no clash.
-            let mut names = self.names(&self.inherited_axes);
-            let mut temporaries: HashMap<Name, Name> = HashMap::new();
-            for (index, name) in stmt.defines().into_iter().enumerate() {
+            // own, and a first binding that reads an outer name of its spelling reads the outer value. One rename reads
+            // the role of each name, so a definition spelled like another's sequential name is no clash.
+            let names = self.names(&self.inherited_axes);
+            let mut defined: HashMap<Name, Name> = HashMap::new();
+            for name in stmt.defines() {
                 if stmt.is_pure() && self.owned.contains(&name) {
                     self.ssa.insert(name, counters.fresh(ssa_prefix(stmt)));
                 } else {
                     self.allocate(counters, &name, ssa_prefix(stmt));
                 }
                 if let Some(new) = self.ssa.get(&name) {
-                    let temporary = Name::new(&format!("__defines__{index}"));
-                    temporaries.insert(name, temporary);
-                    names.insert(temporary, *new);
+                    defined.insert(name, *new);
                 }
             }
-            let retagged = Arc::new(stmt.rewrite_fields(&mut Definitions {
-                temporaries: &temporaries,
-            }));
-            return Statement::rename(&retagged, &names);
+            return Statement::rename_roles(stmt, &|roles, name| {
+                let definition = if roles.contains_any(DEFINES) {
+                    defined.get(&name).copied()
+                } else {
+                    None
+                };
+                definition.or_else(|| names.get(&name).copied())
+            });
         }
         for name in &exported {
             self.allocate(counters, name, "acc");
@@ -843,6 +829,110 @@ for r in 0..4:
             normal.contains("e+30") || normal.contains("e30"),
             "{normal}"
         );
+    }
+
+    /// A one-step update with no base folds the seed its loop started from, as the loop did: a masked `-inf` meets
+    /// `-1e30`, and the written maximum is the loop's, read ahead and behind the update alike.
+    #[test]
+    fn a_one_step_update_folds_the_kernels_seed() {
+        let normal = text(
+            &normalize_body(&body(
+                "for i in 0..8:
+    for k in 0..1:
+        x = load X[i, k]
+        a = m * 2
+        m <- maximum(m, x) over k
+        b = m * 3
+        t = a + b
+        s <- add(s, t) over k
+    M[i] = m
+    S[i] = s",
+            ))
+            .unwrap(),
+        );
+        assert!(
+            normal.contains("maximum(") && !normal.contains("inf") && !normal.contains("<-"),
+            "{normal}"
+        );
+        assert!(
+            normal.contains("e+30") || normal.contains("e30"),
+            "{normal}"
+        );
+    }
+
+    /// A sum's zero and a product's one fold away: a one-step sum is its one addend.
+    #[test]
+    fn a_one_step_sums_seed_folds_away() {
+        let normal = text(
+            &normalize_body(&body(
+                "for i in 0..8:
+    for k in 0..1:
+        x = load X[i, k]
+        s <- add(s, x) over k
+    S[i] = s",
+            ))
+            .unwrap(),
+        );
+        assert_eq!(
+            normal, "for a0 in 0..8:\n    in0 = load X[a0, 0]\n    S[a0] = in0",
+            "{normal}"
+        );
+    }
+
+    /// The loop that folds an accumulator produces it wherever it sits in the block: under a condition (the state
+    /// seeded ahead of the block, which is what its siblings may read), or as the loop itself when the accumulator
+    /// names no axes. A reader written ahead of the block follows the block.
+    #[test]
+    fn a_reader_ahead_of_the_block_holding_the_folding_loop_follows_it() {
+        for src in [
+            "for i in 0..8:
+    O[i] = m
+    if i < 4:
+        for k in 0..4 seed=false:
+            x = load X[i, k]
+            m <- maximum(m, x) over k",
+            "for i in 0..8:
+    O[i] = m
+    for k in 0..4:
+        x = load X[i, k]
+        m <- maximum(m, x)",
+            "for i in 0..8:
+    O[i] = m
+    if i < 4:
+        for k in 0..4 seed=false:
+            for j in 0..2 seed=false:
+                x = load X[i, k, j]
+                m <- maximum(m, x) over k, j",
+        ] {
+            let normal = text(&normalize_body(&body(src)).unwrap());
+            let update = normal.find("<-").expect(&normal);
+            let write = normal.find("O[a0]").expect(&normal);
+            assert!(update < write, "{normal}");
+        }
+    }
+
+    /// An accumulator folded by the enclosing loop and updated inside a map loop of the step (the P·V accumulation of
+    /// an attention step) is still an update site: a read of the step before stays ahead of the map loop.
+    #[test]
+    fn an_update_inside_a_map_loop_of_the_step_is_read_where_it_stands() {
+        let normal = text(
+            &normalize_body(&body(
+                "for i in 0..8:
+    for k in 0..4:
+        x = load X[i, k]
+        r = acc * x
+        R[i, k] = r
+        for d in 0..2 seed=false:
+            v = load V[k, d]
+            w = v * x
+            acc <- add(acc, w) over k
+    O[i] = acc",
+            ))
+            .unwrap(),
+        );
+        let read = normal.find("v0 = acc0 * in0").expect(&normal);
+        let update = normal.find("<- add").expect(&normal);
+        assert!(read < update, "{normal}");
     }
 
     /// One affine form, in the coefficient domain of the field's class: an index folds integer literals alone and

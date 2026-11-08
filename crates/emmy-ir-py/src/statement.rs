@@ -276,7 +276,7 @@ impl PyStatement {
                 pairs.push((axis_from_py(&old, 0)?, axis_from_py(&new, 0)?));
             }
         }
-        let rename = |name: Name| names.get(&name).copied();
+        let rename = |_: emmy_ir::statement::Roles, name: Name| names.get(&name).copied();
         let axis_fn = |axis: &Arc<emmy_ir::axis::Axis>| {
             pairs
                 .iter()

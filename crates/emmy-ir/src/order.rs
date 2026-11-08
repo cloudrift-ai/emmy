@@ -73,14 +73,14 @@ pub fn ordering_constraints(body: &Body, effects: bool) -> Vec<HashSet<usize>> {
     let kinds: HashMap<&Name, Site> = definitions
         .iter()
         .map(|(name, sites)| {
-            let mut found = sites.iter().map(|site| {
+            let kind_at = |site: &usize| {
                 site_kinds[*site]
                     .get(*name)
                     .copied()
                     .unwrap_or(Site::Binding)
-            });
-            let first = found.next().unwrap_or(Site::Binding);
-            let kind = if found.all(|kind| kind == first) {
+            };
+            let first = kind_at(&sites[0]);
+            let kind = if sites.iter().all(|site| kind_at(site) == first) {
                 first
             } else {
                 Site::Binding
@@ -199,44 +199,55 @@ enum Site {
     Carry,
 }
 
-/// How `stmt` defines each name it exposes, in one walk of its subtree: a leaf `Accum` or `Carry`, or a block holding
-/// one, is the update it holds, unless the block is the loop that folds the accumulator or carries the state — that
-/// loop produces it. A name the walk meets no update of is a binding.
+/// How `stmt` defines each name it exposes, in one walk of its subtree. A leaf `Accum` or `Carry`, or a block holding
+/// one, is the update it holds, unless the block holds the loop that folds the accumulator (a loop on the path to it
+/// binds one of its axes, or any loop when it names none) or carries the state (`carried_cells`) — that loop produces
+/// the value and its readers follow the block. A name the walk meets no update of is a binding.
 fn site_kinds(stmt: &Statement) -> HashMap<Name, Site> {
-    let mut kinds = HashMap::new();
-    match stmt {
-        Statement::Accum(a) => {
-            kinds.insert(a.name, Site::Accumulator);
-            return kinds;
-        }
-        Statement::Carry(c) => {
-            kinds.insert(c.name, Site::Carry);
-            return kinds;
-        }
-        _ => {}
-    }
-    let axes = stmt.binds_axes();
-    for body in stmt.nested() {
-        body.walk(&mut |here| match &**here.stmt() {
+    fn walk(
+        stmt: &Statement,
+        bound: &HashSet<Name>,
+        under_loop: bool,
+        kinds: &mut HashMap<Name, Site>,
+    ) {
+        match stmt {
             Statement::Accum(a) => {
-                let kind = if a.axes.iter().any(|axis| axes.contains(axis)) {
-                    Site::Binding
+                let folded = if a.axes.is_empty() {
+                    under_loop
                 } else {
-                    Site::Accumulator
+                    a.axes.iter().any(|axis| bound.contains(axis))
                 };
-                kinds.insert(a.name, kind);
+                kinds.insert(
+                    a.name,
+                    if folded {
+                        Site::Binding
+                    } else {
+                        Site::Accumulator
+                    },
+                );
             }
             Statement::Carry(c) => {
                 kinds.insert(c.name, Site::Carry);
             }
-            _ => {}
-        });
-    }
-    if let Some((_, body)) = loop_parts(stmt) {
-        for (state, _) in carried_cells(body) {
-            kinds.insert(state, Site::Binding);
+            _ => {
+                let is_loop = loop_parts(stmt).is_some();
+                let mut inner = bound.clone();
+                inner.extend(stmt.binds_axes());
+                for body in stmt.nested() {
+                    for child in body.stmts() {
+                        walk(child, &inner, under_loop || is_loop, kinds);
+                    }
+                }
+                if let Some((_, body)) = loop_parts(stmt) {
+                    for (state, _) in carried_cells(body) {
+                        kinds.insert(state, Site::Binding);
+                    }
+                }
+            }
         }
     }
+    let mut kinds = HashMap::new();
+    walk(stmt, &HashSet::new(), false, &mut kinds);
     kinds
 }
 

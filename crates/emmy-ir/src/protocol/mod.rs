@@ -25,7 +25,7 @@ use crate::{Error, Name, Result};
 /// Inside a term, the coordinates its index expressions read follow the outer rename, less the names the term
 /// defines; its value expressions read the term's own names and keep them, as its name fields do.
 struct Coordinates<'a> {
-    rename: &'a dyn Fn(Name) -> Option<Name>,
+    rename: &'a dyn Fn(Roles, Name) -> Option<Name>,
     defined: &'a HashSet<Name>,
 }
 
@@ -38,21 +38,21 @@ impl Rewriter for Coordinates<'_> {
             if self.defined.contains(&name) {
                 None
             } else {
-                (self.rename)(name)
+                (self.rename)(roles, name)
             }
         })
     }
 }
 
-/// What a rewrite does to a statement: every SSA name through `rename`, every expression through `sigma`, every
-/// bound axis through `axis_fn`. A `None` from `rename` keeps the name.
+/// What a rewrite does to a statement: every SSA name through `rename`, which sees the role the name has in its field,
+/// every expression through `sigma`, every bound axis through `axis_fn`. A `None` from `rename` keeps the name.
 pub struct Rewrite<'a> {
-    pub rename: &'a dyn Fn(Name) -> Option<Name>,
+    pub rename: &'a dyn Fn(Roles, Name) -> Option<Name>,
     pub sigma: &'a HashMap<Name, Expression>,
     pub axis_fn: Option<&'a dyn Fn(&AxisRef) -> AxisRef>,
 }
 
-fn keep(_name: Name) -> Option<Name> {
+fn keep(_roles: Roles, _name: Name) -> Option<Name> {
     None
 }
 
@@ -287,7 +287,7 @@ struct RewriteFields<'a, 'b> {
 impl Rewriter for RewriteFields<'_, '_> {
     fn name(&mut self, roles: Roles, name: &Name) -> Name {
         if roles.contains_any(NAMES) {
-            return (self.rewrite.rename)(*name).unwrap_or(*name);
+            return (self.rewrite.rename)(roles, *name).unwrap_or(*name);
         }
         if roles.contains_any(AXIS_NAME) {
             let Some(axis_fn) = self.rewrite.axis_fn else {
@@ -304,10 +304,10 @@ impl Rewriter for RewriteFields<'_, '_> {
         }
         *name
     }
-    fn expression(&mut self, _roles: Roles, expression: &Expression) -> Expression {
+    fn expression(&mut self, roles: Roles, expression: &Expression) -> Expression {
         expression
             .substitute(self.rewrite.sigma)
-            .rename(&mut |name| (self.rewrite.rename)(name))
+            .rename(&mut |name| (self.rewrite.rename)(roles, name))
     }
     fn axis(&mut self, _roles: Roles, axis: &AxisRef) -> AxisRef {
         match self.rewrite.axis_fn {
@@ -648,7 +648,7 @@ impl Statement {
                 .axes
                 .iter()
                 .flat_map(|name| rewrite_axis_name(name, rewrite.sigma))
-                .map(|name| (rewrite.rename)(name).unwrap_or(name))
+                .map(|name| (rewrite.rename)(AXIS_NAME, name).unwrap_or(name))
                 .collect();
             axes.sort();
             axes.dedup();
@@ -676,7 +676,16 @@ impl Statement {
         this: &Arc<Statement>,
         rename: &dyn Fn(Name) -> Option<Name>,
     ) -> Arc<Statement> {
-        let axis_fn = |axis: &AxisRef| axis.renamed(&mut |name| rename(name));
+        Statement::rename_roles(this, &|_, name| rename(name))
+    }
+
+    /// `rename` through a function that sees the role a name has in its field (a definition, a read, an axis), so one
+    /// rewrite can give a statement's reads and its definitions different names; `None` keeps a name.
+    pub fn rename_roles(
+        this: &Arc<Statement>,
+        rename: &dyn Fn(Roles, Name) -> Option<Name>,
+    ) -> Arc<Statement> {
+        let axis_fn = |axis: &AxisRef| axis.renamed(&mut |name| rename(AXIS_NAME, name));
         let empty = HashMap::new();
         Statement::rewrite(
             this,
@@ -950,7 +959,7 @@ mod tests {
         Statement::rewrite(
             stmt,
             &Rewrite {
-                rename: &|name| names.get(&name).copied(),
+                rename: &|_, name| names.get(&name).copied(),
                 sigma,
                 axis_fn: None,
             },
@@ -1404,7 +1413,7 @@ mod tests {
         let names = names_by(&halve, str::to_string);
         let same_axis = |axis: &AxisRef| axis.clone();
         let rewrite = Rewrite {
-            rename: &|name| names.get(&name).copied(),
+            rename: &|_, name| names.get(&name).copied(),
             sigma: &HashMap::new(),
             axis_fn: Some(&same_axis),
         };

@@ -34,9 +34,10 @@ pub fn drop_size_one_free_axes(body: &Body) -> Body {
     })
 }
 
-/// Inline a canonical extent-one reduction as its single update. A read of an accumulator ahead of its update reads
-/// the step before, which the one step has none of: it reads the seed a kernel starts the reduction from, bound by a
-/// `Let` the reads ahead of the update are renamed to (a base names the step's own running value, not the seed).
+/// Inline a canonical extent-one reduction as its single update. The update folds the seed a kernel starts the
+/// reduction from into its value, as the loop did (a base names the step's own running value instead), and a read of
+/// the accumulator ahead of the update reads the step before, which the one step has none of: the seed, bound by a
+/// `Let` the reads ahead are renamed to.
 pub fn drop_size_one_reduce_axes(body: &Body) -> Body {
     body.map(&mut |stmt| {
         let Statement::Loop(l) = &**stmt else {
@@ -73,14 +74,10 @@ pub fn drop_size_one_reduce_axes(body: &Body) -> Body {
                 !matches!(&**m, Statement::Accum(x) if x.name == a.name)
                     && free_ssa(m).contains(&a.name)
             });
-            let seed = a.op.seed();
-            if (a.base.is_none() || read) && seed.is_none() {
-                return Some(vec![stmt.clone()]);
-            }
-            if !read {
+            if !(read || a.base.is_none()) {
                 continue;
             }
-            let Some(seed) = seed else {
+            let Some(seed) = a.op.seed() else {
                 return Some(vec![stmt.clone()]);
             };
             let mut index = 0;
@@ -100,27 +97,30 @@ pub fn drop_size_one_reduce_axes(body: &Body) -> Body {
         }
         for member in l.body.stmts() {
             let member = substituted(member, &l.axis.name, Expression::int(0));
-            if let Statement::Accum(a) = &*member {
-                seeds.remove(&a.name);
-            }
+            let seed = match &*member {
+                Statement::Accum(a) => seeds.remove(&a.name),
+                _ => None,
+            };
             let member = if seeds.is_empty() {
                 member
             } else {
                 Statement::rename_with(&member, &|name| seeds.get(&name).copied())
             };
             match &*member {
-                Statement::Accum(a) => match &a.base {
-                    None => out.push(assign(&a.name, a.value.clone(), a.dtype)),
-                    Some(base) => {
-                        let combined = match a.op.known() {
-                            Some(op) => {
-                                Expression::apply(op, vec![Expression::var(base), a.value.clone()])
-                            }
-                            None => return Some(vec![stmt.clone()]),
-                        };
-                        out.push(assign(&a.name, combined, a.dtype))
-                    }
-                },
+                // The one update folds the seed the loop started from (a base is the step's own running value): a
+                // sum's zero and a product's one fold away, a maximum keeps the one operation the loop ran.
+                Statement::Accum(a) => {
+                    let Some(op) = a.op.known() else {
+                        return Some(vec![stmt.clone()]);
+                    };
+                    let start = match (&a.base, seed) {
+                        (Some(base), _) => Expression::var(base),
+                        (None, Some(seed)) => Expression::var(&seed),
+                        (None, None) => return Some(vec![stmt.clone()]),
+                    };
+                    let combined = Expression::apply(op, vec![start, a.value.clone()]);
+                    out.push(assign(&a.name, combined, a.dtype))
+                }
                 _ => out.push(member),
             }
         }
