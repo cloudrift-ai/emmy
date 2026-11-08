@@ -1,7 +1,7 @@
 # The statement and expression vocabulary
 
 `emmy-ir` implements what `emmy/compiler/ir/stmt` and `emmy/compiler/ir/expression.py` export: the expression types
-and their text, the forty-five statement types, `Body`, the body text, the statement protocol, value numbering,
+and their text, the forty-four statement types, `Body`, the body text, the statement protocol, value numbering,
 identity and body normalization. Pure Rust, no Python in it, so `cargo test -p emmy-ir` runs it alone, and the tests
 of the normalization steps sit beside the steps there. The extension beside it, `emmy-ir-py`, is the `emmy.emmy_ir`
 module those two Python packages re-export from; `make setup` builds it into the package like the runtime extension.

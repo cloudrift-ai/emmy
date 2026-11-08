@@ -99,8 +99,8 @@ describe how a term is used in Emmy; they are not meant to replace a full textbo
 - **Body normalization** — The canonical form every Loop IR body takes at construction and inside every identity
   digest, so two spellings of one program key the same. It answers to no knob, pin or evidence; a transform that
   something decides is a pass, not a normalization step.
-- **Statement type** — The type a Loop IR statement belongs to: `Loop`, `Load`, `Accum`, … Forty-five are declared in
-  one list in the `emmy-ir` crate, fifteen shared and thirty of the Kernel IR; each is a Rust struct and a Python class
+- **Statement type** — The type a Loop IR statement belongs to: `Loop`, `Load`, `Accum`, … Forty-four are declared in
+  one list in the `emmy-ir` crate, fourteen shared and thirty of the Kernel IR; each is a Rust struct and a Python class
   of the same name. A statement is one instance of its type in a body.
 - **Expression class** — Which of the two kinds of scalar arithmetic an expression field admits: `Index`, integer
   arithmetic over integer operands (an index, an extent, a guard), or `Value`, every operation over any operand (the
