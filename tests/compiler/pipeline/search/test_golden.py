@@ -91,6 +91,23 @@ def test_restamp_respells_a_rows_site_keys_as_it_does_a_seam() -> None:
     assert not restamp(document)[1].changed
 
 
+def test_restamp_keys_a_carried_kernels_rows_against_its_serial_form() -> None:
+    """A kernel that carries a state is scheduled as its serial form (one launch per step), and its rows' scoped keys
+    address that form's sites; a restamp offers the row those keys, not the lifted tile's (whose ``scan`` the serial
+    form has already peeled), so the row keeps every key and its measurement."""
+    from dataclasses import replace
+
+    from emmy.compiler.pipeline.search.golden.restamp import restamp
+
+    document = GoldenFile.load(Path(__file__).resolve().parents[4] / "emmy/compiler/pipeline/search/golden/records/rtx5090_sm120.json")
+    kernel = document.kernel("k_unsqueeze_reduce_f62b35")
+    rows = [row for row in document.rows if row.kernel == kernel.ref and any("@" in key for key in row.knobs)]
+    assert rows and all(any(key.startswith("REDUCE@") for key in row.knobs) for row in rows)
+    fresh, report = restamp(replace(document, kernels=[kernel], routing=[], rows=rows))
+    assert not report.dropped_keys and not report.respelled_rows, report.lines()
+    assert [row.knobs for row in fresh.rows] == [row.knobs for row in rows]
+
+
 def test_lora_serving_golden_replays_nested_cuts() -> None:
     path = (
         Path(__file__).resolve().parents[4] / "experiments/Meta-Llama-3.1-8B-Instruct/lora_v100_sxm3_32gb/golden/v100_sxm3_sm70_lora8.json"

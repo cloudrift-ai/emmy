@@ -44,6 +44,7 @@ from emmy.compiler.pipeline import Pipeline
 from emmy.compiler.pipeline.fork import leaf_knobs
 from emmy.compiler.pipeline.knob import family_of
 from emmy.compiler.pipeline.passes.tile._cut import joined_halves
+from emmy.compiler.pipeline.passes.tile._fromloop import serial_form
 from emmy.compiler.pipeline.passes.tile._layout import settled_layouts
 from emmy.compiler.pipeline.pipeline import Run
 from emmy.compiler.pipeline.search.bench_record import kernel_row
@@ -442,11 +443,16 @@ def restamp(document: GoldenFile, *, traced: int | None = None) -> tuple[GoldenF
         return f"{ref} was re-keyed" if fresh.get(ref) not in (None, document.kernel(ref)) else None
 
     def keys_of(ref: str) -> frozenset[str] | None:
-        """The schedule keys the surviving kernel ``ref`` offers: the row keys of the tile this restamp built it as.
-        ``None`` for a kernel this restamp did not build (out of scope, or kept from the file)."""
+        """The schedule keys the surviving kernel ``ref`` offers: the row keys of the tile this restamp built it as, in
+        the form the classic schedule addresses — the serial form of a kernel that carries a state, as the schedule
+        pass offers it. ``None`` for a kernel this restamp did not build (out of scope, or kept from the file)."""
         identity = _identity(next(kernel for kernel in kernels if kernel.ref == ref))
         tile = tiles.get(identity or "")
-        return frozenset(classic_keys(tile)) if tile is not None else None
+        if tile is None:
+            return None
+        if tile.carries:
+            tile = serial_form(tile, tile.name)
+        return frozenset(classic_keys(tile))
 
     rows: list[Row] = []
     for row in document.rows:
