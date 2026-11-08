@@ -118,3 +118,28 @@ def test_integer_bitwise_count_stays_an_abstract_intrinsic():
     value = Literal(7, "int")
     expression = op_to_expression("bitwise_count", [value], dtype="u32")
     assert isinstance(expression, FunctionCallExpression) and expression.name == "bitwise_count" and expression.args == (value,)
+
+
+def test_a_literal_contributes_no_dtype_to_a_promotion():
+    """``2 * x`` computes at ``x``'s dtype, as ``x + x`` does — the normal form spells them alike — and a value of
+    literals alone is f32, or i32 when every literal is an integer."""
+    from emmy.compiler.ir.expression import parse, promoted_dtype
+
+    f16 = {"x": "f16", "y": "f16"}.get
+    assert promoted_dtype(parse("2 * x"), f16) == "f16"
+    assert promoted_dtype(parse("x + x"), f16) == "f16"
+    assert promoted_dtype(parse("x * y + 0.5"), f16) == "f16"
+    assert promoted_dtype(parse("exp(x) / 3"), f16) == "f16"
+    assert promoted_dtype(parse("2 * 3"), f16) == "i32"
+    assert promoted_dtype(parse("2.5 * 3"), f16) == "f32"
+    assert promoted_dtype(parse("x + z"), f16) == "f32", "a name without a dtype is f32"
+
+
+def test_the_renderer_spells_a_literal_at_the_named_operands_dtype():
+    """``2 * x`` over f16 renders as one f16 multiply, the literal spelled at f16, not promoted to f32 for the literal."""
+    from emmy.compiler.ir.expression import parse
+    from emmy.compiler.ir.render import RenderCtx, render_stmt
+    from emmy.compiler.ir.stmt import Assign
+
+    [line] = render_stmt(Assign("y", parse("2 * x")), RenderCtx(ssa_dtypes={"x": "f16"}))
+    assert line.strip().startswith("__half y = ") and "float" not in line, line

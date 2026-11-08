@@ -159,8 +159,7 @@ def _resident(op, program, retained=frozenset()):
     shape = tuple(n.as_static() for n in dimensions)
     shared = "_carry"
     parity = Var(loop.axis.name) % Literal(2, "int")
-    # The first-step predicate as the lowering spells it and as the normal form mirrors it.
-    before = (BinaryExpression(">", Var(loop.axis.name), Literal(0, "int")), BinaryExpression("<", Literal(0, "int"), Var(loop.axis.name)))
+    before = BinaryExpression("<", Literal(0, "int"), Var(loop.axis.name))  # the first-step predicate, in normal form
     stores = [s for s in tile.body.iter() if isinstance(s, Write) and s.output == port]
     if not stores or any(s.atomic or not s.is_scalar for s in stores):
         return None
@@ -174,7 +173,7 @@ def _resident(op, program, retained=frozenset()):
         discarded = set()
         out = []
         for stmt in body:
-            if isinstance(stmt, Select) and len(stmt.branches) == 2 and stmt.branches[0].select in before:
+            if isinstance(stmt, Select) and len(stmt.branches) == 2 and stmt.branches[0].select == before:
                 held = defs.get(stmt.branches[0].value)
                 seed = defs.get(stmt.branches[1].value)
                 if held is not None and held.input == port and seed is not None and seed.input == carry.seed:

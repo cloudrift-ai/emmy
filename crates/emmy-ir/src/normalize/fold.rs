@@ -174,6 +174,15 @@ pub fn fold_single_readers(body: &Body, exposed: &HashSet<Name>) -> Body {
                 index += 1;
                 continue;
             };
+            // A statement between the definition and its reader that redefines a name the value reads (an
+            // accumulator's update after a read of its previous step) would change what the reader computes.
+            if stmts[index + 1..at]
+                .iter()
+                .any(|stmt| stmt.defines().iter().any(|name| assign.value.reads(*name)))
+            {
+                index += 1;
+                continue;
+            }
             let folded = Statement::substitute(
                 reader,
                 &HashMap::from([(assign.name, assign.value.clone())]),
@@ -202,6 +211,40 @@ mod tests {
     use crate::identity::canonicalize_identity;
     use crate::normalize::normalize_body;
     use crate::normalize::testing::*;
+
+    /// A value read once folds into its reader only while nothing between them redefines a name it reads: a read of
+    /// an accumulator between two updates observes the first, and folding it past the second would make it observe
+    /// both.
+    #[test]
+    fn a_read_of_an_accumulator_does_not_fold_past_the_next_update() {
+        let observed = |reader_after_second_update: bool| {
+            let read = "v = total * 2.0";
+            let reader = "w = v + 1.0";
+            let second = "total <- add(total, second)";
+            let order = if reader_after_second_update {
+                [read, second, reader]
+            } else {
+                [read, reader, second]
+            };
+            body(&format!(
+                "init f32 total = 0\nlet first = 1.0\nlet second = 2.0\ntotal <- add(total, first)\n{}\nO[] = w",
+                order.join("\n")
+            ))
+        };
+        let kept = text(&normalize_body(&observed(true)).unwrap());
+        let lines: Vec<&str> = kept.lines().collect();
+        let read = lines
+            .iter()
+            .position(|line| line.contains("= 2 * acc0"))
+            .unwrap();
+        let second = lines
+            .iter()
+            .rposition(|line| line.contains("<- add("))
+            .unwrap();
+        assert!(read < second && !kept.contains("2 * acc0 + 1"), "{kept}");
+        let folded = text(&normalize_body(&observed(false)).unwrap());
+        assert!(folded.contains("2 * acc0 + 1"), "{folded}");
+    }
 
     #[test]
     fn unread_values_leave_with_everything_only_they_read() {

@@ -15,7 +15,7 @@ from frozendict import frozendict
 from emmy.compiler.dtype import BF16, F16
 from emmy.compiler.ir.address import gmem_axis_step, split_addressable
 from emmy.compiler.ir.atom import ATOM_REGISTRY, AtomKind, atoms_for, wide_accumulate
-from emmy.compiler.ir.expression import Expression, Literal, Var
+from emmy.compiler.ir.expression import Expression, Literal, Var, affine_terms
 from emmy.compiler.ir.pure.fold import Fold, binding_extents
 from emmy.compiler.ir.schedule.catalog import (
     WARP_LANES,
@@ -695,13 +695,8 @@ def _adds(consumer: Statement, name: str) -> bool:
 
 
 def _unit_terms(expression: Expression) -> list[Expression]:
-    """The terms a sum adds with coefficient one: through its additions and the left side of its subtractions."""
-    op = expression.operation
-    if op is not None and op.name == "add":
-        return [term for operand in expression.operands for term in _unit_terms(operand)]
-    if op is not None and op.name == "subtract":
-        return _unit_terms(expression.operands[0])
-    return [expression]
+    """The terms a sum adds with coefficient one, read off its affine form."""
+    return [term for coefficient, term in affine_terms(expression)[0] if coefficient == 1]
 
 
 def _plan_node_refusal(tile_op, node: Fold, plan: Tile, placed: PlacedTile, facts: ContractionFacts) -> str | None:

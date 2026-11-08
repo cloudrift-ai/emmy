@@ -188,12 +188,9 @@ def _copied(stmt, bound: dict[str, tuple], dtypes: dict[str, object]) -> tuple |
     """What a same-dtype ``copy`` of one bound value binds: that value's own binding."""
     if not isinstance(stmt, Assign):
         return None
-    value = stmt.value
-    if value.operation is not None and value.operation.name == "copy" and len(value.operands) == 1:
-        (value,) = value.operands  # a spelled copy, before the normal form drops it
-    if not isinstance(value, Var):
+    if not isinstance(stmt.value, Var):
         return None
-    source = value.name
+    source = stmt.value.name
     return bound.get(source) if dtypes.get(source) in (None, stmt.dtype) or stmt.dtype is None else None
 
 

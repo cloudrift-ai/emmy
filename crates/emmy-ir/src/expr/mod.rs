@@ -793,22 +793,6 @@ impl Expression {
         Expression::new(Expr::Call(Name::new(op.text()), args.into()))
     }
 
-    /// Every operation node mapped through `f`, bottom-up; the tree is kept where `f` keeps every operation.
-    pub fn map_operations(&self, f: &mut dyn FnMut(Operation) -> Operation) -> Expression {
-        let mapped = self.map_children(&mut |child| child.map_operations(f));
-        match mapped.operation() {
-            Some((op, args)) => {
-                let new = f(op);
-                if new == op {
-                    mapped
-                } else {
-                    Expression::apply(new, args)
-                }
-            }
-            None => mapped,
-        }
-    }
-
     pub fn as_var(&self) -> Option<&Name> {
         match &**self {
             Expr::Var(name) => Some(name),

@@ -95,7 +95,11 @@ def test_boolean_bitwise_not_lowers_from_graph_loop_to_logical_cuda():
     loop_graph = Pipeline.build(LOOP_PASSES).run(_boolean_not_graph())
     loops = [node.op for node in loop_graph.nodes.values() if isinstance(node.op, LoopOp)]
     assert len(loops) == 1
-    next(stmt for stmt in loops[0] if isinstance(stmt, Assign) and stmt.op.name == "bitwise_not")
+    next(
+        stmt
+        for stmt in loops[0]
+        if isinstance(stmt, Assign) and stmt.value.operation is not None and stmt.value.operation.name == "bitwise_not"
+    )
 
     compiled = CudaBackend().compile(loop_graph)
     source = _cuda_nodes(compiled)[0].op.kernel_source

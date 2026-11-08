@@ -9,7 +9,7 @@ from __future__ import annotations
 import logging
 from dataclasses import replace
 
-from emmy.compiler.ir.expression import Expression, Literal, Var, apply
+from emmy.compiler.ir.expression import Expression, Literal, Var, affine_node, affine_sum, affine_terms, apply
 from emmy.compiler.ir.pure import Fold, Lambda
 from emmy.compiler.ir.pure.twist import RECIPES
 from emmy.compiler.ir.stmt import Assign, Body, Load, Statement
@@ -168,7 +168,7 @@ def _factored(term: Fold, param: str) -> Fold | None:
         if not isinstance(stmt, Assign):
             continue
         for sum_ in stmt.value.subterms():
-            form = affine_terms(sum_)
+            form = _sum_terms(sum_)
             if form is None:
                 continue
             terms, offset = form
@@ -186,54 +186,13 @@ def _factored(term: Fold, param: str) -> Fold | None:
     return None
 
 
-def affine_terms(expression: Expression) -> tuple[list[tuple[float, Expression]], float] | None:
-    """The affine form of a sum: ``(terms, offset)`` with a ``(coefficient, operand)`` per term, read through its
-    additions, subtractions, negations and literal factors; ``None`` when the expression is no sum of two or more
-    terms (a lone product, a name)."""
-
-    def collect(e: Expression, scale: float, terms: list, offset: list[float]) -> None:
-        op = e.operation
-        if isinstance(e, Literal):
-            offset[0] += scale * float(e.value)
-        elif op is None:
-            terms.append((scale, e))
-        elif op.name == "add":
-            for operand in e.operands:
-                collect(operand, scale, terms, offset)
-        elif op.name == "subtract":
-            collect(e.operands[0], scale, terms, offset)
-            collect(e.operands[1], -scale, terms, offset)
-        elif op.name == "negative":
-            collect(e.operands[0], -scale, terms, offset)
-        elif op.name == "multiply" and any(isinstance(operand, Literal) for operand in e.operands):
-            literal, other = sorted(e.operands, key=lambda operand: not isinstance(operand, Literal))
-            collect(other, scale * float(literal.value), terms, offset)
-        else:
-            terms.append((scale, e))
-
-    op = expression.operation
-    if op is None or op.name not in ("add", "subtract"):
+def _sum_terms(expression: Expression) -> tuple[list[tuple[float, Expression]], float] | None:
+    """The affine form of a sum of two or more terms (an offset counts as one); ``None`` for any other value (a lone
+    product, a name)."""
+    if not affine_node(expression):
         return None
-    terms: list[tuple[float, Expression]] = []
-    offset = [0.0]
-    collect(expression, 1.0, terms, offset)
-    return (terms, offset[0]) if len(terms) + (offset[0] != 0) >= 2 else None
-
-
-def affine_sum(terms: list[tuple[float, Expression]], offset: float) -> Expression:
-    """The sum the affine form ``(terms, offset)`` spells."""
-    out: Expression | None = None
-    for coefficient, operand in terms:
-        scaled = operand if abs(coefficient) == 1 else apply("multiply", abs(coefficient), operand)
-        if out is None:
-            out = apply("negative", scaled) if coefficient < 0 else scaled
-        else:
-            out = apply("subtract" if coefficient < 0 else "add", out, scaled)
-    if out is None:
-        return Literal(offset, "float")
-    if offset:
-        out = apply("subtract" if offset < 0 else "add", out, abs(offset))
-    return out
+    terms, offset = affine_terms(expression)
+    return (terms, offset) if len(terms) + (offset != 0) >= 2 else None
 
 
 def _reads_reduce(edge: Fold) -> bool:

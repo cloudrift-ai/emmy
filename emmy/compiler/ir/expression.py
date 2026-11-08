@@ -39,6 +39,9 @@ parse = _ir.parse
 apply = _ir.apply
 spell_name = _ir.spell_name
 affine_form = _ir.affine_form
+affine_terms = _ir.affine_terms
+affine_sum = _ir.affine_sum
+affine_node = _ir.affine_node
 split_anchor = _ir.split_anchor
 index_set_size = _ir.index_set_size
 placeholder = _ir.placeholder
@@ -51,21 +54,33 @@ for _cls in (Expression, Var, Literal, Builtin, BinaryExpression, FunctionCallEx
 
 
 def promoted_dtype(expression: Expression, dtype_of: Callable[[str], str | None]) -> str:
-    """The dtype a value expression computes at: a name's dtype by ``dtype_of`` (f32 when it has none), f32 for a
-    float literal, i32 for an integer one, and for an operation node the table's promotion of its operands' dtypes,
-    the rule one-operation definitions always rendered by. A select promotes its branches; a cast to ``int`` is i32."""
+    """The dtype a value expression computes at: a name's dtype by ``dtype_of`` (f32 when it has none), and for an
+    operation node the table's promotion of its operands' dtypes, the rule one-operation definitions always rendered
+    by. A literal contributes no dtype — ``2 * x`` computes at ``x``'s, as ``x + x`` does — so a value of literals
+    alone is f32, or i32 when every literal is an integer. A select promotes its branches; a cast to ``int`` is i32."""
+    promoted = _promoted(expression, dtype_of)
+    if promoted is not None:
+        return promoted
+    return "i32" if all(e.dtype != "float" for e in expression.subterms() if isinstance(e, Literal)) else "f32"
+
+
+def _promoted(expression: Expression, dtype_of: Callable[[str], str | None]) -> str | None:
+    """:func:`promoted_dtype` over the named operands alone; ``None`` where a value holds none."""
     if isinstance(expression, Var):
         return dtype_of(expression.name) or "f32"
     if isinstance(expression, Literal):
-        return "f32" if expression.dtype == "float" else "i32"
-    op = expression.operation
-    if op is not None:
-        return _ir.dtype_promote(op.name, [promoted_dtype(operand, dtype_of) for operand in expression.operands])
-    if isinstance(expression, TernaryExpression):
-        return _ir.dtype_promote("add", [promoted_dtype(expression.if_true, dtype_of), promoted_dtype(expression.if_false, dtype_of)])
+        return None
     if isinstance(expression, CastExpression):
         return "i32" if expression.dtype == "int" else "f32"
-    return "i32"
+    op = expression.operation
+    if op is not None:
+        operands, name = list(expression.operands), op.name
+    elif isinstance(expression, TernaryExpression):
+        operands, name = [expression.if_true, expression.if_false], "add"
+    else:
+        return "i32"
+    dtypes = [dtype for dtype in (_promoted(operand, dtype_of) for operand in operands) if dtype is not None]
+    return _ir.dtype_promote(name, dtypes) if dtypes else None
 
 
 def apply_binop(op: str, lv: object, rv: object) -> object:

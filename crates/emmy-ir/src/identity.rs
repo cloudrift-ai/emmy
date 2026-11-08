@@ -1154,6 +1154,40 @@ mod tests {
 
     /// The FMA cluster's representative is `add`: bodies that differ only in which FMA-issued operation sits at one
     /// position are equivalent for the autotune search.
+    /// The clustered identity collapses every FMA-class operation to one representative, yet keeps the tree the
+    /// representative chain spells (`Chains::Kept`): typed, `a * b - c` and `a * c - b` assign the f32 role to
+    /// different operands and key apart, while untyped they are one structure.
+    #[test]
+    fn the_clustered_identity_keeps_which_operand_a_sum_subtracts() {
+        let colors = HashMap::from([
+            (Name::from("A"), "f16".to_string()),
+            (Name::from("B"), "f16".to_string()),
+            (Name::from("C"), "f32".to_string()),
+        ]);
+        let product = |left: &str, right: &str, subtrahend: &str| {
+            looped(
+                "i",
+                8,
+                &[
+                    "p = load A[i]".to_string(),
+                    "q = load B[i]".to_string(),
+                    "r = load C[i]".to_string(),
+                    format!("o = {left} * {right} - {subtrahend}"),
+                    "O[i] = o".to_string(),
+                ],
+            )
+        };
+        let halves = body(&product("p", "q", "r"));
+        let mixed = body(&product("p", "r", "q"));
+        assert_eq!(identity_key(&halves, true), identity_key(&mixed, true));
+        let typed = |given: &Body| {
+            canonicalize_identity(given, true, Some(&colors))
+                .unwrap()
+                .key
+        };
+        assert_ne!(typed(&halves), typed(&mixed));
+    }
+
     #[test]
     fn the_fma_operations_share_a_clustered_identity() {
         let keys: HashSet<String> = ["add", "subtract", "multiply", "negative"]

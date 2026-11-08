@@ -36,7 +36,7 @@ from functools import cached_property
 
 from emmy.compiler.ir.axis import Axis
 from emmy.compiler.ir.elementwise import ElementwiseImpl
-from emmy.compiler.ir.expression import Expression, Literal, Var, apply
+from emmy.compiler.ir.expression import Expression, Literal, Var, affine_sum, affine_terms, apply
 from emmy.compiler.ir.pure.lam import Lambda
 from emmy.compiler.ir.pure.twist import Recipe, Twist
 from emmy.compiler.ir.sigma import Sigma
@@ -1013,13 +1013,6 @@ class Fold:
                     return True
             return False
 
-        def summands(expression: Expression) -> list[Expression]:
-            """The terms a sum adds, through its additions: the affine form flattens ``(q + q__o) + corr``."""
-            op = expression.operation
-            if op is not None and op.name == "add":
-                return [term for operand in expression.operands for term in summands(operand)]
-            return [expression]
-
         out: list[Statement] = []
         for stmt in applied:
             if stmt.name not in view.states:
@@ -1030,10 +1023,17 @@ class Fold:
                 # The pivot's final write copies its own ``maximum`` temp: accumulate that maximum.
                 value = pivot.value
             op, operands = value.operation, value.operands
-            terms = summands(value) if op is not None and op.name == "add" else list(operands)
-            if Var(state) in terms:
+            if op is not None and op.name == "add":
+                # ``state + rest`` in affine form: the rest accumulates into the state.
+                terms, offset = affine_terms(value)
+                if (1.0, Var(state)) in terms:
+                    terms.remove((1.0, Var(state)))
+                    rest = affine_sum(terms, offset) if terms or offset else Var(state)
+                    out.append(Accum(name=state, value=rest, op=op))
+                    continue
+            elif Var(state) in operands:
                 # ``state ⊕ rest``: the rest accumulates into the state.
-                terms.remove(Var(state))
+                terms = [operand for operand in operands if operand != Var(state)]
                 rest = Var(state) if not terms else terms[0] if len(terms) == 1 else apply(op, *terms)
                 out.append(Accum(name=state, value=rest, op=op))
                 continue

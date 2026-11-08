@@ -108,11 +108,6 @@ class RenderCtx:
     # consumed by ``Var.render`` to inline the float at use sites instead
     # of emitting a named ``float in0 = 0.044f;`` decl.
     literal_ssa: dict[str, float] = field(default_factory=dict)
-    # Single-use scalar SSA temps folded into their sole consumer's expression — readability only
-    # (``EMMY_READABLE``), so ``m_i__t2 = expf(m_i__t1)`` with ``m_i__t1 = m_i - t0`` collapses to
-    # ``m_i__t2 = expf(m_i - t0)`` (the scalar-tier analogue of the fragment chain fusion). Populated
-    # by ``render_body`` (per flat body, in def order) and consumed by ``Var.render`` — exactly like
-    # ``literal_ssa`` but the inlined value is a rendered sub-expression, not a float.
     # Per-buffer byte offsets into a single ``extern __shared__`` pool
     # ``_smem_pool``. When non-empty, ``Smem``'s render emits a pointer
     # alias into the pool instead of a stand-alone ``__shared__`` array
@@ -882,8 +877,11 @@ def _render_node(
         return [f"{pad}{ctx.type_name(result_dt)} {name} = {render_expression(node, ctx)};"]
     operands = [operand(child) for child in node.operands]
     args = [expression for expression, _ in operands]
-    arg_dtypes = [arg_dt for _, arg_dt in operands]
     op_name = op.name
+    # A literal contributes no dtype: it is spelled at the dtype the named operands promote to.
+    named = [arg_dt for arg, arg_dt in operands if not isinstance(arg, Literal)]
+    promoted = dtype_promote(op_name, named) if named else promoted_dtype(node, ctx.ssa_dtypes.get)
+    arg_dtypes = [promoted if isinstance(arg, Literal) else arg_dt for arg, arg_dt in operands]
     if op_name == "bitcast":
         if len(args) != 1 or not isinstance(args[0], Var) or dtype is None:
             raise ValueError("bitcast requires one named argument and an explicit destination dtype")
@@ -892,7 +890,7 @@ def _render_node(
     # Default rule: f16 stays narrow only when all inputs agree; generic integer arithmetic/bit operations likewise
     # retain one common integer dtype. Other cases promote to f32. An explicit ``dtype`` overrides — the demote pass
     # uses this to force a narrower dtype on the result.
-    result_dt = dtype if dtype is not None else dtype_promote(op_name, arg_dtypes)
+    result_dt = dtype if dtype is not None else promoted
     if result_dt == "f16" and op.decodes is not None and arg_dtypes == [op.decodes] and isinstance(args[0], Var):
         # Every fp8 value is an f16 value: the decode converts straight to it, not through f32 and back.
         ctx.ssa_dtypes[name] = result_dt

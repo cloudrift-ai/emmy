@@ -15,7 +15,7 @@ from typing import TYPE_CHECKING
 
 from emmy.compiler.dtype import F32
 from emmy.compiler.ir.axis import Axis
-from emmy.compiler.ir.expression import BinaryExpression, Expression, Literal, TernaryExpression, Var, apply
+from emmy.compiler.ir.expression import BinaryExpression, Expression, Literal, TernaryExpression, Var, affine_node, apply
 from emmy.compiler.ir.loop import LoopOp
 from emmy.compiler.ir.pure import Lambda
 from emmy.compiler.ir.pure.fold import EXTENTS, Fold, binding_extents
@@ -260,7 +260,7 @@ def _one_per_node(body: Body) -> Body:
     def part(node: Expression, base: str, in_affine: bool) -> Expression:
         """``node`` with the operation nodes below it defined, itself defined too unless it is the root or a node of
         the enclosing affine region."""
-        affine = _affine_node(node)
+        affine = affine_node(node)
         rebuilt = node.with_children([part(child, base, affine) for child in node.children()])
         if rebuilt.operation is None or (in_affine and affine):
             return rebuilt
@@ -270,7 +270,7 @@ def _one_per_node(body: Body) -> Body:
 
     for stmt in body:
         if isinstance(stmt, Assign):
-            affine = _affine_node(stmt.value)
+            affine = affine_node(stmt.value)
             value = stmt.value.with_children([part(child, stmt.name, affine) for child in stmt.value.children()])
             out.append(stmt if value == stmt.value else stmt.replace(value=value))
         elif isinstance(stmt, Accum) and not isinstance(stmt.value, Var):
@@ -283,20 +283,6 @@ def _one_per_node(body: Body) -> Body:
         else:
             out.append(stmt)
     return Body(tuple(out))
-
-
-def _affine_node(node: Expression) -> bool:
-    """Whether ``node`` is a node of an affine region: a sum, a difference, a negation, or a product or quotient with a
-    literal factor."""
-    op = node.operation
-    if op is None:
-        return False
-    if op.name in ("add", "subtract", "negative"):
-        return True
-    operands = node.operands
-    if op.name == "multiply":
-        return any(isinstance(operand, Literal) for operand in operands)
-    return op.name == "divide" and len(operands) == 2 and isinstance(operands[1], Literal)
 
 
 def _factor_products(

@@ -229,7 +229,7 @@ pub(crate) fn operand_ranks(
 }
 
 /// The key of an operand no statement of the body defines: a free name, after every defined one.
-pub(crate) fn unranked() -> Key {
+pub fn unranked() -> Key {
     Key::tuple([Key::Int(3), Key::str("")])
 }
 

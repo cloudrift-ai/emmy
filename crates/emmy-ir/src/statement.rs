@@ -919,8 +919,6 @@ pub struct FieldInfo {
     pub has_default: bool,
     /// Given by keyword only in the Python constructor (an `Init`'s dtype): `KW_ONLY` in the declaration, no role.
     pub kw_only: bool,
-    /// The expression class every expression the field holds must belong to, when the declaration names one.
-    pub class: Option<crate::expr::ExprClass>,
 }
 
 /// The class an expression field's roles declare, when they declare one.
@@ -935,8 +933,7 @@ pub fn class_of(roles: Roles) -> Option<crate::expr::ExprClass> {
 }
 
 /// Every expression `field` holds, visited under `roles`, is of the class its roles declare (a record's fields
-/// under their own), or the first that is not is the error, named by `label` (`Load.index`). An expression field
-/// that declares no class is an error of the declaration.
+/// under their own), or the first that is not is the error, named by `label` (`Load.index`).
 pub fn classed<T: crate::field::Field>(field: &T, roles: Roles, label: &str) -> crate::Result<()> {
     struct Check(crate::Result<()>);
     impl crate::field::Visitor for Check {
@@ -944,12 +941,9 @@ pub fn classed<T: crate::field::Field>(field: &T, roles: Roles, label: &str) -> 
             if self.0.is_err() || !roles.contains_any(EXPRESSION) {
                 return;
             }
-            self.0 = match class_of(roles) {
-                Some(class) => class.check(expression),
-                None => Err(crate::Error::Value(
-                    "an expression field that declares no class".into(),
-                )),
-            };
+            if let Some(class) = class_of(roles) {
+                self.0 = class.check(expression);
+            }
         }
     }
     let mut check = Check(Ok(()));
@@ -965,17 +959,11 @@ impl FieldInfo {
     pub fn is_block(&self) -> bool {
         self.roles.contains_any(BODY.or(TERM).or(STMTS))
     }
-}
 
-#[doc(hidden)]
-#[macro_export]
-macro_rules! __expr_class {
-    () => {
-        None
-    };
-    ($class:ident) => {
-        Some($crate::expr::ExprClass::$class)
-    };
+    /// The expression class every expression the field holds must belong to: what its roles declare.
+    pub fn class(&self) -> Option<crate::expr::ExprClass> {
+        class_of(self.roles)
+    }
 }
 
 #[doc(hidden)]
@@ -1230,7 +1218,7 @@ macro_rules! define_statement_types {
     (@fields $Type:ident { $( $field:ident : $ty:ty [$($role:ident)|*] $(: $class:ident)? $(= $default:expr)? ,)* }) => {
         pub const NAME: &'static str = stringify!($Type);
         pub const FIELDS: &'static [FieldInfo] = &[
-            $( FieldInfo { name: stringify!($field), roles: Roles::NONE $(.or(define_statement_types!(@role $role)))*.or($crate::__class_role!($($class)?)), has_default: $crate::__has_default!($($default)?), kw_only: define_statement_types!(@kw_only $($role)|*), class: $crate::__expr_class!($($class)?) }, )*
+            $( FieldInfo { name: stringify!($field), roles: Roles::NONE $(.or(define_statement_types!(@role $role)))*.or($crate::__class_role!($($class)?)), has_default: $crate::__has_default!($($default)?), kw_only: define_statement_types!(@kw_only $($role)|*) }, )*
         ];
 
         /// Visit every role-playing value, in field order.
@@ -1374,7 +1362,7 @@ mod tests {
             fields
                 .iter()
                 .map(|f| {
-                    f.class
+                    f.class()
                         .map_or_else(|| f.name.to_string(), |class| format!("{}:{class}", f.name))
                 })
                 .collect::<Vec<_>>()
@@ -1397,7 +1385,7 @@ mod tests {
     }
 
     /// A field has a class exactly when it plays `EXPRESSION`: the check reads the class from the roles, so an
-    /// expression field without one would refuse every statement, and a class on anything else would check nothing.
+    /// expression field without one would go unchecked, and a class on anything else would check nothing.
     #[test]
     fn a_field_has_a_class_exactly_when_it_holds_expressions() {
         let records = [
@@ -1412,11 +1400,10 @@ mod tests {
             for field in fields {
                 assert_eq!(
                     field.roles.contains_any(EXPRESSION),
-                    field.class.is_some(),
+                    field.class().is_some(),
                     "{name}.{}",
                     field.name
                 );
-                assert_eq!(class_of(field.roles), field.class, "{name}.{}", field.name);
             }
         }
     }

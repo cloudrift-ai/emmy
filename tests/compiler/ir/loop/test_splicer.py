@@ -14,7 +14,7 @@ import pytest
 from emmy.compiler.dtype import F16, DataType
 from emmy.compiler.graph import Graph
 from emmy.compiler.ir.base import InputOp
-from emmy.compiler.ir.expression import BinaryExpression, Literal, Var
+from emmy.compiler.ir.expression import BinaryExpression, Var, affine_node, affine_terms
 from emmy.compiler.ir.loop import Accum, Assign, Load, Loop, LoopOp, UnfusableStmt, Write, splice_graph, splice_loops
 from emmy.compiler.ir.stmt import parse_body
 from emmy.compiler.tensor import Tensor
@@ -46,12 +46,8 @@ def _spine(value, out=None):
     entry per affine region (additions, subtractions, negations and literal scales), the analog of one sum statement.
     A term below a non-affine operation (``exp(-x)``) is its own region."""
     out = [] if out is None else out
-    op = value.operation
-    name = op.name if op is not None else None
-    scaled = name == "multiply" and any(isinstance(operand, Literal) for operand in value.operands)
-    if name in ("add", "subtract", "negative") or scaled:
-        terms: list = []
-        offset = _terms(value, 1.0, terms)
+    if affine_node(value):
+        terms, offset = affine_terms(value)
         out.append((tuple(sorted(coefficient for coefficient, _ in terms)), offset))
         for _, leaf in terms:
             _spine(leaf, out)
@@ -59,26 +55,6 @@ def _spine(value, out=None):
         for child in value.children():
             _spine(child, out)
     return out
-
-
-def _terms(value, scale: float, terms: list) -> float:
-    """Collect ``value``'s affine terms as ``(coefficient, leaf)`` under ``scale``; the literal offset is returned."""
-    if isinstance(value, Literal):
-        return scale * float(value.value)
-    op = value.operation
-    name = op.name if op is not None else None
-    operands = value.operands
-    if name == "add":
-        return sum(_terms(operand, scale, terms) for operand in operands)
-    if name == "subtract":
-        return _terms(operands[0], scale, terms) + _terms(operands[1], -scale, terms)
-    if name == "negative":
-        return _terms(operands[0], -scale, terms)
-    if name == "multiply" and any(isinstance(operand, Literal) for operand in operands):
-        literal, other = sorted(operands, key=lambda operand: not isinstance(operand, Literal))
-        return _terms(other, scale * float(literal.value), terms)
-    terms.append((scale, value))
-    return 0.0
 
 
 def _operations(body) -> list[str]:
@@ -89,12 +65,8 @@ def _operations(body) -> list[str]:
         if not isinstance(stmt, (Assign, Accum)):
             continue
         for node in stmt.value.subterms():
-            op = node.operation
-            if op is None or op.name in ("add", "subtract", "negative"):
-                continue
-            if op.name == "multiply" and any(isinstance(operand, Literal) for operand in node.operands):
-                continue
-            names.append(op.name)
+            if node.operation is not None and not affine_node(node):
+                names.append(node.operation.name)
     return names
 
 
@@ -233,7 +205,7 @@ def test_pointwise_chain():
 
     merged = _splice_loop_ops(producer, consumer, source="src_0")
     assert merged is not None
-    # exp from producer; the consumer's ``add(y, y)`` folds to one Affine ``2*y``.
+    # exp from producer; the consumer's ``add(y, y)`` takes its affine form ``2 * y``.
     assert "exp" in _elementwise_fns(merged)
     assert _affine_shapes(merged) == [((2.0,), 0.0)]
     # Producer's Load (consumer had no other inputs) survives as source 0.
@@ -637,7 +609,7 @@ def test_chain_three_loops():
     )
     assert merged is not None
     assert "exp" in _elementwise_fns(merged)
-    # ``-exp(x) + bias``: the negation and the add fold into one Affine.
+    # ``-exp(x) + bias``: the negation and the add are one sum in affine form.
     assert _affine_shapes(merged) == [((-1.0, 1.0), 0.0)]
     # Two external Loads remain (X, BIAS); the splice edges collapsed into copy aliases.
     loads = [s for s in merged.body.iter() if isinstance(s, Load)]
@@ -848,7 +820,7 @@ def test_multi_output_splice_target():
     fns = _elementwise_fns(merged)
     # Both target ops appear in the merged body once each.
     assert fns.count("exp") == 1
-    # The negation is read once (its write left with the splice edge), so ``exp(x) + (-x)`` is one Affine.
+    # The negation is read once (its write left with the splice edge), so ``exp(x) + (-x)`` is one sum in affine form.
     assert _affine_shapes(merged) == [((-1.0, 1.0), 0.0)]
     # Only one external Load (target's x); the splice edges replaced sink's Loads.
     loads = [s for s in merged.body.iter() if isinstance(s, Load)]

@@ -369,6 +369,8 @@ expressions among other things is read by a subclass of `Parser`, which takes ea
 | `Var`, `Literal`, `BinaryExpression`, `Builtin`, `FunctionCallExpression`, `TernaryExpression`, `CastExpression`, `FlatIndex` | Expression nodes, implemented in the `emmy-ir` crate and exported here. Each has `eval(env) → value/ndarray`, `substitute(mapping)`, `free_vars()`, plus the generic tree walks `subterms()` / `children()` / `rebuild(fn)`, and the Python operators build them. `FlatIndex` is a buffer coordinate's row-major offset, flattened against the buffer's shape at render time; it only appears in a kernel body. |
 | `Expression`                                                                       | The base class. Its text is its wire form and its structural form; `repr` is the constructor form the graph's dict form reads back. |
 | `PLACEHOLDER_PREFIX`, `placeholder`, `is_placeholder`                        | Convention for output-coord placeholders in coord maps.                  |
+| `affine_terms`, `affine_sum`, `affine_node`                                  | The crate's one affine form: a value's `(coefficient, operand)` terms and offset, the sum they spell, and whether a node is one of the form (a sum, a difference, a negation, a literal scale or a quotient by a literal). Every reader that takes a sum apart uses these; none carries a list of operation names. |
+| `promoted_dtype`                                                             | The dtype a value computes at: the table's promotion of its named operands, node by node; a literal contributes none. |
 
 ## `frontend/ir.py`
 

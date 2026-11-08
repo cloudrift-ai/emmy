@@ -802,6 +802,57 @@ pub fn affine_form<'py>(
     Ok(Some((PyExpression::wrap(py, &anchor)?, out)))
 }
 
+/// An affine form as Python sees it: the `(coefficient, operand)` terms and the offset.
+type AffineForm<'py> = (Vec<(f64, Bound<'py, PyAny>)>, f64);
+
+/// The affine form of a value: its terms, `(coefficient, operand)` each, and its literal offset — the form the
+/// normal form spells every sum in. A value that is no sum is one term with coefficient one.
+#[pyfunction]
+pub fn affine_terms<'py>(
+    py: Python<'py>,
+    expression: &Bound<'py, PyAny>,
+) -> PyResult<AffineForm<'py>> {
+    let form = emmy_ir::normalize::affine_terms(&expression_from_py(expression)?);
+    let terms = form
+        .terms
+        .iter()
+        .map(|(coefficient, term)| Ok((*coefficient, PyExpression::wrap(py, term)?)))
+        .collect::<PyResult<Vec<_>>>()?;
+    Ok((terms, form.offset))
+}
+
+/// The sum an affine form spells: like terms merged, a whole-number coefficient or offset as the integer, the offset
+/// last; the terms in the order the normal form gives names it does not rank.
+#[pyfunction]
+pub fn affine_sum<'py>(
+    py: Python<'py>,
+    terms: &Bound<'py, PyAny>,
+    offset: f64,
+) -> PyResult<Bound<'py, PyAny>> {
+    let terms: Vec<(f64, Expression)> = terms
+        .try_iter()?
+        .map(|item| {
+            let (coefficient, term): (f64, Bound<'py, PyAny>) = item?.extract()?;
+            Ok((coefficient, expression_from_py(&term)?))
+        })
+        .collect::<PyResult<_>>()?;
+    let form = emmy_ir::normalize::AffineTerms { terms, offset };
+    PyExpression::wrap(
+        py,
+        &emmy_ir::normalize::affine_sum(form, &|_| emmy_ir::normalize::ties::unranked()),
+    )
+}
+
+/// Whether `expression` is an operation node of the affine form: a sum, a difference, a negation, a product with a
+/// literal factor or a quotient by a literal.
+#[pyfunction]
+pub fn affine_node(expression: &Bound<'_, PyAny>) -> PyResult<bool> {
+    let expression = expression_from_py(expression)?;
+    Ok(expression
+        .operation()
+        .is_some_and(|(op, args)| emmy_ir::normalize::affine_node(op, &args)))
+}
+
 /// `expression` as `(its integer anchor, the rest)`, or `None`.
 #[pyfunction]
 pub fn split_anchor<'py>(
@@ -865,6 +916,9 @@ pub fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(apply, m)?)?;
     m.add_function(wrap_pyfunction!(spell_name, m)?)?;
     m.add_function(wrap_pyfunction!(affine_form, m)?)?;
+    m.add_function(wrap_pyfunction!(affine_terms, m)?)?;
+    m.add_function(wrap_pyfunction!(affine_sum, m)?)?;
+    m.add_function(wrap_pyfunction!(affine_node, m)?)?;
     m.add_function(wrap_pyfunction!(split_anchor, m)?)?;
     m.add_function(wrap_pyfunction!(index_set_size, m)?)?;
     m.add_function(wrap_pyfunction!(placeholder, m)?)?;

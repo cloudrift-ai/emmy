@@ -172,32 +172,53 @@ impl Context<'_> {
             } else {
                 terms = args;
             }
-            // The sides are keyed twice: once to learn their content order, on state that is then rolled back, and
-            // once in that order, so a parameter or resource first met inside this node takes the index the content
-            // order gives it and not the one the spelling would.
-            let marks = (
-                self.out.buffers.len(),
-                self.out.states.len(),
-                params.len(),
-                touched.len(),
-            );
-            let mut sides: Vec<(Key, &Expression)> = Vec::new();
-            for side in &terms {
-                let mut own: Vec<Value> = Vec::new();
-                let key = self.value_key(side, params, &mut own, touched);
-                sides.push((by_content(&key, &own, params), side));
-            }
-            sides.sort_by(|a, b| a.0.cmp(&b.0));
-            self.out.buffers.truncate(marks.0);
-            self.out.states.truncate(marks.1);
-            params.truncate(marks.2);
-            touched.truncate(marks.3);
+            // Each side is keyed once, into parameter, operand and resource lists of its own, and the sides are
+            // laid into this node's lists in the order of what they compute: a parameter or resource first met
+            // inside the node takes the index the content order gives it, not the one the spelling would.
+            let mut sides: Vec<Side> = terms
+                .iter()
+                .map(|side| {
+                    let marks = (self.out.buffers.len(), self.out.states.len());
+                    let (mut params, mut ops, mut touched) = (Vec::new(), Vec::new(), Vec::new());
+                    let key = self.value_key(side, &mut params, &mut ops, &mut touched);
+                    Side {
+                        order: by_content(&key, &ops, &params),
+                        key,
+                        ops,
+                        params,
+                        touched,
+                        buffers: self.out.buffers.split_off(marks.0),
+                        states: self.out.states.split_off(marks.1),
+                    }
+                })
+                .collect();
+            sides.sort_by(|a, b| a.order.cmp(&b.order));
             let mut keys = Vec::new();
-            for (_, side) in sides {
-                let mut own: Vec<Value> = Vec::new();
-                let key = self.value_key(side, params, &mut own, touched);
-                keys.push(shifted(&key, ops.len() as i64));
-                ops.extend(own);
+            for side in sides {
+                let placed: Vec<usize> = side
+                    .params
+                    .iter()
+                    .map(|param| match params.iter().position(|p| p == param) {
+                        Some(index) => index,
+                        None => {
+                            params.push(param.clone());
+                            params.len() - 1
+                        }
+                    })
+                    .collect();
+                keys.push(relabeled(&side.key, ops.len() as i64, &placed));
+                ops.extend(side.ops);
+                touched.extend(side.touched);
+                for (held, met) in [
+                    (&mut self.out.buffers, side.buffers),
+                    (&mut self.out.states, side.states),
+                ] {
+                    for name in met {
+                        if !held.contains(&name) {
+                            held.push(name);
+                        }
+                    }
+                }
             }
             return Key::tuple([
                 Key::str(ExprType::Binary.text()),
@@ -979,13 +1000,35 @@ fn by_content(key: &Key, ops: &[Value], params: &[Param]) -> Key {
 }
 
 /// `key` with every operand placeholder moved `by` positions: a side's operands appended after the other side's.
-fn shifted(key: &Key, by: i64) -> Key {
+/// One side of a commutative node, keyed on lists of its own before the sides are laid in content order.
+struct Side {
+    order: Key,
+    key: Key,
+    ops: Vec<Value>,
+    params: Vec<Param>,
+    touched: Vec<Name>,
+    buffers: Vec<Name>,
+    states: Vec<Name>,
+}
+
+/// `key` with its operand indices shifted by `ops` and its coordinate indices mapped through `params`: a side keyed
+/// on lists of its own, spelled against the node's.
+fn relabeled(key: &Key, ops: i64, params: &[usize]) -> Key {
     match key {
         Key::Tuple(parts) => match &parts[..] {
             [tag, Key::Int(index)] if *tag == Key::tag(Tag::Operand) => {
-                Key::tuple([tag.clone(), Key::Int(index + by)])
+                Key::tuple([tag.clone(), Key::Int(index + ops)])
             }
-            _ => Key::Tuple(parts.iter().map(|part| shifted(part, by)).collect()),
+            [tag, Key::Int(index)] if *tag == Key::tag(Tag::Coordinate) => Key::tuple([
+                tag.clone(),
+                Key::Int(params.get(*index as usize).map_or(*index, |at| *at as i64)),
+            ]),
+            _ => Key::Tuple(
+                parts
+                    .iter()
+                    .map(|part| relabeled(part, ops, params))
+                    .collect(),
+            ),
         },
         other => other.clone(),
     }
@@ -1047,6 +1090,28 @@ mod tests {
                 .unwrap()
         };
         assert_ne!(kept("(x + y) + z"), kept("x + (y + z)"));
+    }
+
+    /// Each side of a commutative node is keyed once: a chain the clustered identity keeps as a tree is linear in
+    /// its depth, not doubled at every level.
+    #[test]
+    fn a_deep_commutative_tree_is_keyed_once_per_node() {
+        let mut sum = String::from("x0");
+        let mut loads = vec!["x0 = load p[0]".to_string()];
+        for i in 1..40 {
+            loads.push(format!("x{i} = load p[{i}]"));
+            sum = format!("({sum} + x{i})");
+        }
+        let body = crate::text::parse_body(&format!("{}\nv = {sum}\nout[0] = v", loads.join("\n")))
+            .unwrap();
+        let start = std::time::Instant::now();
+        let numbering = value_numbers(&body, &|name| Key::Str(*name), Chains::Kept);
+        assert!(numbering.numbers[40].is_some());
+        assert!(
+            start.elapsed() < std::time::Duration::from_millis(500),
+            "{:?}",
+            start.elapsed()
+        );
     }
 
     #[test]

@@ -10,8 +10,9 @@ Stamping rules:
 - ``Load(input=B)`` — ``dtype = B``'s buffer dtype, read off the op's
   ``inputs`` / ``outputs`` (matcher-populated graph Tensors). A Load against
   a locally-declared buffer (smem) keeps the render-time fallback.
-- ``Assign(value)`` — the promotion of the value's operands node by node (``promoted_dtype``), the same rule
-  ``Assign``'s render applies. A square ``x * x`` and ``pow`` are promoted to f32 (overflow guard, below).
+- ``Assign(value)`` — the promotion of the value's named operands node by node (``promoted_dtype``; a literal
+  contributes no dtype, so ``2 * x`` computes at ``x``'s), the same rule ``Assign``'s render applies. A square
+  ``x * x`` and ``pow`` are promoted to f32 (overflow guard, below).
 - ``Write(output, value)`` — ``value_dtype = ssa[value]``. The destination
   buffer dtype stays a render-time concern; only the value side is stamped.
 - ``Accum`` / ``Init`` are already typed — register

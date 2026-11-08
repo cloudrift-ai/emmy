@@ -383,16 +383,7 @@ pub(crate) fn value_canonical(e: &Expression, rank: &dyn Fn(&Name) -> Key) -> Ex
     let Some((op, args)) = e.operation() else {
         return e;
     };
-    // A sum, a difference, a negation, a product with a literal factor or a quotient by a literal is a node of the
-    // affine form; a product of two values or a quotient by a value is an operation like any other.
-    let literal = |index: usize| matches!(args.get(index).map(|a| &**a), Some(Expr::Literal(_)));
-    let affine_node = match op.info().affine {
-        Some(AffineRole::Sum | AffineRole::Difference | AffineRole::Negation) => true,
-        Some(AffineRole::Scale) => literal(0) || literal(1),
-        Some(AffineRole::Quotient) => literal(1),
-        None => false,
-    };
-    if affine_node {
+    if affine_node(op, &args) {
         return affine_value(&e, rank);
     }
     if let [left, right] = &args[..] {
@@ -447,13 +438,25 @@ fn ranked(e: &Expression, rank: &dyn Fn(&Name) -> Key) -> Key {
 
 /// The terms of an affine tree, `coefficient * operand` each, and its literal offset. A quotient by an integer
 /// literal stays a term, since integer division floors; only a float literal divisor folds into a reciprocal scale.
-pub(crate) struct AffineTerms {
+pub struct AffineTerms {
     pub terms: Vec<(f64, Expression)>,
     pub offset: f64,
 }
 
 /// The affine form's terms: collected through additions, subtractions, negations and literal factors or divisors.
-pub(crate) fn affine_terms(e: &Expression) -> AffineTerms {
+/// Whether an operation node is a node of the affine form: a sum, a difference, a negation, a product with a literal
+/// factor or a quotient by a literal. A product of two values or a quotient by a value is an operation like any other.
+pub fn affine_node(op: Operation, args: &[Expression]) -> bool {
+    let literal = |index: usize| matches!(args.get(index).map(|a| &**a), Some(Expr::Literal(_)));
+    match op.info().affine {
+        Some(AffineRole::Sum | AffineRole::Difference | AffineRole::Negation) => true,
+        Some(AffineRole::Scale) => literal(0) || literal(1),
+        Some(AffineRole::Quotient) => literal(1),
+        None => false,
+    }
+}
+
+pub fn affine_terms(e: &Expression) -> AffineTerms {
     fn collect(e: &Expression, scale: f64, out: &mut AffineTerms) {
         if let Expr::Literal(lit) = &**e
             && lit.dtype != LitType::Bool
@@ -516,7 +519,13 @@ pub(crate) fn affine_terms(e: &Expression) -> AffineTerms {
 
 /// `e`, an affine node, as a sum in affine form: see [`value_canonical`].
 fn affine_value(e: &Expression, rank: &dyn Fn(&Name) -> Key) -> Expression {
-    let AffineTerms { terms, offset } = affine_terms(e);
+    affine_sum(affine_terms(e), rank)
+}
+
+/// The sum an affine form spells, its terms ordered by `rank`: the one spelling of a sum in the normal form, and the
+/// one every reader that takes a sum apart and puts it back uses.
+pub fn affine_sum(form: AffineTerms, rank: &dyn Fn(&Name) -> Key) -> Expression {
+    let AffineTerms { terms, offset } = form;
     // A whole-number coefficient or offset is spelled as the integer: `x + x`, `2.0 * x` and `x / 0.5` are one
     // form, and integer arithmetic over coordinates stays integer. A value promotes an integer literal as it does
     // any operand.

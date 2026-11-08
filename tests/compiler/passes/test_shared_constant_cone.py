@@ -195,7 +195,7 @@ def test_a_same_dtype_copy_of_the_bound_value_is_a_repeat() -> None:
         """
         v0 = load ws[0]
         acc0 = load ws[0]
-        f16 v0 = copy(acc0)
+        f16 v0 = acc0
         """
     )
 
@@ -208,7 +208,7 @@ def test_a_converting_copy_under_a_bound_name_survives_as_the_fault_it_is() -> N
         """
         f32 v0 = load ws[0]
         f32 acc0 = load ws[0]
-        f16 v0 = copy(acc0)
+        f16 v0 = acc0
         """
     )
 

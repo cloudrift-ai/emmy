@@ -19,7 +19,7 @@ from emmy.compiler.ir.base import InputOp
 from emmy.compiler.ir.expression import Var
 from emmy.compiler.ir.loop import LoopOp
 from emmy.compiler.ir.pure.fold import Fold
-from emmy.compiler.ir.stmt import Body, Load, Loop, parse_body
+from emmy.compiler.ir.stmt import Assign, Body, Load, Loop, parse_body
 from emmy.compiler.ir.tensor.ir import ReduceOp
 from emmy.compiler.pipeline import TILE_PASSES, Pipeline
 from emmy.compiler.pipeline.passes.tile._cut import cuttable_seams
@@ -460,6 +460,29 @@ def test_a_sum_ahead_of_an_inner_parallel_loop_peels_onto_the_placement() -> Non
     assert [axis.extent for axis in tile.place.free] == [Dim(3), Dim(4)]
     assert tile.op.axis is None and tile.op.operands == ()
     assert [type(stmt).__name__ for stmt in tile.op.lift.body] == ["Load", "Assign", "Assign", "Load", "Assign"]
+
+
+def test_an_affine_chain_of_statements_lifts_as_one_node() -> None:
+    """A sum spread over statements (``t = a + b; u = t - c``) is one affine region: the normal form folds it into
+    one sum and the lift keeps that sum one node, as the affine form is one operation; the operations around it
+    (``exp``, the product) are nodes of their own."""
+    tile = _tile(
+        parse_body(
+            """
+            for r in 0..8:
+                a = load p[r]
+                b = load q[r]
+                c = load s[r]
+                t = add(a, b)
+                u = subtract(t, c)
+                e = exp(u)
+                v = multiply(e, 2.0)
+                out[r] = v
+            """
+        )
+    )
+    values = [stmt.value for stmt in tile.op.lift.body if isinstance(stmt, Assign)]
+    assert [str(value) for value in values] == ["in0 + in1 - in2", "exp(v0__e0)", "2 * v0__e1"], [str(v) for v in values]
 
 
 def test_a_body_lifts_to_one_fold_tree_before_and_after_the_fold() -> None:
