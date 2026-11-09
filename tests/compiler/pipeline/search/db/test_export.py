@@ -343,6 +343,36 @@ def test_a_several_seam_cut_is_walked_one_seam_at_a_time():
     assert reproduction_rate([verdict for verdict in reproduce_placement(pools, None) if verdict.pool is parent]) == 1.0
 
 
+def test_a_remainder_reached_through_a_piece_pool_carries_the_next_recorded_cut():
+    """A golden that cut a piece, then cut the remainder that cut left, records the second cut on the remainder under
+    its identity. Walked as its own pool, the remainder's fork is that cut; walked from the piece's pool, the remainder
+    is minted inside the piece's program, and its identity must be the one the file records, or the walk keeps it whole
+    and labels the same fork "fuse" — two labels on one feature row, which no prior reproduces both of. That held only
+    while the normal form had one fixed point for the piece's body: with two (the sibling reductions merged in one loop
+    or kept apart by a value between them), the two programs lifted to trees whose seams carved different halves. The
+    RTX 5090 golden's `gdn2rows` linear piece is cut three times this way."""
+    from emmy.compiler.pipeline.search.prior.reproduce import reproduce_placement, reproduction_rate
+    from emmy.compiler.pipeline.search.ranking import placement_decisions, pool_context, walk_placement
+
+    golden = GoldenFile.load(Path(__file__).parents[5] / "emmy/compiler/pipeline/search/golden/records/rtx5090_sm120.json")
+    piece = "k_linear_mean_reduce_f54190__place_5ae451282a"
+    rows = [row for row in golden.rows if any(golden.kernel(route.parent).name.startswith(piece) for route in golden.path_to(row.kernel))]
+    db = SearchDB()
+    import_rows(db, regime_context(golden, rows[0].pins), golden, rows, source="golden:case")
+    pools = placement_pools(db, golden_pools(db)[0])
+    [first, *deeper] = sorted((pool for pool in pools if pool.kernel.name == piece and pool.rows), key=lambda pool: len(pool.rows[0].knobs))
+
+    def walk(pool):
+        return walk_placement(pool, pool_context(pool), placement_decisions(pools, pool), own=True)
+
+    walked, unmatched = walk(first)
+    assert unmatched == [] and len(walked) == len(deeper) + 2, "the piece's walk takes every recorded cut below it, then stays whole"
+    # The remainder's fork, reached from the piece, carries a cut: the one the remainder's own pool records on it.
+    assert [walked[1].labels[i] for i in walked[1].positives] != ["fuse"]
+    assert {walked[1].labels[i] for i in walked[1].positives} & {walk(pool)[0][0].labels[walk(pool)[0][0].pick] for pool in deeper}
+    assert reproduction_rate([verdict for verdict in reproduce_placement(pools, None) if verdict.pool is first]) == 1.0
+
+
 def test_a_composed_route_is_no_arm_of_the_walk():
     """A pinned compile consumed three seams, one nested in another, as one decision; the walk never offers that
     arm. Its single seams carving a piece of the recorded kernel set are the positives, and where no single seam
