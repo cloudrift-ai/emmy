@@ -273,6 +273,15 @@ contractions. A copied N-contiguous slab needs complete N tiles: clamping a vect
 alignment and crosses the row. A transposed B copies along K and can clamp whole outer N rows. Dividing tiles remain
 available on the same fused contraction.
 
+A vector copy (cp.async or the blocking vector load) moves `copy_width` elements from where the slab's load index puts
+them, so its gmem address must start on that width. Every stage resolver that offers one for a stored operand proves
+it first (`vector_copies_aligned`): the operand's whole flat address, with the copy axis at any copy start, must be a
+provable multiple of the width. A slice's offset, a row stride off the grid, or a copy axis split across dims at a
+pitch off it leaves a term the proof cannot clear, and the resolver declines the copy; a dense reshape's quotient and
+remainder recombine and pass. The warp tier's plain, packed and block-scaled stages, the scalar tier and the compute
+fill ask it, and so do the chunk tier's key and value and the query a warp-group score copies (a query off the grid
+keeps the `mma.sync` score). A TMA box takes element coordinates and needs no such proof.
+
 `TileOp.stage_edges` offers a transport at every operand of every contracting site, a chunked carrier's included —
 which tier then puts which operand on a slab is the tier's own business. The chunked site used to be excluded on the
 reading that it "takes its chunk off the `TILE`, so a transport spelling there would decide nothing"; a `Stage` never
