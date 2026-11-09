@@ -5,27 +5,18 @@ and their text, the forty-four statement types, `Body`, the body text, the state
 identity and body normalization. Pure Rust, no Python in it, so `cargo test -p emmy-ir` runs it alone, and the tests
 of the normalization steps sit beside the steps there. The extension beside it, `emmy-ir-py`, is the `emmy.emmy_ir`
 module those two Python packages re-export from; `make setup` builds it into the package like the runtime extension.
-It exports the driver (`normalize_body`, `normalize_uncached`, `prepare_body`) and the steps a pass calls on its own
-(`one_operation_per_definition`, `canonical_values`, `simplify_body`, `rename_free`), no other step. Design: `ir/ARCHITECTURE.md` owns what a statement, a
-body and the normal form ARE; this file says how the crate holds them.
+It exports the driver, `normalize_body`, and the steps a pass calls on its own (`one_operation_per_definition`,
+`canonical_values`, `simplify_body`, `prepare_body`), no other step. Design: `ir/ARCHITECTURE.md` owns what a
+statement, a body and the normal form ARE; this file says how the crate holds them.
 
 ## Layout
 
-The module tree follows the design, one module per concept, and the modules stand in a tower: each imports only the ones
-below it, `field`, `statement` and `body` aside, which define each other's types. From the bottom: `name.rs` (interned
-names), `expr/` (the tree, its text, the simplifier's walk and the range analysis in `mod.rs`, the simplifier's rewrite
-rules and the affine form in `simplify.rs`, the reader in `parse.rs`), `memo.rs` (the memo store every memo is declared
-in), `elementwise.rs` (the operation table), `dtype.rs` (the dtype set and promotion, which reads the table), `axis.rs`
-(axes with their speller, and the keywords a statement's text reserves), `numbering/key.rs` (the `Key` tree and its
-hash, over expressions alone), `field.rs` (the `Field` trait and the field value types), `statement.rs` (the declaration
-list of the statement types and its macros), `body.rs`, `protocol/` (the protocol in `mod.rs`, what the shared statement
-types answer beyond their fields in `shared.rs`, the construction checks in `checks.rs`), `text/` (the printer in
-`print.rs`, the reader in `parse.rs`, what both spell in `mod.rs`), `order.rs` (the dependency constraints; the sort
-they feed is a `Body` method), the rest of `numbering/` (the value numbering in `values.rs`, the scope-tree digest in
-`digest.rs`), `normalize/` (the driver and the helpers the steps share in `mod.rs`, the steps by what they do: `axes`,
-`fold`, `definitions`, `siblings`, `simplify`, `place`, `canonical`, and every tie-break in `ties.rs`) and
-`identity.rs` (the identity of a body's normal form). Every file imports what it uses by name; no child module takes
-its parent's imports.
+The modules stand in a tower: each imports only the ones below it (`field`, `statement` and `body` aside, which define
+each other's types), from the interned names and the expression tree at the bottom, through the operation table, the
+dtypes, the axes, the field types, the statement declarations and `Body`, the protocol, the text, the ordering
+constraints and the value numbering, to `normalize/` (the driver `normalize_body` and the steps, one module per step,
+every tie-break in `ties.rs`) and `identity.rs` at the top. Every file imports what it uses by name; no child module
+takes its parent's imports.
 
 ## Data
 
@@ -37,8 +28,7 @@ its parent's imports.
   a name orders by its text, as the canonical order sorts names and as every digest spells them (`Key::Str` holds a name
   and feeds its text bytes), so an interned name moves no identity. Only names are interned: a text that is digest
   material and not a name (a body's text, a statement's spelling, an axis header) is a `Key::Text`, which hashes the
-  same bytes and is kept by no table. A lowering mints names a body at a time; the A100 golden's fresh lowering and the
-  corpus together intern some twenty thousand.
+  same bytes and is kept by no table.
 - **Expressions** (`expr/`): seven expression types declared once in the `with_exprs!` macro (the variant, its Python
   class and its fields), which generates the `enum Expr`, the walks every expression type answers through its fields
   (children, height, the rebuilds) and, in the extension, the classes with a getter per field. An operation over its
@@ -95,7 +85,7 @@ its parent's imports.
   of an operation's nature (the affine fold, the alias reads of placement and the ties, the dtype promotion, the
   clustered identity, the Python tables) reads a property; none matches a name. The neutral element is the real one
   (`-inf` for a maximum) and `seed` is what a kernel initializes with, the bounded stand-in `±1e30` the CUDA source
-  spells (and two recipe goldens' bodies, as `-1e+30`; the hardware goldens and the corpus seed no maximum). A string of
+  spells. A string of
   any of these sets exists where the text is read or written, at the Python boundary, and nowhere else.
 - **Axes** (`axis.rs`): `Axis` (name, `Dim`, window), equal by name and extent as the Python class is; the window
   is provenance. The Python `Axis`, `Dim`, `DataType` and `ElementwiseImpl` objects stay Python classes: a statement
@@ -139,9 +129,9 @@ with BLAKE3 (`Number`, 128 bits), and every order among ties is by `Key`'s total
 operation that share a number take the order whose layout key is least under a bounded search: every order is tried
 while the groups allow at most 7! of them, generated in place, and a larger operation (an unrolled window sum over
 eight or more shifted reads, which the full search never finished) takes the order built position by position:
-canonical and independent of the input order like the full search's, but not always its minimum. The identity baseline
-over the corpus and the golden check are what shows no stored kernel's order moved. `identity.rs` memoizes the
-identity per body and per coloring. `normalize/` holds the steps and the driver `normalize_body`; `canonical_order`
+canonical and independent of the input order like the full search's, but not always its minimum. `identity.rs`
+memoizes the identity per body and per coloring. `normalize/` holds the steps and the driver `normalize_body`;
+`canonical_order`
 and `place_values` are the two steps that read the numbering, and the order ranks a product's operands through the
 statement objects it permuted. A commutative node's two sides enter the digest in content order (an operand's whole
 value, its number with its parameters), keyed twice: once to learn the order on state rolled back, once in it, so a
@@ -150,36 +140,31 @@ on rank order the normal form by their names, and the identity stays the same wh
 
 ## Memos
 
-What a process remembers across bodies is a `memo::Memo`, declared with the `memo!` macro that names its bound, in
-entries (`[capacity = N]`) or in the weight its entries hold between them (`[weight = W, by = f]`, `f` the weight of an
-entry from its key and value), and lists it in one registry through `memo::declared`, so every store is inspected
-(entries, weight, hits, misses) and cleared from one place (`memo::stats` and `memo::clear_all`;
-`emmy_ir.memo_stats()` and `emmy_ir.clear_memos()` in Python, for a test worker or a process pool that starts clean).
-The body-keyed memos (`normal_forms` in the normalization driver, `identities` in `identity.rs`) weigh an entry by the
-statements of the bodies it holds, bounded by `BODY_MEMO_WEIGHT` between them, since a whole-layer body is thousands
-of statements and a bound by entry count let a process that lowers many goldens hold gigabytes of normal forms. The
-caches are `quick_cache`'s: evicting by its one policy (S3-FIFO), sharded so no lock is held across a computation, and one asker computes a missing value while a second asker of the same key waits for it, so a
-computation that asked its own memo for the key it is computing would wait on itself; `get_or_try_insert` refuses
-that with an error, and the key leaves the thread's list however the computation ends (no normalization step recurses
-into `normalize_body` today).
-A memo's key is the body's exact form, `body::MemoKey`: equal when the statements are and so is everything body
-equality leaves out, every axis's hint and window, every expression's literals and every number a field holds by
-their bits (a signed zero keys apart from zero, every NaN alike, as the digest keys them), with a hash computed once
-and kept with the body by one walk of the subtree; no key is a printed text. A body also keeps the one normal form it
-was given (`normal_form`, `remember_normal_form`, `is_normal`, `mark_normal` in `body.rs`), so a body normalized
-twice costs one lookup and a protocol rewrite that keeps a normal form says so through that API. The extension's
-wrapper tables (a body's statement wrappers, a subroutine's one Python object) are listed in the same registry: not
-bounded, since a live object keeps its one wrapper, but purged of dead entries when their size reaches a multiple of
-1,024 and on `clear_all`.
+What a process remembers across bodies is two `memo::Memo`s, the normal forms (`normal_forms` in the normalization
+driver) and the identities (`identities` in `identity.rs`), each bounded by the weight its entries hold between them:
+an entry weighs the statements of the bodies it holds, `BODY_MEMO_WEIGHT` between them, since a whole-layer body is
+thousands of statements and a bound by entry count let a process that lowers many goldens hold gigabytes of normal
+forms. The caches are `quick_cache`'s: evicting by its one policy (S3-FIFO), sharded so no lock is held across a
+computation, and one asker computes a missing value while a second asker of the same key waits for it (no
+normalization step recurses into `normalize_body`). A memo's key is the body's exact form, `body::MemoKey`: equal when
+the statements are and so is everything body equality leaves out, every axis's hint and window, every expression's
+literals and every number a field holds by their bits (a signed zero keys apart from zero, every NaN alike, as the
+digest keys them), with a hash computed once and kept with the body by one walk of the subtree; no key is a printed
+text. A body also keeps the one normal form it was given (`normal_form`, `remember_normal_form`, `is_normal`,
+`mark_normal` in `body.rs`), so a body normalized twice costs one lookup and a protocol rewrite that keeps a normal form
+says so through that API. `memo::clear_all` forgets both memos; Python's `emmy_ir.clear_memos()` calls it and purges
+the extension's wrapper tables (a body's statement wrappers, a subroutine's one Python object), which are not bounded,
+since a live object keeps its one wrapper, and otherwise drop their dead entries when their size reaches a multiple of
+1,024.
 
 The canonical order decides what the digest leaves open, and the lift of a body into terms reads that order: sibling
 regions are addressed by position in every recorded cut decision, and a product's operand order is its orientation
-where neither operand owns an output axis. So the ties are broken the way the stored goldens were spelled, and
-`normalize/ties.rs` states each rule with its reason: siblings a scope may place either way sort by statement type name,
-then by their fields in declaration order with names abstracted and a one-element tuple after longer ones, so every
-store follows the values it reads and an `Assign`'s operation decides before its dtype; sibling loops sort by a digest
-of their extent, the one the Python order used; a commutative operation lists accumulators, then loads and the copies
-that widen them, then computed values with the deeper cone first, then by value. Changing a rule is a restamp decision.
+where neither operand owns an output axis. `normalize/ties.rs` states each rule with its reason: siblings a scope may
+place either way sort by statement type name, then by their fields in declaration order with names abstracted and a
+one-element tuple after longer ones, so every store follows the values it reads and an `Assign`'s operation decides
+before its dtype; sibling loops sort by a digest of their extent; a commutative operation lists accumulators, then
+loads and the copies that widen them, then computed values with the deeper cone first, then by value. Changing a rule
+moves identities: a restamp decision.
 The order permutes and names, and the operand order inside a value reads the ranks the order gives, which the order in
 turn spells by; so `normalize_uncached` runs its rounds until one whole round leaves the body alone, and refuses a body
 that does not settle in eight. For that to settle, a number must not read what the order decides: the numbering keys a
@@ -187,11 +172,6 @@ chain of one associative commutative operation as one node over every term (`Cha
 the term order can give a sum number alike; the exact identity is keyed the same way. The clustered identity keeps the
 chain (`Chains::Kept`): it spells every FMA-class tree as a chain of one representative, and the shape of that chain is
 what tells `a * b - c` from `a * c - b` when the buffers are typed.
-
-What the port keeps of the Python implementation: stored kernels keep their rows, two raw bodies share an identity in
-Rust exactly when they did in Python, the normal form is final. The text of a normal form, the order among ties and
-the digest value were allowed to move, and did: a tie the Python order broke by the hash of a structural form, the
-Rust order breaks by the text.
 
 ## Errors
 

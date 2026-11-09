@@ -824,21 +824,6 @@ pub fn apply(
     Ok(PyExpression::wrap(py, &expr)?.unbind())
 }
 
-/// `name` as the reader reads a name back: bare, or between backticks.
-#[pyfunction]
-#[pyo3(signature = (name, reserved = None))]
-pub fn spell_name(name: &str, reserved: Option<&Bound<'_, PyAny>>) -> PyResult<String> {
-    let extra: Vec<String> = match reserved {
-        Some(items) => items
-            .try_iter()?
-            .map(|item| item?.extract::<String>())
-            .collect::<PyResult<_>>()?,
-        None => vec![],
-    };
-    let extra: Vec<&str> = extra.iter().map(|s| s.as_str()).collect();
-    emmy_ir::expr::spell_name(name, &extra).py()
-}
-
 /// `expression` as `anchor + Σ coeffs[v]·v` over `vars`, or `None`.
 #[pyfunction]
 pub fn affine_form<'py>(
@@ -873,12 +858,10 @@ type AffineForm<'py> = (Vec<(f64, Bound<'py, PyAny>)>, f64, bool);
 #[pyfunction]
 pub fn affine_terms<'py>(
     py: Python<'py>,
-#[pyo3(signature = (terms, offset, float = false))]
     expression: &Bound<'py, PyAny>,
 ) -> PyResult<AffineForm<'py>> {
     let form = emmy_ir::normalize::affine_terms(&expression_from_py(expression)?, ExprClass::Value);
     let terms = form
-    float: bool,
         .terms
         .iter()
         .map(|(coefficient, term)| Ok((*coefficient, PyExpression::wrap(py, term)?)))
@@ -890,10 +873,12 @@ pub fn affine_terms<'py>(
 /// float literal fed the form (`float`), the offset last; the terms in the order the normal form gives names it does
 /// not rank.
 #[pyfunction]
+#[pyo3(signature = (terms, offset, float = false))]
 pub fn affine_sum<'py>(
     py: Python<'py>,
     terms: &Bound<'py, PyAny>,
     offset: f64,
+    float: bool,
 ) -> PyResult<Bound<'py, PyAny>> {
     let terms: Vec<(f64, Expression)> = terms
         .try_iter()?
@@ -929,25 +914,6 @@ pub fn placeholder(py: Python<'_>, d: usize) -> PyResult<Py<PyAny>> {
     Ok(PyExpression::wrap(py, &Expression::placeholder(d))?.unbind())
 }
 
-/// Whether `expression` is a placeholder variable, of axis `d` when given.
-#[pyfunction]
-#[pyo3(signature = (expression, d = None))]
-pub fn is_placeholder(expression: &Bound<'_, PyAny>, d: Option<usize>) -> bool {
-    expression
-        .cast::<PyExpression>()
-        .is_ok_and(|e| e.get().expr.is_placeholder(d))
-}
-
-#[pyfunction]
-pub fn builtin_names<'py>(py: Python<'py>) -> PyResult<Bound<'py, PyFrozenSet>> {
-    PyFrozenSet::new(
-        py,
-        Builtin::ALL
-            .iter()
-            .map(|builtin| PyString::new(py, builtin.text())),
-    )
-}
-
 pub fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyExpression>()?;
     register_classes(m)?;
@@ -955,16 +921,11 @@ pub fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PySimplifyCtx>()?;
     m.add_function(wrap_pyfunction!(parse, m)?)?;
     m.add_function(wrap_pyfunction!(apply, m)?)?;
-    m.add_function(wrap_pyfunction!(spell_name, m)?)?;
     m.add_function(wrap_pyfunction!(affine_form, m)?)?;
     m.add_function(wrap_pyfunction!(affine_terms, m)?)?;
     m.add_function(wrap_pyfunction!(affine_sum, m)?)?;
     m.add_function(wrap_pyfunction!(affine_node, m)?)?;
-    m.add_function(wrap_pyfunction!(split_anchor, m)?)?;
-    m.add_function(wrap_pyfunction!(index_set_size, m)?)?;
     m.add_function(wrap_pyfunction!(placeholder, m)?)?;
-    m.add_function(wrap_pyfunction!(is_placeholder, m)?)?;
-    m.add("BUILTINS", builtin_names(m.py())?)?;
     m.add("PLACEHOLDER_PREFIX", emmy_ir::expr::PLACEHOLDER_PREFIX)?;
     Ok(())
 }

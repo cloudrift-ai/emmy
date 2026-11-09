@@ -71,7 +71,7 @@ def _hoist_loop_invariants(stmts: Body) -> Body:
 
     ``Accum`` / ``Init`` / ``Write`` always stay (iteration-tied
     semantics). Axis-invariance alone does not earn a hoist: the hoisted set is closed under the
-    scope's ordering constraints (:func:`~emmy.compiler.ir.stmt.order.ordering_constraints`), so
+    scope's ordering constraints (:func:`~emmy.compiler.ir.stmt.ordering_constraints`), so
     a statement that must follow one that stays — the consumer of an accumulator a pinned
     reduction exports, a read of a buffer the loop writes, anything behind an ordered execution
     protocol such as a barrier or a declaration — stays with it.

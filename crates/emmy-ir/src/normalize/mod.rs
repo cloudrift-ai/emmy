@@ -3,16 +3,16 @@
 //! answers to no knob, pin or evidence; a transform something decides is a pipeline pass.
 
 use std::collections::{HashMap, HashSet};
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
 use crate::axis::Axis;
 use crate::body::{Body, MemoKey};
 use crate::dtype::DType;
 use crate::expr::{Expression, Interval, SimplifyCtx};
-use crate::memo::BODY_MEMO_WEIGHT;
+use crate::memo::{BODY_MEMO_WEIGHT, Memo};
 use crate::order::topological_sort;
 use crate::statement::*;
-use crate::{Error, Name, Result, memo};
+use crate::{Error, Name, Result};
 
 const SYMBOLIC_AXIS_HI: i128 = 1 << 30;
 
@@ -34,10 +34,15 @@ pub fn extend_simplify_ctx(ctx: &SimplifyCtx, axis: &Axis) -> SimplifyCtx {
 
 // --- the memo -------------------------------------------------------------------------------------------
 
-memo! {
-    /// The normal forms of the bodies met in this process, by their exact form; each weighs the statements of the
-    /// body it keys and the normal form it holds.
-    pub fn normal_forms() -> Memo<MemoKey, Body> [weight = BODY_MEMO_WEIGHT, by = |key, normal| (key.0.statement_count() + normal.statement_count()) as u64]
+/// The normal forms of the bodies met in this process, by their exact form; each weighs the statements of the body it
+/// keys and the normal form it holds.
+pub fn normal_forms() -> &'static Memo<MemoKey, Body> {
+    static MEMO: OnceLock<Memo<MemoKey, Body>> = OnceLock::new();
+    MEMO.get_or_init(|| {
+        Memo::weighted(BODY_MEMO_WEIGHT, |key, normal| {
+            (key.0.statement_count() + normal.statement_count()) as u64
+        })
+    })
 }
 
 /// The executable normal form of `body`: what the body already knows, else the memo's, else computed and kept.

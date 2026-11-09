@@ -104,8 +104,8 @@ def _drop_private_ports(match: Match, root: Node, kernel: KernelOp, suffix: str)
 
 
 #: Names the RENDERER supplies, so a statement may read them with no binding anywhere in the IR:
-#: the CTA helper coordinates it declares in the prologue of any body that uses them
-#: (``ir.stmt.blocks``), and the reserved coordinates a :class:`~emmy.compiler.ir.kernel.ir.FragmentApply`
+#: the CTA helper coordinates it declares in the prologue of any body that uses them,
+#: and the reserved coordinates a :class:`~emmy.compiler.ir.kernel.ir.FragmentApply`
 #: COORD / GMEM template is written over, which the render substitutes per element (tile origin + layout offset),
 #: and the in-fragment offsets a :class:`~emmy.compiler.ir.kernel.ir.RegStore` epilogue reads.
 _RENDERED_HELPERS = frozenset({"lane", "warp", FRAG_ROW, FRAG_COL, ELEM_ROW, ELEM_COL})

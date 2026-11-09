@@ -2,7 +2,7 @@
 
 A lambda is a PURE term: explicit binders over the reused stmt vocabulary, an A-normal-form
 let-chain in ``body``, the returned defs named by ``results``. It binds; it never executes.
-Nothing here is a :class:`~emmy.compiler.ir.stmt.base.Statement` — see ``ir/ARCHITECTURE.md`` for the
+Nothing here is a :class:`~emmy.compiler.ir.stmt.Statement` — see ``ir/ARCHITECTURE.md`` for the
 invariant and for how a pure term reaches a statement position (it is RENDERED to stmts, never
 spliced in as one).
 """

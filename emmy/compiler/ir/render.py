@@ -374,25 +374,21 @@ _INDEX_CALLS = {"minimum": "min", "maximum": "max"}
 ATOM_PRECEDENCE = 100
 
 
-def render_expression(expression: Expression, ctx, parent_prec: int = 0) -> str:  # noqa: ANN001 — a ``RenderCtx``
+def render_expression(expression: Expression, ctx: RenderCtx, parent_prec: int = 0) -> str:
     """Emit a target-language (C / CUDA) expression string. ``ctx`` carries the intrinsic and builtin spelling tables,
     the literal bindings and the inlined temps; ``parent_prec`` drives parenthesization in nested binary chains."""
     if isinstance(expression, Var):
         # An SSA name bound by a literal-constant Load renders as the literal; ``render_body`` populates the table.
-        lit_map = getattr(ctx, "literal_ssa", None)
-        if lit_map and expression.name in lit_map:
-            return _float_lit(lit_map[expression.name])
+        if expression.name in ctx.literal_ssa:
+            return _float_lit(ctx.literal_ssa[expression.name])
         return expression.name
     if isinstance(expression, Literal):
         if isinstance(expression.value, float) or expression.dtype == "float":
             txt = _float_lit(float(expression.value))
             # A float literal embedded in a non-default-dtype expression composes with the surrounding operands: the
             # target wraps it (``__float2half`` for fp16). Int literals only go through the branch below.
-            if ctx is not None:
-                wrap_dt = getattr(ctx, "literal_default_dtype", None)
-                target = getattr(ctx, "target", None)
-                if wrap_dt is not None and target is not None:
-                    return target.literal(txt, wrap_dt)
+            if ctx.literal_default_dtype is not None:
+                return ctx.target.literal(txt, ctx.literal_default_dtype)
             return txt
         v = int(expression.value)
         return f"{v}LL" if abs(v) > 32768 else str(v)

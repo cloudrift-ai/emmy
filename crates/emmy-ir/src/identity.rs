@@ -2,17 +2,17 @@
 //! its use instead of its spelling, and the roles its buffers fill.
 
 use std::collections::HashMap;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
 use crate::body::{Body, MemoKey};
 use crate::elementwise::Operation;
 use crate::expr::{ExprClass, Expression};
-use crate::memo::BODY_MEMO_WEIGHT;
+use crate::memo::{BODY_MEMO_WEIGHT, Memo};
 use crate::normalize::canonical::affine_terms;
 use crate::normalize::normalize_body;
 use crate::numbering::{Chains, digest, hex};
 use crate::statement::{Accum, Assign, Statement};
-use crate::{Name, Result, memo};
+use crate::{Name, Result};
 
 /// What an identity was computed under: the clustered reading or the exact one, and each buffer's color.
 #[derive(Clone, PartialEq, Eq, Hash, Debug)]
@@ -100,10 +100,11 @@ fn clustered(value: &Expression, represent: &mut dyn FnMut(Operation) -> Operati
     }
 }
 
-memo! {
-    /// The identities of the normal forms met in this process, per coloring: a cut's arms lower the same pieces
-    /// again and again. An entry weighs the statements of the body it keys.
-    pub fn identities() -> Memo<(MemoKey, IdentityKey), Identity> [weight = BODY_MEMO_WEIGHT, by = |key, _| key.0.0.statement_count() as u64]
+/// The identities of the normal forms met in this process, per coloring: a cut's arms lower the same pieces again and
+/// again. An entry weighs the statements of the body it keys.
+pub fn identities() -> &'static Memo<(MemoKey, IdentityKey), Identity> {
+    static MEMO: OnceLock<Memo<(MemoKey, IdentityKey), Identity>> = OnceLock::new();
+    MEMO.get_or_init(|| Memo::weighted(BODY_MEMO_WEIGHT, |key, _| key.0.0.statement_count() as u64))
 }
 
 /// Key the normal form of `body`, optionally with operations collapsed to compute-unit clusters. `colors` types

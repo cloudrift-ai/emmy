@@ -168,7 +168,7 @@ macro_rules! with_statement_types {
                 /// A recurrence's state, which a fold is not: its steps run in order, its step is any computation, and it holds
                 /// `seed` before the first. So it has no op — an op would declare an algebra (a reorderable sum) the state does
                 /// not have — and nothing else to declare either: the loop that carries it is the nearest enclosing `Loop` whose
-                /// axis `index` does not read (:func:`~emmy.compiler.ir.stmt.blocks.carried_cells`), and its shape is those of
+                /// axis `index` does not read (`protocol::shared::carried_cells`), and its shape is those of
                 /// the loops over its cells, each entry of `index` a bare axis. The loop over the steps therefore sits OUTSIDE
                 /// the loops over the cells, which is what lets a step read OTHER cells of its own state (a delta rule's `k @ S`)
                 /// through :class:`Pre`; a scalar `Accum` lives inside the cell loops and cannot. One statement defines a state;

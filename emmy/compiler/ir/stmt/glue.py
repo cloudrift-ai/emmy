@@ -12,9 +12,11 @@ import emmy.emmy_ir as _ir
 from emmy.compiler.ir.axis import Axis
 from emmy.compiler.ir.expression import Expression
 from emmy.compiler.ir.sigma import Sigma
+from emmy.compiler.wire import register
 
 Statement = _ir.Statement
 Body = _ir.Body
+register(Body)
 Cond = _ir.Cond
 Write = _ir.Write
 

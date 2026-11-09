@@ -7,9 +7,10 @@ Backend-agnostic expression sublanguage used by:
 - Tile IR (``ir.tile``): array indices, loop bounds, ternary selects.
 
 The expression types are implemented in Rust (the ``emmy-ir`` crate, reached through ``emmy.emmy_ir``) and exported
-here: the ``Expression`` base and its eight types, the simplification context and the affine-form helpers. On the wire
-an expression is its C-like text, ``((a5 / 128) * 128) + a6`` written as ``a5 / 128 * 128 + a6`` with parentheses only
-where precedence needs them (:func:`parse` reads it back), and that text is also its structural identity. The members
+here: the ``Expression`` base and the seven expression types as eight Python classes, the simplification context and
+the affine-form helpers. On the wire an expression is its C-like text, ``((a5 / 128) * 128) + a6`` written as
+``a5 / 128 * 128 + a6`` with parentheses only where precedence needs them (:func:`parse` reads it back), and that text
+is also its structural identity. The members
 that take a Python function or evaluate against host values — ``rename`` by a function, ``rebuild``, ``eval`` — are
 written here over the Rust reads; rendering to C / CUDA lives in :mod:`emmy.compiler.ir.render`.
 """
@@ -38,16 +39,11 @@ SimplifyCtx = _ir.SimplifyCtx
 
 parse = _ir.parse
 apply = _ir.apply
-spell_name = _ir.spell_name
 affine_form = _ir.affine_form
 affine_terms = _ir.affine_terms
 affine_sum = _ir.affine_sum
 affine_node = _ir.affine_node
-split_anchor = _ir.split_anchor
-index_set_size = _ir.index_set_size
 placeholder = _ir.placeholder
-is_placeholder = _ir.is_placeholder
-BUILTINS = _ir.BUILTINS
 PLACEHOLDER_PREFIX = _ir.PLACEHOLDER_PREFIX
 
 for _cls in (Expression, Var, Literal, Builtin, BinaryExpression, FunctionCallExpression, TernaryExpression, CastExpression, FlatIndex):

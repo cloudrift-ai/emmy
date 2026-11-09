@@ -160,8 +160,8 @@ kernel it produced went on to read.
   boundaries survive. (The broadcast-explicit invariant for
   `ElementwiseOp` inputs lives in `compiler/ARCHITECTURE.md`.)
 - **Tensor → loop** (after `fusion`): only `LoopOp` + boundaries.
-  Tensor-IR ops survive only *inside* `LoopOp.body` as `Assign.op` or
-  `Accum.op` (`ElementwiseOp` only — `ReduceOp` is not a valid body
+  Tensor-IR ops survive only *inside* `LoopOp.body` as the operation nodes of
+  `Assign` values and as `Accum.op` (`ElementwiseOp` only — `ReduceOp` is not a valid body
   op; reductions are `Accum` statements inside a reduce `Loop`). `LoopOp` construction orders a free-loop chain by
   the row-major coordinate depth in its boundary writes; axis spelling is only the fallback when output storage does
   not totally order the chain. The resulting geometry, rather than source names, reaches Tile IR placement.
@@ -221,23 +221,22 @@ along different lowering paths still dedup in the tuning cache.
 **A statement is immutable data** — every concrete Loop-IR / Tile-IR / Kernel-IR statement (`Loop`, `Cond`, leaves,
 `Tile`, `Smem`, `Sync`, `CpAsyncCopy`, `TmaDescriptor`, …) has named read-only fields, compares by content and is
 hashable. To "edit" one, take a copy with `stmt.replace(field=value)`; nothing outside `ir/stmt/` calls
-`dataclasses.replace` on a statement or lists its fields, and a layering test watches a lowering for both. A statement
+`dataclasses.replace` on a statement or lists its fields. A statement
 type states its fields to the text reader and the structural form only. A pass that generalizes whole statements (the
 kernel loopify pass, off unless pinned, rolls repeated ones into a loop) reads each field by the name `fields_of` gives
 and rebuilds through `replace`, so it needs no dataclass behind the statement type. Ops, by contrast, are frozen and
-unhashable — rewrites replace the op and rebind its graph node. Op fields stored inside statements (e.g. `Assign.op`)
-must be lightweight value objects (e.g. `ElementwiseImpl`, not `ElementwiseOp`) so the surrounding statement stays
-hashable. A statement type that applies one elementwise operation names that field `op`: the clustered identity reads it
-by that name.
+unhashable — rewrites replace the op and rebind its graph node. Op fields stored inside statements (`Accum.op`) must be
+lightweight value objects (`ElementwiseImpl`, not `ElementwiseOp`) so the surrounding statement stays hashable.
 
 ## The statement module's interface
 
 `ir/stmt/` is the vocabulary all three IRs share, so the rest of the compiler uses it through one package and
 nothing else: no submodule path, no private name. The package exports the statement types, `Body` and `OutputSpec`,
 `normalize_body` and `canonicalize_identity`, a few functions over statements (`free_names`, `exposed_defines`,
-`rename_free`, `binary`, `mask_select_predicate`, `ordering_constraints`, `dtype_promote`), the text form
-(`pretty_body`, `parse_body`), four normalization steps a caller may run on its own (`one_operation_per_definition`, `canonical_values`, `simplify_body`,
-`prepare_body`), the two statement types fusion's body assembly in `ir/loop/` builds a region with (`Call`,
+`rename_free`, `mask_select_predicate`, `ordering_constraints`, `dtype_promote`), the text form (`pretty_body`,
+`parse_body`), four normalization steps a caller may run on its own (`one_operation_per_definition`,
+`canonical_values`, `simplify_body`, `prepare_body`), the two statement types fusion's body assembly in `ir/loop/`
+builds a region with (`Call`,
 `Subroutine`), and the names of a statement type's fields (`fields_of`). The statement types, `Body`, the protocol, the
 text, the value numbering and the normalization are implemented in Rust — the `emmy-ir` crate, reached through the
 `emmy.emmy_ir` extension (`crates/emmy-ir/ARCHITECTURE.md`) — and the package is the glue over them: `__init__.py`
@@ -704,7 +703,7 @@ across a tree by design (a cone statistic's axis may spell the same as the enclo
 a `Loop` / reducing `Fold` binder that re-binds a substituted name, and is what the smem compute fill substitutes
 cell coordinates through.
 
-### Body normalization — `emmy-ir`'s `normalize.rs`
+### Body normalization — `emmy-ir`'s `normalize/`
 
 Normalization is a canonical form, not a pipeline pass. It runs the same on every body, at construction and inside
 every identity digest, and answers to no knob, pin or evidence; nothing under `ir/` imports the pipeline that holds
@@ -789,8 +788,8 @@ from that CSE form. Subroutine boundaries never limit fusion.
   blocked twisted carrier; subsequent normalization collapses the duplicate loads, and the lowering passes stage both
   weight tensors symmetrically.
 - `place_values` — every pure value once, at the shallowest loop scope on its consumers' path that binds its
-  coordinates and holds its operands. Values are told apart by number (the value numbering below): the same function of the
-  same coordinate expressions is one value whatever it is called, so a second computation a scope can already see
+  coordinates and holds its operands. Values are told apart by number (the value numbering below): the same function
+  of the same coordinate expressions is one value whatever it is called, so a second computation a scope can already see
   reads the first, a copy aliases its source, and a block without a side effect moves with everything it still holds.
   This one step is loop-invariant motion, load and expression dedup, copy-alias elimination and common-branch motion:
   a value both branches of a condition compute moves ahead of the condition, a branch alone never speculates. A read of
@@ -844,7 +843,7 @@ from that CSE form. Subroutine boundaries never limit fusion.
   on its own output because nothing it sorts by reads what it decides: a statement's shape and a block's spelled
   subtree read a sum's coefficients sorted and the block's children already ordered, and no number reads a name.
 
-### Value numbering — `emmy-ir`'s `values.rs`
+### Value numbering — `emmy-ir`'s `numbering/values.rs`
 
 A statement's number is its statement type and payload (op, dtype, resource) over its operands' numbers, with every
 maximal coordinate-only index expression a parameter numbered by first appearance across the statement and its operands

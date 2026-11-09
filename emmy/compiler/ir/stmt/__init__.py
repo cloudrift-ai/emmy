@@ -16,7 +16,6 @@ from Rust through the fallible walks and hold nothing of it afterwards.
 from __future__ import annotations
 
 import emmy.emmy_ir as _ir
-from emmy.compiler.wire import register as _register
 
 Statement = _ir.Statement
 Body = _ir.Body
@@ -51,9 +50,6 @@ mask_select_predicate = _ir.mask_select_predicate
 ordering_constraints = _ir.ordering_constraints
 dtype_promote = _ir.dtype_promote
 clear_memos = _ir.clear_memos
-memo_stats = _ir.memo_stats
-
-_register(Body)
 
 from emmy.compiler.ir.stmt.glue import (  # noqa: E402 — the glue installs members on the classes above
     Identity,
@@ -92,7 +88,6 @@ __all__ = [
     "one_operation_per_definition",
     "free_names",
     "mask_select_predicate",
-    "memo_stats",
     "normalize_body",
     "ordering_constraints",
     "prepare_body",

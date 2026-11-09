@@ -423,8 +423,8 @@ require CloudRift organization access.
   pack loader and cached generation (design, hosts, and qualification in
   [ARCHITECTURE.md](crates/emmy-runtime/ARCHITECTURE.md)); [crates/emmy-runtime-py/](crates/emmy-runtime-py/) is
   its in-process host, the `emmy.emmy_runtime` extension setuptools-rust builds into the package
-- [crates/emmy-ir/](crates/emmy-ir/) — The compiler's statement and expression vocabulary in Rust: the kinds, bodies,
-  their text, value numbering and normalization (see [ARCHITECTURE.md](crates/emmy-ir/ARCHITECTURE.md));
+- [crates/emmy-ir/](crates/emmy-ir/) — The compiler's statement and expression vocabulary in Rust: the statement types,
+  bodies, their text, value numbering and normalization (see [ARCHITECTURE.md](crates/emmy-ir/ARCHITECTURE.md));
   [crates/emmy-ir-py/](crates/emmy-ir-py/) is the `emmy.emmy_ir` extension the `ir/stmt` and `ir/expression` modules
   export from
 - [crates/emmy-server/](crates/emmy-server/) — Native HTTP adapter: text and image processing

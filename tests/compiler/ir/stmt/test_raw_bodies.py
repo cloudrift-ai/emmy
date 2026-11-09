@@ -6,9 +6,8 @@ body is final, and the stored kernel keeps its identity.
 """
 
 import pytest
-from emmy.emmy_ir import normalize_uncached
 
-from emmy.compiler.ir.stmt import normalize_body
+from emmy.compiler.ir.stmt import normalize_body, parse_body
 from tests.compiler.realization import helpers
 
 #: Cases across the families whose raw bodies the rules run over; each lowers in well under a second.
@@ -34,8 +33,8 @@ def test_the_raw_bodies_of_a_lowering_normalize_to_their_stored_kernel(case_path
     assert raw
     normal = [normalize_body(body) for body in raw]
     for body in normal:
-        # Computed afresh: a body already in normal form answers ``normalize_body`` from its mark.
-        assert normalize_uncached(body) == body, "the normal form is final"
+        # Computed afresh from the text: a body already in normal form answers ``normalize_body`` from its mark.
+        assert normalize_body(parse_body(str(body))) == body, "the normal form is final"
     identities = {body.identity(structural=False).key for body in normal}
     stored = case.target.op().identity_key(structural=False)
     assert stored in identities, "the stored kernel is what one raw body normalizes to"

@@ -3,7 +3,6 @@
 import json
 
 import pytest
-from emmy.emmy_ir import normalize_uncached
 
 from emmy.compiler.ir.stmt import Assign, Body, Cond, Load, canonical_values, free_names, normalize_body, parse_body
 from tests.compiler.realization.helpers import CASES_DIR, case_files
@@ -57,8 +56,8 @@ def test_corpus_kernels_have_no_available_duplicates(path):
     for kernel in kernels:
         normalized = normalize_body(Body.from_wire(kernel["attrs"]["body"]))
         _assert_scoped_cse(normalized)
-        # Bypass the Body cache: idempotence is checked, not assumed from cached equality.
-        assert normalize_uncached(normalized) == normalized
+        # Computed afresh from the text: idempotence is checked, not assumed from the body's mark.
+        assert normalize_body(parse_body(str(normalized))) == normalized
 
 
 @pytest.mark.parametrize("nested", [False, True])

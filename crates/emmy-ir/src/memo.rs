@@ -1,30 +1,20 @@
-//! The memos: what a process remembers across bodies, as one store of declared caches. A memo is declared with
-//! [`memo!`], which names its capacity in entries, and registers itself in one list, so every memo is inspected
-//! (entries, hits, misses) and cleared from one place: [`stats`] and [`clear_all`] here, their exports in Python. The caches are `quick_cache`'s: sharded, locked per shard and never across a computation, bounded by
-//! entry count, evicting by its one policy (S3-FIFO: a probation queue ahead of the main one and a ghost list of
-//! what left, so an entry met once does not push out one met many times). A key is a body's exact form
-//! (`body::MemoKey`), never its text.
-//!
-//! A computation that asks its own memo for the key it is computing would wait on itself forever (the cache parks a
-//! second asker of a key until the first inserts); [`Memo::get_or_try_insert`] refuses that with an error instead.
+//! The memos: what a process remembers across bodies. Two caches, the normal forms (`normalize::normal_forms`) and the
+//! identities (`identity::identities`), each bounded by the statements its entries hold between them and keyed by a
+//! body's exact form (`body::MemoKey`), never its text. The caches are `quick_cache`'s: sharded, locked per shard and
+//! never across a computation (a second asker of a key waits for the first's value instead of computing it again),
+//! evicting by its one policy (S3-FIFO: a probation queue ahead of the main one and a ghost list of what left, so an
+//! entry met once does not push out one met many times). [`clear_all`] forgets both: what a test worker does to start
+//! clean.
 
-use std::cell::RefCell;
-use std::collections::HashSet;
-use std::hash::{Hash, Hasher};
-use std::sync::{Mutex, Once, OnceLock};
+use std::hash::Hash;
 
 use quick_cache::Weighter;
 use quick_cache::sync::Cache;
-
-use crate::{Error, locked};
 
 /// How many statements the body-keyed memos keep between them, each body weighing its statement count: a cut's arms
 /// lower the same pieces again and again, and a whole-layer body is thousands of statements, so the bound is on what
 /// the memo holds rather than on how many bodies.
 pub const BODY_MEMO_WEIGHT: u64 = 1_000_000;
-
-/// How many entries a memo of small values keeps.
-pub const SMALL_MEMO_CAPACITY: usize = 16_384;
 
 /// The weight of an entry: a function of its key and value, so a memo is bounded by what it holds.
 pub struct Weigh<K, V>(pub fn(&K, &V) -> u64);
@@ -41,64 +31,25 @@ impl<K, V> Weighter<K, V> for Weigh<K, V> {
     }
 }
 
-/// One declared memo: a bounded cache under a name.
+/// A bounded cache: at most `capacity` of weight, each entry weighing what `weigh` says of it.
 pub struct Memo<K, V> {
-    name: &'static str,
     cache: Cache<K, V, Weigh<K, V>>,
 }
 
-/// A key this thread is computing, listed while the computation runs and unlisted when it ends, however it ends.
-struct Computing((&'static str, u64));
-
-impl Drop for Computing {
-    fn drop(&mut self) {
-        COMPUTING.with(|keys| keys.borrow_mut().remove(&self.0));
-    }
-}
-
-thread_local! {
-    /// The keys this thread is computing a value for, by memo and key hash.
-    static COMPUTING: RefCell<HashSet<(&'static str, u64)>> = RefCell::new(HashSet::new());
-}
-
 impl<K: Eq + Hash + Clone, V: Clone> Memo<K, V> {
-    /// A memo of `capacity` entries, each weighing one.
-    pub fn new(name: &'static str, capacity: usize) -> Memo<K, V> {
-        Memo::weighted(name, capacity, capacity as u64, |_, _| 1)
-    }
-
-    /// A memo holding at most `capacity` of weight, each entry weighing what `weigh` says of it; `entries` is how
-    /// many it is sized for.
-    pub fn weighted(
-        name: &'static str,
-        entries: usize,
-        capacity: u64,
-        weigh: fn(&K, &V) -> u64,
-    ) -> Memo<K, V> {
+    pub fn weighted(capacity: u64, weigh: fn(&K, &V) -> u64) -> Memo<K, V> {
         Memo {
-            name,
-            cache: Cache::with_weighter(entries, capacity, Weigh(weigh)),
+            cache: Cache::with_weighter(1024, capacity, Weigh(weigh)),
         }
     }
 
     /// The value under `key`, computed by `compute` once when the memo has none; a second asker of one key waits
-    /// for the first's result instead of computing it again. A computation that asks for its own key is an error.
-    pub fn get_or_try_insert<E: From<Error>>(
+    /// for the first's result instead of computing it again.
+    pub fn get_or_try_insert<E>(
         &self,
         key: &K,
         compute: impl FnOnce() -> Result<V, E>,
     ) -> Result<V, E> {
-        let mut hasher = std::collections::hash_map::DefaultHasher::new();
-        key.hash(&mut hasher);
-        let computing = (self.name, hasher.finish());
-        if !COMPUTING.with(|keys| keys.borrow_mut().insert(computing)) {
-            return Err(Error::Value(format!(
-                "the {} memo was asked for a key it is computing",
-                self.name
-            ))
-            .into());
-        }
-        let _entered = Computing(computing);
         self.cache.get_or_insert_with(key, compute)
     }
 
@@ -106,174 +57,43 @@ impl<K: Eq + Hash + Clone, V: Clone> Memo<K, V> {
         self.cache.clear();
     }
 
-    pub fn stats(&self) -> Stats {
-        Stats {
-            name: self.name,
-            entries: self.cache.len(),
-            capacity: Some(self.cache.capacity()),
-            weight: Some(self.cache.weight()),
-            hits: self.cache.hits(),
-            misses: self.cache.misses(),
-        }
+    /// The weight the entries hold now.
+    pub fn weight(&self) -> u64 {
+        self.cache.weight()
     }
 }
 
-/// What a store reports.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct Stats {
-    pub name: &'static str,
-    pub entries: usize,
-    /// The bound, when the store has one: on the weight the entries hold between them.
-    pub capacity: Option<u64>,
-    /// The weight the entries hold now, when the store is bounded.
-    pub weight: Option<u64>,
-    pub hits: u64,
-    pub misses: u64,
-}
-
-/// A store the registry lists: a memo, or a table of the extension's that is purged rather than bounded.
-pub trait Store: Send + Sync {
-    fn stats(&self) -> Stats;
-    /// Forget what can be forgotten: every entry of a memo, the dead entries of a table.
-    fn clear(&self);
-}
-
-impl<K: Eq + Hash + Clone + Send + Sync, V: Clone + Send + Sync> Store for Memo<K, V> {
-    fn stats(&self) -> Stats {
-        Memo::stats(self)
-    }
-
-    fn clear(&self) {
-        Memo::clear(self);
-    }
-}
-
-fn registry() -> &'static Mutex<Vec<&'static dyn Store>> {
-    static REGISTRY: Mutex<Vec<&'static dyn Store>> = Mutex::new(Vec::new());
-    &REGISTRY
-}
-
-/// The one store under `cell`, built by `init` on first use and listed once: what every declaration goes through.
-pub fn declared<S: Store + 'static>(
-    cell: &'static OnceLock<S>,
-    listed: &'static Once,
-    init: impl FnOnce() -> S,
-) -> &'static S {
-    let store = cell.get_or_init(init);
-    listed.call_once(|| locked(registry()).push(store));
-    store
-}
-
-fn stores() -> Vec<&'static dyn Store> {
-    locked(registry()).clone()
-}
-
-/// Every registered store's figures.
-pub fn stats() -> Vec<Stats> {
-    stores().iter().map(|store| store.stats()).collect()
-}
-
-/// Clear every registered store. The registry's lock is not held while a store clears: a table's purge drops Python
-/// objects whose finalizers may come back here.
+/// Forget every memoized normal form and identity.
 pub fn clear_all() {
-    for store in stores() {
-        store.clear();
-    }
-}
-
-/// Declare a memo: a function returning the one `Memo` of its name, built on first use with the capacity stated and
-/// registered for `stats` and `clear_all`.
-///
-/// ```ignore
-/// memo! {
-///     /// The normal forms of the bodies met in this process.
-///     pub fn normal_forms() -> Memo<MemoKey, Body> [weight = BODY_MEMO_WEIGHT, by = body_weight]
-/// }
-/// ```
-///
-/// `[capacity = N]` bounds the memo by entries; `[weight = W, by = f]` by the weight `f(&key, &value)` gives each.
-#[macro_export]
-macro_rules! memo {
-    ($(#[$attr:meta])* $vis:vis fn $name:ident() -> Memo<$K:ty, $V:ty> [capacity = $capacity:expr]) => {
-        $(#[$attr])*
-        $vis fn $name() -> &'static $crate::memo::Memo<$K, $V> {
-            static MEMO: std::sync::OnceLock<$crate::memo::Memo<$K, $V>> = std::sync::OnceLock::new();
-            static LISTED: std::sync::Once = std::sync::Once::new();
-            $crate::memo::declared(&MEMO, &LISTED, || {
-                $crate::memo::Memo::new(stringify!($name), $capacity)
-            })
-        }
-    };
-    ($(#[$attr:meta])* $vis:vis fn $name:ident() -> Memo<$K:ty, $V:ty> [weight = $weight:expr, by = $weigh:expr]) => {
-        $(#[$attr])*
-        $vis fn $name() -> &'static $crate::memo::Memo<$K, $V> {
-            static MEMO: std::sync::OnceLock<$crate::memo::Memo<$K, $V>> = std::sync::OnceLock::new();
-            static LISTED: std::sync::Once = std::sync::Once::new();
-            $crate::memo::declared(&MEMO, &LISTED, || {
-                $crate::memo::Memo::weighted(stringify!($name), 1024, $weight, $weigh)
-            })
-        }
-    };
+    crate::normalize::normal_forms().clear();
+    crate::identity::identities().clear();
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    memo! {
-        /// A memo of the bound test's own.
-        fn squares() -> Memo<u64, u64> [capacity = 8]
-    }
-
-    memo! {
-        /// A memo of the registry test's own.
-        fn cubes() -> Memo<u64, u64> [capacity = 8]
-    }
-
-    memo! {
-        /// A memo of the recursion test's own.
-        fn loops() -> Memo<u64, u64> [capacity = 8]
-    }
-
-    fn square(n: u64) -> Result<u64, Error> {
-        Ok(n * n)
-    }
-
     #[test]
-    fn a_memo_is_bounded_and_counts_what_it_answers() {
-        for n in 0..64u64 {
-            assert_eq!(squares().get_or_try_insert(&n, || square(n)), Ok(n * n));
+    fn a_memo_is_bounded_and_clears() {
+        let squares: Memo<u64, u64> = Memo::weighted(8, |_, _| 1);
+        for n in 0..1024u64 {
+            assert_eq!(
+                squares.get_or_try_insert(&n, || Ok::<u64, ()>(n * n)),
+                Ok(n * n)
+            );
         }
-        let stats = squares().stats();
-        assert_eq!((stats.name, stats.capacity), ("squares", Some(8)));
-        assert!(stats.entries <= 8, "{stats:?}");
-        assert!(stats.misses >= 64, "{stats:?}");
-        assert_eq!(stats.hits, 0);
-        // A probe that refuses to compute inserts nothing: a hit answers, a miss errors.
-        let miss = || Err::<u64, Error>(Error::Value("a miss".into()));
-        let kept = (0..64u64)
-            .filter(|n| squares().get_or_try_insert(n, miss).is_ok())
-            .count();
-        assert_eq!(kept, stats.entries);
-        assert_eq!(squares().stats().hits, kept as u64);
-    }
-
-    #[test]
-    fn the_registry_lists_and_clears_every_memo() {
-        assert_eq!(
-            cubes().get_or_try_insert(&3, || Ok::<u64, Error>(27)),
-            Ok(27)
+        // The cache rounds its bound up per shard, but it evicts: far fewer entries stay than went in.
+        assert!(
+            0 < squares.weight() && squares.weight() < 256,
+            "{}",
+            squares.weight()
         );
-        assert!(stats().iter().any(|s| s.name == "cubes" && s.entries == 1));
-        clear_all();
-        assert!(stats().iter().any(|s| s.name == "cubes" && s.entries == 0));
-    }
-
-    #[test]
-    fn a_computation_that_asks_for_its_own_key_is_refused() {
-        let nested =
-            loops().get_or_try_insert(&1, || loops().get_or_try_insert(&1, || Ok::<u64, Error>(1)));
-        assert!(nested.is_err());
-        assert_eq!(loops().get_or_try_insert(&1, || Ok::<u64, Error>(1)), Ok(1));
+        // A probe that refuses to compute inserts nothing: a hit answers, a miss errors.
+        let kept = (0..1024u64)
+            .filter(|n| squares.get_or_try_insert(n, || Err::<u64, ()>(())).is_ok())
+            .count();
+        assert_eq!(kept as u64, squares.weight());
+        squares.clear();
+        assert_eq!(squares.weight(), 0);
     }
 }
