@@ -665,11 +665,21 @@ def _wgmma_refusal(plan: Tile, stage: Stage | None = None) -> str | None:
 
 
 def _wgmma_slab_refusal(node: Fold, plan: Tile, inputs) -> str | None:
-    """Why a warp-group cell cannot read ``node``'s B from the slab its kernel root stages, or ``None``. The
-    descriptor takes the slab's bytes as the atom's B dtype and converts nothing, while the root stages B at the
+    """Why a warp-group cell cannot read ``node``'s operands from the slabs its kernel root stages, or ``None``. The
+    root copies the query (the A operand) into a slab of 128-byte swizzle rows on cp.async, once
+    ahead of its chunk loop, so every copy must start on its own width (``staging.vector_copies_aligned``). The
+    descriptor takes the B slab's bytes as the atom's B dtype and converts nothing, while the root stages B at the
     dtype it is stored at — an FP8 key-value cache's key as raw bytes (:func:`~emmy.compiler.ir.schedule.staging.chunk_slab_dtype`)."""
     if not (plan.is_warp and plan.atom.is_wgmma) or len(node.operands) < 2:
         return None
+    from emmy.compiler.ir.schedule import staging  # noqa: PLC0415
+
+    query = node.operands[0].as_slab()
+    nbytes = plan.atom.operand_dtype("a").nbytes
+    if query is not None and not staging.vector_copies_aligned(
+        ((query.load, node.as_contraction().axis, 128 // nbytes, nbytes, 1),), inputs
+    ):
+        return f"the query {query.load.input} is copied on cp.async, and a copy would start off its own width in gmem"
     slab = node.operands[1].as_slab()
     stored = inputs.get(slab.load.input) if slab is not None and inputs else None
     if stored is None or stored.dtype == plan.atom.operand_dtype("b"):

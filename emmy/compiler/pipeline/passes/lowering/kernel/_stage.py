@@ -49,6 +49,7 @@ from dataclasses import dataclass
 
 from emmy.compiler.dim import Dim
 from emmy.compiler.dtype import I32
+from emmy.compiler.ir.address import copies_aligned, copy_width
 from emmy.compiler.ir.axis import Axis
 from emmy.compiler.ir.expression import (
     BinaryExpression,
@@ -105,21 +106,6 @@ class CtaTile:
     n_threads: int
 
 
-def _cp_async_width(slab_cols: int, elem_bytes: int) -> int:
-    """Elements per ``cp.async`` — the widest contiguous run whose byte size is a
-    legal cp.async width (4 / 8 / 16) and that divides the inner (contiguous) slab
-    extent (a chunk never straddles a slab row). The slab's inner dim maps stride-1
-    to the gmem inner dim (canonical A[m,k] / B[k,n]), so a V-run is contiguous in
-    both. ``elem_bytes == 1`` (an fp8 byte slab) yields 16-element 16 B chunks —
-    the byte-staging legality requires 16-divisible inner spans, so the widest
-    width always fits."""
-    for nbytes in (16, 8, 4):
-        v = nbytes // elem_bytes
-        if v >= 1 and slab_cols % v == 0:
-            return v
-    return 1  # elem_bytes > 16 — never (1/2/4-byte element dtypes only)
-
-
 def cp_async_fill(
     *,
     slab: str,
@@ -136,7 +122,7 @@ def cp_async_fill(
     """Cooperatively ``cp.async``-copy a ``rows × cols`` (= ``shape``) row-major smem
     ``slab`` from gmem ``src``. ``gmem_index(row_expression, col_expression)`` returns the gmem
     index tuple for slab cell ``(row, col)``. The CTA's ``n_threads`` lanes stripe
-    ``rows·cols / V``-element chunks (``V`` = :func:`_cp_async_width`); each
+    ``rows·cols / V``-element chunks (``V`` = :func:`copy_width`); each
     lane runs ``for e = tid; e < n_chunks; e += n_threads``. Emits the fill loop only
     — the caller appends one ``CpAsyncCommit`` + ``CpAsyncWait`` + ``Sync`` after the
     A and B fills together. The loop bound (not a predicate) masks the tail, so every
@@ -153,7 +139,7 @@ def cp_async_fill(
     NONE-swizzle kernel is bit-identical. This is the sm_89 bank-conflict fix: the plain
     row-major slab leaves the drain 4-way (64 B rows) / 8-way (128 B rows) conflicted."""
     slab_rows, slab_cols = shape
-    v = _cp_async_width(slab_cols, elem_bytes)
+    v = copy_width(slab_cols, elem_bytes)
     n_chunks = (slab_rows * slab_cols) // v
     stripe = cta.n_threads * v  # the elements one trip of the whole CTA copies
     if n_chunks % cta.n_threads == 0 and stripe % slab_cols == 0:
@@ -218,7 +204,7 @@ def sync_copy_fill(
     caller closes it with the plain CTA barrier (there is no commit group to wait on). This is the
     only transport a target without ``cp.async`` (sm_70) can copy a materialized operand with."""
     rows, cols = shape
-    v = _cp_async_width(cols, elem_bytes)
+    v = copy_width(cols, elem_bytes)
     fe = Axis(name=f"_f{name}", extent=(rows * cols) // v)
     base = _mul(Var(fe.name), _lit(v))
     row = BinaryExpression("/", base, _lit(cols))
@@ -240,7 +226,7 @@ def _sync_copy_runs(shape: tuple[int, int], cta: CtaTile, elem_bytes: int) -> tu
     the split unrolls the lane's trips so the staged values stay in registers, and a ragged tail has
     no unrolled shape (such a slab keeps the one-phase :func:`sync_copy_fill`)."""
     rows, cols = shape
-    v = _cp_async_width(cols, elem_bytes)
+    v = copy_width(cols, elem_bytes)
     chunks = (rows * cols) // v
     return (v, chunks // cta.n_threads) if chunks % cta.n_threads == 0 else None
 
@@ -534,7 +520,7 @@ def _fill_align(cols: int, elem_bytes: int, swizzle: str) -> int:
     so every one of them answers here.
 
     The chunk is the requirement that is easy to miss, because it does not follow the element
-    width. :func:`_cp_async_width` picks the widest legal chunk that divides the inner span — 16 B
+    width. :func:`copy_width` picks the widest legal chunk that divides the inner span — 16 B
     for any 16 B-divisible row, f16 as much as fp8 — and a vector store faults on a shared address
     that is not chunk-aligned. Aligning to the ELEMENT would leave an f16 slab 2 B-aligned and its
     16 B writes free to land at 8 mod 16, which is a real fault and not a theoretical one: it is
@@ -544,7 +530,7 @@ def _fill_align(cols: int, elem_bytes: int, swizzle: str) -> int:
 
     The row STRIDE keeps every later row aligned once the base is: the byte slab's ``BYTE_SLAB_PAD``
     is 16-divisible and the staging legality already requires 16-divisible inner spans."""
-    return max(_swizzle_align(swizzle), _cp_async_width(cols, elem_bytes) * elem_bytes)
+    return max(_swizzle_align(swizzle), copy_width(cols, elem_bytes) * elem_bytes)
 
 
 # TMA hardware-swizzle atom widths in bytes, widest-first. The widest atom that divides a
@@ -830,6 +816,9 @@ class SyncTransport:
     # ``True`` → the schedule asked for a ring (``depth >= 2``), so split that blocking copy across
     # the drain. :attr:`register_staged` is the confirmed answer.
     staged: bool = False
+    # The kernel's gmem buffers by name — the shapes :meth:`_run_plans` proves a vector read's alignment against. A
+    # read of a buffer missing here stays per-cell.
+    inputs: object = None
 
     @property
     def register_staged(self) -> bool:
@@ -917,8 +906,7 @@ class SyncTransport:
         d = BinaryExpression("-", fb[0], fa[0]).simplify(ctx)
         return d.value if isinstance(d, Literal) and isinstance(d.value, int) else None
 
-    @staticmethod
-    def _run_plans(op: SyncOperand, v: int) -> list[str]:
+    def _run_plans(self, op: SyncOperand, v: int) -> list[str]:
         """Per-position emission plan for one operand's ``V``-cell fill run — ``"hoist"`` /
         ``"vector"`` / ``"cell"``. Classified by PROBING the value closure at synthetic coords
         (col 0 vs col 1; the probe stmts are planning-only, never emitted):
@@ -927,30 +915,19 @@ class SyncTransport:
           row alone) — emit once, unsuffixed, but only while its SSA deps stay outside the
           per-cell defs (a dep on a replicated name demotes it back to per-cell);
         - a scalar ``Load`` whose last-dim index advances by exactly +1 per cell, leading dims
-          col-free, and whose ``col=0, k0=0`` anchor simplifies to a ``V``-aligned literal (the
-          cone's k-indexed operand read; K-divisibility eligibility makes the buffer's k extent
-          ``V``-aligned) ⇒ the run's V scalar loads merge into ONE vector ``Load``;
+          col-free, and whose every run starts on a ``V``-element boundary of its buffer (the
+          cone's k-indexed operand read) ⇒ the run's V scalar loads merge into ONE vector ``Load``.
+          A run starts at a multiple of ``V`` along the slab col, and the chunk base ``k0`` is one
+          too, so :func:`copies_aligned` proves the whole address of every run start at ``k0 = 0``:
+          a slice's offset, and every leading coordinate times its row stride (a 260-wide bf16 row
+          puts every odd row 8 B off the 16 B grid);
         - anything else replicates per cell (a cone stmt whose read doesn't advance +1 with
-          the slab col — e.g. a col-strided gather)."""
-        probe_row, probe_k0, zero = Var("__srow"), Var("__sk0"), Literal(0, "int")
+          the slab col — e.g. a col-strided gather, or a vector read no shape proves aligned)."""
+        probe_row, probe_k0, probe_col, zero = Var("__srow"), Var("__sk0"), Var("__scol"), Literal(0, "int")
         s0, _ = op.value(probe_k0, probe_row, zero)
         s1, _ = op.value(probe_k0, probe_row, Literal(1, "int"))
-        sz, _ = op.value(zero, probe_row, zero)
+        sz, _ = op.value(zero, probe_row, probe_col)
         ctx = SimplifyCtx.empty()
-
-        def aligned(expression: Expression) -> bool:
-            form = affine_form(expression, expression.free_vars())
-            if form is None:
-                return False
-            anchor, coeffs = form
-            anchor = anchor.simplify(ctx)
-            return (
-                isinstance(anchor, Literal)
-                and isinstance(anchor.value, int)
-                and anchor.value % v == 0
-                and all(coeff % v == 0 for coeff in coeffs.values())
-            )
-
         plans: list[str] = []
         cell_defs: set[str] = set()
         for p, (a, b) in enumerate(zip(s0, s1, strict=True)):
@@ -967,7 +944,7 @@ class SyncTransport:
                 and all(str(x) == str(y) for x, y in zip(a.index[:-1], b.index[:-1], strict=True))
                 and step == 1
                 and isinstance(sz[p], Load)
-                and aligned(sz[p].index[-1])
+                and copies_aligned(sz[p], probe_col.name, v, self.inputs)
             ):
                 plans.append("vector")
             else:
@@ -1033,7 +1010,7 @@ class SyncTransport:
             if op.before is not None:
                 out += op.before(k0_cur)
             rows, cols = op.shape
-            v = _cp_async_width(cols, op.elem_bytes or self.elem_bytes)
+            v = copy_width(cols, op.elem_bytes or self.elem_bytes)
             fe = Axis(name=f"_f{op.tag}", extent=(rows * cols) // v)
             base = _mul(Var(fe.name), _lit(v))
             row = BinaryExpression("/", base, _lit(cols))  # constant across the run: v divides cols

@@ -1,11 +1,17 @@
 """Generic sync compute-fill lowering invariants."""
 
+import pytest
+
+from emmy.commands.trace import graph_from_code
+from emmy.compiler.context import Context
 from emmy.compiler.ir.axis import Axis
+from emmy.compiler.ir.cuda import CudaOp
 from emmy.compiler.ir.expression import Literal
 from emmy.compiler.ir.kernel.ir import pack_smem, swizzle_fn, swizzle_xor
 from emmy.compiler.ir.pure.fold import Fold
 from emmy.compiler.ir.stmt import Assign, Body, parse_body
 from emmy.compiler.ir.tile.ops import cone_stat
+from emmy.compiler.pipeline import CUDA_PASSES, Pipeline
 from emmy.compiler.pipeline.passes.lowering.kernel._stage import (
     _SWIZZLE_SLAB_ALIGN,
     CtaTile,
@@ -15,6 +21,7 @@ from emmy.compiler.pipeline.passes.lowering.kernel._stage import (
     slab_smem,
     software_swizzle,
 )
+from emmy.compiler.pipeline.search.pins import pinned_knobs
 from tests.compiler.terms import projection, reduction, slab
 
 
@@ -146,3 +153,28 @@ def test_no_copied_slab_lands_misaligned_behind_an_odd_neighbour() -> None:
     copied = slab_smem("_a_smem", 8, 64, "half", align=_fill_align(64, 2, "NONE"))
     offsets, _total = pack_smem([odd, copied])
     assert offsets["_a_smem"] % 16 == 0, f"copied slab at {offsets['_a_smem']}, not 16 B-aligned"
+
+
+@pytest.mark.parametrize("width", [256, 260], ids=["dense-row", "row-off-the-16B-grid"])
+def test_a_computed_operand_merges_its_reads_only_where_each_run_is_aligned(width, monkeypatch) -> None:
+    """GPU-free. ``(x[:, :256] * 2.0) @ w.t()`` computes A in the fill, which merges each run's eight bf16 reads of ``x``
+    into one 16 B load. A run starts on the 16 B grid along K, but its row does too only when the row stride is a
+    multiple of eight elements: a 260-wide row is 520 B, so every odd row starts 8 B off the grid and a 16 B load there
+    is misaligned. That row reads per element, and the 256-wide row keeps the merge. The later vectorizer still joins
+    the 260-wide row's reads where it can prove them (8 B), so the plan is read off the fill itself."""
+    plans: list[list[str]] = []
+    run_plans = SyncTransport._run_plans
+    monkeypatch.setattr(SyncTransport, "_run_plans", lambda self, op, v: plans.append(run_plans(self, op, v)) or plans[-1])
+    code = (
+        f"import torch\nx = torch.randn(64, {width}, dtype=torch.bfloat16)\nw = torch.randn(256, 256, dtype=torch.bfloat16)\n"
+        "(x[:, :256] * 2.0) @ w.t()"
+    )
+    pin = {"TILE": "mma_m16n8k16_bf16_f32/f2x4/k4", "WORK": "w2x2", "STAGE": "d1/smem", "REDUCE": "", "PLACE": "fuse"}
+    with pinned_knobs(pin):
+        graph = Pipeline.build(CUDA_PASSES).run(graph_from_code(code)[0], ctx=Context.from_target((12, 0)))
+    (source,) = [node.op.kernel_source for node in graph.nodes.values() if isinstance(node.op, CudaOp)]
+
+    aligned = width % 8 == 0
+    assert plans, "the pin must lower through the compute fill"
+    assert any("vector" in plan for plan in plans) is aligned
+    assert ("reinterpret_cast<const uint4*>(&x[" in source) is aligned

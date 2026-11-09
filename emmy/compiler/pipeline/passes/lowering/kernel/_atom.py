@@ -1655,7 +1655,7 @@ def _staged(ops: _AtomOps, cells, offset, mn: tuple[Side, Side]):
             if tma
             else CpAsyncTransport(operands=copies, **common)
             if not fills
-            else SyncTransport(operands=fills, copy_operands=copies, **common)
+            else SyncTransport(operands=fills, copy_operands=copies, inputs=ops.inputs, **common)
         )
         # The per-tensor scale levels, applied once per output element after the K-loop. The cell
         # multiplies the RAW e4m3 block scales into each block's sum and knows nothing of the
@@ -1741,7 +1741,7 @@ def _staged(ops: _AtomOps, cells, offset, mn: tuple[Side, Side]):
             # and the compute fill are simply two of them over one drain segment: the box copies
             # ring at the stage's depth, the compute fill stays single-buffer as it always is.
             copies = TmaTransport(operands=copy_ops, **common)
-            fill = SyncTransport(operands=sync_ops, prologue_stmts=tuple(prologue), **common)
+            fill = SyncTransport(operands=sync_ops, prologue_stmts=tuple(prologue), inputs=ops.inputs, **common)
             slabs = frozenset(op.slab for op in (*copy_ops, *sync_ops))
             decls, region = pipelined_kloop(
                 operands=((copies, stage.depth), (fill, 1)),
@@ -1759,6 +1759,7 @@ def _staged(ops: _AtomOps, cells, offset, mn: tuple[Side, Side]):
             operands=sync_ops,
             copy_operands=copy_ops,
             prologue_stmts=tuple(prologue),
+            inputs=ops.inputs,
             copy_sync=not tile.is_warp or tile.atom.sync_copy_staging,
             # A ring under a blocking copy asks for the register-staged split — that is what makes
             # ``depth`` mean chunks-in-flight here, as it does on the cp.async / TMA transports.
