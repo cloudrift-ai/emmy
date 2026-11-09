@@ -57,6 +57,8 @@ _INTEGER_NATIVE_OPS = frozenset(
 # the only legal uses of an fp8 SSA value are the decode conversion out of it
 # and the encode conversion into it, both spelled below in ``convert``.
 _F8_DTYPES = ("f8e4m3", "f8e5m2")
+# The formats C++ converts into nothing by itself: every pair among them needs a rule in ``convert``.
+_NARROW_DTYPES = (*_F8_DTYPES, "f16", "bf16", "f16x2")
 
 # Intrinsic spellings — per dtype.  Keys are abstract op names emitted
 # by ``op_to_expression`` (``"exp"``, ``"fmax"``, ``"fabs"``, ...).
@@ -200,6 +202,13 @@ class CudaRenderTarget:
             return f"__half2half2({value})"
         if dst_dt == "f16x2" and src_dt == "f32":
             return f"__float2half2_rn({value})"
+        if {src_dt, dst_dt} == {"f16", "bf16"}:
+            # No device intrinsic converts the two half formats into each other: through f32, the round explicit.
+            return self.convert(self.convert(value, src_dt, "f32"), "f32", dst_dt)
+        if src_dt in _NARROW_DTYPES and dst_dt in _NARROW_DTYPES:
+            # Two narrow formats with no rule above have no conversion C++ would supply: a missing rule fails here,
+            # where it names the pair, not in nvcc.
+            raise ValueError(f"CUDA has no conversion from {src_dt!r} to {dst_dt!r}")
         return value
 
     def bitcast(self, value: str, src_dt: str, dst_dt: str) -> str:
