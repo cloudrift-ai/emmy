@@ -140,8 +140,8 @@ def test_the_record_run_compiles_each_target_with_its_familys_settled_layouts(mo
     from emmy.serving.twins import graph_layouts
 
     rows = {
-        ("t16", ()): [SimpleNamespace(name="gdn16.k_linear.m16", kernel="t16")],
-        ("t1", ()): [SimpleNamespace(name="gdn1.k_linear.m1", kernel="t1")],
+        ("t16", (), ()): [SimpleNamespace(name="gdn16.k_linear.m16", kernel="t16")],
+        ("t1", (), ()): [SimpleNamespace(name="gdn1.k_linear.m1", kernel="t1")],
     }
     programs = [_linear(16), _linear(1)]
     document = SimpleNamespace(

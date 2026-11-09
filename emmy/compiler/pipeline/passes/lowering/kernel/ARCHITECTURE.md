@@ -409,8 +409,11 @@ spills that came with holding the results. A base the reading cannot prove keeps
 **Computed operands and nested Folds.** Every computed edge remains a schedule site. Scalar rows evaluate a pure
 producer in registers. Warp rows place a producer in a synchronous shared-memory slab, evaluated per cell in the
 fill; a contraction nested there is a serial loop and takes no `TILE` or `STAGE` of its own (only the chunk tier's
-score does, see "The one factorizer"). Materialized peers keep using the ordinary vectorized copy transports. These are residence choices over the same Fold tree; the scheduler and
-materializer do not recognize operation families.
+score does, see "The one factorizer"). Each fill thread writes a run of up to 16 B of cells, and the run's reads of
+one gmem operand along K merge into one vector load only where `copies_aligned` proves every run starts on that
+width, the proof every vector copy takes (the schedule `ARCHITECTURE.md`). A 260-wide bf16 row puts every odd row
+8 B off, so its reads stay per cell. Materialized peers keep using the ordinary vectorized copy transports. These are
+residence choices over the same Fold tree; the scheduler and materializer do not recognize operation families.
 
 **A carrier the tiers cannot fold WHOLE is no tile site.** `Fold.tiles_whole` asks whether the tile's accumulators can
 BE the carrier: for a planar one, that every carried state is a bilinear channel; for a twisted one, that the recipe
@@ -533,7 +536,16 @@ ldmatrix XOR is b16-indexed); the cp.async byte slab instead pads each row by `_
 every chunk 16 B-aligned and takes the drain from 4-way bank conflicts to ≤ 2-way per the lane→bank oracle), and a
 TMA byte slab (the U8 `CUtensorMap`) deposits dense and eats the measured conflicts. Legality
 (`resolve_warp_stage`'s byte arm): 16-divisible inner spans (and, canonical-B, a 16-divisible gmem row stride N);
-the multi-channel sync compute-fill and the scalar resolver still decline 1-byte elements.
+the multi-channel sync compute-fill and the scalar resolver still decline 1-byte elements. The chunk tier stages an
+FP8 key-value cache the same way, its key and its value both, on cp.async only (`chunk_slab_dtype`): an f16 cell
+converts the key's (k, k+1) pairs with one fp8x2 convert, and a bf16 cell's key and every K-major value element
+convert one by one. A warp-group score cannot read that key, since its descriptor converts nothing
+(`_wgmma_slab_refusal`). Like every vector copy a stage makes, each 16 B copy must start on its own width in gmem
+(`vector_copies_aligned`, the schedule `ARCHITECTURE.md`), so a key or value sliced one byte into a padded row reads
+gmem-direct. Read gmem-direct, the cache cost one byte load per element — about 1,150 loads
+a thread per 64-key chunk at head width 256, each holding a register until it converts — and every attention fold sat
+at 255 registers with spills. Staged, the 27B one-row decode piece at 131,072 cached tokens runs 431 us against 845 on
+an RTX 4080, about 87% of the card's bandwidth.
 
 **Staged packed-pair (NVFP4) weights — the byte slab plus a block-scale slab.** A packed weight is a COMPUTED B, so
 the general reading above already covers it: the compute fill evaluates its decode cone per slab cell. That reading

@@ -276,6 +276,22 @@ pub struct Launch {
     pub serial: Vec<(String, i64)>,
     pub tma: Vec<Tma>,
     pub cpu: Option<CpuLaunch>,
+    /// The symbolic size and the values, first to last, the launch runs at; `None` runs at every
+    /// size. Each of native's attention programs runs in its range of windows.
+    pub size_range: Option<(String, i64, i64)>,
+}
+
+impl Launch {
+    /// Whether the launch runs at `env`: at every size, or while its sized axis lies in its range.
+    pub fn runs_at(&self, env: &Env) -> Result<bool> {
+        let Some((name, first, last)) = &self.size_range else {
+            return Ok(true);
+        };
+        let size = env
+            .get(name)
+            .with_context(|| format!("unbound symbolic axis {name:?}"))?;
+        Ok((first..=last).contains(&size))
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -401,6 +417,8 @@ struct RawLaunch {
     runtime_args: Vec<String>,
     #[serde(default)]
     serial: Vec<(String, i64)>,
+    #[serde(default)]
+    size_range: Option<(String, i64, i64)>,
     #[serde(default)]
     cuda: Option<RawCuda>,
     #[serde(default)]
@@ -572,6 +590,7 @@ impl Program {
                         writes: l.writes,
                         runtime_args: l.runtime_args,
                         serial: l.serial,
+                        size_range: l.size_range,
                         tma: l
                             .cuda
                             .map(|c| c.tma)

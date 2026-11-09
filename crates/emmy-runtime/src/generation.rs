@@ -17,7 +17,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 use std::time::{Duration, Instant};
 
-const GENERATION_FORMAT: u32 = 15;
+const GENERATION_FORMAT: u32 = 16;
 const DEFAULT_TEMPERATURE: f64 = 0.0;
 const DEFAULT_TOP_P: f64 = 1.0;
 const DEFAULT_SEED: u64 = 0;
@@ -1101,6 +1101,41 @@ mod tests {
         // A context short of a step, or past the last whole step, caps it.
         assert_eq!(window(3, 1, 8), 8);
         assert_eq!(window(MAX_CONTEXT - 1, 1, MAX_CONTEXT), MAX_CONTEXT as i64);
+    }
+
+    #[test]
+    fn a_step_attends_through_its_window_ranges_program() {
+        // One layer's attention priced for a short and a long range of windows, split here at
+        // 32,768 positions: each launch runs only in its range.
+        let attend = |id: &str, first: i64, last: i64| {
+            serde_json::json!({"node_id": id, "kernel": "attend", "args": ["q", "y"],
+                "grid": [[1], [1], [1]], "block": [[32], [1], [1]],
+                "size_range": [WINDOW, first, last], "cuda": {"tma": []}})
+        };
+        let plan = serde_json::json!({
+            "format": 1, "backend": "cuda", "inputs": ["q"], "outputs": ["y"],
+            "buffers": [
+                {"name": "q", "shape": [4], "dtype": "f32", "role": "input"},
+                {"name": "y", "shape": [4], "dtype": "f32", "role": "output"}
+            ],
+            "kernels": {"attend": {"binary_key": "ab", "arch_specific": false}},
+            "launches": [attend("attend0", 1, 32767), attend("attend0-long", 32768, MAX_CONTEXT as i64)]
+        });
+        let program = crate::artifact::Program::parse(&plan.to_string()).unwrap();
+        let attends = |position: usize, rows: usize| {
+            let env = Env::from([(WINDOW.to_owned(), window(position, rows, MAX_CONTEXT))]);
+            let ran = program.launches.iter().filter(|l| l.runs_at(&env).unwrap());
+            ran.map(|l| l.node_id.as_str()).collect::<Vec<_>>()
+        };
+        // The window steps by 4,096 positions: a chunk ending at 28,672 attends over the short
+        // range's last window, one more position over the long range's first.
+        assert_eq!(attends(0, 64), ["attend0"]);
+        assert_eq!(attends(28_672 - 64, 64), ["attend0"]);
+        assert_eq!(attends(28_672 - 63, 64), ["attend0-long"]);
+        assert_eq!(attends(197_632, 3), ["attend0-long"]);
+        assert_eq!(attends(MAX_CONTEXT - 1, 1), ["attend0-long"]);
+        // A launch's range names the window, which every step sets.
+        assert!(program.launches[0].runs_at(&Env::new()).is_err());
     }
 
     #[test]

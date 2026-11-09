@@ -431,6 +431,19 @@ def test_packed_b_declines_a_k_strided_layout():
     assert resolve_warp_stage(node, tile, Stage.parse("d2/smem-async"), 100 * 1024, inputs, k_axis=ka) is None
 
 
+@pytest.mark.parametrize(("pad", "staged"), [(16, True), (8, False)], ids=["16B-pad", "8B-pad"])
+def test_packed_b_stages_on_cp_async_only_when_its_rows_keep_the_16_byte_grid(pad, staged):
+    """A bits row ``pad`` bytes wider than ``K / 2`` puts weight row ``n`` at ``n · (K / 2 + pad)``, so its 16 B
+    copies stay on the 16 B grid only when the pitch does."""
+    node, inputs, axes, ka = _node()
+    bits = inputs["w_bits"]
+    inputs = {**inputs, "w_bits": Tensor("w_bits", (bits.shape[0], bits.shape[1].as_static() + pad), F4E2M1x2)}
+    tile = _tile(K16, "f2x2/k2", "w1x4", axes)
+    assert _packed(node, inputs)[0] is not None
+    st = resolve_warp_stage(node, tile, Stage.parse("d2/smem-async"), 100 * 1024, inputs, k_axis=ka)
+    assert (st is not None) is staged
+
+
 def test_packed_b_declines_a_block_the_drain_does_not_read():
     """The drain's scale column is ``K >> 4``; a 32-value block would read the wrong scale."""
     node, inputs, axes, ka = _node(block=32)
@@ -676,7 +689,11 @@ def test_a_pair_table_lookup_is_computed_not_read(tmp_path, place):
 @pytest.mark.xdist_group("cuda")
 def test_the_computed_pair_lookup_matches_the_decoded_oracle(tmp_path):
     """The computed lookup on the device: the decode cut into its own kernel feeds the matmul the same values the
-    table holds, so the product equals ``x @ dequantize_nvfp4(w)ᵀ`` up to the matmul's own rounding."""
+    table holds, so the product equals ``x @ dequantize_nvfp4(w)ᵀ`` up to the matmul's own rounding.
+
+    Fast math is pinned off, so the matmul accumulates in f32. Its own rounding is then the f16 output's, at most
+    half an ulp: 2^-11 (4.9e-4) of the largest output. Left on, a consumer card offers the f16-accumulate atom,
+    whose error here is 1.0e-3, and the prior picks it at ``-O1`` (its own test is the f16-accumulate drain's)."""
     from emmy.compiler.backend.cuda.backend import CudaBackend
     from emmy.compiler.loader.binder import bind_constants
     from emmy.compiler.loader.quant import dequantize_nvfp4
@@ -686,7 +703,7 @@ def test_the_computed_pair_lookup_matches_the_decoded_oracle(tmp_path):
     g, (packed, scale_bits, s2) = _nvfp4_matmul_graph(tmp_path, m=m, n=n, k=k)
     x = (np.random.default_rng(11).standard_normal((m, k)) * 0.05).astype(np.float16)
     backend = CudaBackend()
-    with pinned_knobs({"PLACE": "cut"}):
+    with pinned_knobs({"PLACE": "cut", "FAST_MATH": False}):
         compiled = backend.compile(g)
     assert any("emmy_f4_pair(" in (getattr(node.op, "kernel_source", None) or "") for node in compiled.nodes.values())
     data = bind_constants(compiled, {"layer.weight": packed, "layer.weight_scale": scale_bits, "layer.weight_scale_2": s2})
