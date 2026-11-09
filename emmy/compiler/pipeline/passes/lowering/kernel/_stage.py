@@ -49,6 +49,7 @@ from dataclasses import dataclass
 
 from emmy.compiler.dim import Dim
 from emmy.compiler.dtype import I32
+from emmy.compiler.ir.address import copy_width
 from emmy.compiler.ir.axis import Axis
 from emmy.compiler.ir.expression import (
     BinaryExpr,
@@ -105,21 +106,6 @@ class CtaTile:
     n_threads: int
 
 
-def _cp_async_width(slab_cols: int, elem_bytes: int) -> int:
-    """Elements per ``cp.async`` — the widest contiguous run whose byte size is a
-    legal cp.async width (4 / 8 / 16) and that divides the inner (contiguous) slab
-    extent (a chunk never straddles a slab row). The slab's inner dim maps stride-1
-    to the gmem inner dim (canonical A[m,k] / B[k,n]), so a V-run is contiguous in
-    both. ``elem_bytes == 1`` (an fp8 byte slab) yields 16-element 16 B chunks —
-    the byte-staging legality requires 16-divisible inner spans, so the widest
-    width always fits."""
-    for nbytes in (16, 8, 4):
-        v = nbytes // elem_bytes
-        if v >= 1 and slab_cols % v == 0:
-            return v
-    return 1  # elem_bytes > 16 — never (1/2/4-byte element dtypes only)
-
-
 def cp_async_fill(
     *,
     slab: str,
@@ -136,7 +122,7 @@ def cp_async_fill(
     """Cooperatively ``cp.async``-copy a ``rows × cols`` (= ``shape``) row-major smem
     ``slab`` from gmem ``src``. ``gmem_index(row_expression, col_expression)`` returns the gmem
     index tuple for slab cell ``(row, col)``. The CTA's ``n_threads`` lanes stripe
-    ``rows·cols / V``-element chunks (``V`` = :func:`_cp_async_width`); each
+    ``rows·cols / V``-element chunks (``V`` = :func:`copy_width`); each
     lane runs ``for e = tid; e < n_chunks; e += n_threads``. Emits the fill loop only
     — the caller appends one ``CpAsyncCommit`` + ``CpAsyncWait`` + ``Sync`` after the
     A and B fills together. The loop bound (not a predicate) masks the tail, so every
@@ -153,7 +139,7 @@ def cp_async_fill(
     NONE-swizzle kernel is bit-identical. This is the sm_89 bank-conflict fix: the plain
     row-major slab leaves the drain 4-way (64 B rows) / 8-way (128 B rows) conflicted."""
     slab_rows, slab_cols = shape
-    v = _cp_async_width(slab_cols, elem_bytes)
+    v = copy_width(slab_cols, elem_bytes)
     n_chunks = (slab_rows * slab_cols) // v
     stripe = cta.n_threads * v  # the elements one trip of the whole CTA copies
     if n_chunks % cta.n_threads == 0 and stripe % slab_cols == 0:
@@ -218,7 +204,7 @@ def sync_copy_fill(
     caller closes it with the plain CTA barrier (there is no commit group to wait on). This is the
     only transport a target without ``cp.async`` (sm_70) can copy a materialized operand with."""
     rows, cols = shape
-    v = _cp_async_width(cols, elem_bytes)
+    v = copy_width(cols, elem_bytes)
     fe = Axis(name=f"_f{name}", extent=(rows * cols) // v)
     base = _mul(Var(fe.name), _lit(v))
     row = BinaryExpr("/", base, _lit(cols))
@@ -240,7 +226,7 @@ def _sync_copy_runs(shape: tuple[int, int], cta: CtaTile, elem_bytes: int) -> tu
     the split unrolls the lane's trips so the staged values stay in registers, and a ragged tail has
     no unrolled shape (such a slab keeps the one-phase :func:`sync_copy_fill`)."""
     rows, cols = shape
-    v = _cp_async_width(cols, elem_bytes)
+    v = copy_width(cols, elem_bytes)
     chunks = (rows * cols) // v
     return (v, chunks // cta.n_threads) if chunks % cta.n_threads == 0 else None
 
@@ -534,7 +520,7 @@ def _fill_align(cols: int, elem_bytes: int, swizzle: str) -> int:
     so every one of them answers here.
 
     The chunk is the requirement that is easy to miss, because it does not follow the element
-    width. :func:`_cp_async_width` picks the widest legal chunk that divides the inner span — 16 B
+    width. :func:`copy_width` picks the widest legal chunk that divides the inner span — 16 B
     for any 16 B-divisible row, f16 as much as fp8 — and a vector store faults on a shared address
     that is not chunk-aligned. Aligning to the ELEMENT would leave an f16 slab 2 B-aligned and its
     16 B writes free to land at 8 mod 16, which is a real fault and not a theoretical one: it is
@@ -544,7 +530,7 @@ def _fill_align(cols: int, elem_bytes: int, swizzle: str) -> int:
 
     The row STRIDE keeps every later row aligned once the base is: the byte slab's ``BYTE_SLAB_PAD``
     is 16-divisible and the staging legality already requires 16-divisible inner spans."""
-    return max(_swizzle_align(swizzle), _cp_async_width(cols, elem_bytes) * elem_bytes)
+    return max(_swizzle_align(swizzle), copy_width(cols, elem_bytes) * elem_bytes)
 
 
 # TMA hardware-swizzle atom widths in bytes, widest-first. The widest atom that divides a
@@ -1033,7 +1019,7 @@ class SyncTransport:
             if op.before is not None:
                 out += op.before(k0_cur)
             rows, cols = op.shape
-            v = _cp_async_width(cols, op.elem_bytes or self.elem_bytes)
+            v = copy_width(cols, op.elem_bytes or self.elem_bytes)
             fe = Axis(name=f"_f{op.tag}", extent=(rows * cols) // v)
             base = _mul(Var(fe.name), _lit(v))
             row = BinaryExpr("/", base, _lit(cols))  # constant across the run: v divides cols

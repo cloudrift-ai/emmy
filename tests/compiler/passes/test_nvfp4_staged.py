@@ -431,6 +431,19 @@ def test_packed_b_declines_a_k_strided_layout():
     assert resolve_warp_stage(node, tile, Stage.parse("d2/smem-async"), 100 * 1024, inputs, k_axis=ka) is None
 
 
+@pytest.mark.parametrize(("pad", "staged"), [(16, True), (8, False)], ids=["16B-pad", "8B-pad"])
+def test_packed_b_stages_on_cp_async_only_when_its_rows_keep_the_16_byte_grid(pad, staged):
+    """A bits row ``pad`` bytes wider than ``K / 2`` puts weight row ``n`` at ``n · (K / 2 + pad)``, so its 16 B
+    copies stay on the 16 B grid only when the pitch does."""
+    node, inputs, axes, ka = _node()
+    bits = inputs["w_bits"]
+    inputs = {**inputs, "w_bits": Tensor("w_bits", (bits.shape[0], bits.shape[1].as_static() + pad), F4E2M1x2)}
+    tile = _tile(K16, "f2x2/k2", "w1x4", axes)
+    assert _packed(node, inputs)[0] is not None
+    st = resolve_warp_stage(node, tile, Stage.parse("d2/smem-async"), 100 * 1024, inputs, k_axis=ka)
+    assert (st is not None) is staged
+
+
 def test_packed_b_declines_a_block_the_drain_does_not_read():
     """The drain's scale column is ``K >> 4``; a 32-value block would read the wrong scale."""
     node, inputs, axes, ka = _node(block=32)
