@@ -409,8 +409,11 @@ spills that came with holding the results. A base the reading cannot prove keeps
 **Computed operands and nested Folds.** Every computed edge remains a schedule site. Scalar rows evaluate a pure
 producer in registers. Warp rows place a producer in a synchronous shared-memory slab, evaluated per cell in the
 fill; a contraction nested there is a serial loop and takes no `TILE` or `STAGE` of its own (only the chunk tier's
-score does, see "The one factorizer"). Materialized peers keep using the ordinary vectorized copy transports. These are residence choices over the same Fold tree; the scheduler and
-materializer do not recognize operation families.
+score does, see "The one factorizer"). Each fill thread writes a run of up to 16 B of cells, and the run's reads of
+one gmem operand along K merge into one vector load only where `copies_aligned` proves every run starts on that
+width, the proof every vector copy takes (the schedule `ARCHITECTURE.md`). A 260-wide bf16 row puts every odd row
+8 B off, so its reads stay per cell. Materialized peers keep using the ordinary vectorized copy transports. These are
+residence choices over the same Fold tree; the scheduler and materializer do not recognize operation families.
 
 **A carrier the tiers cannot fold WHOLE is no tile site.** `Fold.tiles_whole` asks whether the tile's accumulators can
 BE the carrier: for a planar one, that every carried state is a bilinear channel; for a twisted one, that the recipe
