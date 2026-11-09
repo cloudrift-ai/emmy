@@ -70,6 +70,7 @@ def test_restamp_respells_a_rows_site_keys_as_it_does_a_seam() -> None:
     rule maps is dropped from its row, named, rather than guessed."""
     from dataclasses import replace
 
+    from emmy.compiler.pipeline.search.golden.format import Measurements
     from emmy.compiler.pipeline.search.golden.restamp import restamp
 
     document = GoldenFile.load(Path(__file__).resolve().parents[2] / "realization/cases/fused/gdn-recurrence-state-kv.json")
@@ -79,10 +80,13 @@ def test_restamp_respells_a_rows_site_keys_as_it_does_a_seam() -> None:
     head, _, tail = nested.partition("/map.3")  # ``map.1/inner.N``: the nested reduce one operand index over
     moved = f"{head[:-1]}{int(head[-1]) + 1}/map.3{tail}"
     shifted = {key.replace(nested, moved): value for key, value in row.knobs.items()}
-    fresh, report = restamp(replace(document, rows=[replace(row, knobs=shifted)]))
+    measured = replace(row, knobs=shifted, measurements=Measurements(emmy_us=12.5))
+    fresh, report = restamp(replace(document, rows=[measured]))
     assert fresh.rows[0].knobs == row.knobs and not report.dropped_rows
     assert report.respelled_rows == [f"{row.name} {old} -> {new}" for old, new in zip(shifted, row.knobs, strict=True) if old != new]
     assert len(report.respelled_rows) == 3
+    # A re-spelled key is a nearest-address match, not proof: the row keeps its schedule and loses its measurement.
+    assert report.demoted == [row.name] and fresh.rows[0].measurements is None
     unmapped = {key.replace(nested, f"{nested}9"): value for key, value in row.knobs.items()}
     fresh, report = restamp(replace(document, rows=[replace(row, knobs=unmapped)]))
     assert fresh.rows[0].knobs == {key: value for key, value in row.knobs.items() if nested not in key}

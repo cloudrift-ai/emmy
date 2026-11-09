@@ -12,8 +12,8 @@ dropped with its decisions and rows, since a row is a schedule of one kernel; a 
 takes the same way (another arm, another number of pieces) is dropped with its pieces' rows, unless only its seam
 addresses moved and nearby seams mint exactly its stored pieces (:func:`_respelled`); a row whose kernel kept its
 identity and whose keys name the same sites keeps its measurement, and one whose kernel was re-keyed, or whose
-scoped key was re-spelled onto the nearest offered site, keeps its schedule and loses its microseconds — a proposal,
-no evidence until a record run on the card measures it again. Re-keyed means the stored body and the
+scoped keys were re-spelled onto the nearest offered sites or dropped, keeps its schedule and loses its microseconds
+— a proposal, no evidence until a record run on the card measures it again. Re-keyed means the stored body and the
 fresh lowering are two kernels: their exact identities, both computed now, differ. A change to how identity is
 computed therefore re-keys nothing. A kernel that kept its identity keeps its stored body too: one identity can be
 minted by several parents, each spelling the body's buffers its own way. When the decisions that name one stored
@@ -462,14 +462,14 @@ def restamp(document: GoldenFile, *, traced: int | None = None) -> tuple[GoldenF
             continue
         fresh_row = replace(row, kernel=stored_as[row.kernel])
         offered_keys = keys_of(fresh_row.kernel) if row.knobs else None
-        respelled = False
+        changed = False
         if offered_keys is not None:
             moved, dropped = _respelled_keys(row.knobs, offered_keys)
-            respelled = any(old != new for old, new in moved.items())
+            changed = bool(dropped) or any(old != new for old, new in moved.items())
             report.respelled_rows.extend(f"{row.name} {old} -> {new}" for old, new in moved.items() if old != new)
             report.dropped_keys.extend(f"{row.name}: {key} names no site of {fresh_row.kernel}" for key in dropped)
             fresh_row = replace(fresh_row, knobs={moved[key]: value for key, value in row.knobs.items() if key not in dropped})
-        if row.measurements is not None and (stale(row.kernel) is not None or respelled):
+        if row.measurements is not None and (stale(row.kernel) is not None or changed):
             fresh_row = replace(fresh_row, measurements=None)
             report.demoted.append(row.name)
         latencies = {}

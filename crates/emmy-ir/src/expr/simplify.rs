@@ -39,12 +39,16 @@ pub(super) fn simplify_binary(
     if let (Some(l), Some(r)) = (left.as_literal(), right.as_literal()) {
         return fold_binop_literals(op, l, r);
     }
+    // An identity element folds away only as an INTEGER literal: `x * 1.0` and `x + 0.0` keep their float literal,
+    // which is what makes the operation a float one over an integer `x`; the affine form spells them `1.0 * x`.
+    let int_zero = |e: &Expression| e.int_literal() == Some(0);
+    let int_one = |e: &Expression| e.int_literal() == Some(1);
     match op {
         Operation::Add => {
-            if left.is_zero() {
+            if int_zero(&left) {
                 return Ok(right);
             }
-            if right.is_zero() {
+            if int_zero(&right) {
                 return Ok(left);
             }
             if let Some(recomposed) = fold_divmod_recompose(&left, &right, ctx)? {
@@ -52,7 +56,7 @@ pub(super) fn simplify_binary(
             }
         }
         Operation::Subtract => {
-            if right.is_zero() {
+            if int_zero(&right) {
                 return Ok(left);
             }
             if left == right {
@@ -60,21 +64,21 @@ pub(super) fn simplify_binary(
             }
         }
         Operation::Multiply => {
-            if left.is_zero() || right.is_zero() {
+            if int_zero(&left) || int_zero(&right) {
                 return Ok(Expression::int(0));
             }
-            if left.is_one() {
+            if int_one(&left) {
                 return Ok(right);
             }
-            if right.is_one() {
+            if int_one(&right) {
                 return Ok(left);
             }
         }
         Operation::Divide | Operation::FloorDivide => {
-            if right.is_one() {
+            if int_one(&right) {
                 return Ok(left);
             }
-            if left.is_zero() {
+            if int_zero(&left) {
                 return Ok(Expression::int(0));
             }
             if let Some(n) = right.int_literal().filter(|n| *n > 1) {
@@ -664,6 +668,25 @@ mod tests {
     fn at(e: &Expression, f: i64) -> Num {
         e.eval(&HashMap::from([(Name::from("f"), Num::Int(f))]))
             .unwrap()
+    }
+
+    /// An identity element folds away as an integer literal and stays as a float one: the float literal is what
+    /// makes `x * 1.0` a float operation over an integer `x`, and the affine form spells it `1.0 * x`.
+    #[test]
+    fn a_float_identity_element_is_not_folded_away() {
+        let ctx = SimplifyCtx::empty();
+        let x = Expression::var("x");
+        let by_one = Expression::binary(Operation::Multiply, x.clone(), Expression::int(1));
+        assert_eq!(by_one.simplify(&ctx).unwrap(), x);
+        let plus_zero = Expression::binary(Operation::Add, x.clone(), Expression::int(0));
+        assert_eq!(plus_zero.simplify(&ctx).unwrap(), x);
+        for kept in [
+            Expression::binary(Operation::Multiply, x.clone(), Expression::float(1.0)),
+            Expression::binary(Operation::Add, x.clone(), Expression::float(0.0)),
+            Expression::binary(Operation::Multiply, Expression::float(0.0), x.clone()),
+        ] {
+            assert_eq!(kept.simplify(&ctx).unwrap(), kept);
+        }
     }
 
     #[test]

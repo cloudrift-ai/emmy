@@ -873,7 +873,6 @@ pub fn affine_terms<'py>(
 /// float literal fed the form (`float`), the offset last; the terms in the order the normal form gives names it does
 /// not rank.
 #[pyfunction]
-#[pyo3(signature = (terms, offset, float = false))]
 pub fn affine_sum<'py>(
     py: Python<'py>,
     terms: &Bound<'py, PyAny>,

@@ -236,9 +236,9 @@ nothing else: no submodule path, no private name. The package exports the statem
 `rename_free`, `mask_select_predicate`, `ordering_constraints`, `dtype_promote`), the text form (`pretty_body`,
 `parse_body`), four normalization steps a caller may run on its own (`one_operation_per_definition`,
 `canonical_values`, `simplify_body`, `prepare_body`), the two statement types fusion's body assembly in `ir/loop/`
-builds a region with (`Call`,
-`Subroutine`), and the names of a statement type's fields (`fields_of`). The statement types, `Body`, the protocol, the
-text, the value numbering and the normalization are implemented in Rust — the `emmy-ir` crate, reached through the
+builds a region with (`Call`, `Subroutine`), and the names of a statement type's fields (`fields_of`). The statement
+types, `Body`, the protocol, the text, the value numbering and the normalization are implemented in Rust — the
+`emmy-ir` crate, reached through the
 `emmy.emmy_ir` extension (`crates/emmy-ir/ARCHITECTURE.md`) — and the package is the glue over them: `__init__.py`
 re-exports the names, and `glue.py` writes the few members that take a Python function and keep its results (`rename` by
 a function, `rewrite` under a `Sigma`, `Body.fold`, the identity with its typed roles); `Body.map` and `map_expressions`
@@ -367,7 +367,7 @@ expressions among other things is read by a subclass of `Parser`, which takes ea
 |------------------------------------------------------------------------------|--------------------------------------------------------------------------|
 | `Var`, `Literal`, `BinaryExpression`, `Builtin`, `FunctionCallExpression`, `TernaryExpression`, `CastExpression`, `FlatIndex` | Expression nodes, implemented in the `emmy-ir` crate and exported here. An operation over its operands is one node in the crate; `BinaryExpression` (an operator over two operands: `op`, `left`, `right`) and `FunctionCallExpression` (`name`, `args`) are the two views Python takes of it. Each has `eval(env) → value/ndarray`, `substitute(mapping)`, `free_vars()`, plus the generic tree walks `subterms()` / `children()` / `rebuild(fn)`, and the Python operators build them. `FlatIndex` is a buffer coordinate's row-major offset, flattened against the buffer's shape at render time; it only appears in a kernel body. |
 | `Expression`                                                                       | The base class. Its text is its wire form and its structural form; `repr` is the constructor form the graph's dict form reads back. |
-| `PLACEHOLDER_PREFIX`, `placeholder`, `is_placeholder`                        | Convention for output-coord placeholders in coord maps.                  |
+| `PLACEHOLDER_PREFIX`, `placeholder`                                          | Convention for output-coord placeholders in coord maps.                  |
 | `affine_terms`, `affine_sum`, `affine_node`                                  | The crate's one affine form: a value's `(coefficient, operand)` terms, offset and whether a float literal fed it, the sum they spell, and whether a node is one of the form (a sum, a difference, a negation, a literal scale or a quotient by a literal). Every reader that takes a sum apart uses these; none carries a list of operation names. |
 | `promoted_dtype`                                                             | The dtype a value computes at: the table's promotion of its named operands, node by node; a literal contributes none. |
 

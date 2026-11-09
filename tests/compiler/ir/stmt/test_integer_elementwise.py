@@ -101,6 +101,9 @@ def test_a_whole_number_float_literal_keeps_its_float_spelling_in_the_normal_for
     assert "v0 = 2.0 * in0" in str(scaled)
     doubled = normalize_body(parse_body("u8 code = load C[0]\nv = add(code, code)\nO[0] = v"))
     assert "v0 = 2 * in0" in str(doubled)
+    # A sum that would spell no literal keeps one: ``code * 1.0`` squared is a float, never ``u8 v = in0 * in0``.
+    collapsed = normalize_body(parse_body("u8 code = load C[0]\nv = multiply(code, 1.0)\nw = multiply(v, v)\nO[0] = w"))
+    assert "v0 = 1.0 * in0\n" in str(collapsed) and "v1 = v0 * v0" in str(collapsed)
     ctx = RenderCtx(ssa_dtypes={"in0": "u8"})
     assert render_stmt(_stmt("v0 = in0 - 8.0"), ctx) == ["    float v0 = in0 - 8.0f;"]
     assert ctx.ssa_dtypes["v0"] == "f32"

@@ -159,8 +159,9 @@ mod tests {
     }
 
     #[test]
-    fn one_key_softmax_weight_folds_to_nothing() {
-        // `v * (exp(s - s) / exp(s - s))` is `v`: the difference is zero, its exponential one, the quotient one.
+    fn one_key_softmax_weight_folds_to_a_float_one() {
+        // `v * (exp(s - s) / exp(s - s))`: the difference is zero, its exponential one, the quotient one — a float one,
+        // kept as `1.0 * v`, since it is what makes the product a float operation over an integer `v`.
         assert_eq!(
             normal_of(&[
                 "z = subtract(s, s)",
@@ -169,7 +170,7 @@ mod tests {
                 "o = multiply(v, w)",
                 "O[i] = o"
             ]),
-            "for a0 in 0..8:\n    in0 = load x[a0]\n    O[a0] = in0"
+            "for a0 in 0..8:\n    in0 = load x[a0]\n    v0 = 1.0 * in0\n    O[a0] = v0"
         );
     }
 
@@ -220,7 +221,7 @@ mod tests {
         .unwrap();
         assert_eq!(
             text(&normal),
-            "for a0 in 0..8:\n    in0 = load V[a0]\n    O[a0] = in0"
+            "for a0 in 0..8:\n    in0 = load V[a0]\n    v0 = 1.0 * in0\n    O[a0] = v0"
         );
     }
 
@@ -280,8 +281,8 @@ mod tests {
         );
         assert_eq!(
             affine_normal(&["let f32 c = 1.0", "o = divide(x, c)"]),
-            COPY,
-            "a division by one is a copy"
+            scaled("1.0"),
+            "a division by a float one keeps the float literal"
         );
     }
 

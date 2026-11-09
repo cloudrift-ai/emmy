@@ -375,7 +375,6 @@ pub struct AffineTerms {
     pub float: bool,
 }
 
-/// The affine form's terms: collected through additions, subtractions, negations and literal factors or divisors.
 /// Whether an operation node is a node of the affine form in `class`'s coefficient domain: a sum, a difference, a
 /// negation, a product with a literal factor, and for a value a quotient by a literal. An `Index` folds integer
 /// literals alone and no quotient, since integer division floors; a product of two values or a quotient by a value is
@@ -393,6 +392,7 @@ pub fn affine_node(op: Operation, args: &[Expression], class: ExprClass) -> bool
     }
 }
 
+/// The affine form's terms: collected through additions, subtractions, negations and literal factors or divisors.
 pub fn affine_terms(e: &Expression, class: ExprClass) -> AffineTerms {
     fn collect(e: &Expression, scale: f64, class: ExprClass, out: &mut AffineTerms) {
         if let Expr::Literal(lit) = &**e
@@ -469,10 +469,12 @@ pub fn affine_sum(form: AffineTerms, rank: &dyn Fn(&Name) -> Key) -> Expression 
         offset,
         float,
     } = form;
-    // A whole-number coefficient or offset is spelled as the integer when every literal behind it was one: `x + x`
-    // is `2 * x`, and integer arithmetic over coordinates stays integer. A float literal keeps its spelling
-    // (`2.0 * x`, `x - 8.0`): it is what makes an operation over integer operands a float one, and an integer in its
-    // place would compute `code - 8` at the code's width.
+    // A whole-number coefficient or offset is spelled as the integer when no float literal fed the sum: `x + x` is
+    // `2 * x`, and integer arithmetic over coordinates stays integer. Once a float literal fed it, every literal the
+    // sum spells is a float (`2.0 * x`, `x - 8.0`, `2.0 * x + 2.0 * y` for `x + x + 2.0 * y`): the literal is what
+    // makes an operation over integer operands a float one, and an integer in its place would compute `code - 8` at
+    // the code's width. A sum that would spell no literal at all (`1.0 * x`, `x + 0.0`, `x - 8.0 + 8.0`) keeps one on
+    // its first term, `1.0 * x`, for the same reason.
     let literal = |value: f64| {
         if !float && value.fract() == 0.0 && value.abs() < 9007199254740992.0 {
             Expression::int(value as i64)
@@ -490,9 +492,10 @@ pub fn affine_sum(form: AffineTerms, rank: &dyn Fn(&Name) -> Key) -> Expression 
     }
     merged.retain(|(c, _)| *c != 0.0);
     merged.sort_by_cached_key(|(c, term)| (ranked(term, rank), Key::float(*c)));
+    let spells_none = offset == 0.0 && merged.iter().all(|(c, _)| c.abs() == 1.0);
     let mut out: Option<Expression> = None;
-    for (coefficient, term) in merged {
-        let magnitude = if coefficient.abs() == 1.0 {
+    for (index, (coefficient, term)) in merged.into_iter().enumerate() {
+        let magnitude = if coefficient.abs() == 1.0 && !(float && spells_none && index == 0) {
             term
         } else {
             Expression::apply(Operation::Multiply, vec![literal(coefficient.abs()), term])
@@ -1113,8 +1116,9 @@ for r in 0..4:
         assert!(listing.contains("= 2.0 * in0"), "{listing}");
     }
 
-    /// A whole-number coefficient or offset is an integer only when every literal behind it was one: a float
-    /// literal keeps its spelling, since it is what makes an operation over integer operands a float one.
+    /// A whole-number coefficient or offset is an integer only when no float literal fed the sum: a float literal
+    /// keeps its spelling, since it is what makes an operation over integer operands a float one, and a sum that
+    /// would spell none keeps one on its first term.
     #[test]
     fn the_affine_form_keeps_a_float_literal_over_integer_operands() {
         let listing = |program: &str| text(&normalize_uncached(&body(program)).unwrap());
@@ -1140,6 +1144,38 @@ for r in 0..4:
     out[a0] = v",
         );
         assert!(shifted.contains("= in0 - 8.0"), "{shifted}");
+        let collapsed = listing(
+            "for a0 in 0..8:
+    u8 code = load x[a0]
+    v = multiply(code, 1.0)
+    w = multiply(v, v)
+    out[a0] = w",
+        );
+        assert!(
+            collapsed.contains("v0 = 1.0 * in0\n") && collapsed.contains("v1 = v0 * v0"),
+            "{collapsed}"
+        );
+        let cancelled = listing(
+            "for a0 in 0..8:
+    u8 code = load x[a0]
+    v = subtract(code, 8.0)
+    w = add(v, 8.0)
+    out[a0] = w",
+        );
+        assert!(cancelled.contains("= 1.0 * in0"), "{cancelled}");
+        let mixed = listing(
+            "for a0 in 0..8:
+    u8 code = load x[a0]
+    u8 other = load y[a0]
+    v = add(code, code)
+    w = multiply(2.0, other)
+    o = add(v, w)
+    out[a0] = o",
+        );
+        assert!(
+            mixed.contains("2.0 * in0") && mixed.contains("2.0 * in1"),
+            "{mixed}"
+        );
     }
 
     fn find_load(body: &Body, input: &str) -> Load {

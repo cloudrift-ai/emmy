@@ -108,19 +108,29 @@ pub fn drop_size_one_reduce_axes(body: &Body) -> Body {
             };
             match &*member {
                 // The one update folds the value it started from — its base as renamed (the step's own running value,
-                // or the seed of a sibling accumulator updated later in the step) or its own bound seed: a sum's zero
-                // and a product's one fold away, a maximum keeps the one operation the loop ran.
+                // or the seed of a sibling accumulator updated later in the step) or its own bound seed. A seed that
+                // IS the op's neutral element (a sum's zero, a product's one) folds away here, whatever the operands'
+                // types: the one update is its value, at the accumulator's dtype. A clamped stand-in (a maximum's
+                // `-1e30`) keeps the one operation the loop ran, since a masked `-inf` meets it, not the neutral element.
                 Statement::Accum(a) => {
                     let Some(op) = a.op.known() else {
                         return Some(vec![stmt.clone()]);
                     };
-                    let start = match (&a.base, seed) {
-                        (Some(base), _) => Expression::var(base),
-                        (None, Some(seed)) => Expression::var(&seed),
+                    let combined = match (&a.base, seed) {
+                        (Some(base), _) => {
+                            Expression::apply(op, vec![Expression::var(base), a.value.clone()])
+                        }
+                        (None, Some(_))
+                            if op.info().neutral.is_some_and(|n| Some(n) == op.seed()) =>
+                        {
+                            a.value.clone()
+                        }
+                        (None, Some(seed)) => {
+                            Expression::apply(op, vec![Expression::var(&seed), a.value.clone()])
+                        }
                         // The first pass bound a seed for every accumulator without a base.
                         (None, None) => return Some(vec![stmt.clone()]),
                     };
-                    let combined = Expression::apply(op, vec![start, a.value.clone()]);
                     out.push(assign(&a.name, combined, a.dtype))
                 }
                 _ => out.push(member),

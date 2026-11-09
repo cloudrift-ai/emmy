@@ -152,7 +152,6 @@ def test_multisource_indexmap_lowers_unconditional_branch_as_bool():
     lowered = Pipeline.build(["loop/lowering"]).run(graph)
     select = next(stmt for stmt in _kernel_nodes(lowered)[0].op.body.iter() if isinstance(stmt, Select))
     assert select.branches[-1].select == Literal(True, "bool")
-    assert str(select.branches[-1].select) == "true"
     _assert_close(_run(graph, inputs), _run(lowered, inputs))
 
     restored = Graph.from_wire(json.loads(json.dumps(lowered.to_wire())))

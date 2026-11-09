@@ -9,7 +9,7 @@ use crate::{Name, Result};
 
 /// A name as a statement's text spells it: bare, or between backticks when it reads as a keyword or is no identifier.
 pub fn spell_stmt_name(name: &str) -> Result<String> {
-    spell_name(name, &[])
+    spell_name(name)
 }
 
 /// The expected size of a symbolic dim when none is supplied.

@@ -179,7 +179,8 @@ def _factored(term: Fold, param: str) -> Fold | None:
             if len(rest) == 1 and rest[0][0] == 1 and offset == 0 and isinstance(rest[0][1], Var):
                 return None  # already ``s + c·g`` with the score named
             score = Assign(f"{stmt.name}__s", affine_sum(rest, offset, float_literal))
-            against = affine_sum([(1.0, Var(score.name)), own[0]], 0.0, float_literal)
+            # The score's definition carries the literals; the split sum over two names spells none.
+            against = affine_sum([(1.0, Var(score.name)), own[0]], 0.0, False)
             split = stmt.replace(value=stmt.value.rebuild(lambda e, sum_=sum_, against=against: against if e == sum_ else e))
             body = Body((*lift.body[:index], score, split, *lift.body[index + 1 :]))
             return replace(term, lift=Lambda(lift.params, body, lift.results))

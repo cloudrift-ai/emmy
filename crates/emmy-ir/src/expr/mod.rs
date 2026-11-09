@@ -751,16 +751,6 @@ impl Expression {
         Expression::var(&format!("{PLACEHOLDER_PREFIX}{d}"))
     }
 
-    pub fn is_placeholder(&self, d: Option<usize>) -> bool {
-        match &**self {
-            Expr::Var(name) => match d {
-                None => name.starts_with(PLACEHOLDER_PREFIX),
-                Some(d) => **name == *format!("{PLACEHOLDER_PREFIX}{d}"),
-            },
-            _ => false,
-        }
-    }
-
     pub fn as_literal(&self) -> Option<&Lit> {
         match &**self {
             Expr::Literal(lit) => Some(lit),
@@ -845,7 +835,7 @@ impl Expression {
 
     fn spell(&self, parent: u8, out: &mut String) -> Result<()> {
         match &**self {
-            Expr::Var(name) => out.push_str(&spell_name(name, &[])?),
+            Expr::Var(name) => out.push_str(&spell_name(name)?),
             Expr::Builtin(builtin) => out.push_str(builtin.text()),
             Expr::Literal(lit) => {
                 let text = literal_text(lit)?;
@@ -906,7 +896,7 @@ impl Expression {
                 inner.spell(ATOM, out)?;
             }
             Expr::FlatIndex(buffer, index) => {
-                out.push_str(&spell_name(buffer, &[])?);
+                out.push_str(&spell_name(buffer)?);
                 out.push('[');
                 for (position, e) in index.iter().enumerate() {
                     if position > 0 {
@@ -1229,12 +1219,8 @@ fn is_identifier(name: &str) -> bool {
 
 /// `name` as the reader reads a name back: bare when it is an identifier with no other meaning, else between
 /// backticks (a `$0` port, a name that is also a built-in or a keyword).
-pub fn spell_name(name: &str, reserved: &[&str]) -> Result<String> {
-    if is_identifier(name)
-        && !is_builtin(name)
-        && !RESERVED.contains(&name)
-        && !reserved.contains(&name)
-    {
+pub fn spell_name(name: &str) -> Result<String> {
+    if is_identifier(name) && !is_builtin(name) && !RESERVED.contains(&name) {
         return Ok(name.to_string());
     }
     if name.contains('`') || name.contains('\n') {
@@ -1733,19 +1719,6 @@ mod tests {
             var_name(&Expression::placeholder(3)),
             Some(format!("{PLACEHOLDER_PREFIX}3").as_str())
         );
-    }
-
-    #[test]
-    fn with_no_axis_every_placeholder_is_one_and_another_name_is_not() {
-        assert!(Expression::placeholder(0).is_placeholder(None));
-        assert!(Expression::placeholder(7).is_placeholder(None));
-        assert!(!Expression::var("row").is_placeholder(None));
-    }
-
-    #[test]
-    fn with_an_axis_only_that_axis_placeholder_is_one() {
-        assert!(Expression::placeholder(2).is_placeholder(Some(2)));
-        assert!(!Expression::placeholder(2).is_placeholder(Some(3)));
     }
 
     #[test]
