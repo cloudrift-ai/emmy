@@ -171,28 +171,28 @@ def _factored(term: Fold, param: str) -> Fold | None:
             form = _sum_terms(sum_)
             if form is None:
                 continue
-            terms, offset = form
+            terms, offset, float_literal = form
             own = [(coefficient, operand) for coefficient, operand in terms if operand == Var(param)]
             rest = [(coefficient, operand) for coefficient, operand in terms if operand != Var(param)]
             if len(own) != 1 or not rest:
                 continue
             if len(rest) == 1 and rest[0][0] == 1 and offset == 0 and isinstance(rest[0][1], Var):
                 return None  # already ``s + c·g`` with the score named
-            score = Assign(f"{stmt.name}__s", affine_sum(rest, offset))
-            against = affine_sum([(1.0, Var(score.name)), own[0]], 0.0)
+            score = Assign(f"{stmt.name}__s", affine_sum(rest, offset, float_literal))
+            against = affine_sum([(1.0, Var(score.name)), own[0]], 0.0, float_literal)
             split = stmt.replace(value=stmt.value.rebuild(lambda e, sum_=sum_, against=against: against if e == sum_ else e))
             body = Body((*lift.body[:index], score, split, *lift.body[index + 1 :]))
             return replace(term, lift=Lambda(lift.params, body, lift.results))
     return None
 
 
-def _sum_terms(expression: Expression) -> tuple[list[tuple[float, Expression]], float] | None:
-    """The affine form of a sum of two or more terms (an offset counts as one); ``None`` for any other value (a lone
-    product, a name)."""
+def _sum_terms(expression: Expression) -> tuple[list[tuple[float, Expression]], float, bool] | None:
+    """The affine form of a sum of two or more terms (an offset counts as one) — its terms, offset and whether a float
+    literal fed it; ``None`` for any other value (a lone product, a name)."""
     if not affine_node(expression):
         return None
-    terms, offset = affine_terms(expression)
-    return (terms, offset) if len(terms) + (offset != 0) >= 2 else None
+    terms, offset, float_literal = affine_terms(expression)
+    return (terms, offset, float_literal) if len(terms) + (offset != 0) >= 2 else None
 
 
 def _reads_reduce(edge: Fold) -> bool:

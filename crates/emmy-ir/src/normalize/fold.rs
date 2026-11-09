@@ -248,18 +248,20 @@ mod tests {
 
     const COPY: &str = "for a0 in 0..8:\n    in0 = load X[a0]\n    O[a0] = in0";
 
+    /// Every spelling of a scale by a float literal is one body, and the literal the fold took is dropped; `x + x`
+    /// is the integer scale, another body, since an integer coefficient keeps an integer operand integer.
     #[test]
-    fn every_spelling_of_a_scale_is_one_body() {
+    fn every_spelling_of_a_scale_is_one_body_in_its_literal_domain() {
         let twice = affine_body(&["o = add(x, x)"]);
         let scaled_by_two = affine_body(&["let f32 c = 2.0", "o = multiply(x, c)"]);
         let halved = affine_body(&["let f32 c = 0.5", "o = divide(x, c)"]);
-        // One affine statement, and the literal the fold took is dropped.
-        for spelling in [&twice, &scaled_by_two, &halved] {
-            assert_eq!(text(&normalize_body(spelling).unwrap()), scaled("2"));
+        assert_eq!(text(&normalize_body(&twice).unwrap()), scaled("2"));
+        for spelling in [&scaled_by_two, &halved] {
+            assert_eq!(text(&normalize_body(spelling).unwrap()), scaled("2.0"));
         }
         let key = |body: &crate::body::Body| canonicalize_identity(body, false, None).unwrap().key;
-        assert_eq!(key(&twice), key(&scaled_by_two));
-        assert_eq!(key(&twice), key(&halved));
+        assert_eq!(key(&scaled_by_two), key(&halved));
+        assert_ne!(key(&twice), key(&scaled_by_two));
         assert_ne!(
             key(&twice),
             key(&affine_body(&["let f32 c = 3.0", "o = multiply(x, c)"]))

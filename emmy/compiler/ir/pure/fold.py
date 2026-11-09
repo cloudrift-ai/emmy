@@ -14,7 +14,7 @@ stable carrier. The ⊕ the fold actually folds with is then derived —
 ``combine(x, y) = psi(psi_inv(x) base psi_inv(y))`` — in the stable spelling the recipe certifies,
 and ``twist=None`` is the planar case where ``psi`` is the identity and ``combine`` IS ``base``.
 
-Nothing here is a :class:`~emmy.compiler.ir.stmt.base.Statement`. A composed step — flash's ``Σ Q·K``
+Nothing here is a :class:`~emmy.compiler.ir.stmt.Statement`. A composed step — flash's ``Σ Q·K``
 ahead of its ``Σ_j P·V``, split-K's sliced contraction — is reached through ``operands``, and its
 POSITION in the emitted nest is produced by the derivation (:meth:`Fold.lower` places every term
 at the shallowest scope binding its free coordinates, operands ahead of their readers), not by
@@ -480,7 +480,7 @@ class Fold:
         (:attr:`cells`) whose step reads other cells through carrier-read operands
         (:meth:`as_carrier_read`); ``next`` has no identity, so every partition arm refuses the
         fold by the gate it already applies and it lowers as the serial walk, its state a
-        :class:`~emmy.compiler.ir.stmt.leaves.Carry` (:meth:`step`)."""
+        :class:`~emmy.compiler.ir.stmt.Carry` (:meth:`step`)."""
         ops = self.base.components() if self.base is not None else None
         return bool(ops) and all(op.name == "next" for op in ops)
 
@@ -1025,10 +1025,10 @@ class Fold:
             op, operands = value.operation, value.operands
             if op is not None and op.name == "add":
                 # ``state + rest`` in affine form: the rest accumulates into the state.
-                terms, offset = affine_terms(value)
+                terms, offset, float_literal = affine_terms(value)
                 if (1.0, Var(state)) in terms:
                     terms.remove((1.0, Var(state)))
-                    rest = affine_sum(terms, offset) if terms or offset else Var(state)
+                    rest = affine_sum(terms, offset, float_literal) if terms or offset else Var(state)
                     out.append(Accum(name=state, value=rest, op=op))
                     continue
             elif Var(state) in operands:

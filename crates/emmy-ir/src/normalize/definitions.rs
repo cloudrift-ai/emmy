@@ -227,7 +227,7 @@ mod tests {
     in0 = load S[a0]
     in1 = load X[a0]
     v0 = exp(in1)
-    v1 = 2 * in0 - in1 + 2 * v0
+    v1 = 2.0 * in0 - in1 + 2.0 * v0
     v2 = rsqrt(v1)
     O[a0] = v2"
         );
@@ -384,7 +384,7 @@ mod tests {
         );
         assert_eq!(
             normal,
-            "let f32 v0 = 2.0\nfor a0 in 0..8:\n    in0 = load X[a0]\n    v1 = 2 * in0\n    O[a0] = v1\n    P[a0] = v0"
+            "let f32 v0 = 2.0\nfor a0 in 0..8:\n    in0 = load X[a0]\n    v1 = 2.0 * in0\n    O[a0] = v1\n    P[a0] = v0"
         );
     }
 
@@ -406,7 +406,7 @@ mod tests {
                 "s = add(t, x)",
                 "o = subtract(s, x)"
             ]),
-            "for a0 in 0..8:\n    in0 = load X[a0]\n    v0 = 3 * in0\n    O[a0] = v0"
+            "for a0 in 0..8:\n    in0 = load X[a0]\n    v0 = 3.0 * in0\n    O[a0] = v0"
         );
         // Every term cancels: the value is the constant zero, which the store reads, and nothing loads `X`.
         assert_eq!(

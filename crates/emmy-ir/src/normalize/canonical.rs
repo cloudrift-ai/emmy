@@ -370,6 +370,9 @@ fn ranked(e: &Expression, rank: &dyn Fn(&Name) -> Key) -> Key {
 pub struct AffineTerms {
     pub terms: Vec<(f64, Expression)>,
     pub offset: f64,
+    /// Whether a float literal fed a coefficient or the offset: then every whole-number coefficient and offset the
+    /// sum spells stays a float literal, and the operation keeps the float dtype the literal gave it.
+    pub float: bool,
 }
 
 /// The affine form's terms: collected through additions, subtractions, negations and literal factors or divisors.
@@ -397,6 +400,7 @@ pub fn affine_terms(e: &Expression, class: ExprClass) -> AffineTerms {
             && (class == ExprClass::Value || lit.dtype == LitType::Int)
         {
             out.offset += scale * lit.value.as_f64();
+            out.float |= lit.dtype == LitType::Float;
             return;
         }
         if let Some((op, args)) = e.operation()
@@ -428,6 +432,7 @@ pub fn affine_terms(e: &Expression, class: ExprClass) -> AffineTerms {
                             },
                         );
                     if let Some((operand, lit)) = factor {
+                        out.float |= lit.dtype == LitType::Float;
                         collect(operand, scale * lit.value.as_f64(), class, out);
                         return;
                     }
@@ -437,6 +442,7 @@ pub fn affine_terms(e: &Expression, class: ExprClass) -> AffineTerms {
                         && lit.dtype == LitType::Float
                         && lit.value.as_f64() != 0.0
                     {
+                        out.float = true;
                         collect(a, scale / lit.value.as_f64(), class, out);
                         return;
                     }
@@ -449,21 +455,26 @@ pub fn affine_terms(e: &Expression, class: ExprClass) -> AffineTerms {
     let mut out = AffineTerms {
         terms: Vec::new(),
         offset: 0.0,
+        float: false,
     };
     collect(e, 1.0, class, &mut out);
     out
 }
 
-/// `e`, an affine node, as a sum in affine form: see [`value_canonical`].
 /// The sum an affine form spells, its terms ordered by `rank`: the one spelling of a sum in the normal form, and the
 /// one every reader that takes a sum apart and puts it back uses.
 pub fn affine_sum(form: AffineTerms, rank: &dyn Fn(&Name) -> Key) -> Expression {
-    let AffineTerms { terms, offset } = form;
-    // A whole-number coefficient or offset is spelled as the integer: `x + x`, `2.0 * x` and `x / 0.5` are one
-    // form, and integer arithmetic over coordinates stays integer. A value promotes an integer literal as it does
-    // any operand.
+    let AffineTerms {
+        terms,
+        offset,
+        float,
+    } = form;
+    // A whole-number coefficient or offset is spelled as the integer when every literal behind it was one: `x + x`
+    // is `2 * x`, and integer arithmetic over coordinates stays integer. A float literal keeps its spelling
+    // (`2.0 * x`, `x - 8.0`): it is what makes an operation over integer operands a float one, and an integer in its
+    // place would compute `code - 8` at the code's width.
     let literal = |value: f64| {
-        if value.fract() == 0.0 && value.abs() < 9007199254740992.0 {
+        if !float && value.fract() == 0.0 && value.abs() < 9007199254740992.0 {
             Expression::int(value as i64)
         } else {
             Expression::float(value)
@@ -1099,7 +1110,36 @@ for r in 0..4:
             listing.contains("load x[3 * a0 - 1, a0 / 2 + 1]"),
             "{listing}"
         );
-        assert!(listing.contains("= 2 * in0"), "{listing}");
+        assert!(listing.contains("= 2.0 * in0"), "{listing}");
+    }
+
+    /// A whole-number coefficient or offset is an integer only when every literal behind it was one: a float
+    /// literal keeps its spelling, since it is what makes an operation over integer operands a float one.
+    #[test]
+    fn the_affine_form_keeps_a_float_literal_over_integer_operands() {
+        let listing = |program: &str| text(&normalize_uncached(&body(program)).unwrap());
+        let doubled = listing(
+            "for a0 in 0..8:
+    u8 code = load x[a0]
+    v = code + code
+    out[a0] = v",
+        );
+        assert!(doubled.contains("= 2 * in0"), "{doubled}");
+        let scaled = listing(
+            "for a0 in 0..8:
+    u8 code = load x[a0]
+    v = multiply(2.0, code)
+    out[a0] = v",
+        );
+        assert!(scaled.contains("= 2.0 * in0"), "{scaled}");
+        let shifted = listing(
+            "for a0 in 0..8:
+    u8 code = load x[a0]
+    f32 eight = 8.0
+    v = subtract(code, eight)
+    out[a0] = v",
+        );
+        assert!(shifted.contains("= in0 - 8.0"), "{shifted}");
     }
 
     fn find_load(body: &Body, input: &str) -> Load {

@@ -863,27 +863,32 @@ pub fn affine_form<'py>(
     Ok(Some((PyExpression::wrap(py, &anchor)?, out)))
 }
 
-/// An affine form as Python sees it: the `(coefficient, operand)` terms and the offset.
-type AffineForm<'py> = (Vec<(f64, Bound<'py, PyAny>)>, f64);
+/// An affine form as Python sees it: the `(coefficient, operand)` terms, the offset, and whether a float literal fed
+/// the form.
+type AffineForm<'py> = (Vec<(f64, Bound<'py, PyAny>)>, f64, bool);
 
-/// The affine form of a value: its terms, `(coefficient, operand)` each, and its literal offset — the form the
-/// normal form spells every sum in. A value that is no sum is one term with coefficient one.
+/// The affine form of a value: its terms, `(coefficient, operand)` each, its literal offset, and whether a float
+/// literal fed the form — the form the normal form spells every sum in. A value that is no sum is one term with
+/// coefficient one.
 #[pyfunction]
 pub fn affine_terms<'py>(
     py: Python<'py>,
+#[pyo3(signature = (terms, offset, float = false))]
     expression: &Bound<'py, PyAny>,
 ) -> PyResult<AffineForm<'py>> {
     let form = emmy_ir::normalize::affine_terms(&expression_from_py(expression)?, ExprClass::Value);
     let terms = form
+    float: bool,
         .terms
         .iter()
         .map(|(coefficient, term)| Ok((*coefficient, PyExpression::wrap(py, term)?)))
         .collect::<PyResult<Vec<_>>>()?;
-    Ok((terms, form.offset))
+    Ok((terms, form.offset, form.float))
 }
 
-/// The sum an affine form spells: like terms merged, a whole-number coefficient or offset as the integer, the offset
-/// last; the terms in the order the normal form gives names it does not rank.
+/// The sum an affine form spells: like terms merged, a whole-number coefficient or offset as the integer unless a
+/// float literal fed the form (`float`), the offset last; the terms in the order the normal form gives names it does
+/// not rank.
 #[pyfunction]
 pub fn affine_sum<'py>(
     py: Python<'py>,
@@ -897,7 +902,11 @@ pub fn affine_sum<'py>(
             Ok((coefficient, expression_from_py(&term)?))
         })
         .collect::<PyResult<_>>()?;
-    let form = emmy_ir::normalize::AffineTerms { terms, offset };
+    let form = emmy_ir::normalize::AffineTerms {
+        terms,
+        offset,
+        float,
+    };
     PyExpression::wrap(
         py,
         &emmy_ir::normalize::affine_sum(form, &|_| emmy_ir::normalize::ties::unranked()),
@@ -912,35 +921,6 @@ pub fn affine_node(expression: &Bound<'_, PyAny>) -> PyResult<bool> {
     Ok(expression
         .operation()
         .is_some_and(|(op, args)| emmy_ir::normalize::affine_node(op, args, ExprClass::Value)))
-}
-
-/// `expression` as `(its integer anchor, the rest)`, or `None`.
-#[pyfunction]
-pub fn split_anchor<'py>(
-    py: Python<'py>,
-    expression: &Bound<'py, PyAny>,
-) -> PyResult<Option<(i64, Bound<'py, PyAny>)>> {
-    match emmy_ir::expr::split_anchor(&expression_from_py(expression)?) {
-        Some((anchor, rest)) => Ok(Some((anchor, PyExpression::wrap(py, &rest)?))),
-        None => Ok(None),
-    }
-}
-
-/// An upper bound on the number of distinct coordinate tuples `expressions` take over `var_extents`.
-#[pyfunction]
-pub fn index_set_size(
-    expressions: &Bound<'_, PyAny>,
-    var_extents: &Bound<'_, PyDict>,
-) -> PyResult<Option<i128>> {
-    let expressions: PyResult<Vec<Expression>> = expressions
-        .try_iter()?
-        .map(|item| expression_from_py(&item?))
-        .collect();
-    let mut extents: HashMap<Name, i64> = HashMap::new();
-    for (key, value) in var_extents.iter() {
-        extents.insert(name_from_py(&key)?, value.extract()?);
-    }
-    Ok(emmy_ir::expr::index_set_size(&expressions?, &extents))
 }
 
 /// The placeholder variable for output coordinate axis `d`.

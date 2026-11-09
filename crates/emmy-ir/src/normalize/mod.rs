@@ -214,7 +214,7 @@ for k in 0..3:
         let folded = normal(
             "for i in 0..4:\n    x = load a[i]\n    let c = 2.0\n    y = multiply(x, c)\n    z = add(y, x)\n    out[i] = z",
         );
-        assert!(folded.contains("v0 = 3 * in0"), "{folded}");
+        assert!(folded.contains("v0 = 3.0 * in0"), "{folded}");
     }
 
     #[test]

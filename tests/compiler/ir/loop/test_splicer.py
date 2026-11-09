@@ -47,7 +47,7 @@ def _spine(value, out=None):
     A term below a non-affine operation (``exp(-x)``) is its own region."""
     out = [] if out is None else out
     if affine_node(value):
-        terms, offset = affine_terms(value)
+        terms, offset, _ = affine_terms(value)
         out.append((tuple(sorted(coefficient for coefficient, _ in terms)), offset))
         for _, leaf in terms:
             _spine(leaf, out)

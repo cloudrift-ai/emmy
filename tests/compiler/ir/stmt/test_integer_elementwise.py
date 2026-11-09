@@ -88,6 +88,24 @@ def test_a_float_literal_over_integer_operands_renders_a_float_operation():
     assert render_stmt(_stmt("v = multiply(2, a)"), ctx)[0].startswith("    int v = ")
 
 
+def test_a_whole_number_float_literal_keeps_its_float_spelling_in_the_normal_form():
+    """The normal form inlines a float constant and spells its sum in affine form; a whole-number coefficient or offset
+    is an integer only when every literal behind it was one, so ``code - eight`` with ``f32 eight = 8.0`` stays
+    ``in0 - 8.0`` — a float operation over the u8 — and never ``in0 - 8``, which the stamp would type at the code's
+    width and compute as 251 where torch computes -5.0."""
+    from emmy.compiler.ir.stmt import normalize_body
+
+    shifted = normalize_body(parse_body("u8 code = load C[0]\nf32 eight = 8.0\nv = subtract(code, eight)\nO[0] = v"))
+    assert "v0 = in0 - 8.0" in str(shifted)
+    scaled = normalize_body(parse_body("u8 code = load C[0]\nv = multiply(2.0, code)\nO[0] = v"))
+    assert "v0 = 2.0 * in0" in str(scaled)
+    doubled = normalize_body(parse_body("u8 code = load C[0]\nv = add(code, code)\nO[0] = v"))
+    assert "v0 = 2 * in0" in str(doubled)
+    ctx = RenderCtx(ssa_dtypes={"in0": "u8"})
+    assert render_stmt(_stmt("v0 = in0 - 8.0"), ctx) == ["    float v0 = in0 - 8.0f;"]
+    assert ctx.ssa_dtypes["v0"] == "f32"
+
+
 def test_f32_bitwise_names_remain_logical_masks():
     ctx = RenderCtx(ssa_dtypes={"a": "f32", "b": "f32"})
     assert render_stmt(_stmt("both = bitwise_and(a, b)"), ctx) == ["    float both = a && b;"]
