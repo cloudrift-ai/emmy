@@ -5,10 +5,10 @@ use std::sync::Arc;
 
 use super::with_bodies;
 use crate::axis::{Axis, Dim};
-use crate::body::{Body, exposed_defines, free_names};
+use crate::body::{Body, free_names};
 use crate::expr::{Expression, SimplifyCtx, affine_form};
 use crate::numbering::{Key, Tag};
-use crate::order::is_protocol;
+use crate::order::ordering_constraints;
 use crate::statement::*;
 use crate::{Name, Result};
 
@@ -175,6 +175,7 @@ pub(crate) fn merge_sibling_reduce_loops_here(body: &Body) -> Body {
     if items.len() < 2 {
         return body.clone();
     }
+    let before = ordering_constraints(body, true);
     let mut out: Vec<Arc<Statement>> = Vec::new();
     let mut consumed: HashSet<usize> = HashSet::new();
     for (i, s) in items.iter().enumerate() {
@@ -191,6 +192,7 @@ pub(crate) fn merge_sibling_reduce_loops_here(body: &Body) -> Body {
         }
         let mut merged = first.clone();
         let mut absorbed = false;
+        let mut absorbed_from: HashSet<usize> = HashSet::new();
         for j in i + 1..items.len() {
             if consumed.contains(&j) {
                 continue;
@@ -222,42 +224,32 @@ pub(crate) fn merge_sibling_reduce_loops_here(body: &Body) -> Body {
             if !clashing.is_disjoint(&carried_out(&incoming)) {
                 continue;
             }
-            // A statement between the loops that the incoming loop reads blocks the merge, unless it is a leaf that
-            // reads nothing the first loop or the span between defines: then it moves above the first loop, where the
-            // merged loop reads it. The form must not depend on where the value started — the lowering may spell it
-            // between the loops and the placement step would sink it back there — so the merge moves it, not the
-            // other way round.
-            let between: Vec<usize> = (i + 1..j).filter(|k| !consumed.contains(k)).collect();
-            let span_defs: HashSet<Name> = between
+            // The statements between the loops that the incoming loop waits on — by a name, a buffer's version, an
+            // accumulator's or carried state, a protocol — directly or through each other, move above the first loop,
+            // where the merged loop reads them; one that waits on the first loop keeps the loops apart. The form must
+            // not depend on where a value started: a lowering may spell the second loop's scale between the loops and
+            // the placement step would sink it back there, so the merge moves it, not the other way round. The incoming
+            // loop's own edges to the merged loops are the name checks above: a shared spelling is a collision.
+            let mut waits: BTreeSet<usize> = BTreeSet::new();
+            let mut pending: Vec<usize> = before[j]
                 .iter()
-                .flat_map(|&k| exposed_defines(&items[k]))
+                .copied()
+                .filter(|k| *k != i && !absorbed_from.contains(k))
                 .collect();
-            let mut hoisted: Vec<usize> = Vec::new();
             let mut blocked = false;
-            for &k in &between {
-                let defines: HashSet<Name> = exposed_defines(&items[k]).into_iter().collect();
-                if defines.is_disjoint(&reads) {
-                    continue;
-                }
-                let needs: HashSet<Name> = free_names(&items[k]).into_iter().collect();
-                let movable = items[k].nested().is_empty()
-                    && !matches!(
-                        &*items[k],
-                        Statement::Write(_) | Statement::Accum(_) | Statement::Carry(_)
-                    )
-                    && !is_protocol(&items[k])
-                    && needs.is_disjoint(&merged_defs)
-                    && needs.is_disjoint(&span_defs);
-                if !movable {
+            while let Some(k) = pending.pop() {
+                if k == i || absorbed_from.contains(&k) {
                     blocked = true;
                     break;
                 }
-                hoisted.push(k);
+                if k > i && !consumed.contains(&k) && waits.insert(k) {
+                    pending.extend(before[k].iter().copied());
+                }
             }
             if blocked {
                 continue;
             }
-            for &k in &hoisted {
+            for &k in &waits {
                 out.push(items[k].clone());
                 consumed.insert(k);
             }
@@ -269,6 +261,7 @@ pub(crate) fn merge_sibling_reduce_loops_here(body: &Body) -> Body {
                 seed: merged.seed,
             };
             consumed.insert(j);
+            absorbed_from.insert(j);
             absorbed = true;
         }
         out.push(if absorbed {
@@ -421,6 +414,103 @@ mod tests {
             ",
         );
         assert_eq!(loop_axes(&out).len(), 2, "sequential reduces stay distinct");
+    }
+
+    fn normal(text: &str) -> String {
+        crate::text::body_text(&normalize_body(&body(text)).unwrap()).unwrap()
+    }
+
+    #[test]
+    fn merge_moves_a_chain_the_second_loop_waits_on_above_the_first() {
+        // RMSNorm after the one-operation split: `rsqrt(mean + eps)` is two statements between the loops, the second
+        // reading the first. Spelled between the loops or above them, one normal form.
+        let split = "
+            for k in 0..16:
+                x1 = load X[0, k]
+                acc0 <- add(acc0, x1)
+            t = add(accb, 1e-6)
+            s1 = rsqrt(t)
+            for k in 0..16:
+                x2 = load X[1, k]
+                m2 = multiply(x2, s1)
+                acc1 <- add(acc1, m2)
+            ";
+        let above = "
+            t = add(accb, 1e-6)
+            s1 = rsqrt(t)
+            for k in 0..16:
+                x1 = load X[0, k]
+                acc0 <- add(acc0, x1)
+            for k in 0..16:
+                x2 = load X[1, k]
+                m2 = multiply(x2, s1)
+                acc1 <- add(acc1, m2)
+            ";
+        assert_eq!(
+            loop_axes(&merged(split)),
+            ["k"],
+            "one loop holds both contractions"
+        );
+        assert_eq!(normal(split), normal(above));
+    }
+
+    #[test]
+    fn merge_moves_an_independent_reduce_the_second_loop_waits_on() {
+        // The scale comes from a reduce over another axis, spelled between the loops or above them.
+        let between = "
+            for k in 0..16:
+                x1 = load X[0, k]
+                acc0 <- add(acc0, x1)
+            for j in 0..8:
+                y = load Y[j]
+                accb <- add(accb, y)
+            s1 = rsqrt(accb)
+            for k in 0..16:
+                x2 = load X[1, k]
+                m2 = multiply(x2, s1)
+                acc1 <- add(acc1, m2)
+            ";
+        let above = "
+            for j in 0..8:
+                y = load Y[j]
+                accb <- add(accb, y)
+            s1 = rsqrt(accb)
+            for k in 0..16:
+                x1 = load X[0, k]
+                acc0 <- add(acc0, x1)
+            for k in 0..16:
+                x2 = load X[1, k]
+                m2 = multiply(x2, s1)
+                acc1 <- add(acc1, m2)
+            ";
+        assert_eq!(normal(between), normal(above));
+        assert_eq!(
+            loop_axes(&normalize_body(&body(between)).unwrap()).len(),
+            2,
+            "the other reduce, then one merged loop"
+        );
+    }
+
+    #[test]
+    fn merge_keeps_a_load_below_the_write_of_its_buffer() {
+        // The second loop reads `y`, a load of a buffer the statement before it writes from the first loop: the load
+        // waits on the write, the write on the first loop, and the loops stay apart.
+        let out = merged(
+            "
+            for k in 0..16:
+                x1 = load X[0, k]
+                acc0 <- add(acc0, x1)
+            O[0] = acc0
+            y = load O[0]
+            for k in 0..16:
+                x2 = load X[1, k]
+                m2 = multiply(x2, y)
+                acc1 <- add(acc1, m2)
+            ",
+        );
+        assert_eq!(loop_axes(&out).len(), 2);
+        let text = crate::text::body_text(&out).unwrap();
+        assert!(text.find("O[0] = ").unwrap() < text.find("y = load").unwrap());
     }
 
     #[test]

@@ -777,7 +777,10 @@ from that CSE form. Subroutine boundaries never limit fusion.
   Sibling reduce Loops that share `axis.name` / `extent` concatenate into one Loop body.
   Every gate is phrased over what the second Loop reads from its ENCLOSING scope (`free_names` — what it uses and does
   not bind itself): it must read no name the first body defines (blocking softmax-style sequential reduces where
-  sum-exp reads `acc_max`), and no between-stmt def. Names both bodies merely happen to bind are a COLLISION, not a
+  sum-exp reads `acc_max`). A statement between the loops that the incoming Loop waits on, directly or through other
+  statements between them (`ordering_constraints`: names, a buffer's version, accumulator and carried state, protocols),
+  moves above the first Loop, unless it waits on the first Loop itself — the form must not depend on where a value was
+  spelled. Names both bodies merely happen to bind are a COLLISION, not a
   dependence — two alpha-equal copies of one cone always share every spelling — so the incoming body's copies rename
   apart. Only a name the incoming Loop still binds after it closes (its immediate carriers, which `Loop`'s render
   declares ahead of the loop) refuses, because the rename cannot reach that name's readers outside. Eliminates the
