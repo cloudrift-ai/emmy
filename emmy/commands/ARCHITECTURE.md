@@ -980,7 +980,7 @@ to leave a computed feature out of. The artifact is one JSON file — the trees 
 and any written one can be pointed at with `EMMY_OFFLINE_FILE` and A/B'd against the shipped one.
 
 The fit is a `QuerySoftMax` CatBoost ranker, one group per candidate pool with every golden matched into that pool as
-a positive: `--iterations N` (trees; 200 by default, 500 for the placement space — `fit/catboost.PLACEMENT_ITERATIONS`
+a positive: `--iterations N` (trees; 400 by default, 3000 for the placement space — `fit/catboost.PLACEMENT_ITERATIONS`
 records the cross-validation behind it), `--depth D`, `--learning-rate η`, `--negatives K` (sampled negatives per pool per
 round, drawn from the unpinned rows — the full corpus is ~38 M rows, so training samples while the rank metric still
 covers whole pools) and `--rounds R` (the first draws negatives uniformly, each further one mines hard negatives from
