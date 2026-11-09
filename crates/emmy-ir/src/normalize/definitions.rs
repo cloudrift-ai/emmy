@@ -408,10 +408,11 @@ mod tests {
             ]),
             "for a0 in 0..8:\n    in0 = load X[a0]\n    v0 = 3.0 * in0\n    O[a0] = v0"
         );
-        // Every term cancels: the value is the constant zero, which the store reads, and nothing loads `X`.
+        // Every term cancels: the value is the integer zero (no literal fed it, and `x` is untyped), which the store
+        // reads, and nothing loads `X`.
         assert_eq!(
             affine(&["o = subtract(x, x)"]),
-            "let f32 v0 = 0.0\nfor a0 in 0..8:\n    O[a0] = v0"
+            "let v0 = 0\nfor a0 in 0..8:\n    O[a0] = v0"
         );
     }
 }

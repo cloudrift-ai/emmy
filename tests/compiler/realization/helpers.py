@@ -169,8 +169,12 @@ def canonical_knobs(knobs: dict) -> dict:
 
 def regenerate(document: GoldenFile) -> GoldenFile:
     """The case document as the current compiler would derive it: its kernels restamped, its authored rows and note
-    preserved (``golden.restamp``, the same rewrite every repository golden gets)."""
-    fresh, _report = restamp(document)
+    preserved (``golden.restamp``, the same rewrite every repository golden gets). A row that would lose a key — a
+    site the fresh lowering no longer has — is a lowering regression to review, not a case to rewrite: a corpus row
+    has no measurement whose demotion would show it, so the restamp is refused."""
+    fresh, report = restamp(document)
+    if report.dropped_keys:
+        raise CaseError("the restamp drops schedule keys that name no site of the fresh kernel: " + "; ".join(report.dropped_keys))
     return replace(fresh, rows=[replace(row, knobs=canonical_knobs(row.knobs or {})) for row in fresh.rows])
 
 

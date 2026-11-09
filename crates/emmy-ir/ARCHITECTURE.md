@@ -132,10 +132,11 @@ eight or more shifted reads, which the full search never finished) takes the ord
 canonical and independent of the input order like the full search's, but not always its minimum. `identity.rs`
 memoizes the identity per body and per coloring. `normalize/` holds the steps and the driver `normalize_body`;
 `canonical_order` and `place_values` are the two steps that read the numbering, and the order ranks a product's
-operands through the statement objects it permuted. A commutative node's two sides enter the digest in content order (an operand's whole
-value, its number with its parameters), keyed twice: once to learn the order on state rolled back, once in it, so a
-parameter or buffer first met inside the node takes the index the content gives it. Two loads of one buffer that tie
-on rank order the normal form by their names, and the identity stays the same whatever the buffers are called.
+operands through the statement objects it permuted. A commutative node's two sides enter the digest in content order
+(an operand's whole value, its number with its parameters), keyed twice: once to learn the order on state rolled back,
+once in it, so a parameter or buffer first met inside the node takes the index the content gives it. Two loads of one
+buffer that tie on rank order the normal form by their names, and the identity stays the same whatever the buffers are
+called.
 
 ## Memos
 

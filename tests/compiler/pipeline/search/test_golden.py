@@ -88,10 +88,12 @@ def test_restamp_respells_a_rows_site_keys_as_it_does_a_seam() -> None:
     # A re-spelled key is a nearest-address match, not proof: the row keeps its schedule and loses its measurement.
     assert report.demoted == [row.name] and fresh.rows[0].measurements is None
     unmapped = {key.replace(nested, f"{nested}9"): value for key, value in row.knobs.items()}
-    fresh, report = restamp(replace(document, rows=[replace(row, knobs=unmapped)]))
+    fresh, report = restamp(replace(document, rows=[replace(row, knobs=unmapped, measurements=Measurements(emmy_us=12.5))]))
     assert fresh.rows[0].knobs == {key: value for key, value in row.knobs.items() if nested not in key}
     families = ("TILE", "REDUCE", "STAGE")
     assert report.dropped_keys == [f"{row.name}: {family}@{nested}9 names no site of {row.kernel}" for family in families]
+    # A row that lost a key is not the schedule that was measured either.
+    assert report.demoted == [row.name] and fresh.rows[0].measurements is None
     assert not restamp(document)[1].changed
 
 

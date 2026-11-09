@@ -24,8 +24,9 @@ pub fn fold_trivial_selects(body: &Body) -> Body {
     })
 }
 
-/// Every `Let` of a float literal at the default precision spelled into the expressions that read it, in its scope
-/// and the scopes under it: a constant is a literal, not a binding. The `Let` stays until nothing reads it.
+/// Every `Let` of a float literal at the default precision, or of an integer literal with no declared width, spelled
+/// into the expressions that read it, in its scope and the scopes under it: a constant is a literal, not a binding.
+/// The `Let` stays until nothing reads it.
 pub fn inline_literals(body: &Body) -> Body {
     fn scope(body: &Body, env: &HashMap<Name, Expression>) -> Body {
         let mut env = env.clone();
@@ -47,7 +48,7 @@ pub fn inline_literals(body: &Body) -> Body {
                 env.remove(&name);
             }
             if let Some((name, value)) = literal_binding(&stmt) {
-                env.insert(*name, Expression::float(value));
+                env.insert(*name, value.clone());
             }
             out.push(stmt);
         }

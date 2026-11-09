@@ -25,11 +25,14 @@ pub fn simplify_body(body: &Body) -> Result<Body> {
 pub(crate) fn simplify_stmt(stmt: &Arc<Statement>, ctx: &SimplifyCtx) -> Result<Arc<Statement>> {
     let stmt = Statement::try_map_expressions(stmt, &mut |e| e.simplify(ctx))?;
     match &*stmt {
-        // A value that is a literal is a constant: a `Let`, typed as the value promotes (`f32` by default), its
-        // literal a float where the type is.
+        // A value that is a literal is a constant: a `Let`, typed as declared, else `f32` for a float literal and
+        // untyped for an integer one (`x - x` over integers is the integer zero, not a float), its literal a float
+        // where the type is.
         Statement::Assign(a) if let Expr::Literal(lit) = &*a.value => {
-            let dtype = a.dtype.unwrap_or(DType::F32);
-            let value = if dtype.is_float() && lit.dtype != LitType::Float {
+            let dtype = a
+                .dtype
+                .or((lit.dtype == LitType::Float).then_some(DType::F32));
+            let value = if dtype.is_some_and(DType::is_float) && lit.dtype != LitType::Float {
                 Expression::float(lit.value.as_f64())
             } else {
                 a.value.clone()
@@ -37,7 +40,7 @@ pub(crate) fn simplify_stmt(stmt: &Arc<Statement>, ctx: &SimplifyCtx) -> Result<
             Ok(Arc::new(Statement::Let(Let {
                 name: a.name,
                 value,
-                dtype: Some(dtype),
+                dtype,
             })))
         }
         Statement::Select(s) => Ok(Arc::new(Statement::Select(decided(s)))),

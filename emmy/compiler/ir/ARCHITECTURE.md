@@ -230,20 +230,20 @@ lightweight value objects (`ElementwiseImpl`, not `ElementwiseOp`) so the surrou
 
 ## The statement module's interface
 
-`ir/stmt/` is the vocabulary all three IRs share, so the rest of the compiler uses it through one package and
-nothing else: no submodule path, no private name. The package exports the statement types, `Body` and `OutputSpec`,
+`ir/stmt/` is the vocabulary all three IRs share, so the rest of the compiler uses it through one package and nothing
+else: no submodule path, no private name. The package exports the statement types, `Body` and `OutputSpec`,
 `normalize_body` and `canonicalize_identity`, a few functions over statements (`free_names`, `exposed_defines`,
 `rename_free`, `mask_select_predicate`, `ordering_constraints`, `dtype_promote`), the text form (`pretty_body`,
 `parse_body`), four normalization steps a caller may run on its own (`one_operation_per_definition`,
 `canonical_values`, `simplify_body`, `prepare_body`), the two statement types fusion's body assembly in `ir/loop/`
 builds a region with (`Call`, `Subroutine`), and the names of a statement type's fields (`fields_of`). The statement
 types, `Body`, the protocol, the text, the value numbering and the normalization are implemented in Rust — the
-`emmy-ir` crate, reached through the
-`emmy.emmy_ir` extension (`crates/emmy-ir/ARCHITECTURE.md`) — and the package is the glue over them: `__init__.py`
-re-exports the names, and `glue.py` writes the few members that take a Python function and keep its results (`rename` by
-a function, `rewrite` under a `Sigma`, `Body.fold`, the identity with its typed roles); `Body.map` and `map_expressions`
-call their function from Rust. The package imports expressions, axes, the sigma and the wire form: no op, tensor, graph,
-backend or pipeline. `tests/architecture/test_layering.py` pins the export list and both directions.
+`emmy-ir` crate, reached through the `emmy.emmy_ir` extension (`crates/emmy-ir/ARCHITECTURE.md`) — and the package is
+the glue over them: `__init__.py` re-exports the names, and `glue.py` writes the few members that take a Python
+function and keep its results (`rename` by a function, `rewrite` under a `Sigma`, `Body.fold`, the identity with its
+typed roles); `Body.map` and `map_expressions` call their function from Rust. The package imports expressions, axes,
+the sigma and the wire form: no op, tensor, graph, backend or pipeline. `tests/architecture/test_layering.py` pins the
+export list and both directions.
 
 **The statement protocol** is what a statement type owes, all of it methods on the statement type. No statement type
 writes them: the shared statement types are declared (below), and a layer adds a statement type of its own by declaring

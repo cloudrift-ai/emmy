@@ -75,7 +75,9 @@ pub(super) fn simplify_binary(
             }
         }
         Operation::Divide | Operation::FloorDivide => {
-            if int_one(&right) {
+            // A true division by one is its dividend for any operand; a floor division by one folds in the
+            // canonical form, where the operand's type is known (a float's `x // 1` is its floor).
+            if int_one(&right) && op == Operation::Divide {
                 return Ok(left);
             }
             if int_zero(&left) {
@@ -112,7 +114,9 @@ pub(super) fn simplify_binary(
             }
         }
         Operation::Remainder => {
-            if right.is_one() || left.is_zero() {
+            // A zero dividend leaves zero; a remainder by one folds in the canonical form, where the operand's type
+            // is known (a float's `x % 1` is its fraction).
+            if int_zero(&left) {
                 return Ok(Expression::int(0));
             }
             if let Some(n) = right.int_literal().filter(|n| *n > 1) {

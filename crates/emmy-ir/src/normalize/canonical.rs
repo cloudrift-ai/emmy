@@ -316,6 +316,15 @@ pub(crate) fn value_canonical(
         return affine_sum(affine_terms(&e, class), rank);
     }
     if let [left, right] = args {
+        // A remainder by one is zero and a floor division by one is its dividend for integers — an index is one; a
+        // value's operand may be a float, whose `x % 1` is its fraction and `x // 1` its floor, so a value keeps both.
+        if class == ExprClass::Index && right.int_literal() == Some(1) {
+            match op {
+                Operation::Remainder => return Expression::int(0),
+                Operation::FloorDivide => return left.clone(),
+                _ => {}
+            }
+        }
         let (mut op, mut left, mut right) = (op, left.clone(), right.clone());
         if matches!(op, Operation::Greater | Operation::GreaterEqual)
             && let Some(mirrored) = op.mirror()

@@ -1124,13 +1124,17 @@ impl Expression {
                     return Ok(operand.clone());
                 }
                 // An operation over float literals is the literal the host computes on `f32`, as the stored kernels
-                // were folded; an integer operand stays, since its arithmetic is the index rules' business.
+                // were folded, and so is a float operation (`exp(0)`) over integer ones; integer arithmetic over
+                // integer literals stays, since it is the index rules' business.
                 if let ElementwiseOp::Known(op) = name
                     && !new.is_empty()
                     && let Some(values) = new
                         .iter()
                         .map(|a| match &**a {
-                            Expr::Literal(lit) if lit.dtype == LitType::Float => {
+                            Expr::Literal(lit)
+                                if lit.dtype == LitType::Float
+                                    || (lit.dtype == LitType::Int && !op.info().integer) =>
+                            {
                                 Some(lit.value.as_f64() as f32)
                             }
                             _ => None,
