@@ -131,7 +131,9 @@ make test                                                        # the whole sui
 ```
 
 `make test` compiles CUDA kernels at **`-Xcicc -O1`** — the **correctness lane**: `-O1` changes runtime perf, not
-numerics, and the deployable perf tests (`tests/perf`, `-m perf`) are skipped here, running at `-O3` via
+a kernel's numerics. It can change a pick, though: the opt level is a schedule-prior feature, and under the default
+fast math a pick can be an f16-accumulate atom. A test that checks numerics and leaves the schedule to the prior pins
+`FAST_MATH` off. The deployable perf tests (`tests/perf`, `-m perf`) are skipped here, running at `-O3` via
 `make bench-kernels`. It also sets `EMMY_GOLDEN_FILE=` (set, empty): no repository golden is evidence in this lane,
 because the lane never asks how fast a pick is and importing a card's goldens is work every worker process would
 repeat; a test that needs golden evidence scopes it itself (`--golden PATH`, `golden.records_override`). To re-run the suite at deployable `-O3`, prefix `EMMY_NVCC_FLAGS=` (empty) or run `pytest`

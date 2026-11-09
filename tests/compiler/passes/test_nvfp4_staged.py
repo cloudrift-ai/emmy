@@ -676,7 +676,11 @@ def test_a_pair_table_lookup_is_computed_not_read(tmp_path, place):
 @pytest.mark.xdist_group("cuda")
 def test_the_computed_pair_lookup_matches_the_decoded_oracle(tmp_path):
     """The computed lookup on the device: the decode cut into its own kernel feeds the matmul the same values the
-    table holds, so the product equals ``x @ dequantize_nvfp4(w)ᵀ`` up to the matmul's own rounding."""
+    table holds, so the product equals ``x @ dequantize_nvfp4(w)ᵀ`` up to the matmul's own rounding.
+
+    Fast math is pinned off, so the matmul accumulates in f32. Its own rounding is then the f16 output's, at most
+    half an ulp: 2^-11 (4.9e-4) of the largest output. Left on, a consumer card offers the f16-accumulate atom,
+    whose error here is 1.0e-3, and the prior picks it at ``-O1`` (its own test is the f16-accumulate drain's)."""
     from emmy.compiler.backend.cuda.backend import CudaBackend
     from emmy.compiler.loader.binder import bind_constants
     from emmy.compiler.loader.quant import dequantize_nvfp4
@@ -686,7 +690,7 @@ def test_the_computed_pair_lookup_matches_the_decoded_oracle(tmp_path):
     g, (packed, scale_bits, s2) = _nvfp4_matmul_graph(tmp_path, m=m, n=n, k=k)
     x = (np.random.default_rng(11).standard_normal((m, k)) * 0.05).astype(np.float16)
     backend = CudaBackend()
-    with pinned_knobs({"PLACE": "cut"}):
+    with pinned_knobs({"PLACE": "cut", "FAST_MATH": False}):
         compiled = backend.compile(g)
     assert any("emmy_f4_pair(" in (getattr(node.op, "kernel_source", None) or "") for node in compiled.nodes.values())
     data = bind_constants(compiled, {"layer.weight": packed, "layer.weight_scale": scale_bits, "layer.weight_scale_2": s2})
