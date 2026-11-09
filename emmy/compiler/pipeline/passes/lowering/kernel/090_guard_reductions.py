@@ -5,7 +5,7 @@ from __future__ import annotations
 from dataclasses import replace
 
 from emmy.compiler.graph import Node
-from emmy.compiler.ir.expr import BinaryExpr, Expr, Literal, SimplifyCtx, TernaryExpr
+from emmy.compiler.ir.expression import BinaryExpr, Expression, Literal, SimplifyCtx, TernaryExpr
 from emmy.compiler.ir.kernel import KernelOp
 from emmy.compiler.ir.stmt import Accum, Assign, Body, Load, Loop, Select, StridedLoop, free_names
 from emmy.compiler.pipeline import Pattern, RuleSkipped
@@ -23,7 +23,7 @@ def rewrite(root: Node) -> KernelOp:
     return replace(op, body=_guard(op.body) if enabled else op.body, knobs={**op.knobs, GUARD_REDUCTIONS.name: enabled})
 
 
-def _boolean(op: str, left: Expr, right: Expr) -> Expr:
+def _boolean(op: str, left: Expression, right: Expression) -> Expression:
     return left if left == right and op in ("&&", "||") else BinaryExpr(op, left, right).simplify(SimplifyCtx(ranges={}))
 
 
@@ -35,9 +35,9 @@ def _guard(body: Body, axes: frozenset[str] = frozenset()) -> Body:
     Scalar-only bodies exclude stores, synchronization and warp operations. The reduction's
     identity seed stays outside the zero-trip loop, so every SSA name remains defined.
     """
-    demand: dict[str, Expr] = {}
+    demand: dict[str, Expression] = {}
 
-    def need(name: str, predicate: Expr) -> None:
+    def need(name: str, predicate: Expression) -> None:
         demand[name] = _boolean("||", demand.get(name, _FALSE), predicate)
 
     rewritten = []
@@ -72,7 +72,7 @@ def _guard(body: Body, axes: frozenset[str] = frozenset()) -> Body:
                     for s in stmt.body.iter()
                 )
                 if carriers and scalar and wanted != _TRUE and wanted.free_vars() <= axes:
-                    end = stmt.end if isinstance(stmt, StridedLoop) and stmt.end is not None else stmt.axis.extent_expr()
+                    end = stmt.end if isinstance(stmt, StridedLoop) and stmt.end is not None else stmt.axis.extent_expression()
                     if isinstance(stmt, Loop):
                         stmt = StridedLoop(stmt.axis, _FALSE, _TRUE, stmt.body, unroll=stmt.unroll, seed=stmt.seed)
                     stmt = stmt.replace(end=TernaryExpr(wanted, end, _FALSE))

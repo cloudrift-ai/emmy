@@ -17,7 +17,7 @@ axes. These tests pin the fold and its safety guards.
 from __future__ import annotations
 
 from emmy.compiler.ir.axis import Axis, extend_simplify_ctx
-from emmy.compiler.ir.expr import BinaryExpr, Interval, Literal, SimplifyCtx, Var
+from emmy.compiler.ir.expression import BinaryExpr, Interval, Literal, SimplifyCtx, Var
 
 
 def _flat_seq_coord(stride: int) -> BinaryExpr:
@@ -50,7 +50,7 @@ def test_collapsed_seq_coord_folds_to_row():
     removing both the inner ``// stride`` and the outer ``% seq_len``."""
     for stride in (1024, 2048):
         folded = _flat_seq_coord(stride).simplify(_loop_ctx(stride))
-        assert folded == Var("a0"), f"stride={stride}: got {folded.pretty()}"
+        assert folded == Var("a0"), f"stride={stride}: got {folded}"
 
 
 def test_collapsed_seq_coord_numerically_equivalent():

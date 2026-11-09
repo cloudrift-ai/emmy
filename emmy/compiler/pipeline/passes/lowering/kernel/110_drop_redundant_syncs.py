@@ -33,7 +33,7 @@ from emmy.compiler.ir.kernel.ir import (
     WgmmaMma,
     WgmmaWait,
 )
-from emmy.compiler.ir.stmt import Body, Stmt
+from emmy.compiler.ir.stmt import Body, Statement
 from emmy.compiler.pipeline import Pattern, RuleSkipped
 
 PATTERN = [Pattern("root", KernelOp)]
@@ -56,7 +56,7 @@ _SMEM_TOUCHING = (
 )
 
 
-def _drop_redundant_syncs(body: tuple[Stmt, ...]) -> list[Stmt]:
+def _drop_redundant_syncs(body: tuple[Statement, ...]) -> list[Statement]:
     """Drop ``Sync`` stmts that are guaranteed no-ops at the body level:
 
     * Two consecutive ``Sync`` stmts collapse to one.
@@ -69,7 +69,7 @@ def _drop_redundant_syncs(body: tuple[Stmt, ...]) -> list[Stmt]:
     a defensive ``Sync()`` at template boundaries, and those surface here.
     """
     smem_seen = False
-    out: list[Stmt] = []
+    out: list[Statement] = []
     for s in body:
         if isinstance(s, Sync):
             if not smem_seen:
@@ -100,7 +100,7 @@ def rewrite(root: Node) -> KernelOp | None:
             return t.with_bodies((Body(deduped),))
         return t
 
-    new_body: list[Stmt] = [clean_tile(s) if isinstance(s, Tile) else s for s in op.body]
+    new_body: list[Statement] = [clean_tile(s) if isinstance(s, Tile) else s for s in op.body]
 
     if not changed:
         raise RuleSkipped("no redundant syncs at the tile body level")

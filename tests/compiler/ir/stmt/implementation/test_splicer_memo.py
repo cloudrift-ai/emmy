@@ -2,16 +2,9 @@
 
 from __future__ import annotations
 
-from emmy.compiler.ir.expr import BinaryExpr, Literal, Var
-from emmy.compiler.ir.loop import (
-    Assign,
-    Axis,
-    Load,
-    Loop,
-    LoopOp,
-    Write,
-    splice_loops,
-)
+from emmy.compiler.ir.expression import BinaryExpr
+from emmy.compiler.ir.loop import LoopOp, splice_loops
+from emmy.compiler.ir.stmt import parse_body
 
 
 def test_large_sigma_target_free_vars_walks_do_not_scale_with_producer_chain(monkeypatch):
@@ -25,46 +18,37 @@ def test_large_sigma_target_free_vars_walks_do_not_scale_with_producer_chain(mon
         _normal_form.cache_clear()
         _identity.cache_clear()
 
-        producer_axis = Axis("p", 4096)
-        producer_stmts = [Load(name="x", input="X", index=(Var("p"),))]
+        producer_stmts = ["x = load X[p]"]
         previous = "x"
         for i in range(chain_length):
             name = f"v{i}"
-            producer_stmts.append(Assign(name=name, op="negative", args=(previous,)))
+            producer_stmts.append(f"{name} = negative({previous})")
             previous = name
-        producer_stmts.append(Write(output="P", index=(Var("p"),), value=previous))
-        producer = LoopOp(body=(Loop(axis=producer_axis, body=tuple(producer_stmts)),))
+        producer_stmts.append(f"P[p] = {previous}")
+        producer = LoopOp(body=parse_body("\n".join(("for p in 0..4096:", *(f"    {line}" for line in producer_stmts)))))
 
-        i_axis, j_axis = Axis("i", 8), Axis("j", 8)
-        target = Var("i")
+        target = "i"
         for _ in range(128):
-            target = target * 2 + Var("j")
-        target = BinaryExpr("^", target, Literal(1, "int"))
+            target = f"({target} * 2 + j)"
         consumer = LoopOp(
-            body=(
-                Loop(
-                    axis=i_axis,
-                    body=(
-                        Loop(
-                            axis=j_axis,
-                            body=(
-                                Load(name="pv", input="P", index=(target,)),
-                                Write(output="OUT", index=(Var("i"), Var("j")), value="pv"),
-                            ),
-                        ),
-                    ),
-                ),
+            body=parse_body(
+                f"""
+                for i in 0..8:
+                    for j in 0..8:
+                        pv = load P[{target} ^ 1]
+                        OUT[i, j] = pv
+                """
             )
         )
 
         root_walks = 0
         original = BinaryExpr.free_vars
 
-        def counted_free_vars(expr):
+        def counted_free_vars(expression):
             nonlocal root_walks
-            if expr.op == "^":
+            if expression.op == "^":
                 root_walks += 1
-            return original(expr)
+            return original(expression)
 
         with monkeypatch.context() as patch:
             patch.setattr(BinaryExpr, "free_vars", counted_free_vars)

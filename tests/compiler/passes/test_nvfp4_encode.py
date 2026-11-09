@@ -48,34 +48,34 @@ def test_to_f4e2m1_is_registered_with_the_numpy_encode():
 def test_the_render_emits_the_encode_helper_rather_than_a_dtype_conversion():
     """The fp8 encodes render as an identity and let the result dtype convert. This one must not:
     a raw uint8 store would move the wrong bits entirely."""
-    from emmy.compiler.ir.expr import FuncCallExpr, Var
-    from emmy.compiler.ir.render import op_to_expr
+    from emmy.compiler.ir.expression import FuncCallExpr, Var
+    from emmy.compiler.ir.render import op_to_expression
 
-    expr = op_to_expr("to_f4e2m1", [Var("v")])
-    assert isinstance(expr, FuncCallExpr)
-    assert expr.name == "emmy_to_f4e2m1"
+    expression = op_to_expression("to_f4e2m1", [Var("v")])
+    assert isinstance(expression, FuncCallExpr)
+    assert expression.name == "emmy_to_f4e2m1"
 
 
 def test_round_to_nearest_f32_division_has_reference_and_target_spellings():
     from emmy.compiler.backend.cuda.render_target import CudaRenderTarget
     from emmy.compiler.backend.loop.render_target import LoopRenderTarget
-    from emmy.compiler.ir.expr import FuncCallExpr, Var
+    from emmy.compiler.ir.expression import FuncCallExpr, Var
     from emmy.compiler.ir.kernel.render import _INTRINSIC_TO_CUDA
     from emmy.compiler.ir.loop.runner import _INTRINSICS_CPP, PRELUDE
-    from emmy.compiler.ir.render import RenderCtx, op_to_expr
+    from emmy.compiler.ir.render import RenderCtx, op_to_expression
 
     numerator = np.array([0.75, -1.25], dtype=np.float32)
     denominator = np.array([1.0, 2.0], dtype=np.float32)
     op = ElementwiseImpl("divide_rn_f32")
     assert op.arity == 2
     np.testing.assert_array_equal(op(numerator, denominator), numerator / denominator)
-    expr = op_to_expr("divide_rn_f32", [Var("x"), Var("scale")], dtype="f32")
-    assert isinstance(expr, FuncCallExpr)
-    np.testing.assert_array_equal(expr.eval({"x": numerator, "scale": denominator}), numerator / denominator)
+    expression = op_to_expression("divide_rn_f32", [Var("x"), Var("scale")], dtype="f32")
+    assert isinstance(expression, FuncCallExpr)
+    np.testing.assert_array_equal(expression.eval({"x": numerator, "scale": denominator}), numerator / denominator)
     ctx = RenderCtx(target=CudaRenderTarget(), intrinsics=_INTRINSIC_TO_CUDA)
-    assert expr.render(ctx) == "__fdiv_rn(x, scale)"
+    assert expression.render(ctx) == "__fdiv_rn(x, scale)"
     host = RenderCtx(target=LoopRenderTarget(), intrinsics=_INTRINSICS_CPP)
-    assert expr.render(host) == "emmy_divide_rn_f32(x, scale)"
+    assert expression.render(host) == "emmy_divide_rn_f32(x, scale)"
     assert "float emmy_divide_rn_f32(float x, float y)" in PRELUDE
 
 

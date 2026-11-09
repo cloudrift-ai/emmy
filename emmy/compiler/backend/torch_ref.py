@@ -213,7 +213,7 @@ def _shape_ints(shape, sym_env: dict[str, int]) -> tuple[int, ...]:
     """Resolve a (possibly symbolic) ``Dim`` shape to concrete ints. Symbolic
     dims eval over ``sym_env`` — the name → runtime-extent map read off the
     supplied input tensors in :func:`build_callable`."""
-    return tuple(d.as_static() if d.is_static else int(d.expr.eval(sym_env)) for d in shape)
+    return tuple(d.as_static() if d.is_static else int(d.expression.eval(sym_env)) for d in shape)
 
 
 def _eval(node, ins: list, sym_env: dict[str, int] | None = None, device=None):
@@ -361,12 +361,12 @@ def _eval(node, ins: list, sym_env: dict[str, int] | None = None, device=None):
     raise NotImplementedError(f"torch_ref: op {name!r} unmapped")
 
 
-def _idx_expr(e, env: dict):
-    """Evaluate a coord/select ``Expr`` over the output-coordinate grids.
+def _idx_expression(e, env: dict):
+    """Evaluate a coord/select ``Expression`` over the output-coordinate grids.
 
-    Mirrors ``Expr.eval`` but with torch-/CUDA-safe boolean ops (``Expr.eval``
+    Mirrors ``Expression.eval`` but with torch-/CUDA-safe boolean ops (``Expression.eval``
     routes ``&&``/``||`` through ``np.logical_and``, which can't take a CUDA
-    tensor). Falls back to ``Expr.eval`` for leaf node types that don't appear
+    tensor). Falls back to ``Expression.eval`` for leaf node types that don't appear
     in coord maps."""
     import torch  # noqa: PLC0415
 
@@ -376,14 +376,14 @@ def _idx_expr(e, env: dict):
     if cls == "Literal":
         return e.value
     if cls == "TernaryExpr":
-        cond = _idx_expr(e.cond, env)
-        if_true = _idx_expr(e.if_true, env)
-        if_false = _idx_expr(e.if_false, env)
+        cond = _idx_expression(e.cond, env)
+        if_true = _idx_expression(e.if_true, env)
+        if_false = _idx_expression(e.if_false, env)
         if not torch.is_tensor(cond):
             return if_true if cond else if_false
         return torch.where(cond, if_true, if_false)
     if cls == "BinaryExpr":
-        lo, ro = _idx_expr(e.left, env), _idx_expr(e.right, env)
+        lo, ro = _idx_expression(e.left, env), _idx_expression(e.right, env)
         op = e.op
         ops = {
             "+": lambda a, b: a + b,
@@ -414,11 +414,11 @@ def _index_map(op, ins: list, sym_env: dict[str, int] | None = None, device=None
 
     For every output cell, the first source whose ``select`` predicate holds
     supplies the value, read from that source at ``coord_map`` (each entry an
-    affine ``Expr`` over the output coords). Single-source / ``select=None`` is
+    affine ``Expression`` over the output coords). Single-source / ``select=None`` is
     the common case (broadcast, transpose, reshape, slice)."""
     import torch  # noqa: PLC0415
 
-    from emmy.compiler.ir.expr import PLACEHOLDER_PREFIX  # noqa: PLC0415
+    from emmy.compiler.ir.expression import PLACEHOLDER_PREFIX  # noqa: PLC0415
 
     out_shape = _shape_ints(op.out_shape, sym_env or {})
     if len(op.sources) == 1 and op.sources[0].select is None:
@@ -449,7 +449,7 @@ def _index_map(op, ins: list, sym_env: dict[str, int] | None = None, device=None
     # all-constant map on the GPU while the graph's own inputs sit on the CPU.
     dev = base.device if base is not None else (device or torch.device("cpu"))
     dtype = base.dtype if base is not None else torch.float32
-    # Coord / select exprs may reference symbolic extents (e.g. ``coord < seq_len``)
+    # Coord / select expressions may reference symbolic extents (e.g. ``coord < seq_len``)
     # besides the output-coordinate placeholders — resolve both from one env.
     env: dict = dict(sym_env or {})
     for i, d in enumerate(out_shape):
@@ -469,7 +469,7 @@ def _index_map(op, ins: list, sym_env: dict[str, int] | None = None, device=None
                 if i < s.dim() and s.shape[i] == 1:  # size-1 source dim → index 0 (mirror loop lowering)
                     idx.append(torch.zeros(out_shape, dtype=torch.long, device=dev))
                 else:
-                    v = _idx_expr(c, env)
+                    v = _idx_expression(c, env)
                     v = v if torch.is_tensor(v) else torch.full(out_shape, int(v), dtype=torch.long, device=dev)
                     # Clamp: the gather runs on every cell, but a source's coord_map
                     # may go out of range where its select is false (those values are
@@ -479,7 +479,7 @@ def _index_map(op, ins: list, sym_env: dict[str, int] | None = None, device=None
         if src.select is None:
             sel = torch.ones(out_shape, dtype=torch.bool, device=dev)
         else:
-            sv = _idx_expr(src.select, env)
+            sv = _idx_expression(src.select, env)
             sel = (sv if torch.is_tensor(sv) else torch.full(out_shape, bool(sv), device=dev)).expand(out_shape).bool()
         take = sel & ~filled
         result = torch.where(take, gathered, result)
@@ -508,7 +508,7 @@ def build_callable(graph: Graph, input_tensors: dict[str, torch.Tensor], *, comp
     graphs."""
     import torch  # noqa: PLC0415
 
-    from emmy.compiler.ir.expr import Var  # noqa: PLC0415
+    from emmy.compiler.ir.expression import Var  # noqa: PLC0415
     from emmy.compiler.provenance import is_boundary  # noqa: PLC0415
 
     order = graph.topological_order()
@@ -521,8 +521,8 @@ def build_callable(graph: Graph, input_tensors: dict[str, torch.Tensor], *, comp
     for nid in tensor_ids:
         t = input_tensors[nid]
         for i, d in enumerate(graph.nodes[nid].output.shape):
-            if isinstance(getattr(d, "expr", None), Var):
-                sym_env.setdefault(d.expr.name, int(t.shape[i]))
+            if isinstance(getattr(d, "expression", None), Var):
+                sym_env.setdefault(d.expression.name, int(t.shape[i]))
     scalars = {
         nid: float(graph.nodes[nid].op.value)
         for nid in order

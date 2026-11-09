@@ -11,7 +11,7 @@ pass group holds the per-graph negotiations (``005_delegate_zero_init`` injects 
 ``ZeroPrologue`` into a *neighbor* kernel; ``010`` renders per-graph buffer names), so artifacts
 above the boundary stay a pure function of the kernel while the negotiations run fresh on every
 assembled graph. Entries store the ``KernelOp`` with its buffers renamed to ROLE slots
-(``Stmt.rename_buffers`` over ``Op.canonical_buffers``); a hit renames the slots to the buffers
+(``Statement.rename_buffers`` over ``Op.canonical_buffers``); a hit renames the slots to the buffers
 filling the same roles on the consumer — sound because the key types every role, whatever order
 either side declared its io in.
 

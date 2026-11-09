@@ -6,156 +6,14 @@ import pytest
 from frozendict import frozendict
 
 from emmy.compiler.ir.elementwise import ElementwiseImpl
-from emmy.compiler.ir.expr import BinaryExpr, Literal, Var
-from emmy.compiler.ir.loop import (
-    Accum,
-    Affine,
-    Assign,
-    Axis,
-    Load,
-    Loop,
-    LoopOp,
-    Select,
-    SelectBranch,
-    Write,
-)
-from emmy.compiler.ir.stmt import Body
+from emmy.compiler.ir.expression import Literal, Var
+from emmy.compiler.ir.loop import Affine, Assign, Axis, Loop, LoopOp, Select
+from emmy.compiler.ir.stmt import parse_body
 
 
-def Port(index=()):
-    """Back-compat test shim — Port is gone at the IR level, but fixtures
-    still spell reads as ``Port(index=...)``. The shim just returns the
-    index tuple for ``_loop`` to synthesize body-form Loads from."""
-    return tuple(index)
-
-
-def _nest(axes, body):
-    """Wrap a flat SSA body into nested Loop-block form.
-
-    Idempotent: if body already contains a Loop, returns it unchanged.
-    Reduce axes are inferred as axes with extent > 1 that don't appear
-    in any Write index (when the body contains an Accum).
-    """
-    if any(isinstance(s, Loop) for s in body):
-        return tuple(body)
-
-    has_update = any(isinstance(s, Accum) for s in body)
-    reduce_axis_names: frozenset[str] = frozenset()
-
-    if has_update:
-        write_axis_names: set[str] = set()
-
-        def _walk(e):
-            if isinstance(e, Var):
-                write_axis_names.add(e.name)
-            elif isinstance(e, BinaryExpr):
-                _walk(e.left)
-                _walk(e.right)
-
-        for s in body:
-            if isinstance(s, Write):
-                for e in s.index:
-                    _walk(e)
-        reduce_axis_names = frozenset(a.name for a in axes if a.name not in write_axis_names and a.extent.as_static() > 1)
-
-    free_axes = [a for a in axes if a.name not in reduce_axis_names]
-
-    if not has_update:
-        wrapped: tuple = tuple(body)
-        for a in reversed(free_axes):
-            wrapped = (Loop(axis=a, body=wrapped),)
-        return wrapped
-
-    reduce_axes = [a for a in axes if a.name in reduce_axis_names]
-    if len(reduce_axes) != 1:
-        return tuple(body)
-    reduce_axis = reduce_axes[0]
-
-    segments: list[list] = []
-    current: list = []
-    for stmt in body:
-        current.append(stmt)
-        if isinstance(stmt, Accum):
-            segments.append(current)
-            current = []
-    tail = current
-
-    nested: list = []
-    for seg in segments:
-        nested.append(Loop(axis=reduce_axis, body=tuple(seg)))
-    nested.extend(tail)
-
-    wrapped = tuple(nested)
-    for a in reversed(free_axes):
-        wrapped = (Loop(axis=a, body=wrapped),)
-    return wrapped
-
-
-def _loop(*, axes=(), inputs=(), body=()):
-    """Build a LoopOp from a flat body + axes hint.
-
-    Test-local shim: ``LoopOp.axes`` is a property over the body's Loop
-    tree, so ``axes=`` feeds ``_nest`` to produce the nested form. When
-    ``inputs=(...)`` is provided (legacy Port-tuples), each ``$N`` ref
-    is rewritten to a freshly-named Load that is inserted just before
-    the referencing statement. Load cache resets at each ``Accum`` and
-    at each nested ``Loop`` boundary so sibling reduce sweeps (softmax
-    pattern) get their own scope-local Loads.
-    """
-    if not inputs:
-        return LoopOp(body=_nest(axes, body))
-
-    index_of = {i: tuple(p) for i, p in enumerate(inputs)}
-    fresh_counter = [0]
-
-    def process(stmts):
-        """Rewrite ``$N`` refs in ``stmts`` and insert Loads at first use."""
-        local_loads: dict[int, str] = {}
-        extra_loads: list = []
-
-        def rewrite_arg(a: str) -> str:
-            if not a.startswith("$"):
-                return a
-            try:
-                src = int(a[1:])
-            except ValueError:
-                return a
-            cached = local_loads.get(src)
-            if cached is not None:
-                return cached
-            fresh_counter[0] += 1
-            name = f"in{src}_{fresh_counter[0]}"
-            local_loads[src] = name
-            extra_loads.append(Load(name=name, input=f"src_{src}", index=index_of[src]))
-            return name
-
-        result: list = []
-        for stmt in stmts:
-            if isinstance(stmt, Assign):
-                stmt = Assign(stmt.name, stmt.op, tuple(rewrite_arg(a) for a in stmt.args))
-            elif isinstance(stmt, Accum):
-                stmt = Accum(stmt.name, rewrite_arg(stmt.value), stmt.op)
-            elif isinstance(stmt, Write):
-                stmt = Write(stmt.output, stmt.index, rewrite_arg(stmt.value))
-            elif isinstance(stmt, Select):
-                stmt = Select(
-                    stmt.name,
-                    tuple(SelectBranch(rewrite_arg(b.value), b.select) for b in stmt.branches),
-                )
-            elif isinstance(stmt, Loop):
-                # Nested Loop: its body is a fresh scope — recursive call has
-                # its own ``local_loads`` / ``extra_loads`` so Loads land
-                # inside the Loop body.
-                stmt = Loop(axis=stmt.axis, body=process(stmt.body))
-            result.extend(extra_loads)
-            extra_loads = []
-            result.append(stmt)
-            if isinstance(stmt, Accum):
-                local_loads = {}
-
-        return tuple(result)
-
-    return LoopOp(body=_nest(axes, process(body)))
+def _loop(text: str) -> LoopOp:
+    """A Loop op over the body ``text`` states."""
+    return LoopOp(body=parse_body(text))
 
 
 # ---------------------------------------------------------------------------
@@ -176,17 +34,13 @@ def test_axis_construction():
 
 def test_load_stmt_binding():
     """Load introduces an SSA name; LoopOp.loads collects them in pre-order."""
-    k = LoopOp(
-        body=(
-            Loop(
-                axis=Axis("a0", 4),
-                body=(
-                    Load("x_val", input="src_0", index=(Var("a0"),)),
-                    Assign("y", ElementwiseImpl("negative"), ("x_val",)),
-                    Write(output="out_0", index=(Var("a0"),), value="y"),
-                ),
-            ),
-        ),
+    k = _loop(
+        """
+        for a0 in 0..4:
+            x_val = load src_0[a0]
+            y = negative(x_val)
+            out_0[a0] = y
+        """
     )
     loads = k.body.loads
     # rename_ssa_sequential canonicalizes Load names to in0, in1, ...
@@ -196,32 +50,29 @@ def test_load_stmt_binding():
 
 def test_load_stmt_multiple_sources():
     """num_inputs is the count of distinct Load.source buf names."""
-    k = LoopOp(
-        body=(
-            Loop(
-                axis=Axis("a0", 4),
-                body=(
-                    Load("a", input="src_0", index=(Var("a0"),)),
-                    Load("b", input="src_2", index=(Var("a0"),)),
-                    Assign("y", ElementwiseImpl("add"), ("a", "b")),
-                    Write(output="out_0", index=(Var("a0"),), value="y"),
-                ),
-            ),
-        ),
+    k = _loop(
+        """
+        for a0 in 0..4:
+            a = load src_0[a0]
+            b = load src_2[a0]
+            y = add(a, b)
+            out_0[a0] = y
+        """
     )
     # Two distinct source buf names → two inputs.
     assert tuple(k.inputs) == ("src_0", "src_2")
 
 
+_SUM_OF_TWO = """
+x = load X[]
+y = load Y[]
+z = add(x, y)
+O[] = z
+"""
+
+
 def test_injective_buffer_rename_preserves_normal_form_cache() -> None:
-    op = LoopOp(
-        body=(
-            Load("x", input="X", index=()),
-            Load("y", input="Y", index=()),
-            Assign("z", ElementwiseImpl("add"), ("x", "y")),
-            Write("O", index=(), value="z"),
-        )
-    )
+    op = _loop(_SUM_OF_TWO)
 
     rename = {"X": "z_input", "Y": "a_input", "O": "renamed_output"}
     renamed = op.rename_buffers(rename)
@@ -232,14 +83,7 @@ def test_injective_buffer_rename_preserves_normal_form_cache() -> None:
 
 
 def test_aliasing_buffer_rename_does_not_preserve_normal_form_cache() -> None:
-    op = LoopOp(
-        body=(
-            Load("x", input="X", index=()),
-            Load("y", input="Y", index=()),
-            Assign("z", ElementwiseImpl("add"), ("x", "y")),
-            Write("O", index=(), value="z"),
-        )
-    )
+    op = _loop(_SUM_OF_TWO)
 
     renamed = op.rename_buffers({"X": "input", "Y": "input"})
     assert "_normalized" not in renamed.body.__dict__
@@ -249,22 +93,14 @@ def test_update_synthesizes_accum_decl():
     """An ``Accum`` in a reduce Loop implicitly declares its accumulator.
     ``LoopOp.accums`` synthesizes the declaration info (name, combine
     op, identity value) from the Accum. No explicit decl stmt is needed."""
-    k = LoopOp(
-        body=(
-            Loop(
-                axis=Axis("row", 4),
-                body=(
-                    Loop(
-                        axis=Axis("k", 8),
-                        body=(
-                            Load("x_val", input="src_0", index=(Var("row"), Var("k"))),
-                            Accum(name="acc", value="x_val", op="add"),
-                        ),
-                    ),
-                    Write(output="out_0", index=(Var("row"),), value="acc"),
-                ),
-            ),
-        ),
+    k = _loop(
+        """
+        for row in 0..4:
+            for k in 0..8:
+                x_val = load src_0[row, k]
+                acc <- add(acc, x_val)
+            out_0[row] = acc
+        """
     )
     # rename_ssa_sequential canonicalizes Accum names to acc0, acc1, ...
     assert len(k.body.accums) == 1 and k.body.accums[0].name == "acc0"
@@ -289,69 +125,63 @@ def test_assign_construction():
 # ---------------------------------------------------------------------------
 
 
-def _pointwise_axes(n: int) -> tuple[Axis, ...]:
-    return tuple(Axis(f"a{i}", 4) for i in range(n))
-
-
 def test_kernel_pointwise():
-    axes = (Axis("a0", 4),)
-    p = Port(index=(Var("a0"),))
     k = _loop(
-        axes=axes,
-        inputs=(p, p),
-        body=(
-            Assign("z", ElementwiseImpl("add"), args=("$0", "$1")),
-            Write(output="out_0", index=(Var("a0"),), value="z"),
-        ),
+        """
+        for a0 in 0..4:
+            in0_1 = load src_0[a0]
+            in1_2 = load src_1[a0]
+            z = add(in0_1, in1_2)
+            out_0[a0] = z
+        """
     )
-    assert sum(1 for s in k if not isinstance(s, Loop)) == 4  # 2 synthesized Loads + Assign + Write
+    assert sum(1 for s in k if not isinstance(s, Loop)) == 4  # 2 Loads + Assign + Write
 
 
 def test_kernel_reduce():
-    axes = (Axis("a0", 4), Axis("a1", 8))
-    p = Port(index=(Var("a0"), Var("a1")))
     k = _loop(
-        axes=axes,
-        inputs=(p,),
-        body=(
-            Accum(name="s", value="$0"),
-            Write(output="out_0", index=(Var("a0"),), value="s"),
-        ),
+        """
+        for a0 in 0..4:
+            for a1 in 0..8:
+                in0_1 = load src_0[a0, a1]
+                s <- add(s, in0_1)
+            out_0[a0] = s
+        """
     )
     assert any(isinstance(lb.op, ElementwiseImpl) for lb in k.body.accums)
 
 
 def test_kernel_matmul():
-    axes = (Axis("a0", 4), Axis("a1", 8))
-    p = Port(index=(Var("a0"), Var("a1")))
     k = _loop(
-        axes=axes,
-        inputs=(p, p),
-        body=(
-            Assign("multiply", ElementwiseImpl("multiply"), args=("$0", "$1")),
-            Accum(name="dot", value="multiply"),
-            Write(output="out_0", index=(Var("a0"),), value="dot"),
-        ),
+        """
+        for a0 in 0..4:
+            for a1 in 0..8:
+                in0_1 = load src_0[a0, a1]
+                in1_2 = load src_1[a0, a1]
+                multiply = multiply(in0_1, in1_2)
+                dot <- add(dot, multiply)
+            out_0[a0] = dot
+        """
     )
-    # 2 synthesized Loads + Assign + Accum + Write — accumulator info is carried on Accum.op now.
+    # 2 Loads + Assign + Accum + Write — accumulator info is carried on Accum.op now.
     assert sum(1 for s in k if not isinstance(s, Loop)) == 5
 
 
 def test_kernel_matmul_bias():
-    axes = (Axis("a0", 4), Axis("a1", 8))
-    p_mk = Port(index=(Var("a0"), Var("a1")))
-    p_bias = Port(index=(Var("a0"),))
     k = _loop(
-        axes=axes,
-        inputs=(p_mk, p_mk, p_bias),
-        body=(
-            Assign("multiply", ElementwiseImpl("multiply"), args=("$0", "$1")),
-            Accum(name="dot", value="multiply"),
-            Assign("out", ElementwiseImpl("add"), args=("dot", "$2")),
-            Write(output="out_0", index=(Var("a0"),), value="out"),
-        ),
+        """
+        for a0 in 0..4:
+            for a1 in 0..8:
+                in0_1 = load src_0[a0, a1]
+                in1_2 = load src_1[a0, a1]
+                multiply = multiply(in0_1, in1_2)
+                dot <- add(dot, multiply)
+            in2_3 = load src_2[a0]
+            out = add(dot, in2_3)
+            out_0[a0] = out
+        """
     )
-    # 3 synthesized Loads + Assign + Accum + Assign + Write (no decl stmt — Accum carries op).
+    # 3 Loads + Assign + Accum + Assign + Write (no decl stmt — Accum carries op).
     assert sum(1 for s in k if not isinstance(s, Loop)) == 7
 
 
@@ -359,17 +189,18 @@ def test_kernel_softmax_two_accumulators():
     # Under nested SSA scoping, per-segment SSA names (sub, ex) are scoped to
     # their own reduce Loop — the old flat fixture relied on laxness. Here we
     # just verify a kernel with two accumulators + two Updates builds fine.
-    axes = (Axis("a0", 4), Axis("a1", 8))
-    p = Port(index=(Var("a0"), Var("a1")))
     k = _loop(
-        axes=axes,
-        inputs=(p,),
-        body=(
-            Accum(name="mx", value="$0", op="maximum"),
-            Accum(name="sm", value="$0"),
-            Write(output="out_0", index=(Var("a0"),), value="mx"),
-            Write(output="out_1", index=(Var("a0"),), value="sm"),
-        ),
+        """
+        for a0 in 0..4:
+            for a1 in 0..8:
+                in0_1 = load src_0[a0, a1]
+                mx <- maximum(mx, in0_1)
+            for a1 in 0..8:
+                in0_2 = load src_0[a0, a1]
+                sm <- add(sm, in0_2)
+            out_0[a0] = mx
+            out_1[a0] = sm
+        """
     )
     # rename_ssa_sequential renames Accums to acc0, acc1 in definition order.
     assert any(lb.name == "acc0" for lb in k.body.accums)
@@ -377,39 +208,32 @@ def test_kernel_softmax_two_accumulators():
 
 
 def test_kernel_unary_chain():
-    axes = (Axis("a0", 4),)
-    p = Port(index=(Var("a0"),))
     k = _loop(
-        axes=axes,
-        inputs=(p,),
-        body=(
-            Assign("negative", ElementwiseImpl("negative"), args=("$0",)),
-            Assign("exp", ElementwiseImpl("exp"), args=("negative",)),
-            Write(output="out_0", index=(Var("a0"),), value="exp"),
-        ),
+        """
+        for a0 in 0..4:
+            in0_1 = load src_0[a0]
+            negative = negative(in0_1)
+            exp = exp(negative)
+            out_0[a0] = exp
+        """
     )
-    # 1 synthesized Load + 2 Assigns + Write.
+    # 1 Load + 2 Assigns + Write.
     assert sum(1 for s in k if not isinstance(s, Loop)) == 4
 
 
 def test_kernel_scatter_output_via_select():
     """Select replaces Mux for coord-predicated dispatch on output."""
-    axes = (Axis("a0", 4),)
-    p = Port(index=(Var("a0"),))
     k = _loop(
-        axes=axes,
-        inputs=(p, p),
-        body=(
-            Assign("z", ElementwiseImpl("add"), args=("$0", "$1")),
-            Select(
-                name="v",
-                branches=(
-                    SelectBranch(value="$0", select=Var("c1")),
-                    SelectBranch(value="$1", select=Var("c2")),
-                ),
-            ),
-            Write(output="out_0", index=(Var("a0"),), value="v"),
-        ),
+        """
+        for a0 in 0..4:
+            in0_1 = load src_0[a0]
+            in1_2 = load src_1[a0]
+            z = add(in0_1, in1_2)
+            v = select:
+                in0_1 when c1
+                in1_2 when c2
+            out_0[a0] = v
+        """
     )
     assert any(isinstance(s, Select) for s in k)
 
@@ -420,45 +244,41 @@ def test_kernel_scatter_output_via_select():
 
 
 def test_ssa_rejects_undefined_arg():
-    axes = _pointwise_axes(1)
-    p = Port(index=(Var("a0"),))
     with pytest.raises(ValueError, match="not defined"):
         _loop(
-            axes=axes,
-            inputs=(p,),
-            body=(Assign("y", ElementwiseImpl("exp"), args=("z",)), Write(output="out_0", index=(Var("a0"),), value="y")),
+            """
+            for a0 in 0..4:
+                y = exp(z)
+                out_0[a0] = y
+            """
         )
 
 
 def test_ssa_rejects_duplicate_name():
-    axes = _pointwise_axes(1)
-    p = Port(index=(Var("a0"),))
     with pytest.raises(ValueError, match="already defined"):
         _loop(
-            axes=axes,
-            inputs=(p,),
-            body=(
-                Assign("y", ElementwiseImpl("exp"), args=("$0",)),
-                Assign("y", ElementwiseImpl("negative"), args=("y",)),
-                Write(output="out_0", index=(Var("a0"),), value="y"),
-            ),
+            """
+            for a0 in 0..4:
+                in0_1 = load src_0[a0]
+                y = exp(in0_1)
+                y = negative(y)
+                out_0[a0] = y
+            """
         )
 
 
 def test_ssa_topo_sorts_forward_reference():
     """A body with a forward SSA reference is silently reordered by
-    ``topo_sort_siblings`` in ``normalize_body`` so the def precedes its
+    ``topological_sort`` in ``normalize_body`` so the def precedes its
     use. Validation only rejects truly undefined names / cycles."""
-    axes = _pointwise_axes(1)
-    p = Port(index=(Var("a0"),))
     k = _loop(
-        axes=axes,
-        inputs=(p,),
-        body=(
-            Assign("a", ElementwiseImpl("add"), args=("$0", "b")),
-            Assign("b", ElementwiseImpl("exp"), args=("$0",)),
-            Write(output="out_0", index=(Var("a0"),), value="a"),
-        ),
+        """
+        for a0 in 0..4:
+            in0_1 = load src_0[a0]
+            a = add(in0_1, b)
+            b = exp(in0_1)
+            out_0[a0] = a
+        """
     )
     # After normalization the rename pass canonicalizes to v0, v1; the
     # exp-Assign (originally "b") must precede the Affine sum that uses it.
@@ -467,86 +287,65 @@ def test_ssa_topo_sorts_forward_reference():
 
 
 def test_ssa_allows_input_name_reuse_in_multiple_args():
-    axes = _pointwise_axes(1)
-    p = Port(index=(Var("a0"),))
     k = _loop(
-        axes=axes,
-        inputs=(p,),
-        body=(
-            Assign("a", ElementwiseImpl("exp"), args=("$0",)),
-            Assign("b", ElementwiseImpl("negative"), args=("$0",)),
-            Assign("c", ElementwiseImpl("add"), args=("a", "b")),
-            Write(output="out_0", index=(Var("a0"),), value="c"),
-        ),
+        """
+        for a0 in 0..4:
+            in0_1 = load src_0[a0]
+            a = exp(in0_1)
+            b = negative(in0_1)
+            c = add(a, b)
+            out_0[a0] = c
+        """
     )
-    # 1 synthesized Load + exp + one Affine (the negation folded into the sum) + 1 Write.
+    # 1 Load + exp + one Affine (the negation folded into the sum) + 1 Write.
     assert sum(1 for s in k if not isinstance(s, Loop)) == 4
 
 
 def test_update_op_conflict_rejected():
     """Multiple Updates to the same target must share the same op — mixing
     ``max`` and ``add`` on one accumulator is semantically ambiguous."""
-    axes = (Axis("a0", 4),)
-    p = Port(index=(Var("a0"),))
     with pytest.raises(ValueError, match="conflicts with"):
         _loop(
-            axes=axes,
-            inputs=(p,),
-            body=(
-                Accum(name="acc", value="$0", op="maximum"),
-                Accum(name="acc", value="$0", op="add"),
-                Write(output="out_0", index=(), value="acc"),
-            ),
+            """
+            for a0 in 0..4:
+                in0_1 = load src_0[a0]
+                acc <- maximum(acc, in0_1)
+            for a0 in 0..4:
+                in0_2 = load src_0[a0]
+                acc <- add(acc, in0_2)
+            out_0[] = acc
+            """
         )
 
 
 # ---------------------------------------------------------------------------
-# Loop Stmt — nested body form
+# Loop Statement — nested body form
 # ---------------------------------------------------------------------------
 
 
 def test_loop_stmt_basic():
-    from emmy.compiler.ir.loop import Loop
-
     # Pointwise kernel with body wrapped in a free Loop.
     loop = _loop(
-        axes=(Axis("a0", 8),),
-        inputs=(Port(index=(Var("a0"),)),),
-        body=(
-            Loop(
-                axis=Axis("a0", 8),
-                body=(
-                    Assign("v", ElementwiseImpl("negative"), args=("$0",)),
-                    Write(output="out_0", index=(Var("a0"),), value="v"),
-                ),
-            ),
-        ),
+        """
+        for a0 in 0..8:
+            in0_1 = load src_0[a0]
+            v = negative(in0_1)
+            out_0[a0] = v
+        """
     )
     assert isinstance(loop.body[0], Loop)
     assert loop.body[0].axis.name == "a0"
 
 
 def test_loop_op_orders_free_axes_by_output_storage() -> None:
-    op = LoopOp(
-        body=(
-            Loop(
-                axis=Axis("d", 16),
-                body=(
-                    Loop(
-                        axis=Axis("h", 4),
-                        body=(
-                            Loop(
-                                axis=Axis("m", 8),
-                                body=(
-                                    Load(name="value", input="x", index=(Var("h"), Var("m"), Var("d"))),
-                                    Write(output="out", index=(Var("h"), Var("m"), Var("d")), value="value"),
-                                ),
-                            ),
-                        ),
-                    ),
-                ),
-            ),
-        )
+    op = _loop(
+        """
+        for d in 0..16:
+            for h in 0..4:
+                for m in 0..8:
+                    value = load x[h, m, d]
+                    out[h, m, d] = value
+        """
     )
 
     assert op.writes[0].index == tuple(Var(axis.name) for axis in op.axes)
@@ -554,18 +353,18 @@ def test_loop_op_orders_free_axes_by_output_storage() -> None:
 
 def test_loop_axis_sibling_same_name_allowed():
     """Sibling Loops with the same axis name are fine — that's softmax's two K-loops."""
-    from emmy.compiler.ir.loop import Loop
-
     # Two reduce Loops over the same axis, sibling (not nested).
     _loop(
-        axes=(Axis("a0", 4), Axis("k", 8)),
-        inputs=(Port(index=(Var("a0"), Var("k"))), Port(index=(Var("a0"), Var("k")))),
-        body=(
-            Loop(axis=Axis("k", 8), body=(Accum(name="mx", value="$0", op="maximum"),)),
-            Loop(axis=Axis("k", 8), body=(Accum(name="sm", value="$1"),)),
-            Assign("v", ElementwiseImpl("add"), args=("mx", "sm")),
-            Write(output="out_0", index=(Var("a0"),), value="v"),
-        ),
+        """
+        for k in 0..8:
+            in0_1 = load src_0[a0, k]
+            mx <- maximum(mx, in0_1)
+        for k in 0..8:
+            in1_2 = load src_1[a0, k]
+            sm <- add(sm, in1_2)
+        v = add(mx, sm)
+        out_0[a0] = v
+        """
     )
 
 
@@ -575,20 +374,14 @@ def test_loop_ssa_scoping():
     The inner Assign binds to the inner axis (via ``$0``'s index) so LICM
     can't hoist it out; the outer reference is a true scope violation.
     """
-    from emmy.compiler.ir.loop import Loop
-
     with pytest.raises(ValueError, match="not defined"):
         _loop(
-            axes=(Axis("a0", 4), Axis("a0_inner", 4)),
-            inputs=(Port(index=(Var("a0_inner"),)),),
-            body=(
-                Loop(
-                    axis=Axis("a0_inner", 4),
-                    body=(Assign("v", ElementwiseImpl("negative"), args=("$0",)),),
-                ),
-                # Reference 'v' outside the inner Loop — should fail.
-                Write(output="out_0", index=(Var("a0"),), value="v"),
-            ),
+            """
+            for a0_inner in 0..4:
+                in0_1 = load src_0[a0_inner]
+                v = negative(in0_1)
+            out_0[a0] = v
+            """
         )
 
 
@@ -600,35 +393,26 @@ def test_loop_ssa_scoping():
 def _flat_reduce_kernel() -> LoopOp:
     """Flat-body reduce kernel for parity comparison."""
     return _loop(
-        axes=(Axis("a0", 4), Axis("k", 8)),
-        inputs=(Port(index=(Var("a0"), Var("k"))),),
-        body=(
-            Accum(name="acc", value="$0"),
-            Write(output="out_0", index=(Var("a0"),), value="acc"),
-        ),
+        """
+        for a0 in 0..4:
+            for k in 0..8:
+                in0_1 = load src_0[a0, k]
+                acc <- add(acc, in0_1)
+            out_0[a0] = acc
+        """
     )
 
 
 def _nested_reduce_kernel() -> LoopOp:
     """Same kernel as _flat_reduce_kernel, but body is nested via explicit Loops."""
-    from emmy.compiler.ir.loop import Loop
-
-    return LoopOp(
-        body=(
-            Loop(
-                axis=Axis("a0", 4),
-                body=(
-                    Loop(
-                        axis=Axis("k", 8),
-                        body=(
-                            Load(name="x_k", input="src_0", index=(Var("a0"), Var("k"))),
-                            Accum(name="acc", value="x_k", op="add"),
-                        ),
-                    ),
-                    Write(output="out_0", index=(Var("a0"),), value="acc"),
-                ),
-            ),
-        ),
+    return _loop(
+        """
+        for a0 in 0..4:
+            for k in 0..8:
+                x_k = load src_0[a0, k]
+                acc <- add(acc, x_k)
+            out_0[a0] = acc
+        """
     )
 
 
@@ -649,19 +433,14 @@ def test_execute_loop_op_handles_nested_body():
 def test_structural_key_is_the_same_bare_and_through_a_loop_op() -> None:
     """Identity keys the executable normal form: hoisting a loop-invariant read at Loop op
     construction must not key the op apart from the bare body it was built from."""
-    i = Var("i")
-    raw = Body(
-        (
-            Loop(
-                axis=Axis("i", 8),
-                body=(
-                    Load(name="s", input="S", index=()),
-                    Load(name="x", input="X", index=(i,)),
-                    Assign(name="y", op="multiply", args=("x", "s")),
-                    Write(output="O", index=(i,), value="y"),
-                ),
-            ),
-        )
+    raw = parse_body(
+        """
+        for i in 0..8:
+            s = load S[]
+            x = load X[i]
+            y = multiply(x, s)
+            O[i] = y
+        """
     )
     op = LoopOp(body=raw)
     assert op.body != raw, "the invariant read hoists"
@@ -675,28 +454,20 @@ def test_identity_binds_buffer_types_to_roles() -> None:
     from emmy.compiler.dtype import F16, F32  # noqa: PLC0415
     from emmy.compiler.tensor import Tensor  # noqa: PLC0415
 
-    i = Var("i")
+    def body(product_left: str, product_right: str, subtrahend: str) -> str:
+        return f"""
+        for i in 0..8:
+            p = load {product_left}[i]
+            q = load {product_right}[i]
+            r = load {subtrahend}[i]
+            m = multiply(p, q)
+            o = subtract(m, r)
+            O[i] = o
+        """
 
-    def body(product_left: str, product_right: str, subtrahend: str) -> Body:
-        return Body(
-            (
-                Loop(
-                    axis=Axis("i", 8),
-                    body=(
-                        Load(name="p", input=product_left, index=(i,)),
-                        Load(name="q", input=product_right, index=(i,)),
-                        Load(name="r", input=subtrahend, index=(i,)),
-                        Assign(name="m", op="multiply", args=("p", "q")),
-                        Assign(name="o", op="subtract", args=("m", "r")),
-                        Write(output="O", index=(i,), value="o"),
-                    ),
-                ),
-            )
-        )
-
-    def op(stmts: Body, *declared: tuple[str, object]) -> LoopOp:
+    def op(stmts: str, *declared: tuple[str, object]) -> LoopOp:
         inputs = frozendict({name: Tensor(name, (8,), dtype) for name, dtype in declared})
-        return LoopOp(body=stmts, inputs=inputs, outputs=frozendict({"O": Tensor("O", (8,), F32)}))
+        return LoopOp(body=parse_body(stmts), inputs=inputs, outputs=frozendict({"O": Tensor("O", (8,), F32)}))
 
     halves_f16 = op(body("A", "B", "C"), ("A", F16), ("B", F16), ("C", F32))
     mixed_product = op(body("A", "C", "B"), ("A", F16), ("B", F16), ("C", F32))

@@ -1,6 +1,6 @@
 """Loop body construction and fresh-name allocation."""
 
-from emmy.compiler.ir.stmt.builder import BodyBuilder
+from emmy.compiler.ir.loop.builder import BodyBuilder
 
 
 class _LookupBudget(set):
@@ -45,20 +45,24 @@ def test_insert_descends_by_axis_and_prepends_at_the_leaf():
     Loop, and each level keeps prepend order — newest first, a fresh nested Loop ahead of the
     stmts inserted before it."""
     from emmy.compiler.ir.axis import Axis
-    from emmy.compiler.ir.stmt import Assign, Loop, Scope
+    from emmy.compiler.ir.loop import Scope
+    from emmy.compiler.ir.stmt import Body, parse_body
+    from tests.compiler.ir.stmt import listing
 
     a, b = Axis("a", 4), Axis("b", 8)
     builder = BodyBuilder(set())
-    builder.insert(Assign(name="v0", op="copy", args=("x",)), Scope(enclosing=(a,)))
-    builder.insert(Assign(name="v1", op="copy", args=("x",)), Scope(enclosing=(a, b)))
-    builder.insert(Assign(name="v2", op="copy", args=("x",)), Scope(enclosing=(a,)))
-    builder.insert(Assign(name="v3", op="copy", args=("x",)), Scope(enclosing=()))
+    builder.insert(*parse_body("v0 = copy(x)"), Scope(enclosing=(a,)))
+    builder.insert(*parse_body("v1 = copy(x)"), Scope(enclosing=(a, b)))
+    builder.insert(*parse_body("v2 = copy(x)"), Scope(enclosing=(a,)))
+    builder.insert(*parse_body("v3 = copy(x)"), Scope(enclosing=()))
 
-    body = builder.finish()
-    assert [type(s).__name__ for s in body] == ["Assign", "Loop"]
-    assert body[0].name == "v3"
-    outer = body[1]
-    assert isinstance(outer, Loop) and outer.axis == a
-    assert [getattr(s, "name", type(s).__name__) for s in outer.body] == ["v2", "Loop", "v0"]
-    inner = outer.body[1]
-    assert inner.axis == b and [s.name for s in inner.body] == ["v1"]
+    assert str(Body(builder.finish())) == listing(
+        """
+        v3 = copy(x)
+        for a in 0..4:
+            v2 = copy(x)
+            for b in 0..8:
+                v1 = copy(x)
+            v0 = copy(x)
+        """
+    )

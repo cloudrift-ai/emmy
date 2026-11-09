@@ -60,11 +60,11 @@ from itertools import count
 from emmy import config
 from emmy.compiler.graph import Node
 from emmy.compiler.ir.axis import Axis
-from emmy.compiler.ir.expr import BinaryExpr, Expr, Literal, Var
+from emmy.compiler.ir.expression import BinaryExpr, Expression, Literal, Var
 from emmy.compiler.ir.kernel import KernelOp
 from emmy.compiler.ir.kernel.ir import FRAG, FragmentApply, FragmentArg, RegFragment
 from emmy.compiler.ir.pure import Lambda
-from emmy.compiler.ir.stmt import Body, StridedLoop
+from emmy.compiler.ir.stmt import Body, Statement, StridedLoop, fields_of
 from emmy.compiler.pipeline import Pattern, RuleSkipped
 from emmy.compiler.pipeline.passes.lowering.kernel._atom import unroll_ok_n
 from emmy.compiler.pipeline.search.space import LOOPIFY
@@ -171,7 +171,7 @@ def _is_int(x) -> bool:
 
 
 def _peel(v):
-    """Split an Expr into ``(base, trailing_int_const)`` — ``kv0`` → ``(kv0, 0)``, ``kv0 + 8`` →
+    """Split an Expression into ``(base, trailing_int_const)`` — ``kv0`` → ``(kv0, 0)``, ``kv0 + 8`` →
     ``(kv0, 8)`` — so a constant-folded ``+ 0`` reconciles with a sibling's ``+ c``."""
     if isinstance(v, BinaryExpr) and v.op == "+" and isinstance(v.right, Literal) and _is_int(v.right.value):
         return v.left, v.right.value
@@ -184,9 +184,9 @@ def _init_kwargs(cls) -> frozenset[str] | None:
 
     Guards the generic dataclass re-roll below: it reconstructs a node as ``type(v0)(**{field: ...})``,
     which is only valid when every ``init`` field name is also a constructor parameter. Most IR nodes
-    (``Expr`` subclasses, stmts) satisfy that, but ``Dim`` does not — it is ``dataclass(init=False)``
-    with a hand-written ``__init__(self, value, *, hint)`` whose param ``value`` populates the ``expr``
-    field, so ``Dim(expr=...)`` raises ``TypeError``. A run whose divergence bottoms out in such a node
+    (``Expression`` subclasses, stmts) satisfy that, but ``Dim`` does not — it is ``dataclass(init=False)``
+    with a hand-written ``__init__(self, value, *, hint)`` whose param ``value`` populates the ``expression``
+    field, so ``Dim(expression=...)`` raises ``TypeError``. A run whose divergence bottoms out in such a node
     is simply declined (``_FAIL``) rather than crashed on."""
     try:
         params = inspect.signature(cls.__init__).parameters
@@ -226,7 +226,15 @@ def _reroll(vals: list, loopvar: str, frag_stems: set[str]):
         return _recurse_seq(vals, loopvar, frag_stems, tuple)
     if isinstance(v0, Lambda):
         return _FAIL  # a closed term binds only its params, so it cannot read the loop var — decline
-    if all(type(v) is type(v0) for v in vals) and (isinstance(v0, Expr) or is_dataclass(v0)):
+    if isinstance(v0, Statement) and all(type(v) is type(v0) for v in vals):
+        changes = {}
+        for name in fields_of(type(v0)):
+            sub = _reroll([getattr(v, name) for v in vals], loopvar, frag_stems)
+            if sub is _FAIL:
+                return _FAIL
+            changes[name] = sub
+        return v0.replace(**changes)
+    if all(type(v) is type(v0) for v in vals) and (isinstance(v0, Expression) or is_dataclass(v0)):
         accepted = _init_kwargs(type(v0))
         kw = {}
         for f in fields(v0):
@@ -259,7 +267,7 @@ def _recurse_seq(vals: list, loopvar: str, frag_stems: set[str], ctor):
 
 
 def _affine(base: int, step: int, loopvar: str, dtype: str):
-    """``base + _r*step`` as an Expr — ``_r*step`` when ``base == 0``, ``Literal(base)`` when ``step ==
+    """``base + _r*step`` as an Expression — ``_r*step`` when ``base == 0``, ``Literal(base)`` when ``step ==
     0``, ``None`` when both are zero (a pure ``+ 0`` that folds away)."""
     if step == 0:
         return None if base == 0 else Literal(base, dtype)
@@ -273,10 +281,13 @@ def _families_in(tmpl, loopvar: str, out: set[str]) -> None:
     if isinstance(tmpl, str):
         if tmpl.endswith(suffix):
             out.add(tmpl[: -len(suffix)])
-    elif isinstance(tmpl, tuple):
+    elif isinstance(tmpl, (tuple, Body)):
         for v in tmpl:
             _families_in(v, loopvar, out)
-    elif isinstance(tmpl, Expr) or is_dataclass(tmpl):
+    elif isinstance(tmpl, Statement):
+        for name in fields_of(type(tmpl)):
+            _families_in(getattr(tmpl, name), loopvar, out)
+    elif isinstance(tmpl, Expression) or is_dataclass(tmpl):
         for f in fields(tmpl):
             if f.init:
                 _families_in(getattr(tmpl, f.name), loopvar, out)

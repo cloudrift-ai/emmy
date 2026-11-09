@@ -8,7 +8,7 @@ from __future__ import annotations
 from dataclasses import replace
 
 from emmy.compiler.ir.axis import Axis
-from emmy.compiler.ir.expr import BinaryExpr, Literal, Var
+from emmy.compiler.ir.expression import Literal, Var
 from emmy.compiler.ir.kernel.ir import Smem, TreeHalve, WarpShuffle
 from emmy.compiler.ir.pure import Fold
 from emmy.compiler.ir.schedule import Placement, Raster, Reduce, Stage, Tile, Work, derive_inventory
@@ -20,7 +20,7 @@ from emmy.compiler.ir.schedule.classic import (
     ProjectionSchedule,
     ReductionSchedule,
 )
-from emmy.compiler.ir.stmt import Assign, Cond, Init, Let, Load, Loop, Select, SelectBranch, StridedLoop, Write
+from emmy.compiler.ir.stmt import Assign, Cond, Init, Load, Loop, StridedLoop, Write, parse_body
 from emmy.compiler.ir.tile import TileOp
 from emmy.compiler.pipeline.passes.lowering.kernel._factor import factorize
 from tests.compiler.terms import contraction, projection, reduction, slab
@@ -52,19 +52,20 @@ def _stamped(root: Fold, plans: dict, axes: tuple = (_K,)) -> TileOp:
 
 def _provider() -> Fold:
     """The provider chain — a workspace row read and its rsqrt — as the cone a member closes over."""
-    return projection((), (Load(name="ws", input="cutbuf", index=(Var("m"),)), Assign(name="scale", op="rsqrt", args=("ws",))))
+    return projection((), parse_body("ws = load cutbuf[m]\nscale = rsqrt(ws)"))
 
 
 def _reduce(axis: Axis, acc: str, factor: Fold, src: str) -> Fold:
     """``acc = Σ_axis src[m, axis] · factor`` — the member fold, ``factor`` an operand it closes over
     (never defined inside the loop)."""
-    scaled = Assign(name=f"{acc}__v", op="multiply", args=(f"{src}_e", factor.exposes[0]))
-    return reduction(axis, (slab(f"{src}_e", src, "m", axis.name), factor), (scaled,), (acc,))
+    scaled = parse_body(f"{acc}__v = multiply({src}_e, {factor.exposes[0]})")
+    return reduction(axis, (slab(f"{src}_e", src, "m", axis.name), factor), scaled, (acc,))
 
 
-def _chain_tile(plan: Reduce, post: tuple = ()) -> TileOp:
+def _chain_tile(plan: Reduce, post: str = "") -> TileOp:
     provider = _provider()
     red = _reduce(_K, "acc", provider, "x")
+    post = parse_body(post)
     root = projection((red, provider), post, results=post[-1].defines() if post else ("acc",))
     return _stamped(root, {red: plan})
 
@@ -79,7 +80,7 @@ def _flat(stmts) -> list:
 
 
 def _names_read(stmts) -> set[str]:
-    return {n for s in stmts for n in (*s.deps(), *(v for e in s.exprs() for v in e.free_vars()))}
+    return {n for s in stmts for n in (*s.deps(), *(v for e in s.expressions() for v in e.free_vars()))}
 
 
 def test_a_partitioned_chain_member_emits_the_provider_chain_ahead_of_the_strided_loop() -> None:
@@ -108,8 +109,7 @@ def test_an_ilp_only_chain_member_shares_the_providers_unrenamed() -> None:
 
 
 def test_post_members_close_after_the_merge() -> None:
-    post = (Assign(name="out", op="multiply", args=("acc", "scale")),)
-    bound = factorize(_chain_tile(Reduce.of(coop=64), post=post), root=None)
+    bound = factorize(_chain_tile(Reduce.of(coop=64), post="out = multiply(acc, scale)"), root=None)
     flat = _flat(bound.body)
     combines = [i for i, s in enumerate(flat) if isinstance(s, (WarpShuffle, TreeHalve))]
     assert combines, "the cross-thread combine must close the fold"
@@ -143,8 +143,8 @@ def test_a_transposed_root_emits_its_computed_provider_at_the_lane_owned_cell() 
 
 
 def test_transposed_columns_keep_the_serial_provider_loop_coordinate() -> None:
-    stat = reduction(_J, (slab("z_e", "z", "m", "j"),), (Assign(name="stat__v", op="multiply", args=("z_e", "z_e")),), ("stat",))
-    provider = projection((stat,), (Assign(name="scale", op="rsqrt", args=("stat",)),))
+    stat = reduction(_J, (slab("z_e", "z", "m", "j"),), parse_body("stat__v = multiply(z_e, z_e)"), ("stat",))
+    provider = projection((stat,), parse_body("scale = rsqrt(stat)"))
     red = _reduce(_K, "acc", provider, "x")
     bound = factorize(_stamped(red, {red: Reduce.of(coop=128, coop_transposed=True, output_lanes=8, columns=2)}, axes=(_K, _J)), root=None)
     flat = _flat(bound.body)
@@ -153,23 +153,17 @@ def test_transposed_columns_keep_the_serial_provider_loop_coordinate() -> None:
     assert "stat__v1" in _names_read(flat)
 
 
-def _transposed_masked(predicate):
+def _transposed_masked(predicate: str):
     n = Axis("n", 8)
-    red = reduction(_K, (slab("x_e", "x", "m", "n", "k"),), (Assign(name="acc__v", op="copy", args=("x_e",)),), ("acc",))
-    root = projection(
-        (red,),
-        (
-            Let(name="zero", value=Literal(0.0, "f32")),
-            Select(name="chosen", branches=(SelectBranch("acc", predicate), SelectBranch("zero", Literal(1, "int")))),
-        ),
-    )
+    red = reduction(_K, (slab("x_e", "x", "m", "n", "k"),), parse_body("acc__v = copy(x_e)"), ("acc",))
+    root = projection((red,), parse_body(f"let `zero` = 0.0\nchosen = select:\n    acc when {predicate}\n    `zero` when 1"))
     tile = _stamped(root, {red: Reduce.of(coop=128, coop_transposed=True, output_lanes=8)})
     tile = replace(tile, place=Placement(free=(_M, n)), axes=(_M, n, _K))
     return factorize(tile, root=None)
 
 
 def test_block_uniform_demand_guards_the_collective_but_keeps_its_seeds_visible() -> None:
-    bound = _transposed_masked(BinaryExpr("&&", Var("m").lt(3), Var("n").lt(2)))
+    bound = _transposed_masked("m < 3 && n < 2")
     (guard,) = [stmt for stmt in bound.body if isinstance(stmt, Cond) and any(isinstance(s, TreeHalve) for s in _flat(stmt.body))]
     assert guard.cond == Var("m").lt(3)
     assert any(isinstance(stmt, Init) and stmt.name == "acc" for stmt in bound.body)
@@ -177,7 +171,7 @@ def test_block_uniform_demand_guards_the_collective_but_keeps_its_seeds_visible(
 
 
 def test_lane_varying_demand_does_not_guard_a_collective() -> None:
-    for predicate in (Var("n").lt(2), BinaryExpr("||", Var("m").lt(3), Var("n").lt(2))):
+    for predicate in ("n < 2", "m < 3 || n < 2"):
         bound = _transposed_masked(predicate)
         assert not any(isinstance(stmt, Cond) and any(isinstance(s, TreeHalve) for s in _flat(stmt.body)) for stmt in bound.body)
         assert any(isinstance(stmt, TreeHalve) for stmt in bound.body)
@@ -185,7 +179,7 @@ def test_lane_varying_demand_does_not_guard_a_collective() -> None:
 
 def test_disabling_coordinate_guards_keeps_the_collective_unconditional(monkeypatch) -> None:
     monkeypatch.setenv("EMMY_GUARD_REDUCTIONS", "0")
-    bound = _transposed_masked(Var("m").lt(3))
+    bound = _transposed_masked("m < 3")
     assert any(isinstance(stmt, TreeHalve) for stmt in bound.body)
     assert next(stmt for stmt in bound.body if isinstance(stmt, StridedLoop)).seed
 
@@ -195,7 +189,7 @@ def _two_member_root() -> tuple[Fold, Fold, Fold]:
     state and the shared provider — so the second member closes over the first."""
     provider = _provider()
     red_a = _reduce(_K, "acc", provider, "x")
-    mid = projection((red_a, provider), (Assign(name="mid", op="multiply", args=("acc", "scale")),))
+    mid = projection((red_a, provider), parse_body("mid = multiply(acc, scale)"))
     red_b = _reduce(_J, "acc2", mid, "y")
     return red_a, red_b, projection((red_b,), results=("acc2",))
 
@@ -234,11 +228,8 @@ def test_a_contraction_chain_member_binds_through_the_chain_arm() -> None:
     CONTRACTION member partitions its K exactly like a monoid fold — a contraction is a monoid with
     a ⊗ lift, and the reduce domain hands both the same catalog through one projection."""
     provider = _provider()
-    cone = projection(
-        (provider,),
-        (Load(name="a_e", input="A", index=(Var("m"), Var("k"))), Assign(name="a_scaled", op="multiply", args=("a_e", "scale"))),
-    )
-    con = contraction(_K, cone, (Load(name="b_e", input="B", index=(Var("k"),)), "acc"))
+    cone = projection((provider,), parse_body("a_e = load A[m, k]\na_scaled = multiply(a_e, scale)"))
+    con = contraction(_K, cone, (*parse_body("b_e = load B[k]"), "acc"))
     bound = factorize(_stamped(projection((con,), results=("acc",)), {con: Reduce.of(coop=64)}), root=None)
 
     flat = _flat(list(bound.body))
@@ -258,13 +249,12 @@ def test_a_partitioned_second_projection_root_is_the_bound_root() -> None:
     """
 
     def matvec(axis: Axis, source: str, weight: str, acc: str) -> Fold:
-        a = Load(name=f"{source}_e", input=source, index=(Var("m"), Var(axis.name)))
-        b = Load(name=f"{weight}_e", input=weight, index=(Var(axis.name),))
+        a, b = parse_body(f"{source}_e = load {source}[m, {axis.name}]\n{weight}_e = load {weight}[{axis.name}]")
         return contraction(axis, a, (b, acc))
 
     first = matvec(_K, "x", "w", "acc")
     second = matvec(_J, "y", "v", "acc2")
-    root = projection((first, second), (Assign(name="out", op="add", args=("acc", "acc2")),), results=("out",))
+    root = projection((first, second), parse_body("out = add(acc, acc2)"), results=("out",))
     bound = factorize(_stamped(root, {second: Reduce.of(coop=64)}, axes=(_K, _J)), root=None)
 
     strided = [stmt for stmt in _flat(bound.body) if isinstance(stmt, StridedLoop)]

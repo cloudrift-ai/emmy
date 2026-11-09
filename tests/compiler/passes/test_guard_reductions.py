@@ -5,40 +5,31 @@ from importlib import import_module
 import numpy as np
 import pytest
 
-from emmy.compiler.ir.axis import Axis
-from emmy.compiler.ir.expr import Literal, Var
+from emmy.compiler.ir.expression import Var
 from emmy.compiler.ir.kernel import KernelOp, Sync
 from emmy.compiler.ir.loop.runner import execute_loop_op_cpp
-from emmy.compiler.ir.stmt import Accum, Assign, Body, Load, Loop, Select, SelectBranch, StridedLoop, Write
+from emmy.compiler.ir.stmt import Body, Select, StridedLoop, parse_body
 
 guard = import_module("emmy.compiler.pipeline.passes.lowering.kernel.090_guard_reductions")
 
 
 def _body(*, extra_use=False, overlapping=False, strided=False) -> Body:
-    reduction = Loop(
-        Axis("k", 7),
-        (Load(name="value", input="x", index=(Var("i"), Var("k"))), Accum(name="sum", op="add", value="value")),
+    return parse_body(
+        f"""
+        for i in 0..6:
+            for k in {"1..7 step 2 until 6" if strided else "0..7"}:
+                value = load x[i, k]
+                sum <- add(sum, value)
+            other = load fallback[i]
+            neg = negative(sum)
+            selected = select:
+                neg when i < 2
+                {"other" if overlapping else "neg"} when i < 4
+                other when false
+            out[i] = selected
+            {"unmasked[i] = sum" if extra_use else ""}
+        """
     )
-    if strided:
-        reduction = StridedLoop(reduction.axis, Literal(1, "int"), Literal(2, "int"), reduction.body, end=Literal(6, "int"))
-    select = Select(
-        "selected",
-        (
-            SelectBranch("neg", Var("i").lt(2)),
-            SelectBranch("other" if overlapping else "neg", Var("i").lt(4)),
-            SelectBranch("other", Literal(False, "bool")),
-        ),
-    )
-    body = (
-        reduction,
-        Load(name="other", input="fallback", index=(Var("i"),)),
-        Assign(name="neg", op="negative", args=("sum",)),
-        select,
-        Write(output="out", index=(Var("i"),), value="selected"),
-    )
-    if extra_use:
-        body += (Write(output="unmasked", index=(Var("i"),), value="sum"),)
-    return Body((Loop(Axis("i", 6), body),))
 
 
 def _run(body: Body, *, extra_use=False) -> tuple:
@@ -75,7 +66,7 @@ def test_guard_does_not_skip_effects_or_use_an_unavailable_predicate(unsafe):
     outer = body[0]
     reduction, *tail = outer.body
     if unsafe == "store":
-        reduction = reduction.replace(body=(*reduction.body, Write(output="side", index=(Var("k"),), value="value")))
+        reduction = reduction.replace(body=(*reduction.body, *parse_body("side[k] = value")))
     elif unsafe == "sync":
         reduction = reduction.replace(body=(*reduction.body, Sync()))
     elif unsafe == "carried":

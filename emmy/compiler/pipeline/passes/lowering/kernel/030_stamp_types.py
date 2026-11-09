@@ -31,9 +31,9 @@ from dataclasses import dataclass, field, replace
 from emmy.compiler.dtype import F16, F32, DataType
 from emmy.compiler.dtype import get as dtype_get
 from emmy.compiler.graph import Node
-from emmy.compiler.ir.expr import Literal
+from emmy.compiler.ir.expression import Literal
 from emmy.compiler.ir.kernel import KernelOp
-from emmy.compiler.ir.stmt import Accum, Affine, Assign, Body, Init, Let, Load, Select, Stmt, Write, dtype_promote
+from emmy.compiler.ir.stmt import Accum, Affine, Assign, Body, Init, Let, Load, Select, Statement, Write, dtype_promote
 from emmy.compiler.pipeline import Pattern, RuleSkipped
 
 PATTERN = [Pattern("root", KernelOp)]
@@ -84,7 +84,7 @@ def _stamp_body(body: Body, ctx: _StampCtx) -> Body:
     return Body(_stamp_stmt(s, ctx) for s in body)
 
 
-def _stamp_stmt(s: Stmt, ctx: _StampCtx) -> Stmt:
+def _stamp_stmt(s: Statement, ctx: _StampCtx) -> Statement:
     if isinstance(s, Load):
         return _stamp_load(s, ctx)
     if isinstance(s, Assign):

@@ -4,7 +4,7 @@ every IR layer.
 Defined here rather than under any one IR package because all three IRs
 (Loop, Tile, Kernel) consume the same leaf vocabulary:
 
-- ``Stmt`` — abstract base for every body statement.
+- ``Statement`` — abstract base for every body statement.
 - Leaves: ``Load``, ``Assign``, ``Accum``, ``Init``, ``Write``,
   ``Select``, ``SelectBranch`` — pure compute primitives that read/write SSA
   names and external buffers (in :mod:`.leaves`).
@@ -13,10 +13,7 @@ Defined here rather than under any one IR package because all three IRs
 - Tree walks: :meth:`Body.iter` (pre-order recursive) and
   :meth:`Body.map` (flat 1:N transformer) — methods on
   :class:`Body` (in :mod:`.body`).
-- Body normalization: the public ``normalize_body`` driver and its internal ordered passes
-  (drop-size-one, canonicalize-axis-order, copy-alias-elim,
-  reduce-axis-unify, hoist, simplify, dedup-loads, canonical-statement-order, rename-ssa) in
-  :mod:`.normalize`.
+- Body normalization: the public ``normalize_body`` driver and its steps (in :mod:`.normalize`).
 
 ``__all__`` is the whole interface: the rest of the compiler imports these names and no submodule. Rendering a
 statement as C / CUDA source is not statement business and lives in :mod:`emmy.compiler.ir.render`.
@@ -29,14 +26,14 @@ Each IR layer adds its own scheduling-specific Stmts on top:
 - Kernel IR: ``Smem``, ``Sync``, ``TreeHalve``, plus the shared
   constructs.
 
-Loop-IR's ``LoopOp`` and validation stay in ``ir/loop/`` because they enforce Loop-IR-specific
-invariants. Body analysis, demand reconstruction, normalization and structural identity stay here.
+Loop-IR's ``LoopOp``, its validation and fusion's body assembly stay in ``ir/loop/``. Normalization and structural
+identity stay here, with the two kinds fusion assembles a region with (``Call``, ``Subroutine``).
 """
 
-from emmy.compiler.ir.stmt.analysis import BodyAnalysis, Scope
-from emmy.compiler.ir.stmt.base import Stmt, dtype_promote, pretty_body
+from emmy.compiler.ir.stmt.base import Statement, dtype_promote
 from emmy.compiler.ir.stmt.blocks import Cond, Loop, StridedLoop
 from emmy.compiler.ir.stmt.body import Body, exposed_defines, free_names
+from emmy.compiler.ir.stmt.declared import fields_of, role, statement
 from emmy.compiler.ir.stmt.identity import canonicalize_identity
 from emmy.compiler.ir.stmt.leaves import (
     Accum,
@@ -55,47 +52,48 @@ from emmy.compiler.ir.stmt.leaves import (
     binary,
     mask_select_predicate,
 )
-from emmy.compiler.ir.stmt.normalize import fold_affine, normalize_body, simplify_body
+from emmy.compiler.ir.stmt.normalize import fold_affine, normalize_body, prepare_body, simplify_body
 from emmy.compiler.ir.stmt.order import ordering_constraints
-from emmy.compiler.ir.stmt.passes import map_exprs, rename_free
-from emmy.compiler.ir.stmt.splicer import NotSupported, Program, Splicer, UnfusableStmt
+from emmy.compiler.ir.stmt.passes import rename_free
+from emmy.compiler.ir.stmt.subroutine import Call, Subroutine
+from emmy.compiler.ir.stmt.text import parse_body, pretty_body
 
 __all__ = [
     "Accum",
     "Affine",
     "Assign",
     "Body",
-    "BodyAnalysis",
+    "Call",
     "Carry",
     "Cond",
     "Init",
     "Let",
     "Load",
     "Loop",
-    "NotSupported",
     "OutputSpec",
     "Pre",
-    "Program",
-    "Scope",
     "Select",
     "SelectBranch",
-    "Splicer",
-    "Stmt",
+    "Statement",
     "StridedLoop",
-    "UnfusableStmt",
+    "Subroutine",
     "Write",
     "ZeroPrologue",
     "binary",
     "canonicalize_identity",
     "dtype_promote",
     "exposed_defines",
+    "fields_of",
     "fold_affine",
     "free_names",
-    "map_exprs",
+    "statement",
     "mask_select_predicate",
     "normalize_body",
     "ordering_constraints",
+    "prepare_body",
+    "parse_body",
     "pretty_body",
     "rename_free",
+    "role",
     "simplify_body",
 ]

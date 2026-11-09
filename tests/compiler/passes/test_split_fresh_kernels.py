@@ -29,10 +29,9 @@ from emmy.compiler.dtype import BF16, F16, F32
 from emmy.compiler.graph import Graph, Tensor
 from emmy.compiler.ir.axis import Axis
 from emmy.compiler.ir.base import InputOp
-from emmy.compiler.ir.expr import Literal, Var
 from emmy.compiler.ir.frontend.ir import MatmulOp
 from emmy.compiler.ir.pure.fold import Fold
-from emmy.compiler.ir.stmt import Load, Loop, Write
+from emmy.compiler.ir.stmt import Loop, parse_body
 from emmy.compiler.ir.tensor.ir import ElementwiseOp, ReduceOp
 from emmy.compiler.ir.tile import OutputSpec, Placement
 from emmy.compiler.ir.tile.ir import TileOp
@@ -138,11 +137,8 @@ def test_split_workspace_preserves_output_axis_order(monkeypatch, free_order) ->
     """A split must not turn a channel tile into a padded tile across four heads."""
     axes = {name: Axis(name, extent) for name, extent in (("head", 4), ("row", 64), ("channel", 256))}
     k = Axis("k", 512)
-    root = contraction(
-        k,
-        Load("a", "a", (Var("row"), Var("k"))),
-        (Load("b", "b", (Var("head"), Var("channel"), Var("k"))), "acc"),
-    )
+    a, b = parse_body("a = load a[row, k]\nb = load b[head, channel, k]")
+    root = contraction(k, a, (b, "acc"))
     graph = Graph()
     graph.add_node(InputOp(), [], Tensor("a", (64, 512), F16), node_id="a")
     graph.add_node(InputOp(), [], Tensor("b", (4, 256, 512), F16), node_id="b")
@@ -151,7 +147,7 @@ def test_split_workspace_preserves_output_axis_order(monkeypatch, free_order) ->
             op=root,
             place=Placement(free=tuple(axes[name] for name in free_order)),
             axes=(*axes.values(), k),
-            output_specs=(OutputSpec(Write("out", (Var("head"), Var("row"), Var("channel")), "acc")),),
+            output_specs=(OutputSpec(*parse_body("out[head, row, channel] = acc")),),
         ),
         ["a", "b"],
         Tensor("out", (4, 64, 256), F32),
@@ -385,8 +381,6 @@ def test_sweep_resident_head_fold_refuses_the_split(monkeypatch) -> None:
     from types import SimpleNamespace
 
     from emmy.compiler.ir.axis import Axis
-    from emmy.compiler.ir.expr import Var
-    from emmy.compiler.ir.stmt import Assign, Load, Write
     from emmy.compiler.ir.tile import OutputSpec, Placement
     from emmy.compiler.ir.tile.ops import head
     from emmy.compiler.pipeline.passes.tile._split import _projection_refusal, split_forks
@@ -398,22 +392,15 @@ def test_sweep_resident_head_fold_refuses_the_split(monkeypatch) -> None:
     # ``j`` a sweep at all, since a kernel whose every fold reads the sweep binds it to the grid
     # instead (``promoted_sweep``) and then has no sweep-resident fold to refuse.
     i, j, k, r = Axis("i", Dim(4)), Axis("j", Dim(8)), Axis("k", Dim(16)), Axis("r", Dim(4))
-    product = (Assign(name="acc__v", op="multiply", args=("v", "in0")),)
+    product = parse_body("acc__v = multiply(v, in0)")
     fold = reduction(k, (slab("v", "x", "k", "j"), slab("in0", "c", "j")), product, ("acc",))
-    stat = reduction(r, (slab("s", "s", "i", "r"),), (Assign(name="stat__v", op="copy", args=("s",)),), ("stat",))
-    wrapper = projection(
-        (fold, stat),
-        (
-            Load(name="in0", input="c", index=(Var("j"),)),
-            Assign(name="scaled", op="multiply", args=("acc", "in0")),
-            Assign(name="y", op="multiply", args=("scaled", "stat")),
-        ),
-    )
+    stat = reduction(r, (slab("s", "s", "i", "r"),), parse_body("stat__v = copy(s)"), ("stat",))
+    wrapper = projection((fold, stat), parse_body("in0 = load c[j]\nscaled = multiply(acc, in0)\ny = multiply(scaled, stat)"))
     tile = TileOp(
         op=wrapper,
         place=Placement(free=(i,)),
         axes=(i, j, k, r),
-        output_specs=(OutputSpec(write=Write(output="o", index=(Var("i"), Var("j")), value="y"), sweep=(j,)),),
+        output_specs=(OutputSpec(*parse_body("o[i, j] = y"), sweep=(j,)),),
     )
     node = head(tile.op)
     assert node is not None and node.axis is not None
@@ -468,7 +455,6 @@ def test_a_contraction_statistic_must_not_share_the_sliced_axis(stat_axis, monke
     """A cut piece can reuse one axis name for two lexical binders. Its statistic must stay whole."""
     from types import SimpleNamespace
 
-    from emmy.compiler.ir.stmt import Assign
     from emmy.compiler.pipeline.passes.tile._split import split_forks
     from tests.compiler.terms import projection, reduction, slab
 
@@ -476,12 +462,12 @@ def test_a_contraction_statistic_must_not_share_the_sliced_axis(stat_axis, monke
     stat = reduction(
         stat_axis,
         (slab("s", "x", "m", stat_axis),),
-        (Assign(name="stat__v", op="multiply", args=("s", "s")),),
+        parse_body("stat__v = multiply(s, s)"),
         ("stat",),
     )
     normalized = projection(
         (slab("xv", "x", "m", "k"), stat),
-        (Assign(name="scaled", op="divide", args=("xv", "stat")),),
+        parse_body("scaled = divide(xv, stat)"),
     )
     fold = contraction(k, normalized, (slab("wv", "w", "k", "n"), "acc"))
     assert fold.as_contraction() is not None
@@ -577,17 +563,15 @@ def test_a_causal_split_piece_masks_its_absolute_key_on_the_chunk_tier() -> None
     ],
 )
 def test_projection_distributes(operation, args, expected):
-    from emmy.compiler.ir.stmt import Assign, Write
     from emmy.compiler.pipeline.passes.tile._split import projection_distributes
 
-    body = [Assign("scaled", operation, args), Write("out", (), value="scaled")]
+    body = list(parse_body(f"scaled = {operation}({', '.join(args)})\nout[] = scaled"))
     assert projection_distributes(body, ("state",)) is expected
 
 
-@pytest.mark.parametrize("count,expected", [(Literal(1024.0), True), (Var("size"), True), (Var("state"), False)])
+@pytest.mark.parametrize("count,expected", [("1024.0", True), ("size", True), ("state", False)])
 def test_projection_distributes_with_a_state_independent_binding(count, expected):
-    from emmy.compiler.ir.stmt import Assign, Let, Write
     from emmy.compiler.pipeline.passes.tile._split import projection_distributes
 
-    body = [Let("count", count, dtype=F32), Assign("scaled", "divide", ("state", "count")), Write("out", (), "scaled")]
+    body = list(parse_body(f"let f32 count = {count}\nscaled = divide(state, count)\nout[] = scaled"))
     assert projection_distributes(body, ("state",)) is expected

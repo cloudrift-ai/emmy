@@ -28,11 +28,10 @@ from emmy.compiler.ir.atom import ATOM_REGISTRY, atom_for, atoms_for
 from emmy.compiler.ir.axis import Axis
 from emmy.compiler.ir.base import ConstantOp, InputOp
 from emmy.compiler.ir.elementwise import ElementwiseImpl
-from emmy.compiler.ir.expr import Literal, Var
 from emmy.compiler.ir.frontend.ir import LinearOp
 from emmy.compiler.ir.schedule import Placement, Tile, Work
 from emmy.compiler.ir.schedule.classic import refusals as sched
-from emmy.compiler.ir.stmt import Accum, Assign, Body, Load, Loop
+from emmy.compiler.ir.stmt import Assign, Load, parse_body
 from emmy.compiler.ir.tensor.ir import ElementwiseOp
 from emmy.compiler.ir.tile.ir import TileOp
 from emmy.compiler.pipeline.passes.frontend.decomposition._broadcast import broadcast_to
@@ -69,31 +68,22 @@ def _bind(loop, m: str = "m", n: str = "n"):
 def _w8a8_loop(*, a_scale=True, b_scale=True):
     """The fused W8A8 matmul loop body: ``acc += (sa * from_f8(a[m,k])) * (sb[n] * from_f8(w[k,n]))``
     — a storage-decode cone on EACH operand, each times a k-invariant scale factor."""
-    k = Axis("k", Dim(64))
-    stmts: list = [
-        Load(name="ab", input="a_bits", index=(Var("m"), Var("k")), dtype=F8E4M3),
-        Assign(name="adq", op="from_f8e4m3", args=("ab",)),
-        Load(name="wb", input="w_bits", index=(Var("k"), Var("n")), dtype=F8E4M3),
-        Assign(name="wdq", op="from_f8e4m3", args=("wb",)),
+    lines = [
+        "f8e4m3 ab = load a_bits[m, k]",
+        "adq = from_f8e4m3(ab)",
+        "f8e4m3 wb = load w_bits[k, n]",
+        "wdq = from_f8e4m3(wb)",
     ]
     a_val, b_val = "adq", "wdq"
     if a_scale:
-        stmts += [
-            Load(name="sa", input="act_scale", index=(Literal(0), Literal(0))),
-            Assign(name="asc", op="multiply", args=("sa", "adq")),
-        ]
+        lines += ["sa = load act_scale[0, 0]", "asc = multiply(sa, adq)"]
         a_val = "asc"
     if b_scale:
-        stmts += [
-            Load(name="sb", input="w_scale", index=(Literal(0), Var("n"))),
-            Assign(name="wsc", op="multiply", args=("sb", "wdq")),
-        ]
+        lines += ["sb = load w_scale[0, n]", "wsc = multiply(sb, wdq)"]
         b_val = "wsc"
-    stmts += [
-        Assign(name="v", op="multiply", args=(a_val, b_val)),
-        Accum(name="acc", value="v", op=ElementwiseImpl("add")),
-    ]
-    return Loop(axis=k, body=Body(tuple(stmts)))
+    lines += [f"v = multiply({a_val}, {b_val})", "acc <- add(acc, v)"]
+    [loop] = parse_body("\n".join(["for k in 0..64:", *(f"    {line}" for line in lines)]))
+    return loop
 
 
 def test_a_side_decode_scale_binds_raw_with_hoist():
@@ -201,8 +191,7 @@ def test_to_f8_op_registered_with_numpy_forward():
 
 def _f8_term(cap=(12, 0), *, a_dtype=F8E4M3, b_dtype=F8E4M3, k=512):
     ka = Axis("k", Dim(k))
-    a = Load(name="ab", input="a_bits", index=(Var("m"), Var("k")), dtype=a_dtype)
-    b = Load(name="wb", input="w_bits", index=(Var("k"), Var("n")), dtype=b_dtype)
+    a, b = parse_body(f"{a_dtype.name} ab = load a_bits[m, k]\n{b_dtype.name} wb = load w_bits[k, n]")
     node = contraction(ka, a, (b, "acc"))
     inputs = {"a_bits": Tensor("a_bits", (32, k), a_dtype), "w_bits": Tensor("w_bits", (k, 512), b_dtype)}
     free = (Axis("m", Dim(32)), Axis("n", Dim(512)))

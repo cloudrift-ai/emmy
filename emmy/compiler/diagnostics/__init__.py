@@ -4,7 +4,7 @@
 ``BankConflictResult`` shape:
 
 - :func:`.bank_conflicts.lane_bank_distribution` — pure oracle over Tile
-  IR. Symbolic ``Expr.eval`` per lane against declared smem layouts.
+  IR. Symbolic ``Expression.eval`` per lane against declared smem layouts.
   Fast, GPU-free; the per-lane bank distribution the Kernel-IR analyzer
   (``simulate_graph``) cross-checks against.
 - :func:`.bank_conflicts.simulate_graph` — Kernel-IR static analyzer.

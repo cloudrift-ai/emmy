@@ -15,7 +15,7 @@ from frozendict import frozendict
 from emmy.compiler.dtype import BF16, F16
 from emmy.compiler.ir.address import gmem_axis_step, split_addressable
 from emmy.compiler.ir.atom import ATOM_REGISTRY, AtomKind, atoms_for, wide_accumulate
-from emmy.compiler.ir.expr import Literal
+from emmy.compiler.ir.expression import Literal
 from emmy.compiler.ir.pure.fold import Fold, binding_extents
 from emmy.compiler.ir.schedule.catalog import (
     WARP_LANES,
@@ -29,7 +29,7 @@ from emmy.compiler.ir.schedule.choices import PlacedTile, Reduce, ResolvedStage,
 from emmy.compiler.ir.schedule.mask import cell_uniform, coordinate_aliases, select_masks
 from emmy.compiler.ir.schedule.packing import block_scaled_atom
 from emmy.compiler.ir.schedule.views import ContractionFacts, NodeId
-from emmy.compiler.ir.stmt import Affine, Assign, Body, Let, Load, Loop, Select, Stmt, Write, mask_select_predicate
+from emmy.compiler.ir.stmt import Affine, Assign, Body, Let, Load, Loop, Select, Statement, Write, mask_select_predicate
 
 from .schedule import NodeSchedule, binds_root, node_id_spelling, packed_works
 
@@ -664,6 +664,29 @@ def _wgmma_refusal(plan: Tile, stage: Stage | None = None) -> str | None:
     return None
 
 
+def _wgmma_slab_refusal(node: Fold, plan: Tile, inputs) -> str | None:
+    """Why a warp-group cell cannot read ``node``'s operands from the slabs its kernel root stages, or ``None``. The
+    root copies the query (the A operand) into a slab of 128-byte swizzle rows on cp.async, once
+    ahead of its chunk loop, so every copy must start on its own width (``staging.vector_copies_aligned``). The
+    descriptor takes the B slab's bytes as the atom's B dtype and converts nothing, while the root stages B at the
+    dtype it is stored at — an FP8 key-value cache's key as raw bytes (:func:`~emmy.compiler.ir.schedule.staging.chunk_slab_dtype`)."""
+    if not (plan.is_warp and plan.atom.is_wgmma) or len(node.operands) < 2:
+        return None
+    from emmy.compiler.ir.schedule import staging  # noqa: PLC0415
+
+    query = node.operands[0].as_slab()
+    nbytes = plan.atom.operand_dtype("a").nbytes
+    if query is not None and not staging.vector_copies_aligned(
+        ((query.load, node.as_contraction().axis, 128 // nbytes, nbytes, 1),), inputs
+    ):
+        return f"the query {query.load.input} is copied on cp.async, and a copy would start off its own width in gmem"
+    slab = node.operands[1].as_slab()
+    stored = inputs.get(slab.load.input) if slab is not None and inputs else None
+    if stored is None or stored.dtype == plan.atom.operand_dtype("b"):
+        return None
+    return f"wgmma reads {slab.load.input} through a descriptor, which cannot convert its stored {stored.dtype}"
+
+
 #: Registers a ``wgmma`` lane keeps live beside its accumulators: descriptors, addresses, the ring
 #: counters. ptxas asked for 154 at an m64n192 (96 accumulator registers) and refused the 128 a
 #: sixteen-warp CTA leaves each lane.
@@ -689,7 +712,7 @@ def _wgmma_register_refusal(node: Fold, plan: Tile) -> str | None:
     )
 
 
-def _adds(consumer: Stmt, name: str) -> bool:
+def _adds(consumer: Statement, name: str) -> bool:
     """Whether ``consumer`` adds the value ``name`` to something: a sum with it as a unit term."""
     if isinstance(consumer, Affine):
         return any(arg == name and coefficient == 1 for coefficient, arg in consumer.terms)

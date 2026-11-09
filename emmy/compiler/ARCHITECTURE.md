@@ -69,6 +69,18 @@ excluded (names, hints, ambient I/O) — the contract is "include only
 bits that affect codegen output or dataflow semantics" so the
 autotuning cache doesn't bust on cosmetic edits.
 
+A class takes part in the two stored forms by what it supplies, never by what it is. On the wire (`compiler/wire.py`)
+a class is registered with its tag, its two wire functions (`to_wire`, `from_wire`) and the parts the wire rewrite
+goes into (`wire_parts`); the `Wire` mixin registers a subclass as it is defined and supplies all of them for a
+dataclass from its fields. In an identity, `structural.form` renders a class by its own `structural_form` when it has
+one and a dataclass by its fields; both go through `record_form`, the one rule that keeps a trailing field left at
+its default out of every key. Neither form asks a class to be a dataclass or to inherit a Python base.
+
+Two classes are their text on the wire: an expression and a body of statements (`ir/ARCHITECTURE.md`). A statement
+is not a wire class at all, so a stored kernel reads as the listing a dump prints, and the wire rewrite does not go
+into a body: a caller that binds dimensions in one maps its expressions and its loop axes through the statement
+module's own functions.
+
 `Context` binds the effective precision decisions when a compile starts. Its key includes those decisions beside
 the target, compiler flags and cache mode, so an independent `FAST_EXP`, `F16_MMA_F32_ACC` or `FP8_MMA` override
 cannot read another regime's timings. Reconstructed contexts take the recorded pins explicitly; later environment
@@ -82,7 +94,7 @@ reader — the context key, the `H_fast_math` feature, the tune DB's regime, the
 | Path                  | Role                                    | See                          |
 |-----------------------|-----------------------------------------|------------------------------|
 | `graph.py`            | `Graph`, `Node`, `Tensor`, `Hints`      | —                            |
-| `dim.py`              | `Dim` — shape extent backed by an `Expr` (static or symbolic) | —    |
+| `dim.py`              | `Dim` — shape extent backed by an `Expression` (static or symbolic) | —    |
 | `ir/`                 | Op-type definitions per dialect         | `ir/ARCHITECTURE.md`         |
 | `trace/`              | PyTorch/HuggingFace → Graph IR          | `trace/ARCHITECTURE.md`      |
 | `pipeline/`           | Rewrite engine, passes, dump hooks      | `pipeline/ARCHITECTURE.md`   |
@@ -105,18 +117,18 @@ reader — the context key, the `H_fast_math` feature, the tune DB's regime, the
 ## Shared invariants
 
 - **Shape lives on the graph**, not on the op — `node.output.shape`. Each shape element is a `Dim`
-  (`compiler/dim.py`) that wraps an `Expr` from `ir/expr.py`: static (`Dim(32)` → `Literal(32)`), atomic
+  (`compiler/dim.py`) that wraps an `Expression` from `ir/expression.py`: static (`Dim(32)` → `Literal(32)`), atomic
   symbolic (`Dim("seq_len")` → `Var("seq_len")`), or composite from arithmetic (`Dim("S") * Dim(2)` →
   `BinaryExpr("*", Var("S"), Literal(2))`). `Dim` overloads `+`/`-`/`*`/`//`/`%` and eager-folds via
-  `Expr.simplify` — static math matches plain int math byte-for-byte; symbolic stays as `BinaryExpr`. It
+  `Expression.simplify` — static math matches plain int math byte-for-byte; symbolic stays as `BinaryExpr`. It
   also exposes `ceil_div` (`(self + (b-1))//b`): the single masked-tile grid-extent formula for both
   regimes — it folds to the integer ceil (`-(-E//b)`) for a static dim and builds the composite ceil-div
-  `Expr` for a symbolic one, so the partition planner's masked block-axis / masked-K sites need no
+  `Expression` for a symbolic one, so the partition planner's masked block-axis / masked-K sites need no
   static-vs-symbolic branch.
-  Read sites use `d.expr` (always works), `d.as_static()` (raises on symbolic), `d.as_atom_name()` (raises
+  Read sites use `d.expression` (always works), `d.as_static()` (raises on symbolic), `d.as_atom_name()` (raises
   unless `Var`-backed), or `d.value` (back-compat shim: int for `Literal`, str for `Var`, raises on
   composite). There is deliberately no `__int__` / `__index__`, so `int(d)` and `range(d)` fail loudly
-  on anything but a static-int `Dim`. Symbolic dims resolve at launch via `d.expr.eval(sym_env)` —
+  on anything but a static-int `Dim`. Symbolic dims resolve at launch via `d.expression.eval(sym_env)` —
   composite shapes (e.g. an `S * 2` concat output) resolve from input array axes without per-site
   branching. `Tensor.__post_init__` and `Axis.__post_init__` coerce bare `int` / `str` to `Dim`, so
   producer call sites need no change. An atomic symbolic `Dim` also carries a `hint` — its *expected*
@@ -130,9 +142,9 @@ reader — the context key, the `H_fast_math` feature, the tune DB's regime, the
 - **A symbolic free axis is tiled for its hint and emitted as a *masked* tile.** A symbolic M/N axis is treated as
   size `hint`, always-overhang: the block axis becomes a composite ceil-div over the symbolic extent
   (`(seq_len + bf - 1)//bf`), and a boundary `Cond(decoded_coord < seq_len)` wraps the body, so one cached kernel runs
-  at any runtime `seq_len` — the grid (`ir/cuda/ir.py` `GridDimSpec` accepts an `Expr` factor, resolved via
-  `Expr.eval` at launch) and the guard read the runtime value while the tile shape is tuned for the hint. The backend
-  benches a symbolic graph at the hint when no real inputs are supplied (`Graph.symbolic_hints` /
+  at any runtime `seq_len` — the grid (`ir/cuda/ir.py` `GridDimSpec` accepts an `Expression` factor, resolved via
+  `Expression.eval` at launch) and the guard read the runtime value while the tile shape is tuned for the hint. The
+  backend benches a symbolic graph at the hint when no real inputs are supplied (`Graph.symbolic_hints` /
   `backend/cuda/program.py` `_resolve_symbolic`), so a bench and a compile agree on a hint-sized variant. A symbolic
   reduce stream takes the cross-CTA split as masked slices (`pipeline/passes/ARCHITECTURE.md`); the masked
   tensor-core and cooperative tiers for symbolic axes are part of the in-flight tile-IR rebuild — see the tile IR

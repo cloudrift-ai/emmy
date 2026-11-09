@@ -747,6 +747,36 @@ def test_checkpoint_logits_and_completions(request, tmp_path, monkeypatch, name,
         asyncio.run(check())
 
 
+def test_a_step_attends_through_its_window_ranges_program(tmp_path, monkeypatch):
+    """Each range of windows attends through its own program, priced at its window: the step holds every layer's
+    attention once per range, each launch running only in its range, and a step gives the model's logits at a window
+    of either range. The boundary sits at the second window here, so a short context reaches both."""
+    from emmy.compiler.backend.cuda._bench_worker import _reference_precision
+    from emmy.serving.native.prepare import WINDOW
+
+    monkeypatch.setattr("emmy.serving.native.prepare.WINDOW_RANGES", (("", 1, 4096), ("-long", 8192, 131072)))
+    model = qwen3_5_model(max_position_embeddings=8192, layer_types=["full_attention"] * 2).half()
+    model.config._attn_implementation = "eager"
+    with gpu_lock():
+        with evidence_scope(strict=False):
+            root = export_model(model, tmp_path / "pack", context_length=8192, prefill_size=1)
+        program = _python_reference(root)
+        ranges = [launch.size_range for launch in program.plan.launches if launch.size_range]
+        assert sorted(set(ranges)) == [(WINDOW, 1, 8191), (WINDOW, 8192, 8192)] and len(ranges) % 2 == 0
+        prompt = [5, 9, 2, 7, 1, 3]
+        for position, token in enumerate(prompt):
+            program.set_sym_values({WINDOW: 4096})
+            short = _python_step(program, position, token)
+        # The same step again at the long range's window rewrites the same cache row and reads the same positions.
+        program.set_sym_values({WINDOW: 8192})
+        long = _python_step(program, len(prompt) - 1, prompt[-1])
+        model.cuda()
+        with torch.no_grad(), _reference_precision(True):
+            expected = model(torch.tensor([prompt], device="cuda")).logits[0, -1].float().cpu().numpy()
+    np.testing.assert_allclose(short, expected, rtol=1e-3, atol=1e-3)
+    np.testing.assert_allclose(long, expected, rtol=1e-3, atol=1e-3)
+
+
 @pytest.mark.parametrize("cache", ["float16", "float8_e4m3fn", "near_tie"])
 def test_attention_reads_only_the_written_cache_prefix(cache):
     """The compiled attention reads the cache to the window the runtime sets and masks every position past the current
@@ -779,7 +809,7 @@ def test_attention_reads_only_the_written_cache_prefix(cache):
 
     window = torch.export.Dim(WINDOW, min=1, max=context)
     examples = (torch.zeros(1, heads * d, dtype=torch.float16), torch.zeros(512, kv, d, dtype=dtype), torch.zeros(512, kv, d, dtype=dtype))
-    module = attend_module(heads, kv, d, 1)
+    module = attend_module(heads, kv, d, 1, grouped=True)  # the decode step's spelling
     shapes = {n: {0: window} if n in ("keys", "values") else {} for n in inspect.signature(module.forward).parameters}
     compiled = CudaBackend().compile(trace_module(module, (*examples, torch.zeros(1, dtype=torch.int64)), dynamic_shapes=shapes))
     with gpu_lock():

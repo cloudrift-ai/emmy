@@ -25,6 +25,7 @@ from emmy.compiler.backend.cpu.runtime import CpuKernel, NativeProgram, default_
 from emmy.compiler.context import Context
 from emmy.compiler.ir.base import ConstantOp, is_f4_pair_table
 from emmy.compiler.ir.loop import LoopOp
+from emmy.compiler.ir.stmt import Body, Load, Statement
 from emmy.compiler.ir.tile.ir import TileOp
 from emmy.compiler.pipeline import LOOP_PASSES, Pipeline
 from emmy.compiler.pipeline.search.pins import pinned_knobs
@@ -107,9 +108,11 @@ def _reads(term) -> set[str]:
         if id(value) in seen:
             continue
         seen.add(id(value))
-        if type(value).__name__ == "Load":
+        if isinstance(value, Load):
             found.add(value.input)
-        if isinstance(value, (tuple, list)):
+        if isinstance(value, Statement):  # a statement is walked through its protocol, the term around it by its fields
+            stack.extend(value.nested())
+        elif isinstance(value, (tuple, list, Body)):
             stack.extend(value)
         elif hasattr(value, "__dataclass_fields__"):
             stack.extend(getattr(value, name) for name in value.__dataclass_fields__)
@@ -153,7 +156,7 @@ def _static_or_name(dim) -> int | str:  # noqa: ANN001
     try:
         return dim.value
     except (TypeError, ValueError) as exc:
-        raise Unsupported(f"composite dim {dim.expr.pretty()}") from exc
+        raise Unsupported(f"composite dim {dim.expression}") from exc
 
 
 def _build(graph: Graph, node, schedule) -> CpuKernel:  # noqa: ANN001

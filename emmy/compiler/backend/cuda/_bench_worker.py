@@ -124,7 +124,7 @@ async def _run_job(req: dict) -> dict:
 
     - ``None`` → the emmy-only autotune bench (``benchmark_program``), no torch comparison.
     - ``("trace_args", {code/input/adapter/layer/seq_len/dynamic})`` → ``load_or_trace`` rebuilds the real
-      module here (HF model id or ``--code`` expr) → ``bench_full_model_real``.
+      module here (HF model id or ``--code`` expression) → ``bench_full_model_real``.
     - ``("frontend_graph", Graph | None)`` → ``bench_lowered_vs_torch`` (per-kernel reproducer).
 
     Rebuilding the torch side **here** (not pickling a live module) means a hung emmy kernel

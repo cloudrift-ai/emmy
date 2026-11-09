@@ -5,14 +5,12 @@ import pytest
 
 from emmy.compiler.backend.cuda.backend import CudaBackend
 from emmy.compiler.context import Context
-from emmy.compiler.dtype import F16
 from emmy.compiler.graph import Graph, Tensor
 from emmy.compiler.ir.axis import Axis
 from emmy.compiler.ir.base import InputOp
 from emmy.compiler.ir.cuda import CudaOp
-from emmy.compiler.ir.expr import BinaryExpr, Literal, Var
 from emmy.compiler.ir.loop import LoopOp
-from emmy.compiler.ir.stmt import Accum, Assign, Body, Load, Loop, Write
+from emmy.compiler.ir.stmt import parse_body
 from emmy.compiler.ir.tile import OutputSpec, Placement, TileOp
 from emmy.compiler.pipeline import CUDA_PASSES, LOWERING_PASSES, Pipeline
 from emmy.compiler.pipeline.search.pins import pinned_knobs
@@ -21,20 +19,19 @@ from tests.compiler.terms import contraction, projection, slab
 
 
 def _graph(dtype: str) -> Graph:
-    b, m, n, k = (Var(name) for name in ("b", "m", "n", "k"))
-    cell = (
-        Loop(
-            Axis("k", 64),
-            (
-                Load("av", "a", (b, m, k)),
-                Load("bv", "w", (b, m, k, n)),
-                Assign("product", "multiply", ("av", "bv")),
-                Accum("sum", "product", axes=("k",)),
-            ),
-        ),
-        Write("out", (b, m, n), "sum"),
+    body = parse_body(
+        """
+        for b in 0..2:
+            for m in 0..4:
+                for n in 0..32:
+                    for k in 0..64:
+                        av = load a[b, m, k]
+                        bv = load w[b, m, k, n]
+                        product = multiply(av, bv)
+                        sum <- add(sum, product) over k
+                    out[b, m, n] = sum
+        """
     )
-    body = Body((Loop(Axis("b", 2), (Loop(Axis("m", 4), (Loop(Axis("n", 32), cell),)),)),))
     graph = Graph()
     graph.add_node(InputOp(), [], Tensor("a", (2, 4, 64), dtype), node_id="a")
     graph.add_node(InputOp(), [], Tensor("w", (2, 4, 64, 32), dtype), node_id="w")
@@ -49,26 +46,24 @@ def _compiled(dtype: str, reduce: str = ""):
 
 
 def _rank_one_graph(dtype: str, k_size: int = 64, n_size: int = 32, *, reshape_output: bool = False) -> Graph:
-    n, k = Var("n"), Var("k")
-    index = (BinaryExpr("/", n, Literal(128, "int")), BinaryExpr("%", n, Literal(128, "int"))) if reshape_output else (n,)
+    index = "n / 128, n % 128" if reshape_output else "n"
     output_shape = (n_size // 128, 128) if reshape_output else (n_size,)
-    cell = (
-        Loop(
-            Axis("k", k_size),
-            (
-                Load("av", "a", (k,)),
-                Load("bv", "w", (k, n)),
-                Assign("product", "multiply", ("av", "bv")),
-                Accum("sum", "product", axes=("k",)),
-            ),
-        ),
-        Write("out", index, "sum"),
+    body = parse_body(
+        f"""
+        for n in 0..{n_size}:
+            for k in 0..{k_size}:
+                av = load a[k]
+                bv = load w[k, n]
+                product = multiply(av, bv)
+                sum <- add(sum, product) over k
+            out[{index}] = sum
+        """
     )
     graph = Graph()
     graph.add_node(InputOp(), [], Tensor("a", (k_size,), dtype), node_id="a")
     graph.add_node(InputOp(), [], Tensor("w", (k_size, n_size), dtype), node_id="w")
     graph.add_node(
-        LoopOp(body=Body((Loop(Axis("n", n_size), cell),)), name="k_rank_one_projection"),
+        LoopOp(body=body, name="k_rank_one_projection"),
         ["a", "w"],
         Tensor("out", output_shape, "f32"),
         node_id="out",
@@ -85,8 +80,8 @@ def _rank_one_compiled(dtype: str, k_size: int = 64, n_size: int = 32, *, reshap
 
 
 def _computed_grouped_graph(mirrored: bool) -> Graph:
-    vector = projection((slab("av", "a", "b", "k"),), (Assign("ac", "relu", ("av",), dtype=F16),), ("ac",))
-    matrix = projection((slab("wv", "w", "b", "g", "n", "k"),), (Assign("wc", "relu", ("wv",), dtype=F16),), ("wc",))
+    vector = projection((slab("av", "a", "b", "k"),), parse_body("f16 ac = relu(av)"), ("ac",))
+    matrix = projection((slab("wv", "w", "b", "g", "n", "k"),), parse_body("f16 wc = relu(wv)"), ("wc",))
     root = contraction("k", matrix if mirrored else vector, (vector if mirrored else matrix, "sum"))
     inputs = {"a": Tensor("a", (2, 32), "f16"), "w": Tensor("w", (2, 3, 128, 32), "f16")}
     output = Tensor("out", (2, 3, 128), "f32")
@@ -96,7 +91,7 @@ def _computed_grouped_graph(mirrored: bool) -> Graph:
         place=Placement(free=(Axis("b", 2), Axis("g", 3), Axis("n", 128))),
         inputs=inputs,
         outputs={"out": output},
-        output_specs=(OutputSpec(Write("out", (Var("b"), Var("g"), Var("n")), "sum")),),
+        output_specs=(OutputSpec(parse_body("out[b, g, n] = sum")[0]),),
     )
     assert tile.op is root
     graph = Graph()
@@ -199,23 +194,21 @@ def test_batched_matvec_matches_independent_reference(dtype: str, reduce: str) -
 
 
 def _row_scaled_fp8_graph() -> Graph:
-    m, n, k = (Var(name) for name in ("m", "n", "k"))
-    cell = (
-        Loop(
-            Axis("k", 32),
-            (
-                Load("scale_value", "scale", (m, k)),
-                Load("bits_value", "bits", (k, n)),
-                Assign("weight", "from_f8e4m3", ("bits_value",)),
-                Assign("scaled", "multiply", ("weight", "scale_value")),
-                Load("activation", "a", (m, k)),
-                Assign("product", "multiply", ("activation", "scaled")),
-                Accum("sum", "product", axes=("k",)),
-            ),
-        ),
-        Write("out", (m, n), "sum"),
+    body = parse_body(
+        """
+        for m in 0..2:
+            for n in 0..16:
+                for k in 0..32:
+                    scale_value = load scale[m, k]
+                    bits_value = load bits[k, n]
+                    weight = from_f8e4m3(bits_value)
+                    scaled = multiply(weight, scale_value)
+                    activation = load a[m, k]
+                    product = multiply(activation, scaled)
+                    sum <- add(sum, product) over k
+                out[m, n] = sum
+        """
     )
-    body = Body((Loop(Axis("m", 2), (Loop(Axis("n", 16), cell),)),))
     graph = Graph()
     graph.add_node(InputOp(), [], Tensor("a", (2, 32), "f16"), node_id="a")
     graph.add_node(InputOp(), [], Tensor("scale", (2, 32), "f16"), node_id="scale")
@@ -245,25 +238,19 @@ def test_row_scaled_fp8_b_matches_independent_reference() -> None:
 
 
 def _grouped_weight_graph() -> Graph:
-    from emmy.compiler.ir.expr import BinaryExpr, Literal
-
-    h, m, n, k = (Var(name) for name in ("h", "m", "n", "k"))
-    group = BinaryExpr("//", h, Literal(3, "int"))
-    row = BinaryExpr("*", m, Literal(6 * 16, "int"))
-    flat = BinaryExpr("+", BinaryExpr("+", row, BinaryExpr("*", group, Literal(16, "int"))), n)
-    cell = (
-        Loop(
-            Axis("k", 32),
-            (
-                Load("activation", "a", (h, m, k)),
-                Load("weight", "w", (k, flat)),
-                Assign("product", "multiply", ("activation", "weight")),
-                Accum("sum", "product", axes=("k",)),
-            ),
-        ),
-        Write("out", (h, m, n), "sum"),
+    body = parse_body(
+        """
+        for h in 0..6:
+            for m in 0..2:
+                for n in 0..16:
+                    for k in 0..32:
+                        activation = load a[h, m, k]
+                        weight = load w[k, m * 96 + h // 3 * 16 + n]
+                        product = multiply(activation, weight)
+                        sum <- add(sum, product) over k
+                    out[h, m, n] = sum
+        """
     )
-    body = Body((Loop(Axis("h", 6), (Loop(Axis("m", 2), (Loop(Axis("n", 16), cell),)),)),))
     graph = Graph()
     graph.add_node(InputOp(), [], Tensor("a", (6, 2, 32), "f16"), node_id="a")
     graph.add_node(InputOp(), [], Tensor("w", (32, 2 * 6 * 16), "f16"), node_id="w")

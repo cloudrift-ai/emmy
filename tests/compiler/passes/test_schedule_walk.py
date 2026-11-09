@@ -21,7 +21,6 @@ from emmy.compiler.dim import Dim
 from emmy.compiler.graph import Graph, Tensor
 from emmy.compiler.ir.axis import Axis
 from emmy.compiler.ir.base import InputOp
-from emmy.compiler.ir.expr import Var
 from emmy.compiler.ir.frontend.ir import MatmulOp, SdpaOp
 from emmy.compiler.ir.pure import Fold, Lambda
 from emmy.compiler.ir.schedule import Placement, Tile, Work
@@ -29,7 +28,7 @@ from emmy.compiler.ir.schedule.catalog import coop_reduce_moves
 from emmy.compiler.ir.schedule.classic import refusals as _classic
 from emmy.compiler.ir.schedule.classic import sites as _sites
 from emmy.compiler.ir.schedule.views import ContractionFacts
-from emmy.compiler.ir.stmt import Accum, Assign, Body, Load, Loop, Write
+from emmy.compiler.ir.stmt import parse_body
 from emmy.compiler.ir.tile import OutputSpec, Reduce, TileOp, ops
 from emmy.compiler.ir.tile.ops import Sched
 from emmy.compiler.pipeline.fork import iter_leaves
@@ -300,13 +299,21 @@ _K = Axis("k", 128)
 
 def _provider() -> Fold:
     """The provider chain a member closes over: a workspace row read and its rsqrt, ``v25``."""
-    return projection((), (Load(name="ws", input="cutbuf", index=(Var("m"),)), Assign(name="v25", op="rsqrt", args=("ws",))))
+    return projection(
+        (),
+        parse_body(
+            """
+            ws = load cutbuf[m]
+            v25 = rsqrt(ws)
+            """
+        ),
+    )
 
 
 def _chain_member(acc: str, axis: str, src: str, factor: Fold):
     """One reduce fold over ``factor``, the provider it closes over."""
-    scaled = Assign(name=f"{acc}__v", op="multiply", args=(f"{src}_e", factor.exposes[0]))
-    return reduction(axis, (slab(f"{src}_e", src, "m", axis), factor), (scaled,), (acc,))
+    scaled = parse_body(f"{acc}__v = multiply({src}_e, {factor.exposes[0]})")
+    return reduction(axis, (slab(f"{src}_e", src, "m", axis), factor), scaled, (acc,))
 
 
 def _chain_root(*members, results=("acc",)):
@@ -335,10 +342,15 @@ def _norm_linear_root() -> Fold:
     """A fused norm→linear: the contraction's A cone normalizes its row by a statistic the cone
     folds itself. A tier COULD fold this root whole — its one carried state is the bilinear
     channel — and the untiled tiers do not, which is the shape every pre-attention gate has."""
-    stat = reduction("k", (slab("x_e", "x", "m", "k"),), (Assign(name="acc_ms__v", op="multiply", args=("x_e", "x_e")),), ("acc_ms",))
+    stat = reduction("k", (slab("x_e", "x", "m", "k"),), parse_body("acc_ms__v = multiply(x_e, x_e)"), ("acc_ms",))
     cone = projection(
         operands=(slab("x_k", "x", "m", "k"), stat),
-        body=(Assign(name="rs", op="rsqrt", args=("acc_ms",)), Assign(name="xn", op="multiply", args=("x_k", "rs"))),
+        body=parse_body(
+            """
+            rs = rsqrt(acc_ms)
+            xn = multiply(x_k, rs)
+            """
+        ),
         results=("xn",),
     )
     return contraction("k", cone, (slab("w_e", "w", "n", "k"), "acc"))
@@ -415,15 +427,16 @@ def test_a_transposed_band_is_not_in_a_direct_chain_members_domain(unpinned) -> 
 def test_a_fold_nested_under_a_chain_member_offers_only_the_serial_reduce(unpinned) -> None:
     """A fold nested UNDER a direct member — not itself a member of the root's own body — binds
     through that member's schedule-blind body recursion, so no partition can ride under it."""
-    inner_body = Body(
-        (
-            Load(name="x_e", input="x", index=(Var("m"), Var("k"))),
-            Accum(name="acc_inner", value="x_e", op="add", axes=("k",)),
-        )
+    (outer_loop,) = parse_body(
+        """
+        for m in 0..4:
+            for k in 0..128:
+                x_e = load x[m, k]
+                acc_inner <- add(acc_inner, x_e) over k
+            acc_outer <- add(acc_outer, acc_inner) over m
+        """
     )
-    inner_loop = Loop(axis=Axis("k", 128), body=inner_body)
-    outer_body = Body((inner_loop, Accum(name="acc_outer", value="acc_inner", op="add", axes=("m",))))
-    outer = fold_from_loop(Loop(axis=Axis("m", 4), body=outer_body))
+    outer = fold_from_loop(outer_loop)
     inner = next(edge for edge in outer.operands if edge.axis is not None)
 
     root = _chain_root(outer, results=("acc_outer",))
@@ -438,9 +451,9 @@ def test_a_sweep_carrying_store_keeps_a_member_serial_only_when_the_member_reads
     catalog stands — the binder realizes exactly that (``_factorize``'s sweep gate reads the root's
     free axes)."""
     red = _chain_member("acc", "k", "x", _provider())
-    spec = OutputSpec(write=Write(output="o", index=(Var("m"), Var("j")), value="v"), sweep=(Axis("j", 4),))
+    spec = OutputSpec(write=parse_body("o[m, j] = v")[0], sweep=(Axis("j", 4),))
     assert _classic._reduction_domain(_tile_stub(_chain_root(red), (spec,)), red, Context.from_target(_CC)) == _member_catalog()
-    over = OutputSpec(write=Write(output="o", index=(Var("m"),), value="v"), sweep=(Axis("m", 4),))
+    over = OutputSpec(write=parse_body("o[m] = v")[0], sweep=(Axis("m", 4),))
     assert _classic._reduction_domain(_tile_stub(_chain_root(red), (over,)), red, Context.from_target(_CC)) == (Reduce(),)
 
 
@@ -451,7 +464,7 @@ def test_a_sweep_the_chain_root_reads_keeps_every_member_serial(unpinned) -> Non
     root = _norm_linear_root()
     statistic = next(member for member in ops.chain_members(root) if member.axis == "k")
     assert "n" in root.free_axes and "n" not in statistic.free_axes
-    swept = OutputSpec(write=Write(output="o", index=(Var("m"), Var("n")), value="acc"), sweep=(Axis("n", 4),))
+    swept = OutputSpec(write=parse_body("o[m, n] = acc")[0], sweep=(Axis("n", 4),))
     assert _classic._reduction_domain(_tile_stub(root, (swept,)), statistic, Context.from_target(_CC)) == (Reduce(),)
 
 
@@ -459,17 +472,18 @@ def test_a_streamed_store_keeps_chain_members_serial(unpinned) -> None:
     """A boundary store that streams into a SIBLING observed member's reduce loop keeps every
     OTHER direct member serial too: the trailing splice cannot reach a loop that already sits in an
     earlier segment. Also kernel-level, and the exact gate the factorizer's chain arm applies."""
-    scan_body = Body(
-        (
-            Load(name="y_e", input="y", index=(Var("m"), Var("j"))),
-            Accum(name="scan_acc", value="y_e", op="add", axes=("j",)),
-            Write(output="running", index=(Var("m"), Var("j")), value="scan_acc"),
-        )
+    (scan_loop,) = parse_body(
+        """
+        for j in 0..4:
+            y_e = load y[m, j]
+            scan_acc <- add(scan_acc, y_e) over j
+            running[m, j] = scan_acc
+        """
     )
-    scan, _trailing = scan_from_loop(Loop(axis=Axis("j", 4), body=scan_body))
+    scan, _trailing = scan_from_loop(scan_loop)
     assert scan.observe is not None
     red = _chain_member("acc", "k", "x", _provider())
-    spec = OutputSpec(write=Write(output="running", index=(Var("m"), Var("j")), value=scan.observe.results[0]), sweep=())
+    spec = OutputSpec(write=parse_body(f"running[m, j] = {scan.observe.results[0]}")[0], sweep=())
     assert _classic._reduction_domain(_tile_stub(_chain_root(scan, red), (spec,)), red, Context.from_target(_CC)) == (Reduce(),)
 
 
@@ -500,13 +514,18 @@ def test_a_contraction_chain_member_inherits_the_member_domain(unpinned) -> None
     delegation deleted."""
     cone = projection(
         (_provider(),),
-        (Load(name="a_e", input="A", index=(Var("m"), Var("k"))), Assign(name="a_scaled", op="multiply", args=("a_e", "v25"))),
+        parse_body(
+            """
+            a_e = load A[m, k]
+            a_scaled = multiply(a_e, v25)
+            """
+        ),
     )
-    con = contraction(_K, cone, (Load(name="b_e", input="B", index=(Var("k"),)), "acc"))
+    con = contraction(_K, cone, (slab("b_e", "B", "k"), "acc"))
     root = _chain_root(con)
     assert _per_cell_reductions(root) == set(_member_catalog())
 
-    swept = OutputSpec(write=Write(output="o", index=(Var("m"),), value="v"), sweep=(Axis("m", 4),))
+    swept = OutputSpec(write=parse_body("o[m] = v")[0], sweep=(Axis("m", 4),))
     assert _per_cell_reductions(root, (swept,)) == {Reduce()}
 
 
@@ -526,13 +545,13 @@ def test_a_scoped_partition_pin_on_a_serial_only_chain_site_enumerates_nothing(u
     The positive direction rides along: the DIRECT member's own site does enumerate under the same
     pin, so a green assertion here cannot come from the kernel being unschedulable outright."""
     provider = _provider()
-    scaled = Assign(name="acc_inner__v", op="multiply", args=("x_e", provider.exposes[0]))
-    inner = reduction("k", (slab("x_e", "x", "m", "j", "k"), provider), (scaled,), ("acc_inner",))
+    scaled = parse_body(f"acc_inner__v = multiply(x_e, {provider.exposes[0]})")
+    inner = reduction("k", (slab("x_e", "x", "m", "j", "k"), provider), scaled, ("acc_inner",))
     # The outer fold over ``j`` accumulates the inner's state as its per-step value — a lift whose
     # result is the bound operand param, as the total lift spells ``Accum(acc_outer, acc_inner)``.
     outer = Fold(
         operands=(inner,),
-        lift=Lambda.closing(("j", "acc_inner"), Body(()), ("acc_inner",)),
+        lift=Lambda.closing(("j", "acc_inner"), parse_body(""), ("acc_inner",)),
         init=(0.0,),
         base=Lambda.componentwise(("add",), ("acc_outer",)),
     )

@@ -484,37 +484,23 @@ _F16 = "f16"
 def _mma_matmul_graph(mode: str, M: int, N: int, K: int, out: str, trans: bool):
     """A hand-built ``C[i,j] = Σ_k A[i,k]·B[…]`` over f16 operands; ``trans`` makes B ``[j,k]``
     (Q@Kᵀ, K last). ``mode='dynamic'`` makes the M (row) axis symbolic (the dynamic-grid tier)."""
-    from emmy.compiler.ir.elementwise import ElementwiseImpl  # noqa: PLC0415
-    from emmy.compiler.ir.expr import Var  # noqa: PLC0415
-    from emmy.compiler.ir.loop import Axis, Load, Loop, LoopOp, Write  # noqa: PLC0415
-    from emmy.compiler.ir.stmt import Accum, Assign  # noqa: PLC0415
+    from emmy.compiler.ir.loop import LoopOp  # noqa: PLC0415
+    from emmy.compiler.ir.stmt import parse_body  # noqa: PLC0415
 
     Mg = dyn_M(mode, M)
-    i, j, k = Axis("i", Mg), Axis("j", N), Axis("k", K)
-    b_index = (Var("j"), Var("k")) if trans else (Var("k"), Var("j"))
     op = LoopOp(
-        body=(
-            Loop(
-                axis=i,
-                body=(
-                    Loop(
-                        axis=j,
-                        body=(
-                            Loop(
-                                axis=k,
-                                body=(
-                                    Load(name="a_v", input="a", index=(Var("i"), Var("k"))),
-                                    Load(name="b_v", input="b", index=b_index),
-                                    Assign(name="p", op=ElementwiseImpl("multiply"), args=("a_v", "b_v")),
-                                    Accum(name="acc", value="p"),
-                                ),
-                            ),
-                            Write(output="c", index=(Var("i"), Var("j")), value="acc"),
-                        ),
-                    ),
-                ),
-            ),
-        ),
+        body=parse_body(
+            f"""
+            for i in 0..{Mg}:
+                for j in 0..{N}:
+                    for k in 0..{K}:
+                        a_v = load a[i, k]
+                        b_v = load b[{"j, k" if trans else "k, j"}]
+                        p = multiply(a_v, b_v)
+                        acc <- add(acc, p)
+                    c[i, j] = acc
+            """
+        )
     )
     g = Graph()
     g.add_node(InputOp(), [], Tensor("a", (Mg, K), dtype=F16), node_id="a")
@@ -528,37 +514,23 @@ def _mma_symbolic_k_graph(M: int, N: int, *, trans: bool):
     """``C[i,j] = Σ_k A[i,k]·B[…]`` with the contraction (K) axis SYMBOLIC (``seq_len``) — ``trans``
     makes B ``[j,k]`` (transposed-B, K contiguous), so the warp mma zero-fills the masked-K tail
     through the (n,k)-swapped trans helper. M / N are static tile divisors (no M/N mask)."""
-    from emmy.compiler.ir.elementwise import ElementwiseImpl  # noqa: PLC0415
-    from emmy.compiler.ir.expr import Var  # noqa: PLC0415
-    from emmy.compiler.ir.loop import Axis, Load, Loop, LoopOp, Write  # noqa: PLC0415
-    from emmy.compiler.ir.stmt import Accum, Assign  # noqa: PLC0415
+    from emmy.compiler.ir.loop import LoopOp  # noqa: PLC0415
+    from emmy.compiler.ir.stmt import parse_body  # noqa: PLC0415
 
     Kg = Dim("seq_len")
-    i, j, k = Axis("i", M), Axis("j", N), Axis("k", Kg)
-    b_index = (Var("j"), Var("k")) if trans else (Var("k"), Var("j"))
     op = LoopOp(
-        body=(
-            Loop(
-                axis=i,
-                body=(
-                    Loop(
-                        axis=j,
-                        body=(
-                            Loop(
-                                axis=k,
-                                body=(
-                                    Load(name="a_v", input="a", index=(Var("i"), Var("k"))),
-                                    Load(name="b_v", input="b", index=b_index),
-                                    Assign(name="p", op=ElementwiseImpl("multiply"), args=("a_v", "b_v")),
-                                    Accum(name="acc", value="p"),
-                                ),
-                            ),
-                            Write(output="c", index=(Var("i"), Var("j")), value="acc"),
-                        ),
-                    ),
-                ),
-            ),
-        ),
+        body=parse_body(
+            f"""
+            for i in 0..{M}:
+                for j in 0..{N}:
+                    for k in 0..{Kg}:
+                        a_v = load a[i, k]
+                        b_v = load b[{"j, k" if trans else "k, j"}]
+                        p = multiply(a_v, b_v)
+                        acc <- add(acc, p)
+                    c[i, j] = acc
+            """
+        )
     )
     g = Graph()
     g.add_node(InputOp(), [], Tensor("a", (M, Kg), dtype=F16), node_id="a")
@@ -894,44 +866,27 @@ def _mma_epilogue_graph(mode: str, epilogue: str):
     g.add_node(InputOp(), [], Tensor("a", (Mg, K), dtype=F16), node_id="a")
     g.add_node(InputOp(), [], Tensor("b", (K, N), dtype=F16), node_id="b")
     if epilogue == "causal":
-        from emmy.compiler.ir.elementwise import ElementwiseImpl  # noqa: PLC0415
-        from emmy.compiler.ir.expr import BinaryExpr, Literal, Var  # noqa: PLC0415
-        from emmy.compiler.ir.loop import Axis, Load, Loop, LoopOp, Write  # noqa: PLC0415
-        from emmy.compiler.ir.stmt import Accum, Assign, Select, SelectBranch  # noqa: PLC0415
+        from emmy.compiler.ir.loop import LoopOp  # noqa: PLC0415
+        from emmy.compiler.ir.stmt import parse_body  # noqa: PLC0415
 
-        i, j, k = Axis("i", Mg), Axis("j", N), Axis("k", K)
         op = LoopOp(
-            body=(
-                Loop(
-                    axis=i,
-                    body=(
-                        Loop(
-                            axis=j,
-                            body=(
-                                Load(name="mz", input="mz", index=(Literal(0, "int"),)),
-                                Load(name="mf", input="mf", index=(Literal(0, "int"),)),
-                                Loop(
-                                    axis=k,
-                                    body=(
-                                        Load(name="a_v", input="a", index=(Var("i"), Var("k"))),
-                                        Load(name="b_v", input="b", index=(Var("k"), Var("j"))),
-                                        Assign(name="p", op=ElementwiseImpl("multiply"), args=("a_v", "b_v")),
-                                        Accum(name="acc", value="p"),
-                                    ),
-                                ),
-                                Select(
-                                    name="out",
-                                    branches=(
-                                        SelectBranch(value="acc", select=BinaryExpr("<=", Var("j"), Var("i"))),
-                                        SelectBranch(value="mf", select=BinaryExpr(">", Var("j"), Var("i"))),
-                                    ),
-                                ),
-                                Write(output="c", index=(Var("i"), Var("j")), value="out"),
-                            ),
-                        ),
-                    ),
-                ),
-            ),
+            body=parse_body(
+                f"""
+                for i in 0..{Mg}:
+                    for j in 0..{N}:
+                        mz = load mz[0]
+                        mf = load mf[0]
+                        for k in 0..{K}:
+                            a_v = load a[i, k]
+                            b_v = load b[k, j]
+                            p = multiply(a_v, b_v)
+                            acc <- add(acc, p)
+                        out = select:
+                            acc when j <= i
+                            mf when j > i
+                        c[i, j] = out
+                """
+            )
         )
         g.add_node(InputOp(), [], Tensor("mz", (1,), dtype=F32), node_id="mz")
         g.add_node(InputOp(), [], Tensor("mf", (1,), dtype=F32), node_id="mf")
@@ -1702,7 +1657,7 @@ def test_regstore_rewrite_preserves_atomic():
     ``atomic`` there silently degraded a rewritten (f16acc array-fragment rolled) atomic split-K
     store to racing plain assigns: the partitions clobber instead of accumulate, numerically wrong
     with no loud failure (found on the gemma-4 mlp_down.m32.lin g4a pinned compile)."""
-    from emmy.compiler.ir.expr import Var
+    from emmy.compiler.ir.expression import Var
     from emmy.compiler.ir.kernel.ir import RegStore
     from emmy.compiler.ir.sigma import Sigma
 
@@ -1872,6 +1827,72 @@ def test_transposed_a_tma_pin_is_refused(monkeypatch) -> None:
 
     with pytest.raises(ValueError, match="does not resolve for this contraction"):
         _run_tile_pass(_imap_graph("transpose_a")[0])
+
+
+# --- an operand off the copy grid -------------------------------------------------------------------------------------
+# A cp.async or blocking vector copy moves 16 B (narrower only when the slab row is) from where the operand's index puts
+# it, so a weight sliced one element into a padded row would read from a 2 B offset, which PTX leaves undefined. The
+# stage resolvers prove the whole address of every copy's start on its own width (``copies_aligned``) and refuse a pin
+# that would misalign it.
+
+_WARP_COPY = {"TILE": "mma_m16n8k16_bf16_f32/f2x4/k4", "WORK": "w2x2", "STAGE": "d2/smem-async", "REDUCE": ""}
+_WARP_FILL = {**_WARP_COPY, "STAGE": "d1/smem", "PLACE": "fuse"}
+_SCALAR_COPY = {"TILE": "f2x4", "WORK": "t16x8", "STAGE": "d2/smem-async", "REDUCE": ""}
+_SCALAR_SYNC = {**_SCALAR_COPY, "STAGE": "d1/smem"}
+
+
+@pytest.mark.parametrize(
+    ("x", "w", "expression", "dtype", "pin", "staged"),
+    [
+        ((64, 256), (256, 272), "x @ w[:, 1:257].t()", "bfloat16", _WARP_COPY, False),
+        ((64, 256), (256, 272), "x @ w[:, 8:264].t()", "bfloat16", _WARP_COPY, True),
+        ((64, 256), (256, 260), "x @ w[:, :256].t()", "bfloat16", _WARP_COPY, False),
+        ((64, 272), (256, 256), "x[:, 1:257] @ w.t()", "bfloat16", _WARP_COPY, False),
+        ((64, 16, 17), (256, 256), "x[:, :, :16].reshape(64, 256) @ w", "bfloat16", _WARP_COPY, False),
+        ((1024, 15), (256, 256), "x.reshape(60, 256) @ w", "bfloat16", _WARP_COPY, True),
+        ((64, 256), (256, 272), "(x * 2.0) @ w[:, 1:257].t()", "bfloat16", _WARP_FILL, False),
+        ((64, 256), (256, 272), "(x * 2.0) @ w[:, 8:264].t()", "bfloat16", _WARP_FILL, True),
+        ((64, 256), (256, 272), "x @ w[:, 2:258].t()", "float32", _SCALAR_COPY, False),
+        ((64, 256), (256, 272), "x @ w[:, 4:260].t()", "float32", _SCALAR_COPY, True),
+        ((64, 256), (256, 272), "x @ w[:, 2:258].t()", "float32", _SCALAR_SYNC, False),
+        ((64, 256), (256, 272), "x @ w[:, 4:260].t()", "float32", _SCALAR_SYNC, True),
+    ],
+    ids=[
+        "warp-2B-offset",
+        "warp-16B-offset",
+        "warp-520B-row-pitch",
+        "warp-sliced-a",
+        "warp-slice-reshaped-flat",
+        "warp-dense-reshape-across-rows",
+        "fill-2B-offset",
+        "fill-16B-offset",
+        "scalar-8B-offset",
+        "scalar-16B-offset",
+        "scalar-sync-8B-offset",
+        "scalar-sync-16B-offset",
+    ],
+)
+def test_an_operand_stages_only_on_the_copy_grid(x, w, expression, dtype, pin, staged) -> None:
+    """GPU-free. A copy runs along K (or N for a canonical B) from where the operand's index puts it, so the pin stages
+    only when every copy's whole address stays on the copy's own grid: a slice's offset, a row pitch, or K split
+    across rows at a pitch off the grid each refuse it, and a dense reshape whose rows recombine on the grid stages."""
+    from emmy.commands.trace import graph_from_code  # noqa: PLC0415
+    from emmy.compiler.ir.cuda import CudaOp  # noqa: PLC0415
+    from emmy.compiler.pipeline.search.pins import pinned_knobs  # noqa: PLC0415
+
+    code = f"import torch\nx = torch.randn{x}.to(torch.{dtype})\nw = torch.randn{w}.to(torch.{dtype})\n{expression}"
+    graph = graph_from_code(code)[0]
+
+    def compile_():
+        with pinned_knobs(pin):
+            return Pipeline.build(CUDA_PASSES).run(graph, ctx=Context.from_target((12, 0)))
+
+    if not staged:
+        with pytest.raises(ValueError, match="does not resolve"):
+            compile_()
+        return
+    (source,) = [node.op.kernel_source for node in compile_().nodes.values() if isinstance(node.op, CudaOp)]
+    assert "_smem[" in source
 
 
 @requires_cuda

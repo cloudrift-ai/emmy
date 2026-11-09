@@ -30,7 +30,7 @@ from emmy.compiler.dim import Dim, paged_declarations
 from emmy.compiler.dtype import DataType
 from emmy.compiler.ir.cuda import TmaDescMeta
 from emmy.compiler.ir.cuda.ir import resolve_dim
-from emmy.compiler.ir.expr import BinaryExpr, Expr, Literal, Var
+from emmy.compiler.ir.expression import BinaryExpr, Expression, Literal, Var
 
 if TYPE_CHECKING:
     from emmy.compiler.graph import Graph
@@ -63,7 +63,7 @@ PLAN_FORMAT_PAGED = 4
 PLAN_FORMAT_CPU = 5
 
 # Binary ops the on-disk expression grammar admits. Everything a ``Dim`` shape, a ceil-div grid
-# factor, or a runtime-constant expr can contain; anything else fails serialization loudly.
+# factor, or a runtime-constant expression can contain; anything else fails serialization loudly.
 _EXPR_OPS = ("+", "-", "*", "/", "//", "%")
 
 
@@ -85,14 +85,14 @@ class BufferSpec:
         return any(not d.is_static for d in self.shape)
 
     def resolve_shape(self, sym_values: dict[str, int]) -> tuple[int, ...]:
-        return tuple(int(d.expr.eval(sym_values)) for d in self.shape)
+        return tuple(int(d.expression.eval(sym_values)) for d in self.shape)
 
 
 @dataclass
 class LaunchSpec:
     """One kernel launch site, in program order. ``grid`` / ``block`` are per-dim factor tuples
     whose entries are ``int`` (static), ``str`` (symbolic axis name resolved from sym_values),
-    or ``Expr`` (composite extent, e.g. ceil-div) — see ``ir.cuda.resolve_dim``."""
+    or ``Expression`` (composite extent, e.g. ceil-div) — see ``ir.cuda.resolve_dim``."""
 
     node_id: str
     kernel_name: str
@@ -114,6 +114,9 @@ class LaunchSpec:
     # ``[lo, hi)`` of an ``extent``-long axis, and a ``"reduce"`` launch combines per-thread
     # partials in its kernel's ``finish``. ``None`` on every CUDA launch.
     cpu: dict | None = None
+    # ``(symbol, first, last)``: the launch runs only while that symbolic size lies in ``[first, last]``, as each of
+    # native's attention programs runs in its range of windows. ``None`` runs at every size.
+    size_range: tuple[str, int, int] | None = None
 
 
 @dataclass
@@ -180,7 +183,7 @@ class ExecutionPlan:
     outputs: list[str]
     buffers: list[BufferSpec]
     constants: dict[str, float]
-    runtime_constants: dict[str, Expr]
+    runtime_constants: dict[str, Expression]
     launches: list[LaunchSpec]
     kernels: dict[str, KernelSpec]
     weights: dict[str, WeightSpec] = field(default_factory=dict)
@@ -410,7 +413,7 @@ def weight_specs(graph: Graph) -> dict[str, WeightSpec]:
 
 def _normalize_spec(spec) -> tuple:
     """A grid/block dim spec as a factor tuple: legacy bare-int specs become one-factor tuples,
-    and scalar ``Expr`` factors collapse to their plain form (``Literal`` int → ``int``,
+    and scalar ``Expression`` factors collapse to their plain form (``Literal`` int → ``int``,
     ``Var`` → ``str``) — identical at resolve time, and it keeps the plan's JSON round-trip
     exact (the grammar reserves the list form for genuinely composite factors)."""
     if isinstance(spec, int):
@@ -440,7 +443,7 @@ def _encode_index_map(op) -> tuple | None:
     Detection is by CONSTRUCTION, not by sampling: each output axis' coord expression must be
     affine in its OWN placeholder alone, which is checked by substituting the other axes' vars
     away and requiring the residual to evaluate to ``a·i + b`` at every i in range."""
-    from emmy.compiler.ir.expr import PLACEHOLDER_PREFIX  # noqa: PLC0415
+    from emmy.compiler.ir.expression import PLACEHOLDER_PREFIX  # noqa: PLC0415
 
     if len(op.sources) != 1 or op.sources[0].select is not None:
         return None
@@ -558,8 +561,8 @@ def apply_weight_loads(source: np.ndarray, load_ops: tuple[tuple, ...]) -> np.nd
 # ---------------------------------------------------------------------------
 
 
-def _expr_to_json(e):
-    """``Expr`` → JSON prefix form: ``int``/``float`` literal, ``"name"`` var, ``[op, l, r]``."""
+def _expression_to_json(e):
+    """``Expression`` → JSON prefix form: ``int``/``float`` literal, ``"name"`` var, ``[op, l, r]``."""
     if isinstance(e, Literal):
         if isinstance(e.value, int) and e.dtype == "int":
             return int(e.value)
@@ -567,11 +570,11 @@ def _expr_to_json(e):
     if isinstance(e, Var):
         return e.name
     if isinstance(e, BinaryExpr) and e.op in _EXPR_OPS:
-        return [e.op, _expr_to_json(e.left), _expr_to_json(e.right)]
+        return [e.op, _expression_to_json(e.left), _expression_to_json(e.right)]
     raise ValueError(f"plan: expression {e!r} not expressible in the plan grammar (ops {_EXPR_OPS})")
 
 
-def _expr_from_json(v) -> Expr:
+def _expression_from_json(v) -> Expression:
     if isinstance(v, bool):
         raise ValueError(f"plan: invalid expression literal {v!r}")
     if isinstance(v, int):
@@ -581,21 +584,21 @@ def _expr_from_json(v) -> Expr:
     if isinstance(v, str):
         return Var(v)
     if isinstance(v, list) and len(v) == 3 and v[0] in _EXPR_OPS:
-        return BinaryExpr(v[0], _expr_from_json(v[1]), _expr_from_json(v[2]))
+        return BinaryExpr(v[0], _expression_from_json(v[1]), _expression_from_json(v[2]))
     raise ValueError(f"plan: malformed expression {v!r}")
 
 
 def _factor_to_json(f):
-    """Grid/block factor → JSON: ``int`` and ``str`` (symbolic name) pass through, ``Expr``
+    """Grid/block factor → JSON: ``int`` and ``str`` (symbolic name) pass through, ``Expression``
     becomes the grammar's list form."""
     if isinstance(f, (int, str)):
         return f
-    return [*_expr_to_json_as_list(f)]
+    return [*_expression_to_json_as_list(f)]
 
 
-def _expr_to_json_as_list(e) -> list:
-    v = _expr_to_json(e)
-    # A factor that is an Expr must serialize as a list so deserialization can tell it apart
+def _expression_to_json_as_list(e) -> list:
+    v = _expression_to_json(e)
+    # A factor that is an Expression must serialize as a list so deserialization can tell it apart
     # from the plain int/str factor forms (a bare Var/Literal factor never reaches here — the
     # lowering emits those as str/int directly).
     if not isinstance(v, list):
@@ -606,15 +609,15 @@ def _expr_to_json_as_list(e) -> list:
 def _factor_from_json(v):
     if isinstance(v, (int, str)):
         return v
-    return _expr_from_json(v)
+    return _expression_from_json(v)
 
 
 def _dim_to_json(d: Dim):
-    return _expr_to_json(d.expr)
+    return _expression_to_json(d.expression)
 
 
 def _dim_from_json(v) -> Dim:
-    return Dim(_expr_from_json(v))
+    return Dim(_expression_from_json(v))
 
 
 # ---------------------------------------------------------------------------
@@ -659,7 +662,7 @@ def plan_to_dict(plan: ExecutionPlan) -> dict:
             for b in plan.buffers
         ],
         "constants": {name: _constant_to_json(value) for name, value in plan.constants.items()},
-        "runtime_constants": {nid: _expr_to_json(e) for nid, e in plan.runtime_constants.items()},
+        "runtime_constants": {nid: _expression_to_json(e) for nid, e in plan.runtime_constants.items()},
         "launches": [
             {
                 "node_id": lc.node_id,
@@ -673,6 +676,7 @@ def plan_to_dict(plan: ExecutionPlan) -> dict:
                 **({"writes": list(lc.writes)} if lc.writes else {}),
                 "runtime_args": list(lc.runtime_args),
                 **({"serial": [[name, extent] for name, extent in lc.serial]} if lc.serial else {}),
+                **({"size_range": list(lc.size_range)} if lc.size_range else {}),
                 **(
                     {"cpu": dict(lc.cpu)}
                     if lc.cpu is not None
@@ -748,7 +752,7 @@ def plan_from_dict(d: dict) -> ExecutionPlan:
             for b in d["buffers"]
         ],
         constants={nid: float(v) for nid, v in d.get("constants", {}).items()},
-        runtime_constants={nid: _expr_from_json(v) for nid, v in d.get("runtime_constants", {}).items()},
+        runtime_constants={nid: _expression_from_json(v) for nid, v in d.get("runtime_constants", {}).items()},
         launches=[
             LaunchSpec(
                 node_id=lc["node_id"],
@@ -767,6 +771,7 @@ def plan_from_dict(d: dict) -> ExecutionPlan:
                 runtime_args=tuple(lc.get("runtime_args", ())),
                 serial=tuple((name, int(extent)) for name, extent in lc.get("serial", ())),
                 cpu=lc.get("cpu"),
+                size_range=tuple(lc["size_range"]) if "size_range" in lc else None,
             )
             for lc in d["launches"]
         ],

@@ -1,7 +1,8 @@
-"""Shared demand reconstruction for body fusion and compact subroutine expansion.
+"""Body assembly for fusion: demand reconstruction over statement analyses and splice edges.
 
-The engine consumes statement analyses and splice edges, never graph nodes or LoopOps. The Loop
-IR adapter chooses graph regions and wraps the resulting Body in a validated LoopOp.
+It keeps each source reduction as a call to a shared subroutine while it builds a region, then expands the calls by
+the same reconstruction, so no body leaves with one. It consumes analyses and edges, never graph nodes or LoopOps:
+the splicer chooses graph regions and wraps the resulting Body in a validated LoopOp.
 """
 
 from __future__ import annotations
@@ -14,15 +15,25 @@ from functools import cached_property
 from graphlib import TopologicalSorter
 
 from emmy.compiler.ir.axis import Axis
-from emmy.compiler.ir.expr import Expr, Interval, Literal, SimplifyCtx, Var
+from emmy.compiler.ir.expression import Expression, Interval, Literal, SimplifyCtx, Var
+from emmy.compiler.ir.loop.analysis import BodyAnalysis, Scope
+from emmy.compiler.ir.loop.builder import BodyBuilder
 from emmy.compiler.ir.sigma import Sigma
-from emmy.compiler.ir.stmt.analysis import BodyAnalysis, Scope
-from emmy.compiler.ir.stmt.base import Stmt
-from emmy.compiler.ir.stmt.blocks import Cond
-from emmy.compiler.ir.stmt.body import Body
-from emmy.compiler.ir.stmt.builder import BodyBuilder
-from emmy.compiler.ir.stmt.leaves import Accum, Affine, Assign, Let, Load, Select, Write
-from emmy.compiler.ir.stmt.subroutine import Call, Subroutine, definitions, pretty_subroutines, reduction_depths
+from emmy.compiler.ir.stmt import (
+    Accum,
+    Affine,
+    Assign,
+    Body,
+    Call,
+    Cond,
+    Let,
+    Load,
+    Select,
+    Statement,
+    Subroutine,
+    Write,
+    prepare_body,
+)
 from emmy.utils import cached_method
 
 logger = logging.getLogger(__name__)
@@ -74,8 +85,49 @@ class _Demand:
     bound_as: str
 
 
+def definitions(body: Body) -> tuple[Subroutine, ...]:
+    """Definitions in dependency order, each visited once regardless of the number of calls."""
+    seen: set[int] = set()
+    out: list[Subroutine] = []
+
+    def visit(stmts: Body) -> None:
+        for stmt in stmts.iter():
+            if isinstance(stmt, Call) and id(stmt.target) not in seen:
+                seen.add(id(stmt.target))
+                visit(stmt.target.body)
+                out.append(stmt.target)
+
+    visit(body)
+    return tuple(out)
+
+
+def reduction_depths(body: Body, inputs: dict[str, int], calls: dict[int, int]) -> dict[str, int]:
+    """Reduction depth including the reductions held in shared definitions, each one's depth kept in ``calls``."""
+
+    def called(target: Subroutine) -> int:
+        depth = calls.get(id(target))
+        if depth is None:
+            depth = calls[id(target)] = reduction_depths(target.body, {}, calls)[target.result]
+        return depth
+
+    memo = body.fold(
+        lambda stmt, children, _: (
+            max(
+                (*(depth for depth in children if depth is not None), *(inputs.get(name, 0) for name in stmt.external_reads())),
+                default=0,
+            )
+            + (called(stmt.target) if isinstance(stmt, Call) else isinstance(stmt, Accum))
+        )
+    )
+    return {name: memo[id(stmt)] for name, stmt in body.definitions.items()}
+
+
 def expand_calls(body: Body) -> Body:
-    """Expand compact SSA bodies through shared demands and reduction-axis unification."""
+    """``body`` with every subroutine call expanded, through shared demands and reduction-axis unification.
+    The calls are simplified and placed first, so equal calls are one demand."""
+    if not definitions(body):
+        return body
+    body = prepare_body(body)
     targets = definitions(body)
     if not targets:
         return body
@@ -108,7 +160,7 @@ class Program:
     def used_names(self) -> set[str]:
         return set().union(
             *(
-                set(meta.body.ssa_defs | meta.body._free_ssa | meta.body.axis_names)
+                set(meta.body.definitions.keys() | meta.body.ssa_uses | meta.body.axis_names)
                 | {axis.name for scope in meta.scopes.values() for axis in scope.enclosing}
                 for meta in self.loops.values()
             )
@@ -120,13 +172,14 @@ class Program:
         for (origin, source), target in self.splice_edges.items():
             dependencies[origin][source] = target
         depths: dict[str, dict[str, int]] = {}
+        calls: dict[int, int] = {}
         order = TopologicalSorter({tag: {origin for origin, _ in edges.values()} for tag, edges in dependencies.items()})
         for tag in order.static_order():
             inputs = {
                 source: max((depths[origin][w.value] for w, _ in self.loops[origin].writes if w.output == output), default=0)
                 for source, (origin, output) in dependencies[tag].items()
             }
-            depths[tag] = reduction_depths(self.loops[tag].body, inputs)
+            depths[tag] = reduction_depths(self.loops[tag].body, inputs, calls)
         return depths
 
     @cached_property
@@ -141,17 +194,15 @@ class Program:
         builder = Splicer(self, roots=(), outline=(origin, name))
         result = builder._ensure_dep(name, origin, Sigma.IDENTITY, scope)
         builder.resolve()
-        from emmy.compiler.ir.stmt.normalize import prepare_body
-
         # A temporary output keeps the returned value live while aliases and unit reductions
         # simplify. It is removed before forming the read-only subroutine.
-        body = prepare_body(Body((*builder.finish(), Write(output="_return", index=(), value=result))))
+        body = prepare_body(Body((*builder.finish(), Write(output="_return", index=(), values=(result,)))))
         returned = next(stmt for stmt in body if isinstance(stmt, Write))
         return Subroutine(f"{origin}_{name}", params, Body(stmt for stmt in body if stmt is not returned), returned.value)
 
 
 class Splicer(BodyBuilder):
-    """Build a maximal region, keeping reduction cones as shared calls until final CSE.
+    """Build a maximal region, keeping reduction cones as shared calls until the region is whole.
 
     Worklist dep-resolution is reverse-topological — producers demanded after consumers — so
     the builder's prepend-at-leaf behavior yields defined-before-use ordering. Reusing an already
@@ -176,8 +227,8 @@ class Splicer(BodyBuilder):
         self.bound = frozenset(axis.name for axis in self.loops[outline[0]].scopes[outline[1]].enclosing) if outline else frozenset()
         self._pending: deque[_Demand] = deque()
         self._binding: dict[_BindKey, str] = {}
-        self._reduce_axes: dict[tuple[Scope, Expr, int], Axis] = {}
-        self._free_vars_by_expr_id: dict[int, tuple[Expr, frozenset[str]]] = {}
+        self._reduce_axes: dict[tuple[Scope, Expression, int], Axis] = {}
+        self._free_vars_by_expression_id: dict[int, tuple[Expression, frozenset[str]]] = {}
 
     # Construction bound: how many DISTINCT bindings the merged body may take per source
     # statement. The dedup table shares each (stmt, emit scope, σ) binding, and a legitimate
@@ -194,7 +245,7 @@ class Splicer(BodyBuilder):
     # than a bound that would reject those layers; a chain left unrolled doubles per stage.
     _BINDING_RATIO = 256
 
-    def insert(self, stmt: Stmt, enclosure: Scope) -> None:
+    def insert(self, stmt: Statement, enclosure: Scope) -> None:
         # A definition's parameters are bound by its call, not by loops in its body.
         super().insert(stmt, Scope(tuple(axis for axis in enclosure.enclosing if axis.name not in self.bound)))
 
@@ -209,8 +260,9 @@ class Splicer(BodyBuilder):
         # an already-emitted producer. Reconstruction itself only orders new demands.
         body = Body.coerce(self.finish())
         if logger.isEnabledFor(logging.DEBUG):
-            logger.debug("Compact fusion:\n%s", "\n".join(pretty_subroutines(body)))
-        return body
+            logger.debug("Compact fusion:\n%s", body)
+        # Calls are storage sharing while the region is built: the body that leaves holds every operation.
+        return expand_calls(body)
 
     # -- Seed: every selected root Write, with its value queued -------------
 
@@ -232,12 +284,12 @@ class Splicer(BodyBuilder):
             # A scatter's index and guard read values of the body too: they are demanded like the stored
             # value, and the store keeps its guard.
             guard = root.guards.get(id(w))
-            read = {name for expr in (*w.index, *(() if guard is None else (guard,))) for name in expr.free_vars()}
+            read = {name for expression in (*w.index, *(() if guard is None else (guard,))) for name in expression.free_vars()}
             rename = {name: Var(self._ensure_dep(name, root_tag, Sigma(), scope)) for name in read if name in root.defs}
             store = Write(
                 output=w.output,
                 index=tuple(e.substitute(rename) for e in w.index),
-                value=v_bound,
+                values=(v_bound,),
                 value_dtype=w.value_dtype,
                 atomic=w.atomic,
                 swizzle=w.swizzle,
@@ -260,11 +312,11 @@ class Splicer(BodyBuilder):
         required_axes = tuple(
             mapped
             for axis in meta.scopes[name].enclosing
-            for mapped in _remap_axis_names(axis, sigma, ref_scope, free_vars=self._expr_free_vars)
+            for mapped in _remap_axis_names(axis, sigma, ref_scope, free_vars=self._expression_free_vars)
         )
         emit_scope = _scope_for_axes(ref_scope, required_axes)
 
-        # σ restricted to axes transitively used in Expr subtrees reachable
+        # σ restricted to axes transitively used in Expression subtrees reachable
         # from this stmt. Bindings outside this set don't affect any emitted
         # stmt, so keeping them in the key would cause spurious duplicate
         # emissions.
@@ -284,14 +336,14 @@ class Splicer(BodyBuilder):
         self._pending.append(_Demand(name=name, origin=origin, sigma=sigma, demand_scope=emit_scope, bound_as=bound))
         return bound
 
-    def _expr_free_vars(self, expr: Expr) -> frozenset[str]:
+    def _expression_free_vars(self, expression: Expression) -> frozenset[str]:
         """Memoize one expression's variables for this splice by object identity."""
-        key = id(expr)
-        cached = self._free_vars_by_expr_id.get(key)
-        if cached is not None and cached[0] is expr:
+        key = id(expression)
+        cached = self._free_vars_by_expression_id.get(key)
+        if cached is not None and cached[0] is expression:
             return cached[1]
-        variables = expr.free_vars()
-        self._free_vars_by_expr_id[key] = (expr, variables)
+        variables = expression.free_vars()
+        self._free_vars_by_expression_id[key] = (expression, variables)
         return variables
 
     # -- Resolution dispatch -------------------------------------------------
@@ -329,7 +381,7 @@ class Splicer(BodyBuilder):
         else:
             raise NotSupported(f"_resolve: unsupported stmt type {type(stmt).__name__} for {d.name!r} in loop {d.origin!r}")
 
-    def _resolve_plain(self, stmt: Stmt, d: _Demand) -> None:
+    def _resolve_plain(self, stmt: Statement, d: _Demand) -> None:
         """Resolve SSA operands, leaving coordinates to σ, for an ordinary scalar binding."""
         meta = self.loops[d.origin]
         rename = {v: self._ensure_dep(v, d.origin, d.sigma, d.demand_scope) for v in stmt.deps() if v in meta.defs}
@@ -369,7 +421,7 @@ class Splicer(BodyBuilder):
     def _resolve_accum(self, stmt: Accum, d: _Demand) -> None:
         """Queue the value under a shared iteration scope for independent reductions of equal extent."""
         orig_axis = self.loops[d.origin].reduce_axes[stmt.name]
-        key = (d.demand_scope, orig_axis.extent.expr, self.program.reduction_depth[d.origin][stmt.name])
+        key = (d.demand_scope, orig_axis.extent.expression, self.program.reduction_depth[d.origin][stmt.name])
         reduce_axis = self._reduce_axes.get(key)
         if reduce_axis is None:
             reduce_axis = self._reduce_axes[key] = Axis(name=self.fresh(orig_axis.name), extent=orig_axis.extent)
@@ -394,7 +446,7 @@ def _canonical(sigma: Sigma, scope: Scope) -> Sigma:
         if axis.extent.is_static:
             extent = axis.extent.as_static()
             ctx = ctx.extend(axis.name, Interval(0, extent - 1), Literal(extent, "int"))
-    return Sigma({name: expr.simplify(ctx) for name, expr in sigma.mapping.items()})
+    return Sigma({name: expression.simplify(ctx) for name, expression in sigma.mapping.items()})
 
 
 def _scope_for_axes(ref_scope: Scope, required: tuple[str, ...]) -> Scope:
@@ -426,7 +478,7 @@ def _remap_axis_names(
     sigma: Sigma,
     ref_scope: Scope,
     *,
-    free_vars: Callable[[Expr], frozenset[str]] | None = None,
+    free_vars: Callable[[Expression], frozenset[str]] | None = None,
 ) -> tuple[str, ...]:
     """Pick the merged-kernel axes that ``axis``'s σ target depends on.
 
@@ -454,8 +506,8 @@ def _remap_axis_names(
 
 
 def _solve_sigma(
-    writer: tuple[Expr, ...],
-    reader: tuple[Expr, ...],
+    writer: tuple[Expression, ...],
+    reader: tuple[Expression, ...],
     producer_axes: set[str],
 ) -> Sigma | None:
     """Solve per-dim pairing ``writer[k] == reader[k]``. Supported writer
@@ -463,7 +515,7 @@ def _solve_sigma(
     ``Literal(c)`` → no binding. Anything else → ``None``."""
     if len(writer) != len(reader):
         return None
-    mapping: dict[str, Expr] = {}
+    mapping: dict[str, Expression] = {}
     for w, r in zip(writer, reader, strict=True):
         if isinstance(w, Literal):
             continue

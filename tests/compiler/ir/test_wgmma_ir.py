@@ -23,12 +23,11 @@ from emmy.compiler.ir.kernel.ir import (
     WgmmaFence,
     WgmmaMma,
     WgmmaWait,
-    Write,
     wgmma_descriptor_bits,
 )
 from emmy.compiler.ir.kernel.render import _WGMMA_PRELUDE, _wgmma_prelude, render_kernelop
 from emmy.compiler.ir.render import RenderCtx, render_stmt
-from emmy.compiler.ir.stmt import Body
+from emmy.compiler.ir.stmt import Body, parse_body
 
 _NS = (64, 128, 256)
 _DTYPES = ("f16", "bf16")
@@ -85,13 +84,15 @@ def test_the_wrapper_name_spells_n_dtype_and_form(n: int, ab_dtype: str, form: s
     acc = ", ".join(_frags(n))
     a, tnsp = ("aD", "<0, 0>") if form == "ss" else ("a", "<0>")
     assert _line(cell) == f"emmy_wgmma_m64n{n}k16_{ab_dtype}_f32_{form}{tnsp}({acc}, {a}, bD, 1);"
-    assert cell.pretty()[0] == f"WgmmaMma {{{acc}}} += {a} @ bD (m64n{n}k16 {ab_dtype} {form})"
+    operand = "a_desc=aD" if form == "ss" else "a_frag=a"
+    dtype = "" if ab_dtype == "f16" else f", ab_dtype={ab_dtype}"
+    assert str(cell) == f"WgmmaMma(c_frags=({acc}), b_desc=bD, shape=(64, {n}, 16){dtype}, {operand})"
 
 
 def test_the_transpose_bits_and_scale_d_reach_the_call() -> None:
     ss = _cell(64, "f16", "ss", scale_d=0, trans_a=1, trans_b=1)
     assert _line(ss).endswith("_f32_ss<1, 1>(c0, c1, c2, c3, c4, c5, c6, c7, aD, bD, 0);")
-    assert ss.pretty()[0].endswith("(m64n64k16 f16 ss scale_d=0 trans_a trans_b)")
+    assert str(ss).endswith("a_desc=aD, scale_d=0, trans_a=1, trans_b=1)")
     rs = _cell(64, "f16", "rs", trans_b=1)
     assert _line(rs).endswith("_f32_rs<1>(c0, c1, c2, c3, c4, c5, c6, c7, a, bD, 1);")
 
@@ -114,14 +115,14 @@ def test_fence_commit_wait_render_the_bare_instructions() -> None:
     assert _line(WgmmaWait(1)) == 'asm volatile("wgmma.wait_group.sync.aligned 1;\\n" ::: "memory");'
     for stmt in (WgmmaFence(), WgmmaCommit(), WgmmaWait()):
         assert stmt.deps() == () and stmt.defines() == ()
-    assert [s.pretty()[0] for s in (WgmmaFence(), WgmmaCommit(), WgmmaWait(2))] == ["WgmmaFence", "WgmmaCommit", "WgmmaWait(2)"]
+    assert [str(s) for s in (WgmmaFence(), WgmmaCommit(), WgmmaWait(2))] == ["WgmmaFence", "WgmmaCommit", "WgmmaWait(group=2)"]
 
 
 def test_the_cell_reads_its_operands_and_defines_its_accumulator() -> None:
     ss = _cell(64, form="ss")
-    assert ss.deps() == (*_frags(64), "aD", "bD") and ss.defines() == _frags(64)
+    assert ss.deps() == (*_frags(64), "bD", "aD") and ss.defines() == _frags(64)
     rs = _cell(64, form="rs")
-    assert rs.deps() == (*_frags(64), "a", "bD") and rs.defines() == _frags(64)
+    assert rs.deps() == (*_frags(64), "bD", "a") and rs.defines() == _frags(64)
 
 
 def test_rewrite_renames_ssa_names_and_keeps_buffers() -> None:
@@ -198,7 +199,7 @@ def _driver() -> str:
         *(_cell(n, ab, form, scale_d=int(i > 0), trans_b=int(ab == "f16")) for i, (n, ab, form) in enumerate(forms)),
         WgmmaCommit(),
         WgmmaWait(),
-        *(Write(output="out", index=(Literal(4 * j + k, "int"),), value=f"c{j}[{k}]") for j in range(256 // 8) for k in range(4)),
+        *parse_body("\n".join(f"out[{4 * j + k}] = `c{j}[{k}]`" for j in range(256 // 8) for k in range(4))),
     ]
     return render_kernelop(KernelOp(body=Body(tuple(stmts)), name="k_wgmma_probe"), shapes={"out": (128,)})
 

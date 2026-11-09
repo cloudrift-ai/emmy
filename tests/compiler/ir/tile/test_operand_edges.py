@@ -19,10 +19,8 @@ import pytest
 from emmy.compiler.dim import Dim
 from emmy.compiler.dtype import F16, F32, I32
 from emmy.compiler.ir.axis import Axis
-from emmy.compiler.ir.elementwise import ElementwiseImpl
-from emmy.compiler.ir.expr import Literal, Var
 from emmy.compiler.ir.pure import Fold
-from emmy.compiler.ir.stmt import Accum, Assign, Body, Let, Load, Loop
+from emmy.compiler.ir.stmt import Accum, Assign, Load, Loop, parse_body
 from emmy.compiler.ir.tile.ops import cone_stat_dtypes, edge_dtypes
 from tests.compiler.terms import contraction, projection, reduction, slab
 
@@ -32,7 +30,13 @@ SCOPE = (M_AXIS, N_AXIS, K_AXIS)
 
 @pytest.mark.parametrize("dtype", [F16, F32, I32, None])
 def test_typed_literal_bindings_keep_their_edge_and_cone_statistic_dtypes(dtype):
-    body = (Let("constant", Literal(2.0), dtype=dtype), Assign("product", "multiply", ("constant", "constant")))
+    typed = "" if dtype is None else f"{dtype.name} "
+    body = parse_body(
+        f"""
+        let {typed}constant = 2.0
+        product = multiply(constant, constant)
+        """
+    )
     edge = projection((), body, ("product",))
     assert edge_dtypes(edge, {}) == (dtype,)
     assert cone_stat_dtypes(body, ("constant", "product"), {}) == ({} if dtype is None else {"constant": dtype, "product": dtype})
@@ -55,8 +59,8 @@ def test_a_slab_declares_the_coordinates_it_indexes() -> None:
 
 def test_a_slab_lowers_to_exactly_its_load() -> None:
     """Wrapping is a declaration, not a layer: the emitted statements are unchanged."""
-    load = Load(name="l", input="x", index=(Var("m"), Var("k")))
-    assert Fold.slab(load).lower(axes=SCOPE) == Body((load,))
+    body = parse_body("l = load x[m, k]")
+    assert Fold.slab(body[0]).lower(axes=SCOPE) == body
 
 
 def test_a_slab_does_not_reduce() -> None:
@@ -66,11 +70,7 @@ def test_a_slab_does_not_reduce() -> None:
 
 
 def test_a_computed_cone_is_not_a_slab() -> None:
-    cone = projection(
-        (slab("e", "x", "m", "k"), slab("s", "w", "k")),
-        (Assign(name="xhat", op="multiply", args=("e", "s")),),
-        ("xhat",),
-    )
+    cone = projection((slab("e", "x", "m", "k"), slab("s", "w", "k")), parse_body("xhat = multiply(e, s)"), ("xhat",))
     assert cone.as_slab() is None
     assert cone.exposes == ("xhat",)
     assert cone.free_axes == {"m", "k"}  # the union of its operands' declarations
@@ -90,14 +90,14 @@ def test_a_scale_is_not_a_contraction() -> None:
     """An operand that brings no ``k`` makes the fold a scale, not a bilinear cell."""
     a = slab("l", "x", "m", "k")
     scale = slab("s", "s", "m")
-    node = reduction(K_AXIS, (a, scale), (Assign(name="acc__v", op="multiply", args=("l", "s")),), ("acc",))
+    node = reduction(K_AXIS, (a, scale), parse_body("acc__v = multiply(l, s)"), ("acc",))
     assert node.as_contraction() is None
     assert node.axis is not None
 
 
 def test_a_pointwise_term_has_no_view() -> None:
     """No axis to share, so nothing to read."""
-    assert projection((slab("l", "x", "m"),), (Assign(name="y", op="relu", args=("l",)),), ("y",)).as_contraction() is None
+    assert projection((slab("l", "x", "m"),), parse_body("y = relu(l)"), ("y",)).as_contraction() is None
 
 
 # --- lowering ------------------------------------------------------------------------------------ #
@@ -115,7 +115,7 @@ def test_an_operand_that_does_not_index_the_axis_lowers_once_ahead_of_the_loop()
     """The hoist is a DECLARATION compared against an axis — no body walked for free names."""
     a = slab("l", "x", "m", "k")
     scale = slab("s", "s", "m")
-    stmts = reduction(K_AXIS, (a, scale), (Assign(name="acc__v", op="multiply", args=("l", "s")),), ("acc",)).lower(axes=SCOPE)
+    stmts = reduction(K_AXIS, (a, scale), parse_body("acc__v = multiply(l, s)"), ("acc",)).lower(axes=SCOPE)
     hoisted, loop = stmts
     assert isinstance(hoisted, Load) and hoisted.input == "s"
     assert [stmt.input for stmt in loop.body if isinstance(stmt, Load)] == ["x"]
@@ -123,17 +123,15 @@ def test_an_operand_that_does_not_index_the_axis_lowers_once_ahead_of_the_loop()
 
 def test_the_combine_folds_one_accum_per_carried_component() -> None:
     """The fused gate⊗up shape: one loop, the shared A read once, an ``Accum`` per channel."""
-    shared = projection(
-        (slab("e", "x", "m", "k"), slab("sc", "w", "k")),
-        (Assign(name="xhat", op="multiply", args=("e", "sc")),),
-        ("xhat",),
-    )
+    shared = projection((slab("e", "x", "m", "k"), slab("sc", "w", "k")), parse_body("xhat = multiply(e, sc)"), ("xhat",))
     node = reduction(
         K_AXIS,
         (shared, slab("bg", "Wg", "k", "n"), slab("bu", "Wu", "k", "n")),
-        (
-            Assign(name="acc_g__v", op="multiply", args=("xhat", "bg")),
-            Assign(name="acc_u__v", op="multiply", args=("xhat", "bu")),
+        parse_body(
+            """
+            acc_g__v = multiply(xhat, bg)
+            acc_u__v = multiply(xhat, bu)
+            """
         ),
         ("acc_g", "acc_u"),
     )
@@ -146,7 +144,7 @@ def test_the_combine_folds_one_accum_per_carried_component() -> None:
 
 def test_a_zero_axis_term_lowers_to_its_operands_then_its_body() -> None:
     """No axis, no monoid: the step IS the answer."""
-    stmts = projection((slab("l", "x", "m"),), (Assign(name="y", op="relu", args=("l",)),), ("y",)).lower(axes=SCOPE)
+    stmts = projection((slab("l", "x", "m"),), parse_body("y = relu(l)"), ("y",)).lower(axes=SCOPE)
     assert [type(stmt).__name__ for stmt in stmts] == ["Load", "Assign"]
 
 
@@ -160,17 +158,8 @@ def test_every_buffer_the_term_touches_reaches_the_lowered_body() -> None:
             for body in stmt.nested():
                 yield from buffers(body)
 
-    shared = projection(
-        (slab("e", "x", "m", "k"), slab("sc", "w", "k")),
-        (Assign(name="xhat", op="multiply", args=("e", "sc")),),
-        ("xhat",),
-    )
-    node = reduction(
-        K_AXIS,
-        (shared, slab("bg", "Wg", "k", "n")),
-        (Assign(name="acc_g__v", op="multiply", args=("xhat", "bg")),),
-        ("acc_g",),
-    )
+    shared = projection((slab("e", "x", "m", "k"), slab("sc", "w", "k")), parse_body("xhat = multiply(e, sc)"), ("xhat",))
+    node = reduction(K_AXIS, (shared, slab("bg", "Wg", "k", "n")), parse_body("acc_g__v = multiply(xhat, bg)"), ("acc_g",))
     assert set(buffers(node.lower(axes=SCOPE))) == {"x", "w", "Wg"}
 
 
@@ -181,11 +170,7 @@ def test_iteration_variables_are_not_captures() -> None:
     """The dominant names in any cone are induction variables, bound by the enclosing nest."""
     from emmy.compiler.pipeline.passes.tile._cut import _closed_at
 
-    cone = projection(
-        (slab("e", "x", "m", "k"), slab("s", "w", "k")),
-        (Assign(name="xhat", op="multiply", args=("e", "s")),),
-        ("xhat",),
-    )
+    cone = projection((slab("e", "x", "m", "k"), slab("s", "w", "k")), parse_body("xhat = multiply(e, s)"), ("xhat",))
     assert _closed_at(cone, ("m", "k")), "an ordinary cone over its own axes is closed"
     assert not _closed_at(cone, ()), "unfiltered, the axes themselves read as captures"
 
@@ -200,38 +185,23 @@ def test_the_closure_predicate_reads_the_declaration() -> None:
 
 def test_a_sweep_drops_pure_members_not_read_by_its_stores() -> None:
     from emmy.compiler.ir.loop import LoopOp
-    from emmy.compiler.ir.stmt import Write
     from emmy.compiler.ir.tile.ir import loaded_buffers
     from emmy.compiler.pipeline.passes.tile._fromloop import lift_loop_op
 
-    first = Loop(
-        axis=N_AXIS,
-        body=Body(
-            (
-                Load(name="first", input="x", index=(Var("n"),)),
-                Write(output="a", index=(Var("n"),), value="first"),
-            )
-        ),
+    body = parse_body(
+        """
+        for n in 0..256:
+            first = load x[n]
+            a[n] = first
+        for m in 0..256:
+            unused = load dead[m]
+            for k in 0..256:
+                value = load y[m, k]
+                sum <- add(sum, value) over k
+            b[m] = sum
+        """
     )
-    second = Loop(
-        axis=M_AXIS,
-        body=Body(
-            (
-                Load(name="unused", input="dead", index=(Var("m"),)),
-                Loop(
-                    axis=K_AXIS,
-                    body=Body(
-                        (
-                            Load(name="value", input="y", index=(Var("m"), Var("k"))),
-                            Accum(name="sum", value="value", op="add", axes=("k",)),
-                        )
-                    ),
-                ),
-                Write(output="b", index=(Var("m"),), value="sum"),
-            )
-        ),
-    )
-    tile = lift_loop_op(LoopOp(body=(first, second)))
+    tile = lift_loop_op(LoopOp(body=body))
     assert {load.input for load in loaded_buffers(tile.op)} == {"x", "y"}
     assert sorted((spec.write.output, len(spec.sweep)) for spec in tile.output_specs) == [("a", 1), ("b", 1)]
     assert tile.output_specs[0].sweep != tile.output_specs[1].sweep
@@ -246,39 +216,29 @@ def test_a_sweep_with_a_projection_beside_a_nested_sweep_lifts() -> None:
     from emmy.compiler.ir.stmt import Write
     from emmy.compiler.pipeline.passes.tile._fromloop import lift_loop_op
 
-    add = ElementwiseImpl("add")
-    gate_total = Loop(
-        axis=K_AXIS,
-        body=Body((Load(name="g0", input="g", index=(Var("m"), Var("s"), Var("k"))), Accum(name="tot", value="g0", op=add, axes=("k",)))),
-    )
-    inner_total = Loop(
-        axis=K_AXIS,
-        body=Body(
-            (Load(name="x0", input="x", index=(Var("m"), Var("s"), Var("n"), Var("k"))), Accum(name="acc", value="x0", op=add, axes=("k",)))
-        ),
-    )
-    inner_sweep = Loop(axis=N_AXIS, body=Body((inner_total, Write(output="mul", index=(Var("m"), Var("s"), Var("n")), value="acc"))))
-    outer = Loop(
-        axis=Axis("s", Dim(4)),
-        body=Body(
-            (
-                gate_total,
-                Assign(name="v", op="exp", args=("tot",)),
-                Write(output="view", index=(Var("m"), Var("s")), value="v"),
-                inner_sweep,
-            )
-        ),
-    )
-    sibling = Loop(
-        axis=K_AXIS,
-        body=Body((Load(name="y0", input="y", index=(Var("m"), Var("k"))), Accum(name="head", value="y0", op=add, axes=("k",)))),
-    )
-    root = Loop(
-        axis=M_AXIS,
-        body=Body((sibling, Assign(name="h", op="exp", args=("head",)), Write(output="o", index=(Var("m"),), value="h"), outer)),
+    body = parse_body(
+        """
+        for m in 0..256:
+            for k in 0..256:
+                y0 = load y[m, k]
+                head <- add(head, y0) over k
+            h = exp(head)
+            o[m] = h
+            for s in 0..4:
+                for k in 0..256:
+                    g0 = load g[m, s, k]
+                    tot <- add(tot, g0) over k
+                v = exp(tot)
+                view[m, s] = v
+                for n in 0..256:
+                    for k in 0..256:
+                        x0 = load x[m, s, n, k]
+                        acc <- add(acc, x0) over k
+                    mul[m, s, n] = acc
+        """
     )
 
-    tile = lift_loop_op(LoopOp(body=(root,)), name="k_nested_sweep")
+    tile = lift_loop_op(LoopOp(body=body), name="k_nested_sweep")
 
     paths = {spec.write.output: tuple(axis.extent.as_static() for axis in spec.sweep) for spec in tile.output_specs}
     assert paths == {"o": (), "view": (4,), "mul": (4, 256)}
@@ -297,27 +257,24 @@ def test_a_reduce_under_an_output_sweep_lifts_to_an_operand_and_lowers_back_unde
     loop back inside the output loop. A sibling reduce ahead of the sweep keeps the sweep a sweep
     rather than a peeled free axis."""
     from emmy.compiler.ir.loop import LoopOp
-    from emmy.compiler.ir.stmt import Write
     from emmy.compiler.pipeline.passes.tile._fromloop import lift_loop_op
 
-    add = ElementwiseImpl("add")
-    total = Loop(
-        axis=K_AXIS,
-        body=Body((Load(name="y0", input="y", index=(Var("m"), Var("k"))), Accum(name="tot", value="y0", op=add, axes=("k",)))),
+    body = parse_body(
+        """
+        for m in 0..256:
+            for k in 0..256:
+                y0 = load y[m, k]
+                tot <- add(tot, y0) over k
+            for n in 0..256:
+                for k in 0..256:
+                    x0 = load x[m, n, k]
+                    d = subtract(x0, tot)
+                    w = exp(d)
+                    acc <- add(acc, w) over k
+                out[m, n] = acc
+        """
     )
-    weighted = Loop(
-        axis=K_AXIS,
-        body=Body(
-            (
-                Load(name="x0", input="x", index=(Var("m"), Var("n"), Var("k"))),
-                Assign(name="d", op="subtract", args=("x0", "tot")),
-                Assign(name="w", op="exp", args=("d",)),
-                Accum(name="acc", value="w", op=add, axes=("k",)),
-            )
-        ),
-    )
-    sweep = Loop(axis=N_AXIS, body=Body((weighted, Write(output="out", index=(Var("m"), Var("n")), value="acc"))))
-    tile = lift_loop_op(LoopOp(body=(Loop(axis=M_AXIS, body=Body((total, sweep))),)), name="k_sweep")
+    tile = lift_loop_op(LoopOp(body=body), name="k_sweep")
 
     # Canonical renumbering renames the axes; the sweep coordinate is one the fold's slab declares.
     # The sibling total is what the swept fold reads, so it arrives as that fold's operand — the

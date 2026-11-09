@@ -3,10 +3,10 @@
 from collections.abc import Mapping
 from math import gcd
 
-from emmy.compiler.ir.expr import BinaryExpr, Expr, Literal, SimplifyCtx, Var, affine_form
+from emmy.compiler.ir.expression import BinaryExpr, Expression, Literal, SimplifyCtx, Var, affine_form
 
 
-def strided_alignment(start: Expr, step: Expr, aligned: Mapping[str, int]) -> int:
+def strided_alignment(start: Expression, step: Expression, aligned: Mapping[str, int]) -> int:
     """The largest power of two every value of a strided loop variable is a multiple of: the
     common divisor of its start's terms and its step. A non-affine or symbolic part gives 1."""
     parts = [step]
@@ -34,9 +34,9 @@ def vector_run(indices, tensor, width: int, aligned: Mapping[str, int] | None = 
     for index in indices:
         flat = index[0]
         for coord, size in zip(index[1:], tensor.shape[1:] if rank > 1 else (), strict=True):
-            flat = BinaryExpr("+", BinaryExpr("*", flat, size.expr), coord)
+            flat = BinaryExpr("+", BinaryExpr("*", flat, size.expression), coord)
         addresses.append(flat.simplify(ctx))
-    atoms: dict[Expr, Var] = {}
+    atoms: dict[Expression, Var] = {}
     addresses = [_atomized(address, atoms) for address in addresses]
     free = frozenset(name for address in addresses for name in address.free_vars())
     first = affine_form(addresses[0], free)
@@ -57,12 +57,12 @@ def vector_run(indices, tensor, width: int, aligned: Mapping[str, int] | None = 
     return True
 
 
-def _atomized(expr: Expr, atoms: dict[Expr, Var]) -> Expr:
-    """``expr`` with each subterm that is not a sum, difference or product (a gathered index's sign wrap, a cast, a
+def _atomized(expression: Expression, atoms: dict[Expression, Var]) -> Expression:
+    """``expression`` with each subterm that is not a sum, difference or product (a gathered index's sign wrap, a cast, a
     quotient) replaced by one variable per distinct subterm. Every such subterm is an integer, the same wherever the
     same subterm appears, which is all the run proof asks of a variable."""
-    if isinstance(expr, (Var, Literal)):
-        return expr
-    if isinstance(expr, BinaryExpr) and expr.op in ("+", "-", "*"):
-        return BinaryExpr(expr.op, _atomized(expr.left, atoms), _atomized(expr.right, atoms))
-    return atoms.setdefault(expr, Var(f"_run_atom{len(atoms)}"))
+    if isinstance(expression, (Var, Literal)):
+        return expression
+    if isinstance(expression, BinaryExpr) and expression.op in ("+", "-", "*"):
+        return BinaryExpr(expression.op, _atomized(expression.left, atoms), _atomized(expression.right, atoms))
+    return atoms.setdefault(expression, Var(f"_run_atom{len(atoms)}"))

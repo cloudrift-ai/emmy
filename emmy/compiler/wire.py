@@ -1,14 +1,16 @@
 """One wire for every object a golden or a tune DB row stores.
 
-A class that lives on the wire mixes in :class:`Wire`. A dataclass gets its wire for free: its init fields, minus
-the ones it names in ``wire_skip``, written by their annotations. A field whose annotation names one wire class
-holds that class's payload bare; a field whose annotation is a base class, a union of classes or ``Any`` holds
-``{tag: payload}``, so the reader knows which class to build; a field at its default is omitted; a field annotated
-``dict`` is an opaque payload kept as it is (a program pool's entries). A class whose wire is not its fields — a dim,
-a tensor, a body, a graph, a leaf type — overrides ``to_wire`` / ``from_wire``. ``wire_tag`` names the class on the
-wire, the class name by default; every wire class registers its tag when it is defined, so a tagged payload decodes
-without anyone listing the classes; a subclass that inherits its base's codec goes by the base's tag (an expression
-node is its text). The walker refuses an unknown or missing key by path.
+A class joins the wire through :func:`register`, with its tag, its two wire functions and the parts the rewrite goes
+into. Mixing in :class:`Wire` registers a class as it is defined and supplies all of them for a dataclass: its init
+fields, minus the ones it names in ``wire_skip``, written by their annotations. A field whose annotation names one
+wire class holds that class's payload bare; a field whose annotation is a base class, a union of classes or ``Any``
+holds ``{tag: payload}``, so the reader knows which class to build; a field at its default is omitted; a field
+annotated ``dict`` is an opaque payload kept as it is (a program pool's entries). A class whose wire is not its fields
+— a dim, a tensor, a graph, a leaf type, an expression or a body (each its text) — overrides ``to_wire`` /
+``from_wire``. ``wire_tag`` names the class on the wire, the class name by default; every wire class registers its tag
+when it is defined, so a tagged payload decodes without anyone listing the classes; a subclass that inherits its
+base's codec goes by the base's tag (an expression node is its text). The walker refuses an unknown or missing key by
+path.
 """
 
 from __future__ import annotations
@@ -38,18 +40,7 @@ class Wire:
 
     def __init_subclass__(cls, **kwargs) -> None:
         super().__init_subclass__(**kwargs)
-        _NAMESPACE[cls.__name__] = cls
-        owner = next(base for base in cls.__mro__ if "to_wire" in base.__dict__)
-        if owner not in (cls, Wire) and "wire_tag" not in cls.__dict__:
-            # A subclass written by its base's codec goes by the base's tag: an ``Expr`` node is its text.
-            _TAG_OF[cls] = _TAG_OF[owner]
-            return
-        tag = cls.__dict__.get("wire_tag") or cls.__name__
-        if tag in _REGISTRY and _REGISTRY[tag] is not cls:
-            other = _REGISTRY[tag]
-            raise TypeError(f"wire tag {tag!r} is claimed by both {other.__module__}.{other.__name__} and {cls.__module__}.{cls.__name__}")
-        _REGISTRY[tag] = cls
-        _TAG_OF[cls] = tag
+        register(cls)
 
     @classmethod
     def from_wire(cls, value: object, where: str | None = None):
@@ -59,6 +50,29 @@ class Wire:
     def to_wire(self):
         """The YAML-safe data the wire stores for this object."""
         return _fields_to_wire(self)
+
+    def wire_parts(self) -> dict[str, object] | None:
+        """What :func:`rewrite` goes into: the keyword arguments this object is rebuilt from — a dataclass's wire
+        fields — or ``None`` for an object the rewrite takes whole."""
+        return {f.name: getattr(self, f.name) for f in _wire_fields(type(self))} if is_dataclass(self) else None
+
+
+def register(cls: type) -> None:
+    """Put ``cls`` on the wire: the one way a class joins it, and what :class:`Wire` does for each subclass. A class
+    that is no ``Wire`` brings what the base supplies: ``to_wire``, the classmethod ``from_wire(value, where)``,
+    ``wire_parts``, and ``wire_tag`` when its name is not its tag."""
+    _NAMESPACE[cls.__name__] = cls
+    owner = next(base for base in cls.__mro__ if "to_wire" in base.__dict__)
+    if owner not in (cls, Wire) and "wire_tag" not in cls.__dict__:
+        # A subclass written by its base's codec goes by the base's tag: an ``Expression`` node is its text.
+        _TAG_OF[cls] = _TAG_OF[owner]
+        return
+    tag = cls.__dict__.get("wire_tag") or cls.__name__
+    if tag in _REGISTRY and _REGISTRY[tag] is not cls:
+        other = _REGISTRY[tag]
+        raise TypeError(f"wire tag {tag!r} is claimed by both {other.__module__}.{other.__name__} and {cls.__module__}.{cls.__name__}")
+    _REGISTRY[tag] = cls
+    _TAG_OF[cls] = tag
 
 
 def tag_of(cls: type) -> str:
@@ -158,10 +172,6 @@ def _scalar_ok(value: object, members: Iterable[type]) -> bool:
     return isinstance(value, str) and str in members
 
 
-def _is_wire_class(tp: object) -> bool:
-    return isinstance(tp, type) and issubclass(tp, Wire)
-
-
 def _to_wire(value: object, tp: object, where: str):
     origin, args = get_origin(tp), get_args(tp)
     if tp is Any or tp is object:
@@ -177,7 +187,7 @@ def _to_wire(value: object, tp: object, where: str):
         if len(members) == 1:
             return _to_wire(value, members[0], where)
         return _tagged(value, where)
-    if _is_wire_class(tp):
+    if tp in _TAG_OF:
         if type(value) is tp or tp.to_wire is not Wire.to_wire:
             return value.to_wire()
         return _tagged(value, where)
@@ -202,8 +212,8 @@ def _tagged(value: object, where: str):
     """Wire data typed by the value itself, tagged where the reader could not tell."""
     if value is None or isinstance(value, _SCALARS):
         return value
-    if isinstance(value, Wire):
-        return {_TAG_OF[type(value)]: value.to_wire()}
+    if (tag := _TAG_OF.get(type(value))) is not None:
+        return {tag: value.to_wire()}
     if isinstance(value, tuple):
         return {"tuple": [_tagged(item, where) for item in value]}
     if isinstance(value, frozenset):
@@ -239,10 +249,10 @@ def _from_wire(tp: object, value: object, where: str):
         if not isinstance(decoded, tuple(member for member in members if isinstance(member, type))):
             raise ValueError(f"{where} holds a {type(decoded).__name__}, not one of {', '.join(m.__name__ for m in members)}")
         return decoded
-    if _is_wire_class(tp):
+    if tp in _TAG_OF:
         # A base class annotation holds a tagged subclass payload — an op among a constant's load ops — while a
         # concrete class, or one whose wire is its own, holds its payload bare.
-        if tp.from_wire.__func__ is Wire.from_wire.__func__ and isinstance(value, Mapping) and len(value) == 1:
+        if tp.to_wire is Wire.to_wire and isinstance(value, Mapping) and len(value) == 1:
             ((tag, payload),) = value.items()
             if (cls := _REGISTRY.get(tag)) is not None and cls is not tp and issubclass(cls, tp):
                 return cls.from_wire(payload, f"{where}.{tag}")
@@ -297,7 +307,7 @@ def _untagged(value: object, where: str):
 
 def rewrite(value: object, fn):
     """``value`` with ``fn`` applied to every object inside it, outermost first: ``fn`` answers an object's
-    replacement, or ``None`` to go on into it — a dataclass wire object's wire fields, a container's members. An
+    replacement, or ``None`` to go on into it — a wire object's parts (``wire_parts``), a container's members. An
     object nothing inside changed is kept as it is; one that changed is rebuilt the way the reader builds it."""
     if (replaced := fn(value)) is not None:
         return replaced
@@ -307,8 +317,7 @@ def rewrite(value: object, fn):
     if isinstance(value, dict):
         items = {key: rewrite(item, fn) for key, item in value.items()}
         return value if all(items[key] is item for key, item in value.items()) else items
-    if isinstance(value, Wire) and is_dataclass(value):
-        declared = {f.name: getattr(value, f.name) for f in _wire_fields(type(value))}
+    if type(value) in _TAG_OF and (declared := value.wire_parts()) is not None:
         items = {name: rewrite(item, fn) for name, item in declared.items()}
         return value if all(items[name] is item for name, item in declared.items()) else type(value)(**items)
     return value
@@ -421,7 +430,7 @@ def kernel_wire(tile) -> dict:
 def symbolic_vars(wire: dict) -> set[str]:
     """The symbolic dim vars a kernel wire's buffers name — the keys a measurement of it binds
     (:func:`kernel_bindings`), and what a piece keeps of its parent's bindings."""
-    from emmy.compiler.ir.expr import Expr  # noqa: PLC0415
+    from emmy.compiler.ir.expression import Expression  # noqa: PLC0415
 
     out: set[str] = set()
     for node in wire["nodes"]:
@@ -430,7 +439,7 @@ def symbolic_vars(wire: dict) -> set[str]:
                 if isinstance(dim, dict) and "sym" in dim:
                     out.add(str(dim["sym"]))
                 elif isinstance(dim, dict) and "expr" in dim:
-                    out |= Expr.from_wire(dim["expr"]).free_vars()
+                    out |= Expression.from_wire(dim["expr"]).free_vars()
     return out
 
 
@@ -443,7 +452,7 @@ def symbolic_bindings(tensors: Iterable, extents: Iterable = ()) -> dict[str, in
     bindings: dict[str, int] = {}
     for dim in (*(dim for tensor in tensors for dim in tensor.shape), *extents):
         if isinstance(dim, Dim) and not dim.is_static:
-            for var in dim.expr.free_vars():
+            for var in dim.expression.free_vars():
                 bindings.setdefault(var, dim.hint or DEFAULT_SEQ_HINT)
     return bindings
 

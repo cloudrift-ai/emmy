@@ -1,5 +1,99 @@
 # Qwen3.6-35B-A3B-FP8 discovery
 
+## The FP8 cache staged into shared memory (2026-11-07)
+
+Native attention's FP8 key-value cache now copies into shared memory before the tensor-core fold reads it (#1366, on
+#1352). Recorded on the card and with the protocol of the 27B's section of the same name (fast math off); the pack
+exports under strict evidence, every twin compiles strictly from the golden, and `emmy eval golden` deploys every twin
+from the golden rows alone. The section below's times are in brackets.
+
+| twin | at 4,096 | at 131,072 |
+|---|---|---|
+| `attend1` (decode) | g32k, 10.0 µs (18.0) | g64k, 111 µs (413) |
+| `attend3` (verify) | g16k, 15.5 µs (29.3) | g64k, 277 µs (815) |
+| `attend4` | g16k, 24.6 µs (129) | g64k, 561 µs (4,954) |
+| `attend64` (chunk) | g8k, 54.4 µs (137) | g16k, 1,046 µs (3,594) |
+
+g128k, which the compiler does not offer, measured 23% slower than g64k at one row and 4% faster at three.
+
+| | this branch | the section below |
+|---|---|---|
+| TPOT / TTFT, 256-token prompt | 20.4 ms / 5.58 s | 20.9 ms / 5.58 s |
+| first token, 257-token prompt | 5.48 s | 5.62 s |
+| TPOT / TTFT, 7,680-token prompt | 20.9 ms / 169 s | 21.2 ms / 167 s |
+| drafts accepted at 256 / 7,680 | 76 / 79% | 75 / 85% |
+| device memory at rest | 23.0 GiB | 23.0 GiB |
+| GSM8K strict / flexible match | 0.460 / 0.475 | |
+
+The short cells hold. GSM8K holds too, against main's 0.455 / 0.460 on 2026-11-06 (standard error 0.035); the section
+below did not run it. The window step was not served, as in the section below: a prompt that reaches the long range
+prefills for over an hour. Its verify twin's attention now takes 277 µs a layer at 131,072 positions.
+
+## Attention priced per range of windows (2026-11-07)
+
+Native attention now compiles once per range of windows, priced at 4,096 and at 131,072 cached tokens, the long range
+from 16,384 (#1352, on #1329's grouped decode attention). Recorded on the card and with the protocol of the 27B's
+2026-11-07 section (fast math off); the pack exports under strict evidence and `emmy eval golden` deploys every twin
+from the golden rows alone.
+
+| twin | at 4,096 | at 131,072 |
+|---|---|---|
+| `attend1` (decode) | g32k, 18.0 µs | g64k, 413 µs |
+| `attend3` (verify) | g32k, 29.3 µs | g64k, 815 µs |
+| `attend4` | g8k, 129 µs | g64k, 4,954 µs |
+| `attend64` (chunk) | g8k, 137 µs | g32k, 3,594 µs |
+
+| | this branch | 2026-11-06 (main) |
+|---|---|---|
+| TPOT / TTFT, 256-token prompt | 20.9 ms / 5.58 s | 20.5 ms / 6.12 s |
+| first token, 257-token prompt | 5.62 s | 6.16 s |
+| TPOT / TTFT, 7,680-token prompt | 21.2 ms / 167 s | 21.7 ms / 185 s |
+| drafts accepted at 256 / 7,680 | 75 / 85% | 80 / 73% |
+| device memory at rest | 23.0 GiB | 23.0 GiB |
+
+- **The short cells.** The drafted step takes 51.1 ms at 256 tokens against about 53 ms on 2026-11-06, and 55.9 ms at
+  7,680 against about 53.4 ms (+5%); both prompts get their first token sooner. TPOT follows the drafts accepted, which
+  the attention's numerics move on these prompts.
+- **The window step was not served.** A prompt that reaches the long range takes more than an hour to prefill here
+  (7,385 s at 261,632 tokens on 2026-11-01), so the verify step at a long window is read from its twin: its attention
+  takes 815 µs a layer at 131,072 positions against 29.3 µs at 4,096. g128k measured 691 µs there, and the compiler
+  offers splits up to g64k.
+
+## The gates of milestones 4 and 5 (2026-11-06)
+
+The parity plan's milestone 4 (prefill ends at the prompt's last token) and the numerics half of milestone 5 (the folded
+prefill attention), native only, on the card and main of the 27B's 2026-11-06 section: one rented x16 RTX 5090 (a
+container with a 46-CPU quota, driver 615.71, CUDA 13.1), main at `f33a86522`. The client, prompts and settings are the
+2026-11-01 section's. Reference packs from the tree before 4 (#1311, `504165b13`) and the tree before 5 (#1318,
+`57fabd6e2`) ran on the same card, not strict. Milestone 5's speed gates are the 27B's.
+
+On the card, `emmy eval golden --serving-config` deploys all 66 twins from the golden rows alone (fast math off), the
+pack exports under strict evidence, and `emmy golden check` says current, 488 kernels.
+
+| | #1311 tree | #1318 tree | main | 2026-11-01 |
+|---|---|---|---|---|
+| TPOT / TTFT, 256-token prompt | 20.9 ms / 16.3 s | 21.3 ms / 6.66 s | 20.5 ms / 6.12 s | 19.1 ms / 15.7 s |
+| first token, 257-token prompt | 6.52 s | 6.65 s | 6.16 s | 5.88 s |
+| TPOT / TTFT, 7,680-token prompt | | | 21.7 ms / 185 s | 20.6 ms / 200 s |
+| drafts accepted at 256 / 7,680 | 81% at 256 | 80% at 256 | 80 / 73% | 90 / 74% |
+| device memory at rest | 24.5 GiB | 24.5 GiB | 23.0 GiB | 24.5 GiB |
+| GSM8K strict / flexible match | | | 0.455 / 0.460 | 0.460 / 0.460 |
+
+- **Milestone 4, met.** At 256 tokens, four 64-row chunks, the first token comes in 6.12 s against the 257-token
+  control's 6.16 s; the tree before it took 16.3 s, three 64-row chunks, 15 four-row chunks and three single steps. The
+  trees before and after #1313 give the same 64 greedy tokens on all four probes.
+- **Milestone 5's numerics.** Here only the attention differs between main and the #1318 tree. Their greedy tokens part
+  at tokens 34, 2, 62 and 21 of the four probes' 64; each pack repeats its own tokens. Where they part, both
+  continuations read well ("red, blue, and yellow" against "red, yellow, and blue"). Native returns no
+  log-probabilities, so the margin at each parting point is not measured. GSM8K holds: 0.455 / 0.460 against 0.460 /
+  0.460 on 2026-11-01, standard error 0.035.
+- **The fold frees 1.5 GiB of device memory,** the old route's scores and probabilities.
+- **The first token is sensitive to the host.** Main's 256- and 257-token cells measured 6.77 and 6.91 s while two
+  pack exports compiled on the host, against 6.12 and 6.16 s once it was idle. The cause was not separated. Every other
+  Qwen3.6 cell here ran on an idle host.
+- **TPOT reads 5-7% above 2026-11-01's** at both prompts. The #1311 tree reads the same on this card (20.9 ms at 256
+  tokens), so the difference is the card or the host, not the code.
+
 ## Native, plugin and stock vLLM again, with concurrency and the step's programs (2026-11-01)
 
 The protocol of the 2026-10-26 table below, on main at `ea17c0964`, one session of 16 hours on one rented x16 RTX 5090

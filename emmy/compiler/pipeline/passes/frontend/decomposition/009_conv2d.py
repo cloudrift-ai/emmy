@@ -11,7 +11,7 @@ reshape restores the two output axes.
 
 from emmy.compiler.graph import Graph, Node, Tensor
 from emmy.compiler.ir.base import ConstantOp
-from emmy.compiler.ir.expr import BinaryExpr, Literal, TernaryExpr, placeholder
+from emmy.compiler.ir.expression import BinaryExpr, Literal, TernaryExpr, placeholder
 from emmy.compiler.ir.frontend.ir import Conv2dOp, MatmulOp, ReshapeOp
 from emmy.compiler.ir.tensor.ir import ElementwiseOp, IndexMapOp, IndexSource
 from emmy.compiler.pipeline import Match, Pattern

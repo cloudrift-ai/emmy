@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from emmy.compiler.dim import Dim
-from emmy.compiler.ir.expr import placeholder
+from emmy.compiler.ir.expression import placeholder
 from emmy.compiler.ir.tensor.ir import IndexMapOp, IndexSource
 
 

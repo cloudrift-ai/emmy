@@ -75,7 +75,7 @@ from emmy.compiler.graph import Graph
 from emmy.compiler.pipeline.fork import iter_leaves, leaf_for, leaf_knobs, parallel_descent_rows, parallel_expand
 from emmy.compiler.pipeline.knob import schedule_pin_fingerprint
 from emmy.compiler.pipeline.search.features import Featurizer
-from emmy.compiler.wire import kernel_identity
+from emmy.compiler.wire import kernel_bindings, kernel_identity, kernel_tile
 
 logger = logging.getLogger(__name__)
 
@@ -318,17 +318,35 @@ def _db_measured_index(db, ctx) -> _Measured:
 class _Measured(NamedTuple):
     """One evidence scan's answers, because the scan is expensive and both come from the same rows.
 
-    ``ok`` RANKS — the measured schedule rows a pick argmins over, by the kernel's exact identity.
+    ``ok`` RANKS — the measured schedule rows a pick argmins over, by the kernel's exact identity and the sizes
+    they were measured at (:func:`_measured_at` reads them).
     ``failed`` DISQUALIFIES — the kernels whose every measured variant failed, a different kind of answer
     that cannot be expressed as a latency. A kernel-set decision is no row here: it is a routing
     row on the exact kernel, priced per kernel from the pieces' own measurements
     (:meth:`SearchDB.priced_arms`) when the fork is decided."""
 
-    ok: dict[str, list[tuple[dict, float]]]
+    ok: dict[str, dict[tuple, list[tuple[dict, float]]]]
     failed: dict[str, list[float]]
 
 
 _EMPTY_MEASURED = _Measured({}, {})
+
+
+def _measured_at(ok: dict, kernel: str | None, bindings: dict) -> list[tuple[dict, float]]:
+    """The measured rows of ``kernel`` at ``bindings``, the sizes the compile binds its symbolic dims to
+    (:func:`~emmy.compiler.wire.kernel_bindings`): a row measured at other sizes timed another run of the kernel.
+    Native's attention, priced per range of windows, is one kernel measured at two windows, and its unsplit fold at
+    131,072 must not rank at its 4,096 time. A row that names no size (a dynamic kernel's, recorded before rows
+    named one) stays evidence at every size."""
+    by_size = ok.get(kernel) or {}
+    key = tuple(sorted(bindings.items()))
+    return [*by_size.get(key, ()), *(by_size.get((), ()) if key else ())]
+
+
+def _kernel_rows(ok: dict, op) -> list[tuple[dict, float]]:
+    """The measured rows of the kernel ``op`` realizes (:func:`~emmy.compiler.wire.kernel_tile`), at its sizes."""
+    tile = kernel_tile(op)
+    return _measured_at(ok, _read(kernel_identity(op)), kernel_bindings(tile) if tile is not None else {})
 
 
 def _db_measured_index_build(db, ctx) -> _Measured:
@@ -351,7 +369,7 @@ def _db_measured_index_build(db, ctx) -> _Measured:
 
     Best-effort: any failure returns an empty index so deploy falls back to the prior.
     """
-    index: dict[str, list[tuple[dict, float]]] = {}
+    index: dict[str, dict[tuple, list[tuple[dict, float]]]] = {}
     survived: set[str] = set()
     failures: dict[str, list[float]] = {}
     try:
@@ -362,7 +380,8 @@ def _db_measured_index_build(db, ctx) -> _Measured:
             survived.add(row.kernel)
             if row.stats.median <= 0:
                 continue
-            index.setdefault(row.kernel, []).append(({k: str(v) for k, v in row.knobs.items()}, float(row.stats.median)))
+            sized = index.setdefault(row.kernel, {}).setdefault(tuple(sorted(row.bindings.items())), [])
+            sized.append(({k: str(v) for k, v in row.knobs.items()}, float(row.stats.median)))
     except Exception:  # noqa: BLE001 — an evidence consult failure must never break compile
         logger.debug("measured-evidence index build failed", exc_info=True)
         return _EMPTY_MEASURED
@@ -466,7 +485,6 @@ def _route_candidates(fp: ForkPoint, index: _Measured, db) -> list[tuple[object,
     from emmy.compiler.ir.tile import TileOp  # noqa: PLC0415
     from emmy.compiler.pipeline.pipeline import _structural_domain  # noqa: PLC0415
     from emmy.compiler.pipeline.search.pins import fork_ahead, spelled_arm  # noqa: PLC0415
-    from emmy.compiler.wire import kernel_bindings  # noqa: PLC0415
 
     root = fp.root_op
     if not isinstance(root, TileOp) or root.op is None or _schedule_fork(fp):
@@ -474,7 +492,7 @@ def _route_candidates(fp: ForkPoint, index: _Measured, db) -> list[tuple[object,
     if _structural_domain(fp.options) not in (("PLACE",), ("REDUCE",)):
         return []
     kernel = _read(root.identity_key(structural=False, with_io=True))
-    measured = list(index.ok.get(kernel, ()))
+    measured = list(_measured_at(index.ok, kernel, kernel_bindings(root)))
     if db is not None and kernel is not None:
         measured.extend((arm, us) for arm, us in db.priced_arms(fp.ctx, kernel, bindings=kernel_bindings(root)) if fork_ahead(root, arm))
     out: list[tuple[object, float]] = []
@@ -502,7 +520,6 @@ def _layout_candidates(fp: ForkPoint, index: _Measured, db) -> list[tuple[object
     from emmy.compiler.pipeline.pipeline import _is_structural_option, _structural_domain  # noqa: PLC0415
     from emmy.compiler.pipeline.search.pins import fork_ahead  # noqa: PLC0415
     from emmy.compiler.pipeline.search.slice import single_node_graph  # noqa: PLC0415
-    from emmy.compiler.wire import kernel_bindings  # noqa: PLC0415
 
     if _structural_domain(fp.options) != ("LAYOUT",):
         return []
@@ -521,7 +538,7 @@ def _layout_candidates(fp: ForkPoint, index: _Measured, db) -> list[tuple[object
             continue
         # The kernel the arm leaves: a structural arm's fresh kernel, or the root carrying this fork's folded receipt.
         left = tile if structural else option.expand()[0]
-        times = [us for _, us in index.ok.get(kernel, ())]
+        times = [us for _, us in _measured_at(index.ok, kernel, kernel_bindings(tile))]
         if db is not None:
             times.extend(us for arm, us in db.priced_arms(fp.ctx, kernel, bindings=kernel_bindings(tile)) if fork_ahead(left, arm))
         if not times:
@@ -531,7 +548,7 @@ def _layout_candidates(fp: ForkPoint, index: _Measured, db) -> list[tuple[object
         for node in readers:
             reader = reader_kernel(fp.match.graph, node, source)
             own = _read(reader.identity_key(structural=False, with_io=True))
-            prices = [us for _, us in index.ok.get(own, ())]
+            prices = [us for _, us in _measured_at(index.ok, own, kernel_bindings(reader))]
             if db is not None and (us := db.best_per_op_time(fp.ctx, own, bindings=kernel_bindings(reader))) is not None:
                 prices.append(us)
             if db is not None and source and not node.op.placement_decided:
@@ -553,7 +570,6 @@ def _pieces_price(splice: object, ctx: Context, db) -> float | None:
     """A splice's price as the sum of its pieces' best rows (:meth:`SearchDB.best_per_op_time`), each piece
     named by the exact identity it carries once spliced, all-or-nothing — the price a routing row gets, for
     an arm whose pieces were benched with no routing row recorded (a sweep's split)."""
-    from emmy.compiler.wire import kernel_bindings  # noqa: PLC0415
 
     fragment = _leaf_graph(splice)
     total = 0.0
@@ -591,7 +607,7 @@ def _direct_measured_pick(fp: ForkPoint, blocked, db_index: dict) -> tuple[objec
                 return hit[0], hit[1], float(price)
         return None
 
-    records = db_index.get(_read(kernel_identity(fp.root_op))) if db_index else None
+    records = _kernel_rows(db_index, fp.root_op) if db_index else None
     return offered(records) if records else None
 
 
@@ -660,7 +676,7 @@ def _stream_tiers(fp: ForkPoint, the_prior, node_blocked, db_idx: dict) -> tuple
     from emmy.compiler.pipeline.search.ranking import later_arms  # noqa: PLC0415
 
     featurizer = Featurizer.of(fp.ctx)
-    measured = db_idx.get(_read(kernel_identity(fp.root_op)), []) if db_idx else []
+    measured = _kernel_rows(db_idx, fp.root_op) if db_idx else []
     arms = later_arms()
     # Per-source running bests: (price, canonical_row_key, leaf, knobs).
     best_db: tuple | None = None

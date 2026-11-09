@@ -4,7 +4,7 @@ Two layers:
 
 * :func:`lane_bank_distribution` — pure lane→bank oracle. Decodes an intra-CTA thread id
   ``warp_id*32 + lane`` per the same axis flattening as ``Tile``'s render, evaluates a Load's
-  slab-relative ``Expr`` index per lane against row-major strides over the slab extents, and
+  slab-relative ``Expression`` index per lane against row-major strides over the slab extents, and
   tallies per-bank distinct addresses (4-byte banks — a sub-word element dtype packs
   ``4 // elem_bytes`` elements per bank word). Free vars not in ``thread_axes`` and not in
   ``extra_env`` are zero-bound (bank distribution is invariant to warp-uniform offsets).
@@ -28,7 +28,7 @@ from math import prod
 
 from emmy.compiler.graph import Graph
 from emmy.compiler.ir.axis import Axis
-from emmy.compiler.ir.expr import Expr
+from emmy.compiler.ir.expression import Expression
 from emmy.compiler.ir.stmt import Load
 
 WARP_SIZE = 32
@@ -214,7 +214,7 @@ def _row_major_strides(extents: tuple[int, ...]) -> list[int]:
 
 
 def lane_bank_distribution(
-    cache_index: tuple[Expr, ...],
+    cache_index: tuple[Expression, ...],
     cache_extents: tuple[int, ...],
     thread_axes: tuple[Axis, ...],
     *,
@@ -238,7 +238,7 @@ def lane_bank_distribution(
     coord (e.g. ``{k_loop: 5}``).
 
     Returns ``None`` if ``len(cache_index) != len(cache_extents)`` or
-    if ``Expr.eval`` raises (KeyError / TypeError) for any lane.
+    if ``Expression.eval`` raises (KeyError / TypeError) for any lane.
     """
     if len(cache_index) != len(cache_extents) or not cache_extents:
         return None
@@ -378,7 +378,7 @@ def _binding_result(b: StageBinding, k_iter: int, warp_id: int) -> BankConflictR
         smem_bytes=prod(extents) * elem_bytes,
         load_name=b.load.names[0],
         tile_op_name=b.tile_op_name,
-        index_repr=tuple(e.pretty() for e in b.load.index),
+        index_repr=tuple(str(e) for e in b.load.index),
         lane_banks=dist.lane_banks,
         lane_addrs=dist.lane_addrs,
         counts=dist.counts,
@@ -395,7 +395,7 @@ def _full_sweep(b: StageBinding, r: BankConflictResult, warp_id: int) -> None:
     """Populate the visualizer's per-cell provenance: sweep the innermost enclosing loop
     (static extents only), touch each lane's 2-D slab cell, and mark the cells of any bank with
     more than one distinct word that iteration. 2-D slabs only (the ring slot offset rides the
-    row expr, so it is swept naturally)."""
+    row expression, so it is swept naturally)."""
     extents = tuple(int(e) for e in b.slab.extents)
     if len(extents) != 2:
         return

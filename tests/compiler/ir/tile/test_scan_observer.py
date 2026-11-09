@@ -10,49 +10,44 @@ the reduce loop, after the observer stmts)."""
 from __future__ import annotations
 
 import dataclasses
+from textwrap import indent
 
 import pytest
 
 from emmy.compiler.ir.axis import Axis
-from emmy.compiler.ir.elementwise import ElementwiseImpl
-from emmy.compiler.ir.expr import Var
 from emmy.compiler.ir.pure import Lambda
 from emmy.compiler.ir.pure.fold import Fold
 from emmy.compiler.ir.pure.twist import SOFTMAX, Twist
-from emmy.compiler.ir.stmt import Accum, Assign, Body, Load, Loop, Write
+from emmy.compiler.ir.stmt import Loop, Write, parse_body
 from emmy.compiler.ir.tile import OutputSpec, extract_output_specs, observed_result_names
 from emmy.compiler.pipeline.passes.tile._fromloop import fold_from_loop, lift_loop_op, scan_from_loop
 
 
-def _scan_loop(axis_name: str = "k", acc: str = "acc", out: str = "out") -> Loop:
+def _scan_text(axis_name: str = "k", acc: str = "acc", out: str = "out", *, store: bool = True) -> str:
     """The 025_lower_scan shape: a reduce loop that both folds and stores per iteration."""
-    index = (Var("m"), Var(axis_name))
-    return Loop(
-        axis=Axis(axis_name, 16),
-        body=Body(
-            (
-                Load(name="x0", input="x", index=index),
-                Accum(name=acc, value="x0", op=ElementwiseImpl("add"), axes=(axis_name,)),
-                Write(output=out, index=index, value=acc),
-            )
-        ),
-    )
+    lines = [
+        f"for {axis_name} in 0..16:",
+        f"    x0 = load x[m, {axis_name}]",
+        f"    {acc} <- add({acc}, x0) over {axis_name}",
+        *([f"    {out}[m, {axis_name}] = {acc}"] if store else []),
+    ]
+    return "\n".join(lines)
+
+
+def _scan_loop(axis_name: str = "k", acc: str = "acc", out: str = "out") -> Loop:
+    (loop,) = parse_body(_scan_text(axis_name, acc, out))
+    return loop
 
 
 def _sum_fold(axis_name: str = "k", acc: str = "acc") -> Fold:
-    loop = _scan_loop(axis_name, acc)
-    pure = Loop(axis=loop.axis, body=Body(tuple(s for s in loop.body if not isinstance(s, Write))))
+    (pure,) = parse_body(_scan_text(axis_name, acc, store=False))
     return fold_from_loop(pure)
 
 
 def _observed(fold: Fold, obs: str | None = None) -> Fold:
     (acc,) = fold.combine.results
     obs = obs or f"{acc}__obs"
-    observe = Lambda(
-        params=(fold.axis, acc),
-        body=Body((Assign(name=obs, op="copy", args=(acc,)),)),
-        results=(obs,),
-    )
+    observe = Lambda(params=(fold.axis, acc), body=parse_body(f"{obs} = copy({acc})"), results=(obs,))
     return dataclasses.replace(fold, observe=observe)
 
 
@@ -66,28 +61,32 @@ def test_observer_formation_gates() -> None:
     assert scan.exposes == ("acc", "acc__obs")
 
     with pytest.raises(AssertionError, match="zero-axis"):
-        Fold(lift=Lambda(params=(), body=Body(()), results=()), observe=scan.observe)
+        Fold(lift=Lambda(params=(), body=parse_body(""), results=()), observe=scan.observe)
     with pytest.raises(AssertionError, match="positionally"):
         # A closed λ over the same names, bound in the wrong ORDER: the observer's contract is
         # positional — the iteration var first, then the carried state.
-        body = Body((Assign(name="t", op="copy", args=("acc",)),))
-        dataclasses.replace(fold, observe=Lambda.closing(("acc", "k"), body, ("t",)))
+        dataclasses.replace(fold, observe=Lambda.closing(("acc", "k"), parse_body("t = copy(acc)"), ("t",)))
     with pytest.raises(AssertionError, match="FRESH"):
         # Observing the state under its own name is ill-formed — the boundary distinguishes a
         # streamed store from a post-fold store by the name.
-        dataclasses.replace(fold, observe=Lambda(params=("k", "acc"), body=Body(()), results=("acc",)))
+        dataclasses.replace(fold, observe=Lambda(params=("k", "acc"), body=parse_body(""), results=("acc",)))
 
 
 def test_exp_family_declines_an_observer() -> None:
     names = ("m_i", "l_i")
     lift = Lambda(
         params=("k",),
-        body=Body((Load(name="s0", input="s", index=(Var("k"),)), Assign(name="e", op="exp", args=("s0",)))),
+        body=parse_body(
+            """
+            s0 = load s[k]
+            e = exp(s0)
+            """
+        ),
         results=("s0", "e"),
     )
     twist = Twist(recipe=SOFTMAX, channels=(0,))
     fold = Fold(lift=lift, init=(float("-inf"), 0.0), base=Lambda.componentwise(SOFTMAX.base[:2], names), twist=twist)
-    observe = Lambda(params=("k", *names), body=Body((Assign(name="m__obs", op="copy", args=("m_i",)),)), results=("m__obs",))
+    observe = Lambda(params=("k", *names), body=parse_body("m__obs = copy(m_i)"), results=("m__obs",))
     with pytest.raises(AssertionError, match="does not support a per-step observer"):
         dataclasses.replace(fold, observe=observe)
 
@@ -132,8 +131,14 @@ def test_scan_from_loop_lifts_the_per_step_store() -> None:
 
 
 def test_scan_from_loop_rejects_a_store_off_the_state() -> None:
-    loop = _scan_loop()
-    bad = Loop(axis=loop.axis, body=Body((*loop.body[:-1], Write(output="out", index=(Var("m"), Var("k")), value="x0"))))
+    (bad,) = parse_body(
+        """
+        for k in 0..16:
+            x0 = load x[m, k]
+            acc <- add(acc, x0) over k
+            out[m, k] = x0
+        """
+    )
     with pytest.raises(ValueError, match="may only observe the carried state"):
         scan_from_loop(bad)
 
@@ -160,7 +165,8 @@ def test_observer_free_reconstitution_is_untouched() -> None:
     """A plain reduce with a post-fold store keeps its kernel-tail position — the observed-name
     membership, not loop-defines, is what streams a store."""
     fold = _sum_fold()
-    spec = OutputSpec(write=Write(output="out", index=(Var("m"),), value="acc"))
+    (write,) = parse_body("out[m] = acc")
+    spec = OutputSpec(write=write)
     lowered = fold.lower(fold.free_axes, (spec,), axes=(Axis("k", 8),))
     assert isinstance(lowered[-1], Write), "the post-fold store stays the kernel tail"
     (loop,) = [s for s in lowered if isinstance(s, Loop)]
@@ -175,8 +181,7 @@ def test_lifted_scan_kernel_shape() -> None:
     boundary — the TileOp the schedule walk and the materializer consume."""
     from emmy.compiler.ir.loop import LoopOp
 
-    scan = _scan_loop()
-    op = LoopOp(body=(Loop(axis=Axis("m", 4), body=Body((scan,))),))
+    op = LoopOp(body=parse_body("for m in 0..4:\n" + indent(_scan_text(), "    ")))
     tile = lift_loop_op(op, name="k_scan")
     # Canonical renumbering renames the accumulator; the observed name follows in lockstep.
     (observed,) = observed_result_names(tile.op)

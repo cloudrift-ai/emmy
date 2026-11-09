@@ -43,7 +43,12 @@ is one launch sequence at every position of a window and replays as one graph. N
 hand-written: the step ends at the FP32 logits and the greedy token, a compiled reduction over them, and the runtime
 samples on the host only at positive temperature (below), so the same export serves any device the compiler targets.
 Attention keeps its dot products, scores and softmax in FP32, which avoids losing near-tied scores at large
-magnitudes. Each query head reads its key-value head's cache. The value expectation reads the FP32 probabilities as the
+magnitudes. A decode or verify step attends per key-value head: its scores are `[rows, kv_heads, group, window]` and
+its output `[rows, kv_heads, group, head_dim]`, the bytes of `[rows, heads * head_dim]`. A kernel's axes follow its
+output's storage order, so the group is the axis the chunk tier folds as its rows, the group's query heads share one
+read of their key-value head's cache, and a split across the window combines the slices' partial states. A step's few
+rows stay on the grid, each reading the cache once. A prefill chunk attends per query head, the chunk's rows the fold's
+rows, and each query head reads its key-value head's cache. The value expectation reads the FP32 probabilities as the
 softmax computes them and accumulates in FP32; only the output is rounded to the model dtype. Rounding the probabilities
 to the model dtype first, as attention in the model dtype does, put a divide and a cast between the exponent and the
 value product, which is not the expectation the softmax twist recognizes, so the text attention could never fold chunk
@@ -194,7 +199,14 @@ finite value, as vLLM's does. The rotary program writes a chunk of each at `posi
 a scatter into a windowed buffer leaves its store no grid. The attention program reads only the cache's leading
 `cache_tokens` positions, a symbolic size the runtime sets per step to the positions read, rounded up to 4,096 (runtime
 `ARCHITECTURE.md`, "Cached generation"), so a step's attention costs what its window holds rather than the whole
-context. Its programs compile once with the window symbolic, and their golden rows bench at the symbol's hint. The
+context. Its programs compile with the window symbolic, once per range of windows (`WINDOW_RANGES`): a short range
+from the runtime's smallest window and a long one, each priced at one window, its hint, where its golden rows bench
+and its pick is made. A kernel's identity has no sizes, so both ranges' programs lower to one kernel with rows at
+two bindings, and a long window's split is measured where it runs instead of at the short one; a pick reads only the
+rows at its own window. A bench puts a program's rows last in the window it is priced at (`position` is the window
+less the rows), since a causal chunk reads keys only up to its rows. The long range's twins are named apart
+(`attend64-long-native`). The runtime runs a step's range's program (runtime `ARCHITECTURE.md`). The long range
+starts at 16,384, where on the RTX 5090 its picks stop losing to the short range's in the 27B's verify step. The
 cache is paged along its positions only when a page (`export_model(page_tokens=…)`, `emmy generate --page-tokens`) is
 shorter than the context; the runtime then allocates every page at load and binds the tables (see the runtime's
 paged-buffer contract). The default page spans the context, which is the flat buffer; a smaller page changes only the
@@ -325,21 +337,22 @@ the image's row, as the plugin's drafter does.
 
 ## Sampling contract
 
-Generation artifact version 15 ends the decode step and every prefill chunk at the FP32 logits and the greedy token, a
+Generation artifact version 16 ends the decode step and every prefill chunk at the FP32 logits and the greedy token, a
 chunk's of its last row, adds the prefill width, with a separate prefill program when that width exceeds one, lists the
 buffers a step carries, empty for dense Qwen3, reads the pages of every buffer the pager holds from the pack, reads the
-cache to the `cache_tokens` window, for a pack with images names its tower (`vision`: its widths, the image token and
-the geometry the host writes the tower's inputs at, and its pools), and names the tokens a verify program drafts
-(`drafts`, zero without one). Every program's inputs are the position and the tokens it embeds, with a drafter the
-decode and prefill programs' also the token after each, and with images each row's M-RoPE position and image row (a
-verify step's only its rows' positions); the decode program's outputs are the logits and the lowest token ID among their
-maxima, which a compiled reduction selects on the device, a prefill program's its last row's, and the verify program's
-the logits and picks of its rows, the accepted count and each draft (`draft1` ...). At temperature zero the runtime
-downloads that token alone; at positive temperature it downloads the logits — one vocabulary-sized FP32 transfer per
-generated token, none for a chunk that generates none — and samples on the host. The head keeps its scores in FP32, so
-16-bit rounding cannot create a false maximum tie. Older generation artifacts must be exported again; the underlying
-execution-plan format is unchanged. Temperature must be finite and nonnegative, and top-p must lie in `(0, 1]`.
-Nonfinite logits fail the request. Top-k is unsupported.
+cache to the `cache_tokens` window through each range of windows' attention, for a pack with images names its tower
+(`vision`: its widths, the image token and the geometry the host writes the tower's inputs at, and its pools), and
+names the tokens a verify program drafts (`drafts`, zero without one). Every program's inputs are the position and the
+tokens it embeds, with a drafter the decode and prefill programs' also the token after each, and with images each
+row's M-RoPE position and image row (a verify step's only its rows' positions); the decode program's outputs are the
+logits and the lowest token ID among their maxima, which a compiled reduction selects on the device, a prefill
+program's its last row's, and the verify program's the logits and picks of its rows, the accepted count and each draft
+(`draft1` ...). At temperature zero the runtime downloads that token alone; at positive temperature it downloads the
+logits — one vocabulary-sized FP32 transfer per generated token, none for a chunk that generates none — and samples on
+the host. The head keeps its scores in FP32, so 16-bit rounding cannot create a false maximum tie. Older generation
+artifacts must be exported again; the underlying execution plan adds only the range an attention launch runs in
+(`size_range`). Temperature must be finite and nonnegative, and top-p must lie in `(0, 1]`. Nonfinite logits fail the
+request. Top-k is unsupported.
 
 Greedy selection is a traced module the compiler lowers with the reductions it has: the peak of the logits, then the
 largest negated token ID among the tokens at the peak, so ties resolve to the lowest ID. A nonfinite logit leaves no

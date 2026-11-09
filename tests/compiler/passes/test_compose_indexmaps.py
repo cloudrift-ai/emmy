@@ -4,7 +4,7 @@ import numpy as np
 
 from emmy.compiler.graph import Graph, Tensor
 from emmy.compiler.ir.base import InputOp
-from emmy.compiler.ir.expr import placeholder
+from emmy.compiler.ir.expression import placeholder
 from emmy.compiler.ir.tensor.ir import IndexMapOp, IndexSource
 from emmy.compiler.pipeline import Pipeline
 

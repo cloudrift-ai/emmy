@@ -8,9 +8,9 @@ import pytest
 from emmy.compiler.dim import Dim
 from emmy.compiler.graph import Tensor
 from emmy.compiler.ir.axis import Axis, Window
-from emmy.compiler.ir.expr import Var
+from emmy.compiler.ir.expression import Var
 from emmy.compiler.ir.loop import LoopOp
-from emmy.compiler.ir.stmt import Assign, Write
+from emmy.compiler.ir.stmt import parse_body
 from emmy.compiler.ir.tile import OutputSpec, Placement, TileOp
 from emmy.compiler.ir.tile.path import sites
 from emmy.compiler.pipeline.passes.tile._row import _align_owned_sweeps, lift_kernel, reformed
@@ -36,8 +36,9 @@ def _siblings(
     second_index = ("k", "n", "p") if cross_coordinate else ("k", "p", "q") if rectangular else ("k", "p")
     second = contraction(k, slab("x1", "x", "m", "k"), (slab("n" if captured_name else "w1v", "w1", *second_index), "acc1"))
     if value_coordinate:
-        second = projection((second,), body=(Assign(name="acc1_value", op="add", args=("acc1", "p")),), results=("acc1_value",))
+        second = projection((second,), body=parse_body("acc1_value = add(acc1, p)"), results=("acc1_value",))
     root = projection((first, second), results=("acc0", "acc1_value" if value_coordinate else "acc1"))
+    out1_index = "m, p, q" if rectangular else "m, p + n" if cross_write else "m, p"
     return TileOp(
         op=root,
         place=Placement(free=(m,)),
@@ -49,13 +50,9 @@ def _siblings(
         },
         outputs={"out0": Tensor("out0", (1, 8), "f16"), "out1": Tensor("out1", (1, 2, 4) if rectangular else (1, second_extent), "f16")},
         output_specs=(
-            OutputSpec(write=Write(output="out0", index=(Var("m"), Var("n")), value="acc0"), sweep=(n,)),
+            OutputSpec(*parse_body("out0[m, n] = acc0"), sweep=(n,)),
             OutputSpec(
-                write=Write(
-                    output="out1",
-                    index=(Var("m"), Var("p"), Var("q")) if rectangular else (Var("m"), Var("p") + Var("n") if cross_write else Var("p")),
-                    value="acc1_value" if value_coordinate else "acc1",
-                ),
+                *parse_body(f"out1[{out1_index}] = {'acc1_value' if value_coordinate else 'acc1'}"),
                 sweep=(p, q) if rectangular else (p,),
             ),
         ),
@@ -172,8 +169,8 @@ def _transposed_siblings(*, incompatible=False, repeated=False, batched=False) -
             "out1": Tensor("out1", (2, 3, 2, 4) if batched else (2, 3, 4), "f32"),
         },
         output_specs=(
-            OutputSpec(write=Write(output="out0", index=tuple(Var(axis.name) for axis in first_sweep), value="acc0"), sweep=first_sweep),
-            OutputSpec(write=Write(output="out1", index=tuple(Var(axis.name) for axis in second_sweep), value="acc1"), sweep=second_sweep),
+            OutputSpec(*parse_body(f"out0[{', '.join(axis.name for axis in first_sweep)}] = acc0"), sweep=first_sweep),
+            OutputSpec(*parse_body(f"out1[{', '.join(axis.name for axis in second_sweep)}] = acc1"), sweep=second_sweep),
         ),
     )
 
@@ -258,15 +255,15 @@ def _row_scaled() -> TileOp:
     """A residual scaled by its row's statistic, minted the way a cut carves it from its parent's tree: the
     residual read ahead of the statistic, the output's columns a store sweep."""
     m, n, r = Axis("m", 8), Axis("n", 16), Axis("r", 4)
-    stat = reduction(r, (slab("sample", "s", "m", "r"),), (Assign(name="stat__v", op="copy", args=("sample",)),), ("stat",))
-    root = projection((slab("res", "x", "m", "n"), stat), (Assign(name="result", op="multiply", args=("res", "stat")),), ("result",))
+    stat = reduction(r, (slab("sample", "s", "m", "r"),), parse_body("stat__v = copy(sample)"), ("stat",))
+    root = projection((slab("res", "x", "m", "n"), stat), parse_body("result = multiply(res, stat)"), ("result",))
     return TileOp(
         op=root,
         place=Placement(free=(m,)),
         axes=(m, n, r),
         inputs={"s": Tensor("s", (8, 4), "f32"), "x": Tensor("x", (8, 16), "f32")},
         outputs={"out": Tensor("out", (8, 16), "f32")},
-        output_specs=(OutputSpec(write=Write(output="out", index=(Var("m"), Var("n")), value="result"), sweep=(n,)),),
+        output_specs=(OutputSpec(*parse_body("out[m, n] = result"), sweep=(n,)),),
     )
 
 
@@ -287,14 +284,14 @@ def test_a_piece_carved_with_a_shorter_grid_takes_its_own_body_grid() -> None:
     # A piece carved with one grid axis whose body opens two: formed alone it binds both, so formed in its program it
     # must too — a row measured on the piece alone and one measured in the program describe one kernel.
     m, n = Axis("m", 8), Axis("n", 16)
-    root = projection((slab("v", "x", "m", "n"),), (Assign(name="result", op="negative", args=("v",)),), ("result",))
+    root = projection((slab("v", "x", "m", "n"),), parse_body("result = negative(v)"), ("result",))
     tile = TileOp(
         op=root,
         place=Placement(free=(m,)),
         axes=(m, n),
         inputs={"x": Tensor("x", (8, 16), "f32")},
         outputs={"out": Tensor("out", (8, 16), "f32")},
-        output_specs=(OutputSpec(write=Write(output="out", index=(Var("m"), Var("n")), value="result"), sweep=(n,)),),
+        output_specs=(OutputSpec(*parse_body("out[m, n] = result"), sweep=(n,)),),
     )
     formed = reformed(tile, {})
     own = lift_kernel(LoopOp(body=tile.loop_body), name=tile.name, shapes={})
@@ -314,12 +311,12 @@ def test_a_kernel_without_a_contraction_runs_its_unit_stride_store_axis_fastest(
     r, c, s = Axis("r", 2), Axis("c", 8), Axis("s", 4)
     index = (Var("r"), Var("c") + Var("s") * 8)
     piece = TileOp(
-        op=projection((slab("x0", "x", *index), slab("y0", "y", "r", "c")), body=(Assign(name="v", op="add", args=("x0", "y0")),)),
+        op=projection((slab("x0", "x", *index), slab("y0", "y", "r", "c")), body=parse_body("v = add(x0, y0)")),
         place=Placement(free=(r, c, s)),
         axes=(r, c, s),
         inputs={"x": Tensor("x", (2, 32), "f16"), "y": Tensor("y", (2, 8), "f16")},
         outputs={"out": Tensor("out", (2, 32), "f16")},
-        output_specs=(OutputSpec(write=Write(output="out", index=index, value="v")),),
+        output_specs=(OutputSpec(*parse_body("out[r, c + s * 8] = v")),),
     )
     formed = reformed(piece, {})
     alone = lift_kernel(formed.source, name=piece.name, shapes={})
@@ -332,12 +329,12 @@ def test_a_kernel_without_a_contraction_runs_an_axis_its_store_does_not_name_slo
     so consecutive threads still write consecutive addresses along ``c``, in the piece and alone."""
     c, p = Axis("c", 8), Axis("p", 4)
     piece = TileOp(
-        op=projection((slab("x0", "x", "p", "c"), slab("y0", "y", "c")), body=(Assign(name="v", op="add", args=("x0", "y0")),)),
+        op=projection((slab("x0", "x", "p", "c"), slab("y0", "y", "c")), body=parse_body("v = add(x0, y0)")),
         place=Placement(free=(c, p)),
         axes=(c, p),
         inputs={"x": Tensor("x", (4, 8), "f16"), "y": Tensor("y", (8,), "f16")},
         outputs={"out": Tensor("out", (8,), "f16")},
-        output_specs=(OutputSpec(write=Write(output="out", index=(Var("c"),), value="v")),),
+        output_specs=(OutputSpec(*parse_body("out[c] = v")),),
     )
     formed = reformed(piece, {})
     alone = lift_kernel(formed.source, name=piece.name, shapes={})

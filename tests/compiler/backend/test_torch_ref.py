@@ -9,7 +9,7 @@ from emmy.compiler.backend import torch_ref
 from emmy.compiler.backend.numpy import NumpyBackend
 from emmy.compiler.graph import Graph, Tensor
 from emmy.compiler.ir.base import ConstantOp, InputOp
-from emmy.compiler.ir.expr import BinaryExpr, Literal, TernaryExpr, placeholder
+from emmy.compiler.ir.expression import BinaryExpr, Literal, TernaryExpr, placeholder
 from emmy.compiler.ir.frontend.ir import LinearOp, MatmulOp, RmsNormOp, SoftmaxOp
 from emmy.compiler.ir.tensor.ir import ElementwiseOp, GatherOp, IndexMapOp, IndexSource, RangeOp, ReduceOp, ScanOp, ScatterOp
 
@@ -493,10 +493,10 @@ def test_indexmap_recurrence_patch_uses_tensor_ternary_coordinates():
 
 
 @pytest.mark.parametrize(("condition", "expected"), [(1, 7), (0, 9)])
-def test_index_expr_ternary_preserves_scalar_condition(condition, expected):
-    expr = TernaryExpr(Literal(condition, "int"), Literal(7, "int"), Literal(9, "int"))
+def test_index_expression_ternary_preserves_scalar_condition(condition, expected):
+    expression = TernaryExpr(Literal(condition, "int"), Literal(7, "int"), Literal(9, "int"))
 
-    assert torch_ref._idx_expr(expr, {}) == expected
+    assert torch_ref._idx_expression(expression, {}) == expected
 
 
 def test_symbolic_shapes_resolve_from_input_tensors():
