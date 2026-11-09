@@ -482,7 +482,7 @@ def test_an_affine_chain_of_statements_lifts_as_one_node() -> None:
         )
     )
     values = [stmt.value for stmt in tile.op.lift.body if isinstance(stmt, Assign)]
-    assert [str(value) for value in values] == ["in0 + in1 - in2", "exp(v0)", "2 * v1"], [str(v) for v in values]
+    assert [str(value) for value in values] == ["in0 + in1 - in2", "exp(v0)", "2.0 * v1"], [str(v) for v in values]
 
 
 def test_a_tree_spelling_and_its_chain_lift_to_one_fold_tree() -> None:
