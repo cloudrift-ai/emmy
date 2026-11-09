@@ -91,6 +91,12 @@ def test_stamp_types_preserves_integer_assign_and_write(op):
     assert "u32 out[0] = result" in lines
 
 
+def test_stamp_types_keeps_a_declared_integer_width_on_integer_algebra():
+    """A narrower integer dtype declared on integer algebra is the result's width — the normal form spells a narrowing
+    as the dtype of the definition it narrows, where a separate ``copy`` once did — and the stamp keeps it."""
+    assert "u16 result = a + b" in _stamped("u16 result = add(a, b)")
+
+
 def test_stamp_types_repairs_a_stale_float_stamp_on_integer_algebra():
     assert "u32 result = a << b" in _stamped("f32 result = left_shift(a, b)")
 

@@ -151,13 +151,13 @@ def _stamped(ctx: _StampCtx, name: str) -> str | None:
 
 def _stamp_assign(s: Assign, ctx: _StampCtx) -> Assign:
     result_dt = dtype_get(promoted_dtype(s.value, lambda name: _stamped(ctx, name)))
-    if s.dtype is not None and result_dt.np.kind not in "iu":
+    if s.dtype is not None and (result_dt.np.kind not in "iu" or s.dtype.np.kind in "iu"):
         ctx.ssa_dtypes[s.name] = s.dtype
         return s
     # Integer algebra is determined by its operands. Structural lowering can carry an old f32
     # stamp from a once-untyped body; keeping it would turn shifts into unsupported float ops.
-    # Explicit casts use ``copy`` / ``bitcast``, whose inferred result is not integer and therefore
-    # retain their declared dtype above.
+    # An integer dtype declared on integer algebra is a narrowing or widening of its result — the normal form
+    # spells a conversion as the dtype of the definition it converts, not as a ``copy`` of its own — and stays.
     # Overflow guard: a square (``x * x``) or a ``pow`` of an fp16 value can
     # blow past fp16's 65504 ceiling, giving inf → a garbage reduction
     # (RMSNorm's mean-of-squares). torch computes that reduction in fp32; do
