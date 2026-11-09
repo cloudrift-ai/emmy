@@ -184,7 +184,7 @@ def test_parallel_snapshot_copy_keeps_intermediate_casts():
         for stmt in body:
             if isinstance(stmt, Write):
                 stmts.extend(parse_body(f"f16 narrowed = copy({stmt.value})"))
-                stmt = replace(stmt, values=("narrowed",))
+                stmt = stmt.replace(values=("narrowed",))
             elif stmt.nested():
                 stmt = stmt.with_bodies(tuple(cast_snapshot(b) for b in stmt.nested()))
             stmts.append(stmt)

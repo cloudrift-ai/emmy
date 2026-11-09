@@ -286,7 +286,7 @@ def test_seed_tensor_keeps_unit_dimensions_on_cuda(register):
     op = source.nodes["out"].op
     zero = Literal(0, "int")
     source.nodes["out"].op = replace(
-        op, body=op.body.map(lambda s: replace(s, index=(zero, s.index[0], zero, s.index[1])) if isinstance(s, (Carry, Pre)) else s)
+        op, body=op.body.map(lambda s: s.replace(index=(zero, s.index[0], zero, s.index[1])) if isinstance(s, (Carry, Pre)) else s)
     )
     pins = {"FAST_MATH": False}
     if register:

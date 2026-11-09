@@ -8,6 +8,7 @@ use crate::axis::{Axis, Dim};
 use crate::body::{Body, exposed_defines, free_names};
 use crate::expr::{Expression, SimplifyCtx, affine_form};
 use crate::numbering::{Key, Tag};
+use crate::order::is_protocol;
 use crate::statement::*;
 use crate::{Name, Result};
 
@@ -221,14 +222,44 @@ pub(crate) fn merge_sibling_reduce_loops_here(body: &Body) -> Body {
             if !clashing.is_disjoint(&carried_out(&incoming)) {
                 continue;
             }
-            let mut between_defs: HashSet<Name> = HashSet::new();
-            for (k, between) in items.iter().enumerate().take(j).skip(i + 1) {
-                if !consumed.contains(&k) {
-                    between_defs.extend(exposed_defines(between));
+            // A statement between the loops that the incoming loop reads blocks the merge, unless it is a leaf that
+            // reads nothing the first loop or the span between defines: then it moves above the first loop, where the
+            // merged loop reads it. The form must not depend on where the value started — the lowering may spell it
+            // between the loops and the placement step would sink it back there — so the merge moves it, not the
+            // other way round.
+            let between: Vec<usize> = (i + 1..j).filter(|k| !consumed.contains(k)).collect();
+            let span_defs: HashSet<Name> = between
+                .iter()
+                .flat_map(|&k| exposed_defines(&items[k]))
+                .collect();
+            let mut hoisted: Vec<usize> = Vec::new();
+            let mut blocked = false;
+            for &k in &between {
+                let defines: HashSet<Name> = exposed_defines(&items[k]).into_iter().collect();
+                if defines.is_disjoint(&reads) {
+                    continue;
                 }
+                let needs: HashSet<Name> = free_names(&items[k]).into_iter().collect();
+                let movable = items[k].nested().is_empty()
+                    && !matches!(
+                        &*items[k],
+                        Statement::Write(_) | Statement::Accum(_) | Statement::Carry(_)
+                    )
+                    && !is_protocol(&items[k])
+                    && needs.is_disjoint(&merged_defs)
+                    && needs.is_disjoint(&span_defs);
+                if !movable {
+                    blocked = true;
+                    break;
+                }
+                hoisted.push(k);
             }
-            if !between_defs.is_disjoint(&reads) {
+            if blocked {
                 continue;
+            }
+            for &k in &hoisted {
+                out.push(items[k].clone());
+                consumed.insert(k);
             }
             let renamed = rename_apart(&incoming, &clashing, &merged_defs);
             merged = Loop {
@@ -390,6 +421,51 @@ mod tests {
             ",
         );
         assert_eq!(loop_axes(&out).len(), 2, "sequential reduces stay distinct");
+    }
+
+    #[test]
+    fn merge_moves_an_independent_value_the_second_loop_reads_above_the_first() {
+        // The scale the second contraction reads depends on nothing the first loop computes; spelled between the
+        // loops it must not keep them apart, or the form would depend on where the lowering put it.
+        let out = merged(
+            "
+            s0 = rsqrt(acc_a)
+            for k in 0..16:
+                x1 = load X[0, k]
+                m1 = multiply(x1, s0)
+                acc0 <- add(acc0, m1)
+            s1 = rsqrt(acc_b)
+            for k in 0..16:
+                x2 = load X[1, k]
+                m2 = multiply(x2, s1)
+                acc1 <- add(acc1, m2)
+            ",
+        );
+        assert_eq!(loop_axes(&out), ["k"], "one loop holds both contractions");
+        let text = crate::text::body_text(&out).unwrap();
+        let (loop_at, s1_at) = (text.find("for k").unwrap(), text.find("s1 = ").unwrap());
+        assert!(
+            s1_at < loop_at,
+            "the scale moved above the merged loop:\n{text}"
+        );
+    }
+
+    #[test]
+    fn merge_keeps_loops_apart_when_the_value_between_reads_the_first() {
+        // A value the second loop reads that the first loop produces is a dependence: the loops stay sequential.
+        let out = merged(
+            "
+            for k in 0..16:
+                x1 = load X[k]
+                acc0 <- add(acc0, x1)
+            s = rsqrt(acc0)
+            for k in 0..16:
+                x2 = load X[k]
+                m2 = multiply(x2, s)
+                acc1 <- add(acc1, m2)
+            ",
+        );
+        assert_eq!(loop_axes(&out).len(), 2);
     }
 
     #[test]
