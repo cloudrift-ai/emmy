@@ -666,7 +666,6 @@ mod tests {
             .unwrap()
     }
 
-    /// `(c·x) % (c·y)` is `c·(x % y)`: the common factor scales the remainder, it does not vanish.
     #[test]
     fn the_affine_form_reads_a_negated_coordinate() {
         // The normal form spells `key - row` as `-row + key`: the same coefficients as the subtraction.
@@ -688,6 +687,7 @@ mod tests {
         assert_eq!(from_negation, BTreeMap::from([(row, -1), (key, 1)]));
     }
 
+    /// `(c·x) % (c·y)` is `c·(x % y)`: the common factor scales the remainder, it does not vanish.
     #[test]
     fn the_modulo_factor_cancel_keeps_the_value() {
         for (coeff, modulus) in [(8, 64), (2, 4), (3, 6), (4, 16), (16, 128), (2, 8), (5, 10)] {

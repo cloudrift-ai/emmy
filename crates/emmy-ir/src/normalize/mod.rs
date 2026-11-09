@@ -332,18 +332,18 @@ for k in 0..3:
     }
 
     #[test]
-    fn a_carry_is_the_last_word_of_its_step() {
-        // A `Pre` reads the step before and a `Carry` writes the step's state: both free in the order, the carry
-        // sorts after every pure leaf, so the serial lift meets the state's loads before its store.
+    fn a_carry_sorts_after_every_pure_leaf() {
+        // A `Pre` reads the step before and a `Carry` writes the step's state; neither orders the other by data flow,
+        // so where the carry's value is a load the order alone decides. Load, carry, pre, write is what the lift
+        // refuses (the state's store ahead of its load); the carry sorts after every pure leaf.
         let normal = crate::text::body_text(
             &normalize_uncached(&testing::body(
                 "
                 for a0 in 0..8:
                     for a1 in 0..4:
-                        acc0[a1] <- v3 seed 0
                         in0 = load U[a0, a1]
+                        acc0[a1] <- in0 seed 0
                         v2 = pre acc0[a1]
-                        v3 = add(in0, v2)
                         out[a0, a1] = v2
                 ",
             ))

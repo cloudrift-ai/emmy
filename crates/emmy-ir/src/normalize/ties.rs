@@ -235,9 +235,10 @@ pub fn unranked() -> Key {
     Key::tuple([Key::Int(3), Key::str("")])
 }
 
-/// Where a sibling sorts first: blocks, then leaves, then what carries a state or has side effects — a `Carry` is
-/// the step's last word on its state, after every `Pre` that reads the step before, which the serial lift reads as
-/// the state's store after its loads; and a block with side effects.
+/// Where a sibling sorts first: blocks, then pure leaves, then what carries a state or has side effects — a `Carry`
+/// sorts after every pure leaf, so every `Pre` that reads the step before and every write of the step precede it,
+/// which the serial lift reads as the state's store after its loads; a block with side effects shares its category,
+/// and the type-name tie puts the carry ahead of such a block.
 pub(crate) fn sibling_category(stmt: &Statement) -> i64 {
     let block = !stmt.nested().is_empty();
     if (block && stmt.has_side_effects()) || matches!(stmt, Statement::Carry(_)) {

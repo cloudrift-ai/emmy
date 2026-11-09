@@ -21,6 +21,7 @@ from collections.abc import Callable
 import numpy as np
 
 import emmy.emmy_ir as _ir
+from emmy.compiler.dtype import INTEGER_NAMES
 from emmy.compiler.wire import register as _register
 
 Expression = _ir.Expression
@@ -89,7 +90,7 @@ def _promoted(expression: Expression, dtype_of: Callable[[str], str | None]) -> 
 
 
 def _integer(dtype: str) -> bool:
-    return dtype.startswith(("i", "u", "bool"))
+    return dtype in INTEGER_NAMES or dtype == "bool"
 
 
 def apply_binop(op: str, lv: object, rv: object) -> object:
