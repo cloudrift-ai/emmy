@@ -176,6 +176,7 @@ pub(crate) fn merge_sibling_reduce_loops_here(body: &Body) -> Body {
         return body.clone();
     }
     let before = ordering_constraints(body, true);
+    let by_name = ordering_constraints(body, false);
     let mut out: Vec<Arc<Statement>> = Vec::new();
     let mut consumed: HashSet<usize> = HashSet::new();
     for (i, s) in items.iter().enumerate() {
@@ -229,12 +230,13 @@ pub(crate) fn merge_sibling_reduce_loops_here(body: &Body) -> Body {
             // where the merged loop reads them; one that waits on the first loop keeps the loops apart. The form must
             // not depend on where a value started: a lowering may spell the second loop's scale between the loops and
             // the placement step would sink it back there, so the merge moves it, not the other way round. The incoming
-            // loop's own edges to the merged loops are the name checks above: a shared spelling is a collision.
+            // loop's own NAME edges to the merged loops are the checks above: a shared spelling is a collision. Its
+            // other edges to them — a buffer one writes and the other reads — are dependences, and keep the loops apart.
             let mut waits: BTreeSet<usize> = BTreeSet::new();
             let mut pending: Vec<usize> = before[j]
                 .iter()
                 .copied()
-                .filter(|k| *k != i && !absorbed_from.contains(k))
+                .filter(|k| (*k != i && !absorbed_from.contains(k)) || !by_name[j].contains(k))
                 .collect();
             let mut blocked = false;
             while let Some(k) = pending.pop() {
@@ -511,6 +513,24 @@ mod tests {
         assert_eq!(loop_axes(&out).len(), 2);
         let text = crate::text::body_text(&out).unwrap();
         assert!(text.find("O[0] = ").unwrap() < text.find("y = load").unwrap());
+    }
+
+    #[test]
+    fn merge_keeps_loops_apart_when_the_second_reads_a_buffer_the_first_writes() {
+        // The second loop loads the buffer the first loop writes, under another index: no name is shared, the edge is
+        // the buffer's version, and merging would read `O[15 - k]` before the step that writes it.
+        let out = merged(
+            "
+            for k in 0..16:
+                x1 = load X[k]
+                acc0 <- add(acc0, x1)
+                O[k] = x1
+            for k in 0..16:
+                y = load O[15 - k]
+                acc1 <- add(acc1, y)
+            ",
+        );
+        assert_eq!(loop_axes(&out).len(), 2);
     }
 
     #[test]
