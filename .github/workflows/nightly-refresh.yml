@@ -622,8 +622,8 @@ jobs:
 
   # Every row of the measurement freeze compiled under its own schedule, the card's file as the compile's golden
   # evidence, on the files the prior job's fold left on main. A freeze stores no program a restamp could lower afresh,
-  # so this is the check it admits. Reported, not gated: a row the compiler no longer realizes is evidence no compile
-  # takes, and the summary counts them per card.
+  # so this is the check it admits. A row the compiler no longer realizes is evidence no compile takes: the job drops
+  # it, folds the files again so each card's sheds the kernels and decisions no row is left under, and commits them.
   freeze:
     needs: prior
     if: always()
@@ -634,11 +634,23 @@ jobs:
       contents: read
     outputs:
       summary: ${{ steps.summary.outputs.summary }}
+    env:
+      FREEZES: emmy/compiler/pipeline/search/freezes
+      # The other jobs may land their files on main while this job compiles; any other move stops the push, so rows
+      # realized under one compiler are never dropped from under another.
+      TOLERATED_PATHS: >-
+        tests/durations_cpu.json
+        emmy/compiler/pipeline/search/prior/weights/schedule.json
+        emmy/compiler/pipeline/search/prior/weights/placement.json
+        emmy/compiler/pipeline/search/golden/records/*.json
+        recipes/*/recipe.yaml
+        recipes/*/DISCOVERY.md
     steps:
       # The branch's tip, not the commit the run started on: the fold may have landed card files since.
       - uses: actions/checkout@v4
         with:
           ref: ${{ github.ref_name }}
+          fetch-depth: 0
           persist-credentials: false
 
       - name: Fetch the measurement freeze from LFS
@@ -646,19 +658,44 @@ jobs:
 
       - uses: ./.github/actions/setup-emmy
 
-      - name: Realize the measurement freeze
-        continue-on-error: true
+      # LFS installed here, locally, so the push uploads the payload.
+      - name: Drop the rows the compiler no longer realizes
+        id: drop
         run: |
+          git lfs install --local
           mkdir -p _data
-          ./venv/bin/emmy golden realize emmy/compiler/pipeline/search/freezes --json _data/realize.json
+          ./venv/bin/emmy golden realize "$FREEZES" --drop --json _data/realize.json
+          if [ -n "$(git status --porcelain -- "$FREEZES")" ]; then
+            ./venv/bin/emmy db import --db _data/fold.db --fresh "$FREEZES"
+            ./venv/bin/emmy db freeze --db _data/fold.db --out "$FREEZES"
+            echo "updated=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "updated=false" >> "$GITHUB_OUTPUT"
+          fi
 
+      - name: Commit the measurement freeze to main
+        if: steps.drop.outputs.updated == 'true' && github.ref == 'refs/heads/main'
+        id: commit
+        uses: ./.github/actions/push-to-main
+        with:
+          app-id: ${{ secrets.EXPERIMENT_APP_ID }}
+          private-key: ${{ secrets.EXPERIMENT_APP_PRIVATE_KEY }}
+          message: "compiler: drop the rows the compiler no longer realizes from the measurement freeze"
+          paths: emmy/compiler/pipeline/search/freezes
+
+      # Runs after a failed step too, so the message carries what the job finished.
       - name: Summarize the realization
         id: summary
         if: always()
+        env:
+          DROPPED: ${{ steps.commit.outcome }}
         run: |
           summary="No report; open the run."
           if [ -f _data/realize.json ]; then
             summary=$(jq -r -f .github/workflows/scripts/freeze_realized.jq _data/realize.json)
+          fi
+          if [ "$DROPPED" = success ]; then
+            summary="$summary. Dropped them from the measurement freeze on main"
           fi
           echo "$summary"
           echo "summary=$summary" >> "$GITHUB_OUTPUT"

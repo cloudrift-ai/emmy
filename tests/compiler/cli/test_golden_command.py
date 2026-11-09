@@ -6,6 +6,7 @@ compiles every row that has a schedule under it and names the rows the compiler 
 
 from __future__ import annotations
 
+import contextlib
 import json
 import shutil
 from argparse import Namespace
@@ -100,17 +101,18 @@ def test_check_fails_a_kernel_re_keyed_under_its_own_body(golden, caplog, monkey
     assert "re-keyed k_matmul" in caplog.text
 
 
-def _realize(path, json_out=None) -> int:
+def _realize(path, json_out=None, drop=False) -> int:
     try:
-        handle_golden_realize(Namespace(paths=[str(path)], jobs=1, json_out=json_out))
+        handle_golden_realize(Namespace(paths=[str(path)], jobs=1, json_out=json_out, drop=drop))
     except SystemExit as exc:
         return int(exc.code)
     return 0
 
 
-def test_realize_compiles_every_scheduled_row_and_names_the_rows_the_compiler_no_longer_realizes(golden, tmp_path, caplog):
+def test_realize_names_the_rows_the_compiler_no_longer_realizes_and_drops_them_on_request(golden, tmp_path, caplog):
     """A freeze stores no program, so a restamp cannot see its rows go stale: realize compiles each row under its own
-    schedule with the file as the evidence, and a row whose schedule the lowering refuses is reported with the reason."""
+    schedule with the file as the evidence, and a row whose schedule the lowering refuses is reported with the reason.
+    ``--drop`` writes the file back without that row, and what is left realizes."""
     report = tmp_path / "report.json"
     assert _realize(golden, report) == 0
     assert json.loads(report.read_text()) == [{"file": str(golden), "gpu_name": "NVIDIA GeForce RTX 4080", "rows": 9, "failed": []}]
@@ -122,6 +124,35 @@ def test_realize_compiles_every_scheduled_row_and_names_the_rows_the_compiler_no
     (failed,) = json.loads(report.read_text())[0]["failed"]
     assert (failed["row"], failed["kernel"]) == ("matmul.square.512", "k_matmul_2967be") and "does not resolve" in failed["reason"]
     assert "1 of 9 rows do not realize" in caplog.text and "matmul.square.512 (k_matmul_2967be)" in caplog.text
+    assert len(GoldenFile.load(golden).rows) == 9  # a report writes nothing
+
+    assert _realize(golden, report, drop=True) == 0
+    assert len(json.loads(report.read_text())[0]["failed"]) == 1 and "do not realize and were dropped" in caplog.text
+    kept = GoldenFile.load(golden)
+    assert [row.name for row in kept.rows] == [row.name for row in document.rows if row.name != "matmul.square.512"]
+    assert len(kept.kernels) == len(document.kernels)  # the kernel stays: a freeze sheds it at its next fold
+    assert _realize(golden, report) == 0
+
+
+def test_realize_rebuilds_a_piece_through_the_route_a_repository_golden_records(tmp_path, monkeypatch):
+    """A tune of one piece of a golden freezes the piece's rows without the decisions that cut it. The piece is rebuilt
+    through the route a repository golden of the card records, and is unrealized once no golden records one."""
+    from emmy.compiler.pipeline.search.golden import repository  # noqa: PLC0415
+
+    source = _RECORDS_DIR / "v100_sm70.json"
+    golden = GoldenFile.load(source)
+    row = next(row for row in golden.rows if row.name == "pre16.k_linear_mean_reduce_3eb29d.m16.0e09e2698d6f")
+    piece = golden.kernel(row.kernel)
+    assert not piece.formed and golden.path_to(piece.ref)
+    freeze, report = tmp_path / "freeze.json", tmp_path / "report.json"
+    replace(golden, programs=[], kernels=[piece], routing=[], rows=[replace(row, latency=None)]).dump(freeze)
+
+    monkeypatch.setattr(repository, "repository_golden_paths", lambda: contextlib.nullcontext([source]))
+    assert _realize(freeze, report) == 0
+    monkeypatch.setattr(repository, "repository_golden_paths", lambda: contextlib.nullcontext([]))
+    assert _realize(freeze, report) == 1
+    (failed,) = json.loads(report.read_text())[0]["failed"]
+    assert "no recorded route" in failed["reason"]
 
 
 def test_restamp_rewrites_the_golden_onto_the_fresh_lowering(golden, caplog):
