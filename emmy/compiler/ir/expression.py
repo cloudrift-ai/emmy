@@ -57,7 +57,8 @@ def promoted_dtype(expression: Expression, dtype_of: Callable[[str], str | None]
     """The dtype a value expression computes at: a name's dtype by ``dtype_of`` (f32 when it has none), and for an
     operation node the table's promotion of its operands' dtypes, the rule one-operation definitions always rendered
     by. A literal contributes no dtype — ``2 * x`` computes at ``x``'s, as ``x + x`` does — so a value of literals
-    alone is f32, or i32 when every literal is an integer. A select promotes its branches; a cast to ``int`` is i32."""
+    alone is f32, or i32 when every literal is an integer; except that a float literal over integer operands alone
+    makes the operation a float one (``0.5 * code``). A select promotes its branches; a cast to ``int`` is i32."""
     promoted = _promoted(expression, dtype_of)
     if promoted is not None:
         return promoted
@@ -80,7 +81,15 @@ def _promoted(expression: Expression, dtype_of: Callable[[str], str | None]) -> 
     else:
         return "i32"
     dtypes = [dtype for dtype in (_promoted(operand, dtype_of) for operand in operands) if dtype is not None]
+    if dtypes and all(_integer(dtype) for dtype in dtypes) and any(isinstance(o, Literal) and o.dtype == "float" for o in operands):
+        # A float literal over integer operands is a float operation — ``maximum(0.0, bits)``, ``0.5 * code`` — the
+        # value the literal's own binding computed at before the normal form spelled it inline.
+        dtypes.append("f32")
     return _ir.dtype_promote(name, dtypes) if dtypes else None
+
+
+def _integer(dtype: str) -> bool:
+    return dtype.startswith(("i", "u", "bool"))
 
 
 def apply_binop(op: str, lv: object, rv: object) -> object:

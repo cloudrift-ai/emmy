@@ -75,6 +75,19 @@ def test_integer_assign_renders_natively(op, symbol):
     assert ctx.ssa_dtypes["result"] == "u32"
 
 
+def test_a_float_literal_over_integer_operands_renders_a_float_operation():
+    """The normal form spells a float constant inline where a typed binding stood (``let f32 half = 0.5`` read by
+    ``multiply(half, code)``), so a float literal over integer operands keeps the operation a float one; an integer
+    literal still contributes no dtype."""
+    ctx = RenderCtx(ssa_dtypes={"a": "i32"})
+    assert render_stmt(_stmt("v = multiply(0.5, a)"), ctx)[0].startswith("    float v = ")
+    assert ctx.ssa_dtypes["v"] == "f32"
+    ctx = RenderCtx(ssa_dtypes={"a": "i32"})
+    assert render_stmt(_stmt("v = maximum(0.0, a)"), ctx)[0].startswith("    float v = ")
+    ctx = RenderCtx(ssa_dtypes={"a": "i32"})
+    assert render_stmt(_stmt("v = multiply(2, a)"), ctx)[0].startswith("    int v = ")
+
+
 def test_f32_bitwise_names_remain_logical_masks():
     ctx = RenderCtx(ssa_dtypes={"a": "f32", "b": "f32"})
     assert render_stmt(_stmt("both = bitwise_and(a, b)"), ctx) == ["    float both = a && b;"]

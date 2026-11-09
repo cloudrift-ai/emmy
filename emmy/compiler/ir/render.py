@@ -878,9 +878,9 @@ def _render_node(
     operands = [operand(child) for child in node.operands]
     args = [expression for expression, _ in operands]
     op_name = op.name
-    # A literal contributes no dtype: it is spelled at the dtype the named operands promote to.
-    named = [arg_dt for arg, arg_dt in operands if not isinstance(arg, Literal)]
-    promoted = dtype_promote(op_name, named) if named else promoted_dtype(node, ctx.ssa_dtypes.get)
+    # A literal contributes no dtype: it is spelled at the dtype the named operands promote to, except that a float
+    # literal over integer operands alone makes the operation a float one (``promoted_dtype``, the one rule).
+    promoted = promoted_dtype(node, ctx.ssa_dtypes.get)
     arg_dtypes = [promoted if isinstance(arg, Literal) else arg_dt for arg, arg_dt in operands]
     if op_name == "bitcast":
         if len(args) != 1 or not isinstance(args[0], Var) or dtype is None:
