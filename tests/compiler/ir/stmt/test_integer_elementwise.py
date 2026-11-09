@@ -110,8 +110,14 @@ def test_stamp_types_keeps_a_declared_integer_width_on_integer_algebra():
     assert "u16 result = a + b" in _stamped("u16 result = add(a, b)")
 
 
-def test_stamp_types_repairs_a_stale_float_stamp_on_integer_algebra():
-    assert "u32 result = a << b" in _stamped("f32 result = left_shift(a, b)")
+def test_stamp_types_keeps_a_declared_float_dtype_on_integer_algebra():
+    """A declared dtype is the result type: the shift computes at its operands' u32 and converts once, as torch
+    converts the integer result — never ``(float)a << (float)b``, which has no float spelling, nor a re-stamp to u32
+    that would run an all-integer consumer at u32 where torch's float path does not overflow."""
+    assert "f32 result = a << b" in _stamped("f32 result = left_shift(a, b)")
+    ctx = RenderCtx()
+    ctx.ssa_dtypes.update(a="u32", b="u32")
+    assert render_stmt(_stmt("f32 result = left_shift(a, b)"), ctx) == ["    float result = (a << b);"]
 
 
 def test_an_integer_constant_load_keeps_its_dtype_when_it_folds_to_a_literal():

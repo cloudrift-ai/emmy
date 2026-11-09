@@ -918,8 +918,18 @@ def _render_promoted(
     """``name = build(args)`` at ``result_dt``: natively when the target computes ``op_name`` at that dtype and every
     argument is already there, else promoted to f32 and converted once. An argument is a name or a literal."""
     pad = _pad(ctx.indent)
+    integer_algebra = bool(arg_dtypes) and all(d in INTEGER_NAMES for d in arg_dtypes)
+    compute_dt = dtype_promote(op_name, arg_dtypes) if integer_algebra else result_dt
+    if integer_algebra and result_dt not in INTEGER_NAMES and compute_dt in INTEGER_NAMES:
+        # Integer algebra declared at a float dtype computes at its operands' integer promotion, as torch does, and
+        # the result converts once: ``(float)(a + b)``, never ``(float)a + (float)b``. An operation whose promotion
+        # of integers is itself a float (a true division) is float algebra and falls through.
+        lines = _render_promoted(ctx, name, op_name, args, arg_dtypes, compute_dt, build)
+        body_str = lines[-1].split(" = ", 1)[1].removesuffix(";")
+        ctx.ssa_dtypes[name] = result_dt
+        return [*lines[:-1], f"{pad}{ctx.type_name(result_dt)} {name} = {ctx.target.convert(f'({body_str})', compute_dt, result_dt)};"]
     all_args_at_result = bool(arg_dtypes) and all(d == result_dt for d in arg_dtypes)
-    integer_promotion = result_dt in INTEGER_NAMES and bool(arg_dtypes) and all(d in INTEGER_NAMES for d in arg_dtypes)
+    integer_promotion = result_dt in INTEGER_NAMES and integer_algebra
     if result_dt != "f32" and ctx.target.has_native_op(op_name, result_dt) and (all_args_at_result or integer_promotion):
         # Native non-f32 path: all args already at ``result_dt`` so no per-arg conversion is needed. Render with the
         # target's dtype-specific intrinsics; ``Literal.render`` wraps embedded float literals via the target so

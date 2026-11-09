@@ -19,9 +19,7 @@ Stamping rules:
   them in the running ``ssa_dtypes`` so downstream Assigns / Writes pick up
   the right arg dtype.
 
-Idempotent: ``None``-stamped fields are filled and existing stamps are kept, except integer algebra whose result dtype
-is recovered from typed operands. This repairs stale float stamps retained by structurally cloned, previously untyped
-bodies.
+Idempotent: ``None``-stamped fields are filled and every existing stamp is kept — a declared dtype is the result type.
 """
 
 from __future__ import annotations
@@ -150,14 +148,13 @@ def _stamped(ctx: _StampCtx, name: str) -> str | None:
 
 
 def _stamp_assign(s: Assign, ctx: _StampCtx) -> Assign:
-    result_dt = dtype_get(promoted_dtype(s.value, lambda name: _stamped(ctx, name)))
-    if s.dtype is not None and (result_dt.np.kind not in "iu" or s.dtype.np.kind in "iu"):
+    if s.dtype is not None:
+        # A declared dtype is the result type: the normal form spells a conversion as the dtype of the definition it
+        # converts, not as a ``copy`` of its own, so a width declared on integer algebra and a float declared over
+        # integer operands both stay, and the render converts the operation's result once.
         ctx.ssa_dtypes[s.name] = s.dtype
         return s
-    # Integer algebra is determined by its operands. Structural lowering can carry an old f32
-    # stamp from a once-untyped body; keeping it would turn shifts into unsupported float ops.
-    # An integer dtype declared on integer algebra is a narrowing or widening of its result — the normal form
-    # spells a conversion as the dtype of the definition it converts, not as a ``copy`` of its own — and stays.
+    result_dt = dtype_get(promoted_dtype(s.value, lambda name: _stamped(ctx, name)))
     # Overflow guard: a square (``x * x``) or a ``pow`` of an fp16 value can
     # blow past fp16's 65504 ceiling, giving inf → a garbage reduction
     # (RMSNorm's mean-of-squares). torch computes that reduction in fp32; do
