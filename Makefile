@@ -82,8 +82,8 @@ format: setup
 	@for file in tests/durations_*.json; do ./venv/bin/python -m json.tool --sort-keys --indent 1 "$$file" "$$file"; done
 
 # Compile CUDA kernels at -Xcicc -O1: the CORRECTNESS lane — -O1 changes runtime perf,
-# not numerics, and the deployable perf tests (tests/perf, -m perf) run at -O3 via
-# `make bench-kernels`. Override with EMMY_NVCC_FLAGS= to test at -O3. The saving is
+# not a kernel's numerics (it can change a prior's pick; see AGENTS.md), and the
+# deployable perf tests (tests/perf, -m perf) run at -O3 via `make bench-kernels`. Override with EMMY_NVCC_FLAGS= to test at -O3. The saving is
 # ~12% cold / ~6% warm on a 5090 (923s vs 1031s cold), not the "~3x" this comment used
 # to claim — that predated the WMMA->mma.sync migration which removed the cicc unroll
 # blowup it rested on. See AGENTS.md for the measurement.
