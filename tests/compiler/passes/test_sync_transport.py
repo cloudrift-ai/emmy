@@ -2,12 +2,16 @@
 
 import pytest
 
+from emmy.commands.trace import graph_from_code
+from emmy.compiler.context import Context
 from emmy.compiler.ir.axis import Axis
+from emmy.compiler.ir.cuda import CudaOp
 from emmy.compiler.ir.expression import Literal
 from emmy.compiler.ir.kernel.ir import pack_smem, swizzle_fn, swizzle_xor
 from emmy.compiler.ir.pure.fold import Fold
 from emmy.compiler.ir.stmt import Assign, Body, parse_body
 from emmy.compiler.ir.tile.ops import cone_stat
+from emmy.compiler.pipeline import CUDA_PASSES, Pipeline
 from emmy.compiler.pipeline.passes.lowering.kernel._stage import (
     _SWIZZLE_SLAB_ALIGN,
     CtaTile,
@@ -17,6 +21,7 @@ from emmy.compiler.pipeline.passes.lowering.kernel._stage import (
     slab_smem,
     software_swizzle,
 )
+from emmy.compiler.pipeline.search.pins import pinned_knobs
 from tests.compiler.terms import projection, reduction, slab
 
 
@@ -157,12 +162,6 @@ def test_a_computed_operand_merges_its_reads_only_where_each_run_is_aligned(widt
     multiple of eight elements: a 260-wide row is 520 B, so every odd row starts 8 B off the grid and a 16 B load there
     is misaligned. That row reads per element, and the 256-wide row keeps the merge. The later vectorizer still joins
     the 260-wide row's reads where it can prove them (8 B), so the plan is read off the fill itself."""
-    from emmy.commands.trace import graph_from_code  # noqa: PLC0415
-    from emmy.compiler.context import Context  # noqa: PLC0415
-    from emmy.compiler.ir.cuda import CudaOp  # noqa: PLC0415
-    from emmy.compiler.pipeline import CUDA_PASSES, Pipeline  # noqa: PLC0415
-    from emmy.compiler.pipeline.search.pins import pinned_knobs  # noqa: PLC0415
-
     plans: list[list[str]] = []
     run_plans = SyncTransport._run_plans
     monkeypatch.setattr(SyncTransport, "_run_plans", lambda self, op, v: plans.append(run_plans(self, op, v)) or plans[-1])
