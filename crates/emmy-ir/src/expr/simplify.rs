@@ -12,18 +12,31 @@ use std::collections::BTreeMap;
 
 // --- the simplifier's helpers ---------------------------------------------------------------------
 
-pub(super) fn fold_binop_literals(op: Operation, left: &Lit, right: &Lit) -> Result<Expression> {
+/// The literal two literals fold to, or `None` for a quotient of integers that does not divide exactly: whether that
+/// is an integer quotient or a float is the field's class's to say, and the canonical form folds it there.
+pub(super) fn fold_binop_literals(
+    op: Operation,
+    left: &Lit,
+    right: &Lit,
+) -> Result<Option<Expression>> {
+    let both_int = left.dtype == LitType::Int && right.dtype == LitType::Int;
+    if op == Operation::Divide
+        && both_int
+        && let (Some(l), Some(r)) = (left.value.int(), right.value.int())
+        && (r == 0 || l % r != 0)
+    {
+        return Ok(None);
+    }
     let folded = apply_binop(op, left.value, right.value)?;
     if let Num::Bool(flag) = folded {
-        return Ok(Expression::int(flag as i64));
+        return Ok(Some(Expression::int(flag as i64)));
     }
-    let both_int = left.dtype == LitType::Int && right.dtype == LitType::Int;
     if let Num::Int(v) = folded
         && both_int
     {
-        return Ok(Expression::int(v));
+        return Ok(Some(Expression::int(v)));
     }
-    Ok(Expression::float(folded.as_f64()))
+    Ok(Some(Expression::float(folded.as_f64())))
 }
 
 pub(super) fn simplify_binary(
@@ -36,8 +49,10 @@ pub(super) fn simplify_binary(
     let (orig_left, orig_right) = (left, right);
     let left = left.simplify(ctx)?;
     let right = right.simplify(ctx)?;
-    if let (Some(l), Some(r)) = (left.as_literal(), right.as_literal()) {
-        return fold_binop_literals(op, l, r);
+    if let (Some(l), Some(r)) = (left.as_literal(), right.as_literal())
+        && let Some(folded) = fold_binop_literals(op, l, r)?
+    {
+        return Ok(folded);
     }
     // An identity element folds away only as an INTEGER literal: `x * 1.0` and `x + 0.0` keep their float literal,
     // which is what makes the operation a float one over an integer `x`; the affine form spells them `1.0 * x`.
@@ -75,9 +90,18 @@ pub(super) fn simplify_binary(
             }
         }
         Operation::Divide | Operation::FloorDivide => {
-            // A true division by one is its dividend for any operand; a floor division by one folds in the
-            // canonical form, where the operand's type is known (a float's `x // 1` is its floor).
-            if int_one(&right) && op == Operation::Divide {
+            // A quotient of two integer literals that does not divide exactly is the field's class's to fold (an
+            // index floors it, a value makes it a float), so the index rules below leave it alone.
+            if op == Operation::Divide
+                && left.as_literal().is_some()
+                && right.as_literal().is_some()
+            {
+                return Ok(Expression::binary(op, left, right));
+            }
+            // A true division by one is its dividend for any operand; a floor division by one only for an integer
+            // one (a float's `x // 1` is its floor), which a ranged dividend is — an index under its loops; the
+            // canonical form folds an index read through an unranged name.
+            if int_one(&right) && (op == Operation::Divide || left.range(ctx).is_some()) {
                 return Ok(left);
             }
             if int_zero(&left) {
@@ -114,9 +138,9 @@ pub(super) fn simplify_binary(
             }
         }
         Operation::Remainder => {
-            // A zero dividend leaves zero; a remainder by one folds in the canonical form, where the operand's type
-            // is known (a float's `x % 1` is its fraction).
-            if int_zero(&left) {
+            // A zero dividend leaves zero, and so does a remainder by one of an integer dividend (a ranged one is);
+            // a float's `x % 1` is its fraction, so an unranged value keeps it.
+            if int_zero(&left) || (int_one(&right) && left.range(ctx).is_some()) {
                 return Ok(Expression::int(0));
             }
             if let Some(n) = right.int_literal().filter(|n| *n > 1) {

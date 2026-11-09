@@ -312,12 +312,26 @@ pub(crate) fn value_canonical(
     let Some((op, args)) = e.operation() else {
         return e;
     };
+    // A quotient of two integer literals that does not divide exactly is the class's to fold, ahead of the affine
+    // form that would carry it as a term: an index floors it, a value computes it as the float the promotion makes
+    // it (`(x - x + 3) / 2` over f32 is `1.5`).
+    if op == Operation::Divide
+        && let [left, right] = args
+        && let (Some(l), Some(r)) = (left.int_literal(), right.int_literal())
+        && r != 0
+    {
+        return match class {
+            ExprClass::Index => Expression::int((l as f64 / r as f64).floor() as i64),
+            ExprClass::Value => Expression::float(l as f64 / r as f64),
+        };
+    }
     if affine_node(op, args, class) {
         return affine_sum(affine_terms(&e, class), rank);
     }
     if let [left, right] = args {
         // A remainder by one is zero and a floor division by one is its dividend for integers — an index is one; a
-        // value's operand may be a float, whose `x % 1` is its fraction and `x // 1` its floor, so a value keeps both.
+        // value's operand may be a float, whose `x % 1` is its fraction and `x // 1` its floor, so a value keeps both
+        // (the simplifier folds them for a dividend under loop ranges; this is the index read through a bare name).
         if class == ExprClass::Index && right.int_literal() == Some(1) {
             match op {
                 Operation::Remainder => return Expression::int(0),
@@ -1123,6 +1137,61 @@ for r in 0..4:
             "{listing}"
         );
         assert!(listing.contains("= 2.0 * in0"), "{listing}");
+    }
+
+    /// A literal's integer kind reaches only what an integer may: an inexact quotient of integer literals is the
+    /// class's to fold (an index floors it, a value is the float the promotion makes it), an operation an index may
+    /// hold stays over integer literals, and `% 1` and `// 1` fold for an index or a ranged dividend while a value
+    /// keeps them, since its operand may be a float.
+    #[test]
+    fn a_literals_integer_kind_reaches_only_what_an_integer_may() {
+        let normal = |program: &str| text(&normalize_uncached(&body(program)).unwrap());
+        let cases: &[(&str, &str)] = &[
+            (
+                "f32 x = load X[a]\nd = subtract(x, x)\ne = add(d, 3)\nw = divide(e, 2)\nO[a] = w",
+                "let f32 v0 = 1.5\n",
+            ),
+            (
+                "f32 x = load X[a]\nd = subtract(x, x)\ne = subtract(d, 1)\nw = divide(e, 2)\nO[a] = w",
+                "let f32 v0 = -0.5\n",
+            ),
+            (
+                "for a0 in 0..8:\n    x = load X[(a0 - a0 + 3) / 2]\n    O[a0] = x",
+                "load X[1]",
+            ),
+            (
+                "for a0 in 0..8:\n    x = load X[(a0 - a0 - 7) / 2]\n    O[a0] = x",
+                "load X[-4]",
+            ),
+            (
+                "for a0 in 0..8:\n    x = load X[maximum(1, 2) * a0]\n    O[a0] = x",
+                "load X[2 * a0]",
+            ),
+            (
+                "for a0 in 0..8:\n    x = load X[a0 + minimum(3, 1)]\n    O[a0] = x",
+                "load X[a0 + 1]",
+            ),
+            (
+                "f32 x = load X[a]\nv = remainder(x, 1)\nO[a] = v",
+                "v0 = in0 % 1\n",
+            ),
+            (
+                "f32 x = load X[a]\nv = floor_divide(x, 1)\nO[a] = v",
+                "v0 = in0 // 1\n",
+            ),
+            (
+                "for h in 0..8:\n    for j in 0..1:\n        x = load X[(h + j) % 1, h // 1]\n        O[h, j] = x",
+                "load X[0, a0]",
+            ),
+            (
+                "for a0 in 0..8:\n    i = load I[a0]\n    x = load X[i % 1, i // 1]\n    O[a0] = x",
+                "load X[0, in0]",
+            ),
+        ];
+        for (program, expected) in cases {
+            let listing = normal(program);
+            assert!(listing.contains(expected), "{program}\n--\n{listing}");
+        }
     }
 
     /// A whole-number coefficient or offset is an integer only when no float literal fed the sum: a float literal

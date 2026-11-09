@@ -1123,9 +1123,30 @@ impl Expression {
                 {
                     return Ok(operand.clone());
                 }
+                // An operation an index may hold (`maximum(1, 2)`, integer arithmetic) over integer literals is the
+                // integer the host computes — an index admits no float — except a quotient, whose inexact case is the
+                // field's class's to fold (`simplify_binary`).
+                if let ElementwiseOp::Known(op) = name
+                    && *op != Operation::Divide
+                    && ExprClass::Index.admits_operation(*op)
+                    && !new.is_empty()
+                    && let Some(values) = new
+                        .iter()
+                        .map(|a| match &**a {
+                            Expr::Literal(lit) if lit.dtype == LitType::Int => lit.value.int(),
+                            _ => None,
+                        })
+                        .collect::<Option<Vec<i64>>>()
+                    && let Some(value) =
+                        op.evaluate_f32(&values.iter().map(|v| *v as f32).collect::<Vec<f32>>())
+                    && value.fract() == 0.0
+                {
+                    return Ok(Expression::int(value as i64));
+                }
                 // An operation over float literals is the literal the host computes on `f32`, as the stored kernels
-                // were folded, and so is a float operation (`exp(0)`) over integer ones; integer arithmetic over
-                // integer literals stays, since it is the index rules' business.
+                // were folded, and so is a float operation (`exp(0)`) over integer ones; an operation an index may
+                // hold stays over integer literals otherwise, since it is the index rules' business and an index
+                // admits no float.
                 if let ElementwiseOp::Known(op) = name
                     && !new.is_empty()
                     && let Some(values) = new
@@ -1133,7 +1154,8 @@ impl Expression {
                         .map(|a| match &**a {
                             Expr::Literal(lit)
                                 if lit.dtype == LitType::Float
-                                    || (lit.dtype == LitType::Int && !op.info().integer) =>
+                                    || (lit.dtype == LitType::Int
+                                        && !ExprClass::Index.admits_operation(*op)) =>
                             {
                                 Some(lit.value.as_f64() as f32)
                             }
@@ -1667,10 +1689,12 @@ mod tests {
         let ctx = SimplifyCtx::empty();
         let e = parse("(3 + 4) * 2 - 1").unwrap().simplify(&ctx).unwrap();
         assert_eq!(e.text(), "13");
+        // An inexact quotient of integers is the field's class's to fold (an index floors it, a value makes it a
+        // float), so the simplifier, which knows no class, leaves it; an exact one is the integer.
         let e = parse("7 / 2").unwrap().simplify(&ctx).unwrap();
-        assert_eq!(e.text(), "3");
-        let e = parse("-7 / 2").unwrap().simplify(&ctx).unwrap();
-        assert_eq!(e.text(), "-4");
+        assert_eq!(e.text(), "7 / 2");
+        let e = parse("8 / 2").unwrap().simplify(&ctx).unwrap();
+        assert_eq!(e.text(), "4");
         let e = parse("1.5 + 1").unwrap().simplify(&ctx).unwrap();
         assert_eq!(e.text(), "2.5");
         let e = parse("3 < 4").unwrap().simplify(&ctx).unwrap();

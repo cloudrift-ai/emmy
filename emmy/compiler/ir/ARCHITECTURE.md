@@ -745,8 +745,9 @@ from that CSE form. Subroutine boundaries never limit fusion.
 
 - `fold_constants` — an operation whose operands are all literals (a literal is a `Let` binding a number at the
   default precision) becomes the `Let` of the value it computes, at the statement's own dtype, so a rounding the
-  program performed still happens where it did and nothing computes past it. With `x - x → 0` from the affine fold,
-  the one-key softmax weight `exp(s - s) / exp(s - s)` is the literal `1` and the product by it folds to nothing.
+  program performed still happens where it did and nothing computes past it; an untyped integer constant stays
+  untyped (the integer `0` of `x - x`), a float one is f32. With `x - x → 0` from the affine fold, the one-key
+  softmax weight `exp(s - s) / exp(s - s)` is the literal `1.0` and the product by it is `1.0 * v`.
 - `fold_trivial_selects` — a `Select` whose branches all bind one value is a copy of it.
 - `drop_unread_values` — a pure statement whose values nothing reads is dropped, and a loop or branch left with
   no statement goes with it: the work reached no output. The one-key softmax weight leaves its whole score behind

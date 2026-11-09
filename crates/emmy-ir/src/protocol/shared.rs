@@ -3,9 +3,8 @@
 
 use crate::Name;
 use crate::body::Body;
-use crate::dtype::DType;
 use crate::elementwise::Operation;
-use crate::expr::{Expr, Expression, LitType};
+use crate::expr::Expression;
 use crate::field::{AxisRef, NumOr};
 use crate::statement::*;
 use std::collections::{HashMap, HashSet};
@@ -138,30 +137,6 @@ pub fn mask_select_predicate(select: &Select) -> Option<Expression> {
         return None;
     }
     Some(mask.select.clone())
-}
-
-/// A `Let` of a float literal at the default precision: the number it binds its name to, else `None`.
-pub fn literal_of(stmt: &Statement) -> Option<f64> {
-    literal_binding(stmt)
-        .and_then(|(_, value)| value.literal_value())
-        .map(|n| n.as_f64())
-}
-
-/// `literal_of` with the name it binds.
-pub fn literal_binding(stmt: &Statement) -> Option<(&Name, &Expression)> {
-    if let Statement::Let(let_) = stmt
-        && let Expr::Literal(lit) = &*let_.value
-        && match lit.dtype {
-            // A float constant at the default precision, or an integer constant with no declared width: either reads
-            // through as the literal it is. A typed integer carries a width the literal would lose.
-            LitType::Float => let_.dtype.is_none_or(|d| d == DType::F32),
-            LitType::Int => let_.dtype.is_none(),
-            LitType::Bool => false,
-        }
-    {
-        return Some((&let_.name, &let_.value));
-    }
-    None
 }
 
 /// The axis a plain Loop IR coordinate expression names, when it is one variable.

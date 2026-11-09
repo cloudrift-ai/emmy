@@ -6,11 +6,29 @@ use std::collections::{HashMap, HashSet};
 use super::{assign, with_bodies};
 use crate::Name;
 use crate::body::Body;
-use crate::expr::{Expr, Expression};
-use crate::protocol::literal_binding;
+use crate::dtype::DType;
+use crate::expr::{Expr, Expression, LitType};
 use crate::statement::*;
 
 // --- folds ----------------------------------------------------------------------------------------------
+
+/// The literal a `Let` binds its name to, when the literal reads through as itself: a float constant at the default
+/// precision, or an integer constant with no declared width.
+fn literal_binding(stmt: &Statement) -> Option<(&Name, &Expression)> {
+    if let Statement::Let(let_) = stmt
+        && let Expr::Literal(lit) = &*let_.value
+        && match lit.dtype {
+            // A float constant at the default precision, or an integer constant with no declared width: either reads
+            // through as the literal it is. A typed integer carries a width the literal would lose.
+            LitType::Float => let_.dtype.is_none_or(|d| d == DType::F32),
+            LitType::Int => let_.dtype.is_none(),
+            LitType::Bool => false,
+        }
+    {
+        return Some((&let_.name, &let_.value));
+    }
+    None
+}
 
 /// A `Select` whose branches all bind one value is a copy of it.
 pub fn fold_trivial_selects(body: &Body) -> Body {

@@ -47,6 +47,23 @@ def test_reference_and_lowered_weights_share_the_source_before_transpose() -> No
     np.testing.assert_array_equal(feed["linear_6_wt"], reference["p_mlp_down_proj_weight"].T)
 
 
+def test_regenerate_refuses_a_row_that_would_lose_a_key() -> None:
+    """A row's scoped key that names no site of the fresh kernel would be dropped by the restamp; a corpus row has no
+    measurement whose demotion would show it, so the regen refuses instead of writing a case that is "current" with
+    a schedule nobody authored."""
+    from dataclasses import replace
+
+    import pytest
+
+    document = GoldenFile.load(helpers.CASES_DIR / "fused/gdn-recurrence-state-kv.json")
+    (row,) = document.rows
+    nested = max((key for key in row.knobs if key.startswith("TILE@")), key=len).partition("@")[2]
+    unmapped = {key.replace(nested, f"{nested}9"): value for key, value in row.knobs.items()}
+    with pytest.raises(helpers.CaseError, match="names no site"):
+        helpers.regenerate(replace(document, rows=[replace(row, knobs=unmapped)]))
+    assert helpers.regenerate(document) == document
+
+
 def test_a_regenerated_case_keeps_its_note(tmp_path) -> None:
     """The note is a field of the file, not a comment the dump drops: regeneration and a dump carry it."""
     case = helpers.load_case(helpers.CASES_DIR / "reduce/singleton-softmax-unsqueeze.json")
