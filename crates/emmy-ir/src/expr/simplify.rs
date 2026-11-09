@@ -555,6 +555,15 @@ pub fn affine_form(
     if let Expr::Var(name) = &**expression {
         return Some((Expression::int(0), BTreeMap::from([(*name, 1)])));
     }
+    if let Some((Operation::Negative, [inner])) = expression.operation() {
+        // The normal form spells `a - b` as `-b + a`: a negation flips every coefficient and the anchor.
+        let (anchor, coeffs) = affine_form(inner, vars)?;
+        let coeffs = coeffs
+            .into_iter()
+            .map(|(v, c)| Some((v, c.checked_neg()?)))
+            .collect::<Option<_>>()?;
+        return Some((Expression::apply(Operation::Negative, vec![anchor]), coeffs));
+    }
     match expression.as_binary() {
         Some((op @ (Operation::Add | Operation::Subtract), left, right)) => {
             let (l_anchor, l_coeffs) = affine_form(left, vars)?;
@@ -658,6 +667,27 @@ mod tests {
     }
 
     /// `(c·x) % (c·y)` is `c·(x % y)`: the common factor scales the remainder, it does not vanish.
+    #[test]
+    fn the_affine_form_reads_a_negated_coordinate() {
+        // The normal form spells `key - row` as `-row + key`: the same coefficients as the subtraction.
+        let (row, key) = (Name::from("a1"), Name::from("a2"));
+        let vars = |name: Name| name == row || name == key;
+        let negated = Expression::binary(
+            Operation::Add,
+            Expression::apply(Operation::Negative, vec![Expression::var("a1")]),
+            Expression::var("a2"),
+        );
+        let subtracted = Expression::binary(
+            Operation::Subtract,
+            Expression::var("a2"),
+            Expression::var("a1"),
+        );
+        let (_, from_negation) = affine_form(&negated, &vars).unwrap();
+        let (_, from_subtraction) = affine_form(&subtracted, &vars).unwrap();
+        assert_eq!(from_negation, from_subtraction);
+        assert_eq!(from_negation, BTreeMap::from([(row, -1), (key, 1)]));
+    }
+
     #[test]
     fn the_modulo_factor_cancel_keeps_the_value() {
         for (coeff, modulus) in [(8, 64), (2, 4), (3, 6), (4, 16), (16, 128), (2, 8), (5, 10)] {

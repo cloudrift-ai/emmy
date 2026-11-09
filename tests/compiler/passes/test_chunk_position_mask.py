@@ -173,6 +173,20 @@ def test_a_cache_slice_stages_only_on_the_16_byte_grid(cache, offset, row, stage
     assert "emmy_cp_async" in source
 
 
+def test_the_mask_bound_reads_the_negation_the_normal_form_spells() -> None:
+    """GPU-free. The normal form spells ``key - row`` as ``-row + key``; the stream bound reads that affine form as
+    the same ``{key: 1, row: -1}``, or a causal mask on a wide launch would bound nothing."""
+    from importlib import import_module
+
+    from emmy.compiler.ir.stmt import parse_body
+
+    atom = import_module("emmy.compiler.pipeline.passes.lowering.kernel._atom")
+    (negated,) = parse_body("bool v = -a1 + a2 > in0")
+    (subtracted,) = parse_body("bool v = a2 - a1 > in0")
+    assert atom._mask_affine(negated.value, frozenset({"a1", "a2"}))[0] == {"a1": -1, "a2": 1}
+    assert atom._mask_affine(negated.value, frozenset({"a1", "a2"}))[0] == atom._mask_affine(subtracted.value, frozenset({"a1", "a2"}))[0]
+
+
 @requires_cuda
 @pytest.mark.parametrize("split", ["", SPLIT], ids=["whole", "split"])
 @pytest.mark.parametrize("heads", [HEADS, WIDE], ids=["one-wave", "wide"])
