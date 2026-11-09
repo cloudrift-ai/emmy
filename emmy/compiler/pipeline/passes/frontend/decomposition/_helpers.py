@@ -19,7 +19,7 @@ from emmy.compiler.dtype import BF16, F16, F32
 from emmy.compiler.dtype import get as get_dtype
 from emmy.compiler.graph import Graph, Node, Tensor
 from emmy.compiler.ir.base import ConstantOp, InputOp
-from emmy.compiler.ir.expr import BinaryExpr, Literal, TernaryExpr, placeholder
+from emmy.compiler.ir.expression import BinaryExpr, Literal, TernaryExpr, placeholder
 from emmy.compiler.ir.tensor.ir import ElementwiseOp, IndexMapOp, IndexSource, ReduceOp
 from emmy.compiler.pipeline.passes.frontend.decomposition._broadcast import broadcast_to, squeeze_axis
 from emmy.compiler.pipeline.passes.frontend.decomposition._matmul_helpers import matmul_unsqueeze
@@ -84,7 +84,7 @@ def opmath_dtype(dtype):
 
 def const_bc(frag: Graph, *, name: str, value=None, context_value=None, target_shape: tuple, dtype: str) -> Node:
     """Add a scalar ConstantOp and broadcast it to ``target_shape``. Pass ``value`` for a
-    static scalar, or ``context_value`` (an ``Expr`` over symbolic-dim names) for a runtime
+    static scalar, or ``context_value`` (an ``Expression`` over symbolic-dim names) for a runtime
     scalar resolved at launch — e.g. a dynamic mean's divisor = the runtime reduce-axis size."""
     cid = frag.add_node(
         op=ConstantOp(name=name, value=value, context_value=context_value),

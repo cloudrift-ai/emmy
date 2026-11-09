@@ -19,11 +19,10 @@ from emmy.compiler.context import Context
 from emmy.compiler.dim import Dim
 from emmy.compiler.graph import Tensor
 from emmy.compiler.ir.axis import Axis
-from emmy.compiler.ir.expr import Expr, Literal, Var
 from emmy.compiler.ir.kernel.ir import LdmatrixLoad
 from emmy.compiler.ir.schedule import Placement, Tile, Work
 from emmy.compiler.ir.schedule.classic import ClassicProblem
-from emmy.compiler.ir.stmt import Body, Load, Write
+from emmy.compiler.ir.stmt import Body, Load, parse_body
 from emmy.compiler.ir.tile import TileOp
 from emmy.compiler.pipeline.passes.lowering.kernel._atom import reduce_codegen, store_sink
 from emmy.compiler.pipeline.passes.lowering.kernel._tiling import atomize, grid_tile, register_tile, unit_tile
@@ -32,18 +31,14 @@ from tests.compiler.terms import contraction
 _A0, _M, _N, _K = Axis("a0", 2), Axis("m", 4), Axis("n", 64), Axis("k", 4)
 
 
-def _lit(value: int) -> Literal:
-    return Literal(value, "int")
-
-
-def _row_residue(sibling: Expr, own: Expr) -> Expr:
+def _row_residue(sibling: str, own: str) -> str:
     """``((s·1024 + o) / 128 % 8) · 128 + (s·1024 + o) % 128`` — value-equal to ``o`` for ``o < 1024``."""
-    flat = sibling * _lit(1024) + own
-    return (flat / _lit(128)) % _lit(8) * _lit(128) + flat % _lit(128)
+    flat = f"({sibling} * 1024 + {own})"
+    return f"{flat} / 128 % 8 * 128 + {flat} % 128"
 
 
-def _free(exprs) -> set[str]:
-    return set().union(*(set(e.free_vars()) for e in exprs))
+def _free(expressions) -> set[str]:
+    return set().union(*(set(e.free_vars()) for e in expressions))
 
 
 def _fragment_loads(a: Load, b: Load, atom: str, inputs=None) -> dict[str, LdmatrixLoad]:
@@ -54,7 +49,7 @@ def _fragment_loads(a: Load, b: Load, atom: str, inputs=None) -> dict[str, Ldmat
     plan = Tile.parse(f"{atom}/f1x1", Work.parse("w1x1")).at(_M, _N)
     axes = (_M, _N, _K)
     state, region = reduce_codegen(c, plan, inputs=inputs, k_axis=_K, axes=axes)
-    epilogue = Body((Write(output="out", index=(Var("m"), Var("n")), value=c.combine.results[0]),))
+    epilogue = parse_body(f"out[m, n] = {c.combine.results[0]}")
     tile = grid_tile(
         unit_tile(register_tile(atomize(plan.atom.shape[:2]), plan.mn), plan.mn),
         mn=plan.mn,
@@ -73,8 +68,7 @@ def test_batched_matvec_uses_a_unit_fragment_row(cc) -> None:
 
     B varies between batches, which is legal; it must never vary within a fragment row.
     """
-    a = Load(name="a", input="A", index=(Var("a0"), Var("m"), Var("k")))
-    b = Load(name="b", input="B", index=(Var("a0"), Var("m"), Var("k"), Var("n")))
+    a, b = parse_body("a = load A[a0, m, k]\nb = load B[a0, m, k, n]")
     tile = TileOp(op=contraction(_K, a, (b, "acc")), place=Placement(free=(_A0, _M, _N)), axes=(_A0, _M, _N, _K))
     site = tile.node_id(tile.op)
     assert tuple(axis.name for axis in tile.grid_sched._mn_for(tile.op)) == ("_um", "n")
@@ -87,8 +81,7 @@ def test_batched_matvec_uses_a_unit_fragment_row(cc) -> None:
 def test_gmem_direct_b_fragment_binds_the_row_residue(atom) -> None:
     """The merged-weight column residue: a value-dead ``m`` in B's index is spelled through the row's block
     base, never the bare axis name the tiled kernel does not define."""
-    a = Load(name="a", input="A", index=(Var("m"), Var("k")))
-    b = Load(name="b", input="B", index=(Var("k"), _row_residue(Var("m"), Var("n"))))
+    a, b = parse_body(f"a = load A[m, k]\nb = load B[k, {_row_residue('m', 'n')}]")
     load = _fragment_loads(a, b, atom)["b"]
     assert "m" not in _free(load.src_index) and "m_b" in _free(load.src_index)
 
@@ -96,8 +89,7 @@ def test_gmem_direct_b_fragment_binds_the_row_residue(atom) -> None:
 @pytest.mark.parametrize("atom", ["mma_m8n8k4_f16_f32", "mma_m16n8k16_f16_f32"])
 def test_gmem_direct_a_fragment_binds_the_column_residue(atom) -> None:
     """The mirror on A: a value-dead ``n`` in A's index is spelled through the column's block base."""
-    a = Load(name="a", input="A", index=(Var("m"), _row_residue(Var("n"), Var("k")) * _lit(0) + Var("k")))
-    b = Load(name="b", input="B", index=(Var("k"), Var("n")))
+    a, b = parse_body(f"a = load A[m, ({_row_residue('n', 'k')}) * 0 + k]\nb = load B[k, n]")
     load = _fragment_loads(a, b, atom)["a"]
     assert "n" not in _free(load.src_index) and "n_b" in _free(load.src_index)
 
@@ -106,8 +98,7 @@ def _packed(k_extent: int, n_extent: int) -> tuple[Load, Load, dict]:
     """``out[m, n] = Σ_k a[m, k] · x[m, k * n_extent + n]`` — B's own coordinate and the reduction
     coordinate packed into ONE tensor dim, the shape DeepSeek-V4's hyper-connection mixing reads
     (``hidden[stream * 4096 + channel]``, 24 streams over one 16384-wide row)."""
-    a = Load(name="a", input="A", index=(Var("m"), Var("k")))
-    b = Load(name="b", input="X", index=(Var("m"), Var("k") * _lit(n_extent) + Var("n")))
+    a, b = parse_body(f"a = load A[m, k]\nb = load X[m, k * {n_extent} + n]")
     inputs = {
         "A": Tensor("A", (Dim(4), Dim(k_extent)), "f16"),
         "X": Tensor("X", (Dim(4), Dim(k_extent * n_extent)), "f16"),
@@ -133,8 +124,7 @@ def test_a_packed_operand_dim_reads_its_stride_not_its_position(atom) -> None:
 def test_separate_dims_keep_the_answer_the_dim_positions_gave(atom) -> None:
     """Where the dims separate the coordinates, the stride reading says what the positions said: a
     ``b[n, k]`` operand is N-major with the row stride its trailing extent gives."""
-    a = Load(name="a", input="A", index=(Var("m"), Var("k")))
-    b = Load(name="b", input="B", index=(Var("n"), Var("k")))
+    a, b = parse_body("a = load A[m, k]\nb = load B[n, k]")
     inputs = {"A": Tensor("A", (Dim(4), Dim(64)), "f16"), "B": Tensor("B", (Dim(64), Dim(64)), "f16")}
     load = _fragment_loads(a, b, atom, inputs)["b"]
     assert load.b_trans

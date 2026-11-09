@@ -4,7 +4,7 @@ every IR layer.
 Defined here rather than under any one IR package because all three IRs
 (Loop, Tile, Kernel) consume the same leaf vocabulary:
 
-- ``Stmt`` — abstract base for every body statement.
+- ``Statement`` — abstract base for every body statement.
 - Leaves: ``Load``, ``Assign``, ``Accum``, ``Init``, ``Write``,
   ``Select``, ``SelectBranch`` — pure compute primitives that read/write SSA
   names and external buffers (in :mod:`.leaves`).
@@ -30,10 +30,10 @@ Loop-IR's ``LoopOp``, its validation and fusion's body assembly stay in ``ir/loo
 identity stay here, with the two kinds fusion assembles a region with (``Call``, ``Subroutine``).
 """
 
-from emmy.compiler.ir.stmt.base import Stmt, dtype_promote, pretty_body
+from emmy.compiler.ir.stmt.base import Statement, dtype_promote
 from emmy.compiler.ir.stmt.blocks import Cond, Loop, StridedLoop
 from emmy.compiler.ir.stmt.body import Body, exposed_defines, free_names
-from emmy.compiler.ir.stmt.declared import Declared, role
+from emmy.compiler.ir.stmt.declared import fields_of, role, statement
 from emmy.compiler.ir.stmt.identity import canonicalize_identity
 from emmy.compiler.ir.stmt.leaves import (
     Accum,
@@ -54,8 +54,9 @@ from emmy.compiler.ir.stmt.leaves import (
 )
 from emmy.compiler.ir.stmt.normalize import fold_affine, normalize_body, prepare_body, simplify_body
 from emmy.compiler.ir.stmt.order import ordering_constraints
-from emmy.compiler.ir.stmt.passes import map_exprs, rename_free
+from emmy.compiler.ir.stmt.passes import rename_free
 from emmy.compiler.ir.stmt.subroutine import Call, Subroutine
+from emmy.compiler.ir.stmt.text import parse_body, pretty_body
 
 __all__ = [
     "Accum",
@@ -65,7 +66,6 @@ __all__ = [
     "Call",
     "Carry",
     "Cond",
-    "Declared",
     "Init",
     "Let",
     "Load",
@@ -74,7 +74,7 @@ __all__ = [
     "Pre",
     "Select",
     "SelectBranch",
-    "Stmt",
+    "Statement",
     "StridedLoop",
     "Subroutine",
     "Write",
@@ -83,13 +83,15 @@ __all__ = [
     "canonicalize_identity",
     "dtype_promote",
     "exposed_defines",
+    "fields_of",
     "fold_affine",
     "free_names",
-    "map_exprs",
+    "statement",
     "mask_select_predicate",
     "normalize_body",
     "ordering_constraints",
     "prepare_body",
+    "parse_body",
     "pretty_body",
     "rename_free",
     "role",

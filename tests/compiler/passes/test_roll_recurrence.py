@@ -54,16 +54,16 @@ def _carriers(graph) -> list[LoopOp]:
 
 
 @pytest.mark.parametrize(
-    ("expr", "want"),
+    ("expression", "want"),
     [
         ("0.5*x*(1+torch.tanh(0.797*(x+0.044*x*x*x)))", lambda x: 0.5 * x * (1 + np.tanh(0.797 * (x + 0.044 * x * x * x)))),
         ("torch.tanh(torch.tanh(torch.tanh(torch.tanh(x))))", lambda x: np.tanh(np.tanh(np.tanh(np.tanh(x))))),
     ],
 )
-def test_a_chain_that_re_derives_no_state_fuses_without_carried_state(expr: str, want) -> None:
+def test_a_chain_that_re_derives_no_state_fuses_without_carried_state(expression: str, want) -> None:
     from emmy.compiler.backend.numpy import NumpyBackend
 
-    graph, _, _ = graph_from_code(f"x=torch.randn(8);{expr}")
+    graph, _, _ = graph_from_code(f"x=torch.randn(8);{expression}")
     fused = Pipeline.build(LOOP_PASSES).run(graph)
     kernels = [node.op for node in fused.nodes.values() if isinstance(node.op, LoopOp)]
     assert len(kernels) == 1 and not _carriers(fused)

@@ -25,7 +25,7 @@ from __future__ import annotations
 
 from emmy.compiler.graph import Graph, Node, Tensor
 from emmy.compiler.ir.base import InputOp
-from emmy.compiler.ir.expr import CastExpr, TernaryExpr, Var
+from emmy.compiler.ir.expression import CastExpr, TernaryExpr, Var
 from emmy.compiler.ir.loop import Axis, Load, Loop, LoopOp, Write
 from emmy.compiler.ir.stmt import Body
 from emmy.compiler.ir.tensor.ir import GatherOp
@@ -41,7 +41,7 @@ def rewrite(root: Node, inp_data: Node, inp_idx: Node, out: Tensor) -> Graph | N
     idx_rank = len(inp_idx.output.shape)
     axis = int(root.op.axis) % data_rank
     index = CastExpr("int", Var("idx"))
-    index = TernaryExpr(index.lt(0), index + inp_data.output.shape[axis].expr, index)
+    index = TernaryExpr(index.lt(0), index + inp_data.output.shape[axis].expression, index)
 
     axes = tuple(Axis(name=f"a{i}", extent=d) for i, d in enumerate(out_shape))
 
@@ -59,9 +59,9 @@ def rewrite(root: Node, inp_data: Node, inp_idx: Node, out: Tensor) -> Graph | N
         raise ValueError(f"lower_gather: incompatible ranks — out_rank={out_rank}, data_rank={data_rank}, idx_rank={idx_rank}, axis={axis}")
 
     inner: Body = (
-        Load(name="idx", input=inp_idx.id, index=idx_index),
-        Load(name="data", input=inp_data.id, index=data_index),
-        Write(output=f"loop_{root.id}", index=tuple(Var(a.name) for a in axes), value="data"),
+        Load(names=("idx",), input=inp_idx.id, index=idx_index),
+        Load(names=("data",), input=inp_data.id, index=data_index),
+        Write(output=f"loop_{root.id}", index=tuple(Var(a.name) for a in axes), values=("data",)),
     )
     body: Body = inner
     for a in reversed(axes):

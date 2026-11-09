@@ -229,8 +229,8 @@ the expectation's mma chain at the consumer-die full rate without moving the sof
 f32; the chunk partial promotes into the f32 carrier once per chunk, which is the promote cadence. The streamed
 value selects the multiplicand dtype — except a 1-byte one, which takes the 16-bit families, since the weight
 repacks from f32 registers into a 16-bit fragment whatever the value stores and the value converts per element in
-its gmem-direct fragment load (its slab declines); the score's wider accumulator does not select a different atom
-family. How many
+its fragment load: gmem-direct, or on cp.async from a byte slab (`chunk_slab_dtype`); the score's wider accumulator
+does not select a different atom family. How many
 register columns of those partials are live at once is one rule the offer and the emitter both ask
 (`chunk_partial_columns`): the whole row while the thread's register envelope holds it, else one column pair. At head
 width 256 the row is 32 fragments, and with every partial live beside the carrier and the hoisted query the thread
@@ -272,6 +272,15 @@ The synchronous fill checks copied-operand cover when constructing its slabs, in
 contractions. A copied N-contiguous slab needs complete N tiles: clamping a vector's start to the last scalar breaks
 alignment and crosses the row. A transposed B copies along K and can clamp whole outer N rows. Dividing tiles remain
 available on the same fused contraction.
+
+A vector copy (cp.async or the blocking vector load) moves `copy_width` elements from where the slab's load index puts
+them, so its gmem address must start on that width. Every stage resolver that offers one for a stored operand proves
+it first (`vector_copies_aligned`): the operand's whole flat address, with the copy axis at any copy start, must be a
+provable multiple of the width. A slice's offset, a row stride off the grid, or a copy axis split across dims at a
+pitch off it leaves a term the proof cannot clear, and the resolver declines the copy; a dense reshape's quotient and
+remainder recombine and pass. The warp tier's plain, packed and block-scaled stages, the scalar tier and the compute
+fill ask it, and so do the chunk tier's key and value and the query a warp-group score copies (a query off the grid
+keeps the `mma.sync` score). A TMA box takes element coordinates and needs no such proof.
 
 `TileOp.stage_edges` offers a transport at every operand of every contracting site, a chunked carrier's included —
 which tier then puts which operand on a slab is the tier's own business. The chunked site used to be excluded on the

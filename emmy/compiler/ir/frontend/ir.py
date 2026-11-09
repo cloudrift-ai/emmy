@@ -78,7 +78,7 @@ class ReshapeOp(Op):
         """Product of a shape's extents as a single ``Dim``. Accumulator starts
         at ``Dim(1)`` so bare-int shape elements (from tests / loader scratch
         shapes) are promoted to ``Dim`` on the first multiply; pure-Dim inputs
-        fold exactly via ``Expr.simplify``."""
+        fold exactly via ``Expression.simplify``."""
         out = Dim(1)
         for d in shape:
             out = out * d

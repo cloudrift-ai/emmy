@@ -49,8 +49,20 @@ from dataclasses import dataclass
 
 from emmy.compiler.dim import Dim
 from emmy.compiler.dtype import I32
+from emmy.compiler.ir.address import copies_aligned, copy_width
 from emmy.compiler.ir.axis import Axis
-from emmy.compiler.ir.expr import BinaryExpr, Builtin, Expr, FlatIndex, FuncCallExpr, Literal, SimplifyCtx, TernaryExpr, Var, affine_form
+from emmy.compiler.ir.expression import (
+    BinaryExpr,
+    Builtin,
+    Expression,
+    FlatIndex,
+    FuncCallExpr,
+    Literal,
+    SimplifyCtx,
+    TernaryExpr,
+    Var,
+    affine_form,
+)
 from emmy.compiler.ir.kernel.ir import (
     VOLTA_B_CONGRUOUS,
     VOLTA_CROSSWISE,
@@ -68,18 +80,18 @@ from emmy.compiler.ir.kernel.ir import (
     TmaLoad,
     swizzle_base,
 )
-from emmy.compiler.ir.stmt import Body, Cond, Let, Load, Loop, Stmt, StridedLoop, Write
+from emmy.compiler.ir.stmt import Body, Cond, Let, Load, Loop, Statement, StridedLoop, Write, exposed_defines
 
 
-def _mul(a: Expr, b: Expr) -> Expr:
+def _mul(a: Expression, b: Expression) -> Expression:
     return BinaryExpr("*", a, b)
 
 
-def _add(a: Expr, b: Expr) -> Expr:
+def _add(a: Expression, b: Expression) -> Expression:
     return BinaryExpr("+", a, b)
 
 
-def _lit(n: int) -> Expr:
+def _lit(n: int) -> Expression:
     return Literal(int(n), "int")
 
 
@@ -90,23 +102,8 @@ class CtaTile:
     ``(m_w·WN + n_w)·32 + lane`` linear id), so the tier's geometry never leaks into the fill. The
     per-operand gmem tile-base rides the :class:`Operand` instead."""
 
-    linear_tid: Expr  # intra-CTA linear thread id (0 .. n_threads-1)
+    linear_tid: Expression  # intra-CTA linear thread id (0 .. n_threads-1)
     n_threads: int
-
-
-def _cp_async_width(slab_cols: int, elem_bytes: int) -> int:
-    """Elements per ``cp.async`` — the widest contiguous run whose byte size is a
-    legal cp.async width (4 / 8 / 16) and that divides the inner (contiguous) slab
-    extent (a chunk never straddles a slab row). The slab's inner dim maps stride-1
-    to the gmem inner dim (canonical A[m,k] / B[k,n]), so a V-run is contiguous in
-    both. ``elem_bytes == 1`` (an fp8 byte slab) yields 16-element 16 B chunks —
-    the byte-staging legality requires 16-divisible inner spans, so the widest
-    width always fits."""
-    for nbytes in (16, 8, 4):
-        v = nbytes // elem_bytes
-        if v >= 1 and slab_cols % v == 0:
-            return v
-    return 1  # elem_bytes > 16 — never (1/2/4-byte element dtypes only)
 
 
 def cp_async_fill(
@@ -118,14 +115,14 @@ def cp_async_fill(
     cta: CtaTile,
     elem_bytes: int,
     name: str,
-    row_offset: Expr | None = None,
+    row_offset: Expression | None = None,
     swizzle: str = "NONE",
     valid=None,
-) -> list[Stmt]:
+) -> list[Statement]:
     """Cooperatively ``cp.async``-copy a ``rows × cols`` (= ``shape``) row-major smem
-    ``slab`` from gmem ``src``. ``gmem_index(row_expr, col_expr)`` returns the gmem
+    ``slab`` from gmem ``src``. ``gmem_index(row_expression, col_expression)`` returns the gmem
     index tuple for slab cell ``(row, col)``. The CTA's ``n_threads`` lanes stripe
-    ``rows·cols / V``-element chunks (``V`` = :func:`_cp_async_width`); each
+    ``rows·cols / V``-element chunks (``V`` = :func:`copy_width`); each
     lane runs ``for e = tid; e < n_chunks; e += n_threads``. Emits the fill loop only
     — the caller appends one ``CpAsyncCommit`` + ``CpAsyncWait`` + ``Sync`` after the
     A and B fills together. The loop bound (not a predicate) masks the tail, so every
@@ -142,7 +139,7 @@ def cp_async_fill(
     NONE-swizzle kernel is bit-identical. This is the sm_89 bank-conflict fix: the plain
     row-major slab leaves the drain 4-way (64 B rows) / 8-way (128 B rows) conflicted."""
     slab_rows, slab_cols = shape
-    v = _cp_async_width(slab_cols, elem_bytes)
+    v = copy_width(slab_cols, elem_bytes)
     n_chunks = (slab_rows * slab_cols) // v
     stripe = cta.n_threads * v  # the elements one trip of the whole CTA copies
     if n_chunks % cta.n_threads == 0 and stripe % slab_cols == 0:
@@ -153,7 +150,7 @@ def cp_async_fill(
         lane = _mul(cta.linear_tid, _lit(v))
         lane_row, lane_col = BinaryExpr("/", lane, _lit(slab_cols)), BinaryExpr("%", lane, _lit(slab_cols))
         stripe_rows = stripe // slab_cols
-        out: list[Stmt] = []
+        out: list[Statement] = []
         for trip in range(n_chunks // cta.n_threads):
             trip_row = _lit(trip * stripe_rows)
             out.append(
@@ -197,9 +194,9 @@ def sync_copy_fill(
     cta: CtaTile,
     elem_bytes: int,
     name: str,
-    row_offset: Expr | None = None,
+    row_offset: Expression | None = None,
     swizzle: str = "NONE",
-) -> list[Stmt]:
+) -> list[Statement]:
     """The BLOCKING gmem→smem copy of the same ``rows × cols`` slab :func:`cp_async_fill` copies —
     each lane vector-LOADS its ``V``-element chunk into registers and vector-STORES it into the
     slab, instead of handing the address pair to the copy engine. Same striping, chunk width, ring
@@ -207,7 +204,7 @@ def sync_copy_fill(
     caller closes it with the plain CTA barrier (there is no commit group to wait on). This is the
     only transport a target without ``cp.async`` (sm_70) can copy a materialized operand with."""
     rows, cols = shape
-    v = _cp_async_width(cols, elem_bytes)
+    v = copy_width(cols, elem_bytes)
     fe = Axis(name=f"_f{name}", extent=(rows * cols) // v)
     base = _mul(Var(fe.name), _lit(v))
     row = BinaryExpr("/", base, _lit(cols))
@@ -229,12 +226,12 @@ def _sync_copy_runs(shape: tuple[int, int], cta: CtaTile, elem_bytes: int) -> tu
     the split unrolls the lane's trips so the staged values stay in registers, and a ragged tail has
     no unrolled shape (such a slab keeps the one-phase :func:`sync_copy_fill`)."""
     rows, cols = shape
-    v = _cp_async_width(cols, elem_bytes)
+    v = copy_width(cols, elem_bytes)
     chunks = (rows * cols) // v
     return (v, chunks // cta.n_threads) if chunks % cta.n_threads == 0 else None
 
 
-def _sync_copy_coords(trip: int, v: int, cols: int, cta: CtaTile) -> tuple[Expr, Expr]:
+def _sync_copy_coords(trip: int, v: int, cols: int, cta: CtaTile) -> tuple[Expression, Expression]:
     """The ``(row, col)`` slab coordinates of lane-local ``trip`` — the unrolled form of the
     one-phase fill's ``for e = tid; e < chunks; e += n_threads`` stride."""
     base = _mul(_add(cta.linear_tid, _lit(trip * cta.n_threads)), _lit(v))
@@ -279,7 +276,9 @@ def _volta_store_decl(*, op, ring: int, cta: CtaTile, elem_bytes: int) -> Let | 
     return Let(name=name, value=value, dtype=I32)
 
 
-def _volta_gmem_bases(*, op, cta: CtaTile, elem_bytes: int) -> tuple[list[tuple[Expr, Expr]], list[tuple[Expr, ...]]] | None:
+def _volta_gmem_bases(
+    *, op, cta: CtaTile, elem_bytes: int
+) -> tuple[list[tuple[Expression, Expression]], list[tuple[Expression, ...]]] | None:
     """Return per-lane copy coordinates and bases when every trip advances equally and affinely in K."""
     eb = op.elem_bytes or elem_bytes
     if _volta_store_plan(slab=op.slab, shape=op.shape, cta=cta, elem_bytes=eb, swizzle=op.swizzle) is None:
@@ -289,7 +288,7 @@ def _volta_gmem_bases(*, op, cta: CtaTile, elem_bytes: int) -> tuple[list[tuple[
     probe = Var("__gk")
     strides: list[tuple[int, ...]] = []
     for coord in coords:
-        forms = [affine_form(expr, {probe.name}) for expr in op.index(probe)(*coord)]
+        forms = [affine_form(expression, {probe.name}) for expression in op.index(probe)(*coord)]
         if any(form is None for form in forms):
             return None
         strides.append(tuple(form[1].get(probe.name, 0) for form in forms))
@@ -320,9 +319,9 @@ def sync_copy_issue(
     cta: CtaTile,
     elem_bytes: int,
     name: str,
-    k0: Expr | None = None,
+    k0: Expression | None = None,
     carried: bool = False,
-) -> list[Stmt] | None:
+) -> list[Statement] | None:
     """The gmem→REGISTER half of :func:`sync_copy_fill`: every lane vector-LOADS each of its
     ``V``-element chunks and STOPS, leaving the values in registers for :func:`sync_copy_deposit`.
 
@@ -338,7 +337,7 @@ def sync_copy_issue(
         return None
     v, trips = run
     cols = shape[1]
-    out: list[Stmt] = []
+    out: list[Statement] = []
     for trip in range(trips):
         row, col = _sync_copy_coords(trip, v, cols, cta)
         if k0 is not None:
@@ -357,11 +356,11 @@ def sync_copy_deposit(
     cta: CtaTile,
     elem_bytes: int,
     name: str,
-    row_offset: Expr | None = None,
+    row_offset: Expression | None = None,
     swizzle: str = "NONE",
     ring: int = 1,
-    slot: Expr | None = None,
-) -> list[Stmt] | None:
+    slot: Expression | None = None,
+) -> list[Statement] | None:
     """The REGISTER→smem half — one vector store per staged chunk, into ring row ``row_offset``.
     Pairs with :func:`sync_copy_issue` off the same striping, so the slab it leaves is identical to
     the one-phase fill's."""
@@ -371,7 +370,7 @@ def sync_copy_deposit(
     v, trips = run
     cols = shape[1]
     volta = _volta_store_plan(slab=slab, shape=shape, cta=cta, elem_bytes=elem_bytes, swizzle=swizzle)
-    out: list[Stmt] = []
+    out: list[Statement] = []
     for trip in range(trips):
         if volta is not None:
             name_base, trip_stride, slot_stride = volta
@@ -390,13 +389,13 @@ def sync_copy_deposit(
     return out
 
 
-def cp_async_commit() -> list[Stmt]:
+def cp_async_commit() -> list[Statement]:
     """Close the current cp.async batch into a commit-group (the depth-``D`` ring commits one
     group per filled slot, so ``CpAsyncWait(group=D-1)`` can drain exactly the slot it needs)."""
     return [CpAsyncCommit()]
 
 
-def cp_async_wait(group: int) -> list[Stmt]:
+def cp_async_wait(group: int) -> list[Statement]:
     """Wait until at most ``group`` cp.async commit-groups remain in flight, then a CTA barrier
     so every lane sees the drained slot (the depth-``D`` ring's per-chunk handshake — the commit
     happened in the prefetch fill above)."""
@@ -410,7 +409,9 @@ def slab_smem(name: str, rows: int, cols: int, dtype: str, *, align: int = 0) ->
     return Smem(name=name, extents=(rows, cols), dtype=dtype, align=align)
 
 
-def sync_row_fill(*, slab: str, src: str, extent: int, grid_vars: tuple, linear_tid: Expr, n_threads: int, dtype: str) -> list[Stmt]:
+def sync_row_fill(
+    *, slab: str, src: str, extent: int, grid_vars: tuple, linear_tid: Expression, n_threads: int, dtype: str
+) -> list[Statement]:
     """The synchronous ``smem`` 1-D operand fill: cooperatively copy the CTA-shared row
     ``src[grid…, 0:extent]`` into a length-``extent`` smem ``slab``, then a CTA barrier so
     every lane sees the filled row before the reader drains it. The ``n_threads`` cooperating
@@ -421,13 +422,15 @@ def sync_row_fill(*, slab: str, src: str, extent: int, grid_vars: tuple, linear_
     fills above."""
     fe = Axis(name=f"_{slab}_f", extent=extent)
     val = f"_{slab}_v"
-    load = Load(name=val, input=src, index=(*grid_vars, Var(fe.name)))
-    write = Write(output=slab, index=(Var(fe.name),), value=val)
+    load = Load(names=(val,), input=src, index=(*grid_vars, Var(fe.name)))
+    write = Write(output=slab, index=(Var(fe.name),), values=(val,))
     loop = StridedLoop(axis=fe, start=linear_tid, step=_lit(n_threads), body=Body((load, write)), unroll=False)
     return [Smem(name=slab, extents=(extent,), dtype=dtype), loop, Sync()]
 
 
-def stat_rows(stats: tuple[str, ...], slab_of, row_axis: Axis, dtype: str = "float", dtypes: dict[str, str] | None = None) -> list[Stmt]:
+def stat_rows(
+    stats: tuple[str, ...], slab_of, row_axis: Axis, dtype: str = "float", dtypes: dict[str, str] | None = None
+) -> list[Statement]:
     """One length-``rows`` smem row per bridged statistic, each at its own C type."""
     per = dtypes or {}
     return [Smem(name=slab_of(nm), extents=(row_axis.extent.as_static(),), dtype=per.get(nm, dtype)) for nm in stats]
@@ -438,13 +441,13 @@ def sync_stat_fill(
     stats: tuple[str, ...],
     slab_of,
     row_axis: Axis,
-    row_body: list[Stmt],
+    row_body: list[Statement],
     cta: CtaTile,
     stat=None,
     dtype: str = "float",
     dtypes: dict[str, str] | None = None,
     declare: bool = True,
-) -> list[Stmt]:
+) -> list[Statement]:
     """The ``smem`` compute fill's per-row STATISTIC prologue — the fused norm→linear warp edge's
     cooperative prologue, run ONCE before the staged K-loop: the CTA stripes the tile's rows **one
     row per WARP** (``for r = warp; r < rows; r += n_warps``); the warp's 32 lanes stride the row's
@@ -462,8 +465,8 @@ def sync_stat_fill(
 
     ``declare=False`` leaves the rows' declarations out — a per-chunk statistic refills rows the
     kernel declared once, ahead of its K loop (:func:`stat_rows`)."""
-    decls: list[Stmt] = stat_rows(stats, slab_of, row_axis, dtype, dtypes) if declare else []
-    writes = tuple(Write(output=slab_of(nm), index=(Var(row_axis.name),), value=nm) for nm in stats)
+    decls: list[Statement] = stat_rows(stats, slab_of, row_axis, dtype, dtypes) if declare else []
+    writes = tuple(Write(output=slab_of(nm), index=(Var(row_axis.name),), values=(nm,)) for nm in stats)
     rl_i = next((i for i, s in enumerate(row_body) if isinstance(s, Loop) and s.is_reduce), None)
     if rl_i is None or stat is None or cta.n_threads % 32 or cta.n_threads < 32:
         body = (*row_body, *writes)
@@ -517,7 +520,7 @@ def _fill_align(cols: int, elem_bytes: int, swizzle: str) -> int:
     so every one of them answers here.
 
     The chunk is the requirement that is easy to miss, because it does not follow the element
-    width. :func:`_cp_async_width` picks the widest legal chunk that divides the inner span — 16 B
+    width. :func:`copy_width` picks the widest legal chunk that divides the inner span — 16 B
     for any 16 B-divisible row, f16 as much as fp8 — and a vector store faults on a shared address
     that is not chunk-aligned. Aligning to the ELEMENT would leave an f16 slab 2 B-aligned and its
     16 B writes free to land at 8 mod 16, which is a real fault and not a theoretical one: it is
@@ -527,7 +530,7 @@ def _fill_align(cols: int, elem_bytes: int, swizzle: str) -> int:
 
     The row STRIDE keeps every later row aligned once the base is: the byte slab's ``BYTE_SLAB_PAD``
     is 16-divisible and the staging legality already requires 16-divisible inner spans."""
-    return max(_swizzle_align(swizzle), _cp_async_width(cols, elem_bytes) * elem_bytes)
+    return max(_swizzle_align(swizzle), copy_width(cols, elem_bytes) * elem_bytes)
 
 
 # TMA hardware-swizzle atom widths in bytes, widest-first. The widest atom that divides a
@@ -604,7 +607,7 @@ def tma_descriptor(name: str, src: str, box: tuple[int, int], dtype: str, *, swi
 # --------------------------------------------------------------------------- #
 
 
-def _slot_row(slot: Expr, rows_per_slot: int) -> Expr | None:
+def _slot_row(slot: Expression, rows_per_slot: int) -> Expression | None:
     """The row offset of ring ``slot`` — ``slot·rows_per_slot``, or ``None`` for a literal
     slot 0 (the single-buffer / ring-slot-0 case). ``None`` keeps the emitted index free of a
     dead ``+ 0·rows`` term, so single-buffer staging stays bit-identical to its gmem baseline."""
@@ -626,8 +629,8 @@ class Operand:
     tag: str  # "a" / "b" — the cp.async fill name + the smem-slab / descriptor suffix
     buf: str  # gmem source buffer
     shape: tuple[int, int]  # (rows, cols) of one ring slot
-    index: Callable[[Expr], Callable]  # k0 -> ((row, col) -> gmem index)   (cp.async)
-    coords: Callable[[Expr], tuple]  # k0 -> gmem box origin                (TMA)
+    index: Callable[[Expression], Callable]  # k0 -> ((row, col) -> gmem index)   (cp.async)
+    coords: Callable[[Expression], tuple]  # k0 -> gmem box origin                (TMA)
     # Smem swizzle mode this operand's slab is written with ("NONE"/"B32"/"B64"/"B128") — derived
     # by the mma tier (`_MmaOps.slab_swizzles`). TMA transport: the hardware swizzles in-copy; the
     # cp.async transport applies the same XOR in SOFTWARE on each fill's destination index
@@ -652,7 +655,7 @@ class Operand:
     # The TMA descriptor box, when it differs from the 2-D slab ``shape`` — a BATCHED operand
     # (flash K/V: gmem ``(B, H, S, D)``) boxes as rank-N with leading extent-1 dims
     # (``(1, 1, bn, head_dim)``); the ``coords`` closure supplies the matching leading origin
-    # coordinates (the load's own batch/head index exprs — GQA's ``h // group`` rides through).
+    # coordinates (the load's own batch/head index expressions — GQA's ``h // group`` rides through).
     # ``None`` = the 2-D ``shape`` (the matmul tier's plain operands).
     box: tuple[int, ...] | None = None
     # An N-contiguous B a ``wgmma`` descriptor reads is stored ATOM-MAJOR: the N tile's 128-byte
@@ -676,10 +679,10 @@ class Operand:
     # :class:`SyncOperand`: its values are evaluated off the weight's scale cone, which is compute,
     # not a copy. ``None`` on every other operand.
     scale: tuple[str, int, int] | None = None
-    # ``(row, col) -> Expr``: whether a slab cell lies inside the source, when the tile overhangs a
+    # ``(row, col) -> Expression``: whether a slab cell lies inside the source, when the tile overhangs a
     # masked edge. The cp.async fill then zero-fills the chunks past it instead of re-reading the
     # edge's last row (``CpAsyncCopy.valid``). ``None``: every cell is in bounds.
-    valid: Callable[[Expr, Expr], Expr] | None = None
+    valid: Callable[[Expression, Expression], Expression] | None = None
 
     @property
     def slab(self) -> str:
@@ -695,7 +698,7 @@ class Operand:
         ``atoms == 1``)."""
         return self.box or (self.shape[0] // self.atoms, self.shape[1])
 
-    def slot_row(self, slot: Expr) -> Expr | None:
+    def slot_row(self, slot: Expression) -> Expression | None:
         """The ring-slot row offset into this operand's multi-slot slab (``None`` for slot 0)."""
         return _slot_row(slot, self.shape[0])
 
@@ -711,11 +714,11 @@ class SyncOperand:
 
     tag: str  # "a" / "b" — the smem-slab suffix
     shape: tuple[int, int]  # (rows, cols) of one ring slot
-    value: Callable[[Expr, Expr, Expr], tuple[list[Stmt], str]]  # (k0, row, col) -> (stmts, name)
+    value: Callable[[Expression, Expression, Expression], tuple[list[Statement], str]]  # (k0, row, col) -> (stmts, name)
     # A scheduled producer that writes the whole slab. Set ⇒ ``value`` is never called: the caller
     # runs the producer as its own pipeline segment, so a child contraction's operand live range
     # ends before this slab's drain begins.
-    producer: Callable[[Expr], list[Stmt]] | None = None
+    producer: Callable[[Expression], list[Statement]] | None = None
     # Smem swizzle mode this slab is written with ("NONE"/"B32"/"B64"/"B128") — the mma tier's
     # `_MmaOps.slab_swizzles`, applied by the fill's ``Write`` (the same flattened-index XOR the
     # cp.async fill uses) and read back by the ``ldmatrix`` drain. NONE outside the mma tier
@@ -734,7 +737,7 @@ class SyncOperand:
     # ``k0 -> stmts`` run once per chunk ahead of this slab's cells, barrier included — the cone's
     # per-chunk statistic (:func:`~emmy.compiler.ir.schedule.views.cone_seam`'s ``chunk``), whose
     # rows the cells read back. ``None`` when the cone has none.
-    before: Callable[[Expr], list[Stmt]] | None = None
+    before: Callable[[Expression], list[Statement]] | None = None
     # The row pad the scalar drain uses to spread power-of-two rows across banks.
     pad_cols: int = 0
 
@@ -742,7 +745,7 @@ class SyncOperand:
     def slab(self) -> str:
         return f"_{self.tag}_smem"
 
-    def slot_row(self, slot: Expr) -> Expr | None:  # noqa: ARG002
+    def slot_row(self, slot: Expression) -> Expression | None:  # noqa: ARG002
         """Always ``None`` — a sync-filled slab is SINGLE-BUFFER by construction: the compute /
         copy fill runs on the drain's own threads, so a prefetch slot for it buys no overlap
         (the work is serial either way) while doubling the slab. The synchronous fill's ``depth``
@@ -799,7 +802,7 @@ class SyncTransport:
     cta: CtaTile
     # The optional one-shot per-row statistic prologue (:func:`sync_stat_fill` — the fused
     # norm→linear cone's cooperative reduce), emitted once ahead of the K-loop.
-    prologue_stmts: tuple[Stmt, ...] = ()
+    prologue_stmts: tuple[Statement, ...] = ()
     # Materialized peers filled by a vectorized copy instead of the per-thread compute loop.
     copy_operands: tuple[Operand, ...] = ()
     # LOOP-INVARIANT staged peers — copied ONCE ahead of the loop and never refilled, because their
@@ -813,6 +816,9 @@ class SyncTransport:
     # ``True`` → the schedule asked for a ring (``depth >= 2``), so split that blocking copy across
     # the drain. :attr:`register_staged` is the confirmed answer.
     staged: bool = False
+    # The kernel's gmem buffers by name — the shapes :meth:`_run_plans` proves a vector read's alignment against. A
+    # read of a buffer missing here stays per-cell.
+    inputs: object = None
 
     @property
     def register_staged(self) -> bool:
@@ -828,14 +834,14 @@ class SyncTransport:
             and all(_sync_copy_runs(op.shape, self.cta, op.elem_bytes or self.elem_bytes) is not None for op in self.copy_operands)
         )
 
-    def slab_decls(self, ring: int) -> list[Stmt]:
+    def slab_decls(self, ring: int) -> list[Statement]:
         # Sync-filled slabs are single-buffer (see :meth:`SyncOperand.slot_row`); of the copied
         # peers only the per-chunk ones allocate the ring — the loop-invariant peers never advance,
         # so one slot holds them. Each peer is sized by its OWN element width and row pad: a copied
         # peer here is a copied operand there (a packed-pair weight's byte slab beside an f16 A),
         # so a byte slab keeps its 16 B alignment and its padded rows. Every copied peer aligns
         # through :func:`_fill_align` — its swizzle atom or its fill chunk, whichever is stricter.
-        def peer(op: Operand, rows: int) -> Stmt:
+        def peer(op: Operand, rows: int) -> Statement:
             eb = op.elem_bytes or self.elem_bytes
             return slab_smem(
                 op.slab,
@@ -868,11 +874,11 @@ class SyncTransport:
             decls += [decl for op in self.copy_operands for decl in _volta_gmem_decls(op=op, cta=self.cta, elem_bytes=self.elem_bytes)]
         return decls
 
-    def prologue(self, ring: int) -> list[Stmt]:  # noqa: ARG002
+    def prologue(self, ring: int) -> list[Statement]:  # noqa: ARG002
         # The invariant peers first, closed by their own handshake: every later reader — the stat
         # prologue below and every chunk's fill — reads them already resident.
         copy = sync_copy_fill if self.copy_sync else cp_async_fill
-        out: list[Stmt] = []
+        out: list[Statement] = []
         for op in self.invariant_operands:
             out += copy(
                 slab=op.slab,
@@ -889,7 +895,7 @@ class SyncTransport:
         return [*out, *self.prologue_stmts]
 
     @staticmethod
-    def _affine_step(a: Expr, b: Expr, ctx: SimplifyCtx) -> int | None:
+    def _affine_step(a: Expression, b: Expression, ctx: SimplifyCtx) -> int | None:
         """The literal difference ``b - a`` when both are affine over the same free vars with
         equal coefficients (``affine_form`` — the vectorizer's decomposition; a plain
         ``simplify`` cannot fold ``(k0 + 1) - k0``), else ``None``."""
@@ -900,8 +906,7 @@ class SyncTransport:
         d = BinaryExpr("-", fb[0], fa[0]).simplify(ctx)
         return d.value if isinstance(d, Literal) and isinstance(d.value, int) else None
 
-    @staticmethod
-    def _run_plans(op: SyncOperand, v: int) -> list[str]:
+    def _run_plans(self, op: SyncOperand, v: int) -> list[str]:
         """Per-position emission plan for one operand's ``V``-cell fill run — ``"hoist"`` /
         ``"vector"`` / ``"cell"``. Classified by PROBING the value closure at synthetic coords
         (col 0 vs col 1; the probe stmts are planning-only, never emitted):
@@ -910,34 +915,23 @@ class SyncTransport:
           row alone) — emit once, unsuffixed, but only while its SSA deps stay outside the
           per-cell defs (a dep on a replicated name demotes it back to per-cell);
         - a scalar ``Load`` whose last-dim index advances by exactly +1 per cell, leading dims
-          col-free, and whose ``col=0, k0=0`` anchor simplifies to a ``V``-aligned literal (the
-          cone's k-indexed operand read; K-divisibility eligibility makes the buffer's k extent
-          ``V``-aligned) ⇒ the run's V scalar loads merge into ONE vector ``Load``;
+          col-free, and whose every run starts on a ``V``-element boundary of its buffer (the
+          cone's k-indexed operand read) ⇒ the run's V scalar loads merge into ONE vector ``Load``.
+          A run starts at a multiple of ``V`` along the slab col, and the chunk base ``k0`` is one
+          too, so :func:`copies_aligned` proves the whole address of every run start at ``k0 = 0``:
+          a slice's offset, and every leading coordinate times its row stride (a 260-wide bf16 row
+          puts every odd row 8 B off the 16 B grid);
         - anything else replicates per cell (a cone stmt whose read doesn't advance +1 with
-          the slab col — e.g. a col-strided gather)."""
-        probe_row, probe_k0, zero = Var("__srow"), Var("__sk0"), Literal(0, "int")
+          the slab col — e.g. a col-strided gather, or a vector read no shape proves aligned)."""
+        probe_row, probe_k0, probe_col, zero = Var("__srow"), Var("__sk0"), Var("__scol"), Literal(0, "int")
         s0, _ = op.value(probe_k0, probe_row, zero)
         s1, _ = op.value(probe_k0, probe_row, Literal(1, "int"))
-        sz, _ = op.value(zero, probe_row, zero)
+        sz, _ = op.value(zero, probe_row, probe_col)
         ctx = SimplifyCtx.empty()
-
-        def aligned(expr: Expr) -> bool:
-            form = affine_form(expr, expr.free_vars())
-            if form is None:
-                return False
-            anchor, coeffs = form
-            anchor = anchor.simplify(ctx)
-            return (
-                isinstance(anchor, Literal)
-                and isinstance(anchor.value, int)
-                and anchor.value % v == 0
-                and all(coeff % v == 0 for coeff in coeffs.values())
-            )
-
         plans: list[str] = []
         cell_defs: set[str] = set()
         for p, (a, b) in enumerate(zip(s0, s1, strict=True)):
-            if "\n".join(a.pretty()) == "\n".join(b.pretty()) and not (set(a.deps()) & cell_defs):
+            if str(a) == str(b) and not (set(a.deps()) & cell_defs):
                 plans.append("hoist")
                 continue
             step = SyncTransport._affine_step(a.index[-1], b.index[-1], ctx) if isinstance(a, Load) and isinstance(b, Load) else None
@@ -950,12 +944,12 @@ class SyncTransport:
                 and all(str(x) == str(y) for x, y in zip(a.index[:-1], b.index[:-1], strict=True))
                 and step == 1
                 and isinstance(sz[p], Load)
-                and aligned(sz[p].index[-1])
+                and copies_aligned(sz[p], probe_col.name, v, self.inputs)
             ):
                 plans.append("vector")
             else:
                 plans.append("cell")
-            cell_defs |= Body((a,)).ssa_defs
+            cell_defs |= exposed_defines(a)
         return plans
 
     @property
@@ -971,8 +965,8 @@ class SyncTransport:
         fill writes the current chunk at the top of the body and keeps its own order."""
         return self.register_staged and not self.fills_current_slot
 
-    def fill(self, *, k0: Expr, slot: Expr, k0_cur: Expr | None = None, carried: bool = False) -> list[Stmt]:
-        out: list[Stmt] = []
+    def fill(self, *, k0: Expression, slot: Expression, k0_cur: Expression | None = None, carried: bool = False) -> list[Statement]:
+        out: list[Statement] = []
         # Issue the peer copies FIRST — at ``depth 1`` they run (cp.async: fly) while the compute
         # fill below runs; at ``depth >= 2`` (the peer-only ring) ``k0``/``slot`` are the
         # skeleton's PREFETCH chunk/slot, so they additionally cover the previous chunk's drain.
@@ -1016,22 +1010,22 @@ class SyncTransport:
             if op.before is not None:
                 out += op.before(k0_cur)
             rows, cols = op.shape
-            v = _cp_async_width(cols, op.elem_bytes or self.elem_bytes)
+            v = copy_width(cols, op.elem_bytes or self.elem_bytes)
             fe = Axis(name=f"_f{op.tag}", extent=(rows * cols) // v)
             base = _mul(Var(fe.name), _lit(v))
             row = BinaryExpr("/", base, _lit(cols))  # constant across the run: v divides cols
             col = BinaryExpr("%", base, _lit(cols))
             smem_row = row
             plans = self._run_plans(op, v)
-            body: list[Stmt] = []
+            body: list[Statement] = []
             vals: list[str] = []
-            cell_stmts: list[list[Stmt]] = []
+            cell_stmts: list[list[Statement]] = []
             for j in range(v):
                 cell_col = _add(col, _lit(j)) if j else col
                 stmts, val = op.value(k0_cur, row, cell_col)
                 cell_stmts.append(stmts)
                 vals.append(val)
-            hoisted_defs = {nm for p, stmt in enumerate(cell_stmts[0]) if plans[p] == "hoist" for nm in Body((stmt,)).ssa_defs}
+            hoisted_defs = {nm for p, stmt in enumerate(cell_stmts[0]) if plans[p] == "hoist" for nm in exposed_defines(stmt)}
             vals = [val if val in hoisted_defs else f"{val}__c{j}" for j, val in enumerate(vals)]
             # Per-cell SSA defs — the names each replica suffixes. HOISTED positions (run-invariant
             # stmts: the stat-row loads, whose value is identical across the run's cells) emit once,
@@ -1041,7 +1035,7 @@ class SyncTransport:
             # binding every cell's suffixed name (one 16 B ld like the cp.async fill, instead of V
             # scalar loads — the compute fill issued 3.6x cuBLAS's LSU instructions). Everything
             # else replicates per cell as before.
-            local = {nm for p, st in enumerate(cell_stmts[0]) if plans[p] != "hoist" for nm in Body((st,)).ssa_defs}
+            local = {nm for p, st in enumerate(cell_stmts[0]) if plans[p] != "hoist" for nm in exposed_defines(st)}
             for p in range(len(cell_stmts[0])):
                 if plans[p] == "hoist":
                     body.append(cell_stmts[0][p])
@@ -1064,14 +1058,14 @@ class SyncTransport:
             out.append(StridedLoop(axis=fe, start=self.cta.linear_tid, step=_lit(self.cta.n_threads), body=Body(tuple(body)), unroll=False))
         return out
 
-    def deposit(self, *, slot: Expr, ring: int, unpack: bool = False) -> list[Stmt]:
+    def deposit(self, *, slot: Expression, ring: int, unpack: bool = False) -> list[Statement]:
         """Land the registers :meth:`fill` issued into ring ``slot`` — the second half of the split
         blocking copy, placed by :func:`pipelined_kloop` past the resident chunk's drain. Empty on
         every unsplit transport, whose bytes land in their own ``wait``. ``unpack`` first spreads the
         packed vectors a back-edge issue carried into the staged names (:class:`Load` ``carried``)."""
         if not self.register_staged:
             return []
-        out: list[Stmt] = []
+        out: list[Statement] = []
         for op in self.copy_operands:
             if unpack:
                 v, trips = _sync_copy_runs(op.shape, self.cta, op.elem_bytes or self.elem_bytes)
@@ -1091,7 +1085,7 @@ class SyncTransport:
             )
         return out
 
-    def commit(self) -> list[Stmt]:
+    def commit(self) -> list[Statement]:
         return cp_async_commit() if self.copy_operands and not self.copy_sync else []
 
     @property
@@ -1106,7 +1100,7 @@ class SyncTransport:
         with a scheduled ``producer`` fills in its own segment and is not one of these."""
         return any(op.producer is None for op in self.operands)
 
-    def wait(self, *, in_flight: int, slot: Expr, phase: Expr) -> list[Stmt]:  # noqa: ARG002
+    def wait(self, *, in_flight: int, slot: Expression, phase: Expression) -> list[Statement]:  # noqa: ARG002
         if self.register_staged and not self.fills_current_slot:
             return []  # the deposit's own barrier past the drain is this group's whole handshake
         return cp_async_wait(in_flight) if self.copy_operands and not self.copy_sync else [Sync()]
@@ -1124,7 +1118,7 @@ class CpAsyncTransport:
     elem_bytes: int
     cta: CtaTile
 
-    def slab_decls(self, ring: int) -> list[Stmt]:
+    def slab_decls(self, ring: int) -> list[Statement]:
         # Every slab here is cp.async-filled, so each aligns to its copy chunk or its swizzle atom,
         # whichever is stricter (:func:`_fill_align`). The chunk half is what a 1-byte (fp8) slab's
         # natural 1 B alignment misses, and equally what an f16 slab's 2 B alignment misses — the
@@ -1141,11 +1135,11 @@ class CpAsyncTransport:
             for op in self.operands
         ]
 
-    def prologue(self, ring: int) -> list[Stmt]:
+    def prologue(self, ring: int) -> list[Statement]:
         return []
 
-    def fill(self, *, k0: Expr, slot: Expr, k0_cur: Expr | None = None) -> list[Stmt]:  # noqa: ARG002 — k0_cur is the sync transport's current-chunk handle
-        out: list[Stmt] = []
+    def fill(self, *, k0: Expression, slot: Expression, k0_cur: Expression | None = None) -> list[Statement]:  # noqa: ARG002 — k0_cur is the sync transport's current-chunk handle
+        out: list[Statement] = []
         for op in self.operands:
             # The software swizzle XOR assumes dense power-of-two rows; a padded slab already
             # breaks the same-bank stride another way — the two fixes are mutually exclusive.
@@ -1164,10 +1158,10 @@ class CpAsyncTransport:
             )
         return out
 
-    def commit(self) -> list[Stmt]:
+    def commit(self) -> list[Statement]:
         return cp_async_commit()
 
-    def wait(self, *, in_flight: int, slot: Expr, phase: Expr) -> list[Stmt]:
+    def wait(self, *, in_flight: int, slot: Expression, phase: Expression) -> list[Statement]:
         return cp_async_wait(in_flight)  # keep ``in_flight`` prefetch groups outstanding + a CTA barrier
 
 
@@ -1185,17 +1179,17 @@ class TmaTransport:
     mbar: str = "_mbar"
 
     @property
-    def _tid0(self) -> Expr:
+    def _tid0(self) -> Expression:
         return BinaryExpr("==", self.cta.linear_tid, _lit(0))
 
     @property
     def _total_bytes(self) -> int:
         return sum(math.prod(op.shape) * (op.elem_bytes or self.elem_bytes) for op in self.operands)
 
-    def slab_decls(self, ring: int) -> list[Stmt]:
+    def slab_decls(self, ring: int) -> list[Statement]:
         # TMA destination smem must be 128 B-aligned (a swizzled slab to its full atom period,
         # so the drain's from-base XOR matches the hardware deposit); one mbarrier per ring slot.
-        decls: list[Stmt] = [
+        decls: list[Statement] = [
             tma_descriptor(
                 op.desc,
                 op.buf,
@@ -1215,7 +1209,7 @@ class TmaTransport:
         decls.append(Smem(name=self.mbar, extents=(ring,), dtype="unsigned long long"))
         return decls
 
-    def _box_coords(self, op: Operand, k0: Expr) -> tuple:
+    def _box_coords(self, op: Operand, k0: Expression) -> tuple:
         """The operand's TMA box-origin coordinates at K-chunk ``k0`` — split to match a
         swizzle-split descriptor box: when the box's inner dim was split down to the swizzle atom,
         the origin's inner coordinate divides by the atom width and a literal-0 atom coordinate is
@@ -1230,14 +1224,14 @@ class TmaTransport:
             return coords
         return (*coords[:-1], BinaryExpr("/", coords[-1], _lit(atom)), _lit(0))
 
-    def prologue(self, ring: int) -> list[Stmt]:
+    def prologue(self, ring: int) -> list[Statement]:
         # Init every ring slot's mbarrier (one producer ``arrive`` per phase), then a CTA barrier so
         # every consumer sees the init before its first wait.
         inits = tuple(MbarrierInit(mbar=self.mbar, count=1, slot=_lit(s)) for s in range(ring))
         return [Cond(cond=self._tid0, body=inits), Sync()]
 
-    def fill(self, *, k0: Expr, slot: Expr, k0_cur: Expr | None = None) -> list[Stmt]:  # noqa: ARG002 — k0_cur is the sync transport's current-chunk handle
-        body: list[Stmt] = [MbarrierArriveExpectTx(mbar=self.mbar, bytes_=self._total_bytes, slot=slot)]
+    def fill(self, *, k0: Expression, slot: Expression, k0_cur: Expression | None = None) -> list[Statement]:  # noqa: ARG002 — k0_cur is the sync transport's current-chunk handle
+        body: list[Statement] = [MbarrierArriveExpectTx(mbar=self.mbar, bytes_=self._total_bytes, slot=slot)]
         for op in self.operands:
             # One box per slot, or one per atom of an atom-major slab: block ``a`` lands ``a`` box
             # heights down the slot and reads ``a`` atom widths along the operand's contiguous dim.
@@ -1256,10 +1250,10 @@ class TmaTransport:
                 )
         return [Cond(cond=self._tid0, body=tuple(body))]
 
-    def commit(self) -> list[Stmt]:
+    def commit(self) -> list[Statement]:
         return []  # TMA has no commit-group; the arrive.expect_tx above already armed the barrier
 
-    def wait(self, *, in_flight: int, slot: Expr, phase: Expr) -> list[Stmt]:
+    def wait(self, *, in_flight: int, slot: Expression, phase: Expression) -> list[Statement]:
         return [MbarrierWait(mbar=self.mbar, phase=phase, slot=slot)]
 
 
@@ -1285,16 +1279,16 @@ _SM_REGFILE = 65536
 def _producer_band_kloop(
     *,
     transport: TmaTransport,
-    drain: Callable[[Expr], list[Stmt]],
+    drain: Callable[[Expression], list[Statement]],
     ring: int,
     bk_elems: int,
     n_chunks: int,
     k_extent: int,
     aux_threads: int,
     block_threads: int,
-    k_end: Expr | None = None,
+    k_end: Expression | None = None,
     in_flight=None,
-) -> tuple[list[Stmt], list[Stmt]]:
+) -> tuple[list[Statement], list[Statement]]:
     """The warp-SPECIALIZED staged K-loop — the same fill → wait → drain phases as the uniform
     skeleton below, split across two warp bands instead of software-pipelined in-warp. The producer
     band rides at the TAIL of the thread block (``threadIdx.x >= block_threads`` — the compute
@@ -1325,10 +1319,10 @@ def _producer_band_kloop(
     # here — then a CTA barrier publishes the init. The transport's own prologue is not used.
     inits = tuple(MbarrierInit(mbar=transport.mbar, count=1, slot=_lit(s)) for s in range(ring))
     inits += tuple(MbarrierInit(mbar=_EMPTY_MBAR, count=1, slot=_lit(s)) for s in range(ring))
-    pre: list[Stmt] = [Cond(cond=BinaryExpr("==", tid, _lit(0)), body=inits), Sync()]
+    pre: list[Statement] = [Cond(cond=BinaryExpr("==", tid, _lit(0)), body=inits), Sync()]
 
     k0, K = "_ks", k_extent
-    i_expr = BinaryExpr("/", Var(k0), _lit(bk_elems))
+    i_expression = BinaryExpr("/", Var(k0), _lit(bk_elems))
     kaxis = Axis(name=k0, extent=K)
     setmaxnreg = (
         aux_threads % _WARP_GROUP == 0
@@ -1341,7 +1335,7 @@ def _producer_band_kloop(
     # (``c >= ring`` ⟺ ``i >= 1``) wait release generation ``c/ring - 1`` first. The empty-wait
     # rides INSIDE the transport's elected-thread fill ``Cond`` — only the thread that issues the
     # box copy needs the slot's release.
-    pref_chunk = BinaryExpr("+", i_expr, _lit(ring - 1))
+    pref_chunk = BinaryExpr("+", i_expression, _lit(ring - 1))
     pref_slot = BinaryExpr("%", pref_chunk, _lit(ring))
     empty_phase = BinaryExpr("%", BinaryExpr("-", BinaryExpr("/", pref_chunk, _lit(ring)), _lit(1)), _lit(2))
     if ring >= 2:
@@ -1356,9 +1350,11 @@ def _producer_band_kloop(
         k0_pref = Var(k0)
     (fill_cond,) = transport.fill(k0=k0_pref, slot=pref_slot)
     assert isinstance(fill_cond, Cond), "TmaTransport.fill is the elected-thread Cond"
-    empty_wait = Cond(cond=BinaryExpr(">=", i_expr, _lit(1)), body=(MbarrierWait(mbar=_EMPTY_MBAR, phase=empty_phase, slot=pref_slot),))
-    prod_body: list[Stmt] = [Cond(cond=fill_cond.cond, body=(empty_wait, *fill_cond.body))]
-    prod: list[Stmt] = [SetMaxNReg(_PRODUCER_REGS, "dec")] if setmaxnreg else []
+    empty_wait = Cond(
+        cond=BinaryExpr(">=", i_expression, _lit(1)), body=(MbarrierWait(mbar=_EMPTY_MBAR, phase=empty_phase, slot=pref_slot),)
+    )
+    prod_body: list[Statement] = [Cond(cond=fill_cond.cond, body=(empty_wait, *fill_cond.body))]
+    prod: list[Statement] = [SetMaxNReg(_PRODUCER_REGS, "dec")] if setmaxnreg else []
     for s in range(ring - 1):  # prime chunks 0..ring-2 into slots 0..ring-2 (release generation 0)
         prod += transport.fill(k0=_lit(s * bk_elems), slot=_lit(s))
     prod.append(StridedLoop(axis=kaxis, start=_lit(0), step=_lit(bk_elems), body=Body(tuple(prod_body)), unroll=False, end=k_end))
@@ -1366,9 +1362,9 @@ def _producer_band_kloop(
     # Compute: wait the data parity, drain the slot, close the band on the named barrier, release.
     # A drain that leaves its group running (``in_flight``) has waited out the PREVIOUS chunk's
     # group only, so it releases that chunk's slot, one chunk late (:func:`_in_flight_kloop`).
-    read_slot = BinaryExpr("%", i_expr, _lit(ring))
-    read_phase = BinaryExpr("%", BinaryExpr("/", i_expr, _lit(ring)), _lit(2))
-    cons_body: list[Stmt] = list(transport.wait(in_flight=ring - 1, slot=read_slot, phase=read_phase))
+    read_slot = BinaryExpr("%", i_expression, _lit(ring))
+    read_phase = BinaryExpr("%", BinaryExpr("/", i_expression, _lit(ring)), _lit(2))
+    cons_body: list[Statement] = list(transport.wait(in_flight=ring - 1, slot=read_slot, phase=read_phase))
     if in_flight is None:
         cons_body += drain(read_slot)
     else:
@@ -1378,13 +1374,14 @@ def _producer_band_kloop(
     if in_flight is None:
         cons_body.append(Cond(cond=elected, body=(MbarrierArrive(mbar=_EMPTY_MBAR, slot=read_slot),)))
     else:
-        prev_slot = BinaryExpr("%", BinaryExpr("+", i_expr, _lit(ring - 1)), _lit(ring))
+        prev_slot = BinaryExpr("%", BinaryExpr("+", i_expression, _lit(ring - 1)), _lit(ring))
         cons_body.append(
             Cond(
-                cond=BinaryExpr("&&", elected, BinaryExpr(">=", i_expr, _lit(1))), body=(MbarrierArrive(mbar=_EMPTY_MBAR, slot=prev_slot),)
+                cond=BinaryExpr("&&", elected, BinaryExpr(">=", i_expression, _lit(1))),
+                body=(MbarrierArrive(mbar=_EMPTY_MBAR, slot=prev_slot),),
             )
         )
-    cons: list[Stmt] = [SetMaxNReg(_CONSUMER_REGS, "inc")] if setmaxnreg else []
+    cons: list[Statement] = [SetMaxNReg(_CONSUMER_REGS, "inc")] if setmaxnreg else []
     cons.append(StridedLoop(axis=kaxis, start=_lit(0), step=_lit(bk_elems), body=Body(tuple(cons_body)), unroll=False, end=k_end))
 
     role = Cond(cond=BinaryExpr(">=", tid, _lit(block_threads)), body=tuple(prod), else_body=tuple(cons))
@@ -1412,18 +1409,18 @@ class _Group:
 
     transport: object
     ring: int
-    read_slot: Expr
-    read_phase: Expr
+    read_slot: Expression
+    read_phase: Expression
     first: int = 0
     last: int = 0
     kind: str = "current"
     lag: int = 0
     n_flight: int = 0  # cp.async wait_group count (the static counting pass below)
-    fill_slot: Expr = Literal(0, "int")  # the slot this iteration's fill targets — where a split fill lands
+    fill_slot: Expression = Literal(0, "int")  # the slot this iteration's fill targets — where a split fill lands
     back_edge: bool = False  # a two-slot split ring issuing past the barrier (``issues_across_back_edge``)
 
 
-def _deposit(group: _Group, slot: Expr, *, unpack: bool = False) -> list[Stmt]:
+def _deposit(group: _Group, slot: Expression, *, unpack: bool = False) -> list[Statement]:
     """The transport's register→smem landing, or nothing for a transport whose fill is not split
     (cp.async / TMA leave their in-flight bytes with the copy engine, not in registers)."""
     land = getattr(group.transport, "deposit", None)
@@ -1433,22 +1430,22 @@ def _deposit(group: _Group, slot: Expr, *, unpack: bool = False) -> list[Stmt]:
 def pipelined_kloop(
     *,
     operands: tuple[tuple[object, int], ...],
-    build_segments: Callable[[tuple[Expr, ...]], list[tuple[list[Stmt], frozenset[str]]]],
+    build_segments: Callable[[tuple[Expression, ...]], list[tuple[list[Statement], frozenset[str]]]],
     bk_elems: int,
     n_chunks: int | Dim,
     k_extent: int | Dim,
     k0: str = "_ks",
-    k_end: Expr | None = None,
-    k_first: Expr | None = None,
+    k_end: Expression | None = None,
+    k_first: Expression | None = None,
     seed: bool = True,
     carried=None,
     in_flight=None,
-) -> tuple[list[Stmt], list[Stmt]]:
+) -> tuple[list[Statement], list[Statement]]:
     """The **one** liveness-scheduled staged K-loop skeleton — every staged form is this scheduler
     run over the loop body's dataflow; none is its own skeleton.
 
     ``operands`` is the ``(transport, depth)`` pair per scheduled operand-group; ``build_segments``
-    is called ONCE with each group's read-slot expr (positional) and returns the body as ordered
+    is called ONCE with each group's read-slot expression (positional) and returns the body as ordered
     ``(stmts, reads)`` segments, ``reads`` naming the smem slabs the segment drains. Two structural
     facts drive every placement decision:
 
@@ -1483,17 +1480,17 @@ def pipelined_kloop(
     full ``depth`` ring and clamps every fill — ring prefetch and kill-point refill alike — against
     the runtime chunk count. Returns ``(slab_decls, [prologue…, outer_loop])``."""
     symbolic = isinstance(k_extent, Dim)
-    k_pos: Expr = BinaryExpr("-", Var(k0), k_first) if k_first is not None else Var(k0)
-    i_expr = BinaryExpr("/", k_pos, _lit(bk_elems))  # chunk index of the current step (stream-relative)
+    k_pos: Expression = BinaryExpr("-", Var(k0), k_first) if k_first is not None else Var(k0)
+    i_expression = BinaryExpr("/", k_pos, _lit(bk_elems))  # chunk index of the current step (stream-relative)
 
     groups: list[_Group] = []
     for transport, depth in operands:
         ring = depth if symbolic else (min(depth, n_chunks) if n_chunks >= 2 else 1)
         if ring == 1:
-            read_slot, read_phase = _lit(0), BinaryExpr("%", i_expr, _lit(2))
+            read_slot, read_phase = _lit(0), BinaryExpr("%", i_expression, _lit(2))
         else:
-            read_slot = BinaryExpr("%", i_expr, _lit(ring))
-            read_phase = BinaryExpr("%", BinaryExpr("/", i_expr, _lit(ring)), _lit(2))
+            read_slot = BinaryExpr("%", i_expression, _lit(ring))
+            read_phase = BinaryExpr("%", BinaryExpr("/", i_expression, _lit(ring)), _lit(2))
         groups.append(_Group(transport=transport, ring=ring, read_slot=read_slot, read_phase=read_phase))
 
     segments = build_segments(tuple(g.read_slot for g in groups))
@@ -1517,38 +1514,38 @@ def pipelined_kloop(
         else:
             g.kind, g.lag = "kill", 1  # a symbolic extent rides the same runtime clamp as the ring prefetch
 
-    def _fill_k0(lag: int) -> Expr:
+    def _fill_k0(lag: int) -> Expression:
         """The refill's chunk base — ``k0 + lag·bk``, clamped onto the last needed chunk (the
         ``k_end`` early stop reads the loop's hoisted ``<k0>_end`` for-init bound — inlining the
-        raw expr per iteration measurably spills; a symbolic extent clamps at runtime)."""
+        raw expression per iteration measurably spills; a symbolic extent clamps at runtime)."""
         k0_next = BinaryExpr("+", Var(k0), _lit(lag * bk_elems))
         if k_end is not None:
             end_var = Var(f"{k0}_end")
             last_k0 = BinaryExpr("*", BinaryExpr("/", BinaryExpr("-", end_var, _lit(1)), _lit(bk_elems)), _lit(bk_elems))
-            bound: Expr = end_var
+            bound: Expression = end_var
         elif symbolic:
-            last_k0 = BinaryExpr("*", BinaryExpr("-", n_chunks.expr, _lit(1)), _lit(bk_elems))
-            bound = k_extent.expr
+            last_k0 = BinaryExpr("*", BinaryExpr("-", n_chunks.expression, _lit(1)), _lit(bk_elems))
+            bound = k_extent.expression
         else:
             last_k0 = _lit((n_chunks - 1) * bk_elems)
             bound = _lit(k_extent)
         return TernaryExpr(cond=BinaryExpr("<", k0_next, bound), if_true=k0_next, if_false=last_k0)
 
-    def _prime_k0(c: int) -> Expr:
+    def _prime_k0(c: int) -> Expression:
         """The prologue prime's chunk base — ``k_first + c·bk`` (plain ``c·bk`` for a zero-start
         stream, today's unclamped shape). A late-starting stream clamps each prime onto the last
-        needed chunk with the RAW bound exprs (the loop's hoisted ``<k0>_end`` is not in scope in
+        needed chunk with the RAW bound expressions (the loop's hoisted ``<k0>_end`` is not in scope in
         the prologue): a band narrower than ``lag`` chunks would otherwise prime past a static
         extent's gmem."""
         if k_first is None:
             return _lit(c * bk_elems)
         base = BinaryExpr("+", k_first, _lit(c * bk_elems))
-        end: Expr = k_end if k_end is not None else (k_extent.expr if symbolic else _lit(k_extent))
+        end: Expression = k_end if k_end is not None else (k_extent.expression if symbolic else _lit(k_extent))
         last_k0 = BinaryExpr("*", BinaryExpr("/", BinaryExpr("-", end, _lit(1)), _lit(bk_elems)), _lit(bk_elems))
         return TernaryExpr(cond=BinaryExpr("<", base, end), if_true=base, if_false=last_k0)
 
-    decls: list[Stmt] = []
-    pre: list[Stmt] = []
+    decls: list[Statement] = []
+    pre: list[Statement] = []
     for g in groups:
         decls += g.transport.slab_decls(g.ring)
     for g in groups:
@@ -1593,17 +1590,17 @@ def pipelined_kloop(
         assert g.n_flight >= 0, "wait-group counting derived a negative in-flight count"
 
     if carried is not None and (
-        region := _carried_kloop(groups, carried, pre, i_expr, _fill_k0, k0, k_extent, bk_elems, k_end, seed, symbolic, k_first)
+        region := _carried_kloop(groups, carried, pre, i_expression, _fill_k0, k0, k_extent, bk_elems, k_end, seed, symbolic, k_first)
     ):
         return decls, region
     if in_flight is not None and (
-        region := _in_flight_kloop(groups, in_flight, pre, i_expr, _fill_k0, k0, k_extent, bk_elems, k_end, seed, k_first)
+        region := _in_flight_kloop(groups, in_flight, pre, i_expression, _fill_k0, k0, k_extent, bk_elems, k_end, seed, k_first)
     ):
         return decls, region
-    body: list[Stmt] = []
+    body: list[Statement] = []
     for g in groups:  # top fills: the ring prefetch / the single-buffer current-chunk fill
         if g.kind == "ring":
-            g.fill_slot = BinaryExpr("%", BinaryExpr("+", i_expr, _lit(g.lag)), _lit(g.ring))
+            g.fill_slot = BinaryExpr("%", BinaryExpr("+", i_expression, _lit(g.lag)), _lit(g.ring))
             if g.back_edge:
                 continue  # its chunk ``i+1`` was issued past the previous iteration's barrier
             body += g.transport.fill(k0=_fill_k0(g.lag), slot=g.fill_slot, k0_cur=Var(k0))
@@ -1645,7 +1642,9 @@ def pipelined_kloop(
     return decls, [*pre, outer]
 
 
-def _carried_kloop(groups, carried, pre, i_expr, fill_k0, k0, k_extent, bk_elems, k_end, seed, symbolic, k_first) -> list[Stmt] | None:
+def _carried_kloop(
+    groups, carried, pre, i_expression, fill_k0, k0, k_extent, bk_elems, k_end, seed, symbolic, k_first
+) -> list[Statement] | None:
     """The cp.async ring whose drain carries its fragments across chunks: every chunk's first atom-K
     step is loaded while the previous chunk's last step is in the tensor cores, and each chunk has
     one barrier. The last step of chunk ``i`` issues the prefetch of chunk ``i+ring-1`` into the
@@ -1662,17 +1661,17 @@ def _carried_kloop(groups, carried, pre, i_expr, fill_k0, k0, k_extent, bk_elems
     steps, loads, mmas = carried(g.read_slot)
     if steps < 2 or steps % 2:
         return None
-    _, next_loads, _ = carried(BinaryExpr("%", BinaryExpr("+", i_expr, _lit(1)), _lit(g.ring)))
+    _, next_loads, _ = carried(BinaryExpr("%", BinaryExpr("+", i_expression, _lit(1)), _lit(g.ring)))
     _, first_loads, _ = carried(_lit(0))
     in_flight = g.ring - 2  # after this step's commit, every prefetch but the next chunk's may fly
     head = [*pre, *g.transport.wait(in_flight=in_flight, slot=_lit(0), phase=_lit(0)), *first_loads(0, "_s0")]
-    body: list[Stmt] = []
+    body: list[Statement] = []
     for step in range(steps):
         this, other = f"_s{step % 2}", f"_s{(step + 1) % 2}"
         if step < steps - 1:
             body += loads(step + 1, other)
         else:
-            slot = BinaryExpr("%", BinaryExpr("+", i_expr, _lit(g.lag)), _lit(g.ring))
+            slot = BinaryExpr("%", BinaryExpr("+", i_expression, _lit(g.lag)), _lit(g.ring))
             body += g.transport.fill(k0=fill_k0(g.lag), slot=slot, k0_cur=Var(k0))
             body += g.transport.commit()
             body += g.transport.wait(in_flight=in_flight, slot=slot, phase=_lit(0))
@@ -1684,7 +1683,7 @@ def _carried_kloop(groups, carried, pre, i_expr, fill_k0, k0, k_extent, bk_elems
     return [*head, outer]
 
 
-def _in_flight_kloop(groups, in_flight, pre, i_expr, fill_k0, k0, k_extent, bk_elems, k_end, seed, k_first) -> list[Stmt] | None:
+def _in_flight_kloop(groups, in_flight, pre, i_expression, fill_k0, k0, k_extent, bk_elems, k_end, seed, k_first) -> list[Statement] | None:
     """The ring whose drain leaves its last MMA group running (the ``wgmma`` drain waiting for all
     but one group): chunk ``i``'s instructions are still in the tensor cores while chunk ``i+1``'s
     are issued, so the tensor pipe never drains between chunks. The slot chunk ``i`` read is
@@ -1700,7 +1699,7 @@ def _in_flight_kloop(groups, in_flight, pre, i_expr, fill_k0, k0, k_extent, bk_e
     if g.kind != "ring" or g.back_edge or not isinstance(g.transport, (CpAsyncTransport, TmaTransport)):
         return None
     issue, settle = in_flight
-    fill_slot = BinaryExpr("%", BinaryExpr("+", i_expr, _lit(g.lag)), _lit(g.ring))
+    fill_slot = BinaryExpr("%", BinaryExpr("+", i_expression, _lit(g.lag)), _lit(g.ring))
     body = [
         *g.transport.wait(in_flight=g.ring - 2, slot=g.read_slot, phase=g.read_phase),
         *issue(g.read_slot),
@@ -1721,12 +1720,12 @@ def _in_flight_kloop(groups, in_flight, pre, i_expr, fill_k0, k0, k_extent, bk_e
     return [*pre, outer]
 
 
-def _last_chunk(k0: str, bk_elems: int, k_extent, k_end: Expr | None, settle) -> Cond:
+def _last_chunk(k0: str, bk_elems: int, k_extent, k_end: Expression | None, settle) -> Cond:
     """``settle(1)`` on every chunk but the last, ``settle(0)`` on the last. The last group is
     waited out INSIDE the loop, not by a wait after it: ptxas (CUDA 12.9) moved the epilogue's
     accumulator reads above a trailing ``wgmma.wait_group 0`` once it had unrolled the loop, and
     an H100 GEMM with a ReLU epilogue stored an eighth of its rows wrong."""
-    bound = Var(f"{k0}_end") if k_end is not None else (k_extent.expr if isinstance(k_extent, Dim) else _lit(k_extent))
+    bound = Var(f"{k0}_end") if k_end is not None else (k_extent.expression if isinstance(k_extent, Dim) else _lit(k_extent))
     more = BinaryExpr("<", BinaryExpr("+", Var(k0), _lit(bk_elems)), bound)
     return Cond(cond=more, body=tuple(settle(1)), else_body=tuple(settle(0)))
 
@@ -1734,7 +1733,7 @@ def _last_chunk(k0: str, bk_elems: int, k_extent, k_end: Expr | None, settle) ->
 def staged_kloop(
     *,
     transport,
-    drain: Callable[[Expr], list[Stmt]],
+    drain: Callable[[Expression], list[Statement]],
     depth: int,
     bk_elems: int,
     n_chunks: int | Dim,
@@ -1742,12 +1741,12 @@ def staged_kloop(
     workers=None,
     block_threads: int | None = None,
     k0: str = "_ks",
-    k_end: Expr | None = None,
-    k_first: Expr | None = None,
+    k_end: Expression | None = None,
+    k_first: Expression | None = None,
     seed: bool = True,
     carried=None,
     in_flight=None,
-) -> tuple[list[Stmt], list[Stmt]]:
+) -> tuple[list[Statement], list[Statement]]:
     """The whole-body staged K-loop — ONE operand-group live across the entire ``drain``, run through
     :func:`pipelined_kloop` (the segment list is the single ``(drain(slot), slabs)`` entry, so the
     scheduler derives exactly the classic phases): ``ring = min(depth, n_chunks)`` slots (``<2``
@@ -1770,7 +1769,7 @@ def staged_kloop(
     identity seed ahead of the loop, for a carrier declared and seeded once outside it at a seed
     the term names (the chunk tier's twisted carrier).
 
-    ``k_end`` (an ``Expr`` over in-scope grid vars, CTA-uniform, ``≤ k_extent``) stops the chunk
+    ``k_end`` (an ``Expression`` over in-scope grid vars, CTA-uniform, ``≤ k_extent``) stops the chunk
     loop early. Chunks past it fold the carrier
     identity exactly, so skipping them is bit-identical; the prefetch clamp re-pins onto the last
     NEEDED chunk (``((k_end − 1) / bk) · bk``). CTA-uniformity keeps the in-loop barriers legal.

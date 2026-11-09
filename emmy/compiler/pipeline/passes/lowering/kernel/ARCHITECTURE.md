@@ -409,8 +409,11 @@ spills that came with holding the results. A base the reading cannot prove keeps
 **Computed operands and nested Folds.** Every computed edge remains a schedule site. Scalar rows evaluate a pure
 producer in registers. Warp rows place a producer in a synchronous shared-memory slab, evaluated per cell in the
 fill; a contraction nested there is a serial loop and takes no `TILE` or `STAGE` of its own (only the chunk tier's
-score does, see "The one factorizer"). Materialized peers keep using the ordinary vectorized copy transports. These are residence choices over the same Fold tree; the scheduler and
-materializer do not recognize operation families.
+score does, see "The one factorizer"). Each fill thread writes a run of up to 16 B of cells, and the run's reads of
+one gmem operand along K merge into one vector load only where `copies_aligned` proves every run starts on that
+width, the proof every vector copy takes (the schedule `ARCHITECTURE.md`). A 260-wide bf16 row puts every odd row
+8 B off, so its reads stay per cell. Materialized peers keep using the ordinary vectorized copy transports. These are
+residence choices over the same Fold tree; the scheduler and materializer do not recognize operation families.
 
 **A carrier the tiers cannot fold WHOLE is no tile site.** `Fold.tiles_whole` asks whether the tile's accumulators can
 BE the carrier: for a planar one, that every carried state is a bilinear channel; for a twisted one, that the recipe
@@ -533,7 +536,16 @@ ldmatrix XOR is b16-indexed); the cp.async byte slab instead pads each row by `_
 every chunk 16 B-aligned and takes the drain from 4-way bank conflicts to ≤ 2-way per the lane→bank oracle), and a
 TMA byte slab (the U8 `CUtensorMap`) deposits dense and eats the measured conflicts. Legality
 (`resolve_warp_stage`'s byte arm): 16-divisible inner spans (and, canonical-B, a 16-divisible gmem row stride N);
-the multi-channel sync compute-fill and the scalar resolver still decline 1-byte elements.
+the multi-channel sync compute-fill and the scalar resolver still decline 1-byte elements. The chunk tier stages an
+FP8 key-value cache the same way, its key and its value both, on cp.async only (`chunk_slab_dtype`): an f16 cell
+converts the key's (k, k+1) pairs with one fp8x2 convert, and a bf16 cell's key and every K-major value element
+convert one by one. A warp-group score cannot read that key, since its descriptor converts nothing
+(`_wgmma_slab_refusal`). Like every vector copy a stage makes, each 16 B copy must start on its own width in gmem
+(`vector_copies_aligned`, the schedule `ARCHITECTURE.md`), so a key or value sliced one byte into a padded row reads
+gmem-direct. Read gmem-direct, the cache cost one byte load per element — about 1,150 loads
+a thread per 64-key chunk at head width 256, each holding a register until it converts — and every attention fold sat
+at 255 registers with spills. Staged, the 27B one-row decode piece at 131,072 cached tokens runs 431 us against 845 on
+an RTX 4080, about 87% of the card's bandwidth.
 
 **Staged packed-pair (NVFP4) weights — the byte slab plus a block-scale slab.** A packed weight is a COMPUTED B, so
 the general reading above already covers it: the compute fill evaluates its decode cone per slab cell. That reading
@@ -851,31 +863,29 @@ multiply when `FAST_MATH` is enabled. It runs after dtype stamping, preserves fl
 varying division and explicit round-to-nearest f32 division alone. The latter protects FP4 encoding boundaries even
 under the default fast-math regime. Structural body normalization stays independent of arithmetic policy.
 
-`085_fast_exp` follows the enabled `FAST_MATH` default, unless an explicit `FAST_EXP` pin overrides it. It lowers
-`exp` through `__expf`, promoting half inputs and rounding back afterward, and records the policy for idempotence.
-The rewrite includes generated `RegStore` epilogue bodies, each traversed in its own SSA scope. Host evaluation
-continues to use `exp`; only CUDA evaluation uses the approximate intrinsic.
-`100_loopify` remains off by default (`EMMY_LOOPIFY=N`), a generic **loop re-roller** iterated to a fixpoint.
-Loopify folds a maximal run of ≥ `N` congruent per-fragment statements —
-an mma body's per-fragment epilogue (`FragmentApply`), its load+mma pairs, the fragment `RegStore`s, the A-fragment
-loads, a nested contraction's K-chunks × N-atoms — into
-`#pragma unroll` `StridedLoop`s over `_r{depth}`. The matcher (`_reroll`) is node-type-agnostic: a recursive structural
-walk over each candidate window's Stmt/Expr trees returns a template ONLY when every per-iteration difference is a
-**contiguous fragment family** index (`O_i_f0 … O_i_f{N-1}` or an already-arrayed `fam[0] …`, arrayed into one
-`count`-arrayed `RegFragment` decl and indexed `fam[_r]`) or an **affine address offset** — and it peels a trailing
-`± Literal` off each index Expr so a codegen-**folded** `kv0` (really `kv0 + 0*8`) reconciles with a sibling's `kv0 + 8`.
-A family that is not `RegFragment`-declared (a scalar carrier / an inline-declared fragment) bails the run. Iterating to
-a fixpoint (fresh `_r{depth}` per pass; already-arrayed `fam[i]` refs re-parsed) turns nested runs into nested loops:
-pass k re-rolls the inner N-atoms, pass k+1 sees the resulting sibling loops as a run and wraps them. Correctness is
-structural: an unrolled congruent run executes in the SAME order as the original straight-line statements, so a template
-that reproduces every window is byte-identical after nvcc unrolls — identical SASS.
-Only the family's `RegFragment` decl carries its dtype, so a render that needs a fragment reference's dtype reads it
-off the stem (`kernel.ir.frag_dtype`) — an arrayed member is `fam[_r]`, which no declaration names.
-A readability lever for `--ir cuda` inspection, `N=4` the recommended sweet spot (skips the 2-long runs).
-Two orthogonal readability transforms ride alongside: `FragmentApply` **always** renders as one element
+`085_fast_exp` follows the enabled `FAST_MATH` default, unless an explicit `FAST_EXP` pin overrides it. It lowers `exp`
+through `__expf`, promoting half inputs and rounding back afterward, and records the policy for idempotence. The rewrite
+includes generated `RegStore` epilogue bodies, each traversed in its own SSA scope. Host evaluation continues to use
+`exp`; only CUDA evaluation uses the approximate intrinsic. `100_loopify` remains off by default (`EMMY_LOOPIFY=N`), a
+generic **loop re-roller** iterated to a fixpoint. Loopify folds a maximal run of ≥ `N` congruent per-fragment
+statements — an mma body's per-fragment epilogue (`FragmentApply`), its load+mma pairs, the fragment `RegStore`s, the
+A-fragment loads, a nested contraction's K-chunks × N-atoms — into `#pragma unroll` `StridedLoop`s over `_r{depth}`. The
+matcher (`_reroll`) is node-type-agnostic: a recursive structural walk over each candidate window's Statement/Expression
+trees returns a template ONLY when every per-iteration difference is a **contiguous fragment family** index (`O_i_f0 …
+O_i_f{N-1}` or an already-arrayed `fam[0] …`, arrayed into one `count`-arrayed `RegFragment` decl and indexed `fam[_r]`)
+or an **affine address offset** — and it peels a trailing `± Literal` off each index Expression so a codegen-**folded**
+`kv0` (really `kv0 + 0*8`) reconciles with a sibling's `kv0 + 8`. A family that is not `RegFragment`-declared (a scalar
+carrier / an inline-declared fragment) bails the run. Iterating to a fixpoint (fresh `_r{depth}` per pass;
+already-arrayed `fam[i]` refs re-parsed) turns nested runs into nested loops: pass k re-rolls the inner N-atoms, pass
+k+1 sees the resulting sibling loops as a run and wraps them. Correctness is structural: an unrolled congruent run
+executes in the SAME order as the original straight-line statements, so a template that reproduces every window is
+byte-identical after nvcc unrolls — identical SASS. Only the family's `RegFragment` decl carries its dtype, so a render
+that needs a fragment reference's dtype reads it off the stem (`kernel.ir.frag_dtype`) — an arrayed member is `fam[_r]`,
+which no declaration names. A readability lever for `--ir cuda` inspection, `N=4` the recommended sweet spot (skips the
+2-long runs). Two orthogonal readability transforms ride alongside: `FragmentApply` **always** renders as one element
 `#pragma unroll for (_e)` loop (the ROW operand as the row-split ternary `_e < 2 ? row0 : row1`), so a re-rolled family
 nests as `for (_r) { for (_e) … }`; and pin-gated **chain fusion** (`_fuse_chains`, before the re-roll) folds a
-`FragmentApply` immediately consumed by an in-place unary `FragmentApply` on the same fragment (`p <- s − m` then
-`p *= exp(p)`) into one node carrying the tail on its `post` field, so the softmax renders `p[_e] = expf(s[_e] − m)`.
-NOTE: the whole-body SSA rename this pass runs is why the shared `_rewrite` `Tile` handler must carry `block_threads` /
+`FragmentApply` immediately consumed by an in-place unary `FragmentApply` on the same fragment (`p <- s − m` then `p *=
+exp(p)`) into one node carrying the tail on its `post` field, so the softmax renders `p[_e] = expf(s[_e] − m)`. NOTE:
+the whole-body SSA rename this pass runs is why the shared `_rewrite` `Tile` handler must carry `block_threads` /
 `aux_threads` through verbatim — dropping them silently over-launches a cooperative tile.

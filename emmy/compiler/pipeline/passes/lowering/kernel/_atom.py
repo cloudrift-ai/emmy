@@ -36,7 +36,7 @@ from emmy.compiler.ir.address import BYTE_SLAB_PAD, clamp_bound, clamp_to, gmem_
 from emmy.compiler.ir.atom import AtomKind, wide_accumulate
 from emmy.compiler.ir.axis import Axis
 from emmy.compiler.ir.elementwise import ElementwiseImpl
-from emmy.compiler.ir.expr import BinaryExpr, Expr, Literal, SimplifyCtx, TernaryExpr, Var, affine_form
+from emmy.compiler.ir.expression import BinaryExpr, Expression, Literal, SimplifyCtx, TernaryExpr, Var, affine_form
 from emmy.compiler.ir.kernel.ir import (
     COORD,
     ELEM_COL,
@@ -72,7 +72,7 @@ from emmy.compiler.ir.schedule import Side, Stage, Tile
 from emmy.compiler.ir.schedule.classic.refusals import chunk_partial_columns
 from emmy.compiler.ir.schedule.mask import cell_uniform, coordinate_aliases, select_masks
 from emmy.compiler.ir.schedule.packing import block_scaled_atom, packed_readings
-from emmy.compiler.ir.schedule.staging import chunk_key_stage, chunk_slab_pad, copied_b
+from emmy.compiler.ir.schedule.staging import chunk_key_stage, chunk_slab_dtype, chunk_slab_pad, copied_b
 from emmy.compiler.ir.sigma import Sigma
 from emmy.compiler.ir.stmt import (
     Accum,
@@ -85,7 +85,7 @@ from emmy.compiler.ir.stmt import (
     Loop,
     Select,
     SelectBranch,
-    Stmt,
+    Statement,
     StridedLoop,
     Write,
     binary,
@@ -169,13 +169,13 @@ def copy_cell(body, sigma, suffix: str, protected) -> list:
 
 # The per-axis masked-overhang helpers — one :class:`Side` in, so the codegen never re-derives a
 # ``mask_m`` / ``m_ext`` scalar pair: ``_guard`` predicates a store, ``_wrap`` clamp-reads an operand.
-def _guard(side: Side, coord: Expr):
+def _guard(side: Side, coord: Expression):
     """The overhang guard for cell ``coord`` on ``side`` — ``(coord, extent)`` when the axis is masked
     (its store is predicated on it), else ``None``."""
     return (coord, side.ext) if side.mask else None
 
 
-def _wrap(side: Side, coord: Expr) -> Expr:
+def _wrap(side: Side, coord: Expression) -> Expression:
     """Wrap ``coord`` in-bounds (``coord % extent``) on a masked ``side`` so an overhanging cell
     clamp-reads, else ``coord`` unchanged."""
     return BinaryExpr("%", coord, side.ext) if side.mask else coord
@@ -213,8 +213,8 @@ def _hoist_k_invariant(body, k_name: str) -> tuple[tuple, tuple]:
     undefined*). A statement that reads the coordinate carries everything it binds with it.
     """
     varying = {k_name}
-    hoisted: list[Stmt] = []
-    rest: list[Stmt] = []
+    hoisted: list[Statement] = []
+    rest: list[Statement] = []
     for stmt in body:
         if free_names(stmt) & varying:
             varying |= {name for inner in Body((stmt,)).iter() for name in inner.defines()}
@@ -224,11 +224,11 @@ def _hoist_k_invariant(body, k_name: str) -> tuple[tuple, tuple]:
     return tuple(hoisted), tuple(rest)
 
 
-def _addends(expr: Expr) -> tuple[Expr, ...]:
-    """The terms of ``expr``'s top-level sum."""
-    if isinstance(expr, BinaryExpr) and expr.op == "+":
-        return (*_addends(expr.left), *_addends(expr.right))
-    return (expr,)
+def _addends(expression: Expression) -> tuple[Expression, ...]:
+    """The terms of ``expression``'s top-level sum."""
+    if isinstance(expression, BinaryExpr) and expression.op == "+":
+        return (*_addends(expression.left), *_addends(expression.right))
+    return (expression,)
 
 
 def _direct_operand(load, inputs, *, k_name: str, own: str | None, legacy: tuple) -> tuple[bool, object]:
@@ -261,7 +261,7 @@ def _direct_operand(load, inputs, *, k_name: str, own: str | None, legacy: tuple
     if tensor is None or len(tensor.shape) != len(load.index):
         return legacy
     load = unclamped(load)
-    address: Expr = Literal(0, "int")
+    address: Expression = Literal(0, "int")
     unit = 1
     for dim in reversed(range(len(load.index))):
         for addend in _addends(load.index[dim]):
@@ -289,7 +289,7 @@ def _direct_operand(load, inputs, *, k_name: str, own: str | None, legacy: tuple
     )
 
 
-def _clamp_bound(load, axis_name: str, bound: Expr | None) -> Expr | None:
+def _clamp_bound(load, axis_name: str, bound: Expression | None) -> Expression | None:
     """``bound`` on ``axis_name`` tightened to where ``load`` reads in bounds — a split's slice overhangs a symbolic
     stream by up to its width, and its loads clamp onto the stream's last position (``address.clamp_to``); the
     fragment loaders stride the position itself (:func:`_direct_operand`), so the lanes past the stream end must
@@ -309,7 +309,7 @@ def _cells(mn: tuple, offset, i: int, j: int):
 
 
 # ---- warp/mma tier ----------------------------------------------------------------------------- #
-def _warp_epilogue(tail: list[Stmt], acc: str, m_name: str, n_name: str, sigma: Sigma, extra_accs: tuple[str, ...] = ()) -> dict:
+def _warp_epilogue(tail: list[Statement], acc: str, m_name: str, n_name: str, sigma: Sigma, extra_accs: tuple[str, ...] = ()) -> dict:
     """Fold the projection (zero-axis) fold into the store's epilogue fields for cell ``sigma`` — a
     :class:`RegStore`'s ``epilogue``, ``epilogue_params`` and ``epilogue_result``. Empty when there
     is no projection (a bare ``Write`` of the accumulator).
@@ -326,7 +326,7 @@ def _warp_epilogue(tail: list[Stmt], acc: str, m_name: str, n_name: str, sigma: 
     coordinates stay independent of a later store to a tile-local shared-memory slab. Keeping the
     ``Assign`` dtype makes the register epilogue obey the scalar Loop tail's promotion and
     conversion rules."""
-    body: list[Stmt] = []
+    body: list[Statement] = []
     write = None
     offset = {"m": Var(ELEM_ROW), "n": Var(ELEM_COL)}
     ph = dict(sigma.mapping)
@@ -407,7 +407,7 @@ def _mma_c_base(atom, i: int, j: int) -> str:
     return f"_ch{i}_{j}" if _f16acc(atom) else f"_c{i}_{j}"
 
 
-def _f16acc_promotes(atom, m_reg: int, n_reg: int, n_folds: int, frag_ns: str = "") -> list[Stmt]:
+def _f16acc_promotes(atom, m_reg: int, n_reg: int, n_folds: int, frag_ns: str = "") -> list[Statement]:
     """One :class:`FragmentPromote` per C cell × fold channel — the f16 chunk fold into the f32
     shadows (also the FINAL fold: the shadows carry the full sum only after it runs)."""
     return [
@@ -436,7 +436,7 @@ def _staged_inner_atom_loop(
     frag_ns: str = "",
     scales=None,
     parts: bool = False,
-) -> list[Stmt]:
+) -> list[Statement]:
     """The inner atom-K drain shared by every staged path: read the A/B ``slabs`` via
     ``LdmatrixLoad(staged=True)`` + ``MmaSyncPtx``. The leaf uses modern ``ldmatrix`` instructions
     or the Volta cooperative shared gather according to the atom fragment layout. ``slabs`` is ``(A, B…)`` — one B slab per fold
@@ -534,7 +534,7 @@ def _staged_inner_atom_loop(
     block_scaled = block_scaled_atom(atom)
 
     def ldms(kexpr, suffix):  # every operand's ldmatrix reads at K position `kexpr`, into fragment slot `suffix`
-        reads: list[Stmt] = []
+        reads: list[Statement] = []
         for frag_of, role, slab, ldm, is_row, reg, unit, adim, off, swz, b8, sc, sf_of in specs:
             assert not (b8 and swz != "NONE"), "a byte slab stays NONE-swizzle (the ldmatrix XOR is b16-indexed)"
             for x in range(reg):  # within-tile coord for register cell x: warp·(reg·adim) + x·adim
@@ -624,7 +624,7 @@ def _staged_inner_atom_loop(
     # buffers; prefetch runs ``depth-1`` steps ahead of the consuming mma.
     depth = min(reg_depth, n_steps)
     kcol = lambda step: Literal(step * atom_k, "int")  # slab-local K col of atom-K step `step`  # noqa: E731
-    stmts: list[Stmt] = []
+    stmts: list[Statement] = []
     for s in range(depth - 1):  # prologue: prime the first depth-1 steps
         stmts += ldms(kcol(s), f"_s{s % depth}")
     for step in range(n_steps):
@@ -635,7 +635,7 @@ def _staged_inner_atom_loop(
     return stmts
 
 
-def _wgmma_drain(*, operands, slot, mn, atom, bk_elems: int, frag_ns: str, n_folds: int, wait: bool = True) -> list[Stmt]:
+def _wgmma_drain(*, operands, slot, mn, atom, bk_elems: int, frag_ns: str, n_folds: int, wait: bool = True) -> list[Statement]:
     """The warp-group drain — the ``wgmma`` leaf reading ring ``slot``. Both operands stay in
     shared memory: each k16 step builds one matrix descriptor per operand and issues one
     ``wgmma.mma_async`` per group of ``cells_per_instruction`` accumulator cells along N, and the
@@ -662,15 +662,15 @@ def _wgmma_drain(*, operands, slot, mn, atom, bk_elems: int, frag_ns: str, n_fol
             "wgmma reads an N-contiguous B through an atom-major slab (one swizzle row per K row, atoms stacked along the rows)"
         )
 
-    def flat(row: Expr, col: Expr, cols: int) -> Expr:
+    def flat(row: Expression, col: Expression, cols: int) -> Expression:
         return BinaryExpr("+", BinaryExpr("*", row, Literal(cols, "int")), col)
 
-    def offset(base: Expr, off: Expr | None) -> Expr:
+    def offset(base: Expression, off: Expression | None) -> Expression:
         return base if off is None else BinaryExpr("+", off, base)
 
     grp_row = BinaryExpr("*", BinaryExpr("/", Var(m.unit), Literal(4, "int")), Literal(64, "int"))
     a_cols = bk_elems + getattr(a_op, "pad_cols", 0)
-    stmts: list[Stmt] = [WgmmaFence()]
+    stmts: list[Statement] = [WgmmaFence()]
     for step in range(n_steps):
         kcol = Literal(step * atom_k, "int")
         a_desc = f"{frag_ns}_da{step}"
@@ -717,25 +717,25 @@ def _wgmma_drain(*, operands, slot, mn, atom, bk_elems: int, frag_ns: str, n_fol
     return stmts
 
 
-def _min(a: Expr, b: Expr) -> Expr:
+def _min(a: Expression, b: Expression) -> Expression:
     return TernaryExpr(cond=BinaryExpr("<", a, b), if_true=a, if_false=b)
 
 
-def _max(a: Expr, b: Expr) -> Expr:
+def _max(a: Expression, b: Expression) -> Expression:
     return TernaryExpr(cond=BinaryExpr(">", a, b), if_true=a, if_false=b)
 
 
-def _shifted(expr: Expr, by: int) -> Expr:
-    return expr if by == 0 else BinaryExpr("+" if by > 0 else "-", expr, Literal(abs(by), "int"))
+def _shifted(expression: Expression, by: int) -> Expression:
+    return expression if by == 0 else BinaryExpr("+" if by > 0 else "-", expression, Literal(abs(by), "int"))
 
 
-def _side_base(side: Side) -> Expr:
+def _side_base(side: Side) -> Expression:
     """The CTA's tile-base coordinate on ``side`` — ``block·tile`` (always in-bounds: the block
     count is ``ceil(extent / tile)``, so ``block·tile < extent``)."""
     return BinaryExpr("*", Var(side.block), Literal(side.tile, "int"))
 
 
-def _sibling_sigma(sibling: Side | None) -> dict[str, Expr]:
+def _sibling_sigma(sibling: Side | None) -> dict[str, Expression]:
     """The σ entry for the operand's OTHER tiled output axis. A staged slab is CTA-shared across
     the sibling axis, so the drain contract already requires the operand's gmem address be
     sibling-invariant in VALUE — but the sibling var can still appear SYNTACTICALLY, through a
@@ -768,7 +768,7 @@ def _slab_index(operand_index, *, tile: Side, tile_base, k_axis, tile_is_row: bo
             # compute fill zeroes the matching A lanes, so it folds to nothing. The K-major
             # orientations have no such row and stay refused (``computed_operand_cover``).
             if not tile_is_row and not k_axis.extent.is_static:
-                k = clamp_to(k, k_axis.extent_expr())
+                k = clamp_to(k, k_axis.extent_expression())
             sig = Sigma(
                 {
                     tile.axis.name: clamp_to(t, tile.ext) if tile.mask else t,
@@ -788,7 +788,7 @@ def _atom_major(rows: int, atom: int):
     row ``r`` is K row ``r % rows`` of the atom whose tile columns start at ``(r // rows) · atom``.
     Composed under a fill's slab map, so every fill kind writes the stacked layout unchanged."""
 
-    def cell(row: Expr, col: Expr) -> tuple[Expr, Expr]:
+    def cell(row: Expression, col: Expression) -> tuple[Expression, Expression]:
         atom_at = BinaryExpr("*", BinaryExpr("/", row, Literal(rows, "int")), Literal(atom, "int"))
         return BinaryExpr("%", row, Literal(rows, "int")), BinaryExpr("+", atom_at, col)
 
@@ -806,12 +806,12 @@ def _stacked(at, rows: int, atom: int):
     return stacked
 
 
-def _tile_base(mn: tuple[Side, Side]) -> tuple[Expr, Expr]:
+def _tile_base(mn: tuple[Side, Side]) -> tuple[Expression, Expression]:
     """The CTA tile's ``(row_base, col_base)`` top-left origin — ``(m_b·tile_m, n_b·tile_n)``."""
     return tuple(_side_base(s) for s in mn)
 
 
-def _box_origin(operand_index, *, tile: Side, tile_base: Expr, k_axis, sibling: Side | None = None):
+def _box_origin(operand_index, *, tile: Side, tile_base: Expression, k_axis, sibling: Side | None = None):
     """The TMA box origin at K-chunk ``k0`` — the operand's OWN gmem index evaluated (σ) at the
     tile base and ``k0``, so an offset operand (a split-K partial's ``ksplit·(K/w) + k``) lands
     the box at its absolute coordinates. For a canonical operand this is exactly ``(tile_base,
@@ -832,7 +832,7 @@ def _slab_operands(
     mn: tuple[Side, Side],
     k_axis,
     bk_elems: int,
-    base: tuple[Expr, Expr],
+    base: tuple[Expression, Expression],
     swizzles: tuple[str, str] = ("NONE", "NONE"),
     elems: tuple = (None, None),
     b_trans: bool = False,
@@ -877,7 +877,7 @@ def _slab_operands(
         block = (tile.tile, bk_elems) if is_row else (bk_elems, tile.tile // atoms)
         elem = elems[i]
         # A >2-D operand (batched / unit-batch view) boxes as rank-N with leading extent-1 dims;
-        # ``_box_origin`` already yields the full-rank origin (the leading index exprs ride
+        # ``_box_origin`` already yields the full-rank origin (the leading index expressions ride
         # through σ untouched — the stage resolvers gated them tile/K-invariant). The flash K/V
         # ``(1, 1, bn, head_dim)`` convention, extended to the matmul tiers.
         box = (1,) * (len(index_srcs[i]) - 2) + block if len(index_srcs[i]) > 2 else None
@@ -902,7 +902,7 @@ def _slab_operands(
     return tuple(ops)
 
 
-def _inside(tile: Side, tile_base: Expr, is_row: bool):
+def _inside(tile: Side, tile_base: Expression, is_row: bool):
     """The slab cells inside a masked tile edge — ``(row, col) -> base + <tile coord> < ext`` —
     or ``None`` for an unmasked tile, or one whose tile axis runs along the slab row (a copy chunk
     there could straddle the edge)."""
@@ -927,7 +927,7 @@ def _stat_slab(name: str) -> str:
     return f"_a_stat_{name}"
 
 
-def _k_masked(stmts: list[Stmt], value: str, k: Expr, k_ext: Expr | None) -> tuple[list[Stmt], str]:
+def _k_masked(stmts: list[Statement], value: str, k: Expression, k_ext: Expression | None) -> tuple[list[Statement], str]:
     """The smem compute fill's **K MASK** — the clamp-to-identity discipline the copy transports
     already follow, applied to the contraction axis.
 
@@ -1011,7 +1011,7 @@ def _a_slab_operand(
                 k = BinaryExpr("+", k0, col)
                 sigma = Sigma({m_name: m_coord(row), k_name: k_coord(k)})
                 name = f"{load.name}__af"
-                stmts = [Load(name=name, input=load.input, index=tuple(sigma.apply(e) for e in load.index), dtype=load.dtype)]
+                stmts = [Load(names=(name,), input=load.input, index=tuple(sigma.apply(e) for e in load.index), dtype=load.dtype)]
                 return _k_masked(stmts, name, k, k_ext)
 
             return SyncOperand(tag="a", shape=shape, value=a_value, swizzle=swizzle), False, []
@@ -1034,15 +1034,15 @@ def _a_slab_operand(
 
     def a_value(k0, row, col):
         k = BinaryExpr("+", k0, col)
-        # σ is hygienic (:meth:`Stmt.substitute`): a cone statistic re-binding the contraction axis
+        # σ is hygienic (:meth:`Statement.substitute`): a cone statistic re-binding the contraction axis
         # name (attention's k-norm inside the K cone) keeps its own iteration var.
         sigma = Sigma({m_name: m_coord(row), k_name: k_coord(k)})
-        reads = Body(cell).ssa_uses - Body(cell).ssa_defs
-        stmts: list[Stmt] = [Load(names=(nm,), input=_stat_slab(nm), index=(row,)) for nm in (*stats, *chunk_stats) if nm in reads]
+        reads = Body(cell).ssa_uses - Body(cell).definitions.keys()
+        stmts: list[Statement] = [Load(names=(nm,), input=_stat_slab(nm), index=(row,)) for nm in (*stats, *chunk_stats) if nm in reads]
         stmts += [s.substitute(sigma) for s in cell]
         return _k_masked(stmts, c.operands[0].exposes[-1], k, k_ext)
 
-    prologue: list[Stmt] = []
+    prologue: list[Statement] = []
     row_axis = Axis(name="_sr", extent=mn[0].tile)
     if stats:
         sigma = Sigma({m_name: m_coord(Var(row_axis.name))})
@@ -1060,7 +1060,7 @@ def _a_slab_operand(
     if chunk_stats:
         chunk_dtypes = {nm: cuda_name(dt) for nm, dt in cone_stat_dtypes(chunk_pro, chunk_stats, inputs).items()}
         prologue += stat_rows(chunk_stats, _stat_slab, row_axis, dtypes=chunk_dtypes)
-        reads = [nm for nm in stats if nm in Body(chunk_pro).ssa_uses - Body(chunk_pro).ssa_defs]
+        reads = [nm for nm in stats if nm in Body(chunk_pro).ssa_uses - Body(chunk_pro).definitions.keys()]
         stat = next(edge for edge in c.operands[0].operands if set(chunk_stats) & set(edge.exposes))
 
         def before(k0):
@@ -1097,7 +1097,7 @@ def _sync_operands(
     b_atoms: int = 1,
     pads: tuple[int, int] = (0, 0),
     elems: tuple = (),
-) -> tuple[tuple, tuple[SyncOperand, ...], tuple[Operand, ...], list[Stmt]]:
+) -> tuple[tuple, tuple[SyncOperand, ...], tuple[Operand, ...], list[Statement]]:
     """The ``smem`` compute fill's drain-ordered, computed, copied, and prologue operands.
 
     Either contraction role may be a generic inline producer cone. A computed A evaluates at
@@ -1121,16 +1121,16 @@ def _sync_operands(
     into every slab lane past the runtime extent, so the drain still reads the whole chunk."""
     n_name, k_name = mn[1].axis.name, k_axis.name
     row_base, col_base = _tile_base(mn)
-    k_ext = k_axis.extent_expr() if not k_axis.extent.is_static else None
+    k_ext = k_axis.extent_expression() if not k_axis.extent.is_static else None
 
-    def m_coord(row) -> Expr:
+    def m_coord(row) -> Expression:
         t = BinaryExpr("+", row_base, row)
         return clamp_to(t, mn[0].ext) if mn[0].mask else t
 
-    def k_coord(k) -> Expr:
+    def k_coord(k) -> Expression:
         return clamp_to(k, k_ext) if k_ext is not None else k
 
-    def n_coord(col) -> Expr:
+    def n_coord(col) -> Expression:
         t = BinaryExpr("+", col_base, col)
         return clamp_to(t, mn[1].ext) if mn[1].mask else t
 
@@ -1233,7 +1233,7 @@ def _packed_operands(
     inputs=None,
     k_axis: Axis,
     axes: tuple = (),
-) -> tuple[tuple, tuple[SyncOperand, ...], tuple[Operand, ...], list[Stmt]]:
+) -> tuple[tuple, tuple[SyncOperand, ...], tuple[Operand, ...], list[Statement]]:
     """The staged operands of a byte-slab B contraction — the NVFP4 weight's byte-slab form, and the
     block-scaled fp8 weight's.
 
@@ -1268,17 +1268,17 @@ def _packed_operands(
     row_base, col_base = _tile_base(mn)
     block, per_byte = packed.block, packed.per_byte
 
-    def n_coord(row) -> Expr:
+    def n_coord(row) -> Expression:
         t = BinaryExpr("+", col_base, row)
         return clamp_to(t, n.ext) if n.mask else t
 
-    def m_coord(row) -> Expr:
+    def m_coord(row) -> Expression:
         t = BinaryExpr("+", row_base, row)
         return clamp_to(t, m.ext) if m.mask else t
 
-    k_ext = k_axis.extent_expr() if not k_axis.extent.is_static else None
+    k_ext = k_axis.extent_expression() if not k_axis.extent.is_static else None
 
-    def k_coord(k) -> Expr:
+    def k_coord(k) -> Expression:
         return clamp_to(k, k_ext) if k_ext is not None else k
 
     # A rides the SAME side the compute fill gives it: copied when materialized, compute-filled
@@ -1340,8 +1340,8 @@ def _packed_operands(
         # One column of this slab is one BYTE, so a column step is ``per_byte`` logical k: the σ
         # substitutes ``k0 + per_byte·col`` and a packed index's own ``k / 2`` turns that back into
         # the byte offset.
-        def bits_at(k_expr: Expr, n_expr: Expr) -> tuple:
-            sig = Sigma({n.axis.name: n_expr, k_axis.name: k_expr, **_sibling_sigma(m)})
+        def bits_at(k_expression: Expression, n_expression: Expression) -> tuple:
+            sig = Sigma({n.axis.name: n_expression, k_axis.name: k_expression, **_sibling_sigma(m)})
             return tuple(sig.apply(e) for e in channel.bits.index)
 
         def bits_index(k0):
@@ -1408,7 +1408,7 @@ def _block_scaled_operands(
     m, n = mn
     row_base, col_base = _tile_base(mn)
     block = pair.block
-    k_ext = k_axis.extent_expr() if not k_axis.extent.is_static else None
+    k_ext = k_axis.extent_expression() if not k_axis.extent.is_static else None
 
     def filled(side: Side, sibling: Side, base, codes, cone, tag: str, *, scale):
         """A compute-FILLED codes slab: this matmul's own kernel produces the byte, so there is no
@@ -1425,8 +1425,8 @@ def _block_scaled_operands(
         return SyncOperand(tag=tag, shape=(side.tile, bk_elems // 2), value=value, scale=scale)
 
     def build(side: Side, sibling: Side, base, load, tag: str, *, cols: int, step: int, dtype, trans: bool, scale=None, pad=pad):
-        def at(k_expr, row_expr):
-            sig = Sigma({side.axis.name: row_expr, k_axis.name: k_expr, **_sibling_sigma(sibling)})
+        def at(k_expression, row_expression):
+            sig = Sigma({side.axis.name: row_expression, k_axis.name: k_expression, **_sibling_sigma(sibling)})
             return tuple(sig.apply(e) for e in load.index)
 
         def coord(row):
@@ -1495,7 +1495,7 @@ def _mask_add(stmt, selects: dict, frags) -> tuple[Select, str] | None:
     return (selects[selected[0]], source[0]) if len(selected) == len(source) == 1 else None
 
 
-def _mask_affine(predicate: BinaryExpr, names: frozenset[str]) -> tuple[dict[str, int], Expr] | None:
+def _mask_affine(predicate: BinaryExpr, names: frozenset[str]) -> tuple[dict[str, int], Expression] | None:
     """A comparison's ``left − right`` as integer coefficients over ``names`` plus the anchor left
     when those read zero — ``None`` unless it is affine in them."""
     form = affine_form(BinaryExpr("-", predicate.left, predicate.right), names)
@@ -1504,7 +1504,7 @@ def _mask_affine(predicate: BinaryExpr, names: frozenset[str]) -> tuple[dict[str
 
 def _mask_key_bounds(
     stmts, held: str, key: Axis, row: str, offset, bk: int, uniform: frozenset[str] = frozenset()
-) -> tuple[Expr | None, Expr | None]:
+) -> tuple[Expression | None, Expression | None]:
     """The chunk range outside which every key is masked for every row of this CTA — the stream's
     ``(k_first, k_end)``, each ``None`` when no mask bounds the keys on that side.
 
@@ -1521,8 +1521,8 @@ def _mask_key_bounds(
     first) could empty a row's stream, and is left to the per-element mask."""
     selects = {stmt.name: stmt for stmt in stmts if isinstance(stmt, Select)}
     fragments = {held}  # the score and every value the prefix derives from it (its scaling, say)
-    first: Expr | None = None
-    end: Expr | None = None
+    first: Expression | None = None
+    end: Expression | None = None
     for stmt in binary(stmts):  # a mask added inside a sum is one operation of its binary spelling
         if isinstance(stmt, Assign) and set(stmt.args) & fragments:
             fragments.add(stmt.name)
@@ -1539,14 +1539,14 @@ def _mask_key_bounds(
             # A uniform anchor — a position read from memory — makes the shift a runtime value, so the sign test
             # below runs at runtime too, clamped rather than dropped: a lead below zero stops at the block end, a
             # lag above zero starts at the block base, where every key past the edge is masked for every row.
-            runtime: Expr = BinaryExpr("-", Literal(0, "int"), affine[1].simplify(SimplifyCtx.empty()))
+            runtime: Expression = BinaryExpr("-", Literal(0, "int"), affine[1].simplify(SimplifyCtx.empty()))
             if predicate.op in (">", ">="):
-                lead_expr = BinaryExpr("-", runtime, Literal(1, "int")) if predicate.op == ">=" else runtime
-                stop = BinaryExpr("+", offset.block_end(), _max(lead_expr, Literal(0, "int")))
+                lead_expression = BinaryExpr("-", runtime, Literal(1, "int")) if predicate.op == ">=" else runtime
+                stop = BinaryExpr("+", offset.block_end(), _max(lead_expression, Literal(0, "int")))
                 end = stop if end is None else _min(end, stop)
             else:
-                lag_expr = BinaryExpr("+", runtime, Literal(1, "int")) if predicate.op == "<=" else runtime
-                start = BinaryExpr("+", offset.block_base(), _min(lag_expr, Literal(0, "int")))
+                lag_expression = BinaryExpr("+", runtime, Literal(1, "int")) if predicate.op == "<=" else runtime
+                start = BinaryExpr("+", offset.block_base(), _min(lag_expression, Literal(0, "int")))
                 first = start if first is None else _max(first, start)
             continue
         shift = -int(affine[1].eval({}))  # the masked branch reads ``key OP row + shift``
@@ -1561,7 +1561,7 @@ def _mask_key_bounds(
                 start = _shifted(offset.block_base(), lag)
                 first = start if first is None else _max(first, start)
     if end is not None:
-        end = _min(end, key.extent_expr())
+        end = _min(end, key.extent_expression())
     if first is not None:
         first = BinaryExpr("*", BinaryExpr("/", _max(first, Literal(0, "int")), Literal(bk, "int")), Literal(bk, "int"))
     return first, end
@@ -1577,7 +1577,7 @@ def _chunk_stream(k_axis: Axis, bk: int):
         static = k_axis.extent.as_static()
         return static, static // bk
     extent = k_axis.extent
-    return extent, Dim(BinaryExpr("/", BinaryExpr("+", extent.expr, Literal(bk - 1, "int")), Literal(bk, "int")))
+    return extent, Dim(BinaryExpr("/", BinaryExpr("+", extent.expression, Literal(bk - 1, "int")), Literal(bk, "int")))
 
 
 def _staged(ops: _AtomOps, cells, offset, mn: tuple[Side, Side]):
@@ -1598,7 +1598,7 @@ def _staged(ops: _AtomOps, cells, offset, mn: tuple[Side, Side]):
     K, n_chunks = _chunk_stream(k_axis, bk)
     elem = ops.slab_elem()
     cta = _cta(mn, tile.atom.lanes, tile.launch_threads)
-    finalize: list[Stmt] = []
+    finalize: list[Statement] = []
     # The BLOCK-SCALED pair, keyed on the ATOM: both operands packed under a 16-bit atom is still
     # the single-sided shape, whose drain decodes each into 16-bit fragments.
     single, pair = packed_readings((c,), ops.inputs)[id(c)]
@@ -1626,7 +1626,7 @@ def _staged(ops: _AtomOps, cells, offset, mn: tuple[Side, Side]):
             if tma
             else CpAsyncTransport(operands=copies, **common)
             if not fills
-            else SyncTransport(operands=fills, copy_operands=copies, **common)
+            else SyncTransport(operands=fills, copy_operands=copies, inputs=ops.inputs, **common)
         )
         # The per-tensor scale levels, applied once per output element after the K-loop. The cell
         # multiplies the RAW e4m3 block scales into each block's sum and knows nothing of the
@@ -1640,14 +1640,14 @@ def _staged(ops: _AtomOps, cells, offset, mn: tuple[Side, Side]):
         # factors are its own. Folding them all into a single product would apply one channel's
         # per-tensor scale to the other, which is wrong by a scalar and invisible in the emitted
         # source — only numerical parity catches it.
-        alpha_stmts: list[Stmt] = []
+        alpha_stmts: list[Statement] = []
         alpha_of: list[str] = []
         counter = 0
         for side in bs_pair.b:
             alpha = ""
             for ld in (*bs_pair.a.alpha, *side.alpha):
                 leaf = f"_bs_alpha_l{counter}"
-                alpha_stmts.append(Load(name=leaf, input=ld.input, index=ld.index, dtype=ld.dtype))
+                alpha_stmts.append(Load(names=(leaf,), input=ld.input, index=ld.index, dtype=ld.dtype))
                 step = f"_bs_alpha{counter}"
                 alpha_stmts.append(
                     Assign(name=step, op="copy", args=(leaf,)) if not alpha else Assign(name=step, op="multiply", args=(alpha, leaf))
@@ -1714,7 +1714,7 @@ def _staged(ops: _AtomOps, cells, offset, mn: tuple[Side, Side]):
             # and the compute fill are simply two of them over one drain segment: the box copies
             # ring at the stage's depth, the compute fill stays single-buffer as it always is.
             copies = TmaTransport(operands=copy_ops, **common)
-            fill = SyncTransport(operands=sync_ops, prologue_stmts=tuple(prologue), **common)
+            fill = SyncTransport(operands=sync_ops, prologue_stmts=tuple(prologue), inputs=ops.inputs, **common)
             slabs = frozenset(op.slab for op in (*copy_ops, *sync_ops))
             decls, region = pipelined_kloop(
                 operands=((copies, stage.depth), (fill, 1)),
@@ -1732,6 +1732,7 @@ def _staged(ops: _AtomOps, cells, offset, mn: tuple[Side, Side]):
             operands=sync_ops,
             copy_operands=copy_ops,
             prologue_stmts=tuple(prologue),
+            inputs=ops.inputs,
             copy_sync=not tile.is_warp or tile.atom.sync_copy_staging,
             # A ring under a blocking copy asks for the register-staged split — that is what makes
             # ``depth`` mean chunks-in-flight here, as it does on the cp.async / TMA transports.
@@ -1818,8 +1819,8 @@ def _contract_kloop(c, cells, *, read_row, read_col, contract, wrap):
     reads."""
     rows = sorted({i for i, _ in cells})
     cols = sorted({j for _, j in cells})
-    pre: list[Stmt] = []
-    body: list[Stmt] = []
+    pre: list[Statement] = []
+    body: list[Statement] = []
     for read, cells_of in ((read_row, rows), (read_col, cols)):
         for index in cells_of:
             hoisted, per_step = read(index)
@@ -1850,10 +1851,10 @@ def _cell_varying(body, side: Side | None) -> bool:
     ``_u`` split vars are bound, so the per-copy rename (:func:`copy_cell`) suffixes the surviving
     axis name into an undefined identifier (nvcc: ``identifier "a1__ar9" is undefined``, the
     whole-model qwen3-0.6b layer-0 o_proj on sm_89). Such an operand is read per CELL instead."""
-    return side is not None and Body(body).depends_on(body, side.name)
+    return side is not None and any(side.name in free_names(stmt) for stmt in body)
 
 
-def _dedup_loads(stmts: list[Stmt]) -> list[Stmt]:
+def _dedup_loads(stmts: list[Statement]) -> list[Statement]:
     """Collapse syntactically-identical scalar ``Load``s (same buffer + index) to one binding,
     rewriting the dropped names to the survivor — the operand reuse a register tile exists for (a
     load not referencing the ``m`` cell axis is shared across the ``n`` cells, and vice versa).
@@ -1864,7 +1865,7 @@ def _dedup_loads(stmts: list[Stmt]) -> list[Stmt]:
     name keeps its own binding."""
     seen: dict = {}
     rename: dict[str, str] = {}
-    kept: list[Stmt] = []
+    kept: list[Statement] = []
     for s in stmts:
         if isinstance(s, Load) and s.is_scalar:
             sig = (s.input, tuple(str(e) for e in s.index))
@@ -1878,7 +1879,7 @@ def _dedup_loads(stmts: list[Stmt]) -> list[Stmt]:
     return kept
 
 
-def _guard_writes(stmts: list[Stmt], cond) -> list[Stmt]:
+def _guard_writes(stmts: list[Statement], cond) -> list[Statement]:
     """Wrap each output ``Write`` in ``Cond(cond, …)`` — the masked tail cell computes (with
     clamp-read operands) but only stores when in bounds. Recurses into nested bodies: a projection
     tail carrying an output-sweep ``Loop`` (e.g. a decode epilogue) holds its ``Write`` inside that
@@ -1886,7 +1887,7 @@ def _guard_writes(stmts: list[Stmt], cond) -> list[Stmt]:
     Other stmts pass through."""
     if cond is None:
         return stmts
-    out: list[Stmt] = []
+    out: list[Statement] = []
     for s in stmts:
         if isinstance(s, Write):
             out.append(Cond(cond=cond, body=(s,)))
@@ -1929,11 +1930,11 @@ def _scalar_protected(tile: Tile, lead: tuple = (), *, k_axis: Axis) -> frozense
     for a in lead:
         prot.add(a.name)
     for a in (m.axis, n.axis, k_axis, *lead):
-        prot |= set(a.extent_expr().free_vars())
+        prot |= set(a.extent_expression().free_vars())
     return frozenset(prot)
 
 
-def _scalar_drain(c: Fold, cells, offset, operands, ki: str, bk_elems: int, base: tuple[Expr, Expr], slot) -> Loop:
+def _scalar_drain(c: Fold, cells, offset, operands, ki: str, bk_elems: int, base: tuple[Expression, Expression], slot) -> Loop:
     """The inner slab-drain reduce loop ``for ki: b = b_slab[ki, n_local]; a = a_slab[m_local, ki];
     v = a·b; acc += v`` — the scalar counterpart of the mma ``ldmatrix`` drain. Built per-cell directly
     (NOT via the masked gmem-direct σ, whose ``% extent`` wrap would corrupt the slab index for an
@@ -1948,7 +1949,7 @@ def _scalar_drain(c: Fold, cells, offset, operands, ki: str, bk_elems: int, base
     row_base, col_base = base
     off_a = a_op.slot_row(slot)
     a_name = c.operands[0].exposes[-1]
-    body: list[Stmt] = []
+    body: list[Statement] = []
     for i, j in cells:
         sfx = f"__c{i}_{j}"
         an = f"{a_name}{sfx}"
@@ -2033,7 +2034,7 @@ class _AtomOps:
 
     def store_stride(self, write: Write, axis: Axis) -> int:
         """The fragment coordinate's physical stride, including coefficients inside a dimension."""
-        step = gmem_axis_step(Load("", write.output, write.index), axis.name, self.outputs)
+        step = gmem_axis_step(Load(("",), write.output, write.index), axis.name, self.outputs)
         return step[0] if step is not None else 0
 
     @property
@@ -2269,7 +2270,7 @@ class _MmaOps(_AtomOps):
         # One A fragment set; one B and one C fragment set PER fold channel (the multi-B node's
         # shared-A / per-channel-accumulate drain).
         n_folds = len(self.channels)
-        decls: list[Stmt] = []
+        decls: list[Statement] = []
         if not atom.is_wgmma:  # a descriptor-fed atom reads its operands from shared memory, not fragments
             decls += [
                 RegFragment(
@@ -2351,7 +2352,7 @@ class _MmaOps(_AtomOps):
         # loaders zero-fill the fragment halves past ``k_zero``'s bound, so the summed reduction
         # keeps its identity. An exactly tiled static K carries no bound (byte-identical output).
         k_exact = k_axis.extent.is_static and k_axis.extent.as_static() % atom.atom_k == 0
-        k_zero = None if k_exact else (Var(k_axis.name), k_axis.extent_expr())
+        k_zero = None if k_exact else (Var(k_axis.name), k_axis.extent_expression())
         a_k_zero = k_zero if k_zero is None else (k_zero[0], _clamp_bound(a_load, k_axis.name, k_zero[1]))
         b_k_zero = k_zero if k_zero is None else (k_zero[0], _clamp_bound(b_load, k_axis.name, k_zero[1]))
 
@@ -2702,8 +2703,8 @@ def _residence(
     frags_only: bool = False,
     layout: str = "m16n8k16",
     select_sigma: Sigma | None = None,
-    row_base: Expr | None = None,
-    col_base: Expr | None = None,
+    row_base: Expression | None = None,
+    col_base: Expression | None = None,
     mask_fill: float | None = None,
 ):
     """Evaluate one straight-line scalar program at the residence each value it reads has.
@@ -2731,7 +2732,7 @@ def _residence(
     programs, and where their values live is a fact about this tile, not about them."""
     from emmy.compiler.pipeline import RuleSkipped  # noqa: PLC0415 — avoid an import cycle
 
-    out: list[Stmt] = []
+    out: list[Statement] = []
     frags, rows, memo = dict(frags), dict(rows), memo if memo is not None else {}
     frag_tag = tag if frag_tag is None else frag_tag
     selects: dict[str, Select] = {}
@@ -2820,7 +2821,7 @@ def _residence(
     return out, frags, rows
 
 
-def _slab_row(operand, slot, row: Expr) -> Expr:
+def _slab_row(operand, slot, row: Expression) -> Expression:
     """A staged drain's slab ROW — the within-slot coordinate at ring ``slot``'s row offset, the
     same one the fill targeted (``Operand.slot_row``; ``None`` at slot 0 keeps the index free of a
     dead term, so single-buffer staging stays bit-identical to its gmem baseline)."""
@@ -2915,7 +2916,7 @@ class _FlashOps(_MmaOps):
         # The carrier accumulates in f32 whatever the expectation's cell does: a reduced cell's
         # chunk partial is promoted here once per chunk (:meth:`_expectation`), which is the
         # hybrid's whole point — the mma chain at full rate, the running sum still f32.
-        decls: list[Stmt] = [self._frag(f"_c{i}_{j}", "c", self._score_atom) for i in range(m.reg) for j in range(n.reg)]
+        decls: list[Statement] = [self._frag(f"_c{i}_{j}", "c", self._score_atom) for i in range(m.reg) for j in range(n.reg)]
         decls += [
             Init(name=name, identity=seed, dtype=F32)
             for index, state, seed in self._carried()
@@ -3002,11 +3003,11 @@ class _FlashOps(_MmaOps):
         # through them; the loads that reach past the extent clamp and zero the same way every
         # gmem-direct fragment loader already does.
         ragged = not key.extent.is_static or key.extent.as_static() % bk
-        bound = key.extent_expr() if ragged else None
+        bound = key.extent_expression() if ragged else None
 
         streams = self._streams(mn, bk)
 
-        def chunk_segments(slots) -> list[tuple[list[Stmt], frozenset[str]]]:
+        def chunk_segments(slots) -> list[tuple[list[Statement], frozenset[str]]]:
             """The chunk's body as the skeleton's segments — the score, reading the key's slab at
             its group's ring slot, then pivot, channels, expectation and merge, reading the value's
             at its own — each tagged with the slab it drains, so the skeleton places every group's
@@ -3014,12 +3015,12 @@ class _FlashOps(_MmaOps):
             slot each group drains this iteration."""
             key_slot, value_slot = slots[0], slots[-1]  # one group: the same slot; two: each its own
             memo: dict = {}
-            scored_stmts: list[Stmt] = (
+            scored_stmts: list[Statement] = (
                 self._score_tile(offset, mn, base, cols, bound, streams, key_slot)
                 if score is not None
                 else self._gathered_score(offset, mn, base, cols, bound)
             )
-            body: list[Stmt] = []
+            body: list[Statement] = []
             held = scored_name
             scored, pivots, advanced, factors = {}, {}, {}, {}
             for i in range(m.reg):
@@ -3162,8 +3163,9 @@ class _FlashOps(_MmaOps):
         elem = self.tile.atom.operand_dtype("b")
         load = self.c.streamed.as_slab().load
         trans = self.c.as_contraction().b_trans
-        # The Volta blocking copy pads its rows instead: its drain reads no swizzled slab.
-        pad = chunk_slab_pad(self.tile, self.stage.choice)
+        v_elem = chunk_slab_dtype(self.tile, self.stage.choice, self.inputs, load.input)
+        # The Volta blocking copy and a byte slab pad their rows instead: their drains read no swizzled slab.
+        pad = chunk_slab_pad(self.tile, self.stage.choice, v_elem)
         swizzle = "NONE" if pad else self.slab_swizzles(mn, elem.nbytes)[1]
         (value,) = _slab_operands(
             index_srcs=(None, load.index),
@@ -3173,7 +3175,7 @@ class _FlashOps(_MmaOps):
             bk_elems=bk,
             base=_tile_base(mn),
             swizzles=("NONE", swizzle),
-            elems=(None, elem),
+            elems=(None, v_elem),
             b_trans=trans,
             b_atoms=self.b_atoms(mn),
             pads=(0, pad),
@@ -3181,7 +3183,8 @@ class _FlashOps(_MmaOps):
         )
         key = None
         if (staged_key := self._key_stage()) is not None:
-            k_load, span = staged_key
+            k_load, span, k_elem = staged_key
+            k_pad = chunk_slab_pad(self.tile, self.stage.choice, k_elem)
             span_axis = self._score_k
             side = Side(axis=span_axis, tile=span, units=1, reg=1, block=span_axis.name + "_b", unit=span_axis.name + "_u")
             # A warp-group score reads the key through a descriptor, whose K step stays inside one
@@ -3195,10 +3198,10 @@ class _FlashOps(_MmaOps):
                 bk_elems=bk,
                 base=(Literal(0, "int"), _tile_base(mn)[1]),
                 b_atoms=atoms,
-                swizzles=("NONE" if pad else self.slab_swizzle(span // atoms, elem.nbytes), "NONE"),
-                elems=(elem, None),
+                swizzles=("NONE" if k_pad else self.slab_swizzle(span // atoms, elem.nbytes), "NONE"),
+                elems=(k_elem, None),
                 rows=(False, trans),
-                pads=(pad, 0),
+                pads=(k_pad, 0),
                 roles=(0,),
             )
         cta = _cta(mn, self.tile.atom.lanes, self.tile.launch_threads)
@@ -3248,13 +3251,13 @@ class _FlashOps(_MmaOps):
         return next(axis for axis in self.axes if axis.name == self.inner[0].axis)
 
     def _key_stage(self):
-        """The score key's staged ``(load, span)``, or ``None`` — the resolver's own statement
+        """The score key's staged ``(load, span, elem)``, or ``None`` — the resolver's own statement
         (:func:`chunk_key_stage`), so the sized ring and the emitted slabs cannot disagree."""
         if self.stage is None or self.inner is None:
             return None
         return chunk_key_stage(self.tile, self.stage.choice, self.inputs, self.inner[0], self._score_k, self.k_axis)
 
-    def _gathered_score(self, offset, mn, base, cols, bound) -> list[Stmt]:
+    def _gathered_score(self, offset, mn, base, cols, bound) -> list[Statement]:
         """The chunk's score, READ — the carrier's A edge is already the stored tile (softmax@V,
         whose probabilities arrive as an input), so there is nothing to contract.
 
@@ -3269,7 +3272,7 @@ class _FlashOps(_MmaOps):
         row = _wrap(m, Var(FRAG_ROW))
         col = Var(FRAG_COL) if bound is None else BinaryExpr("%", Var(FRAG_COL), bound)
         index = tuple(Sigma({m.axis.name: row, self.k_axis.name: col}).apply(e) for e in load.index)
-        out: list[Stmt] = []
+        out: list[Statement] = []
         for i in range(m.reg):
             for j in range(cols):
                 out.append(self._frag(f"_s{i}_{j}", "c", atom))
@@ -3286,7 +3289,7 @@ class _FlashOps(_MmaOps):
                 )
         return out
 
-    def _score_tile(self, offset, mn, base, cols, bound, streams, slot) -> list[Stmt]:
+    def _score_tile(self, offset, mn, base, cols, bound, streams, slot) -> list[Statement]:
         """The chunk's score — one ``(row, chunk)`` mma tile, its own K loop inside the chunk.
 
         Which of the score's two operands is the mma's A is a question about THIS tile, not about
@@ -3306,10 +3309,10 @@ class _FlashOps(_MmaOps):
         staged = None if streams is None else streams.key
         if atom.is_wgmma:
             return self._wgmma_score(m, cols, staged, slot)
-        decls: list[Stmt] = [self._frag(f"_kb{j}", "b", atom) for j in range(cols)]
+        decls: list[Statement] = [self._frag(f"_kb{j}", "b", atom) for j in range(cols)]
         decls += [self._frag(f"_s{i}_{j}", "c", atom) for i in range(m.reg) for j in range(cols)]
 
-        def at_step(t: int) -> list[Stmt]:
+        def at_step(t: int) -> list[Statement]:
             """One atom-K step of the score: its key fragments, then a cell per register row."""
             k = Literal(t * atom.atom_k, "int")
             out = [self._key_read(staged, slot, b_load, base, j, bound, trans, k) for j in range(cols)]
@@ -3357,7 +3360,7 @@ class _FlashOps(_MmaOps):
         )
         return replace(query, tag="q")
 
-    def _query_slab(self, mn) -> list[Stmt]:
+    def _query_slab(self, mn) -> list[Statement]:
         """Fill the query's slab once, ahead of the chunk loop: it does not move with the chunk.
         A cp.async copy the CTA waits on and barriers before the first score reads it."""
         m, _ = mn
@@ -3381,7 +3384,7 @@ class _FlashOps(_MmaOps):
         )
         return [decl, *fill, *cp_async_commit(), *cp_async_wait(0)]
 
-    def _wgmma_score(self, m, cols: int, key, slot) -> list[Stmt]:
+    def _wgmma_score(self, m, cols: int, key, slot) -> list[Statement]:
         """The chunk's score on the warp-group cell: both operands through descriptors — the query
         off its slab staged once ahead of the loop (:meth:`_query_slab`), the key off its ring slot;
         the key slab is K-major (the chunk's keys are its rows, the score's contraction its
@@ -3401,7 +3404,7 @@ class _FlashOps(_MmaOps):
         q_rows = query.shape[0] // query.atoms  # the CTA's query rows: one atom's rows
         # Each warp group reads its own 64 query rows of the tile.
         grp_row = BinaryExpr("*", BinaryExpr("/", Var(m.unit), Literal(4, "int")), Literal(64, "int"))
-        out: list[Stmt] = [self._frag(f"_s0_{j}", "c", atom) for j in range(cols)]
+        out: list[Statement] = [self._frag(f"_s0_{j}", "c", atom) for j in range(cols)]
         out.append(WgmmaFence())
         for t in range(self._score_steps()):
             k0 = t * atom.atom_k
@@ -3450,7 +3453,7 @@ class _FlashOps(_MmaOps):
         the run for a readable listing)."""
         return self._score_k.extent.as_static() // self.tile.atom.atom_k
 
-    def _query(self, offset, mn) -> list[Stmt]:
+    def _query(self, offset, mn) -> list[Statement]:
         """The score's QUERY fragments, held in registers ACROSS the chunk loop.
 
         Q's gmem index carries the query row and the score's own contraction axis and never the
@@ -3465,7 +3468,7 @@ class _FlashOps(_MmaOps):
         # The row stride off the address (:func:`_direct_operand`): a query stored [row, head, dim]
         # strides its rows by every head's dim, not by the one head dim its last extent holds.
         _, ldm = _direct_operand(a_load, self.inputs, k_name=self._score_k.name, own=m.axis.name, legacy=(True, 0))
-        out: list[Stmt] = []
+        out: list[Statement] = []
         for i in range(m.reg):
             for t in range(self._score_steps()):
                 sigma = Sigma({m.axis.name: offset[0].base(i), self._score_k.name: Literal(t * atom.atom_k, "int")})
@@ -3484,7 +3487,7 @@ class _FlashOps(_MmaOps):
                 )
         return out
 
-    def _key_read(self, key, slot, b_load, base, j: int, bound, trans: bool, k: Expr) -> Stmt:
+    def _key_read(self, key, slot, b_load, base, j: int, bound, trans: bool, k: Expression) -> Statement:
         """One key fragment of the score at chunk column ``j`` — from its staged slab at ring
         ``slot`` when the row spells a transport, else straight from gmem.
 
@@ -3517,10 +3520,11 @@ class _FlashOps(_MmaOps):
             ldm=key.shape[1] + key.pad_cols,
             swizzle=key.swizzle,
             b_trans=True,
+            byte_slab=key.elem_bytes == 1,
             fragment_layout=atom.fragment_layout,
         )
 
-    def _expectation(self, offset, mn, base, weights, steps, bound, streams, slot) -> list[Stmt]:
+    def _expectation(self, offset, mn, base, weights, steps, bound, streams, slot) -> list[Statement]:
         """The bilinear channel's product: the weight repacks into an A operand IN REGISTERS and
         ``mma.sync``\\ s against the streamed operand, straight into the carrier's accumulator —
         already scaled to the advanced pivot (:meth:`_scale_expectation`), and the weights formed
@@ -3539,12 +3543,12 @@ class _FlashOps(_MmaOps):
         # promoted into the f32 carrier once this chunk's mmas are done — the chunk IS the promote
         # cadence, so the reduced chain never accumulates past one chunk of keys.
         cell = "_ph" if _f16acc(atom) else "_c"
-        out: list[Stmt] = [self._frag(f"_a{i}_{t}", "a") for i in range(m.reg) for t in range(steps)]
+        out: list[Statement] = [self._frag(f"_a{i}_{t}", "a") for i in range(m.reg) for t in range(steps)]
         out += [self._frag(f"_b{j}_{t}", "b") for j in range(n.reg) for t in range(steps)]
         if _f16acc(atom):
             out += [self._frag(f"{cell}{i}_{j}", "c") for i in range(m.reg) for j in range(n.reg)]
 
-        def repack(t: int) -> list[Stmt]:
+        def repack(t: int) -> list[Statement]:
             if atom.fragment_layout == "m8n8k4":
                 return [
                     FragmentRepack(
@@ -3561,7 +3565,7 @@ class _FlashOps(_MmaOps):
                 for i in range(m.reg)
             ]
 
-        def drain(t: int, cols: range) -> list[Stmt]:
+        def drain(t: int, cols: range) -> list[Statement]:
             row = BinaryExpr("+", base, Literal(t * atom.atom_k, "int"))
             return [self._value_read(staged, slot, n, offset, j, t, v_load, row, bound) for j in cols] + [
                 MmaSyncPtx(
@@ -3595,7 +3599,7 @@ class _FlashOps(_MmaOps):
                 ]
         return out
 
-    def _wgmma_expectation(self, mn, weights, steps, value, slot) -> list[Stmt]:
+    def _wgmma_expectation(self, mn, weights, steps, value, slot) -> list[Statement]:
         """The expectation on the warp-group cell: per chunk step, the weight repacks into the
         register-form A (the ``m16n8k16`` A fragment, exactly as the ``mma.sync`` form repacks it)
         and one ``wgmma.mma_async`` per group of ``cells_per_instruction`` accumulator cells reads
@@ -3615,7 +3619,7 @@ class _FlashOps(_MmaOps):
         if not trans and value.shape[1] != atom_cols:
             raise ValueError("the wgmma expectation reads an N-contiguous value stored one 128-byte atom per slab row")
         bk = steps * atom.atom_k
-        out: list[Stmt] = [self._frag(f"_a0_{t}", "a", self._score_tile_atom) for t in range(steps)]
+        out: list[Statement] = [self._frag(f"_a0_{t}", "a", self._score_tile_atom) for t in range(steps)]
         for t in range(steps):
             out += [FragmentRepack(frag=self.frag(f"_a0_{t}"), srcs=(weights[0, 2 * t], weights[0, 2 * t + 1]), ab_dtype=atom.ab_dtype)]
         out.append(WgmmaFence())
@@ -3648,7 +3652,7 @@ class _FlashOps(_MmaOps):
                 )
         return [*out, WgmmaCommit(), WgmmaWait(0)]
 
-    def _value_read(self, value, slot, n, offset, j: int, t: int, v_load, row, bound) -> Stmt:
+    def _value_read(self, value, slot, n, offset, j: int, t: int, v_load, row, bound) -> Statement:
         """One fragment of the streamed value at chunk step ``t``, column ``j`` — from its staged
         slab at ring ``slot`` when the row spells a transport, else straight from gmem.
 
@@ -3673,7 +3677,7 @@ class _FlashOps(_MmaOps):
                 fragment_layout=atom.fragment_layout,
             )
         within = BinaryExpr("+", BinaryExpr("*", Var(n.unit), Literal(n.reg * atom.atom_n, "int")), Literal(j * atom.atom_n, "int"))
-        step: Expr = Literal(t * atom.atom_k, "int")
+        step: Expression = Literal(t * atom.atom_k, "int")
         trans = value.trans
         slab_row = _slab_row(value, slot, within if trans else step)
         return LdmatrixLoad(
@@ -3685,10 +3689,11 @@ class _FlashOps(_MmaOps):
             ldm=value.shape[1] + value.pad_cols,
             swizzle=value.swizzle,
             b_trans=trans,
+            byte_slab=value.elem_bytes == 1,
             fragment_layout=atom.fragment_layout,
         )
 
-    def _advance(self, i: int, chunk_pivot: tuple[str, str], layout) -> tuple[list[Stmt], tuple[str, str], tuple[str, str]]:
+    def _advance(self, i: int, chunk_pivot: tuple[str, str], layout) -> tuple[list[Statement], tuple[str, str], tuple[str, str]]:
         """The recipe's pivot advance at row ``i`` — the carrier's pivot against the chunk's — as
         per-row statements, with the advanced pivot's register pair and the carrier's factor's.
         The chunk's own factor is never spelled: every channel folds the chunk AT the advanced
@@ -3702,7 +3707,7 @@ class _FlashOps(_MmaOps):
         stmts, _frags, rows = _residence(tuple(instance.cone(factor).body), frags={}, rows=rows, tag=f"_mg{i}_", layout=layout)
         return stmts, rows[moved], rows[factor]
 
-    def _fold_row(self, index: int, i: int, partial: tuple[str, str], factor: tuple[str, str], layout) -> list[Stmt]:
+    def _fold_row(self, index: int, i: int, partial: tuple[str, str], factor: tuple[str, str], layout) -> list[Statement]:
         """Fold row ``i``'s chunk partial of carried state ``index`` into the carrier: the state
         scaled to the advanced pivot, then the channel's own ⊕ with the partial, which is there
         already."""
@@ -3715,7 +3720,7 @@ class _FlashOps(_MmaOps):
         stmts, _frags, _rows = _residence(program, frags={}, rows=rows, tag=f"_mg{i}_{state}_", layout=layout)
         return stmts
 
-    def _scale_expectation(self, mn, factors: dict, layout) -> list[Stmt]:
+    def _scale_expectation(self, mn, factors: dict, layout) -> list[Statement]:
         """Scale the expectation's accumulator to the advanced pivot, in place, ahead of the chunk's
         product: the ``mma.sync`` then accumulates the chunk straight into the carrier."""
         m, n = mn
@@ -3723,7 +3728,7 @@ class _FlashOps(_MmaOps):
         scale = self._recipe.scale
         bound = {scale.params[0]: state, scale.params[1]: _FACTOR}
         instance = scale.rename(lambda name: bound.get(name, name))
-        out: list[Stmt] = []
+        out: list[Statement] = []
         for i in range(m.reg):
             for j in range(n.reg):
                 held = self.frag(f"_c{i}_{j}")
@@ -3740,11 +3745,11 @@ class _FlashOps(_MmaOps):
                 out += stmts
         return out
 
-    def _fold_pivot(self, mn, pivots: dict, layout) -> list[Stmt]:
+    def _fold_pivot(self, mn, pivots: dict, layout) -> list[Statement]:
         """Move the carrier's pivot past the chunk's — the pivot's own ⊕, per row."""
         m, _n = mn
         pivot = self.c.base.results[0]
-        out: list[Stmt] = []
+        out: list[Statement] = []
         for i in range(m.reg):
             rows = {pivot: _row_pair(self.frag(pivot), i), _CHUNK_PIVOT: pivots[i]}
             program = (Accum(name=pivot, value=_CHUNK_PIVOT, op=self.c.base.components()[0]),)

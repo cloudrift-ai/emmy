@@ -10,7 +10,7 @@ import math
 from emmy.compiler.dtype import F32
 from emmy.compiler.graph import Graph, Node, Tensor
 from emmy.compiler.ir.base import ConstantOp
-from emmy.compiler.ir.expr import BinaryExpr, Literal, placeholder
+from emmy.compiler.ir.expression import BinaryExpr, Literal, placeholder
 from emmy.compiler.ir.frontend.ir import SdpaOp, TransposeOp
 from emmy.compiler.ir.tensor.ir import ElementwiseOp, IndexMapOp, IndexSource
 from emmy.compiler.pipeline import Match, Pattern

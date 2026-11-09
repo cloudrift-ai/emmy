@@ -1,12 +1,17 @@
 """Generic sync compute-fill lowering invariants."""
 
+import pytest
+
+from emmy.commands.trace import graph_from_code
+from emmy.compiler.context import Context
 from emmy.compiler.ir.axis import Axis
-from emmy.compiler.ir.elementwise import ElementwiseImpl
-from emmy.compiler.ir.expr import Literal, Var
-from emmy.compiler.ir.kernel.ir import Smem, pack_smem, swizzle_fn, swizzle_xor
+from emmy.compiler.ir.cuda import CudaOp
+from emmy.compiler.ir.expression import Literal
+from emmy.compiler.ir.kernel.ir import pack_smem, swizzle_fn, swizzle_xor
 from emmy.compiler.ir.pure.fold import Fold
-from emmy.compiler.ir.stmt import Accum, Assign, Body, Load, Loop
+from emmy.compiler.ir.stmt import Assign, Body, parse_body
 from emmy.compiler.ir.tile.ops import cone_stat
+from emmy.compiler.pipeline import CUDA_PASSES, Pipeline
 from emmy.compiler.pipeline.passes.lowering.kernel._stage import (
     _SWIZZLE_SLAB_ALIGN,
     CtaTile,
@@ -16,13 +21,14 @@ from emmy.compiler.pipeline.passes.lowering.kernel._stage import (
     slab_smem,
     software_swizzle,
 )
+from emmy.compiler.pipeline.search.pins import pinned_knobs
 from tests.compiler.terms import projection, reduction, slab
 
 
 def _sum_fold(axis: str, acc: str, *index: str) -> Fold:
     """``acc = Σ_axis x[index]`` — a plain sum over one slab."""
     value = f"{acc}_value"
-    return reduction(axis, (slab(value, "x", *index),), (Assign(name=f"{acc}__v", op="copy", args=(value,)),), (acc,))
+    return reduction(axis, (slab(value, "x", *index),), parse_body(f"{acc}__v = copy({value})"), (acc,))
 
 
 def test_cone_stat_follows_the_first_top_level_reduce_in_lowering_order() -> None:
@@ -34,15 +40,15 @@ def test_cone_stat_follows_the_first_top_level_reduce_in_lowering_order() -> Non
     recursive tree walk encounters it.
     """
     nested = _sum_fold("nested", "nested_acc", "first", "nested")
-    first = reduction("first", (nested,), (Assign(name="first_acc__v", op="copy", args=("nested_acc",)),), ("first_acc",))
+    first = reduction("first", (nested,), parse_body("first_acc__v = copy(nested_acc)"), ("first_acc",))
     axes = (Axis("first", 4), Axis("nested", 4))
     body_prologue = projection((first,))
-    body_cone = projection((body_prologue,), (Assign(name="cell", op="copy", args=("first_acc",)),))
+    body_cone = projection((body_prologue,), parse_body("cell = copy(first_acc)"))
     assert cone_stat(body_cone, "k", axes) is first
 
     operand_stat = _sum_fold("operand", "operand_acc", "operand")
-    operand_prologue = projection((operand_stat,), (Assign(name="scale", op="copy", args=("operand_acc",)),))
-    operand_cone = projection((operand_prologue,), (Assign(name="cell", op="copy", args=("scale",)),))
+    operand_prologue = projection((operand_stat,), parse_body("scale = copy(operand_acc)"))
+    operand_cone = projection((operand_prologue,), parse_body("cell = copy(scale)"))
     assert cone_stat(operand_cone, "k", (Axis("operand", 4),)) is operand_stat
 
 
@@ -54,11 +60,11 @@ def test_cone_stat_finds_the_statistic_edge_wherever_formation_put_it() -> None:
     7.7 ms to 11.9 ms at 4096 tokens on an RTX 5090, same schedule. An edge that varies with the
     contraction axis is the cell's, never the prologue's, even when it reduces."""
     stat = _sum_fold("r", "acc", "m", "r")
-    prologue = projection((stat,), (Assign(name="scale", op="copy", args=("acc",)),))
+    prologue = projection((stat,), parse_body("scale = copy(acc)"))
     per_cell = _sum_fold("s", "cell_acc", "k", "s")
     cone = projection(
         (slab("x_v", "x", "m", "k"), slab("w_v", "w", "k"), per_cell, prologue),
-        (Assign(name="cell", op="multiply", args=("x_v", "scale")),),
+        parse_body("cell = multiply(x_v, scale)"),
     )
     axes = (Axis("m", 4), Axis("k", 4), Axis("r", 4), Axis("s", 4))
     assert cone_stat(cone, "k", axes) is stat
@@ -68,18 +74,15 @@ def test_compute_fill_suffixes_nested_ssa_for_every_vector_cell() -> None:
     """Replicated computed operands must rename definitions inside nested statistic folds."""
 
     def value(_k0, _row, col):
-        reduce_axis = Axis("r", 4)
-        loop = Loop(
-            axis=reduce_axis,
-            body=Body(
-                (
-                    Load(name="value", input="x", index=(col, Var(reduce_axis.name))),
-                    Accum(name="acc", value="value", op=ElementwiseImpl("add"), axes=(reduce_axis.name,)),
-                )
-            ),
+        stmts = parse_body(
+            f"""
+            for r in 0..4:
+                value = load x[{col}, r]
+                acc <- add(acc, value) over r
+            out = add(acc, acc)
+            """
         )
-        close = Assign(name="out", op=ElementwiseImpl("add"), args=("acc", "acc"))
-        return [loop, close], "out"
+        return list(stmts), "out"
 
     operand = SyncOperand(tag="b", shape=(1, 8), value=value)
     transport = SyncTransport(operands=(operand,), slab_dtype="half", cta=CtaTile(Literal(0, "int"), 1), elem_bytes=2)
@@ -146,7 +149,32 @@ def test_no_copied_slab_lands_misaligned_behind_an_odd_neighbour() -> None:
     of the next slab's chunk. Placing an f16 operand after such a neighbour is exactly what put a
     16 B ``cp.async`` write on an 8 mod 16 address; :func:`pack_smem` must now round it up.
     """
-    odd = Smem(name="_bs_smem", extents=(3, 4), dtype="half")  # 24 B — leaves the cursor at 8 mod 16
+    [odd] = parse_body("Smem(name=_bs_smem, extents=(3, 4), dtype=half)")  # 24 B — leaves the cursor at 8 mod 16
     copied = slab_smem("_a_smem", 8, 64, "half", align=_fill_align(64, 2, "NONE"))
     offsets, _total = pack_smem([odd, copied])
     assert offsets["_a_smem"] % 16 == 0, f"copied slab at {offsets['_a_smem']}, not 16 B-aligned"
+
+
+@pytest.mark.parametrize("width", [256, 260], ids=["dense-row", "row-off-the-16B-grid"])
+def test_a_computed_operand_merges_its_reads_only_where_each_run_is_aligned(width, monkeypatch) -> None:
+    """GPU-free. ``(x[:, :256] * 2.0) @ w.t()`` computes A in the fill, which merges each run's eight bf16 reads of ``x``
+    into one 16 B load. A run starts on the 16 B grid along K, but its row does too only when the row stride is a
+    multiple of eight elements: a 260-wide row is 520 B, so every odd row starts 8 B off the grid and a 16 B load there
+    is misaligned. That row reads per element, and the 256-wide row keeps the merge. The later vectorizer still joins
+    the 260-wide row's reads where it can prove them (8 B), so the plan is read off the fill itself."""
+    plans: list[list[str]] = []
+    run_plans = SyncTransport._run_plans
+    monkeypatch.setattr(SyncTransport, "_run_plans", lambda self, op, v: plans.append(run_plans(self, op, v)) or plans[-1])
+    code = (
+        f"import torch\nx = torch.randn(64, {width}, dtype=torch.bfloat16)\nw = torch.randn(256, 256, dtype=torch.bfloat16)\n"
+        "(x[:, :256] * 2.0) @ w.t()"
+    )
+    pin = {"TILE": "mma_m16n8k16_bf16_f32/f2x4/k4", "WORK": "w2x2", "STAGE": "d1/smem", "REDUCE": "", "PLACE": "fuse"}
+    with pinned_knobs(pin):
+        graph = Pipeline.build(CUDA_PASSES).run(graph_from_code(code)[0], ctx=Context.from_target((12, 0)))
+    (source,) = [node.op.kernel_source for node in graph.nodes.values() if isinstance(node.op, CudaOp)]
+
+    aligned = width % 8 == 0
+    assert plans, "the pin must lower through the compute fill"
+    assert any("vector" in plan for plan in plans) is aligned
+    assert ("reinterpret_cast<const uint4*>(&x[" in source) is aligned

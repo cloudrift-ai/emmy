@@ -1220,6 +1220,10 @@ impl Executor {
     ) -> Result<()> {
         let program = self.program.clone();
         let launch = &program.launches[index];
+        // A launch outside its range is no part of this env's run, nor of the graph captured at it.
+        if !launch.runs_at(env)? {
+            return Ok(());
+        }
         if serial_from < launch.serial.len() {
             // A recurrence's time: one launch per coordinate, in order, each seeing the
             // previous step's stores.

@@ -430,14 +430,16 @@ def test_greedy_run_propagates_lowering_exception():
 def _mis_sliced_tail():
     """A projection tail whose chain op reads ``acc2`` — a sibling channel's
     accumulator, which a node sliced to one channel never computes."""
-    from emmy.compiler.ir.elementwise import ElementwiseImpl
-    from emmy.compiler.ir.expr import Var
-    from emmy.compiler.ir.stmt import Assign, Write
+    from emmy.compiler.ir.stmt import parse_body
 
-    return [
-        Assign(name="result", op=ElementwiseImpl("copy"), args=("acc2",)),
-        Write(output="out", index=(Var("m"), Var("n")), value="result"),
-    ]
+    return list(
+        parse_body(
+            """
+            result = copy(acc2)
+            out[m, n] = result
+            """
+        )
+    )
 
 
 def test_mis_sliced_projection_tail_declines_as_a_rejection():

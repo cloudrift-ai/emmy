@@ -1952,7 +1952,7 @@ def test_trace_keeps_a_dynamic_dim_symbolic_at_an_example_of_one():
 
     graph = trace_module(Project(), (torch.randn(1, 16),), dynamic_shapes={"x": {0: torch.export.Dim("rows", min=1, max=64)}})
     rows = [graph.buffer(name).shape[0] for name in graph.inputs]
-    assert any(not dim.is_static and dim.expr.free_vars() == {"rows"} for dim in rows)
+    assert any(not dim.is_static and dim.expression.free_vars() == {"rows"} for dim in rows)
 
 
 def test_trace_cat_on_its_default_axis():

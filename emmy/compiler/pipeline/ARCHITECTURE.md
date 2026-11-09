@@ -121,9 +121,10 @@ rule matches a `LoopOp` and returns several tile options.
    however large the pool; no kernel is built until the choice is made (Part 4).
 3. Each compared row contains the compile context's `H_*` features (which GPU, which nvcc flags), the kernel's `S_*`
    features (a summary of its body and loop extents, computed from the kernel), and complete knob values (Part 6).
-4. **The evidence index.** The fastest measured row of the same kernel — the same exact identity — that agrees with
-   an offered leaf: a tune DB `perf` row under this compile's own context key, or a golden row in scope; the two
-   compete on µs alone. Agreement means every knob the leaf has decided has the same value in the row.
+4. **The evidence index.** The fastest measured row of the same kernel — the same exact identity — at the sizes the
+   compile binds its symbolic dims to, that agrees with an offered leaf: a tune DB `perf` row under this compile's own
+   context key, or a golden row in scope; the two compete on µs alone. Agreement means every knob the leaf has decided
+   has the same value in the row.
 5. **The prior.** Otherwise: the `mean_scores` argmin over complete offered rows. A pool whose minted size bound
    exceeds the cold-pool budget is ranked over a deterministic drawn subset (seeded uniform descents through the
    lazy tree — legal complete rows, every level covered) instead of walked at full length: the cold pick needs a
@@ -558,8 +559,9 @@ emission-order fallback raises the same way at a node with several leaves left.
 At a **schedule fork** (one kernel's row):
 
 1. the **evidence index** (`greedy._db_measured_index`): the fastest row of the same kernel — rows are indexed by the
-   exact identity of the kernel they measured, and the fork asks for its own (`wire.kernel_identity`) — that agrees
-   with an offered leaf, whether it came from the tune DB or from a golden file. `_direct_measured_pick` descends the
+   exact identity of the kernel they measured and the sizes they were measured at, and the fork asks for its own
+   (`wire.kernel_identity`, `wire.kernel_bindings`; a row that names no size, recorded before rows named one, answers
+   at every size) — that agrees with an offered leaf, whether it came from the tune DB or from a golden file. `_direct_measured_pick` descends the
    lazy tree straight to it, asking each branch whether it admits the row (`Fork.admits`: a schedule branch spells a
    prefix of what its leaves will spell, a level branch a projection of it, and a knob the row leaves undecided is
    free), so a partial row reaches its leaf whatever the pool size. The prefix reading excludes the empty spelling: a

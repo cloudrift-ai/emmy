@@ -12,7 +12,7 @@ from emmy.compiler.dtype import F32
 from emmy.compiler.dtype import get as dtype_get
 from emmy.compiler.graph import Node
 from emmy.compiler.ir.axis import Axis
-from emmy.compiler.ir.expr import BinaryExpr, Builtin, Literal, SimplifyCtx, TernaryExpr, Var
+from emmy.compiler.ir.expression import BinaryExpr, Builtin, Literal, SimplifyCtx, TernaryExpr, Var
 from emmy.compiler.ir.kernel import KernelOp, Smem, Sync, Tile
 from emmy.compiler.ir.stmt import (
     Accum,
@@ -42,8 +42,12 @@ _stamp = import_module("emmy.compiler.pipeline.passes.lowering.kernel.030_stamp_
 _materialize = import_module("emmy.compiler.pipeline.passes.lowering.kernel.010_materialize")
 
 
-def _conjuncts(expr):
-    return _conjuncts(expr.left) | _conjuncts(expr.right) if isinstance(expr, BinaryExpr) and expr.op == "&&" else frozenset((expr,))
+def _conjuncts(expression):
+    return (
+        _conjuncts(expression.left) | _conjuncts(expression.right)
+        if isinstance(expression, BinaryExpr) and expression.op == "&&"
+        else frozenset((expression,))
+    )
 
 
 def _owned(body, carry):
@@ -193,7 +197,7 @@ def _resident(op, program, retained=frozenset()):
     step = rewrite(tile.body)
     snapshots = tuple(s for s in loop.body.iter() if isinstance(s, Write))
     if port in retained and port not in written:
-        snapshots += (Write(port, (Var(loop.axis.name), *carry.index), carry.value),)
+        snapshots += (Write(port, (Var(loop.axis.name), *carry.index), (carry.value,)),)
     snapshot = _parallel_copy(op, program, step, shared, parity, shape, batch, tile.block_threads, tensor.dtype, snapshots)
     if snapshot is not None:
         copying, step, predicate = snapshot
@@ -201,7 +205,7 @@ def _resident(op, program, retained=frozenset()):
         copying, predicate = (), None
     step = Body((*step, Sync()))
     for axis in reversed(grid):
-        start, end = Literal(0, "int"), axis.extent_expr()
+        start, end = Literal(0, "int"), axis.extent_expression()
         if predicate is not None:
             for condition in _conjuncts(predicate):
                 if not isinstance(condition, BinaryExpr):
@@ -220,14 +224,14 @@ def _resident(op, program, retained=frozenset()):
         suffix.append(BinaryExpr("/", cell, Literal(stride, "int")) % Literal(extent, "int"))
     initial = (*(Var(name) for name in batch), *suffix)
     if isinstance(carry.seed, str):
-        seed = Load("_carry_seed", carry.seed, seed_index(initial, op.inputs[carry.seed].shape), dtype=op.inputs[carry.seed].dtype)
+        seed = Load(("_carry_seed",), carry.seed, seed_index(initial, op.inputs[carry.seed].shape), dtype=op.inputs[carry.seed].dtype)
     else:
         seed = Let("_carry_seed", Literal(float(carry.seed)))
     initialize = StridedLoop(
         Axis("_carry_cell", prod(shape)),
         Builtin("thread_idx.x"),
         Literal(tile.block_threads, "int"),
-        (seed, Write(shared, (Literal(0, "int"), *suffix), "_carry_seed", value_dtype=seed.dtype)),
+        (seed, Write(shared, (Literal(0, "int"), *suffix), ("_carry_seed",), value_dtype=seed.dtype)),
     )
     # One padding column per row keeps column-strided reads of the state off one bank.
     body = (Smem(shared, (2, *shape[:-1], shape[-1] + 1), cuda_name(tensor.dtype)), initialize, Sync(), *step)
@@ -393,12 +397,12 @@ def _parallel_copy(op, program, step, shared, parity, shape, batch, threads, dty
     for extent in shape:
         stride //= extent
         indices.append(BinaryExpr("/", cell, Literal(stride, "int")) % Literal(extent, "int"))
-    load = Load("_carry_old", shared, (parity, *indices), dtype=dtype)
-    stores = [Write(shared, (Literal(1, "int") - parity, *indices), "_carry_old", value_dtype=dtype)]
+    load = Load(("_carry_old",), shared, (parity, *indices), dtype=dtype)
+    stores = [Write(shared, (Literal(1, "int") - parity, *indices), ("_carry_old",), value_dtype=dtype)]
     coordinates = (*(Var(name) for name in batch), *indices)
     for store in outputs:
         index = (Var(loop.axis.name), *seed_index(coordinates, op.outputs[store.output].shape[1:]))
-        stores.append(Write(store.output, index, "_carry_old", value_dtype=dtype))
+        stores.append(Write(store.output, index, ("_carry_old",), value_dtype=dtype))
     copying = StridedLoop(Axis("_carry_copy", prod(shape)), Builtin("thread_idx.x"), Literal(threads, "int"), (load, *stores))
     return (copying, Sync()), changed, selected.branches[0].select
 

@@ -2,59 +2,68 @@
 
 from __future__ import annotations
 
-from emmy.compiler.dtype import F32
-from emmy.compiler.ir.axis import Axis
-from emmy.compiler.ir.expr import Literal, Var
-from emmy.compiler.ir.loop import LoopOp
-from emmy.compiler.ir.stmt import Affine, Assign, Body, Let, Load, Loop, Select, SelectBranch, Write
+from emmy.compiler.ir.stmt import Body, normalize_body, parse_body
+from tests.compiler.ir.stmt import listing
 
 
-def _op(*stmts) -> LoopOp:
-    i = Var("i")
-    return LoopOp(
-        body=Body((Loop(Axis("i", 8), (Load(name="x", input="X", index=(i,)), *stmts, Write(output="O", index=(i,), value="o"))),))
+def _body(*lines: str) -> Body:
+    """A loop that reads ``x`` from ``X``, runs ``lines`` and stores ``o``."""
+    return parse_body("\n".join(["for i in 0..8:", "    x = load X[i]", *(f"    {line}" for line in lines), "    O[i] = o"]))
+
+
+def _normal(*lines: str) -> str:
+    return str(normalize_body(_body(*lines)))
+
+
+def _scaled(coefficient: str) -> str:
+    """The normal form of ``O[i] = coefficient * X[i]``."""
+    return listing(
+        f"""
+        for a0 in 0..8:
+            in0 = load X[a0]
+            v0 = {coefficient}*in0
+            O[a0] = v0
+        """
     )
 
 
-def _literal(name: str, value: float) -> Let:
-    """A constant as a body spells it: a ``Let`` binding the literal at the default precision."""
-    return Let(name, Literal(value), F32)
-
-
-def _affines(op: LoopOp) -> list[tuple[tuple[float, ...], float]]:
-    return [(tuple(sorted(s.coefficients)), s.offset) for s in op.body.iter() if isinstance(s, Affine)]
+COPY = listing(
+    """
+    for a0 in 0..8:
+        in0 = load X[a0]
+        O[a0] = in0
+    """
+)
 
 
 def test_every_spelling_of_a_scale_is_one_body() -> None:
-    twice = _op(Assign("o", "add", ("x", "x")))
-    scaled = _op(_literal("c", 2.0), Assign("o", "multiply", ("x", "c")))
-    halved = _op(_literal("c", 0.5), Assign("o", "divide", ("x", "c")))
-    assert twice.body == scaled.body == halved.body, twice.pretty_body()
-    assert _affines(twice) == [((2.0,), 0.0)]
-    assert not any(isinstance(s, Let) for s in scaled.body.iter()), "the literal the fold took is dropped"
+    twice = _body("o = add(x, x)")
+    scaled = _body("let f32 c = 2.0", "o = multiply(x, c)")
+    halved = _body("let f32 c = 0.5", "o = divide(x, c)")
+    # One affine statement, and the literal the fold took is dropped.
+    assert str(normalize_body(twice)) == str(normalize_body(scaled)) == str(normalize_body(halved)) == _scaled("2")
     exact = {"structural": False}
-    assert twice.identity_key(**exact) == scaled.identity_key(**exact) == halved.identity_key(**exact)
-    assert twice.identity_key(**exact) != _op(_literal("c", 3.0), Assign("o", "multiply", ("x", "c"))).identity_key(**exact)
+    assert twice.structural_key(**exact) == scaled.structural_key(**exact) == halved.structural_key(**exact)
+    assert twice.structural_key(**exact) != _body("let f32 c = 3.0", "o = multiply(x, c)").structural_key(**exact)
 
 
 def test_a_division_by_a_literal_is_the_product_by_its_reciprocal() -> None:
-    divided = _op(_literal("c", 4.0), Assign("o", "divide", ("x", "c")))
-    assert _affines(divided) == [((0.25,), 0.0)]
-    assert divided.body == _op(_literal("c", 0.25), Assign("o", "multiply", ("x", "c"))).body
-    assert _affines(_op(_literal("c", 1.0), Assign("o", "divide", ("x", "c")))) == [], "a division by one is a copy"
+    assert _normal("let f32 c = 4.0", "o = divide(x, c)") == _scaled("0.25")
+    assert _normal("let f32 c = 0.25", "o = multiply(x, c)") == _scaled("0.25")
+    assert _normal("let f32 c = 1.0", "o = divide(x, c)") == COPY, "a division by one is a copy"
 
 
 def test_like_terms_sum_and_cancel() -> None:
-    op = _op(_literal("c", 3.0), Assign("t", "multiply", ("x", "c")), Assign("s", "add", ("t", "x")), Assign("o", "subtract", ("s", "x")))
-    assert _affines(op) == [((3.0,), 0.0)]
-    zero = _op(Assign("o", "subtract", ("x", "x")))
-    assert _affines(zero) == []
-    (constant,) = [s for s in zero.body.iter() if isinstance(s, Let)]
-    assert constant.value == Literal(0.0) and constant.name == zero.body.writes[0].value, zero.pretty_body()
+    assert _normal("let f32 c = 3.0", "t = multiply(x, c)", "s = add(t, x)", "o = subtract(s, x)") == _scaled("3")
+    # Every term cancels: the value is the constant zero, which the store reads, and nothing loads ``X``.
+    assert _normal("o = subtract(x, x)") == listing(
+        """
+        let f32 v0 = 0.0
+        for a0 in 0..8:
+            O[a0] = v0
+        """
+    )
 
 
 def test_a_select_whose_branches_bind_one_value_is_that_value() -> None:
-    i = Var("i")
-    op = _op(Select("o", (SelectBranch("x", i.lt(Var("i"))), SelectBranch("x", Var("i").lt(Var("i"))))))
-    assert not any(isinstance(s, Select) for s in op.body.iter()), op.pretty_body()
-    assert op.body.writes[0].value == op.body.loads[0].name
+    assert _normal("o = select:", "    x when i < i", "    x when i < i") == COPY

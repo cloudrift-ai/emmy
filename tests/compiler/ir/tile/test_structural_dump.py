@@ -18,7 +18,6 @@ them — never from the term; (e) a λ that is not closed says what it captures.
 from __future__ import annotations
 
 from emmy.compiler.ir.axis import Axis
-from emmy.compiler.ir.expr import Literal, Var
 from emmy.compiler.ir.pure import Fold, Lambda
 from emmy.compiler.ir.schedule import Placement, Raster, Reduce, Schedule, Stage, Tile, Work
 from emmy.compiler.ir.schedule.classic import (
@@ -29,34 +28,37 @@ from emmy.compiler.ir.schedule.classic import (
     ProjectionSchedule,
     ReductionSchedule,
 )
-from emmy.compiler.ir.stmt import Accum, Assign, Body, Let, Load, Loop, Write
+from emmy.compiler.ir.stmt import parse_body
 from emmy.compiler.ir.tile import OutputSpec, TileOp
 from emmy.compiler.ir.tile._dump import pretty
 from emmy.compiler.pipeline.passes.tile._fromloop import fold_from_loop
-from tests.compiler.terms import contraction, projection
+from tests.compiler.terms import contraction, projection, slab
 
 K_STAT, K_PRODUCT = Axis("k", 512), Axis("k", 256)
 
 
 def _stat_fold() -> Fold:
     """RMSNorm's statistic — ``acc0 += x[m, k]²``; the lift forms its load as a slab operand."""
-    body = Body(
-        (
-            Load(name="in0", input="x", index=(Var("m"), Var("k"))),
-            Assign(name="v1", op="multiply", args=("in0", "in0")),
-            Accum(name="acc0", value="v1", op="add", axes=("k",)),
-        )
+    (loop,) = parse_body(
+        """
+        for k in 0..512:
+            in0 = load x[m, k]
+            v1 = multiply(in0, in0)
+            acc0 <- add(acc0, v1) over k
+        """
     )
-    return fold_from_loop(Loop(axis=K_STAT, body=body))
+    return fold_from_loop(loop)
 
 
 def _cone() -> Fold:
     """A computed A edge — ``xhat = x[m, k] * w[k]``."""
     return projection(
-        body=(
-            Load(name="xhat_e", input="x", index=(Var("m"), Var("k"))),
-            Load(name="xhat_s", input="w", index=(Var("k"),)),
-            Assign(name="xhat", op="multiply", args=("xhat_e", "xhat_s")),
+        body=parse_body(
+            """
+            xhat_e = load x[m, k]
+            xhat_s = load w[k]
+            xhat = multiply(xhat_e, xhat_s)
+            """
         )
     )
 
@@ -65,8 +67,8 @@ def _product(a=None) -> Fold:
     """The gate⊗up shape — two channels over ONE shared ``a`` edge."""
     return contraction(
         K_PRODUCT,
-        a if a is not None else Load(name="a_e", input="x", index=(Var("m"), Var("k"))),
-        *((Load(name=f"{acc}_b", input=w, index=(Var("k"), Var("n"))), acc) for acc, w in (("acc_g", "Wg"), ("acc_u", "Wu"))),
+        a if a is not None else slab("a_e", "x", "m", "k"),
+        *((slab(f"{acc}_b", w, "k", "n"), acc) for acc, w in (("acc_g", "Wg"), ("acc_u", "Wu"))),
     )
 
 
@@ -105,7 +107,7 @@ def test_projection_dump_shows_the_binder_and_its_operands() -> None:
     """A zero-axis Fold stores its projection lambda and operands. The binder rides its own branch,
     next to the body it binds rather than in the header. Every lambda-valued field reads the same
     way: signature, then body."""
-    m = projection((_stat_fold(),), (Assign(name="o", op="rsqrt", args=("acc0",)),))
+    m = projection((_stat_fold(),), parse_body("o = rsqrt(acc0)"))
     text = "\n".join(pretty(m))
     assert text.splitlines()[0] == "Fold  free"
     assert "├─ operand[acc0]: Fold[k] reduce   ‹computed›" in text
@@ -116,7 +118,7 @@ def test_projection_dump_shows_the_binder_and_its_operands() -> None:
 def test_a_product_edge_shows_every_lambda_param_it_binds() -> None:
     """One operand edge can supply several result components, so the dump names every scalar
     substituted for that edge instead of leaving the positional binding implicit."""
-    node = projection((_product(),), (Assign(name="o", op="add", args=("acc_g", "acc_u")),))
+    node = projection((_product(),), parse_body("o = add(acc_g, acc_u)"))
     text = "\n".join(pretty(node))
     assert "operand[acc_g, acc_u]: Fold[k] contraction" in text
     assert "lift: λ(acc_g, acc_u) -> (o)" in text
@@ -152,7 +154,7 @@ def _two_operand_reader() -> Fold:
     twisted fusion leaves when it re-seats a carrier's channels."""
     return Fold(
         operands=(_stat_fold(), _cone()),
-        lift=Lambda(params=("_unread0", "w"), body=Body((Assign(name="o", op="exp", args=("w",)),)), results=("o",)),
+        lift=Lambda(params=("_unread0", "w"), body=parse_body("o = exp(w)"), results=("o",)),
     )
 
 
@@ -184,17 +186,21 @@ def _scaled_scores() -> Fold:
     """The sdpa score shape — a reduce scaled by a constant the frontend broadcast into a one-element
     buffer. The lift closes over that buffer's read, so the scale arrives as its own operand edge."""
     scale = projection(
-        body=(
-            Load(name="s0", input="sdpa_scale", index=(Literal(0, "int"),)),
-            Load(name="s1", input="sdpa_mask_fill", index=(Literal(0, "int"),)),
+        body=parse_body(
+            """
+            s0 = load sdpa_scale[0]
+            s1 = load sdpa_mask_fill[0]
+            """
         ),
         results=("s0", "s1"),
     )
     return projection(
         (_stat_fold(), scale),
-        (
-            Assign(name="v2", op="multiply", args=("acc0", "s0")),
-            Assign(name="v3", op="add", args=("v2", "s1")),
+        parse_body(
+            """
+            v2 = multiply(acc0, s0)
+            v3 = add(v2, s1)
+            """
         ),
     )
 
@@ -221,7 +227,7 @@ def test_a_twisted_node_prints_its_stable_combine_then_psi_and_the_base_as_helpe
 
     fold = Fold(
         operands=(_stat_fold(),),
-        lift=Lambda(params=("k", "acc0"), body=Body((Let(name="one", value=1.0),)), results=("acc0", "one")),
+        lift=Lambda(params=("k", "acc0"), body=parse_body("let one = 1.0"), results=("acc0", "one")),
         init=(-1e30, 0.0),
         base=Lambda.componentwise(SOFTMAX.base[:2], ("m", "l")),
         twist=Twist(recipe=SOFTMAX, channels=(0,)),
@@ -242,14 +248,10 @@ def test_a_twisted_node_prints_its_stable_combine_then_psi_and_the_base_as_helpe
 def _split_k() -> Fold:
     """Split-K's outer reduce — the identity-lift composition over one bilinear ``Fold`` edge. Its
     derived step embeds that very object, so a dump that printed the step would show it twice."""
-    inner = contraction(
-        "kslice",
-        Load(name="a_e", input="x", index=(Var("m"), Var("kslice"))),
-        (Load(name="b_e", input="w", index=(Var("kslice"), Var("n"))), "acc0"),
-    )
+    inner = contraction("kslice", slab("a_e", "x", "m", "kslice"), (slab("b_e", "w", "kslice", "n"), "acc0"))
     return Fold(
         operands=(inner,),
-        lift=Lambda(params=("ksplit", "acc0"), body=Body(()), results=("acc0",)),
+        lift=Lambda(params=("ksplit", "acc0"), body=parse_body(""), results=("acc0",)),
         init=(0.0,),
         base=Lambda.componentwise(("add",), ("acc0",)),
     )
@@ -285,9 +287,11 @@ def _capturing_cone() -> Fold:
     """The flash ``P = exp(s − m)`` shape — a cone that READS a value the enclosing body defines
     (``m_run``, the carrier's running max) instead of producing it."""
     return projection(
-        body=(
-            Load(name="p_e", input="x", index=(Var("m"), Var("k"))),
-            Assign(name="p", op="subtract", args=("p_e", "m_run")),
+        body=parse_body(
+            """
+            p_e = load x[m, k]
+            p = subtract(p_e, m_run)
+            """
         )
     )
 
@@ -310,13 +314,19 @@ def test_iteration_vars_are_not_captures() -> None:
     """A λ reading an axis is not capturing — the nest binds it. This covers the three places an
     axis can come from: the term's own axes, the placement, and an output specification's sweep."""
     m, n = Axis("m", 128), Axis("n", 64)
-    body = Body((Load(name="w_e", input="w", index=(Var("m"), Var("n"))), Assign(name="o", op="multiply", args=("acc0", "w_e"))))
+    body = parse_body(
+        """
+        w_e = load w[m, n]
+        o = multiply(acc0, w_e)
+        """
+    )
+    (write,) = parse_body("y[m, n] = o")
     tile = TileOp(
         op=projection((_stat_fold(),), body),
         name="k_stat",
         place=Placement(free=(m, n), grid=(m,), mapped=True),
         axes=(m, n, K_STAT),
-        output_specs=(OutputSpec(write=Write(output="y", index=(Var("m"), Var("n")), value="o"), sweep=(n,)),),
+        output_specs=(OutputSpec(write=write, sweep=(n,)),),
     )
     # ``m`` comes from the placement, ``n`` from the output sweep — the sweep axis left the term
     # at 1q, so a dump reading only the term would wrongly call it captured.
@@ -364,12 +374,13 @@ def test_slices_annotate_a_node_only_when_the_owning_tileop_supplies_them() -> N
 
 def test_pretty_body_separates_placement_and_outputs_from_the_term() -> None:
     m, n = Axis("m", 128), Axis("n", 64)
+    (write,) = parse_body("y[m, n] = o")
     tile = TileOp(
-        op=projection((_stat_fold(),), (Assign(name="o", op="rsqrt", args=("acc0",)),)),
+        op=projection((_stat_fold(),), parse_body("o = rsqrt(acc0)")),
         name="k_stat",
         place=Placement(free=(m, n), grid=(m,), mapped=True),
         axes=(m, n, K_STAT),
-        output_specs=(OutputSpec(write=Write(output="y", index=(Var("m"), Var("n")), value="o"), sweep=(n,)),),
+        output_specs=(OutputSpec(write=write, sweep=(n,)),),
     )
     text = tile.pretty_body()
     assert "place  free=(m, n)  grid=(m)" in text

@@ -1,5 +1,89 @@
 # Qwen3.8-27B-NVFP4 (NVIDIA) discovery
 
+## The FP8 cache staged into shared memory: milestone 5 met, 6 still missed (2026-11-07)
+
+Native attention's FP8 key-value cache now copies into shared memory, 16 bytes per copy, before the tensor-core fold
+reads it; it was read one byte per load, which kept every fold at 255 registers with spills (#1366, on #1352). Recorded
+and gated on the card and host of the section below (vast.ai, x16 RTX 5090, EPYC 9655, a 46-CPU quota, driver
+610.57). Every attention twin was swept over its neighbouring key splits and four tiles with the cache staged, and the
+compile's pick recorded. The client, prompts and settings are the section below's. The pack exports under strict
+evidence, every twin compiles strictly from the golden, and `emmy eval golden --serving-config` deploys every twin from
+the golden rows alone.
+
+| twin | at 4,096 | at 131,072 |
+|---|---|---|
+| `attend1` (decode) | g32k, 11.1 µs (27.7) | g64k, 205 µs (581) |
+| `attend3` (verify) | g32k, 22.5 µs (54.9) | g64k, 487 µs (1,413) |
+| `attend16` | g16k, 41.7 µs (141) | g32k, 974 µs (6,516) |
+| `attend64` (chunk) | g8k, 73.0 µs (195) | g32k, 1,590 µs (5,126) |
+
+The section below's times are in brackets. The one-row decode's split piece reads its 268 MB cache in 189 µs, about
+1.4 TB/s; at one warp per CTA it took 170 µs staged against 502 µs read directly. g128k, which the compiler does not
+offer, measured 2% faster than g64k at one row and 7% at three.
+
+| | this branch | the section below |
+|---|---|---|
+| TPOT / TTFT, 256-token prompt | 8.68 ms / 0.151 s | 9.44 ms / 0.154 s |
+| first token, 257-token prompt | 0.172 s | 0.177 s |
+| TPOT / TTFT, 7,680-token prompt | 8.55 ms / 4.62 s | 9.72 ms / 4.88 s |
+| TPOT / TTFT, 197,632-token prompt | 14.7 ms / 188 s | 23.7 ms / 318 s |
+| TPOT / TTFT, 261,632-token prompt | 17.7 ms / 277 s | 32.7 ms / 505 s |
+| drafts accepted at 256 / 7,680 / 197,632 / 261,632 | 75 / 79 / 71 / 64% | 70 / 71 / 79 / 62% |
+| device memory at rest | 27.9 GiB | 27.9 GiB |
+| GSM8K strict / flexible match | 0.715 / 0.765 | |
+
+- **Milestone 5, met.** The attention term of the 197,632-token first token is 69.9 s of GPU time (`nsys
+  --cuda-graph-trace=node`, 3,092 chunks), against at most 117 s (200 s in the section below). The full window's first
+  token is 277 s, against at most 450 s.
+- **Milestone 6, missed.** The captured verify step takes 35.5 ms at 197,632 positions (attention 14.3 ms) against
+  21.1 ms at the 4,096 window (attention 0.41 ms): +14.4 ms, where the bound is about 8 ms (+38.9 in the section
+  below). The three-row verify reads the cache once per row, three reads where one would do: its twin at 131,072 takes
+  487 µs against the one-row decode's 205.
+- **The short cells did not get slower.** The 256- and 7,680-token cells are faster on both TPOT and first token.
+- **GSM8K holds,** inside one standard error (0.032) of main's 0.730 / 0.750 on 2026-11-06; the section below did not
+  run it.
+- Drafts accepted is the share of drafted tokens a step kept, read off the gaps between streamed tokens.
+
+## Attention priced per range of windows: milestones 5 and 6 again (2026-11-07)
+
+Native attention now compiles once per range of windows, priced at 4,096 and at 131,072 cached tokens, and a step runs
+its window's range's program; the long range starts at 16,384 (#1352, stacked on #1329's grouped decode attention).
+Recorded and gated on one rented x16 RTX 5090 (vast.ai; Gen5 x16; a 46-CPU quota on a 96-core EPYC 9655 host, driver
+610.57, CUDA 13.1). The client, prompts and settings are the 2026-11-06 section's, the prompts cut from that section's
+tree. The pack exports under strict evidence.
+
+Every attention twin was swept whole and under key splits g2k to g128k, the FP8 cache unstaged, no TMA, fast math on,
+and the compile's pick recorded. The compiler offers splits up to g64k; g128k measured faster on the decode twins at
+131,072 (one row 475 against 581 µs, three rows 1,296 against 1,413 µs), and no compile can deploy it.
+
+| twin | at 4,096 | at 131,072 |
+|---|---|---|
+| `attend1` (decode) | g32k, 27.7 µs | g64k, 581 µs |
+| `attend3` (verify) | g16k, 54.9 µs | g64k, 1,413 µs |
+| `attend16` | g8k, 141 µs | g8k, 6,516 µs |
+| `attend64` (chunk) | g16k, 195 µs | g32k, 5,126 µs |
+
+| | this branch | 2026-11-06 (main) |
+|---|---|---|
+| TPOT / TTFT, 256-token prompt | 9.44 ms / 0.154 s | 8.70 ms / 0.15 s |
+| first token, 257-token prompt | 0.177 s | 0.17 s |
+| TPOT / TTFT, 7,680-token prompt | 9.72 ms / 4.88 s | 9.76 ms / 4.81 s |
+| TPOT / TTFT, 197,632-token prompt | 23.7 ms / 318 s | 42.9 ms / 429 s |
+| TPOT / TTFT, 261,632-token prompt | 32.7 ms / 505 s | 50.6 ms / 687 s |
+| drafts accepted at 256 / 7,680 / 197,632 / 261,632 | 70 / 71 / 79 / 62% | 76 / 75 / 61 / 67% |
+| device memory at rest | 27.9 GiB | 27.9 GiB |
+
+- **Milestone 5, missed.** The attention term of the 197,632-token first token is 200 s of GPU time (`nsys
+  --cuda-graph-trace=node`, 3,088 chunks), against at most 117 s (300 s on 2026-11-06). The full window's first token is
+  505 s, against at most 450 s (687 s).
+- **Milestone 6, missed.** The captured verify step takes 60.7 ms at 197,632 positions (attention 39.6 ms) against
+  21.9 ms at the 4,096 window (attention 1.1 ms): +38.9 ms, where the bound is about 8 ms (+73.7 on 2026-11-06).
+- **The short cells did not move.** The drafted step at 256 tokens takes 21.9 ms on both trees; TPOT reads higher here
+  because fewer drafts were accepted on these prompts, which the attention's changed numerics move.
+- **What is left is the kernels, not the pricing.** Every attention fold here runs at 255 registers with local memory
+  spills and 17% occupancy. The one-row decode at 131,072 reads 268 MB of cache in 581 µs, about 0.46 TB/s; the 64-row
+  chunk takes 5.1 ms there, where reading the cache once per query head at the card's bandwidth takes under 1 ms.
+
 ## The gates of milestones 3, 4 and 5 (2026-11-06)
 
 The gates of the parity plan's milestones 3 (the rotary store's grid), 4 (prefill ends at the prompt's last token) and 5

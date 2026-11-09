@@ -11,7 +11,7 @@ from frozendict import frozendict
 
 from emmy.compiler.dtype import F32
 from emmy.compiler.ir.base import ConstantOp, Op, buffer_types
-from emmy.compiler.ir.stmt import Body, Load, Stmt, Write, ZeroPrologue
+from emmy.compiler.ir.stmt import Body, Load, Statement, Write, ZeroPrologue
 from emmy.compiler.ir.stmt import pretty_body as _pretty_body_stmts
 from emmy.compiler.tensor import Tensor
 
@@ -33,9 +33,9 @@ class BodyOp(Op):
     from :class:`Op`) with body-derived names keyed to placeholder
     ``Tensor(name, (), F32)`` values, so pre-match callers (loop lowering /
     fusion / tests) already see the right keys + ordering without a
-    matcher run. The body walk is generic — each :class:`Stmt`
-    subclass declares its :meth:`Stmt.external_reads` /
-    :meth:`Stmt.external_writes` / :meth:`Stmt.local_decls`, and
+    matcher run. The body walk is generic — each :class:`Statement`
+    subclass declares its :meth:`Statement.external_reads` /
+    :meth:`Statement.external_writes` / :meth:`Statement.local_decls`, and
     ``BodyOp`` aggregates them (filtering reads / writes that name a
     locally-declared buffer like an ``Smem`` or ``Stage``). The
     matcher's :meth:`with_io` rebind then overrides each entry with
@@ -63,9 +63,9 @@ class BodyOp(Op):
 
     def _derive_io_names(self) -> tuple[tuple[str, ...], tuple[str, ...]]:
         """Walk the body once; aggregate per-stmt
-        :meth:`Stmt.external_reads` / :meth:`Stmt.external_writes` and
+        :meth:`Statement.external_reads` / :meth:`Statement.external_writes` and
         filter out any name covered by some stmt's
-        :meth:`Stmt.local_decls` (smem / staged buffers). Returns
+        :meth:`Statement.local_decls` (smem / staged buffers). Returns
         ``(input_names, output_names)`` in body first-use order."""
         decls: set[str] = set()
         for s in self:
@@ -83,7 +83,7 @@ class BodyOp(Op):
         # earlier steps — and is one output param, not an input too.
         return tuple(name for name in ins if name not in outs), tuple(outs)
 
-    def __iter__(self) -> Iterator[Stmt]:
+    def __iter__(self) -> Iterator[Statement]:
         return self.body.iter()
 
     @property

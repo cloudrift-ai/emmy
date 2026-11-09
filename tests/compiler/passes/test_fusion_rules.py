@@ -13,9 +13,10 @@ import pytest
 from emmy.compiler.backend.numpy import NumpyBackend
 from emmy.compiler.graph import Graph, Tensor
 from emmy.compiler.ir.base import ConstantOp, InputOp
-from emmy.compiler.ir.expr import Literal, placeholder
+from emmy.compiler.ir.expression import Literal, placeholder
 from emmy.compiler.ir.frontend.ir import LinearOp, RmsNormOp
 from emmy.compiler.ir.loop import Accum, Affine, Assign, Load, LoopOp, Select, Write
+from emmy.compiler.ir.stmt import parse_body
 from emmy.compiler.ir.tensor.ir import ElementwiseOp, GatherOp, IndexMapOp, IndexSource, ReduceOp, ScanOp
 from emmy.compiler.pipeline import Pipeline
 
@@ -769,7 +770,7 @@ def test_shared_const_broadcast_lowers_as_one_mimo_cuda_kernel():
 def _make_shared_transpose():
     """A transpose (general layout op) feeding two elementwise consumers —
     covers the non-constant pure-indexmap path."""
-    from emmy.compiler.ir.expr import placeholder
+    from emmy.compiler.ir.expression import placeholder
     from emmy.compiler.pipeline.passes.frontend.decomposition._helpers import single_indexmap
 
     g = Graph()
@@ -964,71 +965,35 @@ def test_output_reshape_folds_into_reduce_producer(rows):
     projection inlined once per output column.
     """
     from emmy.compiler.dim import Dim
-    from emmy.compiler.ir.axis import Axis
-    from emmy.compiler.ir.expr import BinaryExpr, Literal, Var
-    from emmy.compiler.ir.loop import Load, Loop
-    from emmy.compiler.ir.stmt import Body
 
     H, D = 3, 8
 
     def make_graph():
         # Producer: per-head scale-by-row-sum (a reduce + sweep per (row, head) — reduce-heavy).
-        a0, a1 = Var("a0"), Var("a1")
-        red = Loop(
-            axis=Axis(name="a2", extent=Dim(D)),
-            body=Body(
-                (
-                    Load(name="in0", input="x", index=(a0, a1, Var("a2"))),
-                    Accum(name="acc", value="in0", op="add", axes=("a2",)),
-                )
-            ),
-        )
-        sweep = Loop(
-            axis=Axis(name="a3", extent=Dim(D)),
-            body=Body(
-                (
-                    Load(name="in1", input="x", index=(a0, a1, Var("a3"))),
-                    Assign(name="v0", op="multiply", args=("in1", "acc")),
-                    Write(output="y", index=(a0, a1, Var("a3")), value="v0"),
-                )
-            ),
-        )
         producer = LoopOp(
-            body=Body(
-                (
-                    Loop(
-                        axis=Axis(name="a0", extent=Dim(rows)),
-                        body=Body((Loop(axis=Axis(name="a1", extent=Dim(H)), body=Body((red, sweep))),)),
-                    ),
-                )
+            body=parse_body(
+                f"""
+                for a0 in 0..{rows}:
+                    for a1 in 0..{H}:
+                        for a2 in 0..{D}:
+                            in0 = load x[a0, a1, a2]
+                            acc <- add(acc, in0) over a2
+                        for a3 in 0..{D}:
+                            in1 = load x[a0, a1, a3]
+                            v0 = multiply(in1, acc)
+                            y[a0, a1, a3] = v0
+                """
             )
         )
         # Consumer: the traced flatten (4, H, D) -> (4, H*D) — a flat-memory identity copy.
-        b0, b1 = Var("b0"), Var("b1")
         copy = LoopOp(
-            body=Body(
-                (
-                    Loop(
-                        axis=Axis(name="b0", extent=Dim(rows)),
-                        body=Body(
-                            (
-                                Loop(
-                                    axis=Axis(name="b1", extent=Dim(H * D)),
-                                    body=Body(
-                                        (
-                                            Load(
-                                                name="c0",
-                                                input="y",
-                                                index=(b0, BinaryExpr("/", b1, Literal(D, "int")), BinaryExpr("%", b1, Literal(D, "int"))),
-                                            ),
-                                            Write(output="out", index=(b0, b1), value="c0"),
-                                        )
-                                    ),
-                                ),
-                            )
-                        ),
-                    ),
-                )
+            body=parse_body(
+                f"""
+                for b0 in 0..{rows}:
+                    for b1 in 0..{H * D}:
+                        c0 = load y[b0, b1 / {D}, b1 % {D}]
+                        out[b0, b1] = c0
+                """
             )
         )
         g = Graph()
@@ -1064,15 +1029,6 @@ def test_output_reshape_folds_into_reduce_producer(rows):
 # ===================================================================
 
 
-def _loops2(inner, ax0, ext0, ax1, ext1):
-    from emmy.compiler.dim import Dim
-    from emmy.compiler.ir.axis import Axis
-    from emmy.compiler.ir.loop import Loop
-    from emmy.compiler.ir.stmt import Body
-
-    return Body((Loop(axis=Axis(name=ax0, extent=Dim(ext0)), body=Body((Loop(axis=Axis(name=ax1, extent=Dim(ext1)), body=inner),))),))
-
-
 def _make_pending_product_into_exp_residual_add():
     """The mid-fusion state the engine reaches on every transformer layer past the first: the
     decomposed o_proj's sum-reduce already merged into the residual add (which also reads the
@@ -1081,67 +1037,58 @@ def _make_pending_product_into_exp_residual_add():
     still merge into the add's reduce — the flash P@V deferral must not mistake the post-reduce
     residual operand for a V operand (it kept every o_proj product materialized: a (b, s, k, n)
     gmem scratch per layer, 17 GB at S=4096 on the Qwen3 embed trunk)."""
-    from emmy.compiler.dim import Dim
-    from emmy.compiler.ir.axis import Axis
-    from emmy.compiler.ir.expr import Var
-    from emmy.compiler.ir.loop import Load, Loop
-    from emmy.compiler.ir.stmt import Body
-
     S, K, N = 4, 8, 6
-    a0, a1, a2 = Var("a0"), Var("a1"), Var("a2")
 
-    ew_cell = Body(
-        (
-            Loop(
-                axis=Axis(name="a2", extent=Dim(N)),
-                body=Body(
-                    (
-                        Load(name="i0", input="act", index=(a0, a1)),
-                        Load(name="i1", input="w", index=(a2, a1)),
-                        Assign(name="v0", op="multiply", args=("i0", "i1")),
-                        Write(output="ew", index=(a0, a1, a2), value="v0"),
-                    )
-                ),
-            ),
+    ew = LoopOp(
+        body=parse_body(
+            f"""
+            for a0 in 0..{S}:
+                for a1 in 0..{K}:
+                    for a2 in 0..{N}:
+                        i0 = load act[a0, a1]
+                        i1 = load w[a2, a1]
+                        v0 = multiply(i0, i1)
+                        ew[a0, a1, a2] = v0
+            """
         )
     )
-    ew = LoopOp(body=_loops2(ew_cell, "a0", S, "a1", K))
-
-    exp_cell = Body(
-        (
-            Load(name="c0", input="r", index=(a0, a1)),
-            Assign(name="c1", op="exp", args=("c0",)),
-            Write(output="e", index=(a0, a1), value="c1"),
+    e = LoopOp(
+        body=parse_body(
+            f"""
+            for a0 in 0..{S}:
+                for a1 in 0..{N}:
+                    c0 = load r[a0, a1]
+                    c1 = exp(c0)
+                    e[a0, a1] = c1
+            """
         )
     )
-    e = LoopOp(body=_loops2(exp_cell, "a0", S, "a1", N))
-    res_cell = Body(
-        (
-            Load(name="d0", input="r", index=(a0, a1)),
-            Load(name="d1", input="e", index=(a0, a1)),
-            Assign(name="d2", op="add", args=("d0", "d1")),
-            Write(output="res", index=(a0, a1), value="d2"),
+    res = LoopOp(
+        body=parse_body(
+            f"""
+            for a0 in 0..{S}:
+                for a1 in 0..{N}:
+                    d0 = load r[a0, a1]
+                    d1 = load e[a0, a1]
+                    d2 = add(d0, d1)
+                    res[a0, a1] = d2
+            """
         )
     )
-    res = LoopOp(body=_loops2(res_cell, "a0", S, "a1", N))
-
-    add_cell = Body(
-        (
-            Loop(
-                axis=Axis(name="a2", extent=Dim(K)),
-                body=Body(
-                    (
-                        Load(name="in0", input="ew", index=(a0, a2, a1)),
-                        Accum(name="acc0", value="in0", op="add", axes=("a2",)),
-                    )
-                ),
-            ),
-            Load(name="in1", input="res", index=(a0, a1)),
-            Assign(name="v1", op="add", args=("acc0", "in1")),
-            Write(output="y", index=(a0, a1), value="v1"),
+    add13 = LoopOp(
+        body=parse_body(
+            f"""
+            for a0 in 0..{S}:
+                for a1 in 0..{N}:
+                    for a2 in 0..{K}:
+                        in0 = load ew[a0, a2, a1]
+                        acc0 <- add(acc0, in0) over a2
+                    in1 = load res[a0, a1]
+                    v1 = add(acc0, in1)
+                    y[a0, a1] = v1
+            """
         )
     )
-    add13 = LoopOp(body=_loops2(add_cell, "a0", S, "a1", N))
 
     g = Graph()
     g.add_node(InputOp(), [], Tensor("act", (S, K)), node_id="act")
@@ -1173,36 +1120,17 @@ def test_pending_product_exp_residual_correctness():
 
 def test_product_reduction_fuses_before_upstream_activation():
     """An activation feeding a decomposed contraction must not strand its M×K×N product."""
-    from emmy.compiler.dim import Dim
-    from emmy.compiler.ir.axis import Axis
-    from emmy.compiler.ir.expr import Var
-    from emmy.compiler.ir.loop import Load, Loop
-    from emmy.compiler.ir.stmt import Body
-
     graph = _make_pending_product_into_exp_residual_add()
     graph.rename_node("act", "act_src")
-    a0, a1 = Var("a0"), Var("a1")
     activation = LoopOp(
-        body=Body(
-            (
-                Loop(
-                    axis=Axis("a0", Dim(4)),
-                    body=Body(
-                        (
-                            Loop(
-                                axis=Axis("a1", Dim(8)),
-                                body=Body(
-                                    (
-                                        Load(name="x", input="act_src", index=(a0, a1)),
-                                        Assign(name="xa", op="tanh", args=("x",)),
-                                        Write(output="act", index=(a0, a1), value="xa"),
-                                    )
-                                ),
-                            ),
-                        )
-                    ),
-                ),
-            )
+        body=parse_body(
+            """
+            for a0 in 0..4:
+                for a1 in 0..8:
+                    x = load act_src[a0, a1]
+                    xa = tanh(x)
+                    act[a0, a1] = xa
+            """
         )
     )
     graph.add_node(activation, ["act_src"], Tensor("act", (4, 8)), node_id="act")

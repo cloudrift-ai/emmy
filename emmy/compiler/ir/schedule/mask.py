@@ -10,9 +10,9 @@ coordinates and the uniform values, folded into the predicate as the expression 
 
 from __future__ import annotations
 
-from emmy.compiler.ir.expr import BinaryExpr, Expr, Literal, Var
+from emmy.compiler.ir.expression import BinaryExpr, Expression, Literal, Var
 from emmy.compiler.ir.pure.fold import Fold
-from emmy.compiler.ir.stmt import Affine, Assign, Let, Select, SelectBranch, Stmt
+from emmy.compiler.ir.stmt import Affine, Assign, Let, Select, SelectBranch, Statement
 
 _COMPARE = {"less": "<", "less_equal": "<=", "greater": ">", "greater_equal": ">="}
 _NEGATE = {"<": ">=", "<=": ">", ">": "<=", ">=": "<"}
@@ -24,12 +24,12 @@ def cell_uniform(axes, node: Fold, coord_axes: frozenset[str] | set[str]) -> fro
     of the kernel's axis table ``axes``."""
     contraction = node.as_contraction()
     per_cta = node.free_axes - contraction.left_axes - contraction.right_axes
-    extents = {name for axis in axes for name in axis.extent.expr.free_vars()}
+    extents = {name for axis in axes for name in axis.extent.expression.free_vars()}
     leaves = {name for edge in node.operands if edge.uniform_leaf(frozenset(coord_axes)) for name in edge.exposes}
     return frozenset(leaves | per_cta | extents)
 
 
-def coordinate_aliases(stmts, axes: frozenset[str] | set[str], uniform: frozenset[str] | set[str]) -> dict[str, Expr]:
+def coordinate_aliases(stmts, axes: frozenset[str] | set[str], uniform: frozenset[str] | set[str]) -> dict[str, Expression]:
     """``{name: expression}`` for every ``Let`` in ``stmts`` that binds an expression over a coordinate of ``axes``
     and the uniform values — a bare coordinate, or a split piece's absolute key."""
     return {
@@ -39,16 +39,18 @@ def coordinate_aliases(stmts, axes: frozenset[str] | set[str], uniform: frozense
     }
 
 
-def select_masks(stmts, aliases: dict[str, Expr], uniform: set[str] | frozenset[str], axes: frozenset[str] | set[str]) -> list[Stmt] | None:
+def select_masks(
+    stmts, aliases: dict[str, Expression], uniform: set[str] | frozenset[str], axes: frozenset[str] | set[str]
+) -> list[Statement] | None:
     """``stmts`` with every ``where`` over a comparison of coordinates and uniform values spelled as a coordinate
     ``Select``, the coordinate aliases it reads folded into the predicate — or ``None`` when a coordinate reaches a
     statement no ``Select`` can carry, which no per-fragment evaluation can place."""
-    coords: dict[str, Expr] = dict(aliases)
-    aliased = {name for expr in aliases.values() for name in expr.free_vars() if name in axes}
-    scalars: dict[str, Expr] = {}
+    coords: dict[str, Expression] = dict(aliases)
+    aliased = {name for expression in aliases.values() for name in expression.free_vars() if name in axes}
+    scalars: dict[str, Expression] = {}
     predicates: dict[str, BinaryExpr] = {}
 
-    def term(name: str) -> Expr | None:
+    def term(name: str) -> Expression | None:
         if name in coords:
             return coords[name]
         if name in scalars:
@@ -57,7 +59,7 @@ def select_masks(stmts, aliases: dict[str, Expr], uniform: set[str] | frozenset[
             return Var(name)
         return None
 
-    out: list[Stmt] = []
+    out: list[Statement] = []
     for stmt in stmts:
         if isinstance(stmt, Let) and stmt.name in coords:
             continue  # the alias folds into every predicate that reads it
@@ -70,11 +72,11 @@ def select_masks(stmts, aliases: dict[str, Expr], uniform: set[str] | frozenset[
             terms = [term(arg) for arg in stmt.args]
             if any(t is None for t in terms) or any(not float(c).is_integer() for c in stmt.coefficients) or stmt.offset:
                 return None
-            expr: Expr | None = None
+            expression: Expression | None = None
             for t, coefficient in zip(terms, stmt.coefficients, strict=True):
                 scaled = t if coefficient == 1 else BinaryExpr("*", Literal(int(coefficient), "int"), t)
-                expr = scaled if expr is None else BinaryExpr("+", expr, scaled)
-            coords[stmt.name] = expr
+                expression = scaled if expression is None else BinaryExpr("+", expression, scaled)
+            coords[stmt.name] = expression
             continue
         if isinstance(stmt, Assign) and stmt.op.name in _COMPARE and reads & coords.keys():
             left, right = (term(arg) for arg in stmt.args)

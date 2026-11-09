@@ -17,7 +17,7 @@ axes. These tests pin the fold and its safety guards.
 from __future__ import annotations
 
 from emmy.compiler.ir.axis import Axis, extend_simplify_ctx
-from emmy.compiler.ir.expr import BinaryExpr, Interval, Literal, SimplifyCtx, Var
+from emmy.compiler.ir.expression import BinaryExpr, Interval, Literal, SimplifyCtx, Var
 
 
 def _flat_seq_coord(stride: int) -> BinaryExpr:

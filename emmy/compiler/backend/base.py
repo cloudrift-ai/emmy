@@ -194,11 +194,11 @@ class Backend(ABC):
         # Symbolic dims bind from the supplied input array shapes (mirrors
         # ``CudaBackend.run``): each atomic symbolic input dim records its
         # runtime size; downstream node shapes — possibly composite Dim
-        # exprs — resolve via ``expr.eval(sym_env)``.
+        # expressions — resolve via ``expression.eval(sym_env)``.
         sym_env = compiled.symbolic_env(input_data)
 
         def _shape_of(t) -> tuple[int, ...]:  # noqa: ANN001
-            return tuple(d.as_static() if d.is_static else int(d.expr.eval(sym_env)) for d in t.shape)
+            return tuple(d.as_static() if d.is_static else int(d.expression.eval(sym_env)) for d in t.shape)
 
         t0 = time.perf_counter()
         for nid in compiled.topological_order():

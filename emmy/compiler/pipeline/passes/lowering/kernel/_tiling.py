@@ -31,10 +31,10 @@ from collections.abc import Callable
 from dataclasses import dataclass, replace
 
 from emmy.compiler.ir.axis import Axis, Window
-from emmy.compiler.ir.expr import BinaryExpr, Builtin, Expr, Literal, Var
+from emmy.compiler.ir.expression import BinaryExpr, Builtin, Expression, Literal, Var
 from emmy.compiler.ir.kernel import Tile
 from emmy.compiler.ir.schedule import Side
-from emmy.compiler.ir.stmt import Body, Cond, Stmt
+from emmy.compiler.ir.stmt import Body, Cond, Statement
 
 
 def shrink_axis(axis: Axis, reg: int) -> Axis:
@@ -59,7 +59,7 @@ class AxisOffset:
     unit_var: str | None = None  # the UNIT-level var — a warp for mma, a thread for scalar
     unit_count: int = 1
 
-    def base(self, r: int) -> Expr:
+    def base(self, r: int) -> Expression:
         """The offset of register cell index ``r`` along this axis."""
         reg_term = Literal(r * self.atom_dim, "int")
         if self.unit_var is not None:  # block·(units·reg·atom) + unit·(reg·atom) + r·atom
@@ -74,12 +74,12 @@ class AxisOffset:
         """The rows one CTA holds along this axis — what :meth:`base` multiplies the block var by."""
         return self.unit_count * self.reg * self.atom_dim if self.unit_var is not None else self.reg
 
-    def block_base(self) -> Expr:
+    def block_base(self) -> Expression:
         """The start of this CTA's tile along the axis — ``block·tile`` in the grid var alone, so it
         is CTA-uniform wherever :meth:`base` is not."""
         return BinaryExpr("*", Var(self.block_var), Literal(self.block_tile, "int"))
 
-    def block_end(self) -> Expr:
+    def block_end(self) -> Expression:
         """The exclusive end of this CTA's tile along the axis — ``(block + 1)·tile``, CTA-uniform like
         :meth:`block_base`."""
         return BinaryExpr("*", BinaryExpr("+", Var(self.block_var), Literal(1, "int")), Literal(self.block_tile, "int"))
@@ -127,9 +127,9 @@ def grid_tile(
     lead_axes: tuple[Axis, ...] = (),
     block_threads: int | None,
     lanes: int = 1,
-    state_decls: Callable[[list[tuple[int, int]]], list[Stmt]],
-    reduce_region: Callable[..., tuple[list[Stmt], list[Stmt]]],
-    store: Callable[..., list[Stmt]],
+    state_decls: Callable[[list[tuple[int, int]]], list[Statement]],
+    reduce_region: Callable[..., tuple[list[Statement], list[Statement]]],
+    store: Callable[..., list[Statement]],
     workers: object = None,
     raster: object = None,
 ) -> Tile:

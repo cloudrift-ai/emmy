@@ -994,7 +994,7 @@ def _targets_in_build_order(document, target_rows) -> list[tuple[str, dict, str,
             dict(pins),
             target,
         )
-        for (target, pins), rows in target_rows.items()
+        for (target, pins, _), rows in target_rows.items()
     ]
     traced = {kernel.ref: kernel.traced for kernel in document.targets()}
     ctx = Context.from_target(tuple(document.compute_cap), gpu_name=document.gpu_name or None)
@@ -2276,7 +2276,7 @@ def _print_kernel_stats(graph, bench, golden_benches=None, greedy_fail=None, gre
     needs."""
     from emmy.commands.table import Col, knob_columns, render_table  # noqa: PLC0415
     from emmy.compiler.ir.cuda.ir import CudaOp, resolve_dim
-    from emmy.compiler.ir.expr import Var  # noqa: PLC0415
+    from emmy.compiler.ir.expression import Var  # noqa: PLC0415
     from emmy.compiler.pipeline.knob import tuning_knob_items  # noqa: PLC0415
     from emmy.compiler.pipeline.search.dataset import ShapeKey  # noqa: PLC0415
     from emmy.compiler.pipeline.search.features import stamps  # noqa: PLC0415
@@ -2300,8 +2300,8 @@ def _print_kernel_stats(graph, bench, golden_benches=None, greedy_fail=None, gre
         sym_env = {}
         for nid in graph.inputs:
             for dim in graph.buffer(nid).shape:
-                if isinstance(dim.expr, Var) and dim.hint is not None:
-                    sym_env.setdefault(dim.expr.name, dim.hint)
+                if isinstance(dim.expression, Var) and dim.hint is not None:
+                    sym_env.setdefault(dim.expression.name, dim.hint)
 
     def _geom(op, attrs: dict):
         block_dims = [resolve_dim(d, sym_env) for d in op.block]
@@ -3127,6 +3127,16 @@ def _random_input_values(rng, shape, dtype, *, name: str | None = None):
     return rng.standard_normal(shape, dtype=np.float32)
 
 
+def _chunk_position(graph, static) -> int | None:
+    """The ``position`` a bench gives a native step's program, whose rows start there in its cache (``q``, ``keys``):
+    the window's last chunk, the one its attention is priced for. Drawn at random the rows sit at the cache's start,
+    where a causal chunk stops after a few keys, and its time says nothing of the window. ``None`` for any other
+    program; ``static`` gives a shape's sizes at the bench's bindings."""
+    if not {"q", "keys", "position"} <= graph.nodes.keys():
+        return None
+    return static(graph.nodes["keys"].output.shape)[0] - static(graph.nodes["q"].output.shape)[0]
+
+
 async def bench_lowered_vs_torch(
     frontend,
     lowered,
@@ -3190,7 +3200,7 @@ async def bench_lowered_vs_torch(
     # Symbolic reproducers bench at each dim's hint (``DEFAULT_SEQ_HINT`` for a
     # bare seq axis) — the same size the backend resolves a symbolic graph to
     # when no inputs are supplied — so the random inputs built here get concrete
-    # hint-sized shapes. Atomic dims carry their own hint; composite exprs
+    # hint-sized shapes. Atomic dims carry their own hint; composite expressions
     # (e.g. ``S * 2``) eval over the collected env.
     from emmy.compiler.dim import Dim
 
@@ -3199,7 +3209,7 @@ async def bench_lowered_vs_torch(
         sym_env_out.append(dict(sym_env))
 
     def _static(shape):
-        return tuple((d.as_static() if d.is_static else int(d.expr.eval(sym_env))) if isinstance(d, Dim) else int(d) for d in shape)
+        return tuple((d.as_static() if d.is_static else int(d.expression.eval(sym_env))) if isinstance(d, Dim) else int(d) for d in shape)
 
     # One random source array per distinct constant ``source_path`` — shared by
     # emmy (lowered graph) and the torch ref (frontend graph). ``bind_constants``
@@ -3223,9 +3233,12 @@ async def bench_lowered_vs_torch(
 
     input_data: dict[str, object] = {}
     input_tensors: dict[str, object] = {}
+    position = _chunk_position(lowered, _static)
     for nid, node in lowered.nodes.items():
         if isinstance(node.op, InputOp):
             arr = _random_input_values(rng, _static(node.output.shape), node.output.dtype, name=nid)
+            if nid == "position" and position is not None:
+                arr = np.full(arr.shape, position)
             # Keep the ndarray shape (no flatten) — a symbolic graph's launch
             # reads the runtime seq_len off the input array's shape.
             input_data[nid] = arr
@@ -4095,7 +4108,7 @@ def _hint_sized_inputs(lowered, example_args, example_kwargs):
     for nid, tensor in zip(input_ids, flat, strict=True):
         for axis, d in enumerate(lowered.buffer(nid).shape):
             if isinstance(d, Dim) and not d.is_static:
-                tensor = _tile_to(tensor, axis, int(d.expr.eval(sym_env)))
+                tensor = _tile_to(tensor, axis, int(d.expression.eval(sym_env)))
         resized.append(tensor)
     it = iter(resized)
     args = tuple(_map_tensors(v, lambda _: next(it)) for v in example_args)

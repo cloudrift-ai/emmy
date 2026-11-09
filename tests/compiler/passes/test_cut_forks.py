@@ -16,11 +16,10 @@ from emmy.compiler.graph import Graph, Tensor
 from emmy.compiler.ir.axis import Axis, Window
 from emmy.compiler.ir.base import ConstantOp, InputOp
 from emmy.compiler.ir.cuda.ir import CudaOp
-from emmy.compiler.ir.elementwise import ElementwiseImpl
-from emmy.compiler.ir.expr import Literal, Var
+from emmy.compiler.ir.expression import Literal, Var
 from emmy.compiler.ir.frontend.ir import SdpaOp, SoftmaxOp
 from emmy.compiler.ir.pure.fold import Fold
-from emmy.compiler.ir.stmt import Assign, Let, Load, Write
+from emmy.compiler.ir.stmt import Load, Statement, parse_body
 from emmy.compiler.ir.tensor.ir import ElementwiseOp
 from emmy.compiler.ir.tile import OutputSpec, Placement, TileOp
 from emmy.compiler.ir.tile.path import resolve
@@ -49,6 +48,12 @@ _CUT = import_module("emmy.compiler.pipeline.passes.tile.cut.030_cut")
 
 def _input(graph: Graph, name: str, shape, dtype="f16") -> None:
     graph.add_node(InputOp(), [], Tensor(name, shape, dtype), node_id=name)
+
+
+def _stmt(text: str) -> Statement:
+    """The one statement ``text`` spells."""
+    (stmt,) = parse_body(text)
+    return stmt
 
 
 def test_cut_and_schedule_passes_share_the_generic_schedule_driver() -> None:
@@ -89,16 +94,12 @@ def _computed_operand_graph(side: str) -> Graph:
     m, n, k = Axis("m", 8), Axis("n", 8), Axis("k", 16)
     computed = projection(
         (),
-        (
-            Load(name="raw", input="computed", index=(Var("m" if side == "a" else "n"), Var("k"))),
-            Assign(name="scaled", op="multiply", args=("raw", "raw")),
-        ),
+        f"""
+        raw = load computed[{"m" if side == "a" else "n"}, k]
+        scaled = multiply(raw, raw)
+        """,
     )
-    direct = Load(
-        name="direct",
-        input="direct",
-        index=(Var("k"), Var("n")) if side == "a" else (Var("m"), Var("k")),
-    )
+    direct = slab("direct", "direct", *(("k", "n") if side == "a" else ("m", "k")))
     a, b = (computed, direct) if side == "a" else (direct, computed)
     tile = TileOp(op=contraction(k, a, (b, "acc")), name="out", place=Placement(free=(m, n)), axes=(m, n, k))
     graph = Graph()
@@ -115,8 +116,8 @@ def test_a_typed_literal_operand_keeps_its_cut_arm_and_workspace_dtype() -> None
     root = graph.nodes["out"]
     _, _, k = root.op.axes
     computed = projection(
-        (slab("raw", "computed", "m", "k"), projection((), (Let("scale", Literal(2.0), dtype=F16),), ("scale",))),
-        (Assign("scaled", "multiply", ("raw", "scale")),),
+        (slab("raw", "computed", "m", "k"), projection((), "let f16 scale = 2.0", ("scale",))),
+        "scaled = multiply(raw, scale)",
         ("scaled",),
     )
     root.op = replace(root.op, op=contraction(k, computed, (slab("direct", "direct", "k", "n"), "acc")))
@@ -137,11 +138,7 @@ def _mimo_graph() -> Graph:
     m, n, k = Axis("m", 8), Axis("n", 8), Axis("k", 16)
 
     def matmul(a: str, b: str, acc: str) -> Fold:
-        return contraction(
-            k,
-            Load(name=f"{a}_v", input=a, index=(Var("m"), Var("k"))),
-            (Load(name=f"{b}_v", input=b, index=(Var("k"), Var("n"))), acc),
-        )
+        return contraction(k, slab(f"{a}_v", a, "m", "k"), (slab(f"{b}_v", b, "k", "n"), acc))
 
     first, second = matmul("a", "b", "first"), matmul("c", "d", "second")
     tile = TileOp(
@@ -150,8 +147,8 @@ def _mimo_graph() -> Graph:
         place=Placement(free=(m, n)),
         axes=(m, n, k),
         output_specs=(
-            OutputSpec(Write(output="out0", index=(Var("m"), Var("n")), value="first")),
-            OutputSpec(Write(output="out1", index=(Var("m"), Var("n")), value="second")),
+            OutputSpec(_stmt("out0[m, n] = first")),
+            OutputSpec(_stmt("out1[m, n] = second")),
         ),
     )
     graph = Graph()
@@ -260,7 +257,7 @@ def test_a_pipeline_that_stops_at_the_cut_pass_decides_the_kernel_set_and_schedu
 def test_cut_workspace_retains_static_unit_axes() -> None:
     """A unit seam axis remains workspace geometry even when the produced value is invariant in it."""
     unit, unused, column = Axis("batch", 1), Axis("unused", 8), Axis("n", 64)
-    produced = projection((), (Load(name="value", input="x", index=(Var("n"),)),), results=("value",))
+    produced = projection((), "value = load x[n]", results=("value",))
     seam = CutSite(
         node=produced,
         spelling="PLACE",
@@ -280,18 +277,18 @@ def test_cut_stores_one_value_per_repeated_coordinate_group(second_divisor, expe
     m, n, k = Axis("m", 10), Axis("n", 3), Axis("k", 7)
     computed = projection(
         (),
-        (
-            Load(name="x_value", input="x", index=(Var("m") / 4, Var("k"))),
-            Load(name="y_value", input="y", index=(Var("m") / second_divisor, Var("k"))),
-            Assign(name="scaled", op="multiply", args=("x_value", "y_value")),
-        ),
+        f"""
+        x_value = load x[m / 4, k]
+        y_value = load y[m / {second_divisor}, k]
+        scaled = multiply(x_value, y_value)
+        """,
     )
-    fold = contraction(k, computed, (Load(name="weight", input="w", index=(Var("k"), Var("n"))), "acc"))
+    fold = contraction(k, computed, (slab("weight", "w", "k", "n"), "acc"))
     tile = TileOp(
         op=fold,
         place=Placement(free=(m, n)),
         axes=(m, n, k),
-        output_specs=(OutputSpec(Write(output="out", index=(Var("m"), Var("n")), value="acc")),),
+        output_specs=(OutputSpec(_stmt("out[m, n] = acc")),),
     )
     graph = Graph()
     for name, shape in (("x", (3, 7)), ("y", (10, 7)), ("w", (7, 3))):
@@ -333,13 +330,13 @@ def test_sibling_producer_fusion_prunes_unused_later_group(live_dependents: int)
     _input(graph, "x", (4,), "f32")
     axis = Axis("i", 4)
     for name, source in (("a", "x"), ("b", "x"), ("c", "a"), ("d", "a")):
-        fold = projection((), (Load(name="value", input=source, index=(Var("i"),)),))
+        fold = projection((), f"value = load {source}[i]")
         tile = TileOp(
             op=fold,
             name=name,
             place=Placement(free=(axis,)),
             axes=(axis,),
-            output_specs=(OutputSpec(Write(output=name, index=(Var("i"),), value="value")),),
+            output_specs=(OutputSpec(_stmt(f"{name}[i] = value")),),
         )
         graph.add_node(tile, [source], Tensor(name, (4,), "f32"), node_id=name)
     graph.inputs, graph.outputs = ["x"], ["a", "b", *("c", "d")[:live_dependents]]
@@ -367,7 +364,7 @@ def test_composed_cut_topologically_orders_equal_degree_workspace_chain() -> Non
     """Counting direct workspace reads cannot order A->C->B when A and C each read one."""
 
     def piece(name: str, source: str | None):
-        produced = projection((), (Load(name=f"{name}_value", input=source or "input", index=()),), results=(f"{name}_value",))
+        produced = projection((), f"{name}_value = load {source or 'input'}[]", results=(f"{name}_value",))
         return (None, produced, (), (), name, (f"{name}_value",), (name,))
 
     pieces = [piece("a", "c"), piece("c", "b"), piece("b", None)]
@@ -380,19 +377,17 @@ def test_composed_cut_topologically_orders_equal_degree_workspace_chain() -> Non
 def test_cut_does_not_rematerialize_load_only_bundles(channels: int, computed: bool) -> None:
     axis = Axis("i", 8)
     names = tuple(f"v{channel}" for channel in range(channels))
-    loads = tuple(Load(name=name, input=f"workspace{channel}", index=(Var("i"),)) for channel, name in enumerate(names))
+    loads = tuple(f"{name} = load workspace{channel}[i]" for channel, name in enumerate(names))
     values = tuple(f"computed{channel}" for channel in range(channels)) if computed else names
-    body = (*loads, *(Assign(name=value, op="negative", args=(name,)) for name, value in zip(names, values, strict=True) if computed))
+    body = "\n".join((*loads, *(f"{value} = negative({name})" for name, value in zip(names, values, strict=True) if computed)))
     bundle = projection((), body, values)
     outputs = tuple(f"out{channel}" for channel in range(channels))
     tile = TileOp(
-        op=projection(
-            (bundle,), tuple(Assign(name=out, op="negative", args=(value,)) for out, value in zip(outputs, values, strict=True)), outputs
-        ),
+        op=projection((bundle,), "\n".join(f"{out} = negative({value})" for out, value in zip(outputs, values, strict=True)), outputs),
         name="out",
         place=Placement(free=(axis,)),
         axes=(axis,),
-        output_specs=tuple(OutputSpec(Write(output=out, index=(Var("i"),), value=out)) for out in outputs),
+        output_specs=tuple(OutputSpec(_stmt(f"{out}[i] = {out}")) for out in outputs),
     )
     graph = Graph()
     for channel in range(channels):
@@ -530,7 +525,7 @@ def test_a_moved_seam_over_a_re_keyed_piece_is_re_spelled_by_what_its_pieces_rea
 
     document, route = _routed(_sdpa_document(), {"PLACE@map.1/twist.1/inner": "cut"})
     reader = document.kernel(route.children[-1])
-    stale = replace(reader, loop_ir=json.loads(json.dumps(reader.loop_ir).replace('"coefficients": [0.25]', '"coefficients": [0.5]')))
+    stale = replace(reader, loop_ir=json.loads(json.dumps(reader.loop_ir).replace("0.25*in0", "0.5*in0")))
     assert stale.exact_identity != reader.exact_identity
     moved = replace(
         document,
@@ -555,7 +550,8 @@ def test_a_moved_seam_over_a_re_keyed_piece_keeps_the_cut_whose_other_pieces_it_
     code = "(lambda x: (torch.sigmoid(x) * torch.tanh(x)).sum(-1))(torch.randn(4, 64, dtype=torch.float16))"
     document, route = _routed(inventory_document(graph_from_code(code)[0], (12, 0)), {"PLACE@map.1/reduce.2/map": "cut"})
     producer, consumer = (document.kernel(ref) for ref in route.children)
-    stale = replace(consumer, loop_ir=json.loads(json.dumps(consumer.loop_ir).replace('"tanh"', '"exp"')))
+    stale = replace(consumer, loop_ir=json.loads(json.dumps(consumer.loop_ir).replace("tanh(", "exp(")))
+    assert stale.exact_identity != consumer.exact_identity
     moved = replace(
         document,
         kernels=[stale if kernel.ref == consumer.ref else kernel for kernel in document.kernels],
@@ -778,7 +774,7 @@ def test_a_recorded_kernel_set_deploys_the_cut_its_routing_row_records(monkeypat
 
 def _cone_seam() -> CutSite:
     """A bare seam record standing in for a clustered operand cone."""
-    node = projection((), (Load(name="w", input="w", index=(Var("n"), Var("k"))),), results=("w",))
+    node = projection((), "w = load w[n, k]", results=("w",))
     return CutSite(node=node, spelling="PLACE@map.1/twist.1/inner.2/map", axes=(Axis("n", 8), Axis("k", 8)), dtypes=(F16,))
 
 
@@ -794,22 +790,18 @@ def test_alpha_equivalent_operand_cones_cluster_into_one_seam() -> None:
 
 
 def test_cut_value_identity_keeps_updates_of_carried_state_read_before_the_update() -> None:
-    from emmy.compiler.ir.stmt import Accum, Body, Loop, canonicalize_identity
+    from emmy.compiler.ir.stmt import Accum, Body, canonicalize_identity
     from emmy.compiler.pipeline.passes.tile._cut import _pruned
 
-    body = Body(
-        (
-            Loop(
-                Axis("k", 8),
-                (
-                    Load("x", "x", (Var("k"),)),
-                    Assign("shift", "subtract", ("x", "maximum")),
-                    Accum("total", "shift", axes=("k",)),
-                    Accum("maximum", "x", op="maximum", axes=("k",)),
-                    Accum("unused", "x", axes=("k",)),
-                ),
-            ),
-        )
+    body = parse_body(
+        """
+        for k in 0..8:
+            x = load x[k]
+            shift = subtract(x, maximum)
+            total <- add(total, shift) over k
+            maximum <- maximum(maximum, x) over k
+            unused <- add(unused, x) over k
+        """
     )
     pruned = _pruned(body, frozenset(("total",)))
     assert {stmt.name for stmt in pruned.iter_of_type(Accum)} == {"total", "maximum"}
@@ -820,8 +812,13 @@ def test_cut_value_identity_keeps_updates_of_carried_state_read_before_the_updat
 def test_a_multi_result_cone_does_not_materialize_its_own_dependency() -> None:
     from emmy.compiler.pipeline.passes.tile._cut import _cluster_value_seams
 
-    norm = projection(body=(Load("x", "x", (Var("m"),)), Assign("norm", "rsqrt", ("x",))))
-    maximum = reduction("k", (norm, slab("y", "y", "m", "k")), (Assign("amax__v", "multiply", ("norm", "y")),), ("amax",), "maximum")
+    norm = projection(
+        body="""
+        x = load x[m]
+        norm = rsqrt(x)
+        """
+    )
+    maximum = reduction("k", (norm, slab("y", "y", "m", "k")), "amax__v = multiply(norm, y)", ("amax",), "maximum")
     combined = projection((norm, maximum), results=("norm", "amax"))
     axes = (Axis("m", 8), Axis("k", 16))
     seams = [CutSite(combined, "PLACE@map.1/map", axes[:1], (F16, F16)), CutSite(norm, "PLACE@map.1/map.2/reduce.1/map", axes[:1], (F16,))]
@@ -998,7 +995,7 @@ def test_a_contraction_is_one_group_whichever_operand_its_body_reads_first() -> 
     assert not rest and len(grouped) == 1
     (group,) = grouped[0].contraction
     assert len(group.members) == 2 and group.space == ((0, 4), (0, 32)), "laid out in the first member's order"
-    reads = {tuple(str(expr) for expr in exprs) for _, _, exprs, _ in group.members}
+    reads = {tuple(str(expression) for expression in expressions) for _, _, expressions, _ in group.members}
     assert len(reads) == 1, "both occurrences read the one workspace at the same slots"
 
 
@@ -1417,7 +1414,7 @@ def test_a_flat_row_contraction_reads_a_nested_cut_at_the_digits_of_its_row() ->
 
 def _column_seam(column, spelling: str) -> CutSite:
     """A cone reading its weight at ``column``, an expression of the captured ``n``."""
-    node = projection((), (Load(name="w", input="w", index=(column, Var("k"))),), results=("w",))
+    node = projection((), f"w = load w[{column}, k]", results=("w",))
     return CutSite(node=node, spelling=spelling, axes=(Axis("n", 8), Axis("k", 8)), dtypes=(F16,))
 
 
@@ -1425,7 +1422,7 @@ def test_copies_read_at_shifted_columns_cluster_onto_the_plain_read() -> None:
     """RoPE's rotate-half reads one projection at its own column and at the two half-shifted ones:
     one value at three addresses. The plain copy computes it, and each shifted copy reads its
     workspace at the column expression it spelled."""
-    from emmy.compiler.ir.expr import Literal, TernaryExpr
+    from emmy.compiler.ir.expression import TernaryExpr
     from emmy.compiler.pipeline.passes.tile._cut import _cluster_value_seams
 
     n, low = Var("n"), Var("n").lt(4)
@@ -1441,7 +1438,6 @@ def test_copies_read_at_shifted_columns_cluster_onto_the_plain_read() -> None:
 
 def test_a_column_read_past_the_plain_copy_is_not_its_value() -> None:
     """A shifted read reaching past the plain copy's axis reads columns that copy never computes."""
-    from emmy.compiler.ir.expr import Literal
     from emmy.compiler.pipeline.passes.tile._cut import _cluster_value_seams
 
     seams = [_column_seam(Var("n") + Literal(4, "int"), "PLACE@map.1/inner"), _column_seam(Var("n"), "PLACE@map.2/inner")]
@@ -1452,12 +1448,12 @@ def test_a_column_read_past_the_plain_copy_is_not_its_value() -> None:
 def test_a_copy_storing_c_of_every_d_cells_reads_the_plain_copy_at_its_stored_address() -> None:
     """A copy reading its column only as ``m // 4`` and ``m % 2`` stores two of every four cells: over 16 columns it
     is the plain 8-column value, and reads that copy's workspace where its own would store the cell."""
-    from emmy.compiler.ir.expr import BinaryExpr, Literal
+    from emmy.compiler.ir.expression import BinaryExpr
     from emmy.compiler.pipeline.passes.tile._cut import _cluster_value_seams
 
     m = Var("m")
     stored = (m / 4) * 2 + BinaryExpr("%", m, Literal(2, "int"))
-    node = projection((), (Load(name="w", input="w", index=(stored, Var("k"))),), results=("w",))
+    node = projection((), f"w = load w[{stored}, k]", results=("w",))
     folded = CutSite(node=node, spelling="PLACE@map.1/inner", axes=(Axis("m", 16), Axis("k", 8)), dtypes=(F16,))
 
     (clustered,) = _cluster_value_seams([folded, _column_seam(Var("n"), "PLACE@map.2/inner")], (Axis("n", 8), Axis("k", 8), Axis("m", 16)))
@@ -1472,8 +1468,8 @@ def test_a_conversion_to_the_dtype_a_workspace_stores_reads_the_workspace_itself
     from emmy.compiler.dtype import F32
     from emmy.compiler.pipeline.passes.tile._cut import _without_identity_casts
 
-    rounded = projection((slab("x", "ws", "m"),), (Assign(name="y", op="copy", args=("x",), dtype=F16),), ("y",))
-    root = projection((rounded,), (Assign(name="z", op="exp", args=("y",)),), ("z",))
+    rounded = projection((slab("x", "ws", "m"),), "f16 y = copy(x)", ("y",))
+    root = projection((rounded,), "z = exp(y)", ("z",))
 
     kept = _without_identity_casts(root, {"ws": F16}).operands[0]
     assert kept.as_slab() is not None and kept.exposes == ("y",)
@@ -1728,30 +1724,28 @@ def test_a_scalar_operand_is_no_seam() -> None:
     """A value uniform over the kernel — an sdpa scale beside its mask fills — offers no cut. The
     piece would be a kernel writing scalars to a workspace so its reader could read them back, and
     a seam nothing realizes costs the greedy an arm per rank."""
-    from emmy.compiler.ir.expr import Literal
 
     scale = projection(
-        body=(
-            Load(name="s0", input="sdpa_scale", index=(Literal(0, "int"),)),
-            Load(name="s1", input="sdpa_mask_fill", index=(Literal(0, "int"),)),
-        ),
+        body="""
+        s0 = load sdpa_scale[0]
+        s1 = load sdpa_mask_fill[0]
+        """,
         results=("s0", "s1"),
     )
-    scores = contraction(
-        "k",
-        Load(name="q", input="q", index=(Var("m"), Var("k"))),
-        (Load(name="kk", input="k", index=(Var("n"), Var("k"))), "acc0"),
-    )
+    scores = contraction("k", slab("q", "q", "m", "k"), (slab("kk", "k", "n", "k"), "acc0"))
     root = projection(
         (scores, scale),
-        (Assign(name="v0", op="multiply", args=("acc0", "s0")), Assign(name="v1", op="add", args=("v0", "s1"))),
+        """
+        v0 = multiply(acc0, s0)
+        v1 = add(v0, s1)
+        """,
     )
     tile = TileOp(
         op=root,
         name="k_scores",
         place=Placement(free=(Axis("m", 8), Axis("n", 8))),
         axes=(Axis("m", 8), Axis("n", 8), Axis("k", 8)),
-        output_specs=(OutputSpec(write=Write(output="out", index=(Var("m"), Var("n")), values=("v1",))),),
+        output_specs=(OutputSpec(write=_stmt("out[m, n] = v1")),),
         inputs={name: Tensor(name, (8, 8), "f16") for name in ("q", "k", "sdpa_scale", "sdpa_mask_fill")},
         outputs={"out": Tensor("out", (8, 8), "f16")},
     )
@@ -1838,21 +1832,15 @@ def test_peeling_all_but_one_output_leaves_every_piece_single_output() -> None:
     m, k = Axis("m", 8), Axis("k", 16)
     widths = {"wide": Axis("n0", 16), "mid": Axis("n1", 8), "narrow": Axis("n2", 4)}
     edges = tuple(
-        contraction(
-            k,
-            Load(name=f"a_{out}", input="a", index=(Var("m"), Var("k"))),
-            (Load(name=f"b_{out}", input=f"{out}_w", index=(Var("k"), Var(axis.name))), out),
-        )
-        for out, axis in widths.items()
+        contraction(k, slab(f"a_{out}", "a", "m", "k"), (slab(f"b_{out}", f"{out}_w", "k", width.name), out))
+        for out, width in widths.items()
     )
     tile = TileOp(
         op=projection(edges, results=tuple(widths)),
         name="wide",
         place=Placement(free=(m,)),
         axes=(m, k, *widths.values()),
-        output_specs=tuple(
-            OutputSpec(Write(output=out, index=(Var("m"), Var(axis.name)), value=out), sweep=(axis,)) for out, axis in widths.items()
-        ),
+        output_specs=tuple(OutputSpec(_stmt(f"{out}[m, {axis.name}] = {out}"), sweep=(axis,)) for out, axis in widths.items()),
     )
     graph = Graph()
     _input(graph, "a", (8, 16))
@@ -1889,24 +1877,20 @@ def _epilogue_kernel(shared: bool) -> tuple[Graph, object]:
     it is true — the case the cover-and-disjointness rule has to refuse, because neither piece can
     take it without the other losing it."""
     m, wide, narrow, k = Axis("m", 8), Axis("n", 16), Axis("n2", 4), Axis("k", 8)
-    first = contraction(
-        k, Load(name="a_v", input="a", index=(Var("m"), Var("k"))), (Load(name="b_v", input="b", index=(Var("k"), Var("n"))), "first")
-    )
-    second = contraction(
-        k, Load(name="c_v", input="c", index=(Var("m"), Var("k"))), (Load(name="d_v", input="d", index=(Var("k"), Var("n2"))), "second")
-    )
-    body = [
-        Assign(name="wide_out", op=ElementwiseImpl("negative"), args=("first",)),
-        Assign(name="narrow_out", op=ElementwiseImpl("negative"), args=("second" if not shared else "first",)),
-    ]
+    first = contraction(k, slab("a_v", "a", "m", "k"), (slab("b_v", "b", "k", "n"), "first"))
+    second = contraction(k, slab("c_v", "c", "m", "k"), (slab("d_v", "d", "k", "n2"), "second"))
+    body = f"""
+    wide_out = negative(first)
+    narrow_out = negative({"second" if not shared else "first"})
+    """
     tile = TileOp(
         op=projection((first, second), body=body, results=("wide_out", "narrow_out")),
         name="wide",
         place=Placement(free=(m,)),
         axes=(m, wide, narrow, k),
         output_specs=(
-            OutputSpec(Write(output="wide", index=(Var("m"), Var("n")), value="wide_out"), sweep=(wide,)),
-            OutputSpec(Write(output="narrow", index=(Var("m"), Var("n2")), value="narrow_out"), sweep=(narrow,)),
+            OutputSpec(_stmt("wide[m, n] = wide_out"), sweep=(wide,)),
+            OutputSpec(_stmt("narrow[m, n2] = narrow_out"), sweep=(narrow,)),
         ),
     )
     graph = Graph()
@@ -2278,15 +2262,8 @@ def test_parent_place_pin_is_consumed_on_the_uncut_remainder() -> None:
 
     graph = _computed_operand_graph("a")
     root = graph.nodes["out"]
-    second = contraction(
-        root.op.axes[2],
-        Load(name="b_x", input="computed", index=(Var("m"), Var("k"))),
-        (Load(name="b_w", input="direct", index=(Var("k"), Var("n"))), "acc2"),
-    )
-    root.op = replace(
-        root.op,
-        op=projection((root.op.op, second), (Assign(name="sum", op="add", args=("acc", "acc2")),), ("sum",)),
-    )
+    second = contraction(root.op.axes[2], slab("b_x", "computed", "m", "k"), (slab("b_w", "direct", "k", "n"), "acc2"))
+    root.op = replace(root.op, op=projection((root.op.op, second), "sum = add(acc, acc2)", ("sum",)))
     pipeline = Pipeline.build(["tile/cut"])
     with pinned_knobs({"PLACE@step.0": "cut"}):
         before, _ = Run(pipeline, _CTX).resolve(graph.copy(), lambda fork: fork.options[0])
@@ -2446,27 +2423,26 @@ def _one_root_kernel() -> tuple[Graph, object]:
     of the NVFP4 encode's per-block maximum.
     """
     m, wide, narrow, k, r, q = Axis("m", 8), Axis("n", 16), Axis("n2", 4), Axis("k", 8), Axis("r", 4), Axis("q", 4)
-    acc = contraction(
-        k, Load(name="a_v", input="a", index=(Var("m"), Var("k"))), (Load(name="b_v", input="b", index=(Var("k"), Var("n"))), "acc")
+    acc = contraction(k, slab("a_v", "a", "m", "k"), (slab("b_v", "b", "k", "n"), "acc"))
+    stat = reduction(r, (slab("s_v", "s", "m", "r"),), "stat__v = copy(s_v)", ("stat",))
+    blockmax = reduction(q, (slab("t_v", "t", "m", "n", "q"),), "blockmax__v = copy(t_v)", ("blockmax",), ops="maximum")
+    first = projection(
+        (acc, stat, blockmax),
+        """
+        scaled = multiply(acc, stat)
+        wide_out = multiply(scaled, blockmax)
+        """,
+        ("wide_out",),
     )
-    stat = reduction(r, (slab("s_v", "s", "m", "r"),), (Assign(name="stat__v", op="copy", args=("s_v",)),), ("stat",))
-    blockmax = reduction(
-        q, (slab("t_v", "t", "m", "n", "q"),), (Assign(name="blockmax__v", op="copy", args=("t_v",)),), ("blockmax",), ops="maximum"
-    )
-    scaled = Assign(name="scaled", op=ElementwiseImpl("multiply"), args=("acc", "stat"))
-    wide_out = Assign(name="wide_out", op=ElementwiseImpl("multiply"), args=("scaled", "blockmax"))
-    first = projection((acc, stat, blockmax), (scaled, wide_out), ("wide_out",))
-    second = contraction(
-        k, Load(name="c_v", input="c", index=(Var("m"), Var("k"))), (Load(name="d_v", input="d", index=(Var("k"), Var("n2"))), "narrow_out")
-    )
+    second = contraction(k, slab("c_v", "c", "m", "k"), (slab("d_v", "d", "k", "n2"), "narrow_out"))
     tile = TileOp(
         op=projection((first, second), results=("wide_out", "narrow_out")),
         name="wide",
         place=Placement(free=(m,)),
         axes=(m, wide, narrow, k, r, q),
         output_specs=(
-            OutputSpec(Write(output="wide", index=(Var("m"), Var("n")), value="wide_out"), sweep=(wide,)),
-            OutputSpec(Write(output="narrow", index=(Var("m"), Var("n2")), value="narrow_out"), sweep=(narrow,)),
+            OutputSpec(_stmt("wide[m, n] = wide_out"), sweep=(wide,)),
+            OutputSpec(_stmt("narrow[m, n2] = narrow_out"), sweep=(narrow,)),
         ),
     )
     graph = Graph()
@@ -2612,39 +2588,35 @@ def test_a_recorded_route_selects_the_arm_spelling_its_whole_cut_set() -> None:
 @pytest.mark.parametrize("scale_kind", ["load", "computed", "literal"])
 def test_storage_frontier_recomputes_the_encode_scale_in_the_consumer(scale_kind):
     """A scale computed before the encode can also feed the decode without fusing the encode."""
-    from emmy.compiler.dtype import F8E4M3, F32
+    from emmy.compiler.dtype import F8E4M3
 
     m, n, k = Axis("m", 2), Axis("n", 3), Axis("k", 16)
     computed_scale = scale_kind == "computed"
-    scale = Load(name="scale_value", input="scale", index=(Var("m"), Var("k") / 8), dtype=F32)
+    scale = "f32 scale_value = load scale[m, k / 8]"
     operands = ()
     if computed_scale:
-        scale = reduction(
-            "r",
-            (Load(name="sample", input="scale", index=(Var("m"), Var("k") / 8, Var("r")), dtype=F32),),
-            (Assign(name="scale_value__v", op="copy", args=("sample",)),),
-            ("scale_value",),
-        )
-        operands = (scale,)
+        sample = _stmt("f32 sample = load scale[m, k / 8, r]")
+        operands = (reduction("r", (sample,), "scale_value__v = copy(sample)", ("scale_value",)),)
+        scale = ""
     elif scale_kind == "literal":
-        scale = Let("scale_value", Literal(0.25), dtype=F32)
+        scale = "let f32 scale_value = 0.25"
     quantized = projection(
         operands,
-        (
-            Load(name="x_value", input="x", index=(Var("m"), Var("k")), dtype=F16),
-            *((scale,) if not computed_scale else ()),
-            Assign(name="scale_squared", op="multiply", args=("scale_value", "scale_value"), dtype=F32),
-            Assign(name="scaled", op="divide", args=("x_value", "scale_squared"), dtype=F32),
-            Assign(name="encoded", op="to_f8e4m3", args=("scaled",), dtype=F8E4M3),
-            Assign(name="decoded", op="from_f8e4m3", args=("encoded",), dtype=F16),
-            Assign(name="quantized", op="multiply", args=("decoded", "scale_squared"), dtype=F16),
-        ),
+        f"""
+        f16 x_value = load x[m, k]
+        {scale}
+        f32 scale_squared = multiply(scale_value, scale_value)
+        f32 scaled = divide(x_value, scale_squared)
+        f8e4m3 encoded = to_f8e4m3(scaled)
+        f16 decoded = from_f8e4m3(encoded)
+        f16 quantized = multiply(decoded, scale_squared)
+        """,
     )
     tile = TileOp(
-        op=contraction(k, quantized, (Load(name="weight", input="w", index=(Var("k"), Var("n"))), "acc")),
+        op=contraction(k, quantized, (slab("weight", "w", "k", "n"), "acc")),
         place=Placement(free=(m, n)),
         axes=(m, n, k, Axis("r", 3)),
-        output_specs=(OutputSpec(Write(output="out", index=(Var("m"), Var("n")), value="acc")),),
+        output_specs=(OutputSpec(_stmt("out[m, n] = acc")),),
     )
     graph = Graph()
     for name, shape in (("x", (2, 16)), ("scale", (2, 2, 3) if computed_scale else (2, 2)), ("w", (16, 3))):
@@ -2685,13 +2657,10 @@ def _row_statistic_graph() -> Graph:
     """``out[m, n] = f(sum_k x[m, k], w[n])`` — a cut piece whose cone holds a ROW statistic the
     output sweep is invariant in, which is the shape every norm-plus-rotation operand cone has."""
     m, n, k = Axis("m", 8), Axis("n", 16), Axis("k", 32)
-    statistic = reduction(k, (slab("x", "x", "m", "k"),), (Assign(name="acc__v", op="multiply", args=("x", "x")),), ("acc",))
-    cone = projection(
-        (statistic, slab("w", "w", "n")),
-        (Assign(name="scaled", op="multiply", args=("acc", "w")),),
-    )
+    statistic = reduction(k, (slab("x", "x", "m", "k"),), "acc__v = multiply(x, x)", ("acc",))
+    cone = projection((statistic, slab("w", "w", "n")), "scaled = multiply(acc, w)")
     tile = TileOp(
-        op=projection((cone,), (Assign(name="out_v", op="multiply", args=("scaled", "scaled")),)),
+        op=projection((cone,), "out_v = multiply(scaled, scaled)"),
         name="out",
         place=Placement(free=(m, n)),
         axes=(m, n, k),
@@ -2818,20 +2787,20 @@ def test_computed_operand_cut_keeps_bf16_before_fp8_output(rows) -> None:
     m, n, k = Axis("m", rows), Axis("n", 4), Axis("k", 8)
     operand = projection(
         (),
-        (
-            Load(name="xv", input="x", index=(Var("m"), Var("k"))),
-            Assign(name="squared", op="multiply", args=("xv", "xv")),
-            Assign(name="rounded", op="copy", args=("squared",), dtype=BF16),
-        ),
+        """
+        xv = load x[m, k]
+        squared = multiply(xv, xv)
+        bf16 rounded = copy(squared)
+        """,
         ("rounded",),
     )
-    product = contraction(k, operand, (Load(name="wv", input="w", index=(Var("k"), Var("n"))), "acc"))
+    product = contraction(k, operand, (slab("wv", "w", "k", "n"), "acc"))
     tile = TileOp(
-        op=projection((product,), (Assign(name="encoded", op="to_f8e4m3", args=("acc",), dtype=F8E4M3),), ("encoded",)),
+        op=projection((product,), "f8e4m3 encoded = to_f8e4m3(acc)", ("encoded",)),
         name="out",
         place=Placement(free=(m, n)),
         axes=(m, n, k),
-        output_specs=(OutputSpec(Write(output="out", index=(Var("m"), Var("n")), value="encoded")),),
+        output_specs=(OutputSpec(_stmt("out[m, n] = encoded")),),
     )
     graph = Graph()
     _input(graph, "x", (rows, 8), dtype="bf16")
@@ -2879,18 +2848,11 @@ def test_parallel_split_preserves_every_output_buffer() -> None:
 
     n, k = Axis("n", 4), Axis("k", 256)
     tile = TileOp(
-        op=contraction(
-            k,
-            Load(name="xv", input="x", index=(Var("k"),)),
-            (Load(name="av", input="a", index=(Var("k"), Var("n"))), "first"),
-            (Load(name="bv", input="b", index=(Var("k"), Var("n"))), "second"),
-        ),
+        op=contraction(k, slab("xv", "x", "k"), (slab("av", "a", "k", "n"), "first"), (slab("bv", "b", "k", "n"), "second")),
         name="out0",
         place=Placement(free=(n,)),
         axes=(n, k),
-        output_specs=tuple(
-            OutputSpec(Write(output=name, index=(Var("n"),), value=value)) for name, value in (("out0", "first"), ("out1", "second"))
-        ),
+        output_specs=tuple(OutputSpec(_stmt(f"{name}[n] = {value}")) for name, value in (("out0", "first"), ("out1", "second"))),
         placement_decided=True,
     )
     graph = Graph()

@@ -12,9 +12,9 @@ from emmy.compiler.context import Context
 from emmy.compiler.dim import Dim
 from emmy.compiler.ir.axis import Axis
 from emmy.compiler.ir.cuda import CudaOp
-from emmy.compiler.ir.expr import BinaryExpr, Literal, TernaryExpr, Var
+from emmy.compiler.ir.expression import BinaryExpr, Literal, TernaryExpr, Var
 from emmy.compiler.ir.frontend.ir import SdpaOp
-from emmy.compiler.ir.stmt import Assign, Select, SelectBranch
+from emmy.compiler.ir.stmt import Select, parse_body
 from emmy.compiler.pipeline import CUDA_PASSES, Pipeline
 from emmy.compiler.pipeline.passes.lowering.kernel._atom import _mask_key_bounds
 from emmy.compiler.pipeline.passes.lowering.kernel._tiling import AxisOffset
@@ -27,25 +27,20 @@ BK = 32
 
 def _mask(name: str, keep_op: str, mask_op: str, key_lead: int = 0, row_lead: int = 0) -> Select:
     """``zero when key <keep_op> row + lead, fill otherwise`` — one coordinate mask as the SDPA decomposition spells it."""
-    key = Var("a2") if not key_lead else BinaryExpr("+", Var("a2"), Literal(key_lead, "int"))
-    row = Var("a1") if not row_lead else BinaryExpr("+" if row_lead > 0 else "-", Var("a1"), Literal(abs(row_lead), "int"))
-    return Select(
-        name=name,
-        branches=(
-            SelectBranch(select=BinaryExpr(keep_op, key, row), value="zero"),
-            SelectBranch(select=BinaryExpr(mask_op, key, row), value="fill"),
-        ),
-    )
+    key = "a2" if not key_lead else f"a2 + {key_lead}"
+    row = "a1" if not row_lead else f"a1 {'+' if row_lead > 0 else '-'} {abs(row_lead)}"
+    [select] = parse_body(f"{name} = select:\n    `zero` when {key} {keep_op} {row}\n    fill when {key} {mask_op} {row}")
+    return select
 
 
 def _masked_score(*masks: Select) -> list:
     """``s3 = s2 + v1``, ``s4 = s3 + v2`` … — the prefix an SDPA lifts, one add per mask."""
-    stmts: list = []
+    lines: list[str] = []
     held = "s2"
     for index, mask in enumerate(masks, start=3):
-        stmts += [mask, Assign(name=f"s{index}", op="add", args=(mask.name, held))]
+        lines += [str(mask), f"s{index} = add({mask.name}, {held})"]
         held = f"s{index}"
-    return stmts
+    return list(parse_body("\n".join(lines)))
 
 
 CAUSAL = _mask("v1", "<=", ">")  # keep key <= row
@@ -56,8 +51,8 @@ def _bounds(stmts) -> tuple:
     return _mask_key_bounds(stmts, "s2", KEY, "a1", ROW_BLOCK, BK)
 
 
-def _pretty(expr) -> str:
-    return str(expr)
+def _pretty(expression) -> str:
+    return str(expression)
 
 
 def test_a_causal_mask_stops_the_stream_at_the_block_end() -> None:
@@ -83,24 +78,11 @@ def test_a_causal_band_bounds_both_ends_whichever_mask_comes_first() -> None:
 
 
 def test_a_comparison_canonicalized_by_swapping_operands_still_bounds_the_stream() -> None:
-    causal = Select(
-        name="v1",
-        branches=(
-            SelectBranch(select=BinaryExpr("<=", Var("a2"), Var("a1")), value="zero"),
-            SelectBranch(select=BinaryExpr("<", Var("a1"), Var("a2")), value="fill"),
-        ),
-    )
+    [causal] = parse_body("v1 = select:\n    `zero` when a2 <= a1\n    fill when a1 < a2")
     first, end = _bounds(_masked_score(causal))
     assert first is None and end is not None
 
-    edge = BinaryExpr("-", Var("a1"), Literal(32, "int"))
-    band = Select(
-        name="v1",
-        branches=(
-            SelectBranch(select=BinaryExpr("<", edge, Var("a2")), value="zero"),
-            SelectBranch(select=BinaryExpr("<=", Var("a2"), edge), value="fill"),
-        ),
-    )
+    [band] = parse_body("v1 = select:\n    `zero` when a1 - 32 < a2\n    fill when a2 <= a1 - 32")
     first, end = _bounds(_masked_score(band))
     assert first is not None and end is None
 
@@ -125,7 +107,7 @@ def test_a_lead_on_the_row_side_pushes_the_stop_out_and_a_strict_mask_pulls_it_i
             "key < row + 1 takes the row's own key: a block could start after its first row",
         ),
         (_masked_score(_mask("v1", ">", "<=")), "key <= row masks the row's own key from below"),
-        ([Assign(name="s3", op="add", args=("s2", "bias"))], "a bias is not a coordinate mask"),
+        (list(parse_body("s3 = add(s2, bias)")), "a bias is not a coordinate mask"),
     ],
 )
 def test_masks_that_could_take_a_row_own_key_leave_the_stream_whole(stmts, why) -> None:
@@ -203,9 +185,7 @@ def test_the_launch_count_is_the_lead_extents_times_the_block_counts() -> None:
 def test_a_position_read_from_memory_bounds_the_stream_at_runtime() -> None:
     """Native's causal mask compares ``key - row`` against a position the kernel loads: the anchor is a uniform value,
     so the stop is the block end plus the position, the sign test kept at runtime, and nothing starts the stream."""
-    keep = BinaryExpr("<=", BinaryExpr("+", BinaryExpr("*", Literal(-1, "int"), Var("a1")), Var("a2")), Var("in0"))
-    mask = BinaryExpr(">", keep.left, keep.right)
-    select = Select(name="v1", branches=(SelectBranch(select=keep, value="zero"), SelectBranch(select=mask, value="fill")))
+    [select] = parse_body("v1 = select:\n    `zero` when -1 * a1 + a2 <= in0\n    fill when -1 * a1 + a2 > in0")
     first, end = _mask_key_bounds(_masked_score(select), "s2", KEY, "a1", ROW_BLOCK, BK, frozenset({"in0"}))
     assert first is None
     shift = BinaryExpr("-", Literal(0, "int"), BinaryExpr("-", Literal(0, "int"), Var("in0")))  # the anchor, ``-in0``, negated

@@ -26,7 +26,7 @@ from __future__ import annotations
 
 from emmy.compiler.ir.axis import Axis
 from emmy.compiler.ir.loop.analysis import Scope
-from emmy.compiler.ir.stmt import Body, Loop, Stmt
+from emmy.compiler.ir.stmt import Body, Loop, Statement
 
 
 class _Scope:
@@ -66,7 +66,7 @@ class BodyBuilder:
         self._next_suffix[hint] = i + 1
         return name
 
-    def insert(self, stmt: Stmt, enclosure: Scope) -> None:
+    def insert(self, stmt: Statement, enclosure: Scope) -> None:
         """Prepend ``stmt`` at the leaf of the path denoted by ``enclosure``."""
         scope = self._root
         for axis in enclosure.enclosing:

@@ -21,16 +21,17 @@ state, so it is straight-line code, and rolling it would only store every state.
 from __future__ import annotations
 
 from dataclasses import replace
+from functools import lru_cache
 
 from emmy.compiler.dim import Dim
 from emmy.compiler.dtype import F32
 from emmy.compiler.graph import Graph, Node, Tensor
 from emmy.compiler.ir.axis import Axis
 from emmy.compiler.ir.base import ConstantOp, InputOp
-from emmy.compiler.ir.expr import BinaryExpr, Expr, Literal, Var
+from emmy.compiler.ir.expression import BinaryExpr, Expression, Literal, Var, affine_form
 from emmy.compiler.ir.loop import LoopOp, UnfusableStmt
 from emmy.compiler.ir.sigma import Sigma
-from emmy.compiler.ir.stmt import Accum, Assign, Body, Carry, Let, Load, Loop, Pre, Select, SelectBranch, Stmt, Write, map_exprs
+from emmy.compiler.ir.stmt import Accum, Assign, Body, Carry, Let, Load, Loop, Pre, Select, SelectBranch, Statement, Write
 from emmy.compiler.pipeline import Match, Pattern, RuleSkipped
 from emmy.compiler.pipeline.passes.loop.fusion._region import build_merged_region, live_outputs_of
 
@@ -53,6 +54,69 @@ def _ancestors(graph: Graph, node_id: str) -> set[str]:
     return seen
 
 
+@lru_cache(maxsize=256)
+def _census(body: Body) -> tuple[tuple[str, int], ...]:
+    """How many statements of each kind ``body`` holds, nested ones included — a linear-time
+    necessary condition for two bodies to be one computation, to ask before an exact key."""
+    counts: dict[str, int] = {}
+    for stmt in body.iter():
+        kind = type(stmt).__name__
+        counts[kind] = counts.get(kind, 0) + 1
+    return tuple(sorted(counts.items()))
+
+
+@lru_cache(maxsize=256)
+def _literals_abstracted(body: Body) -> tuple[Body, tuple[int, ...]]:
+    """``body`` with every integer literal of its expressions replaced by a positional
+    variable ``__lit<i>``, and the literals it held, in that order. The copies of one computation
+    an unrolled loop leaves read at successive offsets and mask at successive bounds: they share
+    the abstracted body and differ in the literals, affinely in the step."""
+    literals: list[int] = []
+
+    def held(value: int) -> Var:
+        literals.append(value)
+        return Var(f"__lit{len(literals) - 1}")
+
+    def abstract(expression):
+        if isinstance(expression, Literal) and expression.dtype == "int" and type(expression.value) is int:
+            return held(expression.value)
+        return expression
+
+    def lift(expression):
+        # An affine index carries its anchor whole, a zero one included: ``a`` and ``a + 4`` are
+        # one shape read at two offsets, and normalization spells the first without the ``+ 0``.
+        if isinstance(expression, Literal):
+            return abstract(expression)
+        form = affine_form(expression, expression.free_vars())
+        try:
+            anchor = int(form[0].eval({})) if form is not None else None
+        except (KeyError, TypeError, ValueError):
+            anchor = None
+        if anchor is None:
+            return expression.rebuild(abstract)
+        rest = None
+        for name, coeff in sorted(form[1].items()):
+            term = Var(name) if coeff == 1 else BinaryExpr("*", Var(name), Literal(coeff, "int"))
+            rest = term if rest is None else BinaryExpr("+", rest, term)
+        return held(anchor) if rest is None else BinaryExpr("+", rest, held(anchor))
+
+    def abstracted(stmt):
+        # A loop's static extent is a literal too: a step whose reduction covers one more
+        # element than the last is still the same step.
+        if isinstance(stmt, Loop) and isinstance(stmt.axis.extent.expression, Literal) and type(stmt.axis.extent.expression.value) is int:
+            return stmt.replace(axis=replace(stmt.axis, extent=Dim(held(stmt.axis.extent.expression.value))))
+        return stmt.map_expressions(lift)
+
+    return body.map(abstracted), tuple(literals)
+
+
+@lru_cache(maxsize=256)
+def _literal_free_key(body: Body) -> str:
+    """The exact identity of ``body`` blind to its integer literals — what the copies of one
+    computation at successive offsets and bounds share (:func:`_literals_abstracted`)."""
+    return _literals_abstracted(body)[0].structural_key(structural=False)
+
+
 def _chain(graph: Graph, first: Node) -> list[Node]:
     """``first`` and every later state: what descends from it with the same shape and the same body
     once its integer literals are taken out."""
@@ -66,7 +130,7 @@ def _chain(graph: Graph, first: Node) -> list[Node]:
         alike = isinstance(node.op, LoopOp) and node.outputs[0].shape == tensor.shape and node.outputs[0].dtype == tensor.dtype
         # The exact key canonicalizes the body, which a fused kernel of thousands of statements pays
         # for in seconds: ask only of a body with the same statements to begin with.
-        if alike and node.op.body.census == body.census and node.op.body.literal_free_key == body.literal_free_key:
+        if alike and _census(node.op.body) == _census(body) and _literal_free_key(node.op.body) == _literal_free_key(body):
             chain.append(node)
     return chain
 
@@ -170,22 +234,22 @@ def _advanced(abstract: Body, literals: tuple[int, ...], deltas: tuple[int, ...]
     step's own bound each accumulate folds its identity instead — the mask the tracer itself
     spells a partial reduction with, and no wider than a step the chain ran."""
 
-    def value(literal: int, delta: int) -> Expr:
+    def value(literal: int, delta: int) -> Expression:
         if isinstance(by, int):
             return Literal(literal + delta * by, "int")
         return BinaryExpr("+", Literal(literal, "int"), BinaryExpr("*", by, Literal(delta, "int"))) if delta else Literal(literal, "int")
 
-    def fold(expr: Expr) -> Expr:
+    def fold(expression: Expression) -> Expression:
         # The abstraction lifts every affine anchor, so a zero one comes back as ``+ 0``.
-        if isinstance(expr, BinaryExpr) and expr.op == "+" and expr.right == Literal(0, "int"):
-            return expr.left
-        return expr
+        if isinstance(expression, BinaryExpr) and expression.op == "+" and expression.right == Literal(0, "int"):
+            return expression.left
+        return expression
 
     sigma = Sigma({f"__lit{index}": value(literal, delta) for index, (literal, delta) in enumerate(zip(literals, deltas, strict=True))})
     masked = 0
 
-    def mask(within: Expr):
-        def past_the_bound(stmt: Stmt) -> Stmt | tuple[Stmt, ...]:
+    def mask(within: Expression):
+        def past_the_bound(stmt: Statement) -> Statement | tuple[Statement, ...]:
             nonlocal masked
             if not isinstance(stmt, Accum):
                 if isinstance(stmt, (Write, Carry)):
@@ -200,12 +264,12 @@ def _advanced(abstract: Body, literals: tuple[int, ...], deltas: tuple[int, ...]
 
         return past_the_bound
 
-    def advance(stmt: Stmt) -> Stmt:
+    def advance(stmt: Statement) -> Statement:
         if isinstance(stmt, Loop):
-            expr = stmt.axis.extent.expr
-            if not (isinstance(expr, Var) and expr.name.startswith("__lit")):
+            expression = stmt.axis.extent.expression
+            if not (isinstance(expression, Var) and expression.name.startswith("__lit")):
                 return stmt
-            literal, delta = literals[int(expr.name[5:])], deltas[int(expr.name[5:])]
+            literal, delta = literals[int(expression.name[5:])], deltas[int(expression.name[5:])]
             if isinstance(by, int) or delta == 0:
                 return stmt.replace(axis=replace(stmt.axis, extent=Dim(literal + delta * (by if isinstance(by, int) else 0))))
             widest = max(literal, literal + delta * (steps - 1))
@@ -213,7 +277,7 @@ def _advanced(abstract: Body, literals: tuple[int, ...], deltas: tuple[int, ...]
             return stmt.replace(axis=replace(stmt.axis, extent=Dim(widest)), body=stmt.body.map(mask(within)))
         if stmt.nested():
             return stmt
-        return map_exprs(stmt.rewrite(lambda name: name, sigma), lambda expr: expr.rebuild(fold))
+        return stmt.rewrite(lambda name: name, sigma).map_expressions(lambda expression: expression.rebuild(fold))
 
     return abstract.map(advance)
 
@@ -228,7 +292,7 @@ def _rolled(step: Body, steps: int, seed: float | str) -> Body:
     """The step under a loop that carries its state: the state read becomes a ``Pre`` read, its
     store the state's definition, and every kept buffer gains the step as its leading axis."""
 
-    def roll(stmt: Stmt) -> Stmt | tuple[Stmt, ...]:
+    def roll(stmt: Statement) -> Statement | tuple[Statement, ...]:
         if isinstance(stmt, Load) and stmt.input == _STATE:
             return Pre(name=stmt.names[0], carrier=_STATE, index=stmt.index)
         if not isinstance(stmt, Write):
@@ -246,7 +310,9 @@ def _rolled(step: Body, steps: int, seed: float | str) -> Body:
 def _slice(tensor: Tensor, source: str, step: int) -> LoopOp:
     axes = tuple(Axis(f"s{dim}", extent) for dim, extent in enumerate(tensor.shape))
     cell = tuple(Var(axis.name) for axis in axes)
-    body = Body((Load(name="kept", input=source, index=(Literal(step, "int"), *cell)), Write(output=tensor.name, index=cell, value="kept")))
+    body = Body(
+        (Load(names=("kept",), input=source, index=(Literal(step, "int"), *cell)), Write(output=tensor.name, index=cell, values=("kept",)))
+    )
     for axis in reversed(axes):
         body = Body((Loop(axis=axis, body=body),))
     return LoopOp(body=body)
@@ -296,9 +362,9 @@ def _roll(match: Match, chain: list[Node]) -> Graph:
         raise RuleSkipped("the steps keep different buffers")
     if any(tuple(value for _, value in read) != tuple(value for _, value in constants) for _, _, read in spliced):
         raise RuleSkipped("the steps read different constants")
-    abstract, literals = step.literals_abstracted
-    second, later = spliced[1][0].literals_abstracted
-    if second.literal_free_key != abstract.literal_free_key or len(later) != len(literals):
+    abstract, literals = _literals_abstracted(step)
+    second, later = _literals_abstracted(spliced[1][0])
+    if _literal_free_key(second) != _literal_free_key(abstract) or len(later) != len(literals):
         raise RuleSkipped("the second step is not the first step's body")
     deltas = tuple(b - a for a, b in zip(literals, later, strict=True))
     for index, (body, _, _) in enumerate(spliced):

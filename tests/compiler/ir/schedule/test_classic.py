@@ -13,7 +13,6 @@ from emmy.compiler.graph import Graph, Tensor
 from emmy.compiler.ir.atom import ATOM_REGISTRY
 from emmy.compiler.ir.axis import Axis
 from emmy.compiler.ir.base import InputOp
-from emmy.compiler.ir.expr import Var
 from emmy.compiler.ir.pure import Fold
 from emmy.compiler.ir.schedule import (
     PlacedTile,
@@ -47,26 +46,35 @@ from emmy.compiler.ir.schedule.classic import (
     parse_node_id,
 )
 from emmy.compiler.ir.schedule.classic.sites import _select
-from emmy.compiler.ir.stmt import Accum, Assign, Body, Load, Loop, Write
+from emmy.compiler.ir.stmt import Body, parse_body
 from emmy.compiler.ir.tile import OutputSpec, TileOp
 from emmy.compiler.pipeline.fork import DeferredFork, iter_leaves, schedule_forks
 from emmy.compiler.pipeline.passes.tile._fromloop import fold_from_loop
 from tests.compiler.helpers import case_target_tile, classic_cartesian_schedules, enumerate_classic_reference, literal_classic_context
-from tests.compiler.terms import contraction, projection
+from tests.compiler.terms import contraction, projection, slab
 
 _K = Axis("k", 8)
 
 
 def _sum(name: str = "sum") -> Fold:
     """``name = Σ_k x[k]`` — lifted from its Loop IR, so the term is the compiler's own spelling."""
-    load = Load(name="x", input="x", index=(Var("k"),))
-    return fold_from_loop(Loop(axis=_K, body=Body((load, Accum(name=name, value="x", op="add", axes=("k",))))))
+    (loop,) = parse_body(
+        f"""
+        for k in 0..8:
+            x = load x[k]
+            {name} <- add({name}, x) over k
+        """
+    )
+    return fold_from_loop(loop)
+
+
+def _store(write: str) -> OutputSpec:
+    """An output spec over the write statement ``write`` spells."""
+    return OutputSpec(parse_body(write)[0])
 
 
 def _contraction() -> Fold:
-    return contraction(
-        _K, Load(name="a", input="a", index=(Var("m"), Var("k"))), (Load(name="b", input="b", index=(Var("k"), Var("n"))), "acc")
-    )
+    return contraction(_K, slab("a", "a", "m", "k"), (slab("b", "b", "k", "n"), "acc"))
 
 
 def _problem(root: Fold, target=None) -> tuple[TileOp, object]:
@@ -106,16 +114,12 @@ def test_contraction_tiles_the_contiguous_output_axis_across_grid_orders(free_or
     from emmy.compiler.ir.tile.ops import sched_of
 
     axes = {name: Axis(name, extent) for name, extent in (("head", 4), ("row", 64), ("channel", 256))}
-    root = contraction(
-        _K,
-        Load("a", "a", (Var("row"), Var("k"))),
-        (Load("b", "b", (Var("head"), Var("channel"), Var("k"))), "acc"),
-    )
+    root = contraction(_K, slab("a", "a", "row", "k"), (slab("b", "b", "head", "channel", "k"), "acc"))
     tile = TileOp(
         op=root,
         place=Placement(free=tuple(axes[name] for name in free_order), grid=tuple(axes[name] for name in free_order), mapped=True),
         axes=(*axes.values(), _K),
-        output_specs=(OutputSpec(Write("out", (Var("head"), Var("row"), Var("channel")), "acc")),),
+        output_specs=(_store("out[head, row, channel] = acc"),),
         outputs={"out": Tensor("out", (4, 64, 256))},
     )
     assert {axis.name for axis in sched_of(tile)._mn_for(tile.op)} == {"row", "channel"}
@@ -150,16 +154,12 @@ def test_contraction_tiles_the_weight_column_a_direct_read_reaches_across_grid_o
     from emmy.compiler.ir.tile.ops import sched_of
 
     axes = {name: Axis(name, extent) for name, extent in (("lane", 4), ("row", 64), ("channel", 256))}
-    root = contraction(
-        _K,
-        Load("a", "a", (Var("row"), Var("k"))),
-        (Load("b", "b", (Var("k"), Var("channel") + 256 * Var("lane"))), "acc"),
-    )
+    root = contraction(_K, slab("a", "a", "row", "k"), (slab("b", "b", "k", "channel + 256 * lane"), "acc"))
     tile = TileOp(
         op=root,
         place=Placement(free=tuple(axes[name] for name in free_order), grid=tuple(axes[name] for name in free_order), mapped=True),
         axes=(*axes.values(), _K),
-        output_specs=(OutputSpec(Write("out", (Var("row"), Var("channel"), Var("lane")), "acc")),),
+        output_specs=(_store("out[row, channel, lane] = acc"),),
         inputs={"a": Tensor("a", (64, 8)), "b": Tensor("b", (8, 1024))},
         outputs={"out": Tensor("out", (64, 256, 4))},
     )
@@ -178,8 +178,8 @@ def test_attention_score_tiles_its_consumers_row_across_grid_orders(free_order, 
     if projected:
         tile = replace(
             tile,
-            op=projection((tile.op,), (Assign("projected", "copy", tile.op.exposes, dtype="f16"),)),
-            output_specs=tuple(replace(spec, write=Write(spec.write.output, spec.write.index, "projected")) for spec in tile.output_specs),
+            op=projection((tile.op,), f"f16 projected = copy({', '.join(tile.op.exposes)})"),
+            output_specs=tuple(replace(spec, write=spec.write.replace(values=("projected",))) for spec in tile.output_specs),
         )
     _, row, channel = tile.place.free
     free = tuple(tile.place.free[index] for index in free_order)
@@ -212,16 +212,16 @@ def test_attention_statistic_projection_has_no_expectation_fragment() -> None:
     carrier = next(site.node for site in tile.sites if site.node.chunked())
     tile = replace(
         tile,
-        op=projection((carrier,), (Assign("statistic", "copy", (carrier.exposes[1],), dtype="f16"),)),
-        output_specs=tuple(replace(spec, write=Write(spec.write.output, spec.write.index, "statistic")) for spec in tile.output_specs),
+        op=projection((carrier,), f"f16 statistic = copy({carrier.exposes[1]})"),
+        output_specs=tuple(replace(spec, write=spec.write.replace(values=("statistic",))) for spec in tile.output_specs),
     )
     assert not ClassicProblem(tile, Context.from_target((12, 0))).atoms_of(tile.node_id(carrier))
 
 
 def test_shared_node_has_one_site_and_each_use_has_an_edge() -> None:
     shared = _sum()
-    left = projection((shared,), (Assign("left", "add", ("sum", "sum")),), ("left",))
-    right = projection((shared,), (Assign("right", "add", ("sum", "sum")),), ("right",))
+    left = projection((shared,), "left = add(sum, sum)", ("left",))
+    right = projection((shared,), "right = add(sum, sum)", ("right",))
     root = projection((left, right), (), ("left", "right"))
     inventory = TileOp(op=root, axes=(_K,))
 
@@ -244,7 +244,13 @@ def test_classification_binds_contraction_roles_to_consumer_operands() -> None:
 
 
 def test_classification_does_not_read_the_target() -> None:
-    root = projection((), (Load(name="x", input="x", index=(Var("n"),)), Assign("y", "add", ("x", "x"))))
+    root = projection(
+        (),
+        """
+        x = load x[n]
+        y = add(x, x)
+        """,
+    )
     assert root.axis is None and root.as_contraction() is None
     assert TileOp(op=root, axes=(Axis("n", 8),)).views == (root,)
 
@@ -298,11 +304,11 @@ def test_independent_nodes_compose_only_at_matching_physical_axis_geometry() -> 
     """Algebraically reversed axes compose only when their physical widths still agree."""
     m, n = Axis("m", 8), Axis("n", 8)
     k1, k2 = Axis("k1", 8), Axis("k2", 8)
-    first = contraction(k1, Load("a1", "a1", (Var("m"), Var("k1"))), (Load("b1", "b1", (Var("k1"), Var("n"))), "left"))
-    second = contraction(k2, Load("a2", "a2", (Var("n"), Var("k2"))), (Load("b2", "b2", (Var("k2"), Var("m"))), "right"))
+    first = contraction(k1, slab("a1", "a1", "m", "k1"), (slab("b1", "b1", "k1", "n"), "left"))
+    second = contraction(k2, slab("a2", "a2", "n", "k2"), (slab("b2", "b2", "k2", "m"), "right"))
     root = projection((first, second), (), ("left", "right"))
     # Each store reads its own root, so the projection partitions by root and both may be tiled.
-    stores = tuple(OutputSpec(Write(output=name, index=(Var("m"), Var("n")), value=name)) for name in ("left", "right"))
+    stores = tuple(_store(f"{name}[m, n] = {name}") for name in ("left", "right"))
     problem = (TileOp(op=root, place=Placement(free=(m, n)), axes=(m, n, k1, k2), output_specs=stores), Context.from_target((12, 0)))
 
     def pick(context, node, choice):

@@ -11,7 +11,7 @@ an SSA program over a named iteration space:
     input_bufs        : computed property  — distinct Load.source names (in first-use order)
     num_inputs        : computed property  — len(input_bufs)
     analyze()         : BodyAnalysis           — precomputed name → def / scope / reduce-axis / live-axes
-    __iter__          : Iterator[Stmt]     — pre-order walk (via ``iter_body``)
+    __iter__          : Iterator[Statement]     — pre-order walk (via ``iter_body``)
 
 Iteration is explicit via ``Loop(axis, body)`` statements. Each ``Loop``
 is one iteration dimension; ``Loop.body`` runs ``axis.extent`` times.
@@ -27,8 +27,8 @@ before-use, accumulator liveness) are enforced by ``LoopOp.__post_init__``
 
 Free-function companions (used by passes that work on raw
 ``Body``): ``iter_body`` (pre-order generator),
-``map_body`` (transformer supporting ``Stmt | None | Iterable[Stmt]``),
-``Stmt.rewrite(rename_ssa, sigma)`` (per-stmt SSA / Expr rewrite).
+``map_body`` (transformer supporting ``Statement | None | Iterable[Statement]``),
+``Statement.rewrite(rename_ssa, sigma)`` (per-stmt SSA / Expression rewrite).
 """
 
 from __future__ import annotations
@@ -57,12 +57,12 @@ from emmy.compiler.ir.stmt import (  # noqa: F401  (re-exported via __init__)  #
     Pre,
     Select,
     SelectBranch,
-    Stmt,
+    Statement,
     Write,
     pretty_body,
 )
 
-# Body Stmts (Stmt, Load, Assign, Accum, Write, Select, SelectBranch,
+# Body Stmts (Statement, Load, Assign, Accum, Write, Select, SelectBranch,
 # Loop, Cond) and the tree-walk helpers (map_body) live in
 # ``ir/stmt.py`` — they're shared across all IR layers. Imported above
 # and re-exported via ``ir/loop/__init__.py``.
@@ -205,7 +205,7 @@ class LoopOp(BodyOp):
     def _infer_write_shapes(self, skip: Iterable[str] = ()) -> dict[str, tuple[int, ...]]:
         """Derive every output buffer shape from its own ``Write`` scope.
 
-        Evaluates each dim's index Expr over the full iteration space; the
+        Evaluates each dim's index Expression over the full iteration space; the
         per-dim extent is ``max(value) + 1``. Handles plain ``Var(axis)`` (→
         axis extent), ``Literal(c)`` (→ 1), and affine combinations uniformly.
         Per-Write scopes matter for MIMO sibling nests that reuse axis names
@@ -234,8 +234,8 @@ class LoopOp(BodyOp):
                     shape[i] = axis.extent.as_static()
                     env[axis.name] = np.arange(axis.extent.as_static()).reshape(shape)
                 dims: list[int] = []
-                for expr in write.index:
-                    values = expr.eval(env)
+                for expression in write.index:
+                    values = expression.eval(env)
                     dims.append(int(values.max() if isinstance(values, np.ndarray) else values) + 1)
                 candidate_shapes.append(tuple(dims))
             shapes[output] = tuple(max(dims) for dims in zip(*candidate_shapes, strict=True))
@@ -252,7 +252,7 @@ def _bind_symbolic_axes(loop: LoopOp, input_arrays: dict) -> dict[str, int]:
     body ``Load`` index. Each input array's actual shape is the source of
     truth; a symbolic axis seen at index position ``d`` of input ``buf``
     binds to ``input_arrays[buf].shape[d]``."""
-    from emmy.compiler.ir.expr import Var
+    from emmy.compiler.ir.expression import Var
 
     env: dict[str, int] = {}
     symbolic_axis_names = {ax.name for ax in loop.axes if not ax.extent.is_static}
@@ -285,7 +285,7 @@ def _specialize_symbolic_axes(loop: LoopOp, input_arrays: dict) -> LoopOp:
         return Axis(name=ax.name, extent=env[ax.name], window=ax.window)
 
     def _sub_body(body: Body) -> Body:
-        new: list[Stmt] = []
+        new: list[Statement] = []
         for s in body:
             nested = s.nested()
             if isinstance(s, Loop):
@@ -461,5 +461,5 @@ def _validate(loop: LoopOp) -> None:
 
 
 # Tree walk helpers (map_body) live in ``ir/stmt.py`` — they
-# work across all IR layers via ``Stmt.nested``. Imported above and
+# work across all IR layers via ``Statement.nested``. Imported above and
 # re-exported via ``ir/loop/__init__.py``.

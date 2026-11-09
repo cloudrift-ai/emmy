@@ -17,7 +17,7 @@ from dataclasses import fields as dc_fields
 
 from emmy.compiler.ir.base import ConstantOp, InputOp
 from emmy.compiler.ir.elementwise import _NAME_TO_FN
-from emmy.compiler.ir.expr import PLACEHOLDER_PREFIX, Var
+from emmy.compiler.ir.expression import PLACEHOLDER_PREFIX, Var
 from emmy.compiler.ir.frontend.ir import TransposeOp
 from emmy.compiler.ir.tensor.ir import BitcastOp, CastOp, ElementwiseOp, GatherOp, IndexMapOp, ReduceOp, ScanOp
 
@@ -50,8 +50,8 @@ def fmt_type(shape: tuple, dtype, syms: dict[str, Var] | None = None) -> str:
 
 
 def _fmt_dim(d, syms: dict[str, Var] | None) -> str:
-    expr = getattr(d, "expr", None)
-    return str(d) if expr is None or not syms else str(expr.substitute(syms))
+    expression = getattr(d, "expression", None)
+    return str(d) if expression is None or not syms else str(expression.substitute(syms))
 
 
 def _symbols(graph) -> dict[str, Var]:
@@ -60,8 +60,8 @@ def _symbols(graph) -> dict[str, Var]:
     for node in graph.nodes.values():
         for t in node.outputs:
             for d in t.shape:
-                if (expr := getattr(d, "expr", None)) is not None:
-                    names |= expr.free_vars()
+                if (expression := getattr(d, "expression", None)) is not None:
+                    names |= expression.free_vars()
     return {n: Var(f"dynamic.{n}") for n in sorted(names)}
 
 
@@ -78,7 +78,7 @@ def _binders(op: IndexMapOp) -> list[str]:
     return [(n if f"{PLACEHOLDER_PREFIX}{d}" in used else f"_{n}") for d, n in enumerate(_index_names(len(op.out_shape)))]
 
 
-def _index_expr(op: IndexMapOp, names: list[str], syms: dict[str, Var]) -> str:
+def _index_expression(op: IndexMapOp, names: list[str], syms: dict[str, Var]) -> str:
     """The coordinate vector one source reads, in the result's index variables."""
     rename = {f"{PLACEHOLDER_PREFIX}{d}": Var(n.lstrip("_")) for d, n in enumerate(names)} | syms
     return "[" + ", ".join(str(e.substitute(rename)) for e in op.sources[0].coord_map) + "]"
@@ -99,7 +99,7 @@ def _convert_fn(src_t) -> str:
     return "emmy::cast"
 
 
-def fmt_expr(node, graph, names: dict[str, str], syms: dict[str, Var]) -> str:
+def fmt_expression(node, graph, names: dict[str, str], syms: dict[str, Var]) -> str:
     """The right-hand side of one ``let``."""
     op = node.op
     args = [names.get(i, i) for i in node.inputs]
@@ -136,7 +136,7 @@ def fmt_expr(node, graph, names: dict[str, str], syms: dict[str, Var]) -> str:
         if len(op.sources) == 1 and op.sources[0].select is None:
             names = _binders(op)
             operand = args[op.sources[0].input_idx]
-            return f"emmy::index_map_simple({operand}, |{', '.join(names)}| {_index_expr(op, names, syms)})"
+            return f"emmy::index_map_simple({operand}, |{', '.join(names)}| {_index_expression(op, names, syms)})"
         return _fmt_index_sources(op, args, syms)
     if isinstance(op, GatherOp):
         # One op class, two operations. The operand shapes decide which, by the same
@@ -172,9 +172,9 @@ def _fmt_index_sources(op: IndexMapOp, args: list[str], syms: dict[str, Var]) ->
     names = _index_names(len(op.out_shape))
     rename = {f"{PLACEHOLDER_PREFIX}{d}": Var(n) for d, n in enumerate(names)} | syms
 
-    def closure(expr_list: tuple, body: str) -> str:
+    def closure(expression_list: tuple, body: str) -> str:
         used: set[str] = set()
-        for e in expr_list:
+        for e in expression_list:
             used |= e.free_vars()
         params = ", ".join(n if f"{PLACEHOLDER_PREFIX}{d}" in used else f"_{n}" for d, n in enumerate(names))
         return f"|{params}| {body}"
@@ -256,7 +256,7 @@ def render_graph(graph) -> str:
 
     for nid in (n for n in order if not isinstance(graph.nodes[n].op, (InputOp, ConstantOp))):
         node = graph.nodes[nid]
-        rhs = fmt_expr(node, graph, names, syms)
+        rhs = fmt_expression(node, graph, names, syms)
         if len(node.outputs) == 1:
             t = node.output
             lines += _let(names[nid], fmt_type(t.shape, t.dtype, syms), rhs, "  ", t.name)

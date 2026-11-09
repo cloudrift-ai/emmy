@@ -2,29 +2,19 @@
 
 from __future__ import annotations
 
-from emmy.compiler.ir.axis import Axis
-from emmy.compiler.ir.expr import Var
-from emmy.compiler.ir.stmt import Accum, Assign, Body, Load, Loop, Select, SelectBranch
-
-
-def _ld(name: str, src: str, *idx: str) -> Load:
-    return Load(name=name, input=src, index=tuple(Var(v) for v in idx))
-
-
-def _asn(name: str, op: str, *args: str) -> Assign:
-    return Assign(name=name, op=op, args=args)
+from emmy.compiler.ir.stmt import Body, parse_body
 
 
 def _cell() -> Body:
     """A demoted-matmul cell: ``p = cone(x) * w`` with a plain B load."""
-    return Body(
-        [
-            _ld("a0", "x", "m", "k"),
-            _asn("a1", "negative", "a0"),
-            _ld("b", "w", "k", "n"),
-            _asn("p", "multiply", "a1", "b"),
-            Accum(name="acc", value="p"),
-        ]
+    return parse_body(
+        """
+        a0 = load x[m, k]
+        a1 = negative(a0)
+        b = load w[k, n]
+        p = multiply(a1, b)
+        acc <- add(acc, p)
+        """
     )
 
 
@@ -55,10 +45,16 @@ def test_backward_cone_root_not_defined_here_is_external():
 def test_backward_cone_wrapper_member_joins_whole():
     """A reduce Loop resolves through its exposed Accum and joins as one
     member; its own loop axis is internal, the row axis it reads is not."""
-    stat_loop = Loop(axis=Axis("r", 32), body=(_ld("s0", "x", "m", "r"), Accum(name="stat", value="s0", op="maximum")))
-    body = Body([stat_loop, _asn("e", "exp", "stat")])
+    body = parse_body(
+        """
+        for r in 0..32:
+            s0 = load x[m, r]
+            stat <- maximum(stat, s0)
+        e = exp(stat)
+        """
+    )
     cone = body.backward_cone(["e"])
-    assert cone.members == (stat_loop, body[1])
+    assert cone.members == (body[0], body[1])
     assert "r" not in cone.external_reads
     assert "m" in cone.external_reads
 
@@ -67,12 +63,14 @@ def test_backward_cone_select_predicate_axis_is_read():
     """An axis reaching the cone only through a Select predicate counts as
     read — materializing without it would drop a real dependence (the
     rotate-half rotary shape)."""
-    body = Body(
-        [
-            _ld("a0", "x", "k"),
-            _ld("a1", "x", "m"),
-            Select(name="v", branches=(SelectBranch(value="a0", select=Var("n").lt(Var("m"))), SelectBranch(value="a1", select=Var("m")))),
-        ]
+    body = parse_body(
+        """
+        a0 = load x[k]
+        a1 = load x[m]
+        v = select:
+            a0 when n < m
+            a1 when m
+        """
     )
     cone = body.backward_cone(["v"])
     assert "n" in cone.external_reads

@@ -6,30 +6,22 @@ from types import SimpleNamespace
 import pytest
 
 from emmy.compiler.dtype import BF16, F16, F32, F64, I32
-from emmy.compiler.ir.axis import Axis
-from emmy.compiler.ir.expr import Var
 from emmy.compiler.ir.kernel import KernelOp
-from emmy.compiler.ir.stmt import Assign, Body, Load, Loop, Write, normalize_body
+from emmy.compiler.ir.stmt import Assign, normalize_body, parse_body
 from emmy.compiler.pipeline import RuleSkipped
 
 rule = import_module("emmy.compiler.pipeline.passes.lowering.kernel.040_split_invariant_divides")
 
 
-def _body(dtype=F32, *, varying=False):
-    return Body(
-        (
-            Loop(
-                Axis("i", 4),
-                Body(
-                    (
-                        Load("recip_0", "x", (Var("i"),), dtype=dtype),
-                        Load("denominator", "scale", (Var("i"),) if varying else (), dtype=dtype),
-                        Assign("out", "divide", ("recip_0", "denominator"), dtype=dtype),
-                        Write("y", (Var("i"),), value="out", value_dtype=dtype),
-                    )
-                ),
-            ),
-        )
+def _body(dtype=F32, *, varying=False, divide="divide"):
+    return parse_body(
+        f"""
+        for i in 0..4:
+            {dtype.name} recip_0 = load x[i]
+            {dtype.name} denominator = load scale[{"i" if varying else ""}]
+            {dtype.name} out = {divide}(recip_0, denominator)
+            {dtype.name} y[i] = out
+        """
     )
 
 
@@ -65,10 +57,5 @@ def test_integer_or_varying_division_is_not_split(monkeypatch, dtype, varying):
 
 def test_round_to_nearest_division_is_not_split(monkeypatch):
     monkeypatch.setenv("EMMY_FAST_MATH", "1")
-    body = _body()
-    loop = body[0]
-    stmts = list(loop.body)
-    stmts[2] = Assign("out", "divide_rn_f32", ("recip_0", "denominator"), dtype=F32)
-    body = Body((Loop(loop.axis, Body(tuple(stmts))),))
     with pytest.raises(RuleSkipped, match="no invariant"):
-        rule.rewrite(SimpleNamespace(op=KernelOp(body=body)))
+        rule.rewrite(SimpleNamespace(op=KernelOp(body=_body(divide="divide_rn_f32"))))

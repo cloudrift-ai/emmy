@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import pytest
 
-from emmy.compiler.ir.expr import BinaryExpr, Literal, SimplifyCtx, Var
+from emmy.compiler.ir.expression import BinaryExpr, Literal, SimplifyCtx, Var
 
 
 def _simplify(e):

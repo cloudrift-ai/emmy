@@ -9,15 +9,14 @@ chosen by normalization from the value numbering.
 
 from __future__ import annotations
 
-from emmy.compiler.ir.axis import Axis
-from emmy.compiler.ir.stmt.base import Stmt
+from emmy.compiler.ir.stmt.base import Statement
 from emmy.compiler.ir.stmt.body import Body
-from emmy.compiler.ir.stmt.leaves import Init
+from emmy.compiler.ir.stmt.leaves import Accum, Carry, Init
 
-__all__ = ["bound_axes", "ordering_constraints", "topological_sort"]
+__all__ = ["ordering_constraints", "topological_sort"]
 
 
-def _ordered_sibling_defs(stmt: Stmt) -> tuple[str, ...]:
+def _ordered_sibling_defs(stmt: Statement) -> tuple[str, ...]:
     """Names visible to siblings in structural body order."""
     children = stmt.nested()
     if not children:
@@ -25,7 +24,7 @@ def _ordered_sibling_defs(stmt: Stmt) -> tuple[str, ...]:
     return tuple(dict.fromkeys(name for child in children for name in child._carried_names))
 
 
-def _free_ssa(stmt: Stmt) -> frozenset[str]:
+def _free_ssa(stmt: Statement) -> frozenset[str]:
     """SSA names ``stmt`` reads from the scope around it.
 
     A nested scope binds only what it defines at its own level, in any order; a deeper scope's
@@ -40,19 +39,11 @@ def _free_ssa(stmt: Stmt) -> frozenset[str]:
     return frozenset(reads)
 
 
-def bound_axes(stmt: Stmt) -> tuple[Axis, ...]:
-    """The axes a statement binds, as :class:`Axis` values."""
-    axis = getattr(stmt, "axis", None)
-    if isinstance(axis, Axis):
-        return (axis,)
-    return tuple(axis for axis in getattr(stmt, "axes", ()) if isinstance(axis, Axis))
-
-
-def _resources(stmt: Stmt) -> tuple[set[str], set[str], set[str]]:
+def _resources(stmt: Statement) -> tuple[set[str], set[str], set[str]]:
     members = tuple(member for child in stmt.nested() for member in child.iter()) or (stmt,)
     reads = {name for member in members for name in member.external_reads()}
     writes = {name for member in members for name in member.external_writes()}
-    state = {name for member in members for name in getattr(member, "carried_names", lambda: ())()}
+    state = {member.name for member in members if isinstance(member, (Accum, Carry))}
     if isinstance(stmt, Init):
         state.update(stmt.defines())
     return reads, writes, state

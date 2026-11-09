@@ -53,7 +53,7 @@ so `torch.compile` can trace it. A single-output graph returns its tensor direct
 ordered tuple following `graph.outputs`, matching the backend result boundary. Symbolic
 graphs work too: `build_callable` binds every symbolic axis name to its concrete extent read off the supplied tensors
 (the CUDA launch convention) and bakes the env into the per-node callables — shape-resolving sites (`ReshapeOp` target
-shape, `IndexMapOp` out-shape and coord/select exprs) eval through it, so a dynamic frontend provenance slice
+shape, `IndexMapOp` out-shape and coord/select expressions) eval through it, so a dynamic frontend provenance slice
 gets the same vs-torch comparison as a static one (benched at the `Dim` hint by
 `commands/run.py::bench_lowered_vs_torch`, which sizes its random inputs by hint-resolving symbolic dims). Used to
 benchmark decoded golden programs and in-memory provenance slices against torch.
@@ -150,7 +150,8 @@ programs into its step — sharing each buffer the target already holds under it
 buffer specs (one `BufferSpec` per BUFFER — a multi-output node mints one per output slot, each with its own
 role via `graph.buffer_role`), scalar/runtime constants, the launch list (`LaunchSpec.writes` names every
 buffer a launch produces; a scratch planner's first-write test reads it, falling back to `node_id` for plans
-stored before the field existed), symbolic-axis plumbing, kernel refs (source and/or a content-addressed
+stored before the field existed; `LaunchSpec.size_range` limits a launch to a range of one symbolic size, as native
+runs each range of windows' attention), symbolic-axis plumbing, kernel refs (source and/or a content-addressed
 cubin-cache key), and per-weight checkpoint bindings (`source_path` + a pack-own load-op vocabulary applied
 with pure numpy). A kernel ref also records `arch_specific` — whether it must compile for the arch-SUFFIXED
 target (`sm_120a`, `sm_90a`). Three unrelated instruction families need that suffix: TMA, which announces itself
@@ -174,7 +175,7 @@ a weight, and on one with no source, instead of leaving its buffer zero.
 nothing reads the graph again — `CompiledProgram.build(graph)` is exactly `build_from_plan(plan_from_graph(g))`,
 so a plan loaded from disk and a freshly compiled one share one launch path. The JSON form (`plan_to_dict` /
 `plan_from_dict`) carries symbolic shapes and ceil-div grid factors through a tiny self-contained expression
-grammar (`int` literal, `"name"` var, `[op, lhs, rhs]`), deliberately not the compiler's `Expr` classes — the
+grammar (`int` literal, `"name"` var, `[op, lhs, rhs]`), deliberately not the compiler's `Expression` classes — the
 on-disk format survives compiler changes; only runtime-contract changes bump `PLAN_FORMAT_VERSION`.
 CUDA-specific launch fields (TMA descriptors) nest under a `"cuda"` key so another backend can add its own
 namespace and its own `build_from_plan` equivalent.
