@@ -50,7 +50,10 @@ pub(super) fn simplify_binary(
     let (orig_left, orig_right) = (left, right);
     let left = left.simplify_as(ctx, class)?;
     let right = right.simplify_as(ctx, class)?;
-    let index = class == ExprClass::Index;
+    // The integer rules hold over integers: an index's operands, or a value's the ranges prove integer (a float has
+    // no range), as a predicate over coordinates is.
+    let integer = class == ExprClass::Index
+        || (left.range(ctx).is_some() && right.range(ctx).is_some());
     if let (Some(l), Some(r)) = (left.as_literal(), right.as_literal())
         && let Some(folded) = fold_binop_literals(op, l, r)?
     {
@@ -68,7 +71,7 @@ pub(super) fn simplify_binary(
             if int_zero(&right) {
                 return Ok(left);
             }
-            if index
+            if integer
                 && let Some(folded) = fold_digits(&Expression::binary(op, left.clone(), right.clone()), ctx)?
             {
                 return Ok(folded);
@@ -81,7 +84,7 @@ pub(super) fn simplify_binary(
             if left == right {
                 return Ok(Expression::int(0));
             }
-            if index
+            if integer
                 && let Some(folded) = fold_digits(&Expression::binary(op, left.clone(), right.clone()), ctx)?
             {
                 return Ok(folded);
@@ -116,7 +119,7 @@ pub(super) fn simplify_binary(
             if int_zero(&left) {
                 return Ok(Expression::int(0));
             }
-            if !index {
+            if !integer {
                 return Ok(rebuilt(this, op, left, right, orig_left, orig_right));
             }
             if let Some(n) = right.int_literal().filter(|n| *n > 1) {
@@ -167,7 +170,7 @@ pub(super) fn simplify_binary(
             if int_zero(&left) || (int_one(&right) && left.range(ctx).is_some()) {
                 return Ok(Expression::int(0));
             }
-            if !index {
+            if !integer {
                 return Ok(rebuilt(this, op, left, right, orig_left, orig_right));
             }
             if let Some(n) = right.int_literal().filter(|n| *n > 1) {
@@ -953,13 +956,19 @@ mod tests {
         }
     }
 
-    /// The digit rules are an index's: a value's quotient is a true division.
+    /// Over operands the ranges do not prove integer, a value keeps what the integer rules would take apart: `3 * x`
+    /// and `3 * y` of two loaded floats round before they divide.
     #[test]
-    fn a_value_keeps_its_digits() {
+    fn a_value_over_unranged_operands_keeps_its_factors() {
         let ctx = digits_ctx(0, 64);
-        for spelling in ["(i % 8) / 2", "i - i % 8", "2 * ((i / 2) % 4) + i % 2", "minimum(i, 63)"] {
-            let e = crate::expr::parse::parse(spelling).unwrap();
-            assert_eq!(e.simplify_as(&ctx, ExprClass::Value).unwrap(), e, "{e}");
-        }
+        let e = crate::expr::parse::parse("3 * x / (3 * y)").unwrap();
+        assert_eq!(e.simplify_as(&ctx, ExprClass::Value).unwrap(), e);
+        assert_eq!(e.simplify_as(&ctx, ExprClass::Index).unwrap(), crate::expr::parse::parse("x / y").unwrap());
+        let over_coordinates = crate::expr::parse::parse("(i % 8) / 2").unwrap();
+        assert_eq!(
+            over_coordinates.simplify_as(&ctx, ExprClass::Value).unwrap(),
+            over_coordinates.simplify(&ctx).unwrap(),
+            "integer math over coordinates is an index's wherever it sits"
+        );
     }
 }

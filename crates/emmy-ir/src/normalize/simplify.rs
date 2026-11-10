@@ -22,8 +22,9 @@ pub fn simplify_body(body: &Body) -> Result<Body> {
     Ok(body.rebuilt(stmts?))
 }
 
-/// `stmt` with every expression simplified as its field's class (an index under the integer rules, a value without
-/// them) under `ctx`, and every child body under the ranges of the axes the statement binds for it.
+/// `stmt` with every expression simplified as its field's class (an index under the integer rules, a value under them
+/// where the ranges prove its operands integer) under `ctx`, and every child body under the ranges of the axes the
+/// statement binds for it.
 pub(crate) fn simplify_stmt(stmt: &Arc<Statement>, ctx: &SimplifyCtx) -> Result<Arc<Statement>> {
     let stmt =
         Statement::try_map_classed_expressions(stmt, &mut |class, e| e.simplify_as(ctx, class))?;
@@ -159,7 +160,7 @@ mod tests {
     }
 
     #[test]
-    fn a_value_quotient_is_a_true_division_and_keeps_its_digits() {
+    fn integer_math_over_coordinates_simplifies_in_a_value_too() {
         let body = "
             for a in 0..4:
                 for b in 0..8:
@@ -168,7 +169,7 @@ mod tests {
                     O[a, b] = c
             ";
         assert_eq!(line(body, "load X"), "x = load X[a]");
-        assert_eq!(line(body, "c ="), "c = (8 * a + b) / 8");
+        assert_eq!(line(body, "c ="), "c = a");
     }
 
     #[test]

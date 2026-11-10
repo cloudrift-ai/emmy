@@ -1158,9 +1158,10 @@ impl Expression {
 
     /// Bottom-up rewrite of an expression of `class`. Both classes fold literals, drop algebraic identities and
     /// decide comparisons the ranges decide. The integer rules — quotient chains, the digits of a quotient and a
-    /// remainder, factor cancellation, a remainder below its divisor — are an index's alone: a value's quotient is a
-    /// true division and its operands may be floats, which those rules would round differently. A buffer index inside
-    /// a value is an index. Pure and idempotent.
+    /// remainder, factor cancellation, a remainder below its divisor — hold over integers: an index's operands, and a
+    /// value's only where the ranges prove them integer (a predicate over coordinates), since a value's operands may
+    /// be floats, which those rules would round differently. A buffer index inside a value is an index. Pure and
+    /// idempotent.
     pub fn simplify_as(&self, ctx: &SimplifyCtx, class: ExprClass) -> Result<Expression> {
         match &**self {
             Expr::Var(_) | Expr::Literal(_) | Expr::Builtin(_) => Ok(self.clone()),
@@ -1179,9 +1180,8 @@ impl Expression {
                 {
                     return Ok(operand.clone());
                 }
-                // An index's minimum or maximum that the ranges decide is the operand they pick.
-                if class == ExprClass::Index
-                    && let ElementwiseOp::Known(op @ (Operation::Minimum | Operation::Maximum)) = name
+                // A minimum or maximum that the ranges decide is the operand they pick: the ranges prove both integer.
+                if let ElementwiseOp::Known(op @ (Operation::Minimum | Operation::Maximum)) = name
                     && let [a, b] = &new[..]
                     && let (Some(ra), Some(rb)) = (a.range(ctx), b.range(ctx))
                 {
