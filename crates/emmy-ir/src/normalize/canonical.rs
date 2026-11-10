@@ -11,7 +11,7 @@ use crate::elementwise::{AffineRole, Operation};
 use crate::expr::{Expr, ExprClass, Expression, LitType};
 use crate::field::Rewriter;
 use crate::numbering::{Chains, Key, Numbering, roles, statement_tree, value_numbers};
-use crate::order::ordering_constraints;
+use crate::order::ordering_constraints_within;
 use crate::statement::*;
 use crate::{Name, Result};
 
@@ -184,6 +184,11 @@ pub fn rename_ssa_sequential(body: &Body) -> Body {
 /// `body` with every scope's members in the canonical order: dependency-valid, then by the sibling's category, its
 /// shape, its spelling where shapes tie, and its number or scope tree.
 fn ordered(body: &Body, numbering: &Numbering) -> Result<Body> {
+    ordered_within(body, numbering, &HashSet::new())
+}
+
+/// [`ordered`] for a scope inside one that binds `outer` (`ordering_constraints_within`).
+fn ordered_within(body: &Body, numbering: &Numbering, outer: &HashSet<Name>) -> Result<Body> {
     let rebuilt = body.try_map_each(&mut |stmt| {
         let nested = stmt.nested();
         if nested.is_empty() {
@@ -236,7 +241,7 @@ fn ordered(body: &Body, numbering: &Numbering) -> Result<Body> {
             }
         })
         .collect();
-    let incoming = ordering_constraints(&rebuilt, true);
+    let incoming = ordering_constraints_within(&rebuilt, true, outer);
     let order =
         rebuilt.topological_permutation(&incoming, Some(&|index| priorities[index].clone()))?;
     Ok(rebuilt.rebuilt(
@@ -245,6 +250,24 @@ fn ordered(body: &Body, numbering: &Numbering) -> Result<Body> {
             .map(|index| rebuilt.stmts()[index].clone())
             .collect(),
     ))
+}
+
+/// A fragment's statements in the canonical order, its names as they stand: dependency-valid, then as the canonical
+/// order ranks siblings, every buffer keyed by the role the body gives it. Nothing is renamed or dropped, so a pure
+/// fragment with named results (a lambda's body) keeps them. `outer` are the names the fragment's reader binds (a
+/// lambda's parameters): a read of one ahead of its first binding in the fragment reads the outer one. A body whose
+/// statements wait on each other has no order, and is an error.
+pub fn fragment_order(body: &Body, outer: &HashSet<Name>) -> Result<Body> {
+    let role = roles(body, None);
+    let numbering = value_numbers(
+        body,
+        &|name| {
+            role.get(name)
+                .map_or_else(|| Key::Str(*name), |r| Key::Int(*r as i64))
+        },
+        Chains::Flat,
+    );
+    ordered_within(body, &numbering, outer)
 }
 
 pub fn canonical_order(body: &Body) -> Result<Body> {
@@ -603,6 +626,31 @@ mod tests {
     use crate::normalize::testing::*;
     use crate::normalize::{normalize_body, normalize_uncached};
     use crate::statement::Load;
+
+    /// The names of `given`'s statements in the fragment order, `outer` bound by its reader.
+    fn fragment_names(given: &str, outer: &[&str]) -> Result<Vec<String>> {
+        let outer: HashSet<Name> = outer.iter().map(|name| Name::from(*name)).collect();
+        Ok(fragment_order(&body(given), &outer)?
+            .stmts()
+            .iter()
+            .map(|stmt| stmt.defines()[0].to_string())
+            .collect())
+    }
+
+    #[test]
+    fn a_fragment_orders_alike_whatever_order_it_was_written_in() {
+        let loads = "a = load x[k]\nb = load w[k]\nc = load y[k]";
+        let one = fragment_names(&format!("{loads}\nab = multiply(a, b)\nbc = multiply(b, c)"), &[]).unwrap();
+        let two = fragment_names(&format!("{loads}\nbc = multiply(b, c)\nab = multiply(a, b)"), &[]).unwrap();
+        assert_eq!(one, two);
+    }
+
+    #[test]
+    fn a_fragment_reads_an_outer_name_it_rebinds_ahead_of_the_rebinding() {
+        let given = "e = subtract(d, m)\nm = add(m, e)";
+        assert_eq!(fragment_names(given, &["m", "d"]).unwrap(), ["e", "m"]);
+        assert!(fragment_names(given, &[]).is_err(), "inside an order-free scope the read is the rebinding's");
+    }
 
     /// Two lexical bindings of one name in one scope are two values: the reads between them read the one before,
     /// and a binding in a deeper scope shadows neither.

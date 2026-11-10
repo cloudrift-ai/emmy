@@ -138,7 +138,7 @@ def test_the_combine_folds_one_accum_per_carried_component() -> None:
     (loop,) = node.lower(axes=SCOPE)
     body = list(loop.body)
     assert sum(1 for stmt in body if isinstance(stmt, Assign) and stmt.name == "xhat") == 1
-    assert [stmt.name for stmt in body if isinstance(stmt, Accum)] == ["acc_g", "acc_u"]
+    assert sorted(stmt.name for stmt in body if isinstance(stmt, Accum)) == ["acc_g", "acc_u"]
     assert all(stmt.op.reduce_canon == "add" for stmt in body if isinstance(stmt, Accum))
 
 

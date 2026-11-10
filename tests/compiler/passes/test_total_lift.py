@@ -459,7 +459,7 @@ def test_a_sum_ahead_of_an_inner_parallel_loop_peels_onto_the_placement() -> Non
     )
     assert [axis.extent for axis in tile.place.free] == [Dim(3), Dim(4)]
     assert tile.op.axis is None and tile.op.operands == ()
-    assert [type(stmt).__name__ for stmt in tile.op.lift.body] == ["Load", "Assign", "Assign", "Load", "Assign"]
+    assert sorted(type(stmt).__name__ for stmt in tile.op.lift.body) == ["Assign", "Assign", "Assign", "Load", "Load"]
 
 
 def test_an_affine_chain_of_statements_lifts_as_one_node() -> None:

@@ -56,6 +56,16 @@ pub fn is_protocol(stmt: &Statement) -> bool {
 /// where it stands: ahead of its update the step before, behind it the updated value. A state carried through `Carry`
 /// orders nothing in its scope: a `Pre` reads the step before wherever it sits.
 pub fn ordering_constraints(body: &Body, effects: bool) -> Vec<HashSet<usize>> {
+    ordering_constraints_within(body, effects, &HashSet::new())
+}
+
+/// [`ordering_constraints`] of a scope inside one that binds `outer`: a read of an outer name ahead of every binding
+/// of it in the scope reads the outer one, and stays ahead of those bindings (a lambda's body rebinding a parameter).
+pub fn ordering_constraints_within(
+    body: &Body,
+    effects: bool,
+    outer: &HashSet<Name>,
+) -> Vec<HashSet<usize>> {
     let stmts = body.stmts();
     let defs_uses: Vec<(Vec<Name>, HashSet<Name>)> = stmts
         .iter()
@@ -104,7 +114,10 @@ pub fn ordering_constraints(body: &Body, effects: bool) -> Vec<HashSet<usize>> {
         if let Some(preceding) = sites.iter().rev().find(|site| **site < consumer) {
             return Some(*preceding);
         }
-        if kinds.get(name) == Some(&Site::Accumulator) || sites.contains(&consumer) {
+        if kinds.get(name) == Some(&Site::Accumulator)
+            || sites.contains(&consumer)
+            || outer.contains(name)
+        {
             return None;
         }
         sites.first().copied()

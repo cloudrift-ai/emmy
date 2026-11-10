@@ -16,9 +16,9 @@ from emmy.compiler.ir.expression import Var, apply
 from emmy.compiler.ir.stmt import (
     Assign,
     Body,
-    Load,
     canonical_values,
     exposed_defines,
+    fragment_order,
     free_names,
     one_operation_per_definition,
     pretty_body,
@@ -26,42 +26,13 @@ from emmy.compiler.ir.stmt import (
 from emmy.compiler.wire import Wire
 
 
-def _canonical_body_order(body: Body) -> Body:
-    """Return a deterministic dependency-respecting order for a pure ANF body."""
-    stmts = tuple(body)
-    if len(stmts) <= 1:
-        return body
-
-    def token(stmt) -> tuple:
-        op = stmt.value.operation if isinstance(stmt, Assign) else None
-        return (
-            type(stmt).__name__,
-            op.name if op is not None else "",
-            stmt.input if isinstance(stmt, Load) else "",
-            len(stmt.value.operands) if isinstance(stmt, Assign) else 0,
-        )
-
-    definitions = [exposed_defines(stmt) for stmt in stmts]
-    dependencies = [free_names(stmt) for stmt in stmts]
-    placed = []
-    remaining = list(range(len(stmts)))
-    while remaining:
-        remaining_definitions = {name for index in remaining for name in definitions[index]}
-        ready = [index for index in remaining if not dependencies[index] & (remaining_definitions - definitions[index])]
-        if not ready:
-            return body
-        selected = min(ready, key=lambda index: (token(stmts[index]), index))
-        placed.append(stmts[selected])
-        remaining.remove(selected)
-    return Body(placed)
-
-
-def _normalize_body(body: Body) -> Body:
+def _normalize_body(body: Body, params: tuple[str, ...]) -> Body:
     """The construction canonicalization of a pure body — an idempotent transform, applied by
-    :meth:`Lambda.__post_init__`: a dependency-safe statement order and every value spelled in the normal form's
-    canonical form under the body's names (commutative operands and a sum's terms by rank), the context-independent
+    :meth:`Lambda.__post_init__`: the normal form's statement order with the names as they stand (``fragment_order``,
+    a read of a parameter ahead of the body's rebinding of it reading the parameter) and every value spelled in its
+    canonical form under those names (commutative operands and a sum's terms by rank), the context-independent
     storage invariants a term's structural identity reads directly."""
-    return canonical_values(_canonical_body_order(body))
+    return canonical_values(fragment_order(body, params))
 
 
 @dataclass(frozen=True)
@@ -76,7 +47,7 @@ class Lambda(Wire):
     ``Load`` / ``Assign`` and the structural nodes opt in; ``Accum`` / ``Write`` / ``Init`` /
     ``Loop`` never do; no isinstance whitelist, so a new statement type is excluded until it declares
     itself), every result is defined, and every value or coordinate read is bound. Scope-aware
-    ``free_names`` supplies both the construction check and canonical statement ordering.
+    ``free_names`` supplies the construction check, the crate's ``fragment_order`` the statement order.
 
     α-invariance is CANONICAL RENUMBERING (the existing rename machinery), not de Bruijn:
     :meth:`canonical` renumbers params (``_p0…``) and internal defs (``_v0…``) in walk order,
@@ -89,7 +60,7 @@ class Lambda(Wire):
     def __post_init__(self) -> None:
         if not isinstance(self.params, tuple):
             object.__setattr__(self, "params", tuple(self.params))
-        body = _normalize_body(Body.coerce(self.body))
+        body = _normalize_body(Body.coerce(self.body), self.params)
         if not isinstance(self.body, Body) or body != self.body:
             object.__setattr__(self, "body", body)
         if not isinstance(self.results, tuple):
@@ -130,7 +101,7 @@ class Lambda(Wire):
 
         Callers form; :meth:`__post_init__` refuses. They stay separate because a constructor that
         repaired its own input would enforce nothing."""
-        body = _normalize_body(Body.coerce(body))
+        body = _normalize_body(Body.coerce(body), tuple(params))
         bound = set(params)
         for stmt in body:
             bound |= exposed_defines(stmt)
