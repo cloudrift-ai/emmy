@@ -37,7 +37,11 @@ takes its parent's imports.
   operands as `BinaryExpression` (`op`, `left`, `right`) and every other application as `FunctionCallExpression`
   (`name`, `args`), two views over the one node. The printer and the
   reader (exact inverses, the text being the one wire and structural form), substitution, renaming, the simplifier under
-  a `SimplifyCtx` of ranges and symbolic bounds, the range analysis, the affine form. A literal keeps Python's number
+  a `SimplifyCtx` of ranges and symbolic bounds, the range analysis, the affine form. Where the range analysis answers
+  nothing — a guarded or padded coordinate, a select whose condition correlates with a branch — `exact_range`
+  evaluates the expression at every point of a small static domain; the analysis stays conservative-or-nothing, since
+  the simplifier and the cut pass both read it and a loose bound (a select's branch hull) would lay a workspace out
+  over addresses no channel writes. A literal keeps Python's number
   model (`Num`: int, float or bool, equal by value) because a stored kernel's text spells it that way, and is typed by a
   `LitType`. Integer rewrites are checked: a product that would overflow declines the rewrite rather than fold wrong.
   The two kinds of scalar arithmetic the IR has are the two expression classes (`ExprClass`), each a predicate over the
