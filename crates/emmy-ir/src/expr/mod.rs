@@ -1099,7 +1099,54 @@ impl Expression {
                     _ => None,
                 }
             }
+            // A select's range is left to enumeration (`exact_range`): the hull of its branches is sound but loose
+            // where the condition correlates with a branch (`a >= 3 ? a - 3 : 0` never reaches -3), and the cut
+            // pass lays a workspace out over the exact range.
             _ => None,
+        }
+    }
+
+    /// The exact integer range over the context's ranges, by evaluating every point of the domain: for a coordinate
+    /// interval analysis does not bound (a guarded or padded one). `None` when a free name has no range, or the domain
+    /// holds more than `cap` points; an error where a point does not evaluate.
+    pub fn exact_range(&self, ctx: &SimplifyCtx, cap: u128) -> Result<Option<Interval>> {
+        let mut names = self.free_vars();
+        names.sort();
+        let mut spans = Vec::with_capacity(names.len());
+        let mut points: u128 = 1;
+        for name in &names {
+            let Some(range) = ctx.ranges.get(name) else {
+                return Ok(None);
+            };
+            spans.push((range.lo, range.hi));
+            points = points.saturating_mul((range.hi - range.lo + 1).max(0) as u128);
+            if points > cap {
+                return Ok(None);
+            }
+        }
+        let mut env: HashMap<Name, Num> = names.iter().map(|name| (*name, Num::Int(0))).collect();
+        let mut point: Vec<i128> = spans.iter().map(|(lo, _)| *lo).collect();
+        let (mut lo, mut hi) = (i128::MAX, i128::MIN);
+        loop {
+            for (name, value) in names.iter().zip(&point) {
+                env.insert(*name, Num::Int(*value as i64));
+            }
+            let value = i128::from(self.eval(&env)?.as_int()?);
+            lo = lo.min(value);
+            hi = hi.max(value);
+            // Advance the odometer, last name fastest; done when every digit has wrapped.
+            let mut digit = point.len();
+            loop {
+                if digit == 0 {
+                    return Ok(Some(Interval::new(lo, hi)));
+                }
+                digit -= 1;
+                if point[digit] < spans[digit].1 {
+                    point[digit] += 1;
+                    break;
+                }
+                point[digit] = spans[digit].0;
+            }
         }
     }
 
@@ -1714,6 +1761,43 @@ mod tests {
         assert_eq!(e.text(), "k");
         let e = parse("i / 2 * 2 + i % 2").unwrap().simplify(&ctx).unwrap();
         assert_eq!(e.text(), "i");
+    }
+
+    #[test]
+    fn the_exact_range_enumerates_what_interval_analysis_does_not_bound() {
+        let ctx = SimplifyCtx::empty()
+            .extend("a", Interval::new(0, 7), None)
+            .extend("b", Interval::new(0, 15), None);
+        // A guarded coordinate: the hull of the branches would say [-3, 12], the points say [0, 12].
+        let guarded = parse("a >= 3 ? a - 3 + b : 0").unwrap();
+        assert_eq!(guarded.range(&ctx), None);
+        assert_eq!(
+            guarded.exact_range(&ctx, 1 << 20).unwrap(),
+            Some(Interval::new(0, 19))
+        );
+        let padded = parse("(a < 4 ? b : 0) * 3 + a % 2").unwrap();
+        assert_eq!(
+            padded.exact_range(&ctx, 1 << 20).unwrap(),
+            Some(Interval::new(0, 46))
+        );
+        // Past the cap, or with a name no range covers, nothing is claimed.
+        assert_eq!(padded.exact_range(&ctx, 4).unwrap(), None);
+        assert_eq!(
+            parse("a < 4 ? c : 0")
+                .unwrap()
+                .exact_range(&ctx, 1 << 20)
+                .unwrap(),
+            None
+        );
+        // A domain that starts below zero is walked from its start.
+        let signed = SimplifyCtx::empty().extend("n", Interval::new(-2, 2), None);
+        assert_eq!(
+            parse("n < 0 ? 0 - n : n")
+                .unwrap()
+                .exact_range(&signed, 1 << 20)
+                .unwrap(),
+            Some(Interval::new(0, 2))
+        );
     }
 
     #[test]

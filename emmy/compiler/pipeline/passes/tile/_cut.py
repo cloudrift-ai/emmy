@@ -30,7 +30,7 @@ rather than a sequence of them.
 from __future__ import annotations
 
 from dataclasses import dataclass, replace
-from itertools import permutations, product
+from itertools import permutations
 from math import gcd, prod
 
 import numpy as np
@@ -1107,15 +1107,7 @@ def _bounds(expression: Expression, ctx: SimplifyCtx) -> Interval | None:
     """``expression``'s integer range: interval analysis, else the exact range over a small static domain (a guarded or
     padded coordinate, which interval analysis does not bound)."""
     bounds = expression.range(ctx)
-    if bounds is not None:
-        return bounds
-    names = sorted(expression.free_vars())
-    if prod(ctx.ranges[name].hi + 1 for name in names) > 1 << 20:
-        return None
-    values = [
-        expression.eval(dict(zip(names, point, strict=True))) for point in product(*(range(ctx.ranges[name].hi + 1) for name in names))
-    ]
-    return Interval(int(min(values)), int(max(values)))
+    return bounds if bounds is not None else expression.exact_range(ctx, 1 << 20)
 
 
 def _contraction_forms(seam: CutSite, axes: tuple) -> dict[int, tuple] | None:
