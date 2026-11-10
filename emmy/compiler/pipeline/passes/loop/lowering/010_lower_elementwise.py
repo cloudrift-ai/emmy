@@ -42,7 +42,7 @@ def rewrite(match: Match, root: Node) -> Graph | None:
         idx = _identity_index(inp_shape, axes)
         name = f"in{i}"
         load_names.append(name)
-        load_stmts.append(Load(names=(name,), input=inp_id, index=idx))
+        load_stmts.append(Load(names=(name,), input=inp_id, index=idx, dtype=inp_t.dtype if inp_t is not None else None))
 
     write_index = tuple(Var(a.name) for a in axes)
     if isinstance(root.op, ElementwiseOp):

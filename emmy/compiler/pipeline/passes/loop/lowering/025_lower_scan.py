@@ -46,7 +46,7 @@ def rewrite(match: Match, root: Node) -> Graph | None:
         Loop(
             axis=scan_axis,
             body=(
-                Load(names=("in0",), input=src_id, index=index),
+                Load(names=("in0",), input=src_id, index=index, dtype=src_node.output.dtype),
                 Accum(name="acc", value="in0", op=ElementwiseImpl("add"), axes=(scan_axis.name,)),
                 Write(output=f"loop_{root.id}", index=index, values=("acc",)),
             ),

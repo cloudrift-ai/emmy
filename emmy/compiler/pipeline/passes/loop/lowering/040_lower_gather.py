@@ -59,8 +59,8 @@ def rewrite(root: Node, inp_data: Node, inp_idx: Node, out: Tensor) -> Graph | N
         raise ValueError(f"lower_gather: incompatible ranks — out_rank={out_rank}, data_rank={data_rank}, idx_rank={idx_rank}, axis={axis}")
 
     inner: Body = (
-        Load(names=("idx",), input=inp_idx.id, index=idx_index),
-        Load(names=("data",), input=inp_data.id, index=data_index),
+        Load(names=("idx",), input=inp_idx.id, index=idx_index, dtype=inp_idx.output.dtype),
+        Load(names=("data",), input=inp_data.id, index=data_index, dtype=inp_data.output.dtype),
         Write(output=f"loop_{root.id}", index=tuple(Var(a.name) for a in axes), values=("data",)),
     )
     body: Body = inner

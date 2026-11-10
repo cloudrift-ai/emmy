@@ -37,7 +37,7 @@ def rewrite(match: Match, root: Node) -> Graph | None:
         src_shape = t.shape if (t := graph.buffer(src_id)) is not None else ()
         idx = _substituted_index(src.coord_map, mapping, src_shape)
         input_names.append(src_id)
-        body.append(Load(names=("in0",), input=src_id, index=idx))
+        body.append(Load(names=("in0",), input=src_id, index=idx, dtype=t.dtype if t is not None else None))
         body.append(Write(output=out_buf, index=write_index, values=("in0",)))
     else:
         branches: list[SelectBranch] = []
@@ -47,7 +47,7 @@ def rewrite(match: Match, root: Node) -> Graph | None:
             idx = _substituted_index(src.coord_map, mapping, src_shape)
             input_names.append(src_id)
             name = f"in{i}"
-            body.append(Load(names=(name,), input=src_id, index=idx))
+            body.append(Load(names=(name,), input=src_id, index=idx, dtype=t.dtype if t is not None else None))
             select_expression = src.select.substitute(mapping) if src.select is not None else Literal(True, "bool")
             branches.append(SelectBranch(value=name, select=select_expression))
         body.append(Select(name="v", branches=tuple(branches)))

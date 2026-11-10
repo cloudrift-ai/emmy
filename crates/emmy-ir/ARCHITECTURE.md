@@ -15,8 +15,8 @@ The modules stand in a tower: each imports only the ones below it (`field`, `sta
 each other's types), from the interned names and the expression tree at the bottom, through the operation table, the
 dtypes, the axes, the field types, the statement declarations and `Body`, the protocol, the text, the ordering
 constraints and the value numbering, to `normalize/` (the driver `normalize_body` and the steps, one module per step,
-every tie-break in `ties.rs`) and `identity.rs` at the top. Every file imports what it uses by name; no child module
-takes its parent's imports.
+the dtypes a body's names compute at in `dtypes.rs`, every tie-break in `ties.rs`) and `identity.rs` at the top. Every
+file imports what it uses by name; no child module takes its parent's imports.
 
 ## Data
 

@@ -138,6 +138,7 @@ fn assign(name: &Name, value: Expression, dtype: Option<DType>) -> Arc<Statement
 pub mod axes;
 pub mod canonical;
 pub mod definitions;
+pub mod dtypes;
 pub mod fold;
 pub mod place;
 pub mod siblings;

@@ -62,7 +62,7 @@ def rewrite(match: Match, root: Node) -> Graph | None:
         Loop(
             axis=reduce_axis,
             body=(
-                Load(names=("in0",), input=src_id, index=load_index),
+                Load(names=("in0",), input=src_id, index=load_index, dtype=src_node.output.dtype),
                 Accum(name="acc", value="in0", op=combine, axes=(reduce_axis_name,)),
             ),
         ),

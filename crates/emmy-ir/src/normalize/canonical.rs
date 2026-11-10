@@ -4,6 +4,7 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
+use super::dtypes::{DTypes, SumKind, Typed, dtypes_of};
 use super::ties;
 use super::{carried_out, unify_siblings, with_bodies};
 use crate::body::{Body, free_names, unique};
@@ -263,7 +264,8 @@ pub fn canonical_order(body: &Body) -> Result<Body> {
     let operand = ties::operand_ranks(&placed, &result, &numbering);
     let operand_key = |name: &Name| operand.get(name).cloned().unwrap_or_else(ties::unranked);
     let rank = |name: &Name| operand_key(name);
-    let listed = result.map_stmts(&mut |stmt| Some(canonical_fields(stmt, &rank)));
+    let dtypes = dtypes_of(&result);
+    let listed = result.map_stmts(&mut |stmt| Some(canonical_fields(stmt, &rank, &dtypes)));
     // Sequential naming separates lexical binders. Restore shared reduction dimensions without merging dependent
     // loops or changing the order.
     let unified = listed.try_map_stmts(&mut |stmt| {
@@ -279,18 +281,23 @@ pub fn canonical_order(body: &Body) -> Result<Body> {
 
 /// Every expression of `stmt` in canonical form, each in the coefficient domain its field's class declares
 /// (`Index`: integer coefficients, exact over coordinates; `Value`: float), its operands ranked by `rank`.
-fn canonical_fields(stmt: &Arc<Statement>, rank: &dyn Fn(&Name) -> Key) -> Arc<Statement> {
-    struct Canonical<'a>(&'a dyn Fn(&Name) -> Key);
+fn canonical_fields(
+    stmt: &Arc<Statement>,
+    rank: &dyn Fn(&Name) -> Key,
+    dtypes: &DTypes,
+) -> Arc<Statement> {
+    struct Canonical<'a>(&'a dyn Fn(&Name) -> Key, &'a DTypes);
     impl Rewriter for Canonical<'_> {
         fn expression(&mut self, roles: Roles, expression: &Expression) -> Expression {
             value_canonical(
                 expression,
                 self.0,
                 class_of(roles).unwrap_or(ExprClass::Value),
+                self.1,
             )
         }
     }
-    let new = stmt.rewrite_fields(&mut Canonical(rank));
+    let new = stmt.rewrite_fields(&mut Canonical(rank, dtypes));
     if new.same(stmt) {
         stmt.clone()
     } else {
@@ -307,8 +314,9 @@ pub(crate) fn value_canonical(
     e: &Expression,
     rank: &dyn Fn(&Name) -> Key,
     class: ExprClass,
+    dtypes: &DTypes,
 ) -> Expression {
-    let e = e.map_children(&mut |child| value_canonical(child, rank, class));
+    let e = e.map_children(&mut |child| value_canonical(child, rank, class, dtypes));
     let Some((op, args)) = e.operation() else {
         return e;
     };
@@ -326,13 +334,23 @@ pub(crate) fn value_canonical(
         };
     }
     if affine_node(op, args, class) {
-        return affine_sum(affine_terms(&e, class), rank);
+        let form = affine_terms(&e, class);
+        // An index is integer arithmetic; a value computes in the kind its operands' types say, where they are known.
+        let kind = if class == ExprClass::Index {
+            SumKind::Integer
+        } else {
+            let operands: Vec<Expression> =
+                form.terms.iter().map(|(_, term)| term.clone()).collect();
+            dtypes.sum_kind(&operands)
+        };
+        return affine_sum(form, rank, kind);
     }
     if let [left, right] = args {
-        // A remainder by one is zero and a floor division by one is its dividend for integers — an index is one; a
-        // value's operand may be a float, whose `x % 1` is its fraction and `x // 1` its floor, so a value keeps both
-        // (the simplifier folds them for a dividend under loop ranges; this is the index read through a bare name).
-        if class == ExprClass::Index && right.int_literal() == Some(1) {
+        // A remainder by one is zero and a floor division by one is its dividend for INTEGER operands alone: a
+        // float's `x % 1` is its fraction and `x // 1` its floor, so those fold only where the operand is known.
+        let integer_operand = class == ExprClass::Index
+            || matches!(dtypes.value(left), Typed::Known(dtype) if dtype.is_integer());
+        if right.int_literal() == Some(1) && integer_operand {
             match op {
                 Operation::Remainder => return Expression::int(0),
                 Operation::FloorDivide => return left.clone(),
@@ -486,20 +504,23 @@ pub fn affine_terms(e: &Expression, class: ExprClass) -> AffineTerms {
 
 /// The sum an affine form spells, its terms ordered by `rank`: the one spelling of a sum in the normal form, and the
 /// one every reader that takes a sum apart and puts it back uses.
-pub fn affine_sum(form: AffineTerms, rank: &dyn Fn(&Name) -> Key) -> Expression {
+pub fn affine_sum(form: AffineTerms, rank: &dyn Fn(&Name) -> Key, kind: SumKind) -> Expression {
     let AffineTerms {
         terms,
         offset,
         float,
     } = form;
-    // A whole-number coefficient or offset is spelled as the integer when no float literal fed the sum: `x + x` is
-    // `2 * x`, and integer arithmetic over coordinates stays integer. Once a float literal fed it, every literal the
-    // sum spells is a float (`2.0 * x`, `x - 8.0`, `2.0 * x + 2.0 * y` for `x + x + 2.0 * y`): the literal is what
-    // makes an operation over integer operands a float one, and an integer in its place would compute `code - 8` at
-    // the code's width. A sum that would spell no literal at all (`1.0 * x`, `x + 0.0`, `x - 8.0 + 8.0`) keeps one on
-    // its first term, `1.0 * x`, for the same reason.
+    // The kind the sum computes in decides its literals' spelling. A float sum (an operand known float) spells every
+    // whole-number coefficient and offset as a float (`2.0 * x` for `x + x` over f32), and its identity elements fold
+    // away exactly (`x * 1.0`, `x + 0.0` are `x`). An integer sum (every operand known integer) spells them as
+    // integers, unless a float literal fed it: then the literal is what makes the operation a float one, every
+    // literal it spells is a float (`code - 8.0`, `2.0 * code + 2.0 * y` for `code + code + 2.0 * y`), and a sum that
+    // would spell none keeps one on its first term (`1.0 * code` for `code * 1.0`), since `code - 8` would compute at
+    // the code's width. A sum with an operand nobody typed takes the float path only when a float literal fed it.
+    let float_spelling = float || kind == SumKind::Float;
+    let keep_literal = float && kind != SumKind::Float;
     let literal = |value: f64| {
-        if !float && value.fract() == 0.0 && value.abs() < 9007199254740992.0 {
+        if !float_spelling && value.fract() == 0.0 && value.abs() < 9007199254740992.0 {
             Expression::int(value as i64)
         } else {
             Expression::float(value)
@@ -518,7 +539,8 @@ pub fn affine_sum(form: AffineTerms, rank: &dyn Fn(&Name) -> Key) -> Expression 
     let spells_none = offset == 0.0 && merged.iter().all(|(c, _)| c.abs() == 1.0);
     let mut out: Option<Expression> = None;
     for (index, (coefficient, term)) in merged.into_iter().enumerate() {
-        let magnitude = if coefficient.abs() == 1.0 && !(float && spells_none && index == 0) {
+        let magnitude = if coefficient.abs() == 1.0 && !(keep_literal && spells_none && index == 0)
+        {
             term
         } else {
             Expression::apply(Operation::Multiply, vec![literal(coefficient.abs()), term])
@@ -545,15 +567,20 @@ pub fn affine_sum(form: AffineTerms, rank: &dyn Fn(&Name) -> Key) -> Expression 
 /// Every value expression of `body`'s statements in its canonical spelling under the names as they stand (see
 /// [`value_canonical`]): what a hand-written program and a derived one compare by once their names agree.
 pub fn canonical_values(body: &Body) -> Body {
+    let dtypes = dtypes_of(body);
     Body::new(
         body.stmts()
             .iter()
-            .map(|stmt| canonical_fields(stmt, &|name: &Name| Key::Str(*name)))
+            .map(|stmt| canonical_fields(stmt, &|name: &Name| Key::Str(*name), &dtypes))
             .collect(),
     )
 }
 
 pub fn canonicalize_expressions(body: &Body, axes: &[Name]) -> Result<Body> {
+    canonicalize_in(body, axes, &dtypes_of(body))
+}
+
+fn canonicalize_in(body: &Body, axes: &[Name], dtypes: &DTypes) -> Result<Body> {
     let axis_order: HashMap<Name, usize> = axes
         .iter()
         .enumerate()
@@ -564,10 +591,14 @@ pub fn canonicalize_expressions(body: &Body, axes: &[Name]) -> Result<Body> {
         .iter()
         .map(|stmt| {
             // A bound axis ranks by its binding, as the index rules order it; a value by its name until the order ranks it.
-            let rewritten = canonical_fields(stmt, &|name: &Name| match axis_order.get(name) {
-                Some(index) => Key::tuple([Key::Int(0), Key::Int(*index as i64)]),
-                None => Key::tuple([Key::Int(1), Key::Str(*name)]),
-            });
+            let rewritten = canonical_fields(
+                stmt,
+                &|name: &Name| match axis_order.get(name) {
+                    Some(index) => Key::tuple([Key::Int(0), Key::Int(*index as i64)]),
+                    None => Key::tuple([Key::Int(1), Key::Str(*name)]),
+                },
+                dtypes,
+            );
             let mut bound: Vec<Name> = axes.to_vec();
             bound.extend(stmt.bound_axes().iter().map(|axis| axis.name));
             let nested = rewritten.nested();
@@ -576,7 +607,7 @@ pub fn canonicalize_expressions(body: &Body, axes: &[Name]) -> Result<Body> {
             }
             let bodies: Result<Vec<Body>> = nested
                 .iter()
-                .map(|child| canonicalize_expressions(child, &bound))
+                .map(|child| canonicalize_in(child, &bound, dtypes))
                 .collect();
             Ok(with_bodies(&rewritten, bodies?))
         })
@@ -1187,6 +1218,92 @@ for r in 0..4:
                 "for a0 in 0..8:\n    i = load I[a0]\n    x = load X[i % 1, i // 1]\n    O[a0] = x",
                 "load X[0, in0]",
             ),
+        ];
+        for (program, expected) in cases {
+            let listing = normal(program);
+            assert!(listing.contains(expected), "{program}\n--\n{listing}");
+        }
+    }
+
+    /// The operands' types decide a sum's literals: a float sum spells them as floats and folds its identity
+    /// elements away exactly; an integer sum spells them as integers, unless a float literal fed it, which makes the
+    /// operation a float one and is kept; an operand nobody typed leaves the decision to the literal's own kind.
+    #[test]
+    fn the_operands_types_decide_a_sums_literals() {
+        let normal = |program: &str| text(&normalize_uncached(&body(program)).unwrap());
+        let cases: &[(&str, &str)] = &[
+            // float operands: identity elements fold, a whole-number coefficient is a float
+            (
+                "f32 x = load X[a]\nv = multiply(x, 1.0)\nw = exp(v)\nO[a] = w",
+                "v0 = exp(in0)\n",
+            ),
+            (
+                "bf16 x = load X[a]\nv = multiply(x, 1.0)\nw = exp(v)\nO[a] = w",
+                "v0 = exp(in0)\n",
+            ),
+            (
+                "f32 x = load X[a]\nv = add(x, 0.0)\nw = exp(v)\nO[a] = w",
+                "v0 = exp(in0)\n",
+            ),
+            (
+                "f32 x = load X[a]\nv = divide(x, 1.0)\nw = exp(v)\nO[a] = w",
+                "v0 = exp(in0)\n",
+            ),
+            (
+                "f32 x = load X[a]\nc = cos(x)\nv = multiply(c, 1.0)\nO[a] = v",
+                "v0 = cos(in0)\nO[a] = v0",
+            ),
+            (
+                "f32 x = load X[a]\nv = add(x, x)\nO[a] = v",
+                "v0 = 2.0 * in0\n",
+            ),
+            (
+                "f32 x = load X[a]\nf32 y = load Y[a]\nv = add(x, y)\nu = add(v, 0.0)\nO[a] = u",
+                "v0 = in0 + in1\n",
+            ),
+            // integer operands: integer spelling, and a float literal is kept since it makes the operation float
+            (
+                "u8 x = load X[a]\nv = add(x, x)\nO[a] = v",
+                "v0 = 2 * in0\n",
+            ),
+            (
+                "i32 x = load X[a]\nv = multiply(x, 1)\nw = multiply(v, v)\nO[a] = w",
+                "v0 = in0 * in0\n",
+            ),
+            (
+                "u8 x = load X[a]\nv = multiply(x, 1.0)\nw = multiply(v, v)\nO[a] = w",
+                "v0 = 1.0 * in0\nv1 = v0 * v0\n",
+            ),
+            (
+                "u8 x = load X[a]\nv = subtract(0.0, x)\nw = multiply(v, v)\nO[a] = w",
+                "v0 = -(1.0 * in0)\n",
+            ),
+            (
+                "u8 x = load X[a]\nv = multiply(0.0, x)\nO[a] = v",
+                "let f32 v0 = 0.0\n",
+            ),
+            (
+                "u8 x = load X[a]\nu8 y = load Y[a]\nd = subtract(x, x)\nw = add(d, y)\nO[a] = w",
+                "u8 in0 = load Y[a]\nO[a] = in0",
+            ),
+            (
+                "i32 x = load X[a]\ni32 y = load Y[a]\nd = multiply(x, 0)\nw = add(d, y)\nO[a] = w",
+                "i32 in0 = load Y[a]\nO[a] = in0",
+            ),
+            (
+                "i32 x = load X[a]\nv = remainder(x, 1)\nO[a] = v",
+                "let v0 = 0\n",
+            ),
+            (
+                "f32 x = load X[a]\nv = remainder(x, 1)\nO[a] = v",
+                "v0 = in0 % 1\n",
+            ),
+            // an untyped operand: the literal's own kind decides, and a float one is kept
+            (
+                "x = load X[a]\nv = multiply(x, 1.0)\nw = exp(v)\nO[a] = w",
+                "v0 = 1.0 * in0\n",
+            ),
+            ("x = load X[a]\nv = add(x, x)\nO[a] = v", "v0 = 2 * in0\n"),
         ];
         for (program, expected) in cases {
             let listing = normal(program);

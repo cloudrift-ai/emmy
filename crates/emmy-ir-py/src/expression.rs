@@ -893,7 +893,11 @@ pub fn affine_sum<'py>(
     };
     PyExpression::wrap(
         py,
-        &emmy_ir::normalize::affine_sum(form, &|_| emmy_ir::normalize::ties::unranked()),
+        &emmy_ir::normalize::affine_sum(
+            form,
+            &|_| emmy_ir::normalize::ties::unranked(),
+            emmy_ir::normalize::dtypes::SumKind::Unknown,
+        ),
     )
 }
 

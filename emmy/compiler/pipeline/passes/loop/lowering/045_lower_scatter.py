@@ -77,8 +77,8 @@ def rewrite(match: Match, root: Node, inp_dest: Node, inp_idx: Node, inp_values:
     out_index = (*(Var(a.name) for a in axes[:axis]), index, *(Var(a.name) for a in axes[axis + indexed :]))
 
     inner: Body = (
-        Load(names=("idx",), input=inp_idx.id, index=idx_index),
-        Load(names=("val",), input=inp_values.id, index=value_index),
+        Load(names=("idx",), input=inp_idx.id, index=idx_index, dtype=inp_idx.output.dtype),
+        Load(names=("val",), input=inp_values.id, index=value_index, dtype=inp_values.output.dtype),
         Cond(cond=BinaryExpression("<", index, extent), body=(Write(output=f"loop_{root.id}", index=out_index, values=("val",)),)),
     )
     body: Body = inner
