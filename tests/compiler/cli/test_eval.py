@@ -138,6 +138,7 @@ def test_eval_golden_audits_file_scoped_static_release(monkeypatch, tmp_path):
         "symbolic": False,
         "static_only": True,
         "expert_slices": 1,
+        "slot_width": 1,
         "dtype": "float16",
         "verify_width": 0,
         "embed_gpu": None,
