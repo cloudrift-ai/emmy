@@ -88,7 +88,7 @@ def test_fold_dump_shows_every_stored_param() -> None:
     assert "└─ combine: λ(acc0, acc0__o) -> (acc0)" in text
     # The lift's own body nests two under its signature — the stored program, read as the
     # binder's body rather than as a sibling of the branch labels.
-    assert "│    v1 = multiply(in0, in0)" in text
+    assert "│    v1 = in0 * in0" in text
 
 
 def test_contraction_dump_shows_the_k_axis_and_every_channel() -> None:
@@ -146,7 +146,7 @@ def test_a_computed_edge_nests_as_a_subtree_a_materialized_one_is_a_leaf() -> No
     assert "‹computed›" in a_line and "Fold  free" in a_line
     assert any("‹materialized›" in ln and "load Wg" in ln for ln in lines)
     # The cone's own body is reached BELOW the a edge — the subtree is really rendered.
-    assert any("xhat = multiply(xhat_e, xhat_s)" in ln for ln in lines)
+    assert any("xhat = xhat_e * xhat_s" in ln for ln in lines)
 
 
 def _two_operand_reader() -> Fold:
@@ -214,7 +214,7 @@ def test_a_scalar_operand_is_inlined_into_the_lift_that_reads_it() -> None:
     assert "lift: λ(acc0) -> (v3)" in text  # nor the params it bound
     # Its statements open the reader's body, under the reader's own names for them.
     assert "     s0 = load sdpa_scale[0]" in text
-    assert "     v2 = multiply(acc0, s0)" in text
+    assert "     v2 = acc0 * s0" in text
     # The reduce beside it is untouched: an edge that DOES decide keeps its branch.
     assert "operand[acc0]: Fold[k] reduce   ‹computed›" in text
 
@@ -235,9 +235,9 @@ def test_a_twisted_node_prints_its_stable_combine_then_psi_and_the_base_as_helpe
     text = "\n".join(pretty(fold))
     assert "├─ combine: λ(m, l, m__o, l__o) -> (m, l)" in text, "the stable ⊕ is the node's own algebra"
     assert "│    m__o__alpha = exp(m__o__dg)" in text, "body and all — the rescale is where the numerics live"
-    assert "│    m__o__dg = subtract(m, m__o__gn)" in text, "and every exp argument is visibly a distance below the pivot"
+    assert "│    m__o__dg = m - m__o__gn" in text, "and every exp argument is visibly a distance below the pivot"
     assert "├─ helper: psi λ(m, D, O) -> (m, d, o)" in text
-    assert "│    d = multiply(D, f)" in text, "the coordinate map's own program, in the recipe's names"
+    assert "│    d = D * f" in text, "the coordinate map's own program, in the recipe's names"
     assert "└─ helper: base = (maximum, add)" in text
     assert "acc0 <- " not in text  # still nothing derived from the step
 

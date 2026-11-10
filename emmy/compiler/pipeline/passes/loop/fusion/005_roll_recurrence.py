@@ -28,7 +28,7 @@ from emmy.compiler.dtype import F32
 from emmy.compiler.graph import Graph, Node, Tensor
 from emmy.compiler.ir.axis import Axis
 from emmy.compiler.ir.base import ConstantOp, InputOp
-from emmy.compiler.ir.expression import BinaryExpr, Expression, Literal, Var, affine_form
+from emmy.compiler.ir.expression import BinaryExpression, Expression, Literal, Var, affine_form
 from emmy.compiler.ir.loop import LoopOp, UnfusableStmt
 from emmy.compiler.ir.sigma import Sigma
 from emmy.compiler.ir.stmt import Accum, Assign, Body, Carry, Let, Load, Loop, Pre, Select, SelectBranch, Statement, Write
@@ -85,20 +85,21 @@ def _literals_abstracted(body: Body) -> tuple[Body, tuple[int, ...]]:
     def lift(expression):
         # An affine index carries its anchor whole, a zero one included: ``a`` and ``a + 4`` are
         # one shape read at two offsets, and normalization spells the first without the ``+ 0``.
+        # A value's float offset (``acc + 1e-6``) is no integer literal and stays as spelled.
         if isinstance(expression, Literal):
             return abstract(expression)
         form = affine_form(expression, expression.free_vars())
         try:
-            anchor = int(form[0].eval({})) if form is not None else None
+            anchor = form[0].eval({}) if form is not None else None
         except (KeyError, TypeError, ValueError):
             anchor = None
-        if anchor is None:
+        if type(anchor) is not int:
             return expression.rebuild(abstract)
         rest = None
         for name, coeff in sorted(form[1].items()):
-            term = Var(name) if coeff == 1 else BinaryExpr("*", Var(name), Literal(coeff, "int"))
-            rest = term if rest is None else BinaryExpr("+", rest, term)
-        return held(anchor) if rest is None else BinaryExpr("+", rest, held(anchor))
+            term = Var(name) if coeff == 1 else BinaryExpression("*", Var(name), Literal(coeff, "int"))
+            rest = term if rest is None else BinaryExpression("+", rest, term)
+        return held(anchor) if rest is None else BinaryExpression("+", rest, held(anchor))
 
     def abstracted(stmt):
         # A loop's static extent is a literal too: a step whose reduction covers one more
@@ -237,11 +238,15 @@ def _advanced(abstract: Body, literals: tuple[int, ...], deltas: tuple[int, ...]
     def value(literal: int, delta: int) -> Expression:
         if isinstance(by, int):
             return Literal(literal + delta * by, "int")
-        return BinaryExpr("+", Literal(literal, "int"), BinaryExpr("*", by, Literal(delta, "int"))) if delta else Literal(literal, "int")
+        return (
+            BinaryExpression("+", Literal(literal, "int"), BinaryExpression("*", by, Literal(delta, "int")))
+            if delta
+            else Literal(literal, "int")
+        )
 
     def fold(expression: Expression) -> Expression:
         # The abstraction lifts every affine anchor, so a zero one comes back as ``+ 0``.
-        if isinstance(expression, BinaryExpr) and expression.op == "+" and expression.right == Literal(0, "int"):
+        if isinstance(expression, BinaryExpression) and expression.op == "+" and expression.right == Literal(0, "int"):
             return expression.left
         return expression
 
@@ -258,9 +263,12 @@ def _advanced(abstract: Body, literals: tuple[int, ...], deltas: tuple[int, ...]
             if stmt.op.identity is None:
                 raise RuleSkipped(f"{stmt.op.name} has no identity to fold past a step's bound")
             idle, contributed = f"{stmt.name}__idle{masked}", f"{stmt.name}__in{masked}"
+            # A branch carries a name: the folded value is bound first unless it is one already.
+            bound = () if isinstance(stmt.value, Var) else (Assign(f"{stmt.name}__v{masked}", stmt.value),)
+            value = stmt.value.name if isinstance(stmt.value, Var) else bound[0].name
             masked += 1
-            select = Select(name=contributed, branches=(SelectBranch(stmt.value, within), SelectBranch(idle, Literal(True, "bool"))))
-            return (Let(name=idle, value=stmt.init), select, stmt.replace(value=contributed))
+            select = Select(name=contributed, branches=(SelectBranch(value, within), SelectBranch(idle, Literal(True, "bool"))))
+            return (Let(name=idle, value=stmt.init), *bound, select, stmt.replace(value=contributed))
 
         return past_the_bound
 
@@ -273,7 +281,7 @@ def _advanced(abstract: Body, literals: tuple[int, ...], deltas: tuple[int, ...]
             if isinstance(by, int) or delta == 0:
                 return stmt.replace(axis=replace(stmt.axis, extent=Dim(literal + delta * (by if isinstance(by, int) else 0))))
             widest = max(literal, literal + delta * (steps - 1))
-            within = BinaryExpr("<", Var(stmt.axis.name), value(literal, delta))
+            within = BinaryExpression("<", Var(stmt.axis.name), value(literal, delta))
             return stmt.replace(axis=replace(stmt.axis, extent=Dim(widest)), body=stmt.body.map(mask(within)))
         if stmt.nested():
             return stmt

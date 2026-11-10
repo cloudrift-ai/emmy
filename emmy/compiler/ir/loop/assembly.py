@@ -21,7 +21,6 @@ from emmy.compiler.ir.loop.builder import BodyBuilder
 from emmy.compiler.ir.sigma import Sigma
 from emmy.compiler.ir.stmt import (
     Accum,
-    Affine,
     Assign,
     Body,
     Call,
@@ -144,7 +143,7 @@ def expand_calls(body: Body) -> Body:
             continue
         scope = root.scopes[name]
         value = builder._ensure_dep(name, "root", Sigma.IDENTITY, scope)
-        builder.insert(Assign(name, "copy", (value,)), scope)
+        builder.insert(Assign(name, Var(value)), scope)
     builder.resolve()
     return Body.coerce(builder.finish())
 
@@ -374,8 +373,8 @@ class Splicer(BodyBuilder):
             args = tuple(d.sigma.apply(arg).substitute(rename) for arg in stmt.args)
             sigma = _canonical(Sigma(dict(zip(stmt.target.params, args, strict=True))), d.demand_scope)
             value = self._ensure_dep(stmt.target.result, self.expand[stmt.target], sigma, d.demand_scope)
-            self.insert(Assign(name=d.bound_as, op="copy", args=(value,)), d.demand_scope)
-        elif isinstance(stmt, (Assign, Affine, Select, Let)):
+            self.insert(Assign(name=d.bound_as, value=Var(value)), d.demand_scope)
+        elif isinstance(stmt, (Assign, Select, Let)):
             # A ``Let`` is a pure binding like an ``Assign``: the twisted carrier's injected literal, an index bound once.
             self._resolve_plain(stmt, d)
         else:
@@ -416,7 +415,7 @@ class Splicer(BodyBuilder):
         if sigma is None:
             raise NotSupported(f"σ-solve failed pairing target write index {target_write.index} against reader index {effective_index}")
         v_bound = self._ensure_dep(target_write.value, target_tag, _canonical(sigma, d.demand_scope), d.demand_scope)
-        self.insert(Assign(name=d.bound_as, op="copy", args=(v_bound,)), d.demand_scope)
+        self.insert(Assign(d.bound_as, Var(v_bound)), d.demand_scope)
 
     def _resolve_accum(self, stmt: Accum, d: _Demand) -> None:
         """Queue the value under a shared iteration scope for independent reductions of equal extent."""
@@ -428,8 +427,11 @@ class Splicer(BodyBuilder):
         fresh_name = reduce_axis.name
         inner_sigma = d.sigma.extend(orig_axis.name, Var(fresh_name))
         inner_scope = Scope(enclosing=d.demand_scope.enclosing + (reduce_axis,))
-        value_bound = self._ensure_dep(stmt.value, d.origin, inner_sigma, inner_scope)
-        self.insert(Accum(name=d.bound_as, value=value_bound, op=stmt.op, axes=(fresh_name,)), inner_scope)
+        meta = self.loops[d.origin]
+        rename = {v: self._ensure_dep(v, d.origin, inner_sigma, inner_scope) for v in stmt.deps() if v in meta.defs and v != stmt.name}
+        rename[stmt.name] = d.bound_as
+        resolved = stmt.rewrite(lambda n: rename.get(n, n), inner_sigma)
+        self.insert(resolved.replace(axes=(fresh_name,)), inner_scope)
 
 
 # ---------------------------------------------------------------------------

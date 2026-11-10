@@ -31,6 +31,10 @@ _POST_DECOMPOSITION_ROOTS = (
 )
 
 
+# The normalization entry point and the steps a pass may run on its own.
+_STEPS = ("normalize_body", "one_operation_per_definition", "canonical_values", "simplify_body", "prepare_body")
+
+
 def test_checkpoint_format_names_stop_at_frontend_decomposition() -> None:
     """Checkpoint-format implementation details may not enter downstream dialects or passes."""
     forbidden = re.compile(r"\b(?:trellis|exl3)\b", re.IGNORECASE)
@@ -121,29 +125,19 @@ def test_ir_does_not_import_pipeline() -> None:
     assert not offenders, "ir/ must not import the pipeline layer:\n" + "\n".join(offenders)
 
 
-def test_normalization_has_one_entry_point_and_no_orphan_transform() -> None:
-    """Every transform in ``ir/stmt/normalize.py`` runs inside ``normalize_body``.
+def test_normalization_has_one_entry_point() -> None:
+    """Body normalization is the canonical form every Loop IR body and every identity digest takes; it answers to no
+    knob, pin or evidence. It lives in the ``emmy-ir`` crate behind one entry point, ``normalize_body``; the package
+    exports beside it only the four steps a pass may run on its own, and holds no transform of its own."""
+    import emmy.compiler.ir.stmt as stmt
 
-    Body normalization is the canonical form every Loop IR body and every identity digest takes;
-    it answers to no knob, pin or evidence. A transform a pass invokes on its own is that pass's
-    code and lives in its pass file. Two signs give one away: it is exported beside
-    ``normalize_body``, or no other function in the module calls it.
-    """
-    module = ast.parse((_REPO_ROOT / "emmy" / "compiler" / "ir" / "stmt" / "normalize.py").read_text())
-    exported = next(
-        ast.literal_eval(node.value)
-        for node in module.body
-        if isinstance(node, ast.Assign) and any(isinstance(t, ast.Name) and t.id == "__all__" for t in node.targets)
-    )
-    assert exported == ["normalize_body"], f"normalize.py exports {exported}; normalization has one entry point"
-    functions = [node for node in module.body if isinstance(node, ast.FunctionDef)]
-    drivers = {"normalize_body", "_normalize_body"}
-    orphans = []
-    for function in functions:
-        callers = {name.id for other in module.body if other is not function for name in ast.walk(other) if isinstance(name, ast.Name)}
-        if function.name not in drivers and function.name not in callers:
-            orphans.append(function.name)
-    assert not orphans, "no normalization step calls these; a transform invoked only from outside is a pass:\n" + "\n".join(orphans)
+    steps = {name for name in stmt.__all__ if name in _STEPS}
+    assert steps == set(_STEPS)
+    package = _REPO_ROOT / "emmy" / "compiler" / "ir" / "stmt"
+    modules = sorted(path.name for path in package.glob("*.py"))
+    assert modules == ["__init__.py", "glue.py"], "the statement package is its exports and the glue"
+    crate = (_REPO_ROOT / "crates" / "emmy-ir" / "src" / "normalize" / "mod.rs").read_text()
+    assert "pub fn normalize_body(" in crate
 
 
 _STMT_PACKAGE = "emmy.compiler.ir.stmt"
@@ -183,24 +177,27 @@ def test_the_statement_module_exports_a_pinned_list() -> None:
     """The statement module's interface is this list. A name added here is a decision, not a convenience."""
     import emmy.compiler.ir.stmt as stmt
 
-    kinds = ["Statement", "Load", "Assign", "Affine", "Accum", "Carry", "Pre", "Init", "Let", "Write", "Select", "SelectBranch"]
-    kinds += ["ZeroPrologue", "Loop", "StridedLoop", "Cond"]
-    containers = ["Body", "OutputSpec"]
-    functions = ["normalize_body", "canonicalize_identity", "free_names", "exposed_defines", "rename_free", "binary"]
+    statement_types = ["Statement", "Load", "Assign", "Accum", "Carry", "Pre", "Init", "Let", "Write", "Select", "SelectBranch"]
+    statement_types += ["ZeroPrologue", "Loop", "StridedLoop", "Cond"]
+    containers = ["Body", "Identity", "OutputSpec"]
+    functions = ["canonicalize_identity", "free_names", "exposed_defines", "rename_free"]
+    functions += ["clear_memos"]
     functions += ["mask_select_predicate", "pretty_body", "parse_body", "ordering_constraints", "dtype_promote"]
-    # Normalization steps a pass calls on its own, and the two kinds fusion assembles a region with.
-    steps = ["fold_affine", "simplify_body", "prepare_body"]
+    # Normalization steps a pass calls on its own, and the two statement types fusion assembles a region with.
+    steps = list(_STEPS)
     assembly = ["Call", "Subroutine"]
-    # What a layer declares a kind of its own with: the decorator that writes the protocol, and a field's role.
-    declaring = ["statement", "role", "fields_of"]
-    assert sorted(stmt.__all__) == sorted(kinds + containers + functions + steps + assembly + declaring)
+    # The names of a statement type's fields, for the one pass that generalizes whole statements.
+    declaring = ["fields_of"]
+    assert sorted(stmt.__all__) == sorted(statement_types + containers + functions + steps + assembly + declaring)
 
 
 def test_the_statement_module_depends_on_expressions_and_values_only() -> None:
-    """``ir/stmt`` is the vocabulary every IR shares, so it sits below all of them: it imports expressions, axes,
-    dtypes and the structural and wire forms. No op, tensor, graph, backend, renderer or pipeline."""
+    """``ir/stmt`` is the vocabulary every IR shares, so it sits below all of them: it imports the extension that
+    implements it, expressions, axes, dtypes and the structural and wire forms. No op, tensor, graph, backend,
+    renderer or pipeline."""
     allowed = (
         _STMT_PACKAGE,
+        "emmy.emmy_ir",
         "emmy.compiler.ir.expression",
         "emmy.compiler.ir.axis",
         "emmy.compiler.ir.sigma",
@@ -217,52 +214,6 @@ def test_the_statement_module_depends_on_expressions_and_values_only() -> None:
             if module.startswith("emmy") and not any(module == root or module.startswith(root + ".") for root in allowed):
                 offenders.append(f"{py.relative_to(_REPO_ROOT)}: {module}")
     assert not offenders, "the statement module must not depend on these:\n" + "\n".join(offenders)
-
-
-def test_a_statement_is_copied_and_read_through_its_own_methods() -> None:
-    """Outside ``ir/stmt``, nothing edits a statement with ``dataclasses.replace`` (``Statement.replace`` is the one way)
-    and nothing lists a statement's dataclass fields: a caller reads a statement through the statement protocol, so
-    a kind need not be a dataclass.
-
-    The class such a call receives is not visible in the source, so this lowers the first corpus case of each
-    family and watches the calls. The wire form and the structural form may list fields: they are where a
-    statement's class states them, and they read a dataclass kind on its behalf.
-    """
-    import dataclasses
-    import sys
-
-    from emmy.compiler.ir.stmt import SelectBranch, Statement
-    from tests.compiler.realization import helpers
-
-    kinds = (Statement, SelectBranch)
-    inside = str(_REPO_ROOT / "emmy" / "compiler" / "ir" / "stmt")
-    forms = {str(_REPO_ROOT / "emmy" / "compiler" / name) for name in ("wire.py", "structural.py")} | {dataclasses.__file__}
-    listers = {dataclasses.fields.__code__: "class_or_instance", dataclasses.asdict.__code__: "obj", dataclasses.astuple.__code__: "obj"}
-    copies: set[str] = set()
-    listings: set[str] = set()
-
-    def watch(frame, event, _arg):  # noqa: ANN001, ANN202 — the ``sys.setprofile`` signature
-        if event != "call" or not (frame.f_code is dataclasses.replace.__code__ or frame.f_code in listers):
-            return
-        subject = frame.f_locals.get(listers.get(frame.f_code, "obj"))
-        caller = frame.f_back.f_code.co_filename
-        if not (isinstance(subject, kinds) or (isinstance(subject, type) and issubclass(subject, kinds))) or caller.startswith(inside):
-            return
-        if frame.f_code not in listers:
-            copies.add(f"{pathlib.Path(caller).relative_to(_REPO_ROOT)}:{frame.f_back.f_lineno}")
-        elif caller not in forms:
-            listings.add(f"{pathlib.Path(caller).relative_to(_REPO_ROOT)}:{frame.f_back.f_lineno}")
-
-    cases = [helpers.load_case(sorted(family.glob("*.json"))[0]) for family in sorted(helpers.CASES_DIR.iterdir()) if family.is_dir()]
-    previous = sys.getprofile()
-    sys.setprofile(watch)
-    try:
-        for case in cases:
-            helpers.lowered(case, case.context())
-    finally:
-        sys.setprofile(previous)
-    assert not copies, "copy these statements with ``stmt.replace(...)``:\n" + "\n".join(sorted(copies))
-    assert not listings, "read these statements through the statement protocol:\n" + "\n".join(sorted(listings))
 
 
 def test_a_class_is_on_the_wire_by_what_it_registers() -> None:
@@ -515,41 +466,7 @@ def test_nothing_reaches_into_the_scheduler_for_identity() -> None:
     assert not offenders, "read kernel identity off the Op interface (Op.deploy_identity)\n" + "\n".join(offenders)
 
 
-def test_every_buffer_bearing_stmt_can_rename_its_buffers() -> None:
-    """``Statement.rename_buffers`` is the setter counterpart of ``external_reads`` /
-    ``external_writes``: a stmt kind that DECLARES external buffers without knowing how to
-    rename them silently breaks every buffer rebind (structural identity, the session kernel
-    cache) the day it first appears inside a body those walk. Wrapper stmts whose
-    declarations aggregate a nested body are exempt — ``Body.rename_buffers`` reaches their
-    leaves through the recursive map."""
-    import importlib
-    import pkgutil
-
-    import emmy.compiler.ir as ir_pkg
-    from emmy.compiler.ir.stmt import Statement
-
-    for mod in pkgutil.walk_packages(ir_pkg.__path__, prefix="emmy.compiler.ir."):
-        importlib.import_module(mod.name)
-
-    def subclasses(cls):
-        for sub in cls.__subclasses__():
-            yield sub
-            yield from subclasses(sub)
-
-    offenders = [
-        cls.__name__
-        for cls in subclasses(Statement)
-        if ("external_reads" in cls.__dict__ or "external_writes" in cls.__dict__)
-        and "rename_buffers" not in cls.__dict__
-        and not cls.__dict__.get("nested", None)  # wrapper aggregators rename through their bodies
-    ]
-    assert not offenders, (
-        "these stmt kinds declare external buffers but cannot rename them — add a "
-        "rename_buffers override beside the declaration:\n" + "\n".join(sorted(offenders))
-    )
-
-
-def _kernel_kinds() -> list[type]:
+def _kernel_statement_types() -> list[type]:
     import emmy.compiler.ir.kernel.ir as kernel_ir
     from emmy.compiler.ir.stmt import Statement
 
@@ -561,56 +478,23 @@ def _kernel_kinds() -> list[type]:
 
 
 def test_a_kernel_ir_kind_is_declared_not_programmed() -> None:
-    """A Kernel IR statement kind is data: fields with their roles, how it prints, and at most a constructor check.
-    The statement protocol follows from the roles (``@statement``); what rendering or a lowering asks of a statement
-    beyond that is a function over it, beside the render functions."""
+    """A Kernel IR statement type is data: fields with their roles, how it prints, and at most a constructor check,
+    declared in the emmy-ir crate with the shared statement types. The statement protocol follows from the roles; what rendering
+    or a lowering asks of a statement beyond that is a function over it, beside the render functions, never a
+    Python member attached to the class."""
+    import types
+
+    statement_types = _kernel_statement_types()
     offenders = [
         f"{cls.__name__}.{name}"
-        for cls in _kernel_kinds()
+        for cls in statement_types
         for name, member in vars(cls).items()
-        if (callable(member) or isinstance(member, (property, functools.cached_property, staticmethod, classmethod)))
-        and name != "__post_init__"
-        and not getattr(member, "derived", False)
-        and not (name.startswith("__") and name != "__post_init__")
+        if isinstance(member, (types.FunctionType, property, functools.cached_property, staticmethod, classmethod))
     ]
-    assert len(_kernel_kinds()) == 30 and all(cls._rewrite.derived for cls in _kernel_kinds())
+    assert len(statement_types) == 30 and all(
+        cls.__module__ == "emmy.compiler.ir.kernel.ir" and "_fields" in vars(cls) for cls in statement_types
+    )
     assert not offenders, "state these as field roles, or move them to functions over the statement:\n" + "\n".join(sorted(offenders))
-
-
-def test_a_kernel_ir_field_has_a_type_from_the_closed_set() -> None:
-    """Every field of a Kernel IR statement kind is a string, a number, a boolean, an expression, an axis, a dtype, an
-    elementwise op, a body, a statement, a record of such fields, or a tuple or optional of those. A bare ``tuple``,
-    ``object`` or a class from outside that set is a field nothing but Python can hold."""
-    import dataclasses
-    import types
-    import typing
-
-    import emmy.compiler.ir.kernel.ir as kernel_ir
-    from emmy.compiler.dtype import DataType
-    from emmy.compiler.ir.axis import Axis
-    from emmy.compiler.ir.elementwise import ElementwiseImpl
-    from emmy.compiler.ir.expression import Expression
-    from emmy.compiler.ir.stmt import Body, Statement
-
-    def closed(tp) -> bool:  # noqa: ANN001 — a type hint
-        if tp in (str, int, float, bool, type(None)):
-            return True
-        if typing.get_origin(tp) in (tuple, typing.Union, types.UnionType):
-            return all(closed(arg) for arg in typing.get_args(tp) if arg is not Ellipsis)
-        if not isinstance(tp, type):
-            return False
-        if issubclass(tp, (Expression, Axis, DataType, ElementwiseImpl, Body, Statement)):
-            return True
-        record = dataclasses.is_dataclass(tp) and tp.__module__ == kernel_ir.__name__
-        return record and all(closed(hint) for hint in typing.get_type_hints(tp).values())
-
-    offenders = [
-        f"{cls.__name__}.{field.name}: {field.type}"
-        for cls in _kernel_kinds()
-        for field in dataclasses.fields(cls)
-        if not closed(typing.get_type_hints(cls)[field.name])
-    ]
-    assert not offenders, "give these fields a type from the closed set:\n" + "\n".join(offenders)
 
 
 def test_every_op_is_a_frozen_dataclass() -> None:

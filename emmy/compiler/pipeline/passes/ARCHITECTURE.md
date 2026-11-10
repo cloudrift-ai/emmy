@@ -61,12 +61,13 @@ deleted gate is a template for its return, so it is deleted with the code rather
 ## A knob lives in its pass
 
 The transform a knob, a pin or an evidence row decides lives in the pass that reads that decision, and nowhere else.
-Body normalization (`ir/stmt/normalize.py`) is the opposite kind of code: the canonical form every Loop IR body
-takes at construction and every identity digest takes, which can answer to nothing the pipeline chooses, and `ir/`
-imports no pipeline module. A pass may call a normalization step as a mechanical helper; moving a pass's transform into the normalization
-module so another pass can reuse it inverts that direction and leaves a transform no normalization step runs
-(`040_split_invariant_divides` owns the loop-invariant hoist it applies to a kernel body). The IR `ARCHITECTURE.md` owns the
-normalization contract; `tests/architecture/test_layering.py` guards both sides.
+Body normalization (the `emmy-ir` crate's `normalize` module, `normalize_body`) is the opposite kind of code: the
+canonical form every Loop IR body takes at construction and every identity digest takes, which can answer to nothing
+the pipeline chooses, and `ir/` imports no pipeline module. A pass may call a normalization step as a mechanical
+helper; moving a pass's transform into the normalization module so another pass can reuse it inverts that direction
+and leaves a transform no normalization step runs (`040_split_invariant_divides` owns the loop-invariant hoist it
+applies to a kernel body). The IR `ARCHITECTURE.md` owns the normalization contract;
+`tests/architecture/test_layering.py` guards both sides.
 
 ## Quantization is not a concept past the decomposition band
 
@@ -84,11 +85,15 @@ post-decomposition Python source file for known format names.
 
 ## The tile scheduler: one stored tree
 
-`010_lift` reads a Loop IR carried state as a fold that carries it, and the classic schedule's fork realizes that
-fold as a serial kernel (`states_as_buffers`): the loop that carries the state becomes `Placement.serial`, the state
-a buffer the node owns and keeps every step of, a `Pre` read a load one launch back (the seed at the first), and the
-`Carry` a store of its value at this step. The step's own algebra is
-untouched, so a contraction over the previous state lifts as a contraction whose B slab is that buffer. A serial
+`010_lift` lifts a Loop IR body node by node: the normal form gives every definition one operation (an affine region,
+the normal form's one sum, is one node) and an accumulation a name or a literal to sum (the lift names the literal),
+which is the granularity of the tile IR's nodes, so a body and its chain spelling lift to the same Fold tree and the
+cones, the edges between them and the seams `030_cut` offers do not depend on how a program was spelled
+(`test_total_lift.py` pins it). `010_lift` reads a Loop IR carried state as a fold that carries it, and the classic
+schedule's fork realizes that fold as a serial kernel (`states_as_buffers`): the loop that carries the state becomes
+`Placement.serial`, the state a buffer the node owns and keeps every step of, a `Pre` read a load one launch back (the
+seed at the first), and the `Carry` a store of its value at this step. The step's own algebra is untouched, so a
+contraction over the previous state lifts as a contraction whose B slab is that buffer. A serial
 kernel stays ONE kernel — `030_cut` offers it no cut and no split — because the runner launches one kernel's steps
 to completion before the next kernel's first, so pieces could not interleave step by step. The register schedule
 can realize that same ordered axis inside a CTA when every state read stays within its warp's rows. Its schedule
@@ -837,8 +842,11 @@ that canonical input:
   one contraction — the same cone, weight and reduction once its free operand indices are abstracted — is one seam
   with one workspace in the contraction's own coordinates, each channel reading it at its own address; the
   abstraction numbers those indices by the numbering under which the body digests smallest, not by the order the
-  lowered body reads the operands in (a block amax reads the weight first, the rest of the kernel the activation),
-  and the workspace keeps the first channel's layout. A pointwise seam's workspace
+  lowered body reads the operands in (a block amax reads the weight first, the rest of the kernel the activation).
+  The workspace is laid out in the nest order of the first channel's loops: its coordinates by the scope position of
+  the innermost axis each reads, the one the consumer varies fastest last, so that consumer reads the rows it stores
+  contiguously; two at one depth keep their digest-min slot order. Never the operand-read order, which is the normal
+  form's statement order and moves with a spelling. A pointwise seam's workspace
   retains its inferred result dtype, including any explicit rounding in the producer. A downstream output encode
   cannot choose that earlier operand's precision: a BF16 operand feeding an FP8 output remains BF16 at the cut.
   A REDUCING seam's workspace holds the f32 carrier, except for a component every reader only converts to one narrower

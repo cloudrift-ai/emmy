@@ -547,7 +547,7 @@ def test_a_causal_split_piece_masks_its_absolute_key_on_the_chunk_tier() -> None
     partial = next(src for nid, src in sources.items() if nid.endswith("__partial"))
     assert len(sources) == 2, sorted(sources)
     assert "mma_m16n8k16" in partial and "__ck" in partial, "the partial folds its key slice on the chunk tier"
-    assert re.search(r"_ks \* 256 \+ \(a\d+__ck", partial), "the mask compares the slice's absolute key, 256 keys per partition"
+    assert re.search(r"256 \* _a\d+_ks \+ \(a\d+__ck", partial), "the mask compares the slice's absolute key, 256 keys per partition"
 
 
 @pytest.mark.parametrize(

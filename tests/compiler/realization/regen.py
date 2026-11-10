@@ -3,9 +3,11 @@
 Detection lives in ``test_realization.py``; this only writes. The split is the repository's existing shape:
 ``ruff format --check`` detects while ``make format`` fixes.
 
-Two refusals keep it from laundering anything. A case whose *verdict* changed is not restamped — if one commit moves
-an identity and breaks realization, fixing the first must not let the second ride along under a mechanical command.
-And a knob spelling the codec no longer accepts is an error, not something to canonicalize to itself.
+Two refusals keep it from laundering anything. A case whose *verdict* no longer matches its filename is not restamped
+— if one commit moves an identity and breaks realization, fixing the first must not let the second ride along under a
+mechanical command, and a gap that closed is a file to rename, not a stamp. (The restamped case is what is judged: a
+stale route spelling makes the stored half unreplayable, which says nothing about the case.) And a knob spelling the
+codec no longer accepts is an error, not something to canonicalize to itself.
 """
 
 from __future__ import annotations
@@ -33,10 +35,10 @@ def regenerate_all() -> int:
             continue
         if fresh == case.document:
             continue
-        before = verdict(case)
+        expected = f"realized={case.xfail_stage != 'realized'}"
         after = verdict(helpers.Case(path=path, document=fresh, xfail_stage=case.xfail_stage))
-        if before != after:
-            refused.append(f"{path.name}: the verdict changed with the derived half ({before} -> {after})")
+        if after != expected:
+            refused.append(f"{path.name}: the restamped case's verdict contradicts its filename ({after}, expected {expected})")
             continue
         stale.append(path.name)
         fresh.dump(path, overwrite=True)

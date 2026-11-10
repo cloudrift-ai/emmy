@@ -57,6 +57,11 @@ _INTEGER_NATIVE_OPS = frozenset(
 # the only legal uses of an fp8 SSA value are the decode conversion out of it
 # and the encode conversion into it, both spelled below in ``convert``.
 _F8_DTYPES = ("f8e4m3", "f8e5m2")
+# The formats C++ converts into nothing by itself: every pair among them needs a rule in ``convert``.
+_SCALAR_NARROW_FLOATS = (*_F8_DTYPES, "f16", "bf16")
+# Every format whose C++ spelling converts numerically from another by accident — ``unsigned char`` for a pair of fp4
+# codes would decode as an integer: a pair with no rule is refused, never left to the compiler.
+_NARROW_DTYPES = (*_SCALAR_NARROW_FLOATS, "f16x2", "f4e2m1x2")
 
 # Intrinsic spellings — per dtype.  Keys are abstract op names emitted
 # by ``op_to_expression`` (``"exp"``, ``"fmax"``, ``"fabs"``, ...).
@@ -200,6 +205,14 @@ class CudaRenderTarget:
             return f"__half2half2({value})"
         if dst_dt == "f16x2" and src_dt == "f32":
             return f"__float2half2_rn({value})"
+        if src_dt in _SCALAR_NARROW_FLOATS and dst_dt in _SCALAR_NARROW_FLOATS:
+            # No device intrinsic converts two narrow floats into each other: through f32, which holds every value of
+            # either exactly, so the one rounding is the destination's.
+            return self.convert(self.convert(value, src_dt, "f32"), "f32", dst_dt)
+        if src_dt in _NARROW_DTYPES and dst_dt in _NARROW_DTYPES:
+            # Two packed formats with no rule above have no conversion C++ would supply, or one it would supply wrongly:
+            # a missing rule fails here, where it names the pair, not in nvcc or in the numbers.
+            raise ValueError(f"CUDA has no conversion from {src_dt!r} to {dst_dt!r}")
         return value
 
     def bitcast(self, value: str, src_dt: str, dst_dt: str) -> str:

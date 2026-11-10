@@ -98,6 +98,14 @@ optional = true
 debug = false
 args = ["--locked"]
 
+# The compiler's statement and expression vocabulary, as ``emmy.emmy_ir``: required, every compile reads it.
+[[tool.setuptools-rust.ext-modules]]
+target = "emmy.emmy_ir"
+path = "crates/emmy-ir-py/Cargo.toml"
+binding = "PyO3"
+debug = false
+args = ["--locked"]
+
 # The extension targets the stable ABI (PyO3 ``abi3-py312``), so one wheel serves every Python
 # from 3.12 on.
 [tool.distutils.bdist_wheel]

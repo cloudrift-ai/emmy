@@ -30,7 +30,7 @@ from emmy.compiler.dim import Dim, paged_declarations
 from emmy.compiler.dtype import DataType
 from emmy.compiler.ir.cuda import TmaDescMeta
 from emmy.compiler.ir.cuda.ir import resolve_dim
-from emmy.compiler.ir.expression import BinaryExpr, Expression, Literal, Var
+from emmy.compiler.ir.expression import BinaryExpression, Expression, Literal, Var
 
 if TYPE_CHECKING:
     from emmy.compiler.graph import Graph
@@ -70,7 +70,7 @@ _EXPR_OPS = ("+", "-", "*", "/", "//", "%")
 @dataclass
 class BufferSpec:
     """One named device buffer: shape (``Dim``-valued — static ``Literal``, atomic symbolic
-    ``Var``, or composite ``BinaryExpr``), dtype, and planning role."""
+    ``Var``, or composite ``BinaryExpression``), dtype, and planning role."""
 
     name: str
     shape: tuple[Dim, ...]
@@ -569,7 +569,7 @@ def _expression_to_json(e):
         return float(e.value)
     if isinstance(e, Var):
         return e.name
-    if isinstance(e, BinaryExpr) and e.op in _EXPR_OPS:
+    if isinstance(e, BinaryExpression) and e.op in _EXPR_OPS:
         return [e.op, _expression_to_json(e.left), _expression_to_json(e.right)]
     raise ValueError(f"plan: expression {e!r} not expressible in the plan grammar (ops {_EXPR_OPS})")
 
@@ -584,7 +584,7 @@ def _expression_from_json(v) -> Expression:
     if isinstance(v, str):
         return Var(v)
     if isinstance(v, list) and len(v) == 3 and v[0] in _EXPR_OPS:
-        return BinaryExpr(v[0], _expression_from_json(v[1]), _expression_from_json(v[2]))
+        return BinaryExpression(v[0], _expression_from_json(v[1]), _expression_from_json(v[2]))
     raise ValueError(f"plan: malformed expression {v!r}")
 
 

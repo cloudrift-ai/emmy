@@ -306,18 +306,19 @@ def _stmt_eval_scope() -> dict:
     from emmy.compiler.ir.axis import Axis, Window
     from emmy.compiler.ir.elementwise import ElementwiseImpl
     from emmy.compiler.ir.expression import (
-        BinaryExpr,
+        BinaryExpression,
         Builtin,
-        CastExpr,
-        FuncCallExpr,
+        CastExpression,
+        FunctionCallExpression,
         Literal,
-        TernaryExpr,
+        TernaryExpression,
         Var,
     )
     from emmy.compiler.ir.kernel.ir import Smem, Sync, TreeHalve, WarpShuffle
     from emmy.compiler.ir.stmt import (
         Accum,
         Assign,
+        Body,
         Cond,
         Init,
         Let,
@@ -335,11 +336,12 @@ def _stmt_eval_scope() -> dict:
         "Axis": Axis,
         "Var": Var,
         "Literal": Literal,
-        "BinaryExpr": BinaryExpr,
+        "BinaryExpression": BinaryExpression,
         "Builtin": Builtin,
-        "FuncCallExpr": FuncCallExpr,
-        "TernaryExpr": TernaryExpr,
-        "CastExpr": CastExpr,
+        "FunctionCallExpression": FunctionCallExpression,
+        "TernaryExpression": TernaryExpression,
+        "CastExpression": CastExpression,
+        "Body": Body,
         "Load": Load,
         "Assign": Assign,
         "Accum": Accum,
@@ -1487,7 +1489,7 @@ class Graph(Wire):
                         "name": t.name,
                         # JSON dump preserves atomic Dims (int / Var name) so the
                         # round-trip ``emmy run --ir <json>`` flow reconstructs
-                        # them via ``Dim(value)``. Composite Dims (BinaryExpr-backed,
+                        # them via ``Dim(value)``. Composite Dims (BinaryExpression-backed,
                         # e.g. a CatOp output or the demoted symbolic-N B operand's
                         # ``round_up(seq_len, 64)`` TMA-padded inner extent) serialize
                         # to their pretty expression string so a ``EMMY_DUMP_DIR`` dump
@@ -1517,7 +1519,7 @@ class Graph(Wire):
 def _dim_to_json(d):
     """Serialize a ``Dim`` for the JSON dump. Atomic dims (static int / symbolic
     ``Var`` name) return their scalar ``value`` and round-trip via ``Dim(value)``;
-    a composite ``Dim`` (``BinaryExpr``-backed) has no scalar value, so it falls
+    a composite ``Dim`` (``BinaryExpression``-backed) has no scalar value, so it falls
     back to the pretty expression string (a debug-dump artifact — see ``to_dict``)."""
     try:
         return d.value

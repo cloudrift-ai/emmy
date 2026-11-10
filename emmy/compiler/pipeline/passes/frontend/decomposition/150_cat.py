@@ -14,14 +14,14 @@ selected (e.g. rotary's ``cat([-x[..., half:], x[..., :half]], -1)``
 issues ``Load(x, dim - half)`` for ``dim < half`` → negative offset).
 Most allocator layouts mask the OOB Load behind a same-page read, but
 swap-bencher allocations land tight enough to segfault. Each source's
-cat-dim coord is wrapped in a ``TernaryExpr`` that clamps to its valid
+cat-dim coord is wrapped in a ``TernaryExpression`` that clamps to its valid
 range when out of domain — the loaded value is wrong but the Select
 chain never picks it.
 """
 
 from emmy.compiler.graph import Graph, Node, Tensor
 from emmy.compiler.ir.base import ConstantOp
-from emmy.compiler.ir.expression import Literal, TernaryExpr, placeholder
+from emmy.compiler.ir.expression import Literal, TernaryExpression, placeholder
 from emmy.compiler.ir.frontend.ir import CatOp
 from emmy.compiler.ir.tensor.ir import IndexMapOp, IndexSource
 from emmy.compiler.pipeline import Match, Pattern, RuleSkipped
@@ -63,9 +63,9 @@ def rewrite(match: Match, root: Node, out: Tensor) -> Graph | None:
         coord = cat_var - Literal(start, "int") if start else cat_var
         select = cat_var.lt(Literal(ends[i], "int")) if i < len(ends) else None
         if select is not None:
-            coord = TernaryExpr(cond=select, if_true=coord, if_false=zero)
+            coord = TernaryExpression(cond=select, if_true=coord, if_false=zero)
         if start:
-            coord = TernaryExpr(cond=cat_var.lt(Literal(start, "int")), if_true=zero, if_false=coord)
+            coord = TernaryExpression(cond=cat_var.lt(Literal(start, "int")), if_true=zero, if_false=coord)
         coord_map = tuple(coord if d == norm_dim else placeholder(d) for d in range(ndim))
         sources.append(IndexSource(input_idx=i, coord_map=coord_map, select=select))
 

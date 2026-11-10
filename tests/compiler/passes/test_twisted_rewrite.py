@@ -56,6 +56,16 @@ def _carrier(weight_of: str) -> Fold:
     )
 
 
+def _nodes(stmt):
+    """The operation nodes of a definition's value, each ahead of its operands."""
+    return [node for node in stmt.value.subterms() if node.operation is not None]
+
+
+def _operations(body, name: str) -> list:
+    """Every operation node named ``name`` in the body's definitions."""
+    return [node for stmt in body if isinstance(stmt, Assign) for node in _nodes(stmt) if node.operation.name == name]
+
+
 def test_a_carrier_reads_bilinear_before_its_weight_is_reified() -> None:
     """A is what ``operands[0]`` SUPPLIES, not what it exposes: the weight the lift derives from the
     score is the left factor, so the channel is a contraction with no operand minted for it."""
@@ -130,8 +140,9 @@ def test_softmax_rewrites_to_twisted_pair() -> None:
     assert len(fold.init) == 2 and fold.init[1] == 0.0
     assert [edge.as_slab() is not None for edge in fold.operands] == [True], "the score slab is its one operand"
     assert [stmt.value.value for stmt in fold.lift.body if isinstance(stmt, Let)] == [1.0], "the stable singleton is (score, 1)"
-    assert not [stmt for stmt in fold.lift.body if isinstance(stmt, Assign) and stmt.op.name == "exp"], "no exp in the term"
-    assert [stmt.op.name for stmt in fold.based().body if isinstance(stmt, Assign)] == ["exp", "multiply"], "psi_inv restores it"
+    assert not _operations(fold.lift.body, "exp"), "no exp in the term"
+    restored = [node.operation.name for stmt in fold.based().body if isinstance(stmt, Assign) for node in _nodes(stmt)]
+    assert restored == ["exp", "multiply"], "psi_inv restores it"
     assert any(isinstance(stmt, Let) and stmt.value.value == 1.0 for stmt in fold.injected.body), "psi injects 1"
 
 
@@ -153,8 +164,8 @@ def test_sdpa_rewrites_to_twisted_expectation() -> None:
     (_, streamed) = fold.bilinear_channels()[0]
     assert streamed.as_slab() is not None and streamed.free_axes, "the value slab is B"
     assert fold.as_contraction() is not None
-    assert not [s for s in fold.lift.body if isinstance(s, Assign) and s.op.name == "exp"], "the weight is not in the term"
-    assert tile.op.axis is None and any(stmt.op.name == "divide" for stmt in tile.op.lift.body), "the epilogue divides by l once"
+    assert not _operations(fold.lift.body, "exp"), "the weight is not in the term"
+    assert tile.op.axis is None and _operations(tile.op.lift.body, "divide"), "the epilogue divides by l once"
 
 
 def test_causal_sdpa_uses_the_same_twisted_rewrite() -> None:
@@ -435,7 +446,7 @@ def test_an_invariant_factor_hoists_out_of_the_fold(spelling: str) -> None:
     (state,) = fold.as_reduction().states
     inner, epilogue = _hoist_invariant(fold)
     assert inner.as_reduction().states == (f"{state}__sum",) and len(inner.lift.results) == 1
-    assert epilogue.exposes == (state,) and epilogue.lift.body[-1].op.name in {"multiply", "divide"}
+    assert epilogue.exposes == (state,) and epilogue.lift.body[-1].value.operation.name in {"multiply", "divide"}
 
 
 def test_a_refusing_sibling_cluster_says_why(caplog) -> None:
@@ -457,5 +468,5 @@ def test_replacing_shared_components_rebinds_every_reader() -> None:
     rewritten = _replace(reader, {id(second): (first, {0: 0})})
     assert rewritten.operands == (first,)
     assert rewritten.lift.params == ("first",)
-    assert str(rewritten.lift.body) == "sum = add(first, first)"
+    assert str(rewritten.lift.body) == "sum = 2 * first"
     assert rewritten.free_axes == reader.free_axes

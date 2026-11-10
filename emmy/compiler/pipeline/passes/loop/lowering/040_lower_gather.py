@@ -25,7 +25,7 @@ from __future__ import annotations
 
 from emmy.compiler.graph import Graph, Node, Tensor
 from emmy.compiler.ir.base import InputOp
-from emmy.compiler.ir.expression import CastExpr, TernaryExpr, Var
+from emmy.compiler.ir.expression import CastExpression, TernaryExpression, Var
 from emmy.compiler.ir.loop import Axis, Load, Loop, LoopOp, Write
 from emmy.compiler.ir.stmt import Body
 from emmy.compiler.ir.tensor.ir import GatherOp
@@ -40,8 +40,8 @@ def rewrite(root: Node, inp_data: Node, inp_idx: Node, out: Tensor) -> Graph | N
     data_rank = len(inp_data.output.shape)
     idx_rank = len(inp_idx.output.shape)
     axis = int(root.op.axis) % data_rank
-    index = CastExpr("int", Var("idx"))
-    index = TernaryExpr(index.lt(0), index + inp_data.output.shape[axis].expression, index)
+    index = CastExpression("int", Var("idx"))
+    index = TernaryExpression(index.lt(0), index + inp_data.output.shape[axis].expression, index)
 
     axes = tuple(Axis(name=f"a{i}", extent=d) for i, d in enumerate(out_shape))
 

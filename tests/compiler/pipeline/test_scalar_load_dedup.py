@@ -25,7 +25,7 @@ def test_dedup_loads_does_not_capture_a_rebinding_inner_scope() -> None:
         """
         in0 = load x[0]
         in1 = load y[0]
-        v = add(in0, in1)
+        v = in0 + in1
         """
     )
     body = list(
@@ -63,4 +63,4 @@ def test_dedup_loads_still_rewires_an_inner_use_of_the_dropped_name() -> None:
     kept = _dedup_loads(body)
 
     assert [s.name for s in kept if isinstance(s, Load)] == ["in0"]
-    assert str(kept[-1].body) == "v = add(in0, in0)"
+    assert str(kept[-1].body) == "v = in0 + in0"

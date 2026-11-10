@@ -104,7 +104,7 @@ def test_match_packed_b_node_reads_the_cone_off_the_contraction():
     packed = _packed(node, inputs)[0]
     assert packed is not None
     assert packed.bits.input == "w_bits" and packed.table.input == "w_f4_pairs"
-    assert packed.factor == "v2" and packed.block == 16
+    assert str(packed.factor) == "v2" and packed.block == 16
 
 
 def test_match_packed_b_node_declines_a_materialized_b():
@@ -167,7 +167,7 @@ def test_match_packed_b_node_reads_every_channel_in_order():
     packed = _packed(node, inputs)[0]
     assert packed is not None and packed.block == 16 and packed.per_byte == 2
     assert [ch.bits.input for ch in packed.channels] == ["g_w_bits", "u_w_bits"]
-    assert [ch.factor for ch in packed.channels] == ["g_v2", "u_v2"]
+    assert [str(ch.factor) for ch in packed.channels] == ["g_v2", "u_v2"]
     assert packed.bits.input == "g_w_bits"  # the shared facts are read off the first channel
 
 
@@ -190,7 +190,7 @@ def test_packed_channels_read_their_own_result_of_a_shared_producer():
     packed = _packed(node, inputs)[0]
     assert packed is not None
     assert [channel.bits.input for channel in packed.channels] == ["g_w_bits", "u_w_bits"]
-    assert [channel.factor for channel in packed.channels] == ["g_v2", "u_v2"]
+    assert [str(channel.factor) for channel in packed.channels] == ["g_v2", "u_v2"]
     tile = _tile(K16, "f2x2/k2", "w1x4", axes)
     assert resolve_warp_stage(node, tile, Stage.parse("d2/smem-async"), 100 * 1024, inputs, k_axis=ka) is not None
 

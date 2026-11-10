@@ -1,71 +1,71 @@
-"""Shared statement primitives — the leaves and control flow used across
-every IR layer.
+"""Shared statement primitives — the leaves and control flow used across every IR layer.
 
-Defined here rather than under any one IR package because all three IRs
-(Loop, Tile, Kernel) consume the same leaf vocabulary:
-
-- ``Statement`` — abstract base for every body statement.
-- Leaves: ``Load``, ``Assign``, ``Accum``, ``Init``, ``Write``,
-  ``Select``, ``SelectBranch`` — pure compute primitives that read/write SSA
-  names and external buffers (in :mod:`.leaves`).
-- Block stmts: ``Loop``, ``StridedLoop``, ``Cond`` — carry child bodies
-  (in :mod:`.blocks`).
-- Tree walks: :meth:`Body.iter` (pre-order recursive) and
-  :meth:`Body.map` (flat 1:N transformer) — methods on
-  :class:`Body` (in :mod:`.body`).
-- Body normalization: the public ``normalize_body`` driver and its steps (in :mod:`.normalize`).
-
-``__all__`` is the whole interface: the rest of the compiler imports these names and no submodule. Rendering a
+The statement types, ``Body``, the text form, normalization and identity are implemented in Rust (the ``emmy-ir``
+crate, reached through the ``emmy.emmy_ir`` extension); this package is their one face to the rest of the compiler.
+``__all__`` is the whole interface: the rest of the compiler imports these names and no submodule. The statement types
+every layer shares are here; the Kernel IR's thirty are exported by ``emmy.compiler.ir.kernel.ir``. Rendering a
 statement as C / CUDA source is not statement business and lives in :mod:`emmy.compiler.ir.render`.
 
-Each IR layer adds its own scheduling-specific Stmts on top:
-
-- Loop IR: nothing extra — its bodies are exactly Loop / leaves.
-- Tile IR: the typed tile flavors and staging constructs — DEMOLISHED,
-  pending rebuild.
-- Kernel IR: ``Smem``, ``Sync``, ``TreeHalve``, plus the shared
-  constructs.
-
-Loop-IR's ``LoopOp``, its validation and fusion's body assembly stay in ``ir/loop/``. Normalization and structural
-identity stay here, with the two kinds fusion assembles a region with (``Call``, ``Subroutine``).
+The boundary: Rust owns the data and Python reads it through accessors; a field read hands back a held object, so a
+statement read twice from a body is one object; only strings, numbers, booleans, tuples of those and the module's own
+classes cross it. The few members that take a Python function and keep its results (``rename`` by a function,
+``rewrite``, ``Body.fold``) are written here over the Rust reads; ``Body.map`` and ``map_expressions`` call the function
+from Rust through the fallible walks and hold nothing of it afterwards.
 """
 
-from emmy.compiler.ir.stmt.base import Statement, dtype_promote
-from emmy.compiler.ir.stmt.blocks import Cond, Loop, StridedLoop
-from emmy.compiler.ir.stmt.body import Body, exposed_defines, free_names
-from emmy.compiler.ir.stmt.declared import fields_of, role, statement
-from emmy.compiler.ir.stmt.identity import canonicalize_identity
-from emmy.compiler.ir.stmt.leaves import (
-    Accum,
-    Affine,
-    Assign,
-    Carry,
-    Init,
-    Let,
-    Load,
+from __future__ import annotations
+
+import emmy.emmy_ir as _ir
+
+Statement = _ir.Statement
+Body = _ir.Body
+Accum = _ir.Accum
+Assign = _ir.Assign
+Call = _ir.Call
+Carry = _ir.Carry
+Cond = _ir.Cond
+Init = _ir.Init
+Let = _ir.Let
+Load = _ir.Load
+Loop = _ir.Loop
+Pre = _ir.Pre
+Select = _ir.Select
+SelectBranch = _ir.SelectBranch
+StridedLoop = _ir.StridedLoop
+Subroutine = _ir.Subroutine
+Write = _ir.Write
+ZeroPrologue = _ir.ZeroPrologue
+
+parse_body = _ir.parse_body
+pretty_body = _ir.pretty_body
+normalize_body = _ir.normalize_body
+one_operation_per_definition = _ir.one_operation_per_definition
+canonical_values = _ir.canonical_values
+simplify_body = _ir.simplify_body
+prepare_body = _ir.prepare_body
+free_names = _ir.free_names
+exposed_defines = _ir.exposed_defines
+rename_free = _ir.rename_free
+mask_select_predicate = _ir.mask_select_predicate
+ordering_constraints = _ir.ordering_constraints
+dtype_promote = _ir.dtype_promote
+clear_memos = _ir.clear_memos
+
+from emmy.compiler.ir.stmt.glue import (  # noqa: E402 — the glue installs members on the classes above
+    Identity,
     OutputSpec,
-    Pre,
-    Select,
-    SelectBranch,
-    Write,
-    ZeroPrologue,
-    binary,
-    mask_select_predicate,
+    canonicalize_identity,
+    fields_of,
 )
-from emmy.compiler.ir.stmt.normalize import fold_affine, normalize_body, prepare_body, simplify_body
-from emmy.compiler.ir.stmt.order import ordering_constraints
-from emmy.compiler.ir.stmt.passes import rename_free
-from emmy.compiler.ir.stmt.subroutine import Call, Subroutine
-from emmy.compiler.ir.stmt.text import parse_body, pretty_body
 
 __all__ = [
     "Accum",
-    "Affine",
     "Assign",
     "Body",
     "Call",
     "Carry",
     "Cond",
+    "Identity",
     "Init",
     "Let",
     "Load",
@@ -79,14 +79,14 @@ __all__ = [
     "Subroutine",
     "Write",
     "ZeroPrologue",
-    "binary",
+    "canonical_values",
     "canonicalize_identity",
+    "clear_memos",
     "dtype_promote",
     "exposed_defines",
     "fields_of",
-    "fold_affine",
+    "one_operation_per_definition",
     "free_names",
-    "statement",
     "mask_select_predicate",
     "normalize_body",
     "ordering_constraints",
@@ -94,6 +94,5 @@ __all__ = [
     "parse_body",
     "pretty_body",
     "rename_free",
-    "role",
     "simplify_body",
 ]

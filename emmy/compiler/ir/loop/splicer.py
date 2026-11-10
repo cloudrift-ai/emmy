@@ -17,7 +17,7 @@ its loads.
 
 Algorithm. Seed: every selected root ``Write``. Each iteration pops
 one pending dep and emits its def, queueing that def's own deps.
-Resolution dispatches on stmt kind:
+Resolution dispatches on the statement type:
 
 - **Load on a splice edge** — emit a copy alias at the demand scope;
   σ is solved by pairing target's ``Write.index`` against the reader's
@@ -64,7 +64,7 @@ import logging
 import math
 from dataclasses import dataclass
 
-from emmy.compiler.ir.expression import BinaryExpr, Expression, Interval, Literal, SimplifyCtx, Var, affine_form
+from emmy.compiler.ir.expression import BinaryExpression, Expression, Interval, Literal, SimplifyCtx, Var, affine_form
 from emmy.compiler.ir.loop.assembly import NotSupported, Program, Splicer, UnfusableStmt
 from emmy.compiler.ir.loop.ir import Load, Loop, LoopOp, Write
 
@@ -347,8 +347,8 @@ def _flat_expression(index: tuple[Expression, ...], strides: list[int], ctx: Sim
     """Flatten one row-major index and simplify it under ``ctx``."""
     flat: Expression = Literal(0, "int")
     for expression, stride in zip(index, strides, strict=True):
-        term = expression if stride == 1 else BinaryExpr("*", expression, Literal(stride, "int"))
-        flat = BinaryExpr("+", flat, term)
+        term = expression if stride == 1 else BinaryExpression("*", expression, Literal(stride, "int"))
+        flat = BinaryExpression("+", flat, term)
     return flat.simplify(ctx)
 
 
@@ -377,8 +377,8 @@ def _flat_digit(flat: Expression, stride: int, extent: int, ctx: SimplifyCtx) ->
     """Return one mixed-radix digit of ``flat``; unit dimensions are literal zero."""
     if extent == 1:
         return Literal(0, "int")
-    digit = flat if stride == 1 else BinaryExpr("/", flat, Literal(stride, "int"))
-    return BinaryExpr("%", digit, Literal(extent, "int")).simplify(ctx)
+    digit = flat if stride == 1 else BinaryExpression("/", flat, Literal(stride, "int"))
+    return BinaryExpression("%", digit, Literal(extent, "int")).simplify(ctx)
 
 
 def _unflatten(flat: Expression, shape, ctx: SimplifyCtx) -> tuple[Expression, ...] | None:
@@ -431,8 +431,8 @@ def _retarget_equivalent_output(graph, op: LoopOp, cluster: _OutputEquivalenceCl
             for expression, stride in zip(coordinates, inverse, strict=True):
                 if not stride:
                     continue
-                term = expression if stride == 1 else BinaryExpr("*", expression, Literal(stride, "int"))
-                flat = BinaryExpr("+", flat, term)
+                term = expression if stride == 1 else BinaryExpression("*", expression, Literal(stride, "int"))
+                flat = BinaryExpression("+", flat, term)
             coordinates = _unflatten(flat.simplify(ctx), shape, ctx)
             if coordinates is None:
                 return None

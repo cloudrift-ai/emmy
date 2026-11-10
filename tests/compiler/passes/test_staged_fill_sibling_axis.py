@@ -123,7 +123,7 @@ def _packed_matvec():
     )
     bits, pairs = cone[3], cone[4]
     b = projection(body=cone, results=("bv",))
-    packed = PackedKBlockB(bits=bits, table=pairs, factor="fac", block=16)
+    packed = PackedKBlockB(bits=bits, table=pairs, factor=Var("fac"), root="bv", block=16)
     return contraction(ka, a, (b, "acc")), packed, ka
 
 

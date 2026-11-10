@@ -153,7 +153,7 @@ def test_a_paged_output_stored_over_its_cache_writes_through_the_table_at_its_in
 def test_one_page_buffer_resolves_its_base_once(monkeypatch):
     """A buffer whose single page spans it keeps the table in its signature but is addressed like
     the flat buffer it replaces: the preamble takes the table's only entry as the base, so every
-    statement kind — a fragment store, a staged copy — works over it unchanged, and no access
+    statement type — a fragment store, a staged copy — works over it unchanged, and no access
     resolves a page per element."""
     pytest.importorskip("torch")
     from emmy.compiler.backend.cuda.backend import CudaBackend

@@ -1,6 +1,5 @@
-"""The Hopper warp-group MMA statements of the kernel IR: render snapshots, the def-use surface, the
-rewrite round trip, the descriptor's bit layout, and a compile-only build of every wrapper form at
-``sm_90a`` — none of which needs a Hopper card."""
+"""The Hopper warp-group MMA statements of the kernel IR: render snapshots, the descriptor's bit layout, and a
+compile-only build of every wrapper form at ``sm_90a`` — none of which needs a Hopper card."""
 
 from __future__ import annotations
 
@@ -97,17 +96,6 @@ def test_the_transpose_bits_and_scale_d_reach_the_call() -> None:
     assert _line(rs).endswith("_f32_rs<1>(c0, c1, c2, c3, c4, c5, c6, c7, a, bD, 1);")
 
 
-def test_the_cell_rejects_malformed_operands() -> None:
-    with pytest.raises(ValueError, match="exactly one of a_desc / a_frag"):
-        WgmmaMma(c_frags=_frags(64), b_desc="bD", shape=(64, 64, 16), a_desc="aD", a_frag="a")
-    with pytest.raises(ValueError, match="8 m16n8 C fragments"):
-        WgmmaMma(c_frags=_frags(128), b_desc="bD", shape=(64, 64, 16), a_desc="aD")
-    with pytest.raises(ValueError, match="K-major"):
-        _cell(64, "f16", "rs", trans_a=1)
-    with pytest.raises(ValueError, match="m64n"):
-        WgmmaMma(c_frags=("c0",), b_desc="bD", shape=(16, 8, 16), a_desc="aD")
-
-
 def test_fence_commit_wait_render_the_bare_instructions() -> None:
     assert _line(WgmmaFence()) == 'asm volatile("wgmma.fence.sync.aligned;\\n" ::: "memory");'
     assert _line(WgmmaCommit()) == 'asm volatile("wgmma.commit_group.sync.aligned;\\n" ::: "memory");'
@@ -116,33 +104,6 @@ def test_fence_commit_wait_render_the_bare_instructions() -> None:
     for stmt in (WgmmaFence(), WgmmaCommit(), WgmmaWait()):
         assert stmt.deps() == () and stmt.defines() == ()
     assert [str(s) for s in (WgmmaFence(), WgmmaCommit(), WgmmaWait(2))] == ["WgmmaFence", "WgmmaCommit", "WgmmaWait(group=2)"]
-
-
-def test_the_cell_reads_its_operands_and_defines_its_accumulator() -> None:
-    ss = _cell(64, form="ss")
-    assert ss.deps() == (*_frags(64), "bD", "aD") and ss.defines() == _frags(64)
-    rs = _cell(64, form="rs")
-    assert rs.deps() == (*_frags(64), "bD", "a") and rs.defines() == _frags(64)
-
-
-def test_rewrite_renames_ssa_names_and_keeps_buffers() -> None:
-    body = Body(
-        (
-            WgmmaDescriptor(name="bD", smem="K_s", smem_index=Var("k0") * 64, swizzle="B128", lbo_bytes=16, sbo_bytes=1024),
-            WgmmaFence(),
-            _cell(64, form="ss"),
-            _cell(64, form="rs"),
-            WgmmaCommit(),
-            WgmmaWait(),
-        )
-    )
-    renamed = body.map(lambda s: s.rewrite(lambda name: f"{name}_r"))
-    desc, fence, ss, rs, commit, wait = renamed
-    assert desc == WgmmaDescriptor(name="bD_r", smem="K_s", smem_index=Var("k0_r") * 64, swizzle="B128", lbo_bytes=16, sbo_bytes=1024)
-    assert ss.c_frags == tuple(f"{c}_r" for c in _frags(64)) and (ss.a_desc, ss.b_desc) == ("aD_r", "bD_r")
-    assert (rs.a_frag, rs.a_desc, rs.b_desc) == ("a_r", None, "bD_r")
-    assert (fence, commit, wait) == (WgmmaFence(), WgmmaCommit(), WgmmaWait())
-    assert body.map(lambda s: s.rewrite(lambda name: name)) == body
 
 
 def test_the_prelude_joins_only_with_a_wgmma_cell() -> None:

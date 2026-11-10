@@ -137,7 +137,7 @@ class CudaBackend(Backend):
         # Symbolic output shapes bind from the supplied input array shapes:
         # each atomic symbolic input dim records its runtime size. Output dims
         # (possibly composite Dim expressions) then resolve via ``expression.eval(sym_env)``
-        # — one path covers Literal / Var / BinaryExpr uniformly.
+        # — one path covers Literal / Var / BinaryExpression uniformly.
         sym_env = compiled.symbolic_env(input_data)
 
         def shaped(values: dict) -> dict[str, np.ndarray]:

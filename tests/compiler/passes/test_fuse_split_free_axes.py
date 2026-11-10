@@ -22,7 +22,7 @@ from emmy.compiler.dim import Dim
 from emmy.compiler.graph import Graph, Tensor
 from emmy.compiler.ir.axis import Axis
 from emmy.compiler.ir.base import InputOp
-from emmy.compiler.ir.expression import BinaryExpr, Literal, Var
+from emmy.compiler.ir.expression import BinaryExpression, Literal, Var
 from emmy.compiler.ir.loop import LoopOp
 from emmy.compiler.ir.stmt import Body, Load, Loop, Write, parse_body
 from emmy.compiler.ir.tile import TileOp
@@ -95,7 +95,7 @@ def test_flattened_row_head_restores_separate_operand_axes():
     op = _run(graph)
     loads = {load.input: load for load in op.loads}
     assert not any(
-        isinstance(expression, BinaryExpr) and expression.op in ("/", "//", "%")
+        isinstance(expression, BinaryExpression) and expression.op in ("/", "//", "%")
         for load in op.loads
         for index in load.index
         for expression in index.subterms()
@@ -130,8 +130,8 @@ def test_split_n_pair_fuses():
     wv = next(s for s in op.body.iter() if isinstance(s, Load) and s.input == "w")
     assert wv.index == (Var(n), Var(_reduce_name(op))), "the composite operand index must collapse to the bare fused axis"
     wr = next(s for s in op.body.iter() if isinstance(s, Write))
-    assert wr.index[2] == BinaryExpr("/", Var(n), Literal(D, "int"))
-    assert wr.index[3] == BinaryExpr("%", Var(n), Literal(D, "int"))
+    assert wr.index[2] == BinaryExpression("/", Var(n), Literal(D, "int"))
+    assert wr.index[3] == BinaryExpression("%", Var(n), Literal(D, "int"))
 
 
 def test_split_m_pair_fuses():
@@ -278,9 +278,9 @@ def test_split_pair_fuses_across_an_intervening_free_loop():
     s_name = chain[0].axis.name
     assert wr.index == (
         Literal(0, "int"),
-        BinaryExpr("/", Var(n), Literal(D, "int")),
+        BinaryExpression("/", Var(n), Literal(D, "int")),
         Var(s_name),
-        BinaryExpr("%", Var(n), Literal(D, "int")),
+        BinaryExpression("%", Var(n), Literal(D, "int")),
     )
 
 

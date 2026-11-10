@@ -22,7 +22,7 @@ import pytest
 
 from emmy.compiler.dim import Dim
 from emmy.compiler.ir.axis import Axis
-from emmy.compiler.ir.expression import BinaryExpr, Literal, Var
+from emmy.compiler.ir.expression import BinaryExpression, Literal, Var
 from emmy.compiler.ir.pure import Fold, Lambda
 from emmy.compiler.ir.pure.twist import SOFTMAX, Twist
 from emmy.compiler.ir.sigma import Sigma
@@ -35,7 +35,7 @@ SCOPE = (M_AXIS, N_AXIS, K_AXIS)
 
 def test_expression_substitution_replaces_free_coordinate_params() -> None:
     term = contraction(K_AXIS, slab("xv", "x", "m", "k"), (slab("wv", "w", "k", "p", "q"), "acc"))
-    sigma = Sigma({"p": BinaryExpr("/", Var("n"), Literal(4, "int")), "q": BinaryExpr("%", Var("n"), Literal(4, "int"))})
+    sigma = Sigma({"p": BinaryExpression("/", Var("n"), Literal(4, "int")), "q": BinaryExpression("%", Var("n"), Literal(4, "int"))})
     rewritten = term.rewrite(lambda name: name, sigma)
     assert rewritten.free_axes == frozenset({"m", "n"})
     assert "p" not in rewritten.operands[1].lift.params and "q" not in rewritten.operands[1].lift.params
@@ -44,14 +44,14 @@ def test_expression_substitution_replaces_free_coordinate_params() -> None:
 
 def test_expression_substitution_keeps_a_self_referenced_coordinate_in_place() -> None:
     term = slab("v", "x", "a1", "a2", "a3")
-    rewritten = term.rewrite(lambda name: name, Sigma({"a1": BinaryExpr("*", Var("a1"), Literal(8, "int"))}))
+    rewritten = term.rewrite(lambda name: name, Sigma({"a1": BinaryExpression("*", Var("a1"), Literal(8, "int"))}))
     assert rewritten.lift.params == term.lift.params == ("a1", "a2", "a3")
     assert rewritten.free_axes == term.free_axes
 
 
 def test_expression_substitution_stops_at_reduce_binder() -> None:
     term = reduction(Axis("p", 8), (slab("v", "x", "p"),), "acc__v = copy(v)", ("acc",))
-    rewritten = term.rewrite(lambda name: name, Sigma({"p": BinaryExpr("%", Var("n"), Literal(8, "int"))}))
+    rewritten = term.rewrite(lambda name: name, Sigma({"p": BinaryExpression("%", Var("n"), Literal(8, "int"))}))
     assert rewritten == term and rewritten.axis == "p"
 
 
@@ -288,7 +288,7 @@ def test_a_sweep_store_rides_the_loop_the_term_opened() -> None:
     total, swept = _normalized_sum()
     store = _store("out[m, n] = acc", sweep=(N_AXIS,))
     ahead, sweep = swept.lower(frozenset({"m"}), (store,), axes=SCOPE)
-    assert ahead == total.lower(axes=SCOPE)[0] and sweep.axis is N_AXIS
+    assert ahead == total.lower(axes=SCOPE)[0] and sweep.axis == N_AXIS
     assert [type(stmt).__name__ for stmt in sweep.body] == ["Loop", "Write"]
 
 
@@ -313,7 +313,7 @@ def test_a_broadcast_store_opens_the_sweep_axis_its_spec_names() -> None:
     store = _store("o[m, j] = tot", sweep=(j,))
     (m_loop,) = total.lower(frozenset(), (store,), axes=SCOPE)
     reduce_loop, j_loop = m_loop.body
-    assert reduce_loop.axis is K_AXIS and j_loop.axis is j and tuple(j_loop.body) == (store.write,)
+    assert reduce_loop.axis == K_AXIS and j_loop.axis == j and tuple(j_loop.body) == (store.write,)
 
 
 def test_an_observed_store_rides_the_reduce_loop_after_the_observer() -> None:
@@ -467,7 +467,7 @@ def test_a_componentwise_merge_is_one_accum_per_state() -> None:
     lift = Lambda.closing(("k", "y"), body, ("a0", "a1"))
     fold = Fold(operands=(slab("y", "y", "m", "k"),), lift=lift, init=init, base=combine)
     stmts = fold.merge(("acc0__p", "acc1__p"))
-    assert [(s.name, s.op.name, s.value) for s in stmts] == [("acc0", "add", "acc0__p"), ("acc1", "maximum", "acc1__p")]
+    assert [(s.name, s.op.name, str(s.value)) for s in stmts] == [("acc0", "add", "acc0__p"), ("acc1", "maximum", "acc1__p")]
     assert [s.op.identity for s in stmts] == [0.0, -1e30], "the seed the identity placement will emit"
     assert fold.as_reduction().ops is not None and not fold.as_reduction().twisted
 
@@ -536,11 +536,11 @@ def test_a_consumer_names_what_it_binds_and_rendering_spells_the_operand() -> No
     over a passed-through operand value renders with it. Two spellings of one binding are one
     term: equal canonical forms, equal lowered bodies."""
     y = slab("y", "y", "m", "k")
-    lift = Lambda.closing(("k", "value"), parse_body("acc__v = copy(value)"), ("acc__v",))
+    lift = Lambda.closing(("k", "value"), parse_body("acc__v = value"), ("acc__v",))
     fold = Fold(operands=(y,), lift=lift, init=(0.0,), base=Lambda.componentwise(("add",), ("acc",)))
     assert fold.bindings == (("value", y, 0),) and fold.applied.params == ("k", "y")
     (loop,) = fold.lower(axes=SCOPE)
-    assert [stmt.args for stmt in loop.body if isinstance(stmt, Assign)] == [("y",)]
+    assert [str(stmt.value) for stmt in loop.body if isinstance(stmt, Assign)] == ["y"]
     spelled = replace(fold, lift=lift.rename({"value": "y"}))
     assert fold.canonical() == spelled.canonical() and fold.lower(axes=SCOPE) == spelled.lower(axes=SCOPE)
     # A projection passing the state through exposes the state's own name, and its store follows.

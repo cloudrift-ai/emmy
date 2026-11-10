@@ -6,9 +6,9 @@ import pytest
 from frozendict import frozendict
 
 from emmy.compiler.ir.elementwise import ElementwiseImpl
-from emmy.compiler.ir.expression import Literal, Var
-from emmy.compiler.ir.loop import Affine, Assign, Axis, Loop, LoopOp, Select
-from emmy.compiler.ir.stmt import parse_body
+from emmy.compiler.ir.expression import Literal, Var, apply
+from emmy.compiler.ir.loop import Assign, Axis, Loop, LoopOp, Select
+from emmy.compiler.ir.stmt import normalize_body, parse_body
 
 
 def _loop(text: str) -> LoopOp:
@@ -76,7 +76,7 @@ def test_injective_buffer_rename_preserves_normal_form_cache() -> None:
 
     rename = {"X": "z_input", "Y": "a_input", "O": "renamed_output"}
     renamed = op.rename_buffers(rename)
-    assert renamed.body._normalized is renamed.body
+    assert normalize_body(renamed.body) is renamed.body
     assert replace(renamed, outputs=renamed.outputs).body is renamed.body
     assert tuple(load.input for load in renamed.loads) == tuple(rename[load.input] for load in op.loads)
     assert renamed.identity_key() == op.identity_key()
@@ -86,7 +86,7 @@ def test_aliasing_buffer_rename_does_not_preserve_normal_form_cache() -> None:
     op = _loop(_SUM_OF_TWO)
 
     renamed = op.rename_buffers({"X": "input", "Y": "input"})
-    assert "_normalized" not in renamed.body.__dict__
+    assert normalize_body(renamed.body) is not renamed.body
 
 
 def test_update_synthesizes_accum_decl():
@@ -114,10 +114,10 @@ def test_update_synthesizes_accum_decl():
 
 
 def test_assign_construction():
-    a = Assign("out", ElementwiseImpl("add"), args=("a", "b"))
+    a = Assign("out", apply(ElementwiseImpl("add"), "a", "b"))
     assert a.name == "out"
-    assert a.op.name == "add"
-    assert a.args == ("a", "b")
+    assert a.value.operation.name == "add"
+    assert [operand.name for operand in a.value.operands] == ["a", "b"]
 
 
 # ---------------------------------------------------------------------------
@@ -163,7 +163,7 @@ def test_kernel_matmul():
             out_0[a0] = dot
         """
     )
-    # 2 Loads + Assign + Accum + Write — accumulator info is carried on Accum.op now.
+    # 2 Loads + the product + Accum (over its name) + Write — accumulator info is carried on Accum.op now.
     assert sum(1 for s in k if not isinstance(s, Loop)) == 5
 
 
@@ -181,7 +181,7 @@ def test_kernel_matmul_bias():
             out_0[a0] = out
         """
     )
-    # 3 Loads + Assign + Accum + Assign + Write (no decl stmt — Accum carries op).
+    # 3 Loads + the product + Accum (over its name) + Assign + Write (no decl stmt — Accum carries op).
     assert sum(1 for s in k if not isinstance(s, Loop)) == 7
 
 
@@ -217,7 +217,7 @@ def test_kernel_unary_chain():
             out_0[a0] = exp
         """
     )
-    # 1 Load + 2 Assigns + Write.
+    # 1 Load + two Assigns (one operation each) + Write.
     assert sum(1 for s in k if not isinstance(s, Loop)) == 4
 
 
@@ -254,17 +254,19 @@ def test_ssa_rejects_undefined_arg():
         )
 
 
-def test_ssa_rejects_duplicate_name():
-    with pytest.raises(ValueError, match="already defined"):
-        _loop(
-            """
-            for a0 in 0..4:
-                in0_1 = load src_0[a0]
-                y = exp(in0_1)
-                y = negative(y)
-                out_0[a0] = y
-            """
-        )
+def test_two_lexical_bindings_of_one_name_are_two_values():
+    """A name bound twice in one scope (the second reading the first) is two values: the normal form renames them
+    apart, one definition each."""
+    k = _loop(
+        """
+        for a0 in 0..4:
+            in0_1 = load src_0[a0]
+            y = exp(in0_1)
+            y = negative(y)
+            out_0[a0] = y
+        """
+    )
+    assert [str(s.value) for s in k.body[0].body if isinstance(s, Assign)] == ["exp(in0)", "-v0"]
 
 
 def test_ssa_topo_sorts_forward_reference():
@@ -280,10 +282,9 @@ def test_ssa_topo_sorts_forward_reference():
             out_0[a0] = a
         """
     )
-    # After normalization the rename pass canonicalizes to v0, v1; the
-    # exp-Assign (originally "b") must precede the Affine sum that uses it.
-    kinds = [s.op.name if isinstance(s, Assign) else type(s).__name__ for s in k.body[0].body if isinstance(s, (Assign, Affine))]
-    assert kinds == ["exp", "Affine"], kinds
+    # After normalization the ``exp`` (originally "b") is defined ahead of the sum that reads it.
+    values = [str(s.value) for s in k.body[0].body if isinstance(s, Assign)]
+    assert values == ["exp(in0)", "in0 + v0"], values
 
 
 def test_ssa_allows_input_name_reuse_in_multiple_args():
@@ -297,7 +298,7 @@ def test_ssa_allows_input_name_reuse_in_multiple_args():
             out_0[a0] = c
         """
     )
-    # 1 Load + exp + one Affine (the negation folded into the sum) + 1 Write.
+    # 1 Load + the exp, and the sum with the negation (one affine region) + 1 Write.
     assert sum(1 for s in k if not isinstance(s, Loop)) == 4
 
 

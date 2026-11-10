@@ -84,7 +84,7 @@ def _muls(tile) -> list[Statement]:
 def _factors(tile) -> set[frozenset[str]]:
     """The operand pair each cell's product reads. A SET per product: the tier replicates the term's
     own step, so the order the two factors are spelled in is the term's, not the tier's."""
-    return {frozenset(s.args) for s in _muls(tile)}
+    return {frozenset(operand.name for operand in s.value.operands) for s in _muls(tile)}
 
 
 def _cells(mn) -> list[tuple[int, int]]:
@@ -134,7 +134,9 @@ def test_two_product_channels_reuse_a_rows_and_b_columns() -> None:
     assert len(_loads_of(tile, "A")) == mn[0].reg
     assert len(_loads_of(tile, "B")) == len(_loads_of(tile, "B2")) == mn[1].reg
     products = [stmt for stmt in tile.body.iter() if isinstance(stmt, Assign) and stmt.name.startswith("acc2__v")]
-    assert {frozenset(stmt.args) for stmt in products} == {frozenset((f"a__ar{i}", f"b2__bc{j}")) for i, j in _cells(mn)}
+    assert {frozenset(o.name for o in stmt.value.operands) for stmt in products} == {
+        frozenset((f"a__ar{i}", f"b2__bc{j}")) for i, j in _cells(mn)
+    }
 
 
 def test_a_cell_varying_operand_cannot_share_a_staged_slab() -> None:

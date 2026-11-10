@@ -11,7 +11,6 @@ import pytest
 from emmy.compiler.dim import Dim
 from emmy.compiler.graph import Graph, Tensor
 from emmy.compiler.ir.axis import Axis
-from emmy.compiler.ir.elementwise import ElementwiseImpl
 from emmy.compiler.ir.expression import Literal, Var
 from emmy.compiler.ir.loop import LoopOp
 from emmy.compiler.ir.pure import Fold, Lambda
@@ -485,9 +484,9 @@ def test_key_swept_statistic_stays_when_a_sibling_reads_it() -> None:
     tile = _key_swept_score(shared_reader=True)
 
     sweep, score, b = _score_and_b(tile)
-    assert any(isinstance(stmt, Assign) and stmt.op == ElementwiseImpl("rsqrt") for stmt in sweep.lift.body)
+    assert any(isinstance(stmt, Assign) and "rsqrt(" in str(stmt.value) for stmt in sweep.lift.body)
     (inv,) = [edge for edge in b.operands if edge.as_slab() is None]
-    assert any(isinstance(stmt, Assign) and stmt.op == ElementwiseImpl("rsqrt") for stmt in inv.lift.body)
+    assert any(isinstance(stmt, Assign) and "rsqrt(" in str(stmt.value) for stmt in inv.lift.body)
     (stat,) = inv.operands
     assert stat.axis is not None and any(stat is edge for edge in sweep.operands), "the statistic fold is shared, not copied"
 
@@ -901,7 +900,7 @@ def test_contraction_preserves_computed_operand_statement_order() -> None:
     computed = tile.op.operands[0]
     lowered = computed.lower(axes=tile.axes)
     assert isinstance(lowered[0], Loop) and isinstance(lowered[-1], Loop), [type(stmt).__name__ for stmt in lowered]
-    assert any(isinstance(stmt, Assign) and stmt.op.name == "reciprocal" for stmt in lowered[1:-1])
+    assert any(isinstance(stmt, Assign) and "reciprocal(" in str(stmt.value) for stmt in lowered[1:-1])
     assert TileOp(op=tile.op, place=tile.place, axes=tile.axes, output_specs=tile.output_specs).op is tile.op
 
 
@@ -1063,7 +1062,7 @@ def test_a_body_fed_fold_takes_its_provider_as_a_sibling_operand() -> None:
     assert not any(isinstance(stmt, Fold) for stmt in out.lift.body), "a term is never a body member"
     lowered = out.lower(axes=tile.axes)
     assert any(isinstance(stmt, Loop) for stmt in lowered), [type(stmt).__name__ for stmt in lowered]
-    kinds = ["provider" if isinstance(stmt, Assign) and stmt.op.name == "rsqrt" else type(stmt).__name__ for stmt in lowered]
+    kinds = ["provider" if isinstance(stmt, Assign) and "rsqrt(" in str(stmt.value) else type(stmt).__name__ for stmt in lowered]
     assert kinds.index("provider") < kinds.index("Loop"), "the provider is emitted before its consumer"
 
 

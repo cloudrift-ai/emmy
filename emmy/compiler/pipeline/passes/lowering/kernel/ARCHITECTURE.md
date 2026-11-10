@@ -7,9 +7,8 @@ afterwards.
 ## `010_materialize` — bind the schedule to threads (and expand the contraction)
 
 `010_materialize` is a thin wrapper: after the split-survivor assert it makes **one** call to `_factor.factorize(tile,
-root)`, the entry to the recursive emitter, spells every `Affine` statement of the finished body as its binary
-`Assign`s over `Let`-bound literals — Kernel IR evaluates one operation at a time, so no kernel pass meets a sum —
-then passes it through `_drop_repeated_declarations` — the emitted body's one legality guard. Operand cones splice
+root)`, the entry to the recursive emitter, then passes the finished body through `_drop_repeated_declarations` —
+the emitted body's one legality guard. Operand cones splice
 INDEPENDENTLY (`Fold.spliced_step`), so two sibling cones reading one shared broadcast constant each carry their own
 copy of its `buf[0]` `Load`, under the same SSA name and at the same address; flattened into one loop body that is two
 C declarations of one name, which nvcc rejects (*already declared in the current scope*). The repeat binds nothing
@@ -503,7 +502,7 @@ under the edge split, symbolic-seq SDPA lowered a kernel reading twelve names it
 **A bridged seam value keeps its own dtype.** A computed operand's cone splits at its K seam into a row-invariant
 prologue and a per-cell body. Only external cell reads load bridged results; locally defined values are not reloaded.
 The smem rows declare each bridged value's dtype (`cone_stat_dtypes`, typed the way `edge_dtypes`
-types an edge's results; a name whose statement kind carries no dtype keeps the float default). Declaring every row
+types an edge's results; a name whose statement type carries no dtype keeps the float default). Declaring every row
 `float` decides the CELL's arithmetic too: a value that crosses as an integer — a pack's shift amount, a nibble
 mask — returns as f32, and the bit operations reading it have no f32 spelling at all, so the kernel fails to render
 rather than computing something wrong.

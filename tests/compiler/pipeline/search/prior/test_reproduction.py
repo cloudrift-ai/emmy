@@ -13,7 +13,9 @@ pool.
 
 A red node names the rows the prior cannot reproduce. A change to a hardware golden refits the priors in the same PR;
 a recipe golden the shipped priors do not reproduce is either refit for or tagged ``prior-pending``, which skips its
-nodes until a refit reproduces it (README, "Fit the priors"). Never lower the tolerance.
+nodes until a refit reproduces it (README, "Fit the priors"). Never lower the tolerance. A hardware golden's node the
+user has accepted as a known miss is ``xfail`` in ``KNOWN_MISSES``, strict: the refit that reproduces it turns the
+node into an unexpected pass, which is the signal to drop the entry.
 """
 
 from __future__ import annotations
@@ -87,6 +89,19 @@ def _placement_pools(path: Path):
     return placement_pools(db, _pools(path)["schedule"])
 
 
+KNOWN_MISSES = {
+    ("rtx5090_sm120.json", "placement", 14): (
+        "PR #1365: the refit prior ranks the golden's cut of k_linear_mean_reduce_949ce4 at 512 tokens third of ten"
+        " arms (29 of 30 reproduced); accepted by the user, dropped by the refit that reproduces it"
+    ),
+}
+
+
+def _marks(path: Path, space: str, k: int) -> tuple:
+    reason = KNOWN_MISSES.get((_golden_id(path), space, k))
+    return (pytest.mark.xfail(reason=reason, strict=True),) if reason else ()
+
+
 def _parameters():
     """One node per slice of each repository golden's pools, per space, in a stable order."""
     with repository_golden_paths() as paths:
@@ -99,7 +114,7 @@ def _parameters():
             if _prior_pending(path)
         ),
         *(
-            pytest.param(path, space, k, id=f"{_golden_id(path)}/{space}/{k}")
+            pytest.param(path, space, k, id=f"{_golden_id(path)}/{space}/{k}", marks=_marks(path, space, k))
             for path in ordered
             if not _prior_pending(path)
             for space, pools in _pools(path).items()

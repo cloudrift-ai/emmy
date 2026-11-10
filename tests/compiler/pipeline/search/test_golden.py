@@ -63,6 +63,57 @@ def test_a_cut_piece_is_the_kernel_its_stored_definition_lifts_to() -> None:
         assert piece.exact_identity == KernelDef(loop_ir=piece.loop_ir, name=piece.name, formed=piece.formed).exact_identity, piece.name
 
 
+def test_restamp_respells_a_rows_site_keys_as_it_does_a_seam() -> None:
+    """A row's scoped schedule keys address sites by operand position, as a seam does. A node the lift forms before
+    the site moves the address: the key is re-spelled to the one offered key of its kind one segment away (the GDN
+    state recurrence's nested reduce, ``inner.2`` → ``inner.1`` under the lift's one-node rule), and a key no such
+    rule maps is dropped from its row, named, rather than guessed."""
+    from dataclasses import replace
+
+    from emmy.compiler.pipeline.search.golden.format import Measurements
+    from emmy.compiler.pipeline.search.golden.restamp import restamp
+
+    document = GoldenFile.load(Path(__file__).resolve().parents[2] / "realization/cases/fused/gdn-recurrence-state-kv.json")
+    (row,) = document.rows
+    nested = max((key for key in row.knobs if key.startswith("TILE@")), key=len).partition("@")[2]
+    assert {key for key in row.knobs if nested in key} == {f"{family}@{nested}" for family in ("TILE", "REDUCE", "STAGE")}
+    head, _, tail = nested.partition("/map.3")  # ``map.1/inner.N``: the nested reduce one operand index over
+    moved = f"{head[:-1]}{int(head[-1]) + 1}/map.3{tail}"
+    shifted = {key.replace(nested, moved): value for key, value in row.knobs.items()}
+    measured = replace(row, knobs=shifted, measurements=Measurements(emmy_us=12.5))
+    fresh, report = restamp(replace(document, rows=[measured]))
+    assert fresh.rows[0].knobs == row.knobs and not report.dropped_rows
+    assert report.respelled_rows == [f"{row.name} {old} -> {new}" for old, new in zip(shifted, row.knobs, strict=True) if old != new]
+    assert len(report.respelled_rows) == 3
+    # A re-spelled key is a nearest-address match, not proof: the row keeps its schedule and loses its measurement.
+    assert report.demoted == [row.name] and fresh.rows[0].measurements is None
+    unmapped = {key.replace(nested, f"{nested}9"): value for key, value in row.knobs.items()}
+    fresh, report = restamp(replace(document, rows=[replace(row, knobs=unmapped, measurements=Measurements(emmy_us=12.5))]))
+    assert fresh.rows[0].knobs == {key: value for key, value in row.knobs.items() if nested not in key}
+    families = ("TILE", "REDUCE", "STAGE")
+    assert report.dropped_keys == [f"{row.name}: {family}@{nested}9 names no site of {row.kernel}" for family in families]
+    # A row that lost a key is not the schedule that was measured either.
+    assert report.demoted == [row.name] and fresh.rows[0].measurements is None
+    assert not restamp(document)[1].changed
+
+
+def test_restamp_keys_a_carried_kernels_rows_against_its_serial_form() -> None:
+    """A kernel that carries a state is scheduled as its serial form (one launch per step), and its rows' scoped keys
+    address that form's sites; a restamp offers the row those keys, not the lifted tile's (whose ``scan`` the serial
+    form has already peeled), so the row keeps every key and its measurement."""
+    from dataclasses import replace
+
+    from emmy.compiler.pipeline.search.golden.restamp import restamp
+
+    document = GoldenFile.load(Path(__file__).resolve().parents[4] / "emmy/compiler/pipeline/search/golden/records/rtx5090_sm120.json")
+    kernel = document.kernel("k_unsqueeze_reduce_f62b35")
+    rows = [row for row in document.rows if row.kernel == kernel.ref and any("@" in key for key in row.knobs)]
+    assert rows and all(any(key.startswith("REDUCE@") for key in row.knobs) for row in rows)
+    fresh, report = restamp(replace(document, kernels=[kernel], routing=[], rows=rows))
+    assert not report.dropped_keys and not report.respelled_rows, report.lines()
+    assert [row.knobs for row in fresh.rows] == [row.knobs for row in rows]
+
+
 def test_lora_serving_golden_replays_nested_cuts() -> None:
     path = (
         Path(__file__).resolve().parents[4] / "experiments/Meta-Llama-3.1-8B-Instruct/lora_v100_sxm3_32gb/golden/v100_sxm3_sm70_lora8.json"

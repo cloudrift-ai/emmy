@@ -5,7 +5,7 @@ from __future__ import annotations
 from emmy.compiler.dtype import F32
 from emmy.compiler.ir.axis import Axis
 from emmy.compiler.ir.elementwise import ElementwiseImpl
-from emmy.compiler.ir.expression import BinaryExpr, Literal, SimplifyCtx, TernaryExpr, Var
+from emmy.compiler.ir.expression import BinaryExpression, Literal, SimplifyCtx, TernaryExpression, Var
 from emmy.compiler.ir.kernel.ir import (
     COORD,
     FRAG,
@@ -23,7 +23,7 @@ from emmy.compiler.ir.kernel.ir import (
     Tile,
     fragment_args,
 )
-from emmy.compiler.ir.stmt import Assign, Body, Let, Load, Pre, Select, StridedLoop, binary
+from emmy.compiler.ir.stmt import Assign, Body, Let, Load, Pre, Select, StridedLoop
 from emmy.compiler.pipeline.passes.tile._fromloop import seed_index
 
 from ._atom import _direct_operand
@@ -129,10 +129,24 @@ class _Fragments:
             # Clamp memory coordinates before masking a padded fragment. The padded value
             # is zero at the operand boundary, so it contributes the reduction's identity.
             clipped = {
-                name: TernaryExpr(BinaryExpr("<", coord, Literal(self.extents[name], "int")), coord, Literal(self.extents[name] - 1, "int"))
+                name: TernaryExpression(
+                    BinaryExpression("<", coord, Literal(self.extents[name], "int")), coord, Literal(self.extents[name] - 1, "int")
+                )
                 for name, coord in coords.items()
             }
-            for stmt in binary(node.lift.body):
+
+            def evaluate(expression):
+                """A value at its fragment: a name's (an alias names the same fragment, never a second one), a literal
+                as itself, an operation node applied to its operands' fragments."""
+                if isinstance(expression, Var):
+                    return env[expression.name]
+                if isinstance(expression, Literal):
+                    return expression
+                args = tuple(evaluate(operand) for operand in expression.operands)
+                kinds = tuple(UNIFORM if isinstance(arg, Literal) else FRAG for arg in args)
+                return self.apply(expression.operation.name, args, kinds)
+
+            for stmt in node.lift.body:
                 if isinstance(stmt, Let):
                     env[stmt.name] = stmt.value
                 elif isinstance(stmt, Pre):
@@ -147,18 +161,14 @@ class _Fragments:
                         seeded = self.apply("copy", ((seed, seed_index(index, self.tile.inputs[seed].shape)),), (GMEM,), rb, cb)
                     else:
                         seeded = Literal(float(seed))
-                    first = BinaryExpr(">", Var(self.program.time), Literal(0, "int"))
+                    first = BinaryExpression(">", Var(self.program.time), Literal(0, "int"))
                     kinds = (COORD, FRAG, UNIFORM if isinstance(seeded, Literal) else FRAG)
                     env[stmt.name] = self.apply("where", (first, self.states[cb.value // self.width], seeded), kinds, rb, cb)
                 elif isinstance(stmt, Load):
                     index = tuple(e.substitute(clipped).simplify(SimplifyCtx.empty()) for e in stmt.index)
                     env[stmt.name] = self.apply("copy", ((stmt.input, index),), (GMEM,), rb, cb)
-                elif isinstance(stmt, Assign) and stmt.op.name == "copy":
-                    env[stmt.name] = env[stmt.args[0]]  # a name for the same fragment, never a second one
                 elif isinstance(stmt, Assign):
-                    args = tuple(env[name] for name in stmt.args)
-                    kinds = tuple(UNIFORM if isinstance(arg, Literal) else FRAG for arg in args)
-                    env[stmt.name] = self.apply(stmt.op.name, args, kinds)
+                    env[stmt.name] = evaluate(stmt.value)
                 elif isinstance(stmt, Select):
                     value = env[stmt.branches[-1].value]
                     for branch in reversed(stmt.branches[:-1]):
@@ -183,13 +193,13 @@ class _Fragments:
         # Only partial fragments need an element mask. A complete excess warp row is
         # harmless: loads clamp coordinates and stores guard the output's row extent.
         conditions = [
-            BinaryExpr("<", Var(coord), Literal(self.extents[axis], "int"))
+            BinaryExpression("<", Var(coord), Literal(self.extents[axis], "int"))
             for axis, coord, width in ((row, FRAG_ROW, self.atom.atom_m), (col, FRAG_COL, self.width))
             if self.extents[axis] % width
         ]
         if not conditions:
             return self.fragment(value)
-        cond = conditions[0] if len(conditions) == 1 else BinaryExpr("&&", *conditions)
+        cond = conditions[0] if len(conditions) == 1 else BinaryExpression("&&", *conditions)
         return self.apply("where", (cond, value, Literal(0.0)), (COORD, UNIFORM if isinstance(value, Literal) else FRAG, UNIFORM), rb, cb)
 
     def contract(self, node, row, col, rb, cb):

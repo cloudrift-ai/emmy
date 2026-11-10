@@ -18,7 +18,8 @@ from emmy.compiler.context import Context
 from emmy.compiler.graph import Graph, Tensor
 from emmy.compiler.ir.base import InputOp
 from emmy.compiler.ir.cuda import CudaOp
-from emmy.compiler.ir.loop import Accum, Affine, Assign, LoopOp, Write
+from emmy.compiler.ir.expression import Literal
+from emmy.compiler.ir.loop import Accum, Assign, LoopOp, Write
 from emmy.compiler.ir.tensor.ir import ElementwiseOp, ReduceOp, ScanOp
 from emmy.compiler.ir.tile import TileOp
 from emmy.compiler.pipeline import CUDA_PASSES, LOOP_PASSES, TILE_PASSES, Pipeline
@@ -56,13 +57,70 @@ def _input(g: Graph, name: str, shape: tuple) -> str:
     return g.add_node(op=InputOp(), inputs=[], output=Tensor(name, shape), node_id=name)
 
 
+def _spine(value, out=None):
+    """The shape of every maximal sum in ``value``, outermost first: its sorted literal coefficients and its offset, one
+    entry per affine region (additions, subtractions, negations and literal scales), the analog of one sum statement.
+    A term below a non-affine operation (``exp(-x)``) is its own region."""
+    out = [] if out is None else out
+    op = value.operation
+    name = op.name if op is not None else None
+    scaled = name == "multiply" and any(isinstance(operand, Literal) for operand in value.operands)
+    if name in ("add", "subtract", "negative") or scaled:
+        terms: list = []
+        offset = _terms(value, 1.0, terms)
+        out.append((tuple(sorted(coefficient for coefficient, _ in terms)), offset))
+        for _, leaf in terms:
+            _spine(leaf, out)
+    else:
+        for child in value.children():
+            _spine(child, out)
+    return out
+
+
+def _terms(value, scale: float, terms: list) -> float:
+    """Collect ``value``'s affine terms as ``(coefficient, leaf)`` under ``scale``; the literal offset is returned."""
+    if isinstance(value, Literal):
+        return scale * float(value.value)
+    op = value.operation
+    name = op.name if op is not None else None
+    operands = value.operands
+    if name == "add":
+        return sum(_terms(operand, scale, terms) for operand in operands)
+    if name == "subtract":
+        return _terms(operands[0], scale, terms) + _terms(operands[1], -scale, terms)
+    if name == "negative":
+        return _terms(operands[0], -scale, terms)
+    if name == "multiply" and any(isinstance(operand, Literal) for operand in operands):
+        literal, other = sorted(operands, key=lambda operand: not isinstance(operand, Literal))
+        return _terms(other, scale * float(literal.value), terms)
+    terms.append((scale, value))
+    return 0.0
+
+
+def _operations(body) -> list[str]:
+    """The elementwise operations a body computes beyond its sums: every operation node of an ``Assign`` or ``Accum``
+    value that is not part of an affine region (an addition, a subtraction, a negation, a literal scale)."""
+    names = []
+    for stmt in body.iter():
+        if not isinstance(stmt, (Assign, Accum)):
+            continue
+        for node in stmt.value.subterms():
+            op = node.operation
+            if op is None or op.name in ("add", "subtract", "negative"):
+                continue
+            if op.name == "multiply" and any(isinstance(operand, Literal) for operand in node.operands):
+                continue
+            names.append(op.name)
+    return names
+
+
 def _elementwise_fns(body) -> list[str]:
-    return [s.op.name for s in body.iter() if isinstance(s, Assign)]
+    return _operations(body)
 
 
 def _affine_shapes(body) -> list[tuple[tuple[float, ...], float]]:
-    """Every Affine's sorted coefficients and offset: the folded form a sum, difference or negation takes."""
-    return sorted((tuple(sorted(s.coefficients)), s.offset) for s in body.iter() if isinstance(s, Affine))
+    """Every sum's top-level shape in a body (see ``test_fusion_rules._affine_shapes``)."""
+    return sorted(shape for s in body.iter() if isinstance(s, (Assign, Accum)) for shape in _spine(s.value))
 
 
 def _has_update(body) -> bool:

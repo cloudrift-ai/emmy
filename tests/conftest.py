@@ -139,6 +139,18 @@ def _isolate_offline_file(monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def _clear_target_override():
+    """Clear the compile-target override after every test. A CLI test that passes ``--target sm_NN`` installs it for
+    the process (``emmy.compiler.target.set_target``), and a later test in the same xdist worker would then compile for
+    that card instead of the probed one: the carried-state fork offers its register arm on sm_89 and, with no prior to
+    rank the fork, a greedy compile took it where the classic serial form was expected."""
+    yield
+    from emmy.compiler.target import set_target  # noqa: PLC0415
+
+    set_target(None)
+
+
+@pytest.fixture(autouse=True)
 def _seed_rng():
     """Pin RNGs for every test so numerical-tolerance assertions
     (e.g. ``test_torch_ops.test_unary``) don't flake on inputs that

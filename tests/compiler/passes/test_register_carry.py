@@ -9,6 +9,7 @@ from emmy.compiler.context import Context
 from emmy.compiler.graph import Graph
 from emmy.compiler.ir.base import InputOp
 from emmy.compiler.ir.cuda import CudaOp
+from emmy.compiler.ir.expression import apply
 from emmy.compiler.ir.kernel.ir import FragmentPromote, FragmentRepack, LdmatrixLoad, MmaSyncPtx, RegFragment
 from emmy.compiler.ir.render import render_stmt
 from emmy.compiler.ir.schedule import Stage
@@ -86,7 +87,9 @@ def test_register_step_keeps_a_time_coordinate_read_by_its_lift():
                 (
                     *parse_body(f"phase = load D[{carrying.axis}]"),
                     *[
-                        replace(stmt, args=(stmt.args[0], "phase")) if isinstance(stmt, Assign) and stmt.name == lift.results[0] else stmt
+                        stmt.replace(value=apply(stmt.value.operation, stmt.value.operands[0], "phase"))
+                        if isinstance(stmt, Assign) and stmt.name == lift.results[0]
+                        else stmt
                         for stmt in lift.body
                     ],
                 )
@@ -283,7 +286,7 @@ def test_seed_tensor_keeps_unit_dimensions_on_cuda(register):
     op = source.nodes["out"].op
     zero = Literal(0, "int")
     source.nodes["out"].op = replace(
-        op, body=op.body.map(lambda s: replace(s, index=(zero, s.index[0], zero, s.index[1])) if isinstance(s, (Carry, Pre)) else s)
+        op, body=op.body.map(lambda s: s.replace(index=(zero, s.index[0], zero, s.index[1])) if isinstance(s, (Carry, Pre)) else s)
     )
     pins = {"FAST_MATH": False}
     if register:
@@ -306,11 +309,11 @@ def test_gmem_fragment_loads_keep_their_constant_offset_in_the_pointer():
     24 bytes there, while CUDA 13 folded the same source into 189 registers. ``&k[base] + 2048``
     is one pointer and a load immediate on both (179 registers on CUDA 12.9)."""
     from emmy.compiler.dim import Dim
-    from emmy.compiler.ir.expression import BinaryExpr, Literal, Var
+    from emmy.compiler.ir.expression import BinaryExpression, Literal, Var
     from emmy.compiler.ir.render import RenderCtx
 
     ctx = RenderCtx(shapes={"k": (Dim(4), Dim(64), Dim(128))}, buffer_dtypes={"k": "f32"}, ssa_dtypes={"r": "f16"})
-    row = BinaryExpr("+", BinaryExpr("*", Var("a0"), Literal(64, "int")), Literal(16, "int"))
+    row = BinaryExpression("+", BinaryExpression("*", Var("a0"), Literal(64, "int")), Literal(16, "int"))
     load = LdmatrixLoad(frag="r", src_buffer="k", src_index=(Var("a1"), row, Literal(8, "int")), role="b", staged=False, ldm=128)
     (line,) = render_stmt(load, ctx)
     assert line.strip() == "emmy_mma_load_b_gmem<float, __half>(r, &k[a1 * 8192 + a0 * 64 * 128] + 2056, 128);"

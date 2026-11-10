@@ -93,7 +93,7 @@ def test_a_side_decode_scale_binds_raw_with_hoist():
     assert a.as_slab() is not None and a.as_slab().load.input == "a_bits"
     assert b.as_slab() is not None and b.as_slab().load.input == "w_bits"
     tail = [s for s in epi if isinstance(s, Assign)]
-    assert tail and tail[-1].op.name == "multiply", "the activation scale did not hoist"
+    assert tail and tail[-1].value.operation.name == "multiply", "the activation scale did not hoist"
 
 
 def test_double_cone_hoists_both_scales():
@@ -103,7 +103,7 @@ def test_double_cone_hoists_both_scales():
     assert a.as_slab() is not None and a.as_slab().load.input == "a_bits"
     assert b.as_slab() is not None and b.as_slab().load.input == "w_bits"
     assigns = [s for s in epi if isinstance(s, Assign)]
-    assert assigns and {s.op.name for s in assigns} == {"multiply"}
+    assert assigns and {s.value.operation.name for s in assigns} == {"multiply"}
     assert {s.input for s in epi if isinstance(s, Load)} == {"act_scale", "w_scale"}
 
 

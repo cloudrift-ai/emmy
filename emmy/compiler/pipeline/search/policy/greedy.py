@@ -802,6 +802,7 @@ def greedy_decide(
     # context keys): the tune DB's rows and the golden rows in scope, one index.
     # ``None`` sentinel = not built yet.
     db_state: list = [None]
+    from emmy.compiler.pipeline.pipeline import NO_OPTION  # noqa: PLC0415
 
     def db_index() -> dict:
         return (db_state[0].ok if db_state[0] is not None else None) or {}
@@ -876,7 +877,7 @@ def greedy_decide(
             leaves = (leaf for leaf in fp.leaves() if node_blocked is None or not _tile_blocked(leaf_knobs(leaf), node_blocked))
             first = next(leaves, None)
             if first is None:
-                return next(fp.leaves())
+                return next(fp.leaves(), NO_OPTION)
             if next(leaves, None) is not None:
                 _require_evidence(
                     fp,

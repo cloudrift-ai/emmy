@@ -20,7 +20,7 @@ from dataclasses import replace
 
 from emmy.compiler.dtype import get as get_dtype
 from emmy.compiler.ir.address import gmem_axis_step
-from emmy.compiler.ir.expression import Var
+from emmy.compiler.ir.expression import Var, promoted_dtype
 from emmy.compiler.ir.pure.fold import (
     Fold,
 )
@@ -31,7 +31,7 @@ from emmy.compiler.ir.schedule.classic import (
     classic_node_key,
     classic_stage_key,
 )
-from emmy.compiler.ir.stmt import Accum, Affine, Assign, Body, Init, Let, Load, Loop, Select, Statement, dtype_promote
+from emmy.compiler.ir.stmt import Accum, Assign, Body, Init, Let, Load, Loop, Select, Statement
 from emmy.compiler.ir.tile.boundary import apply_output_specs
 from emmy.compiler.ir.tile.path import UnknownSiteError, sites
 
@@ -45,14 +45,14 @@ def cone_stat_dtypes(pro: tuple, stats: tuple[str, ...], inputs) -> dict[str, ob
     amount, a nibble mask — comes back f32, and the bit operations reading it have no f32 spelling.
 
     Typed the same way :func:`edge_dtypes` types an edge's results, over the prologue's flat stmt
-    list. A name whose stmt kind carries no dtype is absent from the result; its row keeps the
+    list. A name whose statement type carries no dtype is absent from the result; its row keeps the
     float default."""
     env: dict[str, object] = {}
     for stmt in pro:
         if isinstance(stmt, Load):
             tensor = inputs.get(stmt.input) if inputs else None
             env.update((name, tensor.dtype if tensor is not None else None) for name in stmt.names)
-        elif isinstance(stmt, (Assign, Affine)):
+        elif isinstance(stmt, Assign):
             env[stmt.name] = _promoted(stmt, env)
         elif isinstance(stmt, (Init, Let)):
             env[stmt.name] = stmt.dtype
@@ -61,15 +61,15 @@ def cone_stat_dtypes(pro: tuple, stats: tuple[str, ...], inputs) -> dict[str, ob
     return {nm: dt for nm in stats if (dt := env.get(nm)) is not None}
 
 
-def _promoted(stmt: Assign | Affine, env: dict) -> object:
-    """The dtype ``stmt`` computes at: its stamp, else the promotion of its named operands — a literal operand takes
-    the dtype of the computation and constrains nothing; ``None`` while an operand is untyped."""
+def _promoted(stmt: Assign, env: dict) -> object:
+    """The dtype ``stmt`` computes at: its stamp, else the promotion of its value's named operands, node by node;
+    ``None`` while an operand is untyped."""
     if stmt.dtype is not None:
         return stmt.dtype
-    args = [env.get(name) for name in stmt.deps()]
-    if not args or not all(args):
+    names = stmt.value.free_vars()
+    if not names or not all(env.get(name) for name in names):
         return None
-    return get_dtype(dtype_promote(stmt.op.name if isinstance(stmt, Assign) else "add", [dtype.name for dtype in args]))
+    return get_dtype(promoted_dtype(stmt.value, lambda name: env[name].name))
 
 
 def edge_dtypes(edge, inputs, cache: dict[int, tuple] | None = None, scope: dict | None = None) -> tuple:
@@ -106,7 +106,7 @@ def edge_dtypes(edge, inputs, cache: dict[int, tuple] | None = None, scope: dict
             env.update((name, tensor.dtype if tensor is not None else None) for name in stmt.names)
         elif isinstance(stmt, Fold):
             env.update(zip(stmt.exposes, edge_dtypes(stmt, inputs, cache, env), strict=True))
-        elif isinstance(stmt, (Assign, Affine)):
+        elif isinstance(stmt, Assign):
             env[stmt.name] = _promoted(stmt, env)
         elif isinstance(stmt, (Init, Let)):
             env[stmt.name] = stmt.dtype

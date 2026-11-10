@@ -19,7 +19,7 @@ from emmy.compiler.ir.base import InputOp
 from emmy.compiler.ir.expression import Var
 from emmy.compiler.ir.loop import LoopOp
 from emmy.compiler.ir.pure.fold import Fold
-from emmy.compiler.ir.stmt import Body, Load, Loop, parse_body
+from emmy.compiler.ir.stmt import Assign, Body, Load, Loop, parse_body
 from emmy.compiler.ir.tensor.ir import ReduceOp
 from emmy.compiler.pipeline import TILE_PASSES, Pipeline
 from emmy.compiler.pipeline.passes.tile._cut import cuttable_seams
@@ -121,7 +121,7 @@ def test_a_product_argument_computed_in_the_step_factors_into_a_cone_operand() -
     cone, weight = node.operands
     assert cone.axis is None and len(cone.exposes) == 1 and weight.as_slab().load.input == "w"
     assert {edge.as_slab().load.input for edge in cone.operands} == {"x", "r"}
-    assert [stmt.op.name for stmt in node.lift.body] == ["multiply"]
+    assert [stmt.value.operation.name for stmt in node.lift.body] == ["multiply"]
 
 
 def test_non_distributing_lift_stays_planar() -> None:
@@ -266,7 +266,7 @@ def test_an_output_sweeps_epilogue_lifts_to_a_term_declaring_the_sweep_axis() ->
     assert [axis.extent for axis in tile.place.free] == [Dim(3), Dim(4)]
     (spec,) = tile.output_specs
     assert spec.write.values == epilogue.exposes and spec.sweep == ()
-    assert [type(stmt).__name__ for stmt in tile.op.lower(_grid(tile), tile.output_specs, tile.axes)] == ["Loop", "Load", "Affine", "Write"]
+    assert [type(stmt).__name__ for stmt in tile.op.lower(_grid(tile), tile.output_specs, tile.axes)] == ["Loop", "Load", "Assign", "Write"]
 
 
 def test_nested_output_sweep_preserves_an_intermediate_value() -> None:
@@ -325,8 +325,8 @@ def test_reduce_feeding_prologue_reaches_the_fold_step() -> None:
         parse_body(
             """
             for m in 0..8:
-                scale = load s[0.0]
-                bias = load b[0.0]
+                scale = load s[0]
+                bias = load b[0]
                 for k in 0..16:
                     xv = load x[m, k]
                     sx = multiply(xv, scale)
@@ -440,9 +440,9 @@ def test_a_contraction_that_owns_a_row_gains_no_bound_axis() -> None:
 
 
 def test_a_sum_ahead_of_an_inner_parallel_loop_peels_onto_the_placement() -> None:
-    """A row statistic the outer level computes as a sum (``Affine`` after normalization) is straight-line
-    code like any ``Assign``: the inner parallel loop still peels onto the placement, so the kernel keeps both
-    free axes and its vector tiles instead of an outer sweep over a hoisted operand."""
+    """A row statistic the outer level computes as a sum (one node of the lift, as the normal form's affine form is one
+    sum) is straight-line code like any ``Assign``: the inner parallel loop still peels onto the placement, so the
+    kernel keeps both free axes and its vector tiles instead of an outer sweep over a hoisted operand."""
     tile = _tile(
         parse_body(
             """
@@ -459,4 +459,71 @@ def test_a_sum_ahead_of_an_inner_parallel_loop_peels_onto_the_placement() -> Non
     )
     assert [axis.extent for axis in tile.place.free] == [Dim(3), Dim(4)]
     assert tile.op.axis is None and tile.op.operands == ()
-    assert "Affine" in [type(stmt).__name__ for stmt in tile.op.lift.body]
+    assert [type(stmt).__name__ for stmt in tile.op.lift.body] == ["Load", "Assign", "Assign", "Load", "Assign"]
+
+
+def test_an_affine_chain_of_statements_lifts_as_one_node() -> None:
+    """A sum spread over statements (``t = a + b; u = t - c``) is one affine region: the normal form joins it into
+    one sum, one node of the lift, as the affine form is one operation; the operations around it (``exp``, the
+    product) are nodes of their own."""
+    tile = _tile(
+        parse_body(
+            """
+            for r in 0..8:
+                a = load p[r]
+                b = load q[r]
+                c = load s[r]
+                t = add(a, b)
+                u = subtract(t, c)
+                e = exp(u)
+                v = multiply(e, 2.0)
+                out[r] = v
+            """
+        )
+    )
+    values = [stmt.value for stmt in tile.op.lift.body if isinstance(stmt, Assign)]
+    assert [str(value) for value in values] == ["in0 + in1 - in2", "exp(v0)", "2.0 * v1"], [str(v) for v in values]
+
+
+def test_a_tree_spelling_and_its_chain_lift_to_one_fold_tree() -> None:
+    """The lift forms one node per operation, whatever the Loop IR spelling: the normal form gives every definition one
+    operation, so a program spelled as trees and the same program spelled as a chain of named values are one body, and
+    both lift to the same Fold tree, which is what keeps the cones, the edges and the seams independent of the spelling."""
+    tree = parse_body(
+        """
+        for a0 in 0..32:
+            in0 = load r[a0]
+            for a1 in 0..64:
+                for a2 in 0..128:
+                    in1 = load w[a1, a2]
+                    in2 = load x[a0, a2]
+                    acc0 <- add(acc0, exp(in2) * in0 * in1) over a2
+                in3 = load s[a1]
+                out[a0, a1] = v0
+                v0 = acc0 * in3 + in3
+        """
+    )
+    chain = parse_body(
+        """
+        for a0 in 0..32:
+            in0 = load r[a0]
+            for a1 in 0..64:
+                for a2 in 0..128:
+                    in1 = load w[a1, a2]
+                    in2 = load x[a0, a2]
+                    e = exp(in2)
+                    xn = multiply(e, in0)
+                    prod = multiply(xn, in1)
+                    acc0 <- add(acc0, prod) over a2
+                in3 = load s[a1]
+                scaled = multiply(acc0, in3)
+                v0 = add(scaled, in3)
+                out[a0, a1] = v0
+        """
+    )
+    op, spelled = LoopOp(body=tree), LoopOp(body=chain)  # normalized at construction
+    assert op.body == spelled.body
+    assert "acc0 <- add(acc0, v2) over a2" in str(op.body) and "v4 = in3 + v3" in str(op.body), str(op.body)
+    lifted, from_chain = lift_loop_op(op, name="k"), lift_loop_op(spelled, name="k", body=chain)
+    assert lifted.op.canonical() == from_chain.op.canonical()
+    assert {seam.spelling for seam in cuttable_seams(lifted)} == {seam.spelling for seam in cuttable_seams(from_chain)}

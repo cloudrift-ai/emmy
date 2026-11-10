@@ -29,7 +29,7 @@ the bias add is the one conversion. Rounding each partial sum to 16 bits instead
 
 from emmy.compiler.dim import Dim
 from emmy.compiler.graph import Graph, Node, Tensor
-from emmy.compiler.ir.expression import BinaryExpr, Literal, placeholder
+from emmy.compiler.ir.expression import BinaryExpression, Literal, placeholder
 from emmy.compiler.ir.frontend.ir import Conv1dOp, MatmulOp, ReshapeOp, TransposeOp
 from emmy.compiler.ir.tensor.ir import ElementwiseOp
 from emmy.compiler.pipeline import Match, Pattern
@@ -48,14 +48,14 @@ def _length_at(tap: object, *, stride: int, dilation: int, padding: int) -> obje
     """``l * stride + tap * dilation - padding`` for a constant or computed ``tap``."""
     expression = placeholder(2)
     if stride != 1:
-        expression = BinaryExpr("*", expression, Literal(stride, "int"))
+        expression = BinaryExpression("*", expression, Literal(stride, "int"))
     shift = tap if isinstance(tap, int) else None
     if shift is not None:
         offset = shift * dilation - padding
-        return expression if offset == 0 else BinaryExpr("+", expression, Literal(offset, "int"))
-    scaled = tap if dilation == 1 else BinaryExpr("*", tap, Literal(dilation, "int"))
-    expression = BinaryExpr("+", expression, scaled)
-    return expression if padding == 0 else BinaryExpr("-", expression, Literal(padding, "int"))
+        return expression if offset == 0 else BinaryExpression("+", expression, Literal(offset, "int"))
+    scaled = tap if dilation == 1 else BinaryExpression("*", tap, Literal(dilation, "int"))
+    expression = BinaryExpression("+", expression, scaled)
+    return expression if padding == 0 else BinaryExpression("-", expression, Literal(padding, "int"))
 
 
 def rewrite(match: Match, root: Node, inp_x: Node, inp_w: Node, inp_bias: Node | None, out: Tensor) -> Graph | None:
@@ -81,12 +81,12 @@ def rewrite(match: Match, root: Node, inp_x: Node, inp_w: Node, inp_bias: Node |
         # One map builds the whole im2col matrix: ck = tap * C_in + ci, tap-major.
         stacked = channels * taps
         stacked_coord = placeholder(1)
-        tap_expression = BinaryExpr("/", stacked_coord, Literal(channels, "int"))
+        tap_expression = BinaryExpression("/", stacked_coord, Literal(channels, "int"))
         col = padded_read(
             frag,
             inp_x,
             out_shape=(out_shape[0], stacked, out_shape[-1]),
-            channel=BinaryExpr("%", stacked_coord, Literal(channels, "int")),
+            channel=BinaryExpression("%", stacked_coord, Literal(channels, "int")),
             length=_length_at(tap_expression, **geometry),
             in_length=in_length,
             name=f"{out.name}_im2col",

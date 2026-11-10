@@ -175,6 +175,54 @@ def test_a_cache_slice_stages_only_on_the_16_byte_grid(cache, offset, row, stage
     assert "emmy_cp_async" in source
 
 
+def test_the_expectation_reads_the_weight_the_denominator_computed() -> None:
+    """GPU-free. The twin's softmax weight ``exp(score - pivot)`` is one fragment per score element, folded into the
+    denominator and repacked as the expectation's operand: one ``exp`` per element. The normal form spells the
+    difference as ``-pivot + score``; evaluated one operation at a time from that spelling, the negated pivot became a
+    row temp under each channel's own name, the fragment memo matched nothing across the two channels, and the
+    expectation computed every exp a second time (Qwen3.6's 4-token decode twin 127 → 171 us on an RTX 5090)."""
+    _, graph = _attention()
+    with pinned_knobs(_flash("mma_m16n8k16_bf16_f32", None)):
+        compiled = Pipeline.build(CUDA_PASSES).run(graph, ctx=Context.from_target((12, 0)))
+    (source,) = [node.op.kernel_source for node in compiled.nodes.values() if isinstance(node.op, CudaOp)]
+    weights = [line.strip() for line in source.splitlines() if "expf(" in line and "_ch0_" in line]
+    assert weights and all(line.startswith("_ch0_") and "_w[_e] = __expf(" in line for line in weights), weights
+
+
+def test_a_sum_with_a_negated_term_is_evaluated_as_a_subtraction() -> None:
+    """GPU-free. The atom lowering evaluates a sum one operation at a time; a negated term, or one scaled by a negative
+    literal, is the subtraction of its positive form, exact by IEEE's definition of subtraction, so no sum leaves a
+    negate temp behind. Only the one node is re-spelled: a sum every leading term of which is negated keeps its
+    negate, since reassociating it would round differently."""
+    from importlib import import_module
+
+    from emmy.compiler.ir.stmt import parse_body
+
+    atom = import_module("emmy.compiler.pipeline.passes.lowering.kernel._atom")
+
+    def spelled(text: str) -> str:
+        return "; ".join(str(stmt) for stmt in atom._one_operation(parse_body(text)))
+
+    assert spelled("v = exp(-m + s)") == "v__e0 = s - m; v = exp(v__e0)"
+    assert spelled("v = exp(s + -2.0 * m)") == "v__e0 = 2.0 * m; v__e1 = s - v__e0; v = exp(v__e1)"
+    assert spelled("v = exp(s - m - c)") == "v__e0 = s - m; v__e1 = v__e0 - c; v = exp(v__e1)"
+    assert spelled("v = exp(-a - b + c)") == "v__e0 = -a; v__e1 = v__e0 - b; v__e2 = v__e1 + c; v = exp(v__e2)"
+
+
+def test_the_mask_bound_reads_the_negation_the_normal_form_spells() -> None:
+    """GPU-free. The normal form spells ``key - row`` as ``-row + key``; the stream bound reads that affine form as
+    the same ``{key: 1, row: -1}``, or a causal mask on a wide launch would bound nothing."""
+    from importlib import import_module
+
+    from emmy.compiler.ir.stmt import parse_body
+
+    atom = import_module("emmy.compiler.pipeline.passes.lowering.kernel._atom")
+    (negated,) = parse_body("bool v = -a1 + a2 > in0")
+    (subtracted,) = parse_body("bool v = a2 - a1 > in0")
+    assert atom._mask_affine(negated.value, frozenset({"a1", "a2"}))[0] == {"a1": -1, "a2": 1}
+    assert atom._mask_affine(negated.value, frozenset({"a1", "a2"}))[0] == atom._mask_affine(subtracted.value, frozenset({"a1", "a2"}))[0]
+
+
 @pytest.mark.parametrize(("query", "wgmma"), [(8, True), (1, False)], ids=["16B-offset", "2B-offset"])
 def test_a_warp_group_score_takes_a_query_slice_only_on_the_16_byte_grid(query, wgmma) -> None:
     """GPU-free. A warp-group score reads its query off a slab the kernel copies on cp.async ahead of the chunk loop,

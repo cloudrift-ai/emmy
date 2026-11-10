@@ -40,8 +40,7 @@ from emmy.compiler.graph import Graph, Node, Tensor
 from emmy.compiler.ir.address import clamp_to, gmem_axis_step
 from emmy.compiler.ir.axis import Axis, Window
 from emmy.compiler.ir.base import InputOp
-from emmy.compiler.ir.elementwise import ElementwiseImpl
-from emmy.compiler.ir.expression import BinaryExpr, Literal, Var
+from emmy.compiler.ir.expression import BinaryExpression, Literal, Var, apply
 from emmy.compiler.ir.loop import LoopOp
 from emmy.compiler.ir.pure import Lambda
 from emmy.compiler.ir.pure.fold import Fold
@@ -49,7 +48,7 @@ from emmy.compiler.ir.pure.twist import Twist
 from emmy.compiler.ir.schedule import Reduce, Work
 from emmy.compiler.ir.schedule.catalog import splitk_moves
 from emmy.compiler.ir.sigma import Sigma
-from emmy.compiler.ir.stmt import Accum, Affine, Assign, Body, Carry, Let, Load, Loop, Pre, Select, SelectBranch, Statement, Write
+from emmy.compiler.ir.stmt import Accum, Assign, Body, Carry, Let, Load, Loop, Pre, Select, SelectBranch, Statement, Write
 from emmy.compiler.ir.tile import OutputSpec, Placement, TileOp
 from emmy.compiler.ir.tile.ops import Sched, carries_partition, head, projection_regions, projection_root, projection_tail
 from emmy.compiler.pipeline import Match
@@ -97,7 +96,7 @@ def _slice_length(k_axis: Axis, width: int):
     """The positions one partition's slice of the stream spans: ``K/w``, or ``⌈K/w⌉`` of a symbolic stream."""
     if k_axis.extent.is_static:
         return Literal(k_axis.extent.as_static() // width, "int")
-    return BinaryExpr("/", BinaryExpr("+", k_axis.extent.expression, Literal(width - 1, "int")), Literal(width, "int"))
+    return BinaryExpression("/", BinaryExpression("+", k_axis.extent.expression, Literal(width - 1, "int")), Literal(width, "int"))
 
 
 def _clamped(k_axis: Axis, position):
@@ -117,7 +116,7 @@ def _masked(fold: Fold, k_axis: Axis, position) -> Fold:
     end = k_axis.extent.expression
     stmts: list[Statement] = []
     if fold.twist is None:
-        inside = BinaryExpr("<", position, end)
+        inside = BinaryExpression("<", position, end)
         results = []
         for name, seed in zip(fold.lift.results, fold.init, strict=True):
             stmts += [
@@ -132,9 +131,9 @@ def _masked(fold: Fold, k_axis: Axis, position) -> Fold:
             Let(name=f"{score}__end", value=end),
             Let(name=f"{score}__keep", value=Literal(0.0, "float")),
             Let(name=f"{score}__fill", value=Literal(float(fold.init[0]), "float")),
-            Assign(name=f"{score}__inside", op=ElementwiseImpl("less"), args=(f"{score}__key", f"{score}__end")),
-            Assign(name=f"{score}__mask", op=ElementwiseImpl("where"), args=(f"{score}__inside", f"{score}__keep", f"{score}__fill")),
-            Affine(name=f"{score}__in", args=(score, f"{score}__mask"), coefficients=(1.0, 1.0), offset=0.0),
+            Assign(f"{score}__inside", apply("less", f"{score}__key", f"{score}__end")),
+            Assign(f"{score}__mask", apply("where", f"{score}__inside", f"{score}__keep", f"{score}__fill")),
+            Assign(f"{score}__in", apply("add", score, f"{score}__mask")),
         ]
         results = [f"{score}__in", *channels]
     body = Body((*fold.lift.body, *stmts))
@@ -443,7 +442,9 @@ def realize_carry_split(match: Match, root: Node, cta: int) -> Graph:
     loop, before, after = body[position], tuple(body[:position]), tuple(body[position + 1 :])
     part, probe = Axis("_part", Dim(cta)), Axis("_probe", Dim(2))
     sliced = replace(loop.axis, extent=Dim(steps), window=Window(parent=loop.axis.source_axis or loop.axis, partition=True))
-    sigma = Sigma({loop.axis.name: BinaryExpr("+", BinaryExpr("*", Var(part.name), Literal(steps, "int")), Var(loop.axis.name))})
+    sigma = Sigma(
+        {loop.axis.name: BinaryExpression("+", BinaryExpression("*", Var(part.name), Literal(steps, "int")), Var(loop.axis.name))}
+    )
     step = Body(tuple(stmt.substitute(sigma) for stmt in loop.body))
     probe_seed, probe_states, starts = f"{out.name}__probe_seed", f"{out.name}__probe", f"{out.name}__start"
 
@@ -474,9 +475,9 @@ def realize_carry_split(match: Match, root: Node, cta: int) -> Graph:
     probe_body = Body((*before, *_nest(walk, (sliced, probe, part)), *after))
     # The probe's seeds: zero, and the identity between the mixed and the kept cell — ones
     # everywhere for a step reading its own cell alone, whose map is diagonal.
-    hit = BinaryExpr(">", Var(probe.name), Literal(0, "int"))
+    hit = BinaryExpression(">", Var(probe.name), Literal(0, "int"))
     if view.mixed is not None:
-        hit = BinaryExpr("&&", hit, BinaryExpr("==", own[view.mixed], own[view.kept]))
+        hit = BinaryExpression("&&", hit, BinaryExpression("==", own[view.mixed], own[view.kept]))
     seed_body = Body(
         (
             Let(name="_one", value=1.0),
@@ -500,9 +501,9 @@ def realize_carry_split(match: Match, root: Node, cta: int) -> Graph:
         return (
             Load(names=("_one_walk",), input=probe_states, index=(Literal(1, "int"), Var(part.name), last, *at(view.kept, along))),
             Load(names=("_zero_walk",), input=probe_states, index=(Literal(0, "int"), Var(part.name), last, *at(view.kept, along))),
-            Assign(name="_a", op="subtract", args=("_one_walk", "_zero_walk")),
+            Assign("_a", apply("subtract", "_one_walk", "_zero_walk")),
             Pre(name="_s", carrier=carried, index=at(view.mixed, along)),
-            Assign(name="_as", op="multiply", args=("_a", "_s")),
+            Assign("_as", apply("multiply", "_a", "_s")),
         )
 
     if view.mixed is None:
@@ -518,7 +519,7 @@ def realize_carry_split(match: Match, root: Node, cta: int) -> Graph:
                 *mapped,
                 Load(names=("_b",), input=probe_states, index=(Literal(0, "int"), Var(part.name), last, *own)),
                 Pre(name="_from", carrier=carried, index=own),
-                Assign(name="_next", op="add", args=(product, "_b")),
+                Assign("_next", apply("add", product, "_b")),
                 Carry(name=carried, value="_next", index=own, seed=node.init[0]),
                 Write(output=starts, index=(Var(part.name), *own), values=("_from",)),
             )
@@ -578,7 +579,7 @@ def _slice_fold(fold: Fold, axis: Axis, width: int, split: Axis) -> tuple[Axis, 
     """``(the sliced axis, the same monoid Fold over one CTA's absolute contiguous slice)`` — the
     generic (non-contraction) slicer: the whole fold rides ``Fold.rewrite`` under the σ-offset."""
     b = _slice_length(axis, width)
-    offset = BinaryExpr("+", Var(axis.name), BinaryExpr("*", Var(_SPLIT), b))
+    offset = BinaryExpression("+", Var(axis.name), BinaryExpression("*", Var(_SPLIT), b))
     sigma = Sigma({axis.name: _clamped(axis, offset)})
     sliced_axis = replace(axis, extent=Dim(b), window=Window(parent=axis.source_axis or axis, partition=True))
     # RE-DERIVED over a narrower axis, not renamed and not substituted-through: the fold keeps its
@@ -596,7 +597,7 @@ def _slice_fold(fold: Fold, axis: Axis, width: int, split: Axis) -> tuple[Axis, 
     return sliced_axis, _masked(replace(fold, operands=operands, lift=lift), axis, offset)
 
 
-def _factor_k(k_axis: Axis, w: int) -> tuple[Axis, Axis, Sigma, BinaryExpr]:
+def _factor_k(k_axis: Axis, w: int) -> tuple[Axis, Axis, Sigma, BinaryExpression]:
     """Factor a contraction axis into ``ksplit × kslice``. ``ksplit`` (extent ``w``, name
     ``_<k>_ks``) becomes the partial's lead grid axis, parallelized across CTAs and combined in
     the finalize; ``kslice`` (extent ``K/w``, or ``⌈K/w⌉`` of a symbolic axis, the ORIGINAL name)
@@ -608,7 +609,7 @@ def _factor_k(k_axis: Axis, w: int) -> tuple[Axis, Axis, Sigma, BinaryExpr]:
     b = _slice_length(k_axis, w)
     ksplit = Axis(name=f"_{k_axis.name}_ks", extent=Dim(w))
     kslice = replace(k_axis, extent=Dim(b), window=Window(parent=k_axis.source_axis or k_axis, partition=True))
-    position = BinaryExpr("+", BinaryExpr("*", Var(ksplit.name), b), Var(k_axis.name))
+    position = BinaryExpression("+", BinaryExpression("*", Var(ksplit.name), b), Var(k_axis.name))
     return ksplit, kslice, Sigma({k_axis.name: _clamped(k_axis, position)}), position
 
 
@@ -1009,21 +1010,37 @@ def projection_distributes(body, states: tuple[str, ...]) -> bool:
             if s.value.free_vars() & linear:
                 return False
             continue  # a literal or coordinate expression independent of the carried state
-        if isinstance(s, Affine):
-            hot = [a for a in s.args if a in linear]
-            if not hot:
-                continue
-            if len(hot) == len(s.args) and s.offset == 0:
-                linear.add(s.name)  # a sum of scaled state values — ``mean``'s ``/N`` — is still linear-homogeneous
-                continue
-            return False  # an offset or a state-independent term breaks distributivity
         if not isinstance(s, Assign):
             return False  # an unfamiliar projection stmt — can't prove distributivity
-        hot = [a for a in s.args if a in linear]
-        if not hot:
+        kind = _homogeneity(s.value, linear)
+        if kind == "constant":
             continue  # state-independent — a constant w.r.t. the split
-        if len(hot) == 1 and (s.op.name == "multiply" or s.op.name == "divide" and s.args[0] in linear):
-            linear.add(s.name)  # state · constant or state / constant — still linear-homogeneous
-            continue
-        return False  # offset / inverse / nonlinear of a state value breaks distributivity
+        if kind is None:
+            return False  # offset / inverse / nonlinear of a state value breaks distributivity
+        linear.add(s.name)
     return False  # no Write reached
+
+
+def _homogeneity(value, linear: set[str]) -> str | None:
+    """How ``value`` depends on the carried state: ``"linear"`` for a linear-homogeneous function of the ``linear``
+    names (a sum of them, one scaled or divided by a constant), ``"constant"`` for none of them, ``None`` for anything
+    else (an offset beside a state term, a product of two state values, a nonlinear unary of one)."""
+    if isinstance(value, Var):
+        return "linear" if value.name in linear else "constant"
+    if isinstance(value, Literal):
+        return "constant"
+    op = value.operation
+    if op is None:
+        return None
+    kinds = [_homogeneity(operand, linear) for operand in value.operands]
+    if any(kind is None for kind in kinds):
+        return None
+    if all(kind == "constant" for kind in kinds):
+        return "constant"
+    if op.name in ("add", "subtract", "negative"):
+        return "linear" if all(kind == "linear" for kind in kinds) else None
+    if op.name == "multiply" and kinds.count("linear") == 1:
+        return "linear"
+    if op.name == "divide" and kinds == ["linear", "constant"]:
+        return "linear"
+    return None

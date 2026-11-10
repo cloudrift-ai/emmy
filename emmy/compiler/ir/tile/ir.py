@@ -38,7 +38,7 @@ from frozendict import frozendict
 from emmy.compiler.dim import Dim
 from emmy.compiler.ir.axis import Axis
 from emmy.compiler.ir.base import Op, buffer_types
-from emmy.compiler.ir.expression import BinaryExpr, Interval, Literal, SimplifyCtx, Var
+from emmy.compiler.ir.expression import BinaryExpression, Interval, Literal, SimplifyCtx, Var
 from emmy.compiler.ir.pure.fold import Fold, binding_extents
 from emmy.compiler.ir.schedule import Placement, WarpSpec
 from emmy.compiler.ir.schedule.base import Schedule
@@ -86,7 +86,7 @@ def _dense_axis_suffix(index: tuple, name: str) -> bool:
         dim = None
         if position:
             if not (
-                isinstance(expression, BinaryExpr)
+                isinstance(expression, BinaryExpression)
                 and expression.op == "%"
                 and isinstance(expression.right, Literal)
                 and isinstance(expression.right.value, int)
@@ -96,7 +96,7 @@ def _dense_axis_suffix(index: tuple, name: str) -> bool:
             expression, dim = expression.left, expression.right.value
         if stride != 1:
             if not (
-                isinstance(expression, BinaryExpr)
+                isinstance(expression, BinaryExpression)
                 and expression.op in ("/", "//")
                 and isinstance(expression.right, Literal)
                 and expression.right.value == stride

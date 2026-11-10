@@ -25,13 +25,13 @@ from dataclasses import replace
 
 from emmy.compiler.dim import Dim
 from emmy.compiler.graph import Node
-from emmy.compiler.ir.expression import BinaryExpr, Literal, Var
+from emmy.compiler.ir.expression import BinaryExpression, Literal, Var
 from emmy.compiler.ir.kernel import KernelOp
 from emmy.compiler.ir.kernel.ir import ELEM_COL, ELEM_ROW, FRAG_COL, FRAG_ROW
 from emmy.compiler.ir.pure.fold import EXTENTS
 from emmy.compiler.ir.schedule.register import RegisterMaterialization
 from emmy.compiler.ir.sigma import Sigma
-from emmy.compiler.ir.stmt import Affine, Assign, Body, Let, Load, Write, exposed_defines, free_names
+from emmy.compiler.ir.stmt import Assign, Body, Let, Load, Write, exposed_defines, free_names
 from emmy.compiler.ir.tile import TileOp
 from emmy.compiler.ir.tile.ops import UnbindableProjection, reduce_plan, sched_of
 from emmy.compiler.pipeline import Match, Pattern, RuleSkipped
@@ -57,8 +57,7 @@ def rewrite(match: Match, root: Node, ctx=None) -> KernelOp | None:
         materialized = factorize(tile, root, sm_count=getattr(ctx, "sm_count", 0))
         if not resident:
             materialized = _pointwise_strip(tile, materialized)
-        # Kernel IR evaluates one operation at a time: a sum is its binary spelling from here on.
-        body = _drop_repeated_declarations(Body((materialized,)).map(lambda s: s.as_assigns() if isinstance(s, Affine) else s))
+        body = _drop_repeated_declarations(Body((materialized,)))
         unbound = _unbound_names(tile, root, body)
         assert not unbound, f"materialize: kernel {tile.name!r} reads names it never binds: {sorted(unbound)}"
         kernel = KernelOp(body=body, name=tile.name, serial=() if resident else tuple(tile.place.serial))
@@ -105,8 +104,8 @@ def _drop_private_ports(match: Match, root: Node, kernel: KernelOp, suffix: str)
 
 
 #: Names the RENDERER supplies, so a statement may read them with no binding anywhere in the IR:
-#: the CTA helper coordinates it declares in the prologue of any body that uses them
-#: (``ir.stmt.blocks``), and the reserved coordinates a :class:`~emmy.compiler.ir.kernel.ir.FragmentApply`
+#: the CTA helper coordinates it declares in the prologue of any body that uses them,
+#: and the reserved coordinates a :class:`~emmy.compiler.ir.kernel.ir.FragmentApply`
 #: COORD / GMEM template is written over, which the render substitutes per element (tile origin + layout offset),
 #: and the in-fragment offsets a :class:`~emmy.compiler.ir.kernel.ir.RegStore` epilogue reads.
 _RENDERED_HELPERS = frozenset({"lane", "warp", FRAG_ROW, FRAG_COL, ELEM_ROW, ELEM_COL})
@@ -155,9 +154,9 @@ def _pointwise_strip(tile: TileOp, materialized):
 
         sigma = Sigma(
             {
-                inner.name: BinaryExpr(
+                inner.name: BinaryExpression(
                     "+",
-                    BinaryExpr("*", Var(inner.name), Literal(width, "int")),
+                    BinaryExpression("*", Var(inner.name), Literal(width, "int")),
                     Literal(offset, "int"),
                 )
             }
@@ -179,7 +178,7 @@ def _binding(stmt) -> tuple | None:
     if isinstance(stmt, Load) and stmt.is_scalar:
         return (stmt.input, tuple(str(e) for e in stmt.index))
     if isinstance(stmt, Assign):
-        return (stmt.op.name, stmt.args, stmt.dtype)
+        return (stmt.value, stmt.dtype)
     if isinstance(stmt, Let):
         return (Let, str(stmt.value), stmt.dtype)  # spelled, so a negative zero stays distinct from zero
     return None
@@ -187,9 +186,11 @@ def _binding(stmt) -> tuple | None:
 
 def _copied(stmt, bound: dict[str, tuple], dtypes: dict[str, object]) -> tuple | None:
     """What a same-dtype ``copy`` of one bound value binds: that value's own binding."""
-    if not isinstance(stmt, Assign) or stmt.op.name != "copy" or len(stmt.args) != 1:
+    if not isinstance(stmt, Assign):
         return None
-    (source,) = stmt.args
+    if not isinstance(stmt.value, Var):
+        return None
+    source = stmt.value.name
     return bound.get(source) if dtypes.get(source) in (None, stmt.dtype) or stmt.dtype is None else None
 
 

@@ -9,10 +9,10 @@ from __future__ import annotations
 import logging
 from dataclasses import replace
 
-from emmy.compiler.ir.expression import Literal
+from emmy.compiler.ir.expression import Expression, Literal, Var, affine_node, affine_sum, affine_terms, apply
 from emmy.compiler.ir.pure import Fold, Lambda
 from emmy.compiler.ir.pure.twist import RECIPES
-from emmy.compiler.ir.stmt import Affine, Assign, Body, Let, Load, Statement
+from emmy.compiler.ir.stmt import Assign, Body, Load, Statement
 from emmy.compiler.pipeline.passes.tile._fromloop import product_spine
 
 logger = logging.getLogger(__name__)
@@ -89,40 +89,28 @@ def _hoist_invariant(fold: Fold) -> tuple[Fold, Fold] | None:
     result = fold.lift.results[0]
     body = fold.lift.body
     top = body.definitions.get(result)
-    factors: list[Let] = []
-    if isinstance(top, Affine) and len(top.args) == 1 and top.offset == 0:
-        # A literal coefficient on the summand is an invariant factor: the product it spells.
-        factors.append(Let(f"{top.name}__c", Literal(top.coefficients[0]), top.dtype))
-        scaled = Assign(top.name, "multiply", (top.args[0], factors[0].name), top.dtype)
-        body = Body(tuple(scaled if stmt is top else stmt for stmt in body))
-    flattened = product_spine(body.definitions, result, divide=True)
-    if flattened is None:
+    if not isinstance(top, Assign):
         return None
-    leaves, spine = flattened
+    leaves, divisors, followed = product_spine(top.value, body.definitions, divide=True)
     bound = {param: edge for param, edge, _ in fold.bindings}
-    literal = {factor.name for factor in factors}
-    divisors = {stmt.args[1] for stmt in spine if stmt.op.name == "divide"}
-    invariant = [leaf for leaf in leaves if leaf in literal or not _varies(fold, leaf, bound)]
-    varying = [leaf for leaf in leaves if leaf not in invariant]
-    if (
-        not invariant
-        or not varying
-        or any(leaf not in bound and leaf not in literal for leaf in invariant)
-        or any(leaf in divisors for leaf in varying)
-    ):
+    # A literal factor is invariant; a bound name is when its edge does not vary along the axis; a computed factor
+    # (an operation over the leaves) varies with what it reads.
+    invariant = [
+        leaf
+        for leaf in leaves
+        if isinstance(leaf, Literal) or (isinstance(leaf, Var) and leaf.name in bound and not _varies(fold, leaf.name, bound))
+    ]
+    varying = [leaf for leaf in leaves if not any(leaf is held for held in invariant)]
+    if not invariant or not varying or any(leaf in divisors for leaf in varying):
         return None
-    spine_ids = {id(stmt) for stmt in spine}
-    kept = [stmt for stmt in body if id(stmt) not in spine_ids]
-    if {stmt.name for stmt in spine} & {name for stmt in kept for name in stmt.deps()}:
+    spine = {id(top), *(id(stmt) for stmt in followed)}
+    kept = [stmt for stmt in body if id(stmt) not in spine]
+    if {stmt.name for stmt in followed} & {name for stmt in kept for name in stmt.deps()}:
         return None  # a product the summand also reads elsewhere (a scale the encode divides by) stays in the fold
-    product: list[Assign] = []
-    value = varying[0]
-    for index, leaf in enumerate(varying[1:]):
-        product.append(Assign(name=f"{result}__k{index}", op="multiply", args=(value, leaf)))
-        value = product[-1].name
+    product = varying[0] if len(varying) == 1 else apply("multiply", *varying)
     state = view.states[0]
     inner_state = f"{state}__sum"
-    reads = {name for stmt in (*kept, *product) for name in stmt.deps()} | {value}
+    reads = {name for stmt in kept for name in stmt.deps()} | product.free_vars()
     kept_edges = {id(edge) for param, edge, _ in fold.bindings if param in reads}
     operands = tuple(edge for edge in fold.operands if id(edge) in kept_edges)
     lift = Lambda(
@@ -131,17 +119,17 @@ def _hoist_invariant(fold: Fold) -> tuple[Fold, Fold] | None:
             *(param for param, edge, _ in fold.bindings if id(edge) in kept_edges),
             *fold.lift.params[1 + len(bound) :],
         ),
-        body=Body((*kept, *product)),
-        results=(value,),
+        body=Body((*kept, Assign(result, product))),
+        results=(result,),
     )
     inner = replace(fold, operands=operands, lift=lift, base=fold.base.rename({state: inner_state}))
-    epilogue: list[Statement] = [*factors]  # the literal factors, bound where the epilogue reads them
-    current = inner_state
+    epilogue: list[Statement] = []
+    current: Expression = Var(inner_state)
     for index, leaf in enumerate(invariant):
         name = state if index == len(invariant) - 1 else f"{state}__c{index}"
-        epilogue.append(Assign(name=name, op="divide" if leaf in divisors else "multiply", args=(current, leaf)))
-        current = name
-    edges = (inner, *dict.fromkeys(bound[leaf] for leaf in invariant if leaf in bound))
+        epilogue.append(Assign(name, apply("divide" if leaf in divisors else "multiply", current, leaf)))
+        current = Var(name)
+    edges = (inner, *dict.fromkeys(bound[leaf.name] for leaf in invariant if isinstance(leaf, Var)))
     params = (inner_state, *(param for edge in edges[1:] for param, held, _ in fold.bindings if held is edge))
     projection = Fold(operands=edges, lift=Lambda.closing(params, Body(epilogue), (state,)))
     return inner, projection
@@ -175,20 +163,37 @@ def _factored(term: Fold, param: str) -> Fold | None:
     the lift ``exp(mask + c·score − m)`` becomes ``exp(s − m)`` with ``s = mask + c·score``, the cone the pivot
     itself folds, which a recipe then matches as the score. A projection composed in first (``−m`` hoisted out of
     the loop) joins the sum before the split; ``None`` when no sum reads ``param`` beside other terms."""
-    from emmy.compiler.ir.stmt import fold_affine  # noqa: PLC0415 — a pass may call a normalization step
-
     lift = term.lift
-    body = fold_affine(lift.body, frozenset(lift.results))
-    for index, stmt in enumerate(body):
-        if not isinstance(stmt, Affine) or param not in stmt.args or len(stmt.args) < 2:
+    for index, stmt in enumerate(lift.body):
+        if not isinstance(stmt, Assign):
             continue
-        rest = [(coefficient, arg) for coefficient, arg in stmt.terms if arg != param]
-        if len(rest) == 1 and rest[0][0] == 1 and stmt.offset == 0:
-            return None  # already ``s + c·g``
-        score = Affine(f"{stmt.name}__s", tuple(arg for _, arg in rest), tuple(c for c, _ in rest), stmt.offset, stmt.dtype)
-        split = Affine(stmt.name, (score.name, param), (1.0, {arg: c for c, arg in stmt.terms}[param]), 0.0, stmt.dtype)
-        return replace(term, lift=Lambda(lift.params, Body((*body[:index], score, split, *body[index + 1 :])), lift.results))
+        for sum_ in stmt.value.subterms():
+            form = _sum_terms(sum_)
+            if form is None:
+                continue
+            terms, offset, float_literal = form
+            own = [(coefficient, operand) for coefficient, operand in terms if operand == Var(param)]
+            rest = [(coefficient, operand) for coefficient, operand in terms if operand != Var(param)]
+            if len(own) != 1 or not rest:
+                continue
+            if len(rest) == 1 and rest[0][0] == 1 and offset == 0 and isinstance(rest[0][1], Var):
+                return None  # already ``s + c·g`` with the score named
+            score = Assign(f"{stmt.name}__s", affine_sum(rest, offset, float_literal))
+            # The score's definition carries the literals; the split sum over two names spells none.
+            against = affine_sum([(1.0, Var(score.name)), own[0]], 0.0, False)
+            split = stmt.replace(value=stmt.value.rebuild(lambda e, sum_=sum_, against=against: against if e == sum_ else e))
+            body = Body((*lift.body[:index], score, split, *lift.body[index + 1 :]))
+            return replace(term, lift=Lambda(lift.params, body, lift.results))
     return None
+
+
+def _sum_terms(expression: Expression) -> tuple[list[tuple[float, Expression]], float, bool] | None:
+    """The affine form of a sum of two or more terms (an offset counts as one) — its terms, offset and whether a float
+    literal fed it; ``None`` for any other value (a lone product, a name)."""
+    if not affine_node(expression):
+        return None
+    terms, offset, float_literal = affine_terms(expression)
+    return (terms, offset, float_literal) if len(terms) + (offset != 0) >= 2 else None
 
 
 def _reads_reduce(edge: Fold) -> bool:

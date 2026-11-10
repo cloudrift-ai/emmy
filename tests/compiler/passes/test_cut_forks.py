@@ -183,6 +183,41 @@ def _softmax_graph() -> Graph:
     return graph
 
 
+def _projection_consumer_graph(nest: tuple[str, str]) -> Graph:
+    """A projection ``acc[t, n] = sum_k act[t, k] * w[n, k]`` consumed in place by its square, under the loop nest
+    ``nest`` over the tokens ``t`` and the features ``n`` (outer first)."""
+    t, n, k = Axis("t", 8), Axis("n", 32), Axis("k", 16)
+    loops = tuple({"t": t, "n": n}[name] for name in nest)
+    matmul = contraction(k, slab("act", "act", "t", "k"), (slab("w", "w", "n", "k"), "acc"))
+    squared = projection((matmul,), "sq = multiply(acc, acc)", ("sq",))
+    tile = TileOp(op=squared, name="out", place=Placement(free=loops), axes=(*loops, k))
+    graph = Graph()
+    _input(graph, "act", (8, 16))
+    _input(graph, "w", (32, 16))
+    graph.add_node(tile, ["act", "w"], Tensor("out", (8, 32), "f16"), node_id="out")
+    graph.inputs, graph.outputs = ["act", "w"], ["out"]
+    return graph
+
+
+@pytest.mark.parametrize(("nest", "shape"), [(("t", "n"), (8, 32)), (("n", "t"), (32, 8))], ids=["tokens-outer", "features-outer"])
+def test_a_contraction_workspace_is_laid_out_in_its_consumers_nest_order(nest, shape) -> None:
+    """The workspace a cut contraction writes takes the nest order of the loops that read it, the coordinate the
+    consumer varies fastest last, whichever operand the cell reads first: a norm sweeping features inside tokens
+    stores the projection tokens-first. The cell here reads the weight first under either nest; laid out in that
+    read order (the normal form's statement order) the workspace was features-first under both, and an FP8
+    attention input's q and k projections were stored so, their norms reading the rows strided: three pieces
+    2.8x to 8.5x slower on an RTX 5090."""
+    graph = _projection_consumer_graph(nest)
+    root = graph.nodes["out"]
+    root.op = root.op.with_io(graph, root)
+    match = Match(graph=graph, root_node_id=root.id, rule=Rule(name="test", pattern=[]))
+    [seam] = [seam for seam in cuttable_seams(root.op) if seam.owned is None]
+    arm = next(arm for arm in _CUT.rewrite(match, root) if dict(arm.knobs) == {seam.spelling: "cut"})
+    pieces = [node for node in arm.materialize().nodes.values() if isinstance(node.op, TileOp)]
+    [workspace] = [tensor for node in pieces for tensor in node.outputs if tensor.name != "out"]
+    assert tuple(workspace.shape) == shape, workspace
+
+
 def _offered(graph: Graph, *, frontend: bool = False) -> list[dict]:
     offered: list[dict] = []
     passes = TILE_PASSES if frontend else ["tile/cut"]
@@ -525,7 +560,7 @@ def test_a_moved_seam_over_a_re_keyed_piece_is_re_spelled_by_what_its_pieces_rea
 
     document, route = _routed(_sdpa_document(), {"PLACE@map.1/twist.1/inner": "cut"})
     reader = document.kernel(route.children[-1])
-    stale = replace(reader, loop_ir=json.loads(json.dumps(reader.loop_ir).replace("0.25*in0", "0.5*in0")))
+    stale = replace(reader, loop_ir=json.loads(json.dumps(reader.loop_ir).replace("0.25 * ", "0.5 * ")))
     assert stale.exact_identity != reader.exact_identity
     moved = replace(
         document,
@@ -548,9 +583,9 @@ def test_a_moved_seam_over_a_re_keyed_piece_keeps_the_cut_whose_other_pieces_it_
     from emmy.commands.trace import graph_from_code
 
     code = "(lambda x: (torch.sigmoid(x) * torch.tanh(x)).sum(-1))(torch.randn(4, 64, dtype=torch.float16))"
-    document, route = _routed(inventory_document(graph_from_code(code)[0], (12, 0)), {"PLACE@map.1/reduce.2/map": "cut"})
+    document, route = _routed(inventory_document(graph_from_code(code)[0], (12, 0)), {"PLACE@map.1/reduce.1/map": "cut"})
     producer, consumer = (document.kernel(ref) for ref in route.children)
-    stale = replace(consumer, loop_ir=json.loads(json.dumps(consumer.loop_ir).replace("tanh(", "exp(")))
+    stale = replace(consumer, loop_ir=json.loads(json.dumps(consumer.loop_ir).replace("sigmoid(", "exp(")))
     assert stale.exact_identity != consumer.exact_identity
     moved = replace(
         document,
@@ -558,10 +593,95 @@ def test_a_moved_seam_over_a_re_keyed_piece_keeps_the_cut_whose_other_pieces_it_
         routing=[replace(route, arm={"PLACE@map.1/reduce.3/map": "cut"})],
     )
     fresh, report = restamp(moved)
-    assert report.respelled == [f"{route.parent} PLACE@map.1/reduce.3/map -> PLACE@map.1/reduce.2/map"]
+    assert report.respelled == [f"{route.parent} PLACE@map.1/reduce.3/map -> PLACE@map.1/reduce.1/map"]
     assert fresh.routing == document.routing
     assert fresh.kernel(producer.ref).exact_identity == producer.exact_identity
     assert all(row.measured for row in fresh.rows if row.kernel == producer.ref)
+
+
+def test_a_moved_seam_whose_candidates_mint_one_kernel_set_is_re_spelled_at_the_first() -> None:
+    """A cone two consumers read is offered as one seam per consumer, and every spelling cuts the same two pieces.
+    When the change re-keyed both pieces, the spellings match alike by what the pieces read and write and none mints a
+    stored piece again: a tie among spellings of one kernel set, not among kernel sets, so the first is the decision
+    and the route stays, its rows kept as proposals."""
+    import json
+
+    from emmy.commands.trace import graph_from_code
+
+    code = (
+        "(lambda x, w1, w2: (lambda r: ((x * r) @ w1, (x * r) @ w2))(torch.rsqrt((x * x).mean(-1, keepdim=True))))"
+        "(torch.randn(4, 64, dtype=torch.float16), torch.randn(64, 32, dtype=torch.float16),"
+        " torch.randn(64, 16, dtype=torch.float16))"
+    )
+    document, route = _routed(inventory_document(graph_from_code(code)[0], (12, 0)), {"PLACE@map.1/inner": "cut"})
+    producer, consumer = (document.kernel(ref) for ref in route.children)
+    stale = {
+        producer.ref: replace(producer, loop_ir=json.loads(json.dumps(producer.loop_ir).replace("rsqrt(", "sqrt("))),
+        consumer.ref: replace(consumer, loop_ir=json.loads(json.dumps(consumer.loop_ir).replace("<- add(", "<- maximum("))),
+    }
+    assert all(stale[ref].exact_identity != document.kernel(ref).exact_identity for ref in stale)
+    moved = replace(
+        document,
+        kernels=[stale.get(kernel.ref, kernel) for kernel in document.kernels],
+        routing=[replace(route, arm={"PLACE@map.9/inner": "cut"})],
+    )
+    fresh, report = restamp(moved)
+    assert report.respelled == [f"{route.parent} PLACE@map.9/inner -> PLACE@map.1/inner"]
+    assert not report.dropped_routes and fresh.routing == document.routing
+    assert sorted(report.demoted) == sorted(row.name for row in document.rows if row.kernel in stale)
+    assert {row.kernel for row in fresh.rows} == {row.kernel for row in document.rows}
+
+
+def test_a_seam_the_re_keyed_parent_still_offers_but_that_cuts_other_pieces_is_re_spelled() -> None:
+    """A chain of single cuts peels the projections off one kernel one by one, and a change of sibling order moves
+    which projection each spelling peels: the stored seam is still offered on the re-keyed parent, yet its pieces are
+    neither the stored ones nor read and write as they do. Such an arm is re-spelled like a lost one, at the nearest
+    seam whose pieces stand for the stored ones, instead of filing the stored rows under the other projection."""
+    import json
+
+    from emmy.commands.trace import graph_from_code
+
+    code = (
+        "(lambda x, wq, wk, gq, gk: (lambda h: ((h @ wq) * gq, (h @ wk) * gk))(x * torch.rsqrt((x * x).mean(-1, keepdim=True))))"
+        "(torch.randn(4, 64, dtype=torch.float16), torch.randn(64, 32, dtype=torch.float16),"
+        " torch.randn(64, 16, dtype=torch.float16), torch.randn(32, dtype=torch.float16), torch.randn(16, dtype=torch.float16))"
+    )
+    recorded, other = "PLACE@map.1/map.1/inner.1/map", "PLACE@map.1/map.1/inner.1/map.2/map"
+    document, route = _routed(inventory_document(graph_from_code(code)[0], (12, 0)), {recorded: "cut"})
+    [target] = document.targets()
+    assert other in _seams_offered(target) and _pieces_minted(target, {other: "cut"}) != _pieces_minted(target, {recorded: "cut"})
+    stale = {
+        ref: replace(document.kernel(ref), loop_ir=json.loads(json.dumps(document.kernel(ref).loop_ir).replace(" * ", " + ")))
+        for ref in route.children
+    }
+    assert all(stale[ref].exact_identity != document.kernel(ref).exact_identity for ref in stale)
+    moved = replace(
+        document,
+        kernels=[stale.get(kernel.ref, kernel) for kernel in document.kernels],
+        routing=[replace(route, arm={other: "cut"})],
+    )
+    fresh, report = restamp(moved)
+    assert report.respelled == [f"{route.parent} {other} -> {recorded}"]
+    assert not report.dropped_routes and fresh.routing == document.routing
+    assert {fresh.kernel(ref).exact_identity for ref in route.children} == {document.kernel(ref).exact_identity for ref in route.children}
+
+
+def _seams_offered(target) -> set[str]:
+    """The seams ``target`` offers to cut, as a replay of a probe route records them."""
+    offered: dict[str, set[str]] = {}
+    mint(target, [RoutingRow(target.ref, {"PLACE@nowhere": "cut"}, ("a piece",))], Context.from_target((12, 0)), seams=offered)
+    return offered[target.ref]
+
+
+def _pieces_minted(target, arm: dict) -> set[str]:
+    """The identities of the pieces cutting ``target`` at ``arm`` mints."""
+    probe = RoutingRow(target.ref, arm, ("a piece",))
+    return {
+        kernel.exact_identity
+        for route, _same, kernels in mint(target, [probe], Context.from_target((12, 0)))
+        if route is probe
+        for kernel in kernels
+    }
 
 
 @requires_cuda
@@ -1422,12 +1542,13 @@ def test_copies_read_at_shifted_columns_cluster_onto_the_plain_read() -> None:
     """RoPE's rotate-half reads one projection at its own column and at the two half-shifted ones:
     one value at three addresses. The plain copy computes it, and each shifted copy reads its
     workspace at the column expression it spelled."""
-    from emmy.compiler.ir.expression import TernaryExpr
+    from emmy.compiler.ir.expression import TernaryExpression
     from emmy.compiler.pipeline.passes.tile._cut import _cluster_value_seams
 
+    # Spelled in the index's canonical form, the one the cluster re-spells each column in: the offset last.
     n, low = Var("n"), Var("n").lt(4)
-    lower = TernaryExpr(cond=low, if_true=Literal(0, "int"), if_false=n + Literal(-4, "int"))
-    upper = Literal(4, "int") + TernaryExpr(cond=low, if_true=n, if_false=Literal(0, "int"))
+    lower = TernaryExpression(cond=low, if_true=Literal(0, "int"), if_false=n - Literal(4, "int"))
+    upper = TernaryExpression(cond=low, if_true=n, if_false=Literal(0, "int")) + Literal(4, "int")
     seams = [_column_seam(lower, "PLACE@map.1/inner"), _column_seam(upper, "PLACE@map.2/inner"), _column_seam(n, "PLACE@map.3/inner")]
 
     (clustered,) = _cluster_value_seams(seams, (Axis("n", 8), Axis("k", 8)))
@@ -1448,11 +1569,11 @@ def test_a_column_read_past_the_plain_copy_is_not_its_value() -> None:
 def test_a_copy_storing_c_of_every_d_cells_reads_the_plain_copy_at_its_stored_address() -> None:
     """A copy reading its column only as ``m // 4`` and ``m % 2`` stores two of every four cells: over 16 columns it
     is the plain 8-column value, and reads that copy's workspace where its own would store the cell."""
-    from emmy.compiler.ir.expression import BinaryExpr
+    from emmy.compiler.ir.expression import BinaryExpression
     from emmy.compiler.pipeline.passes.tile._cut import _cluster_value_seams
 
     m = Var("m")
-    stored = (m / 4) * 2 + BinaryExpr("%", m, Literal(2, "int"))
+    stored = (m / 4) * 2 + BinaryExpression("%", m, Literal(2, "int"))
     node = projection((), f"w = load w[{stored}, k]", results=("w",))
     folded = CutSite(node=node, spelling="PLACE@map.1/inner", axes=(Axis("m", 16), Axis("k", 8)), dtypes=(F16,))
 
@@ -1468,7 +1589,7 @@ def test_a_conversion_to_the_dtype_a_workspace_stores_reads_the_workspace_itself
     from emmy.compiler.dtype import F32
     from emmy.compiler.pipeline.passes.tile._cut import _without_identity_casts
 
-    rounded = projection((slab("x", "ws", "m"),), "f16 y = copy(x)", ("y",))
+    rounded = projection((slab("x", "ws", "m"),), "f16 y = x", ("y",))
     root = projection((rounded,), "z = exp(y)", ("z",))
 
     kept = _without_identity_casts(root, {"ws": F16}).operands[0]
@@ -2877,3 +2998,14 @@ def test_parallel_split_preserves_every_output_buffer() -> None:
     assert result.outputs == ["out0", "consumer"]
     assert result.nodes["consumer"].inputs == ["out1"]
     assert result.buffer("out1") is not None
+
+
+def test_the_row_abstraction_keeps_a_float_offset() -> None:
+    """The row abstraction's affine spelling keeps a constant's kind: a value's float offset is no integer to truncate,
+    so two channels differing only in that offset get two keys, while two spellings of one value get one."""
+    from emmy.compiler.ir.expression import parse
+    from emmy.compiler.pipeline.passes.tile._cut import _affine_sum
+
+    assert _affine_sum(parse("2 * a0 + 0.25")) != _affine_sum(parse("2 * a0 + 0.75"))
+    assert _affine_sum(parse("2 * a0 + 0.25")) == _affine_sum(parse("0.25 + a0 * 2"))
+    assert _affine_sum(parse("2 * a0 + 3")) == _affine_sum(parse("3 + a0 * 2"))

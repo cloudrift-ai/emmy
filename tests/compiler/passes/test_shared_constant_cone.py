@@ -25,6 +25,7 @@ from emmy.compiler.dtype import F16
 from emmy.compiler.graph import Graph, Tensor
 from emmy.compiler.ir.axis import Axis
 from emmy.compiler.ir.base import InputOp
+from emmy.compiler.ir.expression import Var
 from emmy.compiler.ir.frontend.ir import LinearOp, SliceOp
 from emmy.compiler.ir.schedule import Placement, Raster, Reduce, Stage, Tile, Work, derive_inventory
 from emmy.compiler.ir.schedule.base import Schedule
@@ -48,6 +49,12 @@ factor = import_module("emmy.compiler.pipeline.passes.lowering.kernel._factor")
 _CAP = (8, 0)
 _M, _K, _N = 1, 32, 16  # M=1 — the decode row, whose contraction folds serially per channel
 _DECL = re.compile(r"^\s*(?:const\s+)?(?:float|double|half|__half|int|unsigned|long|bool)\s+(\w+)\s*(?:=|;)")
+
+
+def _names(stmt) -> tuple[str, ...]:
+    """The names an ``Assign``'s value reads as direct operands (a bare-name value is its one operand)."""
+    operands = (stmt.value,) if isinstance(stmt.value, Var) else stmt.value.operands
+    return tuple(operand.name for operand in operands)
 
 
 def _redeclared(source: str) -> list[str]:
@@ -188,7 +195,7 @@ def test_a_same_dtype_copy_of_the_bound_value_is_a_repeat() -> None:
         """
         v0 = load ws[0]
         acc0 = load ws[0]
-        f16 v0 = copy(acc0)
+        f16 v0 = acc0
         """
     )
 
@@ -201,7 +208,7 @@ def test_a_converting_copy_under_a_bound_name_survives_as_the_fault_it_is() -> N
         """
         f32 v0 = load ws[0]
         f32 acc0 = load ws[0]
-        f16 v0 = copy(acc0)
+        f16 v0 = acc0
         """
     )
 
@@ -217,7 +224,7 @@ def test_a_name_rebound_to_a_different_expression_survives_as_the_fault_it_is() 
         """
     )
 
-    assert [stmt.args for stmt in materialize._drop_repeated_declarations(body)] == [("a",), ("b",)]
+    assert [_names(stmt) for stmt in materialize._drop_repeated_declarations(body)] == [("a",), ("b",)]
 
 
 def test_two_cones_that_bind_one_name_to_two_values_are_re_spelled() -> None:
@@ -244,8 +251,8 @@ def test_two_cones_that_bind_one_name_to_two_values_are_re_spelled() -> None:
     names = [stmt.name for stmt in spelled]
 
     assert names[0] == "v0" and names[2] != "v0", names
-    assert spelled[1].args == ("v0",)  # a use BEFORE the rebinding still means the first value
-    assert spelled[3].args == (names[2],)  # one after it means the second
+    assert _names(spelled[1]) == ("v0",)  # a use BEFORE the rebinding still means the first value
+    assert _names(spelled[3]) == (names[2],)  # one after it means the second
 
 
 def test_two_cones_that_agree_keep_one_spelling() -> None:
@@ -280,12 +287,12 @@ def test_serial_nested_projections_re_spell_distinct_values_in_one_scope() -> No
         results=("out",),
     )
     bound = factor.factorize(_serial_tile(root, free, reduce_axis), root=None)
-    additions = [stmt for stmt in bound.body if isinstance(stmt, Assign) and stmt.op.name == "add"]
+    additions = [stmt for stmt in bound.body if isinstance(stmt, Assign) and stmt.value.operation.name == "add"]
     reciprocal = next(stmt for stmt in bound.body if isinstance(stmt, Assign) and stmt.name == "out")
 
     assert len(additions) == 2
     assert additions[0].name != additions[1].name
-    assert reciprocal.args == (additions[1].name,)
+    assert _names(reciprocal) == (additions[1].name,)
 
 
 def test_serial_root_and_projection_tail_re_spell_distinct_values_in_one_scope() -> None:
@@ -305,12 +312,12 @@ def test_serial_root_and_projection_tail_re_spell_distinct_values_in_one_scope()
     )
 
     bound = factor.factorize(_serial_tile(root, free, reduce_axis), root=None)
-    additions = [stmt for stmt in bound.body if isinstance(stmt, Assign) and stmt.op.name == "add"]
+    additions = [stmt for stmt in bound.body if isinstance(stmt, Assign) and stmt.value.operation.name == "add"]
     reciprocal = next(stmt for stmt in bound.body if isinstance(stmt, Assign) and stmt.name == "out")
 
     assert len(additions) == 2
     assert additions[0].name != additions[1].name
-    assert reciprocal.args == (additions[1].name,)
+    assert _names(reciprocal) == (additions[1].name,)
 
 
 @pytest.mark.parametrize("coop", [1, 32, 64])

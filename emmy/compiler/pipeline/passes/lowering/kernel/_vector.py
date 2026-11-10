@@ -3,7 +3,7 @@
 from collections.abc import Mapping
 from math import gcd
 
-from emmy.compiler.ir.expression import BinaryExpr, Expression, Literal, SimplifyCtx, Var, affine_form
+from emmy.compiler.ir.expression import BinaryExpression, Expression, Literal, SimplifyCtx, Var, affine_form
 
 
 def strided_alignment(start: Expression, step: Expression, aligned: Mapping[str, int]) -> int:
@@ -34,7 +34,7 @@ def vector_run(indices, tensor, width: int, aligned: Mapping[str, int] | None = 
     for index in indices:
         flat = index[0]
         for coord, size in zip(index[1:], tensor.shape[1:] if rank > 1 else (), strict=True):
-            flat = BinaryExpr("+", BinaryExpr("*", flat, size.expression), coord)
+            flat = BinaryExpression("+", BinaryExpression("*", flat, size.expression), coord)
         addresses.append(flat.simplify(ctx))
     atoms: dict[Expression, Var] = {}
     addresses = [_atomized(address, atoms) for address in addresses]
@@ -51,7 +51,7 @@ def vector_run(indices, tensor, width: int, aligned: Mapping[str, int] | None = 
         form = affine_form(address, free)
         if form is None or form[1] != coefficients:
             return False
-        difference = BinaryExpr("-", form[0], anchor).simplify(ctx)
+        difference = BinaryExpression("-", form[0], anchor).simplify(ctx)
         if not isinstance(difference, Literal) or difference.value != offset:
             return False
     return True
@@ -63,6 +63,6 @@ def _atomized(expression: Expression, atoms: dict[Expression, Var]) -> Expressio
     same subterm appears, which is all the run proof asks of a variable."""
     if isinstance(expression, (Var, Literal)):
         return expression
-    if isinstance(expression, BinaryExpr) and expression.op in ("+", "-", "*"):
-        return BinaryExpr(expression.op, _atomized(expression.left, atoms), _atomized(expression.right, atoms))
+    if isinstance(expression, BinaryExpression) and expression.op in ("+", "-", "*"):
+        return BinaryExpression(expression.op, _atomized(expression.left, atoms), _atomized(expression.right, atoms))
     return atoms.setdefault(expression, Var(f"_run_atom{len(atoms)}"))

@@ -82,7 +82,7 @@ def _statements(term) -> tuple:
     return (*(edge.as_slab().load for edge in term.operands if edge.as_slab() is not None), *term.lift.body)
 
 
-def _dequant_loop(*, scale_index="0.0, n", scale_op="multiply", decode="from_f8e4m3", extra_factor=False):
+def _dequant_loop(*, scale_index="0, n", scale_op="multiply", decode="from_f8e4m3", extra_factor=False):
     """The fused dequant matmul loop body the fp8 expansion + loop fusion produce:
     ``acc += x[m,k] * (s[n] (x) from_f8*(w[k,n]))`` with the scale load hoistable (k-invariant)
     unless ``scale_index`` (the scale load's index text) says otherwise."""
@@ -93,7 +93,7 @@ def _dequant_loop(*, scale_index="0.0, n", scale_op="multiply", decode="from_f8e
         f"wsc = {scale_op}({'dq, s' if scale_op == 'divide' else 's, dq'})",
     ]
     if extra_factor:
-        lines += ["s2 = load w_scale2[0.0, n]", "wsc2 = multiply(s2, wsc)"]
+        lines += ["s2 = load w_scale2[0, n]", "wsc2 = multiply(s2, wsc)"]
     lines += [
         "f16 a = load x[m, k]",
         f"v = multiply(a, {'wsc2' if extra_factor else 'wsc'})",
@@ -114,7 +114,7 @@ def test_decode_scale_cone_binds_via_mul_hoist():
     scale = [s for s in epi if isinstance(s, Load) and s.input == "w_scale"]
     assert scale, "the k-invariant scale did not hoist to the epilogue"
     tail = [s for s in epi if isinstance(s, Assign)][-1]
-    assert tail.op.name == "multiply" and "s" in tail.args
+    assert tail.value.operation.name == "multiply" and "s" in tail.value.free_vars()
 
 
 def test_inverse_scale_hoists_as_divide():
@@ -124,7 +124,7 @@ def test_inverse_scale_hoists_as_divide():
     con, epi = bound
     assert con.operands[1].as_slab() is not None and con.operands[1].as_slab().load.input == "w_bits"
     tail = [s for s in epi if isinstance(s, Assign)][-1]
-    assert tail.op.name == "divide" and "s" in tail.args
+    assert tail.value.operation.name == "divide" and "s" in tail.value.free_vars()
 
 
 def test_factor_chain_hoists_every_k_invariant_factor():
@@ -134,7 +134,7 @@ def test_factor_chain_hoists_every_k_invariant_factor():
     con, epi = bound
     assert con.operands[1].as_slab() is not None and con.operands[1].as_slab().load.input == "w_bits"
     assigns = [s for s in epi if isinstance(s, Assign)]
-    assert assigns and {s.op.name for s in assigns} == {"multiply"}
+    assert assigns and {node.operation.name for s in assigns for node in s.value.subterms() if node.operation} == {"multiply"}
     assert {s.input for s in epi if isinstance(s, Load)} == {"w_scale", "w_scale2"}
 
 
@@ -146,7 +146,7 @@ def test_original_epilogue_reads_the_scaled_value():
     con, epi = bound
     assigns = [s for s in epi if isinstance(s, Assign)]
     assert assigns, "no epilogue chain — nothing rescales the accumulator"
-    assert con.exposes[0] in assigns[0].args
+    assert con.exposes[0] in assigns[0].value.free_vars()
 
 
 def test_k_varying_scale_binds_as_whole_computed_b_cone():
@@ -165,7 +165,10 @@ def test_non_decode_computed_b_preserves_cone_instead_of_positional_misbind():
     assert bound is not None, "the non-decode cone demoted to PLANAR"
     con, _epi = bound
     assert con.operands[0].as_slab() is not None and con.operands[1].as_slab() is None
-    assert any(isinstance(s, Assign) and s.op.name == "exp" for s in con.operands[1].lift.body)
+    assert any(
+        isinstance(s, Assign) and any(n.operation and n.operation.name == "exp" for n in s.value.subterms())
+        for s in con.operands[1].lift.body
+    )
 
 
 def test_m_dependent_b_cone_binds_as_a_batched_matvec():
@@ -382,7 +385,7 @@ def test_packed_kblock_b_matches_the_spelled_shape():
     got = match_packed_kblock_b(cone, "a2", _packed_inputs())
     assert got is not None
     assert got.bits.input == "w_bits" and got.table.input == "w_f4_pairs"
-    assert got.factor == "v3" and got.block == 16
+    assert str(got.factor) == "v3" and got.block == 16
 
 
 def test_packed_kblock_b_declines_misaligned_row_stride():

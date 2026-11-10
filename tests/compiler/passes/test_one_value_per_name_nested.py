@@ -11,6 +11,7 @@ of a name inside it, without leaking that spelling out."""
 from __future__ import annotations
 
 from emmy.compiler.ir.elementwise import ElementwiseImpl
+from emmy.compiler.ir.expression import Var
 from emmy.compiler.ir.stmt import Assign, Body, Loop, Write, parse_body
 from emmy.compiler.pipeline.passes.lowering.kernel._factor import _one_value_per_name
 
@@ -36,6 +37,12 @@ def _sweep_loop() -> Loop:
     return loop
 
 
+def _names(stmt) -> tuple[str, ...]:
+    """The names an ``Assign``'s value reads as direct operands (a bare-name value is its one operand)."""
+    operands = (stmt.value,) if isinstance(stmt.value, Var) else stmt.value.operands
+    return tuple(operand.name for operand in operands)
+
+
 def _defines(body: Body) -> list[str]:
     return [name for stmt in body for name in stmt.defines()]
 
@@ -44,12 +51,12 @@ def test_a_second_value_of_a_name_inside_a_nested_scope_is_re_spelled() -> None:
     (swept,) = _one_value_per_name([_sweep_loop()])
     names = _defines(swept.body)
     assert names.count("v") == 1, f"the sweep loop binds v twice in one scope: {names}"
-    second = [s for s in swept.body if isinstance(s, Assign) and s.args == ("acc", "eps")]
+    second = [s for s in swept.body if isinstance(s, Assign) and _names(s) == ("acc", "eps")]
     assert len(second) == 1 and second[0].name != "v"
     store = next(s for s in swept.body if isinstance(s, Write))
     assert store.value == second[0].name, "the store reads the projection's own cell, the second binding"
-    consumer = next(s for s in swept.body if isinstance(s, Assign) and s.op == ElementwiseImpl("multiply"))
-    assert consumer.args == ("v", "v"), "a use before the second binding keeps the first value"
+    consumer = next(s for s in swept.body if isinstance(s, Assign) and s.value.operation == ElementwiseImpl("multiply"))
+    assert _names(consumer) == ("v", "v"), "a use before the second binding keeps the first value"
 
 
 def test_a_read_ahead_of_a_nested_second_binding_keeps_the_outer_name() -> None:
@@ -70,5 +77,5 @@ def test_a_read_ahead_of_a_nested_second_binding_keeps_the_outer_name() -> None:
     kept, swept = _one_value_per_name([outer, loop])
     assert kept == outer
     use, _, _, second, store = swept.body
-    assert use.args == ("v", "v"), f"the read ahead of the loop-local binding reads the outer v, got {use.args}"
+    assert _names(use) == ("v", "v"), f"the read ahead of the loop-local binding reads the outer v, got {_names(use)}"
     assert second.name != "v" and store.value == second.name

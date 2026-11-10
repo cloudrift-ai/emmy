@@ -4,9 +4,13 @@ import json
 
 import pytest
 
-from emmy.compiler.ir.stmt import Assign, Body, Cond, Load, free_names, normalize_body, parse_body
-from emmy.compiler.ir.stmt.normalize import _normalize_body
+from emmy.compiler.ir.stmt import Assign, Body, Cond, Load, canonical_values, free_names, normalize_body, parse_body
 from tests.compiler.realization.helpers import CASES_DIR, case_files
+
+
+def _spelled(stmt):
+    """``stmt`` with its value in the canonical spelling, so two spellings of one computation compare equal."""
+    return canonical_values(Body((stmt,)))[0] if isinstance(stmt, Assign) else stmt
 
 
 def _assert_scoped_cse(body, available=()):
@@ -36,13 +40,9 @@ def _assert_scoped_cse(body, available=()):
         else:
             writes = set(stmt.external_writes())
             if stmt.pure and stmt.defines() and not (isinstance(stmt, Load) and stmt.carried):
-                candidate = stmt
-                if isinstance(candidate, Assign) and candidate.op.commutative:
-                    candidate = candidate.replace(args=tuple(sorted(candidate.args)))
+                candidate = _spelled(stmt)
                 for prior in available:
-                    renamed = prior.rename(dict(zip(prior.defines(), candidate.defines(), strict=False)))
-                    if isinstance(renamed, Assign) and renamed.op.commutative:
-                        renamed = renamed.replace(args=tuple(sorted(renamed.args)))
+                    renamed = _spelled(prior.rename(dict(zip(prior.defines(), candidate.defines(), strict=False))))
                     assert candidate != renamed, f"available duplicate: {prior} followed by {stmt}"
                 available.append(stmt)
         available = [prior for prior in available if not writes.intersection(prior.external_reads())]
@@ -56,8 +56,8 @@ def test_corpus_kernels_have_no_available_duplicates(path):
     for kernel in kernels:
         normalized = normalize_body(Body.from_wire(kernel["attrs"]["body"]))
         _assert_scoped_cse(normalized)
-        # Bypass the Body cache: idempotence is checked, not assumed from cached equality.
-        assert _normalize_body(normalized) == normalized
+        # Computed afresh from the text: idempotence is checked, not assumed from the body's mark.
+        assert normalize_body(parse_body(str(normalized))) == normalized
 
 
 @pytest.mark.parametrize("nested", [False, True])

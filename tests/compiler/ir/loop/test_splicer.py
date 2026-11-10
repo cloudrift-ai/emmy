@@ -14,8 +14,8 @@ import pytest
 from emmy.compiler.dtype import F16, DataType
 from emmy.compiler.graph import Graph
 from emmy.compiler.ir.base import InputOp
-from emmy.compiler.ir.expression import BinaryExpr
-from emmy.compiler.ir.loop import Accum, Affine, Assign, Load, Loop, LoopOp, UnfusableStmt, Write, splice_graph, splice_loops
+from emmy.compiler.ir.expression import BinaryExpression, Var, affine_node, affine_terms
+from emmy.compiler.ir.loop import Accum, Assign, Load, Loop, LoopOp, UnfusableStmt, Write, splice_graph, splice_loops
 from emmy.compiler.ir.stmt import parse_body
 from emmy.compiler.tensor import Tensor
 
@@ -29,17 +29,54 @@ def _loop(text: str) -> LoopOp:
     return LoopOp(body=parse_body(text))
 
 
-def _count_kind(op: LoopOp, cls: type) -> int:
+def _count_type(op: LoopOp, cls: type) -> int:
     return sum(1 for s in op.body.iter() if isinstance(s, cls))
 
 
+def _is_copy(stmt) -> bool:
+    """An ``Assign`` that copies one name: an alias (a bare name) or a typed ``copy`` that spells a rounding."""
+    if not isinstance(stmt, Assign):
+        return False
+    op = stmt.value.operation
+    return isinstance(stmt.value, Var) or (op is not None and op.name == "copy" and len(stmt.value.operands) == 1)
+
+
+def _spine(value, out=None):
+    """The shape of every maximal sum in ``value``, outermost first: its sorted literal coefficients and its offset, one
+    entry per affine region (additions, subtractions, negations and literal scales), the analog of one sum statement.
+    A term below a non-affine operation (``exp(-x)``) is its own region."""
+    out = [] if out is None else out
+    if affine_node(value):
+        terms, offset, _ = affine_terms(value)
+        out.append((tuple(sorted(coefficient for coefficient, _ in terms)), offset))
+        for _, leaf in terms:
+            _spine(leaf, out)
+    else:
+        for child in value.children():
+            _spine(child, out)
+    return out
+
+
+def _operations(body) -> list[str]:
+    """The elementwise operations a body computes beyond its sums: every operation node of an ``Assign`` or ``Accum``
+    value that is not part of an affine region (an addition, a subtraction, a negation, a literal scale)."""
+    names = []
+    for stmt in body.iter():
+        if not isinstance(stmt, (Assign, Accum)):
+            continue
+        for node in stmt.value.subterms():
+            if node.operation is not None and not affine_node(node):
+                names.append(node.operation.name)
+    return names
+
+
 def _elementwise_fns(op: LoopOp) -> list[str]:
-    return [s.op.name for s in op.body.iter() if isinstance(s, Assign)]
+    return _operations(op.body)
 
 
 def _affine_shapes(op: LoopOp) -> list[tuple[tuple[float, ...], float]]:
-    """Every Affine's sorted coefficients and offset: the folded form a sum, difference or negation takes."""
-    return sorted((tuple(sorted(s.coefficients)), s.offset) for s in op.body.iter() if isinstance(s, Affine))
+    """Every sum's top-level shape in a body (see ``test_fusion_rules._affine_shapes``)."""
+    return sorted(shape for s in op.body.iter() if isinstance(s, (Assign, Accum)) for shape in _spine(s.value))
 
 
 def _splice_loop_ops(producer: LoopOp, consumer: LoopOp, source: str) -> LoopOp | None:
@@ -168,7 +205,7 @@ def test_pointwise_chain():
 
     merged = _splice_loop_ops(producer, consumer, source="src_0")
     assert merged is not None
-    # exp from producer; the consumer's ``add(y, y)`` folds to one Affine ``2*y``.
+    # exp from producer; the consumer's ``add(y, y)`` takes its affine form ``2 * y``.
     assert "exp" in _elementwise_fns(merged)
     assert _affine_shapes(merged) == [((2.0,), 0.0)]
     # Producer's Load (consumer had no other inputs) survives as source 0.
@@ -323,7 +360,7 @@ def test_reduction_producer():
     merged = _splice_loop_ops(producer, consumer, source="src_0")
     assert merged is not None
     # The Accum survives in the merged body.
-    assert _count_kind(merged, Accum) == 1
+    assert _count_type(merged, Accum) == 1
     # Elementwise chain includes the producer-load copy + the consumer's exp.
     assert "exp" in _elementwise_fns(merged)
 
@@ -333,7 +370,7 @@ def test_graph_splice_preserves_a_spelled_store_rounding(rounds_to: DataType | N
     """Fusing a store away must not delete the rounding it spelled — and must invent none."""
     producer = _reduce_producer(source="x", output="producer", rounds_to=rounds_to)
     merged = _splice_graph_producer(producer, input_shape=(4, 16), output_shape=(4,), edge_dtype=F16)
-    typed = [c.dtype for c in merged.body.iter() if isinstance(c, Assign) and c.op.name == "copy" and c.dtype is not None]
+    typed = [c.dtype for c in merged.body.iter() if _is_copy(c) and c.dtype is not None]
     assert typed == ([rounds_to] if rounds_to is not None else [])
 
 
@@ -347,7 +384,7 @@ def test_graph_splice_load_output_needs_no_conversion():
         """
     )
     merged = _splice_graph_producer(producer, input_shape=(4,), output_shape=(4,), edge_dtype=F16)
-    aliases = [stmt for stmt in merged.body.iter() if isinstance(stmt, Assign) and stmt.op.name == "copy"]
+    aliases = [stmt for stmt in merged.body.iter() if _is_copy(stmt)]
     assert aliases == []
 
 
@@ -389,10 +426,10 @@ def test_graph_splice_preserves_multi_reduction_output_dtypes(rounds_to: DataTyp
     assert result is not None
     merged, external = result
     assert external == ["x", "y", "z"]
-    typed = [c.dtype for c in merged.body.iter() if isinstance(c, Assign) and c.op.name == "copy" and c.dtype is not None]
+    typed = [c.dtype for c in merged.body.iter() if _is_copy(c) and c.dtype is not None]
     assert len(typed) == expected_aliases
     assert set(typed) <= {F16}
-    pointwise_result = next(stmt for stmt in merged.body.iter() if isinstance(stmt, Assign) and stmt.op.name == "exp")
+    pointwise_result = next(stmt for stmt in merged.body.iter() if isinstance(stmt, Assign) and "exp" in str(stmt.value))
     assert pointwise_result.dtype == F16
 
 
@@ -406,7 +443,7 @@ def test_graph_splice_typed_boundary_roundtrips():
     graph.outputs = ["consumer"]
 
     restored = Graph.from_dict(graph.to_dict()).nodes["consumer"].op
-    typed = [c.dtype for c in restored.body.iter() if isinstance(c, Assign) and c.op.name == "copy" and c.dtype is not None]
+    typed = [c.dtype for c in restored.body.iter() if _is_copy(c) and c.dtype is not None]
     assert typed == [F16]
 
 
@@ -572,7 +609,7 @@ def test_chain_three_loops():
     )
     assert merged is not None
     assert "exp" in _elementwise_fns(merged)
-    # ``-exp(x) + bias``: the negation and the add fold into one Affine.
+    # ``-exp(x) + bias``: the negation and the add are one sum in affine form.
     assert _affine_shapes(merged) == [((-1.0, 1.0), 0.0)]
     # Two external Loads remain (X, BIAS); the splice edges collapsed into copy aliases.
     loads = [s for s in merged.body.iter() if isinstance(s, Load)]
@@ -657,21 +694,21 @@ def test_output_equivalence_cluster_retargets_reduce_through_copy_chain(monkeypa
     graph.add_node(first_copy, ["y"], Tensor("mid", (3, 2)), node_id="mid")
     graph.add_node(second_copy, ["mid"], Tensor("out", (6,)), node_id="out")
     graph.outputs = ["out"]
-    eval_expression = BinaryExpr.eval
+    eval_expression = BinaryExpression.eval
 
     def reject_coordinate_evaluation(expression, env):
         if env:
             pytest.fail("output equivalence must not enumerate coordinates")
         return eval_expression(expression, env)
 
-    monkeypatch.setattr(BinaryExpr, "eval", reject_coordinate_evaluation)
+    monkeypatch.setattr(BinaryExpression, "eval", reject_coordinate_evaluation)
 
     result = splice_graph(graph)
 
     assert result is not None
     merged, external = result
     assert external == ["x"]
-    assert _count_kind(merged, Accum) == 1
+    assert _count_type(merged, Accum) == 1
     assert [write.output for write in merged.writes] == ["out"]
     assert len(merged.writes[0].index) == 1
     assert "/" not in str(merged.writes[0].index[0]) and "%" not in str(merged.writes[0].index[0])
@@ -783,7 +820,7 @@ def test_multi_output_splice_target():
     fns = _elementwise_fns(merged)
     # Both target ops appear in the merged body once each.
     assert fns.count("exp") == 1
-    # The negation is read once (its write left with the splice edge), so ``exp(x) + (-x)`` is one Affine.
+    # The negation is read once (its write left with the splice edge), so ``exp(x) + (-x)`` is one sum in affine form.
     assert _affine_shapes(merged) == [((-1.0, 1.0), 0.0)]
     # Only one external Load (target's x); the splice edges replaced sink's Loads.
     loads = [s for s in merged.body.iter() if isinstance(s, Load)]
@@ -830,7 +867,7 @@ def test_shared_load_dedup_into_reduce():
     merged = _splice_loop_ops(producer, consumer, source="src_0")
     assert merged is not None  # would have failed pre-fix with SSA validation error
     # Reduce + full silu chain + final multiply should all materialize once.
-    assert _count_kind(merged, Accum) == 1
+    assert _count_type(merged, Accum) == 1
     fns = _elementwise_fns(merged)
     for op in ("exp", "reciprocal", "multiply"):
         assert op in fns, f"missing {op} in merged body: {fns}"
@@ -845,13 +882,13 @@ def test_literal_producer_write_index():
         for a0 in 0..4:
             x = load src_0[a0]
             y = exp(x)
-            out_0[a0, 0.0] = y
+            out_0[a0, 0] = y
         """
     )
     consumer = _loop(
         """
         for a0 in 0..4:
-            yv = load src_0[a0, 0.0]
+            yv = load src_0[a0, 0]
             z = negative(yv)
             out_0[a0] = z
         """
@@ -904,7 +941,7 @@ def test_shallow_affine_recurrence_still_fuses():
     loops, edges, roots = _affine_recurrence_chain(4)
     merged = splice_loops(loops=loops, splice_edges=edges, roots=roots)
     assert merged is not None
-    assert _count_kind(merged, Write) == 1  # one root — every stage inlined
+    assert _count_type(merged, Write) == 1  # one root — every stage inlined
 
 
 def test_deep_affine_recurrence_raises_past_the_binding_ratio():

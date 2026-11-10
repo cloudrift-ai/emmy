@@ -32,8 +32,9 @@ relevant `ARCHITECTURE.md` before answering.
 ## Prerequisites
 
 - Python 3.12+ with `venv`
-- A Rust toolchain (`cargo`): compiled programs execute through the Rust runtime, which `make setup` builds into the
-  package as the `emmy.emmy_runtime` extension; use the README architecture index for the runtime's design.
+- A Rust toolchain (`cargo`): compiled programs execute through the Rust runtime (the `emmy.emmy_runtime`
+  extension), and the compiler's statements and expressions are the `emmy.emmy_ir` extension; `make setup` builds
+  both into the package. Use the README architecture index for their design.
 - `make setup` to create the virtual environment and install dependencies
 - Docker and Docker Compose for local deployments
 - `HF_TOKEN` environment variable for HuggingFace model downloads
@@ -80,18 +81,19 @@ The passes `ARCHITECTURE.md` owns the design; `tests/compiler/passes/test_maxima
 
 ## Compiler Invariant: Normalization Carries No Knob
 
-Body normalization (`ir/stmt/normalize.py`, the `normalize_body` driver) is the canonical form every Loop IR body
-takes at construction and inside every identity digest. It runs the same on every body, so it answers to no knob, pin
-or evidence, and nothing under `ir/` imports the pipeline that holds them.
+Body normalization (the `normalize` module of the `emmy-ir` crate, behind the one entry point `normalize_body` the
+`ir/stmt` package exports) is the canonical form every Loop IR body takes at construction and inside every identity
+digest. It runs the same on every body, so it answers to no knob, pin or evidence, and nothing under `ir/` imports the
+pipeline that holds them.
 
 - **A transform that something decides is a pipeline pass.** A knob the search sets, a pin, a pass stage: the
   transform lives in the pass file that owns the decision under `pipeline/passes/`, even when it is a pure body → body
-  function another pass could reuse. Every function in `normalize.py` runs inside `normalize_body`; one that does not
-  is a pass in the wrong place.
+  function another pass could reuse. Every step of the crate's `normalize` module runs inside `normalize_body`; one
+  that does not is a pass in the wrong place.
 - **A pass may call a normalization step; normalization never calls a pass.**
 - **Nothing is added to normalization to make a kernel faster.** A canonical form moves every kernel identity and
   every golden; whether a transform pays is the knob's evidence question. A simplification that always removes work
-  and never adds any is a canonical form, like constant folding or the fold of a sum into one `Affine` statement:
+  and never adds any is a canonical form, like constant folding or the fold of a sum into its affine form:
   it decides nothing, and it is exact up to the reassociation of a sum and the rounding of a literal reciprocal,
   which every reduce schedule and fast-math division already take.
 
@@ -182,8 +184,8 @@ filename: no suffix means every stage must pass, `_xfail_<stage>` means it is a 
   case.
 - A **stale case** failure means the lowering or a schedule codec changed and the stored kernels are no longer what
   the program lowers to. `make test` detects this on its own, on any machine; `make test-corpus-regen` is the fix —
-  the same restamp every golden gets. It refuses to write when a case's verdict also changed; that refusal is the
-  signal, not an obstacle to work around.
+  the same restamp every golden gets. It refuses to write when the restamped case's verdict contradicts its filename;
+  that refusal is the signal, not an obstacle to work around.
 - **The corpus never asks for something this machine cannot do.** With no GPU, the only obligation is the stale case
   above, and it is always fixable where you are: `realized` runs at the case's declared capability, while `built` and
   `correct` run only on a card whose capability equals it.
