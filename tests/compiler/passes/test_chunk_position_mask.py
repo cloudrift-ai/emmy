@@ -189,6 +189,26 @@ def test_the_expectation_reads_the_weight_the_denominator_computed() -> None:
     assert weights and all(line.startswith("_ch0_") and "_w[_e] = __expf(" in line for line in weights), weights
 
 
+def test_a_sum_with_a_negated_term_is_evaluated_as_a_subtraction() -> None:
+    """GPU-free. The atom lowering evaluates a sum one operation at a time; a negated term, or one scaled by a negative
+    literal, is the subtraction of its positive form, exact by IEEE's definition of subtraction, so no sum leaves a
+    negate temp behind. Only the one node is re-spelled: a sum every leading term of which is negated keeps its
+    negate, since reassociating it would round differently."""
+    from importlib import import_module
+
+    from emmy.compiler.ir.stmt import parse_body
+
+    atom = import_module("emmy.compiler.pipeline.passes.lowering.kernel._atom")
+
+    def spelled(text: str) -> str:
+        return "; ".join(str(stmt) for stmt in atom._one_operation(parse_body(text)))
+
+    assert spelled("v = exp(-m + s)") == "v__e0 = s - m; v = exp(v__e0)"
+    assert spelled("v = exp(s + -2.0 * m)") == "v__e0 = 2.0 * m; v__e1 = s - v__e0; v = exp(v__e1)"
+    assert spelled("v = exp(s - m - c)") == "v__e0 = s - m; v__e1 = v__e0 - c; v = exp(v__e1)"
+    assert spelled("v = exp(-a - b + c)") == "v__e0 = -a; v__e1 = v__e0 - b; v__e2 = v__e1 + c; v = exp(v__e2)"
+
+
 def test_the_mask_bound_reads_the_negation_the_normal_form_spells() -> None:
     """GPU-free. The normal form spells ``key - row`` as ``-row + key``; the stream bound reads that affine form as
     the same ``{key: 1, row: -1}``, or a causal mask on a wide launch would bound nothing."""

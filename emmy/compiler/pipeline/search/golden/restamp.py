@@ -259,7 +259,10 @@ class Report:
         )
 
     def lines(self) -> list[str]:
-        out = [f"{len(self.rekeyed)} of {self.kernels} kernels re-keyed, {len(self.dropped_kernels)} dropped"]
+        out = [
+            f"{len(self.rekeyed)} of {self.kernels} kernels re-keyed, {len(self.dropped_kernels)} dropped, "
+            f"{len(self.dropped_routes)} decisions dropped, {len(self.demoted)} measured rows demoted"
+        ]
         out.extend(f"re-keyed {name}" for name in self.rekeyed)
         out.extend(f"re-pointed {name}" for name in self.repointed)
         out.extend(f"dropped kernel {reason}" for reason in self.dropped_kernels)

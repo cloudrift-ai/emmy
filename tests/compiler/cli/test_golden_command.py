@@ -111,7 +111,7 @@ def test_restamp_rewrites_the_golden_onto_the_fresh_lowering(golden, caplog):
     assert len(document.kernels) == 7 and len(document.programs) == 8, "the kernel goes; the traced program is provenance"
     proposals = {row.name for row in document.rows if not row.measured}
     assert proposals == {"matmul.square.512"}, "measured on another kernel: the row keeps its schedule only"
-    assert "1 of 8 kernels re-keyed, 1 dropped" in caplog.text
+    assert "1 of 8 kernels re-keyed, 1 dropped, 0 decisions dropped, 1 measured rows demoted" in caplog.text
 
     caplog.clear()
     with caplog.at_level("INFO"):

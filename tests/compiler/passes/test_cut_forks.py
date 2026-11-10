@@ -183,15 +183,14 @@ def _softmax_graph() -> Graph:
     return graph
 
 
-def _projection_consumer_graph(weight_first: bool) -> Graph:
-    """A projection ``acc[t, n] = sum_k act[t, k] * w[n, k]`` consumed in place by its square, over the nest
-    ``t`` (tokens, outer) then ``n`` (inner); the contraction's cell reads its weight before its activation when
-    ``weight_first``."""
+def _projection_consumer_graph(nest: tuple[str, str]) -> Graph:
+    """A projection ``acc[t, n] = sum_k act[t, k] * w[n, k]`` consumed in place by its square, under the loop nest
+    ``nest`` over the tokens ``t`` and the features ``n`` (outer first)."""
     t, n, k = Axis("t", 8), Axis("n", 32), Axis("k", 16)
-    act, w = slab("act", "act", "t", "k"), slab("w", "w", "n", "k")
-    matmul = contraction(k, w, (act, "acc")) if weight_first else contraction(k, act, (w, "acc"))
+    loops = tuple({"t": t, "n": n}[name] for name in nest)
+    matmul = contraction(k, slab("act", "act", "t", "k"), (slab("w", "w", "n", "k"), "acc"))
     squared = projection((matmul,), "sq = multiply(acc, acc)", ("sq",))
-    tile = TileOp(op=squared, name="out", place=Placement(free=(t, n)), axes=(t, n, k))
+    tile = TileOp(op=squared, name="out", place=Placement(free=loops), axes=(*loops, k))
     graph = Graph()
     _input(graph, "act", (8, 16))
     _input(graph, "w", (32, 16))
@@ -200,22 +199,23 @@ def _projection_consumer_graph(weight_first: bool) -> Graph:
     return graph
 
 
-@pytest.mark.parametrize("weight_first", [False, True], ids=["activation-read-first", "weight-read-first"])
-def test_a_contraction_workspace_is_laid_out_by_its_consumers_nest_not_its_operand_order(weight_first: bool) -> None:
-    """The workspace a cut contraction writes takes its consumer's nest order, the coordinate the consumer varies
-    fastest last, whichever operand the cell happens to read first: tokens-first for a projection a norm reads
-    per token. Laid out in operand-read order, the normal form's statement order decided the layout, and a
-    re-spelling that read the weight first stored the q and k projections of an FP8 attention input
-    features-first, so their norms read the rows strided — three pieces 2.8x to 8.5x slower on an RTX 5090."""
-    graph = _projection_consumer_graph(weight_first)
+@pytest.mark.parametrize(("nest", "shape"), [(("t", "n"), (8, 32)), (("n", "t"), (32, 8))], ids=["tokens-outer", "features-outer"])
+def test_a_contraction_workspace_is_laid_out_in_its_consumers_nest_order(nest, shape) -> None:
+    """The workspace a cut contraction writes takes the nest order of the loops that read it, the coordinate the
+    consumer varies fastest last, whichever operand the cell reads first: a norm sweeping features inside tokens
+    stores the projection tokens-first. The cell here reads the weight first under either nest; laid out in that
+    read order (the normal form's statement order) the workspace was features-first under both, and an FP8
+    attention input's q and k projections were stored so, their norms reading the rows strided: three pieces
+    2.8x to 8.5x slower on an RTX 5090."""
+    graph = _projection_consumer_graph(nest)
     root = graph.nodes["out"]
     root.op = root.op.with_io(graph, root)
     match = Match(graph=graph, root_node_id=root.id, rule=Rule(name="test", pattern=[]))
     [seam] = [seam for seam in cuttable_seams(root.op) if seam.owned is None]
     arm = next(arm for arm in _CUT.rewrite(match, root) if dict(arm.knobs) == {seam.spelling: "cut"})
-    fragment = arm.materialize()
-    [workspace] = [tensor for node in fragment.nodes.values() if isinstance(node.op, TileOp) for tensor in node.outputs if tensor.name != "out"]
-    assert tuple(workspace.shape) == (8, 32), workspace
+    pieces = [node for node in arm.materialize().nodes.values() if isinstance(node.op, TileOp)]
+    [workspace] = [tensor for node in pieces for tensor in node.outputs if tensor.name != "out"]
+    assert tuple(workspace.shape) == shape, workspace
 
 
 def _offered(graph: Graph, *, frontend: bool = False) -> list[dict]:

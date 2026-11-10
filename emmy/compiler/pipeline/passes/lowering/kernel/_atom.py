@@ -1497,6 +1497,19 @@ def _mask_add(stmt, selects: dict, frags) -> tuple[Select, str] | None:
     return (selects[selected[0]], source[0]) if len(selected) == len(source) == 1 else None
 
 
+def _negated(node: Expression) -> Expression | None:
+    """The positive form of a negated term — ``-b`` as ``b``, ``(-c) * b`` as ``c * b`` — else ``None``."""
+    if node.operation is None:
+        return None
+    if node.operation.name == "negative":
+        return node.operands[0]
+    if node.operation.name == "multiply" and len(node.operands) == 2:
+        for i, factor in enumerate(node.operands):
+            if isinstance(factor, Literal) and factor.value < 0:
+                return apply("multiply", Literal(-factor.value, factor.dtype), node.operands[1 - i])
+    return None
+
+
 def _one_operation(stmts) -> list[Statement]:
     """``stmts`` with every ``Assign`` and ``Accum`` value one operation over names and literals: a nested operation
     node becomes a temp of its own, declared ahead, since a fragment program evaluates one operation at a time."""
@@ -1511,13 +1524,15 @@ def _one_operation(stmts) -> list[Statement]:
             if node.operation is None:
                 return node
             operation, children = node.operation.name, list(node.operands)
-            # A sum with a negated term is the subtraction of that term: ``a + (-b)`` is ``a - b`` to the bit, and
-            # one operation where the negation would be a second, under its own name, which the fragment memo that
-            # shares a weight between two channels would then not match.
-            negated = [i for i, child in enumerate(children) if child.operation is not None and child.operation.name == "negative"]
-            if operation == "add" and len(children) == 2 and negated:
-                i = negated[-1]
-                operation, children = "subtract", [children[1 - i], children[i].operands[0]]
+            # A sum with a negated term is the subtraction of that term's positive form: ``a + (-b)`` is ``a - b`` to
+            # the bit, as is ``a + (-c) * b`` to ``a - c * b``, and one operation where the negation would be a
+            # second under its own name, which the fragment memo that shares a weight between two channels would
+            # then not match. Only the one node is re-spelled: reassociating a sum would round differently.
+            if operation == "add" and len(children) == 2:
+                for i, child in reversed(list(enumerate(children))):
+                    if (positive := _negated(child)) is not None:
+                        operation, children = "subtract", [children[1 - i], positive]
+                        break
             operands = [leaf(child) for child in children]
             name = f"{stmt.name}__e{next(temps)}"
             out.append(Assign(name, apply(operation, *operands)))
