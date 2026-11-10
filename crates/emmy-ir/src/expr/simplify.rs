@@ -68,8 +68,10 @@ pub(super) fn simplify_binary(
             if int_zero(&right) {
                 return Ok(left);
             }
-            if index && let Some(recomposed) = fold_divmod_recompose(&left, &right, ctx)? {
-                return Ok(recomposed);
+            if index
+                && let Some(folded) = fold_digits(&Expression::binary(op, left.clone(), right.clone()), ctx)?
+            {
+                return Ok(folded);
             }
         }
         Operation::Subtract => {
@@ -78,6 +80,11 @@ pub(super) fn simplify_binary(
             }
             if left == right {
                 return Ok(Expression::int(0));
+            }
+            if index
+                && let Some(folded) = fold_digits(&Expression::binary(op, left.clone(), right.clone()), ctx)?
+            {
+                return Ok(folded);
             }
         }
         Operation::Multiply => {
@@ -113,6 +120,18 @@ pub(super) fn simplify_binary(
                 return Ok(rebuilt(this, op, left, right, orig_left, orig_right));
             }
             if let Some(n) = right.int_literal().filter(|n| *n > 1) {
+                // `(x % a) / n` is `(x / n) % (a / n)` when `n` divides `a`: the quotient's digits below `a`.
+                if let Some((x, a)) = int_remainder(&left)
+                    && a % n == 0
+                    && non_negative(x, ctx)
+                {
+                    return Expression::binary(
+                        Operation::Remainder,
+                        Expression::binary(Operation::Divide, x.clone(), right.clone()),
+                        Expression::int(a / n),
+                    )
+                    .simplify(ctx);
+                }
                 if let Some((inner_op, inner_left, inner_right)) = left.as_binary()
                     && inner_op.is_division()
                     && let Some(Lit { value, dtype }) = inner_right.as_literal()
@@ -152,6 +171,14 @@ pub(super) fn simplify_binary(
                 return Ok(rebuilt(this, op, left, right, orig_left, orig_right));
             }
             if let Some(n) = right.int_literal().filter(|n| *n > 1) {
+                // `(x % a) % n` is `x % n` when `n` divides `a`.
+                if let Some((x, a)) = int_remainder(&left)
+                    && a % n == 0
+                    && non_negative(x, ctx)
+                {
+                    return Expression::binary(Operation::Remainder, x.clone(), right.clone())
+                        .simplify(ctx);
+                }
                 if let Some((_, r)) = div_mod_decompose(&left, n, ctx)? {
                     return Ok(r);
                 }
@@ -329,75 +356,132 @@ pub(super) fn cancel_common_factors(
     Some(Expression::binary(op, new_left, new_right))
 }
 
-pub(super) fn addend_chain(e: &Expression, out: &mut Vec<Expression>) {
-    if let Some((Operation::Add, l, r)) = e.as_binary() {
-        addend_chain(l, out);
-        addend_chain(r, out);
-    } else {
-        out.push(e.clone());
+/// `e` as `x / d` (a true or floor quotient) by an integer literal `d > 1`: `(x, d)`.
+fn int_quotient(e: &Expression) -> Option<(&Expression, i64)> {
+    let (op, x, d) = e.as_binary()?;
+    let d = d.int_literal().filter(|d| *d > 1)?;
+    op.is_division().then_some((x, d))
+}
+
+/// `e` as `x % c` by an integer literal `c > 1`: `(x, c)`.
+fn int_remainder(e: &Expression) -> Option<(&Expression, i64)> {
+    let (op, x, c) = e.as_binary()?;
+    let c = c.int_literal().filter(|c| *c > 1)?;
+    (op == Operation::Remainder).then_some((x, c))
+}
+
+fn non_negative(e: &Expression, ctx: &SimplifyCtx) -> bool {
+    e.range(ctx).is_some_and(|range| range.lo >= 0)
+}
+
+/// The terms of a sum with their integer coefficients, through additions, subtractions, negations and integer
+/// literal factors.
+fn signed_terms(e: &Expression, sign: i64, out: &mut Vec<(i64, Expression)>) {
+    match e.operation() {
+        Some((Operation::Add, [a, b])) => {
+            signed_terms(a, sign, out);
+            signed_terms(b, sign, out);
+        }
+        Some((Operation::Subtract, [a, b])) => {
+            signed_terms(a, sign, out);
+            signed_terms(b, -sign, out);
+        }
+        Some((Operation::Negative, [a])) => signed_terms(a, -sign, out),
+        Some((Operation::Multiply, [a, b]))
+            if let Some((k, other)) = [(a, b), (b, a)]
+                .into_iter()
+                .find_map(|(k, other)| k.int_literal().map(|k| (k, other)))
+                && let Some(scaled) = sign.checked_mul(k) =>
+        {
+            signed_terms(other, scaled, out)
+        }
+        _ => out.push((sign, e.clone())),
     }
 }
 
-/// `e` as `(x <op> c) * a` (either `*` operand order, bare form `a = 1`), `op` among `ops`, `c` and `a` positive int
-/// literals: `(x, c, a)`.
-pub(super) fn scaled_term(e: &Expression, ops: &[Operation]) -> Option<(Expression, i64, i64)> {
-    let mut a = 1;
-    let mut e = e.clone();
-    let scaled = e.clone();
-    if let Some((Operation::Multiply, left, right)) = scaled.as_binary() {
-        for (lit_side, other) in [(right, left), (left, right)] {
-            if let Some(value) = lit_side.int_literal().filter(|v| *v > 0) {
-                a = value;
-                e = other.clone();
-                break;
-            }
+/// Two terms of a sum that are digits of one value, as the one term they make, with `x` proven non-negative where a
+/// rule takes a quotient of a quotient:
+///
+/// - `(c·k)·(y / c) + k·(y % c)` is `k·y`, where `y` is `x` or `x / b` and the quotient is `x / (b·c)`: a value's
+///   quotient and its next digit (`8·(i / 8) + i % 8` is `i`, `2·(i / 4) + (i / 2) % 2` is `i / 2`);
+/// - `(b·k)·((x / b) % c) + k·(x % b)` is `k·(x % (b·c))`: two low digits (`2·((i / 2) % 4) + i % 2` is `i % 8`);
+/// - `k·x - k·(x % c)` is `(c·k)·(x / c)`: a value less its low digit, rounded down (`i - i % 8` is `8·(i / 8)`).
+fn digit_pair(
+    (ka, a): &(i64, Expression),
+    (kb, b): &(i64, Expression),
+    ctx: &SimplifyCtx,
+) -> Option<(i64, Expression)> {
+    let (ka, kb) = (*ka, *kb);
+    if let Some((x, d)) = int_quotient(a)
+        && let Some((y, c)) = int_remainder(b)
+        && kb.checked_mul(c) == Some(ka)
+    {
+        if y == x && d == c {
+            return Some((kb, y.clone()));
+        }
+        if let Some((yx, bb)) = int_quotient(y)
+            && yx == x
+            && bb.checked_mul(c) == Some(d)
+            && non_negative(x, ctx)
+        {
+            return Some((kb, y.clone()));
         }
     }
-    if let Some((op, left, right)) = e.as_binary()
-        && ops.contains(&op)
-        && let Some(c) = right.int_literal().filter(|c| *c > 1)
+    if let Some((y, c)) = int_remainder(a)
+        && let Some((x, bb)) = int_quotient(y)
+        && let Some((x_low, b_low)) = int_remainder(b)
+        && x_low == x
+        && b_low == bb
+        && kb.checked_mul(bb) == Some(ka)
+        && non_negative(x, ctx)
+        && let Some(modulus) = bb.checked_mul(c)
     {
-        return Some((left.clone(), c, a));
+        return Some((
+            kb,
+            Expression::binary(Operation::Remainder, x.clone(), Expression::int(modulus)),
+        ));
+    }
+    if let Some((x, c)) = int_remainder(b)
+        && x == a
+        && kb == -ka
+        && non_negative(x, ctx)
+        && let Some(scale) = ka.checked_mul(c)
+    {
+        return Some((
+            scale,
+            Expression::binary(Operation::Divide, x.clone(), Expression::int(c)),
+        ));
     }
     None
 }
 
-/// Fold `(x / c) * (c·k) + (x % c) * k → x * k` inside an additive chain.
-pub(super) fn fold_divmod_recompose(
-    left: &Expression,
-    right: &Expression,
-    ctx: &SimplifyCtx,
-) -> Result<Option<Expression>> {
+/// `sum` with two of its terms that are digits of one value recombined (`digit_pair`), then simplified again so
+/// the next pair can meet; `None` when no two terms recombine.
+pub(super) fn fold_digits(sum: &Expression, ctx: &SimplifyCtx) -> Result<Option<Expression>> {
     let mut terms = Vec::new();
-    addend_chain(left, &mut terms);
-    addend_chain(right, &mut terms);
-    for (i, t1) in terms.iter().enumerate() {
-        let Some((x, c, a)) = scaled_term(t1, &[Operation::Divide, Operation::FloorDivide]) else {
-            continue;
-        };
-        if a % c != 0 {
-            continue;
-        }
-        let k = a / c;
-        for (j, t2) in terms.iter().enumerate() {
-            if j == i {
+    signed_terms(sum, 1, &mut terms);
+    for i in 0..terms.len() {
+        for j in 0..terms.len() {
+            if i == j {
                 continue;
             }
-            match scaled_term(t2, &[Operation::Remainder]) {
-                Some((rx, rc, rk)) if rx == x && rc == c && rk == k => {}
-                _ => continue,
-            }
-            let mut out = if k == 1 {
-                x.clone()
-            } else {
-                Expression::binary(Operation::Multiply, x.clone(), Expression::int(k))
+            let Some(merged) = digit_pair(&terms[i], &terms[j], ctx) else {
+                continue;
             };
-            for (pos, t) in terms.iter().enumerate() {
-                if pos != i && pos != j {
-                    out = Expression::binary(Operation::Add, out, t.clone());
-                }
-            }
-            return Ok(Some(out.simplify(ctx)?));
+            let rest = terms
+                .iter()
+                .enumerate()
+                .filter(|(at, _)| *at != i && *at != j)
+                .map(|(_, term)| term.clone());
+            let folded = std::iter::once(merged)
+                .chain(rest)
+                .map(|(k, e)| match k {
+                    1 => e,
+                    k => Expression::binary(Operation::Multiply, Expression::int(k), e),
+                })
+                .reduce(|sum, term| Expression::binary(Operation::Add, sum, term))
+                .unwrap_or_else(|| Expression::int(0));
+            return Ok(Some(folded.simplify(ctx)?));
         }
     }
     Ok(None)
@@ -787,6 +871,95 @@ mod tests {
         let s = e.simplify(&SimplifyCtx::empty()).unwrap();
         for v in 0..256 {
             assert_eq!(at(&e, v), at(&s, v), "mismatch at f={v}: {e} vs {s}");
+        }
+    }
+
+    /// `i` in `lo..hi` and `j` in `0..8`.
+    fn digits_ctx(lo: i128, hi: i128) -> SimplifyCtx {
+        SimplifyCtx::empty()
+            .extend("i", Interval::new(lo, hi - 1), None)
+            .extend("j", Interval::new(0, 7), None)
+    }
+
+    /// The value of `e` at every point of `i` in `lo..hi`, `j` in `0..8`, as the evaluator floors.
+    fn values(e: &Expression, lo: i64, hi: i64) -> Vec<Num> {
+        (lo..hi)
+            .flat_map(|i| (0..8).map(move |j| (i, j)))
+            .map(|(i, j)| {
+                e.eval(&HashMap::from([
+                    (Name::from("i"), Num::Int(i)),
+                    (Name::from("j"), Num::Int(j)),
+                ]))
+                .unwrap()
+            })
+            .collect()
+    }
+
+    /// Each pair is one value spelled two ways; the index simplifier gives both one spelling, which computes what
+    /// the spelling it came from computes everywhere in range.
+    #[test]
+    fn two_spellings_of_one_digit_value_simplify_alike() {
+        let ctx = digits_ctx(0, 64);
+        for (a, b) in [
+            ("2 * (i / 4) + (i / 2) % 2", "i / 2"),
+            ("4 * (i / 16) + (i / 4) % 4", "i / 4"),
+            ("(i % 8) / 2", "(i / 2) % 4"),
+            ("(i % 16) % 8", "i % 8"),
+            ("(i % 16) / 8", "(i / 8) % 2"),
+            ("2 * ((i / 2) % 4) + i % 2", "i % 8"),
+            ("4 * ((i / 4) % 2) + 2 * ((i / 2) % 2) + i % 2", "i % 8"),
+            ("i - i % 8", "8 * (i / 8)"),
+            ("i + j - i % 8", "8 * (i / 8) + j"),
+            ("-1 * (i % 8) + i", "8 * (i / 8)"),
+            ("3 * i - 3 * (i % 4)", "12 * (i / 4)"),
+        ] {
+            let (a, b) = (crate::expr::parse::parse(a).unwrap(), crate::expr::parse::parse(b).unwrap());
+            let (sa, sb) = (a.simplify(&ctx).unwrap(), b.simplify(&ctx).unwrap());
+            assert_eq!(sa, sb, "{a} and {b}");
+            assert_eq!(values(&sa, 0, 64), values(&a, 0, 64), "{a} became {sa}");
+        }
+    }
+
+    /// A minimum or maximum the ranges decide is the operand they pick, and one they leave open stays.
+    #[test]
+    fn a_minimum_the_ranges_decide_is_its_operand() {
+        let ctx = digits_ctx(0, 64);
+        for (spelling, simplified) in [
+            ("minimum(i, 63)", "i"),
+            ("maximum(0, i)", "i"),
+            ("minimum(j, 64)", "j"),
+            ("maximum(j, i)", "maximum(j, i)"),
+            ("minimum(i, 32)", "minimum(i, 32)"),
+        ] {
+            let e = crate::expr::parse::parse(spelling).unwrap();
+            assert_eq!(e.simplify(&ctx).unwrap(), crate::expr::parse::parse(simplified).unwrap(), "{e}");
+        }
+    }
+
+    /// Over a signed range a rule that needs a non-negative dividend is not taken, and what is taken stays exact.
+    #[test]
+    fn a_signed_dividend_keeps_its_digits() {
+        let ctx = digits_ctx(-16, 16);
+        for (spelling, kept) in [
+            ("(i % 8) / 2", true),
+            ("(i % 16) % 8", true),
+            ("2 * ((i / 2) % 4) + i % 2", true),
+            ("i - i % 8", true),
+        ] {
+            let e = crate::expr::parse::parse(spelling).unwrap();
+            let simplified = e.simplify(&ctx).unwrap();
+            assert_eq!(simplified == e, kept, "{e} became {simplified}");
+            assert_eq!(values(&simplified, -16, 16), values(&e, -16, 16), "{e} became {simplified}");
+        }
+    }
+
+    /// The digit rules are an index's: a value's quotient is a true division.
+    #[test]
+    fn a_value_keeps_its_digits() {
+        let ctx = digits_ctx(0, 64);
+        for spelling in ["(i % 8) / 2", "i - i % 8", "2 * ((i / 2) % 4) + i % 2", "minimum(i, 63)"] {
+            let e = crate::expr::parse::parse(spelling).unwrap();
+            assert_eq!(e.simplify_as(&ctx, ExprClass::Value).unwrap(), e, "{e}");
         }
     }
 }

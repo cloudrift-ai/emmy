@@ -1179,6 +1179,23 @@ impl Expression {
                 {
                     return Ok(operand.clone());
                 }
+                // An index's minimum or maximum that the ranges decide is the operand they pick.
+                if class == ExprClass::Index
+                    && let ElementwiseOp::Known(op @ (Operation::Minimum | Operation::Maximum)) = name
+                    && let [a, b] = &new[..]
+                    && let (Some(ra), Some(rb)) = (a.range(ctx), b.range(ctx))
+                {
+                    let (a_wins, b_wins) = match op {
+                        Operation::Minimum => (ra.hi <= rb.lo, rb.hi <= ra.lo),
+                        _ => (ra.lo >= rb.hi, rb.lo >= ra.hi),
+                    };
+                    if a_wins {
+                        return Ok(a.clone());
+                    }
+                    if b_wins {
+                        return Ok(b.clone());
+                    }
+                }
                 // An operation an index may hold (`maximum(1, 2)`, integer arithmetic) over integer literals is the
                 // integer the host computes — an index admits no float — except a quotient, whose inexact case is the
                 // field's class's to fold (`simplify_binary`).

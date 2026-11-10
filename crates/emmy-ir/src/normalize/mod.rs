@@ -488,6 +488,29 @@ for k in 0..3:
         );
     }
 
+    /// Two loads of one cell spelled with different digits of one index are one load in the normal form.
+    #[test]
+    fn two_digit_spellings_of_one_index_load_once() {
+        for (a, b) in [
+            ("2 * (i / 4) + (i / 2) % 2", "i / 2"),
+            ("(i % 8) / 2", "(i / 2) % 4"),
+            ("(i % 16) % 8", "i % 8"),
+            ("2 * ((i / 2) % 4) + i % 2", "i % 8"),
+            ("i - i % 8", "8 * (i / 8)"),
+            ("i + j - i % 8", "8 * (i / 8) + j"),
+            ("minimum(i, 63)", "i"),
+        ] {
+            let normal = normalize_uncached(&parse_body(&format!(
+                "for i in 0..64:\n    for j in 0..8:\n        a = load X[{a}]\n        b = load X[{b}]\n        \
+                 c = add(a, b)\n        O[i, j] = c"
+            ))
+            .unwrap())
+            .unwrap();
+            let listing = body_text(&normal).unwrap();
+            assert_eq!(listing.matches("load X").count(), 1, "{a} and {b}:\n{listing}");
+        }
+    }
+
     #[test]
     fn a_scaled_term_quotient_folds_through_a_larger_divisor() {
         // `(h*128 + c) / 1024` with `c < 128` is `h / 8`: the collapsed GQA-group index of a decode sweep.
