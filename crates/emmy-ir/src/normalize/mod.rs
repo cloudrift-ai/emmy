@@ -84,12 +84,7 @@ pub fn normalize_uncached(body: &Body) -> Result<Body> {
         }
         stmts = next;
     }
-    let mut lines = Vec::new();
-    crate::text::body_lines(&stmts, "  ", &mut lines)?;
-    Err(Error::Value(format!(
-        "the normal form did not settle in eight rounds:\n{}",
-        lines.join("\n")
-    )))
+    unsettled(&stmts, "the normal form")
 }
 
 /// The exact simplifications, then every value placed once; the three run until the first two leave a placed body
@@ -103,7 +98,7 @@ pub fn prepare_body(body: &Body) -> Result<Body> {
     stmts = inline_literals(&stmts);
     stmts = drop_unread_values(&stmts);
     let mut placed: Option<Body> = None;
-    loop {
+    for _ in 0..8 {
         let simplified = canonicalize_expressions(
             &drop_unread_values(&simplify_body(&inline_literals(
                 &merge_sibling_reduce_loops(&stmts)?,
@@ -117,6 +112,17 @@ pub fn prepare_body(body: &Body) -> Result<Body> {
         stmts = next.clone();
         placed = Some(next);
     }
+    unsettled(&stmts, "the merge, simplification and placement")
+}
+
+/// The error of a fixed point that did not settle in eight rounds, with the body it reached.
+fn unsettled(stmts: &Body, steps: &str) -> Result<Body> {
+    let mut lines = Vec::new();
+    crate::text::body_lines(stmts, "  ", &mut lines)?;
+    Err(Error::Value(format!(
+        "{steps} did not settle in eight rounds:\n{}",
+        lines.join("\n")
+    )))
 }
 
 fn with_bodies(stmt: &Arc<Statement>, bodies: Vec<Body>) -> Arc<Statement> {

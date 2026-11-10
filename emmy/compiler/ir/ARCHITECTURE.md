@@ -743,11 +743,13 @@ from that CSE form. Subroutine boundaries never limit fusion.
   A cross-CTA partition coordinate occupies the workspace's leading index, so the same rule keeps it outside the axes
   it partitions without a naming convention.
 
-- `fold_constants` — an operation whose operands are all literals (a literal is a `Let` binding a number at the
-  default precision) becomes the `Let` of the value it computes, at the statement's own dtype, so a rounding the
-  program performed still happens where it did and nothing computes past it; an untyped integer constant stays
-  untyped (the integer `0` of `x - x`), a float one is f32. With `x - x → 0` from the affine fold, the one-key
-  softmax weight `exp(s - s) / exp(s - s)` is the literal `1.0` and the product by it is `1.0 * v`.
+- `simplify_body` and `inline_literals` — an operation whose operands are all literals folds to the value it
+  computes, and an `Assign` whose value is a literal becomes a `Let` of it at the statement's own dtype, so a rounding
+  the program performed still happens where it did and nothing computes past it; an untyped integer constant stays
+  untyped (the integer `0` of `x - x`), a float one is f32. `inline_literals` spells a `Let` of a float literal at the
+  default precision, or of an integer literal with no declared width, into the expressions that read it, and the `Let`
+  goes once nothing reads it; a `Let` at another precision stays a binding. With `x - x → 0` from the affine fold, the
+  one-key softmax weight `exp(s - s) / exp(s - s)` is the literal `1.0` and the product by it is `1.0 * v`.
 - `fold_trivial_selects` — a `Select` whose branches all bind one value is a copy of it.
 - `drop_unread_values` — a pure statement whose values nothing reads is dropped, and a loop or branch left with
   no statement goes with it: the work reached no output. The one-key softmax weight leaves its whole score behind
@@ -815,18 +817,20 @@ from that CSE form. Subroutine boundaries never limit fusion.
   updated value — so the online softmax's rescale reads the old maximum beside the new one; a carried state orders
   nothing within its step, since a `Pre` reads the step before wherever it sits, while the loop that carries the state
   produces it. A scope whose bindings and reads wait on each other has no reading, and normalization refuses it.
-- Normalization runs its steps once and checks nothing. The steps that feed each other run to their own fixed
-  point where they sit: a value placed outside its loop can expose a sibling merge, two reads placement made one can
-  leave a predicate constant, and a merge exposes values to place, so the merge, the expression simplification and
-  placement run until the first two leave a placed body alone. The split feeds the steps ahead of it — a definition
-  it makes can be placed, and a region it joins can leave a value unread — so the steps run again after a split that
-  changed the body, and only then. The order runs last, once, with one exception: the unread-value drop reads by
-  name, and a cut can splice one cone twice under the same names, so a value only its namesake's readers kept alive
-  is unread only once the order has given every binding its own name. A body the order left such a value in goes
-  through the steps again. What keeps this honest is a test, not a loop: the normal form of every kernel a repository
-  golden or the realization corpus stores is one normalization leaves alone
-  (`tests/compiler/ir/stmt/implementation/test_normal_form_is_final.py`). A form that was not final would give two
-  spellings of one body two texts, and no error.
+- The driver repeats whole rounds until one leaves the body alone, and refuses a body that does not settle in eight.
+  Inside a round, the steps that feed each other run to their own fixed point where they sit: a value placed outside
+  its loop can expose a sibling merge, two reads placement made one can leave a predicate constant, and a merge
+  exposes values to place, so the merge, the expression simplification and placement run until the first two leave
+  a placed body alone, refused the same way after eight. The split feeds the steps ahead of it — a definition it
+  makes can be placed, and a region it joins can leave a value unread — so a split that changed the body starts the
+  round again. The order and the unread-value drop end a round: the drop reads by name, and a cut can splice one cone
+  twice under the same names, so a value only its namesake's readers kept alive is unread only once the order has
+  given every binding its own name. The order permutes and names, and a value's operand order reads the ranks it
+  gives, so one round can change what the next orders; the crate's `ARCHITECTURE.md` says why the rounds settle. A
+  test holds the stored forms to the same rule: the normal form of every kernel a repository golden or the
+  realization corpus stores is one normalization leaves alone
+  (`tests/compiler/ir/stmt/implementation/test_normal_form_is_final.py`), so a stored kernel never reads back as
+  another.
 - Legal motion and merging expose availability; equality alone never moves a value across a scope or an effect. This
   is scoped placement, not general partial redundancy elimination: separately executed sibling scopes and equality
   through mutable loop-carried state may remain, and loads are invalidated by writes to any element of their buffer.
