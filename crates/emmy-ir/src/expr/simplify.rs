@@ -5,7 +5,7 @@ use std::collections::HashMap;
 use std::hash::Hash;
 use std::sync::Arc;
 
-use super::{Expr, Expression, Lit, LitType, Num, Operation, apply_binop};
+use super::{Expr, ExprClass, Expression, Lit, LitType, Num, Operation, apply_binop};
 use crate::{Name, Result};
 
 use std::collections::BTreeMap;
@@ -45,10 +45,12 @@ pub(super) fn simplify_binary(
     left: &Expression,
     right: &Expression,
     ctx: &SimplifyCtx,
+    class: ExprClass,
 ) -> Result<Expression> {
     let (orig_left, orig_right) = (left, right);
-    let left = left.simplify(ctx)?;
-    let right = right.simplify(ctx)?;
+    let left = left.simplify_as(ctx, class)?;
+    let right = right.simplify_as(ctx, class)?;
+    let index = class == ExprClass::Index;
     if let (Some(l), Some(r)) = (left.as_literal(), right.as_literal())
         && let Some(folded) = fold_binop_literals(op, l, r)?
     {
@@ -66,7 +68,7 @@ pub(super) fn simplify_binary(
             if int_zero(&right) {
                 return Ok(left);
             }
-            if let Some(recomposed) = fold_divmod_recompose(&left, &right, ctx)? {
+            if index && let Some(recomposed) = fold_divmod_recompose(&left, &right, ctx)? {
                 return Ok(recomposed);
             }
         }
@@ -107,6 +109,9 @@ pub(super) fn simplify_binary(
             if int_zero(&left) {
                 return Ok(Expression::int(0));
             }
+            if !index {
+                return Ok(rebuilt(this, op, left, right, orig_left, orig_right));
+            }
             if let Some(n) = right.int_literal().filter(|n| *n > 1) {
                 if let Some((inner_op, inner_left, inner_right)) = left.as_binary()
                     && inner_op.is_division()
@@ -142,6 +147,9 @@ pub(super) fn simplify_binary(
             // a float's `x % 1` is its fraction, so an unranged value keeps it.
             if int_zero(&left) || (int_one(&right) && left.range(ctx).is_some()) {
                 return Ok(Expression::int(0));
+            }
+            if !index {
+                return Ok(rebuilt(this, op, left, right, orig_left, orig_right));
             }
             if let Some(n) = right.int_literal().filter(|n| *n > 1) {
                 if let Some((_, r)) = div_mod_decompose(&left, n, ctx)? {
@@ -189,10 +197,22 @@ pub(super) fn simplify_binary(
         }
         _ => {}
     }
+    Ok(rebuilt(this, op, left, right, orig_left, orig_right))
+}
+
+/// `this` over its simplified operands: itself when neither changed.
+fn rebuilt(
+    this: &Expression,
+    op: Operation,
+    left: Expression,
+    right: Expression,
+    orig_left: &Expression,
+    orig_right: &Expression,
+) -> Expression {
     if Arc::ptr_eq(&left.0, &orig_left.0) && Arc::ptr_eq(&right.0, &orig_right.0) {
-        return Ok(this.clone());
+        return this.clone();
     }
-    Ok(Expression::binary(op, left, right))
+    Expression::binary(op, left, right)
 }
 
 /// Flatten a tree of `*` into its non-int factors and its int coefficient.
