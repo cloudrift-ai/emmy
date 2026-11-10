@@ -863,6 +863,14 @@ floating dtypes, and leaves integer or
 varying division and explicit round-to-nearest f32 division alone. The latter protects FP4 encoding boundaries even
 under the default fast-math regime. Structural body normalization stays independent of arithmetic policy.
 
+`083_share_rescale_exponential` computes an online softmax's two rescale factors with one exponential. The recipe's
+advance (`SOFTMAX.advance`) gives each side of a pivot pair `exp` of its distance below `gn = maximum(g, g_o)`; one
+distance is `0`, so one exponential of the other gives both factors, and a select gives the factor of a side whose
+pivot is not finite (`-inf` gives `0`, NaN gives NaN). Every factor keeps the bits the two exponentials compute,
+whichever exponential and flush mode the kernel takes, so the rewrite is exact and runs always, with no knob. It
+reaches the per-element folds, the register and split merges, and a cooperative combine's merge. The recipe keeps
+both exponentials: it is Loop IR, which every attention kernel's identity reads.
+
 `085_fast_exp` follows the enabled `FAST_MATH` default, unless an explicit `FAST_EXP` pin overrides it. It lowers `exp`
 through `__expf`, promoting half inputs and rounding back afterward, and records the policy for idempotence. The rewrite
 reaches every expression a statement holds, so it includes the statements a field carries that are not a body: a
