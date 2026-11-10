@@ -793,18 +793,27 @@ from that CSE form. Subroutine boundaries never limit fusion.
   weight tensors symmetrically.
 - `place_values` — every pure value once, at the shallowest loop scope on its consumers' path that binds its
   coordinates and holds its operands. Values are told apart by number (the value numbering below): the same function
-  of the same coordinate expressions is one value whatever it is called, so a second computation a scope can already see
-  reads the first, a copy aliases its source, and a block without a side effect moves with everything it still holds.
-  This one step is loop-invariant motion, load and expression dedup, copy-alias elimination and common-branch motion:
-  a value both branches of a condition compute moves ahead of the condition, a branch alone never speculates. A read of
-  a buffer or carried state the body writes carries the version it read — the writes before it on its path, with a
-  loop's write counted on the back edge and a branch's not — so it never merges with a read of another version nor
-  moves above the write that made its own, and everything computed from it inherits the version. Stores, reductions,
-  seeds and carried updates stay where they are, an ordered execution protocol holds everything after it behind it,
-  and a binding rebound later represents no other value. Two seeded reductions of one value in one loop, each updated
-  once and read only after the loop, are one reduction. Division keeps its own rounding even when its denominator is
-  invariant; reciprocal multiplication is not a normalization. Names are distinct across scopes when it runs, as the
-  sequential renaming leaves them.
+  of the same coordinate expressions is one value whatever it is called, so a second computation a scope can already
+  see reads the first, a copy aliases its source, and a block without a side effect moves with everything it still
+  holds. This one step is loop-invariant motion, load and expression dedup, copy-alias elimination and common-branch
+  motion: a value both branches of a condition compute moves ahead of the condition, a branch alone never speculates.
+  A read of a buffer or carried state the body writes carries the version it read — the writes before it on its path,
+  with a loop's write counted on the back edge and a branch's not — so it never merges with a read of another version
+  nor moves above the write that made its own, and everything computed from it inherits the version. Stores,
+  reductions, seeds and carried updates stay where they are, an ordered execution protocol holds everything after it
+  behind it, and a binding rebound later represents no other value. Division keeps its own rounding even when its
+  denominator is invariant; reciprocal multiplication is not a normalization. Names are distinct across scopes when it
+  runs, as the sequential renaming leaves them.
+- `merge_congruent_states` — two carried states whose seeds agree and whose updates compute one value once the
+  states are assumed equal hold one value at every step, and are one state. `congruent_states` in the numbering finds
+  them: candidates are accumulators updated directly in a seeded loop and carried states, each defined by one
+  statement; groups start from the update's statement type, operation, dtype and scope, and split by their members'
+  update numbers, every grouped state numbered by its group, until no group splits (optimistic value numbering; groups
+  never come from names, and a body with no two candidates in one scope is not numbered again). Placement numbers the
+  group alike, so it merges the cones the members compute: the twin pivots and denominators of two online softmaxes
+  over one row become one pair. A member then goes when nothing reads it in its own scope but its update (a carried
+  state, read through `pre` the step before wherever it sits, always goes), its reads after the loop reading the
+  group's first member. Two seeded reductions of one value, each read only after the loop, are the simplest case.
 - `rename_ssa_sequential` — `Load` names become `in0, in1, …`, accumulator state becomes `acc0, …`, and
   every other definition becomes `v0, v1, …`, in lexical definition order. Names stay globally unique while each
   nested body tracks its own binders, so sibling scopes may reuse the same source spelling without collapsing. Scalar

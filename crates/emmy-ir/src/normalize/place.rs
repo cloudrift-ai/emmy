@@ -7,7 +7,7 @@ use std::sync::Arc;
 use super::with_bodies;
 use crate::body::{Body, free_names};
 use crate::expr::Expression;
-use crate::numbering::{Number, Numbering, Param, value_numbers};
+use crate::numbering::{Key, Number, Numbering, Param, value_numbers};
 use crate::order::{Site, is_protocol, site_kinds};
 use crate::statement::*;
 use crate::{Error, Name, Result};
@@ -94,7 +94,6 @@ struct Placer<'a> {
     binders: Vec<HashSet<Name>>,
     available: Vec<HashMap<PlaceKey, Vec<Name>>>,
     floor: Vec<usize>,
-    seeds: HashSet<Name>,
 }
 /// The statements a scope keeps, each pure value with the key it is available under.
 type Kept = Vec<(Arc<Statement>, Option<PlaceKey>)>;
@@ -176,7 +175,7 @@ impl Placer<'_> {
             .iter()
             .find_map(|scope| scope.get(key).cloned())
     }
-    fn walk(&mut self, body: &Body, depth: usize, seeded: bool) -> Result<Walked> {
+    fn walk(&mut self, body: &Body, depth: usize) -> Result<Walked> {
         let mut kept: Kept = Vec::new();
         let mut escaped: Vec<(usize, Arc<Statement>)> = Vec::new();
         let mut marks_here: Marks = BTreeSet::new();
@@ -186,7 +185,6 @@ impl Placer<'_> {
                 *counts.entry(name).or_default() += 1;
             }
         }
-        let uses = body.ssa_uses();
         // A carried state read ahead of its update in this scope is the previous step's: it lives here. The order's
         // reading of an update site is the one reading: a leaf, or a block holding the update under a condition or
         // inside a map loop of the step.
@@ -274,23 +272,6 @@ impl Placer<'_> {
                 }
                 continue;
             }
-            if let Statement::Accum(a) = &**stmt {
-                let reduction = seeded
-                    && counts.get(&a.name).copied().unwrap_or(0) == 1
-                    && !uses.contains(&a.name)
-                    && !self.seeds.contains(&a.name);
-                if reduction && let Some(names) = self.available[depth].get(&key).cloned() {
-                    self.alias.insert(a.name, names[0]);
-                    self.settle(std::slice::from_ref(&a.name), depth, &marks);
-                    continue;
-                }
-                if reduction {
-                    self.available[depth].insert(key.clone(), vec![a.name]);
-                }
-            }
-            if let Statement::Init(i) = &**stmt {
-                self.seeds.insert(i.name);
-            }
             for name in stmt.external_writes() {
                 self.bump(&name, depth);
             }
@@ -328,22 +309,17 @@ impl Placer<'_> {
                 self.bump(name, depth + 1);
             }
         }
-        let (scope, seed) = match &**stmt {
-            Statement::Loop(l) => (true, l.seed),
-            Statement::StridedLoop(l) => (true, l.seed),
-            _ => (false, false),
-        };
+        let scope = matches!(&**stmt, Statement::Loop(_) | Statement::StridedLoop(_));
         self.binders.push(stmt.binds_axes().into_iter().collect());
         self.floor
             .push(if scope { self.floor[depth] } else { depth + 1 });
-        let seeded = scope && seed;
         let entered = self.version.clone();
         let mut children: Vec<Walked> = Vec::new();
         for child in &nested {
             // Each child is its own scope, and each branch of a condition starts from the versions ahead of it.
             self.version = entered.clone();
             self.available.push(HashMap::new());
-            let walked = self.walk(child, depth + 1, seeded)?;
+            let walked = self.walk(child, depth + 1)?;
             children.push(walked);
             self.available.pop();
         }
@@ -443,9 +419,21 @@ impl Placer<'_> {
 /// Place every pure value once, at the shallowest loop scope on its consumers' path that binds its coordinates and
 /// holds its operands; a second computation of a value a scope can already see reads the first instead.
 pub fn place_values(body: &Body) -> Result<Body> {
+    place_values_keyed(body, &HashMap::new())
+}
+
+/// [`place_values`] with the carried states `states` names numbered under its keys rather than their names: a read of
+/// any member of a group of congruent states (`congruent_states`) is the same value, so placement merges the cones
+/// the members compute.
+pub fn place_values_keyed(body: &Body, states: &HashMap<Name, Key>) -> Result<Body> {
     let numbering = value_numbers(
         body,
-        &crate::numbering::spelled_key,
+        &|name| {
+            states
+                .get(name)
+                .cloned()
+                .unwrap_or_else(|| crate::numbering::spelled_key(name))
+        },
         crate::numbering::Chains::Flat,
     );
     let mut written: HashSet<Name> = HashSet::new();
@@ -466,9 +454,8 @@ pub fn place_values(body: &Body) -> Result<Body> {
         binders: vec![HashSet::new()],
         available: vec![HashMap::new()],
         floor: vec![0],
-        seeds: HashSet::new(),
     };
-    let (kept, escaped, _) = placer.walk(body, 0, false)?;
+    let (kept, escaped, _) = placer.walk(body, 0)?;
     debug_assert!(escaped.is_empty());
     Ok(body.rebuilt(kept.into_iter().map(|(stmt, _)| stmt).collect()))
 }
@@ -1037,32 +1024,6 @@ mod tests {
         assert!(inner_b.stmts().iter().any(
             |stmt| matches!(&**stmt, Statement::Assign(a) if reads(&a.value) == ["accc", "x"])
         ));
-    }
-
-    #[test]
-    fn folded_reduction_is_read_at_its_representatives_scope() {
-        // Two seeded reductions of one value in one loop are one reduction: the second's name aliases the first.
-        // A read of that name after the loop sees the first's scope, not the loop body the dropped update sat in.
-        let out = placed(
-            "
-            for a in 0..4:
-                for b in 0..4:
-                    x = load X[a, b]
-                    acc1 <- add(acc1, x)
-                    y = load X[a, b]
-                    acc2 <- add(acc2, y)
-                v = add(acc1, acc2)
-                Y[a] = v
-            ",
-        );
-        assert_eq!(loop_axes(&out), ["a"]);
-        let inner_a = inner(&out.stmts()[0]);
-        assert_eq!(statement_types(&inner_a), ["Loop", "Assign", "Write"]);
-        assert_eq!(accum_names(&inner(&inner_a.stmts()[0])), ["acc1"]);
-        let Statement::Assign(read) = &*inner_a.stmts()[1] else {
-            unreachable!()
-        };
-        assert_eq!(read.value.text(), "acc1 + acc1");
     }
 
     #[test]

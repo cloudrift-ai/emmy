@@ -10,6 +10,7 @@ use crate::body::{Body, MemoKey};
 use crate::dtype::DType;
 use crate::expr::{Expression, Interval, SimplifyCtx};
 use crate::memo::{BODY_MEMO_WEIGHT, Memo};
+use crate::numbering::{congruent_states, group_keys};
 use crate::order::topological_sort;
 use crate::statement::*;
 use crate::{Error, Name, Result};
@@ -108,7 +109,8 @@ pub fn prepare_body(body: &Body) -> Result<Body> {
         if placed.as_ref() == Some(&simplified) {
             return Ok(simplified);
         }
-        let next = place_values(&simplified)?;
+        let groups = congruent_states(&simplified);
+        let next = merge_congruent_states(&place_values_keyed(&simplified, &group_keys(&groups))?, &groups);
         stmts = next.clone();
         placed = Some(next);
     }
@@ -143,6 +145,7 @@ fn assign(name: &Name, value: Expression, dtype: Option<DType>) -> Arc<Statement
 
 pub mod axes;
 pub mod canonical;
+pub mod congruent;
 pub mod definitions;
 pub mod fold;
 pub mod place;
@@ -152,6 +155,7 @@ pub mod ties;
 
 pub use axes::*;
 pub use canonical::*;
+pub use congruent::*;
 pub use definitions::*;
 pub use fold::*;
 pub use place::*;

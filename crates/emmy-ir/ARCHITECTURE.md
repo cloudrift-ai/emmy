@@ -127,20 +127,21 @@ line.
 ## Numbering, identity, normalization
 
 `numbering/values.rs` is the value numbering (`value_numbers`); `digest.rs` the scope-tree hash, the use-keyed buffer
-roles and the digest. Statements are keyed by their position in the body they sit in (a `StmtRef`), so a body that
-holds one statement object twice numbers it twice and nothing is copied first; digest material is a `Key` tree hashed
-with BLAKE3 (`Number`, 128 bits), and every order among ties is by `Key`'s total order. The operands of a commutative
-operation that share a number take the order whose layout key is least under a bounded search: every order is tried
-while the groups allow at most 7! of them, generated in place, and a larger operation (an unrolled window sum over
-eight or more shifted reads, which the full search never finished) takes the order built position by position:
-canonical and independent of the input order like the full search's, but not always its minimum. `identity.rs`
-memoizes the identity per body and per coloring. `normalize/` holds the steps and the driver `normalize_body`;
-`canonical_order` and `place_values` are the two steps that read the numbering, and the order ranks a product's
-operands through the statement objects it permuted. A commutative node's two sides enter the digest in content order
-(an operand's whole value, its number with its parameters), keyed twice: once to learn the order on state rolled back,
-once in it, so a parameter or buffer first met inside the node takes the index the content gives it. Two loads of one
-buffer that tie on rank order the normal form by their names, and the identity stays the same whatever the buffers are
-called.
+roles and the digest; `congruence.rs` the congruent carried states (`congruent_states`), numbered with every grouped
+state keyed by its group until the groups hold. Statements are keyed by their position in the body they sit in (a
+`StmtRef`), so a body that holds one statement object twice numbers it twice and nothing is copied first; digest
+material is a `Key` tree hashed with BLAKE3 (`Number`, 128 bits), and every order among ties is by `Key`'s total
+order. The operands of a commutative operation that share a number take the order whose layout key is least under a
+bounded search: every order is tried while the groups allow at most 7! of them, generated in place, and a larger
+operation (an unrolled window sum over eight or more shifted reads, which the full search never finished) takes the
+order built position by position: canonical and independent of the input order like the full search's, but not always
+its minimum. `identity.rs` memoizes the identity per body and per coloring. `normalize/` holds the steps and the
+driver `normalize_body`; `canonical_order`, `place_values` and `merge_congruent_states` are the steps that read the
+numbering, and the order ranks a product's operands through the statement objects it permuted. A commutative node's
+two sides enter the digest in content order (an operand's whole value, its number with its parameters), keyed twice:
+once to learn the order on state rolled back, once in it, so a parameter or buffer first met inside the node takes the
+index the content gives it. Two loads of one buffer that tie on rank order the normal form by their names, and the
+identity stays the same whatever the buffers are called.
 
 ## Memos
 
