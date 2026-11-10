@@ -461,6 +461,16 @@ impl PyExpression {
             .map(|interval| PyInterval { interval }))
     }
 
+    /// The exact integer range over the context's ranges, every point of the domain evaluated; `None` when a free
+    /// name has no range or the domain holds more than `cap` points.
+    fn exact_range(&self, ctx: &Bound<'_, PyAny>, cap: u128) -> PyResult<Option<PyInterval>> {
+        Ok(self
+            .expr
+            .exact_range(&ctx_from_py(ctx)?, cap)
+            .py()?
+            .map(|interval| PyInterval { interval }))
+    }
+
     /// The structural form: an expression's identity is its text.
     fn structural_form(&self) -> PyResult<String> {
         self.expr.try_text().py()
