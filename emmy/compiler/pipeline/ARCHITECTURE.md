@@ -1609,7 +1609,9 @@ The other five are one knob per instruction class, each picking the instruction 
 `FAST_EXP` swaps libm `expf` for `__expf` (`lowering/kernel/085_fast_exp`); `FAST_DIV` picks approximate division
 and reciprocal, and is the one home of multiplying by a reciprocal (`lowering/kernel/040_split_invariant_divides`);
 `FAST_SQRT` the approximate square root; `FLUSH_TO_ZERO` flushes subnormals; `CONTRACT_FMA` fuses a multiply and an
-add. Through nvcc each class is a flag (`backend.cuda.nvcc.precision_flags`): `--use_fast_math` when the umbrella and
+add. `FAST_EXP` with `FLUSH_TO_ZERO` off is the fast exponential that keeps subnormal results: ptxas lowers the
+non-flushing `ex2.approx.f32` under `__expf` to one hardware exponential on a halved argument and a squaring of its
+result, as accurate there as an explicit shift and scale. Through nvcc each class is a flag (`backend.cuda.nvcc.precision_flags`): `--use_fast_math` when the umbrella and
 `FAST_EXP` are both on — the flag also approximates exp and the transcendental functions no knob names (log, sine,
 cosine, tanh, pow), and nothing after it restores the accurate exp — then `--ftz` / `--prec-div` / `--prec-sqrt` /
 `--fmad` for each decision that base does not imply. At their defaults the new classes spell nothing, so the flags,

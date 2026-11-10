@@ -3,8 +3,9 @@
 One knob per instruction class: a class takes its approximate instruction exactly when its own knob is on (by its pin,
 or by the ``FAST_MATH`` umbrella it follows), and that instruction stays inside the bound the CUDA Programming Guide
 documents for it. Every bound is in units in the last place (ulp) of the f32 result, against a float64 host value.
-The approximate exponential is ``__expf``; through nvcc every other class is a compiler flag
-(``backend.cuda.nvcc.precision_flags``), so these tests are what pins that a flag picks the instruction it names.
+The approximate exponential is ``__expf``, which keeps subnormal results unless flush to zero is on; through nvcc every
+other class is a compiler flag (``backend.cuda.nvcc.precision_flags``), so these tests are what pins that a flag picks
+the instruction it names.
 """
 
 from __future__ import annotations
@@ -22,6 +23,7 @@ from tests.compiler.helpers import requires_cuda
 pytestmark = requires_cuda
 
 _N = 1 << 16
+#: The inputs the class table draws at import; each test of its own draws from its own generator, in any order.
 _RNG = np.random.default_rng(0)
 
 
@@ -120,7 +122,8 @@ def test_a_class_takes_its_approximate_instruction_under_its_own_knob(name, pins
 def test_flush_to_zero_flushes_exactly_the_subnormal_results(pins, flush) -> None:
     """A product is exact on the device but where it is subnormal: flushed to zero under ``FLUSH_TO_ZERO``, kept
     exact without it."""
-    x = (_RNG.uniform(1, 2, _N) * 2.0 ** _RNG.integers(-130, -100, _N)).astype(np.float32)
+    rng = np.random.default_rng(1)
+    x = (rng.uniform(1, 2, _N) * 2.0 ** rng.integers(-130, -100, _N)).astype(np.float32)
     scale = np.full(_N, 2.0**-20, np.float32)
     got = _run([("multiply", ["x", "scale"])], {"x": x, "scale": scale}, pins)
     want = x.astype(np.float64) * scale
@@ -147,3 +150,32 @@ def test_contraction_rounds_a_multiply_add_once(pins, fused) -> None:
     c = np.full(_N, -(1 + 2.0**-11), np.float32)
     got = _run([("multiply", ["a", "b"]), ("add", ["s0", "c"])], {"a": a, "b": a, "c": c}, pins)
     np.testing.assert_array_equal(got, 2.0**-24 if fused else 0.0)
+
+
+# --------------------------------------------------------------------------- #
+# The fast exponential on subnormal results
+# --------------------------------------------------------------------------- #
+
+
+@pytest.mark.parametrize(
+    ("pins", "flush"),
+    [({"FAST_MATH": True}, True), ({"FAST_MATH": True, "FLUSH_TO_ZERO": False}, False), ({"FAST_MATH": False, "FAST_EXP": True}, False)],
+    ids=["umbrella", "umbrella-less-flush", "own-knob"],
+)
+def test_the_fast_exponential_keeps_subnormal_results_unless_they_flush(pins, flush) -> None:
+    """``__expf`` without flush to zero keeps a subnormal result: ptxas lowers its ``ex2.approx.f32`` to one hardware
+    exponential on a halved argument and a squaring, so the arm of the exponential knob that keeps subnormals is
+    ``FAST_EXP`` with ``FLUSH_TO_ZERO`` off. It stays inside the bound of ``__expf``, a subnormal's ulp being the
+    smallest subnormal; with flush to zero every subnormal result is zero."""
+    x = np.random.default_rng(2).uniform(-103, -80, _N).astype(np.float32)
+    want = np.exp(x.astype(np.float64))
+    got = _run([("exp", ["x"])], {"x": x}, pins)
+    subnormal = want < 2.0**-126
+    assert subnormal.any() and (~subnormal).any()
+    ulp = _ulp(got, want)
+    within = ulp <= 2 + np.floor(np.abs(1.173 * x))
+    # Under flush to zero, a result within the instruction's error of the smallest normal may flush or not.
+    clear = np.abs(want / 2.0**-126 - 1) > 1e-4 if flush else np.ones(_N, bool)
+    normal = ~subnormal & clear
+    assert within[normal].all() and ulp[normal].max() > 2, "the approximate exponential was not taken"
+    assert (got[subnormal & clear] == 0).all() if flush else within[subnormal].all()
