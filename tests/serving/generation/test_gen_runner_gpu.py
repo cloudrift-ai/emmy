@@ -398,6 +398,36 @@ def test_moe_fixed_slot_combine_matches_routed_oracle(built):
             torch.testing.assert_close(got, ref, rtol=1e-4, atol=1e-5)
 
 
+def test_sliced_experts_run_a_decode_step_through_the_decode_bucket_slot_program():
+    """On experts sliced across ranks a decode step up to the bucket rides the fixed slots, and every row's picks go
+    through ONE launch of the slot program built at the bucket's width (``slot_rows``), each row against its own picks,
+    instead of one launch per row. The rows past the step's keep an earlier step's picks and inputs and no row reads
+    their partials: steps of several widths, back to back, each match the routed oracle."""
+    import torch
+
+    from emmy.compiler.backend.plan_cache import PlanTemplateCache
+    from emmy.serving.gen_runner import EmmyGenRunner
+
+    make_model, kwargs = helpers.RUNNERS["olmoe.l2.b16"]
+    model = make_model()
+    # The lane golden holds no program at the bucket's width: the prior picks it beside the golden's rows.
+    with helpers.evidence_scope(strict=False):
+        runner = EmmyGenRunner.from_model(model, plan_cache=PlanTemplateCache(), expert_slices=2, **kwargs)
+    runner._ensure_device()
+    bucket, k = kwargs["decode_bucket"], model.config.num_experts_per_tok
+    assert runner.moe_slot_width == bucket
+    assert runner._slot_rows_partials.shape == (bucket, k, model.config.hidden_size)
+    assert all(m["slot_rows"] is not None for m in runner._moe)
+
+    torch.manual_seed(1)
+    for layer, rows in ((0, bucket), (0, 3), (1, 5), (1, 2)):
+        moe = runner._moe[layer]
+        xn = torch.randn(rows, model.config.hidden_size, device="cuda")
+        got = runner._moe_combine_slots(moe, xn)
+        assert got.shape == xn.shape
+        torch.testing.assert_close(got, runner._moe_combine(moe, xn), rtol=1e-4, atol=1e-5)
+
+
 def test_paged_experts_combine_identically_and_keep_the_budget(monkeypatch, built, build_runner):
     """``EMMY_GEN_EXPERTS_GPU`` below the expert count pages the experts: a token's picks of the budget are device
     slots and the rest resident experts, the first ones, which stay on the device with no host copy. The other
