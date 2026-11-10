@@ -23,6 +23,12 @@ jobs:
       OPENAI__API_BASE: ${{ vars.CLOUDRIFT_INFERENCE_URL || 'https://inference.cloudrift.ai/v1' }}
       CONFIG__MODEL: ${{ format('openai/{0}', vars.ONBOARD_AGENT_MODEL || 'deepseek-ai/DeepSeek-V4-Flash-0731') }}
       CONFIG__FALLBACK_MODELS: '[]'
+      # Stream the review. A non-streaming request returns nothing until the whole answer is generated, and a
+      # reasoning model takes longer than PR Agent's 120 s wait. PR Agent streams only for a named provider whose
+      # endpoint matches one of the substrings, so the substring is the endpoint itself.
+      LITELLM__CUSTOM_LLM_PROVIDER: openai
+      LITELLM__FORCE_STREAMING_CUSTOM_LLM_PROVIDER: openai
+      LITELLM__FORCE_STREAMING_API_BASE_SUBSTRINGS: ${{ format('["{0}"]', vars.CLOUDRIFT_INFERENCE_URL || 'https://inference.cloudrift.ai/v1') }}
       CONFIG__CUSTOM_MODEL_MAX_TOKENS: '128000'
       CONFIG__MAX_MODEL_TOKENS: '128000'
       CONFIG__PATCH_EXTRA_LINES_BEFORE: '10'
