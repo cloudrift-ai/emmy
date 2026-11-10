@@ -1185,6 +1185,12 @@ def _canonical_slots(body: Body, placeholders: int) -> tuple[object, tuple[int, 
     return best
 
 
+def _depth(expression: Expression, axes: tuple) -> int:
+    """How deep in the loop nest ``expression`` varies: the position of the innermost axis it reads."""
+    position = {axis.name: index for index, axis in enumerate(axes)}
+    return max((position[name] for name in expression.free_vars() if name in position), default=-1)
+
+
 def _group_contractions(seams: list[CutSite], axes: tuple) -> tuple[tuple[CutSite, ...], list[CutSite]]:
     """ONE seam per contraction: every channel that computes the same contraction — the same input cone, weight and
     reduction once its free operand indices are abstracted — shares one workspace laid out in the contraction's own
@@ -1205,9 +1211,12 @@ def _group_contractions(seams: list[CutSite], axes: tuple) -> tuple[tuple[CutSit
             groups.setdefault(key, []).append((index, position, expressions, ranges, slots))
     built = []
     for members in groups.values():
-        # The workspace is laid out in the first member's order; every other member reads it through the slots
-        # its own placeholders share with the first's.
-        first = members[0][4]
+        # The workspace is laid out in the order the first member's cell reads it, the coordinate it varies fastest
+        # last, so that consumer reads its rows contiguously; every other member reads it through the slots its own
+        # placeholders share with the first's. Not the order the lowered body names the operands in: that is the
+        # normal form's statement order, which a spelling change moves.
+        _, _, first_expressions, _, first_slots = members[0]
+        first = tuple(first_slots[i] for i in sorted(range(len(first_slots)), key=lambda i: _depth(first_expressions[i], axes)))
         members = [
             (index, position, tuple(expressions[slots.index(slot)] for slot in first), tuple(ranges[slots.index(slot)] for slot in first))
             for index, position, expressions, ranges, slots in members
