@@ -384,7 +384,7 @@ impl Placer<'_> {
         let exported: Vec<Name> = built
             .nested()
             .iter()
-            .flat_map(|child| child.carried_names().to_vec())
+            .flat_map(|child| child.defined_states().to_vec())
             .collect();
         let mut where_ = depth;
         if !stmt.has_side_effects() && !members.iter().any(|m| matches!(**m, Statement::Carry(_))) {

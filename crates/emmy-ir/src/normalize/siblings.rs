@@ -127,30 +127,6 @@ pub fn unify_siblings(body: &Body) -> Result<Body> {
     Ok(body.rebuilt(stmts))
 }
 
-/// The names a loop over `body` still binds after it closes.
-pub(crate) fn carried_out(body: &Body) -> HashSet<Name> {
-    let mut out: HashSet<Name> = body
-        .stmts()
-        .iter()
-        .filter_map(|s| match &**s {
-            Statement::Accum(a) => Some(a.name),
-            _ => None,
-        })
-        .collect();
-    for stmt in body.stmts() {
-        match &**stmt {
-            Statement::Loop(l) if !l.seed => out.extend(carried_out(&l.body)),
-            Statement::StridedLoop(l) if !l.seed => out.extend(carried_out(&l.body)),
-            Statement::Cond(c) => {
-                out.extend(carried_out(&c.body));
-                out.extend(carried_out(&c.else_body));
-            }
-            _ => {}
-        }
-    }
-    out
-}
-
 /// `body` with each name in `clashing` renamed to one neither side spells.
 pub(crate) fn rename_apart(body: &Body, clashing: &HashSet<Name>, taken: &HashSet<Name>) -> Body {
     let mut used: HashSet<Name> = body.definitions().keys().cloned().collect();
@@ -222,7 +198,7 @@ pub(crate) fn merge_sibling_reduce_loops_here(body: &Body) -> Body {
                 .intersection(&incoming.definitions().keys().cloned().collect())
                 .cloned()
                 .collect();
-            if !clashing.is_disjoint(&carried_out(&incoming)) {
+            if !clashing.is_disjoint(&incoming.escaping_states()) {
                 continue;
             }
             // The statements between the loops that the incoming loop waits on — by a name, a buffer's version, an

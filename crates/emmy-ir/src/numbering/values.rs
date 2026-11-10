@@ -562,7 +562,7 @@ impl Context<'_> {
     }
 
     fn visit(&mut self, body: &Body) {
-        self.carried.extend(body.carried_names().iter().cloned());
+        self.carried.extend(body.defined_states().iter().cloned());
         for index in 0..body.len() {
             let here = body.at(index);
             let stmt = here.stmt().clone();
@@ -773,7 +773,7 @@ impl Context<'_> {
                     }
                     let mut exported: Vec<(Name, Value)> = Vec::new();
                     for child in stmt.nested() {
-                        for name in child.carried_names() {
+                        for name in child.defined_states() {
                             if let Some(value) = self.env.get(name) {
                                 exported.push((*name, value.clone()));
                             }

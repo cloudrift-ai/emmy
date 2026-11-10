@@ -5,7 +5,7 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use super::ties;
-use super::{carried_out, unify_siblings, with_bodies};
+use super::{unify_siblings, with_bodies};
 use crate::body::{Body, free_names, unique};
 use crate::elementwise::{AffineRole, Operation};
 use crate::expr::{Expr, ExprClass, Expression, LitType};
@@ -75,7 +75,7 @@ impl SequentialScope {
         // A scalar accumulator is declared beside its own reduce loop, not beside every ancestor loop.
         let mut exported: Vec<Name> = Vec::new();
         for child in &children {
-            let scalar = carried_out(child);
+            let scalar = child.escaping_states();
             for here in child.of_types(&[StatementType::Accum, StatementType::Carry]) {
                 match &**here.stmt() {
                     Statement::Carry(c) => exported.push(c.name),
