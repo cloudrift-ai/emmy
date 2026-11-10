@@ -297,9 +297,10 @@ def capture_twin_graphs(
     ``expert_slices`` is the serving tensor-parallel width: each rank holds that slice of every routed expert and
     of a Qwen4Exp shared expert (:func:`~emmy.compiler.trace.huggingface.slice_routed_experts`), so the expert and
     post twins are the sliced programs serving compiles, and the fixed-slot program is also traced at ``slot_width``
-    rows (the decode bucket), which a decode step of sliced experts rides. ``verify_width`` is a speculative verify step's widest request: a GDN layer
-    then also traces the programs that keep each row's state (``gdn3rows``) at widths 1 to it, and a checkpoint with
-    a multi-token-prediction head traces its prologue (``mtp-prologue-sym``); the head's layer is a full-attention
+    rows (the decode bucket), which a decode step of sliced experts rides. ``verify_width`` is a speculative verify
+    step's widest request: a GDN layer then also traces the programs that keep each row's state (``gdn3rows``) at
+    widths 1 to it, and a checkpoint with a multi-token-prediction head traces its prologue (``mtp-prologue-sym``);
+    the head's layer is a full-attention
     layer of the trunk's shape, whose twins the trunk's carry, unless a coded checkpoint stores the head dense: its
     layer then has twins of its own (``pre16-mtp``). A checkpoint whose output head serving keeps coded
     (NVFP4, untied, one rank) adds the head program (``head-sym``), and an untied table ``embed_gpu`` pages (fewer
