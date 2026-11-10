@@ -1,8 +1,9 @@
 # Fill in a hardware golden's missing measurements on its own card: every proposal row (no Emmy time) and every
 # target with no torch.compile time, as `emmy golden list --missing` names them. The nightly refresh picks one file
 # whose card CloudRift can rent, runs this row with `--filter golden=PATH`, and commits the returned working.json over
-# the file. A row that fails to record is listed in failed.txt and stays missing; the run stops starting rows when
-# `budget_s` is spent, so a large file fills over several nights.
+# the file. `fill.sh` records the rows with a schedule first, each as an isolated record of its own kernel, then the
+# whole targets; a row that fails to record is listed in failed.txt and stays missing, and the run stops starting rows
+# when `budget_s` is spent, so a large file fills over several nights.
 command:
   stage:
     - emmy
@@ -12,6 +13,7 @@ command:
     - Makefile
     - Cargo.toml
     - Cargo.lock
+    - .github/golden-fill/fill.sh
   run: |
     set -uo pipefail
     export PATH=$$HOME/.cargo/bin:/usr/local/cuda/bin:$$PATH
@@ -22,31 +24,7 @@ command:
     [ -d venv ] || make setup || exit 1
     export EMMY_TUNE_DB=$task_dir/autotune.db EMMY_CUBIN_CACHE=$task_dir/cubins EMMY_NVCC_FLAGS=
     export CUDA_VISIBLE_DEVICES="$gpu_device_ids"
-    cp "$golden" $task_dir/working.json
-    : > $task_dir/failed.txt
-    ./venv/bin/emmy golden list $task_dir/working.json --missing --json $task_dir/missing.json || exit 1
-    deadline=$$((SECONDS + $budget_s))
-    jq -c '.[]' $task_dir/missing.json | while IFS= read -r entry; do
-      if [ "$$SECONDS" -ge "$$deadline" ]; then
-        echo "budget spent; the remaining rows stay missing"
-        break
-      fi
-      row=$$(jq -r .row <<< "$$entry")
-      knobs=$$(jq -r '.knobs // {} | to_entries | map("\(.key)=\(.value)") | join(",")' <<< "$$entry")
-      lane=$$(jq -r 'if .pins.FAST_MATH == null then "" elif .pins.FAST_MATH then "1" else "0" end' <<< "$$entry")
-      lane_env=()
-      [ -n "$$lane" ] && lane_env=(EMMY_FAST_MATH="$$lane")
-      case "$$(jq -r '"\(.missing) \(.piece)"' <<< "$$entry")" in
-        "emmy false") record=(env "$${lane_env[@]}" EMMY_KNOBS="PLACE=fuse,$$knobs" ./venv/bin/emmy run --record-greedy) ;;
-        "emmy true") record=(env "$${lane_env[@]}" EMMY_KNOBS="$$knobs" ./venv/bin/emmy run --pin-route --record-greedy) ;;
-        *) record=(env "$${lane_env[@]}" ./venv/bin/emmy run --record) ;;
-      esac
-      if ! timeout 1800 "$${record[@]}" --golden $task_dir/working.json --realization "$$row" --bench </dev/null \
-        >> $task_dir/fill.log 2>&1; then
-        echo "$$row" >> $task_dir/failed.txt
-      fi
-    done
-    ./venv/bin/emmy golden list $task_dir/working.json --missing --json $task_dir/still_missing.json
+    bash .github/golden-fill/fill.sh "$golden" $task_dir $budget_s
   result_files:
     - working.json
     - missing.json

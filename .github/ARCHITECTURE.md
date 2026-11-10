@@ -91,8 +91,12 @@ The fill job measures what a hardware golden is missing on its own card. `emmy g
 proposal row and each target with no `torch.compile` time; `emmy vm available` says which of those cards CloudRift can
 rent now; `fill_choice.jq` takes the file with the most missing rows among them, and the job skips when nothing is
 missing or no card is free. `emmy bench` then runs `.github/golden-fill/recipe.yaml` on the rented card — one row per
-hardware golden, which `tests/github/test_golden_fill_recipe.py` keeps whole — recording each missing row with
-`run --record-greedy` (a proposal) or `run --record` (a `torch.compile` time) until its two-hour budget is spent. The
+hardware golden, which `tests/github/test_golden_fill_recipe.py` keeps whole — and its `fill.sh` records in two phases
+until the two-hour budget is spent: every row with a schedule first, as an isolated record of its own kernel
+(`run --kernel K --realization ROW --record-greedy --strict`, a cut piece under its row's knobs, a target under
+`PLACE=fuse` and its knobs), then every whole target left, a seed with no schedule or a target with no `torch.compile`
+time, as a `run --record` of the whole program. A strict whole-program record of a target whose rows were all demoted
+refuses at its first fork, since nothing prices it yet; the isolated record needs only the row's own kernel. The
 job copies the returned file over the golden, holds it to `emmy golden check`, and pushes it to `main`, after a
 timed-out fill too, so a large file fills over several nights. The other jobs tolerate the hardware goldens moving on
 `main` while they run.
