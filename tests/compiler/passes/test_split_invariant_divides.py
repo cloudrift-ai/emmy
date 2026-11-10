@@ -151,3 +151,27 @@ def test_a_state_read_under_a_condition_before_its_update_stays_in_the_loop(monk
     )
     assert [s.input for s in outside if isinstance(s, Load)] == ["C"] and all("c" not in s.deps() for s in outside)
     assert any(isinstance(s, Load) and s.input == "D" for s in loop.body)
+
+
+@pytest.mark.parametrize("division", ["0", "1"])
+def test_a_literal_divisor_is_the_division_knobs(monkeypatch, division):
+    """A float literal divisor varies with no axis, so ``FAST_DIV`` takes it like any invariant one: a multiply by its
+    reciprocal when on, the division itself when off. This is where a literal the normal form leaves a division lands."""
+    monkeypatch.setenv("EMMY_FAST_MATH", "1")
+    monkeypatch.setenv("EMMY_FAST_DIV", division)
+    body = parse_body(
+        """
+        for i in 0..4:
+            f32 v = load x[i]
+            f32 out = divide(v, 3.0)
+            f32 y[i] = out
+        """
+    )
+    if division == "0":
+        with pytest.raises(RuleSkipped, match="FAST_DIV is off"):
+            rule.rewrite(SimpleNamespace(op=KernelOp(body=body)))
+        return
+    result = rule.rewrite(SimpleNamespace(op=KernelOp(body=body)))
+    (reciprocal,) = [s for s in result.body if isinstance(s, Assign)]
+    assert str(reciprocal.value) == "reciprocal(3.0)"
+    assert [s.value.operation.name for s in result.body.iter() if isinstance(s, Assign)] == ["reciprocal", "multiply"]
