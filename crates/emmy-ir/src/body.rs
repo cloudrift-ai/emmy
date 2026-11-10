@@ -76,7 +76,7 @@ pub struct BodyData {
     stmts: Vec<Arc<Statement>>,
     hash: u64,
     side_effects: bool,
-    carried_names: OnceLock<Vec<Name>>,
+    defined_states: OnceLock<Vec<Name>>,
     local_defs: OnceLock<HashSet<Name>>,
     free_ssa: OnceLock<HashSet<Name>>,
     definitions: OnceLock<HashMap<Name, StmtRef>>,
@@ -218,7 +218,7 @@ impl Body {
             stmts,
             hash: hasher.finish(),
             side_effects,
-            carried_names: OnceLock::new(),
+            defined_states: OnceLock::new(),
             local_defs: OnceLock::new(),
             free_ssa: OnceLock::new(),
             definitions: OnceLock::new(),
@@ -437,9 +437,11 @@ impl Body {
 
     // --- def-use readings -----------------------------------------------------------------------
 
-    /// Accumulator and carried-state names, each once, in structural order.
-    pub fn carried_names(&self) -> &[Name] {
-        self.0.carried_names.get_or_init(|| {
+    /// Every accumulator and carried state this body defines, at any depth, each once, in structural order: the
+    /// names a sibling must not reuse. A statement over the body binds fewer of them after it closes
+    /// ([`Body::escaping_states`]); the readings that place, number and rename apart a scope read these.
+    pub fn defined_states(&self) -> &[Name] {
+        self.0.defined_states.get_or_init(|| {
             let mut out = Vec::new();
             self.walk(&mut |here| {
                 if let Statement::Accum(_) | Statement::Carry(_) = &**here.stmt() {
@@ -452,6 +454,33 @@ impl Body {
             });
             out
         })
+    }
+
+    /// The accumulators a statement over this body still binds after it closes: this scope's own, and those of a
+    /// nested loop that does not seed its own or of either branch of a conditional. A loop that seeds its
+    /// accumulators declares them beside itself, inside this body, so they end with it. Carried states are not
+    /// here: a carried state escapes every loop, and the renamer that reads this adds them itself.
+    pub fn escaping_states(&self) -> HashSet<Name> {
+        let mut out: HashSet<Name> = self
+            .stmts()
+            .iter()
+            .filter_map(|s| match &**s {
+                Statement::Accum(a) => Some(a.name),
+                _ => None,
+            })
+            .collect();
+        for stmt in self.stmts() {
+            match &**stmt {
+                Statement::Loop(l) if !l.seed => out.extend(l.body.escaping_states()),
+                Statement::StridedLoop(l) if !l.seed => out.extend(l.body.escaping_states()),
+                Statement::Cond(c) => {
+                    out.extend(c.body.escaping_states());
+                    out.extend(c.else_body.escaping_states());
+                }
+                _ => {}
+            }
+        }
+        out
     }
 
     /// Bindings at this scope, including states exported by nested statements.
@@ -727,7 +756,7 @@ pub fn ordered_sibling_defs(stmt: &Statement) -> Vec<Name> {
     unique(
         children
             .iter()
-            .flat_map(|child| child.carried_names().iter().cloned()),
+            .flat_map(|child| child.defined_states().iter().cloned()),
     )
 }
 
@@ -949,7 +978,7 @@ mod tests {
             [carry, accum, given.at(1)]
         );
         assert_eq!(child.of_types(&[StatementType::Carry]), child.carries());
-        assert_eq!(strs(given.carried_names()), ["state", "sum"]);
+        assert_eq!(strs(given.defined_states()), ["state", "sum"]);
     }
 
     #[test]
@@ -977,7 +1006,7 @@ mod tests {
                     "dependent={dependent} strided={strided}"
                 );
                 assert_eq!(coalesced.loads().len(), expected);
-                assert_eq!(strs(coalesced.carried_names()), ["maximum", "sum"]);
+                assert_eq!(strs(coalesced.defined_states()), ["maximum", "sum"]);
             }
         }
     }

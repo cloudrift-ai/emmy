@@ -109,7 +109,7 @@ fields (`validate`); `Statement::check` dispatches on the flag, and `finished` r
 Python's `__post_init__` made.
 
 `body.rs` is `Body`: the statements, a content hash, and every def-use reading computed once on first use and kept
-with the body (`definitions`, `carried_names`, `local_defs`, `free_ssa`, `axis_names`, `ssa_uses`, the filters by
+with the body (`definitions`, `defined_states`, `escaping_states`, `local_defs`, `free_ssa`, `axis_names`, `ssa_uses`, the filters by
 statement type), plus the walks (`try_map`, `try_map_stmts`, `walk`; `map` and `map_stmts` are the same walks with an
 error type that has no values, and the extension calls the fallible ones with a Python function and `PyErr`),
 `backward_cone` and the topological order, which ranks by any ordered priority. `rebuilt` returns the body itself when a

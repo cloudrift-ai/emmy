@@ -24,7 +24,7 @@ def _assert_scoped_cse(body, available=()):
         if stmt.pure and not (isinstance(stmt, Load) and stmt.carried) and not set(stmt.defines()).intersection(stmt.deps()):
             assert stmt not in available, f"available duplicate binding: {stmt}"
         # A redefinition changes the value of an operand or of the earlier representative.
-        rebound = set(stmt.defines()) | {name for child in stmt.nested() for name in child._carried_names}
+        rebound = set(stmt.defines()) | {name for child in stmt.nested() for name in child._defined_states}
         available = [prior for prior in available if not rebound.intersection((*prior.defines(), *free_names(prior)))]
         if stmt.nested():
             writes = {name for child in stmt.nested() for member in child.iter() for name in member.external_writes()}

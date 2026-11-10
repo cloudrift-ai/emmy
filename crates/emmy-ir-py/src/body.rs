@@ -382,8 +382,8 @@ impl PyBody {
 
     /// Accumulator and carried-state names, each once, in structural order.
     #[getter]
-    fn _carried_names<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyTuple>> {
-        str_tuple(py, self.body.carried_names())
+    fn _defined_states<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyTuple>> {
+        str_tuple(py, self.body.defined_states())
     }
 
     /// Bindings at this scope, including states exported by nested statements.
