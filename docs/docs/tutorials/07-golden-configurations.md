@@ -152,14 +152,19 @@ release naming the kernel. Beyond that, a recorded row's health is its pinned re
 ### Against a fresh lowering
 
 A row is evidence for the kernel it names, and a deploy keys rows by the kernels it lowers fresh from the model. When a
-compiler change moves that lowering the file goes stale: serving builds kernels none of its rows describe. Two
-commands cover it, and neither needs a card:
+compiler change moves that lowering the file goes stale: serving builds kernels none of its rows describe. These
+commands cover it, and none needs a card:
 
 ```bash
 emmy golden list [PATH…]       # every measured row beside torch.compile, slowest relative to it first
 emmy golden check [PATH…]      # what a restamp onto the fresh lowering of the golden's own programs would change
 emmy golden restamp [PATH…]    # write that rewrite
+emmy golden realize PATH…      # compile every row under its own schedule; the rows the compiler no longer realizes
 ```
+
+A measurement freeze stores no program, so `check` finds nothing to restamp in it; `realize` is its check, and
+`--drop` writes a file back without the rows it names. The nightly refresh runs that over the freeze after folding
+the tunes' files.
 
 A restamp lowers every traced program again, gives each kernel the body the fresh lowering gives it, and takes every
 kernel-set decision again on the fresh parent. A kernel that kept its identity keeps its rows and their measurements.

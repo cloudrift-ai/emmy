@@ -280,6 +280,20 @@ repository golden, neither needs a card, and the `refresh-golden` skill is the f
 deletes a file: one nothing survives in is left alone and reported. Every command that reads a golden by path loads it
 through `GoldenFile.load`, which validates a repository golden strictly and anything else as a working file.
 
+`emmy golden realize PATH… [--drop] [--jobs N] [--json PATH]` compiles every row that has a schedule under it — the
+row's kernel as the whole program, its regime and schedule pinned, the file the compile's golden evidence, at the file's
+card — and names the rows the compiler no longer realizes: the kernel it built is not the row's, or a knob the row
+spells is not the one the kernel carries (the gate a bench holds a pinned row to before it times it). It is the check a
+measurement freeze admits: a freeze stores no program a restamp could lower afresh, so `check` finds nothing to restamp
+in it. A piece is rebuilt through the route a repository golden of the same card records for the same kernel, and
+through the file's own only when none does: a golden's decisions are held to the fresh lowering, a freeze's go stale
+with it, and a tune of one piece of a golden freezes the piece's rows with no decision at all. `--drop` writes each file
+back without the rows named; the kernels and decisions stay, and a freeze sheds the ones no row is left under when it is
+folded again (`emmy db import --fresh DIR`, `emmy db freeze --out DIR`). The nightly refresh does both over the freeze
+after the fold, commits the files and posts the count per card (`search/golden/realize.py`). A directory argument is
+searched for golden files, rows compile `--jobs` at a time (`EMMY_WORKERS` by default), and the exit status is non-zero
+when a row does not realize and was not dropped.
+
 **One golden flag pair on every command.** `--golden PATH` names a golden file (working or canonical) on `run`,
 `compile`, `serve`, `generate` and `eval golden`: its MEASURED rows are the golden evidence that command deploys from,
 instead of the repository's per-card goldens, joining the tune DB's rows in the one measured-evidence index the
