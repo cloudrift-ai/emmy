@@ -181,13 +181,15 @@ def test_model_lifecycle_workflow_posts_discord_summary_from_separate_job(workfl
 
 def test_nightly_drops_the_rows_the_compiler_no_longer_realizes_after_the_fold():
     """The freeze job runs after the prior job's fold, on the branch's tip rather than the run's commit: it drops the
-    rows the compiler no longer realizes, folds the files again and commits them, only from main and only while main
-    moved in no path the realization depends on."""
+    rows no repository golden reaches and the rows the compiler no longer realizes, folds the files again and commits
+    them, only from main and only while main moved in no path the realization depends on. The walk of the goldens is
+    most of its time, so it has the budget of the prior job's schedule leg and more."""
     document = yaml.safe_load((Path(__file__).parents[2] / ".github" / "workflows" / "nightly-refresh.yml").read_text())
     job = document["jobs"]["freeze"]
     checkout, lfs, _setup, drop, commit, summary = job["steps"]
 
     assert (job["needs"], job["if"]) == ("prior", "always()")
+    assert job["timeout-minutes"] >= 240
     assert job["outputs"]["summary"] == "${{ steps.summary.outputs.summary }}"
     assert (checkout["with"]["ref"], checkout["with"]["fetch-depth"]) == ("${{ github.ref_name }}", 0)
     assert lfs["run"] == 'git lfs pull --include="emmy/compiler/pipeline/search/freezes/*"'

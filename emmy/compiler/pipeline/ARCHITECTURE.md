@@ -1178,13 +1178,21 @@ equal (a golden stores no identity) while the compile meets an identity the file
 realization corpus's staleness test is the same restamp (`tests/compiler/realization/ARCHITECTURE.md`). Both are
 GPU-free; the `refresh-golden` skill is the flow around them, including the record run a demoted row needs.
 A measurement freeze stores no program, so a restamp lowers nothing afresh in it and leaves it as it is; its check is
-`emmy golden realize` (`search/golden/realize.py`): every row compiled under its own schedule, the row's kernel as the
-whole program and the file as the evidence, at the file's card, and the rows the compiler no longer realizes named.
-A piece is rebuilt through the route a repository golden of the same card records for the same kernel, and through
-the file's own only when none does: a golden's decisions are held to the fresh lowering, a freeze's go stale with
-it, and a tune of one piece of a golden freezes the piece's rows with no decision at all. The nightly refresh runs
-the check over the freeze after the fold and drops those rows (`--drop`), then folds once more so each card's file
-sheds the kernels and decisions no row is left under.
+`emmy golden realize` (`search/golden/realize.py`), in two steps. A freeze is the repository goldens' candidate pools
+in full — every arm and every schedule a tune measured where a golden keeps the one it took — so a row's kernel has
+to be one the goldens' programs reach: the check walks each repository golden of the card as the placement dataset does
+(`ranking.walk_placement`), from every target at the sizes the golden's rows reach it, along the golden's own
+decisions one seam at a time, and takes note of every kernel every arm of every fork on the way leaves. A kernel one
+decision off a golden's path is reached; one the lowering no longer produces, or that only a program no repository
+golden holds produced, is not, and its rows are named without a compile. The full tree of arms is not walked: a
+remainder re-offers every seam it still holds, so that tree holds every subset of a kernel's seams. Then every row of
+a reached kernel is compiled under its own schedule, the row's kernel as the whole program and the file as the
+evidence, at the file's card, and the rows the compiler no longer realizes are named. A piece whose stored body only
+a parent's program reaches is rebuilt through the route a repository golden of the card records for the same kernel,
+and through the file's own only when none does: a golden's decisions are held to the fresh lowering, a freeze's go
+stale with it, and a tune of one piece of a golden freezes the piece's rows with no decision at all. The nightly
+refresh runs the check over the freeze after the fold and drops both kinds of row (`--drop`), then folds once more so
+each card's file sheds the kernels and decisions no row is left under.
 
 When a row is dropped, restamp rechecks the surviving rows against their remaining siblings until no further row is
 lost. A kernel set missing a member loses its verified state even if it has a stored measurement. Kept and demoted

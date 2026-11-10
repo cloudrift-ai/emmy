@@ -203,6 +203,9 @@ def test_a_split_a_golden_took_is_the_label_at_the_split_fork():
     assert [row.knobs for row in parent.rows] == [{"REDUCE": "g2k"}]
     [fork], unmatched = walk_placement(parent, pool_context(parent), placement_decisions(pools, parent), own=True)
     assert unmatched == [] and fork.tier == "split" and fork.labels[0] == "unsplit" and [fork.labels[i] for i in fork.positives] == ["g2k"]
+    # What each arm leaves, by exact identity: the kernel itself unsplit, two pieces under every width, none the kernel.
+    assert len(fork.left) == len(fork.feats) and fork.left[0] == (parent.kernel.exact_identity,)
+    assert all(len(left) == 2 and parent.kernel.exact_identity not in left for left in fork.left[1:])
 
     [group] = export_dataset(db, source="test", pool_sample=0, seed=0, space="placement").golden
     assert (group.key, group.tier, group.golden_ids) == (f"{parent.gpu}/{parent.name}", "split", tuple(fork.positives))
@@ -222,6 +225,10 @@ def test_a_layout_decision_on_another_kernel_steers_no_cut():
     forks, _unmatched = walk_placement(parent, pool_context(parent), decisions, own=True)
     layout = {**decisions, "another": {"LAYOUT@w1": "source", "LAYOUT@w2": "source"}}
     assert walk_placement(parent, pool_context(parent), layout, own=True) == (forks, _unmatched)
+    # The placement fork names what every arm leaves: the kernel under the fuse arm, pieces of other identities under a cut.
+    [fork] = [fork for fork in forks if fork.tier == "place"]
+    assert fork.left[fork.labels.index("fuse")] == (parent.kernel.exact_identity,)
+    assert all(len(left) >= 2 and parent.kernel.exact_identity not in left for i, left in enumerate(fork.left) if fork.labels[i] != "fuse")
 
 
 def test_placement_export_includes_weight_layout_from_golden_program(tmp_path):

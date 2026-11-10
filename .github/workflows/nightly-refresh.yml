@@ -620,16 +620,19 @@ jobs:
             "$DISCOVERY_SUMMARY"
           git config --unset-all credential.helper || true
 
-  # Every row of the measurement freeze compiled under its own schedule, the card's file as the compile's golden
-  # evidence, on the files the prior job's fold left on main. A freeze stores no program a restamp could lower afresh,
-  # so this is the check it admits. A row the compiler no longer realizes is evidence no compile takes: the job drops
-  # it, folds the files again so each card's sheds the kernels and decisions no row is left under, and commits them.
+  # The measurement freeze held to the repository goldens, on the files the prior job's fold left on main: the
+  # goldens' programs walked for every kernel their decisions reach one arm off (a freeze is those programs' candidate
+  # groups in full), then every row of a reached kernel compiled under its own schedule, the card's file as the
+  # compile's golden evidence. A freeze stores no program a restamp could lower afresh, so this is the check it
+  # admits. A row no golden reaches, or that the compiler no longer realizes, is evidence no compile takes: the job
+  # drops it, folds the files again so each card's sheds the kernels and decisions no row is left under, and commits
+  # them. The walk is most of the time: budget for the RTX 5090's goldens on an 8-core runner.
   freeze:
     needs: prior
     if: always()
     runs-on:
       group: ubuntu-runners
-    timeout-minutes: 120
+    timeout-minutes: 240
     permissions:
       contents: read
     outputs:
@@ -637,7 +640,8 @@ jobs:
     env:
       FREEZES: emmy/compiler/pipeline/search/freezes
       # The other jobs may land their files on main while this job compiles; any other move stops the push, so rows
-      # realized under one compiler are never dropped from under another.
+      # realized under one compiler are never dropped from under another. A golden the fill job commits gains
+      # microseconds on rows it already had and no kernel or decision, so what the goldens reach stands.
       TOLERATED_PATHS: >-
         tests/durations_cpu.json
         emmy/compiler/pipeline/search/prior/weights/schedule.json
@@ -659,7 +663,7 @@ jobs:
       - uses: ./.github/actions/setup-emmy
 
       # LFS installed here, locally, so the push uploads the payload.
-      - name: Drop the rows the compiler no longer realizes
+      - name: Drop the rows no golden reaches and the rows the compiler no longer realizes
         id: drop
         run: |
           git lfs install --local
@@ -680,7 +684,7 @@ jobs:
         with:
           app-id: ${{ secrets.EXPERIMENT_APP_ID }}
           private-key: ${{ secrets.EXPERIMENT_APP_PRIVATE_KEY }}
-          message: "compiler: drop the rows the compiler no longer realizes from the measurement freeze"
+          message: "compiler: drop the freeze rows no repository golden reaches or the compiler no longer realizes"
           paths: emmy/compiler/pipeline/search/freezes
 
       # Runs after a failed step too, so the message carries what the job finished.

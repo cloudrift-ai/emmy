@@ -23,7 +23,7 @@ import hashlib
 import json
 import logging
 from collections import Counter
-from collections.abc import Iterable, Mapping
+from collections.abc import Iterable, Iterator, Mapping
 from pathlib import Path
 
 from emmy import config
@@ -34,7 +34,7 @@ from emmy.compiler.pipeline.search.db import RoutingRow, SearchDB, knobs_json
 from emmy.compiler.pipeline.search.db.freeze import is_lfs_pointer
 from emmy.compiler.wire import symbolic_vars
 
-from .format import GoldenFile, Row
+from .format import GoldenFile, Kernel, Row
 from .repository import documents_for_card, scope_digest, scope_explicit
 
 logger = logging.getLogger("emmy.compiler.pipeline")
@@ -108,6 +108,21 @@ def import_rows(db: SearchDB, ctx: Context, document: GoldenFile, rows: Iterable
     return written
 
 
+def reached_targets(document: GoldenFile, rows: Iterable[Row], targets: Mapping[str, Kernel]) -> Iterator[tuple[str, dict[str, int], Row]]:
+    """Each row of ``rows`` that reaches a kernel of ``targets`` (by ``ref``), with the target's ``ref`` and the
+    sizes the row reaches it at: a row of the target at its own sizes, a piece's row at the target's symbolic dims
+    out of its own; a piece's row that names fewer is left out."""
+    for row in rows:
+        path = document.path_to(row.kernel)
+        root = path[0].parent if path else row.kernel
+        if root not in targets:
+            continue
+        sizes = symbolic_vars(targets[root].loop_ir)
+        if path and not sizes <= row.bindings.keys():
+            continue
+        yield root, ({var: row.bindings[var] for var in sizes} if path else dict(row.bindings)), row
+
+
 def import_constants(db: SearchDB, document: GoldenFile, rows: Iterable[Row], *, source: str) -> int:
     """File under ``source`` the constant inputs each target kernel's program binds (``GoldenFile.executable``: a
     weight the kernel reads is the checkpoint's, as a deploy sees it), at every set of sizes ``rows`` of ``document``
@@ -119,17 +134,7 @@ def import_constants(db: SearchDB, document: GoldenFile, rows: Iterable[Row], *,
     identity = document.identities()
     targets = {kernel.ref: kernel for kernel in document.targets() if kernel.ref in identity}
     reached: dict[tuple[str, str], dict] = {}
-    for row in rows:
-        if row.kernel not in identity:
-            continue
-        path = document.path_to(row.kernel)
-        root = path[0].parent if path else row.kernel
-        if root not in targets:
-            continue
-        sizes = symbolic_vars(targets[root].loop_ir)
-        if path and not sizes <= row.bindings.keys():
-            continue
-        bindings = {var: row.bindings[var] for var in sizes} if path else dict(row.bindings)
+    for root, bindings, _row in reached_targets(document, (row for row in rows if row.kernel in identity), targets):
         reached.setdefault((root, knobs_json(bindings)), bindings)
     written = 0
     for (ref, _sizes), bindings in reached.items():

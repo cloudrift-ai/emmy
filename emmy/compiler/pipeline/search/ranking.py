@@ -417,17 +417,24 @@ def build_golden_groups(
 PLACEMENT_PASSES = ("tile/lift", "tile/cut")
 
 
+def _exact(op) -> str | None:
+    """A kernel's exact identity, the key its rows are filed under."""
+    return op.identity_key(structural=False, with_io=True)
+
+
 @dataclass(frozen=True)
 class PlacementFork:
     """One kernel-set fork as the walk saw it: its domain's tier, whether the kernel it decides has a symbolic axis
     (``dynamic``: a piece a cut leaves may be static under a symbolic root, and is its own regime), each arm's feature
-    row and its label (``fuse`` or the seams a cut cuts, ``unsplit`` or a split's width, a layout), the arms on the
-    golden's path (``positives``) and the arm the walk itself took (``pick``)."""
+    row, its label (``fuse`` or the seams a cut cuts, ``unsplit`` or a split's width, a layout) and the exact
+    identities of the kernels it leaves (``left``: the fork's kernel itself under an arm that keeps it), the arms on
+    the golden's path (``positives``) and the arm the walk itself took (``pick``)."""
 
     tier: str
     dynamic: bool
     feats: list[dict]
     labels: list[str]
+    left: list[tuple[str, ...]]
     positives: list[int]
     pick: int
 
@@ -456,7 +463,7 @@ def _place_ballot(
     for i in range(len(rows)):
         if i == fused:
             continue
-        pieces = [(op.name, op.identity_key(structural=False, with_io=True)) for op, _ in features.kernel_pieces(leaves[i].expand()[0])]
+        pieces = [(op.name, _exact(op)) for op, _ in features.kernel_pieces(leaves[i].expand()[0])]
         whole[i] = Counter(key for _, key in pieces if key)
         carved[i] = Counter(key for piece, key in pieces if key and piece != name)
     complete = [i for i in whole if whole[i] == pending]
@@ -512,7 +519,7 @@ def _recorded_kernel_set(
         if KERNEL_SET_DOMAINS.get(_structural_domain(fp.options)) != "place" or len(leaves) < 2:
             return leaves[0]
         root = fp.root_op.with_io(fp.match.graph, fp.match.root)
-        identity = root.identity_key(structural=False, with_io=True)
+        identity = _exact(root)
         arm = spelled_arm(leaves, decisions.get(identity, {}))
         if arm is None:
             unmatched.append(identity[:12])
@@ -523,7 +530,7 @@ def _recorded_kernel_set(
 
     routes = [(identity, keys) for identity, keys in cuts.items() if len(keys) > 1]
     terminal = _resolve_placement(pool, ctx, routes, decide)
-    left = Counter(key for op, _ in features.kernel_pieces(terminal) if (key := op.identity_key(structural=False, with_io=True)))
+    left = Counter(key for op, _ in features.kernel_pieces(terminal) if (key := _exact(op)))
     return left, frozenset(cut)
 
 
@@ -570,7 +577,7 @@ def walk_placement(
         if tier is None or len(leaves) < 2:
             return leaves[0]
         root = fp.root_op.with_io(fp.match.graph, fp.match.root)
-        identity = root.identity_key(structural=False, with_io=True)
+        identity = _exact(root)
         owed = recorded if identity == pool.kernel.exact_identity else pending.get(fp.match.root_node_id)
         if own and identity != pool.kernel.exact_identity and (tier != "place" or owed is None):
             return leaves[0]
@@ -592,20 +599,17 @@ def walk_placement(
             labels = [" ".join(str(v) for v in row.values() if v) or "unsplit" for row in rows]
         # Featurized as a deploy featurizes them (``policy/greedy._kernel_set_pick``): an arm that keeps the kernel
         # leaves the kernel itself.
-        feats = [
-            featurizer.features(root, row, pieces=leaf.expand()[0] if leaf.structural else root)
-            for leaf, row in zip(leaves, rows, strict=True)
-        ]
+        options = [leaf.expand()[0] if leaf.structural else root for leaf in leaves]
+        feats = [featurizer.features(root, row, pieces=option) for option, row in zip(options, rows, strict=True)]
+        left = [tuple(key for op, _ in features.kernel_pieces(option) if (key := _exact(op))) for option in options]
         followed = positives[0]
         pick = followed if prior is None else min(range(len(leaves)), key=prior.mean_scores_features(feats).__getitem__)
-        forks.append(PlacementFork(tier, ShapeKey.from_s_features(features.stamps(root)).is_dyn, feats, labels, positives, pick))
+        forks.append(PlacementFork(tier, ShapeKey.from_s_features(features.stamps(root)).is_dyn, feats, labels, left, positives, pick))
         if tier == "place" and carved[followed] is not None:
             left = owed - carved[followed]
             fragment = leaves[followed].expand()[0]
             for node_id, node in fragment.nodes.items():
-                if isinstance(node.op, TileOp) and (
-                    node.op.name == root.name or node.op.with_io(fragment, node).identity_key(structural=False, with_io=True) in continued
-                ):
+                if isinstance(node.op, TileOp) and (node.op.name == root.name or _exact(node.op.with_io(fragment, node)) in continued):
                     # The remainder and a piece the golden cut in its turn are cut further; the splice promotes
                     # a piece onto the buffer it replaces.
                     pending[node_id] = pending[node_id.removesuffix("__placed")] = left
