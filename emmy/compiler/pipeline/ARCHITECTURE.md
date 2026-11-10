@@ -1180,6 +1180,14 @@ check and the suite read the restamp's report beside the file: a kernel re-keyed
 equal (a golden stores no identity) while the compile meets an identity the file's rows are not keyed by. The
 realization corpus's staleness test is the same restamp (`tests/compiler/realization/ARCHITECTURE.md`). Both are
 GPU-free; the `refresh-golden` skill is the flow around them, including the record run a demoted row needs.
+A measurement freeze stores no program, so a restamp lowers nothing afresh in it and leaves it as it is; its check is
+`emmy golden realize` (`search/golden/realize.py`): every row compiled under its own schedule, the row's kernel as the
+whole program and the file as the evidence, at the file's card, and the rows the compiler no longer realizes named.
+A piece is rebuilt through the route a repository golden of the same card records for the same kernel, and through
+the file's own only when none does: a golden's decisions are held to the fresh lowering, a freeze's go stale with
+it, and a tune of one piece of a golden freezes the piece's rows with no decision at all. The nightly refresh runs
+the check over the freeze after the fold and drops those rows (`--drop`), then folds once more so each card's file
+sheds the kernels and decisions no row is left under.
 
 When a row is dropped, restamp rechecks the surviving rows against their remaining siblings until no further row is
 lost. A kernel set missing a member loses its verified state even if it has a stored measurement. Kept and demoted

@@ -112,7 +112,13 @@ def test_discovery_runs_the_dispatched_commit_and_commits_to_main():
 @pytest.mark.parametrize(
     ("workflow", "primary_job", "needs", "workflow_kind", "notification_name"),
     [
-        ("nightly-refresh.yml", "discover", ["durations", "prior", "gaps", "fill", "discover"], "nightly", "Send nightly summary"),
+        (
+            "nightly-refresh.yml",
+            "discover",
+            ["durations", "prior", "freeze", "gaps", "fill", "discover"],
+            "nightly",
+            "Send nightly summary",
+        ),
         ("onboard-model.yml", "onboard", "onboard", "onboard", "Send onboarding summary"),
     ],
 )
@@ -141,8 +147,9 @@ def test_model_lifecycle_workflow_posts_discord_summary_from_separate_job(workfl
         assert "pr_number" not in lifecycle["outputs"]
         assert "PR_NUMBER" not in notify["env"]
         # One summary for the run: every job's result, each prior leg's own comparison line.
-        for job in ("durations", "prior", "gaps", "fill", "discover"):
+        for job in ("durations", "prior", "freeze", "gaps", "fill", "discover"):
             assert notify["env"][f"{job.upper()}_RESULT"] == f"${{{{ needs.{job}.result }}}}"
+        assert notify["env"]["MEASUREMENT_FREEZE"] == "${{ needs.freeze.outputs.summary }}"
         assert notify["env"]["DURATIONS_UPDATED"] == "${{ needs.durations.outputs.updated }}"
         prior = document["jobs"]["prior"]
         assert prior["strategy"]["matrix"]["space"] == ["schedule", "placement"]
@@ -170,6 +177,36 @@ def test_model_lifecycle_workflow_posts_discord_summary_from_separate_job(workfl
         assert notice["if"] == "always() && steps.vm.outcome == 'success'"
         assert 'failure.get("regression") is True' in notice["run"]
     assert "DISCORD_EMMY_ROBOTS_ALERT_ROLE_ID" not in (Path(__file__).parents[2] / ".github" / "workflows" / workflow).read_text()
+
+
+def test_nightly_drops_the_rows_the_compiler_no_longer_realizes_after_the_fold():
+    """The freeze job runs after the prior job's fold, on the branch's tip rather than the run's commit: it drops the
+    rows the compiler no longer realizes, folds the files again and commits them, only from main and only while main
+    moved in no path the realization depends on."""
+    document = yaml.safe_load((Path(__file__).parents[2] / ".github" / "workflows" / "nightly-refresh.yml").read_text())
+    job = document["jobs"]["freeze"]
+    checkout, lfs, _setup, drop, commit, summary = job["steps"]
+
+    assert (job["needs"], job["if"]) == ("prior", "always()")
+    assert job["outputs"]["summary"] == "${{ steps.summary.outputs.summary }}"
+    assert (checkout["with"]["ref"], checkout["with"]["fetch-depth"]) == ("${{ github.ref_name }}", 0)
+    assert lfs["run"] == 'git lfs pull --include="emmy/compiler/pipeline/search/freezes/*"'
+    freezes = job["env"]["FREEZES"]
+    assert freezes == "emmy/compiler/pipeline/search/freezes"
+    # A compiler change on main while the rows compiled must stop the push: the freeze and the compiler are not tolerated.
+    assert not any(path.startswith("emmy/compiler/pipeline/search/freezes") for path in job["env"]["TOLERATED_PATHS"].split())
+    steps = [
+        'emmy golden realize "$FREEZES" --drop --json _data/realize.json',
+        "emmy db import",
+        'emmy db freeze --db _data/fold.db --out "$FREEZES"',
+    ]
+    assert sorted(steps, key=drop["run"].index) == steps
+    assert "continue-on-error" not in drop
+    assert commit["if"] == "steps.drop.outputs.updated == 'true' && github.ref == 'refs/heads/main'"
+    assert (commit["uses"], commit["with"]["paths"]) == ("./.github/actions/push-to-main", freezes)
+    assert summary["if"] == "always()" and summary["env"]["DROPPED"] == "${{ steps.commit.outcome }}"
+    assert "jq -r -f .github/workflows/scripts/freeze_realized.jq _data/realize.json" in summary["run"]
+    assert (Path(__file__).parents[2] / ".github" / "workflows" / "scripts" / "freeze_realized.jq").is_file()
 
 
 def test_onboarding_requires_platform_results_snapshot_and_git_lfs():
