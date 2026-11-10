@@ -1510,9 +1510,17 @@ def _one_operation(stmts) -> list[Statement]:
         def leaf(node: Expression, stmt=stmt, temps=temps) -> Expression:
             if node.operation is None:
                 return node
-            operands = [leaf(child) for child in node.operands]
+            operation, children = node.operation.name, list(node.operands)
+            # A sum with a negated term is the subtraction of that term: ``a + (-b)`` is ``a - b`` to the bit, and
+            # one operation where the negation would be a second, under its own name, which the fragment memo that
+            # shares a weight between two channels would then not match.
+            negated = [i for i, child in enumerate(children) if child.operation is not None and child.operation.name == "negative"]
+            if operation == "add" and len(children) == 2 and negated:
+                i = negated[-1]
+                operation, children = "subtract", [children[1 - i], children[i].operands[0]]
+            operands = [leaf(child) for child in children]
             name = f"{stmt.name}__e{next(temps)}"
-            out.append(Assign(name, apply(node.operation.name, *operands)))
+            out.append(Assign(name, apply(operation, *operands)))
             return Var(name)
 
         if isinstance(stmt, Accum):

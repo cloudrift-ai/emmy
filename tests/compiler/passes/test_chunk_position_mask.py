@@ -175,6 +175,20 @@ def test_a_cache_slice_stages_only_on_the_16_byte_grid(cache, offset, row, stage
     assert "emmy_cp_async" in source
 
 
+def test_the_expectation_reads_the_weight_the_denominator_computed() -> None:
+    """GPU-free. The twin's softmax weight ``exp(score - pivot)`` is one fragment per score element, folded into the
+    denominator and repacked as the expectation's operand: one ``exp`` per element. The normal form spells the
+    difference as ``-pivot + score``; evaluated one operation at a time from that spelling, the negated pivot became a
+    row temp under each channel's own name, the fragment memo matched nothing across the two channels, and the
+    expectation computed every exp a second time (Qwen3.6's 4-token decode twin 127 → 171 us on an RTX 5090)."""
+    _, graph = _attention()
+    with pinned_knobs(_flash("mma_m16n8k16_bf16_f32", None)):
+        compiled = Pipeline.build(CUDA_PASSES).run(graph, ctx=Context.from_target((12, 0)))
+    (source,) = [node.op.kernel_source for node in compiled.nodes.values() if isinstance(node.op, CudaOp)]
+    weights = [line.strip() for line in source.splitlines() if "expf(" in line and "_ch0_" in line]
+    assert weights and all(line.startswith("_ch0_") and "_w[_e] = __expf(" in line for line in weights), weights
+
+
 def test_the_mask_bound_reads_the_negation_the_normal_form_spells() -> None:
     """GPU-free. The normal form spells ``key - row`` as ``-row + key``; the stream bound reads that affine form as
     the same ``{key: 1, row: -1}``, or a causal mask on a wide launch would bound nothing."""
