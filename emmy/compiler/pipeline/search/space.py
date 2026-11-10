@@ -232,6 +232,39 @@ FAST_EXP = Knob(
     off=False,
 )
 
+# The other instruction classes of the precision-trading family, each pin-only and, but for FMA contraction, following
+# FAST_MATH like FAST_EXP. Each maps to the nvcc flag that picks its instruction (``backend.cuda.nvcc.precision_flags``).
+
+FAST_DIV = Knob(
+    "FAST_DIV",
+    KnobType.BOOL,
+    hints=(False,),
+    help="Approximate f32 division and reciprocal (nvcc --prec-div=false); a floating divisor invariant in its loop "
+    "becomes one hoisted reciprocal and a multiply (lowering/kernel/040). Unset follows FAST_MATH.",
+)
+
+FAST_SQRT = Knob(
+    "FAST_SQRT",
+    KnobType.BOOL,
+    hints=(False,),
+    help="Approximate f32 square root (nvcc --prec-sqrt=false). Unset follows FAST_MATH.",
+)
+
+FLUSH_TO_ZERO = Knob(
+    "FLUSH_TO_ZERO",
+    KnobType.BOOL,
+    hints=(False,),
+    help="Flush f32 subnormal operands and results to zero (nvcc --ftz=true). Unset follows FAST_MATH.",
+)
+
+CONTRACT_FMA = Knob(
+    "CONTRACT_FMA",
+    KnobType.BOOL,
+    hints=(True,),
+    help="Contract a multiply and an add into one fused multiply-add (nvcc --fmad). On in both regimes, as nvcc's "
+    "default is, so the umbrella never turns it off; pin 0 to round every multiply and add on its own.",
+)
+
 
 # --- The CPU schedule's knobs (``ir/schedule/cpu.py``): no CUDA knob takes a CPU meaning ------------------------
 
@@ -249,10 +282,9 @@ CPU_TILE = Knob(
 
 # --- The regime knobs: the precision-trading family (under the FAST_MATH umbrella) and the cache knob ------
 #
-# Precedence: an individual pin > FAST_MATH > True (precision_pin). The umbrella also
-# controls NVCC fast math and invariant reciprocal division. It is unfeatured: concrete
-# schedule choices retain their own identity, while effective compiler flags separate
-# the fast and precise measurement contexts. Golden input pins record the umbrella.
+# Precedence: an individual pin > FAST_MATH > True (precision_pin); CONTRACT_FMA alone keeps its own default. The
+# umbrella is unfeatured: concrete schedule choices retain their own identity, while effective compiler flags and the
+# independent overrides separate the fast and precise measurement contexts. Golden input pins record the umbrella.
 
 COLD_CACHE = Knob(
     "COLD_CACHE",
@@ -267,8 +299,8 @@ FAST_MATH = Knob(
     "FAST_MATH",
     KnobType.BOOL,
     hints=(True,),
-    help="Fast math is enabled by default: NVCC fast math, invariant reciprocal division, and the "
-    "precision-trading knobs (FAST_EXP, F16_MMA_F32_ACC, FP8_MMA). Pin 0 to disable; individual pins win.",
+    help="Fast math is enabled by default: the precision-trading knobs that follow it (FAST_EXP, FAST_DIV, FAST_SQRT, "
+    "FLUSH_TO_ZERO, F16_MMA_F32_ACC, FP8_MMA) and nvcc's fast library. Pin 0 to disable; individual pins win.",
     unfeatured=True,  # a meta gate over other knobs — must never enter the feature vector
 )
 
@@ -298,9 +330,13 @@ FP8_MMA = Knob(
 )
 
 
-#: The precision-trading family: the umbrella and the knobs that follow it (:func:`precision_pin`) — what sorts a
+#: The precision-trading family: the umbrella and the knobs under it (:func:`precision_pin`) — what sorts a
 #: row into the fast-math lane.
-PRECISION_KNOBS = (FAST_MATH, FAST_EXP, F16_MMA_F32_ACC, FP8_MMA)
+PRECISION_KNOBS = (FAST_MATH, FAST_EXP, F16_MMA_F32_ACC, FP8_MMA, FAST_DIV, FAST_SQRT, FLUSH_TO_ZERO, CONTRACT_FMA)
+
+#: The precision-trading knobs whose default is their own first hint, not the umbrella's decision: nvcc contracts
+#: multiply-adds in the standard regime as well, so the umbrella leaves contraction on in both.
+_OWN_DEFAULT = (CONTRACT_FMA,)
 
 #: The regime knobs: the input pins a measured row is filed under beside the card and the kernel — the
 #: precision-trading family and the cache knob. Every reader of a regime iterates this tuple through
@@ -308,16 +344,21 @@ PRECISION_KNOBS = (FAST_MATH, FAST_EXP, F16_MMA_F32_ACC, FP8_MMA)
 REGIME_KNOBS = (*PRECISION_KNOBS, COLD_CACHE)
 
 
+def precision_default(knob: Knob, umbrella: bool) -> bool:
+    """A precision-trading ``knob``'s decision when nothing pins it, under the ``FAST_MATH`` decision ``umbrella``: the
+    umbrella's, or the knob's own default for one the umbrella does not move. A decision that differs from it is an
+    independent override, which keys a regime apart."""
+    return knob.hints[0] if knob in _OWN_DEFAULT else umbrella
+
+
 def precision_pin(knob: Knob) -> bool:
     """The effective pin for a precision-trading BOOL ``knob``: its own ``EMMY_<NAME>`` pin when
-    set, else the ``FAST_MATH`` umbrella pin, else its enabled default."""
+    set, else its default under the ``FAST_MATH`` umbrella pin or the umbrella's enabled default."""
     raw = knob.raw()
     if raw is not None:
         return knob.parse(raw)
     raw = FAST_MATH.raw()
-    if raw is not None:
-        return FAST_MATH.parse(raw)
-    return FAST_MATH.hints[0]
+    return precision_default(knob, FAST_MATH.parse(raw) if raw is not None else FAST_MATH.hints[0])
 
 
 def regime_pin(knob: Knob) -> bool:
@@ -340,7 +381,14 @@ def precision_pins(pins: dict | None = None) -> dict[str, bool]:
     if pins is None:
         return {knob.name: precision_pin(knob) for knob in PRECISION_KNOBS}
     umbrella = bool(pins.get(FAST_MATH.name, False))
-    return {knob.name: bool(pins.get(knob.name, umbrella)) for knob in PRECISION_KNOBS}
+    return {knob.name: bool(pins.get(knob.name, precision_default(knob, umbrella))) for knob in PRECISION_KNOBS}
+
+
+def precision_overrides(pins: dict) -> dict[str, bool]:
+    """The independent overrides among effective precision decisions ``pins`` (:func:`precision_pins`): each decision
+    that differs from its default under the umbrella ``pins`` records."""
+    umbrella = pins[FAST_MATH.name]
+    return {knob.name: pins[knob.name] for knob in PRECISION_KNOBS if pins[knob.name] != precision_default(knob, umbrella)}
 
 
 def regime_pins(pins: dict | None = None) -> dict[str, bool]:

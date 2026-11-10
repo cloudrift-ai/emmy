@@ -46,7 +46,7 @@ regime is refused, as the vLLM child's boot refuses it: under the pinned regime 
 evidence. A scope recording two regimes says so once and names the live lane the replay takes; a bare `--golden PATH`
 walk skips the targets a hand pin contradicts and runs the rest.
 Tuning creates its measurement context inside each target's precision scope. `FAST_MATH` defaults to true
-and controls NVCC `--use_fast_math`; `--nvcc-flags=--fmad=false` remains a custom contraction diagnostic.
+and controls NVCC `--use_fast_math`; `EMMY_CONTRACT_FMA=0` is the contraction diagnostic, a regime of its own.
 
 ## Layers
 

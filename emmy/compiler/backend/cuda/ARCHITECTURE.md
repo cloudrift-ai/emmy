@@ -72,12 +72,13 @@ share every line downstream. The projection:
   latency is the deployed one.
 
   `FAST_MATH` defaults to true and adds `--use_fast_math`; `EMMY_FAST_MATH=0` omits that flag and disables the
-  umbrella's compiler rewrites. Individual precision pins still override the umbrella. For an intermediate-rounding
-  diagnostic, pass `--nvcc-flags=--fmad=false`; custom flags follow the policy flag. Disabling contraction alone leaves
-  other fast-math transformations enabled. Combine it with `EMMY_FAST_MATH=0` for precise arithmetic checks.
+  umbrella's compiler rewrites. Individual precision pins still override the umbrella, each instruction class through
+  its own flag (`nvcc.precision_flags`): `EMMY_CONTRACT_FMA=0` adds `--fmad=false` for an intermediate-rounding
+  diagnostic and leaves the other fast-math transformations enabled; combine it with `EMMY_FAST_MATH=0` for precise
+  arithmetic checks. Custom `--nvcc-flags` follow the precision flags.
   Explicit tensor-core instructions retain their own accumulation semantics. Accuracy and latency evidence must name
   the effective flags; a precise diagnostic does not qualify the default fast-math kernel. Persistent benchmark
-  workers receive the effective `FAST_MATH` value with every request and restore their prior value afterward, so a
+  workers receive every effective precision decision with each request and restore their prior values afterward, so a
   previous request's arithmetic mode cannot leak into the next measurement.
 
   An older sweep ranked at `-Xcicc -O1` to dodge a cicc front-end blowup on big unrolled register-tile kernels. That

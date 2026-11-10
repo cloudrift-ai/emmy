@@ -33,15 +33,17 @@ def _body(dtype=F32, *, varying=False, divide="divide"):
 
 
 @pytest.mark.parametrize("dtype", [F16, BF16, F32, F64])
-@pytest.mark.parametrize("enabled", [None, "1", "0"])
-def test_reciprocal_hoisting_follows_fast_math(monkeypatch, dtype, enabled):
-    monkeypatch.delenv("EMMY_FAST_MATH", raising=False)
-    if enabled is not None:
-        monkeypatch.setenv("EMMY_FAST_MATH", enabled)
+@pytest.mark.parametrize(("umbrella", "division"), [(None, None), ("1", None), ("0", None), ("1", "0"), ("0", "1")])
+def test_reciprocal_hoisting_follows_the_division_knob(monkeypatch, dtype, umbrella, division):
+    """The reciprocal is ``FAST_DIV``'s, which follows the ``FAST_MATH`` umbrella unless pinned on its own."""
+    for name, value in (("EMMY_FAST_MATH", umbrella), ("EMMY_FAST_DIV", division)):
+        monkeypatch.delenv(name, raising=False)
+        if value is not None:
+            monkeypatch.setenv(name, value)
     body = _body(dtype)
     root = SimpleNamespace(op=KernelOp(body=body))
-    if enabled == "0":
-        with pytest.raises(RuleSkipped, match="disabled"):
+    if (division or umbrella) == "0":
+        with pytest.raises(RuleSkipped, match="FAST_DIV is off"):
             rule.rewrite(root)
     else:
         result = rule.rewrite(root)

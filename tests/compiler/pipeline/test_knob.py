@@ -590,6 +590,21 @@ def test_precision_pin_precedence(monkeypatch):
     assert FAST_MATH.unfeatured, "the umbrella is a meta gate — it must never enter the feature vector"
 
 
+def test_fma_contraction_keeps_its_own_default_under_the_umbrella(monkeypatch):
+    """nvcc contracts multiply-adds in the standard regime too, so the umbrella never moves ``CONTRACT_FMA``: only
+    its own pin turns it off, and a recorded regime that omits it reads it on."""
+    from emmy.compiler.pipeline.search.space import CONTRACT_FMA, FAST_DIV, precision_pin, precision_pins
+
+    monkeypatch.delenv("EMMY_CONTRACT_FMA", raising=False)
+    for umbrella in ("0", "1"):
+        monkeypatch.setenv("EMMY_FAST_MATH", umbrella)
+        assert precision_pin(CONTRACT_FMA) is True and precision_pin(FAST_DIV) is (umbrella == "1")
+    monkeypatch.setenv("EMMY_CONTRACT_FMA", "0")
+    assert precision_pin(CONTRACT_FMA) is False
+    assert precision_pins({"FAST_MATH": False})["CONTRACT_FMA"] is True
+    assert precision_pins({"FAST_MATH": True})["CONTRACT_FMA"] is True
+
+
 def test_values_equal_requires_exact_classic_spelling():
     from emmy.compiler.pipeline.knob import values_equal
 

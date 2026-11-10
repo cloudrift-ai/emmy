@@ -695,14 +695,14 @@ def test_recorded_route_cuts_the_selected_compile_target(run_cli, tmp_path, monk
 
 
 @pytest.mark.parametrize("umbrella", [False, True])
-@pytest.mark.parametrize("override", [None, "FAST_EXP", "F16_MMA_F32_ACC", "FP8_MMA"])
+@pytest.mark.parametrize("override", [None, "FAST_EXP", "F16_MMA_F32_ACC", "FP8_MMA", "FAST_DIV"])
 def test_recorded_regime_is_published_whole_and_a_hand_pin_against_it_is_refused(umbrella, override, caplog):
     """The recorded regime is published with every effective precision decision, whatever the ambient defaults; a hand
     pin that contradicts it is refused, because under the pinned regime none of the selected rows is evidence."""
     from emmy.commands.compile import selected_regime
 
     pins = {"FAST_MATH": umbrella, "VECTORIZE_LOADS": False}
-    expected = {name: umbrella for name in ("FAST_MATH", "FAST_EXP", "F16_MMA_F32_ACC", "FP8_MMA")}
+    expected = precision_pins({"FAST_MATH": umbrella})
     if override:
         pins[override] = expected[override] = not umbrella
     row = Row(name="recorded", kernel="k", pins=dict(pins))
@@ -742,8 +742,7 @@ def test_equivalent_recorded_defaults_share_a_regime_but_empty_or_mixed_scopes_d
     row = Row(name="recorded", kernel="k")
     document = GoldenFile(compute_cap=(8, 9), rows=[row, replace(row, pins={"FAST_MATH": False, "FP8_MMA": False})])
     args = SimpleNamespace(_golden_document=document)
-    expected = {name: False for name in ("FAST_MATH", "FAST_EXP", "F16_MMA_F32_ACC", "FP8_MMA")}
-    assert selected_regime(args) == expected
+    assert selected_regime(args) == precision_pins({"FAST_MATH": False})
     document.rows.append(replace(row, pins={"FAST_MATH": False, "FAST_EXP": True}))
     for scope in (
         args,
@@ -768,7 +767,7 @@ def test_recorded_sample_pins_are_complete_but_ab_pins_remain_partial(tmp_path):
     [ab] = _ab_samples(["FAST_MATH=false,WORK=t32"])
     with pinned_knobs({"FAST_MATH": True, "FAST_EXP": True}):
         with pinned_knobs(_sample_replay_knobs(sample)):
-            assert not any(Context.from_target((8, 9)).precision_pins().values())
+            assert Context.from_target((8, 9)).precision_pins() == precision_pins({"FAST_MATH": False})
         with pinned_knobs(_sample_replay_knobs(ab)):
             ctx = Context.from_target((8, 9))
             assert ctx.precision_pins()["FAST_MATH"] is False and ctx.precision_pins()["FAST_EXP"] is True

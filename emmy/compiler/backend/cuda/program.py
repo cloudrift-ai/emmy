@@ -1037,11 +1037,9 @@ class _AsyncBenchWorker:
 
     @staticmethod
     def _encode(request: dict) -> bytes:
-        from emmy.compiler.pipeline.search.space import FAST_MATH, cold_cache, precision_pin  # noqa: PLC0415
+        from emmy.compiler.pipeline.search.space import cold_cache, precision_pins  # noqa: PLC0415
 
-        return pickle.dumps(
-            {**request, "fast_math": precision_pin(FAST_MATH), "cold_cache": cold_cache()}, protocol=pickle.HIGHEST_PROTOCOL
-        )
+        return pickle.dumps({**request, "precision": precision_pins(), "cold_cache": cold_cache()}, protocol=pickle.HIGHEST_PROTOCOL)
 
     @staticmethod
     def _decode(body: bytes) -> dict:
