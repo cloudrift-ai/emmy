@@ -759,16 +759,17 @@ from that CSE form. Subroutine boundaries never limit fusion.
 - `one_operation_per_definition` — every definition is one operation over names and literals: a nested node of an
   `Assign`'s value that is no name, literal or node of the value's own affine region (a comparison, a select, a cast,
   any operation) is a definition of its own ahead of its reader, and an `Accum` sums a name or a literal. An affine
-  region is one node, as a sum is one operation: `canonicalize_expressions` spells every expression in affine form
-  — like terms summed, zero terms dropped, the constant last, in the coefficient domain of its field's class (an index
+  region is one node, as a sum is one operation: `canonicalize_expressions` spells every expression in affine form —
+  like terms summed, zero terms dropped, the constant last, in the coefficient domain of its field's class (an index
   folds integer literals alone and keeps a quotient a term, a value folds any literal and a division by a float
-  literal into the product by its reciprocal) — and this step joins an affine definition read exactly once, inside an
-  affine reader, into the reader's region, so `x + x`, `2 * x` and `t = 3 * x; s = t + x; o = s - x` are one body,
-  `x / 2.0` and `0.5 * x` another, and `x - x` is `0`. The affine form reassociates a sum and rounds a reciprocal
-  once, which every reduce schedule and fast-math division do already. A chain of named temps and one tree are one
-  body up to the single-reader guard — a sum two statements read stays a definition — so the readers of the normal
-  form (the tile lift, the kernel passes, the renderer) read one operation per statement; the renderer spells a nested
-  value a kernel pass built as temps of its own.
+  literal whose reciprocal is exact, a power of two, into the product by it) — and this step joins an affine
+  definition read exactly once, inside an affine reader, into the reader's region, so `x + x`, `2 * x` and `t = 3 * x;
+  s = t + x; o = s - x` are one body, `x / 2.0` and `0.5 * x` another, and `x - x` is `0`. The affine form
+  reassociates a sum, which every reduce schedule does already. It decides no rounding a knob owns: `x / 3.0` stays a
+  division, since whether it becomes a product by a rounded reciprocal is the division knob's choice. A chain of named
+  temps and one tree are one body up to the single-reader guard — a sum two statements read stays a definition — so
+  the readers of the normal form (the tile lift, the kernel passes, the renderer) read one operation per statement;
+  the renderer spells a nested value a kernel pass built as temps of its own.
 - `merge_sibling_reduce_loops` — unify sibling reduce axes whose Load positions overlap, then merge matching Loops
   before descending into their children. A parent merge therefore exposes child reductions to the same walk.
   Overlapping reductions share one canonical axis name (softmax's max + sum sweeps; the two matmul reductions in

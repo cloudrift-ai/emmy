@@ -301,8 +301,8 @@ fn canonical_fields(stmt: &Arc<Statement>, rank: &dyn Fn(&Name) -> Key) -> Arc<S
 /// A value's canonical form: comparisons as `<` and `<=`, a commutative node's operands by rank, and every sum in
 /// affine form — its terms `coefficient * operand` collected through additions, subtractions, negations and literal
 /// factors or divisors, like terms merged, zero terms dropped, the terms by the rank of their operands and the
-/// literal offset last. The reassociation of a sum and the rounding of a literal reciprocal are the exactness every
-/// reduce schedule and fast-math division already take.
+/// literal offset last. The reassociation of a sum is the exactness every reduce schedule already takes; a literal
+/// divisor becomes its reciprocal only where that is exact, since a division's rounding is the division knob's.
 pub(crate) fn value_canonical(
     e: &Expression,
     rank: &dyn Fn(&Name) -> Key,
@@ -388,8 +388,8 @@ fn ranked(e: &Expression, rank: &dyn Fn(&Name) -> Key) -> Key {
     }
 }
 
-/// The terms of an affine tree, `coefficient * operand` each, and its literal offset. A quotient by an integer
-/// literal stays a term, since integer division floors; only a float literal divisor folds into a reciprocal scale.
+/// The terms of an affine tree, `coefficient * operand` each, and its literal offset. A quotient folds into a
+/// reciprocal scale only by a float literal whose reciprocal is exact (`affine_node`); any other stays a term.
 pub struct AffineTerms {
     pub terms: Vec<(f64, Expression)>,
     pub offset: f64,
@@ -399,9 +399,10 @@ pub struct AffineTerms {
 }
 
 /// Whether an operation node is a node of the affine form in `class`'s coefficient domain: a sum, a difference, a
-/// negation, a product with a literal factor, and for a value a quotient by a literal. An `Index` folds integer
-/// literals alone and no quotient, since integer division floors; a product of two values or a quotient by a value is
-/// an operation like any other.
+/// negation, a product with a literal factor, and for a value a quotient by a float literal whose reciprocal is exact
+/// (a power of two). An `Index` folds integer literals alone and no quotient, since integer division floors; any
+/// other quotient by a literal keeps its own rounding, which the division knob decides, and a product of two values
+/// or a quotient by a value is an operation like any other.
 pub fn affine_node(op: Operation, args: &[Expression], class: ExprClass) -> bool {
     let literal = |index: usize| {
         matches!(args.get(index).map(|a| &**a), Some(Expr::Literal(lit))
@@ -410,9 +411,24 @@ pub fn affine_node(op: Operation, args: &[Expression], class: ExprClass) -> bool
     match op.info().affine {
         Some(AffineRole::Sum | AffineRole::Difference | AffineRole::Negation) => true,
         Some(AffineRole::Scale) => literal(0) || literal(1),
-        Some(AffineRole::Quotient) => class == ExprClass::Value && literal(1),
+        Some(AffineRole::Quotient) => {
+            class == ExprClass::Value && args.get(1).is_some_and(exact_reciprocal)
+        }
         None => false,
     }
+}
+
+/// Whether `divisor` is a float literal whose reciprocal is exact and normal in `f32`: `±2^k` for `|k| <= 126`.
+fn exact_reciprocal(divisor: &Expression) -> bool {
+    let Expr::Literal(lit) = &**divisor else {
+        return false;
+    };
+    let value = lit.value.as_f64();
+    lit.dtype == LitType::Float
+        && value != 0.0
+        && value.is_finite()
+        && value.abs().log2().fract() == 0.0
+        && value.abs().log2().abs() <= 126.0
 }
 
 /// The affine form's terms: collected through additions, subtractions, negations and literal factors or divisors.
@@ -461,10 +477,7 @@ pub fn affine_terms(e: &Expression, class: ExprClass) -> AffineTerms {
                     }
                 }
                 (Some(AffineRole::Quotient), [a, b]) => {
-                    if let Expr::Literal(lit) = &**b
-                        && lit.dtype == LitType::Float
-                        && lit.value.as_f64() != 0.0
-                    {
+                    if let Expr::Literal(lit) = &**b {
                         out.float = true;
                         collect(a, scale / lit.value.as_f64(), class, out);
                         return;
@@ -1121,7 +1134,8 @@ for r in 0..4:
     }
 
     /// One affine form, in the coefficient domain of the field's class: an index folds integer literals alone and
-    /// keeps a quotient a term, a value folds any literal and a quotient by a float literal into its reciprocal.
+    /// keeps a quotient a term, a value folds any literal and a quotient by a power-of-two float literal into its
+    /// reciprocal.
     #[test]
     fn the_affine_form_takes_its_coefficient_domain_from_the_class() {
         let normal = normalize_uncached(&body(
