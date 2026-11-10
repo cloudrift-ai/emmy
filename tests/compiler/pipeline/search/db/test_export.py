@@ -360,7 +360,10 @@ def test_a_remainder_reached_through_a_piece_pool_carries_the_next_recorded_cut(
     db = SearchDB()
     import_rows(db, regime_context(golden, rows[0].pins), golden, rows, source="golden:case")
     pools = placement_pools(db, golden_pools(db)[0])
-    [first, *deeper] = sorted((pool for pool in pools if pool.kernel.name == piece and pool.rows), key=lambda pool: len(pool.rows[0].knobs))
+    # The piece's pool by its identity: its remainders share its name and its one-knob rows, so a sort on either would
+    # order them by the digest, and the walk would start a cut or two down the chain.
+    [first] = [pool for pool in pools if pool.kernel.exact_identity == golden.kernel(piece).exact_identity]
+    deeper = [pool for pool in pools if pool.kernel.name == piece and pool.rows and pool is not first]
 
     def walk(pool):
         return walk_placement(pool, pool_context(pool), placement_decisions(pools, pool), own=True)
