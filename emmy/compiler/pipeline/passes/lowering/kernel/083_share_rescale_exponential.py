@@ -31,6 +31,8 @@ from emmy.compiler.ir.stmt import Assign, Body, Statement, free_names
 from emmy.compiler.pipeline import Pattern, RuleSkipped
 
 PATTERN = [Pattern("root", KernelOp)]
+#: The names the block adds beside the first factor's: the exponential's argument and its result.
+_FRESH = ("__s", "__e")
 
 
 def rewrite(root: Node) -> KernelOp:
@@ -103,8 +105,10 @@ def _share(stmts: list[Statement], *, typed: bool) -> list[Statement]:
             continue
         (first, dg), (late, dg_o) = sorted(found.values())
         alpha, beta = stmts[first], stmts[late]
-        # The block replaces the later factor, so nothing between may read the earlier one.
+        # The block replaces the later factor, so nothing between may read the earlier one; its two names are fresh.
         if alpha.dtype != beta.dtype or any(alpha.name in free_names(stmt) for stmt in stmts[first + 1 : late]):
+            continue
+        if any(f"{alpha.name}{suffix}" in writes for suffix in _FRESH):
             continue
         replaced[first] = []
         replaced[late] = _one_exponential(alpha, beta, dg, dg_o)
@@ -114,7 +118,7 @@ def _share(stmts: list[Statement], *, typed: bool) -> list[Statement]:
 def _one_exponential(alpha: Assign, beta: Assign, dg: str, dg_o: str) -> list[Statement]:
     """The two factors ``alpha = exp(dg)`` and ``beta = exp(dg_o)`` from one exponential (the module docstring)."""
     at_pivot = apply("equal", dg, 0.0)
-    argument, power = f"{alpha.name}__s", f"{alpha.name}__e"
+    argument, power = (f"{alpha.name}{suffix}" for suffix in _FRESH)
     other = apply("where", apply("equal", dg_o, 0.0), 1.0, apply("where", apply("less", dg_o, 0.0), 0.0, dg_o))
     return [
         Assign(argument, apply("where", at_pivot, dg_o, dg), dtype=alpha.dtype),
