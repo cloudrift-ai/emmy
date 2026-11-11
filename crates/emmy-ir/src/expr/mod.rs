@@ -1171,7 +1171,8 @@ impl Expression {
                 simplify_binary(self, *op, &args[0], &args[1], ctx, class)
             }
             Expr::Apply(name, args) => {
-                let new: Result<Vec<Expression>> = args.iter().map(|a| a.simplify_as(ctx, class)).collect();
+                let new: Result<Vec<Expression>> =
+                    args.iter().map(|a| a.simplify_as(ctx, class)).collect();
                 let new = new?;
                 // A copy of a value is the value: the cast a copy stood for is the definition's dtype.
                 if let ElementwiseOp::Known(op) = name

@@ -4,7 +4,10 @@
 
 use std::collections::HashMap;
 
-use super::{Chains, Key, spelled_key, value_numbers};
+use super::{Chains, Key, Number, Param, spelled_key, value_numbers};
+
+/// A statement's number and parameters, as the numbering gives them.
+type Value = (Number, Vec<Param>);
 use crate::Name;
 use crate::body::Body;
 use crate::statement::Statement;
@@ -43,7 +46,7 @@ pub fn congruent_states(body: &Body) -> Vec<Vec<Name>> {
         );
         let mut next: Vec<Vec<Name>> = Vec::new();
         for group in &groups {
-            let mut parts: Vec<(&Option<(super::Number, Vec<super::Param>)>, Vec<Name>)> = Vec::new();
+            let mut parts: Vec<(&Option<Value>, Vec<Name>)> = Vec::new();
             for name in group {
                 let number = &numbering.numbers[sites.sites[name].ordinal];
                 match parts.iter_mut().find(|(seen, _)| *seen == number) {
@@ -71,7 +74,11 @@ pub fn group_keys(groups: &[Vec<Name>]) -> HashMap<Name, Key> {
     groups
         .iter()
         .enumerate()
-        .flat_map(|(index, group)| group.iter().map(move |name| (*name, Key::Int(index as i64))))
+        .flat_map(|(index, group)| {
+            group
+                .iter()
+                .map(move |name| (*name, Key::Int(index as i64)))
+        })
         .collect()
 }
 
@@ -151,7 +158,9 @@ fn start_key(stmt: &Statement, scope: Option<(usize, usize)>) -> Key {
         op,
         Key::option(dtype.as_ref().map(|d| d.text())),
         match scope {
-            Some((block, position)) => Key::tuple([Key::Int(block as i64), Key::Int(position as i64)]),
+            Some((block, position)) => {
+                Key::tuple([Key::Int(block as i64), Key::Int(position as i64)])
+            }
             None => Key::None,
         },
     ])

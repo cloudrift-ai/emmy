@@ -52,8 +52,8 @@ pub(super) fn simplify_binary(
     let right = right.simplify_as(ctx, class)?;
     // The integer rules hold over integers: an index's operands, or a value's the ranges prove integer (a float has
     // no range), as a predicate over coordinates is.
-    let integer = class == ExprClass::Index
-        || (left.range(ctx).is_some() && right.range(ctx).is_some());
+    let integer =
+        class == ExprClass::Index || (left.range(ctx).is_some() && right.range(ctx).is_some());
     if let (Some(l), Some(r)) = (left.as_literal(), right.as_literal())
         && let Some(folded) = fold_binop_literals(op, l, r)?
     {
@@ -72,7 +72,8 @@ pub(super) fn simplify_binary(
                 return Ok(left);
             }
             if integer
-                && let Some(folded) = fold_digits(&Expression::binary(op, left.clone(), right.clone()), ctx)?
+                && let Some(folded) =
+                    fold_digits(&Expression::binary(op, left.clone(), right.clone()), ctx)?
             {
                 return Ok(folded);
             }
@@ -85,7 +86,8 @@ pub(super) fn simplify_binary(
                 return Ok(Expression::int(0));
             }
             if integer
-                && let Some(folded) = fold_digits(&Expression::binary(op, left.clone(), right.clone()), ctx)?
+                && let Some(folded) =
+                    fold_digits(&Expression::binary(op, left.clone(), right.clone()), ctx)?
             {
                 return Ok(folded);
             }
@@ -916,7 +918,10 @@ mod tests {
             ("-1 * (i % 8) + i", "8 * (i / 8)"),
             ("3 * i - 3 * (i % 4)", "12 * (i / 4)"),
         ] {
-            let (a, b) = (crate::expr::parse::parse(a).unwrap(), crate::expr::parse::parse(b).unwrap());
+            let (a, b) = (
+                crate::expr::parse::parse(a).unwrap(),
+                crate::expr::parse::parse(b).unwrap(),
+            );
             let (sa, sb) = (a.simplify(&ctx).unwrap(), b.simplify(&ctx).unwrap());
             assert_eq!(sa, sb, "{a} and {b}");
             assert_eq!(values(&sa, 0, 64), values(&a, 0, 64), "{a} became {sa}");
@@ -935,7 +940,11 @@ mod tests {
             ("minimum(i, 32)", "minimum(i, 32)"),
         ] {
             let e = crate::expr::parse::parse(spelling).unwrap();
-            assert_eq!(e.simplify(&ctx).unwrap(), crate::expr::parse::parse(simplified).unwrap(), "{e}");
+            assert_eq!(
+                e.simplify(&ctx).unwrap(),
+                crate::expr::parse::parse(simplified).unwrap(),
+                "{e}"
+            );
         }
     }
 
@@ -952,7 +961,11 @@ mod tests {
             let e = crate::expr::parse::parse(spelling).unwrap();
             let simplified = e.simplify(&ctx).unwrap();
             assert_eq!(simplified == e, kept, "{e} became {simplified}");
-            assert_eq!(values(&simplified, -16, 16), values(&e, -16, 16), "{e} became {simplified}");
+            assert_eq!(
+                values(&simplified, -16, 16),
+                values(&e, -16, 16),
+                "{e} became {simplified}"
+            );
         }
     }
 
@@ -963,10 +976,15 @@ mod tests {
         let ctx = digits_ctx(0, 64);
         let e = crate::expr::parse::parse("3 * x / (3 * y)").unwrap();
         assert_eq!(e.simplify_as(&ctx, ExprClass::Value).unwrap(), e);
-        assert_eq!(e.simplify_as(&ctx, ExprClass::Index).unwrap(), crate::expr::parse::parse("x / y").unwrap());
+        assert_eq!(
+            e.simplify_as(&ctx, ExprClass::Index).unwrap(),
+            crate::expr::parse::parse("x / y").unwrap()
+        );
         let over_coordinates = crate::expr::parse::parse("(i % 8) / 2").unwrap();
         assert_eq!(
-            over_coordinates.simplify_as(&ctx, ExprClass::Value).unwrap(),
+            over_coordinates
+                .simplify_as(&ctx, ExprClass::Value)
+                .unwrap(),
             over_coordinates.simplify(&ctx).unwrap(),
             "integer math over coordinates is an index's wherever it sits"
         );

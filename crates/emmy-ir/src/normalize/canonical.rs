@@ -635,8 +635,16 @@ mod tests {
     #[test]
     fn a_fragment_orders_alike_whatever_order_it_was_written_in() {
         let loads = "a = load x[k]\nb = load w[k]\nc = load y[k]";
-        let one = fragment_names(&format!("{loads}\nab = multiply(a, b)\nbc = multiply(b, c)"), &[]).unwrap();
-        let two = fragment_names(&format!("{loads}\nbc = multiply(b, c)\nab = multiply(a, b)"), &[]).unwrap();
+        let one = fragment_names(
+            &format!("{loads}\nab = multiply(a, b)\nbc = multiply(b, c)"),
+            &[],
+        )
+        .unwrap();
+        let two = fragment_names(
+            &format!("{loads}\nbc = multiply(b, c)\nab = multiply(a, b)"),
+            &[],
+        )
+        .unwrap();
         assert_eq!(one, two);
     }
 
@@ -644,7 +652,10 @@ mod tests {
     fn a_fragment_reads_an_outer_name_it_rebinds_ahead_of_the_rebinding() {
         let given = "e = subtract(d, m)\nm = add(m, e)";
         assert_eq!(fragment_names(given, &["m", "d"]).unwrap(), ["e", "m"]);
-        assert!(fragment_names(given, &[]).is_err(), "inside an order-free scope the read is the rebinding's");
+        assert!(
+            fragment_names(given, &[]).is_err(),
+            "inside an order-free scope the read is the rebinding's"
+        );
     }
 
     /// Two lexical bindings of one name in one scope are two values: the reads between them read the one before,

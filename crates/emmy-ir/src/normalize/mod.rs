@@ -110,7 +110,10 @@ pub fn prepare_body(body: &Body) -> Result<Body> {
             return Ok(simplified);
         }
         let groups = congruent_states(&simplified);
-        let next = merge_congruent_states(&place_values_keyed(&simplified, &group_keys(&groups))?, &groups);
+        let next = merge_congruent_states(
+            &place_values_keyed(&simplified, &group_keys(&groups))?,
+            &groups,
+        );
         stmts = next.clone();
         placed = Some(next);
     }
@@ -511,7 +514,11 @@ for k in 0..3:
             .unwrap())
             .unwrap();
             let listing = body_text(&normal).unwrap();
-            assert_eq!(listing.matches("load X").count(), 1, "{a} and {b}:\n{listing}");
+            assert_eq!(
+                listing.matches("load X").count(),
+                1,
+                "{a} and {b}:\n{listing}"
+            );
         }
     }
 

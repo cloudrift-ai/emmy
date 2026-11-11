@@ -50,14 +50,17 @@ fn reads(stmt: &Arc<Statement>, name: Name) -> bool {
 /// nowhere in the scope that updates it but by its update.
 fn can_go(body: &Body, name: Name) -> bool {
     let mut carried = false;
-    body.walk(&mut |here| carried |= matches!(&**here.stmt(), Statement::Carry(c) if c.name == name));
+    body.walk(&mut |here| {
+        carried |= matches!(&**here.stmt(), Statement::Carry(c) if c.name == name)
+    });
     if carried {
         let mut plain = false;
         body.walk(&mut |here| {
             let stmt = here.stmt();
             plain |= !matches!(&**stmt, Statement::Pre(_))
                 && !updates(stmt, name)
-                && (stmt.deps().contains(&name) || stmt.expressions().iter().any(|e| e.reads(name)));
+                && (stmt.deps().contains(&name)
+                    || stmt.expressions().iter().any(|e| e.reads(name)));
         });
         return !plain;
     }
@@ -101,7 +104,10 @@ fn rebuilt(body: &Body, alias: &HashMap<Name, Name>) -> Body {
             if nested.is_empty() {
                 renamed
             } else {
-                with_bodies(&renamed, nested.iter().map(|child| rebuilt(child, alias)).collect())
+                with_bodies(
+                    &renamed,
+                    nested.iter().map(|child| rebuilt(child, alias)).collect(),
+                )
             }
         })
         .collect();
