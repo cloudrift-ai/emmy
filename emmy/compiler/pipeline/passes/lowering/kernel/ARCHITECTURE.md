@@ -867,8 +867,10 @@ under the default fast-math regime. Structural body normalization stays independ
 advance (`SOFTMAX.advance`) gives each side of a pivot pair `exp` of its distance below `gn = maximum(g, g_o)`; one
 distance is `0`, so one exponential of the other gives both factors, and a select gives the factor of a side whose
 pivot is not finite (`-inf` gives `0`, NaN gives NaN). Every factor keeps the bits the two exponentials compute,
-whichever exponential and flush mode the kernel takes, so the rewrite is exact and runs always, with no knob. It
-reaches the per-element folds, the register and split merges, and a cooperative combine's merge. The recipe keeps
+whichever exponential and flush mode the kernel takes, so the rewrite is exact. It runs where the exponential is the
+accurate one, which it saves for two compares and four selects; under `FAST_EXP` the exponential is one `MUFU` and
+one multiply, fewer instructions than the selects, so the pair keeps both. It reaches the per-element folds, the
+register and split merges, and a cooperative combine's merge. The recipe keeps
 both exponentials: it is Loop IR, which every attention kernel's identity reads.
 
 `085_fast_exp` follows the enabled `FAST_MATH` default, unless an explicit `FAST_EXP` pin overrides it. It lowers `exp`

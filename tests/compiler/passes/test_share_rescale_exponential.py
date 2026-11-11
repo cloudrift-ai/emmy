@@ -29,6 +29,13 @@ from tests.compiler.terms import projection, slab
 
 rule = import_module("emmy.compiler.pipeline.passes.lowering.kernel.083_share_rescale_exponential")
 
+
+def _rewrite(op: KernelOp) -> KernelOp:
+    """The rewrite under the accurate exponential, where it runs."""
+    with pinned_knobs({"FAST_EXP": False}):
+        return rule.rewrite(SimpleNamespace(op=op))
+
+
 #: Every kind of pivot: finite values, signed zeros, a subnormal, the ``maximum`` seed ``∓1e30``, the largest finite
 #: values (whose distance overflows), infinities and NaN.
 _PIVOTS = np.float32([0.0, -0.0, 1.5, -2.25, 1e-40, -1e30, 1e30, 3.4e38, -3.4e38, np.inf, -np.inf, np.nan])
@@ -59,11 +66,18 @@ def _same_bits(got: np.ndarray, want: np.ndarray) -> bool:
 
 def test_the_pair_takes_one_exponential_and_the_rewrite_is_idempotent() -> None:
     body = parse_body(f"{_ADVANCE}\n    f32 out = alpha * beta")
-    shared = rule.rewrite(SimpleNamespace(op=KernelOp(body=body)))
+    shared = _rewrite(KernelOp(body=body))
     assert _exps(body) == 2 and _exps(shared.body) == 1
     assert [s.name for s in shared.body if isinstance(s, Assign)][-1] == "out"
     with pytest.raises(RuleSkipped, match="no rescale factor pair"):
-        rule.rewrite(SimpleNamespace(op=shared))
+        _rewrite(shared)
+
+
+def test_the_fast_exponential_keeps_both() -> None:
+    """One ``__expf`` is fewer instructions than the selects that would share it."""
+    body = parse_body(f"{_ADVANCE}\n    f32 out = alpha * beta")
+    with pinned_knobs({"FAST_EXP": True}), pytest.raises(RuleSkipped, match="fast exponential"):
+        rule.rewrite(SimpleNamespace(op=KernelOp(body=body)))
 
 
 @pytest.mark.parametrize(("dtype", "shared"), [(F32, True), (F16, False)])
@@ -74,23 +88,23 @@ def test_a_cooperative_merge_held_as_a_field_takes_one_exponential_at_f32(dtype,
     op = KernelOp(body=Body((combine,)))
     if not shared:
         with pytest.raises(RuleSkipped):
-            rule.rewrite(SimpleNamespace(op=op))
+            _rewrite(op)
         return
-    (combine,) = rule.rewrite(SimpleNamespace(op=op)).body
+    (combine,) = _rewrite(op).body
     assert _exps(combine.combine_states) == 1
 
 
 def test_a_pair_whose_earlier_factor_is_read_before_the_later_one_is_left_alone() -> None:
     body = parse_body(_ADVANCE.replace("    f32 dg_o = g_o - gn", "    f32 early = alpha * 2.0\n    f32 dg_o = g_o - gn"))
     with pytest.raises(RuleSkipped):
-        rule.rewrite(SimpleNamespace(op=KernelOp(body=body)))
+        _rewrite(KernelOp(body=body))
 
 
 def test_two_distances_below_another_pivot_are_no_pair() -> None:
     """Only distances below the maximum of the two sides they read are a pair: one of them is then ``0``."""
     body = parse_body(_ADVANCE.replace("gn = maximum(g, g_o)", "gn = maximum(g, h)"))
     with pytest.raises(RuleSkipped):
-        rule.rewrite(SimpleNamespace(op=KernelOp(body=body)))
+        _rewrite(KernelOp(body=body))
 
 
 def test_the_factors_are_the_two_exponentials_bits_on_the_host() -> None:
@@ -98,7 +112,7 @@ def test_the_factors_are_the_two_exponentials_bits_on_the_host() -> None:
     exponentials."""
     g, g_o = (np.float32(column) for column in zip(*product(_PIVOTS, repeat=2), strict=True))
     before = parse_body(_ADVANCE)
-    after = rule.rewrite(SimpleNamespace(op=KernelOp(body=before))).body
+    after = _rewrite(KernelOp(body=before)).body
     results = []
     for body in (before, after):
         env = {"g": g, "g_o": g_o}
@@ -145,14 +159,14 @@ def _both(graph: Graph, pins: dict, feeds: list[dict], *, cap: tuple[int, int], 
     "pins",
     [
         {"FAST_MATH": False},
-        {"FAST_MATH": True},
-        {"FAST_MATH": True, "FLUSH_TO_ZERO": False},
-        {"FAST_MATH": False, "FAST_EXP": True},
+        {"FAST_MATH": True, "FAST_EXP": False},
+        {"FAST_MATH": True, "FAST_EXP": False, "FLUSH_TO_ZERO": False},
     ],
-    ids=["expf", "fast-exp-flush", "fast-exp", "fast-exp-alone"],
+    ids=["standard", "fast-math-flush", "fast-math"],
 )
 def test_the_factors_are_the_two_exponentials_bits_on_the_device(pins) -> None:
-    """The factor pair itself, for every pair of pivots, under each exponential and flush mode the kernel can take."""
+    """The factor pair itself, for every pair of pivots, under the accurate exponential (where the rewrite runs) in
+    each flush mode."""
     g, g_o = (np.float32(column) for column in zip(*product(_PIVOTS, repeat=2), strict=True))
     n = len(g)
     body = parse_body(
@@ -209,7 +223,7 @@ def test_a_partition_merge_keeps_every_bit(fast_math, reduce, work) -> None:
         states = np.abs(rng.normal(size=(3, count, 8))).astype(np.float32) + 0.5
         states[0] = rng.choice(_PIVOTS, size=(count, 8))
         feeds.append({"x": states})
-    pins = {"WORK": work, "REDUCE": reduce, "RASTER": "", "PLACE": "fuse", "LOOPIFY": "0", "FAST_MATH": fast_math}
+    pins = {"WORK": work, "REDUCE": reduce, "RASTER": "", "PLACE": "fuse", "LOOPIFY": "0", "FAST_MATH": fast_math, "FAST_EXP": False}
     _both(_partition_merge(count), pins, feeds, cap=(8, 0))
 
 
@@ -233,4 +247,4 @@ def test_a_streamed_softmax_keeps_every_bit(fast_math, case) -> None:
             values[mask] = rng.choice(_PIVOTS, size=int(mask.sum()))
             feed[name] = values.astype(program.buffer(name).dtype.np)
         feeds.append(feed)
-    _both(program, {**pin_of(case, case.row), "FAST_MATH": fast_math}, feeds, cap=case.compute_cap)
+    _both(program, {**pin_of(case, case.row), "FAST_MATH": fast_math, "FAST_EXP": False}, feeds, cap=case.compute_cap)

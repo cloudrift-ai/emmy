@@ -14,8 +14,12 @@ first one's distance ``s`` is the exponential's argument; the second distance is
     beta  = dg == 0 ? e : (dg_o == 0 ? 1 : (dg_o < 0 ? 0 : dg_o))
 
 Each factor is the one the two exponentials compute — the same bits for a number, a NaN for a NaN — whichever
-exponential the kernel takes and with or without flush to zero, so the rewrite is exact and runs always: no fork, no
-knob. It runs before ``085_fast_exp``, which lowers the one exponential left. The recipe stays as it is: it is Loop IR,
+exponential the kernel takes and with or without flush to zero, so the rewrite is exact. It removes work only where
+the exponential is the accurate one: there it saves an ``expf`` for two compares and four selects. The fast
+exponential (``FAST_EXP``) is one ``MUFU`` and one multiply, fewer instructions than the selects (a four-row
+cooperative softmax ran 1.32x slower on the RTX 5090 with them), so under it the pair keeps both exponentials. The
+rewrite decides nothing either way: it reads the kernel's exponential, as ``085_fast_exp``, which runs after it,
+does. The recipe stays as it is: it is Loop IR,
 every attention kernel's identity reads it, and the chunk tier's matcher reads the factor's shape there.
 """
 
@@ -29,6 +33,7 @@ from emmy.compiler.ir.expression import Var, apply
 from emmy.compiler.ir.kernel import KernelOp
 from emmy.compiler.ir.stmt import Assign, Body, Statement, free_names
 from emmy.compiler.pipeline import Pattern, RuleSkipped
+from emmy.compiler.pipeline.search.space import FAST_EXP, precision_pin
 
 PATTERN = [Pattern("root", KernelOp)]
 #: The names the block adds beside the first factor's: the exponential's argument and its result.
@@ -37,6 +42,8 @@ _FRESH = ("__s", "__e")
 
 def rewrite(root: Node) -> KernelOp:
     op: KernelOp = root.op
+    if precision_pin(FAST_EXP):
+        raise RuleSkipped("the fast exponential costs fewer instructions than the selects that would share it")
     body = _walk(op.body)
     if body == op.body:
         raise RuleSkipped("no rescale factor pair")
