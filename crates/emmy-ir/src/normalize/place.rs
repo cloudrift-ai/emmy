@@ -550,7 +550,12 @@ mod tests {
                 O[i, 3] = y3
             ",
         );
-        assert_eq!(count(&out, &|s| matches!(s, Statement::Assign(_))), 4, "{}", text(&out));
+        assert_eq!(
+            count(&out, &|s| matches!(s, Statement::Assign(_))),
+            4,
+            "{}",
+            text(&out)
+        );
     }
 
     /// Two accumulators seeded alike ahead of an unseeded loop hold two values inside it from the second step on:
@@ -573,7 +578,12 @@ mod tests {
                     m2 <- maximum(m2, t) over k
             ",
         );
-        assert_eq!(count(&out, &|s| matches!(s, Statement::Assign(_))), 2, "{}", text(&out));
+        assert_eq!(
+            count(&out, &|s| matches!(s, Statement::Assign(_))),
+            2,
+            "{}",
+            text(&out)
+        );
     }
 
     /// A barrier pins the loop that holds it, and a value read after that loop is placed where it is read.
@@ -610,8 +620,16 @@ mod tests {
             MmaSyncPtx(c_frag=c2, a_frag=a, b_frag=b, shape=(16, 8, 16))
             ",
         );
-        let numbering = crate::numbering::value_numbers(&given, &crate::numbering::spelled_key, crate::numbering::Chains::Flat);
-        let number = |index: usize| numbering.numbers[numbering.ordinal(&given.at(index))].clone().map(|v| v.0);
+        let numbering = crate::numbering::value_numbers(
+            &given,
+            &crate::numbering::spelled_key,
+            crate::numbering::Chains::Flat,
+        );
+        let number = |index: usize| {
+            numbering.numbers[numbering.ordinal(&given.at(index))]
+                .clone()
+                .map(|v| v.0)
+        };
         assert_ne!(number(6), number(7));
     }
 

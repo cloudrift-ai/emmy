@@ -489,7 +489,10 @@ impl Context<'_> {
         // halves): each is the statement's value at its position.
         for (position, name) in names.iter().enumerate() {
             let own = if names.len() > 1 {
-                (hash_parts([Key::Num(value.0), Key::Int(position as i64)]), value.1.clone())
+                (
+                    hash_parts([Key::Num(value.0), Key::Int(position as i64)]),
+                    value.1.clone(),
+                )
             } else {
                 value.clone()
             };
@@ -574,7 +577,11 @@ impl Context<'_> {
         if in_place.is_empty() {
             Key::tuple([Key::text(text), Key::Tuple(expressions)])
         } else {
-            Key::tuple([Key::text(text), Key::Tuple(expressions), Key::Tuple(in_place)])
+            Key::tuple([
+                Key::text(text),
+                Key::Tuple(expressions),
+                Key::Tuple(in_place),
+            ])
         }
     }
 
