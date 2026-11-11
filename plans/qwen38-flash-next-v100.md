@@ -840,11 +840,10 @@ Rounds, as with DeepSeek. Each round starts from a profile and ends with a boot 
     The done bar for this round, 200 tok/s, is not reached.
   - One profiled boot, rank 0, one decode step at eight requests, against the 2026-11-07 profile: the routed experts
     5.93 ms (10.37), their dispatch 0.48 ms (5.03), GPU busy 25.5 ms (34.5), 2,961 kernels (5,361). The experts and
-    their dispatch came to 6.4 ms, under the gate's 8. The step lost only 6.2 of the 9 ms because the GPU now waits
-    on the host: unprofiled, the gap between tokens is about 4.5 ms over the GPU busy time, against 1.8-2.0 ms
-    before; the long gaps of vLLM's step work are 4.2 ms per step in both profiles and used to hide behind GPU work.
-    Profiled step times flatter a step with fewer kernels (about 1.6 us of profiler cost per kernel), so read gains
-    from unprofiled boots.
+    their dispatch came to 6.4 ms, under the gate's 8. The step lost only 6.2 of the 9 ms because the profiles
+    over-read the saving: the profiled busy time fell 8.95 ms, the GPU time per step measured without the profiler
+    6.8 ms (the host time note below). Profiled step times flatter a step with fewer kernels, so read gains from
+    unprofiled boots.
   - Correctness: two branch boots give the same text one request at a time, 6 of 6, and the same as main. Six
     requests at once give the same text on two branch boots for 5 of 6; batching changes the text against the same
     prompt alone on main too (4 of 6 identical alone and batched, the branch 3 of 6), and whether batched text varies
@@ -854,7 +853,58 @@ Rounds, as with DeepSeek. Each round starts from a profile and ends with a boot 
     audit deploys all 14 twins from the golden alone.
   - Not measured: how often eight rows share an expert in real routing (each row reads its own ten slices); the wait
     for the slowest rank under the wider program (rank 0 waited about 0.2 ms per step in its all-reduces); four
-    requests; the host time of a decode step, now the next lever at eight requests.
+    requests.
+- **Host time of a decode step (2026-11-11).** #1378's tree, main with #1377 and the step 3 fork image, on boots never
+  profiled. py-spy samples the engine core and all four workers without pausing them; the sampled runs read within
+  1% of unsampled ones. The torch profiler cannot measure this: it slows the host's Python 2-3x and Emmy's CUDA graph
+  launch call 4x. Per decode step, ms, the range over the four ranks:
+
+  | Per decode step, ms | Fork, 8 requests | Emmy main, 8 | Emmy #1378, 8 | Fork, 1 request | Emmy #1378, 1 |
+  | --- | ---: | ---: | ---: | ---: | ---: |
+  | Step, mean gap between tokens | 24.0 | 36.5 | 29.7 | 12.9 | 20.2 |
+  | GPU time: from the graph launch call to the sampled tokens on the host | 20.2-20.6 | 32.6-33.1 | 26.0-26.3 | 9.8-10.0 | 16.7-17.0 |
+  | of it, the graph launch call itself | 0.03-0.09 | 3.6-3.8 | 1.5-2.0 | 0.01 or less | 1.3-1.9 |
+  | Host time with nothing queued on the GPU | 3.4-3.8 | 3.4-3.9 | 3.4-3.7 | 3.0-3.1 | 3.2-3.5 |
+  | of it, attention metadata (Gated DeltaNet 0.8-1.0) | 1.7-2.0 | 1.7-1.8 | 1.6-1.9 | 1.7-2.0 | 1.7-1.9 |
+  | of it, input preparation with the n-gram context | 0.6-0.8 | 0.6-0.9 | 0.5-0.9 | 0.5-0.6 | 0.7-0.8 |
+  | of it, the engine core's scheduling and the step's messages | 0.5-0.7 | 0.4-0.9 | 0.5-0.9 | 0.1-0.5 | 0.2-0.7 |
+
+  - The host time with nothing queued on the GPU is 3.0-3.9 ms on every server, and it is the same code: the fork's
+    vLLM builds the metadata of the Gated DeltaNet, short-convolution, Mamba and sparse-attention layers, prepares the
+    inputs, and the engine core schedules the next step. Emmy adds nothing there. Its one extra host cost is the
+    graph launch call, and the GPU works during it: inside Emmy's graph the GPU idles under 0.01 ms per step, even in
+    the profiled trace where the call took 8.5 ms. Why Emmy's graph costs about 0.6 us per kernel to launch and the
+    fork's almost nothing is not established.
+  - Main and #1378 spend the same host time, so the eight-row round did not leave the GPU waiting on the host. The
+    unprofiled gap between tokens minus the profiled GPU busy time is not host time: the profiler changes both.
+  - So the gap left is GPU work: 26.0-26.3 against 20.2-20.6 ms per step at eight requests, 16.7-17.0 against
+    9.8-10.0 at one. The profiled split at eight requests, #1378 against the fork: routed experts and their dispatch
+    6.4 against 4.4 ms, pre and post 7.0 against 5.8, glue 2.4 against 1.7, the hosted dense matmuls 4.3 against 3.6.
+  - Async scheduling hides the host time behind the previous step's GPU work. Both sides run with it off, as the fork's
+    release-notes example for this model does; that example serves MTP to one sequence, and with MTP off the fork's vLLM
+    turns it on by default. Measured with it on, boots never profiled; the fork's synchronous rows from the same day,
+    Emmy's from the A/B above:
+
+    | Point | Fork | Fork, async | Emmy #1378 | Emmy #1378, async |
+    | --- | ---: | ---: | ---: | ---: |
+    | One request 1K / 512, per token | 12.8-13.1 ms | 9.61-9.62 ms | 20.3-20.7 ms | 16.68-16.69 ms |
+    | 8 requests 4K / 1K, total output | 275-277 tok/s | 315-317 tok/s | 192-194 tok/s | 212-216 tok/s |
+    | 8 requests, median gap between tokens | 23.6 ms | 19.9 ms | 30.0 ms | 25.9 ms |
+    | 8 requests, mean first token | 3.4-3.5 s | 3.8-4.0 s | 6.7-6.8 s | 7.6-8.1 s |
+
+  - It takes 3.3-4.1 ms from every step on both sides, so it does not close the gap: at eight requests Emmy goes from
+    0.70 to 0.68 of the fork's output, at one request from 1.6x to 1.7x its time per token. The first token at eight
+    requests gets slower on both. Emmy's text does not change with it: one request at a time 6 of 6 against both #1378
+    boots, six at once 4 of 6 (two synchronous boots agree on 5). The fork's does: 4 of 6 one at a time and 3 of 6 six
+    at once, against two synchronous boots that agree 6 of 6.
+  - Proposed next round: async scheduling in step 2's production shape, on both sides. It is one flag, measured above at
+    10-12% more output at eight requests and 18% less time per token at one for Emmy, 14% and 25% for the fork, and it
+    would also speed up an earlier release on the plain fork. It is the owner's call, because it moves the done gate's
+    fork baseline to the faster rows, and it needs step 2's checks on the fork (accuracy sets, four replicas, the margin
+    test, why its text changes) and step 4's on Emmy. The parity rounds do not change: Emmy has no host lever left, and
+    the next one stays the prefill experts, then the routed experts at eight requests (80 slices at about 410 GB/s,
+    against the fork's about 74 experts at about 550).
+  - Not measured: first tokens at 8K, 32K and the full context with async scheduling; four requests.
 - Gate, the definition of done. Both sides run step 2's production configuration: the same checkpoint, layout,
   context, key/value pool, concurrency, prefix-cache and MTP settings; fork, Emmy, Emmy, fork rounds; three repeats
   each:
