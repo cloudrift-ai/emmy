@@ -6,16 +6,16 @@
 
 use std::sync::Arc;
 
-use crate::Result;
 use crate::body::Body;
 use crate::elementwise::Operation;
 use crate::expr::{ExprClass, Expression, SimplifyCtx};
 use crate::normalize::{
     drop_unread_values, extend_simplify_ctx, merge_congruent_states, place_values_keyed,
-    share_values, simplify_in, with_bodies,
+    share_values, simplify_in, value_canonical, with_bodies,
 };
-use crate::numbering::{congruent_states, group_keys};
+use crate::numbering::{Key, congruent_states, group_keys};
 use crate::statement::Statement;
+use crate::{Name, Result};
 
 /// `body` with every expression simplified under `ctx` (the launch's ranges of the built-ins) and the ranges of the
 /// axes around it (a `Tile`'s included), every pure value a scope computes twice computed once, every group of
@@ -37,7 +37,7 @@ pub fn hoist_invariants(body: &Body, ctx: &SimplifyCtx) -> Result<Body> {
 fn rounds(body: &Body, ctx: &SimplifyCtx, motion: bool) -> Result<Body> {
     let mut stmts = body.clone();
     for _ in 0..8 {
-        let simplified = simplify_in(&stmts, ctx)?;
+        let simplified = canonical_indices(&simplify_in(&stmts, ctx)?)?;
         let groups = congruent_states(&simplified);
         let keys = group_keys(&groups);
         let shared = if motion {
@@ -52,6 +52,33 @@ fn rounds(body: &Body, ctx: &SimplifyCtx, motion: bool) -> Result<Body> {
         stmts = next;
     }
     Ok(stmts)
+}
+
+/// `body` with every index in its affine spelling (`value_canonical` under the names as they stand): a sum's literal
+/// terms fold and like terms merge, so two spellings of one address are one value to share. Only an index: a value's
+/// sum is float arithmetic, which its order rounds.
+fn canonical_indices(body: &Body) -> Result<Body> {
+    let rank = |name: &Name| Key::Str(*name);
+    let stmts: Result<Vec<Arc<Statement>>> = body
+        .stmts()
+        .iter()
+        .map(|stmt| {
+            let stmt = Statement::try_map_classed_expressions(stmt, &mut |class, e| {
+                Ok(if class == ExprClass::Index {
+                    value_canonical(e, &rank, class)
+                } else {
+                    e.clone()
+                })
+            })?;
+            let nested = stmt.nested();
+            if nested.is_empty() {
+                return Ok(stmt);
+            }
+            let bodies: Result<Vec<Body>> = nested.iter().map(canonical_indices).collect();
+            Ok(with_bodies(&stmt, bodies?))
+        })
+        .collect();
+    Ok(body.rebuilt(stmts?))
 }
 
 /// `body` with every integer division and remainder by a power of two whose dividend the ranges prove non-negative
@@ -199,6 +226,28 @@ mod tests {
         assert!(out.starts_with("Tile("), "{out}");
     }
 
+    /// A barrier orders what the body writes: a read of a buffer nothing writes is one value on both sides of it, a
+    /// read of the shared slab the body fills is two.
+    #[test]
+    fn a_barrier_orders_only_what_the_body_writes() {
+        let out = optimized(
+            "
+            Tile(axes=(m in 0..4, _lane in 0..32)):
+                x = load X[m, _lane]
+                s = load S[_lane]
+                S[_lane] = x
+                Sync
+                y = load X[m, _lane]
+                t = load S[_lane]
+                O[m, _lane] = y
+                P[m, _lane] = t
+                Q[m, _lane] = s
+            ",
+        );
+        assert_eq!(out.matches("load X").count(), 1, "{out}");
+        assert_eq!(out.matches("load S").count(), 2, "{out}");
+    }
+
     #[test]
     fn a_barrier_stays_where_it_is() {
         let given = "
@@ -290,7 +339,7 @@ mod tests {
         );
         let out = text(&optimize_kernel_body(&given, &SimplifyCtx::empty()).unwrap());
         assert!(
-            out.contains("decode=(block_idx.x * 128 + thread_idx.x)"),
+            out.contains("decode=(128 * block_idx.x + thread_idx.x)"),
             "{out}"
         );
     }

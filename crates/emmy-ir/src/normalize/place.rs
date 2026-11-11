@@ -145,14 +145,19 @@ impl Placer<'_> {
                 out.extend(marks.iter().cloned());
             }
         }
-        if let Some(v) = self.version.get(&Name::new("")) {
+        // A barrier orders memory the body writes: what another thread wrote ahead of it is visible behind it. A read
+        // of a buffer nothing in the body writes, and a value computed from registers alone, is the same on both sides.
+        let mut reads: Vec<Name> = stmt.external_reads();
+        if let Statement::Pre(p) = stmt {
+            reads.push(p.carrier);
+        }
+        if reads.iter().any(|name| self.written.contains(name))
+            && let Some(v) = self.version.get(&Name::new(""))
+        {
             out.insert((Name::from(""), *v));
         }
-        for name in stmt.external_reads() {
-            out.extend(self.read_of(&name));
-        }
-        if let Statement::Pre(p) = stmt {
-            out.extend(self.read_of(&p.carrier));
+        for name in &reads {
+            out.extend(self.read_of(name));
         }
         out
     }
@@ -1106,9 +1111,11 @@ mod tests {
     #[test]
     fn hoist_keeps_a_read_of_a_buffer_the_loop_writes() {
         // Axis-invariance alone earns no hoist: a read behind a write to its own buffer, or behind an ordered
-        // execution protocol, follows the scope's ordering constraints and stays.
+        // execution protocol over a buffer the body writes (another thread's write is visible behind it), follows the
+        // scope's ordering constraints and stays.
         let out = placed(
             "
+            S[1] = one
             for i in 0..4:
                 O[0] = one
                 back = load O[0]
@@ -1118,9 +1125,9 @@ mod tests {
                 Q[i] = staged
             ",
         );
-        assert_eq!(statement_types(&out), ["Loop"]);
+        assert_eq!(statement_types(&out), ["Write", "Loop"]);
         assert_eq!(
-            statement_types(&inner(&out.stmts()[0])),
+            statement_types(&inner(&out.stmts()[1])),
             ["Write", "Load", "Sync", "Load", "Write", "Write"]
         );
     }

@@ -215,10 +215,16 @@ def dtype_input_scale(dtype) -> float:
 
 def grouped_raster_decode(src: str, group: int) -> list[str]:
     """The block-axis decode lines of ``src`` that take a grouped raster of ``group`` block-tiles: a block axis read
-    from the CTA index alone as its group's base plus its offset in the group (``... * group + ...``)."""
+    from the CTA index alone as its group's base, a multiple of ``group``, plus its offset in the group. A flat
+    decode reads each block axis as a digit of the CTA index, with no multiple."""
+    import re  # noqa: PLC0415
+
+    multiple = re.compile(rf"(?<![\w.]){group} \*|\* {group}(?![\w.])")
     lines = [line.strip() for line in src.splitlines()]
     return [
-        line for line in lines if line.startswith("int ") and "blockIdx.x" in line and "threadIdx" not in line and f" * {group} + " in line
+        line
+        for line in lines
+        if line.startswith("int ") and "blockIdx.x" in line and "threadIdx" not in line and multiple.search(line)
     ]
 
 

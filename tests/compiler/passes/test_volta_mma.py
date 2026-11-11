@@ -364,7 +364,7 @@ def test_sm70_ring_splits_the_blocking_copy_across_the_drain(monkeypatch) -> Non
     prologue, _, body = src.partition("for (int _ks")
     drain = body.index("emmy_mma_m8n8k4_f16_f32")
     unpack = body.index("_a_stage0_0 = _v__a_stage0_0_h[0];")  # the carried vector spreads to the staged names
-    deposit = body.index("*reinterpret_cast<uint2*>(&_a_smem[_a_smem_store")
+    deposit = body.index("*reinterpret_cast<uint2*>(&_a_smem[")
     barrier = body.index("__syncthreads();")
     issue = body.index("_v__a_stage0_0 = __ldg(")  # the gmem load of the chunk after next, past the barrier
     assert drain < unpack < deposit < barrier < issue, "the loads issue past the barrier that publishes the deposit"
@@ -452,7 +452,7 @@ def test_sm70_causal_attention_selects_the_mask_per_fragment_element(monkeypatch
     src, _ = _source(_sdpa_graph(d=256, causal=True, dynamic=True), Context(compute_capability=(7, 0)))
     (fragment,) = re.findall(r"(_w0_0_\w+?)\[_e\] = _w0_0_\w+\[_e\] \+ __half2float\(in1\);", src)
     assert f"float {fragment}[8]" in src
-    assert f"{fragment}[0] = ((a0_b * 16 + a0_u * 16 + _vr < a1__ck + _vc) ? (-1e+30f) : ({fragment}[0]));" in src
+    assert f"{fragment}[0] = ((16 * a0_b + 16 * a0_u + _vr < a1__ck + _vc) ? (-1e+30f) : ({fragment}[0]));" in src
     assert f"{fragment}[0] = ((a1__ck + _vc >= seq_len) ? (-1e+30f) : ({fragment}[0]));" in src
     assert "__frow" not in src and "__fcol" not in src
     assert "emmy_c_to_a_f16_m8n8k4" in src

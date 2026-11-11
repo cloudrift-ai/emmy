@@ -2,7 +2,13 @@
 
 This stage turns a scheduled `TileOp` into a `KernelOp` (a thread-bound CUDA-IR body), then runs a short chain of
 Kernel-IR peepholes over it. The CUDA lowering (`lowering/cuda`) renders the `KernelOp` to a `__global__` source string
-afterwards.
+afterwards, after two rules of its own: `007_decode_grid` turns the `Tile` into a `Grid` whose axes hold their decode
+as expressions over `thread_idx.x` and `block_idx.x` (`decode_tile`), its tail guard a `Cond` where the launch does
+not cover the cells exactly, and `008_optimize` runs the optimizer again under the launch's ranges of the built-ins,
+then spells every index division and remainder by a power of two over a non-negative dividend as a shift and a mask
+(`reduce_strength`). A block axis then reads `blockIdx.x` alone and a thread axis `threadIdx.x` alone, unsigned, and an
+emitter has no decode of its own to spell. Both run after the rules that read the `Tile` (the kernel cache, the
+zero-init delegation), so `--ir kernel` and the diagnostics see the `Tile`.
 
 ## `010_materialize` — bind the schedule to threads (and expand the contraction)
 
@@ -789,9 +795,11 @@ shared and global storage; ownership, supported geometry and the card's shared-m
 
 `032_optimize` runs the crate's Kernel IR optimizer (`optimize_kernel_body`) over each kernel body once dtypes are
 stamped and before the memory peepholes, which read the indices it simplifies: every expression simplified under the
-ranges of the `Tile`'s axes and the loops around it, each pure value a scope computes twice computed once (the scalar
-tier's copies of one fold step under `__c{i}_{j}` read one value), congruent carried states merged, unread values
-dropped. Every rewrite is exact and removes work, so the pass carries no knob; nothing moves out of a loop.
+ranges of the `Tile`'s axes and the loops around it, every index spelled in its affine form (literal terms folded,
+like terms merged), each pure value a scope computes twice computed once (the scalar tier's copies of one fold step
+under `__c{i}_{j}` read one value), congruent carried states merged, unread values dropped. A barrier orders only the
+buffers the body writes, so a read of an input is one value on both sides of it. Every rewrite is exact and removes
+work, so the pass carries no knob; nothing moves out of a loop.
 
 Vector loads and stores share one alignment proof over the complete flattened address. Every variable coefficient
 and the constant base must be divisible by the vector width, and subsequent elements must be consecutive. An aligned
@@ -843,9 +851,10 @@ the two branches' private chains are one computation up to their load indices (a
 branch — RoPE's rotate-half negation), `045` emits the chain once with each load at `cond ? index_a : index_b`, the
 branches' own clamps folded against `cond`. An effect between the two chains, a carried load, or a predicate or
 index defined after the chains start refuses the merge. `047` then unrolls every lane-strided loop of at most eight trips (a
-cooperative reduce's fold and its full-row projection: a 128-wide row at 32 lanes is four) and drops each load of a
-read-only buffer at an index an earlier load of the same body already read, compared after folding against the lane
-ranges. The projection reads the values the fold loaded, and a partner read resolves to another trip of the same lane.
+cooperative reduce's fold and its full-row projection: a 128-wide row at 32 lanes is four) and runs the Kernel IR
+optimizer over the body: each trip's index folds against the lane ranges and takes its affine spelling, so a load at
+an index an earlier load of the same scope read is computed once, across the combine's barriers too. The projection
+reads the values the fold loaded, and a partner read resolves to another trip of the same lane.
 Both are structural and carry no knob: they change no schedule and no identity, only the emitted body. Every kernel
 buffer parameter is `__restrict__` (a launch's output never shares memory with its inputs), which lets nvcc keep
 read-only operands in registers across the kernel's stores and read them through the non-coherent path.
