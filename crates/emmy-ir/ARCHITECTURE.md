@@ -15,8 +15,8 @@ The modules stand in a tower: each imports only the ones below it (`field`, `sta
 each other's types), from the interned names and the expression tree at the bottom, through the operation table, the
 dtypes, the axes, the field types, the statement declarations and `Body`, the protocol, the text, the ordering
 constraints and the value numbering, to `normalize/` (the driver `normalize_body` and the steps, one module per step,
-every tie-break in `ties.rs`) and `identity.rs` at the top. Every file imports what it uses by name; no child module
-takes its parent's imports.
+every tie-break in `ties.rs`) and `identity.rs`, and at the top `optimize/`, the Kernel IR optimizer, which reads
+`normalize/`'s steps. Every file imports what it uses by name; no child module takes its parent's imports.
 
 ## Data
 
@@ -142,6 +142,20 @@ two sides enter the digest in content order (an operand's whole value, its numbe
 once to learn the order on state rolled back, once in it, so a parameter or buffer first met inside the node takes the
 index the content gives it. Two loads of one buffer that tie on rank order the normal form by their names, and the
 identity stays the same whatever the buffers are called.
+
+## The Kernel IR optimizer
+
+`optimize/` is the crate's second entry point, `optimize_kernel_body`, which one kernel pass runs
+(`032_optimize`): the exact rewrites a kernel body takes after lowering. Each removes work and adds none, so none is a
+decision. It simplifies every expression under the ranges of the axes around it, a `Tile`'s included, shares every
+pure value a scope computes twice (`share_values`: placement's numbering and availability with no motion), merges
+congruent carried states and drops unread values, until a round changes nothing. Nothing moves to another scope:
+moving a value out of a loop lengthens its live range, a choice for evidence. The module is no normalization step and
+normalization never reaches it, since every normalization step runs inside `normalize_body`. It names no kernel
+statement type: the numbering and placement read a kernel statement through the protocol like any other, so a name
+a statement defines at each of several positions is a value apart, a name it reads and defines again is read as the
+value it held, a state a loop updates is read inside the loop as the step before, and a block holding an ordered
+protocol (a barrier) stays where it is.
 
 ## Memos
 

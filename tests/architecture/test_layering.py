@@ -147,6 +147,25 @@ def test_normalization_has_one_entry_point() -> None:
     assert "pub fn normalize_body(" in crate
 
 
+def test_the_kernel_ir_optimizer_is_a_pass_beside_normalization() -> None:
+    """The Kernel IR optimizer is the crate's second entry point, ``optimize_kernel_body`` in its ``optimize`` module:
+    pass mechanics that read the numbering and placement, run by one kernel pass. Normalization never reaches it,
+    since every normalization step runs inside ``normalize_body``."""
+    from emmy.compiler.ir.kernel import optimize_kernel_body
+
+    assert callable(optimize_kernel_body)
+    src = _REPO_ROOT / "crates" / "emmy-ir" / "src"
+    assert "pub fn optimize_kernel_body(" in (src / "optimize" / "mod.rs").read_text()
+    normalize = [path.relative_to(src) for path in (src / "normalize").rglob("*.rs") if "optimize::" in path.read_text()]
+    assert not normalize, f"normalization reaches the optimizer: {normalize}"
+    callers = [
+        path.relative_to(_REPO_ROOT)
+        for path in (_REPO_ROOT / "emmy").rglob("*.py")
+        if "optimize_kernel_body" in path.read_text() and "ir/kernel/__init__.py" not in str(path)
+    ]
+    assert [path.name for path in callers] == ["032_optimize.py"], callers
+
+
 _STMT_PACKAGE = "emmy.compiler.ir.stmt"
 
 

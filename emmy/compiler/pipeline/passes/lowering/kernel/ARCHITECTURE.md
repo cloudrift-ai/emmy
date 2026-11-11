@@ -787,6 +787,12 @@ shared and global storage; ownership, supported geometry and the card's shared-m
 
 ## Kernel-IR peepholes
 
+`032_optimize` runs the crate's Kernel IR optimizer (`optimize_kernel_body`) over each kernel body once dtypes are
+stamped and before the memory peepholes, which read the indices it simplifies: every expression simplified under the
+ranges of the `Tile`'s axes and the loops around it, each pure value a scope computes twice computed once (the scalar
+tier's copies of one fold step under `__c{i}_{j}` read one value), congruent carried states merged, unread values
+dropped. Every rewrite is exact and removes work, so the pass carries no knob; nothing moves out of a loop.
+
 Vector loads and stores share one alignment proof over the complete flattened address. Every variable coefficient
 and the constant base must be divisible by the vector width, and subsequent elements must be consecutive. An aligned
 last coordinate alone is insufficient when an outer row has an odd stride. Unknown multidimensional layouts retain

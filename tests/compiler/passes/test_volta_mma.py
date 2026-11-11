@@ -452,8 +452,8 @@ def test_sm70_causal_attention_selects_the_mask_per_fragment_element(monkeypatch
     src, _ = _source(_sdpa_graph(d=256, causal=True, dynamic=True), Context(compute_capability=(7, 0)))
     (fragment,) = re.findall(r"(_w0_0_\w+?)\[_e\] = _w0_0_\w+\[_e\] \+ __half2float\(in1\);", src)
     assert f"float {fragment}[8]" in src
-    assert f"{fragment}[0] = ((a0_b * 16 + a0_u * 16 + 0 + _vr < a1__ck + 0 + _vc) ? (-1e+30f) : ({fragment}[0]));" in src
-    assert f"{fragment}[0] = ((a1__ck + 0 + _vc >= seq_len) ? (-1e+30f) : ({fragment}[0]));" in src
+    assert f"{fragment}[0] = ((a0_b * 16 + a0_u * 16 + _vr < a1__ck + _vc) ? (-1e+30f) : ({fragment}[0]));" in src
+    assert f"{fragment}[0] = ((a1__ck + _vc >= seq_len) ? (-1e+30f) : ({fragment}[0]));" in src
     assert "__frow" not in src and "__fcol" not in src
     assert "emmy_c_to_a_f16_m8n8k4" in src
 
