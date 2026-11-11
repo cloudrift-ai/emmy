@@ -45,8 +45,8 @@ engine:
       image: "vllm/vllm-openai@sha256:befccf0e7e4089aa23926bb6f887a85c0d46c2a99e6de5c5ffdf5cb7957c5b34"
       # --kv-cache-dtype fp8: halves the per-token pool cost of the 16 full-attention layers (32 KiB instead of
       #   64 KiB), which is what takes the context from 64K to 112K; vLLM then picks the FlashInfer attention
-      #   backend. GSM8K (1,000 questions, thinking off) scores 0.829 strict against 0.845 with the BF16 cache,
-      #   within one standard error (0.012); a planted passphrase is retrieved at 16K, 32K, 64K and 112K.
+      #   backend. GSM8K (1,000 questions, thinking off) scores 0.952 strict against 0.950 with the BF16 cache,
+      #   and retrieval tasks score 1.00 at 8K, 32K, 64K and 110K prompts.
       # --max-num-batched-tokens 4096: the per-step budget prefill and decode share. 4,096 keeps decode steps
       #   short while a long prompt prefills; 8,192 leaves 70 MiB less pool and is a comparison lane in the
       #   experiment.
@@ -66,3 +66,5 @@ engine:
 matrices:
   deploy.gpu: NVIDIA GeForce RTX 5090
   deploy.gpu_count: 1
+  # The slowest of three requests that fill the context (114,176 prompt tokens, 512 generated), in seconds.
+  engine.llm.full_context_latency_s: 36
