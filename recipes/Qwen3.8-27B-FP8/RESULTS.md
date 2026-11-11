@@ -5,6 +5,12 @@ with NVLink turned off, time to first token is 2.5-3.5x longer and prompts past 
 timeout. Two V100 SXM3 32GB cards were also qualified; they are faster at decode but cannot get NVLink on CloudRift,
 and they are kept below as evidence rather than as a recommended platform.
 
+**Context 196,608 since 2026-11-04.** A deployed request has 290 seconds before Relay abandons it. With NVLink a
+full-window prompt reaches its first token in 219 s (the table below), which with 512 output tokens leaves about 15 s,
+less than the spread between a cold and a warm request; a 199,747-token prompt takes 144 s and leaves about 95 s. The
+recipe's Volta entry therefore pins 196,608 tokens, and the H200 entry keeps the native 262,144. The numbers below were
+measured at 262,144. The recipe's full-context latency is not yet measured.
+
 **Volta has no FP8 arithmetic.** The checkpoint is served through the 1Cat-vLLM fork's TurboMind dequantization path,
 the same route the DeepSeek-V4-Flash lane uses on this engine. Every number below is a property of that path, not of
 hardware FP8.

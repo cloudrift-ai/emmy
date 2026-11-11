@@ -73,11 +73,11 @@ legacy recipes and sorts as null until the next discovery run.
 `recipe_catalog()` is the shared repository scan behind `emmy recipe list` and model-discovery validation. The
 versioned JSON document produced by `recipe_inventory_document()` (schema version 2) adds the directory name,
 lifecycle-aware runnable state, whether any variant serves through Emmy, and one entry per matrix-expanded
-deployment — its GPU, GPU count, GPU memory fraction (`engine.llm.gpu_memory_utilization`, default 0.9) and
-effective context length — to the identity, tags, task, input modalities (`model.input_modalities`, `["text"]`
-unless declared), rationale, and heat. Deployments are unique per (GPU, count,
-fraction): a recipe that may share its GPU lists a reduced-fraction entry beside its whole-GPU one, each with its
-own qualified context length, and both appear.
+deployment — its GPU, GPU count, GPU memory fraction (`engine.llm.gpu_memory_utilization`, default 0.9), effective
+context length and measured full-context latency (`engine.llm.full_context_latency_s`, null until measured) — to
+the identity, tags, task, input modalities (`model.input_modalities`, `["text"]` unless declared), rationale, and
+heat. Deployments are unique per (GPU, count, fraction): a recipe that may share its GPU lists a reduced-fraction
+entry beside its whole-GPU one, each with its own qualified context length, and both appear.
 This is the machine interface used by other services: consumers reject unknown `schema_version` values, while Emmy
 may add fields without removing or redefining fields in the current version. Editable installs read the checkout's
 live top-level `recipes/` and wheel installs read their packaged runnable recipes. `recipe list` deliberately exposes
@@ -242,6 +242,22 @@ This design provides:
 2. **Engine portability** — the same recipe field maps to different CLI flags per engine via `VLLM_FLAG_MAP` / `SGLANG_FLAG_MAP` in `engines.py`.
 3. **Computed properties** — `LLMConfig.gpus_per_instance` derives from `tensor_parallel_size * pipeline_parallel_size * data_parallel_size` without parsing strings.
 4. **Deep merge support** — named fields participate in matrix merging naturally. An `extra_args` string cannot be partially overridden.
+
+### Full-Context Latency
+
+`engine.llm.full_context_latency_s` is the one named field that is a measurement, not a setting, and it maps to no
+engine flag. The full-context latency of a deployment entry is the wall time, in whole seconds, of the slowest of
+three non-streaming completion requests sent one at a time against that exact entry, each filling its context: a
+prompt of `context_length - 512` random tokens and 512 generated tokens with EOS ignored. It is the longest ordinary
+request the entry serves, which is what a proxy's response timeout has to cover: Relay abandons a request whose
+response headers do not arrive in time, and a non-streaming response sends its headers only after the whole
+generation. The onboarding skill measures it as a one-call session lane of the serving experiment
+(`emmy/benchmark/ARCHITECTURE.md`), rounds the slowest request up, and writes it on the matrix entry it measured. It
+is bounded: a deployed request has `MAX_FULL_CONTEXT_LATENCY_S` (290) seconds before Relay abandons it, so the lane
+runs with that request timeout, and a context whose full-context request runs past it is halved until the request
+fits. The context a recipe carries is therefore one the platform answers in time, not the model card's maximum. The
+catalog exports the latency per deployment and rejects a value that is not a positive whole number or is over the
+bound; an unmeasured entry exports null, so a reader can tell it from a fast one. Never estimate it.
 
 ### Controlled Workload Flags
 
@@ -546,5 +562,6 @@ generate_compose() -> docker-compose.yaml string
 
 `benchmark.session_calls` opts into the sequential completion workload. `session_new_tokens` controls new input per
 turn; `session_affinity` controls vLLM rank affinity. `session_concurrencies` runs several concurrency values against
-one deployment. The benchmark architecture defines prompt growth and raw measurement semantics. Benchmark fields
-are validated from the `BenchmarkConfig` dataclass, so defaults and accepted workload fields share one declaration.
+one deployment; `session_request_timeout_s` bounds each request in seconds (unset: one hour). The benchmark
+architecture defines prompt growth and raw measurement semantics. Benchmark fields are validated from the
+`BenchmarkConfig` dataclass, so defaults and accepted workload fields share one declaration.
