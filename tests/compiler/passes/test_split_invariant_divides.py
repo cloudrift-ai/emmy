@@ -33,15 +33,17 @@ def _body(dtype=F32, *, varying=False, divide="divide"):
 
 
 @pytest.mark.parametrize("dtype", [F16, BF16, F32, F64])
-@pytest.mark.parametrize("enabled", [None, "1", "0"])
-def test_reciprocal_hoisting_follows_fast_math(monkeypatch, dtype, enabled):
-    monkeypatch.delenv("EMMY_FAST_MATH", raising=False)
-    if enabled is not None:
-        monkeypatch.setenv("EMMY_FAST_MATH", enabled)
+@pytest.mark.parametrize(("umbrella", "division"), [(None, None), ("1", None), ("0", None), ("1", "0"), ("0", "1")])
+def test_reciprocal_hoisting_follows_the_division_knob(monkeypatch, dtype, umbrella, division):
+    """The reciprocal is ``FAST_DIV``'s, which follows the ``FAST_MATH`` umbrella unless pinned on its own."""
+    for name, value in (("EMMY_FAST_MATH", umbrella), ("EMMY_FAST_DIV", division)):
+        monkeypatch.delenv(name, raising=False)
+        if value is not None:
+            monkeypatch.setenv(name, value)
     body = _body(dtype)
     root = SimpleNamespace(op=KernelOp(body=body))
-    if enabled == "0":
-        with pytest.raises(RuleSkipped, match="disabled"):
+    if (division or umbrella) == "0":
+        with pytest.raises(RuleSkipped, match="FAST_DIV is off"):
             rule.rewrite(root)
     else:
         result = rule.rewrite(root)
@@ -149,3 +151,27 @@ def test_a_state_read_under_a_condition_before_its_update_stays_in_the_loop(monk
     )
     assert [s.input for s in outside if isinstance(s, Load)] == ["C"] and all("c" not in s.deps() for s in outside)
     assert any(isinstance(s, Load) and s.input == "D" for s in loop.body)
+
+
+@pytest.mark.parametrize("division", ["0", "1"])
+def test_a_literal_divisor_is_the_division_knobs(monkeypatch, division):
+    """A float literal divisor varies with no axis, so ``FAST_DIV`` takes it like any invariant one: a multiply by its
+    reciprocal when on, the division itself when off. This is where a literal the normal form leaves a division lands."""
+    monkeypatch.setenv("EMMY_FAST_MATH", "1")
+    monkeypatch.setenv("EMMY_FAST_DIV", division)
+    body = parse_body(
+        """
+        for i in 0..4:
+            f32 v = load x[i]
+            f32 out = divide(v, 3.0)
+            f32 y[i] = out
+        """
+    )
+    if division == "0":
+        with pytest.raises(RuleSkipped, match="FAST_DIV is off"):
+            rule.rewrite(SimpleNamespace(op=KernelOp(body=body)))
+        return
+    result = rule.rewrite(SimpleNamespace(op=KernelOp(body=body)))
+    (reciprocal,) = [s for s in result.body if isinstance(s, Assign)]
+    assert str(reciprocal.value) == "reciprocal(3.0)"
+    assert [s.value.operation.name for s in result.body.iter() if isinstance(s, Assign)] == ["reciprocal", "multiply"]

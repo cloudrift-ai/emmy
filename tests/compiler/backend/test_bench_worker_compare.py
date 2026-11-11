@@ -768,6 +768,7 @@ def test_worker_hang_is_sigkilled_not_wedged() -> None:
 async def test_worker_applies_each_requested_fast_math_policy(monkeypatch):
     from emmy.compiler.backend import BenchmarkResult
     from emmy.compiler.backend.cuda import _bench_worker, nvcc, program
+    from emmy.compiler.pipeline.search.space import precision_pins
 
     monkeypatch.setenv("EMMY_FAST_MATH", "1")
     monkeypatch.setenv("EMMY_NVCC_FLAGS", "--fmad=false")
@@ -779,9 +780,15 @@ async def test_worker_applies_each_requested_fast_math_policy(monkeypatch):
 
     monkeypatch.setattr(program, "benchmark_program", benchmark)
     for enabled in (False, True, False):
-        await _bench_worker._run_job({"graph": None, "kwargs": {}, "fast_math": enabled})
+        await _bench_worker._run_job({"graph": None, "kwargs": {}, "precision": precision_pins({"FAST_MATH": enabled})})
         assert nvcc.effective_flags() == ["--use_fast_math", "--fmad=false"]
-    assert seen == [["--fmad=false"], ["--use_fast_math", "--fmad=false"], ["--fmad=false"]]
+    await _bench_worker._run_job({"graph": None, "kwargs": {}, "precision": precision_pins({"FAST_MATH": True, "FAST_DIV": False})})
+    assert seen == [
+        ["--fmad=false"],
+        ["--use_fast_math", "--fmad=false"],
+        ["--fmad=false"],
+        ["--use_fast_math", "--prec-div=true", "--fmad=false"],
+    ]
 
 
 def test_unsupplied_inputs_fill_with_seeded_normal_values() -> None:

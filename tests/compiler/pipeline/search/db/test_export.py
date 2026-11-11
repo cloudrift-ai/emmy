@@ -34,11 +34,13 @@ _CUT = "fused/linear-add-place-cut-sm70.json"
 @pytest.mark.parametrize("cold", [False, True])
 def test_recorded_pool_candidates_ignore_opposite_ambient_precision_and_cache(reduced_accumulate, cold):
     from emmy.compiler.pipeline.search.dataset import regime_of
+    from emmy.compiler.pipeline.search.space import precision_pins
 
     document = GoldenFile.load(corpus.CASES_DIR / "matmul/f16-mma-f16acc-cp.json")
     regime = regime_of(cold, {"F16_MMA_F32_ACC": reduced_accumulate})
     pool = GoldenPool("NVIDIA A100 40GB", (8, 0), regime, document.kernels[0], {}, ())
-    expected = {"FAST_MATH": False, "FAST_EXP": False, "F16_MMA_F32_ACC": reduced_accumulate, "FP8_MMA": False}
+    expected = precision_pins({"FAST_MATH": False, "F16_MMA_F32_ACC": reduced_accumulate})
+    assert expected["F16_MMA_F32_ACC"] is reduced_accumulate and not expected["FAST_EXP"] and expected["CONTRACT_FMA"]
     assert pool.pins == {**expected, "COLD_CACHE": cold}
     draws = []
     for ambient in (False, True):

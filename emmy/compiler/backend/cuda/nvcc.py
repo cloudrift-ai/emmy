@@ -31,16 +31,40 @@ logger = logging.getLogger(__name__)
 
 
 def effective_flags() -> list[str]:
-    """The full nvcc flag list: the base flags plus any extra flags from the
-    ``EMMY_NVCC_FLAGS`` env var (space-separated), which the CLI commands
+    """The full nvcc flag list: the live precision decisions' flags (:func:`precision_flags`) plus any extra flags
+    from the ``EMMY_NVCC_FLAGS`` env var (space-separated), which the CLI commands
     set — ``tune``, ``compile`` and ``run`` all default to nvcc's own cicc -O3.
     Read fresh each call so a per-invocation override / the bench-worker
     subprocess (which inherits the env) both see the same value, and so the
     flags fold into the cache key."""
-    from emmy.compiler.context import FAST_MATH_FLAG  # noqa: PLC0415
-    from emmy.compiler.pipeline.search.space import FAST_MATH, precision_pin  # noqa: PLC0415
+    from emmy.compiler.pipeline.search.space import precision_pins  # noqa: PLC0415
 
-    return [*([FAST_MATH_FLAG] if precision_pin(FAST_MATH) else []), *config.nvcc_flags().split()]
+    return [*precision_flags(precision_pins()), *config.nvcc_flags().split()]
+
+
+def precision_flags(pins: dict[str, bool]) -> list[str]:
+    """The nvcc flags that pick the instructions of the effective precision decisions ``pins``
+    (``space.precision_pins``).
+
+    ``--use_fast_math`` when the umbrella and the exponential knob are both on: the flag also approximates exp, and
+    with it the transcendental functions no knob names (log, sine, cosine, tanh, pow), and no flag after it restores
+    the accurate exp. Then each instruction class whose decision that flag, or nvcc's own default without it, does
+    not imply, spelled by its own flag. The exponential itself is the kernel's ``__expf`` (``lowering/kernel/085``)."""
+    from emmy.compiler.context import FAST_MATH_FLAG  # noqa: PLC0415
+    from emmy.compiler.pipeline.search.space import CONTRACT_FMA, FAST_DIV, FAST_EXP, FAST_MATH, FAST_SQRT, FLUSH_TO_ZERO  # noqa: PLC0415
+
+    library = pins[FAST_MATH.name] and pins[FAST_EXP.name]
+    flags = [FAST_MATH_FLAG] if library else []
+    # Each class: its knob, its flag, whether the flag's ``true`` is the precise instruction, and what the base implies.
+    for knob, flag, precise, implied in (
+        (FLUSH_TO_ZERO, "--ftz", False, library),
+        (FAST_DIV, "--prec-div", True, library),
+        (FAST_SQRT, "--prec-sqrt", True, library),
+        (CONTRACT_FMA, "--fmad", False, True),
+    ):
+        if pins[knob.name] != implied:
+            flags.append(f"{flag}={str(pins[knob.name] != precise).lower()}")
+    return flags
 
 
 def cubin_cache_dir() -> Path:

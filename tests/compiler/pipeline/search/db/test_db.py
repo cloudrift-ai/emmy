@@ -111,21 +111,26 @@ def test_cold_and_hot_measurements_never_replace_or_price_each_other() -> None:
     assert db.lookup_perf(hot, "k", bindings={}, knobs=_ROW).stats.median == 10.0
 
 
-@pytest.mark.parametrize("name", ["FAST_EXP", "F16_MMA_F32_ACC", "FP8_MMA"])
+@pytest.mark.parametrize("name", ["FAST_EXP", "F16_MMA_F32_ACC", "FP8_MMA", "FAST_DIV", "FAST_SQRT", "FLUSH_TO_ZERO", "CONTRACT_FMA"])
 @pytest.mark.parametrize("umbrella", [False, True])
 def test_independent_precision_regimes_never_replace_or_price_each_other(name, umbrella) -> None:
+    from emmy.compiler.pipeline.knob import get
     from emmy.compiler.pipeline.search.pins import pinned_knobs
+    from emmy.compiler.pipeline.search.space import precision_default
 
+    default = precision_default(get(name), umbrella)
     contexts = []
-    for enabled in (umbrella, not umbrella):
+    for enabled in (default, not default):
         with pinned_knobs({"FAST_MATH": umbrella, name: enabled}):
             contexts.append(Context.from_target((12, 0), gpu_name=_5090))
     ordinary, override = contexts
-    assert ordinary.compile_flags == override.compile_flags
+    # A class nvcc picks the instruction of spells its flag; the exponential drops the umbrella's fast library with it.
+    flagged = name in ("FAST_DIV", "FAST_SQRT", "FLUSH_TO_ZERO", "CONTRACT_FMA") or (name == "FAST_EXP" and umbrella)
+    assert (ordinary.compile_flags != override.compile_flags) is flagged
     assert ordinary.structural_key() != override.structural_key()
     # Later ambient changes cannot change either captured regime.
-    with pinned_knobs({"FAST_MATH": not umbrella, name: umbrella}):
-        assert override.precision_pins()[name] is not umbrella
+    with pinned_knobs({"FAST_MATH": not umbrella, name: default}):
+        assert override.precision_pins()[name] is not default
     db = _db("k")
     _record(db, ordinary, "k", 1.0)
     assert db.best_per_op_time(override, "k", bindings={}) is None

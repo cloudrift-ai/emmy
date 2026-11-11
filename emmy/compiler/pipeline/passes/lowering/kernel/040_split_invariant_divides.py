@@ -1,4 +1,4 @@
-"""Hoist reciprocals of invariant floating divisors when FAST_MATH permits the rounding change.
+"""Hoist reciprocals of invariant floating divisors when FAST_DIV permits the rounding change.
 
 Run after dtype stamping so integer division stays exact. Keep this policy out of body
 normalization: structural identity must not depend on the live arithmetic flags.
@@ -13,14 +13,14 @@ from emmy.compiler.ir.expression import Expression, apply
 from emmy.compiler.ir.kernel import KernelOp
 from emmy.compiler.ir.stmt import Accum, Assign, Body, Cond, Init, Load, Loop, Statement, StridedLoop, ordering_constraints
 from emmy.compiler.pipeline import Pattern, RuleSkipped
-from emmy.compiler.pipeline.search.space import FAST_MATH, precision_pin
+from emmy.compiler.pipeline.search.space import FAST_DIV, precision_pin
 
 PATTERN = [Pattern("root", KernelOp)]
 
 
 def rewrite(root: Node) -> KernelOp:
-    if not precision_pin(FAST_MATH):
-        raise RuleSkipped("FAST_MATH is disabled")
+    if not precision_pin(FAST_DIV):
+        raise RuleSkipped("FAST_DIV is off")
     op = root.op
     body = split_invariant_divides(op.body)
     if body == op.body:
