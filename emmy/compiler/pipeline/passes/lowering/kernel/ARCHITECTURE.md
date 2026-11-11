@@ -801,6 +801,11 @@ under `__c{i}_{j}` read one value), congruent carried states merged, unread valu
 buffers the body writes, so a read of an input is one value on both sides of it. Every rewrite is exact and removes
 work, so the pass carries no knob; nothing moves out of a loop.
 
+`098_hoist_invariants` is the motion `032` leaves out (`HOIST`): the same optimizer with placement's motion, so a value
+every trip of a loop computes alike is computed ahead of the loop. Nothing leaves a branch, a tile or a barrier's
+order. It holds a register across the loop for the work it saves, a trade, so the knob decides it; `HOIST` offers one
+arm (`0`, no motion) until a tune measures the other on each card and a refit scores it, and `EMMY_HOIST=1` pins it.
+
 Vector loads and stores share one alignment proof over the complete flattened address. Every variable coefficient
 and the constant base must be divisible by the vector width, and subsequent elements must be consecutive. An aligned
 last coordinate alone is insufficient when an outer row has an odd stride. Unknown multidimensional layouts retain

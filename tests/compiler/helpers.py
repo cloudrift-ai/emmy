@@ -222,9 +222,7 @@ def grouped_raster_decode(src: str, group: int) -> list[str]:
     multiple = re.compile(rf"(?<![\w.]){group} \*|\* {group}(?![\w.])")
     lines = [line.strip() for line in src.splitlines()]
     return [
-        line
-        for line in lines
-        if line.startswith("int ") and "blockIdx.x" in line and "threadIdx" not in line and multiple.search(line)
+        line for line in lines if line.startswith("int ") and "blockIdx.x" in line and "threadIdx" not in line and multiple.search(line)
     ]
 
 

@@ -21,6 +21,8 @@ The main groups:
   prior can featurize and tune the decision. ``off=""`` is the explicit direct leaf value.
 - **Kernel storage knobs** (``SHARED_CARRY``) — a later lowering choice retained in measured rows: global
   storage and the padded shared layout offered as siblings.
+- **Loop transform knobs** (``HOIST``) — a later lowering choice that trades registers for work; one arm offered
+  until a tune measures the other.
 - **Kernel-lowering policy knobs** (``VECTORIZE_LOADS`` / ``INTERLEAVE_LOADS``) — boolean codegen
   policies recorded on the kernel op (idempotence + env override), on by default and not search
   dimensions (``hints=(True,)``).
@@ -160,6 +162,16 @@ SHARED_CARRY = Knob(
     KnobType.INT,
     hints=(0, 1),
     help="Carried-state storage: 0 global with one launch per ordered step, 1 two shared buffers padded by one column per row.",
+    off=0,
+)
+
+HOIST = Knob(
+    "HOIST",
+    KnobType.INT,
+    # One arm until a tune measures the motion on each card and a refit scores it; ``EMMY_HOIST=1`` pins it.
+    hints=(0,),
+    help="Invariant motion in a kernel body: 0 leaves each value where the lowering placed it, 1 moves each out of every "
+    "loop whose trips compute it alike (a register held across the loop for the work it saves).",
     off=0,
 )
 
