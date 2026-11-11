@@ -485,8 +485,15 @@ impl Context<'_> {
             .iter()
             .filter_map(|name| self.defined_by.get(name).copied())
             .collect();
-        for name in names {
-            self.env.insert(*name, value.clone());
+        // Two names one statement defines are two values (a vector load's lanes, a row reduce's top and bottom
+        // halves): each is the statement's value at its position.
+        for (position, name) in names.iter().enumerate() {
+            let own = if names.len() > 1 {
+                (hash_parts([Key::Num(value.0), Key::Int(position as i64)]), value.1.clone())
+            } else {
+                value.clone()
+            };
+            self.env.insert(*name, own);
             self.defined_by.insert(*name, ordinal);
         }
         self.out.numbers[ordinal] = Some(value);
@@ -517,8 +524,14 @@ impl Context<'_> {
         for (index, name) in defined.iter().enumerate() {
             names.insert(*name, format!("$d{index}").into());
         }
+        // A name the statement both reads and defines is updated in place (a shuffle's state, a fragment an MMA
+        // accumulates into): it is spelled as the definition, and the value it read is an operand of its own.
+        let mut in_place: Vec<Key> = Vec::new();
         for name in stmt.deps() {
             if names.contains_key(&name) {
+                if defined.contains(&name) {
+                    in_place.push(self.operand(&name, ops, touched));
+                }
                 continue;
             }
             let key = self.operand(&name, ops, touched);
@@ -558,7 +571,11 @@ impl Context<'_> {
         for (stand_in, spelling) in spellings {
             text = text.replace(&format!("`{stand_in}`"), &format!("`{spelling}`"));
         }
-        Key::tuple([Key::text(text), Key::Tuple(expressions)])
+        if in_place.is_empty() {
+            Key::tuple([Key::text(text), Key::Tuple(expressions)])
+        } else {
+            Key::tuple([Key::text(text), Key::Tuple(expressions), Key::Tuple(in_place)])
+        }
     }
 
     fn visit(&mut self, body: &Body) {
@@ -760,6 +777,13 @@ impl Context<'_> {
                     let is_loop = matches!(&*stmt, Statement::Loop(_) | Statement::StridedLoop(_));
                     if is_loop {
                         self.loops.push(bound[0].name);
+                        // A state the loop updates is read inside it as the step before, whatever bound it ahead of
+                        // the loop (an `init` seed): the back edge carries it.
+                        for child in stmt.nested() {
+                            for name in child.defined_states() {
+                                self.env.remove(name);
+                            }
+                        }
                     }
                     self.path.push(ordinal);
                     for child in stmt.nested() {

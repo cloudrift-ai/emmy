@@ -160,6 +160,8 @@ impl Placer<'_> {
             self.taint.insert(*name, marks.clone());
         }
     }
+    /// The shallowest scope at or above `depth` that holds `names` and every version `marks` read. A version bumped in
+    /// a deeper scope (a barrier inside a loop or a branch, whose scope has closed) bounds nothing below `depth`.
     fn target(&self, depth: usize, names: &HashSet<Name>, marks: &Marks) -> usize {
         let mut out = self.floor[depth];
         for name in names {
@@ -168,7 +170,7 @@ impl Placer<'_> {
         for mark in marks {
             out = out.max(self.version_depth.get(mark).copied().unwrap_or(0));
         }
-        out
+        out.min(depth)
     }
     fn lookup(&self, key: &PlaceKey, depth: usize) -> Option<Vec<Name>> {
         self.available[..=depth]
@@ -362,8 +364,14 @@ impl Placer<'_> {
             .iter()
             .flat_map(|child| child.defined_states().to_vec())
             .collect();
+        // A block moves up only when nothing in it is an effect: a write, a carried update, or an ordered protocol
+        // (a barrier) that every thread must reach as often as it did.
         let mut where_ = depth;
-        if !stmt.has_side_effects() && !members.iter().any(|m| matches!(**m, Statement::Carry(_))) {
+        if !stmt.has_side_effects()
+            && !members
+                .iter()
+                .any(|m| matches!(**m, Statement::Carry(_)) || is_protocol(m))
+        {
             where_ = self.target(depth, &free_names(&built).into_iter().collect(), &marks);
         }
         self.settle(&exported, where_, &marks);
@@ -497,6 +505,95 @@ mod tests {
     fn unchanged(text: &str) {
         let given = body(text);
         assert_eq!(place_values(&given).unwrap(), given, "{text}");
+    }
+
+    /// How many statements of `out`, at any depth, `matches` holds.
+    fn count(out: &Body, matches: &dyn Fn(&Statement) -> bool) -> usize {
+        let mut found = 0;
+        out.walk(&mut |here| found += matches(here.stmt()) as usize);
+        found
+    }
+
+    /// A vector load's lanes are four values: the products of each lane stay four.
+    #[test]
+    fn the_lanes_of_one_load_are_values_apart() {
+        let out = placed(
+            "
+            for i in 0..4:
+                x0, x1, x2, x3 = load X[i]
+                y0 = multiply(x0, 2.0)
+                y1 = multiply(x1, 2.0)
+                y2 = multiply(x2, 2.0)
+                y3 = multiply(x3, 2.0)
+                O[i, 0] = y0
+                O[i, 1] = y1
+                O[i, 2] = y2
+                O[i, 3] = y3
+            ",
+        );
+        assert_eq!(count(&out, &|s| matches!(s, Statement::Assign(_))), 4, "{}", text(&out));
+    }
+
+    /// Two accumulators seeded alike ahead of an unseeded loop hold two values inside it from the second step on:
+    /// what reads them there reads the step before, not the seed.
+    #[test]
+    fn a_seeded_state_is_read_inside_its_loop_as_the_step_before() {
+        let out = placed(
+            "
+            for r in 0..4:
+                init f32 m1 = -1e+30
+                init f32 m2 = -1e+30
+                for k in 0..16 seed=false:
+                    s = load S[r, k]
+                    t = load T[r, k]
+                    g1 = maximum(m1, s)
+                    g2 = maximum(m2, s)
+                    W1[r, k] = g1
+                    W2[r, k] = g2
+                    m1 <- maximum(m1, s) over k
+                    m2 <- maximum(m2, t) over k
+            ",
+        );
+        assert_eq!(count(&out, &|s| matches!(s, Statement::Assign(_))), 2, "{}", text(&out));
+    }
+
+    /// A barrier pins the loop that holds it, and a value read after that loop is placed where it is read.
+    #[test]
+    fn a_loop_that_holds_a_barrier_stays_and_bounds_nothing_below_it() {
+        let given = "
+            for r in 0..4:
+                init f32 acc = 0
+                for k in 0..16 seed=false:
+                    x = load X[k]
+                    acc <- add(acc, x) over k
+                    Sync
+                y = add(acc, 1.0)
+                O[r] = y
+            ";
+        let out = placed(given);
+        assert_eq!(loop_axes(&out), ["r"], "{}", text(&out));
+        assert_eq!(count(&out, &|s| matches!(s, Statement::Sync(_))), 1);
+    }
+
+    /// A statement that updates a name in place reads the value it held: two MMAs of one product into two
+    /// accumulators that held two values are two values.
+    #[test]
+    fn a_name_updated_in_place_keys_the_value_it_read() {
+        let given = body(
+            "
+            RegFragment(name=c1, role=c, shape=(16, 8, 16), dtype=f32)
+            RegFragment(name=c2, role=c, shape=(16, 8, 16), dtype=f32)
+            LdmatrixLoad(frag=a, src_buffer=A, src_index=(0, 0), role=a)
+            LdmatrixLoad(frag=b, src_buffer=B, src_index=(0, 0), role=b)
+            LdmatrixLoad(frag=b2, src_buffer=B2, src_index=(0, 0), role=b)
+            MmaSyncPtx(c_frag=c2, a_frag=a, b_frag=b2, shape=(16, 8, 16))
+            MmaSyncPtx(c_frag=c1, a_frag=a, b_frag=b, shape=(16, 8, 16))
+            MmaSyncPtx(c_frag=c2, a_frag=a, b_frag=b, shape=(16, 8, 16))
+            ",
+        );
+        let numbering = crate::numbering::value_numbers(&given, &crate::numbering::spelled_key, crate::numbering::Chains::Flat);
+        let number = |index: usize| numbering.numbers[numbering.ordinal(&given.at(index))].clone().map(|v| v.0);
+        assert_ne!(number(6), number(7));
     }
 
     /// What the whole driver leaves of `text`.
