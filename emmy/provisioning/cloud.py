@@ -32,6 +32,7 @@ from datetime import datetime
 from emmy.hardware import (
     DEFAULT_GCP_PROVISIONING_MODEL,
     GPU_GCP_PROVISIONING_MODEL,
+    resolve_instance_type,
 )
 from emmy.provisioning import cloudrift as cr_provider
 from emmy.provisioning import gcp as gcp_provider
@@ -138,6 +139,7 @@ async def provision_cloud_vm(
     ports: list[int] | None = None,
     vm_active_timeout: int = DEFAULT_VM_ACTIVE_TIMEOUT,
     node: str | None = None,
+    instance_type: str | None = None,
 ):
     """Provision a cloud VM for the given GPU requirements.
 
@@ -170,6 +172,9 @@ async def provision_cloud_vm(
             a rental on that node, and the first failure there ends provisioning:
             only an instance type the node does not carry moves on to the GPU's
             next one, still on the same node.
+        instance_type: optional CloudRift base instance type (``"h200-8-generic"``,
+            the name a node carries, without the GPU count). It replaces the
+            hardware table's list, so it is the only candidate.
 
     Returns:
         VMConnectionInfo on success, None when every candidate is exhausted.
@@ -181,11 +186,14 @@ async def provision_cloud_vm(
     """
     logger = logger or logging.getLogger(__name__)
 
-    if node is not None:
+    if node is not None or instance_type is not None:
         if provider not in (None, "cloudrift"):
-            raise ValueError(f"A node pin is a CloudRift rental; it cannot be combined with provider '{provider}'")
+            raise ValueError(f"A node or an instance type names a CloudRift rental; it cannot be combined with provider '{provider}'")
         provider = "cloudrift"
-    candidates = iter_candidates(gpu_name, gpu_count, provider, exact_gpu_count=exact_gpu_count)
+    if instance_type is not None:
+        candidates = [VmCandidate("cloudrift", instance_type, resolve_instance_type("cloudrift", instance_type, gpu_count), None)]
+    else:
+        candidates = iter_candidates(gpu_name, gpu_count, provider, exact_gpu_count=exact_gpu_count)
     logger.info(f"GPU: {gpu_name} x{gpu_count} -> {len(candidates)} candidate(s): " + ", ".join(c.describe() for c in candidates))
 
     last_err: Exception | None = None

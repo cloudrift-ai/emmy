@@ -58,6 +58,10 @@ CloudRift candidates, sends every request to that node, and stops at the first f
 `InstanceTypeNotOffered`: a GPU maps to several base types and a node carries one of them, so a request the node
 rejects for its instance type moves on to the GPU's next base type, on the same node.
 
+A caller that knows the CloudRift base type can name it (`deploy cloud --instance-type`,
+`provision_cloud_vm(instance_type=…)`). It replaces the hardware table's list for the GPU and is the only
+candidate, so with a node pin the rental is a single request.
+
 A CloudRift rental opens the ports the caller names (`provision_cloud_vm(ports=…)`): SSH, one host port per engine
 service, and the load balancer's when there is one; the default is `[22, 8000, 8080]`. GCP has no per-VM port list.
 

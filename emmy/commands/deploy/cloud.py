@@ -103,6 +103,7 @@ async def _handle_cloud(args):
                 ports=ports,
                 vm_active_timeout=args.vm_active_timeout,
                 node=args.node,
+                instance_type=args.instance_type,
             )
         except (CapacityExhausted, TerminalProvisionError, RuntimeError, ValueError) as exc:
             logger.error(str(exc))
@@ -197,6 +198,12 @@ def register_cloud_target(subparsers):
         default=None,
         help="Rent on exactly this CloudRift node, by node ID or hostname (hostname resolution requires operator "
         "access); a failure there ends the deploy instead of trying another machine",
+    )
+    parser.add_argument(
+        "--instance-type",
+        default=None,
+        help="Rent this CloudRift base instance type (e.g. h200-8-generic, without the GPU count) instead of the "
+        "ones the hardware table lists for the GPU; no other type is tried",
     )
     parser.add_argument(
         "--vm-active-timeout",

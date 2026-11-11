@@ -115,11 +115,25 @@ async def test_pinned_node_walks_instance_types_it_does_not_carry(mock_create, s
     ]
 
 
+@patch.dict("os.environ", {"CLOUDRIFT_API_KEY": "test-key"})
+@patch("emmy.provisioning.cloud.cr_provider.create_instance", new_callable=AsyncMock)
+async def test_named_instance_type_is_the_only_candidate(mock_create, ssh_key):
+    """A named base type replaces the hardware table's list: one request on the pinned node, even for a type it lacks."""
+    mock_create.side_effect = InstanceTypeNotOffered("node is not of instance type rtx49-custom")
+
+    conn = await provision_cloud_vm("NVIDIA GeForce RTX 4090", 2, ssh_key, node=NODE, instance_type="rtx49-custom")
+
+    assert conn is None
+    assert [(call.kwargs["instance_type"], call.kwargs["node"]) for call in mock_create.await_args_list] == [("rtx49-custom.2", NODE)]
+    with pytest.raises(ValueError, match="CloudRift rental"):
+        await provision_cloud_vm("NVIDIA GeForce RTX 4090", 2, ssh_key, provider="gcp", instance_type="rtx49-custom")
+
+
 @patch("emmy.provisioning.cloud.cr_provider.create_instance", new_callable=AsyncMock)
 @patch("emmy.provisioning.cloud.gcp_provider.create_instance", new_callable=AsyncMock)
 async def test_pinned_node_never_reaches_gcp(mock_gcp, mock_create, ssh_key):
     """A node pin is a CloudRift rental: GCP is refused when named and skipped when it is only a fallback."""
-    with pytest.raises(ValueError, match="node pin"):
+    with pytest.raises(ValueError, match="CloudRift rental"):
         await provision_cloud_vm(gpu_name="NVIDIA H200 141GB", gpu_count=1, ssh_key=ssh_key, provider="gcp", node=NODE)
 
     mock_create.side_effect = CapacityExhausted("node full")
