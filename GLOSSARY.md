@@ -275,6 +275,11 @@ describe how a term is used in Emmy; they are not meant to replace a full textbo
   result format or top-level record copy.
 - **Benchmark** — A controlled measurement of speed, latency, throughput, or resource use.
 - **Latency** — The time needed to complete one operation or request. Lower latency is faster.
+- **Full-context latency** — The time one non-streaming request takes when its prompt and output together fill a
+  deployment's context length: a prompt of `context_length - 512` tokens and 512 generated tokens, sent one at a
+  time. A recipe stores the slowest of three in whole seconds (`engine.llm.full_context_latency_s`), at most the 290
+  seconds a deployed request has before Relay abandons it; onboarding halves a context until its request fits. The
+  catalog exports it per deployment, and Relay reads it as the reference for its non-streaming request timeout.
 - **Throughput** — The amount of work completed per unit of time, such as requests per second. Higher throughput is
   better.
 - **VM (virtual machine)** — A computer created by software, often rented from a cloud provider. A GPU VM includes

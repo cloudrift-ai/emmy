@@ -30,6 +30,7 @@ async def measure(config, client, vocabulary):
     first = initial_length(bench["random_input_len"], calls, bench["random_output_len"], bench["session_new_tokens"])
     if bench["max_concurrency"] < 1 or count < 1:
         raise ValueError("Concurrency and prompt count must be positive")
+    timeout = bench.get("session_request_timeout_s") or 3600
     common = random.Random(bench.get("seed") or 0).choices(vocabulary, k=bench["random_prefix_len"])
     if len(common) >= first:
         raise ValueError("Shared prefix must be shorter than the first prompt")
@@ -74,14 +75,21 @@ async def measure(config, client, vocabulary):
                         "ignore_eos": True,
                         "return_token_ids": True,
                     }
-                    response = await client.post(config["base_url"] + "/v1/completions", json=body, headers=headers)
+                    try:
+                        response = await client.post(config["base_url"] + "/v1/completions", json=body, headers=headers, timeout=timeout)
+                    except httpx.TimeoutException as e:
+                        raise ValueError(f"Request ran past session_request_timeout_s ({timeout} s)") from e
                     response.raise_for_status()
                     result = response.json()
                     after = time.perf_counter()
-                    if "cached_tokens" not in (result["usage"].get("prompt_tokens_details") or {}):
+                    if result["usage"]["completion_tokens"] != bench["random_output_len"]:
+                        raise ValueError("Server did not generate the requested number of tokens")
+                    # A later call extends the prompt with this call's tokens under the server's prefix cache; a
+                    # one-call session is one non-streaming request and needs neither.
+                    tokens = result["choices"][0].get("token_ids")
+                    if calls > 1 and "cached_tokens" not in (result["usage"].get("prompt_tokens_details") or {}):
                         raise ValueError("Server must report cached-token usage")
-                    tokens = result["choices"][0]["token_ids"]
-                    if tokens is None or len(tokens) != bench["random_output_len"]:
+                    if calls > 1 and (tokens is None or len(tokens) != bench["random_output_len"]):
                         raise ValueError("Server did not return the requested generated token IDs")
                     logger.info(
                         json.dumps(
@@ -97,8 +105,9 @@ async def measure(config, client, vocabulary):
                             }
                         )
                     )
-                    prompt.extend(tokens)
-                    prompt.extend(rng.choices(vocabulary, k=bench["session_new_tokens"]))
+                    if turn + 1 < calls:
+                        prompt.extend(tokens)
+                        prompt.extend(rng.choices(vocabulary, k=bench["session_new_tokens"]))
             finally:
                 if rank is not None:
                     active_sessions[rank] -= 1
