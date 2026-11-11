@@ -69,6 +69,7 @@ async def test_plan_deploy_rents_the_exact_shape_and_writes_the_result(tmp_path,
         network=None,
         provider=None,
         vm_active_timeout=3600,
+        node="cato-ubuntu-66-172-10-7",
         vm_proxy="http://10.0.0.1:3128",
         lease=tmp_path / "lease.json",
         owner="relay/deployment-42",
@@ -81,6 +82,7 @@ async def test_plan_deploy_rents_the_exact_shape_and_writes_the_result(tmp_path,
     assert (kwargs["gpu_name"], kwargs["gpu_count"], kwargs["ports"], kwargs["exact_gpu_count"]) == (GPU, 1, [22, 8000, 8001], True)
     assert kwargs["allocation_observer"] == VmLeaseObserver(tmp_path / "lease.json", "relay/deployment-42", GPU, 1)
     assert kwargs["vm_active_timeout"] == 3600
+    assert kwargs["node"] == "cato-ubuntu-66-172-10-7"
     assert cloud.provision_remote.call_args.args[0].proxy == "http://10.0.0.1:3128"  # the host provisioning goes through it
     params = cloud.deploy_entry.call_args.args[0]
     assert params.proxy == "http://10.0.0.1:3128"

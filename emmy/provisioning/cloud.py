@@ -36,7 +36,7 @@ from emmy.hardware import (
 from emmy.provisioning import cloudrift as cr_provider
 from emmy.provisioning import gcp as gcp_provider
 from emmy.provisioning.candidates import VmCandidate, iter_candidates
-from emmy.provisioning.errors import CapacityExhausted, TerminalProvisionError
+from emmy.provisioning.errors import CapacityExhausted, InstanceTypeNotOffered, TerminalProvisionError
 from emmy.provisioning.types import AllocationObserver
 from emmy.redact import register_secret
 
@@ -137,6 +137,7 @@ async def provision_cloud_vm(
     exact_gpu_count: bool = False,
     ports: list[int] | None = None,
     vm_active_timeout: int = DEFAULT_VM_ACTIVE_TIMEOUT,
+    node: str | None = None,
 ):
     """Provision a cloud VM for the given GPU requirements.
 
@@ -165,6 +166,10 @@ async def provision_cloud_vm(
             Active before it is terminated and the next candidate is tried
             (default :data:`DEFAULT_VM_ACTIVE_TIMEOUT`); GCP has its own
             ``create_timeout_*`` provider keys.
+        node: optional CloudRift node UUID or hostname to rent on. Every attempt is
+            a rental on that node, and the first failure there ends provisioning:
+            only an instance type the node does not carry moves on to the GPU's
+            next one, still on the same node.
 
     Returns:
         VMConnectionInfo on success, None when every candidate is exhausted.
@@ -176,6 +181,10 @@ async def provision_cloud_vm(
     """
     logger = logger or logging.getLogger(__name__)
 
+    if node is not None:
+        if provider not in (None, "cloudrift"):
+            raise ValueError(f"A node pin is a CloudRift rental; it cannot be combined with provider '{provider}'")
+        provider = "cloudrift"
     candidates = iter_candidates(gpu_name, gpu_count, provider, exact_gpu_count=exact_gpu_count)
     logger.info(f"GPU: {gpu_name} x{gpu_count} -> {len(candidates)} candidate(s): " + ", ".join(c.describe() for c in candidates))
 
@@ -200,6 +209,7 @@ async def provision_cloud_vm(
                     allocation_observer,
                     ports,
                     vm_active_timeout,
+                    node,
                 )
             except CapacityExhausted as exc:
                 logger.warning(f"{cand.describe()}: capacity exhausted ({exc}); advancing to next candidate.")
@@ -229,6 +239,9 @@ async def provision_cloud_vm(
                 # Soft None — treat like capacity exhaustion, advance immediately.
                 logger.warning(f"{cand.describe()}: provider returned None; advancing to next candidate.")
                 break
+        if node is not None and not isinstance(last_err, InstanceTypeNotOffered):
+            logger.error(f"Node {node} is pinned, so no other candidate is tried.")
+            break
 
     logger.error(f"All {len(candidates)} candidate(s) exhausted for {gpu_name} x{gpu_count}. Last error: {last_err}")
     return None
@@ -248,6 +261,7 @@ async def _provision_candidate(
     allocation_observer: AllocationObserver | None = None,
     ports=None,
     vm_active_timeout=DEFAULT_VM_ACTIVE_TIMEOUT,
+    node=None,
 ):
     """Single provisioning attempt for one resolved candidate.
 
@@ -267,6 +281,7 @@ async def _provision_candidate(
             allocation_observer,
             ports,
             vm_active_timeout,
+            node,
         )
     if cand.provider == "gcp":
         return await _provision_gcp(
@@ -294,6 +309,7 @@ async def _provision_cloudrift(
     allocation_observer: AllocationObserver | None = None,
     ports=None,
     vm_active_timeout=DEFAULT_VM_ACTIVE_TIMEOUT,
+    node=None,
 ):
     api_key = os.environ.get("CLOUDRIFT_API_KEY")
     if not api_key and not dry_run:
@@ -329,6 +345,7 @@ async def _provision_cloudrift(
         with_public_ip=with_public_ip,
         extra_public_keys=extra_authorized_keys,
         allocation_observer=allocation_observer,
+        node=node,
     )
 
 

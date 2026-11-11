@@ -50,10 +50,13 @@ The orchestrator tries candidates in this order until one succeeds or all are ex
 fallback follows the hardware table across providers. An explicit `--provider` restricts the entire candidate list,
 so callers that request CloudRift are never silently relocated to GCP.
 
-CloudRift rentals can also be pinned to one node (`vm create cloudrift --node <id-or-hostname>`): the rent request
-then uses the `ByNodeId` selector instead of `ByInstanceTypeAndLocation`, and `resolve_node_id()` turns a hostname
-into the node UUID via `/api/v1/nodes/list` (an operator-only endpoint — customers pass the UUID). A pinned node has
-no placement fallback, so the pin lives on the single-shot provider command, not the candidate orchestrator.
+CloudRift rentals can also be pinned to one node (`--node <id-or-hostname>` on `vm create cloudrift` and `deploy
+cloud`): the rent request then uses the `ByNodeId` selector instead of `ByInstanceTypeAndLocation`, and
+`resolve_node_id()` turns a hostname into the node UUID via `/api/v1/nodes/list` (an operator-only endpoint —
+customers pass the UUID). A pinned node has no placement fallback. `provision_cloud_vm(node=…)` keeps only the
+CloudRift candidates, sends every request to that node, and stops at the first failure there. The one exception is
+`InstanceTypeNotOffered`: a GPU maps to several base types and a node carries one of them, so a request the node
+rejects for its instance type moves on to the GPU's next base type, on the same node.
 
 A CloudRift rental opens the ports the caller names (`provision_cloud_vm(ports=…)`): SSH, one host port per engine
 service, and the load balancer's when there is one; the default is `[22, 8000, 8080]`. GCP has no per-VM port list.
