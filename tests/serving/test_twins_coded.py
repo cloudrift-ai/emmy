@@ -563,6 +563,39 @@ def test_qwen4_exp_nvfp4_twins_trace_into_the_inventory(tmp_path, monkeypatch):
         np.testing.assert_array_equal(actual, expected)
 
 
+def test_qwen4_exp_nvfp4_slots_kernel_cuts_place_the_gathered_scale_under_its_expert(tmp_path, monkeypatch):
+    """Every cut the cut pass offers the fixed-slot kernel builds pieces that lower. A piece holding the gate/up
+    product reads each selected expert's global scale outside its reduce loop, indexed by the expert a sibling term
+    loads per slot: the lowering places that read under the slot loop, not above it, where it would read the expert
+    before any slot loaded one and the piece's identity could not order its body."""
+    from importlib import import_module
+
+    from emmy.compiler.context import Context
+    from emmy.compiler.ir.tile import TileOp
+    from emmy.compiler.pipeline import Match, Rule
+    from emmy.compiler.pipeline.search.golden.restamp import lift_targets
+    from emmy.compiler.wire import kernel_identity
+
+    cut = import_module("emmy.compiler.pipeline.passes.tile.cut.030_cut")
+    graphs = _qwen4_exp_nvfp4_twins(tmp_path / "model", monkeypatch)
+    (tile,) = lift_targets(graphs["expert-slots@nvfp4"], Context.from_target((7, 0))).values()
+    graph = Graph()
+    for name, tensor in tile.inputs.items():
+        graph.add_node(InputOp(), [], tensor, node_id=name)
+    graph.add_node(tile, list(tile.inputs), next(iter(tile.outputs.values())), node_id=tile.name)
+    match = Match(graph=graph, root_node_id=tile.name, rule=Rule(name="test", pattern=[]))
+    arms = [option for option in cut.rewrite(match, graph.nodes[tile.name]) if "cut" in option.knobs.values()]
+    pieces = [
+        node.op.with_io(fragment, node)
+        for fragment in (arm.expand()[0] for arm in arms)
+        for node in fragment.nodes.values()
+        if isinstance(node.op, TileOp)
+    ]
+    assert pieces
+    for piece in pieces:
+        assert kernel_identity(piece) is not None
+
+
 @pytest.mark.parametrize(("inter", "slices"), [(32, 1), (64, 2)])
 def test_deepseek_expert_twin_records_the_native_mxfp4_program_serving_binds(tmp_path, inter, slices):
     """The pinned checkpoint declares an fp8 TRUNK while storing its routed experts as native MXFP4

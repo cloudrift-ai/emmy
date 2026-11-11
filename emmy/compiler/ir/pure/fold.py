@@ -1583,7 +1583,7 @@ class Fold:
                 _, scope, stmts = loops[depth]
                 loops, node = loops[: depth + 1], path
             else:
-                node = nest.path_of(term.free_axes if term.axis is not None else _needs(term), path)
+                node = nest.path_of(evaluated_over(term.free_axes if term.axis is not None else _needs(term)), path)
                 scope, stmts, loops = nest.bound | set(node), None, []
             if term.axis is not None or term.step():
                 target = stmts if stmts is not None else nest.sink(node)
