@@ -60,6 +60,8 @@ class ServingConfig:
     #: programs at these widths.
     decode_width: int = 1
     prefill_width: int = 0
+    #: The decode bucket (``SERVE_DECODE_BUCKET``): on experts sliced across ranks, the fixed-slot program's width.
+    decode_bucket: int = 0
     #: Whether the server runs the fast-math lane (``SERVE_ENV`` sets ``EMMY_FAST_MATH=1``), the one lane native
     #: generation compiles in.
     fast_math: bool = False
@@ -326,6 +328,7 @@ def load_serving_config(path: str | Path) -> ServingConfig:
         native=values.get("SERVE_NATIVE") == "1",
         decode_width=1 if _integer(values, "SERVE_M1_TIER", default=1) else max(1, _integer(values, "SERVE_DECODE_BUCKET", minimum=0)),
         prefill_width=_integer(values, "SERVE_PREFILL_BUCKET", default=0, minimum=0),
+        decode_bucket=_integer(values, "SERVE_DECODE_BUCKET", minimum=0),
         fast_math=_serve_env_flag(values, source, FAST_MATH),
         experts_gpu=_integer(values, "SERVE_EXPERTS_GPU", minimum=1) if values.get("SERVE_EXPERTS_GPU") else None,
         embed_gpu=_integer(values, "SERVE_EMBED_GPU", minimum=0) if values.get("SERVE_EMBED_GPU") else None,

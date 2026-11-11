@@ -821,6 +821,40 @@ Rounds, as with DeepSeek. Each round starts from a profile and ends with a boot 
     wider program; four requests; the mixed steps at eight requests (estimated from the gaps, not profiled). The
     fork's 4K first token has three samples: the two runs after the 3,921-token prompts hit the prefix cache.
   - Boot: Emmy took 23 minutes on this main (1,387-1,417 s), the fork 7.
+- **Eight rows through the fixed slots at once (2026-11-10).** Main `8dfe595a3`. On experts sliced across ranks the
+  runner now also builds the fixed-slot program at the decode bucket's width (the `expert-slots8` twin) and runs a
+  decode step of two to eight rows through it once, with one combine; a step of one row keeps the one-row program.
+  - Main could not boot this model first. #1365's restamp kept the timings of only 63 of the golden's 139 rows, so
+    12 of its 13 programs refused a strict compile, while `emmy golden check` still called the file current. The
+    fixed-slot program also no longer compiled at all: a cut piece placed each expert's global scale load above the
+    loop that loads the expert. #1377 fixes that placement and re-measures the 76 rows cold on the card (median
+    against their old timings 1.00); main with it serves eight requests at 168.1-168.3 tok/s, as on 2026-11-07.
+  - Gate: the eight-row program, cut like the one-row program (the gate/up product, then the activation) under the
+    one-row program's tuned schedules, took 141 us per layer cold, about 7.4 ms per step with one dispatch per layer
+    against the 8 ms bar. Recorded at 89.6 + 8.2 + 45.1 us; a 40-row tune of each matmul piece and a sweep of their
+    neighbours found nothing faster. The pieces read the 80 slices at about 410 GB/s cold.
+  - A B B A on boots never profiled, main against the branch: eight requests 4K / 1K, 168.1 and 168.3 against 192.3
+    and 193.6 tok/s total output (+15%), median gap between tokens 36.2-36.3 against 30.0 ms. One request 1K / 512:
+    the first pair read 20.02-20.12 against 20.23-20.74 ms per token, a second pair on other boots 20.20-20.39
+    against 20.15-20.29; the boots compiled the same kernels but the three new ones, so one request is unchanged.
+    The done bar for this round, 200 tok/s, is not reached.
+  - One profiled boot, rank 0, one decode step at eight requests, against the 2026-11-07 profile: the routed experts
+    5.93 ms (10.37), their dispatch 0.48 ms (5.03), GPU busy 25.5 ms (34.5), 2,961 kernels (5,361). The experts and
+    their dispatch came to 6.4 ms, under the gate's 8. The step lost only 6.2 of the 9 ms because the GPU now waits
+    on the host: unprofiled, the gap between tokens is about 4.5 ms over the GPU busy time, against 1.8-2.0 ms
+    before; the long gaps of vLLM's step work are 4.2 ms per step in both profiles and used to hide behind GPU work.
+    Profiled step times flatter a step with fewer kernels (about 1.6 us of profiler cost per kernel), so read gains
+    from unprofiled boots.
+  - Correctness: two branch boots give the same text one request at a time, 6 of 6, and the same as main. Six
+    requests at once give the same text on two branch boots for 5 of 6; batching changes the text against the same
+    prompt alone on main too (4 of 6 identical alone and batched, the branch 3 of 6), and whether batched text varies
+    between two main boots is not measured. GSM8K 124 of 128 with none at the output limit, acceptance cases 26 to 28
+    of 28 in each mode, long-document lookups 339 of 339 and 335 of 336. The margin test passes: with 3 GiB held per
+    card every worst-case load of step 2 completes, the busiest card peaking at 32,178 of 32,768 MiB. The release
+    audit deploys all 14 twins from the golden alone.
+  - Not measured: how often eight rows share an expert in real routing (each row reads its own ten slices); the wait
+    for the slowest rank under the wider program (rank 0 waited about 0.2 ms per step in its all-reduces); four
+    requests; the host time of a decode step, now the next lever at eight requests.
 - Gate, the definition of done. Both sides run step 2's production configuration: the same checkpoint, layout,
   context, key/value pool, concurrency, prefix-cache and MTP settings; fork, Emmy, Emmy, fork rounds; three repeats
   each:

@@ -1683,6 +1683,7 @@ class EmmyGenRunner:
                 "one": None,
                 "m256": None,
                 "slots": None,
+                "slot_rows": None,
                 "ind_names": ind_names,
             }
             with torch.device("cpu"):
@@ -1765,39 +1766,50 @@ class EmmyGenRunner:
                         "weight_inputs": ind_names,
                     }
                     wrapper = build_moe_slots_wrapper(expert_w)
-                    slot_examples = [torch.zeros(1, hidden, dtype=dtype), torch.zeros(moe_top_k, dtype=torch.int64), *stacked_w]
-                    try:
-                        with evidence_reads() as read:
-                            _, slot_plan = _compile_split(
-                                wrapper,
-                                slot_examples,
-                                None,
-                                compiler_dtype,
-                                plan=stored(pre + "slots"),
-                                plan_cache=plan_cache,
-                                paged_inputs=tuple((n, paging[0]) for n in ind_names) if paging is not None else None,
-                                # Only the plan is kept: off the arena, this build's memory goes with it.
-                                **stacked_kw,
+                    # One row's k picks; on experts sliced across ranks (resident, in the ``F.linear`` form) also the
+                    # decode bucket's rows at once, each against its own picks: a decode step of several tokens then
+                    # runs one launch set instead of one per row.
+                    widths = (1, decode_bucket) if expert_slices > 1 and decode_bucket > 1 and paging is None and not transposed else (1,)
+                    for rows in widths:
+                        name = pre + ("slots" if rows == 1 else f"slots{rows}")
+                        picks = (moe_top_k,) if rows == 1 else (rows, moe_top_k)
+                        slot_examples = [torch.zeros(rows, hidden, dtype=dtype), torch.zeros(picks, dtype=torch.int64), *stacked_w]
+                        try:
+                            with evidence_reads() as read:
+                                _, slot_plan = _compile_split(
+                                    wrapper,
+                                    slot_examples,
+                                    None,
+                                    compiler_dtype,
+                                    plan=stored(name),
+                                    plan_cache=plan_cache,
+                                    paged_inputs=tuple((n, paging[0]) for n in ind_names) if paging is not None else None,
+                                    # Only the plan is kept: off the arena, this build's memory goes with it.
+                                    **stacked_kw,
+                                )
+                            reads[name] = loaded[name].reads if stored(name) is not None else frozenset(read)
+                            tiers["slots" if rows == 1 else "slot_rows"] = {
+                                "wrapper": wrapper,
+                                "plan": slot_plan,
+                                "examples": slot_examples,
+                                "aux_examples": stacked_kw["aux_examples"],
+                                "weight_inputs": ind_names,
+                                "dtype": compiler_dtype,
+                                "arena": slot_arena,
+                                "paged": paging,
+                            }
+                            plans[name] = slot_plan
+                        except Exception as ex:  # noqa: BLE001 — any compile failure → routed fallback, loudly
+                            logger.warning(
+                                "[gen_runner] fixed-slot expert program build failed for group %d at %d rows (%s); %s",
+                                g,
+                                rows,
+                                ex,
+                                "single-token decode keeps the routed expert path (eager, no whole-step capture)"
+                                if rows == 1
+                                else "a wider decode step runs the one-row program row by row",
                             )
-                        reads[pre + "slots"] = loaded[pre + "slots"].reads if stored(pre + "slots") is not None else frozenset(read)
-                        tiers["slots"] = {
-                            "wrapper": wrapper,
-                            "plan": slot_plan,
-                            "examples": slot_examples,
-                            "aux_examples": stacked_kw["aux_examples"],
-                            "weight_inputs": ind_names,
-                            "dtype": compiler_dtype,
-                            "arena": slot_arena,
-                            "paged": paging,
-                        }
-                        plans[pre + "slots"] = slot_plan
-                    except Exception as ex:  # noqa: BLE001 — any compile failure → routed fallback, loudly
-                        logger.warning(
-                            "[gen_runner] fixed-slot expert program build failed for group %d (%s); single-token decode keeps the "
-                            "routed expert path (eager, no whole-step capture)",
-                            g,
-                            ex,
-                        )
+                            break
                 if static_only and tiers["bucket"] is None:
                     raise RuntimeError(
                         f"expert group {g} static decode compile failed while bucket {decode_bucket} "
@@ -2618,36 +2630,45 @@ class EmmyGenRunner:
                         raise RuntimeError("fixed-slot expert groups must agree on their output precision")
                     partial_dtype = torch.float32 if slot_precision.pop() else act_dtype
                     self._slot_partials = torch.empty(k, h, dtype=partial_dtype, device="cuda")
+                    # The decode bucket's rows at once, when every group has that program: its selector and partials,
+                    # shared by every layer as the one-row pair is.
+                    shared = {"slots": (self._slot_sel, self._slot_partials)}
+                    if all(t["slot_rows"] is not None for t in self._expert_tiers):
+                        rows = self._expert_tiers[0]["slot_rows"]["examples"][0].shape[0]
+                        self._slot_rows_sel = torch.zeros(rows, k, dtype=torch.int64, device="cuda")
+                        self._slot_rows_partials = torch.empty(rows, k, h, dtype=partial_dtype, device="cuda")
+                        shared["slot_rows"] = (self._slot_rows_sel, self._slot_rows_partials)
                     for m in self._moe:
                         if m is None:
                             continue
-                        slots = self._expert_tiers[m["group"]]["slots"]
-                        # A plan from a serving pack keeps the slots it was compiled with.
-                        if {spec[2] for spec in slots["plan"].paged.values()} != ({m["paging"][0]} if "paging" in m else set()):
-                            raise RuntimeError("the fixed-slot program was compiled for another expert budget than the device holds")
-                        # Unpaged, the instance is built over the layer's own expert tensors: lent at build, they take
-                        # no arena backing, which would otherwise hold a dead copy of one layer's experts.
-                        prog, _ = _compile_split(
-                            slots["wrapper"],
-                            slots["examples"],
-                            None,
-                            slots["dtype"],
-                            plan=slots["plan"],
-                            aux_examples=slots["aux_examples"] if "paging" in m else {**(slots["aux_examples"] or {}), **m["inputs"]},
-                            weight_inputs=slots["weight_inputs"],
-                            arena=slots["arena"],
-                        )
-                        p = prog.program
-                        p.alias_buffer("sel", self._slot_sel)
-                        p.alias_buffer(prog.output_names[0], self._slot_partials)
-                        if "paging" in m:
-                            pager = emmy_runtime.Pager()
-                            for name, (on_device, raw, _) in m["inputs"].items():
-                                homes = (on_device.data_ptr(), raw.data_ptr())
-                                pager.declare(device(), name, homes, (m["num_experts"], m["bytes"][name], *m["paging"]))
-                                pager.bind(p.executor, name)
-                            m["pager"] = pager
-                        m["slots"] = prog
+                        for tier, (sel, partials) in shared.items():
+                            slots = self._expert_tiers[m["group"]][tier]
+                            # A plan from a serving pack keeps the slots it was compiled with.
+                            if {spec[2] for spec in slots["plan"].paged.values()} != ({m["paging"][0]} if "paging" in m else set()):
+                                raise RuntimeError("the fixed-slot program was compiled for another expert budget than the device holds")
+                            # Unpaged, the instance is built over the layer's own expert tensors: lent at build, they take
+                            # no arena backing, which would otherwise hold a dead copy of one layer's experts.
+                            prog, _ = _compile_split(
+                                slots["wrapper"],
+                                slots["examples"],
+                                None,
+                                slots["dtype"],
+                                plan=slots["plan"],
+                                aux_examples=slots["aux_examples"] if "paging" in m else {**(slots["aux_examples"] or {}), **m["inputs"]},
+                                weight_inputs=slots["weight_inputs"],
+                                arena=slots["arena"],
+                            )
+                            p = prog.program
+                            p.alias_buffer("sel", sel)
+                            p.alias_buffer(prog.output_names[0], partials)
+                            if "paging" in m:
+                                pager = emmy_runtime.Pager()
+                                for name, (on_device, raw, _) in m["inputs"].items():
+                                    homes = (on_device.data_ptr(), raw.data_ptr())
+                                    pager.declare(device(), name, homes, (m["num_experts"], m["bytes"][name], *m["paging"]))
+                                    pager.bind(p.executor, name)
+                                m["pager"] = pager
+                            m[tier] = prog
                     torch.cuda.empty_cache()
         self._dev_ready = True
 
@@ -3100,6 +3121,27 @@ class EmmyGenRunner:
         self._record_routing(moe, indices)
         capturing = torch.cuda.is_current_stream_capturing()
         stream = torch.cuda.current_stream()
+        if xn.shape[0] > 1 and (rows := moe.get("slot_rows")) is not None:
+            # Every row's picks at once through the decode bucket's program: the rows past this step's keep the
+            # picks and inputs of an earlier one, whose partials no row reads.
+            t = xn.shape[0]
+            p = rows.program
+            with gpu_lock():
+                self._slot_rows_sel[:t].copy_(indices)
+                with p.on_stream(stream):
+                    p.upload_prefix_device({"x": xn.detach().contiguous()})
+                    if capturing:
+                        p.run_once()
+                    else:
+                        p.capture_program_graph()
+                        p.replay_program_graph()
+                # [T, 1, k] @ [T, k, H] — each row's weighted combine, one batched product.
+                return _combine_slot_partials(
+                    scores.unsqueeze(1),
+                    self._slot_rows_partials[:t],
+                    xn.dtype,
+                    accumulate_float32=moe.get("accumulate_float32", False),
+                ).squeeze(1)
         combined = []
         p = moe["slots"].program
         with gpu_lock():

@@ -214,6 +214,7 @@ def capture_serving_twins(model: str, serving: ServingConfig) -> dict[str, Graph
     common = {
         "dtype": serving.dtype or PLUGIN_DTYPE,
         "expert_slices": serving.tensor_parallel_size,
+        "slot_width": serving.decode_bucket,
         "verify_width": serving.verify_width,
         "embed_gpu": serving.embed_gpu,
     }
@@ -268,6 +269,7 @@ def capture_twin_graphs(
     dtype: str = "float16",
     static_only: bool = False,
     expert_slices: int = 1,
+    slot_width: int = 1,
     lora_rank: int | None = None,
     verify_width: int = 0,
     embed_gpu: int | None = None,
@@ -294,9 +296,11 @@ def capture_twin_graphs(
     only the proven decode-1/prefill-0 envelope and emits M=1 without any standard or symbolic twins.
     ``expert_slices`` is the serving tensor-parallel width: each rank holds that slice of every routed expert and
     of a Qwen4Exp shared expert (:func:`~emmy.compiler.trace.huggingface.slice_routed_experts`), so the expert and
-    post twins are the sliced programs serving compiles. ``verify_width`` is a speculative verify step's widest request: a GDN layer
-    then also traces the programs that keep each row's state (``gdn3rows``) at widths 1 to it, and a checkpoint with
-    a multi-token-prediction head traces its prologue (``mtp-prologue-sym``); the head's layer is a full-attention
+    post twins are the sliced programs serving compiles, and the fixed-slot program is also traced at ``slot_width``
+    rows (the decode bucket), which a decode step of sliced experts rides. ``verify_width`` is a speculative verify
+    step's widest request: a GDN layer then also traces the programs that keep each row's state (``gdn3rows``) at
+    widths 1 to it, and a checkpoint with a multi-token-prediction head traces its prologue (``mtp-prologue-sym``);
+    the head's layer is a full-attention
     layer of the trunk's shape, whose twins the trunk's carry, unless a coded checkpoint stores the head dense: its
     layer then has twins of its own (``pre16-mtp``). A checkpoint whose output head serving keeps coded
     (NVFP4, untied, one rank) adds the head program (``head-sym``), and an untied table ``embed_gpu`` pages (fewer
@@ -422,14 +426,18 @@ def capture_twin_graphs(
             else:
                 graphs[expert_name] = graph
         # The fixed-slot decode program: the row's k picks gathered from the E-stacked expert tensors
-        # (``build_moe_slots_wrapper``), spelled like the per-expert twins with the expert axis leading.
+        # (``build_moe_slots_wrapper``), spelled like the per-expert twins with the expert axis leading. On sliced
+        # experts a decode step up to the slot width rides the slots too, every row against its own picks at once
+        # (``expert-slots8``); the one-row program stays the one-token step's.
         top_k = int(getattr(text, "num_experts_per_tok", 0) or 0)
-        if top_k:
+        chunk = slot_width if expert_slices > 1 and slot_width > 1 and not moe_expert_layout(parts[1])[0] else 1
+        for rows in sorted({1, chunk}) if top_k else ():
             count = int(parts[1].gate_up_proj.shape[0])
-            one = _expert_examples(parts[1], 1, hidden, td, split_gate_up=bool(storage))
-            stacked = [one[0], torch.zeros(top_k, dtype=torch.int64), *(torch.zeros((count, *a.shape), dtype=a.dtype) for a in one[1:])]
+            one = _expert_examples(parts[1], rows, hidden, td, split_gate_up=bool(storage))
+            sel = torch.zeros((top_k,) if rows == 1 else (rows, top_k), dtype=torch.int64)
+            stacked = [one[0], sel, *(torch.zeros((count, *a.shape), dtype=a.dtype) for a in one[1:])]
             graph = trace_split(build_moe_slots_wrapper(expert_w), stacked, None)
-            slots_name = f"expert-slots{suffix}"
+            slots_name = f"expert-slots{rows if rows > 1 else ''}{suffix}"
             if storage:
                 graphs.update(_spell_expert_twins(slots_name, graph, storage, lead=(count,)))
             elif mxfp4 is not None:

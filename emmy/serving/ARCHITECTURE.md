@@ -448,10 +448,14 @@ contract lives in [native/ARCHITECTURE.md](native/ARCHITECTURE.md); vLLM remains
   selector (one fixed-shape device write — no `unique()`/`.tolist()`/host sync, no per-step weight staging), runs
   the layer's program and combines the partials with one score matmul, so vLLM's whole-step decode graph records it
   (under the outer capture the program issues its raw launch sequence, mirroring `run_device`). On a sliced-expert
-  rank a decode batch up to the bucket width rides the slots too, row by row through the one selector and partials
-  pair: its picks reach nearly as many distinct experts as there are picks, so the routed dispatch would launch
-  about as often and add the per-layer host read. Wider steps, prefill and whole-expert ranks ride the routed
-  dispatch; `combine_routed_experts` stays the parity oracle (`test_gen_runner_gpu` fixed-slot-vs-routed, the
+  rank a decode batch up to the bucket width rides the slots too: its picks reach nearly as many distinct experts as
+  there are picks, so the routed dispatch would launch about as often and add the per-layer host read. There each
+  group's program is also built at the bucket's width (`slot_rows`: `x[B, H]` and every row's picks `sel[B, k]` in,
+  `partials[B, k, H]` out, the twin `expert-slots8`), and a step of several rows runs it once, through a second shared
+  selector and partials pair, and combines every row with one batched score product. The rows past the step keep an
+  earlier step's picks and inputs, whose partials no row reads. A step of one row keeps the one-row program, and a
+  bucket-width program that does not build leaves the rows to it one at a time. Wider steps, prefill and whole-expert
+  ranks ride the routed dispatch; `combine_routed_experts` stays the parity oracle (`test_gen_runner_gpu` fixed-slot-vs-routed, the
   slot-program-vs-direct bit-exactness pin and the paged-vs-resident pin, `test_gen_capture_gpu` captured-step
   live-replay).
   **Per-input feed dtypes:** `_compile_split` binds every plan input at its own traced dtype rather than one blanket
