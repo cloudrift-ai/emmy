@@ -145,8 +145,8 @@ impl Placer<'_> {
                 out.extend(marks.iter().cloned());
             }
         }
-        // A barrier orders memory the body writes: what another thread wrote ahead of it is visible behind it. A read
-        // of a buffer nothing in the body writes, and a value computed from registers alone, is the same on both sides.
+        // A barrier orders memory the body writes or declares: what another thread wrote ahead of it is visible behind
+        // it. A read of a kernel input, and a value computed from registers alone, is the same on both sides.
         let mut reads: Vec<Name> = stmt.external_reads();
         if let Statement::Pre(p) = stmt {
             reads.push(p.carrier);
@@ -470,6 +470,9 @@ fn placed(body: &Body, states: &HashMap<Name, Key>, motion: bool) -> Result<Body
     let mut written: HashSet<Name> = HashSet::new();
     body.walk(&mut |here| {
         written.extend(here.stmt().external_writes());
+        // A buffer the body declares is memory its threads share, filled by a copy no field names as a write (an
+        // asynchronous copy, a tensor-memory load): a barrier orders it as it orders a written one.
+        written.extend(here.stmt().local_decls());
         if let Statement::Carry(c) = &**here.stmt() {
             written.insert(c.name);
         }

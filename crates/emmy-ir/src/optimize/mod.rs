@@ -226,8 +226,8 @@ mod tests {
         assert!(out.starts_with("Tile("), "{out}");
     }
 
-    /// A barrier orders what the body writes: a read of a buffer nothing writes is one value on both sides of it, a
-    /// read of the shared slab the body fills is two.
+    /// A barrier orders what the body writes or declares: a read of a kernel input is one value on both sides of it, a
+    /// read of the shared slab the body fills is two, and so is a read of a slab only an asynchronous copy fills.
     #[test]
     fn a_barrier_orders_only_what_the_body_writes() {
         let out = optimized(
@@ -246,6 +246,24 @@ mod tests {
         );
         assert_eq!(out.matches("load X").count(), 1, "{out}");
         assert_eq!(out.matches("load S").count(), 2, "{out}");
+        let copied = optimized(
+            "
+            Smem(name=s, extents=(16, 32))
+            Tile(axes=(m in 0..4, _lane in 0..32)):
+                CpAsyncCopy(smem=s, smem_index=(m, _lane), src=X, src_index=(m, _lane))
+                CpAsyncWait
+                Sync
+                a = load s[m, _lane]
+                O[m, _lane] = a
+                Sync
+                CpAsyncCopy(smem=s, smem_index=(m, _lane), src=Y, src_index=(m, _lane))
+                CpAsyncWait
+                Sync
+                b = load s[m, _lane]
+                P[m, _lane] = b
+            ",
+        );
+        assert_eq!(copied.matches("load s").count(), 2, "{copied}");
     }
 
     #[test]
