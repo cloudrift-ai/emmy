@@ -14,7 +14,7 @@ from dataclasses import replace
 
 from emmy.compiler.graph import Node
 from emmy.compiler.ir.elementwise import ElementwiseImpl
-from emmy.compiler.ir.expression import apply
+from emmy.compiler.ir.expression import FunctionCallExpression, apply
 from emmy.compiler.ir.kernel import KernelOp
 from emmy.compiler.ir.stmt import Statement
 from emmy.compiler.pipeline import Pattern, RuleSkipped
@@ -44,5 +44,6 @@ def _lower_exp(stmt: Statement) -> Statement:
 
 
 def _is_exp(node) -> bool:
-    op = node.operation
-    return op is not None and op.name == "exp"
+    # Read the call's name, not its operation: an index may call an intrinsic the target spells itself (a Volta
+    # swizzle), which is no elementwise operation.
+    return isinstance(node, FunctionCallExpression) and node.name == "exp"

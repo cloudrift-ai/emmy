@@ -45,3 +45,21 @@ def test_the_merge_keeps_the_accurate_exponential_under_its_own_pin() -> None:
     merges = [stmt for stmt in kernel.body.iter() if isinstance(stmt, WarpShuffle)]
     assert merges and all(_exp_ops(merge) == {"exp"} for merge in merges)
     assert "__expf(" not in source
+
+
+def test_an_intrinsic_an_index_calls_passes_through() -> None:
+    """An index may call an intrinsic the target spells itself (a Volta swizzle); the walk reads a call's name, so it
+    lowers the exponential beside it and leaves the intrinsic alone."""
+    from importlib import import_module
+    from types import SimpleNamespace
+
+    from emmy.compiler.ir.expression import FunctionCallExpression, Var
+    from emmy.compiler.ir.stmt import Assign, Body, parse_body
+
+    rule = import_module("emmy.compiler.pipeline.passes.lowering.kernel.085_fast_exp")
+    swizzled = Assign("x", FunctionCallExpression("emmy_volta_crosswise", (Var("i"),)))
+    op = KernelOp(body=Body((swizzled, *parse_body("e = exp(x)\nO[i] = e"))))
+    with pinned_knobs({"FAST_EXP": True}):
+        lowered = rule.rewrite(SimpleNamespace(op=op)).body
+    assert "emmy_volta_crosswise(i)" in str(lowered)
+    assert "exp_fast(x)" in str(lowered), str(lowered)
