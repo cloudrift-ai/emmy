@@ -62,6 +62,7 @@ mod tests {
         "SetMaxNReg(count=232, direction=inc)",
         "Smem(name=s_x, extents=(64, 64), dtype=f16)",
         "Tile(axes=(a0 in 0..64, a1 in 0..64), block_threads=128):\n    RegStore(dst_buffer=y, dst_index=(a0, a1), frag=c0, shape=(16, 8, 8)):\n        epilogue:\n            v1 = v0 * s\n        run:\n            RegStore(dst_buffer=y, dst_index=(a0, a1 + 8), frag=c1, shape=(16, 8, 8))",
+        "Grid(axes=(a in 0..3, b in 0..64), decode=(block_idx.x / 2, thread_idx.x), block_threads=64, aux_threads=32):\n    if block_idx.x * 64 + thread_idx.x < 192:\n        y[a, b] = a",
         "FragmentApply(out=o, op=where, args=(FragmentArg(kind=coord, expressions=(_vc > _vr)), FragmentArg(kind=gmem, expressions=(i, j), buffer=mask)), row_base=q)",
         "TreeHalve(bufs=(b), state=(acc), state_b=(acc__o), length=8, tid_var=t):\n    combine_states:\n        t = acc * acc__o\n        acc = acc + t",
         // The other Kernel IR statement types, and the two with the most fields at their fullest.

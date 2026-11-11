@@ -41,12 +41,12 @@ from emmy.compiler.ir.expression import (
     Expression,
     FunctionCallExpression,
     Literal,
+    SimplifyCtx,
     TernaryExpression,
     Var,
 )
 from emmy.compiler.ir.render import (
     RenderCtx,
-    _extent_c,
     _pad,
     op_to_expression,
     render_address,
@@ -60,6 +60,7 @@ from emmy.compiler.ir.sigma import Sigma
 from emmy.compiler.ir.stmt import (
     Accum,
     Assign,
+    Body,
     Cond,
     Load,
     Loop,
@@ -79,6 +80,8 @@ from emmy.emmy_ir import (  # the Kernel IR statement types, declared with the s
     FragmentPromote,
     FragmentRepack,
     FragmentRowReduce,
+    Grid,
+    Interval,
     LdmatrixLoad,
     MbarrierArrive,
     MbarrierArriveExpectTx,
@@ -102,50 +105,6 @@ from emmy.emmy_ir import (  # the Kernel IR statement types, declared with the s
     WgmmaMma,
     WgmmaWait,
 )
-
-# The widest iteration space a 32-bit flat thread id can address — past this the
-# ``Tile`` decode must widen to 64-bit (see ``Tile``'s render).
-_INT32_MAX = 2**31 - 1
-
-
-def _stride_c(axes, ctx: RenderCtx, *, wide: bool = False) -> str:
-    """Build a C expression for the product of axis extents — used as the
-    stride divisor in the grid-axis decode. ``1`` if ``axes`` is empty.
-    ``wide`` prefixes the FIRST factor with a ``(long long)`` cast so the
-    whole product evaluates in 64-bit — a symbolic-grid divisor like
-    ``seq_len * 6144 * 256`` overflows int32 while being *computed*, before
-    any promotion against a 64-bit dividend can help."""
-    if not axes:
-        return "1"
-    factors = [_extent_c(a, ctx) for a in axes]
-    if wide:
-        factors[0] = f"(long long){factors[0]}"
-    return " * ".join(factors)
-
-
-def _render_grid_axis_decode(axes: tuple[Axis, ...], idx_expression: str, ctx: RenderCtx, *, wide: bool = False) -> list[str]:
-    """Decode ``idx_expression`` (``blockIdx.x`` or ``threadIdx.x``) into per-axis ints.
-    ``wide`` keeps every stride divisor in 64-bit (see :func:`_stride_c`); the decoded
-    axis vars stay ``int`` — each is bounded by its extent."""
-    pad = _pad(ctx.indent)
-    if not axes:
-        return []
-    if len(axes) == 1:
-        return [f"{pad}int {axes[0].name} = {idx_expression};"]
-    decoded: list[str] = []
-    stride_axes: list[Axis] = []  # accumulated INNER axes (per-step product is their extents)
-    for ax in reversed(axes):
-        extent = _extent_c(ax, ctx)
-        if not stride_axes:
-            decoded.append(f"int {ax.name} = {idx_expression} % {extent};")
-        else:
-            decoded.append(f"int {ax.name} = ({idx_expression} / ({_stride_c(stride_axes, ctx, wide=wide)})) % {extent};")
-        stride_axes.append(ax)
-    outer = axes[0]
-    outer_stride = _stride_c(list(axes[1:]), ctx, wide=wide)
-    decoded[-1] = f"int {outer.name} = {idx_expression} / ({outer_stride});"
-    return [pad + line for line in reversed(decoded)]
-
 
 # ---------------------------------------------------------------------------
 # Hardware primitives
@@ -246,9 +205,132 @@ def tile_n_dim(tile: Tile):
     return n
 
 
+# The widest value a decode computes in 32 bits; past it (a grid past 2^31 - 1 threads, or one of a symbolic size)
+# its arithmetic is 64-bit.
+_INT32_MAX = 2**31 - 1
+_THREAD, _BLOCK = Builtin("thread_idx.x"), Builtin("block_idx.x")
+
+
+def launch_ranges(cells: Expression, block_threads: int, aux_threads: int = 0) -> SimplifyCtx:
+    """The ranges of the built-ins under the launch a grid of ``cells`` takes: ``block_threads + aux_threads`` threads
+    a CTA, ``ceil(cells / block_threads)`` CTAs. A symbolic count leaves the CTA index what the hardware allows."""
+    ctx = SimplifyCtx.empty().extend(_THREAD.name, Interval(0, block_threads + aux_threads - 1), None)
+    if isinstance(cells, Literal):
+        ctx = ctx.extend(_BLOCK.name, Interval(0, max(-(-int(cells.value) // block_threads), 1) - 1), None)
+    return ctx
+
+
+def grid_launch_ranges(grid: Grid) -> SimplifyCtx:
+    """The ranges of the built-ins under ``grid``'s launch."""
+    return launch_ranges(tile_n_dim(grid).expression, grid.block_threads, grid.aux_threads)
+
+
+def decode_tile(tile: Tile) -> Grid:
+    """The ``Grid`` a ``Tile`` launches as, with its decode spelled out.
+
+    The flat thread id is ``block_idx.x * cells + thread_idx.x`` (``thread_idx.x % cells`` past a warp-specialized
+    producer band, which wraps onto the CTA's first cells): each axis decodes to its digit, the outermost one to the
+    quotient, and the grouped raster remaps the ``(m, n)`` block axes it names (the standard threadblock swizzle, so
+    ``G`` block-tiles of the grouped axis share an operand slab in L2). Every decode is simplified under the launch's
+    ranges, so a block axis reads ``block_idx.x`` alone and a thread axis ``thread_idx.x`` alone, and one whose
+    arithmetic can pass 2^31 - 1 is computed in 64 bits. A ``Cond`` masks the ids past the cell count where the launch
+    does not cover it exactly (never on a spread single cell, whose every thread runs the body)."""
+    cells = tile_cells(tile)
+    count = tile_n_dim(tile).expression
+    launch = launch_ranges(count, cells, tile.aux_threads)
+    gid = _BLOCK * Literal(cells, "int") + (_mod(_THREAD, Literal(cells, "int")) if tile.aux_threads else _THREAD)
+    extents = [a.extent.expression for a in tile.axes]
+    strides = [_product(extents[i + 1 :]) for i in range(len(extents))]
+    decode = [gid if strides[i] == _ONE else _div(gid, strides[i]) for i in range(len(extents))]
+    decode[1:] = [_mod(value, extent) for value, extent in zip(decode[1:], extents[1:], strict=True)]
+    if (pair := _raster_pair(tile)) is not None:
+        for i, value in _raster(tile, pair, gid, extents, strides, launch).items():
+            decode[i] = value
+    body = tile.body
+    guard = BinaryExpression("<", gid, count).simplify(launch)
+    if not tile.spread and not (isinstance(guard, Literal) and guard.value):
+        body = Body((Cond(cond=_settled(guard, launch), body=body),))
+    return Grid(
+        axes=tile.axes,
+        decode=tuple(_settled(value, launch) for value in decode),
+        body=body,
+        block_threads=cells,
+        aux_threads=tile.aux_threads,
+    )
+
+
+def _raster(tile: Tile, pair: tuple[int, int], gid: Expression, extents, strides, launch) -> dict[int, Expression]:
+    """The grouped raster's decode of its two block axes, by position: ``a = grp·G + (sub % (G·Eb)) % gsz`` and ``b =
+    (sub % (G·Eb)) / gsz``, ``sub`` the flat ``(m, n)`` block id, ``grp`` its group and ``gsz = min(G, Ea - grp·G)``
+    the ragged last group's size (``G`` where the groups divide ``Ea``)."""
+    gi, oi = pair
+    mi, ni = min(gi, oi), max(gi, oi)
+    ea, eb = extents[gi], extents[oi]
+    g = tile.raster_group
+    if isinstance(ea, Literal):
+        g = min(g, int(ea.value))
+    group = Literal(g, "int")
+    sub = gid if strides[ni] == _ONE else _div(gid, strides[ni])
+    if mi != 0:
+        sub = _mod(sub, ea * eb)
+    sub = sub.simplify(launch)
+    stripe = group * eb
+    if isinstance(ea, Literal) and int(ea.value) % g == 0:
+        a, b = _div(sub, stripe) * group + _mod(sub, group), _div(_mod(sub, stripe), group)
+    else:
+        grp = _div(sub, stripe)
+        size = FunctionCallExpression("minimum", (group, ea - grp * group))
+        a, b = grp * group + _mod(_mod(sub, stripe), size), _div(_mod(sub, stripe), size)
+    return {gi: a, oi: b}
+
+
+_ONE = Literal(1, "int")
+
+
+def _div(a: Expression, b: Expression) -> Expression:
+    return BinaryExpression("//", a, b)
+
+
+def _mod(a: Expression, b: Expression) -> Expression:
+    return BinaryExpression("%", a, b)
+
+
+def _product(factors: list[Expression]) -> Expression:
+    out: Expression = _ONE
+    for factor in factors:
+        out = factor if out == _ONE else out * factor
+    return out
+
+
+def _settled(value: Expression, launch: SimplifyCtx) -> Expression:
+    """``value`` simplified under ``launch``, its arithmetic 64-bit where a part of it can pass 2^31 - 1."""
+    value = value.simplify(launch)
+    return _widened(value) if _passes_int32(value, launch) else value
+
+
+def _passes_int32(value: Expression, ctx: SimplifyCtx) -> bool:
+    """True when a part of ``value`` can pass 2^31 - 1 under ``ctx``: a name with no range (a symbolic size), or a
+    part whose range does."""
+    if isinstance(value, Var) and value.name not in ctx.ranges:
+        return True
+    span = value.range(ctx)
+    return (span is not None and span.hi > _INT32_MAX) or any(_passes_int32(c, ctx) for c in value.children())
+
+
+def _widened(value: Expression) -> Expression:
+    """``value`` with every built-in and name it reads cast to 64 bits, so C computes all of it in 64 bits; a call's
+    literal argument too, since ``min(int, long long)`` names no one overload."""
+    if isinstance(value, (Builtin, Var)) or (isinstance(value, Literal) and value.dtype == "int"):
+        return CastExpression("long long", value)
+    children = value.children()
+    if isinstance(value, FunctionCallExpression):
+        return value.with_children(tuple(_widened(c) for c in children))
+    return value.with_children(tuple(c if isinstance(c, Literal) else _widened(c) for c in children)) if children else value
+
+
 def _raster_pair(tile: Tile) -> tuple[int, int] | None:
     """``(grouped, other)`` axis positions of an active grouped raster: the ``(m, n)`` block axes adjacent in
-    the decode, ``m`` before ``n``; ``None`` when the order is the flat one."""
+    the decode, ``m`` before ``n``; ``None`` when the order is the flat one or the grouped axis takes one group."""
     if not (tile.raster_group and tile.raster_group > 1 and tile.raster_axes):
         return None
     names = [a.name for a in tile.axes]
@@ -257,164 +339,23 @@ def _raster_pair(tile: Tile) -> tuple[int, int] | None:
     mi, ni = names.index(tile.raster_axes[0]), names.index(tile.raster_axes[1])
     if ni != mi + 1:
         return None
-    return (mi, ni) if tile.raster_orient == "m" else (ni, mi)
-
-
-def _render_symbolic_decode(tile: Tile, ctx: RenderCtx) -> list[str]:
-    """The flat id decoded into the axis vars of a symbolic grid, with the grouped raster when one is active:
-    the static path's swizzle with the extents rendered as C expressions, so a dynamic ``seq_len`` grid takes
-    the same L2-friendly launch order. The ragged last group always takes the clamp — its size is a runtime
-    value."""
-    decoded = _render_grid_axis_decode(tile.axes, "_gid", ctx, wide=True)
-    pair = _raster_pair(tile)
-    if pair is None:
-        return decoded
-    gi, oi = pair
-    mi, ni = min(gi, oi), max(gi, oi)
-    pad, g = _pad(ctx.indent), tile.raster_group
-    ea, eb = _extent_c(tile.axes[gi], ctx), _extent_c(tile.axes[oi], ctx)
-    inner = list(tile.axes[ni + 1 :])
-    sub = f"_gid / ({_stride_c(inner, ctx, wide=True)})" if inner else "_gid"
-    if mi != 0:
-        sub = f"({sub}) % ((long long){ea} * {eb})"
-    stripe = f"((long long){g} * {eb})"
-    grouped = f"_rgrp * {g} + (_rsub % {stripe}) % _rsz"
-    other = f"(_rsub % {stripe}) / _rsz"
-    swizzle = {
-        tile.axes[gi].name: grouped,
-        tile.axes[oi].name: other,
-    }
-    lines = [
-        f"{pad}long long _rsub = {sub};",
-        f"{pad}long long _rgrp = _rsub / {stripe};",
-        f"{pad}long long _rsz = min((long long){g}, (long long){ea} - _rgrp * {g});",
-    ]
-    for line in decoded:
-        name = line.strip().removeprefix("int ").split(" = ", 1)[0]
-        lines.append(f"{pad}int {name} = {swizzle[name]};" if name in swizzle else line)
-    return lines
+    gi, oi = (mi, ni) if tile.raster_orient == "m" else (ni, mi)
+    extent = tile.axes[gi].extent
+    if extent.is_static and min(tile.raster_group, extent.as_static()) <= 1:
+        return None
+    return gi, oi
 
 
 @render_stmt.register
 def _(node: Tile, ctx: RenderCtx) -> list[str]:
+    return render_stmt(decode_tile(node), ctx)
+
+
+@render_stmt.register
+def _(node: Grid, ctx: RenderCtx) -> list[str]:
     pad = _pad(ctx.indent)
-    # Symbolic grid (a dynamic free axis): size the guard + decode from the runtime extents
-    # via the symbolic-aware helpers (the ``Dim`` name renders to its ``int`` arg). Kept off
-    # the static path so static codegen stays byte-identical.
-    if not tile_is_static(node):
-        inner = ctx.child()
-        # A symbolic grid's total is unboundable at render time, so the flat id and every
-        # stride divisor are ALWAYS 64-bit — a batched coop-reduce grid overflows int32 at
-        # runtime-legal extents (batch·seq·N·coop = 4·512·6144·256 ≈ 3.2e9 on the demoted
-        # fused gate/up kernel → cudaErrorIllegalAddress; the static branch below reaches
-        # the same overflow class and widens exactly when its known total needs it). The
-        # ``(long long)blockIdx.x`` lowers to one mul.wide; the decoded axis vars stay
-        # ``int`` (each bounded by its extent).
-        n = _stride_c(list(node.axes), inner, wide=True)
-        # Same aux-band decode as the static path below: blockDim includes the producer band,
-        # so the cell id must be derived from ``block_threads``, not ``blockDim``.
-        sgid = (
-            f"(long long)blockIdx.x * {node.block_threads} + threadIdx.x % {node.block_threads}"
-            if node.aux_threads
-            else "(long long)blockIdx.x * blockDim.x + threadIdx.x"
-        )
-        out = [
-            f"{pad}long long _gid = {sgid};",
-            f"{pad}if (_gid < {n}) {{",
-        ]
-        out.extend(_render_symbolic_decode(node, inner))
-        out.extend(render_body(node.body, inner))
-        out.append(f"{pad}}}")
-        return out
-    extents = tile_extents(node)
-    # Inner-stride of each axis = product of the extents to its right.
-    strides: list[int] = [1] * len(extents)
-    acc = 1
-    for i in range(len(extents) - 1, -1, -1):
-        strides[i] = acc
-        acc *= extents[i]
-    n = tile_n_elements(node)
-    # A flat id past INT32_MAX wraps negative in 32-bit arithmetic and every decoded index
-    # goes wild (a per-cell coop-reduce grid reaches it: M·N·coop = 4096·3840·256 ≈ 4.0e9 on
-    # the gemma-4 down-proj demote → cudaErrorIllegalAddress). Widen the id to 64-bit exactly
-    # when the static iteration space needs it — ``(long long)blockIdx.x`` lowers to one
-    # mul.wide, and the (slower) 64-bit axis divisions only land on kernels that would
-    # otherwise fault. The symbolic branch above widens ALWAYS: its runtime extent is
-    # unboundable at render time (batch·seq·N·coop crossed int32 at seq 512 on the merged
-    # gate/up demote).
-    wide = n > _INT32_MAX
-    bidx = "(long long)blockIdx.x" if wide else "blockIdx.x"
-    # A warp-specialized producer band (``aux_threads``) launches PAST the cooperative cells:
-    # decode off ``blockIdx·block_threads + threadIdx % block_threads`` so an aux thread wraps
-    # onto this CTA's cells (correct block coords; its unit/lane aliases are never read).
-    gid = (
-        f"{bidx} * {node.block_threads} + threadIdx.x % {node.block_threads}" if node.aux_threads else f"{bidx} * blockDim.x + threadIdx.x"
-    )
-    # ``gridDim = ceil(n / cells)`` CTAs cover the cells. When ``cells`` divides ``n`` exactly and
-    # there is no warp-specialized aux band, every launched thread maps to a real cell — the tail
-    # guard ``_gid < n`` is always-true (and nvcc can't prove it: ``gridDim`` is a launch arg), so
-    # emit the decode + body flat. Otherwise the partial last block (or the aux threads that launch
-    # past the cells) needs masking.
-    guard = not node.spread and (node.aux_threads != 0 or n % tile_cells(node) != 0)
-    out = [f"{pad}{'long long' if wide else 'int'} _gid = {gid};"]
-    inner = ctx.child()
-    ipad = _pad(inner.indent)
-    if guard:
-        out.append(f"{pad}if (_gid < {n}) {{")
-    # Grouped CTA rasterization (the resolved ``RASTER`` codec): remap the flat ``(m, n)``
-    # block sub-id so ``G`` block-tiles of the grouped axis iterate fastest within each
-    # launch stripe. Consecutive CTAs then share the same streamed operand slab (L2 reuse)
-    # instead of re-streaming it from DRAM once per row of the other axis (the flat
-    # N-fastest order's failure mode). With the grouped axis ``a`` (extent Ea) and the
-    # other axis ``b`` (extent Eb): ``a = grp·G + (sub % (G·Eb)) % gsz``,
-    # ``b = (sub % (G·Eb)) / gsz`` — the standard threadblock swizzle, with
-    # ``gsz = min(G, Ea − grp·G)`` handling the ragged last group.
-    raster = None  # (grouped_idx, other_idx, G) when active
-    if node.raster_group and node.raster_axes:
-        names = [a.name for a in node.axes]
-        if node.raster_axes[0] in names and node.raster_axes[1] in names:
-            mi, ni = names.index(node.raster_axes[0]), names.index(node.raster_axes[1])
-            if ni == mi + 1:
-                gi, oi = (mi, ni) if node.raster_orient == "m" else (ni, mi)
-                g_eff = min(node.raster_group, extents[gi])
-                if extents[gi] > 1 and g_eff > 1:
-                    raster = (gi, oi, g_eff)
-    if raster is not None:
-        gi, oi, g = raster
-        ea, eb = extents[gi], extents[oi]
-        mi, ni = min(gi, oi), max(gi, oi)
-        sn = strides[ni]
-        sub = "_gid" if sn == 1 else f"_gid / {sn}"
-        # ``% (Em·En)`` drops when (m, n) are the outermost axes (the sub-id is bounded
-        # by the ``_gid < N`` guard / exact grid).
-        if mi != 0:
-            sub = f"({sub}) % {ea * eb}"
-        decls = [f"{ipad}int _rsub = {sub};"]
-        if ea % g == 0:
-            a_expression = f"(_rsub / {g * eb}) * {g} + _rsub % {g}"
-            b_expression = f"(_rsub % {g * eb}) / {g}"
-        else:
-            decls.append(f"{ipad}int _rgrp = _rsub / {g * eb};")
-            decls.append(f"{ipad}int _rsz = min({g}, {ea} - _rgrp * {g});")
-            a_expression = f"_rgrp * {g} + (_rsub % {g * eb}) % _rsz"
-            b_expression = f"(_rsub % {g * eb}) / _rsz"
-    for i, a in enumerate(node.axes):
-        s, e = strides[i], extents[i]
-        if raster is not None and i == mi:
-            out.extend(decls)
-            out.append(f"{ipad}int {a.name} = {a_expression if i == gi else b_expression};")
-            continue
-        if raster is not None and i == ni:
-            out.append(f"{ipad}int {a.name} = {a_expression if i == gi else b_expression};")
-            continue
-        term = "_gid" if s == 1 else f"_gid / {s}"
-        # The outermost axis needs no modulo (``_gid / s0 < e0`` since _gid < N).
-        expression = term if i == 0 else f"({term}) % {e}"
-        out.append(f"{ipad}int {a.name} = {expression};")
-    out.extend(render_body(node.body, inner))
-    if guard:
-        out.append(f"{pad}}}")
-    return out
+    decoded = [f"{pad}int {axis.name} = {render_expression(value, ctx)};" for axis, value in zip(node.axes, node.decode, strict=True)]
+    return decoded + render_body(node.body, ctx)
 
 
 @render_stmt.register
@@ -1997,6 +1938,10 @@ __all__ = [
     "Loop",
     # Kernel-IR statements
     "Tile",
+    "Grid",
+    "decode_tile",
+    "grid_launch_ranges",
+    "launch_ranges",
     "Smem",
     "Sync",
     "TreeHalve",

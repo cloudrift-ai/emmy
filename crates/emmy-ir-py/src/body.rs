@@ -832,13 +832,51 @@ pub fn fragment_order<'py>(
     )
 }
 
-/// A kernel body after the Kernel IR optimizer's exact rewrites (`emmy_ir::optimize::optimize_kernel_body`).
-#[pyfunction]
-pub fn optimize_kernel_body<'py>(body: &Bound<'py, PyAny>) -> PyResult<Bound<'py, PyBody>> {
-    PyBody::wrap(
-        body.py(),
-        &emmy_ir::optimize::optimize_kernel_body(&PyBody::from_iterable(body)?).py()?,
+/// `ctx` as the simplifier's context, the empty one where none is given.
+fn ctx_or_empty(ctx: Option<&Bound<'_, PyAny>>) -> PyResult<emmy_ir::expr::SimplifyCtx> {
+    ctx.map_or_else(
+        || Ok(emmy_ir::expr::SimplifyCtx::empty()),
+        crate::expression::ctx_from_py,
     )
+}
+
+/// A kernel body after the Kernel IR optimizer's exact rewrites (`emmy_ir::optimize::optimize_kernel_body`), under
+/// `ctx`'s ranges (the launch's, for the built-ins) where one is given.
+#[pyfunction]
+#[pyo3(signature = (body, ctx=None))]
+pub fn optimize_kernel_body<'py>(
+    body: &Bound<'py, PyAny>,
+    ctx: Option<&Bound<'py, PyAny>>,
+) -> PyResult<Bound<'py, PyBody>> {
+    let out =
+        emmy_ir::optimize::optimize_kernel_body(&PyBody::from_iterable(body)?, &ctx_or_empty(ctx)?);
+    PyBody::wrap(body.py(), &out.py()?)
+}
+
+/// The optimizer with motion: every value out of each loop its operands do not vary in
+/// (`emmy_ir::optimize::hoist_invariants`).
+#[pyfunction]
+#[pyo3(signature = (body, ctx=None))]
+pub fn hoist_invariants<'py>(
+    body: &Bound<'py, PyAny>,
+    ctx: Option<&Bound<'py, PyAny>>,
+) -> PyResult<Bound<'py, PyBody>> {
+    let out =
+        emmy_ir::optimize::hoist_invariants(&PyBody::from_iterable(body)?, &ctx_or_empty(ctx)?);
+    PyBody::wrap(body.py(), &out.py()?)
+}
+
+/// A kernel body with its index divisions and remainders by a power of two over a non-negative dividend as shifts and
+/// masks (`emmy_ir::optimize::reduce_strength`), under `ctx`'s ranges where one is given.
+#[pyfunction]
+#[pyo3(signature = (body, ctx=None))]
+pub fn reduce_strength<'py>(
+    body: &Bound<'py, PyAny>,
+    ctx: Option<&Bound<'py, PyAny>>,
+) -> PyResult<Bound<'py, PyBody>> {
+    let out =
+        emmy_ir::optimize::reduce_strength(&PyBody::from_iterable(body)?, &ctx_or_empty(ctx)?);
+    PyBody::wrap(body.py(), &out.py()?)
 }
 
 /// Every value expression in its canonical spelling under the names as they stand.
@@ -946,6 +984,8 @@ pub fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(canonical_values, m)?)?;
     m.add_function(wrap_pyfunction!(fragment_order, m)?)?;
     m.add_function(wrap_pyfunction!(optimize_kernel_body, m)?)?;
+    m.add_function(wrap_pyfunction!(reduce_strength, m)?)?;
+    m.add_function(wrap_pyfunction!(hoist_invariants, m)?)?;
     m.add_function(wrap_pyfunction!(free_names_py, m)?)?;
     m.add_function(wrap_pyfunction!(exposed_defines_py, m)?)?;
     m.add_function(wrap_pyfunction!(rename_free, m)?)?;

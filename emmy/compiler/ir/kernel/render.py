@@ -1678,14 +1678,16 @@ def _compute_dynamic_smem_offsets(kernel_op: KernelOp) -> tuple[dict[str, int], 
 
 
 def _launch_bounds_for(kernel_op: KernelOp) -> int:
-    """Derive ``__launch_bounds__`` from the (single) ``Tile``'s per-CTA thread count — a
-    cooperative tile's ``block_threads`` (``coop · ∏block-cells``), else the scalar tier's
-    ``_BLOCK_SIZE``. Matches the ``blockDim`` the cuda lowering picks."""
-    from emmy.compiler.ir.kernel.ir import Tile  # noqa: PLC0415
+    """Derive ``__launch_bounds__`` from the (single) grid's per-CTA thread count — a cooperative tile's
+    ``block_threads`` (``coop · ∏block-cells``), else the scalar tier's ``_BLOCK_SIZE``, with the warp-specialized
+    producer band, which launches too. Matches the ``blockDim`` the cuda lowering picks."""
+    from emmy.compiler.ir.kernel.ir import Grid, Tile, tile_cells  # noqa: PLC0415
 
-    for s in kernel_op.body.iter_of_type(Tile):
-        if s.block_threads is not None:
-            return s.block_threads + s.aux_threads  # the warp-specialized producer band launches too
+    for s in kernel_op.body:
+        if isinstance(s, Grid):
+            return s.block_threads + s.aux_threads
+        if isinstance(s, Tile):
+            return tile_cells(s) + s.aux_threads
     return _BLOCK_SIZE
 
 

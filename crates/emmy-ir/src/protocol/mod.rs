@@ -927,6 +927,7 @@ mod tests {
         "Smem(name=s, extents=(16, 16))",
         "Sync",
         "Tile(axes=(m in 0..4, n in 0..8), raster_axes=(m, n), raster_group=2):\n    x = load a[m, n]",
+        "Grid(axes=(a in 0..3, b in 0..64), decode=(block_idx.x / 2, thread_idx.x), block_threads=64, aux_threads=32):\n    if block_idx.x * 64 + thread_idx.x < 192:\n        y[a, b] = a",
         "CpAsyncCopy(smem=s, smem_index=(i, j), src=a, src_index=(i, j), lane_index=(i, j), valid=i < 2)",
         "CpAsyncCommit",
         "CpAsyncWait(group=1)",

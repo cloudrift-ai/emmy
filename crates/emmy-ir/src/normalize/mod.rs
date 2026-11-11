@@ -130,7 +130,7 @@ fn unsettled(stmts: &Body, steps: &str) -> Result<Body> {
     )))
 }
 
-fn with_bodies(stmt: &Arc<Statement>, bodies: Vec<Body>) -> Arc<Statement> {
+pub(crate) fn with_bodies(stmt: &Arc<Statement>, bodies: Vec<Body>) -> Arc<Statement> {
     Statement::rebuild_bodies(stmt, bodies)
 }
 

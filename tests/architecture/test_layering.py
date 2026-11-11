@@ -148,22 +148,25 @@ def test_normalization_has_one_entry_point() -> None:
 
 
 def test_the_kernel_ir_optimizer_is_a_pass_beside_normalization() -> None:
-    """The Kernel IR optimizer is the crate's second entry point, ``optimize_kernel_body`` in its ``optimize`` module:
-    pass mechanics that read the numbering and placement, run by one kernel pass. Normalization never reaches it,
-    since every normalization step runs inside ``normalize_body``."""
-    from emmy.compiler.ir.kernel import optimize_kernel_body
+    """The Kernel IR optimizer is the crate's second entry point, its ``optimize`` module: pass mechanics that read
+    the numbering and placement, run by pipeline passes alone. Normalization never reaches it, since every
+    normalization step runs inside ``normalize_body``."""
+    from emmy.compiler.ir import kernel
 
-    assert callable(optimize_kernel_body)
+    entries = ("optimize_kernel_body", "hoist_invariants", "reduce_strength")
     src = _REPO_ROOT / "crates" / "emmy-ir" / "src"
-    assert "pub fn optimize_kernel_body(" in (src / "optimize" / "mod.rs").read_text()
+    module = (src / "optimize" / "mod.rs").read_text()
+    for entry in entries:
+        assert callable(getattr(kernel, entry))
+        assert f"pub fn {entry}(" in module, entry
     normalize = [path.relative_to(src) for path in (src / "normalize").rglob("*.rs") if "optimize::" in path.read_text()]
     assert not normalize, f"normalization reaches the optimizer: {normalize}"
     callers = [
         path.relative_to(_REPO_ROOT)
         for path in (_REPO_ROOT / "emmy").rglob("*.py")
-        if "optimize_kernel_body" in path.read_text() and "ir/kernel/__init__.py" not in str(path)
+        if any(entry in path.read_text() for entry in entries) and "ir/kernel/__init__.py" not in str(path)
     ]
-    assert [path.name for path in callers] == ["032_optimize.py"], callers
+    assert callers and all(path.parts[:4] == ("emmy", "compiler", "pipeline", "passes") for path in callers), callers
 
 
 _STMT_PACKAGE = "emmy.compiler.ir.stmt"
@@ -517,7 +520,7 @@ def test_a_kernel_ir_kind_is_declared_not_programmed() -> None:
         for name, member in vars(cls).items()
         if isinstance(member, (types.FunctionType, property, functools.cached_property, staticmethod, classmethod))
     ]
-    assert len(statement_types) == 30 and all(
+    assert len(statement_types) == 31 and all(
         cls.__module__ == "emmy.compiler.ir.kernel.ir" and "_fields" in vars(cls) for cls in statement_types
     )
     assert not offenders, "state these as field roles, or move them to functions over the statement:\n" + "\n".join(sorted(offenders))

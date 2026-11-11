@@ -213,6 +213,15 @@ def dtype_input_scale(dtype) -> float:
     return 0.05 if dtype.name == "f16" else 1.0
 
 
+def grouped_raster_decode(src: str, group: int) -> list[str]:
+    """The block-axis decode lines of ``src`` that take a grouped raster of ``group`` block-tiles: a block axis read
+    from the CTA index alone as its group's base plus its offset in the group (``... * group + ...``)."""
+    lines = [line.strip() for line in src.splitlines()]
+    return [
+        line for line in lines if line.startswith("int ") and "blockIdx.x" in line and "threadIdx" not in line and f" * {group} + " in line
+    ]
+
+
 def skip_if_no_cuda() -> None:
     """Skip the current test when Emmy cannot compile CUDA kernels."""
     if not has_cuda_toolchain():

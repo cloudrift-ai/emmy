@@ -145,12 +145,20 @@ identity stays the same whatever the buffers are called.
 
 ## The Kernel IR optimizer
 
-`optimize/` is the crate's second entry point, `optimize_kernel_body`, which one kernel pass runs
-(`032_optimize`): the exact rewrites a kernel body takes after lowering. Each removes work and adds none, so none is a
-decision. It simplifies every expression under the ranges of the axes around it, a `Tile`'s included, shares every
-pure value a scope computes twice (`share_values`: placement's numbering and availability with no motion), merges
-congruent carried states and drops unread values, until a round changes nothing. Nothing moves to another scope:
-moving a value out of a loop lengthens its live range, a choice for evidence. The module is no normalization step and
+`optimize/` is the crate's second entry point, `optimize_kernel_body`, which two passes run: the kernel lowering's
+`032_optimize` before the memory rules, and the CUDA stage's `008_optimize` after the decode. It takes the exact
+rewrites a kernel body takes after lowering. Each removes work and adds none, so none is a decision. It simplifies
+every expression under the caller's context and the ranges of the axes around it, a `Tile`'s or a `Grid`'s included,
+shares every pure value a scope computes twice (`share_values`: placement's numbering and availability with no
+motion), merges congruent carried states and drops unread values, until a round changes nothing. Nothing moves to
+another scope: moving a value out of a loop lengthens its live range, a choice for evidence.
+
+A built-in has a range: what the hardware allows (`Builtin::hardware_range`), narrowed by the context, where the late
+pass names the launch's (`thread_idx.x` below the CTA's threads, `block_idx.x` below its CTAs). A built-in the launch
+pins to one value simplifies to it. Loop IR holds no built-in, so neither moves an identity. Under those ranges a
+`Grid`'s decode of the flat thread id splits into the CTA's and the thread's digits. `reduce_strength` then spells
+every index division and remainder by a power of two over a dividend the ranges prove non-negative as a shift and a
+mask; it runs last, since the simplifier reads `/` and `%` and a shift's range is unknown to it. The module is no normalization step and
 normalization never reaches it, since every normalization step runs inside `normalize_body`. It names no kernel
 statement type: the numbering and placement read a kernel statement through the protocol like any other, so a name
 a statement defines at each of several positions is a value apart, a name it reads and defines again is read as the

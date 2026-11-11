@@ -415,6 +415,21 @@ macro_rules! with_statement_types {
                     raster_orient: Name [] = Name::from("m"),
                     spread: bool [] = false,
                 }
+                /// A thread grid with its decode spelled out: `ceil(∏extents / block_threads)` CTAs of `block_threads +
+                /// aux_threads` threads, each binding every axis to its `decode` expression over `thread_idx.x` and
+                /// `block_idx.x` and running `body` once.
+                ///
+                /// The target lowering turns a `Tile` into one before it renders, so the decode is Kernel IR the
+                /// optimizer simplifies and an emitter spells, not text. The axes keep their ranges for the body; a
+                /// `Cond` at the top of the body masks the threads past the cells where the launch does not cover them
+                /// exactly, and the axes hold their ranges only under it.
+                kernel Grid {} {
+                    axes: Axes [AXIS],
+                    decode: Exprs [EXPRESSION] : Index,
+                    body: Body [BODY],
+                    block_threads: i64 [],
+                    aux_threads: i64 [] = 0,
+                }
                 /// Issue one `cp.async.{ca,cg}.shared.global` instruction.
                 ///
                 /// Replaces the per-thread `Load(reg) + Write(smem)` pair in cooperative loads on sm_80+. The hardware copies
@@ -1382,7 +1397,7 @@ mod tests {
         }
         assert_eq!(
             blake3::hash(listing.as_bytes()).to_hex().as_str(),
-            "f3d5e7918178e3202a93f607d93db4b332d5ccdaa6a31e8429b3f012e810b18b",
+            "cb4aff661a47375daa3d607b4c7c82dad98006de5462c798c17d801615a90711",
             "{listing}"
         );
     }

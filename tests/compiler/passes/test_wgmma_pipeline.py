@@ -64,7 +64,7 @@ def test_the_producer_band_releases_the_previous_slot_under_p2() -> None:
     src = _source(_code(256, 1024), {"WORK": "w4x1+p1", "TILE": _N128, "STAGE": "d4/smem-tma/p2"})
     assert "wgmma.wait_group.sync.aligned 1" in src
     release = src[src.index("mbarrier_arrive(&_mbar_empty") - 200 : src.index("mbarrier_arrive(&_mbar_empty")]
-    assert ">= 1" in release and "+ 3) % 4" in src[src.index("mbarrier_arrive(&_mbar_empty") :].split("\n")[0]
+    assert ">= 1" in release and "+ 3 & 3]" in src[src.index("mbarrier_arrive(&_mbar_empty") :].split("\n")[0]
 
 
 def test_four_cells_store_one_16_byte_row_each_lane() -> None:
