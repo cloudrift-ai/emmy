@@ -32,7 +32,7 @@ def _normalize_body(body: Body, params: tuple[str, ...]) -> Body:
     a read of a parameter ahead of the body's rebinding of it reading the parameter) and every value spelled in its
     canonical form under those names (commutative operands and a sum's terms by rank), the context-independent
     storage invariants a term's structural identity reads directly."""
-    return canonical_values(fragment_order(body, params))
+    return canonical_values(fragment_order(body, params) if len(body) > 1 else body)
 
 
 @dataclass(frozen=True)

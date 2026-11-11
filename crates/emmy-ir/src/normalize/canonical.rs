@@ -253,20 +253,15 @@ fn ordered_within(body: &Body, numbering: &Numbering, outer: &HashSet<Name>) -> 
 }
 
 /// A fragment's statements in the canonical order, its names as they stand: dependency-valid, then as the canonical
-/// order ranks siblings, every buffer keyed by the role the body gives it. Nothing is renamed or dropped, so a pure
-/// fragment with named results (a lambda's body) keeps them. `outer` are the names the fragment's reader binds (a
-/// lambda's parameters): a read of one ahead of its first binding in the fragment reads the outer one. A body whose
-/// statements wait on each other has no order, and is an error.
+/// order ranks siblings. Nothing is renamed or dropped, so a pure fragment with named results (a lambda's body) keeps
+/// them; its buffers are keyed by name, since a fragment compares its free names as spelled. `outer` are the names
+/// the fragment's reader binds (a lambda's parameters): a read of one ahead of its first binding in the fragment reads
+/// the outer one. A body whose statements wait on each other has no order, and is an error.
 pub fn fragment_order(body: &Body, outer: &HashSet<Name>) -> Result<Body> {
-    let role = roles(body, None);
-    let numbering = value_numbers(
-        body,
-        &|name| {
-            role.get(name)
-                .map_or_else(|| Key::Str(*name), |r| Key::Int(*r as i64))
-        },
-        Chains::Flat,
-    );
+    if body.len() < 2 {
+        return Ok(body.clone());
+    }
+    let numbering = value_numbers(body, &crate::numbering::spelled_key, Chains::Flat);
     ordered_within(body, &numbering, outer)
 }
 
