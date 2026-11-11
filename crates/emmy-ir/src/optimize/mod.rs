@@ -96,4 +96,28 @@ mod tests {
         let out = optimized(given);
         assert_eq!(out.matches("Sync").count(), 1, "{out}");
     }
+
+    /// Two accumulators of one value are congruent, but a combine that updates each in place after the loop holds
+    /// them as two states: the merge leaves both.
+    #[test]
+    fn a_state_a_combine_updates_in_place_stays() {
+        let out = optimized(
+            "
+            Tile(axes=(m in 0..4, _lane in 0..32)):
+                for k in 0..16:
+                    x = load X[m, k]
+                    a <- add(a, x) over k
+                    y = load X[m, k]
+                    b <- add(b, y) over k
+                WarpShuffle(state=(a, b), state_b=(a__o, b__o), length=32):
+                    combine_states:
+                        a = a + a__o
+                        b = b + b__o
+                O[m, 0] = a
+                O[m, 1] = b
+            ",
+        );
+        assert_eq!(out.matches(" <- add").count(), 2, "{out}");
+        assert!(out.contains("state=(a, b)"), "{out}");
+    }
 }

@@ -3,6 +3,7 @@
 //! groups start from structure and split by their updates' numbers until no group splits.
 
 use std::collections::HashMap;
+use std::sync::Arc;
 
 use super::{Chains, Key, Number, Param, spelled_key, value_numbers};
 
@@ -24,7 +25,7 @@ pub fn congruent_states(body: &Body) -> Vec<Vec<Name>> {
     let mut start: Vec<(Key, Vec<Name>)> = Vec::new();
     for name in &sites.order {
         let site = &sites.sites[name];
-        if site.definitions != 1 || !site.candidate {
+        if site.definitions != 1 || !site.candidate || sites.defining.get(name) != Some(&1) {
             continue;
         }
         match start.iter_mut().find(|(key, _)| *key == site.key) {
@@ -83,8 +84,8 @@ pub fn group_keys(groups: &[Vec<Name>]) -> HashMap<Name, Key> {
 }
 
 /// Where a state is defined: its update's ordinal in the numbering's pre-order walk, the start key (the update's
-/// statement type, operation and dtype, and the scope that holds it), how many statements define it, and whether its
-/// seed is known.
+/// statement type, operation and dtype, and the scope that holds it), how many of its updates and seeds define it, and
+/// whether its seed is known.
 struct Site {
     ordinal: usize,
     key: Key,
@@ -97,6 +98,9 @@ struct Sites {
     sites: HashMap<Name, Site>,
     order: Vec<Name>,
     next: usize,
+    /// How many statements, of any type, define each name: a kernel statement may update a state in place (a warp
+    /// shuffle combining into it), which makes it no candidate.
+    defining: HashMap<Name, usize>,
 }
 
 impl Sites {
@@ -106,6 +110,9 @@ impl Sites {
         for stmt in body.stmts() {
             let ordinal = self.next;
             self.next += 1;
+            for name in defined_by(stmt) {
+                *self.defining.entry(name).or_default() += 1;
+            }
             let candidate = match &**stmt {
                 Statement::Accum(_) => Some(seeded && scope.is_some()),
                 Statement::Carry(_) => Some(true),
@@ -164,4 +171,20 @@ fn start_key(stmt: &Statement, scope: Option<(usize, usize)>) -> Key {
             None => Key::None,
         },
     ])
+}
+
+/// The names `stmt` defines, those its carried statements define included: a combine's merge updates its states in
+/// place (`acc = acc + acc__o`) though its state field only reads them.
+fn defined_by(stmt: &Arc<Statement>) -> Vec<Name> {
+    struct Carried(Vec<Name>);
+    impl crate::field::Visitor for Carried {
+        fn carried(&mut self, _roles: crate::statement::Roles, stmt: &Arc<Statement>) {
+            self.0.extend(defined_by(stmt));
+        }
+    }
+    let mut carried = Carried(stmt.defines());
+    stmt.visit(&mut carried);
+    carried.0.sort();
+    carried.0.dedup();
+    carried.0
 }
