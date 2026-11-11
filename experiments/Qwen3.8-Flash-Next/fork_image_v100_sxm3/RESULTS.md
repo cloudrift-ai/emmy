@@ -15,6 +15,8 @@ upstream does not use.
 **Protocol.** Step 2's, unchanged: `emmy bench` with the recipe in this directory, the same rows, flags and seeds, one
 deployment per row, random prompts, greedy, `ignore_eos`, four client repeats per row with fresh prompts (seed 380 +
 repeat), and no warm-up request. Repeat 1 primes the server; repeats 2-4 are the steady numbers below, beside step 2's.
+The archived run passed `--no-async-scheduling`, as step 2 did then; the recipe no longer passes it since async
+scheduling went on in the production shape (2026-11-11), so a rerun measures that shape instead.
 
 | Row | Time to first token | | Per output token | | Total output | |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: |
