@@ -840,11 +840,10 @@ Rounds, as with DeepSeek. Each round starts from a profile and ends with a boot 
     The done bar for this round, 200 tok/s, is not reached.
   - One profiled boot, rank 0, one decode step at eight requests, against the 2026-11-07 profile: the routed experts
     5.93 ms (10.37), their dispatch 0.48 ms (5.03), GPU busy 25.5 ms (34.5), 2,961 kernels (5,361). The experts and
-    their dispatch came to 6.4 ms, under the gate's 8. The step lost only 6.2 of the 9 ms because the GPU now waits
-    on the host: unprofiled, the gap between tokens is about 4.5 ms over the GPU busy time, against 1.8-2.0 ms
-    before; the long gaps of vLLM's step work are 4.2 ms per step in both profiles and used to hide behind GPU work.
-    Profiled step times flatter a step with fewer kernels (about 1.6 us of profiler cost per kernel), so read gains
-    from unprofiled boots.
+    their dispatch came to 6.4 ms, under the gate's 8. The step lost only 6.2 of the 9 ms because the profiles
+    over-read the saving: the profiled busy time fell 8.95 ms, the GPU time per step measured without the profiler
+    6.8 ms (the host time note below). Profiled step times flatter a step with fewer kernels, so read gains from
+    unprofiled boots.
   - Correctness: two branch boots give the same text one request at a time, 6 of 6, and the same as main. Six
     requests at once give the same text on two branch boots for 5 of 6; batching changes the text against the same
     prompt alone on main too (4 of 6 identical alone and batched, the branch 3 of 6), and whether batched text varies
@@ -854,7 +853,7 @@ Rounds, as with DeepSeek. Each round starts from a profile and ends with a boot 
     audit deploys all 14 twins from the golden alone.
   - Not measured: how often eight rows share an expert in real routing (each row reads its own ten slices); the wait
     for the slowest rank under the wider program (rank 0 waited about 0.2 ms per step in its all-reduces); four
-    requests; the host time of a decode step, now the next lever at eight requests.
+    requests.
 - **Host time of a decode step (2026-11-11).** #1378's tree, main with #1377 and the step 3 fork image, on boots never
   profiled. py-spy samples the engine core and all four workers without pausing them; the sampled runs read within
   1% of unsampled ones. The torch profiler cannot measure this: it slows the host's Python 2-3x and Emmy's CUDA graph
@@ -876,9 +875,8 @@ Rounds, as with DeepSeek. Each round starts from a profile and ends with a boot 
     graph launch call, and the GPU works during it: inside Emmy's graph the GPU idles under 0.01 ms per step, even in
     the profiled trace where the call took 8.5 ms. Why Emmy's graph costs about 0.6 us per kernel to launch and the
     fork's almost nothing is not established.
-  - This corrects the reading above: the GPU did not start to wait on the host, and the unprofiled gap minus the
-    profiled GPU busy time is not host time. The step lost 6.2 of the expected 9 ms because the profiles over-read the
-    saving: the profiled busy time fell 8.95 ms, the GPU time per step measured without the profiler 6.8 ms.
+  - Main and #1378 spend the same host time, so the eight-row round did not leave the GPU waiting on the host. The
+    unprofiled gap between tokens minus the profiled GPU busy time is not host time: the profiler changes both.
   - So the gap left is GPU work: 26.0-26.3 against 20.2-20.6 ms per step at eight requests, 16.7-17.0 against
     9.8-10.0 at one. The profiled split at eight requests, #1378 against the fork: routed experts and their dispatch
     6.4 against 4.4 ms, pre and post 7.0 against 5.8, glue 2.4 against 1.7, the hosted dense matmuls 4.3 against 3.6.
