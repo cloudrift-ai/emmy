@@ -2,8 +2,11 @@
 # execution-plan packs, and the checkpoint baked in (docker/vllm-emmy-serve, models/deepseek-v4-flash-0731.env). The
 # image is published; this envelope was qualified on 2026-10-07 (RESULTS.md).
 #
-# - Context is the checkpoint's full 1,048,576 tokens. A prompt of that length completes in 22 minutes, the plain
-#   fork's time, with memory flat at about 31,800 of 32,510 MiB per card.
+# - Context is 131,072 tokens, not the checkpoint's 1,048,576 (2026-11-04). A deployed request has 290 seconds before
+#   Relay abandons it, and on this hardware a prompt of 130,711 tokens took 124 s where one of 262,845 took 224 s and
+#   the full context 22 minutes (RESULTS.md); with 512 output tokens at about 120 ms each, 131,072 is the largest
+#   halving of the native context that answers in time. The serving experiment measured this context at the same
+#   first-token time and a slightly faster decode than the full one. The full-context latency is not yet measured.
 # - The memory share is 0.80, not the fork's 0.90. Emmy's prefill needs about 2 GiB of working memory per card that
 #   vLLM's KV sizing does not leave at 0.90, where a prompt longer than one prefill step runs the first-stage cards
 #   out of memory and kills the server.
@@ -32,7 +35,7 @@ engine:
     tensor_parallel_size: 8
     pipeline_parallel_size: 2
     gpu_memory_utilization: 0.80
-    context_length: 1048576
+    context_length: 131072
     max_concurrent_requests: 8
     vllm:
       image: "cloudriftai/vllm-emmy-deepseek-v4-flash-0731:1.2.3-992de5c8"

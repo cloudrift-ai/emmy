@@ -6,6 +6,13 @@ plain 1Cat/vLLM image at the same context. That configuration's measurement stay
 `experiments/DeepSeek-V4-Flash-0731/serving_v100_sxm3`, and `experiments/DeepSeek-V4-Flash-0731/emmy_ab_v100_sxm3`
 compares the two images at one envelope.
 
+Update 2026-11-04: the recipe now pins a 131,072-token context. A deployed request has 290 seconds before Relay
+abandons it, and the long-prompt times below (124 s for 130,711 tokens, 224 s for 262,845, 22 minutes for the full
+context) plus 512 output tokens at about 120 ms each leave 131,072 as the largest halving of the native context that
+answers in time. The serving experiment's 131,072-token row measured the same first-token time and a slightly faster
+decode than the full context. The measurements in this report were taken at 1,048,576 tokens; the recipe's
+full-context latency is not yet measured.
+
 ## Qualified deployment
 
 | Item | Value |

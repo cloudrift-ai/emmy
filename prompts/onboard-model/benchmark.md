@@ -61,6 +61,19 @@ running this matrix; if the model's validated context is smaller, retain the row
 as inapplicable rather than shortening them. Embedding and materially different multimodal workloads need an analogous
 task-specific matrix instead of pretending that token generation measures them.
 
+### Full-context request
+
+Beside either matrix, run one row that is not a `vllm bench serve` row: three non-streaming completion requests sent
+one at a time, each filling the validated context (a prompt of `context_length - 512` random tokens, 512 output
+tokens, EOS ignored), as a one-call session lane against the serving configuration the recipe selects. It measures
+the longest ordinary request the deployment serves, which a proxy's response timeout has to cover; a streamed row
+cannot stand in for it, because a non-streaming response sends its headers only after the whole generation. Report
+the three request times, and record the slowest, rounded up to whole seconds, as the recipe's
+`engine.llm.full_context_latency_s` on the deployment entry it measured. A deployed request has 290 seconds before
+Relay abandons it, so the row runs with `benchmark.session_request_timeout_s: 290` and a request that runs past it
+fails the row: the validated context is then too long for this platform, and the recipe lowers `context_length` by
+halving, as context validation does, until the row fits. The prompt is never shortened instead.
+
 ### Select a serving configuration
 
 Treat matrix concurrency values as starting targets, not universal limits or required final settings. Before selecting

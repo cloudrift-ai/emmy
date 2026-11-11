@@ -155,6 +155,12 @@ def _load(tmp_path, config):
     return load_recipe(str(recipe_dir))
 
 
+def test_load_recipe_reads_the_measured_full_context_latency(tmp_path):
+    config = _modalities_config(None)
+    config["engine"]["llm"]["full_context_latency_s"] = 41
+    assert _load(tmp_path, config).engine.llm.full_context_latency_s == 41
+
+
 def test_load_recipe_defaults_input_modalities_to_text(tmp_path):
     assert _load(tmp_path, _modalities_config(None)).model.input_modalities == ("text",)
 

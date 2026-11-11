@@ -216,9 +216,12 @@ Before measuring performance, require: weights load and the server reaches healt
 returns coherent output; advertised tool calling returns structured `tool_calls`; advertised reasoning lands in the
 engine's reasoning field; requested multimodal input is exercised and the recipe declares
 `model.input_modalities: [text, image]`, or it is disabled for a text-only run and the field stays unset; and the largest
-claimed context is tested with an input that materially fills it. Start context testing at the native maximum; on an
-out-of-memory or capacity failure, halve it and retry from a clean deployment. Never claim a context from startup
-alone. Search upstream issues for an unfamiliar error and make one evidence-backed change per retry.
+claimed context is tested with a non-streaming request that materially fills it. Start context testing at the native
+maximum; on an out-of-memory or capacity failure, or when that request takes longer than 290 seconds to answer, halve
+it and retry from a clean deployment. A deployed request has 290 seconds before Relay abandons it, so a context the
+platform cannot answer within that time is not this platform's context, whatever the model card claims. Never claim a
+context from startup alone. Search upstream issues for an unfamiliar error and make one evidence-backed change per
+retry.
 
 Run `emmy ... --teardown` after every failed deployment and before changing a serving configuration. Never mutate the
 remote checkout or containers by hand; reading `nvidia-smi`, container state, and logs is fine.
@@ -276,10 +279,34 @@ vLLM or SGLang lane, never a placeholder Emmy lane. Add only the comparisons tha
 including a cache-reuse lane when caching matters for the intended deployment, and name the lane the final recipe
 selects.
 
+Every experiment carries one **full-context latency lane** for the deployment entry the recipe will pin: three
+non-streaming completion requests sent one at a time, each filling the context (a prompt of `context_length - 512`
+tokens, 512 generated tokens, EOS ignored), as a one-call session lane of the serving configuration the recipe
+selects. It is the longest ordinary request the deployment serves, and the reference Relay sets its non-streaming
+request timeout from. Its request timeout is the 290 seconds a deployed request has: a request that runs past it
+fails the lane at once instead of running for an hour, and the context is too long for this platform. Apply the
+context rule of section 3: halve it, redeploy, and run the lane again.
+
+```yaml
+- <<: *platform
+  benchmark.session_calls: 1
+  benchmark.session_request_timeout_s: 290
+  benchmark.random_input_len: <context_length - 512>
+  benchmark.random_output_len: 512
+  benchmark.max_concurrency: 1
+  benchmark.num_prompts: 3
+  benchmark.num_warmups: 0
+```
+
+The client writes one JSON record per request with its start and end times; the request's wall time is their
+difference. Read all three, including the cold first one. The native server takes a text prompt, so the lane does
+not run against a native recipe; leave the field unset there.
+
 Run the final measurement with the `run-experiment` skill. Store it as this platform's archive, update this
 platform's section of the experiment `RESULTS.md` including failed rows, and remove this platform's legacy top-level
 records only after verifying the archive. Fold the winner into a single-variant `recipes/<model>/recipe.yaml`, which
-has no `benchmark:` block.
+has no `benchmark:` block, with `engine.llm.full_context_latency_s` set on the matrix entry it was measured on to
+the slowest of the lane's three requests, rounded up to whole seconds.
 
 ## 6. Write the durable report
 
@@ -296,6 +323,8 @@ the tables that help, drawing from:
 - the exact workload; validated context, modality, tool-call and reasoning-parser results;
 - throughput, TTFT, TPOT or ITL, failure count, and duration for the selected lane, plus any comparison that
   justified the choice;
+- the full-context latency lane: the three request times, the slowest one the recipe carries, and every larger
+  context the 290-second rule rejected;
 - Emmy eligibility with its evidence; compiler coverage, tuned target counts, O3 verification, targets still slower
   than `torch.compile`, and remaining gaps; the golden's path when it is complete;
 - for an Emmy recipe, the published image tag, kernel-tuning summary, and the accuracy result behind the FAST_MATH
@@ -326,6 +355,9 @@ Also check:
 - only repeated O3 rows are called deployable, and each tuning winner names its O1 ranking lane;
 - a serving recipe has at least one successful result for its exact lane, and its report uses only numbers from that
   run;
+- the recipe's `full_context_latency_s` is the slowest request of this platform's full-context latency lane in the
+  archive, rounded up, at most 290, from the same run as the report's numbers and at a prompt of the recipe's
+  `context_length - 512` tokens;
 - recipe and experiment pin immutable images and target exactly the requested GPU name and count;
 - a published Emmy image passed offline zero-recompile verification, and a FAST_MATH recipe has a verified FAST_MATH
   pack for its serving shape; `EMMY_FAST_MATH=1` is in an Emmy recipe unless its accuracy gate regressed, and never in
