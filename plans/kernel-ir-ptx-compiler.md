@@ -12,6 +12,20 @@ This plan takes over what `normalization-debt-and-hackathon-optimizations.md` le
 reuse, division by a constant, unrolling and the precision instructions. Its lane-sharing item stays left out, for the
 same reason (below).
 
+## Status (2026-11-12)
+
+PR A is draft #1393. Steps 1 to 5 are done, each checked on the corpus's rendered CUDA. Steps 3 to 5 changed the
+text and ran the corpus at `correct` on the RTX 5090. No step ran the perf lane or the whole suite yet; both wait for
+the closing step.
+
+| Step | Commit | Corpus CUDA |
+| --- | --- | --- |
+| 1 | `7c5c6932c` | identical |
+| 2 | `ff201cee1` | identical |
+| 3 | `8e44947fb` | 58 of 296 kernels: conversions as definitions, literals at their dtype, one integer negation |
+| 4 | `42c46cc44` | 72 kernels: the `lane` and `warp` declarations, dropped in 42 and moved into the grid in 30 |
+| 5 | `0936d9d9d` | 3 kernels: a `sigmoid` as four assignments |
+
 ## End state
 
 - `emmy_ptx::compile` returns PTX text for one kernel. It reads the crate's own statements, so nothing is serialized on
@@ -139,16 +153,26 @@ no restamp is expected. A row whose time moves is measured again in the closing 
 2. **A target description.** The vector widths and the native half-precision operation set leave `CudaRenderTarget`
    for a small description the vector passes (`050`, `080`), the type pass and the Loop IR runner's target read. PR B
    deletes the class; its facts must not go with it. *Check: text identical.*
-3. **Types complete** (property 1). The renderer's promotion and conversion rules move into `030_stamp_types`: casts
-   become expressions, half-precision math that runs in f32 says so, a write knows both types. Add the crate's type
-   check. The renderer stops inferring. *Check: CUDA text changes only by explicit casts; `test_dtype_cuda`.*
-4. **Lane and warp in the grid** (property 5). `007_decode_grid` writes them as expressions over the thread index,
-   so they take ranges and are shared like any value. *Check: text.*
-5. **Composite functions spelled out.** The table from `sigmoid`, `silu`, `gelu`, `softplus` and the rest to the
-   primitive functions moves into the crate, beside the operations' declarations. A kernel pass applies it to every
-   `Assign`, so the optimizer shares an exponential between two of them. A `FragmentApply` holds one operation and
-   keeps it; PR B's compiler applies the same table there. *Check: text; cicc already shares these, so no time
-   should move.*
+3. **Types complete** (property 1). The renderer's promotion and conversion rules move into one module,
+   `ir/types.py`. `030_stamp_types` stays early, because the passes after it read the stamps and match one-operation
+   values. A last pass, `120_explicit_conversions`, writes the conversions: one conversion is one definition, since
+   body optimization keeps one operation per definition. Half-precision math that runs in f32 says so, a write knows
+   both types. Add the crate's type check. The renderer stops inferring. The check exempts two kinds of statement.
+   The cross-thread combines (`TreeHalve`, `WarpShuffle`, `WarpBroadcast`): PR B's compiler types their combine
+   programs itself, from the stamped states. The register fragment statements and `RegStore`: step 10 covers them.
+   *Check: CUDA text changes only by explicit casts; `test_dtype_cuda`.*
+4. **Lane and warp in the grid** (property 5). `007_decode_grid` binds each one the body reads, a `Let` over the
+   thread index at the top of the `Grid`, so they take ranges and are shared like any value. `TreeHalve` gets a
+   `lane` field for the register fold of a per-warp slab, which read `lane` from rendered text only. The fragment
+   statements and the prefix scan keep their own lane math in rendered text until step 10. *Check: text.*
+5. **Composite functions spelled out.** The definitions of `sigmoid`, `relu`, `square` and `reciprocal` in primitive
+   functions move into the crate, beside the operations' declarations. Only these four reach a kernel: the frontend
+   decomposes `silu`, `softplus`, `gelu` and `gelu_tanh` before Loop IR. A kernel pass, `125_spell_composites`,
+   applies the table to every `Assign`, so the optimizer shares an exponential between two of them. It runs after
+   `120`: where a composite computes is decided on the whole function (an f16 `sigmoid` computes in f32). A
+   `FragmentApply`, a combine program and a `RegStore` epilogue hold one operation and keep it; the renderer prints
+   it through the table, and PR B's compiler applies the same table there. *Check: text; cicc already shares these,
+   so no time should move.*
 6. **Approximate math as operations.** `085_fast_exp` grows into the one pass that picks, under the precision knobs,
    the approximate form of each instruction class: exponential, division and reciprocal, square root and its
    reciprocal, and the functions `--use_fast_math` covers today (log, sine, cosine, power). Each form is its own
@@ -173,7 +197,9 @@ no restamp is expected. A row whose time moves is measured again in the closing 
 10. **Fragment statements say what they are** (property 4). No expansion moves; the statements get the shape the
     compiler needs. `LdmatrixLoad` splits into the instruction on staged shared memory and a fragment load from global
     memory, whose role, transpose, clamp and zero-fill are plain fields. `FragLayout`, the lane-to-element table, moves
-    into the crate; the Python renderers read it through the binding until PR B deletes them. *Check: text identical.*
+    into the crate; the Python renderers read it through the binding until PR B deletes them. The lane coordinates
+    these statements and the prefix scan compute in rendered text (`_g`, `_t`, `threadIdx.x % length`) follow from
+    that table and the lane of step 4. *Check: text identical.*
 11. **Tests read Kernel IR.** 59 test files hold 186 reads of the rendered source. A check of structure becomes a
     check of Kernel IR statements now. A check of an instruction's spelling stays on the CUDA text until PR B replaces
     it with a crate test.
