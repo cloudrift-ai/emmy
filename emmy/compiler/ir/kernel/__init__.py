@@ -8,7 +8,6 @@
 - :mod:`.render` — ``render_kernelop`` emitting CUDA source.
 """
 
-import emmy.emmy_ir as _ir
 from emmy.compiler.ir.axis import Axis
 from emmy.compiler.ir.kernel.ir import (
     Accum,
@@ -38,11 +37,7 @@ from emmy.compiler.ir.kernel.ir import (
     Write,
 )
 
-#: The Kernel IR optimizer's exact rewrites over a kernel body (the crate's ``optimize`` module).
-optimize_kernel_body = _ir.optimize_kernel_body
-
 __all__ = [
-    "optimize_kernel_body",
     "Var",
     "Literal",
     "BinaryExpression",

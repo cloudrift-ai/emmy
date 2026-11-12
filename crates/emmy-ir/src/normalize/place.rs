@@ -96,8 +96,6 @@ struct Placer<'a> {
     binders: Vec<HashSet<Name>>,
     available: Vec<HashMap<PlaceKey, Vec<Name>>>,
     floor: Vec<usize>,
-    /// Whether a value may move to another scope (placement), or only reuse one its own scope computed already.
-    motion: bool,
 }
 /// The statements a scope keeps, each pure value with the key it is available under.
 type Kept = Vec<(Arc<Statement>, Option<PlaceKey>)>;
@@ -168,9 +166,6 @@ impl Placer<'_> {
     /// The shallowest scope at or above `depth` that holds `names` and every version `marks` read. A version bumped in
     /// a deeper scope (a barrier inside a loop or a branch, whose scope has closed) bounds nothing below `depth`.
     fn target(&self, depth: usize, names: &HashSet<Name>, marks: &Marks) -> usize {
-        if !self.motion {
-            return depth;
-        }
         let mut out = self.floor[depth];
         for name in names {
             out = out.max(self.depth_of(name));
@@ -181,8 +176,7 @@ impl Placer<'_> {
         out.min(depth)
     }
     fn lookup(&self, key: &PlaceKey, depth: usize) -> Option<Vec<Name>> {
-        let from = if self.motion { 0 } else { depth };
-        self.available[from..=depth]
+        self.available[..=depth]
             .iter()
             .find_map(|scope| scope.get(key).cloned())
     }
@@ -341,7 +335,7 @@ impl Placer<'_> {
             .iter()
             .flat_map(|(_, escaped, _)| escaped.iter().cloned())
             .collect();
-        if self.motion && is_cond && children.iter().all(|(kept, _, _)| !kept.is_empty()) {
+        if is_cond && children.iter().all(|(kept, _, _)| !kept.is_empty()) {
             up.extend(self.common(&mut children, depth));
         }
         self.binders.pop();
@@ -445,18 +439,6 @@ pub fn place_values(body: &Body) -> Result<Body> {
 /// any member of a group of congruent states (`congruent_states`) is the same value, so placement merges the cones
 /// the members compute.
 pub fn place_values_keyed(body: &Body, states: &HashMap<Name, Key>) -> Result<Body> {
-    placed(body, states, true)
-}
-
-/// Every pure value a scope computes twice computed once, the second reading the first: placement's numbering
-/// and availability with no motion, so nothing moves to another scope and no live range reaches past the scope
-/// that already held the value. The states `states` names are numbered under its keys, as in
-/// [`place_values_keyed`].
-pub fn share_values(body: &Body, states: &HashMap<Name, Key>) -> Result<Body> {
-    placed(body, states, false)
-}
-
-fn placed(body: &Body, states: &HashMap<Name, Key>, motion: bool) -> Result<Body> {
     let numbering = value_numbers(
         body,
         &|name| {
@@ -489,7 +471,6 @@ fn placed(body: &Body, states: &HashMap<Name, Key>, motion: bool) -> Result<Body
         binders: vec![HashSet::new()],
         available: vec![HashMap::new()],
         floor: vec![0],
-        motion,
     };
     let (kept, escaped, _) = placer.walk(body, 0)?;
     debug_assert!(escaped.is_empty());

@@ -832,15 +832,6 @@ pub fn fragment_order<'py>(
     )
 }
 
-/// A kernel body after the Kernel IR optimizer's exact rewrites (`emmy_ir::optimize::optimize_kernel_body`).
-#[pyfunction]
-pub fn optimize_kernel_body<'py>(body: &Bound<'py, PyAny>) -> PyResult<Bound<'py, PyBody>> {
-    PyBody::wrap(
-        body.py(),
-        &emmy_ir::optimize::optimize_kernel_body(&PyBody::from_iterable(body)?).py()?,
-    )
-}
-
 /// Every value expression in its canonical spelling under the names as they stand.
 #[pyfunction]
 pub fn canonical_values<'py>(body: &Bound<'py, PyAny>) -> PyResult<Bound<'py, PyBody>> {
@@ -945,7 +936,6 @@ pub fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(one_operation_per_definition, m)?)?;
     m.add_function(wrap_pyfunction!(canonical_values, m)?)?;
     m.add_function(wrap_pyfunction!(fragment_order, m)?)?;
-    m.add_function(wrap_pyfunction!(optimize_kernel_body, m)?)?;
     m.add_function(wrap_pyfunction!(free_names_py, m)?)?;
     m.add_function(wrap_pyfunction!(exposed_defines_py, m)?)?;
     m.add_function(wrap_pyfunction!(rename_free, m)?)?;

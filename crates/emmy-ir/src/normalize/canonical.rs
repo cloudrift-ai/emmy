@@ -1535,7 +1535,7 @@ for r in 0..4:
                 .find(|l| l.contains(line))
                 .unwrap_or_else(|| panic!("{line}\n{normal}"));
             let rest = &line[line.find(key).unwrap() + key.len()..];
-            rest[..rest.find(|c: char| c == ',' || c == ')').unwrap()].to_string()
+            rest[..rest.find([',', ')']).unwrap()].to_string()
         };
         assert_eq!(
             field("role=a, shape", "name="),
@@ -1557,6 +1557,78 @@ for r in 0..4:
             field("MmaSyncPtx", "a_frag="),
             "{normal}"
         );
+    }
+
+    /// The text of the normal form of a kernel body.
+    fn kernel_normal(given: &str) -> String {
+        text(&normalize_uncached(&body(given)).unwrap())
+    }
+
+    #[test]
+    fn a_value_two_cells_of_a_tile_compute_is_computed_once() {
+        let out = kernel_normal(
+            "
+            Tile(axes=(m in 0..4, n in 0..8)):
+                x0 = load X[m]
+                y0 = multiply(x0, 2.0)
+                x1 = load X[m]
+                y1 = multiply(x1, 2.0)
+                O[m, 2 * n] = y0
+                O[m, 2 * n + 1] = y1
+            ",
+        );
+        assert_eq!(out.matches("load X").count(), 1, "{out}");
+        assert_eq!(out.matches("2.0 * ").count(), 1, "{out}");
+    }
+
+    #[test]
+    fn an_index_simplifies_under_the_tile_axes() {
+        let out = kernel_normal(
+            "
+            Tile(axes=(m in 0..4, _lane in 0..32)):
+                x = load X[(32 * m + _lane) / 32, (32 * m + _lane) % 32]
+                O[m, _lane] = x
+            ",
+        );
+        assert!(out.contains("load X[a0, a1]"), "{out}");
+    }
+
+    #[test]
+    fn a_barrier_stays_where_it_is() {
+        let out = kernel_normal(
+            "
+            Tile(axes=(m in 0..4)):
+                x = load X[m]
+                Sync
+                y = load X[m]
+                O[m] = y
+                P[m] = x
+            ",
+        );
+        assert_eq!(out.matches("Sync").count(), 1, "{out}");
+    }
+
+    /// Two accumulators of one value are congruent, but a combine that updates each in place after the loop holds
+    /// them as two states: the merge leaves both.
+    #[test]
+    fn a_state_a_combine_updates_in_place_stays() {
+        let out = kernel_normal(
+            "
+            Tile(axes=(m in 0..4, _lane in 0..32)):
+                for k in 0..16:
+                    x = load X[m, k]
+                    a <- add(a, x) over k
+                    y = load X[m, k]
+                    b <- add(b, y) over k
+                WarpShuffle(state=(a, b), state_b=(a__o, b__o), length=32):
+                    combine_states:
+                        a = a + a__o
+                        b = b + b__o
+                O[m, 0] = a
+                O[m, 1] = b
+            ",
+        );
+        assert_eq!(out.matches(" <- ").count(), 2, "{out}");
     }
 
     /// A tree combine reads the coordinates that index its slab: they follow the axes they name.
@@ -1609,7 +1681,7 @@ for r in 0..4:
                 .find(|l| l.contains(line))
                 .unwrap_or_else(|| panic!("{line}\n{normal}"));
             let rest = &line[line.find(key).unwrap() + key.len()..];
-            rest[..rest.find(|c: char| c == ',' || c == ')').unwrap()].to_string()
+            rest[..rest.find([',', ')']).unwrap()].to_string()
         };
         assert_eq!(
             named("nregs=0", "name="),

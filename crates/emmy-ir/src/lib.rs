@@ -13,7 +13,6 @@ pub mod memo;
 mod name;
 pub mod normalize;
 pub mod numbering;
-pub mod optimize;
 pub mod order;
 pub mod protocol;
 pub mod statement;
