@@ -149,14 +149,16 @@ identity stays the same whatever the buffers are called.
 
 The normal form is two kinds of step. The optimizing steps remove work: the exact simplifications, every value
 computed once and placed at the shallowest scope that holds its operands, congruent states merged, unread values
-dropped (`prepare_body` and the one-operation split, run until a round changes nothing). The canonical steps make
-equal bodies one body: the sibling order, the operand order its ranks spell, and the sequential names
-(`canonical_order`). An identity reads a Loop IR body, so `normalize_body` runs both until they settle. No identity
-reads a kernel body, so a `KernelOp` takes the optimizing steps alone, through `optimize_body`, at construction: its
-statements stand in the order and under the names the pass that built them wrote, which is what a listing shows and
-what the CUDA compiler schedules. Motion can put two bindings of one name in one scope, so the optimizing steps start
-from `distinct_names`: the first binder of a spelling keeps it, a later one takes it with a number, and sibling loops
-over one axis keep the one name.
+dropped. The canonical steps make equal bodies one body: sibling reduce loops over one axis merged into one loop, the
+sibling order, the operand order its ranks spell, and the sequential names. An identity reads a Loop IR body, so
+`normalize_body` runs both until they settle. No identity reads a kernel body, so a `KernelOp` takes the optimizing
+steps alone, through `optimize_body`, at construction: its statements stand in the order and under the names the pass
+that built them wrote, and its loops stay the loops its schedule wrote, which is what a listing shows and what the
+CUDA compiler schedules. The merge is the step that shows the difference: four rows' reduce loops are one body in Loop
+IR, and as one kernel loop four times the size they ran at half the speed on an A100. Motion can put two bindings of
+one name in one scope, so the optimizing steps start from `distinct_names`: the first binder of a spelling keeps it, a
+later one takes it with a number, sibling loops over one axis keep the one name, and storage a statement updates in
+place keeps its name whether or not a statement in scope declares it.
 
 The crate names no kernel statement type for any of it. The numbering, the ordering constraints and placement read a
 kernel statement through the protocol like any other, so a name a statement defines at each of several positions is a
