@@ -384,8 +384,8 @@ def test_kernel_row_selector_disambiguates_only_with_explicit_pins(tmp_path, mon
         assert args._golden_rows == [other]
         assert selected_decisions(args) == {"PLACE": "fuse", **other.knobs}
     # Boolean and integer storage spellings must compare through the knob codec.
-    args._golden_rows = [replace(other, knobs={"VECTORIZE_LOADS": False, "LOOPIFY": 0})]
-    with pinned_knobs({"VECTORIZE_LOADS": "off", "LOOPIFY": "0"}):
+    args._golden_rows = [replace(other, knobs={"VECTORIZE_LOADS": False, "SHARED_CARRY": 0})]
+    with pinned_knobs({"VECTORIZE_LOADS": "off", "SHARED_CARRY": "0"}):
         assert selected_decisions(args)["VECTORIZE_LOADS"] is False
 
 
@@ -678,7 +678,6 @@ def test_recorded_route_cuts_the_selected_compile_target(run_cli, tmp_path, monk
     document = _working_placement_route(path)
     monkeypatch.delenv("EMMY_KNOBS", raising=False)
     monkeypatch.setenv("EMMY_NVCC_FLAGS", "")
-    monkeypatch.setenv("EMMY_READABLE", "1")
     monkeypatch.setenv("EMMY_TUNE_DB", str(tmp_path / "tune.db"))
     if explicit:
         monkeypatch.setenv("EMMY_KNOBS", "PLACE@inner.1/map=cut")
@@ -2142,9 +2141,9 @@ def test_ab_rows_compile_under_the_pinned_route(monkeypatch):
 @pytest.mark.parametrize(
     ("proposed", "realized"),
     [
-        ({}, {"LOOPIFY": "0"}),
-        ({"LOOPIFY": "0x0"}, {"LOOPIFY": "0"}),
-        ({"LOOPIFY": "0x4"}, {"LOOPIFY": 4}),
+        ({}, {}),
+        ({"SHARED_CARRY": "0x0"}, {"SHARED_CARRY": "0"}),
+        ({"SHARED_CARRY": "0x1"}, {"SHARED_CARRY": 1}),
         ({"VECTORIZE_LOADS": "off"}, {"VECTORIZE_LOADS": False}),
     ],
 )
@@ -2167,7 +2166,7 @@ def test_record_replaces_a_proposal_with_explicit_off_defaults(proposed, realize
     assert merged.measurements == recorded.measurements and merged.knobs == recorded.knobs
 
 
-@pytest.mark.parametrize("decision", [{"LOOPIFY": "4"}, {"SHARED_CARRY": "1"}, {"VECTORIZE_LOADS": True}])
+@pytest.mark.parametrize("decision", [{"SHARED_CARRY": "1"}, {"VECTORIZE_LOADS": True}])
 def test_record_does_not_conflate_later_decisions(decision):
     proposal = Row(name="proposed", kernel="k", knobs={"WORK": "t256"})
     document = GoldenFile(compute_cap=(8, 9), rows=[proposal])

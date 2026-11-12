@@ -237,7 +237,7 @@ def test_a_partition_merge_keeps_every_bit(fast_math, reduce, work) -> None:
         states = np.abs(rng.normal(size=(3, count, 8))).astype(np.float32) + 0.5
         states[0] = rng.choice(_PIVOTS, size=(count, 8))
         feeds.append({"x": states})
-    pins = {"WORK": work, "REDUCE": reduce, "RASTER": "", "PLACE": "fuse", "LOOPIFY": "0", "FAST_MATH": fast_math, "FAST_EXP": False}
+    pins = {"WORK": work, "REDUCE": reduce, "RASTER": "", "PLACE": "fuse", "FAST_MATH": fast_math, "FAST_EXP": False}
     _both(_partition_merge(count), pins, feeds, cap=(8, 0))
 
 

@@ -486,7 +486,7 @@ def test_greedy_run_raises_when_the_projection_tail_is_mis_sliced():
 # placement route, a consumer piece's top-ranked row was refused by the kernel
 # binder, and the retry could never re-rank it — the blocklist was keyed on the
 # terminal node's knob row, which a kernel-stage pass had stamped with a policy
-# knob (``LOOPIFY``) no schedule leaf spells — so the second attempt re-picked
+# knob (``VECTORIZE_LOADS``) no schedule leaf spells — so the second attempt re-picked
 # the same row and the strategy retired the structural picks wholesale, onto the
 # fused root the disqualification index already priced ``inf``.
 # ---------------------------------------------------------------------------
@@ -511,7 +511,7 @@ def _composed_route_pipeline(refused: dict[str, set[int]], *, rows: tuple[int, .
     schedules each kernel over ``rows``. Pass 2 materializes every row except the ``refused`` ones
     per kernel name, which it declines with a rejecting skip — the kernel binder's
     projection-ownership refusal. Pass 3 is the kernel-stage policy stamp: a decided knob lands on
-    every node still un-lowered, exactly as ``LOOPIFY`` does on the production terminal."""
+    every node still un-lowered, exactly as ``VECTORIZE_LOADS`` does on the production terminal."""
     from dataclasses import replace
 
     from emmy.compiler.pipeline.fork import DeferredFork
@@ -541,9 +541,9 @@ def _composed_route_pipeline(refused: dict[str, set[int]], *, rows: tuple[int, .
         return KernelOp(body=[Smem(name="buf", extents=(64,), dtype="float")], name=root.op.name, knobs={"BN": bn})
 
     def stamp(root):
-        if "LOOPIFY" in root.op.knobs:
+        if "VECTORIZE_LOADS" in root.op.knobs:
             raise RuleSkipped("already stamped")
-        return replace(root.op, knobs={**root.op.knobs, "LOOPIFY": 0})
+        return replace(root.op, knobs={**root.op.knobs, "VECTORIZE_LOADS": True})
 
     passes = []
     for i, (name, fn) in enumerate((("__cut__", cut), ("__schedule__", schedule), ("__materialize__", materialize), ("__stamp__", stamp))):

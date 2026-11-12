@@ -2378,8 +2378,8 @@ def test_write_ab_json_records_a_forkless_kernel_row(tmp_path):
 
     ``complete_kernel_row`` accepts the row rather than refusing it: ``TILE`` and ``REDUCE`` key off
     the tile's contraction and reduction sites, so a kernel with neither has nothing to choose and
-    is complete without one. The policy stamp rides along exactly as it does on a kernel that DOES
-    carry forks — ``schedule_row_key`` projects it out when the row is matched against a leaf, so it
+    is complete without one. A later fork's stamp (``SHARED_CARRY``) rides along exactly as it does on a kernel
+    that DOES carry forks — ``schedule_row_key`` projects it out when the row is matched against a leaf, so it
     is recorded, not identity."""
     import json
     from types import SimpleNamespace
@@ -2390,7 +2390,7 @@ def test_write_ab_json_records_a_forkless_kernel_row(tmp_path):
     from emmy.compiler.pipeline.knob import schedule_row_key
 
     graph = Graph()
-    forkless = CudaOp(kernel_name="k", knobs={"WORK": "", "RASTER": "", "LOOPIFY": 0})
+    forkless = CudaOp(kernel_name="k", knobs={"WORK": "", "RASTER": "", "SHARED_CARRY": 0})
     graph.add_node(op=forkless, inputs=[], output=Tensor("o", (4,)), node_id="n0")
     args = SimpleNamespace(
         json=str(tmp_path / "ab.json"), code="torch.zeros(4)", input=None, ir=None, golden=None, dynamic=None, warmup=1, iters=1
@@ -2399,7 +2399,7 @@ def test_write_ab_json_records_a_forkless_kernel_row(tmp_path):
     _write_ab_json(args, {}, graph, None, [])
 
     rec = json.loads((tmp_path / "ab.json").read_text())
-    assert rec["greedy"]["kernels"][0]["record_knobs"] == {"WORK": "", "RASTER": "", "LOOPIFY": "0"}
+    assert rec["greedy"]["kernels"][0]["record_knobs"] == {"WORK": "", "RASTER": "", "SHARED_CARRY": "0"}
     assert schedule_row_key(rec["greedy"]["kernels"][0]["record_knobs"]) == (("WORK", ""), ("RASTER", ""))
 
 
