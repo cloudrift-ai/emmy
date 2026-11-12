@@ -7,7 +7,8 @@ fold rides inside the per-cell body and materializes through its carrier — so
 further kernel kinds reuse it once their schedules are enumerated.
 
 The remaining rules are ``KernelOp`` → ``KernelOp`` codegen-quality passes that
-walk the materialized body of statements; they are independent of the tile IR
+walk the materialized body of statements, which is in normal form (every ``KernelOp`` normalizes
+its body at construction); they are independent of the tile IR
 (they only read/rewrite the kernel-IR ``Load`` / ``Assign`` / ``Write`` / ``Sync``
 vocabulary), so they were restored from the demolished pipeline ahead of the
 tile-tier rebuild:
@@ -16,11 +17,11 @@ tile-tier rebuild:
   them off the IR; overflow-prone fp16 squares promote to f32).
 - ``045_merge_select_loads`` — compute a coordinate select's two isomorphic branches once, each
   load reading at the selected index (RoPE's rotate-half partner).
-- ``047_reuse_lane_loads`` — unroll short lane-strided loops and load each read-only cell once, so a
-  cooperative row stays in registers from its reduce to its projection.
+- ``047_reuse_lane_loads`` — unroll short lane-strided loops, so a cooperative row stays in
+  registers from its reduce to its projection (the body's normal form loads each read-only cell once).
 - ``050_vectorize_loads`` / ``080_vectorize_stores`` — fold consecutive scalar
   Loads / Writes into one wide vector access.
-- ``095_interleave_loads`` — sink each Load to just before its first consumer.
+- ``095_interleave_loads`` — move a Load only one guarded block reads into that block.
 - ``097_widen_fragment_stores`` — store four adjacent ``wgmma`` accumulator cells as one
   16-byte row per lane.
 - ``110_drop_redundant_syncs`` — collapse no-op Sync stmts at the Tile body level.

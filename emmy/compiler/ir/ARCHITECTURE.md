@@ -711,14 +711,13 @@ Normalization is a canonical form, not a pipeline pass. It runs the same on ever
 every identity digest, and answers to no knob, pin or evidence; nothing under `ir/` imports the pipeline that holds
 them. Every function in the module runs inside `normalize_body`. A body → body transform that something decides — a
 knob the search sets, a pin, a pass stage — is a pipeline pass and lives in the pass file owning that decision, even
-when another pass could reuse it from here. A pass may call a normalization step (kernel lowering's
-`040_split_invariant_divides` owns the hoist it applies); normalization never calls a pass.
+when another pass could reuse it from here. A pass may call a normalization step; normalization never calls a pass.
 `tests/architecture/test_layering.py` holds the module to one exported entry point, to no transform that no
 normalization step calls, and `ir/` to no pipeline import.
 
-Pure `body → body` passes run from `LoopOp.__post_init__` so every
-constructed `LoopOp` (including intermediate fusion results) is
-canonicalized before validation:
+`normalize_body` runs from `BodyOp.__post_init__`, the base `LoopOp` and `KernelOp` share, so every constructed
+`LoopOp` (including intermediate fusion results) is canonicalized before validation and every `KernelOp` a kernel
+pass returns is in the same form:
 
 While it builds a region, fusion holds a compact body containing scalar `Call` statements. Each references one
 read-only `Subroutine` with explicit coordinate parameters and captured input buffers. A symbolic dim an index names
