@@ -178,9 +178,11 @@ def test_a_select_takes_its_first_branch_that_holds():
 
 def test_an_integer_index_divides_and_takes_remainders_as_python_does():
     """A gather through quotients and remainders: by a power of two, by another constant over a non-negative index
-    (the multiply-high form), and over a value that goes negative, where the quotient and the remainder floor."""
+    and over a value that goes negative (the multiply-high forms), and by a divisor of either sign read from a
+    buffer (the divide instruction). Every quotient and remainder floors."""
     n = 3000
     a = _floats(4096, np.float32)
+    d = np.random.default_rng(1).integers(1, 12, n).astype(np.int32) * np.where(np.arange(n) % 2, 1, -1).astype(np.int32)
     body = _elementwise(
         """
         i32 q = i / 7
@@ -189,18 +191,24 @@ def test_an_integer_index_divides_and_takes_remainders_as_python_does():
         i32 wrap = (i - 1000) % 9
         i32 low = (i - 1000) % 8
         i32 half = (i - 1000) / 2
+        i32 by = load d[i]
+        i32 any = (i - 1000) / by
+        i32 rest = (i - 1000) % by
         f32 x = load a[q * 3 + r + i / 4]
         i32 code = back * 16 + wrap + low + half
+        i32 other = any * 16 + rest
         f32 o[i] = x
         i32 codes[i] = code
+        i32 others[i] = other
         """,
         n,
     )
-    out = _run(body, {"a": a}, {"o": np.float32, "codes": np.int32}, n)
+    out = _run(body, {"a": a, "d": d}, {"o": np.float32, "codes": np.int32, "others": np.int32}, n)
     i = np.arange(n, dtype=np.int64)
     _same_bits(out["o"][:n], a[(i // 7) * 3 + i % 5 + i // 4])
     shifted = i - 1000
     np.testing.assert_array_equal(out["codes"][:n], (shifted // 9) * 16 + shifted % 9 + shifted % 8 + shifted // 2)
+    np.testing.assert_array_equal(out["others"][:n], (shifted // d) * 16 + shifted % d)
 
 
 def test_a_grid_of_two_axes_guards_its_tail():

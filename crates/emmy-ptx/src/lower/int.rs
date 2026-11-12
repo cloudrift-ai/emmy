@@ -418,8 +418,8 @@ impl Lowerer {
     }
 
     /// A floor quotient or its remainder. By a constant power of two it is an arithmetic shift or a mask, which
-    /// floor whatever the sign; by another constant over a dividend the ranges prove non-negative and below 2^31
-    /// it is a multiply-high; else it is the divide instruction, corrected to the floor where a sign may differ.
+    /// floor whatever the sign; by another constant under a 32-bit dividend it is a multiply-high; else it is the
+    /// divide instruction, corrected to the floor where a sign may differ.
     fn quotient(
         &mut self,
         x: &Expression,
@@ -452,38 +452,16 @@ impl Lowerer {
                     self.int_value(Opcode::Shr, a.ty.arith(), a.ty, operands, 1)
                 });
             }
-            let small = Interval::new(0, i128::from(i32::MAX));
-            if a_range.is_some_and(|range| range.lo >= 0 && range.hi <= small.hi)
-                && divisor <= i64::from(i32::MAX)
-            {
-                let (m, shift) = magic(divisor as u32);
-                let value = self.as_int(&a, VTy::I32);
-                let high = self.int_value(
-                    Opcode::MulHi,
-                    Ty::U32,
-                    VTy::I32,
-                    vec![value.clone(), Operand::Int(m.into())],
-                    1,
-                );
-                let operands = vec![high.op, Operand::Int(shift.into())];
-                let quotient = self.int_value(Opcode::Shr, Ty::U32, VTy::I32, operands, 1);
+            let small = a_range.is_some_and(|range| holds(VTy::I32, range) && range.lo >= 0);
+            if (small || a.ty == VTy::I32) && divisor <= i64::from(i32::MAX) {
+                let quotient = self.multiply_high_quotient(&a, small, divisor);
                 if !remainder {
                     return Ok(quotient);
                 }
-                let whole = self.int_value(
-                    Opcode::Mul,
-                    Ty::S32,
-                    VTy::I32,
-                    vec![quotient.op, Operand::Int(divisor)],
-                    divisor,
-                );
-                return Ok(self.int_value(
-                    Opcode::Sub,
-                    Ty::S32,
-                    VTy::I32,
-                    vec![value, whole.op],
-                    1,
-                ));
+                let operands = vec![quotient.op, Operand::Int(divisor)];
+                let whole = self.int_value(Opcode::Mul, Ty::S32, VTy::I32, operands, divisor);
+                let operands = vec![self.as_int(&a, VTy::I32), whole.op];
+                return Ok(self.int_value(Opcode::Sub, Ty::S32, VTy::I32, operands, 1));
             }
         }
         let ty = self.common(&a, a_range, &b, b_range);
@@ -544,6 +522,35 @@ impl Lowerer {
             1,
         );
         Ok(self.int_value(Opcode::Add, at, ty, vec![base.op, correction.op], 1))
+    }
+
+    /// The floor quotient of a 32-bit value by a constant from 3 up that is no power of two, as a multiply-high.
+    /// The multiply is exact over `0..2^31`; a dividend that may be negative is folded into that range by its
+    /// sign and the quotient folded back, since `~x` is `-x - 1` and the floor of a negative `x / d` is
+    /// `~(~x / d)`.
+    fn multiply_high_quotient(&mut self, a: &Val, non_negative: bool, divisor: i64) -> Val {
+        let value = self.as_int(a, VTy::I32);
+        let mut int = |opcode, at, left: Operand, right: Operand| {
+            self.int_value(opcode, at, VTy::I32, vec![left, right], 1)
+                .op
+        };
+        let sign =
+            (!non_negative).then(|| int(Opcode::Shr, Ty::S32, value.clone(), Operand::Int(31)));
+        let folded = match &sign {
+            Some(sign) => int(Opcode::Xor, Ty::B32, value, sign.clone()),
+            None => value,
+        };
+        let (m, shift) = magic(divisor as u32);
+        let high = int(Opcode::MulHi, Ty::U32, folded, Operand::Int(m.into()));
+        let quotient = int(Opcode::Shr, Ty::U32, high, Operand::Int(shift.into()));
+        let quotient = match sign {
+            Some(sign) => int(Opcode::Xor, Ty::B32, quotient, sign),
+            None => quotient,
+        };
+        Val {
+            op: quotient,
+            ty: VTy::I32,
+        }
     }
 
     /// The predicate of an integer comparison, at the first type that holds both sides. A constant stands on the
@@ -681,7 +688,7 @@ mod tests {
     use super::*;
 
     /// The multiply-high quotient is the true one at every edge of every divisor: around each multiple, and at the
-    /// top of the range the rule admits.
+    /// top of the range the rule admits. So is the floor of a negative dividend folded into that range.
     #[test]
     fn the_multiply_high_quotient_is_exact_below_two_to_the_31() {
         let top = i32::MAX as u64;
@@ -708,7 +715,15 @@ mod tests {
             let multiples = multiples.iter().filter(|k| **k > 0);
             let edges = multiples.flat_map(|k| [k * d - 1, k * d, k * d + 1]);
             for x in edges.chain([0, 1, top - 1, top]).filter(|x| *x <= top) {
-                assert_eq!(((x * u64::from(m)) >> 32) >> shift, x / d, "{x} / {d}");
+                let quotient = |y: u64| ((y * u64::from(m)) >> 32) >> shift;
+                assert_eq!(quotient(x), x / d, "{x} / {d}");
+                // A negative dividend folded by its sign: `~x` is `-x - 1`, which is `x` here.
+                let negative = -(x as i64) - 1;
+                assert_eq!(
+                    !(quotient(x) as i64),
+                    negative.div_euclid(d as i64),
+                    "{negative} / {d}"
+                );
             }
         }
     }

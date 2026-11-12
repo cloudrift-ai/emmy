@@ -81,9 +81,10 @@ Every instruction reaches the list through the `Builder`.
   reads every bit, so it runs at the first type that holds both operands unchanged. A product of two 32-bit values
   that needs 64 bits is the one widening multiply.
 - **Division.** `/` and `%` over integers floor. By a constant power of two they are an arithmetic shift and a mask,
-  which floor whatever the sign. By another constant, over a dividend the ranges prove non-negative and below 2^31,
-  the quotient is a multiply-high and a shift. Anything else is the divide instruction, lowered by one where the
-  remainder is nonzero and its sign is not the divisor's, unless the ranges prove both sides non-negative.
+  which floor whatever the sign. By another constant, under a 32-bit dividend, the quotient is a multiply-high and a
+  shift, exact below 2^31; a dividend the ranges do not prove non-negative is folded into that range by its sign and
+  the quotient folded back. Anything else is the divide instruction, lowered by one where the remainder is nonzero
+  and its sign is not the divisor's, unless the operands are unsigned or the ranges prove both sides non-negative.
 - **Addresses.** A flat index is split into its terms with their integer coefficients and its constant. Each term is
   scaled to bytes and widened by one multiply, then added to the base in 64 bits, the terms bound in outer bodies
   first; the constant is the address's offset. Measured on `sm_120`: ptxas folds an address built this way into

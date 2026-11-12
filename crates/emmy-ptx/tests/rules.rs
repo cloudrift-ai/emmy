@@ -343,7 +343,7 @@ fn a_division_by_a_constant_over_a_non_negative_index_is_a_multiply_high() {
 }
 
 /// A dividend that may be negative keeps the floor: an arithmetic shift and a mask by a power of two, and for any
-/// other divisor the divide instruction lowered by one where the remainder's sign is not the divisor's.
+/// other constant the multiply-high over the dividend folded by its sign, the quotient folded back.
 #[test]
 fn a_division_of_a_possibly_negative_value_floors() {
     let got = under_grid(
@@ -360,19 +360,16 @@ fn a_division_of_a_possibly_negative_value_floors() {
         EXACT,
     );
     assert_eq!(
-        got[..13],
+        got[..10],
         [
             "sub.s32 %r4, %r3, 2000",
-            "rem.s32 %r5, %r4, 7",
-            "xor.b32 %r6, %r5, 7",
-            "setp.lt.s32 %p0, %r6, 0",
-            "setp.ne.s32 %p1, %r5, 0",
-            "and.pred %p2, %p0, %p1",
-            "div.s32 %r7, %r4, 7",
-            "selp.s32 %r8, -1, 0, %p2",
-            "add.s32 %r9, %r7, %r8",
-            "selp.s32 %r10, 7, 0, %p2",
-            "add.s32 %r11, %r5, %r10",
+            "shr.s32 %r5, %r4, 31",
+            "xor.b32 %r6, %r4, %r5",
+            "mul.hi.u32 %r7, %r6, 2454267027",
+            "shr.u32 %r8, %r7, 2",
+            "xor.b32 %r9, %r8, %r5",
+            "mul.lo.s32 %r10, %r9, 7",
+            "sub.s32 %r11, %r4, %r10",
             "and.b32 %r12, %r4, 7",
             "shr.s32 %r13, %r4, 3",
         ]
@@ -380,7 +377,8 @@ fn a_division_of_a_possibly_negative_value_floors() {
 }
 
 /// A division by a value known only where it runs is the divide instruction: plain where the ranges prove both
-/// sides non-negative, unsigned for unsigned operands.
+/// sides non-negative or the operands are unsigned, else lowered by one where the remainder is nonzero and its sign
+/// is not the divisor's, the remainder raised by one divisor.
 #[test]
 fn a_division_by_a_variable_is_the_divide_instruction() {
     let got = under_grid(
@@ -389,21 +387,33 @@ fn a_division_by_a_variable_is_the_divide_instruction() {
         i32 q = i / (i + 1)
         u32 m = u % u
         u32 r = u >> 3
-        u32 s = q + m + r
+        i32 back = i - 2000
+        i32 fq = i / back
+        i32 fr = i % back
+        u32 s = q + m + r + fq + fr
         u32 o[i] = s
         ",
         &[("b", Input, Some(U32)), ("o", Output, Some(U32))],
         EXACT,
     );
     assert_eq!(
-        got[3..9],
+        got[3..18],
         [
             "add.s32 %r5, %r3, 1",
             "div.s32 %r6, %r3, %r5",
             "rem.u32 %r7, %r4, %r4",
             "shr.u32 %r8, %r4, 3",
-            "add.u32 %r9, %r6, %r7",
-            "add.u32 %r10, %r9, %r8",
+            "sub.s32 %r9, %r3, 2000",
+            "rem.s32 %r10, %r3, %r9",
+            "xor.b32 %r11, %r10, %r9",
+            "setp.lt.s32 %p0, %r11, 0",
+            "setp.ne.s32 %p1, %r10, 0",
+            "and.pred %p2, %p0, %p1",
+            "div.s32 %r12, %r3, %r9",
+            "selp.s32 %r13, -1, 0, %p2",
+            "add.s32 %r14, %r12, %r13",
+            "selp.s32 %r15, %r9, 0, %p2",
+            "add.s32 %r16, %r10, %r15",
         ]
     );
 }
