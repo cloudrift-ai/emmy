@@ -435,7 +435,8 @@ stale schedule coverage, not a full-checkpoint qualification of the merged path.
 The serving foundation is implemented: standalone execution, cached generation, request reset, CUDA graph replay,
 and the [native HTTP adapter](../../../crates/emmy-server/ARCHITECTURE.md). Its scope remains one active request
 on one GPU. Paging currently allocates the full context at load; per-request allocation and reclamation,
-continuous batching, and prefix reuse are not implemented. The
+continuous batching, and prefix reuse are not implemented ("Concurrent requests: the design" below says how the
+first two are to be built). The
 [manual-schedule comparison](../../../experiments/Qwen3-0.6B/native_manual_schedules/RESULTS.md),
 [greedy comparison](../../../experiments/Qwen3-0.6B/native_greedy/RESULTS.md), and
 [prefill comparison](../../../experiments/Qwen3-0.6B/native_prefill/RESULTS.md) retain their revision-specific evidence.
@@ -531,6 +532,84 @@ offers TMA, so its rows are recorded at the schedules the paged export offers. L
 later than the plugin's on both models: NVIDIA's 64-row attention writes its scores and probabilities over the window
 and its value expectation runs far below bandwidth, and a Qwen3.6 chunk routes to more non-resident experts than the
 device slots hold, so its expert kernels read their pages over the link.
+
+## Concurrent requests: the design
+
+Not built. Native serves one request; this section is the design the batching work follows, written first so the
+programs, the pack and the goldens move once. It keeps every single-request program and row as they are.
+
+**The budget.** The cache stays one key and one value buffer per attention layer, allocated for the window at load, and
+the drafter's beside it. Requests share it: an admitted request takes a *region*, a run of consecutive positions of
+that buffer, sized at admission to its prompt plus its output budget and returned when it retires. A region is
+bookkeeping on the host (first fit over the free runs, coalesced on return), so one request can still take the whole
+window, and eight can take 32,768 positions each. The server admits a request when a region of its size is free and
+the admission cap (`--max-num-seqs`, default one) has room; otherwise it answers busy, as today above one.
+
+**One page per request.** A program reaches a request's region through a one-entry page table, the paged buffer the
+compiler already has: the cache is declared one page along its positions, the kernel takes the page's base once in its
+preamble and addresses it flat, and positions inside a region start at zero. The runtime writes the table entry with
+the region's base before the step, on the stream, as the plugin points a Gated DeltaNet layer at a request's state
+block. Nothing in a kernel changes with the request, so one captured graph serves every region, and every attention
+row keeps its transport: a launch that reads one page stages through cp.async as it does over the flat buffer. Two
+things the compiler must learn: the symbolic window counts as one page under its cap (today any symbolic extent counts
+as several, which takes cp.async away), and TMA stays off the cache, as it is now.
+
+**State blocks.** A Gated DeltaNet layer's recurrent state and convolution history become one block per admitted
+request, in two buffers of `cap` blocks per layer; a request zeroes its block at admission. The programs write them as
+one-page outputs through a table the runtime points at the request's block, the plugin's mechanism, so the carry
+programs go away for a batched step and stay for the single-request programs until those move too.
+
+**A step is one of three kinds,** chosen by the scheduler between steps:
+
+1. *A prefill chunk of one request,* through today's chunk programs at today's widths, its tables pointed at that
+   request. Nothing new.
+2. *A batched decode step:* one row for each of up to `B` requests, `B` one of the batch widths the pack holds. The
+   trunk's attention halves and MLPs are row-wise and run at the bucket that holds the rows, padded as the plugin
+   pads. Three kinds of program are new at each batch width:
+   - *Gated DeltaNet layers over a batch.* Today's program takes one request's rows and one state. The batched one
+     takes `B` requests of one row and `B` states and histories, read and written through each row's block.
+   - *Rotary and attention over `B` regions.* Each row has its own position (an input of `B` positions, where today's
+     step has one) and its own page. Two forms, to be measured against each other at `B` of 8 and 32: one launch per
+     row of today's one-row program, which keeps cp.async and costs `B` launches a layer; and one program whose batch
+     row is a grid axis, each CTA reading its row's page. The second reads several pages in one launch, so it takes
+     cp.async only once the renderer resolves a page per CTA, and gmem-direct reads until then.
+   - *Native's own row-wise programs* (embedding gather, final norm, head, greedy selection) at `B` rows.
+3. *A batched verify step,* `B` requests of `K + 1` rows: the same programs at `B (K + 1)` rows, the attention fold
+   taking each request's rows beside its group as the single-request verify step does, the accept, pick and drafter
+   programs per request. Whether drafting pays at a given concurrency is measured, and the scheduler drafts only
+   below the concurrency where it stops paying.
+
+**Batch widths** are a short list fixed at preparation, as the chunk widths are (`4, 8, 16, 32` to start; each is a
+set of programs and golden rows). A step takes the narrowest width that holds its rows and pads the rest: a padded
+row reads a scratch region and a scratch state block and its outputs go unread.
+
+**The scheduler** lives in `emmy-server`, between steps. It keeps the admitted requests, each with its region, state
+block, position, prompt and sampling state. Each turn it either runs one prefill chunk for the request with the
+oldest unfinished prompt or one batched step for every request past its prompt, alternating while both kinds wait,
+which is the plugin's shape at `--max-num-batched-tokens 64`. A request streams its tokens as its rows return, retires
+at its end of sequence, its budget or its client's disconnect, and frees its region and block before the next
+admission. The runtime's `Generator` splits accordingly: the device state that is one per pack (programs, pager,
+tables, buffers) stays, and what is one per request today (position, prompt, drafts, sampling counter) becomes a
+request record the scheduler passes to each step.
+
+**Selection and sampling.** Greedy selection runs on the device at `B` rows and the host reads `B` tokens. A request
+at positive temperature needs its row's logits; the host path sorts one vocabulary per such row on one core, which is
+measured at concurrency 8 and 32 before anything replaces it. The candidate replacement is a compiled per-row sampler
+beside greedy selection, fed each row's uniform draw from the host's counter, so a seeded request still reproduces
+itself.
+
+**What stays out:** prefix reuse, preemption, spilling a cold request's region to host memory, and more than one
+image per prompt.
+
+**Cost, from this card's measurements.** A batched step is a wide trunk step, and the trunk's cost model from the
+chunk profile is a fixed weight read plus a cost per row. At 32 requests undrafted the step has 32 rows and the bar
+allows 15.2 ms a token, so the per-row cost of the trunk's launches decides this cell, the same launches the wide
+prefill chunk needs brought down. The work order follows: regions and state blocks at one request, bit-identical to
+today; then batched decode at a fixed width; then the scheduler; then sampling and the drafter at concurrency.
+
+**Gates,** each on the recipe's card: one request through a region gives today's tokens and log-probabilities, bit
+for bit; an admit-and-retire sequence returns device memory to its baseline; every request of a batch generates the
+tokens of its solo run; and the single-request cells do not move.
 
 ## Native HTTP launcher
 

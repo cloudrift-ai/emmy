@@ -253,8 +253,9 @@ def rope_module(heads, kv_heads, head_dim, rotary_dim, rows, cache_dtype, axes=N
                 c, s = torch.gather(cosine, 0, index).unsqueeze(1), torch.gather(sine, 0, index).unsqueeze(1)
             rotated = self.rotate(q, heads, c, s)
             if grouped and rows > 1:
-                rotated = rotated.view(rows, kv_heads, heads // kv_heads, head_dim).transpose(0, 1)
-            rotated = rotated.reshape(rows, heads * head_dim)
+                rotated = rotated.view(rows, kv_heads, heads // kv_heads, head_dim).transpose(0, 1).reshape(rows, heads * head_dim)
+            else:
+                rotated = rotated.view(rows, heads * head_dim)
             new_keys = store(self.rotate(k, kv_heads, c, s))
             new_values = store(v.view(rows, kv_heads, head_dim))
             # Each element of the chunk names its own position.
