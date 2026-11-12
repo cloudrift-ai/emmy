@@ -33,6 +33,26 @@ pub fn extend_simplify_ctx(ctx: &SimplifyCtx, axis: &Axis) -> SimplifyCtx {
     }
 }
 
+/// `ctx` under the ranges `stmt` states for the built-ins, which hold in its own expressions and in its child bodies
+/// (a `Grid`'s launch); `None` where it states none.
+pub(crate) fn launch_ctx(ctx: &SimplifyCtx, stmt: &Statement) -> Option<SimplifyCtx> {
+    let ranges = stmt.launch_ranges();
+    (!ranges.is_empty()).then(|| {
+        ranges
+            .into_iter()
+            .fold(ctx.clone(), |ctx, (builtin, range)| {
+                ctx.extend(builtin.text(), range, None)
+            })
+    })
+}
+
+/// `ctx` inside `stmt`'s child bodies: under the ranges of the axes it binds for them.
+pub(crate) fn inner_ctx(ctx: &SimplifyCtx, stmt: &Statement) -> SimplifyCtx {
+    stmt.bound_axes()
+        .iter()
+        .fold(ctx.clone(), |inner, axis| extend_simplify_ctx(&inner, axis))
+}
+
 // --- the memo -------------------------------------------------------------------------------------------
 
 /// The normal forms of the bodies met in this process, by their exact form; each weighs the statements of the body it
@@ -174,7 +194,7 @@ fn unsettled(stmts: &Body, steps: &str) -> Result<Body> {
     )))
 }
 
-fn with_bodies(stmt: &Arc<Statement>, bodies: Vec<Body>) -> Arc<Statement> {
+pub(crate) fn with_bodies(stmt: &Arc<Statement>, bodies: Vec<Body>) -> Arc<Statement> {
     Statement::rebuild_bodies(stmt, bodies)
 }
 

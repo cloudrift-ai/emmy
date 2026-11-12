@@ -842,6 +842,14 @@ pub fn fragment_order<'py>(
     )
 }
 
+/// A kernel body with its index divisions and remainders by a power of two over a non-negative dividend as shifts and
+/// masks (`emmy_ir::strength::reduce_strength`): the spelling an emitter gives the body it is about to render.
+#[pyfunction]
+pub fn reduce_strength<'py>(body: &Bound<'py, PyAny>) -> PyResult<Bound<'py, PyBody>> {
+    let out = emmy_ir::strength::reduce_strength(&PyBody::from_iterable(body)?);
+    PyBody::wrap(body.py(), &out.py()?)
+}
+
 /// Every value expression in its canonical spelling under the names as they stand.
 #[pyfunction]
 pub fn canonical_values<'py>(body: &Bound<'py, PyAny>) -> PyResult<Bound<'py, PyBody>> {
@@ -947,6 +955,7 @@ pub fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(one_operation_per_definition, m)?)?;
     m.add_function(wrap_pyfunction!(canonical_values, m)?)?;
     m.add_function(wrap_pyfunction!(fragment_order, m)?)?;
+    m.add_function(wrap_pyfunction!(reduce_strength, m)?)?;
     m.add_function(wrap_pyfunction!(free_names_py, m)?)?;
     m.add_function(wrap_pyfunction!(exposed_defines_py, m)?)?;
     m.add_function(wrap_pyfunction!(rename_free, m)?)?;

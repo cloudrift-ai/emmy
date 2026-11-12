@@ -662,6 +662,25 @@ pub fn is_builtin(name: &str) -> bool {
     name.parse::<Builtin>().is_ok()
 }
 
+impl Builtin {
+    /// Every value the hardware allows this built-in, whatever the launch: at most 1024 threads in a block (64 along
+    /// z), 2^31 - 1 blocks along x and 65535 along y and z. A launch narrows it through the simplifier's context.
+    pub fn hardware_range(self) -> Interval {
+        let (lo, hi) = match self {
+            Builtin::ThreadIdxX | Builtin::ThreadIdxY => (0, 1023),
+            Builtin::ThreadIdxZ => (0, 63),
+            Builtin::BlockIdxX => (0, (1 << 31) - 2),
+            Builtin::BlockIdxY | Builtin::BlockIdxZ => (0, 65534),
+            Builtin::BlockDimX | Builtin::BlockDimY => (1, 1024),
+            Builtin::BlockDimZ => (1, 64),
+            Builtin::GridDimX => (1, (1 << 31) - 1),
+            Builtin::GridDimY | Builtin::GridDimZ => (1, 65535),
+            Builtin::WarpSize => (32, 32),
+        };
+        Interval::new(lo, hi)
+    }
+}
+
 /// Names the reader gives a meaning of their own, so a variable of that name is written quoted.
 /// Words the text reader gives a meaning, in an expression or on a statement line, so a name spelled like one is
 /// written between backticks wherever it stands.
@@ -1052,6 +1071,13 @@ impl Expression {
     pub fn range(&self, ctx: &SimplifyCtx) -> Option<Interval> {
         match &**self {
             Expr::Var(name) => ctx.ranges.get(name).copied(),
+            // A built-in's range is the launch's where the context names it, else what the hardware allows.
+            Expr::Builtin(builtin) => Some(
+                ctx.ranges
+                    .get(&Name::from(builtin.text()))
+                    .copied()
+                    .unwrap_or_else(|| builtin.hardware_range()),
+            ),
             Expr::Literal(lit) => lit.value.int().map(|v| Interval::new(v as i128, v as i128)),
             Expr::Apply(ElementwiseOp::Known(op), args) if args.len() == 2 => {
                 let (la, lb) = (args[0].range(ctx), args[1].range(ctx));
@@ -1164,7 +1190,12 @@ impl Expression {
     /// idempotent.
     pub fn simplify_as(&self, ctx: &SimplifyCtx, class: ExprClass) -> Result<Expression> {
         match &**self {
-            Expr::Var(_) | Expr::Literal(_) | Expr::Builtin(_) => Ok(self.clone()),
+            // A built-in the launch pins to one value is that value: the CTA index of a one-CTA grid is 0.
+            Expr::Builtin(_) => Ok(match self.range(ctx) {
+                Some(span) if span.lo == span.hi => Expression::int(span.lo as i64),
+                _ => self.clone(),
+            }),
+            Expr::Var(_) | Expr::Literal(_) => Ok(self.clone()),
             Expr::Apply(ElementwiseOp::Known(op), args)
                 if op.infix().is_some() && args.len() == 2 =>
             {

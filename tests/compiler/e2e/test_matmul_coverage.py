@@ -39,7 +39,7 @@ from emmy.compiler.ir.tensor.ir import ElementwiseOp
 from emmy.compiler.pipeline import CUDA_PASSES, TILE_PASSES, Pipeline
 from emmy.compiler.pipeline.knob import family_value
 from emmy.compiler.pipeline.search.features import mma_atom, stamps
-from tests.compiler.helpers import device_compute_capability, dyn_M, requires_cuda, requires_sm, requires_sm90
+from tests.compiler.helpers import device_compute_capability, dyn_M, grouped_raster_decode, requires_cuda, requires_sm, requires_sm90
 
 
 def _supports_tma() -> bool:
@@ -1582,9 +1582,9 @@ def test_raster_gm_pin_groups_the_launch_order(monkeypatch):
     resolved codec value is stamped on the kernel knobs (honest stamping)."""
     kop = _raster_kop(monkeypatch, 1280, raster="gm8")
     assert kop.knobs.get("RASTER") == "gm8"
-    src = kop.kernel_source
-    assert "_rsub" in src, "the grouped (m, n) sub-id decode must be emitted"
-    assert "_rsz = min(8," in src, "a ragged Em (20 % 8) needs the tail-group clamp"
+    decode = grouped_raster_decode(kop.kernel_source, 8)
+    assert decode, "the grouped (m, n) decode must be emitted"
+    assert "min(8, " in decode[0] and "+ 20)" in decode[0], "a ragged Em (20 % 8) needs the tail-group clamp"
 
 
 def test_raster_gn_pin_groups_the_transpose(monkeypatch):
@@ -1592,8 +1592,8 @@ def test_raster_gn_pin_groups_the_transpose(monkeypatch):
     divides 4, so the decode takes the clamp-free form."""
     kop = _raster_kop(monkeypatch, 1280, raster="gn4")
     assert kop.knobs.get("RASTER") == "gn4"
-    src = kop.kernel_source
-    assert "_rsub" in src and "_rsz" not in src
+    decode = grouped_raster_decode(kop.kernel_source, 4)
+    assert decode and "min(" not in kop.kernel_source
 
 
 def test_raster_default_is_the_flat_order(monkeypatch):
@@ -1603,7 +1603,7 @@ def test_raster_default_is_the_flat_order(monkeypatch):
     silent default."""
     kop = _raster_kop(monkeypatch, 1280)
     assert kop.knobs.get("RASTER") == ""
-    assert "_rsub" not in kop.kernel_source
+    assert not grouped_raster_decode(kop.kernel_source, 8)
 
 
 def test_raster_fork_offers_both_orders(monkeypatch):
@@ -1647,7 +1647,8 @@ def test_raster_symbolic_grid_decodes_every_tile_once(raster, run_m, monkeypatch
     b = (rng.standard_normal((K, N)) * 0.1).astype(np.float16)
     got, src = _compile_run_mma(_mma_matmul_graph("dynamic", 1280, N, K, "f16", False), {"a": a, "b": b})
 
-    assert "_rsub" in src and "int seq_len" in src, "the grouped decode must render over the runtime extent"
+    group = int(raster[2:])
+    assert grouped_raster_decode(src, group) and "int seq_len" in src, "the grouped decode must render over the runtime extent"
     diff = float(np.abs(got.reshape(run_m, N).astype(np.float32) - a.astype(np.float32) @ b.astype(np.float32)).max())
     assert diff < 5e-2, f"{raster} at M={run_m}: mismatch (max abs err {diff})"
 

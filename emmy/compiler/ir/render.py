@@ -377,6 +377,7 @@ def _float_lit(v: float) -> str:
 _INDEX_CALLS = {"minimum": "min", "maximum": "max"}
 #: The precedence a unary operand renders at: tighter than any binary operator, so a nested operation is parenthesized.
 ATOM_PRECEDENCE = 100
+_BITWISE = frozenset({"<<", ">>", "&", "|", "^"})
 
 
 def render_expression(expression: Expression, ctx: RenderCtx, parent_prec: int = 0) -> str:
@@ -399,13 +400,16 @@ def render_expression(expression: Expression, ctx: RenderCtx, parent_prec: int =
         return f"{v}LL" if abs(v) > 32768 else str(v)
     if isinstance(expression, BinaryExpression):
         prec = expression.precedence
-        left = render_expression(expression.left, ctx, prec)
+        # C ranks the shifts and the bitwise operators apart from the comparisons the table puts them beside (``&``
+        # below ``==``, ``|`` below ``&``), so one is parenthesized wherever it nests, and so is a comparison under it.
+        bitwise = expression.op in _BITWISE
+        left = render_expression(expression.left, ctx, prec + 1 if bitwise else prec)
         right = render_expression(expression.right, ctx, prec + 1)
         # ``//`` is Python floor-div; C integer division ``/`` floors for the non-negative operands shape arithmetic
         # produces.
         c_op = "/" if expression.op == "//" else expression.op
         result = f"{left} {c_op} {right}"
-        return f"({result})" if prec < parent_prec else result
+        return f"({result})" if prec < parent_prec or (bitwise and parent_prec) else result
     if isinstance(expression, Builtin):
         spelling = ctx.builtins.get(expression.name) if ctx is not None else None
         if spelling is None:
@@ -1013,7 +1017,8 @@ def _(stmt: Let, ctx: RenderCtx) -> list[str]:
     if stmt.dtype is None:
         return [f"{_pad(ctx.indent)}auto {stmt.name} = {render_expression(stmt.value, ctx)};"]
     ctx.ssa_dtypes[stmt.name] = stmt.dtype.name
-    value = ctx.identity_literal(stmt.value.value, stmt.dtype) if isinstance(stmt.value, Literal) else render_expression(stmt.value, ctx)
+    floating = isinstance(stmt.value, Literal) and stmt.dtype.name not in INTEGER_NAMES
+    value = ctx.identity_literal(stmt.value.value, stmt.dtype) if floating else render_expression(stmt.value, ctx)
     return [f"{_pad(ctx.indent)}{ctx.type_name(stmt.dtype)} {stmt.name} = {value};"]
 
 
