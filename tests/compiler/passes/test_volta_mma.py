@@ -378,11 +378,12 @@ def test_sm70_ring_splits_the_blocking_copy_across_the_drain(monkeypatch) -> Non
     (chunk,) = re.findall(r"for \(int (\w+) = 0; \1 < 64; \1 \+= 32\)", src)
     prologue, _, body = _kernel(src).partition(f"for (int {chunk}")
     drain = body.index("emmy_mma_m8n8k4_f16_f32")
-    unpack = re.search(r"\n\s+\w+ = _v_\w+_h\[0\];", body).start()  # the carried vector spreads to the staged names
+    lanes = re.search(r"_v_\w+_h\[0\]", body).start()  # the deposit reads the carried vector's lanes where it stands
     deposit = body.index("*reinterpret_cast<uint2*>(&_a_smem[")
     barrier = body.index("__syncthreads();")
     issue = re.search(r"_v_\w+ = __ldg\(", body).start()  # the gmem load of the chunk after next, past the barrier
-    assert drain < unpack < deposit < barrier < issue, "the loads issue past the barrier that publishes the deposit"
+    assert drain < lanes < deposit < barrier < issue, "the loads issue past the barrier that publishes the deposit"
+    assert not re.search(r"\n\s+\w+ = _v_\w+_h\[\d\];", body), "nothing spreads a carried vector into names of its own"
     assert re.search(r"uint4 _v_\w+ = \*reinterpret_cast", prologue), "the prime declares the carried registers"
     assert re.search(r"_v_\w+ = __ldg\(", prologue).start() > prologue.rindex("__syncthreads();"), "chunk 1 issues past the prime's barrier"
     assert re.search(r"int \w+ = emmy_volta_crosswise\(", prologue)
@@ -480,8 +481,9 @@ def test_sm70_causal_attention_selects_the_mask_per_fragment_element(monkeypatch
 def test_sm70_attention_rings_its_key_and_value_through_registers(monkeypatch) -> None:
     """A two-slot ring on the Volta chunk tier is the register-staged split: the next chunk's key
     and value load into packed registers past the barrier, the softmax and expectation of this
-    chunk run, and the unpack and deposit land them in the free slot. The loads stay behind the
-    barrier — a load moved above it would refill the vectors the unpack has not read yet."""
+    chunk run, and the deposit lands them in the free slot, reading the vectors where it stands. The
+    loads stay behind the barrier — a load moved above it would refill vectors the deposit has not
+    read yet."""
     monkeypatch.setenv("EMMY_PLACE", "fuse")
     monkeypatch.setenv("EMMY_WORK", "w4x1")
     monkeypatch.setenv("EMMY_TILE@map.1/twist.1/inner", f"{VOLTA}/f1x2/k2")
@@ -494,10 +496,11 @@ def test_sm70_attention_rings_its_key_and_value_through_registers(monkeypatch) -
     assert knobs["STAGE@map.1/twist"] == "d2/smem"
     _, _, body = src.partition("for (int a")
     drain = body.index("emmy_mma_m8n8k4_f16_f32")
-    unpack = body.index("_a_stage0_0 = _v__a_stage0_0_h[0];")
-    barrier = body.index("__syncthreads();", unpack)
-    issue = body.index("_v__a_stage0_0 = __ldg(")
-    assert drain < unpack < barrier < issue, "the key and value of the chunk after next issue past the barrier"
+    lanes = re.search(r"_v_\w+_h\[0\]", body).start()  # the deposit reads the carried vectors' lanes where it stands
+    barrier = body.index("__syncthreads();", lanes)
+    issue = re.search(r"_v_\w+ = __ldg\(", body).start()
+    assert drain < lanes < barrier < issue, "the key and value of the chunk after next issue past the barrier"
+    assert not re.search(r"\n\s+\w+ = _v_\w+_h\[\d\];", body), "nothing spreads a carried vector into names of its own"
     for forbidden in NEWER_INSTRUCTIONS:
         assert forbidden not in src
 

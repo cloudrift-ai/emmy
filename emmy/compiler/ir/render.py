@@ -108,6 +108,11 @@ class RenderCtx:
     # consumed by ``Var.render`` to inline the float at use sites instead
     # of emitting a named ``float in0 = 0.044f;`` decl.
     literal_ssa: dict[str, float] = field(default_factory=dict)
+    # The SSA names some carried ``Load`` of the kernel re-assigns. They live in the packed vector their first Load
+    # declares, and ``lanes`` holds the text of each one's lane once that Load is rendered: a read of one reads the
+    # lane where the read stands. One table per kernel, shared by every scope's context.
+    carried_names: frozenset[str] = frozenset()
+    lanes: dict[str, str] = field(default_factory=dict)
     # Per-buffer byte offsets into a single ``extern __shared__`` pool
     # ``_smem_pool``. When non-empty, ``Smem``'s render emits a pointer
     # alias into the pool instead of a stand-alone ``__shared__`` array
@@ -381,7 +386,7 @@ def render_expression(expression: Expression, ctx: RenderCtx, parent_prec: int =
         # An SSA name bound by a literal-constant Load renders as the literal; ``render_body`` populates the table.
         if expression.name in ctx.literal_ssa:
             return _float_lit(ctx.literal_ssa[expression.name])
-        return expression.name
+        return ctx.lanes.get(expression.name, expression.name)
     if isinstance(expression, Literal):
         if isinstance(expression.value, float) or expression.dtype == "float":
             txt = _float_lit(float(expression.value))
@@ -685,7 +690,7 @@ def _resolve_value(name: str, ctx: RenderCtx) -> str:
     ``Accum.value``) must substitute here instead of emitting an
     undefined identifier."""
     lit = ctx.literal_ssa.get(name) if ctx.literal_ssa else None
-    return _float_lit(lit) if lit is not None else name
+    return _float_lit(lit) if lit is not None else ctx.lanes.get(name, name)
 
 
 def _args_at_dtype(target, args: list[Expression], arg_dtypes: list[str], dst_dt: str) -> list[Expression]:
@@ -782,9 +787,7 @@ def _(stmt: Load, ctx: RenderCtx) -> list[str]:
         # One local per name, declared in the source buffer's element type so downstream ``Assign``s pick native
         # ops without an immediate promote: a scalar Load, or a run the target cannot read as one vector (no
         # vector type for this dtype and width, or a paged buffer, whose run may cross a page). A carried run's
-        # names are then its registers, so ``"load"`` re-assigns them and ``"unpack"`` has nothing to spread.
-        if stmt.carried == "unpack":
-            return []
+        # names are then its registers, which it re-assigns.
         decl = "" if stmt.carried else f"{ctx.type_name(src_dt)} "
         out: list[str] = []
         for k, nm in enumerate(stmt.names):
@@ -805,22 +808,19 @@ def _(stmt: Load, ctx: RenderCtx) -> list[str]:
     # reinterpret-cast; the bf16 pair reads the same way.
     native_n = {"float2": 2, "float4": 4, "__half2": 2}.get(vec_type)
     use_array_index = native_n != n
-    if stmt.carried == "load":  # re-assign the declared vector only (see the class doc)
+    if stmt.carried:  # re-assign the declared vector, whose lanes the names are (see the class doc)
         return [f"{pad}{vname} = __ldg(reinterpret_cast<const {vec_type}*>(&{stmt.input}[{flat}]));"]
-    if stmt.carried == "unpack":
-        if use_array_index:
-            return [f"{pad}{nm} = {vname}_h[{k}];" for k, nm in enumerate(stmt.names)]
-        return [f"{pad}{nm} = {vname}.{c};" for nm, c in zip(stmt.names, ("x", "y", "z", "w"), strict=False)]
     out_lines = [f"{pad}{vec_type} {vname} = *reinterpret_cast<const {vec_type}*>(&{stmt.input}[{flat}]);"]
+    arr_name = f"{vname}_h"
     if use_array_index:
-        arr_name = f"{vname}_h"
         out_lines.append(f"{pad}const {elem_type}* {arr_name} = reinterpret_cast<const {elem_type}*>(&{vname});")
-        out_lines.extend(f"{pad}{elem_type} {nm} = {arr_name}[{k}];" for k, nm in enumerate(stmt.names))
-    else:
-        components = ("x", "y", "z", "w")[:n]
-        out_lines.extend(f"{pad}{elem_type} {nm} = {vname}.{c};" for nm, c in zip(stmt.names, components, strict=True))
-    for nm in stmt.names:
+    lanes = [f"{arr_name}[{k}]" for k in range(n)] if use_array_index else [f"{vname}.{c}" for c in ("x", "y", "z", "w")[:n]]
+    for nm, lane in zip(stmt.names, lanes, strict=True):
         ctx.ssa_dtypes[nm] = src_dt
+        if nm in ctx.carried_names:
+            ctx.lanes[nm] = lane  # no local: a later carried Load re-assigns the vector, and a read takes the lane
+        else:
+            out_lines.append(f"{pad}{elem_type} {nm} = {lane};")
     return out_lines
 
 

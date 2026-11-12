@@ -108,13 +108,13 @@ macro_rules! with_statement_types {
                 /// `KernelOp.inputs`/`outputs` side channels. `None` keeps the legacy render-time inference path working for
                 /// tests that construct Loads by hand without dtype.
                 ///
-                /// `carried` marks the two halves of a staged copy that crosses the chunk loop's back edge. The names and their
-                /// packed vector are the ones an earlier Load of the same names DECLARED ahead of the loop. `"load"` re-assigns
-                /// only the packed vector, through the read-only (non-coherent) path — the operand is one the kernel never writes
-                /// — so the loaded chunk survives into the next iteration as the few registers the vector holds. `"unpack"` re-
-                /// assigns the names from that vector and touches no memory; it sits right before the names' consumer. Measured
-                /// on the V100: unpacking at the load instead keeps every element live across the mma stream and ptxas then
-                /// serializes the loads behind it (a 128x128 partial 84 us against 67).
+                /// `carried` marks a staged copy that crosses the chunk loop's back edge. The names and their packed vector are
+                /// the ones an earlier Load of the same names DECLARED ahead of the loop. `"load"` re-assigns the packed vector,
+                /// through the read-only (non-coherent) path — the operand is one the kernel never writes — so the loaded chunk
+                /// survives into the next iteration as the few registers the vector holds. From there a read of one of the
+                /// names reads its lane of the vector where the read stands: nothing spreads the vector into the names.
+                /// Measured on the V100: spreading it at the load keeps every element live across the mma stream and ptxas
+                /// then serializes the loads behind it (a 128x128 partial 84 us against 67).
                 shared Load {PURE | CHECKED} {
                     names: Names [DEFINES],
                     input: Name [BUFFER_READ],

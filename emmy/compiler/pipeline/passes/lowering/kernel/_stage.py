@@ -954,7 +954,7 @@ class SyncTransport:
         Measured on the V100: issued at the top, ptxas sinks the eight 16 B loads of a 128x128 tile a
         third of the way into the mma stream, and the deposit then waits on them (a fifth of the
         partial's stall samples). Issued past the barrier through the read-only path, and carried as
-        packed vectors until the deposit unpacks them, the Qwen3-0.6B s512 projections' best rows went
+        packed vectors the deposit reads its elements from, the Qwen3-0.6B s512 projections' best rows went
         down 75.8 -> 67.1 us, o 52.3 -> 49.2, q 45.6 -> 42.5. Only a pure copy ring moves: a compute
         fill writes the current chunk at the top of the body and keeps its own order."""
         return self.register_staged and not self.fills_current_slot
@@ -1046,20 +1046,16 @@ class SyncTransport:
             out.append(StridedLoop(axis=fe, start=self.cta.linear_tid, step=_lit(self.cta.n_threads), body=Body(tuple(body)), unroll=False))
         return out
 
-    def deposit(self, *, slot: Expression, ring: int, unpack: bool = False) -> list[Statement]:
+    def deposit(self, *, slot: Expression, ring: int) -> list[Statement]:
         """Land the registers :meth:`fill` issued into ring ``slot`` — the second half of the split
         blocking copy, placed by :func:`pipelined_kloop` past the resident chunk's drain. Empty on
-        every unsplit transport, whose bytes land in their own ``wait``. ``unpack`` first spreads the
-        packed vectors a back-edge issue carried into the staged names (:class:`Load` ``carried``)."""
+        every unsplit transport, whose bytes land in their own ``wait``. The staged names a back-edge
+        issue carried are read from its packed vectors where the stores read them (:class:`Load`
+        ``carried``)."""
         if not self.register_staged:
             return []
         out: list[Statement] = []
         for op in self.copy_operands:
-            if unpack:
-                v, trips = _sync_copy_runs(op.shape, self.cta, op.elem_bytes or self.elem_bytes)
-                out += [
-                    Load(names=_staged_regs(op.tag, trip, v), input=op.buf, index=(_lit(0),), carried="unpack") for trip in range(trips)
-                ]
             out += sync_copy_deposit(
                 slab=op.slab,
                 shape=op.shape,
@@ -1410,11 +1406,11 @@ class _Group:
     back_edge: bool = False  # a two-slot split ring issuing past the barrier (``issues_across_back_edge``)
 
 
-def _deposit(group: _Group, slot: Expression, *, unpack: bool = False) -> list[Statement]:
+def _deposit(group: _Group, slot: Expression) -> list[Statement]:
     """The transport's register→smem landing, or nothing for a transport whose fill is not split
     (cp.async / TMA leave their in-flight bytes with the copy engine, not in registers)."""
     land = getattr(group.transport, "deposit", None)
-    return land(slot=slot, ring=group.ring, unpack=unpack) if land is not None else []
+    return land(slot=slot, ring=group.ring) if land is not None else []
 
 
 def pipelined_kloop(
@@ -1609,7 +1605,7 @@ def pipelined_kloop(
             # that publishes it. It targets the PREFETCH slot, which no lane is reading, so this one
             # barrier serves both the landing and the slab protection: the group needs no other.
             for g in enders:
-                body += _deposit(g, g.fill_slot, unpack=g.back_edge)
+                body += _deposit(g, g.fill_slot)
             body.append(Sync())  # every reader past the slab(s) before a refill / later prefetch overwrites them
             for g in enders:
                 if g.kind == "kill":

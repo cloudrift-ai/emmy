@@ -34,8 +34,8 @@ def _walk(body: Body) -> tuple[Body, bool]:
     """``body`` with each Load only one guarded block reads moved into that block, then the same inside every nested
     body: a Load moved into a guard can be read by one guard inside it."""
     stmts = tuple(body)
-    # A carried staged copy (``Load.carried``) is ordered against the barrier and the unpack that reads its vector,
-    # neither of which its ``defines`` names: it keeps its place, and so does the rest of that body.
+    # A carried staged copy (``Load.carried``) re-assigns names an earlier Load declared, behind a barrier: it keeps
+    # its place, and so does the rest of that body.
     guarded: dict[int, list[Load]] = {}
     if not any(isinstance(s, Load) and s.carried for s in stmts):
         reads = [_nested_deps(s) for s in stmts]
