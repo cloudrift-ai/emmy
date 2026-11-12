@@ -428,6 +428,9 @@ require CloudRift organization access.
   bodies, their text, value numbering and normalization (see [ARCHITECTURE.md](crates/emmy-ir/ARCHITECTURE.md));
   [crates/emmy-ir-py/](crates/emmy-ir-py/) is the `emmy.emmy_ir` extension the `ir/stmt` and `ir/expression` modules
   export from
+- [crates/emmy-ptx/](crates/emmy-ptx/) — The compiler from Kernel IR to PTX: an instruction list, its builder, printer
+  and verifier, and the rule of each statement type; scalar kernels so far, and no pipeline stage calls it yet (see
+  [ARCHITECTURE.md](crates/emmy-ptx/ARCHITECTURE.md))
 - [crates/emmy-server/](crates/emmy-server/) — Native HTTP adapter: text and image processing
   (see [ARCHITECTURE.md](crates/emmy-server/ARCHITECTURE.md))
 - [docs/](docs/) — Docusaurus user-docs site (getting started, benchmarking, custom configurations, deployment)

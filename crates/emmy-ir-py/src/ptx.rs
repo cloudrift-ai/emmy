@@ -1,0 +1,79 @@
+//! `compile_ptx`: a kernel body and its interface, as the Python side computes it, to PTX text.
+
+use pyo3::exceptions::PyValueError;
+use pyo3::prelude::*;
+
+use emmy_ptx::{Interface, Kernel, Param, ParamKind, Precision, Target};
+
+use crate::body::PyBody;
+use crate::convert::{IntoPyErr, name_from_py};
+
+fn param(value: &Bound<'_, PyAny>) -> PyResult<Param> {
+    let kind: String = value.getattr("kind")?.extract()?;
+    let kind = match kind.as_str() {
+        "input" => ParamKind::Input,
+        "output" => ParamKind::Output,
+        "descriptor" => ParamKind::Descriptor,
+        "int" => ParamKind::Int,
+        other => return Err(PyValueError::new_err(format!("no parameter kind {other}"))),
+    };
+    let dtype = value.getattr("dtype")?;
+    let dtype = if dtype.is_none() {
+        None
+    } else {
+        let name: String = dtype.getattr("name")?.extract()?;
+        Some(name.parse().py()?)
+    };
+    Ok(Param {
+        name: name_from_py(&value.getattr("name")?)?,
+        kind,
+        dtype,
+        paged: value.getattr("paged")?.extract()?,
+    })
+}
+
+/// The PTX text of the kernel `name`: its `body`, its `interface` (the `Interface` of `ir/kernel/interface.py`), the
+/// compute capability `sm` (`120` for `sm_120`) and the kernel's two precision decisions.
+#[pyfunction]
+#[pyo3(signature = (name, body, interface, *, sm, fuse = false, ftz = false))]
+pub fn compile_ptx(
+    name: &str,
+    body: &Bound<'_, PyAny>,
+    interface: &Bound<'_, PyAny>,
+    sm: u32,
+    fuse: bool,
+    ftz: bool,
+) -> PyResult<String> {
+    let body = PyBody::from_iterable(body)?;
+    let params: PyResult<Vec<Param>> = interface
+        .getattr("params")?
+        .try_iter()?
+        .map(|item| param(&item?))
+        .collect();
+    let mut shared_offsets = Vec::new();
+    for item in interface
+        .getattr("shared_offsets")?
+        .call_method0("items")?
+        .try_iter()?
+    {
+        let (buffer, offset): (Bound<'_, PyAny>, u64) = item?.extract()?;
+        shared_offsets.push((name_from_py(&buffer)?, offset));
+    }
+    let interface = Interface {
+        params: params?,
+        threads: interface.getattr("threads")?.extract()?,
+        shared_offsets,
+        shared_pool_bytes: interface.getattr("shared_pool_bytes")?.extract()?,
+        arch_specific: interface.getattr("arch_specific")?.extract()?,
+    };
+    let kernel = Kernel {
+        name,
+        body: &body,
+        interface: &interface,
+    };
+    emmy_ptx::compile(&kernel, Target { sm }, Precision { fuse, ftz }).py()
+}
+
+pub fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
+    m.add_function(wrap_pyfunction!(compile_ptx, m)?)
+}

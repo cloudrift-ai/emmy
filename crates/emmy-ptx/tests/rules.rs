@@ -1,0 +1,1342 @@
+//! One test per rule, each from a body in the text form: the instruction list the rule writes, and that ptxas
+//! assembles the printed kernel at `-O0` and at its default level wherever it is installed.
+
+use std::collections::HashMap;
+use std::process::Command;
+use std::sync::atomic::{AtomicU32, Ordering};
+
+use emmy_ir::dtype::DType;
+use emmy_ir::text::parse_body;
+use emmy_ptx::inst::{
+    Bank, Base, Cmp, Inst, Item, Label, Module, Opcode, Operand, ParamDecl, Reg, Shared, Space, Ty,
+};
+use emmy_ptx::print::{instruction_text, print};
+use emmy_ptx::verify::verify;
+use emmy_ptx::{Interface, Kernel, Param, ParamKind, Precision, Target, lower};
+
+use DType::{BF16, Bool, F16, F32, I32, U32};
+use ParamKind::{Input, Int, Output};
+
+type Params<'a> = &'a [(&'a str, ParamKind, Option<DType>)];
+
+const SM_120: Target = Target { sm: 120 };
+const EXACT: Precision = Precision {
+    fuse: false,
+    ftz: false,
+};
+const FUSED: Precision = Precision {
+    fuse: true,
+    ftz: false,
+};
+
+/// One f32 input `a` and one f32 output `o`.
+const A_O: Params = &[("a", Input, Some(F32)), ("o", Output, Some(F32))];
+
+/// One thread per element of 4,096, with no tail to guard.
+const GRID: &str =
+    "Grid(axes=(i in 0..4096), decode=(block_idx.x * 256 + thread_idx.x), block_threads=256):";
+
+/// What `GRID` decodes `i` with: `%r3`.
+const DECODE: [&str; 4] = [
+    "mov.u32 %r0, %ctaid.x",
+    "shl.b32 %r1, %r0, 8",
+    "mov.u32 %r2, %tid.x",
+    "add.s32 %r3, %r1, %r2",
+];
+
+fn interface(params: Params, threads: u32) -> Interface {
+    Interface {
+        params: params
+            .iter()
+            .map(|(name, kind, dtype)| Param {
+                name: (*name).into(),
+                kind: *kind,
+                dtype: *dtype,
+                paged: false,
+            })
+            .collect(),
+        threads,
+        ..Interface::default()
+    }
+}
+
+/// Assemble `ptx` for `target` at `-O0` and at the default level; nothing where ptxas is not installed.
+fn assemble(ptx: &str, target: &str) {
+    static FILES: AtomicU32 = AtomicU32::new(0);
+    if Command::new("ptxas").arg("--version").output().is_err() {
+        return;
+    }
+    let stem = format!(
+        "{}/k{}_{}",
+        env!("CARGO_TARGET_TMPDIR"),
+        std::process::id(),
+        FILES.fetch_add(1, Ordering::Relaxed)
+    );
+    let source = format!("{stem}.ptx");
+    std::fs::write(&source, ptx).unwrap();
+    for level in ["-O0", "-O3"] {
+        let output = Command::new("ptxas")
+            .args([level, &format!("-arch={target}"), "-m64", &source, "-o"])
+            .arg(format!("{stem}.cubin"))
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "ptxas {level} refused:\n{}\n{ptx}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+    let _ = std::fs::remove_file(&source);
+    let _ = std::fs::remove_file(format!("{stem}.cubin"));
+}
+
+fn lowered(
+    body: &str,
+    params: Params,
+    target: Target,
+    precision: Precision,
+) -> emmy_ir::Result<Module> {
+    let body = parse_body(body).unwrap();
+    let interface = interface(params, 256);
+    let kernel = Kernel {
+        name: "k",
+        body: &body,
+        interface: &interface,
+    };
+    let module = lower(&kernel, target, precision)?;
+    assemble(&print(&module), &module.target);
+    Ok(module)
+}
+
+/// The code of a kernel, one line per instruction and label, without the parameter loads and the closing `ret`.
+fn code(body: &str, params: Params, precision: Precision) -> Vec<String> {
+    let module = lowered(body, params, SM_120, precision).unwrap();
+    module
+        .items
+        .iter()
+        .filter_map(|item| match item {
+            Item::Inst(inst) if matches!(inst.opcode, Opcode::Ld(Space::Param) | Opcode::Ret) => {
+                None
+            }
+            Item::Inst(inst) => Some(instruction_text(inst)),
+            Item::Label(label) => Some(format!("L{}:", label.0)),
+            Item::Comment(_) => None,
+        })
+        .collect()
+}
+
+/// The code of the statements `body` holds under `GRID`, after the decode.
+fn under_grid(body: &str, params: Params, precision: Precision) -> Vec<String> {
+    let indented: Vec<String> = body
+        .trim_matches('\n')
+        .lines()
+        .filter(|line| !line.trim().is_empty())
+        .map(|line| format!("    {}", line.strip_prefix("        ").unwrap_or(line)))
+        .collect();
+    let all = code(
+        &format!("{GRID}\n{}", indented.join("\n")),
+        params,
+        precision,
+    );
+    assert_eq!(all[..DECODE.len()], DECODE);
+    all[DECODE.len()..].to_vec()
+}
+
+/// The message a kernel is refused with.
+fn refusal(body: &str, params: Params) -> String {
+    lowered(body, params, SM_120, EXACT)
+        .unwrap_err()
+        .to_string()
+}
+
+// --- the grid --------------------------------------------------------------------------------------------
+
+/// A grid binds each axis to its decode over the built-ins: a division and a remainder by a power of two are a
+/// shift and a mask, and the guard over the launch's tail is a branch past the body.
+#[test]
+fn a_grid_decodes_its_axes_and_guards_its_tail() {
+    let got = code(
+        "
+Grid(axes=(r in 0..100, c in 0..4), decode=((block_idx.x * 256 + thread_idx.x) / 4, thread_idx.x % 4), block_threads=256):
+    if block_idx.x * 256 + thread_idx.x < 400:
+        f32 x = load a[r * 4 + c]
+        f32 o[r * 4 + c] = x
+",
+        A_O,
+        EXACT,
+    );
+    assert_eq!(
+        got,
+        [
+            "mov.u32 %r0, %ctaid.x",
+            "shl.b32 %r1, %r0, 8",
+            "mov.u32 %r2, %tid.x",
+            "add.s32 %r3, %r1, %r2",
+            "shr.s32 %r4, %r3, 2",
+            "and.b32 %r5, %r2, 3",
+            "setp.lt.s32 %p0, %r3, 400",
+            "@!%p0 bra L1",
+            "mul.wide.s32 %rd2, %r4, 16",
+            "add.s64 %rd3, %rd0, %rd2",
+            "mul.wide.s32 %rd4, %r5, 4",
+            "add.s64 %rd5, %rd3, %rd4",
+            "ld.global.f32 %f0, [%rd5]",
+            "add.s64 %rd6, %rd1, %rd2",
+            "add.s64 %rd7, %rd6, %rd4",
+            "st.global.f32 [%rd7], %f0",
+            "L1:",
+        ]
+    );
+}
+
+/// The directives of a module: the PTX version the target needs, the thread bound, and one pointer parameter per
+/// buffer with the alignment of its elements, a 32-bit one per symbolic size.
+#[test]
+fn a_module_states_its_target_its_thread_bound_and_its_parameters() {
+    let body = format!("{GRID}\n    f16 x = load a[i]\n    f16 o[i] = x");
+    let params: Params = &[
+        ("a", Input, Some(F16)),
+        ("o", Output, Some(F16)),
+        ("n", Int, None),
+    ];
+    let module = lowered(&body, params, SM_120, EXACT).unwrap();
+    let text = print(&module);
+    let head = text.split('{').next().unwrap();
+    assert_eq!(
+        head,
+        ".version 8.7\n.target sm_120\n.address_size 64\n\n.visible .entry k(\n\
+         \t.param .u64 .ptr .align 2 k_param_0,\n\t.param .u64 .ptr .align 2 k_param_1,\n\
+         \t.param .u32 k_param_2\n)\n.maxntid 256, 1, 1\n"
+    );
+    assert!(text.contains("\t// f16 x = load a[i]\n"), "{text}");
+    assert!(text.is_ascii());
+    let older = lowered(&body, params, Target { sm: 80 }, EXACT).unwrap();
+    assert_eq!((older.version, older.target.as_str()), ((7, 8), "sm_80"));
+}
+
+// --- addresses -------------------------------------------------------------------------------------------
+
+/// The variable part of a flat index is scaled to bytes and widened by one multiply, shared by every buffer read
+/// at it; the constant part is the offset of the address.
+#[test]
+fn an_address_is_a_base_a_scaled_index_and_a_constant() {
+    let got = under_grid(
+        "
+        f32 x = load a[i]
+        f32 y = load a[i + 3]
+        f32 z = load a[i - 1]
+        f32 v = x + y
+        f32 w = v + z
+        f32 o[i * 2 + 1] = w
+        ",
+        A_O,
+        EXACT,
+    );
+    assert_eq!(
+        got,
+        [
+            "mul.wide.s32 %rd2, %r3, 4",
+            "add.s64 %rd3, %rd0, %rd2",
+            "ld.global.f32 %f0, [%rd3]",
+            "ld.global.f32 %f1, [%rd3+12]",
+            "ld.global.f32 %f2, [%rd3+-4]",
+            "add.rn.f32 %f3, %f0, %f1",
+            "add.rn.f32 %f4, %f3, %f2",
+            "mul.wide.s32 %rd4, %r3, 8",
+            "add.s64 %rd5, %rd1, %rd4",
+            "st.global.f32 [%rd5+4], %f4",
+        ]
+    );
+}
+
+/// Each term of the index is widened by itself and added in 64 bits, the terms bound in outer bodies first: the
+/// part a loop does not change is one register for all its trips, which is the form ptxas folds when it unrolls.
+#[test]
+fn the_terms_of_an_index_are_added_in_64_bits_outermost_first() {
+    let got = under_grid(
+        "
+        for j in 0..8:
+            f32 x = load a[j + i * 8]
+            f32 s <- add(s, x) over j
+        f32 o[i] = s
+        ",
+        A_O,
+        EXACT,
+    );
+    assert_eq!(
+        got,
+        [
+            "mov.f32 %f0, 0f00000000",
+            "mov.u32 %r4, 0",
+            "L1:",
+            "mul.wide.s32 %rd2, %r3, 32",
+            "add.s64 %rd3, %rd0, %rd2",
+            "mul.wide.s32 %rd4, %r4, 4",
+            "add.s64 %rd5, %rd3, %rd4",
+            "ld.global.f32 %f1, [%rd5]",
+            "add.rn.f32 %f0, %f0, %f1",
+            "add.s32 %r4, %r4, 1",
+            "setp.lt.s32 %p0, %r4, 8",
+            "@%p0 bra L1",
+            "mul.wide.s32 %rd6, %r3, 4",
+            "add.s64 %rd7, %rd1, %rd6",
+            "st.global.f32 [%rd7], %f0",
+        ]
+    );
+}
+
+/// An index past the 32-bit range is computed in 64 bits from the term that leaves it: the product of two 32-bit
+/// values is the widening multiply, and a 64-bit value is scaled by a shift.
+#[test]
+fn an_index_past_32_bits_is_widened_once() {
+    let got = code(
+        "
+Grid(axes=(i in 0..1048576), decode=(block_idx.x * 256 + thread_idx.x), block_threads=256):
+    i64 big = i * 1048576
+    f32 x = load a[big + 5]
+    f32 o[i] = x
+",
+        A_O,
+        EXACT,
+    );
+    assert_eq!(
+        got[4..],
+        [
+            "mul.wide.s32 %rd2, %r3, 1048576",
+            "shl.b64 %rd3, %rd2, 2",
+            "add.s64 %rd4, %rd0, %rd3",
+            "ld.global.f32 %f0, [%rd4+20]",
+            "mul.wide.s32 %rd5, %r3, 4",
+            "add.s64 %rd6, %rd1, %rd5",
+            "st.global.f32 [%rd6], %f0",
+        ]
+    );
+}
+
+// --- integers --------------------------------------------------------------------------------------------
+
+/// A division by a constant that is no power of two, over a dividend the ranges prove non-negative, is a
+/// multiply-high and a shift; its remainder subtracts the quotient's multiple.
+#[test]
+fn a_division_by_a_constant_over_a_non_negative_index_is_a_multiply_high() {
+    let got = under_grid(
+        "
+        i32 q = i / 7
+        i32 m = i % 7
+        i32 s = q + m
+        f32 v = (f32)s
+        f32 o[i] = v
+        ",
+        A_O,
+        EXACT,
+    );
+    assert_eq!(
+        got[..5],
+        [
+            "mul.hi.u32 %r4, %r3, 2454267027",
+            "shr.u32 %r5, %r4, 2",
+            "mul.lo.s32 %r6, %r5, 7",
+            "sub.s32 %r7, %r3, %r6",
+            "add.s32 %r8, %r5, %r7",
+        ]
+    );
+}
+
+/// A dividend that may be negative keeps the floor: an arithmetic shift and a mask by a power of two, and for any
+/// other divisor the divide instruction lowered by one where the remainder's sign is not the divisor's.
+#[test]
+fn a_division_of_a_possibly_negative_value_floors() {
+    let got = under_grid(
+        "
+        i32 d = (i - 2000) / 7
+        i32 m = (i - 2000) % 7
+        i32 e = (i - 2000) % 8
+        i32 f = (i - 2000) / 8
+        i32 s = d + m + e + f
+        f32 v = (f32)s
+        f32 o[i] = v
+        ",
+        A_O,
+        EXACT,
+    );
+    assert_eq!(
+        got[..13],
+        [
+            "sub.s32 %r4, %r3, 2000",
+            "rem.s32 %r5, %r4, 7",
+            "xor.b32 %r6, %r5, 7",
+            "setp.lt.s32 %p0, %r6, 0",
+            "setp.ne.s32 %p1, %r5, 0",
+            "and.pred %p2, %p0, %p1",
+            "div.s32 %r7, %r4, 7",
+            "selp.s32 %r8, -1, 0, %p2",
+            "add.s32 %r9, %r7, %r8",
+            "selp.s32 %r10, 7, 0, %p2",
+            "add.s32 %r11, %r5, %r10",
+            "and.b32 %r12, %r4, 7",
+            "shr.s32 %r13, %r4, 3",
+        ]
+    );
+}
+
+/// A division by a value known only where it runs is the divide instruction: plain where the ranges prove both
+/// sides non-negative, unsigned for unsigned operands.
+#[test]
+fn a_division_by_a_variable_is_the_divide_instruction() {
+    let got = under_grid(
+        "
+        u32 u = load b[i]
+        i32 q = i / (i + 1)
+        u32 m = u % u
+        u32 r = u >> 3
+        u32 s = q + m + r
+        u32 o[i] = s
+        ",
+        &[("b", Input, Some(U32)), ("o", Output, Some(U32))],
+        EXACT,
+    );
+    assert_eq!(
+        got[3..9],
+        [
+            "add.s32 %r5, %r3, 1",
+            "div.s32 %r6, %r3, %r5",
+            "rem.u32 %r7, %r4, %r4",
+            "shr.u32 %r8, %r4, 3",
+            "add.u32 %r9, %r6, %r7",
+            "add.u32 %r10, %r9, %r8",
+        ]
+    );
+}
+
+/// The integer operations that are one instruction each, at the width and the signedness of their operands.
+#[test]
+fn the_integer_operations_are_one_instruction_each() {
+    let got = under_grid(
+        "
+        i32 x = load b[i]
+        i32 a1 = x * 6
+        i32 a2 = x & 255
+        i32 a3 = x | i
+        i32 a4 = x ^ i
+        i32 a5 = x << 2
+        i32 a6 = x >> 1
+        i32 a7 = minimum(x, i)
+        i32 a8 = maximum(x, 3)
+        i32 a9 = -x
+        i32 b1 = abs(x)
+        i32 b2 = bitwise_count(x)
+        i32 b3 = x < i
+        i32 b4 = x == 4 ? a1 : a2
+        i64 b5 = (i64)x
+        i64 b6 = b5 * 3
+        i32 b7 = (i32)b6
+        i32 o[i] = b7
+        ",
+        &[("b", Input, Some(I32)), ("o", Output, Some(I32))],
+        EXACT,
+    );
+    assert_eq!(
+        got[3..21],
+        [
+            "mul.lo.s32 %r5, %r4, 6",
+            "and.b32 %r6, %r4, 255",
+            "or.b32 %r7, %r4, %r3",
+            "xor.b32 %r8, %r4, %r3",
+            "shl.b32 %r9, %r4, 2",
+            "shr.s32 %r10, %r4, 1",
+            "min.s32 %r11, %r4, %r3",
+            "max.s32 %r12, %r4, 3",
+            "neg.s32 %r13, %r4",
+            "abs.s32 %r14, %r4",
+            "popc.b32 %r15, %r4",
+            "setp.lt.s32 %p0, %r4, %r3",
+            "selp.s32 %r16, 1, 0, %p0",
+            "setp.eq.s32 %p1, %r4, 4",
+            "selp.s32 %r17, %r5, %r6, %p1",
+            "cvt.s64.s32 %rd4, %r4",
+            "mul.lo.s64 %rd5, %rd4, 3",
+            "cvt.u32.u64 %r18, %rd5",
+        ]
+    );
+}
+
+// --- floats ----------------------------------------------------------------------------------------------
+
+/// Every float instruction that rounds says so, and with the fusion decision off a product and the sum that reads
+/// it stay two instructions.
+#[test]
+fn a_product_and_its_sum_stay_apart_without_the_fusion_decision() {
+    let got = under_grid(
+        "
+        f32 x = load a[i]
+        f32 t = x * x
+        f32 v = t + x
+        f32 w = 2 * v - x
+        f32 o[i] = w
+        ",
+        A_O,
+        EXACT,
+    );
+    assert_eq!(
+        got[3..7],
+        [
+            "mul.rn.f32 %f1, %f0, %f0",
+            "add.rn.f32 %f2, %f1, %f0",
+            "mul.rn.f32 %f3, 0f40000000, %f2",
+            "sub.rn.f32 %f4, %f3, %f0",
+        ]
+    );
+}
+
+/// With the fusion decision on, a product read once by a sum or a difference in its own body is one fused
+/// multiply-add with it: named or written in the reader, on either side, a difference through an exact negation.
+#[test]
+fn a_product_read_once_by_a_sum_fuses_under_the_fusion_decision() {
+    let got = under_grid(
+        "
+        f32 x = load a[i]
+        f32 t = x * x
+        f32 v = t + x
+        f32 w = 2 * v - x
+        f32 u = x - 3 * w
+        f32 p = w * u
+        f32 q = 1.5 - p
+        f32 o[i] = q
+        ",
+        A_O,
+        FUSED,
+    );
+    assert_eq!(
+        got[3..10],
+        [
+            "fma.rn.f32 %f1, %f0, %f0, %f0",
+            "neg.f32 %f2, %f0",
+            "fma.rn.f32 %f3, 0f40000000, %f1, %f2",
+            "fma.rn.f32 %f4, 0fC0400000, %f3, %f0",
+            "neg.f32 %f5, %f3",
+            "fma.rn.f32 %f6, %f5, %f4, 0f3FC00000",
+            "add.s64 %rd4, %rd1, %rd2",
+        ]
+    );
+}
+
+/// A product with two readers, or one read in another body, is computed once where it stands and fuses with
+/// neither.
+#[test]
+fn a_product_read_twice_or_in_another_body_does_not_fuse() {
+    let got = under_grid(
+        "
+        f32 x = load a[i]
+        f32 t = x * x
+        f32 v = t + x
+        f32 w = t + v
+        f32 p = w * x
+        if i < 5:
+            f32 q = p + x
+            f32 o[i] = q
+        f32 o[i + 1] = w
+        ",
+        A_O,
+        FUSED,
+    );
+    assert_eq!(
+        got[3..10],
+        [
+            "mul.rn.f32 %f1, %f0, %f0",
+            "add.rn.f32 %f2, %f1, %f0",
+            "add.rn.f32 %f3, %f1, %f2",
+            "mul.rn.f32 %f4, %f3, %f0",
+            "setp.lt.s32 %p0, %r3, 5",
+            "@!%p0 bra L1",
+            "add.rn.f32 %f5, %f4, %f0",
+        ]
+    );
+}
+
+/// The body's own `fma` is the instruction whatever the fusion decision.
+#[test]
+fn an_fma_the_body_writes_is_an_fma() {
+    let got = under_grid(
+        "
+        f32 x = load a[i]
+        f32 v = fma(x, x, 0.5)
+        f32 o[i] = v
+        ",
+        A_O,
+        EXACT,
+    );
+    assert_eq!(got[3], "fma.rn.f32 %f1, %f0, %f0, 0f3F000000");
+}
+
+/// The float operations that are one instruction each.
+#[test]
+fn the_float_operations_are_one_instruction_each() {
+    let got = under_grid(
+        "
+        f32 x = load a[i]
+        f32 a1 = x / 3.0
+        f32 a2 = true_divide(x, a1)
+        f32 a3 = maximum(x, a2)
+        f32 a4 = minimum(x, a3)
+        f32 a5 = sqrt(a4)
+        f32 a6 = reciprocal(a5)
+        f32 a7 = floor(a6)
+        f32 a8 = ceil(a7)
+        f32 a9 = trunc(a8)
+        f32 b1 = rint(a9)
+        f32 b2 = abs(b1)
+        f32 b3 = -b2
+        f32 b4 = relu(b3)
+        f32 b5 = square(b4)
+        f32 b6 = where(b5 > x, b5, x)
+        f32 b7 = b6 != x ? b6 : 0.25
+        f32 o[i] = b7
+        ",
+        A_O,
+        EXACT,
+    );
+    assert_eq!(
+        got[3..21],
+        [
+            "div.rn.f32 %f1, %f0, 0f40400000",
+            "div.rn.f32 %f2, %f0, %f1",
+            "max.f32 %f3, %f0, %f2",
+            "min.f32 %f4, %f0, %f3",
+            "sqrt.rn.f32 %f5, %f4",
+            "rcp.rn.f32 %f6, %f5",
+            "cvt.rmi.f32.f32 %f7, %f6",
+            "cvt.rpi.f32.f32 %f8, %f7",
+            "cvt.rzi.f32.f32 %f9, %f8",
+            "cvt.rni.f32.f32 %f10, %f9",
+            "abs.f32 %f11, %f10",
+            "neg.f32 %f12, %f11",
+            "max.f32 %f13, %f12, 0f00000000",
+            "mul.rn.f32 %f14, %f13, %f13",
+            "setp.gt.f32 %p0, %f14, %f0",
+            "selp.f32 %f15, %f14, %f0, %p0",
+            "setp.neu.f32 %p1, %f15, %f0",
+            "selp.f32 %f16, %f15, 0f3E800000, %p1",
+        ]
+    );
+}
+
+/// With the flush-to-zero decision on, every f32 instruction that takes the flag carries it.
+#[test]
+fn the_flush_to_zero_decision_marks_every_f32_instruction() {
+    let ftz = Precision {
+        fuse: true,
+        ftz: true,
+    };
+    let got = under_grid(
+        "
+        f32 x = load a[i]
+        f32 t = x * x
+        f32 v = t + x
+        f32 w = sqrt(v) / x
+        f32 u = floor(w)
+        i32 n = (i32)u
+        f32 y = maximum(u, x)
+        f32 z = y < x ? -y : abs(x)
+        f32 r = z + (f32)n
+        f32 o[i] = r
+        ",
+        A_O,
+        ftz,
+    );
+    assert_eq!(
+        got[3..15],
+        [
+            "fma.rn.ftz.f32 %f1, %f0, %f0, %f0",
+            "sqrt.rn.ftz.f32 %f2, %f1",
+            "div.rn.ftz.f32 %f3, %f2, %f0",
+            "cvt.rmi.ftz.f32.f32 %f4, %f3",
+            "cvt.rzi.ftz.s32.f32 %r4, %f4",
+            "max.ftz.f32 %f5, %f4, %f0",
+            "setp.lt.ftz.f32 %p0, %f5, %f0",
+            "neg.ftz.f32 %f6, %f5",
+            "abs.ftz.f32 %f7, %f0",
+            "selp.f32 %f8, %f6, %f7, %p0",
+            "cvt.rn.f32.s32 %f9, %r4",
+            "add.rn.ftz.f32 %f10, %f8, %f9",
+        ]
+    );
+}
+
+/// Half precision runs natively where the body says so: its values live in 16-bit registers, its instructions take
+/// no immediate, so a constant is moved into a register by its bits.
+#[test]
+fn half_precision_runs_in_16_bit_registers() {
+    let got = under_grid(
+        "
+        f16 x = load a[i]
+        f16 y = x * x + x
+        f16 z = maximum(y, -x) - 1.0
+        f16 w = abs(z) < x ? z : x
+        f16 o[i] = w
+        ",
+        &[("a", Input, Some(F16)), ("o", Output, Some(F16))],
+        FUSED,
+    );
+    assert_eq!(
+        got,
+        [
+            "mul.wide.s32 %rd2, %r3, 2",
+            "add.s64 %rd3, %rd0, %rd2",
+            "ld.global.b16 %h0, [%rd3]",
+            "fma.rn.f16 %h1, %h0, %h0, %h0",
+            "neg.f16 %h2, %h0",
+            "max.f16 %h3, %h1, %h2",
+            "mov.b16 %h4, 15360",
+            "sub.rn.f16 %h5, %h3, %h4",
+            "abs.f16 %h6, %h5",
+            "setp.lt.f16 %p0, %h6, %h0",
+            "selp.b16 %h7, %h5, %h0, %p0",
+            "add.s64 %rd4, %rd1, %rd2",
+            "st.global.b16 [%rd4], %h7",
+        ]
+    );
+}
+
+/// A cast is one conversion: exact from a half to f32, rounded to nearest into a float, toward zero into an
+/// integer, and through a predicate to and from a bool.
+#[test]
+fn a_cast_is_one_conversion() {
+    let got = under_grid(
+        "
+        f16 h = load a[i]
+        bf16 b = load c[i]
+        bool m = load d[i]
+        f32 x = (f32)h
+        f32 y = (f32)b
+        f32 z = x + y
+        f16 h2 = (f16)z
+        bf16 b2 = (bf16)z
+        i32 n = (i32)z
+        u32 u = (u32)z
+        i64 l = (i64)z
+        f32 f1 = (f32)n + (f32)u
+        f32 f2 = f1 + (f32)l
+        f32 f3 = f2 + (f32)m
+        i32 k = (i32)h
+        f16 h3 = (f16)k
+        bool t = (bool)f3
+        bool t2 = t && m
+        i32 e = (i32)t2
+        f32 o[i] = f3
+        f16 p[i] = h2
+        bf16 q[i] = b2
+        bool r[i] = t2
+        i32 s[i] = e
+        f16 p[i + 1] = h3
+        ",
+        &[
+            ("a", Input, Some(F16)),
+            ("c", Input, Some(BF16)),
+            ("d", Input, Some(Bool)),
+            ("o", Output, Some(F32)),
+            ("p", Output, Some(F16)),
+            ("q", Output, Some(BF16)),
+            ("r", Output, Some(Bool)),
+            ("s", Output, Some(I32)),
+        ],
+        EXACT,
+    );
+    let conversions: Vec<&str> = got
+        .iter()
+        .map(String::as_str)
+        .filter(|line| {
+            !line.contains("mul.wide")
+                && !line.starts_with("add.s64")
+                && !line.starts_with("cvt.s64")
+        })
+        .collect();
+    assert_eq!(
+        conversions,
+        [
+            "ld.global.b16 %h0, [%rd9]",
+            "ld.global.b16 %h1, [%rd10]",
+            "ld.global.u8 %r4, [%rd12]",
+            "setp.ne.u32 %p0, %r4, 0",
+            "cvt.f32.f16 %f0, %h0",
+            "cvt.f32.bf16 %f1, %h1",
+            "add.rn.f32 %f2, %f0, %f1",
+            "cvt.rn.f16.f32 %h2, %f2",
+            "cvt.rn.bf16.f32 %h3, %f2",
+            "cvt.rzi.s32.f32 %r5, %f2",
+            "cvt.rzi.u32.f32 %r6, %f2",
+            "cvt.rzi.s64.f32 %rd13, %f2",
+            "cvt.rn.f32.s32 %f3, %r5",
+            "cvt.rn.f32.u32 %f4, %r6",
+            "add.rn.f32 %f5, %f3, %f4",
+            "cvt.rn.f32.s64 %f6, %rd13",
+            "add.rn.f32 %f7, %f5, %f6",
+            "selp.f32 %f8, 0f3F800000, 0f00000000, %p0",
+            "add.rn.f32 %f9, %f7, %f8",
+            "cvt.rzi.s32.f16 %r7, %h0",
+            "cvt.rn.f16.s32 %h4, %r7",
+            "setp.neu.f32 %p1, %f9, 0f00000000",
+            "and.pred %p2, %p1, %p0",
+            "selp.s32 %r8, 1, 0, %p2",
+            "st.global.f32 [%rd15], %f9",
+            "st.global.b16 [%rd16], %h2",
+            "st.global.b16 [%rd17], %h3",
+            "st.global.u8 [%rd18], %r8",
+            "st.global.s32 [%rd19], %r8",
+            "st.global.b16 [%rd16+2], %h4",
+        ]
+    );
+}
+
+// --- loops, conditions and states ------------------------------------------------------------------------
+
+/// A loop over a static axis is a counter from zero to a constant with its test at the bottom, and the accumulator
+/// it folds is one register: seeded ahead of the loop, stepped in place, read after it.
+#[test]
+fn a_loop_counts_from_zero_and_steps_its_accumulator_in_place() {
+    let got = under_grid(
+        "
+        for j in 0..8:
+            f32 x = load a[j]
+            f32 t = x * x
+            f32 s <- add(s, t) over j
+            f32 m <- maximum(m, x) over j
+        f32 v = s + m
+        f32 o[i] = v
+        ",
+        A_O,
+        FUSED,
+    );
+    assert_eq!(
+        got[..13],
+        [
+            "mov.f32 %f0, 0f00000000",
+            "mov.f32 %f1, 0fF149F2CA",
+            "mov.u32 %r4, 0",
+            "L1:",
+            "mul.wide.s32 %rd2, %r4, 4",
+            "add.s64 %rd3, %rd0, %rd2",
+            "ld.global.f32 %f2, [%rd3]",
+            "fma.rn.f32 %f0, %f2, %f2, %f0",
+            "max.f32 %f1, %f1, %f2",
+            "add.s32 %r4, %r4, 1",
+            "setp.lt.s32 %p0, %r4, 8",
+            "@%p0 bra L1",
+            "add.rn.f32 %f3, %f0, %f1",
+        ]
+    );
+}
+
+/// A loop over a symbolic extent may run no trip, so its test also stands ahead of it.
+#[test]
+fn a_loop_over_a_symbolic_extent_is_tested_ahead() {
+    let got = code(
+        &format!(
+            "{GRID}\n    for j in 0..n:\n        f32 x = load a[j]\n        f32 s <- add(s, x) over j\n    f32 o[i] = s"
+        ),
+        &[
+            ("a", Input, Some(F32)),
+            ("o", Output, Some(F32)),
+            ("n", Int, None),
+        ],
+        EXACT,
+    );
+    assert_eq!(
+        got[4..16],
+        [
+            "mov.f32 %f0, 0f00000000",
+            "mov.u32 %r5, 0",
+            "setp.ge.s32 %p0, %r5, %r0",
+            "@%p0 bra L1",
+            "L2:",
+            "mul.wide.s32 %rd2, %r5, 4",
+            "add.s64 %rd3, %rd0, %rd2",
+            "ld.global.f32 %f1, [%rd3]",
+            "add.rn.f32 %f0, %f0, %f1",
+            "add.s32 %r5, %r5, 1",
+            "setp.lt.s32 %p1, %r5, %r0",
+            "@%p1 bra L2",
+        ]
+    );
+}
+
+/// A strided loop with a constant start and step runs the same trips in every thread: a counter from zero to the
+/// trip count, the axis computed from it. One that starts at a thread's own value steps the axis itself.
+#[test]
+fn a_strided_loop_counts_its_trips_where_they_are_the_same_for_every_thread() {
+    let got = under_grid(
+        "
+        for k in 4..64 step 8:
+            f32 x = load a[k]
+            f32 s <- add(s, x) over k
+        for k in thread_idx.x..64 step 32 seed=false:
+            f32 y = load a[k]
+            f32 s <- add(s, y) over k
+        f32 o[i] = s
+        ",
+        A_O,
+        EXACT,
+    );
+    assert_eq!(
+        got[..20],
+        [
+            "mov.f32 %f0, 0f00000000",
+            "mov.u32 %r4, 0",
+            "L1:",
+            "shl.b32 %r5, %r4, 3",
+            "add.s32 %r6, %r5, 4",
+            "mul.wide.s32 %rd2, %r6, 4",
+            "add.s64 %rd3, %rd0, %rd2",
+            "ld.global.f32 %f1, [%rd3]",
+            "add.rn.f32 %f0, %f0, %f1",
+            "add.s32 %r4, %r4, 1",
+            "setp.lt.s32 %p0, %r4, 8",
+            "@%p0 bra L1",
+            "mov.u32 %r7, %r2",
+            "setp.ge.s32 %p1, %r7, 64",
+            "@%p1 bra L2",
+            "L3:",
+            "mul.wide.s32 %rd4, %r7, 4",
+            "add.s64 %rd5, %rd0, %rd4",
+            "ld.global.f32 %f2, [%rd5]",
+            "add.rn.f32 %f0, %f0, %f2",
+        ]
+    );
+}
+
+/// A condition is a branch past its body, and with an else side a branch over that; each side makes again what
+/// the other made, since a thread runs one of them. A select is the value of its first branch whose predicate
+/// holds, the last where none does.
+#[test]
+fn a_condition_branches_and_a_select_picks() {
+    let got = under_grid(
+        "
+        f32 x = load a[i]
+        f32 y = -x
+        f32 z = abs(x)
+        v = select:
+            x when i < 8
+            y when i < 16 && x > 0.0
+            z when i >= 16
+        if v > x:
+            f32 o[i] = v
+        else:
+            f32 o[i] = x
+        ",
+        A_O,
+        EXACT,
+    );
+    assert_eq!(
+        got[3..],
+        [
+            "neg.f32 %f1, %f0",
+            "abs.f32 %f2, %f0",
+            "setp.lt.s32 %p0, %r3, 16",
+            "setp.gt.f32 %p1, %f0, 0f00000000",
+            "and.pred %p2, %p0, %p1",
+            "selp.f32 %f3, %f1, %f2, %p2",
+            "setp.lt.s32 %p3, %r3, 8",
+            "selp.f32 %f4, %f0, %f3, %p3",
+            "setp.gt.f32 %p4, %f4, %f0",
+            "@!%p4 bra L1",
+            "add.s64 %rd4, %rd1, %rd2",
+            "st.global.f32 [%rd4], %f4",
+            "bra L2",
+            "L1:",
+            "add.s64 %rd5, %rd1, %rd2",
+            "st.global.f32 [%rd5], %f0",
+            "L2:",
+        ]
+    );
+}
+
+/// A state seeded by the body is a register an accumulator steps under a condition, from another base, or at an
+/// integer type; a name bound to a state is a copy, since the state steps on.
+#[test]
+fn a_seeded_state_steps_in_place_and_is_copied_where_it_is_named() {
+    let got = under_grid(
+        "
+        init f32 best = -inf
+        init i32 count = 0
+        f32 x = load a[i]
+        f32 before = best
+        if x > 1.0:
+            f32 best <- maximum(best, x)
+            i32 count <- add(count, 1)
+        f32 scaled = x * 0.5
+        f32 best <- add(scaled, before)
+        f32 n = (f32)count
+        f32 v = best + n
+        f32 o[i] = v
+        ",
+        A_O,
+        EXACT,
+    );
+    assert_eq!(
+        got,
+        [
+            "mov.f32 %f0, 0fFF800000",
+            "mov.s32 %r4, 0",
+            "mul.wide.s32 %rd2, %r3, 4",
+            "add.s64 %rd3, %rd0, %rd2",
+            "ld.global.f32 %f1, [%rd3]",
+            "mov.f32 %f2, %f0",
+            "setp.gt.f32 %p0, %f1, 0f3F800000",
+            "@!%p0 bra L1",
+            "max.f32 %f0, %f0, %f1",
+            "add.s32 %r4, %r4, 1",
+            "L1:",
+            "mul.rn.f32 %f3, %f1, 0f3F000000",
+            "add.rn.f32 %f0, %f3, %f2",
+            "cvt.rn.f32.s32 %f4, %r4",
+            "add.rn.f32 %f5, %f0, %f4",
+            "add.s64 %rd4, %rd1, %rd2",
+            "st.global.f32 [%rd4], %f5",
+        ]
+    );
+}
+
+// --- the value table -------------------------------------------------------------------------------------
+
+/// A value the compiler makes twice in one scope is made once; what a body made is forgotten when the body closes,
+/// since not every thread ran it; and nothing computed from a state is kept, since the state steps on.
+#[test]
+fn a_value_made_twice_is_made_once_within_its_scope() {
+    let got = under_grid(
+        "
+        init f32 s = 0.0
+        if i < 8:
+            f32 x = load a[i * 2]
+            f32 y = load a[i * 2 + 1]
+            f32 s <- add(s, x)
+            f32 d = s * 2.0
+            f32 s <- add(s, y)
+            f32 e = s * 2.0
+            f32 f = d + e
+            f32 s <- add(s, f)
+        f32 z = load a[i * 2]
+        f32 v = s + z
+        f32 o[i] = v
+        ",
+        A_O,
+        EXACT,
+    );
+    assert_eq!(
+        got,
+        [
+            "mov.f32 %f0, 0f00000000",
+            "setp.lt.s32 %p0, %r3, 8",
+            "@!%p0 bra L1",
+            "mul.wide.s32 %rd2, %r3, 8",
+            "add.s64 %rd3, %rd0, %rd2",
+            "ld.global.f32 %f1, [%rd3]",
+            "ld.global.f32 %f2, [%rd3+4]",
+            "add.rn.f32 %f0, %f0, %f1",
+            "mul.rn.f32 %f3, %f0, 0f40000000",
+            "add.rn.f32 %f0, %f0, %f2",
+            "mul.rn.f32 %f4, %f0, 0f40000000",
+            "add.rn.f32 %f5, %f3, %f4",
+            "add.rn.f32 %f0, %f0, %f5",
+            "L1:",
+            "mul.wide.s32 %rd4, %r3, 8",
+            "add.s64 %rd5, %rd0, %rd4",
+            "ld.global.f32 %f6, [%rd5]",
+            "add.rn.f32 %f7, %f0, %f6",
+            "mul.wide.s32 %rd6, %r3, 4",
+            "add.s64 %rd7, %rd1, %rd6",
+            "st.global.f32 [%rd7], %f7",
+        ]
+    );
+}
+
+// --- what is refused -------------------------------------------------------------------------------------
+
+/// A body that is not typed and flat is refused by the statement that is not; a statement or an operation with no
+/// rule is an error that names it. Nothing is skipped.
+#[test]
+fn a_statement_outside_the_rules_is_an_error_that_names_it() {
+    let under = |statements: &str| format!("{GRID}\n    f32 x = load a[i]\n{statements}");
+    for (statements, expected) in [
+        (
+            "    f32 o[i, 0] = x",
+            "an index of several coordinates is not flat: `f32 o[i, 0] = x`",
+        ),
+        (
+            "    f32 v = exp(x)",
+            "no PTX rule for the operation exp at f32: `f32 v = exp(x)`",
+        ),
+        (
+            "    Sync",
+            "no PTX rule for the statement type Sync: `Sync`",
+        ),
+        ("    f32 y, z = load a[i]", "no PTX rule for a vector load"),
+        ("    f32 o[i] += x", "no PTX rule for an atomic store"),
+        ("    f32 o[i] = (x, x)", "no PTX rule for a vector store"),
+        (
+            "    y = load a[i]",
+            "a value carries no dtype: `y = load a[i]`",
+        ),
+        (
+            "    f16 v = x + x",
+            "x is f32, read as f16: `f16 v = x + x`",
+        ),
+        (
+            "    f16 v = (f16)x\n    f32 o[i] = v",
+            "o holds f32, v is f16",
+        ),
+        ("    f32 a[i] = x", "a is an input"),
+        (
+            "    f32 y = load missing[i]",
+            "missing is no buffer of the interface",
+        ),
+        ("    f32 o[i] = later", "later is read before it is defined"),
+        (
+            "    f32 s <- add(s, x)",
+            "the accumulator s has no seed in scope",
+        ),
+        (
+            "    for j in 0..4 unroll=true:\n        f32 o[j] = x",
+            "a loop asks to be unrolled",
+        ),
+        ("    f64 y = load a[i]", "no PTX rule for the dtype f64"),
+        (
+            "    bf16 v = (bf16)x\n    bf16 w = v + v",
+            "no PTX rule for Add at bf16 on sm_120",
+        ),
+    ] {
+        let message = refusal(&under(statements), A_O);
+        assert!(message.contains(expected), "{statements}: {message}");
+    }
+    let half = "    f16 h = (f16)x\n    f16 m = maximum(h, h)";
+    let message = lowered(&under(half), A_O, Target { sm: 75 }, EXACT)
+        .unwrap_err()
+        .to_string();
+    assert!(
+        message.contains("no PTX rule for Max at f16 on sm_75"),
+        "{message}"
+    );
+}
+
+// --- the printer and the verifier, on lists built by hand -----------------------------------------------
+
+fn reg(bank: Bank, number: u32) -> Reg {
+    Reg { bank, number }
+}
+
+/// A module around `items`: one pointer parameter loaded into `%rd0`, with every bank four registers wide.
+fn module(items: Vec<Item>, alignment: HashMap<Reg, u32>) -> Module {
+    let load = Inst::new(
+        Opcode::Ld(Space::Param),
+        Ty::U64,
+        vec![reg(Bank::B64, 0)],
+        vec![Operand::Addr(Base::Param(0), 0)],
+    );
+    let ret = Inst::new(Opcode::Ret, Ty::Pred, Vec::new(), Vec::new());
+    Module {
+        version: (8, 7),
+        target: "sm_120".into(),
+        entry: "k".into(),
+        params: vec![ParamDecl::Pointer { align: 4 }],
+        shared: Vec::new(),
+        max_threads: 64,
+        registers: Bank::ALL.iter().map(|bank| (*bank, 4)).collect(),
+        items: [vec![Item::Inst(load)], items, vec![Item::Inst(ret)]].concat(),
+        alignment,
+    }
+}
+
+fn inst(opcode: Opcode, ty: Ty, result: Option<Reg>, operands: Vec<Operand>) -> Item {
+    Item::Inst(Inst::new(
+        opcode,
+        ty,
+        result.into_iter().collect(),
+        operands,
+    ))
+}
+
+fn branch(to: u32, pred: Reg) -> Item {
+    let jump = Inst::new(
+        Opcode::Bra,
+        Ty::Pred,
+        Vec::new(),
+        vec![Operand::Label(Label(to))],
+    );
+    Item::Inst(jump.guarded(pred, false))
+}
+
+/// `%p0 = %f0 < 0`.
+fn test_f0() -> Item {
+    let operands = vec![reg(Bank::F32, 0).into(), Operand::f32(0.0)];
+    inst(
+        Opcode::Setp(Cmp::Lt),
+        Ty::F32,
+        Some(reg(Bank::Pred, 0)),
+        operands,
+    )
+}
+
+fn mov(to: Reg, from: Operand) -> Item {
+    inst(Opcode::Mov, Ty::F32, Some(to), vec![from])
+}
+
+/// The forms no rule writes yet print as ptxas reads them: a shared array and the external pool, an instruction
+/// under a guard, and a vector access over a register tuple.
+#[test]
+fn the_printer_spells_shared_declarations_guards_and_tuples() {
+    let (f, p, rd) = (Bank::F32, Bank::Pred, Bank::B64);
+    let address = Operand::Addr(Base::Reg(reg(rd, 0)), 16);
+    let pair = vec![reg(f, 0), reg(f, 1)];
+    let load = Inst::new(
+        Opcode::Ld(Space::Global),
+        Ty::F32,
+        pair.clone(),
+        vec![address.clone()],
+    );
+    let store = Inst::new(
+        Opcode::St(Space::Global),
+        Ty::F32,
+        Vec::new(),
+        vec![address, Operand::Tuple(pair)],
+    );
+    let shared = Operand::Addr(Base::Shared(0), 8);
+    let guarded = Inst::new(
+        Opcode::St(Space::Shared),
+        Ty::F32,
+        Vec::new(),
+        vec![shared, reg(f, 0).into()],
+    );
+    let items = vec![
+        Item::Inst(load),
+        test_f0(),
+        Item::Inst(guarded.guarded(reg(p, 0), true)),
+        Item::Inst(store),
+    ];
+    let mut module = module(items, HashMap::from([(reg(rd, 0), 16)]));
+    module.shared = vec![
+        Shared {
+            align: 16,
+            bytes: Some(64),
+        },
+        Shared {
+            align: 16,
+            bytes: None,
+        },
+    ];
+    verify(&module).unwrap();
+    let text = print(&module);
+    for line in [
+        ".shared .align 16 .b8 k_shared_0[64];\n",
+        ".extern .shared .align 16 .b8 k_shared_1[];\n",
+        "\tld.global.v2.f32 {%f0, %f1}, [%rd0+16];\n",
+        "\t@!%p0 st.shared.f32 [k_shared_0+8], %f0;\n",
+        "\tst.global.v2.f32 [%rd0+16], {%f0, %f1};\n",
+    ] {
+        assert!(text.contains(line), "{line}: {text}");
+    }
+    assemble(&text, "sm_120");
+}
+
+/// A register read on a path that does not define it is refused: one defined in one side of a condition only, one
+/// defined under a guard only, one never defined.
+#[test]
+fn the_verifier_refuses_a_register_not_defined_on_every_path() {
+    let (f, p) = (Bank::F32, Bank::Pred);
+    let zero = Operand::f32(0.0);
+    let one_side = vec![
+        mov(reg(f, 0), zero.clone()),
+        test_f0(),
+        branch(1, reg(p, 0)),
+        mov(reg(f, 1), zero.clone()),
+        Item::Label(Label(1)),
+        mov(reg(f, 2), reg(f, 1).into()),
+    ];
+    let message = verify(&module(one_side, HashMap::new()))
+        .unwrap_err()
+        .to_string();
+    assert!(
+        message.contains("`mov.f32 %f2, %f1` reads %f1 on a path that does not define it"),
+        "{message}"
+    );
+    let both_sides = vec![
+        mov(reg(f, 0), zero.clone()),
+        mov(reg(f, 1), zero.clone()),
+        test_f0(),
+        branch(1, reg(p, 0)),
+        mov(reg(f, 1), reg(f, 0).into()),
+        Item::Label(Label(1)),
+        mov(reg(f, 2), reg(f, 1).into()),
+    ];
+    verify(&module(both_sides, HashMap::new())).unwrap();
+    let guarded = Inst::new(Opcode::Mov, Ty::F32, vec![reg(f, 1)], vec![zero.clone()]);
+    let under_guard = vec![
+        mov(reg(f, 0), zero),
+        test_f0(),
+        Item::Inst(guarded.guarded(reg(p, 0), false)),
+        mov(reg(f, 2), reg(f, 1).into()),
+    ];
+    assert!(verify(&module(under_guard, HashMap::new())).is_err());
+    let never = vec![mov(reg(f, 2), reg(f, 3).into())];
+    assert!(verify(&module(never, HashMap::new())).is_err());
+}
+
+/// A register a loop defines in its body and reads at the top of the next trip is not defined on the path that
+/// enters the loop.
+#[test]
+fn the_verifier_follows_a_loop_back_to_its_head() {
+    let (f, p) = (Bank::F32, Bank::Pred);
+    let zero = Operand::f32(0.0);
+    let looped = |seeded: bool| {
+        let mut items = vec![mov(reg(f, 0), zero.clone())];
+        if seeded {
+            items.push(mov(reg(f, 1), zero.clone()));
+        }
+        let sum = vec![reg(f, 1).into(), reg(f, 0).into()];
+        items.extend([
+            Item::Label(Label(1)),
+            inst(Opcode::Add, Ty::F32, Some(reg(f, 2)), sum),
+            mov(reg(f, 1), reg(f, 2).into()),
+            test_f0(),
+            branch(1, reg(p, 0)),
+        ]);
+        module(items, HashMap::new())
+    };
+    verify(&looped(true)).unwrap();
+    assert!(verify(&looped(false)).is_err());
+}
+
+/// A branch to a label nothing binds, and a label bound twice, are refused.
+#[test]
+fn the_verifier_refuses_a_label_not_bound_once() {
+    let jump = inst(Opcode::Bra, Ty::Pred, None, vec![Operand::Label(Label(7))]);
+    let message = verify(&module(vec![jump], HashMap::new()))
+        .unwrap_err()
+        .to_string();
+    assert!(message.contains("the label L7 is never bound"), "{message}");
+    let twice = vec![Item::Label(Label(1)), Item::Label(Label(1))];
+    let message = verify(&module(twice, HashMap::new()))
+        .unwrap_err()
+        .to_string();
+    assert!(message.contains("the label L1 is bound twice"), "{message}");
+}
+
+/// A vector access needs its address proven aligned to the whole access, the constant offset included.
+#[test]
+fn the_verifier_refuses_a_vector_access_with_no_alignment_fact() {
+    let (f, rd) = (Bank::F32, Bank::B64);
+    let access = |offset: i64| {
+        let address = Operand::Addr(Base::Reg(reg(rd, 0)), offset);
+        let pair = vec![reg(f, 0), reg(f, 1)];
+        let load = Inst::new(Opcode::Ld(Space::Global), Ty::F32, pair, vec![address]);
+        vec![Item::Inst(load)]
+    };
+    let aligned = |bytes: u32| HashMap::from([(reg(rd, 0), bytes)]);
+    verify(&module(access(8), aligned(8))).unwrap();
+    for (offset, proven) in [(8, HashMap::new()), (8, aligned(4)), (4, aligned(8))] {
+        let message = verify(&module(access(offset), proven))
+            .unwrap_err()
+            .to_string();
+        assert!(
+            message.contains("is a 8-byte access with no alignment proven"),
+            "{message}"
+        );
+    }
+}
