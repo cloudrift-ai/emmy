@@ -65,6 +65,7 @@ mod tests {
         "Grid(axes=(a in 0..3, b in 0..64), decode=(block_idx.x / 2, thread_idx.x), block_threads=64, aux_threads=32):\n    if block_idx.x * 64 + thread_idx.x < 192:\n        y[a, b] = a",
         "FragmentApply(out=o, op=where, args=(FragmentArg(kind=coord, expressions=(_vc > _vr)), FragmentArg(kind=gmem, expressions=(i, j), buffer=mask)), row_base=q)",
         "TreeHalve(bufs=(b), state=(acc), state_b=(acc__o), length=8, tid_var=t):\n    combine_states:\n        t = acc * acc__o\n        acc = acc + t",
+        "TreeHalve(bufs=(b), state=(acc), state_b=(acc__o), length=4, tid_var=warp, lane=lane):\n    combine_states:\n        acc = acc + acc__o",
         // The other Kernel IR statement types, and the two with the most fields at their fullest.
         "Sync",
         "CpAsyncCopy(smem=s, smem_index=(i, j), src=a, src_index=(i, j), lane_index=(i, j), valid=i < 2)",

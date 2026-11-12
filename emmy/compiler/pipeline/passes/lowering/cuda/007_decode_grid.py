@@ -3,8 +3,9 @@
 A ``Tile`` binds its axes for its body, and its launch is implied: ``ceil(N / cells)`` CTAs over a flat thread id.
 Here the decode is spelled as Kernel IR (``decode_tile``): each axis a ``Let`` over ``thread_idx.x`` and
 ``block_idx.x``, simplified under the launch's ranges, and the tail guard a ``Cond`` where the launch does not cover
-the cells exactly. What follows sees every value the kernel computes, the coordinates included, and an emitter has
-no decode of its own to spell. It runs after the rules that still read the ``Tile`` (the zero-init delegation, the
+the cells exactly. A thread's lane and warp, where the body reads them, are bound the same way. What follows sees
+every value the kernel computes, the coordinates included, and an emitter has no decode of its own to spell and no
+name of its own to declare. It runs after the rules that still read the ``Tile`` (the zero-init delegation, the
 kernel cache), and it decides nothing: the kernel computes the same values.
 """
 

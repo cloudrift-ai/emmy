@@ -6,7 +6,9 @@ afterwards, after one rule of its own: `007_decode_grid` turns the `Tile` into a
 expressions over `thread_idx.x` and `block_idx.x` (`decode_tile`), its tail guard a `Cond` where the launch does not
 cover the cells exactly. The `Grid` states its launch's ranges of the built-ins, so the optimization the op takes at
 construction reads a block axis off `blockIdx.x` alone and a thread axis off `threadIdx.x` alone, and an emitter has
-no decode of its own to spell. The rule runs after the ones that read the `Tile` (the kernel cache, the zero-init
+no decode of its own to spell. A thread's lane and warp are decoded the same way: a body that reads `lane` or `warp`
+(the cross-warp combine does) gets a `Let` of each at the top of the `Grid`, `thread_idx.x % 32` and `thread_idx.x /
+32`, so they are values under the launch's ranges and no emitter declares them. The rule runs after the ones that read the `Tile` (the kernel cache, the zero-init
 delegation), so `--ir kernel` and the diagnostics see the `Tile`. The renderer then spells every index division and
 remainder by a power of two over a non-negative dividend as a shift and a mask (`reduce_strength`), on the body it is
 about to render: the Kernel IR keeps `/` and `%`, which the simplifier reads.
@@ -26,9 +28,9 @@ statement. Its exported accumulators receive distinct names through the same pos
 rebound values. Whole-loop equality alone cannot detect this partial overlap.
 
 The finished body then answers the complementary question, `_unbound_names`: does it read anything its launch never
-supplies? A well-formed kernel reads its own buffers, the symbolic extents passed beside them and the renderer's CTA
-helpers (`lane` / `warp`), and nothing else — every other name is bound by a statement or an enclosing axis, which is
-what `free_names` subtracts. What survives is a value some emission referred to under a spelling nothing defines: a
+supplies? A well-formed kernel reads its own buffers, the symbolic extents passed beside them and the thread
+coordinates the grid decode binds (`lane` / `warp`), and nothing else — every other name is bound by a statement or
+an enclosing axis, which is what `free_names` subtracts. What survives is a value some emission referred to under a spelling nothing defines: a
 per-cell rename whose shared coordinates missed an axis, a staged fill whose σ left a tile axis free, a workspace read
 a boundary store was not re-spelled for. Each of those reached nvcc as *identifier "x" is undefined*, a hundred
 errors deep in a generated source and charged to whichever candidate the bench happened to be running. Asserting it

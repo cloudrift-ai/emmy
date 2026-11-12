@@ -30,7 +30,7 @@ from dataclasses import dataclass, replace
 from functools import cached_property
 
 from emmy.compiler.dim import Dim
-from emmy.compiler.dtype import INTEGER_NAMES, DataType
+from emmy.compiler.dtype import I32, INTEGER_NAMES, DataType
 from emmy.compiler.dtype import get as dtype_get
 from emmy.compiler.ir.axis import Axis
 from emmy.compiler.ir.body_op import BodyOp
@@ -63,6 +63,7 @@ from emmy.compiler.ir.stmt import (
     Assign,
     Body,
     Cond,
+    Let,
     Load,
     Loop,
     Select,
@@ -70,6 +71,7 @@ from emmy.compiler.ir.stmt import (
     Statement,
     StridedLoop,
     Write,
+    free_names,
 )
 from emmy.compiler.ir.types import explicit_conversions
 from emmy.compiler.target import native_f16_ops
@@ -215,6 +217,13 @@ def tile_n_dim(tile: Tile):
 _INT32_MAX = 2**31 - 1
 _THREAD, _BLOCK = Builtin("thread_idx.x"), Builtin("block_idx.x")
 
+#: A thread's lane in its warp and its warp in the CTA, by the name a tile's body reads them under. The decode binds
+#: each one the body reads, so no emitter declares it.
+THREAD_COORDS: dict[str, Expression] = {
+    "lane": BinaryExpression("%", _THREAD, Literal(32, "int")),
+    "warp": BinaryExpression("//", _THREAD, Literal(32, "int")),
+}
+
 
 def launch_ranges(cells: Expression, block_threads: int, aux_threads: int = 0) -> SimplifyCtx:
     """The ranges of the built-ins under the launch a grid of ``cells`` takes: ``block_threads + aux_threads`` threads
@@ -234,7 +243,8 @@ def decode_tile(tile: Tile) -> Grid:
     ``G`` block-tiles of the grouped axis share an operand slab in L2). Every decode is simplified under the launch's
     ranges, so a block axis reads ``block_idx.x`` alone and a thread axis ``thread_idx.x`` alone, and one whose
     arithmetic can pass 2^31 - 1 is computed in 64 bits. A ``Cond`` masks the ids past the cell count where the launch
-    does not cover it exactly (never on a spread single cell, whose every thread runs the body)."""
+    does not cover it exactly (never on a spread single cell, whose every thread runs the body). A thread coordinate
+    the body reads (``THREAD_COORDS``) is bound ahead of it, a value like any other."""
     cells = tile_cells(tile)
     count = tile_n_dim(tile).expression
     launch = launch_ranges(count, cells, tile.aux_threads)
@@ -250,10 +260,12 @@ def decode_tile(tile: Tile) -> Grid:
     guard = BinaryExpression("<", gid, count).simplify(launch)
     if not tile.spread and not (isinstance(guard, Literal) and guard.value):
         body = Body((Cond(cond=_settled(guard, launch), body=body),))
+    read = free_names(tile)
+    coords = tuple(Let(name, value, dtype=I32) for name, value in THREAD_COORDS.items() if name in read)
     return Grid(
         axes=tile.axes,
         decode=tuple(_settled(value, launch) for value in decode),
-        body=body,
+        body=Body((*coords, *body)),
         block_threads=cells,
         aux_threads=tile.aux_threads,
     )
@@ -481,18 +493,18 @@ def _(stmt: TreeHalve, ctx: RenderCtx) -> list[str]:
     # names. Captured before those shadows overwrite the flat ssa map, restored after the
     # broadcast so the epilogue's conversions read the live declaration, not the dead shadow.
     outer_dtypes = {st: ctx.ssa_dtypes.get(st) for st in stmt.state}
-    if stmt.tid_var == Var("warp") and stmt.inner is None and stmt.barrier_id == 0 and stmt.length <= 32:
-        # The hierarchical cross-warp slab holds one partial per warp, so warp 0 alone folds it with a
-        # register butterfly: one barrier before the broadcast instead of one per halving step.
-        out = [f"{pad}if (warp == 0) {{"]
+    if stmt.lane is not None:
+        # The slab holds one partial per warp, so warp 0 alone folds it with a register butterfly.
+        lane = operand(stmt.lane)
+        out = [f"{pad}if ({t} == 0) {{"]
         for buf, st in zip(stmt.bufs, stmt.state, strict=True):
-            out.append(f"{in1}{ty} {st} = {buf}[lane & {stmt.length - 1}];")
+            out.append(f"{in1}{ty} {st} = {buf}[{lane} & {stmt.length - 1}];")
             ctx.ssa_dtypes[st] = stmt.dtype.name
         butterfly = WarpShuffle(
             state=stmt.state, state_b=stmt.state_b, combine_states=stmt.combine_states, length=stmt.length, dtype=stmt.dtype
         )
         out.extend(render_stmt(butterfly, ctx.child()))
-        out.append(f"{in1}if (lane == 0) {{")
+        out.append(f"{in1}if ({lane} == 0) {{")
         out.extend(f"{in2}{buf}[0] = {st};" for buf, st in zip(stmt.bufs, stmt.state, strict=True))
         out += [f"{in1}}}", f"{pad}}}", f"{pad}__syncthreads();"]
         for buf, st in zip(stmt.bufs, stmt.state, strict=True):
