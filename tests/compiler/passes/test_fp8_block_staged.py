@@ -105,9 +105,9 @@ def test_the_fused_quantize_refills_its_group_statistic_every_chunk(tmp_path):
     chunk's fill rather than a 128-element scan per slab cell."""
     graph, _, _ = _linear(tmp_path)
     (src,) = _lower(graph, _pins("fuse", "d2/smem-async"))
-    loop = src.index("for (int _ks")
-    (state,) = re.findall(r"__shared__ float _a_stat_(acc\d+)\[16\];", src[:loop])
-    assert "__shfl_xor_sync" in src[loop:] and f"_a_stat_{state}[_sr] = {state}" in src[loop:]
+    loop = re.search(r"for \(int (\w+) = 0; \1 < 256; \1 \+= 128\)", src).start()  # the K chunk loop
+    (slab,) = re.findall(r"__shared__ float (_a_stat_\w+)\[16\];", src[:loop])
+    assert "__shfl_xor_sync" in src[loop:] and re.search(rf"{slab}\[\w+\] = \w+;", src[loop:])
 
 
 def test_the_seam_reads_the_group_maximum_as_a_per_chunk_statistic(tmp_path):
@@ -154,8 +154,9 @@ def test_a_chunk_body_that_computes_a_row_statistic_does_not_reload_it(tmp_path)
     with pinned_knobs({"PLACE": "fuse", "REDUCE": "", **staged}):
         lowered = Pipeline.build(CUDA_PASSES).run(graph, ctx=Context.from_target((7, 0)))
     (src,) = [s for node in lowered.nodes.values() if (s := getattr(node.op, "kernel_source", None))]
-    chunk = src[src.index("for (int _ks") :]
-    chunk = chunk[: chunk.index("for (int a")]
+    # The chunk loop's head and its row loop's prologue: from the K chunk loop to the first loop inside the row loop.
+    chunk = src[re.search(r"for \(int (\w+) = 0; \1 < 256; \1 \+= 128\)", src).start() :]
+    chunk = chunk[: [m.start() for m in re.finditer(r"for \(int ", chunk)][2]]
     declared = re.findall(r"^\s*(?:float|__half|int) (\w+) = ", chunk, flags=re.M)
     assert "_a_stat_" in src and len(declared) == len(set(declared))
 

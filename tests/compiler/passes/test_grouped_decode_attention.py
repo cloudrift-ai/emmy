@@ -6,6 +6,7 @@ per query head instead."""
 from __future__ import annotations
 
 import inspect
+import re
 
 import numpy as np
 import pytest
@@ -109,7 +110,9 @@ def test_a_key_split_combines_the_slices_partials_not_the_window(rows) -> None:
     assert len(kernels) == 2, sorted(kernels)
     (partial,) = [node for nid, node in kernels.items() if nid.endswith("__partial")]
     (finalize,) = [node for node in kernels.values() if node is not partial]
-    assert "mma.sync" in partial.op.kernel_source and "__ck" in partial.op.kernel_source
+    # A chunk loop streams the partial's slice of the cache 64 keys at a time.
+    source = partial.op.kernel_source
+    assert "mma.sync" in source and re.search(r"for \(int (\w+) = 0; \1 < .*cache_tokens.*; \1 \+= 64\)", source)
     assert np.prod([extent for axis in partial.op.grid for extent in axis]) == rows * KV * SLICES
     assert list(finalize.inputs) == [partial.id]
     assert WINDOW not in finalize.op.kernel_source
