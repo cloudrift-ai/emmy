@@ -155,7 +155,7 @@ def test_a_chunk_body_that_computes_a_row_statistic_does_not_reload_it(tmp_path)
         lowered = Pipeline.build(CUDA_PASSES).run(graph, ctx=Context.from_target((7, 0)))
     (src,) = [s for node in lowered.nodes.values() if (s := getattr(node.op, "kernel_source", None))]
     # The chunk loop's head and its row loop's prologue: from the K chunk loop to the first loop inside the row loop.
-    chunk = src[re.search(r"for \(int (\w+) = 0; \1 < 256; \1 \+= 128\)", src).start() :]
+    chunk = src[re.search(r"for \(int (\w+) = 0; \1 < 256; \1 \+= \d+\)", src).start() :]
     chunk = chunk[: [m.start() for m in re.finditer(r"for \(int ", chunk)][2]]
     declared = re.findall(r"^\s*(?:float|__half|int) (\w+) = ", chunk, flags=re.M)
     assert "_a_stat_" in src and len(declared) == len(set(declared))
