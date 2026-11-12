@@ -75,9 +75,5 @@ def test_ilp_merge_keeps_the_streaming_accumulator_dtype(op, dtype, masked):
     )
     accumulators = [stmt for stmt in stamped.body.iter() if isinstance(stmt, Accum)]
     assert len(accumulators) == 3
-    # The kernel body is in normal form, so the two copies carry its names: the merge after the loop names the carrier
-    # it merges into and reads the other copy's partial.
-    (merge,) = [stmt for stmt in stamped.body if isinstance(stmt, Accum)]
-    carrier, partial = merge.name, merge.value.name
-    assert {stmt.dtype for stmt in accumulators if stmt.name == carrier} == {dtype}
-    assert {stmt.dtype for stmt in accumulators if stmt.name == partial} == {F32 if masked else dtype}
+    assert {stmt.dtype for stmt in accumulators if stmt.name == "acc"} == {dtype}
+    assert {stmt.dtype for stmt in accumulators if stmt.name == "acc__r1"} == {F32 if masked else dtype}

@@ -536,7 +536,7 @@ def test_fp4_tma_copies_each_stored_buffer_by_box_ahead_of_the_mma(tmp_path, cha
         assert len(set(re.findall(r"CUtensorMap\* __restrict__ (_desc_\w+)", src))) == 2 + 2 * channels
         assert "emmy_cp_async_cg" not in src
         assert "unsigned long long _mbar[2]" in src
-        body = src[re.search(r"for \(int (\w+) = 0; \1 < 1024; \1 \+= 256\)", src).start() :]  # the K chunk loop
+        body = src[src.index("for (int _ks") :]
         assert body.index("cp_async_bulk_tensor") < body.index("mbarrier_wait_parity") < body.index("emmy_mma_m16n8k64_e2m1_f32(")
 
 

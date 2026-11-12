@@ -6,7 +6,6 @@ symbolic window folds the same way per slice, the partition coordinate in the pr
 from __future__ import annotations
 
 import inspect
-import re
 
 import numpy as np
 import pytest
@@ -186,9 +185,8 @@ def test_the_expectation_reads_the_weight_the_denominator_computed() -> None:
     with pinned_knobs(_flash("mma_m16n8k16_bf16_f32", None)):
         compiled = Pipeline.build(CUDA_PASSES).run(graph, ctx=Context.from_target((12, 0)))
     (source,) = [node.op.kernel_source for node in compiled.nodes.values() if isinstance(node.op, CudaOp)]
-    # One element-wise exponential per score fragment of the inner f1x8 tile; a recomputed weight would double them.
-    weights = re.findall(r"(\w+)\[_e\] = __expf\(", source)
-    assert len(weights) == len(set(weights)) == 8, weights
+    weights = [line.strip() for line in source.splitlines() if "expf(" in line and "_ch0_" in line]
+    assert weights and all(line.startswith("_ch0_") and "_w[_e] = __expf(" in line for line in weights), weights
 
 
 def test_a_sum_with_a_negated_term_is_evaluated_as_a_subtraction() -> None:

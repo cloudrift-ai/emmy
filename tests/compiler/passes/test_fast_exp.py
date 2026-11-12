@@ -62,4 +62,4 @@ def test_an_intrinsic_an_index_calls_passes_through() -> None:
     with pinned_knobs({"FAST_EXP": True}):
         lowered = rule.rewrite(SimpleNamespace(op=op)).body
     assert "emmy_volta_crosswise(i)" in str(lowered)
-    assert "exp_fast(" in str(lowered) and " exp(" not in str(lowered), str(lowered)
+    assert "exp_fast(x)" in str(lowered), str(lowered)

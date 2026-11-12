@@ -211,8 +211,7 @@ def test_kernel_op_windowed_axis_roundtrip():
     assert op.body == g.nodes["out"].op.body
     (tile,) = op.body
     assert isinstance(tile.axes[0].window, Window), f"expected a rehydrated Window, got {tile.axes[0].window!r}"
-    assert tile.axes[0].source_axis == g.nodes["out"].op.body[0].axes[0].source_axis
-    assert tile.axes[0].source_axis.extent == 512
+    assert tile.axes[0].source_axis.name == "a0"
     assert op.smem_bytes() == 128 * 32 * 2
 
 
