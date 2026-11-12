@@ -1655,4 +1655,39 @@ for r in 0..4:
         assert_eq!(names.len(), 3, "{normal}");
         assert!(names.iter().all(|name| *name == names[0]), "{normal}");
     }
+
+    /// A read of a state ahead of every update of it in its scope reads the value the scope began with, and stays
+    /// ahead of them, a combine's in-place update among them.
+    #[test]
+    fn a_read_of_the_previous_state_stays_ahead_of_its_updates() {
+        let normal = text(
+            &normalize_uncached(&body(
+                "
+                Tile(axes=(m in 0..9, c in 0..32), block_threads=128):
+                    init f32 s = 0
+                    for chunk in 0..64 step 32 unroll=true seed=false:
+                        f32 previous = s
+                        f32 x = load X[m, chunk + c]
+                        init f32 zero = 0
+                        f32 s <- add(zero, x) over chunk
+                        WarpShuffle(state=(s), state_b=(s__o), length=32, prefix=true):
+                            combine_states:
+                                s = s + s__o
+                        f32 s <- add(s, previous)
+                        f32 O[m, chunk + c] = s
+                        WarpBroadcast(state=(s), length=32)
+                ",
+            ))
+            .unwrap(),
+        );
+        let lines: Vec<&str> = normal.lines().map(str::trim).collect();
+        let at = |what: &str| {
+            lines
+                .iter()
+                .position(|l| l.contains(what))
+                .unwrap_or_else(|| panic!("{what}\n{normal}"))
+        };
+        assert!(at("for ") < at("= acc0"), "{normal}");
+        assert!(at("= acc0") < at("acc0 <- add"), "{normal}");
+    }
 }

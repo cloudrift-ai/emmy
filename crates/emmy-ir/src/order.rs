@@ -215,7 +215,7 @@ pub(crate) enum Site {
 /// How `stmt` defines each name it exposes, in one walk of its subtree. A leaf `Accum` or `Carry`, or a block holding
 /// one, is the update it holds, unless the block holds the loops that fold the accumulator (the loops on the path to
 /// it bind every one of its axes, or any loop when it names none) or carries the state (`carried_cells`) — that block
-/// produces the value and its readers follow it. A fold whose outer axis is bound outside the block is an update of the
+/// produces the value and its readers follow it. A statement that updates a name in place is an update too. A fold whose outer axis is bound outside the block is an update of the
 /// block's scope, whatever loops the block holds. A name the walk meets no update of is a binding.
 pub(crate) fn site_kinds(stmt: &Statement) -> HashMap<Name, Site> {
     fn walk(
@@ -244,6 +244,10 @@ pub(crate) fn site_kinds(stmt: &Statement) -> HashMap<Name, Site> {
                 kinds.insert(c.name, Site::Carry);
             }
             _ => {
+                // An update in place is read where it stands, as an accumulator's update is.
+                for name in stmt.updates() {
+                    kinds.entry(name).or_insert(Site::Accumulator);
+                }
                 let is_loop = loop_parts(stmt).is_some();
                 let mut inner = bound.clone();
                 inner.extend(stmt.binds_axes());
