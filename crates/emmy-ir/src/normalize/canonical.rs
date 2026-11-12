@@ -92,7 +92,12 @@ impl SequentialScope {
             // the role of each name, so a definition spelled like another's sequential name is no clash.
             let names = self.names(&self.inherited_axes);
             let mut defined: HashMap<Name, Name> = HashMap::new();
+            let updates = stmt.updates();
             for name in stmt.defines() {
+                // Storage updated in place keeps the name it has in scope: its field reads and defines it.
+                if updates.contains(&name) && self.ssa.contains_key(&name) {
+                    continue;
+                }
                 if stmt.is_pure() && self.owned.contains(&name) {
                     self.ssa.insert(name, counters.fresh(ssa_prefix(stmt)));
                 } else {
@@ -1464,5 +1469,225 @@ for r in 0..4:
             let once = normalize_uncached(&given).unwrap();
             assert_eq!(normalize_uncached(&once).unwrap(), once, "{}", text(&once));
         }
+    }
+
+    /// A cross-thread combine updates its states in place: a read behind it reads the combined value, and stays
+    /// behind it.
+    #[test]
+    fn a_read_of_a_state_stays_behind_the_combine_that_updates_it() {
+        let normal = text(
+            &normalize_uncached(&body(
+                "
+                Tile(axes=(m in 0..8, c in 0..128), block_threads=128):
+                    init f32 s = 0
+                    f32 x = load X[m, c]
+                    f32 q = multiply(x, x)
+                    f32 s <- add(s, q) over c
+                    WarpShuffle(state=(s), state_b=(s__o), length=32):
+                        combine_states:
+                            s = s + s__o
+                    Smem(name=s_smem, extents=(4))
+                    if lane == 0:
+                        f32 s_smem[warp] = s
+                    Sync
+                    TreeHalve(bufs=(s_smem), state=(s), state_b=(s__o), length=4, tid_var=warp):
+                        combine_states:
+                            s = s + s__o
+                    f32 r = rsqrt(s)
+                    f32 y = multiply(r, x)
+                    f32 O[m, c] = y
+                ",
+            ))
+            .unwrap(),
+        );
+        let at = |what: &str| {
+            normal
+                .find(what)
+                .unwrap_or_else(|| panic!("{what}\n{normal}"))
+        };
+        assert!(at("TreeHalve") < at("rsqrt"), "{normal}");
+        assert!(at("WarpShuffle") < at("Smem"), "{normal}");
+    }
+
+    /// A register fragment is storage: the statements that update it and the statements that read it name it alike,
+    /// in whatever scope they sit.
+    #[test]
+    fn a_fragment_keeps_one_name_through_its_updates() {
+        let normal = text(
+            &normalize_uncached(&body(
+                "
+                Tile(axes=(m in 0..2, n in 0..16, _lane in 0..32), block_threads=32):
+                    RegFragment(name=_a0, role=a, shape=(16, 8, 16), dtype=f16)
+                    RegFragment(name=_b0, role=b, shape=(16, 8, 16), dtype=f16)
+                    RegFragment(name=_c0, role=c, shape=(16, 8, 16), dtype=f32)
+                    for k in 0..128 step 16:
+                        LdmatrixLoad(frag=_a0, src_buffer=A, src_index=(16 * m, k), role=a, ldm=128)
+                        LdmatrixLoad(frag=_b0, src_buffer=B, src_index=(k, 8 * n), role=b, ldm=8)
+                        MmaSyncPtx(c_frag=_c0, a_frag=_a0, b_frag=_b0, shape=(16, 8, 16))
+                    RegStore(dst_buffer=O, dst_index=(16 * m, 8 * n), frag=_c0, shape=(16, 8, 16), ldm=128, ldn=1, row_dim=0, col_dim=1)
+                ",
+            ))
+            .unwrap(),
+        );
+        let field = |line: &str, key: &str| -> String {
+            let line = normal
+                .lines()
+                .find(|l| l.contains(line))
+                .unwrap_or_else(|| panic!("{line}\n{normal}"));
+            let rest = &line[line.find(key).unwrap() + key.len()..];
+            rest[..rest.find(|c: char| c == ',' || c == ')').unwrap()].to_string()
+        };
+        assert_eq!(
+            field("role=a, shape", "name="),
+            field("MmaSyncPtx", "a_frag="),
+            "{normal}"
+        );
+        assert_eq!(
+            field("role=b, shape", "name="),
+            field("MmaSyncPtx", "b_frag="),
+            "{normal}"
+        );
+        assert_eq!(
+            field("role=c, shape", "name="),
+            field("RegStore", "frag="),
+            "{normal}"
+        );
+        assert_eq!(
+            field("role=a, ldm", "frag="),
+            field("MmaSyncPtx", "a_frag="),
+            "{normal}"
+        );
+    }
+
+    /// A tree combine reads the coordinates that index its slab: they follow the axes they name.
+    #[test]
+    fn a_tree_combine_follows_the_axes_that_index_its_slab() {
+        let normal = text(
+            &normalize_uncached(&body(
+                "
+                Tile(axes=(b in 0..2, k_co in 0..4, n_ln in 0..32), block_threads=128):
+                    for k in k_co..256 step 4:
+                        f32 x = load X[32 * b + n_ln, k]
+                        f32 s <- add(s, x) over k
+                    Smem(name=s_smem, extents=(128))
+                    f32 s_smem[k_co * 32 + n_ln] = s
+                    Sync
+                    TreeHalve(bufs=(s_smem), state=(s), state_b=(s__o), length=4, tid_var=k_co, inner=(n_ln, 32)):
+                        combine_states:
+                            s = s + s__o
+                    if k_co == 0:
+                        f32 O[32 * b + n_ln] = s
+                ",
+            ))
+            .unwrap(),
+        );
+        assert!(normal.contains("tid_var=a1, inner=(a2, 32)"), "{normal}");
+    }
+
+    /// A block-scale load fills a declared fragment, and a pointwise rewrite in place rewrites one: both keep its
+    /// name.
+    #[test]
+    fn a_fragment_keeps_one_name_through_a_scale_load_and_a_rewrite_in_place() {
+        let normal = text(
+            &normalize_uncached(&body(
+                "
+                Tile(axes=(m in 0..2, n in 0..16, _lane in 0..32), block_threads=32):
+                    RegFragment(name=_sf, role=a, shape=(16, 8, 64), dtype=f4e2m1x2, nregs=0)
+                    RegFragment(name=_c, role=c, shape=(16, 8, 16), dtype=f32)
+                    f32 w = load W[m]
+                    for k in 0..128 step 64:
+                        BlockScaleLoad(frag=_sf, src_buffer=S, src_index=(16 * m, k / 16), role=a, ldm=16)
+                        FragmentApply(out=_c, op=multiply, args=(FragmentArg(kind=frag, names=(_c)), FragmentArg(kind=uniform, names=(w))), in_place=true)
+                    RegStore(dst_buffer=O, dst_index=(16 * m, 8 * n), frag=_c, shape=(16, 8, 16), ldm=128, ldn=1, row_dim=0, col_dim=1)
+                ",
+            ))
+            .unwrap(),
+        );
+        let named = |line: &str, key: &str| -> String {
+            let line = normal
+                .lines()
+                .find(|l| l.contains(line))
+                .unwrap_or_else(|| panic!("{line}\n{normal}"));
+            let rest = &line[line.find(key).unwrap() + key.len()..];
+            rest[..rest.find(|c: char| c == ',' || c == ')').unwrap()].to_string()
+        };
+        assert_eq!(
+            named("nregs=0", "name="),
+            named("BlockScaleLoad", "frag="),
+            "{normal}"
+        );
+        assert_eq!(
+            named("dtype=f32", "name="),
+            named("FragmentApply", "out="),
+            "{normal}"
+        );
+        assert_eq!(
+            named("dtype=f32", "name="),
+            named("RegStore", "frag="),
+            "{normal}"
+        );
+    }
+
+    /// A staged copy re-assigns, inside the chunk loop, the registers a load declared ahead of it: the three keep
+    /// one set of names.
+    #[test]
+    fn a_staged_copy_keeps_the_names_its_first_load_declared() {
+        let normal = text(
+            &normalize_uncached(&body(
+                "
+                Tile(axes=(m in 0..4), block_threads=32):
+                    Smem(name=_s, extents=(2, 2))
+                    f32 p, q = load X[m, 0]
+                    for k in 0..8 step 2:
+                        f32 p, q = load X[0] carried=unpack
+                        f32 _s[k / 2 % 2, 0] = (p, q)
+                        Sync
+                        f32 p, q = load X[m, k + 2 < 8 ? k + 2 : 0] carried=load
+                ",
+            ))
+            .unwrap(),
+        );
+        let names: Vec<&str> = normal
+            .lines()
+            .filter(|line| line.contains("= load X"))
+            .map(|line| line.trim().split(" = ").next().unwrap())
+            .collect();
+        assert_eq!(names.len(), 3, "{normal}");
+        assert!(names.iter().all(|name| *name == names[0]), "{normal}");
+    }
+
+    /// A read of a state ahead of every update of it in its scope reads the value the scope began with, and stays
+    /// ahead of them, a combine's in-place update among them.
+    #[test]
+    fn a_read_of_the_previous_state_stays_ahead_of_its_updates() {
+        let normal = text(
+            &normalize_uncached(&body(
+                "
+                Tile(axes=(m in 0..9, c in 0..32), block_threads=128):
+                    init f32 s = 0
+                    for chunk in 0..64 step 32 unroll=true seed=false:
+                        f32 previous = s
+                        f32 x = load X[m, chunk + c]
+                        init f32 zero = 0
+                        f32 s <- add(zero, x) over chunk
+                        WarpShuffle(state=(s), state_b=(s__o), length=32, prefix=true):
+                            combine_states:
+                                s = s + s__o
+                        f32 s <- add(s, previous)
+                        f32 O[m, chunk + c] = s
+                        WarpBroadcast(state=(s), length=32)
+                ",
+            ))
+            .unwrap(),
+        );
+        let lines: Vec<&str> = normal.lines().map(str::trim).collect();
+        let at = |what: &str| {
+            lines
+                .iter()
+                .position(|l| l.contains(what))
+                .unwrap_or_else(|| panic!("{what}\n{normal}"))
+        };
+        assert!(at("for ") < at("= acc0"), "{normal}");
+        assert!(at("= acc0") < at("acc0 <- add"), "{normal}");
     }
 }

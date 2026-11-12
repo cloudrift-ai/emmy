@@ -86,6 +86,8 @@ pub(crate) type PlaceKey = (Number, Vec<Param>, Marks);
 struct Placer<'a> {
     numbering: &'a Numbering,
     written: HashSet<Name>,
+    /// The names some statement updates in place: a read of one reads the version it stands behind.
+    updated: HashSet<Name>,
     alias: HashMap<Name, Name>,
     defined: HashMap<Name, usize>,
     taint: HashMap<Name, Marks>,
@@ -126,9 +128,7 @@ impl Placer<'_> {
             .unwrap_or(0)
     }
     fn pure(stmt: &Statement) -> bool {
-        (stmt.is_pure() || matches!(stmt, Statement::Call(_)))
-            && stmt.nested().is_empty()
-            && !matches!(stmt, Statement::Load(l) if !l.carried.is_empty())
+        (stmt.is_pure() || matches!(stmt, Statement::Call(_))) && stmt.nested().is_empty()
     }
     fn reads(stmt: &Statement) -> HashSet<Name> {
         let mut out: HashSet<Name> = stmt.deps().into_iter().collect();
@@ -143,6 +143,9 @@ impl Placer<'_> {
             let name = self.alias.get(&name).unwrap_or(&name);
             if let Some(marks) = self.taint.get(name) {
                 out.extend(marks.iter().cloned());
+            }
+            if self.updated.contains(name) {
+                out.extend(self.read_of(name));
             }
         }
         if let Some(v) = self.version.get(&Name::new("")) {
@@ -304,6 +307,8 @@ impl Placer<'_> {
             if let Statement::Carry(c) = &**member {
                 writes.insert(c.name);
             }
+            // Storage a member updates in place is written on the back edge, as a buffer is.
+            writes.extend(member.updates());
             if is_protocol(member) {
                 writes.insert(Name::from(""));
             }
@@ -463,13 +468,17 @@ fn placed(body: &Body, states: &HashMap<Name, Key>, motion: bool) -> Result<Body
         crate::numbering::Chains::Flat,
     );
     let mut written: HashSet<Name> = HashSet::new();
+    let mut updated: HashSet<Name> = HashSet::new();
     body.walk(&mut |here| {
         written.extend(here.stmt().external_writes());
         if let Statement::Carry(c) = &**here.stmt() {
             written.insert(c.name);
         }
+        updated.extend(here.stmt().updates());
     });
+    written.extend(updated.iter().copied());
     let mut placer = Placer {
+        updated,
         numbering: &numbering,
         written,
         alias: HashMap::new(),

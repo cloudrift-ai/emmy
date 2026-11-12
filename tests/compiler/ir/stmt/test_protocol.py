@@ -106,7 +106,7 @@ _KERNEL_EXAMPLES = [
     kernel_ir.MbarrierArrive("mb", slot=Var("p")),
     kernel_ir.SetMaxNReg(64, "dec"),
     kernel_ir.MbarrierWait("mb", phase=Var("ph"), slot=Var("p")),
-    kernel_ir.TreeHalve(bufs=("b",), state=("acc",), state_b=("acc__o",), combine_states=_COMBINE, length=8, tid_var="t"),
+    kernel_ir.TreeHalve(bufs=("b",), state=("acc",), state_b=("acc__o",), combine_states=_COMBINE, length=8, tid_var=Var("t")),
     kernel_ir.WarpShuffle(state=("acc",), state_b=("acc__o",), combine_states=_COMBINE, length=8),
     kernel_ir.WarpBroadcast(state=("acc",), length=8),
     kernel_ir.FragmentApply(out="o", op=ElementwiseImpl("where"), args=_OPERANDS, row_base=Var("q"), col_base=Var("kv")),
