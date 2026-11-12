@@ -57,6 +57,38 @@ pub fn normalize_body(body: &Body) -> Result<Body> {
     Ok(normal)
 }
 
+/// The optimized forms of the bodies met in this process, by their exact form.
+pub fn optimized_forms() -> &'static Memo<MemoKey, Body> {
+    static MEMO: OnceLock<Memo<MemoKey, Body>> = OnceLock::new();
+    MEMO.get_or_init(|| {
+        Memo::weighted(BODY_MEMO_WEIGHT, |key, optimized| {
+            (key.0.statement_count() + optimized.statement_count()) as u64
+        })
+    })
+}
+
+/// The optimizing half of the normal form: every exact simplification and every value computed once at the
+/// shallowest scope that can hold it, with the statement order and the names as they stand wherever nothing moved.
+/// It is what a body no identity reads takes (a Kernel IR body): [`normalize_body`] is this and then the canonical
+/// order and names.
+pub fn optimize_body(body: &Body) -> Result<Body> {
+    optimized_forms().get_or_try_insert(&MemoKey(body.clone()), || optimize_uncached(body))
+}
+
+/// The optimized form, computed afresh.
+pub fn optimize_uncached(body: &Body) -> Result<Body> {
+    let mut stmts = distinct_names(&topological_sort(body)?);
+    for _ in 0..8 {
+        let prepared = prepare_body(&stmts)?;
+        let next = one_operation_per_definition(&fold_trivial_selects(&prepared), &HashSet::new());
+        if next == stmts {
+            return Ok(next);
+        }
+        stmts = next;
+    }
+    unsettled(&stmts, "the optimized form")
+}
+
 /// The normal form, computed afresh.
 pub fn normalize_uncached(body: &Body) -> Result<Body> {
     // The normal form holds every operation: a call is storage sharing inside fusion, which expands it.
@@ -72,12 +104,6 @@ pub fn normalize_uncached(body: &Body) -> Result<Body> {
     // The split feeds the steps ahead of it, so the steps run again after a split that changed the body. The order
     // permutes and names, and the operand order inside a value reads the ranks the order gives, which the order in
     // turn spells by: the form is final when one whole round leaves the body alone.
-    //
-    // Two chains that compute alike over different cells (the two cells of a register tile, each with its own online
-    // softmax) can trade places every round: a difference is numbered by its spelling (`a - b` or `-b + a`), the
-    // spelling follows the ranks, and the ranks follow the numbers. The rounds then alternate between forms that are
-    // each a whole round's output, and the form is the least of them by text, whichever the rounds reached first.
-    let mut rounds: Vec<Body> = Vec::new();
     for _ in 0..8 {
         let prepared = prepare_body(&stmts)?;
         let split = one_operation_per_definition(&fold_trivial_selects(&prepared), &HashSet::new());
@@ -89,25 +115,9 @@ pub fn normalize_uncached(body: &Body) -> Result<Body> {
         if next == stmts {
             return Ok(next);
         }
-        if let Some(first) = rounds.iter().position(|earlier| *earlier == next) {
-            return least_by_text(&rounds[first..]);
-        }
-        rounds.push(next.clone());
         stmts = next;
     }
     unsettled(&stmts, "the normal form")
-}
-
-/// The body whose text sorts first.
-fn least_by_text(bodies: &[Body]) -> Result<Body> {
-    let mut keyed: Vec<(Vec<String>, &Body)> = Vec::with_capacity(bodies.len());
-    for body in bodies {
-        let mut lines = Vec::new();
-        crate::text::body_lines(body, "", &mut lines)?;
-        keyed.push((lines, body));
-    }
-    keyed.sort_by(|a, b| a.0.cmp(&b.0));
-    Ok(keyed[0].1.clone())
 }
 
 /// The exact simplifications, then every value placed once; the three run until the first two leave a placed body
@@ -229,65 +239,6 @@ for k in 0..3:
         drop(body);
         normal_forms().clear();
         assert!(weak.upgrade().is_none(), "a body holds no Arc to itself");
-    }
-
-    /// The two cells of a register tile, each with its own online softmax, trade places from one round to the next
-    /// (the driver's comment). The form is the lesser of the two, from either of them and from itself.
-    #[test]
-    fn two_chains_that_trade_places_every_round_have_one_form() {
-        let given = testing::body(
-            "
-            Tile(axes=(a0 in 0..4, a1 in 0..4 window(parent=p0 in 0..64), a2 in 0..2 window(parent=p1 in 0..32), a3 in 0..8, a4 in 0..16), block_threads=128, raster_axes=(a1, a2)):
-                for a5 in 0..64 unroll=true:
-                    for a6 in 0..32:
-                        f32 in0 = load x0[0, a0, 2 * a3 + 16 * a1 + 1, a6]
-                        f32 in1 = load x0[0, a0, 2 * a3 + 16 * a1, a6]
-                        f32 in2 = load x1[0, a0, a5, a6]
-                        f32 v0 = in0 * in2
-                        f32 acc6 <- add(acc6, v0) over a6
-                        f32 v1 = in1 * in2
-                        f32 acc7 <- add(acc7, v1) over a6
-                    f32 v2 = 0.1767766922712326 * acc6
-                    f32 v3 = 0.1767766922712326 * acc7
-                    f32 v4 = maximum(acc0, v2)
-                    f32 v5 = -v4 + v2
-                    f32 v6 = acc0 - v4
-                    f32 acc0 <- maximum(acc0, v2) over a5
-                    f32 v7 = exp(v6)
-                    f32 v8 = acc5 * v7
-                    f32 v9 = acc1 * v7
-                    f32 v10 = exp(v5)
-                    f32 v11 = 1.0 * v10
-                    f32 acc1 <- add(v9, v11) over a5
-                    f32 v12 = maximum(acc2, v3)
-                    f32 v13 = acc2 - v12
-                    f32 acc2 <- maximum(acc2, v3) over a5
-                    f32 v14 = -v12 + v3
-                    f32 v15 = exp(v13)
-                    f32 v16 = acc4 * v15
-                    f32 v17 = acc3 * v15
-                    f32 v18 = exp(v14)
-                    f32 v19 = 1.0 * v18
-                    f32 acc3 <- add(v17, v19) over a5
-                    f32 in3 = load x2[0, a0, a5, a4 + 16 * a2]
-                    f32 v20 = in3 * v18
-                    f32 acc4 <- add(v16, v20) over a5
-                    f32 v21 = in3 * v10
-                    f32 acc5 <- add(v8, v21) over a5
-                f32 v22 = acc5 / acc1
-                f32 v23 = acc4 / acc3
-                f32 scaled_dot_product_attention[0, a0, 2 * a3 + 16 * a1, a4 + 16 * a2] = v23
-                f32 scaled_dot_product_attention[0, a0, 2 * a3 + 16 * a1 + 1, a4 + 16 * a2] = v22
-            ",
-        );
-        let normal = normalize_uncached(&given).unwrap();
-        let round = drop_unread_values(&canonical_order(&prepare_body(&normal).unwrap()).unwrap());
-        assert_ne!(
-            round, normal,
-            "the two chains no longer trade places: this test needs another body"
-        );
-        assert_eq!(normalize_uncached(&round).unwrap(), normal);
-        assert_eq!(normalize_uncached(&normal).unwrap(), normal);
     }
 
     fn normal(text: &str) -> String {

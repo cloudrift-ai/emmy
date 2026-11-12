@@ -66,6 +66,7 @@ impl<K: Eq + Hash + Clone, V: Clone> Memo<K, V> {
 /// Forget every memoized normal form and identity.
 pub fn clear_all() {
     crate::normalize::normal_forms().clear();
+    crate::normalize::optimized_forms().clear();
     crate::identity::identities().clear();
 }
 

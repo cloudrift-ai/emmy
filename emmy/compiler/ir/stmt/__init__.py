@@ -39,6 +39,7 @@ ZeroPrologue = _ir.ZeroPrologue
 parse_body = _ir.parse_body
 pretty_body = _ir.pretty_body
 normalize_body = _ir.normalize_body
+optimize_body = _ir.optimize_body
 one_operation_per_definition = _ir.one_operation_per_definition
 canonical_values = _ir.canonical_values
 fragment_order = _ir.fragment_order
@@ -91,6 +92,7 @@ __all__ = [
     "free_names",
     "mask_select_predicate",
     "normalize_body",
+    "optimize_body",
     "ordering_constraints",
     "prepare_body",
     "parse_body",

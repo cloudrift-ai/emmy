@@ -57,6 +57,7 @@ from emmy.compiler.ir.stmt import (  # noqa: F401  (re-exported via __init__)  #
     SelectBranch,
     Statement,
     Write,
+    normalize_body,
     pretty_body,
 )
 
@@ -89,6 +90,8 @@ class LoopOp(BodyOp):
     def __post_init__(self) -> None:
         super().__post_init__()
         _validate(self)
+
+    _formed = staticmethod(normalize_body)
 
     def rename_buffers(self, rename: dict[str, str]) -> LoopOp:
         """Return this canonical LoopOp with only external buffer names changed.

@@ -26,19 +26,48 @@ pub(crate) fn ssa_prefix(stmt: &Statement) -> &'static str {
 }
 
 pub(crate) struct Counters {
-    counts: HashMap<&'static str, usize>,
+    counts: HashMap<Name, usize>,
     reserved: HashSet<Name>,
+    /// The spellings taken so far where binders keep their names ([`distinct_names`]); `None` names sequentially.
+    kept: Option<HashSet<Name>>,
 }
 
 impl Counters {
-    fn fresh(&mut self, prefix: &'static str) -> Name {
+    /// The name of a new binder spelled `old`: the next sequential name under `prefix`, or, where binders keep their
+    /// names, `old` itself for the first binder of the spelling and `old_1`, `old_2`, … for the later ones.
+    fn fresh(&mut self, old: &Name, prefix: &'static str) -> Name {
+        let Some(taken) = &mut self.kept else {
+            loop {
+                let count = self.counts.entry(Name::from(prefix)).or_insert(0);
+                let name: Name = format!("{prefix}{count}").into();
+                *count += 1;
+                if !self.reserved.contains(&name) {
+                    return name;
+                }
+            }
+        };
+        if !self.reserved.contains(old) && taken.insert(*old) {
+            return *old;
+        }
         loop {
-            let count = self.counts.entry(prefix).or_insert(0);
-            let name: Name = format!("{prefix}{count}").into();
+            let count = self.counts.entry(*old).or_insert(0);
             *count += 1;
-            if !self.reserved.contains(&name) {
+            let name: Name = format!("{old}_{count}").into();
+            if !self.reserved.contains(&name) && taken.insert(name) {
                 return name;
             }
+        }
+    }
+
+    /// The name of an axis a statement binds: sequential, or, where binders keep their names, its own unless a
+    /// statement around it or a value in scope holds the spelling. Sibling loops over one axis keep the one name.
+    fn fresh_axis(&mut self, old: &Name, shadows: bool) -> Name {
+        match &mut self.kept {
+            Some(taken) if !shadows && !self.reserved.contains(old) => {
+                taken.insert(*old);
+                *old
+            }
+            _ => self.fresh(old, "a"),
         }
     }
 }
@@ -57,7 +86,7 @@ impl SequentialScope {
         if self.owned.contains(old) || self.fixed.contains(old) {
             return;
         }
-        self.ssa.insert(*old, counters.fresh(prefix));
+        self.ssa.insert(*old, counters.fresh(old, prefix));
         self.owned.insert(*old);
     }
 
@@ -99,7 +128,7 @@ impl SequentialScope {
                     continue;
                 }
                 if stmt.is_pure() && self.owned.contains(&name) {
-                    self.ssa.insert(name, counters.fresh(ssa_prefix(stmt)));
+                    self.ssa.insert(name, counters.fresh(&name, ssa_prefix(stmt)));
                 } else {
                     self.allocate(counters, &name, ssa_prefix(stmt));
                 }
@@ -121,13 +150,14 @@ impl SequentialScope {
         }
         let mut axes = self.inherited_axes.clone();
         for old in stmt.binds_axes() {
-            axes.insert(old, counters.fresh("a"));
+            let shadows = axes.contains_key(&old) || self.ssa.values().any(|name| *name == old);
+            axes.insert(old, counters.fresh_axis(&old, shadows));
         }
         for axis in stmt.bound_axes() {
             for source in axis.sources() {
                 self.sources
                     .entry(source.name)
-                    .or_insert_with(|| counters.fresh("p"));
+                    .or_insert_with(|| counters.fresh(&source.name, "p"));
             }
         }
         let names = self.names(&axes);
@@ -158,6 +188,17 @@ impl SequentialScope {
 /// accumulators to `acc0, …`, every other definition to `v0, …`, in definition order. Each nested body is a lexical
 /// scope, while its assigned names remain globally unique.
 pub fn rename_ssa_sequential(body: &Body) -> Body {
+    renamed(body, None)
+}
+
+/// `body` with every binding under a name of its own, the names as they stand wherever they already are: the first
+/// binder of a spelling keeps it and a later one takes it with a number. Motion needs it (two lexical bindings of one
+/// name can land in one scope) and it is all the naming a body no identity reads takes.
+pub fn distinct_names(body: &Body) -> Body {
+    renamed(body, Some(HashSet::new()))
+}
+
+fn renamed(body: &Body, kept: Option<HashSet<Name>>) -> Body {
     let mut reserved: HashSet<Name> = HashSet::new();
     for stmt in body.stmts() {
         reserved.extend(free_names(stmt));
@@ -168,6 +209,7 @@ pub fn rename_ssa_sequential(body: &Body) -> Body {
     let mut counters = Counters {
         counts: HashMap::new(),
         reserved,
+        kept,
     };
     let mut scope = SequentialScope {
         ssa: HashMap::new(),
@@ -624,7 +666,7 @@ pub fn canonicalize_expressions(body: &Body, axes: &[Name]) -> Result<Body> {
 mod tests {
     use super::*;
     use crate::normalize::testing::*;
-    use crate::normalize::{normalize_body, normalize_uncached};
+    use crate::normalize::{normalize_body, normalize_uncached, optimize_uncached};
     use crate::statement::Load;
 
     /// The names of `given`'s statements in the fragment order, `outer` bound by its reader.
@@ -1514,7 +1556,7 @@ for r in 0..4:
     #[test]
     fn a_fragment_keeps_one_name_through_its_updates() {
         let normal = text(
-            &normalize_uncached(&body(
+            &optimize_uncached(&body(
                 "
                 Tile(axes=(m in 0..2, n in 0..16, _lane in 0..32), block_threads=32):
                     RegFragment(name=_a0, role=a, shape=(16, 8, 16), dtype=f16)
@@ -1559,9 +1601,65 @@ for r in 0..4:
         );
     }
 
-    /// The text of the normal form of a kernel body.
+    /// The text of the form a kernel body takes: the optimizing half of the normal form, and final.
     fn kernel_normal(given: &str) -> String {
-        text(&normalize_uncached(&body(given)).unwrap())
+        let optimized = optimize_uncached(&body(given)).unwrap();
+        assert_eq!(optimize_uncached(&optimized).unwrap(), optimized);
+        text(&optimized)
+    }
+
+    /// The optimized form moves a value and keeps what it does not move: the statements stand in the order their
+    /// builder wrote them and under its names.
+    #[test]
+    fn an_optimized_body_keeps_its_names_and_its_order() {
+        let out = kernel_normal(
+            "
+            Tile(axes=(m in 0..4, _lane in 0..32)):
+                for k in 0..16:
+                    _scale = load S[m]
+                    zeta = load T[m, k]
+                    alpha = load U[m, k]
+                    prod = multiply(zeta, alpha)
+                    out = multiply(prod, _scale)
+                    O[m, k] = out
+            ",
+        );
+        let at = |needle: &str| out.find(needle).unwrap_or_else(|| panic!("{needle}\n{out}"));
+        assert!(at("_scale = load S[m]") < at("for k in"), "{out}");
+        assert!(at("zeta = load T") < at("alpha = load U"), "{out}");
+        assert!(at("alpha = load U") < at("prod = "), "{out}");
+    }
+
+    /// Two sibling loops each bind `x`; motion puts both bindings in the scope around them, where the later one
+    /// takes a number. A body whose names are already distinct is left alone.
+    #[test]
+    fn a_later_binder_of_a_spelling_takes_a_number() {
+        let given = body(
+            "
+            Tile(axes=(m in 0..4)):
+                for k in 0..16:
+                    x = load X[m]
+                    t = load T[m, k]
+                    u = multiply(x, t)
+                    O[m, k] = u
+                for k in 0..16:
+                    x = load Y[m]
+                    t = load T[m, k]
+                    u = add(x, t)
+                    P[m, k] = u
+            ",
+        );
+        let distinct = distinct_names(&given);
+        let out = text(&distinct);
+        for name in ["x = load X", "x_1 = load Y", "t_1 = load T", "P[m, k] = u_1"] {
+            assert!(out.contains(name), "{name}\n{out}");
+        }
+        assert_eq!(out.matches("for k in").count(), 2, "sibling loops keep the one axis name\n{out}");
+        assert_eq!(distinct_names(&distinct), distinct);
+        let optimized = kernel_normal(&text(&given));
+        let at = |needle: &str| optimized.find(needle).unwrap_or_else(|| panic!("{needle}\n{optimized}"));
+        assert!(at("x = load X[m]") < at("for k in"), "{optimized}");
+        assert!(at("x_1 = load Y[m]") < optimized.rfind("for k in").unwrap(), "{optimized}");
     }
 
     #[test]
@@ -1590,7 +1688,7 @@ for r in 0..4:
                 O[m, _lane] = x
             ",
         );
-        assert!(out.contains("load X[a0, a1]"), "{out}");
+        assert!(out.contains("load X[m, _lane]"), "{out}");
     }
 
     #[test]

@@ -11,7 +11,7 @@ from frozendict import frozendict
 
 from emmy.compiler.dtype import F32
 from emmy.compiler.ir.base import ConstantOp, Op, buffer_types
-from emmy.compiler.ir.stmt import Body, Load, Statement, Write, ZeroPrologue
+from emmy.compiler.ir.stmt import Body, Load, Statement, Write, ZeroPrologue, optimize_body
 from emmy.compiler.ir.stmt import pretty_body as _pretty_body_stmts
 from emmy.compiler.tensor import Tensor
 
@@ -47,13 +47,17 @@ class BodyOp(Op):
 
     def __post_init__(self) -> None:
         Op.__post_init__(self)
-        from emmy.compiler.ir.stmt import normalize_body
-
-        # Seed the positional ABI before normalization reorders independent reads and writes; the
+        # Seed the positional ABI before the body's form reorders independent reads and writes; the
         # matcher later refreshes these placeholders in graph order.
         object.__setattr__(self, "body", Body.coerce(self.body))
         self._seed_io_placeholders()
-        object.__setattr__(self, "body", normalize_body(self.body))
+        object.__setattr__(self, "body", self._formed(self.body))
+
+    @staticmethod
+    def _formed(body: Body) -> Body:
+        """The form this op's body takes at construction: the optimizing half of the normal form, with the order and
+        the names as its builder wrote them. ``LoopOp`` takes the whole normal form, which its identity reads."""
+        return optimize_body(body)
 
     def _seed_io_placeholders(self) -> None:
         """Populate empty ``inputs`` / ``outputs`` with body-derived names

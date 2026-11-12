@@ -39,10 +39,9 @@ def test_select_preserves_the_common_type_in_its_consumers(left, right, result, 
     stamped = import_module("emmy.compiler.pipeline.passes.lowering.kernel.030_stamp_types").rewrite(
         Node(id="out", op=op, inputs=["lhs", "rhs"], outputs=(output,))
     )
-    # The kernel body is in normal form: the loads are ``in0`` / ``in1``, the selection ``v0``, the product ``v1``.
     lines = str(stamped.body).splitlines()
-    assert f"{result.name} v1 = in0 * v0" in lines
-    assert f"{result.name} out[0] = v1" in lines
+    assert f"{result.name} product = a * chosen" in lines
+    assert f"{result.name} out[0] = product" in lines
     ctx = RenderCtx(ssa_dtypes={"a": left.name, "b": right.name})
     assert render_stmt(selection, ctx)[0].startswith(f"    {ctype} chosen = ")
     assert ctx.ssa_dtypes["chosen"] == result.name
