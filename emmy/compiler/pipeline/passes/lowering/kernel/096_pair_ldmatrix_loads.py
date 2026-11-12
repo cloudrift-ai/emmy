@@ -20,10 +20,11 @@ Legality, judged structurally on the two loads:
 - **Volta**: adjacent logical fragment indices under the matching derived layout, with equal
   logical K coordinates. A pairs register rows; B pairs register columns. Each becomes one
   LDS.128 and the coupled row/row MMA plus interleaved accumulator map preserve the output;
-- no ordering constraint of the scope runs between the two loads, directly or through other statements
-  (:class:`Siblings`): a body's statement order is its normal form's, which can put one fragment's whole chain
-  ahead of the other's, so position says nothing. A barrier, a slab write or a consumer of the earlier value of
-  either fragment between the two is such a path.
+- no statement must stand between the two loads under the scope's ordering constraints
+  (:class:`Siblings`). A body's statement order is its normal form's, which can put one
+  fragment's whole chain ahead of the other's, so position says nothing. A barrier, a slab
+  write or a consumer of the earlier value of either fragment between the two is such a
+  statement.
 
 The fusion is a pure perf transform: same slab cells, same values, same fragments — the paired
 kernel is bit-identical to its unpaired sibling. Idempotent: a paired load (``pair_frag`` set)
@@ -125,7 +126,8 @@ def _pairs_with(a: LdmatrixLoad, b: LdmatrixLoad) -> bool:
     """``b`` is ``a``'s slab-adjacent partner: the SECOND fragment of one x4 (the ``+8``
     matrices lanes 16-31 address)."""
     if (
-        a.src_buffer != b.src_buffer
+        a.frag == b.frag
+        or a.src_buffer != b.src_buffer
         or a.role != b.role
         or a.ldm != b.ldm
         or a.b_trans != b.b_trans
@@ -159,9 +161,9 @@ def _pair(stmts: list[Statement]) -> list[Statement] | None:
     while progress:
         progress = False
         for a in candidates:
-            if a not in free or any(c in free and scope.independent(c, a) for c in low[a]):
+            if a not in free or any(c in free and scope.fusable((c, a)) for c in low[a]):
                 continue
-            b = next((b for b in high[a] if b in free and scope.independent(a, b)), None)
+            b = next((b for b in high[a] if b in free and scope.fusable((a, b))), None)
             if b is not None:
                 scope.fuse([a, b], scope[a].replace(pair_frag=scope[b].frag))
                 free -= {a, b}

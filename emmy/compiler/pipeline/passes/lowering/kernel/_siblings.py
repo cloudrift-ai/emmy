@@ -2,8 +2,8 @@
 
 A kernel body is in normal form, so the order of sibling statements is the canonical one and tells a pass nothing
 about which statements it may bring together: the two halves of a load pair can stand a whole fragment chain apart.
-A pass that fuses statements asks the scope instead. Two statements can become one when no path of ordering
-constraints (:func:`~emmy.compiler.ir.stmt.ordering_constraints`) runs between them; the fused scope is written back
+A pass that fuses statements asks the scope instead. Statements can become one when no other statement must stand between
+them under the scope's ordering constraints (:func:`~emmy.compiler.ir.stmt.ordering_constraints`); the fused scope is written back
 in an order that keeps every constraint, and the normal form the next ``KernelOp`` takes orders it from there.
 """
 
@@ -30,13 +30,25 @@ class Siblings:
     def positions(self) -> list[int]:
         return sorted(self._stmts)
 
-    def independent(self, first: int, second: int) -> bool:
-        """No constraint, direct or through other statements, orders the two."""
+    def fusable(self, members: Iterable[int]) -> bool:
+        """Whether ``members`` can become one statement: no statement outside them must follow one member and precede
+        another. Members a constraint orders directly (the writes of one buffer) stay fusable."""
         reach = self._reaching()
-        return not (reach[first] >> second & 1 or reach[second] >> first & 1)
+        inside = 0
+        before = 0
+        for position in members:
+            inside |= 1 << position
+            before |= reach[position]
+        between = before & ~inside
+        while between:
+            low = between & -between
+            if reach[low.bit_length() - 1] & inside:
+                return False
+            between ^= low
+        return True
 
     def fuse(self, members: list[int], fused: Statement) -> None:
-        """Replace ``members`` (pairwise :meth:`independent` when taken one after another) with ``fused``."""
+        """Replace ``members`` (:meth:`fusable`) with ``fused``."""
         kept, gone = members[0], set(members[1:])
         self._stmts[kept] = fused
         for position in gone:
