@@ -9,6 +9,7 @@ import pytest
 
 from emmy.compiler.backend.cuda import nvcc
 from emmy.compiler.dtype import F16, F32
+from emmy.compiler.ir.kernel.interface import needs_arch_isa
 from emmy.compiler.ir.kernel.ir import (
     KernelOp,
     Literal,
@@ -23,7 +24,6 @@ from emmy.compiler.ir.kernel.ir import (
     WgmmaWait,
     wgmma_descriptor_bits,
 )
-from emmy.compiler.ir.kernel.interface import needs_arch_isa
 from emmy.compiler.ir.kernel.render import _WGMMA_PRELUDE, _wgmma_prelude, render_kernelop
 from emmy.compiler.ir.render import RenderCtx, render_stmt
 from emmy.compiler.ir.stmt import Body, parse_body

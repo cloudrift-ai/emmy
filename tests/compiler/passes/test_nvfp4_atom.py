@@ -101,6 +101,23 @@ def test_a_kernel_carrying_the_block_scaled_mma_asks_for_the_arch_suffixed_targe
     assert not needs_arch_isa(KernelOp(body=Body((plain,)), name="k"))
 
 
+# The driver around the prelude under test: one warp, one atom cell, gmem-direct operands. A
+# packed row is K/2 = 32 bytes, which is what the reused ``_b8`` loaders take as their stride.
+_DRIVER = """
+extern "C" __global__ void k_f4_block_scaled(float* out, const unsigned char* a,
+                                             const unsigned char* b,
+                                             const unsigned char* sa, const unsigned char* sb) {
+    unsigned ra[4], rb[2];
+    emmy_mma_load_a_gmem_b8<unsigned char>(ra, a, 32);
+    emmy_mma_load_b_gmem_trans_b8<unsigned char>(rb, b, 32);
+    float d[4] = {0.f, 0.f, 0.f, 0.f};
+    emmy_mma_m16n8k64_e2m1_f32(d, ra, rb, emmy_mma_load_sfa_f4(sa, 4), emmy_mma_load_sfb_f4(sb, 4));
+    int lane = threadIdx.x & 31, grp = lane >> 2, tig = lane & 3;
+    for (int i = 0; i < 4; ++i) out[(grp + ((i & 2) ? 8 : 0)) * 8 + (tig << 1) + (i & 1)] = d[i];
+}
+"""
+
+
 def _ue4m3(bits: np.ndarray) -> np.ndarray:
     """Decode UNSIGNED e4m3 — the scale format, where the sign bit the signed form uses is unused."""
     exponent, mantissa = (bits >> 3) & 0xF, bits & 7
