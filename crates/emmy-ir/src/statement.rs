@@ -430,7 +430,7 @@ macro_rules! with_statement_types {
                 /// 64-bit value; indices flatten via `render_index` against the buffer's declared shape (same as `Load` /
                 /// `Write`).
                 kernel CpAsyncCopy {} {
-                    smem: Name [],
+                    smem: Name [BUFFER_WRITE],
                     smem_index: Exprs [EXPRESSION] : Index,
                     src: Name [BUFFER_READ],
                     src_index: Exprs [EXPRESSION] : Index,
@@ -470,7 +470,7 @@ macro_rules! with_statement_types {
                 /// with `MbarrierArriveExpectTx` (issued immediately before) and `MbarrierWait` (issued by every consumer
                 /// thread).
                 kernel TmaLoad {} {
-                    smem: Name [],
+                    smem: Name [BUFFER_WRITE],
                     smem_index: Exprs [EXPRESSION] : Index,
                     desc: Name [],
                     coords: Exprs [EXPRESSION] : Index,

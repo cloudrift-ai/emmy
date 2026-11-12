@@ -1122,6 +1122,30 @@ mod tests {
     }
 
     #[test]
+    fn a_slab_an_async_copy_fills_is_read_behind_its_barrier() {
+        // The copy is the slab's only writer and its bytes land at the wait's barrier: a drain behind the barrier
+        // reads the chunk, and neither moves out of the chunk loop nor shares a read ahead of the barrier.
+        let out = placed(
+            "
+            Smem(name=slab, extents=(8))
+            early = load slab[0]
+            E[0] = early
+            for k in 0..4:
+                CpAsyncCopy(smem=slab, smem_index=(0), src=X, src_index=(k), nbytes=16)
+                CpAsyncWait
+                Sync
+                x = load slab[0]
+                O[k] = x
+            ",
+        );
+        let chunk = inner(out.stmts().last().unwrap());
+        assert_eq!(
+            statement_types(&chunk),
+            ["CpAsyncCopy", "CpAsyncWait", "Sync", "Load", "Write"]
+        );
+    }
+
+    #[test]
     fn a_value_of_unwritten_storage_is_shared_across_a_barrier() {
         // A cooperative reduce reads its row ahead of the combine's barrier and its projection reads it again
         // behind it: the row is no storage the kernel writes, so the second read is the first.
