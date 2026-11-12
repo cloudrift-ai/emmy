@@ -825,9 +825,8 @@ Register-partial merges use the same accumulator policy as streaming updates: se
 while accumulating folds promote to f32. A merge reassigns the existing carrier and cannot change its declaration.
 Integer algebra is always restamped from its typed operands, repairing a
 stale float stamp that a structurally cloned, previously untyped body can carry. `050_vectorize_loads` /
-`080_vectorize_stores` pack memory ops; `095_sink_guarded_loads` moves a `Load` only one guarded block reads into
-that block, so a cell the guard skips never issues it (no knob: it decides nothing); `096_pair_ldmatrix_loads` fuses
-adjacent staged fragment loads. A run
+`080_vectorize_stores` /
+`095_interleave_loads` pack/reorder memory ops; `096_pair_ldmatrix_loads` fuses adjacent staged fragment loads. A run
 of f32 elements moves as one `float2` / `float4`, and a run of f16 or bf16 elements as one 4-, 8- or 16-byte access
 (the pair type `__half2` / `__nv_bfloat162`, or `uint2` / `uint4` punned to 4 and 8 elements). A
 `coop/v<n>` lane's run of fp8 weight bytes or packed e2m1 pairs reads as one 2-, 4-, 8- or 16-byte word (width 16
