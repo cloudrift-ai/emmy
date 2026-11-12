@@ -21,6 +21,13 @@ fn holds(ty: VTy, range: Interval) -> bool {
     }
 }
 
+/// Whether `value` is an integer a state of the integer type `ty` holds.
+pub(super) fn holds_seed(ty: VTy, value: f64) -> bool {
+    let whole = value as i128;
+    let fits = i128::from(i64::MIN) <= whole && whole <= i128::from(i64::MAX);
+    value.fract() == 0.0 && fits && holds(ty, Interval::new(whole, whole))
+}
+
 /// The narrowest integer type that holds `range`: 32 bits where it fits, signed first.
 fn narrowest(range: Interval) -> VTy {
     [VTy::I32, VTy::U32]

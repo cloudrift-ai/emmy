@@ -292,8 +292,12 @@ impl Lowerer {
         let constant = match ty {
             VTy::F32 => Operand::f32(value as f32),
             VTy::F16 | VTy::Bf16 => Operand::Int(i64::from(value::half_bits(ty, value))),
-            VTy::I32 | VTy::U32 | VTy::I64 if value.fract() == 0.0 => Operand::Int(value as i64),
-            _ => return Err(self.no_rule(format_args!("a {} state seeded {value}", ty.text()))),
+            // An integer state holds a seed its type holds: the bounded stand-in of an unbounded neutral element
+            // is a float's.
+            VTy::I32 | VTy::U32 | VTy::I64 if int::holds_seed(ty, value) => {
+                Operand::Int(value as i64)
+            }
+            _ => return Err(self.no_rule(format_args!("a state of {} seeded {value}", ty.text()))),
         };
         let reg = self.b.state(ty.bank());
         self.b

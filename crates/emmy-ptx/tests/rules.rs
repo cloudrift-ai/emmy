@@ -470,6 +470,96 @@ fn the_integer_operations_are_one_instruction_each() {
     );
 }
 
+/// The same operations over 64-bit and unsigned values: the instruction's type follows the operands, a quotient of
+/// a 64-bit value is the divide instruction with its floor correction, an unsigned index is widened without its
+/// sign, and a 64-bit state steps in place.
+#[test]
+fn the_64_bit_and_unsigned_forms_follow_their_operands() {
+    let got = under_grid(
+        "
+        u32 u = load b[i]
+        i64 w = load c[i]
+        init i64 total = 0
+        u32 a1 = minimum(u, 7)
+        u32 a2 = maximum(u, a1)
+        u32 a3 = a2 / 3
+        i64 b1 = w + 5
+        i64 b2 = w - b1
+        i64 b3 = minimum(w, b2)
+        i64 b4 = maximum(b3, 9)
+        i64 b5 = b4 / 3
+        i64 b6 = w >> 2
+        i64 b7 = w & 255
+        i64 b8 = -w
+        i64 b9 = abs(w)
+        i32 c1 = bitwise_count(w)
+        i64 c2 = w <= b1 ? w : b1
+        i64 c3 = (i64)u
+        i64 total <- add(total, c3)
+        i64 total <- maximum(total, b9)
+        let i32 c4 = i * 4
+        c5 = select:
+            c1 when u != 3 || w >= 0
+            c4 when i >= 0
+        f32 x = load a[u]
+        i64 o[i] = total
+        ",
+        &[
+            ("a", Input, Some(F32)),
+            ("b", Input, Some(U32)),
+            ("c", Input, Some(DType::I64)),
+            ("o", Output, Some(DType::I64)),
+        ],
+        EXACT,
+    );
+    let other: Vec<&str> = got
+        .iter()
+        .map(String::as_str)
+        .filter(|line| !line.starts_with("add.s64 %rd") || line.contains(", 5"))
+        .collect();
+    assert_eq!(
+        other,
+        [
+            "mul.wide.s32 %rd4, %r3, 4",
+            "ld.global.u32 %r4, [%rd5]",
+            "mul.wide.s32 %rd6, %r3, 8",
+            "ld.global.s64 %rd8, [%rd7]",
+            "mov.s64 %rd9, 0",
+            "min.u32 %r5, %r4, 7",
+            "max.u32 %r6, %r4, %r5",
+            "div.u32 %r7, %r6, 3",
+            "add.s64 %rd10, %rd8, 5",
+            "sub.s64 %rd11, %rd8, %rd10",
+            "min.s64 %rd12, %rd8, %rd11",
+            "max.s64 %rd13, %rd12, 9",
+            "rem.s64 %rd14, %rd13, 3",
+            "xor.b64 %rd15, %rd14, 3",
+            "setp.lt.s64 %p0, %rd15, 0",
+            "setp.ne.s64 %p1, %rd14, 0",
+            "and.pred %p2, %p0, %p1",
+            "div.s64 %rd16, %rd13, 3",
+            "selp.s64 %rd17, -1, 0, %p2",
+            "shr.s64 %rd19, %rd8, 2",
+            "and.b64 %rd20, %rd8, 255",
+            "neg.s64 %rd21, %rd8",
+            "abs.s64 %rd22, %rd8",
+            "popc.b64 %r8, %rd8",
+            "setp.le.s64 %p3, %rd8, %rd10",
+            "selp.s64 %rd23, %rd8, %rd10, %p3",
+            "cvt.u64.u32 %rd24, %r4",
+            "max.s64 %rd9, %rd9, %rd22",
+            "shl.b32 %r9, %r3, 2",
+            "setp.ne.u32 %p4, %r4, 3",
+            "setp.ge.s64 %p5, %rd8, 0",
+            "or.pred %p6, %p4, %p5",
+            "selp.s32 %r10, %r8, %r9, %p6",
+            "mul.wide.u32 %rd25, %r4, 4",
+            "ld.global.f32 %f0, [%rd26]",
+            "st.global.s64 [%rd27], %rd9",
+        ]
+    );
+}
+
 // --- floats ----------------------------------------------------------------------------------------------
 
 /// Every float instruction that rounds says so, and with the fusion decision off a product and the sum that reads
@@ -703,6 +793,62 @@ fn half_precision_runs_in_16_bit_registers() {
             "selp.b16 %h7, %h5, %h0, %p0",
             "add.s64 %rd4, %rd1, %rd2",
             "st.global.b16 [%rd4], %h7",
+        ]
+    );
+}
+
+/// The half forms the other tests leave out: a product and a sum apart, a minimum, the truth of a half against a
+/// zero in a register, and the conversions between a half and the integers.
+#[test]
+fn the_other_half_forms() {
+    let got = under_grid(
+        "
+        f16 x = load a[i]
+        bf16 b = load c[i]
+        f16 p = x * x
+        f16 s = p + x
+        f16 m = minimum(s, x)
+        bool t = (bool)m
+        bool e = (m >= x) ^ (m == s)
+        u32 u = (u32)m
+        i64 l = (i64)m
+        f16 h1 = (f16)u
+        f16 h2 = (f16)l
+        i32 n = (i32)b
+        bf16 b2 = (bf16)n
+        f16 h3 = t ? h1 : h2
+        f16 h4 = e ? h3 : m
+        f16 o[i] = h4
+        bf16 q[i] = b2
+        ",
+        &[
+            ("a", Input, Some(F16)),
+            ("c", Input, Some(BF16)),
+            ("o", Output, Some(F16)),
+            ("q", Output, Some(BF16)),
+        ],
+        EXACT,
+    );
+    assert_eq!(
+        got[5..22],
+        [
+            "mul.rn.f16 %h2, %h0, %h0",
+            "add.rn.f16 %h3, %h2, %h0",
+            "min.f16 %h4, %h3, %h0",
+            "mov.b16 %h5, 0",
+            "setp.neu.f16 %p0, %h4, %h5",
+            "setp.ge.f16 %p1, %h4, %h0",
+            "setp.eq.f16 %p2, %h4, %h3",
+            "xor.pred %p3, %p1, %p2",
+            "cvt.rzi.u32.f16 %r4, %h4",
+            "cvt.rzi.s64.f16 %rd7, %h4",
+            "cvt.rn.f16.u32 %h6, %r4",
+            "cvt.rn.f16.s64 %h7, %rd7",
+            "cvt.rzi.s32.bf16 %r5, %h1",
+            "cvt.rn.bf16.s32 %h8, %r5",
+            "selp.b16 %h9, %h6, %h7, %p0",
+            "selp.b16 %h10, %h9, %h4, %p3",
+            "add.s64 %rd8, %rd2, %rd4",
         ]
     );
 }
@@ -1108,6 +1254,10 @@ fn a_statement_outside_the_rules_is_an_error_that_names_it() {
             "a loop asks to be unrolled",
         ),
         ("    f64 y = load a[i]", "no PTX rule for the dtype f64"),
+        (
+            "    for j in 0..4:\n        i32 m <- maximum(m, j)",
+            "no PTX rule for a state of i32 seeded -1000000",
+        ),
         (
             "    bf16 v = (bf16)x\n    bf16 w = v + v",
             "no PTX rule for Add at bf16 on sm_120",
