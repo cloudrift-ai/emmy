@@ -32,7 +32,7 @@ the chunk positions.
 The sync compute-fill applies the same XOR on its slab ``Write`` stores (one
 vector store per 16 B run) and on a fragment producer's ``RegStore``\\ s, and its per-cell
 producer-cone replication is planned by
-:meth:`SyncTransport._run_plans` — run-invariant stmts hoist once, a stride-1 k-indexed gmem
+:meth:`SyncTransport._run_plans` — a stride-1 k-indexed gmem
 ``Load`` merges into one vector ``Load`` per run. Scalar-``Load``-drained slabs stay plain
 row-major (NONE-swizzle, linear writes and reads).
 ``_atom._staged`` — the one atom-agnostic driver — builds the transport, asks the atom strategy
@@ -907,13 +907,10 @@ class SyncTransport:
         return d.value if isinstance(d, Literal) and isinstance(d.value, int) else None
 
     def _run_plans(self, op: SyncOperand, v: int) -> list[str]:
-        """Per-position emission plan for one operand's ``V``-cell fill run — ``"hoist"`` /
-        ``"vector"`` / ``"cell"``. Classified by PROBING the value closure at synthetic coords
-        (col 0 vs col 1; the probe stmts are planning-only, never emitted):
+        """Per-position emission plan for one operand's ``V``-cell fill run — ``"vector"`` or
+        ``"cell"``. Classified by PROBING the value closure at synthetic coords (col 0 vs col 1; the
+        probe stmts are planning-only, never emitted):
 
-        - identical at both cols ⇒ run-INVARIANT (the stat-row loads, whose index is the run's
-          row alone) — emit once, unsuffixed, but only while its SSA deps stay outside the
-          per-cell defs (a dep on a replicated name demotes it back to per-cell);
         - a scalar ``Load`` whose last-dim index advances by exactly +1 per cell, leading dims
           col-free, and whose every run starts on a ``V``-element boundary of its buffer (the
           cone's k-indexed operand read) ⇒ the run's V scalar loads merge into ONE vector ``Load``.
@@ -922,18 +919,16 @@ class SyncTransport:
           a slice's offset, and every leading coordinate times its row stride (a 260-wide bf16 row
           puts every odd row 8 B off the 16 B grid);
         - anything else replicates per cell (a cone stmt whose read doesn't advance +1 with
-          the slab col — e.g. a col-strided gather, or a vector read no shape proves aligned)."""
+          the slab col — e.g. a col-strided gather, or a vector read no shape proves aligned). A
+          statement that is the same at every col (the stat-row loads, whose index is the run's
+          row alone) replicates too: the body's normal form holds its value once."""
         probe_row, probe_k0, probe_col, zero = Var("__srow"), Var("__sk0"), Var("__scol"), Literal(0, "int")
         s0, _ = op.value(probe_k0, probe_row, zero)
         s1, _ = op.value(probe_k0, probe_row, Literal(1, "int"))
         sz, _ = op.value(zero, probe_row, probe_col)
         ctx = SimplifyCtx.empty()
         plans: list[str] = []
-        cell_defs: set[str] = set()
         for p, (a, b) in enumerate(zip(s0, s1, strict=True)):
-            if str(a) == str(b) and not (set(a.deps()) & cell_defs):
-                plans.append("hoist")
-                continue
             step = SyncTransport._affine_step(a.index[-1], b.index[-1], ctx) if isinstance(a, Load) and isinstance(b, Load) else None
             if (
                 isinstance(a, Load)
@@ -949,7 +944,6 @@ class SyncTransport:
                 plans.append("vector")
             else:
                 plans.append("cell")
-            cell_defs |= exposed_defines(a)
         return plans
 
     @property
@@ -1025,21 +1019,15 @@ class SyncTransport:
                 stmts, val = op.value(k0_cur, row, cell_col)
                 cell_stmts.append(stmts)
                 vals.append(val)
-            hoisted_defs = {nm for p, stmt in enumerate(cell_stmts[0]) if plans[p] == "hoist" for nm in exposed_defines(stmt)}
-            vals = [val if val in hoisted_defs else f"{val}__c{j}" for j, val in enumerate(vals)]
-            # Per-cell SSA defs — the names each replica suffixes. HOISTED positions (run-invariant
-            # stmts: the stat-row loads, whose value is identical across the run's cells) emit once,
-            # unsuffixed, and per-cell references pass through to them; VECTOR positions (a scalar
-            # gmem ``Load`` whose last-dim index advances by exactly +1 per cell — the cone's
-            # k-indexed operand read) merge the run's V scalar 2 B loads into ONE vector ``Load``
-            # binding every cell's suffixed name (one 16 B ld like the cp.async fill, instead of V
-            # scalar loads — the compute fill issued 3.6x cuBLAS's LSU instructions). Everything
-            # else replicates per cell as before.
-            local = {nm for p, st in enumerate(cell_stmts[0]) if plans[p] != "hoist" for nm in exposed_defines(st)}
+            vals = [f"{val}__c{j}" for j, val in enumerate(vals)]
+            # Each replica suffixes its SSA defs. VECTOR positions (a scalar gmem ``Load`` whose
+            # last-dim index advances by exactly +1 per cell — the cone's k-indexed operand read)
+            # merge the run's V scalar 2 B loads into ONE vector ``Load`` binding every cell's
+            # suffixed name (one 16 B ld like the cp.async fill, instead of V scalar loads — the
+            # compute fill issued 3.6x cuBLAS's LSU instructions). Everything else replicates per
+            # cell.
+            local = {nm for st in cell_stmts[0] for nm in exposed_defines(st)}
             for p in range(len(cell_stmts[0])):
-                if plans[p] == "hoist":
-                    body.append(cell_stmts[0][p])
-                    continue
                 if plans[p] == "vector":
                     ld = cell_stmts[0][p]
                     body.append(Load(names=tuple(f"{ld.names[0]}__c{j}" for j in range(v)), input=ld.input, index=ld.index, dtype=ld.dtype))
