@@ -29,6 +29,27 @@ def test_effective_flags_reads_env(monkeypatch) -> None:
     assert nvcc.effective_flags() == []
 
 
+def test_precision_flags_spell_each_class_the_base_does_not_imply() -> None:
+    """``--use_fast_math`` is the umbrella's with the exponential; every other decision away from what that flag, or
+    nvcc's own default, implies is spelled by its own flag. The exponential itself is the kernel's ``__expf``."""
+    from emmy.compiler.pipeline.search.space import precision_pins
+
+    def flags(**pins) -> list[str]:
+        return nvcc.precision_flags(precision_pins(pins))
+
+    assert flags(FAST_MATH=True) == ["--use_fast_math"]
+    assert flags(FAST_MATH=False) == []
+    assert flags(FAST_MATH=False, FAST_EXP=True) == []
+    assert flags(FAST_MATH=True, FAST_DIV=False) == ["--use_fast_math", "--prec-div=true"]
+    assert flags(FAST_MATH=True, FAST_SQRT=False) == ["--use_fast_math", "--prec-sqrt=true"]
+    assert flags(FAST_MATH=True, FLUSH_TO_ZERO=False) == ["--use_fast_math", "--ftz=false"]
+    assert flags(FAST_MATH=True, CONTRACT_FMA=False) == ["--use_fast_math", "--fmad=false"]
+    assert flags(FAST_MATH=False, FAST_DIV=True, FAST_SQRT=True) == ["--prec-div=false", "--prec-sqrt=false"]
+    assert flags(FAST_MATH=False, FLUSH_TO_ZERO=True, CONTRACT_FMA=False) == ["--ftz=true", "--fmad=false"]
+    # The accurate exponential drops the fast library, so each class it implied is spelled on its own.
+    assert flags(FAST_MATH=True, FAST_EXP=False) == ["--ftz=true", "--prec-div=false", "--prec-sqrt=false"]
+
+
 def test_cubin_cache_key_partitions_by_flags(monkeypatch) -> None:
     """Same source compiled at different opt levels must key to different
     cubins — otherwise an -O1 sweep would serve its cubin to an -O3 run."""

@@ -47,7 +47,7 @@ DEFAULT_SM_COUNT = gpu.DEFAULT_GPU.sm_count
 
 
 def _env_compile_flags() -> str:
-    """Effective nvcc flags, including the FAST_MATH policy and custom overrides.
+    """Effective nvcc flags, including the precision decisions' flags and custom overrides.
 
     Folded into Context.structural_key so timing evidence cannot cross arithmetic regimes."""
     from emmy.compiler.backend.cuda.nvcc import effective_flags  # noqa: PLC0415
@@ -61,8 +61,8 @@ def _env_compile_flags() -> str:
 _OPT_TOKEN = re.compile(r"(?:-Xcicc\s+)?-O(\d)")
 
 
-#: The flag fast math adds — the one extra compiler flag that is a regime of its own, since it changes the
-#: code a kernel runs as (``backend.cuda.nvcc.effective_flags``).
+#: The flag fast math adds — with the precision classes' own flags, a regime of its own, since it changes the
+#: code a kernel runs as (``backend.cuda.nvcc.precision_flags``).
 FAST_MATH_FLAG = "--use_fast_math"
 
 
@@ -183,7 +183,7 @@ class Context:
     # measured in — a kernel timed on 16 threads says nothing about one deployed on 6. Empty and 0 on CUDA.
     host_cpu: str = ""
     threads: int = 0
-    # Effective nvcc flags, from FAST_MATH plus EMMY_NVCC_FLAGS. Folded into structural_key
+    # Effective nvcc flags, from the precision decisions plus EMMY_NVCC_FLAGS. Folded into structural_key
     # so timings under different arithmetic or optimization flags cannot rank one another.
     # Populated from the environment by probe / from_target.
     compile_flags: str = ""
@@ -245,6 +245,7 @@ class Context:
         construction — :data:`DEFAULT_SM_COUNT` is the most common card in the corpus, so a
         misresolved name produces H_* features identical to a correct one on a GPU-less host.
         Recording goldens on a card before adding it to the registry is exactly when this fires."""
+        from emmy.compiler.backend.cuda.nvcc import precision_flags  # noqa: PLC0415
         from emmy.compiler.pipeline.search.space import COLD_CACHE, FAST_MATH, precision_pins, regime_pins  # noqa: PLC0415
 
         spec = gpu.by_name(gpu_name) if gpu_name else None
@@ -261,7 +262,7 @@ class Context:
             # The one place the decision is read off the flag string: a caller naming only flags names the umbrella.
             precision = {FAST_MATH.name: FAST_MATH_FLAG in compile_flags.split()}
         elif compile_flags is None and precision is not None:
-            compile_flags = FAST_MATH_FLAG if regime[FAST_MATH.name] else ""
+            compile_flags = " ".join(precision_flags(regime))
         return cls(
             compute_capability=cap,
             max_dynamic_smem=_max_dynamic_smem_for(cap),
@@ -378,12 +379,11 @@ class Context:
         The flags enter **split** (:func:`split_opt_level`), never raw, so that one regime has one
         key however it is spelled.
         """
-        from emmy.compiler.pipeline.search.space import FAST_MATH  # noqa: PLC0415
+        from emmy.compiler.pipeline.search.space import precision_overrides  # noqa: PLC0415
         from emmy.compiler.structural import digest  # noqa: PLC0415
 
         regime = ("cold-cache",) if self.cold_cache else ()
-        pins = self.precision_pins()
-        overrides = tuple((name, value) for name, value in pins.items() if value != pins[FAST_MATH.name])
+        overrides = tuple(precision_overrides(self.precision_pins()).items())
         precision = ("precision", overrides) if overrides else ()
         cpu = ("cpu", self.host_cpu, self.threads) if self.backend_name == "cpu" else ()
         return digest("Context", self.compute_capability, *split_opt_level(self.compile_flags), *precision, *regime, *cpu)

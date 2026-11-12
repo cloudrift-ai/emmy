@@ -450,8 +450,9 @@ def fast_math_knobs(knobs: Mapping) -> bool:
 
 
 def precision_trading_pins(pins: Mapping) -> bool:
-    """Whether recorded pins enable a precision-trading compiler or NVCC policy."""
-    from emmy.compiler.pipeline.search.space import FAST_MATH, PRECISION_KNOBS  # noqa: PLC0415
+    """Whether recorded pins enable a precision-trading compiler or NVCC policy: a decision the standard regime
+    leaves off."""
+    from emmy.compiler.pipeline.search.space import precision_pins  # noqa: PLC0415
 
-    umbrella = bool(pins.get(FAST_MATH.name, False))
-    return umbrella or any(bool(pins.get(knob.name, False)) for knob in PRECISION_KNOBS if knob is not FAST_MATH)
+    standard = precision_pins({})
+    return any(value and not standard[name] for name, value in precision_pins(dict(pins)).items())

@@ -9,13 +9,14 @@ from emmy.compiler.pipeline.fork import DeferredFork
 from emmy.compiler.pipeline.search.pins import spelled_arm, unreproducible_pin_flag
 
 
-@pytest.mark.parametrize("override", ["FAST_EXP", "F16_MMA_F32_ACC", "FP8_MMA"])
+@pytest.mark.parametrize("override", ["FAST_EXP", "F16_MMA_F32_ACC", "FP8_MMA", "FAST_DIV", "FAST_SQRT", "FLUSH_TO_ZERO"])
 def test_recorded_precision_pins_preserve_the_default_and_overrides(monkeypatch, override):
     from emmy.compiler.pipeline.search.golden import regime_live
     from emmy.compiler.pipeline.search.pins import measured_regime_pins
+    from emmy.compiler.pipeline.search.space import PRECISION_KNOBS
 
-    for name in ("FAST_MATH", "FAST_EXP", "F16_MMA_F32_ACC", "FP8_MMA"):
-        monkeypatch.delenv(f"EMMY_{name}", raising=False)
+    for knob in PRECISION_KNOBS:
+        monkeypatch.delenv(knob.env, raising=False)
     assert measured_regime_pins() == {"FAST_MATH": True}
     assert regime_live({"FAST_MATH": True})
     assert not regime_live({"FAST_MATH": False})

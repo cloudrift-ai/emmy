@@ -13,16 +13,15 @@ from itertools import product
 
 from emmy.compiler.context import FAST_MATH_FLAG
 from emmy.compiler.pipeline.search.dataset.kernel import KernelDef
-from emmy.compiler.pipeline.search.space import COLD_CACHE, FAST_MATH, REGIME_KNOBS, precision_pins
+from emmy.compiler.pipeline.search.space import COLD_CACHE, FAST_MATH, REGIME_KNOBS, precision_overrides, precision_pins
 from emmy.compiler.wire import Wire
 
 
 def regime_of(cold_cache: bool = False, precision: dict | None = None) -> str:
     """The recorded precision and cache regime, with independent overrides preserved and no ambient pins."""
     pins = precision_pins(precision or {})
-    umbrella = pins[FAST_MATH.name]
-    parts = [FAST_MATH_FLAG] if umbrella else []
-    parts.extend(f"{name}={int(value)}" for name, value in pins.items() if name != FAST_MATH.name and value != umbrella)
+    parts = [FAST_MATH_FLAG] if pins[FAST_MATH.name] else []
+    parts.extend(f"{name}={int(value)}" for name, value in precision_overrides(pins).items())
     return " ".join([*parts, *(["cold-cache"] if cold_cache else [])])
 
 

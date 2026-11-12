@@ -72,7 +72,7 @@ class _Softmax(torch.nn.Module):
 @pytest.mark.parametrize("shape", [(4, 128), (8, 256), (2, 64), (2, 4, 128)])
 def test_online_softmax_pairing_reaches_the_kernel(shape) -> None:
     """The pairing must have fired: ONE fused kernel streaming the twisted carrier, whose signature
-    is the recipe's rescale factors (``<score>__alpha = expf(...)`` and ``__beta`` — ``Fold.merge``
+    is the recipe's rescale factors (``<score>__alpha`` and ``__beta``, one ``<score>__alpha__e = expf(...)`` — ``Fold.merge``
     namespaces them on the arriving name, so they are stable across SSA renaming). Fast math may spell
     the ``exp`` as ``__expf`` (the per-thread row stream the RTX 4090 picks for a 2x64 softmax).
 
@@ -88,7 +88,7 @@ def test_online_softmax_pairing_reaches_the_kernel(shape) -> None:
     graph = trace_module(_Softmax().cpu(), (torch.randn(*shape),))
     compiled = CudaBackend().compile(graph)
     srcs = [getattr(node.op, "kernel_source", "") for node in compiled.nodes.values()]
-    assert any(re.search(r"__(alpha|beta) = (__)?expf\(", src) for src in srcs), "online-softmax pairing did not fire"
+    assert any(re.search(r"__(alpha|beta)(__e)? = (__)?expf\(", src) for src in srcs), "online-softmax pairing did not fire"
 
 
 # --------------------------------------------------------------------------- #

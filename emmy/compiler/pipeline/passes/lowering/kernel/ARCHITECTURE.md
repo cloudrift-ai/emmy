@@ -858,13 +858,26 @@ Memory and reduction peepholes record their decisions as on-by-default BOOL poli
 pattern: idempotence via the recorded knob, `EMMY_<NAME>=0` pins it off, never a search dimension).
 
 `040_split_invariant_divides` replaces floating division by an axis-invariant divisor with a hoisted reciprocal and
-multiply when `FAST_MATH` is enabled. It runs after dtype stamping, preserves floating dtypes, and leaves integer or
+multiply when the division knob `FAST_DIV` is on (it follows `FAST_MATH`). It runs after dtype stamping, preserves
+floating dtypes, and leaves integer or
 varying division and explicit round-to-nearest f32 division alone. The latter protects FP4 encoding boundaries even
 under the default fast-math regime. Structural body normalization stays independent of arithmetic policy.
 
+`083_share_rescale_exponential` computes an online softmax's two rescale factors with one exponential. The recipe's
+advance (`SOFTMAX.advance`) gives each side of a pivot pair `exp` of its distance below `gn = maximum(g, g_o)`; one
+distance is `0`, so one exponential of the other gives both factors, and a select gives the factor of a side whose
+pivot is not finite (`-inf` gives `0`, NaN gives NaN). Every factor keeps the bits the two exponentials compute,
+whichever exponential and flush mode the kernel takes, so the rewrite is exact. It runs where the exponential is the
+accurate one, which it saves for two compares and four selects; under `FAST_EXP` the exponential is one `MUFU` and
+one multiply, fewer instructions than the selects, so the pair keeps both. It reaches the per-element folds, the
+register and split merges, and a cooperative combine's merge. The recipe keeps
+both exponentials: it is Loop IR, which every attention kernel's identity reads.
+
 `085_fast_exp` follows the enabled `FAST_MATH` default, unless an explicit `FAST_EXP` pin overrides it. It lowers `exp`
 through `__expf`, promoting half inputs and rounding back afterward, and records the policy for idempotence. The rewrite
-includes generated `RegStore` epilogue bodies, each traversed in its own SSA scope. Host evaluation continues to use
+reaches every expression a statement holds, so it includes the statements a field carries that are not a body: a
+generated `RegStore` epilogue and a cooperative combine's merge (`WarpShuffle` / `TreeHalve` `combine_states`, the
+online softmax's rescale factors). Host evaluation continues to use
 `exp`; only CUDA evaluation uses the approximate intrinsic. `100_loopify` remains off by default (`EMMY_LOOPIFY=N`), a
 generic **loop re-roller** iterated to a fixpoint. Loopify folds a maximal run of ≥ `N` congruent per-fragment
 statements — an mma body's per-fragment epilogue (`FragmentApply`), its load+mma pairs, the fragment `RegStore`s, the

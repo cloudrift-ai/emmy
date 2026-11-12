@@ -1598,14 +1598,26 @@ kernel's structural features (statement/op histogram + loop extents + operand dt
 (`features.stamps`); `H_*` the card and regime (`Context.features`). Neither is written onto an op: an op's knobs
 hold decisions only, every key a registered knob (Part 6).
 
-**`FAST_MATH` / `F16_MMA_F32_ACC` / `FP8_MMA` / `FAST_EXP`** (BOOL, pin-only precision restrictions /
-`lowering/kernel/085_fast_exp`) — the **precision-trading family**. Precedence per knob: its own pin > the
-`FAST_MATH` umbrella > true (`space.precision_pin`). `FAST_EXP` swaps libm `expf` for `__expf`;
-`F16_MMA_F32_ACC` admits the fixed domain's f16-accumulate atom choices (`mma_m16n8k16_f16_f16` — chunked f32
-register promote), while `FP8_MMA` admits its native fp8 atoms. Without the effective gate, Algorithm 1's immutable
-context excludes those choices while composing its lazy frontier.
-`FAST_MATH` also controls NVCC `--use_fast_math` and the typed invariant-divide rewrite. It remains `unfeatured`:
-schedule choices keep their concrete knob identity, and effective compiler flags separate measurement contexts.
+**`FAST_MATH` / `F16_MMA_F32_ACC` / `FP8_MMA` / `FAST_EXP` / `FAST_DIV` / `FAST_SQRT` / `FLUSH_TO_ZERO` /
+`CONTRACT_FMA`** (BOOL, pin-only precision restrictions) — the **precision-trading family**. Precedence per knob: its
+own pin > the `FAST_MATH` umbrella > true (`space.precision_pin`); `CONTRACT_FMA` alone keeps its own default, on in
+both regimes as nvcc's is, so only its own pin turns contraction off (`space.precision_default`). `F16_MMA_F32_ACC`
+admits the fixed domain's f16-accumulate atom choices (`mma_m16n8k16_f16_f16` — chunked f32 register promote), while
+`FP8_MMA` admits its native fp8 atoms. Without the effective gate, Algorithm 1's immutable context excludes those
+choices while composing its lazy frontier.
+The other five are one knob per instruction class, each picking the instruction its class compiles to.
+`FAST_EXP` swaps libm `expf` for `__expf` (`lowering/kernel/085_fast_exp`); `FAST_DIV` picks approximate division
+and reciprocal, and is the one home of multiplying by a reciprocal (`lowering/kernel/040_split_invariant_divides`);
+`FAST_SQRT` the approximate square root; `FLUSH_TO_ZERO` flushes subnormals; `CONTRACT_FMA` fuses a multiply and an
+add. `FAST_EXP` with `FLUSH_TO_ZERO` off is the fast exponential that keeps subnormal results: ptxas lowers the
+non-flushing `ex2.approx.f32` under `__expf` to one hardware exponential on a halved argument and a squaring of its
+result, as accurate there as an explicit shift and scale. Through nvcc each class is a flag (`backend.cuda.nvcc.precision_flags`): `--use_fast_math` when the umbrella and
+`FAST_EXP` are both on — the flag also approximates exp and the transcendental functions no knob names (log, sine,
+cosine, tanh, pow), and nothing after it restores the accurate exp — then `--ftz` / `--prec-div` / `--prec-sqrt` /
+`--fmad` for each decision that base does not imply. At their defaults the new classes spell nothing, so the flags,
+the context key and the `H_*` features of every recorded regime are what they were before the classes had knobs.
+`FAST_MATH` remains `unfeatured`: schedule choices keep their concrete knob identity, and effective compiler flags
+and independent overrides separate measurement contexts.
 New golden inventories and measurements record the effective umbrella explicitly, so replay preserves that regime.
 
 ### Classic schedule keys

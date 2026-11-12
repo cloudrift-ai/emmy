@@ -289,7 +289,7 @@ _OBSOLETE_TABLES = ("loop_op", "tile_op", "kernel_op", "cuda_op", "lowering", "k
 #: The schema and cached identities (``PRAGMA user_version``): kernel wire, exact kernel identity and context key, and
 #: what a context's regime measures. A file holding another is re-created; bump when any changes. The DB tests pin
 #: kernel and context identities.
-_VERSION = 13  # An Assign is one scalar definition, one operation over names and literals: every kernel re-keyed.
+_VERSION = 14  # A context's precision decisions spell the division, square root, flush and contraction knobs too.
 # Drop order respects the foreign keys; create order is the reverse.
 _DROP_ORDER = (
     "perf",

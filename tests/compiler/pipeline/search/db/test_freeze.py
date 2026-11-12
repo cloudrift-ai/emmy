@@ -58,12 +58,13 @@ def test_reason_keeps_a_row_of_either_precision_regime(monkeypatch) -> None:
     assert freeze_reason(_row("k", us=500.0, knobs=_ROW), _STAMPS) is None
     assert freeze_reason(_row("k", us=500.0, knobs=_ROW, flags="--use_fast_math"), _STAMPS) is None
     assert freeze_reason(_row("k", us=500.0, knobs=_ROW, flags="-lineinfo --use_fast_math"), _STAMPS) is None
-    assert REGIME_PINS[""] == dict.fromkeys(("FAST_MATH", "FAST_EXP", "F16_MMA_F32_ACC", "FP8_MMA", "COLD_CACHE"), False)
-    assert REGIME_PINS["--use_fast_math"] == {
-        **dict.fromkeys(("FAST_MATH", "FAST_EXP", "F16_MMA_F32_ACC", "FP8_MMA"), True),
-        "COLD_CACHE": False,
-    }
+    following = ("FAST_MATH", "FAST_EXP", "F16_MMA_F32_ACC", "FP8_MMA", "FAST_DIV", "FAST_SQRT", "FLUSH_TO_ZERO")
+    assert REGIME_PINS[""] == {**dict.fromkeys(following, False), "CONTRACT_FMA": True, "COLD_CACHE": False}
+    assert REGIME_PINS["--use_fast_math"] == {**dict.fromkeys(following, True), "CONTRACT_FMA": True, "COLD_CACHE": False}
     assert regime_of(False, {"FAST_MATH": True}) == "--use_fast_math" and regime_of() == ""
+    # Contraction is on in both regimes, so only turning it off is an independent override.
+    assert regime_of(False, {"FAST_MATH": False, "CONTRACT_FMA": True}) == ""
+    assert regime_of(False, {"FAST_MATH": True, "CONTRACT_FMA": False}) == "--use_fast_math CONTRACT_FMA=0"
 
 
 def test_freeze_preserves_cold_and_hot_rows_of_the_same_kernel(tmp_path):
@@ -270,10 +271,7 @@ def test_both_precision_lanes_freeze_as_pinned_rows_and_import_apart(tmp_path) -
     documents, _dropped = freeze_documents(db)
     [document] = documents.values()
     assert sorted(row.pins["FAST_MATH"] for row in document.rows) == [False, True]
-    assert all(
-        row.pins == dict.fromkeys(("FAST_MATH", "FAST_EXP", "F16_MMA_F32_ACC", "FP8_MMA"), row.pins["FAST_MATH"]) | {"COLD_CACHE": False}
-        for row in document.rows
-    )
+    assert all(row.pins == REGIME_PINS["--use_fast_math" if row.pins["FAST_MATH"] else ""] for row in document.rows)
     write_freeze(path, tmp_path / "freeze")
     db.close()
     again = SearchDB()
