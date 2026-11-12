@@ -804,8 +804,7 @@ Three consequences shape every pass here:
   packed vector into names (where that stood decided how long the elements stayed live); its names are the vector's
   lanes, and each read takes its lane where it stands.
 - **A name means what a statement binds it to, never what it is spelled like.** A name keeps its spelling until a
-  second binder shares it, so a name another name implies (a loop's `<axis>_end`, an array index written into a name)
-  is bound by a statement instead.
+  second binder shares it, so a name another name implies (a loop's `<axis>_end`) is bound by a statement instead.
 - **A pass that fuses statements reads the scope's ordering constraints, not positions.** The two halves of a load
   pair can stand apart with a moved value between them, and a vector's elements in any order. `Siblings` (`_siblings.py`)
   holds one scope's statements with their constraints: a set of statements can become one when no other statement
