@@ -126,9 +126,7 @@ impl Placer<'_> {
             .unwrap_or(0)
     }
     fn pure(stmt: &Statement) -> bool {
-        (stmt.is_pure() || matches!(stmt, Statement::Call(_)))
-            && stmt.nested().is_empty()
-            && !matches!(stmt, Statement::Load(l) if !l.carried.is_empty())
+        (stmt.is_pure() || matches!(stmt, Statement::Call(_))) && stmt.nested().is_empty()
     }
     fn reads(stmt: &Statement) -> HashSet<Name> {
         let mut out: HashSet<Name> = stmt.deps().into_iter().collect();

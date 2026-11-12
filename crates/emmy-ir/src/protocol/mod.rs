@@ -400,8 +400,10 @@ fn rewrite_axis_name(name: &Name, sigma: &HashMap<Name, Expression>) -> Vec<Name
 }
 
 impl Statement {
+    /// A load of a staged copy (`carried`) re-assigns registers declared ahead of its loop: an update, not a value.
     pub fn is_pure(&self) -> bool {
         self.flags().contains(PURE)
+            && !matches!(self, Statement::Load(load) if !load.carried.is_empty())
     }
 
     pub fn deps_deep(&self) -> bool {
@@ -461,6 +463,15 @@ impl Statement {
             out: Vec::new(),
         };
         self.visit(&mut visitor);
+        // A pointwise rewrite of a fragment in place names the fragment it rewrites as its output, and a load of a
+        // staged copy the registers it re-assigns.
+        match self {
+            Statement::FragmentApply(apply) if apply.in_place => visitor.out.push(apply.out),
+            Statement::Load(load) if !load.carried.is_empty() => {
+                visitor.out.extend(load.names.iter().copied())
+            }
+            _ => {}
+        }
         visitor.out
     }
 
@@ -1489,7 +1500,7 @@ mod tests {
             let Statement::TreeHalve(moved) = &*moved else {
                 panic!("not a tree halve");
             };
-            assert_eq!(moved.inner, Some((Name::from("n_ln"), 32)));
+            assert_eq!(moved.inner.as_ref().map(|(_, scale)| *scale), Some(32));
         }
     }
 }

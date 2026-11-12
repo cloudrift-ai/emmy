@@ -865,7 +865,16 @@ def emit_combine(
         out += [Write(output=b, index=(idx,), values=(st,)) for b, st in zip(bufs, state, strict=True)]
         out.append(Sync())
         out.append(
-            TreeHalve(bufs=bufs, state=state, state_b=state_b, combine_states=prog, length=n_threads, tid_var=t, dtype=dtype, inner=inner)
+            TreeHalve(
+                bufs=bufs,
+                state=state,
+                state_b=state_b,
+                combine_states=prog,
+                length=n_threads,
+                tid_var=Var(t),
+                dtype=dtype,
+                inner=(Var(iv), scale),
+            )
         )
         return out
     folds = ReduceStage(Level.BLOCK, n_threads).combine(warp_size=warp_size, segmented=segmented)
@@ -892,7 +901,9 @@ def emit_combine(
             else:
                 out += [Write(output=b, index=(Var(tid_var),), values=(st,)) for b, st in zip(bufs, state, strict=True)]
             out.append(Sync())
-            out.append(TreeHalve(bufs=bufs, state=state, state_b=state_b, combine_states=prog, length=width, tid_var=tid_var, dtype=dtype))
+            out.append(
+                TreeHalve(bufs=bufs, state=state, state_b=state_b, combine_states=prog, length=width, tid_var=Var(tid_var), dtype=dtype)
+            )
         else:  # FoldMove.ATOMIC / FoldMove.REG — cross-CTA / register tiers, not emitted by the intra-CTA walk.
             raise NotImplementedError(f"intra-CTA combine cannot emit {fold} (cta/reg tiers are future work)")
     return out

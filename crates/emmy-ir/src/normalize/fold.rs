@@ -107,7 +107,7 @@ pub(crate) fn read_counts(body: &Body, exposed: &HashSet<Name>) -> HashMap<Name,
 
 pub(crate) fn is_droppable_pure(stmt: &Statement) -> bool {
     match stmt {
-        Statement::Load(l) => l.carried.is_empty(),
+        Statement::Load(_) => stmt.is_pure(),
         Statement::Accum(_)
         | Statement::Assign(_)
         | Statement::Init(_)

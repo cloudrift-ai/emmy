@@ -540,11 +540,11 @@ macro_rules! with_statement_types {
                     state_b: Names [LOCAL],
                     combine_states: Stmts [STMTS],
                     length: i64 [],
-                    tid_var: Name [],
+                    tid_var: Expression [EXPRESSION] : Index,
                     dtype: DType [] = DType::F32,
                     barrier_id: i64 [] = 0,
                     barrier_count: Option<i64> [] = None,
-                    inner: Option<(Name, i64)> [] = None,
+                    inner: Option<(Expression, i64)> [EXPRESSION] : Index = None,
                 }
                 /// Cross-thread combine of a (possibly multi-component) monoid state over `length` lanes via `__shfl_xor_sync` —
                 /// a register-only butterfly (no smem, no syncthreads).
@@ -675,7 +675,7 @@ macro_rules! with_statement_types {
                 /// k16 drain folds it into a 16-bit fragment and no scale reaches the instruction. These two never appear on one
                 /// operand.
                 kernel BlockScaleLoad {} {
-                    frag: Name [DEFINES],
+                    frag: Name [UPDATES],
                     src_buffer: Name [BUFFER_READ],
                     src_index: Exprs [EXPRESSION] : Index,
                     role: Name [],
@@ -1382,7 +1382,7 @@ mod tests {
         }
         assert_eq!(
             blake3::hash(listing.as_bytes()).to_hex().as_str(),
-            "f3d5e7918178e3202a93f607d93db4b332d5ccdaa6a31e8429b3f012e810b18b",
+            "f186c7d8285bf9b9363d7e57e0713b688fc510be96071ac709885b167e6079b7",
             "{listing}"
         );
     }

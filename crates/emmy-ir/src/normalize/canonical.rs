@@ -1558,4 +1558,101 @@ for r in 0..4:
             "{normal}"
         );
     }
+
+    /// A tree combine reads the coordinates that index its slab: they follow the axes they name.
+    #[test]
+    fn a_tree_combine_follows_the_axes_that_index_its_slab() {
+        let normal = text(
+            &normalize_uncached(&body(
+                "
+                Tile(axes=(b in 0..2, k_co in 0..4, n_ln in 0..32), block_threads=128):
+                    for k in k_co..256 step 4:
+                        f32 x = load X[32 * b + n_ln, k]
+                        f32 s <- add(s, x) over k
+                    Smem(name=s_smem, extents=(128))
+                    f32 s_smem[k_co * 32 + n_ln] = s
+                    Sync
+                    TreeHalve(bufs=(s_smem), state=(s), state_b=(s__o), length=4, tid_var=k_co, inner=(n_ln, 32)):
+                        combine_states:
+                            s = s + s__o
+                    if k_co == 0:
+                        f32 O[32 * b + n_ln] = s
+                ",
+            ))
+            .unwrap(),
+        );
+        assert!(normal.contains("tid_var=a1, inner=(a2, 32)"), "{normal}");
+    }
+
+    /// A block-scale load fills a declared fragment, and a pointwise rewrite in place rewrites one: both keep its
+    /// name.
+    #[test]
+    fn a_fragment_keeps_one_name_through_a_scale_load_and_a_rewrite_in_place() {
+        let normal = text(
+            &normalize_uncached(&body(
+                "
+                Tile(axes=(m in 0..2, n in 0..16, _lane in 0..32), block_threads=32):
+                    RegFragment(name=_sf, role=a, shape=(16, 8, 64), dtype=f4e2m1x2, nregs=0)
+                    RegFragment(name=_c, role=c, shape=(16, 8, 16), dtype=f32)
+                    f32 w = load W[m]
+                    for k in 0..128 step 64:
+                        BlockScaleLoad(frag=_sf, src_buffer=S, src_index=(16 * m, k / 16), role=a, ldm=16)
+                        FragmentApply(out=_c, op=multiply, args=(FragmentArg(kind=frag, names=(_c)), FragmentArg(kind=uniform, names=(w))), in_place=true)
+                    RegStore(dst_buffer=O, dst_index=(16 * m, 8 * n), frag=_c, shape=(16, 8, 16), ldm=128, ldn=1, row_dim=0, col_dim=1)
+                ",
+            ))
+            .unwrap(),
+        );
+        let named = |line: &str, key: &str| -> String {
+            let line = normal
+                .lines()
+                .find(|l| l.contains(line))
+                .unwrap_or_else(|| panic!("{line}\n{normal}"));
+            let rest = &line[line.find(key).unwrap() + key.len()..];
+            rest[..rest.find(|c: char| c == ',' || c == ')').unwrap()].to_string()
+        };
+        assert_eq!(
+            named("nregs=0", "name="),
+            named("BlockScaleLoad", "frag="),
+            "{normal}"
+        );
+        assert_eq!(
+            named("dtype=f32", "name="),
+            named("FragmentApply", "out="),
+            "{normal}"
+        );
+        assert_eq!(
+            named("dtype=f32", "name="),
+            named("RegStore", "frag="),
+            "{normal}"
+        );
+    }
+
+    /// A staged copy re-assigns, inside the chunk loop, the registers a load declared ahead of it: the three keep
+    /// one set of names.
+    #[test]
+    fn a_staged_copy_keeps_the_names_its_first_load_declared() {
+        let normal = text(
+            &normalize_uncached(&body(
+                "
+                Tile(axes=(m in 0..4), block_threads=32):
+                    Smem(name=_s, extents=(2, 2))
+                    f32 p, q = load X[m, 0]
+                    for k in 0..8 step 2:
+                        f32 p, q = load X[0] carried=unpack
+                        f32 _s[k / 2 % 2, 0] = (p, q)
+                        Sync
+                        f32 p, q = load X[m, k + 2 < 8 ? k + 2 : 0] carried=load
+                ",
+            ))
+            .unwrap(),
+        );
+        let names: Vec<&str> = normal
+            .lines()
+            .filter(|line| line.contains("= load X"))
+            .map(|line| line.trim().split(" = ").next().unwrap())
+            .collect();
+        assert_eq!(names.len(), 3, "{normal}");
+        assert!(names.iter().all(|name| *name == names[0]), "{normal}");
+    }
 }
