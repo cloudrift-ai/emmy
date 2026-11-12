@@ -1260,6 +1260,18 @@ _CONSUMER_REGS = 240
 _SM_REGFILE = 65536
 
 
+def _end_var(k0: str, k_end: Expression | None) -> Var | None:
+    """The chunk loop's early-stop bound as the name :func:`_end_bound` binds it under, or ``None`` with no early stop."""
+    return Var(f"{k0}_end") if k_end is not None else None
+
+
+def _end_bound(k0: str, k_end: Expression | None) -> list[Statement]:
+    """The early-stop bound ``k_end`` as one named value ahead of the chunk loop, which the loop stops at and the
+    prefetch clamps read: evaluated once, where the raw expression at every use measurably spills on the flash
+    stream. A binding rather than a name the loop would imply, so the body's normal form carries it like any value."""
+    return [Let(name=f"{k0}_end", value=k_end)] if k_end is not None else []
+
+
 def _producer_band_kloop(
     *,
     transport: TmaTransport,
@@ -1306,6 +1318,8 @@ def _producer_band_kloop(
     pre: list[Statement] = [Cond(cond=BinaryExpression("==", tid, _lit(0)), body=inits), Sync()]
 
     k0, K = "_ks", k_extent
+    pre += _end_bound(k0, k_end)
+    end = _end_var(k0, k_end)
     i_expression = BinaryExpression("/", Var(k0), _lit(bk_elems))
     kaxis = Axis(name=k0, extent=K)
     setmaxnreg = (
@@ -1325,7 +1339,7 @@ def _producer_band_kloop(
     if ring >= 2:
         k0_next = BinaryExpression("+", Var(k0), _lit((ring - 1) * bk_elems))
         if k_end is not None:  # clamp onto the last chunk this CTA drains (the causal early stop)
-            end_var = Var(f"{k0}_end")  # the loop's hoisted for-init bound (StridedLoop.end)
+            end_var = _end_var(k0, k_end)
             last_k0 = BinaryExpression("*", BinaryExpression("/", BinaryExpression("-", end_var, _lit(1)), _lit(bk_elems)), _lit(bk_elems))
             k0_pref = TernaryExpression(cond=BinaryExpression("<", k0_next, end_var), if_true=k0_next, if_false=last_k0)
         else:
@@ -1343,7 +1357,7 @@ def _producer_band_kloop(
     prod: list[Statement] = [SetMaxNReg(_PRODUCER_REGS, "dec")] if setmaxnreg else []
     for s in range(ring - 1):  # prime chunks 0..ring-2 into slots 0..ring-2 (release generation 0)
         prod += transport.fill(k0=_lit(s * bk_elems), slot=_lit(s))
-    prod.append(StridedLoop(axis=kaxis, start=_lit(0), step=_lit(bk_elems), body=Body(tuple(prod_body)), unroll=False, end=k_end))
+    prod.append(StridedLoop(axis=kaxis, start=_lit(0), step=_lit(bk_elems), body=Body(tuple(prod_body)), unroll=False, end=end))
 
     # Compute: wait the data parity, drain the slot, close the band on the named barrier, release.
     # A drain that leaves its group running (``in_flight``) has waited out the PREVIOUS chunk's
@@ -1368,7 +1382,7 @@ def _producer_band_kloop(
             )
         )
     cons: list[Statement] = [SetMaxNReg(_CONSUMER_REGS, "inc")] if setmaxnreg else []
-    cons.append(StridedLoop(axis=kaxis, start=_lit(0), step=_lit(bk_elems), body=Body(tuple(cons_body)), unroll=False, end=k_end))
+    cons.append(StridedLoop(axis=kaxis, start=_lit(0), step=_lit(bk_elems), body=Body(tuple(cons_body)), unroll=False, end=end))
 
     role = Cond(cond=BinaryExpression(">=", tid, _lit(block_threads)), body=tuple(prod), else_body=tuple(cons))
     return decls, [*pre, role]
@@ -1506,7 +1520,7 @@ def pipelined_kloop(
         raw expression per iteration measurably spills; a symbolic extent clamps at runtime)."""
         k0_next = BinaryExpression("+", Var(k0), _lit(lag * bk_elems))
         if k_end is not None:
-            end_var = Var(f"{k0}_end")
+            end_var = _end_var(k0, k_end)
             last_k0 = BinaryExpression("*", BinaryExpression("/", BinaryExpression("-", end_var, _lit(1)), _lit(bk_elems)), _lit(bk_elems))
             bound: Expression = end_var
         elif symbolic:
@@ -1531,7 +1545,7 @@ def pipelined_kloop(
         return TernaryExpression(cond=BinaryExpression("<", base, end), if_true=base, if_false=last_k0)
 
     decls: list[Statement] = []
-    pre: list[Statement] = []
+    pre: list[Statement] = _end_bound(k0, k_end)
     for g in groups:
         decls += g.transport.slab_decls(g.ring)
     for g in groups:
@@ -1622,7 +1636,7 @@ def pipelined_kloop(
         step=_lit(bk_elems),
         body=Body(tuple(body)),
         unroll=False,
-        end=k_end,
+        end=_end_var(k0, k_end),
         seed=seed,
     )
     return decls, [*pre, outer]
@@ -1664,7 +1678,13 @@ def _carried_kloop(
             body += next_loads(0, other)
         body += mmas(this)
     outer = StridedLoop(
-        axis=Axis(name=k0, extent=k_extent), start=_lit(0), step=_lit(bk_elems), body=Body(tuple(body)), unroll=False, end=k_end, seed=seed
+        axis=Axis(name=k0, extent=k_extent),
+        start=_lit(0),
+        step=_lit(bk_elems),
+        body=Body(tuple(body)),
+        unroll=False,
+        end=_end_var(k0, k_end),
+        seed=seed,
     )
     return [*head, outer]
 
@@ -1700,7 +1720,7 @@ def _in_flight_kloop(groups, in_flight, pre, i_expression, fill_k0, k0, k_extent
         step=_lit(bk_elems),
         body=Body(tuple(body)),
         unroll=False,
-        end=k_end,
+        end=_end_var(k0, k_end),
         seed=seed,
     )
     return [*pre, outer]
@@ -1711,7 +1731,7 @@ def _last_chunk(k0: str, bk_elems: int, k_extent, k_end: Expression | None, sett
     waited out INSIDE the loop, not by a wait after it: ptxas (CUDA 12.9) moved the epilogue's
     accumulator reads above a trailing ``wgmma.wait_group 0`` once it had unrolled the loop, and
     an H100 GEMM with a ReLU epilogue stored an eighth of its rows wrong."""
-    bound = Var(f"{k0}_end") if k_end is not None else (k_extent.expression if isinstance(k_extent, Dim) else _lit(k_extent))
+    bound = _end_var(k0, k_end) if k_end is not None else (k_extent.expression if isinstance(k_extent, Dim) else _lit(k_extent))
     more = BinaryExpression("<", BinaryExpression("+", Var(k0), _lit(bk_elems)), bound)
     return Cond(cond=more, body=tuple(settle(1)), else_body=tuple(settle(0)))
 

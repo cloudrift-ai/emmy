@@ -536,13 +536,7 @@ impl Statement {
 
     /// The names this statement brings into scope for its child bodies.
     pub fn binds_axes(&self) -> Vec<Name> {
-        let mut names: Vec<Name> = self.bound_axes().iter().map(|axis| axis.name).collect();
-        if let Statement::StridedLoop(loop_) = self
-            && loop_.end.is_some()
-        {
-            names.push(format!("{}_end", loop_.axis.name).into());
-        }
-        names
+        self.bound_axes().iter().map(|axis| axis.name).collect()
     }
 
     /// The child bodies, in field order.

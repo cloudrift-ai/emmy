@@ -1249,9 +1249,10 @@ def _(stmt: StridedLoop, ctx: RenderCtx) -> list[str]:
     if stmt.unroll:
         out.append(f"{pad}#pragma unroll")
     if stmt.end is not None:
-        # Hoist the override bound into the for-init (``<var>_end``, referenceable by body
-        # stmts — the staged prefetch clamp) so a non-literal bound is evaluated once, not
-        # per iteration / per use (the inline form measurably spills on the flash stream).
+        # Hoist the override bound into the for-init (``<var>_end``) so a non-literal bound is
+        # evaluated once, not per iteration (the inline form measurably spills on the flash
+        # stream). A body statement that reads the bound reads the value it is bound to ahead of
+        # the loop, never this name.
         init = f"int {var} = {start_str}, {var}_end = {render_expression(stmt.end, ctx)}"
         out.append(f"{pad}for ({init}; {var} < {var}_end; {var} += {step_str}) {{")
     else:

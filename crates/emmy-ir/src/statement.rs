@@ -313,7 +313,7 @@ macro_rules! with_statement_types {
                     step: Expression [EXPRESSION] : Index,
                     body: Body [BODY],
                     unroll: bool [] = false,
-                    end: Option<Expression> [EXPRESSION] : Index = None,
+                    end: Option<Expression> [EXPRESSION | READS] : Index = None,
                     seed: bool [] = true,
                 }
                 /// Conditional block — `if (cond) { body } [else { else_body }]`.
@@ -431,14 +431,14 @@ macro_rules! with_statement_types {
                 /// `Write`).
                 kernel CpAsyncCopy {} {
                     smem: Name [BUFFER_WRITE],
-                    smem_index: Exprs [EXPRESSION] : Index,
+                    smem_index: Exprs [EXPRESSION | READS] : Index,
                     src: Name [BUFFER_READ],
-                    src_index: Exprs [EXPRESSION] : Index,
+                    src_index: Exprs [EXPRESSION | READS] : Index,
                     nbytes: i64 [] = 4,
                     swizzle: Name [] = Name::from("NONE"),
-                    lane_index: Option<Exprs> [EXPRESSION] : Index = None,
+                    lane_index: Option<Exprs> [EXPRESSION | READS] : Index = None,
                     lane_rows: i64 [] = 0,
-                    valid: Option<Expression> [EXPRESSION] : Index = None,
+                    valid: Option<Expression> [EXPRESSION | READS] : Index = None,
                 }
                 /// `cp.async.commit_group;` — finalize the preceding cp.async copies issued by this thread into a commit group.
                 /// Pairs with `CpAsyncWait` to wait for that group to drain.
@@ -471,11 +471,11 @@ macro_rules! with_statement_types {
                 /// thread).
                 kernel TmaLoad {} {
                     smem: Name [BUFFER_WRITE],
-                    smem_index: Exprs [EXPRESSION] : Index,
+                    smem_index: Exprs [EXPRESSION | READS] : Index,
                     desc: Name [],
-                    coords: Exprs [EXPRESSION] : Index,
+                    coords: Exprs [EXPRESSION | READS] : Index,
                     mbar: Name [],
-                    mbar_slot: Option<Expression> [EXPRESSION] : Index = None,
+                    mbar_slot: Option<Expression> [EXPRESSION | READS] : Index = None,
                 }
                 /// `mbarrier.init.shared.b64 [&mbar[slot]], count;` — one-shot init.
                 ///
