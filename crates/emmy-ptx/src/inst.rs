@@ -111,12 +111,14 @@ impl Ty {
     }
 }
 
-/// A comparison, as `setp` spells it. The ordered float forms are false on a NaN; `Neu` is true on one.
+/// A comparison, as `setp` spells it. The ordered float forms are false on a NaN; `Neu` is true on one, and `Nan`
+/// holds exactly where an operand is one.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 pub enum Cmp {
     Eq,
     Ne,
     Neu,
+    Nan,
     Lt,
     Le,
     Gt,
@@ -129,6 +131,7 @@ impl Cmp {
             Cmp::Eq => "eq",
             Cmp::Ne => "ne",
             Cmp::Neu => "neu",
+            Cmp::Nan => "nan",
             Cmp::Lt => "lt",
             Cmp::Le => "le",
             Cmp::Gt => "gt",

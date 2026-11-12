@@ -170,8 +170,18 @@ ones.
 - **`erf`.** Below 1 an odd polynomial of degree 13. From 1 on, `1 - 2^G(|x|)` with the sign of `x`: `G` is a
   polynomial of degree 7 fit to `log2(erfc)`, with the error weighted by what it moves of the result.
 - **`rsqrt`** is the hardware instruction (`rsqrt.approx`), as CUDA's `rsqrtf` is.
+- **`pow`** is `2^(y * log2|x|)`, with the logarithm and the product each held as a pair of floats whose sum is the
+  value: the product reaches 150 and its error is the result's relative error. With a mantissa `m` from the square
+  root of a half to the square root of two and `f = m - 1`, `log2(m)` is a series in `u = 2f / (2 + f)`. The quotient
+  goes through the hardware's reciprocal, and what that leaves of `u` is computed back from `2f - u * (2 + f)`, so
+  the reciprocal's own error drops out. The product less its nearest integer goes through a polynomial of degree 6,
+  and the power of two is applied in two factors, since it runs past both ends of a normal float's exponent. Selects
+  then give what the operands' kinds decide, as C's `pow` has it: a zero or an infinite base, a negative power for a
+  negative base under an odd exponent, a NaN for one under a fractional exponent, and one for a zero exponent or a
+  base of one whatever the other operand is.
 
-Measured on an RTX 5090 over every f32 bit pattern, against a float64 reference on the host. The error is the
+Measured on an RTX 5090 over every f32 bit pattern, against a float64 reference on the host; `pow` over 1.3 billion
+sampled pairs (below). The error is the
 distance from the exact value in steps of the f32 grid there; the documentation counts steps from the correctly
 rounded result, which is never the larger number. The instruction counts are machine instructions of the sequence
 (`nvdisasm`, the kernel less the same kernel without the function).
@@ -183,10 +193,18 @@ rounded result, which is never the larger number. The instruction counts are mac
 | `tanh` | 2 ulp | 1.367 ulp at 1.0126345 | 5,604 | 2 steps | 18, 17 |
 | `erf` | 2 ulp | 1.166 ulp at 1.0339911 | 788 | 2 steps | 21, 28 |
 | `rsqrt` | 2 ulp | 1.515 ulp at 8.640916e37 | 10,159,988 | the same bits | 4, 4 |
+| `pow` | 4 ulp | 2.613 ulp at (1.3825005, 269.64386) | sampled | 3 steps | 90, 94 |
 
-nvcc's own builds measure 1.931, 0.864, 1.815 and 1.037 ulp for the first four. Every special value is the CUDA
-function's: zeros keep their signs through `tanh` and `erf`, `exp` goes through the subnormals to zero, `log` of zero
-is negative infinity and of a negative a NaN, and a NaN operand gives a NaN.
+The pairs sampled for `pow`, 268 million of each kind: a mantissa at the fold of the logarithm's range under a
+product near the ends of the exponent's range, where the error is largest (2.613 ulp, 0.9% of the pairs over 1
+ulp); bases of every magnitude under products from one end to the other (2.215); random bit patterns (1.567); bases
+next to one under large exponents (1.744); signed bases under small integer exponents (1.001). Over every base of one
+exponent the maximum is 0.90 to 0.96 ulp for 0.5, 2, 3, -1, 1/3 and 2.5, 1.291 for 100 and 2.253 for -227.
+
+nvcc's own builds measure 1.931, 0.864, 1.815 and 1.037 ulp for the first four, and 2.366 for `pow` on the same pairs.
+Every special value is the CUDA function's: zeros keep their signs through `tanh` and `erf`, `exp` goes through the
+subnormals to zero, `log` of zero is negative infinity and of a negative a NaN, and a NaN operand gives a NaN. `pow`
+gives what C's `pow` gives on every pair of a grid of 67 special values, as nvcc's build does.
 
 ### The approximate operations
 
@@ -269,6 +287,6 @@ to run under compute-sanitizer's race and barrier checks.
 
 The math functions are measured there too (`test_math.py`). The default tests hold each function to its documented
 bound over a sample: every special value, the neighbourhoods of the points where a sequence changes form, and two
-million random bit patterns. The tests marked `sweep` (`pytest -m sweep`) put every f32 bit pattern through the
-kernel and hold the maximum of the table above; one function takes half a minute. The crate's own tests check each
-table of coefficients against the function on the host.
+million random bit patterns. The tests marked `sweep` (`pytest -m sweep`) put every f32 bit pattern through the kernel
+and hold the maximum of the table above, for `pow` as every base of each of eight exponents; one function takes half a
+minute. The crate's own tests check each table of coefficients against the function on the host.

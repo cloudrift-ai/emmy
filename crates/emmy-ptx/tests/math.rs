@@ -150,6 +150,64 @@ fn the_hyperbolic_tangent_and_the_error_function_select_between_two_forms() {
     assert_eq!((count("fma.rn.f32"), count("ex2.approx.ftz.f32")), (14, 1));
 }
 
+/// The power: the logarithm of the base as a pair, through the hardware's reciprocal with what it leaves computed
+/// back; the product with the exponent as a pair; a polynomial of its fraction with the scale in two factors; and
+/// the selects for what the operands' kinds decide.
+#[test]
+fn the_power_holds_its_logarithm_and_its_product_as_pairs() {
+    let got = sequence("pow", 2, EXACT);
+    let count = |mnemonic: &str| got.iter().filter(|line| line.starts_with(mnemonic)).count();
+    assert_eq!(got.len(), 103);
+    // The one hardware approximation is the reciprocal, whose error the residual takes back out.
+    assert_eq!(
+        (count("rcp.approx.ftz"), count("ex2"), count("lg2")),
+        (1, 0, 0)
+    );
+    let quotient = got.iter().position(|line| line.starts_with("rcp")).unwrap();
+    assert_eq!(
+        got[quotient - 2..quotient + 8],
+        [
+            "add.rn.f32 %f8, %f5, 0fBF800000",
+            "add.rn.f32 %f9, %f5, 0f3F800000",
+            "rcp.approx.ftz.f32 %f10, %f9",
+            "add.rn.f32 %f11, %f8, %f8",
+            "mul.rn.f32 %f12, %f11, %f10",
+            "sub.rn.f32 %f13, %f8, %f12",
+            "add.rn.f32 %f14, %f13, %f13",
+            "neg.f32 %f15, %f12",
+            "fma.rn.f32 %f16, %f15, %f8, %f14",
+            "mul.rn.f32 %f17, %f16, %f10",
+        ]
+    );
+    // A NaN operand or a negative finite base under a fractional exponent is a NaN, and a zero exponent or a
+    // base of one is one whatever the other operand is: the last select wins.
+    let mnemonics: Vec<&str> = got[got.len() - 13..]
+        .iter()
+        .map(|line| line.split(' ').next().unwrap())
+        .collect();
+    assert_eq!(
+        mnemonics,
+        [
+            "setp.nan.f32",
+            "cvt.rmi.f32.f32",
+            "setp.neu.f32",
+            "setp.lt.f32",
+            "setp.gt.f32",
+            "and.pred",
+            "and.pred",
+            "or.pred",
+            "selp.f32",
+            "setp.eq.f32",
+            "setp.eq.f32",
+            "or.pred",
+            "selp.f32",
+        ]
+    );
+    assert!(got[got.len() - 5].contains("0f7FC00000") && got[got.len() - 1].contains("0f3F800000"));
+    assert_eq!(sequence("power", 2, EXACT), got);
+    assert_eq!(sequence("pow", 2, FLUSHING).len(), got.len());
+}
+
 /// The reciprocal square root is the hardware's, as `rsqrtf` is, and flushes when the kernel's decision says. So
 /// does every instruction of a sequence that takes the modifier.
 #[test]

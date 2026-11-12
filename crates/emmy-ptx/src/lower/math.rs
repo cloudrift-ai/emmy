@@ -70,8 +70,13 @@ const MIN_NORMAL: f32 = f32::MIN_POSITIVE;
 /// share is near zero only where that share is zero.
 const TWO_THIRDS_BITS: i64 = 0x3f2a_aaab;
 
-/// The exponent field of an f32, where it sits.
+/// The bits of the square root of a half: the power takes its mantissa from there to the square root of two, the
+/// range that is even in the variable its logarithm is a series of.
+const ROOT_HALF_BITS: i64 = 0x3f35_04f3;
+
+/// The exponent field of an f32, where it sits, and what takes a value out of it.
 const EXPONENT_MASK: i64 = !0x007f_ffff;
+const EXPONENT_UNIT: f32 = 1.0 / 8388608.0;
 
 /// `ln(1 + f) = f - f^2/2 + f^3 * P(f)` over `|f| <= 1/3`, `P` by ascending power, as every table here is.
 const LOG: [f32; 8] = [
@@ -124,6 +129,27 @@ const ERFC_LOG2: [f32; 8] = [
     6.367126e-4,
     -3.1287414e-5,
 ];
+
+/// `log2(m) = (u + u * z * Q(z)) * log2(e)` with `u = 2f / (2 + f)`, `f = m - 1` and `z = u^2`, over a mantissa
+/// from the square root of a half to the square root of two: the series of `2 * atanh(u / 2)` past its first term.
+/// The table is `Q * log2(e)`.
+const ATANH_LOG2: [f32; 4] = [1.2022459e-1, 1.8033713e-2, 3.218181e-3, 6.5721624e-4];
+
+/// `2^g = 1 + g * P(g)` over `|g| <= 1/2`.
+const EXP2: [f32; 6] = [
+    6.931472e-1,
+    2.4022646e-1,
+    5.550352e-2,
+    9.6186325e-3,
+    1.339523e-3,
+    1.5306543e-4,
+];
+
+/// An exponent's magnitude is held to this: past it every power of a base other than one is zero or infinite.
+const EXPONENT_LIMIT: f32 = 1.2676506e30;
+
+/// A product of exponent and logarithm is held to this: past it the power is zero or infinite.
+const PRODUCT_LIMIT: f32 = 160.0;
 
 /// A value of a sequence: a register or a constant.
 #[derive(Clone, Copy, Debug)]
@@ -262,7 +288,7 @@ impl Seq<'_> {
 
     fn int(&mut self, opcode: Opcode, a: V, b: impl Into<V>) -> V {
         let ty = match opcode {
-            Opcode::Add | Opcode::Sub => Ty::S32,
+            Opcode::Add | Opcode::Sub | Opcode::Shr => Ty::S32,
             _ => Ty::B32,
         };
         let inst = Inst::new(opcode, ty, Vec::new(), vec![a.into(), b.into().into()]);
@@ -274,6 +300,12 @@ impl Seq<'_> {
         let operands = vec![a.into(), b.into().into()];
         let inst = Inst::new(Opcode::Setp(cmp), ty, Vec::new(), operands)
             .flushing(self.0.precision.ftz && ty == Ty::F32);
+        self.value(inst, Bank::Pred)
+    }
+
+    /// A logical operation over two predicates.
+    fn logic(&mut self, opcode: Opcode, a: V, b: V) -> V {
+        let inst = Inst::new(opcode, Ty::Pred, Vec::new(), vec![a.into(), b.into()]);
         self.value(inst, Bank::Pred)
     }
 
@@ -292,6 +324,39 @@ impl Seq<'_> {
             .fold(V::F32(*last), |sum, c| self.fma(sum, x, *c))
     }
 
+    /// `2^k` for an integer `k` a normal float has as its exponent, through its bits.
+    fn power_of_two(&mut self, k: V) -> V {
+        let biased = self.int(Opcode::Add, k, 127);
+        let bits = self.int(Opcode::Shl, biased, 23);
+        self.of_bits(bits)
+    }
+
+    /// A positive float as its exponent and a mantissa in `[fold, 2 * fold)`, `fold` given by its bits. A
+    /// subnormal is scaled into the normals first, and the offset takes the scaling back out of the exponent. The
+    /// bits less those of `fold` hold the exponent in their exponent field; taking that field back out leaves the
+    /// mantissa. Returns the float as it was split, its bits, the exponent still in the exponent's place, and the
+    /// mantissa.
+    fn split(&mut self, x: V, fold: i64) -> (V, V, V, V) {
+        let subnormal = self.compare(Cmp::Lt, Ty::F32, x, MIN_NORMAL);
+        let scaled = self.mul(x, 8388608.0);
+        let x = self.select(Ty::F32, scaled, x, subnormal);
+        let offset = self.select(Ty::B32, fold + (23 << 23), fold, subnormal);
+        let bits = self.bits(x);
+        let shifted = self.int(Opcode::Sub, bits, offset);
+        let exponent = self.int(Opcode::And, shifted, EXPONENT_MASK);
+        let mantissa = self.int(Opcode::Sub, shifted, exponent);
+        let mantissa = self.int(Opcode::Add, mantissa, fold);
+        let mantissa = self.of_bits(mantissa);
+        (x, bits, exponent, mantissa)
+    }
+
+    /// Whether the float of `bits` is anything but positive and finite: zero, a negative, an infinity or a NaN,
+    /// by one unsigned comparison.
+    fn outside_the_positive(&mut self, bits: V) -> V {
+        let below = self.int(Opcode::Sub, bits, 1);
+        self.compare(Cmp::Ge, Ty::U32, below, 0x7f7f_ffff_i64)
+    }
+
     /// `e^x`. The exponent `k` is the floor of `x * log2(e)`, held to the exponents a normal f32 has; what is
     /// left of the product, taken with the rest of the constant, goes through the hardware's power of two, which
     /// is most accurate over `[0, 1)`; and `2^k` is written through its bits. Past either end `k` stays at its
@@ -307,43 +372,24 @@ impl Seq<'_> {
         let fraction = self.fma(x, LOG2_E_REST, fraction);
         let power = self.hardware(Opcode::Ex2, fraction);
         let exponent = self.truncated(k);
-        let biased = self.int(Opcode::Add, exponent, 127);
-        let bits = self.int(Opcode::Shl, biased, 23);
-        let scale = self.of_bits(bits);
+        let scale = self.power_of_two(exponent);
         self.mul(power, scale)
     }
 
-    /// `ln(x)`. A subnormal is scaled into the normals first. The bits less those of `2/3` hold the exponent `k`
-    /// in their exponent field, and taking that field back out leaves a mantissa `m` in `[2/3, 4/3)`. With
-    /// `f = m - 1`, exact, the result is `k * ln(2) + ln(1 + f)`. Zero, a negative, an infinity and a NaN take
-    /// the hardware logarithm's value, which is the right one for each; one unsigned comparison finds them all.
+    /// `ln(x)`. With the exponent `k` and a mantissa `m` in `[2/3, 4/3)`, and `f = m - 1` exact, the result is
+    /// `k * ln(2) + ln(1 + f)`: over that range `ln(m)` is near zero only where `k` is zero. Zero, a negative, an
+    /// infinity and a NaN take the hardware logarithm's value, which is the right one for each.
     fn log(&mut self, x: V) -> V {
-        let subnormal = self.compare(Cmp::Lt, Ty::F32, x, MIN_NORMAL);
-        let scaled = self.mul(x, 8388608.0);
-        let x = self.select(Ty::F32, scaled, x, subnormal);
-        // The scaling by 2^23 is taken back out of the exponent with the offset.
-        let offset = self.select(
-            Ty::B32,
-            TWO_THIRDS_BITS + (23 << 23),
-            TWO_THIRDS_BITS,
-            subnormal,
-        );
-        let bits = self.bits(x);
-        let shifted = self.int(Opcode::Sub, bits, offset);
-        let exponent = self.int(Opcode::And, shifted, EXPONENT_MASK);
-        let mantissa = self.int(Opcode::Sub, shifted, exponent);
-        let mantissa = self.int(Opcode::Add, mantissa, TWO_THIRDS_BITS);
-        let m = self.of_bits(mantissa);
+        let (x, bits, exponent, m) = self.split(x, TWO_THIRDS_BITS);
         let k = self.converted(exponent);
         let f = self.add(m, -1.0);
         let series = self.horner(&LOG, f);
         let series = self.fma(series, f, -0.5);
         let series = self.mul(series, f);
         let log_m = self.fma(series, f, f);
-        // `k` is still shifted into the exponent's place: the constant takes the shift back.
-        let finite = self.fma(k, std::f32::consts::LN_2 / 8388608.0, log_m);
-        let below = self.int(Opcode::Sub, bits, 1);
-        let special = self.compare(Cmp::Ge, Ty::U32, below, 0x7f7f_ffff_i64);
+        // `k` is still in the exponent's place: the constant takes it out.
+        let finite = self.fma(k, std::f32::consts::LN_2 * EXPONENT_UNIT, log_m);
+        let special = self.outside_the_positive(bits);
         let hardware = self.hardware(Opcode::Lg2, x);
         self.select(Ty::F32, hardware, finite, special)
     }
@@ -382,6 +428,116 @@ impl Seq<'_> {
         let small = self.fma(series, x, x);
         let is_large = self.compare(Cmp::Ge, Ty::F32, magnitude, ERF_SPLIT);
         self.select(Ty::F32, large, small, is_large)
+    }
+
+    /// `x^y` as `2^(y * log2|x|)`, with the logarithm and the product each held as a pair of floats whose sum is
+    /// the value: the product reaches 150, and its error is the result's relative error.
+    ///
+    /// The logarithm: with the exponent `k`, a mantissa `m` and `f = m - 1`, `log2(m)` is a series in
+    /// `u = 2f / (2 + f)`. The quotient is taken through the hardware's reciprocal and what it leaves of `u` is
+    /// computed back from `2f - u * (2 + f)`, so the reciprocal's own error drops out. The first term `u * log2(e)`
+    /// is split exactly by a fused multiply-add, `k` is added with its rounding kept, and the series joins the low
+    /// parts with one rounding.
+    ///
+    /// The power: the product less its nearest integer `n`, with the product's low part, goes through a
+    /// polynomial, and `2^n` is applied in two factors, since `n` runs past both ends of a normal float's exponent.
+    ///
+    /// Then what the operands' kinds decide: a zero or an infinite base, the sign of a negative base under an odd
+    /// exponent, a NaN (an operand that is one, or a negative finite base with a fractional exponent), and the
+    /// two cases that are one whatever the other operand is, a zero exponent and a base of one.
+    fn pow(&mut self, x: V, y: V) -> V {
+        let magnitude = self.abs(x);
+        let (_, bits, exponent, m) = self.split(magnitude, ROOT_HALF_BITS);
+        let k = self.converted(exponent);
+        let k = self.mul(k, EXPONENT_UNIT);
+        let f = self.add(m, -1.0);
+        let sum = self.add(m, 1.0);
+        let reciprocal = self.hardware(Opcode::Rcp, sum);
+        let twice = self.add(f, f);
+        let u = self.mul(twice, reciprocal);
+        // `2f - u * (2 + f)` is `2 * (f - u) - u * f`, and `f - u` is exact.
+        let gap = self.sub(f, u);
+        let gap = self.add(gap, gap);
+        let minus_u = self.neg(u);
+        let residual = self.fma(minus_u, f, gap);
+        let u_rest = self.mul(residual, reciprocal);
+        let z = self.mul(u, u);
+        let series = self.horner(&ATANH_LOG2, z);
+        let cube = self.mul(u, z);
+        let head = self.mul(u, LOG2_E);
+        let high = self.add(k, head);
+        let rest = self.sub(k, high);
+        let rest = self.add(rest, head);
+        let minus_head = self.neg(head);
+        let low = self.fma(u, LOG2_E, minus_head);
+        let low = self.fma(u, LOG2_E_REST, low);
+        let low = self.add(low, rest);
+        // What the rest of `u` moves: the first term, and the cubic one by `3 * u^2 / 12` of it.
+        let slope = self.fma(z, 0.25 * LOG2_E, LOG2_E);
+        let low = self.fma(u_rest, slope, low);
+        let low = self.fma(cube, series, low);
+        let log_high = self.add(high, low);
+        let log_low = self.sub(high, log_high);
+        let log_low = self.add(log_low, low);
+
+        // A NaN exponent leaves the clamp as a number; the selects below bring the NaN back.
+        let exponent = self.max(y, -EXPONENT_LIMIT);
+        let exponent = self.min(exponent, EXPONENT_LIMIT);
+        let product = self.mul(exponent, log_high);
+        let minus_product = self.neg(product);
+        let product_rest = self.fma(exponent, log_high, minus_product);
+        let product_rest = self.fma(exponent, log_low, product_rest);
+
+        let held = self.max(product, -PRODUCT_LIMIT);
+        let held = self.min(held, PRODUCT_LIMIT);
+        let whole = self.integral(held, Round::Rni);
+        let fraction = self.sub(held, whole);
+        let fraction = self.add(fraction, product_rest);
+        // Past the limit the low part is no fraction: any value in the polynomial's reach will do.
+        let fraction = self.max(fraction, -1.0);
+        let fraction = self.min(fraction, 1.0);
+        let series = self.horner(&EXP2, fraction);
+        let power = self.fma(series, fraction, 1.0);
+        let whole = self.truncated(whole);
+        let first = self.int(Opcode::Shr, whole, 1);
+        let second = self.int(Opcode::Sub, whole, first);
+        let scale = self.power_of_two(first);
+        let power = self.mul(power, scale);
+        let scale = self.power_of_two(second);
+        let power = self.mul(power, scale);
+
+        // A zero or an infinite base gives zero or infinity, by which it is and the exponent's sign.
+        let edge = self.outside_the_positive(bits);
+        let zero_base = self.compare(Cmp::Eq, Ty::F32, magnitude, 0.0);
+        let falling = self.compare(Cmp::Lt, Ty::F32, y, 0.0);
+        let vanishes = self.logic(Opcode::Xor, zero_base, falling);
+        let at_edge = self.select(Ty::F32, 0.0, f32::INFINITY, vanishes);
+        let power = self.select(Ty::F32, at_edge, power, edge);
+        // A negative base under an odd exponent gives a negative power.
+        let halved = self.mul(y, 0.5);
+        let halved = self.integral(halved, Round::Rzi);
+        let even = self.add(halved, halved);
+        let parity = self.sub(y, even);
+        let parity = self.abs(parity);
+        let odd = self.compare(Cmp::Eq, Ty::F32, parity, 1.0);
+        let base_bits = self.bits(x);
+        let signed = self.compare(Cmp::Lt, Ty::S32, base_bits, 0_i64);
+        let flips = self.logic(Opcode::And, signed, odd);
+        let flipped = self.neg(power);
+        let power = self.select(Ty::F32, flipped, power, flips);
+        let either = self.compare(Cmp::Nan, Ty::F32, x, y);
+        let floor = self.integral(y, Round::Rmi);
+        let fractional = self.compare(Cmp::Neu, Ty::F32, floor, y);
+        let below_zero = self.compare(Cmp::Lt, Ty::F32, x, 0.0);
+        let finite = self.compare(Cmp::Gt, Ty::F32, x, f32::NEG_INFINITY);
+        let negative = self.logic(Opcode::And, below_zero, finite);
+        let rootless = self.logic(Opcode::And, negative, fractional);
+        let nan = self.logic(Opcode::Or, either, rootless);
+        let power = self.select(Ty::F32, f32::NAN, power, nan);
+        let zero_exponent = self.compare(Cmp::Eq, Ty::F32, y, 0.0);
+        let unit_base = self.compare(Cmp::Eq, Ty::F32, x, 1.0);
+        let one = self.logic(Opcode::Or, zero_exponent, unit_base);
+        self.select(Ty::F32, 1.0, power, one)
     }
 }
 
@@ -424,6 +580,10 @@ impl Lowerer {
         ctx: &SimplifyCtx,
     ) -> Result<Option<Operand>> {
         use Operation as O;
+        if matches!(op, O::Pow | O::Power) {
+            let [x, y] = self.math_operands(op.text(), args, ty, ctx)?;
+            return Ok(Some(Seq(self).pow(x, y).into()));
+        }
         if !matches!(op, O::Exp | O::Log | O::Tanh | O::Erf | O::Rsqrt) {
             return Ok(None);
         }
@@ -530,6 +690,17 @@ mod tests {
             assert!(error < 1e-8, "{error:e} at {a}");
         }
         assert!(ERFC_LOG2.last().unwrap().is_sign_negative());
+        // The power's two series are held tighter: their error is multiplied by the exponent.
+        let fold = 2.0 * (2f64.sqrt() - 1.0) / (2f64.sqrt() + 1.0);
+        for u in grid(-fold, fold) {
+            let z = u * u;
+            let got = u * std::f64::consts::LOG2_E + u * z * poly(&ATANH_LOG2, z);
+            let want = ((1.0 + u / 2.0) / (1.0 - u / 2.0)).log2();
+            assert!(want == 0.0 || ((got - want) / want).abs() < 1e-9, "at {u}");
+        }
+        for g in grid(-0.5, 0.5) {
+            close(1.0 + g * poly(&EXP2, g), g.exp2(), g);
+        }
     }
 
     /// The two parts of `log2(e)` are the constant to twice an f32's precision.
