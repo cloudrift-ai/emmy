@@ -86,13 +86,11 @@ class Knob:
     # means the knob is always stamped by its pass and is never auto-filled.
     off: Any = _UNSET
     # An **unfeatured** knob: it must never enter the online-prior feature vector
-    # (``knob_features`` skips it). Two families qualify: a *cosmetic* policy that changes only how
-    # the emitted source is spelled, never the compiled kernel (SASS-identical — e.g. ``LOOPIFY``'s
-    # ``--ir`` re-rolling; batch-enabled via ``EMMY_READABLE`` rather than tuned), and a *meta /
-    # umbrella* pin that gates which forks are OFFERED without being a kernel property itself
-    # (``FAST_MATH`` — the realized fork is already fully identified by the knobs it enables, e.g.
-    # the ``TILE`` codec's atom token). Either way the value cannot disambiguate kernels, and
-    # letting it perturb the features would split one perf class into spurious variants.
+    # (``knob_features`` skips it): a *meta / umbrella* pin that gates which forks are OFFERED
+    # without being a kernel property itself (``FAST_MATH`` — the realized fork is already fully
+    # identified by the knobs it enables, e.g. the ``TILE`` codec's atom token). The value cannot
+    # disambiguate kernels, and letting it perturb the features would split one perf class into
+    # spurious variants.
     unfeatured: bool = False
 
     def __post_init__(self) -> None:
@@ -623,7 +621,7 @@ def schedule_row_key(knobs: dict) -> tuple[tuple[str, str], ...]:
     RECORDED as. :func:`schedule_match_key` is what two such rows are compared by.
 
     A recorded row legitimately carries later forks' knobs too (the
-    kernel-stage policy BOOLs, ``LOOPIFY``); those are separate decisions at separate forks and
+    kernel-stage policy BOOLs); those are separate decisions at separate forks and
     never part of THIS fork's identity. Structural branch prefixes pass through this helper while
     matching a complete leaf, so validation belongs at recording and leaf-construction boundaries."""
     return canonical_row_key({k: v for k, v in knobs.items() if family_of(k) in SCHEDULE_FAMILIES})

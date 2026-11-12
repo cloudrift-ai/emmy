@@ -391,20 +391,3 @@ def regime_pins(pins: dict | None = None) -> dict[str, bool]:
         return {knob.name: regime_pin(knob) for knob in REGIME_KNOBS}
     others = {knob.name: bool(pins.get(knob.name, knob.hints[0])) for knob in REGIME_KNOBS if knob not in PRECISION_KNOBS}
     return {**precision_pins(pins), **others}
-
-
-LOOPIFY = Knob(
-    "LOOPIFY",
-    KnobType.INT,
-    # Off by default (0) and not a search dimension — a readability-only codegen policy: re-roll a
-    # maximal run of parallel per-fragment ``FragmentApply`` (the flash mma epilogue's element-wise
-    # C-fragment arithmetic) into a ``#pragma unroll`` loop over an arrayed fragment family. The value
-    # is the MINIMUM run length to re-roll: ``0`` / unset (and any value < 2) → off, byte-identical
-    # CUDA; ``EMMY_LOOPIFY=4`` re-rolls the 8-long O rescale / divide runs (most of the win) while
-    # skipping the 2-long QK scale; ``EMMY_LOOPIFY=2`` re-rolls every run ≥ 2. Identical SASS (nvcc
-    # unrolls the pragma) — purely a listing-shrink for blog / ``--ir cuda`` inspection.
-    hints=(0,),
-    help="Min parallel FragmentApply run length to re-roll into a #pragma-unroll loop (0 = off, byte-identical).",
-    off=0,
-    unfeatured=True,  # SASS-identical listing re-spell — excluded from the feature vector; batch-enabled by EMMY_READABLE
-)

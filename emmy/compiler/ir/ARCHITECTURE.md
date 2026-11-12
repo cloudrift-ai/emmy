@@ -222,9 +222,7 @@ along different lowering paths still dedup in the tuning cache.
 `Tile`, `Smem`, `Sync`, `CpAsyncCopy`, `TmaDescriptor`, …) has named read-only fields, compares by content and is
 hashable. To "edit" one, take a copy with `stmt.replace(field=value)`; nothing outside `ir/stmt/` calls
 `dataclasses.replace` on a statement or lists its fields. A statement
-type states its fields to the text reader and the structural form only. A pass that generalizes whole statements (the
-kernel loopify pass, off unless pinned, rolls repeated ones into a loop) reads each field by the name `fields_of` gives
-and rebuilds through `replace`, so it needs no dataclass behind the statement type. Ops, by contrast, are frozen and
+type states its fields to the text reader and the structural form only. Ops, by contrast, are frozen and
 unhashable — rewrites replace the op and rebind its graph node. Op fields stored inside statements (`Accum.op`) must be
 lightweight value objects (`ElementwiseImpl`, not `ElementwiseOp`) so the surrounding statement stays hashable.
 

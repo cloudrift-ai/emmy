@@ -611,7 +611,6 @@ macro_rules! with_statement_types {
                     args: FragmentArgs [RECORD],
                     in_place: bool [] = false,
                     layout: Name [] = Name::from("m16n8k16"),
-                    post: ElementwiseOps [] = ElementwiseOps::from([]),
                     row_base: Option<Expression> [EXPRESSION] : Index = None,
                     col_base: Option<Expression> [EXPRESSION] : Index = None,
                 }
@@ -643,19 +642,11 @@ macro_rules! with_statement_types {
                 /// counts and distinct f16/f32 accumulator lane maps. `shape` is the cell `(M, N, K)`; the count derives from
                 /// `shape` + `role` (+ the C dtype) via :func:`_mma_sync_nregs`. The `c` array is zero-initialised at
                 /// declaration, so the mma.sync path needs no separate fill node.
-                ///
-                /// `count` (default 1) arrays a whole fragment FAMILY into one declaration — `float O_i_f[count][n_regs]` — so a
-                /// run of `count` sibling fragments (`O_i_f0 … O_i_f{count-1}`) collapses to a single arrayed decl indexed
-                /// `O_i_f[t]`. Only `100_loopify` sets `count > 1` (the pin-gated re-roll); `count == 1` renders the flat `float
-                /// name[n_regs]` form, byte-identical. A family of SCALAR registers (`nregs == 0` — the fp4 block-scale
-                /// fragments) arrays to one dimension, `unsigned name[count]`, because its member is the register itself and not
-                /// an array of them.
                 kernel RegFragment {} {
                     name: Name [DEFINES | LOCAL_BUFFER],
                     role: Name [],
                     shape: Shape3 [],
                     dtype: DType [],
-                    count: i64 [] = 1,
                     nregs: Option<i64> [] = None,
                 }
                 /// Load one lane's b32 of ue4m3 block scales for the block-scaled fp4 mma.
@@ -1346,8 +1337,8 @@ use crate::dtype::DType;
 use crate::elementwise::ElementwiseOp;
 use crate::expr::Expression;
 use crate::field::{
-    Axes, AxisRef, Branches, ElementwiseOps, Exprs, Float, FragmentArgs, Int2, Ints, Names, NumOr,
-    Shape3, Stmts, SubroutineRef,
+    Axes, AxisRef, Branches, Exprs, Float, FragmentArgs, Int2, Ints, Names, NumOr, Shape3, Stmts,
+    SubroutineRef,
 };
 
 with_statement_types!(define_statement_types);
@@ -1382,7 +1373,7 @@ mod tests {
         }
         assert_eq!(
             blake3::hash(listing.as_bytes()).to_hex().as_str(),
-            "f186c7d8285bf9b9363d7e57e0713b688fc510be96071ac709885b167e6079b7",
+            "811e3d26e02242a17ebb54de91b6153e72795111d5513614be97dd733a133f06",
             "{listing}"
         );
     }
