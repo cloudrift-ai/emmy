@@ -21,7 +21,7 @@ tile-tier rebuild:
   registers from its reduce to its projection (the body's normal form loads each read-only cell once).
 - ``050_vectorize_loads`` / ``080_vectorize_stores`` — fold consecutive scalar
   Loads / Writes into one wide vector access.
-- ``095_interleave_loads`` — move a Load only one guarded block reads into that block.
+- ``095_sink_guarded_loads`` — move a Load only one guarded block reads into that block.
 - ``097_widen_fragment_stores`` — store four adjacent ``wgmma`` accumulator cells as one
   16-byte row per lane.
 - ``110_drop_redundant_syncs`` — collapse no-op Sync stmts at the Tile body level.

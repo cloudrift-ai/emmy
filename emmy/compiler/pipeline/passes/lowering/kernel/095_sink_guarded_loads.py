@@ -6,9 +6,7 @@ never reads it. The body's normal form keeps a Load on the side of a guard it st
 
 Where a Load stands among its siblings is not this pass's: a kernel body is in normal form, which orders them.
 
-``INTERLEAVE_LOADS`` is not a search dimension: only ``True`` is enumerated. ``EMMY_INTERLEAVE_LOADS=0`` remains a
-manual override.
-
+It decides nothing: the kernel computes the same values and issues fewer loads, so it answers to no knob.
 Idempotent: a Load already inside its guard has no guarded block to move into.
 """
 
@@ -20,25 +18,16 @@ from emmy.compiler.graph import Node
 from emmy.compiler.ir.kernel import KernelOp
 from emmy.compiler.ir.stmt import Body, Cond, Load, Statement
 from emmy.compiler.pipeline import Pattern, RuleSkipped
-from emmy.compiler.pipeline.search.space import INTERLEAVE_LOADS
 
 PATTERN = [Pattern("root", KernelOp)]
 
 
-def rewrite(root: Node) -> KernelOp | None:
+def rewrite(root: Node) -> KernelOp:
     op: KernelOp = root.op
-    # Idempotence: the policy is recorded as the INTERLEAVE_LOADS knob, so a
-    # re-scan of the rebound op skips here.
-    if INTERLEAVE_LOADS.name in op.knobs:
-        raise RuleSkipped("INTERLEAVE_LOADS already decided (idempotence via knob)")
-    # Only ``True`` is enumerated, so the autotuner never forks on this knob;
-    # ``EMMY_INTERLEAVE_LOADS=0`` still pins ``False``.
-    if not INTERLEAVE_LOADS.narrow((True,))[0]:
-        return replace(op, body=op.body, knobs={**op.knobs, INTERLEAVE_LOADS.name: False})
-    # Stamp the policy (True) even when no Load moves — the realized config records that the policy
-    # was enabled, keeping a uniform knob set.
-    new_body, _changed = _walk(op.body)
-    return replace(op, body=new_body, knobs={**op.knobs, INTERLEAVE_LOADS.name: True})
+    body, changed = _walk(op.body)
+    if not changed:
+        raise RuleSkipped("no Load stands outside the one guard that reads it")
+    return replace(op, body=body)
 
 
 def _walk(body: Body) -> tuple[Body, bool]:

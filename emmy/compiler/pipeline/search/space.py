@@ -21,7 +21,7 @@ The main groups:
   prior can featurize and tune the decision. ``off=""`` is the explicit direct leaf value.
 - **Kernel storage knobs** (``SHARED_CARRY``) — a later lowering choice retained in measured rows: global
   storage and the padded shared layout offered as siblings.
-- **Kernel-lowering policy knobs** (``VECTORIZE_LOADS`` / ``INTERLEAVE_LOADS``) — boolean codegen
+- **Kernel-lowering policy knobs** (``VECTORIZE_LOADS`` / ``VECTORIZE_STORES``) — boolean codegen
   policies recorded on the kernel op (idempotence + env override), on by default and not search
   dimensions (``hints=(True,)``).
 """
@@ -168,21 +168,13 @@ SHARED_CARRY = Knob(
 #
 # Boolean codegen policies recorded on the kernel op — on by default, not search dimensions
 # (``hints=(True,)``); a rule records its knob for idempotence and honors the ``EMMY_<NAME>``
-# env override. Consumed by ``lowering/kernel/050_vectorize_loads`` / ``095_interleave_loads``.
+# env override. Consumed by ``lowering/kernel/050_vectorize_loads`` / ``080_vectorize_stores``.
 
 VECTORIZE_LOADS = Knob(
     "VECTORIZE_LOADS",
     KnobType.BOOL,
     hints=(True,),  # on by default; not a search dimension — manual override only via the env var
     help="Fold runs of consecutive scalar Loads into one wide vector Load (float4 / __half2).",
-    off=False,
-)
-
-INTERLEAVE_LOADS = Knob(
-    "INTERLEAVE_LOADS",
-    KnobType.BOOL,
-    hints=(True,),  # on by default; not a search dimension — manual override only via the env var
-    help="Sink each Load to just before its first SSA-consumer in flat compute blocks.",
     off=False,
 )
 

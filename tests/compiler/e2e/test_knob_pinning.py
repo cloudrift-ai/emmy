@@ -115,7 +115,6 @@ def test_flat_output_sweep_lowers_with_its_axis_bound(monkeypatch):
         # their own sweeps.
         "REDUCE": "",
         "LOOPIFY": "0",
-        "INTERLEAVE_LOADS": "1",
         "VECTORIZE_LOADS": "1",
     }.items():
         monkeypatch.setenv(f"EMMY_{key}", value)

@@ -11,7 +11,7 @@ from emmy.compiler.ir.stmt import Body, Load, parse_body
 
 _vectorize_loads = import_module("emmy.compiler.pipeline.passes.lowering.kernel.050_vectorize_loads")._vectorize_body
 _vectorize_stores = import_module("emmy.compiler.pipeline.passes.lowering.kernel.080_vectorize_stores")._vectorize_body
-_sink_guarded = import_module("emmy.compiler.pipeline.passes.lowering.kernel.095_interleave_loads")._walk
+_sink_guarded = import_module("emmy.compiler.pipeline.passes.lowering.kernel.095_sink_guarded_loads")._walk
 _pair_ldmatrix = import_module("emmy.compiler.pipeline.passes.lowering.kernel.096_pair_ldmatrix_loads")._walk
 
 
