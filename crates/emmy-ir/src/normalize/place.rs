@@ -1136,7 +1136,10 @@ mod tests {
             P[0] = y2
             ",
         );
-        assert_eq!(statement_types(&out), ["Load", "Assign", "Write", "Sync", "Write"]);
+        assert_eq!(
+            statement_types(&out),
+            ["Load", "Assign", "Write", "Sync", "Write"]
+        );
     }
 
     #[test]
