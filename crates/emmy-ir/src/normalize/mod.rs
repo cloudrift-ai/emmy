@@ -38,9 +38,11 @@ pub fn extend_simplify_ctx(ctx: &SimplifyCtx, axis: &Axis) -> SimplifyCtx {
 pub(crate) fn launch_ctx(ctx: &SimplifyCtx, stmt: &Statement) -> Option<SimplifyCtx> {
     let ranges = stmt.launch_ranges();
     (!ranges.is_empty()).then(|| {
-        ranges.into_iter().fold(ctx.clone(), |ctx, (builtin, range)| {
-            ctx.extend(builtin.text(), range, None)
-        })
+        ranges
+            .into_iter()
+            .fold(ctx.clone(), |ctx, (builtin, range)| {
+                ctx.extend(builtin.text(), range, None)
+            })
     })
 }
 

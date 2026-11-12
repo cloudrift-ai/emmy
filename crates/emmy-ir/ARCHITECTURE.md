@@ -15,8 +15,8 @@ The modules stand in a tower: each imports only the ones below it (`field`, `sta
 each other's types), from the interned names and the expression tree at the bottom, through the operation table, the
 dtypes, the axes, the field types, the statement declarations and `Body`, the protocol, the text, the ordering
 constraints and the value numbering, to `normalize/` (the driver `normalize_body` and the steps, one module per step,
-every tie-break in `ties.rs`) and `identity.rs`. Every file imports what it uses by name; no child module takes its
-parent's imports.
+every tie-break in `ties.rs`), `identity.rs` and `strength.rs` (an emitter's spelling of an index division). Every
+file imports what it uses by name; no child module takes its parent's imports.
 
 ## Data
 
@@ -167,6 +167,16 @@ read stands, a state a loop updates is read inside the loop as the step before, 
 protocol (a barrier) stays where it is. A read of storage the body writes carries the version it reads and the barrier
 it stands behind, since another thread's write of the storage lands at a barrier; a read of storage nothing in the
 body writes holds one value throughout, so it is shared and placed across a barrier.
+
+A built-in has a range: what the hardware allows (`Builtin::hardware_range`), narrowed by the launch a statement
+states. A `Grid` states its own (`launch_ranges` in the protocol: `thread_idx.x` below the CTA's threads, `block_idx.x`
+below its CTAs), and the simplifier reads it for the `Grid`'s decode and its body, so a decode of the flat thread id
+splits into the CTA's and the thread's digits, and a built-in the launch pins to one value is that value. Loop IR
+holds no built-in, so no identity moves.
+
+`strength.rs` is not a step of the normal form. `reduce_strength` spells every index division and remainder by a power
+of two over a dividend the ranges prove non-negative as a shift and a mask, the target's spelling. The simplifier reads
+`/` and `%` and knows no range of a shift, so an emitter runs it on the body it is about to spell and no body keeps it.
 
 ## Memos
 
