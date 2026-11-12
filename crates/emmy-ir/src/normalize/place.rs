@@ -108,12 +108,18 @@ impl Placer<'_> {
         *v += 1;
         self.version_depth.insert((*name, *v), depth);
     }
+    /// The marks a read of `name` carries: none for storage nothing in the body writes, which holds one value
+    /// throughout; else the version it reads and the barrier it stands behind, since another thread's write of the
+    /// storage lands at a barrier.
     fn read_of(&self, name: &Name) -> Marks {
-        if self.written.contains(name) {
-            BTreeSet::from([(*name, self.version.get(name).copied().unwrap_or(0))])
-        } else {
-            BTreeSet::new()
+        if !self.written.contains(name) {
+            return BTreeSet::new();
         }
+        let mut out = BTreeSet::from([(*name, self.version.get(name).copied().unwrap_or(0))]);
+        if let Some(v) = self.version.get(&Name::new("")) {
+            out.insert((Name::from(""), *v));
+        }
+        out
     }
     fn depth_of(&self, name: &Name) -> usize {
         let name = self.alias.get(name).unwrap_or(name);
@@ -145,9 +151,6 @@ impl Placer<'_> {
             if self.updated.contains(name) {
                 out.extend(self.read_of(name));
             }
-        }
-        if let Some(v) = self.version.get(&Name::new("")) {
-            out.insert((Name::from(""), *v));
         }
         for name in stmt.external_reads() {
             out.extend(self.read_of(&name));
@@ -1095,24 +1098,45 @@ mod tests {
 
     #[test]
     fn hoist_keeps_a_read_of_a_buffer_the_loop_writes() {
-        // Axis-invariance alone earns no hoist: a read behind a write to its own buffer, or behind an ordered
-        // execution protocol, follows the scope's ordering constraints and stays.
+        // Axis-invariance alone earns no hoist: a read behind a write to its own buffer stays, and so does a second
+        // read of that buffer behind a barrier, where another thread's write of it lands. A read of a buffer nothing
+        // in the body writes holds one value on either side of the barrier, and moves.
         let out = placed(
             "
             for i in 0..4:
                 O[0] = one
                 back = load O[0]
                 Sync
+                again = load O[0]
                 staged = load S[0]
                 P[i] = back
                 Q[i] = staged
+                R[i] = again
             ",
         );
-        assert_eq!(statement_types(&out), ["Loop"]);
+        assert_eq!(statement_types(&out), ["Load", "Loop"]);
         assert_eq!(
-            statement_types(&inner(&out.stmts()[0])),
-            ["Write", "Load", "Sync", "Load", "Write", "Write"]
+            statement_types(&inner(&out.stmts()[1])),
+            ["Write", "Load", "Sync", "Load", "Write", "Write", "Write"]
         );
+    }
+
+    #[test]
+    fn a_value_of_unwritten_storage_is_shared_across_a_barrier() {
+        // A cooperative reduce reads its row ahead of the combine's barrier and its projection reads it again
+        // behind it: the row is no storage the kernel writes, so the second read is the first.
+        let out = placed(
+            "
+            x = load X[0]
+            y = multiply(x, 2.0)
+            O[0] = y
+            Sync
+            x2 = load X[0]
+            y2 = multiply(x2, 2.0)
+            P[0] = y2
+            ",
+        );
+        assert_eq!(statement_types(&out), ["Load", "Assign", "Write", "Sync", "Write"]);
     }
 
     #[test]
