@@ -147,23 +147,20 @@ def test_normalization_has_one_entry_point() -> None:
     assert "pub fn normalize_body(" in crate
 
 
-def test_the_kernel_ir_optimizer_is_a_pass_beside_normalization() -> None:
-    """The Kernel IR optimizer is the crate's second entry point, ``optimize_kernel_body`` in its ``optimize`` module:
-    pass mechanics that read the numbering and placement, run by one kernel pass. Normalization never reaches it,
-    since every normalization step runs inside ``normalize_body``."""
-    from emmy.compiler.ir.kernel import optimize_kernel_body
+def test_a_kernel_body_is_in_normal_form_at_construction() -> None:
+    """A ``KernelOp`` takes the one normal form a ``LoopOp`` takes, at construction in the base both share, so no
+    kernel pass optimizes a body after it: nothing under ``emmy/`` calls the crate's ``optimize_kernel_body``."""
+    from emmy.compiler.ir.kernel import KernelOp
+    from emmy.compiler.ir.stmt import normalize_body, parse_body
 
-    assert callable(optimize_kernel_body)
-    src = _REPO_ROOT / "crates" / "emmy-ir" / "src"
-    assert "pub fn optimize_kernel_body(" in (src / "optimize" / "mod.rs").read_text()
-    normalize = [path.relative_to(src) for path in (src / "normalize").rglob("*.rs") if "optimize::" in path.read_text()]
-    assert not normalize, f"normalization reaches the optimizer: {normalize}"
+    body = parse_body("a = load X[0]\nb = add(a, a)\nunused = multiply(a, 3)\nY[0] = b")
+    assert KernelOp(body=body, name="k").body == normalize_body(body)
     callers = [
         path.relative_to(_REPO_ROOT)
         for path in (_REPO_ROOT / "emmy").rglob("*.py")
         if "optimize_kernel_body" in path.read_text() and "ir/kernel/__init__.py" not in str(path)
     ]
-    assert [path.name for path in callers] == ["032_optimize.py"], callers
+    assert not callers, callers
 
 
 _STMT_PACKAGE = "emmy.compiler.ir.stmt"
