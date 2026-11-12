@@ -15,6 +15,7 @@ to ``Load`` / ``Assign`` / ``Write`` are gone.
 from __future__ import annotations
 
 from emmy.compiler.dtype import INTEGER_NAMES
+from emmy.compiler.target import vector_widths
 
 _TYPE_NAME: dict[str, str] = {
     "f32": "float",
@@ -242,10 +243,10 @@ class CudaRenderTarget:
         return False
 
     def vector_type(self, dtype: str, n: int) -> tuple[str, str] | None:
-        if dtype == "f32":
-            if n in (2, 4):
-                return (f"float{n}", "float")
+        if n not in vector_widths(dtype):
             return None
+        if dtype == "f32":
+            return (f"float{n}", "float")
         if dtype in ("f16", "bf16"):
             # n=2 → 4 B (LDS.32) via the pair type (``__half2`` / ``__nv_bfloat162``, 4-byte alignment).
             # n=4 → 8 B (LDS.64) via ``uint2`` punned to 4 elements.
