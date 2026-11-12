@@ -77,7 +77,7 @@ def _operands(stmt: Statement, name: str, arity: int) -> tuple[str, ...] | None:
 
 
 def _difference(stmt: Statement) -> tuple[str, str] | None:
-    """``(a, b)`` when ``stmt`` assigns ``a - b`` over two names, however the normal form spells the sum (``a - b``,
+    """``(a, b)`` when ``stmt`` assigns ``a - b`` over two names, however the body's simplification spells the sum (``a - b``,
     or ``-b + a`` where the negated term sorts first)."""
     if not isinstance(stmt, Assign):
         return None

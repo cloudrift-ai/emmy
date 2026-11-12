@@ -57,8 +57,7 @@ def fuse_runs(
     """Fuse every naturally aligned vector among the scope's statements at ``addresses`` (position → flat address),
     widest first: ``width`` statements at ``anchor, anchor + 1, …`` with ``anchor`` a multiple of ``width`` for every
     value of its variables, which the scope's ordering constraints let stand together. Where the statements stand
-    says nothing (an unrolled pointwise body interleaves each element's load with its arithmetic, and the normal form
-    orders siblings its own way). ``aligned`` names index variables known to be multiples of a power of two (an
+    says nothing (an unrolled pointwise body interleaves each element's load with its arithmetic). ``aligned`` names index variables known to be multiples of a power of two (an
     enclosing strided loop's); ``fused`` builds the vector statement from its members in address order."""
     at: dict[frozenset[tuple[str, int]], dict[int, list[int]]] = {}
     for position, (coefficients, offset) in sorted(addresses.items()):

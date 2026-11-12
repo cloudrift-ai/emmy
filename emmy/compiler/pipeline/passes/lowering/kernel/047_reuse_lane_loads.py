@@ -9,7 +9,7 @@ output between trips, and it cannot prove the output does not alias the row.
 
 This pass unrolls every lane-strided loop of at most ``_MAX_TRIPS`` trips whose extent the step
 divides, substituting each trip's coordinate. A reduce loop's carriers are seeded ahead of the
-trips, as the loop would have seeded them. The body's normal form does the rest: it folds each
+trips, as the loop would have seeded them. The body's optimization does the rest: it folds each
 index against the lane ranges, so a partner read ``(i < 64) ? i + 64 : i - 64`` at ``i = lane + 32k``
 resolves to another trip's own read, and it keeps one load of a cell the kernel never writes,
 on either side of the combine's barrier.

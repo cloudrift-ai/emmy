@@ -1964,7 +1964,7 @@ def _scalar_drain(c: Fold, cells, offset, operands, ki: str, bk_elems: int, base
     (NOT via the masked gmem-direct σ, whose ``% extent`` wrap would corrupt the slab index for an
     overhanging cell): the slab is indexed by the **local** tile coordinate ``offset[{0,1}].base(...) −
     base`` (``m_uvar·reg_m + i`` ∈ [0, tile_m), always in-slab), so an overhanging cell reads a
-    clamped / zero-filled slab row and its store is discarded by the guard. The body's normal form
+    clamped / zero-filled slab row and its store is discarded by the guard. The body's optimization
     shares A across the n-cells and B across the m-cells exactly as gmem-direct does. **Seed-less**
     (the accumulators are pre-seeded once by :meth:`_ScalarOps.state` outside the
     outer slab loop, so the drain folds into them without re-seeding. Each operand adds its

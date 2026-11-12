@@ -1,7 +1,7 @@
 """Divide by a divisor that varies with fewer axes than its numerator once: multiply by its reciprocal, when
 FAST_DIV permits the rounding change.
 
-The reciprocal is bound beside the divide it replaces. The body's normal form moves it out of every loop it does
+The reciprocal is bound beside the divide it replaces. The body's optimization moves it out of every loop it does
 not vary with, as it moves any value.
 
 Run after dtype stamping so integer division stays exact. Keep this policy out of body

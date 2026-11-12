@@ -2,9 +2,8 @@
 
 A Load that only a guarded block (a ``Cond`` with no else) reads is issued by every cell, the ones the guard skips
 included: a scatter pointed at its spare row loads a value it throws away. Inside the block, a cell the guard skips
-never reads it. The body's normal form keeps a Load on the side of a guard it stands on, so the move is this pass's.
-
-Where a Load stands among its siblings is not this pass's: a kernel body is in normal form, which orders them.
+never reads it. The optimization every kernel body takes keeps a Load on the side of a guard it stands on, so the move
+is this pass's. It moves a Load nowhere else.
 
 It decides nothing: the kernel computes the same values and issues fewer loads, so it answers to no knob.
 Idempotent: a Load already inside its guard has no guarded block to move into.

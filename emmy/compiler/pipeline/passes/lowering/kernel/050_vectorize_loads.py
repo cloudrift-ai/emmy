@@ -20,7 +20,7 @@ post-order):
    anchor+1, ..., anchor+n-1`` with an aligned anchor for every free coordinate, which the scope's ordering
    constraints let stand together (``Siblings``: nothing that must run between two of them, such as a write of the
    buffer). Where they stand says nothing: an unrolled pointwise body interleaves each element's load with its
-   arithmetic, and the normal form orders siblings its own way. If the target also supports
+   arithmetic. If the target also supports
    ``vector_type(elem_dtype, n)`` for the source-buffer dtype, the loads become one widened ``Load``.
 
 Before grouping, a Load index ``(Y + r) / d`` whose ``Y`` is a non-negative multiple of ``g`` (variable coefficients

@@ -921,7 +921,7 @@ class SyncTransport:
         - anything else replicates per cell (a cone stmt whose read doesn't advance +1 with
           the slab col — e.g. a col-strided gather, or a vector read no shape proves aligned). A
           statement that is the same at every col (the stat-row loads, whose index is the run's
-          row alone) replicates too: the body's normal form holds its value once."""
+          row alone) replicates too: the body's optimization holds its value once."""
         probe_row, probe_k0, probe_col, zero = Var("__srow"), Var("__sk0"), Var("__scol"), Literal(0, "int")
         s0, _ = op.value(probe_k0, probe_row, zero)
         s1, _ = op.value(probe_k0, probe_row, Literal(1, "int"))
@@ -1268,7 +1268,7 @@ def _end_var(k0: str, k_end: Expression | None) -> Var | None:
 def _end_bound(k0: str, k_end: Expression | None) -> list[Statement]:
     """The early-stop bound ``k_end`` as one named value ahead of the chunk loop, which the loop stops at and the
     prefetch clamps read: evaluated once, where the raw expression at every use measurably spills on the flash
-    stream. A binding rather than a name the loop would imply, so the body's normal form carries it like any value."""
+    stream. A binding rather than a name the loop would imply, so the body's optimization carries it like any value."""
     return [Let(name=f"{k0}_end", value=k_end)] if k_end is not None else []
 
 

@@ -147,19 +147,30 @@ identity stays the same whatever the buffers are called.
 
 ## Kernel IR bodies
 
-A kernel body takes the same normal form a Loop IR body takes, through the same entry point: `KernelOp` normalizes
-its body at construction. The crate names no kernel statement type for it. The numbering, the ordering constraints
-and placement read a kernel statement through the protocol like any other, so a name a statement defines at each of
-several positions is a value apart, a name it reads and defines again (storage it updates in place) is read as the
-value it held where the read stands, a state a loop updates is read inside the loop as the step before, and a block
-holding an ordered protocol (a barrier) stays where it is. A read of storage the body writes carries the version it
-reads and the barrier it stands behind, since another thread's write of the storage lands at a barrier; a read of
-storage nothing in the body writes holds one value throughout, so it is shared and placed across a barrier.
+The normal form is two kinds of step. The optimizing steps remove work: the exact simplifications, every value
+computed once and placed at the shallowest scope that holds its operands, congruent states merged, unread values
+dropped (`prepare_body` and the one-operation split, run until a round changes nothing). The canonical steps make
+equal bodies one body: the sibling order, the operand order its ranks spell, and the sequential names
+(`canonical_order`). An identity reads a Loop IR body, so `normalize_body` runs both until they settle. No identity
+reads a kernel body, so a `KernelOp` takes the optimizing steps alone, through `optimize_body`, at construction: its
+statements stand in the order and under the names the pass that built them wrote, which is what a listing shows and
+what the CUDA compiler schedules. Motion can put two bindings of one name in one scope, so the optimizing steps start
+from `distinct_names`: the first binder of a spelling keeps it, a later one takes it with a number, and sibling loops
+over one axis keep the one name.
+
+The crate names no kernel statement type for any of it. The numbering, the ordering constraints and placement read a
+kernel statement through the protocol like any other, so a name a statement defines at each of several positions is a
+value apart, a name it reads and defines again (storage it updates in place) is read as the value it held where the
+read stands, a state a loop updates is read inside the loop as the step before, and a block holding an ordered
+protocol (a barrier) stays where it is. A read of storage the body writes carries the version it reads and the barrier
+it stands behind, since another thread's write of the storage lands at a barrier; a read of storage nothing in the
+body writes holds one value throughout, so it is shared and placed across a barrier.
 
 ## Memos
 
-What a process remembers across bodies is two `memo::Memo`s, the normal forms (`normal_forms` in the normalization
-driver) and the identities (`identities` in `identity.rs`), each bounded by the weight its entries hold between them:
+What a process remembers across bodies is three `memo::Memo`s, the normal forms and the optimized forms
+(`normal_forms`, `optimized_forms` in the normalization driver) and the identities (`identities` in `identity.rs`),
+each bounded by the weight its entries hold between them:
 an entry weighs the statements of the bodies it holds, `BODY_MEMO_WEIGHT` between them, since a whole-layer body is
 thousands of statements and a bound by entry count let a process that lowers many goldens hold gigabytes of normal
 forms. The caches are `quick_cache`'s: evicting by its one policy (S3-FIFO), sharded so no lock is held across a
@@ -170,7 +181,7 @@ literals and every number a field holds by their bits (a signed zero keys apart 
 digest keys them), with a hash computed once and kept with the body by one walk of the subtree; no key is a printed
 text. A body also keeps the one normal form it was given (`normal_form`, `remember_normal_form`, `is_normal`,
 `mark_normal` in `body.rs`), so a body normalized twice costs one lookup and a protocol rewrite that keeps a normal form
-says so through that API. `memo::clear_all` forgets both memos; Python's `emmy_ir.clear_memos()` calls it and purges
+says so through that API. `memo::clear_all` forgets the memos; Python's `emmy_ir.clear_memos()` calls it and purges
 the extension's wrapper tables (a body's statement wrappers, a subroutine's one Python object), which are not bounded,
 since a live object keeps its one wrapper, and otherwise drop their dead entries when their size reaches a multiple of
 1,024.
@@ -190,12 +201,6 @@ chain of one associative commutative operation as one node over every term (`Cha
 the term order can give a sum number alike; the exact identity is keyed the same way. The clustered identity keeps the
 chain (`Chains::Kept`): it spells every FMA-class tree as a chain of one representative, and the shape of that chain is
 what tells `a * b - c` from `a * c - b` when the buffers are typed.
-One reading of the order's spelling is left: a difference is keyed by how it is spelled (`a - b` or `-b + a`), and
-the term order picks the spelling. Two chains that compute alike over different cells (the two cells of a register
-tile, each with its own online softmax) can then trade places every round. The rounds alternate between forms that
-are each a whole round's output, and the normal form is the least of them by text, reached from either. Keying a
-difference by its terms would remove the case and move the order of every stored kernel that holds one: a restamp
-decision.
 
 ## Errors
 

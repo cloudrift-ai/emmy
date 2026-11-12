@@ -713,9 +713,10 @@ when another pass could reuse it from here. A pass may call a normalization step
 `tests/architecture/test_layering.py` holds the module to one exported entry point, to no transform that no
 normalization step calls, and `ir/` to no pipeline import.
 
-`normalize_body` runs from `BodyOp.__post_init__`, the base `LoopOp` and `KernelOp` share, so every constructed
-`LoopOp` (including intermediate fusion results) is canonicalized before validation and every `KernelOp` a kernel
-pass returns is in the same form:
+`BodyOp.__post_init__`, the base `LoopOp` and `KernelOp` share, gives the body its form. A `LoopOp` takes
+`normalize_body`, so every constructed `LoopOp` (including intermediate fusion results) is canonicalized before
+validation. A `KernelOp` takes `optimize_body`, the optimizing steps of the normal form without its canonical order
+and names: no identity reads a kernel body, and its listing keeps the order and the names its passes wrote.
 
 While it builds a region, fusion holds a compact body containing scalar `Call` statements. Each references one
 read-only `Subroutine` with explicit coordinate parameters and captured input buffers. A symbolic dim an index names

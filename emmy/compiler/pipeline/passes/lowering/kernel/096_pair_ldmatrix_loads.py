@@ -21,8 +21,7 @@ Legality, judged structurally on the two loads:
   logical K coordinates. A pairs register rows; B pairs register columns. Each becomes one
   LDS.128 and the coupled row/row MMA plus interleaved accumulator map preserve the output;
 - no statement must stand between the two loads under the scope's ordering constraints
-  (:class:`Siblings`). A body's statement order is its normal form's, which can put one
-  fragment's whole chain ahead of the other's, so position says nothing. A barrier, a slab
+  (:class:`Siblings`), wherever the two stand. A barrier, a slab
   write or a consumer of the earlier value of either fragment between the two is such a
   statement.
 

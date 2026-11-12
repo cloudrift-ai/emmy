@@ -1,10 +1,10 @@
 """The statements of one scope, read by their ordering constraints rather than their positions.
 
-A kernel body is in normal form, so the order of sibling statements is the canonical one and tells a pass nothing
-about which statements it may bring together: the two halves of a load pair can stand a whole fragment chain apart.
+Where two statements stand tells a pass little about whether it may bring them together: an unrolled body interleaves
+each element's load with its arithmetic, and the optimization every kernel body takes can move a value between them.
 A pass that fuses statements asks the scope instead. Statements can become one when no other statement must stand between
 them under the scope's ordering constraints (:func:`~emmy.compiler.ir.stmt.ordering_constraints`); the fused scope is written back
-in an order that keeps every constraint, and the normal form the next ``KernelOp`` takes orders it from there.
+in an order that keeps every constraint: each statement as early as its constraints allow, in its old order.
 """
 
 from __future__ import annotations
@@ -45,8 +45,10 @@ class Siblings:
         return True
 
     def fuse(self, members: list[int], fused: Statement) -> None:
-        """Replace ``members`` (:meth:`fusable`) with ``fused``."""
-        kept, gone = members[0], set(members[1:])
+        """Replace ``members`` (:meth:`fusable`) with ``fused``, which stands where the earliest of them stood unless
+        a constraint puts it later."""
+        kept = min(members)
+        gone = set(members) - {kept}
         self._stmts[kept] = fused
         for position in gone:
             self._before[kept] |= self._before.pop(position)

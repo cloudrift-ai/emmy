@@ -781,32 +781,33 @@ shared and global storage; ownership, supported geometry and the card's shared-m
 
 ## Kernel-IR peepholes
 
-**A kernel body is in normal form.** `KernelOp` normalizes its body at construction, through the one
-`normalize_body` a `LoopOp` takes (the base both share): every expression simplified under the ranges of the `Tile`'s
-axes and the loops around it, each pure value a scope computes twice computed once (the scalar tier's copies of one
-fold step under `__c{i}_{j}` read one value), each value placed at the shallowest scope that holds its operands,
-congruent carried states merged, unread values dropped, values and axes renamed, and sibling statements in the
-canonical order. So every pass reads and writes the same form, and none cleans a body up by hand. What makes this
-sound for hardware statements is their declarations: a statement that updates storage in place says so (a
-cross-thread combine's states, a fragment an `mma` accumulates into), a statement that writes a buffer says so (an
-async copy and a TMA load write their slab), a barrier is ordered against every sibling, and a read of storage the
-body writes carries the version it reads and the barrier it stands behind, while a read of storage the body never
-writes is one value throughout and is shared across a barrier. An effect a statement does not declare is a wrong
-kernel: the slab of an async copy that did not declare its write read as never written, and its drain left the
-chunk loop.
+**A kernel body is optimized at construction.** `KernelOp` runs `optimize_body` on its body, in the base it shares
+with `LoopOp`: every expression simplified under the ranges of the `Tile`'s axes and the loops around it, each pure
+value a scope computes twice computed once (the scalar tier's copies of one fold step under `__c{i}_{j}` read one
+value), each value placed at the shallowest scope that holds its operands, congruent carried states merged, unread
+values dropped. These are the optimizing steps of the normal form a `LoopOp` takes. Its canonical steps, the sibling
+order and the sequential names, are left out: no identity reads a kernel body, so its statements stand in the order
+and under the names the pass that built them wrote, and a later binder of a spelling takes a number (`_lane`,
+`_lane_1`). So no pass cleans a body up by hand, and a listing reads as the passes wrote it. What makes this sound for
+hardware statements is their declarations: a statement that updates storage in place says so (a cross-thread combine's
+states, a fragment an `mma` accumulates into), a statement that writes a buffer says so (an async copy and a TMA load
+write their slab), a barrier is ordered against every sibling, and a read of storage the body writes carries the
+version it reads and the barrier it stands behind, while a read of storage the body never writes is one value
+throughout and is shared across a barrier. An effect a statement does not declare is a wrong kernel: the slab of an
+async copy that did not declare its write read as never written, and its drain left the chunk loop.
 
-Two consequences shape every pass here:
+Three consequences shape every pass here:
 
-- **A pass does not leave an order behind.** Where a statement stands among its siblings is the normal form's. A
-  pass that wants two statements next to each other fuses them into one statement instead, and an emitter whose
-  order was a measured choice makes it structure: a staged copy carried across the chunk loop's back edge has no
-  statement that spreads its packed vector into names (where that stood decided how long the elements stayed live);
-  its names are the vector's lanes, and each read takes its lane where it stands.
-- **A name means what a statement binds it to, never what it is spelled like.** The normal form renames every value
-  and axis, so a name another name implies (a loop's `<axis>_end`, a fragment family's `O_i_f3`, an array index
-  written into a name) does not survive it.
+- **A pass does not decide where a pure value stands.** Placement moves one to the shallowest scope that holds its
+  operands; every other statement stays where the pass put it. An emitter whose place for a pure value was a measured
+  choice makes it structure: a staged copy carried across the chunk loop's back edge has no statement that spreads its
+  packed vector into names (where that stood decided how long the elements stayed live); its names are the vector's
+  lanes, and each read takes its lane where it stands.
+- **A name means what a statement binds it to, never what it is spelled like.** A name keeps its spelling until a
+  second binder shares it, so a name another name implies (a loop's `<axis>_end`, an array index written into a name)
+  is bound by a statement instead.
 - **A pass that fuses statements reads the scope's ordering constraints, not positions.** The two halves of a load
-  pair can stand a whole fragment chain apart, and a vector's elements in any order. `Siblings` (`_siblings.py`)
+  pair can stand apart with a moved value between them, and a vector's elements in any order. `Siblings` (`_siblings.py`)
   holds one scope's statements with their constraints: a set of statements can become one when no other statement
   must stand between two of them, and the fused scope is written back in an order that keeps every constraint.
   Load pairing and the vector loads and stores are built on it.
