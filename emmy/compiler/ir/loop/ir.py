@@ -39,7 +39,6 @@ from dataclasses import dataclass, fields, replace
 from frozendict import frozendict
 
 from emmy.compiler.ir.axis import Axis
-from emmy.compiler.ir.base import Op
 from emmy.compiler.ir.body_op import BodyOp
 from emmy.compiler.ir.elementwise import ElementwiseImpl
 from emmy.compiler.ir.loop.analysis import BodyAnalysis, Scope  # noqa: F401 — public Loop IR aliases
