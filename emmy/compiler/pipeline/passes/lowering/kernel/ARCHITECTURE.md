@@ -785,10 +785,10 @@ shared and global storage; ownership, supported geometry and the card's shared-m
 with `LoopOp`: every expression simplified under the ranges of the `Tile`'s axes and the loops around it, each pure
 value a scope computes twice computed once (the scalar tier's copies of one fold step under `__c{i}_{j}` read one
 value), each value placed at the shallowest scope that holds its operands, congruent carried states merged, unread
-values dropped. These are the optimizing steps of the normal form a `LoopOp` takes. Its canonical steps, the sibling
-order and the sequential names, are left out: no identity reads a kernel body, so its statements stand in the order
-and under the names the pass that built them wrote, and a later binder of a spelling takes a number (`_lane`,
-`_lane_1`). So no pass cleans a body up by hand, and a listing reads as the passes wrote it. What makes this sound for
+values dropped. These are the optimizing steps of the normal form a `LoopOp` takes. Its canonical steps (sibling
+reduce loops merged into one, the sibling order, the sequential names) are left out: no identity reads a kernel body,
+so its loops and statements stand as the pass that built them wrote them, under its names, and a later binder of a
+spelling takes a number (`_lane`, `_lane_1`). So no pass cleans a body up by hand, and a listing reads as the passes wrote it. What makes this sound for
 hardware statements is their declarations: a statement that updates storage in place says so (a cross-thread combine's
 states, a fragment an `mma` accumulates into), a statement that writes a buffer says so (an async copy and a TMA load
 write their slab), a barrier is ordered against every sibling, and a read of storage the body writes carries the
