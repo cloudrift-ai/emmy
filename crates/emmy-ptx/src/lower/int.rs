@@ -7,7 +7,7 @@ use emmy_ir::elementwise::{ElementwiseOp, Operation};
 use emmy_ir::expr::{Builtin, Expr, Expression, Interval, Num, SimplifyCtx, apply_binop};
 
 use super::{Lowerer, VTy, Val};
-use crate::inst::{Bank, Base, Cmp, Inst, Opcode, Operand, Special, Ty};
+use crate::inst::{Bank, Base, Cmp, Inst, Opcode, Operand, Space, Special, Ty};
 
 /// The lanes of a warp.
 const WARP_SIZE: i64 = 32;
@@ -50,7 +50,7 @@ fn bits(ty: VTy) -> Ty {
     if ty == VTy::I64 { Ty::B64 } else { Ty::B32 }
 }
 
-fn gcd(mut a: i64, mut b: i64) -> i64 {
+pub(super) fn gcd(mut a: i64, mut b: i64) -> i64 {
     while b != 0 {
         (a, b) = (b, a % b);
     }
@@ -120,7 +120,7 @@ impl Val {
 
 impl Lowerer {
     /// A number `operand` is a multiple of: a constant's magnitude, a register's known multiple.
-    fn multiple(&self, operand: &Operand) -> i64 {
+    pub(super) fn multiple(&self, operand: &Operand) -> i64 {
         match operand {
             Operand::Int(value) => value.saturating_abs(),
             Operand::Reg(reg) => self.b.multiple(*reg),
@@ -612,7 +612,7 @@ impl Lowerer {
     }
 
     /// `val` times `scale` in 64 bits: a 32-bit value is widened by the multiply itself.
-    fn scaled(&mut self, val: &Val, scale: i64) -> Operand {
+    pub(super) fn scaled(&mut self, val: &Val, scale: i64) -> Operand {
         let multiple = self
             .multiple(&val.op)
             .saturating_mul(scale.saturating_abs());
@@ -637,17 +637,18 @@ impl Lowerer {
 
     /// The address of one element of `buffer`: the base plus each term of the flat index, scaled to bytes and
     /// widened by itself, the terms bound in outer bodies first, and the constant in the address. A term added in
-    /// 64 bits is one ptxas folds across the trips of a loop it unrolls, which a 32-bit sum is not.
+    /// 64 bits is one ptxas folds across the trips of a loop it unrolls, which a 32-bit sum is not. A shared
+    /// buffer's address is 32 bits, and so are its terms.
     pub(super) fn address(
         &mut self,
         buffer: emmy_ir::Name,
         index: &[Expression],
         ctx: &SimplifyCtx,
     ) -> Result<Operand> {
-        let (base, ty, _) = self.buffer(buffer)?;
-        let bytes = ty.bytes();
+        let buffer = self.buffer(buffer)?;
+        let (bytes, wide) = (buffer.elem.bytes(), buffer.space != Space::Shared);
         let flat = match index {
-            [] => return Ok(Operand::Addr(Base::Reg(base), 0)),
+            [] => return Ok(Operand::Addr(Base::Reg(buffer.base), buffer.offset)),
             [flat] => flat,
             _ => return Err(self.refuse("an index of several coordinates is not flat")),
         };
@@ -660,8 +661,9 @@ impl Lowerer {
         let overflow = self.refuse("an address past 64 bits");
         let mut offset = constant
             .checked_mul(bytes)
+            .and_then(|constant| constant.checked_add(buffer.offset))
             .ok_or_else(|| overflow.clone())?;
-        let mut address = base;
+        let mut address = buffer.base;
         for (coefficient, term) in &terms {
             let scale = coefficient
                 .checked_mul(bytes)
@@ -672,15 +674,18 @@ impl Lowerer {
                 offset = offset.checked_add(term).ok_or_else(|| overflow.clone())?;
                 continue;
             }
-            let scaled = self.scaled(&val, scale);
+            let (scaled, at) = if wide {
+                (self.scaled(&val, scale), Ty::S64)
+            } else {
+                let multiple = self
+                    .multiple(&val.op)
+                    .saturating_mul(scale.saturating_abs());
+                let product = self.product_of(&val, &Val::int(scale), VTy::I32, multiple);
+                (product.op, Ty::S32)
+            };
             let aligned = gcd(i64::from(self.b.alignment(address)), self.multiple(&scaled));
-            let sum = Inst::new(
-                Opcode::Add,
-                Ty::S64,
-                Vec::new(),
-                vec![address.into(), scaled],
-            );
-            address = self.b.value(sum, Bank::B64);
+            let sum = Inst::new(Opcode::Add, at, Vec::new(), vec![address.into(), scaled]);
+            address = self.b.value(sum, at.bank());
             self.b
                 .set_alignment(address, 1 << aligned.trailing_zeros().min(16));
         }

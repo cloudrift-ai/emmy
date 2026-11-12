@@ -26,17 +26,24 @@ from emmy.compiler.ir.kernel.ir import (
 from emmy.compiler.tensor import Tensor
 from emmy.gpu import STATIC_SMEM_CAP
 
+#: The bytes every buffer's first element is aligned to: what the widest access a kernel makes needs, a 16-byte vector
+#: load or async copy. The runtime gives its own memory more (a driver allocation per region, and scratch buffers at
+#: ``SLAB_ALIGN`` offsets of theirs). Memory a host lends to a region is taken at this alignment and not checked.
+BUFFER_ALIGN = 16
+
 
 @dataclass(frozen=True)
 class Param:
     """One kernel parameter. ``name`` is its name in the kernel and in the launch's argument order; ``buffer`` the
-    graph buffer behind an ``input`` or ``output`` (a paged buffer binds its page table, so the two differ)."""
+    graph buffer behind an ``input`` or ``output`` (a paged buffer binds its page table, so the two differ);
+    ``align`` the bytes the launch aligns a buffer's first element to."""
 
     name: str
     kind: str  # "input" | "output" | "descriptor" | "int"
     dtype: DataType | None = None
     buffer: str = ""
     paged: bool = False
+    align: int = BUFFER_ALIGN
 
 
 @dataclass(frozen=True)

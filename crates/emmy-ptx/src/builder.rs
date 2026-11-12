@@ -58,6 +58,8 @@ pub struct Builder {
     states: HashSet<Reg>,
     multiples: HashMap<Reg, i64>,
     alignment: HashMap<Reg, u32>,
+    /// The register the instruction appended last defines, where no table keeps it.
+    loose: Option<Reg>,
 }
 
 impl Builder {
@@ -97,7 +99,31 @@ impl Builder {
 
     /// Append `inst` as written: a load, a store, or a definition of a state.
     pub fn emit(&mut self, inst: Inst) {
+        self.loose = None;
         self.items.push(Item::Inst(inst));
+    }
+
+    /// How many lines the code holds so far.
+    pub fn lines(&self) -> usize {
+        self.items.len()
+    }
+
+    /// Have the instruction appended last define `to` and not `from`, under `guard` when one is given: a value
+    /// computed for a state alone steps the state in place. `false`, with nothing changed, where that instruction
+    /// does not define `from` or a table keeps `from` for other readers.
+    pub fn retarget(&mut self, from: Reg, to: Reg, guard: Option<Reg>) -> bool {
+        match self.items.last_mut() {
+            Some(Item::Inst(inst)) if self.loose == Some(from) && inst.guard.is_none() => {
+                inst.results = vec![to];
+                inst.guard = guard.map(|pred| crate::inst::Guard {
+                    pred,
+                    negated: false,
+                });
+                self.loose = None;
+                true
+            }
+            _ => false,
+        }
     }
 
     /// The register holding the value of a pure instruction: the one an open scope already computed it into, else
@@ -121,6 +147,8 @@ impl Builder {
         });
         if keyed && let Some(table) = self.tables.last_mut() {
             table.insert(key, reg);
+        } else {
+            self.loose = Some(reg);
         }
         reg
     }

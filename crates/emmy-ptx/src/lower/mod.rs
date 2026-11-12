@@ -2,7 +2,9 @@
 //! taken as typed and flat: a value without a dtype, an operand of another type than its reader, or an index of
 //! several coordinates is refused by the statement's name, and so is a statement or an operation with no rule yet.
 
+mod coop;
 mod int;
+mod memory;
 mod value;
 
 use std::collections::{HashMap, HashSet};
@@ -14,20 +16,28 @@ use emmy_ir::elementwise::Operation;
 use emmy_ir::expr::{Expression, SimplifyCtx};
 use emmy_ir::normalize::{inner_ctx, launch_ctx};
 use emmy_ir::statement::{
-    Accum, Assign, Cond, Grid, Init, Let, Load, Loop, Select, Statement, StridedLoop, Write,
+    Accum, Assign, Cond, Grid, Init, Let, Loop, Select, Statement, StridedLoop,
 };
 use emmy_ir::text::statement_text;
 use emmy_ir::{Error, Name, Result};
 
+use self::coop::Threads;
+use self::memory::{Buffer, Carried, Elem};
 use crate::builder::Builder;
-use crate::inst::{Bank, Base, Inst, Module, Opcode, Operand, ParamDecl, Reg, Space, Ty};
+use crate::inst::{Bank, Base, Inst, Module, Opcode, Operand, ParamDecl, Reg, Shared, Space, Ty};
 use crate::{Kernel, ParamKind, Precision, Target};
 
 /// The most threads a block can hold.
 const MAX_BLOCK_THREADS: u32 = 1024;
 
-/// The first compute capability with a half-precision minimum and maximum.
-const SM_HALF_MIN_MAX: u32 = 80;
+/// The first compute capability with a half-precision minimum and maximum, and with async copies.
+const SM_AMPERE: u32 = 80;
+
+/// The first compute capability whose kernels wait on the grid ahead of them.
+const SM_HOPPER: u32 = 90;
+
+/// The alignment of the shared pool when no buffer in it asks for more: what a 16-byte access needs.
+const POOL_ALIGN: u32 = 16;
 
 /// The type of a value the rules compute: the dtypes a scalar kernel holds.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
@@ -119,35 +129,43 @@ impl Val {
     }
 }
 
-/// A buffer parameter: the register its pointer was loaded into and its element type.
-struct Buffer {
-    base: Reg,
-    ty: VTy,
-    writable: bool,
-}
-
 pub(crate) struct Lowerer {
     b: Builder,
     target: Target,
     precision: Precision,
     buffers: HashMap<Name, Buffer>,
+    /// The shared declarations of the module, and where each shared buffer starts in the launch-sized pool when
+    /// the interface gives one.
+    shared: Vec<Shared>,
+    pool: HashMap<Name, u64>,
     /// The names in scope, one table per open body, the innermost last.
     names: Vec<HashMap<Name, Val>>,
     /// How many statements read each name.
     uses: HashMap<Name, u32>,
+    /// The names some statement updates in place: each is a state from where it is defined.
+    updated: HashSet<Name>,
     /// The products held back for the one add, subtract or accumulate that reads them: the type and the operands.
     products: HashMap<Name, (VTy, Operand, Operand)>,
+    carried: HashMap<Name, Carried>,
+    /// What is decided of the threads of a block where the statement being lowered stands.
+    threads: Threads,
+    /// The value of a register as an expression over the thread index alone, where it is one.
+    by_thread: HashMap<Reg, Expression>,
+    /// How many bodies are open in the grid's own body.
+    grid_depth: usize,
     /// The first line of the statement being lowered, for an error to name.
     statement: String,
 }
 
-fn count_uses(body: &Body, uses: &mut HashMap<Name, u32>) {
+/// How many statements read each name, and the names a statement updates in place.
+fn survey(body: &Body, uses: &mut HashMap<Name, u32>, updated: &mut HashSet<Name>) {
     for stmt in body.stmts() {
         for name in stmt.deps() {
             *uses.entry(name).or_insert(0) += 1;
         }
+        updated.extend(stmt.updates());
         for nested in stmt.nested() {
-            count_uses(&nested, uses);
+            survey(&nested, uses, updated);
         }
     }
 }
@@ -165,12 +183,27 @@ pub(crate) fn lower(kernel: &Kernel, target: Target, precision: Precision) -> Re
         target,
         precision,
         buffers: HashMap::new(),
+        shared: Vec::new(),
+        pool: interface.shared_offsets.iter().copied().collect(),
         names: vec![HashMap::new()],
         uses: HashMap::new(),
+        updated: HashSet::new(),
         products: HashMap::new(),
+        carried: HashMap::new(),
+        threads: Threads::new(interface.threads as usize),
+        by_thread: HashMap::new(),
+        grid_depth: 0,
         statement: format!("the interface of {}", kernel.name),
     };
-    count_uses(kernel.body, &mut lowerer.uses);
+    survey(kernel.body, &mut lowerer.uses, &mut lowerer.updated);
+    if !lowerer.pool.is_empty() {
+        lowerer.declare_pool(kernel.body)?;
+    }
+    // A kernel waits for the grid launched ahead of it before it reaches any memory that grid may write.
+    if target.sm >= SM_HOPPER {
+        let wait = Inst::new(Opcode::GridWait, Ty::Pred, Vec::new(), Vec::new());
+        lowerer.b.emit(wait);
+    }
     let params = lowerer.parameters(kernel)?;
     lowerer.body(kernel.body, &SimplifyCtx::empty())?;
     let code = lowerer.b.finish()?;
@@ -179,7 +212,7 @@ pub(crate) fn lower(kernel: &Kernel, target: Target, precision: Precision) -> Re
         target: target.text(interface.arch_specific),
         entry: kernel.name.to_string(),
         params,
-        shared: Vec::new(),
+        shared: lowerer.shared,
         max_threads: interface.threads,
         registers: code.registers,
         items: code.items,
@@ -210,15 +243,26 @@ impl Lowerer {
                 }
                 match param.kind {
                     ParamKind::Input | ParamKind::Output => {
-                        let ty = self.vty(param.dtype)?;
+                        let elem = self.elem(param.dtype)?;
+                        let align = param.align;
+                        if !align.is_power_of_two() || i64::from(align) < elem.bytes() {
+                            let name = param.name;
+                            return Err(self.refuse(format_args!(
+                                "{name} is aligned to {align} bytes, which is no alignment of its elements"
+                            )));
+                        }
                         let base = self.b.reg(Bank::B64);
                         let load = Opcode::Ld(Space::Param);
                         self.b
                             .emit(Inst::new(load, Ty::U64, vec![base], vec![source]));
-                        let align = ty.bytes() as u32;
                         self.b.set_alignment(base, align);
-                        let writable = param.kind == ParamKind::Output;
-                        let buffer = Buffer { base, ty, writable };
+                        let buffer = Buffer {
+                            space: Space::Global,
+                            base,
+                            offset: 0,
+                            elem,
+                            writable: param.kind == ParamKind::Output,
+                        };
                         self.buffers.insert(param.name, buffer);
                         Ok(ParamDecl::Pointer { align })
                     }
@@ -244,9 +288,52 @@ impl Lowerer {
         VTy::of(dtype).ok_or_else(|| self.no_rule(format_args!("the dtype {dtype}")))
     }
 
+    /// The element type of a buffer of `dtype`.
+    fn elem(&self, dtype: Option<DType>) -> Result<Elem> {
+        let dtype = dtype.ok_or_else(|| self.refuse("a value carries no dtype"))?;
+        Elem::of(dtype).ok_or_else(|| self.no_rule(format_args!("the dtype {dtype}")))
+    }
+
+    /// Bind `name` to `val` in the innermost body. A name some statement updates in place is a state from here on.
     fn bind(&mut self, name: Name, val: Val) {
+        let val = match val.op {
+            Operand::Reg(reg) if self.b.is_state(reg) => val,
+            _ if self.updated.contains(&name) => {
+                let state = self.b.state(val.ty.bank());
+                let ty = val.ty.held();
+                self.b
+                    .emit(Inst::new(Opcode::Mov, ty, vec![state], vec![val.op]));
+                Val::reg(state, val.ty)
+            }
+            _ => val,
+        };
         if let Some(scope) = self.names.last_mut() {
             scope.insert(name, val);
+        }
+    }
+
+    /// A register for the value `name` is defined with: a state when some statement updates the name in place.
+    fn fresh(&mut self, name: Name, bank: Bank) -> Reg {
+        if self.updated.contains(&name) {
+            self.b.state(bank)
+        } else {
+            self.b.reg(bank)
+        }
+    }
+
+    /// The register of the state `name` is, which a statement updates in place at `ty`.
+    fn state(&self, name: Name, ty: VTy) -> Result<Reg> {
+        match self.find(name) {
+            Some((_, val)) if val.ty != ty => {
+                let (held, read) = (val.ty.text(), ty.text());
+                Err(self.refuse(format_args!("{name} is {held}, updated at {read}")))
+            }
+            Some((_, val)) => val
+                .op
+                .reg()
+                .filter(|reg| self.b.is_state(*reg))
+                .ok_or_else(|| self.refuse(format_args!("{name} is no state"))),
+            None => Err(self.refuse(format_args!("{name} is updated before it is defined"))),
         }
     }
 
@@ -287,18 +374,23 @@ impl Lowerer {
         }
     }
 
-    /// A new state named `name`, holding `value`.
-    fn init(&mut self, name: Name, ty: VTy, value: f64) -> Result<()> {
-        let constant = match ty {
-            VTy::F32 => Operand::f32(value as f32),
-            VTy::F16 | VTy::Bf16 => Operand::Int(i64::from(value::half_bits(ty, value))),
+    /// The constant a state of `ty` is seeded `value` with, as a move takes it.
+    fn seed_constant(&self, ty: VTy, value: f64) -> Result<Operand> {
+        match ty {
+            VTy::F32 => Ok(Operand::f32(value as f32)),
+            VTy::F16 | VTy::Bf16 => Ok(Operand::Int(i64::from(value::half_bits(ty, value)))),
             // An integer state holds a seed its type holds: the bounded stand-in of an unbounded neutral element
             // is a float's.
             VTy::I32 | VTy::U32 | VTy::I64 if int::holds_seed(ty, value) => {
-                Operand::Int(value as i64)
+                Ok(Operand::Int(value as i64))
             }
-            _ => return Err(self.no_rule(format_args!("a state of {} seeded {value}", ty.text()))),
-        };
+            _ => Err(self.no_rule(format_args!("a state of {} seeded {value}", ty.text()))),
+        }
+    }
+
+    /// A new state named `name`, holding `value`.
+    fn init(&mut self, name: Name, ty: VTy, value: f64) -> Result<()> {
+        let constant = self.seed_constant(ty, value)?;
         let reg = self.b.state(ty.bank());
         self.b
             .emit(Inst::new(Opcode::Mov, ty.held(), vec![reg], vec![constant]));
@@ -356,7 +448,7 @@ impl Lowerer {
             Statement::Grid(grid) => self.grid(stmt, grid, ctx),
             Statement::Loop(node) => self.loop_(stmt, node, ctx),
             Statement::StridedLoop(node) => self.strided_loop(stmt, node, ctx),
-            Statement::Cond(cond) => self.cond(cond, ctx),
+            Statement::Cond(cond) => self.cond(cond, rest, ctx),
             Statement::Load(load) => self.load(load, ctx),
             Statement::Write(write) => self.write(write, ctx),
             Statement::Assign(assign) => self.assign(assign, rest, ctx),
@@ -364,6 +456,19 @@ impl Lowerer {
             Statement::Select(select) => self.select(select, ctx),
             Statement::Accum(accum) => self.accum(accum, ctx),
             Statement::Init(init) => self.init_(init),
+            Statement::Carry(carry) => self.carry(carry),
+            Statement::Pre(pre) => self.pre(pre),
+            Statement::ZeroPrologue(zero) => self.zero_prologue(zero, ctx),
+            Statement::Smem(smem) => self.smem(smem),
+            Statement::CpAsyncCopy(copy) => self.cp_async(copy, ctx),
+            Statement::CpAsyncCommit(_) => self.cp_async_group(Opcode::CpAsyncCommit, None),
+            Statement::CpAsyncWait(wait) => {
+                self.cp_async_group(Opcode::CpAsyncWait, Some(wait.group))
+            }
+            Statement::Sync(sync) => self.sync(sync),
+            Statement::WarpShuffle(shuffle) => self.warp_shuffle(shuffle, ctx),
+            Statement::WarpBroadcast(broadcast) => self.warp_broadcast(broadcast),
+            Statement::TreeHalve(tree) => self.tree_halve(tree, ctx),
             other => Err(self.no_rule(format_args!("the statement type {}", other.ty()))),
         }
     }
@@ -373,11 +478,20 @@ impl Lowerer {
         if grid.axes.len() != grid.decode.len() {
             return Err(self.refuse("a grid decodes every axis"));
         }
+        let threads = grid.block_threads + grid.aux_threads;
+        if threads != self.threads.count() as i64 {
+            let bound = self.threads.count();
+            return Err(self.refuse(format_args!(
+                "a grid of {threads} threads a block under an interface of {bound}"
+            )));
+        }
         let launch = launch_ctx(ctx, stmt).unwrap_or_else(|| ctx.clone());
         self.names.push(HashMap::new());
+        self.grid_depth = self.names.len();
         let done = (|| {
             for (axis, decode) in grid.axes.iter().zip(grid.decode.iter()) {
                 let val = self.int(decode, &launch)?;
+                self.note_by_thread(&val, decode);
                 self.bind(axis.name, val);
             }
             self.body(&grid.body, &inner_ctx(&launch, stmt))
@@ -393,6 +507,8 @@ impl Lowerer {
         if node.seed {
             self.seed(&node.body)?;
         }
+        let carried: Vec<Name> = node.carries().into_iter().map(|(name, _)| name).collect();
+        self.declare_carried(&carried, &node.body, ctx)?;
         let (end, enters) = match node.axis.extent.as_static() {
             Some(extent) if extent <= 0 => return Ok(()),
             Some(extent) => (Operand::Int(extent), true),
@@ -401,14 +517,18 @@ impl Lowerer {
                 (self.as_int(&extent, VTy::I32), false)
             }
         };
+        let uneven = self.differs_by_thread(&[&node.axis.extent.expression]);
         let open = self
             .b
             .open_loop(Operand::Int(0), end, Operand::Int(1), enters);
         self.names.push(HashMap::new());
         self.bind(node.axis.name, Val::reg(open.var, VTy::I32));
+        self.threads.uneven += usize::from(uneven);
         let done = self.body(&node.body, &inner_ctx(ctx, stmt));
+        self.threads.uneven -= usize::from(uneven);
         self.names.pop();
         done?;
+        self.commit_carried(&carried);
         self.b.close_loop(open)
     }
 
@@ -427,6 +547,7 @@ impl Lowerer {
             self.seed(&node.body)?;
         }
         let inner = inner_ctx(ctx, stmt);
+        let mut uneven = false;
         let uniform = match (
             node.start.int_literal(),
             node.step.int_literal(),
@@ -456,106 +577,49 @@ impl Lowerer {
             None => {
                 let start = self.int(&node.start, ctx)?;
                 let step = self.int(&node.step, ctx)?;
-                let end = match &node.end {
-                    Some(end) => self.int(end, ctx)?,
-                    None => self.int(&node.axis.extent.expression, ctx)?,
-                };
+                let last = node.end.as_ref().unwrap_or(&node.axis.extent.expression);
+                let end = self.int(last, ctx)?;
+                uneven = self.differs_by_thread(&[&node.start, &node.step, last]);
+                let multiple = int::gcd(self.multiple(&start.op), self.multiple(&step.op));
                 let (start, step, end) = (
                     self.as_int(&start, VTy::I32),
                     self.as_int(&step, VTy::I32),
                     self.as_int(&end, VTy::I32),
                 );
                 let open = self.b.open_loop(start, end, step, false);
+                self.b.set_multiple(open.var, multiple);
                 self.bind(node.axis.name, Val::reg(open.var, VTy::I32));
                 open
             }
         };
+        self.threads.uneven += usize::from(uneven);
         let done = self.body(&node.body, &inner);
+        self.threads.uneven -= usize::from(uneven);
         self.names.pop();
         done?;
         self.b.close_loop(open)
     }
 
-    fn cond(&mut self, cond: &Cond, ctx: &SimplifyCtx) -> Result<()> {
+    /// A condition runs each side where its predicate holds or does not. What is decided of the threads that
+    /// reach each side is kept for the barriers inside; the last condition of a grid's body with no other side is
+    /// the grid's mask, and the threads it turns away have left the kernel.
+    fn cond(&mut self, cond: &Cond, rest: &[Arc<Statement>], ctx: &SimplifyCtx) -> Result<()> {
         let pred = self.pred(&cond.cond, ctx)?;
+        let passes = self.truth_by_thread(&cond.cond);
+        let mask =
+            rest.is_empty() && cond.else_body.is_empty() && self.names.len() == self.grid_depth;
+        let around = self.threads.clone();
+        self.threads.enter(passes.as_deref(), true, mask);
         let mut open = self.b.open_if(pred);
         self.scope(&cond.body, ctx)?;
         if !cond.else_body.is_empty() {
+            self.threads = around.clone();
+            self.threads.enter(passes.as_deref(), false, false);
             self.b.else_(&mut open)?;
             self.scope(&cond.else_body, ctx)?;
         }
+        self.threads = around;
         self.b.close_if(open)
-    }
-
-    /// The pointer register, the element type and whether the kernel may write it, of the buffer `name`.
-    fn buffer(&self, name: Name) -> Result<(Reg, VTy, bool)> {
-        self.buffers
-            .get(&name)
-            .map(|buffer| (buffer.base, buffer.ty, buffer.writable))
-            .ok_or_else(|| self.refuse(format_args!("{name} is no buffer of the interface")))
-    }
-
-    fn load(&mut self, load: &Load, ctx: &SimplifyCtx) -> Result<()> {
-        let [name] = &load.names[..] else {
-            return Err(self.no_rule("a vector load"));
-        };
-        if !load.carried.is_empty() {
-            return Err(self.no_rule("a load of a staged copy"));
-        }
-        let ty = self.vty(load.dtype)?;
-        let (_, stored, _) = self.buffer(load.input)?;
-        if stored != ty {
-            let stored = stored.text();
-            return Err(self.refuse(format_args!("{} holds {stored}", load.input)));
-        }
-        let address = self.address(load.input, &load.index, ctx)?;
-        // A bool is a byte in memory and a predicate in a register.
-        let (held, bank) = match ty {
-            VTy::Bool => (Ty::U8, Bank::B32),
-            ty => (ty.held(), ty.bank()),
-        };
-        let reg = self.b.reg(bank);
-        let opcode = Opcode::Ld(Space::Global);
-        self.b
-            .emit(Inst::new(opcode, held, vec![reg], vec![address]));
-        let val = match ty {
-            VTy::Bool => Val::reg(self.truth(&Val::reg(reg, VTy::U32))?, VTy::Bool),
-            ty => Val::reg(reg, ty),
-        };
-        self.bind(*name, val);
-        Ok(())
-    }
-
-    fn write(&mut self, write: &Write, ctx: &SimplifyCtx) -> Result<()> {
-        let [name] = &write.values[..] else {
-            return Err(self.no_rule("a vector store"));
-        };
-        if write.atomic {
-            return Err(self.no_rule("an atomic store"));
-        }
-        if &*write.swizzle != "NONE" {
-            return Err(self.no_rule("a swizzled store"));
-        }
-        let val = self.lookup(*name)?;
-        let (_, stored, writable) = self.buffer(write.output)?;
-        if !writable {
-            return Err(self.refuse(format_args!("{} is an input", write.output)));
-        }
-        let declared = write.value_dtype.map(|dtype| self.vty(Some(dtype)));
-        if stored != val.ty || declared.transpose()?.is_some_and(|ty| ty != stored) {
-            let (stored, held) = (stored.text(), val.ty.text());
-            let output = write.output;
-            return Err(self.refuse(format_args!("{output} holds {stored}, {name} is {held}")));
-        }
-        let address = self.address(write.output, &write.index, ctx)?;
-        let (held, value) = match val.ty {
-            VTy::Bool => (Ty::U8, self.flag(&val)?.op),
-            ty => (ty.held(), self.register(&val).into()),
-        };
-        let opcode = Opcode::St(Space::Global);
-        self.b
-            .emit(Inst::new(opcode, held, Vec::new(), vec![address, value]));
-        Ok(())
     }
 
     /// `val` in a register: a constant is moved into one.
@@ -608,6 +672,7 @@ impl Lowerer {
         {
             ctx.ranges.insert(name, range);
         }
+        self.note_by_thread(&val, value);
         let val = self.named(val);
         self.bind(name, val);
         Ok(())

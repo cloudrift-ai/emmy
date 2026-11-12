@@ -36,6 +36,9 @@ pub struct Param {
     pub dtype: Option<DType>,
     /// Whether the parameter is a page table of the buffer and not the buffer.
     pub paged: bool,
+    /// The bytes the launch gives a buffer's first element as alignment: what stands behind every access of
+    /// several elements.
+    pub align: u32,
 }
 
 /// What the launch and the code must agree on: the parameters in call order, the per-block thread bound, the

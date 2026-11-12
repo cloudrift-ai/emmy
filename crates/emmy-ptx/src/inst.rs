@@ -55,6 +55,7 @@ pub enum Ty {
     B32,
     B64,
     U8,
+    U16,
     S32,
     U32,
     S64,
@@ -72,6 +73,7 @@ impl Ty {
             Ty::B32 => "b32",
             Ty::B64 => "b64",
             Ty::U8 => "u8",
+            Ty::U16 => "u16",
             Ty::S32 => "s32",
             Ty::U32 => "u32",
             Ty::S64 => "s64",
@@ -87,7 +89,7 @@ impl Ty {
     pub fn bank(self) -> Bank {
         match self {
             Ty::Pred => Bank::Pred,
-            Ty::B16 | Ty::F16 | Ty::Bf16 => Bank::B16,
+            Ty::B16 | Ty::U16 | Ty::F16 | Ty::Bf16 => Bank::B16,
             Ty::B32 | Ty::U8 | Ty::S32 | Ty::U32 => Bank::B32,
             Ty::B64 | Ty::S64 | Ty::U64 => Bank::B64,
             Ty::F32 => Bank::F32,
@@ -102,7 +104,7 @@ impl Ty {
     pub fn bytes(self) -> i64 {
         match self {
             Ty::Pred | Ty::U8 => 1,
-            Ty::B16 | Ty::F16 | Ty::Bf16 => 2,
+            Ty::B16 | Ty::U16 | Ty::F16 | Ty::Bf16 => 2,
             Ty::B32 | Ty::S32 | Ty::U32 | Ty::F32 => 4,
             Ty::B64 | Ty::S64 | Ty::U64 => 8,
         }
@@ -187,6 +189,42 @@ impl Space {
     }
 }
 
+/// How a warp shuffle picks the lane a thread reads: by exchanging with the lane whose number differs in the given
+/// bits, from the lane that many below, or from the lane of that number in its group.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+pub enum Shuffle {
+    Bfly,
+    Up,
+    Idx,
+}
+
+impl Shuffle {
+    pub fn text(self) -> &'static str {
+        match self {
+            Shuffle::Bfly => "bfly",
+            Shuffle::Up => "up",
+            Shuffle::Idx => "idx",
+        }
+    }
+}
+
+/// Which caches an async copy from global memory goes through: every level (4 or 8 bytes), or past the first one
+/// (16 bytes).
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+pub enum Cache {
+    All,
+    Global,
+}
+
+impl Cache {
+    pub fn text(self) -> &'static str {
+        match self {
+            Cache::All => "ca",
+            Cache::Global => "cg",
+        }
+    }
+}
+
 /// What an instruction does. A variant holds what picks the instruction; its type and its float modifiers are the
 /// instruction's own fields.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
@@ -220,7 +258,28 @@ pub enum Opcode {
     /// A conversion to the instruction's type from this one.
     Cvt(Ty),
     Ld(Space),
+    /// A load of global memory nothing writes while the kernel runs (`ld.global.nc`).
+    LdConst,
     St(Space),
+    /// An atomic add into memory; the result is what the cell held.
+    AtomAdd(Space),
+    /// A barrier: of the whole block, or of the named barrier and the thread count given as operands.
+    BarSync,
+    /// A barrier of the lanes of a warp its mask operand names.
+    BarWarpSync,
+    /// The mask of the lanes of the warp that run this instruction together.
+    Activemask,
+    /// A 32-bit value read from another lane of the warp: the value, the lane operand, the clamp and the mask of
+    /// the lanes that take part.
+    Shfl(Shuffle),
+    /// An async copy from global to shared memory: the two addresses, the bytes copied and, when given, how many
+    /// of them are read (the rest are written as zeros).
+    CpAsync(Cache),
+    CpAsyncCommit,
+    /// Wait until at most the operand's count of committed copy groups are still in flight.
+    CpAsyncWait,
+    /// Wait for the grid launched ahead of this one (`griddepcontrol.wait`).
+    GridWait,
     Bra,
     Ret,
 }
@@ -230,8 +289,25 @@ impl Opcode {
     pub fn is_pure(self) -> bool {
         !matches!(
             self,
-            Opcode::Ld(_) | Opcode::St(_) | Opcode::Bra | Opcode::Ret
+            Opcode::Ld(_)
+                | Opcode::LdConst
+                | Opcode::St(_)
+                | Opcode::AtomAdd(_)
+                | Opcode::BarSync
+                | Opcode::BarWarpSync
+                | Opcode::Activemask
+                | Opcode::Shfl(_)
+                | Opcode::CpAsync(_)
+                | Opcode::CpAsyncCommit
+                | Opcode::CpAsyncWait
+                | Opcode::GridWait
+                | Opcode::Bra
+                | Opcode::Ret
         )
+    }
+
+    pub fn is_load(self) -> bool {
+        matches!(self, Opcode::Ld(_) | Opcode::LdConst)
     }
 }
 
@@ -294,8 +370,10 @@ pub enum Operand {
     F32(u32),
     /// A base plus a constant byte offset.
     Addr(Base, i64),
-    /// Several registers one vector access fills or stores.
+    /// Several registers one vector access fills or stores, or one move packs into a wider register.
     Tuple(Vec<Reg>),
+    /// The address of a shared declaration of the module, by its position, in the block's shared memory.
+    Shared(u32),
     Special(Special),
     Label(Label),
 }
@@ -401,6 +479,23 @@ impl Inst {
             .collect()
     }
 
+    /// The bytes one access of memory covers, with the operands that address it: a load or a store of several
+    /// registers, an async copy. `None` for an instruction that reaches one element or no memory.
+    pub fn wide_access(&self) -> Option<(i64, Vec<&Operand>)> {
+        let addresses = |count: usize| self.operands.iter().take(count).collect();
+        match self.opcode {
+            Opcode::CpAsync(_) => Some((self.operands.get(2)?.int()?, addresses(2))),
+            opcode if opcode.is_load() && self.results.len() > 1 => {
+                Some((self.results.len() as i64 * self.ty.bytes(), addresses(1)))
+            }
+            Opcode::St(_) => {
+                let lanes = self.operands.iter().map(Operand::lanes).max()?;
+                (lanes > 1).then(|| (lanes as i64 * self.ty.bytes(), addresses(1)))
+            }
+            _ => None,
+        }
+    }
+
     /// The label a branch goes to.
     pub fn target(&self) -> Option<Label> {
         match (self.opcode, self.operands.first()) {
@@ -419,7 +514,7 @@ pub enum Item {
     Comment(String),
 }
 
-/// How a parameter is declared: a pointer with the alignment of its elements, or a 32-bit integer.
+/// How a parameter is declared: a pointer with the alignment the launch gives its buffer, or a 32-bit integer.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum ParamDecl {
     Pointer { align: u32 },

@@ -1,7 +1,7 @@
 //! The verifier, run on every compile, for what ptxas does not check: every register is defined on every path to
-//! each read of it, every label a branch names is bound once, and an alignment fact stands behind every vector
-//! access. A register read undefined assembles, and gives a right answer at one optimization level and a wrong one
-//! at another.
+//! each read of it, every label a branch names is bound once, and an alignment fact stands behind every access of
+//! several elements. A register read undefined assembles, and gives a right answer at one optimization level and a
+//! wrong one at another.
 
 use std::collections::HashMap;
 
@@ -49,7 +49,7 @@ pub fn verify(module: &Module) -> Result<()> {
     let labels = bound_labels(module)?;
     let blocks = blocks(module, &labels)?;
     definitions(module, &blocks)?;
-    vector_accesses(module)
+    wide_accesses(module)
 }
 
 /// The item each label is bound at; an error for a label bound twice.
@@ -196,28 +196,22 @@ fn definitions(module: &Module, blocks: &[Block]) -> Result<()> {
     Ok(())
 }
 
-/// A load or a store of several registers at once reads or writes that many elements in one access, which the
-/// hardware takes only at an address aligned to the whole access: the base register must be proven so aligned, and
-/// the constant offset a multiple of it.
-fn vector_accesses(module: &Module) -> Result<()> {
+/// A load or a store of several registers, or an async copy, covers its bytes in one access, which the hardware
+/// takes only at an address aligned to the whole of it: each base register must be proven so aligned, and its
+/// constant offset a multiple of the access.
+fn wide_accesses(module: &Module) -> Result<()> {
     for inst in module.instructions() {
-        let lanes = match inst.opcode {
-            Opcode::Ld(_) => inst.results.len(),
-            Opcode::St(_) => inst.operands.iter().map(Operand::lanes).max().unwrap_or(1),
-            _ => 1,
-        };
-        if lanes < 2 {
+        let Some((bytes, addresses)) = inst.wide_access() else {
             continue;
-        }
-        let bytes = lanes as i64 * inst.ty.bytes();
-        let aligned = inst.operands.iter().any(|operand| match operand {
+        };
+        let aligned = |operand: &Operand| match operand {
             Operand::Addr(Base::Reg(reg), offset) => {
                 let proven = module.alignment.get(reg).copied().unwrap_or(1);
                 i64::from(proven) % bytes == 0 && offset % bytes == 0
             }
             _ => false,
-        });
-        if !aligned {
+        };
+        if !addresses.into_iter().all(aligned) {
             return Err(refusal(format!(
                 "`{}` is a {bytes}-byte access with no alignment proven of its address",
                 instruction_text(inst)

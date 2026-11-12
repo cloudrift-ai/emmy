@@ -6,7 +6,7 @@ use emmy_ir::elementwise::{ElementwiseOp, Operation};
 use emmy_ir::expr::{CastTarget, Expr, Expression, LitType, SimplifyCtx};
 use emmy_ir::{Name, Result};
 
-use super::{Lowerer, SM_HALF_MIN_MAX, VTy, Val};
+use super::{Lowerer, SM_AMPERE, VTy, Val};
 use crate::inst::{Bank, Cmp, Inst, Opcode, Operand, Reg, Round, Ty};
 
 /// The sign bit of an `f32`.
@@ -142,7 +142,7 @@ impl Lowerer {
             (VTy::F32, _) | (_, Opcode::Selp | Opcode::Mov) => true,
             (VTy::F16, Opcode::Add | Opcode::Sub | Opcode::Mul | Opcode::Fma) => true,
             (VTy::F16, Opcode::Neg | Opcode::Abs) => true,
-            (VTy::F16, Opcode::Min | Opcode::Max) => self.target.sm >= SM_HALF_MIN_MAX,
+            (VTy::F16, Opcode::Min | Opcode::Max) => self.target.sm >= SM_AMPERE,
             _ => false,
         };
         if native {

@@ -1,36 +1,22 @@
 //! One test per rule, each from a body in the text form: the instruction list the rule writes, and that ptxas
 //! assembles the printed kernel at `-O0` and at its default level wherever it is installed.
 
+mod common;
+
 use std::collections::HashMap;
-use std::process::Command;
-use std::sync::atomic::{AtomicU32, Ordering};
 
 use emmy_ir::dtype::DType;
-use emmy_ir::text::parse_body;
 use emmy_ptx::inst::{
-    Bank, Base, Cmp, Inst, Item, Label, Module, Opcode, Operand, ParamDecl, Reg, Shared, Space, Ty,
+    Bank, Base, Cache, Cmp, Inst, Item, Label, Module, Opcode, Operand, ParamDecl, Reg, Shared,
+    Space, Ty,
 };
-use emmy_ptx::print::{instruction_text, print};
+use emmy_ptx::print::print;
 use emmy_ptx::verify::verify;
-use emmy_ptx::{Interface, Kernel, Param, ParamKind, Precision, Target, lower};
+use emmy_ptx::{Precision, Target};
 
 use DType::{BF16, Bool, F16, F32, I32, U32};
-use ParamKind::{Input, Int, Output};
-
-type Params<'a> = &'a [(&'a str, ParamKind, Option<DType>)];
-
-const SM_120: Target = Target { sm: 120 };
-const EXACT: Precision = Precision {
-    fuse: false,
-    ftz: false,
-};
-const FUSED: Precision = Precision {
-    fuse: true,
-    ftz: false,
-};
-
-/// One f32 input `a` and one f32 output `o`.
-const A_O: Params = &[("a", Input, Some(F32)), ("o", Output, Some(F32))];
+use common::{A_O, EXACT, FUSED, Params, SM_120, assemble, code, lowered, refusal};
+use emmy_ptx::ParamKind::{Input, Int, Output};
 
 /// One thread per element of 4,096, with no tail to guard.
 const GRID: &str =
@@ -44,109 +30,12 @@ const DECODE: [&str; 4] = [
     "add.s32 %r3, %r1, %r2",
 ];
 
-fn interface(params: Params, threads: u32) -> Interface {
-    Interface {
-        params: params
-            .iter()
-            .map(|(name, kind, dtype)| Param {
-                name: (*name).into(),
-                kind: *kind,
-                dtype: *dtype,
-                paged: false,
-            })
-            .collect(),
-        threads,
-        ..Interface::default()
-    }
-}
-
-/// Assemble `ptx` for `target` at `-O0` and at the default level; nothing where ptxas is not installed.
-fn assemble(ptx: &str, target: &str) {
-    static FILES: AtomicU32 = AtomicU32::new(0);
-    if Command::new("ptxas").arg("--version").output().is_err() {
-        return;
-    }
-    let stem = format!(
-        "{}/k{}_{}",
-        env!("CARGO_TARGET_TMPDIR"),
-        std::process::id(),
-        FILES.fetch_add(1, Ordering::Relaxed)
-    );
-    let source = format!("{stem}.ptx");
-    std::fs::write(&source, ptx).unwrap();
-    for level in ["-O0", "-O3"] {
-        let output = Command::new("ptxas")
-            .args([level, &format!("-arch={target}"), "-m64", &source, "-o"])
-            .arg(format!("{stem}.cubin"))
-            .output()
-            .unwrap();
-        assert!(
-            output.status.success(),
-            "ptxas {level} refused:\n{}\n{ptx}",
-            String::from_utf8_lossy(&output.stderr)
-        );
-    }
-    let _ = std::fs::remove_file(&source);
-    let _ = std::fs::remove_file(format!("{stem}.cubin"));
-}
-
-fn lowered(
-    body: &str,
-    params: Params,
-    target: Target,
-    precision: Precision,
-) -> emmy_ir::Result<Module> {
-    let body = parse_body(body).unwrap();
-    let interface = interface(params, 256);
-    let kernel = Kernel {
-        name: "k",
-        body: &body,
-        interface: &interface,
-    };
-    let module = lower(&kernel, target, precision)?;
-    assemble(&print(&module), &module.target);
-    Ok(module)
-}
-
-/// The code of a kernel, one line per instruction and label, without the parameter loads and the closing `ret`.
-fn code(body: &str, params: Params, precision: Precision) -> Vec<String> {
-    let module = lowered(body, params, SM_120, precision).unwrap();
-    module
-        .items
-        .iter()
-        .filter_map(|item| match item {
-            Item::Inst(inst) if matches!(inst.opcode, Opcode::Ld(Space::Param) | Opcode::Ret) => {
-                None
-            }
-            Item::Inst(inst) => Some(instruction_text(inst)),
-            Item::Label(label) => Some(format!("L{}:", label.0)),
-            Item::Comment(_) => None,
-        })
-        .collect()
-}
-
 /// The code of the statements `body` holds under `GRID`, after the decode.
 fn under_grid(body: &str, params: Params, precision: Precision) -> Vec<String> {
-    let indented: Vec<String> = body
-        .trim_matches('\n')
-        .lines()
-        .filter(|line| !line.trim().is_empty())
-        .map(|line| format!("    {}", line.strip_prefix("        ").unwrap_or(line)))
-        .collect();
-    let all = code(
-        &format!("{GRID}\n{}", indented.join("\n")),
-        params,
-        precision,
-    );
+    let body = format!("{GRID}\n{}", common::indented(body));
+    let all = code(&body, params, precision);
     assert_eq!(all[..DECODE.len()], DECODE);
     all[DECODE.len()..].to_vec()
-}
-
-/// The message a kernel is refused with.
-fn refusal(body: &str, params: Params) -> String {
-    lowered(body, params, SM_120, EXACT)
-        .unwrap_err()
-        .to_string()
 }
 
 // --- the grid --------------------------------------------------------------------------------------------
@@ -180,7 +69,7 @@ Grid(axes=(r in 0..100, c in 0..4), decode=((block_idx.x * 256 + thread_idx.x) /
             "add.s64 %rd3, %rd0, %rd2",
             "mul.wide.s32 %rd4, %r5, 4",
             "add.s64 %rd5, %rd3, %rd4",
-            "ld.global.f32 %f0, [%rd5]",
+            "ld.global.nc.f32 %f0, [%rd5]",
             "add.s64 %rd6, %rd1, %rd2",
             "add.s64 %rd7, %rd6, %rd4",
             "st.global.f32 [%rd7], %f0",
@@ -205,13 +94,43 @@ fn a_module_states_its_target_its_thread_bound_and_its_parameters() {
     assert_eq!(
         head,
         ".version 8.7\n.target sm_120\n.address_size 64\n\n.visible .entry k(\n\
-         \t.param .u64 .ptr .align 2 k_param_0,\n\t.param .u64 .ptr .align 2 k_param_1,\n\
+         \t.param .u64 .ptr .align 16 k_param_0,\n\t.param .u64 .ptr .align 16 k_param_1,\n\
          \t.param .u32 k_param_2\n)\n.maxntid 256, 1, 1\n"
     );
     assert!(text.contains("\t// f16 x = load a[i]\n"), "{text}");
     assert!(text.is_ascii());
     let older = lowered(&body, params, Target { sm: 80 }, EXACT).unwrap();
     assert_eq!((older.version, older.target.as_str()), ((7, 8), "sm_80"));
+    // A kernel waits for the grid launched ahead of it, first of all, on the targets that have the instruction.
+    let waits = |module: &Module| {
+        let first = module.instructions().next().unwrap();
+        first.opcode == Opcode::GridWait
+    };
+    let hopper = lowered(&body, params, Target { sm: 90 }, EXACT).unwrap();
+    assert!(waits(&module) && waits(&hopper) && !waits(&older));
+    assert!(text.contains("\tgriddepcontrol.wait;\n\tld.param.u64 %rd0, [k_param_0];\n"));
+}
+
+/// A parameter aligned to less than one of its elements, or to no power of two, is refused.
+#[test]
+fn a_buffer_is_aligned_to_its_elements_at_least() {
+    let body = common::parse(&format!("{GRID}\n    f32 x = load a[i]\n    f32 o[i] = x"));
+    for align in [2, 24] {
+        let mut interface = common::interface(A_O, 256);
+        interface.params[0].align = align;
+        let kernel = emmy_ptx::Kernel {
+            name: "k",
+            body: &body,
+            interface: &interface,
+        };
+        let message = emmy_ptx::lower(&kernel, SM_120, EXACT)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            message.contains("which is no alignment of its elements"),
+            "{message}"
+        );
+    }
 }
 
 // --- addresses -------------------------------------------------------------------------------------------
@@ -237,9 +156,9 @@ fn an_address_is_a_base_a_scaled_index_and_a_constant() {
         [
             "mul.wide.s32 %rd2, %r3, 4",
             "add.s64 %rd3, %rd0, %rd2",
-            "ld.global.f32 %f0, [%rd3]",
-            "ld.global.f32 %f1, [%rd3+12]",
-            "ld.global.f32 %f2, [%rd3+-4]",
+            "ld.global.nc.f32 %f0, [%rd3]",
+            "ld.global.nc.f32 %f1, [%rd3+12]",
+            "ld.global.nc.f32 %f2, [%rd3+-4]",
             "add.rn.f32 %f3, %f0, %f1",
             "add.rn.f32 %f4, %f3, %f2",
             "mul.wide.s32 %rd4, %r3, 8",
@@ -273,7 +192,7 @@ fn the_terms_of_an_index_are_added_in_64_bits_outermost_first() {
             "add.s64 %rd3, %rd0, %rd2",
             "mul.wide.s32 %rd4, %r4, 4",
             "add.s64 %rd5, %rd3, %rd4",
-            "ld.global.f32 %f1, [%rd5]",
+            "ld.global.nc.f32 %f1, [%rd5]",
             "add.rn.f32 %f0, %f0, %f1",
             "add.s32 %r4, %r4, 1",
             "setp.lt.s32 %p0, %r4, 8",
@@ -305,7 +224,7 @@ Grid(axes=(i in 0..1048576), decode=(block_idx.x * 256 + thread_idx.x), block_th
             "mul.wide.s32 %rd2, %r3, 1048576",
             "shl.b64 %rd3, %rd2, 2",
             "add.s64 %rd4, %rd0, %rd3",
-            "ld.global.f32 %f0, [%rd4+20]",
+            "ld.global.nc.f32 %f0, [%rd4+20]",
             "mul.wide.s32 %rd5, %r3, 4",
             "add.s64 %rd6, %rd1, %rd5",
             "st.global.f32 [%rd6], %f0",
@@ -521,9 +440,9 @@ fn the_64_bit_and_unsigned_forms_follow_their_operands() {
         other,
         [
             "mul.wide.s32 %rd4, %r3, 4",
-            "ld.global.u32 %r4, [%rd5]",
+            "ld.global.nc.u32 %r4, [%rd5]",
             "mul.wide.s32 %rd6, %r3, 8",
-            "ld.global.s64 %rd8, [%rd7]",
+            "ld.global.nc.s64 %rd8, [%rd7]",
             "mov.s64 %rd9, 0",
             "min.u32 %r5, %r4, 7",
             "max.u32 %r6, %r4, %r5",
@@ -554,7 +473,7 @@ fn the_64_bit_and_unsigned_forms_follow_their_operands() {
             "or.pred %p6, %p4, %p5",
             "selp.s32 %r10, %r8, %r9, %p6",
             "mul.wide.u32 %rd25, %r4, 4",
-            "ld.global.f32 %f0, [%rd26]",
+            "ld.global.nc.f32 %f0, [%rd26]",
             "st.global.s64 [%rd27], %rd9",
         ]
     );
@@ -782,7 +701,7 @@ fn half_precision_runs_in_16_bit_registers() {
         [
             "mul.wide.s32 %rd2, %r3, 2",
             "add.s64 %rd3, %rd0, %rd2",
-            "ld.global.b16 %h0, [%rd3]",
+            "ld.global.nc.b16 %h0, [%rd3]",
             "fma.rn.f16 %h1, %h0, %h0, %h0",
             "neg.f16 %h2, %h0",
             "max.f16 %h3, %h1, %h2",
@@ -909,9 +828,9 @@ fn a_cast_is_one_conversion() {
     assert_eq!(
         conversions,
         [
-            "ld.global.b16 %h0, [%rd9]",
-            "ld.global.b16 %h1, [%rd10]",
-            "ld.global.u8 %r4, [%rd12]",
+            "ld.global.nc.b16 %h0, [%rd9]",
+            "ld.global.nc.b16 %h1, [%rd10]",
+            "ld.global.nc.u8 %r4, [%rd12]",
             "setp.ne.u32 %p0, %r4, 0",
             "cvt.f32.f16 %f0, %h0",
             "cvt.f32.bf16 %f1, %h1",
@@ -971,7 +890,7 @@ fn a_loop_counts_from_zero_and_steps_its_accumulator_in_place() {
             "L1:",
             "mul.wide.s32 %rd2, %r4, 4",
             "add.s64 %rd3, %rd0, %rd2",
-            "ld.global.f32 %f2, [%rd3]",
+            "ld.global.nc.f32 %f2, [%rd3]",
             "fma.rn.f32 %f0, %f2, %f2, %f0",
             "max.f32 %f1, %f1, %f2",
             "add.s32 %r4, %r4, 1",
@@ -1006,7 +925,7 @@ fn a_loop_over_a_symbolic_extent_is_tested_ahead() {
             "L2:",
             "mul.wide.s32 %rd2, %r5, 4",
             "add.s64 %rd3, %rd0, %rd2",
-            "ld.global.f32 %f1, [%rd3]",
+            "ld.global.nc.f32 %f1, [%rd3]",
             "add.rn.f32 %f0, %f0, %f1",
             "add.s32 %r5, %r5, 1",
             "setp.lt.s32 %p1, %r5, %r0",
@@ -1042,7 +961,7 @@ fn a_strided_loop_counts_its_trips_where_they_are_the_same_for_every_thread() {
             "add.s32 %r6, %r5, 4",
             "mul.wide.s32 %rd2, %r6, 4",
             "add.s64 %rd3, %rd0, %rd2",
-            "ld.global.f32 %f1, [%rd3]",
+            "ld.global.nc.f32 %f1, [%rd3]",
             "add.rn.f32 %f0, %f0, %f1",
             "add.s32 %r4, %r4, 1",
             "setp.lt.s32 %p0, %r4, 8",
@@ -1053,7 +972,7 @@ fn a_strided_loop_counts_its_trips_where_they_are_the_same_for_every_thread() {
             "L3:",
             "mul.wide.s32 %rd4, %r7, 4",
             "add.s64 %rd5, %rd0, %rd4",
-            "ld.global.f32 %f2, [%rd5]",
+            "ld.global.nc.f32 %f2, [%rd5]",
             "add.rn.f32 %f0, %f0, %f2",
         ]
     );
@@ -1134,7 +1053,7 @@ fn a_seeded_state_steps_in_place_and_is_copied_where_it_is_named() {
             "mov.s32 %r4, 0",
             "mul.wide.s32 %rd2, %r3, 4",
             "add.s64 %rd3, %rd0, %rd2",
-            "ld.global.f32 %f1, [%rd3]",
+            "ld.global.nc.f32 %f1, [%rd3]",
             "mov.f32 %f2, %f0",
             "setp.gt.f32 %p0, %f1, 0f3F800000",
             "@!%p0 bra L1",
@@ -1184,8 +1103,8 @@ fn a_value_made_twice_is_made_once_within_its_scope() {
             "@!%p0 bra L1",
             "mul.wide.s32 %rd2, %r3, 8",
             "add.s64 %rd3, %rd0, %rd2",
-            "ld.global.f32 %f1, [%rd3]",
-            "ld.global.f32 %f2, [%rd3+4]",
+            "ld.global.nc.f32 %f1, [%rd3]",
+            "ld.global.nc.f32 %f2, [%rd3+4]",
             "add.rn.f32 %f0, %f0, %f1",
             "mul.rn.f32 %f3, %f0, 0f40000000",
             "add.rn.f32 %f0, %f0, %f2",
@@ -1195,7 +1114,7 @@ fn a_value_made_twice_is_made_once_within_its_scope() {
             "L1:",
             "mul.wide.s32 %rd4, %r3, 8",
             "add.s64 %rd5, %rd0, %rd4",
-            "ld.global.f32 %f6, [%rd5]",
+            "ld.global.nc.f32 %f6, [%rd5]",
             "add.rn.f32 %f7, %f0, %f6",
             "mul.wide.s32 %rd6, %r3, 4",
             "add.s64 %rd7, %rd1, %rd6",
@@ -1221,12 +1140,13 @@ fn a_statement_outside_the_rules_is_an_error_that_names_it() {
             "no PTX rule for the operation exp at f32: `f32 v = exp(x)`",
         ),
         (
-            "    Sync",
-            "no PTX rule for the statement type Sync: `Sync`",
+            "    WgmmaFence",
+            "no PTX rule for the statement type WgmmaFence: `WgmmaFence`",
         ),
-        ("    f32 y, z = load a[i]", "no PTX rule for a vector load"),
-        ("    f32 o[i] += x", "no PTX rule for an atomic store"),
-        ("    f32 o[i] = (x, x)", "no PTX rule for a vector store"),
+        (
+            "    TmaLoad(smem=s, smem_index=(i), desc=d, coords=(i), mbar=mb)",
+            "no PTX rule for the statement type TmaLoad",
+        ),
         (
             "    y = load a[i]",
             "a value carries no dtype: `y = load a[i]`",
@@ -1242,7 +1162,7 @@ fn a_statement_outside_the_rules_is_an_error_that_names_it() {
         ("    f32 a[i] = x", "a is an input"),
         (
             "    f32 y = load missing[i]",
-            "missing is no buffer of the interface",
+            "missing is no buffer of the kernel",
         ),
         ("    f32 o[i] = later", "later is read before it is defined"),
         (
@@ -1253,7 +1173,7 @@ fn a_statement_outside_the_rules_is_an_error_that_names_it() {
             "    for j in 0..4 unroll=true:\n        f32 o[j] = x",
             "a loop asks to be unrolled",
         ),
-        ("    f64 y = load a[i]", "no PTX rule for the dtype f64"),
+        ("    f64 y = x * x", "no PTX rule for the dtype f64"),
         (
             "    for j in 0..4:\n        i32 m <- maximum(m, j)",
             "no PTX rule for a state of i32 seeded -1000000",
@@ -1338,8 +1258,8 @@ fn mov(to: Reg, from: Operand) -> Item {
     inst(Opcode::Mov, Ty::F32, Some(to), vec![from])
 }
 
-/// The forms no rule writes yet print as ptxas reads them: a shared array and the external pool, an instruction
-/// under a guard, and a vector access over a register tuple.
+/// A list built by hand prints as ptxas reads it: a shared array and the external pool, an instruction under a
+/// guard, and a vector access over a register tuple.
 #[test]
 fn the_printer_spells_shared_declarations_guards_and_tuples() {
     let (f, p, rd) = (Bank::F32, Bank::Pred, Bank::B64);
@@ -1478,22 +1398,41 @@ fn the_verifier_refuses_a_label_not_bound_once() {
     assert!(message.contains("the label L1 is bound twice"), "{message}");
 }
 
-/// A vector access needs its address proven aligned to the whole access, the constant offset included.
+/// An access of several elements needs its address proven aligned to the whole of it, the constant offset
+/// included: a load of two registers, and an async copy at both of its addresses.
 #[test]
-fn the_verifier_refuses_a_vector_access_with_no_alignment_fact() {
-    let (f, rd) = (Bank::F32, Bank::B64);
-    let access = |offset: i64| {
+fn the_verifier_refuses_an_access_of_several_elements_with_no_alignment_fact() {
+    let (f, r, rd) = (Bank::F32, Bank::B32, Bank::B64);
+    let load = |offset: i64| {
         let address = Operand::Addr(Base::Reg(reg(rd, 0)), offset);
         let pair = vec![reg(f, 0), reg(f, 1)];
-        let load = Inst::new(Opcode::Ld(Space::Global), Ty::F32, pair, vec![address]);
+        let load = Inst::new(Opcode::LdConst, Ty::F32, pair, vec![address]);
         vec![Item::Inst(load)]
     };
-    let aligned = |bytes: u32| HashMap::from([(reg(rd, 0), bytes)]);
-    verify(&module(access(8), aligned(8))).unwrap();
-    for (offset, proven) in [(8, HashMap::new()), (8, aligned(4)), (4, aligned(8))] {
-        let message = verify(&module(access(offset), proven))
-            .unwrap_err()
-            .to_string();
+    let copy = |offset: i64| {
+        let to = Operand::Addr(Base::Reg(reg(r, 0)), 0);
+        let from = Operand::Addr(Base::Reg(reg(rd, 0)), offset);
+        let operands = vec![to, from, Operand::Int(8)];
+        let copy = Inst::new(Opcode::CpAsync(Cache::All), Ty::B32, Vec::new(), operands);
+        let symbol = vec![Operand::Shared(0)];
+        vec![
+            inst(Opcode::Mov, Ty::U32, Some(reg(r, 0)), symbol),
+            Item::Inst(copy),
+        ]
+    };
+    let aligned =
+        |bytes: u32, shared: u32| HashMap::from([(reg(rd, 0), bytes), (reg(r, 0), shared)]);
+    verify(&module(load(8), aligned(8, 1))).unwrap();
+    verify(&module(copy(8), aligned(8, 8))).unwrap();
+    for (items, proven) in [
+        (load(8), HashMap::new()),
+        (load(8), aligned(4, 1)),
+        (load(4), aligned(8, 1)),
+        (copy(8), aligned(8, 4)),
+        (copy(8), aligned(4, 8)),
+        (copy(4), aligned(8, 8)),
+    ] {
+        let message = verify(&module(items, proven)).unwrap_err().to_string();
         assert!(
             message.contains("is a 8-byte access with no alignment proven"),
             "{message}"

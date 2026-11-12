@@ -89,10 +89,13 @@ fn symbol(entry: &str, base: Base) -> String {
 }
 
 /// The opcode with its modifiers, in the order PTX spells them: the comparison or the multiply's half, the rounding
-/// mode, the flush-to-zero flag, the state space, the type, and for a conversion the type it converts from.
+/// mode, the flush-to-zero flag, the state space and its cache modifier, the vector width, the type, and for a
+/// conversion the type it converts from.
 fn mnemonic(inst: &Inst) -> String {
     let mut parts: Vec<&str> = Vec::new();
     let ty = inst.ty.text();
+    // What stands between the float modifiers and the type: a state space and, for a vector access, its width.
+    let mut memory: Vec<&str> = Vec::new();
     match inst.opcode {
         Opcode::Mov => parts.push("mov"),
         Opcode::Add => parts.push("add"),
@@ -120,24 +123,40 @@ fn mnemonic(inst: &Inst) -> String {
         Opcode::Setp(cmp) => parts.extend(["setp", cmp.text()]),
         Opcode::Selp => parts.push("selp"),
         Opcode::Cvt(_) => parts.push("cvt"),
-        Opcode::Ld(space) => parts.extend(["ld", space.text()]),
-        Opcode::St(space) => parts.extend(["st", space.text()]),
+        Opcode::Ld(space) => {
+            parts.push("ld");
+            memory.push(space.text());
+        }
+        Opcode::LdConst => {
+            parts.push("ld");
+            memory.extend(["global", "nc"]);
+        }
+        Opcode::St(space) => {
+            parts.push("st");
+            memory.push(space.text());
+        }
+        Opcode::AtomAdd(space) => parts.extend(["atom", space.text(), "add"]),
+        Opcode::Activemask => parts.push("activemask"),
+        Opcode::Shfl(shuffle) => parts.extend(["shfl", "sync", shuffle.text()]),
+        Opcode::CpAsync(cache) => return format!("cp.async.{}.shared.global", cache.text()),
+        Opcode::BarSync => return "bar.sync".into(),
+        Opcode::BarWarpSync => return "bar.warp.sync".into(),
+        Opcode::CpAsyncCommit => return "cp.async.commit_group".into(),
+        Opcode::CpAsyncWait => return "cp.async.wait_group".into(),
+        Opcode::GridWait => return "griddepcontrol.wait".into(),
         Opcode::Bra => return "bra".into(),
         Opcode::Ret => return "ret".into(),
     }
-    // The state space stands after the modifiers of a float instruction and before the type; no instruction has
-    // both, so one order serves.
-    let space = matches!(inst.opcode, Opcode::Ld(_) | Opcode::St(_)).then(|| parts.pop());
     if let Some(round) = inst.round {
         parts.push(round.text());
     }
     if inst.ftz {
         parts.push("ftz");
     }
-    parts.extend(space.flatten());
+    parts.extend(memory);
     // A load or a store of several registers is one vector access of that many elements.
     let lanes = match inst.opcode {
-        Opcode::Ld(_) => inst.results.len(),
+        opcode if opcode.is_load() => inst.results.len(),
         Opcode::St(_) => inst.operands.iter().map(Operand::lanes).max().unwrap_or(1),
         _ => 1,
     };
@@ -160,6 +179,7 @@ fn operand(entry: &str, operand: &Operand) -> String {
         Operand::Addr(base, 0) => format!("[{}]", symbol(entry, *base)),
         Operand::Addr(base, offset) => format!("[{}+{offset}]", symbol(entry, *base)),
         Operand::Tuple(regs) => tuple(regs),
+        Operand::Shared(index) => symbol(entry, Base::Shared(*index)),
         Operand::Special(special) => special.text().into(),
         Operand::Label(label) => label_text(*label),
     }

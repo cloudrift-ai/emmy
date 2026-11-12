@@ -29,6 +29,7 @@ fn param(value: &Bound<'_, PyAny>) -> PyResult<Param> {
         kind,
         dtype,
         paged: value.getattr("paged")?.extract()?,
+        align: value.getattr("align")?.extract()?,
     })
 }
 
