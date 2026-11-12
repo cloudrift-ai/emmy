@@ -149,7 +149,8 @@ impl Cmp {
 }
 
 /// A rounding mode: to a float (`Rn`), or to an integral value (`Rni` nearest even, `Rzi` toward zero, `Rmi` down,
-/// `Rpi` up).
+/// `Rpi` up). `Approx` stands where a rounding mode would and names the hardware's approximation of the
+/// instruction, which rounds as the hardware does.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 pub enum Round {
     Rn,
@@ -157,6 +158,7 @@ pub enum Round {
     Rzi,
     Rmi,
     Rpi,
+    Approx,
 }
 
 impl Round {
@@ -167,6 +169,7 @@ impl Round {
             Round::Rzi => "rzi",
             Round::Rmi => "rmi",
             Round::Rpi => "rpi",
+            Round::Approx => "approx",
         }
     }
 }
@@ -253,6 +256,16 @@ pub enum Opcode {
     Fma,
     Rcp,
     Sqrt,
+    /// The hardware's math instructions, which have an approximate form only: the reciprocal square root, two
+    /// to a power, the base-two logarithm, the sine, the cosine and the hyperbolic tangent.
+    Rsqrt,
+    Ex2,
+    Lg2,
+    Sin,
+    Cos,
+    Tanh,
+    /// The second operand with the sign of the first.
+    Copysign,
     Setp(Cmp),
     Selp,
     /// A conversion to the instruction's type from this one.

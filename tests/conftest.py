@@ -212,7 +212,7 @@ _MIN_RECORDED = 5.0
 _UNKNOWN_COST = 0.05
 #: Markers whose tests are deselected from the default suite. They cannot distort ITS bucketing,
 #: so they are excluded from the written baseline.
-_OFF_LANE_MARKERS = ("perf",)
+_OFF_LANE_MARKERS = ("perf", "sweep")
 #: Node ids seen carrying an off-lane marker this session (filled during collection).
 _OFF_LANE_ITEMS: set[str] = set()
 

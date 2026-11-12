@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+import contextlib
 import hashlib
 import subprocess
 import tempfile
 import textwrap
+from collections.abc import Iterator
 from pathlib import Path
 
 import numpy as np
@@ -44,7 +46,8 @@ def assemble(ptx: str, level: str, directory: Path) -> str:
     return key
 
 
-def run(
+@contextlib.contextmanager
+def built(
     body: str | list[str],
     inputs: dict[str, np.ndarray],
     outputs: dict[str, tuple[type, int]],
@@ -53,12 +56,13 @@ def run(
     threads: int = 256,
     level: str | None = None,
     fuse: bool = False,
+    ftz: bool = False,
     shared: tuple[dict[str, int], int] = ({}, 0),
-) -> dict[str, np.ndarray]:
-    """Compile ``body`` to PTX and launch it as ``blocks`` blocks of ``threads`` threads; several bodies are
-    launched in order, over the same buffers. ``outputs`` gives each output's element type and count; every output
-    starts at zero. ``level`` is the ptxas level, its default when ``None``. ``shared`` is the launch-sized pool:
-    each shared buffer's byte offset and the pool's size."""
+) -> Iterator[CompiledProgram]:
+    """Compile ``body`` to PTX and build the program that launches it as ``blocks`` blocks of ``threads`` threads,
+    under the GPU lock; several bodies are launched in order, over the same buffers. ``outputs`` gives each
+    output's element type and count; every output starts at zero. ``level`` is the ptxas level, its default when
+    ``None``. ``shared`` is the launch-sized pool: each shared buffer's byte offset and the pool's size."""
     out_dtypes = {name: (DTYPES[np.dtype(t)], size) for name, (t, size) in outputs.items()}
     params = (
         *(Param(name, "input", DTYPES[data.dtype], name) for name, data in inputs.items()),
@@ -72,7 +76,7 @@ def run(
     with tempfile.TemporaryDirectory() as scratch:
         for index, text in enumerate([body] if isinstance(body, str) else body):
             name = f"k{index}"
-            ptx = compile_ptx(name, parse_body(text), interface, sm=target()[0], fuse=fuse)
+            ptx = compile_ptx(name, parse_body(text), interface, sm=target()[0], fuse=fuse, ftz=ftz)
             kernels[name] = KernelSpec(source=ptx) if level is None else KernelSpec(binary_key=assemble(ptx, level, Path(scratch)))
             zeroed = tuple(outputs) if index == 0 else ()
             launches.append(LaunchSpec(name, name, names, *grid, pool, zeroed, writes=tuple(outputs)))
@@ -90,9 +94,14 @@ def run(
             kernels,
         )
         with gpu_lock():
-            program = CompiledProgram.build_from_plan(plan, dict(inputs), cubin_dir=Path(scratch))
-            program.run_once()
-            return program.outputs()
+            yield CompiledProgram.build_from_plan(plan, dict(inputs), cubin_dir=Path(scratch))
+
+
+def run(body: str | list[str], inputs: dict[str, np.ndarray], outputs: dict[str, tuple[type, int]], **launch) -> dict[str, np.ndarray]:
+    """Launch ``body`` once, as ``built`` builds it, and return its outputs."""
+    with built(body, inputs, outputs, **launch) as program:
+        program.run_once()
+        return program.outputs()
 
 
 def under(grid: str, statements: str, depth: int = 1) -> str:

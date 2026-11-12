@@ -6,6 +6,7 @@ use emmy_ir::elementwise::{ElementwiseOp, Operation};
 use emmy_ir::expr::{CastTarget, Expr, Expression, LitType, SimplifyCtx};
 use emmy_ir::{Name, Result};
 
+use super::math::fast;
 use super::{Lowerer, SM_AMPERE, VTy, Val};
 use crate::inst::{Bank, Cmp, Inst, Opcode, Operand, Reg, Round, Ty};
 
@@ -200,7 +201,13 @@ impl Lowerer {
             Expr::Ternary(cond, if_true, if_false) => {
                 self.float_select(cond, if_true, if_false, ty, ctx)
             }
-            Expr::Apply(ElementwiseOp::Known(op), args) => self.float_apply(*op, args, ty, ctx),
+            Expr::Apply(op, args) => match (fast(op.name()), op) {
+                (Some(row), _) => self.fast(op.name(), row, args, ty, ctx),
+                (None, ElementwiseOp::Known(op)) => self.float_apply(*op, args, ty, ctx),
+                (None, ElementwiseOp::Other(name)) => {
+                    Err(self.no_rule(format_args!("the operation {name}")))
+                }
+            },
             _ => Err(self.no_rule(format_args!("the expression {expression}"))),
         }
     }
@@ -306,7 +313,10 @@ impl Lowerer {
                 self.float_select(cond, if_true, if_false, ty, ctx)
             }
             (O::Copy | O::Positive, [x]) => self.float(x, ty, ctx),
-            _ => Err(self.no_rule(format_args!("the operation {op} at {}", ty.text()))),
+            _ => match self.math(op, args, ty, ctx)? {
+                Some(value) => Ok(value),
+                None => Err(self.no_rule(format_args!("the operation {op} at {}", ty.text()))),
+            },
         }
     }
 

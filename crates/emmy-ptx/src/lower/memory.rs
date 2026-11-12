@@ -128,7 +128,7 @@ impl Lowerer {
     }
 
     /// An error where the target is older than `sm`, which `what` needs.
-    fn needs(&self, sm: u32, what: &str) -> Result<()> {
+    pub(super) fn needs(&self, sm: u32, what: &str) -> Result<()> {
         if self.target.sm >= sm {
             return Ok(());
         }

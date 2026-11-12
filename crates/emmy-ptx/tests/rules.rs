@@ -1136,8 +1136,8 @@ fn a_statement_outside_the_rules_is_an_error_that_names_it() {
             "an index of several coordinates is not flat: `f32 o[i, 0] = x`",
         ),
         (
-            "    f32 v = exp(x)",
-            "no PTX rule for the operation exp at f32: `f32 v = exp(x)`",
+            "    f32 v = sin(x)",
+            "no PTX rule for the operation sin at f32: `f32 v = sin(x)`",
         ),
         (
             "    WgmmaFence",

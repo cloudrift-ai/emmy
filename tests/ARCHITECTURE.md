@@ -217,8 +217,9 @@ minutes and belongs to the finalization stage of a PR — see the Contribution I
 ```bash
 pytest tests/deploy/test_recipe.py -v   # single file — the development lane
 pytest tests/deploy/ -k recipe -v      # a few tests — the development lane
-pytest tests/ -v                       # all tests, finalization only (skips the off-lane `perf` tests)
+pytest tests/ -v                       # all tests, finalization only (skips the off-lane `perf` and `sweep` tests)
 pytest tests/perf/ -m perf -v          # GPU perf suite (see tests/perf/ARCHITECTURE.md)
+pytest tests/compiler/ptx/ -m sweep    # each math function over every f32 input, half a minute a function
 ```
 
 Under `make test` (`-n auto --dist=loadgroup`) the root `conftest.py` routes every CUDA-touching test onto two
@@ -272,6 +273,9 @@ large fraction of the card FREE at startup, plus checkpoint downloads and minute
 `pytest tests/serving/ -m perf` on a machine with the card mostly free). A perf
 mark on anything else silently drops it from `make test` even on GPU machines (this hid the serving runner's GPU
 correctness pins for a while). GPU correctness tests guard themselves with `requires_cuda` / `importorskip` instead.
+
+The `sweep` marker is gated the same way. It holds the tests that put every f32 bit pattern through a math function
+of the PTX compiler on the card (`tests/compiler/ptx/test_math.py`); the default suite samples the same functions.
 
 A lane whose torch has no CUDA hides the device from the compiler as well (`tests/conftest.py` empties
 `CUDA_VISIBLE_DEVICES`). The CI runners carry a GTX 1080 Ti that CPU-only torch cannot use, yet the runtime reached

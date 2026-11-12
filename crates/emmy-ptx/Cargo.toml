@@ -7,3 +7,6 @@ description = "The compiler from Kernel IR to NVIDIA PTX: an instruction list, i
 
 [dependencies]
 emmy-ir = { path = "../emmy-ir" }
+
+[dev-dependencies]
+libm = "0.2"

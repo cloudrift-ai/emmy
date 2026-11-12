@@ -499,6 +499,7 @@ name = "emmy-ptx"
 version = "0.1.0"
 dependencies = [
  "emmy-ir",
+ "libm",
 ]
 
 [[package]]

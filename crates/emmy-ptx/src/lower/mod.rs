@@ -4,6 +4,7 @@
 
 mod coop;
 mod int;
+mod math;
 mod memory;
 mod value;
 
@@ -29,6 +30,9 @@ use crate::{Kernel, ParamKind, Precision, Target};
 
 /// The most threads a block can hold.
 const MAX_BLOCK_THREADS: u32 = 1024;
+
+/// The first compute capability with the hardware's hyperbolic tangent.
+const SM_TURING: u32 = 75;
 
 /// The first compute capability with a half-precision minimum and maximum, and with async copies.
 const SM_AMPERE: u32 = 80;

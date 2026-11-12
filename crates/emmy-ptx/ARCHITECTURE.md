@@ -7,10 +7,11 @@ input, and every other choice is in the Kernel IR before it runs. ptxas keeps re
 scheduling and the unrolling of small loops.
 
 The crate covers scalar and cooperative kernels today. Scalar: the grid, loops, conditions, loads, stores, assigns,
-selects, accumulators and seeded states, carried states, casts, and the elementwise operations that are one
-instruction each. Cooperative: shared memory, barriers, warp shuffles, the tree reduction, vector access, atomic adds,
-async copies and the zeroing one kernel does for another. The math functions, the tensor-core statements, the bulk
-tensor copy and `wgmma` have no rule yet, and a kernel that holds one is an error that names it.
+selects, accumulators and seeded states, carried states, casts, the elementwise operations that are one instruction
+each, and the math functions kernels hold (below). Cooperative: shared memory, barriers, warp shuffles, the tree
+reduction, vector access, atomic adds, async copies and the zeroing one kernel does for another. The tensor-core
+statements, the bulk tensor copy and `wgmma` have no rule yet, and a kernel that holds one is an error that names it.
+So is any math function outside the table below.
 
 ## Entry points
 
@@ -44,9 +45,10 @@ A kernel between the rules and the printer is a `Module`: the directives, the pa
 register count of each bank, and one flat list of instructions, labels and comments. An instruction is an opcode, the
 type it computes at, a rounding mode, the flush-to-zero flag, the registers it defines, its operands and an optional
 predicate guard. Opcodes, types, comparisons, rounding modes, state spaces, shuffle modes and cache modifiers are
-enums; no instruction is a string before `print`. An operand is a register (bank and number), an integer or float
-constant, an address (a base and a constant byte offset), a register tuple, the address of a shared declaration, a
-special register or a label.
+enums; no instruction is a string before `print`. The hardware's approximate form of an instruction (`ex2.approx`,
+`rcp.approx`) is spelled where its rounding mode would stand. An operand is a register (bank and number), an integer
+or float constant, an address (a base and a constant byte offset), a register tuple, the address of a shared
+declaration, a special register or a label.
 
 Register banks follow PTX: predicate, 16-bit, 32-bit, 64-bit and f32. Signedness is on the instruction. A half lives
 in a 16-bit register, a bool in a predicate register (a byte in memory), and a byte is held zero-extended in 32 bits.
@@ -134,6 +136,84 @@ Every instruction reaches the list through the `Builder`.
   the second into the first, so a cell a trip skips keeps its value. A cell at an index known only where the kernel
   runs needs storage and has no rule.
 
+## Math
+
+A math function is a sequence of f32 instructions written through the builder, so the value table shares what two
+calls compute alike. Every instruction that rounds carries `.rn`, a fused multiply-add stands only where the sequence
+writes one, and no sequence reads the kernel's fusion decision: its accuracy is measured with the instructions it
+has. The flush-to-zero decision reaches every instruction of a sequence that takes the modifier. A half value has no
+sequence: its function computes in f32 and converts once, which the body says with its casts, and a math function
+handed a half operand is refused.
+
+Only the functions kernels hold are written. Counted over the realization corpus and the repository goldens (5,930
+kernel bodies): `rsqrt` 8,739 calls, `exp` 7,510, `log` 551, `tanh` 72, `pow` 28 (one golden), `erf` 8. No kernel
+holds a sine or a cosine. `sqrt`, `divide` and `reciprocal` are one correctly rounded instruction each. `sigmoid`
+(1,186 calls) is a composite: a kernel pass writes it as its primitives.
+
+The target of each sequence is the bound NVIDIA's CUDA math documentation states for the same single-precision
+function, with the special values the CUDA function gives. The polynomial coefficients are minimax fits made for
+these sequences, each the function it is fit to within a sixth of an f32's step; the reductions are the textbook
+ones.
+
+- **`exp`.** The exponent `k` is the floor of `x * log2(e)`, held to the exponents a normal float has. The rest of
+  the product, taken with the rest of the constant by two fused multiply-adds, lies in `[0, 1)`, where the
+  hardware's power of two (`ex2.approx`) is most accurate, and `2^k` is written through its bits. Past either end
+  `k` stays at its bound and the hardware instruction carries the result to infinity, through the subnormals, to
+  zero.
+- **`log`.** A subnormal is scaled into the normals. The float's bits less those of `2/3` hold the exponent `k`, and
+  what is left is a mantissa `m` in `[2/3, 4/3)`, so `ln(m)` is near zero only where `k` is zero. The result is
+  `k * ln(2) + ln(1 + f)` with `f = m - 1` exact and a polynomial of degree 10. Zero, a negative, an infinity and a
+  NaN take the hardware logarithm's value, which is the right one for each; one unsigned comparison finds them.
+- **`tanh`.** Below 1 an odd polynomial of degree 15. From 1 on, `1 - 2 / (2^(2|x| * log2(e)) + 1)` with the sign of
+  `x`, through the hardware's power of two and reciprocal. The hardware's own `tanh.approx` measures 134 ulp off
+  and is not used.
+- **`erf`.** Below 1 an odd polynomial of degree 13. From 1 on, `1 - 2^G(|x|)` with the sign of `x`: `G` is a
+  polynomial of degree 7 fit to `log2(erfc)`, with the error weighted by what it moves of the result.
+- **`rsqrt`** is the hardware instruction (`rsqrt.approx`), as CUDA's `rsqrtf` is.
+
+Measured on an RTX 5090 over every f32 bit pattern, against a float64 reference on the host. The error is the
+distance from the exact value in steps of the f32 grid there; the documentation counts steps from the correctly
+rounded result, which is never the larger number. The instruction counts are machine instructions of the sequence
+(`nvdisasm`, the kernel less the same kernel without the function).
+
+| Function | CUDA's bound | Maximum error | Inputs over 1 ulp | Furthest from nvcc's build | Instructions, nvcc's |
+| --- | --- | --- | --- | --- | --- |
+| `exp` | 2 ulp | 1.931 ulp at -13.899315 | 14,299,457 | 2 steps | 11, 10 |
+| `log` | 1 ulp | 0.931 ulp at 2.6688592 | 0 | 1 step | 24, 26 |
+| `tanh` | 2 ulp | 1.367 ulp at 1.0126345 | 5,604 | 2 steps | 18, 17 |
+| `erf` | 2 ulp | 1.166 ulp at 1.0339911 | 788 | 2 steps | 21, 28 |
+| `rsqrt` | 2 ulp | 1.515 ulp at 8.640916e37 | 10,159,988 | the same bits | 4, 4 |
+
+nvcc's own builds measure 1.931, 0.864, 1.815 and 1.037 ulp for the first four. Every special value is the CUDA
+function's: zeros keep their signs through `tanh` and `erf`, `exp` goes through the subnormals to zero, `log` of zero
+is negative infinity and of a negative a NaN, and a NaN operand gives a NaN.
+
+### The approximate operations
+
+An approximate operation is one hardware instruction, on its operand as it stands or scaled: what `--use_fast_math`
+and the fast intrinsics give a CUDA kernel today. One table in the math module holds them, a row each. Only
+`exp_fast` is an operation the IR declares; the other rows stand under provisional names, matched by spelling, until
+the pass that picks the approximate forms declares them.
+
+| Operation | Instructions |
+| --- | --- |
+| `exp_fast` | `ex2.approx(x * log2(e))` |
+| `log_fast` | `lg2.approx(x) * ln(2)` |
+| `pow_fast` | `ex2.approx(y * lg2.approx(x))` |
+| `sin_fast`, `cos_fast` | `sin.approx`, `cos.approx` |
+| `tanh_fast` | `tanh.approx`, from `sm_75` |
+| `divide_fast`, `reciprocal_fast` | `div.approx`, `rcp.approx` |
+| `sqrt_fast`, `rsqrt_fast` | `sqrt.approx`, `rsqrt.approx` |
+
+Each flushes to zero when the kernel's decision says (`tanh.approx` has no such form). With the decision off, the
+instruction is written in the form that keeps subnormals, and ptxas itself writes the shift that needs: it halves
+the operand of `ex2.approx` below the normal range and squares the result, three more machine instructions.
+`exp_fast` gives the bits nvcc's `__expf` gives on every f32 input, in both forms. Its error grows with the operand
+(the product is rounded before the power): the documentation states `2 + floor(|1.173 * x|)` ulp.
+
+An accurate sequence uses the flushing form of a hardware instruction inside it: none hands one a subnormal whose
+value matters or reads a subnormal from one.
+
 ## Cooperation between threads
 
 - **The combine program.** `WarpShuffle` and `TreeHalve` carry a program of statements over their state names. It
@@ -186,3 +266,9 @@ instruction form a rule writes has been through the assembler. `tests/compiler/p
 card, each assembled at ptxas's default level and at `-O0`, and compares them with NumPy: bit for bit, with the fold
 replayed in the kernel's order, except an atomic sum of arbitrary floats. The cooperative kernels are also the ones
 to run under compute-sanitizer's race and barrier checks.
+
+The math functions are measured there too (`test_math.py`). The default tests hold each function to its documented
+bound over a sample: every special value, the neighbourhoods of the points where a sequence changes form, and two
+million random bit patterns. The tests marked `sweep` (`pytest -m sweep`) put every f32 bit pattern through the
+kernel and hold the maximum of the table above; one function takes half a minute. The crate's own tests check each
+table of coefficients against the function on the host.
