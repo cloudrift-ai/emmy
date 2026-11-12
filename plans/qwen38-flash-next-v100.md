@@ -1014,7 +1014,9 @@ Rounds, as with DeepSeek. Each round starts from a profile and ends with a boot 
     round rose run by run (10.89 to 11.33 s); the cause is not established.
   - The grouped kernels sum each product in the same order as the per-expert ones: first-token log-probabilities at
     2K, 4K, 8K and 32K tokens are identical to #1385's, and so is the text, 6 of 6 one at a time and six at once.
-    ACCURACY_LINE The margin test passes with 586 MiB spare per card. The release audit deploys all 15 twins from
+    GSM8K 125 of 128 (2 at the output limit, as #1385), acceptance cases 27, 28, 27 without thinking and 27, 27, 27
+    with it, long-document lookups 339 of 339 without thinking (the run with thinking was stopped: the numerics
+    are #1385's). The margin test passes with 586 MiB spare per card. The release audit deploys all 15 twins from
     the golden alone. Boot 1,088-1,111 s.
   - Next: the experts at eight requests (80 slices at about 410 GB/s, against the fork's about 74 experts at about
     550), and the experts of up to eight rows in a prefill step, which still run one launch set each.
