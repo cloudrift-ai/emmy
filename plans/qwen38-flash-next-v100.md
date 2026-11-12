@@ -11,16 +11,17 @@ Emmy serving the model correctly, step 5 closes the speed gap, and step 6 releas
 Written 2026-10-13, revised the same day after a review and after the owner fixed the goal. Each result is written
 under its step. Numbers marked "upstream" are 1Cat-vLLM's own reports.
 
-**Where it stands (2026-11-11).** Steps 1 to 4 are done; step 5's done gate is not met. Step 4's gate (2026-11-02):
+**Where it stands (2026-11-12).** Steps 1 to 4 are done; step 5's done gate is not met. Step 4's gate (2026-11-02):
 two boots give the same text and the accuracy sets pass, but the correctness limits are not met, and the fork does
 not meet them against itself either. Since the done gate's first run (2026-11-03), step 5 brought Emmy under the
 3 GiB per card margin, sliced the shared expert across ranks, split pre8's down rows across blocks, measured where
 the first-token and eight-request gaps sit (2026-11-07), ran the eight requests' routed experts in one launch (15%
 more output), and found the host time of a decode step equal on both sides. On 2026-11-11 the owner turned async
-scheduling on, on both sides. Against the async fork, Emmy is 1.8-2.5x slower to the first token, 1.74x slower per
-token at one request, and gives 0.64-0.68x the fork's output at four and eight requests. Async doubles the first
-token at the full context on both sides, which a larger key/value pool avoids at a cost to the memory margin: the
-owner's call (step 5). The next round is the prefill experts. The minimums in step 2 and Qwen's license are still
+scheduling on, on both sides, and on 2026-11-12 a prefill step's wider experts began running 32 per launch. Against
+the async fork, Emmy is now 1.6-2.1x slower to the first token, 1.74x slower per token at one request, and gives
+0.71x the fork's output at eight requests (0.64x at four, before the prefill round). Async doubles the first token
+at the full context on both sides, which a larger key/value pool avoids at a cost to the memory margin: the owner's
+call (step 5). The next round is the experts at eight requests. The minimums in step 2 and Qwen's license are still
 open with the owner, who plans as if the license were granted.
 
 ## What we know
@@ -985,6 +986,38 @@ Rounds, as with DeepSeek. Each round starts from a profile and ends with a boot 
     4K prompts began with the 1K row's tokens and the eight-request row repeated the four-request row's prompts.
   - Next: the prefill experts in one launch per group, the round proposed on 2026-11-07, then the routed experts at
     eight requests.
+- **Prefill experts 32 at a time (2026-11-12).** On top of async scheduling. A 3,920-token step ran about 180
+  routed experts per layer, each its own launch set of five kernels well under one wave of the card: 512 ms of the
+  step on rank 0. On experts sliced across ranks the runner now runs every expert routed more rows than the decode
+  bucket through one grouped program, 32 experts per launch, each against blocks of 256 of its rows (the twin
+  `expert-group32x256@nvfp4`); the experts with fewer rows keep their tiers.
+  - The program takes the per-expert route's four cuts: each launch decodes its 32 experts' NVFP4 weights once
+    (78 MB of fp16 per rank, the launch's transient), then runs the gate/up and down products as tensor-core tiles
+    over all 32 experts. Gate: 32 experts of 256 rows took 710 us cold under the prior's schedules, against about
+    2.7 ms one expert at a time; with the two products tuned (40 rows each: gate/up 406 to 252 us, down 222 to
+    210 us) it is 646 us, and that is what the golden records.
+  - A B B A on boots never profiled, #1385 against the branch, rounds' repeats 1-3:
+
+    | Point | #1385 | This round |
+    | --- | ---: | ---: |
+    | First token, 1K | 1.09-1.15 s | 0.91-0.93 s |
+    | First token, 4K | 1.82-1.84 s | 1.59-1.63 s |
+    | First token, 8K | 3.30-3.33 s | 2.78-2.80 s |
+    | First token, 32K | 12.84-12.90 s | 10.58-11.33 s |
+    | First token, 130K | 93.9-96.9 s | 82.0-84.9 s |
+    | One request, 1K / 512, per token | 16.70 ms | 16.70 ms |
+    | 8 requests, 4K / 1K, total output | 214.0, 214.3 tok/s | 225.9, 223.9 tok/s |
+    | 8 requests, mean first token | 7.8 s | 6.4-6.6 s |
+
+  - About 0.25 s less per 4,096-token chunk, as the gate estimated. Against the async fork the first token is now
+    1.6-2.1x slower (2.0-2.5x before) and eight requests give 0.71x its output (0.68x). The branch's second 32K
+    round rose run by run (10.89 to 11.33 s); the cause is not established.
+  - The grouped kernels sum each product in the same order as the per-expert ones: first-token log-probabilities at
+    2K, 4K, 8K and 32K tokens are identical to #1385's, and so is the text, 6 of 6 one at a time and six at once.
+    ACCURACY_LINE The margin test passes with 586 MiB spare per card. The release audit deploys all 15 twins from
+    the golden alone. Boot 1,088-1,111 s.
+  - Next: the experts at eight requests (80 slices at about 410 GB/s, against the fork's about 74 experts at about
+    550), and the experts of up to eight rows in a prefill step, which still run one launch set each.
 - Gate, the definition of done. Both sides run step 2's production configuration: the same checkpoint, layout,
   context, key/value pool, concurrency, prefix-cache and MTP settings; fork, Emmy, Emmy, fork rounds; three repeats
   each:

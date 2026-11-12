@@ -623,7 +623,8 @@ def test_deepseek_expert_twin_records_the_native_mxfp4_program_serving_binds(tmp
     runs. ``w_down``'s packed shape also pins the layout the caller passes down: these experts are
     ``F.linear`` parameters, so the blocks lead with ``out``; the ``x @ W`` reading would produce
     (16, 2, 16) here instead. Served across tensor-parallel ranks, each rank holds a slice of every
-    expert, so the twin is the sliced program: intermediate 64 over two ranks records the 32 one."""
+    expert, so the twin is the sliced program: intermediate 64 over two ranks records the 32 one, and the
+    sliced experts also take the grouped prefill program."""
     torch = pytest.importorskip("torch")
     transformers = pytest.importorskip("transformers")
     from safetensors.torch import save_file
@@ -677,7 +678,7 @@ def test_deepseek_expert_twin_records_the_native_mxfp4_program_serving_binds(tmp
         "expert4@mxfp4",
         "expert256@mxfp4",
         "expert-sym@mxfp4",
-    } | {"expert-slots@mxfp4"}
+    } | {"expert-slots@mxfp4"} | ({"expert-group32x256@mxfp4"} if slices > 1 else set())
     expert = graphs["expert4@mxfp4"]
     assert set(expert.inputs) >= {"w_gate_up", "w_gate_up_scale", "w_down", "w_down_scale"}
     by_id = {i: expert.nodes[i].output for i in expert.inputs}
