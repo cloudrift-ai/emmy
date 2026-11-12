@@ -166,6 +166,17 @@ impl Visitor for Material {
     }
 }
 
+/// The statements a statement carries in a field of its own (a combine's merge).
+struct Carried(Vec<Arc<Statement>>);
+
+impl Visitor for Carried {
+    fn carried(&mut self, roles: Roles, stmt: &Arc<Statement>) {
+        if roles.contains_any(crate::statement::STMTS) {
+            self.0.push(stmt.clone());
+        }
+    }
+}
+
 /// An immutable sequence of statements. Two bodies with equal statements are equal and hash alike; a slice or a
 /// concatenation is a body.
 #[derive(Clone)]
@@ -444,16 +455,36 @@ impl Body {
         self.0.defined_states.get_or_init(|| {
             let mut out = Vec::new();
             self.walk(&mut |here| {
-                if let Statement::Accum(_) | Statement::Carry(_) = &**here.stmt() {
-                    for name in here.stmt().defines() {
-                        if !out.contains(&name) {
-                            out.push(name);
-                        }
+                let names = match &**here.stmt() {
+                    Statement::Accum(_) | Statement::Carry(_) => here.stmt().defines(),
+                    stmt => stmt.updates(),
+                };
+                for name in names {
+                    if !out.contains(&name) {
+                        out.push(name);
                     }
                 }
             });
             out
         })
+    }
+
+    /// The names this body updates in place and binds nowhere: storage of the scope around it, which the body reads.
+    fn updated_storage(&self) -> HashSet<Name> {
+        let mut updated = HashSet::new();
+        let mut bound = HashSet::new();
+        self.walk(&mut |here| {
+            let updates = here.stmt().updates();
+            bound.extend(
+                here.stmt()
+                    .defines()
+                    .into_iter()
+                    .filter(|name| !updates.contains(name)),
+            );
+            updated.extend(updates);
+        });
+        updated.retain(|name| !bound.contains(name));
+        updated
     }
 
     /// The accumulators a statement over this body still binds after it closes: this scope's own, and those of a
@@ -500,8 +531,11 @@ impl Body {
             for stmt in self.stmts() {
                 reads.extend(free_ssa(stmt));
             }
+            let storage = self.updated_storage();
             for local in self.local_defs() {
-                reads.remove(local);
+                if !storage.contains(local) {
+                    reads.remove(local);
+                }
             }
             reads
         })
@@ -572,6 +606,14 @@ impl Body {
                         continue;
                     }
                     _ => {}
+                }
+                // A combine merges each state with the same state of another thread, by the statements it carries:
+                // a state depends afterwards on what its own merge reads, not on every state of the combine.
+                let mut merge = Carried(Vec::new());
+                stmt.visit(&mut merge);
+                if !merge.0.is_empty() && !stmt.updates().is_empty() {
+                    walk(&Body::new(merge.0), axis_names, dependencies);
+                    continue;
                 }
                 let mut reads: HashSet<Name> = stmt.deps().into_iter().collect();
                 for expression in stmt.expressions() {
@@ -1097,6 +1139,32 @@ mod tests {
         .axis_dependencies();
         assert_eq!(dependencies[&Name::new("value")], names(&["a", "k"]));
         assert_eq!(dependencies[&Name::new("acc")], names(&["a"]));
+    }
+
+    /// A combine updates every state in place, and each state's merge reads its own state and the pivot's: the
+    /// weight sum does not come to depend on the value axis the weighted sum reads.
+    #[test]
+    fn a_combined_state_depends_on_what_its_own_merge_reads() {
+        let dependencies = body(
+            "
+            Tile(axes=(m in 0..4, n in 0..8, _lane in 0..32)):
+                for k in 0..32:
+                    p = load P[m, k]
+                    v = load V[k, n]
+                    pv = multiply(p, v)
+                    den <- add(den, p) over k
+                    num <- add(num, pv) over k
+                WarpShuffle(state=(den, num), state_b=(den__o, num__o), length=32):
+                    combine_states:
+                        den = den + den__o
+                        num = num + num__o
+                out = divide(num, den)
+                O[m, n] = out
+            ",
+        )
+        .axis_dependencies();
+        assert_eq!(dependencies[&Name::new("den")], names(&["m"]));
+        assert_eq!(dependencies[&Name::new("num")], names(&["m", "n"]));
     }
 
     #[test]

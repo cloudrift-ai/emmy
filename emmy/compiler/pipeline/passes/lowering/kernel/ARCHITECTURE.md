@@ -7,20 +7,12 @@ afterwards.
 ## `010_materialize` — bind the schedule to threads (and expand the contraction)
 
 `010_materialize` is a thin wrapper: after the split-survivor assert it makes **one** call to `_factor.factorize(tile,
-root)`, the entry to the recursive emitter, then passes the finished body through `_drop_repeated_declarations` —
-the emitted body's one legality guard. Operand cones splice
+root)`, the entry to the recursive emitter, and builds the `KernelOp` from the finished body. Operand cones splice
 INDEPENDENTLY (`Fold.spliced_step`), so two sibling cones reading one shared broadcast constant each carry their own
-copy of its `buf[0]` `Load`, under the same SSA name and at the same address; flattened into one loop body that is two
-C declarations of one name, which nvcc rejects (*already declared in the current scope*). The repeat binds nothing
-new, so it is dropped with NO rewrite — which is what keeps the guard narrow enough to run over a WHOLE kernel body.
-The renaming forms (`_atom._dedup_loads`, `stmt.normalize.place_values`) collapse two DIFFERENT names at one address,
-which needs a memory-effect reading neither has: a `Write` or an async fill between two identical loads of a staged
-buffer makes the second a different value. A same-name repeat cannot hide such a reload, since a rebind in one C scope
-is already illegal. A same-dtype `copy` of a value already bound to what its name holds is the same repeat in another
-spelling (a placement cut drops a workspace read's identity cast in one cone and keeps it in a sibling), and is
-dropped too. A name re-bound to a DIFFERENT address is left alone: that is an SSA fault and must surface as one.
-Repeated `Let` bindings follow the same rule: their expression representation and declared dtype must agree. Signed
-zero remains distinct, and an incompatible repeated declaration still surfaces as an SSA fault.
+copy of its `buf[0]` `Load`, under the same SSA name and at the same address, and a cone that derives a value from
+one carries its own copy of the `Assign`. The body's normal form (below) is what makes that one declaration: a name
+bound twice reads lexically, the two bindings are one value, and the value is held once. A name bound to two
+DIFFERENT values keeps both, under two names.
 
 When a projection recomputes only some outputs of an already bound reduction, its smaller loop is a distinct
 statement. Its exported accumulators receive distinct names through the same positional renaming used for other
@@ -715,7 +707,9 @@ masked branch reads `key > row + c` (or `>=`) with `c ≥ 0` masks every key fro
 row the CTA holds, so the chunk loop stops there; one whose masked branch reads `key < row − c` (or `<=`) masks every
 key before the CTA's block base for every row, so the loop starts on the chunk that key falls in. They become the
 skeleton's `k_first` / `k_end`, CTA-uniform in the grid var alone, bit-identical because a masked chunk folds the carrier
-identity exactly — and derived here, stored nowhere. The mask `Select` in the body is the bound's one source: an
+identity exactly — and derived here, stored nowhere. The skeleton binds `k_end` as one value ahead of the chunk loop
+(a `Let`); the loop stops at it and the prefetch clamps read it, so the bound is evaluated once and the body's normal
+form carries it like any value. The mask `Select` in the body is the bound's one source: an
 axis's domain is its extent in the kernel's axis table, and a row-dependent bound is a relation between two axes
 that only becomes a range once widened to the CTA's rows, so neither the term, the loop IR nor the axis carries it.
 A causal stream gets about half its work back that way, a banded one its band — on a launch of more CTAs than the
@@ -787,6 +781,36 @@ shared and global storage; ownership, supported geometry and the card's shared-m
 
 ## Kernel-IR peepholes
 
+**A kernel body is optimized at construction.** `KernelOp` runs `optimize_body` on its body, in the base it shares
+with `LoopOp`: every expression simplified under the ranges of the `Tile`'s axes and the loops around it, each pure
+value a scope computes twice computed once (the scalar tier's copies of one fold step under `__c{i}_{j}` read one
+value), each value placed at the shallowest scope that holds its operands, congruent carried states merged, unread
+values dropped. These are the optimizing steps of the normal form a `LoopOp` takes. Its canonical steps (sibling
+reduce loops merged into one, the sibling order, the sequential names) are left out: no identity reads a kernel body,
+so its loops and statements stand as the pass that built them wrote them, under its names, and a later binder of a
+spelling takes a number (`_lane`, `_lane_1`). So no pass cleans a body up by hand, and a listing reads as the passes wrote it. What makes this sound for
+hardware statements is their declarations: a statement that updates storage in place says so (a cross-thread combine's
+states, a fragment an `mma` accumulates into), a statement that writes a buffer says so (an async copy and a TMA load
+write their slab), a barrier is ordered against every sibling, and a read of storage the body writes carries the
+version it reads and the barrier it stands behind, while a read of storage the body never writes is one value
+throughout and is shared across a barrier. An effect a statement does not declare is a wrong kernel: the slab of an
+async copy that did not declare its write read as never written, and its drain left the chunk loop.
+
+Three consequences shape every pass here:
+
+- **A pass does not decide where a pure value stands.** Placement moves one to the shallowest scope that holds its
+  operands; every other statement stays where the pass put it. An emitter whose place for a pure value was a measured
+  choice makes it structure: a staged copy carried across the chunk loop's back edge has no statement that spreads its
+  packed vector into names (where that stood decided how long the elements stayed live); its names are the vector's
+  lanes, and each read takes its lane where it stands.
+- **A name means what a statement binds it to, never what it is spelled like.** A name keeps its spelling until a
+  second binder shares it, so a name another name implies (a loop's `<axis>_end`) is bound by a statement instead.
+- **A pass that fuses statements reads the scope's ordering constraints, not positions.** The two halves of a load
+  pair can stand apart with a moved value between them, and a vector's elements in any order. `Siblings` (`_siblings.py`)
+  holds one scope's statements with their constraints: a set of statements can become one when no other statement
+  must stand between two of them, and the fused scope is written back in an order that keeps every constraint.
+  Load pairing and the vector loads and stores are built on it.
+
 Vector loads and stores share one alignment proof over the complete flattened address. Every variable coefficient
 and the constant base must be divisible by the vector width, and subsequent elements must be consecutive. An aligned
 last coordinate alone is insufficient when an outer row has an odd stride. Unknown multidimensional layouts retain
@@ -837,9 +861,10 @@ the two branches' private chains are one computation up to their load indices (a
 branch — RoPE's rotate-half negation), `045` emits the chain once with each load at `cond ? index_a : index_b`, the
 branches' own clamps folded against `cond`. An effect between the two chains, a carried load, or a predicate or
 index defined after the chains start refuses the merge. `047` then unrolls every lane-strided loop of at most eight trips (a
-cooperative reduce's fold and its full-row projection: a 128-wide row at 32 lanes is four) and drops each load of a
-read-only buffer at an index an earlier load of the same body already read, compared after folding against the lane
-ranges. The projection reads the values the fold loaded, and a partner read resolves to another trip of the same lane.
+cooperative reduce's fold and its full-row projection: a 128-wide row at 32 lanes is four). The normal form folds
+each trip's index against the lane ranges and keeps one load of each cell of a buffer the kernel never writes, on
+either side of the combine's barrier, so the projection reads the values the fold loaded and a partner read resolves
+to another trip of the same lane.
 Both are structural and carry no knob: they change no schedule and no identity, only the emitted body. Every kernel
 buffer parameter is `__restrict__` (a launch's output never shares memory with its inputs), which lets nvcc keep
 read-only operands in registers across the kernel's stores and read them through the non-coherent path.
@@ -854,11 +879,12 @@ collectives only with predicates independent of the swept output coordinate. See
 outside the collective guard.
 
 Memory and reduction peepholes record their decisions as on-by-default BOOL policy knobs on the `KernelOp`
-(`VECTORIZE_LOADS` / `VECTORIZE_STORES` / `GUARD_REDUCTIONS` / `INTERLEAVE_LOADS` / `PAIR_LDMATRIX` — the `050`
+(`VECTORIZE_LOADS` / `VECTORIZE_STORES` / `GUARD_REDUCTIONS` / `PAIR_LDMATRIX` — the `050`
 pattern: idempotence via the recorded knob, `EMMY_<NAME>=0` pins it off, never a search dimension).
 
-`040_split_invariant_divides` replaces floating division by an axis-invariant divisor with a hoisted reciprocal and
-multiply when the division knob `FAST_DIV` is on (it follows `FAST_MATH`). It runs after dtype stamping, preserves
+`040_split_invariant_divides` replaces floating division by an axis-invariant divisor with a reciprocal and a
+multiply when the division knob `FAST_DIV` is on (it follows `FAST_MATH`); the normal form moves the reciprocal out
+of the loops it does not vary with. It runs after dtype stamping, preserves
 floating dtypes, and leaves integer or
 varying division and explicit round-to-nearest f32 division alone. The latter protects FP4 encoding boundaries even
 under the default fast-math regime. Structural body normalization stays independent of arithmetic policy.

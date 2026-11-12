@@ -56,6 +56,16 @@ pub fn is_protocol(stmt: &Statement) -> bool {
 /// where it stands: ahead of its update the step before, behind it the updated value. A state carried through `Carry`
 /// orders nothing in its scope: a `Pre` reads the step before wherever it sits.
 pub fn ordering_constraints(body: &Body, effects: bool) -> Vec<HashSet<usize>> {
+    ordering_constraints_within(body, effects, &HashSet::new())
+}
+
+/// [`ordering_constraints`] of a scope inside one that binds `outer`: a read of an outer name ahead of every binding
+/// of it in the scope reads the outer one, and stays ahead of those bindings (a lambda's body rebinding a parameter).
+pub fn ordering_constraints_within(
+    body: &Body,
+    effects: bool,
+    outer: &HashSet<Name>,
+) -> Vec<HashSet<usize>> {
     let stmts = body.stmts();
     let defs_uses: Vec<(Vec<Name>, HashSet<Name>)> = stmts
         .iter()
@@ -104,7 +114,10 @@ pub fn ordering_constraints(body: &Body, effects: bool) -> Vec<HashSet<usize>> {
         if let Some(preceding) = sites.iter().rev().find(|site| **site < consumer) {
             return Some(*preceding);
         }
-        if kinds.get(name) == Some(&Site::Accumulator) || sites.contains(&consumer) {
+        if kinds.get(name) == Some(&Site::Accumulator)
+            || sites.contains(&consumer)
+            || outer.contains(name)
+        {
             return None;
         }
         sites.first().copied()
@@ -202,7 +215,7 @@ pub(crate) enum Site {
 /// How `stmt` defines each name it exposes, in one walk of its subtree. A leaf `Accum` or `Carry`, or a block holding
 /// one, is the update it holds, unless the block holds the loops that fold the accumulator (the loops on the path to
 /// it bind every one of its axes, or any loop when it names none) or carries the state (`carried_cells`) — that block
-/// produces the value and its readers follow it. A fold whose outer axis is bound outside the block is an update of the
+/// produces the value and its readers follow it. A statement that updates a name in place is an update too. A fold whose outer axis is bound outside the block is an update of the
 /// block's scope, whatever loops the block holds. A name the walk meets no update of is a binding.
 pub(crate) fn site_kinds(stmt: &Statement) -> HashMap<Name, Site> {
     fn walk(
@@ -231,6 +244,10 @@ pub(crate) fn site_kinds(stmt: &Statement) -> HashMap<Name, Site> {
                 kinds.insert(c.name, Site::Carry);
             }
             _ => {
+                // An update in place is read where it stands, as an accumulator's update is.
+                for name in stmt.updates() {
+                    kinds.entry(name).or_insert(Site::Accumulator);
+                }
                 let is_loop = loop_parts(stmt).is_some();
                 let mut inner = bound.clone();
                 inner.extend(stmt.binds_axes());

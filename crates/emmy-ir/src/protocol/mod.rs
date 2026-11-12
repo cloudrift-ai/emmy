@@ -17,7 +17,7 @@ use std::sync::Arc;
 
 use crate::axis::Axis;
 use crate::body::{Body, Subroutine, exposed_defines, free_names, loop_parts, unique};
-use crate::expr::{Expr, Expression};
+use crate::expr::{Expr, ExprClass, Expression};
 use crate::field::{AxisRef, Rewriter, SubroutineRef, Visitor};
 use crate::statement::*;
 use crate::{Error, Name, Result};
@@ -218,6 +218,49 @@ impl Rewriter for MapExpressions<'_> {
     }
 }
 
+/// `f` on every expression a statement holds, a term's and a carried statement's included, with the class its field
+/// declares (`Value` where it declares none, as the canonical form reads it); the first error ends the walk.
+struct MapClassed<'a, E> {
+    f: &'a mut dyn FnMut(ExprClass, &Expression) -> std::result::Result<Expression, E>,
+    error: Option<E>,
+}
+
+impl<E> MapClassed<'_, E> {
+    fn statement(&mut self, stmt: &Arc<Statement>) -> Arc<Statement> {
+        let new = stmt.rewrite_fields(self);
+        if new.same(stmt) {
+            stmt.clone()
+        } else {
+            Arc::new(new)
+        }
+    }
+}
+
+impl<E> Rewriter for MapClassed<'_, E> {
+    fn expression(&mut self, roles: Roles, expression: &Expression) -> Expression {
+        if self.error.is_some() || !roles.contains_any(EXPRESSION) {
+            return expression.clone();
+        }
+        match (self.f)(class_of(roles).unwrap_or(ExprClass::Value), expression) {
+            Ok(mapped) => mapped,
+            Err(error) => {
+                self.error = Some(error);
+                expression.clone()
+            }
+        }
+    }
+    fn body(&mut self, roles: Roles, body: &Body) -> Body {
+        if roles.contains_any(TERM) {
+            body.map_each(&mut |stmt| self.statement(stmt))
+        } else {
+            body.clone()
+        }
+    }
+    fn carried(&mut self, _roles: Roles, stmt: &Arc<Statement>) -> Arc<Statement> {
+        self.statement(stmt)
+    }
+}
+
 /// A buffer renaming in progress: the mapping, and each shared subroutine renamed once, however many calls name it.
 pub struct Renaming<'a> {
     mapping: &'a HashMap<Name, Name>,
@@ -357,8 +400,10 @@ fn rewrite_axis_name(name: &Name, sigma: &HashMap<Name, Expression>) -> Vec<Name
 }
 
 impl Statement {
+    /// A load of a staged copy (`carried`) re-assigns registers declared ahead of its loop: an update, not a value.
     pub fn is_pure(&self) -> bool {
         self.flags().contains(PURE)
+            && !matches!(self, Statement::Load(load) if !load.carried.is_empty())
     }
 
     pub fn deps_deep(&self) -> bool {
@@ -407,6 +452,26 @@ impl Statement {
             out: Vec::new(),
         };
         self.visit(&mut visitor);
+        visitor.out
+    }
+
+    /// The names this statement updates in place: storage it both reads and defines (a register fragment a load
+    /// fills, a state a cross-thread combine merges into).
+    pub fn updates(&self) -> Vec<Name> {
+        let mut visitor = NamesByRole {
+            roles: UPDATES,
+            out: Vec::new(),
+        };
+        self.visit(&mut visitor);
+        // A pointwise rewrite of a fragment in place names the fragment it rewrites as its output, and a load of a
+        // staged copy the registers it re-assigns.
+        match self {
+            Statement::FragmentApply(apply) if apply.in_place => visitor.out.push(apply.out),
+            Statement::Load(load) if !load.carried.is_empty() => {
+                visitor.out.extend(load.names.iter().copied())
+            }
+            _ => {}
+        }
         visitor.out
     }
 
@@ -471,13 +536,7 @@ impl Statement {
 
     /// The names this statement brings into scope for its child bodies.
     pub fn binds_axes(&self) -> Vec<Name> {
-        let mut names: Vec<Name> = self.bound_axes().iter().map(|axis| axis.name).collect();
-        if let Statement::StridedLoop(loop_) = self
-            && loop_.end.is_some()
-        {
-            names.push(format!("{}_end", loop_.axis.name).into());
-        }
-        names
+        self.bound_axes().iter().map(|axis| axis.name).collect()
     }
 
     /// The child bodies, in field order.
@@ -554,6 +613,20 @@ impl Statement {
         let mapped: std::result::Result<Vec<Expression>, E> =
             this.expressions().iter().map(&mut *f).collect();
         Ok(Statement::with_expressions(this, mapped?))
+    }
+
+    /// This statement with `f` on each of its expressions, given the class each one's field declares; itself when
+    /// none changes. An error ends the walk.
+    pub fn try_map_classed_expressions<E>(
+        this: &Arc<Statement>,
+        f: &mut dyn FnMut(ExprClass, &Expression) -> std::result::Result<Expression, E>,
+    ) -> std::result::Result<Arc<Statement>, E> {
+        let mut walk = MapClassed { f, error: None };
+        let new = walk.statement(this);
+        match walk.error {
+            Some(error) => Err(error),
+            None => Ok(new),
+        }
     }
 
     /// This statement with every buffer renamed through `mapping`; itself when none changes.
@@ -1112,10 +1185,10 @@ mod tests {
     #[test]
     fn a_carried_program_hides_its_own_names() {
         // A combine a statement carries reads the state and its shuffled copy and binds temporaries; the statement
-        // reads the state alone.
+        // reads the state alone, and updates it in place.
         let halve = example(StatementType::TreeHalve);
         assert_eq!(strs(&halve.deps()), ["acc"]);
-        assert!(halve.defines().is_empty());
+        assert_eq!(strs(&halve.defines()), ["acc"]);
         let Statement::TreeHalve(moved) = &*suffixed(&halve, "_") else {
             panic!("not a tree halve");
         };
@@ -1421,7 +1494,7 @@ mod tests {
             let Statement::TreeHalve(moved) = &*moved else {
                 panic!("not a tree halve");
             };
-            assert_eq!(moved.inner, Some((Name::from("n_ln"), 32)));
+            assert_eq!(moved.inner.as_ref().map(|(_, scale)| *scale), Some(32));
         }
     }
 }

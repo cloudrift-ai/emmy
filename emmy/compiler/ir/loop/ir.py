@@ -39,7 +39,6 @@ from dataclasses import dataclass, fields, replace
 from frozendict import frozendict
 
 from emmy.compiler.ir.axis import Axis
-from emmy.compiler.ir.base import Op
 from emmy.compiler.ir.body_op import BodyOp
 from emmy.compiler.ir.elementwise import ElementwiseImpl
 from emmy.compiler.ir.loop.analysis import BodyAnalysis, Scope  # noqa: F401 — public Loop IR aliases
@@ -58,6 +57,7 @@ from emmy.compiler.ir.stmt import (  # noqa: F401  (re-exported via __init__)  #
     SelectBranch,
     Statement,
     Write,
+    normalize_body,
     pretty_body,
 )
 
@@ -88,18 +88,10 @@ class LoopOp(BodyOp):
     wire_tag = "loop"
 
     def __post_init__(self) -> None:
-        Op.__post_init__(self)  # BodyOp's coerce+seed is replaced below, not chained
-        from emmy.compiler.ir.stmt import normalize_body
-
-        # Body is a tuple subclass; coerce so ``Op(body=tuple_value)`` construction keeps working.
-        # Seed the positional ABI before normalization reorders independent reads and writes; the
-        # matcher later refreshes these placeholders in graph order.
-        coerced = Body.coerce(self.body)
-        object.__setattr__(self, "body", coerced)
-        self._seed_io_placeholders()
-        normalized = normalize_body(coerced)
-        object.__setattr__(self, "body", normalized if isinstance(normalized, Body) else Body(normalized))
+        super().__post_init__()
         _validate(self)
+
+    _formed = staticmethod(normalize_body)
 
     def rename_buffers(self, rename: dict[str, str]) -> LoopOp:
         """Return this canonical LoopOp with only external buffer names changed.

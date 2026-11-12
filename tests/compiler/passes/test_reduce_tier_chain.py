@@ -138,7 +138,7 @@ def test_a_transposed_root_emits_its_computed_provider_at_the_lane_owned_cell() 
     assert provider < loop
     assert "m" not in stmts[provider].index[0].free_vars()
     assert {"m_blk", "m_ln"} <= stmts[provider].index[0].free_vars()
-    assert any(isinstance(stmt, TreeHalve) and stmt.inner == ("m_ln", 8) for stmt in _flat(stmts))
+    assert any(isinstance(stmt, TreeHalve) and stmt.inner == (Var("m_ln"), 8) for stmt in _flat(stmts))
     assert bound.block_threads == 128
 
 

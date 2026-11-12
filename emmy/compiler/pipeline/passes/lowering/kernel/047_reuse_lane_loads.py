@@ -8,11 +8,11 @@ but nvcc cannot reuse the first loop's values in the second: the second loop sto
 output between trips, and it cannot prove the output does not alias the row.
 
 This pass unrolls every lane-strided loop of at most ``_MAX_TRIPS`` trips whose extent the step
-divides, substituting each trip's coordinate, then drops every load of a read-only buffer (one the
-kernel never writes) at an index an earlier load of the same body already read — the index
-compared after folding against the lane ranges, so a partner read ``(i < 64) ? i + 64 : i - 64``
-at ``i = lane + 32k`` resolves to another trip's own read. A reduce loop's carriers are seeded
-ahead of the trips, as the loop would have seeded them.
+divides, substituting each trip's coordinate. A reduce loop's carriers are seeded ahead of the
+trips, as the loop would have seeded them. The body's optimization does the rest: it folds each
+index against the lane ranges, so a partner read ``(i < 64) ? i + 64 : i - 64`` at ``i = lane + 32k``
+resolves to another trip's own read, and it keeps one load of a cell the kernel never writes,
+on either side of the combine's barrier.
 """
 
 from __future__ import annotations
@@ -37,14 +37,13 @@ _FLAT = (Assign, Accum, Load, Select, Let, Write)
 
 def rewrite(root: Node) -> KernelOp:
     op: KernelOp = root.op
-    written = frozenset(op.outputs)
-    body = _walk(op.body, written, SimplifyCtx.empty())
+    body = _walk(op.body, SimplifyCtx.empty())
     if body == op.body:
         raise RuleSkipped("no short lane loop to unroll")
     return replace(op, body=body)
 
 
-def _walk(body: Body, written: frozenset[str], ctx: SimplifyCtx) -> Body:
+def _walk(body: Body, ctx: SimplifyCtx) -> Body:
     stmts: list[Statement] = []
     for stmt in body:
         inner = ctx
@@ -54,7 +53,7 @@ def _walk(body: Body, written: frozenset[str], ctx: SimplifyCtx) -> Body:
                     inner = inner.extend(axis.name, Interval(0, axis.extent.as_static() - 1))
         nested = stmt.nested()
         if nested:
-            stmt = stmt.with_bodies(tuple(_walk(b, written, inner) for b in nested))
+            stmt = stmt.with_bodies(tuple(_walk(b, inner) for b in nested))
         stmts.append(stmt)
     unrolled: list[Statement] = []
     loops = 0
@@ -71,9 +70,7 @@ def _walk(body: Body, written: frozenset[str], ctx: SimplifyCtx) -> Body:
             trip_stmts = _unroll(stmt, trips, f"_{loops}")
         unrolled.extend(trip_stmts)
         loops += 1
-    if not loops:
-        return Body(tuple(stmts))
-    return Body(tuple(_reuse(unrolled, written, ctx)))
+    return Body(tuple(unrolled if loops else stmts))
 
 
 def _trips(stmt: Statement, ctx: SimplifyCtx) -> int | None:
@@ -111,41 +108,3 @@ def _unroll(loop: StridedLoop, trips: int, tag: str) -> list[Statement]:
         for s in loop.body:
             out.append(s.rewrite(lambda name, suffix=suffix: f"{name}{suffix}" if name in defined else name, sigma))
     return out
-
-
-def _reuse(stmts: list[Statement], written: frozenset[str], ctx: SimplifyCtx) -> list[Statement]:
-    """Drop every scalar load of a read-only buffer an earlier load of this body already read,
-    renaming its uses to the earlier value."""
-    seen: dict[tuple, str] = {}
-    rename: dict[str, str] = {}
-    out: list[Statement] = []
-    for stmt in stmts:
-        if rename:
-            # A name the statement defines, itself or anywhere in a nested body (a staging loop unrolled
-            # on its own, with trip names of its own), is a new value: only uses of this body's dropped
-            # loads are renamed. Renaming a nested trip's definition onto an outer one declared the
-            # outer name twice in one C scope.
-            local = {name for s in Body((stmt,)).iter() for name in s.defines()}
-            stmt = stmt.rewrite(lambda name, local=local: name if name in local else rename.get(name, name))
-        if isinstance(stmt, Load) and stmt.is_scalar and stmt.input not in written and not stmt.carried:
-            stmt = stmt.replace(index=tuple(e.simplify(ctx) for e in stmt.index))
-            key = (stmt.input, stmt.dtype, tuple(_canonical(e) for e in stmt.index))
-            if key in seen:
-                rename[stmt.name] = seen[key]
-                continue
-            seen[key] = stmt.name
-        out.append(stmt)
-    return out
-
-
-def _canonical(expression):
-    """A comparison key for an index: its affine form over its free variables when it has one."""
-    from emmy.compiler.ir.expression import affine_form  # noqa: PLC0415
-
-    names = expression.free_vars()
-    form = affine_form(expression, names) if names else None
-    if form is None:
-        return str(expression)
-    anchor, coeffs = form
-    anchor = anchor.simplify(SimplifyCtx.empty())
-    return (str(anchor), tuple(sorted((name, c) for name, c in coeffs.items() if c)))

@@ -12,15 +12,12 @@ indices differ by 0, 1, ..., N-1. The CUDA backend can emit those as one
 For each ``Body`` (every nested Tile / Loop / StridedLoop / Cond body,
 post-order):
 
-1. Walk the stmts. At each position, try widths 8 then 4 then 2.
-2. If ``[body[i], ..., body[i+n-1]]`` are all scalar ``Write``s to the same
-   output buffer, matching outer indices, and last-dim indices that affinely
-   decompose to ``anchor, anchor+1, ..., anchor+n-1`` (same coefficients on
-   free vars), AND the target supports ``vector_type(elem_dtype, n)`` for the
-   destination-buffer dtype, replace the run with one widened ``Write``.
-   Contiguity and alignment are proved on the complete flat address, including
-   outer row strides and recomposed div/mod coordinates.
-3. Otherwise advance one stmt.
+1. Take the scalar ``Write``s of each output buffer and their complete flat addresses, outer row strides and
+   recomposed div/mod coordinates included.
+2. Try widths 8 then 4 then 2: ``n`` writes whose addresses form ``anchor, anchor+1, ..., anchor+n-1`` with an
+   aligned anchor, which the scope's ordering constraints let stand together (``Siblings``: no read of the buffer
+   between two of them). If the target also supports ``vector_type(elem_dtype, n)`` for the destination-buffer
+   dtype, the writes become one widened ``Write``.
 
 The destination-buffer dtype comes from the op's ``outputs`` / ``inputs``
 (matcher-populated graph Tensors).
@@ -31,15 +28,16 @@ NOTE: atomic reduce-writes must NOT vectorize (each lane needs its own
 
 from __future__ import annotations
 
-from collections.abc import Iterable
 from dataclasses import replace
 
 from emmy.compiler.backend.cuda.render_target import CudaRenderTarget
 from emmy.compiler.graph import Node
+from emmy.compiler.ir.expression import Expression, Var
 from emmy.compiler.ir.kernel import KernelOp
 from emmy.compiler.ir.stmt import Body, Statement, Write
 from emmy.compiler.pipeline import Pattern, RuleSkipped
-from emmy.compiler.pipeline.passes.lowering.kernel._vector import vector_run
+from emmy.compiler.pipeline.passes.lowering.kernel._siblings import Siblings
+from emmy.compiler.pipeline.passes.lowering.kernel._vector import Address, flat_address, fuse_runs
 from emmy.compiler.pipeline.search.space import VECTORIZE_STORES
 
 PATTERN = [Pattern("root", KernelOp)]
@@ -71,7 +69,7 @@ def _buf_dtype(top: KernelOp, name: str) -> str:
 
 def _vectorize_body(top: KernelOp, body: Body) -> Body:
     """Post-order body transform: recurse into nested bodies first, then
-    scan this scope for consecutive-Write runs. Threads ``top`` through so
+    fuse this scope's Write runs. Threads ``top`` through so
     ``_buf_dtype`` can resolve per-buffer dtypes against the same op."""
     descended: list[Statement] = []
     for s in body:
@@ -81,59 +79,33 @@ def _vectorize_body(top: KernelOp, body: Body) -> Body:
         else:
             descended.append(s)
 
-    out: list[Statement] = []
-    i = 0
-    while i < len(descended):
-        replaced = False
-        for run_n in (8, 4, 2):
-            vec = _try_vec_store(descended, i, run_n, top)
-            if vec is not None:
-                out.append(vec)
-                i += run_n
-                replaced = True
-                break
-        if not replaced:
-            out.append(descended[i])
-            i += 1
-    vectorized = Body(tuple(out))
-    return body if vectorized == body else vectorized
-
-
-def _try_vec_store(stmts: Iterable[Statement], start: int, n: int, top: KernelOp) -> Write | None:
-    """If ``stmts[start:start+n]`` matches the consecutive-Write pattern
-    and the target supports ``vector_type(elem_dtype, n)`` for the
-    destination buffer's dtype, return the widened :class:`Write`.
-    Otherwise return ``None``."""
-    stmts_list = list(stmts)
-    if start + n > len(stmts_list):
-        return None
-    writes = stmts_list[start : start + n]
-    if not all(isinstance(s, Write) for s in writes):
-        return None
-    # Already-widened Writes in the run aren't safe to re-merge — bail. Atomic reduce-writes
-    # never vectorize (each contributing lane needs its own ``atomicAdd``). A swizzled-slab
-    # run may merge only with a UNIFORM mode (the alignment proof below then keeps the
+    # Already-widened Writes never re-merge, and atomic reduce-writes never vectorize (each contributing lane needs
+    # its own ``atomicAdd``). A swizzled-slab run merges only under one mode (the alignment proof then keeps the
     # n-aligned run inside one 16-byte swizzle chunk, where the XOR passes bits 0..2 through).
-    if any(s.is_vector or s.atomic for s in writes) or len({s.swizzle for s in writes}) != 1:
-        return None
-
-    outputs = {s.output for s in writes}
-    if len(outputs) != 1:
-        return None
-    (output_name,) = outputs
-
-    dst_dt = _buf_dtype(top, output_name)
-    if _TARGET.vector_type(dst_dt, n) is None:
-        return None
-
-    tensor = top.outputs.get(output_name) or top.inputs.get(output_name)
-    if not vector_run([write.index for write in writes], tensor, n):
-        return None
-
-    return Write(
-        output=output_name,
-        index=writes[0].index,
-        values=tuple(s.value for s in writes),
-        value_dtype=writes[0].value_dtype,
-        swizzle=writes[0].swizzle,
-    )
+    atoms: dict[Expression, Var] = {}
+    runs: dict[tuple, dict[int, Address]] = {}
+    for position, stmt in enumerate(descended):
+        if isinstance(stmt, Write) and not stmt.is_vector and not stmt.atomic:
+            tensor = top.outputs.get(stmt.output) or top.inputs.get(stmt.output)
+            if (address := flat_address(stmt.index, tensor, atoms)) is not None:
+                runs.setdefault((stmt.output, stmt.swizzle, stmt.value_dtype), {})[position] = address
+    scope = Siblings(descended) if any(len(addresses) > 1 for addresses in runs.values()) else None
+    changed = False
+    for (output, swizzle, value_dtype), addresses in runs.items():
+        if len(addresses) > 1:
+            widths = [n for n in (8, 4, 2) if _TARGET.vector_type(_buf_dtype(top, output), n) is not None]
+            changed |= fuse_runs(
+                scope,
+                addresses,
+                widths,
+                {},
+                lambda members, output=output, swizzle=swizzle, value_dtype=value_dtype: Write(
+                    output=output,
+                    index=scope[members[0]].index,
+                    values=tuple(scope[m].value for m in members),
+                    value_dtype=value_dtype,
+                    swizzle=swizzle,
+                ),
+            )
+    vectorized = Body(tuple(scope.ordered() if changed else descended))
+    return body if vectorized == body else vectorized

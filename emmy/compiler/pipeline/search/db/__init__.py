@@ -543,11 +543,18 @@ class SearchDB:
             yield RoutingRow(parent=parent, arm=self._knobs_of("placement", pid), children=tuple(children))
 
     def record_taken(self, ctx: Context, kernel: str, *, bindings: dict, arm: dict, source: str) -> None:
-        """Mark ``arm`` as a kernel-set decision ``source`` took on ``kernel`` under ``ctx`` at ``bindings``."""
+        """Mark ``arm`` as a kernel-set decision ``source`` took on ``kernel`` under ``ctx`` at ``bindings``. A golden
+        file's decision stays the file's: a freeze repeating it never takes it over, as with a schedule row
+        (:meth:`record_perf`), since only a golden's decisions label the placement pools."""
         context = self._context_id(ctx.backend_name, *self._regime(ctx), create=True)
+        key = (context, kernel, knobs_json(bindings), self._row_id("placement", arm, create=True))
+        existing = self._conn.execute(
+            "SELECT source FROM taken WHERE context = ? AND kernel = ? AND bindings = ? AND placement = ?", key
+        ).fetchone()
+        if existing is not None and existing[0].startswith("golden:") and source.startswith("freeze:"):
+            return
         self._conn.execute(
-            "INSERT OR REPLACE INTO taken (context, kernel, bindings, placement, source) VALUES (?, ?, ?, ?, ?)",
-            (context, kernel, knobs_json(bindings), self._row_id("placement", arm, create=True), source),
+            "INSERT OR REPLACE INTO taken (context, kernel, bindings, placement, source) VALUES (?, ?, ?, ?, ?)", (*key, source)
         )
 
     def iter_taken(self) -> Iterator[tuple[str, int, str, dict, dict, bool, dict, str]]:

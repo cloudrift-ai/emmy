@@ -19,7 +19,7 @@ from emmy.compiler.ir.kernel import KernelOp
 from emmy.compiler.ir.kernel.ir import WarpShuffle
 from emmy.compiler.ir.pure import Fold, Lambda
 from emmy.compiler.ir.pure.twist import SOFTMAX, Twist
-from emmy.compiler.ir.stmt import Assign, Body, parse_body
+from emmy.compiler.ir.stmt import Body, parse_body
 from emmy.compiler.ir.tile import OutputSpec, Placement, TileOp
 from emmy.compiler.pipeline import CUDA_PASSES, FINAL_LOWERING_PASS, Pipeline, RuleSkipped
 from emmy.compiler.pipeline.search.pins import pinned_knobs
@@ -64,13 +64,29 @@ def _same_bits(got: np.ndarray, want: np.ndarray) -> bool:
 # --------------------------------------------------------------------------- #
 
 
+def _kernel(advance: str = _ADVANCE) -> KernelOp:
+    """A kernel that reads the two pivots and stores the two factors: the body is in normal form, which holds only
+    what something reads."""
+    return KernelOp(body=parse_body(f"    f32 g = load G[0]\n    f32 g_o = load H[0]{advance}    O[0] = alpha\n    O[1] = beta"))
+
+
+def _shared(advance: str) -> list:
+    """The statements of ``advance`` through the pass's scope rewrite, in the order they are written."""
+    return rule._share(list(parse_body(advance)), typed=True)
+
+
 def test_the_pair_takes_one_exponential_and_the_rewrite_is_idempotent() -> None:
-    body = parse_body(f"{_ADVANCE}\n    f32 out = alpha * beta")
-    shared = _rewrite(KernelOp(body=body))
-    assert _exps(body) == 2 and _exps(shared.body) == 1
-    assert [s.name for s in shared.body if isinstance(s, Assign)][-1] == "out"
+    op = _kernel()
+    shared = _rewrite(op)
+    assert _exps(op.body) == 2 and _exps(shared.body) == 1
     with pytest.raises(RuleSkipped, match="no rescale factor pair"):
         _rewrite(shared)
+
+
+def test_a_difference_is_read_in_either_spelling() -> None:
+    """The normal form writes ``g - gn`` as ``-gn + g`` where the negated term sorts first."""
+    spelled = _ADVANCE.replace("f32 dg = g - gn", "f32 dg = add(negative(gn), g)")
+    assert _exps(_shared(spelled)) == 1
 
 
 def test_the_fast_exponential_keeps_both() -> None:
@@ -95,24 +111,36 @@ def test_a_cooperative_merge_held_as_a_field_takes_one_exponential_at_f32(dtype,
 
 
 def test_a_pair_whose_earlier_factor_is_read_before_the_later_one_is_left_alone() -> None:
-    body = parse_body(_ADVANCE.replace("    f32 dg_o = g_o - gn", "    f32 early = alpha * 2.0\n    f32 dg_o = g_o - gn"))
-    with pytest.raises(RuleSkipped):
-        _rewrite(KernelOp(body=body))
+    advance = _ADVANCE.replace("    f32 dg_o = g_o - gn", "    f32 early = alpha * 2.0\n    f32 dg_o = g_o - gn")
+    assert _shared(advance) == list(parse_body(advance))
 
 
 def test_two_distances_below_another_pivot_are_no_pair() -> None:
     """Only distances below the maximum of the two sides they read are a pair: one of them is then ``0``."""
-    body = parse_body(_ADVANCE.replace("gn = maximum(g, g_o)", "gn = maximum(g, h)"))
-    with pytest.raises(RuleSkipped):
-        _rewrite(KernelOp(body=body))
+    advance = _ADVANCE.replace("gn = maximum(g, g_o)", "gn = maximum(g, h)")
+    assert _shared(advance) == list(parse_body(advance))
 
 
-def test_the_factors_are_the_two_exponentials_bits_on_the_host() -> None:
+#: The order the normal form can give the pair: the later factor read before the earlier one's exponential, both
+#: distances ahead of it, so the block takes the earlier factor's place.
+_READ_FIRST = """
+    f32 gn = maximum(g, g_o)
+    f32 dg = g - gn
+    f32 dg_o = g_o - gn
+    f32 beta = exp(dg_o)
+    f32 early = beta * 2.0
+    f32 alpha = exp(dg)
+"""
+
+
+@pytest.mark.parametrize("advance", [_ADVANCE, _READ_FIRST], ids=["recipe-order", "read-first"])
+def test_the_factors_are_the_two_exponentials_bits_on_the_host(advance) -> None:
     """Every pair of pivots, the host's exponential and its NaN-propagating maximum: the same bits as two
     exponentials."""
     g, g_o = (np.float32(column) for column in zip(*product(_PIVOTS, repeat=2), strict=True))
-    before = parse_body(_ADVANCE)
-    after = _rewrite(KernelOp(body=before)).body
+    before = parse_body(advance)
+    after = _shared(advance)
+    assert _exps(after) == 1
     results = []
     for body in (before, after):
         env = {"g": g, "g_o": g_o}

@@ -49,7 +49,11 @@ Concretely:
   prior's vocabulary, and a fix for a slow configuration is new evidence — a record run and a refreshed golden file —
   never a new compile-time condition.
 - A rewrite motivated by performance is a fork with the un-rewritten form as a sibling, so evidence can decide.
-  Hiding a sibling is forbidden, and so is arranging the siblings so one of them wins by default.
+  Hiding a sibling is forbidden, and so is arranging the siblings so one of them wins by default. A rewrite that is
+  exact on every input and removes work without adding any decides nothing and runs always: index simplification,
+  common subexpression elimination, dead code removal, merging congruent states, strength reduction. One that trades
+  registers, code size or rounding is a fork: moving a value out of a loop (it lengthens a live range), unrolling,
+  prefetching, an approximate instruction, contraction into an FMA.
 - A misdeploy is debugged as an evidence problem: a missing or stale golden row, an unfitted prior, or a gap in the
   feature/key vocabulary that makes two different candidates indistinguishable. Fix the evidence path; do not fence
   the compiler.

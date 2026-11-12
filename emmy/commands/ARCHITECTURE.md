@@ -665,7 +665,8 @@ sets fallback preference; pass `--provider {gcp,cloudrift}` to restrict the sear
 ```bash
 emmy deploy cloud --recipe <path> --gpu "NVIDIA H200 141GB" --gpu-count 8 [--provider gcp] [--name prefix]
 emmy deploy cloud --plan plan.json [--result-json out.json] [--lease lease.json --owner NAME] \
-  [--vm-active-timeout SECONDS] [--vm-proxy URL]
+  [--vm-active-timeout SECONDS] [--vm-proxy URL] [--node ID_OR_HOSTNAME] \
+  [--instance-type BASE_TYPE]
 ```
 
 Without a fraction, `--gpu`/`--gpu-count` pick the highest `engine.llm.gpu_memory_utilization` among the entries
@@ -675,6 +676,16 @@ for that GPU and count: the whole-GPU qualification, whatever order the recipe l
 Emmy terminates it and tries the next candidate. A node that has to download the VM image first can need more than
 the default (an on-prem cluster fetching it through a proxy took about an hour). GCP has its own `create_timeout_*`
 provider keys.
+
+`--node ID_OR_HOSTNAME` rents on exactly that CloudRift node, for a caller that has already chosen the machine. It
+implies `--provider cloudrift` and is an error with `--provider gcp`. A hostname is resolved through an
+operator-only listing, so a customer key passes the node ID. Nothing is rented anywhere else: when the node is full,
+or the VM never becomes Active, the deploy fails.
+
+`--instance-type BASE_TYPE` names the CloudRift base instance type to rent, such as `h200-8-generic`: the name a
+node carries, without the GPU count, which still comes from the recipe or the plan. It replaces the types the
+hardware table lists for the GPU, so no other type is tried, and like `--node` it implies `--provider cloudrift`.
+A node carries one base type, so a caller that names both gets exactly one rental request.
 
 `--vm-proxy URL` (also on `deploy ssh`) is for a host that reaches the internet only through an HTTP proxy, such as a
 VM on a VLAN with no default route. The URL must be `http://HOST:PORT` or `https://HOST:PORT` — anything else is an

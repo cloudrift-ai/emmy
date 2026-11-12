@@ -7,7 +7,7 @@ use std::sync::Arc;
 use super::with_bodies;
 use crate::body::{Body, free_names};
 use crate::expr::Expression;
-use crate::numbering::{Number, Numbering, Param, value_numbers};
+use crate::numbering::{Key, Number, Numbering, Param, value_numbers};
 use crate::order::{Site, is_protocol, site_kinds};
 use crate::statement::*;
 use crate::{Error, Name, Result};
@@ -86,6 +86,8 @@ pub(crate) type PlaceKey = (Number, Vec<Param>, Marks);
 struct Placer<'a> {
     numbering: &'a Numbering,
     written: HashSet<Name>,
+    /// The names some statement updates in place: a read of one reads the version it stands behind.
+    updated: HashSet<Name>,
     alias: HashMap<Name, Name>,
     defined: HashMap<Name, usize>,
     taint: HashMap<Name, Marks>,
@@ -94,7 +96,6 @@ struct Placer<'a> {
     binders: Vec<HashSet<Name>>,
     available: Vec<HashMap<PlaceKey, Vec<Name>>>,
     floor: Vec<usize>,
-    seeds: HashSet<Name>,
 }
 /// The statements a scope keeps, each pure value with the key it is available under.
 type Kept = Vec<(Arc<Statement>, Option<PlaceKey>)>;
@@ -107,12 +108,18 @@ impl Placer<'_> {
         *v += 1;
         self.version_depth.insert((*name, *v), depth);
     }
+    /// The marks a read of `name` carries: none for storage nothing in the body writes, which holds one value
+    /// throughout; else the version it reads and the barrier it stands behind, since another thread's write of the
+    /// storage lands at a barrier.
     fn read_of(&self, name: &Name) -> Marks {
-        if self.written.contains(name) {
-            BTreeSet::from([(*name, self.version.get(name).copied().unwrap_or(0))])
-        } else {
-            BTreeSet::new()
+        if !self.written.contains(name) {
+            return BTreeSet::new();
         }
+        let mut out = BTreeSet::from([(*name, self.version.get(name).copied().unwrap_or(0))]);
+        if let Some(v) = self.version.get(&Name::new("")) {
+            out.insert((Name::from(""), *v));
+        }
+        out
     }
     fn depth_of(&self, name: &Name) -> usize {
         let name = self.alias.get(name).unwrap_or(name);
@@ -125,9 +132,7 @@ impl Placer<'_> {
             .unwrap_or(0)
     }
     fn pure(stmt: &Statement) -> bool {
-        (stmt.is_pure() || matches!(stmt, Statement::Call(_)))
-            && stmt.nested().is_empty()
-            && !matches!(stmt, Statement::Load(l) if !l.carried.is_empty())
+        (stmt.is_pure() || matches!(stmt, Statement::Call(_))) && stmt.nested().is_empty()
     }
     fn reads(stmt: &Statement) -> HashSet<Name> {
         let mut out: HashSet<Name> = stmt.deps().into_iter().collect();
@@ -143,9 +148,9 @@ impl Placer<'_> {
             if let Some(marks) = self.taint.get(name) {
                 out.extend(marks.iter().cloned());
             }
-        }
-        if let Some(v) = self.version.get(&Name::new("")) {
-            out.insert((Name::from(""), *v));
+            if self.updated.contains(name) {
+                out.extend(self.read_of(name));
+            }
         }
         for name in stmt.external_reads() {
             out.extend(self.read_of(&name));
@@ -161,6 +166,8 @@ impl Placer<'_> {
             self.taint.insert(*name, marks.clone());
         }
     }
+    /// The shallowest scope at or above `depth` that holds `names` and every version `marks` read. A version bumped in
+    /// a deeper scope (a barrier inside a loop or a branch, whose scope has closed) bounds nothing below `depth`.
     fn target(&self, depth: usize, names: &HashSet<Name>, marks: &Marks) -> usize {
         let mut out = self.floor[depth];
         for name in names {
@@ -169,14 +176,14 @@ impl Placer<'_> {
         for mark in marks {
             out = out.max(self.version_depth.get(mark).copied().unwrap_or(0));
         }
-        out
+        out.min(depth)
     }
     fn lookup(&self, key: &PlaceKey, depth: usize) -> Option<Vec<Name>> {
         self.available[..=depth]
             .iter()
             .find_map(|scope| scope.get(key).cloned())
     }
-    fn walk(&mut self, body: &Body, depth: usize, seeded: bool) -> Result<Walked> {
+    fn walk(&mut self, body: &Body, depth: usize) -> Result<Walked> {
         let mut kept: Kept = Vec::new();
         let mut escaped: Vec<(usize, Arc<Statement>)> = Vec::new();
         let mut marks_here: Marks = BTreeSet::new();
@@ -186,7 +193,6 @@ impl Placer<'_> {
                 *counts.entry(name).or_default() += 1;
             }
         }
-        let uses = body.ssa_uses();
         // A carried state read ahead of its update in this scope is the previous step's: it lives here. The order's
         // reading of an update site is the one reading: a leaf, or a block holding the update under a condition or
         // inside a map loop of the step.
@@ -274,23 +280,6 @@ impl Placer<'_> {
                 }
                 continue;
             }
-            if let Statement::Accum(a) = &**stmt {
-                let reduction = seeded
-                    && counts.get(&a.name).copied().unwrap_or(0) == 1
-                    && !uses.contains(&a.name)
-                    && !self.seeds.contains(&a.name);
-                if reduction && let Some(names) = self.available[depth].get(&key).cloned() {
-                    self.alias.insert(a.name, names[0]);
-                    self.settle(std::slice::from_ref(&a.name), depth, &marks);
-                    continue;
-                }
-                if reduction {
-                    self.available[depth].insert(key.clone(), vec![a.name]);
-                }
-            }
-            if let Statement::Init(i) = &**stmt {
-                self.seeds.insert(i.name);
-            }
             for name in stmt.external_writes() {
                 self.bump(&name, depth);
             }
@@ -315,6 +304,8 @@ impl Placer<'_> {
             if let Statement::Carry(c) = &**member {
                 writes.insert(c.name);
             }
+            // Storage a member updates in place is written on the back edge, as a buffer is.
+            writes.extend(member.updates());
             if is_protocol(member) {
                 writes.insert(Name::from(""));
             }
@@ -328,22 +319,17 @@ impl Placer<'_> {
                 self.bump(name, depth + 1);
             }
         }
-        let (scope, seed) = match &**stmt {
-            Statement::Loop(l) => (true, l.seed),
-            Statement::StridedLoop(l) => (true, l.seed),
-            _ => (false, false),
-        };
+        let scope = matches!(&**stmt, Statement::Loop(_) | Statement::StridedLoop(_));
         self.binders.push(stmt.binds_axes().into_iter().collect());
         self.floor
             .push(if scope { self.floor[depth] } else { depth + 1 });
-        let seeded = scope && seed;
         let entered = self.version.clone();
         let mut children: Vec<Walked> = Vec::new();
         for child in &nested {
             // Each child is its own scope, and each branch of a condition starts from the versions ahead of it.
             self.version = entered.clone();
             self.available.push(HashMap::new());
-            let walked = self.walk(child, depth + 1, seeded)?;
+            let walked = self.walk(child, depth + 1)?;
             children.push(walked);
             self.available.pop();
         }
@@ -386,8 +372,14 @@ impl Placer<'_> {
             .iter()
             .flat_map(|child| child.defined_states().to_vec())
             .collect();
+        // A block moves up only when nothing in it is an effect: a write, a carried update, or an ordered protocol
+        // (a barrier) that every thread must reach as often as it did.
         let mut where_ = depth;
-        if !stmt.has_side_effects() && !members.iter().any(|m| matches!(**m, Statement::Carry(_))) {
+        if !stmt.has_side_effects()
+            && !members
+                .iter()
+                .any(|m| matches!(**m, Statement::Carry(_)) || is_protocol(m))
+        {
             where_ = self.target(depth, &free_names(&built).into_iter().collect(), &marks);
         }
         self.settle(&exported, where_, &marks);
@@ -443,19 +435,35 @@ impl Placer<'_> {
 /// Place every pure value once, at the shallowest loop scope on its consumers' path that binds its coordinates and
 /// holds its operands; a second computation of a value a scope can already see reads the first instead.
 pub fn place_values(body: &Body) -> Result<Body> {
+    place_values_keyed(body, &HashMap::new())
+}
+
+/// [`place_values`] with the carried states `states` names numbered under its keys rather than their names: a read of
+/// any member of a group of congruent states (`congruent_states`) is the same value, so placement merges the cones
+/// the members compute.
+pub fn place_values_keyed(body: &Body, states: &HashMap<Name, Key>) -> Result<Body> {
     let numbering = value_numbers(
         body,
-        &crate::numbering::spelled_key,
+        &|name| {
+            states
+                .get(name)
+                .cloned()
+                .unwrap_or_else(|| crate::numbering::spelled_key(name))
+        },
         crate::numbering::Chains::Flat,
     );
     let mut written: HashSet<Name> = HashSet::new();
+    let mut updated: HashSet<Name> = HashSet::new();
     body.walk(&mut |here| {
         written.extend(here.stmt().external_writes());
         if let Statement::Carry(c) = &**here.stmt() {
             written.insert(c.name);
         }
+        updated.extend(here.stmt().updates());
     });
+    written.extend(updated.iter().copied());
     let mut placer = Placer {
+        updated,
         numbering: &numbering,
         written,
         alias: HashMap::new(),
@@ -466,9 +474,8 @@ pub fn place_values(body: &Body) -> Result<Body> {
         binders: vec![HashSet::new()],
         available: vec![HashMap::new()],
         floor: vec![0],
-        seeds: HashSet::new(),
     };
-    let (kept, escaped, _) = placer.walk(body, 0, false)?;
+    let (kept, escaped, _) = placer.walk(body, 0)?;
     debug_assert!(escaped.is_empty());
     Ok(body.rebuilt(kept.into_iter().map(|(stmt, _)| stmt).collect()))
 }
@@ -510,6 +517,113 @@ mod tests {
     fn unchanged(text: &str) {
         let given = body(text);
         assert_eq!(place_values(&given).unwrap(), given, "{text}");
+    }
+
+    /// How many statements of `out`, at any depth, `matches` holds.
+    fn count(out: &Body, matches: &dyn Fn(&Statement) -> bool) -> usize {
+        let mut found = 0;
+        out.walk(&mut |here| found += matches(here.stmt()) as usize);
+        found
+    }
+
+    /// A vector load's lanes are four values: the products of each lane stay four.
+    #[test]
+    fn the_lanes_of_one_load_are_values_apart() {
+        let out = placed(
+            "
+            for i in 0..4:
+                x0, x1, x2, x3 = load X[i]
+                y0 = multiply(x0, 2.0)
+                y1 = multiply(x1, 2.0)
+                y2 = multiply(x2, 2.0)
+                y3 = multiply(x3, 2.0)
+                O[i, 0] = y0
+                O[i, 1] = y1
+                O[i, 2] = y2
+                O[i, 3] = y3
+            ",
+        );
+        assert_eq!(
+            count(&out, &|s| matches!(s, Statement::Assign(_))),
+            4,
+            "{}",
+            text(&out)
+        );
+    }
+
+    /// Two accumulators seeded alike ahead of an unseeded loop hold two values inside it from the second step on:
+    /// what reads them there reads the step before, not the seed.
+    #[test]
+    fn a_seeded_state_is_read_inside_its_loop_as_the_step_before() {
+        let out = placed(
+            "
+            for r in 0..4:
+                init f32 m1 = -1e+30
+                init f32 m2 = -1e+30
+                for k in 0..16 seed=false:
+                    s = load S[r, k]
+                    t = load T[r, k]
+                    g1 = maximum(m1, s)
+                    g2 = maximum(m2, s)
+                    W1[r, k] = g1
+                    W2[r, k] = g2
+                    m1 <- maximum(m1, s) over k
+                    m2 <- maximum(m2, t) over k
+            ",
+        );
+        assert_eq!(
+            count(&out, &|s| matches!(s, Statement::Assign(_))),
+            2,
+            "{}",
+            text(&out)
+        );
+    }
+
+    /// A barrier pins the loop that holds it, and a value read after that loop is placed where it is read.
+    #[test]
+    fn a_loop_that_holds_a_barrier_stays_and_bounds_nothing_below_it() {
+        let given = "
+            for r in 0..4:
+                init f32 acc = 0
+                for k in 0..16 seed=false:
+                    x = load X[k]
+                    acc <- add(acc, x) over k
+                    Sync
+                y = add(acc, 1.0)
+                O[r] = y
+            ";
+        let out = placed(given);
+        assert_eq!(loop_axes(&out), ["r"], "{}", text(&out));
+        assert_eq!(count(&out, &|s| matches!(s, Statement::Sync(_))), 1);
+    }
+
+    /// A statement that updates a name in place reads the value it held: two MMAs of one product into two
+    /// accumulators that held two values are two values.
+    #[test]
+    fn a_name_updated_in_place_keys_the_value_it_read() {
+        let given = body(
+            "
+            RegFragment(name=c1, role=c, shape=(16, 8, 16), dtype=f32)
+            RegFragment(name=c2, role=c, shape=(16, 8, 16), dtype=f32)
+            LdmatrixLoad(frag=a, src_buffer=A, src_index=(0, 0), role=a)
+            LdmatrixLoad(frag=b, src_buffer=B, src_index=(0, 0), role=b)
+            LdmatrixLoad(frag=b2, src_buffer=B2, src_index=(0, 0), role=b)
+            MmaSyncPtx(c_frag=c2, a_frag=a, b_frag=b2, shape=(16, 8, 16))
+            MmaSyncPtx(c_frag=c1, a_frag=a, b_frag=b, shape=(16, 8, 16))
+            MmaSyncPtx(c_frag=c2, a_frag=a, b_frag=b, shape=(16, 8, 16))
+            ",
+        );
+        let numbering = crate::numbering::value_numbers(
+            &given,
+            &crate::numbering::spelled_key,
+            crate::numbering::Chains::Flat,
+        );
+        let number = |index: usize| {
+            numbering.numbers[numbering.ordinal(&given.at(index))]
+                .clone()
+                .map(|v| v.0)
+        };
+        assert_ne!(number(6), number(7));
     }
 
     /// What the whole driver leaves of `text`.
@@ -984,23 +1098,71 @@ mod tests {
 
     #[test]
     fn hoist_keeps_a_read_of_a_buffer_the_loop_writes() {
-        // Axis-invariance alone earns no hoist: a read behind a write to its own buffer, or behind an ordered
-        // execution protocol, follows the scope's ordering constraints and stays.
+        // Axis-invariance alone earns no hoist: a read behind a write to its own buffer stays, and so does a second
+        // read of that buffer behind a barrier, where another thread's write of it lands. A read of a buffer nothing
+        // in the body writes holds one value on either side of the barrier, and moves.
         let out = placed(
             "
             for i in 0..4:
                 O[0] = one
                 back = load O[0]
                 Sync
+                again = load O[0]
                 staged = load S[0]
                 P[i] = back
                 Q[i] = staged
+                R[i] = again
             ",
         );
-        assert_eq!(statement_types(&out), ["Loop"]);
+        assert_eq!(statement_types(&out), ["Load", "Loop"]);
         assert_eq!(
-            statement_types(&inner(&out.stmts()[0])),
-            ["Write", "Load", "Sync", "Load", "Write", "Write"]
+            statement_types(&inner(&out.stmts()[1])),
+            ["Write", "Load", "Sync", "Load", "Write", "Write", "Write"]
+        );
+    }
+
+    #[test]
+    fn a_slab_an_async_copy_fills_is_read_behind_its_barrier() {
+        // The copy is the slab's only writer and its bytes land at the wait's barrier: a drain behind the barrier
+        // reads the chunk, and neither moves out of the chunk loop nor shares a read ahead of the barrier.
+        let out = placed(
+            "
+            Smem(name=slab, extents=(8))
+            early = load slab[0]
+            E[0] = early
+            for k in 0..4:
+                CpAsyncCopy(smem=slab, smem_index=(0), src=X, src_index=(k), nbytes=16)
+                CpAsyncWait
+                Sync
+                x = load slab[0]
+                O[k] = x
+            ",
+        );
+        let chunk = inner(out.stmts().last().unwrap());
+        assert_eq!(
+            statement_types(&chunk),
+            ["CpAsyncCopy", "CpAsyncWait", "Sync", "Load", "Write"]
+        );
+    }
+
+    #[test]
+    fn a_value_of_unwritten_storage_is_shared_across_a_barrier() {
+        // A cooperative reduce reads its row ahead of the combine's barrier and its projection reads it again
+        // behind it: the row is no storage the kernel writes, so the second read is the first.
+        let out = placed(
+            "
+            x = load X[0]
+            y = multiply(x, 2.0)
+            O[0] = y
+            Sync
+            x2 = load X[0]
+            y2 = multiply(x2, 2.0)
+            P[0] = y2
+            ",
+        );
+        assert_eq!(
+            statement_types(&out),
+            ["Load", "Assign", "Write", "Sync", "Write"]
         );
     }
 
@@ -1037,32 +1199,6 @@ mod tests {
         assert!(inner_b.stmts().iter().any(
             |stmt| matches!(&**stmt, Statement::Assign(a) if reads(&a.value) == ["accc", "x"])
         ));
-    }
-
-    #[test]
-    fn folded_reduction_is_read_at_its_representatives_scope() {
-        // Two seeded reductions of one value in one loop are one reduction: the second's name aliases the first.
-        // A read of that name after the loop sees the first's scope, not the loop body the dropped update sat in.
-        let out = placed(
-            "
-            for a in 0..4:
-                for b in 0..4:
-                    x = load X[a, b]
-                    acc1 <- add(acc1, x)
-                    y = load X[a, b]
-                    acc2 <- add(acc2, y)
-                v = add(acc1, acc2)
-                Y[a] = v
-            ",
-        );
-        assert_eq!(loop_axes(&out), ["a"]);
-        let inner_a = inner(&out.stmts()[0]);
-        assert_eq!(statement_types(&inner_a), ["Loop", "Assign", "Write"]);
-        assert_eq!(accum_names(&inner(&inner_a.stmts()[0])), ["acc1"]);
-        let Statement::Assign(read) = &*inner_a.stmts()[1] else {
-            unreachable!()
-        };
-        assert_eq!(read.value.text(), "acc1 + acc1");
     }
 
     #[test]

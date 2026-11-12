@@ -27,6 +27,14 @@ class CapacityExhausted(Exception):
     """
 
 
+class InstanceTypeNotOffered(CapacityExhausted):
+    """The provider does not carry the candidate's instance type where the rental was asked for.
+
+    Nothing was rented and nothing was tried on a machine, so a rental pinned to one node may
+    still try the GPU's next instance type on that node.
+    """
+
+
 class TerminalProvisionError(Exception):
     """A non-retryable failure (bad credentials, malformed request, etc.).
 
