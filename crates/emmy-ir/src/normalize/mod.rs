@@ -10,6 +10,7 @@ use crate::body::{Body, MemoKey};
 use crate::dtype::DType;
 use crate::expr::{Expression, Interval, SimplifyCtx};
 use crate::memo::{BODY_MEMO_WEIGHT, Memo};
+use crate::numbering::{congruent_states, group_keys};
 use crate::order::topological_sort;
 use crate::statement::*;
 use crate::{Error, Name, Result};
@@ -84,12 +85,7 @@ pub fn normalize_uncached(body: &Body) -> Result<Body> {
         }
         stmts = next;
     }
-    let mut lines = Vec::new();
-    crate::text::body_lines(&stmts, "  ", &mut lines)?;
-    Err(Error::Value(format!(
-        "the normal form did not settle in eight rounds:\n{}",
-        lines.join("\n")
-    )))
+    unsettled(&stmts, "the normal form")
 }
 
 /// The exact simplifications, then every value placed once; the three run until the first two leave a placed body
@@ -103,7 +99,7 @@ pub fn prepare_body(body: &Body) -> Result<Body> {
     stmts = inline_literals(&stmts);
     stmts = drop_unread_values(&stmts);
     let mut placed: Option<Body> = None;
-    loop {
+    for _ in 0..8 {
         let simplified = canonicalize_expressions(
             &drop_unread_values(&simplify_body(&inline_literals(
                 &merge_sibling_reduce_loops(&stmts)?,
@@ -113,10 +109,25 @@ pub fn prepare_body(body: &Body) -> Result<Body> {
         if placed.as_ref() == Some(&simplified) {
             return Ok(simplified);
         }
-        let next = place_values(&simplified)?;
+        let groups = congruent_states(&simplified);
+        let next = merge_congruent_states(
+            &place_values_keyed(&simplified, &group_keys(&groups))?,
+            &groups,
+        );
         stmts = next.clone();
         placed = Some(next);
     }
+    unsettled(&stmts, "the merge, simplification and placement")
+}
+
+/// The error of a fixed point that did not settle in eight rounds, with the body it reached.
+fn unsettled(stmts: &Body, steps: &str) -> Result<Body> {
+    let mut lines = Vec::new();
+    crate::text::body_lines(stmts, "  ", &mut lines)?;
+    Err(Error::Value(format!(
+        "{steps} did not settle in eight rounds:\n{}",
+        lines.join("\n")
+    )))
 }
 
 fn with_bodies(stmt: &Arc<Statement>, bodies: Vec<Body>) -> Arc<Statement> {
@@ -137,6 +148,7 @@ fn assign(name: &Name, value: Expression, dtype: Option<DType>) -> Arc<Statement
 
 pub mod axes;
 pub mod canonical;
+pub mod congruent;
 pub mod definitions;
 pub mod fold;
 pub mod place;
@@ -146,6 +158,7 @@ pub mod ties;
 
 pub use axes::*;
 pub use canonical::*;
+pub use congruent::*;
 pub use definitions::*;
 pub use fold::*;
 pub use place::*;
@@ -480,6 +493,33 @@ for k in 0..3:
                 .unwrap(),
             Expression::var("a")
         );
+    }
+
+    /// Two loads of one cell spelled with different digits of one index are one load in the normal form.
+    #[test]
+    fn two_digit_spellings_of_one_index_load_once() {
+        for (a, b) in [
+            ("2 * (i / 4) + (i / 2) % 2", "i / 2"),
+            ("(i % 8) / 2", "(i / 2) % 4"),
+            ("(i % 16) % 8", "i % 8"),
+            ("2 * ((i / 2) % 4) + i % 2", "i % 8"),
+            ("i - i % 8", "8 * (i / 8)"),
+            ("i + j - i % 8", "8 * (i / 8) + j"),
+            ("minimum(i, 63)", "i"),
+        ] {
+            let normal = normalize_uncached(&parse_body(&format!(
+                "for i in 0..64:\n    for j in 0..8:\n        a = load X[{a}]\n        b = load X[{b}]\n        \
+                 c = add(a, b)\n        O[i, j] = c"
+            ))
+            .unwrap())
+            .unwrap();
+            let listing = body_text(&normal).unwrap();
+            assert_eq!(
+                listing.matches("load X").count(),
+                1,
+                "{a} and {b}:\n{listing}"
+            );
+        }
     }
 
     #[test]

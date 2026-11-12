@@ -306,6 +306,16 @@ mod tests {
     }
 
     #[test]
+    fn a_division_by_a_literal_with_an_inexact_reciprocal_stays_a_division() {
+        let three = affine_normal(&["let f32 c = 3.0", "o = divide(x, c)"]);
+        assert!(three.contains("in0 / 3.0"), "{three}");
+        assert_ne!(
+            three,
+            affine_normal(&["let f32 c = 0.3333333333333333", "o = multiply(x, c)"])
+        );
+    }
+
+    #[test]
     fn a_select_whose_branches_bind_one_value_is_that_value() {
         assert_eq!(
             affine_normal(&["o = select:", "    x when i < i", "    x when i < i"]),

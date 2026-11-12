@@ -105,7 +105,8 @@ boundary. Unsupported non-canonical Loop IR fails loudly. Kernel placement is a 
 ## Canonicalization
 
 `Lambda.__post_init__` owns context-independent construction normalization: every
-pure body receives a dependency-safe order and commutative `Assign` arguments are sorted before it reaches a Fold.
+pure body receives the normal form's statement order (`fragment_order`) and commutative `Assign` arguments are sorted
+before it reaches a Fold.
 Structural identity therefore reads the stored order directly. Contraction canonicalization first orders product
 arguments by geometry, then places the one argument shared by every product in the Fold's shared operand slot.
 For a broadcast-batched product whose batch axis occurs in only one operand, the placement's trailing output pair

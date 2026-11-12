@@ -32,7 +32,14 @@ _POST_DECOMPOSITION_ROOTS = (
 
 
 # The normalization entry point and the steps a pass may run on its own.
-_STEPS = ("normalize_body", "one_operation_per_definition", "canonical_values", "simplify_body", "prepare_body")
+_STEPS = (
+    "normalize_body",
+    "one_operation_per_definition",
+    "canonical_values",
+    "fragment_order",
+    "simplify_body",
+    "prepare_body",
+)
 
 
 def test_checkpoint_format_names_stop_at_frontend_decomposition() -> None:
@@ -128,7 +135,7 @@ def test_ir_does_not_import_pipeline() -> None:
 def test_normalization_has_one_entry_point() -> None:
     """Body normalization is the canonical form every Loop IR body and every identity digest takes; it answers to no
     knob, pin or evidence. It lives in the ``emmy-ir`` crate behind one entry point, ``normalize_body``; the package
-    exports beside it only the four steps a pass may run on its own, and holds no transform of its own."""
+    exports beside it only the steps a pass may run on its own, and holds no transform of its own."""
     import emmy.compiler.ir.stmt as stmt
 
     steps = {name for name in stmt.__all__ if name in _STEPS}

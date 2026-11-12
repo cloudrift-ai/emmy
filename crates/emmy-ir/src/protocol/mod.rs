@@ -17,7 +17,7 @@ use std::sync::Arc;
 
 use crate::axis::Axis;
 use crate::body::{Body, Subroutine, exposed_defines, free_names, loop_parts, unique};
-use crate::expr::{Expr, Expression};
+use crate::expr::{Expr, ExprClass, Expression};
 use crate::field::{AxisRef, Rewriter, SubroutineRef, Visitor};
 use crate::statement::*;
 use crate::{Error, Name, Result};
@@ -215,6 +215,49 @@ impl Rewriter for MapExpressions<'_> {
     }
     fn carried(&mut self, _roles: Roles, stmt: &Arc<Statement>) -> Arc<Statement> {
         Statement::map_expressions(stmt, self.0)
+    }
+}
+
+/// `f` on every expression a statement holds, a term's and a carried statement's included, with the class its field
+/// declares (`Value` where it declares none, as the canonical form reads it); the first error ends the walk.
+struct MapClassed<'a, E> {
+    f: &'a mut dyn FnMut(ExprClass, &Expression) -> std::result::Result<Expression, E>,
+    error: Option<E>,
+}
+
+impl<E> MapClassed<'_, E> {
+    fn statement(&mut self, stmt: &Arc<Statement>) -> Arc<Statement> {
+        let new = stmt.rewrite_fields(self);
+        if new.same(stmt) {
+            stmt.clone()
+        } else {
+            Arc::new(new)
+        }
+    }
+}
+
+impl<E> Rewriter for MapClassed<'_, E> {
+    fn expression(&mut self, roles: Roles, expression: &Expression) -> Expression {
+        if self.error.is_some() || !roles.contains_any(EXPRESSION) {
+            return expression.clone();
+        }
+        match (self.f)(class_of(roles).unwrap_or(ExprClass::Value), expression) {
+            Ok(mapped) => mapped,
+            Err(error) => {
+                self.error = Some(error);
+                expression.clone()
+            }
+        }
+    }
+    fn body(&mut self, roles: Roles, body: &Body) -> Body {
+        if roles.contains_any(TERM) {
+            body.map_each(&mut |stmt| self.statement(stmt))
+        } else {
+            body.clone()
+        }
+    }
+    fn carried(&mut self, _roles: Roles, stmt: &Arc<Statement>) -> Arc<Statement> {
+        self.statement(stmt)
     }
 }
 
@@ -554,6 +597,20 @@ impl Statement {
         let mapped: std::result::Result<Vec<Expression>, E> =
             this.expressions().iter().map(&mut *f).collect();
         Ok(Statement::with_expressions(this, mapped?))
+    }
+
+    /// This statement with `f` on each of its expressions, given the class each one's field declares; itself when
+    /// none changes. An error ends the walk.
+    pub fn try_map_classed_expressions<E>(
+        this: &Arc<Statement>,
+        f: &mut dyn FnMut(ExprClass, &Expression) -> std::result::Result<Expression, E>,
+    ) -> std::result::Result<Arc<Statement>, E> {
+        let mut walk = MapClassed { f, error: None };
+        let new = walk.statement(this);
+        match walk.error {
+            Some(error) => Err(error),
+            None => Ok(new),
+        }
     }
 
     /// This statement with every buffer renamed through `mapping`; itself when none changes.
