@@ -27,9 +27,6 @@ class Siblings:
     def __getitem__(self, position: int) -> Statement:
         return self._stmts[position]
 
-    def positions(self) -> list[int]:
-        return sorted(self._stmts)
-
     def fusable(self, members: Iterable[int]) -> bool:
         """Whether ``members`` can become one statement: no statement outside them must follow one member and precede
         another. Members a constraint orders directly (the writes of one buffer) stay fusable."""

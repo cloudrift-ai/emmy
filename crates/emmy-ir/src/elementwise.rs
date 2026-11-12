@@ -4,7 +4,6 @@
 //! extension's tables.
 
 use std::fmt;
-use std::sync::Arc;
 
 use crate::{Name, closed_set};
 
@@ -355,8 +354,6 @@ impl fmt::Display for ElementwiseOp {
         f.write_str(self.name())
     }
 }
-
-pub type ElementwiseOps = Arc<[ElementwiseOp]>;
 
 #[cfg(test)]
 mod tests {
