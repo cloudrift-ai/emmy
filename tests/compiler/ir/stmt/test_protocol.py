@@ -13,7 +13,7 @@ import emmy.compiler.ir.stmt as stmt_pkg
 from emmy.compiler.dtype import F32
 from emmy.compiler.ir.axis import Axis
 from emmy.compiler.ir.elementwise import ElementwiseImpl
-from emmy.compiler.ir.expression import BinaryExpression, Expression, Literal, Var, apply
+from emmy.compiler.ir.expression import BinaryExpression, Builtin, Expression, Literal, Var, apply
 from emmy.compiler.ir.kernel import ir as kernel_ir
 from emmy.compiler.ir.stmt import (
     Accum,
@@ -95,6 +95,12 @@ _KERNEL_EXAMPLES = [
     kernel_ir.Sync(),
     kernel_ir.Tile(
         axes=(Axis("m", 4), Axis("n", 8)), body=(Load(("x",), "a", (Var("m"), Var("n"))),), raster_axes=("m", "n"), raster_group=2
+    ),
+    kernel_ir.Grid(
+        axes=(Axis("m", 4), Axis("n", 8)),
+        decode=(BinaryExpression("//", Builtin("block_idx.x"), Literal(2, "int")), Builtin("thread_idx.x")),
+        body=(Load(("x",), "a", (Var("m"), Var("n"))),),
+        block_threads=8,
     ),
     kernel_ir.CpAsyncCopy(smem="s", smem_index=_INDEX, src="a", src_index=_INDEX, lane_index=_INDEX, valid=_BELOW),
     kernel_ir.CpAsyncCommit(),

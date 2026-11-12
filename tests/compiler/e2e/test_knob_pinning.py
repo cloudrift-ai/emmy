@@ -239,7 +239,7 @@ def test_unrealizable_warp_pin_falls_back_to_a_bound_scalar_grid(a_dtype, monkey
     result = Pipeline.build([*KERNEL_PASSES, "lowering/cuda"]).run(graph, ctx=Context.from_target((7, 0)))
     [source] = [node.op.kernel_source for node in result.nodes.values() if isinstance(node.op, CudaOp)]
     assert "int a0 =" in source and "int a1 =" in source
-    assert "if (_gid < 32)" in source
+    assert "if (threadIdx.x < 32)" in source
     assert "mma.sync" not in source
 
 

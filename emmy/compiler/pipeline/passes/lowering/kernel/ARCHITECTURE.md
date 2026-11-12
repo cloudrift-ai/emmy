@@ -2,7 +2,14 @@
 
 This stage turns a scheduled `TileOp` into a `KernelOp` (a thread-bound CUDA-IR body), then runs a short chain of
 Kernel-IR peepholes over it. The CUDA lowering (`lowering/cuda`) renders the `KernelOp` to a `__global__` source string
-afterwards.
+afterwards, after one rule of its own: `007_decode_grid` turns the `Tile` into a `Grid` whose axes hold their decode as
+expressions over `thread_idx.x` and `block_idx.x` (`decode_tile`), its tail guard a `Cond` where the launch does not
+cover the cells exactly. The `Grid` states its launch's ranges of the built-ins, so the optimization the op takes at
+construction reads a block axis off `blockIdx.x` alone and a thread axis off `threadIdx.x` alone, and an emitter has
+no decode of its own to spell. The rule runs after the ones that read the `Tile` (the kernel cache, the zero-init
+delegation), so `--ir kernel` and the diagnostics see the `Tile`. The renderer then spells every index division and
+remainder by a power of two over a non-negative dividend as a shift and a mask (`reduce_strength`), on the body it is
+about to render: the Kernel IR keeps `/` and `%`, which the simplifier reads.
 
 ## `010_materialize` — bind the schedule to threads (and expand the contraction)
 

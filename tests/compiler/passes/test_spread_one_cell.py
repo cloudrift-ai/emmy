@@ -36,7 +36,7 @@ def test_a_single_cell_kernel_strides_its_free_loop_and_keeps_its_reduce_serial(
     (spec,) = plan_from_graph(_compiled()).kernels.values()
     assert "a1 = threadIdx.x; a1 < 65; a1 += blockDim.x" in spec.source
     assert "a0 = 0; a0 < 33; a0++" in spec.source
-    assert "_gid < 1" not in spec.source
+    assert "threadIdx.x < 1" not in spec.source
 
 
 @requires_cuda
