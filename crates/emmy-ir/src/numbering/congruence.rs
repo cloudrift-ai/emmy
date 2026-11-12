@@ -3,7 +3,6 @@
 //! groups start from structure and split by their updates' numbers until no group splits.
 
 use std::collections::HashMap;
-use std::sync::Arc;
 
 use super::{Chains, Key, Number, Param, spelled_key, value_numbers};
 
@@ -110,7 +109,7 @@ impl Sites {
         for stmt in body.stmts() {
             let ordinal = self.next;
             self.next += 1;
-            for name in defined_by(stmt) {
+            for name in stmt.defines() {
                 *self.defining.entry(name).or_default() += 1;
             }
             let candidate = match &**stmt {
@@ -171,20 +170,4 @@ fn start_key(stmt: &Statement, scope: Option<(usize, usize)>) -> Key {
             None => Key::None,
         },
     ])
-}
-
-/// The names `stmt` defines, those its carried statements define included: a combine's merge updates its states in
-/// place (`acc = acc + acc__o`) though its state field only reads them.
-fn defined_by(stmt: &Arc<Statement>) -> Vec<Name> {
-    struct Carried(Vec<Name>);
-    impl crate::field::Visitor for Carried {
-        fn carried(&mut self, _roles: crate::statement::Roles, stmt: &Arc<Statement>) {
-            self.0.extend(defined_by(stmt));
-        }
-    }
-    let mut carried = Carried(stmt.defines());
-    stmt.visit(&mut carried);
-    carried.0.sort();
-    carried.0.dedup();
-    carried.0
 }

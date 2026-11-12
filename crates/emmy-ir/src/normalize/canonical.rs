@@ -92,7 +92,12 @@ impl SequentialScope {
             // the role of each name, so a definition spelled like another's sequential name is no clash.
             let names = self.names(&self.inherited_axes);
             let mut defined: HashMap<Name, Name> = HashMap::new();
+            let updates = stmt.updates();
             for name in stmt.defines() {
+                // Storage updated in place keeps the name it has in scope: its field reads and defines it.
+                if updates.contains(&name) && self.ssa.contains_key(&name) {
+                    continue;
+                }
                 if stmt.is_pure() && self.owned.contains(&name) {
                     self.ssa.insert(name, counters.fresh(ssa_prefix(stmt)));
                 } else {
@@ -1464,5 +1469,93 @@ for r in 0..4:
             let once = normalize_uncached(&given).unwrap();
             assert_eq!(normalize_uncached(&once).unwrap(), once, "{}", text(&once));
         }
+    }
+
+    /// A cross-thread combine updates its states in place: a read behind it reads the combined value, and stays
+    /// behind it.
+    #[test]
+    fn a_read_of_a_state_stays_behind_the_combine_that_updates_it() {
+        let normal = text(
+            &normalize_uncached(&body(
+                "
+                Tile(axes=(m in 0..8, c in 0..128), block_threads=128):
+                    init f32 s = 0
+                    f32 x = load X[m, c]
+                    f32 q = multiply(x, x)
+                    f32 s <- add(s, q) over c
+                    WarpShuffle(state=(s), state_b=(s__o), length=32):
+                        combine_states:
+                            s = s + s__o
+                    Smem(name=s_smem, extents=(4))
+                    if lane == 0:
+                        f32 s_smem[warp] = s
+                    Sync
+                    TreeHalve(bufs=(s_smem), state=(s), state_b=(s__o), length=4, tid_var=warp):
+                        combine_states:
+                            s = s + s__o
+                    f32 r = rsqrt(s)
+                    f32 y = multiply(r, x)
+                    f32 O[m, c] = y
+                ",
+            ))
+            .unwrap(),
+        );
+        let at = |what: &str| {
+            normal
+                .find(what)
+                .unwrap_or_else(|| panic!("{what}\n{normal}"))
+        };
+        assert!(at("TreeHalve") < at("rsqrt"), "{normal}");
+        assert!(at("WarpShuffle") < at("Smem"), "{normal}");
+    }
+
+    /// A register fragment is storage: the statements that update it and the statements that read it name it alike,
+    /// in whatever scope they sit.
+    #[test]
+    fn a_fragment_keeps_one_name_through_its_updates() {
+        let normal = text(
+            &normalize_uncached(&body(
+                "
+                Tile(axes=(m in 0..2, n in 0..16, _lane in 0..32), block_threads=32):
+                    RegFragment(name=_a0, role=a, shape=(16, 8, 16), dtype=f16)
+                    RegFragment(name=_b0, role=b, shape=(16, 8, 16), dtype=f16)
+                    RegFragment(name=_c0, role=c, shape=(16, 8, 16), dtype=f32)
+                    for k in 0..128 step 16:
+                        LdmatrixLoad(frag=_a0, src_buffer=A, src_index=(16 * m, k), role=a, ldm=128)
+                        LdmatrixLoad(frag=_b0, src_buffer=B, src_index=(k, 8 * n), role=b, ldm=8)
+                        MmaSyncPtx(c_frag=_c0, a_frag=_a0, b_frag=_b0, shape=(16, 8, 16))
+                    RegStore(dst_buffer=O, dst_index=(16 * m, 8 * n), frag=_c0, shape=(16, 8, 16), ldm=128, ldn=1, row_dim=0, col_dim=1)
+                ",
+            ))
+            .unwrap(),
+        );
+        let field = |line: &str, key: &str| -> String {
+            let line = normal
+                .lines()
+                .find(|l| l.contains(line))
+                .unwrap_or_else(|| panic!("{line}\n{normal}"));
+            let rest = &line[line.find(key).unwrap() + key.len()..];
+            rest[..rest.find(|c: char| c == ',' || c == ')').unwrap()].to_string()
+        };
+        assert_eq!(
+            field("role=a, shape", "name="),
+            field("MmaSyncPtx", "a_frag="),
+            "{normal}"
+        );
+        assert_eq!(
+            field("role=b, shape", "name="),
+            field("MmaSyncPtx", "b_frag="),
+            "{normal}"
+        );
+        assert_eq!(
+            field("role=c, shape", "name="),
+            field("RegStore", "frag="),
+            "{normal}"
+        );
+        assert_eq!(
+            field("role=a, ldm", "frag="),
+            field("MmaSyncPtx", "a_frag="),
+            "{normal}"
+        );
     }
 }

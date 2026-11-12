@@ -536,7 +536,7 @@ macro_rules! with_statement_types {
                 /// cond is UB).
                 kernel TreeHalve {CHECKED} {
                     bufs: Names [],
-                    state: Names [READS],
+                    state: Names [UPDATES],
                     state_b: Names [LOCAL],
                     combine_states: Stmts [STMTS],
                     length: i64 [],
@@ -568,7 +568,7 @@ macro_rules! with_statement_types {
                 /// returns exactly the participating lanes — correct for a partial warp, a full warp, AND a non-warp-multiple
                 /// block's partial final warp (where no single static literal mask is correct per warp).
                 kernel WarpShuffle {CHECKED} {
-                    state: Names [READS],
+                    state: Names [UPDATES],
                     state_b: Names [LOCAL],
                     combine_states: Stmts [STMTS],
                     length: i64 [],
@@ -577,7 +577,7 @@ macro_rules! with_statement_types {
                 }
                 /// Broadcast the last lane's state within each aligned lane group, in place.
                 kernel WarpBroadcast {} {
-                    state: Names [READS],
+                    state: Names [UPDATES],
                     length: i64 [],
                 }
                 /// The one per-element pointwise node over an `mma.sync` C fragment — the fragment-tier sibling of the scalar

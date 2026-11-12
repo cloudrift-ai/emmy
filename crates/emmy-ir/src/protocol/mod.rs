@@ -453,6 +453,17 @@ impl Statement {
         visitor.out
     }
 
+    /// The names this statement updates in place: storage it both reads and defines (a register fragment a load
+    /// fills, a state a cross-thread combine merges into).
+    pub fn updates(&self) -> Vec<Name> {
+        let mut visitor = NamesByRole {
+            roles: UPDATES,
+            out: Vec::new(),
+        };
+        self.visit(&mut visitor);
+        visitor.out
+    }
+
     /// The external buffers this statement reads, each once.
     pub fn external_reads(&self) -> Vec<Name> {
         match self {
@@ -1169,10 +1180,10 @@ mod tests {
     #[test]
     fn a_carried_program_hides_its_own_names() {
         // A combine a statement carries reads the state and its shuffled copy and binds temporaries; the statement
-        // reads the state alone.
+        // reads the state alone, and updates it in place.
         let halve = example(StatementType::TreeHalve);
         assert_eq!(strs(&halve.deps()), ["acc"]);
-        assert!(halve.defines().is_empty());
+        assert_eq!(strs(&halve.defines()), ["acc"]);
         let Statement::TreeHalve(moved) = &*suffixed(&halve, "_") else {
             panic!("not a tree halve");
         };

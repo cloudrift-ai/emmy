@@ -444,16 +444,36 @@ impl Body {
         self.0.defined_states.get_or_init(|| {
             let mut out = Vec::new();
             self.walk(&mut |here| {
-                if let Statement::Accum(_) | Statement::Carry(_) = &**here.stmt() {
-                    for name in here.stmt().defines() {
-                        if !out.contains(&name) {
-                            out.push(name);
-                        }
+                let names = match &**here.stmt() {
+                    Statement::Accum(_) | Statement::Carry(_) => here.stmt().defines(),
+                    stmt => stmt.updates(),
+                };
+                for name in names {
+                    if !out.contains(&name) {
+                        out.push(name);
                     }
                 }
             });
             out
         })
+    }
+
+    /// The names this body updates in place and binds nowhere: storage of the scope around it, which the body reads.
+    fn updated_storage(&self) -> HashSet<Name> {
+        let mut updated = HashSet::new();
+        let mut bound = HashSet::new();
+        self.walk(&mut |here| {
+            let updates = here.stmt().updates();
+            bound.extend(
+                here.stmt()
+                    .defines()
+                    .into_iter()
+                    .filter(|name| !updates.contains(name)),
+            );
+            updated.extend(updates);
+        });
+        updated.retain(|name| !bound.contains(name));
+        updated
     }
 
     /// The accumulators a statement over this body still binds after it closes: this scope's own, and those of a
@@ -500,8 +520,11 @@ impl Body {
             for stmt in self.stmts() {
                 reads.extend(free_ssa(stmt));
             }
+            let storage = self.updated_storage();
             for local in self.local_defs() {
-                reads.remove(local);
+                if !storage.contains(local) {
+                    reads.remove(local);
+                }
             }
             reads
         })
