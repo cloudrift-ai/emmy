@@ -112,13 +112,19 @@ def _share(stmts: list[Statement], *, typed: bool) -> list[Statement]:
             continue
         (first, dg), (late, dg_o) = sorted(found.values())
         alpha, beta = stmts[first], stmts[late]
-        # The block replaces the later factor, so nothing between may read the earlier one; its two names are fresh.
-        if alpha.dtype != beta.dtype or any(alpha.name in free_names(stmt) for stmt in stmts[first + 1 : late]):
+        if alpha.dtype != beta.dtype or any(f"{alpha.name}{suffix}" in writes for suffix in _FRESH):
             continue
-        if any(f"{alpha.name}{suffix}" in writes for suffix in _FRESH):
+        # The block takes the earlier factor's place where both distances are ahead of it, else the later one's; the
+        # factor it moves is read by nothing in between. Its two names are fresh.
+        between = stmts[first + 1 : late]
+        if writes[dg_o][0] < first and not any(beta.name in free_names(stmt) for stmt in between):
+            at = first
+        elif not any(alpha.name in free_names(stmt) for stmt in between):
+            at = late
+        else:
             continue
-        replaced[first] = []
-        replaced[late] = _one_exponential(alpha, beta, dg, dg_o)
+        replaced[first] = replaced[late] = []
+        replaced[at] = _one_exponential(alpha, beta, dg, dg_o)
     return [new for index, stmt in enumerate(stmts) for new in replaced.get(index, [stmt])]
 
 
