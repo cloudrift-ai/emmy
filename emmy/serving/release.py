@@ -60,6 +60,10 @@ class ServingConfig:
     #: programs at these widths.
     decode_width: int = 1
     prefill_width: int = 0
+    #: Native generation's own prefill chunk (``SERVE_NATIVE_PREFILL``, its ``--prefill-size``) where it is wider than
+    #: the plugin's, which it keeps for a prompt's tail; 0 when it runs the plugin's. The trunk's twins at it are rows
+    #: of the server's lane.
+    native_prefill: int = 0
     #: The decode bucket (``SERVE_DECODE_BUCKET``): on experts sliced across ranks, the fixed-slot program's width.
     decode_bucket: int = 0
     #: Whether the server runs the fast-math lane (``SERVE_ENV`` sets ``EMMY_FAST_MATH=1``), the one lane native
@@ -262,6 +266,10 @@ def _realizations(values: dict[str, str], source: Path, *, static_only: bool) ->
         if min(decode, prefill) < 0 or maximum <= 0:
             raise ValueError(f"{source}: warm shape {spec!r} requires non-negative buckets and positive max tokens")
         lanes.append((decode, prefill, maximum, lane_pins[lane == "fm"]))
+    # Native generation's wider chunk: the trunk's static twins at it, in the server's lane, and no any-width row.
+    native_prefill = _integer(values, "SERVE_NATIVE_PREFILL", default=0, minimum=0)
+    if native_prefill:
+        lanes.append((0, native_prefill, 0, lane_pins[False]))
 
     standard_m1 = (1, 0, 1, lane_pins[False])
     if static_only and any(lane != standard_m1 for lane in lanes):
@@ -328,6 +336,7 @@ def load_serving_config(path: str | Path) -> ServingConfig:
         native=values.get("SERVE_NATIVE") == "1",
         decode_width=1 if _integer(values, "SERVE_M1_TIER", default=1) else max(1, _integer(values, "SERVE_DECODE_BUCKET", minimum=0)),
         prefill_width=_integer(values, "SERVE_PREFILL_BUCKET", default=0, minimum=0),
+        native_prefill=_integer(values, "SERVE_NATIVE_PREFILL", default=0, minimum=0),
         decode_bucket=_integer(values, "SERVE_DECODE_BUCKET", minimum=0),
         fast_math=_serve_env_flag(values, source, FAST_MATH),
         experts_gpu=_integer(values, "SERVE_EXPERTS_GPU", minimum=1) if values.get("SERVE_EXPERTS_GPU") else None,

@@ -149,8 +149,10 @@ contract lives in [native/ARCHITECTURE.md](native/ARCHITECTURE.md); vLLM remains
   boot's `EMMY_GEN_EXPERTS_GPU` and `EMMY_GEN_EMBED_GPU`, which decide whether those programs
   read paged inputs), one per kind, width and shape: `router1-native`, `rope64-native` and the like. Under
   `--speculative-config` they include the verify step's, at its rows, with the checkpoint's multi-token-prediction
-  head drafting (`accept3-native`, `pick3-native`, `attend3-native`). Native's trunk is the plugin's twins at those
-  widths, and so is the drafter's prologue and layer, so they are not among them. Each is reached at its own width in
+  head drafting (`accept3-native`, `pick3-native`, `attend3-native`, `unfold3-native`). Native's trunk is the plugin's
+  twins at those widths, and so is the drafter's prologue and layer, so they are not among them. A config that names
+  a wider chunk for native alone (`SERVE_NATIVE_PREFILL`, native's `--prefill-size`) adds native's programs at it and
+  the trunk's static twins at it, as rows of the server's lane; the plugin's chunk stays a width of both. Each is reached at its own width in
   the one lane the server runs (`SERVE_ENV`'s `EMMY_FAST_MATH`, standard by default), since native preparation
   compiles in one regime, and each has a layout scope of its own, since native preparation compiles every one of its
   own programs alone. Unlike the other twins they read the checkpoint, as native preparation traces the loaded model.

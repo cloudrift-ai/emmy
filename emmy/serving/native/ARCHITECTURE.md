@@ -43,11 +43,16 @@ is one launch sequence at every position of a window and replays as one graph. N
 hand-written: the step ends at the FP32 logits and the greedy token, a compiled reduction over them, and the runtime
 samples on the host only at positive temperature (below), so the same export serves any device the compiler targets.
 Attention keeps its dot products, scores and softmax in FP32, which avoids losing near-tied scores at large
-magnitudes. A decode or verify step attends per key-value head: its scores are `[rows, kv_heads, group, window]` and
-its output `[rows, kv_heads, group, head_dim]`, the bytes of `[rows, heads * head_dim]`. A kernel's axes follow its
-output's storage order, so the group is the axis the chunk tier folds as its rows, the group's query heads share one
-read of their key-value head's cache, and a split across the window combines the slices' partial states. A step's few
-rows stay on the grid, each reading the cache once. A prefill chunk attends per query head, the chunk's rows the fold's
+magnitudes. A decode or verify step attends per key-value head: a decode step's scores are `[1, kv_heads, group,
+window]` and its output `[1, kv_heads, group, head_dim]`, the bytes of `[1, heads * head_dim]`. A kernel's axes follow
+its output's storage order, so the group is the axis the chunk tier folds as its rows, the group's query heads share
+one read of their key-value head's cache, and a split across the window combines the slices' partial states. A verify
+step folds its rows beside the group: the rotary program hands its query out per key-value head, `[kv_heads, rows,
+group, head_dim]`, the scores are `[kv_heads, rows * group, window]`, and an unfold program puts the output back in
+the rows' order for the layer's `post`. The mask compares the group's size times the key with the folded row, which
+is the row's own comparison with no quotient in it. Every row then shares the one read of the cache; with an axis of
+their own the rows went to the grid and each read the cache again, 487 against 205 µs for three rows and one at
+131,072 cached tokens on the RTX 5090. A prefill chunk attends per query head, the chunk's rows the fold's
 rows, and each query head reads its key-value head's cache. The value expectation reads the FP32 probabilities as the
 softmax computes them and accumulates in FP32; only the output is rounded to the model dtype. Rounding the probabilities
 to the model dtype first, as attention in the model dtype does, put a divide and a cast between the exponent and the
@@ -179,8 +184,9 @@ schedules.
 ## Execution and state
 
 The prompt stays on the host; each step uploads the tokens it embeds. Prefill processes the prompt in fixed-width
-chunks, defaulting to the plugin's prefill chunk (`EMMY_GEN_PREFILL_BUCKET`), else 16 rows, with a second chunk program
-at the decode width when that is narrower, for the tail the first no longer fills. Each layer writes the chunk's keys
+chunks, defaulting to the plugin's prefill chunk (`EMMY_GEN_PREFILL_BUCKET`), else 16 rows, with a chunk program at each
+narrower width the plugin runs, its own chunk under a wider `--prefill-size` and the decode width, for the tail the
+wider ones no longer fill. Each layer writes the chunk's keys
 and values at their absolute positions before attention reads each query's causal prefix; a row past the prompt's last
 token embeds the previous selection, computes alongside the others and writes cache rows that decode overwrites when it
 reaches them, so a chunk is dispatched only where all of its rows fit the context and the decode program covers the
@@ -381,6 +387,8 @@ emmy generate Qwen/Qwen3-0.6B --revision REVISION --native-pack /tmp/qwen-native
 ```
 
 `generate --export-native` and native serving preparation accept `--prefill-size N`; one selects sequential prefill.
+A width above the plugin's chunk keeps that chunk as a tail width, and a recipe's serving config names it
+(`SERVE_NATIVE_PREFILL`), so the golden holds the trunk's twins and native's own programs at it.
 The width is capped at the context capacity and stored in the artifact; it cannot change when loading an existing pack.
 Use the same checkpoint/tokenizer revision for preparation and text generation. The runtime artifact accepts and returns
 token IDs. Native serving preparation additionally bundles the same

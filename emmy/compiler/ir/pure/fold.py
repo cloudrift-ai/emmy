@@ -818,20 +818,22 @@ class Fold:
 
     def uniform_leaf(self, axes: frozenset[str]) -> bool:
         """Whether this operand varies over nothing the term it feeds does not evaluate over: an edge with no free axis,
-        or a leaf over ``axes`` alone whose body holds nothing but literals, loads indexed by no coordinate, and
-        ``Let`` aliases of those coordinates. Such an operand adds no dependence outside a term evaluated over
-        ``axes`` — a mask over them reads it — and a tier that evaluates per fragment folds the aliases into its
-        coordinate predicates and reads the rest once."""
+        or a leaf over ``axes`` alone whose body holds nothing but loads indexed by no coordinate and values computed
+        from them, those coordinates and literals. Such an operand adds no dependence outside a term evaluated over
+        ``axes`` — a mask over them reads it — and a tier that evaluates per fragment folds the coordinates' values
+        into its coordinate predicates and reads the rest once."""
         if not self.free_axes:
             return True
         if self.operands or self.base is not None or not self.free_axes <= axes:
             return False
+        known = set(axes)
         for stmt in self.lift.body:
-            if isinstance(stmt, Let) and (isinstance(stmt.value, Literal) or (isinstance(stmt.value, Var) and stmt.value.name in axes)):
-                continue
             if isinstance(stmt, Load) and not any(index.free_vars() for index in stmt.index):
-                continue
-            return False
+                known.add(stmt.name)
+            elif isinstance(stmt, (Let, Assign)) and stmt.value.free_vars() <= known:
+                known.add(stmt.name)
+            else:
+                return False
         return True
 
     @property

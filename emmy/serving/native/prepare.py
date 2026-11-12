@@ -206,7 +206,7 @@ def validate_model(model, context_length, ckpt=None):
     return decoder
 
 
-def rope_module(heads, kv_heads, head_dim, rotary_dim, rows, cache_dtype, axes=None):
+def rope_module(heads, kv_heads, head_dim, rotary_dim, rows, cache_dtype, axes=None, grouped=False):
     """Rotate q and k at their positions in FP32, round once to the model dtype, and store k and v into the
     cache at those positions in ``cache_dtype``: the model dtype, or FP8 e4m3 saturated to its largest finite
     value, as vLLM stores its FP8 cache with no scale. The caches come in and go out, written in place (the
@@ -218,7 +218,11 @@ def rope_module(heads, kv_heads, head_dim, rotary_dim, rows, cache_dtype, axes=N
     With ``axes`` (:func:`mrope_axes`) a row rotates at its M-RoPE position, an ``mrope`` input of ``[rows, 3]``
     (temporal, height, width) positions: each rotary column reads the table at its axis' position. A text row's
     three are one position, so its rotation is the plain one's; an image token's differ. The cache still stores at
-    the row's own position in the context."""
+    the row's own position in the context.
+
+    ``grouped`` is a decode or verify step's: a step of several rows hands its rotated query out per key-value head,
+    ``[kv_heads, rows, group, head_dim]`` in the bytes of ``[rows, heads * head_dim]``, the order its attention folds
+    (:func:`attend_module`)."""
     import torch
 
     def store(x):
@@ -247,7 +251,10 @@ def rope_module(heads, kv_heads, head_dim, rotary_dim, rows, cache_dtype, axes=N
             else:
                 index = torch.index_select(mrope[0], 1, self.axes)
                 c, s = torch.gather(cosine, 0, index).unsqueeze(1), torch.gather(sine, 0, index).unsqueeze(1)
-            rotated = self.rotate(q, heads, c, s).view(rows, heads * head_dim)
+            rotated = self.rotate(q, heads, c, s)
+            if grouped and rows > 1:
+                rotated = rotated.view(rows, kv_heads, heads // kv_heads, head_dim).transpose(0, 1)
+            rotated = rotated.reshape(rows, heads * head_dim)
             new_keys = store(self.rotate(k, kv_heads, c, s))
             new_values = store(v.view(rows, kv_heads, head_dim))
             # Each element of the chunk names its own position.
@@ -269,8 +276,11 @@ def attend_module(heads, kv_heads, head_dim, rows, grouped=False):
     the attention runs per key-value head over its group of query heads, and the output is ``[rows, kv_heads, group,
     head_dim]``, the bytes of ``[rows, heads * head_dim]``. A kernel's axes follow its output's storage order, so the
     group is the axis the tensor-core fold takes as its rows, and the group's query heads share one read of their
-    key-value head's cache; spelled per query head, each would read it again. A prefill chunk keeps the per-head
-    spelling, whose fold rows are the chunk's."""
+    key-value head's cache; spelled per query head, each would read it again. A step of several rows folds them too:
+    its query comes per key-value head (:func:`rope_module`) and its output is ``[kv_heads, rows * group, head_dim]``,
+    which :func:`unfold_module` puts back in the rows' order, so the rows and their groups are the fold's one row axis
+    and every row shares the one read; left an axis of their own, the rows went to the grid and each read the cache
+    again. A prefill chunk keeps the per-head spelling, whose fold rows are the chunk's."""
     import torch
 
     class Grouped(torch.nn.Module):
@@ -283,6 +293,19 @@ def attend_module(heads, kv_heads, head_dim, rows, grouped=False):
             index = torch.arange(window)
             keep = index.unsqueeze(0) - index[:rows].unsqueeze(1) <= position
             scores = torch.matmul(q4, k3.transpose(1, 2)) * head_dim**-0.5 + torch.where(keep, 0.0, MASK_FILL)[:, None, None, :]
+            return torch.matmul(torch.softmax(scores, dim=-1), v3).to(q.dtype)
+
+    class Folded(torch.nn.Module):
+        def forward(self, q, keys, values, position):
+            group, window = heads // kv_heads, keys.shape[0]
+            folded = q.view(kv_heads, rows * group, head_dim).float()
+            k3, v3 = keys.float().transpose(0, 1), values.float().transpose(0, 1)
+            # A folded row is one of its row's ``group`` query heads, so its row is the folded index over ``group``,
+            # and the key stands at or before it where ``group`` times the key less the folded index does: a
+            # comparison of the score's coordinates and the position, as the per-head spelling's, with no quotient.
+            index = torch.arange(window)
+            keep = index.unsqueeze(0) * group - index[: rows * group].unsqueeze(1) <= position * group
+            scores = torch.matmul(folded, k3.transpose(1, 2)) * head_dim**-0.5 + torch.where(keep, 0.0, MASK_FILL)
             return torch.matmul(torch.softmax(scores, dim=-1), v3).to(q.dtype)
 
     class Attend(torch.nn.Module):
@@ -300,7 +323,19 @@ def attend_module(heads, kv_heads, head_dim, rows, grouped=False):
             probabilities = torch.softmax(scores, dim=-1)
             return torch.matmul(probabilities, v3).to(q.dtype).transpose(0, 1).reshape(rows, heads * head_dim)
 
-    return Grouped() if grouped else Attend()
+    return (Grouped() if rows == 1 else Folded()) if grouped else Attend()
+
+
+def unfold_module(kv_heads, rows):
+    """A verify step's attention output, which comes per key-value head (:func:`attend_module`), in the rows' order:
+    ``[rows, kv_heads, group, head_dim]``, the bytes of the ``[rows, heads * head_dim]`` the layer's ``post`` reads."""
+    import torch
+
+    class Unfold(torch.nn.Module):
+        def forward(self, attended):
+            return attended.view(kv_heads, rows, -1, attended.shape[-1]).transpose(0, 1)
+
+    return Unfold()
 
 
 def carry_module(select=False):
@@ -581,6 +616,7 @@ class _Step:
         priced=None,
         weights=None,
         rows=None,
+        least=None,
     ):
         """Trace ``wrapper`` at ``examples`` and splice it in (:meth:`spliced`). ``coded`` spells named weight inputs
         as FP8 codes with a scale input appended after the traced ones (``spell_quantized_inputs``), as the plugin
@@ -588,8 +624,8 @@ class _Step:
         plugin traces it: its weights take the layouts of the plugin's wrapper ``weights`` (``prefix`` by default),
         and it is no native twin. ``window`` names the arguments whose leading axis is the window (:data:`WINDOW`):
         the program reads their leading rows, as many as the runtime sets. It is priced at the window of ``priced``,
-        the :class:`WindowRange` it runs in. ``rows``, the program's own rows where they are not the step's, names a
-        traced program."""
+        the :class:`WindowRange` it runs in, and holds ``least`` positions at least (its rows by default). ``rows``,
+        the program's own rows where they are not the step's, names a traced program."""
         import inspect
 
         import torch
@@ -600,7 +636,8 @@ class _Step:
         from emmy.serving.gen_runner import _plan_sources, _traced_split
 
         if window:
-            axis = torch.export.Dim(WINDOW, min=rows or 1, max=MAX_CONTEXT)  # a window holds at least the program's rows
+            # A window holds at least the rows the program's mask counts: its own, or a grouped step's folded ones.
+            axis = torch.export.Dim(WINDOW, min=least or rows or 1, max=MAX_CONTEXT)
             shapes = {name: {0: axis} if name in window else {} for name in inspect.signature(wrapper.forward).parameters}
             graph = rehint_program(trace_module(wrapper, tuple(examples), dynamic_shapes=shapes), {WINDOW: priced.price})
         else:
@@ -1025,7 +1062,7 @@ def _program(
         examples += (torch.zeros(n, 3, dtype=torch.int64),) if images else ()
         step.compiled(
             prefix("rope"),
-            rope_module(heads, kv, d, tables[0].shape[-1], n, kv_dtype, axes),
+            rope_module(heads, kv, d, tables[0].shape[-1], n, kv_dtype, axes, grouped=not prefill),
             examples,
             [*names[:3], position, *rotary, keys, values, *([mrope] if images else [])],
             [rotated, keys, values],
@@ -1036,22 +1073,29 @@ def _program(
         )
         if cache_only:
             return None
-        # A decode or verify step attends per key-value head (:func:`attend_module`); its output is the same bytes. Each
+        # A decode or verify step attends per key-value head (:func:`attend_module`): one row's output is the same
+        # bytes, and a verify step's rows, folded into one axis with their groups, are put back in their order. Each
         # range of windows attends through its own program, priced there (:data:`WINDOW_RANGES`).
         attended = step.buffer(f"{label}.attention", (width, heads * d) if prefill else (width, kv, heads // kv, d))
+        folded = not prefill and n > 1
+        written = step.buffer(f"{label}.folded", (kv, n * (heads // kv), d)) if folded else attended
         for priced in window_ranges(context_length):
             step.compiled(
                 prefix("attend"),
                 attend_module(heads, kv, d, n, grouped=not prefill),
                 (head_rows(n, heads), windowed(), windowed(), scalar()),
                 [rotated, keys, values, position],
-                [attended],
+                [written],
                 cache,
                 paged=(("keys", 0, page_tokens), ("values", 0, page_tokens)) if pages else (),
                 window=("keys", "values"),
                 priced=priced,
                 rows=n,
+                least=n * (heads // kv) if folded else n,
             )
+        if folded:
+            examples = (torch.zeros(kv, n * (heads // kv), d, dtype=td),)
+            step.compiled(prefix("unfold"), unfold_module(kv, n), examples, [written], [attended], cache, rows=n)
         outputs = mixer_outputs(label, out, routed, width)
         examples = (head_rows(width, heads), torch.zeros(width, h, dtype=td), *(head_rows(width, heads) for _ in gated))
         step.compiled(
@@ -1319,7 +1363,9 @@ def default_context(config):
     return min(MAX_CONTEXT, config.get_text_config().max_position_embeddings)
 
 
-def trace_programs(model, *, prefill_size=None, decode_width=None, ckpt=None, kv_cache_dtype="auto", drafter=None, vision=None):
+def trace_programs(
+    model, *, prefill_size=None, prefill_bucket=None, decode_width=None, ckpt=None, kv_cache_dtype="auto", drafter=None, vision=None
+):
     """The programs :func:`export_model` compiles for ``model`` that are native generation's own, traced and not
     compiled: its serving twins, ``{name: graph}``; the rest are the plugin's. A program is named
     ``<kind><width>-native`` after its kind and rows (``router1-native``, ``rope64-native``), numbered after the first
@@ -1329,7 +1375,7 @@ def trace_programs(model, *, prefill_size=None, decode_width=None, ckpt=None, kv
     reaches, the long range's twin named apart (``attend64-long-native``). ``vision`` is :func:`export_model`'s: an
     export that answers images adds its image path."""
     traced = {}
-    _steps(model, None, None, prefill_size, ckpt, kv_cache_dtype, traced, decode_width, drafter=drafter, vision=vision)
+    _steps(model, None, None, prefill_size, ckpt, kv_cache_dtype, traced, decode_width, prefill_bucket, drafter=drafter, vision=vision)
     twins = {}
     for name, graph, plugin in traced.values():
         if plugin:
@@ -1339,15 +1385,26 @@ def trace_programs(model, *, prefill_size=None, decode_width=None, ckpt=None, kv
 
 
 def _steps(
-    model, context_length, page_tokens, prefill_size, ckpt, kv_cache_dtype="auto", traced=None, decode_width=None, drafter=None, vision=None
+    model,
+    context_length,
+    page_tokens,
+    prefill_size,
+    ckpt,
+    kv_cache_dtype="auto",
+    traced=None,
+    decode_width=None,
+    prefill_bucket=None,
+    drafter=None,
+    vision=None,
 ):
     """The decode program, at a prefill width above one the prefill programs (at the chunk and, below it, at the
-    decode width), and with a ``drafter`` the verify program, the context, the prefill widths and the vision tower's
-    contract; with ``traced``, their programs traced
-    into it instead (:class:`_Step`). The context defaults to the model's window, up to :data:`MAX_CONTEXT`. Both
+    plugin's chunk and at the decode width), and with a ``drafter`` the verify program, the context, the prefill
+    widths and the vision tower's contract; with ``traced``, their programs traced
+    into it instead (:class:`_Step`). The context defaults to the model's window, up to :data:`MAX_CONTEXT`. The
     widths default to the plugin's (``EMMY_GEN_DECODE_BUCKET``, ``EMMY_GEN_M1_TIER``, ``EMMY_GEN_PREFILL_BUCKET``):
     ``decode_width`` is the width its trunk runs one token at, and a verify step's rows, as the plugin's, fit it;
-    ``prefill_size`` its prefill chunk, :data:`PREFILL_SIZE` when it has none. With ``vision`` (:func:`export_model`)
+    ``prefill_bucket`` is the plugin's prefill chunk, and ``prefill_size`` native's own, the plugin's when it names
+    none and :data:`PREFILL_SIZE` when the plugin has none. With ``vision`` (:func:`export_model`)
     the steps take images and the tower's programs join them (``vision.tower_programs``); the contract is ``None``
     without."""
     import torch
@@ -1364,8 +1421,10 @@ def _steps(
     page_tokens = context_length if page_tokens is None else page_tokens
     if not 0 < page_tokens <= context_length or context_length % page_tokens:
         raise ValueError(f"page_tokens={page_tokens} must divide the context capacity {context_length}")
+    if prefill_bucket is None:
+        prefill_bucket = config.gen_prefill_bucket()
     if prefill_size is None:
-        prefill_size = config.gen_prefill_bucket() if config.gen_prefill_bucket() > 0 else PREFILL_SIZE
+        prefill_size = prefill_bucket if prefill_bucket > 0 else PREFILL_SIZE
     if type(prefill_size) is not int or not 1 <= prefill_size <= MAX_CONTEXT:
         raise ValueError("prefill size must be within supported context capacity")
     prefill_size = min(prefill_size, context_length)
@@ -1408,10 +1467,11 @@ def _steps(
     # Decode first: the plugin builds a wrapper's twins narrowest first, and the first to decide a weight's layout
     # settles it for the rest; it builds the programs that keep a verify step's states last.
     programs = {"decode": program("decode", 1, decode_width)}
-    # The chunk widths, widest first: the prefill chunk, then the decode width below it, so the tail of a prompt that
-    # no longer fills the chunk is taken at the narrower one before the runtime's chunk rule runs it a token at a time
-    # (a prompt of 255 tokens with carried state and 64-row chunks alone ran its last 63 tokens as 63 steps).
-    prefill_sizes = sorted({n for n in (prefill_size, decode_width) if 1 < n <= prefill_size}, reverse=True)
+    # The chunk widths, widest first: the prefill chunk, then the plugin's chunk and the decode width below it, so the
+    # tail of a prompt that no longer fills a chunk is taken at the next narrower one before the runtime's chunk rule
+    # runs it a token at a time (a prompt of 255 tokens with carried state and 64-row chunks alone ran its last 63
+    # tokens as 63 steps). The narrower widths are the plugin's, so their trunk programs are its recorded twins.
+    prefill_sizes = sorted({n for n in (prefill_size, prefill_bucket, decode_width) if 1 < n <= prefill_size}, reverse=True)
     for n in prefill_sizes:
         programs[f"prefill{n}"] = program("prefill", n, n)
     if drafter is not None:
