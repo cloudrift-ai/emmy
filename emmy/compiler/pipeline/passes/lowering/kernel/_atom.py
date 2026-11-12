@@ -92,7 +92,6 @@ from emmy.compiler.ir.stmt import (
     exposed_defines,
     free_names,
     mask_select_predicate,
-    rename_free,
 )
 from emmy.compiler.ir.tile.ops import cone_stat, cone_stat_dtypes
 from emmy.compiler.pipeline.passes.lowering.kernel._stage import (
@@ -1904,31 +1903,6 @@ def _cell_varying(body, side: Side | None) -> bool:
     return side is not None and any(side.name in free_names(stmt) for stmt in body)
 
 
-def _dedup_loads(stmts: list[Statement]) -> list[Statement]:
-    """Collapse syntactically-identical scalar ``Load``s (same buffer + index) to one binding,
-    rewriting the dropped names to the survivor — the operand reuse a register tile exists for (a
-    load not referencing the ``m`` cell axis is shared across the ``n`` cells, and vice versa).
-
-    Dedup itself is per-``stmts`` (this list only); the rewrite reaches nested scopes, since an
-    epilogue cell's output sweep consumes the loads hoisted above it. It goes through
-    :func:`~emmy.compiler.ir.stmt.rename_free` so a nested scope re-binding a dropped
-    name keeps its own binding."""
-    seen: dict = {}
-    rename: dict[str, str] = {}
-    kept: list[Statement] = []
-    for s in stmts:
-        if isinstance(s, Load) and s.is_scalar:
-            sig = (s.input, tuple(str(e) for e in s.index))
-            if sig in seen:
-                rename[s.names[0]] = seen[sig]
-                continue
-            seen[sig] = s.names[0]
-        kept.append(s)
-    if rename:
-        kept = [rename_free(s, rename) for s in kept]
-    return kept
-
-
 def _guard_writes(stmts: list[Statement], cond) -> list[Statement]:
     """Wrap each output ``Write`` in ``Cond(cond, …)`` — the masked tail cell computes (with
     clamp-read operands) but only stores when in bounds. Recurses into nested bodies: a projection
@@ -1990,7 +1964,7 @@ def _scalar_drain(c: Fold, cells, offset, operands, ki: str, bk_elems: int, base
     (NOT via the masked gmem-direct σ, whose ``% extent`` wrap would corrupt the slab index for an
     overhanging cell): the slab is indexed by the **local** tile coordinate ``offset[{0,1}].base(...) −
     base`` (``m_uvar·reg_m + i`` ∈ [0, tile_m), always in-slab), so an overhanging cell reads a
-    clamped / zero-filled slab row and its store is discarded by the guard. ``_dedup_loads`` still
+    clamped / zero-filled slab row and its store is discarded by the guard. The body's optimization
     shares A across the n-cells and B across the m-cells exactly as gmem-direct does. **Seed-less**
     (the accumulators are pre-seeded once by :meth:`_ScalarOps.state` outside the
     outer slab loop, so the drain folds into them without re-seeding. Each operand adds its
@@ -2017,7 +1991,7 @@ def _scalar_drain(c: Fold, cells, offset, operands, ki: str, bk_elems: int, base
             body.append(Load(names=(bn,), input=op.slab, index=(b_row, b_col)))
             body.append(Assign(vn, apply(_MUL, bn, an)))
             body.append(Accum(name=cn, value=vn, op=_ADD, axes=(ki,)))
-    body = _dedup_loads(body)
+    body = list(body)
     # seed=False: the accumulators are pre-seeded once by _ScalarOps.state outside the outer slab loop, so
     # this inner drain must NOT re-declare (re-zero) them each slab iteration.
     return Loop(axis=Axis(name=ki, extent=bk_elems), body=Body(tuple(body)), unroll=unroll_ok_n(bk_elems, 64), seed=False)
@@ -2706,13 +2680,13 @@ class _ScalarOps(_AtomOps):
 
     def store(self, i, j, offset, mn):
         """Replicate the projection ``tail`` for cell ``(i, j)`` — σ-offset, suffix the SSA names, guard
-        the (overhanging) write, dedup shared operand loads."""
+        the (overhanging) write."""
         c = self.c
         sigma = _scalar_sigma(mn, offset, i, j)
         tail = _unshadowed(self.epilogue, c.exposes)
         cell = copy_cell(tail, sigma, f"__c{i}_{j}", _scalar_protected(self.tile, self.lead, k_axis=self.k_axis))
         cell = _guard_writes(cell, _scalar_bound(mn, offset, i, j))
-        return _dedup_loads(cell)
+        return cell
 
 
 # ---- the twisted carrier's chunk tier ------------------------------------------------------- #

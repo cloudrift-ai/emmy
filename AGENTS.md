@@ -83,8 +83,10 @@ The passes `ARCHITECTURE.md` owns the design; `tests/compiler/passes/test_maxima
 
 Body normalization (the `normalize` module of the `emmy-ir` crate, behind the one entry point `normalize_body` the
 `ir/stmt` package exports) is the canonical form every Loop IR body takes at construction and inside every identity
-digest. It runs the same on every body, so it answers to no knob, pin or evidence, and nothing under `ir/` imports the
-pipeline that holds them.
+digest. It runs the same on every body, so it answers to no knob, pin or evidence, and nothing under `ir/` imports
+the pipeline that holds them. A Kernel IR body takes its optimizing steps alone (`optimize_body`: the exact
+simplifications and every value computed once): no identity reads a kernel body, so it keeps the order and the names
+its passes wrote. The same rule holds for those steps: no knob, pin or evidence.
 
 - **A transform that something decides is a pipeline pass.** A knob the search sets, a pin, a pass stage: the
   transform lives in the pass file that owns the decision under `pipeline/passes/`, even when it is a pure body → body
@@ -97,8 +99,8 @@ pipeline that holds them.
   it decides nothing, and it is exact up to the reassociation of a sum, which every reduce schedule already takes. It
   decides no rounding a knob owns: a literal divisor becomes its reciprocal only where that is exact.
 
-The IR `ARCHITECTURE.md` owns the design; `tests/architecture/test_layering.py` guards the module's single entry
-point and the `ir/` → pipeline import boundary.
+The IR `ARCHITECTURE.md` owns the design; `tests/architecture/test_layering.py` guards the module's two entry
+points and the `ir/` → pipeline import boundary.
 
 ## Compiler Invariant: Kernel Facts Are Computed, Never Stored
 

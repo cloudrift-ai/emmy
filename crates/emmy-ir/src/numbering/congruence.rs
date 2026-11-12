@@ -24,7 +24,7 @@ pub fn congruent_states(body: &Body) -> Vec<Vec<Name>> {
     let mut start: Vec<(Key, Vec<Name>)> = Vec::new();
     for name in &sites.order {
         let site = &sites.sites[name];
-        if site.definitions != 1 || !site.candidate {
+        if site.definitions != 1 || !site.candidate || sites.defining.get(name) != Some(&1) {
             continue;
         }
         match start.iter_mut().find(|(key, _)| *key == site.key) {
@@ -83,8 +83,8 @@ pub fn group_keys(groups: &[Vec<Name>]) -> HashMap<Name, Key> {
 }
 
 /// Where a state is defined: its update's ordinal in the numbering's pre-order walk, the start key (the update's
-/// statement type, operation and dtype, and the scope that holds it), how many statements define it, and whether its
-/// seed is known.
+/// statement type, operation and dtype, and the scope that holds it), how many of its updates and seeds define it, and
+/// whether its seed is known.
 struct Site {
     ordinal: usize,
     key: Key,
@@ -97,6 +97,9 @@ struct Sites {
     sites: HashMap<Name, Site>,
     order: Vec<Name>,
     next: usize,
+    /// How many statements, of any type, define each name: a kernel statement may update a state in place (a warp
+    /// shuffle combining into it), which makes it no candidate.
+    defining: HashMap<Name, usize>,
 }
 
 impl Sites {
@@ -106,6 +109,9 @@ impl Sites {
         for stmt in body.stmts() {
             let ordinal = self.next;
             self.next += 1;
+            for name in stmt.defines() {
+                *self.defining.entry(name).or_default() += 1;
+            }
             let candidate = match &**stmt {
                 Statement::Accum(_) => Some(seeded && scope.is_some()),
                 Statement::Carry(_) => Some(true),

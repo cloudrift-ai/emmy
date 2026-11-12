@@ -32,7 +32,7 @@ the chunk positions.
 The sync compute-fill applies the same XOR on its slab ``Write`` stores (one
 vector store per 16 B run) and on a fragment producer's ``RegStore``\\ s, and its per-cell
 producer-cone replication is planned by
-:meth:`SyncTransport._run_plans` — run-invariant stmts hoist once, a stride-1 k-indexed gmem
+:meth:`SyncTransport._run_plans` — a stride-1 k-indexed gmem
 ``Load`` merges into one vector ``Load`` per run. Scalar-``Load``-drained slabs stay plain
 row-major (NONE-swizzle, linear writes and reads).
 ``_atom._staged`` — the one atom-agnostic driver — builds the transport, asks the atom strategy
@@ -907,13 +907,10 @@ class SyncTransport:
         return d.value if isinstance(d, Literal) and isinstance(d.value, int) else None
 
     def _run_plans(self, op: SyncOperand, v: int) -> list[str]:
-        """Per-position emission plan for one operand's ``V``-cell fill run — ``"hoist"`` /
-        ``"vector"`` / ``"cell"``. Classified by PROBING the value closure at synthetic coords
-        (col 0 vs col 1; the probe stmts are planning-only, never emitted):
+        """Per-position emission plan for one operand's ``V``-cell fill run — ``"vector"`` or
+        ``"cell"``. Classified by PROBING the value closure at synthetic coords (col 0 vs col 1; the
+        probe stmts are planning-only, never emitted):
 
-        - identical at both cols ⇒ run-INVARIANT (the stat-row loads, whose index is the run's
-          row alone) — emit once, unsuffixed, but only while its SSA deps stay outside the
-          per-cell defs (a dep on a replicated name demotes it back to per-cell);
         - a scalar ``Load`` whose last-dim index advances by exactly +1 per cell, leading dims
           col-free, and whose every run starts on a ``V``-element boundary of its buffer (the
           cone's k-indexed operand read) ⇒ the run's V scalar loads merge into ONE vector ``Load``.
@@ -922,18 +919,16 @@ class SyncTransport:
           a slice's offset, and every leading coordinate times its row stride (a 260-wide bf16 row
           puts every odd row 8 B off the 16 B grid);
         - anything else replicates per cell (a cone stmt whose read doesn't advance +1 with
-          the slab col — e.g. a col-strided gather, or a vector read no shape proves aligned)."""
+          the slab col — e.g. a col-strided gather, or a vector read no shape proves aligned). A
+          statement that is the same at every col (the stat-row loads, whose index is the run's
+          row alone) replicates too: the body's optimization holds its value once."""
         probe_row, probe_k0, probe_col, zero = Var("__srow"), Var("__sk0"), Var("__scol"), Literal(0, "int")
         s0, _ = op.value(probe_k0, probe_row, zero)
         s1, _ = op.value(probe_k0, probe_row, Literal(1, "int"))
         sz, _ = op.value(zero, probe_row, probe_col)
         ctx = SimplifyCtx.empty()
         plans: list[str] = []
-        cell_defs: set[str] = set()
         for p, (a, b) in enumerate(zip(s0, s1, strict=True)):
-            if str(a) == str(b) and not (set(a.deps()) & cell_defs):
-                plans.append("hoist")
-                continue
             step = SyncTransport._affine_step(a.index[-1], b.index[-1], ctx) if isinstance(a, Load) and isinstance(b, Load) else None
             if (
                 isinstance(a, Load)
@@ -949,7 +944,6 @@ class SyncTransport:
                 plans.append("vector")
             else:
                 plans.append("cell")
-            cell_defs |= exposed_defines(a)
         return plans
 
     @property
@@ -960,7 +954,7 @@ class SyncTransport:
         Measured on the V100: issued at the top, ptxas sinks the eight 16 B loads of a 128x128 tile a
         third of the way into the mma stream, and the deposit then waits on them (a fifth of the
         partial's stall samples). Issued past the barrier through the read-only path, and carried as
-        packed vectors until the deposit unpacks them, the Qwen3-0.6B s512 projections' best rows went
+        packed vectors the deposit reads its elements from, the Qwen3-0.6B s512 projections' best rows went
         down 75.8 -> 67.1 us, o 52.3 -> 49.2, q 45.6 -> 42.5. Only a pure copy ring moves: a compute
         fill writes the current chunk at the top of the body and keeps its own order."""
         return self.register_staged and not self.fills_current_slot
@@ -1025,21 +1019,15 @@ class SyncTransport:
                 stmts, val = op.value(k0_cur, row, cell_col)
                 cell_stmts.append(stmts)
                 vals.append(val)
-            hoisted_defs = {nm for p, stmt in enumerate(cell_stmts[0]) if plans[p] == "hoist" for nm in exposed_defines(stmt)}
-            vals = [val if val in hoisted_defs else f"{val}__c{j}" for j, val in enumerate(vals)]
-            # Per-cell SSA defs — the names each replica suffixes. HOISTED positions (run-invariant
-            # stmts: the stat-row loads, whose value is identical across the run's cells) emit once,
-            # unsuffixed, and per-cell references pass through to them; VECTOR positions (a scalar
-            # gmem ``Load`` whose last-dim index advances by exactly +1 per cell — the cone's
-            # k-indexed operand read) merge the run's V scalar 2 B loads into ONE vector ``Load``
-            # binding every cell's suffixed name (one 16 B ld like the cp.async fill, instead of V
-            # scalar loads — the compute fill issued 3.6x cuBLAS's LSU instructions). Everything
-            # else replicates per cell as before.
-            local = {nm for p, st in enumerate(cell_stmts[0]) if plans[p] != "hoist" for nm in exposed_defines(st)}
+            vals = [f"{val}__c{j}" for j, val in enumerate(vals)]
+            # Each replica suffixes its SSA defs. VECTOR positions (a scalar gmem ``Load`` whose
+            # last-dim index advances by exactly +1 per cell — the cone's k-indexed operand read)
+            # merge the run's V scalar 2 B loads into ONE vector ``Load`` binding every cell's
+            # suffixed name (one 16 B ld like the cp.async fill, instead of V scalar loads — the
+            # compute fill issued 3.6x cuBLAS's LSU instructions). Everything else replicates per
+            # cell.
+            local = {nm for st in cell_stmts[0] for nm in exposed_defines(st)}
             for p in range(len(cell_stmts[0])):
-                if plans[p] == "hoist":
-                    body.append(cell_stmts[0][p])
-                    continue
                 if plans[p] == "vector":
                     ld = cell_stmts[0][p]
                     body.append(Load(names=tuple(f"{ld.names[0]}__c{j}" for j in range(v)), input=ld.input, index=ld.index, dtype=ld.dtype))
@@ -1058,20 +1046,16 @@ class SyncTransport:
             out.append(StridedLoop(axis=fe, start=self.cta.linear_tid, step=_lit(self.cta.n_threads), body=Body(tuple(body)), unroll=False))
         return out
 
-    def deposit(self, *, slot: Expression, ring: int, unpack: bool = False) -> list[Statement]:
+    def deposit(self, *, slot: Expression, ring: int) -> list[Statement]:
         """Land the registers :meth:`fill` issued into ring ``slot`` — the second half of the split
         blocking copy, placed by :func:`pipelined_kloop` past the resident chunk's drain. Empty on
-        every unsplit transport, whose bytes land in their own ``wait``. ``unpack`` first spreads the
-        packed vectors a back-edge issue carried into the staged names (:class:`Load` ``carried``)."""
+        every unsplit transport, whose bytes land in their own ``wait``. The staged names a back-edge
+        issue carried are read from its packed vectors where the stores read them (:class:`Load`
+        ``carried``)."""
         if not self.register_staged:
             return []
         out: list[Statement] = []
         for op in self.copy_operands:
-            if unpack:
-                v, trips = _sync_copy_runs(op.shape, self.cta, op.elem_bytes or self.elem_bytes)
-                out += [
-                    Load(names=_staged_regs(op.tag, trip, v), input=op.buf, index=(_lit(0),), carried="unpack") for trip in range(trips)
-                ]
             out += sync_copy_deposit(
                 slab=op.slab,
                 shape=op.shape,
@@ -1276,6 +1260,18 @@ _CONSUMER_REGS = 240
 _SM_REGFILE = 65536
 
 
+def _end_var(k0: str, k_end: Expression | None) -> Var | None:
+    """The chunk loop's early-stop bound as the name :func:`_end_bound` binds it under, or ``None`` with no early stop."""
+    return Var(f"{k0}_end") if k_end is not None else None
+
+
+def _end_bound(k0: str, k_end: Expression | None) -> list[Statement]:
+    """The early-stop bound ``k_end`` as one named value ahead of the chunk loop, which the loop stops at and the
+    prefetch clamps read: evaluated once, where the raw expression at every use measurably spills on the flash
+    stream. A binding rather than a name the loop would imply, so the body's optimization carries it like any value."""
+    return [Let(name=f"{k0}_end", value=k_end)] if k_end is not None else []
+
+
 def _producer_band_kloop(
     *,
     transport: TmaTransport,
@@ -1322,6 +1318,8 @@ def _producer_band_kloop(
     pre: list[Statement] = [Cond(cond=BinaryExpression("==", tid, _lit(0)), body=inits), Sync()]
 
     k0, K = "_ks", k_extent
+    pre += _end_bound(k0, k_end)
+    end = _end_var(k0, k_end)
     i_expression = BinaryExpression("/", Var(k0), _lit(bk_elems))
     kaxis = Axis(name=k0, extent=K)
     setmaxnreg = (
@@ -1341,7 +1339,7 @@ def _producer_band_kloop(
     if ring >= 2:
         k0_next = BinaryExpression("+", Var(k0), _lit((ring - 1) * bk_elems))
         if k_end is not None:  # clamp onto the last chunk this CTA drains (the causal early stop)
-            end_var = Var(f"{k0}_end")  # the loop's hoisted for-init bound (StridedLoop.end)
+            end_var = _end_var(k0, k_end)
             last_k0 = BinaryExpression("*", BinaryExpression("/", BinaryExpression("-", end_var, _lit(1)), _lit(bk_elems)), _lit(bk_elems))
             k0_pref = TernaryExpression(cond=BinaryExpression("<", k0_next, end_var), if_true=k0_next, if_false=last_k0)
         else:
@@ -1359,7 +1357,7 @@ def _producer_band_kloop(
     prod: list[Statement] = [SetMaxNReg(_PRODUCER_REGS, "dec")] if setmaxnreg else []
     for s in range(ring - 1):  # prime chunks 0..ring-2 into slots 0..ring-2 (release generation 0)
         prod += transport.fill(k0=_lit(s * bk_elems), slot=_lit(s))
-    prod.append(StridedLoop(axis=kaxis, start=_lit(0), step=_lit(bk_elems), body=Body(tuple(prod_body)), unroll=False, end=k_end))
+    prod.append(StridedLoop(axis=kaxis, start=_lit(0), step=_lit(bk_elems), body=Body(tuple(prod_body)), unroll=False, end=end))
 
     # Compute: wait the data parity, drain the slot, close the band on the named barrier, release.
     # A drain that leaves its group running (``in_flight``) has waited out the PREVIOUS chunk's
@@ -1384,7 +1382,7 @@ def _producer_band_kloop(
             )
         )
     cons: list[Statement] = [SetMaxNReg(_CONSUMER_REGS, "inc")] if setmaxnreg else []
-    cons.append(StridedLoop(axis=kaxis, start=_lit(0), step=_lit(bk_elems), body=Body(tuple(cons_body)), unroll=False, end=k_end))
+    cons.append(StridedLoop(axis=kaxis, start=_lit(0), step=_lit(bk_elems), body=Body(tuple(cons_body)), unroll=False, end=end))
 
     role = Cond(cond=BinaryExpression(">=", tid, _lit(block_threads)), body=tuple(prod), else_body=tuple(cons))
     return decls, [*pre, role]
@@ -1422,11 +1420,11 @@ class _Group:
     back_edge: bool = False  # a two-slot split ring issuing past the barrier (``issues_across_back_edge``)
 
 
-def _deposit(group: _Group, slot: Expression, *, unpack: bool = False) -> list[Statement]:
+def _deposit(group: _Group, slot: Expression) -> list[Statement]:
     """The transport's register→smem landing, or nothing for a transport whose fill is not split
     (cp.async / TMA leave their in-flight bytes with the copy engine, not in registers)."""
     land = getattr(group.transport, "deposit", None)
-    return land(slot=slot, ring=group.ring, unpack=unpack) if land is not None else []
+    return land(slot=slot, ring=group.ring) if land is not None else []
 
 
 def pipelined_kloop(
@@ -1522,7 +1520,7 @@ def pipelined_kloop(
         raw expression per iteration measurably spills; a symbolic extent clamps at runtime)."""
         k0_next = BinaryExpression("+", Var(k0), _lit(lag * bk_elems))
         if k_end is not None:
-            end_var = Var(f"{k0}_end")
+            end_var = _end_var(k0, k_end)
             last_k0 = BinaryExpression("*", BinaryExpression("/", BinaryExpression("-", end_var, _lit(1)), _lit(bk_elems)), _lit(bk_elems))
             bound: Expression = end_var
         elif symbolic:
@@ -1547,7 +1545,7 @@ def pipelined_kloop(
         return TernaryExpression(cond=BinaryExpression("<", base, end), if_true=base, if_false=last_k0)
 
     decls: list[Statement] = []
-    pre: list[Statement] = []
+    pre: list[Statement] = _end_bound(k0, k_end)
     for g in groups:
         decls += g.transport.slab_decls(g.ring)
     for g in groups:
@@ -1621,7 +1619,7 @@ def pipelined_kloop(
             # that publishes it. It targets the PREFETCH slot, which no lane is reading, so this one
             # barrier serves both the landing and the slab protection: the group needs no other.
             for g in enders:
-                body += _deposit(g, g.fill_slot, unpack=g.back_edge)
+                body += _deposit(g, g.fill_slot)
             body.append(Sync())  # every reader past the slab(s) before a refill / later prefetch overwrites them
             for g in enders:
                 if g.kind == "kill":
@@ -1638,7 +1636,7 @@ def pipelined_kloop(
         step=_lit(bk_elems),
         body=Body(tuple(body)),
         unroll=False,
-        end=k_end,
+        end=_end_var(k0, k_end),
         seed=seed,
     )
     return decls, [*pre, outer]
@@ -1680,7 +1678,13 @@ def _carried_kloop(
             body += next_loads(0, other)
         body += mmas(this)
     outer = StridedLoop(
-        axis=Axis(name=k0, extent=k_extent), start=_lit(0), step=_lit(bk_elems), body=Body(tuple(body)), unroll=False, end=k_end, seed=seed
+        axis=Axis(name=k0, extent=k_extent),
+        start=_lit(0),
+        step=_lit(bk_elems),
+        body=Body(tuple(body)),
+        unroll=False,
+        end=_end_var(k0, k_end),
+        seed=seed,
     )
     return [*head, outer]
 
@@ -1716,7 +1720,7 @@ def _in_flight_kloop(groups, in_flight, pre, i_expression, fill_k0, k0, k_extent
         step=_lit(bk_elems),
         body=Body(tuple(body)),
         unroll=False,
-        end=k_end,
+        end=_end_var(k0, k_end),
         seed=seed,
     )
     return [*pre, outer]
@@ -1727,7 +1731,7 @@ def _last_chunk(k0: str, bk_elems: int, k_extent, k_end: Expression | None, sett
     waited out INSIDE the loop, not by a wait after it: ptxas (CUDA 12.9) moved the epilogue's
     accumulator reads above a trailing ``wgmma.wait_group 0`` once it had unrolled the loop, and
     an H100 GEMM with a ReLU epilogue stored an eighth of its rows wrong."""
-    bound = Var(f"{k0}_end") if k_end is not None else (k_extent.expression if isinstance(k_extent, Dim) else _lit(k_extent))
+    bound = _end_var(k0, k_end) if k_end is not None else (k_extent.expression if isinstance(k_extent, Dim) else _lit(k_extent))
     more = BinaryExpression("<", BinaryExpression("+", Var(k0), _lit(bk_elems)), bound)
     return Cond(cond=more, body=tuple(settle(1)), else_body=tuple(settle(0)))
 

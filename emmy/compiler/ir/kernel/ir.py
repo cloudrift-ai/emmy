@@ -516,7 +516,12 @@ def _(stmt: TreeHalve, ctx: RenderCtx) -> list[str]:
     pad = _pad(ctx.indent)
     in1 = _pad(ctx.indent + 1)
     in2 = _pad(ctx.indent + 2)
-    t = stmt.tid_var
+
+    def operand(expression: Expression) -> str:
+        text = render_expression(expression, ctx)
+        return text if isinstance(expression, Var) else f"({text})"
+
+    t = operand(stmt.tid_var)
     ty = ctx.type_name(stmt.dtype.name)
     if stmt.barrier_id == 0:
         sync_line = f"{in1}__syncthreads();"
@@ -526,7 +531,7 @@ def _(stmt: TreeHalve, ctx: RenderCtx) -> list[str]:
         sync_line = f'{in1}asm volatile("bar.sync {stmt.barrier_id}, {stmt.barrier_count};\\n" ::: "memory");'
     half = int(stmt.length) // 2
     if stmt.inner is not None:
-        iv, scale = stmt.inner
+        iv, scale = operand(stmt.inner[0]), stmt.inner[1]
         slot, slot_s, root = f"{t} * {scale} + {iv}", f"({t} + s) * {scale} + {iv}", str(iv)
     else:
         slot, slot_s, root = t, f"{t} + s", "0"
@@ -535,7 +540,7 @@ def _(stmt: TreeHalve, ctx: RenderCtx) -> list[str]:
     # names. Captured before those shadows overwrite the flat ssa map, restored after the
     # broadcast so the epilogue's conversions read the live declaration, not the dead shadow.
     outer_dtypes = {st: ctx.ssa_dtypes.get(st) for st in stmt.state}
-    if t == "warp" and stmt.inner is None and stmt.barrier_id == 0 and stmt.length <= 32:
+    if stmt.tid_var == Var("warp") and stmt.inner is None and stmt.barrier_id == 0 and stmt.length <= 32:
         # The hierarchical cross-warp slab holds one partial per warp, so warp 0 alone folds it with a
         # register butterfly: one barrier before the broadcast instead of one per halving step.
         out = [f"{pad}if (warp == 0) {{"]

@@ -711,14 +711,14 @@ Normalization is a canonical form, not a pipeline pass. It runs the same on ever
 every identity digest, and answers to no knob, pin or evidence; nothing under `ir/` imports the pipeline that holds
 them. Every function in the module runs inside `normalize_body`. A body → body transform that something decides — a
 knob the search sets, a pin, a pass stage — is a pipeline pass and lives in the pass file owning that decision, even
-when another pass could reuse it from here. A pass may call a normalization step (kernel lowering's
-`040_split_invariant_divides` owns the hoist it applies); normalization never calls a pass.
+when another pass could reuse it from here. A pass may call a normalization step; normalization never calls a pass.
 `tests/architecture/test_layering.py` holds the module to one exported entry point, to no transform that no
 normalization step calls, and `ir/` to no pipeline import.
 
-Pure `body → body` passes run from `LoopOp.__post_init__` so every
-constructed `LoopOp` (including intermediate fusion results) is
-canonicalized before validation:
+`BodyOp.__post_init__`, the base `LoopOp` and `KernelOp` share, gives the body its form. A `LoopOp` takes
+`normalize_body`, so every constructed `LoopOp` (including intermediate fusion results) is canonicalized before
+validation. A `KernelOp` takes `optimize_body`, the optimizing steps of the normal form without its canonical order
+and names: no identity reads a kernel body, and its listing keeps the order and the names its passes wrote.
 
 While it builds a region, fusion holds a compact body containing scalar `Call` statements. Each references one
 read-only `Subroutine` with explicit coordinate parameters and captured input buffers. A symbolic dim an index names
@@ -829,7 +829,9 @@ from that CSE form. Subroutine boundaries never limit fusion.
   updated value — so the online softmax's rescale reads the old maximum beside the new one; a carried state orders
   nothing within its step, since a `Pre` reads the step before wherever it sits, while the loop that carries the state
   produces it. A scope whose bindings and reads wait on each other has no reading, and normalization refuses it.
-- The driver repeats whole rounds until one leaves the body alone, and refuses a body that does not settle in eight.
+- The driver repeats whole rounds until one leaves the body alone, takes the least by text of forms the rounds
+  alternate between (the crate's `ARCHITECTURE.md` says which bodies do that), and refuses a body that does neither
+  in eight.
   Inside a round, the steps that feed each other run to their own fixed point where they sit: a value placed outside
   its loop can expose a sibling merge, two reads placement made one can leave a predicate constant, and a merge
   exposes values to place, so the merge, the expression simplification and placement run until the first two leave

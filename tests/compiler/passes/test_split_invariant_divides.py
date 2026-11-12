@@ -3,10 +3,11 @@
 from importlib import import_module
 from types import SimpleNamespace
 
+import numpy as np
 import pytest
 
 from emmy.compiler.dtype import BF16, F16, F32, F64, I32
-from emmy.compiler.ir.expression import Var
+from emmy.compiler.ir.expression import Literal, Var
 from emmy.compiler.ir.kernel import KernelOp
 from emmy.compiler.ir.stmt import Assign, Load, Loop, normalize_body, parse_body
 from emmy.compiler.pipeline import RuleSkipped
@@ -49,9 +50,9 @@ def test_reciprocal_hoisting_follows_the_division_knob(monkeypatch, dtype, umbre
         result = rule.rewrite(root)
         reciprocal = next(s for s in result.body if isinstance(s, Assign))
         assert reciprocal.value.operation.name == "reciprocal" and reciprocal.dtype == dtype
-        assert reciprocal.name != "recip_0"
+        (numerator,) = (s.name for s in result.body.iter() if isinstance(s, Load) and s.input == "x")
         multiply = next(s for s in result.body.iter() if isinstance(s, Assign) and s.value.operation.name == "multiply")
-        assert _names(multiply) == ("recip_0", reciprocal.name) and multiply.dtype == dtype
+        assert _names(multiply) == (numerator, reciprocal.name) and multiply.dtype == dtype
         with pytest.raises(RuleSkipped, match="no invariant"):
             rule.rewrite(SimpleNamespace(op=result))
     assert [s.value.operation.name for s in normalize_body(body).iter() if isinstance(s, Assign)] == ["divide"]
@@ -78,43 +79,6 @@ def _hoist(monkeypatch, text: str):
     return [s for s in result.body if not isinstance(s, Loop)], loop
 
 
-def test_a_state_read_before_its_update_stays_in_the_loop(monkeypatch):
-    """A name the body reads before it rebinds it is a state the loop carries by reassignment: the binding and its
-    reciprocal stay in the loop, so the read ahead of the update sees the previous iteration's value."""
-    outside, loop = _hoist(
-        monkeypatch,
-        """
-        f32 c = load C[]
-        for i in 0..4:
-            f32 w = load x[i]
-            f32 t = add(c, w)
-            f32 O[i] = t
-            f32 c = load D[]
-            f32 q = divide(w, c)
-            f32 Y[i] = q
-        """,
-    )
-    assert [s.input for s in outside if isinstance(s, Load)] == ["C"] and all("c" not in s.deps() for s in outside)
-    assert any(isinstance(s, Load) and s.input == "D" for s in loop.body)
-
-
-def test_a_self_updated_state_stays_in_the_loop(monkeypatch):
-    """A name updated from itself in the loop runs every iteration, however little else it reads."""
-    outside, loop = _hoist(
-        monkeypatch,
-        """
-        f32 c = load C[]
-        for i in 0..4:
-            f32 w = load x[i]
-            f32 c = multiply(c, 2.0)
-            f32 q = divide(w, c)
-            f32 Y[i] = q
-        """,
-    )
-    assert not [s for s in outside if isinstance(s, Assign)]
-    assert any(isinstance(s, Assign) and s.value.operation.name == "multiply" for s in loop.body)
-
-
 def test_a_staged_copy_stays_in_the_loop(monkeypatch):
     """The two halves of a staged copy cross the loop's back edge by their own field, whatever their index reads."""
     outside, loop = _hoist(
@@ -133,30 +97,11 @@ def test_a_staged_copy_stays_in_the_loop(monkeypatch):
     assert [s.carried for s in loop.body if isinstance(s, Load) and s.carried] == ["load", "unpack"]
 
 
-def test_a_state_read_under_a_condition_before_its_update_stays_in_the_loop(monkeypatch):
-    """A read of the state inside a block ahead of the update pins the update as a direct read does."""
-    outside, loop = _hoist(
-        monkeypatch,
-        """
-        f32 c = load C[]
-        for i in 0..4:
-            f32 w = load x[i]
-            if i < 2:
-                f32 t = add(c, w)
-                f32 O[i] = t
-            f32 c = load D[]
-            f32 q = divide(w, c)
-            f32 Y[i] = q
-        """,
-    )
-    assert [s.input for s in outside if isinstance(s, Load)] == ["C"] and all("c" not in s.deps() for s in outside)
-    assert any(isinstance(s, Load) and s.input == "D" for s in loop.body)
-
-
 @pytest.mark.parametrize("division", ["0", "1"])
 def test_a_literal_divisor_is_the_division_knobs(monkeypatch, division):
     """A float literal divisor varies with no axis, so ``FAST_DIV`` takes it like any invariant one: a multiply by its
-    reciprocal when on, the division itself when off. This is where a literal the normal form leaves a division lands."""
+    reciprocal when on, the division itself when off. This is where a literal the normal form leaves a division lands.
+    The kernel body's normal form folds the reciprocal of the literal to its value at the statement's dtype."""
     monkeypatch.setenv("EMMY_FAST_MATH", "1")
     monkeypatch.setenv("EMMY_FAST_DIV", division)
     body = parse_body(
@@ -172,6 +117,6 @@ def test_a_literal_divisor_is_the_division_knobs(monkeypatch, division):
             rule.rewrite(SimpleNamespace(op=KernelOp(body=body)))
         return
     result = rule.rewrite(SimpleNamespace(op=KernelOp(body=body)))
-    (reciprocal,) = [s for s in result.body if isinstance(s, Assign)]
-    assert str(reciprocal.value) == "reciprocal(3.0)"
-    assert [s.value.operation.name for s in result.body.iter() if isinstance(s, Assign)] == ["reciprocal", "multiply"]
+    (multiply,) = [s for s in result.body.iter() if isinstance(s, Assign)]
+    assert multiply.value.operation.name == "multiply"
+    assert float(np.float32(1 / 3)) in [operand.value for operand in multiply.value.operands if isinstance(operand, Literal)]

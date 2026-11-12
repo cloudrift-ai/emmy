@@ -774,6 +774,16 @@ pub fn normalize_body<'py>(body: &Bound<'py, PyAny>) -> PyResult<Bound<'py, PyBo
     }
 }
 
+/// The optimizing half of the normal form, with the order and the names as they stand.
+#[pyfunction]
+pub fn optimize_body<'py>(body: &Bound<'py, PyAny>) -> PyResult<Bound<'py, PyBody>> {
+    let optimized = emmy_ir::normalize::optimize_body(&PyBody::from_iterable(body)?).py()?;
+    match body.cast::<PyBody>() {
+        Ok(given) if given.get().body.ptr_eq(&optimized) => Ok(given.clone()),
+        _ => PyBody::wrap(body.py(), &optimized),
+    }
+}
+
 #[pyfunction]
 pub fn prepare_body<'py>(body: &Bound<'py, PyAny>) -> PyResult<Bound<'py, PyBody>> {
     PyBody::wrap(
@@ -931,6 +941,7 @@ pub fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(parse_body, m)?)?;
     m.add_function(wrap_pyfunction!(pretty_body, m)?)?;
     m.add_function(wrap_pyfunction!(normalize_body, m)?)?;
+    m.add_function(wrap_pyfunction!(optimize_body, m)?)?;
     m.add_function(wrap_pyfunction!(prepare_body, m)?)?;
     m.add_function(wrap_pyfunction!(simplify_body, m)?)?;
     m.add_function(wrap_pyfunction!(one_operation_per_definition, m)?)?;

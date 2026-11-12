@@ -31,9 +31,10 @@ _POST_DECOMPOSITION_ROOTS = (
 )
 
 
-# The normalization entry point and the steps a pass may run on its own.
+# The two entry points (the normal form, and its optimizing half) and the steps a pass may run on its own.
 _STEPS = (
     "normalize_body",
+    "optimize_body",
     "one_operation_per_definition",
     "canonical_values",
     "fragment_order",
@@ -145,6 +146,21 @@ def test_normalization_has_one_entry_point() -> None:
     assert modules == ["__init__.py", "glue.py"], "the statement package is its exports and the glue"
     crate = (_REPO_ROOT / "crates" / "emmy-ir" / "src" / "normalize" / "mod.rs").read_text()
     assert "pub fn normalize_body(" in crate
+
+
+def test_a_kernel_body_takes_the_optimizing_half_of_the_normal_form() -> None:
+    """A ``KernelOp`` body takes the optimizing steps of the normal form at construction, in the base it shares with
+    ``LoopOp``, and keeps the names and the order its builder wrote: no identity reads a kernel body, so nothing
+    needs them canonical. A ``LoopOp`` takes the whole normal form."""
+    from emmy.compiler.ir.kernel import KernelOp
+    from emmy.compiler.ir.loop import LoopOp
+    from emmy.compiler.ir.stmt import normalize_body, optimize_body, parse_body
+
+    body = parse_body("late = load X[1]\nearly = load X[0]\nb = add(early, late)\nunused = multiply(early, 3)\nY[0] = b")
+    kernel = KernelOp(body=body, name="k").body
+    assert kernel == optimize_body(body)
+    assert [str(stmt).split(" = ")[0] for stmt in kernel] == ["late", "early", "b", "Y[0]"]
+    assert LoopOp(body=body, name="k").body == normalize_body(body) != kernel
 
 
 _STMT_PACKAGE = "emmy.compiler.ir.stmt"

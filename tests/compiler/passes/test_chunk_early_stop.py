@@ -192,3 +192,16 @@ def test_a_position_read_from_memory_bounds_the_stream_at_runtime() -> None:
     lead = TernaryExpression(cond=BinaryExpression(">", shift, Literal(0, "int")), if_true=shift, if_false=Literal(0, "int"))
     assert _pretty(end.if_true) == _pretty(BinaryExpression("+", ROW_BLOCK.block_end(), lead))
     assert _bounds(_masked_score(select)) == (None, None), "a value the caller does not name as uniform bounds nothing"
+
+
+def test_a_stop_bound_under_a_name_is_read_not_declared_again() -> None:
+    """The staged chunk loop binds its early stop as ``<axis>_end`` ahead of the loop. The loop reads that value: a
+    for-init local of the same spelling, initialised from the name, would read itself."""
+    from emmy.compiler.ir.render import RenderCtx, render_stmt
+    from emmy.compiler.ir.stmt import Body, StridedLoop
+
+    step = Literal(64, "int")
+    loop = StridedLoop(axis=KEY, start=Literal(0, "int"), step=step, body=Body(()), unroll=False, end=Var("a2_end"))
+    assert "for (int a2 = 0; a2 < a2_end; a2 += 64) {" in [line.strip() for line in render_stmt(loop, RenderCtx())]
+    computed = loop.replace(end=BinaryExpression("+", Var("row"), step))
+    assert any("a2_end = row + 64" in line for line in render_stmt(computed, RenderCtx()))

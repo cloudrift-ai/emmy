@@ -104,6 +104,10 @@ describe how a term is used in Emmy; they are not meant to replace a full textbo
 - **Body normalization** — The canonical form every Loop IR body takes at construction and inside every identity
   digest, so two spellings of one program key the same. It answers to no knob, pin or evidence; a transform that
   something decides is a pass, not a normalization step.
+- **Body optimization** — The steps of body normalization that remove work: the exact simplifications, every value
+  computed once at the shallowest scope that holds its operands, unread values dropped. A Kernel IR body takes these
+  alone at construction (`optimize_body`) and keeps the loops, the order and the names its passes wrote, since no
+  identity reads it. Like normalization, it answers to no knob, pin or evidence.
 - **Statement type** — The type a Loop IR statement belongs to: `Loop`, `Load`, `Accum`, … Forty-four are declared in
   one list in the `emmy-ir` crate, fourteen shared and thirty of the Kernel IR; each is a Rust struct and a Python class
   of the same name. A statement is one instance of its type in a body.

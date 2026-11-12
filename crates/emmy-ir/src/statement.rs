@@ -108,13 +108,13 @@ macro_rules! with_statement_types {
                 /// `KernelOp.inputs`/`outputs` side channels. `None` keeps the legacy render-time inference path working for
                 /// tests that construct Loads by hand without dtype.
                 ///
-                /// `carried` marks the two halves of a staged copy that crosses the chunk loop's back edge. The names and their
-                /// packed vector are the ones an earlier Load of the same names DECLARED ahead of the loop. `"load"` re-assigns
-                /// only the packed vector, through the read-only (non-coherent) path — the operand is one the kernel never writes
-                /// — so the loaded chunk survives into the next iteration as the few registers the vector holds. `"unpack"` re-
-                /// assigns the names from that vector and touches no memory; it sits right before the names' consumer. Measured
-                /// on the V100: unpacking at the load instead keeps every element live across the mma stream and ptxas then
-                /// serializes the loads behind it (a 128x128 partial 84 us against 67).
+                /// `carried` marks a staged copy that crosses the chunk loop's back edge. The names and their packed vector are
+                /// the ones an earlier Load of the same names DECLARED ahead of the loop. `"load"` re-assigns the packed vector,
+                /// through the read-only (non-coherent) path — the operand is one the kernel never writes — so the loaded chunk
+                /// survives into the next iteration as the few registers the vector holds. From there a read of one of the
+                /// names reads its lane of the vector where the read stands: nothing spreads the vector into the names.
+                /// Measured on the V100: spreading it at the load keeps every element live across the mma stream and ptxas
+                /// then serializes the loads behind it (a 128x128 partial 84 us against 67).
                 shared Load {PURE | CHECKED} {
                     names: Names [DEFINES],
                     input: Name [BUFFER_READ],
@@ -313,7 +313,7 @@ macro_rules! with_statement_types {
                     step: Expression [EXPRESSION] : Index,
                     body: Body [BODY],
                     unroll: bool [] = false,
-                    end: Option<Expression> [EXPRESSION] : Index = None,
+                    end: Option<Expression> [EXPRESSION | READS] : Index = None,
                     seed: bool [] = true,
                 }
                 /// Conditional block — `if (cond) { body } [else { else_body }]`.
@@ -430,15 +430,15 @@ macro_rules! with_statement_types {
                 /// 64-bit value; indices flatten via `render_index` against the buffer's declared shape (same as `Load` /
                 /// `Write`).
                 kernel CpAsyncCopy {} {
-                    smem: Name [],
-                    smem_index: Exprs [EXPRESSION] : Index,
+                    smem: Name [BUFFER_WRITE],
+                    smem_index: Exprs [EXPRESSION | READS] : Index,
                     src: Name [BUFFER_READ],
-                    src_index: Exprs [EXPRESSION] : Index,
+                    src_index: Exprs [EXPRESSION | READS] : Index,
                     nbytes: i64 [] = 4,
                     swizzle: Name [] = Name::from("NONE"),
-                    lane_index: Option<Exprs> [EXPRESSION] : Index = None,
+                    lane_index: Option<Exprs> [EXPRESSION | READS] : Index = None,
                     lane_rows: i64 [] = 0,
-                    valid: Option<Expression> [EXPRESSION] : Index = None,
+                    valid: Option<Expression> [EXPRESSION | READS] : Index = None,
                 }
                 /// `cp.async.commit_group;` — finalize the preceding cp.async copies issued by this thread into a commit group.
                 /// Pairs with `CpAsyncWait` to wait for that group to drain.
@@ -470,12 +470,12 @@ macro_rules! with_statement_types {
                 /// with `MbarrierArriveExpectTx` (issued immediately before) and `MbarrierWait` (issued by every consumer
                 /// thread).
                 kernel TmaLoad {} {
-                    smem: Name [],
-                    smem_index: Exprs [EXPRESSION] : Index,
+                    smem: Name [BUFFER_WRITE],
+                    smem_index: Exprs [EXPRESSION | READS] : Index,
                     desc: Name [],
-                    coords: Exprs [EXPRESSION] : Index,
+                    coords: Exprs [EXPRESSION | READS] : Index,
                     mbar: Name [],
-                    mbar_slot: Option<Expression> [EXPRESSION] : Index = None,
+                    mbar_slot: Option<Expression> [EXPRESSION | READS] : Index = None,
                 }
                 /// `mbarrier.init.shared.b64 [&mbar[slot]], count;` — one-shot init.
                 ///
@@ -536,15 +536,15 @@ macro_rules! with_statement_types {
                 /// cond is UB).
                 kernel TreeHalve {CHECKED} {
                     bufs: Names [],
-                    state: Names [READS],
+                    state: Names [UPDATES],
                     state_b: Names [LOCAL],
                     combine_states: Stmts [STMTS],
                     length: i64 [],
-                    tid_var: Name [],
+                    tid_var: Expression [EXPRESSION] : Index,
                     dtype: DType [] = DType::F32,
                     barrier_id: i64 [] = 0,
                     barrier_count: Option<i64> [] = None,
-                    inner: Option<(Name, i64)> [] = None,
+                    inner: Option<(Expression, i64)> [EXPRESSION] : Index = None,
                 }
                 /// Cross-thread combine of a (possibly multi-component) monoid state over `length` lanes via `__shfl_xor_sync` —
                 /// a register-only butterfly (no smem, no syncthreads).
@@ -568,7 +568,7 @@ macro_rules! with_statement_types {
                 /// returns exactly the participating lanes — correct for a partial warp, a full warp, AND a non-warp-multiple
                 /// block's partial final warp (where no single static literal mask is correct per warp).
                 kernel WarpShuffle {CHECKED} {
-                    state: Names [READS],
+                    state: Names [UPDATES],
                     state_b: Names [LOCAL],
                     combine_states: Stmts [STMTS],
                     length: i64 [],
@@ -577,7 +577,7 @@ macro_rules! with_statement_types {
                 }
                 /// Broadcast the last lane's state within each aligned lane group, in place.
                 kernel WarpBroadcast {} {
-                    state: Names [READS],
+                    state: Names [UPDATES],
                     length: i64 [],
                 }
                 /// The one per-element pointwise node over an `mma.sync` C fragment — the fragment-tier sibling of the scalar
@@ -675,7 +675,7 @@ macro_rules! with_statement_types {
                 /// k16 drain folds it into a 16-bit fragment and no scale reaches the instruction. These two never appear on one
                 /// operand.
                 kernel BlockScaleLoad {} {
-                    frag: Name [DEFINES],
+                    frag: Name [UPDATES],
                     src_buffer: Name [BUFFER_READ],
                     src_index: Exprs [EXPRESSION] : Index,
                     role: Name [],
@@ -1382,7 +1382,7 @@ mod tests {
         }
         assert_eq!(
             blake3::hash(listing.as_bytes()).to_hex().as_str(),
-            "f3d5e7918178e3202a93f607d93db4b332d5ccdaa6a31e8429b3f012e810b18b",
+            "f186c7d8285bf9b9363d7e57e0713b688fc510be96071ac709885b167e6079b7",
             "{listing}"
         );
     }
