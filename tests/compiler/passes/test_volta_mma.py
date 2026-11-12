@@ -435,24 +435,6 @@ def test_sm70_shallow_k_tile_keeps_store_addresses_near_the_deposit(monkeypatch)
     assert "*reinterpret_cast<uint2*>(&_a_smem[emmy_volta_crosswise(" in src
 
 
-def test_sm70_register_tile_keeps_the_volta_fragment_layout_through_the_reroll(monkeypatch) -> None:
-    """A register tile wide enough to ROLL back into a loop still drains and stores as Volta.
-
-    The rolled form rebuilds every stmt through ``Statement.rewrite``; dropping ``fragment_layout``
-    there re-defaulted the drain to the modern ``ldmatrix`` and the store to the m16n8k16 C map —
-    an uncompilable, wrong-layout sm_70 kernel that the ``f1x1`` cases above cannot see."""
-    _pin(monkeypatch, VOLTA, tile="f2x2", stage="d1/smem")
-    monkeypatch.setenv("EMMY_LOOPIFY", "2")
-    src, _ = _source(_graph(m=32, n=32, k=16), Context(compute_capability=(7, 0)))
-    assert "unsigned _b[2][2]" in src  # the ROLLED fragment family (count > 1)
-    assert "emmy_mma884_load_a_crosswise_pair(_a0, _a1" in src
-    assert "emmy_mma884_load_b_congruous_pair(_b[0], _b[1]" in src
-    assert "emmy_mma_m8n8k4_f16_f32_brow(_c" in src
-    assert "const int _vr = " in src and "const int _vc = " in src  # the m8n8k4 C-fragment store map
-    for forbidden in NEWER_INSTRUCTIONS:
-        assert forbidden not in src
-
-
 def test_sm70_attention_uses_the_volta_fragment_layout(monkeypatch) -> None:
     """The softmax algebra and its P-to-A handoff use all eight Volta C registers and the lane
     butterflies that join one logical row."""

@@ -114,7 +114,6 @@ def test_flat_output_sweep_lowers_with_its_axis_bound(monkeypatch):
         # REDUCE leaves the cross-CTA split fair game — a split's pieces are new kernels with
         # their own sweeps.
         "REDUCE": "",
-        "LOOPIFY": "0",
         "VECTORIZE_LOADS": "1",
     }.items():
         monkeypatch.setenv(f"EMMY_{key}", value)
@@ -144,13 +143,11 @@ def test_flat_output_sweep_lowers_with_its_axis_bound(monkeypatch):
     assert "a4__c" not in source
 
 
-def test_output_sweep_declines_the_warp_tier(monkeypatch):
+def test_output_sweep_declines_the_warp_tier():
     """A matmul whose boundary store adds an output sweep cannot use the straight-line MMA
     fragment epilogue. Unpinned scheduling must keep the bound scalar fallback."""
     import torch
     import torch.nn as nn
-
-    monkeypatch.setenv("EMMY_LOOPIFY", "0")
 
     from emmy.compiler.context import Context
     from emmy.compiler.ir.cuda.ir import CudaOp
@@ -178,14 +175,12 @@ def test_output_sweep_declines_the_warp_tier(monkeypatch):
 
 
 @requires_cuda
-def test_output_sweep_selection_matches_torch(monkeypatch):
+def test_output_sweep_selection_matches_torch():
     import torch
     import torch.nn as nn
 
     from emmy.compiler.backend.cuda.backend import CudaBackend
     from emmy.compiler.trace.torch import trace_module
-
-    monkeypatch.setenv("EMMY_LOOPIFY", "0")
 
     class StackMatmul(nn.Module):
         def forward(self, x, a, b):
@@ -224,7 +219,6 @@ def test_unrealizable_warp_pin_falls_back_to_a_bound_scalar_grid(a_dtype, monkey
         "TILE": "mma_m8n8k4_f16_f32/f4x4/k8",
         "REDUCE": "",
         "STAGE": "",
-        "LOOPIFY": "0",
         "RASTER": "",
     }.items():
         monkeypatch.setenv(f"EMMY_{key}", value)

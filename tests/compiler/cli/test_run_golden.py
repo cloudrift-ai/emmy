@@ -531,7 +531,7 @@ def test_an_env_pin_that_did_not_realize_is_flagged_like_an_ab_pin(monkeypatch):
 
     # A scheduled pin against the unscheduled per-cell tier: absent, not contradicted.
     monkeypatch.setenv("EMMY_TILE", "mma_m8n8k4_f16_f32/f4x4/k8")
-    flag = run_mod.env_pin_refusal([{"LOOPIFY": "0"}])
+    flag = run_mod.env_pin_refusal([{"VECTORIZE_LOADS": "True"}])
     assert flag is not None
     assert "TILE" in flag
     monkeypatch.delenv("EMMY_TILE")
