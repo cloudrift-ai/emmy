@@ -260,8 +260,11 @@ take width 1, with the standard M=1 row, whatever M=1 the trunk serves: every Mo
 for the fixed-slot tier. They take width 256 too, with an M=256 row per any-width lane: a boot with an any-width
 program also compiles that static expert prefill program. Expert twins are traced at the slice of every expert that
 each rank of the config's `--tensor-parallel-size` holds, and on more than one rank the fixed-slot program is also
-traced at the decode bucket's rows (`expert-slots8`), the program a decode step of several rows runs. The audit expects the same split per twin. A static-only release is accepted only when the same env proves that no wider or symbolic path is
-reachable. The resulting working file is measured and verified by `run --golden PATH [--realization NAME] --bench`.
+traced at the decode bucket's rows (`expert-slots8`), the program a decode step of several rows runs, and, for a
+config with an any-width program, the grouped prefill program (`expert-group32x256`), the program a prefill step's
+wider experts run. Both are symbolic by name and take the dynamic rows. The audit expects the same split per twin. A
+static-only release is accepted only when the same env proves that no wider or symbolic path is reachable. The
+resulting working file is measured and verified by `run --golden PATH [--realization NAME] --bench`.
 
 `emmy golden list [PATH…]` prints every measured row — its kernel's time and reference, the schedules tried, the
 whole row's time beside `torch.compile` where a record run timed it, the note — sorted by that ratio, filterable, and as

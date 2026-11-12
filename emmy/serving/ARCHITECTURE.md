@@ -455,7 +455,15 @@ contract lives in [native/ARCHITECTURE.md](native/ARCHITECTURE.md); vLLM remains
   selector and partials pair, and combines every row with one batched score product. The rows past the step keep an
   earlier step's picks and inputs, whose partials no row reads. A step of one row keeps the one-row program, and a
   bucket-width program that does not build leaves the rows to it one at a time. Wider steps, prefill and whole-expert
-  ranks ride the routed dispatch; `combine_routed_experts` stays the parity oracle (`test_gen_runner_gpu` fixed-slot-vs-routed, the
+  ranks ride the routed dispatch. **Grouped prefill tier:** on the same resident sliced experts each group also builds
+  `ExpertFFN.blocks` over the stacked tensors (`x[G, R, H]` and one expert per block `sel[G]` in, `[G, R, H]` out,
+  G = `EXPERT_GROUP`, R = `EXPERT_PREFILL_M`; the twin `expert-group32x256`), one instance per layer sharing one arena.
+  `_launch_experts` sends every expert routed more rows than the decode bucket there: its rows fill blocks of R, the
+  blocks come first in the gathered rows, padded to whole launches of G, and one `run_each` lends each launch its
+  blocks of the rows and of the output and its experts' entries of a selector. One launch set over 32 experts in
+  place of a launch set per expert keeps the card's waves full: on Qwen3.8-Flash-Next's V100 slices, 32 experts of
+  256 rows take about 0.75 ms cold against about 2.7 ms one expert at a time. A tier that does not build leaves the
+  experts to the per-expert tiers. `combine_routed_experts` stays the parity oracle (`test_gen_runner_gpu` fixed-slot-vs-routed, grouped-vs-per-expert, the
   slot-program-vs-direct bit-exactness pin and the paged-vs-resident pin, `test_gen_capture_gpu` captured-step
   live-replay).
   **Per-input feed dtypes:** `_compile_split` binds every plan input at its own traced dtype rather than one blanket
