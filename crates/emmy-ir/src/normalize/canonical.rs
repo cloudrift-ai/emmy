@@ -123,8 +123,12 @@ impl SequentialScope {
             let mut defined: HashMap<Name, Name> = HashMap::new();
             let updates = stmt.updates();
             for name in stmt.defines() {
-                // Storage updated in place keeps the name it has in scope: its field reads and defines it.
-                if updates.contains(&name) && self.ssa.contains_key(&name) {
+                // Storage updated in place keeps the name it has in scope: its field reads and defines it. Where
+                // binders keep their names, so does storage no statement in scope declares (one element of a
+                // fragment family a loop indexes): an update binds nothing.
+                if updates.contains(&name)
+                    && (self.ssa.contains_key(&name) || counters.kept.is_some())
+                {
                     continue;
                 }
                 if stmt.is_pure() && self.owned.contains(&name) {
