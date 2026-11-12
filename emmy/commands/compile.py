@@ -629,6 +629,15 @@ def register_compile_command(subparsers):
             "off the tile IR without paying for a schedule."
         ),
     )
+    parser.add_argument(
+        "--no-readable",
+        action="store_true",
+        help=(
+            "Disable readability-only codegen (LOOPIFY: re-roll the flash mma epilogue into #pragma-unroll "
+            "loops + fuse the softmax chain). ON by default for compile so --ir listings are legible — "
+            "SASS-identical, so it never changes measured perf; tune / run / bench leave it off."
+        ),
+    )
     add_quantize_arg(parser)
     add_diagnostics_args(parser)
     add_nvcc_args(parser)
@@ -649,6 +658,10 @@ def handle_compile(args):
     from emmy.compiler.pipeline.search.db import SearchDB
 
     setup_pipeline_runtime(args)
+    # ``compile`` is the inspection path — default the readability-only codegen ON so ``--ir``
+    # listings are legible. ``--no-readable`` forces it off; otherwise an explicit ``EMMY_READABLE``
+    # env still wins. tune / run / bench never call this, so they stay on production codegen.
+    config.set_readable(False, overwrite=True) if args.no_readable else config.set_readable(True)
     apply_nvcc_flags(args, default="")  # compile uses nvcc default -O3 (representative codegen)
     passes = resolve_passes(args)
     graph, _, bundle = load_or_trace(args)

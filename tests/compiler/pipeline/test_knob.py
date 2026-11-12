@@ -507,8 +507,8 @@ def test_is_off_value(monkeypatch):
 
 
 def test_integer_off_values_use_the_registered_parser():
-    assert is_off_value("SHARED_CARRY", "0x0")
-    assert not is_off_value("SHARED_CARRY", "0x1")
+    assert is_off_value("LOOPIFY", "0x0")
+    assert not is_off_value("LOOPIFY", "0x4")
 
 
 def test_exact_site_featurizes_consistently():

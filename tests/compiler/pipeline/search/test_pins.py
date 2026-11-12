@@ -122,17 +122,17 @@ def test_unpinned_decisions_withdraws_live_decision_pins_and_restores_them(monke
     monkeypatch.setenv(config.knob_var("WORK"), "w4x1")
     monkeypatch.setenv(config.knob_var("PLACE"), "cut")
     monkeypatch.setenv(config.knob_var("FAST_MATH"), "1")
-    monkeypatch.setenv(config.KNOBS, "STAGE@map.1/twist=d2/smem-tma,FAST_MATH=1,VECTORIZE_LOADS=1")
+    monkeypatch.setenv(config.KNOBS, "STAGE@map.1/twist=d2/smem-tma,FAST_MATH=1,LOOPIFY=1")
     assert family_pins("TILE") and family_pins("WORK")
     with unpinned_decisions():
         assert scoped not in os.environ and config.knob_var("WORK") not in os.environ and config.knob_var("PLACE") not in os.environ
         assert not family_pins("TILE") and not family_pins("WORK") and not family_pins("STAGE")
         assert os.environ[config.knob_var("FAST_MATH")] == "1"
-        assert os.environ[config.KNOBS] == "FAST_MATH=1,VECTORIZE_LOADS=1"
+        assert os.environ[config.KNOBS] == "FAST_MATH=1,LOOPIFY=1"
     assert os.environ[scoped] == "mma_m16n8k16_f16_f32/f1x8/k4"
     assert os.environ[config.knob_var("WORK")] == "w4x1"
     assert os.environ[config.knob_var("PLACE")] == "cut"
-    assert os.environ[config.KNOBS] == "STAGE@map.1/twist=d2/smem-tma,FAST_MATH=1,VECTORIZE_LOADS=1"
+    assert os.environ[config.KNOBS] == "STAGE@map.1/twist=d2/smem-tma,FAST_MATH=1,LOOPIFY=1"
 
 
 def test_a_family_pinned_off_is_realized_by_a_kernel_that_never_stamps_it() -> None:
@@ -140,7 +140,7 @@ def test_a_family_pinned_off_is_realized_by_a_kernel_that_never_stamps_it() -> N
     at all. That is the same schedule, not a miss: replaying such a row of the Gemma 4 inventory (an RMS norm, a
     QK norm) reported ``TILE= realized (unset)`` and left the row unbenched. A kernel that DECIDED the family
     still contradicts the OFF pin."""
-    per_cell = [{"WORK": "", "REDUCE": "coop"}]
+    per_cell = [{"WORK": "", "REDUCE": "coop", "LOOPIFY": "0"}]
     assert unreproducible_pin_flag({"TILE": "", "STAGE": "", "REDUCE": "coop"}, per_cell) is None
 
     tiled = [{"WORK": "w2x2", "TILE": "mma_m16n8k16_f16_f32/f2x2/k2", "STAGE": "d2/smem-tma"}]

@@ -241,7 +241,7 @@ def test_deferred_states_offer_and_lower_the_requested_reduction(count, reduce, 
     tile = _deferred_softmax_merge(count)
     assert merges_partition(tile)
     graph = _deferred_merge_graph(tile)
-    row = {"WORK": work, "REDUCE": reduce, "RASTER": "", "PLACE": "fuse"}
+    row = {"WORK": work, "REDUCE": reduce, "RASTER": "", "PLACE": "fuse", "LOOPIFY": "0"}
     with pinned_knobs(row):
         compiled = Pipeline.build(CUDA_PASSES).run(graph, ctx=Context.from_target((8, 0)), db=None)
     (kernel,) = [node.op for node in compiled.nodes.values() if isinstance(node.op, CudaOp)]

@@ -780,7 +780,7 @@ retirement is logged at WARNING with the rejection reason.
 predicted latency, which can rank a tile that fails `validate(ctx)` (smem / thread budget) first, and greedy
 benches nothing, so it cannot find out by trying. So when a deterministic compile leaves a node un-lowered, the
 strategy blocklists the `tile_identity` of the pick the resolve made at that node — read off the trace, never off
-the terminal node's own knob row, which a kernel-stage pass can stamp with a policy knob no schedule
+the terminal node's own knob row, which a kernel-stage pass can stamp with a policy knob (`LOOPIFY`) no schedule
 leaf spells — and re-resolves: `greedy_decide(blocked=…)` drops the matching leaf and picks the next-best. This is
 bounded by `_MAX_GREEDY_RETRIES`.
 When the retry budget runs out, or the retries have nothing left to block, with the node still un-lowered (a prior

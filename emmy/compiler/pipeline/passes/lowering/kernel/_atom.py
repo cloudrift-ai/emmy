@@ -3495,7 +3495,8 @@ class _FlashOps(_MmaOps):
     def _score_steps(self) -> int:
         """The score's atom-K steps within one chunk. They go STRAIGHT-LINE, which is what lets the
         query hoist hold a fragment per step — a rolled loop would have nowhere to keep them.
-        ``_chunk_refusal`` gates the symbolic extent that has no step count."""
+        ``_chunk_refusal`` gates the symbolic extent that has no step count (``LOOPIFY`` re-rolls
+        the run for a readable listing)."""
         return self._score_k.extent.as_static() // self.tile.atom.atom_k
 
     def _query(self, offset, mn) -> list[Statement]:

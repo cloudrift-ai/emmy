@@ -175,7 +175,7 @@ def test_scalar_binding_removes_only_its_cuda_argument(monkeypatch):
     )
     graph.add_node(kernel, ["constant", "x"], Tensor("out", (4,), F32), node_id="out")
     graph.outputs = ["out"]
-    with pinned_knobs({"PLACE": "fuse", "WORK": "t32", "REDUCE": ""}):
+    with pinned_knobs({"PLACE": "fuse", "WORK": "t32", "REDUCE": "", "LOOPIFY": 0}):
         lowered = Pipeline.build(CUDA_PASSES).run(graph, ctx=Context.from_target((12, 0)))
     (cuda,) = [node.op for node in lowered.nodes.values() if isinstance(node.op, CudaOp)]
     assert cuda.arg_order == ("x", "out")

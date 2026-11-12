@@ -669,7 +669,7 @@ shuffle geometry.
 Two of the tier's registers are held ACROSS the chunk loop rather than per chunk. The QUERY fragments are one: their
 gmem index never carries the carrier's key, so reading them inside the loop re-issued the same loads once per chunk
 (64 times on a 4096-key stream). They ride hoisted instead, one A fragment per score-K step, which is why those steps
-go straight-line — a rolled loop has nowhere to keep them. The
+go straight-line — a rolled loop has nowhere to keep them, and `LOOPIFY` re-rolls the run for a readable listing. The
 CARRIER is the other, and it is f32 whatever the expectation's cell accumulates in: on the reduced-accumulate cell the
 expectation's `mma.sync` targets a packed f16 fragment and one `FragmentPromote` per chunk folds it here, so the mma
 chain runs at the consumer-die full rate while the running sum stays f32. While the row's partials fit the thread's
@@ -906,5 +906,26 @@ through `__expf`, promoting half inputs and rounding back afterward, and records
 reaches every expression a statement holds, so it includes the statements a field carries that are not a body: a
 generated `RegStore` epilogue and a cooperative combine's merge (`WarpShuffle` / `TreeHalve` `combine_states`, the
 online softmax's rescale factors). Host evaluation continues to use
-`exp`; only CUDA evaluation uses the approximate intrinsic. `FragmentApply` renders as one element
-`#pragma unroll for (_e)` loop (the ROW operand as the row-split ternary `_e < 2 ? row0 : row1`).
+`exp`; only CUDA evaluation uses the approximate intrinsic. `100_loopify` remains off by default (`EMMY_LOOPIFY=N`), a
+generic **loop re-roller** iterated to a fixpoint. Loopify folds a maximal run of ≥ `N` congruent per-fragment
+statements — an mma body's per-fragment epilogue (`FragmentApply`), its load+mma pairs, the fragment `RegStore`s, the
+A-fragment loads, a nested contraction's K-chunks × N-atoms — into `#pragma unroll` `StridedLoop`s over `_r{depth}`. The
+matcher (`_reroll`) is node-type-agnostic: a recursive structural walk over each candidate window's Statement/Expression
+trees returns a template ONLY when every per-iteration difference is a **contiguous fragment family** index (`O_i_f0 …
+O_i_f{N-1}` or an already-arrayed `fam[0] …`, arrayed into one `count`-arrayed `RegFragment` decl and indexed `fam[_r]`)
+or an **affine address offset** — and it peels a trailing `± Literal` off each index Expression so a codegen-**folded**
+`kv0` (really `kv0 + 0*8`) reconciles with a sibling's `kv0 + 8`. A family that is not `RegFragment`-declared (a scalar
+carrier / an inline-declared fragment) bails the run. Iterating to a fixpoint (fresh `_r{depth}` per pass;
+already-arrayed `fam[i]` refs re-parsed) turns nested runs into nested loops: pass k re-rolls the inner N-atoms, pass
+k+1 sees the resulting sibling loops as a run and wraps them. Correctness is structural: an unrolled congruent run
+executes in the SAME order as the original straight-line statements, so a template that reproduces every window is
+byte-identical after nvcc unrolls — identical SASS. Only the family's `RegFragment` decl carries its dtype, so a render
+that needs a fragment reference's dtype reads it off the stem (`kernel.ir.frag_dtype`) — an arrayed member is `fam[_r]`,
+which no declaration names. A readability lever for `--ir cuda` inspection, `N=4` the recommended sweet spot (skips the
+2-long runs). Two orthogonal readability transforms ride alongside: `FragmentApply` **always** renders as one element
+`#pragma unroll for (_e)` loop (the ROW operand as the row-split ternary `_e < 2 ? row0 : row1`), so a re-rolled family
+nests as `for (_r) { for (_e) … }`; and pin-gated **chain fusion** (`_fuse_chains`, before the re-roll) folds a
+`FragmentApply` immediately consumed by an in-place unary `FragmentApply` on the same fragment (`p <- s − m` then `p *=
+exp(p)`) into one node carrying the tail on its `post` field, so the softmax renders `p[_e] = expf(s[_e] − m)`. NOTE:
+the whole-body SSA rename this pass runs is why the shared `_rewrite` `Tile` handler must carry `block_threads` /
+`aux_threads` through verbatim — dropping them silently over-launches a cooperative tile.
