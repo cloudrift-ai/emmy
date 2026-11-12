@@ -17,7 +17,7 @@ use std::sync::Arc;
 
 use crate::axis::Axis;
 use crate::body::{Body, Subroutine, exposed_defines, free_names, loop_parts, unique};
-use crate::expr::{Expr, ExprClass, Expression};
+use crate::expr::{Builtin, Expr, ExprClass, Expression, Interval};
 use crate::field::{AxisRef, Rewriter, SubroutineRef, Visitor};
 use crate::statement::*;
 use crate::{Error, Name, Result};
@@ -534,6 +534,28 @@ impl Statement {
         visitor.0
     }
 
+    /// The ranges this statement states for the built-ins, in its own expressions and in its child bodies: a `Grid`
+    /// launches `ceil(cells / block_threads)` CTAs of `block_threads + aux_threads` threads. A symbolic cell count
+    /// leaves the CTA index what the hardware allows.
+    pub fn launch_ranges(&self) -> Vec<(Builtin, Interval)> {
+        let Statement::Grid(grid) = self else {
+            return Vec::new();
+        };
+        let threads = i128::from(grid.block_threads);
+        let mut ranges = vec![(
+            Builtin::ThreadIdxX,
+            Interval::new(0, threads + i128::from(grid.aux_threads) - 1),
+        )];
+        let cells = grid.axes.iter().try_fold(1i128, |cells, axis| {
+            Some(cells * i128::from(axis.extent.as_static()?))
+        });
+        if let Some(cells) = cells {
+            let ctas = ((cells + threads - 1) / threads).max(1);
+            ranges.push((Builtin::BlockIdxX, Interval::new(0, ctas - 1)));
+        }
+        ranges
+    }
+
     /// The names this statement brings into scope for its child bodies.
     pub fn binds_axes(&self) -> Vec<Name> {
         self.bound_axes().iter().map(|axis| axis.name).collect()
@@ -943,6 +965,7 @@ mod tests {
         "Smem(name=s, extents=(16, 16))",
         "Sync",
         "Tile(axes=(m in 0..4, n in 0..8), raster_axes=(m, n), raster_group=2):\n    x = load a[m, n]",
+        "Grid(axes=(a in 0..3, b in 0..64), decode=(block_idx.x / 2, thread_idx.x), block_threads=64, aux_threads=32):\n    if block_idx.x * 64 + thread_idx.x < 192:\n        y[a, b] = a",
         "CpAsyncCopy(smem=s, smem_index=(i, j), src=a, src_index=(i, j), lane_index=(i, j), valid=i < 2)",
         "CpAsyncCommit",
         "CpAsyncWait(group=1)",

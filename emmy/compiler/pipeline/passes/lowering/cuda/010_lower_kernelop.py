@@ -1,9 +1,9 @@
 """Lower each ``KernelOp`` node to a ``CudaOp``.
 
 Renders the ``KernelOp`` body to a ``__global__`` source string and derives the
-launch geometry. The body is a single :class:`Tile` (the thread-grid decode), so the grid
-is sized from the tile's element count over the block (``_BLOCK_SIZE`` scalar tier, the
-cooperative ``block_threads`` otherwise). A **symbolic reduce / output-sweep axis** (a
+launch geometry. The body is a single :class:`Grid` (``007_decode_grid`` decoded the tile into it), so the
+grid is sized from its element count over its block (``_BLOCK_SIZE`` scalar tier, the cooperative ``block_threads``
+otherwise). A **symbolic reduce / output-sweep axis** (a
 dynamic ``seq_len`` inside the body's loops) becomes a runtime ``int`` arg: the kernel
 signature gains one ``int <name>`` per symbolic ``Dim`` and the launch resolves it from the
 input array shapes (``sym_values`` → ``runtime_args``). The free (grid) axes are static
@@ -17,9 +17,9 @@ from emmy.compiler.graph import Node
 from emmy.compiler.ir.axis import Axis
 from emmy.compiler.ir.base import is_f4_pair_table
 from emmy.compiler.ir.cuda import CudaOp, TmaDescMeta
-from emmy.compiler.ir.kernel import KernelOp, Tile
-from emmy.compiler.ir.kernel.ir import TmaDescriptor, tile_is_static, tile_n_dim, tile_n_elements
-from emmy.compiler.ir.kernel.render import _BLOCK_SIZE, render_kernelop
+from emmy.compiler.ir.kernel import KernelOp
+from emmy.compiler.ir.kernel.ir import Grid, TmaDescriptor, tile_is_static, tile_n_dim, tile_n_elements
+from emmy.compiler.ir.kernel.render import render_kernelop
 from emmy.compiler.ir.pure.fold import EXTENTS
 from emmy.compiler.ir.stmt import Load, Write, ZeroPrologue
 from emmy.compiler.pipeline import Match, Pattern, RuleSkipped
@@ -56,7 +56,7 @@ def _symbolic_runtime_args(kernel: KernelOp) -> tuple[str, ...]:
                 shape_syms |= d.expression.free_vars()
     seen: dict[str, None] = {}
     for s in kernel.body.iter():
-        axes = s.axes if isinstance(s, Tile) else ((s.axis,) if hasattr(s, "axis") else ())
+        axes = s.axes if isinstance(s, Grid) else ((s.axis,) if hasattr(s, "axis") else ())
         for ax in axes:
             if isinstance(ax, Axis) and not ax.extent.is_static:
                 for nm in ax.extent.expression.free_vars():
@@ -70,10 +70,10 @@ def _symbolic_runtime_args(kernel: KernelOp) -> tuple[str, ...]:
 
 def rewrite(match: Match, root: Node) -> CudaOp | None:
     kernel: KernelOp = root.op
-    tiles = [s for s in kernel.body if isinstance(s, Tile)]
-    if len(tiles) != 1:
-        raise RuleSkipped("only single-Tile KernelOps lower so far")
-    (tile,) = tiles
+    grids = [s for s in kernel.body if isinstance(s, Grid)]
+    if len(grids) != 1:
+        raise RuleSkipped("only single-grid KernelOps lower so far")
+    (grid_stmt,) = grids
 
     # The kernel function name doubles as the CudaOp's launch name — keep them
     # identical. Loop naming always stamps a label, but a split piece is unnamed.
@@ -118,18 +118,18 @@ def rewrite(match: Match, root: Node) -> CudaOp | None:
 
     # A cooperative tile fixes the per-CTA thread count (``coop · ∏block-cells``): one CTA
     # per output-cell group, ``blockDim = block_threads``, ``gridDim = N / block_threads``
-    # (the linear ``_gid`` decode groups ``block_threads`` consecutive cells per CTA). The
-    # scalar tier is one thread per cell over the fixed ``_BLOCK_SIZE`` block. A warp-specialized
-    # producer band (``aux_threads``) widens ``blockDim`` only — the grid still covers the cells.
-    cells = tile.block_threads if tile.block_threads is not None else _BLOCK_SIZE
-    if tile_is_static(tile):
-        n = tile_n_elements(tile)
+    # (the decode groups ``block_threads`` consecutive cells per CTA). The scalar tier is one
+    # thread per cell over the fixed ``_BLOCK_SIZE`` block. A warp-specialized producer band
+    # (``aux_threads``) widens ``blockDim`` only — the grid still covers the cells.
+    cells = grid_stmt.block_threads
+    if tile_is_static(grid_stmt):
+        n = tile_n_elements(grid_stmt)
         grid = (((n + cells - 1) // cells,), (1,), (1,))
     else:
         # Symbolic grid (a dynamic free axis): ``ceil(∏extents / blockDim)`` CTAs, the symbolic
         # factor resolved from ``sym_values`` at launch (the ``Expression`` grid factor).
-        grid = ((tile_n_dim(tile).ceil_div(cells).expression,), (1,), (1,))
-    block = ((cells + tile.aux_threads,), (1,), (1,))
+        grid = ((tile_n_dim(grid_stmt).ceil_div(cells).expression,), (1,), (1,))
+    block = ((cells + grid_stmt.aux_threads,), (1,), (1,))
     # Signature / arg order: buffers, then the TMA descriptor params (bound to the
     # launch-encoded ``CUtensorMap`` device arrays), then the symbolic ``int`` args
     # (tail-appended in ``_launch``) — matching ``render_kernelop``'s param layout.
