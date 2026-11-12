@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import re
+
 import numpy as np
 import pytest
 import torch
@@ -32,7 +34,7 @@ def _chunk_loop(stage: str) -> str:
     with pinned_knobs(pins):
         lowered = Pipeline.build(CUDA_PASSES).run(graph, ctx=Context.from_target((12, 0)))
     (source,) = [node.op.kernel_source for node in lowered.nodes.values() if isinstance(node.op, CudaOp)]
-    return source[source.index("for (int a2__ck") :]
+    return source[re.search(r"for \(int (\w+) = 0; \1 < 512; \1 \+= 64\)", source).start() :]
 
 
 def test_a_tma_staged_chunk_loop_gives_the_key_and_the_value_their_own_barrier() -> None:
@@ -58,7 +60,7 @@ def test_a_single_slot_ring_refills_each_operand_at_its_own_kill_point() -> None
     copy overlaps the softmax and the expectation — and the value's after the expectation: the
     single-slab schedule FlashAttention-2 runs, which one group spanning the body cannot give."""
     loop = _chunk_loop("d1/smem-async")
-    score = loop.index("emmy_mma_m16n8k16_f16_f32(_s")  # the score's first mma
+    score = loop.index("emmy_mma_m16n8k16_f16_f32(")  # the score's first mma: the first of the chunk
     key_refill = loop.index("emmy_cp_async_cg(&_a_smem")  # the key slab's next-chunk fill
     value_drain = loop.index("&_b_smem[")  # the expectation's first read of the value slab
     value_refill = loop.index("emmy_cp_async_cg(&_b_smem")

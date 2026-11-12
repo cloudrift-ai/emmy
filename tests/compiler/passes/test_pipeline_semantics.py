@@ -11,6 +11,8 @@ outputs — this validates the full decomposition+optimization+fusion chain
 preserves semantics without needing a GPU.
 """
 
+import re
+
 import numpy as np
 
 from emmy.compiler.backend.numpy import NumpyBackend
@@ -239,10 +241,9 @@ def test_scan_after_pointwise_keeps_the_write_inside_its_reduce_loop():
         node.op.kernel_source for node in lowered.nodes.values() if isinstance(node.op, CudaOp) and "out[" in node.op.kernel_source
     )
     lines = source.splitlines()
-    update = next(i for i, line in enumerate(lines) if "acc0 +=" in line)
-    # The stored value is the observer's fresh name (``acc0__obs``), never the raw accumulator —
-    # the boundary distinguishes a streamed store from a post-fold store by exactly that name.
-    write = next(i for i, line in enumerate(lines) if line.lstrip().startswith("out[") and " = acc0__obs;" in line)
+    update, acc = next((i, m.group(1)) for i, line in enumerate(lines) if (m := re.match(r"\s*(\w+) \+= ", line)))
+    # The kernel body's normal form drops the observer's copy of the accumulator: the store reads the updated value.
+    write = next(i for i, line in enumerate(lines) if line.lstrip().startswith("out[") and line.rstrip().endswith(f" = {acc};"))
     loop_open = max(i for i in range(update) if lines[i].lstrip().startswith("for ("))
     loop_indent = len(lines[loop_open]) - len(lines[loop_open].lstrip())
     loop_close = next(

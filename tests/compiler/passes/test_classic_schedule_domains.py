@@ -11,6 +11,7 @@ from emmy.compiler.dtype import F16, F32
 from emmy.compiler.graph import Tensor
 from emmy.compiler.ir.axis import Axis, Window
 from emmy.compiler.ir.elementwise import ElementwiseImpl
+from emmy.compiler.ir.expression import Var
 from emmy.compiler.ir.schedule import Reduce, ScheduleContext, ScheduleRefused, Stage, Tile, Work
 from emmy.compiler.ir.schedule import schedule as advance_schedule
 from emmy.compiler.ir.schedule.catalog import coop_reduce_moves, scalar_tile_moves
@@ -168,7 +169,7 @@ def test_eight_output_lanes_are_offered_on_volta_and_lower_with_their_own_grid()
         bound = factorize(realized, root=None)
         assert tuple(axis.extent.as_static() for axis in bound.axes[1:]) == expected
         (tree,) = [stmt for stmt in bound.body.iter() if isinstance(stmt, TreeHalve)]
-        assert tree.inner == ("n_ln", expected[-1])
+        assert tree.inner == (Var("n_ln"), expected[-1])
 
     tile = _matmul(Axis("m", 1), Axis("n", 1024), Axis("k", 2048))
     for cap in ((8, 0), (12, 0)):

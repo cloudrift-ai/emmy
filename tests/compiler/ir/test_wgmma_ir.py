@@ -15,6 +15,7 @@ from emmy.compiler.ir.kernel.ir import (
     Literal,
     MmaSyncPtx,
     RegFragment,
+    RegStore,
     Smem,
     Var,
     WgmmaCommit,
@@ -26,7 +27,7 @@ from emmy.compiler.ir.kernel.ir import (
 )
 from emmy.compiler.ir.kernel.render import _WGMMA_PRELUDE, _wgmma_prelude, render_kernelop
 from emmy.compiler.ir.render import RenderCtx, render_stmt
-from emmy.compiler.ir.stmt import Body, parse_body
+from emmy.compiler.ir.stmt import Body
 
 _NS = (64, 128, 256)
 _DTYPES = ("f16", "bf16")
@@ -147,8 +148,10 @@ def _driver() -> str:
     """One kernel issuing every wrapper form from IR statements — the compile-only stand-in for the
     lowering's leaf: a 128B-swizzled slab read through two descriptors, the N/8 C fragments each
     cell accumulates into, the register-form A fragment, the fence / commit / wait around them, and
-    a store of every accumulator register after the wait so no cell is dead. The first cell starts
-    the accumulator (``scale_d=0``); every later one accumulates, so ptxas keeps the whole chain."""
+    a store of every accumulator fragment after the wait so no cell is dead. The first cell starts
+    the accumulator (``scale_d=0``); every later one accumulates, so ptxas keeps the whole chain.
+    The stores are ``RegStore`` statements, which name the fragment they read: normalization renames
+    the fragments, so a store must not spell a fragment's name inside other text."""
     forms = [(n, ab, form) for n in _NS for ab in _DTYPES for form in _FORMS]
     stmts = [
         Smem(name="K_s", extents=(64 * 64,), dtype="unsigned short", align=1024),
@@ -160,9 +163,12 @@ def _driver() -> str:
         *(_cell(n, ab, form, scale_d=int(i > 0), trans_b=int(ab == "f16")) for i, (n, ab, form) in enumerate(forms)),
         WgmmaCommit(),
         WgmmaWait(),
-        *parse_body("\n".join(f"out[{4 * j + k}] = `c{j}[{k}]`" for j in range(256 // 8) for k in range(4))),
+        *(
+            RegStore(dst_buffer="out", dst_index=(Literal(0, "int"), Literal(8 * j, "int")), frag=f"c{j}", shape=(16, 8, 16))
+            for j in range(256 // 8)
+        ),
     ]
-    return render_kernelop(KernelOp(body=Body(tuple(stmts)), name="k_wgmma_probe"), shapes={"out": (128,)})
+    return render_kernelop(KernelOp(body=Body(tuple(stmts)), name="k_wgmma_probe"), shapes={"out": (16, 256)})
 
 
 @pytest.mark.skipif(nvcc.nvcc_path() is None, reason="nvcc unavailable")

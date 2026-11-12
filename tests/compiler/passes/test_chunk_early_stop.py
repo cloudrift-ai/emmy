@@ -3,6 +3,7 @@ CTA's diagonal, a banded one starts at its near edge, and the bound is read off 
 
 from __future__ import annotations
 
+import re
 from dataclasses import replace
 
 import pytest
@@ -139,8 +140,13 @@ def _sources(code: str, window: int | None = None) -> list[str]:
     return [node.op.kernel_source for node in lowered.nodes.values() if isinstance(node.op, CudaOp)]
 
 
-def _chunk_loop(source: str) -> str:
-    return next(line.strip() for line in source.splitlines() if "for (int " in line and "__ck" in line)
+def _chunk_loop(source: str) -> tuple[str, str] | None:
+    """The chunk loop's counter and header line: the loop that steps by the tile's 32-key chunk. A kernel body is in
+    normal form, so the counter carries the normal form's name, never a ``__ck`` suffix."""
+    for line in source.splitlines():
+        if match := re.search(r"for \(int (\w+) = .*; \1 \+= 32\) \{", line):
+            return match.group(1), line.strip()
+    return None
 
 
 @pytest.mark.parametrize(
@@ -162,10 +168,10 @@ def _chunk_loop(source: str) -> str:
 )
 def test_the_emitted_chunk_loop_carries_the_bounds_only_where_they_can_shorten_the_kernel(code, window, starts, stops, why) -> None:
     sources = _sources(code, window)
-    assert len(sources) == 1 and "__ck" in sources[0], "one fused kernel with a chunk loop"
-    loop = _chunk_loop(sources[0])
-    assert ("__ck_end" in loop) is stops, f"{why}: {loop}"
-    assert ("__ck = 0" not in loop) is starts, f"{why}: {loop}"
+    assert len(sources) == 1 and _chunk_loop(sources[0]), "one fused kernel with a chunk loop"
+    counter, loop = _chunk_loop(sources[0])
+    assert (f"{counter}_end" in loop) is stops, f"{why}: {loop}"
+    assert (f"{counter} = 0" not in loop) is starts, f"{why}: {loop}"
 
 
 def test_the_launch_count_is_the_lead_extents_times_the_block_counts() -> None:
