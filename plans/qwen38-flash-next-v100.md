@@ -11,17 +11,17 @@ Emmy serving the model correctly, step 5 closes the speed gap, and step 6 releas
 Written 2026-10-13, revised the same day after a review and after the owner fixed the goal. Each result is written
 under its step. Numbers marked "upstream" are 1Cat-vLLM's own reports.
 
-**Where it stands (2026-11-03).** Steps 1 to 3 are done, and so are the nine items of step 4. Step 4's gate ran on
-2026-11-02: two boots give the same text and the accuracy sets pass, but the correctness limits are not met, and the
-fork does not meet them against itself either. Step 5's done gate ran once against the fork and fails on every point:
-Emmy is 2.0-2.5x slower to the first token, 1.67x slower per token at one request, gives 0.58-0.68x the fork's total
-output, and runs out of memory under the 3 GiB per card margin. Item 3 under "Next" ran its two parts on 2026-11-03:
-Emmy now passes the margin, and one decode round gave 1.8% more output at eight requests and nothing measurable at
-one. The next lever, pre and post across ranks, is planned under step 5: its part 1 (the shared expert sliced across
-ranks) ran on 2026-11-04 for 2.6% faster decode at one request and 2.9% more output at eight. Its part 2 (the
-mixers' decode work split) stopped at its gate on 2026-11-05; instead pre8's down rows took the cross-CTA split that
-post8's already had, for 3.8% faster decode at one request and 1.8% more output at eight. The minimums in step 2 and
-Qwen's license are still open with the owner.
+**Where it stands (2026-11-11).** Steps 1 to 4 are done; step 5's done gate is not met. Step 4's gate (2026-11-02):
+two boots give the same text and the accuracy sets pass, but the correctness limits are not met, and the fork does
+not meet them against itself either. Since the done gate's first run (2026-11-03), step 5 brought Emmy under the
+3 GiB per card margin, sliced the shared expert across ranks, split pre8's down rows across blocks, measured where
+the first-token and eight-request gaps sit (2026-11-07), ran the eight requests' routed experts in one launch (15%
+more output), and found the host time of a decode step equal on both sides. On 2026-11-11 the owner turned async
+scheduling on, on both sides. Against the async fork, Emmy is 1.8-2.5x slower to the first token, 1.74x slower per
+token at one request, and gives 0.64-0.68x the fork's output at four and eight requests. Async doubles the first
+token at the full context on both sides, which a larger key/value pool avoids at a cost to the memory margin: the
+owner's call (step 5). The next round is the prefill experts. The minimums in step 2 and Qwen's license are still
+open with the owner, who plans as if the license were granted.
 
 ## What we know
 
@@ -248,8 +248,15 @@ and its baseline and profile are in the results.
 **Result, 2026-10-15.** The shape is the RadixArk NVFP4 checkpoint at TP4 with MTP off, four replicas per node, a
 131,072 context, the KV pool pinned at 2.5 GiB per card (194,016 tokens), a 4,096-token prefill step, up to eight
 sequences, prefix caching, the n-gram table in pinned host memory and history on the cards. It meets every proposed
-minimum with all four replicas running and passes the step 1 accuracy sets. The baseline is the experiment
-`experiments/Qwen3.8-Flash-Next/fork_baseline_v100_sxm3`. The minimums still wait for the owner's confirmation.
+minimum with all four replicas running and passes the step 1 accuracy sets. The minimums still wait for the owner's
+confirmation.
+
+**Async scheduling on, 2026-11-11.** The owner turned vLLM's async scheduling on in this shape, on both sides: the
+host prepares the next step while the GPU runs the current one. The shape above ran it off, as the fork's release
+example does; with MTP off it is vLLM's default, so the recipe and the experiments now just drop
+`--no-async-scheduling`. The production baseline is the experiment
+`experiments/Qwen3.8-Flash-Next/fork_baseline_v100_sxm3`, re-run with async on the step 3 image (result below the
+synchronous rows). Its first run, the synchronous numbers below, stays as history.
 
 - **The grid, one boot per cell by hand.** `emmy bench` deploys every row cold, about 9.5 minutes each, so the full
   grid would have cost about 56 boots; the screen took one boot per cell and the experiment records only the chosen
@@ -285,7 +292,7 @@ minimum with all four replicas running and passes the step 1 accuracy sets. The 
 - **Two boots give the same text.** Six greedy prompts came back identical from the four replicas.
 - **Accuracy on this shape.** GSM8K 124 of 128, none at the cap; acceptance cases 27 of 28 in each mode (the known
   arithmetic miss); every long-document code found, 129 of 129 without thinking and 128 of 128 with it.
-- **Baseline, one replica, repeats 2-4 of 4:**
+- **Baseline, one replica, repeats 2-4 of 4, synchronous (the first run, history):**
 
   | Load | First token | Per output token | Total output |
   | --- | ---: | ---: | ---: |
@@ -299,6 +306,24 @@ minimum with all four replicas running and passes the step 1 accuracy sets. The 
   the fused hyper-connection gathers) 2.7 ms, MoE 1.9 ms, hyper-connection local work 0.9 ms, sparse attention
   0.8 ms, Gated DeltaNet 0.5 ms. A 3,920-token prefill chunk takes about 0.6 s, led by dense GEMMs and the NVFP4
   expert GEMMs; prefill exchanges go over the NCCL ring, not the fast path.
+- **Baseline with async scheduling (2026-11-11), the production baseline.** The same experiment and protocol on the
+  step 3 image; repeats 2-4 of 4:
+
+  | Load | First token | Per output token | Total output |
+  | --- | ---: | ---: | ---: |
+  | 1 request, 1K / 8K / 32K / 130K prompt | 0.47-0.52 / 1.59-1.60 / 6.13-6.21 / 46.3-46.6 s | 9.59 / 9.72-9.74 / 10.0 / 10.9 ms | |
+  | 4 requests, 4K / 1K | 2.5 s mean | 17.2-17.3 ms | 203 tok/s |
+  | 8 requests, 4K / 1K | 3.7-3.9 s mean | 21.3-21.6 ms | 318 tok/s |
+  | 4 replicas, 32 requests, 4K / 1K | 7.4-8.8 s mean, 3.3-3.4 s median | 22.1-22.4 ms | 897-1,008 tok/s |
+
+  - Async takes 3.2-3.9 ms from every decode step and gives 14-17% more output at four and eight requests. First
+    tokens up to 32K do not move; at the full context the first token doubles, because the engine preempts the
+    prompt's prefill twice and starts it again (step 5, "Async scheduling on both sides").
+  - The other checks of this step, on boots never profiled: GSM8K 124 of 128, none at the output limit; acceptance
+    cases 27 of 28 in all six runs; long-document lookups 339 of 339 and 336 of 336. The margin test passes, with
+    338-398 MiB spare per card (0.4-0.6 GiB with async off). Two boots agree on 3 of 6 greedy prompts: the fork's
+    warm-up tune picks kernels anew at every boot, and with async the batches differ from run to run; every
+    divergence is a near-tie (step 5).
 
 ### 3. Bring our fork up to date
 
@@ -326,7 +351,9 @@ minimum with all four replicas running and passes the step 1 accuracy sets. The 
   deploy. Not met as written: the boot is online, because `HF_HUB_OFFLINE=1` moves vLLM's compile key to the host's
   model path. Not run: the full-context DeepSeek V4, Laguna FP8 and Poolside checks, which come with moving those
   recipes to this fork. Published 2026-10-16 to the private Docker Hub repository, digest
-  `sha256:bf976828fc00…`, through `emmy publish`.
+  `sha256:bf976828fc00…`, through `emmy publish`. Since async scheduling went on (2026-11-11) the baked caches miss:
+  the flag is part of vLLM's compile key, so the image boots in 421-464 s again and needs a bake in the async shape
+  before a release.
 
 ### 4. Emmy serves the model, correctly
 
@@ -905,6 +932,59 @@ Rounds, as with DeepSeek. Each round starts from a profile and ends with a boot 
     the next one stays the prefill experts, then the routed experts at eight requests (80 slices at about 410 GB/s,
     against the fork's about 74 experts at about 550).
   - Not measured: first tokens at 8K, 32K and the full context with async scheduling; four requests.
+- **Async scheduling on both sides (2026-11-11).** The owner took the proposal above. Main `488f9f0da` with
+  `--no-async-scheduling` dropped from the recipe, against the step 3 fork image in the same shape; every number from
+  boots never profiled. On this main every program of the recipe golden compiles strict from the golden alone,
+  GPU-free, with no row missing its timings, and the release audit on the card deploys all 14 twins from it.
+  - Why the fork's text changed: two causes, neither a defect. One at a time, async does not change the fork's
+    numerics: with its warm-up tune off (`VLLM_SM70_NVFP4_TUNE_SMALL_SHAPES=0`) two async boots give the synchronous
+    boots' text on 6 of 6 prompts. With the tune on, as the fork serves, the tune picks small-shape kernels by timing
+    at every boot, so the text varies by boot: two async boots agree on 3 of 6, and one of them gives the synchronous
+    text on all 6. Six requests at once, async lets the steps the requests share vary from run to run, so the batched
+    text varies even between two runs on one tune-off boot (3 of 6). At every divergence, by boot or by batch, the
+    two candidate tokens sit 0.016-0.11 apart in log-probability, near-ties.
+  - Fork checks: GSM8K 124 of 128, none at the output limit; acceptance cases 27 of 28 in all six runs; long-document
+    lookups 339 of 339 without thinking and 336 of 336 with it. The margin test passes: with 3 GiB held per card every
+    worst-case load completes and the server keeps serving, with 338-398 MiB spare per card (0.4-0.6 GiB
+    synchronous). Four replicas: step 2's baseline with async.
+  - Emmy checks: two boots give the same text, 6 of 6 one at a time and 6 of 6 six at once, as the earlier async boot
+    above; GSM8K 125 of 128 (2 at the output limit); acceptance cases 27, 27, 27 without thinking and 28, 27, 27 with
+    it. The margin test passes, 538-540 MiB spare per card. Long-document lookups were not run.
+  - Async doubles the first token at the full context, on both sides. Its prefill is preempted twice and recomputed
+    from the start: the engine's preemption count grows by 2 per 130K prompt on both sides and by none on any other
+    row, and the prefix cache serves none of it again. At 64K and 96K tokens the two modes take the same time (12.4-12.8
+    and 19.2-19.9 s on the fork) with no preemption; at 130K the synchronous fork takes 26.1 s and the async one
+    47.9-51.1 s. With the key/value pool raised from 2.5 to 3 GiB per card (194,016 to 232,523 tokens) the async fork
+    takes 26.1 s with no preemption, so async needs a larger pool than synchronous scheduling for a full-context
+    prompt; why is not established. The larger pool is the owner's call: it comes out of the 3 GiB margin, where the
+    async fork keeps only 338-398 MiB.
+  - The step 3 image's baked caches miss under async: the flag is part of vLLM's compile key, so every fork boot
+    compiles its graphs again, 421-464 s against 303 s. Before a release the image needs a bake in the async shape.
+    Emmy boots in 1,048-1,055 s.
+  - The done gate against the async fork. Fresh boots of both sides, rounds fork, Emmy, Emmy, fork; first tokens on
+    random token ids (the first of four runs primes), the rest by `vllm bench serve` (one priming run, then three); a
+    range is both rounds' repeats. Every point still fails:
+
+    | Point | Fork | Emmy | Emmy against the fork |
+    | --- | ---: | ---: | ---: |
+    | First token, 1K | 0.43-0.44 s | 1.05-1.10 s | 2.5x slower |
+    | First token, 8K | 1.46-1.51 s | 3.28-3.33 s | 2.2x slower |
+    | First token, 32K | 5.94-6.01 s | 12.69-12.87 s | 2.1x slower |
+    | First token, 130K | 50.9-53.0 s | 93.4-96.4 s | 1.8x slower |
+    | One request, 1K / 512, per token | 9.60-9.62 ms | 16.69-16.71 ms | 1.74x slower |
+    | 4 requests, 4K / 1K, total output | 201.6-203.3 tok/s (17.2-17.3 ms) | 129.8-131.3 tok/s (25.3-25.5 ms) | 0.64x |
+    | 8 requests, 4K / 1K, total output | 311.3-317.3 tok/s (21.3-21.7 ms) | 214.6-215.6 tok/s (29.6-29.7 ms) | 0.68x |
+    | Step 2's worst-case loads with 3 GiB held per card | passes | passes | |
+    | Boot | 421-464 s | 1,048-1,055 s | 2.4x |
+
+  - Against the synchronous rows: the fork from 12.7-13.1 to 9.6 ms per token at one request and from 275-282 to
+    311-317 tok/s at eight; Emmy (#1378) from 20.0-20.7 to 16.7 ms and from 192-194 to 215 tok/s. First tokens up
+    to 32K are unchanged on both sides.
+  - Method change: every bench row now has its own seeds, and the first-token prompts differ by length. `vllm bench`'s
+    random prompts are runs of consecutive token ids from a seeded offset, so with one seed for every row the first
+    4K prompts began with the 1K row's tokens and the eight-request row repeated the four-request row's prompts.
+  - Next: the prefill experts in one launch per group, the round proposed on 2026-11-07, then the routed experts at
+    eight requests.
 - Gate, the definition of done. Both sides run step 2's production configuration: the same checkpoint, layout,
   context, key/value pool, concurrency, prefix-cache and MTP settings; fork, Emmy, Emmy, fork rounds; three repeats
   each:
