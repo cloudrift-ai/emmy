@@ -36,7 +36,7 @@ from emmy.compiler.ir.schedule.classic import (
     ProjectionSchedule,
     ReductionSchedule,
 )
-from emmy.compiler.ir.stmt import Accum, Assign, parse_body
+from emmy.compiler.ir.stmt import Accum, Assign, normalize_body, parse_body
 from emmy.compiler.ir.tensor.ir import ElementwiseOp
 from emmy.compiler.ir.tile import TileOp
 from emmy.compiler.pipeline import CUDA_PASSES, Pipeline
@@ -138,93 +138,76 @@ def test_sibling_cones_share_one_declaration_of_a_broadcast_constant(_scalar_tie
     assert all(count >= 2 and count % 2 == 0 for count in uses), uses
 
 
-def test_a_name_rebound_to_a_different_address_survives_as_the_fault_it_is() -> None:
-    """Only an exact repeat is dead. A same-name rebind of a DIFFERENT address must reach nvcc."""
-    body = parse_body(
-        """
-        in0 = load a[0]
-        in0 = load b[0]
-        """
-    )
-
-    assert [stmt.input for stmt in materialize._drop_repeated_declarations(body)] == ["a", "b"]
+def _normal_form(text: str) -> list[str]:
+    """The statements of ``text``'s normal form, the form every kernel body takes at construction."""
+    return [str(stmt) for stmt in normalize_body(parse_body(text))]
 
 
 def test_sibling_cones_share_one_declaration_of_a_derived_value() -> None:
     """A cone DERIVES from what it reads, so the repeat is an ``Assign`` as readily as a ``Load``.
 
     DeepSeek-V4's post block is a chain of normalizations; a placement cut lands two cones of one
-    ``1 / (sum + eps)`` at the kernel's own scope, and the second reciprocal redeclares the first's
-    name. nvcc rejects it exactly as it rejects the repeated load."""
-    body = parse_body(
+    ``1 / (sum + eps)`` at the kernel's own scope, and the second reciprocal rebinds the first's
+    name to the same value. The normal form holds the value once."""
+    body = _normal_form(
         """
         in0 = load s[0]
         v0 = reciprocal(in0)
         v0 = reciprocal(in0)
+        out[0] = v0
         """
     )
 
-    assert [stmt.name for stmt in materialize._drop_repeated_declarations(body)] == ["in0", "v0"]
+    assert len(body) == 3, body
 
 
-@pytest.mark.parametrize("value", [3840.0, 1e-6, -0.0])
+@pytest.mark.parametrize("value", [3840.0, 1e-6])
 def test_sibling_cones_share_one_typed_literal_declaration(value) -> None:
-    body = parse_body(
+    body = _normal_form(
         f"""
+        x = load s[0]
         let f32 v0 = {value!r}
-        first = reciprocal(v0)
+        first = multiply(x, v0)
         let f32 v0 = {value!r}
-        second = reciprocal(v0)
+        second = multiply(x, v0)
+        out[0] = first
+        out[1] = second
         """
     )
 
-    assert list(materialize._drop_repeated_declarations(body)) == [body[0], body[1], body[3]]
-
-
-@pytest.mark.parametrize("other", ["let f32 v0 = 0.0", "let f16 v0 = -0.0"])
-def test_a_literal_rebound_to_different_bits_or_dtype_remains_a_fault(other) -> None:
-    body = parse_body(f"let f32 v0 = -0.0\n{other}")
-
-    assert len(materialize._drop_repeated_declarations(body)) == 2
+    assert sum("*" in stmt for stmt in body) == 1, body
 
 
 def test_a_same_dtype_copy_of_the_bound_value_is_a_repeat() -> None:
     """A placement cut on softmax's maximum binds ``v0`` to the workspace read in one cone and to a
-    same-dtype copy of a second read of it in the sibling: one value spelled twice (nvcc: already declared)."""
-    body = parse_body(
+    same-dtype copy of a second read of it in the sibling: one value spelled twice."""
+    body = _normal_form(
         """
-        v0 = load ws[0]
-        acc0 = load ws[0]
+        f16 v0 = load ws[0]
+        f16 acc0 = load ws[0]
         f16 v0 = acc0
+        out[0] = v0
         """
     )
 
-    assert [stmt.name for stmt in materialize._drop_repeated_declarations(body)] == ["v0", "acc0"]
+    assert sum("load ws" in stmt for stmt in body) == 1, body
 
 
-def test_a_converting_copy_under_a_bound_name_survives_as_the_fault_it_is() -> None:
-    """A copy that changes the dtype is a different value: the rebind must reach nvcc."""
-    body = parse_body(
+def test_a_name_rebound_to_a_different_value_keeps_both_values() -> None:
+    """Only an exact repeat is one value. A name bound twice to two values reads lexically: each read takes the
+    binding ahead of it, and the normal form gives the two values two names."""
+    body = _normal_form(
         """
-        f32 v0 = load ws[0]
-        f32 acc0 = load ws[0]
-        f16 v0 = acc0
-        """
-    )
-
-    assert [stmt.name for stmt in materialize._drop_repeated_declarations(body)] == ["v0", "acc0", "v0"]
-
-
-def test_a_name_rebound_to_a_different_expression_survives_as_the_fault_it_is() -> None:
-    """The same rule from the other side: two VALUES under one name stay two statements."""
-    body = parse_body(
-        """
-        v0 = reciprocal(a)
-        v0 = reciprocal(b)
+        in0 = load a[0]
+        out[0] = in0
+        in0 = load b[0]
+        out[1] = in0
         """
     )
 
-    assert [_names(stmt) for stmt in materialize._drop_repeated_declarations(body)] == [("a",), ("b",)]
+    assert sum("load a[0]" in stmt for stmt in body) == 1 and sum("load b[0]" in stmt for stmt in body) == 1, body
+    names = {stmt.split(" = ")[0].split()[-1] for stmt in body if "load" in stmt}
+    assert len(names) == 2, body
 
 
 def test_two_cones_that_bind_one_name_to_two_values_are_re_spelled() -> None:

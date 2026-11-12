@@ -1,4 +1,4 @@
-"""Dependency-safety tests for Kernel-IR load interleaving."""
+"""The Kernel IR memory peepholes: vector loads and stores, fragment load pairs, and loads moved into their guard."""
 
 from importlib import import_module
 
@@ -11,8 +11,7 @@ from emmy.compiler.ir.stmt import Body, Load, parse_body
 
 _vectorize_loads = import_module("emmy.compiler.pipeline.passes.lowering.kernel.050_vectorize_loads")._vectorize_body
 _vectorize_stores = import_module("emmy.compiler.pipeline.passes.lowering.kernel.080_vectorize_stores")._vectorize_body
-_interleave = import_module("emmy.compiler.pipeline.passes.lowering.kernel.095_interleave_loads")
-_sink_loads = _interleave._sink_loads
+_sink_guarded = import_module("emmy.compiler.pipeline.passes.lowering.kernel.095_interleave_loads")._walk
 _pair_ldmatrix = import_module("emmy.compiler.pipeline.passes.lowering.kernel.096_pair_ldmatrix_loads")._walk
 
 
@@ -25,7 +24,7 @@ def test_noop_kernel_peepholes_reuse_the_body() -> None:
         """
     )
     op = KernelOp(body=body)
-    interleaved, interleave_changed = _interleave._walk(body)
+    interleaved, interleave_changed = _sink_guarded(body)
     paired, pair_changed = _pair_ldmatrix(body)
 
     assert _vectorize_loads(op, body) is body
@@ -34,23 +33,28 @@ def test_noop_kernel_peepholes_reuse_the_body() -> None:
     assert paired is body and not pair_changed
 
 
-def test_interleave_keeps_load_before_nested_consumer() -> None:
-    """A load used in a serial reduction loop must remain in the enclosing scope."""
+def test_a_load_only_a_guard_reads_moves_into_it() -> None:
+    """A cell the guard skips then never issues the load. A load the guard's own condition reads, or one another
+    statement reads too, stays where every reader finds it."""
     body = parse_body(
         """
-        f32 epsilon = load epsilon_buffer[0]
-        for k in 0..4:
-            f32 x = load input[0]
-            f32 sum_term = add(epsilon, x)
-            f32 sum <- add(sum, sum_term)
-        f32 result = add(sum, epsilon)
+        f32 flag = load mask[0]
+        f32 x = load input[0]
+        f32 y = load input[1]
+        if flag > 0.0:
+            f32 z = add(x, y)
+            out[0] = z
+        out[1] = y
         """
     )
-    invariant, loop, _ = body
 
-    reordered = tuple(_sink_loads(body))
+    moved, changed = _sink_guarded(body)
 
-    assert reordered.index(invariant) < reordered.index(loop)
+    assert changed
+    assert [str(stmt) for stmt in moved if isinstance(stmt, Load)] == ["f32 flag = load mask[0]", "f32 y = load input[1]"]
+    [guard] = [stmt for stmt in moved if stmt.nested()]
+    assert str(guard.body[0]) == "f32 x = load input[0]"
+    assert _sink_guarded(moved) == (moved, False)
 
 
 def _unrolled_pointwise(*, between: str = "", dtype=F16) -> Body:

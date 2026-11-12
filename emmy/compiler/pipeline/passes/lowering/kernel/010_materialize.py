@@ -31,7 +31,7 @@ from emmy.compiler.ir.kernel.ir import ELEM_COL, ELEM_ROW, FRAG_COL, FRAG_ROW
 from emmy.compiler.ir.pure.fold import EXTENTS
 from emmy.compiler.ir.schedule.register import RegisterMaterialization
 from emmy.compiler.ir.sigma import Sigma
-from emmy.compiler.ir.stmt import Assign, Body, Let, Load, Write, exposed_defines, free_names
+from emmy.compiler.ir.stmt import Body, Load, Write, exposed_defines, free_names
 from emmy.compiler.ir.tile import TileOp
 from emmy.compiler.ir.tile.ops import UnbindableProjection, reduce_plan, sched_of
 from emmy.compiler.pipeline import Match, Pattern, RuleSkipped
@@ -57,7 +57,7 @@ def rewrite(match: Match, root: Node, ctx=None) -> KernelOp | None:
         materialized = factorize(tile, root, sm_count=getattr(ctx, "sm_count", 0))
         if not resident:
             materialized = _pointwise_strip(tile, materialized)
-        body = _drop_repeated_declarations(Body((materialized,)))
+        body = Body((materialized,))
         unbound = _unbound_names(tile, root, body)
         assert not unbound, f"materialize: kernel {tile.name!r} reads names it never binds: {sorted(unbound)}"
         kernel = KernelOp(body=body, name=tile.name, serial=() if resident else tuple(tile.place.serial))
@@ -169,78 +169,3 @@ def _pointwise_strip(tile: TileOp, materialized):
         replace(axis, extent=Dim(axis.extent.as_static() // width)) if axis.name == inner.name else axis for axis in materialized.axes
     )
     return materialized.replace(axes=axes, body=Body((*loads, *computes, *writes)))
-
-
-def _binding(stmt) -> tuple | None:
-    """What ``stmt`` binds its name TO, or ``None`` when it binds something this guard cannot
-    compare. A scalar ``Load`` binds an ADDRESS; ``Assign`` and ``Let`` bind EXPRESSIONS over names the
-    scope has already bound. A second, identical binding computes the same value."""
-    if isinstance(stmt, Load) and stmt.is_scalar:
-        return (stmt.input, tuple(str(e) for e in stmt.index))
-    if isinstance(stmt, Assign):
-        return (stmt.value, stmt.dtype)
-    if isinstance(stmt, Let):
-        return (Let, str(stmt.value), stmt.dtype)  # spelled, so a negative zero stays distinct from zero
-    return None
-
-
-def _copied(stmt, bound: dict[str, tuple], dtypes: dict[str, object]) -> tuple | None:
-    """What a same-dtype ``copy`` of one bound value binds: that value's own binding."""
-    if not isinstance(stmt, Assign):
-        return None
-    if not isinstance(stmt.value, Var):
-        return None
-    source = stmt.value.name
-    return bound.get(source) if dtypes.get(source) in (None, stmt.dtype) or stmt.dtype is None else None
-
-
-def _drop_repeated_declarations(body: Body) -> Body:
-    """Drop a statement re-binding a name already bound to the IDENTICAL value in the same scope —
-    the emitted body's one legality guard.
-
-    Operand cones splice INDEPENDENTLY (``Fold.spliced_step``), so two sibling cones over one
-    shared value each carry their own copy of the statements that bind it, under the same SSA
-    names. Flattened into one loop body those are two C declarations of one name, which nvcc
-    rejects (*already declared in the current scope*). Repeated bindings include the ``Load``
-    of a broadcast constant — eleven of them on DeepSeek-V4's MXFP4 expert kernel, whose decode
-    applies eleven shared constants to both halves of the fused ``gate_up`` weight — and the
-    ``Assign`` that DERIVES a value from one, which the same model's post block reaches whenever a
-    placement cut lands two cones of one reciprocal at the kernel's own scope. Static scalar ``Let``
-    bindings repeat in the same way when both cones carry their own denominator or epsilon.
-
-    The repeat binds nothing new, so it is dropped with NO rewrite: every downstream use already
-    names the survivor. That is what keeps the guard narrow, and narrow is what makes it safe over
-    a WHOLE kernel body. The renaming forms (``_atom._dedup_loads``, ``stmt.normalize.place_values``) collapse
-    two DIFFERENT names at one address, which needs the memory-effect reasoning neither does: a
-    ``Write`` or an async fill between two identical loads of a staged buffer makes the second a
-    different value. A same-name repeat cannot hide such a reload — a rebind in one C scope is
-    already illegal — so this guard needs no such analysis.
-
-    A same-dtype ``copy`` of a value bound to what its name already holds is the same repeat in
-    another spelling: a placement cut drops the identity cast of a workspace read in a one-operand
-    projection and keeps it where the projection has more operands, so one cone binds ``v0`` to the
-    read and its sibling binds ``v0 = copy(read)`` (softmax's maximum, cut on a V100).
-
-    A name re-bound to a DIFFERENT value is left alone: that is an SSA fault, and it must surface
-    as one rather than be collapsed onto a stale value. Per scope, so an inner body may legally
-    shadow an outer binding."""
-
-    def scope(stmts) -> tuple:
-        bound: dict[str, tuple] = {}
-        dtypes: dict[str, object] = {}
-        kept = []
-        for stmt in stmts:
-            binding = _binding(stmt)
-            if binding is not None:
-                held = bound.get(stmt.name)
-                if held is not None and held in (binding, _copied(stmt, bound, dtypes)):
-                    continue
-                bound[stmt.name] = binding
-                dtypes[stmt.name] = stmt.dtype
-            nested = stmt.nested()
-            if nested:
-                stmt = stmt.with_bodies(tuple(Body(scope(inner)) for inner in nested))
-            kept.append(stmt)
-        return tuple(kept)
-
-    return Body(scope(body))
