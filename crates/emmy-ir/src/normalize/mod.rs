@@ -79,7 +79,7 @@ pub fn optimize_body(body: &Body) -> Result<Body> {
 pub fn optimize_uncached(body: &Body) -> Result<Body> {
     let mut stmts = distinct_names(&topological_sort(body)?);
     for _ in 0..8 {
-        let prepared = prepare_body(&stmts)?;
+        let prepared = prepared(&stmts, false)?;
         let next = one_operation_per_definition(&fold_trivial_selects(&prepared), &HashSet::new());
         if next == stmts {
             return Ok(next);
@@ -123,6 +123,12 @@ pub fn normalize_uncached(body: &Body) -> Result<Body> {
 /// The exact simplifications, then every value placed once; the three run until the first two leave a placed body
 /// alone.
 pub fn prepare_body(body: &Body) -> Result<Body> {
+    prepared(body, true)
+}
+
+/// [`prepare_body`], with sibling reduce loops over one axis merged into one loop or left as their builder wrote
+/// them. Merging is Loop IR's: it makes the four loops of four rows one body. A kernel's loops are its schedule.
+fn prepared(body: &Body, merge_loops: bool) -> Result<Body> {
     let mut stmts = topological_sort(body)?;
     stmts = drop_size_one_free_axes(&stmts);
     stmts = drop_size_one_reduce_axes(&stmts);
@@ -132,10 +138,13 @@ pub fn prepare_body(body: &Body) -> Result<Body> {
     stmts = drop_unread_values(&stmts);
     let mut placed: Option<Body> = None;
     for _ in 0..8 {
+        let merged = if merge_loops {
+            merge_sibling_reduce_loops(&stmts)?
+        } else {
+            stmts.clone()
+        };
         let simplified = canonicalize_expressions(
-            &drop_unread_values(&simplify_body(&inline_literals(
-                &merge_sibling_reduce_loops(&stmts)?,
-            ))?),
+            &drop_unread_values(&simplify_body(&inline_literals(&merged))?),
             &[],
         )?;
         if placed.as_ref() == Some(&simplified) {
