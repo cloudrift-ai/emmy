@@ -45,6 +45,38 @@ def vector_widths(dtype: str) -> tuple[int, ...]:
     return _VECTOR_WIDTHS.get(dtype, ())
 
 
+#: The operations a half-precision value computes natively, by the abstract names the elementwise table gives them:
+#: the card rounds each once at f16. Any other operation over f16 computes in f32 and converts its result once. Not
+#: ``sigmoid``: its half spelling ``1/(1+hexp(-x))`` rounds three times, which lands up to two half-ulps from torch's
+#: compute-in-f32-round-once value and fails the strict ``rtol=1e-3`` gate.
+_NATIVE_F16_OPS: frozenset[str] = frozenset(
+    {
+        "add",
+        "subtract",
+        "multiply",
+        "divide",
+        "maximum",
+        "minimum",
+        "exp",
+        "log",
+        "sqrt",
+        "rsqrt",
+        "tanh",
+        "fabs",
+        "abs",
+        "negative",
+        "copy",
+        "reciprocal",
+        "relu",
+    }
+)
+
+
+def native_f16_ops() -> frozenset[str]:
+    """The operations the target computes at f16 without leaving it; the type pass promotes every other one to f32."""
+    return _NATIVE_F16_OPS
+
+
 def parse_sm(spec: str) -> tuple[int, int]:
     """Parse ``sm_NN`` / ``sm_NNN`` (with optional arch suffix) into ``(major, minor)``.
 

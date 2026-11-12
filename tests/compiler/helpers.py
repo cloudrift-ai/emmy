@@ -319,3 +319,17 @@ def qwen3_embedding_model(config=None, auto_class=None):
 
     torch.manual_seed(0)
     return (auto_class or AutoModel).from_config(config if config is not None else qwen3_embedding_config()).float().eval()
+
+
+def render_typed(statements, ctx) -> list[str]:
+    """The rendered lines of hand-built ``statements`` once their types are complete: the renderer prints a typed body
+    (``ir.types.explicit_conversions``), and the names and buffers ``ctx`` already types are taken as declared."""
+    from emmy.compiler.dtype import get
+    from emmy.compiler.ir.render import render_body
+    from emmy.compiler.ir.stmt import Body
+    from emmy.compiler.ir.types import explicit_conversions
+    from emmy.compiler.target import native_f16_ops
+
+    known = {name: get(dtype) for name, dtype in ctx.ssa_dtypes.items()}
+    buffers = {name: get(dtype) for name, dtype in ctx.buffer_dtypes.items()}
+    return render_body(explicit_conversions(Body(statements), buffers, native_f16_ops(), known), ctx)

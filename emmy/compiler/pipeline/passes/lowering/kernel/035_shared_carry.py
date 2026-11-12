@@ -30,6 +30,7 @@ from emmy.compiler.ir.stmt import (
     dtype_promote,
     free_names,
 )
+from emmy.compiler.ir.types import value_dtypes
 from emmy.compiler.pipeline import Match, Pattern, RuleSkipped
 from emmy.compiler.pipeline.fork import DeferredFork
 from emmy.compiler.pipeline.passes.tile._fromloop import seed_index, stored_states
@@ -37,7 +38,6 @@ from emmy.compiler.pipeline.search.space import SHARED_CARRY
 
 PATTERN = [Pattern("root", KernelOp)]
 _resolve = import_module("emmy.compiler.pipeline.passes.lowering.kernel.045_merge_select_loads")._resolve
-_stamp = import_module("emmy.compiler.pipeline.passes.lowering.kernel.030_stamp_types")
 _materialize = import_module("emmy.compiler.pipeline.passes.lowering.kernel.010_materialize")
 
 
@@ -245,10 +245,7 @@ def _guard_stores(body: Body, types=None) -> Body:
     Other readers, nested effects and intervening writes to a cone's input keep the stream unchanged.
     """
     if types is None:
-        ctx = _stamp._StampCtx({})
-        _stamp._seed_explicit_dtypes(body, ctx)
-        _stamp._stamp_body(body, ctx)
-        types = ctx.ssa_dtypes
+        types = value_dtypes(body)
     stmts = [stmt.with_bodies(tuple(_guard_stores(b, types) for b in stmt.nested())) if stmt.nested() else stmt for stmt in body]
     uses = Counter(name for stmt in Body(stmts).iter() for name in free_names(stmt))
     position = 0

@@ -153,7 +153,7 @@ def _driver() -> str:
         *(_cell(n, ab, form, scale_d=int(i > 0), trans_b=int(ab == "f16")) for i, (n, ab, form) in enumerate(forms)),
         WgmmaCommit(),
         WgmmaWait(),
-        *parse_body("\n".join(f"out[{4 * j + k}] = `c{j}[{k}]`" for j in range(256 // 8) for k in range(4))),
+        *parse_body("\n".join(f"f32 out[{4 * j + k}] = `c{j}[{k}]`" for j in range(256 // 8) for k in range(4))),
     ]
     return render_kernelop(KernelOp(body=Body(tuple(stmts)), name="k_wgmma_probe"), shapes={"out": (128,)})
 

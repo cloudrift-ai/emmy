@@ -18,6 +18,7 @@ pub mod protocol;
 pub mod statement;
 pub mod strength;
 pub mod text;
+pub mod types;
 
 pub use name::Name;
 

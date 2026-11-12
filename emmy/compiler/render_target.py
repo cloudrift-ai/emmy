@@ -65,12 +65,6 @@ class RenderTarget(Protocol):
         unchanged when no mapping exists.
         """
 
-    def has_native_op(self, op_name: str, dtype: str) -> bool:
-        """Whether ``op_name`` has a native form at ``dtype``. Drives the
-        ``Assign``'s render dispatch between native and promote-and-demote
-        rendering.
-        """
-
     def vector_type(self, dtype: str, n: int) -> tuple[str, str] | None:
         """For an ``n``-wide vector of ``dtype``, return the
         ``(vector_c_type, element_c_type)`` pair, or ``None`` when the

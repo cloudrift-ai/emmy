@@ -233,8 +233,8 @@ lightweight value objects (`ElementwiseImpl`, not `ElementwiseOp`) so the surrou
 `ir/stmt/` is the vocabulary all three IRs share, so the rest of the compiler uses it through one package and nothing
 else: no submodule path, no private name. The package exports the statement types, `Body` and `OutputSpec`,
 `normalize_body` and `canonicalize_identity`, a few functions over statements (`free_names`, `exposed_defines`,
-`rename_free`, `mask_select_predicate`, `ordering_constraints`, `dtype_promote`), the text form (`pretty_body`,
-`parse_body`), four normalization steps a caller may run on its own (`one_operation_per_definition`,
+`rename_free`, `mask_select_predicate`, `ordering_constraints`, `dtype_promote`, `reduce_strength`, `check_types`),
+the text form (`pretty_body`, `parse_body`), four normalization steps a caller may run on its own (`one_operation_per_definition`,
 `canonical_values`, `simplify_body`, `prepare_body`), the two statement types fusion's body assembly in `ir/loop/`
 builds a region with (`Call`, `Subroutine`), and the names of a statement type's fields (`fields_of`). The statement
 types, `Body`, the protocol, the text, the value numbering and the normalization are implemented in Rust — the
@@ -635,8 +635,23 @@ recurse via `pretty_body`).
 CUDA scalar rendering goes through `op_to_expression` in `ir/render.py`. Boolean masks retain the historical f32 SSA
 convention, so Torch's `bitwise_not` spelling renders as logical zero-test (`mask == 0`); explicitly bool-stamped values
 use the same semantics. Integer complement is not inferred from that name and fails closed until it has a typed
-consumer. The target-aware render of an `Assign` is responsible for conversions such as `__half2float` when an
-argument's stamped dtype differs from the result dtype.
+consumer.
+
+The renderer decides no type. A body reaches it typed in full by `ir/types.py`, the one place the promotion and
+conversion rules live. `stamp_types` gives each `Load`, `Assign`, `Accum` and `Write` its dtype by promotion.
+`explicit_conversions` then makes every operation take its operands at the dtype it computes at: natively at f16
+where the target has the operation there (`target.native_f16_ops`) and every operand is f16, over integers where
+every operand is one, else in f32 with the result converted once. A value read at another dtype gets a definition
+of its own, `name = (dtype)source`, a `CastExpression` whose target is the dtype's name; a `Write`, a `Carry`, an
+`Accum` and the branches of a `Select` read names already at their dtype, so `Write.value_dtype` is also the
+buffer's element type. A literal operand is spelled at its operation's dtype. A name the body only reads (an axis, a
+symbolic size, a thread coordinate) is an integer. The nodes of one affine region compute at one dtype and stay one
+definition. `check_types` (the crate's `types` module, exported by the statement package) is the same property as a
+check that names the first statement leaving a type or a conversion out. Three kinds of statement are exempt until
+they are typed too, and the check lists them: the cross-thread combine programs (`TreeHalve`, `WarpShuffle`,
+`WarpBroadcast`), the register fragment statements, and a `RegStore` epilogue, whose program the renderer types
+with the same rules where it prints it, because its operands are register elements only the renderer names. An
+index `Let` with no dtype is an integer whose width the renderer still takes from its expression.
 
 `Select` uses the common dtype of its branch values, and type propagation gives its consumers that same dtype.
 Selecting between two FP16 values must preserve the rounding of a subsequent FP16 product; promoting the selection
@@ -997,7 +1012,8 @@ reformats deep coordinate trees nor retains duplicate canonical strings.
 
 ### `loop/runner.py` — C++ JIT executor
 
-`execute_loop_op_cpp(loop, input_arrays, out_shapes)` renders the LoopOp body to a C++ source string and JIT-compiles
+`execute_loop_op_cpp(loop, input_arrays, out_shapes)` types the LoopOp body in full (`ir/types.py`, with no operation
+native at f16: the reference computes every float in f32), renders it to a C++ source string and JIT-compiles
 it in-process via cppyy / Cling (cached by the rendered source), then calls it with raw pointers to the input and every
 output array. One output returns an array; multiple outputs return a tuple in the operation's graph-populated ABI
 order. Each Write's own scope determines its output shape, so independent sibling nests may reuse axis names with

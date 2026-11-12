@@ -105,8 +105,8 @@ macro_rules! with_statement_types {
                 /// `dtype` is optional and, when set, names the source-buffer element dtype that this Load produces. The
                 /// `030_stamp_types` Kernel-IR pass populates it once before any analytical pass runs; downstream passes
                 /// (vectorize_loads, demote, etc.) read it instead of reaching for the matcher-populated
-                /// `KernelOp.inputs`/`outputs` side channels. `None` keeps the legacy render-time inference path working for
-                /// tests that construct Loads by hand without dtype.
+                /// `KernelOp.inputs`/`outputs` side channels. A body a code generator reads carries it on every Load
+                /// (`types::check_types`).
                 ///
                 /// `carried` marks a staged copy that crosses the chunk loop's back edge. The names and their packed vector are
                 /// the ones an earlier Load of the same names DECLARED ahead of the loop. `"load"` re-assigns the packed vector,
@@ -234,8 +234,9 @@ macro_rules! with_statement_types {
                 /// `output` is the destination buffer's name (matches the owning graph node's id, or — for multi-output kernels —
                 /// one of its output buffer names). `index` uses axis Vars to compute the per-dim offset.
                 ///
-                /// `value_dtype` is optional; when set, names the SSA-value dtype being stored. Stamped by `030_stamp_types`;
-                /// downstream passes read it instead of querying `ctx.ssa_dtypes` at render time.
+                /// `value_dtype` is optional; when set, names the SSA-value dtype being stored. Stamped by `030_stamp_types`
+                /// for the passes after it. In a body typed in full (`types::check_types`) the values are already at the
+                /// buffer's element type, so it names both.
                 shared Write {SIDE_EFFECTS | CHECKED} {
                     output: Name [BUFFER_WRITE],
                     index: Exprs [EXPRESSION | READS] : Index,

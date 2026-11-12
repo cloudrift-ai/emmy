@@ -9,8 +9,9 @@ import pytest
 from emmy.compiler.dtype import U32
 from emmy.compiler.graph import Node, Tensor
 from emmy.compiler.ir.kernel import KernelOp
-from emmy.compiler.ir.render import RenderCtx, render_stmt
+from emmy.compiler.ir.render import RenderCtx
 from emmy.compiler.ir.stmt import Statement, parse_body
+from tests.compiler.helpers import render_typed
 
 
 def _stmt(text: str) -> Statement:
@@ -70,7 +71,7 @@ _SYMBOL = {
 )
 def test_integer_assign_renders_natively(op, symbol):
     ctx = RenderCtx(ssa_dtypes={"a": "u32", "b": "u32"})
-    line = render_stmt(_stmt(f"result = {op}(a, b)"), ctx)[0]
+    line = render_typed([_stmt(f"result = {op}(a, b)")], ctx)[0]
     assert line == f"    unsigned int result = a {symbol} b;"
     assert ctx.ssa_dtypes["result"] == "u32"
 
@@ -80,12 +81,12 @@ def test_a_float_literal_over_integer_operands_renders_a_float_operation():
     ``multiply(half, code)``), so a float literal over integer operands keeps the operation a float one; an integer
     literal still contributes no dtype."""
     ctx = RenderCtx(ssa_dtypes={"a": "i32"})
-    assert render_stmt(_stmt("v = multiply(0.5, a)"), ctx)[0].startswith("    float v = ")
+    assert render_typed([_stmt("v = multiply(0.5, a)")], ctx) == ["    float a__f32 = a;", "    float v = 0.5f * a__f32;"]
     assert ctx.ssa_dtypes["v"] == "f32"
     ctx = RenderCtx(ssa_dtypes={"a": "i32"})
-    assert render_stmt(_stmt("v = maximum(0.0, a)"), ctx)[0].startswith("    float v = ")
+    assert render_typed([_stmt("v = maximum(0.0, a)")], ctx)[-1].startswith("    float v = ")
     ctx = RenderCtx(ssa_dtypes={"a": "i32"})
-    assert render_stmt(_stmt("v = multiply(2, a)"), ctx)[0].startswith("    int v = ")
+    assert render_typed([_stmt("v = multiply(2, a)")], ctx)[0].startswith("    int v = ")
 
 
 def test_a_whole_number_float_literal_keeps_its_float_spelling_in_the_normal_form():
@@ -105,14 +106,14 @@ def test_a_whole_number_float_literal_keeps_its_float_spelling_in_the_normal_for
     collapsed = normalize_body(parse_body("u8 code = load C[0]\nv = multiply(code, 1.0)\nw = multiply(v, v)\nO[0] = w"))
     assert "v0 = 1.0 * in0\n" in str(collapsed) and "v1 = v0 * v0" in str(collapsed)
     ctx = RenderCtx(ssa_dtypes={"in0": "u8"})
-    assert render_stmt(_stmt("v0 = in0 - 8.0"), ctx) == ["    float v0 = in0 - 8.0f;"]
+    assert render_typed([_stmt("v0 = in0 - 8.0")], ctx) == ["    float in0__f32 = in0;", "    float v0 = in0__f32 - 8.0f;"]
     assert ctx.ssa_dtypes["v0"] == "f32"
 
 
 def test_f32_bitwise_names_remain_logical_masks():
     ctx = RenderCtx(ssa_dtypes={"a": "f32", "b": "f32"})
-    assert render_stmt(_stmt("both = bitwise_and(a, b)"), ctx) == ["    float both = a && b;"]
-    assert render_stmt(_stmt("either = bitwise_or(a, b)"), ctx) == ["    float either = a || b;"]
+    assert render_typed([_stmt("both = bitwise_and(a, b)")], ctx) == ["    float both = a && b;"]
+    assert render_typed([_stmt("either = bitwise_or(a, b)")], ctx) == ["    float either = a || b;"]
 
 
 @pytest.mark.parametrize(
@@ -138,4 +139,5 @@ def test_stamp_types_keeps_a_declared_float_dtype_on_integer_algebra():
     assert "f32 result = a << b" in _stamped("f32 result = left_shift(a, b)")
     ctx = RenderCtx()
     ctx.ssa_dtypes.update(a="u32", b="u32")
-    assert render_stmt(_stmt("f32 result = left_shift(a, b)"), ctx) == ["    float result = (a << b);"]
+    lines = render_typed([_stmt("f32 result = left_shift(a, b)")], ctx)
+    assert lines == ["    unsigned int result__u32 = a << b;", "    float result = result__u32;"]

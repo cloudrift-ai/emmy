@@ -31,6 +31,7 @@ from functools import cached_property
 
 from emmy.compiler.dim import Dim
 from emmy.compiler.dtype import INTEGER_NAMES, DataType
+from emmy.compiler.dtype import get as dtype_get
 from emmy.compiler.ir.axis import Axis
 from emmy.compiler.ir.body_op import BodyOp
 from emmy.compiler.ir.elementwise import _REDUCE_SPELLING, ElementwiseImpl
@@ -70,6 +71,8 @@ from emmy.compiler.ir.stmt import (
     StridedLoop,
     Write,
 )
+from emmy.compiler.ir.types import explicit_conversions
+from emmy.compiler.target import native_f16_ops
 from emmy.emmy_ir import (  # the Kernel IR statement types, declared with the shared ones in the emmy-ir crate
     BlockScaleLoad,
     CpAsyncCommit,
@@ -1486,8 +1489,11 @@ def _element_values(node: RegStore, ctx: RenderCtx) -> tuple[list[list[str]], li
                 local = st.rewrite(
                     lambda name, st=st, i=i, env=env: f"{name}_e{i}" if name == st.name else env.get(name, name), Sigma(coord)
                 )
-                # A value renders as one C temp per operation node; every line is this element's.
-                lines.extend(f"const {rendered}" for rendered in render_stmt(local, replace(ctx, indent=0)))
+                # The epilogue's operands are register elements only this render names, so its program is typed here,
+                # by the one set of rules; every line is this element's.
+                known = {name: dtype_get(ctx.ssa_dtypes[name]) for name in local.deps() if name in ctx.ssa_dtypes}
+                for typed in explicit_conversions(Body([local]), {}, native_f16_ops(), known):
+                    lines.extend(f"const {rendered}" for rendered in render_stmt(typed, replace(ctx, indent=0)))
                 env[st.name] = f"{st.name}_e{i}"
         per_elem.append(lines)
         vals.append(env[node.epilogue_result])
