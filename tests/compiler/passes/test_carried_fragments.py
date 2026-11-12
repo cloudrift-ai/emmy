@@ -3,6 +3,8 @@ loaded before the previous chunk's last mma, behind the chunk's one barrier."""
 
 from __future__ import annotations
 
+import re
+
 import numpy as np
 import pytest
 
@@ -29,21 +31,29 @@ def _source(k: int, stage: str, ctx: Context) -> str:
     return source
 
 
+def _chunk_loop(source: str) -> int:
+    """Where the K chunk loop starts: the one loop over the whole K extent of 1024 in steps of a 64-wide chunk."""
+    return re.search(r"for \(int (\w+) = 0; \1 < 1024; \1 \+= 64\)", source).start()
+
+
 def test_a_carried_ring_loads_the_next_chunk_behind_its_one_barrier() -> None:
     """One barrier per chunk, and the first fragment load of the loop body reads the slot set the
     loop's head (or the previous iteration's last step) did not: the next step's buffer."""
     loop = _source(1024, "d3/smem-async/p2", Context.from_target((8, 0)))
-    head, body = loop[: loop.index("for (int _ks")], loop[loop.index("for (int _ks") :]
-    assert "emmy_ldmatrix_x4(_a0_s0" in head, "the head loads the first chunk's first step"
+    head, body = loop[: _chunk_loop(loop)], loop[_chunk_loop(loop) :]
+    first_step = set(re.findall(r"emmy_ldmatrix_x4\((\w+),", head))
+    assert first_step, "the head loads the first chunk's first step"
     assert body.count("__syncthreads()") == 1, "one barrier per chunk"
     after = body[body.index("__syncthreads()") :]
-    assert after.index("emmy_ldmatrix_x4(_a0_s0") < after.index("emmy_mma_m16n8k16_f16_f32("), "the next chunk loads before this step's mma"
+    (fragment,) = re.findall(r"emmy_ldmatrix_x4\((\w+),", after)[:1]
+    assert fragment in first_step, "past the barrier the loop loads the slot the head loaded: the next chunk's first step"
+    assert after.index("emmy_ldmatrix_x4(") < after.index("emmy_mma_m16n8k16_f16_f32("), "the next chunk loads before this step's mma"
 
 
 def test_a_two_slot_ring_keeps_the_ordinary_schedule() -> None:
     """At two slots the prefetch would target the slot about to be read, so there is nothing to carry."""
     loop = _source(1024, "d2/smem-async/p2", Context.from_target((8, 0)))
-    assert loop[loop.index("for (int _ks") :].count("__syncthreads()") == 2
+    assert loop[_chunk_loop(loop) :].count("__syncthreads()") == 2
 
 
 @requires_cuda
