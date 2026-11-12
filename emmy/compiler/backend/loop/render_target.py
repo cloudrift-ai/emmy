@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-from emmy.compiler.dtype import INTEGER_NAMES
-
 _FLOAT_DTYPES = frozenset({"f32", "f16", "f16x2", "f8e4m3", "f8e5m2"})
 _TYPE_NAME = {
     **{dtype: "float" for dtype in _FLOAT_DTYPES},
@@ -27,22 +25,6 @@ _HOST_NBYTES = {
     "unsigned long long": 8,
     "bool": 1,
 }
-_INTEGER_NATIVE_OPS = frozenset(
-    {
-        "add",
-        "subtract",
-        "multiply",
-        "floor_divide",
-        "remainder",
-        "mod",
-        "left_shift",
-        "right_shift",
-        "bitwise_and",
-        "bitwise_or",
-        "bitwise_xor",
-        "bitwise_count",
-    }
-)
 
 
 class LoopRenderTarget:
@@ -80,13 +62,6 @@ class LoopRenderTarget:
         if op_name == "bitwise_count":
             return "__builtin_popcountll" if result_dt in ("i64", "u64") else "__builtin_popcount"
         return op_name
-
-    def has_native_op(self, op_name: str, dtype: str) -> bool:
-        if dtype == "f32":
-            return True
-        if dtype in INTEGER_NAMES:
-            return op_name in _INTEGER_NATIVE_OPS
-        return False
 
     def vector_type(self, dtype: str, n: int) -> tuple[str, str] | None:  # noqa: ARG002
         return None

@@ -30,6 +30,7 @@ import numpy as np
 
 from emmy.compiler.backend.loop.render_target import LoopRenderTarget
 from emmy.compiler.ir.render import RenderCtx, render_body
+from emmy.compiler.ir.types import explicit_conversions
 
 if TYPE_CHECKING:
     from emmy.compiler.ir.loop.ir import LoopOp
@@ -94,7 +95,8 @@ def render_loopop_cpp(
     sig_parts.extend(f"float* {name}" for name in output_names)
     params_text = ", ".join(sig_parts)
 
-    body_text = "\n".join(render_body(loop.body, ctx))
+    # The reference computes every float in f32, so no operation is native at f16; every buffer is a float array.
+    body_text = "\n".join(render_body(explicit_conversions(loop.body, {}, frozenset()), ctx))
     return f'extern "C" void {fn_name}({params_text}) {{\n{body_text}\n}}\n'
 
 

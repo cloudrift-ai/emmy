@@ -18,11 +18,11 @@ from emmy.compiler.ir.axis import Axis
 from emmy.compiler.ir.base import is_f4_pair_table
 from emmy.compiler.ir.cuda import CudaOp, TmaDescMeta
 from emmy.compiler.ir.kernel import KernelOp
-from emmy.compiler.ir.kernel.interface import kernel_interface
+from emmy.compiler.ir.kernel.interface import buffer_dtypes, kernel_interface
 from emmy.compiler.ir.kernel.ir import Grid, TmaDescriptor, tile_is_static, tile_n_dim, tile_n_elements
 from emmy.compiler.ir.kernel.render import render_kernelop
 from emmy.compiler.ir.pure.fold import EXTENTS
-from emmy.compiler.ir.stmt import Load, Write, ZeroPrologue
+from emmy.compiler.ir.stmt import Load, Write, ZeroPrologue, check_types
 from emmy.compiler.pipeline import Match, Pattern, RuleSkipped
 from emmy.compiler.pipeline.passes.lowering.cuda._helpers import atomic_outputs as _atomic_outputs
 from emmy.compiler.pipeline.passes.lowering.cuda._helpers import launch_name
@@ -115,6 +115,8 @@ def rewrite(match: Match, root: Node) -> CudaOp | None:
         if zeroed:
             raise NotImplementedError(f"paged buffer(s) {zeroed} are zero-initialized per launch, which has no page table to clear")
     pair_tables = frozenset(n for n in kernel.inputs if is_f4_pair_table(match.graph.nodes.get(n)))
+    # The input check of whatever generates this kernel's code: the body says every type and every conversion.
+    check_types(kernel.body, {name: dtype.name for name, dtype in buffer_dtypes(kernel, tensors).items()})
     source = render_kernelop(kernel, tensors=tensors, runtime_args=runtime_args, paged_buffers=paged, pair_tables=pair_tables)
 
     # A cooperative tile fixes the per-CTA thread count (``coop · ∏block-cells``): one CTA

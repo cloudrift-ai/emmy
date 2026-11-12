@@ -138,8 +138,9 @@ def test_a_literal_contributes_no_dtype_to_a_promotion():
 def test_the_renderer_spells_a_literal_at_the_named_operands_dtype():
     """``2 * x`` over f16 renders as one f16 multiply, the literal spelled at f16, not promoted to f32 for the literal."""
     from emmy.compiler.ir.expression import parse
-    from emmy.compiler.ir.render import RenderCtx, render_stmt
+    from emmy.compiler.ir.render import RenderCtx
     from emmy.compiler.ir.stmt import Assign
+    from tests.compiler.helpers import render_typed
 
-    [line] = render_stmt(Assign("y", parse("2 * x")), RenderCtx(ssa_dtypes={"x": "f16"}))
-    assert line.strip().startswith("__half y = ") and "float" not in line, line
+    [line] = render_typed([Assign("y", parse("2 * x"))], RenderCtx(ssa_dtypes={"x": "f16"}))
+    assert line.strip() == "__half y = __hmul_rn(__float2half(2.0f), x);"

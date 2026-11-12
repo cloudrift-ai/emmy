@@ -829,7 +829,14 @@ starts at `lane * n` reads its run as one vector even though the variable's own 
 the flat address that is not a sum, difference or product (a gathered selector's sign wrap, a cast, a quotient)
 counts as one unknown integer per distinct subterm, so a routed expert's selector-indexed weight run still proves.
 
-`030_stamp_types` resolves element dtypes, including the common branch type of a `Select` used by later statements.
+`030_stamp_types` resolves element dtypes, including the common branch type of a `Select` used by later statements;
+its rules are `stamp_types` in `ir/types.py`. It runs early because the passes after it read the stamps and match
+one-operation values over the names the lowering wrote. `120_explicit_conversions` runs last and completes the
+types (`explicit_conversions`, same module): each operation computes at one dtype, every conversion is a definition
+of its own, and a write stores a value of its buffer's element type. A conversion between a load and its reader
+would hide the pattern the vector passes, the shared carry and the load reuse look for, which is why it is not part
+of `030`. The body's optimization then computes each conversion once, at the shallowest scope that holds its
+source. `lowering/cuda` checks the result (`check_types`) on every kernel before it renders one.
 Register-partial merges use the same accumulator policy as streaming updates: selecting folds retain the input dtype,
 while accumulating folds promote to f32. A merge reassigns the existing carrier and cannot change its declaration.
 Integer algebra is always restamped from its typed operands, repairing a

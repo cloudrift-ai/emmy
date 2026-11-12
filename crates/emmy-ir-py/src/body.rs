@@ -784,6 +784,17 @@ pub fn optimize_body<'py>(body: &Bound<'py, PyAny>) -> PyResult<Bound<'py, PyBod
     }
 }
 
+/// Check that a body is typed in full (`emmy_ir::types`): `buffers` maps each buffer the body reads or writes by
+/// name to its element dtype. Raises `TypeError` naming the first statement that leaves a type or a conversion out.
+#[pyfunction]
+pub fn check_types(body: &Bound<'_, PyAny>, buffers: HashMap<String, String>) -> PyResult<()> {
+    let buffers: emmy_ir::Result<HashMap<Name, emmy_ir::dtype::DType>> = buffers
+        .iter()
+        .map(|(name, dtype)| Ok((Name::new(name), dtype.parse()?)))
+        .collect();
+    emmy_ir::types::check_types(&PyBody::from_iterable(body)?, &buffers.py()?).py()
+}
+
 #[pyfunction]
 pub fn prepare_body<'py>(body: &Bound<'py, PyAny>) -> PyResult<Bound<'py, PyBody>> {
     PyBody::wrap(
@@ -950,6 +961,7 @@ pub fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(pretty_body, m)?)?;
     m.add_function(wrap_pyfunction!(normalize_body, m)?)?;
     m.add_function(wrap_pyfunction!(optimize_body, m)?)?;
+    m.add_function(wrap_pyfunction!(check_types, m)?)?;
     m.add_function(wrap_pyfunction!(prepare_body, m)?)?;
     m.add_function(wrap_pyfunction!(simplify_body, m)?)?;
     m.add_function(wrap_pyfunction!(one_operation_per_definition, m)?)?;

@@ -109,3 +109,17 @@ def needs_arch_isa(kernel: KernelOp) -> bool:
         isinstance(s, (TmaDescriptor, WgmmaMma, WgmmaDescriptor)) or (isinstance(s, MmaSyncPtx) and s.sfa_frag is not None)
         for s in kernel.body.iter()
     )
+
+
+def buffer_dtypes(kernel: KernelOp, tensors: dict[str, Tensor] | None = None) -> dict[str, DataType]:
+    """The element dtype of every buffer the kernel's statements read or write by name: its inputs and outputs
+    (``tensors`` where given, else the kernel's own), and the shared buffers it declares."""
+    from emmy.compiler.backend.cuda.dtype import canonical_from_cuda_name  # noqa: PLC0415 — the backend imports the IR
+    from emmy.compiler.dtype import get  # noqa: PLC0415
+
+    dtypes = {n: t.dtype for n, t in (tensors or {**kernel.inputs, **kernel.outputs}).items()}
+    for name, smem in kernel.smem_buffers.items():
+        canonical = canonical_from_cuda_name(smem.dtype)
+        if canonical is not None:
+            dtypes[name] = get(canonical)
+    return dtypes

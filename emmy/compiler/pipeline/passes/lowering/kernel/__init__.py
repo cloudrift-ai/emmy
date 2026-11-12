@@ -25,6 +25,7 @@ tile-tier rebuild:
 - ``097_widen_fragment_stores`` — store four adjacent ``wgmma`` accumulator cells as one
   16-byte row per lane.
 - ``110_drop_redundant_syncs`` — collapse no-op Sync stmts at the Tile body level.
+- ``120_explicit_conversions`` — last: every operation at one dtype, every conversion a definition of its own.
 
 The tile-tier kernel passes (mma fragment lowering, register-tile split, smem
 staging, fp16 K-window packing) stay demolished — they consume tile structures

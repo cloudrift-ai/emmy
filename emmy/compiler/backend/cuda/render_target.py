@@ -3,8 +3,7 @@
 Owns every CUDA C-spelling decision the Kernel-IR renderer makes:
 type names (``float`` / ``__half`` / fixed-width integer carriers), conversion intrinsics
 (``__half2float`` / ``__float2half``), per-dtype op intrinsics
-(``expf`` / ``hexp``, ``fmaxf`` / ``__hmax``, ...), and the set of
-ops with native fp16 forms.
+(``expf`` / ``hexp``, ``fmaxf`` / ``__hmax``, ...).
 
 The Statement renderer in :mod:`emmy.compiler.ir.stmt` calls into a
 :class:`CudaRenderTarget` instance attached to ``RenderCtx``; the
@@ -14,7 +13,6 @@ to ``Load`` / ``Assign`` / ``Write`` are gone.
 
 from __future__ import annotations
 
-from emmy.compiler.dtype import INTEGER_NAMES
 from emmy.compiler.target import vector_widths
 
 _TYPE_NAME: dict[str, str] = {
@@ -36,23 +34,6 @@ _TYPE_NAME: dict[str, str] = {
     "u64": "unsigned long long",
     "bool": "bool",
 }
-
-_INTEGER_NATIVE_OPS = frozenset(
-    {
-        "add",
-        "subtract",
-        "multiply",
-        "floor_divide",
-        "remainder",
-        "mod",
-        "left_shift",
-        "right_shift",
-        "bitwise_and",
-        "bitwise_or",
-        "bitwise_xor",
-        "bitwise_count",
-    }
-)
 
 # fp8 storage dtypes (M2/M3 of the FP8 plan). A kernel never computes ON fp8 —
 # the only legal uses of an fp8 SSA value are the decode conversion out of it
@@ -119,37 +100,6 @@ _INTRINSIC_F16x2: dict[str, str] = {
     "fmin": "__hmin2",
     "fabs": "__habs2",
 }
-
-# Abstract op names with a native fp16 form. Binary operators (+, -, *, /)
-# work via cuda_fp16.h's operator overloads on ``__half`` and ``__half2``,
-# so they don't need an entry in the intrinsic tables but are still
-# "native". The same set covers F16 and F16x2 — every op listed has both
-# a per-element (``__hmax``, ``hexp``) and per-pair (``__hmax2``,
-# ``h2exp``) form.
-_NATIVE_FP16_OPS: frozenset[str] = frozenset(
-    {
-        "add",
-        "subtract",
-        "multiply",
-        "divide",
-        "maximum",
-        "minimum",
-        "exp",
-        "log",
-        "sqrt",
-        "rsqrt",
-        "tanh",
-        "fabs",
-        "abs",
-        "negative",
-        "copy",
-        "reciprocal",
-        "relu",
-        # Not ``sigmoid``: its half spelling ``1/(1+hexp(-x))`` rounds three times, which lands up
-        # to two half-ulps from torch's compute-in-f32-round-once value and fails the strict
-        # ``rtol=1e-3`` gate; the non-native path below computes it in f32 and converts once.
-    }
-)
 
 
 class CudaRenderTarget:
@@ -231,16 +181,6 @@ class CudaRenderTarget:
         if result_dt == "f16x2":
             return _INTRINSIC_F16x2.get(op_name, op_name)
         return _INTRINSIC_F32.get(op_name, op_name)
-
-    def has_native_op(self, op_name: str, dtype: str) -> bool:
-        if dtype == "f32":
-            # f32 has every op natively.
-            return True
-        if dtype in ("f16", "f16x2"):
-            return op_name in _NATIVE_FP16_OPS
-        if dtype in INTEGER_NAMES:
-            return op_name in _INTEGER_NATIVE_OPS
-        return False
 
     def vector_type(self, dtype: str, n: int) -> tuple[str, str] | None:
         if n not in vector_widths(dtype):

@@ -8,8 +8,9 @@ import pytest
 from emmy.compiler.dtype import F16, F32, U32
 from emmy.compiler.graph import Node, Tensor
 from emmy.compiler.ir.kernel import KernelOp
-from emmy.compiler.ir.render import RenderCtx, render_stmt
+from emmy.compiler.ir.render import RenderCtx
 from emmy.compiler.ir.stmt import parse_body
+from tests.compiler.helpers import render_typed
 
 
 @pytest.mark.parametrize(
@@ -43,5 +44,5 @@ def test_select_preserves_the_common_type_in_its_consumers(left, right, result, 
     assert f"{result.name} product = a * chosen" in lines
     assert f"{result.name} out[0] = product" in lines
     ctx = RenderCtx(ssa_dtypes={"a": left.name, "b": right.name})
-    assert render_stmt(selection, ctx)[0].startswith(f"    {ctype} chosen = ")
+    assert render_typed([selection], ctx)[-1].startswith(f"    {ctype} chosen = ")
     assert ctx.ssa_dtypes["chosen"] == result.name
