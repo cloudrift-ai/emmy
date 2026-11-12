@@ -267,16 +267,12 @@ def op_to_expression(fn: str, inputs: list[Expression], *, dtype: str | None = N
         # identity would truncate the value instead. The render emits the rounding as a helper
         # (``_F4_ENCODE_PRELUDE``).
         return FunctionCallExpression("emmy_to_f4e2m1", (inputs[0],))
-    if fn == "square":
-        return BinaryExpression("*", inputs[0], inputs[0])
-    if fn == "reciprocal":
-        return BinaryExpression("/", Literal(1.0, "float"), inputs[0])
-    if fn == "relu":
-        return FunctionCallExpression("fmax", (Literal(0.0, "float"), inputs[0]))
-    if fn == "sigmoid":
-        neg_x = BinaryExpression("-", Literal(0.0, "float"), inputs[0])
-        exp_neg = FunctionCallExpression("exp", (neg_x,))
-        return BinaryExpression("/", Literal(1.0, "float"), BinaryExpression("+", Literal(1.0, "float"), exp_neg))
+    if len(inputs) == 1 and (definition := FunctionCallExpression(fn, (Var("x"),)).definition) is not None:
+        # A composite function has no spelling here: the operations' table defines it by primitive ones.
+        spelled = definition.rebuild(
+            lambda n: n if n.operation is None else op_to_expression(n.operation.name, list(n.operands), dtype=dtype)
+        )
+        return spelled.substitute({"x": inputs[0]})
     if fn in ("exp", "exp_fast", "log", "rsqrt", "sin", "cos", "tanh", "sqrt", "erf", "floor"):
         return FunctionCallExpression(fn, tuple(inputs))
     if fn == "abs":

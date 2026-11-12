@@ -831,12 +831,21 @@ counts as one unknown integer per distinct subterm, so a routed expert's selecto
 
 `030_stamp_types` resolves element dtypes, including the common branch type of a `Select` used by later statements;
 its rules are `stamp_types` in `ir/types.py`. It runs early because the passes after it read the stamps and match
-one-operation values over the names the lowering wrote. `120_explicit_conversions` runs last and completes the
+one-operation values over the names the lowering wrote. `120_explicit_conversions` runs after them and completes the
 types (`explicit_conversions`, same module): each operation computes at one dtype, every conversion is a definition
 of its own, and a write stores a value of its buffer's element type. A conversion between a load and its reader
 would hide the pattern the vector passes, the shared carry and the load reuse look for, which is why it is not part
 of `030`. The body's optimization then computes each conversion once, at the shallowest scope that holds its
 source. `lowering/cuda` checks the result (`check_types`) on every kernel before it renders one.
+
+`125_spell_composites` runs last. A composite function (`sigmoid`, `relu`, `square`, `reciprocal`) is defined by
+primitive operations in one table, beside the operations' declarations in the crate. The pass turns each `Assign` of
+a composite into its definition, one `Assign` per primitive, so a code generator finds primitives only and the
+body's optimization shares a primitive two composites compute. It follows `120` because where a composite computes
+is decided on the whole function: an f16 `sigmoid` computes in f32 and converts once, where its primitives, typed
+one by one, would each round at f16. After `120` the `Assign` holds that dtype and its operand is already there, so
+the primitives take it. A `FragmentApply` and a carried program (a combine, a `RegStore` epilogue) keep their
+composite; the renderer prints it through the same table.
 Register-partial merges use the same accumulator policy as streaming updates: selecting folds retain the input dtype,
 while accumulating folds promote to f32. A merge reassigns the existing carrier and cannot change its declaration.
 Integer algebra is always restamped from its typed operands, repairing a
