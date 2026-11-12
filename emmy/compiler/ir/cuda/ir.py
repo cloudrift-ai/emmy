@@ -72,6 +72,12 @@ class CudaOp(Op):
     #: Serial launch axes ``(name, extent)``: the launcher runs the kernel once per coordinate in
     #: order, passing the coordinate through the ``runtime_args`` slot of the same name.
     serial: tuple[tuple[str, int], ...] = ()
+    #: Whether the kernel must be assembled for the arch-suffixed target (``sm_<cc>a``): it holds TMA, the
+    #: block-scaled fp4 ``mma`` or ``wgmma``.
+    arch_specific: bool = False
+    #: Whether the kernel waits on the grid ahead of it before its first memory access, so the runtime may launch
+    #: it as a programmatic dependent launch. Every lowered kernel does; a hand-written source says so itself.
+    dependent_launch: bool = False
 
     def pretty_body(self) -> str:
         return self.kernel_source

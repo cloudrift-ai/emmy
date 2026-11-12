@@ -249,11 +249,6 @@ def test_integer_load_in_fragment_epilogue_keeps_shift_operands_integer() -> Non
     assert "const int shift_e0 = shift[0];" in source
     assert "int bits_e0 = code_e0 << shift_e0;" in source
 
-    literal = RenderCtx(shapes={"out": (16, 16)}, buffer_dtypes={"out": "i32"}, literal_constants={"shift": 4.0})
-    literal_source = "\n".join(render_stmt(store, literal))
-    assert "const int shift_e0 = 4;" in literal_source
-    assert "int bits_e0 = code_e0 << shift_e0;" in literal_source
-
 
 @requires_sm90
 @requires_cuda

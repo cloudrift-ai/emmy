@@ -15,6 +15,7 @@ from emmy.compiler.backend.cuda.dtype import nbytes_of as _nbytes_of
 from emmy.compiler.backend.cuda.render_target import CudaRenderTarget
 from emmy.compiler.dim import spans_one_page
 from emmy.compiler.dtype import F4_VALUES, F32
+from emmy.compiler.ir.kernel.interface import Param, kernel_interface
 from emmy.compiler.ir.kernel.ir import (
     CpAsyncCopy,
     FragmentRepack,
@@ -22,13 +23,10 @@ from emmy.compiler.ir.kernel.ir import (
     LdmatrixLoad,
     RegStore,
     SetMaxNReg,
-    Smem,
-    TmaDescriptor,
     TreeHalve,
     WarpShuffle,
     WgmmaMma,
     frag_dtype,
-    pack_smem,
     swizzle_fn,
     swizzle_xor,
     wgmma_form,
@@ -43,7 +41,6 @@ from emmy.compiler.tensor import Tensor
 # + ``cudaFuncAttributeMaxDynamicSharedMemorySize``). When the kernel's
 # total Smem footprint exceeds this, ``render_kernelop`` switches to a
 # single dynamic pool with per-buffer offsets.
-STATIC_SMEM_CAP = 48 * 1024
 
 # E4M3's finite values are half bit patterns shifted seven places, times 2**8.
 # This also normalizes subnormals without the SDK emulation's data-dependent loop.
@@ -1428,7 +1425,6 @@ _BUILTIN_TO_CUDA: dict[str, str] = {
 
 # Block size for the linear thread-flattening path (``Tile.block_axes``
 # empty); the host-side launcher rounds the grid up to cover all threads.
-_BLOCK_SIZE = 256
 
 
 _GRID_DEPENDENCY = '#if defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= 900\n    asm volatile("griddepcontrol.wait;" ::: "memory");\n#endif\n'
@@ -1438,7 +1434,6 @@ def render_kernelop(
     kernel_op: KernelOp,
     tensors: dict[str, Tensor] | None = None,
     shapes: dict[str, tuple[int, ...]] | None = None,
-    literal_constants: dict[str, float] | None = None,
     runtime_args: tuple[str, ...] = (),
     paged_buffers: tuple[tuple[str, int, int], ...] = (),
     pair_tables: frozenset[str] = frozenset(),
@@ -1456,12 +1451,6 @@ def render_kernelop(
     ``shapes`` is the legacy form (shape-only, no dtype) — kept for
     back-compat with tests that pre-date the dtype migration; dtypes
     default to F32 in that path. New callers should prefer ``tensors``.
-
-    ``literal_constants`` maps input-buffer names to scalar values that
-    should be embedded in the kernel body as ``float`` literals instead
-    of passed as kernel parameters. Loads of those bufs render as
-    ``float name = <value>;`` (see ``Load``'s render) and the buf is
-    excluded from the kernel signature.
 
     ``paged_buffers`` names buffers virtualized along one axis, as
     ``(name, axis, page_size)``: instead of a plain pointer the signature
@@ -1483,22 +1472,21 @@ def render_kernelop(
     ``kernel_op.outputs`` (distinct ``Write.output`` names) become
     writeable output params, ordered by first appearance. Parameter
     types come from the per-buffer :class:`Tensor.dtype` (passed in via
-    ``tensors=`` / ``shapes=`` — the caller supplies them); literal-constant
-    inputs are skipped. Unknown buffers fall back to ``F32``.
+    ``tensors=`` / ``shapes=`` — the caller supplies them). Unknown buffers fall back to ``F32``.
     """
-    literals = dict(literal_constants or {})
     tmap: dict[str, Tensor] = dict(tensors) if tensors else {}
     if shapes:
         for n, s in shapes.items():
             tmap.setdefault(n, Tensor(n, tuple(s)))
-    smem_offsets, smem_total = _compute_dynamic_smem_offsets(kernel_op)
+    paged_names = frozenset(n for n, _, _ in paged_buffers if n in kernel_op.inputs or n in kernel_op.outputs)
+    interface = kernel_interface(kernel_op, tmap, runtime_args, paged_names)
+    smem_offsets, smem_total = interface.shared_offsets, interface.shared_pool_bytes
     ctx = RenderCtx(
         target=CudaRenderTarget(),
         shapes={n: tuple(t.shape) for n, t in tmap.items()},
         indent=1,
         intrinsics=_INTRINSIC_TO_CUDA,
         builtins=_BUILTIN_TO_CUDA,
-        literal_constants=literals,
         smem_dynamic_offsets=smem_offsets,
         buffer_dtypes={n: t.dtype.name for n, t in tmap.items()},
         pair_tables=frozenset(pair_tables),
@@ -1518,49 +1506,22 @@ def render_kernelop(
                 "kernels are parameter names; keep checkpoint paths on ConstantOp.source_path, never the id"
             )
 
-    paged = {
-        n: Paged(n, axis, page)
-        for n, axis, page in paged_buffers
-        if n not in literals and (n in kernel_op.inputs or n in kernel_op.outputs)
-    }
+    paged = {n: Paged(n, axis, page) for n, axis, page in paged_buffers if n in kernel_op.inputs or n in kernel_op.outputs}
     # A buffer whose one page spans it is addressed like the flat buffer it replaces: its base is
     # the table's only entry, resolved once in the preamble, so every statement type — a staged
     # copy, a descriptor, a fragment store — works over it unchanged.
     whole = {n for n, p in paged.items() if spans_one_page(tensors[n].shape, p.axis, p.page)}
     ctx.memory = {n: p for n, p in paged.items() if n not in whole}
-    sig_parts = [
-        f"const {cuda_name(_dtype_for(n))}* const* {n}__pages" if n in paged else f"const {cuda_name(_dtype_for(n))}* __restrict__ {n}"
-        for n in kernel_op.inputs
-        if n not in literals
-    ]
-
-    def _out_param(n: str) -> str:
-        """A paged output takes its page table; every other output stays a plain pointer."""
-        elem = cuda_name(_dtype_for(n))
-        return f"{elem}* const* {n}__pages" if n in paged else f"{elem}* __restrict__ {n}"
-
     # Every plain buffer parameter is ``__restrict__``: a launch's output never shares memory with its
     # inputs (the arena's live intervals end one launch past the last read, and a chained buffer
     # joins two programs, never one launch's read and write), so the compiler may keep a read-only
     # operand in registers across the kernel's stores and read it through the non-coherent path.
-    sig_parts.extend(_out_param(n) for n in kernel_op.outputs)
-    # TMA descriptors are passed as ``__grid_constant__`` value parameters.
-    # The kernel only takes their address (``&desc``) for inline asm, so
-    # the opaque ``CUtensorMap`` forward decl above suffices.
-    desc_names = tuple(dict.fromkeys(s.name for s in kernel_op.body.iter_of_type(TmaDescriptor)))
-    # Descriptors are passed by pointer (placed in global memory by the
-    # host) rather than ``__grid_constant__`` value parameters: the runtime's
-    # arg-packing path doesn't preserve the 64-byte alignment that
-    # by-value ``CUtensorMap`` parameters require, so this avoids a
-    # CUDA_ERROR_MISALIGNED_ADDRESS at launch.
-    sig_parts.extend(f"const CUtensorMap* __restrict__ {n}" for n in desc_names)
-    # Runtime int args for symbolic axis extents (Dim("seq_len") etc.) come
-    # after buffers and TMA descriptors so the launcher can simply tail-append
-    # the resolved int values to the kernel-arg pack.
-    sig_parts.extend(f"int {n}" for n in runtime_args)
+    # A paged buffer takes its page table. A TMA descriptor is passed by pointer (placed in global memory by the
+    # host): the runtime's arg-packing path doesn't preserve the 64-byte alignment a by-value ``CUtensorMap``
+    # needs. The runtime ``int`` args come last, so the launcher tail-appends their resolved values.
+    sig_parts = [_param_text(p) for p in interface.params]
     params_text = ", ".join(sig_parts)
-    bounds = _launch_bounds_for(kernel_op)
-    launch_bounds = f"\n__launch_bounds__({bounds})"
+    launch_bounds = f"\n__launch_bounds__({interface.threads})"
 
     # The target's spelling of an index division by a power of two: a shift and a mask where the ranges prove the
     # dividend non-negative. It is spelled here, on the body about to render: the simplifier reads ``/`` and ``%``.
@@ -1600,8 +1561,8 @@ def render_kernelop(
     # and a 128-block GEMM stacked that way ran 3-4x slower once released (s512 layer 133 -> 192 us).
     # Released at the predecessor's exit, it still overlaps the launch with the predecessor's drain.
     body_text = _GRID_DEPENDENCY + body_text
-    prelude = _TMA_PRELUDE if desc_names else ""
-    sig_dtypes = [_dtype_for(n) for n in kernel_op.inputs if n not in literals]
+    prelude = _TMA_PRELUDE if any(p.kind == "descriptor" for p in interface.params) else ""
+    sig_dtypes = [_dtype_for(n) for n in kernel_op.inputs]
     sig_dtypes.extend(_dtype_for(n) for n in kernel_op.outputs)
     sig_dtypes.extend(s.dtype for s in kernel_op.body.iter_of_type(Assign) if s.dtype is not None)
     sig_dtypes.extend(frag_dtype(ctx, s.frag) for s in kernel_op.body.iter_of_type(LdmatrixLoad) if frag_dtype(ctx, s.frag))
@@ -1660,38 +1621,15 @@ def render_kernelop(
     return f"{header} {{\n{body_text}\n}}\n"
 
 
-def _compute_dynamic_smem_offsets(kernel_op: KernelOp) -> tuple[dict[str, int], int]:
-    """Walk the body collecting ``Smem`` decls. If their summed footprint
-    exceeds the static cap, return ``({name: byte_offset}, total_bytes)``
-    so ``Smem``'s render can emit pool aliases. Otherwise return an empty
-    map — the kernel keeps using ``__shared__ T arr[N]``.
-
-    Offsets/total come from :func:`pack_smem` (each buffer aligned to the
-    larger of its dtype size and explicit ``align`` field — TMA swizzle slabs
-    request 256/512/1024 B), the same packer ``KernelOp.smem_bytes`` uses — so
-    the static-vs-dynamic gate here and the launch-time pool size agree."""
-    smems: list[Smem] = list(kernel_op.smem_buffers.values())
-    if not smems:
-        return {}, 0
-
-    offsets, total = pack_smem(smems)
-    if total <= STATIC_SMEM_CAP:
-        return {}, 0
-    return offsets, total
-
-
-def _launch_bounds_for(kernel_op: KernelOp) -> int:
-    """Derive ``__launch_bounds__`` from the (single) grid's per-CTA thread count — a cooperative tile's
-    ``block_threads`` (``coop · ∏block-cells``), else the scalar tier's ``_BLOCK_SIZE``, with the warp-specialized
-    producer band, which launches too. Matches the ``blockDim`` the cuda lowering picks."""
-    from emmy.compiler.ir.kernel.ir import Grid, Tile, tile_cells  # noqa: PLC0415
-
-    for s in kernel_op.body:
-        if isinstance(s, Grid):
-            return s.block_threads + s.aux_threads
-        if isinstance(s, Tile):
-            return tile_cells(s) + s.aux_threads
-    return _BLOCK_SIZE
+def _param_text(param: Param) -> str:
+    """One parameter of the kernel's signature."""
+    if param.kind == "int":
+        return f"int {param.name}"
+    if param.kind == "descriptor":
+        return f"const CUtensorMap* __restrict__ {param.name}"
+    const = "const " if param.kind == "input" else ""
+    pointer = "* const*" if param.paged else "* __restrict__"
+    return f"{const}{cuda_name(param.dtype)}{pointer} {param.name}"
 
 
 __all__ = ["render_kernelop"]

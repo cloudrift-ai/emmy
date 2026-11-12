@@ -156,6 +156,10 @@ def _(stmt: Sync, ctx: RenderCtx) -> list[str]:
     return [f'{pad}asm volatile("bar.sync {stmt.barrier_id}, {stmt.count};\\n" ::: "memory");']
 
 
+#: Threads per block of the scalar tier: one thread per cell over this fixed block.
+BLOCK_SIZE = 256
+
+
 def tile_extents(tile: Tile) -> tuple[int, ...]:
     """Static extent of each axis (raises on a symbolic extent)."""
     out: list[int] = []
@@ -176,15 +180,13 @@ def tile_n_elements(tile: Tile) -> int:
 
 def tile_cells(tile: Tile) -> int:
     """The per-CTA cooperative cell count — ``block_threads`` when set, else the scalar tier's
-    ``_BLOCK_SIZE``. This is ``blockDim`` minus any aux band, i.e. the divisor the cuda lowering
+    ``BLOCK_SIZE``. This is ``blockDim`` minus any aux band, i.e. the divisor the cuda lowering
     uses for ``gridDim = ceil(n_elements / cells)``. So ``n_elements % cells == 0`` (and no aux
     band) means the static grid covers the iteration space exactly — no partial last block, so
     the ``_gid < N`` tail guard is provably always-true and the render elides it."""
     if tile.block_threads is not None:
         return tile.block_threads
-    from emmy.compiler.ir.kernel.render import _BLOCK_SIZE  # noqa: PLC0415
-
-    return _BLOCK_SIZE
+    return BLOCK_SIZE
 
 
 def tile_is_static(tile: Tile) -> bool:
@@ -712,8 +714,6 @@ def _frag_operand(stmt: FragmentApply, arg: FragmentArg, ctx: RenderCtx, i: int 
     if arg.expressions:
         return arg.expressions[0]
     nm = arg.names[0]
-    if ctx.literal_ssa and nm in ctx.literal_ssa:
-        return Literal(float(ctx.literal_ssa[nm]))
     dt = ctx.ssa_dtypes.get(nm) if ctx.ssa_dtypes else None
     if dt and dt != "f32":
         from emmy.compiler.ir.expression import FunctionCallExpression  # noqa: PLC0415
@@ -1460,17 +1460,11 @@ def _element_values(node: RegStore, ctx: RenderCtx) -> tuple[list[list[str]], li
                 storage_dt = ctx.buffer_dtypes.get(st.input, "f32")
                 value_dt = st.dtype.name if st.dtype is not None else storage_dt
                 integer = value_dt in INTEGER_NAMES
-                if st.input in ctx.literal_constants:
-                    if integer:
-                        lines.append(f"const {ctx.type_name(value_dt)} {temp} = {int(ctx.literal_constants[st.input])};")
-                    else:
-                        lines.append(f"const float {temp} = {float(ctx.literal_constants[st.input])!r}f;")
+                flat = render_index(st.input, tuple(e.substitute(coord) for e in st.index), ctx)
+                if integer:
+                    lines.append(f"const {ctx.type_name(value_dt)} {temp} = {st.input}[{flat}];")
                 else:
-                    flat = render_index(st.input, tuple(e.substitute(coord) for e in st.index), ctx)
-                    if integer:
-                        lines.append(f"const {ctx.type_name(value_dt)} {temp} = {st.input}[{flat}];")
-                    else:
-                        lines.append(f"const float {temp} = {conv.get(storage_dt, '{}').format(f'{st.input}[{flat}]')};")
+                    lines.append(f"const float {temp} = {conv.get(storage_dt, '{}').format(f'{st.input}[{flat}]')};")
                 env[st.name] = temp
                 ctx.ssa_dtypes[temp] = value_dt if integer else "f32"
             elif isinstance(st, Select):
@@ -1823,7 +1817,7 @@ def pack_smem(smems) -> tuple[dict[str, int], int]:  # noqa: ANN001 — smems: I
     ``({name: byte_offset}, total_padded_bytes)``.
 
     Single source of truth for the per-CTA smem footprint: ``KernelOp.smem_bytes``
-    and ``render._compute_dynamic_smem_offsets`` both call this so the
+    and ``interface.shared_pool`` both call this so the
     static-vs-dynamic gate and the launch-time pool size agree (an unpadded sum
     would under-report when a buffer's alignment exceeds its natural stride —
     e.g. a 512/1024 B swizzle-atom-aligned operand)."""

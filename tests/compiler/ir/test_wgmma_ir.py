@@ -8,7 +8,6 @@ import subprocess
 import pytest
 
 from emmy.compiler.backend.cuda import nvcc
-from emmy.compiler.backend.plan import _needs_arch_isa
 from emmy.compiler.dtype import F16, F32
 from emmy.compiler.ir.kernel.ir import (
     KernelOp,
@@ -24,6 +23,7 @@ from emmy.compiler.ir.kernel.ir import (
     WgmmaWait,
     wgmma_descriptor_bits,
 )
+from emmy.compiler.ir.kernel.interface import needs_arch_isa
 from emmy.compiler.ir.kernel.render import _WGMMA_PRELUDE, _wgmma_prelude, render_kernelop
 from emmy.compiler.ir.render import RenderCtx, render_stmt
 from emmy.compiler.ir.stmt import Body, parse_body
@@ -131,16 +131,9 @@ def test_the_prelude_joins_only_with_a_wgmma_cell() -> None:
 
 
 def test_a_kernel_carrying_a_wgmma_cell_asks_for_the_arch_suffixed_target() -> None:
-    class _Op:
-        tma_descriptors = ()
-        kernel_source = "... emmy_wgmma_m64n128k16_bf16_f32_ss<0, 0>(c0, c1, aD, bD, 1); ..."
-
-    class _Plain:
-        tma_descriptors = ()
-        kernel_source = "... emmy_mma_m16n8k16_f16_f32(c, a, b, c); ..."
-
-    assert _needs_arch_isa(_Op())
-    assert not _needs_arch_isa(_Plain())
+    plain = KernelOp(body=Body((MmaSyncPtx(c_frag="c", a_frag="a", b_frag="b", shape=(16, 8, 16)),)), name="k")
+    assert needs_arch_isa(KernelOp(body=Body((_cell(64, "bf16", "ss"),)), name="k"))
+    assert not needs_arch_isa(plain)
 
 
 def _driver() -> str:
@@ -171,7 +164,7 @@ def test_every_wrapper_form_builds_at_sm_90a(monkeypatch, tmp_path) -> None:
     source = _driver()
     assert nvcc.compile_to_cubin(source, "k_wgmma_probe", arch="sm_90a").exists()
     # The instruction is arch-specific: the same source is refused at the plain target, which is
-    # what ``_needs_arch_isa`` guards.
+    # what ``needs_arch_isa`` guards.
     with pytest.raises(subprocess.CalledProcessError) as err:
         nvcc.compile_to_cubin(source, "k_wgmma_probe", arch="sm_90")
     assert b"wgmma" in err.value.stderr

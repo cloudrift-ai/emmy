@@ -102,12 +102,6 @@ class RenderCtx:
     indent: int = 1
     intrinsics: dict[str, str] = field(default_factory=dict)
     builtins: dict[str, str] = field(default_factory=dict)
-    literal_constants: dict[str, float] = field(default_factory=dict)
-    # SSA names whose defining Load came from a ``literal_constants``
-    # input — populated by ``render_body`` after scanning the body, and
-    # consumed by ``Var.render`` to inline the float at use sites instead
-    # of emitting a named ``float in0 = 0.044f;`` decl.
-    literal_ssa: dict[str, float] = field(default_factory=dict)
     # The SSA names some carried ``Load`` of the kernel re-assigns. They live in the packed vector their first Load
     # declares, and ``lanes`` holds the text of each one's lane once that Load is rendered: a read of one reads the
     # lane where the read stands. One table per kernel, shared by every scope's context.
@@ -384,9 +378,6 @@ def render_expression(expression: Expression, ctx: RenderCtx, parent_prec: int =
     """Emit a target-language (C / CUDA) expression string. ``ctx`` carries the intrinsic and builtin spelling tables,
     the literal bindings and the inlined temps; ``parent_prec`` drives parenthesization in nested binary chains."""
     if isinstance(expression, Var):
-        # An SSA name bound by a literal-constant Load renders as the literal; ``render_body`` populates the table.
-        if expression.name in ctx.literal_ssa:
-            return _float_lit(ctx.literal_ssa[expression.name])
         return ctx.lanes.get(expression.name, expression.name)
     if isinstance(expression, Literal):
         if isinstance(expression.value, float) or expression.dtype == "float":
@@ -614,49 +605,11 @@ def _is_one(e: Expression) -> bool:
 
 
 def render_body(body: Body, ctx: RenderCtx) -> list[str]:
-    """Flatten ``stmt.render(ctx)`` over a body sequence.
-
-    Detection of vectorizable Load runs (``LDS.128`` / ``__half2``) is
-    no longer done here — the dedicated Kernel-IR pass
-    ``050_vectorize_loads`` widens those runs into one :class:`Load`
-    with ``extra_names`` populated before render. This function's only
-    pre-walk responsibility is registering literal-constant Loads so
-    their ``Var(name)`` uses inline as float literals instead of
-    materializing a named local. An INTEGER constant is left out of that
-    inlining: the map holds floats and every use site renders them as
-    float literals, which would put a shift amount or a nibble mask into
-    f32 arithmetic that has no spelling for the bit operation reading it.
-    Those keep their named local, at their own dtype.
-    """
-    # Pre-pass: register every literal-constant Load's SSA name in the ctx
-    # so subsequent ``Var(name)`` references render as the literal value.
-    # The Load itself is then skipped — the loop IR pretty printer behaves
-    # the same way (``multiply(in4, 0.044)`` instead of an explicit
-    # ``in0 = load mul_1_c1[0]; multiply(in4, in0)`` chain).
-    if ctx.literal_constants:
-        new_map = dict(ctx.literal_ssa)
-        changed = False
-        for s in body:
-            # Literal-const Loads are always scalar (the vectorize pass
-            # excludes literal-const buffers from its widening logic).
-            if isinstance(s, Load) and s.is_scalar and s.input in ctx.literal_constants and not _integer_load(s):
-                new_map[s.name] = ctx.literal_constants[s.input]
-                changed = True
-        if changed:
-            ctx = replace(ctx, literal_ssa=new_map)
-
+    """Flatten ``render_stmt`` over a body sequence."""
     out: list[str] = []
     for s in body:
-        if isinstance(s, Load) and s.is_scalar and s.name in ctx.literal_ssa and s.input in ctx.literal_constants:
-            continue  # its value inlines at every use site
         out.extend(render_stmt(s, ctx))
     return out
-
-
-def _integer_load(load) -> bool:
-    """Whether a Load reads an integer buffer — asked of the literal-constant fold, which renders
-    its values as float literals."""
-    return load.dtype is not None and load.dtype.name in INTEGER_NAMES
 
 
 def _read_counts(body: Body, counts: dict[str, int]) -> dict[str, int]:
@@ -686,15 +639,9 @@ def render_stmt(stmt: Statement, ctx: RenderCtx) -> list[str]:
 
 
 def _resolve_value(name: str, ctx: RenderCtx) -> str:
-    """If ``name`` is an SSA name bound by a skipped literal-constant Load,
-    return its rendered float-literal form; otherwise return ``name``
-    unchanged. ``render_body`` drops the defining Load of every
-    literal-constant SSA (its value gets inlined at use sites), so
-    Stmts that carry raw SSA-name strings (``Write.values`` / ``Pack.low`` /
-    ``Accum.value``) must substitute here instead of emitting an
-    undefined identifier."""
-    lit = ctx.literal_ssa.get(name) if ctx.literal_ssa else None
-    return _float_lit(lit) if lit is not None else ctx.lanes.get(name, name)
+    """The text a statement that carries a raw SSA name (``Write.values``, ``Accum.value``) reads it by: the lane of a
+    carried load's packed vector, else the name."""
+    return ctx.lanes.get(name, name)
 
 
 def _args_at_dtype(target, args: list[Expression], arg_dtypes: list[str], dst_dt: str) -> list[Expression]:
@@ -753,22 +700,6 @@ def _dtype_intrinsics(target, result_dt: str, expression: Expression) -> dict[st
 @render_stmt.register
 def _(stmt: Load, ctx: RenderCtx) -> list[str]:
     pad = _pad(ctx.indent)
-    # Inlined scalar constants stay as ``float`` locals — the
-    # consumer's ``Assign``'s render will demote / convert if needed.
-    # (Only valid for scalar Loads; the vectorize pass excludes
-    # literal-const buffers.)
-    lit = ctx.literal_constants.get(stmt.input) if ctx.literal_constants else None
-    if lit is not None and stmt.is_scalar:
-        # An INTEGER constant keeps its own element dtype. Folding it to f32 would decide the
-        # CONSUMER's arithmetic too: ``Assign``'s render reads its args' dtypes to choose between
-        # the native integer spelling and the f32 promotion, and the bit operations (a pack's
-        # shift, a nibble mask) have no f32 spelling at all. Float constants keep the f32
-        # binding, which is what every consumer of them already computes in.
-        if stmt.dtype is not None and stmt.dtype.name in INTEGER_NAMES:
-            ctx.ssa_dtypes[stmt.names[0]] = stmt.dtype.name
-            return [f"{pad}{ctx.type_name(stmt.dtype.name)} {stmt.names[0]} = {int(lit)};"]
-        ctx.ssa_dtypes[stmt.names[0]] = "f32"
-        return [f"{pad}{ctx.type_name('f32')} {stmt.names[0]} = {_float_lit(lit)};"]
     # Prefer the stamped ``stmt.dtype`` (set by ``030_stamp_types``);
     # fall back to ``ctx.buffer_dtypes`` so handwritten test fixtures
     # without a stamped dtype still render correctly.

@@ -137,8 +137,7 @@ class KernelSpec:
 
     @classmethod
     def from_op(cls, op) -> KernelSpec:
-        source = op.kernel_source
-        return cls(source=source, arch_specific=_needs_arch_isa(op), dependent_launch="griddepcontrol.wait" in (source or ""))
+        return cls(source=op.kernel_source, arch_specific=op.arch_specific, dependent_launch=op.dependent_launch)
 
 
 @dataclass
@@ -200,20 +199,6 @@ class ExecutionPlan:
 # ---------------------------------------------------------------------------
 # Graph → plan projection
 # ---------------------------------------------------------------------------
-
-
-#: The block-scaled fp4 mma wrapper and the wgmma wrapper family. A kernel carrying either must
-#: compile for the arch-suffixed target, the same requirement TMA has for a different reason.
-_ARCH_ISA_WRAPPERS = ("emmy_mma_m16n8k64_e2m1_f32", "emmy_wgmma_")
-
-
-def _needs_arch_isa(op) -> bool:
-    """Whether this kernel must compile for ``sm_<cc>a``.
-
-    TMA announces itself structurally through the descriptors. The fp4 mma and the wgmma cells have
-    no such marker at this layer — a plan carries the kernel's rendered source, not its statement
-    tree — so the wrapper name in that source is what identifies them."""
-    return bool(op.tma_descriptors) or any(w in op.kernel_source for w in _ARCH_ISA_WRAPPERS)
 
 
 def plan_from_graph(graph: Graph) -> ExecutionPlan:
