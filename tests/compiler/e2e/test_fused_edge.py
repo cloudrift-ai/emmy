@@ -16,6 +16,8 @@ of the coop ``Map`` form (exercised unpinned below), and a masked / symbolic M c
 
 from __future__ import annotations
 
+import re
+
 import numpy as np
 import pytest
 
@@ -537,7 +539,7 @@ def test_computed_f16_tma_copies_each_weight_beside_the_activation_fill():
         lowered = Pipeline.build(CUDA_PASSES).run(_computed_a_channels_graph(32, 256, 2), ctx=Context.from_target((12, 0)))
     (src,) = [s for node in lowered.nodes.values() if (s := getattr(node.op, "kernel_source", None))]
     kernel = src.split('extern "C" __global__', 1)[1]
-    signature, body = kernel.split("{", 1)[0], kernel.split("for (int _ks", 1)[1]
+    signature, body = kernel.split("{", 1)[0], kernel[re.search(r"for \(int (\w+) = 0; \1 < 256; \1 \+= 32\)", kernel).end() :]
     assert signature.count("const CUtensorMap*") == 2 and "_desc_b," in signature and "_desc_b_x1)" in signature
     assert "emmy_cp_async_cg" not in src, "the weights must not fall back to cp.async"
     assert "_a_smem[" in body and "x[" in body, "the compute threads fill the activation slab from x"
