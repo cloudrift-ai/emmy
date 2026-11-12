@@ -17,6 +17,7 @@ import pytest
 from emmy.commands.golden import handle_golden_check, handle_golden_realize, handle_golden_restamp
 from emmy.compiler.pipeline.search.db import RoutingRow
 from emmy.compiler.pipeline.search.golden import GoldenFile, restamp
+from emmy.compiler.pipeline.search.golden.format import Row
 from emmy.compiler.pipeline.search.golden.repository import _RECORDS_DIR
 
 #: Eight square matmuls with one measured row each — the smallest repository golden, and current.
@@ -109,10 +110,18 @@ def _realize(path, json_out=None, drop=False) -> int:
     return 0
 
 
-def test_realize_names_the_rows_the_compiler_no_longer_realizes_and_drops_them_on_request(golden, tmp_path, caplog):
+def _goldens(monkeypatch, *paths) -> None:
+    """The repository goldens ``emmy golden realize`` walks for a card's reach: ``paths`` alone."""
+    from emmy.compiler.pipeline.search.golden import repository  # noqa: PLC0415
+
+    monkeypatch.setattr(repository, "repository_golden_paths", lambda: contextlib.nullcontext(list(paths)))
+
+
+def test_realize_names_the_rows_the_compiler_no_longer_realizes_and_drops_them_on_request(golden, tmp_path, caplog, monkeypatch):
     """A freeze stores no program, so a restamp cannot see its rows go stale: realize compiles each row under its own
     schedule with the file as the evidence, and a row whose schedule the lowering refuses is reported with the reason.
     ``--drop`` writes the file back without that row, and what is left realizes."""
+    _goldens(monkeypatch, _SMALLEST)
     report = tmp_path / "report.json"
     assert _realize(golden, report) == 0
     assert json.loads(report.read_text()) == [{"file": str(golden), "gpu_name": "NVIDIA GeForce RTX 4080", "rows": 9, "failed": []}]
@@ -134,25 +143,71 @@ def test_realize_names_the_rows_the_compiler_no_longer_realizes_and_drops_them_o
     assert _realize(golden, report) == 0
 
 
-def test_realize_rebuilds_a_piece_through_the_route_a_repository_golden_records(tmp_path, monkeypatch):
-    """A tune of one piece of a golden freezes the piece's rows without the decisions that cut it. The piece is rebuilt
-    through the route a repository golden of the card records, and is unrealized once no golden records one."""
-    from emmy.compiler.pipeline.search.golden import repository  # noqa: PLC0415
+#: A V100 golden row of a piece a fifteen-seam cut left, whose decisions the golden keeps and a tune of the piece does not.
+_PIECE_ROW = "pre16.k_linear_mean_reduce_3eb29d.m16.0e09e2698d6f"
 
-    source = _RECORDS_DIR / "v100_sm70.json"
-    golden = GoldenFile.load(source)
-    row = next(row for row in golden.rows if row.name == "pre16.k_linear_mean_reduce_3eb29d.m16.0e09e2698d6f")
-    piece = golden.kernel(row.kernel)
+
+def _piece_and_golden(tmp_path) -> tuple[GoldenFile, Row, GoldenFile]:
+    """The V100 golden's program of :data:`_PIECE_ROW`'s target alone, the row and the whole file."""
+    source = GoldenFile.load(_RECORDS_DIR / "v100_sm70.json")
+    row = next(row for row in source.rows if row.name == _PIECE_ROW)
+    target = source.kernel(source.path_to(row.kernel)[0].parent)
+    return _one_program(source, target.traced), row, source
+
+
+def test_realize_keeps_the_rows_a_repository_golden_reaches_and_drops_the_rest(tmp_path, monkeypatch):
+    """A freeze is the repository goldens' candidate pools in full, so a row's kernel has to be one their programs
+    reach: a tune of one piece of a golden freezes the piece's rows without the decisions that cut it, and the piece
+    is rebuilt through the route the golden records; a row of a kernel no golden of the card reaches is dropped
+    before anything is compiled, and once no golden is in the repository every row is."""
+    from emmy.compiler.pipeline.search.golden.realize import UNREACHED  # noqa: PLC0415
+
+    golden, row, source = _piece_and_golden(tmp_path)
+    golden.dump(tmp_path / "v100.json")
+    piece = source.kernel(row.kernel)
     assert not piece.formed and golden.path_to(piece.ref)
+    # A kernel of another card, with its row: nothing on the V100 produces it.
+    other = GoldenFile.load(_SMALLEST)
+    stray = next(row for row in other.rows if row.knobs is not None)
     freeze, report = tmp_path / "freeze.json", tmp_path / "report.json"
-    replace(golden, programs=[], kernels=[piece], routing=[], rows=[replace(row, latency=None)]).dump(freeze)
+    rows = [replace(row, latency=None), replace(stray, latency=None)]
+    kernels = [piece, replace(other.kernel(stray.kernel), traced=None, origins=(), bindings={})]
+    replace(source, programs=[], kernels=kernels, routing=[], rows=rows).dump(freeze)
 
-    monkeypatch.setattr(repository, "repository_golden_paths", lambda: contextlib.nullcontext([source]))
-    assert _realize(freeze, report) == 0
-    monkeypatch.setattr(repository, "repository_golden_paths", lambda: contextlib.nullcontext([]))
+    _goldens(monkeypatch, tmp_path / "v100.json")
     assert _realize(freeze, report) == 1
     (failed,) = json.loads(report.read_text())[0]["failed"]
-    assert "no recorded route" in failed["reason"]
+    assert (failed["row"], failed["kernel"], failed["reason"]) == (stray.name, stray.kernel, UNREACHED)
+    assert _realize(freeze, report, drop=True) == 0
+    assert [kept.name for kept in GoldenFile.load(freeze).rows] == [row.name]
+
+    _goldens(monkeypatch)
+    assert _realize(freeze, report) == 1
+    (failed,) = json.loads(report.read_text())[0]["failed"]
+    assert (failed["row"], failed["reason"]) == (row.name, UNREACHED)
+
+
+def test_the_reach_walk_finds_the_pieces_one_cut_off_a_golden_target(tmp_path, monkeypatch):
+    """The reach is the goldens' own walk with every arm of every fork on it counted: a golden that keeps only its
+    target, no decision and no piece, still reaches the pieces one cut leaves — among them a piece of the kernel
+    set its fifteen-seam decision left — and never the decision's deeper pieces."""
+    from emmy.compiler.pipeline.search.golden.realize import _reach_task, card_of, reach_tasks  # noqa: PLC0415
+
+    golden, row, source = _piece_and_golden(tmp_path)
+    target = golden.kernel(golden.path_to(row.kernel)[0].parent)
+    bare = replace(golden, kernels=[target], routing=[], rows=[r for r in golden.rows if r.kernel == target.ref])
+    bare.dump(tmp_path / "bare.json")
+    _goldens(monkeypatch, tmp_path / "bare.json")
+
+    tasks = reach_tasks(card_of(source))
+    assert [task[1:] for task in tasks if len(task) == 2] == [(str(tmp_path / "bare.json"),)]
+    walks = [task for task in tasks if len(task) > 2]
+    assert [task[2:] for task in walks] == [(target.ref, {"num_tokens": 16}, "")]
+    reached = set().union(*(_reach_task(task)[1].kernels for task in walks))
+    pieces = {kernel.exact_identity: kernel.ref for kernel in golden.kernels if kernel.ref != target.ref}
+    found = {pieces[identity] for identity in reached if identity in pieces}
+    assert target.exact_identity in reached and found and all(ref.count("__place_") == 1 for ref in found)
+    assert len(reached) > len(found) + 1, "arms the golden did not take are reached too"
 
 
 def test_restamp_rewrites_the_golden_onto_the_fresh_lowering(golden, caplog):
