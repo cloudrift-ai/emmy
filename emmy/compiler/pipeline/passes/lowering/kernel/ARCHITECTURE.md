@@ -707,7 +707,9 @@ masked branch reads `key > row + c` (or `>=`) with `c ≥ 0` masks every key fro
 row the CTA holds, so the chunk loop stops there; one whose masked branch reads `key < row − c` (or `<=`) masks every
 key before the CTA's block base for every row, so the loop starts on the chunk that key falls in. They become the
 skeleton's `k_first` / `k_end`, CTA-uniform in the grid var alone, bit-identical because a masked chunk folds the carrier
-identity exactly — and derived here, stored nowhere. The mask `Select` in the body is the bound's one source: an
+identity exactly — and derived here, stored nowhere. The skeleton binds `k_end` as one value ahead of the chunk loop
+(a `Let`); the loop stops at it and the prefetch clamps read it, so the bound is evaluated once and the body's normal
+form carries it like any value. The mask `Select` in the body is the bound's one source: an
 axis's domain is its extent in the kernel's axis table, and a row-dependent bound is a relation between two axes
 that only becomes a range once widened to the CTA's rows, so neither the term, the loop IR nor the axis carries it.
 A causal stream gets about half its work back that way, a banded one its band — on a launch of more CTAs than the
@@ -786,14 +788,23 @@ fold step under `__c{i}_{j}` read one value), each value placed at the shallowes
 congruent carried states merged, unread values dropped, values and axes renamed, and sibling statements in the
 canonical order. So every pass reads and writes the same form, and none cleans a body up by hand. What makes this
 sound for hardware statements is their declarations: a statement that updates storage in place says so (a
-cross-thread combine's states, a fragment an `mma` accumulates into), a barrier is ordered against every sibling, and
-a read of storage the body writes carries the version it reads and the barrier it stands behind, while a read of
-storage the body never writes is one value throughout and is shared across a barrier.
+cross-thread combine's states, a fragment an `mma` accumulates into), a statement that writes a buffer says so (an
+async copy and a TMA load write their slab), a barrier is ordered against every sibling, and a read of storage the
+body writes carries the version it reads and the barrier it stands behind, while a read of storage the body never
+writes is one value throughout and is shared across a barrier. An effect a statement does not declare is a wrong
+kernel: the slab of an async copy that did not declare its write read as never written, and its drain left the
+chunk loop.
 
 Two consequences shape every pass here:
 
 - **A pass does not leave an order behind.** Where a statement stands among its siblings is the normal form's. A
-  pass that wants two statements next to each other fuses them into one statement instead.
+  pass that wants two statements next to each other fuses them into one statement instead, and an emitter whose
+  order was a measured choice makes it structure: a staged copy carried across the chunk loop's back edge has no
+  statement that spreads its packed vector into names (where that stood decided how long the elements stayed live);
+  its names are the vector's lanes, and each read takes its lane where it stands.
+- **A name means what a statement binds it to, never what it is spelled like.** The normal form renames every value
+  and axis, so a name another name implies (a loop's `<axis>_end`, a fragment family's `O_i_f3`, an array index
+  written into a name) does not survive it.
 - **A pass that fuses statements reads the scope's ordering constraints, not positions.** The two halves of a load
   pair can stand a whole fragment chain apart, and a vector's elements in any order. `Siblings` (`_siblings.py`)
   holds one scope's statements with their constraints: a set of statements can become one when no other statement

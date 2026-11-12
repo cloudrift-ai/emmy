@@ -826,7 +826,9 @@ from that CSE form. Subroutine boundaries never limit fusion.
   updated value — so the online softmax's rescale reads the old maximum beside the new one; a carried state orders
   nothing within its step, since a `Pre` reads the step before wherever it sits, while the loop that carries the state
   produces it. A scope whose bindings and reads wait on each other has no reading, and normalization refuses it.
-- The driver repeats whole rounds until one leaves the body alone, and refuses a body that does not settle in eight.
+- The driver repeats whole rounds until one leaves the body alone, takes the least by text of forms the rounds
+  alternate between (the crate's `ARCHITECTURE.md` says which bodies do that), and refuses a body that does neither
+  in eight.
   Inside a round, the steps that feed each other run to their own fixed point where they sit: a value placed outside
   its loop can expose a sibling merge, two reads placement made one can leave a predicate constant, and a merge
   exposes values to place, so the merge, the expression simplification and placement run until the first two leave

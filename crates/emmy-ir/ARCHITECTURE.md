@@ -102,9 +102,10 @@ parent's imports.
 (one `Renaming` per body, so a subroutine two calls share is renamed once; the body's renaming and `coalesce` live
 here too), and `rewrite` behind
 `rename` (α, through binders) and `substitute` (β, hygienic: a mapping a statement's own binder shadows is dropped for
-its subtree). The four members no role gives are stated by statement type there: an `Accum`'s reduced axes follow a
-splitting substitution, a `Let` and a `Call` read buffers inside an expression or through a subroutine, a `StridedLoop`
-with an `end` binds `<axis>_end`. A statement type that checks itself is flagged `CHECKED` and does so over its own
+its subtree). The three members no role gives are stated by statement type there: an `Accum`'s reduced axes follow a
+splitting substitution, and a `Let` and a `Call` read buffers inside an expression or through a subroutine. A loop
+that stops early stops at a value bound ahead of it (a `Let`), which its `end` and the statements of its body read
+like any name; the loop implies no name of its own. A statement type that checks itself is flagged `CHECKED` and does so over its own
 fields (`validate`); `Statement::check` dispatches on the flag, and `finished` runs it for every constructor: the checks
 Python's `__post_init__` made.
 
@@ -188,6 +189,12 @@ chain of one associative commutative operation as one node over every term (`Cha
 the term order can give a sum number alike; the exact identity is keyed the same way. The clustered identity keeps the
 chain (`Chains::Kept`): it spells every FMA-class tree as a chain of one representative, and the shape of that chain is
 what tells `a * b - c` from `a * c - b` when the buffers are typed.
+One reading of the order's spelling is left: a difference is keyed by how it is spelled (`a - b` or `-b + a`), and
+the term order picks the spelling. Two chains that compute alike over different cells (the two cells of a register
+tile, each with its own online softmax) can then trade places every round. The rounds alternate between forms that
+are each a whole round's output, and the normal form is the least of them by text, reached from either. Keying a
+difference by its terms would remove the case and move the order of every stored kernel that holds one: a restamp
+decision.
 
 ## Errors
 
