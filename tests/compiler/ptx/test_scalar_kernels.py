@@ -3,21 +3,16 @@ compared with NumPy: bit for bit wherever no fused multiply-add is involved."""
 
 from __future__ import annotations
 
-import textwrap
-
 import numpy as np
 import pytest
-from emmy.emmy_ir import compile_ptx, parse_body
 
-from emmy.compiler import dtype as dtypes
-from emmy.compiler.backend.cuda.program import CompiledProgram
-from emmy.compiler.backend.gpu_lock import gpu_lock
-from emmy.compiler.backend.plan import BufferSpec, ExecutionPlan, KernelSpec, LaunchSpec
-from emmy.compiler.dim import Dim
-from emmy.compiler.ir.kernel.interface import Interface, Param
-from tests.compiler.helpers import device_compute_capability, requires_cuda
+from tests.compiler.helpers import requires_cuda
+from tests.compiler.ptx import launch
+from tests.compiler.ptx.launch import DTYPES as _DTYPES
+from tests.compiler.ptx.launch import floats as _floats
+from tests.compiler.ptx.launch import same_bits as _same_bits
 
-pytestmark = [requires_cuda, pytest.mark.xdist_group("cuda")]
+pytestmark = [requires_cuda, pytest.mark.xdist_group("cuda"), pytest.mark.parametrize("level", launch.LEVELS, ids=["default", "O0"])]
 
 #: Threads per block of every kernel here.
 BLOCK = 256
@@ -28,57 +23,22 @@ Grid(axes=(i in 0..{n}), decode=(block_idx.x * 256 + thread_idx.x), block_thread
     if block_idx.x * 256 + thread_idx.x < {n}:
 """
 
-_DTYPES = {np.dtype(t.np): t for t in (dtypes.F32, dtypes.F16, dtypes.I32)}
 
-
-def _run(body: str, inputs: dict[str, np.ndarray], outputs: dict[str, np.dtype], cells: int, *, fuse: bool = False):
-    """Compile ``body`` to PTX and launch it as ``ceil(cells / BLOCK)`` blocks. Every output holds one element per
-    launched thread and starts at zero, so a thread past the cells that stores anything shows."""
+def _run(body: str, inputs: dict[str, np.ndarray], outputs: dict[str, np.dtype], cells: int, *, level: str | None, fuse: bool = False):
+    """Launch ``body`` as ``ceil(cells / BLOCK)`` blocks. Every output holds one element per launched thread and
+    starts at zero, so a thread past the cells that stores anything shows."""
     blocks = -(-cells // BLOCK)
-    out_dtypes = {name: _DTYPES[np.dtype(t)] for name, t in outputs.items()}
-    params = (
-        *(Param(name, "input", _DTYPES[data.dtype], name) for name, data in inputs.items()),
-        *(Param(name, "output", dtype, name) for name, dtype in out_dtypes.items()),
-    )
-    major, minor = device_compute_capability()
-    ptx = compile_ptx("k", parse_body(body), Interface(params, BLOCK, {}, 0, False), sm=major * 10 + minor, fuse=fuse)
-    names = tuple(param.name for param in params)
-    plan = ExecutionPlan(
-        "cuda",
-        list(inputs),
-        list(outputs),
-        [
-            *(BufferSpec(name, (Dim(data.size),), _DTYPES[data.dtype], "input") for name, data in inputs.items()),
-            *(BufferSpec(name, (Dim(blocks * BLOCK),), dtype, "output") for name, dtype in out_dtypes.items()),
-        ],
-        {},
-        {},
-        [LaunchSpec("k", "k", names, ((blocks,), (1,), (1,)), ((BLOCK,), (1,), (1,)), 0, tuple(outputs), writes=tuple(outputs))],
-        {"k": KernelSpec(source=ptx)},
-    )
-    with gpu_lock():
-        program = CompiledProgram.build_from_plan(plan, dict(inputs))
-        program.run_once()
-        return program.outputs()
+    sized = {name: (dtype, blocks * BLOCK) for name, dtype in outputs.items()}
+    return launch.run(body, inputs, sized, blocks=blocks, level=level, fuse=fuse)
 
 
 def _elementwise(statements: str, n: int) -> str:
     """``statements`` as the body of one thread per element ``i`` of ``n``."""
-    return ELEMENTWISE.format(n=n) + textwrap.indent(textwrap.dedent(statements).strip("\n"), " " * 8)
-
-
-def _floats(n: int, dtype, seed: int = 0) -> np.ndarray:
-    return np.random.default_rng(seed).standard_normal(n).astype(dtype)
-
-
-def _same_bits(got: np.ndarray, expected: np.ndarray) -> None:
-    assert got.dtype == expected.dtype
-    unsigned = np.dtype(f"u{got.dtype.itemsize}")
-    np.testing.assert_array_equal(got.view(unsigned), expected.view(unsigned))
+    return launch.under(ELEMENTWISE.format(n=n), statements, depth=2)
 
 
 @pytest.mark.parametrize("dtype", [np.float32, np.float16])
-def test_pointwise_add_and_multiply_add_match_numpy_bit_for_bit(dtype):
+def test_pointwise_add_and_multiply_add_match_numpy_bit_for_bit(dtype, level):
     """``a + b`` and, with the fusion decision off, ``a * b + c`` round each operation as NumPy does, in f32 and
     natively in f16. The 1,000 cells leave a tail of 24 threads, which store nothing."""
     n, ty = 1000, _DTYPES[np.dtype(dtype)].name
@@ -96,13 +56,13 @@ def test_pointwise_add_and_multiply_add_match_numpy_bit_for_bit(dtype):
         """,
         n,
     )
-    out = _run(body, {"a": a, "b": b, "c": c}, {"sum": dtype, "mad": dtype}, n)
+    out = _run(body, {"a": a, "b": b, "c": c}, {"sum": dtype, "mad": dtype}, n, level=level)
     _same_bits(out["sum"][:n], a + b)
     _same_bits(out["mad"][:n], a * b + c)
     assert not out["sum"][n:].any() and not out["mad"][n:].any()
 
 
-def test_a_fused_multiply_add_rounds_once():
+def test_a_fused_multiply_add_rounds_once(level):
     """With the fusion decision on, ``a * b + c`` is one ``fma``: the product is not rounded before the sum. Every
     result is the float64 value rounded to f32, and some differ from the two-rounding result."""
     n = 4096
@@ -118,14 +78,14 @@ def test_a_fused_multiply_add_rounds_once():
         """,
         n,
     )
-    out = _run(body, {"a": a, "b": b, "c": c}, {"mad": np.float32}, n, fuse=True)["mad"]
+    out = _run(body, {"a": a, "b": b, "c": c}, {"mad": np.float32}, n, level=level, fuse=True)["mad"]
     # The product of two f32 values is exact in float64, so this is the fused value up to one more rounding.
     fused = (a.astype(np.float64) * b + c).astype(np.float32)
     np.testing.assert_allclose(out, fused, rtol=2e-7, atol=0)
     assert (out != a * b + c).any()
 
 
-def test_a_loop_sums_its_trips_in_order():
+def test_a_loop_sums_its_trips_in_order(level):
     """A reduce loop steps its accumulator once per trip, in order: the f32 sum and sum of squares of eight elements
     per cell, each equal to NumPy's sum taken in the same order."""
     n, trips = 2000, 8
@@ -144,7 +104,7 @@ def test_a_loop_sums_its_trips_in_order():
         """,
         n,
     )
-    out = _run(body, {"a": a}, {"sum": np.float32, "squares": np.float32, "largest": np.float32}, n)
+    out = _run(body, {"a": a}, {"sum": np.float32, "squares": np.float32, "largest": np.float32}, n, level=level)
     rows = a.reshape(n, trips)
     total, squares = np.zeros(n, np.float32), np.zeros(n, np.float32)
     for j in range(trips):
@@ -155,7 +115,7 @@ def test_a_loop_sums_its_trips_in_order():
     _same_bits(out["largest"][:n], rows.max(axis=1))
 
 
-def test_a_select_takes_its_first_branch_that_holds():
+def test_a_select_takes_its_first_branch_that_holds(level):
     n = 1500
     a, b = _floats(n, np.float32, 0), _floats(n, np.float32, 1)
     body = _elementwise(
@@ -171,12 +131,12 @@ def test_a_select_takes_its_first_branch_that_holds():
         """,
         n,
     )
-    out = _run(body, {"a": a, "b": b}, {"o": np.float32}, n)["o"]
+    out = _run(body, {"a": a, "b": b}, {"o": np.float32}, n, level=level)["o"]
     i = np.arange(n)
     _same_bits(out[:n], np.where(i % 3 == 0, a, np.where(a > b, b, -a)))
 
 
-def test_an_integer_index_divides_and_takes_remainders_as_python_does():
+def test_an_integer_index_divides_and_takes_remainders_as_python_does(level):
     """A gather through quotients and remainders: by a power of two, by another constant over a non-negative index
     and over a value that goes negative (the multiply-high forms), and by a divisor of either sign read from a
     buffer (the divide instruction). Every quotient and remainder floors."""
@@ -203,7 +163,7 @@ def test_an_integer_index_divides_and_takes_remainders_as_python_does():
         """,
         n,
     )
-    out = _run(body, {"a": a, "d": d}, {"o": np.float32, "codes": np.int32, "others": np.int32}, n)
+    out = _run(body, {"a": a, "d": d}, {"o": np.float32, "codes": np.int32, "others": np.int32}, n, level=level)
     i = np.arange(n, dtype=np.int64)
     _same_bits(out["o"][:n], a[(i // 7) * 3 + i % 5 + i // 4])
     shifted = i - 1000
@@ -211,7 +171,7 @@ def test_an_integer_index_divides_and_takes_remainders_as_python_does():
     np.testing.assert_array_equal(out["others"][:n], (shifted // d) * 16 + shifted % d)
 
 
-def test_a_grid_of_two_axes_guards_its_tail():
+def test_a_grid_of_two_axes_guards_its_tail(level):
     """Rows of eight columns decoded from the flat thread index, 125 rows over four blocks: the last 24 threads are
     past the cells and store nothing."""
     rows, columns = 125, 8
@@ -225,13 +185,13 @@ Grid(axes=(r in 0..{rows}, c in 0..{columns}), decode=((block_idx.x * 256 + thre
         f32 v = y + (f32)c
         f32 o[r * {columns} + c] = v
 """
-    out = _run(body, {"a": a}, {"o": np.float32}, rows * columns)["o"]
+    out = _run(body, {"a": a}, {"o": np.float32}, rows * columns, level=level)["o"]
     r, c = np.divmod(np.arange(rows * columns), columns)
     _same_bits(out[: rows * columns], a * (r + 1).astype(np.float32) + c.astype(np.float32))
     assert not out[rows * columns :].any()
 
 
-def test_half_values_convert_through_f32_and_back():
+def test_half_values_convert_through_f32_and_back(level):
     """A half loaded, widened to f32, computed on and narrowed back rounds as NumPy's conversions do, and its
     truncation to an integer is C's."""
     n = 1000
@@ -249,7 +209,7 @@ def test_half_values_convert_through_f32_and_back():
         """,
         n,
     )
-    out = _run(body, {"a": a}, {"o": np.float16, "whole": np.int32}, n)
+    out = _run(body, {"a": a}, {"o": np.float16, "whole": np.int32}, n, level=level)
     y = a.astype(np.float32) * np.float32(1.5)
     _same_bits(out["o"][:n], np.sqrt(np.abs(y)).astype(np.float16))
     np.testing.assert_array_equal(out["whole"][:n], np.trunc(y).astype(np.int32))
