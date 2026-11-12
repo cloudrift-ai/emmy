@@ -44,6 +44,7 @@ store, which now hands the query out per key-value head) and 0.7 µs (the unfold
 | TPOT / TTFT, 261,632-token prompt | 11.4 ms / 251 s | does not fit | 17.7 ms / 277 s |
 | drafts accepted at 256 / 7,680 / 197,632 / 261,632 | 63 / 77 / 68 / 75% | not read: its stream spaces every token | 75 / 79 / 71 / 64% |
 | device memory at rest | 27.9 GiB | 30.4 GiB | 27.9 GiB |
+| GSM8K strict / flexible match | 0.725 / 0.755 | | 0.715 / 0.765 |
 
 - **Against this session's stock column.** TPOT is inside the bar at 7,680 tokens (1.13x stock, the bar 1.2x) and
   at 197,632 (1.20x, the bar 1.5x) and outside it at 256 (1.25x). The first token is ahead of stock at 256 tokens and
@@ -54,7 +55,8 @@ store, which now hands the query out per key-value head) and 0.7 µs (the unfold
   the bound is 8 ms and the 2026-11-07 step was +14.4.
 - **The short cells.** The step is 21.6 ms where 2026-11-07 captured 21.1; TPOT at 256 tokens reads higher here
   because these prompts accept fewer drafts (2.26 tokens a step).
-- **GSM8K and the probe tokens were not run in this session.**
+- **GSM8K holds:** 0.725 strict and 0.755 flexible match on native (standard error 0.032), against 0.715 / 0.765 on
+  2026-11-07. Stock was not scored in this session, and the probe tokens were not compared.
 
 Where the time goes, from `nsys --cuda-graph-trace=node` (one request at 7,680 tokens and one at 197,632), each
 launch priced at its kernel's median:
