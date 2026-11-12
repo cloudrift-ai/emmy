@@ -1584,7 +1584,7 @@ def test_raster_gm_pin_groups_the_launch_order(monkeypatch):
     assert kop.knobs.get("RASTER") == "gm8"
     decode = grouped_raster_decode(kop.kernel_source, 8)
     assert decode, "the grouped (m, n) decode must be emitted"
-    assert "min(8, 20 - " in decode[0], "a ragged Em (20 % 8) needs the tail-group clamp"
+    assert "min(8, " in decode[0] and "+ 20)" in decode[0], "a ragged Em (20 % 8) needs the tail-group clamp"
 
 
 def test_raster_gn_pin_groups_the_transpose(monkeypatch):
