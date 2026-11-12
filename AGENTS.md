@@ -83,8 +83,8 @@ The passes `ARCHITECTURE.md` owns the design; `tests/compiler/passes/test_maxima
 
 Body normalization (the `normalize` module of the `emmy-ir` crate, behind the one entry point `normalize_body` the
 `ir/stmt` package exports) is the canonical form every Loop IR and Kernel IR body takes at construction and inside
-every identity digest. It runs the same on every body, so it answers to no knob, pin or evidence, and nothing under `ir/` imports the
-pipeline that holds them.
+every identity digest. It runs the same on every body, so it answers to no knob, pin or evidence, and nothing under
+`ir/` imports the pipeline that holds them.
 
 - **A transform that something decides is a pipeline pass.** A knob the search sets, a pin, a pass stage: the
   transform lives in the pass file that owns the decision under `pipeline/passes/`, even when it is a pure body → body
