@@ -310,6 +310,11 @@ class Context:
         return precision_pins(dict(self.precision))
 
     @property
+    def has_tanh_approx(self) -> bool:
+        """Whether the target has the approximate hyperbolic tangent instruction (``tanh.approx.f32``)."""
+        return self.compute_capability >= (7, 5)
+
+    @property
     def has_volta_mma(self) -> bool:
         """Whether the scheduler selects the Volta ``mma.sync.m8n8k4`` family."""
         return (7, 0) <= self.compute_capability < (8, 0)

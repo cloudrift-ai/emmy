@@ -29,7 +29,7 @@ off both (``(kv0, 0)`` vs ``(kv0, 8)``) and reconciles them as one affine family
 contraction into two nested ``#pragma unroll`` loops: pass k re-rolls the inner N-atoms, pass k+1 sees
 the resulting sibling loops as a run and wraps them.
 
-Modeled on ``085_fast_exp`` (the pin-only kernel-IR peephole mold): ``PATTERN = [Pattern("root",
+Modeled on ``130_approximate_math`` (the pin-only kernel-IR peephole mold): ``PATTERN = [Pattern("root",
 KernelOp)]`` and a ``rewrite`` that stamps the knob and returns the body unchanged when off — so the
 **entire default pipeline runs LOOPIFY-off and is byte-identical** (no golden / snapshot churn). The knob
 is an INT = the minimum run length ``N`` to re-roll (``LOOPIFY.read_int(0)``): ``0`` / unset / ``< 2`` →

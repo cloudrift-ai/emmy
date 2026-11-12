@@ -49,7 +49,7 @@ def precision_flags(pins: dict[str, bool]) -> list[str]:
     ``--use_fast_math`` when the umbrella and the exponential knob are both on: the flag also approximates exp, and
     with it the transcendental functions no knob names (log, sine, cosine, tanh, pow), and no flag after it restores
     the accurate exp. Then each instruction class whose decision that flag, or nvcc's own default without it, does
-    not imply, spelled by its own flag. The exponential itself is the kernel's ``__expf`` (``lowering/kernel/085``)."""
+    not imply, spelled by its own flag. The exponential itself is the kernel's ``__expf`` (``lowering/kernel/130``)."""
     from emmy.compiler.context import FAST_MATH_FLAG  # noqa: PLC0415
     from emmy.compiler.pipeline.search.space import CONTRACT_FMA, FAST_DIV, FAST_EXP, FAST_MATH, FAST_SQRT, FLUSH_TO_ZERO  # noqa: PLC0415
 

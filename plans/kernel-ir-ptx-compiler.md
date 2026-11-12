@@ -14,7 +14,7 @@ same reason (below).
 
 ## Status (2026-11-12)
 
-PR A is draft #1393. Steps 1 to 5 are done, each checked on the corpus's rendered CUDA. Steps 3 to 5 changed the
+PR A is draft #1393. Steps 1 to 6 are done, each checked on the corpus's rendered CUDA. Steps 3 to 6 changed the
 text and ran the corpus at `correct` on the RTX 5090. No step ran the perf lane or the whole suite yet; both wait for
 the closing step.
 
@@ -25,6 +25,31 @@ the closing step.
 | 3 | `8e44947fb` | 58 of 296 kernels: conversions as definitions, literals at their dtype, one integer negation |
 | 4 | `42c46cc44` | 72 kernels: the `lane` and `warp` declarations, dropped in 42 and moved into the grid in 30 |
 | 5 | `0936d9d9d` | 3 kernels: a `sigmoid` as four assignments |
+| 6 | this commit | 12 of the 42 fast-math kernels: the reciprocal (7), division (7), a `sigmoid`'s exponential (3) and the logarithm (2) as approximate operations; machine code identical in all 12 |
+
+What step 6 found, checked with `nvcc -ptx` and `nvdisasm` (CUDA 13.0, `sm_75` to `sm_120`):
+
+- `--use_fast_math` is `-ftz=1 -prec_div=0 -prec_sqrt=0 -fmad=1 -fast-math --gen_div_approx_ftz` to cicc. Each
+  instruction it picks has an explicit spelling that gives the same PTX with the flag off: `__expf` (`mul`,
+  `ex2.approx`), `__logf` (`lg2.approx`, `mul`), `__sinf`, `__cosf`, `__powf` (`lg2.approx`, `mul`, `ex2.approx`),
+  `__fdividef` (`div.approx`), and inline PTX for `rcp.approx`, `sqrt.approx` and `tanh.approx`. The intrinsics take
+  `.ftz` from `--ftz`; inline PTX does not, so the two helpers nvcc flushes say `.ftz` from the kernel's decision.
+  `tanh.approx` has no flushing form and needs sm_75.
+- `rsqrtf` is `rsqrt.approx` in every regime, so the reciprocal square root has no second form.
+- `1.0f / x` under approximate division is `rcp.approx`, not `div.approx` with a one: the two differ by one
+  instruction in machine code, so the reciprocal is an operation of its own.
+- **`--prec-div=false` alone is `div.full`, not `div.approx`.** Only `--use_fast_math` gives `div.approx`. The
+  operation is `div.approx` everywhere, so `FAST_DIV` pinned on outside the fast-math lane (with `FAST_MATH` off, or
+  with `FAST_EXP` pinned off) changes instruction. No stored row is in either regime.
+- A `sigmoid` written out by step 5 kept `expf` under `FAST_EXP` with `FAST_MATH` off; it takes `__expf` now, like
+  every other exponential.
+- A `sigmoid` that a `FragmentApply`, a combine or a store epilogue holds as one operation cannot take one
+  approximate part: it becomes `sigmoid_fast` (both parts) when both knobs are on, and stays exact otherwise.
+- The pass cannot stay where `085_fast_exp` was. An approximate instruction is an f32 instruction, and where an
+  operation computes is known only after step 3's `120`; the composites are written out by `125`. It is `130`, the
+  last kernel pass.
+- A kernel whose output buffer is named `log` did not compile: the kernel renderer had no spelling for the logarithm
+  and printed `log(`. It prints `logf(` now.
 
 ## End state
 
@@ -174,9 +199,10 @@ no restamp is expected. A row whose time moves is measured again in the closing 
    it through the table, and PR B's compiler applies the same table there. *Check: text; cicc already shares these,
    so no time should move.*
 6. **Approximate math as operations.** `085_fast_exp` grows into the one pass that picks, under the precision knobs,
-   the approximate form of each instruction class: exponential, division and reciprocal, square root and its
-   reciprocal, and the functions `--use_fast_math` covers today (log, sine, cosine, power). Each form is its own
-   elementwise operation, as `exp_fast` and `divide_rn_f32` already are. *Check: perf lane level.*
+   the approximate form of each instruction class: exponential, division and reciprocal, square root, and the
+   functions `--use_fast_math` covers today (log, sine, cosine, hyperbolic tangent, power). Each form is its own
+   elementwise operation, as `exp_fast` and `divide_rn_f32` already are. It runs last, as `130_approximate_math`.
+   *Check: perf lane level.*
 7. **nvcc flags shrink to the two whole-kernel decisions**, as its own commit after step 6: `--use_fast_math`,
    `--prec-div` and `--prec-sqrt` go; `--fmad` and `--ftz` stay until PR B hands them to the compiler. This commit
    re-baselines timings by itself, so it carries its own perf-lane run.

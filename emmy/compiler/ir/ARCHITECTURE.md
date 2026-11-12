@@ -635,7 +635,10 @@ recurse via `pretty_body`).
 CUDA scalar rendering goes through `op_to_expression` in `ir/render.py`. It spells primitive operations only: a
 composite function (`sigmoid`, `relu`, `square`, `reciprocal`) is its definition in the operations' table
 (`Expression.definition`), which kernel lowering writes into the body (`125_spell_composites`) and the renderer
-reads for the statements that keep one operation (`FragmentApply`, a carried program). Boolean masks retain the historical f32 SSA
+reads for the statements that keep one operation (`FragmentApply`, a carried program). An approximate instruction is
+an operation the body names (`exp_fast`, `divide_fast`, `reciprocal_fast`, `sqrt_fast`, `log_fast`, …, picked by
+`130_approximate_math`): CUDA's fast intrinsic where one exists (`__expf`, `__fdividef`), else a helper in inline PTX
+the kernel renderer emits, with `.ftz` when the kernel flushes to zero. Boolean masks retain the historical f32 SSA
 convention, so Torch's `bitwise_not` spelling renders as logical zero-test (`mask == 0`); explicitly bool-stamped values
 use the same semantics. Integer complement is not inferred from that name and fails closed until it has a typed
 consumer.

@@ -26,6 +26,7 @@ from emmy.compiler.ir.stmt import Load, Write, ZeroPrologue, check_types
 from emmy.compiler.pipeline import Match, Pattern, RuleSkipped
 from emmy.compiler.pipeline.passes.lowering.cuda._helpers import atomic_outputs as _atomic_outputs
 from emmy.compiler.pipeline.passes.lowering.cuda._helpers import launch_name
+from emmy.compiler.pipeline.search.space import FLUSH_TO_ZERO, precision_pin
 
 PATTERN = [Pattern("root", KernelOp)]
 
@@ -117,7 +118,14 @@ def rewrite(match: Match, root: Node) -> CudaOp | None:
     pair_tables = frozenset(n for n in kernel.inputs if is_f4_pair_table(match.graph.nodes.get(n)))
     # The input check of whatever generates this kernel's code: the body says every type and every conversion.
     check_types(kernel.body, {name: dtype.name for name, dtype in buffer_dtypes(kernel, tensors).items()})
-    source = render_kernelop(kernel, tensors=tensors, runtime_args=runtime_args, paged_buffers=paged, pair_tables=pair_tables)
+    source = render_kernelop(
+        kernel,
+        tensors=tensors,
+        runtime_args=runtime_args,
+        paged_buffers=paged,
+        pair_tables=pair_tables,
+        flush_to_zero=precision_pin(FLUSH_TO_ZERO),
+    )
 
     # A cooperative tile fixes the per-CTA thread count (``coop · ∏block-cells``): one CTA
     # per output-cell group, ``blockDim = block_threads``, ``gridDim = N / block_threads``

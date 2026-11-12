@@ -1606,12 +1606,14 @@ admits the fixed domain's f16-accumulate atom choices (`mma_m16n8k16_f16_f16` �
 `FP8_MMA` admits its native fp8 atoms. Without the effective gate, Algorithm 1's immutable context excludes those
 choices while composing its lazy frontier.
 The other five are one knob per instruction class, each picking the instruction its class compiles to.
-`FAST_EXP` swaps libm `expf` for `__expf` (`lowering/kernel/085_fast_exp`); `FAST_DIV` picks approximate division
+`FAST_EXP` swaps libm `expf` for `__expf` (`lowering/kernel/130_approximate_math`); `FAST_DIV` picks approximate division
 and reciprocal, and is the one home of multiplying by a reciprocal (`lowering/kernel/040_split_invariant_divides`);
 `FAST_SQRT` the approximate square root; `FLUSH_TO_ZERO` flushes subnormals; `CONTRACT_FMA` fuses a multiply and an
 add. `FAST_EXP` with `FLUSH_TO_ZERO` off is the fast exponential that keeps subnormal results: ptxas lowers the
 non-flushing `ex2.approx.f32` under `__expf` to one hardware exponential on a halved argument and a squaring of its
-result, as accurate there as an explicit shift and scale. Through nvcc each class is a flag (`backend.cuda.nvcc.precision_flags`): `--use_fast_math` when the umbrella and
+result, as accurate there as an explicit shift and scale. The approximate instruction of a class is an operation the
+kernel body names (`exp_fast`, `divide_fast`, `reciprocal_fast`, `sqrt_fast`), written by
+`lowering/kernel/130_approximate_math`. nvcc still takes each class as a flag too (`backend.cuda.nvcc.precision_flags`): `--use_fast_math` when the umbrella and
 `FAST_EXP` are both on — the flag also approximates exp and the transcendental functions no knob names (log, sine,
 cosine, tanh, pow), and nothing after it restores the accurate exp — then `--ftz` / `--prec-div` / `--prec-sqrt` /
 `--fmad` for each decision that base does not imply. At their defaults the new classes spell nothing, so the flags,

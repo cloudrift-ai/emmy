@@ -47,10 +47,25 @@ _NARROW_DTYPES = (*_SCALAR_NARROW_FLOATS, "f16x2", "f4e2m1x2")
 
 # Intrinsic spellings — per dtype.  Keys are abstract op names emitted
 # by ``op_to_expression`` (``"exp"``, ``"fmax"``, ``"fabs"``, ...).
+#: The approximate form of each instruction class, as the operations' table names them: CUDA's fast intrinsic where
+#: one exists, else a helper in inline PTX the kernel renderer emits. Each is the instruction ``--use_fast_math``,
+#: ``--prec-div=false`` or ``--prec-sqrt=false`` picks for the exact spelling.
+APPROXIMATE_INTRINSICS: dict[str, str] = {
+    "exp_fast": "__expf",  # mul, ex2.approx
+    "log_fast": "__logf",  # lg2.approx, mul
+    "sin_fast": "__sinf",  # sin.approx
+    "cos_fast": "__cosf",  # cos.approx
+    "pow_fast": "__powf",  # lg2.approx, mul, ex2.approx
+    "divide_fast": "__fdividef",  # div.approx
+    "reciprocal_fast": "emmy_rcp_approx",  # rcp.approx
+    "sqrt_fast": "emmy_sqrt_approx",  # sqrt.approx
+    "tanh_fast": "emmy_tanh_approx",  # tanh.approx
+}
+
 _INTRINSIC_F32: dict[str, str] = {
+    **APPROXIMATE_INTRINSICS,
     "divide_rn_f32": "__fdiv_rn",
     "exp": "expf",
-    "exp_fast": "__expf",
     "log": "logf",
     "rsqrt": "rsqrtf",
     "sin": "sinf",

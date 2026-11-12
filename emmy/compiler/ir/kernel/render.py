@@ -12,7 +12,7 @@ import numpy as np
 
 from emmy.compiler.backend.cuda.dtype import cuda_includes, cuda_name
 from emmy.compiler.backend.cuda.dtype import nbytes_of as _nbytes_of
-from emmy.compiler.backend.cuda.render_target import CudaRenderTarget
+from emmy.compiler.backend.cuda.render_target import APPROXIMATE_INTRINSICS, CudaRenderTarget
 from emmy.compiler.dim import spans_one_page
 from emmy.compiler.dtype import F4_VALUES, F32
 from emmy.compiler.ir.kernel.interface import Param, kernel_interface
@@ -93,6 +93,27 @@ static __device__ __forceinline__ __half emmy_f4_pair(int i) {
 }
 
 """
+
+
+def _approximate_prelude(body_text: str, flush_to_zero: bool) -> str:
+    """The approximate instructions CUDA has no intrinsic for (``__expf``, ``__logf``, ``__fdividef`` and the like
+    cover the rest), in inline PTX: the ones ``body_text`` calls. Inline PTX takes no modifier from nvcc's ``--ftz``,
+    so the two instructions nvcc flushes under it say ``.ftz`` here, from the kernel's flush-to-zero decision;
+    ``tanh.approx`` has no flushing form."""
+    ftz = ".ftz" if flush_to_zero else ""
+    helpers = (
+        ("emmy_rcp_approx", f"rcp.approx{ftz}.f32"),
+        ("emmy_sqrt_approx", f"sqrt.approx{ftz}.f32"),
+        ("emmy_tanh_approx", "tanh.approx.f32"),
+    )
+    return "".join(
+        f"static __device__ __forceinline__ float {name}(float x) {{\n"
+        f'    float y; asm("{instruction} %0, %1;" : "=f"(y) : "f"(x)); return y;\n'
+        "}\n\n"
+        for name, instruction in helpers
+        if f"{name}(" in body_text
+    )
+
 
 _BITCAST_PRELUDE = """\
 template <typename To, typename From>
@@ -1388,9 +1409,10 @@ def _wgmma_prelude(kernel_op: KernelOp) -> str:
 
 
 _INTRINSIC_TO_CUDA: dict[str, str] = {
+    **APPROXIMATE_INTRINSICS,
     "divide_rn_f32": "__fdiv_rn",
     "exp": "expf",
-    "exp_fast": "__expf",
+    "log": "logf",
     "rsqrt": "rsqrtf",
     "sin": "sinf",
     "cos": "cosf",
@@ -1434,6 +1456,7 @@ def render_kernelop(
     runtime_args: tuple[str, ...] = (),
     paged_buffers: tuple[tuple[str, int, int], ...] = (),
     pair_tables: frozenset[str] = frozenset(),
+    flush_to_zero: bool = False,
 ) -> str:
     """Render a complete ``extern "C" __global__`` CUDA function for a ``KernelOp``.
 
@@ -1463,6 +1486,9 @@ def render_kernelop(
     ``pair_tables`` names the inputs that are the e2m1 pair table an NVFP4 weight decodes through: a
     ``Load`` from one computes its value (``_F4_PAIR_PRELUDE``) instead of reading it. The buffer
     stays a parameter, so the signature does not change.
+
+    ``flush_to_zero`` is the kernel's flush-to-zero decision, for the instructions written in inline PTX: nvcc's
+    ``--ftz`` reaches every other one.
 
     Kernel signature is derived from the body: ``kernel_op.inputs``
     (distinct ``Load.input`` names) become input params,
@@ -1605,8 +1631,9 @@ def render_kernelop(
     bitcast_prelude = _BITCAST_PRELUDE if "emmy_bitcast<" in body_text else ""
     f4_encode = _F4_ENCODE_PRELUDE if "emmy_to_f4e2m1(" in body_text else ""
     f4_encode += _F4_PAIR_PRELUDE if "emmy_f4_pair(" in body_text else ""
+    approximate = _approximate_prelude(body_text, flush_to_zero)
     preludes = (
-        f"{includes}{bitcast_prelude}{f4_encode}{mma_sync_prelude}{_wgmma_prelude(kernel_op)}"
+        f"{includes}{bitcast_prelude}{f4_encode}{approximate}{mma_sync_prelude}{_wgmma_prelude(kernel_op)}"
         f"{cp_async_prelude}{_swizzle_prelude(kernel_op)}{prelude}"
     )
     header = f'{preludes}extern "C" __global__{launch_bounds} void {kernel_op.name}({params_text})'

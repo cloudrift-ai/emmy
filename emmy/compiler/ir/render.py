@@ -221,6 +221,13 @@ _INTEGER_BINARY_OP: dict[str, str] = {
 }
 
 
+#: The operations a target spells as a call of one argument: a math function, or the approximate form of one.
+_UNARY_CALLS = frozenset(
+    {"exp", "log", "rsqrt", "sin", "cos", "tanh", "sqrt", "erf", "floor"}
+    | {"exp_fast", "log_fast", "sin_fast", "cos_fast", "tanh_fast", "sqrt_fast", "reciprocal_fast"}
+)
+
+
 def op_to_expression(fn: str, inputs: list[Expression], *, dtype: str | None = None) -> Expression:
     """Translate an elementwise op name to an ``Expression`` tree.
 
@@ -243,8 +250,8 @@ def op_to_expression(fn: str, inputs: list[Expression], *, dtype: str | None = N
         return FunctionCallExpression("fmax", tuple(inputs))
     if fn == "minimum":
         return FunctionCallExpression("fmin", tuple(inputs))
-    if fn == "pow":
-        return FunctionCallExpression("pow", tuple(inputs))
+    if fn in ("pow", "pow_fast", "divide_fast"):
+        return FunctionCallExpression(fn, tuple(inputs))
     if fn == "negative":
         return BinaryExpression("-", Literal(0, "int") if dtype in INTEGER_NAMES else Literal(0.0, "float"), inputs[0])
     if fn in ("copy", "pad"):
@@ -273,7 +280,7 @@ def op_to_expression(fn: str, inputs: list[Expression], *, dtype: str | None = N
             lambda n: n if n.operation is None else op_to_expression(n.operation.name, list(n.operands), dtype=dtype)
         )
         return spelled.substitute({"x": inputs[0]})
-    if fn in ("exp", "exp_fast", "log", "rsqrt", "sin", "cos", "tanh", "sqrt", "erf", "floor"):
+    if fn in _UNARY_CALLS:
         return FunctionCallExpression(fn, tuple(inputs))
     if fn == "abs":
         return FunctionCallExpression("fabs", tuple(inputs))

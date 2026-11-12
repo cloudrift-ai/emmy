@@ -926,12 +926,25 @@ one multiply, fewer instructions than the selects, so the pair keeps both. It re
 register and split merges, and a cooperative combine's merge. The recipe keeps
 both exponentials: it is Loop IR, which every attention kernel's identity reads.
 
-`085_fast_exp` follows the enabled `FAST_MATH` default, unless an explicit `FAST_EXP` pin overrides it. It lowers `exp`
-through `__expf`, promoting half inputs and rounding back afterward, and records the policy for idempotence. The rewrite
-reaches every expression a statement holds, so it includes the statements a field carries that are not a body: a
-generated `RegStore` epilogue and a cooperative combine's merge (`WarpShuffle` / `TreeHalve` `combine_states`, the
-online softmax's rescale factors). Host evaluation continues to use
-`exp`; only CUDA evaluation uses the approximate intrinsic. `100_loopify` remains off by default (`EMMY_LOOPIFY=N`), a
+`130_approximate_math`, the last kernel pass, picks every approximate instruction a kernel runs. An approximate
+instruction is an operation of the body, named after the exact one (`exp_fast`, `divide_fast`, `reciprocal_fast`,
+`sqrt_fast`, `log_fast`, `sin_fast`, `cos_fast`, `tanh_fast`, `pow_fast`); no compiler flag picks one. Each class
+follows its own decision: `FAST_EXP` the exponential, `FAST_DIV` division and the reciprocal (a division of one is the
+reciprocal instruction), `FAST_SQRT` the square root, and `FAST_MATH` with `FAST_EXP` the functions no knob names
+(logarithm, sine, cosine, power, and the hyperbolic tangent from sm_75 on). The reciprocal square root has one
+instruction, the approximate one, in every regime, so it has no second form.
+
+An approximate instruction is an f32 instruction. An operation is picked where it computes in f32 and stays as it is
+where it computes natively in f16 or over integers, which is why the pass runs after `120` has typed the body and `125`
+has written the composites out. A half exponential is the one exception, the knob's own: it is picked too, and the
+type rules then compute it in f32 and round it back. The pass walks the four places an operation sits: an `Assign`
+of the body, a cooperative combine's merge (`WarpShuffle` / `TreeHalve` `combine_states`), a `FragmentApply`'s
+operation with its unary tail, and a `RegStore` epilogue, the stores grouped with it included. An epilogue is typed
+only when it is printed, so each of its definitions is typed here by the same rules to read where it will compute.
+The last three hold one operation where the body holds a definition, so a composite stays whole there: a
+`reciprocal` becomes `reciprocal_fast`, and a `sigmoid` becomes `sigmoid_fast` when the exponential and the division
+are both approximate; it keeps both exact otherwise. It records `FAST_EXP` on the kernel for idempotence. Host
+evaluation computes every approximate form as the exact operation. `100_loopify` remains off by default (`EMMY_LOOPIFY=N`), a
 generic **loop re-roller** iterated to a fixpoint. Loopify folds a maximal run of ≥ `N` congruent per-fragment
 statements — an mma body's per-fragment epilogue (`FragmentApply`), its load+mma pairs, the fragment `RegStore`s, the
 A-fragment loads, a nested contraction's K-chunks × N-atoms — into `#pragma unroll` `StridedLoop`s over `_r{depth}`. The

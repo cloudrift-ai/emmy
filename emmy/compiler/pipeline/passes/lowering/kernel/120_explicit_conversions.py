@@ -1,6 +1,7 @@
 """Type the lowered body in full: every operation at one dtype, every conversion a definition of its own.
 
-The last kernel pass that types anything (``125_spell_composites`` follows it and keeps the types). Until here a
+The kernel pass that types the body (``125_spell_composites`` follows it and keeps the types; ``130_approximate_math``
+calls the same rules for a half exponential it moves to f32). Until here a
 conversion is implied: an ``Assign`` over operands of another dtype, a ``Write`` of an f32 value into an f16 buffer.
 The rules that say where each operation computes (natively in f16 where the target has the operation, else in f32
 with the result converted once) are :func:`emmy.compiler.ir.types.explicit_conversions`; after it a code generator
