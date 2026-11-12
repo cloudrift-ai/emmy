@@ -128,7 +128,8 @@ impl SequentialScope {
                     continue;
                 }
                 if stmt.is_pure() && self.owned.contains(&name) {
-                    self.ssa.insert(name, counters.fresh(&name, ssa_prefix(stmt)));
+                    self.ssa
+                        .insert(name, counters.fresh(&name, ssa_prefix(stmt)));
                 } else {
                     self.allocate(counters, &name, ssa_prefix(stmt));
                 }
@@ -1624,7 +1625,10 @@ for r in 0..4:
                     O[m, k] = out
             ",
         );
-        let at = |needle: &str| out.find(needle).unwrap_or_else(|| panic!("{needle}\n{out}"));
+        let at = |needle: &str| {
+            out.find(needle)
+                .unwrap_or_else(|| panic!("{needle}\n{out}"))
+        };
         assert!(at("_scale = load S[m]") < at("for k in"), "{out}");
         assert!(at("zeta = load T") < at("alpha = load U"), "{out}");
         assert!(at("alpha = load U") < at("prod = "), "{out}");
@@ -1651,15 +1655,31 @@ for r in 0..4:
         );
         let distinct = distinct_names(&given);
         let out = text(&distinct);
-        for name in ["x = load X", "x_1 = load Y", "t_1 = load T", "P[m, k] = u_1"] {
+        for name in [
+            "x = load X",
+            "x_1 = load Y",
+            "t_1 = load T",
+            "P[m, k] = u_1",
+        ] {
             assert!(out.contains(name), "{name}\n{out}");
         }
-        assert_eq!(out.matches("for k in").count(), 2, "sibling loops keep the one axis name\n{out}");
+        assert_eq!(
+            out.matches("for k in").count(),
+            2,
+            "sibling loops keep the one axis name\n{out}"
+        );
         assert_eq!(distinct_names(&distinct), distinct);
         let optimized = kernel_normal(&text(&given));
-        let at = |needle: &str| optimized.find(needle).unwrap_or_else(|| panic!("{needle}\n{optimized}"));
+        let at = |needle: &str| {
+            optimized
+                .find(needle)
+                .unwrap_or_else(|| panic!("{needle}\n{optimized}"))
+        };
         assert!(at("x = load X[m]") < at("for k in"), "{optimized}");
-        assert!(at("x_1 = load Y[m]") < optimized.rfind("for k in").unwrap(), "{optimized}");
+        assert!(
+            at("x_1 = load Y[m]") < optimized.rfind("for k in").unwrap(),
+            "{optimized}"
+        );
     }
 
     #[test]
