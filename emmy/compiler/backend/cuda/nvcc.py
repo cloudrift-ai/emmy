@@ -133,6 +133,11 @@ def _cubin_key(source: str, name: str, arch: str) -> str:
     return h.hexdigest()
 
 
+def is_ptx(source: str) -> bool:
+    """Whether ``source`` is PTX text, which opens with its ``.version`` directive, and not CUDA C++."""
+    return source.lstrip().startswith(".version")
+
+
 def compile_to_cubin(source: str, name: str, *, arch: str) -> Path:
     """Compile ``source`` to a cubin with ``nvcc --cubin``, content-addressed in
     the on-disk cache. Idempotent + atomic (compile to a temp file, then
@@ -140,6 +145,9 @@ def compile_to_cubin(source: str, name: str, *, arch: str) -> Path:
     half-written cubin. GPU-free — safe to call from a worker pool. Raises
     ``RuntimeError`` if ``nvcc`` is unavailable; ``CalledProcessError`` on a
     compile error (caller decides whether to fall back).
+
+    A ``source`` that is PTX (:func:`is_ptx`) skips the C++ front end: the toolkit's ``ptxas``, beside ``nvcc``,
+    assembles it into the same cache. No nvcc flag applies to it; its precision decisions are in its instructions.
 
     The opt level comes from :func:`effective_flags` (``EMMY_NVCC_FLAGS``). Every command —
     ``tune`` included — defaults to nvcc's own -O3, the deployable regime, so a tuned latency is
@@ -154,14 +162,15 @@ def compile_to_cubin(source: str, name: str, *, arch: str) -> Path:
     if out.exists():
         return out
     with tempfile.TemporaryDirectory(dir=cache) as td:
-        cu = Path(td) / "k.cu"
-        cu.write_text(source)
         tmp_cubin = Path(td) / "k.cubin"
-        subprocess.run(
-            [nvcc, "--cubin", f"-arch={arch}", *effective_flags(), "-o", str(tmp_cubin), str(cu)],
-            check=True,
-            capture_output=True,
-        )
+        if is_ptx(source):
+            text = Path(td) / "k.ptx"
+            command = [str(Path(nvcc).with_name("ptxas")), f"-arch={arch}", "-m64", "-o", str(tmp_cubin), str(text)]
+        else:
+            text = Path(td) / "k.cu"
+            command = [nvcc, "--cubin", f"-arch={arch}", *effective_flags(), "-o", str(tmp_cubin), str(text)]
+        text.write_text(source)
+        subprocess.run(command, check=True, capture_output=True)
         os.replace(tmp_cubin, out)  # atomic publish
     return out
 

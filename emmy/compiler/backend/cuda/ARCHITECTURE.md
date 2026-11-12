@@ -59,7 +59,9 @@ share every line downstream. The projection:
   compiles in two subprocesses and asserts identical sources. A cubin loads with no driver PTX→SASS JIT, the
   compile is ~3× faster than a cold NVRTC compile on the complex tile-search kernels that dominate a golden bench, and
   it is GPU-free, so the cubin cache can be warmed by a parallel pool (planned). A missing or failing `nvcc` is an
-  error; there is no NVRTC fallback. Kernels are emitted with `extern "C" __global__` so nothing name-mangles them
+  error; there is no NVRTC fallback. A kernel whose source is PTX text (what the `emmy-ptx` crate writes) skips the
+  C++ front end: `compile_to_cubin` hands it to the toolkit's `ptxas`, and its cubin lands in the same cache.
+  Kernels are emitted with `extern "C" __global__` so nothing name-mangles them
   (the cubin symbol loads by `kernel_name`). The compile budget is checked BETWEEN kernels
   (`_compile_kernels`), the only boundary a Python-level check has, so a cold multi-kernel compile that outlives the
   bench worker's wall cap raises `CompileBudgetExceeded` instead of being reported as a dead worker.
