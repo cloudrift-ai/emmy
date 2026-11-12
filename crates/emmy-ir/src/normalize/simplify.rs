@@ -2,7 +2,7 @@
 
 use std::sync::Arc;
 
-use super::{extend_simplify_ctx, with_bodies};
+use super::{inner_ctx, launch_ctx, with_bodies};
 use crate::Result;
 use crate::body::Body;
 use crate::dtype::DType;
@@ -23,9 +23,11 @@ pub fn simplify_body(body: &Body) -> Result<Body> {
 }
 
 /// `stmt` with every expression simplified as its field's class (an index under the integer rules, a value under them
-/// where the ranges prove its operands integer) under `ctx`, and every child body under the ranges of the axes the
-/// statement binds for it.
+/// where the ranges prove its operands integer) under `ctx` and the launch the statement states, and every child body
+/// under the ranges of the axes the statement binds for it.
 pub(crate) fn simplify_stmt(stmt: &Arc<Statement>, ctx: &SimplifyCtx) -> Result<Arc<Statement>> {
+    let launch = launch_ctx(ctx, stmt);
+    let ctx = launch.as_ref().unwrap_or(ctx);
     let stmt =
         Statement::try_map_classed_expressions(stmt, &mut |class, e| e.simplify_as(ctx, class))?;
     match &*stmt {
@@ -53,10 +55,7 @@ pub(crate) fn simplify_stmt(stmt: &Arc<Statement>, ctx: &SimplifyCtx) -> Result<
             if nested.is_empty() {
                 return Ok(stmt);
             }
-            let inner = stmt
-                .bound_axes()
-                .iter()
-                .fold(ctx.clone(), |inner, axis| extend_simplify_ctx(&inner, axis));
+            let inner = inner_ctx(ctx, &stmt);
             let bodies: Result<Vec<Body>> = nested.iter().map(|b| simplify_in(b, &inner)).collect();
             Ok(with_bodies(&stmt, bodies?))
         }

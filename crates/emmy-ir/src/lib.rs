@@ -16,6 +16,7 @@ pub mod numbering;
 pub mod order;
 pub mod protocol;
 pub mod statement;
+pub mod strength;
 pub mod text;
 
 pub use name::Name;

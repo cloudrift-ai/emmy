@@ -87,7 +87,7 @@ def test_pointwise_emits_correct_source():
     nodes = _cuda_nodes(compiled)
     assert len(nodes) == 1
     source = nodes[0].op.kernel_source
-    assert "blockIdx.x" in source
+    assert "threadIdx.x" in source
     assert "x[" in source and "y[" in source
 
 

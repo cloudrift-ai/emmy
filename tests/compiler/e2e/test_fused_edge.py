@@ -263,7 +263,7 @@ def test_fused_sync_fill_slab_swizzle(tile, work, monkeypatch):
     actually swizzles — a future silent drop fails loudly here instead of shipping garbage.
     The B128 cell also pins ``RASTER`` on the fused-cone grid (a computed-A kernel's output is
     the same static 2-D block-tile grid, and the grouped launch order is its B-re-streaming
-    fix): the ``_rsub`` grouped decode must be emitted, not silently degraded to flat."""
+    fix); with one M block-tile the grouped order is the flat one, and the decode says so."""
     monkeypatch.setenv("EMMY_PLACE", "fuse")
     monkeypatch.setenv("EMMY_TILE", tile)
     monkeypatch.setenv("EMMY_WORK", work)
@@ -287,8 +287,6 @@ def test_fused_sync_fill_slab_swizzle(tile, work, monkeypatch):
     got, srcs = _compile_run(g, ins)
     assert len(srcs) == 1 and "emmy_mma" in srcs[0]
     assert "emmy_swizzle" in srcs[0], "the sync compute-fill must swizzle its slabs (fill-side Write XOR)"
-    if tile.endswith("k4"):
-        assert "_rsub" in srcs[0], "RASTER must resolve on the fused-cone grid (grouped CTA decode emitted)"
     x, nw, wg = (ins[k].astype(np.float32) for k in ("x", "nw", "wg"))
     rms = x[0] * (1.0 / np.sqrt((x[0] ** 2).mean(axis=-1, keepdims=True) + 1e-6)) * nw
     np.testing.assert_allclose(got.reshape(S, inter).astype(np.float32), rms @ wg.T, atol=0.5, rtol=0.1)

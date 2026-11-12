@@ -374,14 +374,17 @@ impl Parser {
                 Ok(Expression::new(Expr::Var(token.text.into())))
             }
             TokenKind::Op if token.text == "(" => {
-                // ``(dtype)`` followed by an operand is a cast; the writer never parenthesizes a lone name otherwise.
-                if let Some(next) = self.peek(0)
-                    && next.kind == TokenKind::Name
-                    && self.at(")", 1)
-                    && self.starts_operand(2)
-                {
-                    let dtype: CastTarget = next.text.parse()?;
-                    self.index += 2;
+                // ``(dtype)`` followed by an operand is a cast, its type one or more names (``long long``): the
+                // writer never parenthesizes a lone name otherwise, and two names in a row are no expression.
+                let words = (0..)
+                    .take_while(|&k| self.peek(k).is_some_and(|t| t.kind == TokenKind::Name))
+                    .count();
+                if words > 0 && self.at(")", words) && self.starts_operand(words + 1) {
+                    let dtype: Vec<&str> = (0..words)
+                        .map(|k| self.peek(k).unwrap().text.as_str())
+                        .collect();
+                    let dtype: CastTarget = dtype.join(" ").parse()?;
+                    self.index += words + 1;
                     let inner = self.operand()?;
                     return Ok(Expression::new(Expr::Cast(dtype, inner)));
                 }
@@ -509,6 +512,11 @@ mod tests {
             (cast("int", var("x")), "(int)x"),
             (cast("int", binary("+", var("x"), int(1))), "(int)(x + 1)"),
             (cast("int", int(-1)), "(int)(-1)"),
+            (cast("long long", var("x")), "(long long)x"),
+            (
+                binary("//", cast("long long", var("x")), int(4)),
+                "(long long)x // 4",
+            ),
             (float(f64::NEG_INFINITY), "-inf"),
             (binary("*", var("x"), float(f64::INFINITY)), "x * inf"),
             (
