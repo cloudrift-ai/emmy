@@ -88,17 +88,7 @@ class LoopOp(BodyOp):
     wire_tag = "loop"
 
     def __post_init__(self) -> None:
-        Op.__post_init__(self)  # BodyOp's coerce+seed is replaced below, not chained
-        from emmy.compiler.ir.stmt import normalize_body
-
-        # Body is a tuple subclass; coerce so ``Op(body=tuple_value)`` construction keeps working.
-        # Seed the positional ABI before normalization reorders independent reads and writes; the
-        # matcher later refreshes these placeholders in graph order.
-        coerced = Body.coerce(self.body)
-        object.__setattr__(self, "body", coerced)
-        self._seed_io_placeholders()
-        normalized = normalize_body(coerced)
-        object.__setattr__(self, "body", normalized if isinstance(normalized, Body) else Body(normalized))
+        super().__post_init__()
         _validate(self)
 
     def rename_buffers(self, rename: dict[str, str]) -> LoopOp:

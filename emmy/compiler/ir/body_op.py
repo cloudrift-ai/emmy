@@ -47,9 +47,13 @@ class BodyOp(Op):
 
     def __post_init__(self) -> None:
         Op.__post_init__(self)
-        if not isinstance(self.body, Body):
-            object.__setattr__(self, "body", Body.coerce(self.body))
+        from emmy.compiler.ir.stmt import normalize_body
+
+        # Seed the positional ABI before normalization reorders independent reads and writes; the
+        # matcher later refreshes these placeholders in graph order.
+        object.__setattr__(self, "body", Body.coerce(self.body))
         self._seed_io_placeholders()
+        object.__setattr__(self, "body", normalize_body(self.body))
 
     def _seed_io_placeholders(self) -> None:
         """Populate empty ``inputs`` / ``outputs`` with body-derived names

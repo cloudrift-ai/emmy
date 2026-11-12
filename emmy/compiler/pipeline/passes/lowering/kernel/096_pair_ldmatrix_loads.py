@@ -20,7 +20,8 @@ Legality, judged structurally on the two loads:
 - **Volta**: adjacent logical fragment indices under the matching derived layout, with equal
   logical K coordinates. A pairs register rows; B pairs register columns. Each becomes one
   LDS.128 and the coupled row/row MMA plus interleaved accumulator map preserve the output;
-- the second load moves UP to the first's position: every intervening stmt must be barrier-free
+- the pair stands where the earlier of the two loads stood, whichever half that is (a body's statement
+  order is its normal form's, not the drain's), and the other moves UP to it: every intervening stmt must be barrier-free
   straight-line code that neither redefines either fragment nor defines a free var of the moved
   load's index (the flash drain interleaves ``MmaSyncPtx`` between the loads — reading the FIRST
   fragment is fine, the pair fills both before any consumer runs).
@@ -144,7 +145,7 @@ def _pairs_with(a: LdmatrixLoad, b: LdmatrixLoad) -> bool:
         return False
     row_d, col_d = _delta(a.src_index[0], b.src_index[0]), _delta(a.src_index[1], b.src_index[1])
     if a.fragment_layout == "m8n8k4":
-        if b.fragment_index != a.fragment_index + 1:
+        if a.fragment_index % 2 or b.fragment_index != a.fragment_index + 1:
             return False
         # Crosswise pairs along the slab's ROW axis (A's M, a transposed B's N) at one K
         # column; the congruous canonical B pairs along its columns at one row.
@@ -171,30 +172,23 @@ def _blocks(s: Statement, a_frag: str, moved_frag: str | None, moved_deps: set[s
 
 
 def _pair(stmts: list[Statement]) -> list[Statement] | None:
+    """Each load fused with its partner, at the position of whichever stands first: the two halves fill no
+    order of their own, so the low half may stand behind the high one."""
     out = list(stmts)
     changed = False
-    i = 0
-    while i < len(out):
-        a = out[i]
-        if not _candidate(a):
-            i += 1
+    for i in range(len(out)):  # ``out`` only shrinks behind ``i``
+        if i >= len(out) or not _candidate(a := out[i]):
             continue
-        if isinstance(a, LdmatrixLoad) and a.fragment_layout == "m8n8k4" and a.fragment_index % 2:
-            i += 1
-            continue
-        j = i + 1
-        while j < len(out):
+        for j in range(i + 1, len(out)):
             b = out[j]
-            if _candidate(b) and _pairs_with(a, b):
+            if _candidate(b) and (_pairs_with(a, b) or _pairs_with(b, a)):
                 moved_deps = {v for e in b.src_index for v in e.free_vars()}
-                if any(_blocks(s, a.frag, b.frag, moved_deps) for s in out[i + 1 : j]):
-                    break
-                out[i] = a.replace(pair_frag=b.frag)
-                del out[j]
-                changed = True
+                if not any(_blocks(s, a.frag, b.frag, moved_deps) for s in out[i + 1 : j]):
+                    low, high = (a, b) if _pairs_with(a, b) else (b, a)
+                    out[i] = low.replace(pair_frag=high.frag)
+                    del out[j]
+                    changed = True
                 break
             if _blocks(b, a.frag, None, set()):
                 break
-            j += 1
-        i += 1
     return out if changed else None
