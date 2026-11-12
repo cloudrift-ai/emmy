@@ -27,7 +27,7 @@ from emmy.compiler.dim import Dim
 from emmy.compiler.graph import Node
 from emmy.compiler.ir.expression import BinaryExpression, Literal, Var
 from emmy.compiler.ir.kernel import KernelOp
-from emmy.compiler.ir.kernel.ir import ELEM_COL, ELEM_ROW, FRAG_COL, FRAG_ROW
+from emmy.compiler.ir.kernel.ir import ELEM_COL, ELEM_ROW, FRAG_COL, FRAG_ROW, THREAD_COORDS
 from emmy.compiler.ir.pure.fold import EXTENTS
 from emmy.compiler.ir.schedule.register import RegisterMaterialization
 from emmy.compiler.ir.sigma import Sigma
@@ -103,12 +103,12 @@ def _drop_private_ports(match: Match, root: Node, kernel: KernelOp, suffix: str)
     return fragment
 
 
-#: Names the RENDERER supplies, so a statement may read them with no binding anywhere in the IR:
-#: the CTA helper coordinates it declares in the prologue of any body that uses them,
-#: and the reserved coordinates a :class:`~emmy.compiler.ir.kernel.ir.FragmentApply`
-#: COORD / GMEM template is written over, which the render substitutes per element (tile origin + layout offset),
-#: and the in-fragment offsets a :class:`~emmy.compiler.ir.kernel.ir.RegStore` epilogue reads.
-_RENDERED_HELPERS = frozenset({"lane", "warp", FRAG_ROW, FRAG_COL, ELEM_ROW, ELEM_COL})
+#: Names a statement may read with no binding in the tile's body: a thread's lane and warp, which the grid decode
+#: binds (``THREAD_COORDS``), and names the RENDERER supplies — the reserved coordinates a
+#: :class:`~emmy.compiler.ir.kernel.ir.FragmentApply` COORD / GMEM template is written over, which the render
+#: substitutes per element (tile origin + layout offset), and the in-fragment offsets a
+#: :class:`~emmy.compiler.ir.kernel.ir.RegStore` epilogue reads.
+_RENDERED_HELPERS = frozenset({*THREAD_COORDS, FRAG_ROW, FRAG_COL, ELEM_ROW, ELEM_COL})
 
 
 def _unbound_names(tile: TileOp, root: Node, body: Body) -> set[str]:
@@ -117,8 +117,8 @@ def _unbound_names(tile: TileOp, root: Node, body: Body) -> set[str]:
     A well-formed kernel reads its own buffers, the symbolic extents its launch passes beside them
     (the free vars of the axis table's extents — a ``Dim('seq_len')`` reduce bound, a ceil-div block
     count — and of its buffers' shapes, which a scatter's guard compares an index with) and the
-    renderer's CTA helpers, and nothing else: every other name is bound by a statement or by an
-    enclosing axis, which is exactly what :func:`free_names` subtracts. What survives is a
+    thread coordinates and the renderer's helpers, and nothing else: every other name is bound by a statement or by
+    an enclosing axis, which is exactly what :func:`free_names` subtracts. What survives is a
     value some emission referred to under a spelling nothing defines — a per-cell rename whose shared
     coordinates missed an axis, a staged fill whose σ left a tile axis free, a workspace read the
     boundary store was not re-spelled for. Each of those reached ``nvcc`` as *identifier "x" is

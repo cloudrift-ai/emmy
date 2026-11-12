@@ -98,6 +98,14 @@ impl WgmmaMma {
 
 impl TreeHalve {
     pub fn validate(&self) -> Result<()> {
+        if self.lane.is_some() && (self.inner.is_some() || self.barrier_id != 0 || self.length > 32)
+        {
+            return Err(Error::Value(
+                "TreeHalve: the register fold of a per-warp slab (lane) takes one warp's slots, no segment and the \
+                 CTA barrier"
+                    .into(),
+            ));
+        }
         carried_type(&self.combine_states, StatementType::Assign)
     }
 }

@@ -22,9 +22,6 @@ from emmy.compiler.ir.kernel.ir import (
     KernelOp,
     LdmatrixLoad,
     RegStore,
-    SetMaxNReg,
-    TreeHalve,
-    WarpShuffle,
     WgmmaMma,
     frag_dtype,
     swizzle_fn,
@@ -32,7 +29,7 @@ from emmy.compiler.ir.kernel.ir import (
     wgmma_form,
 )
 from emmy.compiler.ir.render import Paged, RenderCtx, render_body
-from emmy.compiler.ir.stmt import Assign, Body, Load, Write, reduce_strength
+from emmy.compiler.ir.stmt import Assign, Load, Write, reduce_strength
 from emmy.compiler.tensor import Tensor
 
 # Per-CTA static-smem hard cap on every CUDA arch we target. Above this,
@@ -1526,11 +1523,6 @@ def render_kernelop(
     # The target's spelling of an index division by a power of two: a shift and a mask where the ranges prove the
     # dividend non-negative. It is spelled here, on the body about to render: the simplifier reads ``/`` and ``%``.
     body_text = "\n".join(render_body(reduce_strength(kernel_op.body), ctx))
-    # The cross-thread combine (``WarpShuffle`` / ``TreeHalve``) references the hardware
-    # warp ``lane`` / ``warp`` ids; declare them at function entry when the body needs them.
-
-    if _body_uses_lane_warp(kernel_op.body):
-        body_text = "    int lane = threadIdx.x & 31;\n    int warp = threadIdx.x >> 5;\n" + body_text
     if smem_offsets:
         # All Smem decls were rewritten to pointer aliases into a single
         # dynamic pool; declare the pool at function entry. The pool base must
@@ -1633,19 +1625,3 @@ def _param_text(param: Param) -> str:
 
 
 __all__ = ["render_kernelop"]
-
-
-def _body_uses_lane_warp(body: Body) -> bool:
-    """True iff the body needs the ``lane`` / ``warp`` helper vars.
-
-    The materializer emits ``lane`` / ``warp`` use sites alongside:
-    - ``WarpShuffle`` and ``TreeHalve`` (the per-warp partial gate
-      ``if (lane == 0)``, ``TreeHalve(..., tid_var="warp")``).
-    - ``SetMaxNReg`` (only emitted by the warp-specialized materializer
-      path, which wraps in ``Cond(warp < P, ...)`` — the Cond predicate
-      references ``Var("warp")`` directly so the helper must be in scope).
-
-    Checking for these three primitives covers every kernel that
-    references either helper.
-    """
-    return bool(body.iter_of_type(WarpShuffle, TreeHalve, SetMaxNReg))

@@ -422,8 +422,9 @@ macro_rules! with_statement_types {
                 ///
                 /// The target lowering turns a `Tile` into one before it renders, so the decode is Kernel IR the
                 /// optimizer simplifies and an emitter spells, not text. The axes keep their ranges for the body; a
-                /// `Cond` at the top of the body masks the threads past the cells where the launch does not cover them
-                /// exactly, and the axes hold their ranges only under it.
+                /// `Cond` in the body masks the threads past the cells where the launch does not cover them exactly, and
+                /// the axes hold their ranges only under it. A thread's lane and warp, where the body reads them, are a
+                /// `Let` each ahead of that `Cond`.
                 kernel Grid {} {
                     axes: Axes [AXIS],
                     decode: Exprs [EXPRESSION] : Index,
@@ -550,6 +551,11 @@ macro_rules! with_statement_types {
                 /// Named-barrier support: `barrier_id > 0` routes the per-iter sync to `bar.sync <id>, <count>` instead of
                 /// `__syncthreads()` — required inside a warp-specialized consumer branch (a __syncthreads on a warp-divergent
                 /// cond is UB).
+                ///
+                /// `lane` set: the slab holds one partial per warp and `tid_var` is the thread's warp. Warp 0 alone folds
+                /// the slab, in registers: its lane `lane` takes slot `lane % length`, one `WarpShuffle` butterfly over
+                /// `length` lanes folds them and lane 0 stores slot 0. One barrier before the broadcast instead of one per
+                /// halving step. The lowering passes the thread's lane, a value the grid decode binds.
                 kernel TreeHalve {CHECKED} {
                     bufs: Names [],
                     state: Names [UPDATES],
@@ -561,6 +567,7 @@ macro_rules! with_statement_types {
                     barrier_id: i64 [] = 0,
                     barrier_count: Option<i64> [] = None,
                     inner: Option<(Expression, i64)> [EXPRESSION] : Index = None,
+                    lane: Option<Expression> [EXPRESSION] : Index = None,
                 }
                 /// Cross-thread combine of a (possibly multi-component) monoid state over `length` lanes via `__shfl_xor_sync` —
                 /// a register-only butterfly (no smem, no syncthreads).
@@ -1398,7 +1405,7 @@ mod tests {
         }
         assert_eq!(
             blake3::hash(listing.as_bytes()).to_hex().as_str(),
-            "cf4f7f0925c0c53b3fe6eca293c2ffd071501521bd5935336cf16597ab0fa97c",
+            "8a203d549cb6692837b57c43f08d4d2439ed1717164ca040a2a8f82fb6f8ec0a",
             "{listing}"
         );
     }

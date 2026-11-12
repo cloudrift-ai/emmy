@@ -8,11 +8,11 @@ that grid stay 32-bit; arithmetic that can still pass 2^31 - 1 (the guard of suc
 
 from emmy.compiler.dim import Dim
 from emmy.compiler.ir.axis import Axis
-from emmy.compiler.ir.expression import Var
-from emmy.compiler.ir.kernel.ir import Tile
+from emmy.compiler.ir.expression import BinaryExpression, Literal, Var
+from emmy.compiler.ir.kernel.ir import KernelOp, Sync, Tile, decode_tile
 from emmy.compiler.ir.kernel.render import _BUILTIN_TO_CUDA
 from emmy.compiler.ir.render import RenderCtx, render_stmt
-from emmy.compiler.ir.stmt import Body
+from emmy.compiler.ir.stmt import Body, Cond, Let, pretty_body
 
 
 def _render(axes, **kw) -> str:
@@ -59,3 +59,17 @@ def test_a_one_cta_grid_reads_the_thread_index_alone():
     src = _render((Axis("m", 100),))
     assert "if (threadIdx.x < 100) {" in src
     assert "int m = threadIdx.x;" in src
+
+
+def test_the_decode_binds_the_thread_coordinates_the_body_reads():
+    """A body that reads a thread's lane gets it as a value of the grid, under the launch's ranges; one that reads
+    neither coordinate gets neither."""
+    reads_lane = Body((Cond(cond=BinaryExpression("==", Var("lane"), Literal(0, "int")), body=(Sync(),)),))
+    grid = decode_tile(Tile(axes=(Axis("m", 4), Axis("t", 64)), body=reads_lane, block_threads=64))
+    assert [stmt.name for stmt in grid.body if isinstance(stmt, Let)] == ["lane"]
+    assert "let i32 lane = thread_idx.x % 32" in "\n".join(pretty_body(grid.body))
+    # One warp a CTA: the optimized body knows the lane is the thread index.
+    one_warp = KernelOp(body=Body((decode_tile(Tile(axes=(Axis("m", 4), Axis("t", 32)), body=reads_lane, block_threads=32)),)))
+    assert "let i32 lane = thread_idx.x" in "\n".join(pretty_body(one_warp.body))
+    bare = decode_tile(Tile(axes=(Axis("m", 4), Axis("t", 64)), body=Body((Sync(),)), block_threads=64))
+    assert not any(isinstance(stmt, Let) for stmt in bare.body)
