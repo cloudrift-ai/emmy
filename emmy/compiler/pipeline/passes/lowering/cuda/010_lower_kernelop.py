@@ -2,7 +2,7 @@
 
 Renders the ``KernelOp`` body to a ``__global__`` source string and derives the
 launch geometry. The body is a single :class:`Grid` (``007_decode_grid`` decoded the tile into it), so the
-grid is sized from its element count over its block (``_BLOCK_SIZE`` scalar tier, the cooperative ``block_threads``
+grid is sized from its element count over its block (``BLOCK_SIZE`` scalar tier, the cooperative ``block_threads``
 otherwise). A **symbolic reduce / output-sweep axis** (a
 dynamic ``seq_len`` inside the body's loops) becomes a runtime ``int`` arg: the kernel
 signature gains one ``int <name>`` per symbolic ``Dim`` and the launch resolves it from the
@@ -18,6 +18,7 @@ from emmy.compiler.ir.axis import Axis
 from emmy.compiler.ir.base import is_f4_pair_table
 from emmy.compiler.ir.cuda import CudaOp, TmaDescMeta
 from emmy.compiler.ir.kernel import KernelOp
+from emmy.compiler.ir.kernel.interface import kernel_interface
 from emmy.compiler.ir.kernel.ir import Grid, TmaDescriptor, tile_is_static, tile_n_dim, tile_n_elements
 from emmy.compiler.ir.kernel.render import render_kernelop
 from emmy.compiler.ir.pure.fold import EXTENTS
@@ -119,7 +120,7 @@ def rewrite(match: Match, root: Node) -> CudaOp | None:
     # A cooperative tile fixes the per-CTA thread count (``coop · ∏block-cells``): one CTA
     # per output-cell group, ``blockDim = block_threads``, ``gridDim = N / block_threads``
     # (the decode groups ``block_threads`` consecutive cells per CTA). The scalar tier is one
-    # thread per cell over the fixed ``_BLOCK_SIZE`` block. A warp-specialized producer band
+    # thread per cell over the fixed ``BLOCK_SIZE`` block. A warp-specialized producer band
     # (``aux_threads``) widens ``blockDim`` only — the grid still covers the cells.
     cells = grid_stmt.block_threads
     if tile_is_static(grid_stmt):
@@ -130,25 +131,15 @@ def rewrite(match: Match, root: Node) -> CudaOp | None:
         # factor resolved from ``sym_values`` at launch (the ``Expression`` grid factor).
         grid = ((tile_n_dim(grid_stmt).ceil_div(cells).expression,), (1,), (1,))
     block = ((cells + grid_stmt.aux_threads,), (1,), (1,))
-    # Signature / arg order: buffers, then the TMA descriptor params (bound to the
-    # launch-encoded ``CUtensorMap`` device arrays), then the symbolic ``int`` args
-    # (tail-appended in ``_launch``) — matching ``render_kernelop``'s param layout.
-    # A paged operand binds its page TABLE, not the buffer: the name in ``arg_order`` is what the
-    # launcher looks up in ``arrays``, so the rename is the whole runtime change.
-    paged_names = {entry[0] for entry in paged}
-
-    def _bound(n: str) -> str:
-        return f"{n}__pages" if n in paged_names else n
-
-    arg_order = (
-        *(_bound(n) for n in kernel.inputs),
-        *(_bound(n) for n in kernel.outputs),
-        *(d.name for d in tma_descs),
-    )
+    # The launch's argument order is the kernel's own parameter list (buffers, then the TMA descriptors bound to the
+    # launch-encoded ``CUtensorMap`` device arrays); the symbolic ``int`` args are tail-appended in ``_launch``. A
+    # paged operand binds its page TABLE, not the buffer: the name in ``arg_order`` is what the launcher looks up in
+    # ``arrays``, so the rename is the whole runtime change.
+    interface = kernel_interface(kernel, tensors, runtime_args, frozenset(entry[0] for entry in paged))
     return CudaOp(
         kernel_source=source,
         kernel_name=name,
-        arg_order=arg_order,
+        arg_order=interface.arg_order,
         grid=grid,
         block=block,
         smem_bytes=kernel.smem_bytes(),
@@ -161,4 +152,6 @@ def rewrite(match: Match, root: Node) -> CudaOp | None:
         zero_outputs=tuple(b for b in _atomic_outputs(kernel) if b not in kernel.zero_delegated),
         zero_prologues=tuple(dict.fromkeys(zp.dst for zp in kernel.body.iter_of_type(ZeroPrologue))),
         tma_descriptors=tma_descs,
+        arch_specific=interface.arch_specific,
+        dependent_launch=True,
     )

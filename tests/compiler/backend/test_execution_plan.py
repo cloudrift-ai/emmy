@@ -60,6 +60,7 @@ def _sample_graph() -> Graph:
             zero_outputs=("y",),
             tma_descriptors=(TmaDescMeta(name="x_desc", src_buf="x", box_extents=(64, 32), swizzle="B128"),),
             runtime_args=("seq_len",),
+            arch_specific=True,
         ),
         inputs=["x", "w", "eps", "div"],
         output=Tensor("y", ("seq_len", 64)),
@@ -143,12 +144,12 @@ def test_a_plan_stored_under_the_old_tma_key_still_reads():
 
 def test_only_a_kernel_that_waits_on_its_predecessor_launches_dependent():
     """A programmatic dependent launch may start a kernel before the grid ahead of it finished, so
-    only a kernel whose source waits on that grid (``griddepcontrol.wait``) is marked, and a plan
+    only a kernel that waits on that grid is marked (the lowering marks every kernel it writes), and a plan
     stored before the mark existed reads unmarked: its kernels launch serialized."""
     graph = _sample_graph()
     assert plan_from_graph(graph).kernels["k_test"].dependent_launch is False
     node = graph.nodes["y"]
-    node.op = dataclasses.replace(node.op, kernel_source='__global__ void k_test() { asm volatile("griddepcontrol.wait;"); }')
+    node.op = dataclasses.replace(node.op, dependent_launch=True)
     plan = plan_from_graph(graph)
     assert plan.kernels["k_test"].dependent_launch is True
     wire = json.loads(json.dumps(plan_to_dict(plan)))

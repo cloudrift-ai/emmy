@@ -86,42 +86,19 @@ def test_the_block_scaled_call_passes_scales_where_the_others_repeat_the_accumul
 
 
 def test_a_kernel_carrying_the_block_scaled_mma_asks_for_the_arch_suffixed_target():
-    """TMA announces itself through its descriptors; this instruction has no such marker in a
-    plan, so the wrapper name in the rendered source is what identifies it."""
-    from emmy.compiler.backend.plan import _needs_arch_isa
+    """ptxas assembles the block-scaled fp4 ``mma`` only for the arch-suffixed target, as it does TMA; the kernel's
+    statements say which a kernel holds."""
+    from emmy.compiler.ir.kernel import KernelOp
+    from emmy.compiler.ir.kernel.interface import needs_arch_isa
+    from emmy.compiler.ir.kernel.ir import TmaDescriptor
+    from emmy.compiler.ir.stmt import Body
 
-    class _Op:
-        tma_descriptors = ()
-        kernel_source = "... emmy_mma_m16n8k64_e2m1_f32(c, a, b, sa, sb); ..."
-
-    class _Plain:
-        tma_descriptors = ()
-        kernel_source = "... emmy_mma_m16n8k16_f16_f32(c, a, b, c); ..."
-
-    class _Tma:
-        tma_descriptors = ("desc",)
-        kernel_source = "... cp.async.bulk.tensor ..."
-
-    assert _needs_arch_isa(_Op())
-    assert _needs_arch_isa(_Tma())
-    assert not _needs_arch_isa(_Plain())
-
-
-# The driver around the prelude under test: one warp, one atom cell, gmem-direct operands. A
-# packed row is K/2 = 32 bytes, which is what the reused ``_b8`` loaders take as their stride.
-_DRIVER = """
-extern "C" __global__ void k_f4_block_scaled(float* out, const unsigned char* a,
-                                             const unsigned char* b,
-                                             const unsigned char* sa, const unsigned char* sb) {
-    unsigned ra[4], rb[2];
-    emmy_mma_load_a_gmem_b8<unsigned char>(ra, a, 32);
-    emmy_mma_load_b_gmem_trans_b8<unsigned char>(rb, b, 32);
-    float d[4] = {0.f, 0.f, 0.f, 0.f};
-    emmy_mma_m16n8k64_e2m1_f32(d, ra, rb, emmy_mma_load_sfa_f4(sa, 4), emmy_mma_load_sfb_f4(sb, 4));
-    int lane = threadIdx.x & 31, grp = lane >> 2, tig = lane & 3;
-    for (int i = 0; i < 4; ++i) out[(grp + ((i & 2) ? 8 : 0)) * 8 + (tig << 1) + (i & 1)] = d[i];
-}
-"""
+    scaled = MmaSyncPtx(c_frag="c", a_frag="a", b_frag="b", shape=(16, 8, 64), ab_dtype="e2m1", sfa_frag="sa", sfb_frag="sb")
+    plain = MmaSyncPtx(c_frag="c", a_frag="a", b_frag="b", shape=(16, 8, 16))
+    tma = TmaDescriptor(name="desc", src_buf="x", src_shape=(16, 16), box_extents=(16, 16))
+    assert needs_arch_isa(KernelOp(body=Body((scaled,)), name="k"))
+    assert needs_arch_isa(KernelOp(body=Body((tma,)), name="k"))
+    assert not needs_arch_isa(KernelOp(body=Body((plain,)), name="k"))
 
 
 def _ue4m3(bits: np.ndarray) -> np.ndarray:
