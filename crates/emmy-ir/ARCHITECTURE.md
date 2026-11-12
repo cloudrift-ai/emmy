@@ -85,7 +85,8 @@ file imports what it uses by name; no child module takes its parent's imports.
   spelling and its properties, which generates the enum, its `Display`/`FromStr` pair and the table `OPS` the enum
   indexes, one `OperationInfo` row per operation (commutative, associative, the neutral element, the cluster
   representative, integer arithmetic, whether it copies or selects its operand, its affine role, its host evaluator,
-  its infix spelling and precedence). Every reader
+  its infix spelling and precedence, and for a composite function its definition in primitive operations, which
+  `Operation::definition` gives over an operand and kernel lowering writes into a body). Every reader
   of an operation's nature (the affine fold, the alias reads of placement and the ties, the dtype promotion, the
   clustered identity, the Python tables) reads a property; none matches a name. The neutral element is the real one
   (`-inf` for a maximum) and `seed` is what a kernel initializes with, the bounded stand-in `±1e30` the CUDA source

@@ -632,7 +632,10 @@ Body walkers: `iter_body(body)` (pre-order; powers `for s in loop_op`),
 `str(stmt)` (the statement's text, the lines kernel dumps show; block stmts
 recurse via `pretty_body`).
 
-CUDA scalar rendering goes through `op_to_expression` in `ir/render.py`. Boolean masks retain the historical f32 SSA
+CUDA scalar rendering goes through `op_to_expression` in `ir/render.py`. It spells primitive operations only: a
+composite function (`sigmoid`, `relu`, `square`, `reciprocal`) is its definition in the operations' table
+(`Expression.definition`), which kernel lowering writes into the body (`125_spell_composites`) and the renderer
+reads for the statements that keep one operation (`FragmentApply`, a carried program). Boolean masks retain the historical f32 SSA
 convention, so Torch's `bitwise_not` spelling renders as logical zero-test (`mask == 0`); explicitly bool-stamped values
 use the same semantics. Integer complement is not inferred from that name and fails closed until it has a typed
 consumer.
