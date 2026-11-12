@@ -126,19 +126,22 @@ pub fn prepare_body(body: &Body) -> Result<Body> {
     prepared(body, true)
 }
 
-/// [`prepare_body`], with sibling reduce loops over one axis merged into one loop or left as their builder wrote
-/// them. Merging is Loop IR's: it makes the four loops of four rows one body. A kernel's loops are its schedule.
-fn prepared(body: &Body, merge_loops: bool) -> Result<Body> {
+/// [`prepare_body`] with its canonical loop steps (size-one loops dropped, free axes ordered, sibling reduce loops
+/// over one axis merged into one loop) or without them. They are Loop IR's: the merge makes the four loops of four
+/// rows one body. A kernel's loops are its schedule, and stay as their builder wrote them.
+fn prepared(body: &Body, canonical_loops: bool) -> Result<Body> {
     let mut stmts = topological_sort(body)?;
-    stmts = drop_size_one_free_axes(&stmts);
-    stmts = drop_size_one_reduce_axes(&stmts);
-    stmts = canonicalize_free_axis_order(&stmts)?;
+    if canonical_loops {
+        stmts = drop_size_one_free_axes(&stmts);
+        stmts = drop_size_one_reduce_axes(&stmts);
+        stmts = canonicalize_free_axis_order(&stmts)?;
+    }
     stmts = fold_trivial_selects(&stmts);
     stmts = inline_literals(&stmts);
     stmts = drop_unread_values(&stmts);
     let mut placed: Option<Body> = None;
     for _ in 0..8 {
-        let merged = if merge_loops {
+        let merged = if canonical_loops {
             merge_sibling_reduce_loops(&stmts)?
         } else {
             stmts.clone()
