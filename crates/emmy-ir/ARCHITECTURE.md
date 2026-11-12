@@ -105,7 +105,8 @@ here too), and `rewrite` behind
 its subtree). The three members no role gives are stated by statement type there: an `Accum`'s reduced axes follow a
 splitting substitution, and a `Let` and a `Call` read buffers inside an expression or through a subroutine. A loop
 that stops early stops at a value bound ahead of it (a `Let`), which its `end` and the statements of its body read
-like any name; the loop implies no name of its own. A statement type that checks itself is flagged `CHECKED` and does so over its own
+like any name; the loop implies no name of its own. A statement type that checks itself is flagged `CHECKED` and does
+so over its own
 fields (`validate`); `Statement::check` dispatches on the flag, and `finished` runs it for every constructor: the checks
 Python's `__post_init__` made.
 
