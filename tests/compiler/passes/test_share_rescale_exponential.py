@@ -107,12 +107,26 @@ def test_two_distances_below_another_pivot_are_no_pair() -> None:
         _rewrite(KernelOp(body=body))
 
 
-def test_the_factors_are_the_two_exponentials_bits_on_the_host() -> None:
+#: The order the normal form can give the pair: the later factor read before the earlier one's exponential, both
+#: distances ahead of it, so the block takes the earlier factor's place.
+_READ_FIRST = """
+    f32 gn = maximum(g, g_o)
+    f32 dg = g - gn
+    f32 dg_o = g_o - gn
+    f32 beta = exp(dg_o)
+    f32 early = beta * 2.0
+    f32 alpha = exp(dg)
+"""
+
+
+@pytest.mark.parametrize("advance", [_ADVANCE, _READ_FIRST], ids=["recipe-order", "read-first"])
+def test_the_factors_are_the_two_exponentials_bits_on_the_host(advance) -> None:
     """Every pair of pivots, the host's exponential and its NaN-propagating maximum: the same bits as two
     exponentials."""
     g, g_o = (np.float32(column) for column in zip(*product(_PIVOTS, repeat=2), strict=True))
-    before = parse_body(_ADVANCE)
+    before = parse_body(advance)
     after = _rewrite(KernelOp(body=before)).body
+    assert _exps(after) == 1
     results = []
     for body in (before, after):
         env = {"g": g, "g_o": g_o}
