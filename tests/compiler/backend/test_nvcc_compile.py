@@ -18,36 +18,34 @@ from emmy.compiler.context import Context, split_opt_level
 def test_effective_flags_reads_env(monkeypatch) -> None:
     monkeypatch.delenv("EMMY_FAST_MATH", raising=False)
     monkeypatch.delenv("EMMY_NVCC_FLAGS", raising=False)
-    assert nvcc.effective_flags() == ["--use_fast_math"]
+    assert nvcc.effective_flags() == ["--ftz=true"]
     monkeypatch.setenv("EMMY_NVCC_FLAGS", "-Xcicc -O1")
-    assert nvcc.effective_flags() == ["--use_fast_math", "-Xcicc", "-O1"]
+    assert nvcc.effective_flags() == ["--ftz=true", "-Xcicc", "-O1"]
     monkeypatch.setenv("EMMY_NVCC_FLAGS", "--fmad=false")
-    assert nvcc.effective_flags() == ["--use_fast_math", "--fmad=false"]
+    assert nvcc.effective_flags() == ["--ftz=true", "--fmad=false"]
     monkeypatch.setenv("EMMY_FAST_MATH", "0")
     assert nvcc.effective_flags() == ["--fmad=false"]
     monkeypatch.delenv("EMMY_NVCC_FLAGS")
     assert nvcc.effective_flags() == []
 
 
-def test_precision_flags_spell_each_class_the_base_does_not_imply() -> None:
-    """``--use_fast_math`` is the umbrella's with the exponential; every other decision away from what that flag, or
-    nvcc's own default, implies is spelled by its own flag. The exponential itself is the kernel's ``__expf``."""
+def test_precision_flags_spell_the_two_whole_kernel_decisions() -> None:
+    """Flush to zero and multiply-add fusion hold for a whole kernel and are nvcc flags, each spelled where it is not
+    nvcc's default. Every approximate instruction is an operation of the kernel body, so no other precision decision
+    reaches the flag list, and nvcc is never asked for its fast math."""
     from emmy.compiler.pipeline.search.space import precision_pins
 
     def flags(**pins) -> list[str]:
         return nvcc.precision_flags(precision_pins(pins))
 
-    assert flags(FAST_MATH=True) == ["--use_fast_math"]
+    assert flags(FAST_MATH=True) == ["--ftz=true"]
     assert flags(FAST_MATH=False) == []
-    assert flags(FAST_MATH=False, FAST_EXP=True) == []
-    assert flags(FAST_MATH=True, FAST_DIV=False) == ["--use_fast_math", "--prec-div=true"]
-    assert flags(FAST_MATH=True, FAST_SQRT=False) == ["--use_fast_math", "--prec-sqrt=true"]
-    assert flags(FAST_MATH=True, FLUSH_TO_ZERO=False) == ["--use_fast_math", "--ftz=false"]
-    assert flags(FAST_MATH=True, CONTRACT_FMA=False) == ["--use_fast_math", "--fmad=false"]
-    assert flags(FAST_MATH=False, FAST_DIV=True, FAST_SQRT=True) == ["--prec-div=false", "--prec-sqrt=false"]
+    assert flags(FAST_MATH=True, FLUSH_TO_ZERO=False) == []
+    assert flags(FAST_MATH=True, CONTRACT_FMA=False) == ["--ftz=true", "--fmad=false"]
     assert flags(FAST_MATH=False, FLUSH_TO_ZERO=True, CONTRACT_FMA=False) == ["--ftz=true", "--fmad=false"]
-    # The accurate exponential drops the fast library, so each class it implied is spelled on its own.
-    assert flags(FAST_MATH=True, FAST_EXP=False) == ["--ftz=true", "--prec-div=false", "--prec-sqrt=false"]
+    for knob in ("FAST_EXP", "FAST_DIV", "FAST_SQRT"):
+        assert flags(**{"FAST_MATH": True, knob: False}) == ["--ftz=true"]
+        assert flags(**{"FAST_MATH": False, knob: True}) == []
 
 
 def test_cubin_cache_key_partitions_by_flags(monkeypatch) -> None:

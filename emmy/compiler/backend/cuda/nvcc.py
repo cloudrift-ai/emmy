@@ -31,8 +31,8 @@ logger = logging.getLogger(__name__)
 
 
 def effective_flags() -> list[str]:
-    """The full nvcc flag list: the live precision decisions' flags (:func:`precision_flags`) plus any extra flags
-    from the ``EMMY_NVCC_FLAGS`` env var (space-separated), which the CLI commands
+    """The full nvcc flag list: the flags of the live flush and fusion decisions (:func:`precision_flags`) plus any
+    extra flags from the ``EMMY_NVCC_FLAGS`` env var (space-separated), which the CLI commands
     set — ``tune``, ``compile`` and ``run`` all default to nvcc's own cicc -O3.
     Read fresh each call so a per-invocation override / the bench-worker
     subprocess (which inherits the env) both see the same value, and so the
@@ -43,28 +43,16 @@ def effective_flags() -> list[str]:
 
 
 def precision_flags(pins: dict[str, bool]) -> list[str]:
-    """The nvcc flags that pick the instructions of the effective precision decisions ``pins``
-    (``space.precision_pins``).
+    """The nvcc flags of the two precision decisions among ``pins`` (``space.precision_pins``) that hold for a whole
+    kernel: flush to zero and multiply-add fusion, each spelled where it is not nvcc's default (no flush, fusion).
 
-    ``--use_fast_math`` when the umbrella and the exponential knob are both on: the flag also approximates exp, and
-    with it the transcendental functions no knob names (log, sine, cosine, tanh, pow), and no flag after it restores
-    the accurate exp. Then each instruction class whose decision that flag, or nvcc's own default without it, does
-    not imply, spelled by its own flag. The exponential itself is the kernel's ``__expf`` (``lowering/kernel/130``)."""
-    from emmy.compiler.context import FAST_MATH_FLAG  # noqa: PLC0415
-    from emmy.compiler.pipeline.search.space import CONTRACT_FMA, FAST_DIV, FAST_EXP, FAST_MATH, FAST_SQRT, FLUSH_TO_ZERO  # noqa: PLC0415
+    Every other precision decision is an operation of the kernel body (``lowering/kernel/130_approximate_math``), so
+    nvcc compiles at its own defaults for the rest: precise division and square root, the accurate math library. An
+    operation the pass did not pick stays exact. No ``--use_fast_math``: that flag is these two decisions and the
+    approximate instructions together, and it would approximate what the kernel says is exact."""
+    from emmy.compiler.pipeline.search.space import CONTRACT_FMA, FLUSH_TO_ZERO  # noqa: PLC0415
 
-    library = pins[FAST_MATH.name] and pins[FAST_EXP.name]
-    flags = [FAST_MATH_FLAG] if library else []
-    # Each class: its knob, its flag, whether the flag's ``true`` is the precise instruction, and what the base implies.
-    for knob, flag, precise, implied in (
-        (FLUSH_TO_ZERO, "--ftz", False, library),
-        (FAST_DIV, "--prec-div", True, library),
-        (FAST_SQRT, "--prec-sqrt", True, library),
-        (CONTRACT_FMA, "--fmad", False, True),
-    ):
-        if pins[knob.name] != implied:
-            flags.append(f"{flag}={str(pins[knob.name] != precise).lower()}")
-    return flags
+    return [*(["--ftz=true"] if pins[FLUSH_TO_ZERO.name] else []), *([] if pins[CONTRACT_FMA.name] else ["--fmad=false"])]
 
 
 def cubin_cache_dir() -> Path:

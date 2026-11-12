@@ -936,8 +936,9 @@ instruction, the approximate one, in every regime, so it has no second form.
 
 An approximate instruction is an f32 instruction. An operation is picked where it computes in f32 and stays as it is
 where it computes natively in f16 or over integers, which is why the pass runs after `120` has typed the body and `125`
-has written the composites out. A half exponential is the one exception, the knob's own: it is picked too, and the
-type rules then compute it in f32 and round it back. The pass walks the four places an operation sits: an `Assign`
+has written the composites out. Two operations are picked at a half too, and the type rules then compute them in f32
+and round back: the exponential, by its knob's own rule, and the hyperbolic tangent, whose native form (CUDA's
+`htanh`) is the f32 function on the converted value. The pass walks the four places an operation sits: an `Assign`
 of the body, a cooperative combine's merge (`WarpShuffle` / `TreeHalve` `combine_states`), a `FragmentApply`'s
 operation with its unary tail, and a `RegStore` epilogue, the stores grouped with it included. An epilogue is typed
 only when it is printed, so each of its definitions is typed here by the same rules to read where it will compute.

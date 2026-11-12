@@ -1613,12 +1613,13 @@ add. `FAST_EXP` with `FLUSH_TO_ZERO` off is the fast exponential that keeps subn
 non-flushing `ex2.approx.f32` under `__expf` to one hardware exponential on a halved argument and a squaring of its
 result, as accurate there as an explicit shift and scale. The approximate instruction of a class is an operation the
 kernel body names (`exp_fast`, `divide_fast`, `reciprocal_fast`, `sqrt_fast`), written by
-`lowering/kernel/130_approximate_math`. nvcc still takes each class as a flag too (`backend.cuda.nvcc.precision_flags`): `--use_fast_math` when the umbrella and
-`FAST_EXP` are both on — the flag also approximates exp and the transcendental functions no knob names (log, sine,
-cosine, tanh, pow), and nothing after it restores the accurate exp — then `--ftz` / `--prec-div` / `--prec-sqrt` /
-`--fmad` for each decision that base does not imply. At their defaults the new classes spell nothing, so the flags,
-the context key and the `H_*` features of every recorded regime are what they were before the classes had knobs.
-`FAST_MATH` remains `unfeatured`: schedule choices keep their concrete knob identity, and effective compiler flags
+`lowering/kernel/130_approximate_math`; with the umbrella and `FAST_EXP` both on, the same pass picks the approximate
+logarithm, sine, cosine, hyperbolic tangent and power, which no knob names. Flush to zero and contraction hold for a
+whole kernel, so they are the two nvcc flags (`backend.cuda.nvcc.precision_flags`): `--ftz=true` and `--fmad=false`,
+each where the decision is not nvcc's default. nvcc is never passed `--use_fast_math`, `--prec-div` or `--prec-sqrt`:
+it compiles what the body does not name approximate at its own precise defaults. The fast-math lane's flag string is
+therefore `--ftz=true`, and it is part of that lane's context key and of its cubin keys.
+`FAST_MATH` remains `unfeatured`: schedule choices keep their concrete knob identity, and the flush flag
 and independent overrides separate measurement contexts.
 New golden inventories and measurements record the effective umbrella explicitly, so replay preserves that regime.
 

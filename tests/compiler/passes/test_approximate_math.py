@@ -93,14 +93,18 @@ def test_the_hyperbolic_tangent_is_picked_where_the_target_has_its_instruction()
     assert _operations(_picked(_BODY, {"FAST_MATH": True}, (7, 5)))["t"] == "tanh_fast"
 
 
-def test_a_half_exponential_is_picked_and_computes_in_f32() -> None:
-    """The exponential knob moves a half exponential to f32, as it always did: the type rules place it."""
-    kernel = _picked("f16 g = load G[i]\nf16 x = exp(g)\nH[i] = x", {"FAST_MATH": False, "FAST_EXP": True})
+@pytest.mark.parametrize("function", ["exp", "tanh"])
+def test_a_half_exponential_and_tangent_are_picked_and_compute_in_f32(function) -> None:
+    """The exponential knob moves a half exponential to f32, as it always did, and the native half tangent is the
+    f32 function on the converted value, which nvcc's fast library reached: both are picked at a half, and the
+    type rules place them."""
+    kernel = _picked(f"f16 g = load G[i]\nf16 x = {function}(g)\nH[i] = x", {"FAST_MATH": True})
     (fast,) = [stmt for stmt in kernel.body.iter() if isinstance(stmt, Assign) and stmt.value.operation]
-    assert (fast.value.operation.name, fast.dtype.name) == ("exp_fast", "f32")
+    assert (fast.value.operation.name, fast.dtype.name) == (f"{function}_fast", "f32")
     assert "f16 x = (f16)" in str(kernel.body)
 
 
+#: The epilogue's ``w`` and ``z`` declare no dtype: the type rules make both halves, and ``z`` a native square root.
 _HELD = """
 RegStore(dst_buffer=out, dst_index=(i, 0), frag=c0, shape=(16, 8, 16), epilogue_params=(acc), epilogue_result=y):
     epilogue:
@@ -108,7 +112,8 @@ RegStore(dst_buffer=out, dst_index=(i, 0), frag=c0, shape=(16, 8, 16), epilogue_
         in4 = load S[i]
         i32 n4 = load N[i]
         u = acc / in4
-        f16 z = sqrt(v)
+        w = maximum(v, 0.0)
+        z = sqrt(w)
         i32 kk = n4 / 2
         let i32 column = n
         i32 kc = column / 2
@@ -139,7 +144,7 @@ def test_an_operation_a_statement_holds_is_picked_too(pins, exp, divide, recipro
     kernel = _picked(_HELD, pins)
     store, merge, fragment = (next(s for s in kernel.body.iter() if isinstance(s, kind)) for kind in (RegStore, TreeHalve, FragmentApply))
     epilogue = {stmt.name: stmt.value.operation.name for stmt in store.epilogue if isinstance(stmt, Assign) and stmt.value.operation}
-    assert epilogue == {"u": divide, "z": "sqrt", "kk": "divide", "kc": "divide", "y": sigmoid}
+    assert epilogue == {"u": divide, "w": "maximum", "z": "sqrt", "kk": "divide", "kc": "divide", "y": sigmoid}
     assert [stmt.value.operation.name for stmt in merge.combine_states] == [exp, divide]
     assert (fragment.op.name, [op.name for op in fragment.post]) == (divide, [exp, reciprocal])
 

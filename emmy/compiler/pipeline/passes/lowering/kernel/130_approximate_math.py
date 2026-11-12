@@ -13,8 +13,10 @@ An approximate instruction is an operation of the kernel body, named after the e
 Each approximate instruction is an f32 instruction, so an operation is picked where it computes in f32 and stays as
 it is where it computes natively in f16 or over integers. That is why this runs last: ``120_explicit_conversions`` has
 said where every operation computes and ``125_spell_composites`` has written every composite out, so the exponential
-and the division of a ``sigmoid`` are picked like any other. One exception is the knob's own: a half exponential is
-picked too, and the type rules then compute it in f32 and round it back.
+and the division of a ``sigmoid`` are picked like any other. Two operations are picked at a half too, and the type
+rules then compute them in f32 and round back: the exponential, by its knob's own rule, and the hyperbolic tangent,
+because the native one (CUDA's ``htanh``) is the f32 function on the converted value, which nvcc's fast library
+reached.
 
 An operation sits in four places:
 
@@ -51,7 +53,8 @@ from emmy.compiler.target import native_f16_ops
 
 PATTERN = [Pattern("root", KernelOp)]
 
-_EXP = {"exp": "exp_fast"}
+#: The operations picked at a half too (the module doc).
+_AT_A_HALF = ("exp", "tanh")
 
 
 def rewrite(match: Match, root: Node, ctx: Context) -> KernelOp:
@@ -60,7 +63,7 @@ def rewrite(match: Match, root: Node, ctx: Context) -> KernelOp:
         raise RuleSkipped("the approximate forms are already picked (FAST_EXP is recorded)")
     picks = _picks(ctx)
     buffers = buffer_dtypes(op)
-    halves: list[Assign] = []  # the half exponentials picked: the type rules place them
+    halves: list[Assign] = []  # the operations picked at a half: the type rules place them
     body = op.body.map(lambda stmt: _picked(stmt, picks, buffers, halves)) if picks else op.body
     if halves:
         body = explicit_conversions(body, buffers, native_f16_ops())
@@ -72,7 +75,7 @@ def _picks(ctx: Context) -> dict[str, str]:
     target has an instruction for."""
     picks: dict[str, str] = {}
     if precision_pin(FAST_EXP):
-        picks |= _EXP
+        picks["exp"] = "exp_fast"
     if precision_pin(FAST_DIV):
         picks |= {"divide": "divide_fast", "reciprocal": "reciprocal_fast"}
     if precision_pin(FAST_SQRT):
@@ -88,7 +91,7 @@ def _picked(stmt: Statement, picks: dict[str, str], buffers: dict, halves: list[
     if isinstance(stmt, Assign):
         if (stmt.dtype or F32) == F32:
             return stmt.replace(value=_pick(stmt.value, picks))
-        picked = stmt.replace(value=_pick(stmt.value, {name: picks[name] for name in _EXP if name in picks}))
+        picked = stmt.replace(value=_pick(stmt.value, {name: picks[name] for name in _AT_A_HALF if name in picks}))
         if picked != stmt:
             halves.append(picked)
         return picked
@@ -124,8 +127,8 @@ def _pick(node: Expression, picks: dict[str, str]) -> Expression:
 def _epilogue(store: RegStore, picks: dict[str, str], buffers: dict) -> Body:
     """``store``'s epilogue with its approximate forms picked. The program is typed when it is printed, one definition
     at a time, over the types its printer reads each name at: a register element and a floating load are f32, an
-    integer load its own dtype, a definition or a binding its declared dtype. Each definition is typed the same way
-    here, and the operations that come out computing in f32 are the ones picked."""
+    integer load its own dtype, a binding its declared dtype, a definition the dtype the rules give it. Each
+    definition is typed the same way here, and the operations that come out computing in f32 are the ones picked."""
     types = dict.fromkeys(store.epilogue_params, F32)
     out: list[Statement] = []
     for stmt in store.epilogue:
@@ -135,8 +138,9 @@ def _epilogue(store: RegStore, picks: dict[str, str], buffers: dict) -> Body:
         elif isinstance(stmt, Assign):
             typed = explicit_conversions(Body([stmt]), {}, native_f16_ops(), {name: types[name] for name in stmt.deps() if name in types})
             in_f32 = {name for s in typed if isinstance(s, Assign) and s.dtype == F32 for name in _operations(s.value)}
-            stmt = stmt.replace(value=_pick(stmt.value, {name: fast for name, fast in picks.items() if name in in_f32 or name in _EXP}))
-            types[stmt.name] = stmt.dtype or F32
+            placed = {name: fast for name, fast in picks.items() if name in in_f32 or name in _AT_A_HALF}
+            stmt = stmt.replace(value=_pick(stmt.value, placed))
+            types[stmt.name] = next(s.dtype for s in typed if isinstance(s, Assign) and s.name == stmt.name)
         else:  # a select is f32; a binding its declared dtype, an index when it declares none
             types.update(dict.fromkeys(stmt.defines(), F32 if isinstance(stmt, Select) else getattr(stmt, "dtype", None) or I32))
         out.append(stmt)

@@ -265,9 +265,9 @@ def test_both_precision_lanes_freeze_as_pinned_rows_and_import_apart(tmp_path) -
     db = tuned_db(path, CASES[:1])
     [row] = list(db.iter_perf_rows())
     with pinned_knobs({"FAST_MATH": True}):
-        ctx = Context.from_target((12, 0), gpu_name=CARDS[(12, 0)], compile_flags="--use_fast_math")
+        ctx = Context.from_target((12, 0), gpu_name=CARDS[(12, 0)], precision={"FAST_MATH": True})
         db.record_perf(ctx, row.kernel, bindings=row.bindings, knobs=row.knobs, status="ok", stats=row.stats)
-    assert {r.flags for r in db.iter_perf_rows()} == {"", "--use_fast_math"}
+    assert {r.flags for r in db.iter_perf_rows()} == {"", "--ftz=true"}
     documents, _dropped = freeze_documents(db)
     [document] = documents.values()
     assert sorted(row.pins["FAST_MATH"] for row in document.rows) == [False, True]
@@ -277,7 +277,7 @@ def test_both_precision_lanes_freeze_as_pinned_rows_and_import_apart(tmp_path) -
     again = SearchDB()
     import_file(again, (frozen := next((tmp_path / "freeze").glob("*.json"))), file_source("freeze", frozen))
     lanes = sorted((r.flags, r.stats.median) for r in again.iter_perf_rows())
-    assert lanes == [("", row.stats.median), ("--use_fast_math", row.stats.median)]
+    assert lanes == [("", row.stats.median), ("--ftz=true", row.stats.median)]
 
 
 def test_a_kernel_benched_at_two_sizes_freezes_as_two_rows_of_one_kernel(tmp_path) -> None:

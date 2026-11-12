@@ -14,9 +14,9 @@ same reason (below).
 
 ## Status (2026-11-12)
 
-PR A is draft #1393. Steps 1 to 6 are done, each checked on the corpus's rendered CUDA. Steps 3 to 6 changed the
-text and ran the corpus at `correct` on the RTX 5090. No step ran the perf lane or the whole suite yet; both wait for
-the closing step.
+PR A is draft #1393. Steps 1 to 7 are done, each checked on the corpus's rendered CUDA. Steps 3 to 7 changed the
+text or the flags and ran the corpus at `correct` on the RTX 5090. No step ran the perf lane or the whole suite yet;
+both wait for the closing step.
 
 | Step | Commit | Corpus CUDA |
 | --- | --- | --- |
@@ -25,7 +25,8 @@ the closing step.
 | 3 | `8e44947fb` | 58 of 296 kernels: conversions as definitions, literals at their dtype, one integer negation |
 | 4 | `42c46cc44` | 72 kernels: the `lane` and `warp` declarations, dropped in 42 and moved into the grid in 30 |
 | 5 | `0936d9d9d` | 3 kernels: a `sigmoid` as four assignments |
-| 6 | this commit | 12 of the 42 fast-math kernels: the reciprocal (7), division (7), a `sigmoid`'s exponential (3) and the logarithm (2) as approximate operations; machine code identical in all 12 |
+| 6 | `9f1bd549f` | 12 of the 42 fast-math kernels: the reciprocal (7), division (7), a `sigmoid`'s exponential (3) and the logarithm (2) as approximate operations; machine code identical in all 12 |
+| 7 | this commit | identical; the fast-math lane's flags are `--ftz=true` where they were `--use_fast_math`, and the machine code of all 42 fast-math kernels is identical to step 5's |
 
 What step 6 found, checked with `nvcc -ptx` and `nvdisasm` (CUDA 13.0, `sm_75` to `sm_120`):
 
@@ -50,6 +51,23 @@ What step 6 found, checked with `nvcc -ptx` and `nvdisasm` (CUDA 13.0, `sm_75` t
   last kernel pass.
 - A kernel whose output buffer is named `log` did not compile: the kernel renderer had no spelling for the logarithm
   and printed `log(`. It prints `logf(` now.
+
+What step 7 found:
+
+- The flag reached one function inside a CUDA header: `htanh` is `tanhf` on the converted value, so a half
+  hyperbolic tangent was approximate under `--use_fast_math`. The pass picks it at a half too, as it does the
+  exponential. `hexp`, `hlog`, `hsqrt`, `hrsqrt` and the half division are inline PTX and never followed a flag.
+- Nothing else follows `-fast-math`: with the schedule held, 190 small traced kernels in 11 regimes build to the same
+  machine code under the old flags and the new, the half tanh apart.
+- **The fast-math lane's context key moves**, because the flag string is part of it. Three things follow. Its cubins
+  build again under new keys. In an existing tune DB its rows stay filed under `--use_fast_math`, which no compile
+  asks for: the golden rows import again under the new context on first use, and a row measured there locally is
+  not picked from until it is measured again. And a kernel no evidence decides draws its schedule sample with a seed
+  that folds the context key, so those picks move. The standard lane is untouched.
+- The serving pack's key listed three precision decisions and left the rest to the flag list. It lists them all now:
+  `FAST_DIV` and `FAST_SQRT` change the kernel body, not a flag.
+- nvcc's defaults are precise division, precise square root and the accurate library, so the flag list says nothing
+  for them. The standard lane's flag list stays empty, and its keys with it.
 
 ## End state
 
@@ -204,8 +222,9 @@ no restamp is expected. A row whose time moves is measured again in the closing 
    elementwise operation, as `exp_fast` and `divide_rn_f32` already are. It runs last, as `130_approximate_math`.
    *Check: perf lane level.*
 7. **nvcc flags shrink to the two whole-kernel decisions**, as its own commit after step 6: `--use_fast_math`,
-   `--prec-div` and `--prec-sqrt` go; `--fmad` and `--ftz` stay until PR B hands them to the compiler. This commit
-   re-baselines timings by itself, so it carries its own perf-lane run.
+   `--prec-div` and `--prec-sqrt` go; `--fmad` and `--ftz` stay until PR B hands them to the compiler. The machine
+   code of a kernel with a recorded row does not change, so no timing should move; the perf-lane run of the closing
+   step checks that. What does move is the fast-math lane's context key (Status).
 8. **Unrolling in Kernel IR** (property 3). A last kernel pass copies the body of every loop flagged `unroll` with a
    static trip count, binding the axis to its value in each copy; body optimization then folds each copy's index and
    drops guards the value decides. `047_reuse_lane_loads` already unrolls this way; its unroll becomes the shared one.

@@ -47,9 +47,10 @@ DEFAULT_SM_COUNT = gpu.DEFAULT_GPU.sm_count
 
 
 def _env_compile_flags() -> str:
-    """Effective nvcc flags, including the precision decisions' flags and custom overrides.
+    """Effective nvcc flags: the flush and fusion decisions' flags and custom overrides.
 
-    Folded into Context.structural_key so timing evidence cannot cross arithmetic regimes."""
+    Folded into Context.structural_key, beside the precision decisions themselves, so timing evidence cannot cross
+    arithmetic regimes."""
     from emmy.compiler.backend.cuda.nvcc import effective_flags  # noqa: PLC0415
 
     return " ".join(effective_flags())
@@ -61,8 +62,10 @@ def _env_compile_flags() -> str:
 _OPT_TOKEN = re.compile(r"(?:-Xcicc\s+)?-O(\d)")
 
 
-#: The flag fast math adds — with the precision classes' own flags, a regime of its own, since it changes the
-#: code a kernel runs as (``backend.cuda.nvcc.precision_flags``).
+#: The fast-math lane's name: the nvcc flag the umbrella passed until every approximate instruction became an
+#: operation of the kernel body. No flag list holds it now (``backend.cuda.nvcc.precision_flags``). A dataset still
+#: keys the lane by it (``dataset.regime_of``), and a caller that hands :meth:`Context.from_target` a flag string
+#: alone names the umbrella by it.
 FAST_MATH_FLAG = "--use_fast_math"
 
 
@@ -78,7 +81,7 @@ def split_opt_level(compile_flags: str) -> tuple[int, str]:
     Splitting rather than digesting the raw string is what makes ``""`` (compile / run's default)
     and ``"-Xcicc -O3"`` ONE regime, as they physically are — keyed on the raw string they were
     two, and every ``-O3``-pinned row was invisible to a default deploy. The residual keeps every
-    other flag verbatim, so ``--use_fast_math`` (which genuinely changes codegen) stays its own
+    other flag verbatim, so ``--ftz=true`` (which genuinely changes codegen) stays its own
     partition."""
     opt = 3
     m = _OPT_TOKEN.search(compile_flags)

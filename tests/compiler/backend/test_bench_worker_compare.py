@@ -781,14 +781,9 @@ async def test_worker_applies_each_requested_fast_math_policy(monkeypatch):
     monkeypatch.setattr(program, "benchmark_program", benchmark)
     for enabled in (False, True, False):
         await _bench_worker._run_job({"graph": None, "kwargs": {}, "precision": precision_pins({"FAST_MATH": enabled})})
-        assert nvcc.effective_flags() == ["--use_fast_math", "--fmad=false"]
-    await _bench_worker._run_job({"graph": None, "kwargs": {}, "precision": precision_pins({"FAST_MATH": True, "FAST_DIV": False})})
-    assert seen == [
-        ["--fmad=false"],
-        ["--use_fast_math", "--fmad=false"],
-        ["--fmad=false"],
-        ["--use_fast_math", "--prec-div=true", "--fmad=false"],
-    ]
+        assert nvcc.effective_flags() == ["--ftz=true", "--fmad=false"]
+    await _bench_worker._run_job({"graph": None, "kwargs": {}, "precision": precision_pins({"FAST_MATH": False, "FLUSH_TO_ZERO": True})})
+    assert seen == [["--fmad=false"], ["--ftz=true", "--fmad=false"], ["--fmad=false"], ["--ftz=true", "--fmad=false"]]
 
 
 def test_unsupplied_inputs_fill_with_seeded_normal_values() -> None:

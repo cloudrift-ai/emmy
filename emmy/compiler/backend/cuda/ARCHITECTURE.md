@@ -71,11 +71,16 @@ share every line downstream. The projection:
   deployable regime, and `--nvcc-flags` overrides. **Tuning measures in the regime it deploys into**, so a tuned
   latency is the deployed one.
 
-  `FAST_MATH` defaults to true and adds `--use_fast_math`; `EMMY_FAST_MATH=0` omits that flag and disables the
-  umbrella's compiler rewrites. Individual precision pins still override the umbrella, each instruction class through
-  its own flag (`nvcc.precision_flags`): `EMMY_CONTRACT_FMA=0` adds `--fmad=false` for an intermediate-rounding
-  diagnostic and leaves the other fast-math transformations enabled; combine it with `EMMY_FAST_MATH=0` for precise
-  arithmetic checks. Custom `--nvcc-flags` follow the precision flags.
+  Two precision decisions are nvcc flags (`nvcc.precision_flags`), because they hold for a whole kernel: flush to
+  zero (`--ftz=true`, on under the default `FAST_MATH`) and multiply-add fusion (`--fmad=false` under
+  `EMMY_CONTRACT_FMA=0`, an intermediate-rounding diagnostic). Every approximate instruction is an operation of the
+  kernel body, picked by `lowering/kernel/130_approximate_math` and printed as CUDA's fast intrinsic (`__expf`,
+  `__logf`, `__sinf`, `__cosf`, `__powf`, `__fdividef`) or as a helper in inline PTX (`rcp.approx`, `sqrt.approx`,
+  `tanh.approx`). Inline PTX takes no modifier from `--ftz`, so the kernel lowering hands the renderer the flush
+  decision and the two helpers nvcc would flush say `.ftz` themselves. nvcc is never passed `--use_fast_math`,
+  `--prec-div` or `--prec-sqrt`: whatever the body does not name approximate compiles at nvcc's precise defaults.
+  Combine `EMMY_CONTRACT_FMA=0` with `EMMY_FAST_MATH=0` for precise arithmetic checks. Custom `--nvcc-flags` follow
+  the precision flags.
   Explicit tensor-core instructions retain their own accumulation semantics. Accuracy and latency evidence must name
   the effective flags; a precise diagnostic does not qualify the default fast-math kernel. Persistent benchmark
   workers receive every effective precision decision with each request and restore their prior values afterward, so a

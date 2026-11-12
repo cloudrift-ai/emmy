@@ -228,18 +228,21 @@ FAST_EXP = Knob(
     # Pin-only precision policy; its effective default follows FAST_MATH. An explicit
     # EMMY_FAST_EXP pin overrides the umbrella without changing the other precision gates.
     hints=(False,),
-    help="Lower f32 exp through the SFU fast path (__expf: one FMUL + MUFU.EX2) instead of libm expf.",
+    help="Lower f32 exp through the SFU fast path (__expf: one FMUL + MUFU.EX2) instead of libm expf; with FAST_MATH, "
+    "the logarithm, sine, cosine, hyperbolic tangent and power take their approximate instruction too.",
     off=False,
 )
 
 # The other instruction classes of the precision-trading family, each pin-only and, but for FMA contraction, following
-# FAST_MATH like FAST_EXP. Each maps to the nvcc flag that picks its instruction (``backend.cuda.nvcc.precision_flags``).
+# FAST_MATH like FAST_EXP. An approximate instruction is an operation the kernel body names
+# (``lowering/kernel/130_approximate_math``); flush to zero and FMA contraction hold for a whole kernel and are nvcc
+# flags (``backend.cuda.nvcc.precision_flags``).
 
 FAST_DIV = Knob(
     "FAST_DIV",
     KnobType.BOOL,
     hints=(False,),
-    help="Approximate f32 division and reciprocal (nvcc --prec-div=false); a floating divisor invariant in its loop "
+    help="Approximate f32 division and reciprocal (div.approx, rcp.approx); a floating divisor invariant in its loop "
     "becomes one hoisted reciprocal and a multiply (lowering/kernel/040). Unset follows FAST_MATH.",
 )
 
@@ -247,7 +250,7 @@ FAST_SQRT = Knob(
     "FAST_SQRT",
     KnobType.BOOL,
     hints=(False,),
-    help="Approximate f32 square root (nvcc --prec-sqrt=false). Unset follows FAST_MATH.",
+    help="Approximate f32 square root (sqrt.approx). Unset follows FAST_MATH.",
 )
 
 FLUSH_TO_ZERO = Knob(
@@ -283,7 +286,7 @@ CPU_TILE = Knob(
 # --- The regime knobs: the precision-trading family (under the FAST_MATH umbrella) and the cache knob ------
 #
 # Precedence: an individual pin > FAST_MATH > True (precision_pin); CONTRACT_FMA alone keeps its own default. The
-# umbrella is unfeatured: concrete schedule choices retain their own identity, while effective compiler flags and the
+# umbrella is unfeatured: concrete schedule choices retain their own identity, while the flush flag and the
 # independent overrides separate the fast and precise measurement contexts. Golden input pins record the umbrella.
 
 COLD_CACHE = Knob(
@@ -300,7 +303,7 @@ FAST_MATH = Knob(
     KnobType.BOOL,
     hints=(True,),
     help="Fast math is enabled by default: the precision-trading knobs that follow it (FAST_EXP, FAST_DIV, FAST_SQRT, "
-    "FLUSH_TO_ZERO, F16_MMA_F32_ACC, FP8_MMA) and nvcc's fast library. Pin 0 to disable; individual pins win.",
+    "FLUSH_TO_ZERO, F16_MMA_F32_ACC, FP8_MMA). Pin 0 to disable; individual pins win.",
     unfeatured=True,  # a meta gate over other knobs — must never enter the feature vector
 )
 
