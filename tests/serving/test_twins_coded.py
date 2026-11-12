@@ -473,8 +473,9 @@ def test_qwen4_exp_serving_twins_capture_the_gated_residual_seam_weight_free(tmp
     assert not token_dim.is_static and token_dim.as_atom_name() == "num_tokens"
 
 
-def _qwen4_exp_nvfp4_twins(tmp_path, monkeypatch):
-    """The twins of a tiny Qwen3.8-Flash-Next coded as RadixArk's NVFP4 is, from its config and weight index alone."""
+def _qwen4_exp_nvfp4_twins(tmp_path, monkeypatch, text=None, **capture):
+    """The twins of a tiny Qwen3.8-Flash-Next coded as RadixArk's NVFP4 is, from its config and weight index alone
+    (``text``: overrides of the tiny text config)."""
     pytest.importorskip("torch")
     transformers = pytest.importorskip("transformers")
     pytest.importorskip("transformers.models.qwen4_exp")
@@ -488,7 +489,7 @@ def _qwen4_exp_nvfp4_twins(tmp_path, monkeypatch):
     group = {"weights": {"dynamic": False, "num_bits": 4, "type": "float", "group_size": 16}, "targets": ["Linear"]}
     qc = {"quant_method": "modelopt", "quant_algo": "NVFP4", "config_groups": {"group_0": group}, "ignore": ignore}
     vision = dict(depth=1, hidden_size=16, intermediate_size=32, num_heads=2, out_hidden_size=32)
-    config = transformers.Qwen4ExpConfig(text_config=QWEN4_EXP_TINY, vision_config=vision, quantization_config=qc)
+    config = transformers.Qwen4ExpConfig(text_config={**QWEN4_EXP_TINY, **(text or {})}, vision_config=vision, quantization_config=qc)
     config.save_pretrained(tmp_path)
     head = "model.language_model.layers"
     keys = [f"{head}.{i}.{m}_hyper_connection.hc_norm.weight" for i in range(4) for m in ("attn", "mlp")]
@@ -500,7 +501,7 @@ def _qwen4_exp_nvfp4_twins(tmp_path, monkeypatch):
         raise AssertionError("capture fetched the checkpoint")
 
     monkeypatch.setattr(safetensors, "_resolve_model_dir", no_fetch)
-    return capture_twin_graphs(str(tmp_path), decode_bucket=4, prefill_bucket=0)
+    return capture_twin_graphs(str(tmp_path), decode_bucket=4, prefill_bucket=0, **capture)
 
 
 def test_qwen4_exp_nvfp4_expert_twins_bind_packed_trios_without_fetching_the_checkpoint(tmp_path, monkeypatch):
@@ -518,6 +519,24 @@ def test_qwen4_exp_nvfp4_expert_twins_bind_packed_trios_without_fetching_the_che
         "w_gate_up_scale": ((32, 2), "f8e4m3"), "w_gate_up_scale_2": ((32, 1), "f32"),
         "w_down_scale": ((32, 1), "f8e4m3"), "w_down_scale_2": ((32, 1), "f32"),
     }  # fmt: skip
+
+
+def test_qwen4_exp_nvfp4_sliced_experts_add_the_grouped_prefill_twin(tmp_path, monkeypatch):
+    """Sliced across ranks, the experts also take the grouped prefill program: ``EXPERT_GROUP`` experts per launch,
+    each against a block of ``EXPERT_PREFILL_M`` rows, over the layer's E-stacked packed experts. Each rank's slice
+    of an expert keeps whole NVFP4 blocks: 64 intermediate channels over four ranks."""
+    from emmy.serving.release import EXPERT_GROUP, EXPERT_PREFILL_M
+
+    graphs = _qwen4_exp_nvfp4_twins(tmp_path, monkeypatch, {"moe_intermediate_size": 64}, expert_slices=4, slot_width=4)
+    name = f"expert-group{EXPERT_GROUP}x{EXPERT_PREFILL_M}@nvfp4"
+    assert {name, "expert-slots4@nvfp4"} <= set(graphs)
+    group, slots = graphs[name], graphs["expert-slots4@nvfp4"]
+    shapes = {i: (tuple(group.nodes[i].output.shape), group.nodes[i].output.dtype.name) for i in group.inputs}
+    stacked = {i: (tuple(slots.nodes[i].output.shape), slots.nodes[i].output.dtype.name) for i in slots.inputs}
+    assert shapes.pop("x") == ((EXPERT_GROUP, EXPERT_PREFILL_M, 32), "f16")
+    assert shapes.pop("sel") == ((EXPERT_GROUP,), "i64")
+    assert shapes == {i: stacked[i] for i in shapes} and next(iter(shapes.values()))[0][0] == 4
+    assert tuple(group.nodes[group.outputs[0]].output.shape) == (EXPERT_GROUP, EXPERT_PREFILL_M, 32)
 
 
 def test_qwen4_exp_nvfp4_twins_trace_into_the_inventory(tmp_path, monkeypatch):

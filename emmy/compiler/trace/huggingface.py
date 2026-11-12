@@ -1590,6 +1590,14 @@ def build_moe_split_wrapper(block, *, split_gate_up: bool = False, float32_resid
                 hidden = self.act_fn(gate) * up
                 return torch.matmul(_picked(w_down, sel), hidden.unsqueeze(-1)).squeeze(-1) * expert_scaling_factor
 
+            def blocks(self, x, sel, w_gate_up, w_down):
+                gate, up = torch.matmul(x, _picked(w_gate_up, sel).transpose(-1, -2)).chunk(2, dim=-1)
+                if limit is not None:
+                    gate = gate.clamp(max=limit)
+                    up = up.clamp(min=-limit, max=limit)
+                hidden = self.act_fn(gate) * up
+                return torch.matmul(hidden, _picked(w_down, sel).transpose(-1, -2)) * expert_scaling_factor
+
     else:
         raise NotImplementedError(
             f"build_moe_split_wrapper: unsupported experts layout (transposed={transposed}, "
@@ -1600,7 +1608,7 @@ def build_moe_split_wrapper(block, *, split_gate_up: bool = False, float32_resid
     return pre, hyper[1] if hyper is not None else None if gdn else PostAttn(), ExpertFFN()
 
 
-def build_moe_slots_wrapper(expert):
+def build_moe_slots_wrapper(expert, form="slots"):
     """The fixed-slot program's module: ``slots(x[1, H], sel[k], *stacked) -> [k, H]`` of one expert form
     (:func:`build_moe_split_wrapper`), or a chunk's ``[T, k, H]`` from ``x[T, H]`` and ``sel[T, k]``, traced with the
     E-stacked expert tensors as inputs. It carries the expert's float32-output contract."""
@@ -1613,7 +1621,7 @@ def build_moe_slots_wrapper(expert):
             self._emmy_output_float32 = getattr(expert, "_emmy_output_float32", False)
             # The form's own method is the forward: its parameter names become the plan's input names, the
             # names the layer's stacked tensors and the pager bind under.
-            self.forward = expert.slots
+            self.forward = getattr(expert, form)
 
     return Slots()
 

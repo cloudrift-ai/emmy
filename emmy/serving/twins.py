@@ -45,7 +45,7 @@ from typing import TYPE_CHECKING
 
 from emmy.compiler.loader.exl3 import coded_tensor_storage
 from emmy.serving.coded_head import Nvfp4HeadSpec, head_graph, nvfp4_head_stored
-from emmy.serving.release import EXPERT_PREFILL_M
+from emmy.serving.release import EXPERT_GROUP, EXPERT_PREFILL_M
 
 if TYPE_CHECKING:
     from emmy.compiler.graph import Graph
@@ -401,7 +401,25 @@ def capture_twin_graphs(
 
     def emit_experts(parts, expert_w, suffix, members):
         """The expert twins of one MoE profile: one per serving width, the M=1 and prefill ones every MoE boot
-        builds, and the fixed-slot decode program."""
+        builds, the fixed-slot decode program and, on sliced experts, the grouped prefill program."""
+        transposed = moe_expert_layout(parts[1])[0]
+
+        def spell(name, graph, lead=()):
+            """Record one expert program, its weights spelled in the checkpoint's coding (``lead``: a stacked expert
+            axis)."""
+            if storage:
+                graphs.update(_spell_expert_twins(name, graph, storage, lead=lead))
+            elif mxfp4 is not None:
+                # BEFORE fp8: a checkpoint can declare an fp8 trunk beside natively MXFP4
+                # routed experts (DeepSeek V4), and the experts are what this twin records.
+                graphs.update(_spell_mxfp4_expert_twins(name, graph, mxfp4, members, transposed))
+            elif nvfp4 is not None:
+                graphs.update(_spell_nvfp4_expert_twins(name, graph, nvfp4, members, transposed))
+            elif fp8 is not None:
+                graphs.update(_spell_fp8_expert_twins(name, graph, fp8, members))
+            else:
+                graphs[name] = graph
+
         # Every MoE boot compiles the M=1 expert program — the fixed-slot tier runs it — whatever
         # widths the trunk serves, so the expert twins carry width 1 too. A boot with an any-width
         # program also compiles the static M=256 expert prefill twin.
@@ -411,43 +429,30 @@ def capture_twin_graphs(
             rows = 8 if m is None else m
             examples = _expert_examples(parts[1], rows, hidden, td, split_gate_up=bool(storage))
             argnames = ["x"] if m is None else None
-            graph = trace_split(expert_w, examples, argnames)
-            expert_name = f"expert{name}{suffix}"
-            if storage:
-                graphs.update(_spell_expert_twins(expert_name, graph, storage))
-            elif mxfp4 is not None:
-                # BEFORE fp8: a checkpoint can declare an fp8 trunk beside natively MXFP4
-                # routed experts (DeepSeek V4), and the experts are what this twin records.
-                graphs.update(_spell_mxfp4_expert_twins(expert_name, graph, mxfp4, members, moe_expert_layout(parts[1])[0]))
-            elif nvfp4 is not None:
-                graphs.update(_spell_nvfp4_expert_twins(expert_name, graph, nvfp4, members, moe_expert_layout(parts[1])[0]))
-            elif fp8 is not None:
-                graphs.update(_spell_fp8_expert_twins(expert_name, graph, fp8, members))
-            else:
-                graphs[expert_name] = graph
+            spell(f"expert{name}{suffix}", trace_split(expert_w, examples, argnames))
         # The fixed-slot decode program: the row's k picks gathered from the E-stacked expert tensors
         # (``build_moe_slots_wrapper``), spelled like the per-expert twins with the expert axis leading. On sliced
         # experts a decode step up to the slot width rides the slots too, every row against its own picks at once
         # (``expert-slots8``); the one-row program stays the one-token step's.
         top_k = int(getattr(text, "num_experts_per_tok", 0) or 0)
-        chunk = slot_width if expert_slices > 1 and slot_width > 1 and not moe_expert_layout(parts[1])[0] else 1
+        chunk = slot_width if expert_slices > 1 and slot_width > 1 and not transposed else 1
         for rows in sorted({1, chunk}) if top_k else ():
             count = int(parts[1].gate_up_proj.shape[0])
             one = _expert_examples(parts[1], rows, hidden, td, split_gate_up=bool(storage))
             sel = torch.zeros((top_k,) if rows == 1 else (rows, top_k), dtype=torch.int64)
             stacked = [one[0], sel, *(torch.zeros((count, *a.shape), dtype=a.dtype) for a in one[1:])]
             graph = trace_split(build_moe_slots_wrapper(expert_w), stacked, None)
-            slots_name = f"expert-slots{rows if rows > 1 else ''}{suffix}"
-            if storage:
-                graphs.update(_spell_expert_twins(slots_name, graph, storage, lead=(count,)))
-            elif mxfp4 is not None:
-                graphs.update(_spell_mxfp4_expert_twins(slots_name, graph, mxfp4, members, moe_expert_layout(parts[1])[0]))
-            elif nvfp4 is not None:
-                graphs.update(_spell_nvfp4_expert_twins(slots_name, graph, nvfp4, members, moe_expert_layout(parts[1])[0]))
-            elif fp8 is not None:
-                graphs.update(_spell_fp8_expert_twins(slots_name, graph, fp8, members))
-            else:
-                graphs[slots_name] = graph
+            spell(f"expert-slots{rows if rows > 1 else ''}{suffix}", graph, (count,))
+        # The grouped prefill program on sliced experts, for a boot with an any-width program: one launch over
+        # ``EXPERT_GROUP`` experts, each against a block of ``EXPERT_PREFILL_M`` of its routed rows (``x[G, R, H]``,
+        # ``sel[G]``), gathered from the same E-stacked tensors.
+        if top_k and expert_slices > 1 and not transposed and None in widths and hasattr(expert_w, "blocks"):
+            count = int(parts[1].gate_up_proj.shape[0])
+            one = _expert_examples(parts[1], EXPERT_PREFILL_M, hidden, td, split_gate_up=bool(storage))
+            stacked = [torch.zeros((EXPERT_GROUP, *one[0].shape), dtype=td), torch.zeros(EXPERT_GROUP, dtype=torch.int64)]
+            stacked += [torch.zeros((count, *a.shape), dtype=a.dtype) for a in one[1:]]
+            graph = trace_split(build_moe_slots_wrapper(expert_w, "blocks"), stacked, None)
+            spell(f"expert-group{EXPERT_GROUP}x{EXPERT_PREFILL_M}{suffix}", graph, (count,))
 
     def emit_halves(block, pre_w, post_w, suffix, members):
         """The ``pre`` and ``post`` twins of one attention layer at every serving width, scoped to ``members`` (the
