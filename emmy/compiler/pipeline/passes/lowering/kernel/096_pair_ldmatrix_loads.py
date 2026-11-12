@@ -20,10 +20,10 @@ Legality, judged structurally on the two loads:
 - **Volta**: adjacent logical fragment indices under the matching derived layout, with equal
   logical K coordinates. A pairs register rows; B pairs register columns. Each becomes one
   LDS.128 and the coupled row/row MMA plus interleaved accumulator map preserve the output;
-- the second load moves UP to the first's position: every intervening stmt must be barrier-free
-  straight-line code that neither redefines either fragment nor defines a free var of the moved
-  load's index (the flash drain interleaves ``MmaSyncPtx`` between the loads — reading the FIRST
-  fragment is fine, the pair fills both before any consumer runs).
+- no statement must stand between the two loads under the scope's ordering constraints
+  (:class:`Siblings`), wherever the two stand. A barrier, a slab
+  write or a consumer of the earlier value of either fragment between the two is such a
+  statement.
 
 The fusion is a pure perf transform: same slab cells, same values, same fragments — the paired
 kernel is bit-identical to its unpaired sibling. Idempotent: a paired load (``pair_frag`` set)
@@ -37,19 +37,10 @@ from dataclasses import replace
 from emmy.compiler.graph import Node
 from emmy.compiler.ir.expression import BinaryExpression, Expression, Literal, SimplifyCtx, affine_form
 from emmy.compiler.ir.kernel import KernelOp
-from emmy.compiler.ir.kernel.ir import (
-    VOLTA_B_CONGRUOUS,
-    VOLTA_CROSSWISE,
-    LdmatrixLoad,
-    MbarrierWait,
-    Sync,
-    WgmmaCommit,
-    WgmmaFence,
-    WgmmaMma,
-    WgmmaWait,
-)
-from emmy.compiler.ir.stmt import Body, Cond, Loop, Statement, StridedLoop, Write
+from emmy.compiler.ir.kernel.ir import VOLTA_B_CONGRUOUS, VOLTA_CROSSWISE, LdmatrixLoad
+from emmy.compiler.ir.stmt import Body, Statement
 from emmy.compiler.pipeline import Pattern, RuleSkipped
+from emmy.compiler.pipeline.passes.lowering.kernel._siblings import Siblings
 from emmy.compiler.pipeline.search.space import PAIR_LDMATRIX
 
 PATTERN = [Pattern("root", KernelOp)]
@@ -134,7 +125,8 @@ def _pairs_with(a: LdmatrixLoad, b: LdmatrixLoad) -> bool:
     """``b`` is ``a``'s slab-adjacent partner: the SECOND fragment of one x4 (the ``+8``
     matrices lanes 16-31 address)."""
     if (
-        a.src_buffer != b.src_buffer
+        a.frag == b.frag
+        or a.src_buffer != b.src_buffer
         or a.role != b.role
         or a.ldm != b.ldm
         or a.b_trans != b.b_trans
@@ -144,7 +136,7 @@ def _pairs_with(a: LdmatrixLoad, b: LdmatrixLoad) -> bool:
         return False
     row_d, col_d = _delta(a.src_index[0], b.src_index[0]), _delta(a.src_index[1], b.src_index[1])
     if a.fragment_layout == "m8n8k4":
-        if b.fragment_index != a.fragment_index + 1:
+        if a.fragment_index % 2 or b.fragment_index != a.fragment_index + 1:
             return False
         # Crosswise pairs along the slab's ROW axis (A's M, a transposed B's N) at one K
         # column; the congruous canonical B pairs along its columns at one row.
@@ -154,47 +146,26 @@ def _pairs_with(a: LdmatrixLoad, b: LdmatrixLoad) -> bool:
     return row_d == 0 and col_d == _ATOM8  # K-major slab: same K row, cols adjacent
 
 
-def _blocks(s: Statement, a_frag: str, moved_frag: str | None, moved_deps: set[str]) -> bool:
-    """An intervening stmt that forbids moving the partner load up to the pair position: a
-    barrier / control / slab-writing stmt; a redefinition of either fragment; a READ of the
-    moved fragment (its pre-move value — e.g. the previous streaming step's — would be
-    clobbered early); or a definition of a name the moved load's index reads. Reading the
-    KEPT fragment is fine — the pair fills it at its original position."""
-    if s.nested() or isinstance(s, (Sync, MbarrierWait, Write, Loop, StridedLoop, Cond, WgmmaFence, WgmmaCommit, WgmmaWait, WgmmaMma)):
-        return True
-    defs = set(s.defines())
-    if a_frag in defs or (moved_frag is not None and moved_frag in defs):
-        return True
-    if moved_frag is not None and moved_frag in s.deps():
-        return True
-    return bool(defs & moved_deps)
-
-
 def _pair(stmts: list[Statement]) -> list[Statement] | None:
-    out = list(stmts)
-    changed = False
-    i = 0
-    while i < len(out):
-        a = out[i]
-        if not _candidate(a):
-            i += 1
-            continue
-        if isinstance(a, LdmatrixLoad) and a.fragment_layout == "m8n8k4" and a.fragment_index % 2:
-            i += 1
-            continue
-        j = i + 1
-        while j < len(out):
-            b = out[j]
-            if _candidate(b) and _pairs_with(a, b):
-                moved_deps = {v for e in b.src_index for v in e.free_vars()}
-                if any(_blocks(s, a.frag, b.frag, moved_deps) for s in out[i + 1 : j]):
-                    break
-                out[i] = a.replace(pair_frag=b.frag)
-                del out[j]
-                changed = True
-                break
-            if _blocks(b, a.frag, None, set()):
-                break
-            j += 1
-        i += 1
-    return out if changed else None
+    """Each low half fused with its high half wherever the scope's ordering constraints leave the two free of each
+    other. A run of adjacent fragments pairs from its first: a load some open low half can still take waits for it."""
+    candidates = [i for i, s in enumerate(stmts) if _candidate(s)]
+    high = {a: [b for b in candidates if b != a and _pairs_with(stmts[a], stmts[b])] for a in candidates}
+    if not any(high.values()):
+        return None
+    low = {b: [a for a in candidates if b in high[a]] for b in candidates}
+    scope = Siblings(stmts)
+    free = set(candidates)
+    progress = True
+    while progress:
+        progress = False
+        for a in candidates:
+            if a not in free or any(c in free and scope.fusable((c, a)) for c in low[a]):
+                continue
+            b = next((b for b in high[a] if b in free and scope.fusable((a, b))), None)
+            if b is not None:
+                scope.fuse([a, b], scope[a].replace(pair_frag=scope[b].frag))
+                free -= {a, b}
+                progress = True
+    changed = len(free) < len(candidates)
+    return scope.ordered() if changed else None

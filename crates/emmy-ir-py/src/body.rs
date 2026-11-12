@@ -774,6 +774,16 @@ pub fn normalize_body<'py>(body: &Bound<'py, PyAny>) -> PyResult<Bound<'py, PyBo
     }
 }
 
+/// The optimizing half of the normal form, with the order and the names as they stand.
+#[pyfunction]
+pub fn optimize_body<'py>(body: &Bound<'py, PyAny>) -> PyResult<Bound<'py, PyBody>> {
+    let optimized = emmy_ir::normalize::optimize_body(&PyBody::from_iterable(body)?).py()?;
+    match body.cast::<PyBody>() {
+        Ok(given) if given.get().body.ptr_eq(&optimized) => Ok(given.clone()),
+        _ => PyBody::wrap(body.py(), &optimized),
+    }
+}
+
 #[pyfunction]
 pub fn prepare_body<'py>(body: &Bound<'py, PyAny>) -> PyResult<Bound<'py, PyBody>> {
     PyBody::wrap(
@@ -808,6 +818,27 @@ pub fn one_operation_per_definition<'py>(
     PyBody::wrap(
         body.py(),
         &emmy_ir::normalize::one_operation_per_definition(&PyBody::from_iterable(body)?, &exposed),
+    )
+}
+
+/// A fragment's statements in the canonical order, its names as they stand, a read of an `outer` name ahead of its
+/// first binding reading the outer one; an error when they wait on each other.
+#[pyfunction]
+#[pyo3(signature = (body, outer=None))]
+pub fn fragment_order<'py>(
+    body: &Bound<'py, PyAny>,
+    outer: Option<&Bound<'py, PyAny>>,
+) -> PyResult<Bound<'py, PyBody>> {
+    let outer: HashSet<Name> = match outer {
+        Some(names) => names
+            .try_iter()?
+            .map(|item| name_from_py(&item?))
+            .collect::<PyResult<_>>()?,
+        None => HashSet::new(),
+    };
+    PyBody::wrap(
+        body.py(),
+        &emmy_ir::normalize::fragment_order(&PyBody::from_iterable(body)?, &outer).py()?,
     )
 }
 
@@ -910,10 +941,12 @@ pub fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(parse_body, m)?)?;
     m.add_function(wrap_pyfunction!(pretty_body, m)?)?;
     m.add_function(wrap_pyfunction!(normalize_body, m)?)?;
+    m.add_function(wrap_pyfunction!(optimize_body, m)?)?;
     m.add_function(wrap_pyfunction!(prepare_body, m)?)?;
     m.add_function(wrap_pyfunction!(simplify_body, m)?)?;
     m.add_function(wrap_pyfunction!(one_operation_per_definition, m)?)?;
     m.add_function(wrap_pyfunction!(canonical_values, m)?)?;
+    m.add_function(wrap_pyfunction!(fragment_order, m)?)?;
     m.add_function(wrap_pyfunction!(free_names_py, m)?)?;
     m.add_function(wrap_pyfunction!(exposed_defines_py, m)?)?;
     m.add_function(wrap_pyfunction!(rename_free, m)?)?;

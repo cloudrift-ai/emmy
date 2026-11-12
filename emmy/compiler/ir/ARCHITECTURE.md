@@ -583,8 +583,10 @@ isinstance whitelist), with results-defined checked there too and α-invariance 
 arrive through operand edges, and only the enclosing iteration axes are read from outside — so `Fold.canonical`
 (and `Lambda.canonical` for a lambda) is the one cross-scope equivalence the Tile canonical forms and the lowering
 passes (cone sharing, twisted-pair recognition, seam value clustering) all consult.
-`Lambda.__post_init__` installs a
-dependency-safe body order and commutative argument order, so these context-independent storage invariants do not
+`Lambda.__post_init__` installs the
+normal form's body order (the crate's `fragment_order`: the canonical order's ranking with the names kept, a read of
+a parameter ahead of the body's rebinding of it reading the parameter, a body whose statements wait on each other an
+error) and commutative argument order, so these context-independent storage invariants do not
 belong to `Fold`, `TileOp`, or the structural-key path. Contraction operand roles live on Fold edges, so sorting a
 commutative product's arguments does not change them. Formation is strict: a kernel's writes ride
 `TileOp.output_specs`, and synthesized split-reduce loops remain Loop IR until the new kernel re-enters total lift. A
@@ -709,14 +711,14 @@ Normalization is a canonical form, not a pipeline pass. It runs the same on ever
 every identity digest, and answers to no knob, pin or evidence; nothing under `ir/` imports the pipeline that holds
 them. Every function in the module runs inside `normalize_body`. A body → body transform that something decides — a
 knob the search sets, a pin, a pass stage — is a pipeline pass and lives in the pass file owning that decision, even
-when another pass could reuse it from here. A pass may call a normalization step (kernel lowering's
-`040_split_invariant_divides` owns the hoist it applies); normalization never calls a pass.
+when another pass could reuse it from here. A pass may call a normalization step; normalization never calls a pass.
 `tests/architecture/test_layering.py` holds the module to one exported entry point, to no transform that no
 normalization step calls, and `ir/` to no pipeline import.
 
-Pure `body → body` passes run from `LoopOp.__post_init__` so every
-constructed `LoopOp` (including intermediate fusion results) is
-canonicalized before validation:
+`BodyOp.__post_init__`, the base `LoopOp` and `KernelOp` share, gives the body its form. A `LoopOp` takes
+`normalize_body`, so every constructed `LoopOp` (including intermediate fusion results) is canonicalized before
+validation. A `KernelOp` takes `optimize_body`, the optimizing steps of the normal form without its canonical order
+and names: no identity reads a kernel body, and its listing keeps the order and the names its passes wrote.
 
 While it builds a region, fusion holds a compact body containing scalar `Call` statements. Each references one
 read-only `Subroutine` with explicit coordinate parameters and captured input buffers. A symbolic dim an index names
@@ -743,11 +745,13 @@ from that CSE form. Subroutine boundaries never limit fusion.
   A cross-CTA partition coordinate occupies the workspace's leading index, so the same rule keeps it outside the axes
   it partitions without a naming convention.
 
-- `fold_constants` — an operation whose operands are all literals (a literal is a `Let` binding a number at the
-  default precision) becomes the `Let` of the value it computes, at the statement's own dtype, so a rounding the
-  program performed still happens where it did and nothing computes past it; an untyped integer constant stays
-  untyped (the integer `0` of `x - x`), a float one is f32. With `x - x → 0` from the affine fold, the one-key
-  softmax weight `exp(s - s) / exp(s - s)` is the literal `1.0` and the product by it is `1.0 * v`.
+- `simplify_body` and `inline_literals` — an operation whose operands are all literals folds to the value it
+  computes, and an `Assign` whose value is a literal becomes a `Let` of it at the statement's own dtype, so a rounding
+  the program performed still happens where it did and nothing computes past it; an untyped integer constant stays
+  untyped (the integer `0` of `x - x`), a float one is f32. `inline_literals` spells a `Let` of a float literal at the
+  default precision, or of an integer literal with no declared width, into the expressions that read it, and the `Let`
+  goes once nothing reads it; a `Let` at another precision stays a binding. With `x - x → 0` from the affine fold, the
+  one-key softmax weight `exp(s - s) / exp(s - s)` is the literal `1.0` and the product by it is `1.0 * v`.
 - `fold_trivial_selects` — a `Select` whose branches all bind one value is a copy of it.
 - `drop_unread_values` — a pure statement whose values nothing reads is dropped, and a loop or branch left with
   no statement goes with it: the work reached no output. The one-key softmax weight leaves its whole score behind
@@ -757,16 +761,17 @@ from that CSE form. Subroutine boundaries never limit fusion.
 - `one_operation_per_definition` — every definition is one operation over names and literals: a nested node of an
   `Assign`'s value that is no name, literal or node of the value's own affine region (a comparison, a select, a cast,
   any operation) is a definition of its own ahead of its reader, and an `Accum` sums a name or a literal. An affine
-  region is one node, as a sum is one operation: `canonicalize_expressions` spells every expression in affine form
-  — like terms summed, zero terms dropped, the constant last, in the coefficient domain of its field's class (an index
+  region is one node, as a sum is one operation: `canonicalize_expressions` spells every expression in affine form —
+  like terms summed, zero terms dropped, the constant last, in the coefficient domain of its field's class (an index
   folds integer literals alone and keeps a quotient a term, a value folds any literal and a division by a float
-  literal into the product by its reciprocal) — and this step joins an affine definition read exactly once, inside an
-  affine reader, into the reader's region, so `x + x`, `2 * x` and `t = 3 * x; s = t + x; o = s - x` are one body,
-  `x / 2.0` and `0.5 * x` another, and `x - x` is `0`. The affine form reassociates a sum and rounds a reciprocal
-  once, which every reduce schedule and fast-math division do already. A chain of named temps and one tree are one
-  body up to the single-reader guard — a sum two statements read stays a definition — so the readers of the normal
-  form (the tile lift, the kernel passes, the renderer) read one operation per statement; the renderer spells a nested
-  value a kernel pass built as temps of its own.
+  literal whose reciprocal is exact, a power of two, into the product by it) — and this step joins an affine
+  definition read exactly once, inside an affine reader, into the reader's region, so `x + x`, `2 * x` and `t = 3 * x;
+  s = t + x; o = s - x` are one body, `x / 2.0` and `0.5 * x` another, and `x - x` is `0`. The affine form
+  reassociates a sum, which every reduce schedule does already. It decides no rounding a knob owns: `x / 3.0` stays a
+  division, since whether it becomes a product by a rounded reciprocal is the division knob's choice. A chain of named
+  temps and one tree are one body up to the single-reader guard — a sum two statements read stays a definition — so
+  the readers of the normal form (the tile lift, the kernel passes, the renderer) read one operation per statement;
+  the renderer spells a nested value a kernel pass built as temps of its own.
 - `merge_sibling_reduce_loops` — unify sibling reduce axes whose Load positions overlap, then merge matching Loops
   before descending into their children. A parent merge therefore exposes child reductions to the same walk.
   Overlapping reductions share one canonical axis name (softmax's max + sum sweeps; the two matmul reductions in
@@ -790,18 +795,27 @@ from that CSE form. Subroutine boundaries never limit fusion.
   weight tensors symmetrically.
 - `place_values` — every pure value once, at the shallowest loop scope on its consumers' path that binds its
   coordinates and holds its operands. Values are told apart by number (the value numbering below): the same function
-  of the same coordinate expressions is one value whatever it is called, so a second computation a scope can already see
-  reads the first, a copy aliases its source, and a block without a side effect moves with everything it still holds.
-  This one step is loop-invariant motion, load and expression dedup, copy-alias elimination and common-branch motion:
-  a value both branches of a condition compute moves ahead of the condition, a branch alone never speculates. A read of
-  a buffer or carried state the body writes carries the version it read — the writes before it on its path, with a
-  loop's write counted on the back edge and a branch's not — so it never merges with a read of another version nor
-  moves above the write that made its own, and everything computed from it inherits the version. Stores, reductions,
-  seeds and carried updates stay where they are, an ordered execution protocol holds everything after it behind it,
-  and a binding rebound later represents no other value. Two seeded reductions of one value in one loop, each updated
-  once and read only after the loop, are one reduction. Division keeps its own rounding even when its denominator is
-  invariant; reciprocal multiplication is not a normalization. Names are distinct across scopes when it runs, as the
-  sequential renaming leaves them.
+  of the same coordinate expressions is one value whatever it is called, so a second computation a scope can already
+  see reads the first, a copy aliases its source, and a block without a side effect moves with everything it still
+  holds. This one step is loop-invariant motion, load and expression dedup, copy-alias elimination and common-branch
+  motion: a value both branches of a condition compute moves ahead of the condition, a branch alone never speculates.
+  A read of a buffer or carried state the body writes carries the version it read — the writes before it on its path,
+  with a loop's write counted on the back edge and a branch's not — so it never merges with a read of another version
+  nor moves above the write that made its own, and everything computed from it inherits the version. Stores,
+  reductions, seeds and carried updates stay where they are, an ordered execution protocol holds everything after it
+  behind it, and a binding rebound later represents no other value. Division keeps its own rounding even when its
+  denominator is invariant; reciprocal multiplication is not a normalization. Names are distinct across scopes when it
+  runs, as the sequential renaming leaves them.
+- `merge_congruent_states` — two carried states whose seeds agree and whose updates compute one value once the
+  states are assumed equal hold one value at every step, and are one state. `congruent_states` in the numbering finds
+  them: candidates are accumulators updated directly in a seeded loop and carried states, each defined by one
+  statement; groups start from the update's statement type, operation, dtype and scope, and split by their members'
+  update numbers, every grouped state numbered by its group, until no group splits (optimistic value numbering; groups
+  never come from names, and a body with no two candidates in one scope is not numbered again). Placement numbers the
+  group alike, so it merges the cones the members compute: the twin pivots and denominators of two online softmaxes
+  over one row become one pair. A member then goes when nothing reads it in its own scope but its update (a carried
+  state, read through `pre` the step before wherever it sits, always goes), its reads after the loop reading the
+  group's first member. Two seeded reductions of one value, each read only after the loop, are the simplest case.
 - `rename_ssa_sequential` — `Load` names become `in0, in1, …`, accumulator state becomes `acc0, …`, and
   every other definition becomes `v0, v1, …`, in lexical definition order. Names stay globally unique while each
   nested body tracks its own binders, so sibling scopes may reuse the same source spelling without collapsing. Scalar
@@ -815,18 +829,22 @@ from that CSE form. Subroutine boundaries never limit fusion.
   updated value — so the online softmax's rescale reads the old maximum beside the new one; a carried state orders
   nothing within its step, since a `Pre` reads the step before wherever it sits, while the loop that carries the state
   produces it. A scope whose bindings and reads wait on each other has no reading, and normalization refuses it.
-- Normalization runs its steps once and checks nothing. The steps that feed each other run to their own fixed
-  point where they sit: a value placed outside its loop can expose a sibling merge, two reads placement made one can
-  leave a predicate constant, and a merge exposes values to place, so the merge, the expression simplification and
-  placement run until the first two leave a placed body alone. The split feeds the steps ahead of it — a definition
-  it makes can be placed, and a region it joins can leave a value unread — so the steps run again after a split that
-  changed the body, and only then. The order runs last, once, with one exception: the unread-value drop reads by
-  name, and a cut can splice one cone twice under the same names, so a value only its namesake's readers kept alive
-  is unread only once the order has given every binding its own name. A body the order left such a value in goes
-  through the steps again. What keeps this honest is a test, not a loop: the normal form of every kernel a repository
-  golden or the realization corpus stores is one normalization leaves alone
-  (`tests/compiler/ir/stmt/implementation/test_normal_form_is_final.py`). A form that was not final would give two
-  spellings of one body two texts, and no error.
+- The driver repeats whole rounds until one leaves the body alone, takes the least by text of forms the rounds
+  alternate between (the crate's `ARCHITECTURE.md` says which bodies do that), and refuses a body that does neither
+  in eight.
+  Inside a round, the steps that feed each other run to their own fixed point where they sit: a value placed outside
+  its loop can expose a sibling merge, two reads placement made one can leave a predicate constant, and a merge
+  exposes values to place, so the merge, the expression simplification and placement run until the first two leave
+  a placed body alone, refused the same way after eight. The split feeds the steps ahead of it — a definition it
+  makes can be placed, and a region it joins can leave a value unread — so a split that changed the body starts the
+  round again. The order and the unread-value drop end a round: the drop reads by name, and a cut can splice one cone
+  twice under the same names, so a value only its namesake's readers kept alive is unread only once the order has
+  given every binding its own name. The order permutes and names, and a value's operand order reads the ranks it
+  gives, so one round can change what the next orders; the crate's `ARCHITECTURE.md` says why the rounds settle. A
+  test holds the stored forms to the same rule: the normal form of every kernel a repository golden or the
+  realization corpus stores is one normalization leaves alone
+  (`tests/compiler/ir/stmt/implementation/test_normal_form_is_final.py`), so a stored kernel never reads back as
+  another.
 - Legal motion and merging expose availability; equality alone never moves a value across a scope or an effect. This
   is scoped placement, not general partial redundancy elimination: separately executed sibling scopes and equality
   through mutable loop-carried state may remain, and loads are invalidated by writes to any element of their buffer.

@@ -22,8 +22,12 @@ pub fn simplify_body(body: &Body) -> Result<Body> {
     Ok(body.rebuilt(stmts?))
 }
 
+/// `stmt` with every expression simplified as its field's class (an index under the integer rules, a value under them
+/// where the ranges prove its operands integer) under `ctx`, and every child body under the ranges of the axes the
+/// statement binds for it.
 pub(crate) fn simplify_stmt(stmt: &Arc<Statement>, ctx: &SimplifyCtx) -> Result<Arc<Statement>> {
-    let stmt = Statement::try_map_expressions(stmt, &mut |e| e.simplify(ctx))?;
+    let stmt =
+        Statement::try_map_classed_expressions(stmt, &mut |class, e| e.simplify_as(ctx, class))?;
     match &*stmt {
         // A value that is a literal is a constant: a `Let`, typed as declared, else `f32` for a float literal and
         // untyped for an integer one (`x - x` over integers is the integer zero, not a float), its literal a float
@@ -44,19 +48,18 @@ pub(crate) fn simplify_stmt(stmt: &Arc<Statement>, ctx: &SimplifyCtx) -> Result<
             })))
         }
         Statement::Select(s) => Ok(Arc::new(Statement::Select(decided(s)))),
-        Statement::Loop(l) => {
-            let inner = extend_simplify_ctx(ctx, &l.axis);
-            Ok(with_bodies(&stmt, vec![simplify_in(&l.body, &inner)?]))
+        _ => {
+            let nested = stmt.nested();
+            if nested.is_empty() {
+                return Ok(stmt);
+            }
+            let inner = stmt
+                .bound_axes()
+                .iter()
+                .fold(ctx.clone(), |inner, axis| extend_simplify_ctx(&inner, axis));
+            let bodies: Result<Vec<Body>> = nested.iter().map(|b| simplify_in(b, &inner)).collect();
+            Ok(with_bodies(&stmt, bodies?))
         }
-        Statement::StridedLoop(l) => {
-            let inner = extend_simplify_ctx(ctx, &l.axis);
-            Ok(with_bodies(&stmt, vec![simplify_in(&l.body, &inner)?]))
-        }
-        Statement::Cond(c) => Ok(with_bodies(
-            &stmt,
-            vec![simplify_in(&c.body, ctx)?, simplify_in(&c.else_body, ctx)?],
-        )),
-        _ => Ok(stmt),
     }
 }
 
@@ -143,5 +146,51 @@ mod tests {
     #[test]
     fn an_undecided_branch_is_kept_whole() {
         assert_eq!(branches("a < 2"), ["cone when a < 2", "far when true"]);
+    }
+
+    /// The simplified line of `body` that holds `marker`.
+    fn line(body: &str, marker: &str) -> String {
+        let simplified = text(&simplify_body(&super::super::testing::body(body)).unwrap());
+        simplified
+            .lines()
+            .find(|line| line.contains(marker))
+            .unwrap_or_else(|| panic!("no line with {marker}:\n{simplified}"))
+            .trim()
+            .to_string()
+    }
+
+    #[test]
+    fn integer_math_over_coordinates_simplifies_in_a_value_too() {
+        let body = "
+            for a in 0..4:
+                for b in 0..8:
+                    x = load X[(8 * a + b) / 8]
+                    c = (8 * a + b) / 8
+                    O[a, b] = c
+            ";
+        assert_eq!(line(body, "load X"), "x = load X[a]");
+        assert_eq!(line(body, "c ="), "c = a");
+    }
+
+    #[test]
+    fn a_value_quotient_keeps_its_common_factor() {
+        let body = "
+            for i in 0..8:
+                x = load X[i]
+                y = load Y[i]
+                c = divide(3 * x, 3 * y)
+                O[i] = c
+            ";
+        assert_eq!(line(body, "c ="), "c = 3 * x / (3 * y)");
+    }
+
+    #[test]
+    fn a_tile_binds_its_axes_for_its_body() {
+        let body = "
+            Tile(axes=(m in 0..4, n in 0..8)):
+                x = load X[(8 * m + n) / 8]
+                O[m, n] = x
+            ";
+        assert_eq!(line(body, "load X"), "x = load X[m]");
     }
 }

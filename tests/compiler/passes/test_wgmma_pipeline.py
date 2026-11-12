@@ -9,6 +9,8 @@ column pairs through shuffles. Source shape on any machine; the answer on an H10
 
 from __future__ import annotations
 
+import re
+
 import numpy as np
 import pytest
 
@@ -43,11 +45,17 @@ def _source(code: str, pins: dict) -> str:
     return source
 
 
+def _chunk_loop(src: str) -> re.Match:
+    """The K chunk loop: 1024 in steps of a 64-wide chunk. Its counter carries the kernel body's normal-form name."""
+    return re.search(r"for \(int (\w+) = 0; \1 < 1024; \1 \+= 64\)", src)
+
+
 def test_p2_keeps_one_group_in_flight_and_refills_past_the_barrier() -> None:
     src = _source(_code(256, 1024), {"WORK": "w4x1", "TILE": _N128, "STAGE": "d4/smem-async/p2"})
-    loop = src[src.index("for (int _ks") : src.index("uint4")]
+    chunk = _chunk_loop(src)
+    loop = src[chunk.start() : src.index("uint4")]
     one, last = loop.index("wgmma.wait_group.sync.aligned 1"), loop.index("wgmma.wait_group.sync.aligned 0")
-    assert "_ks + 64 < 1024" in loop[:one] and one < last, "the last chunk waits its group out inside the loop"
+    assert f"{chunk.group(1)} + 64 < 1024" in loop[:one] and one < last, "the last chunk waits its group out inside the loop"
     assert last < loop.index("__syncthreads()", last) < loop.index("emmy_cp_async_cg"), "the refill waits for the barrier"
     assert "emmy_cp_async_wait<2>" in loop, "one fewer chunk in flight at the wait (four slots)"
     assert loop.count("wgmma.wait_group") == 2, "no wait after the loop"
@@ -55,7 +63,7 @@ def test_p2_keeps_one_group_in_flight_and_refills_past_the_barrier() -> None:
 
 def test_p1_waits_every_chunk_out() -> None:
     src = _source(_code(256, 1024), {"WORK": "w4x1", "TILE": _N128, "STAGE": "d4/smem-async"})
-    loop = src[src.index("for (int _ks") :]
+    loop = src[_chunk_loop(src).start() :]
     assert "wgmma.wait_group.sync.aligned 1" not in loop
     assert loop.index("emmy_cp_async_cg") < loop.index("wgmma.wait_group.sync.aligned 0"), "the refill leads the chunk"
 
@@ -64,7 +72,8 @@ def test_the_producer_band_releases_the_previous_slot_under_p2() -> None:
     src = _source(_code(256, 1024), {"WORK": "w4x1+p1", "TILE": _N128, "STAGE": "d4/smem-tma/p2"})
     assert "wgmma.wait_group.sync.aligned 1" in src
     release = src[src.index("mbarrier_arrive(&_mbar_empty") - 200 : src.index("mbarrier_arrive(&_mbar_empty")]
-    assert ">= 1" in release and "+ 3) % 4" in src[src.index("mbarrier_arrive(&_mbar_empty") :].split("\n")[0]
+    # The release waits for a previous slot: from the second chunk on (``1 <= chunk / 64`` in the normal form).
+    assert re.search(r"1 <= \w+ / 64", release) and "+ 3) % 4" in src[src.index("mbarrier_arrive(&_mbar_empty") :].split("\n")[0]
 
 
 def test_four_cells_store_one_16_byte_row_each_lane() -> None:

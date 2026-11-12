@@ -29,7 +29,7 @@ from dataclasses import replace
 
 from emmy.compiler.dtype import F32
 from emmy.compiler.graph import Node
-from emmy.compiler.ir.expression import Var, apply
+from emmy.compiler.ir.expression import Var, affine_terms, apply
 from emmy.compiler.ir.kernel import KernelOp
 from emmy.compiler.ir.stmt import Assign, Body, Statement, free_names
 from emmy.compiler.pipeline import Pattern, RuleSkipped
@@ -76,6 +76,18 @@ def _operands(stmt: Statement, name: str, arity: int) -> tuple[str, ...] | None:
     return tuple(operand.name for operand in operands)
 
 
+def _difference(stmt: Statement) -> tuple[str, str] | None:
+    """``(a, b)`` when ``stmt`` assigns ``a - b`` over two names, however the body's simplification spells the sum (``a - b``,
+    or ``-b + a`` where the negated term sorts first)."""
+    if not isinstance(stmt, Assign):
+        return None
+    terms, offset, _ = affine_terms(stmt.value)
+    by_coefficient = dict(terms)
+    if offset or len(terms) != 2 or set(by_coefficient) != {1.0, -1.0} or not all(isinstance(t, Var) for t in by_coefficient.values()):
+        return None
+    return by_coefficient[1.0].name, by_coefficient[-1.0].name
+
+
 def _share(stmts: list[Statement], *, typed: bool) -> list[Statement]:
     """``stmts`` with each rescale factor pair of this one scope computed by one exponential."""
     writes: dict[str, list[int]] = {}
@@ -98,7 +110,7 @@ def _share(stmts: list[Statement], *, typed: bool) -> list[Statement]:
         if distance is None or stmt.dtype not in ((F32,) if typed else (None, F32)) or len(writes[stmt.name]) != 1:
             continue
         at = defined(distance, index)
-        difference = _operands(stmts[at], "subtract", 2) if at is not None else None
+        difference = _difference(stmts[at]) if at is not None else None
         if difference is None or (pivot_at := defined(difference[1], at)) is None:
             continue
         side, pivot = difference
@@ -112,13 +124,19 @@ def _share(stmts: list[Statement], *, typed: bool) -> list[Statement]:
             continue
         (first, dg), (late, dg_o) = sorted(found.values())
         alpha, beta = stmts[first], stmts[late]
-        # The block replaces the later factor, so nothing between may read the earlier one; its two names are fresh.
-        if alpha.dtype != beta.dtype or any(alpha.name in free_names(stmt) for stmt in stmts[first + 1 : late]):
+        if alpha.dtype != beta.dtype or any(f"{alpha.name}{suffix}" in writes for suffix in _FRESH):
             continue
-        if any(f"{alpha.name}{suffix}" in writes for suffix in _FRESH):
+        # The block takes the earlier factor's place where both distances are ahead of it, else the later one's; the
+        # factor it moves is read by nothing in between. Its two names are fresh.
+        between = stmts[first + 1 : late]
+        if writes[dg_o][0] < first and not any(beta.name in free_names(stmt) for stmt in between):
+            at = first
+        elif not any(alpha.name in free_names(stmt) for stmt in between):
+            at = late
+        else:
             continue
-        replaced[first] = []
-        replaced[late] = _one_exponential(alpha, beta, dg, dg_o)
+        replaced[first] = replaced[late] = []
+        replaced[at] = _one_exponential(alpha, beta, dg, dg_o)
     return [new for index, stmt in enumerate(stmts) for new in replaced.get(index, [stmt])]
 
 

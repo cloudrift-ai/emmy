@@ -34,7 +34,7 @@ from emmy.compiler.ir.kernel.ir import (
     wgmma_form,
 )
 from emmy.compiler.ir.render import Paged, RenderCtx, render_body
-from emmy.compiler.ir.stmt import Assign, Body, Write
+from emmy.compiler.ir.stmt import Assign, Body, Load, Write
 from emmy.compiler.tensor import Tensor
 
 # Per-CTA static-smem hard cap on every CUDA arch we target. Above this,
@@ -1502,6 +1502,7 @@ def render_kernelop(
         smem_dynamic_offsets=smem_offsets,
         buffer_dtypes={n: t.dtype.name for n, t in tmap.items()},
         pair_tables=frozenset(pair_tables),
+        carried_names=frozenset(name for stmt in kernel_op if isinstance(stmt, Load) and stmt.carried for name in stmt.names),
     )
 
     def _dtype_for(name: str) -> object:

@@ -35,7 +35,7 @@ from emmy.provisioning.cloudrift import (
     validate_team_id_access,
     wait_for_status,
 )
-from emmy.provisioning.errors import CapacityExhausted, TerminalProvisionError
+from emmy.provisioning.errors import CapacityExhausted, InstanceTypeNotOffered, TerminalProvisionError
 
 API_KEY = "test-api-key"
 API_URL = "https://api.test.cloudrift.ai"
@@ -1098,6 +1098,19 @@ async def test_create_instance_429_raises_capacity_exhausted(mock_rent, tmp_path
 
 
 @patch("emmy.provisioning.cloudrift._rent_instance", new_callable=AsyncMock)
+async def test_create_instance_503_node_of_another_type_is_not_a_full_node(mock_rent, tmp_path):
+    """A pinned node that carries another instance type answers 503 with that reason, not 400."""
+    key_file = tmp_path / "id_ed25519.pub"
+    key_file.write_text("ssh-ed25519 AAAA test@host\n")
+    node = "f8c403e6-7101-11ee-b00d-63f746883a19"
+    body = f"Can't find node to allocate instance {node}, reason: node is not of instance type h200-8-generic"
+    mock_rent.side_effect = _http_status_error(503, body=body)
+
+    with pytest.raises(InstanceTypeNotOffered):
+        await create_instance(API_KEY, "h200-8-generic.1", str(key_file), api_url=API_URL, node=node)
+
+
+@patch("emmy.provisioning.cloudrift._rent_instance", new_callable=AsyncMock)
 async def test_create_instance_400_instance_not_found_raises_capacity(mock_rent, tmp_path):
     """400 'Instance X not found' is a per-datacenter availability signal; advance candidates."""
     import pytest
@@ -1107,7 +1120,7 @@ async def test_create_instance_400_instance_not_found_raises_capacity(mock_rent,
 
     mock_rent.side_effect = _http_status_error(400, body="Instance h200-8-generic.1 not found")
 
-    with pytest.raises(CapacityExhausted):
+    with pytest.raises(InstanceTypeNotOffered):
         await create_instance(API_KEY, "h200-8-generic.1", str(key_file), api_url=API_URL)
 
 

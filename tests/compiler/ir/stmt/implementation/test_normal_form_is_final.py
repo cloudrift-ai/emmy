@@ -1,6 +1,6 @@
-"""Normalization runs its steps once and does not check its own result. These tests are the check: the normal form of
-every kernel the repository stores is one normalization leaves alone. A form that is not final would give two
-spellings of one body two texts, and a stored kernel would read back as another."""
+"""Normalization repeats its rounds until one leaves the body alone. These tests hold the stored forms to the same rule:
+the normal form of every kernel the repository stores is one normalization leaves alone. A stored form that is not
+final would read back as another kernel."""
 
 from __future__ import annotations
 

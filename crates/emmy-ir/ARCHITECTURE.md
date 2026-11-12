@@ -15,8 +15,8 @@ The modules stand in a tower: each imports only the ones below it (`field`, `sta
 each other's types), from the interned names and the expression tree at the bottom, through the operation table, the
 dtypes, the axes, the field types, the statement declarations and `Body`, the protocol, the text, the ordering
 constraints and the value numbering, to `normalize/` (the driver `normalize_body` and the steps, one module per step,
-every tie-break in `ties.rs`) and `identity.rs` at the top. Every file imports what it uses by name; no child module
-takes its parent's imports.
+every tie-break in `ties.rs`) and `identity.rs`. Every file imports what it uses by name; no child module takes its
+parent's imports.
 
 ## Data
 
@@ -102,9 +102,11 @@ takes its parent's imports.
 (one `Renaming` per body, so a subroutine two calls share is renamed once; the body's renaming and `coalesce` live
 here too), and `rewrite` behind
 `rename` (α, through binders) and `substitute` (β, hygienic: a mapping a statement's own binder shadows is dropped for
-its subtree). The four members no role gives are stated by statement type there: an `Accum`'s reduced axes follow a
-splitting substitution, a `Let` and a `Call` read buffers inside an expression or through a subroutine, a `StridedLoop`
-with an `end` binds `<axis>_end`. A statement type that checks itself is flagged `CHECKED` and does so over its own
+its subtree). The three members no role gives are stated by statement type there: an `Accum`'s reduced axes follow a
+splitting substitution, and a `Let` and a `Call` read buffers inside an expression or through a subroutine. A loop
+that stops early stops at a value bound ahead of it (a `Let`), which its `end` and the statements of its body read
+like any name; the loop implies no name of its own. A statement type that checks itself is flagged `CHECKED` and does
+so over its own
 fields (`validate`); `Statement::check` dispatches on the flag, and `finished` runs it for every constructor: the checks
 Python's `__post_init__` made.
 
@@ -127,25 +129,50 @@ line.
 ## Numbering, identity, normalization
 
 `numbering/values.rs` is the value numbering (`value_numbers`); `digest.rs` the scope-tree hash, the use-keyed buffer
-roles and the digest. Statements are keyed by their position in the body they sit in (a `StmtRef`), so a body that
-holds one statement object twice numbers it twice and nothing is copied first; digest material is a `Key` tree hashed
-with BLAKE3 (`Number`, 128 bits), and every order among ties is by `Key`'s total order. The operands of a commutative
-operation that share a number take the order whose layout key is least under a bounded search: every order is tried
-while the groups allow at most 7! of them, generated in place, and a larger operation (an unrolled window sum over
-eight or more shifted reads, which the full search never finished) takes the order built position by position:
-canonical and independent of the input order like the full search's, but not always its minimum. `identity.rs`
-memoizes the identity per body and per coloring. `normalize/` holds the steps and the driver `normalize_body`;
-`canonical_order` and `place_values` are the two steps that read the numbering, and the order ranks a product's
-operands through the statement objects it permuted. A commutative node's two sides enter the digest in content order
-(an operand's whole value, its number with its parameters), keyed twice: once to learn the order on state rolled back,
-once in it, so a parameter or buffer first met inside the node takes the index the content gives it. Two loads of one
-buffer that tie on rank order the normal form by their names, and the identity stays the same whatever the buffers are
-called.
+roles and the digest; `congruence.rs` the congruent carried states (`congruent_states`), numbered with every grouped
+state keyed by its group until the groups hold. Statements are keyed by their position in the body they sit in (a
+`StmtRef`), so a body that holds one statement object twice numbers it twice and nothing is copied first; digest
+material is a `Key` tree hashed with BLAKE3 (`Number`, 128 bits), and every order among ties is by `Key`'s total
+order. The operands of a commutative operation that share a number take the order whose layout key is least under a
+bounded search: every order is tried while the groups allow at most 7! of them, generated in place, and a larger
+operation (an unrolled window sum over eight or more shifted reads, which the full search never finished) takes the
+order built position by position: canonical and independent of the input order like the full search's, but not always
+its minimum. `identity.rs` memoizes the identity per body and per coloring. `normalize/` holds the steps and the
+driver `normalize_body`; `canonical_order`, `place_values` and `merge_congruent_states` are the steps that read the
+numbering, and the order ranks a product's operands through the statement objects it permuted. A commutative node's
+two sides enter the digest in content order (an operand's whole value, its number with its parameters), keyed twice:
+once to learn the order on state rolled back, once in it, so a parameter or buffer first met inside the node takes the
+index the content gives it. Two loads of one buffer that tie on rank order the normal form by their names, and the
+identity stays the same whatever the buffers are called.
+
+## Kernel IR bodies
+
+The normal form is two kinds of step. The optimizing steps remove work: the exact simplifications, every value
+computed once and placed at the shallowest scope that holds its operands, congruent states merged, unread values
+dropped. The canonical steps make equal bodies one body: sibling reduce loops over one axis merged into one loop, the
+sibling order, the operand order its ranks spell, and the sequential names. An identity reads a Loop IR body, so
+`normalize_body` runs both until they settle. No identity reads a kernel body, so a `KernelOp` takes the optimizing
+steps alone, through `optimize_body`, at construction: its statements stand in the order and under the names the pass
+that built them wrote, and its loops stay the loops its schedule wrote, which is what a listing shows and what the
+CUDA compiler schedules. The merge is the step that shows the difference: four rows' reduce loops are one body in Loop
+IR, and as one kernel loop four times the size they ran at half the speed on an A100. Motion can put two bindings of
+one name in one scope, so the optimizing steps start from `distinct_names`: the first binder of a spelling keeps it, a
+later one takes it with a number, sibling loops over one axis keep the one name, and storage a statement updates in
+place keeps its name whether or not a statement in scope declares it.
+
+The crate names no kernel statement type for any of it. The numbering, the ordering constraints and placement read a
+kernel statement through the protocol like any other, so a name a statement defines at each of several positions is a
+value apart, a name it reads and defines again (storage it updates in place) is read as the value it held where the
+read stands, a state a loop updates is read inside the loop as the step before, and a block holding an ordered
+protocol (a barrier) stays where it is. A read of storage the body writes carries the version it reads and the barrier
+it stands behind, since another thread's write of the storage lands at a barrier; a read of storage nothing in the
+body writes holds one value throughout, so it is shared and placed across a barrier.
 
 ## Memos
 
-What a process remembers across bodies is two `memo::Memo`s, the normal forms (`normal_forms` in the normalization
-driver) and the identities (`identities` in `identity.rs`), each bounded by the weight its entries hold between them:
+What a process remembers across bodies is three `memo::Memo`s, the normal forms and the optimized forms
+(`normal_forms`, `optimized_forms` in the normalization driver) and the identities (`identities` in `identity.rs`),
+each bounded by the weight its entries hold between them:
 an entry weighs the statements of the bodies it holds, `BODY_MEMO_WEIGHT` between them, since a whole-layer body is
 thousands of statements and a bound by entry count let a process that lowers many goldens hold gigabytes of normal
 forms. The caches are `quick_cache`'s: evicting by its one policy (S3-FIFO), sharded so no lock is held across a
@@ -156,7 +183,7 @@ literals and every number a field holds by their bits (a signed zero keys apart 
 digest keys them), with a hash computed once and kept with the body by one walk of the subtree; no key is a printed
 text. A body also keeps the one normal form it was given (`normal_form`, `remember_normal_form`, `is_normal`,
 `mark_normal` in `body.rs`), so a body normalized twice costs one lookup and a protocol rewrite that keeps a normal form
-says so through that API. `memo::clear_all` forgets both memos; Python's `emmy_ir.clear_memos()` calls it and purges
+says so through that API. `memo::clear_all` forgets the memos; Python's `emmy_ir.clear_memos()` calls it and purges
 the extension's wrapper tables (a body's statement wrappers, a subroutine's one Python object), which are not bounded,
 since a live object keeps its one wrapper, and otherwise drop their dead entries when their size reaches a multiple of
 1,024.

@@ -52,6 +52,21 @@ def test_a_re_measurement_replaces_the_row_and_a_failure_does_not() -> None:
     assert (row.status, row.stats.median) == ("ok", 120.0)
 
 
+def test_a_freeze_repeating_a_golden_decision_leaves_it_the_golden_s() -> None:
+    """A placement pool is labelled by the decisions a golden took. A freeze that records the same cut on the same
+    kernel, imported after the golden, would otherwise take the decision's source over, and the pool would lose its
+    label: one RTX 5090 cut of a GDN dense linear did, once the normal form gave the freeze's kernel the golden's
+    identity. Another golden, or a freeze recording a decision no golden took, still writes its own."""
+    db, ctx = _db("k"), _ctx(_5090)
+    arm = {"PLACE@map.1/inner": "cut"}
+    db.record_taken(ctx, "k", bindings={}, arm=arm, source="golden:a")
+    db.record_taken(ctx, "k", bindings={}, arm=arm, source="freeze:b")
+    assert [decision[-1] for decision in db.iter_taken()] == ["golden:a"]
+    db.record_taken(ctx, "k", bindings={}, arm=arm, source="golden:c")
+    db.record_taken(ctx, "k", bindings={}, arm={"PLACE@map.2/inner": "cut"}, source="freeze:b")
+    assert sorted(decision[-1] for decision in db.iter_taken()) == ["freeze:b", "golden:c"]
+
+
 def test_two_cards_sharing_a_capability_keep_their_own_rows() -> None:
     """Both cards are sm_120, so the regime alone cannot tell them apart. Keyed on it, the second
     card's row would replace the first's, and the first card would deploy a latency it never

@@ -1150,18 +1150,29 @@ impl Expression {
         }
     }
 
-    /// Bottom-up rewrite: constant-fold literals, drop algebraic identities, collapse static comparisons. Pure and
-    /// idempotent.
+    /// Bottom-up rewrite of an index: constant-fold literals, drop algebraic identities, collapse static
+    /// comparisons, and the integer rules of [`Expression::simplify_as`]. Pure and idempotent.
     pub fn simplify(&self, ctx: &SimplifyCtx) -> Result<Expression> {
+        self.simplify_as(ctx, ExprClass::Index)
+    }
+
+    /// Bottom-up rewrite of an expression of `class`. Both classes fold literals, drop algebraic identities and
+    /// decide comparisons the ranges decide. The integer rules — quotient chains, the digits of a quotient and a
+    /// remainder, factor cancellation, a remainder below its divisor — hold over integers: an index's operands, and a
+    /// value's only where the ranges prove them integer (a predicate over coordinates), since a value's operands may
+    /// be floats, which those rules would round differently. A buffer index inside a value is an index. Pure and
+    /// idempotent.
+    pub fn simplify_as(&self, ctx: &SimplifyCtx, class: ExprClass) -> Result<Expression> {
         match &**self {
             Expr::Var(_) | Expr::Literal(_) | Expr::Builtin(_) => Ok(self.clone()),
             Expr::Apply(ElementwiseOp::Known(op), args)
                 if op.infix().is_some() && args.len() == 2 =>
             {
-                simplify_binary(self, *op, &args[0], &args[1], ctx)
+                simplify_binary(self, *op, &args[0], &args[1], ctx, class)
             }
             Expr::Apply(name, args) => {
-                let new: Result<Vec<Expression>> = args.iter().map(|a| a.simplify(ctx)).collect();
+                let new: Result<Vec<Expression>> =
+                    args.iter().map(|a| a.simplify_as(ctx, class)).collect();
                 let new = new?;
                 // A copy of a value is the value: the cast a copy stood for is the definition's dtype.
                 if let ElementwiseOp::Known(op) = name
@@ -1169,6 +1180,22 @@ impl Expression {
                     && let [operand] = &new[..]
                 {
                     return Ok(operand.clone());
+                }
+                // A minimum or maximum that the ranges decide is the operand they pick: the ranges prove both integer.
+                if let ElementwiseOp::Known(op @ (Operation::Minimum | Operation::Maximum)) = name
+                    && let [a, b] = &new[..]
+                    && let (Some(ra), Some(rb)) = (a.range(ctx), b.range(ctx))
+                {
+                    let (a_wins, b_wins) = match op {
+                        Operation::Minimum => (ra.hi <= rb.lo, rb.hi <= ra.lo),
+                        _ => (ra.lo >= rb.hi, rb.lo >= ra.hi),
+                    };
+                    if a_wins {
+                        return Ok(a.clone());
+                    }
+                    if b_wins {
+                        return Ok(b.clone());
+                    }
                 }
                 // An operation an index may hold (`maximum(1, 2)`, integer arithmetic) over integer literals is the
                 // integer the host computes — an index admits no float — except a quotient, whose inexact case is the
@@ -1224,15 +1251,15 @@ impl Expression {
                 }
             }
             Expr::Ternary(cond, if_true, if_false) => {
-                let cond = cond.simplify(ctx)?;
+                let cond = cond.simplify_as(ctx, class)?;
                 if cond.is_truthy() {
-                    return if_true.simplify(ctx);
+                    return if_true.simplify_as(ctx, class);
                 }
                 if cond.is_falsy() {
-                    return if_false.simplify(ctx);
+                    return if_false.simplify_as(ctx, class);
                 }
-                let a = if_true.simplify(ctx)?;
-                let b = if_false.simplify(ctx)?;
+                let a = if_true.simplify_as(ctx, class)?;
+                let b = if_false.simplify_as(ctx, class)?;
                 if a == b {
                     return Ok(a);
                 }
@@ -1245,7 +1272,7 @@ impl Expression {
                 Ok(Expression::new(Expr::Ternary(cond, a, b)))
             }
             Expr::Cast(dtype, inner) => {
-                let new = inner.simplify(ctx)?;
+                let new = inner.simplify_as(ctx, class)?;
                 if let Some(lit) = new.as_literal()
                     && dtype.is(LitType::Int)
                 {

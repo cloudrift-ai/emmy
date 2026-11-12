@@ -34,6 +34,26 @@ def test_lambda_post_init_canonicalizes_body_order() -> None:
     assert first == second
 
 
+def test_lambda_body_order_does_not_follow_the_written_order_where_values_tie() -> None:
+    """Two products of one shape tie on the old token order, which kept them as written; the crate's order ranks them
+    by what they compute, so the two spellings are one lambda up to renaming."""
+    loads = "a = load x[k]\nb = load w[k]\nc = load y[k]"
+    ab, bc = "ab = multiply(a, b)", "bc = multiply(b, c)"
+    first = Lambda.closing(("k",), parse_body("\n".join((loads, ab, bc))), ("ab", "bc"))
+    second = Lambda.closing(("k",), parse_body("\n".join((loads, bc, ab))), ("ab", "bc"))
+    assert first.body == second.body
+
+
+def test_lambda_body_reads_a_param_it_rebinds_ahead_of_the_rebinding() -> None:
+    lam = Lambda(params=("m", "d"), body=parse_body("e = subtract(d, m)\nm = add(m, e)"), results=("m",))
+    assert [stmt.name for stmt in lam.body] == ["e", "m"]
+
+
+def test_lambda_refuses_a_body_whose_statements_wait_on_each_other() -> None:
+    with pytest.raises(ValueError, match="wait on each other"):
+        Lambda(params=("x",), body=parse_body("a = add(b, x)\nb = add(a, x)"), results=("b",))
+
+
 def test_lambda_orders_the_definition_read_by_a_predicate_first() -> None:
     predicate = """
         predicate = select:

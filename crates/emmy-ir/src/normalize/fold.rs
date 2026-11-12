@@ -107,7 +107,7 @@ pub(crate) fn read_counts(body: &Body, exposed: &HashSet<Name>) -> HashMap<Name,
 
 pub(crate) fn is_droppable_pure(stmt: &Statement) -> bool {
     match stmt {
-        Statement::Load(l) => l.carried.is_empty(),
+        Statement::Load(_) => stmt.is_pure(),
         Statement::Accum(_)
         | Statement::Assign(_)
         | Statement::Init(_)
@@ -302,6 +302,16 @@ mod tests {
             affine_normal(&["let f32 c = 1.0", "o = divide(x, c)"]),
             scaled("1.0"),
             "a division by a float one keeps the float literal"
+        );
+    }
+
+    #[test]
+    fn a_division_by_a_literal_with_an_inexact_reciprocal_stays_a_division() {
+        let three = affine_normal(&["let f32 c = 3.0", "o = divide(x, c)"]);
+        assert!(three.contains("in0 / 3.0"), "{three}");
+        assert_ne!(
+            three,
+            affine_normal(&["let f32 c = 0.3333333333333333", "o = multiply(x, c)"])
         );
     }
 
