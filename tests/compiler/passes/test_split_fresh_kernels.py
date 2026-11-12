@@ -512,11 +512,13 @@ def test_a_twisted_carrier_split_partial_binds_a_tensor_core_tile() -> None:
     sources = {nid: node.op.kernel_source for nid, node in lowered.nodes.items() if isinstance(node.op, CudaOp)}
     partial = next(src for nid, src in sources.items() if nid.endswith("__partial"))
     assert len(sources) == 2, sorted(sources)
-    assert "mma_m16n8k16" in partial and "__ck" in partial, "the partial folds its key slice on the chunk tier"
-    states = re.findall(r"float (acc\d+)__r0_0 = ", partial)
-    assert len(states) == 2, "the pivot and denominator each keep a per-row register"
-    for state in states:
-        assert f"? ({state}__r0_0) : ({state}__r0_1)" in partial, f"{state} reaches the workspace whole"
+    chunks = re.search(r"for \(int (\w+) = 0; \1 < 128; \1 \+= 32\)", partial)
+    assert "mma_m16n8k16" in partial and chunks, "the partial folds its key slice on the chunk tier"
+    # The pivot and the denominator each keep a register per fragment row, both broadcast whole into the fragment the
+    # workspace store reads.
+    pairs = set(re.findall(r"\w+\[_e\] = \(\(_e < 2\) \? \((\w+)\) : \((\w+)\)\);", partial))
+    assert len(pairs) == 2, pairs
+    assert all(re.search(rf"float {name} = ", partial) for pair in pairs for name in pair)
 
 
 def test_a_causal_split_piece_masks_its_absolute_key_on_the_chunk_tier() -> None:
@@ -546,8 +548,12 @@ def test_a_causal_split_piece_masks_its_absolute_key_on_the_chunk_tier() -> None
     sources = {nid: node.op.kernel_source for nid, node in lowered.nodes.items() if isinstance(node.op, CudaOp)}
     partial = next(src for nid, src in sources.items() if nid.endswith("__partial"))
     assert len(sources) == 2, sorted(sources)
-    assert "mma_m16n8k16" in partial and "__ck" in partial, "the partial folds its key slice on the chunk tier"
-    assert re.search(r"256 \* _a\d+_ks \+ \(a\d+__ck", partial), "the mask compares the slice's absolute key, 256 keys per partition"
+    chunks = re.findall(r"for \(int (\w+) = 0; \1 < 256; \1 \+= 64\)", partial)
+    assert "mma_m16n8k16" in partial and len(chunks) == 1, "the partial folds its key slice on the chunk tier"
+    masks = [line for line in partial.splitlines() if "? (-1e+30f)" in line]
+    assert any(chunks[0] in line and re.search(r"\b256 \* \w+", line) for line in masks), (
+        "the mask compares the slice's absolute key, 256 keys per partition"
+    )
 
 
 @pytest.mark.parametrize(
