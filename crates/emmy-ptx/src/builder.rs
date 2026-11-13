@@ -59,6 +59,10 @@ pub struct Builder {
     heads: Vec<Option<usize>>,
     /// The depth of the scope each register is defined in, the deepest where it is defined more than once.
     defined_at: HashMap<Reg, usize>,
+    /// The variable of each open scope that is a loop counting from zero by one, beside its table.
+    counters: Vec<Option<Reg>>,
+    /// The 64-bit copy of a loop's counter that an address reads, made when the first one does.
+    wide: HashMap<Reg, Reg>,
     /// The registers an instruction may define again: an accumulator, a seeded state.
     states: HashSet<Reg>,
     multiples: HashMap<Reg, i64>,
@@ -72,6 +76,7 @@ impl Builder {
         Builder {
             tables: vec![HashMap::new()],
             heads: vec![None],
+            counters: vec![None],
             ..Builder::default()
         }
     }
@@ -260,7 +265,7 @@ impl Builder {
     pub fn open_if(&mut self, pred: Reg) -> If {
         let skip = self.label();
         self.branch(skip, Some((pred, true)));
-        self.push_scope(None);
+        self.push_scope(None, None);
         If {
             skip,
             end: None,
@@ -275,7 +280,7 @@ impl Builder {
         self.branch(end, None);
         self.items.push(Item::Label(open.skip));
         open.end = Some(end);
-        self.push_scope(None);
+        self.push_scope(None, None);
         Ok(())
     }
 
@@ -291,7 +296,12 @@ impl Builder {
     pub fn open_loop(&mut self, start: Operand, end: Operand, step: Operand, enters: bool) -> Loop {
         let place = self.items.len();
         let var = self.reg(Bank::B32);
-        self.emit(Inst::new(Opcode::Mov, Ty::U32, vec![var], vec![start]));
+        self.emit(Inst::new(
+            Opcode::Mov,
+            Ty::U32,
+            vec![var],
+            vec![start.clone()],
+        ));
         let done = (!enters).then(|| {
             let done = self.label();
             let past = self.compare(Cmp::Ge, var.into(), end.clone());
@@ -300,7 +310,8 @@ impl Builder {
         });
         let head = self.label();
         self.items.push(Item::Label(head));
-        self.push_scope(Some(place));
+        let counts = start == Operand::Int(0) && step == Operand::Int(1);
+        self.push_scope(Some(place), counts.then_some(var));
         // The variable steps at the bottom of every trip, so nothing computed from it leaves the loop.
         self.defined_at.insert(var, self.tables.len());
         Loop {
@@ -315,6 +326,10 @@ impl Builder {
 
     pub fn close_loop(&mut self, open: Loop) -> Result<()> {
         self.leave(open.depth)?;
+        if let Some(wide) = self.wide.remove(&open.var) {
+            let step = vec![wide.into(), Operand::Int(1)];
+            self.emit(Inst::new(Opcode::Add, Ty::S64, vec![wide], step));
+        }
         self.emit(Inst::new(
             Opcode::Add,
             Ty::S32,
@@ -338,9 +353,34 @@ impl Builder {
         self.branch(head, Some((done, true)));
     }
 
-    fn push_scope(&mut self, head: Option<usize>) {
+    fn push_scope(&mut self, head: Option<usize>, counter: Option<Reg>) {
         self.tables.push(HashMap::new());
         self.heads.push(head);
+        self.counters.push(counter);
+    }
+
+    /// The counter `var` of an open loop that counts from zero by one, as a 64-bit register that steps beside it:
+    /// made ahead of the loop when an address first reads it. ptxas folds a term of it into `[base + constant]`
+    /// across the trips it unrolls, which it does not for the widening of the 32-bit counter, since `var + 1`
+    /// may wrap. `None` for any other register.
+    pub fn wide_counter(&mut self, var: Reg) -> Option<Reg> {
+        if let Some(wide) = self.wide.get(&var) {
+            return Some(*wide);
+        }
+        let at = self
+            .counters
+            .iter()
+            .position(|counter| *counter == Some(var))?;
+        let place = self.heads[at]?;
+        let wide = self.reg(Bank::B64);
+        for head in self.heads[at..].iter_mut().flatten() {
+            *head += 1;
+        }
+        let start = Inst::new(Opcode::Mov, Ty::U64, vec![wide], vec![Operand::Int(0)]);
+        self.items.insert(place, Item::Inst(start));
+        self.defined_at.insert(wide, at + 1);
+        self.wide.insert(var, wide);
+        Some(wide)
     }
 
     /// Drop the value table of the scope opened at `depth`: it must be the innermost open one.
@@ -353,6 +393,7 @@ impl Builder {
         }
         self.tables.pop();
         self.heads.pop();
+        self.counters.pop();
         Ok(())
     }
 

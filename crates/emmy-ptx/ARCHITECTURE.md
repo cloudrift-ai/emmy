@@ -153,8 +153,14 @@ Every instruction reaches the list through the `Builder`.
 - **Addresses.** A flat index is split into its terms with their integer coefficients and its constant. Each term is
   scaled to bytes and widened by one multiply, then added to the base in 64 bits, the terms bound in outer bodies
   first; the constant is the address's offset. Measured on `sm_120`: ptxas folds an address built this way into
-  `[base + constant]` across the trips of a loop it unrolls, and does not see through a sum made in 32 bits. There is
-  no pointer bumping and no fused wide multiply-add; both measured slower in the hackathon entries.
+  `[base + constant]` across the trips of a loop it unrolls, and does not see through a sum made in 32 bits. Nor does
+  it see through the widening of a 32-bit loop counter, since the counter plus one may wrap: a term of a loop's axis
+  (a counter from zero by one, or such a counter times a constant step plus a constant start) reads a 64-bit copy of
+  the counter, made ahead of the loop when the first address reads it and stepped beside it, and the start goes into
+  the constant. Measured on `sm_120` (dev box RTX 5090, perf lane): `matmul/f16-mma-splitk-deferred` 46.2 to 37.4 us,
+  `reduce/cross-cta-matmul-atomic` 12.3 to 10.2, `fused/norm-linear-f16-scalar-reduce` 133 to 123; the largest loss
+  4% (`reduce/combine-l2-serial`). There is no pointer bumping and no fused wide multiply-add; both measured slower in
+  the hackathon entries.
 - **Floats.** Every instruction that rounds carries `.rn`, so ptxas fuses nothing on its own, and every f32
   instruction that takes it carries `.ftz` when the flush-to-zero decision is on. `fma` is written where the body says
   `fma`. With the fusion decision on it is also written for a product read once, by an add, a subtract or an

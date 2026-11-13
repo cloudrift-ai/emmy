@@ -208,6 +208,9 @@ pub(crate) struct Lowerer {
     pair_tables: HashSet<Name>,
     /// The symbolic sizes among the parameters: each is a count, so never negative.
     sizes: HashSet<Name>,
+    /// Each loop axis that is a counter from zero by one times a step plus a start: the register, its counter, the
+    /// step and the start. An address reads such an axis through the counter's 64-bit copy.
+    counted: HashMap<Reg, (Reg, i64, i64)>,
     /// The first line of the statement being lowered, for an error to name.
     statement: String,
 }
@@ -254,6 +257,7 @@ pub(crate) fn lower(kernel: &Kernel, target: Target, precision: Precision) -> Re
         extents: HashMap::new(),
         pair_tables: HashSet::new(),
         sizes: HashSet::new(),
+        counted: HashMap::new(),
         statement: format!("the interface of {}", kernel.name),
     };
     survey(kernel.body, &mut lowerer.uses, &mut lowerer.updated);
@@ -652,6 +656,7 @@ impl Lowerer {
             .open_loop(Operand::Int(0), end, Operand::Int(1), enters);
         self.names.push(HashMap::new());
         self.bind(node.axis.name, Val::reg(open.var, VTy::I32));
+        self.counted.insert(open.var, (open.var, 1, 0));
         self.threads.uneven += usize::from(uneven);
         let done = self.body(&node.body, &inner_ctx(ctx, stmt));
         self.threads.uneven -= usize::from(uneven);
@@ -700,6 +705,9 @@ impl Lowerer {
                     self.b
                         .open_loop(Operand::Int(0), Operand::Int(trips), Operand::Int(1), true);
                 let axis = self.scaled_counter(open.var, step, start);
+                if let Some(reg) = axis.op.reg() {
+                    self.counted.insert(reg, (open.var, step, start));
+                }
                 self.bind(node.axis.name, axis);
                 open
             }
