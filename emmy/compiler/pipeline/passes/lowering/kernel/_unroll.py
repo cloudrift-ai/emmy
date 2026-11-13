@@ -10,7 +10,7 @@ from __future__ import annotations
 from collections.abc import Callable, Collection
 from itertools import chain, count
 
-from emmy.compiler.ir.expression import BinaryExpression, Expression, Interval, Literal, SimplifyCtx, Var
+from emmy.compiler.ir.expression import BinaryExpression, Expression, Interval, Literal, SimplifyCtx, Var, apply_binop
 from emmy.compiler.ir.kernel.ir import Tile
 from emmy.compiler.ir.sigma import Sigma
 from emmy.compiler.ir.stmt import Accum, Body, Carry, Cond, Init, Loop, Statement, StridedLoop
@@ -137,8 +137,25 @@ def _own(loop: Statement, outer: Collection[str]) -> set[str]:
 
 
 def _copy(loop: Statement, at: Expression, rename: dict[str, str]) -> Body:
-    """``loop``'s body with its axis bound to ``at`` and its own names renamed."""
-    return Body(stmt.rewrite(lambda name: rename.get(name, name), Sigma({loop.axis.name: at})) for stmt in loop.body)
+    """``loop``'s body with its axis bound to ``at`` and its own names renamed.
+
+    The axis is an integer, so an operation the binding leaves over two integer literals is the integer one, and the
+    copy folds it so (``1 / 5`` is ``0``). The body's optimization would fold a quotient of integer literals in a value
+    field as the float one, and a select's predicate over coordinates is a value field."""
+    bound = Body(stmt.rewrite(lambda name: rename.get(name, name), Sigma({loop.axis.name: at})) for stmt in loop.body)
+    return bound.map(lambda stmt: stmt.map_expressions(lambda expression: expression.rebuild(_integer_folded)))
+
+
+def _integer_folded(expression: Expression) -> Expression:
+    """``expression`` folded when it is an integer operation over two integer literals."""
+    if not (isinstance(expression, BinaryExpression) and expression.op in ("+", "-", "*", "/", "%")):
+        return expression
+    left, right = expression.left, expression.right
+    if not all(isinstance(side, Literal) and side.dtype == "int" for side in (left, right)):
+        return expression
+    if expression.op in ("/", "%") and right.value == 0:
+        return expression
+    return Literal(apply_binop(expression.op, left.value, right.value), "int")
 
 
 def _decided(body: Body, ctx: SimplifyCtx) -> Body:

@@ -8,7 +8,7 @@ import pytest
 
 from emmy.compiler.ir.axis import Axis
 from emmy.compiler.ir.kernel.ir import KernelOp, MmaSyncPtx, Tile
-from emmy.compiler.ir.stmt import Accum, Body, Cond, Init, Load, Loop, StridedLoop, Write, parse_body
+from emmy.compiler.ir.stmt import Accum, Body, Cond, Init, Load, Loop, Select, StridedLoop, Write, parse_body
 
 _RULE = import_module("emmy.compiler.pipeline.passes.lowering.kernel.117_unroll_loops")
 
@@ -38,6 +38,17 @@ def test_a_guard_the_trip_decides_is_dropped() -> None:
     assert not any(isinstance(stmt, Cond) for stmt in op.body.iter())
     stores = [(stmt.output, str(stmt.index[1])) for stmt in op.body.iter() if isinstance(stmt, Write)]
     assert sorted(stores) == [("B", "0"), ("B", "1"), ("C", "0"), ("C", "1"), ("C", "2"), ("C", "3")]
+
+
+@pytest.mark.parametrize(("loop", "kept"), [("for k in 0..4 unroll=true:", 3), ("for k in 0..8 step 2 unroll=true:", 2)])
+def test_a_copy_reads_its_trip_as_an_integer_in_a_value_field(loop: str, kept: int) -> None:
+    """A select's predicate over coordinates is a value field: ``i - k / 3 < 7`` reads ``k / 3`` as the integer
+    quotient in every copy: a predicate is ``i < 7`` where the quotient is zero, a select whose quotient is not folds
+    away under the row's range, and no predicate holds a float."""
+    select = "    v = select:\n        a when i - k / 3 < 7\n        z when true\n"
+    op = _unrolled(f"let f32 z = 0.0\n{loop}\n    f32 a = load A[i, k]\n{select}    f32 O[i, k] = v")
+    predicates = [str(branch.select) for stmt in op.body.iter() if isinstance(stmt, Select) for branch in stmt.branches]
+    assert predicates == ["i < 7", "true"] * kept, predicates
 
 
 def test_the_copies_of_two_loops_keep_their_names_apart() -> None:
