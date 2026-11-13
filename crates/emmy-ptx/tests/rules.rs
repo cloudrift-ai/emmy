@@ -191,17 +191,16 @@ fn the_terms_of_an_index_are_added_in_64_bits_outermost_first() {
             "mov.u64 %rd4, 0",
             "mov.u32 %r4, 0",
             "L1:",
-            "shl.b64 %rd5, %rd4, 2",
-            "add.s64 %rd6, %rd3, %rd5",
-            "ld.global.nc.f32 %f1, [%rd6]",
+            "add.s64 %rd5, %rd3, %rd4",
+            "ld.global.nc.f32 %f1, [%rd5]",
             "add.rn.f32 %f0, %f0, %f1",
-            "add.s64 %rd4, %rd4, 1",
+            "add.s64 %rd4, %rd4, 4",
             "add.s32 %r4, %r4, 1",
             "setp.lt.s32 %p0, %r4, 8",
             "@%p0 bra L1",
-            "mul.wide.s32 %rd7, %r3, 4",
-            "add.s64 %rd8, %rd1, %rd7",
-            "st.global.f32 [%rd8], %f0",
+            "mul.wide.s32 %rd6, %r3, 4",
+            "add.s64 %rd7, %rd1, %rd6",
+            "st.global.f32 [%rd7], %f0",
         ]
     );
 }
@@ -905,14 +904,14 @@ fn a_loop_counts_from_zero_and_steps_its_accumulator_in_place() {
             "mov.u64 %rd2, 0",
             "mov.u32 %r4, 0",
             "L1:",
-            "shl.b64 %rd3, %rd2, 2",
-            "add.s64 %rd4, %rd0, %rd3",
-            "ld.global.nc.f32 %f2, [%rd4]",
+            "add.s64 %rd3, %rd0, %rd2",
+            "ld.global.nc.f32 %f2, [%rd3]",
             "fma.rn.f32 %f0, %f2, %f2, %f0",
             "max.f32 %f1, %f1, %f2",
-            "add.s64 %rd2, %rd2, 1",
+            "add.s64 %rd2, %rd2, 4",
             "add.s32 %r4, %r4, 1",
             "setp.lt.s32 %p0, %r4, 8",
+            "@%p0 bra L1",
         ]
     );
 }
@@ -940,12 +939,12 @@ fn a_loop_over_a_symbolic_extent_is_tested_ahead() {
             "setp.ge.s32 %p0, %r5, %r0",
             "@%p0 bra L1",
             "L2:",
-            "shl.b64 %rd3, %rd2, 2",
-            "add.s64 %rd4, %rd0, %rd3",
-            "ld.global.nc.f32 %f1, [%rd4]",
+            "add.s64 %rd3, %rd0, %rd2",
+            "ld.global.nc.f32 %f1, [%rd3]",
             "add.rn.f32 %f0, %f0, %f1",
-            "add.s64 %rd2, %rd2, 1",
+            "add.s64 %rd2, %rd2, 4",
             "add.s32 %r5, %r5, 1",
+            "setp.lt.s32 %p1, %r5, %r0",
         ]
     );
 }
@@ -1040,11 +1039,10 @@ fn a_strided_loop_counts_its_trips_where_they_are_the_same_for_every_thread() {
             "L1:",
             "shl.b32 %r5, %r4, 3",
             "add.s32 %r6, %r5, 4",
-            "shl.b64 %rd3, %rd2, 5",
-            "add.s64 %rd4, %rd0, %rd3",
-            "ld.global.nc.f32 %f1, [%rd4+16]",
+            "add.s64 %rd3, %rd0, %rd2",
+            "ld.global.nc.f32 %f1, [%rd3+16]",
             "add.rn.f32 %f0, %f0, %f1",
-            "add.s64 %rd2, %rd2, 1",
+            "add.s64 %rd2, %rd2, 32",
             "add.s32 %r4, %r4, 1",
             "setp.lt.s32 %p0, %r4, 8",
             "@%p0 bra L1",
@@ -1052,8 +1050,9 @@ fn a_strided_loop_counts_its_trips_where_they_are_the_same_for_every_thread() {
             "setp.ge.s32 %p1, %r7, 64",
             "@%p1 bra L2",
             "L3:",
-            "mul.wide.s32 %rd5, %r7, 4",
-            "add.s64 %rd6, %rd0, %rd5",
+            "mul.wide.s32 %rd4, %r7, 4",
+            "add.s64 %rd5, %rd0, %rd4",
+            "ld.global.nc.f32 %f2, [%rd5]",
         ]
     );
 }

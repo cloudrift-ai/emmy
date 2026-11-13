@@ -209,7 +209,7 @@ pub(crate) struct Lowerer {
     /// The symbolic sizes among the parameters: each is a count, so never negative.
     sizes: HashSet<Name>,
     /// Each loop axis that is a counter from zero by one times a step plus a start: the register, its counter, the
-    /// step and the start. An address reads such an axis through the counter's 64-bit copy.
+    /// step and the start. An address reads such an axis through a 64-bit multiple of the counter.
     counted: HashMap<Reg, (Reg, i64, i64)>,
     /// The first line of the statement being lowered, for an error to name.
     statement: String,

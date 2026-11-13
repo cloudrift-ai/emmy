@@ -61,8 +61,9 @@ pub struct Builder {
     defined_at: HashMap<Reg, usize>,
     /// The variable of each open scope that is a loop counting from zero by one, beside its table.
     counters: Vec<Option<Reg>>,
-    /// The 64-bit copy of a loop's counter that an address reads, made when the first one does.
-    wide: HashMap<Reg, Reg>,
+    /// The 64-bit multiples of a loop's counter that addresses read, by counter and factor, each made when the
+    /// first address reads it.
+    wide: HashMap<(Reg, i64), Reg>,
     /// The registers an instruction may define again: an accumulator, a seeded state.
     states: HashSet<Reg>,
     multiples: HashMap<Reg, i64>,
@@ -332,9 +333,17 @@ impl Builder {
 
     pub fn close_loop(&mut self, open: Loop) -> Result<()> {
         self.leave(open.depth)?;
-        if let Some(wide) = self.wide.remove(&open.var) {
-            let step = vec![wide.into(), Operand::Int(1)];
-            self.emit(Inst::new(Opcode::Add, Ty::S64, vec![wide], step));
+        let mut wide: Vec<_> = self
+            .wide
+            .iter()
+            .filter(|((var, _), _)| *var == open.var)
+            .map(|(key, reg)| (*key, *reg))
+            .collect();
+        wide.sort_by_key(|(_, reg)| reg.number);
+        for ((_, factor), reg) in wide {
+            self.wide.remove(&(open.var, factor));
+            let step = vec![reg.into(), Operand::Int(factor)];
+            self.emit(Inst::new(Opcode::Add, Ty::S64, vec![reg], step));
         }
         self.emit(Inst::new(
             Opcode::Add,
@@ -365,12 +374,14 @@ impl Builder {
         self.counters.push(counter);
     }
 
-    /// The counter `var` of an open loop that counts from zero by one, as a 64-bit register that steps beside it:
-    /// made ahead of the loop when an address first reads it. ptxas folds a term of it into `[base + constant]`
-    /// across the trips it unrolls, which it does not for the widening of the 32-bit counter, since `var + 1`
-    /// may wrap. `None` for any other register.
-    pub fn wide_counter(&mut self, var: Reg) -> Option<Reg> {
-        if let Some(wide) = self.wide.get(&var) {
+    /// The counter `var` of an open loop that counts from zero by one, times `factor`, as a 64-bit register that
+    /// steps by `factor` beside it: made ahead of the loop when an address first reads it. ptxas folds a term of it
+    /// into `[base + constant]` across the trips it unrolls, which it does not for the widening of the 32-bit
+    /// counter, since `var + 1` may wrap. Stepping the multiple itself, not a copy of the counter scaled in the
+    /// trip, is what lets ptxas issue every load of a trip it keeps rolled ahead of the arithmetic, as it does for
+    /// cicc's stepped pointer. `None` for any other register.
+    pub fn wide_counter(&mut self, var: Reg, factor: i64) -> Option<Reg> {
+        if let Some(wide) = self.wide.get(&(var, factor)) {
             return Some(*wide);
         }
         let at = self
@@ -385,7 +396,8 @@ impl Builder {
         let start = Inst::new(Opcode::Mov, Ty::U64, vec![wide], vec![Operand::Int(0)]);
         self.items.insert(place, Item::Inst(start));
         self.defined_at.insert(wide, at + 1);
-        self.wide.insert(var, wide);
+        self.multiples.insert(wide, factor.saturating_abs().max(1));
+        self.wide.insert((var, factor), wide);
         Some(wide)
     }
 
