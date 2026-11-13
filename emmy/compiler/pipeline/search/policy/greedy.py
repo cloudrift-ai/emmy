@@ -197,13 +197,12 @@ def _kernel_set_pick(fp: ForkPoint, prior, failed: dict, refused: set[str] | Non
     A failure also rules out keeping whole every kernel that contains the kernel that failed: each piece a cut
     leaves computes part of its parent, and a kernel that never finished does not finish inside a bigger one. So the
     arm that keeps a kernel whole is off where the kernel failed, where a piece one of its cuts leaves failed, or
-    where it is the remainder (the piece that keeps the parent's name) of a kernel an earlier fork of this compile
+    where it is the remainder (the piece that keeps the outputs no seam took) of a kernel an earlier fork of this compile
     refused to keep whole (``refused``, exact identities); the remainders its cuts leave are refused in turn. One
     failure then cuts the whole remainder chain in one compile, instead of trading the fused variant that hung for its
     one-producer-lighter sibling compile after compile. Refusal outranks the arms rule: a cut that leaves a failed
     piece stays on the ballot when no other cut does, because that piece meets its own fork and is cut there."""
     from emmy.compiler.pipeline.pipeline import _is_structural_option  # noqa: PLC0415
-    from emmy.compiler.pipeline.search.features import kernel_pieces  # noqa: PLC0415
 
     leaves = fp.flat()
     if len(leaves) == 1:
@@ -213,13 +212,13 @@ def _kernel_set_pick(fp: ForkPoint, prior, failed: dict, refused: set[str] | Non
     pieces = [_leaf_graph(o) if _is_structural_option(o) else root for o in leaves]
     live = list(range(len(leaves)))
     if failed or refused:  # the exact identity of every piece of every arm is computed only to be looked up here
-        left = [[(op.name, _read(kernel_identity(op))) for op, _ in kernel_pieces(piece)] for piece in pieces]
-        refuse = refused is not None and (kernel_identity(root) in refused or any(key in failed for kept in left for _, key in kept))
+        left = [_identities_by_node(piece) for piece in pieces]
+        refuse = refused is not None and (kernel_identity(root) in refused or any(key in failed for kept in left for key in kept.values()))
         if refuse:
             live = [i for i in live if _is_structural_option(leaves[i])] or live
-        live = [i for i in live if not any(key in failed for _, key in left[i])] or live
+        live = [i for i in live if not any(key in failed for key in left[i].values())] or live
         if refuse:
-            refused.update(key for i in live for name, key in left[i] if name == root.name)
+            refused.update(left[i][node] for i in live if (node := _remainder(pieces[i])) in left[i])
     if prior is None:
         return leaves[live[0]]
     featurizer = Featurizer.of(fp.ctx)
@@ -234,6 +233,22 @@ def _find_decided_leaf(fp, want: dict) -> object | None:
     offers of one key — and the caller re-decides."""
     hit = fp.find(want)
     return hit[0] if hit is not None and hit[1] == want else None
+
+
+def _identities_by_node(piece) -> dict[str | None, str]:
+    """Each kernel an arm leaves, its exact identity by its node — ``None`` for a kernel kept whole."""
+    from emmy.compiler.ir.tile import TileOp  # noqa: PLC0415
+
+    if not isinstance(piece, Graph):
+        return {None: _read(kernel_identity(piece))}
+    return {node.id: _read(kernel_identity(node.op.with_io(piece, node))) for node in piece.nodes.values() if isinstance(node.op, TileOp)}
+
+
+def _remainder(piece) -> str | None:
+    """The node of a cut arm's remainder, or ``None`` for an arm that keeps the kernel whole or leaves none."""
+    from emmy.compiler.pipeline.passes.tile._cut import REMAINDER  # noqa: PLC0415
+
+    return piece.hints.get(REMAINDER) if isinstance(piece, Graph) else None
 
 
 def _leaf_graph(leaf: object) -> Graph:

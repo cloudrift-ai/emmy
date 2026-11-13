@@ -85,7 +85,7 @@ def test_invalid_complete_pin_keeps_the_original_refusal() -> None:
 
 
 def test_invalid_complete_published_pin_keeps_the_peer_catalog() -> None:
-    tile, ctx = replace(_unmapped_tile(8, 8), name="k_probe__place_aaaaaaaaaa"), Context.from_target((7, 0))
+    tile, ctx = _unmapped_tile(8, 8), Context.from_target((7, 0))
     row = {**_complete_classic_row(tile, ctx), "WORK": "not-a-work"}
     with pinned_knobs(row):
         leaves = list(iter_leaves(classic_forks(tile, tile.knobs, ctx, kernel_set=True)))
@@ -245,14 +245,13 @@ def test_a_kernel_pin_on_another_piece_leaves_the_stamp_alone() -> None:
     from emmy.compiler.pipeline.search.pins import pinned_knobs
 
     ctx = Context.from_target((12, 0))
-    name = "k_probe__place_aaaaaaaaaa"
-    tile = replace(_unmapped_tile(64, 128), name=name)
+    tile = _unmapped_tile(64, 128)
 
     def stamp() -> str:
         return classic_forks(tile, tile.knobs, ctx)[0].pool_id
 
     clean = stamp()
-    with pinned_knobs({"WORK@place_bbbbbbbbbb": "w1x2"}):
+    with pinned_knobs({"WORK@k_bbbbbbbbbbbb": "w1x2"}):
         assert stamp() == clean, "a pin on another piece must not re-seed this piece's draw"
-    with pinned_knobs({"WORK@place_aaaaaaaaaa": "w1x2"}):
+    with pinned_knobs({f"WORK@{tile.name}": "w1x2"}):
         assert stamp() != clean, "a pin on this piece changes its space, so it must change the stamp"

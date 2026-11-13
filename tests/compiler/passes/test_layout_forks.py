@@ -133,7 +133,7 @@ def _two_readers() -> Graph:
 
     graph = _graph()
     first = graph.nodes["y"].op
-    second = replace(first, name="z", output_specs=(OutputSpec(*parse_body("z[n] = acc")),))
+    second = replace(first, output_specs=(OutputSpec(*parse_body("z[n] = acc")),))
     graph.add_node(second, ["x", "w"], outputs=(Tensor("z", (4,), "f32"),), node_id="z")
     graph.outputs = ["y", "z"]
     return graph
@@ -194,7 +194,7 @@ def _recorded_layout_after_cut(*, fixed_reader=False, source=None):
     program = graph.to_wire()
     ctx = Context.from_target((7, 0))
     graph = Pipeline.build(["tile/lift"]).run(graph, ctx=ctx, db=None)
-    target = definition(graph.nodes["y"].op.with_io(graph, graph.nodes["y"]), traced=0, origins=("y",))
+    target = definition(graph.nodes["y"].op.with_io(graph, graph.nodes["y"]), traced=0, origins=("y",), ref=0)
     taken = []
     operand_cut = {"PLACE": "cut"}  # the squared operand's cone, the one seam
 
@@ -206,8 +206,8 @@ def _recorded_layout_after_cut(*, fixed_reader=False, source=None):
     inventory = KernelInventory(on_routing=lambda parent, arm, pieces, _ids: taken.append((parent, arm, pieces)))
     Run(Pipeline.build(["tile/cut"]).with_strategies(inventory), ctx).resolve(graph, decide)
     _, cut, pieces = taken[0]
-    first, remainder = definition(pieces[0]), definition(pieces[1], key="y#2")
-    source = source or definition(taken[-1][2][0], key="y#3")
+    first, remainder = definition(pieces[0], ref=1), definition(pieces[1], ref=2)
+    source = source or definition(taken[-1][2][0], ref=3)
     return GoldenFile(
         compute_cap=(7, 0),
         programs=[program],

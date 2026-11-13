@@ -233,7 +233,7 @@ def complete(
             if existing:
                 document.rows[existing[0]] = replace(document.rows[existing[0]], knobs=realized)
                 continue
-            name = seed.name if seed.kernel == stored.ref else f"{seed.name}.{stored.exact_identity[:12]}"
+            name = seed.name if seed.kernel == stored.ref else f"{seed.name}.{stored.name}"
             document.rows.append(Row(name=name, kernel=stored.ref, bindings=kernel_bindings(tile), pins=dict(regime), knobs=realized))
     document.rows[:] = [row for row in document.rows if row.kernel in ran]
     return document

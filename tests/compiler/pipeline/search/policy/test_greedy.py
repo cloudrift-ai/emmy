@@ -608,15 +608,19 @@ def test_a_failed_fused_variant_cuts_the_whole_remainder_chain(monkeypatch, fail
         monkeypatch.setattr(greedy, "_kernel_set_pick", pick)
         return _kernel_sets(greedy.greedy_decide(prior=_NoSchedule(), placement_prior=_pieces_prior(-1.0)), case)
 
+    def writes_workspace(op) -> bool:
+        return any("__place_" in buffer for buffer in op.outputs)
+
     def standing(pieces: list) -> list:
-        """The remainders of the case's kernel a compile kept whole while they could still be cut."""
-        return [op for op in pieces if op.name == whole.name and cuttable_seams(op)]
+        """The remainders of the case's kernel — the pieces writing its outputs — a compile kept whole while they could
+        still be cut."""
+        return [op for op in pieces if not writes_workspace(op) and cuttable_seams(op)]
 
     [whole] = compile_with(set())
     assert cuttable_seams(whole)
     traded = compile_with({kernel_identity(whole)}, chain=False)
     [sibling] = standing(traded)
-    producer = next(op for op in traded if op.name != whole.name)
+    producer = next(op for op in traded if writes_workspace(op))
     failed = {"whole": whole, "remainder": sibling, "piece": producer}[failed_at]
 
     pieces = compile_with({kernel_identity(failed)})
@@ -629,8 +633,8 @@ def test_a_recorded_bench_failure_moves_the_next_compile_off_the_arm_that_hung(t
     row off the compiled CUDA op (``kernel_key``: the tile its schedule fork was offered), and the next compile's
     kernel-set fork reads it back under the identity of the arm it offers (``_kernel_set_pick``) — through the tune DB,
     with no mocked index — so the fused kernel that hung is off the ballot and the fork takes a cut. The GDN audit
-    read three hangs of one kernel name as three picks of one arm: a cut's remainder keeps its parent's C name, so the
-    name in a hang message is no identity; this test pins what the rows do, by identity."""
+    read three hangs of one kernel name as three picks of one arm, back when a cut's remainder kept its parent's name;
+    this test pins what the rows do, by identity."""
     from emmy.compiler.context import Context
     from emmy.compiler.ir.cuda.ir import CudaOp
     from emmy.compiler.pipeline import CUDA_PASSES, Pipeline
@@ -661,4 +665,4 @@ def test_a_recorded_bench_failure_moves_the_next_compile_off_the_arm_that_hung(t
     cut = compile_once()
     assert len(cut) > 1, "the fused arm whose kernel hung must lose to a cut"
     assert kernel_identity(fused.op) not in {kernel_identity(node.op) for node in cut}
-    assert all(node.op.kernel_name.startswith(fused.op.kernel_name) for node in cut), "the pieces carry the parent's name"
+    assert fused.op.kernel_name not in {node.op.kernel_name for node in cut}, "each piece is named by its own identity"

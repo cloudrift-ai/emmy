@@ -2000,6 +2000,10 @@ def _join_pieces(fragment: Graph, joins: tuple, spelled: dict[str, str], parent:
         _splice_pieces(fragment, members, spelled, parent, joined_spelling(producer, region))
 
 
+#: The fragment hint naming the node of a cut's remainder — the piece that keeps the outputs no seam took.
+REMAINDER = "cut.remainder"
+
+
 def realize(match: Match, root: Node, seams, *, joins: tuple = (), lineage: frozenset[str] = frozenset(), consumed=None) -> Graph:
     """Build the cut fragment for ``seams`` — one piece per seam plus the ONE sibling piece that
     reads what they produced. A single seam is the two-kernel cut; several seams are one COMPOSED
@@ -2022,8 +2026,11 @@ def realize(match: Match, root: Node, seams, *, joins: tuple = (), lineage: froz
 
     ``lineage`` names the placement pins every new piece is past: a piece is a new kernel, which the pins its
     parent read never address. The remainder — the piece that keeps the outputs no seam took — is the kernel the
-    cut continues, so it keeps the parent's consumed pins, or takes ``consumed`` when given."""
+    cut continues, so it keeps the parent's consumed pins, or takes ``consumed`` when given; the fragment names its
+    node (the :data:`REMAINDER` hint)."""
     fragment, remainder = _realize(match, root, seams, joins)
+    if remainder is not None:
+        fragment.hints.set(REMAINDER, remainder)
     for node in fragment.nodes.values():
         if not isinstance(node.op, TileOp):
             continue

@@ -365,8 +365,11 @@ def kernel_identity(op) -> str | None:
 def kernel_name(op) -> str:
     """The name of the kernel ``op`` realizes: ``k_`` and 12 hex of its exact identity (:func:`kernel_identity`), so
     every kernel of one identity has one name and kernels of two identities have two. An op no tile stands behind
-    is named by its own exact identity. Computed, never stored: pins, launches and every tool address a kernel by it."""
-    return name_of(kernel_identity(op) or op.identity_key(structural=False, with_io=True))
+    is named by its own exact identity, and one with no body at all (a placeholder) by a digest of the op. Computed,
+    never stored: pins, launches and every tool address a kernel by it."""
+    from emmy.compiler.structural import digest  # noqa: PLC0415
+
+    return name_of(kernel_identity(op) or op.identity_key(structural=False, with_io=True) or digest(repr(op)))
 
 
 def name_of(identity: str) -> str:

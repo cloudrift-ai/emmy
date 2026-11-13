@@ -115,7 +115,7 @@ def isolated_program(document: GoldenFile, kernel: Kernel, bindings: Mapping[str
         return document.executable(kernel, bindings)
     path = document.path_to(kernel.ref)
     if not path:
-        raise ValueError(f"kernel {kernel.name} has no recorded route to its derived body")
+        raise ValueError(f"kernel {_label(kernel)} has no recorded route to its derived body")
     root = document.kernel(path[0].parent)
     ctx = Context.from_target(tuple(document.compute_cap), gpu_name=document.gpu_name)
     minted: dict[str, TileOp] = {}
@@ -129,7 +129,7 @@ def isolated_program(document: GoldenFile, kernel: Kernel, bindings: Mapping[str
             for route, same, children in taken
         )
     ):
-        raise ValueError(f"kernel {kernel.name} has a stale recorded route")
+        raise ValueError(f"kernel {_label(kernel)} has a stale recorded route")
     matches = [
         node.id
         for node in graph.nodes.values()
@@ -137,7 +137,7 @@ def isolated_program(document: GoldenFile, kernel: Kernel, bindings: Mapping[str
         and node.op.with_io(graph, node).identity_key(structural=False, with_io=True) == kernel.exact_identity
     ]
     if len(matches) != 1:
-        raise ValueError(f"kernel {kernel.name} has {len(matches)} exact matches after its recorded route")
+        raise ValueError(f"kernel {_label(kernel)} has {len(matches)} exact matches after its recorded route")
     # Replay keeps unspecified pieces whole. Isolation starts at the piece's birth, before those
     # temporary fuse/layout/split decisions, while retaining receipts inherited from its parent.
     graph.nodes[matches[0]].op = minted[kernel.exact_identity]

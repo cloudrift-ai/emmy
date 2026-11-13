@@ -495,7 +495,7 @@ def test_greedy_run_raises_when_the_projection_tail_is_mis_sliced():
 def _composed_fragment(input_id: str, suffix: str) -> Graph:
     """The composed route ``input -> y_ws (k_ws) -> y__cut (k_residual)`` replacing the kernel it is
     offered on; the splice hands that kernel's id to the residual root, so the terminal tells the
-    routes apart by op name."""
+    routes apart by what each kernel reads (:func:`_label`)."""
     g = Graph()
     g.add_node(op=InputOp(), inputs=[], output=Tensor(input_id, (4,), "f32"), node_id=input_id)
     ws, cut = f"y_ws{suffix}", f"y__cut{suffix}"
@@ -503,6 +503,14 @@ def _composed_fragment(input_id: str, suffix: str) -> Graph:
     g.add_node(op=TileOp(knobs=_STAMP), inputs=[ws], output=Tensor(cut, (4,), "f32"), node_id=cut)
     g.outputs = [cut]
     return g
+
+
+def _label(node) -> str:
+    """A placeholder kernel of the composed route, by where it sits: a workspace producer by its node, the kernel
+    the route is offered on and each residual by the buffer it reads."""
+    if node.id.startswith("y_ws"):
+        return f"k_ws{node.id.removeprefix('y_ws')}"
+    return {"x": "k_test", "y_ws": "k_residual", "y_ws2": "k_residual2"}[node.inputs[0]]
 
 
 def _composed_route_pipeline(refused: dict[str, set[int]], *, rows: tuple[int, ...] = (8, 16), cut_residual: bool = False) -> Pipeline:
@@ -520,9 +528,9 @@ def _composed_route_pipeline(refused: dict[str, set[int]], *, rows: tuple[int, .
     def cut(root):
         if "BN" in root.op.knobs or "PLACE" in root.op.knobs:
             raise RuleSkipped("already decided")
-        if root.op.name == "k_test":
+        if _label(root) == "k_test":
             fragment, seam = _composed_fragment("x", ""), "PLACE@seam"
-        elif root.op.name == "k_residual" and cut_residual:
+        elif _label(root) == "k_residual" and cut_residual:
             fragment, seam = _composed_fragment("y_ws", "2"), "PLACE@seam.1"
         else:
             raise RuleSkipped("not a kernel-set fork")
@@ -536,7 +544,7 @@ def _composed_route_pipeline(refused: dict[str, set[int]], *, rows: tuple[int, .
 
     def materialize(root):
         bn = root.op.knobs["BN"]
-        if bn in refused.get(root.op.name, ()):
+        if bn in refused.get(_label(root), ()):
             raise RuleSkipped("kernel binder refuses this row's projection ownership", reject=True)
         return KernelOp(body=[Smem(name="buf", extents=(64,), dtype="float")], knobs={"BN": bn})
 
@@ -563,7 +571,7 @@ def _elect_composed_route(monkeypatch) -> None:
 
 
 def _kernels(terminal: Graph) -> dict[str, tuple[str, int]]:
-    return {nid: (n.op.name, n.op.knobs["BN"]) for nid, n in terminal.nodes.items() if isinstance(n.op, KernelOp)}
+    return {nid: (_label(n), n.op.knobs["BN"]) for nid, n in terminal.nodes.items() if isinstance(n.op, KernelOp)}
 
 
 def test_refused_piece_rows_rerank_within_the_composed_route(monkeypatch):

@@ -433,17 +433,20 @@ class PlacementFork:
 
 
 def _place_ballot(
-    leaves: list, rows: list[dict], identity: str, name: str, pending: Counter | None, continued: frozenset[str]
+    leaves: list, rows: list[dict], identity: str, pending: Counter | None, continued: frozenset[str]
 ) -> tuple[list[int], list[str], list]:
     """A placement fork's ballot as ``(positives, labels, carved)``: the arms on the golden's path, every arm's
-    label, and per arm the pieces it carves (every kernel it leaves but the remainder, the one keeping the fork
-    kernel's ``name``), by exact identity with multiplicity. ``pending`` is what the golden's kernel set still holds
+    label, and per arm the pieces it carves (every kernel it leaves but the remainder, the one the fragment names
+    by the ``REMAINDER`` hint), by exact identity with multiplicity. ``pending`` is what the golden's kernel set still holds
     below this kernel: ``None`` where the golden cut nothing here, which keeps the kernel whole, as does a kernel
     that is itself a pending piece. Otherwise an arm is positive when every piece it carves is pending or is a
     kernel the golden cut in its turn (``continued``), whose own fork carries the walk on; an arm leaving exactly
     the pending kernels is positive instead of those (a complete natural cut over its single seams). No positive:
     the golden's kernel set is not reached one seam at a time from here. Equivalent cuts may spell different
     seams, which is why a piece counts by identity and never by spelling."""
+    from emmy.compiler.ir.tile import TileOp  # noqa: PLC0415
+    from emmy.compiler.pipeline.passes.tile._cut import REMAINDER  # noqa: PLC0415
+
     fused = next(i for i, row in enumerate(rows) if "fuse" in row.values())
     # An arm spells every occurrence of each seam; the seams themselves are the keys its aliases map onto.
     aliases = {alias: key for leaf in leaves for alias, key in (getattr(leaf, "aliases", None) or {}).items()}
@@ -456,9 +459,14 @@ def _place_ballot(
     for i in range(len(rows)):
         if i == fused:
             continue
-        pieces = [(op.name, op.identity_key(structural=False, with_io=True)) for op, _ in features.kernel_pieces(leaves[i].expand()[0])]
+        fragment = leaves[i].expand()[0]
+        pieces = [
+            (node.id, node.op.with_io(fragment, node).identity_key(structural=False, with_io=True))
+            for node in fragment.nodes.values()
+            if isinstance(node.op, TileOp)
+        ]
         whole[i] = Counter(key for _, key in pieces if key)
-        carved[i] = Counter(key for piece, key in pieces if key and piece != name)
+        carved[i] = Counter(key for node, key in pieces if key and node != fragment.hints.get(REMAINDER))
     complete = [i for i in whole if whole[i] == pending]
     positives = complete or [
         i
@@ -543,6 +551,7 @@ def walk_placement(
     first, which a deploy would take there. ``own`` keeps only the forks of the pool's own kernel and the placement
     forks of the kernels its cut leaves to cut further, which is all a reproduction verdict reads."""
     from emmy.compiler.ir.tile import TileOp  # noqa: PLC0415
+    from emmy.compiler.pipeline.passes.tile._cut import REMAINDER  # noqa: PLC0415
     from emmy.compiler.pipeline.fork import leaf_knobs  # noqa: PLC0415
     from emmy.compiler.pipeline.knob import family_of  # noqa: PLC0415
     from emmy.compiler.pipeline.pipeline import NO_OPTION, _structural_domain  # noqa: PLC0415
@@ -577,7 +586,7 @@ def walk_placement(
         rows = [leaf_knobs(leaf) for leaf in leaves]
         carved: list = []
         if tier == "place":
-            positives, labels, carved = _place_ballot(leaves, rows, identity, root.name, owed, continued)
+            positives, labels, carved = _place_ballot(leaves, rows, identity, owed, continued)
             if not positives:
                 unmatched.append(identity[:12])
                 return leaves[0]
@@ -604,7 +613,8 @@ def walk_placement(
             fragment = leaves[followed].expand()[0]
             for node_id, node in fragment.nodes.items():
                 if isinstance(node.op, TileOp) and (
-                    node.op.name == root.name or node.op.with_io(fragment, node).identity_key(structural=False, with_io=True) in continued
+                    node_id == fragment.hints.get(REMAINDER)
+                    or node.op.with_io(fragment, node).identity_key(structural=False, with_io=True) in continued
                 ):
                     # The remainder and a piece the golden cut in its turn are cut further; the splice promotes
                     # a piece onto the buffer it replaces.

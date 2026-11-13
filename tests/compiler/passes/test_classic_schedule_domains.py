@@ -723,11 +723,10 @@ def test_kernel_pin_without_work_keeps_the_matching_catalog_rows(monkeypatch, fa
         Axis("m", 64),
         Axis("n", 64),
         Axis("k", 64),
-        name="k_matmul__place_ab12",
         inputs={name: Tensor(name, (64, 64), "f16") for name in ("a", "b")},
         outputs={"out": Tensor("out", (64, 64), "f16")},
     )
-    monkeypatch.setenv(f"EMMY_{family}@place_ab12", value)
+    monkeypatch.setenv(f"EMMY_{family}@{tile.name}", value)
     forks = classic_forks(tile, {}, Context.from_target(target), kernel_set=True)
     leaf = next(iter_leaves(forks), None)
     assert leaf is not None, "a partial kernel pin must find WORK in the catalog"
@@ -761,8 +760,8 @@ def test_a_cut_piece_keeps_its_catalog_when_published_pins_leave_it_no_row(monke
     with pytest.raises(ValueError, match="does not resolve"):  # a kernel of its own is held to the pin, loudly
         tuple(iter_leaves(classic_forks(tile, {}, target)))
 
-    monkeypatch.setenv("EMMY_WORK@place_ab12", "t16x16")
-    leaves = tuple(iter_leaves(classic_forks(tile, {}, target, kernel_set=True, node="out__place_ab12_0")))
+    monkeypatch.setenv(f"EMMY_WORK@{tile.name}", "t16x16")
+    leaves = tuple(iter_leaves(classic_forks(tile, {}, target, kernel_set=True)))
     assert leaves and {leaf.schedule.kernel.work.spell() for leaf in leaves} == {"t16x16"}
 
 
