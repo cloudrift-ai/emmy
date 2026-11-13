@@ -569,8 +569,7 @@ At a **schedule fork** (one kernel's row):
    otherwise fail no earlier than leaf matching. An off merely inherited down the branch is a pin rather than a
    decision and still admits. The index is built once per compile and memoized per process on
    the DB path and mtime, the context key and the card. It holds the DB's `perf` rows of the context's backend for this
-   compile's context key (one lane, because a sweep measures in the regime a deploy compiles in; rows measured
-   under nvcc at another opt level key elsewhere and are simply never consulted) — the box's own
+   compile's context key (one lane, because a sweep measures in the regime a deploy compiles in) — the box's own
    `run --bench` rows and the **golden rows** in scope, which the compile imports before it picks
    (`golden.evidence.evidence_db`): the live card's repository files, or the file `--golden PATH` names, once per
    golden digest into the tune DB — created on first use, and imported under the lock beside the file so the workers
@@ -836,7 +835,7 @@ reverse), so old rows upgrade in place.
 was *biased along tile area* — the axis being tuned — so it systematically priced wide tiles as slow (paired over
 1,818 configs: p90 regret 1.68×, and the `-O1` argmin was the `-O3` argmin on only 44.5% of pools), and the compile
 time it was buying no longer existed: over 4,888 nvcc compiles, `-O3` compiled at a median 0.96× of `-O1`. With nvcc
-gone no compile can select another level: every compile is the deployable one.
+gone there is no level to select: ptxas assembles every kernel, and no context, feature or `perf` row names a level.
 
 Searching a kernel's schedule space on the card is future work: a ranked sweep that scores the kernel's complete rows
 with the offline prior, benches the top few, searches locally from the best measured one, and writes what it measures
@@ -911,11 +910,9 @@ tables hold compilable kernels, the decisions that minted them, and measurements
 - **`context`** — one row per backend, card and regime: the card (`Context.hardware_id`, the PCIe product name — two
   SKUs off one die, H100 and H200, RTX 5090 and RTX PRO 6000, share a compute capability, and without it their rows
   would overwrite each other), the target as the backend spells it (`sm_120`; on the CPU backend, LLVM's name for
-  the host CPU, with the card its product name and thread count — `Context.for_cpu`), the cicc opt level and the
-  residual compiler flags (the spelling of the two whole-kernel precision decisions, `context.precision_flags`;
-  every compile is at level 3, and a row measured under nvcc keeps the level it was built at, `""` and
-  `-Xcicc -O3` one regime), every effective precision decision, and `cold_cache`. Independent overrides of the
-  `FAST_MATH` umbrella partition evidence even when they leave that spelling unchanged. The context captures these
+  the host CPU, with the card its product name and thread count — `Context.for_cpu`), every effective precision
+  decision, and `cold_cache`. Independent overrides of the `FAST_MATH` umbrella partition evidence like any other
+  decision. The context captures these
   inputs before compilation; A/B recording reconstructs it inside each row's replay-pin scope. Omitted independent pins
   inherit the recorded umbrella.
   Publishing a recorded regime spells those effective defaults explicitly, so ambient overrides cannot leak in;
@@ -986,15 +983,12 @@ training data but nothing a restamp can lower again; a compiler change that re-k
 behind.
 
 - **What freezes** is `freeze_reason(row, shape)`'s call, `shape` being the stamps of the row's kernel, computed
-  from its stored definition (`freeze.kernel_ops`): an `ok` row on a card the GPU registry knows, at the deployable
-  opt level, whose kernel still lowers (one that does not is dropped as a stale kernel), that passes the two
+  from its stored definition (`freeze.kernel_ops`): an `ok` row on a card the GPU registry knows whose kernel still
+  lowers (one that does not is dropped as a stale kernel), that passes the two
   physical-plausibility checks (`implausible_value_reason`, which reads the row's
   `bindings` as the size a symbolic axis ran at, and `impossible_kernel_reason`). The effective precision decisions
-  and cache mode define its regime (`regime_of`), including independent overrides; other compiler flags are not
-  stored or gated on. A failed bench is not a measurement (the tune DB keeps it), and a row a compile imported from
-  a golden file is the file's. The opt-level gate is what keeps a freeze a fair yardstick: a freeze is the corpus
-  a reported prior number is computed over, so rows from a regime nothing deploys in would put half a card's pools
-  in a lane no one runs.
+  and cache mode define its regime (`regime_of`), including independent overrides. A failed bench is not a
+  measurement (the tune DB keeps it), and a row a compile imported from a golden file is the file's.
   `measured_groups` inherits the same filter, and keys its pools by regime, so an analysis over a live DB agrees with
   one over a freeze.
 - **Freezing the same DB twice yields the same bytes**: rows sort by content, and the golden dump is deterministic.
@@ -1321,15 +1315,15 @@ recorded as an ordinary row). The nightly refresh posts those counts per space.
 projecting the packed matrix onto the model's own columns with its own absent-value fill — is where a score comes
 from.
  - A MEASURED pool (`--pools measured`: the dataset's measured pools — the DB's `perf` rows, every candidate benched,
-grouped by `(gpu, kernel signature, H_opt)`) can answer what a wrong pick COST — Spearman over the pool, and regret at
+grouped by `(gpu, kernel signature, regime)`) can answer what a wrong pick COST — Spearman over the pool, and regret at
 k=1 (the deploy question: the pick ships, so its latency IS the cost) and k=10 (the tuning question: bench the top
 ten, keep the measured best). This is the half that tracks deployed speed.
 - A GOLDEN pool (`--pools golden`: an enumeration with the verified-optimum row marked) can only answer WHERE the
   known-good row landed, and is reported as a SCREEN. A rank is blind to the latency gap behind it, and the corpus
   aggregate is dominated by pools small enough to rank by accident, so golden summaries are stratified by pool size.
 
-**Every summary publishes what it covered.** Summaries carry the axes they were keyed on as a dict — measured: `gpu` ×
-`H_opt`; golden: `gpu` × `tier` × pool-size bucket — along with how many pools keyed into them, how many the model
+**Every summary publishes what it covered.** Summaries carry the axes they were keyed on as a dict — measured: `gpu`;
+golden: `gpu` × `tier` × pool-size bucket — along with how many pools keyed into them, how many the model
 could not score at all, and — where a metric has a size minimum and so covers fewer pools than the summary holds —
 that metric's own count. The minimums differ (regret needs two rows, Spearman five, regret@10 eleven), so on the RTX
 5090 freeze's 176 pools those counts are 149, 107 and 45. An aggregate that averaged the excluded pools in would be

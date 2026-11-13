@@ -20,8 +20,9 @@ kernel's structure on the rendered text any more (below). Step 12 has begun: two
 closed and the finalization audit is applied (below). No step ran the perf lane, the whole suite or an sm_70 kernel
 on a V100 yet; they are what is left of the closing step.
 
-PR B is draft #1399. Its switch (milestone 7) is done but for the opt level and the refit, which the priors task
-takes (milestone 7 says what it removes and bumps).
+PR B is draft #1399. Its switch (milestone 7) is done but for the refit: the opt level is gone (2026-11-13), and
+the featurizer version (13 to 14) and the tune DB version (14 to 15) are bumped, so the shipped weights refuse to load
+until both priors are refit (milestone 7).
 
 | Step | Commit | Corpus CUDA |
 | --- | --- | --- |
@@ -612,16 +613,15 @@ lists which corpus cases still do. That fallback exists only inside the PR.
    their states are held at, a half maximum or minimum accumulator at f32 where the target has no instruction for it,
    and no fused multiply-add at f16 (eager rounds the product).
 
-   *Left for the priors task: the opt level.* Every compile is level 3 and nothing selects another, but the feature and
-   the columns stay. Remove: `context.split_opt_level` and `_OPT_TOKEN`, the opt part of `Context.compile_flags` (keep
-   the two precision tokens' spelling or bump every context key), `H_opt` and `DEPLOYABLE_OPT` (`search/features.py`,
-   `dataset/sample.py`, `dataset/group.py`, `prior/report.py`, `commands/eval.py`), the tune DB's `opt` and `flags`
-   context columns (`search/db/__init__.py`) and the freeze's deployable-opt gate (`db/freeze.py`). Bump the featurizer
-   version and the tune DB version, refit both priors. Tests that hold the opt level: `backend/test_compile_regime.py`,
-   `db/test_db.py`, `db/test_freeze.py`, `db/test_measured_groups.py`, `policy/test_greedy.py`, `prior/test_report.py`,
-   `tests/github/test_measured_regret_jq.py`. No stored file carries a level-1 row: the freezes hold no opt field (the
-   gate drops level-1 rows when one is written), and no golden names `-Xcicc`. A local tune DB may hold level-1 rows; no
-   compile reads them.
+   *Opt level removed 2026-11-13.* `split_opt_level`, `_OPT_TOKEN`, `H_opt`, `DEPLOYABLE_OPT`, the tune DB's
+   `opt` and `flags` context columns and the freeze's deployable-opt gate are gone; a context's DB regime is its
+   card, target, cache mode and precision decisions. `Context.compile_flags` keeps the two precision tokens' spelling
+   and the context key digests it whole, so every context key moved with the tune DB version. Measured pools key on
+   card, kernel signature and regime, and report by card. Featurizer version 13 to 14, tune DB version 14 to 15.
+   No tree of either shipped prior splits on `H_opt` (no borders), but the version gate refuses both files, so a
+   greedy compile ranks by emission order and the reproduction gate, `test_shipped_artifacts_load` and the `eval
+   prior` CLI test fail until the refit (README, "Fit the priors", at the shipped iteration counts: schedule 400,
+   placement 3000).
 
 ### Checks
 

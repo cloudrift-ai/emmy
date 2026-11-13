@@ -77,8 +77,7 @@ share every line downstream. The projection:
   the default fast-math kernel. Persistent benchmark workers receive every effective precision decision with each
   request and restore their prior values afterward, so a previous request's arithmetic mode cannot leak into the
   next measurement. A context spells the two decisions as the flags nvcc took (`context.precision_flags`), because
-  every stored row's context key is a digest of that spelling; a row measured under nvcc at another cicc opt level
-  still keys apart (`context.split_opt_level`), and no compile spells one.
+  the context key is a digest of that spelling.
   `EMMY_UNROLL=<n>` caps which static loops the kernel lowering flags for unrolling (the unroll budget — declared in
   `lowering/kernel/_atom.py`, read at the extent-driven unroll sites there). The lowering then writes the flagged
   loops out itself (`lowering/kernel/117_unroll_loops`): the Kernel IR holds the copies. It is
