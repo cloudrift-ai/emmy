@@ -746,47 +746,24 @@ impl Lowerer {
             .and_then(|constant| constant.checked_add(buffer.offset))
             .ok_or_else(|| overflow.clone())?;
         let mut address = buffer.base;
-        // The parts of a shared address stay in the loops they stand in: ptxas merges the shared loads of the trips
-        // it unrolls into wide ones only when its unroll factor, which follows the size of the body, is a multiple
-        // of the width, and a body made smaller by moving them changed that factor (qwen3emb's s512 projections:
-        // 16 LDS.128 to 83 LDS, 2.4 times slower on an RTX 5090).
-        let hoisting = self.b.set_hoisting(wide);
-        let built = self.address_terms(&terms, bytes, wide, &mut address, &mut offset, ctx);
-        self.b.set_hoisting(hoisting);
-        built?;
-        Ok(Operand::Addr(Base::Reg(address), offset))
-    }
-
-    /// Add each term of a flat index, scaled to bytes, to `address`, and the bytes of a counted axis's start to
-    /// `offset`.
-    fn address_terms(
-        &mut self,
-        terms: &[(i64, Expression)],
-        bytes: i64,
-        wide: bool,
-        address: &mut crate::inst::Reg,
-        offset: &mut i64,
-        ctx: &SimplifyCtx,
-    ) -> Result<()> {
-        let overflow = self.refuse("an address past 64 bits");
-        for (coefficient, term) in terms {
+        for (coefficient, term) in &terms {
             let scale = coefficient
                 .checked_mul(bytes)
                 .ok_or_else(|| overflow.clone())?;
             let val = self.int(term, ctx)?;
             if let Some(value) = val.op.int() {
                 let term = value.checked_mul(scale).ok_or_else(|| overflow.clone())?;
-                *offset = offset.checked_add(term).ok_or_else(|| overflow.clone())?;
+                offset = offset.checked_add(term).ok_or_else(|| overflow.clone())?;
                 continue;
             }
             let counted = val.op.reg().and_then(|reg| self.counted.get(&reg).copied());
-            let counter = counted.filter(|_| wide).and_then(|(counter, step, start)| {
-                Some((self.b.wide_counter(counter)?, step, start))
+            let counter = counted.and_then(|(counter, step, start)| {
+                Some((self.b.wide_counter(counter).filter(|_| wide)?, step, start))
             });
             let (scaled, at) = if let Some((counter, step, start)) = counter {
                 // The axis is `step * counter + start`: the start's bytes go into the constant.
                 let bytes = start.checked_mul(scale).ok_or_else(|| overflow.clone())?;
-                *offset = offset.checked_add(bytes).ok_or_else(|| overflow.clone())?;
+                offset = offset.checked_add(bytes).ok_or_else(|| overflow.clone())?;
                 let factor = step.checked_mul(scale).ok_or_else(|| overflow.clone())?;
                 let wide = Val::reg(counter, VTy::I64);
                 let multiple = factor.saturating_abs();
@@ -804,16 +781,13 @@ impl Lowerer {
                 let product = self.product_of(&val, &Val::int(scale), VTy::I32, multiple);
                 (product.op, Ty::S32)
             };
-            let aligned = gcd(
-                i64::from(self.b.alignment(*address)),
-                self.multiple(&scaled),
-            );
-            let sum = Inst::new(Opcode::Add, at, Vec::new(), vec![(*address).into(), scaled]);
-            *address = self.b.value(sum, at.bank());
+            let aligned = gcd(i64::from(self.b.alignment(address)), self.multiple(&scaled));
+            let sum = Inst::new(Opcode::Add, at, Vec::new(), vec![address.into(), scaled]);
+            address = self.b.value(sum, at.bank());
             self.b
-                .set_alignment(*address, 1 << aligned.trailing_zeros().min(16));
+                .set_alignment(address, 1 << aligned.trailing_zeros().min(16));
         }
-        Ok(())
+        Ok(Operand::Addr(Base::Reg(address), offset))
     }
 }
 

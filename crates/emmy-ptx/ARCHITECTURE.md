@@ -113,17 +113,13 @@ Every instruction reaches the list through the `Builder`.
   matters even where ptxas would merge the copies, because ptxas decides its unrolling from the size of the PTX it is
   given. The table shares what the compiler itself makes (address parts, widenings, constants in registers, a lane's
   offset in a tile); it never moves a Kernel IR value or a load, and a load is never shared.
-- **Values a loop does not change.** A pure integer value whose operands are all defined outside the loops around it
-  is computed ahead of the outermost of those loops, and kept in the table of the scope it lands in. A condition is
-  never left, since not every thread runs its side, and a float value never moves: the body's optimization placed
-  every value the kernel names, so what moves is what the compiler makes (the part of an address a loop does not
-  change, a widening, the terms of an index). Measured on `sm_120` (`reduce/split-reduce-mean-atomic`): with the row's
-  base computed in the loop, ptxas unrolls the 512-trip loop 32 times and rebuilds every address with two
-  instructions; with it ahead of the loop it unrolls the loop in full and folds every address into `[base +
-  constant]`. The parts of a shared-memory address stay where they are: ptxas merges the shared loads of the trips it
-  unrolls into wide ones only when its unroll factor, which follows the size of the body, is a multiple of the width,
-  and a body made smaller by moving them changed that factor (qwen3emb's s512 projections went from 16 `LDS.128` to 83
-  `LDS`, 2.4 times slower on the rented RTX 5090, while its s32 projections went 1.4 times faster).
+- **Values a loop does not change.** A pure integer value whose operands are all defined outside the loops around
+  it is computed ahead of the outermost of those loops, and kept in the table of the scope it lands in. A condition
+  is never left, since not every thread runs its side, and a float value never moves: the body's optimization
+  placed every value the kernel names, so what moves is what the compiler makes (the part of an address a loop
+  does not change, a widening, the terms of an index). Measured on `sm_120` (`reduce/split-reduce-mean-atomic`): with
+  the row's base computed in the loop, ptxas unrolls the 512-trip loop 32 times and rebuilds every address with two
+  instructions; with it ahead of the loop it unrolls the loop in full and folds every address into `[base + constant]`.
 - **Waiting.** `repeat_until` runs one instruction again until the predicate it defines holds: the one loop with no
   body, a wait on a barrier.
 - **Facts.** The builder keeps, per register, a number its value is a multiple of and, for an address, the bytes it is
@@ -141,11 +137,11 @@ Every instruction reaches the list through the `Builder`.
   shape ptxas unrolls. A plain `Loop`'s axis is the counter. A `StridedLoop` with a literal start and step over a
   static extent counts its trips and computes the axis from the counter; one that starts at a thread's own value, or
   stops early, steps the axis itself. A strided loop that runs at most one trip, because one constant step from the
-  lowest start the ranges allow already passes the highest end (a cooperative copy over fewer elements than the block
-  has threads), is the condition that its start is below its end, with the axis its start: ptxas unrolls a loop whose
-  start differs between threads four times with a remainder, which multiplied the async copies of the NVFP4 kernels
-  (30 `LDGSTS` against cicc's 12 in one). The accumulators a loop folds are seeded ahead of it with the combine's
-  neutral element, as the `seed` flag says.
+  lowest start the ranges allow already passes the highest end (a cooperative copy over fewer elements than the
+  block has threads), is the condition that its start is below its end, with the axis its start: ptxas unrolls a
+  loop whose start differs between threads four times with a remainder, which multiplied the async copies of the
+  NVFP4 kernels (30 `LDGSTS` against cicc's 12 in one). The accumulators a loop folds are seeded ahead of it with the combine's neutral
+  element, as the `seed` flag says.
 - **Integers.** An expression is computed at the narrowest of `i32`, `u32` and `i64` that holds its range, and at its
   operands' type where it has no range. A sum, a product or a bitwise operation depends on the low bits of its
   operands alone, so it runs at the type its own range needs. A division, a shift right, a minimum or a comparison
