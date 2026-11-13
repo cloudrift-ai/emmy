@@ -49,6 +49,17 @@ def test_the_copies_of_two_loops_keep_their_names_apart() -> None:
     assert len(names) == len(set(names)) == 8
 
 
+def test_two_carriers_whose_last_copies_fold_one_value_stay_two_values() -> None:
+    """Each copy's fold is one step on what its carrier holds. ``q`` folds ``A[i, 1]`` on every trip and ``p`` only on
+    the last; the copies' optimization keeps the two carriers, and every value read from them, apart."""
+    op = _unrolled(
+        "for k in 0..2 unroll=true:\n    f32 a = load A[i, k]\n    f32 b = load A[i, 1]\n    f32 p <- maximum(p, a)\n"
+        "    f32 q <- maximum(q, b)\nf32 r = maximum(p, q)\nf32 s = p - r\nf32 t = q - r\nf32 O[i] = s\nf32 P[i] = t"
+    )
+    stores = {stmt.output: stmt.values for stmt in op.body.iter() if isinstance(stmt, Write)}
+    assert stores["O"] != stores["P"]
+
+
 def test_storage_declared_around_the_loop_keeps_its_name() -> None:
     """A fragment declared ahead of the loop is one accumulator: every copy updates it, under its own name."""
     body = (
