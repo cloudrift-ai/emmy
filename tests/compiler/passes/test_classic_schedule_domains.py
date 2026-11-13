@@ -11,7 +11,7 @@ from emmy.compiler.dtype import F16, F32
 from emmy.compiler.graph import Tensor
 from emmy.compiler.ir.axis import Axis, Window
 from emmy.compiler.ir.elementwise import ElementwiseImpl
-from emmy.compiler.ir.expression import Var
+from emmy.compiler.ir.expression import CastExpression, Var
 from emmy.compiler.ir.schedule import Reduce, ScheduleContext, ScheduleRefused, Stage, Tile, Work
 from emmy.compiler.ir.schedule import schedule as advance_schedule
 from emmy.compiler.ir.schedule.catalog import coop_reduce_moves, scalar_tile_moves
@@ -24,12 +24,12 @@ from emmy.compiler.ir.schedule.classic import (
 )
 from emmy.compiler.ir.schedule.classic import refusals as classic
 from emmy.compiler.ir.schedule.classic.schedule import output_sweep_works, packed_works
-from emmy.compiler.ir.stmt import Body, Loop, parse_body
+from emmy.compiler.ir.stmt import Assign, Body, Loop, parse_body
 from emmy.compiler.ir.tile import OutputSpec, Placement, TileOp
 from emmy.compiler.ir.tile.ops import carries_partition
 from emmy.compiler.pipeline.fork import iter_leaves
 from emmy.compiler.pipeline.passes.tile._fromloop import fold_from_loop
-from tests.compiler.helpers import enumerate_classic_reference, requires_cuda
+from tests.compiler.helpers import compile_with_kernels, enumerate_classic_reference, requires_cuda, statements
 from tests.compiler.terms import contraction, projection, reduction, slab
 
 classic_forks = import_module("emmy.compiler.pipeline.passes.tile.schedule.040_schedule").classic_forks
@@ -235,7 +235,6 @@ def _partial_states():
 def test_deferred_states_offer_and_lower_the_requested_reduction(count, reduce, work):
     from emmy.compiler.ir.cuda import CudaOp
     from emmy.compiler.ir.tile.ops import merges_partition
-    from emmy.compiler.pipeline import CUDA_PASSES, Pipeline
     from emmy.compiler.pipeline.search.pins import pinned_knobs
 
     tile = _deferred_softmax_merge(count)
@@ -243,11 +242,14 @@ def test_deferred_states_offer_and_lower_the_requested_reduction(count, reduce, 
     graph = _deferred_merge_graph(tile)
     row = {"WORK": work, "REDUCE": reduce, "RASTER": "", "PLACE": "fuse", "LOOPIFY": "0"}
     with pinned_knobs(row):
-        compiled = Pipeline.build(CUDA_PASSES).run(graph, ctx=Context.from_target((8, 0)), db=None)
+        compiled, kernels = compile_with_kernels(graph, ctx=Context.from_target((8, 0)), db=None)
     (kernel,) = [node.op for node in compiled.nodes.values() if isinstance(node.op, CudaOp)]
+    (body,) = kernels.values()
     assert kernel.knobs["REDUCE"] == reduce and kernel.knobs["WORK"] == work
-    assert kernel.kernel_source.count("__float2half(") == 1
-    assert "const float*" in kernel.kernel_source
+    # The states are read and merged in f32; the one conversion is the result's, to the f16 output.
+    conversions = [stmt for stmt in statements(body, Assign) if isinstance(stmt.value, CastExpression) and stmt.dtype == F16]
+    assert len(conversions) == 1
+    assert [tensor.dtype for tensor in body.inputs.values()] == [F32]
 
 
 @pytest.mark.parametrize("reduce", ["r2", "r4"])

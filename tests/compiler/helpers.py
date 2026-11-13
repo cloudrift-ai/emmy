@@ -6,6 +6,7 @@ are explicit at each call site and test modules never import implementation from
 
 from __future__ import annotations
 
+import contextlib
 import dataclasses
 import functools
 from collections.abc import Mapping
@@ -337,6 +338,32 @@ def render_typed(statements, ctx) -> list[str]:
     return render_body(explicit_conversions(Body(statements), buffers, native_f16_ops(), known), ctx)
 
 
+def _kernel_recorder():
+    """A pipeline strategy that records the ``KernelOp`` each ``CudaOp`` was lowered from; its ``kernels(compiled)``
+    gives the Kernel IR of each kernel node of a compiled graph, by node id."""
+    from emmy.compiler.ir.cuda import CudaOp
+    from emmy.compiler.ir.kernel import KernelOp
+    from emmy.compiler.pipeline.strategy import PipelineStrategy
+
+    class LoweredKernels(PipelineStrategy):
+        def __init__(self) -> None:
+            self.lowered: list[tuple[KernelOp, CudaOp]] = []
+
+        def on_rebind(self, e) -> None:
+            if isinstance(e.replaced, KernelOp) and isinstance(e.node.op, CudaOp):
+                self.lowered.append((e.replaced, e.node.op))
+
+        def kernels(self, compiled) -> dict:
+            found = {}
+            for node_id, node in compiled.nodes.items():
+                if isinstance(node.op, CudaOp):
+                    # A retried resolution lowers a kernel again: the one the result holds is the one it was generated from.
+                    found[node_id] = next(kernel for kernel, op in reversed(self.lowered) if op is node.op)
+            return found
+
+    return LoweredKernels()
+
+
 def compile_with_kernels(graph, *, ctx=None, passes=None, decide=None, **run):
     """``graph`` compiled to CUDA ops, and the Kernel IR each kernel's code was generated from, by node id.
 
@@ -346,19 +373,10 @@ def compile_with_kernels(graph, *, ctx=None, passes=None, decide=None, **run):
     every index flat, every type said. A check of a kernel's structure reads that body; only a check of how an
     instruction is spelled reads the code. With ``decide`` the forks are resolved by it (``Run.resolve``) on the
     live device's context, where ``Pipeline.run`` takes the greedy pick."""
-    from emmy.compiler.ir.cuda import CudaOp
-    from emmy.compiler.ir.kernel import KernelOp
     from emmy.compiler.pipeline import CUDA_PASSES, Pipeline
-    from emmy.compiler.pipeline.strategy import PipelineStrategy
 
-    lowered: list[tuple[KernelOp, CudaOp]] = []
-
-    class Recorder(PipelineStrategy):
-        def on_rebind(self, e) -> None:
-            if isinstance(e.replaced, KernelOp) and isinstance(e.node.op, CudaOp):
-                lowered.append((e.replaced, e.node.op))
-
-    pipeline = Pipeline.build(passes or CUDA_PASSES).with_strategies(Recorder())
+    recorder = _kernel_recorder()
+    pipeline = Pipeline.build(passes or CUDA_PASSES).with_strategies(recorder)
     if decide is None:
         compiled = pipeline.run(graph, ctx=ctx, **run)
     else:
@@ -366,12 +384,26 @@ def compile_with_kernels(graph, *, ctx=None, passes=None, decide=None, **run):
         from emmy.compiler.pipeline.pipeline import Run
 
         compiled, _ = Run(pipeline=pipeline, ctx=ctx or Context.probe()).resolve(graph, decide)
-    kernels = {}
-    for node_id, node in compiled.nodes.items():
-        if isinstance(node.op, CudaOp):
-            # A retried resolution lowers a kernel again: the one the result holds is the one it was generated from.
-            kernels[node_id] = next(kernel for kernel, op in reversed(lowered) if op is node.op)
-    return compiled, kernels
+    return compiled, recorder.kernels(compiled)
+
+
+@contextlib.contextmanager
+def recording_kernels():
+    """Record the Kernel IR of every kernel lowered inside the block, for a compile the test does not run itself (a
+    backend's, a serving split's). Yields a function from a compiled graph to its kernels by node id, as
+    :func:`compile_with_kernels` returns them."""
+    from unittest import mock
+
+    from emmy.compiler.pipeline import Pipeline
+
+    recorder = _kernel_recorder()
+    build = Pipeline.build.__func__
+
+    def recording(cls, passes, **kwargs):
+        return build(cls, passes, **kwargs).with_strategies(recorder)
+
+    with mock.patch.object(Pipeline, "build", classmethod(recording)):
+        yield recorder.kernels
 
 
 def statements(kernels, *types) -> list:

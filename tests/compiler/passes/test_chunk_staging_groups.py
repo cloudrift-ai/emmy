@@ -9,10 +9,10 @@ import torch
 from emmy.commands.trace import graph_from_code
 from emmy.compiler.backend.cuda.backend import CudaBackend
 from emmy.compiler.context import Context
-from emmy.compiler.ir.cuda import CudaOp
-from emmy.compiler.pipeline import CUDA_PASSES, Pipeline
+from emmy.compiler.ir.kernel.ir import CpAsyncCopy, FragmentLoad, LdmatrixLoad, MbarrierWait, MmaSyncPtx, TmaLoad
+from emmy.compiler.ir.stmt import Body, StridedLoop
 from emmy.compiler.pipeline.search.pins import pinned_knobs
-from tests.compiler.helpers import requires_cuda, requires_sm90
+from tests.compiler.helpers import compile_with_kernels, requires_cuda, requires_sm90, statements, text
 
 
 def _chunk_loop(stage: str) -> str:
@@ -30,9 +30,10 @@ def _chunk_loop(stage: str) -> str:
         "WORK": "w2x1",
     }
     with pinned_knobs(pins):
-        lowered = Pipeline.build(CUDA_PASSES).run(graph, ctx=Context.from_target((12, 0)))
-    (source,) = [node.op.kernel_source for node in lowered.nodes.values() if isinstance(node.op, CudaOp)]
-    return source[source.index("for (int a2__ck") :]
+        _, kernels = compile_with_kernels(graph, ctx=Context.from_target((12, 0)))
+    (kernel,) = kernels.values()
+    (loop,) = [loop for loop in statements(kernel, StridedLoop) if loop.axis.name == "a2__ck"]
+    return list(loop.body.iter())
 
 
 def test_a_tma_staged_chunk_loop_gives_the_key_and_the_value_their_own_barrier() -> None:
@@ -40,7 +41,7 @@ def test_a_tma_staged_chunk_loop_gives_the_key_and_the_value_their_own_barrier()
     so each group's fill, wait and release derive from its own live range instead of one group
     spanning the whole body."""
     loop = _chunk_loop("d1/smem-tma")
-    assert "mbarrier_wait_parity(&_mbar_k" in loop and "mbarrier_wait_parity(&_mbar_v" in loop
+    assert {"_mbar_k", "_mbar_v"} <= {wait.mbar for wait in loop if isinstance(wait, MbarrierWait)}
 
 
 def test_a_deeper_ring_keeps_one_group_and_one_barrier() -> None:
@@ -48,8 +49,8 @@ def test_a_deeper_ring_keeps_one_group_and_one_barrier() -> None:
     so a second group there would only add a release barrier between the score and the softmax on
     every chunk: the key and the value stay one group with one barrier."""
     loop = _chunk_loop("d2/smem-tma")
-    assert "_mbar_k" not in loop and "_mbar_v" not in loop
-    assert "mbarrier_wait_parity(&_mbar[" in loop
+    assert {wait.mbar for wait in loop if isinstance(wait, MbarrierWait)} == {"_mbar"}
+    assert not any(name in text(Body(loop)) for name in ("_mbar_k", "_mbar_v"))
 
 
 def test_a_single_slot_ring_refills_each_operand_at_its_own_kill_point() -> None:
@@ -58,10 +59,15 @@ def test_a_single_slot_ring_refills_each_operand_at_its_own_kill_point() -> None
     copy overlaps the softmax and the expectation — and the value's after the expectation: the
     single-slab schedule FlashAttention-2 runs, which one group spanning the body cannot give."""
     loop = _chunk_loop("d1/smem-async")
-    score = loop.index("emmy_mma_m16n8k16_f16_f32(_s")  # the score's first mma
-    key_refill = loop.index("emmy_cp_async_cg(&_a_smem")  # the key slab's next-chunk fill
-    value_drain = loop.index("&_b_smem[")  # the expectation's first read of the value slab
-    value_refill = loop.index("emmy_cp_async_cg(&_b_smem")
+
+    def first(found) -> int:
+        return next(i for i, stmt in enumerate(loop) if found(stmt))
+
+    score = first(lambda stmt: isinstance(stmt, MmaSyncPtx) and stmt.c_frag.startswith("_s"))  # the score's first mma
+    key_refill = first(lambda stmt: isinstance(stmt, CpAsyncCopy) and stmt.smem == "_a_smem")  # the key slab's next-chunk fill
+    # The expectation's first read of the value slab.
+    value_drain = first(lambda stmt: isinstance(stmt, (LdmatrixLoad, FragmentLoad)) and stmt.src_buffer == "_b_smem")
+    value_refill = first(lambda stmt: isinstance(stmt, CpAsyncCopy) and stmt.smem == "_b_smem")
     assert score < key_refill < value_drain < value_refill
 
 
@@ -83,9 +89,10 @@ def test_tma_refills_preserve_causal_attention(stage: str) -> None:
         "STAGE@map.1/twist.1/inner": "",
     }
     with pinned_knobs(pins):
-        compiled = Pipeline.build(CUDA_PASSES).run(graph, ctx=Context.probe())
-    (source,) = [node.op.kernel_source for node in compiled.nodes.values() if isinstance(node.op, CudaOp)]
-    assert "cp_async_bulk_tensor_" in source and "emmy_mma_m16n8k16_f16_f32(" in source
+        compiled, kernels = compile_with_kernels(graph, ctx=Context.probe())
+    (kernel,) = kernels.values()
+    products = {(tuple(mma.shape), mma.ab_dtype, mma.c_dtype) for mma in statements(kernel, MmaSyncPtx)}
+    assert statements(kernel, TmaLoad) and products == {((16, 8, 16), "f16", "f32")}
     backend = CudaBackend()
     for seed in range(3):
         rng = np.random.default_rng(seed)

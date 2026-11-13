@@ -11,22 +11,21 @@ outputs — this validates the full decomposition+optimization+fusion chain
 preserves semantics without needing a GPU.
 """
 
-import re
-
 import numpy as np
 
 from emmy.compiler.backend.numpy import NumpyBackend
 from emmy.compiler.context import Context
 from emmy.compiler.graph import Graph, Tensor
 from emmy.compiler.ir.base import InputOp
-from emmy.compiler.ir.cuda import CudaOp
 from emmy.compiler.ir.expression import Literal
 from emmy.compiler.ir.loop import Accum, Assign, LoopOp, Write
+from emmy.compiler.ir.stmt import Loop, StridedLoop
 from emmy.compiler.ir.tensor.ir import ElementwiseOp, ReduceOp, ScanOp
 from emmy.compiler.ir.tile import TileOp
-from emmy.compiler.pipeline import CUDA_PASSES, LOOP_PASSES, TILE_PASSES, Pipeline
+from emmy.compiler.pipeline import LOOP_PASSES, TILE_PASSES, Pipeline
 from emmy.compiler.pipeline.knob import family_value
 from emmy.compiler.pipeline.search.pins import pinned_knobs
+from tests.compiler.helpers import compile_with_kernels, statements
 
 _backend = NumpyBackend()
 rng = np.random.default_rng(0)
@@ -197,11 +196,11 @@ def test_scan_sum_lifts_and_preserves_prefix_values():
     assert any(accum.op.name == "add" for accum in launches[0].op.body.accums)
     _assert_pipeline_preserves_semantics(make_graph, {"x": np.arange(8, dtype=np.float32).reshape(2, 4)}, rtol=0, atol=0)
 
-    lowered = Pipeline.build(CUDA_PASSES).run(make_graph(), ctx=Context.from_target((8, 9)))
-    cuda_ops = [node.op for node in lowered.nodes.values() if isinstance(node.op, CudaOp)]
-    assert len(cuda_ops) == 1
-    source = cuda_ops[0].kernel_source
-    assert source.index("+=") < source.index("out[")
+    _, kernels = compile_with_kernels(make_graph(), ctx=Context.from_target((8, 9)))
+    assert len(kernels) == 1
+    order = statements(kernels, Accum, Write)
+    fold = next(i for i, stmt in enumerate(order) if isinstance(stmt, Accum) and stmt.op.name == "add")
+    assert fold < next(i for i, stmt in enumerate(order) if isinstance(stmt, Write) and stmt.output == "out")
 
 
 def test_scan_after_pointwise_keeps_the_write_inside_its_reduce_loop():
@@ -236,20 +235,17 @@ def test_scan_after_pointwise_keeps_the_write_inside_its_reduce_loop():
     assert pinned_scan.schedule is not None and pinned_scan.place.is_mapped
     assert family_value(pinned_scan.knobs, "REDUCE") == "coop" and pinned_scan.knobs["WORK"] == "t4"
 
-    lowered = Pipeline.build(CUDA_PASSES).run(make_graph(), ctx=Context.from_target((8, 9)))
-    source = next(
-        node.op.kernel_source for node in lowered.nodes.values() if isinstance(node.op, CudaOp) and "out[" in node.op.kernel_source
-    )
-    lines = source.splitlines()
-    update, acc = next((i, m.group(1)) for i, line in enumerate(lines) if (m := re.match(r"\s*(\w+) \+= ", line)))
-    # The kernel body's normal form drops the observer's copy of the accumulator: the store reads the updated value.
-    write = next(i for i, line in enumerate(lines) if line.lstrip().startswith("out[") and line.rstrip().endswith(f" = {acc};"))
-    loop_open = max(i for i in range(update) if lines[i].lstrip().startswith("for ("))
-    loop_indent = len(lines[loop_open]) - len(lines[loop_open].lstrip())
-    loop_close = next(
-        i for i in range(update + 1, len(lines)) if lines[i].strip() == "}" and len(lines[i]) - len(lines[i].lstrip()) == loop_indent
-    )
-    assert update < write < loop_close, "the prefix store must execute after each accumulator update"
+    _, kernels = compile_with_kernels(make_graph(), ctx=Context.from_target((8, 9)))
+    kernel = next(kernel for kernel in kernels.values() if any(write.output == "out" for write in statements(kernel, Write)))
+    # The kernel body's normal form drops the observer's copy of the accumulator: the store reads the updated value,
+    # inside the loop that updates it.
+    stored = False
+    for loop in statements(kernel, Loop, StridedLoop):
+        steps = list(loop.body)
+        for update, fold in enumerate(steps):
+            if isinstance(fold, Accum) and fold.op.name == "add":
+                stored |= any(isinstance(s, Write) and s.output == "out" and tuple(s.values) == (fold.name,) for s in steps[update + 1 :])
+    assert stored, "the prefix store must execute after each accumulator update"
 
 
 def test_matmul():
