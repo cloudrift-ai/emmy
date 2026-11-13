@@ -135,28 +135,36 @@ def test_buffer_roles():
     assert len(compiled.outputs) == 1
 
 
-def test_softmax_emits_multiple_k_loops():
-    """Softmax emits separate K-loops: the online reduce (running max + the
-    rescaled running denominator, the twisted state-merge) then the per-element div —
-    two loops, not a single collapsed pass. (The online formulation folds max + sum in
-    one loop via the ``exp(x−m)`` twist, so the sum accumulates as a state-merge, not a
-    literal ``+=``.)"""
+def test_softmax_sweeps_k_twice():
+    """Softmax sweeps K twice: the online reduce (running max + the rescaled running
+    denominator, the twisted state-merge) then the per-element div — not a single
+    collapsed pass. (The online formulation folds max + sum in one sweep via the
+    ``exp(x−m)`` twist, so the sum accumulates as a state-merge, not a literal ``+=``.)
+    At K=8 the unroll passes write both sweeps out, so they are told apart by order:
+    every fold of the reduce stands ahead of every store of the output, and no loop
+    holds both."""
     with pinned_knobs({"PLACE": "fuse"}):
-        _, kernels = compile_with_kernels(_softmax_graph())
+        compiled, kernels = compile_with_kernels(_softmax_graph())
     # Find the softmax-bearing kernel (it folds a maximum).
     softmax = next((kernel for kernel in kernels.values() if "maximum" in operations(kernel)), None)
     assert softmax is not None, f"no kernel folds a maximum: {text(kernels)}"
-    loop_count = len(statements(softmax, Loop, StridedLoop))
-    assert loop_count >= 2, f"expected >= 2 K-loops, got {loop_count}\n{text(softmax)}"
+    order = statements(softmax)
+    folds = [at for at, stmt in enumerate(order) if isinstance(stmt, Accum)]
+    stores = [at for at, stmt in enumerate(order) if isinstance(stmt, Write) and stmt.output == compiled.outputs[0]]
+    assert folds and stores and folds[-1] < stores[0], f"the reduce must finish before the div stores\n{text(softmax)}"
+    for loop in statements(softmax, Loop, StridedLoop):
+        inner = list(loop.body.iter())
+        assert not (any(isinstance(s, Accum) for s in inner) and any(isinstance(s, Write) for s in inner)), text(softmax)
     assert operations(softmax) & {"exp", "exp_fast"}  # the softmax numerator / online-reduce normalizer
 
 
-def test_softmax_emits_per_element_store():
-    """Softmax output is per-element: the final div stores inside a K-loop."""
+def test_softmax_stores_every_element():
+    """Softmax output is per-element: each of a row's eight elements is stored as its
+    own value (the unroll passes write the K loop out, so the stores stand in its copies)."""
     compiled, kernels = compile_with_kernels(_softmax_graph())
     out_name = compiled.outputs[0]
-    stores = [write for loop in statements(kernels, Loop, StridedLoop) for write in loop.body.iter() if isinstance(write, Write)]
-    assert any(write.output == out_name for write in stores)
+    stored = {str(value) for write in statements(kernels, Write) if write.output == out_name for value in write.values}
+    assert len(stored) == 8, text(kernels)
 
 
 def test_chained_pointwise_single_kernel():
