@@ -61,9 +61,9 @@ pub struct Builder {
     defined_at: HashMap<Reg, usize>,
     /// The variable of each open scope that is a loop counting from zero by one, beside its table.
     counters: Vec<Option<Reg>>,
-    /// The 64-bit multiples of a loop's counter that addresses read, by counter and factor, each made when the
-    /// first address reads it.
-    wide: HashMap<(Reg, i64), Reg>,
+    /// The multiples of a loop's counter that addresses read, by counter, factor and bank (64 bits for a global
+    /// address, 32 for a shared one), each made when the first address reads it.
+    multiples_of: HashMap<(Reg, i64, Bank), Reg>,
     /// The registers an instruction may define again: an accumulator, a seeded state.
     states: HashSet<Reg>,
     multiples: HashMap<Reg, i64>,
@@ -333,17 +333,18 @@ impl Builder {
 
     pub fn close_loop(&mut self, open: Loop) -> Result<()> {
         self.leave(open.depth)?;
-        let mut wide: Vec<_> = self
-            .wide
+        let mut stepped: Vec<_> = self
+            .multiples_of
             .iter()
-            .filter(|((var, _), _)| *var == open.var)
+            .filter(|((var, _, _), _)| *var == open.var)
             .map(|(key, reg)| (*key, *reg))
             .collect();
-        wide.sort_by_key(|(_, reg)| reg.number);
-        for ((_, factor), reg) in wide {
-            self.wide.remove(&(open.var, factor));
-            let step = vec![reg.into(), Operand::Int(factor)];
-            self.emit(Inst::new(Opcode::Add, Ty::S64, vec![reg], step));
+        stepped.sort_by_key(|(_, reg)| (reg.bank, reg.number));
+        for (key, reg) in stepped {
+            self.multiples_of.remove(&key);
+            let ty = if key.2 == Bank::B64 { Ty::S64 } else { Ty::S32 };
+            let step = vec![reg.into(), Operand::Int(key.1)];
+            self.emit(Inst::new(Opcode::Add, ty, vec![reg], step));
         }
         self.emit(Inst::new(
             Opcode::Add,
@@ -374,31 +375,33 @@ impl Builder {
         self.counters.push(counter);
     }
 
-    /// The counter `var` of an open loop that counts from zero by one, times `factor`, as a 64-bit register that
-    /// steps by `factor` beside it: made ahead of the loop when an address first reads it. ptxas folds a term of it
-    /// into `[base + constant]` across the trips it unrolls, which it does not for the widening of the 32-bit
-    /// counter, since `var + 1` may wrap. Stepping the multiple itself, not a copy of the counter scaled in the
-    /// trip, is what lets ptxas issue every load of a trip it keeps rolled ahead of the arithmetic, as it does for
-    /// cicc's stepped pointer. `None` for any other register.
-    pub fn wide_counter(&mut self, var: Reg, factor: i64) -> Option<Reg> {
-        if let Some(wide) = self.wide.get(&(var, factor)) {
-            return Some(*wide);
+    /// The counter `var` of an open loop that counts from zero by one, times `factor`, as a register of `bank`
+    /// (`B64` for a global address, `B32` for a shared one) that steps by `factor` beside it: made ahead of the loop
+    /// when an address first reads it. ptxas folds a 64-bit term of it into `[base + constant]` across the trips it
+    /// unrolls, which it does not for the widening of the 32-bit counter, since `var + 1` may wrap. Stepping the
+    /// multiple itself, not the counter scaled in the trip, is what lets ptxas issue every load of a trip it keeps
+    /// rolled ahead of the arithmetic, into registers of their own, as it does for cicc's stepped pointers. `None`
+    /// for any other register.
+    pub fn counter_multiple(&mut self, var: Reg, factor: i64, bank: Bank) -> Option<Reg> {
+        if let Some(reg) = self.multiples_of.get(&(var, factor, bank)) {
+            return Some(*reg);
         }
         let at = self
             .counters
             .iter()
             .position(|counter| *counter == Some(var))?;
         let place = self.heads[at]?;
-        let wide = self.reg(Bank::B64);
+        let reg = self.reg(bank);
         for head in self.heads[at..].iter_mut().flatten() {
             *head += 1;
         }
-        let start = Inst::new(Opcode::Mov, Ty::U64, vec![wide], vec![Operand::Int(0)]);
+        let ty = if bank == Bank::B64 { Ty::U64 } else { Ty::U32 };
+        let start = Inst::new(Opcode::Mov, ty, vec![reg], vec![Operand::Int(0)]);
         self.items.insert(place, Item::Inst(start));
-        self.defined_at.insert(wide, at + 1);
-        self.multiples.insert(wide, factor.saturating_abs().max(1));
-        self.wide.insert((var, factor), wide);
-        Some(wide)
+        self.defined_at.insert(reg, at + 1);
+        self.multiples.insert(reg, factor.saturating_abs().max(1));
+        self.multiples_of.insert((var, factor, bank), reg);
+        Some(reg)
     }
 
     /// Drop the value table of the scope opened at `depth`: it must be the innermost open one.

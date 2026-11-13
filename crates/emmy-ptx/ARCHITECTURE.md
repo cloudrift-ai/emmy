@@ -173,6 +173,9 @@ Every instruction reaches the list through the `Builder`.
   trip: from the shifted copy ptxas issued the last load of a kept loop's trip into the registers of the first, still
   being read, and from the stepped multiple it issues every load of the trip ahead of the arithmetic, as for cicc's
   stepped pointer (`reduce/combine-l2-serial`, `-amax-serial`, `-mean-serial`: 10.4 to 7.1 us, nvcc's 6.5 to 7.1).
+  A shared address reads a 32-bit multiple the same way: from the shifted counter ptxas gave the 16 slab reads of
+  a trip of `qwen3emb/matmul-qproj-s512` three registers between them, 48 in the kernel, and from the multiple a
+  register each, 64, as for cicc's build (85 to 77 us on the dev box RTX 5090, nvcc's 72).
   There is no pointer bumping and no fused wide multiply-add; both measured slower in the hackathon entries.
 - **Floats.** Every instruction that rounds carries `.rn`, so ptxas fuses nothing on its own, and every f32
   instruction that takes it carries `.ftz` when the flush-to-zero decision is on. `fma` is written where the body says

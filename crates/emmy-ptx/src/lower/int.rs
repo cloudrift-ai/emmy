@@ -758,15 +758,19 @@ impl Lowerer {
             }
             let counted = val.op.reg().and_then(|reg| self.counted.get(&reg).copied());
             let mut counter = None;
-            if let Some((var, step, start)) = counted.filter(|_| wide) {
+            if let Some((var, step, start)) = counted {
                 // The axis is `step * counter + start`: the start's bytes go into the constant.
                 let bytes = start.checked_mul(scale).ok_or_else(|| overflow.clone())?;
                 let factor = step.checked_mul(scale).ok_or_else(|| overflow.clone())?;
-                counter = self.b.wide_counter(var, factor).map(|reg| (reg, bytes));
+                let bank = if wide { Bank::B64 } else { Bank::B32 };
+                counter = self
+                    .b
+                    .counter_multiple(var, factor, bank)
+                    .map(|reg| (reg, bytes));
             }
             let (scaled, at) = if let Some((counter, bytes)) = counter {
                 offset = offset.checked_add(bytes).ok_or_else(|| overflow.clone())?;
-                (counter.into(), Ty::S64)
+                (counter.into(), if wide { Ty::S64 } else { Ty::S32 })
             } else if wide {
                 (self.scaled(&val, scale), Ty::S64)
             } else {
