@@ -103,8 +103,42 @@ import pytest
 import torch
 import torch.nn.functional as F
 
+from emmy.compiler.ir.expression import Literal
+from emmy.compiler.ir.kernel.ir import (
+    CpAsyncCopy,
+    FragmentApply,
+    FragmentRepack,
+    FragmentRowReduce,
+    MmaSyncPtx,
+    TmaLoad,
+    TreeHalve,
+    WarpShuffle,
+)
+from emmy.compiler.ir.stmt import Accum, StridedLoop
 from emmy.compiler.pipeline.search.pins import pinned_knobs
-from tests.compiler.helpers import direct_classic_leaf, from_pretrained_or_skip, requires_cuda, requires_sm
+from tests.compiler.helpers import (
+    compile_with_kernels,
+    direct_classic_leaf,
+    from_pretrained_or_skip,
+    requires_cuda,
+    requires_sm,
+    statements,
+)
+
+
+def _operations(kernels) -> set[str]:
+    """The elementwise operations the kernels compute: in a value, as a fold's or a fragment statement's operation,
+    or inside a cross-thread combine."""
+    found: set[str] = set()
+    pending = statements(kernels)
+    while pending:
+        stmt = pending.pop()
+        found |= {node.operation.name for e in stmt.expressions() for node in e.subterms() if node.operation}
+        if isinstance(stmt, (Accum, FragmentApply, FragmentRowReduce)):
+            found.add(stmt.op.name)
+        if isinstance(stmt, (WarpShuffle, TreeHalve)):
+            pending.extend(stmt.combine_states)
+    return found
 
 
 class _Sdpa(torch.nn.Module):
@@ -143,22 +177,14 @@ class _Scaled(torch.nn.Module):
 
 
 def _trace(module, args, dynamic_shapes=None, *, direct: bool = False):
-    """Trace + compile ``module``; return ``(backend, compiled, graph, kernel_node_ids)``."""
+    """Trace + compile ``module``; return ``(backend, compiled, graph, its kernels)``, the kernels as the Kernel IR
+    each one's code was generated from, by node id."""
     from emmy.compiler.backend.cuda.backend import CudaBackend  # noqa: PLC0415
     from emmy.compiler.trace.torch import trace_module  # noqa: PLC0415
 
     graph = trace_module(module.cpu(), args, dynamic_shapes=dynamic_shapes)
-    backend = CudaBackend()
-    if direct:
-        from emmy.compiler.context import Context  # noqa: PLC0415
-        from emmy.compiler.pipeline import CUDA_PASSES, Pipeline  # noqa: PLC0415
-        from emmy.compiler.pipeline.pipeline import Run  # noqa: PLC0415
-
-        compiled, _ = Run(pipeline=Pipeline.build(CUDA_PASSES), ctx=Context.probe()).resolve(graph, direct_classic_leaf)
-    else:
-        compiled = backend.compile(graph)
-    kernels = [nid for nid in compiled.nodes if getattr(compiled.nodes[nid].op, "kernel_source", None)]
-    return backend, compiled, graph, kernels
+    compiled, kernels = compile_with_kernels(graph, decide=direct_classic_leaf if direct else None)
+    return CudaBackend(), compiled, graph, kernels
 
 
 def _pin_classic(monkeypatch, pins: dict[str, str]) -> None:
@@ -243,8 +269,8 @@ def test_scalar_flash_matches_torch(monkeypatch, variant):
         backend, compiled, _graph, kernels = _trace(module, args, direct=variant == "mask")
         assert kernels, f"{variant}{cfg}: no kernels"
         if variant == "plain" and cfg == _FLASH_VARIANTS["plain"][2][0]:
-            srcs = "\n".join(compiled.nodes[k].op.kernel_source for k in kernels)
-            assert "fmaxf" in srcs and "expf" in srcs, "the kernel set should carry the softmax (max + exp)"
+            ops = _operations(kernels)
+            assert "maximum" in ops and ops & {"exp", "exp_fast"}, "the kernel set should carry the softmax (max + exp)"
         md = _max_diff(backend, compiled, feed, ref)
         assert md < 1e-4, f"{variant}{cfg}: sdpa vs torch max_diff={md:.6e}"
 
@@ -265,8 +291,7 @@ def test_fused_sdpa_split_partition_merges_monoid_states(monkeypatch):
             return F.scaled_dot_product_attention(cuda["q"], cuda["k"], cuda["v"]).cpu().flatten().float().numpy()
 
     backend, compiled, _graph, kernels = _trace(_Sdpa(), (q, k, v))
-    src = "".join(compiled.nodes[nid].op.kernel_source for nid in kernels)
-    assert "__partial" in src and src.count("__global__") == 2
+    assert len(kernels) == 2 and any(nid.endswith("__partial") for nid in kernels)
     md = _max_diff(backend, compiled, feed, ref)
     assert md < 4e-3, f"split-K fused sdpa vs torch max_diff={md:.6e}"
 
@@ -293,7 +318,7 @@ def test_scalar_flash_dynamic_matches_torch(monkeypatch, variant):
         seed_args = (torch.randn(1, Hq, 16, D), torch.randn(1, Hkv, 16, D), torch.randn(1, Hkv, 16, D))
     backend, compiled, _graph, kernels = _trace(module_cls(), seed_args, dynamic_shapes=ds)
     assert kernels, f"dynamic {variant}: no kernels"
-    assert any("int seq_len" in compiled.nodes[k].op.kernel_source for k in kernels), "a dynamic kernel must carry the runtime seq_len arg"
+    assert any("seq_len" in compiled.nodes[k].op.runtime_args for k in kernels), "a dynamic kernel must carry the runtime seq_len arg"
 
     for s in (8, 16, 37):
         if variant == "mask":
@@ -390,12 +415,15 @@ def _chunk_kernel(module, args, dynamic_shapes=None, stage: str = ""):
     """Compile ``module`` on the pinned chunk row and assert the shape of what came out."""
     with pinned_knobs({**_CHUNK_ROW, "STAGE@map.1/twist": stage}):
         backend, compiled, _graph, kernels = _trace(module, args, dynamic_shapes=dynamic_shapes)
-    assert len(kernels) == 1, f"the chunk tier fuses the whole attention: {kernels}"
-    source = compiled.nodes[kernels[0]].op.kernel_source
-    assert source.count("emmy_mma_m16n8k16") >= 2, "both the score and the expectation reach mma.sync"
-    assert "emmy_c_to_a_f16" in source, "the weight reaches the expectation's A operand as a register repack"
-    assert "__shfl_xor_sync" in source, "the chunk's pivot is a per-row fold over the score's fragments"
-    return backend, compiled
+    assert len(kernels) == 1, f"the chunk tier fuses the whole attention: {list(kernels)}"
+    # The expectation's products read the weight repacked into their A operand; the score's read loaded operands.
+    repacked = {repack.frag for repack in statements(kernels, FragmentRepack) if repack.role == "a"}
+    products = [mma for mma in statements(kernels, MmaSyncPtx) if tuple(mma.shape) == (16, 8, 16)]
+    expectation = [mma for mma in products if mma.a_frag in repacked]
+    assert expectation and len(expectation) < len(products), "both the score and the expectation reach mma.sync"
+    assert repacked, "the weight reaches the expectation's A operand as a register repack"
+    assert statements(kernels, FragmentRowReduce), "the chunk's pivot is a per-row fold over the score's fragments"
+    return backend, compiled, kernels
 
 
 def _sdpa_ref(cuda: dict):
@@ -420,7 +448,7 @@ def test_chunk_tier_folds_the_carrier_on_tensor_cores(keys):
     k, v = (torch.randn(1, 2, keys, 64, dtype=torch.float16) for _ in range(2))
     feed = {"q": q.numpy(), "k": k.numpy(), "v": v.numpy()}
     cuda = {name: torch.from_numpy(array).cuda() for name, array in feed.items()}
-    backend, compiled = _chunk_kernel(_Sdpa(), (q, k, v))
+    backend, compiled, _ = _chunk_kernel(_Sdpa(), (q, k, v))
     assert _max_diff(backend, compiled, feed, _sdpa_ref(cuda)) < 1e-2
 
 
@@ -443,7 +471,7 @@ def test_chunk_tier_reads_a_query_whose_rows_stride_over_every_head():
     k, v = (torch.randn(1, 2, 128, 64, dtype=torch.float16) for _ in range(2))
     feed = {"q": q.numpy(), "k": k.numpy(), "v": v.numpy()}
     cuda = {name: torch.from_numpy(array).cuda() for name, array in feed.items()}
-    backend, compiled = _chunk_kernel(_SeqMajorQuery(), (q, k, v))
+    backend, compiled, _ = _chunk_kernel(_SeqMajorQuery(), (q, k, v))
 
     def ref():
         with torch.no_grad():
@@ -462,7 +490,7 @@ def test_chunk_tier_takes_a_symbolic_key_extent():
     kv = torch.export.Dim("kv", min=64, max=512)
     feed = {"q": q.numpy(), "k": k.numpy(), "v": v.numpy()}
     cuda = {name: torch.from_numpy(array).cuda() for name, array in feed.items()}
-    backend, compiled = _chunk_kernel(_Sdpa(), (q, k, v), dynamic_shapes={"q": {}, "k": {2: kv}, "v": {2: kv}})
+    backend, compiled, _ = _chunk_kernel(_Sdpa(), (q, k, v), dynamic_shapes={"q": {}, "k": {2: kv}, "v": {2: kv}})
     assert _max_diff(backend, compiled, feed, _sdpa_ref(cuda)) < 1e-2
 
 
@@ -491,10 +519,10 @@ def test_chunk_tier_stages_a_symbolic_key_extent(transport):
     kv = torch.export.Dim("kv", min=64, max=512)
     feed = {"q": q.numpy(), "k": k.numpy(), "v": v.numpy()}
     cuda = {name: torch.from_numpy(array).cuda() for name, array in feed.items()}
-    backend, compiled = _chunk_kernel(_Sdpa(), (q, k, v), dynamic_shapes={"q": {}, "k": {2: kv}, "v": {2: kv}}, stage=f"d1/{transport}")
-    source = next(compiled.nodes[n].op.kernel_source for n in compiled.nodes if getattr(compiled.nodes[n].op, "kernel_source", None))
-    issued = "cp.async.bulk.tensor" if transport == "smem-tma" else "cp.async.ca"
-    assert issued in source, f"the streamed value moves through {transport}"
+    dynamic = {"q": {}, "k": {2: kv}, "v": {2: kv}}
+    backend, compiled, kernels = _chunk_kernel(_Sdpa(), (q, k, v), dynamic_shapes=dynamic, stage=f"d1/{transport}")
+    copies = statements(kernels, TmaLoad if transport == "smem-tma" else CpAsyncCopy)
+    assert copies, f"the streamed value moves through {transport}"
     assert _max_diff(backend, compiled, feed, _sdpa_ref(cuda)) < 1e-2
 
 
@@ -515,10 +543,10 @@ def test_chunk_tier_skips_the_chunks_a_causal_band_masks(stage):
     q, k, v = (torch.randn(1, 2, 256, 64, dtype=torch.float16) for _ in range(3))
     with pinned_knobs({**_CHUNK_ROW, "STAGE@map.1/twist": stage}):
         backend, compiled, graph, kernels = _stamp_window(_Sdpa(), (q, k, v), window=64)
-    assert len(kernels) == 1, f"the chunk tier fuses the whole attention: {kernels}"
-    source = compiled.nodes[kernels[0]].op.kernel_source
-    loop = next(line.strip() for line in source.splitlines() if "for (int " in line and "__ck" in line)
-    assert "__ck_end" in loop and "__ck = 0" not in loop, loop
+    assert len(kernels) == 1, f"the chunk tier fuses the whole attention: {list(kernels)}"
+    # The chunk loop is bounded at both ends: it starts past zero and stops at a bound of its own.
+    loop = next(loop for loop in statements(kernels, StridedLoop) if "__ck" in loop.axis.name)
+    assert loop.end is not None and loop.start != Literal(0, "int"), loop
     out = _run_flash(backend, compiled, graph, (q, k, v))
     assert np.abs(out.astype(np.float32) - _banded_ref(q, k, v, 64)()).max() < 1e-2
 
@@ -549,10 +577,8 @@ def _stamp_window(module, args, window, dynamic_shapes=None):
     for n in graph.nodes.values():
         if isinstance(n.op, SdpaOp):
             n.op = replace(n.op, sliding_window=window, is_causal=True)
-    backend = CudaBackend()
-    compiled = backend.compile(graph)
-    kernels = [nid for nid in compiled.nodes if getattr(compiled.nodes[nid].op, "kernel_source", None)]
-    return backend, compiled, graph, kernels
+    compiled, kernels = compile_with_kernels(graph)
+    return CudaBackend(), compiled, graph, kernels
 
 
 def _banded_ref(q, k, v, window, extra_bias=None):

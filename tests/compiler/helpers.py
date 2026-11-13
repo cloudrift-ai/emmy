@@ -337,14 +337,15 @@ def render_typed(statements, ctx) -> list[str]:
     return render_body(explicit_conversions(Body(statements), buffers, native_f16_ops(), known), ctx)
 
 
-def compile_with_kernels(graph, *, ctx=None, passes=None, **run):
+def compile_with_kernels(graph, *, ctx=None, passes=None, decide=None, **run):
     """``graph`` compiled to CUDA ops, and the Kernel IR each kernel's code was generated from, by node id.
 
     A ``CudaOp`` holds its kernel's code, not the statements it was generated from. This runs the one compile a test
     would run (``passes``, the whole pipeline when omitted; ``ctx`` and ``run`` as ``Pipeline.run`` takes them; the
     pins in scope apply as they do there) and keeps each ``KernelOp`` the last lowering pass read: the grid decoded,
     every index flat, every type said. A check of a kernel's structure reads that body; only a check of how an
-    instruction is spelled reads the code."""
+    instruction is spelled reads the code. With ``decide`` the forks are resolved by it (``Run.resolve``) on the
+    live device's context, where ``Pipeline.run`` takes the greedy pick."""
     from emmy.compiler.ir.cuda import CudaOp
     from emmy.compiler.ir.kernel import KernelOp
     from emmy.compiler.pipeline import CUDA_PASSES, Pipeline
@@ -357,7 +358,14 @@ def compile_with_kernels(graph, *, ctx=None, passes=None, **run):
             if isinstance(e.replaced, KernelOp) and isinstance(e.node.op, CudaOp):
                 lowered.append((e.replaced, e.node.op))
 
-    compiled = Pipeline.build(passes or CUDA_PASSES).with_strategies(Recorder()).run(graph, ctx=ctx, **run)
+    pipeline = Pipeline.build(passes or CUDA_PASSES).with_strategies(Recorder())
+    if decide is None:
+        compiled = pipeline.run(graph, ctx=ctx, **run)
+    else:
+        from emmy.compiler.context import Context
+        from emmy.compiler.pipeline.pipeline import Run
+
+        compiled, _ = Run(pipeline=pipeline, ctx=ctx or Context.probe()).resolve(graph, decide)
     kernels = {}
     for node_id, node in compiled.nodes.items():
         if isinstance(node.op, CudaOp):

@@ -179,6 +179,7 @@ def test_fast_exp_policy_reaches_generated_fragment_epilogues(monkeypatch, fast_
                 ]
                 assert expected in ops and ("exp" if enabled else "exp_fast") not in ops
         compiled = Pipeline.build([FINAL_LOWERING_PASS]).run(lowered, ctx=ctx)
+    # CUDA spelling: moves to the PTX compiler's tests
     (source,) = [node.op.kernel_source for node in compiled.nodes.values() if isinstance(node.op, CudaOp)]
     assert ("__expf(" in source) == enabled
     assert "wgmma.mma_async" in source

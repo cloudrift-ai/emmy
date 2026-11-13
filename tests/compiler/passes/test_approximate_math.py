@@ -157,6 +157,7 @@ def _lowered(name: str, pins: dict) -> tuple[KernelOp, str]:
         lowered = Pipeline.build(KERNEL_PASSES).run(case.program(), ctx=ctx, db=None)
         (kernel,) = [node.op for node in lowered.nodes.values() if isinstance(node.op, KernelOp)]
         compiled = Pipeline.build([FINAL_LOWERING_PASS]).run(lowered, ctx=ctx)
+    # CUDA spelling: moves to the PTX compiler's tests
     (source,) = [node.op.kernel_source for node in compiled.nodes.values() if isinstance(node.op, CudaOp)]
     return kernel, source
 

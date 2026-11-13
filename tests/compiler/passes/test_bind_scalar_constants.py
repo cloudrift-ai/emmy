@@ -180,4 +180,5 @@ def test_scalar_binding_removes_only_its_cuda_argument(monkeypatch):
     (cuda,) = [node.op for node in lowered.nodes.values() if isinstance(node.op, CudaOp)]
     assert cuda.arg_order == ("x", "out")
     assert "constant[" not in cuda.kernel_source
+    # CUDA spelling: moves to the PTX compiler's tests
     assert "0.10000000149011612" in cuda.kernel_source

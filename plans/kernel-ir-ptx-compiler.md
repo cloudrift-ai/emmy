@@ -15,7 +15,8 @@ same reason (below).
 ## Status (2026-11-12)
 
 PR A is draft #1395. Steps 1 to 10 are done, each checked on the corpus's rendered CUDA. Steps 3 to 10 changed the
-text, the flags or the statements and ran the corpus at `correct` on the RTX 5090. No step ran the perf lane, the
+text, the flags or the statements and ran the corpus at `correct` on the RTX 5090. Step 11 is started: the helper is
+in and three of the 41 files that check structure on the text are converted (below). No step ran the perf lane, the
 whole suite or an sm_70 kernel on a V100 yet; they wait for the closing step.
 
 | Step | Commit | Corpus CUDA |
@@ -147,6 +148,29 @@ What step 10 found:
   address the lowering cannot read strides off, has `ldm = None`: the extent of the source's last dimension where the
   statement is compiled. The rule is stated once, on the field. `RegStore` keeps `ldm = 0` and `ldn = 0` for the same
   case, with `row_dim` and `col_dim`; it was not part of the split.
+
+Where step 11 stands:
+
+- **The count.** 59 test files hold 181 lines that read `kernel_source`. Read one by one: 119 check structure (41
+  files), 23 check how the CUDA text spells something (10 files), 39 are neither (a `CudaOp` built by hand for the
+  plan and launch tests, the is-a-kernel filter, source determinism, the kernel cache, the rendered-line budget). The
+  paged-buffer tests are spelling checks: Kernel IR indexes a paged buffer by dimension and the page split is the
+  renderer's.
+- **The helper** is `compile_with_kernels` in `tests/compiler/helpers.py`: it runs the compile the test would run and
+  keeps, per kernel node, the `KernelOp` the last lowering pass read, recorded as the pipeline rebinds the node to its
+  `CudaOp` (the `on_rebind` event). Nothing is stored on the op. `statements` lists a kernel's statements by type.
+- **Converted**: `e2e/test_matmul_coverage.py` (19 reads), `passes/test_nvfp4_staged.py` (14) and
+  `e2e/test_attention_coverage.py` (6). 80 structure reads in 38 files are left, the largest
+  `passes/test_nvfp4_w4a4.py`, `passes/test_chunk_position_mask.py`, `passes/test_batched_matvec_unit_row.py` (5
+  each) and `passes/test_register_carry.py`, `passes/test_shared_carry.py`, `passes/test_fp8_staged.py`,
+  `e2e/test_knob_pinning.py`, `e2e/test_fused_edge.py`, `backend/test_emit.py` (4 each).
+- **Marked**: every spelling read carries `# CUDA spelling: moves to the PTX compiler's tests` (29 comments in 12
+  files, the converted files' leftovers included), so one grep lists what PR B's crate tests take over.
+- **Text checks that could not fail.** A search for a helper's name matches its definition in the prelude, which a
+  kernel carries whether or not it calls the helper. The matmul coverage's "operands load gmem-direct" was one: three
+  of its six cases stage their operands (the stage is left to the prior there). The attention coverage's "both the
+  score and the expectation reach mma.sync", "the weight is a register repack" and "the pivot is a per-row fold" were
+  three more. Each is a statement check now. Expect more among the 80.
 
 ## End state
 
@@ -342,9 +366,9 @@ no restamp is expected. A row whose time moves is measured again in the closing 
     - `RegStore`: the packed pair stores of the m16n8 layout spelled as text, its epilogue program typed while it is
       printed, and `ldm = 0` / `ldn = 0` for a stride the buffer's shape gives;
     - one index per dimension on every fragment statement.
-11. **Tests read Kernel IR.** 59 test files hold 186 reads of the rendered source. A check of structure becomes a
-    check of Kernel IR statements now. A check of an instruction's spelling stays on the CUDA text until PR B replaces
-    it with a crate test.
+11. **Tests read Kernel IR.** 59 test files hold 181 reads of the rendered source. A check of structure becomes a
+    check of Kernel IR statements now (`compile_with_kernels`). A check of an instruction's spelling stays on the CUDA
+    text, marked, until PR B replaces it with a crate test. Status has the count and what is converted.
 12. **Closing.** The realization corpus and the perf lane on every held card, `make test` on a rental, then the
     `refresh-golden` skill for rows whose time moved, and both priors refit if a hardware golden changed.
 

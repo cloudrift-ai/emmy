@@ -86,6 +86,7 @@ def test_pointwise_emits_correct_source():
     compiled = CudaBackend().compile(_pointwise_add_graph())
     nodes = _cuda_nodes(compiled)
     assert len(nodes) == 1
+    # CUDA spelling: moves to the PTX compiler's tests
     source = nodes[0].op.kernel_source
     assert "threadIdx.x" in source
     assert "x[" in source and "y[" in source
@@ -102,6 +103,7 @@ def test_boolean_bitwise_not_lowers_from_graph_loop_to_logical_cuda():
     )
 
     compiled = CudaBackend().compile(loop_graph)
+    # CUDA spelling: moves to the PTX compiler's tests
     source = _cuda_nodes(compiled)[0].op.kernel_source
     assert "== 0.0f" in source
 

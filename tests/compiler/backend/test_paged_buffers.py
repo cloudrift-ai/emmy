@@ -93,6 +93,7 @@ def _kernels(compiled):
 
 
 def _signature(kernel) -> str:
+    # CUDA spelling: moves to the PTX compiler's tests (the page table as a kernel parameter)
     return re.search(r'extern "C" __global__[^{]*', kernel.kernel_source).group(0)
 
 
@@ -112,6 +113,7 @@ def test_paged_hint_reaches_the_kernel_abi(monkeypatch):
     for name in ("k", "v"):
         assert f"const float* const* {name}__pages" in signature, signature
         assert not re.search(rf"const float\* {name}\b", signature), signature
+        # CUDA spelling: moves to the PTX compiler's tests (the Kernel IR indexes a paged buffer by dimension)
         assert f"{name}__pages[" in kernel.kernel_source
     assert "k__pages" in kernel.arg_order and "k" not in kernel.arg_order
     # The table is a runtime contract of its own: a plan carrying one serializes as the paged format.
@@ -126,6 +128,7 @@ def test_unpaged_build_is_byte_identical_to_before(monkeypatch):
     monkeypatch.setenv("EMMY_REDUCE", "")
     (kernel,) = _kernels(_compile_read(paged=False))
 
+    # CUDA spelling: moves to the PTX compiler's tests
     assert "__pages" not in kernel.kernel_source
     assert kernel.arg_order == tuple(dict.fromkeys(kernel.arg_order))
     assert "k" in kernel.arg_order and "v" in kernel.arg_order
@@ -144,6 +147,7 @@ def test_a_paged_output_stored_over_its_cache_writes_through_the_table_at_its_in
     signature = _signature(kernel)
     assert f"float* const* {name}__pages" in signature, signature
     assert "const long long* __restrict__ past" in signature and not kernel.runtime_args, signature
+    # CUDA spelling: moves to the PTX compiler's tests (the page a store resolves from its index)
     page = kernel.kernel_source.split(f"{name}__pages[", 1)[1].split("]", 1)[0]
     assert f"/ {PAGE}" in page and "past" in kernel.kernel_source, page  # the page of a value computed from ``past``, not an axis
     assert f"{name}__pages" in kernel.arg_order and name not in kernel.arg_order
@@ -168,6 +172,7 @@ def test_one_page_buffer_resolves_its_base_once(monkeypatch):
     signature = _signature(kernel)
     for name in ("k", "v"):
         assert f"const float* const* {name}__pages" in signature, signature
+        # CUDA spelling: moves to the PTX compiler's tests (a one-page buffer's base, resolved once)
         assert f"const float* {name} = {name}__pages[0];" in kernel.kernel_source
     assert kernel.kernel_source.count("__pages[") == 2
 

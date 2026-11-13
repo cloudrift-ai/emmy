@@ -44,6 +44,7 @@ def test_f16_to_bf16_intermediate_rounds_before_multiply():
 
     backend = CudaBackend()
     compiled = backend.compile(graph)
+    # CUDA spelling: moves to the PTX compiler's tests
     sources = "\n".join(n.op.kernel_source for n in compiled.nodes.values() if hasattr(n.op, "kernel_source"))
     assert "__float2bfloat16" in sources
     actual, _ = backend.run(compiled, input_data=feed)
@@ -67,6 +68,7 @@ def test_bf16_runs_load_and_store_as_one_access(length, vector):
 
     backend = CudaBackend()
     compiled = backend.compile(graph)
+    # CUDA spelling: moves to the PTX compiler's tests
     sources = "\n".join(n.op.kernel_source for n in compiled.nodes.values() if hasattr(n.op, "kernel_source"))
     assert f"*reinterpret_cast<const {vector}*>(&x[" in sources and f"*reinterpret_cast<{vector}*>(&y[" in sources, sources
     actual, _ = backend.run(compiled, input_data=feed)
@@ -223,6 +225,7 @@ def test_fp16_elementwise_chain_cuda(monkeypatch, fast_math):
 
     cuda_nodes = [n for n in compiled.nodes.values() if isinstance(n.op, CudaOp)]
     assert cuda_nodes, "expected at least one CudaOp after lowering"
+    # CUDA spelling: moves to the PTX compiler's tests
     sources = "\n".join(n.op.kernel_source for n in cuda_nodes)
     assert "__half" in sources, f"expected __half in kernel sources, got:\n{sources}"
     assert "cuda_fp16.h" in sources, f"expected cuda_fp16.h include, got:\n{sources}"
@@ -261,6 +264,7 @@ def test_fp16_fallback_to_float_for_non_native_op():
     from emmy.compiler.ir.cuda import CudaOp
 
     compiled = CudaBackend().compile(Pipeline.build(LOOP_PASSES).run(_fp16_erf_graph()))
+    # CUDA spelling: moves to the PTX compiler's tests
     sources = "\n".join(n.op.kernel_source for n in compiled.nodes.values() if isinstance(n.op, CudaOp))
     # Signature stays __half; the fallback inserts __half2float on the
     # input and __float2half on the store, with f32 erff in between.
@@ -301,6 +305,7 @@ def test_fp16_reduction_uses_fp32_accumulator_on_cuda():
     from emmy.compiler.ir.cuda import CudaOp
 
     compiled = CudaBackend().compile(Pipeline.build(LOOP_PASSES).run(_fp16_sum_graph()))
+    # CUDA spelling: moves to the PTX compiler's tests
     sources = "\n".join(n.op.kernel_source for n in compiled.nodes.values() if isinstance(n.op, CudaOp))
     # Accumulator declared as float (f32 promotion); value converted at
     # the combine; final store back to __half.
@@ -396,6 +401,7 @@ def test_fp16_max_reduction_stays_in_fp16():
 
     be = CudaBackend()
     compiled = be.compile(g)
+    # CUDA spelling: moves to the PTX compiler's tests
     sources = "\n".join(n.op.kernel_source for n in compiled.nodes.values() if isinstance(n.op, CudaOp))
     # Accumulator declared as __half — selection ops don't need precision boost.
     assert "__half acc" in sources, f"expected fp16 accumulator for max, got:\n{sources}"
@@ -414,6 +420,7 @@ def test_f32_floor_renders_and_rounds_down():
     g.add_node(op=ElementwiseOp("floor"), inputs=["x"], output=Tensor("y", (1024,), dt.F32), node_id="y")
     g.inputs, g.outputs = ["x"], ["y"]
     compiled = CudaBackend().compile(Pipeline.build(LOOP_PASSES).run(g))
+    # CUDA spelling: moves to the PTX compiler's tests
     sources = "\n".join(n.op.kernel_source for n in compiled.nodes.values() if isinstance(n.op, CudaOp))
     assert "floorf" in sources, sources
 
