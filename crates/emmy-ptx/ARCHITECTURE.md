@@ -511,7 +511,8 @@ arrivals and waits for `sm_90` and `sm_120`, its start for `sm_80` too; `setmaxn
 Volta forms are listed for `sm_70` and assembled for `sm_80` there, and the eleven Volta kernels of the launch tests
 were assembled for `sm_70` at both levels with ptxas of CUDA 12.9 on a V100 host, where they were not launched. Every
 launch test passes at both levels on an RTX 5090 (`sm_120`: all but `wgmma`) and on an H100 (`sm_90`, ptxas of CUDA
-12.9: all but the block-scaled form). No `sm_80` or `sm_89` card ran them.
+12.9: all but the block-scaled form); the tensor-core and fragment launch tests also on an A100 (`sm_80`, ptxas of
+CUDA 12.9, all but the forms that need a later card). No `sm_89` card ran them.
 
 One m16n8k16 tile over three steps of K (two `ldmatrix` and one `mma.sync` a step, then four stores) is 38 machine
 instructions through this compiler and 40 through nvcc with the CUDA helpers, on `sm_120`: the same three products and
