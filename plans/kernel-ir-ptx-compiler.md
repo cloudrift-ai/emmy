@@ -529,15 +529,45 @@ lists which corpus cases still do. That fallback exists only inside the PR.
 
    Measured on the rented RTX 5090 (`87c6d1621`), two rounds per generator taking turns, against the lanes before
    these commits: through PTX, median 0.997, 2 of 104 cases past 5 us more than 5% slower
-   (`qwen3emb/matmul-qproj-s128` 1.06, `matmul/bf16-scalar-sync-d2-sm120` 1.06) and 22 faster, total 23.36 to 23.14 ms over the 213 cases; through
-   nvcc unchanged (median 1.000, total 22.89 to 22.90 ms). Between the two generators: median 1.003, 16 slower and 24
-   faster. What is left, by expected gain:
-   - Straight-line tensor-core kernels whose loads ptxas issues later than in cicc's build, with fewer registers
-     (`matmul/f16-mma-m128n128k132-f32-masked-k` 1.46x, 174 against 255 registers; the trans variant 1.34x;
-     `matmul/f16-symbolic-k-gmem` 1.58x; `matmul/f16-symbolic-batched-mk-greedy` 1.39x).
-   - `matmul/f16-scalar-register-tile` (1.22x), `attention/sdpa-hd256-f16acc-value-wide-row` (1.23x), the
-     symbolic ILP reductions (`combine-l2-ilp-symbolic`, `-amax-ilp-symbolic` 1.17 to 1.19x) and `scan/f32-cumsum-row`
-     (1.17x) run loops of the same instructions as cicc's build in another schedule; not explained.
+   (`qwen3emb/matmul-qproj-s128` 1.06, `matmul/bf16-scalar-sync-d2-sm120` 1.06) and 22 faster, total 23.36 to
+   23.14 ms over the 213 cases; through nvcc unchanged (median 1.000, total 22.89 to 22.90 ms). Between the two
+   generators: median 1.003, 16 slower and 24 faster.
+
+   *Fragment loads and the register count* (`54c95bb33`, `f62b3f77d`), each found by putting this compiler's PTX
+   beside cicc's for the same kernel and assembling transplants of one into the other:
+   - ptxas sizes a kernel's registers for more blocks on a multiprocessor than a small launch places there. Where
+     our code fits fewer registers it takes them, by reusing a fragment's registers for the next fragment's loads,
+     which then issue after the products that read the first: two trips to memory a step
+     (`matmul/f16-symbolic-k-gmem` 48 registers, 66 with `.minnctapersm 1`, 19.4 to 11.5 us on the dev box; the
+     masked-K `m128n128k132` products 174 and 255 registers, 9.5 to 6.6 us). cicc's PTX for the same kernels got
+     more registers without the directive (56 and 255). What moves ptxas's choice was not found; it is none of
+     these, each transplanted alone: the PTX version, `.maxntid` against `.reqntid`, parameter declarations and
+     `cvta`, `.nc`, `.u16` against `.b16`, predicated loads against cicc's branches around them, the packs late,
+     the K bound stepped, the grid wait's place, SSA registers, a block boundary between steps, and the register
+     use level (`-regUsageLevel` 10 left ours at 173). A launch of one wave (a static grid of no more blocks than
+     the card has multiprocessors) now states `.minnctapersm 1`. On every kernel the directive measured median
+     0.994 against the lanes before, 24 faster and 6 slower, the slower ones large grids
+     (`attention/sdpa-hd128-staged-value`, 2,048 blocks, 1.19x), which keep ptxas's choice.
+   - A fragment wholly past its clamp was a branch around its loads; the branch closed a block at each fragment's
+     packs, which waited on that fragment's loads before the next fragment's issued. The clamp's test is a guard of
+     each load now (`matmul/f16-symbolic-batched-mk-greedy` 57.2 to 37.7 us, cicc's build 46.5).
+
+   Measured on the rented RTX 5090 (`f62b3f77d`), two rounds per generator taking turns, against the lanes at
+   `87c6d1621`: through PTX, median 0.997, 24 of 102 cases past 5 us faster and 3 slower (`qwen3emb/matmul-add-oproj-s32`
+   and `-downproj-s32` 1.07, from faster than cicc's build to level with it; `fused/nvfp4-gate-up-requant-place-cut`
+   1.06), total 23.14 to 23.01 ms; through nvcc unchanged (median 0.999). Between the two generators: median 0.998,
+   11 slower and 32 faster; the slowest are the three below, the serial and atomic reductions (1.09 to 1.11) and
+   five cases at 1.05 to 1.07. What is left:
+   - `matmul/f16-scalar-register-tile` (1.22x): its row stages A through TMA and reads it a half at a time across
+     64 unrolled K steps; cicc merges each row's eight steps into one `ld.shared.v4` (208 `LDS.128` against our
+     1,664 `LDS.U16`) and ptxas does not. A widening of shared reads across unrolled copies, in Kernel IR.
+   - `attention/sdpa-hd256-f16acc-value-wide-row` (1.23x): the score scale and the mask bias are two
+     `FragmentApply` statements, a multiply into a fragment and an add of it, so the fusion rule, which takes a
+     multiply read once in its own scope, never sees them: no `fma` at all against cicc's 146, and 40 bytes of
+     spills against 8.
+   - `scan/f32-cumsum-row` (1.17x): its loop of eight trips is marked `nounroll`; cicc keeps it rolled too, but
+     unmarked ptxas writes it out and the case runs in 5.4 us against cicc's build's 10.7 on the dev box. The
+     four-trip bound of the unmarked loops is cicc's, and moving it needs a lane, `qwen3emb/sdpa-s32` first.
    - cicc unrolls a loop `118` leaves stepping a second time where its copies' vector loads make the body small
      (`reduce/cross-cta-sum-atomic`: 32 copies a trip in the CUDA text, 64 in cicc's PTX, more loads in flight).
      The case is level now, but the rule is not modelled; it belongs to `118` under the `UNROLL` knob.
