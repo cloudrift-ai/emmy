@@ -502,6 +502,21 @@ lists which corpus cases still do. That fallback exists only inside the PR.
    only, which is what cicc marked: marking the static ones too cost nvcc's build up to 1.6x where ptxas used to
    finish cicc's unrolling.
 
+   Measured on the rented RTX 5090, two rounds per generator taking turns, against the lanes before it: through
+   nvcc, median 1.001, 8 of 101 cases past 5 us more than 5% slower and 28 faster, total 20.8 to 13.4 ms; through
+   PTX, median 1.000, 10 slower and 30 faster, total 18.5 to 13.5 ms (the symbolic reductions 0.59, the f32
+   projections 0.40 to 0.46, `qwen3emb/sdpa-s32` 0.52). Between the two generators: median 1.015, 32 slower and 16
+   faster. What is left:
+   - The f32 matmuls over shared slabs got slower through nvcc too (1.10 to 1.32x, `qwen3emb/matmul-*`): cicc's
+     four copies were software-pipelined by ptxas when the loop counted `ne` to a constant, and it pipelines neither
+     cicc's stepping loop nor this compiler's. Through PTX they run at nvcc's new speed, `matmul-qproj-s512` 1.33x.
+   - A static loop kept rolled runs slower than cicc's kept loop of the same copies (the serial reductions 1.5 to
+     1.6x, `norm-weight-linear-f16-computed-b` 1.6x, `computed-a-nested-contraction-scalar` 1.4x): ptxas issues the
+     last load of a trip into the registers of the first, still being read. Unmarked, ptxas unrolls those in full
+     and they run at nvcc's speed, but the attention kernels then grow 5x (`sdpa-s32` 2.2x, `sdpa-s512` 1.36x slower).
+   - The softmax kernels (1.1 to 1.2x) take cicc's copies now; the rest of the gap is the exponential's sequence and
+     the division's subroutine.
+
 7. **The switch.** The fallback goes, and with it:
    - the Kernel IR renderers, the C++ helpers, `CudaRenderTarget`, the nvcc wrapper. The Loop IR runner keeps its C
      renderer for the shared statements.
