@@ -79,7 +79,8 @@ Grid(axes=(r in 0..100, c in 0..4), decode=((block_idx.x * 256 + thread_idx.x) /
 }
 
 /// The directives of a module: the PTX version the target needs, the thread bound, and one pointer parameter per
-/// buffer with the alignment of its elements, a 32-bit one per symbolic size.
+/// buffer with the alignment of its elements, a 32-bit one per symbolic size. A launch of one wave says that one
+/// block on each multiprocessor is enough.
 #[test]
 fn a_module_states_its_target_its_thread_bound_and_its_parameters() {
     let body = format!("{GRID}\n    f16 x = load a[i]\n    f16 o[i] = x");
@@ -99,6 +100,11 @@ fn a_module_states_its_target_its_thread_bound_and_its_parameters() {
     );
     assert!(text.contains("\t// f16 x = load a[i]\n"), "{text}");
     assert!(text.is_ascii());
+    let one_wave = Module {
+        single_wave: true,
+        ..module.clone()
+    };
+    assert!(print(&one_wave).contains(".maxntid 256, 1, 1\n.minnctapersm 1\n{"));
     let older = lowered(&body, params, Target { sm: 80 }, EXACT).unwrap();
     assert_eq!((older.version, older.target.as_str()), ((7, 8), "sm_80"));
     // A kernel waits for the grid launched ahead of it, first of all, on the targets that have the instruction.
@@ -1355,6 +1361,7 @@ fn module(items: Vec<Item>, alignment: HashMap<Reg, u32>) -> Module {
         params: vec![ParamDecl::Pointer { align: 4 }],
         shared: Vec::new(),
         max_threads: 64,
+        single_wave: false,
         registers: Bank::ALL.iter().map(|bank| (*bank, 4)).collect(),
         items: [vec![Item::Inst(load)], items, vec![Item::Inst(ret)]].concat(),
         alignment,

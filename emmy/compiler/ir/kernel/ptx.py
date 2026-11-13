@@ -27,11 +27,14 @@ def compile_kernel(
     compute_capability: tuple[int, int],
     fuse: bool,
     flush_to_zero: bool,
+    single_wave: bool = False,
 ) -> str:
     """The PTX text of ``kernel`` under ``interface`` for the card of ``compute_capability``, with the kernel's two
-    whole-kernel precision decisions: multiply-add fusion and flush to zero."""
+    whole-kernel precision decisions: multiply-add fusion and flush to zero. ``single_wave`` says the launch places at
+    most one block on each multiprocessor of the card."""
     major, minor = compute_capability
-    return compile_ptx(kernel.name, kernel.body, interface, sm=major * 10 + minor, fuse=fuse, ftz=flush_to_zero)
+    sm = major * 10 + minor
+    return compile_ptx(kernel.name, kernel.body, interface, sm=sm, fuse=fuse, ftz=flush_to_zero, single_wave=single_wave)
 
 
 __all__ = ["NoRule", "compile_kernel"]

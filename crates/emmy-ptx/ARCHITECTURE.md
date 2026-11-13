@@ -28,8 +28,10 @@ for, and for no other reason ("In the pipeline", below). Every kernel of the rea
   refuses the kernel, with the statement's text: an input the compiler does not take, or the verifier's finding,
   which is a bug of the compiler or of the pass that wrote the kernel.
 - `Kernel` is the entry name, the body and the `Interface`: the parameters in the launch's argument order, each
-  buffer with the alignment the launch gives it, the per-block thread bound, the shared-memory pool. `Interface` and
-  `Param` mirror the Python `ir/kernel/interface.py`, which computes them.
+  buffer with the alignment the launch gives it, the per-block thread bound, the shared-memory pool, and whether the
+  launch is one wave. `Interface` and `Param` mirror the Python `ir/kernel/interface.py`, which computes them; the
+  lowering says a launch is one wave where its grid is static and has no more blocks than the card has
+  multiprocessors, and passes that to `compile_ptx` beside the precision decisions.
 - The `emmy.emmy_ir` extension exports `compile_ptx`, so a body crosses from Python as the crate's own value, and
   `NoRule`, the exception of the first kind (a `NotImplementedError`); every other error is a `ValueError`.
   `emmy/compiler/ir/kernel/ptx.py` is the Python entry the lowering calls.
@@ -463,6 +465,17 @@ value matters or reads a subnormal from one.
 - **The register limit.** `SetMaxNReg` is one `setmaxnreg`, up or down.
 
 ## Targets
+
+The module's `.maxntid` is the interface's thread bound: without it ptxas keeps registers for 1,024 threads. A launch
+of one wave adds `.minnctapersm 1`. Without it ptxas sizes a kernel's registers for more blocks on a multiprocessor
+than such a launch places there, and where the code fits fewer registers it takes them: it reuses a fragment's
+registers for the next fragment's loads, which then issue after the products that read the first, a second trip to
+memory in each step (`matmul/f16-symbolic-k-gmem` 48 registers and 18.3 us, 66 and 10.9 with the directive; the
+masked-K `m128n128k132` products 174 and 8.7 us, 255 and 6.0). cicc's PTX for the same kernels got more registers
+without the directive; what in it moves ptxas's choice was not found (not the PTX version, the parameter
+declarations, `.nc`, the load types, predicates against branches around the loads, where the packs stand, SSA
+registers, or block boundaries). On every static grid of more blocks, ptxas keeps its own choice: there the
+occupancy pays (`attention/sdpa-hd128-staged-value`, 2,048 blocks, 1.19x slower with the directive).
 
 The module's `.target` is the card's compute capability, with the `a` suffix when the interface says the kernel needs
 the arch-specific instruction set. Its `.version` is the target's own (7.8 below `sm_100`, 8.7 from there), raised by

@@ -44,7 +44,7 @@ fn param(value: &Bound<'_, PyAny>) -> PyResult<Param> {
 /// compute capability `sm` (`120` for `sm_120`) and the kernel's two precision decisions. A statement or an operation
 /// with no rule raises `NoRule`; every other refusal is a `ValueError` that names what is wrong with the kernel.
 #[pyfunction]
-#[pyo3(signature = (name, body, interface, *, sm, fuse = false, ftz = false))]
+#[pyo3(signature = (name, body, interface, *, sm, fuse = false, ftz = false, single_wave = false))]
 pub fn compile_ptx(
     name: &str,
     body: &Bound<'_, PyAny>,
@@ -52,6 +52,7 @@ pub fn compile_ptx(
     sm: u32,
     fuse: bool,
     ftz: bool,
+    single_wave: bool,
 ) -> PyResult<String> {
     let body = PyBody::from_iterable(body)?;
     let params: PyResult<Vec<Param>> = interface
@@ -74,6 +75,7 @@ pub fn compile_ptx(
         shared_offsets,
         shared_pool_bytes: interface.getattr("shared_pool_bytes")?.extract()?,
         arch_specific: interface.getattr("arch_specific")?.extract()?,
+        single_wave,
     };
     let kernel = Kernel {
         name,

@@ -693,6 +693,10 @@ pub struct Module {
     pub shared: Vec<Shared>,
     /// The most threads a block launches with (`.maxntid`): without it ptxas reserves registers for 1,024.
     pub max_threads: u32,
+    /// Whether one block on each multiprocessor is all the launch has (`.minnctapersm 1`): ptxas then spends the
+    /// registers a thread can use. Without it ptxas keeps registers for blocks the launch never places, and
+    /// issues a fragment's loads later to stay under them.
+    pub single_wave: bool,
     /// How many registers each bank holds.
     pub registers: Vec<(Bank, u32)>,
     pub items: Vec<Item>,

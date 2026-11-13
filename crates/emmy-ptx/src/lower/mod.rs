@@ -289,6 +289,7 @@ pub(crate) fn lower(kernel: &Kernel, target: Target, precision: Precision) -> Re
         params,
         shared: lowerer.shared,
         max_threads: interface.threads,
+        single_wave: interface.single_wave,
         registers: code.registers,
         items: code.items,
         alignment: code.alignment,

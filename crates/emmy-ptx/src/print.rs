@@ -30,6 +30,9 @@ pub fn print(module: &Module) -> String {
     }
     out.push_str(")\n");
     let _ = writeln!(out, ".maxntid {}, 1, 1", module.max_threads);
+    if module.single_wave {
+        out.push_str(".minnctapersm 1\n");
+    }
     out.push_str("{\n");
     for (bank, count) in &module.registers {
         if *count > 0 {

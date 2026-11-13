@@ -49,7 +49,8 @@ pub struct Param {
 }
 
 /// What the launch and the code must agree on: the parameters in call order, the per-block thread bound, the
-/// shared-memory pool, and whether the kernel needs the arch-specific instruction set.
+/// shared-memory pool, whether the kernel needs the arch-specific instruction set, and whether its launch is one
+/// wave.
 #[derive(Clone, PartialEq, Debug, Default)]
 pub struct Interface {
     pub params: Vec<Param>,
@@ -60,6 +61,9 @@ pub struct Interface {
     /// The pool's size in bytes, 0 when the buffers are static arrays.
     pub shared_pool_bytes: u64,
     pub arch_specific: bool,
+    /// Whether the launch places at most one block on each multiprocessor: a static grid of no more blocks than
+    /// the card has multiprocessors.
+    pub single_wave: bool,
 }
 
 /// One kernel: its entry name, its body and its interface.

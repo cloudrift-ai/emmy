@@ -121,6 +121,20 @@ def rewrite(match: Match, root: Node, ctx) -> CudaOp | None:
     # access of a buffer that is one allocation holds one flat index, and no loop asks for unrolling.
     split_pages = [n for n, axis, page in paged if not spans_one_page(tensors[n].shape, axis, page)]
     check_input(kernel.body, {name: dtype.name for name, dtype in buffer_dtypes(kernel, tensors).items()}, split_pages)
+    # A cooperative tile fixes the per-CTA thread count (``coop · ∏block-cells``): one CTA
+    # per output-cell group, ``blockDim = block_threads``, ``gridDim = N / block_threads``
+    # (the decode groups ``block_threads`` consecutive cells per CTA). The scalar tier is one
+    # thread per cell over the fixed ``BLOCK_SIZE`` block. A warp-specialized producer band
+    # (``aux_threads``) widens ``blockDim`` only — the grid still covers the cells.
+    cells = grid_stmt.block_threads
+    if tile_is_static(grid_stmt):
+        n = tile_n_elements(grid_stmt)
+        grid = (((n + cells - 1) // cells,), (1,), (1,))
+    else:
+        # Symbolic grid (a dynamic free axis): ``ceil(∏extents / blockDim)`` CTAs, the symbolic
+        # factor resolved from ``sym_values`` at launch (the ``Expression`` grid factor).
+        grid = ((tile_n_dim(grid_stmt).ceil_div(cells).expression,), (1,), (1,))
+    block = ((cells + grid_stmt.aux_threads,), (1,), (1,))
     # The launch's argument order is the kernel's own parameter list (buffers, then the TMA descriptors bound to the
     # launch-encoded ``CUtensorMap`` device arrays); the symbolic ``int`` args are tail-appended in ``_launch``. A
     # paged operand binds its page TABLE, not the buffer: the name in ``arg_order`` is what the launcher looks up in
@@ -137,6 +151,8 @@ def rewrite(match: Match, root: Node, ctx) -> CudaOp | None:
                 compute_capability=ctx.compute_capability,
                 fuse=precision_pin(CONTRACT_FMA),
                 flush_to_zero=flush_to_zero,
+                # A static grid of no more blocks than the card has multiprocessors is one block on each.
+                single_wave=isinstance(grid[0][0], int) and grid[0][0] <= ctx.sm_count,
             )
         except ptx.NoRule:
             if code == config.KERNEL_CODE_PTX_ONLY:
@@ -154,20 +170,6 @@ def rewrite(match: Match, root: Node, ctx) -> CudaOp | None:
             flush_to_zero=flush_to_zero,
         )
 
-    # A cooperative tile fixes the per-CTA thread count (``coop · ∏block-cells``): one CTA
-    # per output-cell group, ``blockDim = block_threads``, ``gridDim = N / block_threads``
-    # (the decode groups ``block_threads`` consecutive cells per CTA). The scalar tier is one
-    # thread per cell over the fixed ``BLOCK_SIZE`` block. A warp-specialized producer band
-    # (``aux_threads``) widens ``blockDim`` only — the grid still covers the cells.
-    cells = grid_stmt.block_threads
-    if tile_is_static(grid_stmt):
-        n = tile_n_elements(grid_stmt)
-        grid = (((n + cells - 1) // cells,), (1,), (1,))
-    else:
-        # Symbolic grid (a dynamic free axis): ``ceil(∏extents / blockDim)`` CTAs, the symbolic
-        # factor resolved from ``sym_values`` at launch (the ``Expression`` grid factor).
-        grid = ((tile_n_dim(grid_stmt).ceil_div(cells).expression,), (1,), (1,))
-    block = ((cells + grid_stmt.aux_threads,), (1,), (1,))
     return CudaOp(
         kernel_source=source,
         kernel_name=name,
