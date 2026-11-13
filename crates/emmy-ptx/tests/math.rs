@@ -56,27 +56,25 @@ fn sequence(function: &str, operands: usize, precision: Precision) -> Vec<String
         .collect()
 }
 
-/// The exponential: the floor of the base-two exponent held to a normal float's, the remainder of the product
-/// taken with the rest of the constant, the hardware's power of two in its flushing form, and the scale through
-/// its bits.
+/// The exponential, as cicc writes `expf`: the floor of the base-two exponent held to a normal float's by a
+/// clamped product rounded down into a magic constant, the remainder of the product taken with the rest of the
+/// constant, the hardware's power of two in its flushing form, and the scale through the constant's bits.
 #[test]
 fn the_exponential_reduces_to_the_hardware_power_of_two() {
     assert_eq!(
         sequence("exp", 1, EXACT),
         [
-            "mul.rn.f32 %f1, %f0, 0f3FB8AA3B",
-            "cvt.rmi.f32.f32 %f2, %f1",
-            "max.f32 %f3, %f2, 0fC2FC0000",
-            "min.f32 %f4, %f3, 0f42FE0000",
-            "neg.f32 %f5, %f4",
-            "fma.rn.f32 %f6, %f0, 0f3FB8AA3B, %f5",
-            "fma.rn.f32 %f7, %f0, 0f32A57060, %f6",
-            "ex2.approx.ftz.f32 %f8, %f7",
-            "cvt.rzi.s32.f32 %r4, %f4",
-            "add.s32 %r5, %r4, 127",
-            "shl.b32 %r6, %r5, 23",
-            "mov.b32 %f9, %r6",
-            "mul.rn.f32 %f10, %f8, %f9",
+            "fma.rn.sat.f32 %f1, %f0, 0f3BBB989D, 0f3F000000",
+            "fma.rm.f32 %f2, %f1, 0f437C0000, 0f4B400001",
+            "add.rn.f32 %f3, %f2, 0fCB40007F",
+            "neg.f32 %f4, %f3",
+            "fma.rn.f32 %f5, %f0, 0f3FB8AA3B, %f4",
+            "fma.rn.f32 %f6, %f0, 0f32A57060, %f5",
+            "mov.b32 %r4, %f2",
+            "shl.b32 %r5, %r4, 23",
+            "mov.b32 %f7, %r5",
+            "ex2.approx.ftz.f32 %f8, %f6",
+            "mul.rn.f32 %f9, %f8, %f7",
         ]
     );
 }
@@ -221,11 +219,11 @@ fn the_flush_to_zero_decision_reaches_every_instruction_that_takes_it() {
     assert_eq!(
         exp[..5],
         [
-            "mul.rn.ftz.f32 %f1, %f0, 0f3FB8AA3B",
-            "cvt.rmi.ftz.f32.f32 %f2, %f1",
-            "max.ftz.f32 %f3, %f2, 0fC2FC0000",
-            "min.ftz.f32 %f4, %f3, 0f42FE0000",
-            "neg.ftz.f32 %f5, %f4",
+            "fma.rn.ftz.sat.f32 %f1, %f0, 0f3BBB989D, 0f3F000000",
+            "fma.rm.ftz.f32 %f2, %f1, 0f437C0000, 0f4B400001",
+            "add.rn.ftz.f32 %f3, %f2, 0fCB40007F",
+            "neg.ftz.f32 %f4, %f3",
+            "fma.rn.ftz.f32 %f5, %f0, 0f3FB8AA3B, %f4",
         ]
     );
     for function in ["log", "tanh", "erf"] {
@@ -334,7 +332,7 @@ fn a_function_computed_twice_is_written_once() {
     );
     let got = code(&body, A_O, EXACT);
     let count = |mnemonic: &str| got.iter().filter(|line| line.starts_with(mnemonic)).count();
-    assert_eq!((count("ex2.approx"), count("cvt.rmi")), (1, 1));
+    assert_eq!((count("ex2.approx"), count("fma.rm")), (1, 1));
 }
 
 /// A half operand computes in f32 and converts once, the same sequence on the widened value; a function no kernel

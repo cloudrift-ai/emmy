@@ -196,6 +196,9 @@ fn mnemonic(inst: &Inst) -> String {
     if inst.ftz {
         parts.push("ftz");
     }
+    if inst.sat {
+        parts.push("sat");
+    }
     parts.extend(memory);
     // A load or a store of several registers is one vector access of that many elements.
     let lanes = match inst.opcode {

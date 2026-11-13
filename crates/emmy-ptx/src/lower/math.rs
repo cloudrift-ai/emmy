@@ -59,6 +59,13 @@ pub(super) fn fast(op: Operation) -> Option<Fast> {
 /// `log2(e)` as the nearest f32, and what that leaves of it.
 const LOG2_E: f32 = std::f32::consts::LOG2_E;
 const LOG2_E_REST: f32 = (std::f64::consts::LOG2_E - LOG2_E as f64) as f32;
+/// `log2(e) / 252`, one step below the nearest f32, as cicc writes it.
+const EXP_COARSE: f32 = f32::from_bits(0x3bbb_989d);
+/// `1.5 * 2^23 + 1`: a float whose low bits hold an integer added to it, plus one, which with the unbias below is
+/// the exponent's bias of 127 less the 126 steps the clamped product starts below zero.
+const EXP_MAGIC: f32 = 12582913.0;
+/// Takes the magic constant and the bias back out: `-(1.5 * 2^23 + 127)`.
+const EXP_UNBIAS: f32 = -12583039.0;
 
 /// The smallest normal f32.
 const MIN_NORMAL: f32 = f32::MIN_POSITIVE;
@@ -233,6 +240,26 @@ impl Seq<'_> {
         self.value(inst, Bank::F32)
     }
 
+    /// `a * b + c` with the result clamped to `[0, 1]`.
+    fn saturated_fma(&mut self, a: V, b: impl Into<V>, c: impl Into<V>) -> V {
+        let operands = vec![a.into(), b.into().into(), c.into().into()];
+        let inst = self
+            .0
+            .float_inst(Opcode::Fma, VTy::F32, operands)
+            .saturating();
+        self.value(inst, Bank::F32)
+    }
+
+    /// `a * b + c` rounded towards minus infinity.
+    fn fma_down(&mut self, a: V, b: impl Into<V>, c: impl Into<V>) -> V {
+        let operands = vec![a.into(), b.into().into(), c.into().into()];
+        let inst = self
+            .0
+            .float_inst(Opcode::Fma, VTy::F32, operands)
+            .rounded(Round::Rm);
+        self.value(inst, Bank::F32)
+    }
+
     /// The hardware's approximation of `opcode`, flushing to zero when `ftz` says.
     fn approx<const N: usize>(&mut self, opcode: Opcode, operands: [V; N], ftz: bool) -> V {
         let operands = operands.into_iter().map(Operand::from).collect();
@@ -354,22 +381,24 @@ impl Seq<'_> {
         self.compare(Cmp::Ge, Ty::U32, below, 0x7f7f_ffff_i64)
     }
 
-    /// `e^x`. The exponent `k` is the floor of `x * log2(e)`, held to the exponents a normal f32 has; what is
-    /// left of the product, taken with the rest of the constant, goes through the hardware's power of two, which
-    /// is most accurate over `[0, 1)`; and `2^k` is written through its bits. Past either end `k` stays at its
-    /// bound and the hardware instruction carries the result to infinity, through the subnormals, and to zero. A
-    /// NaN leaves the clamp as a number and comes back through the fused multiply-add.
+    /// `e^x`, by the sequence cicc writes for CUDA's `expf`. The exponent `k` is the floor of `x * log2(e)`, taken
+    /// as `x * log2(e) / 252 + 1/2` clamped to `[0, 1]` and scaled back by 252, so it is held to the exponents a
+    /// normal f32 has without a comparison; its integer is formed in the low bits of a float by rounding down into a
+    /// magic constant, which also holds the bias, so `2^k` is those bits shifted into the exponent. What is left of the product, taken
+    /// with the rest of the constant, goes through the hardware's power of two, which carries the result past
+    /// either end of `k` to infinity, through the subnormals, and to zero. A NaN clamps to zero and comes back
+    /// through the fused multiply-adds.
     fn exp(&mut self, x: V) -> V {
-        let scaled = self.mul(x, LOG2_E);
-        let k = self.integral(scaled, Round::Rmi);
-        let k = self.max(k, -126.0);
-        let k = self.min(k, 127.0);
-        let minus_k = self.neg(k);
+        let coarse = self.saturated_fma(x, EXP_COARSE, 0.5);
+        let k = self.fma_down(coarse, 252.0, EXP_MAGIC);
+        let unbiased = self.add(k, EXP_UNBIAS);
+        let minus_k = self.neg(unbiased);
         let fraction = self.fma(x, LOG2_E, minus_k);
         let fraction = self.fma(x, LOG2_E_REST, fraction);
+        let bits = self.bits(k);
+        let scale = self.int(Opcode::Shl, bits, 23);
+        let scale = self.of_bits(scale);
         let power = self.hardware(Opcode::Ex2, fraction);
-        let exponent = self.truncated(k);
-        let scale = self.power_of_two(exponent);
         self.mul(power, scale)
     }
 

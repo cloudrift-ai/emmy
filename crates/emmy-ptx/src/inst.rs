@@ -178,6 +178,7 @@ impl Cmp {
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 pub enum Round {
     Rn,
+    Rm,
     Rni,
     Rzi,
     Rmi,
@@ -189,6 +190,7 @@ impl Round {
     pub fn text(self) -> &'static str {
         match self {
             Round::Rn => "rn",
+            Round::Rm => "rm",
             Round::Rni => "rni",
             Round::Rzi => "rzi",
             Round::Rmi => "rmi",
@@ -568,6 +570,8 @@ pub struct Inst {
     pub ty: Ty,
     pub round: Option<Round>,
     pub ftz: bool,
+    /// The result clamped to `[0, 1]`, a NaN to zero.
+    pub sat: bool,
     pub results: Vec<Reg>,
     pub operands: Vec<Operand>,
     pub guard: Option<Guard>,
@@ -580,6 +584,7 @@ impl Inst {
             ty,
             round: None,
             ftz: false,
+            sat: false,
             results,
             operands,
             guard: None,
@@ -593,6 +598,11 @@ impl Inst {
 
     pub fn flushing(mut self, ftz: bool) -> Inst {
         self.ftz = ftz;
+        self
+    }
+
+    pub fn saturating(mut self) -> Inst {
+        self.sat = true;
         self
     }
 

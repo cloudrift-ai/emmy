@@ -15,6 +15,7 @@ struct Key {
     ty: Ty,
     round: Option<Round>,
     ftz: bool,
+    sat: bool,
     operands: Vec<Operand>,
 }
 
@@ -152,6 +153,7 @@ impl Builder {
             ty: inst.ty,
             round: inst.round,
             ftz: inst.ftz,
+            sat: inst.sat,
             operands: inst.operands.clone(),
         };
         if keyed && let Some(reg) = self.tables.iter().rev().find_map(|table| table.get(&key)) {

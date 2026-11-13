@@ -246,11 +246,15 @@ function, with the special values the CUDA function gives. The polynomial coeffi
 these sequences, each the function it is fit to within a sixth of an f32's step; the reductions are the textbook
 ones.
 
-- **`exp`.** The exponent `k` is the floor of `x * log2(e)`, held to the exponents a normal float has. The rest of
-  the product, taken with the rest of the constant by two fused multiply-adds, lies in `[0, 1)`, where the
-  hardware's power of two (`ex2.approx`) is most accurate, and `2^k` is written through its bits. Past either end
-  `k` stays at its bound and the hardware instruction carries the result to infinity, through the subnormals, to
-  zero.
+- **`exp`.** The sequence cicc writes for CUDA's `expf`. The exponent `k` is the floor of `x * log2(e)`, taken as
+  `x * log2(e) / 252 + 1/2` clamped to `[0, 1]` by a saturating fused multiply-add and scaled back by 252, so it is
+  held to the exponents a normal float has without a comparison; it is formed in the low bits of a float by a fused
+  multiply-add rounded down into a magic constant that also holds the bias, and `2^k` is those bits shifted into the
+  exponent. The rest of the product, taken with the rest of the constant by two fused multiply-adds, goes through
+  the hardware's power of two (`ex2.approx`), which carries the result past either end of `k` to infinity, through
+  the subnormals, to zero. It gives the bits nvcc's `expf` gives on every f32 input; the sequence it replaced (a
+  floor, a clamp and a conversion of `k`) gave the same maximum error in three more machine instructions, which
+  `reduce/combine-softmax-*` paid for.
 - **`log`.** A subnormal is scaled into the normals. The float's bits less those of `2/3` hold the exponent `k`, and
   what is left is a mantissa `m` in `[2/3, 4/3)`, so `ln(m)` is near zero only where `k` is zero. The result is
   `k * ln(2) + ln(1 + f)` with `f = m - 1` exact and a polynomial of degree 10. Zero, a negative, an infinity and a
@@ -279,7 +283,7 @@ rounded result, which is never the larger number. The instruction counts are mac
 
 | Function | CUDA's bound | Maximum error | Inputs over 1 ulp | Furthest from nvcc's build | Instructions, nvcc's |
 | --- | --- | --- | --- | --- | --- |
-| `exp` | 2 ulp | 1.931 ulp at -13.899315 | 14,299,457 | 2 steps | 11, 10 |
+| `exp` | 2 ulp | 1.931 ulp at -13.899315 | 17,938,603 | the same bits | 10, 10 |
 | `log` | 1 ulp | 0.931 ulp at 2.6688592 | 0 | 1 step | 24, 26 |
 | `tanh` | 2 ulp | 1.367 ulp at 1.0126345 | 5,604 | 2 steps | 18, 17 |
 | `erf` | 2 ulp | 1.166 ulp at 1.0339911 | 788 | 2 steps | 21, 28 |
