@@ -1,5 +1,9 @@
 """CLI tests for ``emmy compile`` argument handling and ``--code``."""
 
+#: The card a compile that writes PTX names: the subprocess may see no device (the CPU lane hides it), and a kernel's
+#: PTX is written for a card.
+_TARGET = ("--target", "sm_120")
+
 
 def test_compile_code_torch_ir(run_cli):
     rc, stdout, stderr = run_cli("compile", "--code", "torch.nn.RMSNorm(2048)(torch.randn(1,32,2048))", "--ir", "torch")
@@ -38,6 +42,7 @@ def test_compile_code_saves_default_cuda_to_output(run_cli, tmp_path):
         "torch.nn.RMSNorm(64)(torch.randn(1, 8, 64))",
         "--output",
         str(out),
+        *_TARGET,
     )
     assert rc == 0, f"stderr: {stderr}"
     assert out.exists()
@@ -93,7 +98,7 @@ def test_compile_dump_dir_writes_rule_application_files(run_cli, tmp_path):
     import json
 
     dump = tmp_path / "dump"
-    rc, _stdout, stderr = run_cli("compile", "-c", "torch.nn.RMSNorm(64)(torch.randn(1,8,64))", "--dump-dir", str(dump))
+    rc, _stdout, stderr = run_cli("compile", "-c", "torch.nn.RMSNorm(64)(torch.randn(1,8,64))", "--dump-dir", str(dump), *_TARGET)
     assert rc == 0, f"stderr: {stderr}"
 
     # Per-pass graph dump is still produced.
@@ -152,6 +157,7 @@ def test_compile_dynamic_emits_runtime_arg(run_cli):
         "seq_len@x:1",
         "--ir",
         "ptx",
+        *_TARGET,
     )
     assert rc == 0, f"stderr: {stderr}"
     assert ".param .u32" in stdout, f"expected the ``seq_len`` parameter in the kernel's PTX, got:\n{stdout[:500]}"
@@ -181,7 +187,7 @@ def test_compile_golden_substring_resolves_dynamic(run_cli, monkeypatch):
     # Hide CUDA from the subprocess: --golden scopes to the live card's recordings,
     # so the name only resolves everywhere via the off-GPU multi-card union.
     monkeypatch.setenv("CUDA_VISIBLE_DEVICES", "")
-    rc, stdout, stderr = run_cli("compile", "--realization", "matmul.o_proj.h4096.dynM", "--ir", "ptx")
+    rc, stdout, stderr = run_cli("compile", "--realization", "matmul.o_proj.h4096.dynM", "--ir", "ptx", *_TARGET)
     assert rc == 0, f"stderr: {stderr}"
     assert ".param .u32" in stdout, f"expected the masked tile's ``seq_len`` parameter from the dynamic golden, got:\n{stdout[:500]}"
 
@@ -193,6 +199,6 @@ def test_compile_code_fp32_stat_free_cone_demotes(run_cli):
     compile, not IndexError on the empty enumeration (the branch regression: this snippet
     compiled at the fork point via pre-nodification demotion)."""
     snippet = "(torch.nn.functional.silu(torch.randn(64, 256)) * torch.randn(64, 256)) @ torch.randn(256, 128)"
-    rc, stdout, stderr = run_cli("compile", "--code", snippet, "--ir", "ptx")
+    rc, stdout, stderr = run_cli("compile", "--code", snippet, "--ir", "ptx", *_TARGET)
     assert rc == 0, f"stderr: {stderr}"
     assert ".visible .entry" in stdout, f"expected a kernel's PTX, got:\n{stdout[:500]}"

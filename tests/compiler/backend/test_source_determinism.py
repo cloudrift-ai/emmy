@@ -8,7 +8,7 @@ prebuilt-cache image impossible. Found on a real RTX 5090 release run: ~270 of ~
 serving kernels re-keyed per boot — a temp name of the code embedded ``id(self)``. The
 compile here runs in two SUBPROCESSES (fresh address space and hash seed — an
 in-process double compile cannot see this class of bug), off-GPU (CUDA hidden;
-code is generated without a device), and the traced pointwise add is pinned to an
+code is generated without a device, for a named card), and the traced pointwise add is pinned to an
 explicit ``f2`` register-strip schedule. The pin keeps coverage independent of
 deploy-policy and tune-database picks.
 """
@@ -21,7 +21,10 @@ import hashlib
 import torch
 from emmy.compiler.backend.cuda.backend import CudaBackend
 from emmy.compiler.pipeline.search.pins import pinned_knobs
+from emmy.compiler.target import set_target
 from emmy.compiler.trace.torch import trace_module
+
+set_target((12, 0))  # no device answers here, so the PTX names its card
 
 class M(torch.nn.Module):
     def forward(self, x):

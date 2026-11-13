@@ -7,9 +7,14 @@ import pytest
 
 from emmy.compiler.backend.cuda import ptxas
 from emmy.compiler.backend.plan import plan_from_dict, plan_from_graph, plan_to_dict
+from emmy.compiler.context import Context
+from emmy.compiler.graph import Graph, Tensor
+from emmy.compiler.ir.base import InputOp
 from emmy.compiler.ir.cuda import CudaOp
 from emmy.compiler.ir.cuda.ir import renamed
 from emmy.compiler.ir.kernel import ptx
+from emmy.compiler.ir.tensor.ir import ElementwiseOp
+from emmy.compiler.pipeline import CUDA_PASSES, Pipeline
 from tests.compiler.helpers import requires_cuda
 from tests.compiler.realization.helpers import CASES_DIR, load_case, lowered
 
@@ -30,6 +35,17 @@ def test_an_error_of_the_compiler_is_raised(monkeypatch):
     monkeypatch.setattr(ptx, "compile_kernel", broken)
     with pytest.raises(ptx.NoRule, match="no PTX rule for"):
         _sources(COVERED)
+
+
+def test_a_compile_with_no_card_asks_for_one():
+    """A context no device answered for and no target named has no card to write PTX for: the compile says to name
+    one, and writes no ``.target sm_0``."""
+    graph = Graph()
+    graph.add_node(op=InputOp(), inputs=[], output=Tensor("x", (64,)), node_id="x")
+    graph.add_node(op=ElementwiseOp("negative"), inputs=["x"], output=Tensor("y", (64,)), node_id="y")
+    graph.inputs, graph.outputs = ["x"], ["y"]
+    with pytest.raises(ValueError, match="no target was named; name one \\(--target sm_NN"):
+        Pipeline.build(CUDA_PASSES).run(graph, ctx=Context.from_target(ptx.NO_TARGET))
 
 
 def test_a_ptx_kernel_keeps_its_name_out_of_its_identity_and_round_trips_in_a_plan():

@@ -14,6 +14,8 @@ import pytest
 import torch
 import yaml
 
+from emmy import gpu
+
 # Cross-process GPU lock for CUDA tests. Set on conftest import so every
 # xdist worker (and any subprocess it spawns) coordinates on the same
 # path. With this set, ``CudaBackend.run`` (via
@@ -36,6 +38,10 @@ os.environ.setdefault("EMMY_GPU_LOCK", f"/tmp/emmy-gpu-{os.getuid()}.lock")
 # whichever card the runner happened to hold. Hidden, every CPU lane features the default card.
 if not torch.cuda.is_available():
     os.environ["CUDA_VISIBLE_DEVICES"] = ""
+
+# A kernel's PTX is written for a card, and with no device to answer a compile has none unless one is named: the CPU
+# lane names the card it features, as ``--target`` would. ``None`` where a device answers.
+_LANE_TARGET = None if torch.cuda.is_available() else gpu.DEFAULT_GPU.compute_capability
 
 # Emmy's CPU-parallel work (a cold-pool draw, a dataset export) runs a process per core by default. The suite
 # already runs a worker per core, so a test runs it in its own process instead; the results are the same either way.
@@ -140,14 +146,15 @@ def _isolate_offline_file(monkeypatch):
 
 @pytest.fixture(autouse=True)
 def _clear_target_override():
-    """Clear the compile-target override after every test. A CLI test that passes ``--target sm_NN`` installs it for
-    the process (``emmy.compiler.target.set_target``), and a later test in the same xdist worker would then compile for
-    that card instead of the probed one: the carried-state fork offers its register arm on sm_89 and, with no prior to
-    rank the fork, a greedy compile took it where the classic serial form was expected."""
-    yield
+    """Reset the compile target to the lane's around every test. A CLI test that passes ``--target sm_NN`` installs
+    it for the process (``emmy.compiler.target.set_target``), and a later test in the same xdist worker would then
+    compile for that card instead of the probed one: the carried-state fork offers its register arm on sm_89 and, with
+    no prior to rank the fork, a greedy compile took it where the classic serial form was expected."""
     from emmy.compiler.target import set_target  # noqa: PLC0415
 
-    set_target(None)
+    set_target(_LANE_TARGET)
+    yield
+    set_target(_LANE_TARGET)
 
 
 @pytest.fixture(autouse=True)
