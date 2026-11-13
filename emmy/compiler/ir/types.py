@@ -6,7 +6,8 @@ Two steps, both pure ``Body -> Body`` and deciding nothing:
   lowering runs it early (``030_stamp_types``), so the passes after it read dtypes off the statements.
 - :func:`explicit_conversions` leaves a code generator nothing to work out. Every operation takes its operands at the
   dtype it computes at and yields that dtype; a value read at another dtype is converted by a definition of its own,
-  ``name = (dtype)source``; a write stores a value of its buffer's element type. Which dtype an operation computes at is
+  ``name = (dtype)source``; a write stores a value of its buffer's element type; a comparison defines a truth value
+  (``bool``), converted once where it is declared another dtype. Which dtype an operation computes at is
   decided here and nowhere else: natively where the target has the operation at the result's dtype and every operand
   is already there, over integers where every operand is one, else in f32 with the result converted once.
 
@@ -19,7 +20,7 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass, field
 
-from emmy.compiler.dtype import F16, F32, I32, INTEGER_NAMES, DataType
+from emmy.compiler.dtype import BOOL, F16, F32, I32, INTEGER_NAMES, DataType
 from emmy.compiler.dtype import get as dtype_get
 from emmy.compiler.ir.expression import CastExpression, Expression, Literal, TernaryExpression, Var, promoted_dtype
 from emmy.compiler.ir.stmt import Accum, Assign, Body, Carry, Init, Let, Load, Pre, Select, SelectBranch, Statement, Write, dtype_promote
@@ -43,9 +44,12 @@ INTEGER_OPS = frozenset(
     }
 )
 
+#: The comparisons: whatever their operands compute at, each yields a truth value.
+_COMPARISONS = frozenset({"equal", "not_equal", "greater", "less", "greater_equal", "less_equal"})
+
 #: The operations with no integer form that C spells as an operator, so over integer operands alone the generated code
 #: computes them in integers (a comparison of two indices, an index quotient) and converts the result.
-_INTEGER_OPERATORS = frozenset({"equal", "not_equal", "greater", "less", "greater_equal", "less_equal", "divide", "where"})
+_INTEGER_OPERATORS = _COMPARISONS | {"divide", "where"}
 
 
 #: The operations that yield their operand: a copy, and the fp8 casts, whose value is the conversion of the operand.
@@ -406,6 +410,9 @@ class _Conversions:
         if op.name == "bitcast":
             return value  # reads its operand's bits at whatever dtype holds them
         typed, compute = self.operation(name, value, result, conversions, out)
+        if op.name in _COMPARISONS:
+            # A truth value, declared another dtype: the comparison is a definition of its own, converted once.
+            return typed if result == BOOL else CastExpression(result.name, Var(self.define(f"{name}__bool", "", typed, BOOL, out)))
         if compute == result or isinstance(typed, CastExpression):
             return typed
         return CastExpression(result.name, Var(self.define(f"{name}__{compute.name}", "", typed, compute, out)))

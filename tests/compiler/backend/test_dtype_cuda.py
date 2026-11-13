@@ -435,3 +435,17 @@ def test_f32_floor_renders_and_rounds_down():
     x_data = (np.random.default_rng(2).standard_normal(1024) * 8).astype(np.float32)
     result, _ = CudaBackend().run(compiled, input_data={"x": x_data})
     np.testing.assert_array_equal(next(iter(result.outputs.values())).reshape(-1), np.floor(x_data))
+
+
+def test_a_comparison_declared_a_float_converts_its_truth_value():
+    """A comparison yields a truth value whatever its operands compute at: declared f32 (a mask the frontend keeps as a
+    number), it is a definition of its own at ``bool``, converted once, and the type check holds the two apart."""
+    from emmy.compiler.ir.stmt import Body, check_types, parse_body, pretty_body
+    from emmy.compiler.ir.types import explicit_conversions
+    from emmy.compiler.target import native_f16_ops
+
+    body = explicit_conversions(Body(parse_body("f16 a = load A[i]\nf32 m = a < 0.0")), {"A": dt.F16}, native_f16_ops())
+    assert list(pretty_body(body)) == ["f16 a = load A[i]", "f32 a__f32 = (f32)a", "bool m__bool = a__f32 < 0.0", "f32 m = (f32)m__bool"]
+    check_types(body, {"A": "f16"})
+    with pytest.raises(TypeError, match="a comparison defines a f32 value"):
+        check_types(Body(parse_body("f32 a = load A[i]\nf32 m = a < 0.0")), {"A": "f32"})

@@ -254,6 +254,19 @@ impl Operation {
             .find(|op| op.infix() == Some(text))
     }
 
+    /// Whether the operation compares its two operands: it yields a truth value, whatever they compute at.
+    pub fn is_comparison(self) -> bool {
+        matches!(
+            self,
+            Operation::Less
+                | Operation::LessEqual
+                | Operation::Greater
+                | Operation::GreaterEqual
+                | Operation::Equal
+                | Operation::NotEqual
+        )
+    }
+
     pub fn is_division(self) -> bool {
         matches!(self, Operation::Divide | Operation::FloorDivide)
     }

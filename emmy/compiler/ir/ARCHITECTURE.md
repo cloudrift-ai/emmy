@@ -657,7 +657,8 @@ where the target has the operation there (`target.native_f16_ops`) and every ope
 every operand is one, else in f32 with the result converted once. A value read at another dtype gets a definition
 of its own, `name = (dtype)source`, a `CastExpression` whose target is the dtype's name; a `Write`, a `Carry`, an
 `Accum` and the branches of a `Select` read names already at their dtype, so `Write.value_dtype` is also the
-buffer's element type. A literal operand is spelled at its operation's dtype. A name the body only reads (an axis, a
+buffer's element type. A comparison defines a truth value (`bool`): declared another dtype, a mask kept as a number,
+it is converted once. A literal operand is spelled at its operation's dtype. A name the body only reads (an axis, a
 symbolic size, a thread coordinate) is an integer. The nodes of one affine region compute at one dtype and stay one
 definition. `check_types` (the crate's `types` module, exported by the statement package) is the same property as a
 check that names the first statement leaving a type or a conversion out. A `FragmentLoad` says the element type of

@@ -204,6 +204,20 @@ impl Scope<'_> {
             Expr::FlatIndex(..) | Expr::Builtin(_) => Ok(()),
             // A reinterpretation reads its operand's bits at whatever dtype holds them.
             Expr::Apply(..) if matches!(value.operation(), Some((Operation::Bitcast, _))) => Ok(()),
+            // A comparison defines a truth value; its operands compute at one dtype, the first named one's.
+            Expr::Apply(_, operands)
+                if value.operation().is_some_and(|(op, _)| op.is_comparison()) =>
+            {
+                if dtype != DType::Bool {
+                    return Err(format!("a comparison defines a {dtype} value"));
+                }
+                match operands.iter().find_map(|operand| operand.as_var()) {
+                    Some(name) => operands
+                        .iter()
+                        .try_for_each(|operand| self.operand(operand, self.dtype(name))),
+                    None => Ok(()),
+                }
+            }
             _ => self.operand(value, dtype),
         }
     }
@@ -299,6 +313,18 @@ mod tests {
         assert!(
             store.to_string().contains("into the f16 buffer O"),
             "{store}"
+        );
+    }
+
+    #[test]
+    fn a_comparison_defines_a_truth_value() {
+        check("f16 a = load A[i]\nbool c = a < 1.0\nf32 m = (f32)c").unwrap();
+        let implied = check("f32 a = (f32)i\nf32 m = a < 1.0").unwrap_err();
+        assert!(
+            implied
+                .to_string()
+                .contains("a comparison defines a f32 value"),
+            "{implied}"
         );
     }
 
