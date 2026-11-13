@@ -673,6 +673,7 @@ def test_input_spelling_reaches_cuda_source_without_format_ir():
     from emmy.serving.gen_runner import _bind_plan_constants
 
     assert set(_bind_plan_constants(plan, {}, cache=None)) == set(plan.weights)
+    # CUDA spelling: moves to the PTX compiler's tests
     source = "\n".join(op.kernel_source for op in cuda)
     assert "emmy_bitcast" in source and "#include <cuda_fp16.h>" in source
     for spelling in (" % ", " << ", " >> ", " & ", " | ", " ^ "):

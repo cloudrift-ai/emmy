@@ -24,8 +24,16 @@ from emmy.compiler.dim import Dim
 from emmy.compiler.graph import Graph, Tensor
 from emmy.compiler.ir.base import InputOp
 from emmy.compiler.ir.frontend.ir import LinearOp, MatmulOp, ReshapeOp, RmsNormOp, SdpaOp, TransposeOp
+from emmy.compiler.ir.kernel.ir import CpAsyncCopy, LdmatrixLoad, MbarrierWait, MmaSyncPtx, TmaLoad
+from emmy.compiler.ir.stmt import Load, StridedLoop, Write
 from emmy.compiler.ir.tensor.ir import ElementwiseOp
-from tests.compiler.helpers import requires_cuda, requires_sm, requires_sm90
+from tests.compiler.helpers import compile_with_kernels, requires_cuda, requires_sm, requires_sm90, statements
+
+
+def _mma(kernels) -> bool:
+    """Whether a kernel of ``kernels`` (the kernels of a compile, or one) holds a tensor-core product."""
+    return bool(statements(kernels, MmaSyncPtx))
+
 
 F16 = _dt.get("f16")
 _M, _K, _N = 32, 64, 32  # M != K so the row / col broadcasts are unambiguous
@@ -67,10 +75,10 @@ def test_interleaved_weight_channels_use_gathers_before_mma(stage, channels, col
     graph.inputs, graph.outputs = ["a", "b"], ["out" if channels == 2 else "out0"]
     backend = CudaBackend()
     with pinned_knobs({"PLACE": "fuse", "TILE": _WARP_TILE, "WORK": _WARP_WORK, "STAGE": stage, "REDUCE": ""}):
-        compiled = backend.compile(graph)
-    sources = [node.op.kernel_source for node in compiled.nodes.values() if hasattr(node.op, "kernel_source")]
-    assert len(sources) == 1
-    assert "emmy_cp_async_cg(&_b" not in sources[0], "a contiguous byte copy cannot gather alternate weight columns"
+        compiled, kernels = compile_with_kernels(graph)
+    assert len(kernels) == 1
+    copied = [copy.smem for copy in statements(kernels, CpAsyncCopy) if copy.smem.startswith("_b")]
+    assert not copied, "a contiguous byte copy cannot gather alternate weight columns"
     rng = np.random.default_rng(0)
     arrays = {name: (rng.standard_normal(shape) * 0.1).astype(np.float16) for name, shape in (("a", (32, 64)), ("b", (64, 2 * columns)))}
     actual = backend.run(compiled, input_data=arrays)[0].outputs
@@ -125,14 +133,13 @@ _PRODUCER_REFS = {
 }
 
 
-def _compile_run(g: Graph, ins: dict) -> tuple[np.ndarray, list[str]]:
+def _compile_run(g: Graph, ins: dict):
+    """Compile and run ``g``: ``(output, compiled graph, its kernels)``, the kernels as Kernel IR by node id."""
     from emmy.compiler.backend.cuda.backend import CudaBackend  # noqa: PLC0415
 
-    be = CudaBackend()
-    compiled = be.compile(g)
-    srcs = [n.op.kernel_source for n in compiled.nodes.values() if getattr(n.op, "kernel_source", None)]
-    got = list(be.run(compiled, input_data=ins)[0].outputs.values())[0]
-    return np.asarray(got), srcs
+    compiled, kernels = compile_with_kernels(g)
+    got = list(CudaBackend().run(compiled, input_data=ins)[0].outputs.values())[0]
+    return np.asarray(got), compiled, kernels
 
 
 @requires_cuda
@@ -153,19 +160,19 @@ def test_fused_map_matmul(tier, producer, monkeypatch):
 
     rng = np.random.default_rng(0)
     ins = {nid: (rng.standard_normal(tuple(d.as_static() for d in g.nodes[nid].output.shape)) * 0.3).astype(np.float16) for nid in g.inputs}
-    got, srcs = _compile_run(g, ins)
-    # The invariant is that the producer cone is FUSED — no kernel signature carries a
+    got, compiled, kernels = _compile_run(g, ins)
+    # The invariant is that the producer cone is FUSED — no kernel's parameter list carries a
     # materialized intermediate: neither the graph's own ``xn`` buffer nor a cut workspace
     # (``020_cut_edge``'s ``<out>__cone`` / ``<out>__stat`` — a cut realization materializes the
     # cone under those names, so a name-anchored ``xn`` check alone would miss it). Kernel COUNT
     # is not the invariant: a stat-free cone binds as a computed-A bilinear ``Fold``, which
     # legitimately offers split-K REDUCE rows, and a chosen one emits a ``__partial`` + finalize
     # pair that still carries the cone inline.
-    sigs = [s.split("{")[0] for s in srcs]
-    leaked = [m for m in ("xn", "__cone", "__stat") if any(m in sig for sig in sigs)]
+    sigs = [compiled.nodes[nid].op.arg_order for nid in kernels]
+    leaked = [m for m in ("xn", "__cone", "__stat") if any(m in name for sig in sigs for name in sig)]
     assert not leaked, f"{producer}/{tier}: the cone round-tripped through gmem ({leaked}): {sigs}"
     if tier == "warp":
-        assert any("emmy_mma" in s for s in srcs), f"{producer}/warp: the pinned warp tier must engage on the fused matmul"
+        assert _mma(kernels), f"{producer}/warp: the pinned warp tier must engage on the fused matmul"
     f32 = {k: v.astype(np.float32) for k, v in ins.items()}
     ref = _PRODUCER_REFS[producer](f32) @ f32["w"]
     np.testing.assert_allclose(got.reshape(_M, _N).astype(np.float32), ref, atol=0.1, rtol=2e-2)
@@ -204,10 +211,10 @@ def test_fused_rmsnorm_linear(tier, monkeypatch):
         "nw": (rng.standard_normal((H,)) * 0.3).astype(np.float16),
         "wg": (rng.standard_normal((inter, H)) * 0.1).astype(np.float16),
     }
-    got, srcs = _compile_run(g, ins)
-    assert len(srcs) == 1, f"the fused norm→linear must be ONE kernel, got {len(srcs)}"
+    got, _, kernels = _compile_run(g, ins)
+    assert len(kernels) == 1, f"the fused norm→linear must be ONE kernel, got {len(kernels)}"
     if tier == "warp":
-        assert "emmy_mma" in srcs[0], "warp: the pinned mma tier must engage on the fused matmul"
+        assert _mma(kernels), "warp: the pinned mma tier must engage on the fused matmul"
     x, nw, wg = (ins[k].astype(np.float32) for k in ("x", "nw", "wg"))
     rms = x[0] * (1.0 / np.sqrt((x[0] ** 2).mean(axis=-1, keepdims=True) + 1e-6)) * nw
     # The fp16 fused-prologue path carries a few % relative error on large elements (cooperative
@@ -236,10 +243,10 @@ def _rmsnorm_linear_check(g: Graph, S: int, H: int, inter: int, *, want_mma: boo
         "nw": (rng.standard_normal((H,)) * 0.3).astype(np.float16),
         "wg": (rng.standard_normal((inter, H)) * 0.1).astype(np.float16),
     }
-    got, srcs = _compile_run(g, ins)
-    assert len(srcs) in kernels, f"the fused norm→linear must be {kernels} kernel(s), got {len(srcs)}"
+    got, _, lowered = _compile_run(g, ins)
+    assert len(lowered) in kernels, f"the fused norm→linear must be {kernels} kernel(s), got {len(lowered)}"
     if want_mma:
-        assert any("emmy_mma" in s for s in srcs), "the pinned mma tier must engage on the fused matmul"
+        assert _mma(lowered), "the pinned mma tier must engage on the fused matmul"
     x, nw, wg = (ins[k].astype(np.float32) for k in ("x", "nw", "wg"))
     rms = x[0] * (1.0 / np.sqrt((x[0] ** 2).mean(axis=-1, keepdims=True) + 1e-6)) * nw
     np.testing.assert_allclose(got.reshape(S, inter).astype(np.float32), rms @ wg.T, atol=0.5, rtol=0.1)
@@ -284,9 +291,10 @@ def test_fused_sync_fill_slab_swizzle(tile, work, monkeypatch):
         "nw": (rng.standard_normal((H,)) * 0.3).astype(np.float16),
         "wg": (rng.standard_normal((inter, H)) * 0.1).astype(np.float16),
     }
-    got, srcs = _compile_run(g, ins)
-    assert len(srcs) == 1 and "emmy_mma" in srcs[0]
-    assert "emmy_swizzle" in srcs[0], "the sync compute-fill must swizzle its slabs (fill-side Write XOR)"
+    got, _, kernels = _compile_run(g, ins)
+    assert len(kernels) == 1 and _mma(kernels)
+    fills = [write for write in statements(kernels, Write) if write.swizzle != "NONE"]
+    assert fills, "the sync compute-fill must swizzle its slabs (fill-side Write XOR)"
     x, nw, wg = (ins[k].astype(np.float32) for k in ("x", "nw", "wg"))
     rms = x[0] * (1.0 / np.sqrt((x[0] ** 2).mean(axis=-1, keepdims=True) + 1e-6)) * nw
     np.testing.assert_allclose(got.reshape(S, inter).astype(np.float32), rms @ wg.T, atol=0.5, rtol=0.1)
@@ -366,9 +374,9 @@ def test_fused_gate_up_swiglu_symbolic_m(runtime_s, monkeypatch):
         "wg": (rng.standard_normal((inter, H)) * 0.1).astype(np.float16),
         "wu": (rng.standard_normal((inter, H)) * 0.1).astype(np.float16),
     }
-    got, srcs = _compile_run(g, ins)
-    assert len(srcs) == 1, f"the fused gate/up edge must be ONE kernel, got {len(srcs)}"
-    assert "emmy_mma" in srcs[0], "the pinned mma tier must engage on the multi-fold contraction"
+    got, _, kernels = _compile_run(g, ins)
+    assert len(kernels) == 1, f"the fused gate/up edge must be ONE kernel, got {len(kernels)}"
+    assert _mma(kernels), "the pinned mma tier must engage on the multi-fold contraction"
     x, nw, wg, wu = (ins[k].astype(np.float32) for k in ("x", "nw", "wg", "wu"))
     rms = x[0] * (1.0 / np.sqrt((x[0] ** 2).mean(axis=-1, keepdims=True) + 1e-6)) * nw
     gate, up = rms @ wg.T, rms @ wu.T
@@ -400,9 +408,9 @@ def test_mixed_dtype_matmul_demotes_a_to_mma(tier, monkeypatch):
         "x": (rng.standard_normal((_M, _K)) * 0.3).astype(np.float32),
         "w": (rng.standard_normal((_K, _N)) * 0.3).astype(np.float16),
     }
-    got, srcs = _compile_run(g, ins)
+    got, _, kernels = _compile_run(g, ins)
     if tier == "warp":
-        assert any("emmy_mma" in s for s in srcs), "the mixed-dtype matmul must engage the mma tier via the demoting sync fill"
+        assert _mma(kernels), "the mixed-dtype matmul must engage the mma tier via the demoting sync fill"
     ref = ins["x"].astype(np.float16).astype(np.float32) @ ins["w"].astype(np.float32)
     np.testing.assert_allclose(got.reshape(_M, _N).astype(np.float32), ref, atol=0.1, rtol=2e-2)
 
@@ -434,10 +442,10 @@ def test_sdpa_consumer_projection_reaches_mma(monkeypatch):
     rng = np.random.default_rng(0)
     ins = {n: (rng.standard_normal((B, H, S, D)) * 0.3).astype(np.float16) for n in ("q", "k", "v")}
     ins["wo"] = (rng.standard_normal((NO, H * D)) * 0.1).astype(np.float16)
-    got, srcs = _compile_run(g, ins)
-    proj = [s for s in srcs if "wo" in s]
+    got, _, kernels = _compile_run(g, ins)
+    proj = [kernel for kernel in kernels.values() if "wo" in kernel.inputs]
     assert proj, "no kernel references the projection weight"
-    assert any("emmy_mma" in s for s in proj), "the sdpa-consumer projection must honor the warp TILE pin (the placeholder-I/O offer gap)"
+    assert any(_mma(kernel) for kernel in proj), "the sdpa-consumer projection must honor the warp TILE pin (the placeholder-I/O offer gap)"
     q, k, v, wo = (ins[n].astype(np.float32) for n in ("q", "k", "v", "wo"))
     scores = (q[0] @ np.swapaxes(k[0], -1, -2)) / np.sqrt(D)
     scores += np.triu(np.full((S, S), -np.inf, dtype=np.float32), k=1)  # causal mask
@@ -482,13 +490,13 @@ def test_fused_cone_splitk_matches_reference(stage, monkeypatch):
         "nw": (rng.standard_normal((H,)) * 0.3).astype(np.float16),
         "wg": (rng.standard_normal((H, inter)) * 0.1).astype(np.float16),
     }
-    got, srcs = _compile_run(g, ins)
-    assert len(srcs) == 2, f"split-K must produce partial + finalize, got {len(srcs)} kernel(s)"
-    assert any("emmy_mma" in s for s in srcs), "the mma tier must engage on the split partial"
+    got, _, kernels = _compile_run(g, ins)
+    assert len(kernels) == 2, f"split-K must produce partial + finalize, got {len(kernels)} kernel(s)"
+    assert _mma(kernels), "the mma tier must engage on the split partial"
     if stage == "d2/smem":
-        assert any("cp.async" in s for s in srcs), "the d2 B-only prefetch ring must issue cp.async on the canonical-B slab"
+        assert statements(kernels, CpAsyncCopy), "the d2 B-only prefetch ring must issue cp.async on the canonical-B slab"
     if stage == "d2/smem-tma":
-        assert any("cp_async_bulk_tensor" in s for s in srcs), "the weight must ride the TMA ring beside the fill"
+        assert statements(kernels, TmaLoad), "the weight must ride the TMA ring beside the fill"
     x, nw, wg = (ins[k].astype(np.float32) for k in ("x", "nw", "wg"))
     rms = x[0] * (1.0 / np.sqrt((x[0] ** 2).mean(axis=-1, keepdims=True) + 1e-6)) * nw
     np.testing.assert_allclose(got.reshape(S, inter).astype(np.float32), rms @ wg, atol=0.5, rtol=0.1)
@@ -528,20 +536,23 @@ def test_computed_f16_tma_copies_each_weight_beside_the_activation_fill():
     into its slab. The next chunk's box copies issue at the top of the K loop, before this
     chunk's fill and tensor-core work, and the drain waits on the slot's barrier first."""
     from emmy.compiler.context import Context  # noqa: PLC0415
-    from emmy.compiler.pipeline import CUDA_PASSES, Pipeline  # noqa: PLC0415
     from emmy.compiler.pipeline.search.pins import pinned_knobs  # noqa: PLC0415
 
     with pinned_knobs(_tma_pins("d2/smem-tma")):
-        lowered = Pipeline.build(CUDA_PASSES).run(_computed_a_channels_graph(32, 256, 2), ctx=Context.from_target((12, 0)))
-    (src,) = [s for node in lowered.nodes.values() if (s := getattr(node.op, "kernel_source", None))]
-    kernel = src.split('extern "C" __global__', 1)[1]
-    signature, body = kernel.split("{", 1)[0], kernel.split("for (int _ks", 1)[1]
-    assert signature.count("const CUtensorMap*") == 2 and "_desc_b," in signature and "_desc_b_x1)" in signature
-    assert "emmy_cp_async_cg" not in src, "the weights must not fall back to cp.async"
-    assert "_a_smem[" in body and "x[" in body, "the compute threads fill the activation slab from x"
-    copy, fill = body.index("cp_async_bulk_tensor_2d(&_b_x1_smem"), body.index("_a_smem[")
-    wait, mma = body.index("mbarrier_wait_parity"), body.index("emmy_mma_")
-    assert copy < fill < wait < body.index("emmy_ldmatrix") < mma
+        lowered, kernels = compile_with_kernels(_computed_a_channels_graph(32, 256, 2), ctx=Context.from_target((12, 0)))
+    ((nid, kernel),) = kernels.items()
+    assert [descriptor.name for descriptor in lowered.nodes[nid].op.tma_descriptors] == ["_desc_b", "_desc_b_x1"]
+    assert not statements(kernel, CpAsyncCopy), "the weights must not fall back to cp.async"
+    chunk = [stmt for loop in statements(kernel, StridedLoop) if loop.axis.name.startswith("_ks") for stmt in loop.body.iter()]
+
+    def first(found) -> int:
+        return next(i for i, stmt in enumerate(chunk) if found(stmt))
+
+    fill = first(lambda stmt: isinstance(stmt, Write) and stmt.output == "_a_smem")
+    assert any(isinstance(stmt, Load) and stmt.input == "x" for stmt in chunk), "the compute threads fill the activation slab from x"
+    copy = first(lambda stmt: isinstance(stmt, TmaLoad) and stmt.smem == "_b_x1_smem")
+    wait, drain, mma = (first(lambda stmt, kind=kind: isinstance(stmt, kind)) for kind in (MbarrierWait, LdmatrixLoad, MmaSyncPtx))
+    assert copy < fill < wait < drain < mma
 
 
 @requires_cuda
@@ -574,10 +585,9 @@ def test_computed_f16_tma_matches_the_compute_fill_bitwise(channels, m, k, fill,
     for stage in (fill, tma):
         with pinned_knobs(_tma_pins(stage, tile)):
             be = CudaBackend()
-            compiled = be.compile(_computed_a_channels_graph(m, k, channels))
-        srcs = [n.op.kernel_source for n in compiled.nodes.values() if getattr(n.op, "kernel_source", None)]
-        assert len(srcs) == 1, f"{stage}: the activation must stay fused, got {len(srcs)} kernels"
-        assert ("cp_async_bulk_tensor" in srcs[0]) == (stage == tma)
+            compiled, kernels = compile_with_kernels(_computed_a_channels_graph(m, k, channels))
+        assert len(kernels) == 1, f"{stage}: the activation must stay fused, got {len(kernels)} kernels"
+        assert bool(statements(kernels, TmaLoad)) == (stage == tma)
         outs[stage] = np.asarray(list(be.run(compiled, input_data=ins)[0].outputs.values())[0]).reshape(m, _TMA_N)
     np.testing.assert_array_equal(outs[tma].view(np.uint16), outs[fill].view(np.uint16))
     f32 = {name: v.astype(np.float32) for name, v in ins.items()}

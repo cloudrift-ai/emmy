@@ -71,11 +71,16 @@ share every line downstream. The projection:
   deployable regime, and `--nvcc-flags` overrides. **Tuning measures in the regime it deploys into**, so a tuned
   latency is the deployed one.
 
-  `FAST_MATH` defaults to true and adds `--use_fast_math`; `EMMY_FAST_MATH=0` omits that flag and disables the
-  umbrella's compiler rewrites. Individual precision pins still override the umbrella, each instruction class through
-  its own flag (`nvcc.precision_flags`): `EMMY_CONTRACT_FMA=0` adds `--fmad=false` for an intermediate-rounding
-  diagnostic and leaves the other fast-math transformations enabled; combine it with `EMMY_FAST_MATH=0` for precise
-  arithmetic checks. Custom `--nvcc-flags` follow the precision flags.
+  Two precision decisions are nvcc flags (`nvcc.precision_flags`), because they hold for a whole kernel: flush to
+  zero (`--ftz=true`, on under the default `FAST_MATH`) and multiply-add fusion (`--fmad=false` under
+  `EMMY_CONTRACT_FMA=0`, an intermediate-rounding diagnostic). Every approximate instruction is an operation of the
+  kernel body, picked by `lowering/kernel/130_approximate_math` and printed as CUDA's fast intrinsic (`__expf`,
+  `__logf`, `__sinf`, `__cosf`, `__powf`, `__fdividef`) or as a helper in inline PTX (`rcp.approx`, `sqrt.approx`,
+  `tanh.approx`). Inline PTX takes no modifier from `--ftz`, so the kernel lowering hands the renderer the flush
+  decision and the two helpers nvcc would flush say `.ftz` themselves. nvcc is never passed `--use_fast_math`,
+  `--prec-div` or `--prec-sqrt`: whatever the body does not name approximate compiles at nvcc's precise defaults.
+  Combine `EMMY_CONTRACT_FMA=0` with `EMMY_FAST_MATH=0` for precise arithmetic checks. Custom `--nvcc-flags` follow
+  the precision flags.
   Explicit tensor-core instructions retain their own accumulation semantics. Accuracy and latency evidence must name
   the effective flags; a precise diagnostic does not qualify the default fast-math kernel. Persistent benchmark
   workers receive every effective precision decision with each request and restore their prior values afterward, so a
@@ -83,7 +88,7 @@ share every line downstream. The projection:
 
   An older sweep ranked at `-Xcicc -O1` to dodge a cicc front-end blowup on big unrolled register-tile kernels. That
   rationale was measured against the WMMA codegen deleted in #189 four days later; on current codegen (fragment work
-  renders as rolled loops with small `#pragma unroll` trip counts) it does not reproduce — over 4,888 nvcc compiles
+  is a loop over a fragment's few elements) it does not reproduce — over 4,888 nvcc compiles
   spanning the tile inventory, -O3 compiled at a **median 0.96×** of -O1, worst case 1.17×, slowest compile 1.39 s.
   So the lower level bought no compile time while mis-ranking by tile area, and it is no longer a measurement lane.
   It stays reachable through `--nvcc-flags` for the test suite's compile-speed lane; a bench pinned to it warns, and
@@ -94,10 +99,10 @@ share every line downstream. The projection:
   the other flags, `context.split_opt_level`), so one regime has one key however it is spelled while measurements
   from different regimes never collide. The bench-worker subprocess inherits the env, so its compiles use the
   same flags.
-  `EMMY_UNROLL=<n>` caps which static loops emit `#pragma unroll` (the unroll budget — declared in
-  `lowering/kernel/_atom.py`, read at the extent-driven unroll sites there). It is a
-  pin-only nvcc hint that steers cicc unrolling / register pressure / compile time; it does **not**
-  change the emitted-C listing size (the register-tile fragment grid is straight-line regardless).
+  `EMMY_UNROLL=<n>` caps which static loops the kernel lowering flags for unrolling (the unroll budget — declared in
+  `lowering/kernel/_atom.py`, read at the extent-driven unroll sites there). The lowering then writes the flagged
+  loops out itself (`lowering/kernel/117_unroll_loops`): the source holds the copies and asks nvcc for nothing. It is
+  pin-only and steers register pressure, code size and compile time.
   Unset → each site's built-in cap; `0` → keep every loop rolled.
 - Builds a static launch plan: per launch, a tuple of
   `(kernel, arg_names, grid, block, smem_bytes, zero_outputs)`. The runtime resolves total shared storage against

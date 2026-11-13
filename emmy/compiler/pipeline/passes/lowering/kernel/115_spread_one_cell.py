@@ -18,7 +18,7 @@ from __future__ import annotations
 from dataclasses import replace
 
 from emmy.compiler.graph import Node
-from emmy.compiler.ir.expression import Var
+from emmy.compiler.ir.expression import Builtin
 from emmy.compiler.ir.kernel import KernelOp, Tile
 from emmy.compiler.ir.kernel.ir import Sync
 from emmy.compiler.ir.stmt import Body, Load, Loop, Statement, StridedLoop, Write
@@ -42,7 +42,9 @@ def rewrite(root: Node) -> KernelOp:
             body.append(Sync())
             written.clear()
         if isinstance(stmt, Loop) and not stmt.is_reduce:
-            body.append(StridedLoop(axis=stmt.axis, start=Var("threadIdx.x"), step=Var("blockDim.x"), body=stmt.body, seed=stmt.seed))
+            body.append(
+                StridedLoop(axis=stmt.axis, start=Builtin("thread_idx.x"), step=Builtin("block_dim.x"), body=stmt.body, seed=stmt.seed)
+            )
             written |= _writes(stmt)
         else:
             body.append(stmt)

@@ -13,8 +13,8 @@ from emmy.compiler.dtype import F16
 from emmy.compiler.graph import Graph, Tensor
 from emmy.compiler.ir.base import InputOp
 from emmy.compiler.ir.frontend.ir import LinearOp
-from emmy.compiler.pipeline import CUDA_PASSES, Pipeline
-from tests.compiler.helpers import requires_cuda, requires_sm
+from emmy.compiler.ir.kernel.ir import CpAsyncCopy
+from tests.compiler.helpers import compile_with_kernels, requires_cuda, requires_sm, statements
 
 K16 = "mma_m16n8k16_f16_f32"
 
@@ -40,9 +40,10 @@ def test_a_masked_m_edge_zero_fills_the_rows_past_it(monkeypatch) -> None:
     """A 96-row tile over 256 rows overhangs A: its rows past the edge are zero-filled, not re-read
     from the edge's last row; B has no masked edge and copies unpredicated."""
     _pin(monkeypatch, "w2x2", "f3x8/k2")
-    lowered = Pipeline.build(CUDA_PASSES).run(_graph(256, 256, 128), ctx=Context(compute_capability=(8, 0)))
-    (src,) = [n.op.kernel_source for n in lowered.nodes.values() if getattr(n.op, "kernel_source", None)]
-    assert "emmy_cp_async_cg_z(&_a_smem[" in src and "emmy_cp_async_cg_z(&_b_smem[" not in src
+    _, kernels = compile_with_kernels(_graph(256, 256, 128), ctx=Context(compute_capability=(8, 0)))
+    zero_filled = {copy.smem for copy in statements(kernels, CpAsyncCopy) if copy.valid is not None}
+    assert "_a_smem" in zero_filled and "_b_smem" not in zero_filled
+    assert any(copy.smem == "_b_smem" for copy in statements(kernels, CpAsyncCopy))
 
 
 def test_a_rewrite_keeps_the_zero_fill_predicate() -> None:

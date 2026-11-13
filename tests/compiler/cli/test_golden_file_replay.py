@@ -678,7 +678,6 @@ def test_recorded_route_cuts_the_selected_compile_target(run_cli, tmp_path, monk
     document = _working_placement_route(path)
     monkeypatch.delenv("EMMY_KNOBS", raising=False)
     monkeypatch.setenv("EMMY_NVCC_FLAGS", "")
-    monkeypatch.setenv("EMMY_READABLE", "1")
     monkeypatch.setenv("EMMY_TUNE_DB", str(tmp_path / "tune.db"))
     if explicit:
         monkeypatch.setenv("EMMY_KNOBS", "PLACE@inner.1/map=cut")

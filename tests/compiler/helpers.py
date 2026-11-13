@@ -6,6 +6,7 @@ are explicit at each call site and test modules never import implementation from
 
 from __future__ import annotations
 
+import contextlib
 import dataclasses
 import functools
 from collections.abc import Mapping
@@ -213,16 +214,18 @@ def dtype_input_scale(dtype) -> float:
     return 0.05 if dtype.name == "f16" else 1.0
 
 
-def grouped_raster_decode(src: str, group: int) -> list[str]:
-    """The block-axis decode lines of ``src`` that take a grouped raster of ``group`` block-tiles: a block axis read
-    from the CTA index alone as its group's base plus its offset in the group (``group * (...) + ...``, the factor on
-    either side)."""
-    lines = [line.strip() for line in src.splitlines()]
-    scaled = (f" * {group} + ", f"= {group} * (")
+def grouped_raster_decode(kernel, group: int) -> list[str]:
+    """The block-axis decodes of ``kernel``'s grid that take a grouped raster of ``group`` block-tiles, as text: a
+    block axis read from the CTA index alone as its group's base plus its offset in the group (``group * (...) +
+    ...``, the factor on either side)."""
+    from emmy.compiler.ir.kernel.ir import Grid
+
+    (grid,) = [stmt for stmt in kernel.body if isinstance(stmt, Grid)]
+    decodes = [str(decode) for decode in grid.decode]
     return [
-        line
-        for line in lines
-        if line.startswith("int ") and "blockIdx.x" in line and "threadIdx" not in line and any(s in line for s in scaled)
+        decode
+        for decode in decodes
+        if "block_idx.x" in decode and "thread_idx" not in decode and (f" * {group} + " in decode or decode.startswith(f"{group} * ("))
     ]
 
 
@@ -319,3 +322,128 @@ def qwen3_embedding_model(config=None, auto_class=None):
 
     torch.manual_seed(0)
     return (auto_class or AutoModel).from_config(config if config is not None else qwen3_embedding_config()).float().eval()
+
+
+def render_typed(statements, ctx) -> list[str]:
+    """The rendered lines of hand-built ``statements`` once their types are complete: the renderer prints a typed body
+    (``ir.types.explicit_conversions``), and the names and buffers ``ctx`` already types are taken as declared."""
+    from emmy.compiler.dtype import get
+    from emmy.compiler.ir.render import render_body
+    from emmy.compiler.ir.stmt import Body
+    from emmy.compiler.ir.types import explicit_conversions
+    from emmy.compiler.target import native_f16_ops
+
+    known = {name: get(dtype) for name, dtype in ctx.ssa_dtypes.items()}
+    buffers = {name: get(dtype) for name, dtype in ctx.buffer_dtypes.items()}
+    return render_body(explicit_conversions(Body(statements), buffers, native_f16_ops(), known), ctx)
+
+
+def _kernel_recorder():
+    """A pipeline strategy that records the ``KernelOp`` each ``CudaOp`` was lowered from; its ``kernels(compiled)``
+    gives the Kernel IR of each kernel node of a compiled graph, by node id."""
+    from emmy.compiler.ir.cuda import CudaOp
+    from emmy.compiler.ir.kernel import KernelOp
+    from emmy.compiler.pipeline.strategy import PipelineStrategy
+
+    class LoweredKernels(PipelineStrategy):
+        def __init__(self) -> None:
+            self.lowered: list[tuple[KernelOp, CudaOp]] = []
+
+        def on_rebind(self, e) -> None:
+            if isinstance(e.replaced, KernelOp) and isinstance(e.node.op, CudaOp):
+                self.lowered.append((e.replaced, e.node.op))
+
+        def kernels(self, compiled) -> dict:
+            found = {}
+            for node_id, node in compiled.nodes.items():
+                if isinstance(node.op, CudaOp):
+                    # A retried resolution lowers a kernel again: the one the result holds is the one it was generated from.
+                    found[node_id] = next(kernel for kernel, op in reversed(self.lowered) if op is node.op)
+            return found
+
+    return LoweredKernels()
+
+
+def compile_with_kernels(graph, *, ctx=None, passes=None, decide=None, **run):
+    """``graph`` compiled to CUDA ops, and the Kernel IR each kernel's code was generated from, by node id.
+
+    A ``CudaOp`` holds its kernel's code, not the statements it was generated from. This runs the one compile a test
+    would run (``passes``, the whole pipeline when omitted; ``ctx`` and ``run`` as ``Pipeline.run`` takes them; the
+    pins in scope apply as they do there) and keeps each ``KernelOp`` the last lowering pass read: the grid decoded,
+    every index flat, every type said. A check of a kernel's structure reads that body; only a check of how an
+    instruction is spelled reads the code. With ``decide`` the forks are resolved by it (``Run.resolve``) on the
+    live device's context, where ``Pipeline.run`` takes the greedy pick."""
+    from emmy.compiler.pipeline import CUDA_PASSES, Pipeline
+
+    recorder = _kernel_recorder()
+    pipeline = Pipeline.build(passes or CUDA_PASSES).with_strategies(recorder)
+    if decide is None:
+        compiled = pipeline.run(graph, ctx=ctx, **run)
+    else:
+        from emmy.compiler.context import Context
+        from emmy.compiler.pipeline.pipeline import Run
+
+        compiled, _ = Run(pipeline=pipeline, ctx=ctx or Context.probe()).resolve(graph, decide)
+    return compiled, recorder.kernels(compiled)
+
+
+@contextlib.contextmanager
+def recording_kernels():
+    """Record the Kernel IR of every kernel lowered inside the block, for a compile the test does not run itself (a
+    backend's, a serving split's). Yields a function from a compiled graph to its kernels by node id, as
+    :func:`compile_with_kernels` returns them."""
+    from unittest import mock
+
+    from emmy.compiler.pipeline import Pipeline
+
+    recorder = _kernel_recorder()
+    build = Pipeline.build.__func__
+
+    def recording(cls, passes, **kwargs):
+        return build(cls, passes, **kwargs).with_strategies(recorder)
+
+    with mock.patch.object(Pipeline, "build", classmethod(recording)):
+        yield recorder.kernels
+
+
+def statements(kernels, *types) -> list:
+    """Every statement of ``types`` in ``kernels`` (one ``KernelOp``, or the ``{node id: KernelOp}`` of a compile),
+    nested ones included, in body order; every statement when no type is given."""
+    ops = kernels.values() if isinstance(kernels, dict) else (kernels,)
+    return [stmt for op in ops for stmt in op.body.iter() if not types or isinstance(stmt, types)]
+
+
+def operations(kernels) -> set[str]:
+    """The elementwise operations ``kernels`` compute, by name: in a value, as a fold's or a fragment statement's own
+    operation, inside a cross-thread combine or a store's epilogue."""
+    found: set[str] = set()
+    pending = statements(kernels)
+    while pending:
+        stmt = pending.pop()
+        found |= {node.fn for e in stmt.expressions() for node in e.subterms() if hasattr(node, "fn")}
+        found |= {node.operation.name for e in stmt.expressions() for node in e.subterms() if getattr(node, "operation", None)}
+        if getattr(stmt, "op", None) is not None:
+            found.add(stmt.op.name)
+        for carried in ("combine_states", "epilogue", "run"):
+            pending.extend(getattr(stmt, carried, None) or ())
+    return found
+
+
+def text(kernels) -> str:
+    """The Kernel IR of ``kernels`` (the kernels of a compile, one of them, or a body) in its text form: what a check
+    of a name the lowering gave, or of an index's form, reads."""
+    from emmy.compiler.ir.stmt import Body, pretty_body
+
+    if isinstance(kernels, Body):
+        return "\n".join(pretty_body(kernels))
+    ops = kernels.values() if isinstance(kernels, dict) else (kernels,)
+    return "\n".join(line for op in ops for line in pretty_body(op.body))
+
+
+def case_kernels(case, ctx=None):
+    """A realization corpus case lowered with itself as its only evidence, as ``realization.helpers.lowered`` lowers
+    it: the compiled graph and the Kernel IR of its kernels by node id."""
+    from tests.compiler.realization.helpers import evidence_scope
+
+    with evidence_scope(case):
+        return compile_with_kernels(case.program(), ctx=ctx or case.context(), db=None)

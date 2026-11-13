@@ -16,15 +16,16 @@ from emmy.compiler.context import Context
 from emmy.compiler.dim import Dim
 from emmy.compiler.dtype import decode_bf16
 from emmy.compiler.ir.cuda import CudaOp
+from emmy.compiler.ir.kernel.ir import MmaSyncPtx
 from emmy.compiler.ir.pure.fold import Fold
 from emmy.compiler.ir.schedule.classic import refusals
-from emmy.compiler.ir.stmt import Load
+from emmy.compiler.ir.stmt import Load, StridedLoop
 from emmy.compiler.ir.tile import TileOp
-from emmy.compiler.pipeline import CUDA_PASSES, LOOP_PASSES, Pipeline
+from emmy.compiler.pipeline import LOOP_PASSES, Pipeline
 from emmy.compiler.pipeline.search.pins import pinned_knobs
 from emmy.compiler.trace.torch import trace_module
 from emmy.serving.native.prepare import WINDOW, attend_module
-from tests.compiler.helpers import requires_cuda
+from tests.compiler.helpers import compile_with_kernels, requires_cuda, statements, text
 
 # The 27B's geometry: 24 query heads in groups of six over four key-value heads.
 HEADS, KV, D, CONTEXT = 24, 4, 256, 4096
@@ -107,15 +108,16 @@ def test_a_key_split_combines_the_slices_partials_not_the_window(rows) -> None:
     every row's group; the finalize reads the partials alone and never the window, which is no extent of it."""
     _, graph = _attention(rows)
     with pinned_knobs(_pins(torch.bfloat16, rows, SLICES)):
-        lowered = Pipeline.build(CUDA_PASSES).run(graph, ctx=CTX)
+        lowered, kernel_ir = compile_with_kernels(graph, ctx=CTX)
     kernels = {nid: node for nid, node in lowered.nodes.items() if isinstance(node.op, CudaOp)}
     assert len(kernels) == 2, sorted(kernels)
     (partial,) = [node for nid, node in kernels.items() if nid.endswith("__partial")]
     (finalize,) = [node for node in kernels.values() if node is not partial]
-    assert "mma.sync" in partial.op.kernel_source and "__ck" in partial.op.kernel_source
+    chunked = any("__ck" in loop.axis.name for loop in statements(kernel_ir[partial.id], StridedLoop))
+    assert statements(kernel_ir[partial.id], MmaSyncPtx) and chunked
     assert np.prod([extent for axis in partial.op.grid for extent in axis]) == KV * SLICES
     assert list(finalize.inputs) == [partial.id]
-    assert WINDOW not in finalize.op.kernel_source
+    assert WINDOW not in finalize.op.runtime_args and WINDOW not in text(kernel_ir[finalize.id])
 
 
 @requires_cuda
@@ -125,15 +127,13 @@ def test_a_key_split_combines_the_slices_partials_not_the_window(rows) -> None:
 def test_the_grouped_attention_matches_the_per_head_twin(rows, cache, split) -> None:
     """The grouped twin, one tensor-core kernel or a partial per key slice and its finalize, computes the per-head
     twin's attention at every position and window a step can set, one the slices overhang included."""
-    from emmy.compiler.backend.cuda.backend import CudaBackend
     from emmy.compiler.backend.cuda.program import CompiledProgram
 
     dtype = CACHES[cache]
     _, graph = _attention(rows, dtype)
     with pinned_knobs(_pins(dtype, rows, split)):
-        compiled = CudaBackend().compile(graph)
-    sources = [node.op.kernel_source for node in compiled.nodes.values() if isinstance(node.op, CudaOp)]
-    assert len(sources) == (2 if split else 1) and "mma.sync" in sources[0]
+        compiled, kernels = compile_with_kernels(graph)
+    assert len(kernels) == (2 if split else 1) and statements(next(iter(kernels.values())), MmaSyncPtx)
     per_head = attend_module(HEADS, KV, D, rows)
     rng = np.random.default_rng(11)
     query = torch.from_numpy(rng.normal(size=(rows, HEADS * D)).astype(np.float32)).to(torch.bfloat16)

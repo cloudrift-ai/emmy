@@ -98,15 +98,11 @@ macro_rules! with_statement_types {
                 /// A load takes its fields as declared: `names` is a tuple, one name for a scalar load. Use `.is_vector` /
                 /// `.is_scalar` / `.width` / `.name` (asserts scalar) / `.names` to test shape.
                 ///
-                /// A scalar Load is rendered as a literal binding (`float name = <value>;`) when `ctx.literal_constants` carries
-                /// a value for `input` — the scalar-constant-inlining path populates that map at the cuda lowering boundary so
-                /// kernels can embed `ConstantOp` values directly instead of taking them as `float*` parameters.
-                ///
                 /// `dtype` is optional and, when set, names the source-buffer element dtype that this Load produces. The
                 /// `030_stamp_types` Kernel-IR pass populates it once before any analytical pass runs; downstream passes
                 /// (vectorize_loads, demote, etc.) read it instead of reaching for the matcher-populated
-                /// `KernelOp.inputs`/`outputs` side channels. `None` keeps the legacy render-time inference path working for
-                /// tests that construct Loads by hand without dtype.
+                /// `KernelOp.inputs`/`outputs` side channels. A body a code generator reads carries it on every Load
+                /// (`types::check_types`).
                 ///
                 /// `carried` marks a staged copy that crosses the chunk loop's back edge. The names and their packed vector are
                 /// the ones an earlier Load of the same names DECLARED ahead of the loop. `"load"` re-assigns the packed vector,
@@ -234,8 +230,9 @@ macro_rules! with_statement_types {
                 /// `output` is the destination buffer's name (matches the owning graph node's id, or — for multi-output kernels —
                 /// one of its output buffer names). `index` uses axis Vars to compute the per-dim offset.
                 ///
-                /// `value_dtype` is optional; when set, names the SSA-value dtype being stored. Stamped by `030_stamp_types`;
-                /// downstream passes read it instead of querying `ctx.ssa_dtypes` at render time.
+                /// `value_dtype` is optional; when set, names the SSA-value dtype being stored. Stamped by `030_stamp_types`
+                /// for the passes after it. In a body typed in full (`types::check_types`) the values are already at the
+                /// buffer's element type, so it names both.
                 shared Write {SIDE_EFFECTS | CHECKED} {
                     output: Name [BUFFER_WRITE],
                     index: Exprs [EXPRESSION | READS] : Index,
@@ -284,8 +281,10 @@ macro_rules! with_statement_types {
                 /// Used by Loop IR for general iteration; reused by Kernel IR for serial (post-materialization) loops inside
                 /// cooperative blocks.
                 ///
-                /// `unroll=True` annotates the loop for `#pragma unroll` at render time. Set by scheduling passes
-                /// (`mark_unroll`); has no effect on the IR's iteration semantics.
+                /// `unroll=True` asks the kernel lowering for the loop's copies: its unroll pass replaces a flagged loop
+                /// whose trip count is static by one copy of the body per trip and clears the flag on any other. Set by
+                /// the kernel lowering's own sites; it has no effect on the IR's iteration semantics, and a body a code
+                /// generator reads carries none (`input::check_input`).
                 ///
                 /// The loop carries NO algebra — the fold's ⊕ lives on the :class:`~emmy.compiler.ir.pure.fold.Fold` node's
                 /// stored `combine`, and the dissolved fold `Accum`\ s in the body are the loop-level spelling; a loop folds iff
@@ -421,8 +420,9 @@ macro_rules! with_statement_types {
                 ///
                 /// The target lowering turns a `Tile` into one before it renders, so the decode is Kernel IR the
                 /// optimizer simplifies and an emitter spells, not text. The axes keep their ranges for the body; a
-                /// `Cond` at the top of the body masks the threads past the cells where the launch does not cover them
-                /// exactly, and the axes hold their ranges only under it.
+                /// `Cond` in the body masks the threads past the cells where the launch does not cover them exactly, and
+                /// the axes hold their ranges only under it. A thread's lane and warp, where the body reads them, are a
+                /// `Let` each ahead of that `Cond`.
                 kernel Grid {} {
                     axes: Axes [AXIS],
                     decode: Exprs [EXPRESSION] : Index,
@@ -549,6 +549,11 @@ macro_rules! with_statement_types {
                 /// Named-barrier support: `barrier_id > 0` routes the per-iter sync to `bar.sync <id>, <count>` instead of
                 /// `__syncthreads()` — required inside a warp-specialized consumer branch (a __syncthreads on a warp-divergent
                 /// cond is UB).
+                ///
+                /// `lane` set: the slab holds one partial per warp and `tid_var` is the thread's warp. Warp 0 alone folds
+                /// the slab, in registers: its lane `lane` takes slot `lane % length`, one `WarpShuffle` butterfly over
+                /// `length` lanes folds them and lane 0 stores slot 0. One barrier before the broadcast instead of one per
+                /// halving step. The lowering passes the thread's lane, a value the grid decode binds.
                 kernel TreeHalve {CHECKED} {
                     bufs: Names [],
                     state: Names [UPDATES],
@@ -560,6 +565,7 @@ macro_rules! with_statement_types {
                     barrier_id: i64 [] = 0,
                     barrier_count: Option<i64> [] = None,
                     inner: Option<(Expression, i64)> [EXPRESSION] : Index = None,
+                    lane: Option<Expression> [EXPRESSION] : Index = None,
                 }
                 /// Cross-thread combine of a (possibly multi-component) monoid state over `length` lanes via `__shfl_xor_sync` —
                 /// a register-only butterfly (no smem, no syncthreads).
@@ -626,7 +632,6 @@ macro_rules! with_statement_types {
                     args: FragmentArgs [RECORD],
                     in_place: bool [] = false,
                     layout: Name [] = Name::from("m16n8k16"),
-                    post: ElementwiseOps [] = ElementwiseOps::from([]),
                     row_base: Option<Expression> [EXPRESSION] : Index = None,
                     col_base: Option<Expression> [EXPRESSION] : Index = None,
                 }
@@ -650,97 +655,130 @@ macro_rules! with_statement_types {
                     layout: Name [] = Name::from("m16n8k16"),
                     dtype: DType [] = DType::F32,
                 }
-                /// Declare an mma.sync per-thread register array.
+                /// Declare one tensor-core fragment: the registers each lane of a warp holds for one operand or
+                /// accumulator of a product.
                 ///
-                /// mma.sync multiplicands are explicit per-lane register arrays — `unsigned a[4]` / `unsigned b[2]` (f16, two
-                /// halfs per 32-bit reg) — and the accumulator is `float c[4]` (f32) or, on the f16-accumulate atom, packed
-                /// `unsigned c[2]` (two halfs per reg — the same element map, pair-packed, on m16n8k16). Volta uses explicit
-                /// counts and distinct f16/f32 accumulator lane maps. `shape` is the cell `(M, N, K)`; the count derives from
-                /// `shape` + `role` (+ the C dtype) via :func:`_mma_sync_nregs`. The `c` array is zero-initialised at
-                /// declaration, so the mma.sync path needs no separate fill node.
-                ///
-                /// `count` (default 1) arrays a whole fragment FAMILY into one declaration — `float O_i_f[count][n_regs]` — so a
-                /// run of `count` sibling fragments (`O_i_f0 … O_i_f{count-1}`) collapses to a single arrayed decl indexed
-                /// `O_i_f[t]`. Only `100_loopify` sets `count > 1` (the pin-gated re-roll); `count == 1` renders the flat `float
-                /// name[n_regs]` form, byte-identical. A family of SCALAR registers (`nregs == 0` — the fp4 block-scale
-                /// fragments) arrays to one dimension, `unsigned name[count]`, because its member is the register itself and not
-                /// an array of them.
-                kernel RegFragment {} {
+                /// `fragment_layout`, `role` and `dtype` name the fragment's row of the lane-to-element table
+                /// (`fragment::fragment_table`), which says how many registers a lane holds and which elements of the tile
+                /// stand in each: `a` and `b` are the multiplicands (32-bit registers of packed 16-bit or 8-bit elements),
+                /// `c` the accumulator (a float a register, or two packed halves on the f16-accumulate atom), `sfa` and `sfb`
+                /// one lane's register of block scales, a scalar. The count is the table's (`RegFragment::registers`),
+                /// never a field. An accumulator is zero at its declaration; an operand holds nothing until a statement
+                /// loads it.
+                kernel RegFragment {CHECKED} {
                     name: Name [DEFINES | LOCAL_BUFFER],
                     role: Name [],
-                    shape: Shape3 [],
                     dtype: DType [],
-                    count: i64 [] = 1,
-                    nregs: Option<i64> [] = None,
+                    fragment_layout: Name [] = Name::from("m16n8k16"),
                 }
                 /// Load one lane's b32 of ue4m3 block scales for the block-scaled fp4 mma.
                 ///
                 /// The instruction takes its per-16-element scales as two ordinary register operands beside the multiplicands,
                 /// one per side, and applies them itself. A supplying lane holds four K blocks as the four bytes of one b32 —
                 /// exactly the `k = 64` an atom step spans — and the lane→row map differs per side and is NOT the data
-                /// fragment's: SFA's supplying lanes are picked by `(lane & 3)` against a thread-id selector, SFB's by equality
-                /// with one. Both maps were found by probing the hardware, and the render's prelude records them beside the PTX
-                /// (the PTX ISA's documented thread-id range is wrong for `scale_vec::4X` — ptxas takes 0..1, not 0..3).
+                /// fragment's: the `sfa` and `sfb` rows of the lane-to-element table (`fragment::fragment_table`) hold
+                /// both, with the lanes that supply a register, under the two selectors the instruction takes
+                /// (`fragment::SCALE_SELECTOR_A`, `fragment::SCALE_SELECTOR_B`). Both maps were found by probing the
+                /// hardware (the PTX ISA's documented thread-id range is wrong for `scale_vec::4X` — ptxas takes 0..1,
+                /// not 0..3).
                 ///
-                /// `src_buffer` is the scale slab, `src_index` the fragment's `(row, k-block)` base and `ldm` the slab's row
-                /// stride in bytes. Non-supplying lanes read nothing and the instruction ignores their register, so there is no
-                /// guard here.
+                /// `src_buffer` is the scale slab, `src_index` the fragment's `(row, k-block)` base, one index per
+                /// dimension of the slab, and `ldm` the slab's row stride in bytes. `role` is the side, `a` or `b`.
+                /// Non-supplying lanes read nothing and the instruction ignores their register.
                 ///
-                /// Distinct from :class:`LdmatrixLoad`'s `scale_buffer`, which is the OTHER way to spend a block scale: there the
-                /// k16 drain folds it into a 16-bit fragment and no scale reaches the instruction. These two never appear on one
-                /// operand.
-                kernel BlockScaleLoad {} {
+                /// Distinct from :class:`FragmentLoad`'s `scale_buffer`, which is the OTHER way to spend a block scale:
+                /// there the drain folds it into a 16-bit fragment and no scale reaches the instruction. These two never
+                /// appear on one operand.
+                kernel BlockScaleLoad {CHECKED} {
                     frag: Name [UPDATES],
                     src_buffer: Name [BUFFER_READ],
                     src_index: Exprs [EXPRESSION] : Index,
                     role: Name [],
-                    ldm: i64 [] = 0,
+                    ldm: i64 [],
                 }
-                /// `ldmatrix.sync.aligned.m8n8.x{2,4}[.trans].b16` — load one operand fragment from smem into a per-thread
-                /// register array.
+                /// `ldmatrix.sync.aligned.m8n8.x{2,4}[.trans].shared.b16`: one operand fragment, or two side by side, read
+                /// from a shared-memory slab of 16-bit elements by one instruction.
                 ///
-                /// `frag` is the destination :class:`RegFragment`; `src_buffer` / `src_index` are the cell's smem tile base (the
-                /// same `(buffer, base-offset)` `_mma_src_index` computes); `ldm` is the smem row stride in elements. Each lane
-                /// derives its own row address from its warp lane id (`threadIdx.x & 31`): the 16×K `a` tile uses `x4` (`row =
-                /// lane%16`, K-col block `(lane/16)*8`); the K×8 `b` tile uses `x2.trans` (`row = lane%16`) so a row-major smem
-                /// slab feeds the mma's col-major B operand.
+                /// Each lane gives the address of one row of eight elements: the tile base `src_index` (the slab's row and
+                /// column) plus the lane's own offset, through the slab's `swizzle` (`"NONE"`, or the XOR mode the fill
+                /// wrote it with). `ldm` is the slab's row stride in elements. The form and the lane's offset follow from
+                /// `role`, `b_trans` and `pair_frag`:
                 ///
-                /// `staged` (default `True`) selects the transport. The modern fragment layout's `ldmatrix` is **smem only**,
-                /// while the Volta layout uses its cooperative gather against either address space. When the operand was NOT
-                /// staged into shared memory (`staged=False`, `src_buffer` is the gmem operand) the render emits the
-                /// `emmy_mma_load_{a,b}_gmem` helper instead — a gmem-direct fragment load that replicates the same lane→element
-                /// map without ldmatrix. Slower (no smem reuse) but correct; the atom lowering picks per operand based on whether
-                /// an enclosing `StageBundle` staged it.
+                /// - `a`: `x4`, the 16×16 A tile. Row `lane % 16`, column block `(lane / 16) * 8`.
+                /// - `b`: `x2.trans`, a K-major slab (K rows × N columns). Row `lane % 16`.
+                /// - `b` with `b_trans`: `x2`, an N-major slab (N rows × K columns), which is the product's own
+                ///   column-major B. Row `lane % 8`, column block `((lane / 8) % 2) * 8`.
+                /// - `pair_frag` set (a `b` only, `096_pair_ldmatrix_loads`): `x4` or `x4.trans`, `frag` and the fragment
+                ///   eight N further in one instruction; lanes 16 to 31 address the second.
                 ///
-                /// `gmem_guard` (gmem-direct only) carries a masked-tile boundary as `(base Expression, bound Expression)` on the
-                /// operand's lane-varying output axis (A's M rows, B's N cols): the render switches to the `_mclamp` / `_nclamp`
-                /// helper, which clamps the lane coordinate to the `bound - base` in-range elements — the gmem-direct analogue of
-                /// the staged slab-fill clamp, so an unstaged masked cell still lowers instead of reading past the runtime-sized
-                /// buffer. Clamped lanes read duplicates; their stores are masked by the RegStore guards.
-                kernel LdmatrixLoad {} {
+                /// A fragment `ldmatrix` cannot load (a slab of bytes, Volta's layout, global memory) is a
+                /// :class:`FragmentLoad`.
+                kernel LdmatrixLoad {CHECKED} {
                     frag: Name [UPDATES],
                     src_buffer: Name [BUFFER_READ],
                     src_index: Exprs [EXPRESSION] : Index,
                     role: Name [],
-                    ldm: i64 [] = 0,
+                    ldm: i64 [],
                     swizzle: Name [] = Name::from("NONE"),
-                    staged: bool [] = true,
-                    gmem_guard: Option<(Expression, Expression)> [EXPRESSION] : Index = None,
-                    k_zero: Option<(Expression, Expression)> [EXPRESSION] : Index = None,
                     b_trans: bool [] = false,
                     pair_frag: Option<Name> [UPDATES] = None,
-                    byte_slab: bool [] = false,
+                }
+                /// One operand fragment gathered element by element: each lane reads the elements the lane-to-element
+                /// table (`fragment::fragment_table`, the row of `fragment_layout`, `role` and `dtype`) gives it, converts
+                /// each from `src_dtype` to `dtype` and packs them into its registers.
+                ///
+                /// `src_index` is the tile's base, one index per dimension of `src_buffer`. An element at the table's
+                /// `(row, column)` stands `row * ldm + column` elements past it; with `b_trans` (a `b` whose source holds
+                /// N along its rows and K along a row) it stands `column * ldm + row` past it. `ldm` is the source's row
+                /// stride in elements; `None` is the extent of the source's last dimension, a launch-time value when that
+                /// extent is symbolic.
+                ///
+                /// Read from global memory (`staged` false):
+                ///
+                /// - `clamp`, `(base, bound)` on the operand's own tile axis (A's M rows, B's N columns): the lanes past
+                ///   `bound - base` read the last element in range instead. A masked tile that straddles its axis's extent
+                ///   never reads past the buffer; the duplicates are masked by the store's guards.
+                /// - `k_zero`, `(base, bound)` on K: the elements past `bound - base` are zero, not read. K is summed, so
+                ///   a duplicate would corrupt the product.
+                ///
+                /// Read from a shared-memory slab the kernel filled (`staged`), where `ldmatrix` does not apply: a slab of
+                /// bytes, or any slab under Volta's layout. The fill clamps and zero-fills, so the two bounds are absent.
+                ///
+                /// - `slab_layout` (`"NONE"`, `"V70A"`, `"V70B"`): the permutation the fill stored the slab under; the
+                ///   element's address is that layout's function of its logical row and column.
+                /// - `pair_frag` (`096_pair_ldmatrix_loads`, Volta's two layouts): the fragment next to `frag`, loaded by
+                ///   the same 128-bit reads. `fragment_index` is the fragment's register cell along its tile axis, which
+                ///   that pass reads to pair neighbours.
+                /// - `scale_buffer`, `scale_index`, `scale_ldm`: a slab of block scales beside a slab of codes. Each byte
+                ///   is decoded and multiplied by the scale of its K block before the pack.
+                ///
+                /// `src_dtype` and `dtype` are the element types of the source and of the fragment, stamped by
+                /// `120_explicit_conversions` like a `Load`'s.
+                kernel FragmentLoad {CHECKED} {
+                    frag: Name [UPDATES],
+                    src_buffer: Name [BUFFER_READ],
+                    src_index: Exprs [EXPRESSION] : Index,
+                    role: Name [],
+                    fragment_layout: Name [] = Name::from("m16n8k16"),
+                    ldm: Option<i64> [] = None,
+                    b_trans: bool [] = false,
+                    staged: bool [] = false,
+                    clamp: Option<(Expression, Expression)> [EXPRESSION] : Index = None,
+                    k_zero: Option<(Expression, Expression)> [EXPRESSION] : Index = None,
+                    slab_layout: Name [] = Name::from("NONE"),
+                    pair_frag: Option<Name> [UPDATES] = None,
+                    fragment_index: i64 [] = 0,
                     scale_buffer: Option<Name> [BUFFER_READ] = None,
                     scale_index: Exprs [EXPRESSION] : Index = Exprs::from([]),
                     scale_ldm: i64 [] = 0,
-                    fragment_layout: Name [] = Name::from("m16n8k16"),
-                    fragment_index: i64 [] = 0,
+                    src_dtype: Option<DType> [] = None,
+                    dtype: Option<DType> [] = None,
                 }
                 /// `mma.sync.aligned.m{M}n{N}k{K}.row.col.f32.{ab}.{ab}.f32` — one tensor-core MMA via inline PTX (the `s16816`
                 /// instruction).
                 ///
                 /// `c_frag` is the accumulator array (both input and output — `d = a·b + c`); `a_frag` / `b_frag` are the
-                /// multiplicand arrays filled by :class:`LdmatrixLoad`. `shape` spells the M/N/K. `ab_dtype` (`"f16"` / `"bf16"`
+                /// multiplicand arrays filled by :class:`LdmatrixLoad` or :class:`FragmentLoad`. `shape` spells the M/N/K. `ab_dtype` (`"f16"` / `"bf16"`
                 /// / `"e4m3"` / `"e5m2"` — the PTX dtype field, :attr:`AtomKind.ab_dtype`) tags the operand element type — same-
                 /// width dtypes share a fragment layout and differ only in the PTX instruction's dtype field, so the render just
                 /// picks the matching `emmy_mma_…` wrapper. `c_dtype` is the accumulator element type: `"f32"` (the default —
@@ -775,9 +813,10 @@ macro_rules! with_statement_types {
                 /// takes one logical 16×16 C fragment and selects a four-column A slice or four-row B slice with warp shuffles.
                 /// The emitter gates on the atom's C→A/C→B repack capabilities at schedule time. The m16n8k16 f16 B layout takes
                 /// one C fragment and exchanges its packed column pairs between lanes. Every lane of the warp must participate in
-                /// that exchange.
+                /// that exchange. `frag` is a fragment a :class:`RegFragment` declared: the repack fills its registers, as a
+                /// load does.
                 kernel FragmentRepack {} {
-                    frag: Name [DEFINES],
+                    frag: Name [UPDATES],
                     srcs: Names [READS],
                     ab_dtype: Name [] = Name::from("f16"),
                     fragment_layout: Name [] = Name::from("m16n8k16"),
@@ -847,10 +886,11 @@ macro_rules! with_statement_types {
                 /// tail, stored as its body: `epilogue_params` bind, in order, the accumulator names to `frag` and `extra_frags`
                 /// (a multi-fold node's additional C fragments, so the chain combines the channels per cell — SwiGLU et al.),
                 /// every other name the body reads is a coordinate, and `epilogue_result` names the stored value. The lowering
-                /// forms the body through `Lambda.closing`, which fixes its statement order. Evaluated per fragment element right
-                /// before the downconvert (the CUTLASS epilogue-visitor pattern): floating loads widen to f32, while integer
-                /// loads retain their type for arithmetic on packed codes. Each param substitutes to that element, and the
-                /// reserved :data:`ELEM_ROW` / :data:`ELEM_COL` vars in a `Load` index or `Select` predicate substitute to the
+                /// forms the body through `Lambda.closing`, which fixes its statement order, and the type pass types it like any
+                /// body over f32 params (`ir.types.epilogue_conversions`): a floating load widens to f32 by a conversion of its
+                /// own, while an integer load retains its type for arithmetic on packed codes. Evaluated per fragment element
+                /// right before the downconvert (the CUTLASS epilogue-visitor pattern). Each param substitutes to that element,
+                /// and the reserved :data:`ELEM_ROW` / :data:`ELEM_COL` vars in a `Load` index or `Select` predicate substitute to the
                 /// element's row / col offset within the fragment (the cell base is already in the expression).
                 ///
                 /// `m_guard` / `n_guard` carry a masked-tile boundary as `(base Expression, bound Expression)` — the tile's row /
@@ -1361,8 +1401,8 @@ use crate::dtype::DType;
 use crate::elementwise::ElementwiseOp;
 use crate::expr::Expression;
 use crate::field::{
-    Axes, AxisRef, Branches, ElementwiseOps, Exprs, Float, FragmentArgs, Int2, Ints, Names, NumOr,
-    Shape3, Stmts, SubroutineRef,
+    Axes, AxisRef, Branches, Exprs, Float, FragmentArgs, Int2, Ints, Names, NumOr, Shape3, Stmts,
+    SubroutineRef,
 };
 
 with_statement_types!(define_statement_types);
@@ -1397,7 +1437,7 @@ mod tests {
         }
         assert_eq!(
             blake3::hash(listing.as_bytes()).to_hex().as_str(),
-            "cf4f7f0925c0c53b3fe6eca293c2ffd071501521bd5935336cf16597ab0fa97c",
+            "ee3da8b8e2f70d0fb65c6713f3ba3c43b5047d0a938489a13deb08973ca4c4ec",
             "{listing}"
         );
     }

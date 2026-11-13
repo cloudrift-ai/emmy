@@ -3,8 +3,7 @@
 Owns every CUDA C-spelling decision the Kernel-IR renderer makes:
 type names (``float`` / ``__half`` / fixed-width integer carriers), conversion intrinsics
 (``__half2float`` / ``__float2half``), per-dtype op intrinsics
-(``expf`` / ``hexp``, ``fmaxf`` / ``__hmax``, ...), and the set of
-ops with native fp16 forms.
+(``expf`` / ``hexp``, ``fmaxf`` / ``__hmax``, ...).
 
 The Statement renderer in :mod:`emmy.compiler.ir.stmt` calls into a
 :class:`CudaRenderTarget` instance attached to ``RenderCtx``; the
@@ -14,7 +13,7 @@ to ``Load`` / ``Assign`` / ``Write`` are gone.
 
 from __future__ import annotations
 
-from emmy.compiler.dtype import INTEGER_NAMES
+from emmy.compiler.target import vector_widths
 
 _TYPE_NAME: dict[str, str] = {
     "f32": "float",
@@ -36,23 +35,6 @@ _TYPE_NAME: dict[str, str] = {
     "bool": "bool",
 }
 
-_INTEGER_NATIVE_OPS = frozenset(
-    {
-        "add",
-        "subtract",
-        "multiply",
-        "floor_divide",
-        "remainder",
-        "mod",
-        "left_shift",
-        "right_shift",
-        "bitwise_and",
-        "bitwise_or",
-        "bitwise_xor",
-        "bitwise_count",
-    }
-)
-
 # fp8 storage dtypes (M2/M3 of the FP8 plan). A kernel never computes ON fp8 —
 # the only legal uses of an fp8 SSA value are the decode conversion out of it
 # and the encode conversion into it, both spelled below in ``convert``.
@@ -65,10 +47,25 @@ _NARROW_DTYPES = (*_SCALAR_NARROW_FLOATS, "f16x2", "f4e2m1x2")
 
 # Intrinsic spellings — per dtype.  Keys are abstract op names emitted
 # by ``op_to_expression`` (``"exp"``, ``"fmax"``, ``"fabs"``, ...).
+#: The approximate form of each instruction class, as the operations' table names them: CUDA's fast intrinsic where
+#: one exists, else a helper in inline PTX the kernel renderer emits. Each is the instruction ``--use_fast_math``,
+#: ``--prec-div=false`` or ``--prec-sqrt=false`` picks for the exact spelling.
+APPROXIMATE_INTRINSICS: dict[str, str] = {
+    "exp_fast": "__expf",  # mul, ex2.approx
+    "log_fast": "__logf",  # lg2.approx, mul
+    "sin_fast": "__sinf",  # sin.approx
+    "cos_fast": "__cosf",  # cos.approx
+    "pow_fast": "__powf",  # lg2.approx, mul, ex2.approx
+    "divide_fast": "__fdividef",  # div.approx
+    "reciprocal_fast": "emmy_rcp_approx",  # rcp.approx
+    "sqrt_fast": "emmy_sqrt_approx",  # sqrt.approx
+    "tanh_fast": "emmy_tanh_approx",  # tanh.approx
+}
+
 _INTRINSIC_F32: dict[str, str] = {
+    **APPROXIMATE_INTRINSICS,
     "divide_rn_f32": "__fdiv_rn",
     "exp": "expf",
-    "exp_fast": "__expf",
     "log": "logf",
     "rsqrt": "rsqrtf",
     "sin": "sinf",
@@ -118,37 +115,6 @@ _INTRINSIC_F16x2: dict[str, str] = {
     "fmin": "__hmin2",
     "fabs": "__habs2",
 }
-
-# Abstract op names with a native fp16 form. Binary operators (+, -, *, /)
-# work via cuda_fp16.h's operator overloads on ``__half`` and ``__half2``,
-# so they don't need an entry in the intrinsic tables but are still
-# "native". The same set covers F16 and F16x2 — every op listed has both
-# a per-element (``__hmax``, ``hexp``) and per-pair (``__hmax2``,
-# ``h2exp``) form.
-_NATIVE_FP16_OPS: frozenset[str] = frozenset(
-    {
-        "add",
-        "subtract",
-        "multiply",
-        "divide",
-        "maximum",
-        "minimum",
-        "exp",
-        "log",
-        "sqrt",
-        "rsqrt",
-        "tanh",
-        "fabs",
-        "abs",
-        "negative",
-        "copy",
-        "reciprocal",
-        "relu",
-        # Not ``sigmoid``: its half spelling ``1/(1+hexp(-x))`` rounds three times, which lands up
-        # to two half-ulps from torch's compute-in-f32-round-once value and fails the strict
-        # ``rtol=1e-3`` gate; the non-native path below computes it in f32 and converts once.
-    }
-)
 
 
 class CudaRenderTarget:
@@ -231,21 +197,11 @@ class CudaRenderTarget:
             return _INTRINSIC_F16x2.get(op_name, op_name)
         return _INTRINSIC_F32.get(op_name, op_name)
 
-    def has_native_op(self, op_name: str, dtype: str) -> bool:
-        if dtype == "f32":
-            # f32 has every op natively.
-            return True
-        if dtype in ("f16", "f16x2"):
-            return op_name in _NATIVE_FP16_OPS
-        if dtype in INTEGER_NAMES:
-            return op_name in _INTEGER_NATIVE_OPS
-        return False
-
     def vector_type(self, dtype: str, n: int) -> tuple[str, str] | None:
-        if dtype == "f32":
-            if n in (2, 4):
-                return (f"float{n}", "float")
+        if n not in vector_widths(dtype):
             return None
+        if dtype == "f32":
+            return (f"float{n}", "float")
         if dtype in ("f16", "bf16"):
             # n=2 → 4 B (LDS.32) via the pair type (``__half2`` / ``__nv_bfloat162``, 4-byte alignment).
             # n=4 → 8 B (LDS.64) via ``uint2`` punned to 4 elements.

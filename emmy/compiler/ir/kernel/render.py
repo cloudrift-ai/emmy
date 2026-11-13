@@ -12,30 +12,27 @@ import numpy as np
 
 from emmy.compiler.backend.cuda.dtype import cuda_includes, cuda_name
 from emmy.compiler.backend.cuda.dtype import nbytes_of as _nbytes_of
-from emmy.compiler.backend.cuda.render_target import CudaRenderTarget
+from emmy.compiler.backend.cuda.render_target import APPROXIMATE_INTRINSICS, CudaRenderTarget
 from emmy.compiler.dim import spans_one_page
 from emmy.compiler.dtype import F4_VALUES, F32
+from emmy.compiler.ir.kernel.interface import Param, kernel_interface
 from emmy.compiler.ir.kernel.ir import (
     CpAsyncCopy,
+    FragmentLoad,
     FragmentRepack,
     KernelOp,
     LdmatrixLoad,
     RegStore,
-    SetMaxNReg,
-    Smem,
-    TmaDescriptor,
-    TreeHalve,
-    WarpShuffle,
     WgmmaMma,
     frag_dtype,
-    pack_smem,
     swizzle_fn,
     swizzle_xor,
     wgmma_form,
 )
 from emmy.compiler.ir.render import Paged, RenderCtx, render_body
-from emmy.compiler.ir.stmt import Assign, Body, Load, Write, reduce_strength
+from emmy.compiler.ir.stmt import Assign, Load, Write, reduce_strength
 from emmy.compiler.tensor import Tensor
+from emmy.emmy_ir import SCALE_SELECTOR_A, SCALE_SELECTOR_B  # the block-scaled product's lane selectors
 
 # Per-CTA static-smem hard cap on every CUDA arch we target. Above this,
 # PTXAS rejects ``__shared__ T arr[N]`` decls (``uses too much shared
@@ -43,7 +40,6 @@ from emmy.compiler.tensor import Tensor
 # + ``cudaFuncAttributeMaxDynamicSharedMemorySize``). When the kernel's
 # total Smem footprint exceeds this, ``render_kernelop`` switches to a
 # single dynamic pool with per-buffer offsets.
-STATIC_SMEM_CAP = 48 * 1024
 
 # E4M3's finite values are half bit patterns shifted seven places, times 2**8.
 # This also normalizes subnormals without the SDK emulation's data-dependent loop.
@@ -99,6 +95,27 @@ static __device__ __forceinline__ __half emmy_f4_pair(int i) {
 }
 
 """
+
+
+def _approximate_prelude(body_text: str, flush_to_zero: bool) -> str:
+    """The approximate instructions CUDA has no intrinsic for (``__expf``, ``__logf``, ``__fdividef`` and the like
+    cover the rest), in inline PTX: the ones ``body_text`` calls. Inline PTX takes no modifier from nvcc's ``--ftz``,
+    so the two instructions nvcc flushes under it say ``.ftz`` here, from the kernel's flush-to-zero decision;
+    ``tanh.approx`` has no flushing form."""
+    ftz = ".ftz" if flush_to_zero else ""
+    helpers = (
+        ("emmy_rcp_approx", f"rcp.approx{ftz}.f32"),
+        ("emmy_sqrt_approx", f"sqrt.approx{ftz}.f32"),
+        ("emmy_tanh_approx", "tanh.approx.f32"),
+    )
+    return "".join(
+        f"static __device__ __forceinline__ float {name}(float x) {{\n"
+        f'    float y; asm("{instruction} %0, %1;" : "=f"(y) : "f"(x)); return y;\n'
+        "}\n\n"
+        for name, instruction in helpers
+        if f"{name}(" in body_text
+    )
+
 
 _BITCAST_PRELUDE = """\
 template <typename To, typename From>
@@ -250,7 +267,7 @@ static __device__ __forceinline__ void emmy_cp_async_wait() {
 # ``emmy_mma_m16n8k16_{f16,bf16}_{f32,f16}(c, a, b, c)`` (the atom convention's <ab>_<acc> dtype pair) rather than raw asm; same SASS.
 # The ``a``/``b`` operands are ``unsigned`` 32-bit register arrays (two packed
 # 16-bit elems each); ``c``/``d`` are ``float`` (f32 accumulate). Lane→element
-# layout is the PTX-fixed mma.m16n8k16 fragment map (see the ``LdmatrixLoad`` /
+# layout is the PTX-fixed mma.m16n8k16 fragment map (see the ``FragmentLoad`` /
 # ``RegStore`` address arithmetic in ``ir/kernel/ir.py``).
 _MMA_M8N8K4_PRELUDE = """\
 // Volta m8n8k4: one warp instruction performs four independent 8x8 MMAs.
@@ -1110,9 +1127,11 @@ static __device__ __forceinline__ void emmy_mma_m16n8k32_e5m2_f32(float* d, cons
 # above serve unchanged — a packed row is K/2 bytes, which is exactly what they take as ``ldm``.
 # Those gather bytes per lane rather than issuing ``ldmatrix``, which is b16-only below sm_100a;
 # reusing them means this atom inherits that choice instead of needing a drain of its own.
-_MMA_F4_BLOCK_PRELUDE = """\
-#define EMMY_F4_SF_TID_A 0
-#define EMMY_F4_SF_TID_B 1
+_MMA_F4_BLOCK_PRELUDE = f"""\
+#define EMMY_F4_SF_TID_A {SCALE_SELECTOR_A}
+#define EMMY_F4_SF_TID_B {SCALE_SELECTOR_B}
+"""
+_MMA_F4_BLOCK_PRELUDE += """\
 
 static __device__ __forceinline__ unsigned emmy_mma_load_sfa_f4(const unsigned char* s, int ldm) {
     int lane = threadIdx.x & 31, q = lane >> 2, r = (lane & 3) - 2 * EMMY_F4_SF_TID_A;
@@ -1147,7 +1166,7 @@ static __device__ __forceinline__ void emmy_mma_m16n8k64_e2m1_f32(
 
 """
 
-# Staged fp8 slab drains — appended ONLY when the kernel carries a byte-slab ``LdmatrixLoad``
+# Staged fp8 slab drains — appended ONLY when the kernel carries a byte-slab ``FragmentLoad``
 # (a staged 1-byte operand), so every other kernel's source stays byte-identical. ldmatrix is
 # b16-only below sm_100a, so a staged fp8 slab drains through a cooperative per-lane gather with
 # the same lane→element maps as the gmem fragment loaders — and, where the slab keeps K
@@ -1203,7 +1222,7 @@ static __device__ __forceinline__ void emmy_mma_load_b_smem_trans_b8v(unsigned* 
 """
 
 # The staged PACKED-PAIR (NVFP4) B drain — appended only for the fragment dtypes a kernel's
-# scale-bearing byte-slab ``LdmatrixLoad``s actually use, so every other kernel's source stays
+# scale-bearing byte-slab ``FragmentLoad``s actually use, so every other kernel's source stays
 # byte-identical and an f16 kernel never carries the bf16 form. One stored byte holds two adjacent
 # K values as 4-bit e2m1 codes (low nibble first), and every 16 of them share one scale, which the
 # fill already decoded into the fragment's own dtype in a companion slab. So a lane's fragment
@@ -1259,7 +1278,7 @@ def _f4_lut_bits(dtype: str) -> list[int]:
 
 
 # The staged BLOCK-SCALED fp8 B drain — the one-value-byte form of the packed drain above, appended
-# only for the fragment dtypes a kernel's fp8 scale-bearing byte-slab ``LdmatrixLoad``s use. A
+# only for the fragment dtypes a kernel's fp8 scale-bearing byte-slab ``FragmentLoad``s use. A
 # lane's (k, k+1) byte pair converts to two exact 16-bit values with one hardware cvt, as the plain
 # W8A16 drain does, and both multiply the k block's f32 scale before ONE round to the fragment —
 # the fill's own ``bf16(scale * decode)``, so the staged form is bit-identical to it. The block
@@ -1394,9 +1413,10 @@ def _wgmma_prelude(kernel_op: KernelOp) -> str:
 
 
 _INTRINSIC_TO_CUDA: dict[str, str] = {
+    **APPROXIMATE_INTRINSICS,
     "divide_rn_f32": "__fdiv_rn",
     "exp": "expf",
-    "exp_fast": "__expf",
+    "log": "logf",
     "rsqrt": "rsqrtf",
     "sin": "sinf",
     "cos": "cosf",
@@ -1428,7 +1448,6 @@ _BUILTIN_TO_CUDA: dict[str, str] = {
 
 # Block size for the linear thread-flattening path (``Tile.block_axes``
 # empty); the host-side launcher rounds the grid up to cover all threads.
-_BLOCK_SIZE = 256
 
 
 _GRID_DEPENDENCY = '#if defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= 900\n    asm volatile("griddepcontrol.wait;" ::: "memory");\n#endif\n'
@@ -1438,10 +1457,10 @@ def render_kernelop(
     kernel_op: KernelOp,
     tensors: dict[str, Tensor] | None = None,
     shapes: dict[str, tuple[int, ...]] | None = None,
-    literal_constants: dict[str, float] | None = None,
     runtime_args: tuple[str, ...] = (),
     paged_buffers: tuple[tuple[str, int, int], ...] = (),
     pair_tables: frozenset[str] = frozenset(),
+    flush_to_zero: bool = False,
 ) -> str:
     """Render a complete ``extern "C" __global__`` CUDA function for a ``KernelOp``.
 
@@ -1456,12 +1475,6 @@ def render_kernelop(
     ``shapes`` is the legacy form (shape-only, no dtype) — kept for
     back-compat with tests that pre-date the dtype migration; dtypes
     default to F32 in that path. New callers should prefer ``tensors``.
-
-    ``literal_constants`` maps input-buffer names to scalar values that
-    should be embedded in the kernel body as ``float`` literals instead
-    of passed as kernel parameters. Loads of those bufs render as
-    ``float name = <value>;`` (see ``Load``'s render) and the buf is
-    excluded from the kernel signature.
 
     ``paged_buffers`` names buffers virtualized along one axis, as
     ``(name, axis, page_size)``: instead of a plain pointer the signature
@@ -1478,27 +1491,29 @@ def render_kernelop(
     ``Load`` from one computes its value (``_F4_PAIR_PRELUDE``) instead of reading it. The buffer
     stays a parameter, so the signature does not change.
 
+    ``flush_to_zero`` is the kernel's flush-to-zero decision, for the instructions written in inline PTX: nvcc's
+    ``--ftz`` reaches every other one.
+
     Kernel signature is derived from the body: ``kernel_op.inputs``
     (distinct ``Load.input`` names) become input params,
     ``kernel_op.outputs`` (distinct ``Write.output`` names) become
     writeable output params, ordered by first appearance. Parameter
     types come from the per-buffer :class:`Tensor.dtype` (passed in via
-    ``tensors=`` / ``shapes=`` — the caller supplies them); literal-constant
-    inputs are skipped. Unknown buffers fall back to ``F32``.
+    ``tensors=`` / ``shapes=`` — the caller supplies them). Unknown buffers fall back to ``F32``.
     """
-    literals = dict(literal_constants or {})
     tmap: dict[str, Tensor] = dict(tensors) if tensors else {}
     if shapes:
         for n, s in shapes.items():
             tmap.setdefault(n, Tensor(n, tuple(s)))
-    smem_offsets, smem_total = _compute_dynamic_smem_offsets(kernel_op)
+    paged_names = frozenset(n for n, _, _ in paged_buffers if n in kernel_op.inputs or n in kernel_op.outputs)
+    interface = kernel_interface(kernel_op, tmap, runtime_args, paged_names)
+    smem_offsets, smem_total = interface.shared_offsets, interface.shared_pool_bytes
     ctx = RenderCtx(
         target=CudaRenderTarget(),
         shapes={n: tuple(t.shape) for n, t in tmap.items()},
         indent=1,
         intrinsics=_INTRINSIC_TO_CUDA,
         builtins=_BUILTIN_TO_CUDA,
-        literal_constants=literals,
         smem_dynamic_offsets=smem_offsets,
         buffer_dtypes={n: t.dtype.name for n, t in tmap.items()},
         pair_tables=frozenset(pair_tables),
@@ -1518,58 +1533,26 @@ def render_kernelop(
                 "kernels are parameter names; keep checkpoint paths on ConstantOp.source_path, never the id"
             )
 
-    paged = {
-        n: Paged(n, axis, page)
-        for n, axis, page in paged_buffers
-        if n not in literals and (n in kernel_op.inputs or n in kernel_op.outputs)
-    }
+    paged = {n: Paged(n, axis, page) for n, axis, page in paged_buffers if n in kernel_op.inputs or n in kernel_op.outputs}
     # A buffer whose one page spans it is addressed like the flat buffer it replaces: its base is
     # the table's only entry, resolved once in the preamble, so every statement type — a staged
     # copy, a descriptor, a fragment store — works over it unchanged.
     whole = {n for n, p in paged.items() if spans_one_page(tensors[n].shape, p.axis, p.page)}
     ctx.memory = {n: p for n, p in paged.items() if n not in whole}
-    sig_parts = [
-        f"const {cuda_name(_dtype_for(n))}* const* {n}__pages" if n in paged else f"const {cuda_name(_dtype_for(n))}* __restrict__ {n}"
-        for n in kernel_op.inputs
-        if n not in literals
-    ]
-
-    def _out_param(n: str) -> str:
-        """A paged output takes its page table; every other output stays a plain pointer."""
-        elem = cuda_name(_dtype_for(n))
-        return f"{elem}* const* {n}__pages" if n in paged else f"{elem}* __restrict__ {n}"
-
     # Every plain buffer parameter is ``__restrict__``: a launch's output never shares memory with its
     # inputs (the arena's live intervals end one launch past the last read, and a chained buffer
     # joins two programs, never one launch's read and write), so the compiler may keep a read-only
     # operand in registers across the kernel's stores and read it through the non-coherent path.
-    sig_parts.extend(_out_param(n) for n in kernel_op.outputs)
-    # TMA descriptors are passed as ``__grid_constant__`` value parameters.
-    # The kernel only takes their address (``&desc``) for inline asm, so
-    # the opaque ``CUtensorMap`` forward decl above suffices.
-    desc_names = tuple(dict.fromkeys(s.name for s in kernel_op.body.iter_of_type(TmaDescriptor)))
-    # Descriptors are passed by pointer (placed in global memory by the
-    # host) rather than ``__grid_constant__`` value parameters: the runtime's
-    # arg-packing path doesn't preserve the 64-byte alignment that
-    # by-value ``CUtensorMap`` parameters require, so this avoids a
-    # CUDA_ERROR_MISALIGNED_ADDRESS at launch.
-    sig_parts.extend(f"const CUtensorMap* __restrict__ {n}" for n in desc_names)
-    # Runtime int args for symbolic axis extents (Dim("seq_len") etc.) come
-    # after buffers and TMA descriptors so the launcher can simply tail-append
-    # the resolved int values to the kernel-arg pack.
-    sig_parts.extend(f"int {n}" for n in runtime_args)
+    # A paged buffer takes its page table. A TMA descriptor is passed by pointer (placed in global memory by the
+    # host): the runtime's arg-packing path doesn't preserve the 64-byte alignment a by-value ``CUtensorMap``
+    # needs. The runtime ``int`` args come last, so the launcher tail-appends their resolved values.
+    sig_parts = [_param_text(p) for p in interface.params]
     params_text = ", ".join(sig_parts)
-    bounds = _launch_bounds_for(kernel_op)
-    launch_bounds = f"\n__launch_bounds__({bounds})"
+    launch_bounds = f"\n__launch_bounds__({interface.threads})"
 
     # The target's spelling of an index division by a power of two: a shift and a mask where the ranges prove the
     # dividend non-negative. It is spelled here, on the body about to render: the simplifier reads ``/`` and ``%``.
     body_text = "\n".join(render_body(reduce_strength(kernel_op.body), ctx))
-    # The cross-thread combine (``WarpShuffle`` / ``TreeHalve``) references the hardware
-    # warp ``lane`` / ``warp`` ids; declare them at function entry when the body needs them.
-
-    if _body_uses_lane_warp(kernel_op.body):
-        body_text = "    int lane = threadIdx.x & 31;\n    int warp = threadIdx.x >> 5;\n" + body_text
     if smem_offsets:
         # All Smem decls were rewritten to pointer aliases into a single
         # dynamic pool; declare the pool at function entry. The pool base must
@@ -1600,11 +1583,12 @@ def render_kernelop(
     # and a 128-block GEMM stacked that way ran 3-4x slower once released (s512 layer 133 -> 192 us).
     # Released at the predecessor's exit, it still overlaps the launch with the predecessor's drain.
     body_text = _GRID_DEPENDENCY + body_text
-    prelude = _TMA_PRELUDE if desc_names else ""
-    sig_dtypes = [_dtype_for(n) for n in kernel_op.inputs if n not in literals]
+    prelude = _TMA_PRELUDE if any(p.kind == "descriptor" for p in interface.params) else ""
+    sig_dtypes = [_dtype_for(n) for n in kernel_op.inputs]
     sig_dtypes.extend(_dtype_for(n) for n in kernel_op.outputs)
     sig_dtypes.extend(s.dtype for s in kernel_op.body.iter_of_type(Assign) if s.dtype is not None)
-    sig_dtypes.extend(frag_dtype(ctx, s.frag) for s in kernel_op.body.iter_of_type(LdmatrixLoad) if frag_dtype(ctx, s.frag))
+    fragment_loads = [s for s in kernel_op.body.iter() if isinstance(s, (LdmatrixLoad, FragmentLoad))]
+    sig_dtypes.extend(frag_dtype(ctx, s.frag) for s in fragment_loads if frag_dtype(ctx, s.frag))
     includes = "".join(f"#include {h}\n" for h in cuda_includes(sig_dtypes))
     if any(str(dtype) == "f8e4m3" for dtype in sig_dtypes):
         includes += _F8_DECODE_PRELUDE
@@ -1618,7 +1602,8 @@ def render_kernelop(
     # A register-form ``wgmma`` cell reads the ``m16n8k16`` A fragment, loaded and repacked by the same
     # wrappers, so a kernel whose every cell is warp-group still needs them.
     uses_modern_mma = any(s.shape != (8, 8, 4) for s in mma_stmts) or any(
-        isinstance(s, (LdmatrixLoad, FragmentRepack)) and s.fragment_layout != "m8n8k4" for s in kernel_op.body.iter()
+        isinstance(s, LdmatrixLoad) or (isinstance(s, (FragmentLoad, FragmentRepack)) and s.fragment_layout != "m8n8k4")
+        for s in kernel_op.body.iter()
     )
     mma_sync_prelude = (_MMA_M8N8K4_PRELUDE if uses_m8n8k4 else "") + (_MMA_SYNC_PRELUDE if uses_modern_mma else "")
     # The fp8 wrappers + byte-gather loaders join only when an fp8 mma is present, so every
@@ -1632,7 +1617,8 @@ def render_kernelop(
         if _MMA_F8_PRELUDE not in mma_sync_prelude:
             mma_sync_prelude += _MMA_F8_PRELUDE
         mma_sync_prelude += _MMA_F4_BLOCK_PRELUDE
-    byte_drains = [s for s in kernel_op.body.iter() if isinstance(s, LdmatrixLoad) and s.byte_slab]
+    # A staged gather outside Volta's layout drains a slab of bytes: ``ldmatrix`` takes every 16-bit one.
+    byte_drains = [s for s in kernel_op.body.iter_of_type(FragmentLoad) if s.staged and s.fragment_layout != "m8n8k4"]
     if any(s.scale_buffer is None for s in byte_drains):
         mma_sync_prelude += _F8_STAGED_PRELUDE
     # A packed drain's fragment dtype IS its scale slab's — the fill writes that slab at the atom's
@@ -1652,62 +1638,24 @@ def render_kernelop(
     bitcast_prelude = _BITCAST_PRELUDE if "emmy_bitcast<" in body_text else ""
     f4_encode = _F4_ENCODE_PRELUDE if "emmy_to_f4e2m1(" in body_text else ""
     f4_encode += _F4_PAIR_PRELUDE if "emmy_f4_pair(" in body_text else ""
+    approximate = _approximate_prelude(body_text, flush_to_zero)
     preludes = (
-        f"{includes}{bitcast_prelude}{f4_encode}{mma_sync_prelude}{_wgmma_prelude(kernel_op)}"
+        f"{includes}{bitcast_prelude}{f4_encode}{approximate}{mma_sync_prelude}{_wgmma_prelude(kernel_op)}"
         f"{cp_async_prelude}{_swizzle_prelude(kernel_op)}{prelude}"
     )
     header = f'{preludes}extern "C" __global__{launch_bounds} void {kernel_op.name}({params_text})'
     return f"{header} {{\n{body_text}\n}}\n"
 
 
-def _compute_dynamic_smem_offsets(kernel_op: KernelOp) -> tuple[dict[str, int], int]:
-    """Walk the body collecting ``Smem`` decls. If their summed footprint
-    exceeds the static cap, return ``({name: byte_offset}, total_bytes)``
-    so ``Smem``'s render can emit pool aliases. Otherwise return an empty
-    map — the kernel keeps using ``__shared__ T arr[N]``.
-
-    Offsets/total come from :func:`pack_smem` (each buffer aligned to the
-    larger of its dtype size and explicit ``align`` field — TMA swizzle slabs
-    request 256/512/1024 B), the same packer ``KernelOp.smem_bytes`` uses — so
-    the static-vs-dynamic gate here and the launch-time pool size agree."""
-    smems: list[Smem] = list(kernel_op.smem_buffers.values())
-    if not smems:
-        return {}, 0
-
-    offsets, total = pack_smem(smems)
-    if total <= STATIC_SMEM_CAP:
-        return {}, 0
-    return offsets, total
-
-
-def _launch_bounds_for(kernel_op: KernelOp) -> int:
-    """Derive ``__launch_bounds__`` from the (single) grid's per-CTA thread count — a cooperative tile's
-    ``block_threads`` (``coop · ∏block-cells``), else the scalar tier's ``_BLOCK_SIZE``, with the warp-specialized
-    producer band, which launches too. Matches the ``blockDim`` the cuda lowering picks."""
-    from emmy.compiler.ir.kernel.ir import Grid, Tile, tile_cells  # noqa: PLC0415
-
-    for s in kernel_op.body:
-        if isinstance(s, Grid):
-            return s.block_threads + s.aux_threads
-        if isinstance(s, Tile):
-            return tile_cells(s) + s.aux_threads
-    return _BLOCK_SIZE
+def _param_text(param: Param) -> str:
+    """One parameter of the kernel's signature."""
+    if param.kind == "int":
+        return f"int {param.name}"
+    if param.kind == "descriptor":
+        return f"const CUtensorMap* __restrict__ {param.name}"
+    const = "const " if param.kind == "input" else ""
+    pointer = "* const*" if param.paged else "* __restrict__"
+    return f"{const}{cuda_name(param.dtype)}{pointer} {param.name}"
 
 
 __all__ = ["render_kernelop"]
-
-
-def _body_uses_lane_warp(body: Body) -> bool:
-    """True iff the body needs the ``lane`` / ``warp`` helper vars.
-
-    The materializer emits ``lane`` / ``warp`` use sites alongside:
-    - ``WarpShuffle`` and ``TreeHalve`` (the per-warp partial gate
-      ``if (lane == 0)``, ``TreeHalve(..., tid_var="warp")``).
-    - ``SetMaxNReg`` (only emitted by the warp-specialized materializer
-      path, which wraps in ``Cond(warp < P, ...)`` — the Cond predicate
-      references ``Var("warp")`` directly so the helper must be in scope).
-
-    Checking for these three primitives covers every kernel that
-    references either helper.
-    """
-    return bool(body.iter_of_type(WarpShuffle, TreeHalve, SetMaxNReg))

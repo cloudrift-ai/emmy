@@ -199,9 +199,15 @@ kernel it produced went on to read.
   (dynamic grid), strided rows, and the tensor-core `warp_tile` are reserved future tiers.
 - **Kernel → CUDA** (after `lowering/cuda`): `KernelOp` replaced by
   `CudaOp` carrying rendered source.
-- **Every buffer index spells every dim of its buffer**, `0` at a size-one dim. `render_index` flattens it
-  row-major for both the CUDA render and the Loop IR C++ runner, and refuses any other count: without strides the
-  coordinates cannot be summed into an address. A single coordinate is an already-flat address.
+- **Every buffer index spells every dim of its buffer**, `0` at a size-one dim, until it is flattened: one function,
+  `address.flat_index`, sums the coordinates row-major over the buffer's shape (symbolic sizes included, each
+  coordinate widened to 64 bits where the buffer can pass the 32-bit range) and refuses any other count, since
+  without strides the coordinates cannot be summed into an address. A single coordinate is an already-flat address.
+  A `Load`, a `Write` and a `CpAsyncCopy` take their flat index before anything prints them: a kernel body in
+  `lowering/cuda` (`008_flat_indices`, after which the body's optimization simplifies the index under the launch's
+  ranges), a Loop IR body where the runner renders it. The renderer prints such an index as it is given. It still
+  flattens for the statements that keep one index per dimension: a paged access, a `Write` under a Volta slab
+  layout, the lane form of a `CpAsyncCopy`, the fragment statements, `TmaLoad`, and a carried state.
 
 Multi-output ABI order always comes from `Node.buffer_names()`: matcher population reorders a body-carrying op's
 input/output maps to the graph ports after body normalization, Loop execution returns outputs in that order,
@@ -222,9 +228,9 @@ along different lowering paths still dedup in the tuning cache.
 `Tile`, `Smem`, `Sync`, `CpAsyncCopy`, `TmaDescriptor`, …) has named read-only fields, compares by content and is
 hashable. To "edit" one, take a copy with `stmt.replace(field=value)`; nothing outside `ir/stmt/` calls
 `dataclasses.replace` on a statement or lists its fields. A statement
-type states its fields to the text reader and the structural form only. A pass that generalizes whole statements (the
-kernel loopify pass, off unless pinned, rolls repeated ones into a loop) reads each field by the name `fields_of` gives
-and rebuilds through `replace`, so it needs no dataclass behind the statement type. Ops, by contrast, are frozen and
+type states its fields to the text reader and the structural form only. A pass that generalizes whole statements
+reads each field by the name `fields_of` gives and rebuilds through `replace`, so it needs no dataclass behind the
+statement type. Ops, by contrast, are frozen and
 unhashable — rewrites replace the op and rebind its graph node. Op fields stored inside statements (`Accum.op`) must be
 lightweight value objects (`ElementwiseImpl`, not `ElementwiseOp`) so the surrounding statement stays hashable.
 
@@ -233,8 +239,9 @@ lightweight value objects (`ElementwiseImpl`, not `ElementwiseOp`) so the surrou
 `ir/stmt/` is the vocabulary all three IRs share, so the rest of the compiler uses it through one package and nothing
 else: no submodule path, no private name. The package exports the statement types, `Body` and `OutputSpec`,
 `normalize_body` and `canonicalize_identity`, a few functions over statements (`free_names`, `exposed_defines`,
-`rename_free`, `mask_select_predicate`, `ordering_constraints`, `dtype_promote`), the text form (`pretty_body`,
-`parse_body`), four normalization steps a caller may run on its own (`one_operation_per_definition`,
+`rename_free`, `mask_select_predicate`, `ordering_constraints`, `dtype_promote`, `reduce_strength`, `check_types`,
+`check_input`),
+the text form (`pretty_body`, `parse_body`), four normalization steps a caller may run on its own (`one_operation_per_definition`,
 `canonical_values`, `simplify_body`, `prepare_body`), the two statement types fusion's body assembly in `ir/loop/`
 builds a region with (`Call`, `Subroutine`), and the names of a statement type's fields (`fields_of`). The statement
 types, `Body`, the protocol, the text, the value numbering and the normalization are implemented in Rust — the
@@ -632,11 +639,39 @@ Body walkers: `iter_body(body)` (pre-order; powers `for s in loop_op`),
 `str(stmt)` (the statement's text, the lines kernel dumps show; block stmts
 recurse via `pretty_body`).
 
-CUDA scalar rendering goes through `op_to_expression` in `ir/render.py`. Boolean masks retain the historical f32 SSA
+CUDA scalar rendering goes through `op_to_expression` in `ir/render.py`. It spells primitive operations only: a
+composite function (`sigmoid`, `relu`, `square`, `reciprocal`) is its definition in the operations' table
+(`Expression.definition`), which kernel lowering writes into the body (`125_spell_composites`) and the renderer
+reads for the statements that keep one operation (`FragmentApply`, a carried program). An approximate instruction is
+an operation the body names (`exp_fast`, `divide_fast`, `reciprocal_fast`, `sqrt_fast`, `log_fast`, …, picked by
+`130_approximate_math`): CUDA's fast intrinsic where one exists (`__expf`, `__fdividef`), else a helper in inline PTX
+the kernel renderer emits, with `.ftz` when the kernel flushes to zero. Boolean masks retain the historical f32 SSA
 convention, so Torch's `bitwise_not` spelling renders as logical zero-test (`mask == 0`); explicitly bool-stamped values
 use the same semantics. Integer complement is not inferred from that name and fails closed until it has a typed
-consumer. The target-aware render of an `Assign` is responsible for conversions such as `__half2float` when an
-argument's stamped dtype differs from the result dtype.
+consumer.
+
+The renderer decides no type. A body reaches it typed in full by `ir/types.py`, the one place the promotion and
+conversion rules live. `stamp_types` gives each `Load`, `Assign`, `Accum` and `Write` its dtype by promotion.
+`explicit_conversions` then makes every operation take its operands at the dtype it computes at: natively at f16
+where the target has the operation there (`target.native_f16_ops`) and every operand is f16, over integers where
+every operand is one, else in f32 with the result converted once. A value read at another dtype gets a definition
+of its own, `name = (dtype)source`, a `CastExpression` whose target is the dtype's name; a `Write`, a `Carry`, an
+`Accum` and the branches of a `Select` read names already at their dtype, so `Write.value_dtype` is also the
+buffer's element type. A comparison defines a truth value (`bool`): declared another dtype, a mask kept as a number,
+it is converted once. A literal operand is spelled at its operation's dtype. A name the body only reads (an axis, a
+symbolic size, a thread coordinate) is an integer. The nodes of one affine region compute at one dtype and stay one
+definition. `check_types` (the crate's `types` module, exported by the statement package) is the same property as a
+check that names the first statement leaving a type or a conversion out. A `FragmentLoad` says the element type of
+its source and of its fragment, and a `RegFragment` its own. A `RegStore` epilogue is a body of its own, typed by
+`epilogue_conversions` over the f32 elements of its accumulators (a float load widened to f32 by a conversion, a
+select at f32) and checked like any. Two kinds of statement are exempt until they are typed too, and the check lists
+them: the cross-thread combine programs (`TreeHalve`, `WarpShuffle`, `WarpBroadcast`), and a `FragmentApply`
+operand's conversion to f32, which the renderer types where it prints it, because its operands are register elements
+only the renderer names. An
+index `Let` with no dtype is an integer whose width the renderer still takes from its expression.
+`check_input` (the crate's `input` module) is what `lowering/cuda` asks of every kernel before it renders one:
+`check_types`, one flat index on every `Load`, `Write` and `CpAsyncCopy` that its dimensions do not define, no
+loop left asking for unrolling, and a layout and a role the lane-to-element table has on every fragment statement.
 
 `Select` uses the common dtype of its branch values, and type propagation gives its consumers that same dtype.
 Selecting between two FP16 values must preserve the rounding of a subsequent FP16 product; promoting the selection
@@ -997,7 +1032,8 @@ reformats deep coordinate trees nor retains duplicate canonical strings.
 
 ### `loop/runner.py` — C++ JIT executor
 
-`execute_loop_op_cpp(loop, input_arrays, out_shapes)` renders the LoopOp body to a C++ source string and JIT-compiles
+`execute_loop_op_cpp(loop, input_arrays, out_shapes)` types the LoopOp body in full (`ir/types.py`, with no operation
+native at f16: the reference computes every float in f32), renders it to a C++ source string and JIT-compiles
 it in-process via cppyy / Cling (cached by the rendered source), then calls it with raw pointers to the input and every
 output array. One output returns an array; multiple outputs return a tuple in the operation's graph-populated ABI
 order. Each Write's own scope determines its output shape, so independent sibling nests may reuse axis names with
@@ -1055,20 +1091,24 @@ beside the statement type's render function, never a member attached to the clas
 closed set — strings, numbers, booleans, expressions, axes, dtypes, elementwise ops, bodies, statements, records of such
 fields (`FragmentArg`, one operand of a `FragmentApply`), and tuples and optionals of those — which is the set the
 crate's `Field` trait is implemented for. A fragment layout is therefore named, not held: the statement stores the
-atom's layout name and rendering looks the geometry up. `tests/architecture/test_layering.py` guards the members.
+atom's layout name and its role, and whatever needs the geometry reads that row of the crate's lane-to-element table
+(`fragment_table`: the lane coordinates, each element's row and column offset as an expression over them, the
+row-reduce masks). The table also counts a fragment's registers, so no statement and no atom carries a count.
+`tests/architecture/test_layering.py` guards the members.
 
 | Symbol             | Role                                                              |
 |--------------------|-------------------------------------------------------------------|
 | `KernelOp`         | Graph-op wrapper around a `Tile`-rooted body. One per kernel.     |
-| `Grid`             | A `Tile` with its decode spelled out, which the CUDA stage turns it into (`decode_tile`): it binds the same axes, each to an expression over `thread_idx.x` and `block_idx.x`, launches `ceil(∏extents / block_threads)` CTAs of `block_threads + aux_threads` threads, and masks the cells past the count with a `Cond` at the top of its body where the launch overshoots. It states its launch's ranges of the built-ins, which the simplifier reads for its decode and its body. |
+| `Grid`             | A `Tile` with its decode spelled out, which the CUDA stage turns it into (`decode_tile`): it binds the same axes, each to an expression over `thread_idx.x` and `block_idx.x`, launches `ceil(∏extents / block_threads)` CTAs of `block_threads + aux_threads` threads, and masks the cells past the count with a `Cond` in its body where the launch overshoots. A thread's lane and warp, where the body reads them, are a `Let` each at the top of its body. It states its launch's ranges of the built-ins, which the simplifier reads for its decode and its body. |
 | `Smem`             | `__shared__` array allocation (name + dtype + extents + optional `align`). Swizzled TMA operand slabs align to their full swizzle atom (`8 × swizzle_width` B: B128→1024, B64→512, B32→256) — the coordinate-only `ldmatrix` XOR only reproduces the hardware's absolute-address swizzle when the base zeroes the swizzle's source-address bits; non-swizzled TMA keeps 128 B, fp16 16 B. `pack_smem` (the shared pool packer used by `smem_bytes` and the renderer) pads each buffer to `max(sizeof(dtype), align)` so the static-vs-dynamic gate and the launch-time dynamic-pool size agree. |
 | `Let` (a `stmt/` leaf) | Pure binding of one expression to an SSA name: a scalar literal, an integer index bound once outside a nested hot loop, or a flattened buffer coordinate (`FlatIndex`) reused across a copy's trips. |
 | `Sync`             | Thread barrier: CTA-wide `__syncthreads()`, warp-scope `__syncwarp()`, or a named `bar.sync` over a thread subset inside a warp-specialized branch. |
-| `TreeHalve`        | Cross-thread tree reduction over a smem buffer.                   |
+| `TreeHalve`        | Cross-thread tree reduction over a smem buffer. With `lane` set the buffer holds one partial per warp, and warp 0 folds it in registers behind one barrier. |
 | `WarpShuffle`      | Lane butterfly reduction or inclusive prefix scan over an aligned lane group. |
 | `WarpBroadcast`    | Broadcast the last lane's scan state within each aligned lane group. |
-| `RegFragment`      | Per-thread `mma.sync` register array declaration, zero-initialized for C. The established m16n8k16 layout uses A/B/C counts 4/2/4 for f16/f16/f32; the Volta m8n8k4 layout carries explicit A/B counts 2/2 and C counts 8 f32 or 4 packed f16 because one instruction realizes four PTX cells arranged as one logical 16×16 tile. Carries instruction shape, dtype, and an optional explicit register count. The opaque `nvcuda::wmma` nodes remain retired. |
-| `LdmatrixLoad`     | Load one operand into a `RegFragment`. The m16n8k16 layout can use `ldmatrix.sync.aligned.m8n8.x{4,trans}.b16` from shared memory or a global-memory-direct gather with the same lane map. SM70 has no `ldmatrix`, so gmem-direct and unpaired staged Volta paths use cooperative gathers. A materialized canonical-B tile with even M/N fragment counts instead derives paired crosswise-A and B-congruous shared layouts; each 128-bit load drains two logical fragments. Its four computation groups duplicate the appropriate A or B quadrant. `b_trans=True` marks a `[N, K]` weight and selects the corresponding transposed gather. Guards clamp M/N lanes and zero masked K elements in both layouts. A 1-byte staged slab (`byte_slab=True`) has no `ldmatrix` below sm_100a and drains through the cooperative gather too; when it also carries a `scale_buffer` the slab holds a weight stored as bytes with one scale per k block in that companion slab — PACKED PAIRS (an NVFP4 weight: one byte, two K elements, decoded through the value table) or fp8 bytes (one element each, converted by the hardware cvt and multiplied by an f32 scale before the round to the fragment). |
+| `RegFragment`      | Declaration of one fragment, the registers each lane of a warp holds for an operand or an accumulator: its role (`a`, `b`, `c`, or `sfa` / `sfb` for a lane's register of block scales), its element dtype and its layout. The register count is its row of the lane-to-element table: 4/2/4 for the m16n8k16 A/B/C at 16-bit operands and a float accumulator (2 for packed halves; bytes pack four a register, so the k32 and k64 operands are 4/2 too), 2/2 for Volta's A/B and 8 floats or 4 packed registers for its C, because one instruction realizes four PTX cells arranged as one logical 16×16 tile. An accumulator is zero at its declaration. The opaque `nvcuda::wmma` nodes remain retired. |
+| `LdmatrixLoad`     | `ldmatrix.sync.aligned.m8n8.x{2,4}[.trans].shared.b16`: one operand fragment, or two B fragments side by side (`pair_frag`, set by `096_pair_ldmatrix_loads`), read from a shared slab of 16-bit elements by one instruction. Each lane addresses one row of eight elements at the tile base plus its own offset, through the slab's `swizzle`; `ldm` is the slab's row stride. `role`, `b_trans` (an N-major slab, which is the product's column-major B) and `pair_frag` pick the form: `x4` for A, `x2.trans` for B, `x2` for a transposed B, `x4` or `x4.trans` for a pair. |
+| `FragmentLoad`     | One operand fragment gathered element by element, where `ldmatrix` does not apply: each lane reads the elements its row of the lane-to-element table gives it, converts each from `src_dtype` to `dtype` and packs them. From global memory, `clamp` holds the lanes past a masked M or N bound on the last element in range and `k_zero` zero-fills the K elements past theirs; `ldm` is the source's row stride, `None` for the extent of its last dimension. From a staged slab (`staged`): a slab of bytes, which `ldmatrix` has no form for below sm_100a, and every slab under Volta's layout, since SM70 has no `ldmatrix`. A materialized canonical-B Volta tile with even M/N fragment counts stores its slabs under the paired crosswise-A and B-congruous layouts (`slab_layout`), and each 128-bit load drains two logical fragments (`pair_frag`). A slab of bytes with a `scale_buffer` holds a weight stored as bytes with one scale per K block in that companion slab — PACKED PAIRS (an NVFP4 weight: one byte, two K elements, decoded through the value table) or fp8 bytes (one element each, converted by the hardware cvt and multiplied by an f32 scale before the round to the fragment). `b_trans=True` marks a `[N, K]` source. Until the PTX compiler expands it from the table, the renderer prints one call of a C++ loader picked from these fields. |
 | `MmaSyncPtx`       | Inline PTX for either `mma.sync.aligned.m8n8k4.row.{col,row}.{f32,f16}.f16.f16.{f32,f16}` on the Volta fragment layout or the established `mma.sync.aligned.m16n8k16.row.col.{f32,f16}.{f16,bf16}.{f16,bf16}.{f32,f16}` family. Paired B-congruous loads select row/row; the other Volta paths retain row/col. The renderer includes only the selected family's prelude, so SM70 never parses newer `ldmatrix` or m16n8k16 assembly. The BLOCK-SCALED fp4 form (`m16n8k64`, `kind::mxf4nvf4`) additionally carries `sfa_frag` / `sfb_frag`: both multiplicands are packed e2m1 pairs and the instruction applies one ue4m3 scale per 16 K elements itself, so the call passes those two scale registers where the others repeat the accumulator. Its data fragments reuse the fp8 byte loaders — the k64 4-bit lane map is the k32 8-bit one, over a row of K/2 bytes — leaving only the scale loaders new. It assembles only for the arch-suffixed consumer-Blackwell target, which the plan requests through `KernelSpec.arch_specific` (the flag TMA also sets). |
 | `WgmmaDescriptor`  | The 64-bit shared-memory matrix descriptor a `wgmma` operand is read through: start address, leading and stride byte offsets and the swizzle mode, built by `emmy_wgmma_desc` from the slab address the same swizzled TMA or cp.async fill deposited. |
 | `WgmmaMma`         | One `wgmma.mma_async.sync.aligned.m64nNk16` cell over N/8 of the per-warp 16×8 C fragments (instruction register d[4j+k] is fragment j, register k); A from a descriptor or a 4-register fragment, B always from a descriptor; the transpose bits are template arguments of the generated wrapper. |
@@ -1077,7 +1117,7 @@ atom's layout name and rendering looks the geometry up. `tests/architecture/test
 | `FragmentApply`    | The one pointwise node over a C fragment. Each argument resides in another fragment, a per-row register pair, a cell-uniform scalar, a predicate over the element's absolute coordinates (`COORD`), or a global-memory load template at those coordinates (`GMEM`). A coordinate mask is a `where` over a `COORD` predicate — the masked branch takes the carrier's finite identity, avoiding `-inf - -inf` in an all-masked chunk, and an additive mask applies its keep op first; an additive bias is an `add` of a `GMEM` operand. The atom's fragment-layout descriptor supplies the element count and row mapping, so the same leaf serves m16n8k16 and Volta m8n8k4. |
 | `FragmentRowReduce` | Fold one warp's C fragments along the atom's N direction, per ROW: in-lane columns combine first, then the layout's `__shfl_xor` masks combine the column-group lanes. The resulting register pair is what a `FragmentApply` broadcasts as a `ROW` operand. The chunk tier's pivot and summed channel partials are exactly this, which is why the tier needs the chunk inside one warp column. |
 | `FragmentRepack`   | Convert C fragments into a 16-bit operand in registers. The m16n8k16 f16 B form exchanges packed column pairs across the warp; the A form uses the existing lane layout. m16n8k16 consumes two adjacent fragments; Volta m8n8k4 selects a four-column A slice or four-row B slice from one logical 16×16 C fragment with warp shuffles of packed FP16 pairs. |
-| `RegStore`         | Layout-aware per-lane epilogue store: four C elements for m16n8k16 or eight elements covering the four Volta output quadrants for m8n8k4. A paired Volta tile derives the matching interleaved 32×32 accumulator map from its cell position; it is not a schedule field. Adjacent elements leave as one packed pair when N is contiguous, including under an M-only tail guard; an N guard or strided physical orientation keeps scalar stores. Stores f32 directly or downconverts to f16. An optional epilogue is a pure term over the projection tail's own `Load` / `Assign` / `Select` stmts, stored as its body with the names bound to the store's fragments and the name of the stored value; it is evaluated at each element's own coordinates. Floating loads widen to f32, while integer loads stay typed so shifts and bitwise operations on packed codes render as integer CUDA expressions. `run` holds the next three N-adjacent cells of a 16-bit `wgmma` output: the quad's lanes exchange packed column pairs so each lane stores one cell's eight columns of a row as one 16-byte store (`097_widen_fragment_stores`). |
+| `RegStore`         | Layout-aware per-lane epilogue store: four C elements for m16n8k16 or eight elements covering the four Volta output quadrants for m8n8k4. A paired Volta tile derives the matching interleaved 32×32 accumulator map from its cell position; it is not a schedule field. Adjacent elements leave as one packed pair when N is contiguous, including under an M-only tail guard; an N guard or strided physical orientation keeps scalar stores. Stores f32 directly or downconverts to f16. An optional epilogue is a pure term over the projection tail's own `Load` / `Assign` / `Select` stmts, stored as its body with the names bound to the store's fragments and the name of the stored value; it is evaluated at each element's own coordinates. The type pass types it over f32 params: a floating load widens to f32 by a conversion of its own, while an integer load keeps its type so shifts and bitwise operations on packed codes stay integer operations. `run` holds the next three N-adjacent cells of a 16-bit `wgmma` output: the quad's lanes exchange packed column pairs so each lane stores one cell's eight columns of a row as one 16-byte store (`097_widen_fragment_stores`). |
 | Shared from `tile` | `Tile` (launch geometry); from `ir/stmt/`: `Loop`, `StridedLoop`, `Load`, `Assign`, `Accum`, `Init`, `Let`, `Write`, `Select`, `Cond`, `ZeroPrologue`. |
 
 Volta direct A and transposed-B loads use the shared four-value loader when the flattened base and row stride

@@ -830,7 +830,7 @@ def emit_combine(
       per-row combine for strided-cooperative rows (caller passes ``segmented=True``).
     - a ``SMEM`` fold **after** a ``SHFL`` → the hierarchical cross-warp slab: lane-0 of each
       warp stages its broadcast state to a ``smem[n_warps]`` slab per component; one ``Sync``
-      + ``TreeHalve(tid_var="warp")`` collapses across warps and broadcasts.
+      + ``TreeHalve(tid_var=warp, lane=lane)`` collapses across warps and broadcasts.
     - a standalone ``SMEM`` → the block slab: every thread stages its partial, one ``Sync``,
       a single ``TreeHalve`` reduces + broadcasts in place.
 
@@ -901,8 +901,11 @@ def emit_combine(
             else:
                 out += [Write(output=b, index=(Var(tid_var),), values=(st,)) for b, st in zip(bufs, state, strict=True)]
             out.append(Sync())
+            lane = Var("lane") if hierarchical else None
             out.append(
-                TreeHalve(bufs=bufs, state=state, state_b=state_b, combine_states=prog, length=width, tid_var=Var(tid_var), dtype=dtype)
+                TreeHalve(
+                    bufs=bufs, state=state, state_b=state_b, combine_states=prog, length=width, tid_var=Var(tid_var), dtype=dtype, lane=lane
+                )
             )
         else:  # FoldMove.ATOMIC / FoldMove.REG — cross-CTA / register tiers, not emitted by the intra-CTA walk.
             raise NotImplementedError(f"intra-CTA combine cannot emit {fold} (cta/reg tiers are future work)")
@@ -1018,8 +1021,9 @@ def _tile_reduce_axis_transposed(
 
     # One copy of the prologue, the body and the projection per column. The prologue's names are
     # renamed with its column, so they come off ``protected``; everything shared (grid, reduce and
-    # lane coordinates) passes through.
-    hoisted_defs = {name for stmt in hoisted for name in stmt.defines()}
+    # lane coordinates) passes through. A name the prologue defines inside a loop (a hoisted fold's
+    # carrier) is one of them: two columns folding one carrier would seed it twice in one scope.
+    hoisted_defs = {name for stmt in Body(tuple(hoisted)).iter() for name in stmt.defines()}
     per_column = protected - hoisted_defs if columns > 1 else protected
     sweep: list[Statement] = []
     body: list[Statement] = []

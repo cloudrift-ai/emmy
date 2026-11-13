@@ -475,7 +475,7 @@ def test_values_equal_registry_canonical(monkeypatch):
     ``0x5``/``all`` vs the stamped binary string (width from its length — the
     ``pretty`` storage convention). Unregistered families compare by string only."""
     _pin_registry(monkeypatch)
-    for spelling in ("1", "yes", "on", "TRUE"):  # the grammar 085_fast_exp advertises (EMMY_FAST_EXP=1)
+    for spelling in ("1", "yes", "on", "TRUE"):  # the grammar 130_approximate_math advertises (EMMY_FAST_EXP=1)
         assert values_equal("FAST_EXP", spelling, True)
     assert values_equal("FAST_EXP", "0", False)
     assert not values_equal("FAST_EXP", "1", False)  # genuinely swapped BOOL

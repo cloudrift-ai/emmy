@@ -52,7 +52,18 @@ def _arange(x):
 
 
 _NAME_TO_FN: dict[str, object] = {
-    "exp_fast": np.exp,  # the FAST_EXP-lowered exp — host semantics identical, CUDA renders __expf
+    # The approximate forms a kernel pass picks under the precision knobs (``lowering/kernel/130``): on a host each is
+    # the exact operation; only a device spells the approximate instruction.
+    "exp_fast": np.exp,
+    "divide_fast": np.divide,
+    "reciprocal_fast": np.reciprocal,
+    "sqrt_fast": np.sqrt,
+    "log_fast": np.log,
+    "sin_fast": np.sin,
+    "cos_fast": np.cos,
+    "tanh_fast": np.tanh,
+    "pow_fast": np.power,
+    "sigmoid_fast": lambda x: 1.0 / (1.0 + np.exp(-x)),
     "divide_rn_f32": np.divide,  # f32 reference division; CUDA keeps round-to-nearest under fast math
     "arange": _arange,
     "rsqrt": lambda x: 1.0 / np.sqrt(x),

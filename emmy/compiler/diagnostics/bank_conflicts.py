@@ -17,7 +17,7 @@ Two layers:
   ``simulate_graph`` lowers the graph through ``KERNEL_PASSES`` first (idempotent), evaluates
   each binding via :func:`lane_bank_distribution`, runs :func:`annotate_lds128` over sibling
   chains, and computes per-cell access provenance over the inner-loop sweep. Pure static — no
-  GPU run. ``LdmatrixLoad`` slab reads are NOT modeled (the ldmatrix 8×8 lane protocol has its
+  GPU run. ``LdmatrixLoad`` and ``FragmentLoad`` slab reads are NOT modeled (the ldmatrix 8×8 lane protocol has its
   own fixed address pattern); the oracle covers the scalar drains and fills.
 """
 

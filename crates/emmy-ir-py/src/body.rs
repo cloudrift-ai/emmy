@@ -784,6 +784,35 @@ pub fn optimize_body<'py>(body: &Bound<'py, PyAny>) -> PyResult<Bound<'py, PyBod
     }
 }
 
+/// Check that a body is typed in full (`emmy_ir::types`): `buffers` maps each buffer the body reads or writes by
+/// name to its element dtype. Raises `TypeError` naming the first statement that leaves a type or a conversion out.
+#[pyfunction]
+pub fn check_types(body: &Bound<'_, PyAny>, buffers: HashMap<String, String>) -> PyResult<()> {
+    let buffers: emmy_ir::Result<HashMap<Name, emmy_ir::dtype::DType>> = buffers
+        .iter()
+        .map(|(name, dtype)| Ok((Name::new(name), dtype.parse()?)))
+        .collect();
+    emmy_ir::types::check_types(&PyBody::from_iterable(body)?, &buffers.py()?).py()
+}
+
+/// Check that a body is a code generator's input (`emmy_ir::input`): typed in full as `check_types` holds it, every
+/// access of a buffer outside `paged` one flat index, and no loop left asking for unrolling. Raises naming the first
+/// statement that fails.
+#[pyfunction]
+#[pyo3(signature = (body, buffers, paged=Vec::new()))]
+pub fn check_input(
+    body: &Bound<'_, PyAny>,
+    buffers: HashMap<String, String>,
+    paged: Vec<String>,
+) -> PyResult<()> {
+    let buffers: emmy_ir::Result<HashMap<Name, emmy_ir::dtype::DType>> = buffers
+        .iter()
+        .map(|(name, dtype)| Ok((Name::new(name), dtype.parse()?)))
+        .collect();
+    let paged = paged.iter().map(|name| Name::new(name)).collect();
+    emmy_ir::input::check_input(&PyBody::from_iterable(body)?, &buffers.py()?, &paged).py()
+}
+
 #[pyfunction]
 pub fn prepare_body<'py>(body: &Bound<'py, PyAny>) -> PyResult<Bound<'py, PyBody>> {
     PyBody::wrap(
@@ -950,6 +979,8 @@ pub fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(pretty_body, m)?)?;
     m.add_function(wrap_pyfunction!(normalize_body, m)?)?;
     m.add_function(wrap_pyfunction!(optimize_body, m)?)?;
+    m.add_function(wrap_pyfunction!(check_types, m)?)?;
+    m.add_function(wrap_pyfunction!(check_input, m)?)?;
     m.add_function(wrap_pyfunction!(prepare_body, m)?)?;
     m.add_function(wrap_pyfunction!(simplify_body, m)?)?;
     m.add_function(wrap_pyfunction!(one_operation_per_definition, m)?)?;

@@ -139,8 +139,8 @@ def test_independent_precision_regimes_never_replace_or_price_each_other(name, u
         with pinned_knobs({"FAST_MATH": umbrella, name: enabled}):
             contexts.append(Context.from_target((12, 0), gpu_name=_5090))
     ordinary, override = contexts
-    # A class nvcc picks the instruction of spells its flag; the exponential drops the umbrella's fast library with it.
-    flagged = name in ("FAST_DIV", "FAST_SQRT", "FLUSH_TO_ZERO", "CONTRACT_FMA") or (name == "FAST_EXP" and umbrella)
+    # The two whole-kernel decisions spell an nvcc flag; an approximate instruction is an operation of the kernel body.
+    flagged = name in ("FLUSH_TO_ZERO", "CONTRACT_FMA")
     assert (ordinary.compile_flags != override.compile_flags) is flagged
     assert ordinary.structural_key() != override.structural_key()
     # Later ambient changes cannot change either captured regime.

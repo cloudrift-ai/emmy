@@ -5,7 +5,7 @@ fragment (the ``WARP`` codec) are the two materializers for the same SEMIRING ``
 algebra. The plain claim "this program under this pinned schedule computes the right answer" is
 data now: it lives in ``tests/compiler/realization/cases/matmul/``, replayed against the compiler
 by the realization corpus. What stays here is everything a case file has no spelling for —
-emitted-source structure, kernel counts, bit-identity between two configs, ``pytest.raises``
+Kernel IR structure, kernel counts, bit-identity between two configs, ``pytest.raises``
 refusal messages, a rendered-line-count compile budget, and one SYMBOLIC kernel run at sizes other
 than the hint it was tiled for (a case runs a symbolic program at its own 512 hint, so the
 off-hint column of every former static/dynamic pair is what survives of it). Sections:
@@ -34,12 +34,37 @@ from emmy.compiler.dim import Dim
 from emmy.compiler.dtype import BF16, F16, F32
 from emmy.compiler.graph import Graph, Tensor
 from emmy.compiler.ir.base import InputOp
+from emmy.compiler.ir.expression import Var
 from emmy.compiler.ir.frontend.ir import LinearOp, MatmulOp, RmsNormOp
+from emmy.compiler.ir.kernel.interface import kernel_interface
+from emmy.compiler.ir.kernel.ir import (
+    CpAsyncCommit,
+    CpAsyncCopy,
+    FragmentLoad,
+    FragmentPromote,
+    LdmatrixLoad,
+    MbarrierInit,
+    MmaSyncPtx,
+    RegFragment,
+    RegStore,
+    Smem,
+    TmaLoad,
+)
+from emmy.compiler.ir.stmt import Body, Loop, Select, StridedLoop, pretty_body
 from emmy.compiler.ir.tensor.ir import ElementwiseOp
 from emmy.compiler.pipeline import CUDA_PASSES, TILE_PASSES, Pipeline
 from emmy.compiler.pipeline.knob import family_value
 from emmy.compiler.pipeline.search.features import mma_atom, stamps
-from tests.compiler.helpers import device_compute_capability, dyn_M, grouped_raster_decode, requires_cuda, requires_sm, requires_sm90
+from tests.compiler.helpers import (
+    compile_with_kernels,
+    device_compute_capability,
+    dyn_M,
+    grouped_raster_decode,
+    requires_cuda,
+    requires_sm,
+    requires_sm90,
+    statements,
+)
 
 
 def _supports_tma() -> bool:
@@ -52,6 +77,30 @@ def _supports_tma() -> bool:
 
 def _dtype(name: str):
     return {"f16": F16, "f32": F32}[name]
+
+
+def _names(kernels) -> str:
+    """The Kernel IR of ``kernels`` (the kernels of a compile, one of them, or a body) as text: what a check of a
+    name the lowering gave (a register cell's suffix, a slab, a fragment slot) or of an index's form reads."""
+    if isinstance(kernels, Body):
+        return "\n".join(pretty_body(kernels))
+    ops = kernels.values() if isinstance(kernels, dict) else (kernels,)
+    return "\n".join(line for op in ops for line in pretty_body(op.body))
+
+
+def _is_m16n8k16(kernels) -> bool:
+    """Whether a kernel holds the ``m16n8k16`` product: the tensor-core tier was reached."""
+    return any(tuple(mma.shape) == (16, 8, 16) for mma in statements(kernels, MmaSyncPtx))
+
+
+def _promotes(kernels, shadow: str, packed: str) -> bool:
+    """Whether a kernel folds the packed f16 accumulator ``packed`` into its f32 shadow ``shadow``."""
+    return any((promote.dst, promote.src) == (shadow, packed) for promote in statements(kernels, FragmentPromote))
+
+
+def _takes(compiled, name: str) -> bool:
+    """Whether a kernel of ``compiled`` takes the symbolic size ``name`` as a launch-time argument."""
+    return any(name in getattr(node.op, "runtime_args", ()) for node in compiled.nodes.values())
 
 
 # =========================================================================== #
@@ -108,9 +157,9 @@ def _pin_tile(monkeypatch, pin: tuple[str, str]) -> None:
     monkeypatch.setenv("EMMY_WORK", work)
 
 
-def _run(mode: str, pin: tuple[str, str], monkeypatch) -> tuple[np.ndarray, np.ndarray, str]:
+def _run(mode: str, pin: tuple[str, str], monkeypatch):
     """Compile the matmul under the pinned ``EMMY_TILE`` codec, run on seeded inputs at the
-    mode's runtime M, and return ``(output, reference, kernel_source)``."""
+    mode's runtime M, and return ``(output, reference, compiled graph, its kernels)``."""
     from emmy.compiler.backend.cuda.backend import CudaBackend  # noqa: PLC0415
 
     _pin_tile(monkeypatch, pin)
@@ -118,11 +167,9 @@ def _run(mode: str, pin: tuple[str, str], monkeypatch) -> tuple[np.ndarray, np.n
     rng = np.random.default_rng(0)
     a = rng.standard_normal((1, m, _K), dtype=np.float32)
     b = rng.standard_normal((_K, _N), dtype=np.float32)
-    be = CudaBackend()
-    compiled = be.compile(_matmul_graph(mode))
-    got = np.asarray(be.run(compiled, input_data={"a": a, "b": b})[0].outputs["c"])
-    src = "\n".join(n.op.kernel_source for n in compiled.nodes.values() if getattr(n.op, "kernel_source", None))
-    return got, (a @ b), src
+    compiled, kernels = compile_with_kernels(_matmul_graph(mode))
+    got = np.asarray(CudaBackend().run(compiled, input_data={"a": a, "b": b})[0].outputs["c"])
+    return got, (a @ b), compiled, kernels
 
 
 # (label, TILE codec, expects-register-replication, expected __launch_bounds__ or None).
@@ -146,25 +193,28 @@ _VARIANTS = {
 def test_matmul_tile_coverage(variant, monkeypatch):
     """Each output-tile geometry over a SYMBOLIC M run at an off-divisor length: the register
     replication the pin asks for is emitted, the small inner reduce unrolls, a pinned thread
-    inventory sets ``__launch_bounds__``, and the dynamic-grid tier threads the runtime extent
-    through as an ``int`` arg. The static column of every geometry is a corpus case."""
+    inventory bounds the block's threads, and the dynamic-grid tier threads the runtime extent
+    through as a launch-time argument. The static column of every geometry is a corpus case."""
     pin, has_reg, launch_bounds = _VARIANTS[variant]
-    got, ref, src = _run("dynamic", pin, monkeypatch)
+    got, ref, compiled, kernels = _run("dynamic", pin, monkeypatch)
+    names = _names(kernels)
 
     diff = float(np.abs(got - ref.reshape(got.shape)).max())
     assert diff < 1e-3, f"{variant}: matmul mismatch at the off-divisor extent (max abs err {diff})"
 
-    has_copy = "__c0_1" in src or "__c1_0" in src  # a replicated register-cell binding
+    has_copy = "__c0_1" in names or "__c1_0" in names  # a replicated register-cell binding
     if has_reg:
         assert has_copy, f"{variant}: expected replicated register cells (__c*)"
-        assert "#pragma unroll" in src, f"{variant}: the small inner reduce must be unrolled"
+        unrolled = "__u1" in names and not any(loop.unroll for loop in statements(kernels, Loop, StridedLoop))
+        assert unrolled, f"{variant}: the small inner reduce must be unrolled"
     else:
         assert not has_copy, f"{variant}: per-cell tier must not replicate register cells"
     if launch_bounds is not None:
-        assert f"__launch_bounds__({launch_bounds})" in src, f"{variant}: expected a {launch_bounds}-thread CTA"
+        threads = {kernel_interface(kernel).threads for kernel in kernels.values()}
+        assert threads == {launch_bounds}, f"{variant}: expected a {launch_bounds}-thread CTA"
     # The dynamic-grid tier: the launch sizes from the runtime extent (the symbolic ``Dim``
     # threaded as an ``int`` arg), and a register-tiled symbolic axis guards its tail store.
-    assert "int seq_len" in src, f"{variant}: symbolic grid must carry the runtime extent arg"
+    assert _takes(compiled, "seq_len"), f"{variant}: symbolic grid must carry the runtime extent arg"
 
 
 # Fused epilogues — a projection ``Map`` over the ``Semiring`` (``project ∘ contract``): the
@@ -233,16 +283,15 @@ def test_matmul_reg_tile_epilogue(epilogue, monkeypatch):
     elif epilogue == "residual":
         feed["r"] = rng.standard_normal((1, m, _N), dtype=np.float32)
 
-    be = CudaBackend()
-    compiled = be.compile(_epilogue_graph("dynamic", epilogue))
-    got = np.asarray(be.run(compiled, input_data=feed)[0].outputs["o"])
-    src = "\n".join(n.op.kernel_source for n in compiled.nodes.values() if getattr(n.op, "kernel_source", None))
+    compiled, kernels = compile_with_kernels(_epilogue_graph("dynamic", epilogue))
+    got = np.asarray(CudaBackend().run(compiled, input_data=feed)[0].outputs["o"])
+    names = _names(kernels)
 
     ref = _epilogue_ref(epilogue, feed)
     diff = float(np.abs(got - ref.reshape(got.shape)).max())
     assert diff < 1e-3, f"{epilogue}: fused-epilogue mismatch (max abs err {diff})"
-    assert src.count("__global__") == 1, f"{epilogue}: epilogue must fuse into the one contraction kernel"
-    assert "__c0_1" in src or "__c1_0" in src, f"{epilogue}: expected the register-tiled tail (__c*)"
+    assert len(kernels) == 1, f"{epilogue}: epilogue must fuse into the one contraction kernel"
+    assert "__c0_1" in names or "__c1_0" in names, f"{epilogue}: expected the register-tiled tail (__c*)"
 
 
 # --- scalar operand staging (the orthogonal STAGE codec) --------------------
@@ -300,8 +349,8 @@ def test_scalar_matmul_stages_through_pipeline(monkeypatch) -> None:
     tile_op = next(n.op for n in out.nodes.values() if isinstance(n.op, TileOp))
     stage = _node_stage(tile_op)
     assert stage is not None and stage.transport == "smem" and stage.depth == 2, stage
-    src = _render_src(_scalar_stage_graph(), cc=(7, 0))
-    assert "__shared__" in src and "cp.async" not in src
+    kernels = _lowered_kernels(_scalar_stage_graph(), cc=(7, 0))
+    assert statements(kernels, Smem) and not statements(kernels, CpAsyncCopy, TmaLoad)
 
 
 def test_scalar_stage_budget_includes_the_bank_padding() -> None:
@@ -367,22 +416,20 @@ def test_scalar_ring_matches_gmem_direct_bit_for_bit(monkeypatch, stage):
     a = rng.standard_normal((M, K), dtype=np.float32)
     b = rng.standard_normal((K, N), dtype=np.float32)
 
-    def _go(st: str | None) -> tuple[np.ndarray, str]:
+    def _go(st: str | None):
         monkeypatch.setenv("EMMY_TILE", "f2x2")
         monkeypatch.setenv("EMMY_WORK", "t16x16")
         monkeypatch.setenv("EMMY_REDUCE", "")
         # Pin STAGE="" for the baseline — unpinned, the offline prior may legitimately stage.
         monkeypatch.setenv("EMMY_STAGE", st if st else "")
-        be = CudaBackend()
-        compiled = be.compile(_scalar_stage_graph(M, N, K))
-        src = compiled.nodes["o"].op.kernel_source
-        got = np.asarray(be.run(compiled, input_data={"a": a, "b": b})[0].outputs["o"])
-        return got, src
+        compiled, kernels = compile_with_kernels(_scalar_stage_graph(M, N, K))
+        got = np.asarray(CudaBackend().run(compiled, input_data={"a": a, "b": b})[0].outputs["o"])
+        return got, kernels["o"]
 
-    staged, staged_src = _go(stage)
-    gmem, gmem_src = _go(None)
-    assert "cp.async" in staged_src and "__shared__" in staged_src, "the scalar ring must stage via cp.async"
-    assert "cp.async" not in gmem_src, "the gmem-direct baseline must not stage"
+    staged, staged_kernel = _go(stage)
+    gmem, gmem_kernel = _go(None)
+    assert statements(staged_kernel, CpAsyncCopy) and statements(staged_kernel, Smem), "the scalar ring must stage via cp.async"
+    assert not statements(gmem_kernel, CpAsyncCopy, TmaLoad), "the gmem-direct baseline must not stage"
     np.testing.assert_array_equal(staged, gmem)  # bit-identical: staging perturbs nothing
     np.testing.assert_allclose(staged.reshape(M, N), a @ b, atol=1e-3, rtol=1e-3)
 
@@ -540,16 +587,14 @@ def _mma_symbolic_k_graph(M: int, N: int, *, trans: bool):
     return g
 
 
-def _compile_run_mma(graph, feed: dict) -> tuple[np.ndarray, str]:
+def _compile_run_mma(graph, feed: dict):
     """Compile the (already WARP-pinned) graph and run it on the seeded f16 operands in ``feed``;
-    return ``(output, kernel_source)``."""
+    return ``(output, compiled graph, its kernels)``."""
     from emmy.compiler.backend.cuda.backend import CudaBackend  # noqa: PLC0415
 
-    be = CudaBackend()
-    compiled = be.compile(graph)
-    got = np.asarray(be.run(compiled, input_data=feed)[0].outputs["c"])
-    src = "\n".join(n.op.kernel_source for n in compiled.nodes.values() if getattr(n.op, "kernel_source", None))
-    return got, src
+    compiled, kernels = compile_with_kernels(graph)
+    got = np.asarray(CudaBackend().run(compiled, input_data=feed)[0].outputs["c"])
+    return got, compiled, kernels
 
 
 # (M, N, K, out_dtype, transposed-B). 128 is the tile (exact-cover static); the dynamic column
@@ -579,26 +624,34 @@ def test_matmul_mma_coverage(M, N, K, out, trans, monkeypatch):
     _pin_tile(monkeypatch, _WARP_PIN)
     # Pin the REDUCE codec serial: the split-K f32 workspace legalized ``g<w>k`` for f16 output,
     # and an unpinned greedy pick can split this shape (partials + tail kernel), moving the
-    # ``__floats2half2_rn`` downconvert out of the fused epilogue these source assertions check.
+    # store of the output out of the one kernel these assertions check.
     monkeypatch.setenv("EMMY_REDUCE", "")
     run_m = M + 2
     rng = np.random.default_rng(0)
     a = (rng.standard_normal((run_m, K)) * 0.1).astype(np.float16)
     b = (rng.standard_normal((N, K) if trans else (K, N)) * 0.1).astype(np.float16)
-    got, src = _compile_run_mma(_mma_matmul_graph("dynamic", M, N, K, out, trans), {"a": a, "b": b})
+    got, compiled, kernels = _compile_run_mma(_mma_matmul_graph("dynamic", M, N, K, out, trans), {"a": a, "b": b})
 
     ref = a.astype(np.float32) @ (b.T if trans else b).astype(np.float32)
     diff = float(np.abs(got.reshape(run_m, N) - ref).max())
     tol = 5e-2 if out == _F16 else 1e-2
     assert diff < tol, f"{M}x{N}x{K} out={out} trans={trans}: mma mismatch (max abs err {diff})"
 
-    assert "mma.sync.aligned.m16n8k16" in src, "the s16816 mma.sync instruction must be emitted"
-    assert "emmy_mma_load_a_gmem" in src, "operands must load via the gmem-direct fragment helper"
-    assert "wmma::" not in src, "the mma.sync path must not mix in legacy wmma intrinsics"
-    assert ("__floats2half2_rn" in src) == (out == _F16), "f16 output needs the fp32→fp16 __half2 downconvert"
-    if trans:
-        assert "emmy_mma_load_b_gmem_trans" in src, "transposed-B must use the gmem-direct trans helper"
-    assert "int seq_len" in src, "the symbolic-M grid must carry the runtime extent arg"
+    assert _is_m16n8k16(kernels), "the s16816 mma.sync instruction must be emitted"
+    # Each operand reaches its fragments through a load, gathered from global memory or drained from a staged slab
+    # (the stage is the prior's pick here; the old check of the gather's helper name read the prelude, which
+    # defines every helper, and could not fail).
+    loads = statements(kernels, FragmentLoad, LdmatrixLoad)
+    assert {load.role for load in loads} == {"a", "b"}, "both operands must load into fragments"
+    # The one kernel stores the output from its accumulators: the conversion to an f16 output is the store's own.
+    assert len(kernels) == 1 and {store.dst_buffer for store in statements(kernels, RegStore)} == {"c"}
+    assert all(load.b_trans == trans for load in loads if load.role == "b"), "transposed-B must load through the transposed form"
+    assert _takes(compiled, "seq_len"), "the symbolic-M grid must carry the runtime extent arg"
+
+
+def _lowered_kernels(graph, cc=(12, 0)) -> dict:
+    """Lower ``graph`` on a FORCED target and return the Kernel IR of its kernels (no GPU needed)."""
+    return compile_with_kernels(graph, ctx=Context.from_target(cc), passes=TILE_PASSES + CUDA_PASSES)[1]
 
 
 def _render_src(graph, cc=(12, 0)) -> str:
@@ -619,9 +672,11 @@ def test_fully_overhanging_m_fragment_clamps_its_reads_into_the_tile(monkeypatch
     _pin_tile(monkeypatch, _WARP_PIN)  # WM.FM.atom_m = a 128-row tile over M=1
     monkeypatch.setenv("EMMY_REDUCE", "")
     monkeypatch.setenv("EMMY_STAGE", "")  # gmem-direct: the tier whose loaders clamp per fragment
-    src = _render_src(_mma_matmul_graph("static", 1, 128, 64, "f32", False))
-    assert "emmy_mma_load_a_gmem_mclamp" in src, "M=1 under this tile must reach the masked-M loader"
-    assert "if (rows_left > 0) {  // wholly past the bound: read nothing" in src, "an overhanging fragment reads nothing"
+    graph = _mma_matmul_graph("static", 1, 128, 64, "f32", False)
+    a_loads = [load for load in statements(_lowered_kernels(graph), FragmentLoad) if load.role == "a"]
+    assert a_loads and all(load.clamp is not None for load in a_loads), "M=1 under this tile must reach the masked-M loader"
+    # CUDA spelling: moves to the PTX compiler's tests
+    assert "if (rows_left > 0) {  // wholly past the bound: read nothing" in _render_src(graph), "an overhanging fragment reads nothing"
 
 
 def test_every_clamped_fragment_loader_reads_nothing_wholly_past_its_bound():
@@ -634,6 +689,7 @@ def test_every_clamped_fragment_loader_reads_nothing_wholly_past_its_bound():
 
     from emmy.compiler.ir.kernel import render
 
+    # CUDA spelling: moves to the PTX compiler's tests
     source = "".join(getattr(render, name) for name in dir(render) if name.endswith("_PRELUDE"))
     loaders = re.findall(r"void (emmy_\w*(?:clamp\w*|_impl|_gmem4))\(([^)]*)\)\s*\{\n(.*?)\n\}", source, re.S)
     assert len(loaders) >= 12, [name for name, _, _ in loaders]
@@ -657,11 +713,11 @@ def test_mma_static_k_tail_zero_fills(K, masked, monkeypatch):
     _pin_tile(monkeypatch, _WARP_PIN)
     monkeypatch.setenv("EMMY_REDUCE", "")
     monkeypatch.setenv("EMMY_STAGE", "")  # gmem-direct: the masked-K tier (a staged K chunk must divide K)
-    src = _render_src(_mma_matmul_graph("static", 128, 128, K, "f32", False))
-    body = src[src.index('extern "C"') :]
-    assert "mma.sync.aligned.m16n8k16" in src, "the row must still reach the mma tier"
-    assert ("emmy_mma_load_a_gmem_kzero" in body) is masked, f"K={K}: A loader zero-fill should be {masked}"
-    assert ("emmy_mma_load_b_gmem_kzero" in body) is masked, f"K={K}: B loader zero-fill should be {masked}"
+    kernels = _lowered_kernels(_mma_matmul_graph("static", 128, 128, K, "f32", False))
+    assert _is_m16n8k16(kernels), "the row must still reach the mma tier"
+    for role in ("a", "b"):
+        loads = [load for load in statements(kernels, FragmentLoad) if load.role == role]
+        assert loads and all((load.k_zero is not None) is masked for load in loads), f"K={K}: {role} zero-fill should be {masked}"
 
 
 def test_warp_tier_is_offered_at_a_static_k_the_step_does_not_tile(monkeypatch):
@@ -705,19 +761,21 @@ def test_matmul_mma_trans_b_staged(transport, monkeypatch):
     b = (rng.standard_normal((N, K)) * 0.1).astype(np.float16)
 
     monkeypatch.setenv("EMMY_STAGE", "")
-    gmem, gmem_src = _compile_run_mma(_mma_matmul_graph("dynamic", M, N, K, _F16, True), {"a": a, "b": b})
+    gmem, _, gmem_kernels = _compile_run_mma(_mma_matmul_graph("dynamic", M, N, K, _F16, True), {"a": a, "b": b})
     monkeypatch.setenv("EMMY_STAGE", _TRANS_STAGES[transport])
-    staged, src = _compile_run_mma(_mma_matmul_graph("dynamic", M, N, K, _F16, True), {"a": a, "b": b})
+    staged, _, kernels = _compile_run_mma(_mma_matmul_graph("dynamic", M, N, K, _F16, True), {"a": a, "b": b})
 
-    # Call-site patterns (`helper(_b…`) — the preamble defines every helper unconditionally,
-    # so bare-name membership can't tell a call from a definition.
-    assert "_b_smem" in src, "the transposed B must stage into an smem slab"
-    assert "emmy_mma_load_b_gmem(_b" not in src and "emmy_mma_load_b_gmem_trans(_b" not in src, (
-        "a staged B must not fall back to the gmem-direct helpers"
+    def b_loads(of, kind):
+        return [load for load in statements(of, kind) if load.role == "b"]
+
+    assert any(slab.name == "_b_smem" for slab in statements(kernels, Smem)), "the transposed B must stage into an smem slab"
+    assert not b_loads(kernels, FragmentLoad), "a staged B must not fall back to the gmem-direct gather"
+    drains = b_loads(kernels, LdmatrixLoad)
+    # The N-major slab drains via the plain x2 or x4 (no .trans): every drain says the slab is transposed.
+    assert drains and all(load.b_trans and load.src_buffer == "_b_smem" for load in drains), "the staged drain must ldmatrix the slab"
+    assert b_loads(gmem_kernels, FragmentLoad) and all(load.b_trans for load in b_loads(gmem_kernels, FragmentLoad)), (
+        "the gmem-direct sibling still gathers the transposed operand"
     )
-    assert "emmy_ldmatrix_x2_trans(_b" not in src, "the N-major slab drains via the PLAIN x2 (no .trans)"
-    assert "emmy_ldmatrix_x2(_b" in src or "emmy_ldmatrix_x4_pair(_b" in src, "the b_trans staged drain must ldmatrix the slab"
-    assert "emmy_mma_load_b_gmem_trans(_b" in gmem_src, "the gmem-direct sibling still uses the trans helper"
     np.testing.assert_array_equal(staged, gmem)  # bit-identical: staging perturbs nothing
     ref = a.astype(np.float32) @ b.T.astype(np.float32)
     diff = float(np.abs(staged.reshape(run_m, N).astype(np.float32) - ref).max())
@@ -784,9 +842,9 @@ def test_matmul_mma_f16acc_coverage(stage, monkeypatch):
     b = (rng.standard_normal((K, N)) * 0.1).astype(np.float16)
     feed = {"a": a, "b": b}
     _pin_tile(monkeypatch, _F16ACC_PIN)
-    got, src = _compile_run_mma(_mma_matmul_graph("dynamic", M, N, K, _F16, False), feed)
+    got, _, kernels = _compile_run_mma(_mma_matmul_graph("dynamic", M, N, K, _F16, False), feed)
     _pin_tile(monkeypatch, _F16ACC_SIBLING_PIN)
-    sib, sib_src = _compile_run_mma(_mma_matmul_graph("dynamic", M, N, K, _F16, False), feed)
+    sib, _, sib_kernels = _compile_run_mma(_mma_matmul_graph("dynamic", M, N, K, _F16, False), feed)
 
     ref = a.astype(np.float32) @ b.astype(np.float32)
     diff = float(np.abs(got.reshape(run_m, N).astype(np.float32) - ref).max())
@@ -794,9 +852,14 @@ def test_matmul_mma_f16acc_coverage(stage, monkeypatch):
     sib_diff = float(np.abs(got.astype(np.float32) - sib.astype(np.float32)).max())
     assert sib_diff < 5e-3, f"f16acc {stage}: drifted from the f32-accumulate sibling (max abs err {sib_diff})"
 
-    assert "emmy_mma_m16n8k16_f16_f16(_ch0_0" in src, "the mma chain must target the packed f16 fragments"
-    assert "emmy_mma_promote_f16acc(_c0_0, _ch0_0);" in src, "the chunk promote into the f32 shadow must be emitted"
-    assert "_ch0_0" not in sib_src, "the f32-accumulate sibling must not declare f16 mma fragments"
+    packed = [mma for mma in statements(kernels, MmaSyncPtx) if mma.c_frag == "_ch0_0"]
+    assert packed and all((mma.ab_dtype, mma.c_dtype) == ("f16", "f16") for mma in packed), (
+        "the mma chain must target the packed f16 fragments"
+    )
+    assert _promotes(kernels, "_c0_0", "_ch0_0"), "the chunk promote into the f32 shadow must be emitted"
+    assert not any(f.name == "_ch0_0" for f in statements(sib_kernels, RegFragment)), (
+        "the f32-accumulate sibling must not declare f16 mma fragments"
+    )
 
 
 @requires_sm90
@@ -818,11 +881,11 @@ def test_matmul_mma_f16acc_symbolic_k(monkeypatch):
     rng = np.random.default_rng(1)
     a = (rng.standard_normal((M, run_k)) * 0.1).astype(np.float16)
     b = (rng.standard_normal((run_k, N)) * 0.1).astype(np.float16)
-    got, src = _compile_run_mma(_mma_symbolic_k_graph(M, N, trans=False), {"a": a, "b": b})
+    got, _, kernels = _compile_run_mma(_mma_symbolic_k_graph(M, N, trans=False), {"a": a, "b": b})
     ref = a.astype(np.float32) @ b.astype(np.float32)
     diff = float(np.abs(got.reshape(M, N).astype(np.float32) - ref).max())
     assert diff < 5e-2, f"f16acc symbolic-K: mismatch vs f32 reference (max abs err {diff})"
-    assert "emmy_mma_promote_f16acc(_c0_0, _ch0_0);" in src
+    assert _promotes(kernels, "_c0_0", "_ch0_0")
 
 
 def test_f16acc_enumeration_policy(monkeypatch):
@@ -945,13 +1008,15 @@ def test_matmul_mma_epilogue_coverage(epilogue, mode, monkeypatch):
         keep = np.arange(N)[None, :] <= np.arange(run_m)[:, None]
         ref = np.where(keep, base, -1e30)
 
-    got, src = _compile_run_mma(_mma_epilogue_graph(mode, epilogue), feed)
+    got, _, kernels = _compile_run_mma(_mma_epilogue_graph(mode, epilogue), feed)
     diff = float(np.abs(got.reshape(run_m, N) - ref).max())
     assert diff < 1e-2, f"{epilogue}/{mode}: fused-epilogue mma mismatch (max abs err {diff})"
-    assert "mma.sync.aligned.m16n8k16" in src, f"{epilogue}/{mode}: must reach the warp tier"
-    assert src.count("__global__") == 1, f"{epilogue}/{mode}: epilogue must fuse into the one mma kernel"
+    assert _is_m16n8k16(kernels), f"{epilogue}/{mode}: must reach the warp tier"
+    assert len(kernels) == 1, f"{epilogue}/{mode}: epilogue must fuse into the one mma kernel"
     if epilogue == "causal":
-        assert "?" in src, "the causal mask must render as a per-element ternary"
+        stores = statements(kernels, RegStore)
+        masked = all(store.epilogue is not None and any(isinstance(st, Select) for st in store.epilogue) for store in stores)
+        assert stores and masked, "the causal mask must be a per-element select in each store's epilogue"
 
 
 # --- the staged transports on one 64-row warp tile --------------------------
@@ -981,8 +1046,8 @@ def _parity_mma_graph(mode: str, *, M: int):
 def test_register_double_buffer_matches_single_buffer_bit_for_bit(monkeypatch, tr):
     """The smem→register double-buffer (``STAGE=d2/<tr>/p2``) is a PURE perf transform over the
     single-buffer staged kernel (``d2/<tr>``): same loads, same mmas, only ldmatrix-prefetched
-    onto alternate fragment slots — so the output is **bit-identical**, and the source actually
-    ping-pongs (``_a0_s0``/``_a0_s1`` fragments the single-buffer kernel does not emit)."""
+    onto alternate fragment slots — so the output is **bit-identical**, and the kernel actually
+    ping-pongs (``_a0_s0``/``_a0_s1`` fragments the single-buffer kernel does not declare)."""
     if tr == "smem-tma" and not _supports_tma():
         pytest.skip("TMA needs sm_90+ (Hopper / Blackwell)")
     from emmy.compiler.backend.cuda.backend import CudaBackend  # noqa: PLC0415
@@ -991,20 +1056,18 @@ def test_register_double_buffer_matches_single_buffer_bit_for_bit(monkeypatch, t
     a = (rng.standard_normal((_PM, _PK)) * 0.1).astype(np.float16)
     b = (rng.standard_normal((_PK, _PN)) * 0.1).astype(np.float16)
 
-    def _go(stage: str) -> tuple[np.ndarray, str]:
+    def _go(stage: str):
         _pin_tile(monkeypatch, _WARP_CODEC)
         monkeypatch.setenv("EMMY_REDUCE", "")  # serial K: the subject is the p2 double-buffer, not the split fork
         monkeypatch.setenv("EMMY_STAGE", stage)
-        be = CudaBackend()
-        compiled = be.compile(_parity_mma_graph("static", M=_PM))
-        src = compiled.nodes["o"].op.kernel_source
-        got = np.asarray(be.run(compiled, input_data={"a": a, "b": b})[0].outputs["o"])
-        return got, src
+        compiled, kernels = compile_with_kernels(_parity_mma_graph("static", M=_PM))
+        got = np.asarray(CudaBackend().run(compiled, input_data={"a": a, "b": b})[0].outputs["o"])
+        return got, {fragment.name for fragment in statements(kernels["o"], RegFragment)}
 
-    single, single_src = _go(f"d2/{tr}")
-    double, double_src = _go(f"d2/{tr}/p2")
-    assert "_a0_s0" in double_src and "_a0_s1" in double_src, "p2 must declare per-slot ping-pong fragments"
-    assert "_s0" not in single_src, "the single-buffer kernel must not slot its fragments"
+    single, single_fragments = _go(f"d2/{tr}")
+    double, double_fragments = _go(f"d2/{tr}/p2")
+    assert {"_a0_s0", "_a0_s1"} <= double_fragments, "p2 must declare per-slot ping-pong fragments"
+    assert not any("_s0" in name for name in single_fragments), "the single-buffer kernel must not slot its fragments"
     np.testing.assert_array_equal(double, single)  # bit-identical: prefetch reordering perturbs nothing
 
 
@@ -1022,24 +1085,20 @@ def test_cp_async_deep_ring_matches_gmem_direct_bit_for_bit(monkeypatch, depth):
     a = (rng.standard_normal((_PM, _PK)) * 0.1).astype(np.float16)
     b = (rng.standard_normal((_PK, _PN)) * 0.1).astype(np.float16)
 
-    def _go(stage: str | None) -> tuple[np.ndarray, str]:
+    def _go(stage: str | None):
         _pin_tile(monkeypatch, _WARP_CODEC)
         monkeypatch.setenv("EMMY_REDUCE", "")  # serial K: the baseline must not reroute through the restored split-K fork
         # Pin STAGE="" for the baseline — unpinned, the offline prior may legitimately stage.
         monkeypatch.setenv("EMMY_STAGE", stage if stage else "")
-        be = CudaBackend()
-        compiled = be.compile(_parity_mma_graph("static", M=_PM))
-        src = compiled.nodes["o"].op.kernel_source
-        got = np.asarray(be.run(compiled, input_data={"a": a, "b": b})[0].outputs["o"])
-        return got, src
+        compiled, kernels = compile_with_kernels(_parity_mma_graph("static", M=_PM))
+        got = np.asarray(CudaBackend().run(compiled, input_data={"a": a, "b": b})[0].outputs["o"])
+        return got, kernels["o"]
 
-    ring, ring_src = _go(f"d{depth}/smem-async")
-    gmem, gmem_src = _go(None)
-    assert "cp.async" not in gmem_src, "the gmem-direct baseline must not stage"
+    ring, ring_kernel = _go(f"d{depth}/smem-async")
+    gmem, gmem_kernel = _go(None)
+    assert not statements(gmem_kernel, CpAsyncCopy, TmaLoad), "the gmem-direct baseline must not stage"
     np.testing.assert_array_equal(ring, gmem)  # bit-identical: prefetch perturbs nothing
-    # ``depth`` ``emmy_cp_async_commit();`` CALLS in the body (the trailing ``;`` excludes the one
-    # ``emmy_cp_async_commit() {`` helper definition in the cp.async prelude).
-    assert ring_src.count("emmy_cp_async_commit();") == depth, f"a depth-{depth} ring must issue {depth} cp.async commit groups"
+    assert len(statements(ring_kernel, CpAsyncCommit)) == depth, f"a depth-{depth} ring must issue {depth} cp.async commit groups"
 
 
 @requires_sm90
@@ -1059,22 +1118,22 @@ def test_tma_deep_ring_matches_gmem_direct_bit_for_bit(monkeypatch, depth):
     a = (rng.standard_normal((_PM, _PK)) * 0.1).astype(np.float16)
     b = (rng.standard_normal((_PK, _PN)) * 0.1).astype(np.float16)
 
-    def _go(stage: str | None) -> tuple[np.ndarray, str]:
+    def _go(stage: str | None):
         _pin_tile(monkeypatch, _WARP_CODEC)
         monkeypatch.setenv("EMMY_REDUCE", "")  # serial K: the baseline must not reroute through the restored split-K fork
         # Pin STAGE="" for the baseline — unpinned, the offline prior may legitimately stage.
         monkeypatch.setenv("EMMY_STAGE", stage if stage else "")
-        be = CudaBackend()
-        compiled = be.compile(_parity_mma_graph("static", M=_PM))
-        src = compiled.nodes["o"].op.kernel_source
-        got = np.asarray(be.run(compiled, input_data={"a": a, "b": b})[0].outputs["o"])
-        return got, src
+        compiled, kernels = compile_with_kernels(_parity_mma_graph("static", M=_PM))
+        got = np.asarray(CudaBackend().run(compiled, input_data={"a": a, "b": b})[0].outputs["o"])
+        return got, kernels["o"]
 
-    ring, ring_src = _go(f"d{depth}/smem-tma")
+    ring, ring_kernel = _go(f"d{depth}/smem-tma")
     gmem, _ = _go(None)
     np.testing.assert_array_equal(ring, gmem)  # bit-identical: the mbarrier-phased prefetch perturbs nothing
-    assert f"_mbar[{depth}]" in ring_src, f"a depth-{depth} TMA ring must declare a {depth}-slot mbarrier array"
-    assert ring_src.count("mbarrier_init(&_mbar[") == depth, f"each of the {depth} ring slots' mbarriers must be initialized"
+    barriers = [slab for slab in statements(ring_kernel, Smem) if slab.name == "_mbar"]
+    assert [tuple(slab.extents) for slab in barriers] == [(depth,)], f"a depth-{depth} TMA ring must declare a {depth}-slot mbarrier array"
+    initialized = sorted(init.slot.value for init in statements(ring_kernel, MbarrierInit) if init.mbar == "_mbar")
+    assert initialized == list(range(depth)), f"each of the {depth} ring slots' mbarriers must be initialized"
 
 
 def test_tma_staged_slab_is_swizzled(monkeypatch):
@@ -1088,14 +1147,15 @@ def test_tma_staged_slab_is_swizzled(monkeypatch):
     _pin_tile(monkeypatch, _WARP_CODEC)
     monkeypatch.setenv("EMMY_STAGE", "d2/smem-tma")
     monkeypatch.setenv("EMMY_REDUCE", "")
-    lowered = Pipeline.build(CUDA_PASSES).run(_parity_mma_graph("static", M=256), ctx=Context(compute_capability=(12, 0)))
+    lowered, kernels = compile_with_kernels(_parity_mma_graph("static", M=256), ctx=Context(compute_capability=(12, 0)))
     op = lowered.nodes["o"].op
     modes = {d.name: d.swizzle for d in op.tma_descriptors}
     assert modes and all(m != "NONE" for m in modes.values()), f"TMA slabs must swizzle: {modes}"
     assert modes["_desc_b"] == "B64", f"B slab (tile_n=32 fp16 = 64 B rows) must pick B64: {modes}"
-    # Every staged ldmatrix applies the XOR via the preamble helper (`emmy_swizzle_<mode>(e)` —
-    # `e ^ (((e >> 6) & mask) << 3)`), and the helper for the picked mode is defined.
-    assert "emmy_swizzle_b64(" in op.kernel_source, "the staged ldmatrix drain must XOR its slab address via the helper"
+    # Every staged ldmatrix reads its slab through the swizzle the copy wrote it with.
+    drains = statements(kernels, LdmatrixLoad)
+    assert drains and all(load.swizzle == "B64" for load in drains), "the staged ldmatrix drain must XOR its slab address"
+    # CUDA spelling: moves to the PTX compiler's tests
     assert "int emmy_swizzle_b64(int e)" in op.kernel_source, "the swizzle helper must be emitted in the preamble"
 
 
@@ -1111,17 +1171,17 @@ def test_cp_staged_slab_is_swizzled(monkeypatch):
     _pin_tile(monkeypatch, _WARP_CODEC)
     monkeypatch.setenv("EMMY_STAGE", "d2/smem-async")
     monkeypatch.setenv("EMMY_REDUCE", "")
-    lowered = Pipeline.build(CUDA_PASSES).run(_parity_mma_graph("static", M=256), ctx=Context(compute_capability=(8, 9)))
+    lowered, kernels = compile_with_kernels(_parity_mma_graph("static", M=256), ctx=Context(compute_capability=(8, 9)))
     op = lowered.nodes["o"].op
-    src = op.kernel_source
     assert not op.tma_descriptors, "sm_89 has no TMA — the fills must be cp.async"
-    assert "int emmy_swizzle_b64(int e)" in src, "the swizzle helper must be emitted in the preamble"
-    # Producer side: every cp.async fill writes through the XOR'd destination index — the lane's
-    # part swizzled once and XORed with the stripe base (``swizzled_slab_index``)...
-    assert "emmy_cp_async_cg(&_a_smem[(emmy_swizzle_b64(" in src, "the A slab fill must XOR its smem destination"
-    assert "emmy_cp_async_cg(&_b_smem[(emmy_swizzle_b64(" in src, "the B slab fill must XOR its smem destination"
+    # CUDA spelling: moves to the PTX compiler's tests
+    assert "int emmy_swizzle_b64(int e)" in op.kernel_source, "the swizzle helper must be emitted in the preamble"
+    # Producer side: every cp.async fill writes through the XOR'd destination index...
+    fills = {slab: {copy.swizzle for copy in statements(kernels, CpAsyncCopy) if copy.smem == slab} for slab in ("_a_smem", "_b_smem")}
+    assert fills == {"_a_smem": {"B64"}, "_b_smem": {"B64"}}, "each slab fill must XOR its smem destination"
     # ...and the drain reads back through the identical XOR (fill/drain symmetry).
-    assert "emmy_ldmatrix" in src and src.count("emmy_swizzle_b64(") >= 4, "the ldmatrix drains must apply the matching XOR"
+    drains = statements(kernels, LdmatrixLoad)
+    assert drains and all(load.swizzle == "B64" for load in drains), "the ldmatrix drains must apply the matching XOR"
 
 
 @requires_sm90
@@ -1145,10 +1205,9 @@ def test_bf16_operands_stage_via_cp_async(monkeypatch):
     g.add_node(op=MatmulOp(), inputs=["a", "b"], output=Tensor("o", (M, _PN), dtype=BF16), node_id="o")
     g.inputs, g.outputs = ["a", "b"], ["o"]
     be = CudaBackend()
-    compiled = be.compile(g)
-    src = compiled.nodes["o"].op.kernel_source
-    assert "cp.async" in src and "mma.sync.aligned.m16n8k16" in src, "bf16 operands must stage on the mma tier"
-    assert "cp.async.bulk.tensor" not in src, "cp.async transport must not emit TMA"
+    compiled, kernels = compile_with_kernels(g)
+    assert statements(kernels["o"], CpAsyncCopy) and _is_m16n8k16(kernels["o"]), "bf16 operands must stage on the mma tier"
+    assert not statements(kernels["o"], TmaLoad), "cp.async transport must not emit TMA"
     torch.manual_seed(0)
     qa = (torch.randn(M, _PK) * 0.1).to(torch.bfloat16)
     qb = (torch.randn(_PK, _PN) * 0.1).to(torch.bfloat16)
@@ -1193,24 +1252,22 @@ def test_staged_splitk_matches_gmem_direct_bit_for_bit(monkeypatch, transport):
     a = (rng.standard_normal((m, k)) * 0.1).astype(np.float16)
     b = (rng.standard_normal((k, n)) * 0.1).astype(np.float16)
 
-    def _go(stage: str | None) -> tuple[np.ndarray, str]:
+    def _go(stage: str | None):
         monkeypatch.setenv("EMMY_TILE", "mma_m16n8k16_f16_f32/f2x2/k2")
         monkeypatch.setenv("EMMY_WORK", "w2x2")
         monkeypatch.setenv("EMMY_REDUCE", "g2k")
         # The baseline pins STAGE="" (gmem-direct) explicitly — unpinned, the offline prior may
         # legitimately pick a staged row (D_stage_* terms), which is not the baseline this test wants.
         monkeypatch.setenv("EMMY_STAGE", stage if stage else "")
-        be = CudaBackend()
-        compiled = be.compile(_splitk_mma_graph(m, k, n))
-        partial_src = compiled.nodes["o__partial"].op.kernel_source  # the deferred-finalize partial kernel
-        got = np.asarray(be.run(compiled, input_data={"a": a, "b": b})[0].outputs["o"])
-        return got, partial_src
+        compiled, kernels = compile_with_kernels(_splitk_mma_graph(m, k, n))
+        got = np.asarray(CudaBackend().run(compiled, input_data={"a": a, "b": b})[0].outputs["o"])
+        return got, kernels["o__partial"]  # the deferred-finalize partial kernel
 
-    marker = "cp.async" if transport == "smem-async" else "cp.async.bulk.tensor"
-    staged, staged_src = _go(f"d2/{transport}")
-    gmem, gmem_src = _go(None)
-    assert marker in staged_src and "__shared__" in staged_src, f"the split partial must stage via {transport}"
-    assert "cp.async" not in gmem_src, "the gmem-direct split partial must not stage"
+    copy = CpAsyncCopy if transport == "smem-async" else TmaLoad
+    staged, staged_partial = _go(f"d2/{transport}")
+    gmem, gmem_partial = _go(None)
+    assert statements(staged_partial, copy) and statements(staged_partial, Smem), f"the split partial must stage via {transport}"
+    assert not statements(gmem_partial, CpAsyncCopy, TmaLoad), "the gmem-direct split partial must not stage"
     np.testing.assert_array_equal(staged, gmem)  # bit-identical: staging perturbs nothing
     ref = a.astype(np.float32) @ b.astype(np.float32)
     np.testing.assert_allclose(staged.astype(np.float32).reshape(m, n), ref, rtol=2e-2, atol=2e-2)
@@ -1354,32 +1411,39 @@ def _pv_softmax_graph(H: int = 16, N: int = 128) -> Graph:
 
 @pytest.mark.parametrize("transport", ["smem-async", "smem-tma"])
 def test_masked_symbolic_m_structure(transport, monkeypatch):
-    """End-to-end render (CPU, forced sm_120): the symbolic-M masked warp kernel carries the
+    """End-to-end lowering (CPU, forced sm_120): the symbolic-M masked warp kernel carries the
     runtime ``seq_len`` arg + the mma.sync pipeline. cp.async stages a clamped A-slab fill with
-    per-element row guards on the fragment store; TMA takes a ``CUtensorMap`` descriptor param and
-    stages the A operand with ``cp.async.bulk.tensor`` (TMA zero-fills the masked overhang)."""
+    per-element row guards on the fragment store; TMA takes a descriptor param and stages the A
+    operand with a bulk tensor copy (TMA zero-fills the masked overhang)."""
     knobs = _CP_KNOBS if transport == "smem-async" else _TMA_KNOBS
     for k, v in knobs.items():
         monkeypatch.setenv(f"EMMY_{k}", v)
-    lowered = Pipeline.build(CUDA_PASSES).run(_symbolic_m_graph(), ctx=Context(compute_capability=(12, 0)))
-    kop = lowered.nodes["o"].op
+    lowered, kernels = compile_with_kernels(_symbolic_m_graph(), ctx=Context(compute_capability=(12, 0)))
+    kop, kernel = lowered.nodes["o"].op, kernels["o"]
     assert mma_atom(kop.knobs) == "mma_m16n8k16_f16_f32"
-    src = kop.kernel_source
-    assert "int seq_len" in src, "runtime extent must be a kernel arg"
-    assert "mma.sync.aligned.m16n8k16" in src
+    assert "seq_len" in kop.runtime_args, "runtime extent must be a kernel arg"
+    assert _is_m16n8k16(kernel)
     if transport == "smem-async":
         assert stamps(kop).get("S_ext_n_symbolic_axis"), "symbolic-M warp row must carry a symbolic axis"
-        assert "ldmatrix" in src
+        assert statements(kernel, LdmatrixLoad)
         # Clamp on the hoisted cooperative A fill: bound by the runtime extent, fall back to last row.
-        assert "< seq_len) ?" in src and "seq_len - 1" in src, "A-slab fill must clamp to the runtime extent"
-        # Per-element row guards from the RegStore (both fragment row blocks).
-        assert "+ _g < (seq_len)" in src and "+ _g + 8 < (seq_len)" in src, "fragment store must row-guard against seq_len"
+        fills = [_names(Body([copy])) for copy in statements(kernel, CpAsyncCopy) if copy.src == "a"]
+        assert fills and all("< seq_len ?" in fill and ": seq_len - 1)" in fill for fill in fills), (
+            "A-slab fill must clamp to the runtime extent"
+        )
+        # Each store guards its rows against the runtime extent (both fragment row blocks read the one bound).
+        stores = statements(kernel, RegStore)
+        assert stores and all(store.m_guard is not None and store.m_guard[1] == Var("seq_len") for store in stores), (
+            "fragment store must row-guard against seq_len"
+        )
     else:
         # STAGE is stamped at the exact operand edge, not bare — this single contraction uses one value.
         stage = next((v for k, v in kop.knobs.items() if k.split("@")[0] == "STAGE"), "")
         assert stage.endswith("/smem-tma"), f"symbolic-M with static innermost dim must stage via TMA: {stage!r}"
-        assert "cp.async.bulk.tensor" in src, "A operand must stage via TMA"
-        assert "CUtensorMap" in src, "kernel must take the TMA descriptor param"
+        assert any(load.smem == "_a_smem" for load in statements(kernel, TmaLoad)), "A operand must stage via TMA"
+        assert kop.tma_descriptors and {d.name for d in kop.tma_descriptors} <= set(kop.arg_order), (
+            "kernel must take the TMA descriptor param"
+        )
 
 
 # (label, env, seqs, make). ``make(seq)`` builds (graph, feed, want) for one off-hint runtime
@@ -1570,30 +1634,31 @@ def _raster_kop(monkeypatch, M: int, raster: str | None = None):
     if raster is not None:
         monkeypatch.setenv("EMMY_RASTER", raster)
     g = _mma_matmul_graph("static", M, 2048, 1024, "f16", False)
-    return Pipeline.build(CUDA_PASSES).run(g, ctx=Context(compute_capability=(12, 0))).nodes["c"].op
+    lowered, kernels = compile_with_kernels(g, ctx=Context(compute_capability=(12, 0)))
+    return lowered.nodes["c"].op, kernels["c"]
 
 
 def test_raster_gm_pin_groups_the_launch_order(monkeypatch):
-    """``EMMY_RASTER=gm8``: the 2-D contraction grid renders the grouped CTA decode — 8 M
+    """``EMMY_RASTER=gm8``: the 2-D contraction grid takes the grouped CTA decode — 8 M
     block-tiles iterate fastest within each launch stripe, so consecutive CTAs share the
     streamed B slab (the 2026-07-12 4090 NCU finding: the flat N-fastest order streamed B from
     DRAM once per M-row, ``A + C + B×2`` measured exactly). ``Em = 1280/64 = 20`` is ragged
     against the group of 8, so the decode carries the ``min``-clamped tail-group size; the
     resolved codec value is stamped on the kernel knobs (honest stamping)."""
-    kop = _raster_kop(monkeypatch, 1280, raster="gm8")
+    kop, kernel = _raster_kop(monkeypatch, 1280, raster="gm8")
     assert kop.knobs.get("RASTER") == "gm8"
-    decode = grouped_raster_decode(kop.kernel_source, 8)
+    decode = grouped_raster_decode(kernel, 8)
     assert decode, "the grouped (m, n) decode must be emitted"
-    assert "min(8, " in decode[0] and "+ 20)" in decode[0], "a ragged Em (20 % 8) needs the tail-group clamp"
+    assert "minimum(8, " in decode[0] and "+ 20)" in decode[0], "a ragged Em (20 % 8) needs the tail-group clamp"
 
 
 def test_raster_gn_pin_groups_the_transpose(monkeypatch):
     """``gn<G>`` groups N block-tiles fastest (the A-streamed regime); ``En = 2048/64 = 32``
     divides 4, so the decode takes the clamp-free form."""
-    kop = _raster_kop(monkeypatch, 1280, raster="gn4")
+    kop, kernel = _raster_kop(monkeypatch, 1280, raster="gn4")
     assert kop.knobs.get("RASTER") == "gn4"
-    decode = grouped_raster_decode(kop.kernel_source, 4)
-    assert decode and "min(" not in kop.kernel_source
+    decode = grouped_raster_decode(kernel, 4)
+    assert decode and "minimum(" not in _names(kernel)
 
 
 def test_raster_default_is_the_flat_order(monkeypatch):
@@ -1601,9 +1666,9 @@ def test_raster_default_is_the_flat_order(monkeypatch):
     N-fastest order, byte-identical to the historical codegen) and stamps the decided-empty
     value; the ``gm8`` sibling is a fork row for the golden evidence to arbitrate, never a
     silent default."""
-    kop = _raster_kop(monkeypatch, 1280)
+    kop, kernel = _raster_kop(monkeypatch, 1280)
     assert kop.knobs.get("RASTER") == ""
-    assert not grouped_raster_decode(kop.kernel_source, 8)
+    assert not grouped_raster_decode(kernel, 8)
 
 
 def test_raster_fork_offers_both_orders(monkeypatch):
@@ -1645,10 +1710,11 @@ def test_raster_symbolic_grid_decodes_every_tile_once(raster, run_m, monkeypatch
     rng = np.random.default_rng(0)
     a = (rng.standard_normal((run_m, K)) * 0.1).astype(np.float16)
     b = (rng.standard_normal((K, N)) * 0.1).astype(np.float16)
-    got, src = _compile_run_mma(_mma_matmul_graph("dynamic", 1280, N, K, "f16", False), {"a": a, "b": b})
+    got, compiled, kernels = _compile_run_mma(_mma_matmul_graph("dynamic", 1280, N, K, "f16", False), {"a": a, "b": b})
 
     group = int(raster[2:])
-    assert grouped_raster_decode(src, group) and "int seq_len" in src, "the grouped decode must render over the runtime extent"
+    grouped = grouped_raster_decode(kernels["c"], group)
+    assert grouped and _takes(compiled, "seq_len"), "the grouped decode must run over the runtime extent"
     diff = float(np.abs(got.reshape(run_m, N).astype(np.float32) - a.astype(np.float32) @ b.astype(np.float32)).max())
     assert diff < 5e-2, f"{raster} at M={run_m}: mismatch (max abs err {diff})"
 
@@ -1726,16 +1792,15 @@ def _imap_graph(form: str) -> tuple[Graph, object]:
     return g, ref
 
 
-def _imap_run(g: Graph) -> tuple[np.ndarray, str]:
+def _imap_run(g: Graph):
+    """Compile and run ``g`` on seeded inputs: ``(output, its kernels, the inputs)``."""
     from emmy.compiler.backend.cuda.backend import CudaBackend  # noqa: PLC0415
 
-    be = CudaBackend()
-    compiled = be.compile(g)
-    src = "\n".join(n.op.kernel_source for n in compiled.nodes.values() if getattr(n.op, "kernel_source", None))
+    compiled, kernels = compile_with_kernels(g)
     rng = np.random.default_rng(0)
     ins = {nid: (rng.standard_normal(tuple(d.as_static() for d in g.nodes[nid].output.shape)) * 0.3).astype(np.float16) for nid in g.inputs}
-    got = np.asarray(list(be.run(compiled, input_data=ins)[0].outputs.values())[0], dtype=np.float32)
-    return got, src, ins
+    got = np.asarray(list(CudaBackend().run(compiled, input_data=ins)[0].outputs.values())[0], dtype=np.float32)
+    return got, kernels, ins
 
 
 @requires_cuda
@@ -1764,10 +1829,10 @@ def test_reshaped_a_fragment_takes_the_derived_row_stride(monkeypatch):
     # otherwise pick a schedule with no mma fragment loader at all.
     _pin_tile(monkeypatch, _WARP_PIN)
     monkeypatch.setenv("EMMY_REDUCE", "")
-    _, src, _ = _imap_run(_imap_graph("reshape_a")[0])
-    calls = [ln.strip() for ln in src.splitlines() if "emmy_mma_load_a_gmem" in ln and "(_a" in ln]
-    assert calls, "the gmem-direct pin must reach the mma fragment loader"
-    assert all(ln.endswith(", 128);") for ln in calls), f"A fragments must take ldm=128, got {calls}"
+    _, kernels, _ = _imap_run(_imap_graph("reshape_a")[0])
+    loads = [load for load in statements(kernels, FragmentLoad) if load.role == "a"]
+    assert loads and not any(load.staged for load in loads), "the gmem-direct pin must reach the mma fragment loader"
+    assert all(load.ldm == 128 for load in loads), f"A fragments must take ldm=128, got {[load.ldm for load in loads]}"
 
 
 @pytest.mark.parametrize("form", ["reshape_a", "transpose_a"])
@@ -1796,8 +1861,8 @@ def test_sliced_a_still_stages_through_tma(monkeypatch):
     """The canonical (sliced) A keeps its TMA box, so the refusal above is not a dead pin."""
     monkeypatch.setenv("EMMY_STAGE", "d2/smem-tma")
     monkeypatch.setenv("EMMY_REDUCE", "")  # no cross-CTA split, for the reason the cp.async test above gives
-    _, src, _ = _imap_run(_imap_graph("slice_a")[0])
-    assert "cp.async.bulk.tensor" in src
+    _, kernels, _ = _imap_run(_imap_graph("slice_a")[0])
+    assert statements(kernels, TmaLoad)
 
 
 def test_transposed_a_cp_async_pin_is_refused(monkeypatch):
@@ -1878,7 +1943,6 @@ def test_an_operand_stages_only_on_the_copy_grid(x, w, expression, dtype, pin, s
     only when every copy's whole address stays on the copy's own grid: a slice's offset, a row pitch, or K split
     across rows at a pitch off the grid each refuse it, and a dense reshape whose rows recombine on the grid stages."""
     from emmy.commands.trace import graph_from_code  # noqa: PLC0415
-    from emmy.compiler.ir.cuda import CudaOp  # noqa: PLC0415
     from emmy.compiler.pipeline.search.pins import pinned_knobs  # noqa: PLC0415
 
     code = f"import torch\nx = torch.randn{x}.to(torch.{dtype})\nw = torch.randn{w}.to(torch.{dtype})\n{expression}"
@@ -1886,14 +1950,14 @@ def test_an_operand_stages_only_on_the_copy_grid(x, w, expression, dtype, pin, s
 
     def compile_():
         with pinned_knobs(pin):
-            return Pipeline.build(CUDA_PASSES).run(graph, ctx=Context.from_target((12, 0)))
+            return compile_with_kernels(graph, ctx=Context.from_target((12, 0)))[1]
 
     if not staged:
         with pytest.raises(ValueError, match="does not resolve"):
             compile_()
         return
-    (source,) = [node.op.kernel_source for node in compile_().nodes.values() if isinstance(node.op, CudaOp)]
-    assert "_smem[" in source
+    (kernel,) = compile_().values()
+    assert any(slab.name.endswith("_smem") for slab in statements(kernel, Smem))
 
 
 @requires_cuda

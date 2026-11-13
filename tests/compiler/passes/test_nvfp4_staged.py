@@ -25,13 +25,35 @@ from emmy.compiler.graph import Tensor
 from emmy.compiler.ir.address import BYTE_SLAB_PAD
 from emmy.compiler.ir.axis import Axis
 from emmy.compiler.ir.expression import Literal
+from emmy.compiler.ir.kernel.ir import CpAsyncCopy, FragmentLoad, FragmentPromote, MmaSyncPtx, RegFragment, Smem, TmaLoad
 from emmy.compiler.ir.pure import Fold
 from emmy.compiler.ir.schedule import Stage, Tile, Work
 from emmy.compiler.ir.schedule.packing import packed_readings
 from emmy.compiler.ir.schedule.staging import resolve_warp_stage
 from emmy.compiler.ir.stmt import Load, parse_body
-from tests.compiler.helpers import literal_classic_context, requires_cuda, requires_sm
+from tests.compiler.helpers import compile_with_kernels, literal_classic_context, requires_cuda, requires_sm, statements
 from tests.compiler.terms import contraction, projection
+
+
+def _packed_drains(kernels, dtype: str = "f16") -> list:
+    """The staged gathers of ``kernels`` that decode a slab of packed 4-bit pairs with its slab of block scales into
+    ``dtype`` fragments: the packed drain."""
+    return [
+        load
+        for load in statements(kernels, FragmentLoad)
+        if load.staged and load.scale_buffer is not None and (load.src_dtype, load.dtype.name) == (F4E2M1x2, dtype)
+    ]
+
+
+def _slabs(kernels) -> dict[str, tuple[str, int]]:
+    """Each shared slab of ``kernels`` as ``(element type, elements)``."""
+    return {slab.name: (slab.dtype, int(np.prod(slab.extents))) for slab in statements(kernels, Smem)}
+
+
+def _is_block_scaled(kernels) -> bool:
+    """Whether a kernel holds the block-scaled ``m16n8k64`` product, its two scale registers beside the operands."""
+    return any(tuple(mma.shape) == (16, 8, 64) and mma.sfa_frag and mma.sfb_frag for mma in statements(kernels, MmaSyncPtx))
+
 
 K16 = "mma_m16n8k16_f16_f32"
 K16_BF16 = "mma_m16n8k16_bf16_f32"
@@ -275,20 +297,18 @@ def test_two_spelled_weights_lower_to_one_kernel_with_a_byte_slab_per_channel(tm
     the multiply they feed, emit ONE kernel with one f16 A slab and, per channel, its own raw byte
     slab and its own decoded scale slab."""
     from emmy.compiler.context import Context
-    from emmy.compiler.pipeline import CUDA_PASSES, Pipeline
     from emmy.compiler.pipeline.search.pins import pinned_knobs
 
     g, _ = _nvfp4_gate_up_graph(tmp_path, m=32, n=128, k=128)
     with pinned_knobs(PACKED_PINS):
-        lowered = Pipeline.build(CUDA_PASSES).run(g, ctx=Context.from_target((8, 9)))
-    sources = [s for node in lowered.nodes.values() if (s := getattr(node.op, "kernel_source", None))]
-    assert len(sources) == 1, "the two projections must stay one kernel"
-    src = sources[0]
-    assert "emmy_mma_load_b_smem_trans_f4s_f16" in src
+        _, kernels = compile_with_kernels(g, ctx=Context.from_target((8, 9)))
+    assert len(kernels) == 1, "the two projections must stay one kernel"
+    assert _packed_drains(kernels)
     # Channel 0 keeps the bare slab names; channel 1 gets its own bits and scale slabs.
-    assert "unsigned char _b_smem[4096]" in src and "unsigned char _b_x1_smem[4096]" in src
-    assert "__half _bs_smem[128]" in src and "__half _b_x1s_smem[128]" in src
-    assert src.count("__half _a_smem[") == 1, "one shared A slab"
+    slabs = _slabs(kernels)
+    assert slabs["_b_smem"] == slabs["_b_x1_smem"] == ("unsigned char", 4096)
+    assert slabs["_bs_smem"] == slabs["_b_x1s_smem"] == ("__half", 128)
+    assert [name for name in slabs if name.startswith("_a")] == ["_a_smem"] and slabs["_a_smem"][0] == "__half", "one shared A slab"
 
 
 @pytest.mark.parametrize(
@@ -322,11 +342,10 @@ def test_the_two_channel_packed_drain_matches_the_decoded_oracle(tmp_path, m, n,
 
     backend = CudaBackend()
     with pinned_knobs(_packed_pins("f16", stage)):
-        compiled = backend.compile(g)
-    sources = [s for node in compiled.nodes.values() if (s := getattr(node.op, "kernel_source", None))]
-    assert len(sources) == 1 and "_b_x1_smem" in sources[0], "the packed pins did not reach the two-channel byte-slab drain"
+        compiled, kernels = compile_with_kernels(g)
+    assert len(kernels) == 1 and "_b_x1_smem" in _slabs(kernels), "the packed pins did not reach the two-channel byte-slab drain"
     if stage.endswith("tma"):
-        assert "cp.async.bulk.tensor" in sources[0] and "emmy_cp_async" not in sources[0], "the TMA pin must box-copy, not cp.async"
+        assert statements(kernels, TmaLoad) and not statements(kernels, CpAsyncCopy), "the TMA pin must box-copy, not cp.async"
 
     constants = {}
     for name, (packed, scale_bits, s2) in weights.items():
@@ -632,21 +651,22 @@ def test_the_spelled_checkpoint_lowers_to_the_packed_drain(tmp_path):
     slabs — the f16 A tile, the raw packed bytes, the decoded block scales — and a drain that
     reads the last two together. No decoded weight is ever materialized."""
     from emmy.compiler.context import Context
-    from emmy.compiler.pipeline import CUDA_PASSES, Pipeline
     from emmy.compiler.pipeline.search.pins import pinned_knobs
 
     g, _ = _nvfp4_matmul_graph(tmp_path, m=32, n=128, k=128)
     with pinned_knobs(PACKED_PINS):
-        lowered = Pipeline.build(CUDA_PASSES).run(g, ctx=Context.from_target((8, 9)))
+        lowered, kernels = compile_with_kernels(g, ctx=Context.from_target((8, 9)))
+    assert _packed_drains(kernels) and not _packed_drains(kernels, "bf16")
+    # CUDA spelling: moves to the PTX compiler's tests
     src = next(s for node in lowered.nodes.values() if (s := getattr(node.op, "kernel_source", None)))
-    assert "emmy_mma_load_b_smem_trans_f4s_f16" in src
     assert "EMMY_F4_LUT_F16" in src
     assert "EMMY_F4_LUT_BF16" not in src, "an f16 kernel must not carry the bf16 drain"
     assert "emmy_mma_load_b_smem_trans_f8_f16" not in src, "the fp8 drain helpers must not ride along"
     # tile_n=64 rows of (bk_elems/2 = 16) bytes + the 16 B pad, two ring slots; the scale slab is
     # 64 rows of bk = 2, single-buffer.
-    assert "unsigned char _b_smem[4096]" in src
-    assert "__half _bs_smem[128]" in src
+    slabs = _slabs(kernels)
+    assert slabs["_b_smem"] == ("unsigned char", 4096)
+    assert slabs["_bs_smem"] == ("__half", 128)
 
 
 def test_a_bf16_checkpoint_lowers_to_the_bf16_packed_drain(tmp_path):
@@ -654,16 +674,16 @@ def test_a_bf16_checkpoint_lowers_to_the_bf16_packed_drain(tmp_path):
     table, and a bf16 scale slab. The value table differs only in its constants — every e2m1
     value is exact in bf16 too."""
     from emmy.compiler.context import Context
-    from emmy.compiler.pipeline import CUDA_PASSES, Pipeline
     from emmy.compiler.pipeline.search.pins import pinned_knobs
 
     g, _ = _nvfp4_matmul_graph(tmp_path, m=32, n=128, k=128, dtype="bf16")
     with pinned_knobs(_packed_pins("bf16")):
-        lowered = Pipeline.build(CUDA_PASSES).run(g, ctx=Context.from_target((8, 9)))
+        lowered, kernels = compile_with_kernels(g, ctx=Context.from_target((8, 9)))
+    assert _packed_drains(kernels, "bf16") and not _packed_drains(kernels, "f16")
+    assert _slabs(kernels)["_bs_smem"] == ("__nv_bfloat16", 128)
+    # CUDA spelling: moves to the PTX compiler's tests
     src = next(s for node in lowered.nodes.values() if (s := getattr(node.op, "kernel_source", None)))
-    assert "emmy_mma_load_b_smem_trans_f4s_bf16" in src
     assert "EMMY_F4_LUT_BF16" in src and "EMMY_F4_LUT_F16" not in src
-    assert "__nv_bfloat16 _bs_smem[128]" in src
     # 1.0 is 0x3F80 in bf16 and 0x3C00 in f16 — the table really is the other format's.
     assert "0x3F80" in src
 
@@ -680,6 +700,7 @@ def test_a_pair_table_lookup_is_computed_not_read(tmp_path, place):
     g, _ = _nvfp4_matmul_graph(tmp_path, m=4, n=128, k=128)
     with pinned_knobs({"PLACE": place}):
         lowered = Pipeline.build(CUDA_PASSES).run(g, ctx=Context.from_target((7, 0)))
+    # CUDA spelling: moves to the PTX compiler's tests (a ``Load`` of the pair table is a lookup computed from its index)
     sources = [s for node in lowered.nodes.values() if (s := getattr(node.op, "kernel_source", None))]
     assert any("emmy_f4_pair(" in s for s in sources)
     assert not any("_f4_pairs[" in s for s in sources)
@@ -705,6 +726,7 @@ def test_the_computed_pair_lookup_matches_the_decoded_oracle(tmp_path):
     backend = CudaBackend()
     with pinned_knobs({"PLACE": "cut", "FAST_MATH": False}):
         compiled = backend.compile(g)
+    # CUDA spelling: moves to the PTX compiler's tests
     assert any("emmy_f4_pair(" in (getattr(node.op, "kernel_source", None) or "") for node in compiled.nodes.values())
     data = bind_constants(compiled, {"layer.weight": packed, "layer.weight_scale": scale_bits, "layer.weight_scale_2": s2})
     result, _ = backend.run(compiled, input_data={**data, "x": x})
@@ -774,11 +796,10 @@ def test_the_packed_drain_matches_the_decoded_oracle(tmp_path, dtype, m, n, k, t
 
     backend = CudaBackend()
     with pinned_knobs(_packed_pins(dtype, stage)):
-        compiled = backend.compile(g)
-    src = next(s for node in compiled.nodes.values() if (s := getattr(node.op, "kernel_source", None)))
-    assert f"emmy_mma_load_b_smem_trans_f4s_{dtype}" in src, "the packed pins did not reach the byte-slab drain"
+        compiled, kernels = compile_with_kernels(g)
+    assert _packed_drains(kernels, dtype), "the packed pins did not reach the byte-slab drain"
     if stage.endswith("tma"):
-        assert "cp.async.bulk.tensor" in src and "emmy_cp_async" not in src, "the TMA pin must box-copy, not cp.async"
+        assert statements(kernels, TmaLoad) and not statements(kernels, CpAsyncCopy), "the TMA pin must box-copy, not cp.async"
 
     data = bind_constants(compiled, {"layer.weight": packed, "layer.weight_scale": scale_bits, "layer.weight_scale_2": s2})
     result, _ = backend.run(compiled, input_data={**data, "x": x})
@@ -853,9 +874,8 @@ def test_the_packed_drain_stages_a_batched_activation_over_tma(tmp_path):
             "PLACE": "fuse",
         }
     ):
-        compiled = backend.compile(g)
-    src = next(s for node in compiled.nodes.values() if (s := getattr(node.op, "kernel_source", None)))
-    assert "emmy_mma_load_b_smem_trans_f4s_f16" in src, "the packed pins did not reach the byte-slab drain"
+        compiled, kernels = compile_with_kernels(g)
+    assert _packed_drains(kernels), "the packed pins did not reach the byte-slab drain"
     data = bind_constants(compiled, {"layer.weight": packed, "layer.weight_scale": scale_bits, "layer.weight_scale_2": s2})
     result, _ = backend.run(compiled, input_data={**data, "x": x})
     y = np.asarray(result.outputs[compiled.outputs[0]]).reshape(m, n).astype(np.float32)
@@ -891,14 +911,16 @@ def test_the_packed_drain_composes_with_the_f16_accumulate_atom(tmp_path):
     outs: dict[str, np.ndarray] = {}
     for atom in ("mma_m16n8k16_f16_f16", K16):
         with pinned_knobs({**PACKED_PINS, "TILE": f"{atom}/f2x2/k2"}):
-            compiled = backend.compile(g)
-        src = next(s for node in compiled.nodes.values() if (s := getattr(node.op, "kernel_source", None)))
-        assert "emmy_mma_load_b_smem_trans_f4s_f16" in src, f"{atom}: the packed pins did not reach the byte-slab drain"
+            compiled, kernels = compile_with_kernels(g)
+        assert _packed_drains(kernels), f"{atom}: the packed pins did not reach the byte-slab drain"
+        packed_chain = [mma for mma in statements(kernels, MmaSyncPtx) if mma.c_frag == "_ch0_0"]
         if atom == K16:
-            assert "_ch0_0" not in src, "the f32-accumulate sibling must not declare f16 mma fragments"
+            declared = {fragment.name for fragment in statements(kernels, RegFragment)}
+            assert "_ch0_0" not in declared, "the f32-accumulate sibling must not declare f16 mma fragments"
         else:
-            assert "emmy_mma_m16n8k16_f16_f16(_ch0_0" in src, "the mma chain must target the packed f16 fragments"
-            assert "emmy_mma_promote_f16acc" in src, "the chunk promote into the f32 shadow must be emitted"
+            half = all((mma.ab_dtype, mma.c_dtype) == ("f16", "f16") for mma in packed_chain)
+            assert packed_chain and half, "the mma chain must target the packed f16 fragments"
+            assert statements(kernels, FragmentPromote), "the chunk promote into the f32 shadow must be emitted"
         data = bind_constants(compiled, {"layer.weight": packed, "layer.weight_scale": scale_bits, "layer.weight_scale_2": s2})
         result, _ = backend.run(compiled, input_data={**data, "x": x})
         outs[atom] = np.asarray(result.outputs[compiled.outputs[0]]).reshape(m, n).astype(np.float32)
@@ -940,9 +962,8 @@ def test_the_packed_drain_addresses_its_own_split_k_slice(tmp_path, stage):
 
     backend = CudaBackend()
     with pinned_knobs({**_packed_pins("f16", stage), "REDUCE": "g8k"}):
-        compiled = backend.compile(g)
-    src = next(s for node in compiled.nodes.values() if (s := getattr(node.op, "kernel_source", None)))
-    assert "emmy_mma_load_b_smem_trans_f4s_f16" in src, "the packed pins did not reach the byte-slab drain"
+        compiled, kernels = compile_with_kernels(g)
+    assert _packed_drains(kernels), "the packed pins did not reach the byte-slab drain"
 
     data = bind_constants(compiled, {"layer.weight": packed, "layer.weight_scale": scale_bits, "layer.weight_scale_2": s2})
     result, _ = backend.run(compiled, input_data={**data, "x": x})
@@ -1052,21 +1073,21 @@ def test_packed_cut_pieces_stage_the_packed_weight_bytes(tmp_path, stage):
     ``unsigned char`` slab, the TMA pin through a tensor map, and the piece still evaluates
     ``x + 1`` into its own A slab. No decoded 16-bit weight slab is filled."""
     from emmy.compiler.context import Context
-    from emmy.compiler.pipeline import CUDA_PASSES, Pipeline
     from emmy.compiler.pipeline.search.pins import pinned_knobs
 
     g, _ = _nvfp4_cut_siblings_graph(tmp_path, m=48, k=256)
     with pinned_knobs({**_CUT_PINS, "TILE": f"{K16}/f1x2/k2", "WORK": "w1x2", "STAGE": stage}):
-        lowered = Pipeline.build(CUDA_PASSES).run(g, ctx=Context.from_target((12, 0)))
-    sources = [s for node in lowered.nodes.values() if (s := getattr(node.op, "kernel_source", None))]
-    assert len(sources) == 2
-    for src in sources:
-        assert "unsigned char _b_smem[" in src and "__half _b_smem[" not in src
-        assert "emmy_mma_load_b_smem_trans_f4s_f16" in src
-        assert "__half _a_smem[" in src and "one[0]" in src, "the piece computes x + 1 itself"
+        _, kernels = compile_with_kernels(g, ctx=Context.from_target((12, 0)))
+    assert len(kernels) == 2
+    for kernel in kernels.values():
+        slabs = _slabs(kernel)
+        assert slabs["_b_smem"][0] == "unsigned char"
+        assert _packed_drains(kernel)
+        reads_one = any(load.input == "one" for load in statements(kernel, Load))
+        assert slabs["_a_smem"][0] == "__half" and reads_one, "the piece computes x + 1 itself"
         if stage.endswith("tma"):
-            assert "const CUtensorMap* __restrict__ _desc_b" in src and "cp_async_bulk_tensor_2d(&_b_smem" in src
-            assert "emmy_cp_async" not in src
+            assert any((copy.smem, copy.desc) == ("_b_smem", "_desc_b") for copy in statements(kernel, TmaLoad))
+            assert not statements(kernel, CpAsyncCopy)
 
 
 def _run_cut_siblings(tmp_path, pins, x):
@@ -1078,8 +1099,7 @@ def _run_cut_siblings(tmp_path, pins, x):
     g, weights = _nvfp4_cut_siblings_graph(tmp_path, m=x.shape[0], k=x.shape[1])
     backend = CudaBackend()
     with pinned_knobs(pins):
-        compiled = backend.compile(g)
-    sources = [s for node in compiled.nodes.values() if (s := getattr(node.op, "kernel_source", None))]
+        compiled, kernels = compile_with_kernels(g)
     constants = {}
     for name, (packed, scale_bits, s2) in weights.items():
         constants |= {f"{name}.weight": packed, f"{name}.weight_scale": scale_bits, f"{name}.weight_scale_2": s2}
@@ -1088,7 +1108,7 @@ def _run_cut_siblings(tmp_path, pins, x):
         name: np.asarray(result.outputs[output]).reshape(x.shape[0], -1).astype(np.float32)
         for name, output in zip(_CUT_WIDTHS, compiled.outputs, strict=True)
     }
-    return outputs, weights, sources
+    return outputs, weights, kernels
 
 
 @requires_cuda
@@ -1107,12 +1127,13 @@ def test_packed_cut_pieces_match_the_decoded_oracle_and_the_fused_kernel(tmp_pat
 
     rng = np.random.default_rng(13)
     x = rng.standard_normal((48, 256)).astype(np.float16)
-    staged, weights, sources = _run_cut_siblings(
+    staged, weights, kernels = _run_cut_siblings(
         tmp_path / "cut", {**_CUT_PINS, "TILE": f"{K16}/f1x2/k2", "WORK": "w1x2", "STAGE": stage}, x
     )
-    assert len(sources) == 2 and all("unsigned char _b_smem[" in src for src in sources), "the pins did not reach the byte slab"
-    fused, _, sources = _run_cut_siblings(tmp_path / "fused", {"PLACE@map.1/inner": "fuse", "REDUCE": ""}, x)
-    assert len(sources) == 1
+    bytes_staged = all(_slabs(kernel)["_b_smem"][0] == "unsigned char" for kernel in kernels.values())
+    assert len(kernels) == 2 and bytes_staged, "the pins did not reach the byte slab"
+    fused, _, kernels = _run_cut_siblings(tmp_path / "fused", {"PLACE@map.1/inner": "fuse", "REDUCE": ""}, x)
+    assert len(kernels) == 1
 
     a = x.astype(np.float32) + 1
     for name, (packed, scale_bits, s2) in weights.items():
@@ -1273,7 +1294,6 @@ def test_native_fp4_runtime_rows_reuse_one_compilation(k):
     from emmy.compiler.graph import Graph
     from emmy.compiler.ir.base import InputOp
     from emmy.compiler.ir.tile import OutputSpec, Placement, TileOp
-    from emmy.compiler.pipeline import CUDA_PASSES, Pipeline
     from emmy.compiler.pipeline.search.pins import pinned_knobs
 
     n = 128
@@ -1292,9 +1312,8 @@ def test_native_fp4_runtime_rows_reuse_one_compilation(k):
     graph.add_node(op, list(inputs), Tensor("y", ("num_tokens", n), F32), node_id="y")
     graph.inputs, graph.outputs = list(inputs), ["y"]
     with pinned_knobs({"TILE": f"{K64}/f1x2/k4", "WORK": "w4x1", "STAGE": "d2/smem-async", "REDUCE": ""}):
-        compiled = Pipeline.build(CUDA_PASSES).run(graph, ctx=Context.from_target((12, 0)))
-    source = compiled.nodes["y"].op.kernel_source
-    assert "int num_tokens" in source and "emmy_mma_m16n8k64_e2m1_f32(" in source
+        compiled, kernels = compile_with_kernels(graph, ctx=Context.from_target((12, 0)))
+    assert "num_tokens" in compiled.nodes["y"].op.runtime_args and _is_block_scaled(kernels["y"])
 
     rng = np.random.default_rng(42)
     values = np.array([0, 0.5, 1, 1.5, 2, 3, 4, 6, 0, -0.5, -1, -1.5, -2, -3, -4, -6], np.float64)
@@ -1423,7 +1442,6 @@ def test_native_fp4_unit_n_matches_decoded_numpy(rows, k):
     from emmy.compiler.ir.base import InputOp
     from emmy.compiler.ir.tile import Placement, TileOp
     from emmy.compiler.ir.tile.ir import OutputSpec
-    from emmy.compiler.pipeline import CUDA_PASSES, Pipeline
     from emmy.compiler.pipeline.search.pins import pinned_knobs
 
     node, inputs, axes, ka = _pair_node(m=rows, n=1, k=k)
@@ -1464,10 +1482,9 @@ def test_native_fp4_unit_n_matches_decoded_numpy(rows, k):
             decode(feed["a_w_bits"][start : start + 128], feed["a_w_scale_bits"][start : start + 128]) @ activation
         )
     with pinned_knobs({"TILE": f"{K64}/f1x2/k4", "WORK": "w4x1", "STAGE": "d2/smem-async", "REDUCE": ""}):
-        compiled = Pipeline.build(CUDA_PASSES).run(graph, ctx=Context.from_target((12, 0)))
+        compiled, kernels = compile_with_kernels(graph, ctx=Context.from_target((12, 0)))
         result, _ = CudaBackend().run(compiled, input_data=feed)
-    source = next(n.op.kernel_source for n in compiled.nodes.values() if hasattr(n.op, "kernel_source"))
-    assert "emmy_mma_m16n8k64_e2m1_f32(" in source
+    assert _is_block_scaled(kernels)
     actual = result.outputs["y"].reshape(-1)
     assert np.count_nonzero(actual) > rows * 0.95
     np.testing.assert_allclose(actual, expected, rtol=1e-3, atol=1e-3)

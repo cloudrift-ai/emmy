@@ -208,6 +208,8 @@ def test_the_statement_module_exports_a_pinned_list() -> None:
     functions += ["mask_select_predicate", "pretty_body", "parse_body", "ordering_constraints", "dtype_promote"]
     # The target's spelling of an index division, which an emitter runs on the body it renders.
     functions += ["reduce_strength"]
+    # The input check of a code generator: the body says every type and every conversion, and asks for nothing.
+    functions += ["check_types", "check_input"]
     # Normalization steps a pass calls on its own, and the two statement types fusion assembles a region with.
     steps = list(_STEPS)
     assembly = ["Call", "Subroutine"]
@@ -516,7 +518,7 @@ def test_a_kernel_ir_kind_is_declared_not_programmed() -> None:
         for name, member in vars(cls).items()
         if isinstance(member, (types.FunctionType, property, functools.cached_property, staticmethod, classmethod))
     ]
-    assert len(statement_types) == 31 and all(
+    assert len(statement_types) == 32 and all(
         cls.__module__ == "emmy.compiler.ir.kernel.ir" and "_fields" in vars(cls) for cls in statement_types
     )
     assert not offenders, "state these as field roles, or move them to functions over the statement:\n" + "\n".join(sorted(offenders))

@@ -6,20 +6,22 @@ import numpy as np
 import pytest
 
 from emmy.compiler.context import Context
+from emmy.compiler.dtype import F16, F32
 from emmy.compiler.graph import Graph
 from emmy.compiler.ir.base import InputOp
 from emmy.compiler.ir.cuda import CudaOp
 from emmy.compiler.ir.expression import apply
-from emmy.compiler.ir.kernel.ir import FragmentPromote, FragmentRepack, LdmatrixLoad, MmaSyncPtx, RegFragment
+from emmy.compiler.ir.kernel.ir import FragmentLoad, FragmentPromote, FragmentRepack, MmaSyncPtx, RegFragment, fragment_registers
 from emmy.compiler.ir.render import render_stmt
 from emmy.compiler.ir.schedule import Stage
 from emmy.compiler.ir.schedule.base import ScheduleRefused
 from emmy.compiler.ir.schedule.register import RegisterCodec, RegisterContext, RegisterProblem, materialize_register
+from emmy.compiler.ir.stmt import Loop, StridedLoop
 from emmy.compiler.ir.tile import TileOp
 from emmy.compiler.pipeline import CUDA_PASSES, LOOP_PASSES, Pipeline
 from emmy.compiler.pipeline.passes.lowering.kernel._register import factorize_register
 from emmy.compiler.pipeline.search.pins import pinned_knobs
-from tests.compiler.helpers import requires_cuda
+from tests.compiler.helpers import compile_with_kernels, requires_cuda, statements, text
 from tests.compiler.ir.test_carried_state import _graph, _inputs, _reference, _unit_seeded_graph
 
 
@@ -121,13 +123,18 @@ def test_a_descent_row_naming_other_families_offers_no_register_leaf():
 @pytest.mark.parametrize("target", [(7, 0), (12, 0)], ids=["volta", "modern"])
 def test_chunk_loop_is_inside_one_launch(target):
     with pinned_knobs({"FAST_MATH": True, "STAGE": "d1/reg"}):
-        graph = Pipeline.build(CUDA_PASSES).run(_graph(), ctx=Context.from_target(target))
+        graph, kernels = compile_with_kernels(_graph(), ctx=Context.from_target(target))
     (op,) = (n.op for n in graph.nodes.values() if isinstance(n.op, CudaOp))
+    (kernel,) = kernels.values()
     assert not op.serial and op.smem_bytes == 0
     assert op.arg_order == ("D", "W", "U", "out")
     assert [t.name for t in graph.nodes["out"].outputs] == ["out"]
-    assert f"float _state0[{8 if target == (7, 0) else 4}]" in op.kernel_source and "for (int a0" in op.kernel_source
-    assert "out__acc1[" not in op.kernel_source
+    # The state is an accumulator of floats in registers, and the step axis is a loop of the one launch.
+    (state,) = [fragment for fragment in statements(kernel, RegFragment) if fragment.name == "_state0"]
+    assert (state.role, state.dtype.name, fragment_registers(state)) == ("c", "f32", 8 if target == (7, 0) else 4)
+    assert any(loop.axis.name == "a0" for loop in statements(kernel, Loop, StridedLoop))
+    assert "out__acc1" not in text(kernel)
+    # CUDA spelling: moves to the PTX compiler's tests
     assert "#include <cuda_fp16.h>" in op.kernel_source  # The buffers are FP32; the direct loader constructs FP16 operands.
 
 
@@ -155,18 +162,19 @@ def test_register_output_keeps_a_unit_batch_coordinate(batch_extent):
     if batch_extent == 1:
         schedule = next(iter(_context(tile).extensions()))
         node.op = materialize_register(tile, schedule, {})
-        lowered = Pipeline.build(["lowering/kernel", "lowering/cuda"]).run(graph, ctx=Context.from_target((12, 0)))
-        (cuda,) = (n.op for n in lowered.nodes.values() if isinstance(n.op, CudaOp))
-        assert "emmy_mma_m16n8k16" in cuda.kernel_source
+        _, kernels = compile_with_kernels(graph, ctx=Context.from_target((12, 0)), passes=["lowering/kernel", "lowering/cuda"])
+        (kernel,) = kernels.values()
+        assert any(tuple(mma.shape) == (16, 8, 16) for mma in statements(kernel, MmaSyncPtx))
 
 
 def test_classic_recurrence_does_not_reopen_the_launch_axis():
     with pinned_knobs({"FAST_MATH": False}):
-        graph = Pipeline.build(CUDA_PASSES).run(_graph(), ctx=Context.from_target((12, 0)))
+        graph, kernels = compile_with_kernels(_graph(), ctx=Context.from_target((12, 0)))
     (cuda,) = (n.op for n in graph.nodes.values() if isinstance(n.op, CudaOp))
+    (kernel,) = kernels.values()
     assert cuda.serial
-    for name, _extent in cuda.serial:
-        assert f"for (int {name} =" not in cuda.kernel_source
+    looped = {loop.axis.name for loop in statements(kernel, Loop, StridedLoop)}
+    assert not looped & {name for name, _extent in cuda.serial}
 
 
 def test_register_fork_keeps_the_carrier_when_classic_is_also_offered():
@@ -203,9 +211,9 @@ def test_register_operands_use_direct_loads_when_the_address_allows_it(target, s
     (tile,) = (n.op for n in _lift(graph).nodes.values() if isinstance(n.op, TileOp))
     schedule = next(iter(_context(tile, target).extensions()))
     statements = tuple(factorize_register(materialize_register(tile, schedule, {})).body.iter())
-    reads = [s for s in statements if isinstance(s, LdmatrixLoad)]
+    reads = [s for s in statements if isinstance(s, FragmentLoad)]
     assert bool(reads) == (stride == 1)
-    assert all(s.src_buffer == "W" and s.b_trans and not s.staged and s.gmem_guard for s in reads)
+    assert all(s.src_buffer == "W" and s.b_trans and not s.staged and s.clamp for s in reads)
     assert any(isinstance(s, FragmentRepack) and s.role == "b" for s in statements) == (stride != 1)
     assert any(isinstance(s, FragmentRepack) and s.role == "a" for s in statements)
 
@@ -312,9 +320,10 @@ def test_gmem_fragment_loads_keep_their_constant_offset_in_the_pointer():
     from emmy.compiler.ir.expression import BinaryExpression, Literal, Var
     from emmy.compiler.ir.render import RenderCtx
 
-    ctx = RenderCtx(shapes={"k": (Dim(4), Dim(64), Dim(128))}, buffer_dtypes={"k": "f32"}, ssa_dtypes={"r": "f16"})
+    ctx = RenderCtx(shapes={"k": (Dim(4), Dim(64), Dim(128))})
     row = BinaryExpression("+", BinaryExpression("*", Var("a0"), Literal(64, "int")), Literal(16, "int"))
-    load = LdmatrixLoad(frag="r", src_buffer="k", src_index=(Var("a1"), row, Literal(8, "int")), role="b", staged=False, ldm=128)
+    index = (Var("a1"), row, Literal(8, "int"))
+    load = FragmentLoad(frag="r", src_buffer="k", src_index=index, role="b", ldm=128, src_dtype=F32, dtype=F16)
     (line,) = render_stmt(load, ctx)
     assert line.strip() == "emmy_mma_load_b_gmem<float, __half>(r, &k[a1 * 8192 + a0 * 64 * 128] + 2056, 128);"
 

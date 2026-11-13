@@ -29,16 +29,23 @@ from emmy.compiler.ir.axis import Axis
 from emmy.compiler.ir.base import ConstantOp, InputOp
 from emmy.compiler.ir.elementwise import ElementwiseImpl
 from emmy.compiler.ir.frontend.ir import LinearOp
+from emmy.compiler.ir.kernel.ir import FragmentLoad, MmaSyncPtx
 from emmy.compiler.ir.schedule import Placement, Tile, Work
 from emmy.compiler.ir.schedule.classic import refusals as sched
 from emmy.compiler.ir.stmt import Assign, Load, parse_body
 from emmy.compiler.ir.tensor.ir import ElementwiseOp
 from emmy.compiler.ir.tile.ir import TileOp
 from emmy.compiler.pipeline.passes.frontend.decomposition._broadcast import broadcast_to
-from tests.compiler.helpers import requires_cuda, requires_sm
+from tests.compiler.helpers import compile_with_kernels, requires_cuda, requires_sm, statements
 from tests.compiler.terms import contraction, projection
 
 K32 = "mma_m16n8k32_e4m3_f32"
+
+
+def _k32_products(kernels) -> list:
+    """The ``m16n8k32`` products of ``kernels``: the native FP8 tier."""
+    return [mma for mma in statements(kernels, MmaSyncPtx) if tuple(mma.shape) == (16, 8, 32)]
+
 
 # ===================================================================
 # The side-generic mul-hoist: A-side and double-cone W8A8 (restored)
@@ -140,13 +147,16 @@ def test_k32_tile_codec_round_trips():
 def test_k32_fragment_register_counts():
     """The k32 8-bit fragment ABI packs 4 bytes/reg/lane: A is 4x32-bit regs, B is 2 (the PTX
     m16n8k32 8-bit fragment table); C keeps the k16 f32 map (4 regs)."""
-    from emmy.compiler.ir.kernel.ir import _mma_sync_nregs
+    from emmy.compiler.ir.kernel.ir import RegFragment, fragment_registers
 
-    assert _mma_sync_nregs("a", (16, 8, 32), F8E4M3) == 4
-    assert _mma_sync_nregs("b", (16, 8, 32), F8E4M3) == 2
-    assert _mma_sync_nregs("c", (16, 8, 32), F32) == 4
+    def registers(role, dtype):
+        return fragment_registers(RegFragment(name="f", role=role, dtype=dtype))
+
+    assert registers("a", F8E4M3) == 4
+    assert registers("b", F8E4M3) == 2
+    assert registers("c", F32) == 4
     # the 16-bit family is untouched
-    assert _mma_sync_nregs("a", (16, 8, 16), F16) == 4 and _mma_sync_nregs("b", (16, 8, 16), F16) == 2
+    assert registers("a", F16) == 4 and registers("b", F16) == 2
 
 
 # ===================================================================
@@ -292,12 +302,14 @@ def test_k32_mma_matches_lut_reference_cuda():
     rng = np.random.default_rng(11)
     backend = CudaBackend()
     with pinned_knobs({"TILE": f"{K32}/f2x2", "WORK": "w1x4", "REDUCE": "", "STAGE": ""}):
-        compiled = backend.compile(_bare_f8_linear_graph(m, n, k))
-    srcs = [getattr(nd.op, "kernel_source", "") or "" for nd in compiled.nodes.values()]
-    mma_src = next((s for s in srcs if "mma.sync.aligned.m16n8k32.row.col.f32.e4m3.e4m3.f32" in s), None)
-    assert mma_src is not None, "no k32 mma kernel — the f8 pair did not reach the native fp8 tier"
-    assert "emmy_mma_load_a_gmem_b8" in mma_src  # the byte-gather fragment loaders, raw bits
-    assert "emmy_mma_load_b_gmem_trans_b8" in mma_src or "emmy_mma_load_b_gmem_b8" in mma_src
+        compiled, kernels = compile_with_kernels(_bare_f8_linear_graph(m, n, k))
+    native = [kernel for kernel in kernels.values() if _k32_products(kernel)]
+    assert native, "no k32 mma kernel — the f8 pair did not reach the native fp8 tier"
+    assert all((mma.ab_dtype, mma.c_dtype) == ("e4m3", "f32") for mma in _k32_products(native[0]))
+    # The byte-gather fragment loads: both operands straight from global memory, raw bits into FP8 fragments.
+    loads = statements(native[0], FragmentLoad)
+    assert {load.role for load in loads} == {"a", "b"}
+    assert all(not load.staged and load.src_dtype == load.dtype == F8E4M3 for load in loads)
 
     # exact regime
     abits = np.take(np.array([0x00, 0x38, 0xB8], dtype=np.uint8), rng.integers(0, 3, (m, k)))
@@ -375,9 +387,8 @@ def test_w8a8_needs_the_gate_to_enumerate_cuda(monkeypatch):
     x = (rng.standard_normal((m, k)) * 0.05).astype(np.float16)
 
     backend = CudaBackend()
-    compiled = backend.compile(_w8a8_graph(m, n, k))
-    srcs = [getattr(nd.op, "kernel_source", "") or "" for nd in compiled.nodes.values()]
-    assert not any("m16n8k32" in s for s in srcs), "the k32 atom enumerated without the precision gate"
+    compiled, kernels = compile_with_kernels(_w8a8_graph(m, n, k))
+    assert not _k32_products(kernels), "the k32 atom enumerated without the precision gate"
 
     input_data: dict = {"x": x}
     input_data.update(bind_constants(compiled, {"act.scale": act_scale, "layer.wscale": wscale, "layer.weight": bits}))

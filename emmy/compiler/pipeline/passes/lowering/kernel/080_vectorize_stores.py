@@ -30,7 +30,6 @@ from __future__ import annotations
 
 from dataclasses import replace
 
-from emmy.compiler.backend.cuda.render_target import CudaRenderTarget
 from emmy.compiler.graph import Node
 from emmy.compiler.ir.expression import Expression, Var
 from emmy.compiler.ir.kernel import KernelOp
@@ -39,10 +38,9 @@ from emmy.compiler.pipeline import Pattern, RuleSkipped
 from emmy.compiler.pipeline.passes.lowering.kernel._siblings import Siblings
 from emmy.compiler.pipeline.passes.lowering.kernel._vector import Address, flat_address, fuse_runs
 from emmy.compiler.pipeline.search.space import VECTORIZE_STORES
+from emmy.compiler.target import vector_widths
 
 PATTERN = [Pattern("root", KernelOp)]
-
-_TARGET = CudaRenderTarget()
 
 
 def rewrite(root: Node) -> KernelOp | None:
@@ -93,7 +91,7 @@ def _vectorize_body(top: KernelOp, body: Body) -> Body:
     changed = False
     for (output, swizzle, value_dtype), addresses in runs.items():
         if len(addresses) > 1:
-            widths = [n for n in (8, 4, 2) if _TARGET.vector_type(_buf_dtype(top, output), n) is not None]
+            widths = [n for n in sorted(vector_widths(_buf_dtype(top, output)), reverse=True) if n <= 8]
             changed |= fuse_runs(
                 scope,
                 addresses,

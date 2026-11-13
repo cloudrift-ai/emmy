@@ -1,7 +1,7 @@
 # The statement and expression vocabulary
 
 `emmy-ir` implements what `emmy/compiler/ir/stmt` and `emmy/compiler/ir/expression.py` export: the expression types
-and their text, the forty-four statement types, `Body`, the body text, the statement protocol, value numbering,
+and their text, the forty-five statement types, `Body`, the body text, the statement protocol, value numbering,
 identity and body normalization. Pure Rust, no Python in it, so `cargo test -p emmy-ir` runs it alone, and the tests
 of the normalization steps sit beside the steps there. The extension beside it, `emmy-ir-py`, is the `emmy.emmy_ir`
 module those two Python packages re-export from; `make setup` builds it into the package like the runtime extension.
@@ -77,15 +77,18 @@ file imports what it uses by name; no child module takes its parent's imports.
   material): the dtypes (`DType`, `dtype.rs`, with the promotion rule; the extension exports the set as `DTYPES` and a
   Python test holds it equal to the `DataType` registry), the literal types (`LitType`),
   the GPU built-ins (`expr::Builtin`), the expression types (`ExprType`, generated from the one expression list; the
-  digest spells a node by it) and the digest's other tags (`numbering::Tag`). A cast's target is `CastTarget`: a literal
-  type the simplifier folds through, or any other C type the renderer spells. A value the crate only carries stays a
-  name: a slab's swizzle, a tile's raster orientation, a fragment's layout and role, a slab's or an MMA wrapper's C
-  type. An elementwise operation is `ElementwiseOp::Known(Operation)` or `ElementwiseOp::Other(name)`, a spelling only a
+  digest spells a node by it), the digest's other tags (`numbering::Tag`) and a fragment's layout and role
+  (`fragment::Layout`, `fragment::Role`, which the lane-to-element table is keyed on). A cast's target is `CastTarget`:
+  a literal type the simplifier folds through, or any other C type the renderer spells. A value the crate only carries
+  stays a name: a slab's swizzle, a tile's raster orientation, a slab's or an MMA wrapper's C type. An elementwise operation is `ElementwiseOp::Known(Operation)` or `ElementwiseOp::Other(name)`, a spelling only a
   renderer knows. The known operations are one declaration (`operations!` in `elementwise.rs`): each variant with its
   spelling and its properties, which generates the enum, its `Display`/`FromStr` pair and the table `OPS` the enum
   indexes, one `OperationInfo` row per operation (commutative, associative, the neutral element, the cluster
   representative, integer arithmetic, whether it copies or selects its operand, its affine role, its host evaluator,
-  its infix spelling and precedence). Every reader
+  its infix spelling and precedence, and for a composite function its definition in primitive operations, which
+  `Operation::definition` gives over an operand and kernel lowering writes into a body). An approximate instruction
+  is an operation of its own, named after the exact one (`exp_fast`, `divide_fast`, `sqrt_fast`, …): the same
+  function and the same host value, a faster instruction with a documented error on a device. Every reader
   of an operation's nature (the affine fold, the alias reads of placement and the ties, the dtype promotion, the
   clustered identity, the Python tables) reads a property; none matches a name. The neutral element is the real one
   (`-inf` for a maximum) and `seed` is what a kernel initializes with, the bounded stand-in `±1e30` the CUDA source
@@ -173,6 +176,22 @@ states. A `Grid` states its own (`launch_ranges` in the protocol: `thread_idx.x`
 below its CTAs), and the simplifier reads it for the `Grid`'s decode and its body, so a decode of the flat thread id
 splits into the CTA's and the thread's digits, and a built-in the launch pins to one value is that value. Loop IR
 holds no built-in, so no identity moves.
+
+`fragment.rs` holds the lane-to-element table of the tensor-core fragments, the one statement of which elements of a
+tile each lane of a warp holds in which register. `fragment_table(layout, role, dtype)` gives one row: the lane
+coordinates the row reads (a name and an expression over the lane, `fragment::LANE`, and the coordinates before it),
+per register and element the row and column offset in the tile as expressions over those coordinates, the XOR masks
+of a per-row reduce, and for a register of block scales the lanes that supply it under the instruction's two
+selectors (`SCALE_SELECTOR_A`, `SCALE_SELECTOR_B`). `paired_accumulator_table` is the accumulator of Volta's paired
+tile. A `RegFragment` holds as many registers as its row (`RegFragment::registers`); no statement carries a count.
+The CUDA renderer reads the rows of an accumulator of floats through the extension (`FragmentApply`,
+`FragmentRowReduce`, `RegStore`); the operand rows, the packed accumulators and the block scales are what its C++
+loaders compute, written here for the PTX compiler and checked by a test that every element of a tile is held once
+(twice by Volta's operands), not against a card.
+
+`input.rs` is the check a code generator's input passes (`check_input`): typed in full (`types.rs`), one flat index
+per access outside the accesses their dimensions define, no loop asking for unrolling, and every fragment statement
+naming a layout and a role the table has.
 
 `strength.rs` is not a step of the normal form. `reduce_strength` spells every index division and remainder by a power
 of two over a dividend the ranges prove non-negative as a shift and a mask, the target's spelling. The simplifier reads

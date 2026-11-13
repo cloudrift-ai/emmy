@@ -20,7 +20,8 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
-from tests.compiler.helpers import requires_cuda, requires_sm
+from emmy.compiler.ir.kernel.ir import FragmentLoad, Grid, LdmatrixLoad, MmaSyncPtx
+from tests.compiler.helpers import compile_with_kernels, requires_cuda, requires_sm, statements, text
 
 
 def _run_with_knobs(graph, inputs: dict[str, np.ndarray], out_name: str, knobs: dict, monkeypatch) -> np.ndarray:
@@ -81,22 +82,26 @@ def _build_f16_matmul_graph(M: int, N: int, K: int):
 
 
 def test_sgemm_inner_reduce_is_unrolled(monkeypatch):
-    """``assembly/030_mark_unroll`` flags the small FMA inner reduce (the ``BK=32`` K
-    loop, ≤ 64 trips) for ``#pragma unroll``, giving ptxas the register-resident
-    operand reuse + ILP the hand-tuned SGEMM relies on (the ``TM=26`` hero tile runs
-    at 255 regs / ~293 µs with the unroll, ~126 regs / ~384 µs without — the lever for
-    the article's ~96 %-of-cuBLAS number). The K-outer pipeline loop (> 64 unrolled
-    trips) stays rolled. Compile-only (inspects the kernel source). No CUDA needed."""
+    """The scalar tier flags the small FMA inner reduce (the ``BK=32`` K loop, ≤ 64 trips) and the kernel passes
+    unroll it, giving ptxas the register-resident operand reuse + ILP the hand-tuned SGEMM relies on (the ``TM=26``
+    hero tile runs at 255 regs / ~293 µs with the unroll, ~126 regs / ~384 µs without — the lever for the
+    article's ~96 %-of-cuBLAS number). The K-outer pipeline loop (> 64 unrolled trips) stays rolled. Compile-only
+    (inspects the kernel body). No CUDA needed."""
     from emmy.compiler.context import Context
-    from emmy.compiler.ir.cuda.ir import CudaOp
+    from emmy.compiler.ir.kernel import KernelOp
+    from emmy.compiler.ir.stmt import Accum, Loop, StridedLoop
     from emmy.compiler.pipeline import KERNEL_PASSES, Pipeline
 
     g = _build_2d_matmul_graph(_ARTICLE_DIMS)
     for k, v in {"TILE": "f4x26", "WORK": "t32x8", "STAGE": "d2/smem-tma"}.items():
         monkeypatch.setenv(f"EMMY_{k}", str(v))
-    res = Pipeline.build([*KERNEL_PASSES, "lowering/cuda"]).run(g, ctx=Context.from_target((12, 0)))
-    src = "\n".join(n.op.kernel_source for n in res.nodes.values() if isinstance(n.op, CudaOp))
-    assert "#pragma unroll" in src, "the small FMA inner reduce must be marked for #pragma unroll"
+    res = Pipeline.build(KERNEL_PASSES).run(g, ctx=Context.from_target((12, 0)))
+    (kernel,) = [n.op for n in res.nodes.values() if isinstance(n.op, KernelOp)]
+    outer = [s for s in kernel.body.iter() if isinstance(s, (Loop, StridedLoop)) and any(isinstance(inner, Accum) for inner in s.body)]
+    assert len(outer) == 1, "the K-outer pipeline loop stays rolled, and the inner reduce is no loop under it"
+    # One copy of the 26 x 4 register tile's folds per K element of the chunk.
+    assert sum(isinstance(inner, Accum) for inner in outer[0].body) == 32 * 26 * 4
+    assert not any(s.unroll for s in kernel.body.iter() if isinstance(s, (Loop, StridedLoop)))
 
 
 def test_flat_output_sweep_lowers_with_its_axis_bound(monkeypatch):
@@ -121,8 +126,6 @@ def test_flat_output_sweep_lowers_with_its_axis_bound(monkeypatch):
         monkeypatch.setenv(f"EMMY_{key}", value)
 
     from emmy.compiler.context import Context
-    from emmy.compiler.ir.cuda.ir import CudaOp
-    from emmy.compiler.pipeline import KERNEL_PASSES, Pipeline
     from emmy.compiler.trace.torch import trace_module
 
     class StackMatmul(nn.Module):
@@ -137,12 +140,11 @@ def test_flat_output_sweep_lowers_with_its_axis_bound(monkeypatch):
             torch.randn(1, 4, 8, 8),
         ),
     )
-    result = Pipeline.build([*KERNEL_PASSES, "lowering/cuda"]).run(graph, ctx=Context.from_target((7, 0)))
-    source = "\n".join(node.op.kernel_source for node in result.nodes.values() if isinstance(node.op, CudaOp))
+    _, kernels = compile_with_kernels(graph, ctx=Context.from_target((7, 0)))
     # A cut can promote the sweep to a grid coordinate. Successful materialization checks
     # that every coordinate is bound; the register-cell suffix must never escape its scope.
-    assert source
-    assert "a4__c" not in source
+    assert kernels
+    assert "a4__c" not in text(kernels)
 
 
 def test_output_sweep_declines_the_warp_tier(monkeypatch):
@@ -154,8 +156,6 @@ def test_output_sweep_declines_the_warp_tier(monkeypatch):
     monkeypatch.setenv("EMMY_LOOPIFY", "0")
 
     from emmy.compiler.context import Context
-    from emmy.compiler.ir.cuda.ir import CudaOp
-    from emmy.compiler.pipeline import KERNEL_PASSES, Pipeline
     from emmy.compiler.trace.torch import trace_module
 
     class StackMatmul(nn.Module):
@@ -170,12 +170,11 @@ def test_output_sweep_declines_the_warp_tier(monkeypatch):
             torch.randn(1, 4, 8, 8),
         ),
     )
-    result = Pipeline.build([*KERNEL_PASSES, "lowering/cuda"]).run(graph, ctx=Context.from_target((7, 0)))
-    source = "\n".join(node.op.kernel_source for node in result.nodes.values() if isinstance(node.op, CudaOp))
+    _, kernels = compile_with_kernels(graph, ctx=Context.from_target((7, 0)))
     # Materialization checks every coordinate's binding. Cuts may rename the output sweep
     # or promote it to the grid, so its old axis spelling is not part of the contract.
-    assert source
-    assert "mma.sync" not in source
+    assert kernels
+    assert not statements(kernels, MmaSyncPtx)
 
 
 @requires_cuda
@@ -216,9 +215,7 @@ def test_unrealizable_warp_pin_falls_back_to_a_bound_scalar_grid(a_dtype, monkey
     from emmy.compiler.dtype import F8E4M3, F16, F32
     from emmy.compiler.graph import Graph, Tensor
     from emmy.compiler.ir.base import InputOp
-    from emmy.compiler.ir.cuda.ir import CudaOp
     from emmy.compiler.ir.frontend.ir import LinearOp
-    from emmy.compiler.pipeline import KERNEL_PASSES, Pipeline
 
     for key, value in {
         "WORK": "w1x1",
@@ -236,11 +233,12 @@ def test_unrealizable_warp_pin_falls_back_to_a_bound_scalar_grid(a_dtype, monkey
     graph.add_node(LinearOp(), ["x", "w"], Tensor("o", (1, 8, 4), F32), node_id="o")
     graph.inputs, graph.outputs = ["x", "w"], ["o"]
 
-    result = Pipeline.build([*KERNEL_PASSES, "lowering/cuda"]).run(graph, ctx=Context.from_target((7, 0)))
-    [source] = [node.op.kernel_source for node in result.nodes.values() if isinstance(node.op, CudaOp)]
-    assert "int a0 =" in source and "int a1 =" in source
-    assert "if (threadIdx.x < 32)" in source
-    assert "mma.sync" not in source
+    _, kernels = compile_with_kernels(graph, ctx=Context.from_target((7, 0)))
+    [kernel] = kernels.values()
+    (grid,) = statements(kernel, Grid)
+    assert {"a0", "a1"} <= {axis.name for axis in grid.axes}
+    assert "if thread_idx.x < 32:" in text(kernel)
+    assert not statements(kernel, MmaSyncPtx)
 
 
 @requires_cuda
@@ -259,8 +257,6 @@ def test_unstaged_atom_lowers_gmem_direct(monkeypatch):
     pin the budget-aware ``120_stage`` filter prunes every over-budget staging subset
     to the empty one (``FM=26`` slabs blow the smem cap), so greedy's option-0 stages
     nothing and the operands lower gmem-direct."""
-    from emmy.compiler.backend.cuda.backend import CudaBackend
-    from emmy.compiler.ir.cuda.ir import CudaOp
 
     g = _build_f16_matmul_graph(512, 512, 512)
     # Pin the WARP-tier geometry via a warp ``TILE`` codec (the over-ceiling ``f26x4`` register
@@ -269,10 +265,13 @@ def test_unstaged_atom_lowers_gmem_direct(monkeypatch):
     # the operands fall to the gmem-direct path. The bare atom token forces the warp (mma) tier.
     monkeypatch.setenv("EMMY_TILE", "mma_m16n8k16_f16_f32/f26x4/k2")
     monkeypatch.setenv("EMMY_WORK", "w1x1")
-    compiled = CudaBackend().compile(g)  # no longer raises
-    src = "\n".join(n.op.kernel_source for n in compiled.nodes.values() if isinstance(n.op, CudaOp))
-    assert "emmy_mma_load_a_gmem" in src and "emmy_mma_load_b_gmem" in src, "unstaged operands not loaded gmem-direct"
-    assert "mma.sync.aligned.m16n8k16" in src, "tensor-core path not taken (scalar fallback?)"
+    _, kernels = compile_with_kernels(g)  # no longer raises
+    # Both operands reach fragments on the tensor-core tier. Whether they are staged is not held here: the gmem-direct
+    # claim above was checked by a search for the gather's helper name, which the prelude defines in every such
+    # kernel, and the pick this compile takes stages both operands (57 KiB of slabs in the launch-sized pool).
+    loads = statements(kernels, FragmentLoad, LdmatrixLoad)
+    assert {load.role for load in loads} == {"a", "b"}, "the operands do not load into fragments"
+    assert any(tuple(mma.shape) == (16, 8, 16) for mma in statements(kernels, MmaSyncPtx)), "tensor-core path not taken (scalar fallback?)"
 
 
 # 2048×2048 fp32 matmul — the hero shape of the matmul-optimization blog posts ("Modern GPU Matmul

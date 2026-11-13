@@ -17,8 +17,6 @@ weights through the smem compute fill.
 
 from __future__ import annotations
 
-import re
-
 import pytest
 
 from emmy.compiler.dim import Dim
@@ -27,12 +25,13 @@ from emmy.compiler.graph import Tensor
 from emmy.compiler.ir.atom import ATOM_REGISTRY
 from emmy.compiler.ir.axis import Axis
 from emmy.compiler.ir.elementwise import ElementwiseImpl
+from emmy.compiler.ir.kernel.ir import FragmentLoad, MmaSyncPtx
 from emmy.compiler.ir.schedule import Stage, Tile, Work
 from emmy.compiler.ir.schedule.staging import resolve_warp_stage
 from emmy.compiler.ir.stmt import Assign, Body, Load, parse_body
 from emmy.compiler.ir.tile import Placement, TileOp
 from emmy.compiler.pipeline.passes.tile._fromloop import _stamp_axes, fold_from_loop
-from tests.compiler.helpers import requires_cuda, requires_sm
+from tests.compiler.helpers import recording_kernels, requires_cuda, requires_sm, statements
 from tests.compiler.terms import contraction, projection
 
 # ===================================================================
@@ -317,16 +316,17 @@ def test_fp8_b_matmul_reaches_warp_tier_cuda():
     # STAGE pinned to gmem-direct: this test anchors the gmem-direct fragment-convert spelling
     # (the staged byte-slab forms are ``test_fp8_staged``'s).
     with pinned_knobs({"TILE": "mma_m16n8k16_f16_f32/f2x2/k2", "WORK": "w1x8", "REDUCE": "", "STAGE": ""}):
-        compiled = backend.compile(_fp8_linear_graph(m, n, k))
+        with recording_kernels() as kernels_of:
+            compiled = backend.compile(_fp8_linear_graph(m, n, k))
 
-    sources = [getattr(node.op, "kernel_source", None) for node in compiled.nodes.values()]
-    mma_src = next((s for s in sources if s and "mma.sync" in s), None)
-    assert mma_src is not None, "no mma kernel — the fp8-B contraction did not reach the warp tier"
+    warp = [kernel for kernel in kernels_of(compiled).values() if statements(kernel, MmaSyncPtx)]
+    assert warp, "no mma kernel — the fp8-B contraction did not reach the warp tier"
     # The fragment-boundary decode. Below sm_90 the 050/060 constant folds don't fire, so B
-    # arrives in-graph-transposed and the TRANS fragment helper carries the same per-element
-    # convert — verified numerically on a 4090 (max_rel 2.5e-4); either spelling is the warp
-    # tier with the decode at the fragment load.
-    assert re.search(r"emmy_mma_load_b_gmem(_trans)?<__nv_fp8_e4m3, __half>", mma_src)
+    # arrives in-graph-transposed and the transposed fragment load carries the same per-element
+    # convert — verified numerically on a 4090 (max_rel 2.5e-4); either is the warp tier with the
+    # decode at the fragment load: a gmem-direct B load of e4m3 bytes into an f16 fragment.
+    b_loads = [load for load in statements(warp[0], FragmentLoad) if load.role == "b"]
+    assert b_loads and all(not load.staged and (load.src_dtype, load.dtype) == (F8E4M3, F16) for load in b_loads)
 
     input_data: dict = {"x": x}
     input_data.update(bind_constants(compiled, {"layer.weight": bits, "layer.weight_scale": scale}))

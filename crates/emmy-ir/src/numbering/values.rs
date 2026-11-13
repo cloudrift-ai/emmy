@@ -638,8 +638,15 @@ impl Context<'_> {
                 Statement::Accum(s) => {
                     let redirected = s.base.as_ref().is_some_and(|base| *base != s.name);
                     let value_key = self.value_key(&s.value, &mut params, &mut ops, &mut touched);
+                    // A fold the back edge of its loop seeds (the first update of a state its loop carries, read as
+                    // the step before) is the whole reduction of its value. A fold whose state already holds a value
+                    // here (a seed in its own scope, an update ahead of it: an unrolled loop's copies, a merge of
+                    // partials after their loop) is one step on that value, and its number keeps it.
                     let base_key = match &s.base {
                         Some(base) if redirected => self.operand(base, &mut ops, &mut touched),
+                        _ if self.env.contains_key(&s.name) => {
+                            self.operand(&s.name, &mut ops, &mut touched)
+                        }
                         _ => Key::None,
                     };
                     let bound: Vec<Name> = if s.axes.is_empty() {
@@ -1116,6 +1123,31 @@ mod tests {
                 .unwrap()
         };
         assert_ne!(kept("(x + y) + z"), kept("x + (y + z)"));
+    }
+
+    /// A fold whose state already holds a value is one step on that value: two states seeded alike that fold one
+    /// value last hold two values when an earlier step differs (an unrolled loop's last copies, where one state's
+    /// lane ran past the row and folds the seed). A fold its loop's back edge seeds keeps the number of its value's
+    /// whole reduction.
+    #[test]
+    fn a_fold_on_a_held_value_numbers_with_that_value() {
+        let body = crate::text::parse_body(
+            "init f32 p = -1e+30\ninit f32 q = -1e+30\nf32 a = load A[0]\nf32 b = load A[1]\n\
+             f32 p <- maximum(p, a)\nf32 q <- maximum(q, b)\nf32 p <- maximum(p, b)\nf32 q <- maximum(q, b)\n\
+             f32 O[0] = p\nf32 O[1] = q",
+        )
+        .unwrap();
+        let numbering = value_numbers(&body, &|name| Key::Str(*name), Chains::Flat);
+        assert_ne!(numbering.numbers[6], numbering.numbers[7]);
+        let looped = |seed: &str| {
+            let body = crate::text::parse_body(&format!(
+                "{seed}for k in 0..4:\n    f32 x = load A[k]\n    f32 s <- add(s, x)\nf32 O[0] = s"
+            ))
+            .unwrap();
+            let numbering = value_numbers(&body, &|name| Key::Str(*name), Chains::Flat);
+            numbering.numbers.iter().rev().nth(1).cloned().unwrap()
+        };
+        assert_eq!(looped(""), looped("init f32 s = 0\n"));
     }
 
     /// Each side of a commutative node is keyed once: a chain the clustered identity keeps as a tree is linear in
