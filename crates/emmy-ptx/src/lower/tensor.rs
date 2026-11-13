@@ -208,12 +208,6 @@ impl Lowerer {
     /// statement loads it. A declaration of no registers is one register by the fragment's own name: a lane's
     /// block scales.
     pub(super) fn reg_fragment(&mut self, node: &RegFragment) -> Result<()> {
-        if node.count != 1 {
-            let count = node.count;
-            return Err(self.refuse(format_args!(
-                "a declaration of {count} fragments asks for a loop over them, which a kernel pass writes out"
-            )));
-        }
         let role = &*node.role;
         let count = match node.nregs {
             Some(count) => count,

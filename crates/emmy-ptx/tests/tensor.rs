@@ -142,8 +142,6 @@ fn a_fragment_is_read_by_its_registers_at_their_type() {
         with("MmaSyncPtx(c_frag=fa, a_frag=fa, b_frag=fa, shape=(16, 8, 16))")
             .contains("the fragment fa holds 4 registers of u32, read as 2 of u32")
     );
-    let family = "RegFragment(name=fs, role=c, shape=(16, 8, 16), dtype=f32, count=4)";
-    assert!(refusal(family, 80, false).contains("asks for a loop over them"));
 }
 
 /// `ldmatrix` reads 8x8 matrices of halves from a shared slab, each lane giving the address of one row. A is four
