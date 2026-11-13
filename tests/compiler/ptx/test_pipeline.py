@@ -14,8 +14,7 @@ from tests.compiler.helpers import requires_cuda
 from tests.compiler.ptx.corpus import kernel_code
 from tests.compiler.realization.helpers import CASES_DIR, load_case, lowered
 
-#: A case whose two kernels are one the compiler covers and one it has no rule for yet (a tensor-core kernel that
-#: stores its accumulator), and a case of one covered kernel.
+#: A case of two kernels, one of which the test makes the compiler refuse as having no rule, and a case of one kernel.
 MIXED = "matmul/f16-mma-splitk-deferred.json"
 COVERED = "reduce/combine-amax-coop-warp.json"
 
@@ -28,7 +27,16 @@ def _sources(path: str, code: str | None) -> tuple[dict[str, CudaOp], object]:
     return {node.op.kernel_name: node.op for node in graph.nodes.values() if isinstance(node.op, CudaOp)}, graph
 
 
-def test_the_default_renders_cuda_and_ptx_falls_back_for_a_missing_rule_alone():
+def test_the_default_renders_cuda_and_ptx_falls_back_for_a_missing_rule_alone(monkeypatch):
+    compile_kernel = ptx.compile_kernel
+
+    def missing_one(kernel, interface, **decisions):  # noqa: ANN001, ANN003, ANN202 — the compiler entry's signature
+        # Every corpus kernel compiles: the refusal of one stands for a statement with no rule yet.
+        if kernel.name.endswith("__partial"):
+            raise ptx.NoRule(f"no PTX rule for the test's missing rule: `{kernel.name}`")
+        return compile_kernel(kernel, interface, **decisions)
+
+    monkeypatch.setattr(ptx, "compile_kernel", missing_one)
     default, _ = _sources(MIXED, None)
     assert len(default) == 2 and not any(nvcc.is_ptx(op.kernel_source) for op in default.values())
     mixed, _ = _sources(MIXED, config.KERNEL_CODE_PTX)

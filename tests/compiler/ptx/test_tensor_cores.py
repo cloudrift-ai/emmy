@@ -1,8 +1,9 @@
 """Tensor-core kernels compiled to PTX by the ``emmy-ptx`` crate and launched on a card: ``mma.sync`` fed through
 ``ldmatrix`` from shared memory, the 8-bit and the block-scaled 4-bit products, and the statements that stay in
 registers between two products. A test body writes the fragment layouts by hand, as the PTX reference documents
-them, since the statements that expand a fragment into loads and stores are not compiled yet. Operands are small
-integers wherever a product must be exact, so each result is compared with NumPy bit for bit."""
+them, so each instruction is checked apart from the statements that expand a fragment by the lane-to-element table
+(``test_fragments.py``). Operands are small integers wherever a product must be exact, so each result is compared
+with NumPy bit for bit."""
 
 from __future__ import annotations
 

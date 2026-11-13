@@ -690,8 +690,17 @@ impl Lowerer {
                 let operand = self.float(inner, from, ctx)?;
                 Ok(converted(self, Ty::F32, operand, Some(Round::Rn), false))
             }
+            // Between the two half types the value goes through f32, exactly one way and rounded once the other.
             (_, _) if from.is_float() && to.is_float() => {
-                Err(self.no_rule(format_args!("a cast from {} to {}", from.text(), to.text())))
+                let operand = self.float(inner, from, ctx)?;
+                let op = self.converted(
+                    Val {
+                        op: operand,
+                        ty: from,
+                    },
+                    to,
+                );
+                Ok(Val { op, ty: to })
             }
             // A float truncates toward zero into an integer, as a C cast does.
             (_, _) if from.is_float() => {

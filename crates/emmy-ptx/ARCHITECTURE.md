@@ -497,8 +497,11 @@ to run under compute-sanitizer's race and barrier checks.
 
 The tensor-core tests (`test_tensor_cores.py`, `test_hopper.py`) write each fragment layout by hand in the test body,
 as the PTX reference documents it, with `Load` and `Write` on the fragments, and use small integers as operands so a
-product is exact and the comparison is bit for bit. Volta's m8n8k4 forms run on later cards too, so they are launched
-wherever the suite runs. `wgmma` runs on `sm_90` alone; the tensor copy, `mbarrier` and `setmaxnreg` from there on.
+product is exact and the comparison is bit for bit. `test_fragments.py` runs the fragment statements the same way: a
+gather from global memory in each orientation and from f32, a tile past its bounds (clamp, zero-fill of K, guards),
+a store's epilogue, and the operations per element with the fold along rows. Volta's m8n8k4 forms run on later cards
+too, so they are launched wherever the suite runs. `wgmma` runs on `sm_90` alone; the tensor copy, `mbarrier` and
+`setmaxnreg` from there on.
 
 What was assembled and launched, 2026-11-12. Crate tests assemble every form at `-O0` and `-O3` with ptxas of CUDA
 13.0: the m16n8k16 forms and `ldmatrix` for `sm_80`, `sm_89`, `sm_90` and `sm_120`; the fp8 forms for `sm_89`,
@@ -517,16 +520,24 @@ six matrix loads, the loop unrolled and every address folded by ptxas in both.
 The corpus goes through the compiler in `tests/compiler/ptx/test_corpus.py`. Without a card, every case: each
 kernel compiles or names a missing rule, never raises anything else, holds its name in its own symbols alone (what
 the kernel merge's rename by text replacement needs), and assembles for the case's declared capability at ptxas's
-default level and at `-O0`. All 178 kernels of the 234 cases that ptxas of CUDA 13.0 can assemble for do; the 24
-`sm_70` cases, 18 PTX kernels, are skipped. On the card, a case whose every kernel compiles to PTX is built both
-ways, from CUDA text by nvcc and from PTX by ptxas, run on the same inputs and held to the corpus's own tolerance
-(`tests/compiler/ptx/differential.py`, which prints the table when run as a module): a sample of each family by
-default, every case under `pytest -m sweep`. On an RTX 5090, 144 cases run both ways: 119 give the same bits and 25
-differ within tolerance, by at most 3.0e-7 of the output's peak in f32 and by one f16 step (4.8e-4) in the one f16
-case. 21 of the 25 hold an exponential, whose sequence is not `expf`'s; two hold approximate operations and were not
-traced; two hold no math function and differ by the fused product above. The realization suite itself, run with
-`EMMY_KERNEL_CODE=ptx` on that card, passes every stage of every case (952 passed), 168 of its 244 launched kernels
-compiled to PTX.
+default level and at `-O0`; the 24 `sm_70` cases are skipped where ptxas of CUDA 13.0 runs. On the card, a case whose
+every kernel compiles to PTX is built both ways, from CUDA text by nvcc and from PTX by ptxas, run on the same inputs
+and held to the corpus's own tolerance (`tests/compiler/ptx/differential.py`, which prints the table when run as a
+module): a sample of each family by default, every case under `pytest -m sweep`.
+
+Run on 2026-11-12, every corpus kernel in PTX (`EMMY_KERNEL_CODE=ptx-only`):
+
+| Card | Realization suite | Both ways | Largest difference |
+| --- | --- | --- | --- |
+| RTX 5090, `sm_120` | 952 passed, 86 skipped | 182 of 215 cases the same bits | 8.2e-4 of the output's peak |
+| H100, `sm_90`, ptxas 12.9 | 538 passed, 500 skipped | 2 of 8 | 8.2e-4 |
+| A100, `sm_80`, ptxas 12.9 | 536 passed, 502 skipped | 6 of 7 | 8.2e-4 |
+
+Every case that differs holds an exponential, whose sequence is not `expf`'s; the largest differences are one step of
+an f16 output. No V100 runs the `sm_70` cases, so they were lowered at their own capability and their `sm_70` PTX
+built and run on the RTX 5090 instead, both ways: all 27 pass the reference check, 23 with the same bits (the other
+four hold an exponential), Volta's paired slabs among them. The modules of `sm_80` and `sm_89` cases state PTX 7.8,
+those of `sm_90` 7.8 to 8.6, `sm_120` 8.7.
 
 The math functions are measured there too (`test_math.py`). The default tests hold each function to its documented
 bound over a sample: every special value, the neighbourhoods of the points where a sequence changes form, and two

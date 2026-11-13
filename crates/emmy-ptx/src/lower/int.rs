@@ -529,9 +529,15 @@ impl Lowerer {
                 let operands = vec![quotient.op, Operand::Int(divisor)];
                 let whole = self.int_value(Opcode::Mul, Ty::S32, VTy::I32, operands, divisor);
                 let operands = vec![self.as_int(&a, VTy::I32), whole.op];
-                return Ok(self.int_value(Opcode::Sub, Ty::S32, VTy::I32, operands, 1));
+                let kept = gcd(multiple, divisor);
+                return Ok(self.int_value(Opcode::Sub, Ty::S32, VTy::I32, operands, kept));
             }
         }
+        // A remainder by a constant is a multiple of what the dividend and the divisor share.
+        let kept = match b.op.int() {
+            Some(divisor) if remainder && divisor != 0 => gcd(multiple, divisor),
+            _ => 1,
+        };
         let ty = self.common(&a, a_range, &b, b_range);
         let at = ty.arith();
         let (left, right) = (self.as_int(&a, ty), self.as_int(&b, ty));
@@ -541,11 +547,11 @@ impl Lowerer {
         let operands = vec![left, right.clone()];
         if exact {
             let opcode = if remainder { Opcode::Rem } else { Opcode::Div };
-            return Ok(self.int_value(opcode, at, ty, operands, 1));
+            return Ok(self.int_value(opcode, at, ty, operands, kept));
         }
         // The instruction rounds toward zero: where the remainder is nonzero and its sign is not the divisor's,
         // the floor is one lower and its remainder one divisor higher.
-        let rest = self.int_value(Opcode::Rem, at, ty, operands.clone(), 1);
+        let rest = self.int_value(Opcode::Rem, at, ty, operands.clone(), kept);
         let signs = self.int_value(
             Opcode::Xor,
             bits(ty),
@@ -587,9 +593,9 @@ impl Lowerer {
             at,
             ty,
             vec![step, Operand::Int(0), lower.into()],
-            1,
+            kept,
         );
-        Ok(self.int_value(Opcode::Add, at, ty, vec![base.op, correction.op], 1))
+        Ok(self.int_value(Opcode::Add, at, ty, vec![base.op, correction.op], kept))
     }
 
     /// The floor quotient of a 32-bit value by a constant from 3 up that is no power of two, as a multiply-high.
