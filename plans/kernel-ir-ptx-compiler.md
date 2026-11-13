@@ -506,16 +506,43 @@ lists which corpus cases still do. That fallback exists only inside the PR.
    nvcc, median 1.001, 8 of 101 cases past 5 us more than 5% slower and 28 faster, total 20.8 to 13.4 ms; through
    PTX, median 1.000, 10 slower and 30 faster, total 18.5 to 13.5 ms (the symbolic reductions 0.59, the f32
    projections 0.40 to 0.46, `qwen3emb/sdpa-s32` 0.52). Between the two generators: median 1.015, 32 slower and 16
-   faster. What is left:
-   - The f32 matmuls over shared slabs got slower through nvcc too (1.10 to 1.32x, `qwen3emb/matmul-*`): cicc's
-     four copies were software-pipelined by ptxas when the loop counted `ne` to a constant, and it pipelines neither
-     cicc's stepping loop nor this compiler's. Through PTX they run at nvcc's new speed, `matmul-qproj-s512` 1.33x.
-   - A static loop kept rolled runs slower than cicc's kept loop of the same copies (the serial reductions 1.5 to
-     1.6x, `norm-weight-linear-f16-computed-b` 1.6x, `computed-a-nested-contraction-scalar` 1.4x): ptxas issues the
-     last load of a trip into the registers of the first, still being read. Unmarked, ptxas unrolls those in full
-     and they run at nvcc's speed, but the attention kernels then grow 5x (`sdpa-s32` 2.2x, `sdpa-s512` 1.36x slower).
-   - The softmax kernels (1.1 to 1.2x) take cicc's copies now; the rest of the gap is the exponential's sequence and
-     the division's subroutine.
+   faster.
+
+   *Loop shape and the exponential* (`00f98f4f7` to `87c6d1621`), each found by putting this compiler's PTX beside
+   cicc's for the same kernel:
+   - A kept loop's loads waited on its arithmetic because an address read the counter shifted to bytes in every
+     trip; ptxas then issued the last load of a trip into the registers of the first. Stepping a multiple of the
+     counter by the term's bytes, as cicc steps a pointer, puts every load of the trip ahead (the serial reductions
+     10.0 to 6.9 us). The same in 32 bits for a shared address gives each slab read of the f32 projections a
+     register of its own (`matmul-qproj-s512` 48 to 64 registers, 75 to 69 us). Only a loop kept rolled reads the
+     multiples: in one ptxas may unroll each byte factor was a register and an add for nothing
+     (`gdn-conv-join-in-place-name` 69 to 77 us, back to 68 on the dev box).
+   - ptxas wrote out in full the static loops of at most four trips cicc left it, which run the sibling loops of a
+     register tile side by side; such a loop is no longer marked (`norm-weight-linear-f16-computed-b` 52.9 to 31.1
+     us, `computed-a-nested-contraction-scalar` 17.2 to 10.7, both now faster than nvcc's build). Whether ptxas
+     unrolls an unmarked loop of cicc's turned on details no rule here reproduces: with a stepped pointer, the
+     order of the counter's and the pointer's increments decided it on `reduce/combine-l2-serial`.
+   - The exponential is cicc's `expf` sequence, bit for bit (three machine instructions fewer); the softmax kernels
+     lost most of their gap (`combine-softmax-serial` 84.7 to 70.6 us). The division is the same `div.rn.f32`
+     subroutine call in both builds, at the same places, so it is no difference.
+   - A load widening of shared slabs in Kernel IR was tried and dropped: ptxas already merges the scalar reads.
+
+   Measured on the rented RTX 5090 (`87c6d1621`), two rounds per generator taking turns, against the lanes before
+   these commits: through PTX, median 0.997, 2 of 104 cases past 5 us more than 5% slower
+   (`qwen3emb/matmul-qproj-s128` 1.06, `matmul/bf16-scalar-sync-d2-sm120` 1.06) and 22 faster, total 23.36 to 23.14 ms over the 213 cases; through
+   nvcc unchanged (median 1.000, total 22.89 to 22.90 ms). Between the two generators: median 1.003, 16 slower and 24
+   faster. What is left, by expected gain:
+   - Straight-line tensor-core kernels whose loads ptxas issues later than in cicc's build, with fewer registers
+     (`matmul/f16-mma-m128n128k132-f32-masked-k` 1.46x, 174 against 255 registers; the trans variant 1.34x;
+     `matmul/f16-symbolic-k-gmem` 1.58x; `matmul/f16-symbolic-batched-mk-greedy` 1.39x).
+   - `matmul/f16-scalar-register-tile` (1.22x), `attention/sdpa-hd256-f16acc-value-wide-row` (1.23x), the
+     symbolic ILP reductions (`combine-l2-ilp-symbolic`, `-amax-ilp-symbolic` 1.17 to 1.19x) and `scan/f32-cumsum-row`
+     (1.17x) run loops of the same instructions as cicc's build in another schedule; not explained.
+   - cicc unrolls a loop `118` leaves stepping a second time where its copies' vector loads make the body small
+     (`reduce/cross-cta-sum-atomic`: 32 copies a trip in the CUDA text, 64 in cicc's PTX, more loads in flight).
+     The case is level now, but the rule is not modelled; it belongs to `118` under the `UNROLL` knob.
+   - The f32 matmuls over shared slabs still trail the build whose four copies counted to a constant (ptxas
+     software-pipelined only that), through both generators.
 
 7. **The switch.** The fallback goes, and with it:
    - the Kernel IR renderers, the C++ helpers, `CudaRenderTarget`, the nvcc wrapper. The Loop IR runner keeps its C
