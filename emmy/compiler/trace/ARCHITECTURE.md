@@ -36,8 +36,10 @@ included, and the empty table decomposes nothing but the view aliases (`chunk` a
 disappears; `linear`, `rms_norm`, `scaled_dot_product_attention`, `einsum` and `silu` keep their names. `chunk`,
 `split` and `split_with_sizes` share one handler driven by the FX output metadata. A write
 through a static unit-step slice or select arrives as `slice_scatter` / `select_scatter`, a two-source `IndexMapOp`
-whose region reads the source and whose remainder reads the base; functional `copy` is a broadcast and cast of its
-source, and `fill` a fill constructor. `index_copy`, `index_fill`, a one-index `index_put` and a plain `scatter` are
+whose region reads the source and whose remainder reads the base. The region is the written axis's range, and only
+that axis's source coordinate clamps outside it: every other axis reads the source at the output's own coordinate,
+so a kernel the write fuses into keeps those axes independent of the written one. Functional `copy` is a broadcast and
+cast of its source, and `fill` a fill constructor. `index_copy`, `index_fill`, a one-index `index_put` and a plain `scatter` are
 a `ScatterOp`; other scatters (several indices, accumulation, strided or diagonal views) fail. A
 graph has no write-back, so `trace_module` refuses a module that writes an input, parameter or buffer, read again or
 not. `trace_module_functional` traces one for a caller that writes the results back: each input's new value becomes a
