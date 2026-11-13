@@ -400,20 +400,27 @@ impl Lowerer {
         ctx: &SimplifyCtx,
     ) -> Result<()> {
         let buffer = self.buffer(name)?;
-        let first = &elements[0].0;
+        let (first, shared) = &elements[0];
         let in_a_row = elements.iter().enumerate().all(|(at, (index, guard))| {
-            guard.is_none() && constant_difference(index, first) == Some(at as i64)
+            guard == shared && constant_difference(index, first) == Some(at as i64)
         });
         if in_a_row {
             let address = self.address(name, std::slice::from_ref(first), ctx)?;
             let bytes = buffer.elem.bytes() * elements.len() as i64;
             if source == dtype && bytes == 4 && self.aligned(&address, 4) {
                 let load = Inst::new(buffer.load(), Ty::B32, vec![reg], vec![address]);
-                self.b.emit(load);
+                match shared {
+                    Some(guard) => {
+                        let guard = self.pred(guard, ctx)?;
+                        self.zero(&[reg], VTy::U32);
+                        self.b.emit(load.guarded(guard, false));
+                    }
+                    None => self.b.emit(load),
+                }
                 return Ok(());
             }
             let packed = source == DType::F8E4M3 && dtype == DType::F16 && bytes == 2;
-            if packed && self.target.sm >= SM_ADA && self.aligned(&address, 2) {
+            if shared.is_none() && packed && self.target.sm >= SM_ADA && self.aligned(&address, 2) {
                 self.requires(&F8_CONVERSION)?;
                 let pair = self.b.reg(Bank::B16);
                 let load = Inst::new(buffer.load(), Ty::B16, vec![pair], vec![address]);
@@ -493,15 +500,11 @@ impl Lowerer {
             node.clamp.as_ref().map(left),
             node.k_zero.as_ref().map(left),
         );
-        let open = match &axis_left {
-            Some(left) => {
-                self.zero(&regs, VTy::U32);
-                let some = binary(Operation::Greater, left.clone(), Expression::int(0));
-                let some = self.pred(&some, ctx)?;
-                Some(self.b.open_if(some))
-            }
-            None => None,
-        };
+        // A fragment wholly past the clamp guards each of its loads, as a zero-fill does, and is no branch: a
+        // branch closes a block at each fragment's packs, which wait on its loads before the next fragment's issue.
+        let some = axis_left
+            .as_ref()
+            .map(|left| binary(Operation::Greater, left.clone(), Expression::int(0)));
         for (reg, register) in regs.iter().zip(&lanes.registers) {
             let mut elements = Vec::with_capacity(register.len());
             for (row, column) in register {
@@ -521,17 +524,18 @@ impl Lowerer {
                     (k.clone(), axis)
                 };
                 let index = plus(plus(base.clone(), times(major, stride.clone())), minor);
-                let guard = k_left
+                let k_guard = k_left
                     .as_ref()
                     .map(|left| binary(Operation::Less, k.clone(), left.clone()));
+                let guard = match (k_guard, &some) {
+                    (Some(k), Some(some)) => Some(binary(Operation::LogicalAnd, k, some.clone())),
+                    (k, some) => k.or_else(|| some.clone()),
+                };
                 elements.push((index, guard));
             }
             self.gather_register(*reg, name, &elements, (source, dtype), ctx)?;
         }
-        match open {
-            Some(open) => self.b.close_if(open),
-            None => Ok(()),
-        }
+        Ok(())
     }
 
     /// The two fragments of one cell pair of Volta's paired tile, from a slab stored under a paired layout: A or a

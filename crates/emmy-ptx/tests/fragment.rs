@@ -61,8 +61,8 @@ fn guarded_loads(module: &Module) -> usize {
 /// A fragment gathered from global memory reads the elements its row of the table gives each lane. A's register
 /// holds two elements side by side along K, aligned by the even column and row stride: one 32-bit load each. B
 /// with K along its rows strides its two elements a row apart: a load an element, joined by one move. A clamp of
-/// the operand's axis zeroes the fragment and reads only where some row is in range; a zero-fill of K guards
-/// each element.
+/// the operand's axis holds each row to the last in range, and a fragment wholly past it reads nothing: its
+/// loads are guarded, with a zero-fill of K's guard of each element where there is one.
 #[test]
 fn a_fragment_is_gathered_by_its_row_of_the_table() {
     let module = kernel(
@@ -102,8 +102,8 @@ fn a_fragment_is_gathered_by_its_row_of_the_table() {
         listing(&clamped)
     );
     assert_eq!(guarded_loads(&clamped), 8);
-    // A fragment wholly past the bound reads nothing: one branch around the loads.
-    assert_eq!(count(&clamped, "bra"), 1);
+    // A fragment wholly past the bound reads nothing, by the guards and not by a branch.
+    assert_eq!(count(&clamped, "bra"), 0);
     assert!(count(&clamped, "min.s32") >= 1);
 }
 

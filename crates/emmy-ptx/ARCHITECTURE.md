@@ -408,13 +408,16 @@ value matters or reads a subnormal from one.
   starts, so the value table keeps each once for the kernel; loads stay where their statement stands.
   - `FragmentLoad`: per element, the index is the tile's base plus the row and the column by the source's row stride,
     by the role and the orientation. A clamp holds the operand's own axis to the last element in range and a fragment
-    wholly past it reads nothing and is zero; a zero-fill of K guards each element. Elements next to each other that a
-    register holds as they stand in memory, proven aligned, are one 32-bit load; two e4m3 bytes, one 16-bit load and
-    one packed conversion (`sm_89` on). Anything else is a load an element, converted and packed. A slab of codes
-    beside a slab of block scales decodes each byte (an e2m1 pair by its bits, an 8-bit float through its half),
-    multiplies it by its block's scale in f32 and rounds once. Volta's paired slabs are read by the paired rows
-    (`fragment::paired_operand_table`): two register cells a side couple into one 32-row map, so `frag` and
-    `pair_frag` hold rows four apart, each element read where the slab layout puts it, one load an element.
+    wholly past it reads nothing and is zero; a zero-fill of K guards each element. The clamp's test is a guard of
+    each load too, never a branch: a branch closes a block at each fragment's packs, which then wait on its loads
+    before the next fragment's loads issue (`f16-symbolic-batched-mk-greedy` 57 to 38 us). Elements next to each
+    other that a register holds as they stand in memory, proven aligned, are one 32-bit load, under the clamp's
+    guard where there is one; two e4m3 bytes, one 16-bit load and one packed conversion (`sm_89` on). Anything else
+    is a load an element, converted and packed. A slab of codes beside a slab of block scales decodes each byte (an
+    e2m1 pair by its bits, an 8-bit float through its half), multiplies it by its block's scale in f32 and rounds
+    once. Volta's paired slabs are read by the paired rows (`fragment::paired_operand_table`): two register cells a
+    side couple into one 32-row map, so `frag` and `pair_frag` hold rows four apart, each element read where the
+    slab layout puts it, one load an element.
   - `RegStore`: per element, the address from the index and the table's row and column by the two strides, through the
     slab's swizzle; the value is the register or what the epilogue makes of it, converted to the buffer's type. The
     epilogue's statements go through the ordinary rules in a scope of their own, the element of each fragment (f32)
