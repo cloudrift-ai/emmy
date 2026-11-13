@@ -38,6 +38,7 @@ from emmy.compiler.pipeline.fork import Fork, exact_schedule_leaf, iter_leaves
 # pass. Pin reads / knob-key spelling ride the enumerator's helpers instead; the family NAMES below
 # are plain strings and a function, which that scan does not see.
 from emmy.compiler.pipeline.knob import family_pins, kernel_pin, schedule_pin_fingerprint
+from emmy.compiler.pipeline.passes.tile._cut import PIECE
 from emmy.compiler.pipeline.passes.tile._fromloop import serial_form
 from emmy.compiler.pipeline.schedule import fork_schedule
 from emmy.compiler.structural import digest
@@ -206,8 +207,7 @@ def rewrite(match: Match, root: Node, ctx=None) -> Fork | list[Fork]:
     tile: TileOp = root.op
     if tile.op is None or tile.place.is_mapped:
         raise RuleSkipped("TileOp already scheduled / nothing to map")
-    # A cut's pieces write or read a workspace, which the seam token names.
-    kernel_set = any("__place_" in buffer for buffer in (*root.inputs, *root.buffer_names()))
+    kernel_set = root.hints.has(PIECE)  # a kernel a cut left
     if getattr(ctx, "backend_name", "cuda") == "cpu":
         options = cpu_forks(tile, tile.knobs, ctx)
     else:

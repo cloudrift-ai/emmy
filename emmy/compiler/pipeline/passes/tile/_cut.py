@@ -265,19 +265,11 @@ def _output_owners(tile: TileOp) -> dict[int, tuple]:
 
 
 def seam_token(parent: TileOp, spelling: str) -> str:
-    """The token a piece cut from ``parent`` at the seam ``spelling`` carries in its kernel name,
-    ``…__place_<token>``, and in the workspace buffers it writes: the parent's structural identity and
-    the seam's canonical ``PLACE`` key, digested — the keys of a seam set joined by ``+`` for the
-    producers one decision fuses. Two pieces of one shape cut at different seams, or at one seam of
-    two parents, are two kernels, and a ``place_<token>`` pin reaches exactly one."""
+    """The token the workspace buffers a cut of ``parent`` at the seam ``spelling`` writes carry,
+    ``<root>__place_<token>_<i>``: the parent's structural identity and the seam's canonical ``PLACE`` key,
+    digested — the keys of a seam set joined by ``+`` for the producers one decision fuses — so the workspaces of
+    two cuts in one graph never share a buffer name."""
     return digest(parent.identity_key(structural=False) or "", spelling)[:10]
-
-
-def place_token(name: str) -> str | None:
-    """The token the kernel ``name`` carries — what follows its last ``__place_``, up to what a split
-    or a nested cut appends after ``__`` — or ``None`` for a kernel that is no cut piece. A
-    ``place_<token>`` pin and a recorded route address the piece by it."""
-    return name.rsplit("__place_", 1)[1].split("__", 1)[0] if "__place_" in name else None
 
 
 def cuttable_seams(tile: TileOp) -> tuple[CutSite, ...]:
@@ -2000,8 +1992,15 @@ def _join_pieces(fragment: Graph, joins: tuple, spelled: dict[str, str], parent:
         _splice_pieces(fragment, members, spelled, parent, joined_spelling(producer, region))
 
 
-#: The fragment hint naming the node of a cut's remainder — the piece that keeps the outputs no seam took.
-REMAINDER = "cut.remainder"
+#: The node hint a cut leaves on every kernel it mints: ``"remainder"`` on the piece that keeps the outputs no seam
+#: took, ``"piece"`` on the rest. A graph fact, like op provenance: the schedule pass reads it to know a kernel is one
+#: piece of a cut kernel set, and a pick reads it to know which piece of an arm continues the kernel it cut.
+PIECE = "cut.piece"
+
+
+def remainder_of(fragment: Graph) -> str | None:
+    """The node of the remainder a cut fragment leaves, or ``None`` when every output went to a seam."""
+    return next((node.id for node in fragment.nodes.values() if node.hints.get(PIECE) == "remainder"), None)
 
 
 def realize(match: Match, root: Node, seams, *, joins: tuple = (), lineage: frozenset[str] = frozenset(), consumed=None) -> Graph:
@@ -2026,14 +2025,13 @@ def realize(match: Match, root: Node, seams, *, joins: tuple = (), lineage: froz
 
     ``lineage`` names the placement pins every new piece is past: a piece is a new kernel, which the pins its
     parent read never address. The remainder — the piece that keeps the outputs no seam took — is the kernel the
-    cut continues, so it keeps the parent's consumed pins, or takes ``consumed`` when given; the fragment names its
-    node (the :data:`REMAINDER` hint)."""
+    cut continues, so it keeps the parent's consumed pins, or takes ``consumed`` when given. Every kernel the cut
+    leaves carries the :data:`PIECE` hint."""
     fragment, remainder = _realize(match, root, seams, joins)
-    if remainder is not None:
-        fragment.hints.set(REMAINDER, remainder)
     for node in fragment.nodes.values():
         if not isinstance(node.op, TileOp):
             continue
+        node.hints.set(PIECE, "remainder" if node.id == remainder else "piece")
         if node.id == remainder:
             if consumed is not None:
                 node.op = replace(node.op, placement_consumed=consumed)
@@ -2593,7 +2591,6 @@ __all__ = [
     "joined_halves",
     "joined_spelling",
     "output_map",
-    "place_token",
     "realize",
     "seam_token",
     "storage_frontier",

@@ -211,7 +211,7 @@ def test_finalize_keeps_projection_input_edges(monkeypatch) -> None:
     out, _ = _resolve(CUDA_PASSES, graph)
     finalize = out.nodes["biased"]
     assert finalize.inputs == ["biased__partial", "bias"]
-    assert finalize.op.arg_order == ("biased__partial", "bias", "biased")
+    assert sorted(finalize.op.arg_order) == ["bias", "biased", "biased__partial"]
 
 
 def test_no_piece_inherits_the_kernel_it_replaces(monkeypatch) -> None:

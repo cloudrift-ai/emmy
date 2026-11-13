@@ -55,7 +55,8 @@ def test_a_cut_piece_is_the_kernel_its_stored_definition_lifts_to() -> None:
     from emmy.compiler.pipeline.search.golden.restamp import mint
 
     document = GoldenFile.load(Path(__file__).resolve().parents[4] / "recipes/Qwen3.6-35B-A3B-FP8/golden/rtx5090_sm120.json")
-    root = document.kernel("k_linear_mean_reduce_f54190")
+    root = document.kernels[7]  # the gdn2rows twin's linear norm reduction
+    assert root.name == "k_06660b0d3e7b"
     route = next(route for route in document.routing if route.parent == root.ref)
     [(_, _, pieces)] = mint(root, [route], Context.from_target(tuple(document.compute_cap), gpu_name=document.gpu_name))
     assert len(pieces) == len(route.children)
@@ -91,7 +92,9 @@ def test_restamp_respells_a_rows_site_keys_as_it_does_a_seam() -> None:
     fresh, report = restamp(replace(document, rows=[replace(row, knobs=unmapped, measurements=Measurements(emmy_us=12.5))]))
     assert fresh.rows[0].knobs == {key: value for key, value in row.knobs.items() if nested not in key}
     families = ("TILE", "REDUCE", "STAGE")
-    assert report.dropped_keys == [f"{row.name}: {family}@{nested}9 names no site of {row.kernel}" for family in families]
+    assert report.dropped_keys == [
+        f"{row.name}: {family}@{nested}9 names no site of {document.kernel(row.kernel).name}" for family in families
+    ]
     # A row that lost a key is not the schedule that was measured either.
     assert report.demoted == [row.name] and fresh.rows[0].measurements is None
     assert not restamp(document)[1].changed
@@ -106,7 +109,8 @@ def test_restamp_keys_a_carried_kernels_rows_against_its_serial_form() -> None:
     from emmy.compiler.pipeline.search.golden.restamp import restamp
 
     document = GoldenFile.load(Path(__file__).resolve().parents[4] / "emmy/compiler/pipeline/search/golden/records/rtx5090_sm120.json")
-    kernel = document.kernel("k_unsqueeze_reduce_f62b35")
+    kernel = document.kernels[643]  # a kernel that carries a state
+    assert kernel.name == "k_92b3b90d7d5e"
     rows = [row for row in document.rows if row.kernel == kernel.ref and any("@" in key for key in row.knobs)]
     assert rows and all(any(key.startswith("REDUCE@") for key in row.knobs) for row in rows)
     fresh, report = restamp(replace(document, kernels=[kernel], routing=[], rows=rows))

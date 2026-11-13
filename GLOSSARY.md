@@ -179,10 +179,12 @@ describe how a term is used in Emmy; they are not meant to replace a full textbo
   to the original model operation when debugging.
 - **Metadata** — Information about program data rather than the data itself, such as a tensor's shape, a kernel's
   original operation, or the number of threads needed for launch.
-- **Stamp** — To write a value onto a graph node or an operation as metadata that later stages can read: a kernel's
-  name, or a tuning choice a fork decided. Nothing computed from an operation is stamped onto it. A kernel's *stamps*
-  (the `S_*` features: statement and operation counts, loop extents, operand dtypes) keep the name but are computed
-  from the kernel's body wherever they are read.
+- **Stamp** — To write a value onto a graph node or an operation as metadata that later stages can read: a tuning
+  choice a fork decided. Nothing computed from an operation is stamped onto it. A kernel's name is `k_` and the first
+  12 hex digits of its exact identity, computed wherever it is read, so every kernel of one identity has one name and
+  the name says nothing about the operations it realizes. A kernel's *stamps* (the `S_*` features: statement and
+  operation counts, loop extents, operand dtypes) keep the word but are computed from the kernel's body wherever they
+  are read.
 - **Mutable / immutable** — A mutable object can be changed after creation. An immutable object cannot; code creates
   a replacement instead. Emmy's graph is mutable, while many nested compiler statements are immutable.
 - **Closure** — The property that a term is closed over its enclosing iteration axes: it reads only those axes,
@@ -318,8 +320,10 @@ describe how a term is used in Emmy; they are not meant to replace a full textbo
 - **Knob** — A named tuning choice, such as a tile size or memory-staging strategy.
 - **Pin** — A forced tuning choice. A hand pin comes from the environment (`EMMY_STAGE=d2/smem-async`, `EMMY_KNOBS`,
   `emmy run --ab`) and is how a row is measured rather than chosen: a pinned benchmark measures the forced configuration
-  rather than the one the compiler would have picked. A kernel never carries pins of its own: a measured row reaches
-  it only as evidence at its forks.
+  rather than the one the compiler would have picked. A pin is bare (`TILE`, every kernel), scoped to a site
+  (`PLACE@map.1/inner`), or scoped to a kernel by its name (`TILE@k_3f2a1b9c04de`, every kernel of that name; a
+  `PLACE` kernel pin may add a site after a slash). A kernel never carries pins of its own: a measured row reaches it
+  only as evidence at its forks.
 - **Schedule key** — The name a schedule choice is stored under when one kernel contains more than one step that takes
   the same kind of choice. Written plain, `TILE` refers to the kernel's main step. Where a kernel has several — the
   fused norm→linear kernel folds both its statistic and its contraction — the name carries a suffix identifying the
@@ -354,11 +358,12 @@ describe how a term is used in Emmy; they are not meant to replace a full textbo
   from two different pools are not comparable, because they are different kernels. A pool may hold more than one
   verified answer: a shape recorded twice, or under two names, contributes several.
 - **Golden file** (*golden*) — A card's measurements in the tune DB's shape: the kernels it measured (``kernels``:
-  each kernel's Loop IR and name, plus, for a target, the traced program it was lowered from and the sizes that
+  each kernel's Loop IR, plus, for a target, the traced program it was lowered from and the sizes that
   specialized it), the kernel-set decisions taken on them (``routing``) and the measured rows (``rows``), beside the
-  traced programs. It holds inputs only: a compile imports its rows under each kernel's exact identity, which the
-  import computes from the stored Loop IR. `--golden PATH` names the file a command reads instead of the repository's.
-- **Row** — One ``perf`` row of a golden: the kernel (by its ``ref``, the name the file knows it by), the sizes its
+  traced programs. It holds inputs only — no kernel name, no identity; rows and decisions point at a kernel by its
+  position in the file — and a compile imports its rows under each kernel's exact identity, which the import computes
+  from the stored Loop IR. `--golden PATH` names the file a command reads instead of the repository's.
+- **Row** — One ``perf`` row of a golden: the kernel (by its position in the file's kernel list), the sizes its
   symbolic dims were benched at, the input regime (``pins``), the schedule row (``knobs``) and the measurement. Its
   ``name`` is a label a command selects it by (`--realization NAME`). A row with no measurement is a proposal, not
   evidence; one with no schedule is a target that has only been traced.
@@ -384,12 +389,12 @@ describe how a term is used in Emmy; they are not meant to replace a full textbo
 - **Evidence** — A compatible recorded measurement used to select between candidates: a tune database row — a
   `run --bench` writes its rows there, and a golden file's rows are imported there before a compile picks. A row is
   evidence for the kernel whose exact identity it is keyed by. All are read by one rule.
-- **Routing row** (*route row*, in older text) — The tune database's record of one kernel-set decision: the kernel
-  it was offered on, the arm — a `PLACE` key, or a `REDUCE` value carrying a cross-CTA `g<n>` half — and the pieces
-  it minted, one row per piece. A golden stores the same rows, its kernels named by their ``ref``. At that kernel's
-  fork the decision is priced as the sum of its pieces' measured rows, which outranks the placement prior's ranking; a
-  decision no piece's row prices is off the measured ballot, and the pieces the arm mints are decided from rows of
-  their own (see *Routing table*).
+- **Routing row** (*route row*, in older text) — The tune database's record of one kernel-set decision: the kernel it
+  was offered on, the arm — a `PLACE` key, or a `REDUCE` value carrying a cross-CTA `g<n>` half — and the pieces it
+  minted, one row per piece. A golden stores the same rows, pointing at kernels by their position in the file. At that
+  kernel's fork the decision is priced as the sum of its pieces' measured rows, which outranks the placement prior's
+  ranking; a decision no piece's row prices is off the measured ballot, and the pieces the arm mints are decided from
+  rows of their own (see *Routing table*).
 - **Routing table** — The tune database table that links a parent kernel and one decision taken on it to the kernels
   the decision minted, one row per piece. It says which pieces a route leads to, and the decision's price on a card
   is the sum of the pieces' fastest measurements there — every piece measured, or the decision is unpriced. Where a

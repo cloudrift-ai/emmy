@@ -246,9 +246,9 @@ def _identities_by_node(piece) -> dict[str | None, str]:
 
 def _remainder(piece) -> str | None:
     """The node of a cut arm's remainder, or ``None`` for an arm that keeps the kernel whole or leaves none."""
-    from emmy.compiler.pipeline.passes.tile._cut import REMAINDER  # noqa: PLC0415
+    from emmy.compiler.pipeline.passes.tile._cut import remainder_of  # noqa: PLC0415
 
-    return piece.hints.get(REMAINDER) if isinstance(piece, Graph) else None
+    return remainder_of(piece) if isinstance(piece, Graph) else None
 
 
 def _leaf_graph(leaf: object) -> Graph:

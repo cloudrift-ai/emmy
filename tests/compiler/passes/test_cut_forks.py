@@ -2435,7 +2435,7 @@ def test_output_cut_and_its_complement_label_the_same_exact_kernel_set() -> None
     assert identities[0] == identities[1] == identities[2]
 
     identity = node.op.identity_key(structural=False, with_io=True)
-    positives, _, _ = _place_ballot(leaves, rows, identity, node.op.name, Counter(identities[0]), frozenset())
+    positives, _, _ = _place_ballot(leaves, rows, identity, Counter(identities[0]), frozenset())
 
     assert sorted(positives) == cuts
 

@@ -42,11 +42,23 @@ def _linear(tmp_path, *, m=16, k=256, n=256, dtype="bfloat16"):
     return graph, bundle, ckpt
 
 
-def _pins(place: str, stage: str, *, atom: str = K16_BF16, chunk: str = "k8") -> dict:
+def _root(graph) -> str:
+    """The name of the one kernel ``graph`` lifts to."""
+    from emmy.compiler.context import Context
+    from emmy.compiler.ir.tile import TileOp
+    from emmy.compiler.pipeline import LOOP_PASSES, Pipeline
+
+    lifted = Pipeline.build([*LOOP_PASSES, "tile/lift"]).run(graph.copy(), ctx=Context.from_target((12, 0)), db=None)
+    [name] = [node.op.with_io(lifted, node).name for node in lifted.nodes.values() if isinstance(node.op, TileOp)]
+    return name
+
+
+def _pins(place: str, stage: str, *, graph=None, atom: str = K16_BF16, chunk: str = "k8") -> dict:
     # The reduction is pinned unsplit: a split is the kernel-set pick's call, which a prior refit moves. The cut is
-    # the one at the frontier, numbered: a bare cut would go on to cut the remainder's statistic seam too.
+    # the one at the frontier, pinned on the root kernel by name: a bare cut would go on to cut the remainder's
+    # statistic seam too.
     return {
-        "PLACE@step.0" if place == "cut" else "PLACE": place,
+        f"PLACE@{_root(graph)}" if place == "cut" else "PLACE": place,
         "REDUCE": "",
         "WORK": "w1x4",
         "TILE": f"{atom}/f1x1/{chunk}",
@@ -92,7 +104,7 @@ def test_the_cut_linear_lowers_to_the_fp8_byte_slab(tmp_path):
     """Under a copy stage the weight stages as raw e4m3 bytes in padded rows beside an f32 scale
     slab, and one drain reads both; no 16-bit weight tile and no packed-pair table appear."""
     graph, _, _ = _linear(tmp_path)
-    kernels = _lower(graph, _pins("cut", "d2/smem-async"))
+    kernels = _lower(graph, _pins("cut", "d2/smem-async", graph=graph))
     b_loads = [load for load in statements(kernels, FragmentLoad) if load.role == "b"]
     assert b_loads and all(
         load.staged and load.b_trans and (load.src_dtype, load.dtype) == (F8E4M3, BF16) and load.scale_buffer == "_bs_smem"
@@ -201,8 +213,8 @@ def test_the_byte_slab_matches_the_compute_fill_bit_for_bit(tmp_path, dtype, ato
     """The staged fp8 drain and the compute fill hand the tensor cores the same 16-bit values, so
     the matmul agrees to the bit on either copy transport and either fragment dtype."""
     graph, bundle, ckpt = _linear(tmp_path, k=512, n=512, dtype=dtype)
-    staged = _run(graph.copy(), bundle, ckpt, _pins("cut", stage, atom=atom))
-    filled = _run(graph.copy(), bundle, ckpt, _pins("cut", "d1/smem", atom=atom))
+    staged = _run(graph.copy(), bundle, ckpt, _pins("cut", stage, graph=graph, atom=atom))
+    filled = _run(graph.copy(), bundle, ckpt, _pins("cut", "d1/smem", graph=graph, atom=atom))
     assert np.array_equal(staged, filled)
 
 
@@ -214,7 +226,7 @@ def test_the_fused_quantize_matches_the_cut_one_bit_for_bit(tmp_path):
     value, so fusing it into the matmul's fill changes nothing the tensor cores see."""
     graph, bundle, ckpt = _linear(tmp_path, k=512, n=512)
     fused = _run(graph.copy(), bundle, ckpt, _pins("fuse", "d2/smem-async"))
-    cut = _run(graph.copy(), bundle, ckpt, _pins("cut", "d2/smem-async"))
+    cut = _run(graph.copy(), bundle, ckpt, _pins("cut", "d2/smem-async", graph=graph))
     assert np.array_equal(fused, cut)
 
 

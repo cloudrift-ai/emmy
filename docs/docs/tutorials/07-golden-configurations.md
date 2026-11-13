@@ -38,24 +38,25 @@ with four tables, one entry per line:
   {"inputs":[...],"outputs":[...],"nodes":[...]}
  ],
  "kernels": [
-  {"loop_ir":{...},"name":"k_linear_7a1c2e","formed":true,"traced":0,"origins":["linear_7"],"bindings":{"num_tokens":32}}
+  {"loop_ir":{...},"formed":true,"traced":0,"origins":["linear_7"],"bindings":{"num_tokens":32}}
  ],
  "routing": [
-  {"parent":"k_linear_7a1c2e","arm":{"PLACE@inner.1/map":"cut"},"children":["k_linear_7a1c2e__place_d2802d6545","k_linear_7a1c2e#2"]}
+  {"parent":0,"arm":{"PLACE@inner.1/map":"cut"},"children":[1,2]}
  ],
  "rows": [
-  {"name":"gemma4_12b.norm_q_proj.m32","kernel":"k_linear_7a1c2e","pins":{"FAST_MATH":false},"knobs":{"WORK":"w1x16","TILE":"mma_m16n8k16_f16_f32/f2x2/k2","REDUCE":"g8k","RASTER":"","STAGE":"d2/smem"},"measurements":{"emmy_us":26.7,"reference_us":19.8,"reference_backend":"cublas"}}
+  {"name":"gemma4_12b.norm_q_proj.m32","kernel":0,"pins":{"FAST_MATH":false},"knobs":{"WORK":"w1x16","TILE":"mma_m16n8k16_f16_f32/f2x2/k2","REDUCE":"g8k","RASTER":"","STAGE":"d2/smem"},"measurements":{"emmy_us":26.7,"reference_us":19.8,"reference_backend":"cublas"}}
  ]}
 ```
 
 - `programs` are the traced Torch IR programs — provenance: the twin a benchmark compares a kernel against, and what
   a record run re-compiles.
-- `kernels` are the kernels' definitions: the standalone Loop IR body, the C name, and, for a kernel lowered from a
+- `kernels` are the kernels' definitions: the standalone Loop IR body and, for a kernel lowered from a
   program, which program (`traced`), which of its ops it computes whole (`origins`) and the sizes that specialized it
   (`bindings`). A piece a cut or a split minted has no program of its own; a routing row reaches it from its parent.
   Nothing computed from a kernel is stored beside it. The identity the tuning database keys a kernel by, and the
-  structural features the prior reads, are computed from the Loop IR when they are needed. Inside the file, rows and
-  routing rows name a kernel by its C name, or by a `key` such as `k_linear_7a1c2e#2` where two kernels share one.
+  structural features the prior reads, are computed from the Loop IR when they are needed, and so is its name, `k_` and
+  12 hex digits of that identity. Inside the file, rows and routing rows point at a kernel by its position in this
+  list.
 - `routing` are the kernel-set decisions: the kernel a decision was taken on, the arm (a `PLACE@seam: cut`, or the
   cross-CTA half of a `REDUCE` value) and the pieces it minted, in order. A decision has no time of its own: at the
   parent's fork it is priced as the sum of its pieces' fastest rows.

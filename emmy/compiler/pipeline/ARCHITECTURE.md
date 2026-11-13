@@ -155,7 +155,7 @@ Everything in this table recurs on nearly every page below. The rest of the docu
 | **fork** | A rule returning multiple alternatives; the engine turns each option into a child candidate. |
 | **knob** | A named tuning dimension (e.g. `TILE`, `STAGE`). Every fork option is identified by the knob values it fixes. |
 | **to pin a knob** | To force a knob's value by hand instead of letting the compiler choose — from the environment (`EMMY_STAGE=d2/smem-async`), or by reproducing a golden entry's recorded values. A *pinned row* is a benchmark of such a forced configuration. |
-| **to stamp a value** | To write a value onto an op as metadata, where later passes can read it: its kernel name, the knob values a fork decided. Nothing computed from the op is stamped onto it: a kernel's `S_*` *stamps* — its shape/body features — keep the name but are computed from the kernel where they are read (`features.stamps`). |
+| **to stamp a value** | To write a value onto an op as metadata, where later passes can read it: the knob values a fork decided. Nothing computed from the op is stamped onto it: a kernel's name is computed from its exact identity (`wire.kernel_name`), and its `S_*` *stamps* — its shape/body features — keep the word but are computed from the kernel where they are read (`features.stamps`). |
 | **to realize** | A recorded configuration *realizes* at a fork when the options the compiler actually offers there include one that matches it. A recording that realizes nowhere cannot be deployed, no matter how good its recorded µs. |
 | **regime** | The compiler flags, precision pins and hot/cold cache mode a measurement was taken under. Benchmarks use deployable `-O3`; a compile reads evidence from its matching regime. |
 | **prior** | The ranking model — the **offline prior**, fit ahead of time by `emmy fit` and shipped with the repo. It answers only where nothing measured decides. |
@@ -578,10 +578,10 @@ At a **schedule fork** (one kernel's row):
    re-recorded file changes the digest, and its earlier rows on this card and regime are let go first. A golden file is
    the DB's shape, so the import goes row for row: every kernel a `kernel` row, every decision a `routing` row (and a
    `taken` row where a row of the file sits below it), every measured row in the live input regime
-   (`evidence.regime_live`) a `perf` row of its kernel. The one thing the import computes is the key: the file names
-   a kernel by a local `ref`, the DB by the exact identity of its Loop IR (`GoldenFile.identities`). An unmeasured
-   row (a proposal) is not evidence: `run --golden PATH --bench` measures it under a hand pin and writes the
-   measurement as `perf` rows, after which it deploys like any other;
+   (`evidence.regime_live`) a `perf` row of its kernel. The one thing the import computes is the key: the file points
+   at a kernel by its position in the file, the DB by the exact identity of its Loop IR (`GoldenFile.identities`). An
+   unmeasured row (a proposal) is not evidence: `run --golden PATH --bench` measures it under a hand pin and writes
+   the measurement as `perf` rows, after which it deploys like any other;
 2. the prior's `mean_scores` argmin — only when no candidate has any evidence at all. Score ties break by
    `knob.canonical_row_key`, never by the order options were emitted in.
 
@@ -753,7 +753,7 @@ Rendered bytes are pinned across fresh interpreters by `test_source_determinism.
 is decided from what its arms are: a measured arm, else the placement prior over the kernels each arm leaves, else
 the first arm (Part 3). No arm is scheduled to price it, so the two kinds of decision never meet: the pieces an arm
 mints are brand-new kernels, and each gets its schedule at its own schedule fork, from its own pool, like any other
-kernel. A pipeline that ends between `tile/cut` and `tile/schedule` (`compile --passes dolfstp`) therefore decides
+kernel. A pipeline that ends between `tile/cut` and `tile/schedule` (`compile --passes dolftp`) therefore decides
 its cuts exactly as a full compile does, and schedules nothing. **No arm is withheld to keep a kernel set
 unchanged.** A retired cut withdraws ONE splice — the blocklisted decision identity at that node — and the fork is
 decided again over what remains.
@@ -874,6 +874,11 @@ the decisions, the measurements). What is computed:
   it name the same kernel.
 - **Its exact identity** is that tile's (`wire.kernel_identity`) — the one key measured evidence joins on: a `perf`
   row, a routing row, a fork's offer and a golden's stored kernel name one kernel alike.
+- **Its name** is `k_` and the first 12 hex digits of that identity (`wire.kernel_name`, a property of every loop,
+  tile and kernel op): every kernel of one identity has one name, and two identities have two. An op no tile stands
+  behind is named by its own exact identity, a bodiless placeholder by a digest of the op. A name is never stored —
+  not on an op, in a golden or in the tune DB — and says nothing about the ops a kernel realizes: that provenance is a
+  graph fact (a golden's `origins`).
 - **Its `S_*` stamps** are `features.stamps(op)`: `structure_features` of the body the identity digests — the tile's
   derived `loop_body`, or a loop op's own body where no tile stands behind it — with the operand dtypes read off the
   kernel's own io, memoized on the kernel.
@@ -895,7 +900,7 @@ it picks (`golden/evidence.py`); a dataset DB (the file `emmy db … --db PATH` 
 tables hold compilable kernels, the decisions that minted them, and measurements of them — nothing else.
 
 - **`kernel`** — one row per kernel, keyed by its exact identity: its Loop IR wire (`wire.kernel_wire` — the one-node
-  program of the loop body the kernel was formed from, bound to its own buffers), its C name and `formed`. The key
+  program of the loop body the kernel was formed from, bound to its own buffers) and `formed`. The key
   is the one computed value the DB holds: a cache key, computed from the wire by whoever writes the row (a bench off
   its live kernel, an import off a golden's stored one) and valid under the DB's version (below). Nothing else
   computed from a kernel is stored — its `S_*` stamps are computed from the wire where a row is featurized. The
@@ -974,13 +979,12 @@ placement digest matches its knob rows, every row names the rows it references, 
 schedule knobs and placement knobs stay apart. Nothing decodes a stored wire here. The artifact that has to survive
 a code change is the freeze, which is re-lowered on import.
 
-**Measurement freeze** (`db/freeze.py`, written by `emmy db freeze`). The tune DB is a live store, so a model
-fit or evaluated straight from it is not reproducible. A *freeze* is a snapshot written as a golden file per card
-(Part 7's format), the DB's tables with each kernel named by a ref of the file: every measured kernel's definition
-with the routing rows that reach it and the parents they reach it from, and a row per measurement — its schedule
-row, its regime as the input pin `FAST_MATH`, its median. A freeze has no traced programs, so it is evidence and
-training data but nothing a restamp can lower again; a compiler change that re-keys a kernel leaves its frozen rows
-behind.
+**Measurement freeze** (`db/freeze.py`, written by `emmy db freeze`). The tune DB is a live store, so a model fit or
+evaluated straight from it is not reproducible. A *freeze* is a snapshot written as a golden file per card (Part 7's
+format), the DB's tables with each kernel pointed at by its position in the file: every measured kernel's definition
+with the routing rows that reach it and the parents they reach it from, and a row per measurement — its schedule row,
+its regime as the input pin `FAST_MATH`, its median. A freeze has no traced programs, so it is evidence and training
+data but nothing a restamp can lower again; a compiler change that re-keys a kernel leaves its frozen rows behind.
 
 - **What freezes** is `freeze_reason(row, shape)`'s call, `shape` being the stamps of the row's kernel, computed
   from its stored definition (`freeze.kernel_ops`): an `ok` row on a card the GPU registry knows, at the deployable
@@ -1054,7 +1058,7 @@ restamp that keeps it current, and the checks that keep the A/B honest.
 **The file is the DB's shape.** `golden/format.py` declares it as `GoldenFile`: the card and model; `programs`, the
 traced Torch IR programs the targets were lowered from (provenance: the Torch twin a bench compares against, and what
 a record run re-compiles); `kernels`, one `Kernel` per kernel — its definition (`dataset.KernelDef`: the standalone
-Loop IR body, the C name and `formed`) and an optional `key`, plus, for a target, the traced program it came from
+Loop IR body and `formed`), plus, for a target, the traced program it came from
 (`traced`), the ops it computes whole (`origins`) and the sizes that specialized it (`bindings`); `routing`, the
 `RoutingRow` of every kernel-set decision — the parent, the arm, the pieces it minted; and `rows`, one `Row` per
 `perf` row — the kernel, the sizes its symbolic dims were benched at, the input regime (`pins`), the
@@ -1062,18 +1066,23 @@ schedule row (`knobs`), the measurement, and a `name` a command selects it by. A
 program of its own: a routing row reaches it from its parent (`GoldenFile.path_to`). A row with no measurement is a
 proposal, not evidence; a row with no schedule is a target that has only been traced. Every object writes its own
 wire (`emmy/compiler/wire.py`: one mixin, one walker, a field at its default omitted), `GoldenFile.check` holds the
-cross-object rules (every reference resolves, a `ref` names one kernel, a row spells a schedule and never a kernel-set
+cross-object rules (every reference resolves to one kernel, a row spells a schedule and never a kernel-set
 decision, a repository golden names its card and measures with a reference), `load` / `dump` read and write a file
 through it, and `edit` is the one locked read-modify-write every record run goes through. The dump writes a header key
 per line with `gpu_name` alone on the first (a card-scoped reader skips a foreign file off that line) and an entry per
 line in each table, so a diff lands on the entry that changed.
 
-**The file stores inputs only.** A stored kernel has no identity and no stamps beside its Loop IR. Rows and routing
-rows name a kernel by its `ref` in the file (`Kernel.ref`): its `key`, or its C name where no key is set — a second
-kernel sharing a C name takes a key like `k_name#2`. The exact identity is computed from the wire when something
-asks (`KernelDef.exact_identity`, through `KernelDef.op`: a formed kernel's body goes through `tile/lift`; a kernel
-formed from no loop op stores its derived body, and a loop op over it has the kernel's identity as it stands), and
-`GoldenFile.identities` gives every kernel's by `ref` — which only an import, a restamp or a record asks. A stored
+**The file stores inputs only.** A stored kernel has no identity, no name and no stamps beside its Loop IR. Rows
+(`kernel`), routing rows (`parent`, `children`) and latencies (`kernels`) point at a kernel by its position in the
+file's kernel list. In memory each `Kernel` carries a `ref` handle that never travels: its position when the file is
+read, a fresh number for a kernel added since, and its position again when the file is written. The exact identity is
+computed from the wire when something asks (`KernelDef.exact_identity`, through `KernelDef.op`: a formed kernel's
+body goes through `tile/lift`; a kernel formed from no loop op stores its derived body, and a loop op over it has the
+kernel's identity as it stands), and the name from the identity (`KernelDef.name`); `GoldenFile.identities` gives
+every kernel's by `ref` — which only an import, a restamp or a record asks. `run --golden PATH --kernel NAME` selects a
+kernel by its computed name, exact or else a unique substring. The reader migrates a file written while kernels
+stored a name once: the names and keys go (the loop node's `name` attribute too), and every reference to a kernel
+becomes its position. A stored
 kernel whose body the compiler no longer takes back has no identity: a stale kernel, whose rows are no evidence.
 `tests/architecture/test_layering.py` pins the field lists, so a new field is an input or it does not go in the file.
 
@@ -1105,13 +1114,14 @@ compare by their effective regime, so recording fills an existing proposal while
 pin spelling. Recorded this way, a strict-evidence compile picks the same kernel set again from the file's rows alone
 (no tune DB, no prior). A routing row the unpinned cut pass does not take again is
 refused before anything is written, since the next restamp would drop it. A composed cut leaves its children open,
-so a cut pinned on one of them (`PLACE@place_<token>/…`) records as a later decision on that child. The pin spells the
-child's own seams, bare where it has one (`PLACE@place_<token>=cut`), and the strict record needs rows for the pieces
+so a cut pinned on one of them by its name (`PLACE@k_<hash>/<site>`) records as a later decision on that child. The pin
+spells the child's own seams after its name, or none for its root-most seam (`PLACE@k_<hash>=cut`); the child's name
+is read off a dump or a first compile. The strict record needs rows for the pieces
 that cut mints — a remainder's cross-CTA split fork refuses with none — so the child is benched first under the pin
 alone (`run --golden PATH --kernel CHILD --bench` with `EMMY_KNOBS=PLACE=cut` at the tune standard, which writes its
 routing row and its pieces' rows into the tune DB); the strict whole-target record then takes the cut from those rows
 with no pin. The isolated record of a named row (`--kernel CHILD --realization ROW`) pins the row's kernel whole, so it
-takes no hand `PLACE` pin. A `place_<token>` pin that names none of the child's seams decides nothing, and the audit
+takes no hand `PLACE` pin. A kernel pin whose site names none of the child's seams decides nothing, and the audit
 answers with the seams it offers. Each measured row
 carries `tried`: the schedules of its kernel the tune DB held at its sizes and regime on the card
 (`bench_record.measured_schedules`) —
@@ -1119,20 +1129,23 @@ the search behind the row, which nothing else in the file can tell, and which go
 demotes the row. `--record` writes a row's per-card latencies (`golden.record_latency`), the corpus's ratchet. A record
 run requests `torch.compile`, and `--record-greedy` writes the same block onto the seed row: the whole pick's time
 beside `torch.compile` and eager, the number `emmy golden list` reads a gap against `torch.compile` from. Each latency
-names the kernel set it timed, by `ref`: `--record-greedy` the seed's target, every kernel its decisions name and every
-kernel that ran; `--record` the row's target and every piece the file's decisions reach from it. That set is what a
-restamp holds the timing to, and what `--pin-route` pins for a timed row that benches as no pinned row. A file stores
+names the kernel set it timed, by position in the file: `--record-greedy` the seed's target, every kernel its
+decisions name and every kernel that ran; `--record` the row's target and every piece the file's decisions reach from
+it. That set is what a restamp holds the timing to, and what `--pin-route` pins for a timed row that benches as no
+pinned row. A route replays as pins on names: each recorded decision becomes a pin on its parent's name, computed
+from the parent's stored body — `PLACE@<parent>/<site>` for a cut (`PLACE@<parent>` for a seam spelled bare),
+`REDUCE@<parent>` for a split. A file stores
 one kernel per identity, so a re-record that reaches a stored kernel by another route leaves it the child of two
 decisions; the pin takes the route whose parent and children all lie in the timed set, never another route that
 mints the same kernel. An isolated
-`--kernel REF --realization NAME --record-greedy` refreshes only the selected kernel's measurement; its timing cannot
+`--kernel KERNEL --realization NAME --record-greedy` refreshes only the selected kernel's measurement; its timing cannot
 stand for the target and never writes that latency block. A row's `note` is free text a person writes about it, never
 a label computed from the numbers. Both writers refuse a canonical path:
 a re-record works on a copy.
 
 **One builder writes every kernel entry.** `golden.definition` builds every entry — a trace inventory's, a record
-run's, a restamp's — from the tile kernel through `bench_record.kernel_row` and spells the body under the entry's own
-name, so a kernel recorded off a compiled program and the same kernel re-derived from its program are one entry.
+run's, a restamp's — from the tile kernel through `bench_record.kernel_row`, so a kernel recorded off a compiled
+program and the same kernel re-derived from its program are one entry.
 
 **The restamp keeps a file current, and a current file is one the restamp leaves unchanged.** `golden.restamp`
 lowers every traced program afresh (`lift_targets`: the loop passes and the lift, at the kernel's sizes), matches each
@@ -1146,9 +1159,9 @@ the replay keeps the piece fused, and compiles under the path's recorded layouts
 one carrier serving and the bench walk use), so an earlier sibling cannot default to a conflicting layout. A reader
 fixed in the other layout outranks a settled layout and still refuses the path. What it keeps is
 decided per entry, never guessed: a kernel that kept its identity
-keeps its entry — body and name (one identity can be minted by several parents, each spelling the body's buffers its
-own way); one the fresh lowering re-keys — the stored body and the fresh one are two kernels, their exact identities,
-both computed now, differ — takes the fresh body under the stored name and `ref`; a piece two
+keeps its entry and its stored body (one identity can be minted by several parents, each spelling the body's buffers
+its own way); one the fresh lowering re-keys — the stored body and the fresh one are two kernels, their exact
+identities, both computed now, differ — takes the fresh body in the stored entry's place; a piece two
 decisions shared that one of them now mints as another kernel is re-pointed by that decision to the kernel of the
 fresh identity (a stored one, or the fresh piece stored anew) while the decisions that still mint the stored kernel
 keep it and its rows, whatever order the file lists them in (when none does, the decision replayed first keeps it,
@@ -1237,8 +1250,8 @@ names an explicit file, whose GPU header is checked against the live device.
    work, but it does mean that a pin dropped on its intended kernel goes undetected if a sibling kernel happens to
    match it. `PLACE` is consumed before CUDA emission, so the final greedy resolution's placement receipts ride the
    compiled graph as attribution and supply its realized side. Bare `PLACE=fuse` accepts an empty placement trace;
-   a site-scoped pin still requires its site. A child or remainder-step pin also retains the exact source key the cut
-   pass applied, including a root-most cut without a site suffix. The `g<n>` cross-CTA stage of a `REDUCE` value is
+   a site-scoped pin still requires its site. A kernel pin (`PLACE@k_<hash>…`) also retains the exact source key the
+   cut pass applied, including a root-most cut without a site suffix. The `g<n>` cross-CTA stage of a `REDUCE` value is
    structural and cannot be read off a knob stamp, so the check skips it. A split replaces the kernel it splits, and
    `knob.consume_kernel_row` strips the schedule row from the pieces it mints — no piece may carry the `g<n>` it came
    from — so the receipt is the piece's sliced reduce axis, not a stamp. Only that stage is exempt: the rest of the
@@ -1488,9 +1501,9 @@ siblings — closure counting the offer-time provider closure and dependent-seam
 describes. A cut is
 consumed by the graph splice and therefore is not stamped on either fresh kernel; exact routing replay reads it from
 the structural decision trace. A pinned cut decides the one fork its pins name; the remainder and the pieces it
-leaves re-enter placement and take their own fork, which a `step.<n>` or `place_<token>` pin, evidence or the prior
-decides. Bare `PLACE=cut` selects the root-most seam at every step, so it cuts the remainder chain until no seam is
-left, and never reaches a piece.
+leaves are kernels of their own names, re-enter placement and take their own fork, which a kernel pin naming them
+(`PLACE@k_<hash>[/<site>]`), evidence or the prior decides. Bare `PLACE=cut` selects the root-most seam at every
+step, so it cuts the remainder chain until no seam is left, and never reaches a piece.
 
 **`WORK`** (STR codec) — the kernel-global **worker inventory**, spelled exactly once per row (step 7):
 `w<M>x<N>[+p<np>]` (warps — the mma tier; `+p<np>` the dedicated producer band the retired per-row `WSPEC` key
@@ -1662,7 +1675,6 @@ of algebraic rewrites they may apply are documented there too.
 | `frontend/optimization/`  | `compose_indexmaps`: collapse chains of single-source / single-consumer `IndexMapOp` into one coord_map, so trivial layout kernels don't block fusion. |
 | `loop/lowering/`           | `lower_*` rules wrap each surviving tensor primitive in a single-op `LoopOp`; an additive scan writes its accumulator after every ordered scan-axis update. |
 | `loop/fusion/`            | `roll_recurrence` first rolls an unrolled recurrence into one kernel that carries its state (`passes/ARCHITECTURE.md`). `merge_loop_ops` then maximally splices each downstream Loop region without consulting Tile IR or schedule support. Non-reconvergent consumers become ports of one multi-output `LoopOp`; one shared splicer worklist deduplicates their common producers. Only semantic splice legality stops a merge. |
-| `loop/stamp/`             | `stamp_loop_names` (`provenance.name_for`, e.g. `k_rms_norm_3f2a1b`) — the name is the one thing stamped. Runs last in the loop dialect, after maximal fusion. |
 | `tile/{lift,cut,schedule}/` | `010_lift` forms each kernel through `lift_kernel`, the formation cut and split pieces share: it re-fuses free axes a fused reshape split (`p → f/Q, q → f%Q`, kept only when every access folds clean), so split and unsplit spellings of one contraction converge to one kernel identity, then converts the complete inner loop nest to a canonically factored Fold tree; `020_twisted` rewrites the exp family; `030_cut` reaches a fixpoint over stored-edge cuts, constant layouts, then cross-CTA splits; `040_schedule` schedules each stored tree. |
 | `lowering/kernel/`        | `010_materialize` lowers the selected schedule through `_factor.factorize`, followed by the Kernel IR peepholes. See [`passes/lowering/kernel/ARCHITECTURE.md`](passes/lowering/kernel/ARCHITECTURE.md). |
 | `lowering/cuda/`          | `delegate_zero_init` (first) moves an atomic accumulator's per-launch zero-init off the runtime memset and into a dataflow-predecessor kernel as a `ZeroPrologue` stmt (every thread of the grid writes a stride of zero words ahead of the kernel's own work; stream order guarantees happen-before) — one CUDA-graph MEMSET node saved per site; the capture's first launch and symbolic-shaped accumulators keep their memset, and the slab planner starts the buffer's live interval at the delegating launch (`CudaOp.zero_prologues`). `lower_kernelop` then renders the `KernelOp` body to a `__global__` source string (`ir/kernel/render.py::render_kernelop`) and mutates the node's op to `CudaOp` in place. |
@@ -1686,9 +1698,9 @@ provenance stay in memory for `run --bench`'s per-kernel benchmarking and are ne
 
 At `compile -vv` (DEBUG) the engine emits one block per rule application: a unified diff between the matched subgraph
 and the rewritten fragment, bracketed by `>>> <pass>:NNN_rulename` and `<<< <pass>:NNN_rulename` markers. The `<pass>`
-prefix is the single-letter shorthand from `PASS_SHORTHAND` (`d` / `o` / `l` / `f` / `n` / `s` / `t` / `p` / `h` / `k`
-/ `c`) — the same letters the CLI accepts in `--passes dolfstph` (`commands/compile.py` imports `PASS_SHORTHAND` so
-the flag and the marker prefix can't drift). The three tile passes have a letter each, so `--passes dolfstp` ends
+prefix is the single-letter shorthand from `PASS_SHORTHAND` (`d` / `o` / `l` / `f` / `t` / `p` / `h` / `k` / `c`) —
+the same letters the CLI accepts in `--passes dolftph` (`commands/compile.py` imports `PASS_SHORTHAND` so the flag
+and the marker prefix can't drift). The three tile passes have a letter each, so `--passes dolftp` ends
 after the cut pass: the greedy decides every kernel-set fork as a full compile does (no arm is scheduled to decide
 one) and the tile IR shows the chosen kernel set unscheduled. Skipped rules collapse to a one-liner. The bracketing
 makes per-rule / per-pass slicing trivial via `awk`; ANSI color is applied only inside the diff body so the markers
