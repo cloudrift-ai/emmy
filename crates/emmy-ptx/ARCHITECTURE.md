@@ -136,7 +136,11 @@ Every instruction reaches the list through the `Builder`.
 - **Loops.** A loop whose trip count is the same for every thread is a counter from zero to that count, which is the
   shape ptxas unrolls. A plain `Loop`'s axis is the counter. A `StridedLoop` with a literal start and step over a
   static extent counts its trips and computes the axis from the counter; one that starts at a thread's own value, or
-  stops early, steps the axis itself. The accumulators a loop folds are seeded ahead of it with the combine's neutral
+  stops early, steps the axis itself. A strided loop that runs at most one trip, because one constant step from the
+  lowest start the ranges allow already passes the highest end (a cooperative copy over fewer elements than the
+  block has threads), is the condition that its start is below its end, with the axis its start: ptxas unrolls a
+  loop whose start differs between threads four times with a remainder, which multiplied the async copies of the
+  NVFP4 kernels (30 `LDGSTS` against cicc's 12 in one). The accumulators a loop folds are seeded ahead of it with the combine's neutral
   element, as the `seed` flag says.
 - **Integers.** An expression is computed at the narrowest of `i32`, `u32` and `i64` that holds its range, and at its
   operands' type where it has no range. A sum, a product or a bitwise operation depends on the low bits of its

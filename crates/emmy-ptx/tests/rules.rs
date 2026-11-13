@@ -950,6 +950,34 @@ fn a_loop_over_a_symbolic_extent_is_tested_ahead() {
     );
 }
 
+/// A strided loop whose step from the lowest start already passes the highest end runs at most one trip: it is
+/// the condition that its start is below its end, with the axis its start.
+#[test]
+fn a_strided_loop_of_at_most_one_trip_is_a_condition() {
+    let got = under_grid(
+        "
+        for k in thread_idx.x..32 step 256:
+            f32 x = load a[k]
+            f32 o[k] = x
+        ",
+        A_O,
+        EXACT,
+    );
+    assert_eq!(
+        got,
+        [
+            "setp.lt.s32 %p0, %r2, 32",
+            "@!%p0 bra L1",
+            "mul.wide.s32 %rd2, %r2, 4",
+            "add.s64 %rd3, %rd0, %rd2",
+            "ld.global.nc.f32 %f0, [%rd3]",
+            "add.s64 %rd4, %rd1, %rd2",
+            "st.global.f32 [%rd4], %f0",
+            "L1:",
+        ]
+    );
+}
+
 /// A strided loop with a constant start and step runs the same trips in every thread: a counter from zero to the
 /// trip count, the axis computed from it. One that starts at a thread's own value steps the axis itself.
 #[test]

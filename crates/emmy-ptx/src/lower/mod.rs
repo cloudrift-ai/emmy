@@ -666,6 +666,48 @@ impl Lowerer {
         self.b.close_loop(open)
     }
 
+    /// Whether a strided loop runs no more than one trip in any thread: from the lowest start the ranges allow, one
+    /// constant step already reaches the highest end. A cooperative copy over fewer elements than the block has
+    /// threads is such a loop.
+    fn at_most_once(&self, node: &StridedLoop, ctx: &SimplifyCtx) -> bool {
+        let last = node.end.as_ref().unwrap_or(&node.axis.extent.expression);
+        match (
+            node.step.int_literal(),
+            node.start.range(ctx),
+            last.range(ctx),
+        ) {
+            (Some(step), Some(start), Some(end)) if step > 0 => {
+                end.hi - start.lo <= i128::from(step)
+            }
+            _ => false,
+        }
+    }
+
+    /// A strided loop of at most one trip is the condition that its start is below its end, the axis its start:
+    /// ptxas would otherwise unroll a loop whose start differs between threads four times, with a remainder.
+    fn single_trip(
+        &mut self,
+        node: &StridedLoop,
+        inner: &SimplifyCtx,
+        ctx: &SimplifyCtx,
+    ) -> Result<()> {
+        let last = node.end.as_ref().unwrap_or(&node.axis.extent.expression);
+        let runs = Expression::binary(Operation::Less, node.start.clone(), last.clone());
+        let pred = self.pred(&runs, ctx)?;
+        let passes = self.truth_by_thread(&runs);
+        let start = self.int(&node.start, ctx)?;
+        let around = self.threads.clone();
+        self.threads.enter(passes.as_deref(), true, false);
+        let open = self.b.open_if(pred);
+        self.names.push(HashMap::new());
+        self.bind(node.axis.name, start);
+        let done = self.body(&node.body, inner);
+        self.names.pop();
+        self.threads = around;
+        done?;
+        self.b.close_if(open)
+    }
+
     /// A strided loop with a constant start and step over a static extent runs the same trips in every thread, so
     /// it is a counter from zero to a constant with the axis computed from it; any other steps the axis itself.
     fn strided_loop(
@@ -693,6 +735,9 @@ impl Lowerer {
             }
             _ => None,
         };
+        if uniform.is_none() && self.at_most_once(node, ctx) {
+            return self.single_trip(node, &inner, ctx);
+        }
         self.names.push(HashMap::new());
         let open = match uniform {
             Some((start, step, extent)) => {
