@@ -13,18 +13,20 @@ from emmy.compiler.graph import Graph, Tensor
 from emmy.compiler.ir.base import InputOp
 from emmy.compiler.ir.cuda.ir import CudaOp
 from emmy.compiler.ir.frontend.ir import MatmulOp, ReshapeOp, SdpaOp
+from emmy.compiler.ir.kernel.ir import MmaSyncPtx, WgmmaMma
 from emmy.compiler.ir.loop import LoopOp
 from emmy.compiler.ir.schedule.base import clear_pin_refusals, pin_refusal
 from emmy.compiler.ir.tensor.ir import ReduceOp
 from emmy.compiler.ir.tile import TileOp
 from emmy.compiler.ir.tile.ops import UnbindableProjection
-from emmy.compiler.pipeline import CUDA_PASSES, LOOP_PASSES, TILE_PASSES, Pipeline
+from emmy.compiler.pipeline import LOOP_PASSES, TILE_PASSES, Pipeline
 from emmy.compiler.pipeline.fork import iter_leaves
 from emmy.compiler.pipeline.passes.lowering.kernel._factor import factorize
 from emmy.compiler.pipeline.passes.tile._fromloop import lift_loop_op
 from emmy.compiler.pipeline.search.pins import pinned_knobs
 from emmy.compiler.pipeline.search.pool import PoolSample
 from emmy.compiler.pipeline.search.ranking import enumerate_graph
+from tests.compiler.helpers import compile_with_kernels, statements
 
 classic_forks = import_module("emmy.compiler.pipeline.passes.tile.schedule.040_schedule").classic_forks
 
@@ -117,12 +119,12 @@ def test_block_maximum_offers_no_nested_matmul_tile(gpu_name, cap) -> None:
     assert "does not fold it" in (pin_refusal("TILE", pins["TILE"]) or "")
 
     with pinned_knobs({"PLACE": "fuse"}):
-        compiled = Pipeline.build(CUDA_PASSES).run(_block_maximum(), ctx=ctx, db=None)
-    kernels = [node.op for node in compiled.nodes.values() if isinstance(node.op, CudaOp)]
+        compiled, bodies = compile_with_kernels(_block_maximum(), ctx=ctx, db=None)
+    kernels = {node_id: node.op for node_id, node in compiled.nodes.items() if isinstance(node.op, CudaOp)}
     assert kernels
-    for kernel in kernels:
+    for node_id, kernel in kernels.items():
         if _tiled(kernel.knobs):
-            assert "mma" in kernel.kernel_source
+            assert statements(bodies[node_id], MmaSyncPtx, WgmmaMma)
 
 
 @pytest.mark.parametrize(("gpu_name", "cap"), _CARDS)

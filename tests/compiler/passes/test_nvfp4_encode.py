@@ -22,7 +22,7 @@ from emmy.compiler.ir.base import InputOp
 from emmy.compiler.ir.elementwise import ElementwiseImpl
 from emmy.compiler.ir.render import render_expression
 from emmy.compiler.ir.tensor.ir import ElementwiseOp
-from tests.compiler.helpers import requires_cuda
+from tests.compiler.helpers import operations, recording_kernels, requires_cuda
 
 #: Every exact midpoint of the e2m1 grid, where the rounding rule is decided.
 MIDPOINTS = (0.25, 0.75, 1.25, 1.75, 2.5, 3.5, 5.0)
@@ -97,9 +97,9 @@ def test_the_cuda_encode_matches_the_numpy_encode():
         ]
     )
     backend = CudaBackend()
-    compiled = backend.compile(_encode_graph(x.size))
-    source = next(s for node in compiled.nodes.values() if (s := getattr(node.op, "kernel_source", None)))
-    assert "emmy_to_f4e2m1" in source, "the encode helper never reached the kernel"
+    with recording_kernels() as kernels_of:
+        compiled = backend.compile(_encode_graph(x.size))
+    assert "to_f4e2m1" in operations(kernels_of(compiled)), "the encode never reached the kernel"
 
     result, _ = backend.run(compiled, input_data={"x": x})
     got = np.asarray(result.outputs[compiled.outputs[0]]).astype(np.uint8).ravel()

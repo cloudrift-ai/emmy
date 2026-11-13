@@ -19,10 +19,10 @@ from emmy.compiler.ir.base import ConstantOp, InputOp
 from emmy.compiler.ir.cuda import CudaOp
 from emmy.compiler.ir.loop import LoopOp
 from emmy.compiler.ir.loop.runner import execute_loop_op_cpp
-from emmy.compiler.ir.stmt import Loop
+from emmy.compiler.ir.stmt import Loop, StridedLoop
 from emmy.compiler.ir.tile import TileOp
 from emmy.compiler.pipeline import CUDA_PASSES, LOOP_PASSES, Pipeline
-from tests.compiler.helpers import requires_cuda
+from tests.compiler.helpers import compile_with_kernels, requires_cuda, statements, text
 
 _DELTA = """
 import torch, torch.nn as nn
@@ -265,12 +265,13 @@ def test_the_rolled_kernel_lowers_to_one_launch_per_step() -> None:
     """The serial axis reaches the CUDA op as a runtime ``int`` and a launch count; the body holds
     no loop over it and reads the previous step behind the guard."""
     graph, _, _ = graph_from_code(_delta())
-    lowered = Pipeline.build(CUDA_PASSES).run(graph, ctx=Context.from_target((9, 0)))
+    lowered, kernels = compile_with_kernels(graph, ctx=Context.from_target((9, 0)))
 
-    (step,) = (node.op for node in lowered.nodes.values() if isinstance(node.op, CudaOp) and node.op.serial)
+    ((node_id, step),) = ((node_id, node.op) for node_id, node in lowered.nodes.items() if isinstance(node.op, CudaOp) and node.op.serial)
     ((axis, launches),) = step.serial
     assert launches == 3 and axis in step.runtime_args
-    assert f"int {axis}" in step.kernel_source and f"for (int {axis}" not in step.kernel_source
+    assert not [loop for loop in statements(kernels[node_id], Loop, StridedLoop) if loop.axis.name == axis]
+    assert axis in text(kernels[node_id]), "the body reads the step it runs"
     # CUDA spelling: moves to the PTX compiler's tests
     assert f"(0 < {axis}) ? ({axis} - 1) : (0)" in step.kernel_source  # the comparison in its canonical form
 

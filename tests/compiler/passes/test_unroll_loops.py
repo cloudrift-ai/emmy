@@ -141,4 +141,5 @@ def test_a_lowered_matmul_reaches_code_generation_with_no_loop_flagged() -> None
     assert not _loops(kernel)
     folds = sum(isinstance(stmt, Accum) for stmt in kernel.body.iter())
     assert folds and folds % 64 == 0  # one fold per trip and register cell
+    # CUDA spelling: moves to the PTX compiler's tests
     assert "#pragma unroll" not in cuda.kernel_source

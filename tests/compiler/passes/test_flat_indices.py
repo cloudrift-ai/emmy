@@ -117,4 +117,4 @@ def test_a_lowered_matmul_reaches_code_generation_with_affine_indices() -> None:
     kernel = next(op for op in cuda.source_chain() if isinstance(op, KernelOp))
     loads = [stmt for stmt in kernel.body.iter() if isinstance(stmt, Load)]
     assert loads and all(len(stmt.index) == 1 for stmt in loads)
-    assert "a[2048 * a0_b + 128 * a0_u + 64]" in cuda.kernel_source and ") * 64" not in cuda.kernel_source
+    assert "2048 * a0_b + 128 * a0_u + 64" in {str(stmt.index[0]) for stmt in loads if stmt.input == "a"}

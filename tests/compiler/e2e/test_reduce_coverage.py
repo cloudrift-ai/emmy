@@ -24,8 +24,10 @@ from __future__ import annotations
 import pytest
 import torch
 
+from emmy.compiler.ir.kernel.ir import Cond, TreeHalve
+from emmy.compiler.ir.stmt import Assign, Loop, StridedLoop
 from emmy.compiler.trace.torch import trace_module
-from tests.compiler.helpers import requires_cuda
+from tests.compiler.helpers import recording_kernels, requires_cuda, statements, text
 
 # --------------------------------------------------------------------------- #
 # Cross-CTA split-reduce — the projection epilogue the atomic finalize refuses.
@@ -86,9 +88,10 @@ def test_online_softmax_pairing_reaches_the_kernel(shape) -> None:
 
     torch.manual_seed(0)
     graph = trace_module(_Softmax().cpu(), (torch.randn(*shape),))
-    compiled = CudaBackend().compile(graph)
-    srcs = [getattr(node.op, "kernel_source", "") for node in compiled.nodes.values()]
-    assert any(re.search(r"__(alpha|beta)(__e)? = (__)?expf\(", src) for src in srcs), "online-softmax pairing did not fire"
+    with recording_kernels() as kernels_of:
+        compiled = CudaBackend().compile(graph)
+    rescales = [stmt for stmt in statements(kernels_of(compiled), Assign) if re.search(r"__(alpha|beta)(__|$)", stmt.name)]
+    assert any(str(stmt.value).startswith("exp") for stmt in rescales), "online-softmax pairing did not fire"
 
 
 # --------------------------------------------------------------------------- #
@@ -138,8 +141,12 @@ def test_a_short_lane_loop_unrolls_and_one_warp_folds_the_warp_partials(monkeypa
     monkeypatch.setenv("EMMY_WORK", "t512")
     monkeypatch.setenv("EMMY_REDUCE", "coop")
     code = "torch.nn.RMSNorm(3840, dtype=torch.float16)(torch.randn(32, 3840, dtype=torch.float16))"
-    compiled = CudaBackend().compile(graph_from_code(code)[0])
-    (src,) = [s for s in (getattr(node.op, "kernel_source", "") for node in compiled.nodes.values()) if s]
+    with recording_kernels() as kernels_of:
+        compiled = CudaBackend().compile(graph_from_code(code)[0])
+    (kernel,) = kernels_of(compiled).values()
     # Eight copies of each lane loop's body, the eighth under the row's bound: 3840 cells leave half the lanes seven.
-    assert src.count("__u7 = ") >= 2 and "if (a1_co + 3584 < 3840) {" in src and "#pragma unroll" not in src, src
-    assert "if (warp == 0) {" in src and "for (int s = " not in src, src
+    assert text(kernel).count("__u7 = ") >= 2 and any(str(guard.cond) == "a1_co + 3584 < 3840" for guard in statements(kernel, Cond))
+    assert not statements(kernel, Loop, StridedLoop), "no lane loop is left to unroll"
+    # Warp 0 folds the warp partials with its butterfly (a tree with a lane) behind a single barrier.
+    folds = statements(kernel, TreeHalve)
+    assert folds and all(fold.lane is not None for fold in folds)

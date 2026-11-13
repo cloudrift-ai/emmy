@@ -36,11 +36,11 @@ from emmy.compiler.ir.schedule.classic import (
     ProjectionSchedule,
     ReductionSchedule,
 )
-from emmy.compiler.ir.stmt import Accum, Assign, normalize_body, parse_body
+from emmy.compiler.ir.stmt import Accum, Assign, Load, normalize_body, parse_body
 from emmy.compiler.ir.tensor.ir import ElementwiseOp
 from emmy.compiler.ir.tile import TileOp
-from emmy.compiler.pipeline import CUDA_PASSES, Pipeline
 from emmy.compiler.target import set_target
+from tests.compiler.helpers import compile_with_kernels, statements
 from tests.compiler.terms import projection, reduction, slab
 
 materialize = import_module("emmy.compiler.pipeline.passes.lowering.kernel.010_materialize")
@@ -120,21 +120,22 @@ def _scalar_tier(monkeypatch):
 def test_sibling_cones_share_one_declaration_of_a_broadcast_constant(_scalar_tier) -> None:
     set_target(_CAP)
     try:
-        lowered = Pipeline.build(CUDA_PASSES).run(_gate_up_graph(), ctx=Context(compute_capability=_CAP))
+        lowered, kernels = compile_with_kernels(_gate_up_graph(), ctx=Context(compute_capability=_CAP))
     finally:
         set_target(None)
+    assert kernels, "the graph must lower to at least one kernel"
+    # CUDA spelling: moves to the PTX compiler's tests (nvcc's one declaration of a name per brace scope)
     sources = {node.op.kernel_name: node.op.kernel_source for node in lowered.nodes.values() if getattr(node.op, "kernel_source", None)}
-
-    assert sources, "the graph must lower to at least one kernel"
     assert {name: _redeclared(src) for name, src in sources.items() if _redeclared(src)} == {}
     # Every reduction step reads the shared constant through ONE binding used by both sibling
     # cones: a kernel that reads it binds it once, and every use pairs up — an ILP partition
     # multiplies the uses (one pair per register copy), never the binding.
-    bindings = {source: re.findall(r"__half (\w+) = c\[0\];", source) for source in sources.values()}
+    bindings = {node_id: [load.name for load in statements(kernel, Load) if load.input == "c"] for node_id, kernel in kernels.items()}
     assert any(bindings.values())
     assert all(len(names) == 1 for names in bindings.values() if names)
-    # A use is any read of the binding past its declaration, whatever spells the subtraction (``-`` or ``__hsub_rn``).
-    uses = [len(re.findall(rf"\b{names[0]}\b", source)) - 1 for source, names in bindings.items() if names]
+    uses = [
+        sum(names[0] in stmt.deps() for stmt in statements(kernels[node_id], Assign, Accum)) for node_id, names in bindings.items() if names
+    ]
     assert all(count >= 2 and count % 2 == 0 for count in uses), uses
 
 

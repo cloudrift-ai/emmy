@@ -12,9 +12,10 @@ from emmy.compiler.ir.base import ConstantOp, InputOp
 from emmy.compiler.ir.cuda import CudaOp
 from emmy.compiler.ir.expression import Var
 from emmy.compiler.ir.loop import LoopOp
-from emmy.compiler.ir.stmt import Let, parse_body
-from emmy.compiler.pipeline import CUDA_PASSES, LOOP_PASSES, Pipeline
+from emmy.compiler.ir.stmt import Let, Load, parse_body
+from emmy.compiler.pipeline import LOOP_PASSES, Pipeline
 from emmy.compiler.pipeline.search.pins import pinned_knobs
+from tests.compiler.helpers import compile_with_kernels, statements
 
 _RULE = "095_bind_scalar_constants"
 
@@ -176,9 +177,9 @@ def test_scalar_binding_removes_only_its_cuda_argument(monkeypatch):
     graph.add_node(kernel, ["constant", "x"], Tensor("out", (4,), F32), node_id="out")
     graph.outputs = ["out"]
     with pinned_knobs({"PLACE": "fuse", "WORK": "t32", "REDUCE": "", "LOOPIFY": 0}):
-        lowered = Pipeline.build(CUDA_PASSES).run(graph, ctx=Context.from_target((12, 0)))
+        lowered, kernels = compile_with_kernels(graph, ctx=Context.from_target((12, 0)))
     (cuda,) = [node.op for node in lowered.nodes.values() if isinstance(node.op, CudaOp)]
     assert cuda.arg_order == ("x", "out")
-    assert "constant[" not in cuda.kernel_source
+    assert not [load for load in statements(kernels, Load) if load.input == "constant"]
     # CUDA spelling: moves to the PTX compiler's tests
     assert "0.10000000149011612" in cuda.kernel_source

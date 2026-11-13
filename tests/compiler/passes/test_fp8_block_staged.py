@@ -10,17 +10,18 @@ each 128-wide K group, which a staged chunk inside that group evaluates once per
 
 from __future__ import annotations
 
-import re
+import math
 
 import numpy as np
 import pytest
 
-from emmy.compiler.dtype import F8E4M3, F32
+from emmy.compiler.dtype import BF16, F8E4M3, F32
 from emmy.compiler.graph import Tensor
+from emmy.compiler.ir.kernel.ir import FragmentLoad, Smem, WarpShuffle
 from emmy.compiler.ir.schedule.packing import match_packed_kblock_b
 from emmy.compiler.ir.schedule.views import cone_seam
-from emmy.compiler.ir.stmt import parse_body
-from tests.compiler.helpers import requires_cuda, requires_sm
+from emmy.compiler.ir.stmt import Assign, Body, Let, Load, StridedLoop, Write, parse_body
+from tests.compiler.helpers import compile_with_kernels, requires_cuda, requires_sm, statements
 
 pytest.importorskip("torch")
 
@@ -55,12 +56,10 @@ def _pins(place: str, stage: str, *, atom: str = K16_BF16, chunk: str = "k8") ->
 
 def _lower(graph, pins):
     from emmy.compiler.context import Context
-    from emmy.compiler.pipeline import CUDA_PASSES, Pipeline
     from emmy.compiler.pipeline.search.pins import pinned_knobs
 
     with pinned_knobs(pins):
-        lowered = Pipeline.build(CUDA_PASSES).run(graph, ctx=Context.from_target((12, 0)))
-    return [s for node in lowered.nodes.values() if (s := getattr(node.op, "kernel_source", None))]
+        return compile_with_kernels(graph, ctx=Context.from_target((12, 0)))[1]
 
 
 @pytest.mark.parametrize(
@@ -93,21 +92,29 @@ def test_the_cut_linear_lowers_to_the_fp8_byte_slab(tmp_path):
     """Under a copy stage the weight stages as raw e4m3 bytes in padded rows beside an f32 scale
     slab, and one drain reads both; no 16-bit weight tile and no packed-pair table appear."""
     graph, _, _ = _linear(tmp_path)
-    src = "\n".join(_lower(graph, _pins("cut", "d2/smem-async")))
-    assert "emmy_mma_load_b_smem_trans_f8s_bf16" in src
+    kernels = _lower(graph, _pins("cut", "d2/smem-async"))
+    b_loads = [load for load in statements(kernels, FragmentLoad) if load.role == "b"]
+    assert b_loads and all(
+        load.staged and load.b_trans and (load.src_dtype, load.dtype) == (F8E4M3, BF16) and load.scale_buffer == "_bs_smem"
+        for load in b_loads
+    ), "one drain reads the e4m3 bytes and their scale"
     # tile_n = 32 rows of (128 bytes + the 16 B pad), two ring slots; one f32 scale per row.
-    assert "__nv_fp8_e4m3 _b_smem[9216]" in src and "float _bs_smem[32]" in src
-    assert "EMMY_F4_LUT" not in src
+    slabs = {smem.name: (smem.dtype, math.prod(smem.extents)) for smem in statements(kernels, Smem)}
+    assert slabs["_b_smem"] == ("__nv_fp8_e4m3", 9216) and slabs["_bs_smem"] == ("float", 32)
+    assert not [load for load in statements(kernels, FragmentLoad) if load.src_dtype.name.startswith("f4")], "no packed-pair table"
 
 
 def test_the_fused_quantize_refills_its_group_statistic_every_chunk(tmp_path):
     """Fused into the matmul, the activation's group maximum is a warp reduce at the head of each
     chunk's fill rather than a 128-element scan per slab cell."""
     graph, _, _ = _linear(tmp_path)
-    (src,) = _lower(graph, _pins("fuse", "d2/smem-async"))
-    loop = src.index("for (int _ks")
-    (state,) = re.findall(r"__shared__ float _a_stat_(acc\d+)\[16\];", src[:loop])
-    assert "__shfl_xor_sync" in src[loop:] and f"_a_stat_{state}[_sr] = {state}" in src[loop:]
+    ((grid,),) = [kernel.body for kernel in _lower(graph, _pins("fuse", "d2/smem-async")).values()]
+    loop = next(i for i, stmt in enumerate(grid.body) if isinstance(stmt, StridedLoop) and stmt.axis.name == "_ks")
+    head, chunk = list(Body(grid.body[:loop]).iter()), list(Body((grid.body[loop],)).iter())
+    ((state, extents),) = [(smem.name, smem.extents) for smem in head if isinstance(smem, Smem) and smem.name.startswith("_a_stat_")]
+    assert extents == (16,)
+    assert any(isinstance(stmt, WarpShuffle) for stmt in chunk), "a warp reduce at the head of each chunk's fill"
+    assert any(isinstance(stmt, Write) and stmt.output == state for stmt in chunk), "the chunk refills the statistic"
 
 
 def test_the_seam_reads_the_group_maximum_as_a_per_chunk_statistic(tmp_path):
@@ -137,7 +144,6 @@ def test_a_chunk_body_that_computes_a_row_statistic_does_not_reload_it(tmp_path)
     from emmy.commands.trace import graph_from_code
     from emmy.compiler.context import Context
     from emmy.compiler.loader.synthesize import quantize_and_spell
-    from emmy.compiler.pipeline import CUDA_PASSES, Pipeline
     from emmy.compiler.pipeline.search.pins import pinned_knobs
 
     code = (
@@ -152,12 +158,15 @@ def test_a_chunk_body_that_computes_a_row_statistic_does_not_reload_it(tmp_path)
     # nested in the fill take no transport of their own.
     staged = {"STAGE@inner": "d1/smem", "STAGE@inner.1/map.1/inner": "", "STAGE@inner.1/map.2/reduce.1/inner": ""}
     with pinned_knobs({"PLACE": "fuse", "REDUCE": "", **staged}):
-        lowered = Pipeline.build(CUDA_PASSES).run(graph, ctx=Context.from_target((7, 0)))
-    (src,) = [s for node in lowered.nodes.values() if (s := getattr(node.op, "kernel_source", None))]
-    chunk = src[src.index("for (int _ks") :]
-    chunk = chunk[: chunk.index("for (int a")]
-    declared = re.findall(r"^\s*(?:float|__half|int) (\w+) = ", chunk, flags=re.M)
-    assert "_a_stat_" in src and len(declared) == len(set(declared))
+        _, kernels = compile_with_kernels(graph, ctx=Context.from_target((7, 0)))
+    (kernel,) = kernels.values()
+    assert any(smem.name.startswith("_a_stat_") for smem in statements(kernel, Smem))
+    (chunk,) = [loop for loop in statements(kernel, StridedLoop) if loop.axis.name == "_ks"]
+    # Every scope of the chunk binds each value once (a fragment is a register set its loads refill, not a binding).
+    for stmt in (chunk, *Body((chunk,)).iter()):
+        for scope in stmt.nested():
+            declared = [name for inner in scope if isinstance(inner, (Assign, Load, Let)) for name in inner.defines()]
+            assert len(declared) == len(set(declared)), sorted(name for name in declared if declared.count(name) > 1)
 
 
 def _run(graph, bundle, ckpt, pins):
