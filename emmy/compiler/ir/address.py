@@ -20,7 +20,6 @@ from emmy.compiler.ir.expression import (
     SimplifyCtx,
     TernaryExpression,
     Var,
-    affine_form,
 )
 from emmy.compiler.ir.stmt import Body, Load, Statement, Write
 
@@ -180,24 +179,6 @@ def copies_aligned(load: Load, inner: str, chunk: int, inputs, *, per: int = 1) 
         dim = t.shape[pos]
         stride = BinaryExpression("*", stride, Literal(dim.as_static(), "int") if dim.is_static else Var(f"__dim{pos}"))
     return _divisible(address.simplify(SimplifyCtx.empty()), chunk)
-
-
-def reads_declared_rows(load: Load, axis_name: str) -> bool:
-    """Whether the operand's row step IS the buffer's DECLARED trailing extent — the reading a
-    loader falls back on when it is handed no stride (``ir._resolve_ldm``), and the only one that
-    survives a SYMBOLIC extent, which no integer derivation can name. True exactly when the axis
-    rides the penultimate index component alone at coefficient 1: then the flat row step is the
-    product of the extents after it, which IS the declared trailing extent.
-
-    The escape hatch for :func:`gmem_row_stride` declining on a symbolic dim — a masked / dynamic-M
-    matmul reads canonical rows and always did. Not a substitute for the derivation: it says the
-    declaration happens to be right here, nothing about any other index."""
-    if len(load.index) < 2:
-        return False
-    form = affine_form(load.index[-2], {axis_name})
-    if form is None or form[1].get(axis_name, 0) != 1:
-        return False
-    return not any(axis_name in e.free_vars() for i, e in enumerate(load.index) if i != len(load.index) - 2)
 
 
 def _run_gcd(a: int, b: int) -> int:

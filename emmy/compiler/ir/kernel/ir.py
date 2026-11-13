@@ -836,7 +836,6 @@ VOLTA_CROSSWISE = "V70A"
 VOLTA_B_CONGRUOUS = "V70B"
 #: The slab layouts that are a function of a store's logical row and column: a ``Write`` under one keeps both.
 TWO_DIMENSIONAL_LAYOUTS = (VOLTA_CROSSWISE, VOLTA_B_CONGRUOUS)
-VOLTA_SMEM_LAYOUTS = frozenset((VOLTA_CROSSWISE, VOLTA_B_CONGRUOUS))
 
 #: A SOFTWARE-swizzled mode may override the element shift, spelled ``<mode>@<shift>``. The shift
 #: above is ``log2(atom elems)``, which reads the row index only while a slab row IS one swizzle
@@ -1558,7 +1557,7 @@ def _(node: RegStore, ctx: RenderCtx) -> list[str]:
     if node.epilogue is None:
         # Flash output store: no per-element epilogue temps, so declare _g/_t once per scope
         # (reused by sibling stores) and emit the stores flat — no wrapping { } block, so a
-        # store re-rolled into a loop renders ``for (…) { … }`` not ``for (…) { { … } }``.
+        # store alone in a loop body renders ``for (…) { … }`` not ``for (…) { { … } }``.
         names = {name for name, _ in _store_table(node).coordinates}
         head, base, close = ([] if names <= ctx.scope_decls else [f"{pad}{lane_stmt}"]), pad, ""
         ctx.scope_decls.update(names)

@@ -98,10 +98,6 @@ macro_rules! with_statement_types {
                 /// A load takes its fields as declared: `names` is a tuple, one name for a scalar load. Use `.is_vector` /
                 /// `.is_scalar` / `.width` / `.name` (asserts scalar) / `.names` to test shape.
                 ///
-                /// A scalar Load is rendered as a literal binding (`float name = <value>;`) when `ctx.literal_constants` carries
-                /// a value for `input` — the scalar-constant-inlining path populates that map at the cuda lowering boundary so
-                /// kernels can embed `ConstantOp` values directly instead of taking them as `float*` parameters.
-                ///
                 /// `dtype` is optional and, when set, names the source-buffer element dtype that this Load produces. The
                 /// `030_stamp_types` Kernel-IR pass populates it once before any analytical pass runs; downstream passes
                 /// (vectorize_loads, demote, etc.) read it instead of reaching for the matcher-populated

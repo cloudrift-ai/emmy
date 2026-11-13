@@ -91,8 +91,7 @@ class RenderCtx:
     ``threadIdx.x``, etc.). Dtype-aware lookups go through
     ``ctx.target.intrinsic(...)`` instead.
 
-    ``shapes`` maps every buffer to its declared shape so multi-dim
-    ``Load`` / ``Write`` indices can be flattened row-major.
+    ``shapes`` maps every buffer to its declared shape, for the statements that hold one index per dimension.
     """
 
     target: RenderTarget = field(default_factory=_default_render_target)
@@ -192,11 +191,9 @@ _BINARY_OP: dict[str, str] = {
     "multiply": "*",
     "divide": "/",
     "mod": "%",
-    # Comparisons + legacy bool combines — the whole-model explicit-mask subgraph.
-    # Non-integer operands reach ``op_to_expression`` promoted to f32; C's implicit
-    # nonzero→bool conversion makes these logical spellings valid on them. Typed
-    # integer operands use ``_INTEGER_BINARY_OP`` instead, including packed
-    # bitwise decode operations.
+    # Comparisons and the boolean combines of a traced mask, whose operands are floats or truth values: C's
+    # nonzero→bool conversion makes the logical spellings valid on them. Integer operands use ``_INTEGER_BINARY_OP``
+    # instead, including packed bitwise decode operations.
     "equal": "==",
     "not_equal": "!=",
     "greater": ">",
@@ -256,16 +253,12 @@ def op_to_expression(fn: str, inputs: list[Expression], *, dtype: str | None = N
     if fn in ("copy", "pad"):
         return inputs[0]
     if fn in ("from_f8e4m3", "from_f8e5m2"):
-        # fp8 decode cast: the value semantics live in the dtype conversion the
-        # target already applied to the argument (``Assign``'s render promotes the
-        # f8-typed arg through ``target.convert``, which spells the decode), so
-        # the op itself is an identity here — like ``copy``, but never a raw
-        # byte move because the arg reaches this point converted.
+        # fp8 decode cast: the value is the conversion the typed body spells ahead of it (``target.convert`` spells
+        # the decode), so the op itself is an identity here — like ``copy``, never a raw byte move.
         return inputs[0]
     if fn in ("to_f8e4m3", "to_f8e5m2"):
-        # fp8 encode cast — the decode twin: ``Assign``'s render computes the arg at f32 and its
-        # result-dtype demotion routes through ``target.convert``, which spells the <cuda_fp8.h>
-        # constructor (round-to-nearest-even, saturate-to-finite). Identity here, same as above.
+        # fp8 encode cast — the decode twin: the typed body converts the f32 value to the fp8 dtype, which
+        # ``target.convert`` spells as the <cuda_fp8.h> constructor (round-to-nearest-even, saturate-to-finite).
         return inputs[0]
     if fn == "to_f4e2m1":
         # e2m1 encode — NOT the fp8 encodes' identity. Those convert to an fp8 type whose
@@ -285,7 +278,7 @@ def op_to_expression(fn: str, inputs: list[Expression], *, dtype: str | None = N
         return FunctionCallExpression("fabs", tuple(inputs))
     if fn == "where":
         # np.where(cond, a, b) — the mask-apply tail of the explicit-mask
-        # subgraph. The f32-promoted cond is C-truthy (nonzero) in ``?:``.
+        # subgraph. A float or truth-value cond is C-truthy (nonzero) in ``?:``.
         return TernaryExpression(inputs[0], inputs[1], inputs[2])
     if fn == "bitwise_not":
         # Torch spells ``~mask`` as bitwise_not even when ``mask`` is bool. Loop
@@ -530,17 +523,6 @@ def render_body(body: Body, ctx: RenderCtx) -> list[str]:
     return out
 
 
-def _read_counts(body: Body, counts: dict[str, int]) -> dict[str, int]:
-    """Total reads of each SSA name across ``body`` and every nested body (a name read inside a loop
-    counts, so a temp used only in a nested scope is never folded at this level)."""
-    for s in body:
-        for nm in s.deps():
-            counts[nm] = counts.get(nm, 0) + 1
-        for b in s.nested():
-            _read_counts(b, counts)
-    return counts
-
-
 #: The suffix of a carried cell's next-step slot.
 NEXT_STEP = "__next"
 
@@ -611,10 +593,9 @@ def _(stmt: Load, ctx: RenderCtx) -> list[str]:
     n = stmt.width
     vec_pair = None if stmt.is_scalar else ctx.target.vector_type(src_dt, n)
     if vec_pair is None or not mem.vectorizable:
-        # One local per name, declared in the source buffer's element type so downstream ``Assign``s pick native
-        # ops without an immediate promote: a scalar Load, or a run the target cannot read as one vector (no
-        # vector type for this dtype and width, or a paged buffer, whose run may cross a page). A carried run's
-        # names are then its registers, which it re-assigns.
+        # One local per name, declared at the load's dtype: a scalar Load, or a run the target cannot read as one
+        # vector (no vector type for this dtype and width, or a paged buffer, whose run may cross a page). A carried
+        # run's names are then its registers, which it re-assigns.
         decl = "" if stmt.carried else f"{ctx.type_name(src_dt)} "
         out: list[str] = []
         for k, nm in enumerate(stmt.names):

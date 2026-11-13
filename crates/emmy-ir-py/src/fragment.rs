@@ -21,8 +21,6 @@ pub struct PyFragmentTable {
     registers: Py<PyTuple>,
     /// The lane XOR masks of the shuffles that fold a row over the lanes that share it.
     reduce_xors: Py<PyTuple>,
-    /// Which lanes hold the fragment, where not every lane does; else `None`.
-    supplies: Option<Py<PyAny>>,
 }
 
 fn wrap(py: Python<'_>, table: &FragmentTable) -> PyResult<PyFragmentTable> {
@@ -43,12 +41,6 @@ fn wrap(py: Python<'_>, table: &FragmentTable) -> PyResult<PyFragmentTable> {
         coordinates: PyTuple::new(py, coordinates)?.unbind(),
         registers: PyTuple::new(py, registers)?.unbind(),
         reduce_xors: PyTuple::new(py, &table.reduce_xors)?.unbind(),
-        supplies: table
-            .supplies
-            .as_ref()
-            .map(expression)
-            .transpose()?
-            .map(Bound::unbind),
     })
 }
 

@@ -60,11 +60,6 @@ def cubin_cache_dir() -> Path:
     return config.cubin_cache_dir()
 
 
-def clear_cubin_cache() -> None:
-    """Delete the entire cubin cache (used by ``emmy tune --clean``)."""
-    shutil.rmtree(cubin_cache_dir(), ignore_errors=True)
-
-
 @functools.cache
 def nvcc_path() -> str | None:
     """Resolve the ``nvcc`` binary (PATH, then ``$CUDA_HOME``/``$CUDA_PATH``),

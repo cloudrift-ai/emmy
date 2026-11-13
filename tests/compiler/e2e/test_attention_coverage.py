@@ -390,10 +390,6 @@ def test_flash_transposed_output_matches_torch(monkeypatch):
 # what these cold-compile cases pin.
 
 
-def _compile_tc(q, k, v, module=None):
-    return _trace(module if module is not None else _Sdpa(), (q, k, v))
-
-
 #: One row of the CHUNK tier: the carrier's own mma tile beside the score's, the seam's equation
 #: satisfied (the score's key side IS the carrier's chunk, one warp column wide, same register rows).
 _CHUNK_ROW = {
@@ -866,34 +862,6 @@ def test_two_linears_tinyllama_shape(_chain_tile_pins):
     x = torch.randn(1, 32, 2048)
     dpd, eager = _run_module_with_eager(m, (x,), {"x": x.numpy()})
     _assert_close(dpd, eager)
-
-
-class _QKVAttnNoRope(torch.nn.Module):
-    def __init__(self, hidden: int = 2048, n_heads: int = 32, head_dim: int = 64):
-        super().__init__()
-        self.h, self.d = n_heads, head_dim
-        self.q = torch.nn.Linear(hidden, hidden, bias=False)
-        self.k = torch.nn.Linear(hidden, hidden, bias=False)
-        self.v = torch.nn.Linear(hidden, hidden, bias=False)
-        self.o = torch.nn.Linear(hidden, hidden, bias=False)
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        B, S, _ = x.shape
-        q = self.q(x).view(B, S, self.h, self.d).transpose(1, 2)
-        k = self.k(x).view(B, S, self.h, self.d).transpose(1, 2)
-        v = self.v(x).view(B, S, self.h, self.d).transpose(1, 2)
-        out = F.scaled_dot_product_attention(q, k, v, is_causal=True)
-        out = out.transpose(1, 2).contiguous().view(B, S, -1)
-        return self.o(out)
-
-
-def _band_mask(seq: int, window: int) -> torch.Tensor:
-    """A sliding-window additive float mask — causal AND within ``window`` keys of the query (the
-    HF gemma sliding-attention band): 0 where ``m - window < kv <= m``, ``-inf`` elsewhere."""
-    kv = torch.arange(seq)[None, :]
-    m = torch.arange(seq)[:, None]
-    keep = (kv <= m) & (kv > m - window)
-    return torch.where(keep, 0.0, float("-inf"))[None, None].half()
 
 
 def _run_self_attn_tinyllama(seq_len: int, threshold: float = 1e-4, *, direct: bool = False) -> None:
