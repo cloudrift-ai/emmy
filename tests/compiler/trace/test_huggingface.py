@@ -1217,7 +1217,7 @@ def test_gdn_state_wrapper_continues_resets_and_isolates_requests(length):
             torch.testing.assert_close(actual, expected, rtol=0, atol=0)
 
 
-@pytest.mark.parametrize("length", [1, 16])
+@pytest.mark.parametrize("length", [1, 16, 130])
 def test_gdn_state_wrapper_traces_both_state_outputs(length):
     import numpy as np
     import torch
