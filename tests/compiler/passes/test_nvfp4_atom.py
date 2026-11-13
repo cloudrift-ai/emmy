@@ -34,7 +34,7 @@ def test_the_atom_is_registered_with_packed_operands_and_an_f32_accumulator():
     assert atom.operand_dtype("a") is F4E2M1x2
     assert atom.operand_dtype("b") is F4E2M1x2
     assert atom.operand_dtype("c") is F32
-    assert (atom.fragment_nregs("a"), atom.fragment_nregs("b")) == (4, 2)
+    assert (atom.fragment_registers("a"), atom.fragment_registers("b")) == (4, 2)
     assert atom.target_feature == "has_block_scaled_f4_mma"
 
 

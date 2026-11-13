@@ -18,6 +18,7 @@ from emmy.compiler.dtype import F4_VALUES, F32
 from emmy.compiler.ir.kernel.interface import Param, kernel_interface
 from emmy.compiler.ir.kernel.ir import (
     CpAsyncCopy,
+    FragmentLoad,
     FragmentRepack,
     KernelOp,
     LdmatrixLoad,
@@ -31,6 +32,7 @@ from emmy.compiler.ir.kernel.ir import (
 from emmy.compiler.ir.render import Paged, RenderCtx, render_body
 from emmy.compiler.ir.stmt import Assign, Load, Write, reduce_strength
 from emmy.compiler.tensor import Tensor
+from emmy.emmy_ir import SCALE_SELECTOR_A, SCALE_SELECTOR_B  # the block-scaled product's lane selectors
 
 # Per-CTA static-smem hard cap on every CUDA arch we target. Above this,
 # PTXAS rejects ``__shared__ T arr[N]`` decls (``uses too much shared
@@ -265,7 +267,7 @@ static __device__ __forceinline__ void emmy_cp_async_wait() {
 # ``emmy_mma_m16n8k16_{f16,bf16}_{f32,f16}(c, a, b, c)`` (the atom convention's <ab>_<acc> dtype pair) rather than raw asm; same SASS.
 # The ``a``/``b`` operands are ``unsigned`` 32-bit register arrays (two packed
 # 16-bit elems each); ``c``/``d`` are ``float`` (f32 accumulate). Lane→element
-# layout is the PTX-fixed mma.m16n8k16 fragment map (see the ``LdmatrixLoad`` /
+# layout is the PTX-fixed mma.m16n8k16 fragment map (see the ``FragmentLoad`` /
 # ``RegStore`` address arithmetic in ``ir/kernel/ir.py``).
 _MMA_M8N8K4_PRELUDE = """\
 // Volta m8n8k4: one warp instruction performs four independent 8x8 MMAs.
@@ -1125,9 +1127,11 @@ static __device__ __forceinline__ void emmy_mma_m16n8k32_e5m2_f32(float* d, cons
 # above serve unchanged — a packed row is K/2 bytes, which is exactly what they take as ``ldm``.
 # Those gather bytes per lane rather than issuing ``ldmatrix``, which is b16-only below sm_100a;
 # reusing them means this atom inherits that choice instead of needing a drain of its own.
-_MMA_F4_BLOCK_PRELUDE = """\
-#define EMMY_F4_SF_TID_A 0
-#define EMMY_F4_SF_TID_B 1
+_MMA_F4_BLOCK_PRELUDE = f"""\
+#define EMMY_F4_SF_TID_A {SCALE_SELECTOR_A}
+#define EMMY_F4_SF_TID_B {SCALE_SELECTOR_B}
+"""
+_MMA_F4_BLOCK_PRELUDE += """\
 
 static __device__ __forceinline__ unsigned emmy_mma_load_sfa_f4(const unsigned char* s, int ldm) {
     int lane = threadIdx.x & 31, q = lane >> 2, r = (lane & 3) - 2 * EMMY_F4_SF_TID_A;
@@ -1162,7 +1166,7 @@ static __device__ __forceinline__ void emmy_mma_m16n8k64_e2m1_f32(
 
 """
 
-# Staged fp8 slab drains — appended ONLY when the kernel carries a byte-slab ``LdmatrixLoad``
+# Staged fp8 slab drains — appended ONLY when the kernel carries a byte-slab ``FragmentLoad``
 # (a staged 1-byte operand), so every other kernel's source stays byte-identical. ldmatrix is
 # b16-only below sm_100a, so a staged fp8 slab drains through a cooperative per-lane gather with
 # the same lane→element maps as the gmem fragment loaders — and, where the slab keeps K
@@ -1218,7 +1222,7 @@ static __device__ __forceinline__ void emmy_mma_load_b_smem_trans_b8v(unsigned* 
 """
 
 # The staged PACKED-PAIR (NVFP4) B drain — appended only for the fragment dtypes a kernel's
-# scale-bearing byte-slab ``LdmatrixLoad``s actually use, so every other kernel's source stays
+# scale-bearing byte-slab ``FragmentLoad``s actually use, so every other kernel's source stays
 # byte-identical and an f16 kernel never carries the bf16 form. One stored byte holds two adjacent
 # K values as 4-bit e2m1 codes (low nibble first), and every 16 of them share one scale, which the
 # fill already decoded into the fragment's own dtype in a companion slab. So a lane's fragment
@@ -1274,7 +1278,7 @@ def _f4_lut_bits(dtype: str) -> list[int]:
 
 
 # The staged BLOCK-SCALED fp8 B drain — the one-value-byte form of the packed drain above, appended
-# only for the fragment dtypes a kernel's fp8 scale-bearing byte-slab ``LdmatrixLoad``s use. A
+# only for the fragment dtypes a kernel's fp8 scale-bearing byte-slab ``FragmentLoad``s use. A
 # lane's (k, k+1) byte pair converts to two exact 16-bit values with one hardware cvt, as the plain
 # W8A16 drain does, and both multiply the k block's f32 scale before ONE round to the fragment —
 # the fill's own ``bf16(scale * decode)``, so the staged form is bit-identical to it. The block
@@ -1583,7 +1587,8 @@ def render_kernelop(
     sig_dtypes = [_dtype_for(n) for n in kernel_op.inputs]
     sig_dtypes.extend(_dtype_for(n) for n in kernel_op.outputs)
     sig_dtypes.extend(s.dtype for s in kernel_op.body.iter_of_type(Assign) if s.dtype is not None)
-    sig_dtypes.extend(frag_dtype(ctx, s.frag) for s in kernel_op.body.iter_of_type(LdmatrixLoad) if frag_dtype(ctx, s.frag))
+    fragment_loads = [s for s in kernel_op.body.iter() if isinstance(s, (LdmatrixLoad, FragmentLoad))]
+    sig_dtypes.extend(frag_dtype(ctx, s.frag) for s in fragment_loads if frag_dtype(ctx, s.frag))
     includes = "".join(f"#include {h}\n" for h in cuda_includes(sig_dtypes))
     if any(str(dtype) == "f8e4m3" for dtype in sig_dtypes):
         includes += _F8_DECODE_PRELUDE
@@ -1597,7 +1602,8 @@ def render_kernelop(
     # A register-form ``wgmma`` cell reads the ``m16n8k16`` A fragment, loaded and repacked by the same
     # wrappers, so a kernel whose every cell is warp-group still needs them.
     uses_modern_mma = any(s.shape != (8, 8, 4) for s in mma_stmts) or any(
-        isinstance(s, (LdmatrixLoad, FragmentRepack)) and s.fragment_layout != "m8n8k4" for s in kernel_op.body.iter()
+        isinstance(s, LdmatrixLoad) or (isinstance(s, (FragmentLoad, FragmentRepack)) and s.fragment_layout != "m8n8k4")
+        for s in kernel_op.body.iter()
     )
     mma_sync_prelude = (_MMA_M8N8K4_PRELUDE if uses_m8n8k4 else "") + (_MMA_SYNC_PRELUDE if uses_modern_mma else "")
     # The fp8 wrappers + byte-gather loaders join only when an fp8 mma is present, so every
@@ -1611,7 +1617,8 @@ def render_kernelop(
         if _MMA_F8_PRELUDE not in mma_sync_prelude:
             mma_sync_prelude += _MMA_F8_PRELUDE
         mma_sync_prelude += _MMA_F4_BLOCK_PRELUDE
-    byte_drains = [s for s in kernel_op.body.iter() if isinstance(s, LdmatrixLoad) and s.byte_slab]
+    # A staged gather outside Volta's layout drains a slab of bytes: ``ldmatrix`` takes every 16-bit one.
+    byte_drains = [s for s in kernel_op.body.iter_of_type(FragmentLoad) if s.staged and s.fragment_layout != "m8n8k4"]
     if any(s.scale_buffer is None for s in byte_drains):
         mma_sync_prelude += _F8_STAGED_PRELUDE
     # A packed drain's fragment dtype IS its scale slab's — the fill writes that slab at the atom's

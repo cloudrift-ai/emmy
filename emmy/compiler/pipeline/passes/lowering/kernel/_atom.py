@@ -52,6 +52,7 @@ from emmy.compiler.ir.kernel.ir import (
     VOLTA_CROSSWISE,
     BlockScaleLoad,
     FragmentApply,
+    FragmentLoad,
     FragmentPromote,
     FragmentRepack,
     FragmentRowReduce,
@@ -288,6 +289,40 @@ def _direct_operand(load, inputs, *, k_name: str, own: str | None, legacy: tuple
     )
 
 
+def _staged_load(
+    atom,
+    *,
+    frag: str,
+    src_buffer: str,
+    src_index,
+    role: str,
+    ldm: int,
+    swizzle: str = "NONE",
+    b_trans: bool = False,
+    byte_slab: bool = False,
+    **gather,
+) -> Statement:
+    """The drain of one fragment from a staged slab: one ``ldmatrix`` where the instruction applies (a slab of
+    16-bit elements read by a fragment of the m16n8k16 layout), else the gather element by element (a slab of bytes,
+    which ``ldmatrix`` has no form for, and Volta, which has no ``ldmatrix``). ``gather`` holds what only the gather
+    reads: the companion slab of block scales and the fragment's register cell."""
+    if byte_slab or atom.fragment_layout == "m8n8k4":
+        return FragmentLoad(
+            frag=frag,
+            src_buffer=src_buffer,
+            src_index=src_index,
+            role=role,
+            fragment_layout=atom.fragment_layout,
+            ldm=ldm,
+            b_trans=b_trans,
+            staged=True,
+            slab_layout=swizzle,
+            **gather,
+        )
+    assert gather.get("scale_buffer") is None, "a slab with block scales is a slab of bytes"
+    return LdmatrixLoad(frag=frag, src_buffer=src_buffer, src_index=src_index, role=role, ldm=ldm, swizzle=swizzle, b_trans=b_trans)
+
+
 def _clamp_bound(load, axis_name: str, bound: Expression | None) -> Expression | None:
     """``bound`` on ``axis_name`` tightened to where ``load`` reads in bounds — a split's slice overhangs a symbolic
     stream by up to its width, and its loads clamp onto the stream's last position (``address.clamp_to``); the
@@ -371,7 +406,7 @@ def _warp_epilogue(tail: list[Statement], acc: str, m_name: str, n_name: str, si
 
 # ---- operand staging (smem slab + ldmatrix drain) ---------------------------------------------- #
 # The warp tier's smem operand pipeline, driven off the node's :class:`Stage`. Synchronous copy, cp.async, and TMA
-# share the slab + the staged-``LdmatrixLoad`` drain (:func:`_staged_inner_atom_loop`) AND the
+# share the slab + the staged fragment load drain (:func:`_staged_inner_atom_loop`) AND the
 # slab swizzle modes (:meth:`_MmaOps.slab_swizzles`); only who applies the fill-side permutation
 # differs — TMA swizzles in hardware during the box copy, a cp.async fill XORs its destination
 # index in software — and the drain XOR undoes either. Staging is a **pure perf
@@ -437,7 +472,7 @@ def _staged_inner_atom_loop(
     parts: bool = False,
 ) -> list[Statement]:
     """The inner atom-K drain shared by every staged path: read the A/B ``slabs`` via
-    ``LdmatrixLoad(staged=True)`` + ``MmaSyncPtx``. The leaf uses modern ``ldmatrix`` instructions
+    the staged drain (:func:`_staged_load`) + ``MmaSyncPtx``. The leaf uses modern ``ldmatrix`` instructions
     or the Volta cooperative shared gather according to the atom fragment layout. ``slabs`` is ``(A, B…)`` — one B slab per fold
     channel (one for the ordinary matmul; N for the multi-B gate/up node, whose ONE ldmatrix'd A
     fragment feeds a per-channel mma chain into a per-channel C fragment). Slab-local indices —
@@ -457,7 +492,7 @@ def _staged_inner_atom_loop(
     filled, while a later chunk prefetches into another slot.
 
     ``swizzles`` (per-slab, aligned with ``slabs``): the smem swizzle mode each slab was written
-    with (TMA in-copy, or the cp.async fill's software XOR) — threaded onto each ``LdmatrixLoad``
+    with (TMA in-copy, or the cp.async fill's software XOR) — threaded onto each drain
     so its address XOR undoes the fill's chunk permutation (``"NONE"`` reads the plain row-major
     slab).
 
@@ -465,11 +500,11 @@ def _staged_inner_atom_loop(
     — ``tile_n`` rows × ``bk_elems`` K cols, the serving ``F.linear`` layout staged in its own
     gmem orientation): the B read takes A's row/col convention (tile coord the ROW, K the col,
     ``ldm = bk_elems``) and drains via the plain (no ``.trans``) ldmatrix — the
-    ``LdmatrixLoad(b_trans=True)`` staged path. Always ``False`` for A.
+    ``b_trans=True`` staged path. Always ``False`` for A.
 
     ``byte_slabs`` (per-slab, aligned with ``slabs``): a 1-byte (fp8) slab — ldmatrix is b16-only
     below sm_100a, so its drain is the cooperative per-lane byte gather instead
-    (``LdmatrixLoad(byte_slab=True)`` — the gmem fragment-loader lane map pointed at the slab; a
+    (a staged ``FragmentLoad`` — the gmem fragment-loader lane map pointed at the slab; a
     16-bit fragment converts per element, an fp8 fragment repacks raw bytes). NONE-swizzle by
     construction; ``pads`` (per-slab row pad in elements, the cp.async byte slabs'
     ``BYTE_SLAB_PAD``) rides the drain ``ldm`` so reads stride the padded rows.
@@ -568,12 +603,12 @@ def _staged_inner_atom_loop(
                     row = BinaryExpression("+", off, row)
                 frag = f"{frag_of(x)}{suffix}"
                 reads.append(
-                    LdmatrixLoad(
+                    _staged_load(
+                        atom,
                         frag=frag,
                         src_buffer=slab,
                         src_index=(row, col),
                         role=role,
-                        staged=True,
                         ldm=ldm,
                         swizzle=swz,
                         b_trans=role == "b" and is_row,
@@ -581,7 +616,6 @@ def _staged_inner_atom_loop(
                         scale_buffer=scale_slab,
                         scale_index=scale_index,
                         scale_ldm=scale_ldm,
-                        fragment_layout=atom.fragment_layout,
                         fragment_index=x,
                     )
                 )
@@ -1857,7 +1891,7 @@ def _contract_kloop(c, cells, *, read_row, read_col, contract, wrap):
     operand reuse — an A read is shared across the row's columns and vice versa), contract every
     ``(row, col)`` pair into its accumulator, then wrap the whole body in the reduce loop. The only
     per-atom variation is the four leaf constructors (the "atom factory"): ``read_row`` / ``read_col``
-    build the operand read (``LdmatrixLoad`` fragment vs scalar ``Load``), ``contract`` the ⊗+accumulate
+    build the operand read (a fragment load vs scalar ``Load``), ``contract`` the ⊗+accumulate
     (``MmaSyncPtx`` vs ``Assign``+``Accum``), ``wrap`` the K-loop (``StridedLoop`` step ``atom_k`` vs a
     unit ``Loop``). Returns ``(pre_decls, kloop_stmts)`` — no pre-decls here (accumulators ride
     ``state``).
@@ -2297,40 +2331,27 @@ class _MmaOps(_AtomOps):
         decls: list[Statement] = []
         if not atom.is_wgmma:  # a descriptor-fed atom reads its operands from shared memory, not fragments
             decls += [
-                RegFragment(
-                    name=nm,
-                    role="a",
-                    shape=atom.ptx_shape,
-                    dtype=atom.operand_dtype("a"),
-                    nregs=atom.fragment_nregs("a"),
-                )
+                RegFragment(name=nm, role="a", dtype=atom.operand_dtype("a"), fragment_layout=atom.fragment_layout)
                 for nm in frags(lambda i: self.frag(f"_a{i}"), m.reg)
             ]
             for f in range(n_folds):
                 decls += [
-                    RegFragment(
-                        name=nm,
-                        role="b",
-                        shape=atom.ptx_shape,
-                        dtype=atom.operand_dtype("b"),
-                        nregs=atom.fragment_nregs("b"),
-                    )
+                    RegFragment(name=nm, role="b", dtype=atom.operand_dtype("b"), fragment_layout=atom.fragment_layout)
                     for nm in frags(lambda i, ff=f: _fold_frag(self.frag(f"_b{i}"), ff), n.reg)
                 ]
         if block_scaled_atom(atom):
             # The block-scale fragments — one 32-bit register per operand fragment, reloaded per
             # k-step into the same name (``BlockScaleLoad`` assigns), so they are declared here once.
-            scale = dict(role="a", shape=atom.ptx_shape, dtype=atom.operand_dtype("a"), nregs=0)
-            decls += [RegFragment(name=nm, **scale) for nm in frags(lambda i: f"_sfa{i}", m.reg)]
+            scale = dict(dtype=atom.operand_dtype("a"), fragment_layout=atom.fragment_layout)
+            decls += [RegFragment(name=nm, role="sfa", **scale) for nm in frags(lambda i: f"_sfa{i}", m.reg)]
             for f in range(n_folds):
-                decls += [RegFragment(name=nm, **scale) for nm in frags(lambda i, ff=f: _fold_frag(f"_sfb{i}", ff), n.reg)]
+                decls += [RegFragment(name=nm, role="sfb", **scale) for nm in frags(lambda i, ff=f: _fold_frag(f"_sfb{i}", ff), n.reg)]
         decls += [
             RegFragment(
                 name=_fold_frag(self.frag(_mma_c_base(atom, i, j)), f),
                 role="c",
-                shape=atom.ptx_shape,
                 dtype=atom.operand_dtype("c"),
-                nregs=atom.fragment_nregs("c"),
+                fragment_layout=atom.fragment_layout,
             )
             for f in range(n_folds)
             for i in range(m.reg)
@@ -2340,7 +2361,7 @@ class _MmaOps(_AtomOps):
             # The f32 shadow accumulators — they keep the ``_c{i}_{j}`` names the store reads;
             # the packed f16 mma targets above are the ``_ch{i}_{j}`` family FragmentPromote folds.
             decls += [
-                RegFragment(name=_fold_frag(self.frag(f"_c{i}_{j}"), f), role="c", shape=atom.shape, dtype=F32)
+                RegFragment(name=_fold_frag(self.frag(f"_c{i}_{j}"), f), role="c", dtype=F32, fragment_layout=atom.fragment_layout)
                 for f in range(n_folds)
                 for i in range(m.reg)
                 for j in range(n.reg)
@@ -2389,15 +2410,8 @@ class _MmaOps(_AtomOps):
                     "+", BinaryExpression("*", Var(m.unit), Literal(m.reg * atom.atom_m, "int")), Literal(i * atom.atom_m, "int")
                 )
                 return [], [
-                    LdmatrixLoad(
-                        frag=self.frag(f"_a{i}"),
-                        src_buffer=slab,
-                        src_index=(prim, Var(k_axis.name)),
-                        role="a",
-                        staged=True,
-                        ldm=ldm,
-                        swizzle=swz,
-                        fragment_layout=atom.fragment_layout,
+                    _staged_load(
+                        atom, frag=self.frag(f"_a{i}"), src_buffer=slab, src_index=(prim, Var(k_axis.name)), role="a", ldm=ldm, swizzle=swz
                     )
                 ]
             cell = offset[0].base(i)
@@ -2409,14 +2423,13 @@ class _MmaOps(_AtomOps):
             # A fragment read indexes the K-loop's own coordinate, so a gmem-direct mma leaf never
             # hoists: the split the scalar tier takes is empty here.
             return [], [
-                LdmatrixLoad(
+                FragmentLoad(
                     frag=self.frag(f"_a{i}"),
                     src_buffer=a_load.input,
                     src_index=idx,
                     role="a",
-                    staged=False,
-                    ldm=a_ldm,
-                    gmem_guard=_guard(m, cell),
+                    ldm=a_ldm or None,
+                    clamp=_guard(m, cell),
                     k_zero=a_k_zero,
                     fragment_layout=atom.fragment_layout,
                 )
@@ -2428,30 +2441,28 @@ class _MmaOps(_AtomOps):
                 # this tile's N span, so the absolute base drops out) and the K-loop's own row.
                 slab, ldm, swz = self.slabs[1]
                 return [], [
-                    LdmatrixLoad(
+                    _staged_load(
+                        atom,
                         frag=self.frag(f"_b{j}"),
                         src_buffer=slab,
                         src_index=(Literal(j * atom.atom_n, "int"), Var(k_axis.name)),
                         role="b",
-                        staged=True,
                         ldm=ldm,
                         b_trans=True,
                         swizzle=swz,
-                        fragment_layout=atom.fragment_layout,
                     )
                 ]
             cell = offset[1].base(j)
             idx = tuple(Sigma({n.axis.name: cell, **_sibling_sigma(m)}).apply(e) for e in b_load.index)
             return [], [
-                LdmatrixLoad(
+                FragmentLoad(
                     frag=self.frag(f"_b{j}"),
                     src_buffer=b_load.input,
                     src_index=idx,
                     role="b",
-                    staged=False,
                     b_trans=b_trans,
-                    ldm=b_ldm,
-                    gmem_guard=_guard(n, cell),
+                    ldm=b_ldm or None,
+                    clamp=_guard(n, cell),
                     k_zero=b_k_zero,
                     fragment_layout=atom.fragment_layout,
                 )
@@ -2975,13 +2986,7 @@ class _FlashOps(_MmaOps):
         """One register fragment of ``atom`` (the carrier's cell by default — the score passes its
         own, which differs from the carrier's only in the accumulator)."""
         atom = self.tile.atom if atom is None else atom
-        return RegFragment(
-            name=self.frag(name),
-            role=role,
-            shape=atom.ptx_shape,
-            dtype=atom.operand_dtype(role),
-            nregs=atom.fragment_nregs(role),
-        )
+        return RegFragment(name=self.frag(name), role=role, dtype=atom.operand_dtype(role), fragment_layout=atom.fragment_layout)
 
     # ---- the chunk ---------------------------------------------------------------------------- #
 
@@ -3519,14 +3524,13 @@ class _FlashOps(_MmaOps):
                 sigma = Sigma({m.axis.name: offset[0].base(i), self._score_k.name: Literal(t * atom.atom_k, "int")})
                 out.append(self._frag(f"_qa{i}_{t}", "a", atom))
                 out.append(
-                    LdmatrixLoad(
+                    FragmentLoad(
                         frag=self.frag(f"_qa{i}_{t}"),
                         src_buffer=a_load.input,
                         src_index=tuple(sigma.apply(e) for e in a_load.index),
                         role="a",
-                        staged=False,
-                        ldm=ldm,
-                        gmem_guard=_guard(m, offset[0].base(i)),
+                        ldm=ldm or None,
+                        clamp=_guard(m, offset[0].base(i)),
                         fragment_layout=atom.fragment_layout,
                     )
                 )
@@ -3545,28 +3549,26 @@ class _FlashOps(_MmaOps):
             sigma = Sigma({self.k_axis.name: col, self._score_k.name: k})
             trans, ldm = _direct_operand(b_load, self.inputs, k_name=self._score_k.name, own=self.k_axis.name, legacy=(trans, 0))
             bound = _clamp_bound(b_load, self.k_axis.name, bound)
-            return LdmatrixLoad(
+            return FragmentLoad(
                 frag=self.frag(f"_kb{j}"),
                 src_buffer=b_load.input,
                 src_index=tuple(sigma.apply(e) for e in b_load.index),
                 role="b",
-                staged=False,
-                ldm=ldm,
+                ldm=ldm or None,
                 b_trans=trans,
-                gmem_guard=None if bound is None else (col, bound),
+                clamp=None if bound is None else (col, bound),
                 fragment_layout=atom.fragment_layout,
             )
-        return LdmatrixLoad(
+        return _staged_load(
+            atom,
             frag=self.frag(f"_kb{j}"),
             src_buffer=key.slab,
             src_index=(_slab_row(key, slot, Literal(j * atom.atom_n, "int")), k),
             role="b",
-            staged=True,
             ldm=key.shape[1] + key.pad_cols,
             swizzle=key.swizzle,
             b_trans=True,
             byte_slab=key.elem_bytes == 1,
-            fragment_layout=atom.fragment_layout,
         )
 
     def _expectation(self, offset, mn, base, weights, steps, bound, streams, slot) -> list[Statement]:
@@ -3711,15 +3713,14 @@ class _FlashOps(_MmaOps):
             legacy = (self.c.as_contraction().b_trans, 0)
             trans, ldm = _direct_operand(v_load, self.inputs, k_name=self.k_axis.name, own=n.axis.name, legacy=legacy)
             bound = _clamp_bound(v_load, self.k_axis.name, bound)
-            return LdmatrixLoad(
+            return FragmentLoad(
                 frag=self.frag(f"_b{j}_{t}"),
                 src_buffer=v_load.input,
                 src_index=tuple(Sigma({self.k_axis.name: row, n.axis.name: offset[1].base(j)}).apply(e) for e in v_load.index),
                 role="b",
-                staged=False,
-                ldm=ldm,
+                ldm=ldm or None,
                 b_trans=trans,
-                gmem_guard=_guard(n, offset[1].base(j)),
+                clamp=_guard(n, offset[1].base(j)),
                 k_zero=None if bound is None else (row, bound),
                 fragment_layout=atom.fragment_layout,
             )
@@ -3729,17 +3730,16 @@ class _FlashOps(_MmaOps):
         step: Expression = Literal(t * atom.atom_k, "int")
         trans = value.trans
         slab_row = _slab_row(value, slot, within if trans else step)
-        return LdmatrixLoad(
+        return _staged_load(
+            atom,
             frag=self.frag(f"_b{j}_{t}"),
             src_buffer=value.slab,
             src_index=(slab_row, step) if trans else (slab_row, within),
             role="b",
-            staged=True,
             ldm=value.shape[1] + value.pad_cols,
             swizzle=value.swizzle,
             b_trans=trans,
             byte_slab=value.elem_bytes == 1,
-            fragment_layout=atom.fragment_layout,
         )
 
     def _advance(self, i: int, chunk_pivot: tuple[str, str], layout) -> tuple[list[Statement], tuple[str, str], tuple[str, str]]:

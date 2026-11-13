@@ -13,8 +13,9 @@ What its dimensions define keeps them:
 - a ``Write`` under a Volta slab layout, a function of the logical row and column;
 - the shared-memory side of a ``CpAsyncCopy`` that carries a lane offset, whose swizzle is split over the tile's row
   and column;
-- the fragment statements (``LdmatrixLoad``, ``BlockScaleLoad``, ``FragmentApply``'s gathered operand, ``RegStore``
-  and the loads of its epilogue) and ``TmaLoad``, until they say what they are.
+- the fragment statements (``LdmatrixLoad``, ``FragmentLoad``, ``BlockScaleLoad``, ``FragmentApply``'s gathered
+  operand, ``RegStore`` and the loads of its epilogue) and ``TmaLoad``: each holds a tile's base, one index per
+  dimension, which the lane's own offset in the tile is added to dimension by dimension.
 
 It runs here and not with the kernel passes because which buffers are paged is a fact of the graph, which the cached
 kernel does not know, and after ``007_decode_grid`` so that the simplification sees the launch. It follows the

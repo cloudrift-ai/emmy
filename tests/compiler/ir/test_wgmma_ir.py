@@ -145,8 +145,8 @@ def _driver() -> str:
     forms = [(n, ab, form) for n in _NS for ab in _DTYPES for form in _FORMS]
     stmts = [
         Smem(name="K_s", extents=(64 * 64,), dtype="unsigned short", align=1024),
-        *(RegFragment(name=f"c{j}", role="c", shape=(16, 8, 16), dtype=F32) for j in range(256 // 8)),
-        RegFragment(name="a", role="a", shape=(16, 8, 16), dtype=F16),
+        *(RegFragment(name=f"c{j}", role="c", dtype=F32, fragment_layout="wgmma") for j in range(256 // 8)),
+        RegFragment(name="a", role="a", dtype=F16, fragment_layout="wgmma"),
         WgmmaDescriptor(name="aD", smem="K_s", smem_index=None, swizzle="B128", lbo_bytes=16, sbo_bytes=1024),
         WgmmaDescriptor(name="bD", smem="K_s", smem_index=Literal(64 * 8, "int"), swizzle="B128", lbo_bytes=16, sbo_bytes=1024),
         WgmmaFence(),

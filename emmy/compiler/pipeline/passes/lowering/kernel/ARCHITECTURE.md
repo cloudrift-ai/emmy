@@ -21,9 +21,10 @@ alignment over them and the staging passes tile them. And which buffers are page
 kernel taken from the kernel cache does not know: an access of a paged buffer keeps one index per dimension, since
 its index along the paged axis picks the page (`render.Paged`), and so does whatever else its dimensions define — a
 `Write` under a Volta slab layout, the shared-memory side of a `CpAsyncCopy` that carries a lane offset, the fragment
-statements (`LdmatrixLoad`, `BlockScaleLoad`, a `FragmentApply`'s gathered operand, `RegStore` and the loads of its
-epilogue) and `TmaLoad`. `010_lower_kernelop` then checks the body (`check_input`): typed in full,
-one flat index per access outside those, and no loop asking for unrolling.
+statements (`LdmatrixLoad`, `FragmentLoad`, `BlockScaleLoad`, a `FragmentApply`'s gathered operand, `RegStore` and
+the loads of its epilogue) and `TmaLoad`. `010_lower_kernelop` then checks the body (`check_input`): typed in full,
+one flat index per access outside those, no loop asking for unrolling, and every fragment statement naming a row of
+the lane-to-element table.
 
 The renderer then spells every index division and remainder by a power of two over a non-negative dividend as a shift
 and a mask (`reduce_strength`), on the body it is about to render: the Kernel IR keeps `/` and `%`, which the
@@ -64,7 +65,7 @@ expressions share results. The schedule proves row ownership before lowering; th
 geometry with existing `FragmentApply`, `MmaSyncPtx`, `FragmentPromote`, and `RegStore` nodes. `FragmentRepack`
 supplies C→A and C→B conversion, with every warp lane participating. Loads clamp padded coordinates, stores guard
 them, and partial operands are zero-masked before MMA. Loads and packs stay beside their consuming MMA to limit
-register lifetimes. Materialized B operands reuse `LdmatrixLoad` and its address analysis when they have unit
+register lifetimes. Materialized B operands reuse `FragmentLoad` and its address analysis when they have unit
 stride; computed or strided operands use C-fragment gather and repack. FP16 promotion is shared with classic
 schedules, and Volta repacking shuffles packed FP16 pairs to reduce the shuffle count.
 
@@ -244,7 +245,8 @@ fill→drain skeleton — and the atom contributes only leaves, never a loop. Th
 sink so a paired Volta operand layout and its accumulator map remain one coupled lowering choice. Per-atom diff:
 
 - **mma** (`_MmaOps`) — atom `(16, 8, 16)`, `lanes == 32`. The UNIT is a **warp**; its leaves emit `RegFragment` /
-  `LdmatrixLoad` / `MmaSyncPtx` / `RegStore` and decode the atom-lane offset at render. `RegStore` derives both
+  a fragment load (`LdmatrixLoad` for a staged 16-bit slab, else `FragmentLoad`) / `MmaSyncPtx` / `RegStore` and
+  decode the atom-lane offset at render. `RegStore` derives both
   algebraic M/N strides from the full physical output address, including composite coordinate coefficients:
   contiguous N keeps packed stores, while a reversed physical orientation
   uses scalar strided stores. On Volta, each adjacent accumulator pair stays packed under an M-only tail guard; an N
@@ -543,7 +545,7 @@ the block.
 **Staged fp8 (1-byte) operand slabs.** A storage-dtype (fp8) operand stages as a RAW BYTE slab — each `Operand`
 sized at its OWN element width (the mixed-dtype seam the scalar tier already had), the cp.async fill running 16 B
 16-element chunks. ldmatrix is b16-only below sm_100a, so the drain is a **cooperative byte gather** instead
-(`LdmatrixLoad(byte_slab=True)`): the gmem fragment loaders' lane→element map pointed at the slab — under a 16-bit
+(a staged `FragmentLoad`): the gmem fragment loaders' lane→element map pointed at the slab — under a 16-bit
 atom (W8A16, the fp8-B mul-hoist form) converting per element, with the transposed-B slab's contiguous (k, k+1)
 pair loading as ONE fp8x2 and converting with one hardware `cvt.rn.f16x2.e4m3x2` (`emmy_mma_load_b_smem_trans_f8_f16`);
 under the fp8 k32 atoms (W8A8) repacking raw bytes, contiguous-K lanes as single u32 loads (`_smem_b8v`). Staged is
@@ -580,7 +582,7 @@ The scale slab is `tile_n × bk_elems/block` and single-buffer: its fill is comp
 threads, so ringing it buys no overlap. Evaluating the scale cone at ONE k per block instead of at every k is
 exactly the block-invariance the matcher proved.
 
-The drain is one loader reading both slabs (`LdmatrixLoad.scale_buffer`, rendered as
+The drain is one loader reading both slabs (`FragmentLoad.scale_buffer`, rendered as
 `emmy_mma_load_b_smem_trans_f4s_<dtype>`): per fragment element pair it reads one byte, looks both 4-bit codes up in
 a constant value table, and multiplies each by the block's scale. The mma B fragment's own lane map is what makes
 the byte read whole: a lane's two adjacent K positions ARE a stored pair. `render._f4_staged_prelude` emits one

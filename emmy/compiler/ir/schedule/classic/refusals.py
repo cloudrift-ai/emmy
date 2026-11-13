@@ -988,30 +988,17 @@ def _seam_layout(atom) -> str:
     return "m16n8k16" if atom.is_wgmma else atom.fragment_layout
 
 
-def _fragment_registers(atom, role: str) -> int:
-    explicit = atom.fragment_nregs(role)
-    if explicit is not None:
-        return explicit
-    m, n, k = atom.ptx_shape
-    dtype = atom.operand_dtype(role)
-    if role == "a":
-        return m * k * dtype.nbytes // 128
-    if role == "b":
-        return n * k * dtype.nbytes // 128
-    return m * n // (64 if dtype.nbytes == 2 else 32)
-
-
 def _paired_registers(node: Fold, producer: Fold, placed: PlacedTile, stage: ResolvedStage, partial_columns: int) -> int:
     """The live fragment registers one thread of a paired contraction needs, with ``partial_columns``
     register columns of reduced partials live at once."""
     atom = placed.atom
-    a_regs = _fragment_registers(atom, "a")
-    b_regs = _fragment_registers(atom, "b")
+    a_regs = atom.fragment_registers("a")
+    b_regs = atom.fragment_registers("b")
     cells = placed.reg_m * placed.reg_n
-    cell_regs = cells * _fragment_registers(atom, "c")
+    cell_regs = cells * atom.fragment_registers("c")
     if atom.operand_dtype("c").nbytes == 2:
         # A reduced accumulator promotes into an f32 shadow per cell, beside its live partials.
-        cell_regs = cells * (atom.atom_m * atom.atom_n // 32) + placed.reg_m * partial_columns * _fragment_registers(atom, "c")
+        cell_regs = cells * (atom.atom_m * atom.atom_n // 32) + placed.reg_m * partial_columns * atom.fragment_registers("c")
     depth = max(1, stage.reg_depth)
     # C fragment SETS the consumer holds. A fused multi-channel edge keeps one per streamed
     # operand; a TWISTED carrier keeps one — its bilinear channel — beside per-row registers for
@@ -1022,7 +1009,7 @@ def _paired_registers(node: Fold, producer: Fold, placed: PlacedTile, stage: Res
     producer_n = stage.bk_elems // atom.atom_n
     # The producer accumulates at ITS own cell: a chunked consumer on the reduced-accumulate cell
     # still scores in f32 (``wide_accumulate``), so its score tile is no wider for it.
-    producer_c = _fragment_registers(wide_accumulate(atom), "c")
+    producer_c = wide_accumulate(atom).fragment_registers("c")
     producer_regs = placed.reg_m * a_regs + (len(producer.operands) - 1) * (producer_n * b_regs + placed.reg_m * producer_n * producer_c)
     return max(consumer, consumer_c + producer_regs)
 

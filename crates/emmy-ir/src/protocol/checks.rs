@@ -122,6 +122,79 @@ impl RegStore {
     }
 }
 
+impl RegFragment {
+    /// A fragment names a row of the lane-to-element table: its register count is that row's.
+    pub fn validate(&self) -> Result<()> {
+        self.registers().map(|_| ())
+    }
+}
+
+/// An operand fragment is one of the two multiplicands.
+fn operand_role(statement: &str, role: &str) -> Result<()> {
+    match role {
+        "a" | "b" => Ok(()),
+        _ => Err(Error::Value(format!(
+            "{statement}: the role is a or b, got {role}"
+        ))),
+    }
+}
+
+/// A row stride is a count of elements.
+fn stride(statement: &str, ldm: i64) -> Result<()> {
+    if ldm <= 0 {
+        return Err(Error::Value(format!(
+            "{statement}: ldm is the source's row stride in elements, got {ldm}"
+        )));
+    }
+    Ok(())
+}
+
+impl LdmatrixLoad {
+    pub fn validate(&self) -> Result<()> {
+        operand_role("LdmatrixLoad", &self.role)?;
+        stride("LdmatrixLoad", self.ldm)?;
+        if &*self.role == "a" && (self.b_trans || self.pair_frag.is_some()) {
+            return Err(Error::Value(
+                "LdmatrixLoad: an A fragment is one x4 load (no b_trans, no pair_frag)".into(),
+            ));
+        }
+        Ok(())
+    }
+}
+
+impl FragmentLoad {
+    pub fn validate(&self) -> Result<()> {
+        operand_role("FragmentLoad", &self.role)?;
+        if let Some(ldm) = self.ldm {
+            stride("FragmentLoad", ldm)?;
+        }
+        if self.staged && (self.clamp.is_some() || self.k_zero.is_some()) {
+            return Err(Error::Value(
+                "FragmentLoad: a staged slab is filled in range (no clamp, no k_zero)".into(),
+            ));
+        }
+        let slab_only =
+            &*self.slab_layout != "NONE" || self.pair_frag.is_some() || self.scale_buffer.is_some();
+        if !self.staged && slab_only {
+            return Err(Error::Value(
+                "FragmentLoad: slab_layout, pair_frag and scale_buffer describe a staged slab"
+                    .into(),
+            ));
+        }
+        if self.scale_buffer.is_some() {
+            stride("FragmentLoad.scale", self.scale_ldm)?;
+        }
+        Ok(())
+    }
+}
+
+impl BlockScaleLoad {
+    pub fn validate(&self) -> Result<()> {
+        operand_role("BlockScaleLoad", &self.role)?;
+        stride("BlockScaleLoad", self.ldm)
+    }
+}
+
 fn carried_type(stmts: &[Arc<Statement>], ty: StatementType) -> Result<()> {
     match stmts.iter().find(|s| s.ty() != ty) {
         Some(other) => Err(Error::Type(format!(

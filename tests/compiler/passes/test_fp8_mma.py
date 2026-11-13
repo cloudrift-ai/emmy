@@ -140,13 +140,16 @@ def test_k32_tile_codec_round_trips():
 def test_k32_fragment_register_counts():
     """The k32 8-bit fragment ABI packs 4 bytes/reg/lane: A is 4x32-bit regs, B is 2 (the PTX
     m16n8k32 8-bit fragment table); C keeps the k16 f32 map (4 regs)."""
-    from emmy.compiler.ir.kernel.ir import _mma_sync_nregs
+    from emmy.compiler.ir.kernel.ir import RegFragment, fragment_registers
 
-    assert _mma_sync_nregs("a", (16, 8, 32), F8E4M3) == 4
-    assert _mma_sync_nregs("b", (16, 8, 32), F8E4M3) == 2
-    assert _mma_sync_nregs("c", (16, 8, 32), F32) == 4
+    def registers(role, dtype):
+        return fragment_registers(RegFragment(name="f", role=role, dtype=dtype))
+
+    assert registers("a", F8E4M3) == 4
+    assert registers("b", F8E4M3) == 2
+    assert registers("c", F32) == 4
     # the 16-bit family is untouched
-    assert _mma_sync_nregs("a", (16, 8, 16), F16) == 4 and _mma_sync_nregs("b", (16, 8, 16), F16) == 2
+    assert registers("a", F16) == 4 and registers("b", F16) == 2
 
 
 # ===================================================================

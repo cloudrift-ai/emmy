@@ -123,7 +123,7 @@ def test_volta_atom_separates_logical_and_instruction_shapes() -> None:
     atom = ATOM_REGISTRY[VOLTA]
     assert atom.shape == (16, 16, 4)
     assert atom.ptx_shape == (8, 8, 4)
-    assert tuple(atom.fragment_nregs(role) for role in ("a", "b", "c")) == (2, 2, 8)
+    assert tuple(atom.fragment_registers(role) for role in ("a", "b", "c")) == (2, 2, 8)
     assert atom.fragment_layout == "m8n8k4"
     assert atom.sync_copy_staging and atom.c_to_a_repack and atom.c_to_b_repack
 
@@ -203,22 +203,25 @@ def test_sm70_source_uses_only_the_volta_mma_family(monkeypatch, trans) -> None:
     ids=["aligned", "offset", "stride", "k-tail"],
 )
 def test_volta_direct_vectors_require_aligned_complete_runs(role, trans, dtype, stride, offset, masked_k, aligned):
+    from emmy.compiler.dtype import F16
+    from emmy.compiler.dtype import get as dtype_get
     from emmy.compiler.ir.expression import Literal, Var
-    from emmy.compiler.ir.kernel.ir import LdmatrixLoad
+    from emmy.compiler.ir.kernel.ir import FragmentLoad
     from emmy.compiler.ir.render import RenderCtx
 
-    ctx = RenderCtx(shapes={"x": (Dim(17), Dim(stride))}, buffer_dtypes={"x": dtype}, ssa_dtypes={"r": "f16"})
-    load = LdmatrixLoad(
+    ctx = RenderCtx(shapes={"x": (Dim(17), Dim(stride))})
+    load = FragmentLoad(
         frag="r",
         src_buffer="x",
         src_index=(Var("row"), Literal(offset, "int")),
         role=role,
-        staged=False,
         b_trans=trans,
         ldm=stride,
         fragment_layout="m8n8k4",
-        gmem_guard=(Literal(0, "int"), Literal(17, "int")),
+        clamp=(Literal(0, "int"), Literal(17, "int")),
         k_zero=(Literal(0, "int"), Literal(3, "int")) if masked_k else None,
+        src_dtype=dtype_get(dtype),
+        dtype=F16,
     )
     source = "\n".join(render_stmt(load, ctx))
     assert ("load_gmem4<" in source) == (aligned and (role == "a" or trans))

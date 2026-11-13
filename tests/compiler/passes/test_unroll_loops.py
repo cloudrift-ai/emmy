@@ -52,11 +52,11 @@ def test_the_copies_of_two_loops_keep_their_names_apart() -> None:
 def test_storage_declared_around_the_loop_keeps_its_name() -> None:
     """A fragment declared ahead of the loop is one accumulator: every copy updates it, under its own name."""
     body = (
-        "RegFragment(name=c, role=c, shape=(16, 8, 16), dtype=f32)\n"
-        "RegFragment(name=a, role=a, shape=(16, 8, 16), dtype=f16)\n"
+        "RegFragment(name=c, role=c, dtype=f32)\n"
+        "RegFragment(name=a, role=a, dtype=f16)\n"
         "for k in 0..32 step 16 unroll=true:\n"
-        "    RegFragment(name=b, role=b, shape=(16, 8, 16), dtype=f16)\n"
-        "    LdmatrixLoad(frag=b, src_buffer=B, src_index=(k, i), role=b)\n"
+        "    RegFragment(name=b, role=b, dtype=f16)\n"
+        "    LdmatrixLoad(frag=b, src_buffer=B, src_index=(k, i), role=b, ldm=8)\n"
         "    MmaSyncPtx(c_frag=c, a_frag=a, b_frag=b, shape=(16, 8, 16))"
     )
     mmas = [stmt for stmt in _unrolled(body).body.iter() if isinstance(stmt, MmaSyncPtx)]
@@ -107,11 +107,11 @@ def test_a_long_loop_keeps_rolling_over_copies_of_its_body() -> None:
     """A 128-trip K loop runs 32 copies of its body per trip, the ``n``-th at the axis ``n`` steps on; the fragment
     it accumulates into and the one it reloads keep their names."""
     body = (
-        "RegFragment(name=c, role=c, shape=(16, 8, 16), dtype=f32)\n"
-        "RegFragment(name=a, role=a, shape=(16, 8, 16), dtype=f16)\n"
-        "RegFragment(name=b, role=b, shape=(16, 8, 16), dtype=f16)\n"
+        "RegFragment(name=c, role=c, dtype=f32)\n"
+        "RegFragment(name=a, role=a, dtype=f16)\n"
+        "RegFragment(name=b, role=b, dtype=f16)\n"
         "for k in 0..2048 step 16 unroll=true:\n"
-        "    LdmatrixLoad(frag=b, src_buffer=B, src_index=(k, i), role=b)\n"
+        "    LdmatrixLoad(frag=b, src_buffer=B, src_index=(k, i), role=b, ldm=8)\n"
         "    MmaSyncPtx(c_frag=c, a_frag=a, b_frag=b, shape=(16, 8, 16))"
     )
     [loop] = _loops(_unrolled(body))

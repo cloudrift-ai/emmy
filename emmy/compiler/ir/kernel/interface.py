@@ -15,6 +15,7 @@ from emmy.compiler.ir.kernel.ir import (
     Grid,
     KernelOp,
     MmaSyncPtx,
+    SetMaxNReg,
     Tile,
     TmaDescriptor,
     WgmmaDescriptor,
@@ -104,9 +105,10 @@ def shared_pool(kernel: KernelOp) -> tuple[dict[str, int], int]:
 
 def needs_arch_isa(kernel: KernelOp) -> bool:
     """Whether the kernel holds an instruction ptxas assembles only for the arch-suffixed target: TMA, the
-    block-scaled fp4 ``mma``, or ``wgmma``."""
+    block-scaled fp4 ``mma``, ``wgmma``, or ``setmaxnreg`` (refused on ``sm_90``, ``sm_100`` and ``sm_120``, CUDA
+    13.0). The lowering writes ``SetMaxNReg`` only beside a TMA ring, so it decides no kernel today."""
     return any(
-        isinstance(s, (TmaDescriptor, WgmmaMma, WgmmaDescriptor)) or (isinstance(s, MmaSyncPtx) and s.sfa_frag is not None)
+        isinstance(s, (TmaDescriptor, WgmmaMma, WgmmaDescriptor, SetMaxNReg)) or (isinstance(s, MmaSyncPtx) and s.sfa_frag is not None)
         for s in kernel.body.iter()
     )
 

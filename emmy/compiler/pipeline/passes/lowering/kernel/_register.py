@@ -14,9 +14,9 @@ from emmy.compiler.ir.kernel.ir import (
     GMEM,
     UNIFORM,
     FragmentApply,
+    FragmentLoad,
     FragmentPromote,
     FragmentRepack,
-    LdmatrixLoad,
     MmaSyncPtx,
     RegFragment,
     RegStore,
@@ -75,11 +75,9 @@ class _Fragments:
         out = self.name()
         self.body.extend(
             (
-                RegFragment(
-                    name=out, role=role, shape=self.atom.shape, dtype=self.atom.operand_dtype(role), nregs=self.atom.fragment_nregs(role)
-                ),
+                RegFragment(name=out, role=role, dtype=self.atom.operand_dtype(role), fragment_layout=self.layout),
                 srcs.replace(frag=out)
-                if isinstance(srcs, LdmatrixLoad)
+                if isinstance(srcs, FragmentLoad)
                 else FragmentRepack(frag=out, srcs=srcs, role=role, fragment_layout=self.atom.fragment_layout, part=part),
             )
         )
@@ -98,15 +96,14 @@ class _Fragments:
         if not ldm:
             return None
         sub = {axis: Literal(k, "int"), col: cb}
-        return LdmatrixLoad(
+        return FragmentLoad(
             frag="",
             src_buffer=slab.load.input,
             src_index=tuple(e.substitute(sub) for e in slab.load.index),
             role="b",
-            staged=False,
             b_trans=trans,
             ldm=ldm,
-            gmem_guard=(cb, Literal(self.extents[col], "int")) if self.extents[col] % self.width else None,
+            clamp=(cb, Literal(self.extents[col], "int")) if self.extents[col] % self.width else None,
             k_zero=(Literal(k, "int"), Literal(self.extents[axis], "int")) if self.extents[axis] % self.atom.atom_k else None,
             fragment_layout=self.atom.fragment_layout,
         )
@@ -223,11 +220,11 @@ class _Fragments:
         key = ("mma", tuple(pairs), self.atom)
         if key not in self.memo:
             out = self.name()
-            self.body.append(RegFragment(name=out, role="c", shape=self.atom.shape, dtype=F32))
+            self.body.append(RegFragment(name=out, role="c", dtype=F32, fragment_layout=self.layout))
             half = self.atom.operand_dtype("c").nbytes == 2
             partial = self.name() if half else out
             if half:
-                self.body.append(RegFragment(name=partial, role="c", shape=self.atom.shape, dtype=self.atom.operand_dtype("c")))
+                self.body.append(RegFragment(name=partial, role="c", dtype=self.atom.operand_dtype("c"), fragment_layout=self.layout))
             # Keep conversions and operand loads beside their consumer. Reuse the FP32
             # matrix values, rather than retaining every packed K slice across products.
             for step, ((a, b, ap, bp), prepare) in enumerate(zip(pairs, preparations, strict=True), 1):
@@ -295,7 +292,7 @@ def factorize_register(tile):
         emit.body.append(
             FragmentApply(out=state, op=ElementwiseImpl("copy"), args=fragment_args((value,), (FRAG,)), layout=emit.layout, in_place=True)
         )
-    declarations = tuple(RegFragment(name=name, role="c", shape=emit.atom.shape, dtype=F32) for name in emit.states)
+    declarations = tuple(RegFragment(name=name, role="c", dtype=F32, fragment_layout=emit.layout) for name in emit.states)
     loop = StridedLoop(axis=tile.axis_of(program.time), start=Literal(0, "int"), step=Literal(1, "int"), body=Body(emit.body), unroll=False)
     axes = (*program.batch, Axis("_rb", (program.rows + warps * height - 1) // (warps * height)), Axis("_rw", warps), Axis("_rl", 32))
     return Tile(axes=axes, body=Body((*declarations, loop)), block_threads=warps * 32)

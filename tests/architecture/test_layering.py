@@ -518,7 +518,7 @@ def test_a_kernel_ir_kind_is_declared_not_programmed() -> None:
         for name, member in vars(cls).items()
         if isinstance(member, (types.FunctionType, property, functools.cached_property, staticmethod, classmethod))
     ]
-    assert len(statement_types) == 31 and all(
+    assert len(statement_types) == 32 and all(
         cls.__module__ == "emmy.compiler.ir.kernel.ir" and "_fields" in vars(cls) for cls in statement_types
     )
     assert not offenders, "state these as field roles, or move them to functions over the statement:\n" + "\n".join(sorted(offenders))

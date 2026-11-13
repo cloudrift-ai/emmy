@@ -8,6 +8,7 @@ pub mod dtype;
 pub mod elementwise;
 pub mod expr;
 pub mod field;
+pub mod fragment;
 pub mod identity;
 pub mod input;
 pub mod memo;

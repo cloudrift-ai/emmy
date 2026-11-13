@@ -139,18 +139,27 @@ impl Scope<'_> {
             // another one while printing. No step of the plan names them; the cooperative milestone of the PTX
             // compiler (PR B, milestone 2) has to type them first.
             Statement::TreeHalve(_) | Statement::WarpShuffle(_) | Statement::WarpBroadcast(_) => {}
-            // Register fragments and what computes on them (plan step A10, "fragment statements say what they
-            // are"): a fragment's element type, a pointwise operand's conversion to the fragment algebra's f32, and
-            // a store's epilogue program, typed while printing because its operands are register elements.
-            Statement::RegFragment(_)
-            | Statement::FragmentApply(_)
+            // A fragment gathered element by element says both element types, as a `Load` says its own.
+            Statement::FragmentLoad(load) => {
+                let (source, fragment) = (declared(load.src_dtype)?, declared(load.dtype)?);
+                if let Some(element) = self.buffers.get(&load.src_buffer)
+                    && *element != source
+                {
+                    return Err(format!(
+                        "reads {source} elements from the {element} buffer {}",
+                        load.src_buffer
+                    ));
+                }
+                if fragment.is_integer() {
+                    return Err(format!("a fragment of {fragment} elements"));
+                }
+            }
+            // What computes on a fragment's registers: a pointwise operand's conversion to the fragment algebra's
+            // f32 and a store's epilogue program are typed while printing, because their operands are register
+            // elements no name stands for. The fragment expansion of the PTX compiler (PR B, milestone 4) types
+            // them from the fragments' declarations. The other statements move whole registers and convert nothing.
+            Statement::FragmentApply(_)
             | Statement::FragmentRowReduce(_)
-            | Statement::FragmentPromote(_)
-            | Statement::FragmentRepack(_)
-            | Statement::BlockScaleLoad(_)
-            | Statement::LdmatrixLoad(_)
-            | Statement::MmaSyncPtx(_)
-            | Statement::WgmmaMma(_)
             | Statement::RegStore(_) => {}
             // Everything else defines no scalar value: structure, declarations, copies of bytes, barriers.
             _ => {}

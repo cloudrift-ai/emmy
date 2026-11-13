@@ -6,11 +6,12 @@ import numpy as np
 import pytest
 
 from emmy.compiler.context import Context
+from emmy.compiler.dtype import F16, F32
 from emmy.compiler.graph import Graph
 from emmy.compiler.ir.base import InputOp
 from emmy.compiler.ir.cuda import CudaOp
 from emmy.compiler.ir.expression import apply
-from emmy.compiler.ir.kernel.ir import FragmentPromote, FragmentRepack, LdmatrixLoad, MmaSyncPtx, RegFragment
+from emmy.compiler.ir.kernel.ir import FragmentLoad, FragmentPromote, FragmentRepack, MmaSyncPtx, RegFragment
 from emmy.compiler.ir.render import render_stmt
 from emmy.compiler.ir.schedule import Stage
 from emmy.compiler.ir.schedule.base import ScheduleRefused
@@ -203,9 +204,9 @@ def test_register_operands_use_direct_loads_when_the_address_allows_it(target, s
     (tile,) = (n.op for n in _lift(graph).nodes.values() if isinstance(n.op, TileOp))
     schedule = next(iter(_context(tile, target).extensions()))
     statements = tuple(factorize_register(materialize_register(tile, schedule, {})).body.iter())
-    reads = [s for s in statements if isinstance(s, LdmatrixLoad)]
+    reads = [s for s in statements if isinstance(s, FragmentLoad)]
     assert bool(reads) == (stride == 1)
-    assert all(s.src_buffer == "W" and s.b_trans and not s.staged and s.gmem_guard for s in reads)
+    assert all(s.src_buffer == "W" and s.b_trans and not s.staged and s.clamp for s in reads)
     assert any(isinstance(s, FragmentRepack) and s.role == "b" for s in statements) == (stride != 1)
     assert any(isinstance(s, FragmentRepack) and s.role == "a" for s in statements)
 
@@ -312,9 +313,10 @@ def test_gmem_fragment_loads_keep_their_constant_offset_in_the_pointer():
     from emmy.compiler.ir.expression import BinaryExpression, Literal, Var
     from emmy.compiler.ir.render import RenderCtx
 
-    ctx = RenderCtx(shapes={"k": (Dim(4), Dim(64), Dim(128))}, buffer_dtypes={"k": "f32"}, ssa_dtypes={"r": "f16"})
+    ctx = RenderCtx(shapes={"k": (Dim(4), Dim(64), Dim(128))})
     row = BinaryExpression("+", BinaryExpression("*", Var("a0"), Literal(64, "int")), Literal(16, "int"))
-    load = LdmatrixLoad(frag="r", src_buffer="k", src_index=(Var("a1"), row, Literal(8, "int")), role="b", staged=False, ldm=128)
+    index = (Var("a1"), row, Literal(8, "int"))
+    load = FragmentLoad(frag="r", src_buffer="k", src_index=index, role="b", ldm=128, src_dtype=F32, dtype=F16)
     (line,) = render_stmt(load, ctx)
     assert line.strip() == "emmy_mma_load_b_gmem<float, __half>(r, &k[a1 * 8192 + a0 * 64 * 128] + 2056, 128);"
 

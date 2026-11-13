@@ -19,7 +19,7 @@ from emmy.compiler.context import Context
 from emmy.compiler.dim import Dim
 from emmy.compiler.graph import Tensor
 from emmy.compiler.ir.axis import Axis
-from emmy.compiler.ir.kernel.ir import LdmatrixLoad
+from emmy.compiler.ir.kernel.ir import FragmentLoad
 from emmy.compiler.ir.schedule import Placement, Tile, Work
 from emmy.compiler.ir.schedule.classic import ClassicProblem
 from emmy.compiler.ir.stmt import Body, Load, parse_body
@@ -41,7 +41,7 @@ def _free(expressions) -> set[str]:
     return set().union(*(set(e.free_vars()) for e in expressions))
 
 
-def _fragment_loads(a: Load, b: Load, atom: str, inputs=None) -> dict[str, LdmatrixLoad]:
+def _fragment_loads(a: Load, b: Load, atom: str, inputs=None) -> dict[str, FragmentLoad]:
     """The gmem-direct operand fragment loads the mma atom emits for ``a ⊗ b`` on a 1×1 warp tile — sealed
     through ``grid_tile`` the way ``_factor._bind``'s output-tiled arm seals it. ``inputs`` gives the
     operand tensors their shapes, which is what lets the leaf read a stride rather than a dim position."""
@@ -59,7 +59,7 @@ def _fragment_loads(a: Load, b: Load, atom: str, inputs=None) -> dict[str, Ldmat
         reduce_region=region,
         store=store_sink(c, plan, epilogue, k_axis=_K, axes=axes),
     )
-    return {s.role: s for s in Body(tile.body).iter() if isinstance(s, LdmatrixLoad)}
+    return {s.role: s for s in Body(tile.body).iter() if isinstance(s, FragmentLoad)}
 
 
 @pytest.mark.parametrize("cc", [(7, 0), (12, 0)])

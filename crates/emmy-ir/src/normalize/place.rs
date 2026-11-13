@@ -603,11 +603,11 @@ mod tests {
     fn a_name_updated_in_place_keys_the_value_it_read() {
         let given = body(
             "
-            RegFragment(name=c1, role=c, shape=(16, 8, 16), dtype=f32)
-            RegFragment(name=c2, role=c, shape=(16, 8, 16), dtype=f32)
-            LdmatrixLoad(frag=a, src_buffer=A, src_index=(0, 0), role=a)
-            LdmatrixLoad(frag=b, src_buffer=B, src_index=(0, 0), role=b)
-            LdmatrixLoad(frag=b2, src_buffer=B2, src_index=(0, 0), role=b)
+            RegFragment(name=c1, role=c, dtype=f32)
+            RegFragment(name=c2, role=c, dtype=f32)
+            LdmatrixLoad(frag=a, src_buffer=A, src_index=(0, 0), role=a, ldm=16)
+            LdmatrixLoad(frag=b, src_buffer=B, src_index=(0, 0), role=b, ldm=8)
+            LdmatrixLoad(frag=b2, src_buffer=B2, src_index=(0, 0), role=b, ldm=8)
             MmaSyncPtx(c_frag=c2, a_frag=a, b_frag=b2, shape=(16, 8, 16))
             MmaSyncPtx(c_frag=c1, a_frag=a, b_frag=b, shape=(16, 8, 16))
             MmaSyncPtx(c_frag=c2, a_frag=a, b_frag=b, shape=(16, 8, 16))
