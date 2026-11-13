@@ -310,7 +310,17 @@ CHUNK = 64
 
 
 def _chunk_rule_scan_then_read(
-    scope, query, key, value, g, beta, chunk_size=CHUNK, initial_state=None, output_final_state=False, use_qk_l2norm_in_kernel=False, **kwargs
+    scope,
+    query,
+    key,
+    value,
+    g,
+    beta,
+    chunk_size=CHUNK,
+    initial_state=None,
+    output_final_state=False,
+    use_qk_l2norm_in_kernel=False,
+    **kwargs,
 ):
     """Transformers' ``torch_chunk_gated_delta_rule`` (``scope`` is its module) with the outputs read after the scan.
 
@@ -323,7 +333,9 @@ def _chunk_rule_scan_then_read(
     dtype = query.dtype
     batch, length, _, k_dim = key.shape
     v_heads, v_dim = value.shape[-2:]
-    query, key, value, beta, g = (x.transpose(1, 2).to(torch.float32, memory_format=torch.contiguous_format) for x in (query, key, value, beta, g))
+    query, key, value, beta, g = (
+        x.transpose(1, 2).to(torch.float32, memory_format=torch.contiguous_format) for x in (query, key, value, beta, g)
+    )
     if use_qk_l2norm_in_kernel:
         query, key = scope["l2norm"](query, dim=-1, eps=1e-6), scope["l2norm"](key, dim=-1, eps=1e-6)
     query = query * query.shape[-1] ** -0.5
