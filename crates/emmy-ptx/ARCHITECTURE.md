@@ -404,8 +404,9 @@ value matters or reads a subnormal from one.
     away is not stored at all: a store of 8 rows of an m16n8 tile drops each lane's second row (cicc does the same),
     and the shift and mask of the table's lane coordinates are read as the floor division and remainder they are,
     which the range analysis bounds. Two elements next to each other under one guard, proven aligned, are one store.
-    Each cell of a run is stored as its own statement says. Volta's paired tile has its own accumulator row
-    (`fragment::paired_accumulator_table`).
+    Every address is computed ahead of its guard, so the stores of a statement share the parts they have in common
+    (the guard opens a scope, whose values are forgotten when it closes). Each cell of a run is stored as its own
+    statement says. Volta's paired tile has its own accumulator row (`fragment::paired_accumulator_table`).
   - `FragmentApply`: per element, the operation over the arguments at the element's row and column: a fragment's
     register, the scalar of the element's row, a uniform scalar, a condition over the coordinates, or a load at them.
   - `FragmentRowReduce`: each of a lane's two rows folded over its elements of every fragment, then over the lanes

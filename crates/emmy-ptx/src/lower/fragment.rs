@@ -798,6 +798,11 @@ impl Lowerer {
                             && constant_difference(next, index) == Some(1)
                     });
             let group = if pair { 2 } else { 1 };
+            // The addresses are computed ahead of the guard, where every store of the statement shares their parts.
+            let mut addresses = Vec::with_capacity(group);
+            for (index, _, _) in &elements[at..at + group] {
+                addresses.push(self.address(name, std::slice::from_ref(index), ctx)?);
+            }
             let open = match guard {
                 Some(guard) => {
                     let pred = self.pred(guard, ctx)?;
@@ -811,16 +816,13 @@ impl Lowerer {
                     self.stored_value(node, &frags, element, &lanes.registers[element][0], ctx)?;
                 values.push(self.stored_element(val, elem)?);
             }
-            let address = self.address(name, std::slice::from_ref(index), ctx)?;
             let store = Opcode::St(buffer.space);
-            if pair && self.aligned(&address, 2 * elem.bytes()) {
-                let operands = vec![address, Operand::Tuple(values)];
+            if pair && self.aligned(&addresses[0], 2 * elem.bytes()) {
+                let operands = vec![addresses[0].clone(), Operand::Tuple(values)];
                 self.b
                     .emit(Inst::new(store, elem.mem, Vec::new(), operands));
             } else {
-                for (element, value) in values.into_iter().enumerate() {
-                    let index = &elements[at + element].0;
-                    let address = self.address(name, std::slice::from_ref(index), ctx)?;
+                for (address, value) in addresses.into_iter().zip(values) {
                     if node.atomic {
                         let held = self.b.reg(Bank::F32);
                         let add = Opcode::AtomAdd(buffer.space);
