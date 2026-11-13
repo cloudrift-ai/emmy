@@ -63,6 +63,8 @@ pub struct Builder {
     counters: Vec<Option<Reg>>,
     /// The 64-bit copy of a loop's counter that an address reads, made when the first one does.
     wide: HashMap<Reg, Reg>,
+    /// Whether a value a loop does not change is computed ahead of it: off while a shared address is built.
+    fixed: bool,
     /// The registers an instruction may define again: an accumulator, a seeded state.
     states: HashSet<Reg>,
     multiples: HashMap<Reg, i64>,
@@ -174,6 +176,12 @@ impl Builder {
         reg
     }
 
+    /// Turn off (`false`) or back on the computing of values a loop does not change ahead of it; returns whether
+    /// it was on.
+    pub fn set_hoisting(&mut self, on: bool) -> bool {
+        !std::mem::replace(&mut self.fixed, !on)
+    }
+
     /// The depth of the outermost scope a pure integer value can be computed in, where that is outside the loops
     /// it stands in: the loops around it that define none of its operands. `None` where no loop can be left. A
     /// condition is never left, since not every thread runs its side, and a float value is never moved: the body's
@@ -185,6 +193,7 @@ impl Builder {
             Ty::B32 | Ty::B64 | Ty::S32 | Ty::U32 | Ty::S64 | Ty::U64
         );
         if !integer
+            || self.fixed
             || inst.guard.is_some()
             || !matches!(inst.results[..], [reg] if matches!(reg.bank, Bank::B32 | Bank::B64))
         {
