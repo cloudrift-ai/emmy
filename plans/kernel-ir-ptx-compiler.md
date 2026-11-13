@@ -14,19 +14,21 @@ same reason (below).
 
 ## Status (2026-11-12)
 
-PR A is draft #1393. Steps 1 to 7 are done, each checked on the corpus's rendered CUDA. Steps 3 to 7 changed the
-text or the flags and ran the corpus at `correct` on the RTX 5090. No step ran the perf lane or the whole suite yet;
-both wait for the closing step.
+PR A is draft #1395. Steps 1 to 9 are done, each checked on the corpus's rendered CUDA. Steps 3 to 9 changed the
+text or the flags and ran the corpus at `correct` on the RTX 5090. No step ran the perf lane, the whole suite or an
+sm_70 kernel on a V100 yet; they wait for the closing step.
 
 | Step | Commit | Corpus CUDA |
 | --- | --- | --- |
-| 1 | `7c5c6932c` | identical |
-| 2 | `ff201cee1` | identical |
-| 3 | `8e44947fb` | 58 of 296 kernels: conversions as definitions, literals at their dtype, one integer negation |
-| 4 | `42c46cc44` | 72 kernels: the `lane` and `warp` declarations, dropped in 42 and moved into the grid in 30 |
-| 5 | `0936d9d9d` | 3 kernels: a `sigmoid` as four assignments |
-| 6 | `9f1bd549f` | 12 of the 42 fast-math kernels: the reciprocal (7), division (7), a `sigmoid`'s exponential (3) and the logarithm (2) as approximate operations; machine code identical in all 12 |
-| 7 | this commit | identical; the fast-math lane's flags are `--ftz=true` where they were `--use_fast_math`, and the machine code of all 42 fast-math kernels is identical to step 5's |
+| 1 | `60144bb83` | identical |
+| 2 | `84e21ffa7` | identical |
+| 3 | `5d8b1518a` | 58 of 296 kernels: conversions as definitions, literals at their dtype, one integer negation |
+| 4 | `b8eaa7f01` | 72 kernels: the `lane` and `warp` declarations, dropped in 42 and moved into the grid in 30 |
+| 5 | `c46c902cc` | 3 kernels: a `sigmoid` as four assignments |
+| 6 | `f10f4fbdd` | 12 of the 42 fast-math kernels: the reciprocal (7), division (7), a `sigmoid`'s exponential (3) and the logarithm (2) as approximate operations; machine code identical in all 12 |
+| 7 | `4aa5a4d73` | identical; the fast-math lane's flags are `--ftz=true` where they were `--use_fast_math`, and the machine code of all 42 fast-math kernels is identical to step 5's |
+| 8 | `f3c19f0a9` | 118 kernels, the ones with a flagged loop: each such loop is copies of its body (one keeps rolling, 32 copies per trip), no statement loop carries a `#pragma`; 74 of the 118 build to the same instruction count, 104 to within 3% |
+| 9 | `66729a66c` | 218 kernels: 9,320 lines whose index is respelled, 462 whose vector-store temporary is renamed after it; the same elements at 65,400 sampled launch points (3.4 million accesses) |
 
 What step 6 found, checked with `nvcc -ptx` and `nvdisasm` (CUDA 13.0, `sm_75` to `sm_120`):
 
@@ -68,6 +70,49 @@ What step 7 found:
   `FAST_DIV` and `FAST_SQRT` change the kernel body, not a flag.
 - nvcc's defaults are precise division, precise square root and the accurate library, so the flag list says nothing
   for them. The standard lane's flag list stays empty, and its keys with it.
+
+What step 8 found:
+
+- **The flag was not what nvcc did.** cicc unrolled a 64-trip scalar reduce in full (the instruction count of those
+  kernels is unchanged), but gave the 128-trip tensor-core K loop of `matmul/f16-warp-splitk` 32 copies per trip.
+  Written out in full that kernel has four times the machine code (7,663 to 30,641 instructions) and takes nvcc
+  57 s where it took 5.5 s. The pass copies what cicc did: one copy per trip up to 64 trips, and past that a loop
+  that runs up to 32 copies per trip (7,299 instructions, 9.2 s). The site that flags K loops at any length is the
+  only one past 64 trips. A partial factor as a knob stays left out, below.
+- **Body optimization does not drop a decided guard.** It simplifies the condition and leaves `if (1)`; two corpus
+  kernels held 33 of them before this step. The unroll drops the guards its own trip value decides.
+- **A trip count can depend on the thread.** A lane loop over a row its lanes do not divide runs one trip more on the
+  low lanes (8 corpus cases; a 3,840-wide norm at 512 lanes, whose test says the loop must unroll, is another). Such a
+  trip keeps the loop's bound as the guard of its copy. No corpus loop is flagged with no static bound on its trips;
+  one would stay a loop and lose the flag. The goldens were not surveyed.
+- **A loop seeds the folds that stand in its body.** Copies unrolled into an outer loop bring folds it never seeded,
+  and it would have declared them a second time: such a loop seeds its own folds as a statement ahead of itself.
+- **The printer still decides on what it can prove.** A Volta gmem-direct fragment load takes the four-wide loader
+  when its address is provably aligned; a literal K offset is, where the loop variable was not, so
+  `matmul/volta-f16acc-direct` and three tests change loader. Nothing here ran it on a V100.
+- **cicc unrolls on its own, and differently now.** Of the 14 kernels past 3%, four grow by 41% to 181%: each holds an
+  unflagged chunk loop around the written-out inner loop, which cicc unrolled twice before and eight times now
+  (`matmul/f16-matvec-reshaped-output-tma`: 64 `HMMA` to 256). Six shrink by 6% to 37% (decided guards, folded
+  indices). All 118 are correct on the 5090; the perf lane has to say what moved.
+- **`LOOPIFY` is in every stored row.** Its pass stamped `LOOPIFY: 0` on each kernel, so about 21,000 rows of the
+  goldens and freezes carry it, and a row key no knob declares is a number to the priors' featurizer. The pass, the
+  fragment-family and fused-tail fields and readable mode are gone; the knob stays a registered name nothing reads
+  until those rows are rewritten. Eleven corpus cases lost the key or the pin.
+- Pipeline time of the ten largest corpus cases (GPU-free lowering, best of three): 1.79 s to 2.33 s in total, the
+  worst 0.16 s to 0.33 s. nvcc on the 118 changed sources: 38.1 s to 42.9 s in total.
+
+What step 9 found:
+
+- **The flattening is one function, and the pass is not a kernel pass.** Which buffers are paged is a fact of the
+  graph that a kernel from the kernel cache does not know, so the pass is `lowering/cuda/008_flat_indices`, after the
+  grid decode, and an access of a paged buffer keeps its dimensions: the page split is untouched.
+- Body optimization does not inline a `Let`, so a staged copy's base stays a name and only its K stride, now a
+  constant, folds into the loads.
+- The Loop IR runner prints through the same statement renderers, so it flattens its body the same way before it
+  renders.
+- Machine code of the 218 changed kernels: 122 build to the same instruction count, 184 to within 3%, and the total
+  falls from 91,469 instructions to 90,329. Two grow past 10% (`matmul/f16-volta-warp-mma-sm70` built for sm_75,
+  +27%; `matmul/f16-mma-splitk-unit-output`, +13%). Pipeline time of the ten largest cases: 2.33 s to 2.68 s.
 
 ## End state
 
@@ -225,20 +270,25 @@ no restamp is expected. A row whose time moves is measured again in the closing 
    `--prec-div` and `--prec-sqrt` go; `--fmad` and `--ftz` stay until PR B hands them to the compiler. The machine
    code of a kernel with a recorded row does not change, so no timing should move; the perf-lane run of the closing
    step checks that. What does move is the fast-math lane's context key (Status).
-8. **Unrolling in Kernel IR** (property 3). A last kernel pass copies the body of every loop flagged `unroll` with a
-   static trip count, binding the axis to its value in each copy; body optimization then folds each copy's index and
-   drops guards the value decides. `047_reuse_lane_loads` already unrolls this way; its unroll becomes the shared one.
-   Only the atom lowering sets the flag, so no Loop IR statement changes. The `#pragma` leaves statement loops, and
-   with it what exists only to re-roll code into pragma loops: `100_loopify`, `RegFragment.count`, `EMMY_READABLE`
-   and `--no-readable` (open decision 2). Cost, measured: body optimization takes 0.17 s on 4,608 statements and
-   0.46 s on 9,216, and runs again at each later construction; the `UNROLL` budget is the cap. Unflagged loops stay
+8. **Unrolling in Kernel IR** (property 3). A kernel pass, `117_unroll_loops`, copies the body of every loop flagged
+   `unroll` whose trips a static number bounds, binding the axis to its value in each copy and dropping the guards
+   that value decides; body optimization then folds each copy's index. It runs before `120`: a copy reads its axis as
+   a literal, and a literal is typed by the operation that reads it. Up to 64 trips a loop is written out in full,
+   past that it keeps rolling over 32 copies per trip, as cicc did (Status). `047_reuse_lane_loads` unrolls through
+   the same function. The atom lowering and the lane loops of `_factor` set the flag, so no Loop IR statement
+   changes. The `#pragma` leaves statement loops; `FragmentApply` keeps the one inside its rendered text until step
+   10. What existed only to re-roll code into pragma loops is gone: `100_loopify`, `RegFragment.count`,
+   `FragmentApply.post`, `EMMY_READABLE` and `--no-readable`; the `LOOPIFY` name stays registered until the stored
+   rows that carry it are rewritten (Status). The `UNROLL` budget caps which loops a site flags. Unflagged loops stay
    rolled. *Check: perf lane, pipeline time per kernel, nvcc time per kernel.*
-9. **Flat indices** (property 2). The last kernel pass turns each `Load`, `Write` and `CpAsyncCopy` index into one
-   flat index, carrying the 64-bit widening the renderer applies today for buffers past the 32-bit range. Body
-   optimization then spells it affine under the ranges in scope. Statements that are defined by their dimensions keep
-   them: `RegStore`, the Volta shared layouts, `TmaLoad` coordinates. A paged buffer is a graph fact the cached kernel
-   does not know, so its page and offset split stays in `lowering/cuda`. *Check: text shows simplified indices; perf
-   lane.*
+9. **Flat indices** (property 2). `lowering/cuda/008_flat_indices`, after the grid decode, turns each `Load`, `Write`
+   and `CpAsyncCopy` index into one flat index (`address.flat_index`), carrying the 64-bit widening for buffers past
+   the 32-bit range. Body optimization then spells it affine under the ranges in scope, the launch's included. The
+   accesses their dimensions define keep them: one of a paged buffer (a graph fact the cached kernel does not know,
+   so the pass stands in `lowering/cuda` and the page and offset split stays as it was), a `Write` under a Volta slab
+   layout, the shared-memory side of a `CpAsyncCopy` with a lane offset, the fragment statements (`LdmatrixLoad`,
+   `BlockScaleLoad`, a `FragmentApply`'s gathered operand, `RegStore` and the loads of its epilogue) and `TmaLoad`.
+   The crate's `check_input` holds properties 1 to 3. *Check: text shows simplified indices; perf lane.*
 10. **Fragment statements say what they are** (property 4). No expansion moves; the statements get the shape the
     compiler needs. `LdmatrixLoad` splits into the instruction on staged shared memory and a fragment load from global
     memory, whose role, transpose, clamp and zero-fill are plain fields. `FragLayout`, the lane-to-element table, moves
@@ -378,8 +428,8 @@ Volta on the V100, fp4 on a 5090, `wgmma` on the H100.
    in PR A, would let nvcc measure the expansion before the compiler exists. It needs a statement for an in-place
    register update, which plain statements cannot express today, and body optimization would hoist the expanded loads
    in the fastest kernels with no knob. The lane maps are NVIDIA-only facts in any case.
-2. **Delete `LOOPIFY` and readable mode** (step A8). They only re-roll code into `#pragma unroll` loops. Dropping a
-   feature is the owner's call; the plan assumes yes.
+2. **Delete `LOOPIFY` and readable mode** (step A8). Done, except the knob's name: stored rows carry `LOOPIFY: 0`
+   (Status). Rewriting them (every golden, the freezes, a tune DB version) removes it.
 3. **ptxas as a binary** (recommended first) **or the PTX compiler library linked in.** The toolkit ships a static
    library; linking it would drop the subprocess and the toolkit from serving images. Its redistribution terms need a
    look first.
@@ -389,7 +439,8 @@ Volta on the V100, fp4 on a 5090, `wgmma` on the H100.
 
 - **Work sharing across lanes, re-tiling, sibling loop fusion.** Schedule questions; the fastest entries show the size
   of the prize (row 38: half of nvcc's time), so it deserves its own plan.
-- **A partial unroll factor and early loads as knobs.** The earlier plan's milestone 3. They build on step A8. Row 41
+- **A partial unroll factor and early loads as knobs.** The earlier plan's milestone 3. They build on step A8, whose
+  pass holds the factor as two constants copied from cicc (64 trips in full, 32 copies per trip past that). Row 41
   issues the next trip's loads a trip ahead and reports 24 attention kernels at 0.36x to 0.97x of their time, and every
   unroll threshold in the entries was tuned on one card, so both belong to the search.
 - **A host interpreter of the instruction list.** It would give CI, which has no GPU, a check of kernel code, and row
