@@ -42,8 +42,8 @@ def test_compile_code_saves_default_cuda_to_output(run_cli, tmp_path):
     assert rc == 0, f"stderr: {stderr}"
     assert out.exists()
     text = out.read_text()
-    # Default IR is cuda — expect a __global__ kernel rendered to source.
-    assert "__global__" in text
+    # The default IR is each kernel's PTX.
+    assert ".visible .entry" in text
     assert "k_rms_norm" in text
 
 
@@ -143,7 +143,7 @@ def test_compile_code_and_input_mutually_exclusive(run_cli, tmp_path):
 
 def test_compile_dynamic_emits_runtime_arg(run_cli):
     """``--dynamic seq_len@x:1`` traces with torch.export's dynamic_shapes
-    so the rendered CUDA kernel signature gains an ``int seq_len`` arg."""
+    so the kernel's PTX gains a 32-bit ``seq_len`` parameter."""
     rc, stdout, stderr = run_cli(
         "compile",
         "--code",
@@ -151,10 +151,10 @@ def test_compile_dynamic_emits_runtime_arg(run_cli):
         "--dynamic",
         "seq_len@x:1",
         "--ir",
-        "cuda",
+        "ptx",
     )
     assert rc == 0, f"stderr: {stderr}"
-    assert "int seq_len" in stdout, f"expected ``int seq_len`` in kernel signature, got:\n{stdout[:500]}"
+    assert ".param .u32" in stdout, f"expected the ``seq_len`` parameter in the kernel's PTX, got:\n{stdout[:500]}"
 
 
 def test_compile_dynamic_bad_spec_rejected(run_cli):
@@ -167,7 +167,7 @@ def test_compile_dynamic_bad_spec_rejected(run_cli):
         "--dynamic",
         "seq_len",
         "--ir",
-        "cuda",
+        "ptx",
     )
     assert rc != 0
     assert "NAME@INPUT:AXIS" in stdout + stderr
@@ -176,14 +176,14 @@ def test_compile_dynamic_bad_spec_rejected(run_cli):
 def test_compile_golden_substring_resolves_dynamic(run_cli, monkeypatch):
     """``compile --realization`` accepts the same name **substring** ``eval --kernel``
     filters on, and a dynamic golden carries its recorded symbolic spec through — so
-    the rendered kernel gains an ``int seq_len`` arg (the masked-tile path), proving
+    the kernel gains a 32-bit ``seq_len`` parameter (the masked-tile path), proving
     the golden was resolved via compile, not just run."""
     # Hide CUDA from the subprocess: --golden scopes to the live card's recordings,
     # so the name only resolves everywhere via the off-GPU multi-card union.
     monkeypatch.setenv("CUDA_VISIBLE_DEVICES", "")
-    rc, stdout, stderr = run_cli("compile", "--realization", "matmul.o_proj.h4096.dynM", "--ir", "cuda")
+    rc, stdout, stderr = run_cli("compile", "--realization", "matmul.o_proj.h4096.dynM", "--ir", "ptx")
     assert rc == 0, f"stderr: {stderr}"
-    assert "int seq_len" in stdout, f"expected masked-tile ``int seq_len`` from the dynamic golden, got:\n{stdout[:500]}"
+    assert ".param .u32" in stdout, f"expected the masked tile's ``seq_len`` parameter from the dynamic golden, got:\n{stdout[:500]}"
 
 
 def test_compile_code_fp32_stat_free_cone_demotes(run_cli):
@@ -193,6 +193,6 @@ def test_compile_code_fp32_stat_free_cone_demotes(run_cli):
     compile, not IndexError on the empty enumeration (the branch regression: this snippet
     compiled at the fork point via pre-nodification demotion)."""
     snippet = "(torch.nn.functional.silu(torch.randn(64, 256)) * torch.randn(64, 256)) @ torch.randn(256, 128)"
-    rc, stdout, stderr = run_cli("compile", "--code", snippet, "--ir", "cuda")
+    rc, stdout, stderr = run_cli("compile", "--code", snippet, "--ir", "ptx")
     assert rc == 0, f"stderr: {stderr}"
-    assert "__global__" in stdout, f"expected a rendered kernel, got:\n{stdout[:500]}"
+    assert ".visible .entry" in stdout, f"expected a kernel's PTX, got:\n{stdout[:500]}"

@@ -1,4 +1,4 @@
-"""Generic integer elementwise typing and CUDA statement rendering."""
+"""Generic integer elementwise typing and its host C++ rendering."""
 
 from __future__ import annotations
 
@@ -9,7 +9,7 @@ import pytest
 from emmy.compiler.dtype import U32
 from emmy.compiler.graph import Node, Tensor
 from emmy.compiler.ir.kernel import KernelOp
-from emmy.compiler.ir.render import RenderCtx
+from emmy.compiler.ir.loop.render import RenderCtx
 from emmy.compiler.ir.stmt import Statement, parse_body
 from tests.compiler.helpers import render_typed
 
@@ -81,7 +81,10 @@ def test_a_float_literal_over_integer_operands_renders_a_float_operation():
     ``multiply(half, code)``), so a float literal over integer operands keeps the operation a float one; an integer
     literal still contributes no dtype."""
     ctx = RenderCtx(ssa_dtypes={"a": "i32"})
-    assert render_typed([_stmt("v = multiply(0.5, a)")], ctx) == ["    float a__f32 = a;", "    float v = 0.5f * a__f32;"]
+    assert render_typed([_stmt("v = multiply(0.5, a)")], ctx) == [
+        "    float a__f32 = static_cast<float>(a);",
+        "    float v = 0.5f * a__f32;",
+    ]
     assert ctx.ssa_dtypes["v"] == "f32"
     ctx = RenderCtx(ssa_dtypes={"a": "i32"})
     assert render_typed([_stmt("v = maximum(0.0, a)")], ctx)[-1].startswith("    float v = ")
@@ -106,7 +109,10 @@ def test_a_whole_number_float_literal_keeps_its_float_spelling_in_the_normal_for
     collapsed = normalize_body(parse_body("u8 code = load C[0]\nv = multiply(code, 1.0)\nw = multiply(v, v)\nO[0] = w"))
     assert "v0 = 1.0 * in0\n" in str(collapsed) and "v1 = v0 * v0" in str(collapsed)
     ctx = RenderCtx(ssa_dtypes={"in0": "u8"})
-    assert render_typed([_stmt("v0 = in0 - 8.0")], ctx) == ["    float in0__f32 = in0;", "    float v0 = in0__f32 - 8.0f;"]
+    assert render_typed([_stmt("v0 = in0 - 8.0")], ctx) == [
+        "    float in0__f32 = static_cast<float>(in0);",
+        "    float v0 = in0__f32 - 8.0f;",
+    ]
     assert ctx.ssa_dtypes["v0"] == "f32"
 
 
@@ -140,4 +146,4 @@ def test_stamp_types_keeps_a_declared_float_dtype_on_integer_algebra():
     ctx = RenderCtx()
     ctx.ssa_dtypes.update(a="u32", b="u32")
     lines = render_typed([_stmt("f32 result = left_shift(a, b)")], ctx)
-    assert lines == ["    unsigned int result__u32 = a << b;", "    float result = result__u32;"]
+    assert lines == ["    unsigned int result__u32 = a << b;", "    float result = static_cast<float>(result__u32);"]

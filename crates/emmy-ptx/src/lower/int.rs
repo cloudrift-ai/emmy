@@ -5,7 +5,9 @@
 use emmy_ir::Result;
 use emmy_ir::elementwise::{ElementwiseOp, Operation};
 use emmy_ir::expr::{Builtin, Expr, Expression, Interval, Num, SimplifyCtx, apply_binop};
+use emmy_ir::fragment::volta_slab_index;
 
+use super::memory::Buffer;
 use super::{Lowerer, VTy, Val};
 use crate::inst::{Bank, Base, Cmp, Inst, Opcode, Operand, Space, Special, Ty};
 
@@ -39,7 +41,7 @@ fn narrowest(range: Interval) -> VTy {
 /// The type C computes two integers at, for operands with no range: 64 bits when either is, else unsigned when
 /// either is.
 fn wider(a: VTy, b: VTy) -> VTy {
-    [VTy::I64, VTy::U32]
+    [VTy::U64, VTy::I64, VTy::U32]
         .into_iter()
         .find(|ty| a == *ty || b == *ty)
         .unwrap_or(VTy::I32)
@@ -47,7 +49,7 @@ fn wider(a: VTy, b: VTy) -> VTy {
 
 /// The type of the bitwise instructions over a value of `ty`.
 fn bits(ty: VTy) -> Ty {
-    if ty == VTy::I64 { Ty::B64 } else { Ty::B32 }
+    if ty.is_wide() { Ty::B64 } else { Ty::B32 }
 }
 
 pub(super) fn gcd(mut a: i64, mut b: i64) -> i64 {
@@ -182,9 +184,12 @@ impl Lowerer {
     }
 
     /// `val` as an operand of an instruction at `to`: a 32-bit value is widened by its own sign, a 64-bit one keeps
-    /// its low half, and a constant is the constant.
+    /// its low half, a 16-bit one keeps its low 16 bits extended by its own sign, and a constant is the constant.
     pub(super) fn as_int(&mut self, val: &Val, to: VTy) -> Operand {
-        let wide = |ty| ty == VTy::I64;
+        let wide = |ty: VTy| ty.is_wide();
+        if matches!(to, VTy::I16 | VTy::U16) && val.ty != to {
+            return self.narrowed_to_16(val, to);
+        }
         match &val.op {
             Operand::Int(value) => Operand::Int(match to {
                 VTy::I32 => i64::from(*value as i32),
@@ -194,8 +199,8 @@ impl Lowerer {
             operand if wide(val.ty) == wide(to) => operand.clone(),
             operand => {
                 let (at, from) = match (val.ty, to) {
-                    (VTy::U32, _) => (Ty::U64, Ty::U32),
-                    (VTy::I64, _) => (Ty::U32, Ty::U64),
+                    (VTy::U32 | VTy::U16, _) => (Ty::U64, Ty::U32),
+                    (VTy::I64 | VTy::U64, _) => (Ty::U32, Ty::U64),
                     _ => (Ty::S64, Ty::S32),
                 };
                 let multiple = if wide(to) { self.multiple(operand) } else { 1 };
@@ -203,6 +208,43 @@ impl Lowerer {
                     .op
             }
         }
+    }
+
+    /// The low 16 bits of `val`, extended to 32 by their sign for an `i16` and by zeros for a `u16`.
+    fn narrowed_to_16(&mut self, val: &Val, to: VTy) -> Operand {
+        if let Some(value) = val.op.int() {
+            return Operand::Int(if to == VTy::I16 {
+                i64::from(value as i16)
+            } else {
+                i64::from(value as u16)
+            });
+        }
+        let low = self.as_int(val, VTy::U32);
+        let low = self.int_value(
+            Opcode::And,
+            Ty::B32,
+            VTy::U32,
+            vec![low, Operand::Int(0xffff)],
+            1,
+        );
+        if to == VTy::U16 {
+            return low.op;
+        }
+        let high = self.int_value(
+            Opcode::Shl,
+            Ty::B32,
+            VTy::U32,
+            vec![low.op, Operand::Int(16)],
+            1,
+        );
+        self.int_value(
+            Opcode::Shr,
+            Ty::S32,
+            VTy::I32,
+            vec![high.op, Operand::Int(16)],
+            1,
+        )
+        .op
     }
 
     /// The first of the three integer types that holds both operands as they are: what a division, a shift right,
@@ -218,10 +260,15 @@ impl Lowerer {
             Some(value) => holds(ty, Interval::new(i128::from(value), i128::from(value))),
             None => val.ty == ty || range.is_some_and(|range| holds(ty, range)),
         };
+        let wide = if a.ty == VTy::U64 || b.ty == VTy::U64 {
+            VTy::U64
+        } else {
+            VTy::I64
+        };
         [VTy::I32, VTy::U32]
             .into_iter()
             .find(|ty| fits(a, a_range, *ty) && fits(b, b_range, *ty))
-            .unwrap_or(VTy::I64)
+            .unwrap_or(wide)
     }
 
     fn builtin(&mut self, builtin: Builtin) -> Val {
@@ -298,6 +345,18 @@ impl Lowerer {
                 let code = self.e2m1_code(args, ctx)?;
                 Ok(Val::reg(code, VTy::U32))
             }
+            // Where a Volta slab layout puts the element at a logical row and column, the slab's rows or its row
+            // stride the extent: the index a store of the copy precomputes once.
+            Expr::Apply(ElementwiseOp::Other(name), args) if args.len() == 3 => {
+                let layout = match &**name {
+                    "emmy_volta_crosswise" => "V70A",
+                    "emmy_volta_b_congruous" => "V70B",
+                    _ => return Err(self.no_rule(format_args!("the expression {expression}"))),
+                };
+                let index = volta_slab_index(layout, &args[0], &args[1], &args[2])
+                    .expect("a Volta layout has an index");
+                self.int(&index, ctx)
+            }
             _ => Err(self.no_rule(format_args!("the expression {expression}"))),
         }
     }
@@ -339,7 +398,7 @@ impl Lowerer {
                 }
                 let ty = expression.range(ctx).map_or(a.ty, narrowest);
                 let (operand, multiple) = (self.as_int(&a, ty), self.multiple(&a.op));
-                let at = if ty == VTy::I64 { Ty::S64 } else { Ty::S32 };
+                let at = if ty.is_wide() { Ty::S64 } else { Ty::S32 };
                 Ok(self.int_value(Opcode::Neg, at, ty, vec![operand], multiple))
             }
             (O::Abs | O::Absolute, [x]) => {
@@ -421,13 +480,13 @@ impl Lowerer {
     fn product_of(&mut self, a: &Val, b: &Val, ty: VTy, multiple: i64) -> Val {
         for (value, constant) in [(a, b), (b, a)] {
             if let Some(shift) = constant.op.int().and_then(power_of_two)
-                && (ty != VTy::I64 || value.ty == VTy::I64)
+                && (!ty.is_wide() || value.ty.is_wide())
             {
                 let operands = vec![self.as_int(value, ty), Operand::Int(shift)];
                 return self.int_value(Opcode::Shl, bits(ty), ty, operands, multiple);
             }
         }
-        if ty == VTy::I64 && a.ty != VTy::I64 && b.ty != VTy::I64 {
+        if ty.is_wide() && !a.ty.is_wide() && !b.ty.is_wide() {
             let constant = |val: &Val, ty| {
                 val.op
                     .int()
@@ -723,7 +782,10 @@ impl Lowerer {
         ctx: &SimplifyCtx,
     ) -> Result<Operand> {
         let buffer = self.buffer(name)?;
-        let (bytes, wide) = (buffer.elem.bytes(), buffer.space != Space::Shared);
+        if self.pages.contains_key(&name) {
+            let (page, within) = self.page_of(name, buffer, index, ctx)?;
+            return self.address_in(page, &within, ctx);
+        }
         let folded;
         let flat = match index {
             [] => return Ok(Operand::Addr(Base::Reg(buffer.base), buffer.offset)),
@@ -734,6 +796,17 @@ impl Lowerer {
                 &folded
             }
         };
+        self.address_in(buffer, flat, ctx)
+    }
+
+    /// The address of element `flat` of `buffer`.
+    pub(super) fn address_in(
+        &mut self,
+        buffer: Buffer,
+        flat: &Expression,
+        ctx: &SimplifyCtx,
+    ) -> Result<Operand> {
+        let (bytes, wide) = (buffer.elem.bytes(), buffer.space != Space::Shared);
         let (mut terms, mut constant) = (Vec::new(), 0);
         if linear(flat, 1, &mut terms, &mut constant).is_none() {
             (terms, constant) = (vec![(1, flat.clone())], 0);

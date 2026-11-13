@@ -657,11 +657,6 @@ def test_the_spelled_checkpoint_lowers_to_the_packed_drain(tmp_path):
     with pinned_knobs(PACKED_PINS):
         lowered, kernels = compile_with_kernels(g, ctx=Context.from_target((8, 9)))
     assert _packed_drains(kernels) and not _packed_drains(kernels, "bf16")
-    # CUDA spelling: moves to the PTX compiler's tests
-    src = next(s for node in lowered.nodes.values() if (s := getattr(node.op, "kernel_source", None)))
-    assert "EMMY_F4_LUT_F16" in src
-    assert "EMMY_F4_LUT_BF16" not in src, "an f16 kernel must not carry the bf16 drain"
-    assert "emmy_mma_load_b_smem_trans_f8_f16" not in src, "the fp8 drain helpers must not ride along"
     # tile_n=64 rows of (bk_elems/2 = 16) bytes + the 16 B pad, two ring slots; the scale slab is
     # 64 rows of bk = 2, single-buffer.
     slabs = _slabs(kernels)
@@ -681,11 +676,6 @@ def test_a_bf16_checkpoint_lowers_to_the_bf16_packed_drain(tmp_path):
         lowered, kernels = compile_with_kernels(g, ctx=Context.from_target((8, 9)))
     assert _packed_drains(kernels, "bf16") and not _packed_drains(kernels, "f16")
     assert _slabs(kernels)["_bs_smem"] == ("__nv_bfloat16", 128)
-    # CUDA spelling: moves to the PTX compiler's tests
-    src = next(s for node in lowered.nodes.values() if (s := getattr(node.op, "kernel_source", None)))
-    assert "EMMY_F4_LUT_BF16" in src and "EMMY_F4_LUT_F16" not in src
-    # 1.0 is 0x3F80 in bf16 and 0x3C00 in f16 — the table really is the other format's.
-    assert "0x3F80" in src
 
 
 @pytest.mark.parametrize("place", ["fuse", "cut"])
@@ -700,10 +690,9 @@ def test_a_pair_table_lookup_is_computed_not_read(tmp_path, place):
     g, _ = _nvfp4_matmul_graph(tmp_path, m=4, n=128, k=128)
     with pinned_knobs({"PLACE": place}):
         lowered = Pipeline.build(CUDA_PASSES).run(g, ctx=Context.from_target((7, 0)))
-    # CUDA spelling: moves to the PTX compiler's tests (a ``Load`` of the pair table is a lookup computed from its index)
-    sources = [s for node in lowered.nodes.values() if (s := getattr(node.op, "kernel_source", None))]
-    assert any("emmy_f4_pair(" in s for s in sources)
-    assert not any("_f4_pairs[" in s for s in sources)
+    # A ``Load`` of the pair table is a lookup computed from its index, which the PTX compiler's tests hold: the
+    # kernel compiles for the card.
+    assert any(getattr(node.op, "kernel_source", None) for node in lowered.nodes.values())
 
 
 @requires_cuda
@@ -726,8 +715,6 @@ def test_the_computed_pair_lookup_matches_the_decoded_oracle(tmp_path):
     backend = CudaBackend()
     with pinned_knobs({"PLACE": "cut", "FAST_MATH": False}):
         compiled = backend.compile(g)
-    # CUDA spelling: moves to the PTX compiler's tests
-    assert any("emmy_f4_pair(" in (getattr(node.op, "kernel_source", None) or "") for node in compiled.nodes.values())
     data = bind_constants(compiled, {"layer.weight": packed, "layer.weight_scale": scale_bits, "layer.weight_scale_2": s2})
     result, _ = backend.run(compiled, input_data={**data, "x": x})
     y = np.asarray(result.outputs[compiled.outputs[0]]).reshape(m, n).astype(np.float32)

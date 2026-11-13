@@ -1,8 +1,8 @@
 """CUDA-backend dtype traits.
 
-Augments :class:`emmy.compiler.dtype.DataType` with CUDA-specific
-information: the C type name used in kernel source, any header that
-must be ``#include``'d.
+Augments :class:`emmy.compiler.dtype.DataType` with the C type name a
+shared declaration of Kernel IR spells its element type with
+(``Smem.dtype``).
 
 Per-buffer / per-decl dtype lookup helpers (``nbytes_of``) accept the
 legacy CUDA C-name spellings (``"float"``, ``"half"``, ...) that older
@@ -12,8 +12,6 @@ tables in the compiler can route through this module.
 
 from __future__ import annotations
 
-from collections.abc import Iterable
-
 from emmy.compiler import dtype as _dtype
 from emmy.compiler.dtype import DataType
 
@@ -22,14 +20,9 @@ _CUDA_NAME: dict[DataType, str] = {
     _dtype.F16: "__half",
     _dtype.F64: "double",
     _dtype.BF16: "__nv_bfloat16",
-    # Registry completeness only in M1 — no kernel computes on fp8 yet;
-    # the M2 fragment-path convert is what first emits these in source.
     _dtype.F8E4M3: "__nv_fp8_e4m3",
     _dtype.F8E5M2: "__nv_fp8_e5m2",
-    # Packed e2m1 pairs move as raw bytes. The cuda_fp4.h ``__nv_fp4x2_e2m1``
-    # spelling is deliberately not used: it would put a CUDA 12.8 floor on every
-    # kernel that merely stores the type, and in-kernel decode is hand-written
-    # (render helpers), not header-provided.
+    # Packed e2m1 pairs move as raw bytes.
     _dtype.F4E2M1x2: "unsigned char",
     _dtype.F16x2: "__half2",
     # Raw int16 checkpoint carriers are represented directly in generic tensor algebra.
@@ -44,8 +37,7 @@ _CUDA_NAME: dict[DataType, str] = {
 }
 
 # Inverse of _CUDA_NAME for the kernel-internal C-name -> canonical
-# lookup. Used by Smem.render to populate ``ctx.buffer_dtypes`` so a
-# subsequent Load on the same smem buffer picks the right local C type.
+# lookup: the element dtype of a shared buffer (``interface.buffer_dtypes``).
 # Unknown C names (e.g. ``"unsigned long long"`` for mbarriers) map to
 # None and the caller treats the smem buffer as "not a tensor".
 #
@@ -69,23 +61,6 @@ def canonical_from_cuda_name(name: str) -> str | None:
     :class:`DataType` (mbarrier slots, alignment helpers, etc.)."""
     return _CANONICAL_FROM_CUDA_NAME.get(name)
 
-
-_CUDA_INCLUDE: dict[DataType, str | None] = {
-    _dtype.F32: None,
-    _dtype.F16: "<cuda_fp16.h>",
-    _dtype.BF16: "<cuda_bf16.h>",
-    _dtype.F8E4M3: "<cuda_fp8.h>",
-    _dtype.F8E5M2: "<cuda_fp8.h>",
-    _dtype.F4E2M1x2: None,  # raw-byte spelling, no cuda_fp4.h (see _CUDA_NAME)
-    _dtype.F16x2: "<cuda_fp16.h>",
-}
-
-# Per-op intrinsic spellings and the native-op set used to live here as
-# ``INTRINSICS_FP16`` / ``NATIVE_FP16_OPS`` for the Kernel-IR renderer
-# to consult on the ``RenderCtx``. They moved to
-# :class:`CudaRenderTarget` (``backend/cuda/render_target.py``) — the
-# render layer now talks to the target via the :class:`RenderTarget`
-# protocol instead of pulling tables from this module.
 
 # Bytes for raw CUDA C type names that appear in Kernel IR today (``Smem.dtype``,
 # ``Local.dtype``, ``Literal.dtype`` are ``str`` for now — step 2 of the dtype
@@ -120,16 +95,6 @@ _C_NAME_BYTES: dict[str, int] = {
 def cuda_name(dtype: str | DataType) -> str:
     """C type name for a kernel signature or local decl (``float``, ``__half``)."""
     return _CUDA_NAME[_dtype.get(dtype)]
-
-
-def cuda_includes(dtypes: Iterable[str | DataType]) -> list[str]:
-    """Deduplicated ``#include`` directives required by the given dtypes."""
-    seen: dict[str, None] = {}
-    for d in dtypes:
-        header = _CUDA_INCLUDE.get(_dtype.get(d))
-        if header is not None:
-            seen.setdefault(header, None)
-    return list(seen)
 
 
 def nbytes_of(dtype: str | DataType) -> int:

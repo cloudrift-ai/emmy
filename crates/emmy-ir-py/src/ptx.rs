@@ -3,7 +3,7 @@
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 
-use emmy_ptx::{Interface, Kernel, Param, ParamKind, Precision, Target};
+use emmy_ptx::{Interface, Kernel, Page, Param, ParamKind, Precision, Target};
 
 use crate::body::PyBody;
 use crate::convert::{IntoPyErr, NoRule, expression_from_py, name_from_py};
@@ -29,11 +29,21 @@ fn param(value: &Bound<'_, PyAny>) -> PyResult<Param> {
         .try_iter()?
         .map(|extent| expression_from_py(&extent?))
         .collect();
+    // The body names a buffer by the graph buffer behind it, which a page table's parameter is not named after.
+    let buffer = value.getattr("buffer")?;
+    let name = if buffer.extract::<String>()?.is_empty() {
+        value.getattr("name")?
+    } else {
+        buffer
+    };
     Ok(Param {
-        name: name_from_py(&value.getattr("name")?)?,
+        name: name_from_py(&name)?,
         kind,
         dtype,
-        paged: value.getattr("paged")?.extract()?,
+        page: value
+            .getattr("page")?
+            .extract::<Option<(usize, i64)>>()?
+            .map(|(axis, size)| Page { axis, size }),
         align: value.getattr("align")?.extract()?,
         shape: shape?,
         pair_table: value.getattr("pair_table")?.extract()?,

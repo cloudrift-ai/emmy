@@ -142,17 +142,17 @@ def has_cuda_gpu() -> bool:
 
 
 def has_cuda_toolchain() -> bool:
-    """Check that Emmy can both see a GPU and compile CUDA kernels."""
+    """Check that Emmy can both see a GPU and assemble kernels."""
     if not has_cuda_gpu():
         return False
-    from emmy.compiler.backend.cuda.nvcc import nvcc_path
+    from emmy.compiler.backend.cuda.ptxas import ptxas_path
 
-    return nvcc_path() is not None
+    return ptxas_path() is not None
 
 
 requires_cuda = pytest.mark.skipif(
     not has_cuda_toolchain(),
-    reason="CUDA not available (need the emmy.emmy_runtime extension + GPU + nvcc)",
+    reason="CUDA not available (need the emmy.emmy_runtime extension + GPU + ptxas)",
 )
 
 
@@ -162,6 +162,26 @@ def device_compute_capability() -> tuple[int, int] | None:
     from emmy.compiler.backend.cuda.device import compute_capability
 
     return compute_capability()
+
+
+def kernel_ptx(name: str, body: str, params, *, threads: int, arch_specific: bool = False) -> str:
+    """The PTX of a hand-written kernel for the live card: ``body`` is a Kernel IR body in the text form, ``params``
+    its parameters in call order, each ``(name, kind, dtype)`` with ``kind`` an ``input``, an ``output`` or a
+    ``descriptor``, and ``threads`` the threads of a block. Without a card the kernel is for ``sm_80``."""
+    from emmy.emmy_ir import compile_ptx, parse_body
+
+    from emmy.compiler.dtype import get
+    from emmy.compiler.ir.kernel.interface import Interface, Param
+
+    major, minor = device_compute_capability() or (8, 0)
+    interface = Interface(
+        tuple(Param(n, kind, None if dtype is None else get(dtype), "" if kind == "descriptor" else n) for n, kind, dtype in params),
+        threads,
+        {},
+        0,
+        arch_specific,
+    )
+    return compile_ptx(name, parse_body(body), interface, sm=major * 10 + minor)
 
 
 def requires_sm(major: int, minor: int = 0):
@@ -325,17 +345,16 @@ def qwen3_embedding_model(config=None, auto_class=None):
 
 
 def render_typed(statements, ctx) -> list[str]:
-    """The rendered lines of hand-built ``statements`` once their types are complete: the renderer prints a typed body
-    (``ir.types.explicit_conversions``), and the names and buffers ``ctx`` already types are taken as declared."""
+    """The host C++ lines of hand-built ``statements`` once their types are complete: the renderer prints a typed body
+    (``ir.types.explicit_conversions``), and the names ``ctx`` already types are taken as declared."""
     from emmy.compiler.dtype import get
-    from emmy.compiler.ir.render import render_body
+    from emmy.compiler.ir.loop.render import render_body
     from emmy.compiler.ir.stmt import Body
     from emmy.compiler.ir.types import explicit_conversions
     from emmy.compiler.target import native_f16_ops
 
     known = {name: get(dtype) for name, dtype in ctx.ssa_dtypes.items()}
-    buffers = {name: get(dtype) for name, dtype in ctx.buffer_dtypes.items()}
-    return render_body(explicit_conversions(Body(statements), buffers, native_f16_ops(), known), ctx)
+    return render_body(explicit_conversions(Body(statements), {}, native_f16_ops(), known), ctx)
 
 
 def _kernel_recorder():

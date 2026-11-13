@@ -31,12 +31,14 @@ pub enum ParamKind {
 /// One kernel parameter, in the launch's argument order.
 #[derive(Clone, PartialEq, Debug)]
 pub struct Param {
+    /// The name the body reads it by: a buffer's own name, also where the launch binds its page table.
     pub name: Name,
     pub kind: ParamKind,
     /// The element type of a buffer.
     pub dtype: Option<DType>,
-    /// Whether the parameter is a page table of the buffer and not the buffer.
-    pub paged: bool,
+    /// Where the parameter is a table of the buffer's pages and not the buffer: the dimension the pages cut and the
+    /// extent of a page along it.
+    pub page: Option<Page>,
     /// The bytes the launch gives a buffer's first element as alignment: what stands behind every access of
     /// several elements.
     pub align: u32,
@@ -46,6 +48,14 @@ pub struct Param {
     pub shape: Vec<Expression>,
     /// Whether the buffer is the e2m1 pair table: a load of it computes its value from the index and reads nothing.
     pub pair_table: bool,
+}
+
+/// How a paged buffer is cut: its pages are equal, each the buffer's shape with dimension `axis` cut to `size`, and
+/// the table holds the address of each, in order along that dimension.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct Page {
+    pub axis: usize,
+    pub size: i64,
 }
 
 /// What the launch and the code must agree on: the parameters in call order, the per-block thread bound, the

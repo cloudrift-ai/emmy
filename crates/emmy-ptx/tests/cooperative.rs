@@ -1150,10 +1150,6 @@ fn a_cooperative_statement_outside_its_rule_is_an_error_that_names_it() {
             "a shared array has a size and a power of two as alignment",
         ),
         (
-            "Smem(name=bars, extents=(4), dtype=u64)\n        u64 x = load bars[0]",
-            "no PTX rule for a load of u64",
-        ),
-        (
             "Smem(name=bars, extents=(4), dtype=CUtensorMap)",
             "no PTX rule for a shared array of CUtensorMap",
         ),

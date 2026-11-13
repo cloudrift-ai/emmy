@@ -9,17 +9,13 @@ signature gains one ``int <name>`` per symbolic ``Dim`` and the launch resolves 
 input array shapes (``sym_values`` → ``runtime_args``). The free (grid) axes are static
 here (``010_lift`` defers a symbolic free axis), so the grid stays a static int.
 
-The code is CUDA text for nvcc (``render_kernelop``) or PTX text for ptxas (``ir/kernel/ptx``, the Kernel IR to PTX
-compiler), as ``EMMY_KERNEL_CODE`` says (``config.kernel_code``); CUDA is the default until the perf lane has been
-read through PTX. Under ``ptx`` a kernel the compiler has no rule for yet (``NoRule``) is rendered as CUDA, and under
-``ptx-only`` that is an error. Any other error of the compiler is raised under both: it says the kernel is not what a
-code generator takes, or the compiler is wrong, and CUDA text would hide it. The variable, the fallback and the
-renderer go together when the compiler covers every kernel.
+The code is PTX text for ptxas, from the Kernel IR to PTX compiler (``ir/kernel/ptx``). A kernel the compiler has
+no rule for (``NoRule``) is an error, as is every other refusal: it says the kernel is not what the code generator
+takes, or the compiler is wrong.
 """
 
 from dataclasses import replace
 
-from emmy import config
 from emmy.compiler.dim import spans_one_page
 from emmy.compiler.graph import Node
 from emmy.compiler.ir.axis import Axis
@@ -28,7 +24,6 @@ from emmy.compiler.ir.cuda import CudaOp, TmaDescMeta
 from emmy.compiler.ir.kernel import KernelOp, ptx
 from emmy.compiler.ir.kernel.interface import buffer_dtypes, kernel_interface
 from emmy.compiler.ir.kernel.ir import Grid, TmaDescriptor, tile_is_static, tile_n_dim, tile_n_elements
-from emmy.compiler.ir.kernel.render import render_kernelop
 from emmy.compiler.ir.pure.fold import EXTENTS
 from emmy.compiler.ir.stmt import Load, Write, ZeroPrologue, check_input
 from emmy.compiler.pipeline import Match, Pattern, RuleSkipped
@@ -43,7 +38,7 @@ def _tma_descriptors(kernel: KernelOp) -> tuple[TmaDescMeta, ...]:
     """Each distinct ``TmaDescriptor`` in the body → a ``TmaDescMeta`` the backend
     encodes at launch (``cuTensorMapEncodeTiled`` off the bound array's device
     pointer + the box). First-seen order; deduped by descriptor name so the param
-    list matches the renderer's signature (``const CUtensorMap* <name>``)."""
+    list matches the kernel's parameters (``kernel_interface``)."""
     seen: dict[str, TmaDescMeta] = {}
     for s in kernel.body.iter_of_type(TmaDescriptor):
         seen.setdefault(s.name, TmaDescMeta(name=s.name, src_buf=s.src_buf, box_extents=s.box_extents, swizzle=s.swizzle))
@@ -91,7 +86,7 @@ def rewrite(match: Match, root: Node, ctx) -> CudaOp | None:
     if name != kernel.name:
         kernel = replace(kernel, name=name)
 
-    # Buffer shapes / dtypes for the renderer come from the op's I/O Tensors
+    # Buffer shapes / dtypes for the code generator come from the op's I/O Tensors
     # (snapped to the graph by the matcher's populate_io). A symbolic reduce axis adds an
     # ``int <name>`` runtime arg to the signature, threaded through to the CudaOp.
     # A serial axis is a runtime coordinate: one ``int`` param, one launch per value.
@@ -103,7 +98,7 @@ def rewrite(match: Match, root: Node, ctx) -> CudaOp | None:
         # A paged buffer has no base pointer to take: only ``Load`` / ``Write`` resolve a page,
         # so any other stmt touching it (a TMA descriptor, a cp.async stage, a fragment store)
         # would need a base this ABI cannot give — unless one page spans the buffer, whose base
-        # the renderer resolves once — and a zero-init would have to memset a slab that does not exist.
+        # the code reads from the table once — and a zero-init would have to memset a slab that does not exist.
         names = {entry[0] for entry in paged}
         split = {n for n, axis, page in paged if not spans_one_page(tensors[n].shape, axis, page)}
         staging = [s for s in kernel.body.iter() if not isinstance(s, (Load, Write))]
@@ -139,36 +134,16 @@ def rewrite(match: Match, root: Node, ctx) -> CudaOp | None:
     # launch-encoded ``CUtensorMap`` device arrays); the symbolic ``int`` args are tail-appended in ``_launch``. A
     # paged operand binds its page TABLE, not the buffer: the name in ``arg_order`` is what the launcher looks up in
     # ``arrays``, so the rename is the whole runtime change.
-    interface = kernel_interface(kernel, tensors, runtime_args, frozenset(entry[0] for entry in paged), pair_tables)
-    flush_to_zero = precision_pin(FLUSH_TO_ZERO)
-    source = None
-    code = config.kernel_code()
-    if code != config.KERNEL_CODE_CUDA:
-        try:
-            source = ptx.compile_kernel(
-                kernel,
-                interface,
-                compute_capability=ctx.compute_capability,
-                fuse=precision_pin(CONTRACT_FMA),
-                flush_to_zero=flush_to_zero,
-                # A static grid of no more blocks than the card has multiprocessors is one block on each.
-                single_wave=isinstance(grid[0][0], int) and grid[0][0] <= ctx.sm_count,
-            )
-        except ptx.NoRule:
-            if code == config.KERNEL_CODE_PTX_ONLY:
-                raise
-    # A PTX kernel waits on the grid ahead of it only where its target has the instruction; CUDA text decides that
-    # when it is built, for the card it is built for.
-    dependent_launch = source is None or ctx.compute_capability >= ptx.GRID_WAIT_CAPABILITY
-    if source is None:
-        source = render_kernelop(
-            kernel,
-            tensors=tensors,
-            runtime_args=runtime_args,
-            paged_buffers=paged,
-            pair_tables=pair_tables,
-            flush_to_zero=flush_to_zero,
-        )
+    interface = kernel_interface(kernel, tensors, runtime_args, {n: (axis, page) for n, axis, page in paged}, pair_tables)
+    source = ptx.compile_kernel(
+        kernel,
+        interface,
+        compute_capability=ctx.compute_capability,
+        fuse=precision_pin(CONTRACT_FMA),
+        flush_to_zero=precision_pin(FLUSH_TO_ZERO),
+        # A static grid of no more blocks than the card has multiprocessors is one block on each.
+        single_wave=isinstance(grid[0][0], int) and grid[0][0] <= ctx.sm_count,
+    )
 
     return CudaOp(
         kernel_source=source,
@@ -187,5 +162,6 @@ def rewrite(match: Match, root: Node, ctx) -> CudaOp | None:
         zero_prologues=tuple(dict.fromkeys(zp.dst for zp in kernel.body.iter_of_type(ZeroPrologue))),
         tma_descriptors=tma_descs,
         arch_specific=interface.arch_specific,
-        dependent_launch=dependent_launch,
+        # A kernel waits on the grid ahead of it only where its target has the instruction.
+        dependent_launch=ctx.compute_capability >= ptx.GRID_WAIT_CAPABILITY,
     )

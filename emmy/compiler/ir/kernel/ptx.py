@@ -1,12 +1,7 @@
 """The Python entry of the Kernel IR to PTX compiler (the ``emmy-ptx`` crate, through the ``emmy.emmy_ir`` extension).
 
 :func:`compile_kernel` returns a kernel's PTX text, or raises :class:`NoRule` when the kernel holds something the
-compiler has no rule for yet: the kernel is well formed and its code is generated the other way, as CUDA. Every
-other error says the kernel is not what the compiler takes, or the compiler is wrong, and is never a reason to
-generate the code another way.
-
-Temporary seam: while the CUDA renderer exists, what it works out as it prints and the compiler does not read yet
-is refused with the same error. The crate refuses a paged buffer, whose page the renderer resolves, itself.
+compiler has no rule for, and ``ValueError`` when the kernel is not what the compiler takes.
 """
 
 from __future__ import annotations

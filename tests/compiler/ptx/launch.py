@@ -14,7 +14,7 @@ import numpy as np
 from emmy.emmy_ir import compile_ptx, parse_body
 
 from emmy.compiler import dtype as dtypes
-from emmy.compiler.backend.cuda import nvcc
+from emmy.compiler.backend.cuda import ptxas
 from emmy.compiler.backend.cuda.program import CompiledProgram
 from emmy.compiler.backend.gpu_lock import gpu_lock
 from emmy.compiler.backend.plan import BufferSpec, ExecutionPlan, KernelSpec, LaunchSpec
@@ -43,9 +43,8 @@ def assemble(ptx: str, level: str | None, directory: Path, arch_specific: bool =
     key = hashlib.sha1(f"{level}\0{ptx}".encode()).hexdigest()
     source = directory / f"{key}.ptx"
     source.write_text(ptx)
-    ptxas = str(Path(nvcc.nvcc_path()).with_name("ptxas"))
     arch = (arch or target()[1]) + ("a" if arch_specific else "")
-    command = [ptxas, *([level] if level else []), f"-arch={arch}", "-m64", "-o", str(directory / f"{key}.cubin"), str(source)]
+    command = [ptxas.ptxas_path(), *([level] if level else []), f"-arch={arch}", "-m64", "-o", str(directory / f"{key}.cubin"), str(source)]
     try:
         subprocess.run(command, check=True, capture_output=True, text=True)
     except subprocess.CalledProcessError as refused:
@@ -68,6 +67,7 @@ def built(
     arch_specific: bool = False,
     types: dict[str, DataType] | None = None,
     descriptors: tuple[TmaDescMeta, ...] = (),
+    sm: int | None = None,
 ) -> Iterator[CompiledProgram]:
     """Compile ``body`` to PTX and build the program that launches it as ``blocks`` blocks of ``threads`` threads,
     under the GPU lock; several bodies are launched in order, over the same buffers. ``outputs`` gives each
@@ -75,7 +75,8 @@ def built(
     ``None``. ``shared`` is the launch-sized pool: each shared buffer's byte offset and the pool's size.
     ``arch_specific`` assembles for the arch-suffixed target. ``types`` names the element type of an input NumPy
     has no type of its own for (``bf16``, held as its 16 bits). ``descriptors`` are the tensor maps the launch
-    encodes and passes after the buffers; an input a descriptor copies from has two dimensions, its array's."""
+    encodes and passes after the buffers; an input a descriptor copies from has two dimensions, its array's. ``sm``
+    compiles for an older card than the live one, whose code the live card runs."""
     in_dtypes = {name: (types or {}).get(name) or DTYPES[data.dtype] for name, data in inputs.items()}
     out_dtypes = {name: (DTYPES[np.dtype(t)], size) for name, (t, size) in outputs.items()}
     params = (
@@ -92,7 +93,7 @@ def built(
     with tempfile.TemporaryDirectory() as scratch:
         for index, text in enumerate([body] if isinstance(body, str) else body):
             name = f"k{index}"
-            ptx = compile_ptx(name, parse_body(text), interface, sm=target()[0], fuse=fuse, ftz=ftz)
+            ptx = compile_ptx(name, parse_body(text), interface, sm=sm or target()[0], fuse=fuse, ftz=ftz)
             if level is None:
                 kernels[name] = KernelSpec(source=ptx, arch_specific=arch_specific)
             else:

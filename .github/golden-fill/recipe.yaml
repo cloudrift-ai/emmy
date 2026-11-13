@@ -20,7 +20,7 @@ command:
     sudo env DEBIAN_FRONTEND=noninteractive apt-get install -y -qq jq make python3.12-venv || exit 1
     command -v cargo >/dev/null || curl -sSf https://sh.rustup.rs | sh -s -- -y -q --profile minimal
     [ -d venv ] || make setup || exit 1
-    export EMMY_TUNE_DB=$task_dir/autotune.db EMMY_CUBIN_CACHE=$task_dir/cubins EMMY_NVCC_FLAGS=
+    export EMMY_TUNE_DB=$task_dir/autotune.db EMMY_CUBIN_CACHE=$task_dir/cubins
     export CUDA_VISIBLE_DEVICES="$gpu_device_ids"
     cp "$golden" $task_dir/working.json
     : > $task_dir/failed.txt

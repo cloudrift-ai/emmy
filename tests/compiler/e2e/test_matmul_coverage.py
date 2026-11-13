@@ -6,13 +6,13 @@ algebra. The plain claim "this program under this pinned schedule computes the r
 data now: it lives in ``tests/compiler/realization/cases/matmul/``, replayed against the compiler
 by the realization corpus. What stays here is everything a case file has no spelling for —
 Kernel IR structure, kernel counts, bit-identity between two configs, ``pytest.raises``
-refusal messages, a rendered-line-count compile budget, and one SYMBOLIC kernel run at sizes other
+refusal messages, a count of a fused prologue's copies, and one SYMBOLIC kernel run at sizes other
 than the hint it was tiled for (a case runs a symbolic program at its own 512 hint, so the
 off-hint column of every former static/dynamic pair is what survives of it). Sections:
 
 - **scalar TILE tier** — register-tile geometries and fused epilogues at an off-divisor symbolic
-  M, operand staging (the ``STAGE`` codec) with its pinned-stage refusals, and the fused-prologue
-  compile-budget reproducer.
+  M, operand staging (the ``STAGE`` codec) with its pinned-stage refusals, and the fused prologue
+  compiled once.
 - **warp MMA tier** — ``mma.sync`` plain / transposed-B / epilogue structure, symbolic-M accuracy
   across cp.async + TMA transports, the staging invariants (bit-identical, bf16), staged split-K,
   the smem swizzle modes, and the ``RASTER`` launch-order codec.
@@ -20,8 +20,8 @@ off-hint column of every former static/dynamic pair is what survives of it). Sec
   boundary-guard + clamp + zero-fill interplay no single stored size can reach), the demoted
   B-cone, the batched / softmax-P@V split-consumers, cp.async AND TMA.
 
-Pure GPU accuracy (no ``-O1`` numerics change), so it runs in the correctness lane. The CPU-render
-structure tests (forced sm_120) need no GPU; warp-tier accuracy needs sm_90+.
+Pure GPU accuracy, so it runs in the default suite. The structure tests (forced sm_120) need no
+GPU; warp-tier accuracy needs sm_90+.
 """
 
 from __future__ import annotations
@@ -60,10 +60,12 @@ from tests.compiler.helpers import (
     device_compute_capability,
     dyn_M,
     grouped_raster_decode,
+    recording_kernels,
     requires_cuda,
     requires_sm,
     requires_sm90,
     statements,
+    text,
 )
 
 
@@ -470,36 +472,30 @@ def test_producer_band_without_a_driveable_stage_enumerates_nothing(monkeypatch)
     assert tile_op.knobs.get("WSPEC", "") == ""  # the retired key is never stamped
 
 
-# --- the fused-prologue compile budget --------------------------------------
+# --- the fused prologue, once ---------------------------------------------
 # The per-cell + replicator + ``dedup_replicated`` pipeline reproduces register-blocked GEMM at
-# the autotune knob bundles that used to blow the nvcc compile budget (FN=32 / FN=64) by
+# the autotune knob bundles that used to blow the compile budget (FN=32 / FN=64) by
 # duplicating the fused prologue once per register cell.
 #
 # The fused RMSNorm+Linear prologue must remain one body-level chain rather than duplicate per
-# register cell, which would make the rendered kernel exceed the compile budget.
-_FUSED_PROLOGUE = {
-    "rmsnorm_linear_n4096": {"N": 4096, "lines": 360},
-    "qwen_lmhead_n4099": {"N": 4099, "lines": 850},
-}
+# register cell.
+_FUSED_PROLOGUE = {"rmsnorm_linear_n4096": 4096, "qwen_lmhead_n4099": 4099}
 
 
 @requires_cuda
 @pytest.mark.parametrize("case", ["rmsnorm_linear_n4096", "qwen_lmhead_n4099"])
-def test_fused_prologue_compiles_in_budget(case):
+def test_fused_prologue_compiles_once(case):
     """A fused RMSNorm→Linear at lm_head-style shapes keeps the N-invariant prologue chain (mean
-    reduce + rsqrt + ``norm_weight·v``) as ONE body-level copy, so the rendered kernel stays under
-    the nvcc compile budget.
+    reduce + rsqrt + ``norm_weight·v``) as ONE body-level copy.
 
-    The RENDERED LINE COUNT is the whole assertion, and it is the reason this test survives the
-    realization corpus: the duplicated-prologue regression replicates the chain once per register
-    cell and inflates the body far past these thresholds while still computing the right answer,
-    so no accuracy comparison — stored or otherwise — can see it."""
+    The count of the chain's reciprocal square roots is the whole assertion, and it is the reason this
+    test survives the realization corpus: the duplicated-prologue regression replicates the chain
+    once per register cell while still computing the right answer, so no accuracy comparison —
+    stored or otherwise — can see it."""
 
     from emmy.compiler.backend.cuda.backend import CudaBackend  # noqa: PLC0415
-    from emmy.compiler.ir.cuda.ir import CudaOp  # noqa: PLC0415
 
-    spec = _FUSED_PROLOGUE[case]
-    M, K, N = 2, 1024, spec["N"]
+    M, K, N = 2, 1024, _FUSED_PROLOGUE[case]
     g = Graph()
     g.add_node(op=InputOp(), inputs=[], output=Tensor("x", (M, K)), node_id="x")
     g.add_node(op=InputOp(), inputs=[], output=Tensor("wn", (K,)), node_id="wn")
@@ -508,14 +504,12 @@ def test_fused_prologue_compiles_in_budget(case):
     g.add_node(op=LinearOp(), inputs=["xn", "wl"], output=Tensor("o", (M, N)), node_id="o")
     g.inputs, g.outputs = ["x", "wn", "wl"], ["o"]
 
-    compiled = CudaBackend().compile(g)
-    cuda_ops = [n.op for n in compiled.nodes.values() if isinstance(n.op, CudaOp)]
-    assert cuda_ops, "expected a CudaOp in the lowered graph"
-    n_lines = "\n".join(op.kernel_source for op in cuda_ops).count("\n")
-    assert n_lines < spec["lines"], (
-        f"{case}: rendered kernel is {n_lines} lines (budget {spec['lines']}) — a regression that "
-        f"fails to dedup the N-invariant prologue chain inflates it."
-    )
+    with recording_kernels() as kernels_of:
+        compiled = CudaBackend().compile(g)
+    kernels = kernels_of(compiled)
+    assert kernels, "expected a kernel in the lowered graph"
+    for kernel in kernels.values():
+        assert text(kernel).count("rsqrt(") == 1, f"{case}: the N-invariant prologue chain is not deduplicated"
 
 
 # =========================================================================== #
@@ -654,8 +648,8 @@ def _lowered_kernels(graph, cc=(12, 0)) -> dict:
     return compile_with_kernels(graph, ctx=Context.from_target(cc), passes=TILE_PASSES + CUDA_PASSES)[1]
 
 
-def _render_src(graph, cc=(12, 0)) -> str:
-    """Lower ``graph`` to CUDA on a FORCED target and return the kernel source (no GPU needed)."""
+def _ptx(graph, cc=(12, 0)) -> str:
+    """Lower ``graph`` on a FORCED target and return the kernels' PTX (no GPU needed)."""
     out = Pipeline.build(TILE_PASSES + CUDA_PASSES).run(graph, ctx=Context.from_target(cc))
     return "\n".join(n.op.kernel_source for n in out.nodes.values() if getattr(n.op, "kernel_source", None))
 
@@ -675,29 +669,9 @@ def test_fully_overhanging_m_fragment_clamps_its_reads_into_the_tile(monkeypatch
     graph = _mma_matmul_graph("static", 1, 128, 64, "f32", False)
     a_loads = [load for load in statements(_lowered_kernels(graph), FragmentLoad) if load.role == "a"]
     assert a_loads and all(load.clamp is not None for load in a_loads), "M=1 under this tile must reach the masked-M loader"
-    # CUDA spelling: moves to the PTX compiler's tests
-    assert "if (rows_left > 0) {  // wholly past the bound: read nothing" in _render_src(graph), "an overhanging fragment reads nothing"
-
-
-def test_every_clamped_fragment_loader_reads_nothing_wholly_past_its_bound():
-    """A fragment wholly past its bound has no in-range address: clamping to the fragment base read
-    past the buffer's end. Eight 128-row warps over a 512-row attention (the RTX 5090's hd64 fused
-    kernel under ``WORK=w8x1``) handed warps 4-7 their own Q base at rows 512+; for the last head that
-    is past the allocation, an intermittent CUDA_ERROR_ILLEGAL_ADDRESS. Every clamped loader of every
-    prelude now predicates those reads off and zero-fills the fragment."""
-    import re
-
-    from emmy.compiler.ir.kernel import render
-
-    # CUDA spelling: moves to the PTX compiler's tests
-    source = "".join(getattr(render, name) for name in dir(render) if name.endswith("_PRELUDE"))
-    loaders = re.findall(r"void (emmy_\w*(?:clamp\w*|_impl|_gmem4))\(([^)]*)\)\s*\{\n(.*?)\n\}", source, re.S)
-    assert len(loaders) >= 12, [name for name, _, _ in loaders]
-    for name, params, body in loaders:
-        left = next(p.split()[-1] for p in params.split(",") if p.split()[-1] in ("left", "rows_left", "cols_left"))
-        delegates = re.match(r"\s*emmy_\w*_impl<", body)
-        assert delegates or f"{left} > 0" in body, f"{name} reads without checking {left} > 0"
-        assert "return;" not in body, f"{name}: an early return cost the decode split partial 18% on an RTX 5090"
+    # Each read of an overhanging fragment is guarded: a fragment wholly past the bound reads nothing.
+    code = [line.strip() for line in _ptx(graph).splitlines()]
+    assert any(line.startswith("@") and " ld.global" in line for line in code), "an overhanging fragment reads nothing"
 
 
 @pytest.mark.parametrize(("K", "masked"), [(128, False), (136, True), (132, True)])
@@ -1155,8 +1129,6 @@ def test_tma_staged_slab_is_swizzled(monkeypatch):
     # Every staged ldmatrix reads its slab through the swizzle the copy wrote it with.
     drains = statements(kernels, LdmatrixLoad)
     assert drains and all(load.swizzle == "B64" for load in drains), "the staged ldmatrix drain must XOR its slab address"
-    # CUDA spelling: moves to the PTX compiler's tests
-    assert "int emmy_swizzle_b64(int e)" in op.kernel_source, "the swizzle helper must be emitted in the preamble"
 
 
 def test_cp_staged_slab_is_swizzled(monkeypatch):
@@ -1174,8 +1146,6 @@ def test_cp_staged_slab_is_swizzled(monkeypatch):
     lowered, kernels = compile_with_kernels(_parity_mma_graph("static", M=256), ctx=Context(compute_capability=(8, 9)))
     op = lowered.nodes["o"].op
     assert not op.tma_descriptors, "sm_89 has no TMA — the fills must be cp.async"
-    # CUDA spelling: moves to the PTX compiler's tests
-    assert "int emmy_swizzle_b64(int e)" in op.kernel_source, "the swizzle helper must be emitted in the preamble"
     # Producer side: every cp.async fill writes through the XOR'd destination index...
     fills = {slab: {copy.swizzle for copy in statements(kernels, CpAsyncCopy) if copy.smem == slab} for slab in ("_a_smem", "_b_smem")}
     assert fills == {"_a_smem": {"B64"}, "_b_smem": {"B64"}}, "each slab fill must XOR its smem destination"

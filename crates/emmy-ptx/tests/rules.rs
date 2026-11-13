@@ -14,7 +14,7 @@ use emmy_ptx::print::print;
 use emmy_ptx::verify::verify;
 use emmy_ptx::{Precision, Target};
 
-use DType::{BF16, Bool, F16, F32, I32, U32};
+use DType::{BF16, Bool, F16, F32, I16, I32, U16, U32};
 use common::{A_O, EXACT, FUSED, Params, SM_120, assemble, code, lowered, refusal};
 use emmy_ptx::ParamKind::{Input, Int, Output};
 
@@ -704,7 +704,8 @@ fn the_flush_to_zero_decision_marks_every_f32_instruction() {
 }
 
 /// Half precision runs natively where the body says so: its values live in 16-bit registers, its instructions take
-/// no immediate, so a constant is moved into a register by its bits.
+/// no immediate, so a constant is moved into a register by its bits. A half product is never fused with its sum:
+/// each operation rounds, as eager's do.
 #[test]
 fn half_precision_runs_in_16_bit_registers() {
     let got = under_grid(
@@ -724,16 +725,47 @@ fn half_precision_runs_in_16_bit_registers() {
             "mul.wide.s32 %rd2, %r3, 2",
             "add.s64 %rd3, %rd0, %rd2",
             "ld.global.nc.b16 %h0, [%rd3]",
-            "fma.rn.f16 %h1, %h0, %h0, %h0",
-            "neg.f16 %h2, %h0",
-            "max.f16 %h3, %h1, %h2",
-            "mov.b16 %h4, 15360",
-            "sub.rn.f16 %h5, %h3, %h4",
-            "abs.f16 %h6, %h5",
-            "setp.lt.f16 %p0, %h6, %h0",
-            "selp.b16 %h7, %h5, %h0, %p0",
+            "mul.rn.f16 %h1, %h0, %h0",
+            "add.rn.f16 %h2, %h1, %h0",
+            "neg.f16 %h3, %h0",
+            "max.f16 %h4, %h2, %h3",
+            "mov.b16 %h5, 15360",
+            "sub.rn.f16 %h6, %h4, %h5",
+            "abs.f16 %h7, %h6",
+            "setp.lt.f16 %p0, %h7, %h0",
+            "selp.b16 %h8, %h6, %h0, %p0",
             "add.s64 %rd4, %rd1, %rd2",
-            "st.global.b16 [%rd4], %h7",
+            "st.global.b16 [%rd4], %h8",
+        ]
+    );
+}
+
+/// A bfloat16 accumulator of a maximum or a minimum steps at f32 between two conversions, which are exact: bf16 is
+/// never computed in.
+#[test]
+fn a_bfloat16_selection_accumulator_steps_at_f32() {
+    let got = under_grid(
+        "
+        bf16 x = load a[i]
+        init bf16 m = 0
+        bf16 m <- maximum(m, x)
+        bf16 o[i] = m
+        ",
+        &[("a", Input, Some(BF16)), ("o", Output, Some(BF16))],
+        EXACT,
+    );
+    let steps: Vec<&str> = got
+        .iter()
+        .map(String::as_str)
+        .filter(|line| line.contains("f32") || line.contains("bf16"))
+        .collect();
+    assert_eq!(
+        steps,
+        [
+            "cvt.f32.bf16 %f0, %h1",
+            "cvt.f32.bf16 %f1, %h0",
+            "max.f32 %f2, %f0, %f1",
+            "cvt.rn.bf16.f32 %h1, %f2",
         ]
     );
 }
@@ -1312,7 +1344,10 @@ fn a_statement_outside_the_rules_is_an_error_that_names_it() {
             "    for j in 0..4 unroll=true:\n        f32 o[j] = x",
             "a loop asks to be unrolled",
         ),
-        ("    f64 y = x * x", "no PTX rule for the dtype f64"),
+        (
+            "    f64 w = (f64)x\n    f64 y = exp(w)",
+            "no PTX rule for the operation exp at f64",
+        ),
         (
             "    for j in 0..4:\n        i32 m <- maximum(m, j)",
             "no PTX rule for a state of i32 seeded -1000000",
@@ -1686,4 +1721,69 @@ Grid(axes=(i in 0..1024), decode=(block_idx.x * 256 + thread_idx.x), block_threa
             "ld.global.nc.v4.f32 {%f0, %f1, %f2, %f3}, [%rd5]",
         ]
     );
+}
+
+/// A store of a Volta copy precomputes where its element stands in the slab: the layout's index of a logical row and
+/// column, computed once like any integer.
+#[test]
+fn a_volta_layout_index_is_its_integer_expression() {
+    let params: Params = &[("o", Output, Some(I32))];
+    for function in ["emmy_volta_crosswise", "emmy_volta_b_congruous"] {
+        let got = under_grid(
+            &format!("let i32 at = {function}(i / 4, 8 * (i % 4), 128)\ni32 o[i] = at"),
+            params,
+            EXACT,
+        );
+        assert!(
+            got.iter().any(|line| line.starts_with("xor.b32")),
+            "{function}: {got:#?}"
+        );
+    }
+}
+
+/// A 16-bit integer is held extended in a 32-bit register, by its sign or by zeros, and a 64-bit unsigned one shifts
+/// right by zeros; a bitcast moves the bits between the 16-bit integers and a half through the low half.
+#[test]
+fn sixteen_bit_and_unsigned_64_bit_integers_keep_their_bits() {
+    let params: Params = &[
+        ("a", Input, Some(I16)),
+        ("o", Output, Some(U16)),
+        ("h", Output, Some(F16)),
+    ];
+    let got = under_grid(
+        "i16 x = load a[i]
+u16 y = bitcast(x)
+u32 z = (u32)y
+u64 wide = (u64)z
+u64 up = wide << 47
+u64 down = up >> 40
+u32 low = (u32)down
+u16 code = (u16)low
+f16 half = bitcast(code)
+u16 o[i] = code
+f16 h[i] = half",
+        params,
+        EXACT,
+    );
+    let has = |prefix: &str| got.iter().any(|line| line.starts_with(prefix));
+    assert!(has("ld.global.nc.s16"), "{got:#?}");
+    assert!(
+        has("and.b32") && has("shr.u64") && has("cvt.u16.u32"),
+        "{got:#?}"
+    );
+    assert!(has("st.global.u16") && has("st.global.b16"), "{got:#?}");
+    assert!(!has("shr.s64"), "{got:#?}");
+}
+
+/// A double is a value converted through and back: exactly from a half or an f32, rounded to nearest into an f32.
+#[test]
+fn a_double_converts_exactly_out_and_rounds_back() {
+    let params: Params = &[("a", Input, Some(F16)), ("o", Output, Some(F32))];
+    let got = under_grid(
+        "f16 x = load a[i]\nf64 wide = (f64)x\nf32 back = (f32)wide\nf32 o[i] = back",
+        params,
+        EXACT,
+    );
+    let has = |prefix: &str| got.iter().any(|line| line.starts_with(prefix));
+    assert!(has("cvt.f64.f32") && has("cvt.rn.f32.f64"), "{got:#?}");
 }

@@ -4,7 +4,7 @@ The statement types, ``Body``, the text form, normalization and identity are imp
 crate, reached through the ``emmy.emmy_ir`` extension); this package is their one face to the rest of the compiler.
 ``__all__`` is the whole interface: the rest of the compiler imports these names and no submodule. The statement types
 every layer shares are here; the Kernel IR's thirty are exported by ``emmy.compiler.ir.kernel.ir``. Rendering a
-statement as C / CUDA source is not statement business and lives in :mod:`emmy.compiler.ir.render`.
+statement as host C++ for the Loop IR runner is not statement business and lives in :mod:`emmy.compiler.ir.loop.render`.
 
 The boundary: Rust owns the data and Python reads it through accessors; a field read hands back a held object, so a
 statement read twice from a body is one object; only strings, numbers, booleans, tuples of those and the module's own

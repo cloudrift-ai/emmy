@@ -12,9 +12,6 @@ Design contract:
   with ``env=dict(os.environ)``, so anything written here propagates to them;
   tests monkeypatch ``os.environ`` directly, so getters must read it **live**.
 - Getters read ``os.environ`` on every call (never cache at import).
-- The one setter, :func:`set_nvcc_flags`, centralizes the ``--flag > env >
-  default`` override that used to live in the CLI layer, so every callsite
-  (CLI, programmatic, tests) shares it.
 
 Out of scope: provider/secret vars (``HF_TOKEN``, ``CLOUDRIFT_*``, ``GCP_*``,
 ``NO_COLOR``) — those stay at their use sites, and ``emmy/redact.py`` owns
@@ -37,15 +34,12 @@ FREEZE_DIR = "EMMY_FREEZE_DIR"
 OFFLINE_FILE = "EMMY_OFFLINE_FILE"
 GOLDEN_FILE = "EMMY_GOLDEN_FILE"
 STRICT_EVIDENCE = "EMMY_STRICT_EVIDENCE"
-NVCC_FLAGS = "EMMY_NVCC_FLAGS"
 DEBUG = "EMMY_DEBUG"
 DUMP_DIR = "EMMY_DUMP_DIR"
 KNOBS = "EMMY_KNOBS"
 BENCH_BACKENDS = "EMMY_BENCH_BACKENDS"
 CUBIN_CACHE = "EMMY_CUBIN_CACHE"
 PACK_DIR = "EMMY_PACK_DIR"
-NO_NVCC = "EMMY_NO_NVCC"
-KERNEL_CODE = "EMMY_KERNEL_CODE"
 KERNEL_TIMEOUT_MS = "EMMY_KERNEL_TIMEOUT_MS"
 FIRST_ITER_TIMEOUT_MS = "EMMY_FIRST_ITER_TIMEOUT_MS"
 BENCH_COMPILE_TIMEOUT_S = "EMMY_BENCH_COMPILE_TIMEOUT_S"
@@ -187,10 +181,9 @@ def golden_scope() -> str | None:
     """The golden evidence scope ``EMMY_GOLDEN_FILE`` names: ``None`` when unset (the repository's
     per-card goldens), paths joined by ``os.pathsep`` (those files' measured rows instead — a model
     golden beside its card's hardware golden), or ``""`` — set but empty — for
-    NO golden evidence at all. The empty form mirrors ``EMMY_NVCC_FLAGS=``: ``make test`` sets it,
-    because the correctness lane never asks how fast a pick is and importing a card's goldens is
-    work every worker process would repeat. Set by ``emmy serve --golden PATH`` for the vLLM child
-    it spawns; ``run`` / ``compile`` scope the same evidence in-process through
+    NO golden evidence at all. ``make test`` sets the empty form, because the suite never asks how
+    fast a pick is and importing a card's goldens is work every worker process would repeat. Set by
+    ``emmy serve --golden PATH`` for the vLLM child it spawns; ``run`` / ``compile`` scope the same evidence in-process through
     ``search.golden.evidence_scope``, which takes precedence."""
     return os.environ.get(GOLDEN_FILE)
 
@@ -247,36 +240,6 @@ def offline_path() -> Path | None:
     silent fallback."""
     override = os.environ.get(OFFLINE_FILE)
     return Path(override) if override else None
-
-
-def nvcc_flags() -> str:
-    """Extra nvcc flags for this compile (``EMMY_NVCC_FLAGS``, ``""`` if unset).
-
-    Read fresh each call so a per-invocation override (set via
-    :func:`set_nvcc_flags`) and the bench-worker subprocess (which inherits the
-    env) see the same value, and so the flags fold into cache keys."""
-    return _str(NVCC_FLAGS)
-
-
-@contextmanager
-def nvcc_flags_override(flags: str | None):
-    """Temporarily swap ``EMMY_NVCC_FLAGS`` for one compile (e.g. re-benching
-    a tune winner at ``-Xcicc -O3``). ``None`` is a no-op. Since ``nvcc_flags`` is
-    read fresh and folds into the cubin cache key, this transparently selects the
-    right (and separately-cached) cubin. Applied in whichever process compiles —
-    the bench worker reads it off the request and wraps its own compile."""
-    if flags is None:
-        yield
-        return
-    prev = os.environ.get(NVCC_FLAGS)
-    os.environ[NVCC_FLAGS] = flags
-    try:
-        yield
-    finally:
-        if prev is None:
-            os.environ.pop(NVCC_FLAGS, None)
-        else:
-            os.environ[NVCC_FLAGS] = prev
 
 
 def debug_enabled() -> bool:
@@ -510,28 +473,6 @@ def pack_dir() -> Path | None:
     return Path(override) if override else None
 
 
-def nvcc_disabled() -> bool:
-    """``EMMY_NO_NVCC`` — declare nvcc unavailable (every kernel compile then fails loudly)."""
-    return _bool(NO_NVCC)
-
-
-#: The values of ``EMMY_KERNEL_CODE``, the default first.
-KERNEL_CODE_CUDA, KERNEL_CODE_PTX, KERNEL_CODE_PTX_ONLY = KERNEL_CODES = ("cuda", "ptx", "ptx-only")
-
-
-def kernel_code() -> str:
-    """``EMMY_KERNEL_CODE`` — what generates a kernel's code while the Kernel IR to PTX compiler is being brought
-    up: ``cuda`` (the default) renders CUDA for nvcc, as before; ``ptx`` compiles to PTX and renders CUDA only for a
-    kernel that holds a statement or an operation the compiler has no rule for yet; ``ptx-only`` makes that
-    refusal an error. It is no part of a measurement's context, so that both generators take the same schedules: a
-    bench under a PTX value writes its rows where a CUDA run reads them, and points ``EMMY_TUNE_DB`` at a file of its
-    own. Temporary: the variable and the CUDA path are deleted when the PTX compiler covers every kernel."""
-    value = _str(KERNEL_CODE) or KERNEL_CODE_CUDA
-    if value not in KERNEL_CODES:
-        raise ValueError(f"{KERNEL_CODE}={value!r}: expected one of {', '.join(KERNEL_CODES)}")
-    return value
-
-
 def pool_draw() -> int:
     """``EMMY_POOL_DRAW`` — the complete rows a greedy compile draws from a schedule pool too large to walk
     (default 8192). Seeded uniform descents cover every level's values, unlike an emission-order prefix; a descent
@@ -614,23 +555,3 @@ def ncu_child() -> bool:
 # (``025_swizzle_blocks.py``) so it shows up in ``emmy knobs`` and reads
 # through the descriptor's env path. Env access still routes through this
 # module's ``knob_raw`` / ``int_env`` primitives.
-
-
-# --- Setters (write os.environ so subprocesses inherit) --------------------
-
-
-def set_nvcc_flags(cli_value: str | None, default: str) -> str:
-    """Resolve and publish the effective extra nvcc flags via
-    ``EMMY_NVCC_FLAGS`` (the carrier the cubin compiler, the bench-worker
-    subprocess, and ``Context.structural_key`` all read).
-
-    Precedence: ``cli_value`` (a ``--nvcc-flags`` override, when not ``None``) >
-    a pre-set env var > ``default`` (per-command policy: ``""`` for compile/run,
-    ``""`` everywhere today — tune measures in the same deployable regime it deploys into).
-    Must run before any compile/bench. Returns the
-    effective string."""
-    if cli_value is not None:
-        os.environ[NVCC_FLAGS] = cli_value
-    elif NVCC_FLAGS not in os.environ:
-        os.environ[NVCC_FLAGS] = default
-    return os.environ.get(NVCC_FLAGS, "")

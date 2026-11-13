@@ -14,7 +14,7 @@ from emmy.compiler.backend.plan import BufferSpec, ExecutionPlan, KernelSpec, La
 from emmy.compiler.dim import Dim
 from emmy.compiler.dtype import F32
 from emmy.compiler.ir.cuda import TmaDescMeta
-from tests.compiler.helpers import requires_cuda, requires_sm
+from tests.compiler.helpers import device_compute_capability, kernel_ptx, requires_cuda, requires_sm
 
 pytestmark = [requires_cuda, pytest.mark.xdist_group("cuda")]
 
@@ -38,9 +38,37 @@ def _plan():
         ],
         {
             "add": KernelSpec(
-                source='extern "C" __global__ void add(float* y, const float* x, const float* w) { int i=threadIdx.x; y[i] += x[i]*w[0]; }'
+                source=kernel_ptx(
+                    "add",
+                    """
+                    Grid(axes=(i in 0..32), decode=(thread_idx.x), block_threads=32):
+                        f32 before = load y[i]
+                        f32 a = load x[i]
+                        f32 scale = load w[0]
+                        f32 product = a * scale
+                        f32 after = before + product
+                        f32 y[i] = after
+                    """,
+                    (("y", "output", "f32"), ("x", "input", "f32"), ("w", "input", "f32")),
+                    threads=32,
+                )
             )
         },
+    )
+
+
+def _module(name: str, params: tuple[str, ...], code: str, declarations: str = "") -> str:
+    """A hand-written PTX kernel ``name`` for the live card: its pointer ``params`` loaded into ``%<param>`` as global
+    addresses, the thread index in ``%t`` and its byte offset in ``%t4``, then ``code``."""
+    major, minor = device_compute_capability()
+    loads = "".join(f"\tld.param.u64 %{p}, [{p}_param];\n\tcvta.to.global.u64 %{p}, %{p};\n" for p in params)
+    return (
+        f".version {'8.7' if major >= 10 else '7.8'}\n.target sm_{major}{minor}\n.address_size 64\n{declarations}"
+        f".visible .entry {name}({', '.join(f'.param .u64 {p}_param' for p in params)})\n{{\n"
+        "\t.reg .pred %p;\n\t.reg .b32 %t, %i, %s;\n\t.reg .f32 %a, %b, %c;\n\t.reg .b64 %t4, %at, %clock, %start;\n"
+        f"\t.reg .b64 {', '.join(f'%{p}' for p in params)};\n{loads}"
+        "\tmov.u32 %t, %tid.x;\n\tmul.wide.u32 %t4, %t, 4;\n"
+        f"{code}\tret;\n}}\n"
     )
 
 
@@ -50,28 +78,29 @@ def _bindings(x):
 
 @requires_sm(9, 0)
 def test_first_program_graph_capture_prepares_tma_descriptors():
-    source = r"""struct __align__(64) CUtensorMap { unsigned long long opaque[16]; };
-extern "C" __global__ void tma_copy(float* y, const CUtensorMap* x_desc) {
-    __shared__ __align__(128) float tile[16][16];
-    __shared__ unsigned long long bar;
-    if (threadIdx.x == 0) {
-        unsigned int tile_addr = __cvta_generic_to_shared(tile);
-        unsigned int bar_addr = __cvta_generic_to_shared(&bar);
-        unsigned long long state;
-        asm volatile("mbarrier.init.shared.b64 [%0], 1;" :: "r"(bar_addr) : "memory");
-        asm volatile("fence.proxy.async.shared::cta;" ::: "memory");
-        asm volatile("mbarrier.arrive.expect_tx.shared.b64 %0, [%1], 1024;"
-                     : "=l"(state) : "r"(bar_addr) : "memory");
-        asm volatile("cp.async.bulk.tensor.2d.shared::cta.global.mbarrier::complete_tx::bytes "
-                     "[%0], [%1, {%2, %3}], [%4];"
-                     :: "r"(tile_addr), "l"(x_desc), "r"(0), "r"(0), "r"(bar_addr) : "memory");
-        asm volatile("{.reg .pred p; wait: mbarrier.try_wait.parity.shared.b64 p, [%0], 0; @!p bra wait;}"
-                     :: "r"(bar_addr) : "memory");
-    }
-    __syncthreads();
-    y[threadIdx.x] = tile[threadIdx.x / 16][threadIdx.x % 16] + 1.0f;
-}
-"""
+    # Thread 0 copies the 16 x 16 tile through the tensor map into a slab; every thread waits for the copy.
+    source = kernel_ptx(
+        "tma_copy",
+        """
+        Grid(axes=(t in 0..256), decode=(thread_idx.x), block_threads=256):
+            Smem(name=tile, extents=(1, 16, 16), dtype=f32, align=128)
+            Smem(name=bar, extents=(1), dtype=u64)
+            TmaDescriptor(name=x_desc, src_buf=x, src_shape=(16, 16), box_extents=(16, 16))
+            if t == 0:
+                MbarrierInit(mbar=bar, count=1, slot=0)
+            Sync
+            if t == 0:
+                MbarrierArriveExpectTx(mbar=bar, bytes_=1024, slot=0)
+                TmaLoad(smem=tile, smem_index=(0, 0, 0), desc=x_desc, coords=(0, 0), mbar=bar, mbar_slot=0)
+            MbarrierWait(mbar=bar, phase=0, slot=0)
+            f32 v = load tile[t]
+            f32 u = v + 1.0
+            f32 y[t] = u
+        """,
+        (("y", "output", "f32"), ("x_desc", "descriptor", None)),
+        threads=256,
+        arch_specific=True,
+    )
     plan = ExecutionPlan(
         "cuda",
         ["x"],
@@ -167,12 +196,15 @@ def test_native_gpu_failure_restarts_cleanly(tmp_path, monkeypatch, fault):
     monkeypatch.setenv("EMMY_CUBIN_CACHE", str(tmp_path / "cache"))
     good = _plan()
     bad = _plan()
-    body = (
-        "unsigned long long start=clock64(); while(clock64()-start < 1000000000ULL) {} y[threadIdx.x]=x[threadIdx.x];"
+    # A kernel that spins for a second of clocks, or one that stores through a null address.
+    code = (
+        "\tmov.u64 %start, %clock64;\nWAIT:\n\tmov.u64 %clock, %clock64;\n\tsub.u64 %clock, %clock, %start;\n"
+        "\tsetp.lt.u64 %p, %clock, 1000000000;\n\t@%p bra WAIT;\n"
+        "\tadd.u64 %at, %x, %t4;\n\tld.global.f32 %a, [%at];\n\tadd.u64 %at, %y, %t4;\n\tst.global.f32 [%at], %a;\n"
         if fault == "deadline"
-        else "*(volatile float*)0 = 1.0f;"
+        else "\tmov.u64 %at, 0;\n\tst.volatile.global.f32 [%at], 0f3F800000;\n"
     )
-    bad.kernels["add"] = KernelSpec(source='extern "C" __global__ void add(float* y, const float* x, const float* w) {' + body + "}")
+    bad.kernels["add"] = KernelSpec(source=_module("add", ("y", "x", "w"), code))
     with gpu_lock():
         x = np.arange(32, dtype=np.float32)
         root = save_executable(
@@ -213,17 +245,28 @@ def test_shared_memory_uses_cubin_static_and_plan_dynamic_storage(tmp_path, stat
     executable = shutil.which("emmy-runtime-worker")
     if not executable:
         pytest.skip("build emmy-runtime-worker and add it to PATH")
-    declarations, writes, reads = [], [], []
+    # Each array filled from ``x`` by a strided loop, then every thread sums its element of each, counted from the end.
+    declarations, code, reads = "", "", []
     for name, count, declaration in (
-        ("fixed", static_count, f"__shared__ float fixed[{static_count}];"),
-        ("extra", dynamic_count, "extern __shared__ float extra[];"),
+        ("fixed", static_count, f".shared .align 4 .f32 fixed[{static_count}];\n"),
+        ("extra", dynamic_count, ".extern .shared .align 4 .f32 extra[];\n"),
     ):
         if count:
-            declarations.append(declaration)
-            writes.append(f"for (int i=threadIdx.x; i<{count}; i+=blockDim.x) {name}[i]=x[i%128];")
-            reads.append(f"{name}[{count}-1-threadIdx.x]")
-    source = 'extern "C" __global__ void shared(const float* x, float* y) {'
-    source += "".join(declarations + writes) + "__syncthreads(); y[threadIdx.x]=" + "+".join(reads) + ";}"
+            declarations += declaration
+            code += (
+                f"\tmov.u32 %i, %t;\nFILL_{name}:\n\tand.b32 %s, %i, 127;\n\tmul.wide.u32 %at, %s, 4;\n"
+                f"\tadd.u64 %at, %x, %at;\n\tld.global.f32 %a, [%at];\n\tmov.u32 %s, {name};\n\tmad.lo.u32 %s, %i, 4, %s;\n"
+                f"\tst.shared.f32 [%s], %a;\n\tadd.u32 %i, %i, 128;\n\tsetp.lt.u32 %p, %i, {count};\n\t@%p bra FILL_{name};\n"
+            )
+            reads.append((name, count))
+    code += "\tbar.sync 0;\n\tmov.f32 %c, 0f00000000;\n"
+    for name, count in reads:
+        code += (
+            f"\tsub.u32 %i, {count - 1}, %t;\n\tmov.u32 %s, {name};\n\tmad.lo.u32 %s, %i, 4, %s;\n"
+            "\tld.shared.f32 %b, [%s];\n\tadd.f32 %c, %c, %b;\n"
+        )
+    code += "\tadd.u64 %at, %y, %t4;\n\tst.global.f32 [%at], %c;\n"
+    source = _module("shared", ("x", "y"), code, declarations)
     plan = ExecutionPlan(
         "cuda",
         ["x"],
@@ -270,7 +313,12 @@ def test_a_lent_operand_swaps_without_waiting_for_queued_launches():
     before one synchronize, and each run reads the weights it was launched with."""
     import torch
 
-    kernel = 'extern "C" __global__ void mul(float* y, const float* x, const float* w) { int i=threadIdx.x; y[i] = x[i]*w[i]; }'
+    kernel = _module(
+        "mul",
+        ("y", "x", "w"),
+        "\tadd.u64 %at, %x, %t4;\n\tld.global.f32 %a, [%at];\n\tadd.u64 %at, %w, %t4;\n\tld.global.f32 %b, [%at];\n"
+        "\tmul.rn.f32 %c, %a, %b;\n\tadd.u64 %at, %y, %t4;\n\tst.global.f32 [%at], %c;\n",
+    )
     plan = ExecutionPlan(
         "cuda",
         ["x", "w"],

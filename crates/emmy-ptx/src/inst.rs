@@ -56,6 +56,7 @@ pub enum Ty {
     B64,
     U8,
     U16,
+    S16,
     S32,
     U32,
     S64,
@@ -63,6 +64,7 @@ pub enum Ty {
     F16,
     Bf16,
     F32,
+    F64,
     /// Two halves in one 32-bit register: what a packed conversion writes.
     F16x2,
     Bf16x2,
@@ -86,6 +88,7 @@ impl Ty {
             Ty::B64 => "b64",
             Ty::U8 => "u8",
             Ty::U16 => "u16",
+            Ty::S16 => "s16",
             Ty::S32 => "s32",
             Ty::U32 => "u32",
             Ty::S64 => "s64",
@@ -93,6 +96,7 @@ impl Ty {
             Ty::F16 => "f16",
             Ty::Bf16 => "bf16",
             Ty::F32 => "f32",
+            Ty::F64 => "f64",
             Ty::F16x2 => "f16x2",
             Ty::Bf16x2 => "bf16x2",
             Ty::E4m3 => "e4m3",
@@ -109,25 +113,25 @@ impl Ty {
     pub fn bank(self) -> Bank {
         match self {
             Ty::Pred => Bank::Pred,
-            Ty::B16 | Ty::U16 | Ty::F16 | Ty::Bf16 | Ty::E4m3x2 | Ty::E5m2x2 => Bank::B16,
+            Ty::B16 | Ty::U16 | Ty::S16 | Ty::F16 | Ty::Bf16 | Ty::E4m3x2 | Ty::E5m2x2 => Bank::B16,
             Ty::B32 | Ty::U8 | Ty::S32 | Ty::U32 | Ty::F16x2 | Ty::Bf16x2 => Bank::B32,
             Ty::E4m3 | Ty::E5m2 | Ty::E2m1 | Ty::Ue4m3 => Bank::B32,
-            Ty::B64 | Ty::S64 | Ty::U64 => Bank::B64,
+            Ty::B64 | Ty::S64 | Ty::U64 | Ty::F64 => Bank::B64,
             Ty::F32 => Bank::F32,
         }
     }
 
     pub fn is_float(self) -> bool {
-        matches!(self, Ty::F16 | Ty::Bf16 | Ty::F32)
+        matches!(self, Ty::F16 | Ty::Bf16 | Ty::F32 | Ty::F64)
     }
 
     /// The bytes one value takes in memory.
     pub fn bytes(self) -> i64 {
         match self {
             Ty::Pred | Ty::U8 | Ty::E4m3 | Ty::E5m2 | Ty::E2m1 | Ty::Ue4m3 => 1,
-            Ty::B16 | Ty::U16 | Ty::F16 | Ty::Bf16 | Ty::E4m3x2 | Ty::E5m2x2 => 2,
+            Ty::B16 | Ty::U16 | Ty::S16 | Ty::F16 | Ty::Bf16 | Ty::E4m3x2 | Ty::E5m2x2 => 2,
             Ty::B32 | Ty::S32 | Ty::U32 | Ty::F32 | Ty::F16x2 | Ty::Bf16x2 => 4,
-            Ty::B64 | Ty::S64 | Ty::U64 => 8,
+            Ty::B64 | Ty::S64 | Ty::U64 | Ty::F64 => 8,
         }
     }
 }

@@ -1,21 +1,15 @@
-"""The Hopper warp-group MMA statements of the kernel IR: render snapshots, the descriptor's bit layout, and a
-compile-only build of every wrapper form at ``sm_90a`` — none of which needs a Hopper card."""
+"""The Hopper warp-group MMA statements of the kernel IR: their text form, the descriptor's bit layout, and the
+arch-suffixed target they ask for — none of which needs a Hopper card. The PTX each compiles to is the PTX compiler's
+(``crates/emmy-ptx/tests/hopper.rs``)."""
 
 from __future__ import annotations
 
-import subprocess
-
 import pytest
 
-from emmy.compiler.backend.cuda import nvcc
-from emmy.compiler.dtype import F16, F32
 from emmy.compiler.ir.kernel.interface import needs_arch_isa
 from emmy.compiler.ir.kernel.ir import (
     KernelOp,
-    Literal,
     MmaSyncPtx,
-    RegFragment,
-    Smem,
     Var,
     WgmmaCommit,
     WgmmaDescriptor,
@@ -24,9 +18,7 @@ from emmy.compiler.ir.kernel.ir import (
     WgmmaWait,
     wgmma_descriptor_bits,
 )
-from emmy.compiler.ir.kernel.render import _WGMMA_PRELUDE, _wgmma_prelude, render_kernelop
-from emmy.compiler.ir.render import RenderCtx, render_stmt
-from emmy.compiler.ir.stmt import Body, parse_body
+from emmy.compiler.ir.stmt import Body
 
 _NS = (64, 128, 256)
 _DTYPES = ("f16", "bf16")
@@ -42,16 +34,9 @@ def _cell(n: int = 64, ab_dtype: str = "bf16", form: str = "ss", **kw) -> WgmmaM
     return WgmmaMma(c_frags=_frags(n), b_desc="bD", shape=(64, n, 16), ab_dtype=ab_dtype, **a, **kw)
 
 
-def _line(stmt) -> str:
-    return render_stmt(stmt, RenderCtx())[0].strip()
-
-
-@pytest.mark.parametrize(("swizzle", "mode"), [("NONE", 0), ("B128", 1), ("B64", 2), ("B32", 3), ("B128@7", 1)])
-def test_the_descriptor_renders_its_swizzle_as_the_layout_type(swizzle: str, mode: int) -> None:
+@pytest.mark.parametrize("swizzle", ["NONE", "B128", "B64", "B32", "B128@7"])
+def test_the_descriptor_reads_its_slab(swizzle: str) -> None:
     desc = WgmmaDescriptor(name="bD", smem="K_s", smem_index=Var("k0") * 64, swizzle=swizzle, lbo_bytes=16, sbo_bytes=1024)
-    assert _line(desc) == f"unsigned long long bD = emmy_wgmma_desc(emmy_smem_u32(&K_s[k0 * 64]), 16, 1024, {mode});"
-    whole = WgmmaDescriptor(name="aD", smem="Q_s", smem_index=None, swizzle=swizzle, lbo_bytes=16, sbo_bytes=1024)
-    assert _line(whole) == f"unsigned long long aD = emmy_wgmma_desc(emmy_smem_u32(Q_s), 16, 1024, {mode});"
     assert desc.defines() == ("bD",) and desc.deps() == () and desc.external_reads() == ("K_s",)
 
 
@@ -70,101 +55,29 @@ def test_the_descriptor_bits_of_a_128b_swizzled_bf16_slab() -> None:
     assert wgmma_descriptor_bits(0x40000, 0, 0, 0) == 0
 
 
-def test_the_c_prelude_spells_the_same_descriptor_formula() -> None:
-    for shift in ("(addr >> 4) & 0x3FFF", "((lbo >> 4) & 0x3FFF) << 16", "((sbo >> 4) & 0x3FFF) << 32", "(mode << 62)"):
-        assert shift in _WGMMA_PRELUDE
-
-
 @pytest.mark.parametrize("n", _NS)
 @pytest.mark.parametrize("ab_dtype", _DTYPES)
 @pytest.mark.parametrize("form", _FORMS)
-def test_the_wrapper_name_spells_n_dtype_and_form(n: int, ab_dtype: str, form: str) -> None:
+def test_the_text_form_spells_n_dtype_and_form(n: int, ab_dtype: str, form: str) -> None:
     cell = _cell(n, ab_dtype, form)
     acc = ", ".join(_frags(n))
-    a, tnsp = ("aD", "<0, 0>") if form == "ss" else ("a", "<0>")
-    assert _line(cell) == f"emmy_wgmma_m64n{n}k16_{ab_dtype}_f32_{form}{tnsp}({acc}, {a}, bD, 1);"
     operand = "a_desc=aD" if form == "ss" else "a_frag=a"
     dtype = "" if ab_dtype == "f16" else f", ab_dtype={ab_dtype}"
     assert str(cell) == f"WgmmaMma(c_frags=({acc}), b_desc=bD, shape=(64, {n}, 16){dtype}, {operand})"
 
 
-def test_the_transpose_bits_and_scale_d_reach_the_call() -> None:
+def test_the_transpose_bits_and_scale_d_stand_in_the_text_form() -> None:
     ss = _cell(64, "f16", "ss", scale_d=0, trans_a=1, trans_b=1)
-    assert _line(ss).endswith("_f32_ss<1, 1>(c0, c1, c2, c3, c4, c5, c6, c7, aD, bD, 0);")
     assert str(ss).endswith("a_desc=aD, scale_d=0, trans_a=1, trans_b=1)")
-    rs = _cell(64, "f16", "rs", trans_b=1)
-    assert _line(rs).endswith("_f32_rs<1>(c0, c1, c2, c3, c4, c5, c6, c7, a, bD, 1);")
 
 
-def test_fence_commit_wait_render_the_bare_instructions() -> None:
-    assert _line(WgmmaFence()) == 'asm volatile("wgmma.fence.sync.aligned;\\n" ::: "memory");'
-    assert _line(WgmmaCommit()) == 'asm volatile("wgmma.commit_group.sync.aligned;\\n" ::: "memory");'
-    assert _line(WgmmaWait()) == 'asm volatile("wgmma.wait_group.sync.aligned 0;\\n" ::: "memory");'
-    assert _line(WgmmaWait(1)) == 'asm volatile("wgmma.wait_group.sync.aligned 1;\\n" ::: "memory");'
+def test_fence_commit_wait_read_and_define_nothing() -> None:
     for stmt in (WgmmaFence(), WgmmaCommit(), WgmmaWait()):
         assert stmt.deps() == () and stmt.defines() == ()
     assert [str(s) for s in (WgmmaFence(), WgmmaCommit(), WgmmaWait(2))] == ["WgmmaFence", "WgmmaCommit", "WgmmaWait(group=2)"]
-
-
-def test_the_prelude_joins_only_with_a_wgmma_cell() -> None:
-    plain = KernelOp(body=Body((MmaSyncPtx(c_frag="c", a_frag="a", b_frag="b", shape=(16, 8, 16)),)), name="k")
-    assert _wgmma_prelude(plain) == ""
-    assert "emmy_wgmma_" not in render_kernelop(plain)
-    op = KernelOp(body=Body((_cell(64, "bf16", "ss"), _cell(64, "bf16", "ss", trans_b=1), _cell(64, "f16", "rs"))), name="k")
-    prelude = _wgmma_prelude(op)
-    assert prelude.count("emmy_smem_u32(") == 1 and prelude.count("emmy_wgmma_desc(") == 1
-    # One wrapper per (N, dtype, form) — the two ss cells share theirs; the transpose bits are template
-    # arguments, which is why the wrapper count does not grow with them.
-    assert prelude.count("static __device__ __forceinline__ void emmy_wgmma_") == 2
-    assert prelude.count("void emmy_wgmma_m64n64k16_bf16_f32_ss(") == 1 and prelude.count("void emmy_wgmma_m64n64k16_f16_f32_rs(") == 1
-    # Operand order: d0..d31 fragment-major / register-minor, then A, B, the scale-d predicate and the
-    # scale-A / scale-B / transpose immediates.
-    d_regs = ", ".join(f"%{i}" for i in range(32))
-    assert f"wgmma.mma_async.sync.aligned.m64n64k16.f32.bf16.bf16 {{{d_regs}}}, %32, %33, p, 1, 1, %35, %36;" in prelude
-    assert f"wgmma.mma_async.sync.aligned.m64n64k16.f32.f16.f16 {{{d_regs}}}, {{%32, %33, %34, %35}}, %36, p, 1, 1, %38;" in prelude
-    assert "setp.ne.b32 p, %34, 0;" in prelude and "setp.ne.b32 p, %37, 0;" in prelude
-    assert ': "+f"(c0[0]), "+f"(c0[1]), "+f"(c0[2]), "+f"(c0[3]), "+f"(c1[0]),' in prelude
-    assert '"+f"(c7[3])\n' in prelude
-    assert ': "l"(a_desc), "l"(b_desc), "r"(scale_d), "n"(TnspA), "n"(TnspB));' in prelude
-    assert ': "r"(a[0]), "r"(a[1]), "r"(a[2]), "r"(a[3]), "l"(b_desc), "r"(scale_d), "n"(TnspB));' in prelude
-    assert render_kernelop(op).startswith(prelude)
 
 
 def test_a_kernel_carrying_a_wgmma_cell_asks_for_the_arch_suffixed_target() -> None:
     plain = KernelOp(body=Body((MmaSyncPtx(c_frag="c", a_frag="a", b_frag="b", shape=(16, 8, 16)),)), name="k")
     assert needs_arch_isa(KernelOp(body=Body((_cell(64, "bf16", "ss"),)), name="k"))
     assert not needs_arch_isa(plain)
-
-
-def _driver() -> str:
-    """One kernel issuing every wrapper form from IR statements — the compile-only stand-in for the
-    lowering's leaf: a 128B-swizzled slab read through two descriptors, the N/8 C fragments each
-    cell accumulates into, the register-form A fragment, the fence / commit / wait around them, and
-    a store of every accumulator register after the wait so no cell is dead. The first cell starts
-    the accumulator (``scale_d=0``); every later one accumulates, so ptxas keeps the whole chain."""
-    forms = [(n, ab, form) for n in _NS for ab in _DTYPES for form in _FORMS]
-    stmts = [
-        Smem(name="K_s", extents=(64 * 64,), dtype="unsigned short", align=1024),
-        *(RegFragment(name=f"c{j}", role="c", dtype=F32, fragment_layout="wgmma") for j in range(256 // 8)),
-        RegFragment(name="a", role="a", dtype=F16, fragment_layout="wgmma"),
-        WgmmaDescriptor(name="aD", smem="K_s", smem_index=None, swizzle="B128", lbo_bytes=16, sbo_bytes=1024),
-        WgmmaDescriptor(name="bD", smem="K_s", smem_index=Literal(64 * 8, "int"), swizzle="B128", lbo_bytes=16, sbo_bytes=1024),
-        WgmmaFence(),
-        *(_cell(n, ab, form, scale_d=int(i > 0), trans_b=int(ab == "f16")) for i, (n, ab, form) in enumerate(forms)),
-        WgmmaCommit(),
-        WgmmaWait(),
-        *parse_body("\n".join(f"f32 out[{4 * j + k}] = `c{j}[{k}]`" for j in range(256 // 8) for k in range(4))),
-    ]
-    return render_kernelop(KernelOp(body=Body(tuple(stmts)), name="k_wgmma_probe"), shapes={"out": (128,)})
-
-
-@pytest.mark.skipif(nvcc.nvcc_path() is None, reason="nvcc unavailable")
-def test_every_wrapper_form_builds_at_sm_90a(monkeypatch, tmp_path) -> None:
-    monkeypatch.setattr(nvcc, "cubin_cache_dir", lambda: tmp_path)
-    source = _driver()
-    assert nvcc.compile_to_cubin(source, "k_wgmma_probe", arch="sm_90a").exists()
-    # The instruction is arch-specific: the same source is refused at the plain target, which is
-    # what ``needs_arch_isa`` guards.
-    with pytest.raises(subprocess.CalledProcessError) as err:
-        nvcc.compile_to_cubin(source, "k_wgmma_probe", arch="sm_90")
-    assert b"wgmma" in err.value.stderr

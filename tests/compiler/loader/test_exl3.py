@@ -673,12 +673,12 @@ def test_input_spelling_reaches_cuda_source_without_format_ir():
     from emmy.serving.gen_runner import _bind_plan_constants
 
     assert set(_bind_plan_constants(plan, {}, cache=None)) == set(plan.weights)
-    # CUDA spelling: moves to the PTX compiler's tests
+    # The decode is integer bit manipulation in 32 and 64 bits, its 64-bit window shifted right by zeros, and its
+    # 16-bit codes read as halves through the low half of a register.
     source = "\n".join(op.kernel_source for op in cuda)
-    assert "emmy_bitcast" in source and "#include <cuda_fp16.h>" in source
-    for spelling in (" % ", " << ", " >> ", " & ", " | ", " ^ "):
-        assert spelling in source
-    assert "unsigned int" in source and "unsigned long long" in source
+    opcodes = {line.split()[0] for line in source.splitlines() if line.startswith("\t") and not line.startswith("\t//")}
+    for opcode in ("shl.b32", "shr.u64", "and.b32", "or.b64", "xor.b32", "rem.s32", "cvt.u16.u32"):
+        assert opcode in opcodes, sorted(opcodes)
     active_ir = "\n".join(f"{nid} {type(node.op).__module__} {type(node.op).__name__}" for nid, node in lowered.nodes.items())
     assert "trellis" not in active_ir.lower() and "exl3" not in active_ir.lower()
 

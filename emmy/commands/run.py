@@ -240,19 +240,15 @@ def register_run_command(subparsers):
             "-vv: also per-rule application snapshots."
         ),
     )
-    from emmy.commands.compile import add_nvcc_args
     from emmy.compiler.target import add_target_arg
 
-    add_nvcc_args(parser)
     add_target_arg(parser, dest="gpu_arch", option="--gpu-arch")
     parser.set_defaults(func=handle_run)
 
 
 def handle_run(args):
-    from emmy.commands.compile import apply_nvcc_flags
     from emmy.compiler.target import CPU_TARGET, apply_target_arg
 
-    apply_nvcc_flags(args, default="")  # run uses nvcc default -O3 (representative codegen)
     cpu = args.gpu_arch == CPU_TARGET
     if not cpu:
         apply_target_arg(args, dest="gpu_arch")
@@ -1066,18 +1062,12 @@ def _family_layouts(args):
 
 
 def _records_evidence(args, *, timed: bool = True) -> bool:
-    """Whether this run's bench writes tune-DB evidence: not opted out (``--no-record-evidence``), compiled in the
-    deployable regime, and, for a timing (``timed``), benched at the tune bench standard. A run at another
-    optimization level (the test suite's ``-Xcicc -O1`` compile) measures a kernel no deploy compiles; a run below
-    the standard is a quick look, whose median could displace a recorded row. A ``bench_fail`` row is no timing."""
-    from emmy.compiler.context import Context  # noqa: PLC0415
+    """Whether this run's bench writes tune-DB evidence: not opted out (``--no-record-evidence``) and, for a timing
+    (``timed``), benched at the tune bench standard. A run below the standard is a quick look, whose median could
+    displace a recorded row. A ``bench_fail`` row is no timing."""
     from emmy.compiler.pipeline.search.bench_record import meets_quality_bar  # noqa: PLC0415
 
-    return (
-        not getattr(args, "no_record_evidence", False)
-        and float(Context.probe().features().get("H_opt", 3.0)) == 3.0
-        and (not timed or meets_quality_bar(args.warmup, args.iters))
-    )
+    return not getattr(args, "no_record_evidence", False) and (not timed or meets_quality_bar(args.warmup, args.iters))
 
 
 def _note_below_standard(args) -> None:
@@ -1095,8 +1085,7 @@ def _record_greedy_failure(args, backend, graph, exc) -> None:
     """A greedy pick that failed to bench is evidence too (``--no-record-evidence`` opts out): the
     kernel the watchdog named earns its ``bench_fail`` perf row at the run budget's fail sentinel,
     exactly as the tuner files a hung terminal, so the next ``compile`` / ``run`` / ``serve``
-    disqualifies that arm instead of electing the same route and hanging again. Recorded only in
-    the deployable regime (:func:`_records_evidence`)."""
+    disqualifies that arm instead of electing the same route and hanging again (:func:`_records_evidence`)."""
     if not _records_evidence(args, timed=False):
         return
     from emmy.commands.compile import resolve_tune_db  # noqa: PLC0415
@@ -1114,7 +1103,7 @@ def _record_bench_evidence(args, golden_benches, greedy_iso, decisions=()) -> No
     and the greedy isolated re-bench become per-kernel ``perf`` rows in the tune DB — the measured
     evidence the next compile's greedy pick deploys, which is how a replayed golden or a hand-pinned
     ``--ab`` row becomes what ``compile`` / ``run`` / ``serve`` choose. Records only at tune-standard
-    measurement quality, and only in the deployable regime; ``record_perf`` keeps the best
+    measurement quality; ``record_perf`` keeps the best
     measurement per kernel. A clean row is an ``ok`` row with NO integrity flag — a flagged ok row
     measured something untrue (wrong answer, intensity floor). ``decisions`` are the kernel-set
     decisions the greedy compile took; once the greedy re-bench is recorded they become ``routing``
@@ -1242,7 +1231,7 @@ _TWIN_JIT_S_PER_NODE = 2.0
 
 def _compare_wall_s(graph, backend, *, base_s: float, twin=None) -> float:
     """Workload-scaled SIGKILL cap for a worker comparison job. A fixed cap false-fails
-    legitimate big runs: the child pays a first nvcc compile of EVERY kernel (the in-child
+    legitimate big runs: the child pays a first compile of EVERY kernel (the in-child
     compile budget bounds each) plus the bench itself, on top of ``base_s`` for its own
     setup — a dozen-kernel model layer legitimately needs several hundred seconds where a
     single --code kernel needs a fraction. ``twin`` is the frontend graph the Torch twin is
@@ -2990,16 +2979,16 @@ def _parse_ncu_csv(csv_text: str) -> dict:
 
 def _detect_stage(graph) -> str:
     """Identify the IR stage by scanning op type names. Returns one of
-    ``torch | tensor | loop | tile | kernel | cuda`` — the highest-stage
+    ``torch | tensor | loop | tile | kernel | ptx`` — the highest-stage
     op present in the graph wins, since lowering produces a graph mixed
     only briefly during a pass and stable in the post-pass form."""
     stage_by_op: dict[str, str] = {
-        "CudaOp": "cuda",
+        "CudaOp": "ptx",
         "KernelOp": "kernel",
         "TileOp": "tile",
         "LoopOp": "loop",
     }
-    order = ["torch", "tensor", "loop", "tile", "kernel", "cuda"]
+    order = ["torch", "tensor", "loop", "tile", "kernel", "ptx"]
     best = "torch"
     for node in graph.nodes.values():
         s = stage_by_op.get(type(node.op).__name__)
@@ -3026,7 +3015,7 @@ def _passes_after_stage(stage: str) -> list[str]:
         "loop": LOOP_PASSES,
         "tile": TILE_PASSES,
         "kernel": KERNEL_PASSES,
-        "cuda": CUDA_PASSES,
+        "ptx": CUDA_PASSES,
     }[stage]
     return [p for p in CUDA_PASSES if p not in completed]
 

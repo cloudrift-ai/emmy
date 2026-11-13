@@ -6,7 +6,7 @@ from emmy.commands.trace import graph_from_code
 from emmy.compiler.context import Context
 from emmy.compiler.ir.axis import Axis
 from emmy.compiler.ir.expression import Literal
-from emmy.compiler.ir.kernel.ir import pack_smem, swizzle_fn, swizzle_xor
+from emmy.compiler.ir.kernel.ir import pack_smem, swizzle_xor
 from emmy.compiler.ir.pure.fold import Fold
 from emmy.compiler.ir.stmt import Assign, Body, Load, parse_body
 from emmy.compiler.ir.tile.ops import cone_stat
@@ -102,7 +102,7 @@ def test_software_swizzle_shifts_by_the_slab_row_not_the_atom() -> None:
     positions, and the ``ldmatrix`` drain over 16 rows goes multi-way bank-conflicted (measured
     7.8-way at ``D = 128`` on an A100, none at ``D = 64``). A one-atom row — and a non-power-of-two
     one, where no row bit is extractable — keeps the PLAIN spelling, so every slab that already
-    drained conflict-free renders byte-identically.
+    drained conflict-free keeps its layout.
     """
     assert software_swizzle(64, 2) == "B128"  # one 128 B atom: the default shift already is the row
     assert software_swizzle(32, 2) == "B64"  # one 64 B atom
@@ -114,10 +114,6 @@ def test_software_swizzle_shifts_by_the_slab_row_not_the_atom() -> None:
     assert swizzle_xor("B128") == (6, 0x7)
     assert swizzle_xor("B128@7") == (7, 0x7)  # the override moves the shift, never the row mask
     assert swizzle_xor("NONE") is None
-    # One emitted helper per distinct (mask, shift): the plain mode keeps its name, so an
-    # unchanged slab's kernel source is unchanged.
-    assert swizzle_fn("B128") == "emmy_swizzle_b128"
-    assert swizzle_fn("B128@7") == "emmy_swizzle_b128_s7"
 
 
 def test_a_staged_slab_aligns_to_its_fill_chunk_not_its_element() -> None:

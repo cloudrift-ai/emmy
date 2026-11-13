@@ -235,8 +235,8 @@ FAST_EXP = Knob(
 
 # The other instruction classes of the precision-trading family, each pin-only and, but for FMA contraction, following
 # FAST_MATH like FAST_EXP. An approximate instruction is an operation the kernel body names
-# (``lowering/kernel/130_approximate_math``); flush to zero and FMA contraction hold for a whole kernel and are nvcc
-# flags (``backend.cuda.nvcc.precision_flags``).
+# (``lowering/kernel/130_approximate_math``); flush to zero and FMA contraction hold for a whole kernel and reach the
+# PTX compiler as the kernel's two precision decisions.
 
 FAST_DIV = Knob(
     "FAST_DIV",

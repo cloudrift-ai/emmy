@@ -2294,7 +2294,7 @@ def realize(match: Match, root: Node, seams, *, joins: tuple = ()) -> Graph:
         producer = TileOp(
             op=produced,
             # The seam token keeps recursive pieces' kernel names distinct — the one-name-one-source
-            # launch rule stated beside ``nvcc.load_cubin_function``: two same-named producers from
+            # launch rule stated in ``backend.plan``: two same-named producers from
             # different cut levels would launch one kernel twice.
             name=f"{tile.name}__place_{token}",
             # The workspace axes are the store's SWEEP, and the one rank rule

@@ -46,31 +46,38 @@ _TENSOR_CORE_GEN = gpu.TENSOR_CORE_GEN
 DEFAULT_SM_COUNT = gpu.DEFAULT_GPU.sm_count
 
 
+def precision_flags(pins: dict[str, bool]) -> list[str]:
+    """How a context's ``compile_flags`` spells the two precision decisions among ``pins`` (``space.precision_pins``)
+    that hold for a whole kernel: flush to zero and multiply-add fusion, each where it is not the default (no flush,
+    fusion). They were nvcc's flags; the PTX compiler reads the decisions themselves, and the spelling stays because
+    every stored measurement's context key (:meth:`Context.structural_key`) is a digest of it."""
+    from emmy.compiler.pipeline.search.space import CONTRACT_FMA, FLUSH_TO_ZERO  # noqa: PLC0415
+
+    return [*(["--ftz=true"] if pins[FLUSH_TO_ZERO.name] else []), *([] if pins[CONTRACT_FMA.name] else ["--fmad=false"])]
+
+
 def _env_compile_flags() -> str:
-    """Effective nvcc flags: the flush and fusion decisions' flags and custom overrides.
+    """The live regime's ``compile_flags``: the live precision decisions' spelling (:func:`precision_flags`)."""
+    from emmy.compiler.pipeline.search.space import precision_pins  # noqa: PLC0415
 
-    Folded into Context.structural_key, beside the precision decisions themselves, so timing evidence cannot cross
-    arithmetic regimes."""
-    from emmy.compiler.backend.cuda.nvcc import effective_flags  # noqa: PLC0415
-
-    return " ".join(effective_flags())
+    return " ".join(precision_flags(precision_pins()))
 
 
-# The cicc optimization level as it is spelled on the nvcc command line, with the ``-Xcicc``
-# forwarding prefix when present. nvcc's own default is -O3, which is why an absent token reads
-# as 3 (:func:`split_opt_level`) — the compile / run default of ``""`` IS the deployable regime.
+# The cicc optimization level as nvcc spelled it, with the ``-Xcicc`` forwarding prefix when present. No compile
+# spells one now: every compile is the deployable regime, level 3, which is what an absent token reads as
+# (:func:`split_opt_level`). A row measured under nvcc at another level still carries its token.
 _OPT_TOKEN = re.compile(r"(?:-Xcicc\s+)?-O(\d)")
 
 
 #: The fast-math lane's name: the nvcc flag the umbrella passed until every approximate instruction became an
-#: operation of the kernel body. No flag list holds it now (``backend.cuda.nvcc.precision_flags``). A dataset still
+#: operation of the kernel body. No flag list holds it now (:func:`precision_flags`). A dataset still
 #: keys the lane by it (``dataset.regime_of``), and a caller that hands :meth:`Context.from_target` a flag string
 #: alone names the umbrella by it.
 FAST_MATH_FLAG = "--use_fast_math"
 
 
 def split_opt_level(compile_flags: str) -> tuple[int, str]:
-    """Split effective nvcc flags into ``(cicc opt level, everything else)``.
+    """Split a regime's flags into ``(cicc opt level, everything else)``.
 
     ONE parse, shared by the two places the opt level matters: the ``H_opt`` feature
     (:meth:`Context.features`) and the identity a measurement is stored under
@@ -186,9 +193,10 @@ class Context:
     # measured in — a kernel timed on 16 threads says nothing about one deployed on 6. Empty and 0 on CUDA.
     host_cpu: str = ""
     threads: int = 0
-    # Effective nvcc flags, from the precision decisions plus EMMY_NVCC_FLAGS. Folded into structural_key
-    # so timings under different arithmetic or optimization flags cannot rank one another.
-    # Populated from the environment by probe / from_target.
+    # The regime's flags: the spelling of the two whole-kernel precision decisions (:func:`precision_flags`), and,
+    # for a row measured under nvcc, the cicc opt level it was built at. Folded into structural_key so timings under
+    # different arithmetic or optimization regimes cannot rank one another. Populated from the precision decisions
+    # by probe / from_target; no compile spells an opt level, so every compile is the deployable level 3.
     compile_flags: str = ""
     # Bound precision decisions — the one carrier of the fast-math decision: ``compile_flags`` names it only
     # at construction (``from_target``), and every reader takes :meth:`precision_pins`. Empty on a directly
@@ -248,7 +256,6 @@ class Context:
         construction — :data:`DEFAULT_SM_COUNT` is the most common card in the corpus, so a
         misresolved name produces H_* features identical to a correct one on a GPU-less host.
         Recording goldens on a card before adding it to the registry is exactly when this fires."""
-        from emmy.compiler.backend.cuda.nvcc import precision_flags  # noqa: PLC0415
         from emmy.compiler.pipeline.search.space import COLD_CACHE, FAST_MATH, precision_pins, regime_pins  # noqa: PLC0415
 
         spec = gpu.by_name(gpu_name) if gpu_name else None
@@ -378,8 +385,8 @@ class Context:
         Folds in codegen fields and the cache regime used to select measurement evidence. ``compute_capability``
         gates hardware-feature passes (TMA, cp.async, dynamic smem cap);
         anything derived from it (``max_dynamic_smem``) is implied.
-        ``compile_flags`` is folded in because the nvcc opt level genuinely
-        changes the emitted SASS / measured latency (it is NOT a debug flag).
+        ``compile_flags`` is folded in because a row measured under nvcc at another opt
+        level timed other machine code (it is NOT a debug flag).
         As other non-derived knobs land (forced TMA on/off, splitk overrides),
         extend this method explicitly — keep ambient I/O fields out so the
         autotuning cache survives debug-flag flips.

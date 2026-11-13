@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-from contextlib import nullcontext
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -10,20 +9,24 @@ from emmy.compiler.pipeline.search.golden import GoldenFile
 from tests.compiler.realization import helpers
 
 
-def test_built_loads_the_lowered_program_through_nvcc(monkeypatch) -> None:
-    source = SimpleNamespace(copy=lambda: "source-copy")
-    case = SimpleNamespace(program=lambda: source)
-    lowered = object()
+def test_built_assembles_every_kernel_for_the_declared_card(monkeypatch) -> None:
+    from emmy.compiler.ir.cuda import CudaOp
+
+    graph = SimpleNamespace(
+        nodes={
+            "plain": SimpleNamespace(op=CudaOp(kernel_source="ptx", kernel_name="k_plain")),
+            "tma": SimpleNamespace(op=CudaOp(kernel_source="ptx", kernel_name="k_tma", arch_specific=True)),
+            "input": SimpleNamespace(op=object()),
+        }
+    )
+    case = SimpleNamespace(compute_cap=(9, 0), context=lambda: "declared")
     seen = []
 
-    monkeypatch.setattr(helpers, "lowered", lambda case, ctx: (lowered, []))
-    monkeypatch.setattr("emmy.compiler.context.Context.probe", staticmethod(lambda: "live"))
-    monkeypatch.setattr("emmy.compiler.backend.cuda.program.CompiledProgram.build", lambda graph, feed: seen.append((graph, feed)))
-    monkeypatch.setattr("emmy.compiler.backend.gpu_lock.gpu_lock", nullcontext)
-    monkeypatch.setattr(helpers, "seeded_inputs", lambda program: {"x": program})
+    monkeypatch.setattr(helpers, "lowered", lambda case, ctx: (graph, []) if ctx == "declared" else None)
+    monkeypatch.setattr("emmy.compiler.backend.cuda.ptxas.compile_to_cubin", lambda source, name, arch: seen.append((name, arch)))
 
-    assert helpers.built(case) is lowered
-    assert seen == [(lowered, {"x": source})]
+    assert helpers.built(case) is graph
+    assert seen == [("k_plain", "sm_90"), ("k_tma", "sm_90a")]
 
 
 def test_bench_command_replays_the_named_realization_through_the_golden_flags() -> None:

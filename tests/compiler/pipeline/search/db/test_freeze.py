@@ -50,11 +50,9 @@ _ROW = {"TILE": "f2x2", "WORK": "t16x16"}
 # ---------------------------------------------------------------------------
 
 
-def test_reason_keeps_a_row_of_either_precision_regime(monkeypatch) -> None:
+def test_reason_keeps_a_row_of_either_precision_regime() -> None:
     """A row's precision decisions alone decide its regime, spelled once and not read off this shell: the flags a
-    row was compiled with, and whatever ``EMMY_NVCC_FLAGS`` holds when the freeze runs, leave it where its context
-    put it."""
-    monkeypatch.setenv("EMMY_NVCC_FLAGS", "-lineinfo")
+    row was compiled with leave it where its context put it."""
     assert freeze_reason(_row("k", us=500.0, knobs=_ROW), _STAMPS) is None
     assert freeze_reason(_row("k", us=500.0, knobs=_ROW, flags="--use_fast_math"), _STAMPS) is None
     assert freeze_reason(_row("k", us=500.0, knobs=_ROW, flags="-lineinfo --use_fast_math"), _STAMPS) is None

@@ -36,7 +36,8 @@ BUFFER_ALIGN = 16
 @dataclass(frozen=True)
 class Param:
     """One kernel parameter. ``name`` is its name in the kernel and in the launch's argument order; ``buffer`` the
-    graph buffer behind an ``input`` or ``output`` (a paged buffer binds its page table, so the two differ);
+    graph buffer behind an ``input`` or ``output`` (a paged buffer binds its page table, so the two differ, and
+    ``page`` says how the pages cut it: the dimension and a page's extent along it);
     ``align`` the bytes the launch aligns a buffer's first element to; ``shape`` a buffer's extents, an ``int`` or,
     for a symbolic one, its expression over the runtime sizes; ``pair_table`` says the buffer is the e2m1 pair table,
     whose loads are computed from the index."""
@@ -45,7 +46,7 @@ class Param:
     kind: str  # "input" | "output" | "descriptor" | "int"
     dtype: DataType | None = None
     buffer: str = ""
-    paged: bool = False
+    page: tuple[int, int] | None = None
     align: int = BUFFER_ALIGN
     shape: tuple = ()
     pair_table: bool = False
@@ -73,20 +74,20 @@ def kernel_interface(
     kernel: KernelOp,
     tensors: dict[str, Tensor] | None = None,
     runtime_args: tuple[str, ...] = (),
-    paged: frozenset[str] = frozenset(),
+    pages: dict[str, tuple[int, int]] | None = None,
     pair_tables: frozenset[str] = frozenset(),
 ) -> Interface:
     """The interface of ``kernel``. ``tensors`` gives each buffer's dtype (f32 where absent) and shape,
-    ``runtime_args`` the symbolic sizes it takes as ``int`` parameters, ``paged`` the buffers bound as a page table,
-    ``pair_tables`` the inputs that are the e2m1 pair table."""
+    ``runtime_args`` the symbolic sizes it takes as ``int`` parameters, ``pages`` the buffers bound as a page table
+    with the dimension the pages cut and a page's extent, ``pair_tables`` the inputs that are the e2m1 pair table."""
     tensors = tensors or {}
 
     def buffer(name: str, kind: str) -> Param:
         dtype = tensors[name].dtype if name in tensors else F32
         dims = [to_dim(d) for d in tensors[name].shape] if name in tensors else []
         shape = tuple(d.as_static() if d.is_static else d.expression for d in dims)
-        pages = f"{name}__pages" if name in paged else name
-        return Param(pages, kind, dtype, name, name in paged, shape=shape, pair_table=name in pair_tables)
+        page = (pages or {}).get(name)
+        return Param(f"{name}__pages" if page else name, kind, dtype, name, page, shape=shape, pair_table=name in pair_tables)
 
     descriptors = tuple(dict.fromkeys(s.name for s in kernel.body.iter_of_type(TmaDescriptor)))
     params = (

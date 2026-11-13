@@ -2902,7 +2902,7 @@ def test_a_kernel_pin_that_leaves_no_row_is_refused_by_name() -> None:
 @pytest.mark.parametrize("rows", [1, 2])
 def test_computed_operand_cut_keeps_bf16_before_fp8_output(rows) -> None:
     """A later FP8 encode cannot change the precision of an earlier contraction operand."""
-    from emmy.compiler.backend.cuda.nvcc import compile_to_cubin, nvcc_path
+    from emmy.compiler.backend.cuda.ptxas import compile_to_cubin, ptxas_path
     from emmy.compiler.dtype import BF16, F8E4M3
 
     m, n, k = Axis("m", rows), Axis("n", 4), Axis("k", 8)
@@ -2935,8 +2935,8 @@ def test_computed_operand_cut_keeps_bf16_before_fp8_output(rows) -> None:
     producer = next(node for node in lowered.nodes.values() if isinstance(node.op, CudaOp) and "__place_" in node.id)
     assert producer.output.dtype == BF16
     assert lowered.buffer("out").dtype == F8E4M3
-    if nvcc_path() is None:
-        pytest.skip("nvcc unavailable")
+    if ptxas_path() is None:
+        pytest.skip("ptxas unavailable")
     for node in lowered.nodes.values():
         if isinstance(node.op, CudaOp):
             assert compile_to_cubin(node.op.kernel_source, node.op.kernel_name, arch="sm_120a").exists()

@@ -1,14 +1,13 @@
-"""CudaOp — graph-level wrapper around a rendered CUDA kernel.
+"""CudaOp — graph-level wrapper around a compiled kernel.
 
-Produced by ``passes/lowering/cuda`` by rendering each ``KernelOp`` body
-to a ``__global__`` source string. The final graph before codegen is
-``Graph[CudaOp + InputOp + ConstantOp]``; the CUDA backend walks it in
-topological order, emits one ``kernel_name<<<grid, block>>>(args)``
-launch per node, and wires buffer pointers by node id.
+Produced by ``passes/lowering/cuda`` by compiling each ``KernelOp`` body to PTX text. The final graph before codegen
+is ``Graph[CudaOp + InputOp + ConstantOp]``; the CUDA backend walks it in topological order, emits one launch per
+node, and wires buffer pointers by node id.
 """
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, field
 
 from emmy.compiler.ir.base import Op
@@ -54,7 +53,7 @@ class CudaOp(Op):
     TMA descriptor params).
     """
 
-    kernel_source: str = ""  # complete __global__ function
+    kernel_source: str = ""  # the kernel's PTX text
     kernel_name: str = ""
     arg_order: tuple[str, ...] = ()  # kernel-param names in positional order
     grid: tuple[GridDimSpec, GridDimSpec, GridDimSpec] = ((1,), (1,), (1,))
@@ -83,16 +82,21 @@ class CudaOp(Op):
         return self.kernel_source
 
     def identity_key(self, *, structural: bool = True, with_io: bool = False, with_knobs: bool = False) -> str | None:
-        """Override :meth:`Op.identity_key` whole: digest of the rendered source + launch
-        params — past rendering, body / io / knobs are all realized into the artifact, so the
-        lattice flags have nothing left to fold and are accepted-and-ignored. (the
-        bits that determine runtime behavior). Name-invariant: the kernel function name is
-        rendered into the source (``void <name>(...)``) but doesn't change runtime behavior,
-        so it normalizes out — renaming a kernel (e.g. via op provenance) neither busts the
-        perf cache nor blocks an isolated-kernel tune from transferring to a whole-model
-        compile."""
-        src = self.kernel_source.replace(self.kernel_name, "_K_") if self.kernel_name else self.kernel_source
+        """Override :meth:`Op.identity_key` whole: digest of the kernel's code + launch params — past code
+        generation, body / io / knobs are all realized into the artifact, so the lattice flags have nothing left to
+        fold and are accepted-and-ignored. Name-invariant: the kernel's name stands in its code (its entry and the
+        symbols derived from it, :func:`renamed`) but doesn't change runtime behavior, so it normalizes out —
+        renaming a kernel (e.g. via op provenance) neither busts the perf cache nor blocks an isolated-kernel tune
+        from transferring to a whole-model compile."""
+        src = renamed(self.kernel_source, self.kernel_name, "_K_") if self.kernel_name else self.kernel_source
         return digest(type(self).__name__, src, self.arg_order, self.grid, self.block, self.smem_bytes)
+
+
+def renamed(source: str, old: str, new: str) -> str:
+    """The PTX text ``source`` of kernel ``old`` with the kernel named ``new``: its entry and the parameter and shared
+    symbols the PTX printer derives from the entry's name (``<name>_param_<i>``, ``<name>_shared_<i>``), and nothing
+    else."""
+    return re.sub(rf"(?<![\w$]){re.escape(old)}(?=(?:_param_\d+|_shared_\d+)?(?![\w$]))", new, source)
 
 
 def resolve_dim(spec, sym_values: dict[str, int]) -> int:

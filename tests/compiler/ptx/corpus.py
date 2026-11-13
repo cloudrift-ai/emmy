@@ -1,17 +1,14 @@
-"""The realization corpus through the Kernel IR to PTX compiler: each case lowered with ``EMMY_KERNEL_CODE=ptx``,
-and what became of each of its kernels. GPU-free. ``python -m tests.compiler.ptx.corpus`` prints the table."""
+"""The realization corpus through the Kernel IR to PTX compiler: each case lowered, and what became of each of its
+kernels. GPU-free. ``python -m tests.compiler.ptx.corpus`` prints the table."""
 
 from __future__ import annotations
 
 import os
 import sys
 from collections import Counter
-from collections.abc import Iterator
 from concurrent.futures import ProcessPoolExecutor
-from contextlib import contextmanager
 from dataclasses import dataclass
 
-from emmy import config
 from emmy.compiler.context import Context
 from emmy.compiler.ir.cuda import CudaOp
 from emmy.compiler.ir.kernel import ptx
@@ -30,24 +27,10 @@ class Outcome:
     error: str | None = None
 
 
-@contextmanager
-def kernel_code(value: str | None) -> Iterator[None]:
-    """``EMMY_KERNEL_CODE`` set to ``value`` for the block, unset when ``None``."""
-    previous = os.environ.pop(config.KERNEL_CODE, None)
-    if value is not None:
-        os.environ[config.KERNEL_CODE] = value
-    try:
-        yield
-    finally:
-        os.environ.pop(config.KERNEL_CODE, None)
-        if previous is not None:
-            os.environ[config.KERNEL_CODE] = previous
-
-
-def compiled(case: Case, ctx: Context | None = None) -> tuple[object, list[Outcome]]:
-    """``case`` lowered at ``ctx`` (its own declared capability when omitted) with PTX asked for, and the outcome of
-    each kernel in the order the lowering reached it. A kernel the compiler raises on is recorded and rendered as
-    CUDA, so one bug does not hide the case's other kernels."""
+def compiled(case: Case, ctx: Context | None = None) -> tuple[object | None, list[Outcome]]:
+    """``case`` lowered at ``ctx`` (its own declared capability when omitted), and the outcome of each kernel in the
+    order the lowering reached it. The graph is ``None`` where the compiler refused a kernel, which ends the
+    lowering: the last outcome names the refusal."""
     outcomes: list[Outcome] = []
     compile_kernel = ptx.compile_kernel
 
@@ -60,21 +43,27 @@ def compiled(case: Case, ctx: Context | None = None) -> tuple[object, list[Outco
             raise
         except Exception as error:  # noqa: BLE001 — the report's product is the error
             outcomes.append(Outcome(name, arch, error=f"{type(error).__name__}: {error}"))
-            raise ptx.NoRule(str(error)) from error
+            raise
         outcomes.append(Outcome(name, arch, ptx=text))
         return text
 
     ptx.compile_kernel = recording
     try:
-        with kernel_code(config.KERNEL_CODE_PTX):
-            graph, _taken = lowered(case, ctx or case.context())
+        graph, _taken = lowered(case, ctx or case.context())
+    except Exception:
+        if not outcomes or outcomes[-1].ptx is not None:
+            raise
+        graph = None
     finally:
         ptx.compile_kernel = compile_kernel
     return graph, outcomes
 
 
 def launched(graph, outcomes: list[Outcome]) -> list[Outcome]:  # noqa: ANN001 — a lowered graph
-    """The outcomes of the kernels the lowered graph launches: a search may lower a kernel it then does not keep."""
+    """The outcomes of the kernels the lowered graph launches: a search may lower a kernel it then does not keep.
+    With no graph, the refusal that ended the lowering."""
+    if graph is None:
+        return outcomes[-1:]
     names = {node.op.kernel_name for node in graph.nodes.values() if isinstance(node.op, CudaOp)}
     last = {outcome.kernel: outcome for outcome in outcomes}
     return [last[name] for name in sorted(names) if name in last]

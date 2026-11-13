@@ -15,8 +15,8 @@ snapshot together. Weights are external too (the HF checkpoint), rebound by
 Validity: a pack loads only when its manifest matches the caller's ``key`` (model identity +
 serving shape — composed by the runner; "identity" has to include whatever the compiled programs
 read off the CHECKPOINT, not just the architecture config — see the serving runners' keys) AND
-the current environment (backend, device arch, nvcc toolkit tag + flags — the same tags the cubin
-cache keys on — the precision pins, and the version kernel identities are computed under) AND every
+the current environment (backend, device arch, ptxas's version — the tags the cubin cache keys
+on — the precision pins, and the version kernel identities are computed under) AND every
 referenced cubin still exists. **Any mismatch or error returns ``None`` and the caller falls back to
 the full compile path** — a stale or damaged pack costs a recompile, never a wrong result. Compiler
 version is deliberately NOT part of validity (a pack keeps serving its frozen snapshot);
@@ -67,11 +67,10 @@ class PackEntry(NamedTuple):
 
 
 def _environment() -> dict:
-    """The environment half of the validity key — the same tags the cubin cache keys on
-    (arch / toolkit / flags), so a pack never references cubins the current toolchain
-    wouldn't have produced, PLUS every precision decision: the ``FAST_MATH``-family pins
-    change which kernel forks the compile enumerates and which approximate instructions a
-    kernel body names (only flush to zero and fusion are nvcc flags), so a pack
+    """The environment half of the validity key — the tags the cubin cache keys on (arch /
+    ptxas's version), so a pack never references cubins the current toolchain wouldn't have
+    produced, PLUS every precision decision: the ``FAST_MATH``-family pins change which
+    kernel forks the compile enumerates and which instructions a kernel's code holds, so a pack
     warmed in one precision lane must never serve a boot in the other. Found live
     (2026-07-31 article repro): an ``EMMY_FAST_MATH=1`` boot at the baked serving shape
     pack-hit the std plans and silently served std kernels — the fm lane's numbers were
@@ -81,23 +80,18 @@ def _environment() -> dict:
     decides, and the version of the kernel identities an entry's reads name (the tune DB's
     key version): identities computed under two versions do not compare.
     Probes the live GPU."""
-    from emmy.compiler.backend.cuda import nvcc  # noqa: PLC0415
+    from emmy.compiler.backend.cuda import ptxas  # noqa: PLC0415
     from emmy.compiler.pipeline.search.db import _VERSION  # noqa: PLC0415
     from emmy.compiler.pipeline.search.golden import live_gpu_key  # noqa: PLC0415
     from emmy.compiler.pipeline.search.space import precision_pins  # noqa: PLC0415
 
-    # Which generator wrote the kernels' code (``config.kernel_code``), while there are two: a pack warmed through
-    # one never serves a boot that asks for the other. The default adds no field, so its packs keep their key.
-    code = config.kernel_code()
     return {
         "backend": "cuda",
-        "arch": nvcc.device_arch(False),
-        "toolkit": nvcc._toolkit_tag(),
-        "nvcc_flags": nvcc.effective_flags(),
+        "arch": ptxas.device_arch(False),
+        "ptxas": ptxas.version(),
         "precision": precision_pins(),
         "card": (live_gpu_key() or ("",))[0],
         "kernel_key": _VERSION,
-        **({} if code == config.KERNEL_CODE_CUDA else {"kernel_code": code}),
     }
 
 
@@ -161,7 +155,7 @@ def save_pack(
     ``reads`` names, for every program, the kernels whose evidence its compile read (a loaded
     program's :attr:`PackEntry.reads`); ``provenance`` is informational only (compiler rev, tune
     state) and never checked."""
-    from emmy.compiler.backend.cuda import nvcc  # noqa: PLC0415
+    from emmy.compiler.backend.cuda import ptxas  # noqa: PLC0415
 
     root = Path(pack_dir)
     (root / "plan").mkdir(parents=True, exist_ok=True)
@@ -179,7 +173,7 @@ def save_pack(
             binary_key = (
                 spec.binary_key
                 if spec.source is None
-                else nvcc.compile_to_cubin(spec.source, kname, arch=nvcc.device_arch(spec.arch_specific)).stem
+                else ptxas.compile_to_cubin(spec.source, kname, arch=ptxas.device_arch(spec.arch_specific)).stem
             )
             kernels[kname] = KernelSpec(
                 source=None, binary_key=binary_key, arch_specific=spec.arch_specific, dependent_launch=spec.dependent_launch
@@ -210,7 +204,6 @@ def load_pack(pack_dir: Path | str, *, key: dict) -> dict[str, PackEntry] | None
     scope moved since the save, an entry whose golden rows moved — or that shares its wrapper
     with one — comes back with no plan, and with none of them moved the manifest takes the new
     scope digest, so the next load skips the comparison."""
-    from emmy import config  # noqa: PLC0415
 
     root = Path(pack_dir)
     try:
@@ -292,7 +285,6 @@ def save_executable(
     plans, reads the resident pages straight onto the device and the rest straight into pinned host
     memory. The destination must not exist; a failed export never publishes a partial artifact.
     """
-    from emmy import config  # noqa: PLC0415
 
     root = Path(pack_dir)
     if root.exists():

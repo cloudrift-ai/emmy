@@ -163,11 +163,15 @@ fn left((base, bound): &(Expression, Expression)) -> Expression {
 pub(super) fn dtype_of(ty: VTy) -> DType {
     match ty {
         VTy::F32 => DType::F32,
+        VTy::F64 => DType::F64,
         VTy::F16 => DType::F16,
         VTy::Bf16 => DType::BF16,
         VTy::I32 => DType::I32,
         VTy::U32 => DType::U32,
         VTy::I64 => DType::I64,
+        VTy::U64 => DType::U64,
+        VTy::I16 => DType::I16,
+        VTy::U16 => DType::U16,
         VTy::Bool => DType::Bool,
         VTy::F8E4M3 => DType::F8E4M3,
         VTy::F8E5M2 => DType::F8E5M2,
@@ -702,8 +706,8 @@ impl Lowerer {
     }
 
     /// An accumulator of floats stored to memory, each lane its own elements. The cells of a run are each stored
-    /// as their own statement says: the 16-byte row the CUDA renderer gathers four cells into by shuffles holds
-    /// the same bytes.
+    /// as their own statement says; gathering four cells into one 16-byte row a lane by shuffles, as the run
+    /// allows, is not done.
     pub(super) fn reg_store(&mut self, node: &RegStore, ctx: &SimplifyCtx) -> Result<()> {
         self.store_cell(node, ctx)?;
         for cell in node.run.iter() {

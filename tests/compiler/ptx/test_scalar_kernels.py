@@ -24,12 +24,12 @@ Grid(axes=(i in 0..{n}), decode=(block_idx.x * 256 + thread_idx.x), block_thread
 """
 
 
-def _run(body: str, inputs: dict[str, np.ndarray], outputs: dict[str, np.dtype], cells: int, *, level: str | None, fuse: bool = False):
+def _run(body: str, inputs: dict[str, np.ndarray], outputs: dict[str, np.dtype], cells: int, *, level: str | None, **launched):
     """Launch ``body`` as ``ceil(cells / BLOCK)`` blocks. Every output holds one element per launched thread and
     starts at zero, so a thread past the cells that stores anything shows."""
     blocks = -(-cells // BLOCK)
     sized = {name: (dtype, blocks * BLOCK) for name, dtype in outputs.items()}
-    return launch.run(body, inputs, sized, blocks=blocks, level=level, fuse=fuse)
+    return launch.run(body, inputs, sized, blocks=blocks, level=level, **launched)
 
 
 def _elementwise(statements: str, n: int) -> str:
@@ -213,3 +213,25 @@ def test_half_values_convert_through_f32_and_back(level):
     y = a.astype(np.float32) * np.float32(1.5)
     _same_bits(out["o"][:n], np.sqrt(np.abs(y)).astype(np.float16))
     np.testing.assert_array_equal(out["whole"][:n], np.trunc(y).astype(np.int32))
+
+
+@pytest.mark.parametrize(("dtype", "largest"), [("f8e4m3", 448.0), ("f8e5m2", 57344.0)])
+def test_an_8_bit_float_is_encoded_from_its_bits_before_the_card_has_the_conversion(level, dtype, largest):
+    """Compiled for ``sm_80``, which has no conversion into an 8-bit float: the encode rounds to nearest even and
+    saturates at the largest finite value, as the conversion does, at every boundary of the format and its
+    subnormals, at infinities and at NaN."""
+    import torch
+
+    reference = {"f8e4m3": torch.float8_e4m3fn, "f8e5m2": torch.float8_e5m2}[dtype]
+    codes = torch.arange(256, dtype=torch.uint8).view(reference).float()
+    grid = np.unique(np.abs(codes[torch.isfinite(codes)].numpy()))
+    edges = np.concatenate([grid, (grid[1:] + grid[:-1]) / 2])
+    near = np.concatenate([edges, np.nextafter(edges, np.inf), np.nextafter(edges, -np.inf)]).astype(np.float32)
+    special = np.array([np.inf, np.nan, 1e30, largest * 1.5, 1e-30, 2.0**-140], dtype=np.float32)
+    values = np.concatenate([near, -near, special, -special, _floats(4096, np.float32) * 64]).astype(np.float32)
+    body = _elementwise(f"f32 x = load a[i]\n{dtype} c = ({dtype})x\ni32 bits = (i32)c\nu8 o[i] = bits", values.size)
+    got = _run(body, {"a": values}, {"o": np.uint8}, values.size, level=level, sm=80)["o"][: values.size]
+    want = torch.from_numpy(values).clamp(-largest, largest).to(reference).view(torch.uint8).numpy()
+    nan = np.isnan(values)
+    np.testing.assert_array_equal(got[~nan], want[~nan])
+    assert np.all(got[nan] & 0x7F == 0x7F)

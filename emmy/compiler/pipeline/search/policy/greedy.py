@@ -277,7 +277,7 @@ def _decision_key(fp: ForkPoint, blocked: dict | None) -> tuple | None:
 
 
 # Process-wide memo for the built DB index, keyed on (db path, mtime, context key, card).
-# The index depends only on the DB file, the card and cc+nvcc-flags (NOT the
+# The index depends only on the DB file, the card and the context key (NOT the
 # op shape — ``structural_key`` folds neither), so for a serve boot it is identical
 # across all ~96 program compiles; without this the 527 MB perf scan reran each time.
 # Bounded to the current key (cleared on miss), like ``_load_prior_cached``.

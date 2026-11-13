@@ -28,8 +28,10 @@ use emmy_ir::{Error, Name, Result};
 use self::coop::Threads;
 use self::memory::{Buffer, Carried, Elem};
 use crate::builder::Builder;
-use crate::inst::{Bank, Base, Inst, Module, Opcode, Operand, ParamDecl, Reg, Shared, Space, Ty};
-use crate::{Kernel, ParamKind, Precision, Target};
+use crate::inst::{
+    Bank, Base, Inst, Module, Opcode, Operand, ParamDecl, Reg, Round, Shared, Space, Ty,
+};
+use crate::{Kernel, Page, ParamKind, Precision, Target};
 
 /// The most threads a block can hold.
 const MAX_BLOCK_THREADS: u32 = 1024;
@@ -68,11 +70,19 @@ const POOL_ALIGN: u32 = 16;
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 pub(crate) enum VTy {
     F32,
+    /// A double, held in a 64-bit register: what a value converts through and back, with no math function of its
+    /// own.
+    F64,
     F16,
     Bf16,
     I32,
     U32,
     I64,
+    U64,
+    /// A 16-bit integer, held extended to 32 bits by its sign or by zeros: what a buffer of them loads into and
+    /// a store of one narrows from.
+    I16,
+    U16,
     Bool,
     /// An 8-bit float, or a byte of two 4-bit e2m1 codes, as its bits in the low byte of a 32-bit register: what a
     /// buffer of them stores and a cast converts. No arithmetic reads one.
@@ -85,11 +95,15 @@ impl VTy {
     fn of(dtype: DType) -> Option<VTy> {
         Some(match dtype {
             DType::F32 => VTy::F32,
+            DType::F64 => VTy::F64,
             DType::F16 => VTy::F16,
             DType::BF16 => VTy::Bf16,
             DType::I32 => VTy::I32,
             DType::U32 => VTy::U32,
             DType::I64 => VTy::I64,
+            DType::U64 => VTy::U64,
+            DType::I16 => VTy::I16,
+            DType::U16 => VTy::U16,
             DType::Bool => VTy::Bool,
             DType::F8E4M3 => VTy::F8E4M3,
             DType::F8E5M2 => VTy::F8E5M2,
@@ -104,22 +118,32 @@ impl VTy {
     }
 
     fn is_int(self) -> bool {
-        matches!(self, VTy::I32 | VTy::U32 | VTy::I64)
+        matches!(
+            self,
+            VTy::I32 | VTy::U32 | VTy::I64 | VTy::U64 | VTy::I16 | VTy::U16
+        )
+    }
+
+    /// Whether the integer is held in 64 bits.
+    fn is_wide(self) -> bool {
+        matches!(self, VTy::I64 | VTy::U64)
     }
 
     fn is_float(self) -> bool {
-        matches!(self, VTy::F32 | VTy::F16 | VTy::Bf16)
+        matches!(self, VTy::F32 | VTy::F64 | VTy::F16 | VTy::Bf16)
     }
 
     /// The type an arithmetic instruction computes this value at.
     fn arith(self) -> Ty {
         match self {
             VTy::F32 => Ty::F32,
+            VTy::F64 => Ty::F64,
             VTy::F16 => Ty::F16,
             VTy::Bf16 => Ty::Bf16,
-            VTy::I32 => Ty::S32,
-            VTy::U32 => Ty::U32,
+            VTy::I32 | VTy::I16 => Ty::S32,
+            VTy::U32 | VTy::U16 => Ty::U32,
             VTy::I64 => Ty::S64,
+            VTy::U64 => Ty::U64,
             VTy::Bool => Ty::Pred,
             VTy::F8E4M3 | VTy::F8E5M2 | VTy::F4x2 => Ty::U32,
         }
@@ -139,17 +163,24 @@ impl VTy {
 
     /// The bytes one element takes in a buffer: a bool is a byte.
     fn bytes(self) -> i64 {
-        self.held().bytes()
+        match self {
+            VTy::I16 | VTy::U16 => 2,
+            other => other.held().bytes(),
+        }
     }
 
     fn text(self) -> &'static str {
         match self {
             VTy::F32 => "f32",
+            VTy::F64 => "f64",
             VTy::F16 => "f16",
             VTy::Bf16 => "bf16",
             VTy::I32 => "i32",
             VTy::U32 => "u32",
             VTy::I64 => "i64",
+            VTy::U64 => "u64",
+            VTy::I16 => "i16",
+            VTy::U16 => "u16",
             VTy::Bool => "bool",
             VTy::F8E4M3 => "f8e4m3",
             VTy::F8E5M2 => "f8e5m2",
@@ -206,6 +237,9 @@ pub(crate) struct Lowerer {
     extents: HashMap<Name, Vec<Expression>>,
     /// The inputs that are the e2m1 pair table: a load of one computes its value.
     pair_tables: HashSet<Name>,
+    /// The buffers bound as a table of their pages, each with how its pages cut it and the alignment of a page: the
+    /// buffer's base register holds the table's address.
+    pages: HashMap<Name, (Page, u32)>,
     /// The symbolic sizes among the parameters: each is a count, so never negative.
     sizes: HashSet<Name>,
     /// Each loop axis that is a counter from zero by one times a step plus a start: the register, its counter, the
@@ -266,6 +300,7 @@ pub(crate) fn lower(kernel: &Kernel, target: Target, precision: Precision) -> Re
         descriptors: HashMap::new(),
         extents: HashMap::new(),
         pair_tables: HashSet::new(),
+        pages: HashMap::new(),
         sizes: HashSet::new(),
         counted: HashMap::new(),
         statement: format!("the interface of {}", kernel.name),
@@ -337,9 +372,6 @@ impl Lowerer {
             .enumerate()
             .map(|(index, param)| {
                 let source = Operand::Addr(Base::Param(index as u32), 0);
-                if param.paged {
-                    return Err(self.no_rule(format_args!("the paged buffer {}", param.name)));
-                }
                 match param.kind {
                     ParamKind::Input | ParamKind::Output => {
                         let elem = self.elem(param.dtype)?;
@@ -354,7 +386,13 @@ impl Lowerer {
                         let load = Opcode::Ld(Space::Param);
                         self.b
                             .emit(Inst::new(load, Ty::U64, vec![base], vec![source]));
-                        self.b.set_alignment(base, align);
+                        let base = match param.page {
+                            Some(page) => self.page_table(param, page, base)?,
+                            None => base,
+                        };
+                        if !self.pages.contains_key(&param.name) {
+                            self.b.set_alignment(base, align);
+                        }
                         let buffer = Buffer {
                             space: Space::Global,
                             base,
@@ -845,6 +883,9 @@ impl Lowerer {
 
     /// The value of `expression` at `ty`.
     fn typed(&mut self, expression: &Expression, ty: VTy, ctx: &SimplifyCtx) -> Result<Val> {
+        if let Some((Operation::Bitcast, [source])) = expression.operation() {
+            return self.bitcast(source, ty, ctx);
+        }
         match ty {
             VTy::Bool => Ok(Val::reg(self.pred(expression, ctx)?, VTy::Bool)),
             ty if ty.is_byte_float() => self.byte_float(expression, ty, ctx),
@@ -860,6 +901,52 @@ impl Lowerer {
                 })
             }
         }
+    }
+
+    /// The bits of `source` read as a value of `to`, the same width. A 16-bit integer is held extended in a 32-bit
+    /// register and a half in a 16-bit one, so between the two the bits move through the low half.
+    fn bitcast(&mut self, source: &Expression, to: VTy, ctx: &SimplifyCtx) -> Result<Val> {
+        let from = self.operand_type(source);
+        if from.bytes() != to.bytes() || from == VTy::Bool || to == VTy::Bool {
+            let (from, to) = (from.text(), to.text());
+            return Err(self.refuse(format_args!("a bitcast of {from} to {to}")));
+        }
+        let val = self.typed(source, from, ctx)?;
+        let half = |ty: VTy| matches!(ty, VTy::F16 | VTy::Bf16);
+        let short = |ty: VTy| matches!(ty, VTy::I16 | VTy::U16);
+        Ok(match (from, to) {
+            _ if from == to || (half(from) && half(to)) || (from.is_wide() && to.is_wide()) => {
+                Val { op: val.op, ty: to }
+            }
+            _ if short(from) && short(to) => Val {
+                op: self.as_int(&val, to),
+                ty: to,
+            },
+            _ if short(from) => {
+                let bits = self.as_int(&val, VTy::U32);
+                let low = Inst::new(Opcode::Cvt(Ty::U32), Ty::U16, Vec::new(), vec![bits]);
+                Val::reg(self.b.value(low, Bank::B16), to)
+            }
+            _ if half(from) => {
+                let reg = self.register(&val);
+                let wide = Inst::new(Opcode::Cvt(Ty::U16), Ty::U32, Vec::new(), vec![reg.into()]);
+                let bits = Val::reg(self.b.value(wide, Bank::B32), VTy::U32);
+                Val {
+                    op: self.as_int(&bits, to),
+                    ty: to,
+                }
+            }
+            _ => {
+                let reg = self.register(&val);
+                let held = if to.is_wide() || from.is_wide() {
+                    Ty::B64
+                } else {
+                    Ty::B32
+                };
+                let moved = Inst::new(Opcode::Mov, held, Vec::new(), vec![reg.into()]);
+                Val::reg(self.b.value(moved, to.bank()), to)
+            }
+        })
     }
 
     /// Bind `name` to `value` at `dtype`. An integer's range joins the context, so the expressions that read the
@@ -923,7 +1010,7 @@ impl Lowerer {
     ) -> Result<()> {
         if self.precision.fuse
             && let Some(ty) = assign.dtype.and_then(VTy::of)
-            && matches!(ty, VTy::F32 | VTy::F16)
+            && ty == VTy::F32
             && let Some((Operation::Multiply, [x, y])) = assign.value.operation()
             && self.fuses(assign.name, assign.dtype, rest)
         {
@@ -1006,7 +1093,26 @@ impl Lowerer {
             Some(Operation::Minimum | Operation::Fmin) => Opcode::Min,
             _ => return Err(self.no_rule(format_args!("an accumulator of {}", accum.op.name()))),
         };
-        let step = if ty.is_float() {
+        let selection = matches!(opcode, Opcode::Max | Opcode::Min);
+        let step = if selection
+            && matches!(ty, VTy::Bf16 | VTy::F16)
+            && self.float_supported(opcode, ty).is_err()
+        {
+            // A selection is exact, so a half one the target has no instruction for runs at f32 between two exact
+            // conversions, as a body's does.
+            let value = self.typed(&accum.value, ty, ctx)?;
+            let wide = |this: &mut Self, val: Val| this.converted(val, VTy::F32);
+            let operands = vec![wide(self, left), wide(self, value)];
+            let selected = self.float_inst(opcode, VTy::F32, operands);
+            let selected = self.b.value(selected, VTy::F32.bank());
+            let narrowed = Inst::new(
+                Opcode::Cvt(VTy::F32.arith()),
+                ty.arith(),
+                Vec::new(),
+                vec![selected.into()],
+            );
+            narrowed.rounded(Round::Rn)
+        } else if ty.is_float() {
             self.float_supported(opcode, ty)?;
             let product = match opcode {
                 Opcode::Add => self.product(&accum.value, ty, ctx)?,

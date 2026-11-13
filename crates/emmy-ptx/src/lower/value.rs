@@ -137,7 +137,7 @@ impl Lowerer {
 
     /// The type of an operand with no reader to say it: its own, else `f32` for a float literal and `i32` for an
     /// integer one.
-    fn operand_type(&self, expression: &Expression) -> VTy {
+    pub(super) fn operand_type(&self, expression: &Expression) -> VTy {
         self.infer(expression).unwrap_or_else(|| {
             let float = expression
                 .subterms()
@@ -197,6 +197,11 @@ impl Lowerer {
     fn float_constant(&mut self, ty: VTy, value: f64) -> Operand {
         match ty {
             VTy::F32 => Operand::f32(value as f32),
+            VTy::F64 => {
+                let bits = Operand::Int(value.to_bits() as i64);
+                let inst = Inst::new(Opcode::Mov, Ty::B64, Vec::new(), vec![bits]);
+                self.b.value(inst, Bank::B64).into()
+            }
             _ => {
                 let bits = Operand::Int(i64::from(half_bits(ty, value)));
                 let inst = Inst::new(Opcode::Mov, Ty::B16, Vec::new(), vec![bits]);
@@ -255,6 +260,20 @@ impl Lowerer {
                 let inst = Inst::new(Opcode::Cvt(Ty::U32), Ty::F32, Vec::new(), vec![code.into()]);
                 Ok(self.b.value(inst.rounded(Round::Rn), Bank::F32).into())
             }
+            // The negation of a truth value a traced mask holds as a float: 1 where it is zero, else 0.
+            Expr::Apply(ElementwiseOp::Other(name), args)
+                if &**name == "bitwise_not" && args.len() == 1 =>
+            {
+                let holds = self.pred(&args[0], ctx)?;
+                let (one, zero) = (self.float_constant(ty, 1.0), self.float_constant(ty, 0.0));
+                let inst = Inst::new(
+                    Opcode::Selp,
+                    ty.held(),
+                    Vec::new(),
+                    vec![zero, one, holds.into()],
+                );
+                Ok(self.b.value(inst, ty.bank()).into())
+            }
             Expr::Apply(ElementwiseOp::Other(name), _) => {
                 Err(self.no_rule(format_args!("the operation {name}")))
             }
@@ -285,10 +304,11 @@ impl Lowerer {
             Vec::new(),
             vec![from.into()],
         );
-        let inst = if to == VTy::F32 {
-            inst
-        } else {
+        // A narrowing rounds to nearest; a widening is exact and takes no rounding.
+        let inst = if to.held().bytes() < val.ty.held().bytes() {
             inst.rounded(Round::Rn)
+        } else {
+            inst
         };
         self.b.value(inst, to.bank()).into()
     }
@@ -453,6 +473,24 @@ impl Lowerer {
                 self.float_select(cond, if_true, if_false, ty, ctx)
             }
             (O::Copy | O::Positive, [x]) => self.float(x, ty, ctx),
+            // The logical combine of two truth values a traced mask holds as floats: 1 where it holds, else 0.
+            (O::BitwiseAnd | O::BitwiseOr | O::LogicalAnd | O::LogicalOr, [x, y]) => {
+                let opcode = logical(op).expect("a logical operation");
+                let operands = vec![self.pred(x, ctx)?.into(), self.pred(y, ctx)?.into()];
+                let holds = self.b.value(
+                    Inst::new(opcode, Ty::Pred, Vec::new(), operands),
+                    Bank::Pred,
+                );
+                let (one, zero) = (self.float_constant(ty, 1.0), self.float_constant(ty, 0.0));
+                let inst = Inst::new(
+                    Opcode::Selp,
+                    ty.held(),
+                    Vec::new(),
+                    vec![one, zero, holds.into()],
+                );
+                Ok(self.b.value(inst, ty.bank()).into())
+            }
+            _ if ty == VTy::F64 => Err(self.no_rule(format_args!("the operation {op} at f64"))),
             _ => {
                 if let Some(value) = self.math(op, args, ty, ctx)? {
                     return Ok(value);
@@ -476,7 +514,7 @@ impl Lowerer {
         ty: VTy,
         ctx: &SimplifyCtx,
     ) -> Result<Option<(Operand, Operand)>> {
-        if !self.precision.fuse || !matches!(ty, VTy::F32 | VTy::F16) {
+        if !self.precision.fuse || ty != VTy::F32 {
             return Ok(None);
         }
         if let Some(name) = expression.as_var() {
@@ -874,6 +912,9 @@ impl Lowerer {
     /// A float rounded to nearest into an 8-bit float, saturating at the largest finite value, as CUDA's 8-bit
     /// float constructors do: the hardware's conversion of two f32 into two 8-bit floats, the value the low one.
     fn narrowed_to_f8(&mut self, value: Val, to: VTy) -> Result<Val> {
+        if self.target.sm < SM_ADA {
+            return Ok(self.f8_by_bits(value, to));
+        }
         self.requires(&super::fragment::F8_CONVERSION)?;
         let wide = self.converted(value, VTy::F32);
         let pair = if to == VTy::F8E4M3 {
@@ -890,6 +931,155 @@ impl Lowerer {
 }
 
 impl Lowerer {
+    /// The 8-bit float of a float before the card has a conversion: from the bits of its f32, rounded to nearest
+    /// even and saturated at the largest finite value as the conversion is, a NaN the format's NaN. A value at or
+    /// above the smallest normal one keeps its exponent and the top bits of its mantissa, rounded by the bits below
+    /// them; a smaller one is its count of the smallest subnormal step, rounded to nearest even.
+    fn f8_by_bits(&mut self, value: Val, to: VTy) -> Val {
+        let (mantissa, bias, largest) = if to == VTy::F8E4M3 {
+            (3, 7, 0x7e)
+        } else {
+            (2, 15, 0x7b)
+        };
+        let shift = 23 - mantissa;
+        let wide = self.converted(value, VTy::F32);
+        let x = self.register(&Val {
+            op: wide,
+            ty: VTy::F32,
+        });
+        let op = |this: &mut Lowerer, opcode, ty, operands: Vec<Operand>, bank| {
+            this.b
+                .value(Inst::new(opcode, ty, Vec::new(), operands), bank)
+        };
+        let bits = op(self, Opcode::Mov, Ty::B32, vec![x.into()], Bank::B32);
+        let magnitude = op(
+            self,
+            Opcode::And,
+            Ty::B32,
+            vec![bits.into(), Operand::Int(0x7fff_ffff)],
+            Bank::B32,
+        );
+        let sign = op(
+            self,
+            Opcode::Shr,
+            Ty::U32,
+            vec![bits.into(), Operand::Int(24)],
+            Bank::B32,
+        );
+        let sign = op(
+            self,
+            Opcode::And,
+            Ty::B32,
+            vec![sign.into(), Operand::Int(0x80)],
+            Bank::B32,
+        );
+        let odd = op(
+            self,
+            Opcode::Shr,
+            Ty::U32,
+            vec![magnitude.into(), Operand::Int(shift)],
+            Bank::B32,
+        );
+        let odd = op(
+            self,
+            Opcode::And,
+            Ty::B32,
+            vec![odd.into(), Operand::Int(1)],
+            Bank::B32,
+        );
+        let half = Operand::Int((1 << (shift - 1)) - 1);
+        let rounded = op(
+            self,
+            Opcode::Add,
+            Ty::U32,
+            vec![magnitude.into(), half],
+            Bank::B32,
+        );
+        let rounded = op(
+            self,
+            Opcode::Add,
+            Ty::U32,
+            vec![rounded.into(), odd.into()],
+            Bank::B32,
+        );
+        let normal = op(
+            self,
+            Opcode::Shr,
+            Ty::U32,
+            vec![rounded.into(), Operand::Int(shift)],
+            Bank::B32,
+        );
+        let rebias = Operand::Int((127 - bias) << mantissa);
+        let normal = op(
+            self,
+            Opcode::Sub,
+            Ty::S32,
+            vec![normal.into(), rebias],
+            Bank::B32,
+        );
+        let normal = op(
+            self,
+            Opcode::Min,
+            Ty::S32,
+            vec![normal.into(), Operand::Int(largest)],
+            Bank::B32,
+        );
+        let absolute = op(self, Opcode::Abs, Ty::F32, vec![x.into()], Bank::F32);
+        let step = Operand::f32(2f32.powi((bias - 1 + mantissa) as i32));
+        let scaled = op(
+            self,
+            Opcode::Mul,
+            Ty::F32,
+            vec![absolute.into(), step],
+            Bank::F32,
+        );
+        let count = Inst::new(
+            Opcode::Cvt(Ty::F32),
+            Ty::S32,
+            Vec::new(),
+            vec![scaled.into()],
+        )
+        .rounded(Round::Rni);
+        let count = self.b.value(count, Bank::B32);
+        let smallest = Operand::Int((1 + 127 - bias) << 23);
+        let tiny = op(
+            self,
+            Opcode::Setp(Cmp::Lt),
+            Ty::U32,
+            vec![magnitude.into(), smallest],
+            Bank::Pred,
+        );
+        let code = op(
+            self,
+            Opcode::Selp,
+            Ty::B32,
+            vec![count.into(), normal.into(), tiny.into()],
+            Bank::B32,
+        );
+        let nan = op(
+            self,
+            Opcode::Setp(Cmp::Gt),
+            Ty::U32,
+            vec![magnitude.into(), Operand::Int(0x7f80_0000)],
+            Bank::Pred,
+        );
+        let code = op(
+            self,
+            Opcode::Selp,
+            Ty::B32,
+            vec![Operand::Int(0x7f), code.into(), nan.into()],
+            Bank::B32,
+        );
+        let byte = op(
+            self,
+            Opcode::Or,
+            Ty::B32,
+            vec![code.into(), sign.into()],
+            Bank::B32,
+        );
+        Val::reg(byte, to)
+    }
+
     /// A cast into or out of an 8-bit float or a pair of codes. A float converts to and from an 8-bit float; an
     /// integer is a pair of codes by its low byte, and the bits of either are the integer they spell.
     fn byte_float_cast(

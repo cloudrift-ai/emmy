@@ -27,7 +27,7 @@ Correctness:
   keeps the runtime memset.
 - **Name re-suffix**: kernel names were content-stamped BEFORE this rewrite, and launches
   resolve kernels by name (the one-name-one-source rule stated beside
-  ``backend/cuda/nvcc.load_cubin_function``; first source wins) — two same-named predecessors delegated
+  ``backend.plan``; first source wins) — two same-named predecessors delegated
   different-sized buffers would run one body with the other's baked word count. The suffix
   carries the total word count, so equal-suffix collisions are positionally safe (params bind
   by position; equal structure + equal counts).

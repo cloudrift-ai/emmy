@@ -20,9 +20,9 @@ from emmy.compiler.backend.cuda.program import GraphCaptureError, benchmark_prog
 from emmy.compiler.graph import Graph, Tensor
 from emmy.compiler.ir.base import InputOp
 from emmy.compiler.ir.cuda import CudaOp
-from tests.compiler.helpers import requires_cuda
+from tests.compiler.helpers import kernel_ptx, requires_cuda
 
-from .test_program import EW_ADD_SOURCE, _make_add_graph
+from .test_program import _make_add_graph, ew_add_source
 
 
 def _make_two_launch_graph(n: int = 8) -> Graph:
@@ -32,7 +32,7 @@ def _make_two_launch_graph(n: int = 8) -> Graph:
     g.add_node(op=InputOp(), inputs=[], output=Tensor("A", (n,)), node_id="A")
     g.add_node(op=InputOp(), inputs=[], output=Tensor("B", (n,)), node_id="B")
     op = CudaOp(
-        kernel_source=EW_ADD_SOURCE.replace("ELEMENTS", str(n)),
+        kernel_source=ew_add_source(n),
         kernel_name="ew_add",
         arg_order=("A", "B", "C"),
         grid=((n + 255) // 256, 1, 1),
@@ -40,7 +40,7 @@ def _make_two_launch_graph(n: int = 8) -> Graph:
     )
     g.add_node(op=op, inputs=["A", "B"], output=Tensor("C", (n,)), node_id="C")
     op2 = CudaOp(
-        kernel_source=EW_ADD_SOURCE.replace("ELEMENTS", str(n)),
+        kernel_source=ew_add_source(n),
         kernel_name="ew_add",
         arg_order=("C", "B", "D"),
         grid=((n + 255) // 256, 1, 1),
@@ -243,7 +243,18 @@ def test_program_graph_batches_execute_every_forward_and_preserve_serving_replay
 
     graph = Graph()
     graph.add_node(op=InputOp(), inputs=[], output=Tensor("counter", (1,)), node_id="counter")
-    source = 'extern "C" __global__ void count(float* counter, float* out) { *out = ++*counter; }'
+    source = kernel_ptx(
+        "count",
+        """
+        Grid(axes=(t in 0..1), decode=(thread_idx.x), block_threads=1):
+            f32 c = load counter[0]
+            f32 n = c + 1.0
+            f32 counter[0] = n
+            f32 out[0] = n
+        """,
+        (("counter", "output", "f32"), ("out", "output", "f32")),
+        threads=1,
+    )
     for name in ("a", "b"):
         graph.add_node(
             op=CudaOp(kernel_source=source, kernel_name="count", arg_order=("counter", name), grid=(1, 1, 1), block=(1, 1, 1)),

@@ -6,6 +6,7 @@
 mod common;
 
 use emmy_ir::dtype::DType;
+use emmy_ir::expr::Expression;
 use emmy_ptx::inst::Module;
 use emmy_ptx::{Interface, Param, ParamKind, Target};
 
@@ -214,6 +215,59 @@ fn an_operation_per_element_and_a_fold_along_rows_stay_in_registers() {
     assert_eq!(count(&module, "sub.rn.f32"), 4);
 }
 
+/// A store whose fragment rows run along the output's columns (`row_dim=1, col_dim=0`) steps an element's row by one
+/// and its column by the output's row stride: no two of a lane's elements are neighbours, so each is stored alone.
+#[test]
+fn a_transposed_store_steps_by_both_strides_of_its_output() {
+    let mut interface = Interface {
+        arch_specific: false,
+        ..common::interface(HALVES, 32)
+    };
+    interface.params[3].shape = vec![Expression::int(16), Expression::int(64)];
+    let statements = format!(
+        "{FRAGMENTS}
+        RegStore(dst_buffer=o, dst_index=(0, r * 16), frag=fc, shape=(16, 8, 16), row_dim=1, col_dim=0)
+        "
+    );
+    let body = format!("{GRID}\n{}", common::indented(&statements));
+    let module = lowered_in(&body, &interface, Target { sm: 80 }, EXACT).unwrap();
+    let listed = listing(&module);
+    assert_eq!(count(&module, "st.global.f32"), 4, "{listed:#?}");
+    assert_eq!(count(&module, "st.global.v2"), 0, "{listed:#?}");
+    // The lane's two columns are a row of 64 elements apart, and its second row eight elements on.
+    let offsets: Vec<&str> = listed
+        .iter()
+        .filter(|line| line.starts_with("st.global.f32"))
+        .filter_map(|line| {
+            line.split('+')
+                .nth(1)
+                .and_then(|rest| rest.split(']').next())
+        })
+        .collect();
+    assert_eq!(offsets, ["256", "32", "288"], "{listed:#?}");
+}
+
+/// An operand gathered from global memory is read at each element's own row and column, and a half one is widened
+/// to the accumulator's f32 before the operation.
+#[test]
+fn a_gathered_operand_is_read_at_each_element_and_widened() {
+    let module = kernel(
+        &format!(
+            "{FRAGMENTS}
+        FragmentApply(out=fc, op=add, args=(FragmentArg(kind=frag, names=(fc)), FragmentArg(kind=gmem, expressions=(__frow * 8 + __fcol), buffer=a)), in_place=true, row_base=r * 16, col_base=0)
+        RegStore(dst_buffer=o, dst_index=(r * 128), frag=fc, shape=(16, 8, 16), ldm=8)
+        "
+        ),
+        HALVES,
+        80,
+    )
+    .unwrap();
+    let listed = listing(&module);
+    assert_eq!(count(&module, "ld.global.nc.b16"), 4, "{listed:#?}");
+    assert_eq!(count(&module, "cvt.f32.f16"), 4, "{listed:#?}");
+    assert_eq!(count(&module, "add.rn.f32"), 4, "{listed:#?}");
+}
+
 /// Volta's paired slabs: a store of eight halves under the crosswise layout is two stores of four, and the paired
 /// drain reads each element of its two fragments where the layout puts it.
 #[test]
@@ -304,6 +358,8 @@ fn byte_floats_convert_store_and_decode() {
     assert_eq!(count(&module, "setp.g"), 7, "{:#?}", listing(&module));
     // The table is never read: the one global load is `x`'s.
     assert_eq!(count(&module, "ld.global"), 1);
-    let refused = lowered_in(&body, &interface, Target { sm: 80 }, EXACT).unwrap_err();
-    assert!(refused.to_string().contains("8-bit floats"), "{refused}");
+    // Before the card has the conversion, the encode is computed from the bits of the f32.
+    let older = lowered_in(&body, &interface, Target { sm: 80 }, EXACT).unwrap();
+    assert_eq!(count(&older, "cvt.rn.satfinite.e4m3x2.f32"), 0);
+    assert_eq!(count(&older, "st.global.u8"), 2);
 }

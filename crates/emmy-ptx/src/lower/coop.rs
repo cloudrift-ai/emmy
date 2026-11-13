@@ -253,9 +253,11 @@ impl Lowerer {
             self.b.comment(self.statement.clone());
             match &**stmt {
                 Statement::Assign(assign) if states.contains(&assign.name) => {
-                    if assign.dtype.is_some_and(|dtype| VTy::of(dtype) != Some(ty)) {
-                        let ty = ty.text();
-                        return Err(self.refuse(format_args!("a state combined at {ty}")));
+                    if let Some(dtype) = assign.dtype.filter(|dtype| VTy::of(*dtype) != Some(ty)) {
+                        let (name, held) = (assign.name, ty.text());
+                        return Err(
+                            self.refuse(format_args!("{name} is {held}, updated at {dtype}"))
+                        );
                     }
                     let state = self.state(assign.name, ty)?;
                     let before = self.b.lines();
@@ -396,14 +398,24 @@ impl Lowerer {
         Ok(())
     }
 
+    /// The type the states of a combine are held at, where they are defined: a combine's own dtype is the f32 of a
+    /// reduction, and the state of a selection may stay a half, which it combines at exactly.
+    fn held_type(&self, states: &[Name], declared: VTy) -> VTy {
+        states
+            .first()
+            .and_then(|name| self.find(*name))
+            .map_or(declared, |(_, val)| val.ty)
+    }
+
     pub(super) fn warp_shuffle(&mut self, node: &WarpShuffle, ctx: &SimplifyCtx) -> Result<()> {
+        let declared = self.vty(Some(node.dtype))?;
         let fold = Fold {
             states: &node.state,
             others: &node.state_b,
             program: &node.combine_states,
             length: self.lanes(node.length)?,
             prefix: node.prefix,
-            ty: self.vty(Some(node.dtype))?,
+            ty: self.held_type(&node.state, declared),
         };
         self.fold_lanes(&fold, None, ctx)
     }
@@ -469,6 +481,8 @@ impl Lowerer {
     /// butterfly, and the first of them writes the result: one writer a slot, either way.
     pub(super) fn tree_halve(&mut self, node: &TreeHalve, ctx: &SimplifyCtx) -> Result<()> {
         let ty = self.vty(Some(node.dtype))?;
+        // The slabs hold the combine's type; a state held at another takes the first slot converted.
+        let held = self.held_type(&node.state, ty);
         let length = node.length;
         if length < 1 || length & (length - 1) != 0 {
             return Err(self.refuse(format_args!("{length} slots are no power of two")));
@@ -483,7 +497,7 @@ impl Lowerer {
                 let (stored, read) = (buffer.elem.dtype, node.dtype);
                 return Err(self.refuse(format_args!("{slab} holds {stored}, read at {read}")));
             }
-            outer.push(self.state(*name, ty)?);
+            outer.push(self.state(*name, held)?);
         }
         let (scale, slot, root) = match &node.inner {
             Some((within, scale)) => {
@@ -532,7 +546,18 @@ impl Lowerer {
         }
         for (state, slab) in outer.into_iter().zip(node.bufs.iter()) {
             let first = self.address(*slab, std::slice::from_ref(&root), ctx)?;
-            self.load_slot(&first, 0, Some(state), ty);
+            if held == ty {
+                self.load_slot(&first, 0, Some(state), ty);
+            } else {
+                let slot = self.load_slot(&first, 0, None, ty);
+                let value = self.converted(Val::reg(slot, ty), held);
+                self.b.emit(Inst::new(
+                    Opcode::Mov,
+                    held.held(),
+                    vec![state],
+                    vec![value],
+                ));
+            }
         }
         Ok(())
     }

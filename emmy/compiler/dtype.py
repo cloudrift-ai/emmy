@@ -283,9 +283,8 @@ def encode_f8(values: np.ndarray, fmt: str) -> np.ndarray:
 #: The 16 e2m1 values in code order — the 8 non-negative ones first (exponent
 #: bias 1; code 1 is the lone subnormal, 0.5), then codes 8..15 mirroring them
 #: with the sign bit set. No inf/nan codes exist in the format, and every value
-#: is exact in f16, so this table IS the decode wherever the format is read:
-#: numpy here, and the CUDA fragment drain that emits it as an f16 constant
-#: table (``render._F4_STAGED_PRELUDE``) rather than keeping a second copy.
+#: is exact in f16, so this table IS the decode wherever the format is read on
+#: the host.
 F4_VALUES: tuple[float, ...] = (0.0, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0, -0.0, -0.5, -1.0, -1.5, -2.0, -3.0, -4.0, -6.0)
 _F4_LUT = np.array(F4_VALUES, dtype=np.float32)
 

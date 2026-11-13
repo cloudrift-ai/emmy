@@ -41,7 +41,7 @@ pub fn interface(params: Params, threads: u32) -> Interface {
                 name: (*name).into(),
                 kind: *kind,
                 dtype: *dtype,
-                paged: false,
+                page: None,
                 align: BUFFER_ALIGN,
                 shape: Vec::new(),
                 pair_table: false,

@@ -7,7 +7,7 @@ use std::collections::BTreeMap;
 use emmy_ir::body::Body;
 use emmy_ir::dtype::DType;
 use emmy_ir::elementwise::Operation;
-use emmy_ir::expr::{Builtin, Expr, Expression, Interval, SimplifyCtx};
+use emmy_ir::expr::{Builtin, Expr, Expression, Interval, Num, SimplifyCtx};
 use emmy_ir::field::NumOr;
 use emmy_ir::statement::{Carry, CpAsyncCopy, Load, Pre, Smem, Statement, Write, ZeroPrologue};
 use emmy_ir::{Name, Result};
@@ -17,6 +17,7 @@ use emmy_ir::fragment::volta_slab_index;
 use super::tensor::{swizzle_exchange, swizzled};
 use super::{Lowerer, POOL_ALIGN, SM_AMPERE, VTy, Val};
 use crate::inst::{Bank, Base, Cache, Inst, Opcode, Operand, Reg, Shared, Space, Ty};
+use crate::{Page, Param};
 
 /// The most bytes the shared arrays of a module may take together; past it the launch sizes one pool.
 const STATIC_SHARED_BYTES: u64 = 48 * 1024;
@@ -35,14 +36,15 @@ pub(super) struct Elem {
 }
 
 impl Elem {
-    /// A byte is an integer in a register; a bool is a byte in memory and a predicate in a register. An element
-    /// no value rule reads (an 8-bit or 4-bit float, the 64 bits of a barrier) has its size in memory only: a
-    /// buffer of them is addressed, and read by the statements that take its bits as they are.
+    /// A byte and a 16-bit integer are integers extended in a 32-bit register; a bool is a byte in memory and a
+    /// predicate in a register. An 8-bit or 4-bit float is its bits in a register, which only a conversion reads.
     pub(super) fn of(dtype: DType) -> Option<Elem> {
         let (ty, mem) = match dtype {
             DType::U8 => (VTy::I32, Ty::U8),
             DType::F8E4M3 | DType::F8E5M2 | DType::F4E2M1x2 => (VTy::of(dtype)?, Ty::U8),
-            DType::U64 => (VTy::I64, Ty::U64),
+            DType::U64 => (VTy::U64, Ty::U64),
+            DType::I16 => (VTy::I16, Ty::S16),
+            DType::U16 => (VTy::U16, Ty::U16),
             DType::Bool => (VTy::Bool, Ty::U8),
             dtype => {
                 let ty = VTy::of(dtype)?;
@@ -60,9 +62,18 @@ impl Elem {
         self.dtype == DType::U8
     }
 
+    /// Whether the element is a 16-bit integer, held extended in a 32-bit register: a run of them is accessed four
+    /// at a time at most, each element a register of its own.
+    fn is_short(self) -> bool {
+        matches!(self.dtype, DType::I16 | DType::U16)
+    }
+
     /// Whether a load gives a value of the element and a store takes one.
     pub(super) fn has_value(self) -> bool {
-        matches!(self.dtype, DType::U8 | DType::Bool) || VTy::of(self.dtype).is_some()
+        matches!(
+            self.dtype,
+            DType::U8 | DType::I16 | DType::U16 | DType::Bool
+        ) || VTy::of(self.dtype).is_some()
     }
 }
 
@@ -127,6 +138,19 @@ fn shared_dtype(name: &str) -> Option<DType> {
     })
 }
 
+/// The bytes of one entry of a page table: an address.
+const PAGE_ENTRY_BYTES: i64 = 8;
+
+/// The one element index the coordinates `index` name in a buffer of `extents`, the last coordinate the nearest.
+fn folded(index: &[Expression], extents: &[Expression]) -> Expression {
+    let mut flat = index[0].clone();
+    for (coordinate, extent) in index.iter().zip(extents).skip(1) {
+        let outer = Expression::binary(Operation::Multiply, flat, extent.clone());
+        flat = Expression::binary(Operation::Add, outer, coordinate.clone());
+    }
+    flat
+}
+
 /// A carried state: its type, what every cell holds before the first step, and per cell the register a read sees
 /// and the register the step defines.
 pub(super) struct Carried {
@@ -141,6 +165,84 @@ impl Lowerer {
             .get(&name)
             .copied()
             .ok_or_else(|| self.refuse(format_args!("{name} is no buffer of the kernel")))
+    }
+
+    /// The base of a buffer the launch binds as a table of its pages, whose address `table` holds. A buffer one page
+    /// holds whole along the cut dimension is that page, read from the table once; any other is reached page by
+    /// page, each access reading the address of its own (`page_of`).
+    pub(super) fn page_table(&mut self, param: &Param, page: Page, table: Reg) -> Result<Reg> {
+        let name = param.name;
+        let extent = param.shape.get(page.axis).filter(|_| page.size > 0);
+        let Some(extent) = extent else {
+            return Err(self.refuse(format_args!(
+                "{name} is paged along dimension {} by pages of {}, which its shape does not have",
+                page.axis, page.size
+            )));
+        };
+        if extent
+            .literal_value()
+            .and_then(Num::int)
+            .is_some_and(|extent| extent <= page.size)
+        {
+            let first = self.b.reg(Bank::B64);
+            let operands = vec![Operand::Addr(Base::Reg(table), 0)];
+            self.b.emit(Inst::new(
+                Opcode::Ld(Space::Global),
+                Ty::U64,
+                vec![first],
+                operands,
+            ));
+            return Ok(first);
+        }
+        self.b.set_alignment(table, PAGE_ENTRY_BYTES as u32);
+        self.pages.insert(name, (page, param.align));
+        Ok(table)
+    }
+
+    /// The page an access of the paged buffer `name` falls in, as a buffer, and the element it names inside that
+    /// page. The access names one coordinate a dimension: the quotient of the paged one by the page's extent picks
+    /// the page, whose address the table holds, and the remainder stands in its place inside it.
+    pub(super) fn page_of(
+        &mut self,
+        name: Name,
+        buffer: Buffer,
+        index: &[Expression],
+        ctx: &SimplifyCtx,
+    ) -> Result<(Buffer, Expression)> {
+        let (page, align) = self.pages[&name];
+        let extents = self
+            .extents
+            .get(&name)
+            .filter(|extents| extents.len() == index.len());
+        let Some(extents) = extents else {
+            return Err(self.refuse(format_args!(
+                "an access of the paged buffer {name} names one coordinate a dimension"
+            )));
+        };
+        let size = Expression::int(page.size);
+        let mut extents = extents.clone();
+        extents[page.axis] = size.clone();
+        let at = &index[page.axis];
+        let number = Expression::binary(Operation::FloorDivide, at.clone(), size.clone());
+        let mut within = index.to_vec();
+        within[page.axis] = Expression::binary(Operation::Remainder, at.clone(), size);
+        let table = Buffer {
+            space: Space::Global,
+            base: buffer.base,
+            offset: 0,
+            elem: Elem::of(DType::U64).expect("an address is an element"),
+            writable: false,
+        };
+        let entry = self.address_in(table, &number, ctx)?;
+        let base = self.b.reg(Bank::B64);
+        self.b.emit(Inst::new(
+            Opcode::Ld(Space::Global),
+            Ty::U64,
+            vec![base],
+            vec![entry],
+        ));
+        self.b.set_alignment(base, align);
+        Ok((Buffer { base, ..buffer }, folded(&within, &extents)))
     }
 
     /// An error where the target is older than `sm`, which `what` needs.
@@ -242,12 +344,7 @@ impl Lowerer {
                 index.len()
             )));
         };
-        let mut flat = index[0].clone();
-        for (coordinate, extent) in index.iter().zip(extents).skip(1) {
-            let outer = Expression::binary(Operation::Multiply, flat, extent.clone());
-            flat = Expression::binary(Operation::Add, outer, coordinate.clone());
-        }
-        Ok(flat)
+        Ok(folded(index, extents))
     }
 
     // --- loads and stores --------------------------------------------------------------------------------
@@ -328,9 +425,16 @@ impl Lowerer {
             return Err(self.refuse(format_args!("{input} holds {stored}")));
         }
         let lanes = load.names.len();
-        // A run wider than one access is loaded 16 bytes at a time, as the CUDA renderer's vector types allow.
-        let widest = (16 / elem.bytes()).max(1) as usize;
-        if lanes > widest && access(elem.bytes(), lanes).is_none() && lanes.is_multiple_of(widest) {
+        // A run wider than one access is loaded 16 bytes at a time; a run of a paged buffer, which may cross a page,
+        // one element at a time.
+        let paged = self.pages.contains_key(&load.input);
+        let widest = match () {
+            _ if paged => 1,
+            _ if elem.is_short() => 4,
+            _ => (16 / elem.bytes()).max(1) as usize,
+        };
+        let split = paged || elem.is_short() || access(elem.bytes(), lanes).is_none();
+        if lanes > widest && split && lanes.is_multiple_of(widest) {
             for (at, names) in load.names.chunks(widest).enumerate() {
                 let mut index = load.index.to_vec();
                 let last = index
@@ -447,7 +551,14 @@ impl Lowerer {
             return Err(self.no_rule(format_args!("a store of {}", elem.dtype)));
         }
         let lanes = write.values.len();
-        let access = access(elem.bytes(), lanes)
+        // A run of a paged buffer may cross a page: it is stored one element at a time.
+        let paged = self.pages.contains_key(&output);
+        let at_once = match () {
+            _ if paged => 1,
+            _ if elem.is_short() => lanes.min(4),
+            _ => lanes,
+        };
+        let access = access(elem.bytes(), at_once)
             .filter(|_| !write.atomic || lanes == 1)
             .ok_or_else(|| {
                 let stored = elem.dtype;
@@ -457,7 +568,8 @@ impl Lowerer {
         for name in write.values.iter() {
             let val = self.lookup(*name)?;
             // A byte is stored from an integer of any width; every other value has its buffer's type.
-            let fits = val.ty == elem.ty || (elem.is_byte() && val.ty.is_int());
+            let fits =
+                val.ty == elem.ty || ((elem.is_byte() || elem.is_short()) && val.ty.is_int());
             if !fits || write.value_dtype.is_some_and(|dtype| dtype != elem.dtype) {
                 let (stored, held) = (elem.dtype, val.ty.text());
                 return Err(self.refuse(format_args!("{output} holds {stored}, {name} is {held}")));
@@ -471,6 +583,10 @@ impl Lowerer {
                 _ if elem.is_byte() => Val {
                     op: self.as_int(val, VTy::I32),
                     ty: VTy::I32,
+                },
+                _ if elem.is_short() => Val {
+                    op: self.as_int(val, elem.ty),
+                    ty: elem.ty,
                 },
                 _ => val.clone(),
             };
@@ -494,6 +610,7 @@ impl Lowerer {
         }
         // Volta's crosswise layout moves runs of four elements apart: a run of eight is two stores.
         let run = match (&*write.swizzle, lanes) {
+            _ if paged || elem.is_short() => at_once,
             ("V70A", 8) => 4,
             _ => lanes,
         };
@@ -507,8 +624,12 @@ impl Lowerer {
                     Expression::int((at * run) as i64),
                 );
             }
-            let element = self.slab_index(output, &index, &write.swizzle)?;
-            let address = self.address(output, &[element], ctx)?;
+            let address = if paged {
+                self.address(output, &index, ctx)?
+            } else {
+                let element = self.slab_index(output, &index, &write.swizzle)?;
+                self.address(output, &[element], ctx)?
+            };
             let access = if run == lanes { access } else { Access::Direct };
             let (ty, value) = match access {
                 Access::Direct if regs.len() == 1 => (elem.mem, regs[0].into()),

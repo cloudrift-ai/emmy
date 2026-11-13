@@ -93,13 +93,12 @@ def test_pointwise_emits_correct_source():
     compiled = CudaBackend().compile(_pointwise_add_graph())
     nodes = _cuda_nodes(compiled)
     assert len(nodes) == 1
-    # CUDA spelling: moves to the PTX compiler's tests
     source = nodes[0].op.kernel_source
-    assert "threadIdx.x" in source
-    assert "x[" in source and "y[" in source
+    assert "%tid.x" in source
+    assert "ld.global" in source and "st.global" in source
 
 
-def test_boolean_bitwise_not_lowers_from_graph_loop_to_logical_cuda():
+def test_boolean_bitwise_not_lowers_from_graph_loop_to_a_logical_not():
     loop_graph = Pipeline.build(LOOP_PASSES).run(_boolean_not_graph())
     loops = [node.op for node in loop_graph.nodes.values() if isinstance(node.op, LoopOp)]
     assert len(loops) == 1
@@ -110,9 +109,9 @@ def test_boolean_bitwise_not_lowers_from_graph_loop_to_logical_cuda():
     )
 
     compiled = CudaBackend().compile(loop_graph)
-    # CUDA spelling: moves to the PTX compiler's tests
+    # The negation is a comparison of the mask with zero, its truth stored as a byte.
     source = _cuda_nodes(compiled)[0].op.kernel_source
-    assert "== 0.0f" in source
+    assert "setp." in source and "st.global.u8" in source
 
 
 def test_reduce_emits_k_loop():
