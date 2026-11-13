@@ -199,9 +199,15 @@ kernel it produced went on to read.
   (dynamic grid), strided rows, and the tensor-core `warp_tile` are reserved future tiers.
 - **Kernel → CUDA** (after `lowering/cuda`): `KernelOp` replaced by
   `CudaOp` carrying rendered source.
-- **Every buffer index spells every dim of its buffer**, `0` at a size-one dim. `render_index` flattens it
-  row-major for both the CUDA render and the Loop IR C++ runner, and refuses any other count: without strides the
-  coordinates cannot be summed into an address. A single coordinate is an already-flat address.
+- **Every buffer index spells every dim of its buffer**, `0` at a size-one dim, until it is flattened: one function,
+  `address.flat_index`, sums the coordinates row-major over the buffer's shape (symbolic sizes included, each
+  coordinate widened to 64 bits where the buffer can pass the 32-bit range) and refuses any other count, since
+  without strides the coordinates cannot be summed into an address. A single coordinate is an already-flat address.
+  A `Load`, a `Write` and a `CpAsyncCopy` take their flat index before anything prints them: a kernel body in
+  `lowering/cuda` (`008_flat_indices`, after which the body's optimization simplifies the index under the launch's
+  ranges), a Loop IR body where the runner renders it. The renderer prints such an index as it is given. It still
+  flattens for the statements that keep one index per dimension: a paged access, a `Write` under a Volta slab
+  layout, the lane form of a `CpAsyncCopy`, the fragment statements, `TmaLoad`, and a carried state.
 
 Multi-output ABI order always comes from `Node.buffer_names()`: matcher population reorders a body-carrying op's
 input/output maps to the graph ports after body normalization, Loop execution returns outputs in that order,
@@ -233,7 +239,8 @@ lightweight value objects (`ElementwiseImpl`, not `ElementwiseOp`) so the surrou
 `ir/stmt/` is the vocabulary all three IRs share, so the rest of the compiler uses it through one package and nothing
 else: no submodule path, no private name. The package exports the statement types, `Body` and `OutputSpec`,
 `normalize_body` and `canonicalize_identity`, a few functions over statements (`free_names`, `exposed_defines`,
-`rename_free`, `mask_select_predicate`, `ordering_constraints`, `dtype_promote`, `reduce_strength`, `check_types`),
+`rename_free`, `mask_select_predicate`, `ordering_constraints`, `dtype_promote`, `reduce_strength`, `check_types`,
+`check_input`),
 the text form (`pretty_body`, `parse_body`), four normalization steps a caller may run on its own (`one_operation_per_definition`,
 `canonical_values`, `simplify_body`, `prepare_body`), the two statement types fusion's body assembly in `ir/loop/`
 builds a region with (`Call`, `Subroutine`), and the names of a statement type's fields (`fields_of`). The statement
@@ -658,6 +665,9 @@ they are typed too, and the check lists them: the cross-thread combine programs 
 `WarpBroadcast`), the register fragment statements, and a `RegStore` epilogue, whose program the renderer types
 with the same rules where it prints it, because its operands are register elements only the renderer names. An
 index `Let` with no dtype is an integer whose width the renderer still takes from its expression.
+`check_input` (the crate's `input` module) is what `lowering/cuda` asks of every kernel before it renders one:
+`check_types`, one flat index on every `Load`, `Write` and `CpAsyncCopy` that its dimensions do not define, and no
+loop left asking for unrolling.
 
 `Select` uses the common dtype of its branch values, and type propagation gives its consumers that same dtype.
 Selecting between two FP16 values must preserve the rounding of a subsequent FP16 product; promoting the selection

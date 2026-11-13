@@ -13,8 +13,8 @@ from functools import singledispatch
 from itertools import count
 from typing import TYPE_CHECKING, ClassVar, Protocol
 
-from emmy.compiler.dim import DYNAMIC_DIM_MAX, Dim
 from emmy.compiler.dtype import F32, INTEGER_NAMES
+from emmy.compiler.ir.address import flat_index
 from emmy.compiler.ir.axis import Axis
 from emmy.compiler.ir.elementwise import reduce_spelling
 from emmy.compiler.ir.expression import (
@@ -22,7 +22,6 @@ from emmy.compiler.ir.expression import (
     Builtin,
     CastExpression,
     Expression,
-    FlatIndex,
     FunctionCallExpression,
     Literal,
     SimplifyCtx,
@@ -351,10 +350,6 @@ def select_to_ternary(s: Select, dtype: str = "float") -> Expression:
     return result
 
 
-#: Largest value C ``int`` addressing can represent; past it a flat address wraps negative.
-_INT_MAX = 2**31 - 1
-
-
 def _float_lit(v: float) -> str:
     """C / CUDA float literal — always carries a decimal so ``0.0`` renders as ``0.0f`` not the invalid ``0f``, and
     large/scientific values keep their exponent."""
@@ -418,26 +413,19 @@ def render_expression(expression: Expression, ctx: RenderCtx, parent_prec: int =
         return f"(({c}) ? ({t}) : ({f}))"
     if isinstance(expression, CastExpression):
         return f"(({expression.dtype})({render_expression(expression.expression, ctx)}))"
-    if isinstance(expression, FlatIndex):
-        text = render_index(expression.buffer, expression.index, ctx)
-        return f"({text})" if parent_prec > 0 else text
     raise NotImplementedError(f"{type(expression).__name__} has no render")
 
 
 def render_index(buf: str, indices: tuple, ctx: RenderCtx, shape: tuple | None = None) -> str:
-    """Row-major flatten ``buf[i0][i1]...`` to a single C/CUDA expression.
-
-    Builds the row-major sum as an ``Expression`` and runs ``simplify`` on it so
-    constant-zero indices (typical of size-1 outer dims) drop out via the
-    standard ``0 * x → 0`` / ``0 + y → y`` folds rather than emitting
-    ``0 * stride`` terms in the output.
+    """The flat element index of ``buf[indices]`` as a C/CUDA expression, for a statement that holds one index per
+    dimension (a fragment statement, a paged access, a carried state): the row-major sum (``address.flat_index``),
+    simplified, so constant-zero indices (typical of size-1 outer dims) drop out. One index is flat already and
+    prints as it is given.
 
     ``shape`` overrides the buffer's declared shape — a paged read flattens over ONE page,
-    whose paged axis is the page size rather than the buffer's full extent. A single index is
-    already a flat address; any other index spells every dim of a known shape, ``0`` at a size-one dim.
+    whose paged axis is the page size rather than the buffer's full extent.
     """
-    flat = _flat_index(buf, indices, ctx, shape)
-    return flat if isinstance(flat, str) else render_expression(flat, ctx)
+    return render_expression(_flat_index(buf, indices, ctx, shape), ctx)
 
 
 def render_address(buf: str, indices: tuple, ctx: RenderCtx) -> str:
@@ -450,8 +438,6 @@ def render_address(buf: str, indices: tuple, ctx: RenderCtx) -> str:
     register cap (the GDN chunk step: 255 registers and a spill on CUDA 12.9, 179 with this form).
     """
     flat = _flat_index(buf, indices, ctx)
-    if isinstance(flat, str):
-        return f"&{buf}[{flat}]"
     index, offset = _split_offset(flat)
     if not offset:
         return f"&{buf}[{render_expression(flat, ctx)}]"
@@ -473,37 +459,14 @@ def _split_offset(e: Expression) -> tuple[Expression | None, int]:
     return e, 0
 
 
-def _flat_index(buf: str, indices: tuple, ctx: RenderCtx, shape: tuple | None = None) -> Expression | str:
-    """The row-major flat index of ``buf[indices]``: a simplified ``int`` Expression, or the rendered
-    ``long long`` sum when the buffer's extent exceeds ``int`` addressing."""
-    if len(indices) == 0:
-        return Literal(0, "int")
+def _flat_index(buf: str, indices: tuple, ctx: RenderCtx, shape: tuple | None = None) -> Expression:
+    """The flat index of ``buf[indices]``: one index as it is given, several flattened over the buffer's shape."""
     if len(indices) == 1:
-        return indices[0].simplify(SimplifyCtx.empty())
-    shape = ctx.shapes.get(buf) if shape is None else shape
-    if shape is None or len(shape) != len(indices):
-        raise ValueError(f"{buf}: {len(indices)} indices for a buffer of shape {shape} — an index spells every dim of its buffer")
-    wide = _exceeds_int_range(shape)
-    flat = None
-    parts: list[str] = []
-    for d, idx in enumerate(indices):
-        stride: Expression = Literal(1, "int")
-        for k in range(d + 1, len(shape)):
-            stride = BinaryExpression("*", stride, _to_expression(shape[k]))
-        stride = stride.simplify(SimplifyCtx.empty())
-        if wide:
-            # Widen the TERM, not the finished sum: `(long long)(a*b + c*d)` computes the whole
-            # sum in `int` and widens an already-wrapped result. Casting the index makes each
-            # multiply 64-bit, and the accumulating `+` chain stays 64-bit by promotion.
-            i_src = render_expression(idx.simplify(SimplifyCtx.empty()), ctx)
-            parts.append(f"(long long)({i_src})" if _is_one(stride) else f"(long long)({i_src}) * ({render_expression(stride, ctx)})")
-            continue
-        term: Expression = idx if _is_one(stride) else BinaryExpression("*", idx, stride)
-        flat = term if flat is None else BinaryExpression("+", flat, term)
-    if wide:
-        return "(" + " + ".join(parts) + ")"
-    assert flat is not None
-    return flat.simplify(SimplifyCtx.empty())
+        return indices[0]
+    try:
+        return flat_index(indices, ctx.shapes.get(buf) if shape is None else shape).simplify(SimplifyCtx.empty())
+    except ValueError as exc:
+        raise ValueError(f"{buf}: {exc}") from exc
 
 
 @dataclass(frozen=True)
@@ -518,7 +481,10 @@ class Flat:
         return self.name
 
     def flat(self, index: tuple, ctx: RenderCtx) -> str:
-        return render_index(self.name, index, ctx)
+        """The element index, printed as the statement gives it: a body a code generator reads holds one."""
+        if len(index) != 1:
+            raise ValueError(f"{self.name}: an access holds one flat index, got {len(index)} (address.flat_accesses writes it)")
+        return render_expression(index[0], ctx)
 
 
 @dataclass(frozen=True)
@@ -554,50 +520,6 @@ class Paged:
         within = BinaryExpression("%", index[self.axis], Literal(self.page, "int"))
         inside = tuple(within if d == self.axis else idx for d, idx in enumerate(index))
         return render_index(self.name, inside, ctx, shape=(*shape[: self.axis], self.page, *shape[self.axis + 1 :]))
-
-
-def _exceeds_int_range(shape) -> bool:
-    """Whether this buffer's element count can pass ``INT_MAX``, so its addresses need 64-bit
-    arithmetic.
-
-    A flat address is a sum of ``index * stride`` terms, and C evaluates it in ``int`` unless an
-    operand is wider. Past ``INT_MAX`` the sum wraps NEGATIVE and the access lands outside the
-    allocation — an illegal access that poisons the whole CUDA context, not a wrong answer. It is
-    not hypothetical: a 4x512-token Qwen3 trunk plans a 2^32-element activation buffer.
-
-    A symbolic dim is taken at ``DYNAMIC_DIM_MAX``, the exported bound on every ``--dynamic`` axis,
-    so the answer is an upper bound over every shape the program can legally be resolved at rather
-    than a guess about the one in front of us. (``Dim.hint`` is NOT usable here: it is advisory and
-    a run may exceed it.) Buffers that stay inside the range keep their existing 32-bit
-    addressing byte for byte, which is most of them — 64-bit index math is not free."""
-    numel = 1
-    for dim in shape:
-        expression = getattr(dim, "expression", None)
-        if isinstance(dim, int):
-            numel *= dim
-        elif isinstance(expression, Literal) and isinstance(expression.value, int):
-            numel *= expression.value
-        else:
-            numel *= DYNAMIC_DIM_MAX
-        if numel > _INT_MAX:
-            return True
-    return False
-
-
-def _to_expression(d) -> Expression:
-    """Pull the ``Expression`` out of a shape element: ``Dim`` exposes its expression
-    directly; bare ``int`` becomes ``Literal``. ``Tensor.shape`` is always
-    ``tuple[Dim, ...]``, so the ``int`` branch only catches the rare
-    bare-int shape that slipped past coercion."""
-    if isinstance(d, Dim):
-        return d.expression
-    if isinstance(d, int):
-        return Literal(d, "int")
-    raise TypeError(f"_to_expression: unexpected shape element {d!r}")
-
-
-def _is_one(e: Expression) -> bool:
-    return isinstance(e, Literal) and e.value == 1
 
 
 def render_body(body: Body, ctx: RenderCtx) -> list[str]:
@@ -679,7 +601,7 @@ def _(stmt: Load, ctx: RenderCtx) -> list[str]:
         out = []
         for k, nm in enumerate(stmt.names):
             idx_k = (*stmt.index[:-1], BinaryExpression("+", stmt.index[-1], Literal(k, "int"))) if k else stmt.index
-            value = f"emmy_f4_pair({render_index(stmt.input, idx_k, ctx)})"
+            value = f"emmy_f4_pair({ctx.memory_for(stmt.input).flat(idx_k, ctx)})"
             if src_dt != "f16":
                 value = ctx.target.convert(ctx.target.convert(value, "f16", "f32"), "f32", src_dt)
             ctx.ssa_dtypes[nm] = src_dt
@@ -702,7 +624,7 @@ def _(stmt: Load, ctx: RenderCtx) -> list[str]:
         return out
     # Vector path: one ``<vec_type>`` reinterpret-cast read + N ``.x/.y/.z/.w`` (or indexed) unpacks.
     vec_type, elem_type = vec_pair
-    flat = render_index(stmt.input, stmt.index, ctx)  # vectorizable ⇒ Flat, so the plain index
+    flat = mem.flat(stmt.index, ctx)
     vname = f"_v_{stmt.names[0]}"
     # ``.x/.y/.z/.w`` accessors only work when ``vec_type``'s native
     # components match ``elem_type`` 1:1 (``float2``→``float``,
@@ -850,11 +772,14 @@ def _(stmt: Let, ctx: RenderCtx) -> list[str]:
     return [f"{_pad(ctx.indent)}{ctx.type_name(stmt.dtype)} {stmt.name} = {value};"]
 
 
-def _swizzled(stmt: Write, flat: str, ctx: RenderCtx, index: tuple[Expression, ...] | None = None) -> str:
-    """The flattened store index under this shared slab's derived physical layout."""
-    from emmy.compiler.ir.kernel.ir import smem_layout_index  # noqa: PLC0415 — kernel IR imports this module
+def _store_index(stmt: Write, mem, ctx: RenderCtx, index: tuple[Expression, ...] | None = None) -> str:
+    """The element index a store writes at, under its shared slab's physical layout. A Volta layout is a function of
+    the logical row and column, which such a write keeps; every other write holds its flat index."""
+    from emmy.compiler.ir.kernel.ir import TWO_DIMENSIONAL_LAYOUTS, smem_layout_index  # noqa: PLC0415 — kernel IR imports this module
 
-    return smem_layout_index(stmt.swizzle, flat, stmt.output, ctx, stmt.index if index is None else index)
+    index = stmt.index if index is None else index
+    flat = "" if stmt.swizzle in TWO_DIMENSIONAL_LAYOUTS else mem.flat(index, ctx)
+    return smem_layout_index(stmt.swizzle, flat, stmt.output, ctx, index)
 
 
 @render_stmt.register
@@ -864,7 +789,7 @@ def _(stmt: Write, ctx: RenderCtx) -> list[str]:
     out_dt = _declared(stmt, stmt.value_dtype)
     mem = ctx.memory_for(stmt.output)
     if stmt.is_scalar:
-        flat = _swizzled(stmt, mem.flat(stmt.index, ctx), ctx)
+        flat = _store_index(stmt, mem, ctx)
         rhs = _resolve_value(stmt.value, ctx)
         if stmt.atomic:
             # Cross-CTA additive finalize: every contributing CTA accumulates into the
@@ -882,12 +807,11 @@ def _(stmt: Write, ctx: RenderCtx) -> list[str]:
         lines: list[str] = []
         for k in range(n):
             idx_k = tuple(stmt.index[:-1]) + (BinaryExpression("+", stmt.index[-1], Literal(k, "int")),)
-            flat = _swizzled(stmt, mem.flat(idx_k, ctx), ctx, idx_k)
+            flat = _store_index(stmt, mem, ctx, idx_k)
             lines.append(f"{pad}{mem.base(idx_k, ctx)}[{flat}] = {converted[k]};")
         return lines
     vec_type, _elem_type = vec_pair
-    logical_flat = render_index(stmt.output, stmt.index, ctx)
-    flat = _swizzled(stmt, logical_flat, ctx)
+    flat = _store_index(stmt, mem, ctx)
     # Native-width vectors (``float2`` / ``float4`` / ``__half2``) take
     # a positional constructor — ``make_float2(a, b)`` for fp32 paths,
     # ``__halves2half2(a, b)`` for the fp16 pair. Wider packed vectors
@@ -929,7 +853,7 @@ def _(stmt: Write, ctx: RenderCtx) -> list[str]:
         arr = temp
         init = ", ".join(converted)
         idx_hi = (*stmt.index[:-1], BinaryExpression("+", stmt.index[-1], Literal(4, "int")))
-        flat_hi = _swizzled(stmt, render_index(stmt.output, idx_hi, ctx), ctx, idx_hi)
+        flat_hi = _store_index(stmt, mem, ctx, idx_hi)
         return [
             f"{pad}{elem_type} {arr}[{n}] = {{ {init} }};",
             f"{pad}*reinterpret_cast<uint2*>(&{stmt.output}[{flat}]) = *reinterpret_cast<const uint2*>({arr});",

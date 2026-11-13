@@ -11,8 +11,18 @@ from __future__ import annotations
 
 import math
 
-from emmy.compiler.ir.expression import BinaryExpression, Expression, Literal, SimplifyCtx, TernaryExpression, Var, affine_form
-from emmy.compiler.ir.stmt import Load
+from emmy.compiler.dim import DYNAMIC_DIM_MAX
+from emmy.compiler.ir.expression import (
+    BinaryExpression,
+    CastExpression,
+    Expression,
+    Literal,
+    SimplifyCtx,
+    TernaryExpression,
+    Var,
+    affine_form,
+)
+from emmy.compiler.ir.stmt import Body, Load, Statement, Write
 
 # Row pad (in ELEMENTS = bytes) for a cp.async-staged 1-byte (fp8) operand slab. The cooperative
 # byte-gather drain (no ldmatrix below sm_100a — the fragment loads are per-lane byte gathers)
@@ -355,3 +365,74 @@ def split_addressable(index: tuple, shape, name: str, atom_ext: int, trailing: b
         if strides[dims[0]] == q * strides[dims[1]]:
             return True  # row-major recomposition — the address is affine in the axis
     return q % atom_ext == 0
+
+
+_INT_MAX = 2**31 - 1
+
+
+def exceeds_int_range(shape) -> bool:
+    """Whether this buffer's element count can pass ``INT_MAX``, so its addresses need 64-bit
+    arithmetic.
+
+    A flat address is a sum of ``index * stride`` terms, and C evaluates it in ``int`` unless an
+    operand is wider. Past ``INT_MAX`` the sum wraps NEGATIVE and the access lands outside the
+    allocation — an illegal access that poisons the whole CUDA context, not a wrong answer. It is
+    not hypothetical: a 4x512-token Qwen3 trunk plans a 2^32-element activation buffer.
+
+    A symbolic dim is taken at ``DYNAMIC_DIM_MAX``, the exported bound on every ``--dynamic`` axis,
+    so the answer is an upper bound over every shape the program can legally be resolved at rather
+    than a guess about the one in front of us. (``Dim.hint`` is NOT usable here: it is advisory and
+    a run may exceed it.) Buffers that stay inside the range keep their 32-bit addressing, which is
+    most of them — 64-bit index math is not free."""
+    numel = 1
+    for dim in shape:
+        size = getattr(dim, "expression", dim)
+        if isinstance(size, Literal) and isinstance(size.value, int):
+            size = size.value
+        numel *= size if isinstance(size, int) else DYNAMIC_DIM_MAX
+        if numel > _INT_MAX:
+            return True
+    return False
+
+
+def flat_index(index: tuple[Expression, ...], shape) -> Expression:
+    """The row-major element index of ``index`` into a buffer of ``shape``, symbolic sizes included: the one
+    flattening of an access. One index is a flat index already, and none is element zero.
+
+    Where the buffer can pass ``INT_MAX`` elements (:func:`exceeds_int_range`) each coordinate is widened before it
+    meets its stride. The cast sits on the TERM, not on the finished sum: ``(long long)(a*b + c*d)`` computes the
+    whole sum in ``int`` and widens a result that already wrapped."""
+    if len(index) < 2:
+        return index[0] if index else Literal(0, "int")
+    if shape is None or len(shape) != len(index):
+        raise ValueError(f"{len(index)} indices for a buffer of shape {shape} — an index spells every dim of its buffer")
+    wide = exceeds_int_range(shape)
+    sizes = [dim.expression if hasattr(dim, "expression") else Literal(int(dim), "int") for dim in shape]
+    flat: Expression | None = None
+    for position, coordinate in enumerate(index):
+        stride: Expression = Literal(1, "int")
+        for size in sizes[position + 1 :]:
+            stride = BinaryExpression("*", stride, size)
+        stride = stride.simplify(SimplifyCtx.empty())
+        term = CastExpression("long long", coordinate) if wide else coordinate
+        if stride != Literal(1, "int"):
+            term = BinaryExpression("*", term, stride)
+        flat = term if flat is None else BinaryExpression("+", flat, term)
+    return flat
+
+
+def flat_accesses(body: Body, shapes, keeps=lambda stmt: False) -> Body:
+    """``body`` with the index of every ``Load`` and ``Write`` one flat element index into its buffer
+    (:func:`flat_index` over ``shapes``, each buffer's shape by name). ``keeps`` names the accesses that stay as
+    they are: the ones their dimensions define."""
+
+    def flat(stmt: Statement) -> Statement:
+        if isinstance(stmt, (Load, Write)) and len(stmt.index) != 1 and not keeps(stmt):
+            buffer = stmt.input if isinstance(stmt, Load) else stmt.output
+            try:
+                return stmt.replace(index=(flat_index(stmt.index, shapes.get(buffer)),))
+            except ValueError as exc:
+                raise ValueError(f"{buffer}: {exc}") from exc
+        return stmt
+
+    return body.map(flat)

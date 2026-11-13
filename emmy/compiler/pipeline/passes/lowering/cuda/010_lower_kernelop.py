@@ -12,7 +12,7 @@ here (``010_lift`` defers a symbolic free axis), so the grid stays a static int.
 
 from dataclasses import replace
 
-from emmy.compiler.dim import paged_declarations, spans_one_page
+from emmy.compiler.dim import spans_one_page
 from emmy.compiler.graph import Node
 from emmy.compiler.ir.axis import Axis
 from emmy.compiler.ir.base import is_f4_pair_table
@@ -25,7 +25,7 @@ from emmy.compiler.ir.pure.fold import EXTENTS
 from emmy.compiler.ir.stmt import Load, Write, ZeroPrologue, check_input
 from emmy.compiler.pipeline import Match, Pattern, RuleSkipped
 from emmy.compiler.pipeline.passes.lowering.cuda._helpers import atomic_outputs as _atomic_outputs
-from emmy.compiler.pipeline.passes.lowering.cuda._helpers import launch_name
+from emmy.compiler.pipeline.passes.lowering.cuda._helpers import launch_name, paged_buffers
 from emmy.compiler.pipeline.search.space import FLUSH_TO_ZERO, precision_pin
 
 PATTERN = [Pattern("root", KernelOp)]
@@ -90,14 +90,7 @@ def rewrite(match: Match, root: Node) -> CudaOp | None:
     runtime_args = tuple(dict.fromkeys((*_symbolic_runtime_args(kernel), *(axis.name for axis in kernel.serial))))
     tensors = {**kernel.inputs, **kernel.outputs}
     tma_descs = _tma_descriptors(kernel)
-    # Paged buffers (graph-level hint, set by the caller before compile; ABI-level only, invisible to the
-    # schedule search except where a transport needs a base address): the marked
-    # buffers are a device table of equal-sized pages rather than one allocation, so each read
-    # and write resolves its page first — the KV cache, whose pages belong to a request rather
-    # than to one contiguous slab. Shapes are untouched, so the schedule search never sees it.
-    scope = {*kernel.inputs, *kernel.outputs}
-    declared = paged_declarations(match.graph.hints.get("cuda.paged_buffers", ()), match.graph)
-    paged = tuple((n, axis, page) for n, (axis, page, _) in declared.items() if n in scope)
+    paged = paged_buffers(kernel, match.graph)
     if paged:
         # A paged buffer has no base pointer to take: only ``Load`` / ``Write`` resolve a page,
         # so any other stmt touching it (a TMA descriptor, a cp.async stage, a fragment store)
@@ -116,9 +109,10 @@ def rewrite(match: Match, root: Node) -> CudaOp | None:
         if zeroed:
             raise NotImplementedError(f"paged buffer(s) {zeroed} are zero-initialized per launch, which has no page table to clear")
     pair_tables = frozenset(n for n in kernel.inputs if is_f4_pair_table(match.graph.nodes.get(n)))
-    # The input check of whatever generates this kernel's code: the body says every type and every conversion, and
-    # no loop of it asks for unrolling.
-    check_input(kernel.body, {name: dtype.name for name, dtype in buffer_dtypes(kernel, tensors).items()})
+    # The input check of whatever generates this kernel's code: the body says every type and every conversion, every
+    # access of a buffer that is one allocation holds one flat index, and no loop asks for unrolling.
+    split_pages = [n for n, axis, page in paged if not spans_one_page(tensors[n].shape, axis, page)]
+    check_input(kernel.body, {name: dtype.name for name, dtype in buffer_dtypes(kernel, tensors).items()}, split_pages)
     source = render_kernelop(
         kernel,
         tensors=tensors,

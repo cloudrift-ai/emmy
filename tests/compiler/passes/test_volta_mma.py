@@ -392,10 +392,10 @@ def test_sm70_ring_splits_the_blocking_copy_across_the_drain(monkeypatch) -> Non
     assert re.search(r"_v_\w+ = __ldg\(", prologue).start() > prologue.rindex("__syncthreads();"), "chunk 1 issues past the prime's barrier"
     assert re.search(r"int \w+ = emmy_volta_crosswise\(", prologue)
     assert re.search(r"int \w+ = emmy_volta_b_congruous\(", prologue)
-    # The global addresses — a base per staged copy and a stride per operand — are computed once ahead of the loop,
-    # and every load of the loop reads nothing else.
+    # The global addresses — a base per staged copy — are computed once ahead of the loop, and every load of the
+    # loop reads nothing else: an operand's stride along K is a constant of its flat index.
     addresses = set(re.findall(r"\bauto (\w+) = ", prologue))
-    assert len(addresses) == 6
+    assert len(addresses) == 4
     issued = re.findall(r"__ldg\(reinterpret_cast<const uint4\*>\(&[ab]\[([^\]]*)\]", body)
     assert len(issued) == 4 and all(set(re.findall(r"[A-Za-z_]\w*", index)) <= addresses for index in issued)
     assert "emmy_volta_crosswise(" not in body and "emmy_volta_b_congruous(" not in body

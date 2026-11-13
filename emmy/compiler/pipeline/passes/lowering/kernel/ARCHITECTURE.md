@@ -8,10 +8,26 @@ cover the cells exactly. The `Grid` states its launch's ranges of the built-ins,
 construction reads a block axis off `blockIdx.x` alone and a thread axis off `threadIdx.x` alone, and an emitter has
 no decode of its own to spell. A thread's lane and warp are decoded the same way: a body that reads `lane` or `warp`
 (the cross-warp combine does) gets a `Let` of each at the top of the `Grid`, `thread_idx.x % 32` and `thread_idx.x /
-32`, so they are values under the launch's ranges and no emitter declares them. The rule runs after the ones that read the `Tile` (the kernel cache, the zero-init
-delegation), so `--ir kernel` and the diagnostics see the `Tile`. The renderer then spells every index division and
-remainder by a power of two over a non-negative dividend as a shift and a mask (`reduce_strength`), on the body it is
-about to render: the Kernel IR keeps `/` and `%`, which the simplifier reads.
+32`, so they are values under the launch's ranges and no emitter declares them. The rule runs after the ones that
+read the `Tile` (the kernel cache, the zero-init delegation), so `--ir kernel` and the diagnostics see the `Tile`.
+
+`008_flat_indices` follows it: every `Load`, `Write` and `CpAsyncCopy` takes one flat element index into its buffer
+(`address.flat_index`: row-major over the buffer's shape, symbolic sizes included, each coordinate widened to 64 bits
+where the buffer can pass the 32-bit range), and a `FlatIndex` a staging pass left in a value becomes that arithmetic
+too. The body's optimization then simplifies the index under the ranges in scope, so `(128 * a0_b + 64 * a0_u) * 132
++ a2` reaches the code generator as `16896 * a0_b + 8448 * a0_u + a2`, and the renderer prints it as given. The pass
+stands here, past every kernel pass, for two reasons. The kernel passes read the coordinates: the vector passes prove
+alignment over them and the staging passes tile them. And which buffers are paged is a fact of the graph, which a
+kernel taken from the kernel cache does not know: an access of a paged buffer keeps one index per dimension, since
+its index along the paged axis picks the page (`render.Paged`), and so does whatever else its dimensions define — a
+`Write` under a Volta slab layout, the shared-memory side of a `CpAsyncCopy` that carries a lane offset, the fragment
+statements (`LdmatrixLoad`, `BlockScaleLoad`, a `FragmentApply`'s gathered operand, `RegStore` and the loads of its
+epilogue) and `TmaLoad`. `010_lower_kernelop` then checks the body (`check_input`): typed in full,
+one flat index per access outside those, and no loop asking for unrolling.
+
+The renderer then spells every index division and remainder by a power of two over a non-negative dividend as a shift
+and a mask (`reduce_strength`), on the body it is about to render: the Kernel IR keeps `/` and `%`, which the
+simplifier reads.
 
 ## `010_materialize` — bind the schedule to threads (and expand the contraction)
 

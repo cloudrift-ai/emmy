@@ -8,7 +8,7 @@ import pytest
 
 from emmy.compiler.ir.axis import Axis
 from emmy.compiler.ir.kernel.ir import KernelOp, MmaSyncPtx, Tile
-from emmy.compiler.ir.stmt import Accum, Body, Cond, Init, Load, Loop, StridedLoop, Write, check_input, parse_body
+from emmy.compiler.ir.stmt import Accum, Body, Cond, Init, Load, Loop, StridedLoop, Write, parse_body
 
 _RULE = import_module("emmy.compiler.pipeline.passes.lowering.kernel.117_unroll_loops")
 
@@ -30,7 +30,6 @@ def test_a_flagged_loop_becomes_one_copy_per_trip() -> None:
     assert [str(stmt.index[1]) for stmt in op.body.iter() if isinstance(stmt, Load)] == ["0", "1", "2", "3"]
     assert sum(isinstance(stmt, Init) for stmt in op.body.iter()) == 1
     assert sum(isinstance(stmt, Accum) for stmt in op.body.iter()) == 4
-    check_input(op.body, {})
 
 
 def test_a_guard_the_trip_decides_is_dropped() -> None:
@@ -127,7 +126,6 @@ def test_a_loop_with_no_static_bound_on_its_trips_stays_a_loop_and_loses_the_fla
     op = _unrolled("for j in 0..8 step 4 until j_end unroll=true:\n    f32 a = load A[i, j]\n    f32 O[i, j] = a")
     [loop] = _loops(op)
     assert not loop.unroll
-    check_input(op.body, {})
 
 
 def test_a_lowered_matmul_reaches_code_generation_with_no_loop_flagged() -> None:

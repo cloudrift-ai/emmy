@@ -372,8 +372,10 @@ def _(node: Grid, ctx: RenderCtx) -> list[str]:
 
 @render_stmt.register
 def _(node: CpAsyncCopy, ctx: RenderCtx) -> list[str]:
+    # The source and a plain destination hold one flat index. A destination with a lane offset keeps its tile's row
+    # and column, which the swizzle split reads.
     smem_flat = render_index(node.smem, node.smem_index, ctx)
-    src_flat = render_index(node.src, node.src_index, ctx)
+    src_flat = ctx.memory_for(node.src).flat(node.src_index, ctx)
     if node.lane_index is not None:
         cols = ctx.shapes[node.smem][-1]
         lane = f"({render_expression(node.lane_index[0], ctx)}) * {cols} + ({render_expression(node.lane_index[1], ctx)})"
@@ -888,6 +890,8 @@ LDMATRIX_SWIZZLE_XOR: dict[str, tuple[int, int]] = {
 #: ordinary 128-bit shared loads. They are internal lowering choices, not schedule knobs.
 VOLTA_CROSSWISE = "V70A"
 VOLTA_B_CONGRUOUS = "V70B"
+#: The slab layouts that are a function of a store's logical row and column: a ``Write`` under one keeps both.
+TWO_DIMENSIONAL_LAYOUTS = (VOLTA_CROSSWISE, VOLTA_B_CONGRUOUS)
 VOLTA_SMEM_LAYOUTS = frozenset((VOLTA_CROSSWISE, VOLTA_B_CONGRUOUS))
 
 #: A SOFTWARE-swizzled mode may override the element shift, spelled ``<mode>@<shift>``. The shift

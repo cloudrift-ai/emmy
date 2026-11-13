@@ -795,15 +795,22 @@ pub fn check_types(body: &Bound<'_, PyAny>, buffers: HashMap<String, String>) ->
     emmy_ir::types::check_types(&PyBody::from_iterable(body)?, &buffers.py()?).py()
 }
 
-/// Check that a body is a code generator's input (`emmy_ir::input`): typed in full as `check_types` holds it, and
-/// with no loop left asking for unrolling. Raises naming the first statement that fails.
+/// Check that a body is a code generator's input (`emmy_ir::input`): typed in full as `check_types` holds it, every
+/// access of a buffer outside `paged` one flat index, and no loop left asking for unrolling. Raises naming the first
+/// statement that fails.
 #[pyfunction]
-pub fn check_input(body: &Bound<'_, PyAny>, buffers: HashMap<String, String>) -> PyResult<()> {
+#[pyo3(signature = (body, buffers, paged=Vec::new()))]
+pub fn check_input(
+    body: &Bound<'_, PyAny>,
+    buffers: HashMap<String, String>,
+    paged: Vec<String>,
+) -> PyResult<()> {
     let buffers: emmy_ir::Result<HashMap<Name, emmy_ir::dtype::DType>> = buffers
         .iter()
         .map(|(name, dtype)| Ok((Name::new(name), dtype.parse()?)))
         .collect();
-    emmy_ir::input::check_input(&PyBody::from_iterable(body)?, &buffers.py()?).py()
+    let paged = paged.iter().map(|name| Name::new(name)).collect();
+    emmy_ir::input::check_input(&PyBody::from_iterable(body)?, &buffers.py()?, &paged).py()
 }
 
 #[pyfunction]
