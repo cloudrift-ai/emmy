@@ -13,11 +13,11 @@ Cooperative: shared memory, barriers, warp shuffles, the tree reduction, vector 
 swizzled and Volta slab layouts, and the zeroing one kernel does for another. Tensor cores: fragments as registers,
 `ldmatrix`, `mma.sync` in every form, the fragment statements expanded from the lane-to-element table (`FragmentLoad`,
 `RegStore`, `FragmentApply`, `FragmentRowReduce`), the promote and the repacks that stay in registers, block scales,
-and Hopper's `wgmma`, tensor copy, `mbarrier` and register limit. A math function outside the table below is an error
-that names it, and so is a paged buffer.
+and Hopper's `wgmma`, tensor copy, `mbarrier` and register limit. Paged buffers: a table of pages in place of a
+buffer. A math function outside the table below is an error that names it.
 
-Until every statement has a rule, the lowering falls back to the CUDA renderer for a kernel the compiler has no rule
-for, and for no other reason ("In the pipeline", below). Every kernel of the realization corpus compiles today.
+It is the only code generator: a statement or an operation it has no rule for is an error ("In the pipeline",
+below).
 
 ## Entry points
 
@@ -185,9 +185,10 @@ Every instruction reaches the list through the `Builder`.
   There is no pointer bumping and no fused wide multiply-add; both measured slower in the hackathon entries.
 - **Floats.** Every instruction that rounds carries `.rn`, so ptxas fuses nothing on its own, and every f32
   instruction that takes it carries `.ftz` when the flush-to-zero decision is on. `fma` is written where the body says
-  `fma`. With the fusion decision on it is also written for a product read once, by an add, a subtract or an
+  `fma`. With the fusion decision on it is also written for an f32 product read once, by an add, a subtract or an
   accumulate in the product's own body: the product is held back at its definition and becomes one instruction with
-  its reader. A difference is the fused sum over an exact negation. A product whose reader does not take it is
+  its reader. A half product is never fused: each half operation rounds, as eager's do and as CUDA's `__hmul_rn` and
+  `__hadd_rn` did. A difference is the fused sum over an exact negation. A product whose reader does not take it is
   computed where it is first read. Two choices differ from cicc's ("Fusion against cicc", below): of two products
   one add reads, the left one is fused, and a product with a state as a factor is never held back.
 - **Half precision.** `f16` add, subtract, multiply, fused multiply-add, negation, absolute value, minimum and maximum
@@ -199,8 +200,7 @@ Every instruction reaches the list through the `Builder`.
   leaves one at bf16. Half instructions take no immediate, so a half constant is moved into a register by its bits.
 - **The module.** A kernel waits for the grid launched ahead of it (`griddepcontrol.wait`) before anything else, on
   the targets that have the instruction (`sm_90` and later). A load of a buffer the kernel never writes, a parameter
-  of kind input, goes past the coherent cache (`ld.global.nc`), as nvcc loads through the `const` pointer the CUDA
-  renderer declared.
+  of kind input, goes past the coherent cache (`ld.global.nc`), as nvcc loaded through a `const` pointer.
 - **Shared memory.** A `Smem` is an array of bytes of the module, aligned to its elements or to what the statement
   asks for. Where the interface gives a pool, the module declares one external array aligned to the strictest
   buffer, and a buffer is its offset in it. Either way the buffer's address is read from the symbol where the buffer
@@ -350,8 +350,8 @@ value matters or reads a subnormal from one.
   writes its own, then a barrier. Where the lanes of a warp share a slot, that form would have every lane of a warp
   read, combine and write one slot, which is a race. There the block's first lanes, as many as there are slots, take
   one slot each into registers, fold them by a butterfly under the mask of exactly those lanes, and the first writes
-  the result. The CUDA renderer folds in the whole first warp, so several lanes read the slot the first lane then
-  writes; compute-sanitizer reports that as a write-after-read hazard. Any other sharing, and a slot the thread
+  the result. Folding in the whole first warp, as the CUDA renderer did, has several lanes read the slot the first lane
+  then writes; compute-sanitizer reports that as a write-after-read hazard. Any other sharing, and a slot the thread
   index does not decide, is refused.
 - **What is decided of a block's threads.** The lowering remembers each integer or bool register whose value is an
   expression over the thread index alone, through the names that define it. Such an expression is evaluated for
@@ -513,20 +513,27 @@ answer at one optimization level and a wrong one at another, which is why the fi
 
 ## In the pipeline
 
-`lowering/cuda/010_lower_kernelop` generates each kernel's code. `EMMY_KERNEL_CODE` says how: `cuda`, the default,
-renders CUDA text for nvcc as before; `ptx` compiles the kernel here and renders CUDA only where the compiler raises
-`NoRule`; `ptx-only` raises that too. Every other error of the compiler is raised under both PTX values: falling back
-on it would hide a bug behind text that builds. The default stays `cuda` until the perf lane has been read through
-PTX. The variable, the fallback and the CUDA renderer are deleted together when the compiler covers every kernel;
-the CUDA backend `ARCHITECTURE.md` says what else reads the switch.
+`lowering/cuda/010_lower_kernelop` generates each kernel's code here, and any refusal is an error: a missing rule
+(`NoRule`) or a kernel that is not what the compiler takes. The CUDA backend `ARCHITECTURE.md` says how the PTX is
+assembled and what is keyed on it.
 
-A paged buffer, whose page the renderer resolves as it prints, is refused with `NoRule` for now (the crate refuses
-the parameter); no corpus kernel holds one. The e2m1 pair table an NVFP4 weight decodes through is named by the
-interface (`Param.pair_table`), and a load of it computes its value from the index (code `i & 1` of byte `i >> 1`)
-and reads nothing, as the renderer does.
+A paged buffer is bound as a table of its pages (`Param.page`: the dimension the pages cut and a page's extent). One
+page that holds the whole buffer is read from the table once, where the kernel starts, and is the buffer's base;
+otherwise every access names one coordinate a dimension, reads its page's address from the table at the quotient
+of its paged coordinate by the page's extent, and addresses the remainder inside that page. A run of a paged buffer
+may cross a page, so it is accessed one element at a time. The e2m1 pair table an NVFP4 weight decodes through is
+named by the interface (`Param.pair_table`), and a load of it computes its value from the index (code `i & 1` of
+byte `i >> 1`) and reads nothing.
 
-`python -m tests.compiler.ptx.corpus` lowers every realization corpus case with `ptx` asked for and prints, a kernel
-a line, whether it compiled or what had no rule, with the counts by reason. On 2026-11-12: 258 cases, all 296 of
+A 16-bit integer is held extended to 32 bits, by its sign or by zeros, and a 64-bit unsigned one shifts right by zeros;
+a bitcast moves bits between types of one width, a half and a 16-bit integer through the low half. A double is a value
+converted through, with no math function of its own. A half accumulator of a maximum or a minimum the target has no
+instruction for steps at f32 between two exact conversions, as a body's selection does. An 8-bit float is encoded by the
+hardware's conversion from `sm_89`, and before it from the bits of its f32, rounded to nearest even and saturated as the
+conversion is.
+
+`python -m tests.compiler.ptx.corpus` lowers every realization corpus case and prints, a kernel a line, whether it
+compiled or what refused it, with the counts by reason. On 2026-11-12: 258 cases, all 296 of
 their kernels in PTX.
 
 ### Fusion against cicc
@@ -583,14 +590,12 @@ instructions through this compiler and 40 through nvcc with the CUDA helpers, on
 six matrix loads, the loop unrolled and every address folded by ptxas in both.
 
 The corpus goes through the compiler in `tests/compiler/ptx/test_corpus.py`. Without a card, every case: each
-kernel compiles or names a missing rule, never raises anything else, holds its name in its own symbols alone (what
-the kernel merge's rename by text replacement needs), and assembles for the case's declared capability at ptxas's
-default level and at `-O0`; the 24 `sm_70` cases are skipped where ptxas of CUDA 13.0 runs. On the card, a case whose
-every kernel compiles to PTX is built both ways, from CUDA text by nvcc and from PTX by ptxas, run on the same inputs
-and held to the corpus's own tolerance (`tests/compiler/ptx/differential.py`, which prints the table when run as a
-module): a sample of each family by default, every case under `pytest -m sweep`.
+kernel compiles, holds its name in its own symbols alone (what the kernel merge's rename needs), and assembles for
+the case's declared capability at ptxas's default level and at `-O0`; the 24 `sm_70` cases are skipped where ptxas
+of CUDA 13.0 runs. On the card, the realization corpus runs each case. Until the CUDA renderer was deleted, a case
+was also built both ways, from CUDA text by nvcc and from PTX by ptxas, and held to the corpus's own tolerance.
 
-Run on 2026-11-12, every corpus kernel in PTX (`EMMY_KERNEL_CODE=ptx-only`):
+Run on 2026-11-12, every corpus kernel in PTX, the last run both ways:
 
 | Card | Realization suite | Both ways | Largest difference |
 | --- | --- | --- | --- |

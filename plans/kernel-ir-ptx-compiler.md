@@ -20,6 +20,9 @@ kernel's structure on the rendered text any more (below). Step 12 has begun: two
 closed and the finalization audit is applied (below). No step ran the perf lane, the whole suite or an sm_70 kernel
 on a V100 yet; they are what is left of the closing step.
 
+PR B is draft #1399. Its switch (milestone 7) is done but for the opt level and the refit, which the priors task
+takes (milestone 7 says what it removes and bumps).
+
 | Step | Commit | Corpus CUDA |
 | --- | --- | --- |
 | 1 | `60144bb83` | identical |
@@ -592,6 +595,33 @@ lists which corpus cases still do. That fallback exists only inside the PR.
    - **Docs.** The CUDA backend, IR and passes `ARCHITECTURE.md` files, `AGENTS.md` (prerequisites, running tests),
      `README.md`, `GLOSSARY.md` for PTX.
    - Then record runs on each card and the refit.
+
+   *Done 2026-11-13, except the opt level and the refit.* The PTX compiler is the only code generator; a refusal is
+   an error. Deleted: the Kernel IR renderers and helpers (`ir/kernel/render.py`, the `render_stmt` registrations in
+   `ir/kernel/ir.py`), the shared `ir/render.py`, both `render_target.py`, `backend/cuda/nvcc.py`, the differential
+   test and the renderer-only tests. The Loop IR runner keeps a host C++ renderer of the shared statements,
+   `ir/loop/render.py`. `backend/cuda/ptxas.py` assembles: ptxas on `PATH` or under `$CUDA_HOME`/`$CUDA_PATH`, the
+   cubin keyed on the PTX, the target and ptxas's `--version`. The pack's environment is the arch and the ptxas
+   version. The kernel merge renames PTX symbols (`ir.cuda.ir.renamed`: the entry, `_param_N`, `_shared_N`). The
+   stage is `--ir ptx`; the dump writes `.ptx`. The corpus `built` stage assembles for the declared card without
+   one, and skips a target the installed ptxas refuses (CUDA 13: `sm_70`).
+
+   The compiler gained what the renderer still held: paged buffers (a table of pages, `Param.page`), float masks under
+   `and`/`or`/`not`, 8-bit float encoding below `sm_89` in software, 16-bit and unsigned 64-bit integers, bitcasts and
+   doubles as a value converted through (EXL3), the Volta slab layouts as integer expressions, combines at the type
+   their states are held at, a half maximum or minimum accumulator at f32 where the target has no instruction for it,
+   and no fused multiply-add at f16 (eager rounds the product).
+
+   *Left for the priors task: the opt level.* Every compile is level 3 and nothing selects another, but the feature and
+   the columns stay. Remove: `context.split_opt_level` and `_OPT_TOKEN`, the opt part of `Context.compile_flags` (keep
+   the two precision tokens' spelling or bump every context key), `H_opt` and `DEPLOYABLE_OPT` (`search/features.py`,
+   `dataset/sample.py`, `dataset/group.py`, `prior/report.py`, `commands/eval.py`), the tune DB's `opt` and `flags`
+   context columns (`search/db/__init__.py`) and the freeze's deployable-opt gate (`db/freeze.py`). Bump the featurizer
+   version and the tune DB version, refit both priors. Tests that hold the opt level: `backend/test_compile_regime.py`,
+   `db/test_db.py`, `db/test_freeze.py`, `db/test_measured_groups.py`, `policy/test_greedy.py`, `prior/test_report.py`,
+   `tests/github/test_measured_regret_jq.py`. No stored file carries a level-1 row: the freezes hold no opt field (the
+   gate drops level-1 rows when one is written), and no golden names `-Xcicc`. A local tune DB may hold level-1 rows; no
+   compile reads them.
 
 ### Checks
 

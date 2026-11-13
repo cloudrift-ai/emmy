@@ -125,7 +125,7 @@ generator, not fusion.**
 
 ## CUDA backend (`cuda/`)
 
-See `cuda/ARCHITECTURE.md`. Runs the full lowering chain, compiles every kernel with `nvcc`
+See `cuda/ARCHITECTURE.md`. Runs the full lowering chain, assembles every kernel's PTX with `ptxas`
 into the cubin cache, and executes the program through the Rust runtime.
 The `COLD_CACHE` input regime measures one replay per kernel after same-stream eviction of L2 and the instruction
 caches outside the event window. It reports a sum of per-kernel times, with no whole-program timing; worker requests carry the regime

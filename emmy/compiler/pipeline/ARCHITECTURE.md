@@ -119,7 +119,7 @@ rule matches a `LoopOp` and returns several tile options.
 2. `greedy_decide` first tries to descend directly to a measured complete row. Without direct evidence,
    it ranks the complete offered rows — streamed off the lazy walk in bounded chunks, so memory stays O(chunk)
    however large the pool; no kernel is built until the choice is made (Part 4).
-3. Each compared row contains the compile context's `H_*` features (which GPU, which nvcc flags), the kernel's `S_*`
+3. Each compared row contains the compile context's `H_*` features (which GPU, which regime), the kernel's `S_*`
    features (a summary of its body and loop extents, computed from the kernel), and complete knob values (Part 6).
 4. **The evidence index.** The fastest measured row of the same kernel — the same exact identity — at the sizes the
    compile binds its symbolic dims to, that agrees with an offered leaf: a tune DB `perf` row under this compile's own
@@ -520,7 +520,7 @@ the model can rate some of them far above the golden. On the V100 Qwen3.8-27B-FP
 reproduced. The fix is a fit and a gate that draw the way the deploy draws; until then a cold V100 compile needs
 recorded evidence.
 
-**A subtlety about features.** The `H_*` features (which GPU, which nvcc level) have the same value for every
+**A subtlety about features.** The `H_*` features (which GPU, which regime) have the same value for every
 candidate competing at one fork, so on their own they cannot change a ranking within that set. A tree can still
 combine one with a per-candidate feature — split on the card, then on the accumulator width — which is how a single
 model can prefer f16 accumulation on one architecture and f32 on another; the default view carries `H_cc` for that
@@ -569,8 +569,8 @@ At a **schedule fork** (one kernel's row):
    otherwise fail no earlier than leaf matching. An off merely inherited down the branch is a pin rather than a
    decision and still admits. The index is built once per compile and memoized per process on
    the DB path and mtime, the context key and the card. It holds the DB's `perf` rows of the context's backend for this
-   compile's context key (one lane, because a sweep measures in the regime a deploy compiles in; rows from a
-   deliberately non-deployable `--nvcc-flags` run key elsewhere and are simply never consulted) — the box's own
+   compile's context key (one lane, because a sweep measures in the regime a deploy compiles in; rows measured
+   under nvcc at another opt level key elsewhere and are simply never consulted) — the box's own
    `run --bench` rows and the **golden rows** in scope, which the compile imports before it picks
    (`golden.evidence.evidence_db`): the live card's repository files, or the file `--golden PATH` names, once per
    golden digest into the tune DB — created on first use, and imported under the lock beside the file so the workers
@@ -835,7 +835,8 @@ reverse), so old rows upgrade in place.
 `-Xcicc -O1` and re-benched near-best configs at `-O3`, which put a proxy in charge of the search. The proxy's error
 was *biased along tile area* — the axis being tuned — so it systematically priced wide tiles as slow (paired over
 1,818 configs: p90 regret 1.68×, and the `-O1` argmin was the `-O3` argmin on only 44.5% of pools), and the compile
-time it was buying no longer existed: over 4,888 nvcc compiles, `-O3` compiled at a median 0.96× of `-O1`.
+time it was buying no longer existed: over 4,888 nvcc compiles, `-O3` compiled at a median 0.96× of `-O1`. With nvcc
+gone no compile can select another level: every compile is the deployable one.
 
 Searching a kernel's schedule space on the card is future work: a ranked sweep that scores the kernel's complete rows
 with the offline prior, benches the top few, searches locally from the best measured one, and writes what it measures
@@ -911,10 +912,12 @@ tables hold compilable kernels, the decisions that minted them, and measurements
   SKUs off one die, H100 and H200, RTX 5090 and RTX PRO 6000, share a compute capability, and without it their rows
   would overwrite each other), the target as the backend spells it (`sm_120`; on the CPU backend, LLVM's name for
   the host CPU, with the card its product name and thread count — `Context.for_cpu`), the cicc opt level and the
-  residual compiler flags (`""` in the plain regime, so `""` and `-Xcicc -O3` are one regime), every effective
-  precision decision, and `cold_cache`. Independent overrides of the `FAST_MATH` umbrella partition evidence even
-  when they leave nvcc flags unchanged. The context captures these inputs before compilation; A/B recording
-  reconstructs it inside each row's replay-pin scope. Omitted independent pins inherit the recorded umbrella.
+  residual compiler flags (the spelling of the two whole-kernel precision decisions, `context.precision_flags`;
+  every compile is at level 3, and a row measured under nvcc keeps the level it was built at, `""` and
+  `-Xcicc -O3` one regime), every effective precision decision, and `cold_cache`. Independent overrides of the
+  `FAST_MATH` umbrella partition evidence even when they leave that spelling unchanged. The context captures these
+  inputs before compilation; A/B recording reconstructs it inside each row's replay-pin scope. Omitted independent pins
+  inherit the recorded umbrella.
   Publishing a recorded regime spells those effective defaults explicitly, so ambient overrides cannot leak in;
   equivalent omitted and explicit defaults share one regime without rewriting the stored row's pins.
   Cold measurements evict L2 and the instruction caches before each timed launch. The replayable `COLD_CACHE` golden input pin carries that
@@ -1032,8 +1035,8 @@ implausible arithmetic intensity) and anything from the `--ir` path are never re
 
 **A failure blames one kernel** (`bench_record.persist_bench_failure`, the one writer for a failed bench, which `run
 --bench`'s greedy row comes through). A kernel whose row is a `bench_fail` fails every graph it is in — its identity
-is its rendered source and launch geometry, the same bytes wherever it appears — so a failure is recorded only
-against the kernel the failure names — the watchdog's hang, or nvcc's refusal of a kernel's source — and the innocent
+is its PTX and launch geometry, the same bytes wherever it appears — so a failure is recorded only
+against the kernel the failure names — the watchdog's hang, or ptxas's refusal of a kernel's PTX — and the innocent
 kernels stay rowless; the name is read off the message text, since the exception class does not cross the worker
 pipe, and with the quote `repr` escapes when the message also holds a `"`. A failure that names no kernel in a
 multi-kernel graph — a wall kill — blames none of them and records nothing: the DB holds measurements of kernels and
@@ -1601,24 +1604,25 @@ hold decisions only, every key a registered knob (Part 6).
 **`FAST_MATH` / `F16_MMA_F32_ACC` / `FP8_MMA` / `FAST_EXP` / `FAST_DIV` / `FAST_SQRT` / `FLUSH_TO_ZERO` /
 `CONTRACT_FMA`** (BOOL, pin-only precision restrictions) — the **precision-trading family**. Precedence per knob: its
 own pin > the `FAST_MATH` umbrella > true (`space.precision_pin`); `CONTRACT_FMA` alone keeps its own default, on in
-both regimes as nvcc's is, so only its own pin turns contraction off (`space.precision_default`). `F16_MMA_F32_ACC`
+both regimes, so only its own pin turns contraction off (`space.precision_default`). `F16_MMA_F32_ACC`
 admits the fixed domain's f16-accumulate atom choices (`mma_m16n8k16_f16_f16` — chunked f32 register promote), while
 `FP8_MMA` admits its native fp8 atoms. Without the effective gate, Algorithm 1's immutable context excludes those
 choices while composing its lazy frontier.
 The other five are one knob per instruction class, each picking the instruction its class compiles to.
-`FAST_EXP` swaps libm `expf` for `__expf` (`lowering/kernel/130_approximate_math`); `FAST_DIV` picks approximate division
-and reciprocal, and is the one home of multiplying by a reciprocal (`lowering/kernel/040_split_invariant_divides`);
+`FAST_EXP` swaps the exact exponential for the approximate one (`lowering/kernel/130_approximate_math`); `FAST_DIV`
+picks approximate division and reciprocal, and is the one home of multiplying by a reciprocal
+(`lowering/kernel/040_split_invariant_divides`);
 `FAST_SQRT` the approximate square root; `FLUSH_TO_ZERO` flushes subnormals; `CONTRACT_FMA` fuses a multiply and an
 add. `FAST_EXP` with `FLUSH_TO_ZERO` off is the fast exponential that keeps subnormal results: ptxas lowers the
-non-flushing `ex2.approx.f32` under `__expf` to one hardware exponential on a halved argument and a squaring of its
+non-flushing `ex2.approx.f32` to one hardware exponential on a halved argument and a squaring of its
 result, as accurate there as an explicit shift and scale. The approximate instruction of a class is an operation the
 kernel body names (`exp_fast`, `divide_fast`, `reciprocal_fast`, `sqrt_fast`), written by
 `lowering/kernel/130_approximate_math`; with the umbrella and `FAST_EXP` both on, the same pass picks the approximate
 logarithm, sine, cosine, hyperbolic tangent and power, which no knob names. Flush to zero and contraction hold for a
-whole kernel, so they are the two nvcc flags (`backend.cuda.nvcc.precision_flags`): `--ftz=true` and `--fmad=false`,
-each where the decision is not nvcc's default. nvcc is never passed `--use_fast_math`, `--prec-div` or `--prec-sqrt`:
-it compiles what the body does not name approximate at its own precise defaults. The fast-math lane's flag string is
-therefore `--ftz=true`, and it is part of that lane's context key and of its cubin keys.
+whole kernel, so they reach the PTX compiler as its two precision decisions; a context spells them as the flags nvcc
+took (`context.precision_flags`: `--ftz=true` and `--fmad=false`, each where the decision is not the default), since
+every stored row's context key is a digest of that spelling. What the body does not name approximate is compiled
+exact. The fast-math lane's flag string is therefore `--ftz=true`, and it is part of that lane's context key.
 `FAST_MATH` remains `unfeatured`: schedule choices keep their concrete knob identity, and the flush flag
 and independent overrides separate measurement contexts.
 New golden inventories and measurements record the effective umbrella explicitly, so replay preserves that regime.
@@ -1665,7 +1669,7 @@ of algebraic rewrites they may apply are documented there too.
 | `loop/stamp/`             | `stamp_loop_names` (`provenance.name_for`, e.g. `k_rms_norm_3f2a1b`) — the name is the one thing stamped. Runs last in the loop dialect, after maximal fusion. |
 | `tile/{lift,cut,schedule}/` | `010_lift` forms each kernel through `lift_kernel`, the formation cut and split pieces share: it re-fuses free axes a fused reshape split (`p → f/Q, q → f%Q`, kept only when every access folds clean), so split and unsplit spellings of one contraction converge to one kernel identity, then converts the complete inner loop nest to a canonically factored Fold tree; `020_twisted` rewrites the exp family; `030_cut` reaches a fixpoint over stored-edge cuts, constant layouts, then cross-CTA splits; `040_schedule` schedules each stored tree. |
 | `lowering/kernel/`        | `010_materialize` lowers the selected schedule through `_factor.factorize`, followed by the Kernel IR peepholes. See [`passes/lowering/kernel/ARCHITECTURE.md`](passes/lowering/kernel/ARCHITECTURE.md). |
-| `lowering/cuda/`          | `delegate_zero_init` (first) moves an atomic accumulator's per-launch zero-init off the runtime memset and into a dataflow-predecessor kernel as a `ZeroPrologue` stmt (every thread of the grid writes a stride of zero words ahead of the kernel's own work; stream order guarantees happen-before) — one CUDA-graph MEMSET node saved per site; the capture's first launch and symbolic-shaped accumulators keep their memset, and the slab planner starts the buffer's live interval at the delegating launch (`CudaOp.zero_prologues`). `lower_kernelop` then generates the kernel's code and mutates the node's op to `CudaOp` in place: a `__global__` source string (`ir/kernel/render.py::render_kernelop`) by default, or PTX from the Kernel IR to PTX compiler (`ir/kernel/ptx.py`) under `EMMY_KERNEL_CODE=ptx`, with the renderer as the fallback for a kernel the compiler has no rule for yet and for nothing else (the CUDA backend `ARCHITECTURE.md` owns the switch). |
+| `lowering/cuda/`          | `delegate_zero_init` (first) moves an atomic accumulator's per-launch zero-init off the runtime memset and into a dataflow-predecessor kernel as a `ZeroPrologue` stmt (every thread of the grid writes a stride of zero words ahead of the kernel's own work; stream order guarantees happen-before) — one CUDA-graph MEMSET node saved per site; the capture's first launch and symbolic-shaped accumulators keep their memset, and the slab planner starts the buffer's live interval at the delegating launch (`CudaOp.zero_prologues`). `lower_kernelop` then compiles the kernel to PTX with the Kernel IR to PTX compiler (`ir/kernel/ptx.py`, the `emmy-ptx` crate) and mutates the node's op to `CudaOp` in place; a refusal of the compiler is an error. |
 
 SiLU decomposition follows PyTorch opmath precision: f16 and bf16 inputs widen once to f32, the primitive
 negative/exp/denominator/reciprocal chain and final product compute in f32, and the result converts once to the

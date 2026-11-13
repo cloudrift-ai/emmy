@@ -20,7 +20,7 @@ kernels. A curated list describes its programs in prose and shapes, so it drifts
 without anything noticing: this one still claimed "Emmy currently emits FP32 only" long after that
 stopped being true, and its `EMMY_BK` parametrization pinned a knob that no longer existed, so both
 of its cells ran the same compile. A corpus case stores the program itself, is replayed by the
-correctness lane on every commit, and carries its own realization contract.
+default suite on every commit, and carries its own realization contract.
 
 Those twelve kernels survive as `cases/qwen3emb/` — RMSNorm at the layer and per-head widths, the
 Q and K/V projections, causal GQA attention, `o_proj` and `down_proj` with the residual fused into

@@ -238,12 +238,13 @@ describe how a term is used in Emmy; they are not meant to replace a full textbo
 - **Carrier** — The temporary state maintained by a reduction and the rule for combining partial states. A sum's
   carrier can be one accumulated number; stable softmax needs several related values.
 - **Tensor core** — Specialized GPU hardware for performing small matrix operations efficiently.
-- **nvcc / NVRTC** — Two NVIDIA CUDA compilers. nvcc compiles ahead of execution; NVRTC compiles CUDA source at
-  runtime.
-- **PTX** — NVIDIA's assembly language for GPU kernels: typed instructions over virtual registers, the form nvcc
-  hands to its assembler. The `emmy-ptx` crate writes it from Kernel IR.
-- **ptxas** — NVIDIA's PTX assembler. It turns PTX text into the machine code a card runs, and does register
-  allocation, instruction scheduling and loop unrolling on the way.
+- **nvcc / NVRTC** — Two NVIDIA CUDA C++ compilers. Emmy uses neither: it writes PTX itself.
+- **PTX** — NVIDIA's assembly language for GPU kernels: typed instructions over virtual registers. The `emmy-ptx`
+  crate, the Kernel IR to PTX compiler, writes every kernel's code in it; it is the stage `emmy compile --ir ptx`
+  prints.
+- **ptxas** — NVIDIA's PTX assembler, part of the CUDA toolkit. It turns PTX text into the machine code a card runs
+  (a cubin), and does register allocation, instruction scheduling and loop unrolling on the way. It is the one
+  toolkit binary Emmy runs.
 - **CUDA graph capture** — Recording a sequence of GPU launches so the sequence can be replayed with less CPU
   overhead.
 - **Paged buffer** — A buffer reached through a page table instead of one base address: cut along one axis every

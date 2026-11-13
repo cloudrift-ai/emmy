@@ -21,10 +21,10 @@ Graph (frontend ops)                        ── Layer 1
 Graph[LoopOp]  (one LoopOp = one kernel)    ── Layer 2
    │  pipeline/passes/tile/{lift,cut,schedule}  (Loop IR → Tile IR)
    │  pipeline/passes/lowering/kernel       (Tile IR → Kernel IR)
-   │  pipeline/passes/lowering/cuda         (Kernel IR → CUDA source)
+   │  pipeline/passes/lowering/cuda         (Kernel IR → PTX, crates/emmy-ptx)
    ▼
 Graph[CudaOp]                               ── Layer 3
-   │  backend/cuda                          (nvcc cubins, launched by the Rust runtime)
+   │  backend/cuda                          (ptxas cubins, launched by the Rust runtime)
    ▼
 GPU
 ```
@@ -84,10 +84,10 @@ module's own functions.
 `Context` binds the effective precision decisions when a compile starts. Its key includes those decisions beside
 the target, compiler flags and cache mode, so an independent `FAST_EXP`, `F16_MMA_F32_ACC` or `FP8_MMA` override
 cannot read another regime's timings. Reconstructed contexts take the recorded pins explicitly; later environment
-changes do not alter their keys. The bound decisions are the one carrier of the fast-math decision: the nvcc flag
-string names it only where a context is built from flags alone (`Context.from_target(compile_flags=…)`), and every
-reader — the context key, the `H_fast_math` feature, the tune DB's regime, the dataset's regime key — takes
-`Context.precision_pins()` or the row's `precision`, never the flag string.
+changes do not alter their keys. The bound decisions are the one carrier of the fast-math decision: the flag string a
+stored row names its regime by names it only where a context is built from flags alone
+(`Context.from_target(compile_flags=…)`), and every reader — the context key, the `H_fast_math` feature, the tune DB's
+regime, the dataset's regime key — takes `Context.precision_pins()` or the row's `precision`, never the flag string.
 
 ## Module layout
 
@@ -211,7 +211,7 @@ ordinary outcome — a fusion-band decision upstream of the tile binding, shared
 holds for an E-stacked bits input the serving slots program gathers by a selector, paged or resident.
 
 **NVFP4 checkpoints.** The dtype layer carries the storage format — `f4e2m1x2` (a uint8 element holding a packed
-pair of e2m1 codes) with its LUT decode `decode_f4x2` and a raw-byte CUDA spelling. `loader/quant.py` recognizes
+pair of e2m1 codes) with its LUT decode `decode_f4x2`, a raw byte in a kernel. `loader/quant.py` recognizes
 both checkpoint config conventions (modelopt, compressed-tensors `nvfp4-pack-quantized`; MXFP4's 32-element blocks
 stay excluded) and dequantizes the packed trio `<key>` + `<key>_scale` (e4m3, read as raw bits) + `<key>_scale_2`
 (f32) for the accuracy twin via `dequantize_nvfp4` — `fuse_nvfp4_scales` collapses the two scale levels into one

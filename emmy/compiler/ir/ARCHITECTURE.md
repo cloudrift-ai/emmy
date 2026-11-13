@@ -14,7 +14,7 @@ top-level layer/pass picture see `compiler/ARCHITECTURE.md`.
 | `loop/ir`         | after fusion                    | `LoopOp` + body types (`Load`, `Assign`, `Accum`, `Write`, `Select`, `Loop`, `Axis`)                  |
 | `tile/ir`         | after `tile/schedule`           | `TileOp` holding the structural root `op`, output specifications, placement, workers, knobs, a typed classic schedule, and its materialization |
 | `kernel/ir`       | after `lowering/kernel`         | `KernelOp` + hardware stmts (`Tile`, `Smem`, `Sync`, `TreeHalve`)                                     |
-| `cuda/ir`         | after `lowering/cuda`           | `CudaOp` (rendered `__global__` source)                                                               |
+| `cuda/ir`         | after `lowering/cuda`           | `CudaOp` (the kernel's PTX)                                                                           |
 
 ## Pure terms vs statements
 
@@ -197,19 +197,19 @@ kernel it produced went on to read.
   ceil-div / clamp) and the `Dim` name is threaded as a runtime `int`
   arg. Cross-CTA reduction splits are structural choices in `030_cut`. A symbolic FREE axis
   (dynamic grid), strided rows, and the tensor-core `warp_tile` are reserved future tiers.
-- **Kernel → CUDA** (after `lowering/cuda`): `KernelOp` replaced by
-  `CudaOp` carrying the kernel's code: rendered CUDA source, or PTX from the Kernel IR to PTX compiler
-  (`kernel/ptx.py`, the Python entry of the `emmy-ptx` crate) where `EMMY_KERNEL_CODE` asks for it and the compiler
-  has a rule for every statement of the kernel.
+- **Kernel → PTX** (after `lowering/cuda`): `KernelOp` replaced by `CudaOp` carrying the kernel's PTX, from the
+  Kernel IR to PTX compiler (`kernel/ptx.py`, the Python entry of the `emmy-ptx` crate). A statement or an operation
+  it has no rule for is an error.
 - **Every buffer index spells every dim of its buffer**, `0` at a size-one dim, until it is flattened: one function,
   `address.flat_index`, sums the coordinates row-major over the buffer's shape (symbolic sizes included, each
   coordinate widened to 64 bits where the buffer can pass the 32-bit range) and refuses any other count, since
   without strides the coordinates cannot be summed into an address. A single coordinate is an already-flat address.
   A `Load`, a `Write` and a `CpAsyncCopy` take their flat index before anything prints them: a kernel body in
   `lowering/cuda` (`008_flat_indices`, after which the body's optimization simplifies the index under the launch's
-  ranges), a Loop IR body where the runner renders it. The renderer prints such an index as it is given. It still
-  flattens for the statements that keep one index per dimension: a paged access, a `Write` under a Volta slab
-  layout, the lane form of a `CpAsyncCopy`, the fragment statements, `TmaLoad`, and a carried state.
+  ranges), a Loop IR body where the runner renders it. The code generators take such an index as it is given. The
+  PTX compiler still flattens for the statements that keep one index per dimension: a paged access, a `Write`
+  under a Volta slab layout, the lane form of a `CpAsyncCopy`, the fragment statements and `TmaLoad`; the Loop
+  IR runner for a carried state.
 
 Multi-output ABI order always comes from `Node.buffer_names()`: matcher population reorders a body-carrying op's
 input/output maps to the graph ports after body normalization, Loop execution returns outputs in that order,
@@ -296,9 +296,10 @@ member the roles cannot give is a missing role, not a hand-written member; the s
 buffers their fields do not name (inside an expression, through the subroutine), and a `StridedLoop` with an `end` binds
 one more name than its axis.
 
-Behaviour that is not on this list lives outside the module as a function over statements. CUDA rendering is the
-main case: `ir/render.py` holds the render context, the index flattening and one render function per statement type,
-dispatched on the statement's type; Kernel IR registers its own statement types beside their classes.
+Behaviour that is not on this list lives outside the module as a function over statements. The Loop IR runner's
+host C++ is the main case: `ir/loop/render.py` holds the render context, the index flattening and one render
+function per shared statement type, dispatched on the statement's type. A Kernel IR statement has no host
+rendering; its code is the PTX compiler's.
 
 **`Body`** is an immutable sequence of statements, built from any iterable. A slice or a sum of bodies is a `Body`;
 two bodies with equal statements are equal and hash alike; a statement placed in a body is the same object every
@@ -641,18 +642,18 @@ Body walkers: `iter_body(body)` (pre-order; powers `for s in loop_op`),
 `str(stmt)` (the statement's text, the lines kernel dumps show; block stmts
 recurse via `pretty_body`).
 
-CUDA scalar rendering goes through `op_to_expression` in `ir/render.py`. It spells primitive operations only: a
-composite function (`sigmoid`, `relu`, `square`, `reciprocal`) is its definition in the operations' table
-(`Expression.definition`), which kernel lowering writes into the body (`125_spell_composites`) and the renderer
-reads for the statements that keep one operation (`FragmentApply`, a carried program). An approximate instruction is
-an operation the body names (`exp_fast`, `divide_fast`, `reciprocal_fast`, `sqrt_fast`, `log_fast`, …, picked by
-`130_approximate_math`): CUDA's fast intrinsic where one exists (`__expf`, `__fdividef`), else a helper in inline PTX
-the kernel renderer emits, with `.ftz` when the kernel flushes to zero. Boolean masks retain the historical f32 SSA
-convention, so Torch's `bitwise_not` spelling renders as logical zero-test (`mask == 0`); explicitly bool-stamped values
-use the same semantics. Integer complement is not inferred from that name and fails closed until it has a typed
-consumer.
+Host scalar rendering goes through `op_to_expression` in `ir/loop/render.py`. It spells primitive operations only:
+a composite function (`sigmoid`, `relu`, `square`, `reciprocal`) is its definition in the operations' table
+(`Expression.definition`), which kernel lowering writes into a kernel body (`125_spell_composites`) and the code
+generators read for the statements that keep one operation (`FragmentApply`, a carried program). An approximate
+instruction is an operation a kernel body names (`exp_fast`, `divide_fast`, `reciprocal_fast`, `sqrt_fast`,
+`log_fast`, …, picked by `130_approximate_math`): the PTX compiler writes the hardware's approximate instruction,
+with `.ftz` when the kernel flushes to zero, and the host reference computes it exactly. Boolean masks retain the
+historical f32 SSA convention, so Torch's `bitwise_not` spelling is a logical zero-test (`mask == 0`); explicitly
+bool-stamped values use the same semantics. Integer complement is not inferred from that name and fails closed until
+it has a typed consumer.
 
-The renderer decides no type. A body reaches it typed in full by `ir/types.py`, the one place the promotion and
+No code generator decides a type. A body reaches it typed in full by `ir/types.py`, the one place the promotion and
 conversion rules live. `stamp_types` gives each `Load`, `Assign`, `Accum` and `Write` its dtype by promotion.
 `explicit_conversions` then makes every operation take its operands at the dtype it computes at: natively at f16
 where the target has the operation there (`target.native_f16_ops`) and every operand is f16, over integers where
@@ -668,10 +669,10 @@ its source and of its fragment, and a `RegFragment` its own. A `RegStore` epilog
 `epilogue_conversions` over the f32 elements of its accumulators (a float load widened to f32 by a conversion, a
 select at f32) and checked like any. Two kinds of statement are exempt until they are typed too, and the check lists
 them: the cross-thread combine programs (`TreeHalve`, `WarpShuffle`, `WarpBroadcast`), and a `FragmentApply`
-operand's conversion to f32, which the renderer types where it prints it, because its operands are register elements
-only the renderer names. An
-index `Let` with no dtype is an integer whose width the renderer still takes from its expression.
-`check_input` (the crate's `input` module) is what `lowering/cuda` asks of every kernel before it renders one:
+operand's conversion to f32, which the PTX compiler types where it compiles it, because its operands are register
+elements only the compiler names; a combine takes the type its states are held at. An index `Let` with no dtype is
+an integer whose width the compiler takes from its expression.
+`check_input` (the crate's `input` module) is what `lowering/cuda` asks of every kernel before it compiles one:
 `check_types`, one flat index on every `Load`, `Write` and `CpAsyncCopy` that its dimensions do not define, no
 loop left asking for unrolling, and a layout and a role the lane-to-element table has on every fragment statement.
 
@@ -682,8 +683,8 @@ to FP32 would silently change the computation.
 A typed `Let` also declares its value's dtype. Operand-edge and cone-statistic readers preserve that declaration,
 including when a static scalar load becomes a literal binding. An untyped binding remains unknown; the readers do
 not infer a storage dtype from the Python literal. Cuts and schedules consume these facts without changing policy.
-Fragment epilogues retain these bindings through the shared statement renderer, including their coordinate
-substitution and storage dtype. An atomic split's projection may use a binding independent of the carried state;
+Fragment epilogues retain these bindings through the PTX compiler, including their coordinate substitution and
+storage dtype. An atomic split's projection may use a binding independent of the carried state;
 binding a state-dependent expression does not by itself prove that the projection distributes over addition.
 
 Dependence cones: `Body.backward_cone(roots)` builds a `Cone` —
@@ -807,8 +808,8 @@ from that CSE form. Subroutine boundaries never limit fusion.
   reassociates a sum, which every reduce schedule does already. It decides no rounding a knob owns: `x / 3.0` stays a
   division, since whether it becomes a product by a rounded reciprocal is the division knob's choice. A chain of named
   temps and one tree are one body up to the single-reader guard — a sum two statements read stays a definition — so
-  the readers of the normal form (the tile lift, the kernel passes, the renderer) read one operation per statement;
-  the renderer spells a nested value a kernel pass built as temps of its own.
+  the readers of the normal form (the tile lift, the kernel passes, the code generators) read one operation per
+  statement; the host renderer spells a nested value as temps of its own.
 - `merge_sibling_reduce_loops` — unify sibling reduce axes whose Load positions overlap, then merge matching Loops
   before descending into their children. A parent merge therefore exposes child reductions to the same walk.
   Overlapping reductions share one canonical axis name (softmax's max + sum sweeps; the two matmul reductions in
@@ -1133,7 +1134,7 @@ field or model-specific choice is involved.
 
 | Symbol    | Role                                                                        |
 |-----------|-----------------------------------------------------------------------------|
-| `CudaOp`  | Graph-op carrying `kernel_source`, `kernel_name`, `arg_order`, `grid`, `block`, `smem_bytes`, `zero_outputs`, `comment`. Produced by `pipeline/passes/lowering/cuda` (renders the `KernelOp` body to a `__global__` source string). |
+| `CudaOp`  | Graph-op carrying `kernel_source`, `kernel_name`, `arg_order`, `grid`, `block`, `smem_bytes`, `zero_outputs`, `comment`. Produced by `pipeline/passes/lowering/cuda` (compiles the `KernelOp` body to PTX). |
 
 ## Graph as the single program form
 

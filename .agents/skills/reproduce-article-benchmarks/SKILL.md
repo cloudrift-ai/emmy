@@ -195,7 +195,7 @@ nvidia-smi --query-gpu=name,memory.total,compute_cap --format=csv,noheader     #
 
 Articles commonly span several GPUs. If only one is available, run its recipes and **report the rest as not-run** —
 never substitute a different card and present the numbers against the article's table for another one. Command
-recipes also need host toolchain: `nvcc` on `PATH` at a version the target arch requires, `python3.12-venv`, a
+recipes also need host toolchain: `ptxas` on `PATH` at a version the target arch requires, `python3.12-venv`, a
 system-wide `ninja`, and `cmake` where a lane builds a third-party engine from source.
 
 Before committing the user to a run, **estimate and state the cost** — recipe `timeout:` values and the variant

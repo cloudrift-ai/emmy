@@ -400,7 +400,7 @@ drafting gate gives a tiny Qwen3.5 a head that drafts the target's own pick agai
 draft, and checks transformers' greedy tokens drafted and not, captured or not, through chunked prefill. Its layers
 are attention only: without evidence a tiny Gated DeltaNet step runs past the worker's deadline, so a verify step's
 per-row state carry is checked on the CPU and by the recipes' gates on the card. It
-hides Python and NVCC from the native
+hides Python and ptxas from the native
 child's PATH after export. The same exported binaries also run through the Python API; logits must be bit-identical
 at every checked step. Independent NumPy checks cover rotary rounding and causal attention through cache position
 4,096, including a shorter request after the largest one.

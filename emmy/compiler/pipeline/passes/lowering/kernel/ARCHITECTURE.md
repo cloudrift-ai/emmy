@@ -1,8 +1,8 @@
 # Kernel lowering — `TileOp` → `KernelOp`
 
 This stage turns a scheduled `TileOp` into a `KernelOp` (a thread-bound CUDA-IR body), then runs a short chain of
-Kernel-IR peepholes over it. The CUDA lowering (`lowering/cuda`) renders the `KernelOp` to a `__global__` source string
-afterwards, after one rule of its own: `007_decode_grid` turns the `Tile` into a `Grid` whose axes hold their decode as
+Kernel-IR peepholes over it. The CUDA lowering (`lowering/cuda`) compiles the `KernelOp` to PTX afterwards, after one
+rule of its own: `007_decode_grid` turns the `Tile` into a `Grid` whose axes hold their decode as
 expressions over `thread_idx.x` and `block_idx.x` (`decode_tile`), its tail guard a `Cond` where the launch does not
 cover the cells exactly. The `Grid` states its launch's ranges of the built-ins, so the optimization the op takes at
 construction reads a block axis off `blockIdx.x` alone and a thread axis off `threadIdx.x` alone, and an emitter has
@@ -15,20 +15,19 @@ read the `Tile` (the kernel cache, the zero-init delegation), so `--ir kernel` a
 (`address.flat_index`: row-major over the buffer's shape, symbolic sizes included, each coordinate widened to 64 bits
 where the buffer can pass the 32-bit range), and a `FlatIndex` a staging pass left in a value becomes that arithmetic
 too. The body's optimization then simplifies the index under the ranges in scope, so `(128 * a0_b + 64 * a0_u) * 132
-+ a2` reaches the code generator as `16896 * a0_b + 8448 * a0_u + a2`, and the renderer prints it as given. The pass
++ a2` reaches the code generator as `16896 * a0_b + 8448 * a0_u + a2`, which takes it as given. The pass
 stands here, past every kernel pass, for two reasons. The kernel passes read the coordinates: the vector passes prove
 alignment over them and the staging passes tile them. And which buffers are paged is a fact of the graph, which a
 kernel taken from the kernel cache does not know: an access of a paged buffer keeps one index per dimension, since
-its index along the paged axis picks the page (`render.Paged`), and so does whatever else its dimensions define — a
+its index along the paged axis picks the page, and so does whatever else its dimensions define — a
 `Write` under a Volta slab layout, the shared-memory side of a `CpAsyncCopy` that carries a lane offset, the fragment
 statements (`LdmatrixLoad`, `FragmentLoad`, `BlockScaleLoad`, a `FragmentApply`'s gathered operand, `RegStore` and
 the loads of its epilogue) and `TmaLoad`. `010_lower_kernelop` then checks the body (`check_input`): typed in full,
 one flat index per access outside those, no loop asking for unrolling, and every fragment statement naming a row of
 the lane-to-element table.
 
-The renderer then spells every index division and remainder by a power of two over a non-negative dividend as a shift
-and a mask (`reduce_strength`), on the body it is about to render: the Kernel IR keeps `/` and `%`, which the
-simplifier reads.
+The PTX compiler then computes every index division and remainder by a constant over a non-negative dividend as a
+shift, a mask or a multiply-high: the Kernel IR keeps `/` and `%`, which the simplifier reads.
 
 ## `010_materialize` — bind the schedule to threads (and expand the contraction)
 
@@ -404,7 +403,7 @@ retain the cooperative gather path. Newer instruction families stay disabled. Th
 additionally requires **sm_90+**
 (Hopper/Blackwell): below it (the schedule's TMA gate, mirroring the frontend TMA-fold gate) the `d*/smem-tma*` moves
 are never offered and a `smem-tma` pin refuses — Ada/Ampere have no
-`cp.async.bulk.tensor` and nvcc has no `sm_89a` target, so a TMA kernel there would fail to compile. Unpinned, the
+`cp.async.bulk.tensor` and ptxas has no `sm_89a` target, so a TMA kernel there would fail to assemble. Unpinned, the
 schedule fork enumerates the resolver-gated stage grid (`ir/schedule/catalog.stage_moves`) alongside the tile / reduce
 moves;
 an `EMMY_STAGE` pin stays authoritative. A warp tile's TMA and cp.async stages also take an N that ends inside the
@@ -419,10 +418,10 @@ such a sum — a tile base the IR spells (a fragment's row block and K step, a c
 row offset) plus the lane's own offset the render adds — and a base whose row is a multiple of the lane's row span
 and whose column clears the lane's column bits shares no bit with it. So the drain reads
 `(swz(lane) ^ swz(col)) + row·ldm` and an evenly striped cp.async fill, unrolled per stripe, writes
-`swz(lane) + base` (`swizzled_slab_index`): the lane's swizzle is one hoisted per-lane value, the column's a
-constant nvcc folds, the row an immediate of the load. Re-applying the swizzle to every load's whole index had nvcc
-recompute the XOR from `threadIdx` per load — a fifth of an attention chunk's instructions on the A100, and the
-spills that came with holding the results. A base the reading cannot prove keeps the whole-index form.
+`swz(lane) + base` (`swizzled_slab_index`): the lane's swizzle is one hoisted per-lane value, the column's a constant
+the compiler folds, the row an immediate of the load. Re-applying the swizzle to every load's whole index had nvcc
+recompute the XOR from `threadIdx` per load — a fifth of an attention chunk's instructions on the A100, and the spills
+that came with holding the results. A base the reading cannot prove keeps the whole-index form.
 
 **Computed operands and nested Folds.** Every computed edge remains a schedule site. Scalar rows evaluate a pure
 producer in registers. Warp rows place a producer in a synchronous shared-memory slab, evaluated per cell in the
@@ -897,9 +896,8 @@ shape nvcc gave a kernel; how many copies a loop takes is a decision, and it mov
 two limits. Every loop the unroll passes leave stepping several trips says it is `unrolled`, and the PTX compiler
 keeps it a loop (`.pragma "nounroll"`): cicc marks the two loops of its runtime unroll, and ptxas, free to, unrolled
 the PTX compiler's compact static loops in full where it had left cicc's alone (`qwen3emb/sdpa-s32`: 11,344 machine
-instructions unmarked, 2,216 marked). The CUDA renderer writes `#pragma unroll 1` on the runtime-bound ones only,
-which is what cicc marked; marked static loops cost the nvcc build up to 1.6x (`fused/norm-weight-linear-f16-computed-b`)
-where ptxas used to finish cicc's unrolling. A loop already `unrolled` is taken no further, which keeps the pass
+instructions unmarked, 2,216 marked); a static loop of at most four trips is left unmarked, for ptxas to write out
+as it wrote out cicc's. A loop already `unrolled` is taken no further, which keeps the pass
 idempotent.
 
 `119_vectorize_copies` runs the two widenings of `050` and `080` again (`_vector.vectorize_loads`,
@@ -914,7 +912,7 @@ body's optimization shares a primitive two composites compute. It follows `120` 
 is decided on the whole function: an f16 `sigmoid` computes in f32 and converts once, where its primitives, typed
 one by one, would each round at f16. After `120` the `Assign` holds that dtype and its operand is already there, so
 the primitives take it. A `FragmentApply` and a carried program (a combine, a `RegStore` epilogue) keep their
-composite; the renderer prints it through the same table.
+composite; the PTX compiler compiles it through the same table.
 Register-partial merges use the same accumulator policy as streaming updates: selecting folds retain the input dtype,
 while accumulating folds promote to f32. A merge reassigns the existing carrier and cannot change its declaration.
 Integer algebra is always restamped from its typed operands, repairing a
@@ -928,7 +926,7 @@ is tried for 1-byte dtypes only), each fp8 byte converting straight to f16 and e
 table; a run that divides the reduce extent carries no bounds mask (the
 modulo a mask spells blocks every vector load); and before grouping, a load index `(Y + r) / d` whose `Y` is a
 non-negative multiple of a `g` dividing `d`, with `0 < r < g`, reads `Y / d`, so every element of a lane's run reads a
-block-scaled weight's scale at the run's own index and nvcc loads it once (V100 width-1 fp8 down projection: 181 →
+block-scaled weight's scale at the run's own index and the code loads it once (V100 width-1 fp8 down projection: 181 →
 127 µs). On
 modern atoms, two B `x2` loads become one `x4` (plain for N-adjacent transposed B, transposed for col-adjacent canonical
 B). On Volta, adjacent A or B fragments under the derived crosswise/congruous layouts become one 128-bit shared load.
@@ -960,8 +958,8 @@ each trip's index against the lane ranges and keeps one load of each cell of a b
 either side of the combine's barrier, so the projection reads the values the fold loaded and a partner read resolves
 to another trip of the same lane.
 Both are structural and carry no knob: they change no schedule and no identity, only the emitted body. Every kernel
-buffer parameter is `__restrict__` (a launch's output never shares memory with its inputs), which lets nvcc keep
-read-only operands in registers across the kernel's stores and read them through the non-coherent path.
+buffer an input of the launch is read through the non-coherent path (`ld.global.nc`): a launch's output never
+shares memory with its inputs.
 
 `090_guard_reductions` propagates coordinate demand backward through pure scalar expressions and selects. A scalar
 reduction whose result is read only under an enclosing-coordinate predicate becomes a zero-trip loop elsewhere.
@@ -1014,6 +1012,5 @@ whole there: a
 are both approximate; it keeps both exact otherwise. It records `FAST_EXP` on the kernel for idempotence. Host
 evaluation computes every approximate form as the exact operation.
 
-A `FragmentApply` renders as one element loop, `#pragma unroll for (_e)` over the fragment's registers (the ROW
-operand as the row-split ternary `_e < 2 ? row0 : row1`). It is the last request the rendered text makes of nvcc, and
-it goes when the fragment statements say what they are.
+A `FragmentApply` compiles to one operation per fragment register, at each element's own row and column (the ROW
+operand the register's row of the pair).
