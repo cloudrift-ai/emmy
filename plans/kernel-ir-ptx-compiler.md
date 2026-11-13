@@ -16,8 +16,9 @@ same reason (below).
 
 PR A is draft #1395. Steps 1 to 10 are done, each checked on the corpus's rendered CUDA. Steps 3 to 10 changed the
 text, the flags or the statements and ran the corpus at `correct` on the RTX 5090. Step 11 is done: no test checks a
-kernel's structure on the rendered text any more (below). No step ran the perf lane, the whole suite or an sm_70 kernel
-on a V100 yet; they wait for the closing step.
+kernel's structure on the rendered text any more (below). Step 12 has begun: two typing gaps the PTX compiler met are
+closed and the finalization audit is applied (below). No step ran the perf lane, the whole suite or an sm_70 kernel
+on a V100 yet; they are what is left of the closing step.
 
 | Step | Commit | Corpus CUDA |
 | --- | --- | --- |
@@ -31,6 +32,9 @@ on a V100 yet; they wait for the closing step.
 | 8 | `f3c19f0a9` | 118 kernels, the ones with a flagged loop: each such loop is copies of its body (one keeps rolling, 32 copies per trip), no statement loop carries a `#pragma`; 74 of the 118 build to the same instruction count, 104 to within 3% |
 | 9 | `66729a66c` | 218 kernels: 9,320 lines whose index is respelled, 462 whose vector-store temporary is renamed after it; the same elements at 65,400 sampled launch points (3.4 million accesses) |
 | 10 | `f68e11911` | identical |
+| 12: epilogue | `685250cd1` | 8 kernels: a conversion's name moves its suffix (`v_e0__f32` to `v__f32_e0`), and in 2 a residual load of halves is its own definition ahead of its conversion; machine code identical in all 8 |
+| 12: comparison | `95dae5c2b` | 30 kernels, 408 comparisons: `float x = cmp;` is `bool x__bool = cmp; float x = x__bool;`; machine code identical in all 30 |
+| 12: audit | `463a197b6` | identical |
 
 What step 6 found, checked with `nvcc -ptx` and `nvdisasm` (CUDA 13.0, `sm_75` to `sm_120`):
 
@@ -175,6 +179,32 @@ Where step 11 stands:
 - **Found on the way**: `test_deferred_reduction_cuda_preserves_empty_states_and_the_uneven_tail[r4-]` gives a wrong
   answer on the RTX 5090 (5 of 8 values off). It reads no source; not chased.
 
+What step 12 found and did so far:
+
+- **Two typing gaps, both met by the PTX compiler.** A `RegStore` epilogue was typed by the renderer while it printed
+  it, so the compiler re-implemented its rules (a float load widens to f32, an untyped value takes the promoted dtype,
+  a float read converts). `120` types it now like any body over the f32 accumulator elements
+  (`ir.types.epilogue_conversions`): a load that declares no dtype reads its buffer's type and a narrower float is
+  widened by a conversion of its own, a select is f32. `check_types` reads the epilogue instead of exempting it, the
+  renderer prints it, and `130` picks approximate forms on it as on the body. A comparison assigned at f32 left the
+  truth value's conversion to the code generator; it is a `bool` definition now, converted once, and `check_types`
+  refuses a comparison that defines anything else. Only `FragmentApply`'s operand conversion and the combine programs
+  are still exempt.
+- **The audit removed** what nothing reached: the cubin cache's clear helper, `address.reads_declared_rows`,
+  `VOLTA_SMEM_LAYOUTS`, the renderer's self-recursive `_read_counts`, the fragment table binding's `supplies` field
+  (no Python reader; the crate keeps it for PR B) and three attention-test helpers. Comments that still described the
+  renderer promoting operands or re-rolled stores now say what the code does, and "register statement" is "fragment
+  statement". No durable doc named `EMMY_READABLE`, `--no-readable`, `literal_constants` or a retired pass; a code
+  comment and a crate doc named `literal_constants`, and are fixed.
+- **Line balance** (`origin/main...`, after the audit): Python under `emmy/` +2,043 / −2,050, so 7 lines fewer; Rust
+  +1,446 / −116. The growth is the crate's new checks and table, with their tests: `fragment.rs` +408 (the
+  lane-to-element table), `types.rs` +336 (the type check), `input.rs` +201, the composite definitions and
+  approximate operations in `elementwise.rs` +104. In Python it is `ir/types.py` +488 (the rules the renderer and
+  `030` held, now one module), the unroll (`_unroll.py`, `117`), `130`, `125`, the interface and `008`;
+  `100_loopify` −410, `render.py` −282, `030` −162 and `kernel/ir.py` −136 pay for it.
+- **Plans**: `plans/` holds 11 files, two of them the owner's untracked ones. No tracked plan's work has clearly
+  landed on main, so none was deleted.
+
 ## End state
 
 - `emmy_ptx::compile` returns PTX text for one kernel. It reads the crate's own statements, so nothing is serialized on
@@ -308,7 +338,8 @@ no restamp is expected. A row whose time moves is measured again in the closing 
    body optimization keeps one operation per definition. Half-precision math that runs in f32 says so, a write knows
    both types. Add the crate's type check. The renderer stops inferring. The check exempts two kinds of statement.
    The cross-thread combines (`TreeHalve`, `WarpShuffle`, `WarpBroadcast`): PR B's compiler types their combine
-   programs itself, from the stamped states. The register fragment statements and `RegStore`: step 10 covers them.
+   programs itself, from the stamped states. The register fragment statements: step 10 covers them, and step 12
+   types the `RegStore` epilogue.
    *Check: CUDA text changes only by explicit casts; `test_dtype_cuda`.*
 4. **Lane and warp in the grid** (property 5). `007_decode_grid` binds each one the body reads, a `Let` over the
    thread index at the top of the `Grid`, so they take ranges and are shared like any value. `TreeHalve` gets a
@@ -366,8 +397,8 @@ no restamp is expected. A row whose time moves is measured again in the closing 
     - `FragmentApply`'s own `#pragma unroll` loop over the elements, and the conversion of its operands to f32;
     - the thirty C++ loaders a `FragmentLoad` picks among, with the choice of the four-wide Volta loader on an
       address the printer proves aligned, and `BlockScaleLoad`'s, `FragmentPromote`'s and `FragmentRepack`'s helpers;
-    - `RegStore`: the packed pair stores of the m16n8 layout spelled as text, its epilogue program typed while it is
-      printed, and `ldm = 0` / `ldn = 0` for a stride the buffer's shape gives;
+    - `RegStore`: the packed pair stores of the m16n8 layout spelled as text, its typed epilogue printed once per
+      element, and `ldm = 0` / `ldn = 0` for a stride the buffer's shape gives;
     - one index per dimension on every fragment statement.
 11. **Tests read Kernel IR.** 59 test files hold 181 reads of the rendered source. A check of structure becomes a
     check of Kernel IR statements now (`compile_with_kernels`). A check of an instruction's spelling stays on the CUDA

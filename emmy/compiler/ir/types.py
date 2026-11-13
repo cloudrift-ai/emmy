@@ -297,7 +297,7 @@ class _Conversions:
     #: The names a later statement defines again (an accumulator, a carried state): a conversion of one is never reused.
     states: set[str]
     taken: set[str]
-    #: The names some statement of the body defines. One with no declared dtype is f32 (a register statement's
+    #: The names some statement of the body defines. One with no declared dtype is f32 (a fragment statement's
     #: scalar); a name the body only reads is an integer: an axis, a symbolic size, a thread coordinate.
     defined: set[str]
 

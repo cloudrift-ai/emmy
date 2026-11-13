@@ -118,10 +118,10 @@ class RenderCtx:
     pair_tables: frozenset[str] = frozenset()
     # Per-buffer canonical dtype tokens (``"f32"`` / ``"f16"``) for every global-buffer name (kernel inputs +
     # outputs) and every shared buffer declared so far. The shared statements do not read it: a typed ``Load`` and
-    # ``Write`` carry their dtype. The register statements, which are not typed yet, still do.
+    # ``Write`` carry their dtype. The fragment statements still do: a store converts to its buffer's element type.
     buffer_dtypes: dict[str, str] = field(default_factory=dict)
     # The dtype each name was declared at, recorded as ``render_body`` walks: the source dtype a conversion
-    # (``name = (dtype)source``) and a register statement's operand read. Nothing is promoted from it.
+    # (``name = (dtype)source``) and a fragment statement's operand read. Nothing is promoted from it.
     ssa_dtypes: dict[str, str] = field(default_factory=dict)
     # Render-time hint to ``Literal.render``: when set to a non-default
     # dtype, float literals render via ``target.literal(text, dtype)``

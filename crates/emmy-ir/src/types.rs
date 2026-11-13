@@ -68,7 +68,7 @@ impl Scope<'_> {
         }
     }
 
-    /// The dtype of a name. One no typed statement defines is f32 when an exempt statement defines it (a register
+    /// The dtype of a name. One no typed statement defines is f32 when an exempt statement defines it (a fragment
     /// statement's scalar), and an integer when the body only reads it: an axis, a symbolic size, a thread coordinate.
     fn dtype(&self, name: &Name) -> DType {
         match self.types.get(name) {
