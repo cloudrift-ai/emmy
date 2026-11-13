@@ -894,10 +894,13 @@ is 16 (`_unroll._runtime`). Only bodies of target-neutral statements are sized; 
 asynchronous copy, a shuffle or a fragment statement stays, as do strided loops over a static extent (cicc left
 those to ptxas). The numbers are nvcc's, a fixed rule like `117`'s two limits, so either code generator keeps the
 shape nvcc gave a kernel; how many copies a loop takes is a decision, and it moves under the `UNROLL` knob with the
-two limits. Every loop the unroll passes leave stepping several trips says it is `unrolled`, and a code generator
-keeps it a loop (`.pragma "nounroll"`, `#pragma unroll 1`): cicc marks the two loops of its runtime unroll, and
-ptxas, free to, unrolled the PTX compiler's compact static loops in full where it had left cicc's alone. A loop
-already `unrolled` is taken no further, which keeps the pass idempotent.
+two limits. Every loop the unroll passes leave stepping several trips says it is `unrolled`, and the PTX compiler
+keeps it a loop (`.pragma "nounroll"`): cicc marks the two loops of its runtime unroll, and ptxas, free to, unrolled
+the PTX compiler's compact static loops in full where it had left cicc's alone (`qwen3emb/sdpa-s32`: 11,344 machine
+instructions unmarked, 2,216 marked). The CUDA renderer writes `#pragma unroll 1` on the runtime-bound ones only,
+which is what cicc marked; marked static loops cost the nvcc build up to 1.6x (`fused/norm-weight-linear-f16-computed-b`)
+where ptxas used to finish cicc's unrolling. A loop already `unrolled` is taken no further, which keeps the pass
+idempotent.
 
 `119_vectorize_copies` runs the two widenings of `050` and `080` again (`_vector.vectorize_loads`,
 `_vector.vectorize_stores`, under the same decisions): the copies of a read along the axis are consecutive elements,

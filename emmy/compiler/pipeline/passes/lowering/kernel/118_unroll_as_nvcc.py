@@ -17,10 +17,10 @@ does not change across trips cicc computed once ahead of the loop, so it counts 
   ``C`` trips while that many are left, then the trips left in blocks of half as many copies down to one, four and a
   loop of one copy past 8 copies (:func:`_unroll._runtime`).
 
-Every loop the pass leaves stepping several trips at a time says it is ``unrolled``, and a code generator keeps such a
-loop as it is (``.pragma "nounroll"`` in PTX, ``#pragma unroll 1`` in CUDA). cicc marks the two loops of a runtime
-unroll so; it leaves its static partial unroll unmarked, but ptxas then left those loops alone, where it would unroll
-the more compact loops of the PTX compiler in full.
+Every loop the pass leaves stepping several trips at a time says it is ``unrolled``. The PTX compiler keeps such a
+loop as it is (``.pragma "nounroll"``): cicc marks the two loops of a runtime unroll so, and leaves its static partial
+unroll unmarked, but ptxas then left those loops alone where it unrolls the more compact loops of the PTX compiler in
+full. The CUDA renderer writes what cicc wrote: ``#pragma unroll 1`` on the runtime-bound ones only.
 
 Only a body of target-neutral statements is sized. A loop holding a barrier, an asynchronous copy, a shuffle or a
 fragment statement stays as it is: cicc does not unroll a loop with a barrier at run time, and left the tensor-core

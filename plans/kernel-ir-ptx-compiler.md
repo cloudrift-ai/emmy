@@ -474,6 +474,34 @@ lists which corpus cases still do. That fallback exists only inside the PR.
 6. **Speed.** The perf lane on every held card against PR A. A slower case is compared with cicc's PTX for the same
    kernel (`nvcc -ptx`), then explained or fixed. First thing to try for a rolled loop: placing a compiler-made
    address part in the outermost scope that defines its operands, which the builder does not do until a case needs it.
+   *The unrolling nvcc did on its own* (`118_unroll_as_nvcc`, `119_vectorize_copies`, the loop field `unrolled`).
+   Most of what stayed slower after the first speed commits was loops cicc unrolled without being asked. Its rule,
+   read off `nvcc -ptx -arch=sm_120` (CUDA 13.0) across trip counts and body sizes, with the body sized in Kernel IR
+   as the work of one trip (one per access, fold, selection and branch, one more for a changing address, one per
+   operation whose value changes, a math function by the instructions cicc writes: `exp` 14, `log` 28, `tanh` 17,
+   `sin` 88, `pow` 113, the fast forms 1 to 3):
+   - A static counted loop of `N` trips is written out when `N·(size + 2) ≤ 480` (96 trips of a two-statement body
+     are, 97 are not), else steps the largest power of two `C` dividing `N` with `C·(size + 2) ≤ 199`. It carries no
+     `.pragma`. An odd `N` gets four copies with the exit test between the third and the fourth (not modelled).
+   - A loop over a runtime bound takes 16, 8, 4 or 2 copies by `C·(size + 7) ≤ 228`, none past a size of 89. The
+     remainder is blocks of `C/2`, `C/4`, … copies, each under its bit of the count left, and with 16 copies the
+     last three trips a loop of one copy; the stepping loop and that loop carry `.pragma "nounroll"`, nothing else
+     does. A thread-start loop over a symbolic extent gets the same; one over a static extent cicc left to ptxas
+     below 24 trips (and copied 16 times from 24 on, not modelled).
+   - A loop with a barrier is not unrolled at run time; the tensor-core loops over a symbolic K stayed rolled.
+   - Checked on the corpus: the symbolic reductions (16 copies, blocks 8 and 4, loop), their ILP forms (4, then 2
+     and 1), softmax's normalize (8; the online pass 4), the f32 matmuls' 128-trip `_ki` loop over shared slabs (4,
+     the four A reads one `ld.shared.v4`), `qwen3emb/sdpa-s32`'s inner loops (16) all come out as cicc's.
+
+   The rule is a fixed copy of nvcc, like step A8's two limits; the number of copies moves under the `UNROLL` knob
+   with them. `119` runs the vector widenings again over the copies (cicc merged them after unrolling); a stepping
+   loop states its step, so the alignment proof holds. Every loop the unroll passes leave stepping several trips says
+   `unrolled`, and the PTX compiler marks it `.pragma "nounroll"`: unmarked, ptxas unrolled the compact static loops
+   in full where it had left cicc's alone (`qwen3emb/sdpa-s32`: 11,344 machine instructions and 0.53 s of ptxas,
+   2,216 and 0.06 s marked, 180 to 82 us). The CUDA renderer writes `#pragma unroll 1` on the runtime-bound ones
+   only, which is what cicc marked: marking the static ones too cost nvcc's build up to 1.6x where ptxas used to
+   finish cicc's unrolling.
+
 7. **The switch.** The fallback goes, and with it:
    - the Kernel IR renderers, the C++ helpers, `CudaRenderTarget`, the nvcc wrapper. The Loop IR runner keeps its C
      renderer for the shared statements.

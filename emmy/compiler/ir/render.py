@@ -924,7 +924,7 @@ def _(node: Loop, ctx: RenderCtx) -> list[str]:
             ctx.ssa_dtypes[s.name] = (s.dtype or F32).name
     var = node.axis.name
     extent = _extent_c(node.axis, ctx)
-    if node.unrolled:
+    if node.unrolled and not node.axis.extent.is_static:
         out.append(f"{pad}{_ROLLED}")
     out.append(f"{pad}for (int {var} = 0; {var} < {extent}; {var}++) {{")
     inner = ctx.child()
@@ -934,8 +934,9 @@ def _(node: Loop, ctx: RenderCtx) -> list[str]:
     return out
 
 
-#: Ahead of a loop whose copies the kernel lowering wrote (``unrolled``): cicc keeps it as it is, as ptxas does under the
-#: PTX compiler's ``.pragma "nounroll"``.
+#: Ahead of a loop whose copies the kernel lowering wrote (``unrolled``) and whose trips the launch decides: cicc keeps it
+#: as it is, and marks it ``nounroll`` for ptxas, as it marks the two loops of its own runtime unroll. A static loop the
+#: lowering stepped is left to cicc and ptxas, as cicc left its own static partial unroll.
 _ROLLED = "#pragma unroll 1"
 
 
@@ -974,7 +975,7 @@ def _(stmt: StridedLoop, ctx: RenderCtx) -> list[str]:
     var = stmt.axis.name
     start_str = render_expression(stmt.start, ctx)
     step_str = render_expression(stmt.step, ctx)
-    if stmt.unrolled:
+    if stmt.unrolled and (stmt.end is not None or not stmt.axis.extent.is_static):
         out.append(f"{pad}{_ROLLED}")
     # ``_extent_c`` renders a symbolic bound (a cooperative reduce over a dynamic
     # ``seq_len`` strides each lane to the runtime extent — the ``< seq_len`` bound is the
