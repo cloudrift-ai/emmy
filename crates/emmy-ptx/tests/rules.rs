@@ -354,7 +354,8 @@ fn the_integer_operations_are_one_instruction_each() {
         i32 a9 = -x
         i32 b1 = abs(x)
         i32 b2 = bitwise_count(x)
-        i32 b3 = x < i
+        bool b3__bool = x < i
+        i32 b3 = (i32)b3__bool
         i32 b4 = x == 4 ? a1 : a2
         i64 b5 = (i64)x
         i64 b6 = b5 * 3
@@ -1446,14 +1447,15 @@ fn the_verifier_refuses_an_access_of_several_elements_with_no_alignment_fact() {
 
 // --- what the pipeline's kernels hold --------------------------------------------------------------------
 
-/// A comparison read as a float is one where it holds and zero where it does not; a selection among floats
-/// computes at its values' type, whatever its condition compares.
+/// A comparison kept as a number is its truth value converted to a float: one where it holds and zero where it
+/// does not; a selection among floats computes at its values' type, whatever its condition compares.
 #[test]
-fn a_comparison_read_as_a_float_selects_one_or_zero() {
+fn a_truth_value_converted_to_a_float_selects_one_or_zero() {
     let got = under_grid(
         "
         f32 x = load a[i]
-        f32 same = 0.0 == x
+        bool same__bool = 0.0 == x
+        f32 same = (f32)same__bool
         f32 kept = where(x == 0.0, same, x)
         f32 o[i] = kept
         ",

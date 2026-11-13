@@ -206,10 +206,6 @@ pub(crate) struct Lowerer {
     extents: HashMap<Name, Vec<Expression>>,
     /// The inputs that are the e2m1 pair table: a load of one computes its value.
     pair_tables: HashSet<Name>,
-    /// Whether a store's epilogue is being lowered. Its statements are typed where it is compiled, as the CUDA
-    /// renderer types them: a float load is widened to f32, a value with no dtype is f32, and a float read at
-    /// another float type is converted.
-    epilogue: bool,
     /// The first line of the statement being lowered, for an error to name.
     statement: String,
 }
@@ -255,7 +251,6 @@ pub(crate) fn lower(kernel: &Kernel, target: Target, precision: Precision) -> Re
         descriptors: HashMap::new(),
         extents: HashMap::new(),
         pair_tables: HashSet::new(),
-        epilogue: false,
         statement: format!("the interface of {}", kernel.name),
     };
     survey(kernel.body, &mut lowerer.uses, &mut lowerer.updated);
@@ -802,7 +797,6 @@ impl Lowerer {
     ) -> Result<()> {
         let ty = match dtype {
             Some(dtype) => self.vty(Some(dtype))?,
-            None if self.epilogue => self.promoted(value),
             None => self
                 .infer(value)
                 .ok_or_else(|| self.refuse("a value carries no dtype"))?,
@@ -881,24 +875,12 @@ impl Lowerer {
             return Err(self.refuse("a select has a branch"));
         };
         let mut result = self.lookup(last.value)?;
-        if self.epilogue && result.ty.is_float() {
-            result = Val {
-                op: self.converted(result, VTy::F32),
-                ty: VTy::F32,
-            };
-        }
         let ty = result.ty;
         if ty == VTy::Bool {
             return Err(self.no_rule("a select of bools"));
         }
         for branch in earlier.iter().rev() {
-            let mut value = self.lookup(branch.value)?;
-            if self.epilogue && value.ty.is_float() {
-                value = Val {
-                    op: self.converted(value, VTy::F32),
-                    ty: VTy::F32,
-                };
-            }
+            let value = self.lookup(branch.value)?;
             if value.ty != ty {
                 let (name, held) = (branch.value, value.ty.text());
                 return Err(self.refuse(format_args!("{name} is {held}, not {}", ty.text())));

@@ -359,10 +359,6 @@ impl Lowerer {
                 Ok(self.int_value(Opcode::Popc, bits(a.ty), VTy::I32, vec![operand], 1))
             }
             (O::Copy | O::Positive, [x]) => self.int(x, ctx),
-            _ if self.infer(expression) == Some(VTy::Bool) => {
-                let pred = self.pred(expression, ctx)?;
-                self.flag(&Val::reg(pred, VTy::Bool))
-            }
             _ => Err(self.no_rule(format_args!("the integer operation {op}"))),
         }
     }

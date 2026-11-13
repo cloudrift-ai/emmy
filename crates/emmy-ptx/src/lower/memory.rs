@@ -318,7 +318,6 @@ impl Lowerer {
         let elem = buffer.elem;
         let dtype = match load.dtype {
             Some(dtype) => dtype,
-            None if self.epilogue => elem.dtype,
             None => return Err(self.refuse("a value carries no dtype")),
         };
         if !elem.has_value() {
@@ -387,10 +386,6 @@ impl Lowerer {
             }
             let val = match elem.ty {
                 VTy::Bool => Val::reg(self.truth(&Val::reg(reg, VTy::U32))?, VTy::Bool),
-                ty if self.epilogue && ty.is_float() => Val {
-                    op: self.converted(Val::reg(reg, ty), VTy::F32),
-                    ty: VTy::F32,
-                },
                 ty => Val::reg(reg, ty),
             };
             self.bind(*name, val);
@@ -402,7 +397,9 @@ impl Lowerer {
     /// holds byte `b`'s low and high codes, so flat index `i` is code `i & 1` of byte `i >> 1`. Every e2m1 value
     /// is exact in each float type.
     fn pair_table_load(&mut self, load: &Load, ctx: &SimplifyCtx) -> Result<()> {
-        let dtype = load.dtype.unwrap_or(self.buffer(load.input)?.elem.dtype);
+        let dtype = load
+            .dtype
+            .ok_or_else(|| self.refuse("a value carries no dtype"))?;
         let ty = self.vty(Some(dtype))?;
         if !ty.is_float() {
             return Err(self.refuse(format_args!(
@@ -431,15 +428,7 @@ impl Lowerer {
             let code = self.register(&Val { op, ty: VTy::U32 });
             let value = self.e2m1_value(code);
             let value = self.converted(Val::reg(value, VTy::F32), ty);
-            let val = Val { op: value, ty };
-            let val = match self.epilogue {
-                true => Val {
-                    op: self.converted(val, VTy::F32),
-                    ty: VTy::F32,
-                },
-                false => val,
-            };
-            self.bind(*name, val);
+            self.bind(*name, Val { op: value, ty });
         }
         Ok(())
     }

@@ -156,8 +156,8 @@ fn a_store_is_guarded_and_runs_its_epilogue_once_an_element() {
             "{FRAGMENTS}
         RegStore(dst_buffer=h, dst_index=(r * 128), frag=fc, shape=(16, 8, 16), ldm=8, epilogue_params=(acc), epilogue_result=v):
             epilogue:
-                bias = load w[__N__]
-                v = acc + bias
+                f32 bias = load w[__N__]
+                f32 v = acc + bias
         "
         ),
         HALVES,

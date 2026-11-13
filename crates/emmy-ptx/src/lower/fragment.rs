@@ -802,7 +802,6 @@ impl Lowerer {
         }
         let statement = self.statement.clone();
         self.names.push(HashMap::new());
-        self.epilogue = true;
         let done = (|| {
             for (param, frag) in node.epilogue_params.iter().zip(frags) {
                 let val = self.named(Val::reg(frag[at], VTy::F32));
@@ -820,7 +819,6 @@ impl Lowerer {
             self.lookup(result)
         })();
         self.names.pop();
-        self.epilogue = false;
         self.statement = statement;
         done
     }

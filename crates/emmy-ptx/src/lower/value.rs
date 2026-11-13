@@ -216,9 +216,6 @@ impl Lowerer {
             Expr::Literal(lit) => Ok(self.float_constant(ty, lit.value.as_f64())),
             Expr::Var(name) => {
                 let val = self.lookup(*name)?;
-                if self.epilogue && val.ty != ty && val.ty.is_float() && ty.is_float() {
-                    return Ok(self.converted(val, ty));
-                }
                 if val.ty != ty {
                     let (held, read) = (val.ty.text(), ty.text());
                     return Err(self.refuse(format_args!("{name} is {held}, read as {read}")));
@@ -456,18 +453,6 @@ impl Lowerer {
                 self.float_select(cond, if_true, if_false, ty, ctx)
             }
             (O::Copy | O::Positive, [x]) => self.float(x, ty, ctx),
-            // A comparison read as a float is one where it holds and zero where it does not.
-            (op, [x, y]) if comparison(op).is_some() => {
-                let pred = self.compare(comparison(op).expect("a comparison"), x, y, ctx)?;
-                let (one, zero) = (self.float_constant(ty, 1.0), self.float_constant(ty, 0.0));
-                let inst = Inst::new(
-                    Opcode::Selp,
-                    ty.held(),
-                    Vec::new(),
-                    vec![one, zero, pred.into()],
-                );
-                Ok(self.b.value(inst, ty.bank()).into())
-            }
             _ => {
                 if let Some(value) = self.math(op, args, ty, ctx)? {
                     return Ok(value);
@@ -809,26 +794,6 @@ impl Lowerer {
             vec![code.into(), sign.into()],
         );
         Ok(self.b.value(join, Bank::B32))
-    }
-
-    /// The type an epilogue's value with no dtype computes at, as the type pass would promote it: an operation at
-    /// the promotion of its operands' types (the integer rule over integers, `f16` over halves alone, else `f32`),
-    /// a name at its own.
-    pub(super) fn promoted(&self, value: &Expression) -> VTy {
-        if let Expr::Apply(op, args) = &**value {
-            let operands: Vec<DType> = args
-                .iter()
-                .filter(|arg| !matches!(&***arg, Expr::Literal(_)))
-                .filter_map(|arg| self.infer(arg))
-                .map(super::fragment::dtype_of)
-                .collect();
-            let op = match op {
-                ElementwiseOp::Known(op) => Some(*op),
-                ElementwiseOp::Other(_) => None,
-            };
-            return VTy::of(emmy_ir::dtype::promote(op, &operands)).unwrap_or(VTy::F32);
-        }
-        self.infer(value).unwrap_or(VTy::F32)
     }
 
     /// A value of an 8-bit float type or of a pair of codes: a name that holds one, or a cast into the type.

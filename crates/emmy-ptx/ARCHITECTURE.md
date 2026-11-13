@@ -41,14 +41,16 @@ and a `Load` or a `Write` holds one element index into its buffer. No statement 
 `unroll` is refused, since unrolling is a kernel pass. The compiler checks what it reads, statement by statement, and
 refuses with the statement's text: a value with no dtype, an operand of another type than its reader, an index of
 several coordinates, a store into an input. Integers are the one exception to "every conversion is a cast": their
-width and signedness are the compiler's, so `i32`, `u32` and `i64` values mix freely in an index.
+width and signedness are the compiler's, so `i32`, `u32` and `i64` values mix freely in an index. Two statements
+still reach the compiler with no dtype: the cooperative combine's `maximum` of a value and its peer's, and an index
+`let` the chunk bounds write. Each computes at its operands' type, the one place a type is read off the operands.
 
 A literal has no type of its own. It takes its reader's: an integer literal in a float expression is that float.
 
-Three things a pipeline kernel holds are read as they stand. A comparison assigned at a float type is one where it
-holds and zero where it does not, with no cast written. A condition the body's optimization decided and left
+Two things a pipeline kernel holds are read as they stand. A condition the body's optimization decided and left
 standing (`if 1:`, `if 0:`) is no branch: its one side stands in its place. The cast `(long long)` on an index term,
-which the flattening writes where a buffer passes the 32-bit range, is the widening to `i64`.
+which the flattening writes where a buffer passes the 32-bit range, is the widening to `i64`. A comparison defines a
+`bool`; one the body keeps as a number is that `bool` and a cast of it, as the type pass writes them.
 
 A byte (`u8`) is a buffer's element type only: a load gives an integer with its range, a store takes the low byte of
 one. An 8-bit float and a byte of two e2m1 codes are values whose bits stand in the low byte of a 32-bit register: a
@@ -374,9 +376,8 @@ value matters or reads a subnormal from one.
   - `RegStore`: per element, the address from the index and the table's row and column by the two strides, through
     the slab's swizzle; the value is the register or what the epilogue makes of it, converted to the buffer's type.
     The epilogue's statements go through the ordinary rules in a scope of their own, the element of each fragment
-    and its row and column bound. Its body is typed where it is compiled, as the CUDA renderer types it: a float load
-    widens to f32, a value with no dtype computes at the promotion of its operands, a float read at another float
-    type converts. An element past a guard is not stored and its epilogue reads nothing. Two elements next to each
+    (f32) and its row and column bound. The type pass types the epilogue like any body, so each value states its
+    dtype and each conversion is its own definition; nothing in it is typed here. An element past a guard is not stored and its epilogue reads nothing. Two elements next to each
     other under one guard, proven aligned, are one store. Each cell of a run is stored as its own statement says.
     Volta's paired tile has its own accumulator row (`fragment::paired_accumulator_table`).
   - `FragmentApply`: per element, the operation over the arguments at the element's row and column: a fragment's
