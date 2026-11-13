@@ -762,15 +762,26 @@ impl Lowerer {
                 // The axis is `step * counter + start`: the start's bytes go into the constant.
                 let bytes = start.checked_mul(scale).ok_or_else(|| overflow.clone())?;
                 let factor = step.checked_mul(scale).ok_or_else(|| overflow.clone())?;
-                let bank = if wide { Bank::B64 } else { Bank::B32 };
-                counter = self
-                    .b
-                    .counter_multiple(var, factor, bank)
-                    .map(|reg| (reg, bytes));
+                // A loop ptxas keeps reads a multiple stepped by the term's bytes; one it may unroll reads a
+                // 64-bit copy of the counter scaled in the trip, which it folds into each copy's offset.
+                if self.b.kept_rolled(var) {
+                    let bank = if wide { Bank::B64 } else { Bank::B32 };
+                    counter = self
+                        .b
+                        .counter_multiple(var, factor, bank)
+                        .map(|reg| (reg.into(), bytes));
+                } else if wide && let Some(reg) = self.b.counter_multiple(var, 1, Bank::B64) {
+                    let copy = Val::reg(reg, VTy::I64);
+                    let multiple = factor.saturating_abs();
+                    let scaled = self
+                        .product_of(&copy, &Val::int(factor), VTy::I64, multiple)
+                        .op;
+                    counter = Some((scaled, bytes));
+                }
             }
             let (scaled, at) = if let Some((counter, bytes)) = counter {
                 offset = offset.checked_add(bytes).ok_or_else(|| overflow.clone())?;
-                (counter.into(), if wide { Ty::S64 } else { Ty::S32 })
+                (counter, if wide { Ty::S64 } else { Ty::S32 })
             } else if wide {
                 (self.scaled(&val, scale), Ty::S64)
             } else {

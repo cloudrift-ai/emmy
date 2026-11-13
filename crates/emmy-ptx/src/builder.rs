@@ -65,6 +65,8 @@ pub struct Builder {
     /// The multiples of a loop's counter that addresses read, by counter, factor and bank (64 bits for a global
     /// address, 32 for a shared one), each made when the first address reads it.
     multiples_of: HashMap<(Reg, i64, Bank), Reg>,
+    /// The counters of the open loops marked for ptxas to keep as they are.
+    rolled: HashSet<Reg>,
     /// The registers an instruction may define again: an accumulator, a seeded state.
     states: HashSet<Reg>,
     multiples: HashMap<Reg, i64>,
@@ -331,6 +333,14 @@ impl Builder {
     /// "nounroll"` at its head): the kernel lowering already wrote its copies.
     pub fn keep_rolled(&mut self) {
         self.items.push(Item::NoUnroll);
+        if let Some(Some(var)) = self.counters.last() {
+            self.rolled.insert(*var);
+        }
+    }
+
+    /// Whether `var` counts a loop marked for ptxas to keep as it is.
+    pub fn kept_rolled(&self, var: Reg) -> bool {
+        self.rolled.contains(&var)
     }
 
     pub fn close_loop(&mut self, open: Loop) -> Result<()> {

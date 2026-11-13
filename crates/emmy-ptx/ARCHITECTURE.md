@@ -168,17 +168,18 @@ Every instruction reaches the list through the `Builder`.
   first; the constant is the address's offset. Measured on `sm_120`: ptxas folds an address built this way into
   `[base + constant]` across the trips of a loop it unrolls, and does not see through a sum made in 32 bits. Nor does
   it see through the widening of a 32-bit loop counter, since the counter plus one may wrap: a term of a loop's axis
-  (a counter from zero by one, or such a counter times a constant step plus a constant start) reads a 64-bit multiple
-  of the counter, the term's bytes a trip, made ahead of the loop when the first address reads it and stepped by those
-  bytes beside it, and the start goes into the constant. Measured on `sm_120` (dev box RTX 5090, perf lane):
-  `matmul/f16-mma-splitk-deferred` 46.2 to 37.4 us, `reduce/cross-cta-matmul-atomic` 12.3 to 10.2,
-  `fused/norm-linear-f16-scalar-reduce` 133 to 123. The multiple steps by the bytes, not by one with a shift in the
-  trip: from the shifted copy ptxas issued the last load of a kept loop's trip into the registers of the first, still
-  being read, and from the stepped multiple it issues every load of the trip ahead of the arithmetic, as for cicc's
-  stepped pointer (`reduce/combine-l2-serial`, `-amax-serial`, `-mean-serial`: 10.4 to 7.1 us, nvcc's 6.5 to 7.1).
-  A shared address reads a 32-bit multiple the same way: from the shifted counter ptxas gave the 16 slab reads of
-  a trip of `qwen3emb/matmul-qproj-s512` three registers between them, 48 in the kernel, and from the multiple a
-  register each, 64, as for cicc's build (85 to 77 us on the dev box RTX 5090, nvcc's 72).
+  (a counter from zero by one, or such a counter times a constant step plus a constant start) reads a 64-bit copy of
+  the counter, made ahead of the loop when the first address reads it and stepped beside it, and the start goes into
+  the constant. Measured on `sm_120` (dev box RTX 5090, perf lane): `matmul/f16-mma-splitk-deferred` 46.2 to 37.4 us,
+  `reduce/cross-cta-matmul-atomic` 12.3 to 10.2, `fused/norm-linear-f16-scalar-reduce` 133 to 123. In a loop marked
+  for ptxas to keep (below), the term reads instead a multiple of the counter stepped by the term's bytes, 64 bits
+  for a global address and 32 for a shared one. From the copy shifted in the trip ptxas issued the last load of a
+  kept trip into the registers of the first, still being read, and gave the 16 slab reads of a trip of
+  `qwen3emb/matmul-qproj-s512` three registers between them; from the stepped multiple, as from cicc's stepped
+  pointer, every load of the trip goes out ahead of the arithmetic into a register of its own
+  (`reduce/combine-l2-serial`, `-amax-serial`, `-mean-serial` 10.4 to 7.1 us, nvcc's 6.5 to 7.1; `matmul-qproj-s512`
+  85 to 77, nvcc's 72). In a loop ptxas may unroll the stepped multiples cost more than they give: one register and
+  one add for each byte factor (`fused/gdn-conv-join-in-place-name`, 83 to 68 us with the copy back).
   There is no pointer bumping and no fused wide multiply-add; both measured slower in the hackathon entries.
 - **Floats.** Every instruction that rounds carries `.rn`, so ptxas fuses nothing on its own, and every f32
   instruction that takes it carries `.ftz` when the flush-to-zero decision is on. `fma` is written where the body says

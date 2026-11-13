@@ -191,16 +191,17 @@ fn the_terms_of_an_index_are_added_in_64_bits_outermost_first() {
             "mov.u64 %rd4, 0",
             "mov.u32 %r4, 0",
             "L1:",
-            "add.s64 %rd5, %rd3, %rd4",
-            "ld.global.nc.f32 %f1, [%rd5]",
+            "shl.b64 %rd5, %rd4, 2",
+            "add.s64 %rd6, %rd3, %rd5",
+            "ld.global.nc.f32 %f1, [%rd6]",
             "add.rn.f32 %f0, %f0, %f1",
-            "add.s64 %rd4, %rd4, 4",
+            "add.s64 %rd4, %rd4, 1",
             "add.s32 %r4, %r4, 1",
             "setp.lt.s32 %p0, %r4, 8",
             "@%p0 bra L1",
-            "mul.wide.s32 %rd6, %r3, 4",
-            "add.s64 %rd7, %rd1, %rd6",
-            "st.global.f32 [%rd7], %f0",
+            "mul.wide.s32 %rd7, %r3, 4",
+            "add.s64 %rd8, %rd1, %rd7",
+            "st.global.f32 [%rd8], %f0",
         ]
     );
 }
@@ -904,14 +905,14 @@ fn a_loop_counts_from_zero_and_steps_its_accumulator_in_place() {
             "mov.u64 %rd2, 0",
             "mov.u32 %r4, 0",
             "L1:",
-            "add.s64 %rd3, %rd0, %rd2",
-            "ld.global.nc.f32 %f2, [%rd3]",
+            "shl.b64 %rd3, %rd2, 2",
+            "add.s64 %rd4, %rd0, %rd3",
+            "ld.global.nc.f32 %f2, [%rd4]",
             "fma.rn.f32 %f0, %f2, %f2, %f0",
             "max.f32 %f1, %f1, %f2",
-            "add.s64 %rd2, %rd2, 4",
+            "add.s64 %rd2, %rd2, 1",
             "add.s32 %r4, %r4, 1",
             "setp.lt.s32 %p0, %r4, 8",
-            "@%p0 bra L1",
         ]
     );
 }
@@ -939,18 +940,19 @@ fn a_loop_over_a_symbolic_extent_is_tested_ahead() {
             "setp.ge.s32 %p0, %r5, %r0",
             "@%p0 bra L1",
             "L2:",
-            "add.s64 %rd3, %rd0, %rd2",
-            "ld.global.nc.f32 %f1, [%rd3]",
+            "shl.b64 %rd3, %rd2, 2",
+            "add.s64 %rd4, %rd0, %rd3",
+            "ld.global.nc.f32 %f1, [%rd4]",
             "add.rn.f32 %f0, %f0, %f1",
-            "add.s64 %rd2, %rd2, 4",
+            "add.s64 %rd2, %rd2, 1",
             "add.s32 %r5, %r5, 1",
-            "setp.lt.s32 %p1, %r5, %r0",
         ]
     );
 }
 
 /// A loop whose copies the kernel lowering wrote is kept as it is: ptxas is told not to unroll it again, whether it
-/// counts its trips or steps its axis.
+/// counts its trips or steps its axis, unless it is static and runs at most four trips. A kept loop's address reads
+/// a multiple of its counter stepped by the term's bytes, not the counter shifted in the trip.
 #[test]
 fn an_unrolled_loop_is_kept_as_it_is() {
     let params = [
@@ -975,6 +977,30 @@ fn an_unrolled_loop_is_kept_as_it_is() {
             .position(|line| line.starts_with('L') && line.ends_with(':'));
         assert!(at.is_some() && head < at, "{got:#?}");
     }
+    let body = |head: &str| {
+        format!(
+            "{GRID}\n    {head}\n        f32 x = load a[j]\n        f32 y = load a[j + 1]\n        f32 s <- add(s, x) over j\n        f32 s <- add(s, y) over j\n    f32 o[i] = s"
+        )
+    };
+    let kept = code(
+        &body("for j in 0..64 step 2 unrolled=true:"),
+        &params,
+        EXACT,
+    );
+    assert!(
+        kept.iter()
+            .any(|line| line.starts_with("add.s64 %rd") && line.ends_with(", 8")),
+        "{kept:#?}"
+    );
+    assert!(
+        !kept.iter().any(|line| line.starts_with("shl.b64")),
+        "{kept:#?}"
+    );
+    let short = code(&body("for j in 0..8 step 2 unrolled=true:"), &params, EXACT);
+    assert!(
+        !short.iter().any(|line| line.contains("nounroll")),
+        "{short:#?}"
+    );
     let rolled = code(
         &format!(
             "{GRID}\n    for j in 0..n:\n        f32 x = load a[j]\n        f32 s <- add(s, x) over j\n    f32 o[i] = s"
@@ -1039,10 +1065,11 @@ fn a_strided_loop_counts_its_trips_where_they_are_the_same_for_every_thread() {
             "L1:",
             "shl.b32 %r5, %r4, 3",
             "add.s32 %r6, %r5, 4",
-            "add.s64 %rd3, %rd0, %rd2",
-            "ld.global.nc.f32 %f1, [%rd3+16]",
+            "shl.b64 %rd3, %rd2, 5",
+            "add.s64 %rd4, %rd0, %rd3",
+            "ld.global.nc.f32 %f1, [%rd4+16]",
             "add.rn.f32 %f0, %f0, %f1",
-            "add.s64 %rd2, %rd2, 32",
+            "add.s64 %rd2, %rd2, 1",
             "add.s32 %r4, %r4, 1",
             "setp.lt.s32 %p0, %r4, 8",
             "@%p0 bra L1",
@@ -1050,9 +1077,8 @@ fn a_strided_loop_counts_its_trips_where_they_are_the_same_for_every_thread() {
             "setp.ge.s32 %p1, %r7, 64",
             "@%p1 bra L2",
             "L3:",
-            "mul.wide.s32 %rd4, %r7, 4",
-            "add.s64 %rd5, %rd0, %rd4",
-            "ld.global.nc.f32 %f2, [%rd5]",
+            "mul.wide.s32 %rd5, %r7, 4",
+            "add.s64 %rd6, %rd0, %rd5",
         ]
     );
 }
