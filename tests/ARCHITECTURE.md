@@ -133,11 +133,12 @@ the shared module already provides.
   in what order, with which fields (a product's shape, a load's clamp, a copy's swizzle, a slab's size, a loop's
   bounds) is asserted on the statements the code was generated from: `compile_with_kernels` in
   `tests/compiler/helpers.py` runs the compile a test would run and returns, beside the compiled graph, each kernel's
-  `KernelOp` as the last lowering pass read it, and `statements` lists a kernel's statements by type. A launch fact (a
-  runtime argument, the argument order, a TMA descriptor) is read off the `CudaOp`. Only a check of how the code
-  spells something (a helper in the prelude, a type cast, a paged buffer's page table) reads the generated text, and
-  each such read carries the comment `# CUDA spelling: moves to the PTX compiler's tests`. A text search for a
-  helper's name cannot tell a call from the helper's definition in the prelude; a statement can.
+  `KernelOp` as the last lowering pass read it (`recording_kernels` does the same for a compile the test does not run
+  itself), and `statements` lists a kernel's statements by type. A launch fact (a runtime argument, the argument
+  order, a TMA descriptor) is read off the `CudaOp`. Only a check of how the code spells something (a helper in the
+  prelude, a type cast, a paged buffer's page table) reads the generated text, and each such read carries the comment
+  `# CUDA spelling: moves to the PTX compiler's tests`. A text search for a helper's name cannot tell a call from the
+  helper's definition in the prelude; a statement can.
 - **Prefer combinatorial coverage matrices over per-capability test files.** The compiler e2e suite covers each
   regime with one parameterized matrix (`test_matmul_coverage.py`'s tile × stage × reduce × static/dynamic grid,
   `test_reduce_coverage.py`, `test_attention_coverage.py`, `test_fused_edge.py`'s producer × tier product) rather

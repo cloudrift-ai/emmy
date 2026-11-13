@@ -15,9 +15,9 @@ same reason (below).
 ## Status (2026-11-12)
 
 PR A is draft #1395. Steps 1 to 10 are done, each checked on the corpus's rendered CUDA. Steps 3 to 10 changed the
-text, the flags or the statements and ran the corpus at `correct` on the RTX 5090. Step 11 is started: the helper is
-in and three of the 41 files that check structure on the text are converted (below). No step ran the perf lane, the
-whole suite or an sm_70 kernel on a V100 yet; they wait for the closing step.
+text, the flags or the statements and ran the corpus at `correct` on the RTX 5090. Step 11 is done: no test checks a
+kernel's structure on the rendered text any more (below). No step ran the perf lane, the whole suite or an sm_70 kernel
+on a V100 yet; they wait for the closing step.
 
 | Step | Commit | Corpus CUDA |
 | --- | --- | --- |
@@ -151,26 +151,29 @@ What step 10 found:
 
 Where step 11 stands:
 
-- **The count.** 59 test files hold 181 lines that read `kernel_source`. Read one by one: 119 check structure (41
-  files), 23 check how the CUDA text spells something (10 files), 39 are neither (a `CudaOp` built by hand for the
-  plan and launch tests, the is-a-kernel filter, source determinism, the kernel cache, the rendered-line budget). The
-  paged-buffer tests are spelling checks: Kernel IR indexes a paged buffer by dimension and the page split is the
-  renderer's.
-- **The helper** is `compile_with_kernels` in `tests/compiler/helpers.py`: it runs the compile the test would run and
+- **The count.** 31 test files hold 70 lines that read `kernel_source`, down from 181 in 59. None checks structure.
+  37 check how the CUDA text spells something, in 17 files carrying 46 markers. 33 are neither: a `CudaOp` built by
+  hand for the plan, launch and capture tests, the is-a-kernel filter, source determinism, the kernel cache, the
+  rendered-line budget, a removed field's name, a stored table's column.
+- **The helpers** are in `tests/compiler/helpers.py`. `compile_with_kernels` runs the compile the test would run and
   keeps, per kernel node, the `KernelOp` the last lowering pass read, recorded as the pipeline rebinds the node to its
-  `CudaOp` (the `on_rebind` event). Nothing is stored on the op. `statements` lists a kernel's statements by type.
-- **Converted**: `e2e/test_matmul_coverage.py` (19 reads), `passes/test_nvfp4_staged.py` (14) and
-  `e2e/test_attention_coverage.py` (6). 80 structure reads in 38 files are left, the largest
-  `passes/test_nvfp4_w4a4.py`, `passes/test_chunk_position_mask.py`, `passes/test_batched_matvec_unit_row.py` (5
-  each) and `passes/test_register_carry.py`, `passes/test_shared_carry.py`, `passes/test_fp8_staged.py`,
-  `e2e/test_knob_pinning.py`, `e2e/test_fused_edge.py`, `backend/test_emit.py` (4 each).
-- **Marked**: every spelling read carries `# CUDA spelling: moves to the PTX compiler's tests` (29 comments in 12
-  files, the converted files' leftovers included), so one grep lists what PR B's crate tests take over.
+  `CudaOp` (the `on_rebind` event). `recording_kernels` records the same for a compile the test does not run itself
+  (a backend's, a serving split's). Nothing is stored on the op. `statements` lists a kernel's statements by type,
+  `operations` the elementwise operations it computes, `text` its text form.
+- **Marked**: every spelling read carries `# CUDA spelling: moves to the PTX compiler's tests`, so one grep lists what
+  PR B's crate tests take over. What stays there: helper and intrinsic names, a conversion's spelling, the vector type
+  a width spells, a run's 16-byte rows and shuffles, a lane formula, a slot's shift and mask, the paged buffers' page
+  tables, the unroll pragma, a C declaration per brace scope.
 - **Text checks that could not fail.** A search for a helper's name matches its definition in the prelude, which a
-  kernel carries whether or not it calls the helper. The matmul coverage's "operands load gmem-direct" was one: three
-  of its six cases stage their operands (the stage is left to the prior there). The attention coverage's "both the
-  score and the expectation reach mma.sync", "the weight is a register repack" and "the pivot is a per-row fold" were
-  three more. Each is a statement check now. Expect more among the 80.
+  kernel carries whether or not it calls the helper; the Volta prelude goes into every `m8n8k4` kernel whole. Found:
+  the matmul coverage's "operands load gmem-direct", the attention coverage's three ("both the score and the
+  expectation reach mma.sync", "the weight is a register repack", "the pivot is a per-row fold"), the knob pinning's
+  "operands loaded gmem-direct", the FP8 staged "byte-gather drain", the Volta "one wide load" and its crosswise and
+  lane-swap formulas, a Volta line no renderer writes any more, the twisted rewrite's f16 conversion (it accepted
+  "acc" anywhere), the f32 accumulator's ("float v" passed), and the SwiGLU chunk's "each name is declared once" (its
+  window held one declaration). Each is a statement check now, or dropped where the statement check already said it.
+- **Found on the way**: `test_deferred_reduction_cuda_preserves_empty_states_and_the_uneven_tail[r4-]` gives a wrong
+  answer on the RTX 5090 (5 of 8 values off). It reads no source; not chased.
 
 ## End state
 
