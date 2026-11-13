@@ -20,7 +20,7 @@ from emmy.compiler.ir.schedule.classic import (
     ProjectionSchedule,
     ReductionSchedule,
 )
-from emmy.compiler.ir.stmt import Assign, Cond, Init, Load, Loop, StridedLoop, Write, parse_body
+from emmy.compiler.ir.stmt import Accum, Assign, Cond, Init, Load, Loop, StridedLoop, Write, parse_body
 from emmy.compiler.ir.tile import TileOp
 from emmy.compiler.pipeline.passes.lowering.kernel._factor import factorize
 from tests.compiler.terms import contraction, projection, reduction, slab
@@ -151,6 +151,18 @@ def test_transposed_columns_keep_the_serial_provider_loop_coordinate() -> None:
     assert any(isinstance(stmt, Loop) and stmt.axis.name == "j" for stmt in flat)
     assert "j__v1" not in _names_read(flat)
     assert "stat__v1" in _names_read(flat)
+
+
+def test_transposed_columns_fold_their_own_copy_of_a_provider_carrier_the_loop_reads() -> None:
+    """A provider fold whose carrier the loop reads directly is copied per column like the rest of the prologue:
+    each column folds and reads a carrier of its own, so no scope seeds one carrier twice."""
+    stat = reduction(_J, (slab("z_e", "z", "m", "j"),), parse_body("stat__v = multiply(z_e, z_e)"), ("stat",))
+    red = _reduce(_K, "acc", stat, "x")
+    bound = factorize(_stamped(red, {red: Reduce.of(coop=128, coop_transposed=True, output_lanes=8, columns=2)}, axes=(_K, _J)), root=None)
+    flat = _flat(bound.body)
+    assert sorted(stmt.name for stmt in flat if isinstance(stmt, Accum) and stmt.name.startswith("stat")) == ["stat", "stat__v1"]
+    loop = next(stmt for stmt in bound.body if isinstance(stmt, StridedLoop))
+    assert {"stat", "stat__v1"} <= _names_read(loop.body)
 
 
 def _transposed_masked(predicate: str):
