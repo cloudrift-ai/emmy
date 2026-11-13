@@ -262,7 +262,8 @@ fn the_fast_exponential_is_one_hardware_instruction_on_a_scaled_operand() {
     );
 }
 
-/// Each approximate operation is the hardware instruction of its row, under the name the row gives it.
+/// Each approximate operation is the hardware instruction of its row. The reciprocal square root has no
+/// approximate operation: `rsqrt` is the hardware's instruction already.
 #[test]
 fn an_approximate_operation_is_the_hardware_instruction_of_its_row() {
     let one = |function: &str| sequence(function, 1, FLUSHING);
@@ -276,7 +277,6 @@ fn an_approximate_operation_is_the_hardware_instruction_of_its_row() {
     assert_eq!(one("sin_fast"), ["sin.approx.ftz.f32 %f1, %f0"]);
     assert_eq!(one("cos_fast"), ["cos.approx.ftz.f32 %f1, %f0"]);
     assert_eq!(one("sqrt_fast"), ["sqrt.approx.ftz.f32 %f1, %f0"]);
-    assert_eq!(one("rsqrt_fast"), ["rsqrt.approx.ftz.f32 %f1, %f0"]);
     assert_eq!(one("reciprocal_fast"), ["rcp.approx.ftz.f32 %f1, %f0"]);
     // The hardware's hyperbolic tangent has no flushing form.
     assert_eq!(one("tanh_fast"), ["tanh.approx.f32 %f1, %f0"]);
@@ -300,6 +300,30 @@ fn an_approximate_operation_is_the_hardware_instruction_of_its_row() {
         message.contains("no PTX rule for tanh_fast on sm_70"),
         "{message}"
     );
+}
+
+/// A composite function a kernel pass left as it was is compiled as its definition in the operations table:
+/// `sigmoid` is `1 / (1 + exp(-x))` with the accurate exponential and a rounded division, and `sigmoid_fast` the
+/// hardware's reciprocal of one plus the hardware's power of two.
+#[test]
+fn a_composite_function_is_its_definition_in_primitive_operations() {
+    assert_eq!(
+        sequence("sigmoid_fast", 1, FLUSHING),
+        [
+            "neg.ftz.f32 %f1, %f0",
+            "mul.rn.ftz.f32 %f2, %f1, 0f3FB8AA3B",
+            "ex2.approx.ftz.f32 %f3, %f2",
+            "add.rn.ftz.f32 %f4, 0f3F800000, %f3",
+            "rcp.approx.ftz.f32 %f5, %f4"
+        ]
+    );
+    // The accurate form: the exponential's own sequence, with the negation ahead of it and the sum and the
+    // division behind.
+    let (accurate, exponential) = (sequence("sigmoid", 1, EXACT), sequence("exp", 1, EXACT));
+    assert_eq!(accurate.len(), exponential.len() + 3);
+    assert_eq!(accurate[0], "neg.f32 %f1, %f0");
+    assert!(accurate[accurate.len() - 2].starts_with("add.rn.f32 "));
+    assert!(accurate[accurate.len() - 1].starts_with("div.rn.f32 "));
 }
 
 /// Two calls of one function on one operand are one sequence: the value table shares every instruction.
@@ -326,14 +350,15 @@ fn a_half_operand_and_an_unwritten_function_are_refused_by_name() {
     let body = format!("{GRID}\n    f16 x = load a[i]\n    f16 v = log_fast(x)\n    f16 o[i] = v");
     let message = refusal(&body, halves);
     assert!(message.contains("log_fast at f16"), "{message}");
-    for function in ["sin", "cos", "sigmoid", "log2", "expm1"] {
+    for function in ["sin", "cos", "log2", "expm1"] {
         let message = refusal(&kernel(function, 1), A_O);
         let expected = format!("no PTX rule for the operation {function} at f32");
         assert!(message.contains(&expected), "{message}");
     }
-    let message = refusal(&kernel("cbrt_fast", 1), A_O);
-    assert!(
-        message.contains("no PTX rule for the operation cbrt_fast"),
-        "{message}"
-    );
+    // A name the operations table does not hold is no operation: there is no approximate reciprocal square root.
+    for function in ["cbrt_fast", "rsqrt_fast"] {
+        let message = refusal(&kernel(function, 1), A_O);
+        let expected = format!("no PTX rule for the operation {function}");
+        assert!(message.contains(&expected), "{message}");
+    }
 }

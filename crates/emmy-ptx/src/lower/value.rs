@@ -201,13 +201,15 @@ impl Lowerer {
             Expr::Ternary(cond, if_true, if_false) => {
                 self.float_select(cond, if_true, if_false, ty, ctx)
             }
-            Expr::Apply(op, args) => match (fast(op.name()), op) {
-                (Some(row), _) => self.fast(op.name(), row, args, ty, ctx),
-                (None, ElementwiseOp::Known(op)) => self.float_apply(*op, args, ty, ctx),
-                (None, ElementwiseOp::Other(name)) => {
-                    Err(self.no_rule(format_args!("the operation {name}")))
+            Expr::Apply(ElementwiseOp::Known(op), args) => {
+                if let Some(row) = fast(*op) {
+                    return self.fast(&op.to_string(), row, args, ty, ctx);
                 }
-            },
+                self.float_apply(*op, args, ty, ctx)
+            }
+            Expr::Apply(ElementwiseOp::Other(name), _) => {
+                Err(self.no_rule(format_args!("the operation {name}")))
+            }
             _ => Err(self.no_rule(format_args!("the expression {expression}"))),
         }
     }
@@ -313,10 +315,18 @@ impl Lowerer {
                 self.float_select(cond, if_true, if_false, ty, ctx)
             }
             (O::Copy | O::Positive, [x]) => self.float(x, ty, ctx),
-            _ => match self.math(op, args, ty, ctx)? {
-                Some(value) => Ok(value),
-                None => Err(self.no_rule(format_args!("the operation {op} at {}", ty.text()))),
-            },
+            _ => {
+                if let Some(value) = self.math(op, args, ty, ctx)? {
+                    return Ok(value);
+                }
+                // A composite a kernel pass left as it was is its definition in primitive operations.
+                if let [operand] = args
+                    && let Some(definition) = op.definition(operand)?
+                {
+                    return self.float(&definition, ty, ctx);
+                }
+                Err(self.no_rule(format_args!("the operation {op} at {}", ty.text())))
+            }
         }
     }
 

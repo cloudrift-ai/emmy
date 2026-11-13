@@ -173,7 +173,9 @@ handed a half operand is refused.
 Only the functions kernels hold are written. Counted over the realization corpus and the repository goldens (5,930
 kernel bodies): `rsqrt` 8,739 calls, `exp` 7,510, `log` 551, `tanh` 72, `pow` 28 (one golden), `erf` 8. No kernel
 holds a sine or a cosine. `sqrt`, `divide` and `reciprocal` are one correctly rounded instruction each. `sigmoid`
-(1,186 calls) is a composite: a kernel pass writes it as its primitives.
+(1,186 calls) is a composite: a kernel pass writes it as its primitives. A composite that reaches the compiler as it
+was is compiled as its definition in the operations table, so `sigmoid` is `1 / (1 + exp(-x))` and `sigmoid_fast`
+the hardware's reciprocal of one plus the hardware's power of two.
 
 The target of each sequence is the bound NVIDIA's CUDA math documentation states for the same single-precision
 function, with the special values the CUDA function gives. The polynomial coefficients are minimax fits made for
@@ -234,9 +236,9 @@ gives what C's `pow` gives on every pair of a grid of 67 special values, as nvcc
 ### The approximate operations
 
 An approximate operation is one hardware instruction, on its operand as it stands or scaled: what `--use_fast_math`
-and the fast intrinsics give a CUDA kernel today. One table in the math module holds them, a row each. Only
-`exp_fast` is an operation the IR declares; the other rows stand under provisional names, matched by spelling, until
-the pass that picks the approximate forms declares them.
+and the fast intrinsics gave a CUDA kernel. One table in the math module holds them, a row for each `_fast`
+operation the operations table of `emmy-ir` declares. There is no approximate reciprocal square root: `rsqrt` is the
+hardware's instruction already.
 
 | Operation | Instructions |
 | --- | --- |
@@ -246,7 +248,7 @@ the pass that picks the approximate forms declares them.
 | `sin_fast`, `cos_fast` | `sin.approx`, `cos.approx` |
 | `tanh_fast` | `tanh.approx`, from `sm_75` |
 | `divide_fast`, `reciprocal_fast` | `div.approx`, `rcp.approx` |
-| `sqrt_fast`, `rsqrt_fast` | `sqrt.approx`, `rsqrt.approx` |
+| `sqrt_fast` | `sqrt.approx` |
 
 Each flushes to zero when the kernel's decision says (`tanh.approx` has no such form). With the decision off, the
 instruction is written in the form that keeps subnormals, and ptxas itself writes the shift that needs: it halves

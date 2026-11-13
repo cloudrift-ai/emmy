@@ -30,32 +30,29 @@ pub(super) enum Fast {
     Power,
 }
 
-/// The approximate operations: what `--use_fast_math` and the fast intrinsics give a CUDA kernel, each the hardware
-/// instruction of its row. An instruction flushes to zero when the kernel's decision says.
-///
-/// PROVISIONAL NAMES: only `exp_fast` is an operation the IR declares. The other rows stand under the names this
-/// table expects the pass that picks the approximate forms to give them; they are matched by spelling and are
-/// reconciled with the IR's declarations when that pass lands.
-const FAST: [(&str, Fast); 10] = [
-    ("exp_fast", Fast::OfScaled(Opcode::Ex2, LOG2_E)),
+/// The approximate operations: what `--use_fast_math` and the fast intrinsics gave a CUDA kernel, each the hardware
+/// instruction of its row. An instruction flushes to zero when the kernel's decision says. The reciprocal square
+/// root has no row: `rsqrt` is the hardware's instruction already. `sigmoid_fast` has none either: it is a
+/// composite, compiled through its definition in the operations table.
+const FAST: [(Operation, Fast); 9] = [
+    (Operation::ExpFast, Fast::OfScaled(Opcode::Ex2, LOG2_E)),
     (
-        "log_fast",
+        Operation::LogFast,
         Fast::Scaled(Opcode::Lg2, std::f32::consts::LN_2),
     ),
-    ("sin_fast", Fast::Inst(Opcode::Sin)),
-    ("cos_fast", Fast::Inst(Opcode::Cos)),
-    ("tanh_fast", Fast::Inst(Opcode::Tanh)),
-    ("pow_fast", Fast::Power),
-    ("divide_fast", Fast::Inst(Opcode::Div)),
-    ("reciprocal_fast", Fast::Inst(Opcode::Rcp)),
-    ("sqrt_fast", Fast::Inst(Opcode::Sqrt)),
-    ("rsqrt_fast", Fast::Inst(Opcode::Rsqrt)),
+    (Operation::SinFast, Fast::Inst(Opcode::Sin)),
+    (Operation::CosFast, Fast::Inst(Opcode::Cos)),
+    (Operation::TanhFast, Fast::Inst(Opcode::Tanh)),
+    (Operation::PowFast, Fast::Power),
+    (Operation::DivideFast, Fast::Inst(Opcode::Div)),
+    (Operation::ReciprocalFast, Fast::Inst(Opcode::Rcp)),
+    (Operation::SqrtFast, Fast::Inst(Opcode::Sqrt)),
 ];
 
-/// The approximate operation `name` spells.
-pub(super) fn fast(name: &str) -> Option<Fast> {
+/// The row of the approximate operation `op`, when it is one.
+pub(super) fn fast(op: Operation) -> Option<Fast> {
     FAST.iter()
-        .find(|(spelling, _)| *spelling == name)
+        .find(|(operation, _)| *operation == op)
         .map(|(_, row)| *row)
 }
 
@@ -710,13 +707,13 @@ mod tests {
         assert!((sum - std::f64::consts::LOG2_E).abs() < 1e-15);
     }
 
-    /// Every row of the approximate operations has its own name.
+    /// Every row of the approximate operations has its own operation.
     #[test]
     fn an_approximate_operation_has_one_row() {
-        for (index, (name, row)) in FAST.iter().enumerate() {
-            assert_eq!(fast(name), Some(*row));
-            assert!(FAST[..index].iter().all(|(earlier, _)| earlier != name));
+        for (index, (op, row)) in FAST.iter().enumerate() {
+            assert_eq!(fast(*op), Some(*row));
+            assert!(FAST[..index].iter().all(|(earlier, _)| earlier != op));
         }
-        assert_eq!(fast("exp"), None);
+        assert_eq!(fast(Operation::Exp), None);
     }
 }

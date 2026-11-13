@@ -246,6 +246,19 @@ def test_the_fast_exponential_is_within_the_bound_of_the_cuda_intrinsic(ftz):
     assert (steps <= bound).all(), float(x[np.argmax(steps - bound)])
 
 
+@pytest.mark.parametrize("function", ["sigmoid", "sigmoid_fast"])
+def test_a_composite_function_computes_its_definition(function):
+    """A composite that reaches the compiler as it was is compiled as its definition in primitive operations.
+    ``sigmoid`` is ``1 / (1 + exp(-x))`` over the accurate exponential and a rounded division: the exponential's 2
+    ulp and two roundings. ``sigmoid_fast`` is the hardware's reciprocal of one plus the hardware's power of two,
+    whose error grows with the operand like ``exp_fast``'s."""
+    x = np.linspace(-30, 30, 64 * BLOCK, dtype=np.float32)
+    got = _apply(function, x)
+    exact = 1 / (1 + np.exp(-x.astype(np.float64)))
+    bound = 4 if function == "sigmoid" else 5 + np.floor(np.abs(1.173 * x.astype(np.float64)))
+    assert (ulp_error(got, exact) <= bound).all()
+
+
 #: What bounds the power: 4 ulp in the CUDA documentation, and the largest error found on an RTX 5090 over 1.3
 #: billion sampled pairs.
 POW_BOUND = 4
