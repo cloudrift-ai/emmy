@@ -6,7 +6,7 @@ import pytest
 from emmy.compiler.dtype import F16, F32, I32
 from emmy.compiler.ir.elementwise import ElementwiseImpl
 from emmy.compiler.ir.expression import Var
-from emmy.compiler.ir.kernel.ir import MmaSyncPtx, RegStore
+from emmy.compiler.ir.kernel.ir import MmaSyncPtx, RegStore, WgmmaMma
 from emmy.compiler.ir.render import RenderCtx, render_stmt
 from emmy.compiler.ir.sigma import Sigma
 from emmy.compiler.ir.stmt import Assign, parse_body
@@ -188,11 +188,11 @@ def test_fast_exp_policy_reaches_generated_fragment_epilogues(monkeypatch, fast_
                     if node.operation
                 ]
                 assert expected in ops and ("exp" if enabled else "exp_fast") not in ops
+        assert any(isinstance(stmt, WgmmaMma) for stmt in kernel.body.iter())
         compiled = Pipeline.build([FINAL_LOWERING_PASS]).run(lowered, ctx=ctx)
     # CUDA spelling: moves to the PTX compiler's tests
     (source,) = [node.op.kernel_source for node in compiled.nodes.values() if isinstance(node.op, CudaOp)]
     assert ("__expf(" in source) == enabled
-    assert "wgmma.mma_async" in source
     values = np.array([-12, -1, 0, 1, 12], dtype=np.float32)
     np.testing.assert_array_equal(ElementwiseImpl(expected)(values), np.exp(values))
 

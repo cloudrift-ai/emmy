@@ -17,9 +17,10 @@ from emmy.compiler.backend.cuda.dtype import canonical_from_cuda_name, cuda_name
 from emmy.compiler.graph import Graph, Tensor
 from emmy.compiler.ir.base import InputOp
 from emmy.compiler.ir.frontend.ir import MatmulOp, RmsNormOp
+from emmy.compiler.ir.stmt import Accum, Load, Write
 from emmy.compiler.ir.tensor.ir import ElementwiseOp, ReduceOp
 from emmy.compiler.pipeline import LOOP_PASSES, Pipeline
-from tests.compiler.helpers import requires_cuda
+from tests.compiler.helpers import recording_kernels, requires_cuda, statements
 
 
 @requires_cuda
@@ -67,8 +68,12 @@ def test_bf16_runs_load_and_store_as_one_access(length, vector):
     expected, _ = NumpyBackend().run(graph, input_data=feed)
 
     backend = CudaBackend()
-    compiled = backend.compile(graph)
-    # CUDA spelling: moves to the PTX compiler's tests
+    with recording_kernels() as kernels_of:
+        compiled = backend.compile(graph)
+    kernels = kernels_of(compiled)
+    assert any(load.input == "x" and load.width > 1 for load in statements(kernels, Load)), "one vector read per run"
+    assert any(write.output == "y" and write.width > 1 for write in statements(kernels, Write)), "one vector write per run"
+    # CUDA spelling: moves to the PTX compiler's tests (the vector type a run's width spells)
     sources = "\n".join(n.op.kernel_source for n in compiled.nodes.values() if hasattr(n.op, "kernel_source"))
     assert f"*reinterpret_cast<const {vector}*>(&x[" in sources and f"*reinterpret_cast<{vector}*>(&y[" in sources, sources
     actual, _ = backend.run(compiled, input_data=feed)
@@ -304,12 +309,13 @@ def test_fp16_reduction_uses_fp32_accumulator_on_cuda():
     from emmy.compiler.backend.cuda.backend import CudaBackend
     from emmy.compiler.ir.cuda import CudaOp
 
-    compiled = CudaBackend().compile(Pipeline.build(LOOP_PASSES).run(_fp16_sum_graph()))
+    with recording_kernels() as kernels_of:
+        compiled = CudaBackend().compile(Pipeline.build(LOOP_PASSES).run(_fp16_sum_graph()))
+    # The accumulator is f32 (the promotion); the value converts at the combine, the store back to f16.
+    folds = statements(kernels_of(compiled), Accum)
+    assert folds and all(fold.dtype == dt.F32 for fold in folds), folds
     # CUDA spelling: moves to the PTX compiler's tests
     sources = "\n".join(n.op.kernel_source for n in compiled.nodes.values() if isinstance(n.op, CudaOp))
-    # Accumulator declared as float (f32 promotion); value converted at
-    # the combine; final store back to __half.
-    assert "float acc" in sources or "float v" in sources or "float r" in sources, f"expected f32 accumulator local, got:\n{sources}"
     assert "__half2float" in sources, f"expected __half2float at combine, got:\n{sources}"
     assert "__float2half" in sources, f"expected __float2half at store, got:\n{sources}"
 
@@ -400,11 +406,13 @@ def test_fp16_max_reduction_stays_in_fp16():
     g.outputs = ["m"]
 
     be = CudaBackend()
-    compiled = be.compile(g)
+    with recording_kernels() as kernels_of:
+        compiled = be.compile(g)
+    # The accumulator is f16: a selection needs no precision boost.
+    folds = statements(kernels_of(compiled), Accum)
+    assert folds and all(fold.dtype == dt.F16 for fold in folds), folds
     # CUDA spelling: moves to the PTX compiler's tests
     sources = "\n".join(n.op.kernel_source for n in compiled.nodes.values() if isinstance(n.op, CudaOp))
-    # Accumulator declared as __half — selection ops don't need precision boost.
-    assert "__half acc" in sources, f"expected fp16 accumulator for max, got:\n{sources}"
     # The combine uses __hmax (native fp16 max), not fmaxf.
     assert "__hmax" in sources, f"expected __hmax intrinsic for fp16 max, got:\n{sources}"
 
