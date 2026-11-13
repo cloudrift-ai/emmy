@@ -890,10 +890,11 @@ macro_rules! with_statement_types {
                 /// tail, stored as its body: `epilogue_params` bind, in order, the accumulator names to `frag` and `extra_frags`
                 /// (a multi-fold node's additional C fragments, so the chain combines the channels per cell — SwiGLU et al.),
                 /// every other name the body reads is a coordinate, and `epilogue_result` names the stored value. The lowering
-                /// forms the body through `Lambda.closing`, which fixes its statement order. Evaluated per fragment element right
-                /// before the downconvert (the CUTLASS epilogue-visitor pattern): floating loads widen to f32, while integer
-                /// loads retain their type for arithmetic on packed codes. Each param substitutes to that element, and the
-                /// reserved :data:`ELEM_ROW` / :data:`ELEM_COL` vars in a `Load` index or `Select` predicate substitute to the
+                /// forms the body through `Lambda.closing`, which fixes its statement order, and the type pass types it like any
+                /// body over f32 params (`ir.types.epilogue_conversions`): a floating load widens to f32 by a conversion of its
+                /// own, while an integer load retains its type for arithmetic on packed codes. Evaluated per fragment element
+                /// right before the downconvert (the CUTLASS epilogue-visitor pattern). Each param substitutes to that element,
+                /// and the reserved :data:`ELEM_ROW` / :data:`ELEM_COL` vars in a `Load` index or `Select` predicate substitute to the
                 /// element's row / col offset within the fragment (the cell base is already in the expression).
                 ///
                 /// `m_guard` / `n_guard` carry a masked-tile boundary as `(base Expression, bound Expression)` — the tile's row /

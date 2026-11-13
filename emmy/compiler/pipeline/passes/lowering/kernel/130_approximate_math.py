@@ -23,12 +23,11 @@ An operation sits in four places:
 - An ``Assign`` of the body, typed in full: it computes at the statement's dtype.
 - The merge program of a cooperative combine (``TreeHalve``, ``WarpShuffle``), which runs at the statement's dtype.
 - A ``FragmentApply``'s operation and its unary tail. The fragment algebra is f32.
-- A ``RegStore`` epilogue, typed only when it is printed. Each of its definitions is typed here by the same rules,
-  to read where its operation will compute.
+- An ``Assign`` of a ``RegStore`` epilogue, typed in full like one of the body.
 
-The last three hold one operation where the body holds a definition, so a composite stays whole there: a
-``reciprocal`` becomes ``reciprocal_fast``, and a ``sigmoid`` becomes ``sigmoid_fast`` when the exponential and the
-division are both approximate (it keeps both exact otherwise).
+A combine, a ``FragmentApply`` and an epilogue hold one operation where the body holds a definition, so a composite
+stays whole there: a ``reciprocal`` becomes ``reciprocal_fast``, and a ``sigmoid`` becomes ``sigmoid_fast`` when the
+exponential and the division are both approximate (it keeps both exact otherwise).
 
 ``FAST_EXP`` is recorded on the kernel, as it always was: the record makes the pass idempotent.
 """
@@ -38,15 +37,15 @@ from __future__ import annotations
 from dataclasses import replace
 
 from emmy.compiler.context import Context
-from emmy.compiler.dtype import F32, I32, INTEGER_NAMES
+from emmy.compiler.dtype import F32
 from emmy.compiler.graph import Node
 from emmy.compiler.ir.elementwise import ElementwiseImpl, is_elementwise
 from emmy.compiler.ir.expression import Expression, FunctionCallExpression, Literal, apply
 from emmy.compiler.ir.kernel import KernelOp
 from emmy.compiler.ir.kernel.interface import buffer_dtypes
 from emmy.compiler.ir.kernel.ir import FragmentApply, RegStore, TreeHalve, WarpShuffle
-from emmy.compiler.ir.stmt import Assign, Body, Load, Select, Statement
-from emmy.compiler.ir.types import explicit_conversions
+from emmy.compiler.ir.stmt import Assign, Statement
+from emmy.compiler.ir.types import epilogue_conversions, explicit_conversions
 from emmy.compiler.pipeline import Match, Pattern, RuleSkipped
 from emmy.compiler.pipeline.search.space import FAST_DIV, FAST_EXP, FAST_MATH, FAST_SQRT, precision_pin
 from emmy.compiler.target import native_f16_ops
@@ -102,7 +101,13 @@ def _picked(stmt: Statement, picks: dict[str, str], buffers: dict, halves: list[
     if isinstance(stmt, RegStore):
         # A store holds the stores grouped with it (``run``), each with an epilogue of its own.
         run = tuple(_picked(cell, picks, buffers, halves) for cell in stmt.run)
-        return stmt.replace(epilogue=None if stmt.epilogue is None else _epilogue(stmt, picks, buffers), run=run)
+        if stmt.epilogue is None:
+            return stmt.replace(run=run)
+        placed: list[Assign] = []
+        epilogue = stmt.epilogue.map(lambda inner: _picked(inner, picks, buffers, placed))
+        if placed:
+            epilogue = epilogue_conversions(epilogue, stmt.epilogue_params, buffers, native_f16_ops())
+        return stmt.replace(epilogue=epilogue, run=run)
     return stmt
 
 
@@ -121,33 +126,3 @@ def _pick(node: Expression, picks: dict[str, str]) -> Expression:
     if op.name == "divide" and isinstance(operands[0], Literal) and operands[0].value == 1:
         return apply("reciprocal_fast", operands[1])  # the instruction nvcc picks for ``1.0f / x``
     return apply(picks[op.name], *operands)
-
-
-def _epilogue(store: RegStore, picks: dict[str, str], buffers: dict) -> Body:
-    """``store``'s epilogue with its approximate forms picked. The program is typed when it is printed, one definition
-    at a time, over the types its printer reads each name at: a register element and a floating load are f32, an
-    integer load its own dtype, a binding its declared dtype, a definition the dtype the rules give it. Each
-    definition is typed the same way here, and the operations that come out computing in f32 are the ones picked."""
-    types = dict.fromkeys(store.epilogue_params, F32)
-    out: list[Statement] = []
-    for stmt in store.epilogue:
-        if isinstance(stmt, Load):
-            dtype = stmt.dtype or buffers.get(stmt.input) or F32
-            types.update((name, dtype if dtype.name in INTEGER_NAMES else F32) for name in stmt.names)
-        elif isinstance(stmt, Assign):
-            typed = explicit_conversions(Body([stmt]), {}, native_f16_ops(), {name: types[name] for name in stmt.deps() if name in types})
-            in_f32 = {name for s in typed if isinstance(s, Assign) and s.dtype == F32 for name in _operations(s.value)}
-            placed = {name: fast for name, fast in picks.items() if name in in_f32 or name in _AT_A_HALF}
-            stmt = stmt.replace(value=_pick(stmt.value, placed))
-            types[stmt.name] = next(s.dtype for s in typed if isinstance(s, Assign) and s.name == stmt.name)
-        else:  # a select is f32; a binding its declared dtype, an index when it declares none
-            types.update(dict.fromkeys(stmt.defines(), F32 if isinstance(stmt, Select) else getattr(stmt, "dtype", None) or I32))
-        out.append(stmt)
-    return Body(out)
-
-
-def _operations(node: Expression) -> set[str]:
-    """The elementwise operations ``node`` applies, by name."""
-    if (isinstance(node, FunctionCallExpression) and not is_elementwise(node.name)) or node.operation is None:
-        return set()
-    return {node.operation.name}.union(*(_operations(operand) for operand in node.operands))

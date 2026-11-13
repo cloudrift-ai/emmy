@@ -241,6 +241,49 @@ def explicit_conversions(
     return _Conversions(buf_dtypes, native_f16, seed.ssa_dtypes, states, taken, defined).body(body, {})
 
 
+def epilogue_conversions(epilogue: Body, params: tuple[str, ...], buf_dtypes: dict[str, DataType], native_f16: frozenset[str]) -> Body:
+    """A ``RegStore`` epilogue typed in full. It computes on the f32 elements of the accumulators ``params`` name: a
+    load that declares no dtype reads its buffer's element type, widened to f32 by a conversion of its own when that is
+    a narrower float, and a select is f32, every branch at another dtype converted ahead of it. Then the epilogue is
+    typed as any body (:func:`explicit_conversions`). Typing it again changes nothing."""
+    known = dict.fromkeys(params, F32)
+    taken = {name for s in epilogue.iter() for name in (*s.defines(), *s.deps())} | set(params)
+
+    def narrow(name: str, dtype: DataType) -> str:
+        """A fresh name for the value ``name`` holds at ``dtype`` before it is widened."""
+        fresh, index = f"{name}__{dtype.name}", 0
+        while fresh in taken:
+            index += 1
+            fresh = f"{name}__{dtype.name}_{index}"
+        taken.add(fresh)
+        return fresh
+
+    out: list[Statement] = []
+    for s in epilogue:
+        if isinstance(s, Load) and s.dtype is None:
+            stored = buf_dtypes.get(s.input, F32)
+            if stored == F32 or stored.name in INTEGER_NAMES:
+                out.append(s.replace(dtype=stored))
+                continue
+            loaded = [narrow(name, stored) for name in s.names]
+            out.append(s.replace(names=tuple(loaded), dtype=stored))
+            out.extend(Assign(name, CastExpression(F32.name, Var(held)), F32) for name, held in zip(s.names, loaded, strict=True))
+        elif isinstance(s, Select):
+            types = {**value_dtypes(stamp_types(Body(out), buf_dtypes, known)), **known}
+            branches = []
+            for branch in s.branches:
+                dtype = types.get(branch.value, I32)
+                if dtype != F32:
+                    widened = narrow(branch.value, F32)
+                    out.append(Assign(widened, CastExpression(F32.name, Var(branch.value)), F32))
+                    branch = SelectBranch(widened, branch.select)
+                branches.append(branch)
+            out.append(s.replace(branches=tuple(branches)))
+        else:
+            out.append(s)
+    return explicit_conversions(Body(out), buf_dtypes, native_f16, known)
+
+
 @dataclass
 class _Conversions:
     buf_dtypes: dict[str, DataType]

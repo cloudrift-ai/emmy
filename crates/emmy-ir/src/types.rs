@@ -154,13 +154,31 @@ impl Scope<'_> {
                     return Err(format!("a fragment of {fragment} elements"));
                 }
             }
+            // A store's epilogue is a body of its own, typed like any: its parameters are the f32 elements of the
+            // accumulators, and the other names it reads are coordinates. The cells stored with it carry their own.
+            Statement::RegStore(store) => {
+                if let Some(epilogue) = &store.epilogue {
+                    let mut scope = Scope {
+                        buffers: self.buffers,
+                        types: store
+                            .epilogue_params
+                            .iter()
+                            .map(|p| (*p, DType::F32))
+                            .collect(),
+                        defined: store.epilogue_params.iter().copied().collect(),
+                    };
+                    scope.declare(epilogue);
+                    scope.body(epilogue).map_err(|why| why.to_string())?;
+                }
+                for cell in store.run.iter() {
+                    self.statement(cell)?;
+                }
+            }
             // What computes on a fragment's registers: a pointwise operand's conversion to the fragment algebra's
-            // f32 and a store's epilogue program are typed while printing, because their operands are register
-            // elements no name stands for. The fragment expansion of the PTX compiler (PR B, milestone 4) types
-            // them from the fragments' declarations. The other statements move whole registers and convert nothing.
-            Statement::FragmentApply(_)
-            | Statement::FragmentRowReduce(_)
-            | Statement::RegStore(_) => {}
+            // f32 is typed while printing, because its operands are register elements no name stands for. The
+            // fragment expansion of the PTX compiler (PR B, milestone 4) types it from the fragments' declarations.
+            // The other statements move whole registers and convert nothing.
+            Statement::FragmentApply(_) | Statement::FragmentRowReduce(_) => {}
             // Everything else defines no scalar value: structure, declarations, copies of bytes, barriers.
             _ => {}
         }

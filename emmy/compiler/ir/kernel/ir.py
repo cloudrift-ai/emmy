@@ -30,8 +30,7 @@ from dataclasses import dataclass, replace
 from functools import cache, cached_property
 
 from emmy.compiler.dim import Dim
-from emmy.compiler.dtype import I32, INTEGER_NAMES
-from emmy.compiler.dtype import get as dtype_get
+from emmy.compiler.dtype import I32
 from emmy.compiler.ir.axis import Axis
 from emmy.compiler.ir.body_op import BodyOp
 from emmy.compiler.ir.elementwise import _REDUCE_SPELLING, ElementwiseImpl
@@ -48,6 +47,7 @@ from emmy.compiler.ir.expression import (
 )
 from emmy.compiler.ir.render import (
     RenderCtx,
+    _flat_index,
     _pad,
     op_to_expression,
     render_address,
@@ -73,8 +73,6 @@ from emmy.compiler.ir.stmt import (
     Write,
     free_names,
 )
-from emmy.compiler.ir.types import explicit_conversions
-from emmy.compiler.target import native_f16_ops
 from emmy.emmy_ir import (  # the Kernel IR statement types, declared with the shared ones in the emmy-ir crate
     FRAGMENT_LANE,
     BlockScaleLoad,
@@ -1350,73 +1348,31 @@ def _element_coords(node: RegStore, ctx: RenderCtx) -> list[tuple[str, str, Expr
 
 
 def _element_values(node: RegStore, ctx: RenderCtx) -> tuple[list[list[str]], list[str]]:
-    """``(per_element_preamble, values)``: the four per-lane store values,
-    plus, per element, the leaf-load / chain-op declaration lines that
-    element needs (so a guarded render can scope element ``i``'s gmem
-    reads inside element ``i``'s boundary check). Without
-    an epilogue the values are the bare ``frag[i]`` and the preambles are
-    empty. With one, each element ``i`` (row ``_g``/``_g+8``, col
-    ``2_t+{0,1}``) declares its leaf loads at the element's own coordinates
-    (floating values widened to f32, integer values kept as integers) and the
-    chain ops (via the scalar ``Assign`` renderer), all scoped inside the
-    store's ``{ }`` block. Leaf loads are scalar; lanes ``_t = 0..3`` cover
-    8 contiguous columns, so the warp's
-    accesses coalesce regardless."""
+    """``(per_element_preamble, values)``: the value each fragment element stores, and the lines that compute it (so a
+    guarded store can scope element ``i``'s reads inside element ``i``'s boundary check). Without an epilogue the value
+    is the register ``frag[i]``. With one, the typed epilogue is printed once per element: each parameter is that
+    element's register, the reserved :data:`ELEM_ROW` / :data:`ELEM_COL` its row and column offset in the fragment (a
+    load index and a select predicate already carry the cell base), and every name it defines takes the element's
+    suffix. Every line is a constant of the store's ``{ }`` block."""
     coords = _element_coords(node, ctx)
     if node.epilogue is None:
         return [[] for _ in coords], [f"{node.frag}[{i}]" for i in range(len(coords))]
-    conv = {"f16": "__half2float({})", "bf16": "__bfloat162float({})"}
     frags = (node.frag, *node.extra_frags)
     per_elem: list[list[str]] = []
     vals: list[str] = []
     for i, (_row, _col, row_off, col_off) in enumerate(coords):
+        names = {acc: f"{fr}[{i}]" for acc, fr in zip(node.epilogue_params, frags, strict=True)}
+        ctx.ssa_dtypes.update(dict.fromkeys(names.values(), "f32"))
+        names |= {name: f"{name}_e{i}" for st in node.epilogue for name in st.defines()}
+        sigma = Sigma({ELEM_ROW: row_off, ELEM_COL: col_off})
         lines: list[str] = []
-        env = {acc: f"{fr}[{i}]" for acc, fr in zip(node.epilogue_params, frags, strict=True)}
-        for value in env.values():
-            ctx.ssa_dtypes[value] = "f32"
-        # The reserved ``ELEM_ROW`` / ``ELEM_COL`` vars substitute to this element's row / col offset
-        # within the fragment; a Load index and a Select predicate already carry the cell base.
-        coord = {ELEM_ROW: row_off, ELEM_COL: col_off}
         for st in node.epilogue:
-            if isinstance(st, Load):
-                temp = f"{st.name}_e{i}"
-                storage_dt = ctx.buffer_dtypes.get(st.input, "f32")
-                value_dt = st.dtype.name if st.dtype is not None else storage_dt
-                integer = value_dt in INTEGER_NAMES
-                flat = render_index(st.input, tuple(e.substitute(coord) for e in st.index), ctx)
-                if integer:
-                    lines.append(f"const {ctx.type_name(value_dt)} {temp} = {st.input}[{flat}];")
-                else:
-                    lines.append(f"const float {temp} = {conv.get(storage_dt, '{}').format(f'{st.input}[{flat}]')};")
-                env[st.name] = temp
-                ctx.ssa_dtypes[temp] = value_dt if integer else "f32"
-            elif isinstance(st, Select):
-                # The select is declared f32, and a chain op keeps the tail's own dtype, so a
-                # branch value narrowed by an earlier op converts back here — a ternary over a
-                # ``__half`` and a ``float`` does not compile.
-                def widened(value, ctx=ctx, env=env):
-                    rendered = env[value]
-                    return conv.get(ctx.ssa_dtypes.get(rendered, "f32"), "{}").format(rendered)
-
-                expression = widened(st.branches[-1].value)
-                for br in reversed(st.branches[:-1]):
-                    rc = render_expression(br.select.substitute(coord), ctx)
-                    expression = f"(({rc}) ? {widened(br.value)} : {expression})"
-                lines.append(f"const float {st.name}_e{i} = {expression};")
-                env[st.name] = f"{st.name}_e{i}"
-                ctx.ssa_dtypes[env[st.name]] = "f32"
-            else:
-                local = st.rewrite(
-                    lambda name, st=st, i=i, env=env: f"{name}_e{i}" if name == st.name else env.get(name, name), Sigma(coord)
-                )
-                # The epilogue's operands are register elements only this render names, so its program is typed here,
-                # by the one set of rules; every line is this element's.
-                known = {name: dtype_get(ctx.ssa_dtypes[name]) for name in local.deps() if name in ctx.ssa_dtypes}
-                for typed in explicit_conversions(Body([local]), {}, native_f16_ops(), known):
-                    lines.extend(f"const {rendered}" for rendered in render_stmt(typed, replace(ctx, indent=0)))
-                env[st.name] = f"{st.name}_e{i}"
+            local = st.rewrite(lambda name, names=names: names.get(name, name), sigma)
+            if isinstance(local, Load):  # an epilogue's load keeps one index per dimension
+                local = local.replace(index=(_flat_index(local.input, local.index, ctx),))
+            lines.extend(f"const {line}" for line in render_stmt(local, replace(ctx, indent=0)))
         per_elem.append(lines)
-        vals.append(env[node.epilogue_result])
+        vals.append(names[node.epilogue_result])
     return per_elem, vals
 
 

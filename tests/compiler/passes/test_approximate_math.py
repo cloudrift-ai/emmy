@@ -108,16 +108,17 @@ def test_a_half_exponential_and_tangent_are_picked_and_compute_in_f32(function) 
 _HELD = """
 RegStore(dst_buffer=out, dst_index=(i, 0), frag=c0, shape=(16, 8, 16), epilogue_params=(acc), epilogue_result=y):
     epilogue:
-        f16 v = acc
-        in4 = load S[i]
+        f16 v = (f16)acc
+        f32 in4 = load S[i]
         i32 n4 = load N[i]
-        u = acc / in4
-        w = maximum(v, 0.0)
-        z = sqrt(w)
+        f32 u = acc / in4
+        f16 w = maximum(v, 0.0)
+        f16 z = sqrt(w)
         i32 kk = n4 / 2
         let i32 column = n
         i32 kc = column / 2
-        f16 y = sigmoid(u)
+        f32 y__f32 = sigmoid(u)
+        f16 y = (f16)y__f32
 TreeHalve(bufs=(bb), state=(acc9), state_b=(acc9__o), length=8, tid_var=tt):
     combine_states:
         f = exp(acc9__o)
@@ -137,14 +138,13 @@ FragmentApply(out=c1, op=reciprocal, args=(FragmentArg(kind=frag, names=(c0))))
 )
 def test_an_operation_a_statement_holds_is_picked_too(pins, exp, divide, reciprocal, sigmoid) -> None:
     """A store's epilogue, a combine's merge program and a fragment operation hold operations no body walk enters.
-    The epilogue is typed only when it is printed, so its definitions are typed here to read where each computes: the
-    f32 division is picked, the half square root and the integer quotients are not. A composite stays whole in all
-    three: the reciprocal has its own instruction, and a ``sigmoid`` takes the approximate exponential and division
-    together or neither."""
+    The epilogue is typed like a body (by ``120``): the f32 division is picked, the half square root and the integer
+    quotients are not. A composite stays whole in all three: the reciprocal has its own instruction, and a ``sigmoid``
+    takes the approximate exponential and division together or neither."""
     kernel = _picked(_HELD, pins)
     store, merge, fragment = (next(s for s in kernel.body.iter() if isinstance(s, kind)) for kind in (RegStore, TreeHalve, FragmentApply))
     epilogue = {stmt.name: stmt.value.operation.name for stmt in store.epilogue if isinstance(stmt, Assign) and stmt.value.operation}
-    assert epilogue == {"u": divide, "w": "maximum", "z": "sqrt", "kk": "divide", "kc": "divide", "y": sigmoid}
+    assert epilogue == {"u": divide, "w": "maximum", "z": "sqrt", "kk": "divide", "kc": "divide", "y__f32": sigmoid}
     assert [stmt.value.operation.name for stmt in merge.combine_states] == [exp, divide]
     assert fragment.op.name == reciprocal
 

@@ -853,7 +853,9 @@ counts as one unknown integer per distinct subterm, so a routed expert's selecto
 its rules are `stamp_types` in `ir/types.py`. It runs early because the passes after it read the stamps and match
 one-operation values over the names the lowering wrote. `120_explicit_conversions` runs after them and completes the
 types (`explicit_conversions`, same module): each operation computes at one dtype, every conversion is a definition
-of its own, and a write stores a value of its buffer's element type. A conversion between a load and its reader
+of its own, and a write stores a value of its buffer's element type. A `RegStore` epilogue is typed the same way
+(`epilogue_conversions`), over the f32 elements of its accumulators: a float load is widened to f32 by a conversion of
+its own and a select is f32, as the epilogue always computed. A conversion between a load and its reader
 would hide the pattern the vector passes, the shared carry and the load reuse look for, which is why it is not part
 of `030`. The body's optimization then computes each conversion once, at the shallowest scope that holds its
 source. `lowering/cuda` checks the result (`check_input`, which holds `check_types`) on every kernel before it renders one.
@@ -976,9 +978,9 @@ has written the composites out. Two operations are picked at a half too, and the
 and round back: the exponential, by its knob's own rule, and the hyperbolic tangent, whose native form (CUDA's
 `htanh`) is the f32 function on the converted value. The pass walks the four places an operation sits: an `Assign`
 of the body, a cooperative combine's merge (`WarpShuffle` / `TreeHalve` `combine_states`), a `FragmentApply`'s
-operation with its unary tail, and a `RegStore` epilogue, the stores grouped with it included. An epilogue is typed
-only when it is printed, so each of its definitions is typed here by the same rules to read where it will compute.
-The last three hold one operation where the body holds a definition, so a composite stays whole there: a
+operation with its unary tail, and an `Assign` of a `RegStore` epilogue, the stores grouped with it included, typed
+like one of the body. The last three hold one operation where the body holds a definition, so a composite stays
+whole there: a
 `reciprocal` becomes `reciprocal_fast`, and a `sigmoid` becomes `sigmoid_fast` when the exponential and the division
 are both approximate; it keeps both exact otherwise. It records `FAST_EXP` on the kernel for idempotence. Host
 evaluation computes every approximate form as the exact operation.
