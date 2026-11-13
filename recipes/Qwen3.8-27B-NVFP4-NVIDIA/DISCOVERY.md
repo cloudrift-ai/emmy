@@ -1,5 +1,89 @@
 # Qwen3.8-27B-NVFP4 (NVIDIA) discovery
 
+## One cache read per verify step, and the golden measured again (2026-11-12)
+
+A verify step's attention now folds its three rows beside the query group, so every row shares one read of the
+key-value cache; before, each row read every slice. Measured on one rented RTX 5090 (CloudRift; 14 vCPUs of a Ryzen 7
+7800X3D, 21.5 GiB of RAM with swap on, PCIe Gen5 x16, driver 580.159, CUDA 13.3), one session, native and stock
+vLLM 0.32.0 both. The client and settings are the 2026-10-25 section's; the prompts are cut again from this tree's
+Markdown, so acceptance differs from the earlier sessions'. The pack exports under strict evidence from the golden
+alone.
+
+**The golden first.** On main the file held 225 measured rows of 415: #1365's normal form re-keyed the rest, and a
+strict export stopped at its first fork. This session measured the demoted schedules again on the card (the file now
+holds 375 measured rows of 412) and recorded the new verify programs. Three things needed more than a re-measure:
+
+- **A split attention's combine kernel is priced at its window.** An export prices each range of windows at its own
+  window, and a record stores the combine kernel's row at the stored program's hint. With that row at another size the
+  split's arm has no price, the unsplit kernel's row wins, and nothing fails: a pack exported that way ran its decode
+  attention unsplit (389 µs a layer against 11) and gave 10.6 ms a token at 256 tokens and 6.1 s to the first token
+  at 7,680. Every attention twin's split is recorded again at its window, and each combine row is stored under the
+  window it was measured at.
+- **One Gated DeltaNet piece of the 64-row program had no row.** The compile's own pick for it takes 336 µs a layer;
+  the schedule its sibling pieces carry takes 7.7 µs and is the row recorded.
+- **Two schedules no longer realize** (a 64-row Gated DeltaNet projection piece and one alternative of the three-row
+  program). The first is recorded at the schedule the compiler realizes in its place, 49.5 µs; the second is left a
+  proposal, beside the plugin's any-width `pre` piece, which native does not run.
+
+| twin | at 4,096 | at 131,072 |
+|---|---|---|
+| `attend1` (decode) | g32k, 10.7 µs (11.1) | g64k, 183 µs (205) |
+| `attend3` (verify), rows folded | g32k, 12.5 µs (22.5) | g32k, 183 µs (487) |
+| `attend16` | g16k, 39.1 µs (41.7) | g32k, 852 µs (974) |
+| `attend64` (chunk) | g8k, 78.6 µs (73.0) | g32k, 1,601 µs (1,590) |
+
+The 2026-11-07 times, on another card, are in brackets. The verify step's other new programs take 2.3 µs (the rotary
+store, which now hands the query out per key-value head) and 0.7 µs (the unfold that puts the rows back in order).
+
+| | native, this branch | stock vLLM 0.32.0 | native on 2026-11-07, another card |
+|---|---|---|---|
+| TPOT / TTFT, 256-token prompt | 9.84 ms / 0.143 s | 7.87 ms / 0.159 s | 8.68 ms / 0.151 s |
+| first token, 257-token prompt | 0.165 s | 0.127 s | 0.172 s |
+| TPOT / TTFT, 7,680-token prompt | 8.72 ms / 4.37 s | 7.73 ms / 0.753 s | 8.55 ms / 4.62 s |
+| TPOT / TTFT, 197,632-token prompt | 11.4 ms / 172 s | 9.54 ms / 67.9 s | 14.7 ms / 188 s |
+| TPOT / TTFT, 261,632-token prompt | 11.4 ms / 251 s | does not fit | 17.7 ms / 277 s |
+| drafts accepted at 256 / 7,680 / 197,632 / 261,632 | 63 / 77 / 68 / 75% | not read: its stream spaces every token | 75 / 79 / 71 / 64% |
+| device memory at rest | 27.9 GiB | 30.4 GiB | 27.9 GiB |
+| GSM8K strict / flexible match | 0.725 / 0.755 | | 0.715 / 0.765 |
+
+- **Against this session's stock column.** TPOT is inside the bar at 7,680 tokens (1.13x stock, the bar 1.2x) and
+  at 197,632 (1.20x, the bar 1.5x) and outside it at 256 (1.25x). The first token is ahead of stock at 256 tokens and
+  behind at 7,680 (5.8x, the bar 2x) and at 197,632 (2.5x). Native holds 2.5 GiB less of the device and serves the
+  whole window, which stock does not fit.
+- **The long-window decode gate, met.** The captured verify step takes 26.4 ms at 197,632 positions (the target's
+  attention 4.5 ms, the drafter's 0.5) against 21.6 ms at a window of up to 8,192 (attention 0.35 ms): +4.8 ms, where
+  the bound is 8 ms and the 2026-11-07 step was +14.4.
+- **The short cells.** The step is 21.6 ms where 2026-11-07 captured 21.1; TPOT at 256 tokens reads higher here
+  because these prompts accept fewer drafts (2.26 tokens a step).
+- **GSM8K holds:** 0.725 strict and 0.755 flexible match on native (standard error 0.032), against 0.715 / 0.765 on
+  2026-11-07. Stock was not scored in this session, and the probe tokens were not compared.
+
+Where the time goes, from `nsys --cuda-graph-trace=node` (one request at 7,680 tokens and one at 197,632), each
+launch priced at its kernel's median:
+
+| launches | 64-row chunk | verify step, up to 8,192 | verify step, 197,632 |
+|---|---|---|---|
+| Gated DeltaNet layers (48) | 27.7 ms | 14.3 ms | 14.4 ms |
+| attention layers: `post` (16) | 3.0 ms | 2.2 ms | 2.3 ms |
+| attention layers: `pre` (16) | 2.8 ms | 1.7 ms | 1.7 ms |
+| attention | 1.2 ms | 0.35 ms | 4.5 ms |
+| output head (one row; a verify step runs it three times) | 0.45 ms | 1.3 ms | 1.3 ms |
+| the drafter's layer and prologue | 0.44 ms | 1.4 ms | 1.9 ms |
+| state carry, rotary store, unfold, the rest | 0.3 ms | 0.3 ms | 0.3 ms |
+| sum | 35.9 ms | 21.6 ms | 26.4 ms |
+
+The 197,632-token first token is 171 s of kernels: 86 s in the Gated DeltaNet layers, 62 s in attention (69.9 s on
+2026-11-07), 18 s in the attention layers' halves. A 64-row chunk's Gated DeltaNet layers take 577 µs each; the largest
+launches are the MLP gate and up (74 µs), the convolution piece (71 µs), `k_slice_unsqueeze_reduce` (59 µs) and the
+MLP down (54 µs).
+
+**A 256-row chunk does not load yet.** Traced at 256 rows the Gated DeltaNet layer has twelve root kernels where the
+64-row one has four: the recurrence across its four 64-token chunks adds eight. No golden row covers them, and the
+compile's own cuts leave four workspaces of `[4, 64, 64, 48, 48, 128]` FP32 a layer, 18 GiB each, so the pack runs out
+of device memory at load. Under the 64-row kernel's recorded route one piece of the 256-row kernel does not finish in
+80 s. A wide chunk therefore needs its own recorded route before it can be timed, and no time for one is in this
+section.
+
 ## The FP8 cache staged into shared memory: milestone 5 met, 6 still missed (2026-11-07)
 
 Native attention's FP8 key-value cache now copies into shared memory, 16 bytes per copy, before the tensor-core fold

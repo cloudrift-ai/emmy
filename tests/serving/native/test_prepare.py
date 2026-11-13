@@ -419,11 +419,14 @@ def test_native_programs_are_the_twins_a_native_serving_config_adds(tmp_path):
     add_mtp_head(tmp_path / "mtp")
     drafter, _ = load_drafter(str(tmp_path / "mtp"), None, model, 2)
     drafted = trace_programs(model, prefill_size=8, decode_width=4, drafter=drafter)
-    verify = ["router", "experts", "combine", "rope", "attend", "norm", "head", "greedy", "carry", "accept", "pick", "prologue"]
+    # A verify step attends per key-value head over all its rows at once, and puts the rows back in order (``unfold``).
+    verify = ["router", "experts", "combine", "rope", "attend", "unfold", "norm", "head", "greedy", "carry", "accept", "pick", "prologue"]
     chunk = ["router", "experts", "combine", "rope", "attend", "norm", "pick", "next", "prologue"]
     expected = [f"{k}1-native" for k in (*decode, "prologue")] + [f"{k}3-native" for k in verify]
-    expected += [f"{k}{rows}-native" for rows in (8, 4) for k in chunk]
-    assert sorted(drafted) == sorted([*expected, "embed-sym-native"])
+    assert sorted(drafted) == sorted([*expected, *(f"{k}{rows}-native" for rows in (8, 4) for k in chunk), "embed-sym-native"])
+    # A chunk wider than the plugin's keeps the plugin's chunk too, between it and the decode width.
+    wide = trace_programs(model, prefill_size=16, prefill_bucket=8, decode_width=4, drafter=drafter)
+    assert sorted(wide) == sorted([*expected, *(f"{k}{rows}-native" for rows in (16, 8, 4) for k in chunk), "embed-sym-native"])
     router = twins["router1-native"]
     assert router.buffer(router.inputs[0]).dtype == BF16
     # Tracing binds no weights: a traced step never calls for a buffer's host values.
@@ -501,10 +504,18 @@ def test_a_native_serving_config_traces_native_twins_as_its_export_would(tmp_pat
         "embed": (0, 0),
         "decode_width": 4,
         "prefill_size": 64,
+        "prefill_bucket": 64,
         "kv_cache_dtype": "auto",
         "vision": None,
         "drafter": None,
     }
+    # Native's own wider chunk: its programs trace at it, the plugin's chunk stays a width, and the trunk's twins at
+    # it are rows of the config's matrix, with no any-width row of their own.
+    env.write_text(env.read_text() + "SERVE_NATIVE_PREFILL=256\n")
+    wide = load_serving_config(env)
+    twins.capture_serving_twins("org/model", wide)
+    assert (seen["prefill_size"], seen["prefill_bucket"], wide.static_widths) == (256, 64, (4, 64, 256))
+    assert [row.name for row in wide.realizations if not row.bindings] == [row.name for row in serving.realizations if not row.bindings]
     assert config.gen_experts_gpu() == 7 and config.gen_embed_slots(1000) is None, "the budgets are the config's for the trace alone"
 
 

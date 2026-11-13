@@ -1,7 +1,7 @@
 """A decode or verify step attends per key-value head: native's grouped twin puts a key-value head's query heads on the
-axis the chunk tier folds as its rows, so the group shares one read of the head's cache, and a key split's finalize
-combines the slices' partial states, never the window. The per-head spelling a prefill chunk keeps reads the cache once
-per query head instead."""
+axis the chunk tier folds as its rows, a verify step's every row's beside them, so the step's rows and their groups
+share one read of the head's cache, and a key split's finalize combines the slices' partial states, never the window.
+The per-head spelling a prefill chunk keeps reads the cache once per query head instead."""
 
 from __future__ import annotations
 
@@ -34,13 +34,14 @@ SLICES = 4  # a key split across the window, ``g<SLICES>k``
 CTX = Context.from_target((12, 0))
 
 
-def _pins(cache, split: int = 0) -> dict[str, str]:
-    """The chunk tier on the twin, one warp over the group and the whole head dimension (32 n8 columns), so a CTA
-    covers what one read of a key-value head's cache serves. A split's partial names its sites from its own root."""
+def _pins(cache, rows, split: int = 0) -> dict[str, str]:
+    """The chunk tier on the twin, a warp for each 16 of the rows' folded groups over the whole head dimension (32 n8
+    columns), so a CTA covers what one read of a key-value head's cache serves. A split's partial names its sites
+    from its own root."""
     site = "" if split else "map.1/map.1/"
     pins = {
         "PLACE": "fuse",
-        "WORK": "w1x1",
+        "WORK": f"w{-(-rows * GROUP // 16)}x1",
         "REDUCE@map.1/map.1/twist": f"g{split}k" if split else "",
         f"TILE@{site}twist": "mma_m16n8k16_bf16_f32/f1x32/k4",
         f"TILE@{site}twist.1/inner": "mma_m16n8k16_bf16_f32/f1x8/k4",
@@ -53,7 +54,7 @@ def _pins(cache, split: int = 0) -> dict[str, str]:
 def _attention(rows, cache=torch.bfloat16, grouped=True):
     """Native's attention twin at ``rows`` over a symbolic window, traced as the export traces it."""
     module = attend_module(HEADS, KV, D, rows, grouped=grouped)
-    window = torch.export.Dim(WINDOW, min=rows, max=CONTEXT)
+    window = torch.export.Dim(WINDOW, min=rows * GROUP if grouped and rows > 1 else rows, max=CONTEXT)
     shapes = {n: {0: window} if n in ("keys", "values") else {} for n in inspect.signature(module.forward).parameters}
     # Two tensors, not one twice: the tracer takes a shared example tensor as one aliased input.
     caches = (torch.zeros(512, KV, D, dtype=cache), torch.zeros(512, KV, D, dtype=cache))
@@ -81,13 +82,15 @@ def _cache_reads(node):
 
 @pytest.mark.parametrize("cache", CACHES)
 @pytest.mark.parametrize("rows", [1, 3])
-def test_a_key_value_head_s_query_group_is_the_fold_s_rows(rows, cache) -> None:
-    """The output's storage order puts the group second to last, so the tensor-core fold takes it as its rows and the
-    head dimension as its columns, and no read of a key or a value depends on that axis: one read serves the group. The
-    per-head spelling reads the cache through the query head instead, once per head of the group."""
+def test_the_rows_groups_of_a_key_value_head_are_the_fold_s_rows(rows, cache) -> None:
+    """The output's storage order puts every row's group on one axis, second to last, so the tensor-core fold takes it
+    as its rows and the head dimension as its columns, and no read of a key or a value depends on that axis: one read
+    serves every row's group, and no axis of the step's rows is left to the grid. The per-head spelling reads the
+    cache through the query head instead, once per head of the group."""
     root, twist = _lifted(_attention(rows, CACHES[cache])[1])
-    *_, fold_rows, columns = root.place.free
-    assert (fold_rows.extent, columns.extent) == (Dim(GROUP), Dim(D))
+    *batch, fold_rows, columns = root.place.free
+    assert (fold_rows.extent, columns.extent) == (Dim(rows * GROUP), Dim(D))
+    assert np.prod([axis.extent.as_static() for axis in batch]) == KV
     reads = _cache_reads(twist)
     assert {load.input for load in reads} == {"keys", "values"}
     assert all(fold_rows.name not in {name for index in load.index for name in index.free_vars()} for load in reads)
@@ -100,17 +103,17 @@ def test_a_key_value_head_s_query_group_is_the_fold_s_rows(rows, cache) -> None:
 
 @pytest.mark.parametrize("rows", [1, 3])
 def test_a_key_split_combines_the_slices_partials_not_the_window(rows) -> None:
-    """Split across the window, a partial per row, key-value head and slice reads its slice of the head's cache once for
-    the whole group; the finalize reads the partials alone and never the window, which is no extent of it."""
+    """Split across the window, a partial per key-value head and slice reads its slice of the head's cache once for
+    every row's group; the finalize reads the partials alone and never the window, which is no extent of it."""
     _, graph = _attention(rows)
-    with pinned_knobs(_pins(torch.bfloat16, SLICES)):
+    with pinned_knobs(_pins(torch.bfloat16, rows, SLICES)):
         lowered = Pipeline.build(CUDA_PASSES).run(graph, ctx=CTX)
     kernels = {nid: node for nid, node in lowered.nodes.items() if isinstance(node.op, CudaOp)}
     assert len(kernels) == 2, sorted(kernels)
     (partial,) = [node for nid, node in kernels.items() if nid.endswith("__partial")]
     (finalize,) = [node for node in kernels.values() if node is not partial]
     assert "mma.sync" in partial.op.kernel_source and "__ck" in partial.op.kernel_source
-    assert np.prod([extent for axis in partial.op.grid for extent in axis]) == rows * KV * SLICES
+    assert np.prod([extent for axis in partial.op.grid for extent in axis]) == KV * SLICES
     assert list(finalize.inputs) == [partial.id]
     assert WINDOW not in finalize.op.kernel_source
 
@@ -127,13 +130,15 @@ def test_the_grouped_attention_matches_the_per_head_twin(rows, cache, split) -> 
 
     dtype = CACHES[cache]
     _, graph = _attention(rows, dtype)
-    with pinned_knobs(_pins(dtype, split)):
+    with pinned_knobs(_pins(dtype, rows, split)):
         compiled = CudaBackend().compile(graph)
     sources = [node.op.kernel_source for node in compiled.nodes.values() if isinstance(node.op, CudaOp)]
     assert len(sources) == (2 if split else 1) and "mma.sync" in sources[0]
     per_head = attend_module(HEADS, KV, D, rows)
     rng = np.random.default_rng(11)
     query = torch.from_numpy(rng.normal(size=(rows, HEADS * D)).astype(np.float32)).to(torch.bfloat16)
+    # The grouped twin reads its query per key-value head, and writes its output so.
+    folded = query.view(rows, KV, GROUP, D).transpose(0, 1).reshape(rows, HEADS * D)
     stored = torch.from_numpy(rng.normal(size=(2, CONTEXT, KV, D)).astype(np.float32)).to(dtype)
 
     def bits(t):
@@ -142,7 +147,7 @@ def test_the_grouped_attention_matches_the_per_head_twin(rows, cache, split) -> 
 
     with gpu_lock():
         program = CompiledProgram.build(
-            compiled, {"q": bits(query), "position": np.array([0], np.int64), "keys": bits(stored[0]), "values": bits(stored[1])}
+            compiled, {"q": bits(folded), "position": np.array([0], np.int64), "keys": bits(stored[0]), "values": bits(stored[1])}
         )
         for position in (0, 5, 937, CONTEXT - rows):
             # The window the step's rows reach, the runtime's 4096-position step, and a window no split width divides.
@@ -152,6 +157,7 @@ def test_the_grouped_attention_matches_the_per_head_twin(rows, cache, split) -> 
                     {"position": np.array([position], np.int64), "keys": bits(stored[0][:span]), "values": bits(stored[1][:span])}
                 )
                 program.run_once()
-                actual = decode_bf16(program.outputs()[compiled.outputs[0]]).reshape(rows, HEADS * D)
+                actual = decode_bf16(program.outputs()[compiled.outputs[0]]).reshape(KV, rows, GROUP, D)
+                actual = actual.transpose(1, 0, 2, 3).reshape(rows, HEADS * D)
                 expected = per_head(query, stored[0][:span], stored[1][:span], torch.tensor([position])).float().numpy()
                 np.testing.assert_allclose(actual, expected, rtol=3e-2, atol=3e-2)
