@@ -14,9 +14,9 @@ same reason (below).
 
 ## Status (2026-11-12)
 
-PR A is draft #1395. Steps 1 to 9 are done, each checked on the corpus's rendered CUDA. Steps 3 to 9 changed the
-text or the flags and ran the corpus at `correct` on the RTX 5090. No step ran the perf lane, the whole suite or an
-sm_70 kernel on a V100 yet; they wait for the closing step.
+PR A is draft #1395. Steps 1 to 10 are done, each checked on the corpus's rendered CUDA. Steps 3 to 10 changed the
+text, the flags or the statements and ran the corpus at `correct` on the RTX 5090. No step ran the perf lane, the
+whole suite or an sm_70 kernel on a V100 yet; they wait for the closing step.
 
 | Step | Commit | Corpus CUDA |
 | --- | --- | --- |
@@ -29,6 +29,7 @@ sm_70 kernel on a V100 yet; they wait for the closing step.
 | 7 | `4aa5a4d73` | identical; the fast-math lane's flags are `--ftz=true` where they were `--use_fast_math`, and the machine code of all 42 fast-math kernels is identical to step 5's |
 | 8 | `f3c19f0a9` | 118 kernels, the ones with a flagged loop: each such loop is copies of its body (one keeps rolling, 32 copies per trip), no statement loop carries a `#pragma`; 74 of the 118 build to the same instruction count, 104 to within 3% |
 | 9 | `66729a66c` | 218 kernels: 9,320 lines whose index is respelled, 462 whose vector-store temporary is renamed after it; the same elements at 65,400 sampled launch points (3.4 million accesses) |
+| 10 | `f68e11911` | identical |
 
 What step 6 found, checked with `nvcc -ptx` and `nvdisasm` (CUDA 13.0, `sm_75` to `sm_120`):
 
@@ -113,6 +114,39 @@ What step 9 found:
 - Machine code of the 218 changed kernels: 122 build to the same instruction count, 184 to within 3%, and the total
   falls from 91,469 instructions to 90,329. Two grow past 10% (`matmul/f16-volta-warp-mma-sm70` built for sm_75,
   +27%; `matmul/f16-mma-splitk-unit-output`, +13%). Pipeline time of the ten largest cases: 2.33 s to 2.68 s.
+
+What step 10 found:
+
+- **`LdmatrixLoad` was two statements.** It is the `ldmatrix` instruction now (a staged slab of 16-bit elements: the
+  tile base, the row stride, the swizzle, and the role, transpose and pair that pick `x2`, `x4` and `.trans`), and
+  `FragmentLoad` is every fragment gathered element by element. The staged drains that are no `ldmatrix` went with
+  the gather, not into a third statement: a slab of bytes and every Volta slab are read by the same lane-to-element
+  map as a read from global memory, through the same C++ loaders, and differ from it in the address space, the slab's
+  stored layout and, for a slab with block scales, a decode. A staged gather carries no clamp and no zero-fill (the
+  fill makes the slab exact), and the constructor refuses one that does.
+- **No statement and no atom carries a register count.** The count follows from the layout, the role and the element
+  dtype, in every case the three copies of the rule (the renderer's formula, the atoms' explicit lists, the paired
+  contraction's register budget) handled: bytes pack four a register, and a packed pair of 4-bit values is one stored
+  byte, so the fp4 A fragment is 4 registers by the same rule as the fp8 one. `RegFragment` lost `shape` and `nregs`
+  and names its layout; a lane's register of block scales has a role of its own (`sfa`, `sfb`) where it was an A
+  fragment of zero registers.
+- **`FragmentRepack` fills a declared fragment**, as a load does: its `frag` is an update, not a definition. No
+  kernel's statement order moved.
+- **`setmaxnreg` needs the arch-suffixed target**: ptxas of CUDA 13.0 refuses it on `sm_90`, `sm_100` and `sm_120`.
+  The lowering writes it only beside a TMA ring, which already asks for that target, so `needs_arch_isa` names it and
+  no kernel changes.
+- **The table's operand rows are read by nothing in PR A.** The renderer reads the rows of an accumulator of floats
+  (`FragmentApply`, `FragmentRowReduce`, `RegStore`, their lane coordinates). The rows of A and B, of the packed
+  accumulators and of the block scales are what the C++ loaders compute, transcribed from them; a crate test holds
+  that the 32 lanes hold every element of the tile once (Volta's operands twice), and no card has run them.
+  Volta's packed accumulator row is derived from the promote helper's shuffles: one row of eight columns a lane.
+- **An index of a fragment statement stays one per dimension.** The swizzle of an `ldmatrix` address is split over
+  the tile's row and column, a Volta slab layout is a function of the two, and a flat base would change the text.
+  PR B's compiler flattens them with the shapes of the interface.
+- **A row stride can be a launch-time value.** A `FragmentLoad` whose operand has a symbolic last extent, or whose
+  address the lowering cannot read strides off, has `ldm = None`: the extent of the source's last dimension where the
+  statement is compiled. The rule is stated once, on the field. `RegStore` keeps `ldm = 0` and `ldn = 0` for the same
+  case, with `row_dim` and `col_dim`; it was not part of the split.
 
 ## End state
 
@@ -290,11 +324,24 @@ no restamp is expected. A row whose time moves is measured again in the closing 
    `BlockScaleLoad`, a `FragmentApply`'s gathered operand, `RegStore` and the loads of its epilogue) and `TmaLoad`.
    The crate's `check_input` holds properties 1 to 3. *Check: text shows simplified indices; perf lane.*
 10. **Fragment statements say what they are** (property 4). No expansion moves; the statements get the shape the
-    compiler needs. `LdmatrixLoad` splits into the instruction on staged shared memory and a fragment load from global
-    memory, whose role, transpose, clamp and zero-fill are plain fields. `FragLayout`, the lane-to-element table, moves
-    into the crate; the Python renderers read it through the binding until PR B deletes them. The lane coordinates
-    these statements and the prefix scan compute in rendered text (`_g`, `_t`, `threadIdx.x % length`) follow from
-    that table and the lane of step 4. *Check: text identical.*
+    compiler needs. `LdmatrixLoad` is the instruction on a staged slab of 16-bit elements, and `FragmentLoad` a
+    fragment gathered element by element (from global memory, a slab of bytes, a Volta slab), whose role, transpose,
+    clamp, zero-fill, row stride and two element dtypes are plain fields; `120_explicit_conversions` stamps the
+    dtypes. The lane-to-element table is the crate's `fragment` module: per layout, role and element dtype, the lane
+    coordinates and each element's row and column offset as expressions over them, the row-reduce masks, and the
+    lanes that supply a register of block scales under the product's two selectors. It counts a fragment's registers,
+    so `RegFragment` names its layout and carries no count. The Python renderers read the accumulator rows through
+    the binding until PR B deletes them, and `check_input` holds that every fragment statement names a row.
+    *Check: text identical.* What stays in the renderer for PR B's fragment expansion to take over:
+    - the lane coordinates each fragment statement declares in its own text (`_g`, `_t`, `_vl`, …), now printed from
+      the table's coordinates over `threadIdx.x & 31`, which the compiler binds once per kernel over the lane of
+      step 4; and the prefix `WarpShuffle`'s `threadIdx.x % length`;
+    - `FragmentApply`'s own `#pragma unroll` loop over the elements, and the conversion of its operands to f32;
+    - the thirty C++ loaders a `FragmentLoad` picks among, with the choice of the four-wide Volta loader on an
+      address the printer proves aligned, and `BlockScaleLoad`'s, `FragmentPromote`'s and `FragmentRepack`'s helpers;
+    - `RegStore`: the packed pair stores of the m16n8 layout spelled as text, its epilogue program typed while it is
+      printed, and `ldm = 0` / `ldn = 0` for a stride the buffer's shape gives;
+    - one index per dimension on every fragment statement.
 11. **Tests read Kernel IR.** 59 test files hold 186 reads of the rendered source. A check of structure becomes a
     check of Kernel IR statements now. A check of an instruction's spelling stays on the CUDA text until PR B replaces
     it with a crate test.
