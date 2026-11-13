@@ -43,6 +43,8 @@ pub fn interface(params: Params, threads: u32) -> Interface {
                 dtype: *dtype,
                 paged: false,
                 align: BUFFER_ALIGN,
+                shape: Vec::new(),
+                pair_table: false,
             })
             .collect(),
         threads,

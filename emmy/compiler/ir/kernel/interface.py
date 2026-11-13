@@ -9,6 +9,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+from emmy.compiler.dim import to_dim
 from emmy.compiler.dtype import F32, DataType
 from emmy.compiler.ir.kernel.ir import (
     BLOCK_SIZE,
@@ -36,7 +37,9 @@ BUFFER_ALIGN = 16
 class Param:
     """One kernel parameter. ``name`` is its name in the kernel and in the launch's argument order; ``buffer`` the
     graph buffer behind an ``input`` or ``output`` (a paged buffer binds its page table, so the two differ);
-    ``align`` the bytes the launch aligns a buffer's first element to."""
+    ``align`` the bytes the launch aligns a buffer's first element to; ``shape`` a buffer's extents, an ``int`` or,
+    for a symbolic one, its expression over the runtime sizes; ``pair_table`` says the buffer is the e2m1 pair table,
+    whose loads are computed from the index."""
 
     name: str
     kind: str  # "input" | "output" | "descriptor" | "int"
@@ -44,6 +47,8 @@ class Param:
     buffer: str = ""
     paged: bool = False
     align: int = BUFFER_ALIGN
+    shape: tuple = ()
+    pair_table: bool = False
 
 
 @dataclass(frozen=True)
@@ -69,14 +74,19 @@ def kernel_interface(
     tensors: dict[str, Tensor] | None = None,
     runtime_args: tuple[str, ...] = (),
     paged: frozenset[str] = frozenset(),
+    pair_tables: frozenset[str] = frozenset(),
 ) -> Interface:
-    """The interface of ``kernel``. ``tensors`` gives each buffer's dtype (f32 where absent), ``runtime_args`` the
-    symbolic sizes it takes as ``int`` parameters, ``paged`` the buffers bound as a page table."""
+    """The interface of ``kernel``. ``tensors`` gives each buffer's dtype (f32 where absent) and shape,
+    ``runtime_args`` the symbolic sizes it takes as ``int`` parameters, ``paged`` the buffers bound as a page table,
+    ``pair_tables`` the inputs that are the e2m1 pair table."""
     tensors = tensors or {}
 
     def buffer(name: str, kind: str) -> Param:
         dtype = tensors[name].dtype if name in tensors else F32
-        return Param(f"{name}__pages" if name in paged else name, kind, dtype, name, name in paged)
+        dims = [to_dim(d) for d in tensors[name].shape] if name in tensors else []
+        shape = tuple(d.as_static() if d.is_static else d.expression for d in dims)
+        pages = f"{name}__pages" if name in paged else name
+        return Param(pages, kind, dtype, name, name in paged, shape=shape, pair_table=name in pair_tables)
 
     descriptors = tuple(dict.fromkeys(s.name for s in kernel.body.iter_of_type(TmaDescriptor)))
     params = (

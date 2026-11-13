@@ -74,7 +74,7 @@ fn apply(op: Operation, left: Expression, right: i64) -> Expression {
 }
 
 /// The lane of a thread in its warp.
-fn lane() -> Expression {
+pub(super) fn lane() -> Expression {
     apply(Operation::Remainder, thread(), WARP)
 }
 
@@ -110,7 +110,7 @@ fn either(left: Expression, right: Expression) -> Expression {
 /// The shift and the row mask of a swizzle mode's exchange of 16-byte chunks: `e ^ (((e >> shift) & mask) << 3)`
 /// over the index of a 16-bit element. `B128`, `B64` and `B32` exchange among 8, 4 and 2 chunks; `<mode>@<shift>`
 /// states the shift of a slab whose row is not one swizzle row. `None` for a mode that is none of them.
-fn swizzle_exchange(mode: &str) -> Option<Option<(i64, i64)>> {
+pub(super) fn swizzle_exchange(mode: &str) -> Option<Option<(i64, i64)>> {
     if mode == "NONE" {
         return Some(None);
     }
@@ -127,7 +127,7 @@ fn swizzle_exchange(mode: &str) -> Option<Option<(i64, i64)>> {
     Some(Some((shift, mask)))
 }
 
-fn swizzled(element: Expression, (shift, mask): (i64, i64)) -> Expression {
+pub(super) fn swizzled(element: Expression, (shift, mask): (i64, i64)) -> Expression {
     let row = masked(apply(Operation::RightShift, element.clone(), shift), mask);
     Expression::binary(
         Operation::BitwiseXor,
@@ -171,7 +171,7 @@ impl Lowerer {
 
     /// A new fragment `name` of `count` registers of `ty` in the innermost body. Every statement that names the
     /// fragment defines its registers again, so each is a state.
-    fn declare_fragment(&mut self, name: Name, count: usize, ty: VTy) -> Vec<Reg> {
+    pub(super) fn declare_fragment(&mut self, name: Name, count: usize, ty: VTy) -> Vec<Reg> {
         let regs: Vec<Reg> = (0..count).map(|_| self.b.state(ty.bank())).collect();
         let val = Val {
             op: Operand::Tuple(regs.clone()),
@@ -209,7 +209,7 @@ impl Lowerer {
         Ok(())
     }
 
-    fn zero(&mut self, regs: &[Reg], ty: VTy) {
+    pub(super) fn zero(&mut self, regs: &[Reg], ty: VTy) {
         let zero = match ty {
             VTy::F32 => Operand::f32(0.0),
             _ => Operand::Int(0),
@@ -304,7 +304,8 @@ impl Lowerer {
             return Ok(sum(self.flat_index(buffer, &node.src_index)?, offset));
         };
         let (shift, mask) = exchange;
-        let by_rows = self.extents.get(&buffer).and_then(|e| e.last()) == Some(&ldm);
+        let inner = self.extents.get(&buffer).and_then(|e| e.last());
+        let by_rows = inner.and_then(Expression::int_literal) == Some(ldm);
         if let [row, column] = &node.src_index[..]
             && by_rows
             && ldm >= 8

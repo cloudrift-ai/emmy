@@ -262,6 +262,79 @@ pub fn paired_accumulator_table(cell: (i64, i64)) -> FragmentTable {
     }
 }
 
+/// The operand fragment of one cell of Volta's paired tile, read from a slab under one of the paired layouts (`V70A`
+/// for A or a transposed B, `V70B` for a B by rows). Two register cells a side couple into one 32-row (or column) map
+/// the paired accumulator matches, so a cell's lanes hold rows four apart from its neighbour's, not sixteen. `cell`
+/// is the register cell along the operand's own axis; its parity picks the half. A B by rows (`b_row`) is the
+/// fragment of the product's second form: a lane holds four adjacent columns of one K row. Derived from the C++
+/// loaders of the paired slabs (`emmy_mma884_load_{a,b}_crosswise_pair`, `emmy_mma884_load_b_congruous_pair`).
+pub fn paired_operand_table(role: &str, b_row: bool, cell: i64) -> Result<FragmentTable> {
+    let role: Role = role.parse()?;
+    let half = 4 * (cell & 1);
+    let mut spelled = M8N8K4_QUADRANT.to_vec();
+    let elements: Vec<(Expression, Expression)> = match (role, b_row) {
+        (Role::A, false) => {
+            spelled.push(("_va", "(_vl >> 4) * 16 + (_vq & 1) * 8 + (_vl & 3)"));
+            (0..4)
+                .map(|k| (offset("_va", half), Expression::int(k)))
+                .collect()
+        }
+        (Role::B, false) => {
+            spelled.push(("_vb", "(_vl >> 3) * 8 + (_vl & 3)"));
+            (0..4)
+                .map(|k| (Expression::int(k), offset("_vb", half)))
+                .collect()
+        }
+        (Role::B, true) => {
+            spelled.push(("_vk", "_vl & 3"));
+            spelled.push(("_vn", "(_vl >> 3) * 8"));
+            (0..4)
+                .map(|n| (expression("_vk"), offset("_vn", half + n)))
+                .collect()
+        }
+        _ => {
+            return Err(value_error(format!(
+                "no paired fragment of role {role}{}",
+                if b_row { " by rows" } else { "" }
+            )));
+        }
+    };
+    Ok(FragmentTable {
+        coordinates: coordinates(&spelled),
+        registers: registers(elements, 2),
+        reduce_xors: Vec::new(),
+        supplies: None,
+    })
+}
+
+/// The element a Volta slab layout stores the logical `(row, column)` at: `V70A` (crosswise: 64-bit runs of four
+/// along K, a slab of `extent` rows) or `V70B` (congruous: 128-bit runs of eight along N, a row of `extent`
+/// elements). `None` for any other layout. The functions are the fill's and the drain's both, so a slab read back
+/// through one is the slab written through it.
+pub fn volta_slab_index(
+    layout: &str,
+    row: &Expression,
+    column: &Expression,
+    extent: &Expression,
+) -> Option<Expression> {
+    let text = match layout {
+        "V70A" => {
+            "((col >> 2) * extent + ((((row >> 4) << 4) + ((row & 3) << 2) + (((row >> 2) ^ ((row & 16) >> 3)) & 3)) \
+             ^ ((col >> 3) & 3))) * 4 + (col & 3)"
+        }
+        "V70B" => {
+            "(((row >> 2) << 2) + ((col >> 3) & 3)) * extent \
+             + ((((col >> 3) >> 3) << 3) + (((row & 3) ^ ((col >> 3) & 3)) | ((col >> 3) & 4))) * 8 + (col & 7)"
+        }
+        _ => return None,
+    };
+    let mapping = [("row", row), ("col", column), ("extent", extent)]
+        .into_iter()
+        .map(|(name, value)| (Name::new(name), value.clone()))
+        .collect();
+    Some(expression(text).substitute(&mapping))
+}
+
 impl RegFragment {
     /// How many registers a lane holds of this fragment: its row of the table says.
     pub fn registers(&self) -> Result<usize> {
@@ -404,5 +477,123 @@ mod tests {
         assert!(held_by_all.iter().all(|((row, column), times)| {
             (0..32).contains(row) && (0..32).contains(column) && *times == 1
         }));
+    }
+
+    fn int_at(value: &Expression, env: &HashMap<Name, Num>) -> i64 {
+        match value.eval(env).unwrap() {
+            Num::Int(value) => value,
+            other => panic!("{other:?} in an index"),
+        }
+    }
+
+    /// Per lane, the `(row, column)` of every element of `table`, in register order, from a tile base.
+    fn lane_elements(table: &FragmentTable, lane: i64, base: (i64, i64)) -> Vec<(i64, i64)> {
+        let mut env = HashMap::from([(Name::new(LANE), Num::Int(lane))]);
+        for (name, value) in &table.coordinates {
+            let value = int_at(value, &env);
+            env.insert(*name, Num::Int(value));
+        }
+        let at = |value: &Expression| int_at(value, &env);
+        table
+            .registers
+            .iter()
+            .flatten()
+            .map(|(row, column)| (base.0 + at(row), base.1 + at(column)))
+            .collect()
+    }
+
+    fn slab_index(layout: &str, (row, column): (i64, i64), extent: i64) -> i64 {
+        let index = volta_slab_index(
+            layout,
+            &Expression::int(row),
+            &Expression::int(column),
+            &Expression::int(extent),
+        )
+        .unwrap();
+        int_at(&index, &HashMap::new())
+    }
+
+    /// A Volta slab layout puts every element of a slab at its own place in it.
+    #[test]
+    fn a_volta_slab_layout_is_a_permutation() {
+        for (layout, (rows, columns), extent) in [("V70A", (64, 32), 64), ("V70B", (16, 64), 64)] {
+            let mut seen: Vec<i64> = (0..rows)
+                .flat_map(|row| (0..columns).map(move |column| (row, column)))
+                .map(|element| slab_index(layout, element, extent))
+                .collect();
+            seen.sort_unstable();
+            assert_eq!(seen, (0..rows * columns).collect::<Vec<_>>(), "{layout}");
+        }
+        assert!(
+            volta_slab_index(
+                "B128",
+                &Expression::int(0),
+                &Expression::int(0),
+                &Expression::int(8)
+            )
+            .is_none()
+        );
+    }
+
+    /// The two cells of a paired operand hold the 32 rows (or columns) of their pair, each element twice as every
+    /// Volta operand is, and a lane's eight elements of the two cells are one aligned run of eight in the slab:
+    /// what the 128-bit read of the paired drain loads.
+    #[test]
+    fn the_cells_of_a_paired_operand_are_one_run_of_the_slab() {
+        let cases = [
+            // A from a crosswise slab of 64 rows: (row, k).
+            ("a", false, "V70A", 64, false),
+            // A transposed B from a crosswise slab: the table's (k, n) stands at the slab's (n, k).
+            ("b", false, "V70A", 64, true),
+            // A B by rows from a congruous slab of rows of 64: (k, n).
+            ("b", true, "V70B", 64, false),
+        ];
+        for (role, b_row, layout, extent, swapped) in cases {
+            let tables = [0, 1].map(|cell| paired_operand_table(role, b_row, cell).unwrap());
+            let mut held: HashMap<(i64, i64), usize> = HashMap::new();
+            for lane in 0..32 {
+                // A pair starts on 32 rows (or columns) and on a group of four along K.
+                let bases = if role == "a" {
+                    [(0, 0), (32, 4), (0, 8), (32, 28)]
+                } else {
+                    [(0, 0), (4, 32), (8, 0), (28, 32)]
+                };
+                for base in bases {
+                    let elements: Vec<(i64, i64)> = tables
+                        .iter()
+                        .flat_map(|table| lane_elements(table, lane, base))
+                        .collect();
+                    let mut run: Vec<i64> = elements
+                        .iter()
+                        .map(|&(row, column)| {
+                            let at = if swapped {
+                                (column, row)
+                            } else {
+                                (row, column)
+                            };
+                            slab_index(layout, at, extent)
+                        })
+                        .collect();
+                    run.sort_unstable();
+                    assert!(
+                        run[0] % 8 == 0,
+                        "{role} {layout} lane {lane} {base:?}: {run:?}"
+                    );
+                    assert_eq!(
+                        run,
+                        (run[0]..run[0] + 8).collect::<Vec<_>>(),
+                        "{role} {layout} lane {lane}"
+                    );
+                    if base == (0, 0) {
+                        for element in elements {
+                            *held.entry(element).or_default() += 1;
+                        }
+                    }
+                }
+            }
+            assert_eq!(held.len(), 128, "{role} {layout}");
+            assert!(held.values().all(|times| *times == 2), "{role} {layout}");
+        }
+        assert!(paired_operand_table("c", false, 0).is_err());
     }
 }

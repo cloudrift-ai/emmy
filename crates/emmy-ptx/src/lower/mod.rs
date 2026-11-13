@@ -3,6 +3,7 @@
 //! several coordinates is refused by the statement's name, and so is a statement or an operation with no rule yet.
 
 mod coop;
+mod fragment;
 mod hopper;
 mod int;
 mod math;
@@ -73,6 +74,11 @@ pub(crate) enum VTy {
     U32,
     I64,
     Bool,
+    /// An 8-bit float, or a byte of two 4-bit e2m1 codes, as its bits in the low byte of a 32-bit register: what a
+    /// buffer of them stores and a cast converts. No arithmetic reads one.
+    F8E4M3,
+    F8E5M2,
+    F4x2,
 }
 
 impl VTy {
@@ -85,8 +91,16 @@ impl VTy {
             DType::U32 => VTy::U32,
             DType::I64 => VTy::I64,
             DType::Bool => VTy::Bool,
+            DType::F8E4M3 => VTy::F8E4M3,
+            DType::F8E5M2 => VTy::F8E5M2,
+            DType::F4E2M1x2 => VTy::F4x2,
             _ => return None,
         })
+    }
+
+    /// Whether the value is the bits of an 8-bit float or of a pair of 4-bit codes.
+    pub(super) fn is_byte_float(self) -> bool {
+        matches!(self, VTy::F8E4M3 | VTy::F8E5M2 | VTy::F4x2)
     }
 
     fn is_int(self) -> bool {
@@ -107,6 +121,7 @@ impl VTy {
             VTy::U32 => Ty::U32,
             VTy::I64 => Ty::S64,
             VTy::Bool => Ty::Pred,
+            VTy::F8E4M3 | VTy::F8E5M2 | VTy::F4x2 => Ty::U32,
         }
     }
 
@@ -136,6 +151,9 @@ impl VTy {
             VTy::U32 => "u32",
             VTy::I64 => "i64",
             VTy::Bool => "bool",
+            VTy::F8E4M3 => "f8e4m3",
+            VTy::F8E5M2 => "f8e5m2",
+            VTy::F4x2 => "f4e2m1x2",
         }
     }
 }
@@ -183,8 +201,15 @@ pub(crate) struct Lowerer {
     arch_specific: bool,
     /// The register holding the address of each tensor-map descriptor the launch passes.
     descriptors: HashMap<Name, Reg>,
-    /// The extents of each shared buffer, for a statement that indexes one by several coordinates.
-    extents: HashMap<Name, Vec<i64>>,
+    /// The extents of each buffer the kernel or the interface states them of, for a statement that indexes one by
+    /// several coordinates.
+    extents: HashMap<Name, Vec<Expression>>,
+    /// The inputs that are the e2m1 pair table: a load of one computes its value.
+    pair_tables: HashSet<Name>,
+    /// Whether a store's epilogue is being lowered. Its statements are typed where it is compiled, as the CUDA
+    /// renderer types them: a float load is widened to f32, a value with no dtype is f32, and a float read at
+    /// another float type is converted.
+    epilogue: bool,
     /// The first line of the statement being lowered, for an error to name.
     statement: String,
 }
@@ -229,6 +254,8 @@ pub(crate) fn lower(kernel: &Kernel, target: Target, precision: Precision) -> Re
         arch_specific: interface.arch_specific,
         descriptors: HashMap::new(),
         extents: HashMap::new(),
+        pair_tables: HashSet::new(),
+        epilogue: false,
         statement: format!("the interface of {}", kernel.name),
     };
     survey(kernel.body, &mut lowerer.uses, &mut lowerer.updated);
@@ -323,6 +350,12 @@ impl Lowerer {
                             writable: param.kind == ParamKind::Output,
                         };
                         self.buffers.insert(param.name, buffer);
+                        if !param.shape.is_empty() {
+                            self.extents.insert(param.name, param.shape.clone());
+                        }
+                        if param.pair_table {
+                            self.pair_tables.insert(param.name);
+                        }
                         Ok(ParamDecl::Pointer { align })
                     }
                     ParamKind::Int => {
@@ -561,15 +594,10 @@ impl Lowerer {
             }
             Statement::MbarrierWait(wait) => self.mbarrier_wait(wait, ctx),
             Statement::SetMaxNReg(set) => self.set_max_registers(set),
-            // A fragment read from or written to memory is one access a register and element, each at the place
-            // the lane-to-element table gives it.
-            other @ (Statement::FragmentLoad(_)
-            | Statement::RegStore(_)
-            | Statement::FragmentApply(_)
-            | Statement::FragmentRowReduce(_)) => Err(self.no_rule(format_args!(
-                "the statement type {}, which waits for the lane-to-element table",
-                other.ty()
-            ))),
+            Statement::FragmentLoad(load) => self.fragment_gather(load, ctx),
+            Statement::RegStore(store) => self.reg_store(store, ctx),
+            Statement::FragmentApply(apply) => self.fragment_apply(apply, ctx),
+            Statement::FragmentRowReduce(reduce) => self.fragment_row_reduce(reduce),
             other => Err(self.no_rule(format_args!("the statement type {}", other.ty()))),
         }
     }
@@ -595,6 +623,7 @@ impl Lowerer {
                 self.note_by_thread(&val, decode);
                 self.bind(axis.name, val);
             }
+            self.lane_coordinates(&grid.body, &launch)?;
             self.body(&grid.body, &inner_ctx(&launch, stmt))
         })();
         self.names.pop();
@@ -747,6 +776,7 @@ impl Lowerer {
     fn typed(&mut self, expression: &Expression, ty: VTy, ctx: &SimplifyCtx) -> Result<Val> {
         match ty {
             VTy::Bool => Ok(Val::reg(self.pred(expression, ctx)?, VTy::Bool)),
+            ty if ty.is_byte_float() => self.byte_float(expression, ty, ctx),
             ty if ty.is_float() => Ok(Val {
                 op: self.float(expression, ty, ctx)?,
                 ty,
@@ -772,6 +802,7 @@ impl Lowerer {
     ) -> Result<()> {
         let ty = match dtype {
             Some(dtype) => self.vty(Some(dtype))?,
+            None if self.epilogue => self.promoted(value),
             None => self
                 .infer(value)
                 .ok_or_else(|| self.refuse("a value carries no dtype"))?,
@@ -850,12 +881,24 @@ impl Lowerer {
             return Err(self.refuse("a select has a branch"));
         };
         let mut result = self.lookup(last.value)?;
+        if self.epilogue && result.ty.is_float() {
+            result = Val {
+                op: self.converted(result, VTy::F32),
+                ty: VTy::F32,
+            };
+        }
         let ty = result.ty;
         if ty == VTy::Bool {
             return Err(self.no_rule("a select of bools"));
         }
         for branch in earlier.iter().rev() {
-            let value = self.lookup(branch.value)?;
+            let mut value = self.lookup(branch.value)?;
+            if self.epilogue && value.ty.is_float() {
+                value = Val {
+                    op: self.converted(value, VTy::F32),
+                    ty: VTy::F32,
+                };
+            }
             if value.ty != ty {
                 let (name, held) = (branch.value, value.ty.text());
                 return Err(self.refuse(format_args!("{name} is {held}, not {}", ty.text())));

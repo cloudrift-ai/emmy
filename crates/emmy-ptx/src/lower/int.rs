@@ -113,6 +113,38 @@ fn linear(
     }
 }
 
+/// The constant `a - b` is, where every term of the two cancels.
+pub(super) fn constant_difference(a: &Expression, b: &Expression) -> Option<i64> {
+    let (mut terms, mut constant) = (Vec::new(), 0);
+    linear(a, 1, &mut terms, &mut constant)?;
+    linear(b, -1, &mut terms, &mut constant)?;
+    terms
+        .iter()
+        .all(|(coefficient, _)| *coefficient == 0)
+        .then_some(constant)
+}
+
+/// The floor of `expression / by`, for a positive `by`: spelled with no division where every coefficient of the
+/// expression's terms is a multiple of `by`.
+pub(super) fn divided(expression: &Expression, by: i64) -> Expression {
+    let (mut terms, mut constant) = (Vec::new(), 0);
+    let exact = linear(expression, 1, &mut terms, &mut constant).is_some()
+        && terms.iter().all(|(coefficient, _)| coefficient % by == 0);
+    if !exact {
+        return Expression::binary(
+            Operation::FloorDivide,
+            expression.clone(),
+            Expression::int(by),
+        );
+    }
+    let mut quotient = Expression::int(constant.div_euclid(by));
+    for (coefficient, term) in terms {
+        let part = Expression::binary(Operation::Multiply, term, Expression::int(coefficient / by));
+        quotient = Expression::binary(Operation::Add, quotient, part);
+    }
+    quotient
+}
+
 impl Val {
     pub(super) fn int(value: i64) -> Val {
         let range = Interval::new(i128::from(value), i128::from(value));
@@ -229,6 +261,11 @@ impl Lowerer {
                 match val.ty {
                     ty if ty.is_int() => Ok(val),
                     VTy::Bool => self.flag(&val),
+                    // The bits of an 8-bit float or a pair of codes are a byte.
+                    ty if ty.is_byte_float() => Ok(Val {
+                        op: val.op,
+                        ty: VTy::U32,
+                    }),
                     ty => {
                         Err(self
                             .refuse(format_args!("{name} is {}, read as an integer", ty.text())))
@@ -256,6 +293,10 @@ impl Lowerer {
             }
             Expr::Apply(ElementwiseOp::Known(op), args) => {
                 self.int_apply(expression, *op, args, ctx)
+            }
+            Expr::Apply(ElementwiseOp::Other(name), args) if &**name == super::value::TO_E2M1 => {
+                let code = self.e2m1_code(args, ctx)?;
+                Ok(Val::reg(code, VTy::U32))
             }
             _ => Err(self.no_rule(format_args!("the expression {expression}"))),
         }
@@ -464,12 +505,19 @@ impl Lowerer {
             }
             if let Some(shift) = power_of_two(divisor) {
                 let value = self.register(&a).into();
+                // A mask keeps the low zero bits of its operand; an exact quotient is the multiple over the divisor.
                 return Ok(if remainder {
                     let mask = Operand::Int(divisor - 1);
-                    self.int_value(Opcode::And, bits(a.ty), a.ty, vec![value, mask], 1)
+                    let kept = gcd(multiple, divisor);
+                    self.int_value(Opcode::And, bits(a.ty), a.ty, vec![value, mask], kept)
                 } else {
                     let operands = vec![value, Operand::Int(shift)];
-                    self.int_value(Opcode::Shr, a.ty.arith(), a.ty, operands, 1)
+                    let left = if multiple % divisor == 0 {
+                        multiple / divisor
+                    } else {
+                        1
+                    };
+                    self.int_value(Opcode::Shr, a.ty.arith(), a.ty, operands, left)
                 });
             }
             let small = a_range.is_some_and(|range| holds(VTy::I32, range) && range.lo >= 0);
@@ -586,7 +634,12 @@ impl Lowerer {
         let ty = self.common(&a, x.range(ctx), &b, y.range(ctx));
         let (left, right) = (self.as_int(&a, ty), self.as_int(&b, ty));
         let (cmp, left, right) = match (&left, &right) {
-            (Operand::Int(_), Operand::Int(_)) => return Err(self.no_rule("a constant condition")),
+            // Both sides known where the kernel is compiled (an unrolled copy's axis): ptxas folds the comparison
+            // once one side stands in a register.
+            (Operand::Int(_), Operand::Int(_)) => {
+                let held = Inst::new(Opcode::Mov, ty.arith(), Vec::new(), vec![left.clone()]);
+                (cmp, Operand::Reg(self.b.value(held, ty.bank())), right)
+            }
             (Operand::Int(_), _) => (cmp.mirrored(), right, left),
             _ => (cmp, left, right),
         };
@@ -654,16 +707,21 @@ impl Lowerer {
     /// buffer's address is 32 bits, and so are its terms.
     pub(super) fn address(
         &mut self,
-        buffer: emmy_ir::Name,
+        name: emmy_ir::Name,
         index: &[Expression],
         ctx: &SimplifyCtx,
     ) -> Result<Operand> {
-        let buffer = self.buffer(buffer)?;
+        let buffer = self.buffer(name)?;
         let (bytes, wide) = (buffer.elem.bytes(), buffer.space != Space::Shared);
+        let folded;
         let flat = match index {
             [] => return Ok(Operand::Addr(Base::Reg(buffer.base), buffer.offset)),
             [flat] => flat,
-            _ => return Err(self.refuse("an index of several coordinates is not flat")),
+            // One coordinate a dimension: what a fragment statement and the loads of its epilogue hold.
+            _ => {
+                folded = self.flat_index(name, index)?;
+                &folded
+            }
         };
         let (mut terms, mut constant) = (Vec::new(), 0);
         if linear(flat, 1, &mut terms, &mut constant).is_none() {

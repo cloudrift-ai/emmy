@@ -6,22 +6,18 @@ no decision. A kernel's two whole-kernel precision decisions, multiply-add fusio
 input, and every other choice is in the Kernel IR before it runs. ptxas keeps register allocation, instruction
 scheduling and the unrolling of small loops.
 
-The crate covers scalar and cooperative kernels, and of tensor-core kernels every statement that is one instruction
-with its operands. Scalar: the grid, loops, conditions, loads, stores, assigns, selects, accumulators and seeded
-states, carried states, casts, the elementwise operations that are one instruction each, and the math functions
-kernels hold (below). Cooperative: shared memory, barriers, warp shuffles, the tree reduction, vector access, atomic
-adds, async copies and the zeroing one kernel does for another. Tensor cores: fragments as registers, `ldmatrix`,
-`mma.sync` in every form, the promote and the repacks that stay in registers, block scales, and Hopper's `wgmma`,
-tensor copy, `mbarrier` and register limit.
-
-A fragment read from or written to memory element by element has no rule yet: a fragment load from global memory
-(`LdmatrixLoad` with `staged` off), the staged drains that are no `ldmatrix` (Volta's layout, a slab of bytes),
-`RegStore`, `FragmentApply` and `FragmentRowReduce`. Their instructions follow from the lane-to-element table, which
-the crate does not hold yet, and a kernel that holds one is an error that names it and says so. So is any math
-function outside the table below.
+The crate covers scalar, cooperative and tensor-core kernels. Scalar: the grid, loops, conditions, loads, stores,
+assigns, selects, accumulators and seeded states, carried states, casts (the 8-bit floats and the e2m1 codes among
+them), the elementwise operations that are one instruction each, and the math functions kernels hold (below).
+Cooperative: shared memory, barriers, warp shuffles, the tree reduction, vector access, atomic adds, async copies,
+swizzled and Volta slab layouts, and the zeroing one kernel does for another. Tensor cores: fragments as registers,
+`ldmatrix`, `mma.sync` in every form, the fragment statements expanded from the lane-to-element table (`FragmentLoad`,
+`RegStore`, `FragmentApply`, `FragmentRowReduce`), the promote and the repacks that stay in registers, block scales,
+and Hopper's `wgmma`, tensor copy, `mbarrier` and register limit. A math function outside the table below is an error
+that names it, and so is a paged buffer.
 
 Until every statement has a rule, the lowering falls back to the CUDA renderer for a kernel the compiler has no rule
-for, and for no other reason ("In the pipeline", below).
+for, and for no other reason ("In the pipeline", below). Every kernel of the realization corpus compiles today.
 
 ## Entry points
 
@@ -55,9 +51,13 @@ standing (`if 1:`, `if 0:`) is no branch: its one side stands in its place. The 
 which the flattening writes where a buffer passes the 32-bit range, is the widening to `i64`.
 
 A byte (`u8`) is a buffer's element type only: a load gives an integer with its range, a store takes the low byte of
-one. A buffer of fp8 elements, of packed fp4 pairs or of 64-bit barriers is declared and addressed, and read by the
-statements that take its bits as they are (a block-scale load, an `mbarrier` instruction); a plain load or store of
-one is refused, since no value rule decodes it.
+one. An 8-bit float and a byte of two e2m1 codes are values whose bits stand in the low byte of a 32-bit register: a
+load gives them, a store takes them, and no arithmetic reads them. A cast converts: from a float to an 8-bit float by
+the hardware's conversion of two f32 (`cvt.rn.satfinite`, round to nearest and saturate, as CUDA's constructors do,
+`sm_89` on), back through the half of the same value; between an integer and a pair of codes by the low byte. The
+encode `to_f4e2m1` counts the midpoints of the format's values below the magnitude, ties to the even code, and puts
+the sign in the fourth bit. A buffer of 64-bit barriers is declared and addressed, and read by the `mbarrier`
+instructions alone.
 
 A fragment is a local buffer of registers. `RegFragment` declares it, the tensor-core statements read and define its
 registers in place, and a `Load` or a `Write` that names it reaches one register by a constant index: `f32 x = load
@@ -150,8 +150,12 @@ Every instruction reaches the list through the `Builder`.
   computed where it is first read. Two choices differ from cicc's ("Fusion against cicc", below): of two products
   one add reads, the left one is fused, and a product with a state as a factor is never held back.
 - **Half precision.** `f16` add, subtract, multiply, fused multiply-add, negation, absolute value, minimum and maximum
-  run natively (minimum and maximum from `sm_80`). `bf16` is converted, never computed in. Half instructions take no
-  immediate, so a half constant is moved into a register by its bits.
+  run natively (minimum and maximum from `sm_80`). Any other `f16` operation computes in f32 and rounds once: the
+  kernel passes' set of operations a half computes natively (`target.native_f16_ops`) names more than PTX has, the
+  exponential, the logarithm, the division and the others CUDA's half header computes between two conversions, and
+  the conversion the body does not write is written here. `bf16` is converted, never computed in; the operations that
+  give a bf16 the same value that way (a minimum, a maximum, a sign, a magnitude) are computed in f32 when a body
+  leaves one at bf16. Half instructions take no immediate, so a half constant is moved into a register by its bits.
 - **The module.** A kernel waits for the grid launched ahead of it (`griddepcontrol.wait`) before anything else, on
   the targets that have the instruction (`sm_90` and later). A load of a buffer the kernel never writes, a parameter
   of kind input, goes past the coherent cache (`ld.global.nc`), as nvcc loads through the `const` pointer the CUDA
@@ -172,8 +176,13 @@ Every instruction reaches the list through the `Builder`.
 - **Async copies.** `CpAsyncCopy` is one `cp.async` of 4, 8 or 16 bytes between a 32-bit shared address and a 64-bit
   global one; under `valid` a 16-byte copy takes its source size from the condition, so it writes zeros where the
   condition fails. A copy with a lane offset names the tile it fills by row and column and the thread's own row and
-  column in it: its element is the sum of the two, folded by the slab's extents. A swizzled destination has no rule
-  yet: every kernel that holds one also holds a fragment statement, so nothing would run it.
+  column in it: its element is the sum of the two, folded by the slab's extents. A swizzled destination takes the
+  slab's layout like a store does (below).
+- **Slab layouts.** A shared slab can be stored under a layout, which a store, an async copy and a gather name. A
+  swizzle (`B128`, `B64`, `B32`) is the exchange of 16-byte chunks over the flat index (below). Volta's two are
+  functions of the logical row and column (`fragment::volta_slab_index` in `emmy-ir`, the fill's and the drain's
+  both): `V70A` keeps runs of four elements along K together (a store of eight is two stores of four), `V70B` runs of
+  eight along N.
 - **Carried states.** A cell of a carried state at a literal index is two registers: the one a `Pre` copies and the
   one a `Carry` moves into. Both are seeded ahead of the loop that carries the state, and the end of each trip moves
   the second into the first, so a cell a trip skips keeps its value. A cell at an index known only where the kernel
@@ -185,11 +194,10 @@ A math function is a sequence of f32 instructions written through the builder, s
 calls compute alike. Every instruction that rounds carries `.rn`, a fused multiply-add stands only where the sequence
 writes one, and no sequence reads the kernel's fusion decision: its accuracy is measured with the instructions it
 has. The flush-to-zero decision reaches every instruction of a sequence that takes the modifier. A half value has no
-sequence: its function computes in f32 and converts once, which the body says with its casts, and a math function
-handed a half operand has no rule. The kernel passes still leave some there: their set of operations a half computes
-natively (`target.native_f16_ops`) holds `exp`, `log`, `sqrt`, `rsqrt`, `tanh`, the division and the reciprocal, which
-CUDA's half header computes in f32 between two conversions and PTX has no half instruction for. One corpus kernel
-holds such a function with nothing else in its way.
+sequence: its function computes in f32 and converts once. The body says so with its casts, except where the kernel
+passes leave the function at a half (their set of operations a half computes natively, `target.native_f16_ops`, holds
+`exp`, `log`, `sqrt`, `rsqrt`, `tanh`, the division and the reciprocal, which CUDA's half header computes in f32
+between two conversions); there the compiler writes the two conversions itself.
 
 Only the functions kernels hold are written. Counted over the realization corpus and the repository goldens (5,930
 kernel bodies): `rsqrt` 8,739 calls, `exp` 7,510, `log` 551, `tanh` 72, `pow` 28 (one golden), `erf` 8. No kernel
@@ -331,8 +339,7 @@ value matters or reads a subnormal from one.
   `e ^ (((e >> shift) & mask) << 3)`, the mask 7, 3 or 1 by the mode and the shift 6 unless the mode states one
   (`B128@7`). The exchange is linear over parts that share no bit. Where the tile's row and column are proven
   multiples of what a lane's offset spans, the lane's part is swizzled alone, once for every load, the column's part
-  is a constant, and the row is added after; any other tile swizzles its whole index. Volta's two layouts are no
-  exchange of chunks and have no rule.
+  is a constant, and the row is added after; any other tile swizzles its whole index.
 - **`mma.sync`.** One instruction a statement: the accumulator's registers defined again from A's, B's and their own.
 
   | Tile | Operands | Accumulator | Registers A, B, C | Target, PTX |
@@ -350,6 +357,32 @@ value matters or reads a subnormal from one.
   one register. Only the lanes the selector names supply one (for A those whose place in their group of four is 0 or
   1, the second eight rows on; for B those whose place is 1); every other lane holds zero and reads nothing. The four
   bytes are loaded one by one, as the CUDA helper does: one 32-bit load would need an alignment no fact gives.
+- **The fragment statements.** Each is one expansion over its row of the lane-to-element table
+  (`fragment::fragment_table` in `emmy-ir`): per register and element the table gives the element's row and column in
+  the tile as expressions over the lane, and the rule adds them to the statement's own index. No rule holds a lane map
+  of its own. The lane's coordinates are integer expressions over the thread index, computed where the grid's body
+  starts, so the value table keeps each once for the kernel; loads stay where their statement stands.
+  - `FragmentLoad`: per element, the index is the tile's base plus the row and the column by the source's row stride,
+    by the role and the orientation. A clamp holds the operand's own axis to the last element in range and a fragment
+    wholly past it reads nothing and is zero; a zero-fill of K guards each element. Elements next to each other that a
+    register holds as they stand in memory, proven aligned, are one 32-bit load; two e4m3 bytes, one 16-bit load and
+    one packed conversion (`sm_89` on). Anything else is a load an element, converted and packed. A slab of codes
+    beside a slab of block scales decodes each byte (an e2m1 pair by its bits, an 8-bit float through its half),
+    multiplies it by its block's scale in f32 and rounds once. Volta's paired slabs are read by the paired rows
+    (`fragment::paired_operand_table`): two register cells a side couple into one 32-row map, so `frag` and
+    `pair_frag` hold rows four apart, each element read where the slab layout puts it, one load an element.
+  - `RegStore`: per element, the address from the index and the table's row and column by the two strides, through
+    the slab's swizzle; the value is the register or what the epilogue makes of it, converted to the buffer's type.
+    The epilogue's statements go through the ordinary rules in a scope of their own, the element of each fragment
+    and its row and column bound. Its body is typed where it is compiled, as the CUDA renderer types it: a float load
+    widens to f32, a value with no dtype computes at the promotion of its operands, a float read at another float
+    type converts. An element past a guard is not stored and its epilogue reads nothing. Two elements next to each
+    other under one guard, proven aligned, are one store. Each cell of a run is stored as its own statement says.
+    Volta's paired tile has its own accumulator row (`fragment::paired_accumulator_table`).
+  - `FragmentApply`: per element, the operation over the arguments at the element's row and column: a fragment's
+    register, the scalar of the element's row, a uniform scalar, a condition over the coordinates, or a load at them.
+  - `FragmentRowReduce`: each of a lane's two rows folded over its elements of every fragment, then over the lanes
+    that share the row by the table's shuffles.
 - **The promote.** An accumulator of halves is folded into its accumulator of floats and zeroed: each register split
   into its halves, each widened and added. On Volta a lane's halves are one row of the tile and its floats two, so
   each lane first takes the pair from the lane that holds it, by a shuffle of every lane of the warp.
@@ -423,18 +456,14 @@ on it would hide a bug behind text that builds. The default stays `cuda` until t
 PTX. The variable, the fallback and the CUDA renderer are deleted together when the compiler covers every kernel;
 the CUDA backend `ARCHITECTURE.md` says what else reads the switch.
 
-Two things the renderer works out as it prints are refused with `NoRule` for now: a paged buffer, whose page it
-resolves (the crate refuses the parameter), and the e2m1 pair table, whose loads it computes instead of reading (the
-Python entry refuses the kernel).
+A paged buffer, whose page the renderer resolves as it prints, is refused with `NoRule` for now (the crate refuses
+the parameter); no corpus kernel holds one. The e2m1 pair table an NVFP4 weight decodes through is named by the
+interface (`Param.pair_table`), and a load of it computes its value from the index (code `i & 1` of byte `i >> 1`)
+and reads nothing, as the renderer does.
 
 `python -m tests.compiler.ptx.corpus` lowers every realization corpus case with `ptx` asked for and prints, a kernel
-a line, whether it compiled or what had no rule, with the counts by reason. On 2026-11-12: 258 cases, 164 with every
-kernel in PTX; 296 kernels, 196 in PTX (168 of the 244 of `sm_120` cases, 18 of 27 of `sm_70`, 6 of 12 of `sm_80`,
-4 of 5 of `sm_89`, none of the 8 of `sm_90`). Of the 100 that fall back, 95 hold a `RegStore`, and with it a fragment
-read from global memory (39), a `FragmentApply` (24), a `FragmentRowReduce` (16), a drain of a slab of bytes (12) or
-a staged fragment of Volta's layout (6): all wait for the lane-to-element table. Of those 95, 23 also hold a
-swizzled async copy, 16 a swizzled store and 12 a pair table, which need rules of their own. The other 5 hold a cast
-to an 8-bit float (4) or a math function at a half (1).
+a line, whether it compiled or what had no rule, with the counts by reason. On 2026-11-12: 258 cases, all 296 of
+their kernels in PTX.
 
 ### Fusion against cicc
 

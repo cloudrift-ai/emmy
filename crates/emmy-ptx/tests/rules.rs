@@ -1133,7 +1133,7 @@ fn a_statement_outside_the_rules_is_an_error_that_names_it() {
     for (statements, expected) in [
         (
             "    f32 o[i, 0] = x",
-            "an index of several coordinates is not flat: `f32 o[i, 0] = x`",
+            "an index of 2 coordinates into o is not flat: `f32 o[i, 0] = x`",
         ),
         (
             "    f32 v = sin(x)",
@@ -1145,7 +1145,7 @@ fn a_statement_outside_the_rules_is_an_error_that_names_it() {
         ),
         (
             "    RegStore(dst_buffer=o, dst_index=(i), frag=c, shape=(16, 8, 16))",
-            "no PTX rule for the statement type RegStore, which waits for the lane-to-element table",
+            "the fragment c is read before it is declared",
         ),
         (
             "    y = load a[i]",
@@ -1186,13 +1186,17 @@ fn a_statement_outside_the_rules_is_an_error_that_names_it() {
         let message = refusal(&under(statements), A_O);
         assert!(message.contains(expected), "{statements}: {message}");
     }
+    // A half maximum before `sm_80`, which has no half instruction for it, computes in f32 and rounds once.
     let half = "    f16 h = (f16)x\n    f16 m = maximum(h, h)";
-    let message = lowered(&under(half), A_O, Target { sm: 75 }, EXACT)
-        .unwrap_err()
-        .to_string();
+    let module = lowered(&under(half), A_O, Target { sm: 75 }, EXACT).unwrap();
+    let lines = common::listing(&module);
     assert!(
-        message.contains("no PTX rule for Max at f16 on sm_75"),
-        "{message}"
+        lines.iter().any(|line| line.starts_with("max.f32")),
+        "{lines:?}"
+    );
+    assert!(
+        !lines.iter().any(|line| line.starts_with("max.f16")),
+        "{lines:?}"
     );
 }
 

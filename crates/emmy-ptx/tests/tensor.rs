@@ -775,34 +775,6 @@ fn warp_refusal_unassembled(statements: &str, sm: u32) -> String {
         .to_string()
 }
 
-/// A fragment read from or written to memory element by element has its instructions from the lane-to-element
-/// table, which no rule reads yet: each such statement is refused by name.
-#[test]
-fn a_statement_that_needs_the_lane_table_is_refused_by_name() {
-    let waits = "which waits for the lane-to-element table";
-    for (statement, ty) in [
-        (
-            "FragmentLoad(frag=fa, src_buffer=sa, src_index=(0, 0), role=a, ldm=64, staged=true)",
-            "FragmentLoad",
-        ),
-        (
-            "RegStore(dst_buffer=o, dst_index=(0), frag=fc, shape=(16, 8, 16))",
-            "RegStore",
-        ),
-        (
-            "FragmentRowReduce(top=x, bot=y, frags=(fc), op=maximum)",
-            "FragmentRowReduce",
-        ),
-    ] {
-        let message = refusal(&tile(statement), 80, false);
-        assert!(
-            message.contains(&format!("no PTX rule for the statement type {ty}"))
-                && message.contains(waits),
-            "{message}"
-        );
-    }
-}
-
 /// The verifier holds what ptxas does not check. An operand fragment no statement loaded is read undefined by the
 /// product, and a load under a condition defines its fragment on some paths only. Each row `ldmatrix` reads is 16
 /// bytes at once, so the slab must be proven aligned to that.

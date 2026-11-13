@@ -72,6 +72,9 @@ pub enum Ty {
     E5m2,
     E2m1,
     Ue4m3,
+    /// Two 8-bit floats in 16 bits: the source of a packed conversion to two halves, or its result from two f32.
+    E4m3x2,
+    E5m2x2,
 }
 
 impl Ty {
@@ -93,6 +96,8 @@ impl Ty {
             Ty::F16x2 => "f16x2",
             Ty::Bf16x2 => "bf16x2",
             Ty::E4m3 => "e4m3",
+            Ty::E4m3x2 => "e4m3x2",
+            Ty::E5m2x2 => "e5m2x2",
             Ty::E5m2 => "e5m2",
             Ty::E2m1 => "e2m1",
             Ty::Ue4m3 => "ue4m3",
@@ -104,7 +109,7 @@ impl Ty {
     pub fn bank(self) -> Bank {
         match self {
             Ty::Pred => Bank::Pred,
-            Ty::B16 | Ty::U16 | Ty::F16 | Ty::Bf16 => Bank::B16,
+            Ty::B16 | Ty::U16 | Ty::F16 | Ty::Bf16 | Ty::E4m3x2 | Ty::E5m2x2 => Bank::B16,
             Ty::B32 | Ty::U8 | Ty::S32 | Ty::U32 | Ty::F16x2 | Ty::Bf16x2 => Bank::B32,
             Ty::E4m3 | Ty::E5m2 | Ty::E2m1 | Ty::Ue4m3 => Bank::B32,
             Ty::B64 | Ty::S64 | Ty::U64 => Bank::B64,
@@ -120,7 +125,7 @@ impl Ty {
     pub fn bytes(self) -> i64 {
         match self {
             Ty::Pred | Ty::U8 | Ty::E4m3 | Ty::E5m2 | Ty::E2m1 | Ty::Ue4m3 => 1,
-            Ty::B16 | Ty::U16 | Ty::F16 | Ty::Bf16 => 2,
+            Ty::B16 | Ty::U16 | Ty::F16 | Ty::Bf16 | Ty::E4m3x2 | Ty::E5m2x2 => 2,
             Ty::B32 | Ty::S32 | Ty::U32 | Ty::F32 | Ty::F16x2 | Ty::Bf16x2 => 4,
             Ty::B64 | Ty::S64 | Ty::U64 => 8,
         }

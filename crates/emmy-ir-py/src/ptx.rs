@@ -6,7 +6,7 @@ use pyo3::prelude::*;
 use emmy_ptx::{Interface, Kernel, Param, ParamKind, Precision, Target};
 
 use crate::body::PyBody;
-use crate::convert::{IntoPyErr, NoRule, name_from_py};
+use crate::convert::{IntoPyErr, NoRule, expression_from_py, name_from_py};
 
 fn param(value: &Bound<'_, PyAny>) -> PyResult<Param> {
     let kind: String = value.getattr("kind")?.extract()?;
@@ -24,12 +24,19 @@ fn param(value: &Bound<'_, PyAny>) -> PyResult<Param> {
         let name: String = dtype.getattr("name")?.extract()?;
         Some(name.parse().py()?)
     };
+    let shape: PyResult<Vec<_>> = value
+        .getattr("shape")?
+        .try_iter()?
+        .map(|extent| expression_from_py(&extent?))
+        .collect();
     Ok(Param {
         name: name_from_py(&value.getattr("name")?)?,
         kind,
         dtype,
         paged: value.getattr("paged")?.extract()?,
         align: value.getattr("align")?.extract()?,
+        shape: shape?,
+        pair_table: value.getattr("pair_table")?.extract()?,
     })
 }
 

@@ -298,7 +298,7 @@ impl Lowerer {
 
     /// The value of `ty` in `from`, read from the lane the shuffle picks. A shuffle moves 32 bits: a float goes
     /// through its bits, a half through a 32-bit register.
-    fn shuffled(
+    pub(super) fn shuffled(
         &mut self,
         shuffle: Shuffle,
         (from, ty): (Reg, VTy),

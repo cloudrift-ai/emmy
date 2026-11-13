@@ -12,6 +12,9 @@ use emmy_ir::field::NumOr;
 use emmy_ir::statement::{Carry, CpAsyncCopy, Load, Pre, Smem, Statement, Write, ZeroPrologue};
 use emmy_ir::{Name, Result};
 
+use emmy_ir::fragment::volta_slab_index;
+
+use super::tensor::{swizzle_exchange, swizzled};
 use super::{Lowerer, POOL_ALIGN, SM_AMPERE, VTy, Val};
 use crate::inst::{Bank, Base, Cache, Inst, Opcode, Operand, Reg, Shared, Space, Ty};
 
@@ -37,7 +40,8 @@ impl Elem {
     /// buffer of them is addressed, and read by the statements that take its bits as they are.
     pub(super) fn of(dtype: DType) -> Option<Elem> {
         let (ty, mem) = match dtype {
-            DType::U8 | DType::F8E4M3 | DType::F8E5M2 | DType::F4E2M1x2 => (VTy::I32, Ty::U8),
+            DType::U8 => (VTy::I32, Ty::U8),
+            DType::F8E4M3 | DType::F8E5M2 | DType::F4E2M1x2 => (VTy::of(dtype)?, Ty::U8),
             DType::U64 => (VTy::I64, Ty::U64),
             DType::Bool => (VTy::Bool, Ty::U8),
             dtype => {
@@ -105,7 +109,7 @@ fn access(bytes: i64, lanes: usize) -> Option<Access> {
 }
 
 /// The element type a shared declaration names: a dtype, or the C type the CUDA renderer declares the array with.
-/// `unsigned char` is not read as a byte: the renderer declares a slab of packed fp4 pairs with it.
+/// `unsigned char` is the renderer's spelling of a slab of packed fp4 pairs.
 fn shared_dtype(name: &str) -> Option<DType> {
     name.parse().ok().or(match name {
         "float" => Some(DType::F32),
@@ -116,6 +120,9 @@ fn shared_dtype(name: &str) -> Option<DType> {
         "long long" => Some(DType::I64),
         "unsigned long long" => Some(DType::U64),
         "bool" => Some(DType::Bool),
+        "unsigned char" => Some(DType::F4E2M1x2),
+        "__nv_fp8_e4m3" => Some(DType::F8E4M3),
+        "__nv_fp8_e5m2" => Some(DType::F8E5M2),
         _ => None,
     })
 }
@@ -217,12 +224,13 @@ impl Lowerer {
             writable: true,
         };
         self.buffers.insert(smem.name, buffer);
-        self.extents.insert(smem.name, smem.extents.to_vec());
+        let extents = smem.extents.iter().map(|e| Expression::int(*e)).collect();
+        self.extents.insert(smem.name, extents);
         Ok(())
     }
 
-    /// The one element index `index` names in `buffer`: itself, or its coordinates folded by the extents of a
-    /// shared buffer, the last coordinate the nearest.
+    /// The one element index `index` names in `buffer`: itself, or its coordinates folded by the buffer's extents,
+    /// the last coordinate the nearest.
     pub(super) fn flat_index(&self, buffer: Name, index: &[Expression]) -> Result<Expression> {
         if let [flat] = index {
             return Ok(flat.clone());
@@ -236,7 +244,7 @@ impl Lowerer {
         };
         let mut flat = index[0].clone();
         for (coordinate, extent) in index.iter().zip(extents).skip(1) {
-            let outer = Expression::binary(Operation::Multiply, flat, Expression::int(*extent));
+            let outer = Expression::binary(Operation::Multiply, flat, extent.clone());
             flat = Expression::binary(Operation::Add, outer, coordinate.clone());
         }
         Ok(flat)
@@ -266,7 +274,7 @@ impl Lowerer {
     }
 
     /// One 32-bit word of `parts`, lowest first: two halves by one move, four bytes by masks, shifts and sums.
-    fn pack(&mut self, parts: &[Reg]) -> Reg {
+    pub(super) fn pack(&mut self, parts: &[Reg]) -> Reg {
         if parts.len() == 2 {
             let halves = Operand::Tuple(parts.to_vec());
             let join = Inst::new(Opcode::Mov, Ty::B32, Vec::new(), vec![halves]);
@@ -303,11 +311,16 @@ impl Lowerer {
         if self.is_fragment(load.input) {
             return self.fragment_load(load);
         }
+        if self.pair_tables.contains(&load.input) && load.carried.is_empty() {
+            return self.pair_table_load(load, ctx);
+        }
         let buffer = self.buffer(load.input)?;
         let elem = buffer.elem;
-        let dtype = load
-            .dtype
-            .ok_or_else(|| self.refuse("a value carries no dtype"))?;
+        let dtype = match load.dtype {
+            Some(dtype) => dtype,
+            None if self.epilogue => elem.dtype,
+            None => return Err(self.refuse("a value carries no dtype")),
+        };
         if !elem.has_value() {
             return Err(self.no_rule(format_args!("a load of {}", elem.dtype)));
         }
@@ -316,6 +329,28 @@ impl Lowerer {
             return Err(self.refuse(format_args!("{input} holds {stored}")));
         }
         let lanes = load.names.len();
+        // A run wider than one access is loaded 16 bytes at a time, as the CUDA renderer's vector types allow.
+        let widest = (16 / elem.bytes()).max(1) as usize;
+        if lanes > widest && access(elem.bytes(), lanes).is_none() && lanes.is_multiple_of(widest) {
+            for (at, names) in load.names.chunks(widest).enumerate() {
+                let mut index = load.index.to_vec();
+                let last = index
+                    .last_mut()
+                    .ok_or_else(|| self.refuse("a load names an element"))?;
+                *last = Expression::binary(
+                    Operation::Add,
+                    last.clone(),
+                    Expression::int((at * widest) as i64),
+                );
+                let part = Load {
+                    names: names.into(),
+                    index: index.into(),
+                    ..load.clone()
+                };
+                self.load(&part, ctx)?;
+            }
+            return Ok(());
+        }
         let again = !load.carried.is_empty();
         let access = access(elem.bytes(), lanes)
             .filter(|_| elem.ty != VTy::Bool || (lanes == 1 && !again))
@@ -352,7 +387,57 @@ impl Lowerer {
             }
             let val = match elem.ty {
                 VTy::Bool => Val::reg(self.truth(&Val::reg(reg, VTy::U32))?, VTy::Bool),
+                ty if self.epilogue && ty.is_float() => Val {
+                    op: self.converted(Val::reg(reg, ty), VTy::F32),
+                    ty: VTy::F32,
+                },
                 ty => Val::reg(reg, ty),
+            };
+            self.bind(*name, val);
+        }
+        Ok(())
+    }
+
+    /// A load of the e2m1 pair table computes each value from its index and reads nothing. Row `b` of the table
+    /// holds byte `b`'s low and high codes, so flat index `i` is code `i & 1` of byte `i >> 1`. Every e2m1 value
+    /// is exact in each float type.
+    fn pair_table_load(&mut self, load: &Load, ctx: &SimplifyCtx) -> Result<()> {
+        let dtype = load.dtype.unwrap_or(self.buffer(load.input)?.elem.dtype);
+        let ty = self.vty(Some(dtype))?;
+        if !ty.is_float() {
+            return Err(self.refuse(format_args!(
+                "the pair table {} is read as {dtype}",
+                load.input
+            )));
+        }
+        let flat = self.flat_index(load.input, &load.index)?;
+        let int = |value: i64| Expression::int(value);
+        let binary = Expression::binary;
+        for (k, name) in load.names.iter().enumerate() {
+            let at = binary(Operation::Add, flat.clone(), int(k as i64));
+            let byte = binary(Operation::RightShift, at.clone(), int(1));
+            let shift = binary(
+                Operation::LeftShift,
+                binary(Operation::BitwiseAnd, at, int(1)),
+                int(2),
+            );
+            let code = binary(
+                Operation::BitwiseAnd,
+                binary(Operation::RightShift, byte, shift),
+                int(15),
+            );
+            let code = self.int(&code, ctx)?;
+            let op = self.as_int(&code, VTy::U32);
+            let code = self.register(&Val { op, ty: VTy::U32 });
+            let value = self.e2m1_value(code);
+            let value = self.converted(Val::reg(value, VTy::F32), ty);
+            let val = Val { op: value, ty };
+            let val = match self.epilogue {
+                true => Val {
+                    op: self.converted(val, VTy::F32),
+                    ty: VTy::F32,
+                },
+                false => val,
             };
             self.bind(*name, val);
         }
@@ -363,9 +448,6 @@ impl Lowerer {
     pub(super) fn write(&mut self, write: &Write, ctx: &SimplifyCtx) -> Result<()> {
         if self.is_fragment(write.output) {
             return self.fragment_store(write);
-        }
-        if &*write.swizzle != "NONE" {
-            return Err(self.no_rule("a swizzled store"));
         }
         let buffer = self.buffer(write.output)?;
         let (elem, output) = (buffer.elem, write.output);
@@ -393,7 +475,6 @@ impl Lowerer {
             }
             vals.push(val);
         }
-        let address = self.address(output, &write.index, ctx)?;
         let mut regs = Vec::with_capacity(lanes);
         for val in &vals {
             let val = match val.ty {
@@ -407,6 +488,10 @@ impl Lowerer {
             regs.push(self.register(&val));
         }
         if write.atomic {
+            if &*write.swizzle != "NONE" {
+                return Err(self.no_rule("an atomic add into a swizzled slab"));
+            }
+            let address = self.address(output, &write.index, ctx)?;
             let ty = match elem.dtype {
                 DType::F32 | DType::I32 | DType::U32 => elem.ty.arith(),
                 DType::I64 => Ty::U64,
@@ -418,18 +503,66 @@ impl Lowerer {
             self.b.emit(add);
             return Ok(());
         }
-        let (ty, value) = match access {
-            Access::Direct if lanes == 1 => (elem.mem, regs[0].into()),
-            Access::Direct => (elem.mem, Operand::Tuple(regs)),
-            Access::Words { each, .. } => {
-                let words = regs.chunks(each).map(|parts| self.pack(parts)).collect();
-                (Ty::B32, Operand::Tuple(words))
-            }
+        // Volta's crosswise layout moves runs of four elements apart: a run of eight is two stores.
+        let run = match (&*write.swizzle, lanes) {
+            ("V70A", 8) => 4,
+            _ => lanes,
         };
-        let store = Opcode::St(buffer.space);
-        self.b
-            .emit(Inst::new(store, ty, Vec::new(), vec![address, value]));
+        for (at, regs) in regs.chunks(run).enumerate() {
+            let mut index = write.index.to_vec();
+            if at > 0 {
+                let last = index.last_mut().expect("a store names an element");
+                *last = Expression::binary(
+                    Operation::Add,
+                    last.clone(),
+                    Expression::int((at * run) as i64),
+                );
+            }
+            let element = self.slab_index(output, &index, &write.swizzle)?;
+            let address = self.address(output, &[element], ctx)?;
+            let access = if run == lanes { access } else { Access::Direct };
+            let (ty, value) = match access {
+                Access::Direct if regs.len() == 1 => (elem.mem, regs[0].into()),
+                Access::Direct => (elem.mem, Operand::Tuple(regs.to_vec())),
+                Access::Words { each, .. } => {
+                    let words = regs.chunks(each).map(|parts| self.pack(parts)).collect();
+                    (Ty::B32, Operand::Tuple(words))
+                }
+            };
+            let store = Opcode::St(buffer.space);
+            self.b
+                .emit(Inst::new(store, ty, Vec::new(), vec![address, value]));
+        }
         Ok(())
+    }
+
+    /// The element `index` names in a slab stored under the layout `mode`: the flat index itself, through a
+    /// swizzle's exchange of 16-byte chunks, or a Volta layout's function of the logical row and column.
+    pub(super) fn slab_index(
+        &self,
+        buffer: Name,
+        index: &[Expression],
+        mode: &str,
+    ) -> Result<Expression> {
+        if let Some(exchange) = swizzle_exchange(mode) {
+            let flat = self.flat_index(buffer, index)?;
+            return Ok(match exchange {
+                Some(exchange) => swizzled(flat, exchange),
+                None => flat,
+            });
+        }
+        let extent = match (mode, self.extents.get(&buffer).map(Vec::as_slice)) {
+            ("V70A", Some([rows, _])) => rows,
+            ("V70B", Some([_, columns])) => columns,
+            _ => return Err(self.no_rule(format_args!("a slab of {buffer} laid out as {mode}"))),
+        };
+        let [row, column] = index else {
+            return Err(self.refuse(format_args!(
+                "a slab laid out as {mode} is indexed by row and column"
+            )));
+        };
+        volta_slab_index(mode, row, column, extent)
+            .ok_or_else(|| self.no_rule(format_args!("a slab laid out as {mode}")))
     }
 
     /// Zero the 32-bit words of another launch's accumulator, every thread of the grid a stride of them:
@@ -480,9 +613,6 @@ impl Lowerer {
     /// of the two, folded by the slab's extents.
     pub(super) fn cp_async(&mut self, copy: &CpAsyncCopy, ctx: &SimplifyCtx) -> Result<()> {
         self.needs(SM_AMPERE, "an async copy")?;
-        if &*copy.swizzle != "NONE" {
-            return Err(self.no_rule("an async copy into a swizzled slab"));
-        }
         let element = match copy.lane_index.as_deref() {
             None => None,
             Some([_, _]) if copy.smem_index.len() != 2 => {
@@ -512,7 +642,8 @@ impl Lowerer {
         if to.space != Space::Shared || from.space != Space::Global {
             return Err(self.refuse("an async copy goes from a parameter to a shared buffer"));
         }
-        let to = self.address(copy.smem, smem_index, ctx)?;
+        let element = self.slab_index(copy.smem, smem_index, &copy.swizzle)?;
+        let to = self.address(copy.smem, &[element], ctx)?;
         let from = self.address(copy.src, &copy.src_index, ctx)?;
         let mut operands = vec![to, from, Operand::Int(copy.nbytes)];
         if let Some(valid) = &copy.valid {

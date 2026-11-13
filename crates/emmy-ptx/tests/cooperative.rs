@@ -1210,8 +1210,8 @@ fn a_cooperative_statement_outside_its_rule_is_an_error_that_names_it() {
             "`ld.shared.v2.f32 {%f1, %f2}, [%r8]` is a 8-byte access with no alignment proven",
         ),
         (
-            "f32 o[t * 2] = (acc, acc) swizzle=B32",
-            "no PTX rule for a swizzled store",
+            "f32 o[t * 2] = (acc, acc) swizzle=B16",
+            "no PTX rule for a slab of o laid out as B16",
         ),
         (
             "f32 x0, x1 = load a[t * 2] carried=load",
@@ -1245,11 +1245,11 @@ fn a_cooperative_statement_outside_its_rule_is_an_error_that_names_it() {
         ),
         (
             "CpAsyncCopy(smem=s, smem_index=(t, 0), src=a, src_index=(t * 4), nbytes=16)",
-            "an index of several coordinates is not flat",
+            "an index of 2 coordinates into s is not flat",
         ),
         (
-            "CpAsyncCopy(smem=s, smem_index=(t * 4), src=a, src_index=(t * 4), nbytes=16, swizzle=B32)",
-            "no PTX rule for an async copy into a swizzled slab",
+            "CpAsyncCopy(smem=s, smem_index=(t * 4), src=a, src_index=(t * 4), nbytes=16, swizzle=V70A)",
+            "no PTX rule for a slab of s laid out as V70A",
         ),
         (
             "for k in 0..8:\n            for j in 0..2:\n                f32 st[j] <- acc seed 0",

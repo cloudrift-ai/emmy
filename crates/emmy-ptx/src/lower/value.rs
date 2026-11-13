@@ -2,6 +2,7 @@
 //! nothing on its own; a fused multiply-add is written where the body says `fma`, or where the kernel's fusion
 //! decision meets a product read once by a sum.
 
+use emmy_ir::dtype::DType;
 use emmy_ir::elementwise::{ElementwiseOp, Operation};
 use emmy_ir::expr::{CastTarget, Expr, Expression, LitType, SimplifyCtx};
 use emmy_ir::{Name, Result};
@@ -42,6 +43,12 @@ pub(super) fn half_bits(ty: VTy, value: f64) -> u16 {
     sign | bits.min(u64::from(top)) as u16
 }
 
+/// The operation that encodes a value as its 4-bit e2m1 code.
+pub(super) const TO_E2M1: &str = "to_f4e2m1";
+
+/// The first compute capability with the conversions between 8-bit floats and wider ones.
+pub(super) const SM_ADA: u32 = 89;
+
 /// The cast `ir/address.py` writes on an index term of a buffer past the 32-bit range.
 const WIDE_INDEX: &str = "long long";
 
@@ -55,6 +62,24 @@ fn comparison(op: Operation) -> Option<Cmp> {
         Operation::NotEqual => Cmp::Ne,
         _ => return None,
     })
+}
+
+/// Whether `op` gives the same value computed at f32 and rounded back as at its half operands' own type: it
+/// selects, compares or changes a sign, and rounds nothing.
+fn exact_through_f32(op: Operation) -> bool {
+    use Operation as O;
+    matches!(
+        op,
+        O::Maximum
+            | O::Fmax
+            | O::Minimum
+            | O::Fmin
+            | O::Relu
+            | O::Negative
+            | O::Abs
+            | O::Absolute
+            | O::Fabs
+    )
 }
 
 fn logical(op: Operation) -> Option<Opcode> {
@@ -191,6 +216,9 @@ impl Lowerer {
             Expr::Literal(lit) => Ok(self.float_constant(ty, lit.value.as_f64())),
             Expr::Var(name) => {
                 let val = self.lookup(*name)?;
+                if self.epilogue && val.ty != ty && val.ty.is_float() && ty.is_float() {
+                    return Ok(self.converted(val, ty));
+                }
                 if val.ty != ty {
                     let (held, read) = (val.ty.text(), ty.text());
                     return Err(self.refuse(format_args!("{name} is {held}, read as {read}")));
@@ -209,16 +237,122 @@ impl Lowerer {
                 self.float_select(cond, if_true, if_false, ty, ctx)
             }
             Expr::Apply(ElementwiseOp::Known(op), args) => {
+                let through = match ty {
+                    VTy::F16 => !self.native_f16(*op),
+                    VTy::Bf16 => exact_through_f32(*op),
+                    _ => false,
+                };
+                if through {
+                    return self.through_f32(*op, args, ty, ctx);
+                }
                 if let Some(row) = fast(*op) {
                     return self.fast(&op.to_string(), row, args, ty, ctx);
                 }
                 self.float_apply(*op, args, ty, ctx)
+            }
+            // The e2m1 code of a value, read as a float: the code's number.
+            Expr::Apply(ElementwiseOp::Other(name), args)
+                if &**name == TO_E2M1 && ty == VTy::F32 =>
+            {
+                let code = self.e2m1_code(args, ctx)?;
+                let inst = Inst::new(Opcode::Cvt(Ty::U32), Ty::F32, Vec::new(), vec![code.into()]);
+                Ok(self.b.value(inst.rounded(Round::Rn), Bank::F32).into())
             }
             Expr::Apply(ElementwiseOp::Other(name), _) => {
                 Err(self.no_rule(format_args!("the operation {name}")))
             }
             _ => Err(self.no_rule(format_args!("the expression {expression}"))),
         }
+    }
+
+    /// A float value at another float type: a half widens exactly, a narrowing rounds to nearest, and between the
+    /// two half types the value goes through f32.
+    pub(super) fn converted(&mut self, val: Val, to: VTy) -> Operand {
+        if val.ty == to {
+            return val.op;
+        }
+        if val.ty != VTy::F32 && to != VTy::F32 {
+            let wide = self.converted(val, VTy::F32);
+            return self.converted(
+                Val {
+                    op: wide,
+                    ty: VTy::F32,
+                },
+                to,
+            );
+        }
+        let from = self.register(&val);
+        let inst = Inst::new(
+            Opcode::Cvt(val.ty.arith()),
+            to.arith(),
+            Vec::new(),
+            vec![from.into()],
+        );
+        let inst = if to == VTy::F32 {
+            inst
+        } else {
+            inst.rounded(Round::Rn)
+        };
+        self.b.value(inst, to.bank()).into()
+    }
+
+    /// Whether PTX computes `op` at f16 in one instruction.
+    fn native_f16(&self, op: Operation) -> bool {
+        use Operation as O;
+        match op {
+            O::Add | O::Subtract | O::Multiply | O::Fma | O::Square | O::Negative => true,
+            O::Abs | O::Absolute | O::Fabs | O::Where | O::Copy | O::Positive => true,
+            O::Maximum | O::Fmax | O::Minimum | O::Fmin | O::Relu => self.target.sm >= SM_AMPERE,
+            op => comparison(op).is_some(),
+        }
+    }
+
+    /// `op` over half operands where PTX has no instruction for it at their type: each operand widened, the
+    /// operation at f32, the result rounded once. A bf16 takes only the operations that give its own value that way
+    /// (a selection, a comparison, a sign or a magnitude), since bf16 is never computed in. The kernel passes' list of operations a half computes natively
+    /// (`target.native_f16_ops`) names more than PTX has (the exponential, the logarithm, the square root and its
+    /// reciprocal, the hyperbolic tangent, the division and the reciprocal, which CUDA's half header computes in
+    /// f32 between two conversions), so the conversion the body does not write is written here.
+    fn through_f32(
+        &mut self,
+        op: Operation,
+        args: &[Expression],
+        ty: VTy,
+        ctx: &SimplifyCtx,
+    ) -> Result<Operand> {
+        self.names.push(std::collections::HashMap::new());
+        let done = (|| {
+            let mut wide = Vec::with_capacity(args.len());
+            for (position, arg) in args.iter().enumerate() {
+                let val = match self.infer(arg) {
+                    Some(VTy::Bool) => self.typed(arg, VTy::Bool, ctx)?,
+                    _ => Val {
+                        op: self.float(arg, ty, ctx)?,
+                        ty,
+                    },
+                };
+                let val = match val.ty {
+                    VTy::F16 | VTy::Bf16 => Val {
+                        op: self.converted(val, VTy::F32),
+                        ty: VTy::F32,
+                    },
+                    _ => val,
+                };
+                let name = Name::new(&format!("__h{position}"));
+                self.bind(name, val);
+                wide.push(Expression::new(Expr::Var(name)));
+            }
+            self.float(&Expression::apply(op, wide), VTy::F32, ctx)
+        })();
+        self.names.pop();
+        let value = done?;
+        Ok(self.converted(
+            Val {
+                op: value,
+                ty: VTy::F32,
+            },
+            ty,
+        ))
     }
 
     fn float_select(
@@ -421,6 +555,11 @@ impl Lowerer {
 
     /// The predicate that holds where `val` is nonzero: a NaN is nonzero.
     pub(super) fn truth(&mut self, val: &Val) -> Result<Reg> {
+        // A condition known where the kernel is compiled is tested in a register: ptxas folds it.
+        let val = match (val.ty, val.op.int()) {
+            (VTy::Bool, Some(known)) => &Val::int(known),
+            _ => val,
+        };
         let (cmp, zero) = match val.ty {
             VTy::Bool => {
                 return val
@@ -432,9 +571,7 @@ impl Lowerer {
             ty if ty.is_float() => (Cmp::Neu, self.float_constant(ty, 0.0)),
             _ => (Cmp::Ne, Operand::Int(0)),
         };
-        if !matches!(val.op, Operand::Reg(_)) {
-            return Err(self.no_rule("a constant condition"));
-        }
+        let val = Val::reg(self.register(val), val.ty);
         let inst = Inst::new(
             Opcode::Setp(cmp),
             val.ty.arith(),
@@ -474,6 +611,7 @@ impl Lowerer {
         }
         let ty = self.operand_type(expression);
         let val = match &**expression {
+            Expr::Literal(lit) => Val::int(i64::from(lit.value.truthy())),
             Expr::Var(name) => self.lookup(*name)?,
             _ if ty == VTy::Bool => {
                 return Err(self.no_rule(format_args!("the condition {expression}")));
@@ -522,6 +660,9 @@ impl Lowerer {
                 };
                 Val::reg(this.b.value(inst, to.bank()), to)
             };
+        if from.is_byte_float() || to.is_byte_float() {
+            return self.byte_float_cast(inner, from, to, ctx);
+        }
         match (from, to) {
             _ if from == to || (from.is_int() && to.is_int()) => self.typed(inner, to, ctx),
             (_, VTy::Bool) => Ok(Val::reg(self.pred(inner, ctx)?, VTy::Bool)),
@@ -580,6 +721,208 @@ impl Lowerer {
                     )),
                 }
             }
+        }
+    }
+}
+
+impl Lowerer {
+    /// The e2m1 code of the one f32 operand, as an integer: the code's three magnitude bits count the midpoints of
+    /// the format's values below the magnitude, ties to the even code (the comparisons alternate strict and not),
+    /// saturating at 6; the sign is the fourth bit. A NaN is code zero with its sign.
+    pub(super) fn e2m1_code(&mut self, args: &[Expression], ctx: &SimplifyCtx) -> Result<Reg> {
+        let [x] = args else {
+            return Err(self.refuse(format_args!("{TO_E2M1} takes one operand")));
+        };
+        let x = self.float(x, VTy::F32, ctx)?;
+        let magnitude = self.b.value(
+            Inst::new(Opcode::Abs, Ty::F32, Vec::new(), vec![x.clone()]),
+            Bank::F32,
+        );
+        let mut code: Option<Reg> = None;
+        for (midpoint, strict) in [
+            (0.25, true),
+            (0.75, false),
+            (1.25, true),
+            (1.75, false),
+            (2.5, true),
+            (3.5, false),
+            (5.0, true),
+        ] {
+            let cmp = if strict { Cmp::Gt } else { Cmp::Ge };
+            let operands = vec![magnitude.into(), Operand::f32(midpoint)];
+            let above = self.b.value(
+                Inst::new(Opcode::Setp(cmp), Ty::F32, Vec::new(), operands),
+                Bank::Pred,
+            );
+            let one = Inst::new(
+                Opcode::Selp,
+                Ty::U32,
+                Vec::new(),
+                vec![Operand::Int(1), Operand::Int(0), above.into()],
+            );
+            let one = self.b.value(one, Bank::B32);
+            code = Some(match code {
+                None => one,
+                Some(code) => {
+                    let sum = Inst::new(
+                        Opcode::Add,
+                        Ty::U32,
+                        Vec::new(),
+                        vec![code.into(), one.into()],
+                    );
+                    self.b.value(sum, Bank::B32)
+                }
+            });
+        }
+        let code = code.expect("seven midpoints");
+        let bits = self.b.value(
+            Inst::new(Opcode::Mov, Ty::B32, Vec::new(), vec![x]),
+            Bank::B32,
+        );
+        let sign = Inst::new(
+            Opcode::Shr,
+            Ty::U32,
+            Vec::new(),
+            vec![bits.into(), Operand::Int(31)],
+        );
+        let sign = self.b.value(sign, Bank::B32);
+        let sign = Inst::new(
+            Opcode::Shl,
+            Ty::B32,
+            Vec::new(),
+            vec![sign.into(), Operand::Int(3)],
+        );
+        let sign = self.b.value(sign, Bank::B32);
+        let join = Inst::new(
+            Opcode::Or,
+            Ty::B32,
+            Vec::new(),
+            vec![code.into(), sign.into()],
+        );
+        Ok(self.b.value(join, Bank::B32))
+    }
+
+    /// The type an epilogue's value with no dtype computes at, as the type pass would promote it: an operation at
+    /// the promotion of its operands' types (the integer rule over integers, `f16` over halves alone, else `f32`),
+    /// a name at its own.
+    pub(super) fn promoted(&self, value: &Expression) -> VTy {
+        if let Expr::Apply(op, args) = &**value {
+            let operands: Vec<DType> = args
+                .iter()
+                .filter(|arg| !matches!(&***arg, Expr::Literal(_)))
+                .filter_map(|arg| self.infer(arg))
+                .map(super::fragment::dtype_of)
+                .collect();
+            let op = match op {
+                ElementwiseOp::Known(op) => Some(*op),
+                ElementwiseOp::Other(_) => None,
+            };
+            return VTy::of(emmy_ir::dtype::promote(op, &operands)).unwrap_or(VTy::F32);
+        }
+        self.infer(value).unwrap_or(VTy::F32)
+    }
+
+    /// A value of an 8-bit float type or of a pair of codes: a name that holds one, or a cast into the type.
+    pub(super) fn byte_float(
+        &mut self,
+        expression: &Expression,
+        ty: VTy,
+        ctx: &SimplifyCtx,
+    ) -> Result<Val> {
+        match &**expression {
+            Expr::Var(name) => {
+                let val = self.lookup(*name)?;
+                if val.ty != ty {
+                    let (held, read) = (val.ty.text(), ty.text());
+                    return Err(self.refuse(format_args!("{name} is {held}, read as {read}")));
+                }
+                Ok(val)
+            }
+            Expr::Cast(target, inner) if self.cast_target(target)? == ty => {
+                self.cast(inner, ty, ctx)
+            }
+            // A pair of codes computed from integers is the low byte of the integer.
+            Expr::Apply(..) if ty == VTy::F4x2 => {
+                let val = self.int(expression, ctx)?;
+                let op = self.as_int(&val, VTy::U32);
+                let low = Inst::new(
+                    Opcode::And,
+                    Ty::B32,
+                    Vec::new(),
+                    vec![op, Operand::Int(0xff)],
+                );
+                Ok(Val::reg(self.b.value(low, Bank::B32), ty))
+            }
+            _ => Err(self.no_rule(format_args!("the expression {expression} at {}", ty.text()))),
+        }
+    }
+
+    /// A float rounded to nearest into an 8-bit float, saturating at the largest finite value, as CUDA's 8-bit
+    /// float constructors do: the hardware's conversion of two f32 into two 8-bit floats, the value the low one.
+    fn narrowed_to_f8(&mut self, value: Val, to: VTy) -> Result<Val> {
+        self.requires(&super::fragment::F8_CONVERSION)?;
+        let wide = self.converted(value, VTy::F32);
+        let pair = if to == VTy::F8E4M3 {
+            Ty::E4m3x2
+        } else {
+            Ty::E5m2x2
+        };
+        let operands = vec![Operand::f32(0.0), wide];
+        let both = Inst::new(Opcode::Cvt(Ty::F32), pair, Vec::new(), operands).rounded(Round::Rn);
+        let both = self.b.value(both, Bank::B16);
+        let byte = Inst::new(Opcode::Cvt(Ty::U16), Ty::U32, Vec::new(), vec![both.into()]);
+        Ok(Val::reg(self.b.value(byte, Bank::B32), to))
+    }
+}
+
+impl Lowerer {
+    /// A cast into or out of an 8-bit float or a pair of codes. A float converts to and from an 8-bit float; an
+    /// integer is a pair of codes by its low byte, and the bits of either are the integer they spell.
+    fn byte_float_cast(
+        &mut self,
+        inner: &Expression,
+        from: VTy,
+        to: VTy,
+        ctx: &SimplifyCtx,
+    ) -> Result<Val> {
+        let val = self.typed(inner, from, ctx)?;
+        match (from, to) {
+            _ if from == to => Ok(val),
+            (from, VTy::F8E4M3 | VTy::F8E5M2) if from.is_float() => self.narrowed_to_f8(val, to),
+            (VTy::F8E4M3 | VTy::F8E5M2, to) if to.is_float() => {
+                let byte = self.register(&val);
+                let dtype = if from == VTy::F8E4M3 {
+                    DType::F8E4M3
+                } else {
+                    DType::F8E5M2
+                };
+                let half = self.f8_as_f16(byte, dtype)?;
+                Ok(Val {
+                    op: self.converted(Val::reg(half, VTy::F16), to),
+                    ty: to,
+                })
+            }
+            (from, to) if from.is_int() && to.is_byte_float() => {
+                let op = self.as_int(&val, VTy::U32);
+                let low = Inst::new(
+                    Opcode::And,
+                    Ty::B32,
+                    Vec::new(),
+                    vec![op, Operand::Int(0xff)],
+                );
+                Ok(Val::reg(self.b.value(low, Bank::B32), to))
+            }
+            (from, to) if from.is_byte_float() && to.is_int() => {
+                let bits = Val {
+                    op: val.op,
+                    ty: VTy::U32,
+                };
+                Ok(Val {
+                    op: self.as_int(&bits, to),
+                    ty: to,
+                })
+            }
+            _ => Err(self.no_rule(format_args!("a cast from {} to {}", from.text(), to.text()))),
         }
     }
 }

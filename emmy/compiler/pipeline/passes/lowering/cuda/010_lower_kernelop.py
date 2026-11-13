@@ -125,7 +125,7 @@ def rewrite(match: Match, root: Node, ctx) -> CudaOp | None:
     # launch-encoded ``CUtensorMap`` device arrays); the symbolic ``int`` args are tail-appended in ``_launch``. A
     # paged operand binds its page TABLE, not the buffer: the name in ``arg_order`` is what the launcher looks up in
     # ``arrays``, so the rename is the whole runtime change.
-    interface = kernel_interface(kernel, tensors, runtime_args, frozenset(entry[0] for entry in paged))
+    interface = kernel_interface(kernel, tensors, runtime_args, frozenset(entry[0] for entry in paged), pair_tables)
     flush_to_zero = precision_pin(FLUSH_TO_ZERO)
     source = None
     code = config.kernel_code()
@@ -137,7 +137,6 @@ def rewrite(match: Match, root: Node, ctx) -> CudaOp | None:
                 compute_capability=ctx.compute_capability,
                 fuse=precision_pin(CONTRACT_FMA),
                 flush_to_zero=flush_to_zero,
-                pair_tables=pair_tables,
             )
         except ptx.NoRule:
             if code == config.KERNEL_CODE_PTX_ONLY:

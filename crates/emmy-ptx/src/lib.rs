@@ -10,6 +10,7 @@ pub mod verify;
 
 use emmy_ir::body::Body;
 use emmy_ir::dtype::DType;
+use emmy_ir::expr::Expression;
 use emmy_ir::{Name, Result};
 
 use crate::inst::Module;
@@ -28,7 +29,7 @@ pub enum ParamKind {
 }
 
 /// One kernel parameter, in the launch's argument order.
-#[derive(Clone, PartialEq, Eq, Debug)]
+#[derive(Clone, PartialEq, Debug)]
 pub struct Param {
     pub name: Name,
     pub kind: ParamKind,
@@ -39,11 +40,17 @@ pub struct Param {
     /// The bytes the launch gives a buffer's first element as alignment: what stands behind every access of
     /// several elements.
     pub align: u32,
+    /// The extents of a buffer, one a dimension, a symbolic one as an expression over the sizes the launch passes:
+    /// what flattens the index of a statement that names an element by one coordinate a dimension. Empty where no
+    /// statement of the kernel does.
+    pub shape: Vec<Expression>,
+    /// Whether the buffer is the e2m1 pair table: a load of it computes its value from the index and reads nothing.
+    pub pair_table: bool,
 }
 
 /// What the launch and the code must agree on: the parameters in call order, the per-block thread bound, the
 /// shared-memory pool, and whether the kernel needs the arch-specific instruction set.
-#[derive(Clone, PartialEq, Eq, Debug, Default)]
+#[derive(Clone, PartialEq, Debug, Default)]
 pub struct Interface {
     pub params: Vec<Param>,
     /// The most threads a block of the kernel launches with.

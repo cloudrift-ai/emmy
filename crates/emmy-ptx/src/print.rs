@@ -2,7 +2,7 @@
 
 use std::fmt::Write as _;
 
-use crate::inst::{Base, Inst, Item, Label, Mma, Module, Opcode, Operand, ParamDecl, Reg};
+use crate::inst::{Base, Inst, Item, Label, Mma, Module, Opcode, Operand, ParamDecl, Reg, Ty};
 
 /// The text of `module`, as ptxas reads it. ASCII only: ptxas refuses any other byte, in a comment too.
 pub fn print(module: &Module) -> String {
@@ -187,6 +187,10 @@ fn mnemonic(inst: &Inst) -> String {
     }
     if let Some(round) = inst.round {
         parts.push(round.text());
+    }
+    // A conversion into two 8-bit floats saturates to the finite range: PTX has no other form of it.
+    if matches!(inst.opcode, Opcode::Cvt(_)) && matches!(inst.ty, Ty::E4m3x2 | Ty::E5m2x2) {
+        parts.push("satfinite");
     }
     if inst.ftz {
         parts.push("ftz");
