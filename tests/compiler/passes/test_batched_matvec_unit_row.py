@@ -9,12 +9,13 @@ from emmy.compiler.graph import Graph, Tensor
 from emmy.compiler.ir.axis import Axis
 from emmy.compiler.ir.base import InputOp
 from emmy.compiler.ir.cuda import CudaOp
+from emmy.compiler.ir.kernel.ir import MmaSyncPtx
 from emmy.compiler.ir.loop import LoopOp
 from emmy.compiler.ir.stmt import parse_body
 from emmy.compiler.ir.tile import OutputSpec, Placement, TileOp
-from emmy.compiler.pipeline import CUDA_PASSES, LOWERING_PASSES, Pipeline
+from emmy.compiler.pipeline import LOWERING_PASSES, Pipeline
 from emmy.compiler.pipeline.search.pins import pinned_knobs
-from tests.compiler.helpers import requires_cuda, requires_sm
+from tests.compiler.helpers import compile_with_kernels, requires_cuda, requires_sm, statements
 from tests.compiler.terms import contraction, projection, slab
 
 
@@ -40,9 +41,16 @@ def _graph(dtype: str) -> Graph:
     return graph
 
 
-def _compiled(dtype: str, reduce: str = ""):
+def _products(kernels) -> set[tuple]:
+    """The tensor-core products of ``kernels``: each one's shape, operand type and accumulator type."""
+    return {(tuple(mma.shape), mma.ab_dtype, mma.c_dtype) for mma in statements(kernels, MmaSyncPtx)}
+
+
+def _compiled(dtype: str, reduce: str = "", *, kernels: bool = False):
+    """The batched matvec compiled under its tensor-core pins; with ``kernels``, beside its Kernel IR."""
     with pinned_knobs({"PLACE": "fuse", "WORK": "w1x1", "TILE": f"mma_m16n8k16_{dtype}_f32/f1x1", "REDUCE": reduce, "STAGE": ""}):
-        return Pipeline.build(CUDA_PASSES).run(_graph(dtype), ctx=Context.from_target((12, 0)))
+        compiled = compile_with_kernels(_graph(dtype), ctx=Context.from_target((12, 0)))
+    return compiled if kernels else compiled[0]
 
 
 def _rank_one_graph(dtype: str, k_size: int = 64, n_size: int = 32, *, reshape_output: bool = False) -> Graph:
@@ -72,11 +80,12 @@ def _rank_one_graph(dtype: str, k_size: int = 64, n_size: int = 32, *, reshape_o
     return graph
 
 
-def _rank_one_compiled(dtype: str, k_size: int = 64, n_size: int = 32, *, reshape_output: bool = False):
+def _rank_one_compiled(dtype: str, k_size: int = 64, n_size: int = 32, *, reshape_output: bool = False, kernels: bool = False):
+    """The rank-one projection compiled under its tensor-core pins; with ``kernels``, beside its Kernel IR."""
+    graph = _rank_one_graph(dtype, k_size, n_size, reshape_output=reshape_output)
     with pinned_knobs({"PLACE": "fuse", "WORK": "w1x1", "TILE": f"mma_m16n8k16_{dtype}_f32/f1x1", "REDUCE": "", "STAGE": ""}):
-        return Pipeline.build(CUDA_PASSES).run(
-            _rank_one_graph(dtype, k_size, n_size, reshape_output=reshape_output), ctx=Context.from_target((12, 0))
-        )
+        compiled = compile_with_kernels(graph, ctx=Context.from_target((12, 0)))
+    return compiled if kernels else compiled[0]
 
 
 def _computed_grouped_graph(mirrored: bool) -> Graph:
@@ -127,18 +136,16 @@ def test_computed_grouped_matvec_tiles_either_operand_orientation(mirrored, tile
 @pytest.mark.parametrize("dtype", ["f16", "bf16"])
 @pytest.mark.parametrize(("k_size", "n_size"), [(64, 32), (5120, 2048), (5120, 6144), (5120, 10240)])
 def test_rank_one_projection_emits_mma(dtype: str, k_size: int, n_size: int) -> None:
-    compiled = _rank_one_compiled(dtype, k_size, n_size)
-    sources = [node.op.kernel_source for node in compiled.nodes.values() if isinstance(node.op, CudaOp)]
-    assert len(sources) == 1
-    assert f"emmy_mma_m16n8k16_{dtype}_f32(" in sources[0]
+    _, kernels = _rank_one_compiled(dtype, k_size, n_size, kernels=True)
+    assert len(kernels) == 1
+    assert _products(kernels) == {((16, 8, 16), dtype, "f32")}
 
 
 @pytest.mark.parametrize("n_size", [256, 2048, 6144])
 def test_rank_one_reshaped_projection_emits_mma(n_size: int) -> None:
-    compiled = _rank_one_compiled("bf16", 5120, n_size, reshape_output=True)
-    sources = [node.op.kernel_source for node in compiled.nodes.values() if isinstance(node.op, CudaOp)]
-    assert len(sources) == 1
-    assert "emmy_mma_m16n8k16_bf16_f32(" in sources[0]
+    _, kernels = _rank_one_compiled("bf16", 5120, n_size, reshape_output=True, kernels=True)
+    assert len(kernels) == 1
+    assert _products(kernels) == {((16, 8, 16), "bf16", "f32")}
 
 
 @requires_cuda
@@ -165,10 +172,9 @@ def test_rank_one_projection_matches_independent_reference(dtype: str, n_size: i
 
 @pytest.mark.parametrize("dtype", ["f16", "bf16"])
 def test_batched_matvec_emits_mma(dtype: str) -> None:
-    compiled = _compiled(dtype)
-    sources = [node.op.kernel_source for node in compiled.nodes.values() if isinstance(node.op, CudaOp)]
-    assert len(sources) == 1
-    assert f"emmy_mma_m16n8k16_{dtype}_f32(" in sources[0]
+    _, kernels = _compiled(dtype, kernels=True)
+    assert len(kernels) == 1
+    assert _products(kernels) == {((16, 8, 16), dtype, "f32")}
 
 
 @requires_cuda
@@ -229,9 +235,8 @@ def test_row_scaled_fp8_b_matches_independent_reference() -> None:
     bits = rng.integers(0, 256, (32, 16), dtype=np.uint8)
     bits[(bits == 0x7F) | (bits == 0xFF)] = 0
     with pinned_knobs({"PLACE": "fuse", "WORK": "w1x1", "TILE": "mma_m16n8k16_f16_f32/f1x1", "REDUCE": "", "STAGE": ""}):
-        compiled = Pipeline.build(CUDA_PASSES).run(_row_scaled_fp8_graph(), ctx=Context.from_target((12, 0)))
-    sources = [node.op.kernel_source for node in compiled.nodes.values() if isinstance(node.op, CudaOp)]
-    assert len(sources) == 1
+        compiled, kernels = compile_with_kernels(_row_scaled_fp8_graph(), ctx=Context.from_target((12, 0)))
+    assert len(kernels) == 1
     result, _ = CudaBackend().run(compiled, input_data={"a": a, "scale": scale, "bits": bits})
     expected = np.einsum("mk,mk,kn->mn", a.astype(np.float32), scale.astype(np.float32), decode_f8(bits, "f8e4m3"))
     np.testing.assert_allclose(result.outputs["out"].reshape(expected.shape), expected, rtol=2e-3, atol=2e-3)
@@ -267,9 +272,8 @@ def test_grouped_weight_row_batch_matches_independent_reference() -> None:
     a = rng.standard_normal((6, 2, 32)).astype(np.float16)
     w = rng.standard_normal((32, 2 * 6 * 16)).astype(np.float16)
     with pinned_knobs({"PLACE": "fuse", "WORK": "w1x1", "TILE": "mma_m16n8k16_f16_f32/f1x1", "REDUCE": "", "STAGE": ""}):
-        compiled = Pipeline.build(CUDA_PASSES).run(_grouped_weight_graph(), ctx=Context.from_target((12, 0)))
-    sources = [node.op.kernel_source for node in compiled.nodes.values() if isinstance(node.op, CudaOp)]
-    assert len(sources) == 1 and "mma.sync" in sources[0]
+        compiled, kernels = compile_with_kernels(_grouped_weight_graph(), ctx=Context.from_target((12, 0)))
+    assert len(kernels) == 1 and statements(kernels, MmaSyncPtx)
     result, _ = CudaBackend().run(compiled, input_data={"a": a, "w": w})
     expected = np.empty((6, 2, 16), dtype=np.float32)
     for head in range(6):

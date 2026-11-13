@@ -379,3 +379,30 @@ def statements(kernels, *types) -> list:
     nested ones included, in body order; every statement when no type is given."""
     ops = kernels.values() if isinstance(kernels, dict) else (kernels,)
     return [stmt for op in ops for stmt in op.body.iter() if not types or isinstance(stmt, types)]
+
+
+def operations(kernels) -> set[str]:
+    """The elementwise operations ``kernels`` compute, by name: in a value, as a fold's or a fragment statement's own
+    operation, inside a cross-thread combine or a store's epilogue."""
+    found: set[str] = set()
+    pending = statements(kernels)
+    while pending:
+        stmt = pending.pop()
+        found |= {node.fn for e in stmt.expressions() for node in e.subterms() if hasattr(node, "fn")}
+        found |= {node.operation.name for e in stmt.expressions() for node in e.subterms() if getattr(node, "operation", None)}
+        if getattr(stmt, "op", None) is not None:
+            found.add(stmt.op.name)
+        for carried in ("combine_states", "epilogue", "run"):
+            pending.extend(getattr(stmt, carried, None) or ())
+    return found
+
+
+def text(kernels) -> str:
+    """The Kernel IR of ``kernels`` (the kernels of a compile, one of them, or a body) in its text form: what a check
+    of a name the lowering gave, or of an index's form, reads."""
+    from emmy.compiler.ir.stmt import Body, pretty_body
+
+    if isinstance(kernels, Body):
+        return "\n".join(pretty_body(kernels))
+    ops = kernels.values() if isinstance(kernels, dict) else (kernels,)
+    return "\n".join(line for op in ops for line in pretty_body(op.body))

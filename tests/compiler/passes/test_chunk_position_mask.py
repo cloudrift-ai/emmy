@@ -14,24 +14,24 @@ import torch
 from emmy.compiler.backend.gpu_lock import gpu_lock
 from emmy.compiler.context import Context
 from emmy.compiler.dtype import F8E4M3, decode_bf16
-from emmy.compiler.ir.cuda import CudaOp
+from emmy.compiler.ir.kernel.ir import CpAsyncCopy, FragmentApply, MmaSyncPtx, Smem, WgmmaMma
 from emmy.compiler.ir.pure.fold import Fold
 from emmy.compiler.ir.schedule import Stage, Tile, Work
 from emmy.compiler.ir.schedule.classic import refusals
 from emmy.compiler.ir.schedule.staging import chunk_slab_dtype, chunk_slab_pad
+from emmy.compiler.ir.stmt import Body, StridedLoop
 from emmy.compiler.ir.tile import TileOp
-from emmy.compiler.pipeline import CUDA_PASSES, LOOP_PASSES, Pipeline
+from emmy.compiler.pipeline import LOOP_PASSES, Pipeline
 from emmy.compiler.pipeline.passes.tile._split import split_forks
 from emmy.compiler.pipeline.search.pins import pinned_knobs
 from emmy.compiler.trace.torch import trace_module
 from emmy.serving.native.prepare import WINDOW, attend_module
-from tests.compiler.helpers import requires_cuda
+from tests.compiler.helpers import compile_with_kernels, requires_cuda, statements, text
 
 HEADS, KV, D, ROWS, CONTEXT = 4, 2, 128, 64, 1024
 # One CTA per head: 4 heads launch one wave, where the tier keeps the stream whole; 192 heads launch more CTAs than
 # any card has SMs, where the stream stops at the block end plus the position, a bound decided at runtime.
 WIDE = 192
-STOP = "__ck_end"  # the chunk loop's bound, a variable its header carries only when a mask bounds the stream
 SPLIT = "g4k"  # a key split across the window: four CTAs per head, each over a quarter of the keys
 BYTES = "d1/smem-async"  # an FP8 cache copied verbatim into byte slabs, its fragment reads converting
 CELLS = {  # the twist's cell and an FP8 cache's transport; the score inner stays bf16_f32, the query's own width
@@ -126,25 +126,27 @@ def test_an_fp8_cache_takes_a_16_bit_cell_whose_value_load_converts() -> None:
 
 
 @pytest.mark.parametrize(
-    ("cache", "target", "score", "spelled"),
+    ("cache", "target", "score", "slab", "wgmma"),
     [
-        (torch.float8_e4m3fn, (12, 0), "mma_m16n8k16_bf16_f32", ("__nv_fp8_e4m3 _a_smem", "emmy_cp_async")),
-        (torch.bfloat16, (9, 0), "wgmma_m64n64k16_bf16_f32", ("__nv_bfloat16 _a_smem", "emmy_cp_async", "wgmma")),
-        (torch.float8_e4m3fn, (9, 0), "wgmma_m64n64k16_bf16_f32", ()),
+        (torch.float8_e4m3fn, (12, 0), "mma_m16n8k16_bf16_f32", "__nv_fp8_e4m3", False),
+        (torch.bfloat16, (9, 0), "wgmma_m64n64k16_bf16_f32", "__nv_bfloat16", True),
+        (torch.float8_e4m3fn, (9, 0), "wgmma_m64n64k16_bf16_f32", None, False),
     ],
     ids=["fp8-mma", "bf16-wgmma", "fp8-wgmma"],
 )
-def test_a_staged_key_is_read_only_by_a_cell_that_converts_it(cache, target, score, spelled) -> None:
+def test_a_staged_key_is_read_only_by_a_cell_that_converts_it(cache, target, score, slab, wgmma) -> None:
     """GPU-free. Under the staged pins an FP8 key stages as a byte slab on cp.async, which the ``mma.sync`` score
     converts as it reads. A warp-group score reads its key slab through a descriptor, which converts nothing: it takes
     a bf16 key, and refuses an FP8 one, so no kernel reads the key's bytes as bf16."""
     _, graph = _attention(cache)
     pins = {**_flash("mma_m16n8k16_bf16_f32", BYTES), "TILE@map.1/map.1/twist.1/inner": f"{score}/f1x8/k4"}
     with pinned_knobs(pins):
-        compiled = Pipeline.build(CUDA_PASSES).run(graph, ctx=Context.from_target(target))
-    (source,) = [node.op.kernel_source for node in compiled.nodes.values() if isinstance(node.op, CudaOp)]
-    assert all(text in source for text in spelled), spelled
-    assert ("wgmma" in source) == ("wgmma" in spelled)
+        _, kernels = compile_with_kernels(graph, ctx=Context.from_target(target))
+    (kernel,) = kernels.values()
+    if slab is not None:  # the key's slab at the element type its reader takes, filled on cp.async
+        assert [key.dtype for key in statements(kernel, Smem) if key.name == "_a_smem"] == [slab]
+        assert statements(kernel, CpAsyncCopy)
+    assert bool(statements(kernel, WgmmaMma)) == wgmma
 
 
 @pytest.mark.parametrize(
@@ -165,14 +167,14 @@ def test_a_cache_slice_stages_only_on_the_16_byte_grid(cache, offset, row, stage
 
     def compile_():
         with pinned_knobs(_flash("mma_m16n8k16_bf16_f32", BYTES)):
-            return Pipeline.build(CUDA_PASSES).run(graph, ctx=Context.from_target((12, 0)))
+            return compile_with_kernels(graph, ctx=Context.from_target((12, 0)))[1]
 
     if not staged:
         with pytest.raises(ValueError, match="does not resolve"):
             compile_()
         return
-    (source,) = [node.op.kernel_source for node in compile_().nodes.values() if isinstance(node.op, CudaOp)]
-    assert "emmy_cp_async" in source
+    (kernel,) = compile_().values()
+    assert statements(kernel, CpAsyncCopy)
 
 
 def test_the_expectation_reads_the_weight_the_denominator_computed() -> None:
@@ -183,10 +185,15 @@ def test_the_expectation_reads_the_weight_the_denominator_computed() -> None:
     expectation computed every exp a second time (Qwen3.6's 4-token decode twin 127 → 171 us on an RTX 5090)."""
     _, graph = _attention()
     with pinned_knobs(_flash("mma_m16n8k16_bf16_f32", None)):
-        compiled = Pipeline.build(CUDA_PASSES).run(graph, ctx=Context.from_target((12, 0)))
-    (source,) = [node.op.kernel_source for node in compiled.nodes.values() if isinstance(node.op, CudaOp)]
-    weights = [line.strip() for line in source.splitlines() if "expf(" in line and "_ch0_" in line]
-    assert weights and all(line.startswith("_ch0_") and "_w[_e] = __expf(" in line for line in weights), weights
+        _, kernels = compile_with_kernels(graph, ctx=Context.from_target((12, 0)))
+    (kernel,) = kernels.values()
+    # Every exponential over the twin's score fragments defines one weight fragment, and each weight is defined once.
+    exponentials = [
+        apply for apply in statements(kernel, FragmentApply) if apply.op.name in ("exp", "exp_fast") and "_ch0_" in text(Body([apply]))
+    ]
+    weights = [apply.out for apply in exponentials]
+    assert weights and all(out.startswith("_ch0_") and out.endswith("_w") for out in weights), weights
+    assert len(weights) == len(set(weights)), weights
 
 
 def test_a_sum_with_a_negated_term_is_evaluated_as_a_subtraction() -> None:
@@ -230,9 +237,9 @@ def test_a_warp_group_score_takes_a_query_slice_only_on_the_16_byte_grid(query, 
     _, graph = _attention(query=query)
     pins = {**_flash("mma_m16n8k16_bf16_f32", BYTES), "TILE@map.1/map.1/twist.1/inner": "wgmma_m64n64k16_bf16_f32/f1x8/k4"}
     with pinned_knobs(pins):
-        compiled = Pipeline.build(CUDA_PASSES).run(graph, ctx=Context.from_target((9, 0)))
-    (source,) = [node.op.kernel_source for node in compiled.nodes.values() if isinstance(node.op, CudaOp)]
-    assert ("wgmma" in source) is wgmma
+        _, kernels = compile_with_kernels(graph, ctx=Context.from_target((9, 0)))
+    (kernel,) = kernels.values()
+    assert bool(statements(kernel, WgmmaMma)) is wgmma
 
 
 @requires_cuda
@@ -243,20 +250,20 @@ def test_the_folded_attention_matches_the_twin_over_the_causal_prefix(cell, head
     """One tensor-core kernel at the symbolic window, or a partial per key slice and its finalize, at every position and
     window a step can set, one the slices overhang included: the keys past a row's own position never reach the
     output, whatever the cache stores and whether or not the stream stops early."""
-    from emmy.compiler.backend.cuda.backend import CudaBackend
     from emmy.compiler.backend.cuda.program import CompiledProgram
 
     cache, atom, stage = CELLS[cell]
     module, graph = _attention(cache, heads)
     with pinned_knobs(_flash(atom, stage, split)):
-        compiled = CudaBackend().compile(graph)
-    sources = [node.op.kernel_source for node in compiled.nodes.values() if isinstance(node.op, CudaOp)]
-    assert len(sources) == (2 if split else 1), "the chunk tier's one kernel, or the split's partial and finalize"
-    source = sources[0]
-    assert "mma.sync" in source and "__ck" in source, "the chunk tier folds the stream, or each slice of it"
+        compiled, kernels = compile_with_kernels(graph)
+    assert len(kernels) == (2 if split else 1), "the chunk tier's one kernel, or the split's partial and finalize"
+    kernel = next(iter(kernels.values()))
+    chunks = [loop for loop in statements(kernel, StridedLoop) if "__ck" in loop.axis.name]
+    assert statements(kernel, MmaSyncPtx) and chunks, "the chunk tier folds the stream, or each slice of it"
     if stage is not None:
-        assert ("emmy_cp_async" in source) == bool(stage), "an FP8 cache stages exactly when its row spells a transport"
-    assert (STOP in source) == (heads == WIDE), "the position bounds the stream on a launch of more than one wave"
+        assert bool(statements(kernel, CpAsyncCopy)) == bool(stage), "an FP8 cache stages exactly when its row spells a transport"
+    bounded = any(loop.end is not None for loop in chunks)
+    assert bounded == (heads == WIDE), "the position bounds the stream on a launch of more than one wave"
     rng = np.random.default_rng(7)
     query = torch.from_numpy(rng.normal(size=(ROWS, heads * D)).astype(np.float32)).to(torch.bfloat16)
     stored = torch.from_numpy(rng.normal(size=(2, CONTEXT, KV, D)).astype(np.float32)).to(cache)

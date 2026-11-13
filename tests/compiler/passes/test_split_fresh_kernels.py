@@ -30,8 +30,9 @@ from emmy.compiler.graph import Graph, Tensor
 from emmy.compiler.ir.axis import Axis
 from emmy.compiler.ir.base import InputOp
 from emmy.compiler.ir.frontend.ir import MatmulOp
+from emmy.compiler.ir.kernel.ir import FragmentApply, MmaSyncPtx
 from emmy.compiler.ir.pure.fold import Fold
-from emmy.compiler.ir.stmt import Loop, parse_body
+from emmy.compiler.ir.stmt import Body, Loop, StridedLoop, parse_body
 from emmy.compiler.ir.tensor.ir import ElementwiseOp, ReduceOp
 from emmy.compiler.ir.tile import OutputSpec, Placement
 from emmy.compiler.ir.tile.ir import TileOp
@@ -40,9 +41,16 @@ from emmy.compiler.pipeline import CUDA_PASSES, TILE_PASSES, Pipeline
 from emmy.compiler.pipeline.fork import leaf_knobs
 from emmy.compiler.pipeline.knob import family_of
 from emmy.compiler.pipeline.pipeline import Run
+from tests.compiler.helpers import compile_with_kernels, statements, text
 from tests.compiler.terms import contraction
 
 _CTX = Context.from_target((12, 0))
+
+
+def _folds_on_the_chunk_tier(kernel) -> bool:
+    """Whether ``kernel`` folds a chunked stream with the ``m16n8k16`` product: products under a chunk loop."""
+    products = [mma for mma in statements(kernel, MmaSyncPtx) if tuple(mma.shape) == (16, 8, 16)]
+    return bool(products) and any("__ck" in loop.axis.name for loop in statements(kernel, StridedLoop))
 
 
 def _matmul(m: int = 128, k: int = 512, n: int = 128, *, out_dtype=F16) -> Graph:
@@ -490,7 +498,6 @@ def test_a_twisted_carrier_split_partial_binds_a_tensor_core_tile() -> None:
     chunk tier must write its per-row states whole, broadcast into a fragment, beside the
     expectation's own fragment. Before, that write fell the partial to scalar tiles."""
     from emmy.commands.trace import graph_from_code
-    from emmy.compiler.ir.cuda import CudaOp
     from emmy.compiler.pipeline.search.pins import pinned_knobs
 
     q, kv = "torch.randn(1, 16, 1, 64, dtype=torch.float16)", "torch.randn(1, 2, 256, 64, dtype=torch.float16)"
@@ -508,15 +515,19 @@ def test_a_twisted_carrier_split_partial_binds_a_tensor_core_tile() -> None:
         "WORK": "w1x1",
     }
     with pinned_knobs(pins):
-        lowered = Pipeline.build(CUDA_PASSES).run(graph_from_code(code)[0], ctx=_CTX)
-    sources = {nid: node.op.kernel_source for nid, node in lowered.nodes.items() if isinstance(node.op, CudaOp)}
-    partial = next(src for nid, src in sources.items() if nid.endswith("__partial"))
-    assert len(sources) == 2, sorted(sources)
-    assert "mma_m16n8k16" in partial and "__ck" in partial, "the partial folds its key slice on the chunk tier"
-    states = re.findall(r"float (acc\d+)__r0_0 = ", partial)
-    assert len(states) == 2, "the pivot and denominator each keep a per-row register"
-    for state in states:
-        assert f"? ({state}__r0_0) : ({state}__r0_1)" in partial, f"{state} reaches the workspace whole"
+        _, kernels = compile_with_kernels(graph_from_code(code)[0], ctx=_CTX)
+    partial = next(kernel for nid, kernel in kernels.items() if nid.endswith("__partial"))
+    assert len(kernels) == 2, sorted(kernels)
+    assert _folds_on_the_chunk_tier(partial), "the partial folds its key slice on the chunk tier"
+    # A per-row state reaches the workspace as a fragment its two row registers are broadcast into.
+    whole = {
+        arg.names for apply in statements(partial, FragmentApply) if apply.op.name == "copy" for arg in apply.args if arg.kind == "row"
+    }
+    states = {top.removesuffix("__r0_0") for top, _ in whole}
+    assert len(states) == 2 and all(re.fullmatch(r"acc\d+", state) for state in states), (
+        "the pivot and denominator each keep a per-row register"
+    )
+    assert whole == {(f"{state}__r0_0", f"{state}__r0_1") for state in states}, "each state reaches the workspace whole"
 
 
 def test_a_causal_split_piece_masks_its_absolute_key_on_the_chunk_tier() -> None:
@@ -524,7 +535,6 @@ def test_a_causal_split_piece_masks_its_absolute_key_on_the_chunk_tier() -> None
     coordinate as uniform over the CTA, like the batch axes, so the sliced causal mask lands as the coordinate mask the
     tier evaluates per element — before, the partition in the predicate refused every causal split off the tier."""
     from emmy.commands.trace import graph_from_code
-    from emmy.compiler.ir.cuda import CudaOp
     from emmy.compiler.pipeline.search.pins import pinned_knobs
 
     q, kv = "torch.randn(1, 16, 128, 64, dtype=torch.float16)", "torch.randn(1, 2, 512, 64, dtype=torch.float16)"
@@ -542,12 +552,14 @@ def test_a_causal_split_piece_masks_its_absolute_key_on_the_chunk_tier() -> None
         "WORK": "w4x1",
     }
     with pinned_knobs(pins):
-        lowered = Pipeline.build(CUDA_PASSES).run(graph_from_code(code)[0], ctx=_CTX)
-    sources = {nid: node.op.kernel_source for nid, node in lowered.nodes.items() if isinstance(node.op, CudaOp)}
-    partial = next(src for nid, src in sources.items() if nid.endswith("__partial"))
-    assert len(sources) == 2, sorted(sources)
-    assert "mma_m16n8k16" in partial and "__ck" in partial, "the partial folds its key slice on the chunk tier"
-    assert re.search(r"256 \* _a\d+_ks \+ \(a\d+__ck", partial), "the mask compares the slice's absolute key, 256 keys per partition"
+        _, kernels = compile_with_kernels(graph_from_code(code)[0], ctx=_CTX)
+    partial = next(kernel for nid, kernel in kernels.items() if nid.endswith("__partial"))
+    assert len(kernels) == 2, sorted(kernels)
+    assert _folds_on_the_chunk_tier(partial), "the partial folds its key slice on the chunk tier"
+    # The mask is a predicate over each element's coordinates: its key is the chunk's column past the slice's base.
+    masks = [text(Body([apply])) for apply in statements(partial, FragmentApply) if any(arg.kind == "coord" for arg in apply.args)]
+    absolute = all(re.search(r"__frow < 256 \* _a\d+_ks \+ __fcol", mask) and re.search(r"col_base=a\d+__ck", mask) for mask in masks)
+    assert masks and absolute, "the mask compares the slice's absolute key, 256 keys per partition"
 
 
 @pytest.mark.parametrize(
