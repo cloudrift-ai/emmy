@@ -42,7 +42,11 @@ def rewrite(root: Node) -> KernelOp:
 
 
 def _copies(stmt: Statement, trips: tuple[int, int] | None) -> int | None:
-    """The trips of a short lane loop, or ``None`` when it is not one this pass unrolls."""
-    if trips is None or not isinstance(stmt, StridedLoop) or not all(isinstance(s, _FLAT) and not s.nested() for s in stmt.body):
+    """The trips of a short lane loop, or ``None`` when it is not one this pass unrolls. A loop already ``unrolled``
+    (the kernel unroll passes stepped it) is taken no further, so a finished kernel the session cache replays comes
+    out of this pass as it went in."""
+    if trips is None or not isinstance(stmt, StridedLoop) or stmt.unrolled:
+        return None
+    if not all(isinstance(s, _FLAT) and not s.nested() for s in stmt.body):
         return None
     return trips[0] if trips[0] == trips[1] and 1 < trips[0] <= _MAX_TRIPS else None
