@@ -19,6 +19,8 @@ from emmy.compiler.backend.cuda.program import CompiledProgram
 from emmy.compiler.backend.gpu_lock import gpu_lock
 from emmy.compiler.backend.plan import BufferSpec, ExecutionPlan, KernelSpec, LaunchSpec
 from emmy.compiler.dim import Dim
+from emmy.compiler.dtype import DataType
+from emmy.compiler.ir.cuda import TmaDescMeta
 from emmy.compiler.ir.kernel.interface import Interface, Param
 from tests.compiler.helpers import device_compute_capability
 
@@ -26,7 +28,7 @@ from tests.compiler.helpers import device_compute_capability
 #: it is defined or an instruction form ptxas rewrites away would show.
 LEVELS = (None, "-O0")
 
-DTYPES = {np.dtype(t.np): t for t in (dtypes.F32, dtypes.F16, dtypes.I32, dtypes.U8)}
+DTYPES = {np.dtype(t.np): t for t in (dtypes.F32, dtypes.F16, dtypes.I32, dtypes.U32, dtypes.U8)}
 
 
 def target() -> tuple[int, str]:
@@ -35,13 +37,14 @@ def target() -> tuple[int, str]:
     return major * 10 + minor, f"sm_{major}{minor}"
 
 
-def assemble(ptx: str, level: str, directory: Path) -> str:
+def assemble(ptx: str, level: str, directory: Path, arch_specific: bool = False) -> str:
     """Assemble ``ptx`` at ``level`` into ``directory`` and return the key the cubin is filed under."""
     key = hashlib.sha1(f"{level}\0{ptx}".encode()).hexdigest()
     source = directory / f"{key}.ptx"
     source.write_text(ptx)
     ptxas = str(Path(nvcc.nvcc_path()).with_name("ptxas"))
-    command = [ptxas, level, f"-arch={target()[1]}", "-m64", "-o", str(directory / f"{key}.cubin"), str(source)]
+    arch = target()[1] + ("a" if arch_specific else "")
+    command = [ptxas, level, f"-arch={arch}", "-m64", "-o", str(directory / f"{key}.cubin"), str(source)]
     subprocess.run(command, check=True, capture_output=True)
     return key
 
@@ -58,34 +61,50 @@ def built(
     fuse: bool = False,
     ftz: bool = False,
     shared: tuple[dict[str, int], int] = ({}, 0),
+    arch_specific: bool = False,
+    types: dict[str, DataType] | None = None,
+    descriptors: tuple[TmaDescMeta, ...] = (),
 ) -> Iterator[CompiledProgram]:
     """Compile ``body`` to PTX and build the program that launches it as ``blocks`` blocks of ``threads`` threads,
     under the GPU lock; several bodies are launched in order, over the same buffers. ``outputs`` gives each
     output's element type and count; every output starts at zero. ``level`` is the ptxas level, its default when
-    ``None``. ``shared`` is the launch-sized pool: each shared buffer's byte offset and the pool's size."""
+    ``None``. ``shared`` is the launch-sized pool: each shared buffer's byte offset and the pool's size.
+    ``arch_specific`` assembles for the arch-suffixed target. ``types`` names the element type of an input NumPy
+    has no type of its own for (``bf16``, held as its 16 bits). ``descriptors`` are the tensor maps the launch
+    encodes and passes after the buffers; an input a descriptor copies from has two dimensions, its array's."""
+    in_dtypes = {name: (types or {}).get(name) or DTYPES[data.dtype] for name, data in inputs.items()}
     out_dtypes = {name: (DTYPES[np.dtype(t)], size) for name, (t, size) in outputs.items()}
     params = (
-        *(Param(name, "input", DTYPES[data.dtype], name) for name, data in inputs.items()),
+        *(Param(name, "input", dtype, name) for name, dtype in in_dtypes.items()),
         *(Param(name, "output", dtype, name) for name, (dtype, _) in out_dtypes.items()),
+        *(Param(descriptor.name, "descriptor") for descriptor in descriptors),
     )
     offsets, pool = shared
-    interface = Interface(params, threads, offsets, pool, False)
+    interface = Interface(params, threads, offsets, pool, arch_specific)
     names = tuple(param.name for param in params)
+    copied = {descriptor.src_buf for descriptor in descriptors}
     grid = ((blocks,), (1,), (1,)), ((threads,), (1,), (1,))
     kernels, launches = {}, []
     with tempfile.TemporaryDirectory() as scratch:
         for index, text in enumerate([body] if isinstance(body, str) else body):
             name = f"k{index}"
             ptx = compile_ptx(name, parse_body(text), interface, sm=target()[0], fuse=fuse, ftz=ftz)
-            kernels[name] = KernelSpec(source=ptx) if level is None else KernelSpec(binary_key=assemble(ptx, level, Path(scratch)))
+            if level is None:
+                kernels[name] = KernelSpec(source=ptx, arch_specific=arch_specific)
+            else:
+                key = assemble(ptx, level, Path(scratch), arch_specific)
+                kernels[name] = KernelSpec(binary_key=key, arch_specific=arch_specific)
             zeroed = tuple(outputs) if index == 0 else ()
-            launches.append(LaunchSpec(name, name, names, *grid, pool, zeroed, writes=tuple(outputs)))
+            launches.append(LaunchSpec(name, name, names, *grid, pool, zeroed, writes=tuple(outputs), tma_descriptors=descriptors))
         plan = ExecutionPlan(
             "cuda",
             list(inputs),
             list(outputs),
             [
-                *(BufferSpec(name, (Dim(data.size),), DTYPES[data.dtype], "input") for name, data in inputs.items()),
+                *(
+                    BufferSpec(name, tuple(Dim(d) for d in (data.shape if name in copied else (data.size,))), in_dtypes[name], "input")
+                    for name, data in inputs.items()
+                ),
                 *(BufferSpec(name, (Dim(size),), dtype, "output") for name, (dtype, size) in out_dtypes.items()),
             ],
             {},

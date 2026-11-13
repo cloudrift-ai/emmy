@@ -2,7 +2,7 @@
 
 use std::fmt::Write as _;
 
-use crate::inst::{Base, Inst, Item, Label, Module, Opcode, Operand, ParamDecl, Reg};
+use crate::inst::{Base, Inst, Item, Label, Mma, Module, Opcode, Operand, ParamDecl, Reg};
 
 /// The text of `module`, as ptxas reads it. ASCII only: ptxas refuses any other byte, in a comment too.
 pub fn print(module: &Module) -> String {
@@ -151,6 +151,37 @@ fn mnemonic(inst: &Inst) -> String {
         Opcode::CpAsyncCommit => return "cp.async.commit_group".into(),
         Opcode::CpAsyncWait => return "cp.async.wait_group".into(),
         Opcode::GridWait => return "griddepcontrol.wait".into(),
+        Opcode::Ldmatrix { trans } => {
+            let trans = if trans { ".trans" } else { "" };
+            let matrices = inst.results.len();
+            return format!("ldmatrix.sync.aligned.m8n8.x{matrices}{trans}.shared.b16");
+        }
+        Opcode::Mma(mma) => return mma_text(mma),
+        Opcode::Wgmma { n, ab } => {
+            let ab = ab.text();
+            return format!("wgmma.mma_async.sync.aligned.m64n{n}k16.f32.{ab}.{ab}");
+        }
+        Opcode::WgmmaFence => return "wgmma.fence.sync.aligned".into(),
+        Opcode::WgmmaCommit => return "wgmma.commit_group.sync.aligned".into(),
+        Opcode::WgmmaWait => return "wgmma.wait_group.sync.aligned".into(),
+        Opcode::MbarrierInit => return "mbarrier.init.shared.b64".into(),
+        Opcode::MbarrierArrive => return "mbarrier.arrive.shared.b64".into(),
+        Opcode::MbarrierArriveExpectTx => return "mbarrier.arrive.expect_tx.shared.b64".into(),
+        Opcode::MbarrierTryWait => return "mbarrier.try_wait.parity.shared.b64".into(),
+        Opcode::FenceProxyAsync => return "fence.proxy.async.shared::cta".into(),
+        Opcode::CpAsyncBulkTensor => {
+            let rank = match inst.operands.get(1) {
+                Some(Operand::Tensor(_, coords)) => coords.len(),
+                _ => 0,
+            };
+            return format!(
+                "cp.async.bulk.tensor.{rank}d.shared::cta.global.mbarrier::complete_tx::bytes"
+            );
+        }
+        Opcode::SetMaxNReg { inc } => {
+            let direction = if inc { "inc" } else { "dec" };
+            return format!("setmaxnreg.{direction}.sync.aligned.u32");
+        }
         Opcode::Bra => return "bra".into(),
         Opcode::Ret => return "ret".into(),
     }
@@ -178,6 +209,19 @@ fn mnemonic(inst: &Inst) -> String {
     parts.join(".")
 }
 
+/// One form of `mma.sync`: the tile, the layouts of A and B, the block-scale modifiers, then the types of the
+/// result, of A, of B and of the accumulator read, and of the scales.
+fn mma_text(mma: Mma) -> String {
+    let b = if mma.b_row { "row" } else { "col" };
+    let (kind, scales) = if mma.block_scale {
+        (".kind::mxf4nvf4.block_scale.scale_vec::4X", ".ue4m3")
+    } else {
+        ("", "")
+    };
+    let (shape, ab, acc) = (mma.shape.text(), mma.ab.text(), mma.acc.text());
+    format!("mma.sync.aligned.{shape}.row.{b}{kind}.{acc}.{ab}.{ab}.{acc}{scales}")
+}
+
 fn operand(entry: &str, operand: &Operand) -> String {
     match operand {
         Operand::Reg(reg) => register(*reg),
@@ -186,6 +230,13 @@ fn operand(entry: &str, operand: &Operand) -> String {
         Operand::Addr(base, 0) => format!("[{}]", symbol(entry, *base)),
         Operand::Addr(base, offset) => format!("[{}+{offset}]", symbol(entry, *base)),
         Operand::Tuple(regs) => tuple(regs),
+        Operand::Ints(values) => {
+            let values: Vec<String> = values.iter().map(i64::to_string).collect();
+            format!("{{{}}}", values.join(", "))
+        }
+        Operand::Tensor(descriptor, coords) => {
+            format!("[{}, {}]", register(*descriptor), tuple(coords))
+        }
         Operand::Shared(index) => symbol(entry, Base::Shared(*index)),
         Operand::Special(special) => special.text().into(),
         Operand::Label(label) => label_text(*label),

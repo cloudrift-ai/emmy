@@ -3,9 +3,11 @@
 //! several coordinates is refused by the statement's name, and so is a statement or an operation with no rule yet.
 
 mod coop;
+mod hopper;
 mod int;
 mod math;
 mod memory;
+mod tensor;
 mod value;
 
 use std::collections::{HashMap, HashSet};
@@ -39,6 +41,24 @@ const SM_AMPERE: u32 = 80;
 
 /// The first compute capability whose kernels wait on the grid ahead of them.
 const SM_HOPPER: u32 = 90;
+
+/// The alignment the launch gives a tensor-map descriptor.
+const DESCRIPTOR_ALIGN: u32 = 64;
+
+/// What an instruction asks of the target: the compute capabilities that have it, whether only their
+/// arch-specific instruction set does, and the first PTX version that names it. The cards are what ptxas of CUDA
+/// 13.0 takes and refuses; so is every version from 7.8 on, the module's own lowest, and an earlier one is the PTX
+/// reference's.
+pub(crate) struct Needs {
+    /// The instruction, as an error names it.
+    pub what: &'static str,
+    pub sm: std::ops::RangeInclusive<u32>,
+    pub arch_specific: bool,
+    pub version: (u32, u32),
+}
+
+/// The last compute capability there is to ask for.
+pub(crate) const SM_LAST: u32 = u32::MAX;
 
 /// The alignment of the shared pool when no buffer in it asks for more: what a 16-byte access needs.
 const POOL_ALIGN: u32 = 16;
@@ -157,6 +177,14 @@ pub(crate) struct Lowerer {
     by_thread: HashMap<Reg, Expression>,
     /// How many bodies are open in the grid's own body.
     grid_depth: usize,
+    /// The PTX version the module states: the target's own, raised by each instruction that needs a later one.
+    version: (u32, u32),
+    /// Whether the interface asks for the target's arch-specific instruction set.
+    arch_specific: bool,
+    /// The register holding the address of each tensor-map descriptor the launch passes.
+    descriptors: HashMap<Name, Reg>,
+    /// The extents of each shared buffer, for a statement that indexes one by several coordinates.
+    extents: HashMap<Name, Vec<i64>>,
     /// The first line of the statement being lowered, for an error to name.
     statement: String,
 }
@@ -197,6 +225,10 @@ pub(crate) fn lower(kernel: &Kernel, target: Target, precision: Precision) -> Re
         threads: Threads::new(interface.threads as usize),
         by_thread: HashMap::new(),
         grid_depth: 0,
+        version: target.version(),
+        arch_specific: interface.arch_specific,
+        descriptors: HashMap::new(),
+        extents: HashMap::new(),
         statement: format!("the interface of {}", kernel.name),
     };
     survey(kernel.body, &mut lowerer.uses, &mut lowerer.updated);
@@ -212,7 +244,7 @@ pub(crate) fn lower(kernel: &Kernel, target: Target, precision: Precision) -> Re
     lowerer.body(kernel.body, &SimplifyCtx::empty())?;
     let code = lowerer.b.finish()?;
     Ok(Module {
-        version: target.version(),
+        version: lowerer.version,
         target: target.text(interface.arch_specific),
         entry: kernel.name.to_string(),
         params,
@@ -231,6 +263,29 @@ impl Lowerer {
 
     fn refuse(&self, why: impl std::fmt::Display) -> Error {
         Error::Value(format!("{why}: `{}`", self.statement))
+    }
+
+    /// An error where the target lacks the instruction `needs` describes; the module's version is raised to the
+    /// one that names it.
+    fn requires(&mut self, needs: &Needs) -> Result<()> {
+        let (what, sm) = (needs.what, self.target.sm);
+        if !needs.sm.contains(&sm) {
+            let suffix = if needs.arch_specific { "a" } else { "" };
+            let (first, last) = (needs.sm.start(), needs.sm.end());
+            let has = match *last {
+                SM_LAST => format!("sm_{first}{suffix} or later"),
+                last if last / 10 == first / 10 => format!("sm_{first}{suffix}"),
+                last => format!("sm_{first}{suffix} to sm_{last}{suffix}"),
+            };
+            return Err(self.no_rule(format_args!("{what} on sm_{sm}, which needs {has}")));
+        }
+        if needs.arch_specific && !self.arch_specific {
+            return Err(self.refuse(format_args!(
+                "{what} needs the arch-specific instruction set, sm_{sm}a, which the interface does not ask for"
+            )));
+        }
+        self.version = self.version.max(needs.version);
+        Ok(())
     }
 
     /// The parameter declarations, with each parameter loaded into a register: a buffer's pointer, a size's value.
@@ -279,7 +334,14 @@ impl Lowerer {
                         Ok(ParamDecl::U32)
                     }
                     ParamKind::Descriptor => {
-                        Err(self.no_rule(format_args!("the descriptor {}", param.name)))
+                        let address = self.b.reg(Bank::B64);
+                        let load = Opcode::Ld(Space::Param);
+                        self.b
+                            .emit(Inst::new(load, Ty::U64, vec![address], vec![source]));
+                        self.descriptors.insert(param.name, address);
+                        Ok(ParamDecl::Pointer {
+                            align: DESCRIPTOR_ALIGN,
+                        })
                     }
                 }
             })
@@ -359,9 +421,13 @@ impl Lowerer {
             self.bind(name, val.clone());
             return Ok(val);
         }
-        self.find(name)
-            .map(|(_, val)| val.clone())
-            .ok_or_else(|| self.refuse(format_args!("{name} is read before it is defined")))
+        match self.find(name) {
+            Some((_, val)) if matches!(val.op, Operand::Tuple(_)) => Err(self.refuse(
+                format_args!("{name} is a fragment, read one register at a time"),
+            )),
+            Some((_, val)) => Ok(val.clone()),
+            None => Err(self.refuse(format_args!("{name} is read before it is defined"))),
+        }
     }
 
     /// `val` as the value of a name of its own: a state's register is copied, since the state steps on.
@@ -473,6 +539,36 @@ impl Lowerer {
             Statement::WarpShuffle(shuffle) => self.warp_shuffle(shuffle, ctx),
             Statement::WarpBroadcast(broadcast) => self.warp_broadcast(broadcast),
             Statement::TreeHalve(tree) => self.tree_halve(tree, ctx),
+            Statement::RegFragment(fragment) => self.reg_fragment(fragment),
+            Statement::LdmatrixLoad(load) => self.ldmatrix(load, ctx),
+            Statement::MmaSyncPtx(mma) => self.mma_sync(mma),
+            Statement::FragmentPromote(promote) => self.fragment_promote(promote, ctx),
+            Statement::FragmentRepack(repack) => self.fragment_repack(repack, ctx),
+            Statement::BlockScaleLoad(load) => self.block_scale_load(load, ctx),
+            Statement::WgmmaDescriptor(descriptor) => self.wgmma_descriptor(descriptor, ctx),
+            Statement::WgmmaMma(mma) => self.wgmma(mma),
+            Statement::WgmmaFence(_) => self.wgmma_group(Opcode::WgmmaFence, None),
+            Statement::WgmmaCommit(_) => self.wgmma_group(Opcode::WgmmaCommit, None),
+            Statement::WgmmaWait(wait) => self.wgmma_group(Opcode::WgmmaWait, Some(wait.group)),
+            Statement::TmaDescriptor(descriptor) => self.tma_descriptor(descriptor),
+            Statement::TmaLoad(load) => self.tma_load(load, ctx),
+            Statement::MbarrierInit(init) => self.mbarrier_init(init, ctx),
+            Statement::MbarrierArriveExpectTx(arrive) => {
+                self.mbarrier_arrive(arrive.mbar, &arrive.slot, Some(arrive.bytes_), ctx)
+            }
+            Statement::MbarrierArrive(arrive) => {
+                self.mbarrier_arrive(arrive.mbar, &arrive.slot, None, ctx)
+            }
+            Statement::MbarrierWait(wait) => self.mbarrier_wait(wait, ctx),
+            Statement::SetMaxNReg(set) => self.set_max_registers(set),
+            // A fragment read from or written to memory is one access a register and element, each at the place
+            // the lane-to-element table gives it.
+            other @ (Statement::RegStore(_)
+            | Statement::FragmentApply(_)
+            | Statement::FragmentRowReduce(_)) => Err(self.no_rule(format_args!(
+                "the statement type {}, which waits for the lane-to-element table",
+                other.ty()
+            ))),
             other => Err(self.no_rule(format_args!("the statement type {}", other.ty()))),
         }
     }

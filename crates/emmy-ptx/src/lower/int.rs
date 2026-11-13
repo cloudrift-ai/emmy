@@ -57,6 +57,11 @@ pub(super) fn gcd(mut a: i64, mut b: i64) -> i64 {
     a.saturating_abs()
 }
 
+/// The largest power of two `value` is a multiple of, held to 2^16; zero is a multiple of every one.
+fn low_power(value: i64) -> i64 {
+    1 << value.trailing_zeros().min(16)
+}
+
 /// The exponent of `value` when it is a power of two above one.
 fn power_of_two(value: i64) -> Option<i64> {
     (value > 1 && value & (value - 1) == 0).then(|| i64::from(value.trailing_zeros()))
@@ -360,9 +365,16 @@ impl Lowerer {
             Operation::Subtract => {
                 self.int_value(Opcode::Sub, ty.arith(), ty, operands, gcd(ma, mb))
             }
-            Operation::BitwiseAnd => self.int_value(Opcode::And, bits(ty), ty, operands, 1),
-            Operation::BitwiseOr => self.int_value(Opcode::Or, bits(ty), ty, operands, 1),
-            _ => self.int_value(Opcode::Xor, bits(ty), ty, operands, 1),
+            // The low zero bits both operands share stay zero under any bitwise operation; a mask keeps the
+            // zero bits of either side.
+            Operation::BitwiseAnd => {
+                let multiple = low_power(ma).max(low_power(mb));
+                self.int_value(Opcode::And, bits(ty), ty, operands, multiple)
+            }
+            Operation::BitwiseOr => {
+                self.int_value(Opcode::Or, bits(ty), ty, operands, low_power(gcd(ma, mb)))
+            }
+            _ => self.int_value(Opcode::Xor, bits(ty), ty, operands, low_power(gcd(ma, mb))),
         })
     }
 

@@ -268,6 +268,15 @@ impl Builder {
         Ok(())
     }
 
+    /// Run `inst`, which defines the predicate `done`, again until that predicate holds: the one loop that is an
+    /// instruction waiting, with no body.
+    pub fn repeat_until(&mut self, done: Reg, inst: Inst) {
+        let head = self.label();
+        self.items.push(Item::Label(head));
+        self.emit(inst);
+        self.branch(head, Some((done, true)));
+    }
+
     /// Drop the value table of the scope opened at `depth`: it must be the innermost open one.
     fn leave(&mut self, depth: usize) -> Result<()> {
         if self.tables.len() != depth {

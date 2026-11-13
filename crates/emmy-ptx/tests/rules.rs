@@ -1141,11 +1141,11 @@ fn a_statement_outside_the_rules_is_an_error_that_names_it() {
         ),
         (
             "    WgmmaFence",
-            "no PTX rule for the statement type WgmmaFence: `WgmmaFence`",
+            "no PTX rule for `wgmma` on sm_120, which needs sm_90a: `WgmmaFence`",
         ),
         (
-            "    TmaLoad(smem=s, smem_index=(i), desc=d, coords=(i), mbar=mb)",
-            "no PTX rule for the statement type TmaLoad",
+            "    RegStore(dst_buffer=o, dst_index=(i), frag=c, shape=(16, 8, 16))",
+            "no PTX rule for the statement type RegStore, which waits for the lane-to-element table",
         ),
         (
             "    y = load a[i]",

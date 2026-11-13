@@ -1090,7 +1090,8 @@ fn a_barrier_some_threads_do_not_reach_is_refused() {
     }
 }
 
-/// What the cooperative rules refuse, each by the statement's name: a shared buffer the interface gives no place,
+/// What the cooperative rules refuse, each by the statement's name: a plain load of an element only a barrier or a
+/// tensor core reads, a shared buffer the interface gives no place,
 /// a state that is none or of another type, a tree reduction whose slots the thread index does not decide or
 /// threads share other than by warp, an access with no vector form or no alignment proven (a shared array is
 /// aligned to its elements unless its declaration says more), an atomic add or an async copy with no instruction,
@@ -1112,8 +1113,8 @@ fn a_cooperative_statement_outside_its_rule_is_an_error_that_names_it() {
             "a shared array has a size and a power of two as alignment",
         ),
         (
-            "Smem(name=bars, extents=(4), dtype=u64)",
-            "no PTX rule for the dtype u64",
+            "Smem(name=bars, extents=(4), dtype=u64)\n        u64 x = load bars[0]",
+            "no PTX rule for a load of u64",
         ),
         (
             "Smem(name=bars, extents=(4), dtype=CUtensorMap)",

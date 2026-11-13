@@ -63,6 +63,15 @@ pub enum Ty {
     F16,
     Bf16,
     F32,
+    /// Two halves in one 32-bit register: what a packed conversion writes.
+    F16x2,
+    Bf16x2,
+    /// The 8-bit and 4-bit float formats a tensor-core product reads its operands at, and the unsigned 8-bit one
+    /// a block of them is scaled by. No register holds one alone: each names an instruction's operand type.
+    E4m3,
+    E5m2,
+    E2m1,
+    Ue4m3,
 }
 
 impl Ty {
@@ -81,16 +90,23 @@ impl Ty {
             Ty::F16 => "f16",
             Ty::Bf16 => "bf16",
             Ty::F32 => "f32",
+            Ty::F16x2 => "f16x2",
+            Ty::Bf16x2 => "bf16x2",
+            Ty::E4m3 => "e4m3",
+            Ty::E5m2 => "e5m2",
+            Ty::E2m1 => "e2m1",
+            Ty::Ue4m3 => "ue4m3",
         }
     }
 
-    /// The bank a value of this type lives in. A byte is held zero-extended in a 32-bit register, and a half in
-    /// a 16-bit one.
+    /// The bank a value of this type lives in. A byte is held zero-extended in a 32-bit register, a half in a
+    /// 16-bit one, and the packed formats of a tensor-core operand in 32-bit ones.
     pub fn bank(self) -> Bank {
         match self {
             Ty::Pred => Bank::Pred,
             Ty::B16 | Ty::U16 | Ty::F16 | Ty::Bf16 => Bank::B16,
-            Ty::B32 | Ty::U8 | Ty::S32 | Ty::U32 => Bank::B32,
+            Ty::B32 | Ty::U8 | Ty::S32 | Ty::U32 | Ty::F16x2 | Ty::Bf16x2 => Bank::B32,
+            Ty::E4m3 | Ty::E5m2 | Ty::E2m1 | Ty::Ue4m3 => Bank::B32,
             Ty::B64 | Ty::S64 | Ty::U64 => Bank::B64,
             Ty::F32 => Bank::F32,
         }
@@ -103,9 +119,9 @@ impl Ty {
     /// The bytes one value takes in memory.
     pub fn bytes(self) -> i64 {
         match self {
-            Ty::Pred | Ty::U8 => 1,
+            Ty::Pred | Ty::U8 | Ty::E4m3 | Ty::E5m2 | Ty::E2m1 | Ty::Ue4m3 => 1,
             Ty::B16 | Ty::U16 | Ty::F16 | Ty::Bf16 => 2,
-            Ty::B32 | Ty::S32 | Ty::U32 | Ty::F32 => 4,
+            Ty::B32 | Ty::S32 | Ty::U32 | Ty::F32 | Ty::F16x2 | Ty::Bf16x2 => 4,
             Ty::B64 | Ty::S64 | Ty::U64 => 8,
         }
     }
@@ -231,6 +247,38 @@ impl Cache {
     }
 }
 
+/// The tile one tensor-core product of a warp covers: its rows, its columns and the length of the sum.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+pub enum MmaShape {
+    M8n8k4,
+    M16n8k16,
+    M16n8k32,
+    M16n8k64,
+}
+
+impl MmaShape {
+    pub fn text(self) -> &'static str {
+        match self {
+            MmaShape::M8n8k4 => "m8n8k4",
+            MmaShape::M16n8k16 => "m16n8k16",
+            MmaShape::M16n8k32 => "m16n8k32",
+            MmaShape::M16n8k64 => "m16n8k64",
+        }
+    }
+}
+
+/// One form of `mma.sync`: the tile, whether B is read row-major (Volta's second form), the type of the
+/// multiplicands, the type of the accumulator, and whether every 16 elements of the sum carry a scale of their own
+/// (the block-scaled 4-bit form).
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+pub struct Mma {
+    pub shape: MmaShape,
+    pub b_row: bool,
+    pub ab: Ty,
+    pub acc: Ty,
+    pub block_scale: bool,
+}
+
 /// What an instruction does. A variant holds what picks the instruction; its type and its float modifiers are the
 /// instruction's own fields.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
@@ -296,6 +344,43 @@ pub enum Opcode {
     CpAsyncWait,
     /// Wait for the grid launched ahead of this one (`griddepcontrol.wait`).
     GridWait,
+    /// A warp's load of 8x8 matrices of 16-bit elements from shared memory, each lane giving the address of one
+    /// row: two or four matrices, as many as the registers it defines, read by rows or transposed.
+    Ldmatrix {
+        trans: bool,
+    },
+    /// One tensor-core product of a warp: the accumulator's registers, then the tuples of A, B and the
+    /// accumulator before it; the block-scaled form adds each side's scale register and its selector.
+    Mma(Mma),
+    /// One tensor-core product of four warps together (`wgmma.mma_async`), of a 64 x `n` tile at the operand type
+    /// `ab`: A as a descriptor or a tuple of registers, B's descriptor, the predicate that keeps the accumulator,
+    /// the two scales and the transpose bits of the descriptor operands. The accumulator's registers are read
+    /// and defined.
+    Wgmma {
+        n: u16,
+        ab: Ty,
+    },
+    WgmmaFence,
+    WgmmaCommit,
+    /// Wait until at most the operand's count of committed `wgmma` groups are still in flight.
+    WgmmaWait,
+    /// Start a barrier of shared memory with the count of arrivals one phase takes.
+    MbarrierInit,
+    /// One arrival at a barrier; the result is the barrier's state before it.
+    MbarrierArrive,
+    /// One arrival that also states the bytes of async copies the phase waits for.
+    MbarrierArriveExpectTx,
+    /// Whether the barrier's phase of the given parity is over; it may suspend the thread while it waits.
+    MbarrierTryWait,
+    /// Order the block's earlier shared-memory accesses before the async copies and arrivals that follow.
+    FenceProxyAsync,
+    /// A copy of one box of a tensor from global to shared memory, by the copy engine: the destination, the
+    /// descriptor with the box's coordinates, and the barrier the copy's bytes arrive at.
+    CpAsyncBulkTensor,
+    /// Give back (`inc: false`) or claim the registers a warp may hold, up to the operand's count.
+    SetMaxNReg {
+        inc: bool,
+    },
     Bra,
     Ret,
 }
@@ -317,6 +402,19 @@ impl Opcode {
                 | Opcode::CpAsyncCommit
                 | Opcode::CpAsyncWait
                 | Opcode::GridWait
+                | Opcode::Ldmatrix { .. }
+                | Opcode::Mma(_)
+                | Opcode::Wgmma { .. }
+                | Opcode::WgmmaFence
+                | Opcode::WgmmaCommit
+                | Opcode::WgmmaWait
+                | Opcode::MbarrierInit
+                | Opcode::MbarrierArrive
+                | Opcode::MbarrierArriveExpectTx
+                | Opcode::MbarrierTryWait
+                | Opcode::FenceProxyAsync
+                | Opcode::CpAsyncBulkTensor
+                | Opcode::SetMaxNReg { .. }
                 | Opcode::Bra
                 | Opcode::Ret
         )
@@ -386,8 +484,13 @@ pub enum Operand {
     F32(u32),
     /// A base plus a constant byte offset.
     Addr(Base, i64),
-    /// Several registers one vector access fills or stores, or one move packs into a wider register.
+    /// Several registers one vector access fills or stores, one move packs into a wider register, or a
+    /// tensor-core instruction reads as one fragment.
     Tuple(Vec<Reg>),
+    /// Several integer constants in braces: the selector of a block scale.
+    Ints(Vec<i64>),
+    /// A box of a tensor: the register holding its descriptor's address, and the box's coordinates.
+    Tensor(Reg, Vec<Reg>),
     /// The address of a shared declaration of the module, by its position, in the block's shared memory.
     Shared(u32),
     Special(Special),
@@ -427,6 +530,9 @@ impl Operand {
         match self {
             Operand::Reg(reg) | Operand::Addr(Base::Reg(reg), _) => vec![*reg],
             Operand::Tuple(regs) => regs.clone(),
+            Operand::Tensor(descriptor, coords) => std::iter::once(*descriptor)
+                .chain(coords.iter().copied())
+                .collect(),
             _ => Vec::new(),
         }
     }
@@ -444,6 +550,10 @@ pub struct Guard {
     pub pred: Reg,
     pub negated: bool,
 }
+
+/// The bytes a matrix load reads at each lane's address, a row of eight halves, and the alignment the copy engine
+/// asks of a tensor copy's destination.
+pub const ROW_ACCESS_BYTES: i64 = 16;
 
 /// One instruction: its opcode, the type it computes at, its float modifiers, the registers it defines, its
 /// operands in the order PTX takes them, and the guard it runs under.
@@ -486,21 +596,31 @@ impl Inst {
         self
     }
 
-    /// Every register the instruction reads: its operands' and its guard's.
+    /// Every register the instruction reads: its operands' and its guard's, and for a `wgmma` product the
+    /// accumulator it adds into, which stands once in the instruction.
     pub fn reads(&self) -> Vec<Reg> {
+        let accumulated: &[Reg] = match self.opcode {
+            Opcode::Wgmma { .. } => &self.results,
+            _ => &[],
+        };
         self.operands
             .iter()
             .flat_map(Operand::reads)
             .chain(self.guard.map(|guard| guard.pred))
+            .chain(accumulated.iter().copied())
             .collect()
     }
 
     /// The bytes one access of memory covers, with the operands that address it: a load or a store of several
-    /// registers, an async copy. `None` for an instruction that reaches one element or no memory.
+    /// registers, an async copy, a row of a matrix load, the destination of a tensor copy. `None` for an
+    /// instruction that reaches one element or no memory.
     pub fn wide_access(&self) -> Option<(i64, Vec<&Operand>)> {
         let addresses = |count: usize| self.operands.iter().take(count).collect();
         match self.opcode {
             Opcode::CpAsync(_) => Some((self.operands.get(2)?.int()?, addresses(2))),
+            Opcode::Ldmatrix { .. } | Opcode::CpAsyncBulkTensor => {
+                Some((ROW_ACCESS_BYTES, addresses(1)))
+            }
             opcode if opcode.is_load() && self.results.len() > 1 => {
                 Some((self.results.len() as i64 * self.ty.bytes(), addresses(1)))
             }

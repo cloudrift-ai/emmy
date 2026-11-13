@@ -198,7 +198,8 @@ fn definitions(module: &Module, blocks: &[Block]) -> Result<()> {
 
 /// A load or a store of several registers, or an async copy, covers its bytes in one access, which the hardware
 /// takes only at an address aligned to the whole of it: each base register must be proven so aligned, and its
-/// constant offset a multiple of the access.
+/// constant offset a multiple of the access. The same holds of each row a matrix load reads and of the destination
+/// of a tensor copy.
 fn wide_accesses(module: &Module) -> Result<()> {
     for inst in module.instructions() {
         let Some((bytes, addresses)) = inst.wide_access() else {

@@ -32,10 +32,13 @@ pub(super) struct Elem {
 }
 
 impl Elem {
-    /// A byte is an integer in a register; a bool is a byte in memory and a predicate in a register.
+    /// A byte is an integer in a register; a bool is a byte in memory and a predicate in a register. An element
+    /// no value rule reads (an 8-bit or 4-bit float, the 64 bits of a barrier) has its size in memory only: a
+    /// buffer of them is addressed, and read by the statements that take its bits as they are.
     pub(super) fn of(dtype: DType) -> Option<Elem> {
         let (ty, mem) = match dtype {
-            DType::U8 => (VTy::I32, Ty::U8),
+            DType::U8 | DType::F8E4M3 | DType::F8E5M2 | DType::F4E2M1x2 => (VTy::I32, Ty::U8),
+            DType::U64 => (VTy::I64, Ty::U64),
             DType::Bool => (VTy::Bool, Ty::U8),
             dtype => {
                 let ty = VTy::of(dtype)?;
@@ -51,6 +54,11 @@ impl Elem {
 
     fn is_byte(self) -> bool {
         self.dtype == DType::U8
+    }
+
+    /// Whether a load gives a value of the element and a store takes one.
+    pub(super) fn has_value(self) -> bool {
+        matches!(self.dtype, DType::U8 | DType::Bool) || VTy::of(self.dtype).is_some()
     }
 }
 
@@ -69,7 +77,7 @@ pub(super) struct Buffer {
 impl Buffer {
     /// A load of global memory the kernel never writes goes past the coherent cache, as nvcc sends a load through
     /// a `const` pointer it was promised nothing else writes.
-    fn load(self) -> Opcode {
+    pub(super) fn load(self) -> Opcode {
         match (self.space, self.writable) {
             (Space::Global, false) => Opcode::LdConst,
             (space, _) => Opcode::Ld(space),
@@ -106,6 +114,7 @@ fn shared_dtype(name: &str) -> Option<DType> {
         "int" => Some(DType::I32),
         "unsigned int" => Some(DType::U32),
         "long long" => Some(DType::I64),
+        "unsigned long long" => Some(DType::U64),
         "bool" => Some(DType::Bool),
         _ => None,
     })
@@ -208,7 +217,29 @@ impl Lowerer {
             writable: true,
         };
         self.buffers.insert(smem.name, buffer);
+        self.extents.insert(smem.name, smem.extents.to_vec());
         Ok(())
+    }
+
+    /// The one element index `index` names in `buffer`: itself, or its coordinates folded by the extents of a
+    /// shared buffer, the last coordinate the nearest.
+    pub(super) fn flat_index(&self, buffer: Name, index: &[Expression]) -> Result<Expression> {
+        if let [flat] = index {
+            return Ok(flat.clone());
+        }
+        let extents = self.extents.get(&buffer).filter(|e| e.len() == index.len());
+        let Some(extents) = extents else {
+            return Err(self.refuse(format_args!(
+                "an index of {} coordinates into {buffer} is not flat",
+                index.len()
+            )));
+        };
+        let mut flat = index[0].clone();
+        for (coordinate, extent) in index.iter().zip(extents).skip(1) {
+            let outer = Expression::binary(Operation::Multiply, flat, Expression::int(*extent));
+            flat = Expression::binary(Operation::Add, outer, coordinate.clone());
+        }
+        Ok(flat)
     }
 
     // --- loads and stores --------------------------------------------------------------------------------
@@ -269,11 +300,17 @@ impl Lowerer {
     /// A load of one element, or of several in a row by one access. A staged copy is loaded again into the
     /// registers its first load declared.
     pub(super) fn load(&mut self, load: &Load, ctx: &mut SimplifyCtx) -> Result<()> {
+        if self.is_fragment(load.input) {
+            return self.fragment_load(load);
+        }
         let buffer = self.buffer(load.input)?;
         let elem = buffer.elem;
         let dtype = load
             .dtype
             .ok_or_else(|| self.refuse("a value carries no dtype"))?;
+        if !elem.has_value() {
+            return Err(self.no_rule(format_args!("a load of {}", elem.dtype)));
+        }
         if dtype != elem.dtype {
             let (input, stored) = (load.input, elem.dtype);
             return Err(self.refuse(format_args!("{input} holds {stored}")));
@@ -324,6 +361,9 @@ impl Lowerer {
 
     /// A store of one value, or of several in a row by one access; an atomic store adds its value to the cell.
     pub(super) fn write(&mut self, write: &Write, ctx: &SimplifyCtx) -> Result<()> {
+        if self.is_fragment(write.output) {
+            return self.fragment_store(write);
+        }
         if &*write.swizzle != "NONE" {
             return Err(self.no_rule("a swizzled store"));
         }
@@ -331,6 +371,9 @@ impl Lowerer {
         let (elem, output) = (buffer.elem, write.output);
         if !buffer.writable {
             return Err(self.refuse(format_args!("{output} is an input")));
+        }
+        if !elem.has_value() {
+            return Err(self.no_rule(format_args!("a store of {}", elem.dtype)));
         }
         let lanes = write.values.len();
         let access = access(elem.bytes(), lanes)
@@ -507,7 +550,8 @@ impl Lowerer {
             }
             NumOr::Value(seeds) => {
                 let buffer = self.buffer(seeds)?;
-                if buffer.elem.ty != ty || buffer.elem.mem != ty.held() {
+                if buffer.elem.ty != ty || buffer.elem.mem != ty.held() || !buffer.elem.has_value()
+                {
                     let stored = buffer.elem.dtype;
                     return Err(self.refuse(format_args!("{seeds} holds {stored}")));
                 }
