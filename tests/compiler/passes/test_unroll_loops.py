@@ -126,8 +126,9 @@ def test_a_trip_only_some_lanes_run_keeps_the_loop_bound_as_its_guard() -> None:
 
 
 def test_a_long_loop_keeps_rolling_over_copies_of_its_body() -> None:
-    """A 128-trip K loop runs 32 copies of its body per trip, the ``n``-th at the axis ``n`` steps on; the fragment
-    it accumulates into and the one it reloads keep their names."""
+    """A 128-trip K loop runs 32 copies of its body per trip, the ``n``-th at the axis ``n`` steps on, and says it is
+    unrolled, so no code generator unrolls it again; the fragment it accumulates into and the one it reloads keep
+    their names."""
     body = (
         "RegFragment(name=c, role=c, dtype=f32)\n"
         "RegFragment(name=a, role=a, dtype=f16)\n"
@@ -137,7 +138,7 @@ def test_a_long_loop_keeps_rolling_over_copies_of_its_body() -> None:
         "    MmaSyncPtx(c_frag=c, a_frag=a, b_frag=b, shape=(16, 8, 16))"
     )
     [loop] = _loops(_unrolled(body))
-    assert (str(loop.start), str(loop.step), loop.unroll) == ("0", "512", False)
+    assert (str(loop.start), str(loop.step), loop.unroll, loop.unrolled) == ("0", "512", False, True)
     loads = [stmt for stmt in loop.body if not isinstance(stmt, MmaSyncPtx)]
     assert [str(stmt.src_index[0]) for stmt in loads] == ["k", *(f"k + {16 * n}" for n in range(1, 32))]
     assert {(stmt.c_frag, stmt.b_frag) for stmt in loop.body if isinstance(stmt, MmaSyncPtx)} == {("c", "b")}

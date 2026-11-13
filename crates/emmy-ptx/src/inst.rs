@@ -653,6 +653,8 @@ pub enum Item {
     Label(Label),
     /// A Kernel IR statement, kept above its instructions so a kernel can still be read.
     Comment(String),
+    /// `.pragma "nounroll";` at the head of a loop: ptxas keeps the loop as it is.
+    NoUnroll,
 }
 
 /// How a parameter is declared: a pointer with the alignment the launch gives its buffer, or a 32-bit integer.

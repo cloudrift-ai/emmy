@@ -950,6 +950,42 @@ fn a_loop_over_a_symbolic_extent_is_tested_ahead() {
     );
 }
 
+/// A loop whose copies the kernel lowering wrote is kept as it is: ptxas is told not to unroll it again, whether it
+/// counts its trips or steps its axis.
+#[test]
+fn an_unrolled_loop_is_kept_as_it_is() {
+    let params = [
+        ("a", Input, Some(F32)),
+        ("o", Output, Some(F32)),
+        ("n", Int, None),
+    ];
+    for head in [
+        "for j in 0..64 step 2 unrolled=true:",
+        "for j in 0..n step 2 until n - 1 unrolled=true:",
+    ] {
+        let got = code(
+            &format!(
+                "{GRID}\n    {head}\n        f32 x = load a[j]\n        f32 y = load a[j + 1]\n        f32 s <- add(s, x) over j\n        f32 s <- add(s, y) over j\n    f32 o[i] = s"
+            ),
+            &params,
+            EXACT,
+        );
+        let at = got.iter().position(|line| line == ".pragma \"nounroll\"");
+        let head = got
+            .iter()
+            .position(|line| line.starts_with('L') && line.ends_with(':'));
+        assert!(at.is_some() && head < at, "{got:#?}");
+    }
+    let rolled = code(
+        &format!(
+            "{GRID}\n    for j in 0..n:\n        f32 x = load a[j]\n        f32 s <- add(s, x) over j\n    f32 o[i] = s"
+        ),
+        &params,
+        EXACT,
+    );
+    assert!(!rolled.iter().any(|line| line.contains("nounroll")));
+}
+
 /// A strided loop whose step from the lowest start already passes the highest end runs at most one trip: it is
 /// the condition that its start is below its end, with the axis its start.
 #[test]

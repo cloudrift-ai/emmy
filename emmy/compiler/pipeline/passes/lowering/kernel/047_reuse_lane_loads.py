@@ -41,8 +41,8 @@ def rewrite(root: Node) -> KernelOp:
     return replace(op, body=body)
 
 
-def _copies(stmt: Statement, trips: tuple[int, int]) -> int | None:
+def _copies(stmt: Statement, trips: tuple[int, int] | None) -> int | None:
     """The trips of a short lane loop, or ``None`` when it is not one this pass unrolls."""
-    if not isinstance(stmt, StridedLoop) or not all(isinstance(s, _FLAT) and not s.nested() for s in stmt.body):
+    if trips is None or not isinstance(stmt, StridedLoop) or not all(isinstance(s, _FLAT) and not s.nested() for s in stmt.body):
         return None
     return trips[0] if trips[0] == trips[1] and 1 < trips[0] <= _MAX_TRIPS else None

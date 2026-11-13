@@ -924,12 +924,19 @@ def _(node: Loop, ctx: RenderCtx) -> list[str]:
             ctx.ssa_dtypes[s.name] = (s.dtype or F32).name
     var = node.axis.name
     extent = _extent_c(node.axis, ctx)
+    if node.unrolled:
+        out.append(f"{pad}{_ROLLED}")
     out.append(f"{pad}for (int {var} = 0; {var} < {extent}; {var}++) {{")
     inner = ctx.child()
     out.extend(render_body(node.body, inner))
     out.extend(f"{_pad(inner.indent)}{name} = {name}{NEXT_STEP};" for name in node.carries)
     out.append(f"{pad}}}")
     return out
+
+
+#: Ahead of a loop whose copies the kernel lowering wrote (``unrolled``): cicc keeps it as it is, as ptxas does under the
+#: PTX compiler's ``.pragma "nounroll"``.
+_ROLLED = "#pragma unroll 1"
 
 
 def _extent_c(ax: Axis, ctx: RenderCtx) -> str:
@@ -967,6 +974,8 @@ def _(stmt: StridedLoop, ctx: RenderCtx) -> list[str]:
     var = stmt.axis.name
     start_str = render_expression(stmt.start, ctx)
     step_str = render_expression(stmt.step, ctx)
+    if stmt.unrolled:
+        out.append(f"{pad}{_ROLLED}")
     # ``_extent_c`` renders a symbolic bound (a cooperative reduce over a dynamic
     # ``seq_len`` strides each lane to the runtime extent — the ``< seq_len`` bound is the
     # masked tail, idle lanes folding the carrier identity) as the C name, a static one as

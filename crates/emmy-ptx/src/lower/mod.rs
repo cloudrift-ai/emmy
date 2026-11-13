@@ -654,6 +654,9 @@ impl Lowerer {
         let open = self
             .b
             .open_loop(Operand::Int(0), end, Operand::Int(1), enters);
+        if node.unrolled {
+            self.b.keep_rolled();
+        }
         self.names.push(HashMap::new());
         self.bind(node.axis.name, Val::reg(open.var, VTy::I32));
         self.counted.insert(open.var, (open.var, 1, 0));
@@ -774,6 +777,9 @@ impl Lowerer {
                 open
             }
         };
+        if node.unrolled {
+            self.b.keep_rolled();
+        }
         self.threads.uneven += usize::from(uneven);
         let done = self.body(&node.body, &inner);
         self.threads.uneven -= usize::from(uneven);

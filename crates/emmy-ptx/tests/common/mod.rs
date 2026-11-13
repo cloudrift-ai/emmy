@@ -132,6 +132,7 @@ pub fn listing(module: &Module) -> Vec<String> {
             Item::Inst(inst) => Some(instruction_text(inst)),
             Item::Label(label) => Some(format!("L{}:", label.0)),
             Item::Comment(_) => None,
+            Item::NoUnroll => Some(".pragma \"nounroll\"".into()),
         })
         .collect()
 }

@@ -26,6 +26,8 @@ tile-tier rebuild:
   16-byte row per lane.
 - ``110_drop_redundant_syncs`` — collapse no-op Sync stmts at the Tile body level.
 - ``117_unroll_loops`` — every loop a lowering site flagged, written out as copies of its body.
+- ``118_unroll_as_nvcc`` — the loops nvcc unrolled on its own, by cicc's size rule.
+- ``119_vectorize_copies`` — the vector widenings again, over the runs the copies line up.
 - ``120_explicit_conversions`` — every operation at one dtype, every conversion a definition of its own.
 - ``125_spell_composites`` — every composite function (``sigmoid``, ``relu``, …) as its primitive operations.
 - ``130_approximate_math`` — last: the approximate form of each instruction class a precision knob turns on.

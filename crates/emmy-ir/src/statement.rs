@@ -286,6 +286,11 @@ macro_rules! with_statement_types {
                 /// the kernel lowering's own sites; it has no effect on the IR's iteration semantics, and a body a code
                 /// generator reads carries none (`input::check_input`).
                 ///
+                /// `unrolled=True` says the kernel lowering already wrote the loop's copies: its body runs several trips of
+                /// the loop it came from, and a code generator keeps it as it is (`.pragma "nounroll"`). A fact of the
+                /// kernel body, set by the unroll passes on the loops they leave; it too has no effect on the iteration
+                /// semantics, and a Loop IR body carries none.
+                ///
                 /// The loop carries NO algebra — the fold's ⊕ lives on the :class:`~emmy.compiler.ir.pure.fold.Fold` node's
                 /// stored `combine`, and the dissolved fold `Accum`\ s in the body are the loop-level spelling; a loop folds iff
                 /// its body carries one.
@@ -294,6 +299,7 @@ macro_rules! with_statement_types {
                     body: Body [BODY],
                     unroll: bool [] = false,
                     seed: bool [] = true,
+                    unrolled: bool [] = false,
                 }
                 /// Strided iteration: `for (axis = start; axis < axis.extent; axis += step)`.
                 ///
@@ -306,6 +312,7 @@ macro_rules! with_statement_types {
                 /// analysis-visible range; `end` must never exceed it.
                 ///
                 /// Reduction detection mirrors `Loop`: a `StridedLoop` is a reduce-loop iff its body contains an `Accum`.
+                /// `unroll` and `unrolled` are `Loop`'s.
                 shared StridedLoop {} {
                     axis: AxisRef [AXIS],
                     start: Expression [EXPRESSION] : Index,
@@ -314,6 +321,7 @@ macro_rules! with_statement_types {
                     unroll: bool [] = false,
                     end: Option<Expression> [EXPRESSION | READS] : Index = None,
                     seed: bool [] = true,
+                    unrolled: bool [] = false,
                 }
                 /// Conditional block — `if (cond) { body } [else { else_body }]`.
                 ///
@@ -1437,7 +1445,7 @@ mod tests {
         }
         assert_eq!(
             blake3::hash(listing.as_bytes()).to_hex().as_str(),
-            "ee3da8b8e2f70d0fb65c6713f3ba3c43b5047d0a938489a13deb08973ca4c4ec",
+            "9661dafbb8aaaf1974b2112ccfcf74c0c689ccf2d010ef244cabf9b109137ded",
             "{listing}"
         );
     }

@@ -867,7 +867,7 @@ flags nothing. The pass spends the flag. A flagged loop of at most 64 trips beco
 axis bound to its value in each, a carrier the loop seeded seeded once ahead of the copies and each name the body
 defines given a copy of its own; a trip only some threads run (a lane loop over a row its lanes do not divide) keeps
 the loop's bound as the guard of its copy, and a guard the trip's value decides is dropped. A longer loop stays a loop
-that runs up to 32 copies of its body per trip. The two numbers are what nvcc did with the flag while it was a
+that runs up to 32 copies of its body per trip, and says it is `unrolled`. The two numbers are what nvcc did with the flag while it was a
 `#pragma unroll`: a 64-trip scalar reduce came out unrolled in full, a 128-trip tensor-core K loop as 32 copies per
 trip, and a kernel that holds all 128 copies has four times the machine code and takes nvcc ten times as long. A
 flagged loop with no static bound on its trips (a symbolic extent, an early stop) stays as it is. A loop that takes
@@ -877,6 +877,32 @@ lane loops. The body's optimization then folds each copy's index and computes on
 after the passes that match loops and the statements in them, and before `120`: a copy reads its axis as a literal,
 and a literal is typed by the operation that reads it. After it no statement carries the flag, which `lowering/cuda`
 checks (`check_input`) beside the types.
+
+`118_unroll_as_nvcc` writes the copies cicc gave the loops no site flagged. They reached nvcc as loops and cicc
+(CUDA 13.0) unrolled them by a size rule of its own, which ptxas does not; so the rule is stated here, and both code
+generators read loops already unrolled the way cicc did. It was read off cicc's PTX for `sm_120` across trip counts
+and body sizes. A body's size is the work of one trip: one per memory access, fold, selection and branch, one more
+for an access whose address changes from trip to trip, and one per operation whose value changes, a math function
+counting the instructions cicc writes for it (`exp` 14, `log` 28, `sin` 88, `pow` 113, in the form `130` will pick
+under the live precision decisions). A serial `Loop` of `N` static trips is written out in full when
+`N·(size + 2) ≤ 480`, else steps `C` trips at a time, `C` the largest power of two dividing `N` with
+`C·(size + 2) ≤ 199` (an odd `N` stays: cicc copies such a body four times with the exit test inside, which is not
+written). A loop over a symbolic extent takes `C` copies, the largest of 16, 8, 4, 2 with `C·(size + 7) ≤ 228` and
+none past a size of 89, in cicc's shape: a loop stepping `C` trips while that many are left, then the trips left in
+blocks of `C/2`, `C/4`, … copies, each under its bit of the count, the last three trips a loop of one copy when `C`
+is 16 (`_unroll._runtime`). Only bodies of target-neutral statements are sized; a loop with a barrier, an
+asynchronous copy, a shuffle or a fragment statement stays, as do strided loops over a static extent (cicc left
+those to ptxas). The numbers are nvcc's, a fixed rule like `117`'s two limits, so either code generator keeps the
+shape nvcc gave a kernel; how many copies a loop takes is a decision, and it moves under the `UNROLL` knob with the
+two limits. Every loop the unroll passes leave stepping several trips says it is `unrolled`, and a code generator
+keeps it a loop (`.pragma "nounroll"`, `#pragma unroll 1`): cicc marks the two loops of its runtime unroll, and
+ptxas, free to, unrolled the PTX compiler's compact static loops in full where it had left cicc's alone. A loop
+already `unrolled` is taken no further, which keeps the pass idempotent.
+
+`119_vectorize_copies` runs the two widenings of `050` and `080` again (`_vector.vectorize_loads`,
+`_vector.vectorize_stores`, under the same decisions): the copies of a read along the axis are consecutive elements,
+which cicc merged after it unrolled. A loop stepping `C` trips states its step, so the alignment proof holds on its
+copies as on any strided loop; a remainder copy's offset is the launch's and stays scalar.
 
 `125_spell_composites` follows. A composite function (`sigmoid`, `relu`, `square`, `reciprocal`) is defined by
 primitive operations in one table, beside the operations' declarations in the crate. The pass turns each `Assign` of

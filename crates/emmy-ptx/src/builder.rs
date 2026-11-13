@@ -324,6 +324,12 @@ impl Builder {
         }
     }
 
+    /// Mark the loop just opened, before anything is written in it, as one ptxas keeps as it is (`.pragma
+    /// "nounroll"` at its head): the kernel lowering already wrote its copies.
+    pub fn keep_rolled(&mut self) {
+        self.items.push(Item::NoUnroll);
+    }
+
     pub fn close_loop(&mut self, open: Loop) -> Result<()> {
         self.leave(open.depth)?;
         if let Some(wide) = self.wide.remove(&open.var) {

@@ -6,8 +6,9 @@ its body, the axis bound to its value in each (``_unroll.unroll_where``), innerm
 
 - A loop of at most ``_WHOLE`` trips becomes one copy per trip. A trip only some threads run (a lane loop over a row
   its lanes do not divide) keeps the loop's bound as the guard of its copy.
-- A longer loop stays a loop that runs up to ``_PER_TRIP`` copies of its body per trip: the tensor-core K loop of a
-  deep contraction, which its site flags at any length.
+- A longer loop stays a loop that runs up to ``_PER_TRIP`` copies of its body per trip, and says it is ``unrolled``
+  so no code generator unrolls it again: the tensor-core K loop of a deep contraction, which its site flags at any
+  length.
 
 The two numbers are what nvcc did when the flag was a ``#pragma unroll`` it read: it unrolled a 64-trip scalar reduce
 in full and gave a 128-trip tensor-core loop 32 copies per trip, so the machine code keeps its shape. The body's
@@ -46,11 +47,11 @@ def rewrite(root: Node) -> KernelOp:
     return replace(op, body=_unflagged(unroll_where(op.body, _copies)), knobs=dict(op.knobs))
 
 
-def _copies(loop: Statement, trips: tuple[int, int]) -> int | None:
+def _copies(loop: Statement, trips: tuple[int, int] | None) -> int | None:
     """The copies a flagged loop takes."""
-    every, most = trips
-    if not loop.unroll:
+    if not loop.unroll or trips is None:
         return None
+    every, most = trips
     if most <= _WHOLE:
         return most
     return max((n for n in range(2, _PER_TRIP + 1) if most % n == 0), default=None) if every == most else None

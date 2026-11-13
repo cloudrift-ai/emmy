@@ -38,7 +38,8 @@ for, and for no other reason ("In the pipeline", below). Every kernel of the rea
 
 The body is typed and flat. Every value-defining statement carries its dtype, every conversion is a cast in the body,
 and a `Load` or a `Write` holds one element index into its buffer. No statement carries a request: a loop flagged
-`unroll` is refused, since unrolling is a kernel pass. The compiler checks what it reads, statement by statement, and
+`unroll` is refused, since unrolling is a kernel pass. A loop that says `unrolled` is one whose copies that pass
+already wrote, and stays a loop in the code (Rules). The compiler checks what it reads, statement by statement, and
 refuses with the statement's text: a value with no dtype, an operand of another type than its reader, an index of
 several coordinates, a store into an input. Integers are the one exception to "every conversion is a cast": their
 width and signedness are the compiler's, so `i32`, `u32` and `i64` values mix freely in an index. Two statements
@@ -141,7 +142,12 @@ Every instruction reaches the list through the `Builder`.
   has threads), is the condition that its start is below its end, with the axis its start: ptxas unrolls a loop whose
   start differs between threads four times with a remainder, which multiplied the async copies of the NVFP4 kernels
   (30 `LDGSTS` against cicc's 12 in one). The accumulators a loop folds are seeded ahead of it with the combine's
-  neutral element, as the `seed` flag says.
+  neutral element, as the `seed` flag says. A loop that says `unrolled` (its body holds several trips' copies,
+  written by the kernel lowering's unroll passes) carries `.pragma "nounroll"` at its head, so ptxas keeps it as it
+  is: cicc marks the two loops of a runtime unroll so, and ptxas left alone the static loops cicc unrolled, but it
+  unrolls the more compact loops of this compiler in full. Measured on `sm_120` (`qwen3emb/sdpa-s32`, 32 loops of 16
+  copies a trip): 11,344 machine instructions and 0.53 s of ptxas unmarked, 2,216 and 0.06 s marked, 194 to 89 us
+  on the dev box RTX 5090, where nvcc's build of the same CUDA text runs 88 us.
 - **Integers.** An expression is computed at the narrowest of `i32`, `u32` and `i64` that holds its range, and at its
   operands' type where it has no range. A sum, a product or a bitwise operation depends on the low bits of its
   operands alone, so it runs at the type its own range needs. A division, a shift right, a minimum or a comparison

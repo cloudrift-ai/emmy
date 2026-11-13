@@ -52,6 +52,7 @@ pub fn print(module: &Module) -> String {
             Item::Comment(text) => {
                 let _ = writeln!(out, "\t// {}", ascii(text));
             }
+            Item::NoUnroll => out.push_str("\t.pragma \"nounroll\";\n"),
         }
     }
     out.push_str("}\n");
