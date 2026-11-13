@@ -198,7 +198,9 @@ kernel it produced went on to read.
   arg. Cross-CTA reduction splits are structural choices in `030_cut`. A symbolic FREE axis
   (dynamic grid), strided rows, and the tensor-core `warp_tile` are reserved future tiers.
 - **Kernel → CUDA** (after `lowering/cuda`): `KernelOp` replaced by
-  `CudaOp` carrying rendered source.
+  `CudaOp` carrying the kernel's code: rendered CUDA source, or PTX from the Kernel IR to PTX compiler
+  (`kernel/ptx.py`, the Python entry of the `emmy-ptx` crate) where `EMMY_KERNEL_CODE` asks for it and the compiler
+  has a rule for every statement of the kernel.
 - **Every buffer index spells every dim of its buffer**, `0` at a size-one dim, until it is flattened: one function,
   `address.flat_index`, sums the coordinates row-major over the buffer's shape (symbolic sizes included, each
   coordinate widened to 64 bits where the buffer can pass the 32-bit range) and refuses any other count, since

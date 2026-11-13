@@ -20,14 +20,23 @@ A fragment read from or written to memory element by element has no rule yet: a 
 the crate does not hold yet, and a kernel that holds one is an error that names it and says so. So is any math
 function outside the table below.
 
+Until every statement has a rule, the lowering falls back to the CUDA renderer for a kernel the compiler has no rule
+for, and for no other reason ("In the pipeline", below).
+
 ## Entry points
 
 - `compile(kernel, target, precision)` returns the PTX text. `lower` returns the instruction list it prints, which is
   what the crate's tests read.
+- An error is one of two kinds. `Error::NoRule` says the compiler has no rule yet for a statement, an operation or a
+  target's instruction: the kernel is well formed and its code can be generated another way. Any other error
+  refuses the kernel, with the statement's text: an input the compiler does not take, or the verifier's finding,
+  which is a bug of the compiler or of the pass that wrote the kernel.
 - `Kernel` is the entry name, the body and the `Interface`: the parameters in the launch's argument order, each
   buffer with the alignment the launch gives it, the per-block thread bound, the shared-memory pool. `Interface` and
   `Param` mirror the Python `ir/kernel/interface.py`, which computes them.
-- The `emmy.emmy_ir` extension exports `compile_ptx`, so a body crosses from Python as the crate's own value.
+- The `emmy.emmy_ir` extension exports `compile_ptx`, so a body crosses from Python as the crate's own value, and
+  `NoRule`, the exception of the first kind (a `NotImplementedError`); every other error is a `ValueError`.
+  `emmy/compiler/ir/kernel/ptx.py` is the Python entry the lowering calls.
 
 ## What the compiler expects of a body
 
@@ -39,6 +48,11 @@ several coordinates, a store into an input. Integers are the one exception to "e
 width and signedness are the compiler's, so `i32`, `u32` and `i64` values mix freely in an index.
 
 A literal has no type of its own. It takes its reader's: an integer literal in a float expression is that float.
+
+Three things a pipeline kernel holds are read as they stand. A comparison assigned at a float type is one where it
+holds and zero where it does not, with no cast written. A condition the body's optimization decided and left
+standing (`if 1:`, `if 0:`) is no branch: its one side stands in its place. The cast `(long long)` on an index term,
+which the flattening writes where a buffer passes the 32-bit range, is the widening to `i64`.
 
 A byte (`u8`) is a buffer's element type only: a load gives an integer with its range, a store takes the low byte of
 one. A buffer of fp8 elements, of packed fp4 pairs or of 64-bit barriers is declared and addressed, and read by the
@@ -100,10 +114,11 @@ Every instruction reaches the list through the `Builder`.
 - **Facts.** The builder keeps, per register, a number its value is a multiple of and, for an address, the bytes it is
   aligned to. A parameter's pointer starts at the alignment its `Param` states, a shared buffer's address at its
   declaration's, and each term added to an address keeps what the term's multiple allows. A bitwise operation keeps
-  the low zero bits its operands share, so an index stays a multiple of eight through a swizzle. Ranges are not kept per
-  register: they come from the `emmy-ir` range analysis on the expression being lowered, under the same context body
-  optimization uses (`launch_ctx` for a grid's built-ins, `inner_ctx` for the axes a statement binds). An integer
-  name's range joins that context where the name is bound.
+  the low zero bits its operands share, so an index stays a multiple of eight through a swizzle, and a selection
+  between two integers is a multiple of what both are. Ranges are not kept per register: they come from the
+  `emmy-ir` range analysis on the expression being lowered, under the same context body optimization uses
+  (`launch_ctx` for a grid's built-ins, `inner_ctx` for the axes a statement binds). An integer name's range joins
+  that context where the name is bound.
 
 ## Rules
 
@@ -132,7 +147,8 @@ Every instruction reaches the list through the `Builder`.
   `fma`. With the fusion decision on it is also written for a product read once, by an add, a subtract or an
   accumulate in the product's own body: the product is held back at its definition and becomes one instruction with
   its reader. A difference is the fused sum over an exact negation. A product whose reader does not take it is
-  computed where it is first read.
+  computed where it is first read. Two choices differ from cicc's ("Fusion against cicc", below): of two products
+  one add reads, the left one is fused, and a product with a state as a factor is never held back.
 - **Half precision.** `f16` add, subtract, multiply, fused multiply-add, negation, absolute value, minimum and maximum
   run natively (minimum and maximum from `sm_80`). `bf16` is converted, never computed in. Half instructions take no
   immediate, so a half constant is moved into a register by its bits.
@@ -155,7 +171,9 @@ Every instruction reaches the list through the `Builder`.
   grid's thread count, both held to the word count so the index stays in 32 bits.
 - **Async copies.** `CpAsyncCopy` is one `cp.async` of 4, 8 or 16 bytes between a 32-bit shared address and a 64-bit
   global one; under `valid` a 16-byte copy takes its source size from the condition, so it writes zeros where the
-  condition fails. A swizzled or lane-indexed destination has no rule yet.
+  condition fails. A copy with a lane offset names the tile it fills by row and column and the thread's own row and
+  column in it: its element is the sum of the two, folded by the slab's extents. A swizzled destination has no rule
+  yet: every kernel that holds one also holds a fragment statement, so nothing would run it.
 - **Carried states.** A cell of a carried state at a literal index is two registers: the one a `Pre` copies and the
   one a `Carry` moves into. Both are seeded ahead of the loop that carries the state, and the end of each trip moves
   the second into the first, so a cell a trip skips keeps its value. A cell at an index known only where the kernel
@@ -168,7 +186,10 @@ calls compute alike. Every instruction that rounds carries `.rn`, a fused multip
 writes one, and no sequence reads the kernel's fusion decision: its accuracy is measured with the instructions it
 has. The flush-to-zero decision reaches every instruction of a sequence that takes the modifier. A half value has no
 sequence: its function computes in f32 and converts once, which the body says with its casts, and a math function
-handed a half operand is refused.
+handed a half operand has no rule. The kernel passes still leave some there: their set of operations a half computes
+natively (`target.native_f16_ops`) holds `exp`, `log`, `sqrt`, `rsqrt`, `tanh`, the division and the reciprocal, which
+CUDA's half header computes in f32 between two conversions and PTX has no half instruction for. One corpus kernel
+holds such a function with nothing else in its way.
 
 Only the functions kernels hold are written. Counted over the realization corpus and the repository goldens (5,930
 kernel bodies): `rsqrt` 8,739 calls, `exp` 7,510, `log` 551, `tanh` 72, `pow` 28 (one golden), `erf` 8. No kernel
@@ -393,6 +414,49 @@ starts at what the interface states of a buffer and a `Smem` of a shared array, 
 aligned only to its elements is refused. A register read undefined assembles without complaint and can give a right
 answer at one optimization level and a wrong one at another, which is why the first check exists.
 
+## In the pipeline
+
+`lowering/cuda/010_lower_kernelop` generates each kernel's code. `EMMY_KERNEL_CODE` says how: `cuda`, the default,
+renders CUDA text for nvcc as before; `ptx` compiles the kernel here and renders CUDA only where the compiler raises
+`NoRule`; `ptx-only` raises that too. Every other error of the compiler is raised under both PTX values: falling back
+on it would hide a bug behind text that builds. The default stays `cuda` until the perf lane has been read through
+PTX. The variable, the fallback and the CUDA renderer are deleted together when the compiler covers every kernel;
+the CUDA backend `ARCHITECTURE.md` says what else reads the switch.
+
+Two things the renderer works out as it prints are refused with `NoRule` for now: a paged buffer, whose page it
+resolves (the crate refuses the parameter), and the e2m1 pair table, whose loads it computes instead of reading (the
+Python entry refuses the kernel).
+
+`python -m tests.compiler.ptx.corpus` lowers every realization corpus case with `ptx` asked for and prints, a kernel
+a line, whether it compiled or what had no rule, with the counts by reason. On 2026-11-12: 258 cases, 164 with every
+kernel in PTX; 296 kernels, 196 in PTX (168 of the 244 of `sm_120` cases, 18 of 27 of `sm_70`, 6 of 12 of `sm_80`,
+4 of 5 of `sm_89`, none of the 8 of `sm_90`). Of the 100 that fall back, 95 hold a `RegStore`, and with it a fragment
+read from global memory (39), a `FragmentApply` (24), a `FragmentRowReduce` (16), a drain of a slab of bytes (12) or
+a staged fragment of Volta's layout (6): all wait for the lane-to-element table. Of those 95, 23 also hold a
+swizzled async copy, 16 a swizzled store and 12 a pair table, which need rules of their own. The other 5 hold a cast
+to an 8-bit float (4) or a math function at a half (1).
+
+### Fusion against cicc
+
+The count of `fma` instructions in this compiler's PTX against the count in `nvcc -ptx` of the rendered CUDA, with
+the flags the tree passes, on the 178 corpus kernels that compile and that nvcc of CUDA 13.0 takes (not `sm_70`):
+equal in 83, fewer here in 95, never more. Most of the difference is not the rule. cicc unrolls the loops the
+Kernel IR leaves rolled, so its text holds a loop's `fma` once a copy, and its `expf` holds four of its own. Of the
+41 kernels with no loop left and no math function, 40 have the same count. What was found:
+
+- **A product with a state as a factor.** `v = acc * scale; out = bias + v`: cicc fuses it, and here the product is
+  never held back for its reader when a factor is a register some statement updates in place. One loop-free kernel
+  differs by this one instruction.
+- **Two products under one add.** Where both operands of an add are products read once, cicc fuses the one whose
+  operands come first in the program (in `a*b + c*d` and in `c*d + a*b` alike it writes `fma(a, b, c*d)` when `a` and
+  `b` are loaded before `c` and `d`, whichever product is defined first); here the left operand is fused. The two
+  give different bits, and two corpus cases with no math function differ for it.
+- **A difference of two products.** cicc writes no `fma` and leaves `mul`, `mul`, `sub` without rounding modifiers,
+  which ptxas then fuses its own way. The count in cicc's text understates what its build fuses.
+
+The rule is unchanged: the first is a product the rule could take, the second a choice the perf lane and a record
+run would have to accept, since it moves the bits of every kernel that holds such an add.
+
 ## Tests
 
 `cargo test -p emmy-ptx` runs without a GPU. The rule tests build bodies from the text form, compare the instruction
@@ -420,6 +484,20 @@ launch test passes at both levels on an RTX 5090 (`sm_120`: all but `wgmma`) and
 One m16n8k16 tile over three steps of K (two `ldmatrix` and one `mma.sync` a step, then four stores) is 38 machine
 instructions through this compiler and 40 through nvcc with the CUDA helpers, on `sm_120`: the same three products and
 six matrix loads, the loop unrolled and every address folded by ptxas in both.
+
+The corpus goes through the compiler in `tests/compiler/ptx/test_corpus.py`. Without a card, every case: each
+kernel compiles or names a missing rule, never raises anything else, holds its name in its own symbols alone (what
+the kernel merge's rename by text replacement needs), and assembles for the case's declared capability at ptxas's
+default level and at `-O0`. All 178 kernels of the 234 cases that ptxas of CUDA 13.0 can assemble for do; the 24
+`sm_70` cases, 18 PTX kernels, are skipped. On the card, a case whose every kernel compiles to PTX is built both
+ways, from CUDA text by nvcc and from PTX by ptxas, run on the same inputs and held to the corpus's own tolerance
+(`tests/compiler/ptx/differential.py`, which prints the table when run as a module): a sample of each family by
+default, every case under `pytest -m sweep`. On an RTX 5090, 144 cases run both ways: 119 give the same bits and 25
+differ within tolerance, by at most 3.0e-7 of the output's peak in f32 and by one f16 step (4.8e-4) in the one f16
+case. 21 of the 25 hold an exponential, whose sequence is not `expf`'s; two hold approximate operations and were not
+traced; two hold no math function and differ by the fused product above. The realization suite itself, run with
+`EMMY_KERNEL_CODE=ptx` on that card, passes every stage of every case (952 passed), 168 of its 244 launched kernels
+compiled to PTX.
 
 The math functions are measured there too (`test_math.py`). The default tests hold each function to its documented
 bound over a sample: every special value, the neighbourhoods of the points where a sequence changes form, and two

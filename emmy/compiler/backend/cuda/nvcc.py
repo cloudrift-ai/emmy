@@ -126,8 +126,11 @@ def _cubin_key(source: str, name: str, arch: str) -> str:
     # cubin, so the persistent cache is safe to share across (even concurrent)
     # runs. Toolkit + flags are in the key so an nvcc / opt-level / flags change
     # recompiles rather than serving a stale or wrong-opt cubin.
+    # PTX carries its precision decisions in its instructions and takes no nvcc flag, so the flags are no part of
+    # its key: one text is one cubin under every flag list.
+    flags = [] if is_ptx(source) else effective_flags()
     h = hashlib.sha1()
-    for part in (source, name, arch, _toolkit_tag(), "\x1f".join(effective_flags())):
+    for part in (source, name, arch, _toolkit_tag(), "\x1f".join(flags)):
         h.update(part.encode())
         h.update(b"\0")
     return h.hexdigest()
@@ -188,5 +191,6 @@ def compile_kernel(source: str, name: str, *, arch_specific: bool) -> Path:
         return compile_to_cubin(source, name, arch=_launchable_arch(arch_specific))
     except subprocess.CalledProcessError as exc:
         detail = exc.stderr.decode(errors="replace") if exc.stderr else "(no stderr)"
-        logger.error("nvcc compile failed for kernel %r:\n%s", name, detail)
-        raise RuntimeError(f"nvcc compile failed for kernel {name!r}: {detail[-400:]}") from exc
+        tool = "ptxas" if is_ptx(source) else "nvcc"
+        logger.error("%s failed for kernel %r:\n%s", tool, name, detail)
+        raise RuntimeError(f"{tool} compile failed for kernel {name!r}: {detail[-400:]}") from exc

@@ -60,7 +60,21 @@ share every line downstream. The projection:
   compile is ~3× faster than a cold NVRTC compile on the complex tile-search kernels that dominate a golden bench, and
   it is GPU-free, so the cubin cache can be warmed by a parallel pool (planned). A missing or failing `nvcc` is an
   error; there is no NVRTC fallback. A kernel whose source is PTX text (what the `emmy-ptx` crate writes) skips the
-  C++ front end: `compile_to_cubin` hands it to the toolkit's `ptxas`, and its cubin lands in the same cache.
+  C++ front end: `compile_to_cubin` hands it to the toolkit's `ptxas`, and its cubin lands in the same cache. Its
+  key holds no nvcc flag: the text carries its own precision decisions, so one PTX text is one cubin under every
+  flag list.
+- **Which text a kernel is** is `EMMY_KERNEL_CODE` (`config.kernel_code`), read where `lowering/cuda` generates the
+  code: `cuda` (the default) renders CUDA for nvcc; `ptx` compiles to PTX and renders CUDA only for a kernel the
+  compiler has no rule for yet; `ptx-only` makes that refusal an error. The default stays `cuda` until the perf
+  lane has been read through PTX. Everything keyed on the source takes either text: the cubin cache, the kernel
+  merge (a kernel's name stands in its PTX as its entry and in the symbols the printer derives from it, so the
+  rename by text replacement holds; the corpus test checks it on every kernel), `CudaOp.identity_key`, the plan's
+  JSON, the pack. A pack's key names the generator when it is not the default, so a pack warmed through one never
+  serves a boot that asks for the other. The switch is no part of a measurement's context: an A/B run under a PTX
+  mode writes its rows where a CUDA run reads them, so it points `EMMY_TUNE_DB` at a file of its own. A PTX kernel
+  waits on the grid ahead of it only where its target has the instruction (`sm_90` and later), and says so
+  (`CudaOp.dependent_launch`); CUDA text decides that when it is built. The switch, the fallback and the renderer
+  are deleted together when the compiler covers every kernel.
   Kernels are emitted with `extern "C" __global__` so nothing name-mangles them
   (the cubin symbol loads by `kernel_name`). The compile budget is checked BETWEEN kernels
   (`_compile_kernels`), the only boundary a Python-level check has, so a cold multi-kernel compile that outlives the

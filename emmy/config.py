@@ -45,6 +45,7 @@ BENCH_BACKENDS = "EMMY_BENCH_BACKENDS"
 CUBIN_CACHE = "EMMY_CUBIN_CACHE"
 PACK_DIR = "EMMY_PACK_DIR"
 NO_NVCC = "EMMY_NO_NVCC"
+KERNEL_CODE = "EMMY_KERNEL_CODE"
 KERNEL_TIMEOUT_MS = "EMMY_KERNEL_TIMEOUT_MS"
 FIRST_ITER_TIMEOUT_MS = "EMMY_FIRST_ITER_TIMEOUT_MS"
 BENCH_COMPILE_TIMEOUT_S = "EMMY_BENCH_COMPILE_TIMEOUT_S"
@@ -512,6 +513,23 @@ def pack_dir() -> Path | None:
 def nvcc_disabled() -> bool:
     """``EMMY_NO_NVCC`` — declare nvcc unavailable (every kernel compile then fails loudly)."""
     return _bool(NO_NVCC)
+
+
+#: The values of ``EMMY_KERNEL_CODE``, the default first.
+KERNEL_CODE_CUDA, KERNEL_CODE_PTX, KERNEL_CODE_PTX_ONLY = KERNEL_CODES = ("cuda", "ptx", "ptx-only")
+
+
+def kernel_code() -> str:
+    """``EMMY_KERNEL_CODE`` — what generates a kernel's code while the Kernel IR to PTX compiler is being brought
+    up: ``cuda`` (the default) renders CUDA for nvcc, as before; ``ptx`` compiles to PTX and renders CUDA only for a
+    kernel that holds a statement or an operation the compiler has no rule for yet; ``ptx-only`` makes that
+    refusal an error. It is no part of a measurement's context, so that both generators take the same schedules: a
+    bench under a PTX value writes its rows where a CUDA run reads them, and points ``EMMY_TUNE_DB`` at a file of its
+    own. Temporary: the variable and the CUDA path are deleted when the PTX compiler covers every kernel."""
+    value = _str(KERNEL_CODE) or KERNEL_CODE_CUDA
+    if value not in KERNEL_CODES:
+        raise ValueError(f"{KERNEL_CODE}={value!r}: expected one of {', '.join(KERNEL_CODES)}")
+    return value
 
 
 def pool_draw() -> int:

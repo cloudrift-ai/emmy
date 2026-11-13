@@ -44,6 +44,7 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import NamedTuple
 
+from emmy import config
 from emmy.compiler.backend.plan import (
     PLAN_FORMAT_VERSION,
     ExecutionPlan,
@@ -85,6 +86,9 @@ def _environment() -> dict:
     from emmy.compiler.pipeline.search.golden import live_gpu_key  # noqa: PLC0415
     from emmy.compiler.pipeline.search.space import precision_pins  # noqa: PLC0415
 
+    # Which generator wrote the kernels' code (``config.kernel_code``), while there are two: a pack warmed through
+    # one never serves a boot that asks for the other. The default adds no field, so its packs keep their key.
+    code = config.kernel_code()
     return {
         "backend": "cuda",
         "arch": nvcc.device_arch(False),
@@ -93,6 +97,7 @@ def _environment() -> dict:
         "precision": precision_pins(),
         "card": (live_gpu_key() or ("",))[0],
         "kernel_key": _VERSION,
+        **({} if code == config.KERNEL_CODE_CUDA else {"kernel_code": code}),
     }
 
 

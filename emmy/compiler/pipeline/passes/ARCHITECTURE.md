@@ -505,7 +505,7 @@ tier cannot erase "tensor cores were on offer here" from the rows it does enumer
 lowered `KernelOp` out — and `pipeline/kernel_cache.py` memoizes it at its boundary: `tile/lift/005`
 fetches a finished lowering (io rebound through `Statement.rename_buffers`) before the lift, and
 `lowering/cuda/001` harvests every single-kernel lowering just before the per-graph negotiations
-(zero-init delegation, rendering) that deliberately sit below the boundary. Caller-owned on
+(zero-init delegation, code generation) that deliberately sit below the boundary. Caller-owned on
 `Context.kernel_cache` (nothing installs it by default), greedy-only (tune strips it, pricing probes
 strip it), multi-kernel origins poison their key. A twin program compiles ~750x faster than cold.
 

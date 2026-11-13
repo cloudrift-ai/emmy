@@ -37,15 +37,19 @@ def target() -> tuple[int, str]:
     return major * 10 + minor, f"sm_{major}{minor}"
 
 
-def assemble(ptx: str, level: str, directory: Path, arch_specific: bool = False) -> str:
-    """Assemble ``ptx`` at ``level`` into ``directory`` and return the key the cubin is filed under."""
+def assemble(ptx: str, level: str | None, directory: Path, arch_specific: bool = False, arch: str | None = None) -> str:
+    """Assemble ``ptx`` at ``level`` (ptxas's default when ``None``) into ``directory`` and return the key the cubin
+    is filed under. ``arch`` is the target, the live card's when omitted; ``arch_specific`` adds its suffix."""
     key = hashlib.sha1(f"{level}\0{ptx}".encode()).hexdigest()
     source = directory / f"{key}.ptx"
     source.write_text(ptx)
     ptxas = str(Path(nvcc.nvcc_path()).with_name("ptxas"))
-    arch = target()[1] + ("a" if arch_specific else "")
-    command = [ptxas, level, f"-arch={arch}", "-m64", "-o", str(directory / f"{key}.cubin"), str(source)]
-    subprocess.run(command, check=True, capture_output=True)
+    arch = (arch or target()[1]) + ("a" if arch_specific else "")
+    command = [ptxas, *([level] if level else []), f"-arch={arch}", "-m64", "-o", str(directory / f"{key}.cubin"), str(source)]
+    try:
+        subprocess.run(command, check=True, capture_output=True, text=True)
+    except subprocess.CalledProcessError as refused:
+        raise AssertionError(f"ptxas {level or ''} -arch={arch} refused the kernel:\n{refused.stderr[-2000:]}") from refused
     return key
 
 
