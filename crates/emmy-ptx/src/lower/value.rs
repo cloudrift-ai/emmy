@@ -627,9 +627,47 @@ impl Lowerer {
             return Ok(self.b.value(inst, Bank::Pred));
         }
         if ty == VTy::Bool {
-            return Err(self.no_rule("a comparison of bools"));
+            return self.bool_compare(cmp, x, y, ctx);
         }
         self.int_compare(cmp, x, y, ctx)
+    }
+
+    /// `x == y` or `x != y` where one side is a bool: a bool is 1 or 0, so it equals a literal 1 where it holds and
+    /// a literal 0 where it does not, and two bools are equal where their exclusive or does not hold. The chunk
+    /// bounds write `0 == x < n` for the negation.
+    fn bool_compare(
+        &mut self,
+        cmp: Cmp,
+        x: &Expression,
+        y: &Expression,
+        ctx: &SimplifyCtx,
+    ) -> Result<Reg> {
+        if !matches!(cmp, Cmp::Eq | Cmp::Ne) {
+            return Err(self.no_rule("an ordering of bools"));
+        }
+        let literal = |e: &Expression| match &**e {
+            Expr::Literal(lit) if lit.dtype != LitType::Float => lit.value.as_int().ok(),
+            _ => None,
+        };
+        let (holds, negated) = match (literal(x), literal(y)) {
+            (Some(k), None) | (None, Some(k)) if k == 0 || k == 1 => {
+                let other = if literal(x).is_some() { y } else { x };
+                (self.pred(other, ctx)?, (k == 1) != (cmp == Cmp::Eq))
+            }
+            (None, None) => {
+                let operands = vec![self.pred(x, ctx)?.into(), self.pred(y, ctx)?.into()];
+                let inst = Inst::new(Opcode::Xor, Ty::Pred, Vec::new(), operands);
+                (self.b.value(inst, Bank::Pred), cmp == Cmp::Eq)
+            }
+            _ => {
+                return Err(self.no_rule("a comparison of a bool with a constant other than 0 or 1"));
+            }
+        };
+        if !negated {
+            return Ok(holds);
+        }
+        let inst = Inst::new(Opcode::Not, Ty::Pred, Vec::new(), vec![holds.into()]);
+        Ok(self.b.value(inst, Bank::Pred))
     }
 
     /// The value of `inner` converted to `to`.

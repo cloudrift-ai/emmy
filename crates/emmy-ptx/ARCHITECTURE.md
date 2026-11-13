@@ -50,7 +50,9 @@ A literal has no type of its own. It takes its reader's: an integer literal in a
 Two things a pipeline kernel holds are read as they stand. A condition the body's optimization decided and left
 standing (`if 1:`, `if 0:`) is no branch: its one side stands in its place. The cast `(long long)` on an index term,
 which the flattening writes where a buffer passes the 32-bit range, is the widening to `i64`. A comparison defines a
-`bool`; one the body keeps as a number is that `bool` and a cast of it, as the type pass writes them.
+`bool`; one the body keeps as a number is that `bool` and a cast of it, as the type pass writes them. A bool compared
+for equality with a literal 0 or 1 is its predicate or the negation (the chunk bounds write `0 == i < n`), and two
+bools compared are their exclusive or.
 
 A byte (`u8`) is a buffer's element type only: a load gives an integer with its range, a store takes the low byte of
 one. An 8-bit float and a byte of two e2m1 codes are values whose bits stand in the low byte of a 32-bit register: a

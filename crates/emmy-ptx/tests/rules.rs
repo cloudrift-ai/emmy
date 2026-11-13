@@ -1025,6 +1025,34 @@ fn a_condition_branches_and_a_select_picks() {
     );
 }
 
+/// A bool equals a literal 0 where it does not hold, a literal 1 where it does, and another bool where their
+/// exclusive or does not hold: the chunk bounds write `0 == i < n` for a negation.
+#[test]
+fn a_comparison_of_bools_is_a_predicate_or_its_negation() {
+    let got = under_grid(
+        "
+        f32 x = load a[i]
+        if 0 == i < 8 || (i < 16) == (x > 0.0) || 1 != i < 32:
+            f32 o[i] = x
+        ",
+        A_O,
+        EXACT,
+    );
+    assert_eq!(
+        got[3..11],
+        [
+            "setp.lt.s32 %p0, %r3, 8",
+            "not.pred %p1, %p0",
+            "setp.lt.s32 %p2, %r3, 16",
+            "setp.gt.f32 %p3, %f0, 0f00000000",
+            "xor.pred %p4, %p2, %p3",
+            "not.pred %p5, %p4",
+            "or.pred %p6, %p1, %p5",
+            "setp.lt.s32 %p7, %r3, 32",
+        ]
+    );
+}
+
 /// A state seeded by the body is a register an accumulator steps under a condition, from another base, or at an
 /// integer type; a name bound to a state is a copy, since the state steps on.
 #[test]
