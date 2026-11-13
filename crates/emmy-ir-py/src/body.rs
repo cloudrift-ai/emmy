@@ -795,6 +795,17 @@ pub fn check_types(body: &Bound<'_, PyAny>, buffers: HashMap<String, String>) ->
     emmy_ir::types::check_types(&PyBody::from_iterable(body)?, &buffers.py()?).py()
 }
 
+/// Check that a body is a code generator's input (`emmy_ir::input`): typed in full as `check_types` holds it, and
+/// with no loop left asking for unrolling. Raises naming the first statement that fails.
+#[pyfunction]
+pub fn check_input(body: &Bound<'_, PyAny>, buffers: HashMap<String, String>) -> PyResult<()> {
+    let buffers: emmy_ir::Result<HashMap<Name, emmy_ir::dtype::DType>> = buffers
+        .iter()
+        .map(|(name, dtype)| Ok((Name::new(name), dtype.parse()?)))
+        .collect();
+    emmy_ir::input::check_input(&PyBody::from_iterable(body)?, &buffers.py()?).py()
+}
+
 #[pyfunction]
 pub fn prepare_body<'py>(body: &Bound<'py, PyAny>) -> PyResult<Bound<'py, PyBody>> {
     PyBody::wrap(
@@ -962,6 +973,7 @@ pub fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(normalize_body, m)?)?;
     m.add_function(wrap_pyfunction!(optimize_body, m)?)?;
     m.add_function(wrap_pyfunction!(check_types, m)?)?;
+    m.add_function(wrap_pyfunction!(check_input, m)?)?;
     m.add_function(wrap_pyfunction!(prepare_body, m)?)?;
     m.add_function(wrap_pyfunction!(simplify_body, m)?)?;
     m.add_function(wrap_pyfunction!(one_operation_per_definition, m)?)?;

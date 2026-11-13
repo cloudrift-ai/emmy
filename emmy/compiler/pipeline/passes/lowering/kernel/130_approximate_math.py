@@ -98,8 +98,7 @@ def _picked(stmt: Statement, picks: dict[str, str], buffers: dict, halves: list[
     if isinstance(stmt, (TreeHalve, WarpShuffle)) and stmt.dtype == F32:
         return stmt.replace(combine_states=tuple(merge.replace(value=_pick(merge.value, picks)) for merge in stmt.combine_states))
     if isinstance(stmt, FragmentApply):
-        op, *post = (ElementwiseImpl(picks.get(held.name, held.name)) for held in (stmt.op, *stmt.post))
-        return stmt.replace(op=op, post=tuple(post))
+        return stmt.replace(op=ElementwiseImpl(picks.get(stmt.op.name, stmt.op.name)))
     if isinstance(stmt, RegStore):
         # A store holds the stores grouped with it (``run``), each with an epilogue of its own.
         run = tuple(_picked(cell, picks, buffers, halves) for cell in stmt.run)

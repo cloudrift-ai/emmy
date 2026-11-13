@@ -210,16 +210,16 @@ PAIR_LDMATRIX = Knob(
     off=False,
 )
 
-#: The unroll budget — the max static loop trip count eligible for ``#pragma unroll``. Pin-only
-#: (``off`` defaults to ``_UNSET`` → never stamped / featurized / enumerated, so it can't perturb the
-#: search or the goldens): ``EMMY_UNROLL=0`` keeps every extent-driven loop **rolled** (compact,
-#: readable kernels — e.g. for a blog listing), a high value unrolls more. Unset → each call site's
-#: built-in cap (64 for an inner reduce, 128 for the flash KV fold, uncapped for the tensor-core
-#: K-chunk), so the default codegen is byte-identical. Consumed by ``lowering/kernel/_atom.unroll_ok``.
+#: The unroll budget — the max static loop trip count a lowering site flags for unrolling
+#: (``lowering/kernel/117_unroll_loops`` then writes the flagged loops out). Pin-only (``off`` defaults to
+#: ``_UNSET`` → never stamped / featurized / enumerated, so it can't perturb the search or the goldens):
+#: ``EMMY_UNROLL=0`` keeps every extent-driven loop **rolled** (compact kernels), a high value flags more. Unset →
+#: each call site's built-in cap (64 for an inner reduce, 16 for a lane loop, none for the tensor-core K loop).
+#: Consumed by ``lowering/kernel/_atom.unroll_ok``.
 UNROLL = Knob(
     "UNROLL",
     KnobType.INT,
-    help="Max static loop trip count to #pragma-unroll (the unroll budget); pin 0 to keep loops rolled. Unset = per-site cap.",
+    help="Max static loop trip count a lowering site flags for unrolling; pin 0 to keep loops rolled. Unset = per-site cap.",
 )
 
 FAST_EXP = Knob(
@@ -404,18 +404,8 @@ def regime_pins(pins: dict | None = None) -> dict[str, bool]:
     return {**precision_pins(pins), **others}
 
 
-LOOPIFY = Knob(
-    "LOOPIFY",
-    KnobType.INT,
-    # Off by default (0) and not a search dimension — a readability-only codegen policy: re-roll a
-    # maximal run of parallel per-fragment ``FragmentApply`` (the flash mma epilogue's element-wise
-    # C-fragment arithmetic) into a ``#pragma unroll`` loop over an arrayed fragment family. The value
-    # is the MINIMUM run length to re-roll: ``0`` / unset (and any value < 2) → off, byte-identical
-    # CUDA; ``EMMY_LOOPIFY=4`` re-rolls the 8-long O rescale / divide runs (most of the win) while
-    # skipping the 2-long QK scale; ``EMMY_LOOPIFY=2`` re-rolls every run ≥ 2. Identical SASS (nvcc
-    # unrolls the pragma) — purely a listing-shrink for blog / ``--ir cuda`` inspection.
-    hints=(0,),
-    help="Min parallel FragmentApply run length to re-roll into a #pragma-unroll loop (0 = off, byte-identical).",
-    off=0,
-    unfeatured=True,  # SASS-identical listing re-spell — excluded from the feature vector; batch-enabled by EMMY_READABLE
-)
+#: Retired: the pass that read it (a re-roller of statement runs into ``#pragma unroll`` loops, for listings) is gone
+#: and nothing stamps or reads it. The name stays registered because the rows stored while that pass ran (the
+#: goldens, the freezes, tune DBs) carry ``LOOPIFY: 0``, and a row key no knob declares is a number to the priors'
+#: featurizer. It goes with a rewrite of those rows.
+LOOPIFY = Knob("LOOPIFY", KnobType.INT, hints=(0,), help="Retired; stored rows carry its 0.", off=0, unfeatured=True)

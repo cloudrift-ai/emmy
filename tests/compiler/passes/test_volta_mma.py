@@ -187,7 +187,10 @@ def test_sm70_source_uses_only_the_volta_mma_family(monkeypatch, trans) -> None:
     kernel = _kernel(src)
     assert len(re.findall(r"unsigned \w+\[2\];", kernel)) == 2, "one A and one B fragment"
     assert len(re.findall(r"float \w+\[8\] = ", kernel)) == 1, "one accumulator"
-    assert ("emmy_mma884_load_b_gmem_trans(" in kernel) == trans
+    # A transposed B is K-contiguous in memory: its one unrolled K step starts at a literal offset, so it loads four
+    # halves at a time, as A does. A plain B strides K by its row and loads element by element.
+    assert ("emmy_mma884_load_gmem4<__half, false>(" in kernel) == trans
+    assert ("emmy_mma884_load_b_gmem(" in kernel) != trans
     for forbidden in ("ldmatrix", "cp.async", "cp.async.bulk", "m16n8k16", ".bf16", ".e4m3", ".e5m2"):
         assert forbidden not in src
 
@@ -232,7 +235,8 @@ def test_sm70_m1_linear_synthesizes_a_masked_mma_row(monkeypatch) -> None:
     assert family_value(knobs, "TILE") == f"{VOLTA}/f1x1"
     assert knobs["WORK"] == "w1x1"
     assert "emmy_mma_m8n8k4_f16_f32" in src
-    assert "emmy_mma884_load_a_gmem_mclamp(" in _kernel(src) and "< (1)" in src
+    # The A load clamps to the one row (its last argument is the rows left), and the stores are guarded to it.
+    assert re.search(r"emmy_mma884_load_gmem4<__half, true>\(_a0, [^;]*, \(1\) - \(", _kernel(src)) and "< (1)" in src
 
 
 @pytest.mark.parametrize("trans", [False, True])
@@ -327,7 +331,7 @@ def test_sm70_gmem_direct_tile_keeps_the_ordinary_accumulator_map(monkeypatch) -
     src, _ = _source(_graph(m=32, n=32, k=16), Context(compute_capability=(7, 0)))
     kernel = _kernel(src)
     assert "emmy_mma_m8n8k4_f16_f32_brow(" not in kernel
-    assert kernel.count("emmy_mma_m8n8k4_f16_f32(") == 4
+    assert kernel.count("emmy_mma_m8n8k4_f16_f32(") == 4 * (16 // 4)  # the 2x2 register tile, at each K step
     assert "const int _vq = (_vl & 15) >> 2;" in src
 
 
@@ -433,24 +437,6 @@ def test_sm70_shallow_k_tile_keeps_store_addresses_near_the_deposit(monkeypatch)
     assert "int _a_smem_store" not in src and "int _b_smem_store" not in src
     assert "_a_gmem_stride" not in src and "_b_gmem_stride" not in src
     assert "*reinterpret_cast<uint2*>(&_a_smem[emmy_volta_crosswise(" in src
-
-
-def test_sm70_register_tile_keeps_the_volta_fragment_layout_through_the_reroll(monkeypatch) -> None:
-    """A register tile wide enough to ROLL back into a loop still drains and stores as Volta.
-
-    The rolled form rebuilds every stmt through ``Statement.rewrite``; dropping ``fragment_layout``
-    there re-defaulted the drain to the modern ``ldmatrix`` and the store to the m16n8k16 C map —
-    an uncompilable, wrong-layout sm_70 kernel that the ``f1x1`` cases above cannot see."""
-    _pin(monkeypatch, VOLTA, tile="f2x2", stage="d1/smem")
-    monkeypatch.setenv("EMMY_LOOPIFY", "2")
-    src, _ = _source(_graph(m=32, n=32, k=16), Context(compute_capability=(7, 0)))
-    assert "unsigned _b[2][2]" in src  # the ROLLED fragment family (count > 1)
-    assert "emmy_mma884_load_a_crosswise_pair(_a0, _a1" in src
-    assert "emmy_mma884_load_b_congruous_pair(_b[0], _b[1]" in src
-    assert "emmy_mma_m8n8k4_f16_f32_brow(_c" in src
-    assert "const int _vr = " in src and "const int _vc = " in src  # the m8n8k4 C-fragment store map
-    for forbidden in NEWER_INSTRUCTIONS:
-        assert forbidden not in src
 
 
 def test_sm70_attention_uses_the_volta_fragment_layout(monkeypatch) -> None:

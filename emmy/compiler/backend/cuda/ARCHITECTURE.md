@@ -88,7 +88,7 @@ share every line downstream. The projection:
 
   An older sweep ranked at `-Xcicc -O1` to dodge a cicc front-end blowup on big unrolled register-tile kernels. That
   rationale was measured against the WMMA codegen deleted in #189 four days later; on current codegen (fragment work
-  renders as rolled loops with small `#pragma unroll` trip counts) it does not reproduce — over 4,888 nvcc compiles
+  is a loop over a fragment's few elements) it does not reproduce — over 4,888 nvcc compiles
   spanning the tile inventory, -O3 compiled at a **median 0.96×** of -O1, worst case 1.17×, slowest compile 1.39 s.
   So the lower level bought no compile time while mis-ranking by tile area, and it is no longer a measurement lane.
   It stays reachable through `--nvcc-flags` for the test suite's compile-speed lane; a bench pinned to it warns, and
@@ -99,10 +99,10 @@ share every line downstream. The projection:
   the other flags, `context.split_opt_level`), so one regime has one key however it is spelled while measurements
   from different regimes never collide. The bench-worker subprocess inherits the env, so its compiles use the
   same flags.
-  `EMMY_UNROLL=<n>` caps which static loops emit `#pragma unroll` (the unroll budget — declared in
-  `lowering/kernel/_atom.py`, read at the extent-driven unroll sites there). It is a
-  pin-only nvcc hint that steers cicc unrolling / register pressure / compile time; it does **not**
-  change the emitted-C listing size (the register-tile fragment grid is straight-line regardless).
+  `EMMY_UNROLL=<n>` caps which static loops the kernel lowering flags for unrolling (the unroll budget — declared in
+  `lowering/kernel/_atom.py`, read at the extent-driven unroll sites there). The lowering then writes the flagged
+  loops out itself (`lowering/kernel/117_unroll_loops`): the source holds the copies and asks nvcc for nothing. It is
+  pin-only and steers register pressure, code size and compile time.
   Unset → each site's built-in cap; `0` → keep every loop rolled.
 - Builds a static launch plan: per launch, a tuple of
   `(kernel, arg_names, grid, block, smem_bytes, zero_outputs)`. The runtime resolves total shared storage against

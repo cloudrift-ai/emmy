@@ -122,7 +122,7 @@ TreeHalve(bufs=(bb), state=(acc9), state_b=(acc9__o), length=8, tid_var=tt):
     combine_states:
         f = exp(acc9__o)
         acc9 = acc9 / f
-FragmentApply(out=c1, op=divide, args=(FragmentArg(kind=frag, names=(c0)), FragmentArg(kind=row, names=(r0, r1))), post=(exp, reciprocal))
+FragmentApply(out=c1, op=reciprocal, args=(FragmentArg(kind=frag, names=(c0))))
 """
 
 
@@ -136,17 +136,17 @@ FragmentApply(out=c1, op=divide, args=(FragmentArg(kind=frag, names=(c0)), Fragm
     ids=["standard", "umbrella", "div"],
 )
 def test_an_operation_a_statement_holds_is_picked_too(pins, exp, divide, reciprocal, sigmoid) -> None:
-    """A store's epilogue, a combine's merge program and a fragment operation with its unary tail hold operations no
-    body walk enters. The epilogue is typed only when it is printed, so its definitions are typed here to read where
-    each computes: the f32 division is picked, the half square root and the integer quotients are not. A composite
-    stays whole in all three: the reciprocal has its own instruction, and a ``sigmoid`` takes the approximate
-    exponential and division together or neither."""
+    """A store's epilogue, a combine's merge program and a fragment operation hold operations no body walk enters.
+    The epilogue is typed only when it is printed, so its definitions are typed here to read where each computes: the
+    f32 division is picked, the half square root and the integer quotients are not. A composite stays whole in all
+    three: the reciprocal has its own instruction, and a ``sigmoid`` takes the approximate exponential and division
+    together or neither."""
     kernel = _picked(_HELD, pins)
     store, merge, fragment = (next(s for s in kernel.body.iter() if isinstance(s, kind)) for kind in (RegStore, TreeHalve, FragmentApply))
     epilogue = {stmt.name: stmt.value.operation.name for stmt in store.epilogue if isinstance(stmt, Assign) and stmt.value.operation}
     assert epilogue == {"u": divide, "w": "maximum", "z": "sqrt", "kk": "divide", "kc": "divide", "y": sigmoid}
     assert [stmt.value.operation.name for stmt in merge.combine_states] == [exp, divide]
-    assert (fragment.op.name, [op.name for op in fragment.post]) == (divide, [exp, reciprocal])
+    assert fragment.op.name == reciprocal
 
 
 def _lowered(name: str, pins: dict) -> tuple[KernelOp, str]:

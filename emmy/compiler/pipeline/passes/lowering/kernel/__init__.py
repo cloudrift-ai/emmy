@@ -25,6 +25,7 @@ tile-tier rebuild:
 - ``097_widen_fragment_stores`` — store four adjacent ``wgmma`` accumulator cells as one
   16-byte row per lane.
 - ``110_drop_redundant_syncs`` — collapse no-op Sync stmts at the Tile body level.
+- ``117_unroll_loops`` — every loop a lowering site flagged, written out as copies of its body.
 - ``120_explicit_conversions`` — every operation at one dtype, every conversion a definition of its own.
 - ``125_spell_composites`` — every composite function (``sigmoid``, ``relu``, …) as its primitive operations.
 - ``130_approximate_math`` — last: the approximate form of each instruction class a precision knob turns on.

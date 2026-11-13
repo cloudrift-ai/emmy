@@ -1019,8 +1019,6 @@ def _(node: Loop, ctx: RenderCtx) -> list[str]:
             ctx.ssa_dtypes[s.name] = (s.dtype or F32).name
     var = node.axis.name
     extent = _extent_c(node.axis, ctx)
-    if node.unroll:
-        out.append(f"{pad}#pragma unroll")
     out.append(f"{pad}for (int {var} = 0; {var} < {extent}; {var}++) {{")
     inner = ctx.child()
     out.extend(render_body(node.body, inner))
@@ -1068,8 +1066,6 @@ def _(stmt: StridedLoop, ctx: RenderCtx) -> list[str]:
     # ``seq_len`` strides each lane to the runtime extent — the ``< seq_len`` bound is the
     # masked tail, idle lanes folding the carrier identity) as the C name, a static one as
     # its literal int.
-    if stmt.unroll:
-        out.append(f"{pad}#pragma unroll")
     if isinstance(stmt.end, (Var, Literal)):
         # A bound that is already one value (the staged chunk loop binds its early stop ahead of the loop).
         out.append(f"{pad}for (int {var} = {start_str}; {var} < {render_expression(stmt.end, ctx)}; {var} += {step_str}) {{")

@@ -173,7 +173,7 @@
  "tests/compiler/realization/test_realization.py::test_realization[matmul/fp4-tma-w4a4-split-k.json-correct]@cuda": 27.76,
  "tests/compiler/realization/test_realization.py::test_realization[matmul/nvfp4-unit-n.json-built]@cuda": 0.8,
  "tests/compiler/realization/test_realization.py::test_realization[matmul/nvfp4-unit-n.json-correct]@cuda": 0.92,
- "tests/compiler/realization/test_realization.py::test_realization[matmul/nvfp4-w4a4-packed-slab-loopify.json-correct]@cuda": 7.2,
+ "tests/compiler/realization/test_realization.py::test_realization[matmul/nvfp4-w4a4-packed-slab.json-correct]@cuda": 7.2,
  "tests/compiler/realization/test_realization.py::test_realization[matmul/volta-f16acc-direct.json-built]@cuda": 5.4,
  "tests/compiler/realization/test_realization.py::test_realization[matmul/volta-gptq-cone-d1smem.json-correct]@cuda": 18.0,
  "tests/compiler/realization/test_realization.py::test_realization[reduce/sinkhorn-nested-cut-derived-read-sm70.json-built]@cuda": 7.41,

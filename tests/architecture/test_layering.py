@@ -208,8 +208,8 @@ def test_the_statement_module_exports_a_pinned_list() -> None:
     functions += ["mask_select_predicate", "pretty_body", "parse_body", "ordering_constraints", "dtype_promote"]
     # The target's spelling of an index division, which an emitter runs on the body it renders.
     functions += ["reduce_strength"]
-    # The input check of a code generator: the body says every type and every conversion.
-    functions += ["check_types"]
+    # The input check of a code generator: the body says every type and every conversion, and asks for nothing.
+    functions += ["check_types", "check_input"]
     # Normalization steps a pass calls on its own, and the two statement types fusion assembles a region with.
     steps = list(_STEPS)
     assembly = ["Call", "Subroutine"]

@@ -742,15 +742,12 @@ def _frag_operand(stmt: FragmentApply, arg: FragmentArg, ctx: RenderCtx, i: int 
 
 def _frag_element(stmt: FragmentApply, ctx: RenderCtx, i: int | None) -> str:
     argvars = [_frag_operand(stmt, arg, ctx, i) for arg in stmt.args]
-    expression = op_to_expression(stmt.op.name, argvars)
-    for post_op in stmt.post:  # compose the fused unary tail (outermost last)
-        expression = op_to_expression(post_op.name, [expression])
-    return render_expression(expression, ctx)
+    return render_expression(op_to_expression(stmt.op.name, argvars), ctx)
 
 
 @render_stmt.register
 def _(stmt: FragmentApply, ctx: RenderCtx) -> list[str]:
-    """One ``#pragma unroll`` loop over the fragment's ``n_elems`` — ``out[_e] = post…(op(args_e))``
+    """One ``#pragma unroll`` loop over the fragment's ``n_elems`` — ``out[_e] = op(args_e)``
     — instead of ``n_elems`` straight-line assignments. The ROW operand renders as the row-split
     ternary, so the m16n8 2-rows/lane structure stays legible (``_e < 2 ? row0 : row1``); identical
     SASS (nvcc unrolls the pragma). A COORD / GMEM operand differs per element in its coordinate
@@ -838,42 +835,23 @@ def _frag_nregs(stmt: RegFragment) -> int:
     return stmt.nregs if stmt.nregs is not None else _mma_sync_nregs(stmt.role, stmt.shape, stmt.dtype)
 
 
-def _frag_dims(stmt: RegFragment) -> str:
-    """The declaration's subscripts — the family count when arrayed, then the per-member
-    register count, which a scalar register does not have. Spelled once so the listing and the
-    emitted decl cannot disagree about a family's shape."""
-    n_regs = _frag_nregs(stmt)
-    extents = ((stmt.count,) if stmt.count > 1 else ()) + ((n_regs,) if n_regs else ())
-    return "".join(f"[{e}]" for e in extents)
-
-
 @render_stmt.register
 def _(stmt: RegFragment, ctx: RenderCtx) -> list[str]:
     n_regs = _frag_nregs(stmt)
     ctx.ssa_dtypes[stmt.name] = stmt.dtype.name
-    dims = _frag_dims(stmt)
+    # A scalar register (a block-scale fragment) has no subscript.
+    dims = f"[{n_regs}]" if n_regs else ""
     if stmt.role == "c" and stmt.dtype.nbytes != 2:
-        # Brace-init zeros the whole (arrayed) accumulator; ``= {0.0f, ...}`` stays the flat form.
-        init = " = {}" if stmt.count > 1 else f" = {{{', '.join(['0.0f'] * n_regs)}}}"
-        return [f"{_pad(ctx.indent)}float {stmt.name}{dims}{init};"]
+        return [f"{_pad(ctx.indent)}float {stmt.name}{dims} = {{{', '.join(['0.0f'] * n_regs)}}};"]
     if stmt.role == "c":
         # f16-accumulate C: packed half pairs, zero bits = 0.0h pairs (rezeroed by FragmentPromote).
-        init = " = {}" if stmt.count > 1 else f" = {{{', '.join(['0u'] * n_regs)}}}"
-        return [f"{_pad(ctx.indent)}unsigned {stmt.name}{dims}{init};"]
+        return [f"{_pad(ctx.indent)}unsigned {stmt.name}{dims} = {{{', '.join(['0u'] * n_regs)}}};"]
     return [f"{_pad(ctx.indent)}unsigned {stmt.name}{dims};"]
 
 
 def frag_dtype(ctx: RenderCtx, frag: str) -> str | None:
-    """Canonical dtype token of a fragment reference (``None`` when no :class:`RegFragment`
-    declares it).
-
-    A ``count``-arrayed family declares the STEM (``_b``) and its members are referenced
-    subscripted (``_b[_r0]`` inside a re-rolled loop, ``_b[3]`` outside one), so the dtype hangs
-    off the stem and a bare ``ctx.ssa_dtypes`` lookup on the reference misses. A miss is silent —
-    every caller has a fallback — so it does not raise, it picks the wrong loader: a packed-pair
-    (NVFP4) byte slab read as if its bytes were fp8 elements, one stored byte standing for two K
-    values."""
-    return ctx.ssa_dtypes.get(frag.partition("[")[0])
+    """Canonical dtype token of a fragment (``None`` when no :class:`RegFragment` declares it)."""
+    return ctx.ssa_dtypes.get(frag)
 
 
 # Per-lane fp16 element XOR matching the TMA hardware smem swizzle (the

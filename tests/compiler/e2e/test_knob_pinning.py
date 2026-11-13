@@ -81,22 +81,26 @@ def _build_f16_matmul_graph(M: int, N: int, K: int):
 
 
 def test_sgemm_inner_reduce_is_unrolled(monkeypatch):
-    """``assembly/030_mark_unroll`` flags the small FMA inner reduce (the ``BK=32`` K
-    loop, ≤ 64 trips) for ``#pragma unroll``, giving ptxas the register-resident
-    operand reuse + ILP the hand-tuned SGEMM relies on (the ``TM=26`` hero tile runs
-    at 255 regs / ~293 µs with the unroll, ~126 regs / ~384 µs without — the lever for
-    the article's ~96 %-of-cuBLAS number). The K-outer pipeline loop (> 64 unrolled
-    trips) stays rolled. Compile-only (inspects the kernel source). No CUDA needed."""
+    """The scalar tier flags the small FMA inner reduce (the ``BK=32`` K loop, ≤ 64 trips) and the kernel passes
+    unroll it, giving ptxas the register-resident operand reuse + ILP the hand-tuned SGEMM relies on (the ``TM=26``
+    hero tile runs at 255 regs / ~293 µs with the unroll, ~126 regs / ~384 µs without — the lever for the
+    article's ~96 %-of-cuBLAS number). The K-outer pipeline loop (> 64 unrolled trips) stays rolled. Compile-only
+    (inspects the kernel body). No CUDA needed."""
     from emmy.compiler.context import Context
-    from emmy.compiler.ir.cuda.ir import CudaOp
+    from emmy.compiler.ir.kernel import KernelOp
+    from emmy.compiler.ir.stmt import Accum, Loop, StridedLoop
     from emmy.compiler.pipeline import KERNEL_PASSES, Pipeline
 
     g = _build_2d_matmul_graph(_ARTICLE_DIMS)
     for k, v in {"TILE": "f4x26", "WORK": "t32x8", "STAGE": "d2/smem-tma"}.items():
         monkeypatch.setenv(f"EMMY_{k}", str(v))
-    res = Pipeline.build([*KERNEL_PASSES, "lowering/cuda"]).run(g, ctx=Context.from_target((12, 0)))
-    src = "\n".join(n.op.kernel_source for n in res.nodes.values() if isinstance(n.op, CudaOp))
-    assert "#pragma unroll" in src, "the small FMA inner reduce must be marked for #pragma unroll"
+    res = Pipeline.build(KERNEL_PASSES).run(g, ctx=Context.from_target((12, 0)))
+    (kernel,) = [n.op for n in res.nodes.values() if isinstance(n.op, KernelOp)]
+    outer = [s for s in kernel.body.iter() if isinstance(s, (Loop, StridedLoop)) and any(isinstance(inner, Accum) for inner in s.body)]
+    assert len(outer) == 1, "the K-outer pipeline loop stays rolled, and the inner reduce is no loop under it"
+    # One copy of the 26 x 4 register tile's folds per K element of the chunk.
+    assert sum(isinstance(inner, Accum) for inner in outer[0].body) == 32 * 26 * 4
+    assert not any(s.unroll for s in kernel.body.iter() if isinstance(s, (Loop, StridedLoop)))
 
 
 def test_flat_output_sweep_lowers_with_its_axis_bound(monkeypatch):

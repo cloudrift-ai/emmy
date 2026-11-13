@@ -41,6 +41,7 @@ pretty_body = _ir.pretty_body
 normalize_body = _ir.normalize_body
 optimize_body = _ir.optimize_body
 check_types = _ir.check_types
+check_input = _ir.check_input
 reduce_strength = _ir.reduce_strength
 one_operation_per_definition = _ir.one_operation_per_definition
 canonical_values = _ir.canonical_values
@@ -96,6 +97,7 @@ __all__ = [
     "normalize_body",
     "optimize_body",
     "check_types",
+    "check_input",
     "reduce_strength",
     "ordering_constraints",
     "prepare_body",

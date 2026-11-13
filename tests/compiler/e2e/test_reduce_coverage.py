@@ -140,5 +140,6 @@ def test_a_short_lane_loop_unrolls_and_one_warp_folds_the_warp_partials(monkeypa
     code = "torch.nn.RMSNorm(3840, dtype=torch.float16)(torch.randn(32, 3840, dtype=torch.float16))"
     compiled = CudaBackend().compile(graph_from_code(code)[0])
     (src,) = [s for s in (getattr(node.op, "kernel_source", "") for node in compiled.nodes.values()) if s]
-    assert src.count("#pragma unroll\n") >= 2, src
+    # Eight copies of each lane loop's body, the eighth under the row's bound: 3840 cells leave half the lanes seven.
+    assert src.count("__u7 = ") >= 2 and "if (a1_co + 3584 < 3840) {" in src and "#pragma unroll" not in src, src
     assert "if (warp == 0) {" in src and "for (int s = " not in src, src

@@ -157,7 +157,7 @@ def test_matmul_tile_coverage(variant, monkeypatch):
     has_copy = "__c0_1" in src or "__c1_0" in src  # a replicated register-cell binding
     if has_reg:
         assert has_copy, f"{variant}: expected replicated register cells (__c*)"
-        assert "#pragma unroll" in src, f"{variant}: the small inner reduce must be unrolled"
+        assert "__u1" in src and "#pragma unroll" not in src, f"{variant}: the small inner reduce must be unrolled"
     else:
         assert not has_copy, f"{variant}: per-cell tier must not replicate register cells"
     if launch_bounds is not None:

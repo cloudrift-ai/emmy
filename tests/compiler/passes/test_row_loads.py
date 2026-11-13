@@ -76,25 +76,28 @@ def test_a_norm_rope_row_computes_the_right_answer() -> None:
     np.testing.assert_allclose(got, expected, rtol=2e-2, atol=2e-2)
 
 
-def test_a_lane_loop_unrolls_only_when_its_start_is_below_its_step() -> None:
-    """Unrolling writes coordinates ``start + k·step`` for every ``k < extent / step``; they stay inside the
-    loop only when ``start`` is proven in ``[0, step)``. A start at or past the step (or unknown) keeps the loop."""
+def test_a_lane_loop_unrolls_only_when_every_lane_runs_the_same_trips() -> None:
+    """Unrolling writes coordinates ``start + k·step`` for every trip; they are the loop's own only when the ranges
+    prove every start runs that many. A start that is unknown keeps the loop."""
     import importlib
 
     from emmy.compiler.ir.expression import Interval, SimplifyCtx
     from emmy.compiler.ir.stmt import parse_body
+    from emmy.compiler.pipeline.passes.lowering.kernel._unroll import trip_counts
 
-    trips = importlib.import_module("emmy.compiler.pipeline.passes.lowering.kernel.047_reuse_lane_loads")._trips
+    copies = importlib.import_module("emmy.compiler.pipeline.passes.lowering.kernel.047_reuse_lane_loads")._copies
     lanes = SimplifyCtx.empty().extend("lane", Interval(0, 15))
 
-    def loop(start: str):
+    def trips(start: str) -> int | None:
         [loop] = parse_body(f"for i in {start}..64 step 16:\n    f16 v = load x[i]")
-        return loop
+        counts = trip_counts(loop, lanes)
+        return None if counts is None else copies(loop, counts)
 
-    assert trips(loop("lane"), lanes) == 4
-    assert trips(loop("0"), lanes) == 4
-    assert trips(loop("32"), lanes) is None
-    assert trips(loop("unknown"), lanes) is None
+    assert trips("lane") == 4
+    assert trips("0") == 4
+    assert trips("32") == 2
+    assert trips("2 * lane") is None
+    assert trips("unknown") is None
 
 
 def test_sibling_lane_loops_over_one_cone_unroll_to_distinct_names() -> None:
@@ -102,18 +105,23 @@ def test_sibling_lane_loops_over_one_cone_unroll_to_distinct_names() -> None:
     one scope, a repeat of those names is a second C declaration nvcc rejects; the later loop takes its own."""
     import importlib
 
-    from emmy.compiler.ir.expression import Interval, SimplifyCtx
-    from emmy.compiler.ir.stmt import Assign, Load, normalize_body, parse_body
+    from emmy.compiler.ir.axis import Axis
+    from emmy.compiler.ir.kernel.ir import Tile
+    from emmy.compiler.ir.stmt import Assign, Body, Load, normalize_body, parse_body
+    from emmy.compiler.pipeline.passes.lowering.kernel._unroll import unroll_where
 
-    walk = importlib.import_module("emmy.compiler.pipeline.passes.lowering.kernel.047_reuse_lane_loads")._walk
-    lanes = SimplifyCtx.empty().extend("lane", Interval(0, 15))
+    rule = importlib.import_module("emmy.compiler.pipeline.passes.lowering.kernel.047_reuse_lane_loads")
+
+    def walk(body):
+        [tile] = unroll_where(Body((Tile(axes=(Axis("lane", 16),), body=body),)), rule._copies)
+        return tile.body
 
     def loop(out: str) -> str:
         return f"for i in lane..64 step 16:\n    f16 v = load x[i]\n    w = exp(v)\n    {out}[i] = w"
 
-    one = walk(parse_body(loop("a")), lanes)
+    one = walk(parse_body(loop("a")))
     assert [s.name for s in one if isinstance(s, Assign)] == [f"w__u{k}" for k in range(4)]  # a lone loop keeps its names
-    two = walk(parse_body(loop("a") + "\n" + loop("b")), lanes)
+    two = walk(parse_body(loop("a") + "\n" + loop("b")))
     names = [name for s in two for name in s.defines()]
     assert len(names) == len(set(names))
     # The second cone reads each cell from the first's loads once the body takes its normal form.
