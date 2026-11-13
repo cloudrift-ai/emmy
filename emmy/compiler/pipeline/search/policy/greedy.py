@@ -357,10 +357,9 @@ def _db_measured_index_build(db, ctx) -> _Measured:
 
     Rows are indexed by the exact identity of the kernel they measured — the one evidence join: the same
     identity is the same kernel, and nothing else about a kernel takes part (knob values are stringified
-    because perf knobs round-trip JSON). One context key is sufficient: tune measures in the deployable regime, and
-    ``Context.structural_key`` gives that regime one key however its flags are spelled. Rows from a
-    deliberately non-deployable compile key elsewhere and are not consulted, and neither are rows
-    another card measured (``SearchDB.iter_perf`` reads this card's rows in this regime).
+    because perf knobs round-trip JSON). Rows measured in another precision or cache regime key elsewhere and are not
+    consulted, and neither are rows another card measured (``SearchDB.iter_perf`` reads this card's rows in this
+    regime).
 
     A non-``ok`` row is evidence too — the bench watchdog measured that variant not finishing — but
     it is evidence a ranker cannot use, since its sentinel latency is a timeout constant rather

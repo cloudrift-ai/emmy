@@ -61,7 +61,7 @@ def test_db_measured_index_collects_kernels_whose_every_measured_variant_failed(
         row("mixed", "ok", 7.0, WORK="t64"),
     ]
     db = SimpleNamespace(iter_perf=lambda *_args, **_kwargs: rows)
-    ctx = SimpleNamespace(structural_key=lambda: "ctx", gpu_name=None, compute_capability=(8, 9), features=lambda: {"H_opt": 3.0})
+    ctx = SimpleNamespace(structural_key=lambda: "ctx", gpu_name=None, compute_capability=(8, 9), features=lambda: {"H_cc": 89.0})
 
     measured = _db_measured_index_build(db, ctx)
     assert "doomed" in measured.failed, "every measured variant of this kernel hit the watchdog"
@@ -103,7 +103,7 @@ def test_schedule_pick_descends_directly_to_complete_measured_row() -> None:
         match=SimpleNamespace(root_node_id="node", graph=None),
         options=[tree],
         root_op=_kernel(),
-        ctx=SimpleNamespace(features=lambda: {"H_opt": 3.0}),
+        ctx=SimpleNamespace(features=lambda: {"H_cc": 89.0}),
     )
     index = {"k": {(): [({"TILE": "42", "STAGE": "73"}, 1.25)]}, "another": {(): [({"TILE": "1", "STAGE": "1"}, 0.5)]}}
     leaf, knobs, price = _direct_measured_pick(point, None, index)
@@ -195,7 +195,7 @@ def test_strict_evidence_lets_a_hand_pin_decide_a_kernel_set_fork(monkeypatch) -
     cut = DeferredFork(materialize=lambda: None, knobs={"PLACE@map.1/map": "cut"}, structural=True)
     fuse = DeferredFork(materialize=lambda: None, knobs={"PLACE": "fuse"})
     ctx = SimpleNamespace(
-        structural_key=lambda: "ctx", gpu_name="", backend_name="cuda", compute_capability=(8, 9), features=lambda: {"H_opt": 3.0}
+        structural_key=lambda: "ctx", gpu_name="", backend_name="cuda", compute_capability=(8, 9), features=lambda: {"H_cc": 89.0}
     )
     match = SimpleNamespace(root_node_id="node", rule=SimpleNamespace(name="030_cut"), graph=None)
 
@@ -230,7 +230,7 @@ def _point(rows):
         match=SimpleNamespace(root_node_id="node", graph=None),
         options=[tree],
         root_op=_kernel(),
-        ctx=SimpleNamespace(features=lambda: {"H_opt": 3.0}),
+        ctx=SimpleNamespace(features=lambda: {"H_cc": 89.0}),
     )
 
 
@@ -247,7 +247,7 @@ def test_streamed_model_pick_equals_flattened_argmin(monkeypatch) -> None:
 
     flat = [(o, leaf_knobs(o)) for o in list(iter_leaves(point.options))]
     rows = [k for _, k in flat]
-    scores = _BarePrior().mean_scores_features([Featurizer({"H_opt": 3.0}).features(point.root_op, k) for _, k in flat])
+    scores = _BarePrior().mean_scores_features([Featurizer({"H_cc": 89.0}).features(point.root_op, k) for _, k in flat])
     best_i = min(range(len(rows)), key=lambda i: (scores[i], canonical_row_key(rows[i])))
     assert knobs == flat[best_i][1]
     # The lazy walk mints fresh (content-equal) leaf objects per expansion, so identity is by row.
@@ -261,7 +261,7 @@ def test_a_schedule_is_scored_at_its_best_later_knob_and_a_later_fork_keeps_its_
     the storage fork opens. The storage fork's own leaves spell the knob already, and each keeps its value."""
     rows = [{"TILE": "0", "REDUCE": reduce} for reduce in ("", "r2", "r4")]
     point = _point(rows)
-    featurizer = Featurizer({"H_opt": 3.0})
+    featurizer = Featurizer({"H_cc": 89.0})
     # Shared storage makes r2 the fastest row of all; in global storage the serial fold wins.
     table = {}
     for row in rows:

@@ -15,7 +15,6 @@ the signature alone.
 
 from __future__ import annotations
 
-import re
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
@@ -50,7 +49,7 @@ def precision_flags(pins: dict[str, bool]) -> list[str]:
     """How a context's ``compile_flags`` spells the two precision decisions among ``pins`` (``space.precision_pins``)
     that hold for a whole kernel: flush to zero and multiply-add fusion, each where it is not the default (no flush,
     fusion). They were nvcc's flags; the PTX compiler reads the decisions themselves, and the spelling stays because
-    every stored measurement's context key (:meth:`Context.structural_key`) is a digest of it."""
+    the context key (:meth:`Context.structural_key`) is a digest of it."""
     from emmy.compiler.pipeline.search.space import CONTRACT_FMA, FLUSH_TO_ZERO  # noqa: PLC0415
 
     return [*(["--ftz=true"] if pins[FLUSH_TO_ZERO.name] else []), *([] if pins[CONTRACT_FMA.name] else ["--fmad=false"])]
@@ -63,39 +62,11 @@ def _env_compile_flags() -> str:
     return " ".join(precision_flags(precision_pins()))
 
 
-# The cicc optimization level as nvcc spelled it, with the ``-Xcicc`` forwarding prefix when present. No compile
-# spells one now: every compile is the deployable regime, level 3, which is what an absent token reads as
-# (:func:`split_opt_level`). A row measured under nvcc at another level still carries its token.
-_OPT_TOKEN = re.compile(r"(?:-Xcicc\s+)?-O(\d)")
-
-
 #: The fast-math lane's name: the nvcc flag the umbrella passed until every approximate instruction became an
 #: operation of the kernel body. No flag list holds it now (:func:`precision_flags`). A dataset still
 #: keys the lane by it (``dataset.regime_of``), and a caller that hands :meth:`Context.from_target` a flag string
 #: alone names the umbrella by it.
 FAST_MATH_FLAG = "--use_fast_math"
-
-
-def split_opt_level(compile_flags: str) -> tuple[int, str]:
-    """Split a regime's flags into ``(cicc opt level, everything else)``.
-
-    ONE parse, shared by the two places the opt level matters: the ``H_opt`` feature
-    (:meth:`Context.features`) and the identity a measurement is stored under
-    (:meth:`Context.structural_key`). They must agree — the deploy evidence tiers gate on
-    ``H_opt`` and then look rows up by ``structural_key``, so a regime the two spell differently
-    is a row that is declared deployable and is then unreadable at a deploy.
-
-    Splitting rather than digesting the raw string is what makes ``""`` (compile / run's default)
-    and ``"-Xcicc -O3"`` ONE regime, as they physically are — keyed on the raw string they were
-    two, and every ``-O3``-pinned row was invisible to a default deploy. The residual keeps every
-    other flag verbatim, so ``--ftz=true`` (which genuinely changes codegen) stays its own
-    partition."""
-    opt = 3
-    m = _OPT_TOKEN.search(compile_flags)
-    if m is not None:
-        opt = int(m.group(1))
-        compile_flags = compile_flags[: m.start()] + compile_flags[m.end() :]
-    return opt, " ".join(compile_flags.split())
 
 
 def _max_dynamic_smem_for(cc: tuple[int, int]) -> int:
@@ -193,10 +164,9 @@ class Context:
     # measured in — a kernel timed on 16 threads says nothing about one deployed on 6. Empty and 0 on CUDA.
     host_cpu: str = ""
     threads: int = 0
-    # The regime's flags: the spelling of the two whole-kernel precision decisions (:func:`precision_flags`), and,
-    # for a row measured under nvcc, the cicc opt level it was built at. Folded into structural_key so timings under
-    # different arithmetic or optimization regimes cannot rank one another. Populated from the precision decisions
-    # by probe / from_target; no compile spells an opt level, so every compile is the deployable level 3.
+    # The regime's flags: the spelling of the two whole-kernel precision decisions (:func:`precision_flags`). Folded
+    # into structural_key so timings under different arithmetic regimes cannot rank one another. Populated from the
+    # precision decisions by probe / from_target.
     compile_flags: str = ""
     # Bound precision decisions — the one carrier of the fast-math decision: ``compile_flags`` names it only
     # at construction (``from_target``), and every reader takes :meth:`precision_pins`. Empty on a directly
@@ -385,14 +355,11 @@ class Context:
         Folds in codegen fields and the cache regime used to select measurement evidence. ``compute_capability``
         gates hardware-feature passes (TMA, cp.async, dynamic smem cap);
         anything derived from it (``max_dynamic_smem``) is implied.
-        ``compile_flags`` is folded in because a row measured under nvcc at another opt
-        level timed other machine code (it is NOT a debug flag).
+        ``compile_flags`` is folded in because a row measured under other precision flags
+        timed other machine code (it is NOT a debug flag).
         As other non-derived knobs land (forced TMA on/off, splitk overrides),
         extend this method explicitly — keep ambient I/O fields out so the
         autotuning cache survives debug-flag flips.
-
-        The flags enter **split** (:func:`split_opt_level`), never raw, so that one regime has one
-        key however it is spelled.
         """
         from emmy.compiler.pipeline.search.space import precision_overrides  # noqa: PLC0415
         from emmy.compiler.structural import digest  # noqa: PLC0415
@@ -401,13 +368,13 @@ class Context:
         overrides = tuple(precision_overrides(self.precision_pins()).items())
         precision = ("precision", overrides) if overrides else ()
         cpu = ("cpu", self.host_cpu, self.threads) if self.backend_name == "cpu" else ()
-        return digest("Context", self.compute_capability, *split_opt_level(self.compile_flags), *precision, *regime, *cpu)
+        return digest("Context", self.compute_capability, self.compile_flags, *precision, *regime, *cpu)
 
     def hardware_id(self) -> str:
         """A stable per-card identity for the ``perf`` table's ``gpu`` key column: the PCIe
         product name when known, else a digest of the device-physical regime (``H_*``
         features + capability). Separates same-die SKUs (H100 vs H200) that
-        ``structural_key`` (cc + opt only) and the SM-only ``H_*`` features can't, so a
+        ``structural_key`` (cc + flags only) and the SM-only ``H_*`` features can't, so a
         cross-hardware dataset never collides. A CPU is the cores it runs on: its product name and thread count."""
         if self.backend_name == "cpu":
             return f"{self.gpu_name} ({self.threads} threads)"
@@ -420,7 +387,7 @@ class Context:
 
     def features(self) -> dict[str, float]:
         """Host/hardware regime as ``H_*`` features for the online prior, so a
-        SINGLE global prior spans every GPU and nvcc opt level (these are
+        SINGLE global prior spans every GPU (these are
         constant across a compile's sibling candidates, but trees can combine
         them with candidate features to rank differently per regime).
         Combines capability-derived facts with the
@@ -429,8 +396,6 @@ class Context:
         - ``H_cc`` — compute capability ``major*10 + minor``
         - ``H_tc_gen`` — tensor-core generation (``_TENSOR_CORE_GEN``)
         - ``H_smem_optin`` — per-block dynamic-smem opt-in cap (bytes)
-        - ``H_opt`` — nvcc cicc opt level from ``compile_flags`` (tune's
-          an explicit ``-Xcicc -O1`` pin → 1; the default → 3)
         - ``H_fast_math`` — 1 under the bound ``FAST_MATH`` decision (:meth:`precision_pins`), the regime a
           golden can decide a kernel set differently in
         - ``H_sm_count`` / ``H_smem_per_sm`` / ``H_smem_per_block`` /
@@ -447,7 +412,6 @@ class Context:
             "H_cc": float(major * 10 + minor),
             "H_tc_gen": float(_TENSOR_CORE_GEN.get((major, minor), major)),
             "H_smem_optin": float(self.max_dynamic_smem),
-            "H_opt": float(split_opt_level(self.compile_flags)[0]),
             "H_fast_math": float(self.precision_pins()[FAST_MATH.name]),
         }
         # The memorized props of this context's card (golden reconstruction) when

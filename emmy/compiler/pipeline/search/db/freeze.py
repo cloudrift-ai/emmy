@@ -8,10 +8,9 @@ them), those decisions, and a row per measurement — its schedule row, the regi
 (``FAST_MATH`` and its independent overrides) and its median. ``emmy db import`` reads it back as it reads
 any golden.
 
-What freezes (:func:`freeze_reason`): every ``ok`` CUDA row measured on a card the GPU registry knows, at the
-deployable opt level, that passes the physical-plausibility predicates; the effective precision decisions
-and cache mode define its regime, and other compiler flags are not stored or gated on. A failed bench is
-not a measurement; the tune DB keeps it. A row a compile imported from a golden file is the file's, and is
+What freezes (:func:`freeze_reason`): every ``ok`` CUDA row measured on a card the GPU registry knows that passes
+the physical-plausibility predicates; the effective precision decisions and cache mode define its regime. A failed
+bench is not a measurement; the tune DB keeps it. A row a compile imported from a golden file is the file's, and is
 not frozen again.
 
 Freezing the same rows twice yields the same bytes: rows sort by content and the golden dump is
@@ -42,7 +41,7 @@ from pathlib import Path
 from emmy.compiler.pipeline.search.dataset import regime_of
 from emmy.compiler.pipeline.search.dataset.pool import REGIME_PINS
 from emmy.compiler.pipeline.search.db import PerfRow, RoutingRow, SearchDB, knobs_json
-from emmy.compiler.pipeline.search.features import DEPLOYABLE_OPT, stamps
+from emmy.compiler.pipeline.search.features import stamps
 
 logger = logging.getLogger(__name__)
 
@@ -84,21 +83,13 @@ def freeze_reason(row: PerfRow, shape: Mapping | None) -> str | None:
     longer lowers), is excluded from a measurement freeze and from every measured-pool reader, or ``None`` to
     keep it.
 
-    THE admission filter, and nothing else — keep every ``ok`` row measured at the DEPLOYABLE opt level, on a
-    card the GPU registry knows, that passes the shared plausibility predicates.
-
-    The opt-level gate is what keeps a freeze a fair yardstick. A freeze is the corpus a reported
-    prior number is computed over, and a measurement taken under a non-deployable opt level
-    answers a question nothing asks: nothing trains on it (``Prior.add_rows``) and no deploy
-    reads it. Kept, it would put half a card's pools in a lane no one runs, so half the headline
-    number would describe a regime that does not exist. Precision decisions and cache mode define
-    the regime (:func:`regime_of`); other flags a freeze neither stores nor gates on."""
+    THE admission filter, and nothing else — keep every ``ok`` row measured on a card the GPU registry knows that
+    passes the shared plausibility predicates. Precision decisions and cache mode define the regime
+    (:func:`regime_of`)."""
     from emmy import gpu  # noqa: PLC0415
 
     if gpu.by_name(row.gpu) is None:
         return "unknown card (not in the GPU registry)"
-    if row.opt != DEPLOYABLE_OPT:
-        return f"non-deployable regime (H_opt={row.opt:g})"
     if row.status != "ok":
         return f"{row.status}: not a measurement"
     if shape is None:
@@ -243,7 +234,7 @@ def freeze_documents(db: SearchDB) -> tuple[dict[str, object], Counter]:
         by_card[(row.gpu, divmod(row.cc, 10))].append(row)
     documents = {}
     for (gpu_name, cap), rows in sorted(by_card.items()):
-        rows.sort(key=lambda r: (r.kernel, knobs_json(r.bindings), knobs_json(r.knobs), r.flags, r.cold_cache, knobs_json(r.precision)))
+        rows.sort(key=lambda r: (r.kernel, knobs_json(r.bindings), knobs_json(r.knobs), r.cold_cache, knobs_json(r.precision)))
         # The decisions that reach a measured kernel, and every kernel they name: the routing closure upward.
         wanted = {row.kernel for row in rows}
         routes = []

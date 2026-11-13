@@ -81,18 +81,20 @@ def test_two_cards_sharing_a_capability_keep_their_own_rows() -> None:
     assert [r.stats.median for r in db.iter_perf(a)] == [100.0]
     rows = {r.gpu: r for r in db.iter_perf_rows()}
     assert set(rows) == {_5090, _PRO_6000}
-    assert (rows[_5090].cc, rows[_5090].opt, rows[_5090].flags, rows[_5090].backend) == (120, 3, "", "cuda")
+    assert (rows[_5090].cc, rows[_5090].backend) == (120, "cuda")
 
 
-def test_the_regime_is_spelled_in_columns_and_extra_flags_are_another_regime() -> None:
-    """``""`` and ``-Xcicc -O3`` are one regime and read each other's rows; a fast-math compile is
-    another context and reads none of them."""
+def test_the_regime_is_its_precision_decisions_however_its_flags_are_spelled() -> None:
+    """A fast-math compile is another context and reads none of the plain rows; two spellings of the fast-math
+    regime, the umbrella's name or the flags its decisions spell, are one context."""
     db = _db("k")
     _record(db, _ctx(_5090), "k", 100.0)
-    assert db.lookup_perf(_ctx(_5090, "-Xcicc -O3"), "k", bindings={}, knobs=_ROW).stats.median == 100.0
     assert db.lookup_perf(_ctx(_5090, "--use_fast_math"), "k", bindings={}, knobs=_ROW) is None
     _record(db, _ctx(_5090, "--use_fast_math"), "k", 90.0)
-    assert {r.flags for r in db.iter_perf_rows()} == {"", "--use_fast_math"}
+    spelled = Context.from_target((12, 0), gpu_name=_5090, precision={"FAST_MATH": True})
+    assert spelled.compile_flags == "--ftz=true"
+    assert db.lookup_perf(spelled, "k", bindings={}, knobs=_ROW).stats.median == 90.0
+    assert {r.precision["FAST_MATH"] for r in db.iter_perf_rows()} == {False, True}
     assert db._conn.execute("SELECT COUNT(*) FROM context").fetchone() == (2,)
 
 
@@ -221,25 +223,24 @@ def test_the_identity_the_db_keys_kernels_by_is_the_one_its_version_was_cut_at()
 
 
 def test_context_keys_match_the_db_version_and_ignore_later_ambient_pins(monkeypatch) -> None:
-    from emmy.compiler.context import split_opt_level
     from emmy.compiler.structural import digest
 
     monkeypatch.setenv("EMMY_FAST_MATH", "1")
     monkeypatch.setenv("EMMY_FAST_EXP", "1")
     expected = {
-        None: "c05e1978f70ffeac79634331d54426ae1fc940289490421fbd29701e1e850cc1",
-        "FAST_EXP": "0f92e8f3044cfcd90c10d71bd452ef4cbbc0ce88d095ce9d2196bab6f88e34cd",
-        "F16_MMA_F32_ACC": "fa64cfbe993c3a6a9efc8f866de4f415239961a34621a31f9bfbfe17ccb92ba2",
-        "FP8_MMA": "d919089d897a7c27e9c1ddae5cec0cba98c13304fe792102368a470571b49d93",
+        None: "379278b50ca7cd2ef629958e499dae9be053d301048e9332f56f65ab53651ae7",
+        "FAST_EXP": "617281d54241cb9661e16d5391b2c07a027775b36feae633f0141b9b120e148c",
+        "F16_MMA_F32_ACC": "69288f77da3bf7d67ab57f09a5d139a3a3671b20195968788592936a2ac99d59",
+        "FP8_MMA": "af978f22a9550138f3c921dcb33f39a4832573f5f4efc8a7f1a0b8bd3750a7c6",
     }
     for name, key in expected.items():
         ctx = Context.from_target((12, 0), compile_flags="", precision={name: True} if name else None)
         assert ctx.structural_key() == key, "context identity changes require a DB version bump"
-    for flags in ("", "-Xcicc -O3", "--use_fast_math"):
+    for flags in ("", "--use_fast_math"):
         for cold in (False, True):
             ctx = Context.from_target((12, 0), compile_flags=flags, cold_cache=cold)
-            old_key = digest("Context", (12, 0), *split_opt_level(flags), *(("cold-cache",) if cold else ()))
-            assert ctx.structural_key() == old_key, "unchanged regimes retain their existing pool keys"
+            key = digest("Context", (12, 0), flags, *(("cold-cache",) if cold else ()))
+            assert ctx.structural_key() == key, "a regime's key is its capability, flags and cache mode"
     assert Context.from_target((12, 0), compile_flags="", precision={"FAST_EXP": False}).structural_key() == expected[None]
 
 

@@ -286,7 +286,7 @@ def test_a_placement_label_is_what_the_golden_of_that_card_did():
     db = tuned_db(None, (_CUT,), source="golden:case")
     [parent] = [pool for pool in placement_pools(db, golden_pools(db)[0]) if pool.rows]
     other = "NVIDIA Tesla V100 SXM3 32GB"
-    whole = dict(us=1.0, flags=parent.regime, bindings=parent.bindings, knobs={"WORK": "t1"})
+    whole = dict(us=1.0, bindings=parent.bindings, knobs={"WORK": "t1"})
     db.record_perf_row(perf_row(parent.kernel.exact_identity, gpu=parent.gpu, cc=70, source="golden:case", **whole))
     db.record_perf_row(perf_row(parent.kernel.exact_identity, gpu=other, cc=70, source="golden:other", **whole))
     assert {pool.gpu for pool in golden_pools(db)[0] if pool.kernel == parent.kernel} == {parent.gpu, other}
