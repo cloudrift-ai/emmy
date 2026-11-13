@@ -23,12 +23,29 @@ from emmy.compiler.graph import Tensor
 from emmy.compiler.ir.address import BYTE_SLAB_PAD
 from emmy.compiler.ir.axis import Axis
 from emmy.compiler.ir.expression import BinaryExpression, Literal, Var
+from emmy.compiler.ir.kernel.ir import FragmentLoad, MmaSyncPtx, Smem
 from emmy.compiler.ir.schedule import Stage, Tile, Work
 from emmy.compiler.ir.schedule.catalog import stage_moves
 from emmy.compiler.ir.schedule.staging import resolve_warp_stage
 from emmy.compiler.ir.stmt import parse_body
-from tests.compiler.helpers import requires_cuda, requires_sm
+from tests.compiler.helpers import compile_with_kernels, requires_cuda, requires_sm, statements
 from tests.compiler.terms import contraction
+
+
+def _mma_kernel(kernels):
+    """The kernel of ``kernels`` that holds a tensor-core product, or ``None``."""
+    return next((kernel for kernel in kernels.values() if statements(kernel, MmaSyncPtx)), None)
+
+
+def _slab(kernel, name: str) -> str | None:
+    """The element type of ``kernel``'s shared slab ``name``, or ``None`` when it declares none."""
+    return next((slab.dtype for slab in statements(kernel, Smem) if slab.name == name), None)
+
+
+def _byte_drains(kernel, role: str) -> list:
+    """The staged gathers of ``kernel`` that drain a slab of FP8 bytes into the ``role`` operand's fragments."""
+    return [load for load in statements(kernel, FragmentLoad) if load.staged and load.role == role and load.src_dtype == F8E4M3]
+
 
 K16 = "mma_m16n8k16_f16_f32"
 K32 = "mma_m16n8k32_e4m3_f32"
@@ -153,14 +170,12 @@ def _byte_a_pins(dtype):
 
 @pytest.mark.parametrize("dtype", ["f16", "bf16"])
 def test_byte_a_widens_into_the_tensor_core_slab(dtype):
-    from emmy.compiler.ir.cuda.ir import CudaOp
-    from emmy.compiler.pipeline import CUDA_PASSES, Pipeline
     from emmy.compiler.pipeline.search.pins import pinned_knobs
 
     with pinned_knobs(_byte_a_pins(dtype)):
-        compiled = Pipeline.build(CUDA_PASSES).run(_byte_a_graph(dtype), ctx=Context.from_target((12, 0)), db=None)
-    [source] = [node.op.kernel_source for node in compiled.nodes.values() if isinstance(node.op, CudaOp)]
-    assert "mma.sync" in source and "_a_smem" in source
+        _, kernels = compile_with_kernels(_byte_a_graph(dtype), ctx=Context.from_target((12, 0)), db=None)
+    [kernel] = kernels.values()
+    assert statements(kernel, MmaSyncPtx) and _slab(kernel, "_a_smem") is not None
 
 
 @requires_cuda
@@ -251,13 +266,12 @@ def _run_w8a16(backend, stage_pin, x, bits, scale, m, n, k):
 
     pins = {"TILE": f"{K16}/f2x2/k2", "WORK": "w1x8", "REDUCE": "", "STAGE": stage_pin or ""}
     with pinned_knobs(pins):
-        compiled = backend.compile(_fp8_linear_graph(m, n, k))
-    srcs = [getattr(nd.op, "kernel_source", "") or "" for nd in compiled.nodes.values()]
-    mma_src = next((s for s in srcs if "mma.sync" in s), "")
+        compiled, kernels = compile_with_kernels(_fp8_linear_graph(m, n, k))
+    mma_kernel = _mma_kernel(kernels)
     input_data = {"x": x}
     input_data.update(bind_constants(compiled, {"layer.weight": bits, "layer.weight_scale": scale}))
     result, _ = backend.run(compiled, input_data=input_data)
-    return np.asarray(result.outputs[compiled.outputs[0]]).reshape(m, n), mma_src
+    return np.asarray(result.outputs[compiled.outputs[0]]).reshape(m, n), mma_kernel
 
 
 @requires_cuda
@@ -265,8 +279,8 @@ def _run_w8a16(backend, stage_pin, x, bits, scale, m, n, k):
 @requires_sm(8)
 def test_w8a16_staged_bit_identical_to_gmem_direct_cuda():
     """Staged fp8-B (cp.async and TMA) is BIT-identical to the gmem-direct fragment-convert
-    kernel — same per-element convert, same K order, same atoms — and the staged source carries
-    the byte-slab machinery (the fp8 slab decl + a byte-gather drain)."""
+    kernel — same per-element convert, same K order, same atoms — and the staged kernel carries
+    the byte-slab machinery (the fp8 slab + a byte-gather drain)."""
     from emmy.compiler.backend.cuda.backend import CudaBackend
 
     m, n, k = 32, 512, 512
@@ -278,12 +292,13 @@ def test_w8a16_staged_bit_identical_to_gmem_direct_cuda():
     x = (rng.standard_normal((m, k)) * 0.05).astype(np.float16)
 
     backend = CudaBackend()
-    base, base_src = _run_w8a16(backend, None, x, bits, scale, m, n, k)
-    assert "_b_smem" not in base_src
+    base, base_kernel = _run_w8a16(backend, None, x, bits, scale, m, n, k)
+    assert _slab(base_kernel, "_b_smem") is None
     for pin in ("d1/smem-async", "d2/smem-async", "d2/smem-async/p2", *_tma_pins()):
-        y, src = _run_w8a16(backend, pin, x, bits, scale, m, n, k)
-        assert "__nv_fp8_e4m3 _b_smem" in src or "__nv_fp8_e4m3* _b_smem" in src, pin
-        assert "emmy_mma_load_b_smem_trans_f8_f16" in src or "emmy_mma_load_b_gmem" in src, pin
+        y, kernel = _run_w8a16(backend, pin, x, bits, scale, m, n, k)
+        assert _slab(kernel, "_b_smem") == "__nv_fp8_e4m3", pin
+        drains = _byte_drains(kernel, "b")
+        assert drains and all(load.src_buffer == "_b_smem" for load in drains), pin
         assert np.array_equal(y.view(np.uint16), base.view(np.uint16)), pin
 
 
@@ -320,18 +335,19 @@ def test_canonical_byte_b_and_splitk_compose_cuda():
 
     def run(stage, red):
         with pinned_knobs({"TILE": f"{K16}/f2x2/k2", "WORK": "w1x8", "REDUCE": red, "STAGE": stage}):
-            compiled = backend.compile(graph())
-        srcs = [getattr(nd.op, "kernel_source", "") or "" for nd in compiled.nodes.values()]
-        src = next((s for s in srcs if "mma.sync" in s), "")
+            compiled, kernels = compile_with_kernels(graph())
         result, _ = backend.run(compiled, input_data={"x": x, "w8": wbits})
-        return np.asarray(result.outputs["y"]).reshape(m, n), src
+        return np.asarray(result.outputs["y"]).reshape(m, n), _mma_kernel(kernels)
 
     bases: dict[str, np.ndarray] = {}
     for stage, red in [("d2/smem-async", ""), ("d2/smem-async", "g4k"), *((s, r) for s in _tma_pins() for r in ("", "g4k"))]:
         if red not in bases:
             bases[red] = run("", red)[0]
-        y, src = run(stage, red)
-        assert "_b_smem" in src and "emmy_mma_load_b_gmem<__nv_fp8_e4m3, __half>" in src, (stage, red)
+        y, kernel = run(stage, red)
+        # The canonical slab strides its bytes along K: the drain converts element by element into f16 fragments.
+        drains = _byte_drains(kernel, "b")
+        converting = all(not load.b_trans and load.dtype == F16 for load in drains)
+        assert _slab(kernel, "_b_smem") is not None and drains and converting, (stage, red)
         assert np.array_equal(y.view(np.uint16), bases[red].view(np.uint16)), (stage, red)
 
 
@@ -355,15 +371,16 @@ def test_k32_staged_bit_identical_to_gmem_direct_cuda():
     def run(stage_pin):
         pins = {"TILE": f"{K32}/f2x2/k2", "WORK": "w1x8", "REDUCE": "", "STAGE": stage_pin or ""}
         with pinned_knobs(pins):
-            compiled = backend.compile(_bare_f8_linear_graph(m, n, k))
-        srcs = [getattr(nd.op, "kernel_source", "") or "" for nd in compiled.nodes.values()]
-        src = next((s for s in srcs if "m16n8k32" in s), "")
+            compiled, kernels = compile_with_kernels(_bare_f8_linear_graph(m, n, k))
+        k32 = next(kernel for kernel in kernels.values() if any(tuple(mma.shape) == (16, 8, 32) for mma in statements(kernel, MmaSyncPtx)))
         result, _ = backend.run(compiled, input_data={"a8": abits, "w8": wbits})
-        return np.asarray(result.outputs["y"]).reshape(m, n), src
+        return np.asarray(result.outputs["y"]).reshape(m, n), k32
 
-    base, base_src = run(None)
-    assert "_a_smem" not in base_src
+    base, base_kernel = run(None)
+    assert _slab(base_kernel, "_a_smem") is None
     for pin in ("d1/smem-async", "d2/smem-async", *_tma_pins()):
-        y, src = run(pin)
-        assert "emmy_mma_load_a_smem_b8v" in src, pin
+        y, kernel = run(pin)
+        # Raw bytes repacked into an FP8 fragment, no conversion.
+        drains = _byte_drains(kernel, "a")
+        assert drains and all(load.dtype == F8E4M3 for load in drains), pin
         assert np.array_equal(y.view(np.uint32), base.view(np.uint32)), pin

@@ -406,3 +406,12 @@ def text(kernels) -> str:
         return "\n".join(pretty_body(kernels))
     ops = kernels.values() if isinstance(kernels, dict) else (kernels,)
     return "\n".join(line for op in ops for line in pretty_body(op.body))
+
+
+def case_kernels(case, ctx=None):
+    """A realization corpus case lowered with itself as its only evidence, as ``realization.helpers.lowered`` lowers
+    it: the compiled graph and the Kernel IR of its kernels by node id."""
+    from tests.compiler.realization.helpers import evidence_scope
+
+    with evidence_scope(case):
+        return compile_with_kernels(case.program(), ctx=ctx or case.context(), db=None)
