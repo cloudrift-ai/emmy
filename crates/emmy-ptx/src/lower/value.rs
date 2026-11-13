@@ -42,6 +42,9 @@ pub(super) fn half_bits(ty: VTy, value: f64) -> u16 {
     sign | bits.min(u64::from(top)) as u16
 }
 
+/// The cast `ir/address.py` writes on an index term of a buffer past the 32-bit range.
+const WIDE_INDEX: &str = "long long";
+
 fn comparison(op: Operation) -> Option<Cmp> {
     Some(match op {
         Operation::Less => Cmp::Lt,
@@ -70,6 +73,8 @@ impl Lowerer {
             CastTarget::Known(LitType::Int) => Ok(VTy::I32),
             CastTarget::Known(LitType::Float) => Ok(VTy::F32),
             CastTarget::Known(LitType::Bool) => Ok(VTy::Bool),
+            // The widening an index takes where its buffer passes the 32-bit range.
+            CastTarget::Other(name) if name == WIDE_INDEX => Ok(VTy::I64),
             CastTarget::Other(name) => name
                 .parse()
                 .ok()
@@ -93,10 +98,12 @@ impl Lowerer {
             Expr::Apply(ElementwiseOp::Known(op), args) => {
                 let truth = comparison(*op).is_some()
                     || matches!(op, Operation::LogicalAnd | Operation::LogicalOr);
+                // A selection computes at its two values' type, not at its condition's.
+                let values = if *op == Operation::Where { 1 } else { 0 };
                 if truth {
                     Some(VTy::Bool)
                 } else {
-                    args.iter().find_map(|arg| self.infer(arg))
+                    args.iter().skip(values).find_map(|arg| self.infer(arg))
                 }
             }
             _ => None,
@@ -315,6 +322,18 @@ impl Lowerer {
                 self.float_select(cond, if_true, if_false, ty, ctx)
             }
             (O::Copy | O::Positive, [x]) => self.float(x, ty, ctx),
+            // A comparison read as a float is one where it holds and zero where it does not.
+            (op, [x, y]) if comparison(op).is_some() => {
+                let pred = self.compare(comparison(op).expect("a comparison"), x, y, ctx)?;
+                let (one, zero) = (self.float_constant(ty, 1.0), self.float_constant(ty, 0.0));
+                let inst = Inst::new(
+                    Opcode::Selp,
+                    ty.held(),
+                    Vec::new(),
+                    vec![one, zero, pred.into()],
+                );
+                Ok(self.b.value(inst, ty.bank()).into())
+            }
             _ => {
                 if let Some(value) = self.math(op, args, ty, ctx)? {
                     return Ok(value);

@@ -26,6 +26,14 @@ use crate::statement::{
     FragmentArg as PyFragmentArg, PyStatement, SelectBranch as PySelectBranch, wrap_statement,
 };
 
+pyo3::create_exception!(
+    emmy_ir,
+    NoRule,
+    PyNotImplementedError,
+    "A code generator has no rule yet for a statement or an operation of the kernel it was handed: the kernel is \
+     well formed, and its code can be generated another way."
+);
+
 pub fn translate(error: Error) -> PyErr {
     match error {
         Error::Value(m) => PyValueError::new_err(m),
@@ -34,6 +42,7 @@ pub fn translate(error: Error) -> PyErr {
         Error::ZeroDivision => PyZeroDivisionError::new_err("integer division or modulo by zero"),
         Error::NotImplemented(m) => PyNotImplementedError::new_err(m),
         Error::Recursion(m) => PyRecursionError::new_err(m),
+        Error::NoRule(m) => NoRule::new_err(m),
     }
 }
 

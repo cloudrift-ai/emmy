@@ -35,14 +35,19 @@ pub enum Error {
     NotImplemented(String),
     /// An expression nested past what the compiler walks: the Python side raises `RecursionError`.
     Recursion(String),
+    /// A statement or an operation a code generator has no rule for yet, as opposed to an input it refuses: the
+    /// Python side raises the extension's `NoRule`, and the caller may generate that kernel's code another way.
+    NoRule(String),
 }
 
 impl std::fmt::Display for Error {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Error::Value(m) | Error::Type(m) | Error::NotImplemented(m) | Error::Recursion(m) => {
-                f.write_str(m)
-            }
+            Error::Value(m)
+            | Error::Type(m)
+            | Error::NotImplemented(m)
+            | Error::Recursion(m)
+            | Error::NoRule(m) => f.write_str(m),
             Error::Key(m) => write!(f, "{m:?}"),
             Error::ZeroDivision => f.write_str("integer division or modulo by zero"),
         }

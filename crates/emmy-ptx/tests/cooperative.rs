@@ -838,6 +838,39 @@ fn an_async_copy_is_one_instruction_between_two_aligned_addresses() {
     );
 }
 
+/// A copy with a lane offset names the tile it fills by row and column and the thread's own row and column in the
+/// tile: the element is the sum of the two, folded by the slab's extents, and the tile's constant part is the
+/// address's offset.
+#[test]
+fn an_async_copy_with_a_lane_offset_adds_the_thread_place_to_its_tile() {
+    let module = row_module(
+        "
+        Smem(name=s, extents=(16, 68), dtype=f32, align=16)
+        CpAsyncCopy(smem=s, smem_index=(8, 0), src=a, src_index=(r * 256 + t * 4), nbytes=16, lane_index=(t / 16, 4 * (t % 16)), lane_rows=8)
+        ",
+        A_O,
+        64,
+        &[],
+    );
+    assert_eq!(
+        row_code(&module),
+        [
+            "mov.u32 %r2, k_shared_0",
+            "shr.s32 %r3, %r1, 4",
+            "mul.lo.s32 %r4, %r3, 272",
+            "add.s32 %r5, %r2, %r4",
+            "and.b32 %r6, %r1, 15",
+            "shl.b32 %r7, %r6, 4",
+            "add.s32 %r8, %r5, %r7",
+            "mul.wide.s32 %rd2, %r0, 1024",
+            "add.s64 %rd3, %rd0, %rd2",
+            "mul.wide.s32 %rd4, %r1, 16",
+            "add.s64 %rd5, %rd3, %rd4",
+            "cp.async.cg.shared.global [%r8+2176], [%rd5], 16",
+        ]
+    );
+}
+
 /// Each cell of a carried state is the register a read sees and the register a step defines, both seeded ahead
 /// of the loop that carries it: with a constant, or from the cell's element of a buffer. A read copies the
 /// first, a definition moves into the second, and the end of every trip moves the second into the first, so a
@@ -1216,7 +1249,7 @@ fn a_cooperative_statement_outside_its_rule_is_an_error_that_names_it() {
         ),
         (
             "CpAsyncCopy(smem=s, smem_index=(t * 4), src=a, src_index=(t * 4), nbytes=16, swizzle=B32)",
-            "no PTX rule for an async copy into a swizzled or lane-indexed slab",
+            "no PTX rule for an async copy into a swizzled slab",
         ),
         (
             "for k in 0..8:\n            for j in 0..2:\n                f32 st[j] <- acc seed 0",

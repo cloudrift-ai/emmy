@@ -6,7 +6,7 @@ use pyo3::prelude::*;
 use emmy_ptx::{Interface, Kernel, Param, ParamKind, Precision, Target};
 
 use crate::body::PyBody;
-use crate::convert::{IntoPyErr, name_from_py};
+use crate::convert::{IntoPyErr, NoRule, name_from_py};
 
 fn param(value: &Bound<'_, PyAny>) -> PyResult<Param> {
     let kind: String = value.getattr("kind")?.extract()?;
@@ -34,7 +34,8 @@ fn param(value: &Bound<'_, PyAny>) -> PyResult<Param> {
 }
 
 /// The PTX text of the kernel `name`: its `body`, its `interface` (the `Interface` of `ir/kernel/interface.py`), the
-/// compute capability `sm` (`120` for `sm_120`) and the kernel's two precision decisions.
+/// compute capability `sm` (`120` for `sm_120`) and the kernel's two precision decisions. A statement or an operation
+/// with no rule raises `NoRule`; every other refusal is a `ValueError` that names what is wrong with the kernel.
 #[pyfunction]
 #[pyo3(signature = (name, body, interface, *, sm, fuse = false, ftz = false))]
 pub fn compile_ptx(
@@ -76,5 +77,6 @@ pub fn compile_ptx(
 }
 
 pub fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
+    m.add("NoRule", m.py().get_type::<NoRule>())?;
     m.add_function(wrap_pyfunction!(compile_ptx, m)?)
 }

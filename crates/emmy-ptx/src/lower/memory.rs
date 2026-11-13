@@ -475,12 +475,29 @@ impl Lowerer {
     // --- async copies ------------------------------------------------------------------------------------
 
     /// One async copy of 4, 8 or 16 bytes from global to shared memory. Under `valid`, a 16-byte copy reads its
-    /// bytes where the condition holds and writes zeros where it does not.
+    /// bytes where the condition holds and writes zeros where it does not. A copy with a lane offset names the
+    /// tile it fills by row and column, and the thread's own row and column in that tile: its element is the sum
+    /// of the two, folded by the slab's extents.
     pub(super) fn cp_async(&mut self, copy: &CpAsyncCopy, ctx: &SimplifyCtx) -> Result<()> {
         self.needs(SM_AMPERE, "an async copy")?;
-        if &*copy.swizzle != "NONE" || copy.lane_index.is_some() {
-            return Err(self.no_rule("an async copy into a swizzled or lane-indexed slab"));
+        if &*copy.swizzle != "NONE" {
+            return Err(self.no_rule("an async copy into a swizzled slab"));
         }
+        let element = match copy.lane_index.as_deref() {
+            None => None,
+            Some([_, _]) if copy.smem_index.len() != 2 => {
+                return Err(self.refuse("a lane offset goes with a tile's row and column"));
+            }
+            Some(lane @ [_, _]) => {
+                let (tile, lane) = (
+                    self.flat_index(copy.smem, &copy.smem_index)?,
+                    self.flat_index(copy.smem, lane)?,
+                );
+                Some([Expression::binary(Operation::Add, tile, lane)])
+            }
+            Some(_) => return Err(self.refuse("a lane offset is a row and a column")),
+        };
+        let smem_index = element.as_ref().map_or(&copy.smem_index[..], |e| &e[..]);
         let cache = match (copy.nbytes, &copy.valid) {
             (16, _) => Cache::Global,
             (4 | 8, None) => Cache::All,
@@ -495,7 +512,7 @@ impl Lowerer {
         if to.space != Space::Shared || from.space != Space::Global {
             return Err(self.refuse("an async copy goes from a parameter to a shared buffer"));
         }
-        let to = self.address(copy.smem, &copy.smem_index, ctx)?;
+        let to = self.address(copy.smem, smem_index, ctx)?;
         let from = self.address(copy.src, &copy.src_index, ctx)?;
         let mut operands = vec![to, from, Operand::Int(copy.nbytes)];
         if let Some(valid) = &copy.valid {

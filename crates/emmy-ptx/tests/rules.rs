@@ -1439,3 +1439,106 @@ fn the_verifier_refuses_an_access_of_several_elements_with_no_alignment_fact() {
         );
     }
 }
+
+// --- what the pipeline's kernels hold --------------------------------------------------------------------
+
+/// A comparison read as a float is one where it holds and zero where it does not; a selection among floats
+/// computes at its values' type, whatever its condition compares.
+#[test]
+fn a_comparison_read_as_a_float_selects_one_or_zero() {
+    let got = under_grid(
+        "
+        f32 x = load a[i]
+        f32 same = 0.0 == x
+        f32 kept = where(x == 0.0, same, x)
+        f32 o[i] = kept
+        ",
+        A_O,
+        EXACT,
+    );
+    assert_eq!(
+        got[3..7],
+        [
+            "setp.eq.f32 %p0, 0f00000000, %f0",
+            "selp.f32 %f1, 0f3F800000, 0f00000000, %p0",
+            "setp.eq.f32 %p1, %f0, 0f00000000",
+            "selp.f32 %f2, %f1, %f0, %p1",
+        ]
+    );
+}
+
+/// The 64-bit widening an index term carries where its buffer passes the 32-bit range is a conversion among
+/// integers: the product is computed at 64 bits.
+#[test]
+fn an_index_term_widened_to_64_bits_is_an_integer() {
+    let params: Params = &[
+        ("a", Input, Some(F32)),
+        ("o", Output, Some(F32)),
+        ("n", Int, None),
+    ];
+    let body = format!("{GRID}\n    f32 x = load a[(long long)i * (long long)n]\n    f32 o[i] = x");
+    let got = code(&body, params, EXACT);
+    assert_eq!(
+        got[4..9],
+        [
+            "cvt.s64.s32 %rd2, %r4",
+            "cvt.s64.s32 %rd3, %r0",
+            "mul.lo.s64 %rd4, %rd2, %rd3",
+            "shl.b64 %rd5, %rd4, 2",
+            "add.s64 %rd6, %rd0, %rd5",
+        ]
+    );
+}
+
+/// A condition the body's optimization decided is no branch: its one side stands in its place.
+#[test]
+fn a_decided_condition_is_its_one_side() {
+    let got = under_grid(
+        "
+        f32 x = load a[i]
+        if 1:
+            f32 o[i] = x
+        if 0:
+            f32 o[i + 1] = x
+        ",
+        A_O,
+        EXACT,
+    );
+    assert_eq!(
+        got,
+        [
+            "mul.wide.s32 %rd2, %r3, 4",
+            "add.s64 %rd3, %rd0, %rd2",
+            "ld.global.nc.f32 %f0, [%rd3]",
+            "add.s64 %rd4, %rd1, %rd2",
+            "st.global.f32 [%rd4], %f0",
+        ]
+    );
+}
+
+/// A selection between two indices is a multiple of what both are, so a vector access at it keeps its alignment
+/// proof: the verifier would refuse the four-wide load otherwise.
+#[test]
+fn a_selected_index_keeps_the_multiple_of_its_two_values() {
+    let got = code(
+        "
+Grid(axes=(i in 0..1024), decode=(block_idx.x * 256 + thread_idx.x), block_threads=256):
+    for k in 0..384 step 128:
+        f32 x0, x1, x2, x3 = load a[(k + 256 < 384 ? k + 256 : 256) + 512 * i]
+        f32 o[k + 512 * i] = x0
+",
+        A_O,
+        EXACT,
+    );
+    assert_eq!(
+        got[9..15],
+        [
+            "add.s32 %r6, %r5, 256",
+            "setp.lt.s32 %p0, %r6, 384",
+            "selp.s32 %r7, %r6, 256, %p0",
+            "mul.wide.s32 %rd4, %r7, 4",
+            "add.s64 %rd5, %rd3, %rd4",
+            "ld.global.nc.v4.f32 {%f0, %f1, %f2, %f3}, [%rd5]",
+        ]
+    );
+}

@@ -337,16 +337,19 @@ fn a_function_computed_twice_is_written_once() {
     assert_eq!((count("ex2.approx"), count("cvt.rmi")), (1, 1));
 }
 
-/// A half value has no sequence, and a function no kernel holds has no rule: each is refused by its name.
+/// A half value has no sequence, and a function no kernel holds has no rule: each is refused by its name, as a
+/// missing rule and not as a kernel that is wrong.
 #[test]
 fn a_half_operand_and_an_unwritten_function_are_refused_by_name() {
     let halves: Params = &[("a", Input, Some(F16)), ("o", Output, Some(F16))];
     let body = format!("{GRID}\n    f16 x = load a[i]\n    f16 v = exp(x)\n    f16 o[i] = v");
     let message = refusal(&body, halves);
     assert!(
-        message.contains("exp at f16: a math function computes in f32"),
+        message.contains("no PTX rule for exp at f16: a math function computes in f32"),
         "{message}"
     );
+    let refused = common::lowered(&body, halves, common::SM_120, common::EXACT);
+    assert!(matches!(refused, Err(emmy_ir::Error::NoRule(_))));
     let body = format!("{GRID}\n    f16 x = load a[i]\n    f16 v = log_fast(x)\n    f16 o[i] = v");
     let message = refusal(&body, halves);
     assert!(message.contains("log_fast at f16"), "{message}");

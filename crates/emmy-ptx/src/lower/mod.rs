@@ -16,7 +16,7 @@ use std::sync::Arc;
 use emmy_ir::body::Body;
 use emmy_ir::dtype::DType;
 use emmy_ir::elementwise::Operation;
-use emmy_ir::expr::{Expression, SimplifyCtx};
+use emmy_ir::expr::{Expr, Expression, SimplifyCtx};
 use emmy_ir::normalize::{inner_ctx, launch_ctx};
 use emmy_ir::statement::{
     Accum, Assign, Cond, Grid, Init, Let, Loop, Select, Statement, StridedLoop,
@@ -258,7 +258,7 @@ pub(crate) fn lower(kernel: &Kernel, target: Target, precision: Precision) -> Re
 
 impl Lowerer {
     fn no_rule(&self, what: impl std::fmt::Display) -> Error {
-        Error::NotImplemented(format!("no PTX rule for {what}: `{}`", self.statement))
+        Error::NoRule(format!("no PTX rule for {what}: `{}`", self.statement))
     }
 
     fn refuse(&self, why: impl std::fmt::Display) -> Error {
@@ -704,6 +704,15 @@ impl Lowerer {
     /// reach each side is kept for the barriers inside; the last condition of a grid's body with no other side is
     /// the grid's mask, and the threads it turns away have left the kernel.
     fn cond(&mut self, cond: &Cond, rest: &[Arc<Statement>], ctx: &SimplifyCtx) -> Result<()> {
+        // A condition the body's optimization decided and left standing: its one side is the statement.
+        if let Expr::Literal(decided) = &*cond.cond {
+            let side = if decided.value.truthy() {
+                &cond.body
+            } else {
+                &cond.else_body
+            };
+            return self.scope(side, ctx);
+        }
         let pred = self.pred(&cond.cond, ctx)?;
         let passes = self.truth_by_thread(&cond.cond);
         let mask =

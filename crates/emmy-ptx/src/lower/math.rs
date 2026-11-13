@@ -539,7 +539,7 @@ impl Seq<'_> {
 }
 
 impl Lowerer {
-    /// The operands of a math function, each an f32 value. A half is refused: its function computes in f32 and
+    /// The operands of a math function, each an f32 value. A half has no rule: its function computes in f32 and
     /// converts once, and the body says where.
     fn math_operands<const N: usize>(
         &mut self,
@@ -550,7 +550,7 @@ impl Lowerer {
     ) -> Result<[V; N]> {
         if ty != VTy::F32 {
             let ty = ty.text();
-            return Err(self.refuse(format_args!(
+            return Err(self.no_rule(format_args!(
                 "{name} at {ty}: a math function computes in f32, and the body casts its operand and its result"
             )));
         }

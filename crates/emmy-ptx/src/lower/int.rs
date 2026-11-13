@@ -250,8 +250,9 @@ impl Lowerer {
                 let pred = self.pred(cond, ctx)?;
                 let (a, b) = (self.int(if_true, ctx)?, self.int(if_false, ctx)?);
                 let ty = self.common(&a, if_true.range(ctx), &b, if_false.range(ctx));
+                let multiple = gcd(self.multiple(&a.op), self.multiple(&b.op));
                 let operands = vec![self.as_int(&a, ty), self.as_int(&b, ty), pred.into()];
-                Ok(self.int_value(Opcode::Selp, ty.arith(), ty, operands, 1))
+                Ok(self.int_value(Opcode::Selp, ty.arith(), ty, operands, multiple))
             }
             Expr::Apply(ElementwiseOp::Known(op), args) => {
                 self.int_apply(expression, *op, args, ctx)
