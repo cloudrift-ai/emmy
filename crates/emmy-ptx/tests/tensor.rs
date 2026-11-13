@@ -423,7 +423,8 @@ fn the_block_scaled_product_takes_a_scale_register_a_side() {
 /// A lane's register of block scales is the four scales of its row of A or of its column of B, a byte each, as
 /// they stand in the slab. Only the lanes the instruction's selector names supply one: for A those whose place in
 /// their group of four is 0 or 1, the second eight rows on; for B those whose place is 1. Every other lane
-/// holds zero and reads nothing.
+/// holds zero and reads nothing. A row proven aligned to four bytes is one 32-bit load under the lanes' predicate;
+/// any other is four byte loads behind a branch.
 #[test]
 fn block_scales_are_loaded_by_the_lanes_that_supply_them() {
     let module = warp(
@@ -442,45 +443,50 @@ fn block_scales_are_loaded_by_the_lanes_that_supply_them() {
             "and.b32 %r3, %r1, 31",
             "and.b32 %r4, %r3, 3",
             "setp.eq.s32 %p0, %r4, 1",
-            "@!%p0 bra L1",
             "shr.s32 %r5, %r3, 2",
             "mul.wide.s32 %rd3, %r5, 4",
             "add.s64 %rd4, %rd2, %rd3",
             "mul.wide.s32 %rd5, %r0, 32",
             "add.s64 %rd6, %rd4, %rd5",
-            "ld.global.nc.u8 %r6, [%rd6]",
-            "ld.global.nc.u8 %r7, [%rd6+1]",
-            "shl.b32 %r8, %r7, 8",
-            "or.b32 %r9, %r6, %r8",
-            "ld.global.nc.u8 %r10, [%rd6+2]",
-            "shl.b32 %r11, %r10, 16",
-            "or.b32 %r12, %r9, %r11",
-            "ld.global.nc.u8 %r13, [%rd6+3]",
-            "shl.b32 %r14, %r13, 24",
-            "or.b32 %r2, %r12, %r14",
-            "L1:",
+            "@%p0 ld.global.nc.b32 %r2, [%rd6]",
         ]
     );
     let a = warp(
         "
         RegFragment(name=sfa, role=sfa, dtype=u8)
-        BlockScaleLoad(frag=sfa, src_buffer=s, src_index=(r * 64), role=a, ldm=4)
+        BlockScaleLoad(frag=sfa, src_buffer=s, src_index=(r * 64 + 1), role=a, ldm=4)
         ",
         120,
         true,
     )
     .unwrap();
     assert_eq!(
-        listing(&a)[2..10],
+        listing(&a)[2..],
         [
             "mov.b32 %r2, 0",
             "and.b32 %r3, %r1, 31",
             "and.b32 %r4, %r3, 3",
             "shr.s32 %r5, %r4, 1",
             "setp.eq.s32 %p0, %r5, 0",
-            "@!%p0 bra L1",
             "shr.s32 %r6, %r3, 2",
             "mul.wide.s32 %rd3, %r6, 4",
+            "add.s64 %rd4, %rd2, %rd3",
+            "mul.wide.s32 %rd5, %r4, 32",
+            "add.s64 %rd6, %rd4, %rd5",
+            "mul.wide.s32 %rd7, %r0, 64",
+            "add.s64 %rd8, %rd6, %rd7",
+            "@!%p0 bra L1",
+            "ld.global.nc.u8 %r7, [%rd8+1]",
+            "ld.global.nc.u8 %r8, [%rd8+2]",
+            "shl.b32 %r9, %r8, 8",
+            "or.b32 %r10, %r7, %r9",
+            "ld.global.nc.u8 %r11, [%rd8+3]",
+            "shl.b32 %r12, %r11, 16",
+            "or.b32 %r13, %r10, %r12",
+            "ld.global.nc.u8 %r14, [%rd8+4]",
+            "shl.b32 %r15, %r14, 24",
+            "or.b32 %r2, %r13, %r15",
+            "L1:",
         ]
     );
 }

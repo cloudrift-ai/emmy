@@ -206,6 +206,8 @@ pub(crate) struct Lowerer {
     extents: HashMap<Name, Vec<Expression>>,
     /// The inputs that are the e2m1 pair table: a load of one computes its value.
     pair_tables: HashSet<Name>,
+    /// The symbolic sizes among the parameters: each is a count, so never negative.
+    sizes: HashSet<Name>,
     /// The first line of the statement being lowered, for an error to name.
     statement: String,
 }
@@ -251,6 +253,7 @@ pub(crate) fn lower(kernel: &Kernel, target: Target, precision: Precision) -> Re
         descriptors: HashMap::new(),
         extents: HashMap::new(),
         pair_tables: HashSet::new(),
+        sizes: HashSet::new(),
         statement: format!("the interface of {}", kernel.name),
     };
     survey(kernel.body, &mut lowerer.uses, &mut lowerer.updated);
@@ -354,6 +357,7 @@ impl Lowerer {
                         Ok(ParamDecl::Pointer { align })
                     }
                     ParamKind::Int => {
+                        self.sizes.insert(param.name);
                         let reg = self.b.reg(Bank::B32);
                         let load = Opcode::Ld(Space::Param);
                         self.b

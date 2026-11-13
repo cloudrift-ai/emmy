@@ -54,6 +54,11 @@ pub struct Builder {
     labels: u32,
     /// The value table of each open scope, the innermost last.
     tables: Vec<HashMap<Key, Reg>>,
+    /// Where each open scope that is a loop starts in the list, beside its table: the place a value the loop does
+    /// not change is computed ahead of it. `None` for the kernel's scope and a condition's side.
+    heads: Vec<Option<usize>>,
+    /// The depth of the scope each register is defined in, the deepest where it is defined more than once.
+    defined_at: HashMap<Reg, usize>,
     /// The registers an instruction may define again: an accumulator, a seeded state.
     states: HashSet<Reg>,
     multiples: HashMap<Reg, i64>,
@@ -66,6 +71,7 @@ impl Builder {
     pub fn new() -> Builder {
         Builder {
             tables: vec![HashMap::new()],
+            heads: vec![None],
             ..Builder::default()
         }
     }
@@ -100,6 +106,11 @@ impl Builder {
     /// Append `inst` as written: a load, a store, or a definition of a state.
     pub fn emit(&mut self, inst: Inst) {
         self.loose = None;
+        let depth = self.tables.len();
+        for reg in &inst.results {
+            let at = self.defined_at.entry(*reg).or_insert(depth);
+            *at = (*at).max(depth);
+        }
         self.items.push(Item::Inst(inst));
     }
 
@@ -141,16 +152,63 @@ impl Builder {
             return *reg;
         }
         let reg = self.reg(bank);
-        self.emit(Inst {
+        let inst = Inst {
             results: vec![reg],
             ..inst
-        });
+        };
+        if keyed && let Some(depth) = self.invariant_depth(&inst) {
+            self.hoist(depth, inst, key);
+            return reg;
+        }
+        self.emit(inst);
         if keyed && let Some(table) = self.tables.last_mut() {
             table.insert(key, reg);
         } else {
             self.loose = Some(reg);
         }
         reg
+    }
+
+    /// The depth of the outermost scope a pure integer value can be computed in, where that is outside the loops
+    /// it stands in: the loops around it that define none of its operands. `None` where no loop can be left. A
+    /// condition is never left, since not every thread runs its side, and a float value is never moved: the body's
+    /// optimization placed every value the kernel names, so what moves here is what the compiler makes itself
+    /// (address parts, widenings, the terms of an index).
+    fn invariant_depth(&self, inst: &Inst) -> Option<usize> {
+        let integer = matches!(
+            inst.ty,
+            Ty::B32 | Ty::B64 | Ty::S32 | Ty::U32 | Ty::S64 | Ty::U64
+        );
+        if !integer
+            || inst.guard.is_some()
+            || !matches!(inst.results[..], [reg] if matches!(reg.bank, Bank::B32 | Bank::B64))
+        {
+            return None;
+        }
+        let depth = self.tables.len();
+        let operands = inst
+            .reads()
+            .iter()
+            .map(|reg| self.defined_at.get(reg).copied().unwrap_or(depth))
+            .max();
+        let floor = operands.unwrap_or(1);
+        let mut at = depth;
+        while at > floor && self.heads[at - 1].is_some() {
+            at -= 1;
+        }
+        (at < depth).then_some(at)
+    }
+
+    /// Compute `inst` in the scope at `depth`, ahead of the loop it holds that is open, and keep it in that scope's
+    /// table.
+    fn hoist(&mut self, depth: usize, inst: Inst, key: Key) {
+        let place = self.heads[depth].expect("the scope left is a loop");
+        for head in self.heads[depth..].iter_mut().flatten() {
+            *head += 1;
+        }
+        self.defined_at.insert(inst.results[0], depth);
+        self.tables[depth - 1].insert(key, inst.results[0]);
+        self.items.insert(place, Item::Inst(inst));
     }
 
     /// A number every value `reg` takes is a multiple of; 1 when nothing is known.
@@ -202,7 +260,7 @@ impl Builder {
     pub fn open_if(&mut self, pred: Reg) -> If {
         let skip = self.label();
         self.branch(skip, Some((pred, true)));
-        self.tables.push(HashMap::new());
+        self.push_scope(None);
         If {
             skip,
             end: None,
@@ -217,7 +275,7 @@ impl Builder {
         self.branch(end, None);
         self.items.push(Item::Label(open.skip));
         open.end = Some(end);
-        self.tables.push(HashMap::new());
+        self.push_scope(None);
         Ok(())
     }
 
@@ -231,6 +289,7 @@ impl Builder {
     /// first trip is known to run, so no test stands ahead of the loop: with a zero start and a constant end, that
     /// is the counter from zero to a constant ptxas unrolls. The test stands at the bottom either way.
     pub fn open_loop(&mut self, start: Operand, end: Operand, step: Operand, enters: bool) -> Loop {
+        let place = self.items.len();
         let var = self.reg(Bank::B32);
         self.emit(Inst::new(Opcode::Mov, Ty::U32, vec![var], vec![start]));
         let done = (!enters).then(|| {
@@ -241,7 +300,9 @@ impl Builder {
         });
         let head = self.label();
         self.items.push(Item::Label(head));
-        self.tables.push(HashMap::new());
+        self.push_scope(Some(place));
+        // The variable steps at the bottom of every trip, so nothing computed from it leaves the loop.
+        self.defined_at.insert(var, self.tables.len());
         Loop {
             var,
             end,
@@ -277,6 +338,11 @@ impl Builder {
         self.branch(head, Some((done, true)));
     }
 
+    fn push_scope(&mut self, head: Option<usize>) {
+        self.tables.push(HashMap::new());
+        self.heads.push(head);
+    }
+
     /// Drop the value table of the scope opened at `depth`: it must be the innermost open one.
     fn leave(&mut self, depth: usize) -> Result<()> {
         if self.tables.len() != depth {
@@ -286,6 +352,7 @@ impl Builder {
             )));
         }
         self.tables.pop();
+        self.heads.pop();
         Ok(())
     }
 

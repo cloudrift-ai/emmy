@@ -775,7 +775,8 @@ impl Lowerer {
 
     /// One lane's register of block scales: the four scales of its row of A, or of its column of B, one a byte, as
     /// they stand in the slab. Only the lanes the instruction's selector names supply one; any other holds zero
-    /// and reads nothing.
+    /// and reads nothing. A row proven aligned to four bytes is one 32-bit load under the lanes' predicate, as
+    /// cicc builds the CUDA helper; any other is four byte loads behind a branch.
     pub(super) fn block_scale_load(
         &mut self,
         node: &BlockScaleLoad,
@@ -821,12 +822,17 @@ impl Lowerer {
         let empty = Inst::new(Opcode::Mov, Ty::B32, vec![scales], vec![Operand::Int(0)]);
         self.b.emit(empty);
         let supplies = self.pred(&supplies, ctx)?;
-        let open = self.b.open_if(supplies);
         let flat = self.flat_index(node.src_buffer, &node.src_index)?;
         let first = self.address(node.src_buffer, &[sum(flat, times(row, node.ldm))], ctx)?;
+        if self.aligned(&first, 4) {
+            let load = Inst::new(buffer.load(), Ty::B32, vec![scales], vec![first]);
+            self.b.emit(load.guarded(supplies, false));
+            return Ok(());
+        }
         let Operand::Addr(base, offset) = first else {
             return Err(self.refuse("block scales have an address"));
         };
+        let open = self.b.open_if(supplies);
         // The four bytes, the first the lowest, as one register.
         let mut word = None;
         for byte in 0..4 {

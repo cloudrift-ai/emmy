@@ -186,10 +186,10 @@ fn the_terms_of_an_index_are_added_in_64_bits_outermost_first() {
         got,
         [
             "mov.f32 %f0, 0f00000000",
-            "mov.u32 %r4, 0",
-            "L1:",
             "mul.wide.s32 %rd2, %r3, 32",
             "add.s64 %rd3, %rd0, %rd2",
+            "mov.u32 %r4, 0",
+            "L1:",
             "mul.wide.s32 %rd4, %r4, 4",
             "add.s64 %rd5, %rd3, %rd4",
             "ld.global.nc.f32 %f1, [%rd5]",
@@ -295,9 +295,9 @@ fn a_division_of_a_possibly_negative_value_floors() {
     );
 }
 
-/// A division by a value known only where it runs is the divide instruction: plain where the ranges prove both
-/// sides non-negative or the operands are unsigned, else lowered by one where the remainder is nonzero and its sign
-/// is not the divisor's, the remainder raised by one divisor.
+/// A division by a value known only where it runs is the divide instruction: unsigned where the ranges prove both
+/// sides non-negative (a symbolic size never is negative) or the operands are unsigned, else lowered by one where the
+/// remainder is nonzero and its sign is not the divisor's, the remainder raised by one divisor.
 #[test]
 fn a_division_by_a_variable_is_the_divide_instruction() {
     let got = under_grid(
@@ -319,7 +319,7 @@ fn a_division_by_a_variable_is_the_divide_instruction() {
         got[3..18],
         [
             "add.s32 %r5, %r3, 1",
-            "div.s32 %r6, %r3, %r5",
+            "div.u32 %r6, %r3, %r5",
             "rem.u32 %r7, %r4, %r4",
             "shr.u32 %r8, %r4, 3",
             "sub.s32 %r9, %r3, 2000",
@@ -334,6 +334,19 @@ fn a_division_by_a_variable_is_the_divide_instruction() {
             "selp.s32 %r15, %r9, 0, %p2",
             "add.s32 %r16, %r10, %r15",
         ]
+    );
+    let sized = code(
+        "
+Grid(axes=(i in 0..4096), decode=(block_idx.x * 256 + thread_idx.x), block_threads=256):
+    i32 w = (i + 1) % n
+    i32 o[i] = w
+",
+        &[("o", Output, Some(I32)), ("n", Int, None)],
+        EXACT,
+    );
+    assert_eq!(
+        sized[4..6],
+        ["add.s32 %r5, %r4, 1", "rem.u32 %r6, %r5, %r0"]
     );
 }
 
@@ -1565,7 +1578,7 @@ Grid(axes=(i in 0..1024), decode=(block_idx.x * 256 + thread_idx.x), block_threa
         EXACT,
     );
     assert_eq!(
-        got[9..15],
+        got[10..16],
         [
             "add.s32 %r6, %r5, 256",
             "setp.lt.s32 %p0, %r6, 384",

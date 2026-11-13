@@ -660,7 +660,9 @@ impl Lowerer {
                 (self.b.value(inst, Bank::Pred), cmp == Cmp::Eq)
             }
             _ => {
-                return Err(self.no_rule("a comparison of a bool with a constant other than 0 or 1"));
+                return Err(
+                    self.no_rule("a comparison of a bool with a constant other than 0 or 1")
+                );
             }
         };
         if !negated {

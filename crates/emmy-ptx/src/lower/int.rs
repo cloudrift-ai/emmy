@@ -537,12 +537,21 @@ impl Lowerer {
         let ty = self.common(&a, a_range, &b, b_range);
         let at = ty.arith();
         let (left, right) = (self.as_int(&a, ty), self.as_int(&b, ty));
-        let exact = ty == VTy::U32
-            || (a_range.is_some_and(|range| range.lo >= 0)
-                && b_range.is_some_and(|range| range.lo > 0));
+        // Truncation is the floor where neither side is negative: a symbolic size never is, and a division by
+        // zero has no value in either form. The unsigned instruction is then the same value, and the cheaper one.
+        let non_negative = |e: &Expression, range: Option<Interval>| {
+            range.is_some_and(|range| range.lo >= 0)
+                || matches!(&**e, Expr::Var(name) if self.sizes.contains(name))
+        };
+        let exact = ty == VTy::U32 || (non_negative(x, a_range) && non_negative(y, b_range));
         let operands = vec![left, right.clone()];
         if exact {
             let opcode = if remainder { Opcode::Rem } else { Opcode::Div };
+            let at = match at {
+                Ty::S32 => Ty::U32,
+                Ty::S64 => Ty::U64,
+                at => at,
+            };
             return Ok(self.int_value(opcode, at, ty, operands, kept));
         }
         // The instruction rounds toward zero: where the remainder is nonzero and its sign is not the divisor's,

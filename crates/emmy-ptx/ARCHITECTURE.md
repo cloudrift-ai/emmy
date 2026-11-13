@@ -113,6 +113,13 @@ Every instruction reaches the list through the `Builder`.
   matters even where ptxas would merge the copies, because ptxas decides its unrolling from the size of the PTX it is
   given. The table shares what the compiler itself makes (address parts, widenings, constants in registers, a lane's
   offset in a tile); it never moves a Kernel IR value or a load, and a load is never shared.
+- **Values a loop does not change.** A pure integer value whose operands are all defined outside the loops around
+  it is computed ahead of the outermost of those loops, and kept in the table of the scope it lands in. A condition
+  is never left, since not every thread runs its side, and a float value never moves: the body's optimization
+  placed every value the kernel names, so what moves is what the compiler makes (the part of an address a loop
+  does not change, a widening, the terms of an index). Measured on `sm_120` (`reduce/split-reduce-mean-atomic`): with
+  the row's base computed in the loop, ptxas unrolls the 512-trip loop 32 times and rebuilds every address with two
+  instructions; with it ahead of the loop it unrolls the loop in full and folds every address into `[base + constant]`.
 - **Waiting.** `repeat_until` runs one instruction again until the predicate it defines holds: the one loop with no
   body, a wait on a barrier.
 - **Facts.** The builder keeps, per register, a number its value is a multiple of and, for an address, the bytes it is
@@ -140,7 +147,9 @@ Every instruction reaches the list through the `Builder`.
   which floor whatever the sign. By another constant, under a 32-bit dividend, the quotient is a multiply-high and a
   shift, exact below 2^31; a dividend the ranges do not prove non-negative is folded into that range by its sign and
   the quotient folded back. Anything else is the divide instruction, lowered by one where the remainder is nonzero
-  and its sign is not the divisor's, unless the operands are unsigned or the ranges prove both sides non-negative.
+  and its sign is not the divisor's, unless the operands are unsigned or neither side can be negative: the ranges
+  prove it, or the side is a symbolic size. Then it is the unsigned instruction, which ptxas expands to the shorter
+  sequence.
 - **Addresses.** A flat index is split into its terms with their integer coefficients and its constant. Each term is
   scaled to bytes and widened by one multiply, then added to the base in 64 bits, the terms bound in outer bodies
   first; the constant is the address's offset. Measured on `sm_120`: ptxas folds an address built this way into
@@ -359,8 +368,9 @@ value matters or reads a subnormal from one.
   reference states.
 - **Block scales.** `BlockScaleLoad` gives a lane the four scales of its row of A or its column of B, a byte each, as
   one register. Only the lanes the selector names supply one (for A those whose place in their group of four is 0 or
-  1, the second eight rows on; for B those whose place is 1); every other lane holds zero and reads nothing. The four
-  bytes are loaded one by one, as the CUDA helper does: one 32-bit load would need an alignment no fact gives.
+  1, the second eight rows on; for B those whose place is 1); every other lane holds zero and reads nothing. A row
+  proven aligned to four bytes is one 32-bit load under the predicate of the lanes that supply one, as cicc builds the
+  CUDA helper; any other row is four byte loads behind a branch.
 - **The fragment statements.** Each is one expansion over its row of the lane-to-element table
   (`fragment::fragment_table` in `emmy-ir`): per register and element the table gives the element's row and column in
   the tile as expressions over the lane, and the rule adds them to the statement's own index. No rule holds a lane map

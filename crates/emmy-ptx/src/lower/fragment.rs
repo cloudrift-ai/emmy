@@ -167,7 +167,7 @@ impl Lowerer {
     }
 
     /// Whether `address` is proven a multiple of `bytes`.
-    fn aligned(&self, address: &Operand, bytes: i64) -> bool {
+    pub(super) fn aligned(&self, address: &Operand, bytes: i64) -> bool {
         match address {
             Operand::Addr(Base::Reg(base), offset) => {
                 i64::from(self.b.alignment(*base)) % bytes == 0 && offset % bytes == 0
