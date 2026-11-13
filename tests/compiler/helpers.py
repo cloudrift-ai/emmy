@@ -213,16 +213,18 @@ def dtype_input_scale(dtype) -> float:
     return 0.05 if dtype.name == "f16" else 1.0
 
 
-def grouped_raster_decode(src: str, group: int) -> list[str]:
-    """The block-axis decode lines of ``src`` that take a grouped raster of ``group`` block-tiles: a block axis read
-    from the CTA index alone as its group's base plus its offset in the group (``group * (...) + ...``, the factor on
-    either side)."""
-    lines = [line.strip() for line in src.splitlines()]
-    scaled = (f" * {group} + ", f"= {group} * (")
+def grouped_raster_decode(kernel, group: int) -> list[str]:
+    """The block-axis decodes of ``kernel``'s grid that take a grouped raster of ``group`` block-tiles, as text: a
+    block axis read from the CTA index alone as its group's base plus its offset in the group (``group * (...) +
+    ...``, the factor on either side)."""
+    from emmy.compiler.ir.kernel.ir import Grid
+
+    (grid,) = [stmt for stmt in kernel.body if isinstance(stmt, Grid)]
+    decodes = [str(decode) for decode in grid.decode]
     return [
-        line
-        for line in lines
-        if line.startswith("int ") and "blockIdx.x" in line and "threadIdx" not in line and any(s in line for s in scaled)
+        decode
+        for decode in decodes
+        if "block_idx.x" in decode and "thread_idx" not in decode and (f" * {group} + " in decode or decode.startswith(f"{group} * ("))
     ]
 
 
@@ -333,3 +335,39 @@ def render_typed(statements, ctx) -> list[str]:
     known = {name: get(dtype) for name, dtype in ctx.ssa_dtypes.items()}
     buffers = {name: get(dtype) for name, dtype in ctx.buffer_dtypes.items()}
     return render_body(explicit_conversions(Body(statements), buffers, native_f16_ops(), known), ctx)
+
+
+def compile_with_kernels(graph, *, ctx=None, passes=None, **run):
+    """``graph`` compiled to CUDA ops, and the Kernel IR each kernel's code was generated from, by node id.
+
+    A ``CudaOp`` holds its kernel's code, not the statements it was generated from. This runs the one compile a test
+    would run (``passes``, the whole pipeline when omitted; ``ctx`` and ``run`` as ``Pipeline.run`` takes them; the
+    pins in scope apply as they do there) and keeps each ``KernelOp`` the last lowering pass read: the grid decoded,
+    every index flat, every type said. A check of a kernel's structure reads that body; only a check of how an
+    instruction is spelled reads the code."""
+    from emmy.compiler.ir.cuda import CudaOp
+    from emmy.compiler.ir.kernel import KernelOp
+    from emmy.compiler.pipeline import CUDA_PASSES, Pipeline
+    from emmy.compiler.pipeline.strategy import PipelineStrategy
+
+    lowered: list[tuple[KernelOp, CudaOp]] = []
+
+    class Recorder(PipelineStrategy):
+        def on_rebind(self, e) -> None:
+            if isinstance(e.replaced, KernelOp) and isinstance(e.node.op, CudaOp):
+                lowered.append((e.replaced, e.node.op))
+
+    compiled = Pipeline.build(passes or CUDA_PASSES).with_strategies(Recorder()).run(graph, ctx=ctx, **run)
+    kernels = {}
+    for node_id, node in compiled.nodes.items():
+        if isinstance(node.op, CudaOp):
+            # A retried resolution lowers a kernel again: the one the result holds is the one it was generated from.
+            kernels[node_id] = next(kernel for kernel, op in reversed(lowered) if op is node.op)
+    return compiled, kernels
+
+
+def statements(kernels, *types) -> list:
+    """Every statement of ``types`` in ``kernels`` (one ``KernelOp``, or the ``{node id: KernelOp}`` of a compile),
+    nested ones included, in body order; every statement when no type is given."""
+    ops = kernels.values() if isinstance(kernels, dict) else (kernels,)
+    return [stmt for op in ops for stmt in op.body.iter() if not types or isinstance(stmt, types)]
