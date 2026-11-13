@@ -56,6 +56,51 @@ fn coordinates(table: &FragmentTable) -> HashMap<Name, Expression> {
     over_thread
 }
 
+/// `expression` with each shift right by a constant written as the floor division it is, and each mask of low bits
+/// as the floor remainder: the same value, in the operations the range analysis bounds. The lane tables spell a
+/// lane's group as a shift.
+fn arithmetic(expression: &Expression) -> Expression {
+    let Some((op, [left, right])) = expression.operation() else {
+        return expression.clone();
+    };
+    let (left, right) = (arithmetic(left), arithmetic(right));
+    match (op, right.int_literal()) {
+        (Operation::RightShift, Some(shift)) if (0..31).contains(&shift) => {
+            binary(Operation::FloorDivide, left, Expression::int(1 << shift))
+        }
+        (Operation::BitwiseAnd, Some(mask)) if mask > 0 && mask & (mask + 1) == 0 => {
+            binary(Operation::Remainder, left, Expression::int(mask + 1))
+        }
+        _ => binary(op, left, right),
+    }
+}
+
+/// Whether a store's guard holds for every thread or for none, where the ranges of its two sides tell: a bound
+/// below every value, or above every one. `None` where they overlap.
+fn decided(guard: &Expression, ctx: &SimplifyCtx) -> Option<bool> {
+    let (op, [left, right]) = guard.operation()? else {
+        return None;
+    };
+    match op {
+        Operation::LogicalAnd => match (decided(left, ctx), decided(right, ctx)) {
+            (Some(false), _) | (_, Some(false)) => Some(false),
+            (Some(true), Some(true)) => Some(true),
+            _ => None,
+        },
+        Operation::Less => {
+            let (left, right) = (arithmetic(left).range(ctx)?, arithmetic(right).range(ctx)?);
+            if left.hi < right.lo {
+                Some(true)
+            } else if left.lo >= right.hi {
+                Some(false)
+            } else {
+                None
+            }
+        }
+        _ => None,
+    }
+}
+
 impl Lanes {
     fn of(table: &FragmentTable) -> Lanes {
         let over_thread = coordinates(table);
@@ -669,7 +714,8 @@ impl Lowerer {
     /// One cell: per element the address from the statement's index and the table's row and column by the two
     /// strides, the value (the register, or what the epilogue makes of it at the element's own coordinates),
     /// converted to the buffer's type. An element past a guard's bound is not stored and its epilogue reads
-    /// nothing. Two elements next to each other in memory, under one guard and proven aligned, are one store.
+    /// nothing; a guard the ranges decide is no branch, and an element it always turns away is not written at
+    /// all. Two elements next to each other in memory, under one guard and proven aligned, are one store.
     fn store_cell(&mut self, node: &RegStore, ctx: &SimplifyCtx) -> Result<()> {
         let lanes = Lanes::of(&self.store_table(node)?);
         let count = lanes.registers.len();
@@ -728,16 +774,29 @@ impl Lowerer {
                 (Some(m), Some(n)) => Some(binary(Operation::LogicalAnd, m, n)),
                 (m, n) => m.or(n),
             };
-            elements.push((index, guard));
+            // A guard the ranges decide is no branch: an element always past its bound is not stored at all.
+            match guard.as_ref().and_then(|guard| decided(guard, ctx)) {
+                Some(false) => elements.push((index, None, false)),
+                Some(true) => elements.push((index, None, true)),
+                None => elements.push((index, guard, true)),
+            }
         }
         let pairs = !node.atomic && (half || elem.dtype == DType::F32);
         let mut at = 0;
         while at < count {
-            let (index, guard) = &elements[at];
+            let (index, guard, stored) = &elements[at];
+            if !stored {
+                at += 1;
+                continue;
+            }
             let pair = pairs
-                && elements.get(at + 1).is_some_and(|(next, next_guard)| {
-                    next_guard == guard && constant_difference(next, index) == Some(1)
-                });
+                && elements
+                    .get(at + 1)
+                    .is_some_and(|(next, next_guard, next_stored)| {
+                        *next_stored
+                            && next_guard == guard
+                            && constant_difference(next, index) == Some(1)
+                    });
             let group = if pair { 2 } else { 1 };
             let open = match guard {
                 Some(guard) => {

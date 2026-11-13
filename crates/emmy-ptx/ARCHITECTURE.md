@@ -395,13 +395,17 @@ value matters or reads a subnormal from one.
     multiplies it by its block's scale in f32 and rounds once. Volta's paired slabs are read by the paired rows
     (`fragment::paired_operand_table`): two register cells a side couple into one 32-row map, so `frag` and
     `pair_frag` hold rows four apart, each element read where the slab layout puts it, one load an element.
-  - `RegStore`: per element, the address from the index and the table's row and column by the two strides, through
-    the slab's swizzle; the value is the register or what the epilogue makes of it, converted to the buffer's type.
-    The epilogue's statements go through the ordinary rules in a scope of their own, the element of each fragment
-    (f32) and its row and column bound. The type pass types the epilogue like any body, so each value states its
-    dtype and each conversion is its own definition; nothing in it is typed here. An element past a guard is not stored and its epilogue reads nothing. Two elements next to each
-    other under one guard, proven aligned, are one store. Each cell of a run is stored as its own statement says.
-    Volta's paired tile has its own accumulator row (`fragment::paired_accumulator_table`).
+  - `RegStore`: per element, the address from the index and the table's row and column by the two strides, through the
+    slab's swizzle; the value is the register or what the epilogue makes of it, converted to the buffer's type. The
+    epilogue's statements go through the ordinary rules in a scope of their own, the element of each fragment (f32)
+    and its row and column bound. The type pass types the epilogue like any body, so each value states its dtype and
+    each conversion is its own definition; nothing in it is typed here. An element past a guard is not stored and its
+    epilogue reads nothing. A guard the ranges of its two sides decide is no branch, and an element it always turns
+    away is not stored at all: a store of 8 rows of an m16n8 tile drops each lane's second row (cicc does the same),
+    and the shift and mask of the table's lane coordinates are read as the floor division and remainder they are,
+    which the range analysis bounds. Two elements next to each other under one guard, proven aligned, are one store.
+    Each cell of a run is stored as its own statement says. Volta's paired tile has its own accumulator row
+    (`fragment::paired_accumulator_table`).
   - `FragmentApply`: per element, the operation over the arguments at the element's row and column: a fragment's
     register, the scalar of the element's row, a uniform scalar, a condition over the coordinates, or a load at them.
   - `FragmentRowReduce`: each of a lane's two rows folded over its elements of every fragment, then over the lanes

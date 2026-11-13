@@ -124,8 +124,8 @@ fn a_fragment_of_halves_from_floats_rounds_each_element() {
     assert_eq!(count(&module, "cvt.rn.f16.f32"), 8);
 }
 
-/// A store under a guard of rows keeps its pairs, each under its row's predicate; a guard of columns stores each
-/// element under its own. An epilogue runs its statements once an element, at the element's coordinates, and the
+/// A store under a guard of rows keeps its pairs, each under its row's predicate, and a guard the ranges decide is
+/// no branch; a guard of columns stores each element under its own. An epilogue runs its statements once an element, at the element's coordinates, and the
 /// value is rounded once into a buffer of halves.
 #[test]
 fn a_store_is_guarded_and_runs_its_epilogue_once_an_element() {
@@ -139,7 +139,27 @@ fn a_store_is_guarded_and_runs_its_epilogue_once_an_element() {
         80,
     )
     .unwrap();
-    assert_eq!(count(&rows, "st.global.v2.f32"), 2);
+    // The lane's second row (8 and on) is never below 5: only the first is stored, under its predicate.
+    assert_eq!(count(&rows, "st.global.v2.f32"), 1);
+    assert_eq!(count(&rows, "bra"), 1);
+    // A guard the ranges decide is no branch: the lane's first row is always in, its second always out.
+    let decided = kernel(
+        &format!(
+            "{FRAGMENTS}
+        RegStore(dst_buffer=o, dst_index=(r * 40), frag=fc, shape=(16, 8, 16), ldm=8, m_guard=(0, 8))
+        "
+        ),
+        HALVES,
+        80,
+    )
+    .unwrap();
+    assert_eq!(
+        count(&decided, "st.global.v2.f32"),
+        1,
+        "{:#?}",
+        listing(&decided)
+    );
+    assert_eq!(count(&decided, "bra"), 0);
     let columns = kernel(
         &format!(
             "{FRAGMENTS}
