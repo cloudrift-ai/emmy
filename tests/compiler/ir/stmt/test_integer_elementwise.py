@@ -32,7 +32,6 @@ def _stamped(result: str) -> list[str]:
     out = Tensor("out", (1,), U32)
     kernel = KernelOp(
         body=body,
-        name="integer_elementwise",
         inputs={"lhs": Tensor("lhs", (1,), U32), "rhs": Tensor("rhs", (1,), U32)},
         outputs={"out": out},
     )

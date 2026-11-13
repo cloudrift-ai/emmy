@@ -33,7 +33,6 @@ def _graph(*, grouped: bool = False) -> Graph:
     channels = [(wv, "acc"), *([(w2v, "acc2")] if grouped else [])]
     tile = TileOp(
         op=contraction(k, xv, *channels),
-        name="y",
         place=Placement(free=(n,)),
         axes=(n, k),
         output_specs=(OutputSpec(*parse_body("y[n] = acc")),) + ((OutputSpec(*parse_body("y2[n] = acc2")),) if grouped else ()),
@@ -191,11 +190,11 @@ def _recorded_layout_after_cut(*, fixed_reader=False, source=None):
     root.op = replace(root.op, op=contraction("k", x, (weight, "acc"), (squared, "acc2")))
     root.inputs = ["x", "w"]
     del graph.nodes["w2"]
-    root.op = LoopOp(body=root.op.loop_body, name="y")
+    root.op = LoopOp(body=root.op.loop_body)
     program = graph.to_wire()
     ctx = Context.from_target((7, 0))
     graph = Pipeline.build(["tile/lift"]).run(graph, ctx=ctx, db=None)
-    target = definition(graph.nodes["y"].op.with_io(graph, graph.nodes["y"]), "y", traced=0, origins=("y",))
+    target = definition(graph.nodes["y"].op.with_io(graph, graph.nodes["y"]), traced=0, origins=("y",))
     taken = []
     operand_cut = {"PLACE": "cut"}  # the squared operand's cone, the one seam
 
@@ -207,8 +206,8 @@ def _recorded_layout_after_cut(*, fixed_reader=False, source=None):
     inventory = KernelInventory(on_routing=lambda parent, arm, pieces, _ids: taken.append((parent, arm, pieces)))
     Run(Pipeline.build(["tile/cut"]).with_strategies(inventory), ctx).resolve(graph, decide)
     _, cut, pieces = taken[0]
-    first, remainder = definition(pieces[0], pieces[0].name), definition(pieces[1], "y", key="y#2")
-    source = source or definition(taken[-1][2][0], "y", key="y#3")
+    first, remainder = definition(pieces[0]), definition(pieces[1], key="y#2")
+    source = source or definition(taken[-1][2][0], key="y#3")
     return GoldenFile(
         compute_cap=(7, 0),
         programs=[program],
@@ -350,7 +349,7 @@ def test_a_reader_still_to_cut_prices_a_layout_arm_by_the_cut_recorded_on_it() -
     stats = PerfStats(median=5, min=5, max=5, mean=5, variance=0, n_samples=1)
     for node in recorded.nodes.values():
         if isinstance(node.op, TileOp):
-            kernel = kernel_row(node.op.with_io(recorded, node), node.op.name)
+            kernel = kernel_row(node.op.with_io(recorded, node))
             db.record_kernel(kernel)
             db.record_perf(ctx, kernel.exact_identity, bindings={}, knobs={"WORK": "t32"}, status="ok", stats=stats)
     root = graph.nodes["y"]
@@ -386,7 +385,7 @@ def test_strict_placement_replays_a_measured_source_layout_continuation() -> Non
     with evidence_scope([]), pinned_knobs({"PLACE": "fuse", "LAYOUT@w": "source"}):
         recorded = pipeline.with_strategies(inventory).run(graph.copy(), ctx=ctx)
     node = next(node for node in recorded.nodes.values() if isinstance(node.op, TileOp))
-    kernel = kernel_row(node.op.with_io(recorded, node), node.op.name)
+    kernel = kernel_row(node.op.with_io(recorded, node))
     db.record_kernel(kernel)
     db.record_perf(
         ctx,

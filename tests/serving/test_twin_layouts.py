@@ -243,7 +243,6 @@ def _twin(n: int) -> Graph:
     axis_n, axis_k = Axis("n", n), Axis("k", 8)
     tile = TileOp(
         op=contraction(axis_k, slab("xv", "x", "k"), (slab("wv", "w", "k", "n"), "acc")),
-        name="y",
         place=Placement(free=(axis_n,)),
         axes=(axis_n, axis_k),
         output_specs=(OutputSpec(parse_body("y[n] = acc")[0]),),
@@ -272,7 +271,7 @@ def _measure(db, graph, layout, ctx, pipeline):
     with evidence_scope([]), pinned_knobs({"PLACE": "fuse", "REDUCE": "", "LAYOUT@w": layout}):
         formed = pipeline.run(graph.copy(), ctx=ctx)
     node = next(node for node in formed.nodes.values() if isinstance(node.op, TileOp))
-    kernel = kernel_row(node.op.with_io(formed, node), node.op.name)
+    kernel = kernel_row(node.op.with_io(formed, node))
     db.record_kernel(kernel)
     stats = PerfStats(median=17, min=17, max=17, mean=17, variance=0, n_samples=1)
     db.record_perf(ctx, kernel.exact_identity, bindings={}, knobs={"WORK": "t32"}, status="ok", stats=stats)

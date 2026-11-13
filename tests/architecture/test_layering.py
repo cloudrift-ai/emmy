@@ -156,10 +156,10 @@ def test_a_kernel_body_takes_the_optimizing_half_of_the_normal_form() -> None:
     from emmy.compiler.ir.stmt import normalize_body, optimize_body, parse_body
 
     body = parse_body("late = load X[1]\nearly = load X[0]\nb = add(early, late)\nunused = multiply(early, 3)\nY[0] = b")
-    kernel = KernelOp(body=body, name="k").body
+    kernel = KernelOp(body=body).body
     assert kernel == optimize_body(body)
     assert [str(stmt).split(" = ")[0] for stmt in kernel] == ["late", "early", "b", "Y[0]"]
-    assert LoopOp(body=body, name="k").body == normalize_body(body) != kernel
+    assert LoopOp(body=body).body == normalize_body(body) != kernel
 
 
 _STMT_PACKAGE = "emmy.compiler.ir.stmt"

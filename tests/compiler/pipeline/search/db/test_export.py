@@ -98,7 +98,7 @@ def test_a_carried_kernels_pool_offers_both_storage_arms_and_a_golden_lands_on_i
     from tests.compiler.passes.test_shared_carry import _graph as carried_state_graph
 
     graph = carried_state_graph()
-    kernel = KernelDef(loop_ir=graph.to_wire(), name="k_step", formed=True)
+    kernel = KernelDef(loop_ir=graph.to_wire(), formed=True)
     ctx = Context.from_target((7, 0), gpu_name=CARDS[(7, 0)], compile_flags="")
     schedule = {k: v for k, v in _PINS.items() if k in ("WORK", "REDUCE")}
     with pinned_knobs({"FAST_MATH": True}):

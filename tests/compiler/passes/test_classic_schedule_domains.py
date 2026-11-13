@@ -82,7 +82,7 @@ def _reference(tile, target, *, pins=None):
 
 def _schedule_leaves(tile, name, target):
     """Expand the lazy traversal while retaining its typed schedule leaves."""
-    return tuple(iter_leaves(classic_forks(tile, name, {}, target)))
+    return tuple(iter_leaves(classic_forks(tile, {}, target)))
 
 
 def _pointwise() -> TileOp:
@@ -165,7 +165,7 @@ def test_eight_output_lanes_are_offered_on_volta_and_lower_with_their_own_grid()
         problem = ClassicProblem(tile, target, row=row, validate_pins=True)
         choices = list(advance_schedule(ClassicScheduleContext(tile, target, problem)))
         assert len(choices) == 1, (spec, choices)
-        realized = materialize_classic(tile, name="matmul", knobs=row, target=target, schedule=choices[0])
+        realized = materialize_classic(tile, knobs=row, target=target, schedule=choices[0])
         bound = factorize(realized, root=None)
         assert tuple(axis.extent.as_static() for axis in bound.axes[1:]) == expected
         (tree,) = [stmt for stmt in bound.body.iter() if isinstance(stmt, TreeHalve)]
@@ -266,7 +266,7 @@ def test_deferred_register_partials_preserve_empty_states_and_the_uneven_tail(re
     row = {"WORK": "", "REDUCE": reduce}
     problem = ClassicProblem(tile, target, row=row, validate_pins=True)
     (choice,) = advance_schedule(ClassicScheduleContext(tile, target, problem))
-    realized = materialize_classic(tile, name="merge", knobs=row, target=target, schedule=choice)
+    realized = materialize_classic(tile, knobs=row, target=target, schedule=choice)
     bound = factorize(realized, root=None)
     assert bound.axes == tile.place.free
     # This serial Kernel IR uses only the shared scalar statements. Execute its actual strided
@@ -728,7 +728,7 @@ def test_kernel_pin_without_work_keeps_the_matching_catalog_rows(monkeypatch, fa
         outputs={"out": Tensor("out", (64, 64), "f16")},
     )
     monkeypatch.setenv(f"EMMY_{family}@place_ab12", value)
-    forks = classic_forks(tile, tile.name, {}, Context.from_target(target), kernel_set=True)
+    forks = classic_forks(tile, {}, Context.from_target(target), kernel_set=True)
     leaf = next(iter_leaves(forks), None)
     assert leaf is not None, "a partial kernel pin must find WORK in the catalog"
     assert leaf.row[family] == value
@@ -757,12 +757,12 @@ def test_a_cut_piece_keeps_its_catalog_when_published_pins_leave_it_no_row(monke
     tile = TileOp(op=root, place=Placement(free=(Axis("m", 64), Axis("n", 64))), axes=(Axis("m", 64), Axis("n", 64), k))
     target = Context.from_target((7, 0))
     monkeypatch.setenv("EMMY_STAGE", "d1/smem")
-    assert tuple(iter_leaves(classic_forks(tile, "k__place_ab12", {}, target, kernel_set=True, published=True)))
+    assert tuple(iter_leaves(classic_forks(tile, {}, target, kernel_set=True, published=True)))
     with pytest.raises(ValueError, match="does not resolve"):  # a kernel of its own is held to the pin, loudly
-        tuple(iter_leaves(classic_forks(tile, "k", {}, target)))
+        tuple(iter_leaves(classic_forks(tile, {}, target)))
 
     monkeypatch.setenv("EMMY_WORK@place_ab12", "t16x16")
-    leaves = tuple(iter_leaves(classic_forks(tile, "k__place_ab12", {}, target, kernel_set=True, node="out__place_ab12_0")))
+    leaves = tuple(iter_leaves(classic_forks(tile, {}, target, kernel_set=True, node="out__place_ab12_0")))
     assert leaves and {leaf.schedule.kernel.work.spell() for leaf in leaves} == {"t16x16"}
 
 

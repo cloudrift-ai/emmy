@@ -39,7 +39,7 @@ def _unmapped_tile(m: int, n: int, k: int = 64, dtype: str = "f16"):
     g.add_node(MatmulOp(), ["a", "b"], Tensor("o", (Dim(m), Dim(n)), dtype=dtype), node_id="o")
     g.inputs, g.outputs = ["a", "b"], ["o"]
     node = Pipeline.build(LOOP_PASSES).run(g).nodes["o"]
-    tile = lift_loop_op(node.op, name=node.op.name)
+    tile = lift_loop_op(node.op)
     return replace(tile, knobs=dict(node.op.knobs), inputs=dict(node.op.inputs), outputs=dict(node.op.outputs))
 
 
@@ -57,7 +57,7 @@ def test_complete_pin_decodes_without_walking_the_compatibility_frontier(monkeyp
 
     monkeypatch.setattr(ClassicNodeSite, "compatible", unexpected_frontier)
     with pinned_knobs(row):
-        leaves = list(iter_leaves(classic_forks(tile, tile.name, tile.knobs, ctx)))
+        leaves = list(iter_leaves(classic_forks(tile, tile.knobs, ctx)))
     assert len(leaves) == 1
     assert {key: leaves[0].knobs[key] for key in row} == row
     assert leaves[0].schedule == ClassicScheduleCodec(ClassicScheduleContext(tile, ctx)).decode(row)
@@ -72,7 +72,7 @@ def test_complete_pin_ignores_a_peer_kernel_site(monkeypatch) -> None:
 
     monkeypatch.setattr(ClassicNodeSite, "compatible", unexpected_frontier)
     with pinned_knobs({**row, "REDUCE@peer": "coop"}):
-        leaves = list(iter_leaves(classic_forks(tile, tile.name, tile.knobs, ctx)))
+        leaves = list(iter_leaves(classic_forks(tile, tile.knobs, ctx)))
     assert len(leaves) == 1
     assert {key: leaves[0].knobs[key] for key in row} == row
 
@@ -81,14 +81,14 @@ def test_invalid_complete_pin_keeps_the_original_refusal() -> None:
     tile, ctx = _unmapped_tile(8, 8), Context.from_target((7, 0))
     row = {**_complete_classic_row(tile, ctx), "WORK": "not-a-work"}
     with pinned_knobs(row):
-        assert not list(iter_leaves(classic_forks(tile, tile.name, tile.knobs, ctx)))
+        assert not list(iter_leaves(classic_forks(tile, tile.knobs, ctx)))
 
 
 def test_invalid_complete_published_pin_keeps_the_peer_catalog() -> None:
     tile, ctx = replace(_unmapped_tile(8, 8), name="k_probe__place_aaaaaaaaaa"), Context.from_target((7, 0))
     row = {**_complete_classic_row(tile, ctx), "WORK": "not-a-work"}
     with pinned_knobs(row):
-        leaves = list(iter_leaves(classic_forks(tile, tile.name, tile.knobs, ctx, kernel_set=True)))
+        leaves = list(iter_leaves(classic_forks(tile, tile.knobs, ctx, kernel_set=True)))
     assert leaves
     assert all(leaf.knobs["WORK"] != "not-a-work" for leaf in leaves)
 
@@ -121,10 +121,10 @@ def test_transposed_free_extents_stamp_different_spaces() -> None:
 
     # The consequence of transposing: the spaces differ.
     def total(tile) -> int:
-        return sum(1 for _ in iter_leaves(classic_forks(tile, "t", tile.knobs, ctx)))
+        return sum(1 for _ in iter_leaves(classic_forks(tile, tile.knobs, ctx)))
 
     assert total(wide) != total(tall), "transposed M/N must not enumerate the same space"
-    assert classic_forks(wide, "t", wide.knobs, ctx)[0].pool_id != classic_forks(tall, "t", tall.knobs, ctx)[0].pool_id, (
+    assert classic_forks(wide, wide.knobs, ctx)[0].pool_id != classic_forks(tall, tall.knobs, ctx)[0].pool_id, (
         "so they must not share a schedule-space stamp"
     )
 
@@ -149,7 +149,7 @@ def test_split_dim_store_does_not_share_an_identity() -> None:
         graph, _, _ = graph_from_code(code)
         out = Pipeline.build(LOOP_PASSES).run(graph)
         node = [n for n in out.nodes.values() if isinstance(n.op, LoopOp)][-1]
-        tile = lift_kernel(node.op.with_io(out, node), name=node.op.name)
+        tile = lift_kernel(node.op.with_io(out, node))
         return replace(tile, knobs=dict(node.op.knobs), inputs=dict(node.op.inputs), outputs=dict(node.op.outputs))
 
     flat, split = lifted(matmul), lifted(f"{matmul}.reshape(4,32,128)")
@@ -158,11 +158,11 @@ def test_split_dim_store_does_not_share_an_identity() -> None:
     assert [a.extent.as_static() for a in flat.place.free] == [a.extent.as_static() for a in split.place.free]
 
     def total(tile) -> int:
-        return sum(1 for _ in iter_leaves(classic_forks(tile, "t", tile.knobs, ctx)))
+        return sum(1 for _ in iter_leaves(classic_forks(tile, tile.knobs, ctx)))
 
     assert total(flat) == total(split), "re-fusing the split pair must recover the contraction schedule space"
     assert flat.identity_key(with_io=True) != split.identity_key(with_io=True), "so a golden must not join across them"
-    assert classic_forks(flat, "t", flat.knobs, ctx)[0].pool_id != classic_forks(split, "t", split.knobs, ctx)[0].pool_id, (
+    assert classic_forks(flat, flat.knobs, ctx)[0].pool_id != classic_forks(split, split.knobs, ctx)[0].pool_id, (
         "and they must not share a schedule-space stamp"
     )
 
@@ -183,11 +183,11 @@ def test_an_axis_renamed_twin_preserves_the_node_id_vocabulary() -> None:
     code = f"torch.nn.functional.linear({norm}(torch.randn(128, 256, dtype=torch.float16)), torch.randn(256, 256, dtype=torch.float16))"
     out = Pipeline.build(LOOP_PASSES).run(graph_from_code(code)[0])
     node = [n for n in out.nodes.values() if isinstance(n.op, LoopOp)][-1]
-    tile = lift_loop_op(node.op, name=node.op.name)
+    tile = lift_loop_op(node.op)
     tile = replace(tile, knobs=dict(node.op.knobs), inputs=dict(node.op.inputs), outputs=dict(node.op.outputs))
 
     ctx = Context.from_target((12, 0))
-    row = dict(next(iter_leaves(classic_forks(tile, "t", tile.knobs, ctx))).knobs)
+    row = dict(next(iter_leaves(classic_forks(tile, tile.knobs, ctx))).knobs)
     spelled = next(k for k in row if "@" in k)
     old = spelled.split("@", 1)[1]
     new = old + "x"
@@ -198,7 +198,7 @@ def test_an_axis_renamed_twin_preserves_the_node_id_vocabulary() -> None:
     twin_op = tile.op.rewrite(lambda n: n, Sigma({old: Var(new)}), ren)
     twin = TileOp(op=twin_op, place=tile.place, output_specs=tile.output_specs, axes=tuple(ren(axis) for axis in tile.axes))
     twin = replace(twin, knobs=dict(tile.knobs), inputs=dict(tile.inputs), outputs=dict(tile.outputs))
-    twin_row = dict(next(iter_leaves(classic_forks(twin, "t", twin.knobs, ctx))).knobs)
+    twin_row = dict(next(iter_leaves(classic_forks(twin, twin.knobs, ctx))).knobs)
     assert spelled in twin_row
     assert {key for key in row if "@" in key} == {key for key in twin_row if "@" in key}
 
@@ -220,9 +220,9 @@ def test_an_off_precision_gate_stamps_the_same_space() -> None:
     ctx = Context.from_target((12, 0))
     tile = _unmapped_tile(8, 8)
     with pinned_knobs({"FAST_MATH": False}):
-        pool = classic_forks(tile, "t", tile.knobs, ctx)[0].pool_id
+        pool = classic_forks(tile, tile.knobs, ctx)[0].pool_id
     with pinned_knobs({"F16_MMA_F32_ACC": 0, "FP8_MMA": 0}):
-        assert classic_forks(tile, "t", tile.knobs, ctx)[0].pool_id == pool
+        assert classic_forks(tile, tile.knobs, ctx)[0].pool_id == pool
     # The umbrella spells exactly what it enables: one stamp for ``FAST_MATH=1`` and for both gates pinned ON,
     # and an individual OFF pin under the umbrella is the other gate alone.
     with FAST_MATH.pinned("1"):
@@ -249,7 +249,7 @@ def test_a_kernel_pin_on_another_piece_leaves_the_stamp_alone() -> None:
     tile = replace(_unmapped_tile(64, 128), name=name)
 
     def stamp() -> str:
-        return classic_forks(tile, name, tile.knobs, ctx)[0].pool_id
+        return classic_forks(tile, tile.knobs, ctx)[0].pool_id
 
     clean = stamp()
     with pinned_knobs({"WORK@place_bbbbbbbbbb": "w1x2"}):

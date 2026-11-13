@@ -41,7 +41,7 @@ from emmy.compiler.graph import Node, Tensor
 from emmy.compiler.ir.kernel import KernelOp
 from emmy.compiler.ir.stmt import Body, ZeroPrologue
 from emmy.compiler.pipeline import Match, Pattern, RuleSkipped
-from emmy.compiler.pipeline.passes.lowering.cuda._helpers import atomic_outputs, launch_name
+from emmy.compiler.pipeline.passes.lowering.cuda._helpers import atomic_outputs
 
 PATTERN = [Pattern("root", KernelOp)]
 
@@ -82,14 +82,9 @@ def rewrite(match: Match, root: Node) -> KernelOp | None:
     # fragment alternative would splice two kernels for a body prepend). The prologues go FIRST
     # in the body; the target buffers join ``outputs`` with placeholder Tensors — the next
     # match's ``populate_io`` swaps in the real graph tensors (the buffers are graph nodes).
-    total_words = sum(s.words for s in prologues) + sum(s.words for s in pnode.op.body.iter() if isinstance(s, ZeroPrologue))
-    # An unnamed kernel (a split piece) takes its launch name here: a bare ``__zp<words>`` would be
-    # shared by every unnamed predecessor zeroing as many words.
-    base = launch_name(pnode.op, pnode.id).rsplit("__zp", 1)[0]
     pnode.op = replace(
         pnode.op,
         body=Body((*prologues, *pnode.op.body)),
-        name=f"{base}__zp{total_words}",
         inputs=dict(pnode.op.inputs),
         outputs={**pnode.op.outputs, **{b: Tensor(b, (), "f32") for b in delegated}},
     )

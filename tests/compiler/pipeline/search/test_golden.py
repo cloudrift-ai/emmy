@@ -60,7 +60,7 @@ def test_a_cut_piece_is_the_kernel_its_stored_definition_lifts_to() -> None:
     [(_, _, pieces)] = mint(root, [route], Context.from_target(tuple(document.compute_cap), gpu_name=document.gpu_name))
     assert len(pieces) == len(route.children)
     for piece in pieces:
-        assert piece.exact_identity == KernelDef(loop_ir=piece.loop_ir, name=piece.name, formed=piece.formed).exact_identity, piece.name
+        assert piece.exact_identity == KernelDef(loop_ir=piece.loop_ir, formed=piece.formed).exact_identity, piece.name
 
 
 def test_restamp_respells_a_rows_site_keys_as_it_does_a_seam() -> None:

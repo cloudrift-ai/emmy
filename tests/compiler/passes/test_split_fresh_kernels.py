@@ -99,7 +99,7 @@ def _stamps(out) -> dict[str, dict]:
 
 def _tile_pieces(graph=None) -> list[TileOp]:
     loop, _ = _resolve(
-        ["frontend/decomposition", "frontend/optimization", "loop/lowering", "loop/fusion", "loop/stamp"],
+        ["frontend/decomposition", "frontend/optimization", "loop/lowering", "loop/fusion"],
         graph,
     )
     tiled, _ = Run(pipeline=Pipeline.build(["tile/lift", "tile/cut", "tile/schedule"]), ctx=_CTX).resolve(

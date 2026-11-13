@@ -271,7 +271,7 @@ def test_a_swept_piece_takes_the_tree_its_own_body_lifts_to() -> None:
     # Rows name a site by its path in the tree, so two pieces with one body must have one tree, however each was carved.
     tile = _row_scaled()
     formed = reformed(tile, {})
-    own = lift_kernel(LoopOp(body=tile.loop_body), name=tile.name, shapes={})
+    own = lift_kernel(LoopOp(body=tile.loop_body), shapes={})
     assert [site.path for site in sites(formed.op)] == [site.path for site in sites(own.op)]
     # Re-forming moves no identity: the rows a card measured on the minted piece still join it.
     assert formed.identity_key(structural=False, with_io=True) == tile.identity_key(structural=False, with_io=True)
@@ -294,7 +294,7 @@ def test_a_piece_carved_with_a_shorter_grid_takes_its_own_body_grid() -> None:
         output_specs=(OutputSpec(*parse_body("out[m, n] = result"), sweep=(n,)),),
     )
     formed = reformed(tile, {})
-    own = lift_kernel(LoopOp(body=tile.loop_body), name=tile.name, shapes={})
+    own = lift_kernel(LoopOp(body=tile.loop_body), shapes={})
 
     def placement(piece: TileOp) -> tuple:
         extents = tuple(axis.extent.as_static() for axis in piece.place.free)
@@ -319,7 +319,7 @@ def test_a_kernel_without_a_contraction_runs_its_unit_stride_store_axis_fastest(
         output_specs=(OutputSpec(*parse_body("out[r, c + s * 8] = v")),),
     )
     formed = reformed(piece, {})
-    alone = lift_kernel(formed.source, name=piece.name, shapes={})
+    alone = lift_kernel(formed.source, shapes={})
     assert [axis.extent.as_static() for axis in formed.place.free] == [2, 4, 8]
     assert [axis.name for axis in alone.place.free] == [axis.name for axis in formed.place.free]
 
@@ -337,6 +337,6 @@ def test_a_kernel_without_a_contraction_runs_an_axis_its_store_does_not_name_slo
         output_specs=(OutputSpec(*parse_body("out[c] = v")),),
     )
     formed = reformed(piece, {})
-    alone = lift_kernel(formed.source, name=piece.name, shapes={})
+    alone = lift_kernel(formed.source, shapes={})
     assert [axis.extent.as_static() for axis in formed.place.free] == [4, 8]
     assert [axis.name for axis in alone.place.free] == [axis.name for axis in formed.place.free]

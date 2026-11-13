@@ -92,7 +92,7 @@ def _lifted(graph: Graph) -> TileOp:
     """The graph's one fused kernel, lifted and not yet scheduled."""
     with pinned_knobs({"PLACE": "fuse"}):
         loop = next(node.op for node in Pipeline.build(LOOP_PASSES).run(graph).nodes.values() if isinstance(node.op, LoopOp))
-    return replace(lift_loop_op(loop, name=loop.name), knobs=dict(loop.knobs), inputs=dict(loop.inputs), outputs=dict(loop.outputs))
+    return replace(lift_loop_op(loop), knobs=dict(loop.knobs), inputs=dict(loop.inputs), outputs=dict(loop.outputs))
 
 
 def _tiled(knobs) -> int:
@@ -108,14 +108,14 @@ def test_block_maximum_offers_no_nested_matmul_tile(gpu_name, cap) -> None:
     tile = _lifted(_block_maximum())
     assert tile.nested_tiles, "the matmul is a TILE site below the maximum"
 
-    leaves = list(iter_leaves(classic_forks(tile, tile.name, tile.knobs, ctx)))
+    leaves = list(iter_leaves(classic_forks(tile, tile.knobs, ctx)))
     assert leaves
     assert not any(_tiled(leaf.knobs) for leaf in leaves)
 
     pins = {"TILE": "mma_m16n8k16_f16_f32/f1x2/k2", "WORK": "w1x1", "STAGE": "", "REDUCE": ""}
     clear_pin_refusals()
     with pinned_knobs(pins):
-        assert not list(iter_leaves(classic_forks(tile, tile.name, tile.knobs, ctx)))
+        assert not list(iter_leaves(classic_forks(tile, tile.knobs, ctx)))
     assert "does not fold it" in (pin_refusal("TILE", pins["TILE"]) or "")
 
     with pinned_knobs({"PLACE": "fuse"}):
@@ -138,13 +138,13 @@ def test_an_output_tiled_root_offers_no_tile_on_the_matmul_in_its_cone(gpu_name,
     (nested,) = (site for _root, site in tile.nested_tiles)
     tile_key, stage_key = (f"{family}@{tile.sites[nested].path}" for family in ("TILE", "STAGE"))
 
-    leaves = iter_leaves(classic_forks(tile, tile.name, tile.knobs, ctx))
+    leaves = iter_leaves(classic_forks(tile, tile.knobs, ctx))
     assert not any(leaf.knobs[tile_key] or leaf.knobs[stage_key] for leaf in leaves)
-    assert any(_tiled(leaf.knobs) for leaf in iter_leaves(classic_forks(tile, tile.name, tile.knobs, ctx))), "the root still tiles"
+    assert any(_tiled(leaf.knobs) for leaf in iter_leaves(classic_forks(tile, tile.knobs, ctx))), "the root still tiles"
 
     clear_pin_refusals()
     with pinned_knobs({tile_key: "mma_m16n8k16_f16_f32/f1x2"}):
-        assert not list(iter_leaves(classic_forks(tile, tile.name, tile.knobs, ctx)))
+        assert not list(iter_leaves(classic_forks(tile, tile.knobs, ctx)))
     assert "does not fold it" in (pin_refusal(tile_key, "mma_m16n8k16_f16_f32/f1x2") or "")
 
 
@@ -155,7 +155,7 @@ def test_binder_refuses_a_nested_tile_that_reaches_it(monkeypatch) -> None:
     ctx = Context.from_target((12, 0), gpu_name="NVIDIA GeForce RTX 5090")
     tile = _lifted(_block_maximum())
     monkeypatch.setattr(TileOp, "nested_tiles", property(lambda _self: frozendict()))
-    leaf = next(leaf for leaf in iter_leaves(classic_forks(tile, tile.name, tile.knobs, ctx)) if _tiled(leaf.knobs))
+    leaf = next(leaf for leaf in iter_leaves(classic_forks(tile, tile.knobs, ctx)) if _tiled(leaf.knobs))
     (realized,) = leaf.expand()
     with pytest.raises(UnbindableProjection, match="serial lowering of reduce cannot realize TILE at reduce.1/inner"):
         factorize(realized, root=None)
@@ -168,7 +168,7 @@ def test_binder_refuses_a_tile_in_an_output_tiled_roots_cone(monkeypatch) -> Non
     ctx = Context.from_target((8, 9), gpu_name="NVIDIA GeForce RTX 4090")
     tile = _lifted(_back_to_back())
     monkeypatch.setattr(TileOp, "nested_tiles", property(lambda _self: frozendict()))
-    leaf = next(leaf for leaf in iter_leaves(classic_forks(tile, tile.name, tile.knobs, ctx)) if _tiled(leaf.knobs) == 2)
+    leaf = next(leaf for leaf in iter_leaves(classic_forks(tile, tile.knobs, ctx)) if _tiled(leaf.knobs) == 2)
     (realized,) = leaf.expand()
     with pytest.raises(UnbindableProjection, match="tiled lowering of inner cannot realize TILE at inner.1/map.1/inner"):
         factorize(realized, root=None)

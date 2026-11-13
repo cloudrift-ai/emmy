@@ -53,7 +53,7 @@ def _hex(tag: str) -> str:
 
 def _kernel(tag: str, *, piece: bool = False) -> Kernel:
     """A fake kernel the file calls ``k_<tag>``, its identity handed in: nothing here lowers its (empty) wire."""
-    kernel = Kernel(loop_ir={"inputs": [], "outputs": [], "nodes": []}, name=f"k_{tag}", formed=True, traced=None if piece else 0)
+    kernel = Kernel(loop_ir={"inputs": [], "outputs": [], "nodes": []}, formed=True, traced=None if piece else 0)
     return kernel.keyed(_hex(tag))
 
 

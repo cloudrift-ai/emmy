@@ -430,7 +430,7 @@ def test_a_measured_split_is_priced_from_its_pieces_with_no_routing_row() -> Non
 
     def measured(db, op, us: float) -> None:
         stats = PerfStats(median=us, min=us, max=us, mean=us, variance=0.0, n_samples=30)
-        db.record_kernel(kernel_row(op, op.name))
+        db.record_kernel(kernel_row(op))
         db.record_perf(
             ctx,
             op.identity_key(structural=False, with_io=True),
@@ -491,7 +491,7 @@ def test_a_kernel_measured_at_two_sizes_is_ranked_at_the_size_it_compiles_at() -
 
     def measured(op, us: float) -> None:
         stats = PerfStats(median=us, min=us, max=us, mean=us, variance=0.0, n_samples=30)
-        db.record_kernel(kernel_row(op, op.name))
+        db.record_kernel(kernel_row(op))
         identity = op.identity_key(structural=False, with_io=True)
         db.record_perf(ctx, identity, bindings=kernel_bindings(op), knobs={"WORK": "w1x8"}, status="ok", stats=stats)
 

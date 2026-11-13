@@ -74,7 +74,6 @@ def test_compile_passes_shorthand(run_cli, tmp_path):
         "frontend/optimization",
         "loop/lowering",
         "loop/fusion",
-        "loop/stamp",
         "tile/lift",
         "tile/cut",
         "tile/schedule",

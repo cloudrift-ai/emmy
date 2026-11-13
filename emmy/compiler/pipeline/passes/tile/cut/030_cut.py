@@ -15,7 +15,7 @@ from emmy.compiler.ir.tile import TileOp
 from emmy.compiler.ir.tile.path import MissingSiteError, parse_key, resolve, sites
 from emmy.compiler.pipeline import Match, Pattern, RuleSkipped
 from emmy.compiler.pipeline.fork import DeferredFork
-from emmy.compiler.pipeline.knob import axis_of, family_of, family_pins
+from emmy.compiler.pipeline.knob import axis_of, family_of, family_pins, pinned_kernel
 from emmy.compiler.pipeline.passes.tile._cut import (
     cuttable_seams,
     full_projection_seams,
@@ -23,7 +23,6 @@ from emmy.compiler.pipeline.passes.tile._cut import (
     joined_halves,
     joined_spelling,
     output_map,
-    place_token,
     realize,
 )
 from emmy.compiler.pipeline.passes.tile._layout import layout_forks
@@ -106,65 +105,27 @@ def _rootmost(seams, all_sites, refuse: frozenset[str] = frozenset()):
     return min(kept, key=lambda candidate: depth[id(candidate.node)])
 
 
-def _child_pins() -> tuple[tuple[str, str, str], ...]:
-    """``(original, local key, value)`` for PLACE pins addressed to a cut piece.
-
-    The ``place_<token>/`` prefix identifies the piece; the remainder uses the ordinary
-    site spelling relative to that piece, or no suffix for its root-most cut.
-    """
-    return tuple(
-        (name, "PLACE" + ("@" + scope.partition("/")[2] if "/" in scope else ""), value)
-        for name, value in family_pins("PLACE", kernels=True)
-        if (scope := axis_of(name)) is not None and scope.startswith("place_")
-    )
-
-
-def _step_pin(key: str) -> tuple[int, str] | None:
-    """A root-site pin addressed to one same-name remainder after successive cuts."""
-    scope = axis_of(key) or ""
-    stage, slash, site = scope.partition("/")
-    if not stage.startswith("step.") or not stage[5:].isdigit() or (slash and not site):
-        return None
-    return int(stage[5:]), f"PLACE@{site}" if slash else "PLACE"
-
-
 def _placement_candidates(tile: TileOp) -> tuple[tuple[tuple[str, str, str], ...], bool]:
-    """The original and local spellings of pins addressed to this kernel."""
-    targeted = _child_pins()
-    if targeted and (token := place_token(tile.name)) is not None:
-        # A nested cut keeps its ancestor's token in its name. Address only the most recent
-        # piece, so an ancestor's output-cut pin cannot cut the grandchild again.
-        matched = tuple(
-            (original, local, value)
-            for original, local, value in targeted
-            if original.split("@", 1)[1].split("/", 1)[0] == f"place_{token}"
-        )
-        return matched, True
+    """``(original, local key, value)`` for the PLACE pins this kernel reads, and whether they are its own: the kernel
+    pins naming it (``PLACE@<name>``, ``PLACE@<name>/<site>`` with the site spelled relative to it), else the pins
+    every kernel reads."""
+    own = tuple(
+        (key, "PLACE" + ("@" + site if site else ""), value)
+        for key, value in family_pins("PLACE", kernels=True)
+        if pinned_kernel(key) == tile.name
+        for site in ((axis_of(key) or "").partition("/")[2],)
+    )
+    if own:
+        return own, True
     return tuple((key, key, value) for key, value in family_pins("PLACE")), False
 
 
 def _placement_pins(tile: TileOp) -> tuple[tuple[tuple[str, str], ...], dict[str, str]]:
-    """Resolve child-site scope and the current cut stage before parsing site paths. A numbered pin for a later
-    stage of this kernel decides fuse now: a future cut cannot choose an unpinned prerequisite at this stage."""
-    candidates, child = _placement_candidates(tile)
-    selected: list[tuple[str, str]] = []
-    sources: dict[str, str] = {}
-    future = False
-    for original, local, value in candidates:
-        if original in tile.placement_consumed:
-            continue
-        staged = _step_pin(local)
-        if staged is not None and staged[0] != tile.placement_step:
-            future = future or staged[0] > tile.placement_step
-            continue
-        local = staged[1] if staged is not None else local
-        previous = next((sources.get(name, name) for name, _ in selected if name == local), None)
-        if previous is not None:
-            raise ValueError(f"PLACE pins {previous!r} and {original!r} address the same site at step {tile.placement_step}")
-        selected.append((local, value))
-        if staged is not None or child:
-            sources[local] = original
-    return (tuple(selected), sources) if selected or not future else ((("PLACE", "fuse"),), {})
+    """The PLACE pins this kernel reads and has not consumed, by their local key, and the original key of each kernel
+    pin among them."""
+    candidates, own = _placement_candidates(tile)
+    live = [(original, local, value) for original, local, value in candidates if original not in tile.placement_consumed]
+    return tuple((local, value) for _, local, value in live), ({local: original for original, local, _ in live} if own else {})
 
 
 def _placement_restriction(tile: TileOp, seams) -> tuple[tuple, str, frozenset[str], tuple] | None:
@@ -173,19 +134,17 @@ def _placement_restriction(tile: TileOp, seams) -> tuple[tuple, str, frozenset[s
     This restriction is consumed entirely by the cut pass before classic schedule enumeration.
     Every scoped ``PLACE@site=cut`` pin that resolves on this kernel joins ONE composed decision —
     the seams all live on this kernel's tree, so one realization cuts them together. A numbered
-    ``PLACE@step.N/site=cut`` pin applies only after N same-name cuts. A bare ``PLACE=cut`` names no
-    site: it cuts the root-most seam of every kernel it reaches at every step, so a kernel's same-name
-    remainder chain is cut until no seam is left (``PLACE@step.N=cut`` names one step of it). A scoped pin whose
-    site path does not exist on this kernel addresses another kernel of the graph, and a kernel none
-    of the pins address takes its own fork (a numbered pin for a later stage of this kernel decides
-    fuse now). A pin that resolves to a site no cut realizes is an addressing error and raises. A scoped
+    A bare ``PLACE=cut`` names no site: it cuts the root-most seam of every kernel it reaches at every step,
+    so a kernel's remainder chain is cut until no seam is left (``PLACE@<name>=cut`` cuts the one kernel of that
+    name). A scoped pin whose site path does not exist on this kernel addresses another kernel of the graph, and a
+    kernel none of the pins address takes its own fork. A pin that resolves to a site no cut realizes is an addressing error and raises. A scoped
     ``PLACE@site=fuse`` excludes that seam from the composed cut (alone, it decides fuse under
     that spelling). A bare cut supplies the primary root-most seam and composes with scoped cuts;
     a bare fuse applies only when no scoped pin addressed this kernel. A JOINED key
     (``PLACE@<workspace seam>+<output-owning seam>=cut``) cuts both seams and splices their pieces into one; the
     last element of the result lists those pairs. A pin decides the forks it names: the remainder a pinned cut
-    leaves (the piece keeping this kernel's name, at the next step) and every piece it mints take their own fork,
-    which the bare pin, a ``step.<n>`` or a ``place_<token>`` pin decides, else evidence or the prior."""
+    leaves and every piece it mints take their own fork, which the bare pin (the remainder only) or a pin naming
+    the piece decides, else evidence or the prior."""
     scoped_pins, source_keys = _placement_pins(tile)
     pins = [(name, value) for name, value in scoped_pins if family_of(name) == "PLACE"]
     if not pins:
@@ -235,7 +194,7 @@ def _placement_restriction(tile: TileOp, seams) -> tuple[tuple, str, frozenset[s
             original = source_keys.get("PLACE", "PLACE")
             note_place_key(original)
             if original != "PLACE":
-                used |= {original}  # a numbered or child root-most cut names one step; the plain bare pin names them all
+                used |= {original}  # a kernel's own root-most cut names one kernel; the plain bare pin names them all
         return tuple(cut), "cut", used, tuple(joins)
     if fused:
         for original, value, found in addressed:
@@ -294,17 +253,12 @@ def _placement_forks(match: Match, root: Node, tile: TileOp, ctx=None):
     if not seams:
         return None
 
-    # A piece a cut mints is a new kernel: the pins this kernel and its same-name remainder read never address it,
-    # so it takes its own fork unless a ``place_<token>`` pin names it.
-    lineage = tile.placement_consumed | frozenset(key for key, _ in family_pins("PLACE") if not (axis_of(key) or "").startswith("place_"))
+    # A piece a cut mints is a new kernel: the pins this kernel and its remainder read never address it, so it takes
+    # its own fork unless a pin names it.
+    lineage = tile.placement_consumed | frozenset(key for key, _ in family_pins("PLACE"))
 
     def mint(chosen, joins: tuple = ()) -> Graph:
-        fragment = realize(match, root, chosen, joins=joins)
-        if lineage:
-            for node in fragment.nodes.values():
-                if isinstance(node.op, TileOp) and node.op.name != tile.name:
-                    node.op = replace(node.op, placement_consumed=node.op.placement_consumed | lineage)
-        return fragment
+        return realize(match, root, chosen, joins=joins, lineage=lineage)
 
     pinned = _placement_restriction(tile, seams)
     if pinned is not None:
@@ -316,14 +270,9 @@ def _placement_forks(match: Match, root: Node, tile: TileOp, ctx=None):
         consumed = tile.placement_consumed | used
 
         def cut():
-            # The remainder keeps this kernel's name and takes its own fork at the next step, as every piece does:
-            # the bare pin or a ``step.<n>`` pin decides it there, else evidence or the prior; the scoped pins this
-            # cut consumed never address it again.
-            fragment = mint(chosen, joins)
-            for node in fragment.nodes.values():
-                if isinstance(node.op, TileOp) and node.op.name == tile.name:
-                    node.op = replace(node.op, placement_consumed=consumed)
-            return fragment
+            # The remainder takes its own fork at the next step, as every piece does: the bare pin decides it there,
+            # else evidence or the prior; the scoped pins this cut consumed never address it again.
+            return realize(match, root, chosen, joins=joins, lineage=lineage, consumed=consumed)
 
         return _cut_arm(root, cut, chosen, joins)
 

@@ -380,7 +380,6 @@ def test_a_root_that_leaves_the_chain_arm_offers_its_member_no_partition(unpinne
         op=_norm_linear_root(),
         place=Placement(free=(Axis("m", 64), Axis("n", 64))),
         axes=(Axis("m", 64), Axis("n", 64), Axis("k", 256)),
-        name="k_norm_linear",
         knobs={},
     )
     (root,) = ops.kernel_roots(tile.op)
@@ -389,7 +388,7 @@ def test_a_root_that_leaves_the_chain_arm_offers_its_member_no_partition(unpinne
     tile_key, band_key = sched.key("TILE", root), sched.key("REDUCE", root)
     member_key = sched.key("REDUCE", statistic)
 
-    rows = [dict(leaf.knobs) for leaf in iter_leaves(_SCHEDULE_RULE.classic_forks(tile, tile.name, {}, Context.from_target(_CC)))]
+    rows = [dict(leaf.knobs) for leaf in iter_leaves(_SCHEDULE_RULE.classic_forks(tile, {}, Context.from_target(_CC)))]
     picks = []
     for row in rows:
         work = Work.parse(str(row["WORK"])) if str(row.get("WORK", "")) else None
@@ -556,7 +555,7 @@ def test_a_scoped_partition_pin_on_a_serial_only_chain_site_enumerates_nothing(u
         base=Lambda.componentwise(("add",), ("acc_outer",)),
     )
     root = _chain_root(outer, results=("acc_outer",))
-    tile = TileOp(op=root, place=Placement(free=(Axis("m", 4),)), axes=(Axis("m", 4), Axis("j", 4), _K), name="k_chain_probe", knobs={})
+    tile = TileOp(op=root, place=Placement(free=(Axis("m", 4),)), axes=(Axis("m", 4), Axis("j", 4), _K), knobs={})
     assert tile.op is outer, "an identity projection over one member dissolves into the member"
 
     member = tile.op
@@ -567,7 +566,7 @@ def test_a_scoped_partition_pin_on_a_serial_only_chain_site_enumerates_nothing(u
 
     def rows(pins: dict) -> list[dict]:
         with pinned_knobs(pins):
-            return [dict(leaf.knobs) for leaf in iter_leaves(_SCHEDULE_RULE.classic_forks(tile, tile.name, {}, ctx))]
+            return [dict(leaf.knobs) for leaf in iter_leaves(_SCHEDULE_RULE.classic_forks(tile, {}, ctx))]
 
     unpinned_rows = rows({})
     # The member is the kernel's peeled root, so its rows are exactly its projected domain — the

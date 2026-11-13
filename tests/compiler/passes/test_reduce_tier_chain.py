@@ -289,9 +289,9 @@ def test_the_walk_offers_and_the_binder_realizes_two_partitioned_members(monkeyp
     for var in ("EMMY_KNOBS", "EMMY_PLACE", "EMMY_TILE", "EMMY_WORK", "EMMY_STAGE", "EMMY_REDUCE", "EMMY_RASTER"):
         monkeypatch.delenv(var, raising=False)
     _, _, root = _two_member_root()
-    tile = TileOp(op=root, place=_PLACE, axes=(_M, _K, _J), name="k_two_member_probe", knobs={})
+    tile = TileOp(op=root, place=_PLACE, axes=(_M, _K, _J), knobs={})
 
-    leaves = list(iter_leaves(classic_forks(tile, tile.name, {}, Context.from_target((12, 0)))))
+    leaves = list(iter_leaves(classic_forks(tile, {}, Context.from_target((12, 0)))))
     keys = sorted({key for leaf in leaves for key in leaf.knobs if key.split("@", 1)[0] == "REDUCE"})
     assert len(keys) == 2, f"both members must be keyed schedule sites: {keys}"
     both = [leaf for leaf in leaves if all(str(leaf.knobs.get(key, "")) == "coop" for key in keys)]

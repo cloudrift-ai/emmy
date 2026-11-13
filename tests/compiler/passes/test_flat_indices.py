@@ -23,11 +23,10 @@ _RULE = import_module("emmy.compiler.pipeline.passes.lowering.cuda.008_flat_indi
 def _flat(body: str, shapes: dict[str, tuple], paged: tuple = ()) -> KernelOp:
     """``body`` under a 4 x 132 x 8 tile ``(i, j, k)``, its buffers of ``shapes``, through the pass."""
     axes = tuple(Axis(name, extent) for name, extent in (("i", 4), ("j", 132), ("k", 8)))
-    kernel = KernelOp(body=Body((Tile(axes=axes, body=parse_body(body)),)), name="k")
+    kernel = KernelOp(body=Body((Tile(axes=axes, body=parse_body(body)),)))
     tensors = {name: Tensor(name, shape, F32) for name, shape in shapes.items()}
     kernel = KernelOp(
         body=kernel.body,
-        name="k",
         inputs={n: t for n, t in tensors.items() if n in kernel.inputs},
         outputs={n: t for n, t in tensors.items() if n in kernel.outputs},
     )

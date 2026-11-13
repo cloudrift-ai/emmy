@@ -20,7 +20,7 @@ from emmy.compiler.pipeline.knob import (
     kernel_scoped,
     parse_knob_spec,
     pin_key_matches,
-    reaches,
+    pinned_kernel,
     values_equal,
 )
 
@@ -168,7 +168,7 @@ def unreproducible_pin_flag(
     *,
     placement_knobs: list[dict] | None = None,
     reject_conflicts: bool = False,
-    kernel_names: list[tuple[str, ...]] | None = None,
+    kernel_names: list[str] | None = None,
     applied_place_pins: dict[str, str] | None = None,
 ) -> str | None:
     """Describe pins not realized by any compiled CUDA kernel, or return ``None``.
@@ -186,10 +186,9 @@ def unreproducible_pin_flag(
     for label, want in pinned.items():
         fam = family_of(label)
         # A kernel pin is its family's bare pin, asked of the kernels it names (``kernel_names``, launch
-        # order beside ``kernel_knobs``: each kernel's name and graph node id, the two names the compile's
-        # ``kernel_pin`` reads -- a cut piece's node id carries its ordinal, its kernel name does not);
-        # without names, of every kernel, as a bare pin is. A placement receipt names a local seam;
-        # a kernel-scoped PLACE pin instead needs the exact source-key receipt from the cut pass.
+        # order beside ``kernel_knobs``); without names, of every kernel, as a bare pin is. A placement
+        # receipt names a local seam; a kernel-scoped PLACE pin instead needs the exact source-key receipt
+        # from the cut pass.
         name = fam if kernel_scoped(label) and fam != "PLACE" else label
         if fam in {"PLACE", "LAYOUT"}:
             if placement_knobs is None:
@@ -202,21 +201,15 @@ def unreproducible_pin_flag(
                 if label in applied_place_pins and values_equal(label, want, applied_place_pins[label]):
                     continue
         elif kernel_scoped(label) and kernel_names is not None:
-            realized_knobs = [
-                knobs for knobs, names in zip(kernel_knobs, kernel_names, strict=True) if any(reaches(label, name) for name in names)
-            ]
+            realized_knobs = [knobs for knobs, kernel in zip(kernel_knobs, kernel_names, strict=True) if pinned_kernel(label) == kernel]
         else:
             realized_knobs = kernel_knobs
             if name == fam and kernel_names is not None:
                 # A kernel-scoped pin supersedes the bare family pin on that
                 # kernel, including when the scoped value is OFF. Other kernels
                 # remain subject to the bare pin and are still checked below.
-                scoped = [key for key in pinned if family_of(key) == fam and kernel_scoped(key)]
-                realized_knobs = [
-                    raw
-                    for raw, names in zip(kernel_knobs, kernel_names, strict=True)
-                    if not any(any(reaches(key, kernel) for kernel in names) for key in scoped)
-                ]
+                scoped = {pinned_kernel(key) for key in pinned if family_of(key) == fam and kernel_scoped(key)}
+                realized_knobs = [raw for raw, kernel in zip(kernel_knobs, kernel_names, strict=True) if kernel not in scoped]
                 if not realized_knobs:
                     continue
         probe = want

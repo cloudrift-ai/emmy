@@ -410,7 +410,7 @@ def _row(*parts: str) -> LoopOp:
 def _rewrite(*parts: str) -> tuple[Fold, tuple]:
     """Lift the statements under one row and rewrite: the second loop's read of ``acc0`` arrives as
     an operand edge, which is what the recipe matches on. Returns the tree and the kernel's axis table."""
-    tile = lift_loop_op(_row(*parts), name="k_pair")
+    tile = lift_loop_op(_row(*parts))
     return rewrite_twisted(tile.op, tile.axes), tile.axes
 
 
@@ -446,7 +446,7 @@ def test_an_invariant_factor_hoists_out_of_the_fold(spelling: str) -> None:
     Loop IR may already have split the divide into a reciprocal ahead of the loop, so the epilogue
     applies the factor by whichever ⊗ reached the term."""
     weight = "inv = reciprocal(d)\np = multiply(in1, inv)" if spelling == "reciprocal" else "p = divide(in1, d)"
-    tile = lift_loop_op(_row("d = load den[a0]", _reduce_loop(f"in1 = load x[a0, a1]\n{weight}\nacc1 <- add(acc1, p)")), name="k_hoist")
+    tile = lift_loop_op(_row("d = load den[a0]", _reduce_loop(f"in1 = load x[a0, a1]\n{weight}\nacc1 <- add(acc1, p)")))
     fold = next(term for term in _folds(tile.op) if term.axis is not None)
     (state,) = fold.as_reduction().states
     inner, epilogue = _hoist_invariant(fold)

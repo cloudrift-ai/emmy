@@ -469,3 +469,24 @@ def test_merged_kernels_keep_their_names_unless_another_source_holds_one():
     assert renamed.startswith("k_copy_") and names["k_add"] == "k_add"
     assert kernels[renamed].source == other.source.replace("k_copy", renamed) and set(kernels) == {"k_copy", renamed, "k_add"}
     assert merge_kernels(kernels, {"k_copy": other}) == {"k_copy": renamed}
+
+
+def test_a_name_with_two_sources_launches_each_under_its_own_symbol():
+    """Kernels of one identity share a name; under one schedule they render one source and share it, while one that
+    carries other code (a neighbor's zero-init) launches under a symbol of its own, never the first source."""
+    g = Graph()
+    g.add_node(op=InputOp(), inputs=[], output=Tensor("x", (64,)), node_id="x")
+    sources = ('extern "C" __global__ void k_twin(float* a, float* b) {}', 'extern "C" __global__ void k_twin(float* a, float* b) {}')
+    other = 'extern "C" __global__ void k_twin(float* a, float* b) { /* zero-init */ }'
+    for node, (source, inp) in enumerate(zip((*sources, other), ("x", "y0", "y1"), strict=True)):
+        g.add_node(
+            op=CudaOp(kernel_source=source, kernel_name="k_twin", arg_order=(inp, f"y{node}")),
+            inputs=[inp],
+            output=Tensor(f"y{node}", (64,)),
+            node_id=f"y{node}",
+        )
+    g.inputs, g.outputs = ["x"], ["y2"]
+    plan = plan_from_graph(g)
+    first, second, third = (launch.kernel_name for launch in plan.launches)
+    assert first == second == "k_twin" and third.startswith("k_twin_")
+    assert plan.kernels[third].source == other.replace(" k_twin(", f" {third}(")

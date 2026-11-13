@@ -250,7 +250,7 @@ def _rows_of(tile, ctx=None) -> list[dict]:
     from importlib import import_module
 
     classic_forks = import_module("emmy.compiler.pipeline.passes.tile.schedule.040_schedule").classic_forks
-    out = classic_forks(tile, "k", {}, ctx or Context.from_target((12, 0)))
+    out = classic_forks(tile, {}, ctx or Context.from_target((12, 0)))
     return [dict(leaf.knobs) for leaf in iter_leaves(out)]
 
 

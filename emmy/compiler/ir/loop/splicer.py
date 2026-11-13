@@ -440,7 +440,6 @@ def _retarget_equivalent_output(graph, op: LoopOp, cluster: _OutputEquivalenceCl
 
     return LoopOp(
         body=op.body.map(lambda stmt: replacement.get(id(stmt), stmt)),
-        name=op.name,
         source=op.source,
         knobs=dict(op.knobs),
     )

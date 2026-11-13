@@ -330,7 +330,6 @@ class TileOp(Op):
     (``identity_key(with_io=True, with_knobs=True)``) is untouched."""
 
     op: object = None
-    name: str = ""
     place: Placement = field(default_factory=Placement)
     # The kernel's AXIS TABLE — the extent and window of every axis the term binds or reads: the
     # free axes, each reduce axis, a split's slice and partition, a sweep. The term itself carries
@@ -366,6 +365,13 @@ class TileOp(Op):
     # flag past "declined" is safe because the partition receipt is an explicit pool-key term of
     # the schedule memo — a receipt-bearing twin can never serve a receipt-free one.
     split_consumed: bool = False
+
+    @cached_property
+    def name(self) -> str:
+        """The kernel's name, computed from its exact identity (:func:`~emmy.compiler.wire.kernel_name`)."""
+        from emmy.compiler.wire import kernel_name  # noqa: PLC0415 — the wire module imports the IR
+
+        return kernel_name(self)
 
     def __post_init__(self) -> None:
         Op.__post_init__(self)

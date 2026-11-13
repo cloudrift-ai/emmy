@@ -64,7 +64,7 @@ from emmy.compiler.pipeline import Match
 from emmy.compiler.pipeline.knob import consume_kernel_row
 from emmy.compiler.pipeline.passes.loop.fusion._region import build_merged_region, live_outputs_of, wrap_multi_output_fragment
 from emmy.compiler.pipeline.passes.tile._row import io_shapes, lift_kernel, reformed
-from emmy.compiler.pipeline.passes.tile._split import add_output_piece, output_root
+from emmy.compiler.pipeline.passes.tile._split import add_output_piece, output_root, redirects
 from emmy.compiler.structural import digest
 from emmy.compiler.tensor import Tensor
 
@@ -1878,9 +1878,6 @@ def _region_piece(tile: TileOp, regions: tuple, tail, stores: tuple, split_consu
     longer in the intersection."""
     piece = TileOp(
         op=_region_term(regions, tail, stores),
-        # The seam token keeps recursive pieces' kernel names distinct, as it does for a workspace
-        # producer — two same-named pieces from different cut levels would launch one kernel twice.
-        name=f"{tile.name}__place_{seam_token(tile, spelling)}",
         place=Placement(free=tuple(tile.place.free)),
         axes=tile.axes,
         output_specs=stores,
@@ -1976,7 +1973,7 @@ def _splice_pieces(fragment: Graph, members: set[str], spelled: dict[str, str], 
     loop_graph = fragment.copy()
     for nid in members:
         tile = loop_graph.nodes[nid].op
-        loop_graph.nodes[nid].op = LoopOp(body=tile.loop_body, name=tile.name)
+        loop_graph.nodes[nid].op = LoopOp(body=tile.loop_body)
     live = live_outputs_of(loop_graph, members)
     merged = build_merged_region(loop_graph, members, live)
     if merged is None:
@@ -1986,7 +1983,7 @@ def _splice_pieces(fragment: Graph, members: set[str], spelled: dict[str, str], 
     merged = replace(merged, inputs={name: merged.inputs[name] for name in inputs if name in merged.inputs})
     replacement, output_map = wrap_multi_output_fragment(fragment, merged, live)
     merged_node = next(node for node in replacement.nodes.values() if isinstance(node.op, LoopOp))
-    fused = lift_kernel(merged_node.op, name=f"{parent.name}__place_{seam_token(parent, seams)}")
+    fused = lift_kernel(merged_node.op)
     merged_node.op = replace(fused, split_consumed=any(fragment.nodes[nid].op.split_consumed for nid in members))
     fragment.splice(replacement, consumed=members, output=output_map)
 
@@ -2003,7 +2000,7 @@ def _join_pieces(fragment: Graph, joins: tuple, spelled: dict[str, str], parent:
         _splice_pieces(fragment, members, spelled, parent, joined_spelling(producer, region))
 
 
-def realize(match: Match, root: Node, seams, *, joins: tuple = ()) -> Graph:
+def realize(match: Match, root: Node, seams, *, joins: tuple = (), lineage: frozenset[str] = frozenset(), consumed=None) -> Graph:
     """Build the cut fragment for ``seams`` — one piece per seam plus the ONE sibling piece that
     reads what they produced. A single seam is the two-kernel cut; several seams are one COMPOSED
     placement decision (a pinned compile consumes every scoped PLACE pin that resolves on this
@@ -2021,7 +2018,26 @@ def realize(match: Match, root: Node, seams, *, joins: tuple = ()) -> Graph:
 
     Every piece leaves its placement open, so it can expose and decide smaller seams. A placement
     cut never erases an earlier cross-CTA decision: every piece inherits the parent's explicit or
-    sliced-axis split receipt."""
+    sliced-axis split receipt.
+
+    ``lineage`` names the placement pins every new piece is past: a piece is a new kernel, which the pins its
+    parent read never address. The remainder — the piece that keeps the outputs no seam took — is the kernel the
+    cut continues, so it keeps the parent's consumed pins, or takes ``consumed`` when given."""
+    fragment, remainder = _realize(match, root, seams, joins)
+    for node in fragment.nodes.values():
+        if not isinstance(node.op, TileOp):
+            continue
+        if node.id == remainder:
+            if consumed is not None:
+                node.op = replace(node.op, placement_consumed=consumed)
+        elif lineage:
+            node.op = replace(node.op, placement_consumed=node.op.placement_consumed | lineage)
+    return fragment
+
+
+def _realize(match: Match, root: Node, seams, joins: tuple) -> tuple[Graph, str | None]:
+    """:func:`realize`'s fragment and the node id of its remainder, ``None`` when every output went to a seam."""
+
     tile: TileOp = root.op
     split_consumed = tile.split_consumed or carries_partition(tile)
     owning = tuple(seam for seam in seams if seam.owned is not None)
@@ -2268,10 +2284,6 @@ def realize(match: Match, root: Node, seams, *, joins: tuple = ()) -> Graph:
         produced, grid, index, minted = _split_fused_pair(produced, axes, index)
         producer = TileOp(
             op=produced,
-            # The seam token keeps recursive pieces' kernel names distinct — the one-name-one-source
-            # launch rule stated beside ``nvcc.load_cubin_function``: two same-named producers from
-            # different cut levels would launch one kernel twice.
-            name=f"{tile.name}__place_{token}",
             # The workspace axes are the store's SWEEP, and the one rank rule
             # (``promoted_sweep``, applied by ``TileOp.__post_init__``) binds the ones binding
             # replicates nothing over. A free axis per workspace dimension instead bound the sweep a
@@ -2354,7 +2366,7 @@ def realize(match: Match, root: Node, seams, *, joins: tuple = ()) -> Graph:
         if not consumer_stores:
             _fuse_sibling_producers(fragment, spelled, tile)
             _join_pieces(fragment, joins, spelled, tile)
-            return fragment
+            return fragment, None
         consumer_outputs = {store.write.output for store in consumer_stores}
         consumer_fold = _region_term(
             _over(regions, kept, consumer_stores),
@@ -2364,14 +2376,12 @@ def realize(match: Match, root: Node, seams, *, joins: tuple = ()) -> Graph:
 
     consumer = TileOp(
         op=consumer_fold,
-        name=tile.name,
         place=tile.place,
         axes=tile.axes,
         # ``specs`` already reads each stored value under the name the cut left it;
         # ``add_output_piece`` re-spells the BUFFER each write targets.
         output_specs=consumer_stores,
         placement_consumed=tile.placement_consumed,
-        placement_step=tile.placement_step + 1,
         split_consumed=split_consumed,
     )
     consumer = replace(reformed(consumer, shapes), knobs=consume_kernel_row(consumer.knobs))
@@ -2379,16 +2389,17 @@ def realize(match: Match, root: Node, seams, *, joins: tuple = ()) -> Graph:
     # or a workspace's — and a buffer bound but not read counts as a reader with no layout fork, which forces its
     # folded layout against the layout another program chose.
     reads = _buffer_reads(consumer.op)
+    remainder = output_root(root, consumer_outputs)
     add_output_piece(
         fragment,
-        output_root(root, consumer_outputs),
+        remainder,
         consumer,
         _piece_inputs(root, consumer.op, tuple(buffer for buffer in all_buffers if buffer in reads)),
         suffix=_PLACED,
     )
     _fuse_sibling_producers(fragment, spelled, tile)
     _join_pieces(fragment, joins, spelled, tile)
-    return fragment
+    return fragment, redirects(remainder, _PLACED)[remainder.buffer_names()[0]]
 
 
 def _reindexed(body: Body, mapping: dict) -> Body:
@@ -2446,9 +2457,8 @@ def _contraction_producer(tile: TileOp, seam: CutSite, batch: list, others: dict
             nest = (Loop(axis=Axis(f"{_PLACEHOLDER}{slot}", space[slot][1]), body=Body(nest)),)
         nests.extend(nest)
     nest = tuple(nests)
-    name = f"{tile.name}__place_{seam_token(tile, seam.spelling)}"
     # The nest is stored as the piece's ``source``, as a re-formed piece's is: it is the body a kernel row stores.
-    return replace(lift_kernel(LoopOp(body=Body(nest)), name=name, shapes=shapes), source=LoopOp(body=Body(nest), name=name))
+    return replace(lift_kernel(LoopOp(body=Body(nest)), shapes=shapes), source=LoopOp(body=Body(nest)))
 
 
 def _digits(expression: Expression, placeholder: Var, by_name: dict) -> dict[str, Expression]:

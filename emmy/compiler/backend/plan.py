@@ -224,18 +224,13 @@ def plan_from_graph(graph: Graph) -> ExecutionPlan:
             continue
         if not isinstance(op, CudaOp):
             raise TypeError(f"plan_from_graph: node {nid!r} has non-CudaOp {type(op).__name__!r}; lowering must produce Graph[CudaOp].")
-        spec = kernels.get(op.kernel_name)
-        if spec is None:
-            kernels[op.kernel_name] = KernelSpec.from_op(op)
-        elif spec.source != op.kernel_source:
-            # Longstanding runtime semantics: launches resolve kernels by NAME and the first
-            # source wins (repeated helper names like ``__partial`` ride the first-compiled
-            # body). Keep that behavior — a plan must reproduce what the live compile ran.
-            logger.debug("plan: kernel name %r repeats with a differing source; first source wins", op.kernel_name)
+        # Kernels of one identity under one schedule render one source and share it; one carrying a neighbor's
+        # zero-init or another pick is other code, launched under its own symbol.
+        symbol = merge_kernels(kernels, {op.kernel_name: KernelSpec.from_op(op)})[op.kernel_name]
         launches.append(
             LaunchSpec(
                 node_id=nid,
-                kernel_name=op.kernel_name,
+                kernel_name=symbol,
                 arg_names=tuple(op.arg_order),
                 grid=tuple(_normalize_spec(s) for s in op.grid),
                 block=tuple(_normalize_spec(s) for s in op.block),
@@ -275,15 +270,15 @@ def plan_from_graph(graph: Graph) -> ExecutionPlan:
 
 
 def merge_kernels(kernels: dict[str, KernelSpec], incoming: dict[str, KernelSpec]) -> dict[str, str]:
-    """Merge ``incoming`` into ``kernels`` and return each incoming kernel's name there. Launches resolve kernels by
-    name and the first source wins: an incoming kernel whose name another source already holds takes a suffix from
-    its own source; a cubin compiled under the old name no longer fits it."""
+    """Merge ``incoming`` into ``kernels`` and return each incoming kernel's symbol there. Launches resolve kernels
+    by symbol: an incoming kernel whose name another source already holds takes a suffix from its own source; a cubin
+    compiled under the old name no longer fits it."""
     names: dict[str, str] = {}
     for kernel, spec in incoming.items():
         name = kernel
         if kernel in kernels and kernels[kernel] != spec:
             name = f"{kernel}_{hashlib.sha1(spec.source.encode()).hexdigest()[:8]}"
-            spec = replace(spec, source=spec.source.replace(kernel, name), binary_key=None)
+            spec = replace(spec, source=spec.source.replace(f" {kernel}(", f" {name}("), binary_key=None)
         kernels[name] = spec
         names[kernel] = name
     return names

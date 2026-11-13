@@ -518,7 +518,6 @@ def _rows(node, inputs, axes, ka, pins=None):
     specs = tuple(OutputSpec(write=parse_body(f"y{i or ''}[m, n] = {state}")[0]) for i, state in enumerate(node.combine.results))
     op = TileOp(
         op=projection((node,)),
-        name="y",
         place=Placement(free=axes),
         axes=(*axes, ka),
         inputs=inputs,
@@ -1300,7 +1299,6 @@ def test_native_fp4_runtime_rows_reuse_one_compilation(k):
     node, inputs, axes, ka = _pair_node(m="num_tokens", n=n, k=k)
     op = TileOp(
         op=projection((node,)),
-        name="packed_runtime_rows",
         place=Placement(free=axes),
         axes=(*axes, ka),
         inputs=inputs,
@@ -1391,7 +1389,6 @@ def test_a_packed_byte_slab_refuses_a_producer_band_under_tma():
     node, inputs, axes, ka = _node()
     op = TileOp(
         op=projection((node,)),
-        name="y",
         place=Placement(free=axes),
         axes=(*axes, ka),
         inputs=inputs,
@@ -1447,7 +1444,6 @@ def test_native_fp4_unit_n_matches_decoded_numpy(rows, k):
     node, inputs, axes, ka = _pair_node(m=rows, n=1, k=k)
     op = TileOp(
         op=projection((node,)),
-        name="packed_unit_n",
         place=Placement(free=axes),
         axes=(*axes, ka),
         inputs=inputs,

@@ -107,10 +107,10 @@ def test_fence_commit_wait_render_the_bare_instructions() -> None:
 
 
 def test_the_prelude_joins_only_with_a_wgmma_cell() -> None:
-    plain = KernelOp(body=Body((MmaSyncPtx(c_frag="c", a_frag="a", b_frag="b", shape=(16, 8, 16)),)), name="k")
+    plain = KernelOp(body=Body((MmaSyncPtx(c_frag="c", a_frag="a", b_frag="b", shape=(16, 8, 16)),)))
     assert _wgmma_prelude(plain) == ""
     assert "emmy_wgmma_" not in render_kernelop(plain)
-    op = KernelOp(body=Body((_cell(64, "bf16", "ss"), _cell(64, "bf16", "ss", trans_b=1), _cell(64, "f16", "rs"))), name="k")
+    op = KernelOp(body=Body((_cell(64, "bf16", "ss"), _cell(64, "bf16", "ss", trans_b=1), _cell(64, "f16", "rs"))))
     prelude = _wgmma_prelude(op)
     assert prelude.count("emmy_smem_u32(") == 1 and prelude.count("emmy_wgmma_desc(") == 1
     # One wrapper per (N, dtype, form) — the two ss cells share theirs; the transpose bits are template
@@ -131,8 +131,8 @@ def test_the_prelude_joins_only_with_a_wgmma_cell() -> None:
 
 
 def test_a_kernel_carrying_a_wgmma_cell_asks_for_the_arch_suffixed_target() -> None:
-    plain = KernelOp(body=Body((MmaSyncPtx(c_frag="c", a_frag="a", b_frag="b", shape=(16, 8, 16)),)), name="k")
-    assert needs_arch_isa(KernelOp(body=Body((_cell(64, "bf16", "ss"),)), name="k"))
+    plain = KernelOp(body=Body((MmaSyncPtx(c_frag="c", a_frag="a", b_frag="b", shape=(16, 8, 16)),)))
+    assert needs_arch_isa(KernelOp(body=Body((_cell(64, "bf16", "ss"),))))
     assert not needs_arch_isa(plain)
 
 
@@ -155,7 +155,7 @@ def _driver() -> str:
         WgmmaWait(),
         *parse_body("\n".join(f"f32 out[{4 * j + k}] = `c{j}[{k}]`" for j in range(256 // 8) for k in range(4))),
     ]
-    return render_kernelop(KernelOp(body=Body(tuple(stmts)), name="k_wgmma_probe"), shapes={"out": (128,)})
+    return render_kernelop(KernelOp(body=Body(tuple(stmts))), shapes={"out": (128,)})
 
 
 @pytest.mark.skipif(nvcc.nvcc_path() is None, reason="nvcc unavailable")

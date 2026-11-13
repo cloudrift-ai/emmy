@@ -32,7 +32,6 @@ def test_select_preserves_the_common_type_in_its_consumers(left, right, result, 
     selection = body[2]
     output = Tensor("out", (1,), result)
     op = KernelOp(
-        name="selected_product",
         inputs={"lhs": Tensor("lhs", (1,), left), "rhs": Tensor("rhs", (1,), right)},
         outputs={"out": output},
         body=body,

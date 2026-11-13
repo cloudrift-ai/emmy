@@ -722,7 +722,7 @@ def test_a_traced_program_or_kernel_takes_the_regime_of_its_own_rows(caplog):
     from emmy.commands.compile import selected_regime
     from emmy.compiler.pipeline.search.space import FAST_MATH, precision_pin
 
-    standard, fast = (Kernel(loop_ir={}, name=name, formed=True, traced=index) for index, name in enumerate(("k_std", "k_fast")))
+    standard, fast = (Kernel(loop_ir={}, formed=True, traced=index) for index, name in enumerate(("k_std", "k_fast")))
     rows = [Row(name="std", kernel="k_std", pins={"FAST_MATH": False}), Row(name="fast", kernel="k_fast", pins={"FAST_MATH": True})]
     document = GoldenFile(compute_cap=(8, 9), programs=[{}, {}], kernels=[standard, fast], rows=rows)
 
@@ -1318,8 +1318,8 @@ def _branching_route_document():
     token = pieces[0].name.rsplit("__place_", 1)[1]
     _, taken = _compile_pinned(document, {"FAST_MATH": False, **both, f"PLACE@place_{token}/map.1/reduce": "cut", **_SPLIT})
     for parent, arm, pieces in taken:
-        stored = document.add_kernel(definition(parent, parent.name))
-        children = [document.add_kernel(definition(piece, piece.name)) for piece in pieces]
+        stored = document.add_kernel(definition(parent))
+        children = [document.add_kernel(definition(piece)) for piece in pieces]
         document.add_routing(RoutingRow(stored.ref, arm, tuple(child.ref for child in children)))
     assert len(document.routing) == 3
     return document
@@ -1379,8 +1379,8 @@ def test_record_replays_conflicting_route_alternatives_separately(monkeypatch):
     document = _branching_route_document()
     _, taken = _compile_pinned(document, {"FAST_MATH": False, **_CUT, **_SPLIT})
     parent, arm, pieces = taken[0]
-    stored = document.add_kernel(definition(parent, parent.name))
-    children = [document.add_kernel(definition(piece, piece.name)) for piece in pieces]
+    stored = document.add_kernel(definition(parent))
+    children = [document.add_kernel(definition(piece)) for piece in pieces]
     document.add_routing(RoutingRow(stored.ref, arm, tuple(child.ref for child in children)))
     replays = []
     mint = working.mint

@@ -63,10 +63,9 @@ class GoldenPool(Wire):
 
     @property
     def name(self) -> str:
-        """The pool's label in a report: the kernel's C name and the head of its exact identity — the name a freeze
-        gives its realizations — with the sizes when the kernel is symbolic."""
+        """The pool's label in a report: the kernel's name, with the sizes when the kernel is symbolic."""
         sizes = " ".join(f"{var}={size}" for var, size in sorted(self.bindings.items()))
-        return f"{self.kernel.name}.{self.kernel.exact_identity[:12]}" + (f" {sizes}" if sizes else "")
+        return self.kernel.name + (f" {sizes}" if sizes else "")
 
     @property
     def pins(self) -> dict:

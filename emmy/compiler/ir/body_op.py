@@ -6,6 +6,7 @@ from __future__ import annotations
 
 from collections.abc import Iterator
 from dataclasses import dataclass, field, replace
+from functools import cached_property
 
 from frozendict import frozendict
 
@@ -43,7 +44,13 @@ class BodyOp(Op):
     has no Load / Write naming a buffer the dict doesn't cover."""
 
     body: Body = field(default_factory=Body)
-    name: str = ""
+
+    @cached_property
+    def name(self) -> str:
+        """The kernel's name, computed from its exact identity (:func:`~emmy.compiler.wire.kernel_name`)."""
+        from emmy.compiler.wire import kernel_name  # noqa: PLC0415 — the wire module imports the IR
+
+        return kernel_name(self)
 
     def __post_init__(self) -> None:
         Op.__post_init__(self)

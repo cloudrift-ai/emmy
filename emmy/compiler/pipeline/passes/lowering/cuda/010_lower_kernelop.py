@@ -25,8 +25,9 @@ from emmy.compiler.ir.pure.fold import EXTENTS
 from emmy.compiler.ir.stmt import Load, Write, ZeroPrologue, check_input
 from emmy.compiler.pipeline import Match, Pattern, RuleSkipped
 from emmy.compiler.pipeline.passes.lowering.cuda._helpers import atomic_outputs as _atomic_outputs
-from emmy.compiler.pipeline.passes.lowering.cuda._helpers import launch_name, paged_buffers
+from emmy.compiler.pipeline.passes.lowering.cuda._helpers import paged_buffers
 from emmy.compiler.pipeline.search.space import FLUSH_TO_ZERO, precision_pin
+from emmy.compiler.wire import kernel_tile
 
 PATTERN = [Pattern("root", KernelOp)]
 
@@ -70,6 +71,33 @@ def _symbolic_runtime_args(kernel: KernelOp) -> tuple[str, ...]:
     return tuple(seen)
 
 
+def _slotted(kernel: KernelOp) -> tuple[KernelOp, dict[str, str]]:
+    """``kernel`` with every buffer its exact identity names renamed to its role slot (``buf<i>``) and declared in
+    role order, and the slot of each such buffer: two kernels of one identity under one schedule render one source,
+    which their one name launches (:func:`~emmy.compiler.wire.kernel_name`). A buffer outside the identity (a
+    neighbor's zero-init) keeps its name."""
+    tile = kernel_tile(kernel)
+    roles = tile.canonical_buffers() if tile is not None else ()
+    declared = {*kernel.inputs, *kernel.outputs}
+    slots = {buffer: f"buf{i}" for i, buffer in enumerate(roles) if buffer in declared}
+    rank = {buffer: i for i, buffer in enumerate(slots)}
+
+    def io(tensors: dict) -> dict:
+        ordered = sorted(tensors, key=lambda n: rank.get(n, len(rank)))
+        return {slots.get(n, n): replace(tensors[n], name=slots.get(n, n)) for n in ordered}
+
+    if not slots:
+        return kernel, {}
+    return replace(kernel, body=kernel.body.rename_buffers(slots), inputs=io(kernel.inputs), outputs=io(kernel.outputs)), slots
+
+
+def _unslotted(arg: str, back: dict[str, str]) -> str:
+    """The graph buffer a launch argument binds: a slot's buffer, a paged slot's page table under the buffer's
+    name (``<buffer>__pages``)."""
+    base, pages, _ = arg.partition("__pages")
+    return back.get(base, base) + pages if pages else back.get(arg, arg)
+
+
 def rewrite(match: Match, root: Node) -> CudaOp | None:
     kernel: KernelOp = root.op
     grids = [s for s in kernel.body if isinstance(s, Grid)]
@@ -77,19 +105,13 @@ def rewrite(match: Match, root: Node) -> CudaOp | None:
         raise RuleSkipped("only single-grid KernelOps lower so far")
     (grid_stmt,) = grids
 
-    # The kernel function name doubles as the CudaOp's launch name — keep them
-    # identical. Loop naming always stamps a label, but a split piece is unnamed.
-    name = launch_name(kernel, root.id)
-    if name != kernel.name:
-        kernel = replace(kernel, name=name)
-
+    name = kernel.name
     # Buffer shapes / dtypes for the renderer come from the op's I/O Tensors
     # (snapped to the graph by the matcher's populate_io). A symbolic reduce axis adds an
     # ``int <name>`` runtime arg to the signature, threaded through to the CudaOp.
     # A serial axis is a runtime coordinate: one ``int`` param, one launch per value.
     runtime_args = tuple(dict.fromkeys((*_symbolic_runtime_args(kernel), *(axis.name for axis in kernel.serial))))
     tensors = {**kernel.inputs, **kernel.outputs}
-    tma_descs = _tma_descriptors(kernel)
     paged = paged_buffers(kernel, match.graph)
     if paged:
         # A paged buffer has no base pointer to take: only ``Load`` / ``Write`` resolve a page,
@@ -109,6 +131,13 @@ def rewrite(match: Match, root: Node) -> CudaOp | None:
         if zeroed:
             raise NotImplementedError(f"paged buffer(s) {zeroed} are zero-initialized per launch, which has no page table to clear")
     pair_tables = frozenset(n for n in kernel.inputs if is_f4_pair_table(match.graph.nodes.get(n)))
+    graph_kernel = kernel
+    kernel, slots = _slotted(kernel)
+    tma_descs = _tma_descriptors(kernel)
+    back = {slot: buffer for buffer, slot in slots.items()}
+    tensors = {**kernel.inputs, **kernel.outputs}
+    paged = tuple((slots.get(n, n), axis, page) for n, axis, page in paged)
+    pair_tables = frozenset(slots.get(n, n) for n in pair_tables)
     # The input check of whatever generates this kernel's code: the body says every type and every conversion, every
     # access of a buffer that is one allocation holds one flat index, and no loop asks for unrolling.
     split_pages = [n for n, axis, page in paged if not spans_one_page(tensors[n].shape, axis, page)]
@@ -141,10 +170,11 @@ def rewrite(match: Match, root: Node) -> CudaOp | None:
     # paged operand binds its page TABLE, not the buffer: the name in ``arg_order`` is what the launcher looks up in
     # ``arrays``, so the rename is the whole runtime change.
     interface = kernel_interface(kernel, tensors, runtime_args, frozenset(entry[0] for entry in paged))
+    kernel = graph_kernel
     return CudaOp(
         kernel_source=source,
         kernel_name=name,
-        arg_order=interface.arg_order,
+        arg_order=tuple(_unslotted(arg, back) for arg in interface.arg_order),
         grid=grid,
         block=block,
         smem_bytes=kernel.smem_bytes(),
@@ -156,7 +186,7 @@ def rewrite(match: Match, root: Node) -> CudaOp | None:
         # planner (their live interval starts at THIS launch, not their own producer's).
         zero_outputs=tuple(b for b in _atomic_outputs(kernel) if b not in kernel.zero_delegated),
         zero_prologues=tuple(dict.fromkeys(zp.dst for zp in kernel.body.iter_of_type(ZeroPrologue))),
-        tma_descriptors=tma_descs,
+        tma_descriptors=tuple(replace(desc, src_buf=back.get(desc.src_buf, desc.src_buf)) for desc in tma_descs),
         arch_specific=interface.arch_specific,
         dependent_launch=True,
     )

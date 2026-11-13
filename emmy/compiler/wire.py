@@ -362,6 +362,18 @@ def kernel_identity(op) -> str | None:
     return tile.identity_key(structural=False, with_io=True) if tile is not None else None
 
 
+def kernel_name(op) -> str:
+    """The name of the kernel ``op`` realizes: ``k_`` and 12 hex of its exact identity (:func:`kernel_identity`), so
+    every kernel of one identity has one name and kernels of two identities have two. An op no tile stands behind
+    is named by its own exact identity. Computed, never stored: pins, launches and every tool address a kernel by it."""
+    return name_of(kernel_identity(op) or op.identity_key(structural=False, with_io=True))
+
+
+def name_of(identity: str) -> str:
+    """The name of the kernel of exact identity ``identity``: ``k_`` and its first 12 hex."""
+    return f"k_{identity[:12]}"
+
+
 def formed_from(tile):
     """The loop op ``tile`` was formed from — the fused loop op the lift threads in as a kernel's ``source``,
     the loop nest a cut or split piece is re-formed through — or ``None`` for a kernel formed from no loop op:
@@ -421,7 +433,7 @@ def kernel_wire(tile) -> dict:
     formed = formed_from(tile)
     body = formed.body if formed is not None else tile.loop_body
     outputs = tuple(tile.outputs[name] for name in declared_outputs(tile))
-    graph.add_node(LoopOp(body=body, name=tile.name), list(tile.inputs), outputs=outputs, node_id=primary)
+    graph.add_node(LoopOp(body=body), list(tile.inputs), outputs=outputs, node_id=primary)
     graph.inputs = list(tile.inputs)
     graph.outputs = [tensor.name for tensor in outputs]
     return graph.to_wire()
