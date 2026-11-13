@@ -147,7 +147,10 @@ Every instruction reaches the list through the `Builder`.
   is: cicc marks the two loops of a runtime unroll so, and ptxas left alone the static loops cicc unrolled, but it
   unrolls the more compact loops of this compiler in full. Measured on `sm_120` (`qwen3emb/sdpa-s32`, 32 loops of 16
   copies a trip): 11,344 machine instructions and 0.53 s of ptxas unmarked, 2,216 and 0.06 s marked, 194 to 89 us
-  on the dev box RTX 5090, where nvcc's build of the same CUDA text runs 88 us.
+  on the dev box RTX 5090, where nvcc's build of the same CUDA text runs 88 us. A static loop of at most four trips
+  stays unmarked, and ptxas writes it out in full, as it wrote out cicc's: kept rolled, the eight sibling loops of
+  four trips in `fused/norm-weight-linear-f16-computed-b` each waited on its own chain of fused multiply-adds, which
+  written out run side by side.
 - **Integers.** An expression is computed at the narrowest of `i32`, `u32` and `i64` that holds its range, and at its
   operands' type where it has no range. A sum, a product or a bitwise operation depends on the low bits of its
   operands alone, so it runs at the type its own range needs. A division, a shift right, a minimum or a comparison

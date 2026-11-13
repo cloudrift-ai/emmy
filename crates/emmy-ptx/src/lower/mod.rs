@@ -228,6 +228,16 @@ fn survey(body: &Body, uses: &mut HashMap<Name, u32>, updated: &mut HashSet<Name
     }
 }
 
+/// Whether a loop the kernel lowering unrolled, of `trips` trips where every thread runs the same, is marked for
+/// ptxas to keep as it is. A static loop of at most four trips is left to ptxas, which writes it out in full as it
+/// wrote out cicc's: rolled, the sibling loops of a register tile (`fused/norm-weight-linear-f16-computed-b`, eight
+/// loops of four trips) each wait on their own chain of fused multiply-adds, which written out run side by side.
+/// Past four trips ptxas would write out the compact loops of this compiler where it kept cicc's
+/// (`qwen3emb/sdpa-s32`, 32 loops of eight trips: five times the machine code and twice the time).
+fn kept_rolled(trips: Option<i64>) -> bool {
+    trips.is_none_or(|trips| trips > 4)
+}
+
 pub(crate) fn lower(kernel: &Kernel, target: Target, precision: Precision) -> Result<Module> {
     let interface = kernel.interface;
     if !(1..=MAX_BLOCK_THREADS).contains(&interface.threads) {
@@ -654,7 +664,7 @@ impl Lowerer {
         let open = self
             .b
             .open_loop(Operand::Int(0), end, Operand::Int(1), enters);
-        if node.unrolled {
+        if node.unrolled && kept_rolled(node.axis.extent.as_static()) {
             self.b.keep_rolled();
         }
         self.names.push(HashMap::new());
@@ -742,6 +752,8 @@ impl Lowerer {
             return self.single_trip(node, &inner, ctx);
         }
         self.names.push(HashMap::new());
+        let trips =
+            uniform.map(|(start, step, extent)| (extent - start + step - 1).div_euclid(step));
         let open = match uniform {
             Some((start, step, extent)) => {
                 let trips = (extent - start + step - 1).div_euclid(step);
@@ -777,7 +789,7 @@ impl Lowerer {
                 open
             }
         };
-        if node.unrolled {
+        if node.unrolled && kept_rolled(trips) {
             self.b.keep_rolled();
         }
         self.threads.uneven += usize::from(uneven);
