@@ -563,7 +563,8 @@ impl Lowerer {
             Statement::SetMaxNReg(set) => self.set_max_registers(set),
             // A fragment read from or written to memory is one access a register and element, each at the place
             // the lane-to-element table gives it.
-            other @ (Statement::RegStore(_)
+            other @ (Statement::FragmentLoad(_)
+            | Statement::RegStore(_)
             | Statement::FragmentApply(_)
             | Statement::FragmentRowReduce(_)) => Err(self.no_rule(format_args!(
                 "the statement type {}, which waits for the lane-to-element table",

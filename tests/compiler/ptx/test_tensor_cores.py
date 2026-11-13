@@ -79,9 +79,9 @@ def test_a_tile_is_multiplied_from_shared_slabs_through_ldmatrix(level, ab):
                     {ab} y = load b[r * {8 * k} + i * 8 + j]
                     {ab} sb[i * 8 + j] = y
         Sync
-        RegFragment(name=fa, role=a, shape=(16, 8, 16), dtype={ab})
-        RegFragment(name=fb, role=b, shape=(16, 8, 16), dtype={ab})
-        RegFragment(name=fc, role=c, shape=(16, 8, 16), dtype=f32)
+        RegFragment(name=fa, role=a, dtype={ab})
+        RegFragment(name=fb, role=b, dtype={ab})
+        RegFragment(name=fc, role=c, dtype=f32)
         for s in 0..{k // 16}:
             LdmatrixLoad(frag=fa, src_buffer=sa, src_index=(0, s * 16), role=a, ldm={k})
             LdmatrixLoad(frag=fb, src_buffer=sb, src_index=(s * 16, 0), role=b, ldm=8)
@@ -157,10 +157,10 @@ def test_an_accumulator_of_halves_is_promoted_into_one_of_floats(level):
                     f16 y = load b[r * {8 * k} + i * 8 + j]
                     f16 sb[i * 8 + j] = y
         Sync
-        RegFragment(name=fa, role=a, shape=(16, 8, 16), dtype=f16)
-        RegFragment(name=fb, role=b, shape=(16, 8, 16), dtype=f16)
-        RegFragment(name=fh, role=c, shape=(16, 8, 16), dtype=f16)
-        RegFragment(name=fc, role=c, shape=(16, 8, 16), dtype=f32)
+        RegFragment(name=fa, role=a, dtype=f16)
+        RegFragment(name=fb, role=b, dtype=f16)
+        RegFragment(name=fh, role=c, dtype=f16)
+        RegFragment(name=fc, role=c, dtype=f32)
         for s in 0..{k // 16}:
             LdmatrixLoad(frag=fa, src_buffer=sa, src_index=(0, s * 16), role=a, ldm={k})
             LdmatrixLoad(frag=fb, src_buffer=sb, src_index=(s * 16, 0), role=b, ldm=8)
@@ -182,10 +182,10 @@ def test_two_accumulators_are_repacked_into_an_a_fragment(level, ab):
     p, b = _integers((BLOCKS, 16, 16), 5), _integers((BLOCKS, 16, 8), 6)
     body = _warp(
         f"""
-        RegFragment(name=c0, role=c, shape=(16, 8, 16), dtype=f32)
-        RegFragment(name=c1, role=c, shape=(16, 8, 16), dtype=f32)
-        RegFragment(name=fb, role=b, shape=(16, 8, 16), dtype={ab})
-        RegFragment(name=fc, role=c, shape=(16, 8, 16), dtype=f32)
+        RegFragment(name=c0, role=c, dtype=f32)
+        RegFragment(name=c1, role=c, dtype=f32)
+        RegFragment(name=fb, role=b, dtype={ab})
+        RegFragment(name=fc, role=c, dtype=f32)
         """,
         _fill_c("c0", "p", 16),
         _fill_c("c1", "p", 16, column=8),
@@ -208,10 +208,10 @@ def test_an_accumulator_is_repacked_into_a_b_fragment_by_an_exchange_between_lan
     a, p = _integers((BLOCKS, 16, 16), 7), _integers((BLOCKS, 16, 8), 8)
     body = _warp(
         """
-        RegFragment(name=c0, role=c, shape=(16, 8, 16), dtype=f32)
-        RegFragment(name=fa, role=a, shape=(16, 8, 16), dtype=f16)
-        RegFragment(name=fb, role=b, shape=(16, 8, 16), dtype=f16)
-        RegFragment(name=fc, role=c, shape=(16, 8, 16), dtype=f32)
+        RegFragment(name=c0, role=c, dtype=f32)
+        RegFragment(name=fa, role=a, dtype=f16)
+        RegFragment(name=fb, role=b, dtype=f16)
+        RegFragment(name=fc, role=c, dtype=f32)
         """,
         _fill_c("c0", "p", 8),
         FILL_A,
@@ -246,9 +246,9 @@ def test_a_tile_of_8_bit_floats_is_multiplied(level, fmt):
     )
     body = _warp(
         f"""
-        RegFragment(name=fa, role=a, shape=(16, 8, 32), dtype=f8{fmt})
-        RegFragment(name=fb, role=b, shape=(16, 8, 32), dtype=f8{fmt})
-        RegFragment(name=fc, role=c, shape=(16, 8, 32), dtype=f32)
+        RegFragment(name=fa, role=a, dtype=f8{fmt})
+        RegFragment(name=fb, role=b, dtype=f8{fmt})
+        RegFragment(name=fc, role=c, dtype=f32)
         """,
         f"for s in 0..{k // 32}:\n" + textwrap.indent(step, "    "),
         STORE_C,
@@ -288,11 +288,11 @@ def test_the_block_scaled_product_of_4_bit_floats_matches_the_decoded_oracle(lev
     )
     body = _warp(
         """
-        RegFragment(name=fa, role=a, shape=(16, 8, 64), dtype=f4e2m1x2, nregs=4)
-        RegFragment(name=fb, role=b, shape=(16, 8, 64), dtype=f4e2m1x2, nregs=2)
-        RegFragment(name=fc, role=c, shape=(16, 8, 64), dtype=f32)
-        RegFragment(name=sfa, role=a, shape=(16, 8, 64), dtype=u8, nregs=0)
-        RegFragment(name=sfb, role=b, shape=(16, 8, 64), dtype=u8, nregs=0)
+        RegFragment(name=fa, role=a, dtype=f4e2m1x2)
+        RegFragment(name=fb, role=b, dtype=f4e2m1x2)
+        RegFragment(name=fc, role=c, dtype=f32)
+        RegFragment(name=sfa, role=sfa, dtype=u8)
+        RegFragment(name=sfb, role=sfb, dtype=u8)
         """,
         fill,
         """
@@ -356,10 +356,10 @@ def test_volta_s_product_fills_a_16_by_16_tile(level, acc):
     body = _warp(
         VOLTA_LANES,
         """
-        RegFragment(name=fa, role=a, shape=(8, 8, 4), dtype=f16, nregs=2)
-        RegFragment(name=fb, role=b, shape=(8, 8, 4), dtype=f16, nregs=2)
-        RegFragment(name=fh, role=c, shape=(8, 8, 4), dtype=f16, nregs=4)
-        RegFragment(name=fc, role=c, shape=(8, 8, 4), dtype=f32, nregs=8)
+        RegFragment(name=fa, role=a, dtype=f16, fragment_layout=m8n8k4)
+        RegFragment(name=fb, role=b, dtype=f16, fragment_layout=m8n8k4)
+        RegFragment(name=fh, role=c, dtype=f16, fragment_layout=m8n8k4)
+        RegFragment(name=fc, role=c, dtype=f32, fragment_layout=m8n8k4)
         """,
         f"for s in 0..{k // 4}:\n" + textwrap.indent(_volta_fill(k // 2, "s") + "\n" + product, "    "),
         VOLTA_STORE,
@@ -386,9 +386,9 @@ def test_volta_s_product_reads_b_by_rows(level):
     body = _warp(
         VOLTA_LANES,
         """
-        RegFragment(name=fa, role=a, shape=(8, 8, 4), dtype=f16, nregs=2)
-        RegFragment(name=fb, role=b, shape=(8, 8, 4), dtype=f16, nregs=2)
-        RegFragment(name=fc, role=c, shape=(8, 8, 4), dtype=f32, nregs=8)
+        RegFragment(name=fa, role=a, dtype=f16, fragment_layout=m8n8k4)
+        RegFragment(name=fb, role=b, dtype=f16, fragment_layout=m8n8k4)
+        RegFragment(name=fc, role=c, dtype=f32, fragment_layout=m8n8k4)
         """,
         f"for s in 0..{k // 4}:\n" + textwrap.indent(step, "    "),
         VOLTA_STORE,
@@ -422,9 +422,9 @@ def test_volta_s_accumulator_is_repacked_into_an_operand(level, role, part):
     body = _warp(
         VOLTA_LANES,
         f"""
-        RegFragment(name=c0, role=c, shape=(8, 8, 4), dtype=f32, nregs=8)
-        RegFragment(name=f{kept}, role={kept}, shape=(8, 8, 4), dtype=f16, nregs=2)
-        RegFragment(name=fc, role=c, shape=(8, 8, 4), dtype=f32, nregs=8)
+        RegFragment(name=c0, role=c, dtype=f32, fragment_layout=m8n8k4)
+        RegFragment(name=f{kept}, role={kept}, dtype=f16, fragment_layout=m8n8k4)
+        RegFragment(name=fc, role=c, dtype=f32, fragment_layout=m8n8k4)
         """,
         VOLTA_FILL_C,
         fill,
@@ -467,9 +467,9 @@ def test_ldmatrix_reads_a_swizzled_slab(level, mode):
                     f16 y = load b[r * {8 * k} + i * 8 + j]
                     f16 sb[{moved("i * 8 + j")}] = y
         Sync
-        RegFragment(name=fa, role=a, shape=(16, 8, 16), dtype=f16)
-        RegFragment(name=fb, role=b, shape=(16, 8, 16), dtype=f16)
-        RegFragment(name=fc, role=c, shape=(16, 8, 16), dtype=f32)
+        RegFragment(name=fa, role=a, dtype=f16)
+        RegFragment(name=fb, role=b, dtype=f16)
+        RegFragment(name=fc, role=c, dtype=f32)
         for s in 0..{k // 16}:
             LdmatrixLoad(frag=fa, src_buffer=sa, src_index=(0, s * 16), role=a, ldm={k}, swizzle={mode})
             LdmatrixLoad(frag=fb, src_buffer=sb, src_index=(s * 16, 0), role=b, ldm=8, swizzle={mode})

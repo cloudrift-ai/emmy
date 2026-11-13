@@ -22,9 +22,6 @@ use crate::inst::{Bank, Inst, Mma, MmaShape, Opcode, Operand, Reg, Round, Shuffl
 /// The lanes of a warp.
 const WARP: i64 = 32;
 
-/// The most registers one fragment holds: Volta's accumulator of floats.
-const MAX_FRAGMENT_REGISTERS: i64 = 8;
-
 /// Which lanes supply the block scales of each side: the selector the instruction takes beside the scale register.
 /// With selector `t`, A's scales come from the lanes whose index in their group of four is `2t` or `2t + 1`, B's
 /// from the lanes where it is `t`. Both were found by probing the hardware; ptxas takes 0 or 1 for either.
@@ -139,23 +136,6 @@ fn swizzled(element: Expression, (shift, mask): (i64, i64)) -> Expression {
     )
 }
 
-/// How many registers a fragment of `role` holds for a tile of `shape` over elements of `dtype`: an operand packs
-/// two 16-bit or four 8-bit elements a register, an accumulator holds a float a register or two halves.
-fn register_count(role: &str, shape: Shape3, dtype: DType) -> Option<i64> {
-    let Shape3(m, n, k) = shape;
-    let bytes = match dtype {
-        DType::F8E4M3 | DType::F8E5M2 | DType::F4E2M1x2 | DType::U8 => 1,
-        DType::F16 | DType::BF16 => 2,
-        _ => 4,
-    };
-    match role {
-        "a" => Some(m * k / (WARP * if bytes == 1 { 4 } else { 2 })),
-        "b" => Some(k * n / (WARP * if bytes == 1 { 4 } else { 2 })),
-        "c" => Some(m * n / (WARP * if bytes == 2 { 2 } else { 1 })),
-        _ => None,
-    }
-}
-
 impl Lowerer {
     // --- fragments ---------------------------------------------------------------------------------------
 
@@ -209,28 +189,20 @@ impl Lowerer {
     /// block scales.
     pub(super) fn reg_fragment(&mut self, node: &RegFragment) -> Result<()> {
         let role = &*node.role;
-        let count = match node.nregs {
-            Some(count) => count,
-            None => register_count(role, node.shape, node.dtype)
-                .ok_or_else(|| self.refuse(format_args!("a fragment of role {role}")))?,
-        };
-        if count == 0 {
+        if node.is_scalar() {
             let reg = self.b.state(Bank::B32);
             if let Some(scope) = self.names.last_mut() {
                 scope.insert(node.name, Val::reg(reg, VTy::U32));
             }
             return Ok(());
         }
-        if !(1..=MAX_FRAGMENT_REGISTERS).contains(&count) {
-            return Err(self.refuse(format_args!("a fragment of {count} registers")));
-        }
+        let count = node.registers()?;
         let halves = matches!(node.dtype, DType::F16 | DType::BF16);
         let ty = match role {
             "c" if !halves => VTy::F32,
-            "a" | "b" | "c" => VTy::U32,
-            _ => return Err(self.refuse(format_args!("a fragment of role {role}"))),
+            _ => VTy::U32,
         };
-        let regs = self.declare_fragment(node.name, count as usize, ty);
+        let regs = self.declare_fragment(node.name, count, ty);
         if role == "c" {
             self.zero(&regs, ty);
         }
@@ -371,20 +343,6 @@ impl Lowerer {
     /// two transposed matrices of 16 rows; from a slab with N along its rows (a transposed B), two plain ones.
     /// Two B fragments side by side in the slab are one load of four matrices.
     pub(super) fn ldmatrix(&mut self, node: &LdmatrixLoad, ctx: &SimplifyCtx) -> Result<()> {
-        let waits = |this: &Lowerer, what: &str| {
-            this.no_rule(format_args!(
-                "{what}, which waits for the lane-to-element table"
-            ))
-        };
-        if !node.staged {
-            return Err(waits(self, "a fragment read from global memory"));
-        }
-        if &*node.fragment_layout != "m16n8k16" {
-            return Err(waits(self, "a staged fragment of Volta's layout"));
-        }
-        if node.byte_slab || node.scale_buffer.is_some() {
-            return Err(waits(self, "a fragment read from a slab of bytes"));
-        }
         self.requires(&LDMATRIX)?;
         let buffer = self.buffer(node.src_buffer)?;
         let halves = matches!(buffer.elem.dtype, DType::F16 | DType::BF16);
@@ -394,11 +352,7 @@ impl Lowerer {
                 "`ldmatrix` reads a shared slab of 16-bit elements, and {name} holds {dtype}"
             )));
         }
-        let inner = self.extents.get(&node.src_buffer).and_then(|e| e.last());
-        let ldm = match (node.ldm, inner) {
-            (0, Some(inner)) => *inner,
-            (ldm, _) => ldm,
-        };
+        let ldm = node.ldm;
         let lane = lane();
         let rows_of = |count: i64| times(modulo(lane.clone(), count), ldm);
         let (trans, regs, offset, spans) = match (&*node.role, node.pair_frag, node.b_trans) {

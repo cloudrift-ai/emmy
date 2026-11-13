@@ -69,13 +69,13 @@ fn refusal(statements: &str, sm: u32, arch_specific: bool) -> String {
 const TILE: &str = "
         Smem(name=sa, extents=(16, 64), dtype=f16, align=1024)
         Smem(name=sb, extents=(64, 8), dtype=f16, align=16)
-        RegFragment(name=fa, role=a, shape=(16, 8, 16), dtype=f16)
-        RegFragment(name=fb, role=b, shape=(16, 8, 16), dtype=f16)
-        RegFragment(name=fc, role=c, shape=(16, 8, 16), dtype=f32)
+        RegFragment(name=fa, role=a, dtype=f16)
+        RegFragment(name=fb, role=b, dtype=f16)
+        RegFragment(name=fc, role=c, dtype=f32)
 ";
 const LOADS: &str = "
         LdmatrixLoad(frag=fa, src_buffer=sa, src_index=(0, 16), role=a, ldm=64)
-        LdmatrixLoad(frag=fb, src_buffer=sb, src_index=(16, 0), role=b)
+        LdmatrixLoad(frag=fb, src_buffer=sb, src_index=(16, 0), role=b, ldm=8)
 ";
 
 fn tile(rest: &str) -> String {
@@ -90,9 +90,9 @@ fn tile(rest: &str) -> String {
 fn a_fragment_is_its_registers_and_an_accumulator_starts_at_zero() {
     let lines = code(
         "
-        RegFragment(name=fa, role=a, shape=(16, 8, 16), dtype=f16)
-        RegFragment(name=fc, role=c, shape=(16, 8, 16), dtype=f32)
-        RegFragment(name=fh, role=c, shape=(16, 8, 16), dtype=f16)
+        RegFragment(name=fa, role=a, dtype=f16)
+        RegFragment(name=fc, role=c, dtype=f32)
+        RegFragment(name=fh, role=c, dtype=f16)
         f32 x = load fc[1]
         f32 fc[2] = x
         u32 w = load fh[0]
@@ -127,8 +127,8 @@ fn a_fragment_is_its_registers_and_an_accumulator_starts_at_zero() {
 #[test]
 fn a_fragment_is_read_by_its_registers_at_their_type() {
     let declared = "
-        RegFragment(name=fa, role=a, shape=(16, 8, 16), dtype=f16)
-        RegFragment(name=fc, role=c, shape=(16, 8, 16), dtype=f32)
+        RegFragment(name=fa, role=a, dtype=f16)
+        RegFragment(name=fc, role=c, dtype=f32)
     ";
     let with = |rest: &str| {
         let body = format!("{}\n        {rest}", declared.trim_end());
@@ -175,7 +175,7 @@ fn ldmatrix_gives_each_lane_the_address_of_a_row() {
 #[test]
 fn ldmatrix_reads_a_transposed_b_plainly_and_two_fragments_at_once() {
     let forms = "
-        RegFragment(name=fb2, role=b, shape=(16, 8, 16), dtype=f16)
+        RegFragment(name=fb2, role=b, dtype=f16)
         LdmatrixLoad(frag=fb, src_buffer=sa, src_index=(8, 16), role=b, ldm=64, b_trans=true)
         LdmatrixLoad(frag=fb, src_buffer=sb, src_index=(16, 0), role=b, ldm=8, pair_frag=fb2)
         LdmatrixLoad(frag=fb, src_buffer=sa, src_index=(0, 16), role=b, ldm=64, b_trans=true, pair_frag=fb2)
@@ -291,13 +291,13 @@ fn a_swizzle_mode_gives_its_mask_and_its_shift() {
 #[test]
 fn mma_sync_has_a_form_per_tile_and_type_pair() {
     let product = |rest: &str| format!("MmaSyncPtx(c_frag=fc, a_frag=fa, b_frag=fb, {rest})");
-    let fragments = |shape: &str, dtype: &str, acc: &str| {
+    let fragments = |dtype: &str, acc: &str| {
         format!(
             "
         Smem(name=sa, extents=(16, 64), dtype=f16, align=16)
-        RegFragment(name=fa, role=a, shape={shape}, dtype={dtype}, nregs=4)
-        RegFragment(name=fb, role=b, shape={shape}, dtype={dtype}, nregs=2)
-        RegFragment(name=fc, role=c, shape={shape}, dtype={acc})
+        RegFragment(name=fa, role=a, dtype={dtype})
+        RegFragment(name=fb, role=b, dtype={dtype})
+        RegFragment(name=fc, role=c, dtype={acc})
         LdmatrixLoad(frag=fa, src_buffer=sa, src_index=(0, 0), role=a, ldm=64)
         LdmatrixLoad(frag=fb, src_buffer=sa, src_index=(0, 0), role=b, ldm=64)
         "
@@ -307,7 +307,6 @@ fn mma_sync_has_a_form_per_tile_and_type_pair() {
     let halves = "{%r9, %r10}, {%r3, %r4, %r5, %r6}, {%r7, %r8}, {%r9, %r10}";
     let forms = [
         (
-            "(16, 8, 16)",
             "f16",
             "f32",
             "shape=(16, 8, 16)",
@@ -317,7 +316,6 @@ fn mma_sync_has_a_form_per_tile_and_type_pair() {
             (7, 8),
         ),
         (
-            "(16, 8, 16)",
             "bf16",
             "f32",
             "shape=(16, 8, 16), ab_dtype=bf16",
@@ -327,7 +325,6 @@ fn mma_sync_has_a_form_per_tile_and_type_pair() {
             (7, 8),
         ),
         (
-            "(16, 8, 16)",
             "f16",
             "f16",
             "shape=(16, 8, 16), c_dtype=f16",
@@ -337,7 +334,6 @@ fn mma_sync_has_a_form_per_tile_and_type_pair() {
             (7, 8),
         ),
         (
-            "(16, 8, 32)",
             "f8e4m3",
             "f32",
             "shape=(16, 8, 32), ab_dtype=e4m3",
@@ -347,7 +343,6 @@ fn mma_sync_has_a_form_per_tile_and_type_pair() {
             (8, 4),
         ),
         (
-            "(16, 8, 32)",
             "f8e5m2",
             "f32",
             "shape=(16, 8, 32), ab_dtype=e5m2",
@@ -357,9 +352,9 @@ fn mma_sync_has_a_form_per_tile_and_type_pair() {
             (8, 4),
         ),
     ];
-    for (shape, dtype, acc, fields, form, operands, targets, version) in forms {
+    for (dtype, acc, fields, form, operands, targets, version) in forms {
         for sm in targets {
-            let body = format!("{}{}", fragments(shape, dtype, acc), product(fields));
+            let body = format!("{}{}", fragments(dtype, acc), product(fields));
             let module = warp(&body, sm, false).unwrap();
             assert_eq!(
                 only(&module, &["mma"]),
@@ -380,20 +375,20 @@ fn mma_sync_has_a_form_per_tile_and_type_pair() {
 #[test]
 fn the_block_scaled_product_takes_a_scale_register_a_side() {
     let body = "
-        RegFragment(name=fa, role=a, shape=(16, 8, 64), dtype=f4e2m1x2, nregs=4)
-        RegFragment(name=fb, role=b, shape=(16, 8, 64), dtype=f4e2m1x2, nregs=2)
-        RegFragment(name=fc, role=c, shape=(16, 8, 64), dtype=f32)
-        RegFragment(name=sfa, role=a, shape=(16, 8, 64), dtype=u8, nregs=0)
-        RegFragment(name=sfb, role=b, shape=(16, 8, 64), dtype=u8, nregs=0)
+        RegFragment(name=fa, role=a, dtype=f4e2m1x2)
+        RegFragment(name=fb, role=b, dtype=f4e2m1x2)
+        RegFragment(name=fc, role=c, dtype=f32)
+        RegFragment(name=sfa, role=sfa, dtype=u8)
+        RegFragment(name=sfb, role=sfb, dtype=u8)
         u32 w = load fc[0]
     ";
     let filled = "
-        RegFragment(name=fa, role=a, shape=(16, 8, 64), dtype=f4e2m1x2, nregs=4)
-        RegFragment(name=fb, role=b, shape=(16, 8, 64), dtype=f4e2m1x2, nregs=2)
-        RegFragment(name=fc, role=c, shape=(16, 8, 64), dtype=f32)
-        RegFragment(name=fh, role=c, shape=(16, 8, 64), dtype=f16, nregs=4)
-        RegFragment(name=sfa, role=a, shape=(16, 8, 64), dtype=u8, nregs=0)
-        RegFragment(name=sfb, role=b, shape=(16, 8, 64), dtype=u8, nregs=0)
+        RegFragment(name=fa, role=a, dtype=f4e2m1x2)
+        RegFragment(name=fb, role=b, dtype=f4e2m1x2)
+        RegFragment(name=fc, role=c, dtype=f32)
+        RegFragment(name=fh, role=c, dtype=f16)
+        RegFragment(name=sfa, role=sfa, dtype=u8)
+        RegFragment(name=sfb, role=sfb, dtype=u8)
         u32 w = load fh[0]
         u32 fa[0] = w
         u32 fa[1] = w
@@ -413,7 +408,7 @@ fn the_block_scaled_product_takes_a_scale_register_a_side() {
         [
             "mma.sync.aligned.m16n8k64.row.col.kind::mxf4nvf4.block_scale.scale_vec::4X.f32.e2m1.e2m1.f32.ue4m3 \
              {%f0, %f1, %f2, %f3}, {%r2, %r3, %r4, %r5}, {%r6, %r7}, {%f0, %f1, %f2, %f3}, \
-             {%r12}, {0, 0}, {%r13}, {0, 1}"
+             {%r10}, {0, 0}, {%r11}, {0, 1}"
         ]
     );
     assert!(refusal(filled, 120, false).contains(
@@ -433,7 +428,7 @@ fn the_block_scaled_product_takes_a_scale_register_a_side() {
 fn block_scales_are_loaded_by_the_lanes_that_supply_them() {
     let module = warp(
         "
-        RegFragment(name=sfb, role=b, shape=(16, 8, 64), dtype=u8, nregs=0)
+        RegFragment(name=sfb, role=sfb, dtype=u8)
         BlockScaleLoad(frag=sfb, src_buffer=s, src_index=(r * 32), role=b, ldm=4)
         ",
         120,
@@ -468,7 +463,7 @@ fn block_scales_are_loaded_by_the_lanes_that_supply_them() {
     );
     let a = warp(
         "
-        RegFragment(name=sfa, role=a, shape=(16, 8, 64), dtype=u8, nregs=0)
+        RegFragment(name=sfa, role=sfa, dtype=u8)
         BlockScaleLoad(frag=sfa, src_buffer=s, src_index=(r * 64), role=a, ldm=4)
         ",
         120,
@@ -496,10 +491,10 @@ fn block_scales_are_loaded_by_the_lanes_that_supply_them() {
 #[test]
 fn volta_s_product_has_a_form_that_reads_b_by_rows() {
     let body = "
-        RegFragment(name=fa, role=a, shape=(8, 8, 4), dtype=f16, nregs=2)
-        RegFragment(name=fb, role=b, shape=(8, 8, 4), dtype=f16, nregs=2)
-        RegFragment(name=fh, role=c, shape=(8, 8, 4), dtype=f16, nregs=4)
-        RegFragment(name=fc, role=c, shape=(8, 8, 4), dtype=f32, nregs=8)
+        RegFragment(name=fa, role=a, dtype=f16, fragment_layout=m8n8k4)
+        RegFragment(name=fb, role=b, dtype=f16, fragment_layout=m8n8k4)
+        RegFragment(name=fh, role=c, dtype=f16, fragment_layout=m8n8k4)
+        RegFragment(name=fc, role=c, dtype=f32, fragment_layout=m8n8k4)
         u32 w = load fh[0]
         u32 fa[0] = w
         u32 fa[1] = w
@@ -565,8 +560,8 @@ fn volta_s_product_has_a_form_that_reads_b_by_rows() {
 fn a_promote_adds_the_halves_into_the_floats_and_zeroes_them() {
     let lines = code(
         "
-        RegFragment(name=fc, role=c, shape=(16, 8, 16), dtype=f32)
-        RegFragment(name=fh, role=c, shape=(16, 8, 16), dtype=f16)
+        RegFragment(name=fc, role=c, dtype=f32)
+        RegFragment(name=fh, role=c, dtype=f16)
         FragmentPromote(dst=fc, src=fh)
         ",
         80,
@@ -597,9 +592,9 @@ fn a_promote_adds_the_halves_into_the_floats_and_zeroes_them() {
 fn two_accumulators_are_one_a_fragment_by_packed_conversions() {
     let lines = code(
         "
-        RegFragment(name=c0, role=c, shape=(16, 8, 16), dtype=f32)
-        RegFragment(name=c1, role=c, shape=(16, 8, 16), dtype=f32)
-        RegFragment(name=fa, role=a, shape=(16, 8, 16), dtype=f16)
+        RegFragment(name=c0, role=c, dtype=f32)
+        RegFragment(name=c1, role=c, dtype=f32)
+        RegFragment(name=fa, role=a, dtype=f16)
         FragmentRepack(frag=fa, srcs=(c0, c1))
         FragmentRepack(frag=fz, srcs=(c0, c1), ab_dtype=bf16)
         ",
@@ -628,7 +623,7 @@ fn two_accumulators_are_one_a_fragment_by_packed_conversions() {
 fn an_accumulator_is_a_b_fragment_by_an_exchange_of_packed_pairs() {
     let lines = code(
         "
-        RegFragment(name=c0, role=c, shape=(16, 8, 16), dtype=f32)
+        RegFragment(name=c0, role=c, dtype=f32)
         FragmentRepack(frag=fb, srcs=(c0), role=b)
         ",
         80,
@@ -676,7 +671,7 @@ fn volta_s_accumulator_gives_a_part_of_itself_as_an_operand() {
         for part in 0..4 {
             let body = format!(
                 "
-        RegFragment(name=fc, role=c, shape=(8, 8, 4), dtype=f32, nregs=8)
+        RegFragment(name=fc, role=c, dtype=f32, fragment_layout=m8n8k4)
         FragmentRepack(frag=fx, srcs=(fc), fragment_layout=m8n8k4, part={part}, role={role})
         "
             );
@@ -689,7 +684,7 @@ fn volta_s_accumulator_gives_a_part_of_itself_as_an_operand() {
     }
     // A's columns 12 to 15: the lanes of the group that holds them for the lane's rows, the lane's own row.
     let body = "
-        RegFragment(name=fc, role=c, shape=(8, 8, 4), dtype=f32, nregs=8)
+        RegFragment(name=fc, role=c, dtype=f32, fragment_layout=m8n8k4)
         FragmentRepack(frag=fx, srcs=(fc), fragment_layout=m8n8k4, part=3, role=a)
     ";
     let lines = listing(&warp_unassembled(body, 70));
@@ -737,17 +732,17 @@ fn a_target_without_the_instruction_is_refused_by_name() {
     let message = warp_refusal_unassembled(&tile(LOADS), 70);
     assert!(message.contains("no PTX rule for `ldmatrix` on sm_70, which needs sm_75 or later"));
     let bytes = "
-        RegFragment(name=fa, role=a, shape=(16, 8, 32), dtype=f8e4m3)
-        RegFragment(name=fb, role=b, shape=(16, 8, 32), dtype=f8e4m3)
-        RegFragment(name=fc, role=c, shape=(16, 8, 32), dtype=f32)
+        RegFragment(name=fa, role=a, dtype=f8e4m3)
+        RegFragment(name=fb, role=b, dtype=f8e4m3)
+        RegFragment(name=fc, role=c, dtype=f32)
         MmaSyncPtx(c_frag=fc, a_frag=fa, b_frag=fb, shape=(16, 8, 32), ab_dtype=e4m3)
     ";
     assert!(refusal(bytes, 80, false).contains(
         "no PTX rule for `mma.sync` m16n8k32 of 8-bit floats on sm_80, which needs sm_89 or later"
     ));
     let repack = "
-        RegFragment(name=c0, role=c, shape=(16, 8, 16), dtype=f32)
-        RegFragment(name=c1, role=c, shape=(16, 8, 16), dtype=f32)
+        RegFragment(name=c0, role=c, dtype=f32)
+        RegFragment(name=c1, role=c, dtype=f32)
         FragmentRepack(frag=fa, srcs=(c0, c1))
     ";
     assert!(
@@ -781,30 +776,31 @@ fn warp_refusal_unassembled(statements: &str, sm: u32) -> String {
 }
 
 /// A fragment read from or written to memory element by element has its instructions from the lane-to-element
-/// table, which the compiler does not hold yet: each such statement is refused by name.
+/// table, which no rule reads yet: each such statement is refused by name.
 #[test]
 fn a_statement_that_needs_the_lane_table_is_refused_by_name() {
     let waits = "which waits for the lane-to-element table";
-    let unstaged =
-        "LdmatrixLoad(frag=fa, src_buffer=a, src_index=(0), role=a, ldm=64, staged=false)";
-    let message = refusal(&tile(unstaged), 80, false);
-    assert!(
-        message.contains("no PTX rule for a fragment read from global memory")
-            && message.contains(waits)
-    );
-    let volta = "LdmatrixLoad(frag=fa, src_buffer=sa, src_index=(0, 0), role=a, ldm=64, fragment_layout=m8n8k4)";
-    assert!(refusal(&tile(volta), 80, false).contains("a staged fragment of Volta's layout"));
-    let bytes =
-        "LdmatrixLoad(frag=fa, src_buffer=sa, src_index=(0, 0), role=a, ldm=64, byte_slab=true)";
-    assert!(refusal(&tile(bytes), 80, false).contains("a fragment read from a slab of bytes"));
-    let store = "RegStore(dst_buffer=o, dst_index=(0), frag=fc, shape=(16, 8, 16))";
-    let message = refusal(&tile(store), 80, false);
-    assert!(
-        message.contains("no PTX rule for the statement type RegStore") && message.contains(waits)
-    );
-    let reduce = "FragmentRowReduce(top=x, bot=y, frags=(fc), op=maximum)";
-    let message = refusal(&tile(reduce), 80, false);
-    assert!(message.contains("the statement type FragmentRowReduce") && message.contains(waits));
+    for (statement, ty) in [
+        (
+            "FragmentLoad(frag=fa, src_buffer=sa, src_index=(0, 0), role=a, ldm=64, staged=true)",
+            "FragmentLoad",
+        ),
+        (
+            "RegStore(dst_buffer=o, dst_index=(0), frag=fc, shape=(16, 8, 16))",
+            "RegStore",
+        ),
+        (
+            "FragmentRowReduce(top=x, bot=y, frags=(fc), op=maximum)",
+            "FragmentRowReduce",
+        ),
+    ] {
+        let message = refusal(&tile(statement), 80, false);
+        assert!(
+            message.contains(&format!("no PTX rule for the statement type {ty}"))
+                && message.contains(waits),
+            "{message}"
+        );
+    }
 }
 
 /// The verifier holds what ptxas does not check. An operand fragment no statement loaded is read undefined by the
@@ -821,7 +817,7 @@ fn the_verifier_refuses_an_unloaded_fragment_and_an_unaligned_row() {
         "
         if t < 16:
             LdmatrixLoad(frag=fa, src_buffer=sa, src_index=(0, 16), role=a, ldm=64)
-        LdmatrixLoad(frag=fb, src_buffer=sb, src_index=(16, 0), role=b)
+        LdmatrixLoad(frag=fb, src_buffer=sb, src_index=(16, 0), role=b, ldm=8)
         {product}
         "
     );
@@ -829,14 +825,14 @@ fn the_verifier_refuses_an_unloaded_fragment_and_an_unaligned_row() {
     assert!(message.contains("reads %r4 on a path that does not define it"));
     let unaligned = "
         Smem(name=sa, extents=(16, 64), dtype=f16)
-        RegFragment(name=fa, role=a, shape=(16, 8, 16), dtype=f16)
+        RegFragment(name=fa, role=a, dtype=f16)
         LdmatrixLoad(frag=fa, src_buffer=sa, src_index=(0, 16), role=a, ldm=64)
     ";
     let message = refusal(unaligned, 80, false);
     assert!(message.contains("is a 16-byte access with no alignment proven of its address"));
     let odd_rows = "
         Smem(name=sa, extents=(16, 20), dtype=f16, align=16)
-        RegFragment(name=fa, role=a, shape=(16, 8, 16), dtype=f16)
+        RegFragment(name=fa, role=a, dtype=f16)
         LdmatrixLoad(frag=fa, src_buffer=sa, src_index=(0, 0), role=a, ldm=20)
     ";
     let message = refusal(odd_rows, 80, false);

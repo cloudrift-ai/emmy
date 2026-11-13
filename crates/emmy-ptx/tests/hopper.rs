@@ -48,8 +48,8 @@ fn only(module: &Module, opcodes: &[&str]) -> Vec<String> {
 const SLABS: &str = "
         Smem(name=sa, extents=(64, 64), dtype=f16, align=1024)
         Smem(name=sb, extents=(16, 64), dtype=f16, align=1024)
-        RegFragment(name=c0, role=c, shape=(16, 8, 16), dtype=f32)
-        RegFragment(name=c1, role=c, shape=(16, 8, 16), dtype=f32)
+        RegFragment(name=c0, role=c, dtype=f32)
+        RegFragment(name=c1, role=c, dtype=f32)
 ";
 
 /// `wgmma` reads an operand through a descriptor: the slab's address in shared memory and the two byte offsets
@@ -102,7 +102,7 @@ fn wgmma_reads_its_operands_through_descriptors() {
 fn wgmma_takes_a_from_registers_and_any_width_of_tile() {
     let body = format!(
         "{SLABS}
-        RegFragment(name=fa, role=a, shape=(16, 8, 16), dtype=bf16)
+        RegFragment(name=fa, role=a, dtype=bf16)
         WgmmaDescriptor(name=db, smem=sb, smem_index=64, swizzle=NONE, lbo_bytes=16, sbo_bytes=1024)
         LdmatrixLoad(frag=fa, src_buffer=sa, src_index=(0, 0), role=a, ldm=64)
         WgmmaMma(c_frags=(c0, c1), b_desc=db, shape=(64, 16, 16), ab_dtype=bf16, a_frag=fa, scale_d=0)
@@ -122,9 +122,7 @@ fn wgmma_takes_a_from_registers_and_any_width_of_tile() {
         let fragments: Vec<String> = (0..n / 8).map(|j| format!("w{j}")).collect();
         let declared: Vec<String> = fragments
             .iter()
-            .map(|name| {
-                format!("        RegFragment(name={name}, role=c, shape=(16, 8, 16), dtype=f32)\n")
-            })
+            .map(|name| format!("        RegFragment(name={name}, role=c, dtype=f32)\n"))
             .collect();
         let body = format!(
             "{SLABS}{}

@@ -118,9 +118,9 @@ def test_four_warps_multiply_a_64_by_16_tile_from_swizzled_slabs(level, form):
             f16 y = load bt[r * 1024 + i * 128 + t]
             f16 sb[{_moved("i * 128 + t")}] = y
         Sync
-        RegFragment(name=c0, role=c, shape=(16, 8, 16), dtype=f32)
-        RegFragment(name=c1, role=c, shape=(16, 8, 16), dtype=f32)
-        RegFragment(name=fa, role=a, shape=(16, 8, 16), dtype=f16)
+        RegFragment(name=c0, role=c, dtype=f32)
+        RegFragment(name=c1, role=c, dtype=f32)
+        RegFragment(name=fa, role=a, dtype=f16)
         WgmmaFence
         """,
         "for s in 0..4:\n" + textwrap.indent(textwrap.dedent(step).strip("\n"), "    "),
