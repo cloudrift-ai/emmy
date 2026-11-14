@@ -156,14 +156,14 @@ def test_the_factors_are_the_two_exponentials_bits_on_the_host(advance) -> None:
 # --------------------------------------------------------------------------- #
 
 
-def _compile(graph: Graph, pins: dict, *, cap: tuple[int, int], shared: bool, passes: list[str]) -> Graph:
-    """``graph`` through ``passes`` under ``pins``, with or without the rewrite."""
+def _compile(graph: Graph, pins: dict, *, shared: bool, passes: list[str]) -> Graph:
+    """``graph`` through ``passes`` under ``pins``, with or without the rewrite, for the card it runs on."""
     pipeline = Pipeline.build(passes)
     if not shared:
         for pass_ in pipeline.passes:
             pass_.rules = [r for r in pass_.rules if r.name != "083_share_rescale_exponential"]
     with pinned_knobs(pins):
-        return pipeline.run(graph.copy(), ctx=Context.from_target(cap), db=None)
+        return pipeline.run(graph.copy(), ctx=Context.probe(), db=None)
 
 
 def _exponentials(kernels) -> int:
@@ -179,12 +179,12 @@ def _exponentials(kernels) -> int:
     return count
 
 
-def _both(graph: Graph, pins: dict, feeds: list[dict], *, cap: tuple[int, int], passes: list[str] = CUDA_PASSES) -> None:
+def _both(graph: Graph, pins: dict, feeds: list[dict], *, passes: list[str] = CUDA_PASSES) -> None:
     """Run ``graph`` with and without the rewrite on every feed: the same bits out."""
     from emmy.compiler.backend.cuda.backend import CudaBackend
 
     with recording_kernels() as kernels_of:
-        compiled = {shared: _compile(graph, pins, cap=cap, shared=shared, passes=passes) for shared in (True, False)}
+        compiled = {shared: _compile(graph, pins, shared=shared, passes=passes) for shared in (True, False)}
     exps = {shared: _exponentials(kernels_of(g)) for shared, g in compiled.items()}
     assert exps[True] < exps[False], f"the rewrite took no factor pair: {exps}"
     backend = CudaBackend()
@@ -221,7 +221,7 @@ def test_the_factors_are_the_two_exponentials_bits_on_the_device(pins) -> None:
     factors = Tensor("F", (2, n), F32)
     graph.add_node(KernelOp(body=body, name="k_advance", inputs=io, outputs={"F": factors}), list(io), factors, node_id="F")
     graph.inputs, graph.outputs = list(io), ["F"]
-    _both(graph, pins, [{"G": g, "GO": g_o}], cap=(12, 0), passes=["lowering/kernel", FINAL_LOWERING_PASS])
+    _both(graph, pins, [{"G": g, "GO": g_o}], passes=["lowering/kernel", FINAL_LOWERING_PASS])
 
 
 def _partition_merge(count: int) -> Graph:
@@ -264,7 +264,7 @@ def test_a_partition_merge_keeps_every_bit(fast_math, reduce, work) -> None:
         states[0] = rng.choice(_PIVOTS, size=(count, 8))
         feeds.append({"x": states})
     pins = {"WORK": work, "REDUCE": reduce, "RASTER": "", "PLACE": "fuse", "LOOPIFY": "0", "FAST_MATH": fast_math, "FAST_EXP": False}
-    _both(_partition_merge(count), pins, feeds, cap=(8, 0))
+    _both(_partition_merge(count), pins, feeds)
 
 
 @requires_cuda
@@ -287,4 +287,4 @@ def test_a_streamed_softmax_keeps_every_bit(fast_math, case) -> None:
             values[mask] = rng.choice(_PIVOTS, size=int(mask.sum()))
             feed[name] = values.astype(program.buffer(name).dtype.np)
         feeds.append(feed)
-    _both(program, {**pin_of(case, case.row), "FAST_MATH": fast_math, "FAST_EXP": False}, feeds, cap=case.compute_cap)
+    _both(program, {**pin_of(case, case.row), "FAST_MATH": fast_math, "FAST_EXP": False}, feeds)
