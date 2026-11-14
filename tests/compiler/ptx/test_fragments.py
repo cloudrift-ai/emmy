@@ -73,6 +73,39 @@ def test_operands_are_gathered_from_global_memory_and_the_accumulator_stored(lev
     same_bits(out.reshape(BLOCKS, 16, 8), a @ b)
 
 
+@requires_sm(8, 9)
+def test_an_e4m3_operand_is_gathered_into_a_bfloat16_fragment(level):
+    """A 16 x 8 tile of ``A @ B`` over K = 32, A of bfloat16 and B transposed of e4m3: each register of B is two
+    e4m3 elements side by side, read as one pair and converted into the fragment's bfloat16."""
+    import torch
+
+    from emmy.compiler import dtype as dtypes
+
+    k = 32
+    a, b = _integers((BLOCKS, 16, k), 5), _integers((BLOCKS, k, 8), 6)
+    a_bits = (a.astype(np.float32).view(np.uint32) >> 16).astype(np.uint16)
+    b_bits = torch.from_numpy(np.ascontiguousarray(b.transpose(0, 2, 1))).to(torch.float8_e4m3fn).view(torch.uint8).numpy()
+    b_load = f"src_index=(r * {8 * k} + s * 16), ldm={k}, b_trans=true"
+    body = _warp(
+        """
+        RegFragment(name=fa, role=a, dtype=bf16)
+        RegFragment(name=fb, role=b, dtype=bf16)
+        RegFragment(name=fc, role=c, dtype=f32)
+        """,
+        f"""
+        for s in 0..2:
+            FragmentLoad(frag=fa, src_buffer=a, src_index=(r * {16 * k} + s * 16), role=a, ldm={k}, src_dtype=bf16, dtype=bf16)
+            FragmentLoad(frag=fb, src_buffer=b, {b_load}, role=b, src_dtype=f8e4m3, dtype=bf16)
+            MmaSyncPtx(c_frag=fc, a_frag=fa, b_frag=fb, shape=(16, 8, 16), ab_dtype=bf16)
+        RegStore(dst_buffer=o, dst_index=(r * 128), frag=fc, shape=(16, 8, 16), ldm=8)
+        """,
+    )
+    inputs = {"a": a_bits.ravel(), "b": b_bits.ravel()}
+    types = {"a": dtypes.BF16, "b": dtypes.F8E4M3}
+    out = launch.run(body, inputs, {"o": (np.float32, BLOCKS * 128)}, blocks=BLOCKS, threads=32, level=level, types=types)["o"]
+    same_bits(out.reshape(BLOCKS, 16, 8), a @ b)
+
+
 def test_a_tile_past_its_bounds_is_clamped_zero_filled_and_guarded(level):
     """A tile of 16 x 8 over buffers of 5 rows, 27 along K and 6 columns. The operand's own axis is clamped, so no
     lane reads past the fifth row of A or the sixth column of B; K past 27 is zero and not read, which a row stride

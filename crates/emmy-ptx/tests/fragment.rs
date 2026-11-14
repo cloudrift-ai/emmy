@@ -125,6 +125,39 @@ fn a_fragment_of_halves_from_floats_rounds_each_element() {
     assert_eq!(count(&module, "cvt.rn.f16.f32"), 8);
 }
 
+/// Two e4m3 elements side by side along K are one 16-bit load and one packed conversion into halves, for a
+/// fragment of halves and of bfloat16 alike: every e4m3 value is a bfloat16, so the halves widened and packed
+/// again are exact.
+#[test]
+fn two_adjacent_e4m3_elements_are_one_load_for_halves_and_bfloat16() {
+    let params: Params = &[
+        ("q", ParamKind::Input, Some(DType::F8E4M3)),
+        ("o", ParamKind::Output, Some(F32)),
+    ];
+    for (dtype, packs) in [("f16", 0), ("bf16", 2)] {
+        let module = kernel(
+            &format!(
+                "
+        RegFragment(name=fb, role=b, dtype={dtype})
+        FragmentLoad(frag=fb, src_buffer=q, src_index=(r * 256), role=b, ldm=16, b_trans=true, src_dtype=f8e4m3, dtype={dtype})
+        "
+            ),
+            params,
+            120,
+        )
+        .unwrap();
+        assert_eq!(
+            count(&module, "ld.global.nc.b16"),
+            2,
+            "{:#?}",
+            listing(&module)
+        );
+        assert_eq!(count(&module, "ld.global.nc.u8"), 0);
+        assert_eq!(count(&module, "cvt.rn.f16x2.e4m3x2"), 2);
+        assert_eq!(count(&module, "cvt.rn.bf16x2.f32"), packs);
+    }
+}
+
 /// A store under a guard of rows keeps its pairs, each under its row's predicate, and a guard the ranges decide is
 /// no branch; a guard of columns stores each element under its own. An epilogue runs its statements once an element, at the element's coordinates, and the
 /// value is rounded once into a buffer of halves.

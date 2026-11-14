@@ -423,7 +423,8 @@ impl Lowerer {
                 }
                 return Ok(());
             }
-            let packed = source == DType::F8E4M3 && dtype == DType::F16 && bytes == 2;
+            let packed =
+                source == DType::F8E4M3 && matches!(dtype, DType::F16 | DType::BF16) && bytes == 2;
             if shared.is_none() && packed && self.target.sm >= SM_ADA && self.aligned(&address, 2) {
                 self.requires(&F8_CONVERSION)?;
                 let pair = self.b.reg(Bank::B16);
@@ -432,10 +433,28 @@ impl Lowerer {
                 let convert = Inst::new(
                     Opcode::Cvt(Ty::E4m3x2),
                     Ty::F16x2,
-                    vec![reg],
+                    Vec::new(),
                     vec![pair.into()],
                 );
-                self.b.emit(convert.rounded(Round::Rn));
+                if dtype == DType::F16 {
+                    self.b.emit(Inst {
+                        results: vec![reg],
+                        ..convert.rounded(Round::Rn)
+                    });
+                    return Ok(());
+                }
+                // Every e4m3 value is a bfloat16 too: the two halves widened and packed are exact.
+                let halves = self.b.value(convert.rounded(Round::Rn), Bank::B32);
+                let high = self.word_of(Opcode::Shr, Ty::U32, halves, 16);
+                let [low, high] = [halves, high].map(|word| {
+                    let half = self.low_half(word);
+                    let widen =
+                        Inst::new(Opcode::Cvt(Ty::F16), Ty::F32, Vec::new(), vec![half.into()]);
+                    self.b.value(widen, Bank::F32)
+                });
+                let operands = vec![high.into(), low.into()];
+                let pack = Inst::new(Opcode::Cvt(Ty::F32), Ty::Bf16x2, vec![reg], operands);
+                self.b.emit(pack.rounded(Round::Rn));
                 return Ok(());
             }
         }
