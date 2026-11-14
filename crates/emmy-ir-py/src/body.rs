@@ -28,7 +28,7 @@ const PURGE_EVERY: usize = 1024;
 
 /// A table of per-object state on this side of the boundary, keyed by the shared object's address while it lives:
 /// a body's statement wrappers, a subroutine's one Python object. An entry outlives its object only until the next
-/// purge, every `PURGE_EVERY` inserts or from Python's `clear_memos`; the table is not bounded (a live object keeps
+/// purge, every `PURGE_EVERY` inserts; the table is not bounded (a live object keeps
 /// its one wrapper).
 struct Tables<T, V> {
     entries: HashMap<usize, (std::sync::Weak<T>, V)>,
@@ -882,25 +882,30 @@ pub fn one_operation_per_definition<'py>(
     )
 }
 
-/// A fragment's statements in the canonical order, its names as they stand, a read of an `outer` name ahead of its
-/// first binding reading the outer one; an error when they wait on each other.
+/// Lambda normalization: a pure body's statements in the canonical order with its names as they stand (a read of a
+/// `params` name ahead of its first binding reading the parameter; an error when the statements wait on each other),
+/// then every value expression in its canonical spelling under those names.
 #[pyfunction]
-#[pyo3(signature = (body, outer=None))]
-pub fn fragment_order<'py>(
+#[pyo3(signature = (body, params=None))]
+pub fn normalize_lambda_body<'py>(
     body: &Bound<'py, PyAny>,
-    outer: Option<&Bound<'py, PyAny>>,
+    params: Option<&Bound<'py, PyAny>>,
 ) -> PyResult<Bound<'py, PyBody>> {
-    let outer: HashSet<Name> = match outer {
+    let params: HashSet<Name> = match params {
         Some(names) => names
             .try_iter()?
             .map(|item| name_from_py(&item?))
             .collect::<PyResult<_>>()?,
         None => HashSet::new(),
     };
-    PyBody::wrap(
-        body.py(),
-        &emmy_ir::normalize::fragment_order(&PyBody::from_iterable(body)?, &outer).py()?,
-    )
+    let py = body.py();
+    let body = PyBody::from_iterable(body)?;
+    let ordered = if body.len() > 1 {
+        emmy_ir::normalize::fragment_order(&body, &params).py()?
+    } else {
+        body
+    };
+    PyBody::wrap(py, &emmy_ir::normalize::canonical_values(&ordered))
 }
 
 /// A kernel body with its index divisions and remainders by a power of two over a non-negative dividend as shifts and
@@ -909,15 +914,6 @@ pub fn fragment_order<'py>(
 pub fn reduce_strength<'py>(body: &Bound<'py, PyAny>) -> PyResult<Bound<'py, PyBody>> {
     let out = emmy_ir::strength::reduce_strength(&PyBody::from_iterable(body)?);
     PyBody::wrap(body.py(), &out.py()?)
-}
-
-/// Every value expression in its canonical spelling under the names as they stand.
-#[pyfunction]
-pub fn canonical_values<'py>(body: &Bound<'py, PyAny>) -> PyResult<Bound<'py, PyBody>> {
-    PyBody::wrap(
-        body.py(),
-        &emmy_ir::normalize::canonical_values(&PyBody::from_iterable(body)?),
-    )
 }
 
 /// Every name the whole subtree of `stmt` reads from its enclosing scope.
@@ -939,22 +935,6 @@ pub fn exposed_defines_py<'py>(
 ) -> PyResult<Bound<'py, PySet>> {
     let names = exposed_defines(&*statement_from_py(stmt)?);
     PySet::new(py, names.iter().map(|name| PyString::new(py, name)))
-}
-
-/// A rename under an alias map, made hygienic.
-#[pyfunction]
-pub fn rename_free<'py>(
-    py: Python<'py>,
-    stmt: &Bound<'py, PyAny>,
-    alias: &Bound<'py, PyAny>,
-) -> PyResult<Bound<'py, PyAny>> {
-    let alias = renames_from_py(alias)?;
-    let original = statement_from_py(stmt)?;
-    let renamed = emmy_ir::normalize::rename_free(&original, &alias);
-    if Arc::ptr_eq(&renamed, &original) {
-        return Ok(stmt.clone());
-    }
-    Ok(wrap_statement(py, &renamed)?.into_bound(py))
 }
 
 /// The mask branch of an ordered two-way comparison, or `None`.
@@ -1016,24 +996,12 @@ pub fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(prepare_body, m)?)?;
     m.add_function(wrap_pyfunction!(simplify_body, m)?)?;
     m.add_function(wrap_pyfunction!(one_operation_per_definition, m)?)?;
-    m.add_function(wrap_pyfunction!(canonical_values, m)?)?;
-    m.add_function(wrap_pyfunction!(fragment_order, m)?)?;
+    m.add_function(wrap_pyfunction!(normalize_lambda_body, m)?)?;
     m.add_function(wrap_pyfunction!(reduce_strength, m)?)?;
     m.add_function(wrap_pyfunction!(free_names_py, m)?)?;
     m.add_function(wrap_pyfunction!(exposed_defines_py, m)?)?;
-    m.add_function(wrap_pyfunction!(rename_free, m)?)?;
     m.add_function(wrap_pyfunction!(mask_select_predicate, m)?)?;
     m.add_function(wrap_pyfunction!(ordering_constraints, m)?)?;
     m.add_function(wrap_pyfunction!(dtype_promote, m)?)?;
-    m.add_function(wrap_pyfunction!(clear_memos, m)?)?;
     Ok(())
-}
-
-/// Forget every memoized normal form and identity and purge the wrapper tables: what a test worker or a process
-/// pool does to start clean.
-#[pyfunction]
-fn clear_memos() {
-    emmy_ir::memo::clear_all();
-    purge(wrapper_tables());
-    purge(subroutines());
 }

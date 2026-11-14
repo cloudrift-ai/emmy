@@ -1023,7 +1023,7 @@ def _tile_reduce_axis_transposed(
     # renamed with its column, so they come off ``protected``; everything shared (grid, reduce and
     # lane coordinates) passes through. A name the prologue defines inside a loop (a hoisted fold's
     # carrier) is one of them: two columns folding one carrier would seed it twice in one scope.
-    hoisted_defs = {name for stmt in Body(tuple(hoisted)).iter() for name in stmt.defines()}
+    hoisted_defs = Body(tuple(hoisted)).defined
     per_column = protected - hoisted_defs if columns > 1 else protected
     sweep: list[Statement] = []
     body: list[Statement] = []

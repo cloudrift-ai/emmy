@@ -1070,7 +1070,7 @@ def _a_slab_operand(
         # σ is hygienic (:meth:`Statement.substitute`): a cone statistic re-binding the contraction axis
         # name (attention's k-norm inside the K cone) keeps its own iteration var.
         sigma = Sigma({m_name: m_coord(row), k_name: k_coord(k)})
-        reads = Body(cell).ssa_uses - Body(cell).definitions.keys()
+        reads = Body(cell).ssa_uses - Body(cell).defined
         stmts: list[Statement] = [Load(names=(nm,), input=_stat_slab(nm), index=(row,)) for nm in (*stats, *chunk_stats) if nm in reads]
         stmts += [s.substitute(sigma) for s in cell]
         return _k_masked(stmts, c.operands[0].exposes[-1], k, k_ext)
@@ -1093,7 +1093,7 @@ def _a_slab_operand(
     if chunk_stats:
         chunk_dtypes = {nm: cuda_name(dt) for nm, dt in cone_stat_dtypes(chunk_pro, chunk_stats, inputs).items()}
         prologue += stat_rows(chunk_stats, _stat_slab, row_axis, dtypes=chunk_dtypes)
-        reads = [nm for nm in stats if nm in Body(chunk_pro).ssa_uses - Body(chunk_pro).definitions.keys()]
+        reads = [nm for nm in stats if nm in Body(chunk_pro).ssa_uses - Body(chunk_pro).defined]
         stat = next(edge for edge in c.operands[0].operands if set(chunk_stats) & set(edge.exposes))
 
         def before(k0):

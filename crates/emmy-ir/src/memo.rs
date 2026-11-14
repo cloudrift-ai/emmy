@@ -3,8 +3,7 @@
 //! body's exact form (`body::MemoKey`), never its text. The caches are `quick_cache`'s: sharded, locked per shard and
 //! never across a computation (a second asker of a key waits for the first's value instead of computing it again),
 //! evicting by its one policy (S3-FIFO: a probation queue ahead of the main one and a ghost list of what left, so an
-//! entry met once does not push out one met many times). [`clear_all`] forgets both: what a test worker does to start
-//! clean.
+//! entry met once does not push out one met many times).
 
 use std::hash::Hash;
 
@@ -61,13 +60,6 @@ impl<K: Eq + Hash + Clone, V: Clone> Memo<K, V> {
     pub fn weight(&self) -> u64 {
         self.cache.weight()
     }
-}
-
-/// Forget every memoized normal form and identity.
-pub fn clear_all() {
-    crate::normalize::normal_forms().clear();
-    crate::normalize::optimized_forms().clear();
-    crate::identity::identities().clear();
 }
 
 #[cfg(test)]

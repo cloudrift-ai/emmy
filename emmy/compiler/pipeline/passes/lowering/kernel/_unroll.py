@@ -133,7 +133,7 @@ def _stepped(loop: Statement, copies: int, outer: Collection[str]) -> StridedLoo
 
 def _own(loop: Statement, outer: Collection[str]) -> set[str]:
     """The names ``loop``'s body defines that no statement around the loop does."""
-    return {name for stmt in loop.body.iter() for name in stmt.defines()} - set(outer)
+    return loop.body.defined - set(outer)
 
 
 def _copy(loop: Statement, at: Expression, rename: dict[str, str]) -> Body:

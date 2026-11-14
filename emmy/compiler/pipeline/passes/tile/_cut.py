@@ -1471,7 +1471,7 @@ def _defined_values(root: Fold, skip: int | None = None) -> set[str]:
         if id(node) in seen or id(node) == skip:
             continue
         seen.add(id(node))
-        out |= set(node.exposes) | node.step().definitions.keys()
+        out |= set(node.exposes) | node.step().defined
         pending.extend(node.operands)
     return out
 
