@@ -108,7 +108,7 @@ generic system information, and partial raw results after failure. It treats exe
 failures as authoritative, but does not parse or record experiment measurements and does not judge model output,
 backend selection, or scientific claims. Recipes cannot run post-processing or report generation. Command recipes
 may opt into the single `command.strict` integrity contract for clean declared stage paths, required declared results,
-and Git/GPU/NVCC/cuBLAS provenance. Staged Git provenance comes from the invoking worktree, not a shared virtual
+and Git/GPU/ptxas/cuBLAS provenance. Staged Git provenance comes from the invoking worktree, not a shared virtual
 environment or reused remote source tree. The complete boundary lives in `emmy/benchmark/ARCHITECTURE.md`.
 
 `run_benchmark_workload()` drives `vllm bench serve`. Embedding recipes (`model.task: embed`) bench with

@@ -193,7 +193,7 @@ def requires_sm(major: int, minor: int = 0):
 
 
 # Skip the mma.sync warp-tier tests below sm_90. On sm_80-89 the pin-only path is currently non-functional because
-# nvcc rejects the ``sm_NNa`` target and ``ldmatrix`` faults at runtime on at least Ada (sm_89).
+# ptxas has no ``sm_NNa`` target there and ``ldmatrix`` faults at runtime on at least Ada (sm_89).
 requires_sm90 = pytest.mark.skipif(
     (device_compute_capability() or (0, 0)) < (9, 0),
     reason="mma.sync warp tier needs sm_90+ (pin-only / non-functional on sm_80-89: ldmatrix fault + sm_NNa TMA compile)",
@@ -252,7 +252,7 @@ def grouped_raster_decode(kernel, group: int) -> list[str]:
 def skip_if_no_cuda() -> None:
     """Skip the current test when Emmy cannot compile CUDA kernels."""
     if not has_cuda_toolchain():
-        pytest.skip("CUDA not available (need the emmy.emmy_runtime extension + GPU + nvcc)")
+        pytest.skip("CUDA not available (need the emmy.emmy_runtime extension + GPU + ptxas)")
 
 
 def matmul_graph(m: int, k: int, n: int):

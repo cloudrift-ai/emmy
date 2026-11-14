@@ -179,8 +179,8 @@ class ExperimentRecord:
         if not gpus or not all(item.uuid or item.pci_bus_id for item in gpus):
             missing.append("GPU provenance")
         software = self.system.software if self.system else SoftwareInformation()
-        if not software.nvcc_version:
-            missing.append("NVCC provenance")
+        if not software.ptxas_version:
+            missing.append("ptxas provenance")
         if not software.cublas_version:
             missing.append("cuBLAS provenance")
         return missing
