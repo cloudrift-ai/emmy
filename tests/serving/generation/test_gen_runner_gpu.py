@@ -428,10 +428,11 @@ def test_sliced_experts_run_a_decode_step_through_the_decode_bucket_slot_program
         torch.testing.assert_close(got, runner._moe_combine(moe, xn), rtol=1e-4, atol=1e-5)
 
 
-def test_sliced_experts_run_a_steps_wide_experts_through_the_grouped_prefill_program():
-    """On experts sliced across ranks, every expert a step routes more rows than the decode bucket runs through the
-    grouped prefill program, ``EXPERT_GROUP`` experts per launch in blocks of ``EXPERT_PREFILL_M`` rows, the last launch
-    padded. The step combines to what the per-expert tiers give, with experts past one block among them."""
+def test_sliced_experts_run_a_steps_experts_through_the_grouped_prefill_programs():
+    """On experts sliced across ranks, a step's experts run through the grouped prefill programs, ``EXPERT_GROUP``
+    experts per launch, each launch's last padded: an expert routed up to the decode bucket's rows in one block of that
+    many, a wider one in blocks of ``EXPERT_PREFILL_M`` rows. The step combines to what the per-expert tiers give, with
+    experts past one block among them."""
     import torch
 
     from emmy.compiler.backend.plan_cache import PlanTemplateCache
@@ -444,11 +445,11 @@ def test_sliced_experts_run_a_steps_wide_experts_through_the_grouped_prefill_pro
         runner = EmmyGenRunner.from_model(model, plan_cache=PlanTemplateCache(), expert_slices=2, **kwargs)
     runner._ensure_device()
     moe = runner._moe[0]
-    assert moe["blocks"] is not None
+    assert set(moe["blocks"]) == {runner._decode_bucket, EXPERT_PREFILL_M}
     hidden = model.config.hidden_size
     torch.manual_seed(3)
-    # 300 alike rows: each of their experts takes all of them, more than one block.
-    xn = torch.cat([torch.randn(1, hidden).expand(EXPERT_PREFILL_M + 44, hidden), torch.randn(200, hidden)]).cuda()
+    # 300 alike rows: each of their experts takes all of them, more than one block; 40 more spread thin.
+    xn = torch.cat([torch.randn(1, hidden).expand(EXPERT_PREFILL_M + 44, hidden), torch.randn(40, hidden)]).cuda()
     got = runner._moe_combine(moe, xn)
     grouped = moe.pop("blocks")
     try:

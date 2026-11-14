@@ -262,8 +262,9 @@ for the fixed-slot tier. They take width 256 too, with an M=256 row per any-widt
 program also compiles that static expert prefill program. Expert twins are traced at the slice of every expert that
 each rank of the config's `--tensor-parallel-size` holds, and on more than one rank the fixed-slot program is also
 traced at the decode bucket's rows (`expert-slots8`), the program a decode step of several rows runs, and, for a
-config with an any-width program, the grouped prefill program (`expert-group32x256`), the program a prefill step's
-wider experts run. Both are symbolic by name and take the dynamic rows. The audit expects the same split per twin. A
+config with an any-width program, the grouped prefill programs (`expert-group32x8` and `expert-group32x256`), which
+a prefill step's experts run 32 at a time, blocks of the decode bucket's rows or of 256. They are symbolic by name
+and take the dynamic rows. The audit expects the same split per twin. A
 static-only release is accepted only when the same env proves that no wider or symbolic path is reachable. The
 resulting working file is measured and verified by `run --golden PATH [--realization NAME] --bench`.
 

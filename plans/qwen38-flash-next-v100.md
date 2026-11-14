@@ -17,13 +17,12 @@ not meet them against itself either. Since the done gate's first run (2026-11-03
 3 GiB per card margin, sliced the shared expert across ranks, split pre8's down rows across blocks, measured where
 the first-token and eight-request gaps sit (2026-11-07), ran the eight requests' routed experts in one launch (15%
 more output), and found the host time of a decode step equal on both sides. On 2026-11-11 the owner turned async
-scheduling on, on both sides, and on 2026-11-12 a prefill step's wider experts began running 32 per launch. Against
-the async fork, Emmy is now 1.6-2.2x slower to the first token, 1.74x slower per token at one request, and gives
-0.67x the fork's output at four requests and 0.72x at eight (2026-11-13). Async doubles the first token at the full
-context on both sides; the owner keeps the 2.5 GiB key/value pool, so that is a known limit (step 5). The
-2026-11-13 measurement round ranks the next rounds and recommends the prefill experts' second round, for the owner
-to pick. The minimums in step 2 and Qwen's license are still open with the owner, who plans as if the license were
-granted.
+scheduling on, on both sides, and on 2026-11-12 a prefill step's wider experts began running 32 per launch, the
+rest on 2026-11-14. Against the async fork, Emmy is now 1.7-1.9x slower to the first token at 1K and 4K, 1.74x
+slower per token at one request, and gives 0.68x the fork's output at four requests and 0.73x at eight (2026-11-14).
+Async doubles the first token at the full context on both sides; the owner keeps the 2.5 GiB key/value pool, so that
+is a known limit (step 5). The next round comes from the 2026-11-13 ranking, for the owner to pick. The minimums in
+step 2 and Qwen's license are still open with the owner, who plans as if the license were granted.
 
 ## What we know
 
@@ -1168,6 +1167,50 @@ Rounds, as with DeepSeek. Each round starts from a profile and ends with a boot 
     100 ms. For a decode round instead, 2 is the cheapest measured gain (four requests) and 3 the cheapest one that
     reaches every concurrency.
   - Boot: Emmy about 1,085 s, the fork 475 s (its baked caches miss under async, as before).
+- **Prefill experts, second round (2026-11-14).** Round 1 of the 2026-11-13 ranking. The experts a prefill step
+  routes eight rows or fewer now run 32 at a time too, through a second grouped program over blocks of eight rows (the
+  twin `expert-group32x8@nvfp4`), and each row's expert outputs are weighted and summed in one pass in float32
+  (`embedding_bag`), in place of a gather, a weighting and ten adds in fp16. The round proposed a combine twin; torch's
+  fused weighted gather does the same in one call, 0.92 ms per layer at 3,920 tokens against 1.9 (a sparse product
+  took 0.52 ms, but sums in an order cuSPARSE picks).
+  - The twin takes the 8-row expert's two cuts, and both large pieces were tuned cold on the card, 40 rows each, to
+    tensor-core tiles: 191.5 us per launch of 32 experts, about 6 us per expert against about 35 one at a time. A
+    16-way split of the gate/up sum ran slower under the prior's schedules and was not pursued.
+  - The gate, profiled, rank 0, the 3,920-token step, main against the branch on the same base: expert programs 315 to
+    266 ms (the small experts 83 to 33), the row gather, sort, weighting and sum 139 to 90 ms, so the expert work 454
+    to 356 ms: 98 ms, just under the 100 ms bar. The step is 121 ms shorter (1,189 to 1,068 ms) and runs 7,855
+    kernels against 18,912; the 175-token step takes 472 ms against 588 (5,380 kernels against 15,163).
+  - A B B A on boots never profiled, main `0dfcf3e8c` against the branch; a range is both rounds' repeats:
+
+    | Point | Main | This round |
+    | --- | ---: | ---: |
+    | First token, 1K | 0.93 s | 0.84 s |
+    | First token, 4K | 1.59-1.63 s | 1.43-1.45 s |
+    | First token, 8K | 2.80-2.81 s | 2.55 s |
+    | First token, 32K | 10.66-10.70 s | 9.73-10.22 s |
+    | First token, 130K | 78.8-79.0 s | 72.8-80.0 s |
+    | One request, 1K / 512, per token | 16.68 ms | 16.71 ms |
+    | 4 requests, 4K / 1K, total output | 136.1-136.2 tok/s | 137.4-138.4 tok/s |
+    | 8 requests, 4K / 1K, total output | 227.6-227.9 tok/s | 232.9 tok/s |
+
+  - The 4K first token is 0.17 s sooner: its 3,920-token step by 0.09 s, its 175-token step by 0.05 s and its 1-token
+    step by 0.03 s (first tokens at 2, 3,921 and 4,096 tokens). A 176-token prompt from scratch: 0.53 to 0.39 s.
+    Four and eight requests gained 1-2%, under the 3-5% expected.
+  - At 130K the branch's prefill was preempted three times per prompt against main's two (the engine's counter: 18
+    against 12 over six prompts each), which takes back what its faster chunks save. Why the count differs is not
+    established. The branch's second 32K round rose run by run (9.94 to 10.43 s), as #1388's did; four more runs after
+    the 130K rows took 9.69-10.12 s.
+  - Against the async fork (2026-11-13's numbers): first token 1.9x slower at 1K (2.2x before) and 1.7x at 4K (1.9x);
+    four requests 0.68x its output (0.67x), eight 0.73x (0.72x). The 4K gap is now 0.58 s: the 3,920-token step
+    0.29 s, the 1-token step 0.18 s, the 175-token step 0.11 s.
+  - Checks on the branch: GSM8K 124 of 128 (2 at the output limit; 125 before); acceptance cases 28, 28, 27 without
+    thinking and 27, 27, 27 with it; long-document lookups 339 of 339 without thinking (the run with thinking was
+    stopped for time). The margin test passes with 582-584 MiB spare per card, and the release audit deploys all 16
+    twins from the golden alone. The float32 sum rounds differently: the top first token at 2K, 4K, 8K and 32K random
+    tokens is main's and its log-probabilities move by up to 0.3, and 3 of 6 greedy texts are main's, the other three
+    parting after 650-1,460 characters. Boot 1,116 s, as main's 1,117.
+  - Next: from the 2026-11-13 ranking, for the owner to pick. In the 4K first token the 3,920-token step is still the
+    largest part of the gap; its 256-row blocks are about half padding, and gathering the rows into them takes 33 ms.
 - Gate, the definition of done. Both sides run step 2's production configuration: the same checkpoint, layout,
   context, key/value pool, concurrency, prefix-cache and MTP settings; fork, Emmy, Emmy, fork rounds; three repeats
   each:
