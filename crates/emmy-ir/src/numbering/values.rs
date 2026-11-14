@@ -61,6 +61,52 @@ impl Numbering {
 
 type Value = (Number, Vec<Param>);
 
+/// The values in scope, with every change since a scope opened undone when it closes: a journal of each changed
+/// name's previous value, so a block costs what it changes rather than a copy of every value defined ahead of it.
+#[derive(Default)]
+struct ScopedValues {
+    values: HashMap<Name, Value>,
+    journal: Vec<(Name, Option<Value>)>,
+}
+
+impl ScopedValues {
+    fn get(&self, name: &Name) -> Option<&Value> {
+        self.values.get(name)
+    }
+
+    fn contains_key(&self, name: &Name) -> bool {
+        self.values.contains_key(name)
+    }
+
+    fn insert(&mut self, name: Name, value: Value) {
+        let previous = self.values.insert(name, value);
+        self.journal.push((name, previous));
+    }
+
+    fn remove(&mut self, name: &Name) {
+        if let Some(previous) = self.values.remove(name) {
+            self.journal.push((*name, Some(previous)));
+        }
+    }
+
+    /// Where a scope opens: [`ScopedValues::close`] undoes every change made after it.
+    fn open(&self) -> usize {
+        self.journal.len()
+    }
+
+    fn close(&mut self, opened: usize) {
+        while self.journal.len() > opened {
+            let Some((name, previous)) = self.journal.pop() else {
+                break;
+            };
+            match previous {
+                Some(value) => self.values.insert(name, value),
+                None => self.values.remove(&name),
+            };
+        }
+    }
+}
+
 /// How a chain of one associative commutative operation is keyed: as one node over every term (`Flat`: two
 /// associations of one sum number alike, which the normal form's order needs, since it orders a sum's terms by the
 /// ranks the numbering gives), or as the tree it is spelled as (`Kept`: the clustered identity spells every FMA-class
@@ -75,7 +121,7 @@ struct Context<'a> {
     out: Numbering,
     resource_key: &'a dyn Fn(&Name) -> Key,
     chains: Chains,
-    env: HashMap<Name, Value>,
+    env: ScopedValues,
     axes: HashMap<Name, Key>,
     loops: Vec<Name>,
     path: Vec<usize>,
@@ -779,7 +825,7 @@ impl Context<'_> {
                         .filter_map(|name| self.defined_by.get(name).copied())
                         .collect();
                     let bound = stmt.bound_axes();
-                    let saved_env = self.env.clone();
+                    let opened = self.env.open();
                     let saved_axes: Vec<(Name, Option<Key>)> = bound
                         .iter()
                         .map(|axis| (axis.name, self.axes.get(&axis.name).cloned()))
@@ -817,8 +863,10 @@ impl Context<'_> {
                             }
                         }
                     }
-                    self.env = saved_env;
-                    self.env.extend(exported);
+                    self.env.close(opened);
+                    for (name, value) in exported {
+                        self.env.insert(name, value);
+                    }
                     for (name, previous) in saved_axes {
                         match previous {
                             None => {
@@ -970,7 +1018,7 @@ pub fn value_numbers(
         out: Numbering::default(),
         resource_key,
         chains,
-        env: HashMap::new(),
+        env: ScopedValues::default(),
         axes: HashMap::new(),
         loops: Vec::new(),
         path: Vec::new(),

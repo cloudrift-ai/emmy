@@ -52,6 +52,11 @@ impl<K: Eq + Hash + Clone, V: Clone> Memo<K, V> {
         self.cache.get_or_insert_with(key, compute)
     }
 
+    /// Remember `value` under `key`.
+    pub fn insert(&self, key: K, value: V) {
+        self.cache.insert(key, value);
+    }
+
     pub fn clear(&self) {
         self.cache.clear();
     }

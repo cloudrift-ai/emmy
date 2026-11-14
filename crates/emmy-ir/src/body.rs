@@ -88,6 +88,7 @@ pub struct BodyData {
     by_type: Mutex<HashMap<Vec<StatementType>, Vec<StmtRef>>>,
     exact: OnceLock<u64>,
     normalized: OnceLock<Normalized>,
+    sorted: OnceLock<()>,
 }
 
 /// What a body knows of its normal form once it was taken: that it is its own, or which body it is. Never the body's
@@ -244,6 +245,7 @@ impl Body {
             by_type: Mutex::new(HashMap::new()),
             exact: OnceLock::new(),
             normalized: OnceLock::new(),
+            sorted: OnceLock::new(),
         }))
     }
 
@@ -290,6 +292,18 @@ impl Body {
     /// Record that this body is its own normal form.
     pub(crate) fn mark_normal(&self) {
         let _ = self.0.normalized.set(Normalized::Itself);
+    }
+
+    /// Whether every scope of this body is known to be in dependency order, so the stable dependency sort
+    /// (`order::topological_sort`) leaves it as it is.
+    pub(crate) fn is_sorted(&self) -> bool {
+        self.0.sorted.get().is_some()
+    }
+
+    /// Record that every scope of this body is in dependency order: the dependency sort's own result, or an order
+    /// that keeps every dependency and adds effects on top.
+    pub(crate) fn mark_sorted(&self) {
+        let _ = self.0.sorted.set(());
     }
 
     pub fn from_statements(stmts: impl IntoIterator<Item = Statement>) -> Body {

@@ -4,7 +4,7 @@
 
 use std::collections::HashMap;
 
-use super::{Chains, Key, Number, Param, spelled_key, value_numbers};
+use super::{Chains, Key, Number, Numbering, Param, spelled_key, value_numbers};
 
 /// A statement's number and parameters, as the numbering gives them.
 type Value = (Number, Vec<Param>);
@@ -17,8 +17,10 @@ use crate::statement::Statement;
 /// an accumulator updated directly in a seeded loop, so its seed is the operation's identity at that loop's entry, or
 /// a carried state, whose seed its update names. Two candidates start in one group when their updates are statements
 /// of one type, operation and dtype in one scope; a group splits by its members' update numbers, the numbering keying every grouped state
-/// by its group, until no group splits. A body with no two candidates in one scope is not numbered at all.
-pub fn congruent_states(body: &Body) -> Vec<Vec<Name>> {
+/// by its group, until no group splits. A body with no two candidates in one scope is not numbered at all. The
+/// numbering that found the groups stable comes with them: it keys every member under [`group_keys`] and every other
+/// name as spelled, which is what placement numbers under, so placement takes it instead of numbering again.
+pub fn congruent_states(body: &Body) -> (Vec<Vec<Name>>, Option<Numbering>) {
     let mut sites = Sites::default();
     sites.walk(body, None, true);
     let mut start: Vec<(Key, Vec<Name>)> = Vec::new();
@@ -62,11 +64,11 @@ pub fn congruent_states(body: &Body) -> Vec<Vec<Name>> {
             );
         }
         if next == groups {
-            break;
+            return (groups, Some(numbering));
         }
         groups = next;
     }
-    groups
+    (groups, None)
 }
 
 /// The resource key every member of a group is numbered under: its group's position.

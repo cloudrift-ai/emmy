@@ -148,7 +148,26 @@ pub(crate) fn rename_apart(body: &Body, clashing: &HashSet<Name>, taken: &HashSe
 
 pub(crate) fn merge_sibling_reduce_loops_here(body: &Body) -> Body {
     let items = body.stmts();
-    if items.len() < 2 {
+    // Only two reduce loops over one axis can merge: a scope without such a pair is left alone before its ordering
+    // constraints are worked out.
+    let reduces: Vec<&Loop> = items
+        .iter()
+        .filter_map(|s| match &**s {
+            Statement::Loop(l) if l.is_reduce() => Some(l),
+            _ => None,
+        })
+        .collect();
+    let mergeable = |a: &Loop, b: &Loop| {
+        a.axis.name == b.axis.name
+            && a.axis.extent == b.axis.extent
+            && a.unroll == b.unroll
+            && a.seed == b.seed
+    };
+    if !reduces
+        .iter()
+        .enumerate()
+        .any(|(i, a)| reduces[i + 1..].iter().any(|b| mergeable(a, b)))
+    {
         return body.clone();
     }
     let before = ordering_constraints(body, true);
@@ -177,12 +196,7 @@ pub(crate) fn merge_sibling_reduce_loops_here(body: &Body) -> Body {
             let Statement::Loop(t) = &*items[j] else {
                 continue;
             };
-            if !(t.is_reduce()
-                && t.axis.name == merged.axis.name
-                && t.axis.extent == merged.axis.extent
-                && t.unroll == merged.unroll
-                && t.seed == merged.seed)
-            {
+            if !(t.is_reduce() && mergeable(t, &merged)) {
                 continue;
             }
             // ONE reading of what the incoming loop needs from around it: the names it reads and does not bind.
