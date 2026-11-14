@@ -270,7 +270,7 @@ def test_deferred_register_partials_preserve_empty_states_and_the_uneven_tail(re
     bound = factorize(realized, root=None)
     assert bound.axes == tile.place.free
     # This serial Kernel IR uses only the shared scalar statements. Execute its actual strided
-    # body through the host renderer; the CUDA source assertion above checks the storage conversion.
+    # body through the host renderer; the Kernel IR assertion above checks the storage conversion.
     kernel = KernelOp(body=Body((Loop(bound.axes[0], bound.body),)), inputs=tile.inputs, outputs=tile.outputs)
     states, expected = _partial_states()
     actual = execute_loop_op_cpp(kernel, {"x": states}, {"y": (8,)})

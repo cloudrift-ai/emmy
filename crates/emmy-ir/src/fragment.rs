@@ -6,8 +6,7 @@
 //! (`FragmentLoad`, `FragmentApply`, `FragmentRowReduce`, `RegStore`, `BlockScaleLoad`) follows from its row of the
 //! table, and so does the register count of a `RegFragment`.
 //!
-//! Only the rows of an accumulator of floats are read by the CUDA renderer; the operand rows, the packed
-//! accumulators and the block scales are what its C++ loaders compute, written here for the PTX compiler.
+//! The PTX compiler expands every fragment statement per lane from these rows.
 
 use crate::closed_set;
 use crate::dtype::DType;

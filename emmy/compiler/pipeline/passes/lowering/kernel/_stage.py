@@ -802,7 +802,7 @@ class SyncTransport:
     The compute fill assigns each thread a run of ``V`` **contiguous** slab cells (``V`` = the
     16-byte vector width, always dividing the slab's inner extent): the ``row``/``col`` derivation
     hoists out of the per-cell code (one div/mod per run, not per cell), the per-thread gmem reads
-    and smem stores are contiguous (nvcc merges them into wide accesses), and the cone stmts are
+    and smem stores are contiguous (ptxas merges them into wide accesses), and the cone stmts are
     replicated per lane-local cell with a ``__c<j>`` SSA suffix."""
 
     operands: tuple[SyncOperand, ...]

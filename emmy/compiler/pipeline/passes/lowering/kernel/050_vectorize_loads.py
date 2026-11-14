@@ -3,12 +3,10 @@
 Until this pass, the body of every materialized kernel carries scalar
 ``Load`` Stmts. Some sequences of those Loads have a "vector" shape: N
 consecutive Loads from the same source buffer whose last-dim indices differ
-by 0, 1, ..., N-1. The CUDA backend can emit those as a single
-``float<N>`` / ``__half2`` reinterpret-cast read followed by N ``.x/.y/.z/.w``
-unpacks. Folding the run into one ``Load(names=(n0, n1, ...), input, index)``
+by 0, 1, ..., N-1. The PTX compiler emits those as one vector load of N
+registers. Folding the run into one ``Load(names=(n0, n1, ...), input, index)``
 makes the optimization visible in the IR (``--ir kernel`` shows one Load with
-multiple LHS names) while keeping the renderer simple — ``Load``'s render
-branches on the vector form.
+multiple LHS names).
 
 ## What the pass does
 
@@ -25,7 +23,7 @@ post-order):
 
 Before grouping, a Load index ``(Y + r) / d`` whose ``Y`` is a non-negative multiple of ``g`` (variable coefficients
 times the strided-loop alignment), with ``g`` dividing ``d`` and ``0 < r < g``, reads ``Y / d``: every element of a
-lane's run then reads a block-scaled weight's scale at the run's own index, which nvcc loads once. On the V100 the
+lane's run then reads a block-scaled weight's scale at the run's own index, which is loaded once. On the V100 the
 width-1 fp8 down projection read 8 scales per 8-byte run and ran 181 us; read once per run it runs 127 us.
 
 ## Why this needs the source-buffer dtype

@@ -572,7 +572,7 @@ programs go away for a batched step and stay for the single-request programs unt
      step has one) and its own page. Two forms, to be measured against each other at `B` of 8 and 32: one launch per
      row of today's one-row program, which keeps cp.async and costs `B` launches a layer; and one program whose batch
      row is a grid axis, each CTA reading its row's page. The second reads several pages in one launch, so it takes
-     cp.async only once the renderer resolves a page per CTA, and gmem-direct reads until then.
+     cp.async only once the PTX compiler resolves a page per CTA, and gmem-direct reads until then.
    - *Native's own row-wise programs* (embedding gather, final norm, head, greedy selection) at `B` rows.
 3. *A batched verify step,* `B` requests of `K + 1` rows: the same programs at `B (K + 1)` rows, the attention fold
    taking each request's rows beside its group as the single-request verify step does, the accept, pick and drafter

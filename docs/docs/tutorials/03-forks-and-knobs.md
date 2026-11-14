@@ -25,7 +25,7 @@ compute. Suppose it offers four sizes:
 TILE = 64x64      TILE = 128x64     TILE = 64x128     TILE = 128x128
 ```
 
-Four options, one fork. Nothing has been built. No CUDA source exists, no kernel has been compiled, nothing has been
+Four options, one fork. Nothing has been built. No PTX exists, no kernel has been compiled, nothing has been
 measured. All that separates the four is a knob value — and that is deliberate, because it means the machinery
 deciding between them can look at all four without paying to construct any of them.
 

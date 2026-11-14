@@ -284,7 +284,7 @@ def _factorize(op, ctx: Ctx, tail: tuple, out_val: str, store=None, output_specs
         plain = tuple(spec for spec in output_specs if id(spec) not in streamed_ids)
         # An output sweep whose axis the peeled root's cone reads cannot wrap here: the peel binds
         # the root OUTSIDE the projection, so no wrap position inside ``proj`` encloses the reduce
-        # and the sweep coordinate renders as an undefined identifier at nvcc (DeepSeek-V4's fused
+        # and the sweep coordinate is a name nothing defines (DeepSeek-V4's fused
         # ``k_div_36_reduce``, whose per-column mean read the store sweep's column). The serial
         # fold realizes the shape whole — bind the UNPEELED projection so ``apply_output_specs``
         # wraps operand and projection together.
@@ -407,13 +407,13 @@ def _one_value_per_name(stmts) -> list:
     other's. Two peel levels that carry the same cone bind the same names to the same statements and
     the dedup above collapses them, which is what the tag is for. A placement cut breaks the tie — it
     replaces one level's cone with a workspace read and leaves the other computing in place — so the
-    two bind one name to two values, and nvcc rejects the second declaration (DeepSeek-V4's
+    two bind one name to two values, an SSA fault (DeepSeek-V4's
     ``post1.k_div_64_reduce`` under a cut, where one ``in0`` is a broadcast constant and the other is
     the workspace the cut materialized, and both derive ``v73`` from it).
 
-    The sweep is positional, which is what makes it right in one C scope: a use before the second
-    binding means the first value and a use after it means the second, exactly as the redeclaration
-    nvcc refuses would have read. Exported accumulators count as bindings too: a partial copy of
+    The sweep is positional, which is what makes it right in one scope: a use before the second
+    binding means the first value and a use after it means the second, exactly as the second binding
+    would have read. Exported accumulators count as bindings too: a partial copy of
     a reduction is a different loop even when some outputs retain their original names.
     Nothing moves while the two agree.
 

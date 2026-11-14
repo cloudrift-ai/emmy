@@ -1,8 +1,8 @@
-"""Kernel IR — the fully-scheduled kernel form, just above CUDA source.
+"""Kernel IR — the fully-scheduled kernel form, the input of the PTX compiler.
 
 Kernel IR sits between Tile IR (schedule decisions as structural Stmts)
-and CUDA source (text). Its body contains the explicit hardware
-machinery: ``Tile`` (thread/block coord bindings), ``Smem`` (``__shared__``
+and PTX (text). Its body contains the explicit hardware
+machinery: ``Tile`` (thread/block coord bindings), ``Smem`` (shared
 arrays), ``Sync`` (barriers), the transports into shared memory
 (``CpAsync*``, ``Tma*`` + ``Mbarrier*``), the cross-thread combines
 (``WarpShuffle``, ``TreeHalve``) and the tensor-core register fragments
@@ -11,11 +11,11 @@ arrays), ``Sync`` (barriers), the transports into shared memory
 Pipeline shape::
 
     Tile IR ──materialize_tile──▶ Kernel IR
-                    ──render_kernelop──▶ CUDA source
+                    ──ptx.compile_kernel──▶ PTX
 
 **Leaf compute reuses the shared statements directly**. ``Load`` / ``Assign`` /
 ``Let`` / ``Select`` / ``Write`` / ``Accum`` / ``Cond`` / ``Loop`` come straight
-from ``ir.stmt`` — buffer names are strings, so they render as they are.
+from ``ir.stmt`` — buffer names are strings, so they compile as they are.
 
 Kernel IR deliberately contains no scheduling decisions — those live in
 Tile IR and are materialized away before reaching this layer. A
@@ -128,7 +128,7 @@ def tile_cells(tile: Tile) -> int:
     ``BLOCK_SIZE``. This is ``blockDim`` minus any aux band, i.e. the divisor the cuda lowering
     uses for ``gridDim = ceil(n_elements / cells)``. So ``n_elements % cells == 0`` (and no aux
     band) means the static grid covers the iteration space exactly — no partial last block, so
-    the ``_gid < N`` tail guard is provably always-true and the render elides it."""
+    the ``_gid < N`` tail guard is provably always-true and the grid elides it."""
     if tile.block_threads is not None:
         return tile.block_threads
     return BLOCK_SIZE
@@ -143,7 +143,7 @@ def tile_n_dim(tile: Tile):
     """Total iteration-space size as a :class:`Dim` — the ∏ of the axis extents, holding a
     symbolic factor (a dynamic ``seq_len``) when any axis is symbolic. The cuda lowering
     sizes the launch from this (``ceil(n_dim / blockDim)`` CTAs, ``seq_len`` resolved at
-    launch); the renderer guards ``_gid < n_dim`` so the partial last block is masked."""
+    launch); the grid guards ``_gid < n_dim`` so the partial last block is masked."""
 
     n = Dim(1)
     for a in tile.axes:
@@ -320,7 +320,7 @@ def fragment_args(args: tuple, kinds: tuple[str, ...]) -> tuple[FragmentArg, ...
 
 
 #: The reserved coordinate Vars a :class:`FragmentApply` COORD / GMEM template is written over — the element's
-#: ABSOLUTE query row / key column; the render substitutes each element's coords (tile origin +
+#: ABSOLUTE query row / key column; the PTX compiler substitutes each element's coords (tile origin +
 #: layout offset) for these.
 FRAG_ROW = "__frow"
 FRAG_COL = "__fcol"
@@ -333,13 +333,10 @@ ELEM_COL = "__N__"
 # ---------------------------------------------------------------------------
 # Warp-level MMA: ``mma.sync.aligned`` + ``ldmatrix`` (the ``s16816`` path
 # cuBLAS / CUTLASS use) — the sole tensor-core Statement family. Operands are
-# *explicit per-thread register arrays* with a PTX-fixed lane→element layout,
-# referenced positionally inside inline PTX (``RegFragment`` / ``LdmatrixLoad`` / ``FragmentLoad``
-# / ``MmaSyncPtx`` / ``RegStore``), rendered via the ``_MMA_SYNC_PRELUDE``
-# helper wrappers (pure PTX — NVRTC-clean, no ``<mma.h>``). Emitted by
+# *explicit per-thread register arrays* with a PTX-fixed lane→element layout
+# (``RegFragment`` / ``LdmatrixLoad`` / ``FragmentLoad`` / ``MmaSyncPtx`` / ``RegStore``), which the PTX
+# compiler expands per lane from the lane-to-element table. Emitted by
 # the kernel atom lowering (``lowering/kernel/_atom.py``) from the tile's ``Atom`` spec.
-# (The opaque ``nvcuda::wmma`` node family was removed — the swizzled mma.sync
-# slab beat it.)
 # ---------------------------------------------------------------------------
 
 
@@ -489,7 +486,7 @@ class KernelOp(BodyOp):
     a graph node, carries a body of Kernel IR stmts plus a kernel name.
 
     Buffer shapes are *not* baked in — the surrounding graph supplies
-    them at render time, same as ``TileOp``. Kernel signature is derived
+    them where the kernel is compiled, same as ``TileOp``. Kernel signature is derived
     from the body: distinct ``Load.input`` names become kernel input
     params, distinct ``Write.output`` names become writeable output
     params, ordered by first appearance. ``Smem`` buffers are excluded.
@@ -519,10 +516,10 @@ class KernelOp(BodyOp):
         return {s.name: s for s in self if isinstance(s, Smem)}
 
     def smem_bytes(self) -> int:
-        """Total static + dynamic ``__shared__`` bytes declared in the body —
+        """Total static + dynamic shared bytes declared in the body —
         the padding-aware pool footprint from :func:`pack_smem` (each buffer
-        aligned to ``max(sizeof(dtype), Smem.align)``), so this matches the
-        renderer's pool packer and the launch-time pool size."""
+        aligned to ``max(dtype.nbytes, Smem.align)``), so this matches the
+        launch-time pool size."""
         return pack_smem(self.smem_buffers.values())[1]
 
     def validate(self, ctx) -> bool:

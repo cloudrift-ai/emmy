@@ -142,7 +142,7 @@ def _unshadowed(body, states: tuple[str, ...]) -> list:
 
     The tail replicates under the same ``__c{i}_{j}`` suffix the states take, so a tail that DEFINES
     a value spelled like one of them lands on that cell's accumulator: two declarations of one name
-    in one scope, which nvcc refuses (``acc0__c0_0 has already been declared``). It happens where the
+    in one scope (``acc0__c0_0`` defined twice), an SSA fault. It happens where the
     tail RECOMPUTES the carrier's own fold — one traced value whose two occurrences the tree could
     not share because they were formed differently — and however alike they look those are two
     values, so the tail's takes its own name. A tail that only READS a state is untouched, and still
@@ -208,8 +208,8 @@ def _hoist_k_invariant(body, k_name: str) -> tuple[tuple, tuple]:
     What a loop-varying statement defines is read off its WHOLE tree, not its own head: a reduce
     over some other axis is one statement whose accumulator its body binds, and reading only the
     head left that accumulator invariant — so the projection above it hoisted ahead of the loop
-    that fills it, and the kernel read a name declared later (nvcc: *identifier "acc7__ar0" is
-    undefined*). A statement that reads the coordinate carries everything it binds with it.
+    that fills it, and the kernel read a name defined later (``acc7__ar0``, read before its
+    definition). A statement that reads the coordinate carries everything it binds with it.
     """
     varying = {k_name}
     hoisted: list[Statement] = []
@@ -1927,8 +1927,8 @@ def _cell_varying(body, side: Side | None) -> bool:
     A[m, k, n]``) — and then the row read is BOTH the wrong value for every column but the first and
     a reference to a coordinate the kernel does not define: after the tile split only the ``_b`` /
     ``_u`` split vars are bound, so the per-copy rename (:func:`copy_cell`) suffixes the surviving
-    axis name into an undefined identifier (nvcc: ``identifier "a1__ar9" is undefined``, the
-    whole-model qwen3-0.6b layer-0 o_proj on sm_89). Such an operand is read per CELL instead."""
+    axis name into a name nothing defines (``a1__ar9``, the whole-model qwen3-0.6b layer-0 o_proj on sm_89).
+    Such an operand is read per CELL instead."""
     return side is not None and any(side.name in free_names(stmt) for stmt in body)
 
 
@@ -3425,9 +3425,7 @@ class _FlashOps(_MmaOps):
             name=query.tag,
             swizzle=query.swizzle,
         )
-        decl = slab_smem(
-            query.slab, query.shape[0], query.shape[1], elem, align=_fill_align(query.shape[1], elem.nbytes, query.swizzle)
-        )
+        decl = slab_smem(query.slab, query.shape[0], query.shape[1], elem, align=_fill_align(query.shape[1], elem.nbytes, query.swizzle))
         return [decl, *fill, *cp_async_commit(), *cp_async_wait(0)]
 
     def _wgmma_score(self, m, cols: int, key, slot) -> list[Statement]:

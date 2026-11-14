@@ -1,8 +1,8 @@
 """The session kernel cache — fetch a finished lowering instead of re-lowering.
 
-What these pin: (a) REPLAY EQUALITY — a twin kernel compiled through a cache hit renders the
-byte-identical CUDA source a fresh compile produces (modulo nothing: the io rebind restores the
-twin's own buffer names before rendering); (b) the cache is OPT-IN (no ``Context.kernel_cache``,
+What these pin: (a) REPLAY EQUALITY — a twin kernel compiled through a cache hit compiles to the
+byte-identical PTX a fresh compile produces (modulo nothing: the io rebind restores the
+twin's own buffer names before compiling); (b) the cache is OPT-IN (no ``Context.kernel_cache``,
 no behavior change) and greedy-only (the tune search strips it); (c) a multi-kernel origin
 poisons its key rather than serving a fragment."""
 

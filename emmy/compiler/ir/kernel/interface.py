@@ -1,8 +1,8 @@
 """A kernel's interface: what the launch and the code generator must agree on, computed from the kernel.
 
 Its parameters in call order, the per-block thread bound, the shared-memory pool, and whether it needs the
-arch-specific ISA. One function computes it; the CUDA lowering takes the launch's argument order from it, the renderer
-its signature and its shared-memory declarations. A computed fact, never stored on the op.
+arch-specific ISA. One function computes it; the CUDA lowering takes the launch's argument order from it, the PTX
+compiler its signature and its shared-memory declarations. A computed fact, never stored on the op.
 """
 
 from __future__ import annotations

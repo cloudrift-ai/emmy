@@ -82,8 +82,8 @@ class StructuredType(DataType):
     """A register-composite type — a packed vector like ``F16x2`` — as opposed
     to a plain scalar element.
 
-    It occupies a register with a hardware-specific layout (``__half2``); the
-    renderer / lowering keys on the concrete subtype rather than treating it as
+    It occupies a register with a hardware-specific layout (two packed halves); the
+    lowering keys on the concrete subtype rather than treating it as
     a scalar."""
 
     @property
@@ -115,10 +115,10 @@ F8E5M2 = DataType("f8e5m2", np.dtype(np.uint8), 1)
 # e4m3 per 16 values + one f32 per tensor) are separate plain tensors — a
 # loader concern, not dtype information.
 F4E2M1x2 = StructuredType("f4e2m1x2", np.dtype(np.uint8), 1)
-# Two ``__half`` values packed into a 32-bit register, semantically a
+# Two f16 values packed into a 32-bit register, semantically a
 # 2-wide vector of fp16 — the first ``StructuredType``. Same numpy dtype as
 # F16 since numpy doesn't distinguish — packing is a CUDA-side storage detail;
-# the canonical IR token "f16x2" is what the renderer keys on.
+# the canonical IR token "f16x2" is what the code generators key on.
 F16x2 = StructuredType("f16x2", np.dtype(np.float16), 4)
 
 

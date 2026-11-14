@@ -68,32 +68,32 @@ file imports what it uses by name; no child module takes its parent's imports.
   statement type has (`op`, `dtype`, `name`) are the `Field` trait's: a field type that is one answers, every other
   field's default is none. A test pins the digest of the declaration list, the names and field orders every stored text
   spells.
-- **Fields** (`field.rs`): one trait, `Field`, every field type implements: how it is visited and rewritten by
-  role, spelled on a declared statement type's header and read back by its `FieldType`. A number where a name is
-  expected (`NumOr<T>`, a carry's literal seed) is plain data. A record (`SelectBranch`, `FragmentArg`) is declared in
-  the same list with a layer of its own, a struct whose own fields play roles and a `Field` of the statement type that
-  holds it. Every closed set of spellings the crate branches on is an enum declared with `closed_set!` (one text per
+- **Fields** (`field.rs`): one trait, `Field`, every field type implements: how it is visited and rewritten by role,
+  spelled on a declared statement type's header and read back by its `FieldType`. A number where a name is expected
+  (`NumOr<T>`, a carry's literal seed) is plain data. A record (`SelectBranch`, `FragmentArg`) is declared in the same
+  list with a layer of its own, a struct whose own fields play roles and a `Field` of the statement type that holds
+  it. Every closed set of spellings the crate branches on is an enum declared with `closed_set!` (one text per
   variant, `Display` and `FromStr` over them, a test pinning every text, since each is a stored spelling or identity
   material): the dtypes (`DType`, `dtype.rs`, with the promotion rule; the extension exports the set as `DTYPES` and a
-  Python test holds it equal to the `DataType` registry), the literal types (`LitType`),
-  the GPU built-ins (`expr::Builtin`), the expression types (`ExprType`, generated from the one expression list; the
-  digest spells a node by it), the digest's other tags (`numbering::Tag`) and a fragment's layout and role
-  (`fragment::Layout`, `fragment::Role`, which the lane-to-element table is keyed on). A cast's target is `CastTarget`:
-  a literal type the simplifier folds through, or any other C type the renderer spells. A value the crate only carries
-  stays a name: a slab's swizzle, a tile's raster orientation, a slab's or an MMA wrapper's C type. An elementwise operation is `ElementwiseOp::Known(Operation)` or `ElementwiseOp::Other(name)`, a spelling only a
-  renderer knows. The known operations are one declaration (`operations!` in `elementwise.rs`): each variant with its
-  spelling and its properties, which generates the enum, its `Display`/`FromStr` pair and the table `OPS` the enum
-  indexes, one `OperationInfo` row per operation (commutative, associative, the neutral element, the cluster
-  representative, integer arithmetic, whether it copies or selects its operand, its affine role, its host evaluator,
-  its infix spelling and precedence, and for a composite function its definition in primitive operations, which
-  `Operation::definition` gives over an operand and kernel lowering writes into a body). An approximate instruction
-  is an operation of its own, named after the exact one (`exp_fast`, `divide_fast`, `sqrt_fast`, …): the same
-  function and the same host value, a faster instruction with a documented error on a device. Every reader
-  of an operation's nature (the affine fold, the alias reads of placement and the ties, the dtype promotion, the
-  clustered identity, the Python tables) reads a property; none matches a name. The neutral element is the real one
-  (`-inf` for a maximum) and `seed` is what a kernel initializes with, the bounded stand-in `±1e30` the CUDA source
-  spells. A string of any of these sets exists where the text is read or written, at the Python boundary, and nowhere
-  else.
+  Python test holds it equal to the `DataType` registry), the literal types (`LitType`), the GPU built-ins
+  (`expr::Builtin`), the expression types (`ExprType`, generated from the one expression list; the digest spells a
+  node by it), the digest's other tags (`numbering::Tag`) and a fragment's layout and role (`fragment::Layout`,
+  `fragment::Role`, which the lane-to-element table is keyed on). A cast's target is `CastTarget`: a literal type the
+  simplifier folds through, or any other C type the renderer spells. A value the crate only carries stays a name: a
+  slab's swizzle, a tile's raster orientation. An elementwise operation is `ElementwiseOp::Known(Operation)` or
+  `ElementwiseOp::Other(name)`, a spelling only a renderer knows. The known operations are one declaration
+  (`operations!` in `elementwise.rs`): each variant with its spelling and its properties, which generates the enum,
+  its `Display`/`FromStr` pair and the table `OPS` the enum indexes, one `OperationInfo` row per operation
+  (commutative, associative, the neutral element, the cluster representative, integer arithmetic, whether it copies or
+  selects its operand, its affine role, its host evaluator, its infix spelling and precedence, and for a composite
+  function its definition in primitive operations, which `Operation::definition` gives over an operand and kernel
+  lowering writes into a body). An approximate instruction is an operation of its own, named after the exact one
+  (`exp_fast`, `divide_fast`, `sqrt_fast`, …): the same function and the same host value, a faster instruction with a
+  documented error on a device. Every reader of an operation's nature (the affine fold, the alias reads of placement
+  and the ties, the dtype promotion, the clustered identity, the Python tables) reads a property; none matches a name.
+  The neutral element is the real one (`-inf` for a maximum) and `seed` is what a kernel initializes with, the bounded
+  stand-in `±1e30`. A string of any of these sets exists where the text is read or written, at the Python boundary,
+  and nowhere else.
 - **Axes** (`axis.rs`): `Axis` (name, `Dim`, window), equal by name and extent as the Python class is; the window
   is provenance. The Python `Axis`, `Dim`, `DataType` and `ElementwiseImpl` objects stay Python classes: a statement
   holds a name (or an axis's parts) and the extension makes the object on first read.
@@ -184,10 +184,8 @@ per register and element the row and column offset in the tile as expressions ov
 of a per-row reduce, and for a register of block scales the lanes that supply it under the instruction's two
 selectors (`SCALE_SELECTOR_A`, `SCALE_SELECTOR_B`). `paired_accumulator_table` is the accumulator of Volta's paired
 tile. A `RegFragment` holds as many registers as its row (`RegFragment::registers`); no statement carries a count.
-The CUDA renderer reads the rows of an accumulator of floats through the extension (`FragmentApply`,
-`FragmentRowReduce`, `RegStore`); the operand rows, the packed accumulators and the block scales are what its C++
-loaders compute, written here for the PTX compiler and checked by a test that every element of a tile is held once
-(twice by Volta's operands), not against a card.
+The PTX compiler expands every fragment statement per lane from these rows. A test checks that every element of a
+tile is held once (twice by Volta's operands).
 
 `input.rs` is the check a code generator's input passes (`check_input`): typed in full (`types.rs`), one flat index
 per access outside the accesses their dimensions define, no loop asking for unrolling, and every fragment statement

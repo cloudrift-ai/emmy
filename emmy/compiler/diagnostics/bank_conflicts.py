@@ -288,7 +288,7 @@ def lane_bank_distribution(
 # LDS.128 vectorization model
 # ---------------------------------------------------------------------------
 #
-# nvcc fuses N consecutive scalar fp32 loads from smem into a single
+# ptxas fuses N consecutive scalar fp32 loads from smem into a single
 # ``ld.shared.v4`` (LDS.128) when they read 4 contiguous fp32. The warp
 # drains in 4 cycles regardless — so the first ``vec_width`` distinct
 # addresses per bank are "absorbed" into the natural drain (no extra
@@ -351,7 +351,6 @@ def annotate_lds128(results: list[BankConflictResult]) -> None:
 # ---------------------------------------------------------------------------
 # Kernel-IR static analyzer (visualizer + cross-validation)
 # ---------------------------------------------------------------------------
-
 
 
 def _binding_result(b: StageBinding, k_iter: int, warp_id: int) -> BankConflictResult | None:

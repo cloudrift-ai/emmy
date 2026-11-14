@@ -148,7 +148,7 @@ def test_native_pack_parity_rebind_graph_and_retirement(tmp_path, monkeypatch):
         root = save_executable(tmp_path / "bundle", {"test": plan}, bindings={"test": _bindings(x)}, key={}, reads={"test": frozenset()})
         del reference
         shutil.rmtree(tmp_path / "cache")
-        # The native child cannot find Python, nvcc, or the removed cubin cache.
+        # The native child cannot find Python, ptxas, or the removed cubin cache.
         monkeypatch.setenv("PATH", "/nonexistent")
 
         async def check():

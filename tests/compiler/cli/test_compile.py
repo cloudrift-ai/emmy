@@ -27,15 +27,15 @@ def test_compile_code_loop_ir(run_cli):
     assert " = relu(" in stdout
 
 
-def test_compile_code_saves_default_cuda_to_output(run_cli, tmp_path):
-    """Default ``handle_compile`` path: no ``--ir`` ⇒ cuda. With ``--output``
-    the rendered CUDA source lands on disk.
+def test_compile_code_saves_default_ptx_to_output(run_cli, tmp_path):
+    """Default ``handle_compile`` path: no ``--ir`` ⇒ ptx. With ``--output``
+    each kernel's PTX lands on disk.
 
-    Covers the full decomposition→optimization→fusion→tile→kernel→cuda
+    Covers the full decomposition→optimization→fusion→tile→kernel→ptx
     pipeline (where ``LoopOp.__post_init__`` runs normalize_body →
     simplify_body on the first LoopOp construction).
     """
-    out = tmp_path / "k.cu"
+    out = tmp_path / "k.ptx"
     rc, stdout, stderr = run_cli(
         "compile",
         "--code",

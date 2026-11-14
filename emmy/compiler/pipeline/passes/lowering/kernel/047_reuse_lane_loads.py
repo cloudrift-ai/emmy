@@ -4,7 +4,7 @@ A cooperative reduce with a full-row projection (RMSNorm, RoPE over a normed row
 its row twice per lane: the reduce loop reads ``x[lane + coop·k]``, and after the combine the
 projection loop reads the same cells again — and a rotate-half partner reads a cell another trip
 of the same lane already holds. Both loops are short (a 128-wide row at 32 lanes is four trips),
-but nvcc cannot reuse the first loop's values in the second: the second loop stores to the
+but the assembler cannot reuse the first loop's values in the second: the second loop stores to the
 output between trips, and it cannot prove the output does not alias the row.
 
 This pass unrolls every lane-strided loop of at most ``_MAX_TRIPS`` trips whose extent the step

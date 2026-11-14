@@ -590,7 +590,7 @@ def test_a_cp_pin_names_the_byte_slab_and_a_sync_pin_the_compute_fill():
 
 
 # ===================================================================
-# The whole lowering: the spelled checkpoint through to CUDA source
+# The whole lowering: the spelled checkpoint through to PTX
 # ===================================================================
 
 

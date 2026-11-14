@@ -104,8 +104,8 @@ def _drop_private_ports(match: Match, root: Node, kernel: KernelOp, suffix: str)
 
 
 #: Names a statement may read with no binding in the tile's body: a thread's lane and warp, which the grid decode
-#: binds (``THREAD_COORDS``), and names the RENDERER supplies — the reserved coordinates a
-#: :class:`~emmy.compiler.ir.kernel.ir.FragmentApply` COORD / GMEM template is written over, which the render
+#: binds (``THREAD_COORDS``), and names the PTX compiler supplies — the reserved coordinates a
+#: :class:`~emmy.compiler.ir.kernel.ir.FragmentApply` COORD / GMEM template is written over, which it
 #: substitutes per element (tile origin + layout offset), and the in-fragment offsets a
 #: :class:`~emmy.compiler.ir.kernel.ir.RegStore` epilogue reads.
 _RENDERED_HELPERS = frozenset({*THREAD_COORDS, FRAG_ROW, FRAG_COL, ELEM_ROW, ELEM_COL})
@@ -117,14 +117,13 @@ def _unbound_names(tile: TileOp, root: Node, body: Body) -> set[str]:
     A well-formed kernel reads its own buffers, the symbolic extents its launch passes beside them
     (the free vars of the axis table's extents — a ``Dim('seq_len')`` reduce bound, a ceil-div block
     count — and of its buffers' shapes, which a scatter's guard compares an index with) and the
-    thread coordinates and the renderer's helpers, and nothing else: every other name is bound by a statement or by
-    an enclosing axis, which is exactly what :func:`free_names` subtracts. What survives is a
-    value some emission referred to under a spelling nothing defines — a per-cell rename whose shared
-    coordinates missed an axis, a staged fill whose σ left a tile axis free, a workspace read the
-    boundary store was not re-spelled for. Each of those reached ``nvcc`` as *identifier "x" is
-    undefined*, a hundred errors deep in a generated source and attributed to whichever candidate the
-    tuner happened to be benching. Asking it here names the kernel and the value instead, in the pass
-    that built them."""
+    thread coordinates and the names the PTX compiler supplies, and nothing else: every other name is bound by a
+    statement or by an enclosing axis, which is exactly what :func:`free_names` subtracts. What survives is a value
+    some emission referred to under a spelling nothing defines — a per-cell rename whose shared coordinates missed
+    an axis, a staged fill whose σ left a tile axis free, a workspace read the boundary store was not re-spelled
+    for. Each of those used to surface as an undefined identifier deep in a generated kernel, attributed to
+    whichever candidate the tuner happened to be benching. Asking it here names the kernel and the value instead, in
+    the pass that built them."""
     serial = (axis.name for axis in tile.place.serial)
     bound = {*root.inputs, *root.buffer_names(), *_RENDERED_HELPERS, *serial, *tile.extents, *EXTENTS.get()}
     for axis in (*tile.axes, *tile.place.free):

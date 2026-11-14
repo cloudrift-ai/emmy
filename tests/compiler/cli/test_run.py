@@ -2019,7 +2019,7 @@ def test_bind_inputs_arity_mismatch_raises():
 
 def test_compare_wall_s_scales_with_kernel_count():
     """The comparison job's SIGKILL wall cap derives from the workload — a fixed cap
-    false-fails big-model runs whose child legitimately pays a first nvcc compile per
+    false-fails big-model runs whose child legitimately pays a first kernel build per
     kernel (bounded by the in-child compile budget) before ever benching."""
     from types import SimpleNamespace
 

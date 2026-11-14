@@ -639,7 +639,7 @@ impl Lowerer {
 
     /// The slab folded in registers: each of the block's first `length` lanes takes a slot of its own, a butterfly
     /// over exactly those lanes folds them, and the first writes the first slot. No slot is read by one lane and
-    /// written by another, which the CUDA renderer's form, with the whole first warp reading, does.
+    /// written by another, which the CUDA renderer's form, with the whole first warp reading, did.
     fn tree_in_first_lanes(&mut self, node: &TreeHalve, ty: VTy, ctx: &SimplifyCtx) -> Result<()> {
         let compare = |op, value| Expression::binary(op, thread_index(), Expression::int(value));
         let folding = self.pred(&compare(Operation::Less, node.length), ctx)?;

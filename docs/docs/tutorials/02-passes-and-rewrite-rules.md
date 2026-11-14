@@ -8,7 +8,7 @@ keywords: [Emmy, compiler, rewrite rule, pass, pipeline, graph, fusion]
 # 2. Passes and Rewrite Rules
 
 The previous page described the pipeline from a distance: a model becomes a graph, the graph is rewritten stage by
-stage, and CUDA source comes out. This page zooms in on one rewrite. It is the mechanical layer — no tuning happens
+stage, and PTX comes out. This page zooms in on one rewrite. It is the mechanical layer — no tuning happens
 here — and it is worth understanding first, because a fork is nothing more than one particular kind of rewrite
 result.
 
@@ -41,7 +41,7 @@ disappears.
 
 **An operation, rebound in place.** The rule returns a single operation and the engine assigns it to the node it
 matched, keeping the node's identity, its input list and its output tensors. Lowering works this way: the same node
-becomes a tiled operation, then a kernel, then CUDA source, without ever changing its name. That matters more than it
+becomes a tiled operation, then a kernel, then PTX, without ever changing its name. That matters more than it
 sounds — the generated kernel's output buffer is named after the node, so a new identity would break the binding
 between the kernel and the memory it writes to.
 
@@ -83,7 +83,7 @@ so that a compile is reproducible.
 | Naming (the stamp pass) | Name each remaining loop after the operations it implements (`k_rms_norm`, `k_sdpa_reduce`). The name is all the pass writes. A kernel's identity, which is how a measurement taken elsewhere is recognized as being about *this* kernel, and the summary of its body and loop extents that the prior reads are both computed from the kernel whenever they are needed. |
 | Tile lowering | Turn each fused loop into a tiled schedule — which worker computes which piece of the output, how the reduction is divided, which hardware instruction does the arithmetic. Most forks live here. |
 | Kernel lowering | Turn the schedule into a kernel body: staging into shared memory, vectorized loads and stores, synchronization. |
-| CUDA lowering | Render the body to CUDA source. |
+| CUDA lowering | Compile the kernel body to PTX. |
 
 The stamp pass deliberately runs *after* fusion, so that the name describes the final kernel rather than
 one of the pieces it was built from.

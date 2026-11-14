@@ -1,6 +1,6 @@
 """``measured_groups`` — measured ``perf`` rows packed into comparison sets.
 
-A group here is the set of configs that genuinely competed: one op, one card, one nvcc regime. What makes
+A group here is the set of configs that genuinely competed: one op, one card, one precision regime. What makes
 that non-trivial is that three plausible spellings of "one op" are wrong, and two kinds of row carry a
 number that is not a measurement. Each is pinned below, because every one of them fails silently — a
 misgrouped or mislabelled pool still produces a confident-looking correlation.

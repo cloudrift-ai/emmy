@@ -508,7 +508,8 @@ contract lives in [native/ARCHITECTURE.md](native/ARCHITECTURE.md); vLLM remains
   table-resolved inputs and no decoded dense expert weight exists.
   Single-token sparse decode uses the generic fixed-slot tier: the selected experts' E-leading coded tensors are
   gathered by the selector, their factorized contraction runs batched over the picks, and the routed outputs combine
-  in fp32. EXL3 has no format-specific operation, native helper, or CUDA source below the birth-time spelling boundary.
+  in fp32. EXL3 has no format-specific operation, native helper, or hand-written kernel below the birth-time spelling
+  boundary.
   Prefill and unsupported fixed-slot shapes use the same generic symbolic programs rather than a separate kernel path.
 
   A **hyper-connection** architecture (DeepSeek V4, Qwen3.8-Flash-Next) changes what the seam carries, and the runner
