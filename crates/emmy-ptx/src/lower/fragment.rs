@@ -29,9 +29,14 @@ use crate::inst::{Bank, Base, Inst, Opcode, Operand, Reg, Round, Shuffle, Space,
 /// An element's `(row, column)` for each of the 32 lanes.
 type LanePlaces = [(i64, i64); 32];
 
-/// One register of a paired slab read: the register, the slab index of each element with no guard, and per element
-/// each lane's place in the slab.
-type SlabRegister = (Reg, Vec<(Expression, Option<Expression>)>, Vec<LanePlaces>);
+/// One register of a paired slab read: the register, the slab index of each element with no guard, per element each
+/// lane's place in the slab, and its first element's offset in the tile as expressions over the lane.
+struct SlabRegister {
+    reg: Reg,
+    elements: Vec<(Expression, Option<Expression>)>,
+    places: Vec<LanePlaces>,
+    first: (Expression, Expression),
+}
 
 /// The names a `FragmentApply`'s coordinate and gathered operands read the element's own row and column by, and
 /// the names a `RegStore`'s epilogue reads the element's offset in its fragment by.
@@ -608,23 +613,37 @@ impl Lowerer {
                 .ok_or_else(|| self.refuse("a paired table's coordinates are the lane's alone"))?;
             for ((reg, register), places) in regs.iter().zip(&lanes.registers).zip(places) {
                 let mut elements = Vec::with_capacity(register.len());
-                for (r, c) in register {
-                    let (r, c) = if swapped { (c, r) } else { (r, c) };
+                let placed: Vec<(Expression, Expression)> = register
+                    .iter()
+                    .map(|(r, c)| {
+                        if swapped {
+                            (c.clone(), r.clone())
+                        } else {
+                            (r.clone(), c.clone())
+                        }
+                    })
+                    .collect();
+                for (r, c) in &placed {
                     let at = [
                         plus(row.clone(), r.clone()),
                         plus(column.clone(), c.clone()),
                     ];
                     elements.push((self.slab_index(name, &at, layout)?, None));
                 }
-                registers.push((*reg, elements, places));
+                let first = placed[0].clone();
+                registers.push(SlabRegister {
+                    reg: *reg,
+                    elements,
+                    places,
+                    first,
+                });
             }
         }
         let runs = self.slab_runs(name, layout, (row, column), &registers, types);
         let mut done = vec![false; registers.len()];
-        for run in runs {
-            let regs: Vec<Reg> = run.iter().map(|at| registers[*at].0).collect();
-            let first = &registers[run[0]].1[0].0;
-            let address = self.address(name, std::slice::from_ref(first), ctx)?;
+        for (run, first) in runs {
+            let regs: Vec<Reg> = run.iter().map(|at| registers[*at].reg).collect();
+            let address = self.address(name, std::slice::from_ref(&first), ctx)?;
             // The run proves the whole address a multiple of its bytes; the register holds it but the constant.
             let bytes = 4 * run.len() as u32;
             let Operand::Addr(Base::Reg(base), offset) = address else {
@@ -640,9 +659,9 @@ impl Lowerer {
                 .emit(Inst::new(buffer.load(), Ty::B32, regs, vec![address]));
             run.iter().for_each(|at| done[*at] = true);
         }
-        for ((reg, elements, _), done) in registers.iter().zip(done) {
+        for (register, done) in registers.iter().zip(done) {
             if !done {
-                self.gather_register(*reg, name, elements, types, ctx)?;
+                self.gather_register(register.reg, name, &register.elements, types, ctx)?;
             }
         }
         Ok(())
@@ -684,6 +703,10 @@ impl Lowerer {
     /// for every lane. The slab's tile position `(row, column)` must step by whole periods of its layout from a
     /// constant, so the places a lane reads stand as far apart there as they do at that constant, and the slab's
     /// own start must be aligned. Registers of no run are gathered as before.
+    ///
+    /// Each run comes with its first element's slab index in the form the periods give: the layout at the constant
+    /// position plus the lane's offset, which only the lane decides and a kernel computes once, plus each period
+    /// stepped times the distance one step moves an element. A stage of a loop then moves the address by one sum.
     fn slab_runs(
         &self,
         name: Name,
@@ -691,7 +714,7 @@ impl Lowerer {
         (row, column): (&Expression, &Expression),
         registers: &[SlabRegister],
         (source, dtype): (DType, DType),
-    ) -> Vec<Vec<usize>> {
+    ) -> Vec<(Vec<usize>, Expression)> {
         let Ok(buffer) = self.buffer(name) else {
             return Vec::new();
         };
@@ -708,15 +731,35 @@ impl Lowerer {
                 .all(|(coefficient, _)| coefficient % period == 0)
                 .then_some(constant)
         };
-        let origin = volta_slab_period(layout)
-            .and_then(|(p, q)| Some((residue(row, p)?, residue(column, q)?)));
+        // The periods stepped, from the constant: each term's coefficient over the period.
+        let steps = |expression: &Expression, period: i64| {
+            let (mut terms, mut constant) = (Vec::new(), 0);
+            linear(expression, 1, &mut terms, &mut constant)?;
+            let stepped = terms
+                .into_iter()
+                .map(|(coefficient, term)| times(term, Expression::int(coefficient / period)));
+            Some(stepped.fold(Expression::int(0), plus))
+        };
+        let period = volta_slab_period(layout);
+        let origin = period.and_then(|(p, q)| Some((residue(row, p)?, residue(column, q)?)));
+        let stepped = period.and_then(|(p, q)| Some((steps(row, p)?, steps(column, q)?)));
         let aligned = i64::from(self.b.alignment(buffer.base)) % 16 == 0 && buffer.offset % 16 == 0;
-        let (Some(extent), Some((row, column)), true, true) = (
+        let (
+            Some(extent),
+            Some((p, q)),
+            Some((row_steps, column_steps)),
+            Some((row, column)),
+            true,
+            true,
+        ) = (
             extent.filter(|extent| extent % 8 == 0),
+            period,
+            stepped,
             origin,
             aligned,
             source == dtype && buffer.elem.bytes() == 2,
-        ) else {
+        )
+        else {
             return Vec::new();
         };
         let index = |(r, c): (i64, i64)| {
@@ -734,8 +777,8 @@ impl Lowerer {
         // Each register's first element per lane, where its two elements stand side by side.
         let starts: Vec<Option<[i64; 32]>> = registers
             .iter()
-            .map(|(_, _, places)| {
-                let [low, high] = &places[..] else {
+            .map(|register| {
+                let [low, high] = &register.places[..] else {
                     return None;
                 };
                 let starts: [i64; 32] = std::array::from_fn(|lane| index(low[lane]));
@@ -766,7 +809,21 @@ impl Lowerer {
                     .collect();
                 if let Some(run) = run {
                     run.iter().for_each(|at| taken[*at] = true);
-                    runs.push(run);
+                    let (r, c) = &registers[run[0]].first;
+                    let lane = volta_slab_index(
+                        layout,
+                        &plus(Expression::int(row), r.clone()),
+                        &plus(Expression::int(column), c.clone()),
+                        &Expression::int(extent),
+                    )
+                    .expect("a Volta layout has an index");
+                    let down = index((p, 0)) - index((0, 0));
+                    let across = index((0, q)) - index((0, 0));
+                    let stepped = plus(
+                        times(row_steps.clone(), Expression::int(down)),
+                        times(column_steps.clone(), Expression::int(across)),
+                    );
+                    runs.push((run, plus(lane, stepped)));
                 }
             }
         }

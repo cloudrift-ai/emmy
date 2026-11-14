@@ -372,6 +372,35 @@ fn volta_s_paired_slab_is_stored_and_read_through_its_layout() {
     assert_eq!(count(&module, "ld.shared.b16"), 8);
 }
 
+/// A run read in a loop that steps its slab position by whole periods moves its address by one sum a trip: the
+/// layout's exchanges stand at the constant position, which only the lane decides, ahead of the loop.
+#[test]
+fn a_paired_read_in_a_loop_moves_its_address_by_a_sum() {
+    let module = kernel(
+        "
+        Smem(name=sa, extents=(64, 32), dtype=f16, align=16)
+        RegFragment(name=fa0, role=a, dtype=f16, fragment_layout=m8n8k4)
+        RegFragment(name=fa1, role=a, dtype=f16, fragment_layout=m8n8k4)
+        RegFragment(name=fc, role=c, dtype=f32, fragment_layout=m8n8k4)
+        for s in 0..4:
+            FragmentLoad(frag=fa0, src_buffer=sa, src_index=(32 * (s % 2), 8), role=a, fragment_layout=m8n8k4, ldm=32, staged=true, slab_layout=V70A, pair_frag=fa1, src_dtype=f16, dtype=f16)
+            MmaSyncPtx(c_frag=fc, a_frag=fa0, b_frag=fa1, shape=(8, 8, 4))
+        ",
+        HALVES,
+        80,
+    )
+    .unwrap();
+    let lines = listing(&module);
+    let head = lines.iter().rposition(|line| line.ends_with(':')).unwrap();
+    let body = &lines[head..];
+    assert_eq!(count(&module, "ld.shared.v4.b32"), 1, "{lines:#?}");
+    assert!(
+        body.iter()
+            .all(|line| !line.starts_with("xor") && !line.starts_with("shr")),
+        "{body:#?}"
+    );
+}
+
 /// A swizzled destination of an async copy or a store takes the exchange of 16-byte chunks over its flat index.
 #[test]
 fn a_swizzled_slab_exchanges_its_chunks() {
