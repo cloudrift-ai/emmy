@@ -240,7 +240,7 @@ def _decode_split(arg: str, plain: Body, defs: dict, exposed: dict, k_name: str)
 def _accums_sum_names(body: Body) -> Body:
     """``body`` with every accumulation summing a name: the normal form lets an ``Accum`` sum a literal, and the lift's
     step reads the summed value by name, so a literal takes a definition of its own ahead of the accumulation."""
-    taken = set(body.ssa_uses) | {name for stmt in body.iter() for name in stmt.defines()}
+    taken = set(body.ssa_uses) | body.defined
     out: list[Statement] = []
     for stmt in body:
         if isinstance(stmt, Accum) and isinstance(stmt.value, Literal):
@@ -416,7 +416,7 @@ def _renamed_sweep(loop: Loop, taken: set[str]) -> Loop:
     name (the fused encode kernel's byte sweep and scale sweep, both ``a1`` at different
     extents). Loop IR binds per loop, so the reuse is legal there; a term tree names one coordinate
     per name, so the second sweep is alpha-renamed, binder and references together."""
-    taken = taken | set(Body(loop.body).definitions)
+    taken = taken | Body(loop.body).defined
     fresh = next(name for index in range(1, len(taken) + 2) if (name := f"{loop.axis.name}_{index}") not in taken)
     coords = Sigma({loop.axis.name: Var(fresh)})
     return loop.replace(axis=replace(loop.axis, name=fresh), body=Body(tuple(stmt.substitute(coords) for stmt in loop.body)))

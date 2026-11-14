@@ -36,8 +36,7 @@ _STEPS = (
     "normalize_body",
     "optimize_body",
     "one_operation_per_definition",
-    "canonical_values",
-    "fragment_order",
+    "normalize_lambda_body",
     "simplify_body",
     "prepare_body",
 )
@@ -203,8 +202,7 @@ def test_the_statement_module_exports_a_pinned_list() -> None:
     statement_types = ["Statement", "Load", "Assign", "Accum", "Carry", "Pre", "Init", "Let", "Write", "Select", "SelectBranch"]
     statement_types += ["ZeroPrologue", "Loop", "StridedLoop", "Cond"]
     containers = ["Body", "Identity", "OutputSpec"]
-    functions = ["canonicalize_identity", "free_names", "exposed_defines", "rename_free"]
-    functions += ["clear_memos"]
+    functions = ["canonicalize_identity", "free_names", "exposed_defines"]
     functions += ["mask_select_predicate", "pretty_body", "parse_body", "ordering_constraints", "dtype_promote"]
     # The target's spelling of an index division, which an emitter runs on the body it renders.
     functions += ["reduce_strength"]

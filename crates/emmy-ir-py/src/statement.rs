@@ -300,12 +300,6 @@ impl PyStatement {
         names_tuple(py, &self.stmt.names())
     }
 
-    /// True iff executing this statement writes a buffer, directly or inside a child body.
-    #[getter]
-    fn has_side_effects(&self) -> bool {
-        self.stmt.has_side_effects()
-    }
-
     /// The structural form: the statement type's name over its fields' forms, trailing defaults left out.
     fn structural_form<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyTuple>> {
         let fields = self.stmt.fields();
@@ -489,12 +483,6 @@ macro_rules! define_py_statement_types {
                 #[classattr]
                 fn pure() -> bool {
                     emmy_ir::statement::$StatementType::FLAGS.contains(emmy_ir::statement::PURE)
-                }
-
-                /// `deps` already reports the whole subtree's reads.
-                #[classattr]
-                fn deps_deep() -> bool {
-                    emmy_ir::statement::$StatementType::FLAGS.contains(emmy_ir::statement::DEPS_DEEP)
                 }
 
                 $(

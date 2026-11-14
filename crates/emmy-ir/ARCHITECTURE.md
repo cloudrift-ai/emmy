@@ -5,8 +5,9 @@ and their text, the forty-five statement types, `Body`, the body text, the state
 identity and body normalization. Pure Rust, no Python in it, so `cargo test -p emmy-ir` runs it alone, and the tests
 of the normalization steps sit beside the steps there. The extension beside it, `emmy-ir-py`, is the `emmy.emmy_ir`
 module those two Python packages re-export from; `make setup` builds it into the package like the runtime extension.
-It exports the driver, `normalize_body`, and the steps a pass calls on its own (`one_operation_per_definition`,
-`canonical_values`, `simplify_body`, `prepare_body`), no other step. Design: `ir/ARCHITECTURE.md` owns what a
+It exports the driver, `normalize_body`, the steps a pass calls on its own (`one_operation_per_definition`,
+`simplify_body`, `prepare_body`) and the lambda normalization (`normalize_lambda_body`: `fragment_order`, then
+`canonical_values`), no other step. Design: `ir/ARCHITECTURE.md` owns what a
 statement, a body and the normal form ARE; this file says how the crate holds them.
 
 ## Layout
@@ -114,13 +115,14 @@ fields (`validate`); `Statement::check` dispatches on the flag, and `finished` r
 Python's `__post_init__` made.
 
 `body.rs` is `Body`: the statements, a content hash, and every def-use reading computed once on first use and kept
-with the body (`definitions`, `defined_states`, `escaping_states`, `local_defs`, `free_ssa`, `axis_names`, `ssa_uses`, the filters by
-statement type), plus the walks (`try_map`, `try_map_stmts`, `walk`; `map` and `map_stmts` are the same walks with an
-error type that has no values, and the extension calls the fallible ones with a Python function and `PyErr`),
-`backward_cone` and the topological order, which ranks by any ordered priority. `rebuilt` returns the body itself when a
-step hands back its own statements, so a step that changed nothing keeps the readings. `StmtRef` names a statement by
-the body that holds it and its position, which is what the numbering and a Python-side cache key on. `Subroutine` is the
-shared reduction body a `Call` names, compared by object.
+with the body (`definitions`, `defined`, `free`, `buffers`, `defined_states`, `escaping_states`, `local_defs`,
+`free_ssa`, `axis_names`, `ssa_uses`, the filters by statement type), plus the walks (`try_map`, `try_map_stmts`,
+`walk`; `map` and `map_stmts` are the same walks with an error type that has no values, and the extension calls the
+fallible ones with a Python function and `PyErr`), `backward_cone`, `pruned` and the topological order, which ranks by
+any ordered priority. `rebuilt` returns the body itself when a step hands back its own statements, so a step that
+changed nothing keeps the readings. `StmtRef` names a statement by the body that holds it and its position, which is
+what the numbering and a Python-side cache key on. `Subroutine` is the shared reduction body a `Call` names, compared
+by object.
 
 ## Text
 
@@ -212,10 +214,9 @@ literals and every number a field holds by their bits (a signed zero keys apart 
 digest keys them), with a hash computed once and kept with the body by one walk of the subtree; no key is a printed
 text. A body also keeps the one normal form it was given (`normal_form`, `remember_normal_form`, `is_normal`,
 `mark_normal` in `body.rs`), so a body normalized twice costs one lookup and a protocol rewrite that keeps a normal form
-says so through that API. `memo::clear_all` forgets the memos; Python's `emmy_ir.clear_memos()` calls it and purges
-the extension's wrapper tables (a body's statement wrappers, a subroutine's one Python object), which are not bounded,
-since a live object keeps its one wrapper, and otherwise drop their dead entries when their size reaches a multiple of
-1,024.
+says so through that API. The extension's wrapper tables (a body's statement wrappers, a subroutine's one Python
+object) are not bounded, since a live object keeps its one wrapper, and drop their dead entries when their size
+reaches a multiple of 1,024.
 
 The canonical order decides what the digest leaves open, and the lift of a body into terms reads that order: sibling
 regions are addressed by position in every recorded cut decision, and a product's operand order is its orientation
