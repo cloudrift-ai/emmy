@@ -1,3 +1,3 @@
 [workspace]
-members = ["crates/emmy-ir", "crates/emmy-ir-py", "crates/emmy-ptx", "crates/emmy-runtime", "crates/emmy-runtime-py", "crates/emmy-server"]
+members = ["crates/emmy-ir", "crates/emmy-ir-py", "crates/emmy-pure", "crates/emmy-ptx", "crates/emmy-runtime", "crates/emmy-runtime-py", "crates/emmy-server"]
 resolver = "3"

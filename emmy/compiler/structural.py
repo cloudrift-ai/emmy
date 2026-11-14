@@ -69,8 +69,7 @@ def instance_memo(obj, slot: str) -> dict:
     the class, dodges the pickling rules, and smears one type's functionality across whichever
     module caches for it. A derived read belongs on the type that owns it — a ``cached_property``
     returning the whole keyed family, a ``cached_method`` for one keyed by an argument, or a field
-    computed in ``__post_init__``. The remaining callers (the path spelling tables, the normalize
-    fixpoint stamp) are to be converted."""
+    computed in ``__post_init__``. The remaining caller (the path spelling tables) is to be converted."""
     table = obj.__dict__.get(slot)
     if table is None:
         table = {}

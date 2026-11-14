@@ -370,7 +370,7 @@ def _hoisted(fold: Fold, names: tuple[str, ...], hoists: dict, axes: tuple, leve
     original state names: the fold reduces into ``<state>__sum``, the projection multiplies (or
     divides) that by each factor in spine order and exposes the result as ``<state>``."""
     inner = {name: f"{name}__sum" for index, name in enumerate(names) if index in hoists}
-    fold = replace(fold, base=fold.base.rename(inner))
+    fold = fold.replace(base=fold.base.rename(inner))
     terms: list[Fold] = [fold]
     epilogue: list[Statement] = []
     for index, name in enumerate(names):

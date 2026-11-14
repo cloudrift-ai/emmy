@@ -1295,9 +1295,7 @@ def _channel_copies(seam: CutSite, axes: tuple) -> dict[int, tuple[int, dict[str
 
 def _channels(node: Fold, names: tuple[str, ...]) -> Fold:
     """``node`` computing only the components ``names``, every operand it no longer reads dropped."""
-    from emmy.compiler.ir.tile.normalize import _prune_unread  # noqa: PLC0415
-
-    return _prune_unread(node.exposing(names), frozenset(names))
+    return node.exposing(names).pruned(names)
 
 
 def _unchanged(pieces: tuple, members) -> bool:
@@ -1348,7 +1346,7 @@ def _read_inline(node: Fold, inline: _InlineReads) -> tuple[Fold, dict[str, str]
             operands.append(edge)
             bound.extend(slots)
     lift = Lambda.closing((*node.lift.params[:lead], *bound), Body(members), node.lift.results)
-    return replace(node, operands=tuple(operands), lift=lift), {name: load.name.removeprefix(name) for name, load in loads.items()}
+    return node.replace(operands=tuple(operands), lift=lift), {name: load.name.removeprefix(name) for name, load in loads.items()}
 
 
 def _replace_member(member, targets: dict[int, tuple], renamed: dict[str, str]):
@@ -1392,7 +1390,7 @@ def _follow_reads(before: Fold, after: Fold, renamed: dict[str, str], lift_reads
         tags.update((name, "".join(read)) for name in stmt.defines() if read)
     names = {name: f"{name}{tag}" for name, tag in tags.items() if name not in was}
     renamed.update(names)
-    return replace(after, lift=after.lift.rename(names)) if names else after
+    return after.replace(lift=after.lift.rename(names)) if names else after
 
 
 def _replace_fold(node: Fold, targets: dict[int, tuple], renamed: dict[str, str]) -> Fold:
@@ -1426,13 +1424,13 @@ def _replace_fold(node: Fold, targets: dict[int, tuple], renamed: dict[str, str]
     body = tuple(piece for stmt in node.lift.body for piece in _replace_member(stmt, targets, renamed))
     if _unchanged(operands, node.operands) and _unchanged(body, node.lift.body) and not lift_reads:
         return node
-    lift = replace(node.lift, body=Body(body))
+    lift = node.lift.replace(body=Body(body))
     if not all(bound):
         lead = 1 if node.base is not None else 0
         params = node.lift.params
         head, slots, tail = params[:lead], params[lead : lead + len(bound)], params[lead + len(bound) :]
-        lift = replace(lift, params=(*head, *(name for name, keep in zip(slots, bound, strict=True) if keep), *tail))
-    return _follow_reads(node, replace(node, operands=operands, lift=lift), renamed, lift_reads)
+        lift = lift.replace(params=(*head, *(name for name, keep in zip(slots, bound, strict=True) if keep), *tail))
+    return _follow_reads(node, node.replace(operands=operands, lift=lift), renamed, lift_reads)
 
 
 def _without_identity_casts(node: Fold, dtypes: dict[str, object]) -> Fold:
@@ -1647,7 +1645,7 @@ def _substitute_and_fold(produced: Fold, name: str, sigma: Sigma, ctx: SimplifyC
     operands = tuple(_substitute_and_fold(edge, name, sigma, ctx) for edge in produced.operands)
     body = Body(stmt.rewrite(lambda n: n, folding) for stmt in produced.lift.body)
     lift = Lambda.closing(tuple(p for p in produced.lift.params if p != name), body, produced.lift.results)
-    return replace(produced, operands=operands, lift=lift)
+    return produced.replace(operands=operands, lift=lift)
 
 
 def _divmod_in_edge(edge: Fold, name: str, factor: int) -> tuple[bool, bool]:

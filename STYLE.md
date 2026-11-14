@@ -105,7 +105,8 @@ cache key when a position-independent structural lookup genuinely needs one. A s
 tree breaks both guarantees, and the surrounding code cannot degrade gracefully without losing the optimization.
 
 If you need to "edit" a frozen Statement, return a new instance via `stmt.replace(field=value)`; outside `ir/stmt/`,
-`dataclasses.replace` is not called on a statement. If a
+`dataclasses.replace` is not called on a statement. The pure terms are the same: a `Lambda` or a `Fold` changes
+through its own `replace(field=value)`, which forms and checks the new term. If a
 `__post_init__` needs to coerce a field (e.g. `tuple → Body`), use `object.__setattr__(self, "field", coerced)` —
 that's the standard pattern for frozen dataclasses that still need light normalization at construction time. Don't
 add `try/except TypeError` fallbacks around structural caches to tolerate unhashable stmts; fix the unhashable stmt
@@ -141,7 +142,7 @@ own — takes `slots=True` as well. It drops the per-instance `__dict__`, which 
 access, and that is worth having on the leaf choice objects an enumeration builds in the millions (`Tile`, `Work`,
 `Reduce`, `Stage`, `Raster`).
 
-A BIGGER type — one that owns derived reads the rest of the compiler depends on (`Fold`, `TileOp`, `ClassicNodeSite`,
+A BIGGER type — one that owns derived reads the rest of the compiler depends on (`TileOp`, `ClassicNodeSite`,
 `ClassicScheduleContext`) — stays unslotted and declares those reads with `cached_property` or `cached_method`, per
 the next section. The two are mutually exclusive: both cache through the very `__dict__` that `slots=True` removes,
 so a slotted class raises `TypeError: No '__dict__' attribute on 'X' instance to cache 'y' property` on the first

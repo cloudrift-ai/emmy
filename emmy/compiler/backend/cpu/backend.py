@@ -116,6 +116,8 @@ def _reads(term) -> set[str]:
             stack.extend(value)
         elif hasattr(value, "__dataclass_fields__"):
             stack.extend(getattr(value, name) for name in value.__dataclass_fields__)
+        elif callable(parts := getattr(value, "wire_parts", None)) and (declared := parts()) is not None:
+            stack.extend(declared.values())  # a crate class's fields: a Fold, its Lambdas, its Twist
     return found
 
 

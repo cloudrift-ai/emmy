@@ -133,28 +133,39 @@ def _init_defaults(cls: type) -> dict[str, object]:
 
 def _fields_to_wire(obj: Wire):
     cls = type(obj)
-    hints, declared = _hints(cls), _wire_fields(cls)
+    hints = _hints(cls)
+    return declared_to_wire(obj, [(f.name, hints[f.name], _default_of(cls, f)) for f in _wire_fields(cls)])
+
+
+def declared_to_wire(obj: object, declared) -> dict:
+    """``obj``'s wire data over ``declared``, its fields as ``(name, annotation, default)`` with ``MISSING`` for no
+    default: what a class that is no dataclass (a crate class with a Python half) writes itself as."""
+    name = type(obj).__name__
     out = {}
-    for f in declared:
-        item = getattr(obj, f.name)
-        default = _default_of(cls, f)
+    for field_name, hint, default in declared:
+        item = getattr(obj, field_name)
         if default is not MISSING and item == default:
             continue
-        out[f.name] = _to_wire(item, hints[f.name], f"{cls.__name__}.{f.name}")
+        out[field_name] = _to_wire(item, hint, f"{name}.{field_name}")
     return out
 
 
 def _fields_from_wire(cls: type, value: object, where: str):
-    hints, declared = _hints(cls), _wire_fields(cls)
+    hints = _hints(cls)
+    return declared_from_wire(cls, value, where, [(f.name, hints[f.name], _default_of(cls, f)) for f in _wire_fields(cls)])
+
+
+def declared_from_wire(cls: type, value: object, where: str, declared):
+    """An instance of ``cls`` from its wire data over ``declared`` (:func:`declared_to_wire`'s inverse)."""
     if not isinstance(value, Mapping):
         raise ValueError(f"{where} must be a mapping")
-    names = {f.name: f for f in declared}
+    names = {field_name: (hint, default) for field_name, hint, default in declared}
     if unknown := set(value) - set(names):
         raise ValueError(f"{where}: unknown field(s): {', '.join(sorted(unknown))}")
-    required = {name for name, f in names.items() if _default_of(cls, f) is MISSING}
+    required = {field_name for field_name, (_, default) in names.items() if default is MISSING}
     if missing := required - set(value):
         raise ValueError(f"{where} missing {', '.join(sorted(missing))}")
-    kwargs = {name: _from_wire(hints[name], item, f"{where}.{name}") for name, item in value.items()}
+    kwargs = {field_name: _from_wire(names[field_name][0], item, f"{where}.{field_name}") for field_name, item in value.items()}
     try:
         return cls(**kwargs)
     except (TypeError, ValueError) as exc:

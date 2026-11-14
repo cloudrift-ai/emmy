@@ -33,7 +33,7 @@ relevant `ARCHITECTURE.md` before answering.
 
 - Python 3.12+ with `venv`
 - A Rust toolchain (`cargo`): compiled programs execute through the Rust runtime (the `emmy.emmy_runtime`
-  extension), and the compiler's statements and expressions are the `emmy.emmy_ir` extension; `make setup` builds
+  extension), and the compiler's statements, expressions and pure terms are the `emmy.emmy_ir` extension; `make setup` builds
   both into the package. The `emmy.emmy_ir` extension also holds the Kernel IR to PTX compiler, the only code
   generator. Use the README architecture index for their design.
 - The CUDA toolkit's `ptxas` (on `PATH` or under `CUDA_HOME`), which assembles each kernel's PTX; NVIDIA ships it in

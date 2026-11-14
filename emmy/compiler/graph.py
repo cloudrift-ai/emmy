@@ -1608,7 +1608,7 @@ def _rename_buf_in_op(op, old: str, new: str):
         body = rename_body(term.lift.body)
         if same(operands, term.operands) and body is term.lift.body:
             return term
-        return replace(term, operands=operands, lift=replace(term.lift, body=body))
+        return term.replace(operands=operands, lift=term.lift.replace(body=body))
 
     return replace(
         op,

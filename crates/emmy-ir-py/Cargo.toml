@@ -14,5 +14,6 @@ doctest = false
 
 [dependencies]
 emmy-ir = { path = "../emmy-ir" }
+emmy-pure = { path = "../emmy-pure" }
 emmy-ptx = { path = "../emmy-ptx" }
 pyo3 = { version = "0.29", features = ["extension-module", "abi3-py312", "multiple-pymethods"] }
