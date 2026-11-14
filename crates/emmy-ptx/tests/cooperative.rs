@@ -1006,6 +1006,46 @@ fn sixteen_bytes_are_four_words() {
     );
 }
 
+/// An offset computed in 64 bits and kept as its low half stays a multiple of the powers of two that divided it,
+/// so eight halves at it are still one aligned access.
+#[test]
+fn an_offset_narrowed_to_32_bits_keeps_its_alignment() {
+    let module = row_module(
+        "
+        i64 e = load q[t]
+        let i32 off = 8 * e
+        f16 w0, w1, w2, w3, w4, w5, w6, w7 = load h[off]
+        f16 g[off] = (w7, w6, w5, w4, w3, w2, w1, w0)
+        ",
+        VECTORS,
+        64,
+        &[],
+    );
+    assert_eq!(
+        row_code(&module),
+        [
+            "mul.wide.s32 %rd5, %r1, 8",
+            "add.s64 %rd6, %rd4, %rd5",
+            "ld.global.nc.s64 %rd7, [%rd6]",
+            "shl.b64 %rd8, %rd7, 3",
+            "cvt.u32.u64 %r2, %rd8",
+            "mul.wide.s32 %rd9, %r2, 2",
+            "add.s64 %rd10, %rd2, %rd9",
+            "ld.global.nc.v4.b32 {%r3, %r4, %r5, %r6}, [%rd10]",
+            "mov.b32 {%h0, %h1}, %r3",
+            "mov.b32 {%h2, %h3}, %r4",
+            "mov.b32 {%h4, %h5}, %r5",
+            "mov.b32 {%h6, %h7}, %r6",
+            "add.s64 %rd11, %rd3, %rd9",
+            "mov.b32 %r7, {%h7, %h6}",
+            "mov.b32 %r8, {%h5, %h4}",
+            "mov.b32 %r9, {%h3, %h2}",
+            "mov.b32 %r10, {%h1, %h0}",
+            "st.global.v4.b32 [%rd11], {%r7, %r8, %r9, %r10}",
+        ]
+    );
+}
+
 /// The cooperative forms assemble for the older targets that have them, and an async copy is refused by name
 /// on a target that has none.
 #[test]
@@ -1282,4 +1322,106 @@ fn a_cooperative_statement_outside_its_rule_is_an_error_that_names_it() {
         let message = row_refusal(&format!("        {statements}"), A_O, &[pool]);
         assert!(message.contains(expected), "{message}");
     }
+}
+
+/// A selection held at a half beside a reduction at f32 combines at the f32, as the renderer's merge did: the half
+/// moves through a 32-bit register at its own width and is read widened, the program runs at f32, and the update
+/// of the half is narrowed back. A tree reduction whose slabs hold f32 gives the half its root narrowed.
+#[test]
+fn states_held_at_two_types_combine_at_the_combines_own() {
+    let module = row_module(
+        "
+        f16 m = load h[r * 64 + t]
+        let f32 l = 1.0
+        WarpShuffle(state=(m, l), state_b=(m__o, l__o), length=2):
+            combine_states:
+                big = maximum(m, m__o)
+                d = m - big
+                l = l * d + l__o
+                m = big
+        Smem(name=ms, extents=(64), dtype=f32)
+        Smem(name=ls, extents=(64), dtype=f32)
+        f32 mw = (f32)m
+        f32 ms[t] = mw
+        f32 ls[t] = l
+        Sync
+        TreeHalve(bufs=(ms, ls), state=(m, l), state_b=(m__o, l__o), length=2, tid_var=t):
+            combine_states:
+                big = maximum(m, m__o)
+                d = m - big
+                l = l * d + l__o
+                m = big
+        f32 mo = (f32)m
+        f32 v = mo + l
+        f32 o[r * 64 + t] = v
+        ",
+        VECTORS,
+        64,
+        &[],
+    );
+    assert_eq!(
+        row_code(&module),
+        [
+            "mul.wide.s32 %rd5, %r0, 128",
+            "add.s64 %rd6, %rd2, %rd5",
+            "mul.wide.s32 %rd7, %r1, 2",
+            "add.s64 %rd8, %rd6, %rd7",
+            "ld.global.nc.b16 %h0, [%rd8]",
+            "mov.f32 %f0, 0f3F800000",
+            "activemask.b32 %r2",
+            "cvt.u32.u16 %r3, %h0",
+            "shfl.sync.bfly.b32 %r4, %r3, 1, 31, %r2",
+            "cvt.u16.u32 %h1, %r4",
+            "cvt.f32.f16 %f1, %h1",
+            "mov.b32 %r5, %f0",
+            "shfl.sync.bfly.b32 %r6, %r5, 1, 31, %r2",
+            "mov.b32 %f2, %r6",
+            "cvt.f32.f16 %f3, %h0",
+            "mov.f32 %f4, %f3",
+            "max.f32 %f5, %f4, %f1",
+            "sub.rn.f32 %f6, %f4, %f5",
+            "mul.rn.f32 %f7, %f0, %f6",
+            "add.rn.f32 %f8, %f7, %f2",
+            "mov.f32 %f0, %f8",
+            "cvt.rn.f16.f32 %h2, %f5",
+            "mov.b16 %h0, %h2",
+            "cvt.f32.f16 %f9, %h0",
+            "mov.f32 %f10, %f9",
+            "mov.u32 %r7, k_shared_0",
+            "mov.u32 %r8, k_shared_1",
+            "cvt.f32.f16 %f11, %h0",
+            "shl.b32 %r9, %r1, 2",
+            "add.s32 %r10, %r7, %r9",
+            "st.shared.f32 [%r10], %f11",
+            "add.s32 %r11, %r8, %r9",
+            "st.shared.f32 [%r11], %f0",
+            "bar.sync 0",
+            "setp.lt.s32 %p0, %r1, 1",
+            "@!%p0 bra L1",
+            "ld.shared.f32 %f12, [%r10]",
+            "ld.shared.f32 %f13, [%r10+4]",
+            "ld.shared.f32 %f14, [%r11]",
+            "ld.shared.f32 %f15, [%r11+4]",
+            "max.f32 %f16, %f12, %f13",
+            "sub.rn.f32 %f17, %f12, %f16",
+            "mul.rn.f32 %f18, %f14, %f17",
+            "add.rn.f32 %f14, %f18, %f15",
+            "mov.f32 %f12, %f16",
+            "st.shared.f32 [%r10], %f12",
+            "st.shared.f32 [%r11], %f14",
+            "L1:",
+            "bar.sync 0",
+            "ld.shared.f32 %f20, [%r7]",
+            "cvt.rn.f16.f32 %h3, %f20",
+            "mov.b16 %h0, %h3",
+            "ld.shared.f32 %f0, [%r8]",
+            "cvt.f32.f16 %f21, %h0",
+            "add.rn.f32 %f22, %f21, %f0",
+            "mul.wide.s32 %rd9, %r0, 256",
+            "add.s64 %rd10, %rd1, %rd9",
+            "mul.wide.s32 %rd11, %r1, 4",
+            "add.s64 %rd12, %rd10, %rd11",
+            "st.global.f32 [%rd12], %f22",
+        ]
+    );
 }

@@ -203,7 +203,14 @@ impl Lowerer {
                     (VTy::I64 | VTy::U64, _) => (Ty::U32, Ty::U64),
                     _ => (Ty::S64, Ty::S32),
                 };
-                let multiple = if wide(to) { self.multiple(operand) } else { 1 };
+                // Widening keeps the value; keeping the low half keeps it modulo 2^32, so a power of two below that
+                // still divides it.
+                let multiple = self.multiple(operand);
+                let multiple = if wide(to) {
+                    multiple
+                } else {
+                    low_power(multiple)
+                };
                 self.int_value(Opcode::Cvt(from), at, to, vec![operand.clone()], multiple)
                     .op
             }

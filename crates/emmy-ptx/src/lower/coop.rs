@@ -74,14 +74,14 @@ impl Threads {
 }
 
 /// A fold over the lanes of a warp: the states and the names the other lane's take, the combine program, the lanes
-/// of a group, whether it is a prefix, and the type it runs at.
+/// of a group, whether it is a prefix, and the combine's own dtype. Each state moves at the type it is held at.
 struct Fold<'a> {
     states: &'a [Name],
     others: &'a [Name],
     program: &'a [Arc<Statement>],
     length: i64,
     prefix: bool,
-    ty: VTy,
+    declared: VTy,
 }
 
 /// Who writes a slot of a tree reduction.
@@ -234,9 +234,26 @@ impl Lowerer {
 
     // --- the combine program -----------------------------------------------------------------------------
 
-    /// Run a combine program: a statement that defines one of `states` moves its value into that state's register,
-    /// under `guard` when one is given, and any other is a temporary of the program. The order is the program's: a
-    /// state is read before the statement that updates it.
+    /// The type a state is held at where it is defined, `otherwise` where it is not.
+    fn held(&self, name: Name, otherwise: VTy) -> VTy {
+        self.find(name).map_or(otherwise, |(_, val)| val.ty)
+    }
+
+    /// The type a combine program over `states` runs at: the one they are all held at, else the combine's own
+    /// dtype, as the renderer's merge did. A reduction's states are its f32 accumulators, and the state of a
+    /// selection may stay a half, which it combines at exactly; a selection beside a reduction runs at the f32.
+    fn combined_at(&self, states: &[Name], declared: VTy) -> VTy {
+        let mut held = states.iter().map(|name| self.held(*name, declared));
+        match held.next() {
+            Some(first) if held.all(|ty| ty == first) => first,
+            _ => declared,
+        }
+    }
+
+    /// Run a combine program at `ty`: a statement that defines one of `states` moves its value into that state's
+    /// register, under `guard` when one is given, and any other is a temporary of the program. A state held at
+    /// another type is read converted to `ty` and updated converted back. The order is the program's: a state is
+    /// read before the statement that updates it.
     fn combine(
         &mut self,
         program: &[Arc<Statement>],
@@ -245,35 +262,60 @@ impl Lowerer {
         guard: Option<Reg>,
         ctx: &SimplifyCtx,
     ) -> Result<()> {
+        // Each state's register, found before a converted copy takes its name.
+        let mut held = Vec::with_capacity(states.len());
+        for name in states {
+            let at = self.held(*name, ty);
+            held.push((self.state(*name, at)?, at));
+        }
+        for (name, (state, at)) in states.iter().zip(&held) {
+            if *at != ty {
+                let op = self.converted(Val::reg(*state, *at), ty);
+                self.bind(*name, Val { op, ty });
+            }
+        }
         let mut ctx = ctx.clone();
         let around = self.statement.clone();
         for (at, stmt) in program.iter().enumerate() {
             let text = statement_text(stmt).unwrap_or_else(|_| stmt.ty().name().to_string());
             self.statement = text.lines().next().unwrap_or_default().to_string();
             self.b.comment(self.statement.clone());
-            match &**stmt {
-                Statement::Assign(assign) if states.contains(&assign.name) => {
+            let updated = match &**stmt {
+                Statement::Assign(assign) => states.iter().position(|name| *name == assign.name),
+                _ => None,
+            };
+            match (&**stmt, updated) {
+                (Statement::Assign(assign), Some(index)) => {
                     if let Some(dtype) = assign.dtype.filter(|dtype| VTy::of(*dtype) != Some(ty)) {
                         let (name, held) = (assign.name, ty.text());
                         return Err(
                             self.refuse(format_args!("{name} is {held}, updated at {dtype}"))
                         );
                     }
-                    let state = self.state(assign.name, ty)?;
+                    let (state, state_ty) = held[index];
                     let before = self.b.lines();
                     let val = self.typed(&assign.value, ty, &ctx)?;
                     // The instruction that computed the value for this statement alone defines the state itself.
                     let computed = assign.value.operation().is_some() && self.b.lines() > before;
                     let stepped = match val.op {
-                        Operand::Reg(reg) if computed => self.b.retarget(reg, state, guard),
+                        Operand::Reg(reg) if computed && state_ty == ty => {
+                            self.b.retarget(reg, state, guard)
+                        }
                         _ => false,
                     };
                     if !stepped {
-                        let step = Inst::new(Opcode::Mov, ty.held(), vec![state], vec![val.op]);
+                        let value = self.converted(val, state_ty);
+                        let step =
+                            Inst::new(Opcode::Mov, state_ty.held(), vec![state], vec![value]);
                         self.b.emit(match guard {
                             Some(guard) => step.guarded(guard, false),
                             None => step,
                         });
+                    }
+                    if state_ty != ty {
+                        // A later statement reads the state as updated, converted again.
+                        let op = self.converted(Val::reg(state, state_ty), ty);
+                        self.bind(assign.name, Val { op, ty });
                     }
                 }
                 _ => self.rule(stmt, &program[at + 1..], &mut ctx)?,
@@ -356,7 +398,7 @@ impl Lowerer {
     /// in the group, so each lane ends with the fold of the lanes up to itself. `mask` names the lanes that take
     /// part, the lanes that run here together when it is not given.
     fn fold_lanes(&mut self, fold: &Fold, mask: Option<Operand>, ctx: &SimplifyCtx) -> Result<()> {
-        let (ty, length) = (fold.ty, fold.length);
+        let (ty, length) = (self.combined_at(fold.states, fold.declared), fold.length);
         if fold.states.len() != fold.others.len() {
             return Err(self.refuse("every state has the name its other lane's value takes"));
         }
@@ -374,12 +416,14 @@ impl Lowerer {
             self.names.push(HashMap::new());
             let done = (|| {
                 for (state, other) in fold.states.iter().zip(fold.others) {
-                    let from = (self.state(*state, ty)?, ty);
+                    let held = self.held(*state, ty);
+                    let from = (self.state(*state, held)?, held);
                     let theirs = match fold.prefix {
                         true => self.shuffled(Shuffle::Up, from, (stride, segment), &mask)?,
                         false => self.shuffled(Shuffle::Bfly, from, (stride, WARP - 1), &mask)?,
                     };
-                    self.bind(*other, Val::reg(theirs, ty));
+                    let op = self.converted(Val::reg(theirs, held), ty);
+                    self.bind(*other, Val { op, ty });
                 }
                 let guard = match fold.prefix {
                     true => {
@@ -398,24 +442,14 @@ impl Lowerer {
         Ok(())
     }
 
-    /// The type the states of a combine are held at, where they are defined: a combine's own dtype is the f32 of a
-    /// reduction, and the state of a selection may stay a half, which it combines at exactly.
-    fn held_type(&self, states: &[Name], declared: VTy) -> VTy {
-        states
-            .first()
-            .and_then(|name| self.find(*name))
-            .map_or(declared, |(_, val)| val.ty)
-    }
-
     pub(super) fn warp_shuffle(&mut self, node: &WarpShuffle, ctx: &SimplifyCtx) -> Result<()> {
-        let declared = self.vty(Some(node.dtype))?;
         let fold = Fold {
             states: &node.state,
             others: &node.state_b,
             program: &node.combine_states,
             length: self.lanes(node.length)?,
             prefix: node.prefix,
-            ty: self.held_type(&node.state, declared),
+            declared: self.vty(Some(node.dtype))?,
         };
         self.fold_lanes(&fold, None, ctx)
     }
@@ -482,7 +516,6 @@ impl Lowerer {
     pub(super) fn tree_halve(&mut self, node: &TreeHalve, ctx: &SimplifyCtx) -> Result<()> {
         let ty = self.vty(Some(node.dtype))?;
         // The slabs hold the combine's type; a state held at another takes the first slot converted.
-        let held = self.held_type(&node.state, ty);
         let length = node.length;
         if length < 1 || length & (length - 1) != 0 {
             return Err(self.refuse(format_args!("{length} slots are no power of two")));
@@ -497,7 +530,8 @@ impl Lowerer {
                 let (stored, read) = (buffer.elem.dtype, node.dtype);
                 return Err(self.refuse(format_args!("{slab} holds {stored}, read at {read}")));
             }
-            outer.push(self.state(*name, held)?);
+            let held = self.held(*name, ty);
+            outer.push((self.state(*name, held)?, held));
         }
         let (scale, slot, root) = match &node.inner {
             Some((within, scale)) => {
@@ -544,7 +578,7 @@ impl Lowerer {
                 ));
             }
         }
-        for (state, slab) in outer.into_iter().zip(node.bufs.iter()) {
+        for ((state, held), slab) in outer.into_iter().zip(node.bufs.iter()) {
             let first = self.address(*slab, std::slice::from_ref(&root), ctx)?;
             if held == ty {
                 self.load_slot(&first, 0, Some(state), ty);
@@ -625,7 +659,7 @@ impl Lowerer {
                 program: &node.combine_states,
                 length: node.length,
                 prefix: false,
-                ty,
+                declared: ty,
             };
             let lanes = Operand::Int((1 << node.length) - 1);
             self.fold_lanes(&fold, Some(lanes), ctx)?;
