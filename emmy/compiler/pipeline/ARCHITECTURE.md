@@ -1010,6 +1010,14 @@ data but nothing a restamp can lower again; a compiler change that re-keys a ker
   body no longer lowers is skipped with a warning, with its rows; a stale file is a restamp, not an import option. A
   golden file's rows become, through `emmy db export`, the golden pools `emmy fit` and `eval prior` read (Part 8); a
   compile never reads this instance, and the tune DB imports the goldens on its own.
+- **The candidate files** (`search/candidates`, one file per hardware golden under its `records/`) hold measured
+  schedules that are not the best known one, for the groups the hardware golden holds: a group is filled to a count
+  set by the size of its kernel's schedule space (`candidates.target`: 3 at ten schedules or fewer, 10 at a million or
+  more, by the logarithm between; the size is the bound the schedule fork declares, `Fork.pool_bound`, so nothing is
+  enumerated). A file is in the golden file format and copies its golden's programs, kernels and decisions; its rows
+  are the candidates alone, and join the golden's rows on the kernel's exact identity, the sizes and the regime.
+  `candidates.build` fills it from the freeze of the same card and keeps the rows it already holds. It is not a
+  repository golden: no compile, import, export, fit or gate reads it. It restamps as its golden does.
 - **The freeze kept with the repository** is the directory `search/freezes/` (`freeze.REPOSITORY_FREEZE`): one
   file per card, exactly what `emmy db freeze` writes, payload in git LFS and left out of the wheel. `emmy db import
   --repository` reads it beside the repository goldens, and nothing else does — not a compile, not the reproduction

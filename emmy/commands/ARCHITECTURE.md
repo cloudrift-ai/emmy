@@ -285,6 +285,14 @@ repository golden, neither needs a card, and the `refresh-golden` skill is the f
 deletes a file: one nothing survives in is left alone and reported. Every command that reads a golden by path loads it
 through `GoldenFile.load`, which validates a repository golden strictly and anything else as a working file.
 
+`emmy candidates {build,check,restamp,realize}` maintains the candidate files (GLOSSARY, "Candidate file"; the module
+`search/candidates`). `build [GOLDEN…] [--freeze DIR] [--out DIR]` writes each hardware golden's candidate file: the
+golden's programs, kernels and decisions, the candidate rows the file already holds, and each group topped up to its
+target from the rows the freeze of the same card measured on it — a spread across their latency, never a schedule the
+golden holds. It logs the groups still under their target, which a tune on the card fills, and warns of a candidate
+faster than its golden's row. A card nothing was measured on gets no file. `check`, `restamp` and `realize` are the
+`emmy golden` subcommands over the candidate files, every repository candidate file where no path is named.
+
 `emmy golden realize PATH… [--drop] [--jobs N] [--json PATH]` compiles every row that has a schedule under it — the
 row's kernel as the whole program, its regime and schedule pinned, the file the compile's golden evidence, at the file's
 card — and names the rows the compiler no longer realizes: the kernel it built is not the row's, or a knob the row

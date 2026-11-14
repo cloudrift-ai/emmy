@@ -208,6 +208,16 @@ on `main`, then compiles every row of the freeze under its own schedule and drop
 realizes (`emmy golden realize --drop`). A tune on a rented card writes the file into the copy there: copy it back
 next to the card's file, as you do the working golden. `EMMY_FREEZE_DIR` names another directory or, set empty, none.
 
+### Candidate files
+
+A hardware golden holds the best known schedule of each kernel. A candidate file, one per hardware golden under
+`emmy/compiler/pipeline/search/candidates/records/`, holds a few other measured schedules of the same kernels: 3 where
+the kernel's schedule space is small, up to 10 where it is large, the slow ones beside the near misses. `emmy
+candidates build` fills the files from the measurement freeze and lists the groups still under their target; a tune of
+such a kernel on its card (`emmy run --golden PATH --kernel REF --bench --tune N`) freezes the rows the next build
+takes. `emmy candidates check`, `restamp` and `realize --drop` keep the files current, as the `emmy golden` commands
+keep a golden. No compile reads a candidate file.
+
 A tune DB from a machine with no checkout is merged by hand (`~/.cache/emmy/autotune.db`, or the file `EMMY_TUNE_DB`
 names, copied over):
 

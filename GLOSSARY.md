@@ -422,6 +422,13 @@ describe how a term is used in Emmy; they are not meant to replace a full textbo
   beside the repository goldens; a tune writes its rows as one more file there, beside the card's, and the nightly
   refresh folds those files into each card's, then compiles every row under its own schedule and drops the rows the
   compiler no longer realizes (`emmy golden realize --drop`).
+- **Candidate file** — A few measured schedules that are not the best known one, for each group a hardware golden
+  holds (one kernel, at one set of sizes, in one input regime): 3 where the kernel's schedule space is small, up to 10
+  where it is large, spread across their latency. It is written in the golden file format and carries its hardware
+  golden's traced programs, kernels and decisions, so it is checked against a fresh lowering, restamped and pruned as
+  a golden is (`emmy candidates {check,restamp,realize}`). It is never a golden: a golden's row is the best known for
+  its kernel, a candidate is not, and no compile reads a candidate file as evidence. One file per hardware golden,
+  under `search/candidates/records/`; `emmy candidates build` fills it from the measurement freeze.
 - **Deploy evidence hierarchy** — The fixed order in which an ordinary compile answers a tuning choice: measured
   evidence first — the tune database's rows, the golden rows in scope imported among them, the fastest compatible
   row winning — then the prior's prediction, and last the rule's own first option. A structural
