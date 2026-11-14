@@ -19,6 +19,19 @@ struct Key {
     operands: Vec<Operand>,
 }
 
+impl Key {
+    fn of(inst: &Inst) -> Key {
+        Key {
+            opcode: inst.opcode,
+            ty: inst.ty,
+            round: inst.round,
+            ftz: inst.ftz,
+            sat: inst.sat,
+            operands: inst.operands.clone(),
+        }
+    }
+}
+
 /// An open condition: the label its false side goes to, and the label its end is, once it has an else side.
 #[derive(Debug)]
 #[must_use = "an open condition is closed with `close_if`"]
@@ -150,16 +163,9 @@ impl Builder {
     /// a new register the instruction is appended for. A value made twice is made once.
     pub fn value(&mut self, inst: Inst, bank: Bank) -> Reg {
         let keyed = inst.opcode.is_pure() && !inst.reads().iter().any(|reg| self.is_state(*reg));
-        let key = Key {
-            opcode: inst.opcode,
-            ty: inst.ty,
-            round: inst.round,
-            ftz: inst.ftz,
-            sat: inst.sat,
-            operands: inst.operands.clone(),
-        };
-        if keyed && let Some(reg) = self.tables.iter().rev().find_map(|table| table.get(&key)) {
-            return *reg;
+        let key = Key::of(&inst);
+        if keyed && let Some(reg) = self.known(&inst) {
+            return reg;
         }
         let reg = self.reg(bank);
         let inst = Inst {
@@ -177,6 +183,25 @@ impl Builder {
             self.loose = Some(reg);
         }
         reg
+    }
+
+    /// The register an open scope already computed the pure instruction `inst` into.
+    pub fn known(&self, inst: &Inst) -> Option<Reg> {
+        let key = Key::of(inst);
+        self.tables
+            .iter()
+            .rev()
+            .find_map(|table| table.get(&key))
+            .copied()
+    }
+
+    /// Keep `reg` in the innermost scope's table as the value of the pure instruction `inst`: what code standing in
+    /// for that one instruction computed (a branch to a narrower form of it), so the same instruction is not
+    /// computed again.
+    pub fn remember(&mut self, inst: &Inst, reg: Reg) {
+        if let Some(table) = self.tables.last_mut() {
+            table.insert(Key::of(inst), reg);
+        }
     }
 
     /// The depth of the outermost scope a pure integer value can be computed in, where that is outside the loops

@@ -550,6 +550,14 @@ impl Lowerer {
         remainder: bool,
         ctx: &SimplifyCtx,
     ) -> Result<Val> {
+        // Two values no wider than 32 bits, neither negative, widened to 64: their quotient and remainder are the
+        // 32-bit ones, with no 64-bit divide.
+        let signs = (self.non_negative(x, ctx), self.non_negative(y, ctx));
+        let (x, y) = if signs == (true, true) {
+            (self.unwidened(x), self.unwidened(y))
+        } else {
+            (x, y)
+        };
         let (a, b) = (self.int(x, ctx)?, self.int(y, ctx)?);
         let op = if remainder {
             Operation::Remainder
@@ -584,7 +592,7 @@ impl Lowerer {
             }
             let small = a_range.is_some_and(|range| holds(VTy::I32, range) && range.lo >= 0);
             if (small || a.ty == VTy::I32) && divisor <= i64::from(i32::MAX) {
-                let quotient = self.multiply_high_quotient(&a, small, divisor);
+                let quotient = self.multiply_high_quotient(&a, small || signs.0, divisor);
                 if !remainder {
                     return Ok(quotient);
                 }
@@ -593,6 +601,9 @@ impl Lowerer {
                 let operands = vec![self.as_int(&a, VTy::I32), whole.op];
                 let kept = gcd(multiple, divisor);
                 return Ok(self.int_value(Opcode::Sub, Ty::S32, VTy::I32, operands, kept));
+            }
+            if a.ty.is_wide() && signs.0 {
+                return Ok(self.wide_multiply_high(&a, divisor, remainder, multiple));
             }
         }
         // A remainder by a constant is a multiple of what the dividend and the divisor share.
@@ -603,13 +614,9 @@ impl Lowerer {
         let ty = self.common(&a, a_range, &b, b_range);
         let at = ty.arith();
         let (left, right) = (self.as_int(&a, ty), self.as_int(&b, ty));
-        // Truncation is the floor where neither side is negative: a symbolic size never is, and a division by
-        // zero has no value in either form. The unsigned instruction is then the same value, and the cheaper one.
-        let non_negative = |e: &Expression, range: Option<Interval>| {
-            range.is_some_and(|range| range.lo >= 0)
-                || matches!(&**e, Expr::Var(name) if self.sizes.contains(name))
-        };
-        let exact = ty == VTy::U32 || (non_negative(x, a_range) && non_negative(y, b_range));
+        // Truncation is the floor where neither side is negative, and a division by zero has no value in either
+        // form. The unsigned instruction is then the same value, and the cheaper one.
+        let exact = ty == VTy::U32 || signs == (true, true);
         let operands = vec![left, right.clone()];
         if exact {
             let opcode = if remainder { Opcode::Rem } else { Opcode::Div };
@@ -618,6 +625,18 @@ impl Lowerer {
                 Ty::S64 => Ty::U64,
                 at => at,
             };
+            // A remainder beside the quotient of the same operands is the dividend less the quotient's multiple.
+            let quotient = Inst::new(Opcode::Div, at, Vec::new(), operands.clone());
+            if remainder && let Some(quotient) = self.b.known(&quotient) {
+                let at = if ty.is_wide() { Ty::S64 } else { Ty::S32 };
+                let product = vec![quotient.into(), operands[1].clone()];
+                let whole = self.int_value(Opcode::Mul, at, ty, product, 1);
+                let operands = vec![operands[0].clone(), whole.op];
+                return Ok(self.int_value(Opcode::Sub, at, ty, operands, kept));
+            }
+            if at == Ty::U64 && operands.iter().all(|operand| operand.int().is_none()) {
+                return Ok(self.bypassed(opcode, operands, ty, kept));
+            }
             return Ok(self.int_value(opcode, at, ty, operands, kept));
         }
         // The instruction rounds toward zero: where the remainder is nonzero and its sign is not the divisor's,
@@ -667,6 +686,161 @@ impl Lowerer {
             kept,
         );
         Ok(self.int_value(Opcode::Add, at, ty, vec![base.op, correction.op], kept))
+    }
+
+    /// Whether no value of `expression` is negative: its range says so, or it is a built-in, a symbolic size or a
+    /// literal from zero up, or it is made of such values by sums, products, quotients, remainders by them,
+    /// minima, maxima, selections, masks, shifts and casts. A sum or a product of them that wrapped past its
+    /// type is a value C's own index arithmetic assumes away, as cicc does.
+    pub(super) fn non_negative(&self, expression: &Expression, ctx: &SimplifyCtx) -> bool {
+        use Operation as O;
+        if expression.range(ctx).is_some_and(|range| range.lo >= 0) {
+            return true;
+        }
+        let each = |args: &[Expression]| args.iter().all(|arg| self.non_negative(arg, ctx));
+        match &**expression {
+            Expr::Var(name) => self.sizes.contains(name),
+            Expr::Builtin(_) => true,
+            Expr::Literal(_) => expression.int_literal().is_some_and(|value| value >= 0),
+            Expr::Ternary(_, a, b) => self.non_negative(a, ctx) && self.non_negative(b, ctx),
+            // A cast to fewer than 64 bits keeps a value from zero up only where it fits the 32-bit range: a size
+            // and a built-in always do.
+            Expr::Cast(target, inner) => {
+                let fits = |to: VTy| {
+                    to.is_wide()
+                        || matches!(&**inner, Expr::Builtin(_))
+                        || matches!(&**inner, Expr::Var(name) if self.sizes.contains(name))
+                        || inner.range(ctx).is_some_and(|range| holds(VTy::I32, range))
+                };
+                self.cast_target(target)
+                    .is_ok_and(|to| to.is_int() && fits(to))
+                    && self.non_negative(inner, ctx)
+            }
+            _ => match expression.operation() {
+                Some((
+                    O::Add | O::Multiply | O::Divide | O::FloorDivide | O::Minimum | O::BitwiseOr,
+                    args,
+                )) => each(args),
+                Some((O::Maximum | O::BitwiseAnd, args)) => {
+                    args.iter().any(|arg| self.non_negative(arg, ctx))
+                }
+                // A floor remainder takes the divisor's sign.
+                Some((O::Remainder | O::Mod, [_, divisor])) => self.non_negative(divisor, ctx),
+                Some((O::RightShift | O::LeftShift, [value, _])) => self.non_negative(value, ctx),
+                Some((O::Copy | O::Positive, [value])) => self.non_negative(value, ctx),
+                _ => false,
+            },
+        }
+    }
+
+    /// The value inside a cast to 64 bits of a value C computes at 32 bits or fewer; `expression` itself otherwise.
+    fn unwidened<'e>(&self, expression: &'e Expression) -> &'e Expression {
+        match &**expression {
+            Expr::Cast(target, inner)
+                if self.cast_target(target).is_ok_and(VTy::is_wide)
+                    && matches!(
+                        self.infer(inner),
+                        Some(VTy::I32 | VTy::U32 | VTy::I16 | VTy::U16)
+                    ) =>
+            {
+                inner
+            }
+            _ => expression,
+        }
+    }
+
+    /// The unsigned 64-bit quotient or remainder of two registers, with cicc's bypass: where both operands fit 32
+    /// bits when the kernel runs, the 32-bit instruction, a fraction of the 64-bit one's cost, behind a branch.
+    fn bypassed(&mut self, opcode: Opcode, operands: Vec<Operand>, ty: VTy, kept: i64) -> Val {
+        let whole = Inst::new(opcode, Ty::U64, Vec::new(), operands.clone());
+        if let Some(reg) = self.b.known(&whole) {
+            return Val::reg(reg, ty);
+        }
+        let either = self.int_value(Opcode::Or, Ty::B64, VTy::U64, operands.clone(), 1);
+        let mask = Operand::Int(-1 << 32);
+        let high = self.int_value(Opcode::And, Ty::B64, VTy::U64, vec![either.op, mask], 1);
+        let narrow = Inst::new(
+            Opcode::Setp(Cmp::Eq),
+            Ty::U64,
+            Vec::new(),
+            vec![high.op, Operand::Int(0)],
+        );
+        let narrow = self.b.value(narrow, Bank::Pred);
+        let result = self.b.state(Bank::B64);
+        let mut open = self.b.open_if(narrow);
+        let halves: Vec<Operand> = operands
+            .iter()
+            .map(|operand| {
+                let low = Inst::new(
+                    Opcode::Cvt(Ty::U64),
+                    Ty::U32,
+                    Vec::new(),
+                    vec![operand.clone()],
+                );
+                self.b.value(low, Bank::B32).into()
+            })
+            .collect();
+        let short = self
+            .b
+            .value(Inst::new(opcode, Ty::U32, Vec::new(), halves), Bank::B32);
+        let widened = Inst::new(
+            Opcode::Cvt(Ty::U32),
+            Ty::U64,
+            vec![result],
+            vec![short.into()],
+        );
+        self.b.emit(widened);
+        self.b
+            .else_(&mut open)
+            .expect("the condition just opened is innermost");
+        self.b.emit(Inst {
+            results: vec![result],
+            ..whole.clone()
+        });
+        self.b
+            .close_if(open)
+            .expect("the condition just opened is innermost");
+        let value = self.b.reg(Bank::B64);
+        self.b.emit(Inst::new(
+            Opcode::Mov,
+            Ty::B64,
+            vec![value],
+            vec![result.into()],
+        ));
+        self.b.set_multiple(value, kept);
+        self.b.remember(&whole, value);
+        Val::reg(value, ty)
+    }
+
+    /// The floor quotient or remainder of a 64-bit value from zero up by a constant from 3 up that is no power of
+    /// two, as a multiply-high: `m` is `2^(63 + l) / d` rounded up, `l` the bits of `d`, exact below `2^63` as the
+    /// 32-bit form is below `2^31`. A remainder by a 32-bit divisor is computed from the low halves.
+    fn wide_multiply_high(&mut self, a: &Val, divisor: i64, remainder: bool, multiple: i64) -> Val {
+        let d = divisor as u64;
+        let l = 64 - (d - 1).leading_zeros();
+        let m = (1u128 << (63 + l)).div_ceil(u128::from(d)) as u64;
+        let value = self.as_int(a, VTy::U64);
+        let operands = vec![value.clone(), Operand::Int(m as i64)];
+        let high = self.int_value(Opcode::MulHi, Ty::U64, VTy::U64, operands, 1);
+        let shift = Operand::Int(i64::from(l - 1));
+        let quotient = self.int_value(Opcode::Shr, Ty::U64, VTy::U64, vec![high.op, shift], 1);
+        if !remainder {
+            return quotient;
+        }
+        let kept = gcd(multiple, divisor);
+        if divisor <= i64::from(i32::MAX) {
+            let low = |this: &mut Lowerer, operand: Operand| {
+                this.int_value(Opcode::Cvt(Ty::U64), Ty::U32, VTy::U32, vec![operand], 1)
+                    .op
+            };
+            let (value, quotient) = (low(self, value), low(self, quotient.op));
+            let operands = vec![quotient, Operand::Int(divisor)];
+            let whole = self.int_value(Opcode::Mul, Ty::S32, VTy::I32, operands, divisor);
+            return self.int_value(Opcode::Sub, Ty::S32, VTy::I32, vec![value, whole.op], kept);
+        }
+        let operands = vec![quotient.op, Operand::Int(divisor)];
+        let whole = self.int_value(Opcode::Mul, Ty::S64, VTy::I64, operands, divisor);
+        self.int_value(Opcode::Sub, Ty::S64, VTy::I64, vec![value, whole.op], kept)
     }
 
     /// The floor quotient of a 32-bit value by a constant from 3 up that is no power of two, as a multiply-high.
