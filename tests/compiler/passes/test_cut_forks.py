@@ -400,7 +400,7 @@ def test_composed_cut_topologically_orders_equal_degree_workspace_chain() -> Non
 
     def piece(name: str, source: str | None):
         produced = projection((), f"{name}_value = load {source or 'input'}[]", results=(f"{name}_value",))
-        return (None, produced, (), (), name, (f"{name}_value",), (name,))
+        return (None, produced, (), (), (f"{name}_value",), (name,))
 
     pieces = [piece("a", "c"), piece("c", "b"), piece("b", None)]
 

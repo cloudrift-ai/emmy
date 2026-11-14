@@ -2088,15 +2088,13 @@ def realize(match: Match, root: Node, seams, *, joins: tuple = ()) -> Graph:
                 groups.append((names, produced, tuple(seam.dtypes[position] for position in positions), tuple(positions)))
         held: dict[int, str] = {}
         indexes: dict[int, tuple] = {}
-        for number, (names, produced, dtypes, ordinals) in enumerate(groups):
+        for names, produced, dtypes, ordinals in groups:
             axes, strides, index = _workspace_layout(produced, _weight_ordered(_workspace_axes(seam, produced), produced, tile.inputs))
             buffers = tuple(f"{root.id}__place_{token}_{i}" for i in ordinals)
             for name, buffer in zip(names, buffers, strict=True) if front is None else ():
                 held.update({position: buffer for position, own in enumerate(child.exposes) if own == name})
                 indexes.update({position: index for position, own in enumerate(child.exposes) if own == name})
-            pieces.append(
-                (replace(seam, dtypes=dtypes), produced, axes, strides, token if number == 0 else f"{token}_{number}", names, buffers)
-            )
+            pieces.append((replace(seam, dtypes=dtypes), produced, axes, strides, names, buffers))
 
         # SLABS, not bare Loads: these replace an operand edge, and an operand is a term. The
         # workspace read declares the seam axes it indexes, exactly as any other gmem read does.
@@ -2211,7 +2209,7 @@ def realize(match: Match, root: Node, seams, *, joins: tuple = ()) -> Graph:
         for store in tile.output_specs
     )
     produced_pieces = []
-    for seam, produced, axes, strides, token, names, buffers, replacements in pieces:
+    for seam, produced, axes, strides, names, buffers, replacements in pieces:
         others = {target: loads for target, loads in everything.items() if target not in replacements}
         # A piece that reads another seam's workspace re-spells what it derives from it too, and
         # its own stores name those values.
@@ -2219,7 +2217,7 @@ def realize(match: Match, root: Node, seams, *, joins: tuple = ()) -> Graph:
         produced = _without_identity_casts(_replace_fold(produced, others, derived) if others else produced, stored)
         produced = _stored_cells(produced, axes, strides)
         index = tuple(Var(axis.name) for axis in axes)
-        produced_pieces.append((seam, produced, axes, index, token, tuple(derived.get(name, name) for name in names), buffers))
+        produced_pieces.append((seam, produced, axes, index, tuple(derived.get(name, name) for name in names), buffers))
 
     fragment = _input_fragment(match, root)
     spelled = {buffer: seam.spelling for seam, *_, buffers in produced_pieces for buffer in buffers}
@@ -2257,7 +2255,7 @@ def realize(match: Match, root: Node, seams, *, joins: tuple = ()) -> Graph:
     # containment makes this dependency graph acyclic, including chains whose members have the
     # same number of direct workspace reads.
     entries = []
-    for seam, produced, axes, index, token, names, buffers in _producer_order(produced_pieces):
+    for seam, produced, axes, index, names, buffers in _producer_order(produced_pieces):
         # The workspace keeps the shape the sibling already reads it back at, so the split below
         # moves the GRID and nothing else.
         shape = tuple(axis.extent for axis in axes)
