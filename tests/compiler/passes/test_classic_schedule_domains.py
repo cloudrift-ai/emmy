@@ -1046,3 +1046,18 @@ def test_grouped_matvec_does_not_tile_two_axes_of_one_operand(heads):
     row, column = tile.grid_sched._mn_for(tile.op)
     assert row.extent.as_static() == 1 and column.name == "channel"
     assert heads == 1 or row.name != "head"
+
+
+def test_two_output_tiled_roots_merge_into_one_grid_binding() -> None:
+    """The binder merges two roots bound on one grid into a single kernel Tile holding both bodies."""
+    from importlib import import_module
+
+    from emmy.compiler.ir.kernel import Tile as KernelTile
+
+    factor = import_module("emmy.compiler.pipeline.passes.lowering.kernel._factor")
+    m = Axis("m", 8)
+    merged = factor._merge_root_tiles(
+        (KernelTile(axes=(m,), body=parse_body("v0 = copy(x)")), KernelTile(axes=(m,), body=parse_body("v1 = copy(y)")))
+    )
+    assert merged.axes == (m,)
+    assert [stmt.defines() for stmt in merged.body] == [("v0",), ("v1",)]

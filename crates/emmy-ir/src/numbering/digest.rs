@@ -3,7 +3,7 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
-use super::{Chains, Key, Number, Numbering, Tag, hash_parts, value_numbers};
+use super::{Chains, Key, Number, Numbering, Tag, hash_parts, params_key, value_numbers};
 use crate::body::{Body, StmtRef};
 use crate::order::ordering_constraints;
 use crate::{Name, locked};
@@ -79,7 +79,7 @@ fn member_tree(
             hash_parts([
                 Key::tag(Tag::Block),
                 header.clone(),
-                Key::Tuple(params.clone()),
+                params_key(params),
                 Key::Tuple(children.into_iter().map(Key::Num).collect()),
                 Key::Tuple(preceding),
             ])
@@ -91,7 +91,7 @@ fn member_tree(
             hash_parts([
                 Key::tag(Tag::Stmt),
                 number,
-                Key::Tuple(params),
+                params_key(&params),
                 Key::Tuple(preceding),
             ])
         }

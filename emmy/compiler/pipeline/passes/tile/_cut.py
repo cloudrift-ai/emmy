@@ -63,7 +63,7 @@ from emmy.compiler.ir.tile.path import family_sites, sites, spell
 from emmy.compiler.pipeline import Match
 from emmy.compiler.pipeline.knob import consume_kernel_row
 from emmy.compiler.pipeline.passes.loop.fusion._region import build_merged_region, live_outputs_of, wrap_multi_output_fragment
-from emmy.compiler.pipeline.passes.tile._row import io_shapes, lift_kernel, reformed
+from emmy.compiler.pipeline.passes.tile._row import io_shapes, lift_kernel, lift_nest, reformed
 from emmy.compiler.pipeline.passes.tile._split import add_output_piece, output_root
 from emmy.compiler.structural import digest
 from emmy.compiler.tensor import Tensor
@@ -2442,7 +2442,7 @@ def _contraction_producer(tile: TileOp, seam: CutSite, batch: list, others: dict
         nests.extend(nest)
     nest = tuple(nests)
     # The nest is stored as the piece's ``source``, as a re-formed piece's is: it is the body a kernel row stores.
-    return replace(lift_kernel(LoopOp(body=Body(nest)), shapes=shapes), source=LoopOp(body=Body(nest)))
+    return replace(lift_nest(Body(nest), shapes), source=LoopOp(body=Body(nest)))
 
 
 def _digits(expression: Expression, placeholder: Var, by_name: dict) -> dict[str, Expression]:

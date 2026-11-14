@@ -3,7 +3,7 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
-use super::{Key, Number, Param, Tag, expression_key, hash_parts};
+use super::{Key, Number, Param, Tag, expression_key, hash_parts, params_key};
 use crate::Name;
 use crate::body::{Body, StmtRef};
 use crate::elementwise::Operation;
@@ -311,7 +311,7 @@ impl Context<'_> {
     ) -> Key {
         expression_key(e, &mut |e| {
             if self.reads_axis(e) && self.coordinate_only(e) {
-                let key = Key::tuple([Key::tag(Tag::Expr), self.by_depth(e)]);
+                let key = Param::new(Key::tuple([Key::tag(Tag::Expr), self.by_depth(e)]));
                 let index = match params.iter().position(|p| *p == key) {
                     Some(index) => index,
                     None => {
@@ -361,7 +361,7 @@ impl Context<'_> {
             return found.clone();
         }
         let mut found = Vec::new();
-        if let Key::Tuple(parts) = param
+        if let Key::Tuple(parts) = param.key()
             && parts.len() == 2
         {
             depths(&parts[1], &mut found);
@@ -444,13 +444,13 @@ impl Context<'_> {
                     // A bound composite still reads its free coordinates: they stay as bare parameters of the reduce.
                     for depth in self.param_depths(param) {
                         if !bound_depths.contains(&depth) {
-                            let bare = Key::tuple([
+                            let bare = Param::new(Key::tuple([
                                 Key::tag(Tag::Expr),
                                 Key::tuple([
                                     Key::str(ExprType::Var.text()),
                                     Key::Int(depth as i64),
                                 ]),
-                            ]);
+                            ]));
                             if !kept.contains(&bare) {
                                 kept.push(bare);
                             }
@@ -467,7 +467,7 @@ impl Context<'_> {
                         if let Some(position) = bound_depths.iter().position(|d| *d == depth) {
                             return Key::tuple([Key::tag(Tag::Bound), Key::Int(position as i64)]);
                         }
-                        let bare = Key::tuple([Key::tag(Tag::Expr), value.clone()]);
+                        let bare = Param::new(Key::tuple([Key::tag(Tag::Expr), value.clone()]));
                         let position = kept
                             .iter()
                             .position(|p| *p == bare)
@@ -487,7 +487,7 @@ impl Context<'_> {
                 reduced_indices
                     .iter()
                     .map(|&index| {
-                        let form = match &parent[index] {
+                        let form = match parent[index].key() {
                             Key::Tuple(parts) if parts.len() == 2 => &parts[1],
                             other => other,
                         };
@@ -930,7 +930,7 @@ fn exhaustive_layout(groups: &[Vec<Value>], params: &[Param]) -> Vec<Value> {
     for_each_arrangement(&mut groups, 0, &mut |arranged| {
         let order: Vec<Value> = arranged.iter().flatten().cloned().collect();
         let (parent, mapped) = Context::laid_out(&order, params);
-        let key = vec![Key::Tuple(mapped), Key::Tuple(parent)];
+        let key = vec![Key::Tuple(mapped), params_key(&parent)];
         if best.as_ref().is_none_or(|(best_key, _)| key < *best_key) {
             best = Some((key, order));
         }
@@ -1062,13 +1062,12 @@ fn by_content(key: &Key, ops: &[Value], params: &[Param]) -> Key {
             [tag, Key::Int(index)] if *tag == Key::tag(Tag::Operand) => {
                 ops.get(*index as usize).map_or_else(
                     || key.clone(),
-                    |value| Key::tuple([Key::Num(value.0), Key::Tuple(value.1.clone())]),
+                    |value| Key::tuple([Key::Num(value.0), params_key(&value.1)]),
                 )
             }
             [tag, Key::Int(index)] if *tag == Key::tag(Tag::Coordinate) => params
                 .get(*index as usize)
-                .cloned()
-                .unwrap_or_else(|| key.clone()),
+                .map_or_else(|| key.clone(), |param| Key::Param(param.clone())),
             _ => Key::Tuple(
                 parts
                     .iter()
@@ -1124,7 +1123,7 @@ mod tests {
             number,
             params
                 .iter()
-                .map(|p| Key::tuple([Key::str(ExprType::Var.text()), Key::Int(*p)]))
+                .map(|p| Param::new(Key::tuple([Key::str(ExprType::Var.text()), Key::Int(*p)])))
                 .collect(),
         )
     }
@@ -1137,7 +1136,10 @@ mod tests {
             vec![operand(2, &[9])],
             coordinates.iter().map(|c| operand(7, &[*c])).collect(),
         ];
-        let params = vec![Key::tuple([Key::str(ExprType::Var.text()), Key::Int(9)])];
+        let params = vec![Param::new(Key::tuple([
+            Key::str(ExprType::Var.text()),
+            Key::Int(9),
+        ]))];
         let greedy = greedy_layout(&groups, &params);
         assert_eq!(greedy, exhaustive_layout(&groups, &params));
         assert_eq!(greedy, least_layout(&groups, &params));
