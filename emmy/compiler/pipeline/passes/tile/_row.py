@@ -17,6 +17,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from dataclasses import replace
+from functools import lru_cache
 from math import prod
 
 from emmy.compiler.ir.axis import Axis
@@ -153,6 +154,18 @@ def lift_kernel(loop: LoopOp, *, shapes: Mapping | None = None) -> TileOp:
         if binds_the_row(bound, ROW_AXIS):
             return bound
     return _store_ordered(tile)
+
+
+def lift_nest(body: Body, shapes: Mapping) -> TileOp:
+    """The kernel :func:`lift_kernel` forms from a bare loop nest a cut, split or re-form builds. The arms of one
+    kernel-set fork build many of the same pieces, and a nest's kernel depends on its normal form and the buffer
+    ``shapes`` alone, so each one is lifted once."""
+    return _lift_formed(LoopOp(body=body).body, tuple(sorted(shapes.items())))
+
+
+@lru_cache(maxsize=512)
+def _lift_formed(body: Body, shapes: tuple) -> TileOp:
+    return lift_kernel(LoopOp(body=body), shapes=dict(shapes))
 
 
 def _region_loads(region: Fold) -> tuple[Load, ...]:
@@ -529,7 +542,7 @@ def reformed(piece: TileOp, shapes: Mapping) -> TileOp:
     try:
         # Through the LoopOp's normalization: that is where two reduce loops over one axis become
         # one loop with two accumulators, the twin the lift forms one term from.
-        formed = lift_kernel(LoopOp(body=body), shapes=shapes)
+        formed = lift_nest(body, shapes)
         if _orients_by_nest(formed):
             # The closed nest's grid order is ``lower``'s choice. Formed once, the piece is lowered
             # again inside its own grid loops: nothing sits ahead of that chain, so normalization
@@ -541,7 +554,7 @@ def reformed(piece: TileOp, shapes: Mapping) -> TileOp:
             for axis in reversed(formed.place.free):
                 again = Body((Loop(axis=axis, body=again),))
             try:
-                reoriented = lift_kernel(LoopOp(body=again), shapes=shapes)
+                reoriented = lift_nest(again, shapes)
                 reoriented.op.lower(bound=frozenset(), stores=reoriented.output_specs, axes=reoriented.axes)
             except ValueError:
                 pass

@@ -41,7 +41,6 @@ from emmy.compiler.ir.address import clamp_to, gmem_axis_step
 from emmy.compiler.ir.axis import Axis, Window
 from emmy.compiler.ir.base import InputOp
 from emmy.compiler.ir.expression import BinaryExpression, Literal, Var, apply
-from emmy.compiler.ir.loop import LoopOp
 from emmy.compiler.ir.pure import Lambda
 from emmy.compiler.ir.pure.fold import Fold
 from emmy.compiler.ir.pure.twist import Twist
@@ -55,7 +54,7 @@ from emmy.compiler.pipeline import Match
 from emmy.compiler.pipeline.fork import DeferredFork
 from emmy.compiler.pipeline.knob import axis_of, consume_kernel_row, kernel_pin
 from emmy.compiler.pipeline.passes.tile._fromloop import carrying_loops, stored_states
-from emmy.compiler.pipeline.passes.tile._row import io_shapes, lift_kernel, reformed
+from emmy.compiler.pipeline.passes.tile._row import io_shapes, lift_nest, reformed
 from emmy.compiler.pipeline.search.space import REDUCE, WORK
 
 logger = logging.getLogger(__name__)
@@ -536,7 +535,7 @@ def realize_carry_split(match: Match, root: Node, cta: int) -> Graph:
     }
 
     def piece(body: Body) -> TileOp:
-        lifted = lift_kernel(LoopOp(body=body), shapes=shapes)
+        lifted = lift_nest(body, shapes)
         return replace(lifted, knobs=consume_kernel_row(lifted.knobs))
 
     frag = _frag(match, root)
