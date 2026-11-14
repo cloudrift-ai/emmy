@@ -215,7 +215,9 @@ walk of the subtree; no key is a printed text. A body also keeps the one normal 
 `remember_normal_form`, `is_normal`, `mark_normal` in `body.rs`), so a body normalized twice costs one lookup and a
 protocol rewrite that keeps a normal form says so through that API. A normal form also enters `normal_forms` under its
 own form, since it is its own normal form: a body built again equal to one, which passes do often, reads it back
-instead of taking a round to learn it is final. The extension's wrapper tables (a body's statement wrappers, a
+instead of taking a round to learn it is final. It keeps, the same way, whether every scope of it is in dependency
+order (`is_sorted`, `mark_sorted`): the dependency sort's result and the canonical order's are, so the sort leaves
+such a body alone without working out its constraints. The extension's wrapper tables (a body's statement wrappers, a
 subroutine's one Python object) are not bounded, since a live object keeps its one wrapper, and drop their dead
 entries when their size reaches a multiple of 1,024.
 

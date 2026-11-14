@@ -443,16 +443,23 @@ pub fn place_values(body: &Body) -> Result<Body> {
 /// any member of a group of congruent states (`congruent_states`) is the same value, so placement merges the cones
 /// the members compute.
 pub fn place_values_keyed(body: &Body, states: &HashMap<Name, Key>) -> Result<Body> {
-    let numbering = value_numbers(
+    place_values_numbered(
         body,
-        &|name| {
-            states
-                .get(name)
-                .cloned()
-                .unwrap_or_else(|| crate::numbering::spelled_key(name))
-        },
-        crate::numbering::Chains::Flat,
-    );
+        &value_numbers(
+            body,
+            &|name| {
+                states
+                    .get(name)
+                    .cloned()
+                    .unwrap_or_else(|| crate::numbering::spelled_key(name))
+            },
+            crate::numbering::Chains::Flat,
+        ),
+    )
+}
+
+/// [`place_values_keyed`] under a numbering already taken with those keys (the one `congruent_states` found stable).
+pub fn place_values_numbered(body: &Body, numbering: &Numbering) -> Result<Body> {
     let mut written: HashSet<Name> = HashSet::new();
     let mut updated: HashSet<Name> = HashSet::new();
     body.walk(&mut |here| {
@@ -465,7 +472,7 @@ pub fn place_values_keyed(body: &Body, states: &HashMap<Name, Key>) -> Result<Bo
     written.extend(updated.iter().copied());
     let mut placer = Placer {
         updated,
-        numbering: &numbering,
+        numbering,
         written,
         alias: HashMap::new(),
         defined: HashMap::new(),

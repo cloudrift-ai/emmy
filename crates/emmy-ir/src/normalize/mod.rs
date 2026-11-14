@@ -179,11 +179,12 @@ fn prepared(body: &Body, canonical_loops: bool) -> Result<Body> {
         if placed.as_ref() == Some(&simplified) {
             return Ok(simplified);
         }
-        let groups = congruent_states(&simplified);
-        let next = merge_congruent_states(
-            &place_values_keyed(&simplified, &group_keys(&groups))?,
-            &groups,
-        );
+        let (groups, numbering) = congruent_states(&simplified);
+        let placed_values = match &numbering {
+            Some(numbering) => place_values_numbered(&simplified, numbering)?,
+            None => place_values_keyed(&simplified, &group_keys(&groups))?,
+        };
+        let next = merge_congruent_states(&placed_values, &groups);
         stmts = next.clone();
         placed = Some(next);
     }

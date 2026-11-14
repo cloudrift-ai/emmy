@@ -344,7 +344,10 @@ pub fn canonical_order(body: &Body) -> Result<Body> {
         let bodies: Result<Vec<Body>> = nested.iter().map(unify_siblings).collect();
         Ok(Some(with_bodies(stmt, bodies?)))
     })?;
-    unify_siblings(&unified)
+    // Every scope was ordered under its dependencies and effects, and the renaming keeps each read's binding.
+    let canonical = unify_siblings(&unified)?;
+    canonical.mark_sorted();
+    Ok(canonical)
 }
 
 /// Every expression of `stmt` in canonical form, each in the coefficient domain its field's class declares
