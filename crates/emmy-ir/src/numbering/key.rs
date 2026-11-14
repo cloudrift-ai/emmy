@@ -1,12 +1,16 @@
 //! Digest material: the `Key` tree every number, parameter and tie is spelled in, and its hash.
 
+use std::cmp::Ordering;
+use std::hash::{Hash, Hasher};
+use std::sync::Arc;
+
 use crate::Name;
 use crate::closed_set;
 use crate::expr::Num;
 use crate::expr::{Expr, ExprType, Expression};
 
 /// Digest material: a tree of primitives, hashed to a number and ordered totally.
-#[derive(Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Debug)]
+#[derive(Clone, Debug)]
 pub enum Key {
     None,
     Bool(bool),
@@ -18,6 +22,8 @@ pub enum Key {
     Text(Box<str>),
     Num(u128),
     Tuple(Vec<Key>),
+    /// A parameter, shared rather than copied: it hashes, compares and orders as the key it holds.
+    Param(Param),
 }
 
 pub type Number = u128;
@@ -103,6 +109,30 @@ impl Key {
                     part.write(out);
                 }
             }
+            Key::Param(param) => param.key().write(out),
+        }
+    }
+
+    /// The key a parameter holds, or the key itself.
+    fn peeled(&self) -> &Key {
+        match self {
+            Key::Param(param) => param.key(),
+            other => other,
+        }
+    }
+
+    /// The variant's position, which orders two keys of different variants.
+    fn rank(&self) -> u8 {
+        match self {
+            Key::None => 0,
+            Key::Bool(_) => 1,
+            Key::Int(_) => 2,
+            Key::Float(_) => 3,
+            Key::Str(_) => 4,
+            Key::Text(_) => 5,
+            Key::Num(_) => 6,
+            Key::Tuple(_) => 7,
+            Key::Param(_) => unreachable!("a peeled key is never a parameter"),
         }
     }
 
@@ -135,8 +165,120 @@ pub fn hash_parts(parts: impl IntoIterator<Item = Key>) -> Number {
     Key::tuple(parts).hash()
 }
 
-/// A parameter: the form of a coordinate-only expression, every axis spelled by its binding depth.
-pub type Param = Key;
+impl PartialEq for Key {
+    fn eq(&self, other: &Key) -> bool {
+        if let (Key::Param(a), Key::Param(b)) = (self, other) {
+            return a == b;
+        }
+        match (self.peeled(), other.peeled()) {
+            (Key::None, Key::None) => true,
+            (Key::Bool(a), Key::Bool(b)) => a == b,
+            (Key::Int(a), Key::Int(b)) => a == b,
+            (Key::Float(a), Key::Float(b)) => a == b,
+            (Key::Str(a), Key::Str(b)) => a == b,
+            (Key::Text(a), Key::Text(b)) => a == b,
+            (Key::Num(a), Key::Num(b)) => a == b,
+            (Key::Tuple(a), Key::Tuple(b)) => a == b,
+            _ => false,
+        }
+    }
+}
+
+impl Eq for Key {}
+
+impl Ord for Key {
+    fn cmp(&self, other: &Key) -> Ordering {
+        if let (Key::Param(a), Key::Param(b)) = (self, other) {
+            return a.cmp(b);
+        }
+        let (a, b) = (self.peeled(), other.peeled());
+        match (a, b) {
+            (Key::Bool(a), Key::Bool(b)) => a.cmp(b),
+            (Key::Int(a), Key::Int(b)) => a.cmp(b),
+            (Key::Float(a), Key::Float(b)) => a.cmp(b),
+            (Key::Str(a), Key::Str(b)) => a.cmp(b),
+            (Key::Text(a), Key::Text(b)) => a.cmp(b),
+            (Key::Num(a), Key::Num(b)) => a.cmp(b),
+            (Key::Tuple(a), Key::Tuple(b)) => a.cmp(b),
+            _ => a.rank().cmp(&b.rank()),
+        }
+    }
+}
+
+impl PartialOrd for Key {
+    fn partial_cmp(&self, other: &Key) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Hash for Key {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        let key = self.peeled();
+        state.write_u8(key.rank());
+        match key {
+            Key::None | Key::Param(_) => {}
+            Key::Bool(v) => v.hash(state),
+            Key::Int(v) => v.hash(state),
+            Key::Float(v) => v.hash(state),
+            Key::Str(v) => v.hash(state),
+            Key::Text(v) => v.hash(state),
+            Key::Num(v) => v.hash(state),
+            Key::Tuple(v) => v.hash(state),
+        }
+    }
+}
+
+/// A parameter: the form of a coordinate-only expression, every axis spelled by its binding depth. A value carries
+/// its parameters to every statement that reads it, so a parameter is shared rather than copied, and keeps a
+/// fingerprint so two parameters compare at once unless they are equal.
+#[derive(Clone, Debug)]
+pub struct Param(Arc<(u64, Key)>);
+
+impl Param {
+    pub fn new(key: Key) -> Param {
+        let mut hasher = std::hash::DefaultHasher::new();
+        Hash::hash(&key, &mut hasher);
+        Param(Arc::new((hasher.finish(), key)))
+    }
+
+    pub fn key(&self) -> &Key {
+        &self.0.1
+    }
+}
+
+/// Parameters as one key: a tuple of them, each shared.
+pub fn params_key(params: &[Param]) -> Key {
+    Key::Tuple(params.iter().cloned().map(Key::Param).collect())
+}
+
+impl PartialEq for Param {
+    fn eq(&self, other: &Param) -> bool {
+        Arc::ptr_eq(&self.0, &other.0) || (self.0.0 == other.0.0 && self.0.1 == other.0.1)
+    }
+}
+
+impl Eq for Param {}
+
+impl Ord for Param {
+    fn cmp(&self, other: &Param) -> Ordering {
+        if Arc::ptr_eq(&self.0, &other.0) {
+            return Ordering::Equal;
+        }
+        self.key().cmp(other.key())
+    }
+}
+
+impl PartialOrd for Param {
+    fn partial_cmp(&self, other: &Param) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Hash for Param {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        state.write_u64(self.0.0);
+    }
+}
 
 pub fn spelled_key(name: &Name) -> Key {
     Key::Str(*name)
