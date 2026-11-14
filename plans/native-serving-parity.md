@@ -158,6 +158,36 @@ What the session changes for the milestones:
 - **14's reference chunk moved.** Qwen3.6's 64-row chunk takes 1.44-1.49 s against 1.25 s, 97% expert programs. The card
   and the host memory settings both differ, and that was not separated.
 
+## Measured 2026-11-12 (#1392)
+
+The 27B DISCOVERY's 2026-11-12 section holds the tables: one rented x16 RTX 5090, one session, native and stock, the
+pack exported under strict evidence. The plugin lane was not measured, and Qwen3.6 was not served (the host had too
+little memory for its export).
+
+The bar in these numbers: 27B TPOT <= 9.44 / 9.28 / 14.3 ms at 256 / 7,680 / 197,632 tokens, first token <= 0.32 /
+1.51 / 136 s.
+
+| 27B, native against the bar | 256 | 7,680 | 197,632 |
+| --- | --- | --- | --- |
+| TPOT | 9.84 ms, missed by 4% | 8.72 ms, met | 11.4 ms, met |
+| first token | 0.143 s, met | 4.37 s, missed | 172 s, missed |
+
+The full window serves (11.4 ms, 251 s), device memory at rest is 27.9 GiB against stock's 30.4, and GSM8K holds.
+
+What the session changes for the milestones:
+
+- **2-6 are met.** 6's gate is in its own entry below.
+- **The three cells left belong to 7 and 9.** The 256-token TPOT is 7's: the verify step is 21.6 ms, 14.3 ms of it the
+  Gated DeltaNet layers, and those prompts accept 2.26 tokens a step. Both first-token cells are 9's.
+- **9 is two pieces of work, and width is the smaller one.** A 64-row chunk is 35.9 ms, 27.7 ms of it the Gated
+  DeltaNet layers: about 15.6 ms whatever the width plus about 0.32 ms a row, an estimate from two programs, with no
+  chunk above 64 rows timed. At that row cost a 256-row chunk gives about 2.9 s at 7,680 tokens, and no width gives
+  less than about 2.5 s; the cell needs about 0.14 ms a row at 256 rows. At 197,632 tokens attention is 62 s at any
+  width and a 256-row chunk leaves about 75 s for the rest: about 137 s against 136 s.
+- **19's design is written** (`emmy/serving/native/ARCHITECTURE.md`) and waits for the owner's approval.
+- **The golden has to be watched after a normal-form change.** #1365 left the 27B golden with 225 measured rows of
+  415 and a strict export that stopped at its first fork. The file holds 375 of 412 now.
+
 ## The open PRs, placed
 
 - **#1294**, beside **#1293** (both merged 2026-10-30): the placement prior prices a kernel set's work; a cut
@@ -413,6 +443,12 @@ What the session changes for the milestones:
    each read every slice: at 131,072 the three-row twin takes 487 us against the one-row twin's 205. What is left is
    one cache read per step, the step's rows folded into the fold's rows beside the group, so a slice is read once.
 
+   Gated again on 2026-11-12 with the verify step's rows folded beside the group (#1392), met for the 27B. The
+   captured verify step takes 26.4 ms at 197,632 positions, 4.5 ms of it the target's attention, against 21.6 ms at a
+   window of up to 8,192: +4.8 ms against ~8. At 131,072 the three-row twin takes 183 us against 487. TPOT at
+   197,632 tokens is 11.4 ms, inside the bar. Qwen3.6's twins are recorded (120 us at 131,072 against 274); its
+   window step is still not served, and 16 confirms it.
+
 7. **The width-3 Gated DeltaNet step toward its floor.** gdn3rows is 14.3 ms against a 6.9 ms floor after #1282:
    the weight readers run 1.0-1.4 TB/s, the same readers the one-row program runs 5-10 us faster (qkv 38.4 us for
    52 MB, gate_up 70 for 94.7 MB), and the recurrence keeps two ideas #1288 left (the seed read on the step's
@@ -434,6 +470,54 @@ What the session changes for the milestones:
    (2x stock); the chunk term at 197,632 <= 20 s ((197,632 / W) x the measured per-chunk cost); device memory at
    rest within the standing condition at the widest kept width (native sits at 30.1 GiB against stock's 30.4, so
    the wide chunk's activations get ~0.3 GiB); the full window still serves; goldens current. Needs 3, 4, 5, 8.
+
+   #1392 landed the pack's half: a pack holds a chunk wider than the plugin's and keeps the plugin's chunk and the
+   decode width for a prompt's tail (`--prefill-size`, `SERVE_NATIVE_PREFILL`). No recipe uses it. What is left is two
+   pieces of work (the 2026-11-12 section has the arithmetic):
+
+   - **The 256-row chunk loads.** Traced at 256 rows the Gated DeltaNet layer has twelve root kernels where the
+     64-row one has four: the recurrence across its four 64-token chunks adds eight. No row covers them. The
+     compile's own cuts leave four FP32 workspaces of `[4, 64, 64, 48, 48, 128]` a layer, 18 GiB each, so the pack
+     runs out of device memory at load, and under the 64-row kernel's recorded route one piece does not finish in
+     80 s. This is a cut problem and reproduces off the card at sm_120 lowering. Done when the 256-row program
+     compiles to a kernel set whose workspaces fit the standing memory condition and every piece finishes; its rows
+     are then recorded on the card. The compile half is done (#1398); the records are not.
+   - **The row cost of the Gated DeltaNet layers falls about 2.4x.** Width alone meets the 197,632-token cell and
+     not the 7,680-token one. The layers are 27.7 ms of a 35.9 ms chunk; the in projections and the input norm, the
+     state and convolution pieces and `k_slice_unsqueeze_reduce` are the row-bound ones (8's table). A tune on the
+     card, at the wide width once it loads.
+
+   The first piece loads since #1398 (2026-11-13): a program wider than one chunk traces the delta rule with the
+   scan carrying only the state, and the 256-row NVFP4 layer lowers at sm_120 with no workspace above 0.18 GiB (the
+   stored steps of the triangular solve, which exist once a program because scratch is packed by liveness). A
+   second fix for the same fault, a tracer that clamps only the written axis of a slice write, was built and
+   dropped: on top of #1398 it changes no workspace, and it re-keys the Gated DeltaNet kernels of 16 goldens on
+   seven cards. Keeping only the last step of the solve was tried and reverted too: the shared-memory schedule of
+   the solve needs every step stored at its own index, and without it the 16-row solve went from 59 to 214 us.
+
+   What a rented RTX 5090 measured on 2026-11-14, on the trace before #1398, so no row of it is in a golden. The
+   256-row layer's slow picks are a search problem, not a width problem: the main output kernel is 22.6 ms as
+   the priors pick it and 0.84 ms after a 60-schedule tune of each of its fourteen heavy cut pieces (0.4-4 ms
+   each before, 8-160 us after); the solve is 21 ms as picked and 0.14 ms tuned; `k_matmul` at 256 rows 1.9 ms
+   and 13 us. Every heavy piece refuses a plain `--tune` (it is cut again) and tunes under `PLACE=fuse`. The
+   pieces to record again on #1398's trace are the same ones, and the same steps apply: bench the root so its
+   routing rows land in the tune DB, record the kernel set through a seed row on the root, tune each piece above
+   about 25 us by name, record again. Each `emmy run` on the 79-program working golden spends about 13 minutes
+   on one core before it benches, so the rows go in parallel streams. Not recorded: the two 256-row attention
+   targets (7.2 ms a layer as picked; their strict record stops at a second cut fork), and no first token was
+   timed at 256 rows.
+
+   Recorded on #1398's trace the same day (second rental, the recipe golden): 25 of the 28 targets a 256-row
+   chunk adds. The Gated DeltaNet layer's twelve kernels sum to about 1.06 ms at 256 rows, about 4.1 us a row,
+   against about 9 us a row in the 64-row chunk of 2026-11-12. As the priors picked them the solve was 21.7 ms
+   (0.14 ms recorded), triangle-times-values 1.16 ms (63 us) and the main output kernel 0.73 ms (0.30 ms). A
+   record of a wide twin compiles its narrower twins first under strict evidence, so the targets are recorded
+   inside a working copy of the recipe golden, never in a bare trace. Left: the two 256-row attention targets
+   (they need the per-window records the 64-row ones have), one `post` kernel whose pick hangs, and then the
+   strict export and the first token at 256 rows.
+
+   The rotary term of 8's floor is gone since 3 (0.09 ms a chunk), so its "512 rows still leaves 3.85 s" no longer
+   holds as written; the row cost above is what replaces it.
 
 10. **Gate: the 27B at the bar.** The protocol re-run, all columns, one session; the DISCOVERY updated. The
     197,632 first-token cell reads as its two terms — chunk <= 20 s (9), attention <= 117 s (5) — so a miss names
@@ -536,6 +620,10 @@ What the session changes for the milestones:
     the design after 10; it moved up because nothing in it has to wait for single-request parity. Revise it once
     10 lands.
 
+    #1392 wrote the design into `emmy/serving/native/ARCHITECTURE.md`: a region of the window-sized cache per
+    request, reached through a one-entry page table; a state block per request; what a batched step runs and which
+    programs are new; the scheduler. Nothing of it is built. The gate is open: the owner has not approved it.
+
 20. **Per-request cache regions and reclamation.** Today the KV cache is one key and one value buffer per layer,
     sized to the window and allocated at load, and the Gated DeltaNet state is one set of carried buffers — one
     request's. Give each admitted request a cache region (one page, as 19 recommends) and a state block,
@@ -632,7 +720,8 @@ The record and measurement milestones share rented x16 RTX 5090 sessions instead
   attention records twice. Done: 2's head rows on a rented card (#1322), 3's, 4's and 5's rows on the dev-box 5090
   (#1324), and the gates of 3, 4 and 5 on a rented x16 card on 2026-11-06. 6 and 7 share a second: decode attention
   at one and three rows for both models, at both window prices (6's PR lists what to measure), then the width-3 GDN
-  tune in the step. 9's wide-width records are a third, after 8's floor is read.
+  tune in the step. 6's half is done (#1392, 2026-11-12); 7's tune is not. 9's wide-width records are a third, once
+  the 256-row chunk loads, and 7's tune can share that rental.
 - Qwen3.6's 13 and 14 share one rental; 15's overlap check rides it when the runtime lands in time, else it takes a
   short rental of its own before 16's gate session.
 - 10 and 16 are each a fresh protocol session per model (the bar requires one session, all columns).
