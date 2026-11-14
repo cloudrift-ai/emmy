@@ -911,7 +911,6 @@ def test_alpha_equivalent_operand_cones_cluster_into_one_seam() -> None:
 
 def test_cut_value_identity_keeps_updates_of_carried_state_read_before_the_update() -> None:
     from emmy.compiler.ir.stmt import Accum, Body, canonicalize_identity
-    from emmy.compiler.pipeline.passes.tile._cut import _pruned
 
     body = parse_body(
         """
@@ -923,10 +922,10 @@ def test_cut_value_identity_keeps_updates_of_carried_state_read_before_the_updat
             unused <- add(unused, x) over k
         """
     )
-    pruned = _pruned(body, frozenset(("total",)))
+    pruned = body.pruned(("total",))
     assert {stmt.name for stmt in pruned.iter_of_type(Accum)} == {"total", "maximum"}
     renamed = Body(stmt.rename({"maximum": "another_maximum", "total": "another_total"}) for stmt in body)
-    assert canonicalize_identity(pruned).key == canonicalize_identity(_pruned(renamed, frozenset(("another_total",)))).key
+    assert canonicalize_identity(pruned).key == canonicalize_identity(renamed.pruned(("another_total",))).key
 
 
 def test_a_multi_result_cone_does_not_materialize_its_own_dependency() -> None:

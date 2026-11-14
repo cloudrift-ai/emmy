@@ -240,7 +240,7 @@ def _decode_split(arg: str, plain: Body, defs: dict, exposed: dict, k_name: str)
 def _accums_sum_names(body: Body) -> Body:
     """``body`` with every accumulation summing a name: the normal form lets an ``Accum`` sum a literal, and the lift's
     step reads the summed value by name, so a literal takes a definition of its own ahead of the accumulation."""
-    taken = set(body.ssa_uses) | {name for stmt in body.iter() for name in stmt.defines()}
+    taken = set(body.ssa_uses) | body.defined
     out: list[Statement] = []
     for stmt in body:
         if isinstance(stmt, Accum) and isinstance(stmt.value, Literal):

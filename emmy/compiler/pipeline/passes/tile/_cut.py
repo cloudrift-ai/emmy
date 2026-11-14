@@ -494,31 +494,6 @@ def join_pairs(seams) -> tuple[tuple[CutSite, CutSite], ...]:
     )
 
 
-def _pruned(body: Body, roots: frozenset[str]) -> Body:
-    """``body`` cut to what ``roots`` need — the statements a root reads through, in order, a
-    loop kept with what its own body keeps."""
-    from emmy.compiler.ir.stmt import free_names  # noqa: PLC0415
-
-    needed = set(roots)
-    while True:
-        before = needed.copy()
-        kept: list = []
-        for stmt in reversed(tuple(body)):
-            if stmt.nested():
-                inner = tuple(_pruned(child, frozenset(needed)) for child in stmt.nested())
-                if not any(inner):
-                    continue
-                stmt = stmt.with_bodies(inner)
-            elif not (needed.intersection(stmt.defines()) or stmt.external_writes()):
-                continue
-            kept.append(stmt)
-            needed |= free_names(stmt)
-        # A carried state may be read before its update. Keep its update too, even when the
-        # backward walk discovered that read after it had already visited the update.
-        if needed == before:
-            return Body(tuple(reversed(kept)))
-
-
 def _coordinate_reads(body: Body, names: tuple[str, ...]) -> dict[str, Expression]:
     """For each coordinate the cone reads through ONE expression of that coordinate alone, other
     than the coordinate itself, that expression — the index a rotate-half read computes its column
@@ -585,7 +560,7 @@ def _value_forms(seam: CutSite, axes: tuple) -> tuple[tuple, dict[str, Expressio
         body = Body(tuple(stmt.rewrite(lambda name: name, sigma) for stmt in body))
     forms = []
     for exposed in seam.node.exposes:
-        identity = canonicalize_identity(_pruned(body, frozenset((exposed,))))
+        identity = canonicalize_identity(body.pruned((exposed,)))
         forms.append((identity.key, identity.arguments))
     own = {spelled: Var(name) for name, spelled in names.items()}
     at = {axis.name: address for axis, address in zip(stored, index, strict=True) if axis.name in strides and axis.name in names}
@@ -733,7 +708,7 @@ def _row_form(seam: CutSite, name: str, row: Expression, common: tuple[str, ...]
     body = Body(tuple(stmt.rewrite(lambda value: value, sigma) for stmt in body))
     if any(row.free_vars() & expression.free_vars() for stmt in body.iter() for expression in stmt.expressions()):
         return None
-    identity = canonicalize_identity(_pruned(body, frozenset((name,))))
+    identity = canonicalize_identity(body.pruned((name,)))
     return identity.key, identity.arguments
 
 
@@ -1134,7 +1109,7 @@ def _contraction_forms(seam: CutSite, axes: tuple) -> dict[int, tuple] | None:
     for position, name in enumerate(node.exposes):
         channel = _channels(node, (name,)) if len(node.exposes) > 1 else node
         table: dict = {}
-        body = _abstracted(_pruned(Body(tuple(channel.lower(bound=captured, axes=axes))), frozenset((name,))), captured, table, by_name)
+        body = _abstracted(Body(tuple(channel.lower(bound=captured, axes=axes))).pruned((name,)), captured, table, by_name)
         if body is None:
             return None
         expressions = tuple(table)
@@ -2548,7 +2523,7 @@ def _contraction_body(tile: TileOp, group: ContractionGroup, buffer: str, others
         for (expression, placeholder), span in zip(table.items(), ranges, strict=True):
             inverse.update(_digits(expression, placeholder, by_name))
             preimages.update(_preimage(expression, placeholder, span, by_name, shared=shared))
-        lowered = _pruned(Body(tuple(replaced.lower(bound=captured, axes=tile.axes))), frozenset((name,)))
+        lowered = Body(tuple(replaced.lower(bound=captured, axes=tile.axes))).pruned((name,))
         # A captured unit axis reads at 0 wherever a nested cut left it in an index.
         inverse.update({axis: Literal(0, "int") for axis in captured if axis not in inverse and _unit(by_name[axis])})
         body = None

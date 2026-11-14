@@ -402,6 +402,38 @@ impl PyBody {
         frozenset(py, self.body.ssa_uses().iter().cloned())
     }
 
+    /// Every name a statement of this body defines, at any depth.
+    #[getter]
+    fn defined<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyFrozenSet>> {
+        frozenset(py, self.body.defined().iter().copied())
+    }
+
+    /// Every name this body reads from the scope around it, less what it defines or binds.
+    #[getter]
+    fn free<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyFrozenSet>> {
+        frozenset(py, self.body.free().iter().copied())
+    }
+
+    /// ``(reads, writes)``: the external buffers this body reads and writes, first use order, less its kernel-local
+    /// declarations.
+    #[getter]
+    fn buffers<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyTuple>> {
+        let (reads, writes) = self.body.buffers();
+        PyTuple::new(py, [str_tuple(py, reads)?, str_tuple(py, writes)?])
+    }
+
+    /// This body cut to what ``roots`` need, nested bodies cut too; a statement that writes a buffer stays.
+    fn pruned<'py>(
+        &self,
+        py: Python<'py>,
+        roots: &Bound<'py, PyAny>,
+    ) -> PyResult<Bound<'py, PyBody>> {
+        let roots: PyResult<Vec<Name>> =
+            roots.try_iter()?.map(|item| name_from_py(&item?)).collect();
+        let result = self.body.pruned(&roots?).py()?;
+        PyBody::wrap(py, &result)
+    }
+
     /// Each SSA definition to the axes its value depends on.
     #[getter]
     fn axis_dependencies<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyDict>> {

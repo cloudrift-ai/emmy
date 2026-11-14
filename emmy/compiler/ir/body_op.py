@@ -70,23 +70,9 @@ class BodyOp(Op):
             object.__setattr__(self, "outputs", frozendict({n: Tensor(n, (), F32) for n in out_names}))
 
     def _derive_io_names(self) -> tuple[tuple[str, ...], tuple[str, ...]]:
-        """Walk the body once; aggregate per-stmt
-        :meth:`Statement.external_reads` / :meth:`Statement.external_writes` and
-        filter out any name covered by some stmt's
-        :meth:`Statement.local_decls` (smem / staged buffers). Returns
+        """The body's external buffers (:attr:`Body.buffers`: kernel-local declarations left out) as
         ``(input_names, output_names)`` in body first-use order."""
-        decls: set[str] = set()
-        for s in self:
-            decls.update(s.local_decls())
-        ins: dict[str, None] = {}
-        outs: dict[str, None] = {}
-        for s in self:
-            for r in s.external_reads():
-                if r not in decls:
-                    ins.setdefault(r, None)
-            for w in s.external_writes():
-                if w not in decls:
-                    outs.setdefault(w, None)
+        ins, outs = self.body.buffers
         # A buffer the body both reads and writes is in place — a recurrence reading its own
         # earlier steps — and is one output param, not an input too.
         return tuple(name for name in ins if name not in outs), tuple(outs)
