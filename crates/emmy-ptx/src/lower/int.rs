@@ -79,7 +79,7 @@ fn magic(d: u32) -> (u32, u32) {
 }
 
 /// `expression` as a sum of integer multiples of its terms plus a constant; `None` where a coefficient overflows.
-fn linear(
+pub(super) fn linear(
     expression: &Expression,
     scale: i64,
     terms: &mut Vec<(i64, Expression)>,

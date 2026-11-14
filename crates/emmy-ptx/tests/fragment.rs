@@ -302,11 +302,14 @@ fn a_gathered_operand_is_read_at_each_element_and_widened() {
 }
 
 /// Volta's paired slabs: a store of eight halves under the crosswise layout is two stores of four, and the paired
-/// drain reads each element of its two fragments where the layout puts it.
+/// drain reads each element of its two fragments where the layout puts it: where the slab position steps by the
+/// layout's period, the eight elements are one aligned run, read at once.
 #[test]
 fn volta_s_paired_slab_is_stored_and_read_through_its_layout() {
-    let module = kernel(
-        "
+    let module_at = |at: &str| {
+        kernel(
+            &format!(
+                "
         Smem(name=sa, extents=(64, 32), dtype=f16, align=16)
         RegFragment(name=fa0, role=a, dtype=f16, fragment_layout=m8n8k4)
         RegFragment(name=fa1, role=a, dtype=f16, fragment_layout=m8n8k4)
@@ -314,21 +317,34 @@ fn volta_s_paired_slab_is_stored_and_read_through_its_layout() {
         f16 x0, x1, x2, x3, x4, x5, x6, x7 = load a[r * 256 + t * 8]
         f16 sa[t / 4, 8 * (t % 4)] = (x0, x1, x2, x3, x4, x5, x6, x7) swizzle=V70A
         Sync
-        FragmentLoad(frag=fa0, src_buffer=sa, src_index=(0, 4), role=a, fragment_layout=m8n8k4, ldm=32, staged=true, slab_layout=V70A, pair_frag=fa1, src_dtype=f16, dtype=f16)
+        FragmentLoad(frag=fa0, src_buffer=sa, src_index=({at}), role=a, fragment_layout=m8n8k4, ldm=32, staged=true, slab_layout=V70A, pair_frag=fa1, src_dtype=f16, dtype=f16)
         MmaSyncPtx(c_frag=fc, a_frag=fa0, b_frag=fa1, shape=(8, 8, 4))
-        ",
-        HALVES,
-        80,
-    )
-    .unwrap();
+        "
+            ),
+            HALVES,
+            80,
+        )
+        .unwrap()
+    };
+    let module = module_at("0, 4");
     assert_eq!(
         count(&module, "st.shared.v4.b16"),
         2,
         "{:#?}",
         listing(&module)
     );
+    // The eight elements of the two cells are one aligned run of the slab: one 128-bit read. At a K group whose
+    // second bit is set the second cell's run comes first, and it is still one read.
+    for at in ["0, 4", "32, 8", "r * 32, 12"] {
+        let module = module_at(at);
+        assert_eq!(count(&module, "ld.shared.v4.b32"), 1, "{at}");
+        assert_eq!(count(&module, "ld.shared.b16"), 0, "{at}");
+        assert_eq!(count(&module, "mma.sync.aligned.m8n8k4"), 1);
+    }
+    // A slab position off the layout's period proves nothing: an element a load.
+    let module = module_at("r * 8, 4");
+    assert_eq!(count(&module, "ld.shared.v4.b32"), 0);
     assert_eq!(count(&module, "ld.shared.b16"), 8);
-    assert_eq!(count(&module, "mma.sync.aligned.m8n8k4"), 1);
 }
 
 /// A swizzled destination of an async copy or a store takes the exchange of 16-byte chunks over its flat index.

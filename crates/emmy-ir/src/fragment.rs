@@ -307,6 +307,18 @@ pub fn paired_operand_table(role: &str, b_row: bool, cell: i64) -> Result<Fragme
     })
 }
 
+/// The row and column periods of a Volta slab layout: past a multiple of them the bits the layout exchanges repeat,
+/// so the place of `(row + p·i, column + q·j)` is the place of `(row, column)` plus a part linear in `i` and `j`,
+/// and two elements read from a slab position that is such a multiple stand as far apart as they do at the slab's
+/// origin. `None` for any other layout.
+pub fn volta_slab_period(layout: &str) -> Option<(i64, i64)> {
+    match layout {
+        "V70A" => Some((32, 32)),
+        "V70B" => Some((4, 32)),
+        _ => None,
+    }
+}
+
 /// The element a Volta slab layout stores the logical `(row, column)` at: `V70A` (crosswise: 64-bit runs of four
 /// along K, a slab of `extent` rows) or `V70B` (congruous: 128-bit runs of eight along N, a row of `extent`
 /// elements). `None` for any other layout. The functions are the fill's and the drain's both, so a slab read back
@@ -533,6 +545,26 @@ mod tests {
             )
             .is_none()
         );
+    }
+
+    /// A step of a Volta layout's row or column period moves every element of the slab by the same distance.
+    #[test]
+    fn a_volta_slab_layout_repeats_past_its_period() {
+        for (layout, extent) in [("V70A", 256), ("V70B", 128)] {
+            let (p, q) = volta_slab_period(layout).unwrap();
+            for (step_row, step_column) in [(p, 0), (0, q), (3 * p, 2 * q)] {
+                let moved = |row, column| {
+                    slab_index(layout, (row + step_row, column + step_column), extent)
+                        - slab_index(layout, (row, column), extent)
+                };
+                let first = moved(0, 0);
+                for row in 0..2 * p {
+                    for column in 0..2 * q {
+                        assert_eq!(moved(row, column), first, "{layout} ({row}, {column})");
+                    }
+                }
+            }
+        }
     }
 
     /// The two cells of a paired operand hold the 32 rows (or columns) of their pair, each element twice as every

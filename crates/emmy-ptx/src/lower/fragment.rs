@@ -11,19 +11,28 @@ use std::collections::HashMap;
 use emmy_ir::body::Body;
 use emmy_ir::dtype::DType;
 use emmy_ir::elementwise::Operation;
-use emmy_ir::expr::{Expr, Expression, SimplifyCtx};
+use emmy_ir::expr::{Expr, Expression, Num, SimplifyCtx};
 use emmy_ir::fragment::{
     FragmentTable, LANE, fragment_table, paired_accumulator_table, paired_operand_table,
+    volta_slab_index, volta_slab_period,
 };
 use emmy_ir::statement::{FragmentApply, FragmentLoad, FragmentRowReduce, RegStore, Statement};
 use emmy_ir::{Name, Result};
 
-use super::int::{constant_difference, divided};
+use super::int::{constant_difference, divided, linear};
 use super::memory::{Buffer, Elem};
 use super::tensor::{lane, swizzle_exchange, swizzled};
 use super::value::SM_ADA;
 use super::{Lowerer, Needs, SM_LAST, VTy, Val};
 use crate::inst::{Bank, Base, Inst, Opcode, Operand, Reg, Round, Shuffle, Space, Ty};
+
+/// One register of a paired slab read: the register, the slab index of each element with no guard, and per element
+/// each lane's place in the slab.
+type SlabRegister = (
+    Reg,
+    Vec<(Expression, Option<Expression>)>,
+    Vec<[(i64, i64); 32]>,
+);
 
 /// The names a `FragmentApply`'s coordinate and gathered operands read the element's own row and column by, and
 /// the names a `RegStore`'s epilogue reads the element's offset in its fragment by.
@@ -589,28 +598,182 @@ impl Lowerer {
             return Err(self.refuse("a paired slab is indexed by row and column"));
         };
         let name = node.src_buffer;
+        // The table's B is (k, n); a transposed B's slab holds n along its rows.
+        let swapped = node.role == "b" && node.b_trans;
+        let mut registers = Vec::new();
         for (frag, cell) in [(node.frag, 0), (pair, 1)] {
-            let lanes = Lanes::of(&paired_operand_table(&node.role, b_row, cell)?);
+            let table = paired_operand_table(&node.role, b_row, cell)?;
+            let lanes = Lanes::of(&table);
             let regs = self.tensor_fragment(frag, lanes.registers.len(), VTy::U32)?;
-            for (reg, register) in regs.iter().zip(&lanes.registers) {
+            let places = Self::lane_places(&table, swapped);
+            for ((reg, register), places) in regs.iter().zip(&lanes.registers).zip(places) {
                 let mut elements = Vec::with_capacity(register.len());
                 for (r, c) in register {
-                    // The table's B is (k, n); a transposed B's slab holds n along its rows.
-                    let (r, c) = if node.role == "b" && node.b_trans {
-                        (c, r)
-                    } else {
-                        (r, c)
-                    };
+                    let (r, c) = if swapped { (c, r) } else { (r, c) };
                     let at = [
                         plus(row.clone(), r.clone()),
                         plus(column.clone(), c.clone()),
                     ];
                     elements.push((self.slab_index(name, &at, layout)?, None));
                 }
-                self.gather_register(*reg, name, &elements, types, ctx)?;
+                registers.push((*reg, elements, places));
+            }
+        }
+        let runs = self.slab_runs(name, layout, (row, column), &registers, types);
+        let mut done = vec![false; registers.len()];
+        for run in runs {
+            let regs: Vec<Reg> = run.iter().map(|at| registers[*at].0).collect();
+            let first = &registers[run[0]].1[0].0;
+            let address = self.address(name, std::slice::from_ref(first), ctx)?;
+            // The run proves the whole address a multiple of its bytes; the register holds it but the constant.
+            let bytes = 4 * run.len() as u32;
+            let Operand::Addr(Base::Reg(base), offset) = address else {
+                continue;
+            };
+            if offset % i64::from(bytes) != 0 {
+                continue;
+            }
+            self.b
+                .set_alignment(base, self.b.alignment(base).max(bytes));
+            let buffer = self.buffer(name)?;
+            self.b
+                .emit(Inst::new(buffer.load(), Ty::B32, regs, vec![address]));
+            run.iter().for_each(|at| done[*at] = true);
+        }
+        for ((reg, elements, _), done) in registers.iter().zip(done) {
+            if !done {
+                self.gather_register(*reg, name, elements, types, ctx)?;
             }
         }
         Ok(())
+    }
+
+    /// Per register of `table` and per element, the element's `(row, column)` in the slab for each of the 32 lanes,
+    /// swapped for a transposed B.
+    fn lane_places(table: &FragmentTable, swapped: bool) -> Vec<Vec<[(i64, i64); 32]>> {
+        let lanes: Vec<HashMap<Name, Num>> = (0..32)
+            .map(|lane| {
+                let mut env = HashMap::from([(Name::new(LANE), Num::Int(lane))]);
+                for (name, value) in &table.coordinates {
+                    let value = value.eval(&env).expect("a lane coordinate has a value");
+                    env.insert(*name, value);
+                }
+                env
+            })
+            .collect();
+        let at = |value: &Expression, env: &HashMap<Name, Num>| match value.eval(env) {
+            Ok(Num::Int(value)) => value,
+            other => panic!("{other:?} as a lane's element"),
+        };
+        table
+            .registers
+            .iter()
+            .map(|register| {
+                register
+                    .iter()
+                    .map(|(r, c)| {
+                        std::array::from_fn(|lane| {
+                            let place = (at(r, &lanes[lane]), at(c, &lanes[lane]));
+                            if swapped { (place.1, place.0) } else { place }
+                        })
+                    })
+                    .collect()
+            })
+            .collect()
+    }
+
+    /// The runs of registers of a paired slab read that stand side by side in it, each one vector load: four
+    /// registers, or two, whose 16-bit elements are one run in the slab, starting on a multiple of the run's bytes,
+    /// for every lane. The slab's tile position `(row, column)` must step by whole periods of its layout from a
+    /// constant, so the places a lane reads stand as far apart there as they do at that constant, and the slab's
+    /// own start must be aligned. Registers of no run are gathered as before.
+    fn slab_runs(
+        &self,
+        name: Name,
+        layout: &str,
+        (row, column): (&Expression, &Expression),
+        registers: &[SlabRegister],
+        (source, dtype): (DType, DType),
+    ) -> Vec<Vec<usize>> {
+        let Ok(buffer) = self.buffer(name) else {
+            return Vec::new();
+        };
+        let extent = match (layout, self.extents.get(&name).map(Vec::as_slice)) {
+            ("V70A", Some([rows, _])) => rows.int_literal(),
+            ("V70B", Some([_, columns])) => columns.int_literal(),
+            _ => None,
+        };
+        let residue = |expression: &Expression, period: i64| {
+            let (mut terms, mut constant) = (Vec::new(), 0);
+            linear(expression, 1, &mut terms, &mut constant)?;
+            terms
+                .iter()
+                .all(|(coefficient, _)| coefficient % period == 0)
+                .then_some(constant)
+        };
+        let origin = volta_slab_period(layout)
+            .and_then(|(p, q)| Some((residue(row, p)?, residue(column, q)?)));
+        let aligned = i64::from(self.b.alignment(buffer.base)) % 16 == 0 && buffer.offset % 16 == 0;
+        let (Some(extent), Some((row, column)), true, true) = (
+            extent.filter(|extent| extent % 8 == 0),
+            origin,
+            aligned,
+            source == dtype && buffer.elem.bytes() == 2,
+        ) else {
+            return Vec::new();
+        };
+        let index = |(r, c): (i64, i64)| {
+            let place = volta_slab_index(
+                layout,
+                &Expression::int(row + r),
+                &Expression::int(column + c),
+                &Expression::int(extent),
+            );
+            match place.map(|place| place.eval(&HashMap::new())) {
+                Some(Ok(Num::Int(value))) => value,
+                other => panic!("{other:?} as a slab place"),
+            }
+        };
+        // Each register's first element per lane, where its two elements stand side by side.
+        let starts: Vec<Option<[i64; 32]>> = registers
+            .iter()
+            .map(|(_, _, places)| {
+                let [low, high] = &places[..] else {
+                    return None;
+                };
+                let starts: [i64; 32] = std::array::from_fn(|lane| index(low[lane]));
+                (0..32)
+                    .all(|lane| index(high[lane]) == starts[lane] + 1)
+                    .then_some(starts)
+            })
+            .collect();
+        let mut taken = vec![false; registers.len()];
+        let mut runs = Vec::new();
+        // The runs of four first, whichever cell holds their start, then the runs of two.
+        for count in [4, 2] {
+            for first in 0..registers.len() {
+                let Some(start) = starts[first]
+                    .filter(|start| !taken[first] && start.iter().all(|at| at % (2 * count) == 0))
+                else {
+                    continue;
+                };
+                let run: Option<Vec<usize>> = (0..count)
+                    .map(|k| {
+                        (0..registers.len()).find(|at| {
+                            !taken[*at]
+                                && starts[*at].is_some_and(|other| {
+                                    (0..32).all(|lane| other[lane] == start[lane] + 2 * k)
+                                })
+                        })
+                    })
+                    .collect();
+                if let Some(run) = run {
+                    run.iter().for_each(|at| taken[*at] = true);
+                    runs.push(run);
+                }
+            }
+        }
+        runs
     }
 
     /// A transposed B fragment of 16-bit elements from a slab of codes beside a slab of block scales: each value
