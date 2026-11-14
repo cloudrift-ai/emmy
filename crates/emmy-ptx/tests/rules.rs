@@ -358,6 +358,53 @@ Grid(axes=(i in 0..4096), decode=(block_idx.x * 256 + thread_idx.x), block_threa
     );
 }
 
+/// A grid decode over a symbolic size in 64 bits: the built-ins, the size, their sums, products and casts are never
+/// negative, so a quotient is the unsigned instruction with no floor correction, behind cicc's branch to the 32-bit
+/// one where both operands fit; a remainder of two 32-bit values widened is the 32-bit instruction; and a remainder
+/// of the 64-bit quotient by a constant is a multiply-high. A quotient computed twice is computed once, and a
+/// remainder beside it subtracts its multiple.
+#[test]
+fn a_decode_over_a_symbolic_size_divides_unsigned() {
+    let got = code(
+        "
+Grid(axes=(a0 in 0..4, a1 in 0..6, a3 in 0..n, c in 0..256), decode=((256 * (long long)block_idx.x + (long long)thread_idx.x) // (1536 * (long long)n), (256 * (long long)block_idx.x + (long long)thread_idx.x) // (256 * (long long)n) % 6, (long long)block_idx.x % (long long)n, thread_idx.x), block_threads=256):
+    i64 q = (256 * (long long)block_idx.x + (long long)thread_idx.x) // (1536 * (long long)n)
+    i64 r = (256 * (long long)block_idx.x + (long long)thread_idx.x) % (1536 * (long long)n)
+    i64 s = q + r + a0 + a1 + a3
+    i64 o[c] = s
+",
+        &[("o", Output, Some(DType::I64)), ("n", Int, None)],
+        EXACT,
+    );
+    let divisions: Vec<&str> = got
+        .iter()
+        .map(String::as_str)
+        .filter(|line| {
+            ["div.", "rem.", "mul.hi", "mul.lo.s64", "sub.s64"]
+                .iter()
+                .any(|op| line.contains(op))
+        })
+        .collect();
+    assert_eq!(
+        divisions,
+        [
+            "mul.lo.s64 %rd6, 1536, %rd5",
+            "div.u32 %r5, %r3, %r4",
+            "div.u64 %rd9, %rd4, %rd6",
+            "div.u32 %r8, %r6, %r7",
+            "div.u64 %rd14, %rd4, %rd11",
+            "mul.hi.u64 %rd16, %rd15, -6148914691236517205",
+            "rem.u32 %r13, %r1, %r0",
+            "mul.lo.s64 %rd18, %rd10, %rd6",
+            "sub.s64 %rd19, %rd4, %rd18",
+        ]
+    );
+    assert!(
+        !got.iter().any(|line| line.contains(".s64 %p")),
+        "no floor correction"
+    );
+}
+
 /// The integer operations that are one instruction each, at the width and the signedness of their operands.
 #[test]
 fn the_integer_operations_are_one_instruction_each() {
@@ -1165,6 +1212,43 @@ fn a_condition_branches_and_a_select_picks() {
             "L2:",
         ]
     );
+}
+
+/// A bool converted to a number is its predicate's 1 or 0: the truth of that number is the predicate again, a
+/// logical operation over two such numbers combines their predicates, and the number converted to another number
+/// type selects that type's 1 or 0. No comparison with zero and no integer conversion stands between them.
+#[test]
+fn a_bool_converted_to_a_number_keeps_its_predicate() {
+    let got = under_grid(
+        "
+        f32 x = load a[i]
+        bool b__bool = x < 2.0
+        f32 b = (f32)b__bool
+        bool c__bool = x == 3.0
+        f32 c = (f32)c__bool
+        f32 both = b && c
+        bool d = (bool)both
+        i64 k = (i64)d
+        f32 h = (f32)k
+        f32 o[i] = h
+        ",
+        A_O,
+        EXACT,
+    );
+    let selp = got.iter().filter(|line| line.starts_with("selp")).count();
+    assert!(
+        got.iter().all(|line| !line.starts_with("setp.neu")),
+        "{got:#?}"
+    );
+    assert!(
+        got.iter().all(|line| !line.starts_with("cvt.rn.f32.s64")),
+        "{got:#?}"
+    );
+    assert!(
+        got.iter().any(|line| line.starts_with("and.pred")),
+        "{got:#?}"
+    );
+    assert!(selp >= 1, "{got:#?}");
 }
 
 /// A bool equals a literal 0 where it does not hold, a literal 1 where it does, and another bool where their

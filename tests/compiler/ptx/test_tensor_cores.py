@@ -399,6 +399,49 @@ def test_volta_s_product_reads_b_by_rows(level):
     same_bits(out.reshape(BLOCKS, 16, 16), a @ b)
 
 
+@pytest.mark.parametrize(
+    ("role", "layout", "extents", "positions"),
+    [
+        ("a", "V70A", (64, 32), ["0, 4", "32, 8", "0, 28"]),
+        ("b", "V70B", (16, 64), ["4, 0", "8, 32", "12, 32"]),
+    ],
+)
+def test_a_paired_slab_read_at_once_holds_what_its_elements_hold(level, role, layout, extents, positions):
+    """A paired drain from a slab position that steps by the layout's period is one 128-bit read of its eight
+    elements. Each lane's four registers hold the same bits as the element reads give at that position reached
+    through a runtime zero, which proves nothing about the period."""
+    rows, columns = extents
+    words = BLOCKS * 32 * 4 * len(positions)
+    fill = f"""
+        Smem(name=sl, extents=({rows}, {columns}), dtype=f16, align=16)
+        for i in 0..{rows * columns // 32}:
+            f16 x = load s[i * 32 + t]
+            f16 sl[(i * 32 + t) / {columns}, (i * 32 + t) % {columns}] = x
+        Sync
+        i32 z = load zero[0]
+        RegFragment(name=f0, role={role}, dtype=f16, fragment_layout=m8n8k4)
+        RegFragment(name=f1, role={role}, dtype=f16, fragment_layout=m8n8k4)
+        """
+
+    def drained(scaled: bool) -> np.ndarray:
+        reads = []
+        for p, position in enumerate(positions):
+            row, column = position.split(", ")
+            at = f"{row} + z, {column}" if scaled else position
+            reads.append(
+                f"FragmentLoad(frag=f0, src_buffer=sl, src_index=({at}), role={role}, fragment_layout=m8n8k4, ldm={columns}, "
+                f"staged=true, slab_layout={layout}, pair_frag=f1, src_dtype=f16, dtype=f16)"
+            )
+            for i, (frag, reg) in enumerate([("f0", 0), ("f0", 1), ("f1", 0), ("f1", 1)]):
+                reads.append(f"u32 w{p}_{i} = load {frag}[{reg}]")
+                reads.append(f"u32 o[((r * {len(positions)} + {p}) * 32 + t) * 4 + {i}] = w{p}_{i}")
+        body = under(GRID, textwrap.dedent(fill).strip("\n") + "\n" + "\n".join(reads))
+        inputs = {"s": np.arange(rows * columns, dtype=np.uint16).view(np.float16), "zero": np.zeros(1, dtype=np.int32)}
+        return launch.run(body, inputs, {"o": (np.uint32, words)}, blocks=BLOCKS, threads=32, level=level, sm=70)["o"]
+
+    same_bits(drained(False), drained(True))
+
+
 VOLTA_FILL_C = "\n".join(
     line
     for i in range(8)

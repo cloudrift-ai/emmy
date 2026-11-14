@@ -125,6 +125,64 @@ fn a_fragment_of_halves_from_floats_rounds_each_element() {
     assert_eq!(count(&module, "cvt.rn.f16.f32"), 8);
 }
 
+/// A guard of Volta's interleaved accumulator is decided by the rows the lane table gives each register over the
+/// 32 lanes: a 16-row tile at row 16 of an 8-row output stores nothing and tests nothing; at row 0 a register's
+/// rows fall on both sides of the bound over the lanes, so each store keeps its guard.
+#[test]
+fn a_volta_store_past_its_rows_is_not_written() {
+    let store = |row: i64| {
+        kernel(
+            &format!(
+                "
+        RegFragment(name=fv, role=c, dtype=f32, fragment_layout=m8n8k4)
+        RegStore(dst_buffer=o, dst_index=({row} * 16), frag=fv, shape=(16, 16, 4), ldm=16, ldn=1, m_guard=({row}, 8), fragment_layout=m8n8k4, volta_interleaved=true)
+        "
+            ),
+            HALVES,
+            80,
+        )
+        .unwrap()
+    };
+    let past = store(16);
+    assert_eq!(count(&past, "st.global"), 0, "{:#?}", listing(&past));
+    assert_eq!(count(&past, "setp"), 0);
+    let first = store(0);
+    assert_eq!(count(&first, "st.global"), 4, "{:#?}", listing(&first));
+}
+
+/// Two e4m3 elements side by side along K are one 16-bit load and one packed conversion into halves, for a
+/// fragment of halves and of bfloat16 alike: every e4m3 value is a bfloat16, so the halves widened and packed
+/// again are exact.
+#[test]
+fn two_adjacent_e4m3_elements_are_one_load_for_halves_and_bfloat16() {
+    let params: Params = &[
+        ("q", ParamKind::Input, Some(DType::F8E4M3)),
+        ("o", ParamKind::Output, Some(F32)),
+    ];
+    for (dtype, packs) in [("f16", 0), ("bf16", 2)] {
+        let module = kernel(
+            &format!(
+                "
+        RegFragment(name=fb, role=b, dtype={dtype})
+        FragmentLoad(frag=fb, src_buffer=q, src_index=(r * 256), role=b, ldm=16, b_trans=true, src_dtype=f8e4m3, dtype={dtype})
+        "
+            ),
+            params,
+            120,
+        )
+        .unwrap();
+        assert_eq!(
+            count(&module, "ld.global.nc.b16"),
+            2,
+            "{:#?}",
+            listing(&module)
+        );
+        assert_eq!(count(&module, "ld.global.nc.u8"), 0);
+        assert_eq!(count(&module, "cvt.rn.f16x2.e4m3x2"), 2);
+        assert_eq!(count(&module, "cvt.rn.bf16x2.f32"), packs);
+    }
+}
+
 /// A store under a guard of rows keeps its pairs, each under its row's predicate, and a guard the ranges decide is
 /// no branch; a guard of columns stores each element under its own. An epilogue runs its statements once an element, at the element's coordinates, and the
 /// value is rounded once into a buffer of halves.
@@ -269,11 +327,14 @@ fn a_gathered_operand_is_read_at_each_element_and_widened() {
 }
 
 /// Volta's paired slabs: a store of eight halves under the crosswise layout is two stores of four, and the paired
-/// drain reads each element of its two fragments where the layout puts it.
+/// drain reads each element of its two fragments where the layout puts it: where the slab position steps by the
+/// layout's period, the eight elements are one aligned run, read at once.
 #[test]
 fn volta_s_paired_slab_is_stored_and_read_through_its_layout() {
-    let module = kernel(
-        "
+    let module_at = |at: &str| {
+        kernel(
+            &format!(
+                "
         Smem(name=sa, extents=(64, 32), dtype=f16, align=16)
         RegFragment(name=fa0, role=a, dtype=f16, fragment_layout=m8n8k4)
         RegFragment(name=fa1, role=a, dtype=f16, fragment_layout=m8n8k4)
@@ -281,21 +342,63 @@ fn volta_s_paired_slab_is_stored_and_read_through_its_layout() {
         f16 x0, x1, x2, x3, x4, x5, x6, x7 = load a[r * 256 + t * 8]
         f16 sa[t / 4, 8 * (t % 4)] = (x0, x1, x2, x3, x4, x5, x6, x7) swizzle=V70A
         Sync
-        FragmentLoad(frag=fa0, src_buffer=sa, src_index=(0, 4), role=a, fragment_layout=m8n8k4, ldm=32, staged=true, slab_layout=V70A, pair_frag=fa1, src_dtype=f16, dtype=f16)
+        FragmentLoad(frag=fa0, src_buffer=sa, src_index=({at}), role=a, fragment_layout=m8n8k4, ldm=32, staged=true, slab_layout=V70A, pair_frag=fa1, src_dtype=f16, dtype=f16)
         MmaSyncPtx(c_frag=fc, a_frag=fa0, b_frag=fa1, shape=(8, 8, 4))
-        ",
-        HALVES,
-        80,
-    )
-    .unwrap();
+        "
+            ),
+            HALVES,
+            80,
+        )
+        .unwrap()
+    };
+    let module = module_at("0, 4");
     assert_eq!(
         count(&module, "st.shared.v4.b16"),
         2,
         "{:#?}",
         listing(&module)
     );
+    // The eight elements of the two cells are one aligned run of the slab: one 128-bit read. At a K group whose
+    // second bit is set the second cell's run comes first, and it is still one read.
+    for at in ["0, 4", "32, 8", "r * 32, 12"] {
+        let module = module_at(at);
+        assert_eq!(count(&module, "ld.shared.v4.b32"), 1, "{at}");
+        assert_eq!(count(&module, "ld.shared.b16"), 0, "{at}");
+        assert_eq!(count(&module, "mma.sync.aligned.m8n8k4"), 1);
+    }
+    // A slab position off the layout's period proves nothing: an element a load.
+    let module = module_at("r * 8, 4");
+    assert_eq!(count(&module, "ld.shared.v4.b32"), 0);
     assert_eq!(count(&module, "ld.shared.b16"), 8);
-    assert_eq!(count(&module, "mma.sync.aligned.m8n8k4"), 1);
+}
+
+/// A run read in a loop that steps its slab position by whole periods moves its address by one sum a trip: the
+/// layout's exchanges stand at the constant position, which only the lane decides, ahead of the loop.
+#[test]
+fn a_paired_read_in_a_loop_moves_its_address_by_a_sum() {
+    let module = kernel(
+        "
+        Smem(name=sa, extents=(64, 32), dtype=f16, align=16)
+        RegFragment(name=fa0, role=a, dtype=f16, fragment_layout=m8n8k4)
+        RegFragment(name=fa1, role=a, dtype=f16, fragment_layout=m8n8k4)
+        RegFragment(name=fc, role=c, dtype=f32, fragment_layout=m8n8k4)
+        for s in 0..4:
+            FragmentLoad(frag=fa0, src_buffer=sa, src_index=(32 * (s % 2), 8), role=a, fragment_layout=m8n8k4, ldm=32, staged=true, slab_layout=V70A, pair_frag=fa1, src_dtype=f16, dtype=f16)
+            MmaSyncPtx(c_frag=fc, a_frag=fa0, b_frag=fa1, shape=(8, 8, 4))
+        ",
+        HALVES,
+        80,
+    )
+    .unwrap();
+    let lines = listing(&module);
+    let head = lines.iter().rposition(|line| line.ends_with(':')).unwrap();
+    let body = &lines[head..];
+    assert_eq!(count(&module, "ld.shared.v4.b32"), 1, "{lines:#?}");
+    assert!(
+        body.iter()
+            .all(|line| !line.starts_with("xor") && !line.starts_with("shr")),
+        "{body:#?}"
+    );
 }
 
 /// A swizzled destination of an async copy or a store takes the exchange of 16-byte chunks over its flat index.

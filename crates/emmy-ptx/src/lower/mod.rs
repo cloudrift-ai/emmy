@@ -242,6 +242,9 @@ pub(crate) struct Lowerer {
     pages: HashMap<Name, (Page, u32)>,
     /// The symbolic sizes among the parameters: each is a count, so never negative.
     sizes: HashSet<Name>,
+    /// Each register that holds the 1 or 0 of a predicate, a bool converted, by the predicate: its truth is that
+    /// predicate, and its conversion to another number type selects that type's 1 or 0 by it.
+    flags: HashMap<Reg, Reg>,
     /// Each loop axis that is a counter from zero by one times a step plus a start: the register, its counter, the
     /// step and the start. An address reads such an axis through a 64-bit multiple of the counter.
     counted: HashMap<Reg, (Reg, i64, i64)>,
@@ -302,6 +305,7 @@ pub(crate) fn lower(kernel: &Kernel, target: Target, precision: Precision) -> Re
         pair_tables: HashSet::new(),
         pages: HashMap::new(),
         sizes: HashSet::new(),
+        flags: HashMap::new(),
         counted: HashMap::new(),
         statement: format!("the interface of {}", kernel.name),
     };
