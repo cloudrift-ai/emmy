@@ -326,6 +326,29 @@ fn a_gathered_operand_is_read_at_each_element_and_widened() {
     assert_eq!(count(&module, "add.rn.f32"), 4, "{listed:#?}");
 }
 
+/// A clamp of a gathered operand's index that the lane's own range keeps inside the bound folds away: each element
+/// reads at its row and column with no comparison and no select. A clamp the range does not decide stays.
+#[test]
+fn a_gathered_clamp_the_lane_range_decides_is_no_select() {
+    let gathered = |bound: i64| {
+        let index = format!("(__frow < {bound} ? __frow : {}) * 8 + __fcol", bound - 1);
+        kernel(
+            &format!(
+                "{FRAGMENTS}
+        FragmentApply(out=fc, op=add, args=(FragmentArg(kind=frag, names=(fc)), FragmentArg(kind=gmem, expressions=({index}), buffer=a)), in_place=true, row_base=r * 16, col_base=0)
+        RegStore(dst_buffer=o, dst_index=(r * 128), frag=fc, shape=(16, 8, 16), ldm=8)
+        "
+            ),
+            HALVES,
+            80,
+        )
+        .unwrap()
+    };
+    // Rows `16r` to `16r + 15` with `r < 4`: every one below 64, some at or past 40.
+    assert_eq!(count(&gathered(64), "selp"), 0);
+    assert!(count(&gathered(40), "selp") > 0);
+}
+
 /// Volta's paired slabs: a store of eight halves under the crosswise layout is two stores of four, and the paired
 /// drain reads each element of its two fragments where the layout puts it: where the slab position steps by the
 /// layout's period, the eight elements are one aligned run, read at once.

@@ -73,19 +73,24 @@ fn coordinates(table: &FragmentTable) -> HashMap<Name, Expression> {
 /// as the floor remainder: the same value, in the operations the range analysis bounds. The lane tables spell a
 /// lane's group as a shift.
 fn arithmetic(expression: &Expression) -> Expression {
-    let Some((op, [left, right])) = expression.operation() else {
-        return expression.clone();
-    };
-    let (left, right) = (arithmetic(left), arithmetic(right));
-    match (op, right.int_literal()) {
-        (Operation::RightShift, Some(shift)) if (0..31).contains(&shift) => {
-            binary(Operation::FloorDivide, left, Expression::int(1 << shift))
+    expression.rebuild(&mut |node| {
+        let Some((op, [left, right])) = node.operation() else {
+            return node;
+        };
+        match (op, right.int_literal()) {
+            (Operation::RightShift, Some(shift)) if (0..31).contains(&shift) => binary(
+                Operation::FloorDivide,
+                left.clone(),
+                Expression::int(1 << shift),
+            ),
+            (Operation::BitwiseAnd, Some(mask)) if mask > 0 && mask & (mask + 1) == 0 => binary(
+                Operation::Remainder,
+                left.clone(),
+                Expression::int(mask + 1),
+            ),
+            _ => node.clone(),
         }
-        (Operation::BitwiseAnd, Some(mask)) if mask > 0 && mask & (mask + 1) == 0 => {
-            binary(Operation::Remainder, left, Expression::int(mask + 1))
-        }
-        _ => binary(op, left, right),
-    }
+    })
 }
 
 /// Whether a store's guard holds for every thread or for none, where the ranges of its two sides tell: a bound
@@ -1257,11 +1262,15 @@ impl Lowerer {
                             let name = argument
                                 .buffer
                                 .expect("a gathered operand names its buffer");
-                            let index: Vec<Expression> = argument
+                            // The lane's coordinates in the operations the range analysis bounds: a clamp of
+                            // the index the lane's range keeps inside the bound folds away.
+                            let index = argument
                                 .expressions
                                 .iter()
-                                .map(|coordinate| coordinate.substitute(&place))
-                                .collect();
+                                .map(|coordinate| {
+                                    arithmetic(&coordinate.substitute(&place)).simplify(ctx)
+                                })
+                                .collect::<Result<Vec<Expression>>>()?;
                             let buffer = self.buffer(name)?;
                             let address = self.address(name, &index, ctx)?;
                             let value = self.gathered(&buffer, address, None);
