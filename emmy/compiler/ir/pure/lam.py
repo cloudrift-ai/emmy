@@ -22,6 +22,7 @@ from emmy.compiler.ir.stmt import (
     pretty_body,
 )
 from emmy.compiler.wire import Wire
+from emmy.emmy_ir import rename_lambda
 
 
 @dataclass(frozen=True)
@@ -158,17 +159,17 @@ class Lambda(Wire):
     def rename(self, names) -> Lambda:
         """α-rename params, body and results through one map — a mapping or a callable — the
         lockstep every consumer of a stored lambda applies: the fold's rewrite handler, the
-        combine's state rename, a recipe instantiated onto a term's names."""
-        lookup = names.get if hasattr(names, "get") else None
-
-        def rn(name: str) -> str:
-            return lookup(name, name) if lookup is not None else names(name)
-
-        return Lambda(
-            params=tuple(rn(p) for p in self.params),
-            body=Body(tuple(s.rewrite(rn) for s in self.body)),
-            results=tuple(rn(r) for r in self.results),
-        )
+        combine's state rename, a recipe instantiated onto a term's names. The rename runs in Rust
+        over the whole lambda; one that keeps every name apart keeps this lambda's formation
+        checks true, so its result is formed without running them again."""
+        params, body, results, injective = rename_lambda(self.params, self.body, self.results, names)
+        if not injective:
+            return Lambda(params=params, body=body, results=results)
+        formed = object.__new__(Lambda)
+        object.__setattr__(formed, "params", params)
+        object.__setattr__(formed, "body", body)
+        object.__setattr__(formed, "results", results)
+        return formed
 
     def canonical(self) -> Lambda:
         """The α-canonical form: every definition one operation (a result stays a statement, as a reader outside the

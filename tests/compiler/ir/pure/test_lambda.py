@@ -191,6 +191,22 @@ def test_rename_maps_params_body_and_results_in_lockstep() -> None:
     assert fn.alpha_eq(renamed)
 
 
+def test_rename_that_merges_names_forms_the_lambda_it_spells() -> None:
+    """A rename that keeps every name apart skips the formation checks; one that merges two names is built like any
+    lambda, and both agree with building the renamed parts by hand."""
+    fn = Lambda.closing(("x", "y"), parse_body("t = add(x, y)\nu = multiply(t, x)"), ("u",))
+    for names in ({"x": "a", "t": "b"}, {"t": "x"}, lambda name: f"{name}_1"):
+        renamed = fn.rename(names)
+        spell = names.get if isinstance(names, dict) else None
+        rn = (lambda n: spell(n, n)) if spell else names
+        expected = Lambda(
+            params=tuple(rn(p) for p in fn.params),
+            body=parse_body("\n".join(str(stmt.rename({n: rn(n) for n in stmt._names()})) for stmt in fn.body)),
+            results=tuple(rn(r) for r in fn.results),
+        )
+        assert renamed == expected
+
+
 def test_alpha_equality_under_bound_renaming() -> None:
     a = Lambda(params=("k", "x"), body=parse_body("t = multiply(x, x)"), results=("t",))
     b = Lambda(params=("j", "v"), body=parse_body("sq = multiply(v, v)"), results=("sq",))

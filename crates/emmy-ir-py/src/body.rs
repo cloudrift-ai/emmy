@@ -23,21 +23,30 @@ use crate::statement::{PyStatement, statement_type_of, statements_from_py, wrap_
 /// Python object. An entry outlives its body only until the next purge.
 type Wrappers = Arc<[OnceLock<Py<PyAny>>]>;
 
-/// How many entries a table grows by between two purges of its dead ones.
+/// The fewest inserts between two purges of a table's dead entries.
 const PURGE_EVERY: usize = 1024;
 
 /// A table of per-object state on this side of the boundary, keyed by the shared object's address while it lives:
 /// a body's statement wrappers, a subroutine's one Python object. An entry outlives its object only until the next
-/// purge, every `PURGE_EVERY` inserts; the table is not bounded (a live object keeps
-/// its one wrapper).
+/// purge; the table is not bounded (a live object keeps its one wrapper). A purge walks every entry, so the next one
+/// waits for as many inserts as the purge left entries alive, never fewer than `PURGE_EVERY`: an insert costs a
+/// constant share of the walks whatever the table holds. (A purge due at every length that was a multiple of
+/// `PURGE_EVERY` walked the whole table on every insert that took a dead object's address, which a body made and
+/// dropped in a loop does every time.)
 struct Tables<T, V> {
     entries: HashMap<usize, (std::sync::Weak<T>, V)>,
+    /// Inserts since the last purge.
+    inserts: usize,
+    /// Inserts the next purge waits for.
+    budget: usize,
 }
 
 impl<T, V> Tables<T, V> {
     fn new() -> Tables<T, V> {
         Tables {
             entries: HashMap::new(),
+            inserts: 0,
+            budget: PURGE_EVERY,
         }
     }
 
@@ -62,15 +71,23 @@ impl<T, V> Tables<T, V> {
                 (Arc::downgrade(object), value),
             )
             .map(|(_, old)| old);
-        (old, self.entries.len().is_multiple_of(PURGE_EVERY))
+        self.inserts += 1;
+        let due = self.inserts >= self.budget;
+        if due {
+            self.inserts = 0;
+        }
+        (old, due)
     }
 
     /// The values of every entry whose object is gone, removed from the table.
     fn dead(&mut self) -> Vec<V> {
-        self.entries
+        let dead = self
+            .entries
             .extract_if(|_, (alive, _)| alive.strong_count() == 0)
             .map(|(_, (_, value))| value)
-            .collect()
+            .collect();
+        self.budget = self.entries.len().max(PURGE_EVERY);
+        dead
     }
 }
 
@@ -908,6 +925,79 @@ pub fn normalize_lambda_body<'py>(
     PyBody::wrap(py, &emmy_ir::normalize::canonical_values(&ordered))
 }
 
+/// A renamed lambda's params, body and results, and whether the rename kept every name apart.
+type RenamedLambda<'py> = (
+    Bound<'py, PyTuple>,
+    Bound<'py, PyBody>,
+    Bound<'py, PyTuple>,
+    bool,
+);
+
+/// A lambda's params, body and results α-renamed through one map (a dict, or a function asked once per name the
+/// lambda spells), the body normalized as `normalize_lambda_body` leaves it. The last item says whether the map was
+/// injective on those names: a rename that keeps every name apart keeps a valid lambda valid, so its result needs no
+/// second check.
+#[pyfunction]
+pub fn rename_lambda<'py>(
+    params: &Bound<'py, PyAny>,
+    body: &Bound<'py, PyAny>,
+    results: &Bound<'py, PyAny>,
+    names: &Bound<'py, PyAny>,
+) -> PyResult<RenamedLambda<'py>> {
+    let py = body.py();
+    let read = |value: &Bound<'py, PyAny>| -> PyResult<Vec<Name>> {
+        value.try_iter()?.map(|item| name_from_py(&item?)).collect()
+    };
+    let (params, results) = (read(params)?, read(results)?);
+    let body = PyBody::from_iterable(body)?;
+    let mut spelled: Vec<Name> = params.iter().chain(&results).copied().collect();
+    for stmt in body.stmts() {
+        spelled.extend(stmt.names());
+    }
+    let spelled: HashSet<Name> = spelled.into_iter().collect();
+    let mapping: HashMap<Name, Name> = if names.cast::<PyDict>().is_ok() {
+        renames_from_py(names)?
+    } else {
+        let mut out = HashMap::new();
+        for name in &spelled {
+            out.insert(
+                *name,
+                name_from_py(&names.call1((PyString::new(py, name),))?)?,
+            );
+        }
+        out
+    };
+    let image: HashSet<Name> = spelled
+        .iter()
+        .map(|name| mapping.get(name).copied().unwrap_or(*name))
+        .collect();
+    let rename = |name: &Name| mapping.get(name).copied().unwrap_or(*name);
+    let params: Vec<Name> = params.iter().map(rename).collect();
+    let results: Vec<Name> = results.iter().map(rename).collect();
+    // The same rewrite a statement's own `rewrite(names)` makes: names only, no axis map.
+    let empty = HashMap::new();
+    let by_role = |_: emmy_ir::statement::Roles, name: Name| mapping.get(&name).copied();
+    let rewrite = emmy_ir::protocol::Rewrite {
+        rename: &by_role,
+        sigma: &empty,
+        axis_fn: None,
+    };
+    let renamed = body.map_each(&mut |stmt| Statement::rewrite(stmt, &rewrite));
+    let outer: HashSet<Name> = params.iter().copied().collect();
+    let ordered = if renamed.len() > 1 {
+        emmy_ir::normalize::fragment_order(&renamed, &outer).py()?
+    } else {
+        renamed
+    };
+    let normal = emmy_ir::normalize::canonical_values(&ordered);
+    Ok((
+        str_tuple(py, &params)?,
+        PyBody::wrap(py, &normal)?,
+        str_tuple(py, &results)?,
+        image.len() == spelled.len(),
+    ))
+}
+
 /// A kernel body with its index divisions and remainders by a power of two over a non-negative dividend as shifts and
 /// masks (`emmy_ir::strength::reduce_strength`): the spelling an emitter gives the body it is about to render.
 #[pyfunction]
@@ -997,6 +1087,7 @@ pub fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(simplify_body, m)?)?;
     m.add_function(wrap_pyfunction!(one_operation_per_definition, m)?)?;
     m.add_function(wrap_pyfunction!(normalize_lambda_body, m)?)?;
+    m.add_function(wrap_pyfunction!(rename_lambda, m)?)?;
     m.add_function(wrap_pyfunction!(reduce_strength, m)?)?;
     m.add_function(wrap_pyfunction!(free_names_py, m)?)?;
     m.add_function(wrap_pyfunction!(exposed_defines_py, m)?)?;
