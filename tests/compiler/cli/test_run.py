@@ -1449,7 +1449,6 @@ def test_ab_evidence_captures_each_rows_precision_scope(tmp_path, monkeypatch):
     with pinned_knobs({"FAST_MATH": False}):
         run_mod._record_bench_evidence(SimpleNamespace(), benches, None)
     assert [ctx.precision_pins()["FAST_EXP"] for ctx in seen] == [False, True]
-    assert seen[0].compile_flags == seen[1].compile_flags
     assert seen[0].structural_key() != seen[1].structural_key()
 
 

@@ -767,23 +767,26 @@ def test_worker_hang_is_sigkilled_not_wedged() -> None:
 async def test_worker_applies_each_requested_fast_math_policy(monkeypatch):
     from emmy.compiler.backend import BenchmarkResult
     from emmy.compiler.backend.cuda import _bench_worker, program
-    from emmy.compiler.context import precision_flags
     from emmy.compiler.pipeline.search.space import precision_pins
 
     monkeypatch.setenv("EMMY_FAST_MATH", "1")
     seen = []
 
+    def whole_kernel() -> tuple[bool, bool]:
+        pins = precision_pins()
+        return pins["FLUSH_TO_ZERO"], pins["CONTRACT_FMA"]
+
     def benchmark(*args, **kwargs):
-        seen.append(precision_flags(precision_pins()))
+        seen.append(whole_kernel())
         return BenchmarkResult(time_ms=1, min_ms=1, num_launches=1, per_launch=[])
 
     monkeypatch.setattr(program, "benchmark_program", benchmark)
     for enabled in (False, True, False):
         await _bench_worker._run_job({"graph": None, "kwargs": {}, "precision": precision_pins({"FAST_MATH": enabled})})
-        assert precision_flags(precision_pins()) == ["--ftz=true"]
+        assert whole_kernel() == (True, True)
     precision = precision_pins({"FAST_MATH": False, "FLUSH_TO_ZERO": True, "CONTRACT_FMA": False})
     await _bench_worker._run_job({"graph": None, "kwargs": {}, "precision": precision})
-    assert seen == [[], ["--ftz=true"], [], ["--ftz=true", "--fmad=false"]]
+    assert seen == [(False, True), (True, True), (False, True), (True, False)]
 
 
 def test_unsupplied_inputs_fill_with_seeded_normal_values() -> None:

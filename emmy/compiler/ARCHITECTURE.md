@@ -82,12 +82,11 @@ into a body: a caller that binds dimensions in one maps its expressions and its 
 module's own functions.
 
 `Context` binds the effective precision decisions when a compile starts. Its key includes those decisions beside
-the target, compiler flags and cache mode, so an independent `FAST_EXP`, `F16_MMA_F32_ACC` or `FP8_MMA` override
-cannot read another regime's timings. Reconstructed contexts take the recorded pins explicitly; later environment
-changes do not alter their keys. The bound decisions are the one carrier of the fast-math decision: the flag string a
-stored row names its regime by names it only where a context is built from flags alone
-(`Context.from_target(compile_flags=…)`), and every reader — the context key, the `H_fast_math` feature, the tune DB's
-regime, the dataset's regime key — takes `Context.precision_pins()` or the row's `precision`, never the flag string.
+the target and cache mode, so an independent `FAST_EXP`, `F16_MMA_F32_ACC` or `FP8_MMA` override cannot read another
+regime's timings. Reconstructed contexts take the recorded pins explicitly; later environment changes do not alter
+their keys. The bound decisions are the one carrier of the fast-math decision: every reader — the context key, the
+`H_fast_math` feature, the tune DB's regime, the dataset's regime key — takes `Context.precision_pins()` or the row's
+`precision`.
 
 ## Module layout
 

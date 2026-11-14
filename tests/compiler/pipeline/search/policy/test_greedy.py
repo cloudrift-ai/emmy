@@ -167,7 +167,7 @@ def test_standard_golden_schedule_cannot_win_under_fast_exp() -> None:
     # Golden schedules omit precision knobs: those belong to their input regime.
     db.record_perf_row(perf_row("k", us=1.0, knobs={"WORK": "t32"}, source="golden:standard"))
     db.record_perf_row(perf_row("k", us=2.0, knobs={"WORK": "t64", "FAST_EXP": True}, precision={"FAST_EXP": True}))
-    ctx = Context.from_target((12, 0), gpu_name=GPU_5090, compile_flags="", precision={"FAST_EXP": True})
+    ctx = Context.from_target((12, 0), gpu_name=GPU_5090, precision={"FAST_EXP": True})
     candidates = [{"WORK": "t32", "FAST_EXP": True}, {"WORK": "t64", "FAST_EXP": True}]
     index = _db_measured_index_build(db, ctx)
     assert greedy._db_measured_pick(greedy._measured_at(index.ok, "k", {}), candidates) == (1, 2.0)
@@ -537,7 +537,7 @@ def _kernel_sets(decide, case: str = "fused/linear-add-place-cut-sm70.json"):
     from tests.compiler.realization import helpers as corpus
 
     case = corpus.load_case(corpus.CASES_DIR / case)
-    ctx = Context.from_target(case.compute_cap, gpu_name=CARDS[case.compute_cap], compile_flags="")
+    ctx = Context.from_target(case.compute_cap, gpu_name=CARDS[case.compute_cap], precision={})
     with pinned_knobs(case.regime), unpinned_decisions():
         terminal, _trace = Run(pipeline=Pipeline.build(["tile/lift", "tile/cut"]), ctx=ctx).resolve(case.program(), decide)
     return [node.op for node in terminal.nodes.values() if isinstance(node.op, TileOp)]
@@ -643,7 +643,7 @@ def test_a_recorded_bench_failure_moves_the_next_compile_off_the_arm_that_hung(t
     from tests.compiler.realization import helpers as corpus
 
     case = corpus.load_case(corpus.CASES_DIR / "fused/linear-add-place-cut-sm70.json")
-    ctx = Context.from_target(case.compute_cap, gpu_name=CARDS[case.compute_cap], compile_flags="")
+    ctx = Context.from_target(case.compute_cap, gpu_name=CARDS[case.compute_cap], precision={})
     db = SearchDB(tmp_path / "tune.db")
 
     def compile_once() -> list:

@@ -1769,7 +1769,7 @@ def test_whole_file_bench_records_fresh_route_only_after_a_valid_measurement(mon
     from emmy.compiler.pipeline.search.db import SearchDB
     from emmy.compiler.pipeline.search.policy.greedy import EvidenceError
 
-    ctx = Context.from_target((8, 9), gpu_name="NVIDIA GeForce RTX 4090", compile_flags="", cold_cache=False)
+    ctx = Context.from_target((8, 9), gpu_name="NVIDIA GeForce RTX 4090", precision={}, cold_cache=False)
     monkeypatch.setattr(Context, "probe", classmethod(lambda cls: ctx))
     path, db_path, benched = _bench_fresh_seed(
         monkeypatch,

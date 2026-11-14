@@ -62,7 +62,7 @@ spot from knowledge recorded earlier, in a fixed order — measured first:
 
 That order has a name — the **deploy evidence hierarchy**. The list above is only a summary. **Part 3's "The deploy
 evidence hierarchy" is the authoritative statement** of the exact order, of what the evidence index holds, and of the
-rule that measured evidence applies only to a compile at deployable `-O3` flags.
+rule that measured evidence applies only to a compile in the regime it was measured in.
 
 Kernel-set forks — a cut, a split, a weight layout: the ones that change a kernel's identity or the kernel set —
 follow the same rule, and are decided before any schedule. A cut or split decision the tune DB stores on the kernel (a
@@ -103,7 +103,7 @@ recorded from those rows ────────────▶ recipe-local / 
                                        weights/schedule.json, placement.json ▶ greedy compile, the priors
 ```
 
-Benchmarks use deployable compiler flags. Their context also distinguishes precision and hot/cold cache regimes:
+Benchmarks measure the code a deploy runs. Their context distinguishes precision and hot/cold cache regimes:
 a compile reads only matching evidence, and freeze/export preserve the regime. Cold timing fetches weights from
 memory before each kernel; it does not predict the partial cache reuse of a complete serving request. The regime a
 compile runs in is declared, never inferred from the rows: a serving config declares its server's cache regime
@@ -157,7 +157,7 @@ Everything in this table recurs on nearly every page below. The rest of the docu
 | **to pin a knob** | To force a knob's value by hand instead of letting the compiler choose — from the environment (`EMMY_STAGE=d2/smem-async`), or by reproducing a golden entry's recorded values. A *pinned row* is a benchmark of such a forced configuration. |
 | **to stamp a value** | To write a value onto an op as metadata, where later passes can read it: its kernel name, the knob values a fork decided. Nothing computed from the op is stamped onto it: a kernel's `S_*` *stamps* — its shape/body features — keep the name but are computed from the kernel where they are read (`features.stamps`). |
 | **to realize** | A recorded configuration *realizes* at a fork when the options the compiler actually offers there include one that matches it. A recording that realizes nowhere cannot be deployed, no matter how good its recorded µs. |
-| **regime** | The compiler flags, precision pins and hot/cold cache mode a measurement was taken under. Benchmarks use deployable `-O3`; a compile reads evidence from its matching regime. |
+| **regime** | The precision pins and hot/cold cache mode a measurement was taken under; a compile reads evidence from its matching regime. |
 | **prior** | The ranking model — the **offline prior**, fit ahead of time by `emmy fit` and shipped with the repo. It answers only where nothing measured decides. |
 | **terminal** | A fully-lowered candidate (every fork on its path resolved) that can be benchmarked. |
 | **golden file** | A card's measurements in the tune DB's shape — kernels, kernel-set decisions, measured rows — beside the traced programs they came from. It stores inputs only; a compile imports its rows under the identity it computes from each stored kernel. |
@@ -802,8 +802,8 @@ design, so there only a node with a recorded rejection counts.
 ## Part 5: Recording evidence
 
 Nothing in this package benchmarks on its own initiative. A measurement is taken by `run --bench`, and it reaches
-the next compile as a `perf` row of the tune DB. Every writer records in the deployable regime — the flags `compile` /
-`run` / `serve` use — so a recorded latency is the deployed latency and no store carries a per-regime lane (Part 3).
+the next compile as a `perf` row of the tune DB. Every writer records in the deployable regime — the precision decisions `compile`
+/ `run` / `serve` use — so a recorded latency is the deployed latency and no store carries a per-regime lane (Part 3).
 
 - **`run --bench`** records every clean pinned row (a golden row, an `--ab` row) and the greedy pick's own isolated
   re-bench, one `kernel` + `perf` row per benched kernel (`bench_record.persist_kernel_perf`), so a replayed golden
@@ -830,12 +830,9 @@ All bench timings are **CUDA-graph-captured** by default (pure GPU time); each `
 `captured` column, and on write a captured measurement supersedes a wall-semantics one for the same key (never the
 reverse), so old rows upgrade in place.
 
-**One measurement regime.** The single-regime rule was measured, not assumed. An earlier sweep ranked candidates at
-`-Xcicc -O1` and re-benched near-best configs at `-O3`, which put a proxy in charge of the search. The proxy's error
-was *biased along tile area* — the axis being tuned — so it systematically priced wide tiles as slow (paired over
-1,818 configs: p90 regret 1.68×, and the `-O1` argmin was the `-O3` argmin on only 44.5% of pools), and the compile
-time it was buying no longer existed: over 4,888 nvcc compiles, `-O3` compiled at a median 0.96× of `-O1`. With nvcc
-gone there is no level to select: ptxas assembles every kernel, and no context, feature or `perf` row names a level.
+**One measurement regime.** A search ranks candidates by the code a deploy runs, never by a cheaper proxy build: a
+proxy's error lies along the axes being tuned. ptxas assembles every kernel one way, and no context, feature or `perf`
+row names an optimization level.
 
 Searching a kernel's schedule space on the card is future work: a ranked sweep that scores the kernel's complete rows
 with the offline prior, benches the top few, searches locally from the best measured one, and writes what it measures
@@ -1613,12 +1610,11 @@ result, as accurate there as an explicit shift and scale. The approximate instru
 kernel body names (`exp_fast`, `divide_fast`, `reciprocal_fast`, `sqrt_fast`), written by
 `lowering/kernel/130_approximate_math`; with the umbrella and `FAST_EXP` both on, the same pass picks the approximate
 logarithm, sine, cosine, hyperbolic tangent and power, which no knob names. Flush to zero and contraction hold for a
-whole kernel, so they reach the PTX compiler as its two precision decisions; a context spells them as the flags nvcc
-took (`context.precision_flags`: `--ftz=true` and `--fmad=false`, each where the decision is not the default), since
-every stored row's context key is a digest of that spelling. What the body does not name approximate is compiled
-exact. The fast-math lane's flag string is therefore `--ftz=true`, and it is part of that lane's context key.
-`FAST_MATH` remains `unfeatured`: schedule choices keep their concrete knob identity, and the flush flag
-and independent overrides separate measurement contexts.
+whole kernel, so they reach the PTX compiler as its two precision decisions. What the body does not name approximate
+is compiled exact. The context key folds in every effective precision decision, the umbrella's included, and a
+dataset names a regime by the umbrella and the decisions that differ from it (`dataset.regime_of`: `FAST_MATH`,
+`FAST_MATH CONTRACT_FMA=0`). `FAST_MATH` remains `unfeatured`: schedule choices keep their concrete knob identity,
+and the regime separates measurement contexts.
 New golden inventories and measurements record the effective umbrella explicitly, so replay preserves that regime.
 
 ### Classic schedule keys

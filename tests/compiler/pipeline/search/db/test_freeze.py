@@ -56,11 +56,11 @@ def test_reason_keeps_a_row_of_either_precision_regime() -> None:
     assert freeze_reason(_row("k", us=500.0, knobs=_ROW, precision={"FAST_MATH": True}), _STAMPS) is None
     following = ("FAST_MATH", "FAST_EXP", "F16_MMA_F32_ACC", "FP8_MMA", "FAST_DIV", "FAST_SQRT", "FLUSH_TO_ZERO")
     assert REGIME_PINS[""] == {**dict.fromkeys(following, False), "CONTRACT_FMA": True, "COLD_CACHE": False}
-    assert REGIME_PINS["--use_fast_math"] == {**dict.fromkeys(following, True), "CONTRACT_FMA": True, "COLD_CACHE": False}
-    assert regime_of(False, {"FAST_MATH": True}) == "--use_fast_math" and regime_of() == ""
+    assert REGIME_PINS["FAST_MATH"] == {**dict.fromkeys(following, True), "CONTRACT_FMA": True, "COLD_CACHE": False}
+    assert regime_of(False, {"FAST_MATH": True}) == "FAST_MATH" and regime_of() == ""
     # Contraction is on in both regimes, so only turning it off is an independent override.
     assert regime_of(False, {"FAST_MATH": False, "CONTRACT_FMA": True}) == ""
-    assert regime_of(False, {"FAST_MATH": True, "CONTRACT_FMA": False}) == "--use_fast_math CONTRACT_FMA=0"
+    assert regime_of(False, {"FAST_MATH": True, "CONTRACT_FMA": False}) == "FAST_MATH CONTRACT_FMA=0"
 
 
 def test_freeze_preserves_cold_and_hot_rows_of_the_same_kernel(tmp_path):
@@ -265,7 +265,7 @@ def test_both_precision_lanes_freeze_as_pinned_rows_and_import_apart(tmp_path) -
     documents, _dropped = freeze_documents(db)
     [document] = documents.values()
     assert sorted(row.pins["FAST_MATH"] for row in document.rows) == [False, True]
-    assert all(row.pins == REGIME_PINS["--use_fast_math" if row.pins["FAST_MATH"] else ""] for row in document.rows)
+    assert all(row.pins == REGIME_PINS["FAST_MATH" if row.pins["FAST_MATH"] else ""] for row in document.rows)
     write_freeze(path, tmp_path / "freeze")
     db.close()
     again = SearchDB()
@@ -359,7 +359,7 @@ def test_the_rtx_5090_hardware_goldens_rows_round_trip_through_a_freeze(tmp_path
     tuned_path = tmp_path / "autotune.db"
     tuned = SearchDB(tuned_path)
     standard = [row for row in document.rows if regime_of(precision=row.pins) == ""]  # every spelling of the plain lane
-    ctx = Context.from_target((12, 0), gpu_name=GPU_5090, compile_flags="")
+    ctx = Context.from_target((12, 0), gpu_name=GPU_5090, precision={})
     assert import_rows(tuned, ctx, document, standard, source="measured") >= 30
     documents, dropped = freeze_documents(tuned)
     assert dropped == {} and list(documents) == ["nvidia_geforce_rtx_5090_sm120.json"]
