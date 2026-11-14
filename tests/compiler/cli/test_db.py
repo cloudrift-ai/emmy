@@ -138,8 +138,8 @@ def _instance(path):
     parent = case_target_tile("fused/norm-linear-f16-scalar-reduce.json")
     piece = case_target_tile("matmul/f16-mma-f16acc-gmem.json")
     db = SearchDB(path)
-    for tile, name in ((parent, "k_parent"), (piece, "k_piece")):
-        db.record_kernel(tile_row(tile, name))
+    for tile in (parent, piece):
+        db.record_kernel(tile_row(tile))
     stats = PerfStats(median=10.0, min=10.0, max=10.0, mean=10.0, variance=0.0, n_samples=3)
     for tile in (parent, piece):
         identity = tile.identity_key(structural=False, with_io=True)
@@ -156,7 +156,7 @@ def _instance(path):
 
 _TAMPERS = {
     "schedule and placement digests match their knob rows": "UPDATE placement SET digest = 'moved'",
-    "every row names the rows it references": "DELETE FROM kernel WHERE kernel_name = 'k_piece'",
+    "every row names the rows it references": "DELETE FROM kernel WHERE exact_identity = (SELECT child FROM routing LIMIT 1)",
     "every CUDA context names a registry card": "UPDATE context SET gpu_name = 'Mystery GPU'",
     "schedule knobs and placement knobs stay apart": (
         f"INSERT INTO schedule (id, digest) VALUES (99, '{digest(knobs_json({'PLACE': 'cut'}))}'); "

@@ -97,6 +97,13 @@ def _signature(kernel) -> str:
     return re.search(r'extern "C" __global__[^{]*', kernel.kernel_source).group(0)
 
 
+def _spelled(kernel, argument: str) -> str:
+    """How the source spells the parameter the launch binds ``argument`` to: the source names a buffer by its role
+    slot, at the argument's position."""
+    params = _signature(kernel).split("(", 1)[1].rsplit(")", 1)[0].split(",")
+    return params[kernel.arg_order.index(argument)].split()[-1]
+
+
 def test_paged_hint_reaches_the_kernel_abi(monkeypatch):
     """The marked buffers take a page table in place of a pointer, the launcher binds that table
     by name, and every read of them goes through it — codegen only, so no GPU is needed."""
@@ -111,10 +118,11 @@ def test_paged_hint_reaches_the_kernel_abi(monkeypatch):
 
     signature = _signature(kernel)
     for name in ("k", "v"):
-        assert f"const float* const* {name}__pages" in signature, signature
-        assert not re.search(rf"const float\* {name}\b", signature), signature
+        table = _spelled(kernel, f"{name}__pages")
+        assert f"const float* const* {table}" in signature, signature
+        assert not re.search(rf"const float\* {table.removesuffix('__pages')}\b", signature), signature
         # CUDA spelling: moves to the PTX compiler's tests (the Kernel IR indexes a paged buffer by dimension)
-        assert f"{name}__pages[" in kernel.kernel_source
+        assert f"{table}[" in kernel.kernel_source
     assert "k__pages" in kernel.arg_order and "k" not in kernel.arg_order
     # The table is a runtime contract of its own: a plan carrying one serializes as the paged format.
     assert plan_to_dict(plan_from_graph(compiled))["format"] == PLAN_FORMAT_PAGED
@@ -145,11 +153,12 @@ def test_a_paged_output_stored_over_its_cache_writes_through_the_table_at_its_in
     name = compiled.outputs[0]
 
     signature = _signature(kernel)
-    assert f"float* const* {name}__pages" in signature, signature
-    assert "const long long* __restrict__ past" in signature and not kernel.runtime_args, signature
+    table, past = _spelled(kernel, f"{name}__pages"), _spelled(kernel, "past")
+    assert f"float* const* {table}" in signature, signature
+    assert f"const long long* __restrict__ {past}" in signature and not kernel.runtime_args, signature
     # CUDA spelling: moves to the PTX compiler's tests (the page a store resolves from its index)
-    page = kernel.kernel_source.split(f"{name}__pages[", 1)[1].split("]", 1)[0]
-    assert f"/ {PAGE}" in page and "past" in kernel.kernel_source, page  # the page of a value computed from ``past``, not an axis
+    page = kernel.kernel_source.split(f"{table}[", 1)[1].split("]", 1)[0]
+    assert f"/ {PAGE}" in page and past in kernel.kernel_source, page  # the page of a value computed from ``past``, not an axis
     assert f"{name}__pages" in kernel.arg_order and name not in kernel.arg_order
     assert compiled.buffer(name).alias == "cache"
 
@@ -171,9 +180,10 @@ def test_one_page_buffer_resolves_its_base_once(monkeypatch):
 
     signature = _signature(kernel)
     for name in ("k", "v"):
-        assert f"const float* const* {name}__pages" in signature, signature
+        table = _spelled(kernel, f"{name}__pages")
+        assert f"const float* const* {table}" in signature, signature
         # CUDA spelling: moves to the PTX compiler's tests (a one-page buffer's base, resolved once)
-        assert f"const float* {name} = {name}__pages[0];" in kernel.kernel_source
+        assert f"const float* {table.removesuffix('__pages')} = {table}[0];" in kernel.kernel_source
     assert kernel.kernel_source.count("__pages[") == 2
 
 

@@ -313,7 +313,7 @@ def restamp(document: GoldenFile, *, traced: int | None = None) -> tuple[GoldenF
             if stored.ref not in scope and _identity(stored) == identity:
                 return stored.ref
         ref = max(stored.ref for stored in (*document.kernels, *added)) + 1
-        added.append(replace(kernel, ref=ref).keyed(identity))
+        added.append(kernel.with_ref(ref))
         return ref
 
     groups: dict[tuple, list[Kernel]] = {}

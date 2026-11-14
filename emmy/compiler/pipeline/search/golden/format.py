@@ -76,6 +76,11 @@ class Kernel(KernelDef):
     bindings: dict[str, int] = field(default_factory=dict)
     ref: int | None = field(default=None, compare=False)
 
+    def with_ref(self, ref: int) -> Kernel:
+        """This kernel under ``ref``, its identity kept where it is already known."""
+        out = replace(self, ref=ref)
+        return out.keyed(self.__dict__["exact_identity"]) if "exact_identity" in self.__dict__ else out
+
 
 @dataclass(frozen=True)
 class Measurements(Wire):
@@ -167,7 +172,7 @@ class GoldenFile(Wire):
             raise ValueError("model_quant_digest must be a 16-character lowercase hexadecimal digest")
         taken = {kernel.ref for kernel in self.kernels if kernel.ref is not None}
         fresh = (ref for ref in range(len(self.kernels) + len(taken)) if ref not in taken)
-        self.kernels[:] = [kernel if kernel.ref is not None else replace(kernel, ref=next(fresh)) for kernel in self.kernels]
+        self.kernels[:] = [kernel if kernel.ref is not None else kernel.with_ref(next(fresh)) for kernel in self.kernels]
 
     @classmethod
     def from_wire(cls, value: object, where: str | None = None) -> GoldenFile:
@@ -463,7 +468,7 @@ class GoldenFile(Wire):
                     stored = replace(stored, traced=kernel.traced, origins=kernel.origins, bindings=kernel.bindings).keyed(identity)
                     self.kernels[index] = stored
                 return stored
-        kernel = replace(kernel, ref=max((stored.ref for stored in self.kernels), default=-1) + 1).keyed(identity)
+        kernel = kernel.with_ref(max((stored.ref for stored in self.kernels), default=-1) + 1)
         self.kernels.append(kernel)
         return kernel
 

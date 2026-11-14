@@ -242,6 +242,6 @@ def test_loop_graph_round_trip_preserves_structural_body_and_composite_dims() ->
     restored = Graph.from_wire(wire)
 
     assert restored.nodes["y"].op.body == body
-    assert restored.nodes["y"].op.name == "k_relu"
+    assert restored.nodes["y"].op.name == graph.nodes["y"].op.name  # computed from the body, never on the wire
     assert restored.buffer("y").shape == (extent,)
     assert restored.to_wire() == wire

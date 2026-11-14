@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import json
 import logging
+import re
 from dataclasses import replace
 from pathlib import Path
 
@@ -355,7 +356,7 @@ def test_eval_prior_golden_ranks_an_exported_datasets_golden_pools(tmp_path, cap
     header = json.loads((tmp_path / "r.json").read_text())["header"]
     assert (header["dataset"], header["source"], header["sources"]) == ("golden", dataset, {"golden:case": 1})
     assert (header["groups"], header["positives"], header["skipped"]) == (1, 1, 0)
-    assert "Golden reproduction" in caplog.text and "k_matmul_" in caplog.text
+    assert "Golden reproduction" in caplog.text and re.search(r"k_[0-9a-f]{12}", caplog.text)
 
     def forbidden(*_args):
         raise AssertionError("rank-only evaluation must skip golden reproduction")

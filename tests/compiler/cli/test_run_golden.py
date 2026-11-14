@@ -52,7 +52,7 @@ def _hex(tag: str) -> str:
 
 
 def _kernel(tag: str, *, piece: bool = False) -> Kernel:
-    """A fake kernel the file calls ``k_<tag>``, its identity handed in: nothing here lowers its (empty) wire."""
+    """A fake kernel keyed by the digest of ``tag``, its identity handed in: nothing here lowers its (empty) wire."""
     kernel = Kernel(loop_ir={"inputs": [], "outputs": [], "nodes": []}, formed=True, traced=None if piece else 0)
     return kernel.keyed(_hex(tag))
 
@@ -61,13 +61,14 @@ def _document(rows, routing=()) -> GoldenFile:
     """A golden of fake kernels: ``rows`` as ``(name, kernel tag, pins)``, ``routing`` as ``(parent tag, child tags)``
     — a child is a piece, with no program of its own."""
     children = {child for _, kids in routing for child in kids}
-    tags = {tag for _, tag, _ in rows} | {parent for parent, _ in routing} | children
+    tags = sorted({tag for _, tag, _ in rows} | {parent for parent, _ in routing} | children)
+    at = {tag: position for position, tag in enumerate(tags)}
     return GoldenFile(
         compute_cap=(8, 9),
         programs=[{"inputs": [], "outputs": [], "nodes": []}],
-        kernels=[_kernel(tag, piece=tag in children) for tag in sorted(tags)],
-        routing=[RoutingRow(f"k_{parent}", {"PLACE": "cut"}, tuple(f"k_{child}" for child in kids)) for parent, kids in routing],
-        rows=[Row(name=name, kernel=f"k_{tag}", pins=dict(pins)) for name, tag, pins in rows],
+        kernels=[_kernel(tag, piece=tag in children) for tag in tags],
+        routing=[RoutingRow(at[parent], {"PLACE": "cut"}, tuple(at[child] for child in kids)) for parent, kids in routing],
+        rows=[Row(name=name, kernel=at[tag], pins=dict(pins)) for name, tag, pins in rows],
     )
 
 
