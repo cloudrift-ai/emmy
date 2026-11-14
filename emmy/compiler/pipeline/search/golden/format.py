@@ -174,10 +174,6 @@ class GoldenFile(Wire):
         fresh = (ref for ref in range(len(self.kernels) + len(taken)) if ref not in taken)
         self.kernels[:] = [kernel if kernel.ref is not None else kernel.with_ref(next(fresh)) for kernel in self.kernels]
 
-    @classmethod
-    def from_wire(cls, value: object, where: str | None = None) -> GoldenFile:
-        return super().from_wire(_migrated(value), where)
-
     def to_wire(self):
         """The wire, each kernel pointed at by its position in the kernel list."""
         at = {kernel.ref: position for position, kernel in enumerate(self.kernels)}
@@ -506,40 +502,6 @@ class GoldenFile(Wire):
                 return merged
         self.rows.append(row)
         return row
-
-
-def _migrated(wire: object) -> object:
-    """A golden written while kernels stored a name, in today's shape: the names and keys gone, from each kernel and
-    from the loop node of its Loop IR, and every reference to a kernel its position in the kernel list. The one
-    migration of files written before names were computed."""
-    if not isinstance(wire, Mapping) or not any(isinstance(kernel, Mapping) and "name" in kernel for kernel in wire.get("kernels", ())):
-        return wire
-    at = {kernel.get("key") or kernel["name"]: position for position, kernel in enumerate(wire["kernels"])}
-
-    def unnamed(loop_ir: dict) -> dict:
-        nodes = [
-            {**node, "attrs": {key: value for key, value in node["attrs"].items() if key != "name"}}
-            if node.get("op") == "loop" and "attrs" in node
-            else node
-            for node in loop_ir["nodes"]
-        ]
-        return {**loop_ir, "nodes": nodes}
-
-    kernels = [
-        {key: unnamed(value) if key == "loop_ir" else value for key, value in kernel.items() if key not in ("name", "key")}
-        for kernel in wire["kernels"]
-    ]
-    routing = [
-        {**route, "parent": at[route["parent"]], "children": [at[child] for child in route["children"]]}
-        for route in wire.get("routing", ())
-    ]
-    rows = []
-    for row in wire.get("rows", ()):
-        latency = row.get("latency")
-        if latency:
-            latency = {card: {**timing, "kernels": [at[ref] for ref in timing.get("kernels", ())]} for card, timing in latency.items()}
-        rows.append({**row, "kernel": at[row["kernel"]], **({"latency": latency} if latency else {})})
-    return {**wire, "kernels": kernels, "routing": routing, "rows": rows}
 
 
 # --- the text ---------------------------------------------------------------------------------

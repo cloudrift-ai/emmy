@@ -3,8 +3,8 @@
   {"inputs":["a","b"],"outputs":["o"],"nodes":[{"id":"a","op":"input","outputs":[["a","f32",[1,32,1024]]]},{"id":"b","op":"input","outputs":[["b","f32",[1024,2048]]]},{"id":"o","op":"torch.matmul","inputs":["a","b"],"outputs":[["o","f32",[1,32,2048]]]}]}
  ],
  "kernels": [
-  {"loop_ir":{"inputs":["b","a"],"outputs":["o"],"nodes":[{"id":"a","op":"input","outputs":[["a","f32",[1,32,1024]]]},{"id":"b","op":"input","outputs":[["b","f32",[1024,2048]]]},{"id":"o","op":"loop","attrs":{"body":"for a0 in 0..32:\n    for a1 in 0..2048:\n        for a2 in 0..1024:\n            in0 = load a[0, a0, a2]\n            in1 = load b[a2, a1]\n            v0 = multiply(in0, in1)\n            acc0 <- add(acc0, v0) over a2\n        o[0, a0, a1] = acc0","name":"k_matmul_314044"},"inputs":["b","a"],"outputs":[["o","f32",[1,32,2048]]]}]},"name":"k_matmul_314044","formed":true,"traced":0,"origins":["o"]}
+  {"loop_ir":{"inputs":["b","a"],"outputs":["o"],"nodes":[{"id":"a","op":"input","outputs":[["a","f32",[1,32,1024]]]},{"id":"b","op":"input","outputs":[["b","f32",[1024,2048]]]},{"id":"o","op":"loop","attrs":{"body":"for a0 in 0..32:\n    for a1 in 0..2048:\n        for a2 in 0..1024:\n            in0 = load a[0, a0, a2]\n            in1 = load b[a2, a1]\n            v0 = multiply(in0, in1)\n            acc0 <- add(acc0, v0) over a2\n        o[0, a0, a1] = acc0"},"inputs":["b","a"],"outputs":[["o","f32",[1,32,2048]]]}]},"formed":true,"traced":0,"origins":["o"]}
  ],
  "rows": [
-  {"name":"k_matmul_314044","kernel":"k_matmul_314044","pins":{"FAST_MATH":false},"knobs":{"WORK":"t16x8","TILE":"f2x4","REDUCE":"","STAGE":"d1/smem-tma","RASTER":""},"latency":{"NVIDIA GeForce RTX 5090":{"emmy_us":14.20342837061201,"tcompile_us":10.23144533138464,"kernels":["k_matmul_314044"]}}}
+  {"name":"k_matmul_314044","kernel":0,"pins":{"FAST_MATH":false},"knobs":{"WORK":"t16x8","TILE":"f2x4","REDUCE":"","STAGE":"d1/smem-tma","RASTER":""},"latency":{"NVIDIA GeForce RTX 5090":{"emmy_us":14.20342837061201,"tcompile_us":10.23144533138464,"kernels":[0]}}}
  ]}

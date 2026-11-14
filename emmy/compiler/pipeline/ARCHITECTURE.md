@@ -1076,10 +1076,7 @@ computed from the wire when something asks (`KernelDef.exact_identity`, through 
 body goes through `tile/lift`; a kernel formed from no loop op stores its derived body, and a loop op over it has the
 kernel's identity as it stands), and the name from the identity (`KernelDef.name`); `GoldenFile.identities` gives
 every kernel's by `ref` — which only an import, a restamp or a record asks. `run --golden PATH --kernel NAME` selects a
-kernel by its computed name, exact or else a unique substring. The reader migrates a file written while kernels
-stored a name once: the names and keys go (the loop node's `name` attribute too), and every reference to a kernel
-becomes its position. A stored
-kernel whose body the compiler no longer takes back has no identity: a stale kernel, whose rows are no evidence.
+kernel by its computed name, exact or else a unique substring. A stored kernel whose body the compiler no longer takes back has no identity: a stale kernel, whose rows are no evidence.
 `tests/architecture/test_layering.py` pins the field lists, so a new field is an input or it does not go in the file.
 
 **Isolating a recorded kernel preserves its identity.** A formed kernel's stored body runs on its own. A derived
