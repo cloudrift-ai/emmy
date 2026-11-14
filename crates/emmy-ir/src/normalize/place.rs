@@ -4,7 +4,7 @@
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::sync::Arc;
 
-use super::with_bodies;
+use super::{refilled, with_bodies};
 use crate::body::{Body, free_names};
 use crate::expr::Expression;
 use crate::numbering::{Key, Number, Numbering, Param, value_numbers};
@@ -75,7 +75,7 @@ pub fn rename_free(stmt: &Arc<Statement>, alias: &HashMap<Name, Name>) -> Arc<St
         }
         inner.push(b.map_each(&mut |c| rename_free(c, &pruned)));
     }
-    with_bodies(&renamed, inner)
+    refilled(stmt, &renamed, inner)
 }
 
 pub(crate) type Marks = BTreeSet<(Name, u64)>;
@@ -356,7 +356,8 @@ impl Placer<'_> {
             &with_bodies(stmt, nested.iter().map(|_| Body::empty()).collect()),
             &self.alias,
         );
-        let built = with_bodies(
+        let built = refilled(
+            stmt,
             &shell,
             children
                 .iter()

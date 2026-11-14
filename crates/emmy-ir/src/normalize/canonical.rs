@@ -5,7 +5,7 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use super::ties;
-use super::{unify_siblings, with_bodies};
+use super::{refilled, unify_siblings, with_bodies};
 use crate::body::{Body, free_names, unique};
 use crate::elementwise::{AffineRole, Operation};
 use crate::expr::{Expr, ExprClass, Expression, LitType};
@@ -185,7 +185,7 @@ impl SequentialScope {
             self.sources.extend(scope.sources);
             renamed_children.push(child.rebuilt(members));
         }
-        with_bodies(&renamed, renamed_children)
+        refilled(stmt, &renamed, renamed_children)
     }
 }
 
