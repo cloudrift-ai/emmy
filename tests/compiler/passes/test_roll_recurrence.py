@@ -261,45 +261,6 @@ def test_the_chunked_gated_delta_rule_of_a_real_model_rolls_and_matches_eager() 
     np.testing.assert_allclose(arrays[out].reshape(reference.shape), reference, rtol=1e-4, atol=1e-5)
 
 
-_SOLVE = """
-import torch, torch.nn as nn
-class Solve(nn.Module):
-    # a forward substitution: row i of the state is rewritten from the rows before it
-    def forward(self, a):
-        a = a.clone()
-        for i in range(1, a.shape[-1]):
-            a[..., i, :i] = a[..., i, :i] + (a[..., i, :, None] * a[..., :, :i]).sum(-2)
-        return a
-m = Solve()
-m(torch.randn(2, 6, 6))
-"""
-
-
-def test_a_state_read_at_its_last_step_alone_is_stored_once_and_matches_eager() -> None:
-    """Only the next step reads each state of a forward substitution, so the rolled kernel keeps one slot of it,
-    not one per step."""
-    graph, _, (module, _, _) = graph_from_code(_SOLVE)
-    graph = Pipeline.build(LOOP_PASSES).run(graph)
-
-    (rolled,) = _carriers(graph)
-    ((store, tensor),) = rolled.outputs.items()
-    assert tensor.shape[0].as_static() == 1
-
-    rng = np.random.default_rng(0)
-    arrays = {"a": (rng.standard_normal((2, 6, 6)) * 0.5).astype(np.float32)}
-    for node_id in graph.topological_order():
-        node = graph.nodes[node_id]
-        shapes = {tensor.name: tuple(dim.as_static() for dim in tensor.shape) for tensor in node.outputs}
-        if isinstance(node.op, ConstantOp):
-            arrays[node.outputs[0].name] = np.full(*shapes.values(), node.op.value, dtype=np.float32)
-        elif isinstance(node.op, LoopOp):
-            result = execute_loop_op_cpp(node.op, arrays, shapes)
-            arrays.update(zip(node.op.outputs, result if isinstance(result, tuple) else (result,), strict=True))
-    reference = module(torch.from_numpy(arrays["a"])).numpy()
-    (out,) = graph.outputs
-    np.testing.assert_allclose(arrays[out].reshape(reference.shape), reference, rtol=1e-4, atol=1e-5)
-
-
 def test_the_rolled_kernel_lowers_to_one_launch_per_step() -> None:
     """The serial axis reaches the CUDA op as a runtime ``int`` and a launch count; the body holds
     no loop over it and reads the previous step behind the guard."""
@@ -325,24 +286,5 @@ def test_the_rolled_kernel_matches_eager_on_the_gpu() -> None:
     result, _ = run_program(Pipeline.build(CUDA_PASSES).run(graph), arrays)
 
     reference = module(*(torch.from_numpy(arrays[name]) for name in ("q", "k", "v", "g"))).numpy()
-    (out,) = result.outputs.values()
-    np.testing.assert_allclose(np.asarray(out).reshape(reference.shape), reference, rtol=1e-4, atol=1e-5)
-
-
-@requires_cuda
-@pytest.mark.xdist_group("cuda")
-def test_a_state_stored_once_matches_eager_on_the_gpu() -> None:
-    """The serial kernel's own state buffer keeps two steps, whatever the number of steps."""
-    from emmy.compiler.backend.cuda.program import run_program  # noqa: PLC0415
-
-    graph, _, (module, _, _) = graph_from_code(_SOLVE)
-    arrays = {"a": (np.random.default_rng(0).standard_normal((2, 6, 6)) * 0.5).astype(np.float32)}
-
-    lowered = Pipeline.build(CUDA_PASSES).run(graph)
-    kernels = [node for node in lowered.nodes.values() if isinstance(node.op, CudaOp)]
-    assert all(tensor.shape[0].as_static() <= 2 for node in kernels for tensor in node.outputs)
-    result, _ = run_program(lowered, arrays)
-
-    reference = module(torch.from_numpy(arrays["a"])).numpy()
     (out,) = result.outputs.values()
     np.testing.assert_allclose(np.asarray(out).reshape(reference.shape), reference, rtol=1e-4, atol=1e-5)
