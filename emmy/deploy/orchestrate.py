@@ -10,6 +10,7 @@ import shlex
 import struct
 import zlib
 
+from emmy import config
 from emmy.deploy.compose import generate_compose, generate_nginx_conf, service_name
 from emmy.deploy.log_phases import decompose_model_load, parse_engine_load_phases
 from emmy.deploy.params import DeployParams, Service
@@ -181,7 +182,7 @@ def _audio_request(recipe: Recipe) -> tuple[str, dict]:
     }
 
 
-async def _smoke_test(run_cmd, service: Service, name: str, check_smoke_output: bool) -> bool:
+async def _smoke_test(run_cmd, service: Service, name: str, check_smoke_output: bool, api_key: str = "") -> bool:
     """Probe one service until it answers (the first request may be slow after warmup).
 
     A standalone deploy checks model-specific content, then sends one inline image and one inline
@@ -190,24 +191,25 @@ async def _smoke_test(run_cmd, service: Service, name: str, check_smoke_output: 
     """
     path, body = _request(service.recipe)
     check = _smoke_response_check(service.recipe, check_smoke_output=check_smoke_output)
-    if not await _probe(run_cmd, service.port, path, body, check, name, log_response=not check_smoke_output):
+    if not await _probe(run_cmd, service.port, path, body, check, name, api_key, log_response=not check_smoke_output):
         return False
     modalities = service.recipe.model.input_modalities
     if check_smoke_output and "image" in modalities:
         path, body = _image_request(service.recipe)
-        if not await _probe(run_cmd, service.port, path, body, _check_image_response, f"{name} (image input)"):
+        if not await _probe(run_cmd, service.port, path, body, _check_image_response, f"{name} (image input)", api_key):
             return False
     if check_smoke_output and "audio" in modalities:
         path, body = _audio_request(service.recipe)
-        return await _probe(run_cmd, service.port, path, body, _check_audio_response, f"{name} (audio input)")
+        return await _probe(run_cmd, service.port, path, body, _check_audio_response, f"{name} (audio input)", api_key)
     return True
 
 
-async def _probe(run_cmd, port: int, path: str, body: dict, check, name: str, *, log_response: bool = False) -> bool:
+async def _probe(run_cmd, port: int, path: str, body: dict, check, name: str, api_key: str = "", *, log_response: bool = False) -> bool:
     """Send one request until the service answers it, then judge the answer with ``check``."""
     # The body is a shell word: quote it so no recipe value can end the string early.
     data = shlex.quote(json.dumps(body))
-    smoke_cmd = f"curl --fail-with-body -s http://localhost:{port}{path} -H 'Content-Type: application/json' -d {data}"
+    auth = f" -H 'Authorization: Bearer {api_key}'" if api_key else ""
+    smoke_cmd = f"curl --fail-with-body -s http://localhost:{port}{path} -H 'Content-Type: application/json'{auth} -d {data}"
     deadline = asyncio.get_event_loop().time() + SMOKE_TIMEOUT
     while asyncio.get_event_loop().time() < deadline:
         rc, stdout, _ = await run_cmd(smoke_cmd, stream=False, timeout=180)
@@ -243,6 +245,7 @@ async def run_deploy(
     timer: PhaseTimer | None = None,
     check_smoke_output: bool = True,
     proxy: str | None = None,
+    api_key: str = "",
 ):
     """Shared deploy orchestration.
 
@@ -263,12 +266,13 @@ async def run_deploy(
             semantic judgment and uses the probe only for API readiness.
         proxy: HTTP proxy URL the host reaches the internet through; the weight download and every
             engine service get it in their environment
+        api_key: serving API key of a protected deployment; every engine requires it and the smoke test sends it
     """
     timer = timer or PhaseTimer()
     names = [service_name(index, service) for index, service in enumerate(services)]
 
     # Generate and write compose file, and the nginx config when there is a load balancer
-    await write_file("docker-compose.yaml", generate_compose(services, model_dir, hf_token, load_balancer, proxy=proxy))
+    await write_file("docker-compose.yaml", generate_compose(services, model_dir, hf_token, load_balancer, proxy=proxy, api_key=api_key))
     if load_balancer:
         await write_file("nginx.conf", generate_nginx_conf(names))
 
@@ -318,7 +322,8 @@ async def run_deploy(
             baked.add(image)
     if baked:
         await write_file(
-            "docker-compose.yaml", generate_compose(services, model_dir, hf_token, load_balancer, baked_images=baked, proxy=proxy)
+            "docker-compose.yaml",
+            generate_compose(services, model_dir, hf_token, load_balancer, baked_images=baked, proxy=proxy, api_key=api_key),
         )
     download_items = []
     for service in services:
@@ -409,17 +414,18 @@ async def run_deploy(
         logger.info("\nRunning smoke test...")
         async with timer.ameasure(PHASE_SMOKE_TEST):
             for index, service in enumerate(services):
-                if not await _smoke_test(run_cmd, service, names[index], check_smoke_output):
+                if not await _smoke_test(run_cmd, service, names[index], check_smoke_output, api_key):
                     return False
 
     # Print curl example
     logger.info("\nExample curl:")
+    auth = f'    -H "Authorization: Bearer ${config.SERVING_API_KEY}" \\\n' if api_key else ""
     for service in services:
         path, body = _request(service.recipe, example=True)
         payload = "\n".join("    " + line for line in json.dumps(body, indent=2).splitlines()).lstrip()
         logger.info(
             f"  curl http://{host}:{port_map.get(service.port, service.port)}{path} \\\n"
-            f"    -H 'Content-Type: application/json' \\\n"
+            f"    -H 'Content-Type: application/json' \\\n{auth}"
             f"    -d '{payload}'"
         )
 
@@ -544,6 +550,7 @@ async def deploy(params: DeployParams, timer: PhaseTimer | None = None, *, check
         timer=timer,
         check_smoke_output=check_smoke_output,
         proxy=params.proxy,
+        api_key=params.api_key,
     )
 
 

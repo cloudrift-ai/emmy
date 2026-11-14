@@ -12,7 +12,9 @@ from emmy.deploy import (
 from emmy.deploy import (
     teardown as teardown_entry,
 )
+from emmy.deploy.compose import check_protectable
 from emmy.deploy.plan import load_plan
+from emmy.deploy.serving_key import add_serving_api_key_argument
 from emmy.detect import detect_remote_gpus
 from emmy.provisioning.host import RemoteHost
 from emmy.provisioning.proxy import add_proxy_argument
@@ -76,6 +78,11 @@ async def _handle_ssh(args):
         recipe = STRATEGIES[args.scale_out_strategy]().apply(recipe, gpu_count)
         services, load_balancer = replica_services(recipe)
     deploy_config = services[0].recipe.deploy  # a plan validated that every recipe pins the same versions
+    try:
+        check_protectable(services, args.serving_api_key)
+    except ValueError as exc:
+        logger.error(str(exc))
+        sys.exit(1)
 
     hf_token = args.hf_token or os.environ.get("HF_TOKEN", "")
     register_secret(hf_token)
@@ -87,6 +94,7 @@ async def _handle_ssh(args):
         load_balancer=load_balancer,
         model_dir=args.model_dir,
         hf_token=hf_token,
+        api_key=args.serving_api_key or "",
         dry_run=args.dry_run,
         proxy=args.vm_proxy,
     )
@@ -123,6 +131,7 @@ def register_ssh_target(subparsers):
         "reference); the host must have exactly the plan's GPU name and count. Exclusive with --recipe",
     )
     parser.add_argument("--hf-token", default=None, help="HuggingFace token (default: $HF_TOKEN)")
+    add_serving_api_key_argument(parser)
     parser.add_argument("--model-dir", default="/mnt/models", help="Model cache directory")
     parser.add_argument("--teardown", action="store_true", help="Stop containers instead of deploying")
     parser.add_argument("--dry-run", action="store_true", help="Print commands without executing")

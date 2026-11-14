@@ -50,6 +50,7 @@ def _args(plan, **overrides):
         gpu=None,
         gpu_count=None,
         hf_token="",
+        serving_api_key=None,
         model_dir="/mnt/models",
         teardown=False,
         dry_run=False,

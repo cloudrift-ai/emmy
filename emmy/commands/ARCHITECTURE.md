@@ -33,7 +33,7 @@ commands/publish ─► publish (image naming, metadata, collision and digest ga
   `compile.apply_nvcc_flags` / `compile.resolve_tune_db` wrappers just adapt argparse to it. (Provider/secret vars stay
   with `redact.py`; the dynamic `EMMY_<KNOB>` namespace stays with `compiler/pipeline/knob.py`, which borrows
   `config.knob_var` / `config.knob_raw`.)
-- `emmy/redact.py` — `redact_secrets()`, `SecretRedactingFilter`, `install_redaction()` (attach the filter to a handler — must be a handler, not a logger, so child-logger records that propagate up are still redacted), `register_secret()` (call after resolving any secret from a CLI flag — `--hf-token`, `--api-key` — or env var so its value is added to the redaction set)
+- `emmy/redact.py` — `redact_secrets()`, `SecretRedactingFilter`, `install_redaction()` (attach the filter to a handler — must be a handler, not a logger, so child-logger records that propagate up are still redacted), `register_secret()` (call after resolving any secret from a CLI flag — `--hf-token`, `--api-key`, `--serving-api-key` — or env var so its value is added to the redaction set)
 - `emmy/benchmark/` — config, logging, workload, tasks, execution, and YAML experiment records
 
 Golden replay keeps the selected input precision pins active through lowering, NVCC compilation, measurement, and
@@ -80,6 +80,28 @@ orchestration uses the same probe as a transport-readiness check but does not in
 internet through. `generate_compose()` puts it into every engine service's environment, and the model-download
 container gets the same six variables (`HTTP_PROXY`, `HTTPS_PROXY`, `NO_PROXY` and their lower-case twins), so vLLM,
 SGLang and `hf download` fetch weights through it; nginx gets none. Without it the compose file is unchanged.
+
+`DeployParams.api_key` (`--serving-api-key KEY` on every deploy target, `EMMY_SERVING_API_KEY` as the fallback)
+makes a protected deployment: every engine of the deployment, including each model of a plan, rejects a `/v1`
+request that does not send `Authorization: Bearer KEY`. Without it the endpoints are open and the compose file is
+unchanged. The key must be at least 16 characters from letters, digits and `. _ ~ -`; anything else is an argparse
+error that does not repeat the value. Each engine enforces the key itself, and `generate_compose()` hands it over
+the way that engine can keep out of its own log:
+
+| Engine | How it gets the key | What stays open or visible |
+| --- | --- | --- |
+| vLLM | `VLLM_API_KEY` in the service environment — vLLM logs its command-line arguments at start-up, so the key never goes on the command | routes outside `/v1` (`/health`, `/metrics`, `/tokenize`, …) answer without the key |
+| SGLang | `--api-key` on the command; it has no environment option | `/health*` and `/metrics*` answer without the key; SGLang prints its start-up arguments, key included, into its own container log |
+| native | refused before anything is provisioned: the native server has no API key option | — |
+
+Both engines leave `/health` open, so the container health check and the deploy's health poll send nothing; only the
+smoke test sends the key. Emmy registers the key as a secret when it parses it, so no line Emmy logs shows it — a
+command, a streamed remote line, the container logs printed on a failure — and the printed curl example names the
+variable instead of the value. The key is still readable where the deployment keeps it: in `docker-compose.yaml` on
+the host (as the HF token is), in `docker inspect`, and, for SGLang, in `docker logs`. Traffic is plain HTTP, so a
+protected deployment on an untrusted network also needs TLS in front of it. A recipe cannot carry the key:
+`--api-key` in `extra_args` and `VLLM_API_KEY` in `extra_env` are validation errors. `emmy bench` deploys open
+endpoints.
 
 **GPU visibility:** `generate_compose()` accepts a `gpu_device_ids` parameter to restrict GPU visibility via
 `device_ids: [...]` instead of `count: all`. Used by bench when a task needs fewer GPUs than the VM has.
@@ -644,7 +666,8 @@ emmy deploy local --recipe <path> --engine native               # the card's nat
 Deploys to a remote server via SSH + SCP. Auto-detects the remote GPU and resolves the matrix the same way as `deploy local`. The remote host is responsible for having Docker + NVIDIA toolkit installed (or supplying `deploy.driver_version` / `deploy.cuda_version` in the recipe — see Recipe ARCHITECTURE).
 
 ```bash
-emmy deploy ssh --recipe <path> --ssh user@host[:port] [--ssh-key ~/.ssh/id_ed25519] [--dry-run] [--teardown]
+emmy deploy ssh --recipe <path> --ssh user@host[:port] [--ssh-key ~/.ssh/id_ed25519] [--serving-api-key KEY] \
+  [--dry-run] [--teardown]
 emmy deploy ssh --plan plan.json --ssh user@host[:port] [--vm-proxy URL]
 ```
 
@@ -656,6 +679,10 @@ lease or result file, so `--teardown` is how the project comes down.
 
 `--vm-proxy URL` routes the host's image pulls, weight downloads and package installs through an HTTP proxy; it
 behaves exactly as under `deploy cloud` below.
+
+`--serving-api-key KEY` (on `deploy local`, `ssh` and `cloud`; default `$EMMY_SERVING_API_KEY`) makes the
+deployment protected: every model request must send `Authorization: Bearer KEY`. One key covers every model of a
+plan. See "protected deployment" in the deploy library section above for what each engine leaves open.
 
 ### `emmy deploy cloud`
 

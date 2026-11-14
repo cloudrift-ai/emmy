@@ -324,6 +324,10 @@ which engine is active. Immutable checkpoints use `model.revision`; `build_engin
 engines, and deployment passes the same value to `hf download`. `--revision` is therefore also banned from
 `extra_args`, preventing the prefetch and server revisions from drifting apart.
 
+`--api-key` is banned from `extra_args`, and `VLLM_API_KEY` from `extra_env`, for another reason: it is a secret. A
+protected deployment takes its serving API key at deploy time (`emmy deploy … --serving-api-key`), never from a
+recipe.
+
 ### Engine-Specific Nesting
 
 Engine-specific config (`image`, `extra_args`, `extra_env`) nests under `engine.llm.vllm`, `engine.llm.sglang` or

@@ -239,6 +239,11 @@ emmy deploy cloud --recipe gemma-4-12B-it
 A recipe name creates an editable copy in the current directory. You can also pass a recipe directory with
 `--recipe path/to/recipe`. Deployment leaves the server running and prints its endpoint.
 
+By default the endpoint answers anyone who can reach its port. Add `--serving-api-key KEY` (or set
+`EMMY_SERVING_API_KEY`) to any deploy command for a protected deployment: requests must then send
+`Authorization: Bearer KEY`. The [deploy reference](emmy/commands/ARCHITECTURE.md) says what each engine leaves
+open.
+
 Local deployment needs Docker Compose and NVIDIA container support. Cloud deployment needs provider credentials:
 `CLOUDRIFT_API_KEY` for CloudRift, or an authenticated `gcloud` CLI for GCP.
 See the [deployment reference](emmy/commands/ARCHITECTURE.md) for teardown, provider options, and multi-model plans.
