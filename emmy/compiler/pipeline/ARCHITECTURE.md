@@ -447,8 +447,8 @@ dataset is
 `emmy db export --space placement`: one pool per kernel-set fork of every golden kernel, walked through the lift and
 the cut pass only (`ranking.walk_placement`) one seam at a time, as a deploy with no recorded route walks it. A
 several-seam cut a golden recorded is the kernel set it left: at the kernel's fork every single seam carving a piece
-of that set is positive, the deepest first, and the remainder's fork is the next pool, until the remainder is itself
-a piece of the set and stays whole; a naturally offered arm leaving exactly that set is positive instead of the
+of that set is positive, the deepest first, and each piece the set does not hold yet re-enters the walk owing what is
+left to carve, until it is itself a piece of the set and stays whole; a naturally offered arm leaving exactly that set is positive instead of the
 seams. A split fork's positive is the width the golden took; the first arm, which keeps the kernel as it is, is the
 positive where it took none. A composed route — the one decision a pinned compile consumed several seams as — steers
 no walk and is no arm: a cold compile never sees one. A kernel set no single-seam walk reaches is skipped by name.
@@ -472,7 +472,7 @@ holds a time, so a golden that cut a kernel marks the cut and one that kept it w
 names no card, so it cannot mark a cut on a card whose golden did not take it. Shared cut parents receive one pool
 per context a golden cut them under, and the walk keeps decisions within it.
 At that same fork, a natural arm leaving the same exact kernel identities, with multiplicity, also matches the
-recorded decision. Cutting the last output explicitly can leave the same kernel set as keeping it as the remainder.
+recorded decision. Cutting the last output explicitly can leave the same kernel set as leaving it in the other piece.
 
 The proxy stays uncalibrated, and nothing in the deploy path corrects it by hand. Where a prior ends up deciding a
 production election, the defect is the missing evidence — no recorded golden or measured row for that kernel — and
@@ -608,12 +608,8 @@ the fork goes to the placement prior (`_kernel_set_pick`: its argmin over the ar
 kernel whole included); without the shipped placement weights, the first arm wins — the kernel stays fused, unsplit
 and folded. Disabling the schedule prior does not disable placement ranking. No arm is scheduled to decide the fork (Part 4). A measurement can
 also disqualify: an arm that leaves a kernel whose every measured variant failed (`_Measured.failed`, the watchdog's
-`bench_fail` rows) is off the ballot while another arm remains. A failure also rules out keeping whole every kernel that
-contains the failed one: each piece a cut leaves computes part of its parent, so the arm that keeps a kernel whole is
-off where the kernel failed, where a piece one of its cuts leaves failed, or where the kernel is the remainder of one
-an earlier fork of the same compile refused to keep whole, and the remainders its cuts leave are refused in turn. One
-failure thus cuts the whole remainder chain in one compile, where before the fork traded the fused variant that hung
-for its one-producer-lighter sibling compile after compile. Nothing is installed on the kernel: a piece a cut or
+`bench_fail` rows) is off the ballot while another arm remains. A failure also rules out keeping a kernel whole where
+the kernel failed or where a piece one of its cuts leaves failed: each piece computes part of its parent. Nothing is installed on the kernel: a piece a cut or
 split mints is a brand-new kernel (`knob.consume_kernel_row` strips every decision family), its own forks consult the
 rows of its own identity, and a piece that fails to lower re-ranks at its own forks and, once no row of it binds,
 retires the one cut that minted it (`Pipeline.run`'s retry).
@@ -1117,8 +1113,8 @@ refused before anything is written, since the next restamp would drop it. A comp
 so a cut pinned on one of them by its name (`PLACE@k_<hash>/<site>`) records as a later decision on that child. The pin
 spells the child's own seams after its name, or none for its root-most seam (`PLACE@k_<hash>=cut`); the child's name
 is read off a dump or a first compile. The strict record needs rows for the pieces
-that cut mints — a remainder's cross-CTA split fork refuses with none — so the child is benched first under the pin
-alone (`run --golden PATH --kernel CHILD --bench` with `EMMY_KNOBS=PLACE=cut` at the tune standard, which writes its
+that cut mints — a piece's cross-CTA split fork refuses with none — so the child is benched first under the pin
+alone (`run --golden PATH --kernel CHILD --bench` with `EMMY_KNOBS=PLACE@<child>=cut` at the tune standard, which writes its
 routing row and its pieces' rows into the tune DB); the strict whole-target record then takes the cut from those rows
 with no pin. The isolated record of a named row (`--kernel CHILD --realization ROW`) pins the row's kernel whole, so it
 takes no hand `PLACE` pin. A kernel pin whose site names none of the child's seams decides nothing, and the audit
@@ -1500,10 +1496,10 @@ structural tree-path codec before classic sites exist. The maximal fused kernel 
 siblings — closure counting the offer-time provider closure and dependent-seam composition `passes/ARCHITECTURE.md`
 describes. A cut is
 consumed by the graph splice and therefore is not stamped on either fresh kernel; exact routing replay reads it from
-the structural decision trace. A pinned cut decides the one fork its pins name; the remainder and the pieces it
-leaves are kernels of their own names, re-enter placement and take their own fork, which a kernel pin naming them
-(`PLACE@k_<hash>[/<site>]`), evidence or the prior decides. Bare `PLACE=cut` selects the root-most seam at every
-step, so it cuts the remainder chain until no seam is left, and never reaches a piece.
+the structural decision trace. A pinned cut decides the one fork its pins name; the pieces it leaves are kernels of
+their own names, re-enter placement and take their own fork, which a kernel pin naming them
+(`PLACE@k_<hash>[/<site>]`), evidence or the prior decides. Bare `PLACE=cut` cuts the root-most seam of each kernel
+no cut minted, once, and never reaches a piece.
 
 **`WORK`** (STR codec) — the kernel-global **worker inventory**, spelled exactly once per row (step 7):
 `w<M>x<N>[+p<np>]` (warps — the mma tier; `+p<np>` the dedicated producer band the retired per-row `WSPEC` key

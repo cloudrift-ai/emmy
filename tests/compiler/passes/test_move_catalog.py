@@ -417,7 +417,6 @@ def test_a_kernel_pin_with_no_split_keeps_its_piece_unsplit(monkeypatch):
     """``REDUCE@<name>=coop-t`` names the piece by its name: the split fork
     reads it like a bare pin with no ``g`` half and offers the unsplit tree alone, where it used to miss
     the pin and offer every split."""
-    from dataclasses import replace
     from types import SimpleNamespace
 
     from emmy.compiler.pipeline.passes.tile._split import split_forks

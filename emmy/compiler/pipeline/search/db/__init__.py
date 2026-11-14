@@ -507,7 +507,9 @@ class SearchDB:
         return None if found is None else KernelDef(json.loads(found[0]), formed=bool(found[1])).keyed(exact_identity)
 
     def iter_kernels(self) -> Iterator[KernelDef]:
-        for exact, loop_ir, formed in self._conn.execute("SELECT exact_identity, loop_ir, formed FROM kernel ORDER BY exact_identity").fetchall():
+        for exact, loop_ir, formed in self._conn.execute(
+            "SELECT exact_identity, loop_ir, formed FROM kernel ORDER BY exact_identity"
+        ).fetchall():
             yield KernelDef(json.loads(loop_ir), formed=bool(formed)).keyed(exact)
 
     # ------------------------------------------------------------------

@@ -51,7 +51,9 @@ def piece_seams(graph: Graph, key: str) -> str:
     name = pinned_kernel(key)
     if name is None:
         return ""
-    kernels = [node.op for node in graph.nodes.values() if (getattr(node.op, "kernel_name", None) or getattr(node.op, "name", None)) == name]
+    kernels = [
+        node.op for node in graph.nodes.values() if (getattr(node.op, "kernel_name", None) or getattr(node.op, "name", None)) == name
+    ]
     offered = sorted({seam.spelling for op in kernels if (tile := kernel_tile(op)) is not None for seam in cuttable_seams(tile)})
     if not kernels:
         return f"; no kernel of the compile is {name}"

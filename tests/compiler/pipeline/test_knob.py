@@ -758,7 +758,9 @@ def test_a_kernel_pin_names_one_kernel_by_its_name(monkeypatch):
     assert knob_mod.kernel_pin("REDUCE", "k_0123456789ab") == "g16k/coop-t"
     assert knob_mod.kernel_pin("REDUCE", "k_0123456789ac") is None
     assert knob_mod.kernel_pin("REDUCE", "k_0123456789") is None
-    assert knob_mod.kernel_scoped("REDUCE@k_0123456789ab") and knob_mod.pinned_kernel("PLACE@k_0123456789ab/map.1/inner") == "k_0123456789ab"
+    assert (
+        knob_mod.kernel_scoped("REDUCE@k_0123456789ab") and knob_mod.pinned_kernel("PLACE@k_0123456789ab/map.1/inner") == "k_0123456789ab"
+    )
     assert knob_mod.family_pins("REDUCE") == (("REDUCE", "coop"),)
     assert pin_row("k_0123456789ab", split_consumed=True) == {"REDUCE": "coop-t"}
     assert pin_row("k_ba9876543210", split_consumed=False) == {"REDUCE": "coop"}

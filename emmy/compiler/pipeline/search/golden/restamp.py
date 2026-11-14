@@ -397,14 +397,18 @@ def restamp(document: GoldenFile, *, traced: int | None = None) -> tuple[GoldenF
             ):
                 respelled, kernels = found
                 report.respelled.extend(
-                    f"{_label(document.kernel(route.parent))} {old} -> {new}" for old, new in zip(route.arm, respelled.arm, strict=True) if old != new
+                    f"{_label(document.kernel(route.parent))} {old} -> {new}"
+                    for old, new in zip(route.arm, respelled.arm, strict=True)
+                    if old != new
                 )
                 routing[index] = respelled
                 reached.update({child: respelled for child, via in reached.items() if via is route})
                 same = True
             if not same:
                 routing[index] = None
-                report.dropped_routes.append(f"{_label(document.kernel(route.parent))} {route.arm}: the fresh parent does not take it the same way")
+                report.dropped_routes.append(
+                    f"{_label(document.kernel(route.parent))} {route.arm}: the fresh parent does not take it the same way"
+                )
                 for child in route.children:
                     fresh.setdefault(child, None)
                 continue

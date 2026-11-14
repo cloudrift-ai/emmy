@@ -319,8 +319,8 @@ def test_a_pool_of_a_kernel_formed_from_no_loop_op_is_skipped_by_name():
 def test_a_several_seam_cut_is_walked_one_seam_at_a_time():
     """A golden that cut a kernel at several seams, one of them on a piece of its own, is in the placement space the
     sequence of single cuts a deploy with no recorded route takes: at the kernel's fork the single seams carving a piece of the
-    recorded kernel set are positive, the deepest first; each remainder's fork is the next, with the seams still
-    to cut positive; the last remainder is a piece of the set and stays whole. No arm cuts several seams at once,
+    recorded kernel set are positive, the deepest first; the fork of the piece each cut leaves to cut is the next, with
+    the seams still to cut positive; the last such piece is a piece of the set and stays whole. No arm cuts several seams at once,
     and the reproduction gate grades every fork on the way."""
     from emmy.compiler.pipeline.search.prior.reproduce import reproduce_placement, reproduction_rate
     from emmy.compiler.pipeline.search.ranking import placement_decisions, pool_context, walk_placement
@@ -341,13 +341,14 @@ def test_a_several_seam_cut_is_walked_one_seam_at_a_time():
     first, *rest = forks
     assert len(first.positives) == 2 and first.pick == first.positives[0]
     assert first.labels[first.pick].count("/") > first.labels[first.positives[1]].count("/"), "the deepest seam first"
-    assert [len(fork.positives) for fork in rest] == [1, 1, 1] and rest[-1].labels[rest[-1].pick] == "fuse"
+    # The second fork reaches the set either way: each of its two arms carves a recorded kernel and leaves one to cut.
+    assert [len(fork.positives) for fork in rest] == [2, 1, 1] and rest[-1].labels[rest[-1].pick] == "fuse"
     assert reproduction_rate([verdict for verdict in reproduce_placement(pools, None) if verdict.pool is parent]) == 1.0
 
 
-def test_a_remainder_reached_through_a_piece_pool_carries_the_next_recorded_cut():
-    """A golden that cut a piece, then cut the remainder that cut left, records the second cut on the remainder under
-    its identity. Walked as its own pool, the remainder's fork is that cut; walked from the piece's pool, the remainder
+def test_a_piece_reached_through_its_parents_pool_carries_the_next_recorded_cut():
+    """A golden that cut a piece, then cut a piece that cut left, records the second cut on that piece under
+    its identity. Walked as its own pool, that piece's fork is that cut; walked from its parent's pool, the piece
     is minted inside the piece's program, and its identity must be the one the file records, or the walk keeps it whole
     and labels the same fork "fuse" — two labels on one feature row, which no prior reproduces both of. That held only
     while the normal form had one fixed point for the piece's body: with two (the sibling reductions merged in one loop
@@ -357,22 +358,22 @@ def test_a_remainder_reached_through_a_piece_pool_carries_the_next_recorded_cut(
     from emmy.compiler.pipeline.search.ranking import placement_decisions, pool_context, walk_placement
 
     golden = GoldenFile.load(Path(__file__).parents[5] / "emmy/compiler/pipeline/search/golden/records/rtx5090_sm120.json")
-    # The piece, and the remainders its successive cuts left, each a kernel of its own name.
-    piece, *remainders = ("k_a2b88a00bf07", "k_7a5a28b812a5", "k_053828ff9e76", "k_422dbda9e34c", "k_a7158f75e968")
+    # The piece, and the pieces its successive cuts left to cut further, each a kernel of its own name.
+    piece, *deeper_names = ("k_a2b88a00bf07", "k_7a5a28b812a5", "k_053828ff9e76", "k_422dbda9e34c", "k_a7158f75e968")
     [ref] = [kernel.ref for kernel in golden.kernels if kernel.name == piece]
     rows = [row for row in golden.rows if row.kernel in golden.kernel_set(ref)]
     db = SearchDB()
     import_rows(db, regime_context(golden, rows[0].pins), golden, rows, source="golden:case")
     pools = placement_pools(db, golden_pools(db)[0])
     [first] = [pool for pool in pools if pool.kernel.name == piece]
-    deeper = [pool for pool in pools if pool.kernel.name in remainders and pool.rows]
+    deeper = [pool for pool in pools if pool.kernel.name in deeper_names and pool.rows]
 
     def walk(pool):
         return walk_placement(pool, pool_context(pool), placement_decisions(pools, pool), own=True)
 
     walked, unmatched = walk(first)
     assert unmatched == [] and len(walked) == len(deeper) + 2, "the piece's walk takes every recorded cut below it, then stays whole"
-    # The remainder's fork, reached from the piece, carries a cut: the one the remainder's own pool records on it.
+    # The next piece's fork, reached from the piece, carries a cut: the one that piece's own pool records on it.
     assert [walked[1].labels[i] for i in walked[1].positives] != ["fuse"]
     assert {walked[1].labels[i] for i in walked[1].positives} & {walk(pool)[0][0].labels[walk(pool)[0][0].pick] for pool in deeper}
     assert reproduction_rate([verdict for verdict in reproduce_placement(pools, None) if verdict.pool is first]) == 1.0

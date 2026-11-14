@@ -64,7 +64,7 @@ from emmy.compiler.pipeline import Match
 from emmy.compiler.pipeline.knob import consume_kernel_row
 from emmy.compiler.pipeline.passes.loop.fusion._region import build_merged_region, live_outputs_of, wrap_multi_output_fragment
 from emmy.compiler.pipeline.passes.tile._row import io_shapes, lift_kernel, reformed
-from emmy.compiler.pipeline.passes.tile._split import add_output_piece, output_root, redirects
+from emmy.compiler.pipeline.passes.tile._split import add_output_piece, output_root
 from emmy.compiler.structural import digest
 from emmy.compiler.tensor import Tensor
 
@@ -1992,18 +1992,12 @@ def _join_pieces(fragment: Graph, joins: tuple, spelled: dict[str, str], parent:
         _splice_pieces(fragment, members, spelled, parent, joined_spelling(producer, region))
 
 
-#: The node hint a cut leaves on every kernel it mints: ``"remainder"`` on the piece that keeps the outputs no seam
-#: took, ``"piece"`` on the rest. A graph fact, like op provenance: the schedule pass reads it to know a kernel is one
-#: piece of a cut kernel set, and a pick reads it to know which piece of an arm continues the kernel it cut.
+#: The node hint a cut leaves on every kernel it mints. A graph fact, like op provenance: each such kernel is a new
+#: kernel, which reads only the pins that name it, and the schedule pass reads it as one piece of a cut kernel set.
 PIECE = "cut.piece"
 
 
-def remainder_of(fragment: Graph) -> str | None:
-    """The node of the remainder a cut fragment leaves, or ``None`` when every output went to a seam."""
-    return next((node.id for node in fragment.nodes.values() if node.hints.get(PIECE) == "remainder"), None)
-
-
-def realize(match: Match, root: Node, seams, *, joins: tuple = (), lineage: frozenset[str] = frozenset(), consumed=None) -> Graph:
+def realize(match: Match, root: Node, seams, *, joins: tuple = ()) -> Graph:
     """Build the cut fragment for ``seams`` — one piece per seam plus the ONE sibling piece that
     reads what they produced. A single seam is the two-kernel cut; several seams are one COMPOSED
     placement decision (a pinned compile consumes every scoped PLACE pin that resolves on this
@@ -2023,26 +2017,7 @@ def realize(match: Match, root: Node, seams, *, joins: tuple = (), lineage: froz
     cut never erases an earlier cross-CTA decision: every piece inherits the parent's explicit or
     sliced-axis split receipt.
 
-    ``lineage`` names the placement pins every new piece is past: a piece is a new kernel, which the pins its
-    parent read never address. The remainder — the piece that keeps the outputs no seam took — is the kernel the
-    cut continues, so it keeps the parent's consumed pins, or takes ``consumed`` when given. Every kernel the cut
-    leaves carries the :data:`PIECE` hint."""
-    fragment, remainder = _realize(match, root, seams, joins)
-    for node in fragment.nodes.values():
-        if not isinstance(node.op, TileOp):
-            continue
-        node.hints.set(PIECE, "remainder" if node.id == remainder else "piece")
-        if node.id == remainder:
-            if consumed is not None:
-                node.op = replace(node.op, placement_consumed=consumed)
-        elif lineage:
-            node.op = replace(node.op, placement_consumed=node.op.placement_consumed | lineage)
-    return fragment
-
-
-def _realize(match: Match, root: Node, seams, joins: tuple) -> tuple[Graph, str | None]:
-    """:func:`realize`'s fragment and the node id of its remainder, ``None`` when every output went to a seam."""
-
+    Every kernel the cut leaves is a new kernel and carries the :data:`PIECE` hint."""
     tile: TileOp = root.op
     split_consumed = tile.split_consumed or carries_partition(tile)
     owning = tuple(seam for seam in seams if seam.owned is not None)
@@ -2371,7 +2346,7 @@ def _realize(match: Match, root: Node, seams, joins: tuple) -> tuple[Graph, str 
         if not consumer_stores:
             _fuse_sibling_producers(fragment, spelled, tile)
             _join_pieces(fragment, joins, spelled, tile)
-            return fragment, None
+            return _marked(fragment)
         consumer_outputs = {store.write.output for store in consumer_stores}
         consumer_fold = _region_term(
             _over(regions, kept, consumer_stores),
@@ -2386,7 +2361,6 @@ def _realize(match: Match, root: Node, seams, joins: tuple) -> tuple[Graph, str 
         # ``specs`` already reads each stored value under the name the cut left it;
         # ``add_output_piece`` re-spells the BUFFER each write targets.
         output_specs=consumer_stores,
-        placement_consumed=tile.placement_consumed,
         split_consumed=split_consumed,
     )
     consumer = replace(reformed(consumer, shapes), knobs=consume_kernel_row(consumer.knobs))
@@ -2394,17 +2368,24 @@ def _realize(match: Match, root: Node, seams, joins: tuple) -> tuple[Graph, str 
     # or a workspace's — and a buffer bound but not read counts as a reader with no layout fork, which forces its
     # folded layout against the layout another program chose.
     reads = _buffer_reads(consumer.op)
-    remainder = output_root(root, consumer_outputs)
     add_output_piece(
         fragment,
-        remainder,
+        output_root(root, consumer_outputs),
         consumer,
         _piece_inputs(root, consumer.op, tuple(buffer for buffer in all_buffers if buffer in reads)),
         suffix=_PLACED,
     )
     _fuse_sibling_producers(fragment, spelled, tile)
     _join_pieces(fragment, joins, spelled, tile)
-    return fragment, redirects(remainder, _PLACED)[remainder.buffer_names()[0]]
+    return _marked(fragment)
+
+
+def _marked(fragment: Graph) -> Graph:
+    """``fragment`` with every kernel it holds marked a piece of a cut (:data:`PIECE`)."""
+    for node in fragment.nodes.values():
+        if isinstance(node.op, TileOp):
+            node.hints.set(PIECE, True)
+    return fragment
 
 
 def _reindexed(body: Body, mapping: dict) -> Body:

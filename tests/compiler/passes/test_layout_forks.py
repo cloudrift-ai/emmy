@@ -206,15 +206,15 @@ def _recorded_layout_after_cut(*, fixed_reader=False, source=None):
     inventory = KernelInventory(on_routing=lambda parent, arm, pieces, _ids: taken.append((parent, arm, pieces)))
     Run(Pipeline.build(["tile/cut"]).with_strategies(inventory), ctx).resolve(graph, decide)
     _, cut, pieces = taken[0]
-    first, remainder = definition(pieces[0], ref=1), definition(pieces[1], ref=2)
+    first, second = definition(pieces[0], ref=1), definition(pieces[1], ref=2)
     source = source or definition(taken[-1][2][0], ref=3)
     return GoldenFile(
         compute_cap=(7, 0),
         programs=[program],
-        kernels=[target, first, remainder, source],
+        kernels=[target, first, second, source],
         routing=[
-            RoutingRow(parent=target.ref, arm=cut, children=(first.ref, remainder.ref)),
-            RoutingRow(parent=remainder.ref, arm={"LAYOUT@w": "source"}, children=(source.ref,)),
+            RoutingRow(parent=target.ref, arm=cut, children=(first.ref, second.ref)),
+            RoutingRow(parent=second.ref, arm={"LAYOUT@w": "source"}, children=(source.ref,)),
         ],
     )
 
@@ -225,9 +225,9 @@ def test_recorded_layout_replay_keeps_undecided_siblings_compatible(fixed_reader
 
     document = _recorded_layout_after_cut()
     if fixed_reader:
-        remainder = document.kernels[2].exact_identity
+        reader = document.kernels[2].exact_identity
         document = _recorded_layout_after_cut(fixed_reader=True, source=document.kernels[-1])
-        assert document.kernels[2].exact_identity == remainder, "only the earlier reader's layout constraint changes"
+        assert document.kernels[2].exact_identity == reader, "only the earlier reader's layout constraint changes"
     taken = mint(document.kernels[0], document.routing, Context.from_target((7, 0)), document=document)
     assert len(taken) == (1 if fixed_reader else 2), "only an undecided sibling may follow the recorded source layout"
     assert [route for route, _, _ in taken] == document.routing[: len(taken)], "explicit cut and layout decisions retain precedence"

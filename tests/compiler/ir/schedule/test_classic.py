@@ -132,9 +132,7 @@ def test_contraction_tiles_the_contiguous_output_axis_across_grid_orders(free_or
         {**direct.nodes, site: ReductionSchedule(Tile(units=(8, 8)), Reduce())},
         direct.edges,
     )
-    result = materialize_classic(
-        tile, knobs=ClassicScheduleCodec(context).encode(schedule), target=target, schedule=schedule
-    )
+    result = materialize_classic(tile, knobs=ClassicScheduleCodec(context).encode(schedule), target=target, schedule=schedule)
     assert result.outputs == tile.outputs
     assert {axis.name for axis in result.materialization.tiles[site].axes} == {"row", "channel"}
     graph = Graph()

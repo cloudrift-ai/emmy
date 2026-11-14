@@ -524,7 +524,10 @@ def _migrated(wire: object) -> object:
         {key: unnamed(value) if key == "loop_ir" else value for key, value in kernel.items() if key not in ("name", "key")}
         for kernel in wire["kernels"]
     ]
-    routing = [{**route, "parent": at[route["parent"]], "children": [at[child] for child in route["children"]]} for route in wire.get("routing", ())]
+    routing = [
+        {**route, "parent": at[route["parent"]], "children": [at[child] for child in route["children"]]}
+        for route in wire.get("routing", ())
+    ]
     rows = []
     for row in wire.get("rows", ()):
         latency = row.get("latency")

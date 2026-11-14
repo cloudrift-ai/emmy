@@ -28,16 +28,16 @@ class _EmptyBranch(Fork):
 
 
 def _ballot(monkeypatch, pieces: dict[int, tuple[tuple[str, str], ...]], rows: list[dict], aliases=None):
-    """Fake leaves whose expansion is the ``(piece, identity)`` kernels each arm leaves, the remainder spelled ``k``,
-    read through ``ranking._arm_pieces``."""
-    monkeypatch.setattr(ranking, "_arm_pieces", lambda left: [(piece == "k", key) for piece, key in left])
+    """Fake leaves whose expansion is the ``(piece, identity)`` kernels each arm leaves, read through
+    ``ranking._arm_identities``."""
+    monkeypatch.setattr(ranking, "_arm_identities", lambda left: [key for _, key in left])
     return [DeferredFork(lambda i=i: pieces.get(i, ()), knobs=row, aliases=aliases or {}) for i, row in enumerate(rows)]
 
 
 @pytest.mark.parametrize("complete_offered", [False, True])
 @pytest.mark.parametrize("alias", ["PLACE@left", "PLACE@left_alias"])
 def test_placement_labels_prefer_the_complete_natural_arm(monkeypatch, complete_offered, alias):
-    """A golden that left ``left``, ``right`` and the remainder ``rest``: each single seam carving one of them is
+    """A golden that left ``left``, ``right`` and the piece ``rest``: each single seam carving one of them is
     positive, and a natural arm leaving exactly that kernel set is positive instead of them. An alias spells the
     same seam, and the label reads the seam."""
     rows = [{"PLACE": "fuse"}, {alias: "cut"}, {"PLACE@right": "cut"}]
@@ -57,8 +57,8 @@ def test_placement_labels_prefer_the_complete_natural_arm(monkeypatch, complete_
 
 def test_placement_labels_require_pending_pieces_with_multiplicity(monkeypatch):
     """An arm is positive only when every piece it carves is still pending, as many times as it carves it — or is
-    a kernel the golden cut in its turn, whose own fork carries the chain on. The remainder is the kernel the cut
-    marks as such, and a kernel that is itself a pending piece stays whole."""
+    a kernel the golden cut in its turn, whose own fork carries the chain on; the kernels it leaves outside the set
+    carry the walk on. A kernel that is itself a pending piece stays whole."""
     rows = [{"PLACE": "fuse"}, {"PLACE@a": "cut"}, {"PLACE@c": "cut"}, {"PLACE@a": "cut", "PLACE@a2": "cut"}, {"PLACE@p": "cut"}]
     pieces = {
         1: (("k__place_a", "a"), ("k", "k_a")),

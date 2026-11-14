@@ -450,9 +450,7 @@ def _handle_run_cpu(args) -> None:
                 variance=statistics.pvariance(us),
                 n_samples=len(us),
             )
-            persist_kernel_perf(
-                db, program.ctx, tile, stats=stats, status="ok", knobs=decisions[nid], sizes=program.native.executor.env()
-            )
+            persist_kernel_perf(db, program.ctx, tile, stats=stats, status="ok", knobs=decisions[nid], sizes=program.native.executor.env())
     finally:
         db.close()
 

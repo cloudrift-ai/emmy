@@ -211,8 +211,8 @@ Each of these cost a record run on a rented card:
   the pieces' rows land in the tune DB), then record the whole target with that DB in scope.
   `--kernel PIECE --realization ROW` pins the row's kernel whole and takes no hand `PLACE` pin.
 - A recorded cut replays as a pin on its parent's name (`PLACE@k_<hash>/<seam>=cut`, or `PLACE@k_<hash>=cut` for a
-  root-most cut), and under strict evidence a record stops at a remainder's own fork, naming it, instead of fusing it.
-  A remainder is a kernel of its own name, so pin one remainder of a chain by that name.
+  root-most cut), and under strict evidence a record stops at an unpriced piece's own fork, naming it, instead of
+  fusing it. Every piece is a kernel of its own name, so pin one piece down a chain of cuts by that name.
 - `--record-greedy` spells every precision gate in the new rows' pins (`FAST_MATH`, `FAST_EXP`, `F16_MMA_F32_ACC`,
   `FP8_MMA`); the golden rows carry `{"FAST_MATH": lane}` alone. The audit reads both spellings as one lane.
 - A whole-target bench now and then falls back from CUDA graph capture, and a strict record refuses it ("backend

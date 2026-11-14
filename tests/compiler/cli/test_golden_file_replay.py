@@ -41,7 +41,7 @@ _CUT = {"PLACE@inner.1/map": "cut"}
 
 @functools.cache
 def _split(cap=(8, 9)) -> dict[str, str]:
-    """The residual matmul's cross-CTA split, pinned on the remainder ``_CUT`` leaves on graph node ``y``: the route a
+    """The residual matmul's cross-CTA split, pinned on the piece ``_CUT`` leaves on graph node ``y``: the route a
     recorded golden replays is the test's input, not the prior's pick."""
     from unittest import mock  # noqa: PLC0415
 
@@ -1901,7 +1901,9 @@ def test_a_kernel_bench_records_a_pieces_own_decision_for_its_parent(monkeypatch
     with pytest.raises(EvidenceError):
         strict_compile()
 
-    args = _run_args(path, realization=None, kernel=document.kernel(piece).name, record=False, record_greedy=False, strict_correctness=False)
+    args = _run_args(
+        path, realization=None, kernel=document.kernel(piece).name, record=False, record_greedy=False, strict_correctness=False
+    )
     resolve_golden_arg(args)
     assert args.golden_configs == [], "a --kernel run has no row to bench beside the greedy pick"
 
@@ -2076,17 +2078,17 @@ def test_pin_route_pins_the_decisions_the_named_rows_agree_on(monkeypatch):
 
 @pytest.mark.parametrize("bare", (False, True))
 def test_a_recorded_route_pins_each_decision_on_its_parents_name(bare: bool) -> None:
-    """Every kernel of a route has a name of its own — a remainder, a producer, the producer's remainder — so each
+    """Every kernel of a route has a name of its own — each piece a cut leaves, at any depth — so each
     recorded decision is a pin on the kernel it was taken on, a bare cut included: ``PLACE@<name>`` cuts that one
     kernel's root-most seam, never the chain below it."""
     from emmy.commands.compile import _route_pins
 
-    names = {ref: f"k_{n:012x}" for n, ref in enumerate(("root", "remainder", "producer", "producer_remainder", "nested", "final"))}
+    names = {ref: f"k_{n:012x}" for n, ref in enumerate(("root", "second", "producer", "producer_second", "nested", "final"))}
     path = [
-        SimpleNamespace(parent="root", arm={"PLACE@map.1/map": "cut"}, children=("remainder",)),
-        SimpleNamespace(parent="remainder", arm={"PLACE@map.2/inner": "cut"}, children=("producer",)),
-        SimpleNamespace(parent="producer", arm={"PLACE@map.1/reduce": "cut"}, children=("producer_remainder",)),
-        SimpleNamespace(parent="producer_remainder", arm={"PLACE@map.2/inner": "cut"}, children=("nested",)),
+        SimpleNamespace(parent="root", arm={"PLACE@map.1/map": "cut"}, children=("second",)),
+        SimpleNamespace(parent="second", arm={"PLACE@map.2/inner": "cut"}, children=("producer",)),
+        SimpleNamespace(parent="producer", arm={"PLACE@map.1/reduce": "cut"}, children=("producer_second",)),
+        SimpleNamespace(parent="producer_second", arm={"PLACE@map.2/inner": "cut"}, children=("nested",)),
         SimpleNamespace(parent="nested", arm={"PLACE@map.3/inner": "cut"}, children=("final",)),
     ]
     if bare:

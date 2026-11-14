@@ -228,16 +228,16 @@ RMSNorm + rotation cone launched one cooperative block per element.
 A two-pass softmax's row statistics are not seams of this tree: the twist carries them as
 components of ONE fold, so there is no statistic edge to materialize, and the score contraction and the fold itself
 are the seams that stand there. The unpinned fork offers every seam as its own structural arm. Bare `PLACE=cut`
-resolves to the root-most seam of every kernel it reaches, at every step: it names no site, so the remainder a cut
-leaves — a new kernel of its own name — reads it again and the chain is cut until no seam is left, while the fresh
-pieces are past it. `PLACE@k_<hash>=cut` cuts the root-most seam of the one kernel of that name.
+names no site: it cuts the root-most seam of every kernel no cut minted, once. A cut leaves only pieces, each a new
+kernel of its own name, which the pins its parent read never address. `PLACE@k_<hash>=cut` cuts the root-most seam
+of the one kernel of that name.
 Unpinned recursive placement converges in practice — pieces collapse onto shared identities as the tree shrinks —
 rather than being cut off by any count or depth guard.
 Scoped `PLACE@path=cut` pins are authoritative and COMPOSE: every pin that resolves on
 one kernel joins a single realization — one producer per seam, one consumer, a producer reading another seam's
 workspace when its value nests inside (a normalized K cone contains the K-norm statistic cut beside it) — and the
-kernel consumes that placement restriction, while its remainder and each piece take
-their own fork (see `030_cut` under "Kernel boundaries after maximal fusion"). A chosen seam can still go unread: a
+kernel consumes that placement restriction, while each piece takes
+its own fork (see `030_cut` under "Kernel boundaries after maximal fusion"). A chosen seam can still go unread: a
 contraction's piece is built from the one occurrence whose read spans its whole space, so a cone chosen under another
 occurrence is computed in place there and nothing loads its workspace. Such a piece is dropped before any piece is
 fused or joined, so the decision mints what its other seams mint; fused into a piece something reads, it was a buffer
@@ -246,19 +246,18 @@ lower to Loop IR, use the ordinary fusion splicer, and lift back to unscheduled 
 that region, preserving the selected workspace edge. The fused producer re-enters the cut pass; an output-owning
 cut can separate it again without creating workspace producers to re-fuse. Input argument order and prior
 cross-CTA split receipts survive the round trip. Packed storage retains its required boundary. A bare pinned cut
-supplies the root-most seam of that single decision beside the scoped cuts, and stays live for the remainder.
-Every cut piece, remainder, split partial and finalize is a kernel of its own name, `k_` and the first 12 hex digits
+supplies the root-most seam of that single decision beside the scoped cuts.
+Every cut piece, split partial and finalize is a kernel of its own name, `k_` and the first 12 hex digits
 of its exact identity (`pipeline/ARCHITECTURE.md`), and a KERNEL pin `FAMILY@k_<hash>` names every kernel of that
 name, matched by equality (`knob.kernel_pin`, `knob.pinned_kernel`). A `PLACE` kernel pin may name a site of that
 kernel after a slash, relative to it: `PLACE@k_3f2a1b9c04de/map.1/inner=cut` cuts only kernels of that name, and the
 other children settle to fuse; without a site it cuts that kernel's root-most seam. A kernel with kernel pins of its
-own reads only those; a plain site pin `PLACE@<site>` applies to every kernel that has not consumed it. To pin one
-remainder in a chain of cuts, pin it by its own name, read off a dump or a first compile. The consumed key retains
-its full scope, so that cut cannot apply to another kernel. A kernel pin no kernel resolves is rejected by the
-realized-pin audit. A scoped pin whose site
+own reads only those; a plain pin (`PLACE`, `PLACE@<site>`) applies only to kernels no cut minted, which carry no
+`cut.piece` node hint. To pin a piece anywhere down a chain of cuts, pin it by its own name, read off a dump or a first
+compile. A kernel pin no kernel resolves is rejected by the realized-pin audit. A scoped pin whose site
 path does not exist on a kernel addresses another kernel of the graph; a kernel such a pin fails to address fuses,
 deterministic, so under a pin-driven compile the unpinned placement fork returns only where no live pin is left to
-read: a pinned cut's remainder and pieces, which take their own fork. A pin that resolves to an edge no cut
+read: a pinned cut's pieces, which take their own fork. A pin that resolves to an edge no cut
 realizes is an addressing error. Newly fused producers and pieces of unpinned cuts can expose smaller seams before
 scheduling. The environment is the pass's one pin source (`knob.family_pins`); a measured route row
 never becomes a pin — the deploy's evidence pick takes one of the pass's own offered arms with it
@@ -873,14 +872,12 @@ that canonical input:
   order, largest stride first, and keeps the other axes in the parent's order: the tile column is then the axis the
   weight is unit-stride along, so the fragments' stores stay contiguous where a projection is viewed and transposed
   downstream. A weight unit-stride along its reduction axis leaves the column to the workspace's own layout.
-  An unpinned cut may expose more cut choices. A pinned cut decides the one fork its pins name: its remainder — a new
-  kernel the cut marks `remainder` in the `cut.piece` node hint every kernel it leaves carries, which the greedy chain
-  rule and the prior's placement walk read — takes its own fork, which the bare pin or a kernel pin on its name addresses, and each piece
-  it mints is a new kernel no pin names unless a kernel pin on its name does, so a remainder or piece no pin addresses
-  takes the fork an unpinned compile's piece takes — evidence, the prior, or a strict refusal (the recorded GDN routes
-  once compiled every piece whole under their own pins, and no piece's own seam was ever measured; a pinned cut once
-  decided its remainder fused with no fork asked, which recorded remainders whole and left the tiny Gated DeltaNet
-  programs' remainders one thread block recomputing their whole cone per cell). If the parent
+  An unpinned cut may expose more cut choices. A pinned cut decides the one fork its pins name: each piece it mints is a
+  new kernel, marked with the `cut.piece` node hint, that no pin names unless a kernel pin on its name does, so a
+  piece no pin addresses takes the fork an unpinned compile's piece takes — evidence, the prior, or a strict refusal
+  (the recorded GDN routes once compiled every piece whole under their own pins, and no piece's own seam was ever
+  measured; a pinned cut once decided a piece fused with no fork asked, which left the tiny Gated DeltaNet programs'
+  pieces one thread block recomputing their whole cone per cell). If the parent
   already carries a cross-CTA split receipt, every placement piece inherits it, so a later cut cannot make the same
   split pending again. A piece minted by a structural apply stays in the ordinary pass sequence; no schedule-specific
   visitor discovers or realizes another placement decision.

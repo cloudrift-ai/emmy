@@ -432,14 +432,12 @@ class PlacementFork:
     pick: int
 
 
-def _arm_pieces(fragment) -> list[tuple[bool, str | None]]:
-    """Each kernel a cut arm leaves: whether it is the arm's remainder, and its exact identity."""
+def _arm_identities(fragment) -> list[str]:
+    """The exact identity of each kernel a cut arm leaves."""
     from emmy.compiler.ir.tile import TileOp  # noqa: PLC0415
-    from emmy.compiler.pipeline.passes.tile._cut import remainder_of  # noqa: PLC0415
 
-    remainder = remainder_of(fragment)
     return [
-        (node.id == remainder, node.op.with_io(fragment, node).identity_key(structural=False, with_io=True))
+        node.op.with_io(fragment, node).identity_key(structural=False, with_io=True)
         for node in fragment.nodes.values()
         if isinstance(node.op, TileOp)
     ]
@@ -449,14 +447,14 @@ def _place_ballot(
     leaves: list, rows: list[dict], identity: str, pending: Counter | None, continued: frozenset[str]
 ) -> tuple[list[int], list[str], list]:
     """A placement fork's ballot as ``(positives, labels, carved)``: the arms on the golden's path, every arm's
-    label, and per arm the pieces it carves (every kernel it leaves but the remainder, which the cut marks), by exact
-    identity with multiplicity. ``pending`` is what the golden's kernel set still holds
-    below this kernel: ``None`` where the golden cut nothing here, which keeps the kernel whole, as does a kernel
-    that is itself a pending piece. Otherwise an arm is positive when every piece it carves is pending or is a
-    kernel the golden cut in its turn (``continued``), whose own fork carries the walk on; an arm leaving exactly
-    the pending kernels is positive instead of those (a complete natural cut over its single seams). No positive:
-    the golden's kernel set is not reached one seam at a time from here. Equivalent cuts may spell different
-    seams, which is why a piece counts by identity and never by spelling."""
+    label, and per arm the pieces it carves — the kernels it leaves that are pending or that the golden cut in its
+    turn (``continued``) — by exact identity with multiplicity. ``pending`` is what the golden's kernel set still
+    holds below this kernel: ``None`` where the golden cut nothing here, which keeps the kernel whole, as does a
+    kernel that is itself a pending piece. Otherwise an arm is positive when it carves something, and no pending
+    kernel more often than the set holds it; the other kernels it leaves carry the walk on, owing what is left. An arm
+    leaving exactly the pending kernels is positive instead of those (a complete natural cut over its single seams).
+    No positive: the golden's kernel set is not reached one seam at a time from here. Equivalent cuts may spell
+    different seams, which is why a piece counts by identity and never by spelling."""
     fused = next(i for i, row in enumerate(rows) if "fuse" in row.values())
     # An arm spells every occurrence of each seam; the seams themselves are the keys its aliases map onto.
     aliases = {alias: key for leaf in leaves for alias, key in (getattr(leaf, "aliases", None) or {}).items()}
@@ -469,16 +467,11 @@ def _place_ballot(
     for i in range(len(rows)):
         if i == fused:
             continue
-        pieces = _arm_pieces(leaves[i].expand()[0])
-        whole[i] = Counter(key for _, key in pieces if key)
-        carved[i] = Counter(key for remainder, key in pieces if key and not remainder)
+        whole[i] = Counter(key for key in _arm_identities(leaves[i].expand()[0]) if key)
+        carved[i] = Counter({key: n for key, n in whole[i].items() if key in pending or key in continued})
     complete = [i for i in whole if whole[i] == pending]
     positives = complete or [
-        i
-        for i in whole
-        if carved[i]
-        and Counter({key: n for key, n in carved[i].items() if key not in continued}) <= pending
-        and all(key in pending or key in continued for key in carved[i])
+        i for i in whole if carved[i] and Counter({key: n for key, n in carved[i].items() if key not in continued}) <= pending
     ]
     # Deepest seam first: a cone is carved before the cone containing it, so the outer piece reads the inner
     # workspace — the kernel a composed cut of both leaves — and a seam's spelling never moves under the walk.
@@ -547,8 +540,8 @@ def walk_placement(
     layouts), in walk order, and the kernels whose recorded decision the walk could not take (a stale spelling, or
     a kernel set no single-seam walk reaches). The walk cuts one seam at a time, as a deploy with no recorded route
     does: where the golden cut the pool's kernel, an arm is positive when every piece it carves belongs to the
-    kernel set the golden left (:func:`_recorded_kernel_set`), and the remainder re-enters the walk owing what is
-    still to carve, until it is itself a piece of that set and stays whole; a split or layout fork's positive is
+    kernel set the golden left (:func:`_recorded_kernel_set`), and each kernel it leaves that the set does not hold
+    yet re-enters the walk owing what is still to carve, until it is itself a piece of that set and stays whole; a split or layout fork's positive is
     the arm the golden recorded on that kernel (``decisions``: a kernel's exact identity to the kernel-set arm
     recorded on it; unsplit and folded where none is). An arm carving a kernel the golden cut on the way to its
     set is positive too: that kernel's own fork carries the walk on. The walk takes the first positive at every
@@ -558,7 +551,6 @@ def walk_placement(
     from emmy.compiler.ir.tile import TileOp  # noqa: PLC0415
     from emmy.compiler.pipeline.fork import leaf_knobs  # noqa: PLC0415
     from emmy.compiler.pipeline.knob import family_of  # noqa: PLC0415
-    from emmy.compiler.pipeline.passes.tile._cut import remainder_of  # noqa: PLC0415
     from emmy.compiler.pipeline.pipeline import NO_OPTION, _structural_domain  # noqa: PLC0415
     from emmy.compiler.pipeline.search.pins import KERNEL_SET_DOMAINS, spelled_arm  # noqa: PLC0415
 
@@ -618,11 +610,10 @@ def walk_placement(
             fragment = leaves[followed].expand()[0]
             for node_id, node in fragment.nodes.items():
                 if isinstance(node.op, TileOp) and (
-                    node_id == remainder_of(fragment)
-                    or node.op.with_io(fragment, node).identity_key(structural=False, with_io=True) in continued
+                    (key := node.op.with_io(fragment, node).identity_key(structural=False, with_io=True)) in continued or key not in owed
                 ):
-                    # The remainder and a piece the golden cut in its turn are cut further; the splice promotes
-                    # a piece onto the buffer it replaces.
+                    # A piece the golden cut in its turn, or one the set does not hold yet, is cut further; the
+                    # splice promotes a piece onto the buffer it replaces.
                     pending[node_id] = pending[node_id.removesuffix("__placed")] = left
         return leaves[followed]
 
@@ -681,7 +672,8 @@ def build_placement_groups(pools: Sequence[GoldenPool], *, jobs: int = 1) -> tup
     ``REDUCE`` split; none: it stayed one kernel. The walk runs the tile lift and the cut pass only
     (``PLACEMENT_PASSES``) and cuts one seam at a time, as a deploy with no recorded route does
     (:func:`walk_placement`): a several-seam decision is the kernel set it left, and every fork on the way to that
-    set is a group — the kernel's, then each remainder's, until the remainder is itself a piece of the set — with
+    set is a group — the kernel's, then that of each kernel a cut leaves on the way, until it is itself a piece of the
+    set — with
     the arms carving pieces of it marked. A piece's own fork, where it stays whole, is a group too, as is a split
     or layout fork with the arm the decision names marked, and the first arm marked where nothing was recorded. A
     kernel set no single-seam walk reaches is counted out by name: a deploy cannot take it either. ``jobs`` walks that
