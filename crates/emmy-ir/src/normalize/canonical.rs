@@ -10,7 +10,7 @@ use crate::body::{Body, free_names, unique};
 use crate::elementwise::{AffineRole, Operation};
 use crate::expr::{Expr, ExprClass, Expression, LitType};
 use crate::field::Rewriter;
-use crate::numbering::{Chains, Key, Numbering, roles, statement_tree, value_numbers};
+use crate::numbering::{Chains, Key, Numbering, params_key, roles, statement_tree, value_numbers};
 use crate::order::ordering_constraints_within;
 use crate::statement::*;
 use crate::{Name, Result};
@@ -288,7 +288,7 @@ fn ordered_within(body: &Body, numbering: &Numbering, outer: &HashSet<Name>) -> 
                     own.clone(),
                     spelled,
                     number,
-                    Key::Tuple(params),
+                    params_key(&params),
                 ])
             }
         })
