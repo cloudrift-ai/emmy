@@ -105,6 +105,25 @@ def test_a_loop_that_takes_copies_seeds_its_own_folds_only() -> None:
     assert sorted(stmt.name for stmt in op.body.iter() if isinstance(stmt, Init)) == ["acc", "total"]
 
 
+def test_an_outer_loop_written_out_keeps_the_carriers_it_seeded_ahead_of_itself() -> None:
+    """The outer loop of such a nest written out too: the seed of ``total`` it moved ahead of itself stands outside
+    every copy, so each copy folds into ``total`` itself, and only each trip's own names are the copy's."""
+    body = (
+        "for c in 0..2 unroll=true:\n"
+        "    init f32 dot = 0.0\n"
+        "    for k in 0..2 unroll=true seed=false:\n"
+        "        f32 a = load A[i, c, k]\n"
+        "        f32 dot <- add(dot, a)\n"
+        "    f32 total <- maximum(total, dot) over c\n"
+        "f32 O[i] = total"
+    )
+    op = _unrolled(body)
+    assert not _loops(op)
+    folds = [stmt.name for stmt in op.body.iter() if isinstance(stmt, Accum)]
+    assert folds.count("total") == 2 and "total__u0" not in folds
+    assert [stmt.name for stmt in op.body.iter() if isinstance(stmt, Init)] == ["total", "dot__u0", "dot__u1"]
+
+
 @pytest.mark.parametrize(("extent", "copies"), [(8, 2), (16, 4)])
 def test_a_lane_loop_unrolls_when_every_lane_runs_the_same_trips(extent: int, copies: int) -> None:
     op = _unrolled(f"for j in lane..{extent} step 4 unroll=true:\n    f32 a = load A[i, j]\n    O[i, j] = a")

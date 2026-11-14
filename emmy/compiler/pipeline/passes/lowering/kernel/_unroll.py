@@ -132,7 +132,7 @@ def _unroll(loop: Statement, trips: int, ctx: SimplifyCtx, outer: Collection[str
     updates in place.
     """
     out = _seeds(loop)
-    own = _own(loop, outer) - {seed.name for seed in out}
+    own = _own(loop, outer) - _carried(loop) - {seed.name for seed in out}
     tags = chain(("",), (f"_{n}" for n in count(1)))
     tag = next(t for t in tags if not any(f"{name}__u{trip}{t}" in taken for name in own for trip in range(trips)))
     for trip in range(trips):
