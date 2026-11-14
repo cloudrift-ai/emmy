@@ -83,8 +83,7 @@ def test_register_step_keeps_a_time_coordinate_read_by_its_lift():
     lift = carrying.lift
     changed = replace(
         carrying,
-        lift=replace(
-            lift,
+        lift=lift.replace(
             body=Body(
                 (
                     *parse_body(f"phase = load D[{carrying.axis}]"),

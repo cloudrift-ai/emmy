@@ -10,12 +10,12 @@ use std::collections::{HashMap, HashSet};
 use std::hash::{Hash, Hasher};
 use std::sync::{Arc, OnceLock};
 
-use crate::body::{Body, exposed_defines};
-use crate::elementwise::ElementwiseOp;
-use crate::expr::{Expr, Expression};
-use crate::normalize::{canonical_values, fragment_order, one_operation_per_definition};
-use crate::statement::{Assign, PURE, Statement};
-use crate::{Error, Name, Result};
+use emmy_ir::body::{Body, exposed_defines};
+use emmy_ir::elementwise::ElementwiseOp;
+use emmy_ir::expr::{Expr, Expression};
+use emmy_ir::normalize::{canonical_values, fragment_order, one_operation_per_definition};
+use emmy_ir::statement::{Assign, PURE, Statement};
+use emmy_ir::{Error, Name, Result};
 
 /// A pure function over the statement vocabulary. Immutable and shared: a clone is the same lambda.
 #[derive(Clone)]
@@ -302,8 +302,8 @@ impl Lambda {
         let results: Vec<Name> = self.0.results.iter().map(rename).collect();
         // Names only, no axis map: the rewrite a statement's own `rewrite(names)` makes.
         let empty = HashMap::new();
-        let by_role = |_: crate::statement::Roles, name: Name| mapping.get(&name).copied();
-        let rewrite = crate::protocol::Rewrite {
+        let by_role = |_: emmy_ir::statement::Roles, name: Name| mapping.get(&name).copied();
+        let rewrite = emmy_ir::protocol::Rewrite {
             rename: &by_role,
             sigma: &empty,
             axis_fn: None,
@@ -364,7 +364,7 @@ impl Lambda {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::text::parse_body;
+    use emmy_ir::text::parse_body;
 
     fn names(items: &[&str]) -> Vec<Name> {
         items.iter().map(|item| Name::new(item)).collect()
