@@ -71,7 +71,7 @@ from emmy import config
 from emmy.compiler.graph import Graph
 from emmy.compiler.pipeline.fork import iter_leaves, leaf_for, leaf_knobs, parallel_descent_rows, parallel_expand
 from emmy.compiler.pipeline.knob import schedule_pin_fingerprint
-from emmy.compiler.pipeline.search.features import Featurizer
+from emmy.compiler.pipeline.search.features import Featurizer, kernel_pieces
 from emmy.compiler.wire import kernel_bindings, kernel_identity, kernel_tile
 
 logger = logging.getLogger(__name__)
@@ -205,7 +205,7 @@ def _kernel_set_pick(fp: ForkPoint, prior, failed: dict) -> object:
     pieces = [_leaf_graph(o) if _is_structural_option(o) else root for o in leaves]
     live = list(range(len(leaves)))
     if failed:  # the exact identity of every piece of every arm is computed only to be looked up here
-        left = [_identities(piece) for piece in pieces]
+        left = [[_read(kernel_identity(op)) for op, _ in kernel_pieces(piece)] for piece in pieces]
         if any(key in failed for kept in left for key in kept):
             live = [i for i in live if _is_structural_option(leaves[i])] or live
         live = [i for i in live if not any(key in failed for key in left[i])] or live
@@ -223,15 +223,6 @@ def _find_decided_leaf(fp, want: dict) -> object | None:
     offers of one key — and the caller re-decides."""
     hit = fp.find(want)
     return hit[0] if hit is not None and hit[1] == want else None
-
-
-def _identities(piece) -> list[str]:
-    """The exact identity of each kernel an arm leaves — the kernel itself for an arm that keeps it whole."""
-    from emmy.compiler.ir.tile import TileOp  # noqa: PLC0415
-
-    if not isinstance(piece, Graph):
-        return [_read(kernel_identity(piece))]
-    return [_read(kernel_identity(node.op.with_io(piece, node))) for node in piece.nodes.values() if isinstance(node.op, TileOp)]
 
 
 def _leaf_graph(leaf: object) -> Graph:

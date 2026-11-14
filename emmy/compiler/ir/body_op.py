@@ -20,11 +20,10 @@ from emmy.compiler.tensor import Tensor
 @dataclass(frozen=True)
 class BodyOp(Op):
     """Shared base for IR ops that carry a structured :class:`Body` of
-    stmts plus a kernel name — ``LoopOp`` (loop IR), ``KernelOp`` (kernel
-    IR). Provides:
+    stmts — ``LoopOp`` (loop IR), ``KernelOp`` (kernel IR). Provides:
 
-    - ``body`` / ``name`` fields, plus a ``__post_init__`` that coerces
-      tuple-bodies to :class:`Body`,
+    - the ``body`` field, plus a ``__post_init__`` that coerces tuple-bodies to :class:`Body`,
+    - ``name``, computed from the kernel's exact identity,
     - ``__iter__`` over the body's deep stmt iterator,
     - ``loads`` / ``writes`` typed iters,
     - a unified ``pretty_body`` returning the indented body listing

@@ -11,7 +11,7 @@ Tables (the DDL is the reference):
   with_io=True)``: the digest of the normalized body's form plus each buffer's dtype and hint-free shape),
   holding the kernel's Loop IR wire (``wire.kernel_wire``: the body it was formed from, which the tile lift
   takes back to the kernel — ``formed`` — or, for a piece carved from a twisted tree, its derived body, which
-  only its parent's program reaches) and its C name. A piece a cut or a split minted is a row like any other,
+  only its parent's program reaches). A piece a cut or a split minted is a row like any other,
   so the same kernel reached from two parents has one definition. The key is the one computed value the DB
   holds: a cache key, computed from the wire by whoever writes the row (a bench off its live kernel, an import
   off a golden's stored one) and valid under :data:`_VERSION`. Nothing else derived from a kernel is stored —

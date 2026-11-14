@@ -236,7 +236,9 @@ def persist_bench_failure(db, ctx, cuda_nodes, exc, fail_us: float) -> list:
     so such a slice is spent for this session and benched again, at the run budget, by the next."""
     named = _NAMED_KERNEL.search(str(exc))
     if named is not None:
-        blamed = [n for n in cuda_nodes if getattr(n.op, "kernel_name", "") == named.group(1)]
+        # The watchdog names the launch symbol: the kernel's name, suffixed where the plan launches other code under it.
+        symbol = named.group(1)
+        blamed = [n for n in cuda_nodes if symbol == n.op.kernel_name or symbol.startswith(f"{n.op.kernel_name}_")]
     else:
         blamed = list(cuda_nodes) if len(cuda_nodes) == 1 else []
     stats = point_stats(fail_us)

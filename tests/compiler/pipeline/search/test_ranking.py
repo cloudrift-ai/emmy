@@ -2,6 +2,7 @@
 
 from collections import Counter
 from dataclasses import dataclass, field
+from types import SimpleNamespace
 
 import pytest
 
@@ -12,7 +13,7 @@ from emmy.compiler.ir.schedule import Placement
 from emmy.compiler.ir.tile import TileOp
 from emmy.compiler.pipeline.fork import DeferredFork, Fork
 from emmy.compiler.pipeline.pipeline import ForkPoint
-from emmy.compiler.pipeline.search import ranking
+from emmy.compiler.pipeline.search import features
 from emmy.compiler.pipeline.search.features import Featurizer
 from emmy.compiler.pipeline.search.ranking import _place_ballot, enumerate_graph
 from tests.compiler.terms import contraction, projection, slab
@@ -29,8 +30,10 @@ class _EmptyBranch(Fork):
 
 def _ballot(monkeypatch, pieces: dict[int, tuple[tuple[str, str], ...]], rows: list[dict], aliases=None):
     """Fake leaves whose expansion is the ``(piece, identity)`` kernels each arm leaves, read through
-    ``ranking._arm_identities``."""
-    monkeypatch.setattr(ranking, "_arm_identities", lambda left: [key for _, key in left])
+    ``kernel_pieces``."""
+    monkeypatch.setattr(
+        features, "kernel_pieces", lambda left: [(SimpleNamespace(identity_key=lambda key=key, **_: key), False) for _, key in left]
+    )
     return [DeferredFork(lambda i=i: pieces.get(i, ()), knobs=row, aliases=aliases or {}) for i, row in enumerate(rows)]
 
 

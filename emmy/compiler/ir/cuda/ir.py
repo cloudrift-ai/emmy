@@ -85,14 +85,9 @@ class CudaOp(Op):
     def identity_key(self, *, structural: bool = True, with_io: bool = False, with_knobs: bool = False) -> str | None:
         """Override :meth:`Op.identity_key` whole: digest of the rendered source + launch
         params — past rendering, body / io / knobs are all realized into the artifact, so the
-        lattice flags have nothing left to fold and are accepted-and-ignored. (the
-        bits that determine runtime behavior). Name-invariant: the kernel function name is
-        rendered into the source (``void <name>(...)``) but doesn't change runtime behavior,
-        so it normalizes out — renaming a kernel (e.g. via op provenance) neither busts the
-        perf cache nor blocks an isolated-kernel tune from transferring to a whole-model
-        compile."""
-        src = self.kernel_source.replace(self.kernel_name, "_K_") if self.kernel_name else self.kernel_source
-        return digest(type(self).__name__, src, self.arg_order, self.grid, self.block, self.smem_bytes)
+        lattice flags have nothing left to fold and are accepted-and-ignored. The kernel's name is in the source, and
+        it is the kernel's exact identity, so one kernel has one source wherever it is compiled."""
+        return digest(type(self).__name__, self.kernel_source, self.arg_order, self.grid, self.block, self.smem_bytes)
 
 
 def resolve_dim(spec, sym_values: dict[str, int]) -> int:

@@ -25,12 +25,9 @@ Correctness:
   graph inputs / constants) is skipped — nothing precedes it in the capture.
 - **Static shapes only**: the word count bakes into the source; a symbolic-shaped accumulator
   keeps the runtime memset.
-- **Name re-suffix**: kernel names were content-stamped BEFORE this rewrite, and launches
-  resolve kernels by name (the one-name-one-source rule stated beside
-  ``backend/cuda/nvcc.load_cubin_function``; first source wins) — two same-named predecessors delegated
-  different-sized buffers would run one body with the other's baked word count. The suffix
-  carries the total word count, so equal-suffix collisions are positionally safe (params bind
-  by position; equal structure + equal counts).
+- **Other code, same name**: the predecessor keeps its name, the hash of its exact identity, while its source now
+  carries the prologue; the execution plan launches a source its name already holds under a symbol of its own
+  (``backend/plan.merge_kernels``), so no twin of it runs this body or this one the twin's.
 """
 
 from __future__ import annotations

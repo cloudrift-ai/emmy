@@ -334,7 +334,7 @@ def build_golden_groups(
     golden row recorded on the pool's card and regime is reached by its own descent whatever the draw picks,
     so a golden that misses its pool still means what it always meant: a pin or dtype mismatch.
 
-    ``kernel`` keeps only pools whose kernel's C name contains it — a narrowing VIEW, for iterating on one kernel
+    ``kernel`` keeps only pools whose kernel's name contains it — a narrowing VIEW, for iterating on one kernel
     without paying for the rest. Each retained pool's rank is unchanged by it: the keep-set is computed over every
     pool given, so a pool retains the same rows under the same draw; what changes is the group and positive counts,
     so only an unfiltered run compares against a fit.
@@ -432,17 +432,6 @@ class PlacementFork:
     pick: int
 
 
-def _arm_identities(fragment) -> list[str]:
-    """The exact identity of each kernel a cut arm leaves."""
-    from emmy.compiler.ir.tile import TileOp  # noqa: PLC0415
-
-    return [
-        node.op.with_io(fragment, node).identity_key(structural=False, with_io=True)
-        for node in fragment.nodes.values()
-        if isinstance(node.op, TileOp)
-    ]
-
-
 def _place_ballot(
     leaves: list, rows: list[dict], identity: str, pending: Counter | None, continued: frozenset[str]
 ) -> tuple[list[int], list[str], list]:
@@ -467,7 +456,8 @@ def _place_ballot(
     for i in range(len(rows)):
         if i == fused:
             continue
-        whole[i] = Counter(key for key in _arm_identities(leaves[i].expand()[0]) if key)
+        pieces = features.kernel_pieces(leaves[i].expand()[0])
+        whole[i] = Counter(key for op, _ in pieces if (key := op.identity_key(structural=False, with_io=True)))
         carved[i] = Counter({key: n for key, n in whole[i].items() if key in pending or key in continued})
     complete = [i for i in whole if whole[i] == pending]
     positives = complete or [
@@ -539,10 +529,10 @@ def walk_placement(
     """One pool's kernel-set forks (``pins.KERNEL_SET_DOMAINS``: placement cuts, cross-CTA and carry splits,
     layouts), in walk order, and the kernels whose recorded decision the walk could not take (a stale spelling, or
     a kernel set no single-seam walk reaches). The walk cuts one seam at a time, as a deploy with no recorded route
-    does: where the golden cut the pool's kernel, an arm is positive when every piece it carves belongs to the
-    kernel set the golden left (:func:`_recorded_kernel_set`), and each kernel it leaves that the set does not hold
-    yet re-enters the walk owing what is still to carve, until it is itself a piece of that set and stays whole; a split or layout fork's positive is
-    the arm the golden recorded on that kernel (``decisions``: a kernel's exact identity to the kernel-set arm
+    does: where the golden cut the pool's kernel, an arm is positive when it carves a piece of the kernel set the
+    golden left (:func:`_recorded_kernel_set`), and each kernel it leaves that the set does not hold yet re-enters the
+    walk owing what is still to carve, until it is itself a piece of that set and stays whole; a split or layout
+    fork's positive is the arm the golden recorded on that kernel (``decisions``: a kernel's exact identity to the kernel-set arm
     recorded on it; unsplit and folded where none is). An arm carving a kernel the golden cut on the way to its
     set is positive too: that kernel's own fork carries the walk on. The walk takes the first positive at every
     fork, so its forks are the dataset's groups; a placement ``prior`` records at each of them the arm it ranks
