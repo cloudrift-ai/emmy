@@ -149,6 +149,39 @@ const EXP2: [f32; 6] = [
     1.5306543e-4,
 ];
 
+/// `sin(r) = r + r * s * P(s)` with `s = r^2`, over `|r| <= pi/4`.
+const SIN: [f32; 4] = [-1.6666666e-1, 8.333313e-3, -1.9836151e-4, 2.697417e-6];
+
+/// `cos(r) = 1 - s/2 + s^2 * P(s)` with `s = r^2`, over `|r| <= pi/4`.
+const COS: [f32; 4] = [4.1666668e-2, -1.3888871e-3, 2.4797066e-5, -2.7056896e-7];
+
+/// `2/pi` as the nearest f32: the quadrant of an argument is the integer nearest its product with this.
+const TWO_OVER_PI: f32 = std::f32::consts::FRAC_2_PI;
+/// `1.5 * 2^23`: a fused multiply-add into it rounds a product to its nearest integer and leaves that integer's low
+/// bits in its own.
+const ROUND_MAGIC: f32 = 12582912.0;
+/// `pi/2` in three parts, each the nearest f32 to what the ones before it leave: one fused multiply-add each takes
+/// a quadrant off an argument up to the short reduction's limit.
+const HALF_PI: [f32; 3] = [
+    f32::from_bits(0x3fc9_0fd8),
+    f32::from_bits(0x34a8_885a),
+    f32::from_bits(0x27c2_34c5),
+];
+/// Past this magnitude the three parts of `pi/2` leave too little of the argument: the reduction is the long one.
+const SHORT_REDUCTION: f32 = 105615.0;
+/// The 192 bits of `2/pi` after the binary point, least significant word first: the long reduction multiplies the
+/// argument's significand by them.
+const TWO_OVER_PI_BITS: [i64; 6] = [
+    0x3c43_9041,
+    0xdb62_9599,
+    0xf534_ddc0,
+    0xfc27_57d1,
+    0x4e44_1529,
+    0xa2f9_836e,
+];
+/// `pi/2 * 2^-64`: a fraction of a quadrant held as a 64-bit integer, times this, is radians.
+const HALF_PI_PER_UNIT: f64 = std::f64::consts::FRAC_PI_2 / 18446744073709551616.0;
+
 /// An exponent's magnitude is held to this: past it every power of a base other than one is zero or infinite.
 const EXPONENT_LIMIT: f32 = 1.2676506e30;
 
@@ -456,6 +489,150 @@ impl Seq<'_> {
         self.select(Ty::F32, large, small, is_large)
     }
 
+    /// An integer instruction at `ty` into a register of `bank`.
+    fn typed<const N: usize>(&mut self, opcode: Opcode, ty: Ty, operands: [V; N], bank: Bank) -> V {
+        let operands = operands.into_iter().map(Operand::from).collect();
+        self.value(Inst::new(opcode, ty, Vec::new(), operands), bank)
+    }
+
+    /// `sin(x)`, or `cos(x)` where `cosine` says: the argument less its nearest multiple `q` of `pi/2`, then the
+    /// sine or the cosine polynomial of that remainder by the quadrant `q mod 4`, a cosine being the sine a
+    /// quadrant on. Up to the short reduction's limit `q` is formed in a magic constant's low bits and taken off
+    /// in three parts of `pi/2`; past it, the long reduction gives the remainder and `q`. An infinity or a NaN
+    /// takes the short path, which gives a NaN.
+    fn sincos(&mut self, x: V, cosine: bool) -> V {
+        let rounded = self.fma(x, TWO_OVER_PI, ROUND_MAGIC);
+        let short_q = self.bits(rounded);
+        let j = self.add(rounded, -ROUND_MAGIC);
+        let short = HALF_PI
+            .iter()
+            .fold(x, |rest, part| self.fma(j, -part, rest));
+        let (long, long_q) = self.long_reduction(x);
+        let magnitude = self.abs(x);
+        let past = self.compare(Cmp::Gt, Ty::F32, magnitude, SHORT_REDUCTION);
+        let finite = self.compare(Cmp::Lt, Ty::F32, magnitude, f32::INFINITY);
+        let long_path = self.logic(Opcode::And, past, finite);
+        let r = self.select(Ty::F32, long, short, long_path);
+        let q = self.select(Ty::B32, long_q, short_q, long_path);
+        let q = if cosine {
+            self.int(Opcode::Add, q, 1)
+        } else {
+            q
+        };
+        let s = self.mul(r, r);
+        let sine = self.horner(&SIN, s);
+        // The product with a zero added, as in the hyperbolic tangent: `-0` keeps its sign.
+        let sine = self.fma(sine, s, 0.0);
+        let sine = self.fma(sine, r, r);
+        let cos = self.horner(&COS, s);
+        let cos = self.fma(cos, s, -0.5);
+        let cos = self.fma(cos, s, 1.0);
+        let odd = self.int(Opcode::And, q, 1);
+        let odd = self.compare(Cmp::Ne, Ty::S32, odd, 0_i64);
+        let value = self.select(Ty::F32, cos, sine, odd);
+        let half = self.int(Opcode::And, q, 2);
+        let half = self.compare(Cmp::Ne, Ty::S32, half, 0_i64);
+        let flipped = self.neg(value);
+        self.select(Ty::F32, flipped, value, half)
+    }
+
+    /// The remainder of a finite `x` past the short reduction's limit after its nearest multiple `q` of `pi/2`,
+    /// and `q`'s low bits (Payne and Hanek). The 24-bit significand, at the top of a word, times the 192 bits of
+    /// `2/pi` is `x * 2/pi` in fixed point; of the product, the 64 bits from the units' place up two hold `q mod 4`
+    /// and the fraction. A fraction of a half or more rounds `q` up and is negative. The fraction goes to radians in
+    /// f64, which holds its 64 bits to a relative step of `2^-53` however small it is.
+    fn long_reduction(&mut self, x: V) -> (V, V) {
+        let bits = self.bits(x);
+        let exponent = self.int(Opcode::Shr, bits, 23);
+        let exponent = self.int(Opcode::And, exponent, 0xff);
+        let significand = self.int(Opcode::Shl, bits, 8);
+        let significand = self.int(Opcode::Or, significand, 0x8000_0000_i64);
+        let mut words = Vec::with_capacity(TWO_OVER_PI_BITS.len() + 1);
+        let mut carry = V::Int(0);
+        for word in TWO_OVER_PI_BITS {
+            let product = self.typed(
+                Opcode::MulWide,
+                Ty::U32,
+                [significand, V::Int(word)],
+                Bank::B64,
+            );
+            let sum = self.typed(Opcode::Add, Ty::U64, [product, carry], Bank::B64);
+            words.push(self.typed(Opcode::Cvt(Ty::U64), Ty::U32, [sum], Bank::B32));
+            carry = self.typed(Opcode::Shr, Ty::U64, [sum, V::Int(32)], Bank::B64);
+        }
+        words.push(self.typed(Opcode::Cvt(Ty::U64), Ty::U32, [carry], Bank::B32));
+        // With `x = significand * 2^(exponent - 158)`, the product's units' place is bit `350 - exponent`, so the
+        // 64 bits wanted start at bit `288 - exponent`: in word 1 to 4 for every exponent past the limit.
+        let start = self.int(Opcode::Sub, V::Int(288), exponent);
+        let word = self.int(Opcode::Shr, start, 5);
+        let shift = self.int(Opcode::And, start, 31);
+        let pick = |seq: &mut Self, at: usize| {
+            (1..4).rev().fold(words[4 + at], |rest, w| {
+                let here = seq.compare(Cmp::Eq, Ty::S32, word, w as i64);
+                seq.select(Ty::B32, words[w + at], rest, here)
+            })
+        };
+        let low = pick(self, 0);
+        let middle = pick(self, 1);
+        let high = pick(self, 2);
+        let (V::Reg(middle), V::Reg(high)) = (middle, high) else {
+            unreachable!("a word of the product is a register")
+        };
+        let pair = Operand::Tuple(vec![middle, high]);
+        let upper = self.value(
+            Inst::new(Opcode::Mov, Ty::B64, Vec::new(), vec![pair]),
+            Bank::B64,
+        );
+        let left = self.int(Opcode::Sub, V::Int(32), shift);
+        let upper = self.typed(Opcode::Shl, Ty::B64, [upper, left], Bank::B64);
+        let lower = self.typed(Opcode::Shr, Ty::U32, [low, shift], Bank::B32);
+        let lower = self.typed(Opcode::Cvt(Ty::U32), Ty::U64, [lower], Bank::B64);
+        let window = self.typed(Opcode::Or, Ty::B64, [upper, lower], Bank::B64);
+        let quadrant = self.typed(Opcode::Shr, Ty::U64, [window, V::Int(62)], Bank::B64);
+        let quadrant = self.typed(Opcode::Cvt(Ty::U64), Ty::U32, [quadrant], Bank::B32);
+        let fraction = self.typed(Opcode::Shl, Ty::B64, [window, V::Int(2)], Bank::B64);
+        let up = self.compare(Cmp::Lt, Ty::S64, fraction, 0_i64);
+        let next = self.int(Opcode::Add, quadrant, 1);
+        let quadrant = self.select(Ty::B32, next, quadrant, up);
+        let negated = self.typed(Opcode::Neg, Ty::S64, [fraction], Bank::B64);
+        let magnitude = self.select(Ty::B64, negated, fraction, up);
+        let wide = Inst::new(
+            Opcode::Cvt(Ty::U64),
+            Ty::F64,
+            Vec::new(),
+            vec![magnitude.into()],
+        )
+        .rounded(Round::Rn);
+        let wide = self.value(wide, Bank::B64);
+        let unit = self.typed(
+            Opcode::Mov,
+            Ty::B64,
+            [V::Int(HALF_PI_PER_UNIT.to_bits() as i64)],
+            Bank::B64,
+        );
+        let product = self
+            .0
+            .float_inst(Opcode::Mul, VTy::F64, vec![wide.into(), unit.into()]);
+        let radians = self.value(product, Bank::B64);
+        let narrow = Inst::new(
+            Opcode::Cvt(Ty::F64),
+            Ty::F32,
+            Vec::new(),
+            vec![radians.into()],
+        )
+        .rounded(Round::Rn);
+        let r = self.value(narrow, Bank::F32);
+        // The sign: a negative fraction, and a negative argument, which also negates the quadrant.
+        let r_neg = self.neg(r);
+        let r = self.select(Ty::F32, r_neg, r, up);
+        let negative = self.compare(Cmp::Lt, Ty::S32, bits, 0_i64);
+        let r_neg = self.neg(r);
+        let r = self.select(Ty::F32, r_neg, r, negative);
+        let q_neg = self.int(Opcode::Sub, V::Int(0), quadrant);
+        let q = self.select(Ty::B32, q_neg, quadrant, negative);
+        (r, q)
+    }
+
     /// `x^y` as `2^(y * log2|x|)`, with the logarithm and the product each held as a pair of floats whose sum is
     /// the value: the product reaches 150, and its error is the result's relative error.
     ///
@@ -610,7 +787,10 @@ impl Lowerer {
             let [x, y] = self.math_operands(op.text(), args, ty, ctx)?;
             return Ok(Some(Seq(self).pow(x, y).into()));
         }
-        if !matches!(op, O::Exp | O::Log | O::Tanh | O::Erf | O::Rsqrt) {
+        if !matches!(
+            op,
+            O::Exp | O::Log | O::Tanh | O::Erf | O::Sin | O::Cos | O::Rsqrt
+        ) {
             return Ok(None);
         }
         let [x] = self.math_operands(op.text(), args, ty, ctx)?;
@@ -621,6 +801,8 @@ impl Lowerer {
             O::Log => seq.log(x),
             O::Tanh => seq.tanh(x),
             O::Erf => seq.erf(x),
+            O::Sin => seq.sincos(x, false),
+            O::Cos => seq.sincos(x, true),
             // The reciprocal square root is the hardware's, as `rsqrtf` is.
             _ => seq.approx(Opcode::Rsqrt, [x], ftz),
         };
@@ -727,6 +909,26 @@ mod tests {
         for g in grid(-0.5, 0.5) {
             close(1.0 + g * poly(&EXP2, g), g.exp2(), g);
         }
+        let quarter = std::f64::consts::FRAC_PI_4;
+        for r in grid(-quarter, quarter) {
+            close(r + r * r * r * poly(&SIN, r * r), r.sin(), r);
+            close(
+                1.0 - r * r / 2.0 + r.powi(4) * poly(&COS, r * r),
+                r.cos(),
+                r,
+            );
+        }
+    }
+
+    /// The three parts of `pi/2` are the constant to well past three f32's precision, and the bits of `2/pi` are
+    /// its first 192 bits after the binary point.
+    #[test]
+    fn the_reduction_constants_are_pi() {
+        let sum: f64 = HALF_PI.iter().map(|part| f64::from(*part)).sum();
+        assert!((sum - std::f64::consts::FRAC_PI_2).abs() < 1e-16);
+        let leading = (TWO_OVER_PI_BITS[5] as u64) << 32 | TWO_OVER_PI_BITS[4] as u64;
+        let fraction = leading as f64 / 18446744073709551616.0;
+        assert!((fraction - std::f64::consts::FRAC_2_PI).abs() < 1e-16);
     }
 
     /// The two parts of `log2(e)` are the constant to twice an f32's precision.

@@ -538,10 +538,23 @@ impl Lowerer {
         match ty {
             VTy::F32 => Ok(Operand::f32(value as f32)),
             VTy::F16 | VTy::Bf16 => Ok(Operand::Int(i64::from(value::half_bits(ty, value)))),
-            // An integer state holds a seed its type holds: the bounded stand-in of an unbounded neutral element
-            // is a float's.
+            // An integer state holds a seed its type holds.
             VTy::I32 | VTy::U32 | VTy::I64 if int::holds_seed(ty, value) => {
                 Ok(Operand::Int(value as i64))
+            }
+            // The bounded stand-in of the unbounded neutral element of a maximum or a minimum is a float's: an
+            // integer state takes its type's own bound, the operation's neutral element at that type.
+            VTy::I32 | VTy::U32 | VTy::I64
+                if [Operation::Maximum, Operation::Minimum]
+                    .iter()
+                    .any(|op| op.seed() == Some(value)) =>
+            {
+                let (lowest, highest) = match ty {
+                    VTy::I32 => (i64::from(i32::MIN), i64::from(i32::MAX)),
+                    VTy::U32 => (0, i64::from(u32::MAX)),
+                    _ => (i64::MIN, i64::MAX),
+                };
+                Ok(Operand::Int(if value < 0.0 { lowest } else { highest }))
             }
             _ => Err(self.no_rule(format_args!("a state of {} seeded {value}", ty.text()))),
         }

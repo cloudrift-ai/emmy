@@ -242,7 +242,7 @@ between two conversions); there the compiler writes the two conversions itself.
 
 Only the functions kernels hold are written. Counted over the realization corpus and the repository goldens (5,930
 kernel bodies): `rsqrt` 8,739 calls, `exp` 7,510, `log` 551, `tanh` 72, `pow` 28 (one golden), `erf` 8. No kernel
-holds a sine or a cosine. `sqrt`, `divide` and `reciprocal` are one correctly rounded instruction each. `sigmoid`
+there holds a sine or a cosine, but a traced program can, as nvcc's build compiled it. `sqrt`, `divide` and `reciprocal` are one correctly rounded instruction each. `sigmoid`
 (1,186 calls) is a composite: a kernel pass writes it as its primitives. A composite that reaches the compiler as it
 was is compiled as its definition in the operations table, so `sigmoid` is `1 / (1 + exp(-x))` and `sigmoid_fast`
 the hardware's reciprocal of one plus the hardware's power of two.
@@ -271,6 +271,11 @@ ones.
 - **`erf`.** Below 1 an odd polynomial of degree 13. From 1 on, `1 - 2^G(|x|)` with the sign of `x`: `G` is a
   polynomial of degree 7 fit to `log2(erfc)`, with the error weighted by what it moves of the result.
 - **`rsqrt`** is the hardware instruction (`rsqrt.approx`), as CUDA's `rsqrtf` is.
+- **`sin`, `cos`.** The argument less its nearest multiple `q` of `pi/2`, then a polynomial of degree 9 for the sine
+  or 10 for the cosine of the remainder by `q mod 4`. Up to 105615 `q` forms in the low bits of a magic constant and
+  three f32 parts of `pi/2` come off, one fused multiply-add each. Past it the reduction is Payne and Hanek's: the
+  significand times 192 bits of `2/pi` in 32-bit words, the 64 bits at the units' place picked by the exponent, and
+  that fraction taken to radians in f64. An infinity or a NaN gives a NaN.
 - **`pow`** is `2^(y * log2|x|)`, with the logarithm and the product each held as a pair of floats whose sum is the
   value: the product reaches 150 and its error is the result's relative error. With a mantissa `m` from the square
   root of a half to the square root of two and `f = m - 1`, `log2(m)` is a series in `u = 2f / (2 + f)`. The quotient
@@ -295,6 +300,8 @@ rounded result, which is never the larger number. The instruction counts are mac
 | `erf` | 2 ulp | 1.166 ulp at 1.0339911 | 788 | 2 steps | 21, 28 |
 | `rsqrt` | 2 ulp | 1.515 ulp at 8.640916e37 | 10,159,988 | the same bits | 4, 4 |
 | `pow` | 4 ulp | 2.613 ulp at (1.3825005, 269.64386) | sampled | 3 steps | 90, 94 |
+| `sin` | 2 ulp | 1.496 ulp at 2.1696532e25 | 3,346,874 | not compared | not counted |
+| `cos` | 2 ulp | 1.513 ulp at 76194.49 | 3,295,012 | not compared | not counted |
 
 The pairs sampled for `pow`, 268 million of each kind: a mantissa at the fold of the logarithm's range under a
 product near the ends of the exponent's range, where the error is largest (2.613 ulp, 0.9% of the pairs over 1

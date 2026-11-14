@@ -80,6 +80,8 @@ FUNCTIONS = [
     Function("tanh", np.tanh, 2, 1.37, (0.5, 9.0109, 1.0126345)),
     Function("erf", _erf, 2, 1.17, (3.92, 4.0, 1.0339911)),
     Function("rsqrt", lambda x: 1 / np.sqrt(x), 2, 1.52, (2.0, 4.0, 1.19399e-38)),
+    Function("sin", np.sin, 2, 1.50, (math.pi / 4, math.pi / 2, 105615.0, 1e30, 3.4e38)),
+    Function("cos", np.cos, 2, 1.52, (math.pi / 4, math.pi / 2, 105615.0, 1e30, 3.4e38)),
 ]
 BY_NAME = {function.name: function for function in FUNCTIONS}
 
@@ -192,6 +194,8 @@ SPECIAL_VALUES = {
     "tanh": [(0.0, 0.0), (-0.0, -0.0), (INF, 1.0), (-INF, -1.0), (20.0, 1.0), (-20.0, -1.0), (1e-45, 1e-45), (-1e-45, -1e-45)],
     "erf": [(0.0, 0.0), (-0.0, -0.0), (INF, 1.0), (-INF, -1.0), (5.0, 1.0), (-5.0, -1.0)],
     "rsqrt": [(0.0, INF), (-0.0, -INF), (INF, 0.0), (1.0, 1.0), (4.0, 0.5), (-1.0, NAN), (-INF, NAN)],
+    "sin": [(0.0, 0.0), (-0.0, -0.0), (INF, NAN), (-INF, NAN), (1e-45, 1e-45), (-1e-45, -1e-45)],
+    "cos": [(0.0, 1.0), (-0.0, 1.0), (INF, NAN), (-INF, NAN), (1e-45, 1.0)],
 }
 
 

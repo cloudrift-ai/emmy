@@ -357,7 +357,7 @@ fn a_half_operand_computes_in_f32_and_an_unwritten_function_is_refused_by_name()
             .iter()
             .any(|line| line.starts_with("lg2.approx"))
     );
-    for function in ["sin", "cos", "log2", "expm1"] {
+    for function in ["log2", "expm1"] {
         let message = refusal(&kernel(function, 1), A_O);
         let expected = format!("no PTX rule for the operation {function} at f32");
         assert!(message.contains(&expected), "{message}");
