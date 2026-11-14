@@ -238,13 +238,13 @@ def resolve_golden_arg(args) -> None:
         from emmy.compiler.pipeline.search.golden.restamp import isolated_program  # noqa: PLC0415
 
         document = GoldenFile.load(golden_file)
-        found = [k for k in document.kernels if k.ref == kernel_name] or [k for k in document.kernels if kernel_name in k.ref]
+        found = [k for k in document.kernels if k.name == kernel_name] or [k for k in document.kernels if kernel_name in k.name]
         if len(found) != 1:
             logger.error(
-                "--kernel %r matches %d kernels.\nKernels: %s", kernel_name, len(found), ", ".join(sorted(k.ref for k in document.kernels))
+                "--kernel %r matches %d kernels.\nKernels: %s", kernel_name, len(found), ", ".join(sorted(k.name for k in document.kernels))
             )
             sys.exit(2)
-        args.kernel = found[0].ref  # the substring resolved to the one kernel; what reads the regime needs its name
+        args._golden_kernel = found[0].ref  # the name resolved to the one kernel; what reads the regime needs it
         if name:
             from emmy.compiler.pipeline.knob import values_equal  # noqa: PLC0415
             from emmy.compiler.pipeline.search.pins import hand_pins  # noqa: PLC0415
@@ -403,45 +403,21 @@ def selected_decisions(args) -> dict:
     return decisions
 
 
-def _route_pins(document, ref: str, preferred=()) -> dict[str, str]:
-    """Address each recorded decision on the kernel and step where its parent exists. A piece is addressed by the
-    token its fresh name carries (``place_token``): the stored path is minted again for the names, because a stored
-    name keeps the token of the parent that first minted the piece, and a restamp keeps it through a re-key. A kernel
-    two recorded routes mint takes its path through the ``preferred`` routes first."""
-    from emmy.compiler.context import Context  # noqa: PLC0415
-    from emmy.compiler.pipeline.passes.tile._cut import place_token  # noqa: PLC0415
-    from emmy.compiler.pipeline.search.golden.restamp import mint  # noqa: PLC0415
-
-    path = document.path_to(ref, preferred)
-    fresh = {path[0].parent: document.kernel(path[0].parent)} if path else {}
-    if len(path) > 1:
-        ctx = Context.from_target(tuple(document.compute_cap), gpu_name=document.gpu_name or None)
-        for decision, same, children in mint(fresh[path[0].parent], path, ctx, document=document):
-            if not same:
-                raise ValueError(f"recorded route on {decision.parent} no longer replays")
-            fresh.update(zip(decision.children, children, strict=True))
-    steps = {path[0].parent: 0} if path else {}
+def _route_pins(document, ref: int, preferred=()) -> dict[str, str]:
+    """The recorded decisions that mint the kernel ``ref`` points at, each as a pin on the kernel it was taken on: a
+    cut as ``PLACE@<parent>/<site>`` (``PLACE@<parent>`` for a seam spelled bare), a split as ``REDUCE@<parent>``. A
+    parent's name is computed from its stored body, the body a fresh lowering gives it, so each pin names the kernel
+    the compile meets. A kernel two recorded routes mint takes its path through the ``preferred`` routes first."""
     route = {}
-    for decision in path:
-        parent = fresh[decision.parent]
-        stage = steps[decision.parent]
+    for decision in document.path_to(ref, preferred):
+        parent = document.kernel(decision.parent).name
         for key, value in decision.arm.items():
-            key = str(key)
-            if key.partition("@")[0] == "PLACE":
-                scope = [key.partition("@")[2]] if "@" in key else []
-                if stage or not scope:
-                    # A bare hand pin cuts a kernel's whole remainder chain; a recorded root-most cut is one step of it.
-                    scope.insert(0, f"step.{stage}")
-                if (token := place_token(parent.name)) is not None:
-                    scope.insert(0, f"place_{token}")
-                key = "PLACE" + ("@" + "/".join(scope) if scope else "")
-            elif key.partition("@")[0] == "REDUCE":
-                token = place_token(parent.name)
-                key = "REDUCE@" + (f"place_{token}" if token is not None else "node_" + parent.name.removeprefix("k_"))
-            route[key] = str(value)
-        cut = any(str(key).partition("@")[0] == "PLACE" and value == "cut" for key, value in decision.arm.items())
-        for child in decision.children:
-            steps[child] = stage + 1 if cut and fresh.get(child, document.kernel(child)).name == parent.name else 0
+            family, _, site = str(key).partition("@")
+            if family == "PLACE":
+                key = f"PLACE@{parent}" + (f"/{site}" if site else "")
+            elif family == "REDUCE":
+                key = f"REDUCE@{parent}"
+            route[str(key)] = str(value)
     return route
 
 
@@ -740,7 +716,7 @@ def selected_regime(args) -> dict:
     rows = getattr(args, "_golden_rows", None)
     if rows is None and (program := getattr(args, "program", None)) is not None:
         rows = [row for (target, *_), group in document.target_rows().items() if document.kernel(target).traced == program for row in group]
-    elif rows is None and (kernel := getattr(args, "kernel", None)):
+    elif rows is None and (kernel := getattr(args, "_golden_kernel", None)) is not None:
         rows = [row for row in document.rows if row.kernel in document.kernel_set(kernel)]
     try:
         regime = golden_regime(document, rows)

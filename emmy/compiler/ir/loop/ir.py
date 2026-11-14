@@ -288,7 +288,6 @@ def _specialize_symbolic_axes(loop: LoopOp, input_arrays: dict) -> LoopOp:
 
     return LoopOp(
         body=_sub_body(loop.body),
-        name=loop.name,
         inputs=dict(loop.inputs),
         outputs=dict(loop.outputs),
         knobs=dict(loop.knobs),

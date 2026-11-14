@@ -73,7 +73,7 @@ class CpuBackend(Backend):
                     raise ValueError(f"{nid}: TileOp without a loop body")
                 schedule = node.op.schedule.kernel if node.op.schedule is not None else None
                 tiles[nid] = node.op
-                node.op = LoopOp(body=node.op.loop_body, name=node.op.name)
+                node.op = LoopOp(body=node.op.loop_body)
             if not isinstance(node.op, LoopOp):
                 continue
             try:

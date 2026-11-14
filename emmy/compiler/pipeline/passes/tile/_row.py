@@ -123,7 +123,7 @@ def io_shapes(op) -> dict:
     return {name: tensor.shape for name, tensor in {**op.inputs, **op.outputs}.items()}
 
 
-def lift_kernel(loop: LoopOp, *, name: str, shapes: Mapping | None = None) -> TileOp:
+def lift_kernel(loop: LoopOp, *, shapes: Mapping | None = None) -> TileOp:
     """One kernel formed from its program, a fused region and a piece alike: its free coordinates canonical over the
     buffer ``shapes`` (``loop``'s own io by default), the complete nest as one Fold tree, then, for a contraction
     that owns no free axis, its size-one row bound back so a tier has a row to tile. Every question reads ``shapes``,
@@ -132,14 +132,14 @@ def lift_kernel(loop: LoopOp, *, name: str, shapes: Mapping | None = None) -> Ti
     shapes = io_shapes(loop) if shapes is None else shapes
     if (body := canonical_free_axes(loop.body, shapes)) is not None:
         loop = replace(loop, body=body)
-    tile = lift_loop_op(loop, name=name)
+    tile = lift_loop_op(loop)
     # Independent output regions whose loops fusion paired by position re-form with the coordinates their shared
     # reads agree on; the swapped term is lowered and lifted again, so the grid comes out of the same lift.
     paired = _paired_by_loads(tile)
     if paired is not tile:
         body = paired.op.lower(bound=frozenset(), stores=paired.output_specs, axes=paired.axes)
         try:
-            again = lift_loop_op(replace(loop, body=body), name=name)
+            again = lift_loop_op(replace(loop, body=body))
             again.op.lower(bound=frozenset(), stores=again.output_specs, axes=again.axes)
         except ValueError:
             pass
@@ -149,7 +149,7 @@ def lift_kernel(loop: LoopOp, *, name: str, shapes: Mapping | None = None) -> Ti
     # output dimension Loop-IR normalization inlined; bound back, the term keeps every per-cell
     # choice it had and gains the fragment ones beside them.
     for position in row_candidates(loop, tile, shapes):
-        bound = lift_loop_op(loop, name=name, body=row_bound_body(loop, position, ROW_AXIS, shapes))
+        bound = lift_loop_op(loop, body=row_bound_body(loop, position, ROW_AXIS, shapes))
         if binds_the_row(bound, ROW_AXIS):
             return bound
     return _store_ordered(tile)
@@ -529,7 +529,7 @@ def reformed(piece: TileOp, shapes: Mapping) -> TileOp:
     try:
         # Through the LoopOp's normalization: that is where two reduce loops over one axis become
         # one loop with two accumulators, the twin the lift forms one term from.
-        formed = lift_kernel(LoopOp(body=body), name=piece.name, shapes=shapes)
+        formed = lift_kernel(LoopOp(body=body), shapes=shapes)
         if _orients_by_nest(formed):
             # The closed nest's grid order is ``lower``'s choice. Formed once, the piece is lowered
             # again inside its own grid loops: nothing sits ahead of that chain, so normalization
@@ -541,7 +541,7 @@ def reformed(piece: TileOp, shapes: Mapping) -> TileOp:
             for axis in reversed(formed.place.free):
                 again = Body((Loop(axis=axis, body=again),))
             try:
-                reoriented = lift_kernel(LoopOp(body=again), name=piece.name, shapes=shapes)
+                reoriented = lift_kernel(LoopOp(body=again), shapes=shapes)
                 reoriented.op.lower(bound=frozenset(), stores=reoriented.output_specs, axes=reoriented.axes)
             except ValueError:
                 pass
@@ -563,7 +563,7 @@ def reformed(piece: TileOp, shapes: Mapping) -> TileOp:
     place = replace(formed.place, free=grid)
     # The loop op the piece was formed from rides as its ``source``, as a fused kernel's does: the body a
     # kernel row stores and a freeze re-lowers is the one the lift was given.
-    loop = LoopOp(body=body, name=piece.name)
+    loop = LoopOp(body=body)
     return replace(
         piece, op=rewrite_twisted(formed.op, formed.axes), place=place, axes=formed.axes, output_specs=formed.output_specs, source=loop
     )

@@ -3,8 +3,8 @@
   {"inputs":["x"],"outputs":["cumsum"],"nodes":[{"id":"x","op":"input","outputs":[["x","f32",[9,67]]]},{"id":"cumsum","op":"tensor.scan","attrs":{"axis":-1},"inputs":["x"],"outputs":[["cumsum","f32",[9,67]]]}]}
  ],
  "kernels": [
-  {"loop_ir":{"inputs":["x"],"outputs":["cumsum"],"nodes":[{"id":"x","op":"input","outputs":[["x","f32",[9,67]]]},{"id":"cumsum","op":"loop","attrs":{"body":"for a0 in 0..9:\n    for a1 in 0..67:\n        in0 = load x[a0, a1]\n        acc0 <- add(acc0, in0) over a1\n        cumsum[a0, a1] = acc0","name":"k_cumsum_reduce"},"inputs":["x"],"outputs":[["cumsum","f32",[9,67]]]}]},"name":"k_cumsum_reduce","formed":true,"traced":0,"origins":["cumsum"]}
+  {"loop_ir":{"inputs":["x"],"outputs":["cumsum"],"nodes":[{"id":"x","op":"input","outputs":[["x","f32",[9,67]]]},{"id":"cumsum","op":"loop","attrs":{"body":"for a0 in 0..9:\n    for a1 in 0..67:\n        in0 = load x[a0, a1]\n        acc0 <- add(acc0, in0) over a1\n        cumsum[a0, a1] = acc0"},"inputs":["x"],"outputs":[["cumsum","f32",[9,67]]]}]},"formed":true,"traced":0,"origins":["cumsum"]}
  ],
  "rows": [
-  {"name":"k_cumsum_reduce","kernel":"k_cumsum_reduce","pins":{"FAST_MATH":false},"knobs":{"WORK":"t32x4","REDUCE":"coop","RASTER":""}}
+  {"name":"k_cumsum_reduce","kernel":0,"pins":{"FAST_MATH":false},"knobs":{"WORK":"t32x4","REDUCE":"coop","RASTER":""}}
  ]}

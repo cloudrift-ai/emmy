@@ -3,8 +3,8 @@
   {"inputs":["x"],"outputs":["softmax"],"nodes":[{"id":"x","op":"input","outputs":[["x","f32",[512,2048]]]},{"id":"softmax","op":"torch.softmax","inputs":["x"],"outputs":[["softmax","f32",[512,2048]]]}]}
  ],
  "kernels": [
-  {"loop_ir":{"inputs":["x"],"outputs":["softmax"],"nodes":[{"id":"x","op":"input","outputs":[["x","f32",[512,2048]]]},{"id":"softmax","op":"loop","attrs":{"body":"for a0 in 0..512:\n    for a1 in 0..2048:\n        in0 = load x[a0, a1]\n        acc0 <- maximum(acc0, in0) over a1\n    for a1 in 0..2048:\n        in1 = load x[a0, a1]\n        v0 = subtract(in1, acc0)\n        v1 = exp(v0)\n        acc1 <- add(acc1, v1) over a1\n    for a3 in 0..2048:\n        in2 = load x[a0, a3]\n        v2 = subtract(in2, acc0)\n        v3 = exp(v2)\n        v4 = divide(v3, acc1)\n        softmax[a0, a3] = v4","name":"k_softmax_eba8b4"},"inputs":["x"],"outputs":[["softmax","f32",[512,2048]]]}]},"name":"k_softmax_eba8b4","formed":true,"traced":0,"origins":["softmax"]}
+  {"loop_ir":{"inputs":["x"],"outputs":["softmax"],"nodes":[{"id":"x","op":"input","outputs":[["x","f32",[512,2048]]]},{"id":"softmax","op":"loop","attrs":{"body":"for a0 in 0..512:\n    for a1 in 0..2048:\n        in0 = load x[a0, a1]\n        acc0 <- maximum(acc0, in0) over a1\n    for a1 in 0..2048:\n        in1 = load x[a0, a1]\n        v0 = subtract(in1, acc0)\n        v1 = exp(v0)\n        acc1 <- add(acc1, v1) over a1\n    for a3 in 0..2048:\n        in2 = load x[a0, a3]\n        v2 = subtract(in2, acc0)\n        v3 = exp(v2)\n        v4 = divide(v3, acc1)\n        softmax[a0, a3] = v4"},"inputs":["x"],"outputs":[["softmax","f32",[512,2048]]]}]},"formed":true,"traced":0,"origins":["softmax"]}
  ],
  "rows": [
-  {"name":"k_softmax_557c32","kernel":"k_softmax_eba8b4","pins":{"FAST_MATH":false},"knobs":{"WORK":"t256","REDUCE":"coop","RASTER":""}}
+  {"name":"k_softmax_557c32","kernel":0,"pins":{"FAST_MATH":false},"knobs":{"WORK":"t256","REDUCE":"coop","RASTER":""}}
  ]}

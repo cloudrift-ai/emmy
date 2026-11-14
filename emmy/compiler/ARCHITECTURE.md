@@ -381,12 +381,8 @@ Boundary sentinels (`InputOp`/`ConstantOp`) never carry prov: `put` refuses to s
 outputs that land on one (the generic hint merge would otherwise copy prov onto e.g. the ConstantOp produced by the sm_90+
 weight-transpose fold, inflating `totals` so every kernel of that origin read partial coverage).
 
-Consumers: `provenance.name_for` (called from `pipeline/passes/loop/stamp/010_stamp_loop_names.py`, the
-loop-dialect stamp pass) names kernels after the ops they realize (`k_rms_norm` when full, `k_rms_norm_reduce` when partial)
-and stamps the name onto `LoopOp.name`; every subsequent dialect (`TileOp`/`KernelOp`/`CudaOp`) just copies it
-through. Multi-op labels sort dominant-first (descending piece count, lexical tie-break), so the name is independent
-of fusion merge order — the attention kernel is `k_sdpa_linear_reduce`, its QKV-prologue twin `k_linear_sdpa_reduce`.
-Layout/plumbing origins (`_WEAK_KINDS`: transpose / reshape / unsqueeze / cat / slice) label a kernel only when no
-strong op is present — RoPE plumbing fused into attention doesn't pollute the name, while a standalone copy kernel
-still reads `k_cat_…` instead of the node-id fallback. Compiler dumps retain provenance-selected frontend slices in
-memory for tune benchmarking; stable persistence of those programs belongs exclusively to golden files.
+Consumers: the golden trace inventory selects each target's `origins` — the ops a kernel computes whole — from its
+coverage (`golden.working`), and that is what a target's Torch reference slice is cut from. Provenance is a graph
+fact and never part of a kernel's name, which is computed from the kernel's exact identity
+(`pipeline/ARCHITECTURE.md`). Compiler dumps retain provenance-selected frontend slices in memory for tune
+benchmarking; stable persistence of those programs belongs exclusively to golden files.

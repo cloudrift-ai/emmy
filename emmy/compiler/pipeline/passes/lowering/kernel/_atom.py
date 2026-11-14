@@ -32,7 +32,7 @@ from itertools import count
 
 from emmy.compiler.backend.cuda.dtype import cuda_name
 from emmy.compiler.dim import Dim
-from emmy.compiler.dtype import F32
+from emmy.compiler.dtype import F32, INTEGER_NAMES
 from emmy.compiler.ir.address import BYTE_SLAB_PAD, clamp_bound, clamp_to, gmem_axis_step, unclamped
 from emmy.compiler.ir.atom import AtomKind, wide_accumulate
 from emmy.compiler.ir.axis import Axis
@@ -960,6 +960,16 @@ def _stat_slab(name: str) -> str:
     return f"_a_stat_{name}"
 
 
+def _stat_read(name: str, row: Expression, dtypes: dict) -> Load:
+    """The fill's read of statistic ``name`` back from its row (:func:`_stat_slab`), typed where it is created: an
+    integer row reads back as its integer — a shift amount or a modulus the cell's integer arithmetic reads, which the
+    float default would turn into float arithmetic with no spelling — and a float row at the cell's f32."""
+    dtype = dtypes.get(name)
+    return Load(
+        names=(name,), input=_stat_slab(name), index=(row,), dtype=dtype if dtype is not None and dtype.name in INTEGER_NAMES else None
+    )
+
+
 def _k_masked(stmts: list[Statement], value: str, k: Expression, k_ext: Expression | None) -> tuple[list[Statement], str]:
     """The smem compute fill's **K MASK** — the clamp-to-identity discipline the copy transports
     already follow, applied to the contraction axis.
@@ -1031,6 +1041,8 @@ def _a_slab_operand(
     Returns ``(operand, copied, prologue)``."""
     pro, cell, stats, chunk = seam
     chunk_pro, chunk_stats, _block = chunk or ((), (), 0)
+    stat_dtypes = cone_stat_dtypes(pro, stats, inputs)
+    chunk_stat_dtypes = cone_stat_dtypes(chunk_pro, chunk_stats, inputs)
     m_name, k_name = mn[0].axis.name, k_axis.name
     a_slab = c.operands[0].as_slab()
     if a_slab is not None:
@@ -1070,8 +1082,8 @@ def _a_slab_operand(
         # σ is hygienic (:meth:`Statement.substitute`): a cone statistic re-binding the contraction axis
         # name (attention's k-norm inside the K cone) keeps its own iteration var.
         sigma = Sigma({m_name: m_coord(row), k_name: k_coord(k)})
-        reads = Body(cell).ssa_uses - Body(cell).definitions.keys()
-        stmts: list[Statement] = [Load(names=(nm,), input=_stat_slab(nm), index=(row,)) for nm in (*stats, *chunk_stats) if nm in reads]
+        reads = Body(cell).ssa_uses - Body(cell).defined
+        stmts: list[Statement] = [_stat_read(nm, row, {**stat_dtypes, **chunk_stat_dtypes}) for nm in (*stats, *chunk_stats) if nm in reads]
         stmts += [s.substitute(sigma) for s in cell]
         return _k_masked(stmts, c.operands[0].exposes[-1], k, k_ext)
 
@@ -1087,18 +1099,18 @@ def _a_slab_operand(
             row_body=row_body,
             cta=cta,
             stat=cone_stat(c.operands[0], k_name, axes),
-            dtypes={nm: cuda_name(dt) for nm, dt in cone_stat_dtypes(pro, stats, inputs).items()},
+            dtypes={nm: cuda_name(dt) for nm, dt in stat_dtypes.items()},
         )
     before = None
     if chunk_stats:
-        chunk_dtypes = {nm: cuda_name(dt) for nm, dt in cone_stat_dtypes(chunk_pro, chunk_stats, inputs).items()}
+        chunk_dtypes = {nm: cuda_name(dt) for nm, dt in chunk_stat_dtypes.items()}
         prologue += stat_rows(chunk_stats, _stat_slab, row_axis, dtypes=chunk_dtypes)
-        reads = [nm for nm in stats if nm in Body(chunk_pro).ssa_uses - Body(chunk_pro).definitions.keys()]
+        reads = [nm for nm in stats if nm in Body(chunk_pro).ssa_uses - Body(chunk_pro).defined]
         stat = next(edge for edge in c.operands[0].operands if set(chunk_stats) & set(edge.exposes))
 
         def before(k0):
             sigma = Sigma({m_name: m_coord(Var(row_axis.name)), k_name: k_coord(k0)})
-            row_body = [Load(names=(nm,), input=_stat_slab(nm), index=(Var(row_axis.name),)) for nm in reads]
+            row_body = [_stat_read(nm, Var(row_axis.name), stat_dtypes) for nm in reads]
             row_body += [s.substitute(sigma) for s in chunk_pro]
             return sync_stat_fill(
                 stats=chunk_stats,

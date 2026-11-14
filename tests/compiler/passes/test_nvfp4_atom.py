@@ -96,9 +96,9 @@ def test_a_kernel_carrying_the_block_scaled_mma_asks_for_the_arch_suffixed_targe
     scaled = MmaSyncPtx(c_frag="c", a_frag="a", b_frag="b", shape=(16, 8, 64), ab_dtype="e2m1", sfa_frag="sa", sfb_frag="sb")
     plain = MmaSyncPtx(c_frag="c", a_frag="a", b_frag="b", shape=(16, 8, 16))
     tma = TmaDescriptor(name="desc", src_buf="x", src_shape=(16, 16), box_extents=(16, 16))
-    assert needs_arch_isa(KernelOp(body=Body((scaled,)), name="k"))
-    assert needs_arch_isa(KernelOp(body=Body((tma,)), name="k"))
-    assert not needs_arch_isa(KernelOp(body=Body((plain,)), name="k"))
+    assert needs_arch_isa(KernelOp(body=Body((scaled,))))
+    assert needs_arch_isa(KernelOp(body=Body((tma,))))
+    assert not needs_arch_isa(KernelOp(body=Body((plain,))))
 
 
 # The driver around the prelude under test: one warp, one atom cell, gmem-direct operands. A

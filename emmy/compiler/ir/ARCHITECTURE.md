@@ -69,7 +69,7 @@ schedule, materialization, output specifications, and knobs belong to `TileOp`, 
 `ir/pure/fold.py` and is not a `Statement`.
 
 **Lambda construction binds every read and orders definitions before uses.** Both checks use the scope-aware
-`free_names` analysis, including coordinates in predicates and indices. `Lambda.closing` appends unbound reads as
+`Body.free` reading, including coordinates in predicates and indices. `Lambda.closing` appends unbound reads as
 parameters; direct construction rejects them. Canonical ordering uses the same dependencies, so a predicate cannot
 move before its definition. The narrower `Body.ssa_uses` query follows statement `deps()` and does not include every
 expression read.
@@ -239,10 +239,10 @@ lightweight value objects (`ElementwiseImpl`, not `ElementwiseOp`) so the surrou
 `ir/stmt/` is the vocabulary all three IRs share, so the rest of the compiler uses it through one package and nothing
 else: no submodule path, no private name. The package exports the statement types, `Body` and `OutputSpec`,
 `normalize_body` and `canonicalize_identity`, a few functions over statements (`free_names`, `exposed_defines`,
-`rename_free`, `mask_select_predicate`, `ordering_constraints`, `dtype_promote`, `reduce_strength`, `check_types`,
-`check_input`),
-the text form (`pretty_body`, `parse_body`), four normalization steps a caller may run on its own (`one_operation_per_definition`,
-`canonical_values`, `simplify_body`, `prepare_body`), the two statement types fusion's body assembly in `ir/loop/`
+`mask_select_predicate`, `ordering_constraints`, `dtype_promote`, `reduce_strength`, `check_types`, `check_input`),
+the text form (`pretty_body`, `parse_body`), three normalization steps a caller may run on its own
+(`one_operation_per_definition`, `simplify_body`, `prepare_body`), the lambda normalization (`normalize_lambda_body`),
+the two statement types fusion's body assembly in `ir/loop/`
 builds a region with (`Call`, `Subroutine`), and the names of a statement type's fields (`fields_of`). The statement
 types, `Body`, the protocol, the text, the value numbering and the normalization are implemented in Rust — the
 `emmy-ir` crate, reached through the `emmy.emmy_ir` extension (`crates/emmy-ir/ARCHITECTURE.md`) — and the package is
@@ -258,7 +258,7 @@ it, and nothing else:
 
 | Group | Members |
 | --- | --- |
-| Traits | `pure`, `deps_deep`, `has_side_effects` |
+| Traits | `pure` |
 | Reads and writes | `deps`, `defines`, `external_reads`, `external_writes`, `local_decls`, `bound_axes`, `binds_axes` |
 | Structure | `nested` with `with_bodies`; `expressions` with `map_expressions` |
 | Rebuilding | `_rewrite` (behind `rewrite`, `rename` and `substitute`), `rename_buffers`, `replace` |
@@ -308,9 +308,15 @@ normal forms, the identities) are keyed by the body's exact form, which reads th
 number, never by equality or by text.
 Callers use its walks (`iter`, `map`, `fold`, `iter_of_type`,
 `loads`, `writes`, `carries`, `accums`, `loops`), its def-use readings (`definitions`, `ssa_uses`, `axis_names`,
-`axis_dependencies`, `backward_cone`), its orders (`topological_order`, `coalesce`), `rename_buffers`, and its
-identity (`identity`, `structural_key`). The names a body defines are the keys of `definitions`; the names one
-statement makes visible are `exposed_defines`.
+`axis_dependencies`, `backward_cone`, `pruned`, `defined`, `free`), its buffers (`buffers`), its orders
+(`topological_order`, `coalesce`), `rename_buffers`, and its identity (`identity`, `structural_key`).
+
+A name question is asked of a scope, so a body answers it once and keeps the answer: `defined` is every name a
+statement of it defines at any depth, `free` every name it reads from outside — SSA reads and coordinates — less what
+it defines or binds, `buffers` the external buffers it reads and writes, kernel-local declarations left out, and
+`pruned(roots)` the body cut to what the roots need, nested bodies cut too. A name the body defines anywhere is not
+free, wherever it is read. One statement's answers, `free_names` and `exposed_defines`, are built from its nested
+bodies' kept answers, so asking costs the statement's own fields, not a walk of its subtree.
 
 **A body has one text**, which is also its wire form. `str(body)` is it and `parse_body` reads it back to an equal
 body, so the text says
@@ -509,20 +515,20 @@ there is no type to dispatch on and no second place for a fact to live.
 
 `Fold.lower(bound, stores)` flattens the term to the loop nest: a plain loop for every free coordinate the caller left
 unbound, outermost the one the most terms share, the reduce loop of each term innermost, every term placed at the
-shallowest scope binding its free coordinates, and each boundary store right after the term defining its value. A value
-of the tree a term or a store reads by name, such as the expert a gathered row belongs to, counts as the coordinates of
-the term that defines it, since no loop binds a value. A term's coordinates there are those its own step reads, directly
-or through the operands it reads: an operand it only carries to a store — a multi-output root's per-page and per-slot
-results beside a count — takes its own loop beside the others, never one nested in another's. Loops carry NO algebra and
-no annotation, so the derived nest depends only on what is stored, which is what makes every identity of the term a
-digest of its lowered body — there is no separate term hasher. The `TileOp`'s body identity is the canonical digest of
-the nest `lower()` derives (the body is the term's normal form); the variant key (`identity_key(with_io=True,
-with_knobs=True)`) folds the schedule-free body identity with the knobs; and the deploy join key (the deploy identity
-(`identity_key(with_io=True)`), over `TileOp.loop_body`) types the roles the body reads its buffers through, so term
-re-spellings and cluster-sibling ops that lower alike share schedule evidence. A read walk STOPS at a statement whose
-**`deps_deep` trait** is set (a `Statement`-protocol member beside `pure`, conservative `False` default; `Call` opts
-in): its `deps()` already answers for the whole subtree, scope-correctly, so the walk does not re-walk `nested()`,
-whose flat namespace cannot see the subroutine's own params.
+shallowest scope binding its free coordinates, and each boundary store right after the term defining its value. A
+value of the tree a term or a store reads by name, such as the expert a gathered row belongs to, counts as the
+coordinates of the term that defines it, since no loop binds a value. A term's coordinates there are those its own
+step reads, directly or through the operands it reads: an operand it only carries to a store — a multi-output root's
+per-page and per-slot results beside a count — takes its own loop beside the others, never one nested in another's.
+Loops carry NO algebra and no annotation, so the derived nest depends only on what is stored, which is what makes
+every identity of the term a digest of its lowered body — there is no separate term hasher. The `TileOp`'s body
+identity is the canonical digest of the nest `lower()` derives (the body is the term's normal form); the variant key
+(`identity_key(with_io=True, with_knobs=True)`) folds the schedule-free body identity with the knobs; and the deploy
+join key (the deploy identity (`identity_key(with_io=True)`), over `TileOp.loop_body`) types the roles the body reads
+its buffers through, so term re-spellings and cluster-sibling ops that lower alike share schedule evidence. A read
+walk STOPS at a statement whose **`deps_deep` flag** is set (a protocol flag the crate keeps beside `pure`, unset by
+default; `Call` sets it): its `deps()` already answers for the whole subtree, scope-correctly, so the walk does not
+re-walk `nested()`, whose flat namespace cannot see the subroutine's own params.
 
 A reduce is a contraction not by "two loads" but by the genuine algebra — the lift ⊗
 **distributes over** the fold ⊕ (`multiply` over `add`; *not* `add` over `add`, a sum of two
@@ -728,7 +734,7 @@ its reads, while `Assign` / `Load` / `Select` names bound inside a `Loop` / `Con
 two are safe together only for a whole-subtree renumbering (`rename_ssa_sequential`). When the rename instead comes
 from *dropping* a binding — load dedup, CSE — an inner scope that merely re-uses the dropped name's spelling is a
 different variable, and renaming it both redeclares the survivor inside the scope and rewires the inner arithmetic to
-the outer value. `passes.rename_free(stmt, alias)` is the hygienic form: it prunes the alias of whatever each child
+the outer value. The crate's `rename_free(stmt, alias)` is the hygienic form: it prunes the alias of whatever each child
 scope re-binds before descending. It rewrites the wrapper with empty child bodies, then visits each child once;
 rewriting the full subtree first would repeat and discard work at every enclosing level.
 If an alias's destination is shadowed, the local binding is renamed before substitution to prevent capture.
@@ -841,16 +847,17 @@ from that CSE form. Subroutine boundaries never limit fusion.
   behind it, and a binding rebound later represents no other value. Division keeps its own rounding even when its
   denominator is invariant; reciprocal multiplication is not a normalization. Names are distinct across scopes when it
   runs, as the sequential renaming leaves them.
-- `merge_congruent_states` — two carried states whose seeds agree and whose updates compute one value once the
-  states are assumed equal hold one value at every step, and are one state. `congruent_states` in the numbering finds
-  them: candidates are accumulators updated directly in a seeded loop and carried states, each defined by one
-  statement; groups start from the update's statement type, operation, dtype and scope, and split by their members'
-  update numbers, every grouped state numbered by its group, until no group splits (optimistic value numbering; groups
-  never come from names, and a body with no two candidates in one scope is not numbered again). Placement numbers the
-  group alike, so it merges the cones the members compute: the twin pivots and denominators of two online softmaxes
-  over one row become one pair. A member then goes when nothing reads it in its own scope but its update (a carried
-  state, read through `pre` the step before wherever it sits, always goes), its reads after the loop reading the
-  group's first member. Two seeded reductions of one value, each read only after the loop, are the simplest case.
+- `merge_congruent_states` — two carried states whose seeds agree and whose updates compute one value once the states
+  are assumed equal hold one value at every step, and are one state. `congruent_states` in the numbering finds them:
+  candidates are accumulators updated directly in a seeded loop and carried states, each defined by one statement;
+  groups start from the update's statement type, operation, dtype and scope, and split by their members' update
+  numbers, every grouped state numbered by its group, until no group splits (optimistic value numbering; groups never
+  come from names, and a body with no two candidates in one scope is not numbered again). Placement numbers the group
+  alike (it takes the numbering that found the groups stable), so it merges the cones the members compute: the twin
+  pivots and denominators of two online softmaxes over one row become one pair. A member then goes when nothing reads
+  it in its own scope but its update (a carried state, read through `pre` the step before wherever it sits, always
+  goes), its reads after the loop reading the group's first member. Two seeded reductions of one value, each read only
+  after the loop, are the simplest case.
 - `rename_ssa_sequential` — `Load` names become `in0, in1, …`, accumulator state becomes `acc0, …`, and
   every other definition becomes `v0, v1, …`, in lexical definition order. Names stay globally unique while each
   nested body tracks its own binders, so sibling scopes may reuse the same source spelling without collapsing. Scalar

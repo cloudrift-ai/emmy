@@ -64,7 +64,7 @@ Read the [compiler guide](emmy/compiler/ARCHITECTURE.md) or the
 
 **Readable Schedule**: `emmy compile -c "nn.RMSNorm(2048)(torch.randn(1,32,2048))" --ir tile`
 ```
-kernel k_rms_norm_reduce  inputs: rms_norm_mean_count, rms_norm_eps, x, p_weight  outputs: rms_norm
+kernel k_b70c36714207  inputs: rms_norm_mean_count, rms_norm_eps, x, p_weight  outputs: rms_norm
     in0 = load rms_norm_mean_count[0]
     in1 = load rms_norm_eps[0]
     Tile(axes=(a0:256=THREAD, a1:32=BLOCK)):
@@ -89,7 +89,7 @@ kernel k_rms_norm_reduce  inputs: rms_norm_mean_count, rms_norm_eps, x, p_weight
 
 ```c
 extern "C" __global__
-__launch_bounds__(256) void k_rms_norm_reduce(const float* x, const float* p_weight, float* rms_norm) {
+__launch_bounds__(256) void k_b70c36714207(const float* buf0, const float* buf2, float* buf1) {
     float in0 = 2048.0f;
     float in1 = 1e-06f;
     {
@@ -102,7 +102,7 @@ __launch_bounds__(256) void k_rms_norm_reduce(const float* x, const float* p_wei
             {
                 unsigned int _smem_addr = __cvta_generic_to_shared(&x_smem[x_smem_flat]);
                 asm volatile("cp.async.ca.shared.global [%0], [%1], 4;\n"
-                             :: "r"(_smem_addr), "l"(&x[a1 * 2048 + x_smem_flat])
+                             :: "r"(_smem_addr), "l"(&buf0[a1 * 2048 + x_smem_flat])
                              : "memory");
             }
         }
@@ -114,7 +114,7 @@ __launch_bounds__(256) void k_rms_norm_reduce(const float* x, const float* p_wei
             {
                 unsigned int _smem_addr = __cvta_generic_to_shared(&p_weight_smem[p_weight_smem_flat]);
                 asm volatile("cp.async.ca.shared.global [%0], [%1], 4;\n"
-                             :: "r"(_smem_addr), "l"(&p_weight[p_weight_smem_flat])
+                             :: "r"(_smem_addr), "l"(&buf2[p_weight_smem_flat])
                              : "memory");
             }
         }
@@ -145,7 +145,7 @@ __launch_bounds__(256) void k_rms_norm_reduce(const float* x, const float* p_wei
             float in4 = p_weight_smem[a3];
             float v4 = in3 * v3;
             float v5 = v4 * in4;
-            rms_norm[a1 * 2048 + a3] = v5;
+            buf1[a1 * 2048 + a3] = v5;
         }
     }
 }

@@ -158,11 +158,10 @@ def kernel_key(cuda_op) -> tuple | None:
     return None if identity is None else (tile, identity, kernel_bindings(tile))
 
 
-def kernel_row(tile, name: str) -> KernelDef:
-    """The ``kernel`` row of a tile kernel: its wire, the C name it was rendered under and whether the wire is
-    the body it was formed from, keyed by the tile's own exact identity — which lifting the wire again computes
-    too (``KernelDef.exact_identity``)."""
-    row = KernelDef(loop_ir=kernel_wire(tile), name=name, formed=formed_from(tile) is not None)
+def kernel_row(tile) -> KernelDef:
+    """The ``kernel`` row of a tile kernel: its wire and whether the wire is the body it was formed from, keyed by
+    the tile's own exact identity — which lifting the wire again computes too (``KernelDef.exact_identity``)."""
+    row = KernelDef(loop_ir=kernel_wire(tile), formed=formed_from(tile) is not None)
     return row.keyed(tile.identity_key(structural=False, with_io=True))
 
 
@@ -177,7 +176,6 @@ def persist_kernel_perf(
     error: str | None = None,
     knobs: dict | None = None,
     source: str = "measured",
-    name: str | None = None,
     sizes: dict[str, int] | None = None,
 ) -> bool:
     """Persist one measured kernel as deploy evidence: its ``kernel`` row (the definition the
@@ -186,16 +184,15 @@ def persist_kernel_perf(
     pinned rows and the golden import both come here, so a replayed golden and a recorded pick are
     indistinguishable to the evidence pick. The row is the op's knobs — the decisions taken on it —
     unless ``knobs`` says otherwise — a golden's recorded schedule row, stored as written rather
-    than as the import's lowering realized it; ``source`` names where the measurement came from; ``name`` the name
-    the kernel was built under, the CUDA op's kernel name unless given; ``sizes`` what the bench bound the symbolic
-    dims to, their hints unless given. Returns whether a row was written (a kernel no tile stands behind persists
+    than as the import's lowering realized it; ``source`` names where the measurement came from; ``sizes`` what the
+    bench bound the symbolic dims to, their hints unless given. Returns whether a row was written (a kernel no tile stands behind persists
     nothing)."""
     key = kernel_key(cuda_op)
     if key is None:
         return False
     tile, identity, bindings = key
     bindings = {var: (sizes or {}).get(var, size) for var, size in bindings.items()}
-    db.record_kernel(kernel_row(tile, name or cuda_op.kernel_name))
+    db.record_kernel(kernel_row(tile))
     if knobs is None:
         knobs = getattr(cuda_op, "knobs", None) or {}
     db.record_perf(
@@ -239,7 +236,9 @@ def persist_bench_failure(db, ctx, cuda_nodes, exc, fail_us: float) -> list:
     so such a slice is spent for this session and benched again, at the run budget, by the next."""
     named = _NAMED_KERNEL.search(str(exc))
     if named is not None:
-        blamed = [n for n in cuda_nodes if getattr(n.op, "kernel_name", "") == named.group(1)]
+        # The watchdog names the launch symbol: the kernel's name, suffixed where the plan launches other code under it.
+        symbol = named.group(1)
+        blamed = [n for n in cuda_nodes if symbol == n.op.kernel_name or symbol.startswith(f"{n.op.kernel_name}_")]
     else:
         blamed = list(cuda_nodes) if len(cuda_nodes) == 1 else []
     stats = point_stats(fail_us)

@@ -1,19 +1,20 @@
 """Session-scoped reuse of fully-lowered kernels — fetch instead of re-lowering.
 
-Greedy lowering of one kernel is a function: the fused Loop-IR program in, the lowered
-``KernelOp`` out (the schedule pick baked in). This cache memoizes that function at its natural
+Greedy lowering of one kernel is a function: the tile its kernel-set decisions start from in, the
+lowered ``KernelOp`` out (the cut and schedule picks baked in). This cache memoizes that function at its natural
 boundary, so a compile that meets a kernel it has lowered before — the same computation under
 different buffer names, in another program of the same session — splices the finished artifact
 instead of enumerating, deciding and materializing again.
 
 The boundary is deliberately the END OF THE KERNEL PASSES, before ``lowering/cuda``: the cuda
 pass group holds the per-graph negotiations (``005_delegate_zero_init`` injects a
-``ZeroPrologue`` into a *neighbor* kernel; ``010`` renders per-graph buffer names), so artifacts
+``ZeroPrologue`` into a *neighbor* kernel; ``010`` renders the launch), so artifacts
 above the boundary stay a pure function of the kernel while the negotiations run fresh on every
 assembled graph. Entries store the ``KernelOp`` with its buffers renamed to ROLE slots
 (``Statement.rename_buffers`` over ``Op.canonical_buffers``); a hit renames the slots to the buffers
 filling the same roles on the consumer — sound because the key types every role, whatever order
-either side declared its io in.
+either side declared its io in. The consumer's tile becomes the hit's ``source``, so the hit's name and render are
+a fresh lowering's.
 
 The key is the exact variant key (``identity_key(structural=False, with_io=True,
 with_knobs=True)`` — an artifact is exact code, never a cluster representative) folded with the
@@ -25,9 +26,9 @@ view and no second persistent validity contract exists. Greedy-only: the tune se
 field (``prepare_ctx``) because an artifact bakes a conclusion and exploration must not inherit
 conclusions.
 
-A kernel whose lowering produced SEVERAL kernels (a cut, a cross-CTA split) poisons its key:
-the artifact of a multi-kernel origin is a graph fragment, deliberately out of scope until the
-single-kernel path has earned it.
+A tile whose lowering produced SEVERAL kernels (a cross-CTA split) poisons its key: the artifact of a multi-kernel
+origin is a graph fragment, deliberately out of scope. A cut is not one: each piece it leaves is a tile of its own,
+cached and fetched as one kernel.
 """
 
 from __future__ import annotations
@@ -63,8 +64,25 @@ class KernelCache:
         self.misses = 0
 
     @staticmethod
+    def origin_of(kernel):
+        """The tile ``kernel``'s kernel-set decisions started from — the one the replay rule meets ahead of the cut:
+        the oldest unscheduled tile on its rewrite chain of the kernel's own identity (a decision to keep the kernel
+        whole adds knobs and keeps the identity; the twisted rewrite before it changes the identity). ``None`` for a
+        kernel no tile stands behind."""
+        from emmy.compiler.ir.tile import TileOp  # noqa: PLC0415
+        from emmy.compiler.wire import kernel_identity  # noqa: PLC0415
+
+        identity = kernel_identity(kernel)
+        tiles = [
+            op
+            for op in kernel.source_chain()
+            if isinstance(op, TileOp) and op.schedule is None and op.identity_key(structural=False, with_io=True) == identity
+        ]
+        return tiles[-1] if identity is not None and tiles else None
+
+    @staticmethod
     def key_for(op) -> str | None:
-        """The cache key of one fused Loop-IR kernel — ``None`` when the op offers no identity.
+        """The cache key of one kernel's origin tile (:meth:`origin_of`) — ``None`` when the op offers no identity.
         The ONE spelling of the composition (consult and harvest both call this)."""
         from emmy.compiler.pipeline.knob import schedule_pin_fingerprint  # noqa: PLC0415
 
@@ -77,7 +95,7 @@ class KernelCache:
 
     def fetch(self, key: str, target) -> object | None:
         """The cached lowering rebound to ``target``'s buffer names, or ``None`` (miss /
-        poisoned). ``target`` is the consuming fused Loop-IR op; its buffers fill the stored
+        poisoned). ``target`` is the consuming tile; its buffers fill the stored
         slots by role, which the key types."""
         entry = self._store.get(key)
         if entry is None or entry is POISON:

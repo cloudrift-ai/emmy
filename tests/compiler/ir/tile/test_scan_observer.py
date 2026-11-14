@@ -182,7 +182,7 @@ def test_lifted_scan_kernel_shape() -> None:
     from emmy.compiler.ir.loop import LoopOp
 
     op = LoopOp(body=parse_body("for m in 0..4:\n" + indent(_scan_text(), "    ")))
-    tile = lift_loop_op(op, name="k_scan")
+    tile = lift_loop_op(op)
     # Canonical renumbering renames the accumulator; the observed name follows in lockstep.
     (observed,) = observed_result_names(tile.op)
     assert observed.endswith("__obs")

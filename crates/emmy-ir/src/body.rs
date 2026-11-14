@@ -82,9 +82,13 @@ pub struct BodyData {
     definitions: OnceLock<HashMap<Name, StmtRef>>,
     axis_names: OnceLock<HashSet<Name>>,
     ssa_uses: OnceLock<HashSet<Name>>,
+    defined: OnceLock<Vec<Name>>,
+    free: OnceLock<Vec<Name>>,
+    buffers: OnceLock<(Vec<Name>, Vec<Name>)>,
     by_type: Mutex<HashMap<Vec<StatementType>, Vec<StmtRef>>>,
     exact: OnceLock<u64>,
     normalized: OnceLock<Normalized>,
+    sorted: OnceLock<()>,
 }
 
 /// What a body knows of its normal form once it was taken: that it is its own, or which body it is. Never the body's
@@ -235,9 +239,13 @@ impl Body {
             definitions: OnceLock::new(),
             axis_names: OnceLock::new(),
             ssa_uses: OnceLock::new(),
+            defined: OnceLock::new(),
+            free: OnceLock::new(),
+            buffers: OnceLock::new(),
             by_type: Mutex::new(HashMap::new()),
             exact: OnceLock::new(),
             normalized: OnceLock::new(),
+            sorted: OnceLock::new(),
         }))
     }
 
@@ -284,6 +292,18 @@ impl Body {
     /// Record that this body is its own normal form.
     pub(crate) fn mark_normal(&self) {
         let _ = self.0.normalized.set(Normalized::Itself);
+    }
+
+    /// Whether every scope of this body is known to be in dependency order, so the stable dependency sort
+    /// (`order::topological_sort`) leaves it as it is.
+    pub(crate) fn is_sorted(&self) -> bool {
+        self.0.sorted.get().is_some()
+    }
+
+    /// Record that every scope of this body is in dependency order: the dependency sort's own result, or an order
+    /// that keeps every dependency and adds effects on top.
+    pub(crate) fn mark_sorted(&self) {
+        let _ = self.0.sorted.set(());
     }
 
     pub fn from_statements(stmts: impl IntoIterator<Item = Statement>) -> Body {
@@ -572,6 +592,91 @@ impl Body {
         })
     }
 
+    /// Every name a statement of this body defines, at any depth, each once, pre-order.
+    pub fn defined(&self) -> &[Name] {
+        self.0
+            .defined
+            .get_or_init(|| unique(self.stmts().iter().flat_map(|stmt| exposed_defines(stmt))))
+    }
+
+    /// Every name this body reads from the scope around it — SSA reads and index coordinates — less what it defines
+    /// or binds, each once, in first-read order. A name the body defines anywhere is not free, wherever it is read.
+    pub fn free(&self) -> &[Name] {
+        self.0.free.get_or_init(|| {
+            let defined: HashSet<Name> = self.defined().iter().copied().collect();
+            unique(
+                self.stmts()
+                    .iter()
+                    .flat_map(|stmt| free_names(stmt))
+                    .filter(|name| !defined.contains(name)),
+            )
+        })
+    }
+
+    /// The external buffers this body reads and writes, at any depth, each once in first-use order, less the buffers
+    /// a statement of it declares kernel-local.
+    pub fn buffers(&self) -> &(Vec<Name>, Vec<Name>) {
+        self.0.buffers.get_or_init(|| {
+            let stmts = self.iter_stmts();
+            let local: HashSet<Name> = stmts.iter().flat_map(|stmt| stmt.local_decls()).collect();
+            let reads = unique(
+                stmts
+                    .iter()
+                    .flat_map(|stmt| stmt.external_reads())
+                    .filter(|name| !local.contains(name)),
+            );
+            let writes = unique(
+                stmts
+                    .iter()
+                    .flat_map(|stmt| stmt.external_writes())
+                    .filter(|name| !local.contains(name)),
+            );
+            (reads, writes)
+        })
+    }
+
+    /// This body cut to what `roots` need: the statements a root reads through, in order, a block kept with what its
+    /// own bodies keep, and a statement that writes a buffer always kept. Repeated until nothing more is needed, since
+    /// a carried state may be read ahead of its update.
+    pub fn pruned(&self, roots: &[Name]) -> Result<Body> {
+        let mut needed: HashSet<Name> = roots.iter().copied().collect();
+        loop {
+            let before = needed.len();
+            let mut kept: Vec<Arc<Statement>> = Vec::new();
+            for stmt in self.stmts().iter().rev() {
+                let nested = stmt.nested();
+                let stmt = if nested.is_empty() {
+                    let wanted = stmt.defines().iter().any(|name| needed.contains(name))
+                        || !stmt.external_writes().is_empty();
+                    if !wanted {
+                        continue;
+                    }
+                    stmt.clone()
+                } else {
+                    let roots: Vec<Name> = needed.iter().copied().collect();
+                    let inner = nested
+                        .iter()
+                        .map(|child| child.pruned(&roots))
+                        .collect::<Result<Vec<Body>>>()?;
+                    if inner.iter().all(Body::is_empty) {
+                        continue;
+                    }
+                    if inner.iter().zip(&nested).all(|(new, old)| new.ptr_eq(old)) {
+                        stmt.clone()
+                    } else {
+                        Statement::with_bodies(stmt, inner)?
+                    }
+                };
+                needed.extend(free_names(&stmt));
+                kept.push(stmt);
+            }
+            if needed.len() == before {
+                kept.reverse();
+                return Ok(self.rebuilt(kept));
+            }
+        }
+    }
+
     /// Each SSA definition to the axes its value depends on.
     pub fn axis_dependencies(&self) -> HashMap<Name, HashSet<Name>> {
         let axis_names = self.axis_names();
@@ -780,13 +885,11 @@ pub fn loop_parts(stmt: &Statement) -> Option<(bool, &Body)> {
 
 /// Names each listed once, in first appearance.
 pub fn unique(names: impl IntoIterator<Item = Name>) -> Vec<Name> {
-    let mut out: Vec<Name> = Vec::new();
-    for name in names {
-        if !out.contains(&name) {
-            out.push(name);
-        }
-    }
-    out
+    let mut seen: HashSet<Name> = HashSet::new();
+    names
+        .into_iter()
+        .filter(|name| seen.insert(*name))
+        .collect()
 }
 
 /// Names visible to siblings in structural body order: a leaf's own definitions, a block's exported states.
@@ -819,50 +922,36 @@ pub fn free_ssa(stmt: &Statement) -> HashSet<Name> {
 pub fn exposed_defines(stmt: &Statement) -> Vec<Name> {
     let mut out = stmt.defines();
     for body in stmt.nested() {
-        body.walk(&mut |here| out.extend(here.stmt().defines()));
+        out.extend(body.defined().iter().copied());
     }
     unique(out)
 }
 
 /// Every name the whole subtree of `stmt` reads from its enclosing scope: SSA reads and index coordinates, less
-/// what the subtree defines or binds.
+/// what the subtree defines or binds. Its own reads, then each nested body's free names less the axes `stmt` binds
+/// for it; a statement whose `deps` already answer for its subtree reads only those.
 pub fn free_names(stmt: &Statement) -> Vec<Name> {
-    let mut reads: Vec<Name> = Vec::new();
-    let mut defs: HashSet<Name> = HashSet::new();
-    fn walk(
-        stmt: &Statement,
-        bound: &HashSet<Name>,
-        reads: &mut Vec<Name>,
-        defs: &mut HashSet<Name>,
-    ) {
-        for name in stmt.deps() {
-            if !bound.contains(&name) && !reads.contains(&name) {
-                reads.push(name);
-            }
-        }
-        // A program the statement carries (a combine) reads under its own binders, which `deps` already scopes.
-        for expression in stmt.own_expressions() {
-            for name in expression.free_vars() {
-                if !bound.contains(&name) && !reads.contains(&name) {
-                    reads.push(name);
-                }
-            }
-        }
-        defs.extend(stmt.defines());
-        if stmt.deps_deep() {
-            return;
-        }
-        let mut inner = bound.clone();
-        inner.extend(stmt.binds_axes());
-        for body in stmt.nested() {
-            for child in body.stmts() {
-                walk(child, &inner, reads, defs);
+    let mut reads: Vec<Name> = stmt.deps();
+    // A program the statement carries (a combine) reads under its own binders, which `deps` already scopes.
+    for expression in stmt.own_expressions() {
+        reads.extend(expression.free_vars());
+    }
+    if !stmt.deps_deep() {
+        let nested = stmt.nested();
+        if !nested.is_empty() {
+            let binds: HashSet<Name> = stmt.binds_axes().into_iter().collect();
+            for body in &nested {
+                reads.extend(
+                    body.free()
+                        .iter()
+                        .copied()
+                        .filter(|name| !binds.contains(name)),
+                );
             }
         }
     }
-    walk(stmt, &HashSet::new(), &mut reads, &mut defs);
-    reads.retain(|name| !defs.contains(name));
-    reads
+    let defined: HashSet<Name> = exposed_defines(stmt).into_iter().collect();
+    unique(reads.into_iter().filter(|name| !defined.contains(name)))
 }
 
 /// One shared, read-only reduction cone with explicit coordinate parameters. Compared by object.

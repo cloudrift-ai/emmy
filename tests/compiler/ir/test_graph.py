@@ -200,7 +200,7 @@ def test_kernel_op_windowed_axis_roundtrip():
     )
     g = Graph()
     x = g.add_node(op=InputOp(), inputs=[], output=Tensor("x", (512, 4096), "f16"), node_id="x")
-    g.add_node(op=KernelOp(body=(body,), name="k_x"), inputs=[x], output=Tensor("out", (512, 4096), "f16"), node_id="out")
+    g.add_node(op=KernelOp(body=(body,)), inputs=[x], output=Tensor("out", (512, 4096), "f16"), node_id="out")
     g.inputs, g.outputs = [x], ["out"]
 
     dumped = g.to_dict()

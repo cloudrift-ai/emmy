@@ -53,7 +53,7 @@ def test_a_stored_carried_kernel_relifts_with_one_state_port() -> None:
 
     lifted = Pipeline.build(["tile/lift"], select=["lift"]).run(_graph(steps=STEPS))
     (node,) = (n for n in lifted.nodes.values() if isinstance(n.op, TileOp))
-    stored = definition(node.op.with_io(lifted, node), node.op.name)
+    stored = definition(node.op.with_io(lifted, node))
     replayed = Pipeline.build(["tile/lift"], select=["lift"]).run(stored.program({}))
     (fresh,) = (n for n in replayed.nodes.values() if isinstance(n.op, TileOp))
     assert len(fresh.outputs) == len(node.outputs) == 2
@@ -105,7 +105,7 @@ def test_a_coefficient_that_varies_with_the_kept_cell_offers_no_split() -> None:
     graph = Graph()
     for name, shape in (("D", (STEPS,)), ("W", (N, N)), ("U", (STEPS, N, N)), ("D2", (STEPS, N))):
         graph.add_node(InputOp(), [], Tensor(name, shape, "f32"), node_id=name)
-    graph.add_node(LoopOp(body=per_column, name="k_step"), ["D", "W", "U", "D2"], Tensor("out", (STEPS, N, N), "f32"), node_id="out")
+    graph.add_node(LoopOp(body=per_column), ["D", "W", "U", "D2"], Tensor("out", (STEPS, N, N), "f32"), node_id="out")
     graph.inputs, graph.outputs = ["D", "W", "U", "D2"], ["out"]
     lifted = Pipeline.build(["tile/lift"], select=["lift"]).run(graph)
     (node,) = (n for n in lifted.nodes.values() if isinstance(n.op, TileOp))

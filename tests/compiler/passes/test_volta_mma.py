@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import math
+import re
 
 import pytest
 
@@ -396,7 +397,7 @@ def test_sm70_output_stores_contiguous_fragment_pairs(monkeypatch) -> None:
     _pin(monkeypatch, VOLTA)
     _, _, src = _source(_graph(), Context(compute_capability=(7, 0)))
     # CUDA spelling: moves to the PTX compiler's tests
-    assert src.count("*reinterpret_cast<__half2*>(&c[") == 4
+    assert len(re.findall(r"\*reinterpret_cast<__half2\*>\(&buf\d+\[", src)) == 4  # the output, spelled by its role
 
 
 def test_sm70_masked_rows_keep_contiguous_fragment_pairs(monkeypatch) -> None:
@@ -406,7 +407,7 @@ def test_sm70_masked_rows_keep_contiguous_fragment_pairs(monkeypatch) -> None:
     (store,) = statements(kernel, RegStore)
     assert store.m_guard is not None and store.m_guard[1] == Var("seq_len")
     # CUDA spelling: moves to the PTX compiler's tests
-    assert src.count("*reinterpret_cast<__half2*>(&c[") == 4
+    assert len(re.findall(r"\*reinterpret_cast<__half2\*>\(&buf\d+\[", src)) == 4  # the output, spelled by its role
 
 
 def test_sm70_sync_copy_composes_ring_and_register_pipelines(monkeypatch) -> None:

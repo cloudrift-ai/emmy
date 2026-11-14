@@ -1,8 +1,8 @@
 """The session kernel cache — fetch a finished lowering instead of re-lowering.
 
 What these pin: (a) REPLAY EQUALITY — a twin kernel compiled through a cache hit renders the
-byte-identical CUDA source a fresh compile produces (modulo nothing: the io rebind restores the
-twin's own buffer names before rendering); (b) the cache is OPT-IN (no ``Context.kernel_cache``,
+byte-identical CUDA source a fresh compile produces (modulo nothing: the hit's source is the twin's tile, so its
+name and buffer slots are computed the same way); (b) the cache is OPT-IN (no ``Context.kernel_cache``,
 no behavior change) and greedy-only (the tune search strips it); (c) a multi-kernel origin
 poisons its key rather than serving a fragment."""
 
@@ -54,7 +54,7 @@ def test_twin_replay_renders_byte_identical_source() -> None:
     assert replayed.kernel_source == fresh.kernel_source, "replay must render the byte-identical kernel"
     assert replayed.arg_order == fresh.arg_order
     assert (replayed.grid, replayed.block, replayed.smem_bytes) == (fresh.grid, fresh.block, fresh.smem_bytes)
-    assert first.kernel_source != fresh.kernel_source, "the premise: the twins spell different buffer names"
+    assert first.kernel_source == fresh.kernel_source, "twins of one identity render one source"
 
 
 def test_without_a_cache_nothing_changes() -> None:

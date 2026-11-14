@@ -56,13 +56,13 @@ class StubKernel:
         return iter((self,))
 
 
-def kernel_row(identity: str, *, name: str | None = None, symbolic: tuple[str, ...] = (), formed: bool = True) -> KernelDef:
+def kernel_row(identity: str, *, symbolic: tuple[str, ...] = (), formed: bool = True) -> KernelDef:
     """A ``kernel`` row keyed ``identity`` with a minimal wire — one loop node whose output carries the
     ``symbolic`` dims. Every ``perf`` row names a kernel row, so tests seed one of these before recording
     measurements of it. The key is handed in (``KernelDef.keyed``), as the DB hands back the one it stores."""
     dims: list = [{"sym": var, "hint": 512} for var in symbolic] + [4]
     wire = {"inputs": [], "outputs": ["y"], "nodes": [{"id": "y", "op": "loop", "attrs": {"body": []}, "outputs": [["y", "f32", dims]]}]}
-    return KernelDef(loop_ir=wire, name=name or f"k_{identity}", formed=formed).keyed(identity)
+    return KernelDef(loop_ir=wire, formed=formed).keyed(identity)
 
 
 def perf_row(

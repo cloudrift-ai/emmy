@@ -60,7 +60,7 @@ def rewrite(match: Match, root: Node, ctx=None) -> KernelOp | None:
         body = Body((materialized,))
         unbound = _unbound_names(tile, root, body)
         assert not unbound, f"materialize: kernel {tile.name!r} reads names it never binds: {sorted(unbound)}"
-        kernel = KernelOp(body=body, name=tile.name, serial=() if resident else tuple(tile.place.serial))
+        kernel = KernelOp(body=body, serial=() if resident else tuple(tile.place.serial))
         if resident:
             # The state's port — the buffer the lift added for the classic realization, which no
             # store of the term writes. Register storage has no global state allocation, so the

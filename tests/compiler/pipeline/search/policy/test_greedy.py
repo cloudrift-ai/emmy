@@ -430,7 +430,7 @@ def test_a_measured_split_is_priced_from_its_pieces_with_no_routing_row() -> Non
 
     def measured(db, op, us: float) -> None:
         stats = PerfStats(median=us, min=us, max=us, mean=us, variance=0.0, n_samples=30)
-        db.record_kernel(kernel_row(op, op.name))
+        db.record_kernel(kernel_row(op))
         db.record_perf(
             ctx,
             op.identity_key(structural=False, with_io=True),
@@ -491,7 +491,7 @@ def test_a_kernel_measured_at_two_sizes_is_ranked_at_the_size_it_compiles_at() -
 
     def measured(op, us: float) -> None:
         stats = PerfStats(median=us, min=us, max=us, mean=us, variance=0.0, n_samples=30)
-        db.record_kernel(kernel_row(op, op.name))
+        db.record_kernel(kernel_row(op))
         identity = op.identity_key(structural=False, with_io=True)
         db.record_perf(ctx, identity, bindings=kernel_bindings(op), knobs={"WORK": "w1x8"}, status="ok", stats=stats)
 
@@ -589,39 +589,25 @@ def test_an_arm_leaving_a_kernel_that_always_failed_is_off_the_ballot(monkeypatc
     assert kernels_with_failed({"another"}, 1.0) == [kernel_identity(k) for k in cut], "a failure on another kernel condemns nothing"
 
 
-@pytest.mark.parametrize("failed_at", ["whole", "remainder", "piece"])
-def test_a_failed_fused_variant_cuts_the_whole_remainder_chain(monkeypatch, failed_at: str) -> None:
-    """Every piece a cut leaves computes part of its parent, so the failure of a kernel — the kernel itself, the
-    remainder one of its cuts leaves, or that cut's producer — rules out keeping whole the parent and every kernel down
-    its remainder chain: one compile cuts the chain to its end. Without the chain rule the failed kernel's arm alone is
-    off, and the fork trades it for a sibling kept whole — the GDN layer that hung compile after compile. The prior
-    here prefers fewer pieces, so with nothing failed the kernel stays whole."""
-    from emmy.compiler.pipeline.passes.tile._cut import cuttable_seams
+@pytest.mark.parametrize("failed_at", ["whole", "piece"])
+def test_a_failure_takes_the_keep_whole_arm_off_its_kernel(monkeypatch, failed_at: str) -> None:
+    """Every piece a cut leaves computes part of its parent, so the failure of a kernel, or of a piece one of its
+    cuts leaves, rules out keeping that kernel whole, and an arm that leaves the failed kernel is off the ballot. The
+    prior here prefers fewer pieces, so with nothing failed the kernel stays whole."""
     from emmy.compiler.wire import kernel_identity
 
     case = "attention/sdpa-hd128-softmax-v-mma.json"
-    chain_rule = greedy._kernel_set_pick
 
-    def compile_with(failed: set[str], *, chain: bool = True) -> list:
+    def compile_with(failed: set[str]) -> list:
         monkeypatch.setattr(greedy, "_db_measured_index", lambda *_: greedy._Measured({}, {kernel: [2e6] for kernel in failed}))
-        pick = chain_rule if chain else (lambda fp, prior, failed, refused=None: chain_rule(fp, prior, failed))
-        monkeypatch.setattr(greedy, "_kernel_set_pick", pick)
         return _kernel_sets(greedy.greedy_decide(prior=_NoSchedule(), placement_prior=_pieces_prior(-1.0)), case)
 
-    def standing(pieces: list) -> list:
-        """The remainders of the case's kernel a compile kept whole while they could still be cut."""
-        return [op for op in pieces if op.name == whole.name and cuttable_seams(op)]
-
     [whole] = compile_with(set())
-    assert cuttable_seams(whole)
-    traded = compile_with({kernel_identity(whole)}, chain=False)
-    [sibling] = standing(traded)
-    producer = next(op for op in traded if op.name != whole.name)
-    failed = {"whole": whole, "remainder": sibling, "piece": producer}[failed_at]
+    cut = compile_with({kernel_identity(whole)})
+    failed = whole if failed_at == "whole" else next(op for op in cut if any("__place_" in buffer for buffer in op.outputs))
 
-    pieces = compile_with({kernel_identity(failed)})
-    assert not standing(pieces), "no remainder of a kernel that failed whole is kept whole while it can be cut"
-    assert len(pieces) > len(compile_with({kernel_identity(failed)}, chain=False))
+    kept = {kernel_identity(op) for op in compile_with({kernel_identity(failed)})}
+    assert kernel_identity(whole) not in kept and kernel_identity(failed) not in kept
 
 
 def test_a_recorded_bench_failure_moves_the_next_compile_off_the_arm_that_hung(tmp_path) -> None:
@@ -629,8 +615,8 @@ def test_a_recorded_bench_failure_moves_the_next_compile_off_the_arm_that_hung(t
     row off the compiled CUDA op (``kernel_key``: the tile its schedule fork was offered), and the next compile's
     kernel-set fork reads it back under the identity of the arm it offers (``_kernel_set_pick``) — through the tune DB,
     with no mocked index — so the fused kernel that hung is off the ballot and the fork takes a cut. The GDN audit
-    read three hangs of one kernel name as three picks of one arm: a cut's remainder keeps its parent's C name, so the
-    name in a hang message is no identity; this test pins what the rows do, by identity."""
+    read three hangs of one kernel name as three picks of one arm, back when a piece of a cut kept its parent's name;
+    this test pins what the rows do, by identity."""
     from emmy.compiler.context import Context
     from emmy.compiler.ir.cuda.ir import CudaOp
     from emmy.compiler.pipeline import CUDA_PASSES, Pipeline
@@ -661,4 +647,4 @@ def test_a_recorded_bench_failure_moves_the_next_compile_off_the_arm_that_hung(t
     cut = compile_once()
     assert len(cut) > 1, "the fused arm whose kernel hung must lose to a cut"
     assert kernel_identity(fused.op) not in {kernel_identity(node.op) for node in cut}
-    assert all(node.op.kernel_name.startswith(fused.op.kernel_name) for node in cut), "the pieces carry the parent's name"
+    assert fused.op.kernel_name not in {node.op.kernel_name for node in cut}, "each piece is named by its own identity"

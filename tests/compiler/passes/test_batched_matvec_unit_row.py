@@ -36,7 +36,7 @@ def _graph(dtype: str) -> Graph:
     graph = Graph()
     graph.add_node(InputOp(), [], Tensor("a", (2, 4, 64), dtype), node_id="a")
     graph.add_node(InputOp(), [], Tensor("w", (2, 4, 64, 32), dtype), node_id="w")
-    graph.add_node(LoopOp(body=body, name="k_batched_matvec"), ["a", "w"], Tensor("out", (2, 4, 32), "f32"), node_id="out")
+    graph.add_node(LoopOp(body=body), ["a", "w"], Tensor("out", (2, 4, 32), "f32"), node_id="out")
     graph.inputs, graph.outputs = ["a", "w"], ["out"]
     return graph
 
@@ -71,7 +71,7 @@ def _rank_one_graph(dtype: str, k_size: int = 64, n_size: int = 32, *, reshape_o
     graph.add_node(InputOp(), [], Tensor("a", (k_size,), dtype), node_id="a")
     graph.add_node(InputOp(), [], Tensor("w", (k_size, n_size), dtype), node_id="w")
     graph.add_node(
-        LoopOp(body=body, name="k_rank_one_projection"),
+        LoopOp(body=body),
         ["a", "w"],
         Tensor("out", output_shape, "f32"),
         node_id="out",

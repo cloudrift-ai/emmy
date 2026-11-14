@@ -15,7 +15,7 @@ _RULE = import_module("emmy.compiler.pipeline.passes.lowering.kernel.117_unroll_
 
 def _unrolled(body: str, lanes: int = 4) -> KernelOp:
     """``body`` over a row axis ``i`` and a lane axis ``lane``, through the pass."""
-    tiled = KernelOp(body=Body((Tile(axes=(Axis("i", 8), Axis("lane", lanes)), body=parse_body(body)),)), name="k")
+    tiled = KernelOp(body=Body((Tile(axes=(Axis("i", 8), Axis("lane", lanes)), body=parse_body(body)),)))
     return _RULE.rewrite(SimpleNamespace(op=tiled))
 
 

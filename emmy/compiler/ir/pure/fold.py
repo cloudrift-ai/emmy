@@ -1848,7 +1848,7 @@ def _writes_under(term: Fold, stored: frozenset[str]) -> bool:
         if id(node) in seen:
             continue
         seen.add(id(node))
-        if (set(node.exposes) | node.step().definitions.keys()) & stored:
+        if (set(node.exposes) | node.step().defined) & stored:
             return True
         pending.extend(node.operands)
     return False

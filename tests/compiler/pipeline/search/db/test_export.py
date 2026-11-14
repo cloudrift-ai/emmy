@@ -60,9 +60,9 @@ def test_a_kernel_pool_opens_the_candidates_its_golden_program_opens(tmp_path):
     golden file sourced, and the builder's ``kernel`` narrows on the kernel's C name."""
     db = tuned_db(None, (_MATMUL,), source="golden:case")
     [pool], dropped = golden_pools(db)
-    assert pool.kernel.formed and pool.name.startswith("k_matmul_") and (pool.regime, pool.bindings) == ("", {}) and dropped == {}
-    assert build_golden_groups([pool], kernel="k_reduce") == ([], [])
-    groups, skipped = build_golden_groups([pool], kernel="k_matmul")
+    assert pool.kernel.formed and pool.name == pool.kernel.name and (pool.regime, pool.bindings) == ("", {}) and dropped == {}
+    assert build_golden_groups([pool], kernel="k_ffffffffffff") == ([], [])
+    groups, skipped = build_golden_groups([pool], kernel=pool.kernel.name)
     assert skipped == []
     [group] = groups
     assert (group.key, group.name, group.tier, group.gpu) == (f"{GPU_5090}/{pool.name}", pool.name, "warp", GPU_5090)
@@ -98,7 +98,7 @@ def test_a_carried_kernels_pool_offers_both_storage_arms_and_a_golden_lands_on_i
     from tests.compiler.passes.test_shared_carry import _graph as carried_state_graph
 
     graph = carried_state_graph()
-    kernel = KernelDef(loop_ir=graph.to_wire(), name="k_step", formed=True)
+    kernel = KernelDef(loop_ir=graph.to_wire(), formed=True)
     ctx = Context.from_target((7, 0), gpu_name=CARDS[(7, 0)], compile_flags="")
     schedule = {k: v for k, v in _PINS.items() if k in ("WORK", "REDUCE")}
     with pinned_knobs({"FAST_MATH": True}):
@@ -152,7 +152,7 @@ def test_the_placement_space_is_one_pool_per_fork_with_the_golden_arm_marked(tmp
 def test_symbolic_placement_fork_exports_in_the_dynamic_tier():
     """A recorded symbolic cut must export with the same regime its arm features carry."""
     golden = GoldenFile.load(Path(__file__).parents[5] / "recipes" / "DeepSeek-V4-Flash-0731" / "golden" / "v100_sm70.json")
-    target = "k_linear_matmul_reduce_b61b5c"
+    target = "k_aad29a834ef6"  # a symbolic fused linear and matmul reduction, cut by its recorded route
     row = next(row for row in golden.rows if any(golden.kernel(route.parent).name == target for route in golden.path_to(row.kernel)))
     db = SearchDB()
     import_rows(db, regime_context(golden, row.pins), golden, [row], source="golden:case")
@@ -170,7 +170,7 @@ def test_a_static_piece_under_a_symbolic_root_exports_in_its_own_regime():
     the static head dimension); the fork on that piece is a static-regime group, whatever its root's regime, and the
     group's tier agrees with the rows it packs."""
     golden = GoldenFile.load(Path(__file__).parents[5] / "recipes" / "Qwen3.8-27B-NVFP4-NVIDIA" / "golden" / "rtx5090_sm120.json")
-    target = "k_matmul_softmax_range_reduce_3e1cea"
+    target = "k_78cece60d704"  # a symbolic attention kernel whose recorded cut leaves a static piece
     rows = [row for row in golden.rows if any(golden.kernel(route.parent).name == target for route in golden.path_to(row.kernel))]
     assert rows
     db = SearchDB()
@@ -238,7 +238,7 @@ def test_placement_export_includes_weight_layout_from_golden_program(tmp_path):
     import_rows(db, regime_context(document, row.pins), document, [row], source=source)
     assert import_constants(db, document, [row], source=source) > 0
     pools = placement_pools(db, golden_pools(db)[0])
-    [pool] = [pool for pool in pools if pool.kernel.name == "k_linear_0accca"]
+    [pool] = [pool for pool in pools if pool.kernel.name == "k_90a94eaf8978"]  # the 3584-wide linear
     forks, unmatched = walk_placement(pool, pool_context(pool), placement_decisions(pools, pool), own=True)
     assert unmatched == []
     [layout] = [fork for fork in forks if fork.tier == "layout"]
@@ -310,23 +310,23 @@ def test_a_pool_of_a_kernel_formed_from_no_loop_op_is_skipped_by_name():
     """A piece carved from a twisted tree has no definition the lowering takes back to it; its rows are counted
     out under their kernel's name rather than enumerated through a body that would make another kernel."""
     db = SearchDB()
-    db.record_kernel(kernel_row("twisted", name="k_piece", formed=False))
+    db.record_kernel(kernel_row("twisted", formed=False))
     db.record_perf_row(perf_row("twisted", us=500.0, source="golden:case"))  # plausible: the freeze admits it
     groups, skipped = build_golden_groups(golden_pools(db, lambda row: StubKernel(F16_MATMUL_STAMPS))[0])
-    assert groups == [] and skipped == [(GPU_5090, "k_piece.twisted", "kernel formed from no loop op")]
+    assert groups == [] and skipped == [(GPU_5090, "k_twisted", "kernel formed from no loop op")]
 
 
 def test_a_several_seam_cut_is_walked_one_seam_at_a_time():
     """A golden that cut a kernel at several seams, one of them on a piece of its own, is in the placement space the
     sequence of single cuts a deploy with no recorded route takes: at the kernel's fork the single seams carving a piece of the
-    recorded kernel set are positive, the deepest first; each remainder's fork is the next, with the seams still
-    to cut positive; the last remainder is a piece of the set and stays whole. No arm cuts several seams at once,
+    recorded kernel set are positive, the deepest first; the fork of the piece each cut leaves to cut is the next, with
+    the seams still to cut positive; the last such piece is a piece of the set and stays whole. No arm cuts several seams at once,
     and the reproduction gate grades every fork on the way."""
     from emmy.compiler.pipeline.search.prior.reproduce import reproduce_placement, reproduction_rate
     from emmy.compiler.pipeline.search.ranking import placement_decisions, pool_context, walk_placement
 
     golden = GoldenFile.load(Path(__file__).parents[5] / "recipes" / "DeepSeek-V4-Flash-0731" / "golden" / "v100_sm70.json")
-    target = "k_linear_matmul_reduce_b61b5c"
+    target = "k_aad29a834ef6"  # cut at three seams by its recorded route
     row = next(row for row in golden.rows if any(golden.kernel(route.parent).name == target for route in golden.path_to(row.kernel)))
     db = SearchDB()
     import_rows(db, regime_context(golden, row.pins), golden, [row], source="golden:case")
@@ -341,13 +341,14 @@ def test_a_several_seam_cut_is_walked_one_seam_at_a_time():
     first, *rest = forks
     assert len(first.positives) == 2 and first.pick == first.positives[0]
     assert first.labels[first.pick].count("/") > first.labels[first.positives[1]].count("/"), "the deepest seam first"
-    assert [len(fork.positives) for fork in rest] == [1, 1, 1] and rest[-1].labels[rest[-1].pick] == "fuse"
+    # The second fork reaches the set either way: each of its two arms carves a recorded kernel and leaves one to cut.
+    assert [len(fork.positives) for fork in rest] == [2, 1, 1] and rest[-1].labels[rest[-1].pick] == "fuse"
     assert reproduction_rate([verdict for verdict in reproduce_placement(pools, None) if verdict.pool is parent]) == 1.0
 
 
-def test_a_remainder_reached_through_a_piece_pool_carries_the_next_recorded_cut():
-    """A golden that cut a piece, then cut the remainder that cut left, records the second cut on the remainder under
-    its identity. Walked as its own pool, the remainder's fork is that cut; walked from the piece's pool, the remainder
+def test_a_piece_reached_through_its_parents_pool_carries_the_next_recorded_cut():
+    """A golden that cut a piece, then cut a piece that cut left, records the second cut on that piece under
+    its identity. Walked as its own pool, that piece's fork is that cut; walked from its parent's pool, the piece
     is minted inside the piece's program, and its identity must be the one the file records, or the walk keeps it whole
     and labels the same fork "fuse" — two labels on one feature row, which no prior reproduces both of. That held only
     while the normal form had one fixed point for the piece's body: with two (the sibling reductions merged in one loop
@@ -357,22 +358,22 @@ def test_a_remainder_reached_through_a_piece_pool_carries_the_next_recorded_cut(
     from emmy.compiler.pipeline.search.ranking import placement_decisions, pool_context, walk_placement
 
     golden = GoldenFile.load(Path(__file__).parents[5] / "emmy/compiler/pipeline/search/golden/records/rtx5090_sm120.json")
-    piece = "k_linear_mean_reduce_f54190__place_5ae451282a"
-    rows = [row for row in golden.rows if any(golden.kernel(route.parent).name.startswith(piece) for route in golden.path_to(row.kernel))]
+    # The piece, and the pieces its successive cuts left to cut further, each a kernel of its own name.
+    piece, *deeper_names = ("k_a2b88a00bf07", "k_7a5a28b812a5", "k_053828ff9e76", "k_422dbda9e34c", "k_a7158f75e968")
+    [ref] = [kernel.ref for kernel in golden.kernels if kernel.name == piece]
+    rows = [row for row in golden.rows if row.kernel in golden.kernel_set(ref)]
     db = SearchDB()
     import_rows(db, regime_context(golden, rows[0].pins), golden, rows, source="golden:case")
     pools = placement_pools(db, golden_pools(db)[0])
-    # The piece's pool by its identity: its remainders share its name and its one-knob rows, so a sort on either would
-    # order them by the digest, and the walk would start a cut or two down the chain.
-    [first] = [pool for pool in pools if pool.kernel.exact_identity == golden.kernel(piece).exact_identity]
-    deeper = [pool for pool in pools if pool.kernel.name == piece and pool.rows and pool is not first]
+    [first] = [pool for pool in pools if pool.kernel.name == piece]
+    deeper = [pool for pool in pools if pool.kernel.name in deeper_names and pool.rows]
 
     def walk(pool):
         return walk_placement(pool, pool_context(pool), placement_decisions(pools, pool), own=True)
 
     walked, unmatched = walk(first)
     assert unmatched == [] and len(walked) == len(deeper) + 2, "the piece's walk takes every recorded cut below it, then stays whole"
-    # The remainder's fork, reached from the piece, carries a cut: the one the remainder's own pool records on it.
+    # The next piece's fork, reached from the piece, carries a cut: the one that piece's own pool records on it.
     assert [walked[1].labels[i] for i in walked[1].positives] != ["fuse"]
     assert {walked[1].labels[i] for i in walked[1].positives} & {walk(pool)[0][0].labels[walk(pool)[0][0].pick] for pool in deeper}
     assert reproduction_rate([verdict for verdict in reproduce_placement(pools, None) if verdict.pool is first]) == 1.0

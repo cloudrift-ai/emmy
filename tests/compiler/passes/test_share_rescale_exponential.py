@@ -219,7 +219,7 @@ def test_the_factors_are_the_two_exponentials_bits_on_the_device(pins) -> None:
     for name, tensor in io.items():
         graph.add_node(InputOp(), [], tensor, node_id=name)
     factors = Tensor("F", (2, n), F32)
-    graph.add_node(KernelOp(body=body, name="k_advance", inputs=io, outputs={"F": factors}), list(io), factors, node_id="F")
+    graph.add_node(KernelOp(body=body, inputs=io, outputs={"F": factors}), list(io), factors, node_id="F")
     graph.inputs, graph.outputs = list(io), ["F"]
     _both(graph, pins, [{"G": g, "GO": g_o}], cap=(12, 0), passes=["lowering/kernel", FINAL_LOWERING_PASS])
 

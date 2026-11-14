@@ -96,7 +96,7 @@ def test_pointwise_emits_correct_source():
     # CUDA spelling: moves to the PTX compiler's tests
     source = nodes[0].op.kernel_source
     assert "threadIdx.x" in source
-    assert "x[" in source and "y[" in source
+    assert "buf0[" in source and "buf1[" in source  # buffers are spelled by their role
 
 
 def test_boolean_bitwise_not_lowers_from_graph_loop_to_logical_cuda():

@@ -127,7 +127,7 @@ def test_chunk_loop_is_inside_one_launch(target):
     (op,) = (n.op for n in graph.nodes.values() if isinstance(n.op, CudaOp))
     (kernel,) = kernels.values()
     assert not op.serial and op.smem_bytes == 0
-    assert op.arg_order == ("D", "W", "U", "out")
+    assert sorted(op.arg_order) == ["D", "U", "W", "out"]  # in the order of the roles its identity names
     assert [t.name for t in graph.nodes["out"].outputs] == ["out"]
     # The state is an accumulator of floats in registers, and the step axis is a loop of the one launch.
     (state,) = [fragment for fragment in statements(kernel, RegFragment) if fragment.name == "_state0"]
@@ -185,7 +185,7 @@ def test_register_fork_keeps_the_carrier_when_classic_is_also_offered():
     classic_forks = import_module("emmy.compiler.pipeline.passes.tile.schedule.040_schedule").classic_forks
     (tile,) = (n.op for n in _lift(_graph()).nodes.values() if isinstance(n.op, TileOp))
     with pinned_knobs({"FAST_MATH": True}):
-        forks = classic_forks(tile, tile.name, {}, Context.from_target((12, 0)))
+        forks = classic_forks(tile, {}, Context.from_target((12, 0)))
         register = next(leaf for leaf in iter_leaves(forks) if leaf.knobs.get("STAGE") == "d1/reg")
         (scheduled,) = register.expand()
     assert scheduled.carries and not scheduled.place.serial

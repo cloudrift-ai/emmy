@@ -240,7 +240,7 @@ def _decode_split(arg: str, plain: Body, defs: dict, exposed: dict, k_name: str)
 def _accums_sum_names(body: Body) -> Body:
     """``body`` with every accumulation summing a name: the normal form lets an ``Accum`` sum a literal, and the lift's
     step reads the summed value by name, so a literal takes a definition of its own ahead of the accumulation."""
-    taken = set(body.ssa_uses) | {name for stmt in body.iter() for name in stmt.defines()}
+    taken = set(body.ssa_uses) | body.defined
     out: list[Statement] = []
     for stmt in body:
         if isinstance(stmt, Accum) and isinstance(stmt.value, Literal):
@@ -416,7 +416,7 @@ def _renamed_sweep(loop: Loop, taken: set[str]) -> Loop:
     name (the fused encode kernel's byte sweep and scale sweep, both ``a1`` at different
     extents). Loop IR binds per loop, so the reuse is legal there; a term tree names one coordinate
     per name, so the second sweep is alpha-renamed, binder and references together."""
-    taken = taken | set(Body(loop.body).definitions)
+    taken = taken | Body(loop.body).defined
     fresh = next(name for index in range(1, len(taken) + 2) if (name := f"{loop.axis.name}_{index}") not in taken)
     coords = Sigma({loop.axis.name: Var(fresh)})
     return loop.replace(axis=replace(loop.axis, name=fresh), body=Body(tuple(stmt.substitute(coords) for stmt in loop.body)))
@@ -866,7 +866,7 @@ def _root_results(body: Body) -> tuple[str, ...]:
     return ()
 
 
-def lift_loop_op(op: LoopOp, *, name: str = "", body: Body | None = None, serial: tuple[Axis, ...] = ()) -> TileOp:
+def lift_loop_op(op: LoopOp, *, body: Body | None = None, serial: tuple[Axis, ...] = ()) -> TileOp:
     """Peel free axes and lift the complete remaining nest as one Fold tree.
 
     ``body`` lifts a rewritten spelling of ``op``'s program instead of the stored one. Constructing
@@ -875,10 +875,10 @@ def lift_loop_op(op: LoopOp, *, name: str = "", body: Body | None = None, serial
     ``serial`` names the peeled axes that are the kernel's time (:func:`states_as_buffers`).
     """
     with binding_extents(name for tensor in op.inputs.values() for dim in tensor.shape for name in dim.expression.free_vars()):
-        return _lift_loop_op(op, name, body, serial)
+        return _lift_loop_op(op, body, serial)
 
 
-def _lift_loop_op(op: LoopOp, name: str, body, serial: tuple[Axis, ...]) -> TileOp:
+def _lift_loop_op(op: LoopOp, body, serial: tuple[Axis, ...]) -> TileOp:
     free, cell = _peel(op.body if body is None else Body.coerce(body))
     if any(axis not in free for axis in serial):
         raise ValueError(f"a loop that carries a state must sit outside every reduction: {[axis.name for axis in serial]}")
@@ -905,7 +905,6 @@ def _lift_loop_op(op: LoopOp, name: str, body, serial: tuple[Axis, ...]) -> Tile
     axes.update((axis.name, axis) for spec in output_specs for axis in spec.sweep)  # a renamed sibling sweep
     return TileOp(
         op=Fold(operands=edges, lift=lift),
-        name=name,
         place=Placement(free=tuple(axis for axis in free if axis not in serial), serial=serial),
         axes=tuple(axes.values()),
         inputs=dict(op.inputs),
@@ -926,12 +925,12 @@ def seed_index(cell: tuple[Expression, ...], shape: tuple) -> tuple[Expression, 
     return tuple(Literal(0, "int") if dim in units else next(rest) for dim in range(len(shape)))
 
 
-def lift_serial(op: LoopOp, *, name: str, prefix: str) -> tuple[TileOp, dict[str, tuple]]:
+def lift_serial(op: LoopOp, *, prefix: str) -> tuple[TileOp, dict[str, tuple]]:
     """A kernel that carries a state lifted as a serial kernel: its carried states become state
     buffers (:func:`states_as_buffers`, named under ``prefix``) and the loop that carries them the
     kernel's time. Returns the tile and the state buffers' shapes."""
     body, serial, shapes = states_as_buffers(op.body, prefix, op.inputs)
-    return lift_loop_op(op, name=name, body=body, serial=serial), shapes
+    return lift_loop_op(op, body=body, serial=serial), shapes
 
 
 def serial_form(tile: TileOp, prefix: str) -> TileOp:
@@ -941,7 +940,7 @@ def serial_form(tile: TileOp, prefix: str) -> TileOp:
     launch per step, each reading the previous launch's stores. The term the classic tiers then
     tile is the STEP, a projection over ordinary slabs; the register schedule reads the carrying
     fold itself."""
-    formed, _ = lift_serial(LoopOp(body=tile.loop_body, inputs=tile.inputs), name=tile.name, prefix=prefix)
+    formed, _ = lift_serial(LoopOp(body=tile.loop_body, inputs=tile.inputs), prefix=prefix)
     # The kernel's own knobs and its BOUND I/O: a standalone loop op seeds placeholder tensors, and
     # the schedule reads operand dtypes, output shapes and the ``with_io`` identity off these maps.
     return replace(formed, knobs=tile.knobs, inputs=tile.inputs, outputs=tile.outputs)

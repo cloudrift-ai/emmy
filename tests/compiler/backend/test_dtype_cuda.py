@@ -8,6 +8,8 @@ match eager numpy within fp16 tolerance.
 
 from __future__ import annotations
 
+import re
+
 import numpy as np
 import pytest
 
@@ -75,7 +77,9 @@ def test_bf16_runs_load_and_store_as_one_access(length, vector):
     assert any(write.output == "y" and write.width > 1 for write in statements(kernels, Write)), "one vector write per run"
     # CUDA spelling: moves to the PTX compiler's tests (the vector type a run's width spells)
     sources = "\n".join(n.op.kernel_source for n in compiled.nodes.values() if hasattr(n.op, "kernel_source"))
-    assert f"*reinterpret_cast<const {vector}*>(&x[" in sources and f"*reinterpret_cast<{vector}*>(&y[" in sources, sources
+    # Buffers are spelled by their role slot: one vector load of the input, one vector store of the output.
+    assert re.search(rf"\*reinterpret_cast<const {re.escape(vector)}\*>\(&buf\d+\[", sources), sources
+    assert re.search(rf"\*reinterpret_cast<{re.escape(vector)}\*>\(&buf\d+\[", sources), sources
     actual, _ = backend.run(compiled, input_data=feed)
     np.testing.assert_array_equal(actual.outputs["y"], expected.outputs["y"])
 
@@ -273,7 +277,7 @@ def test_fp16_fallback_to_float_for_non_native_op():
     sources = "\n".join(n.op.kernel_source for n in compiled.nodes.values() if isinstance(n.op, CudaOp))
     # Signature stays __half; the fallback inserts __half2float on the
     # input and __float2half on the store, with f32 erff in between.
-    assert "__half* __restrict__ y" in sources or "__half* __restrict__ x" in sources, sources
+    assert re.search(r"__half\* __restrict__ buf\d+", sources), sources
     assert "erff" in sources, f"expected fallback to f32 erff, got:\n{sources}"
     assert "__half2float" in sources, f"expected promote-to-float at use, got:\n{sources}"
     assert "__float2half" in sources, f"expected demote-to-half at store, got:\n{sources}"

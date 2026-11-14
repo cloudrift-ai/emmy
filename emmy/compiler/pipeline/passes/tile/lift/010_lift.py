@@ -17,7 +17,7 @@ def rewrite(match: Match, root: Node, ctx=None):
     from dataclasses import replace  # noqa: PLC0415
 
     loop: LoopOp = root.op
-    tile = lift_kernel(loop, name=loop.name)
+    tile = lift_kernel(loop)
     if not tile.carries:
         return replace(tile, outputs={root.output.name: root.output})
     # A carried state: the term carries it (``Fold.cells``), and the classic schedule realizes it

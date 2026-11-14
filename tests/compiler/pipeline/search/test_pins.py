@@ -178,12 +178,12 @@ def test_bare_fuse_pin_accepts_a_trace_with_no_cut() -> None:
 
 
 def test_scoped_kernel_pin_supersedes_bare_only_on_its_own_kernel() -> None:
-    names = [("__place_a1", "linear_0"), ("__place_b2", "linear_1")]
-    pins = {"WORK": "w1x4", "WORK@place_a1": "w1x1"}
+    names = ["k_0000000000a1", "k_0000000000b2"]
+    pins = {"WORK": "w1x4", "WORK@k_0000000000a1": "w1x1"}
     assert unreproducible_pin_flag(pins, [{"WORK": "w1x1"}, {"WORK": "w1x4"}], kernel_names=names) is None
     assert unreproducible_pin_flag(pins, [{"WORK": "w1x1"}, {"WORK": "w1x2"}], kernel_names=names) is not None
     assert unreproducible_pin_flag(pins, [{"WORK": "w1x2"}, {"WORK": "w1x4"}], kernel_names=names) is not None
     # An explicit scoped OFF overrides the bare value on exactly its target.
-    off = {"TILE": "f1x2", "TILE@place_a1": ""}
+    off = {"TILE": "f1x2", "TILE@k_0000000000a1": ""}
     assert unreproducible_pin_flag(off, [{"TILE": ""}, {"TILE": "f1x2"}], kernel_names=names) is None
     assert unreproducible_pin_flag(off, [{"TILE": ""}, {"TILE": "f1x1"}], kernel_names=names) is not None

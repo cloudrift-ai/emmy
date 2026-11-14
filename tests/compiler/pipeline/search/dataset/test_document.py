@@ -19,7 +19,7 @@ _STAMP = {"S_ext_n_symbolic_axis": 0.0}
 def _dataset() -> Dataset:
     """One golden group over one pool (a second row lacking a feature, so the matrix carries the NaN fill) and one
     measured group, with the bookkeeping an export writes beside them."""
-    pool = GoldenPool("gpuA", (12, 0), "", kernel_row("k1", name="k_one"), {"m": 512}, (GoldenRow({"TILE": "a"}, 1.5, "golden:x"),))
+    pool = GoldenPool("gpuA", (12, 0), "", kernel_row("k1"), {"m": 512}, (GoldenRow({"TILE": "a"}, 1.5, "golden:x"),))
     golden = GoldenGroup.over(
         "gpuA/k_one",
         "k_one",

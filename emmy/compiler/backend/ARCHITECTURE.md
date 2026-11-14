@@ -146,6 +146,15 @@ dispatcher. `splice` joins one plan into another under a prefix — the paging p
 programs into its step — sharing each buffer the target already holds under its mapped name and merging kernels by name
 (`merge_kernels`: a different source under a taken name takes a suffix from its own).
 
+**Kernels of one identity share one source.** A kernel's name is `k_` and the first 12 hex digits of its exact
+identity (`pipeline/ARCHITECTURE.md`). The renderer gives every buffer of that identity its role slot (`buf0`, `buf1`,
+…) and declares the parameters in role order, inputs before outputs (`canonical_buffers`), so kernels of one identity
+under one schedule render one source and share one compiled kernel; `arg_order` maps the slots back to the graph's
+buffers in the same order. A buffer outside the identity (a neighbor's delegated zero-init) keeps its name. The plan
+keeps one source per name. A kernel of a taken name whose code differs — a neighbor's delegated zero-init, another
+schedule pick — launches under its own symbol, `k_<hash>_<8 hex digits of its source>`, the same rule `merge_kernels`
+applies when programs merge. No source is dropped in favor of another.
+
 `plan.py` defines the **execution plan** — the serializable runtime projection of a lowered `Graph[CudaOp]`:
 buffer specs (one `BufferSpec` per BUFFER — a multi-output node mints one per output slot, each with its own
 role via `graph.buffer_role`), scalar/runtime constants, the launch list (`LaunchSpec.writes` names every
