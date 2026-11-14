@@ -1,8 +1,7 @@
 """Generic data-type identity used throughout the compiler.
 
-Holds only generic + numpy information. Backend-specific traits (CUDA C
-spelling, required headers) live in the respective backend
-modules (e.g. ``emmy/compiler/backend/cuda/dtype.py``).
+Holds only generic + numpy information. How a target spells a dtype is
+the code generator's (the PTX compiler's ``DType``).
 
 Naming convention: the class is ``DataType``; every argument, variable,
 and field that carries one is named ``dtype``.
@@ -99,14 +98,12 @@ F64 = DataType("f64", np.dtype(np.float64), 8)
 # split (8 / 7 vs 5 / 10). Used by the mma.sync bf16 atom kind (M9 of the MMA
 # fragment-factorization plan). NumPy has no first-class bf16; we map to
 # the closest carrier (uint16 with the bf16 bit-pattern) so Tensor.dtype
-# round-trips through serialization. CUDA-side spelling is
-# ``__nv_bfloat16`` (see ``backend/cuda/dtype.py``).
+# round-trips through serialization.
 BF16 = DataType("bf16", np.dtype(np.uint16), 2)
 # FP8 storage formats (e4m3 = 4 exponent / 3 mantissa bits, e5m2 = 5 / 2).
 # Same bits-carrier precedent as BF16: NumPy has no first-class fp8, so
 # uint8 carries the bit pattern; the loader decodes to real values at bind
-# time (M1) and CUDA-side conversion is a later milestone. CUDA spellings
-# are ``__nv_fp8_e4m3`` / ``__nv_fp8_e5m2`` (see ``backend/cuda/dtype.py``).
+# time (M1) and CUDA-side conversion is a later milestone.
 F8E4M3 = DataType("f8e4m3", np.dtype(np.uint8), 1)
 F8E5M2 = DataType("f8e5m2", np.dtype(np.uint8), 1)
 # NVFP4 storage format — e2m1 values (1 sign / 2 exponent / 1 mantissa bit; the

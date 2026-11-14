@@ -349,11 +349,11 @@ macro_rules! with_statement_types {
                     target: SubroutineRef [],
                     args: Exprs [EXPRESSION | READS] : Index,
                 }
-                /// Declare a per-block `__shared__` array.
+                /// Declare a per-block shared array of `dtype` elements.
                 ///
-                /// Renders to `__shared__ [__align__(N)] <dtype> <name>[<prod(extents)>];`. `extents` is the multi-dim shape used
-                /// to flatten `Load` / `Write` indices against this buffer. smem_bytes for `CudaOp` is computed by walking the
-                /// KernelOp body and summing `prod(extents) * sizeof(dtype)` across distinct `Smem` declarations.
+                /// `extents` is the multi-dim shape `Load` / `Write` indices against this buffer flatten with. Every shared
+                /// array has its place in one pool the launch sizes: the sum of `prod(extents)` elements of each distinct
+                /// declaration, each placed at its alignment.
                 ///
                 /// `align` is an optional explicit byte alignment. TMA destinations (`cp.async.bulk.tensor`) require 16-byte
                 /// aligned smem; the materializer sets `align=16` on TMA-target slabs. Default 0 means "no explicit alignment" —
@@ -361,7 +361,7 @@ macro_rules! with_statement_types {
                 kernel Smem {} {
                     name: Name [LOCAL_BUFFER],
                     extents: Ints [],
-                    dtype: Name [] = Name::from("float"),
+                    dtype: DType [] = DType::F32,
                     align: i64 [] = 0,
                 }
                 /// Thread-group barrier.
@@ -484,7 +484,6 @@ macro_rules! with_statement_types {
                     src_shape: Ints [],
                     box_extents: Ints [],
                     swizzle: Name [] = Name::from("NONE"),
-                    dtype: Name [] = Name::from("float"),
                 }
                 /// `cp.async.bulk.tensor.<rank>d` — single-thread box copy.
                 ///
@@ -1445,7 +1444,7 @@ mod tests {
         }
         assert_eq!(
             blake3::hash(listing.as_bytes()).to_hex().as_str(),
-            "9661dafbb8aaaf1974b2112ccfcf74c0c689ccf2d010ef244cabf9b109137ded",
+            "eed8f32e87a0b1055192dd4e04c657b0bd527f33dd8d6808dac1840a43b78c6e",
             "{listing}"
         );
     }

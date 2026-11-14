@@ -112,14 +112,13 @@ fn a_load_of_a_buffer_the_kernel_never_writes_goes_past_the_coherent_cache() {
 
 /// A shared declaration is an array of bytes of the module, aligned to its elements or to what it asks for. Its
 /// address is the symbol's own, read into a 32-bit register, and every address into it is 32-bit arithmetic: the
-/// variable part scaled by a shift or a multiply, the constant in the address. The element type may be spelled
-/// as a dtype or as the C type the CUDA renderer declared the array with.
+/// variable part scaled by a shift or a multiply, the constant in the address.
 #[test]
 fn a_shared_buffer_is_an_array_of_the_module_addressed_in_32_bits() {
     let module = row_module(
         "
         Smem(name=s, extents=(8, 8), dtype=f32)
-        Smem(name=h, extents=(64), dtype=__half, align=16)
+        Smem(name=h, extents=(64), dtype=f16, align=16)
         f32 x = load a[r * 64 + t]
         f16 n = (f16)x
         f32 s[t] = x
@@ -1188,10 +1187,6 @@ fn a_cooperative_statement_outside_its_rule_is_an_error_that_names_it() {
         (
             "Smem(name=odd, extents=(4), dtype=f32, align=24)",
             "a shared array has a size and a power of two as alignment",
-        ),
-        (
-            "Smem(name=bars, extents=(4), dtype=CUtensorMap)",
-            "no PTX rule for a shared array of CUtensorMap",
         ),
         (
             "Smem(name=b0, extents=(8192), dtype=f32)\n        Smem(name=b1, extents=(8192), dtype=f32)",

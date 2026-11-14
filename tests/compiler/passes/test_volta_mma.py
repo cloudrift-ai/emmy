@@ -310,8 +310,8 @@ def test_sm70_sync_copy_stages_fragments_without_newer_instructions(monkeypatch,
     _pin(monkeypatch, VOLTA, stage="d1/smem")
     kernel, knobs, _ = _source(_graph(k=16, trans=trans), Context(compute_capability=(7, 0)))
     assert family_value(knobs, "STAGE") == "d1/smem"
-    slabs = {smem.name: (smem.dtype, math.prod(smem.extents)) for smem in statements(kernel, Smem)}
-    assert slabs == {"_a_smem": ("__half", 64), "_b_smem": ("__half", 64)}
+    slabs = {smem.name: (smem.dtype.name, math.prod(smem.extents)) for smem in statements(kernel, Smem)}
+    assert slabs == {"_a_smem": ("f16", 64), "_b_smem": ("f16", 64)}
     assert [(load.src_buffer, load.b_trans) for load in _drains(kernel, "a")] == [("_a_smem", False)]
     assert [(load.src_buffer, load.b_trans) for load in _drains(kernel, "b")] == [("_b_smem", trans)]
     assert len(statements(kernel, Sync)) == 2
@@ -416,8 +416,8 @@ def test_sm70_sync_copy_composes_ring_and_register_pipelines(monkeypatch) -> Non
     kernel, knobs, _ = _source(_graph(k=32), Context(compute_capability=(7, 0)))
     assert family_value(knobs, "TILE") == f"{VOLTA}/f1x1/k2"
     assert family_value(knobs, "STAGE") == "d2/smem/p2"
-    slabs = {smem.name: (smem.dtype, math.prod(smem.extents)) for smem in statements(kernel, Smem)}
-    assert slabs == {"_a_smem": ("__half", 256), "_b_smem": ("__half", 256)}
+    slabs = {smem.name: (smem.dtype.name, math.prod(smem.extents)) for smem in statements(kernel, Smem)}
+    assert slabs == {"_a_smem": ("f16", 256), "_b_smem": ("f16", 256)}
     operands = [fragment for fragment in statements(kernel, RegFragment) if fragment.role in ("a", "b")]
     assert len(operands) == 4, "two register slots of the A and the B fragment"
     calls = [(mma.c_frag, mma.a_frag, mma.b_frag) for mma in statements(kernel, MmaSyncPtx)]

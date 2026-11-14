@@ -47,7 +47,6 @@ from __future__ import annotations
 from dataclasses import dataclass, replace
 from importlib import import_module
 
-from emmy.compiler.backend.cuda.dtype import cuda_name
 from emmy.compiler.dtype import F32
 from emmy.compiler.ir.address import clamp_to
 from emmy.compiler.ir.axis import Axis, Window
@@ -843,7 +842,6 @@ def emit_combine(
     prog = tuple(fold.combine.body)
     dtype = next((a.dtype for a in prog if a.dtype is not None), None) or F32
 
-    smem_c = cuda_name(dtype)
     bufs = tuple(f"{st}_smem" for st in state)
     if inner is not None:
         # The transposed (``coop-t``) combine: threads sharing an output lane sit ``scale``
@@ -861,7 +859,7 @@ def emit_combine(
                 BinaryExpression("/", slot, Literal(warp_size, "int")),
             )
         idx = BinaryExpression("+", BinaryExpression("*", slot, Literal(scale, "int")), Var(iv))
-        out: list[Statement] = [Smem(name=b, extents=(n_threads * scale,), dtype=smem_c) for b in bufs]
+        out: list[Statement] = [Smem(name=b, extents=(n_threads * scale,), dtype=dtype) for b in bufs]
         out += [Write(output=b, index=(idx,), values=(st,)) for b, st in zip(bufs, state, strict=True)]
         out.append(Sync())
         out.append(
@@ -889,7 +887,7 @@ def emit_combine(
             hierarchical = i > 0 and folds[i - 1] is FoldMove.SHFL
             width = n_threads // warp_size if hierarchical else n_threads
             tid_var = "warp" if hierarchical else t
-            out += [Smem(name=b, extents=(width,), dtype=smem_c) for b in bufs]
+            out += [Smem(name=b, extents=(width,), dtype=dtype) for b in bufs]
             if hierarchical:
                 # Lane-0 of each warp stages that warp's broadcast state, indexed by ``warp``.
                 out.append(
@@ -1274,7 +1272,7 @@ def _tile_reduce_axis(
             grid_vars=grid_vars,
             linear_tid=start,
             n_threads=coop,
-            dtype=cuda_name(ctx.inputs[staged].dtype),
+            dtype=ctx.inputs[staged].dtype,
         )
         n_grid = len(grid)
         rloop = rloop.replace(body=Body(tuple(_restage_loads(list(rloop.body), staged, smem_name, n_grid, grid_vars))))

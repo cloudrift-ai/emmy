@@ -195,7 +195,7 @@ def test_kernel_op_windowed_axis_roundtrip():
     parent = Axis(name="a0", extent=512)
     body = Tile(
         axes=(Axis(name="a0_b", extent=8, window=Window(parent=parent)),),
-        body=(Smem(name="_a_smem", extents=(128, 32), dtype="__half"),),
+        body=(Smem(name="_a_smem", extents=(128, 32), dtype="f16"),),
         block_threads=256,
     )
     g = Graph()

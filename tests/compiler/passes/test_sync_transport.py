@@ -4,6 +4,7 @@ import pytest
 
 from emmy.commands.trace import graph_from_code
 from emmy.compiler.context import Context
+from emmy.compiler.dtype import F16
 from emmy.compiler.ir.axis import Axis
 from emmy.compiler.ir.expression import Literal
 from emmy.compiler.ir.kernel.ir import pack_smem, swizzle_xor
@@ -84,7 +85,7 @@ def test_compute_fill_suffixes_nested_ssa_for_every_vector_cell() -> None:
         return list(stmts), "out"
 
     operand = SyncOperand(tag="b", shape=(1, 8), value=value)
-    transport = SyncTransport(operands=(operand,), slab_dtype="half", cta=CtaTile(Literal(0, "int"), 1), elem_bytes=2)
+    transport = SyncTransport(operands=(operand,), slab_dtype=F16, cta=CtaTile(Literal(0, "int"), 1))
     fill = Body(tuple(transport.fill(k0=Literal(0, "int"), slot=Literal(0, "int"), k0_cur=Literal(0, "int"))))
 
     assert {acc.name for acc in fill.accums} == {f"acc__c{i}" for i in range(8)}
@@ -145,7 +146,7 @@ def test_no_copied_slab_lands_misaligned_behind_an_odd_neighbour() -> None:
     16 B ``cp.async`` write on an 8 mod 16 address; :func:`pack_smem` must now round it up.
     """
     [odd] = parse_body("Smem(name=_bs_smem, extents=(3, 4), dtype=half)")  # 24 B — leaves the cursor at 8 mod 16
-    copied = slab_smem("_a_smem", 8, 64, "half", align=_fill_align(64, 2, "NONE"))
+    copied = slab_smem("_a_smem", 8, 64, F16, align=_fill_align(64, 2, "NONE"))
     offsets, _total = pack_smem([odd, copied])
     assert offsets["_a_smem"] % 16 == 0, f"copied slab at {offsets['_a_smem']}, not 16 B-aligned"
 

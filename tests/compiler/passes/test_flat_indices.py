@@ -82,7 +82,7 @@ def test_what_its_dimensions_define_keeps_them() -> None:
     """A Volta layout is a function of row and column, and a copy's lane offset is split over the tile's row and
     column: both keep the shared slab's coordinates. The copy's source is one allocation and goes flat."""
     body = (
-        "Smem(name=s, extents=(16, 64), dtype=float)\n"
+        "Smem(name=s, extents=(16, 64))\n"
         "f32 x = load A[i, j, k]\n"
         "f32 s[i, k] = x swizzle=V70A\n"
         "f32 s[i, k] = x swizzle=B128\n"

@@ -30,7 +30,6 @@ from dataclasses import dataclass, field, replace
 from functools import partial
 from itertools import count
 
-from emmy.compiler.backend.cuda.dtype import cuda_name
 from emmy.compiler.dim import Dim
 from emmy.compiler.dtype import F32
 from emmy.compiler.ir.address import BYTE_SLAB_PAD, clamp_bound, clamp_to, gmem_axis_step, unclamped
@@ -924,8 +923,7 @@ def _slab_operands(
                 coords=_box_origin(index_srcs[i], tile=tile, tile_base=tile_base, k_axis=k_axis, sibling=sibling),
                 index=_stacked(index, bk_elems, block[1]) if atoms > 1 else index,
                 swizzle=swizzles[i],
-                dtype=cuda_name(elem) if elem is not None else None,
-                elem_bytes=elem.nbytes if elem is not None else None,
+                dtype=elem,
                 trans=i == 1 and b_trans,
                 atoms=atoms,
                 pad_cols=pads[i],
@@ -1087,11 +1085,11 @@ def _a_slab_operand(
             row_body=row_body,
             cta=cta,
             stat=cone_stat(c.operands[0], k_name, axes),
-            dtypes={nm: cuda_name(dt) for nm, dt in cone_stat_dtypes(pro, stats, inputs).items()},
+            dtypes=cone_stat_dtypes(pro, stats, inputs),
         )
     before = None
     if chunk_stats:
-        chunk_dtypes = {nm: cuda_name(dt) for nm, dt in cone_stat_dtypes(chunk_pro, chunk_stats, inputs).items()}
+        chunk_dtypes = cone_stat_dtypes(chunk_pro, chunk_stats, inputs)
         prologue += stat_rows(chunk_stats, _stat_slab, row_axis, dtypes=chunk_dtypes)
         reads = [nm for nm in stats if nm in Body(chunk_pro).ssa_uses - Body(chunk_pro).definitions.keys()]
         stat = next(edge for edge in c.operands[0].operands if set(chunk_stats) & set(edge.exposes))
@@ -1186,7 +1184,7 @@ def _sync_operands(
     if pads[0]:
         a_op = replace(a_op, pad_cols=pads[0])
     if elems:
-        a_op = replace(a_op, dtype=cuda_name(elems[0]), elem_bytes=elems[0].nbytes)
+        a_op = replace(a_op, dtype=elems[0])
     # One B slab per fold channel (the multi-B node fills each projection's weights alongside the
     # one compute-filled A slab); drain order is (A, B0, B1, …) regardless of which fill each rides.
     # ``swizzles`` are the per-operand slab modes (the mma tier's ``slab_swizzles``; NONE elsewhere):
@@ -1226,7 +1224,7 @@ def _sync_operands(
 
             op = SyncOperand(tag=tag, shape=(bk_elems * b_atoms, mn[1].tile // b_atoms), value=b_value, swizzle=swizzles[1])
             if elems:
-                op = replace(op, dtype=cuda_name(elems[1]), elem_bytes=elems[1].nbytes)
+                op = replace(op, dtype=elems[1])
             sync_ops.append(op)
             drain.append(op)
             continue
@@ -1246,7 +1244,7 @@ def _sync_operands(
             pads=pads,
             roles=(1,),
         )
-        op = replace(op, tag=tag, dtype=cuda_name(elems[1]) if elems else op.dtype, elem_bytes=elems[1].nbytes if elems else op.elem_bytes)
+        op = replace(op, tag=tag, dtype=elems[1] if elems else op.dtype)
         async_ops.append(op)
         drain.append(op)
     return tuple(drain), tuple(sync_ops), tuple(async_ops), prologue
@@ -1334,7 +1332,7 @@ def _packed_operands(
 
     # A packed pair's scale slab rides the transport's fragment dtype; an fp8 byte's keeps the f32
     # its scale multiplies in, so the drain's product rounds once, exactly where the fill's does.
-    f32_scale = dict(dtype="float", elem_bytes=4) if per_byte == 1 else {}
+    f32_scale = dict(dtype=F32) if per_byte == 1 else {}
 
     def channel_operands(channel, edge, tag: str) -> tuple[SyncOperand, Operand]:
         """One channel's ``(scale slab, bits slab)``: the scale compute-filled off ITS decode cone's
@@ -1391,8 +1389,7 @@ def _packed_operands(
             index=bits_index,
             trans=True,
             pad_cols=pad,
-            dtype=cuda_name(bits_dtype),
-            elem_bytes=bits_dtype.nbytes,
+            dtype=bits_dtype,
             scale=(scale_op.slab, block, per_byte),
         )
         return scale_op, bits_op
@@ -1487,8 +1484,7 @@ def _block_scaled_operands(
             index=index,
             trans=trans,
             pad_cols=pad,
-            dtype=cuda_name(dtype),
-            elem_bytes=dtype.nbytes,
+            dtype=dtype,
             scale=scale,
         )
 
@@ -1701,7 +1697,7 @@ def _staged(ops: _AtomOps, cells, offset, mn: tuple[Side, Side]):
             pad=0 if tma else BYTE_SLAB_PAD,
             k_axis=k_axis,
         )
-        common = dict(slab_dtype=cuda_name(elem), elem_bytes=elem.nbytes, cta=cta)
+        common = dict(slab_dtype=elem, cta=cta)
         # Pure copies when both operands' codes are stored; a fill underneath them when this
         # matmul computes its own A codes, which is the same two-group shape the packed
         # byte-slab stage takes for its scale fill. ``staging._block_scaled_warp_stage`` offers
@@ -1788,7 +1784,7 @@ def _staged(ops: _AtomOps, cells, offset, mn: tuple[Side, Side]):
                 pads=ops.slab_pads(),
                 elems=ops.slab_elems(),
             )
-        common = dict(slab_dtype=cuda_name(elem), elem_bytes=elem.nbytes, cta=cta)
+        common = dict(slab_dtype=elem, cta=cta)
         if stage.transport == "smem-tma":
             # TWO operand groups, not one. cp.async can ride inside the ``sync`` producer because
             # both are issued by the same threads under one CTA barrier; a TMA copy is armed on an
@@ -1858,8 +1854,7 @@ def _staged(ops: _AtomOps, cells, offset, mn: tuple[Side, Side]):
         operands = (a_op, *b_ops)
         common = dict(
             operands=operands,
-            slab_dtype=cuda_name(elem),
-            elem_bytes=elem.nbytes,
+            slab_dtype=elem,
             cta=cta,
         )
         transport = TmaTransport(**common) if stage.transport == "smem-tma" else CpAsyncTransport(**common)
@@ -3258,7 +3253,7 @@ class _FlashOps(_MmaOps):
         cta = _cta(mn, self.tile.atom.lanes, self.tile.launch_threads)
 
         def group(operands: tuple, tag: str = ""):
-            common = dict(slab_dtype=cuda_name(elem), elem_bytes=elem.nbytes, cta=cta)
+            common = dict(slab_dtype=elem, cta=cta)
             if self.stage.transport == "smem":
                 # Volta: the same slabs, filled by the blocking vector copy the CTA barrier closes; a
                 # two-slot ring splits that copy so the next chunk's loads fly under this one's softmax.
@@ -3431,7 +3426,7 @@ class _FlashOps(_MmaOps):
             swizzle=query.swizzle,
         )
         decl = slab_smem(
-            query.slab, query.shape[0], query.shape[1], cuda_name(elem), align=_fill_align(query.shape[1], elem.nbytes, query.swizzle)
+            query.slab, query.shape[0], query.shape[1], elem, align=_fill_align(query.shape[1], elem.nbytes, query.swizzle)
         )
         return [decl, *fill, *cp_async_commit(), *cp_async_wait(0)]
 

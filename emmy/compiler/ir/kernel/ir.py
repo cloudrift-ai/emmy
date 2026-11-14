@@ -459,7 +459,7 @@ _MAX_CTAS = 65536
 def pack_smem(smems) -> tuple[dict[str, int], int]:  # noqa: ANN001 — smems: Iterable[Smem]
     """Pack ``Smem`` buffers into one contiguous pool, padding each to its
     alignment. Walks the buffers in order, aligns the running cursor to
-    ``max(nbytes_of(dtype), s.align)`` before placing each buffer, and returns
+    ``max(dtype.nbytes, s.align)`` before placing each buffer, and returns
     ``({name: byte_offset}, total_padded_bytes)``.
 
     Single source of truth for the per-CTA smem footprint: ``KernelOp.smem_bytes``
@@ -469,17 +469,15 @@ def pack_smem(smems) -> tuple[dict[str, int], int]:  # noqa: ANN001 — smems: I
     e.g. a 512/1024 B swizzle-atom-aligned operand)."""
     from math import prod  # noqa: PLC0415
 
-    from emmy.compiler.backend.cuda.dtype import nbytes_of  # noqa: PLC0415
-
     offsets: dict[str, int] = {}
     cursor = 0
     for s in smems:
         elements = prod(int(e) for e in s.extents) if s.extents else 1
-        align = max(nbytes_of(s.dtype), int(s.align) if s.align else 0)
+        align = max(s.dtype.nbytes, int(s.align) if s.align else 0)
         if align:
             cursor = (cursor + align - 1) // align * align
         offsets[s.name] = cursor
-        cursor += elements * nbytes_of(s.dtype)
+        cursor += elements * s.dtype.nbytes
     return offsets, cursor
 
 

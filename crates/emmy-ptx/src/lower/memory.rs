@@ -119,25 +119,6 @@ fn access(bytes: i64, lanes: usize) -> Option<Access> {
     }
 }
 
-/// The element type a shared declaration names: a dtype, or the C type the CUDA renderer declares the array with.
-/// `unsigned char` is the renderer's spelling of a slab of packed fp4 pairs.
-fn shared_dtype(name: &str) -> Option<DType> {
-    name.parse().ok().or(match name {
-        "float" => Some(DType::F32),
-        "__half" => Some(DType::F16),
-        "__nv_bfloat16" => Some(DType::BF16),
-        "int" => Some(DType::I32),
-        "unsigned int" => Some(DType::U32),
-        "long long" => Some(DType::I64),
-        "unsigned long long" => Some(DType::U64),
-        "bool" => Some(DType::Bool),
-        "unsigned char" => Some(DType::F4E2M1x2),
-        "__nv_fp8_e4m3" => Some(DType::F8E4M3),
-        "__nv_fp8_e5m2" => Some(DType::F8E5M2),
-        _ => None,
-    })
-}
-
 /// The bytes of one entry of a page table: an address.
 const PAGE_ENTRY_BYTES: i64 = 8;
 
@@ -257,9 +238,7 @@ impl Lowerer {
 
     /// The alignment and the size in bytes of a shared declaration.
     fn shared_extent(&self, smem: &Smem) -> Result<(Elem, u32, u64)> {
-        let dtype = shared_dtype(&smem.dtype)
-            .ok_or_else(|| self.no_rule(format_args!("a shared array of {}", smem.dtype)))?;
-        let elem = self.elem(Some(dtype))?;
+        let elem = self.elem(Some(smem.dtype))?;
         let elements: i64 = smem.extents.iter().product();
         let align = smem.align.max(elem.bytes());
         if elements < 0 || !(1..=1 << 16).contains(&align) || align & (align - 1) != 0 {

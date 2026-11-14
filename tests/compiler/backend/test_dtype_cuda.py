@@ -1,10 +1,5 @@
-"""End-to-end fp16 elementwise chain on the CUDA backend.
-
-Verifies that an fp16-typed graph compiles through NVRTC with the
-``__half`` parameter type + ``cuda_fp16.h`` include + load/store
-conversion intrinsics, runs on the GPU, and returns fp16 numerics that
-match eager numpy within fp16 tolerance.
-"""
+"""Narrow float dtypes on the CUDA backend: fp16, bf16 and fp8 graphs compile, run on the GPU, and return the
+numerics eager gives within the dtype's tolerance."""
 
 from __future__ import annotations
 
@@ -12,7 +7,6 @@ import numpy as np
 import pytest
 
 from emmy.compiler import dtype as dt
-from emmy.compiler.backend.cuda.dtype import canonical_from_cuda_name, cuda_name, nbytes_of
 from emmy.compiler.graph import Graph, Tensor
 from emmy.compiler.ir.base import InputOp
 from emmy.compiler.ir.frontend.ir import MatmulOp, RmsNormOp
@@ -116,65 +110,6 @@ def test_scalar_fp16_matmul_widens_products_before_accumulation():
         compiled = backend.compile(graph)
     result, _ = backend.run(compiled, input_data={"a": a, "b": b})
     np.testing.assert_array_equal(result.outputs["out"], a @ b)
-
-
-def test_cuda_name_int_dtypes():
-    # I32/I64 must map to the C type names the kernel renderer emits in
-    # parameter signatures for graphs whose placeholder inputs carry an
-    # integer dtype (input_ids / position_ids from HF whole-model traces).
-    assert cuda_name(dt.I32) == "int"
-    assert cuda_name(dt.I64) == "long long"
-    # Aliases route through the same mapping.
-    assert cuda_name("int32") == "int"
-    assert cuda_name("int64") == "long long"
-    assert cuda_name("long") == "long long"
-
-
-def test_cuda_name_table_consistent_with_byte_sizes():
-    """Every C spelling in ``_CUDA_NAME`` resolves through ``nbytes_of`` to its dtype's own byte size."""
-    from emmy.compiler.backend.cuda.dtype import _CUDA_NAME
-
-    for dtype, cname in _CUDA_NAME.items():
-        assert nbytes_of(cname) == dtype.nbytes, (dtype.name, cname)
-
-
-def test_every_shared_c_spelling_names_the_dtype_its_inverse_returns():
-    """The table is not injective — one-byte dtypes share ``unsigned char`` — so the inverse must
-    pick, and the pick has to be written down. Dict order would decide it otherwise, invisibly, and
-    the next byte-wide dtype would flip it."""
-    from collections import Counter
-
-    from emmy.compiler.backend.cuda.dtype import _CUDA_NAME, _SHARED_CUDA_NAMES
-
-    shared = {name for name, n in Counter(_CUDA_NAME.values()).items() if n > 1}
-    assert shared == set(_SHARED_CUDA_NAMES), "a C spelling gained or lost a second dtype without a declared winner"
-    for name, canonical in _SHARED_CUDA_NAMES.items():
-        assert canonical_from_cuda_name(name) == canonical
-        assert canonical in {d.name for d, c in _CUDA_NAME.items() if c == name}
-
-
-def test_canonical_from_cuda_name_int_dtypes():
-    # The inverse mapping is what ``Smem``'s render consults to recover the
-    # canonical DataType from a kernel-internal C name.
-    assert canonical_from_cuda_name("int") == "i32"
-    assert canonical_from_cuda_name("long long") == "i64"
-
-
-def test_nbytes_of_int_dtypes():
-    # ``nbytes_of`` is the per-element size table used by the slab budget
-    # / smem accounting. Must agree with the canonical DataType sizes.
-    assert nbytes_of(dt.I32) == 4
-    assert nbytes_of(dt.I64) == 8
-    assert nbytes_of("i32") == 4
-    assert nbytes_of("i64") == 8
-
-
-def test_fp8_cuda_traits():
-    # Registry completeness for the fp8 storage dtypes: the C names a shared declaration spells, 1-byte accounting.
-    assert cuda_name(dt.F8E4M3) == "__nv_fp8_e4m3"
-    assert cuda_name(dt.F8E5M2) == "__nv_fp8_e5m2"
-    for spelling in (dt.F8E4M3, "f8e4m3", "float8_e4m3fn", "__nv_fp8_e4m3", "__nv_fp8_e5m2"):
-        assert nbytes_of(spelling) == 1
 
 
 @requires_cuda

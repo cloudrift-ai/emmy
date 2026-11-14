@@ -46,8 +46,8 @@ def _packed_drains(kernels, dtype: str = "f16") -> list:
 
 
 def _slabs(kernels) -> dict[str, tuple[str, int]]:
-    """Each shared slab of ``kernels`` as ``(element type, elements)``."""
-    return {slab.name: (slab.dtype, int(np.prod(slab.extents))) for slab in statements(kernels, Smem)}
+    """Each shared slab of ``kernels`` as ``(dtype name, elements)``."""
+    return {slab.name: (slab.dtype.name, int(np.prod(slab.extents))) for slab in statements(kernels, Smem)}
 
 
 def _is_block_scaled(kernels) -> bool:
@@ -306,9 +306,9 @@ def test_two_spelled_weights_lower_to_one_kernel_with_a_byte_slab_per_channel(tm
     assert _packed_drains(kernels)
     # Channel 0 keeps the bare slab names; channel 1 gets its own bits and scale slabs.
     slabs = _slabs(kernels)
-    assert slabs["_b_smem"] == slabs["_b_x1_smem"] == ("unsigned char", 4096)
-    assert slabs["_bs_smem"] == slabs["_b_x1s_smem"] == ("__half", 128)
-    assert [name for name in slabs if name.startswith("_a")] == ["_a_smem"] and slabs["_a_smem"][0] == "__half", "one shared A slab"
+    assert slabs["_b_smem"] == slabs["_b_x1_smem"] == ("f4e2m1x2", 4096)
+    assert slabs["_bs_smem"] == slabs["_b_x1s_smem"] == ("f16", 128)
+    assert [name for name in slabs if name.startswith("_a")] == ["_a_smem"] and slabs["_a_smem"][0] == "f16", "one shared A slab"
 
 
 @pytest.mark.parametrize(
@@ -660,8 +660,8 @@ def test_the_spelled_checkpoint_lowers_to_the_packed_drain(tmp_path):
     # tile_n=64 rows of (bk_elems/2 = 16) bytes + the 16 B pad, two ring slots; the scale slab is
     # 64 rows of bk = 2, single-buffer.
     slabs = _slabs(kernels)
-    assert slabs["_b_smem"] == ("unsigned char", 4096)
-    assert slabs["_bs_smem"] == ("__half", 128)
+    assert slabs["_b_smem"] == ("f4e2m1x2", 4096)
+    assert slabs["_bs_smem"] == ("f16", 128)
 
 
 def test_a_bf16_checkpoint_lowers_to_the_bf16_packed_drain(tmp_path):
@@ -675,7 +675,7 @@ def test_a_bf16_checkpoint_lowers_to_the_bf16_packed_drain(tmp_path):
     with pinned_knobs(_packed_pins("bf16")):
         lowered, kernels = compile_with_kernels(g, ctx=Context.from_target((8, 9)))
     assert _packed_drains(kernels, "bf16") and not _packed_drains(kernels, "f16")
-    assert _slabs(kernels)["_bs_smem"] == ("__nv_bfloat16", 128)
+    assert _slabs(kernels)["_bs_smem"] == ("bf16", 128)
 
 
 @pytest.mark.parametrize("place", ["fuse", "cut"])
@@ -1068,10 +1068,10 @@ def test_packed_cut_pieces_stage_the_packed_weight_bytes(tmp_path, stage):
     assert len(kernels) == 2
     for kernel in kernels.values():
         slabs = _slabs(kernel)
-        assert slabs["_b_smem"][0] == "unsigned char"
+        assert slabs["_b_smem"][0] == "f4e2m1x2"
         assert _packed_drains(kernel)
         reads_one = any(load.input == "one" for load in statements(kernel, Load))
-        assert slabs["_a_smem"][0] == "__half" and reads_one, "the piece computes x + 1 itself"
+        assert slabs["_a_smem"][0] == "f16" and reads_one, "the piece computes x + 1 itself"
         if stage.endswith("tma"):
             assert any((copy.smem, copy.desc) == ("_b_smem", "_desc_b") for copy in statements(kernel, TmaLoad))
             assert not statements(kernel, CpAsyncCopy)
@@ -1117,7 +1117,7 @@ def test_packed_cut_pieces_match_the_decoded_oracle_and_the_fused_kernel(tmp_pat
     staged, weights, kernels = _run_cut_siblings(
         tmp_path / "cut", {**_CUT_PINS, "TILE": f"{K16}/f1x2/k2", "WORK": "w1x2", "STAGE": stage}, x
     )
-    bytes_staged = all(_slabs(kernel)["_b_smem"][0] == "unsigned char" for kernel in kernels.values())
+    bytes_staged = all(_slabs(kernel)["_b_smem"][0] == "f4e2m1x2" for kernel in kernels.values())
     assert len(kernels) == 2 and bytes_staged, "the pins did not reach the byte slab"
     fused, _, kernels = _run_cut_siblings(tmp_path / "fused", {"PLACE@map.1/inner": "fuse", "REDUCE": ""}, x)
     assert len(kernels) == 1

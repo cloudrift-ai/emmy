@@ -187,7 +187,7 @@ fn wgmma_is_refused_off_sm_90a_and_out_of_its_forms() {
 fn a_tensor_copy_arrives_at_a_barrier_every_thread_waits_on() {
     let body = "
         Smem(name=tile, extents=(2, 16, 16), dtype=f32, align=128)
-        Smem(name=bar, extents=(2), dtype=`unsigned long long`)
+        Smem(name=bar, extents=(2), dtype=u64)
         TmaDescriptor(name=x_desc, src_buf=x, src_shape=(64, 16), box_extents=(16, 16))
         if t == 0:
             MbarrierInit(mbar=bar, count=1, slot=0)

@@ -67,7 +67,7 @@ def _graph_with_tile() -> Graph:
 
 def _over_budget_kernel() -> KernelOp:
     """A ``KernelOp`` whose 16 KiB smem slab exceeds the 2 KiB test cap."""
-    return KernelOp(body=[Smem(name="buf", extents=(4096,), dtype="float")], name="k_test")
+    return KernelOp(body=[Smem(name="buf", extents=(4096,))], name="k_test")
 
 
 def _build_pipeline() -> Pipeline:
@@ -238,7 +238,7 @@ def _two_pass_tile_pipeline(
             raise RuleSkipped(f"nothing lowers BN={bn}")
         fits = bn <= 8 or overflowing not in (None, root.id)
         extents = (64,) if fits else (4096,)  # 256 B fits the 2 KiB cap; 16 KiB overflows
-        return KernelOp(body=[Smem(name="buf", extents=extents, dtype="float")], name="k_test", knobs={"BN": bn})
+        return KernelOp(body=[Smem(name="buf", extents=extents)], name="k_test", knobs={"BN": bn})
 
     emit_rule = Rule(
         name="__emit_tiles__",
@@ -538,7 +538,7 @@ def _composed_route_pipeline(refused: dict[str, set[int]], *, rows: tuple[int, .
         bn = root.op.knobs["BN"]
         if bn in refused.get(root.op.name, ()):
             raise RuleSkipped("kernel binder refuses this row's projection ownership", reject=True)
-        return KernelOp(body=[Smem(name="buf", extents=(64,), dtype="float")], name=root.op.name, knobs={"BN": bn})
+        return KernelOp(body=[Smem(name="buf", extents=(64,))], name=root.op.name, knobs={"BN": bn})
 
     def stamp(root):
         if "LOOPIFY" in root.op.knobs:

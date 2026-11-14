@@ -99,8 +99,8 @@ def test_the_cut_linear_lowers_to_the_fp8_byte_slab(tmp_path):
         for load in b_loads
     ), "one drain reads the e4m3 bytes and their scale"
     # tile_n = 32 rows of (128 bytes + the 16 B pad), two ring slots; one f32 scale per row.
-    slabs = {smem.name: (smem.dtype, math.prod(smem.extents)) for smem in statements(kernels, Smem)}
-    assert slabs["_b_smem"] == ("__nv_fp8_e4m3", 9216) and slabs["_bs_smem"] == ("float", 32)
+    slabs = {smem.name: (smem.dtype.name, math.prod(smem.extents)) for smem in statements(kernels, Smem)}
+    assert slabs["_b_smem"] == ("f8e4m3", 9216) and slabs["_bs_smem"] == ("f32", 32)
     assert not [load for load in statements(kernels, FragmentLoad) if load.src_dtype.name.startswith("f4")], "no packed-pair table"
 
 
