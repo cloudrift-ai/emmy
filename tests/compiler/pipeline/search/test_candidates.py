@@ -85,6 +85,7 @@ def test_a_candidate_file_holds_candidates_of_its_hardware_goldens_groups(path: 
     assert (document.programs, document.kernels, document.routing) == (golden.programs, golden.kernels, golden.routing)
     groups = _groups(golden)
     for key, rows in _groups(document).items():
+        key = key if key in groups else (key[0], "{}", key[2])  # a golden row that records no sizes counts at every size
         assert key in groups, f"{rows[0].name}: no group of the golden"
         assert len(rows) <= MOST, f"{rows[0].name}: {len(rows)} candidates"
         schedules = [_schedule(row) for row in rows]

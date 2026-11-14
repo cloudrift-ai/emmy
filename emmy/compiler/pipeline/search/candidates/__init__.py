@@ -87,6 +87,15 @@ def _groups(document: GoldenFile) -> dict[tuple, list[Row]]:
     return out
 
 
+def _of_group(groups: dict[tuple, list[Row]], key: tuple) -> list[Row]:
+    """The rows of ``groups`` on the golden group ``key``. A golden row that records no sizes counts at every size of
+    its kernel (``GoldenFile.target_rows``), so its group takes the kernel's rows in its regime at any sizes."""
+    identity, sizes, regime = key
+    if sizes != "{}":
+        return groups.get(key, [])
+    return [row for (other, _sizes, lane), rows in groups.items() if (other, lane) == (identity, regime) for row in rows]
+
+
 def _schedule(row: Row) -> tuple:
     """A row's schedule as a key: its knobs by value, the ones at their OFF value left out."""
     return tuple(sorted((key, str(value)) for key, value in (row.knobs or {}).items() if not is_off_value(family_of(key), value)))
@@ -141,10 +150,10 @@ def build(golden: GoldenFile, freezes: Sequence[GoldenFile] = (), existing: Gold
         pool = GoldenPool(golden.gpu_name or "", tuple(golden.compute_cap), regime, golden.kernel(head.kernel), dict(head.bindings), timed)
         wanted = target(space_size(pool))
         taken = {_schedule(row) for row in rows}
-        kept = [row for row in held.get(key, []) if _schedule(row) not in taken]
+        kept = [row for row in _of_group(held, key) if _schedule(row) not in taken]
         taken.update(_schedule(row) for row in kept)
         fresh = {}  # one row per schedule the group does not hold yet
-        for row in measured.get(key, []):
+        for row in _of_group(measured, key):
             if row.measured and _schedule(row) not in taken:
                 fresh.setdefault(_schedule(row), row)
         names = {row.name for row in kept}
@@ -153,7 +162,7 @@ def build(golden: GoldenFile, freezes: Sequence[GoldenFile] = (), existing: Gold
             Row(
                 name=next(name for name in numbers if name not in names),
                 kernel=head.kernel,
-                bindings=dict(head.bindings),
+                bindings=dict(head.bindings or row.bindings),
                 pins=dict(head.pins),
                 knobs=dict(row.knobs),
                 measurements=row.measurements,
