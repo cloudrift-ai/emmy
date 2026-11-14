@@ -16,7 +16,7 @@ _NONE = {"median": None, "worst": None, "groups": 0}
 
 
 def _summary(gpu: str, regret1: dict, regret10: dict) -> dict:
-    return {"axes": {"half": "current", "gpu": gpu, "H_opt": 3}, "groups": 4, "metrics": {"regret1": regret1, "regret10": regret10}}
+    return {"axes": {"half": "current", "gpu": gpu}, "groups": 4, "metrics": {"regret1": regret1, "regret10": regret10}}
 
 
 def test_each_card_with_a_regret_is_one_clause_without_the_metrics_it_lacks_and_dropped_rows_are_counted():

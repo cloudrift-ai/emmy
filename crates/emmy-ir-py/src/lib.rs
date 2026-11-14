@@ -9,6 +9,7 @@ mod convert;
 mod expression;
 mod fragment;
 mod lambda;
+mod ptx;
 mod statement;
 
 /// The elementwise tables the Python `ElementwiseImpl` reads, each a view of the operations' properties.
@@ -70,6 +71,7 @@ fn emmy_ir_module(m: &Bound<'_, PyModule>) -> PyResult<()> {
     body::register(m)?;
     fragment::register(m)?;
     lambda::register(m)?;
+    ptx::register(m)?;
     elementwise_tables(m)?;
     Ok(())
 }

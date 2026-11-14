@@ -22,11 +22,11 @@ from emmy.compiler.pipeline.search.prior.report import (
 )
 
 
-def _measured(key: str, latencies: list[float], *, gpu: str = "card-a", h_opt: float = 3.0) -> MeasuredGroup:
+def _measured(key: str, latencies: list[float], *, gpu: str = "card-a") -> MeasuredGroup:
     """A benched pool whose rows carry one feature, ``D_a``, ascending — so a scorer that ranks by ``D_a``
     ranks them in a known order and the metric values are hand-checkable."""
     feats = [{"D_a": float(i)} for i in range(len(latencies))]
-    return MeasuredGroup.from_measured(key, gpu, key, h_opt, latencies, feats)
+    return MeasuredGroup.from_measured(key, gpu, key, latencies, feats)
 
 
 def _golden(key: str, n_rows: int, golden_row: int, *, total: int | None = None, tier: str = "warp") -> GoldenGroup:
@@ -63,16 +63,16 @@ def test_a_pool_too_small_for_a_metric_is_excluded_and_the_count_says_so():
     assert summary.metrics["regret10"]["groups"] == 1  # needs eleven — a top-10 over ten rows is the whole pool
 
 
-def test_measured_summaries_key_on_card_and_compile_regime():
-    """Cards never pool, and neither do nvcc regimes — ``-O1`` and ``-O3`` reorder the same candidates."""
+def test_measured_summaries_key_on_card():
+    """Cards never pool: each card is a cell of its own, over every pool measured on it."""
     groups = [
-        _measured("a", [20.0, 10.0], gpu="card-a", h_opt=3.0),
-        _measured("b", [20.0, 10.0], gpu="card-a", h_opt=1.0),
-        _measured("c", [20.0, 10.0], gpu="card-b", h_opt=3.0),
+        _measured("a", [20.0, 10.0], gpu="card-a"),
+        _measured("b", [20.0, 10.0], gpu="card-a"),
+        _measured("c", [20.0, 10.0], gpu="card-b"),
     ]
     summaries = measured_summaries("offline", groups, _by_d_a)
 
-    assert [(c.axes["gpu"], c.axes["H_opt"]) for c in summaries] == [("card-a", "O1"), ("card-a", "O3"), ("card-b", "O3")]
+    assert [(c.axes["gpu"], c.groups) for c in summaries] == [("card-a", 2), ("card-b", 1)]
     assert all(c.axes["half"] == "offline" for c in summaries)
 
 
@@ -114,7 +114,7 @@ def test_the_report_serializes_to_a_diffable_schema():
     obj = report.to_json()
 
     assert obj["header"] == {"dataset": "db", "source": "dataset.db"}
-    assert obj["summaries"][0]["axes"] == {"half": "offline", "gpu": "card-a", "H_opt": "O3"}
+    assert obj["summaries"][0]["axes"] == {"half": "offline", "gpu": "card-a"}
     assert obj["summaries"][0]["groups"] == 1
     assert EvalReport({"dataset": "db", "source": "dataset.db"}, summaries).to_json() == obj
 

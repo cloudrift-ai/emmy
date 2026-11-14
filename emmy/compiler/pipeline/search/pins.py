@@ -443,8 +443,7 @@ def fast_math_knobs(knobs: Mapping) -> bool:
 
 
 def precision_trading_pins(pins: Mapping) -> bool:
-    """Whether recorded pins enable a precision-trading compiler or NVCC policy: a decision the standard regime
-    leaves off."""
+    """Whether recorded pins enable a precision-trading decision: one the standard regime leaves off."""
     from emmy.compiler.pipeline.search.space import precision_pins  # noqa: PLC0415
 
     standard = precision_pins({})

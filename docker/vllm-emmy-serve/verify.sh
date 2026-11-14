@@ -1,7 +1,7 @@
 #!/bin/bash
 # Verify a baked per-model serving image on the target GPU: cold-start fully offline (HF_HUB_OFFLINE is
 # baked in; no HF_TOKEN passed) — proving zero downloads — then issue one completion and
-# assert the cubin set did not grow: an empty diff = 100% cache hit (zero nvcc compiles).
+# assert the cubin set did not grow: an empty diff = 100% cache hit (zero ptxas runs).
 #
 #   MODEL=google/gemma-4-12B-it IMAGE=cloudriftai/vllm-emmy-<slug>:TAG [GPU_DEVICE=1] ./verify.sh
 set -euo pipefail

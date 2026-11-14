@@ -270,7 +270,7 @@ def _metric(block: dict, key: str, fmt: str) -> str:
 # decision made here and not a side effect of dict insertion.
 _REPORT_TABLES = {
     "measured": (
-        ["half", "gpu", "H_opt"],
+        ["half", "gpu"],
         [
             ("rho", lambda c: _metric(c.metrics["spearman"], "median", "{:+.2f}")),
             ("regret@1", lambda c: _metric(c.metrics["regret1"], "median", "{:.2f}x")),

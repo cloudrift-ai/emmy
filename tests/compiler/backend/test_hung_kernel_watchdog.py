@@ -40,7 +40,28 @@ def test_timed_launch_raises_hungkernelerror_promptly() -> None:
         from emmy.compiler.dim import Dim
         from emmy.compiler.dtype import I32
 
-        source = r'extern "C" __global__ void spin(volatile int* f) { while (f[0] == 0) {} }'
+        from emmy.compiler.backend.cuda.device import compute_capability
+
+        major, minor = compute_capability()
+        # Spin until f[0] is set, reading it from memory each time.
+        source = f'''
+        .version {'8.7' if major >= 10 else '7.8'}
+        .target sm_{major}{minor}
+        .address_size 64
+        .visible .entry spin(.param .u64 f)
+        {{
+            .reg .pred %p;
+            .reg .b32 %v;
+            .reg .b64 %f;
+            ld.param.u64 %f, [f];
+            cvta.to.global.u64 %f, %f;
+        WAIT:
+            ld.volatile.global.u32 %v, [%f];
+            setp.eq.u32 %p, %v, 0;
+            @%p bra WAIT;
+            ret;
+        }}
+        '''
         plan = ExecutionPlan(
             "cuda", ["f"], [], [BufferSpec("f", (Dim(1),), I32, "input")], {}, {},
             [LaunchSpec("spin", "spin", ("f",), ((1,), (1,), (1,)), ((1,), (1,), (1,)), 0, ())],

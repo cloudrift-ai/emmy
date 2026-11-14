@@ -15,7 +15,6 @@ the signature alone.
 
 from __future__ import annotations
 
-import re
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
@@ -44,51 +43,6 @@ _TENSOR_CORE_GEN = gpu.TENSOR_CORE_GEN
 # offline prior (the ``D_*`` CTA / waves features in ``features.knob_features``) to
 # size tiles to the device — keep CTA count near ~1-2 waves over the SMs.
 DEFAULT_SM_COUNT = gpu.DEFAULT_GPU.sm_count
-
-
-def _env_compile_flags() -> str:
-    """Effective nvcc flags: the flush and fusion decisions' flags and custom overrides.
-
-    Folded into Context.structural_key, beside the precision decisions themselves, so timing evidence cannot cross
-    arithmetic regimes."""
-    from emmy.compiler.backend.cuda.nvcc import effective_flags  # noqa: PLC0415
-
-    return " ".join(effective_flags())
-
-
-# The cicc optimization level as it is spelled on the nvcc command line, with the ``-Xcicc``
-# forwarding prefix when present. nvcc's own default is -O3, which is why an absent token reads
-# as 3 (:func:`split_opt_level`) — the compile / run default of ``""`` IS the deployable regime.
-_OPT_TOKEN = re.compile(r"(?:-Xcicc\s+)?-O(\d)")
-
-
-#: The fast-math lane's name: the nvcc flag the umbrella passed until every approximate instruction became an
-#: operation of the kernel body. No flag list holds it now (``backend.cuda.nvcc.precision_flags``). A dataset still
-#: keys the lane by it (``dataset.regime_of``), and a caller that hands :meth:`Context.from_target` a flag string
-#: alone names the umbrella by it.
-FAST_MATH_FLAG = "--use_fast_math"
-
-
-def split_opt_level(compile_flags: str) -> tuple[int, str]:
-    """Split effective nvcc flags into ``(cicc opt level, everything else)``.
-
-    ONE parse, shared by the two places the opt level matters: the ``H_opt`` feature
-    (:meth:`Context.features`) and the identity a measurement is stored under
-    (:meth:`Context.structural_key`). They must agree — the deploy evidence tiers gate on
-    ``H_opt`` and then look rows up by ``structural_key``, so a regime the two spell differently
-    is a row that is declared deployable and is then unreadable at a deploy.
-
-    Splitting rather than digesting the raw string is what makes ``""`` (compile / run's default)
-    and ``"-Xcicc -O3"`` ONE regime, as they physically are — keyed on the raw string they were
-    two, and every ``-O3``-pinned row was invisible to a default deploy. The residual keeps every
-    other flag verbatim, so ``--ftz=true`` (which genuinely changes codegen) stays its own
-    partition."""
-    opt = 3
-    m = _OPT_TOKEN.search(compile_flags)
-    if m is not None:
-        opt = int(m.group(1))
-        compile_flags = compile_flags[: m.start()] + compile_flags[m.end() :]
-    return opt, " ".join(compile_flags.split())
 
 
 def _max_dynamic_smem_for(cc: tuple[int, int]) -> int:
@@ -174,7 +128,7 @@ class Context:
     # identity that separates same-die SKUs (H100 vs H200: identical cc + SM features,
     # different VRAM) — the ``perf`` table's ``gpu`` key column, so cross-hardware
     # measurements never collide. NOT in ``structural_key``, which spells the regime (compute
-    # capability + compiler flags) and nothing about the card. ``None`` ⇒ unknown.
+    # capability + precision decisions) and nothing about the card. ``None`` ⇒ unknown.
     gpu_name: str | None = None
     # Identifies which backend's perf rows this compile reads/writes — the
     # tune DB keys ``perf`` by the card, the regime, the kernel and ``backend``. Defaults to
@@ -186,14 +140,9 @@ class Context:
     # measured in — a kernel timed on 16 threads says nothing about one deployed on 6. Empty and 0 on CUDA.
     host_cpu: str = ""
     threads: int = 0
-    # Effective nvcc flags, from the precision decisions plus EMMY_NVCC_FLAGS. Folded into structural_key
-    # so timings under different arithmetic or optimization flags cannot rank one another.
-    # Populated from the environment by probe / from_target.
-    compile_flags: str = ""
-    # Bound precision decisions — the one carrier of the fast-math decision: ``compile_flags`` names it only
-    # at construction (``from_target``), and every reader takes :meth:`precision_pins`. Empty on a directly
-    # constructed context means the standard regime, never the current environment; factories capture the
-    # live policy or an explicitly recorded one.
+    # Bound precision decisions, read through :meth:`precision_pins` and folded into structural_key so timings
+    # under different arithmetic regimes cannot rank one another. Empty on a directly constructed context means the
+    # standard regime, never the current environment; factories capture the live policy or an explicitly recorded one.
     precision: tuple[tuple[str, bool], ...] = ()
     # Measurement regime: kernels timed after L2 eviction cannot rank hot-cache measurements.
     cold_cache: bool = False
@@ -226,7 +175,6 @@ class Context:
         cap: tuple[int, int],
         *,
         gpu_name: str | None = None,
-        compile_flags: str | None = None,
         cold_cache: bool | None = None,
         precision: dict[str, bool] | None = None,
     ) -> Context:
@@ -235,12 +183,9 @@ class Context:
         :mod:`emmy.gpu` registry — used to reconstruct a *golden* config's
         context so it featurizes with its own card's SM count / smem (not the live
         device's). Default ``None`` → the live device (the live-compile path).
-        ``compile_flags`` names the regime the context stands for — the flags a
-        recorded row was measured under — instead of the live environment's.
-        Explicit flags without ``precision`` use their umbrella regime, the one place the decision is read
-        off the flag string; a recorded row's input pins are supplied in ``precision`` — its independent
-        precision overrides, and its cache mode unless ``cold_cache`` says — and spell the flags when none
-        are given. Without either, both capture the live policy.
+        ``precision`` names the regime the context stands for — a recorded row's input pins: its precision
+        decisions, and its cache mode unless ``cold_cache`` says — instead of the live environment's. Without it,
+        the context captures the live policy.
 
         A ``gpu_name`` the registry does not know is a hard error, never a fallback: the caller
         named a specific card, so substituting the live device's properties would featurize that
@@ -248,8 +193,7 @@ class Context:
         construction — :data:`DEFAULT_SM_COUNT` is the most common card in the corpus, so a
         misresolved name produces H_* features identical to a correct one on a GPU-less host.
         Recording goldens on a card before adding it to the registry is exactly when this fires."""
-        from emmy.compiler.backend.cuda.nvcc import precision_flags  # noqa: PLC0415
-        from emmy.compiler.pipeline.search.space import COLD_CACHE, FAST_MATH, precision_pins, regime_pins  # noqa: PLC0415
+        from emmy.compiler.pipeline.search.space import COLD_CACHE, precision_pins, regime_pins  # noqa: PLC0415
 
         spec = gpu.by_name(gpu_name) if gpu_name else None
         if gpu_name and spec is None:
@@ -261,18 +205,12 @@ class Context:
         sm = int(props.get("sm_count") or _live_sm_count())
         # The regime the context stands for: the one the recorded ``precision`` pins spell, or the live one.
         regime = regime_pins(precision)
-        if precision is None and compile_flags is not None:
-            # The one place the decision is read off the flag string: a caller naming only flags names the umbrella.
-            precision = {FAST_MATH.name: FAST_MATH_FLAG in compile_flags.split()}
-        elif compile_flags is None and precision is not None:
-            compile_flags = " ".join(precision_flags(regime))
         return cls(
             compute_capability=cap,
             max_dynamic_smem=_max_dynamic_smem_for(cap),
             sm_count=sm,
             device_props=props,
             gpu_name=spec.name if spec else gpu_name,
-            compile_flags=_env_compile_flags() if compile_flags is None else compile_flags,
             cold_cache=regime[COLD_CACHE.name] if cold_cache is None else cold_cache,
             precision=tuple(precision_pins(precision).items()),
         )
@@ -368,7 +306,7 @@ class Context:
     @property
     def has_tma(self) -> bool:
         """Whether the target can issue TMA (``cp.async.bulk.tensor``) — a Hopper (sm_90) feature.
-        Ada / Ampere have none, and nvcc has no ``sm_89a``, so a TMA stage below sm_90 fails to
+        Ada / Ampere have none, and ptxas has no ``sm_89a``, so a TMA stage below sm_90 fails to
         compile: the schedule declines those rows rather than emitting them."""
         return self.compute_capability >= (9, 0)
 
@@ -378,29 +316,23 @@ class Context:
         Folds in codegen fields and the cache regime used to select measurement evidence. ``compute_capability``
         gates hardware-feature passes (TMA, cp.async, dynamic smem cap);
         anything derived from it (``max_dynamic_smem``) is implied.
-        ``compile_flags`` is folded in because the nvcc opt level genuinely
-        changes the emitted SASS / measured latency (it is NOT a debug flag).
+        Every precision decision is folded in because a row measured under another one
+        timed other machine code.
         As other non-derived knobs land (forced TMA on/off, splitk overrides),
         extend this method explicitly — keep ambient I/O fields out so the
         autotuning cache survives debug-flag flips.
-
-        The flags enter **split** (:func:`split_opt_level`), never raw, so that one regime has one
-        key however it is spelled.
         """
-        from emmy.compiler.pipeline.search.space import precision_overrides  # noqa: PLC0415
         from emmy.compiler.structural import digest  # noqa: PLC0415
 
         regime = ("cold-cache",) if self.cold_cache else ()
-        overrides = tuple(precision_overrides(self.precision_pins()).items())
-        precision = ("precision", overrides) if overrides else ()
         cpu = ("cpu", self.host_cpu, self.threads) if self.backend_name == "cpu" else ()
-        return digest("Context", self.compute_capability, *split_opt_level(self.compile_flags), *precision, *regime, *cpu)
+        return digest("Context", self.compute_capability, ("precision", tuple(self.precision_pins().items())), *regime, *cpu)
 
     def hardware_id(self) -> str:
         """A stable per-card identity for the ``perf`` table's ``gpu`` key column: the PCIe
         product name when known, else a digest of the device-physical regime (``H_*``
         features + capability). Separates same-die SKUs (H100 vs H200) that
-        ``structural_key`` (cc + opt only) and the SM-only ``H_*`` features can't, so a
+        ``structural_key`` (cc + regime only) and the SM-only ``H_*`` features can't, so a
         cross-hardware dataset never collides. A CPU is the cores it runs on: its product name and thread count."""
         if self.backend_name == "cpu":
             return f"{self.gpu_name} ({self.threads} threads)"
@@ -413,7 +345,7 @@ class Context:
 
     def features(self) -> dict[str, float]:
         """Host/hardware regime as ``H_*`` features for the online prior, so a
-        SINGLE global prior spans every GPU and nvcc opt level (these are
+        SINGLE global prior spans every GPU (these are
         constant across a compile's sibling candidates, but trees can combine
         them with candidate features to rank differently per regime).
         Combines capability-derived facts with the
@@ -422,8 +354,6 @@ class Context:
         - ``H_cc`` — compute capability ``major*10 + minor``
         - ``H_tc_gen`` — tensor-core generation (``_TENSOR_CORE_GEN``)
         - ``H_smem_optin`` — per-block dynamic-smem opt-in cap (bytes)
-        - ``H_opt`` — nvcc cicc opt level from ``compile_flags`` (tune's
-          an explicit ``-Xcicc -O1`` pin → 1; the default → 3)
         - ``H_fast_math`` — 1 under the bound ``FAST_MATH`` decision (:meth:`precision_pins`), the regime a
           golden can decide a kernel set differently in
         - ``H_sm_count`` / ``H_smem_per_sm`` / ``H_smem_per_block`` /
@@ -440,7 +370,6 @@ class Context:
             "H_cc": float(major * 10 + minor),
             "H_tc_gen": float(_TENSOR_CORE_GEN.get((major, minor), major)),
             "H_smem_optin": float(self.max_dynamic_smem),
-            "H_opt": float(split_opt_level(self.compile_flags)[0]),
             "H_fast_math": float(self.precision_pins()[FAST_MATH.name]),
         }
         # The memorized props of this context's card (golden reconstruction) when
@@ -479,7 +408,6 @@ class Context:
             max_dynamic_smem=smem,
             sm_count=_live_sm_count(),
             gpu_name=gpu.live_name(),
-            compile_flags=_env_compile_flags(),
             cold_cache=cold_cache(),
             precision=tuple(precision_pins().items()),
         )

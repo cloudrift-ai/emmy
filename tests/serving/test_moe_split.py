@@ -698,7 +698,9 @@ def test_marked_moe_contributions_preserve_the_float32_residual():
     def run_expert(expert, rows):
         return partials[expert].expand_as(rows)
 
-    assert not torch.isfinite(combine_routed_experts(xn, gated, per_expert(run_expert), num_experts=2)).all()
+    # The model-dtype lane weighs and sums in float32 and rounds once: products past the fp16 range still cancel.
+    plain = combine_routed_experts(xn, gated, per_expert(run_expert), num_experts=2)
+    torch.testing.assert_close(plain, torch.zeros_like(xn), rtol=0, atol=0)
     routed = combine_routed_experts(xn, gated, per_expert(run_expert), num_experts=2, accumulate_float32=True)
     slots = _combine_slot_partials(scores, partials, xn.dtype, accumulate_float32=True)
 

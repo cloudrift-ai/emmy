@@ -4,7 +4,7 @@ A cooperative reduce with a full-row projection (RMSNorm, RoPE over a normed row
 its row twice per lane: the reduce loop reads ``x[lane + coop·k]``, and after the combine the
 projection loop reads the same cells again — and a rotate-half partner reads a cell another trip
 of the same lane already holds. Both loops are short (a 128-wide row at 32 lanes is four trips),
-but nvcc cannot reuse the first loop's values in the second: the second loop stores to the
+but the assembler cannot reuse the first loop's values in the second: the second loop stores to the
 output between trips, and it cannot prove the output does not alias the row.
 
 This pass unrolls every lane-strided loop of at most ``_MAX_TRIPS`` trips whose extent the step
@@ -41,8 +41,12 @@ def rewrite(root: Node) -> KernelOp:
     return replace(op, body=body)
 
 
-def _copies(stmt: Statement, trips: tuple[int, int]) -> int | None:
-    """The trips of a short lane loop, or ``None`` when it is not one this pass unrolls."""
-    if not isinstance(stmt, StridedLoop) or not all(isinstance(s, _FLAT) and not s.nested() for s in stmt.body):
+def _copies(stmt: Statement, trips: tuple[int, int] | None) -> int | None:
+    """The trips of a short lane loop, or ``None`` when it is not one this pass unrolls. A loop already ``unrolled``
+    (the kernel unroll passes stepped it) is taken no further, so a finished kernel the session cache replays comes
+    out of this pass as it went in."""
+    if trips is None or not isinstance(stmt, StridedLoop) or stmt.unrolled:
+        return None
+    if not all(isinstance(s, _FLAT) and not s.nested() for s in stmt.body):
         return None
     return trips[0] if trips[0] == trips[1] and 1 < trips[0] <= _MAX_TRIPS else None

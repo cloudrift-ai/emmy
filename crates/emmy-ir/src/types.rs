@@ -104,7 +104,7 @@ impl Scope<'_> {
                 self.types.insert(pre.name, dtype);
             }
             Statement::Let(binding) => {
-                // An index with no dtype is an integer whose width the flat-index step decides (plan step A9).
+                // An index with no dtype is an integer whose width the flat-index step decides.
                 if binding.dtype.is_none() && binding.value.as_literal().is_some() {
                     return Err("a literal binding carries no dtype".into());
                 }
@@ -133,11 +133,8 @@ impl Scope<'_> {
                     ));
                 }
             }
-            // Exempt until the plan step named types them; the renderer still works their types out.
-            //
-            // Cross-thread combines: the merge program runs at the statement's dtype and converts a name read at
-            // another one while printing. No step of the plan names them; the cooperative milestone of the PTX
-            // compiler (PR B, milestone 2) has to type them first.
+            // Cross-thread combines: the merge program runs at the statement's dtype, and the PTX compiler converts a
+            // name read at another one where it compiles the combine.
             Statement::TreeHalve(_) | Statement::WarpShuffle(_) | Statement::WarpBroadcast(_) => {}
             // A fragment gathered element by element says both element types, as a `Load` says its own.
             Statement::FragmentLoad(load) => {
@@ -175,8 +172,8 @@ impl Scope<'_> {
                 }
             }
             // What computes on a fragment's registers: a pointwise operand's conversion to the fragment algebra's
-            // f32 is typed while printing, because its operands are register elements no name stands for. The
-            // fragment expansion of the PTX compiler (PR B, milestone 4) types it from the fragments' declarations.
+            // f32 is typed by the PTX compiler's fragment expansion, from the fragments' declarations, because its
+            // operands are register elements no name stands for.
             // The other statements move whole registers and convert nothing.
             Statement::FragmentApply(_) | Statement::FragmentRowReduce(_) => {}
             // Everything else defines no scalar value: structure, declarations, copies of bytes, barriers.

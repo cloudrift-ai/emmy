@@ -121,6 +121,7 @@ emmy = "emmy.dynamo:emmy_backend"
 asyncio_mode = "auto"
 markers = [
     "perf: GPU performance comparison vs PyTorch (deselected by default; run with `pytest -m perf`)",
+    "sweep: an exhaustive run on the card (a math function over every f32 input, every corpus case through both code generators); deselected by default, run with `pytest -m sweep`",
 ]
 
 [tool.ruff]

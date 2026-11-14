@@ -117,7 +117,7 @@ compare configurations, add an experiment; then fold the winner back into the re
 
 - **The engine and image.** For emmy-accelerated models this is the prebuilt per-model image built by
   [`docker/vllm-emmy-serve/`](../docker/vllm-emmy-serve/ARCHITECTURE.md) — the model snapshot, warmed cubins and the
-  execution-plan pack are baked in, so a cold start pays no download, no `nvcc`, and no compiler frontend. Pin its
+  execution-plan pack are baked in, so a cold start pays no download, no `ptxas`, and no compiler frontend. Pin its
   canonical immutable reference; the recipe is the publication input to `emmy publish` as well as the deployment
   input.
 - **The serving shape**, matching what that image was warmed at. The pack is keyed on the shape (model,

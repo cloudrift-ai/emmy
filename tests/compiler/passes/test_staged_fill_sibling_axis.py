@@ -160,6 +160,7 @@ def test_a_ringed_group_still_publishes_the_slab_it_fills_this_iteration() -> No
     emitted, was correct."""
     from types import SimpleNamespace
 
+    from emmy.compiler.dtype import F16
     from emmy.compiler.ir.kernel.ir import Sync
     from emmy.compiler.pipeline.passes.lowering.kernel._stage import Operand, SyncTransport
 
@@ -168,7 +169,7 @@ def test_a_ringed_group_still_publishes_the_slab_it_fills_this_iteration() -> No
     def transport(operands):
         return SyncTransport(
             operands=operands,
-            slab_dtype="f16",
+            slab_dtype=F16,
             cta=CtaTile(linear_tid=Var("_t"), n_threads=128),
             copy_operands=(peer,),
             copy_sync=True,

@@ -210,8 +210,8 @@ def persist_kernel_perf(
 
 
 #: The kernel a failure message NAMES — ``kernel "k_foo" did not complete …`` from the runtime's
-#: watchdog (Rust's ``{:?}`` quotes it), ``nvcc compile failed for kernel 'k_foo': …`` from the
-#: compiler. The exception class does not survive the bench worker's pipe (it arrives wrapped in a
+#: watchdog (Rust's ``{:?}`` quotes it), ``ptxas failed for kernel 'k_foo': …`` from the
+#: assembler. The exception class does not survive the bench worker's pipe (it arrives wrapped in a
 #: ``BenchWorkerJobError`` carrying the child exception's ``repr``), so the label is recovered from
 #: the text — and ``repr`` escapes a quote that matches its own, so either quote is matched with or
 #: without its backslash.

@@ -47,7 +47,8 @@ from emmy.compiler.ir.kernel.ir import FragmentApply, RegStore, TreeHalve, WarpS
 from emmy.compiler.ir.stmt import Assign, Statement
 from emmy.compiler.ir.types import epilogue_conversions, explicit_conversions
 from emmy.compiler.pipeline import Match, Pattern, RuleSkipped
-from emmy.compiler.pipeline.search.space import FAST_DIV, FAST_EXP, FAST_MATH, FAST_SQRT, precision_pin
+from emmy.compiler.pipeline.passes.lowering.kernel._approximate import approximate_forms
+from emmy.compiler.pipeline.search.space import FAST_EXP, precision_pin
 from emmy.compiler.target import native_f16_ops
 
 PATTERN = [Pattern("root", KernelOp)]
@@ -60,30 +61,13 @@ def rewrite(match: Match, root: Node, ctx: Context) -> KernelOp:
     op: KernelOp = root.op
     if FAST_EXP.name in op.knobs:
         raise RuleSkipped("the approximate forms are already picked (FAST_EXP is recorded)")
-    picks = _picks(ctx)
+    picks = approximate_forms(ctx)
     buffers = buffer_dtypes(op)
     halves: list[Assign] = []  # the operations picked at a half: the type rules place them
     body = op.body.map(lambda stmt: _picked(stmt, picks, buffers, halves)) if picks else op.body
     if halves:
         body = explicit_conversions(body, buffers, native_f16_ops())
     return replace(op, body=body, knobs={**op.knobs, FAST_EXP.name: precision_pin(FAST_EXP)})
-
-
-def _picks(ctx: Context) -> dict[str, str]:
-    """The exact operation to its approximate form, for each class the live precision decisions turn on and the
-    target has an instruction for."""
-    picks: dict[str, str] = {}
-    if precision_pin(FAST_EXP):
-        picks["exp"] = "exp_fast"
-    if precision_pin(FAST_DIV):
-        picks |= {"divide": "divide_fast", "reciprocal": "reciprocal_fast"}
-    if precision_pin(FAST_SQRT):
-        picks["sqrt"] = "sqrt_fast"
-    if precision_pin(FAST_MATH) and precision_pin(FAST_EXP):
-        picks |= {name: f"{name}_fast" for name in ("log", "sin", "cos", "pow", *(("tanh",) if ctx.has_tanh_approx else ()))}
-    if "exp" in picks and "divide" in picks:
-        picks["sigmoid"] = "sigmoid_fast"
-    return picks
 
 
 def _picked(stmt: Statement, picks: dict[str, str], buffers: dict, halves: list[Assign]) -> Statement:

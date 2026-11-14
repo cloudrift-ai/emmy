@@ -52,7 +52,7 @@ system:
     vendor: NVIDIA
     name: NVIDIA A100 40GB
   software:
-    nvcc_version: 12.9.41
+    ptxas_version: 12.9.41
     cublas_version: 12.9.0.13
     docker_client: 29.8.0
     docker_server: 29.8.0

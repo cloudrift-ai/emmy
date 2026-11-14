@@ -60,7 +60,6 @@ def _sample_graph() -> Graph:
             zero_outputs=("y",),
             tma_descriptors=(TmaDescMeta(name="x_desc", src_buf="x", box_extents=(64, 32), swizzle="B128"),),
             runtime_args=("seq_len",),
-            arch_specific=True,
         ),
         inputs=["x", "w", "eps", "div"],
         output=Tensor("y", ("seq_len", 64)),
@@ -81,7 +80,7 @@ def test_plan_projection():
     assert plan.runtime_constants == {"div": Var("seq_len")}
     assert plan.weights == {"w": WeightSpec(source_path="model.w", load_ops=(("transpose", (1, 0)),), graph_dtype="f32")}
     assert set(plan.kernels) == {"k_test"}
-    assert plan.kernels["k_test"].arch_specific and plan.kernels["k_test"].source.startswith("__global__")
+    assert plan.kernels["k_test"].source.startswith("__global__")
     assert plan.symbolic_bindings == {"seq_len": ("x", 0)}
     (launch,) = plan.launches
     assert launch.kernel_name == "k_test" and launch.runtime_args == ("seq_len",)
@@ -129,17 +128,6 @@ def test_cpu_plan_round_trips_with_its_thread_split_in_place_of_the_cuda_grid():
     assert wire["format"] == PLAN_FORMAT_CPU
     assert all(lc["cpu"] == split and "cuda" not in lc for lc in wire["launches"])
     assert plan_from_dict(wire) == plan
-
-
-def test_a_plan_stored_under_the_old_tma_key_still_reads():
-    """``uses_tma`` became ``arch_specific`` when the block-scaled fp4 mma turned out to need the
-    same arch-suffixed target for its own reason. The meaning did not change, so a pack baked
-    before the rename must keep loading rather than silently dropping to the unsuffixed arch."""
-    wire = json.loads(json.dumps(plan_to_dict(plan_from_graph(_sample_graph()))))
-    spec = wire["kernels"]["k_test"]
-    assert spec.pop("arch_specific") is True
-    spec["uses_tma"] = True
-    assert plan_from_dict(wire).kernels["k_test"].arch_specific is True
 
 
 def test_only_a_kernel_that_waits_on_its_predecessor_launches_dependent():
@@ -472,12 +460,13 @@ def test_merged_kernels_keep_their_names_unless_another_source_holds_one():
 
 
 def test_a_name_with_two_sources_launches_each_under_its_own_symbol():
-    """Kernels of one identity share a name; under one schedule they render one source and share it, while one that
+    """Kernels of one identity share a name; under one schedule they compile to one code and share it, while one that
     carries other code (a neighbor's zero-init) launches under a symbol of its own, never the first source."""
     g = Graph()
     g.add_node(op=InputOp(), inputs=[], output=Tensor("x", (64,)), node_id="x")
-    sources = ('extern "C" __global__ void k_twin(float* a, float* b) {}', 'extern "C" __global__ void k_twin(float* a, float* b) {}')
-    other = 'extern "C" __global__ void k_twin(float* a, float* b) { /* zero-init */ }'
+    twin = ".visible .entry k_twin(\n\t.param .u64 k_twin_param_0,\n\t.param .u64 k_twin_param_1\n)\n{\n\tret;\n}\n"
+    sources = (twin, twin)
+    other = twin.replace("\tret;", "\t// zero-init\n\tret;")
     for node, (source, inp) in enumerate(zip((*sources, other), ("x", "y0", "y1"), strict=True)):
         g.add_node(
             op=CudaOp(kernel_source=source, kernel_name="k_twin", arg_order=(inp, f"y{node}")),
@@ -489,4 +478,4 @@ def test_a_name_with_two_sources_launches_each_under_its_own_symbol():
     plan = plan_from_graph(g)
     first, second, third = (launch.kernel_name for launch in plan.launches)
     assert first == second == "k_twin" and third.startswith("k_twin_")
-    assert plan.kernels[third].source == other.replace(" k_twin(", f" {third}(")
+    assert plan.kernels[third].source == other.replace("k_twin", third)  # the entry and the symbols derived from it

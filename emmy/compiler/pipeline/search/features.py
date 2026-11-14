@@ -75,18 +75,13 @@ CTX_PREFIX = "H_"
 # Version 13 is the one-scalar-definition normal form: an ``Assign`` holds one operation (a sum in affine form one node),
 # an ``Accum`` sums a name or a literal, and the pointwise work is the operation nodes of every ``Assign`` and ``Accum``
 # value. Earlier datasets and weights must be rebuilt.
-FEATURIZER_VERSION = 13
+# Version 14 drops ``H_opt``: ptxas assembles every kernel, so there is no compiler opt level to feature. Earlier
+# datasets and weights must be rebuilt.
+FEATURIZER_VERSION = 14
 
 # The features that name a candidate's regime rather than describe it — the ``S_ext_n_symbolic_axis`` stamp a
 # masked-tile (symbolic-axis) kernel carries. The stamp VOCABULARY belongs here with the rest of the feature
 # spelling, so a dataset can read it without importing a model; the model splits on it like any column.
-#: The ``H_opt`` value of the DEPLOYABLE regime — the nvcc opt level ``compile`` / ``run`` / ``tune``
-#: all compile at, and therefore the only one a measurement is worth anything under. Rows carrying
-#: any other value came from a deliberately pinned sweep or from the era when tuning ranked at
-#: ``-Xcicc -O1``; nothing trains on them and no deploy reads them. Spelled here because both the
-#: data layer and the model layer test against it and neither may import the other.
-DEPLOYABLE_OPT = 3.0
-
 ROUTING_FEATURES = ("S_ext_n_symbolic_axis",)
 
 

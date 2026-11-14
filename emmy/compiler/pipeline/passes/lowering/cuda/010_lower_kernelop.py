@@ -1,6 +1,6 @@
 """Lower each ``KernelOp`` node to a ``CudaOp``.
 
-Renders the ``KernelOp`` body to a ``__global__`` source string and derives the
+Generates the kernel's code and derives the
 launch geometry. The body is a single :class:`Grid` (``007_decode_grid`` decoded the tile into it), so the
 grid is sized from its element count over its block (``BLOCK_SIZE`` scalar tier, the cooperative ``block_threads``
 otherwise). A **symbolic reduce / output-sweep axis** (a
@@ -8,6 +8,10 @@ dynamic ``seq_len`` inside the body's loops) becomes a runtime ``int`` arg: the 
 signature gains one ``int <name>`` per symbolic ``Dim`` and the launch resolves it from the
 input array shapes (``sym_values`` → ``runtime_args``). The free (grid) axes are static
 here (``010_lift`` defers a symbolic free axis), so the grid stays a static int.
+
+The code is PTX text for ptxas, from the Kernel IR to PTX compiler (``ir/kernel/ptx``). A kernel the compiler has
+no rule for (``NotImplementedError``) is an error, as is every other refusal: it says the kernel is not what the code generator
+takes, or the compiler is wrong.
 """
 
 from dataclasses import replace
@@ -17,16 +21,15 @@ from emmy.compiler.graph import Node
 from emmy.compiler.ir.axis import Axis
 from emmy.compiler.ir.base import is_f4_pair_table
 from emmy.compiler.ir.cuda import CudaOp, TmaDescMeta
-from emmy.compiler.ir.kernel import KernelOp
+from emmy.compiler.ir.kernel import KernelOp, ptx
 from emmy.compiler.ir.kernel.interface import buffer_dtypes, kernel_interface
 from emmy.compiler.ir.kernel.ir import Grid, TmaDescriptor, tile_is_static, tile_n_dim, tile_n_elements
-from emmy.compiler.ir.kernel.render import render_kernelop
 from emmy.compiler.ir.pure.fold import EXTENTS
 from emmy.compiler.ir.stmt import Load, Write, ZeroPrologue, check_input
 from emmy.compiler.pipeline import Match, Pattern, RuleSkipped
 from emmy.compiler.pipeline.passes.lowering.cuda._helpers import atomic_outputs as _atomic_outputs
 from emmy.compiler.pipeline.passes.lowering.cuda._helpers import paged_buffers
-from emmy.compiler.pipeline.search.space import FLUSH_TO_ZERO, precision_pin
+from emmy.compiler.pipeline.search.space import CONTRACT_FMA, FLUSH_TO_ZERO, precision_pin
 from emmy.compiler.wire import kernel_tile
 
 PATTERN = [Pattern("root", KernelOp)]
@@ -36,7 +39,7 @@ def _tma_descriptors(kernel: KernelOp) -> tuple[TmaDescMeta, ...]:
     """Each distinct ``TmaDescriptor`` in the body → a ``TmaDescMeta`` the backend
     encodes at launch (``cuTensorMapEncodeTiled`` off the bound array's device
     pointer + the box). First-seen order; deduped by descriptor name so the param
-    list matches the renderer's signature (``const CUtensorMap* <name>``)."""
+    list matches the kernel's parameters (``kernel_interface``)."""
     seen: dict[str, TmaDescMeta] = {}
     for s in kernel.body.iter_of_type(TmaDescriptor):
         seen.setdefault(s.name, TmaDescMeta(name=s.name, src_buf=s.src_buf, box_extents=s.box_extents, swizzle=s.swizzle))
@@ -73,7 +76,7 @@ def _symbolic_runtime_args(kernel: KernelOp) -> tuple[str, ...]:
 
 def _slotted(kernel: KernelOp) -> tuple[KernelOp, dict[str, str]]:
     """``kernel`` with every buffer its exact identity names renamed to its role slot (``buf<i>``) and declared in
-    role order, and the slot of each such buffer: two kernels of one identity under one schedule render one source,
+    role order, and the slot of each such buffer: two kernels of one identity under one schedule compile to one code,
     which their one name launches (:func:`~emmy.compiler.wire.kernel_name`). A buffer outside the identity (a
     neighbor's zero-init) keeps its name."""
     tile = kernel_tile(kernel)
@@ -98,7 +101,7 @@ def _unslotted(arg: str, back: dict[str, str]) -> str:
     return back.get(base, base) + pages if pages else back.get(arg, arg)
 
 
-def rewrite(match: Match, root: Node) -> CudaOp | None:
+def rewrite(match: Match, root: Node, ctx) -> CudaOp | None:
     kernel: KernelOp = root.op
     grids = [s for s in kernel.body if isinstance(s, Grid)]
     if len(grids) != 1:
@@ -106,7 +109,7 @@ def rewrite(match: Match, root: Node) -> CudaOp | None:
     (grid_stmt,) = grids
 
     name = kernel.name
-    # Buffer shapes / dtypes for the renderer come from the op's I/O Tensors
+    # Buffer shapes / dtypes for the code generator come from the op's I/O Tensors
     # (snapped to the graph by the matcher's populate_io). A symbolic reduce axis adds an
     # ``int <name>`` runtime arg to the signature, threaded through to the CudaOp.
     # A serial axis is a runtime coordinate: one ``int`` param, one launch per value.
@@ -117,7 +120,7 @@ def rewrite(match: Match, root: Node) -> CudaOp | None:
         # A paged buffer has no base pointer to take: only ``Load`` / ``Write`` resolve a page,
         # so any other stmt touching it (a TMA descriptor, a cp.async stage, a fragment store)
         # would need a base this ABI cannot give — unless one page spans the buffer, whose base
-        # the renderer resolves once — and a zero-init would have to memset a slab that does not exist.
+        # the code reads from the table once — and a zero-init would have to memset a slab that does not exist.
         names = {entry[0] for entry in paged}
         split = {n for n, axis, page in paged if not spans_one_page(tensors[n].shape, axis, page)}
         staging = [s for s in kernel.body.iter() if not isinstance(s, (Load, Write))]
@@ -142,15 +145,6 @@ def rewrite(match: Match, root: Node) -> CudaOp | None:
     # access of a buffer that is one allocation holds one flat index, and no loop asks for unrolling.
     split_pages = [n for n, axis, page in paged if not spans_one_page(tensors[n].shape, axis, page)]
     check_input(kernel.body, {name: dtype.name for name, dtype in buffer_dtypes(kernel, tensors).items()}, split_pages)
-    source = render_kernelop(
-        kernel,
-        tensors=tensors,
-        runtime_args=runtime_args,
-        paged_buffers=paged,
-        pair_tables=pair_tables,
-        flush_to_zero=precision_pin(FLUSH_TO_ZERO),
-    )
-
     # A cooperative tile fixes the per-CTA thread count (``coop · ∏block-cells``): one CTA
     # per output-cell group, ``blockDim = block_threads``, ``gridDim = N / block_threads``
     # (the decode groups ``block_threads`` consecutive cells per CTA). The scalar tier is one
@@ -169,7 +163,16 @@ def rewrite(match: Match, root: Node) -> CudaOp | None:
     # launch-encoded ``CUtensorMap`` device arrays); the symbolic ``int`` args are tail-appended in ``_launch``. A
     # paged operand binds its page TABLE, not the buffer: the name in ``arg_order`` is what the launcher looks up in
     # ``arrays``, so the rename is the whole runtime change.
-    interface = kernel_interface(kernel, tensors, runtime_args, frozenset(entry[0] for entry in paged))
+    interface = kernel_interface(kernel, tensors, runtime_args, {n: (axis, page) for n, axis, page in paged}, pair_tables)
+    source, dependent_launch = ptx.compile_kernel(
+        kernel,
+        interface,
+        compute_capability=ctx.compute_capability,
+        fuse=precision_pin(CONTRACT_FMA),
+        flush_to_zero=precision_pin(FLUSH_TO_ZERO),
+        # A static grid of no more blocks than the card has multiprocessors is one block on each.
+        single_wave=isinstance(grid[0][0], int) and grid[0][0] <= ctx.sm_count,
+    )
     kernel = graph_kernel
     return CudaOp(
         kernel_source=source,
@@ -187,6 +190,5 @@ def rewrite(match: Match, root: Node) -> CudaOp | None:
         zero_outputs=tuple(b for b in _atomic_outputs(kernel) if b not in kernel.zero_delegated),
         zero_prologues=tuple(dict.fromkeys(zp.dst for zp in kernel.body.iter_of_type(ZeroPrologue))),
         tma_descriptors=tuple(replace(desc, src_buf=back.get(desc.src_buf, desc.src_buf)) for desc in tma_descs),
-        arch_specific=interface.arch_specific,
-        dependent_launch=True,
+        dependent_launch=dependent_launch,
     )

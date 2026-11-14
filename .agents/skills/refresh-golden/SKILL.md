@@ -121,7 +121,7 @@ when refreshing an existing schedule, including a cut piece:
 
 ```bash
 mkdir -p _tune/<run> && cp recipes/<model>/golden/<card>.json _tune/<run>/working.json
-EMMY_NVCC_FLAGS= EMMY_KNOBS="PLACE=fuse,<the row's knobs, every family spelled>" \
+EMMY_KNOBS="PLACE=fuse,<the row's knobs, every family spelled>" \
   emmy run --golden _tune/<run>/working.json --kernel <kernel name> \
     --realization <exact row name> --bench --record-greedy --strict
 ```

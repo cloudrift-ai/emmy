@@ -8,12 +8,12 @@ instead of enumerating, deciding and materializing again.
 
 The boundary is deliberately the END OF THE KERNEL PASSES, before ``lowering/cuda``: the cuda
 pass group holds the per-graph negotiations (``005_delegate_zero_init`` injects a
-``ZeroPrologue`` into a *neighbor* kernel; ``010`` renders the launch), so artifacts
+``ZeroPrologue`` into a *neighbor* kernel; ``010`` compiles the launch), so artifacts
 above the boundary stay a pure function of the kernel while the negotiations run fresh on every
 assembled graph. Entries store the ``KernelOp`` with its buffers renamed to ROLE slots
 (``Statement.rename_buffers`` over ``Op.canonical_buffers``); a hit renames the slots to the buffers
 filling the same roles on the consumer — sound because the key types every role, whatever order
-either side declared its io in. The consumer's tile becomes the hit's ``source``, so the hit's name and render are
+either side declared its io in. The consumer's tile becomes the hit's ``source``, so the hit's name and code are
 a fresh lowering's.
 
 The key is the exact variant key (``identity_key(structural=False, with_io=True,

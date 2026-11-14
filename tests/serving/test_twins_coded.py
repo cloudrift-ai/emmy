@@ -521,22 +521,23 @@ def test_qwen4_exp_nvfp4_expert_twins_bind_packed_trios_without_fetching_the_che
     }  # fmt: skip
 
 
-def test_qwen4_exp_nvfp4_sliced_experts_add_the_grouped_prefill_twin(tmp_path, monkeypatch):
-    """Sliced across ranks, the experts also take the grouped prefill program: ``EXPERT_GROUP`` experts per launch,
-    each against a block of ``EXPERT_PREFILL_M`` rows, over the layer's E-stacked packed experts. Each rank's slice
-    of an expert keeps whole NVFP4 blocks: 64 intermediate channels over four ranks."""
-    from emmy.serving.release import EXPERT_GROUP, EXPERT_PREFILL_M
+@pytest.mark.parametrize("rows", [4, 256])
+def test_qwen4_exp_nvfp4_sliced_experts_add_the_grouped_prefill_twins(tmp_path, monkeypatch, rows):
+    """Sliced across ranks, the experts also take the grouped prefill programs: ``EXPERT_GROUP`` experts per launch,
+    each against a block of the slot width's rows or of ``EXPERT_PREFILL_M`` rows, over the layer's E-stacked packed
+    experts. Each rank's slice of an expert keeps whole NVFP4 blocks: 64 intermediate channels over four ranks."""
+    from emmy.serving.release import EXPERT_GROUP
 
     graphs = _qwen4_exp_nvfp4_twins(tmp_path, monkeypatch, {"moe_intermediate_size": 64}, expert_slices=4, slot_width=4)
-    name = f"expert-group{EXPERT_GROUP}x{EXPERT_PREFILL_M}@nvfp4"
+    name = f"expert-group{EXPERT_GROUP}x{rows}@nvfp4"
     assert {name, "expert-slots4@nvfp4"} <= set(graphs)
     group, slots = graphs[name], graphs["expert-slots4@nvfp4"]
     shapes = {i: (tuple(group.nodes[i].output.shape), group.nodes[i].output.dtype.name) for i in group.inputs}
     stacked = {i: (tuple(slots.nodes[i].output.shape), slots.nodes[i].output.dtype.name) for i in slots.inputs}
-    assert shapes.pop("x") == ((EXPERT_GROUP, EXPERT_PREFILL_M, 32), "f16")
+    assert shapes.pop("x") == ((EXPERT_GROUP, rows, 32), "f16")
     assert shapes.pop("sel") == ((EXPERT_GROUP,), "i64")
     assert shapes == {i: stacked[i] for i in shapes} and next(iter(shapes.values()))[0][0] == 4
-    assert tuple(group.nodes[group.outputs[0]].output.shape) == (EXPERT_GROUP, EXPERT_PREFILL_M, 32)
+    assert tuple(group.nodes[group.outputs[0]].output.shape) == (EXPERT_GROUP, rows, 32)
 
 
 def test_qwen4_exp_nvfp4_twins_trace_into_the_inventory(tmp_path, monkeypatch):

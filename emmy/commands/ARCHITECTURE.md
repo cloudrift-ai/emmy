@@ -27,16 +27,15 @@ commands/publish ─► publish (image naming, metadata, collision and digest ga
   records so versioned JSON remains parseable, plus `ensure_plugin_logging()` — makes emmy INFO logs visible when
   nothing configured logging (a bare vLLM entrypoint; called by `emmy.serving.register()`)
 - `emmy/config.py` — the single owner of `os.environ` for all `EMMY_*` config vars. Typed getters
-  (`tune_db_path`, `nvcc_flags`, `debug_enabled`, `dump_dir`, `tune_patience`, `bench_backends_raw`, `cubin_cache_dir`,
-  …) read the env live; `set_nvcc_flags(cli_value, default)` holds the `--nvcc-flags` > env > command-default precedence
-  that used to live in this CLI layer, so every callsite (CLI, programmatic, tests) shares it. The thin
-  `compile.apply_nvcc_flags` / `compile.resolve_tune_db` wrappers just adapt argparse to it. (Provider/secret vars stay
+  (`tune_db_path`, `debug_enabled`, `dump_dir`, `tune_patience`, `bench_backends_raw`, `cubin_cache_dir`, …) read the
+  env live, so every callsite (CLI, programmatic, tests) shares one precedence; the thin `compile.resolve_tune_db`
+  wrapper just adapts argparse to it. (Provider/secret vars stay
   with `redact.py`; the dynamic `EMMY_<KNOB>` namespace stays with `compiler/pipeline/knob.py`, which borrows
   `config.knob_var` / `config.knob_raw`.)
 - `emmy/redact.py` — `redact_secrets()`, `SecretRedactingFilter`, `install_redaction()` (attach the filter to a handler — must be a handler, not a logger, so child-logger records that propagate up are still redacted), `register_secret()` (call after resolving any secret from a CLI flag — `--hf-token`, `--api-key` — or env var so its value is added to the redaction set)
 - `emmy/benchmark/` — config, logging, workload, tasks, execution, and YAML experiment records
 
-Golden replay keeps the selected input precision pins active through lowering, NVCC compilation, measurement, and
+Golden replay keeps the selected input precision pins active through lowering, assembly, measurement, and
 recording. It publishes all effective recorded precision decisions, so omitted independent pins inherit the recorded
 umbrella rather than the caller's environment. Raw pins stay unchanged for exact row matching. Partial `--ab` pins
 still override only the named live choices; an empty or mixed golden scope publishes no regime. The scope is the rows
@@ -46,7 +45,7 @@ regime is refused, as the vLLM child's boot refuses it: under the pinned regime 
 evidence. A scope recording two regimes says so once and names the live lane the replay takes; a bare `--golden PATH`
 walk skips the targets a hand pin contradicts and runs the rest.
 Tuning creates its measurement context inside each target's precision scope. `FAST_MATH` defaults to true
-and turns on the approximate instructions a kernel names and nvcc's `--ftz=true`; `EMMY_CONTRACT_FMA=0` is the
+and turns on the approximate instructions a kernel names and flush to zero; `EMMY_CONTRACT_FMA=0` is the
 contraction diagnostic, a regime of its own.
 
 ## Layers
@@ -109,7 +108,7 @@ generic system information, and partial raw results after failure. It treats exe
 failures as authoritative, but does not parse or record experiment measurements and does not judge model output,
 backend selection, or scientific claims. Recipes cannot run post-processing or report generation. Command recipes
 may opt into the single `command.strict` integrity contract for clean declared stage paths, required declared results,
-and Git/GPU/NVCC/cuBLAS provenance. Staged Git provenance comes from the invoking worktree, not a shared virtual
+and Git/GPU/ptxas/cuBLAS provenance. Staged Git provenance comes from the invoking worktree, not a shared virtual
 environment or reused remote source tree. The complete boundary lives in `emmy/benchmark/ARCHITECTURE.md`.
 
 `run_benchmark_workload()` drives `vllm bench serve`. Embedding recipes (`model.task: embed`) bench with
@@ -262,8 +261,9 @@ for the fixed-slot tier. They take width 256 too, with an M=256 row per any-widt
 program also compiles that static expert prefill program. Expert twins are traced at the slice of every expert that
 each rank of the config's `--tensor-parallel-size` holds, and on more than one rank the fixed-slot program is also
 traced at the decode bucket's rows (`expert-slots8`), the program a decode step of several rows runs, and, for a
-config with an any-width program, the grouped prefill program (`expert-group32x256`), the program a prefill step's
-wider experts run. Both are symbolic by name and take the dynamic rows. The audit expects the same split per twin. A
+config with an any-width program, the grouped prefill programs (`expert-group32x8` and `expert-group32x256`), which
+a prefill step's experts run 32 at a time, blocks of the decode bucket's rows or of 256. They are symbolic by name
+and take the dynamic rows. The audit expects the same split per twin. A
 static-only release is accepted only when the same env proves that no wider or symbolic path is reachable. The
 resulting working file is measured and verified by `run --golden PATH [--realization NAME] --bench`.
 
@@ -413,7 +413,7 @@ the deploy evidence the next `compile` / `run` / `serve` picks from, which is ho
 embedded golden lowers in-process, knobs and all, so it records like a traced model; only the `--ir` JSON path, whose
 serialization drops the knobs, stays unrecorded. A greedy row that fails to bench is recorded through the same
 writer (`bench_record.record_bench_failure`, over `persist_bench_failure`): the kernel
-the failure names — the one the watchdog saw hang, or the one nvcc refused to compile — or a one-kernel graph's only
+the failure names — the one the watchdog saw hang, or the one ptxas refused to assemble — or a one-kernel graph's only
 kernel earns a `bench_fail` perf row at the run budget's fail sentinel and the innocent kernels earn none, so the
 next compile disqualifies that arm instead of electing the same route and failing the same way again; a failure
 that names no kernel records nothing, and a compile-budget overrun measured nothing and records nothing. The bench

@@ -369,7 +369,7 @@ contract lives in [native/ARCHITECTURE.md](native/ARCHITECTURE.md); vLLM remains
   the tracer cannot map) runs on `xn`, each HIT expert launches ONE shared expert program (`moe.expert.sym`:
   `expert(x, w_gate_up, w_down[, b_gate_up, b_down])` with the weights — and gpt-oss's per-expert biases — as
   forward args → graph INPUTS, fed per-expert dim-0 slices of the E-stacked tensors, which live on device beside
-  the routers via `_ensure_device` under the per-layer `inputs` map), and the partials weighted-`index_add_` into
+  the routers via `_ensure_device` under the per-layer `inputs` map), and the partials' weighted sum is added to
   `h`. **Under tensor parallelism every rank holds a slice of EVERY expert** (`slice_routed_experts`, the slicing vLLM's
   fused MoE does without expert parallelism): gate and up keep the same 1/world of the intermediate rows, down the
   matching columns, so a rank's expert output is a partial sum the caller's all-reduce completes. The router is
@@ -414,7 +414,7 @@ contract lives in [native/ARCHITECTURE.md](native/ARCHITECTURE.md); vLLM remains
   base residual, fp16 normalized activation, and fp32 shared result separately; the runner adds base + shared + routed
   without a narrowing cast. gpt-oss MXFP4 uses the narrower form of the same residual contract: embedding and the
   inter-layer residual stay fp32, pre/post norms cast their projection and router activations back to fp16, expert
-  partials and their weighted combine stay fp16, and the routed result is added to the fp32 base before the final norm
+  partials and the routed result stay fp16, and the routed result is added to the fp32 base before the final norm
   returns fp16 for the output head. This prevents late-layer residual adds from overflowing on fp16-only GPUs without
   widening attention or expert kernels. Other checkpoints retain their existing hot paths.
   **Expert tiers (decode + prefill perf lanes):** the expert program comes in four tiers mirroring the main ladder —
@@ -433,7 +433,10 @@ contract lives in [native/ARCHITECTURE.md](native/ARCHITECTURE.md); vLLM remains
   width, so a tier without descriptors is lent its block of the gathered rows and of the output and runs in place;
   descriptor-bearing tiers copy the block in and out. The symbolic program's buffers span the whole step, and a launch
   that clears its output clears all of it, so its blocks come last, in the order they run, with that span spare
-  after them. The combine reads each pick's output through the row map the launcher returns.
+  after them. The combine reads each pick's output through the row map the launcher returns and weighs and sums every
+  row's picks in one pass (`embedding_bag`), in ascending expert order, in float32, rounding once to the activation
+  dtype: on Qwen3.8-Flash-Next's V100 slices a 3,920-token step's combine takes about 0.9 ms per layer against 1.9 ms
+  for a gather, a weighting and k adds in fp16.
   **Fixed-slot decode tier (T=1, capture-legal):** ONE batched program per shape group over the E-stacked expert
   tensors (`moe.expert.slots`): `x[1, H]` and the row's `k` picks `sel[k]` in, `partials[k, H]` out. The module is
   the expert twin's `slots` form (`ExpertFFN.slots`, trace ARCHITECTURE): each weight is gathered along its expert
@@ -459,13 +462,15 @@ contract lives in [native/ARCHITECTURE.md](native/ARCHITECTURE.md); vLLM remains
   bucket-width program that does not build leaves the rows to it one at a time. Wider steps, prefill and whole-expert
   ranks ride the routed dispatch. **Grouped prefill tier:** on the same resident sliced experts each group also builds
   `ExpertFFN.blocks` over the stacked tensors (`x[G, R, H]` and one expert per block `sel[G]` in, `[G, R, H]` out,
-  G = `EXPERT_GROUP`, R = `EXPERT_PREFILL_M`; the twin `expert-group32x256`), one instance per layer sharing one arena.
-  `_launch_experts` sends every expert routed more rows than the decode bucket there: its rows fill blocks of R, the
-  blocks come first in the gathered rows, padded to whole launches of G, and one `run_each` lends each launch its
-  blocks of the rows and of the output and its experts' entries of a selector. One launch set over 32 experts in
-  place of a launch set per expert keeps the card's waves full: on Qwen3.8-Flash-Next's V100 slices, 32 experts of
-  256 rows take about 0.75 ms cold against about 2.7 ms one expert at a time. A tier that does not build leaves the
-  experts to the per-expert tiers. `combine_routed_experts` stays the parity oracle (`test_gen_runner_gpu` fixed-slot-vs-routed, grouped-vs-per-expert, the
+  G = `EXPERT_GROUP`) at two block widths: R = the decode bucket for the experts a step routes that many rows or
+  fewer, R = `EXPERT_PREFILL_M` for the wider ones (the twins `expert-group32x8` and `expert-group32x256`), one
+  instance of each per layer, all sharing one arena. `_launch_experts` lays each program's blocks first in the gathered
+  rows, an expert's rows filling one or more blocks, each program's padded to whole launches of G, and one `run_each`
+  per program lends each launch its blocks of the rows and of the output and its experts' entries of a selector. One
+  launch set over 32 experts in place of a launch set per expert keeps the card's waves full: on Qwen3.8-Flash-Next's
+  V100 slices, 32 experts of 256 rows take about 0.65 ms cold against about 2.7 ms one expert at a time, and 32 of up
+  to 8 rows about 0.19 ms against about 1.1 ms. A width that does not build leaves its experts to the per-expert
+  tiers. `combine_routed_experts` stays the parity oracle (`test_gen_runner_gpu` fixed-slot-vs-routed, grouped-vs-per-expert, the
   slot-program-vs-direct bit-exactness pin and the paged-vs-resident pin, `test_gen_capture_gpu` captured-step
   live-replay).
   **Per-input feed dtypes:** `_compile_split` binds every plan input at its own traced dtype rather than one blanket
@@ -508,7 +513,8 @@ contract lives in [native/ARCHITECTURE.md](native/ARCHITECTURE.md); vLLM remains
   table-resolved inputs and no decoded dense expert weight exists.
   Single-token sparse decode uses the generic fixed-slot tier: the selected experts' E-leading coded tensors are
   gathered by the selector, their factorized contraction runs batched over the picks, and the routed outputs combine
-  in fp32. EXL3 has no format-specific operation, native helper, or CUDA source below the birth-time spelling boundary.
+  in fp32. EXL3 has no format-specific operation, native helper, or hand-written kernel below the birth-time spelling
+  boundary.
   Prefill and unsupported fixed-slot shapes use the same generic symbolic programs rather than a separate kernel path.
 
   A **hyper-connection** architecture (DeepSeek V4, Qwen3.8-Flash-Next) changes what the seam carries, and the runner
@@ -939,13 +945,13 @@ Recorded follow-ups, in impact order:
   **generative** path no longer needs it: `run_device` is capture-aware and `serve --runner generate` defaults to
   whole-step decode graphs (see `gen_runner.py` above). A checkpoint with GDN layers is the exception: it serves
   eager (see `vllm_model_gen.py` above).
-- Startup compiles the whole model (~1–2 min for 0.6B warm-cubin-cache; first boot pays nvcc). `EMMY_CUBIN_CACHE`
+- Startup compiles the whole model (~1–2 min for 0.6B warm-cubin-cache; first boot pays ptxas). `EMMY_CUBIN_CACHE`
   persistence across container restarts is what keeps reboots fast. **`EMMY_PACK_DIR`** cuts the rest of the warm
   boot: `EmmyForwardRunner.create` keys an execution-plan pack (`compiler/backend/pack.py`) on model id + config
   hash + serving shape — a hit loads binary-keyed plans (`CompiledProgram.build_from_plan`) and skips trace, pass
   pipeline, fork resolution, and codegen entirely (weights still bind from the checkpoint via the plan's
   `source_path` refs); a miss compiles in full and writes the pack for the next boot. Any mismatch — retune under
-  a different config, nvcc/toolkit change, evicted cubin — silently falls back to the full compile; a changed golden
+  a different config, ptxas change, evicted cubin — silently falls back to the full compile; a changed golden
   recompiles only the programs whose rows it changed (next bullet).
   The generative arm's key drops the model id (a baked image resolves the model to a snapshot *path* offline while
   the warm boot uses the hub id) and excludes only `eos_token_id` from the config digest: EOS is generation policy

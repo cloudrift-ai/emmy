@@ -35,7 +35,7 @@ pub fn extend_simplify_ctx(ctx: &SimplifyCtx, axis: &Axis) -> SimplifyCtx {
 
 /// `ctx` under the ranges `stmt` states for the built-ins, which hold in its own expressions and in its child bodies
 /// (a `Grid`'s launch); `None` where it states none.
-pub(crate) fn launch_ctx(ctx: &SimplifyCtx, stmt: &Statement) -> Option<SimplifyCtx> {
+pub fn launch_ctx(ctx: &SimplifyCtx, stmt: &Statement) -> Option<SimplifyCtx> {
     let ranges = stmt.launch_ranges();
     (!ranges.is_empty()).then(|| {
         ranges
@@ -47,7 +47,7 @@ pub(crate) fn launch_ctx(ctx: &SimplifyCtx, stmt: &Statement) -> Option<Simplify
 }
 
 /// `ctx` inside `stmt`'s child bodies: under the ranges of the axes it binds for them.
-pub(crate) fn inner_ctx(ctx: &SimplifyCtx, stmt: &Statement) -> SimplifyCtx {
+pub fn inner_ctx(ctx: &SimplifyCtx, stmt: &Statement) -> SimplifyCtx {
     stmt.bound_axes()
         .iter()
         .fold(ctx.clone(), |inner, axis| extend_simplify_ctx(&inner, axis))
@@ -106,7 +106,8 @@ pub fn optimize_uncached(body: &Body) -> Result<Body> {
     let mut stmts = distinct_names(&topological_sort(body)?);
     for _ in 0..8 {
         let prepared = prepared(&stmts, false)?;
-        let next = one_operation_per_definition(&fold_trivial_selects(&prepared), &HashSet::new());
+        let folded = fold_conditions(&fold_trivial_selects(&prepared));
+        let next = one_operation_per_definition(&folded, &HashSet::new());
         if next == stmts {
             return Ok(next);
         }

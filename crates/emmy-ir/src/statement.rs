@@ -122,7 +122,7 @@ macro_rules! with_statement_types {
                 /// literals, one operation of the table: the normal form gives every nested operation node a definition
                 /// of its own, and a sum in affine form is one node. `dtype` overrides the promotion of the operands when set: the
                 /// `demote_to_write_dtype` Kernel IR pass stamps it on an `Assign` whose result only feeds dtype-narrower
-                /// consumers, so a softmax or RMSNorm epilogue feeding an `__half*` store computes in `__half` end to
+                /// consumers, so a softmax or RMSNorm epilogue feeding an f16 store computes in f16 end to
                 /// end without spurious promotions.
                 shared Assign {PURE} {
                     name: Name [DEFINES],
@@ -286,6 +286,11 @@ macro_rules! with_statement_types {
                 /// the kernel lowering's own sites; it has no effect on the IR's iteration semantics, and a body a code
                 /// generator reads carries none (`input::check_input`).
                 ///
+                /// `unrolled=True` says the kernel lowering already wrote the loop's copies: its body runs several trips of
+                /// the loop it came from, and a code generator keeps it as it is (`.pragma "nounroll"`). A fact of the
+                /// kernel body, set by the unroll passes on the loops they leave; it too has no effect on the iteration
+                /// semantics, and a Loop IR body carries none.
+                ///
                 /// The loop carries NO algebra — the fold's ⊕ lives on the :class:`~emmy.compiler.ir.pure.fold.Fold` node's
                 /// stored `combine`, and the dissolved fold `Accum`\ s in the body are the loop-level spelling; a loop folds iff
                 /// its body carries one.
@@ -294,6 +299,7 @@ macro_rules! with_statement_types {
                     body: Body [BODY],
                     unroll: bool [] = false,
                     seed: bool [] = true,
+                    unrolled: bool [] = false,
                 }
                 /// Strided iteration: `for (axis = start; axis < axis.extent; axis += step)`.
                 ///
@@ -306,6 +312,7 @@ macro_rules! with_statement_types {
                 /// analysis-visible range; `end` must never exceed it.
                 ///
                 /// Reduction detection mirrors `Loop`: a `StridedLoop` is a reduce-loop iff its body contains an `Accum`.
+                /// `unroll` and `unrolled` are `Loop`'s.
                 shared StridedLoop {} {
                     axis: AxisRef [AXIS],
                     start: Expression [EXPRESSION] : Index,
@@ -314,6 +321,7 @@ macro_rules! with_statement_types {
                     unroll: bool [] = false,
                     end: Option<Expression> [EXPRESSION | READS] : Index = None,
                     seed: bool [] = true,
+                    unrolled: bool [] = false,
                 }
                 /// Conditional block — `if (cond) { body } [else { else_body }]`.
                 ///
@@ -341,11 +349,11 @@ macro_rules! with_statement_types {
                     target: SubroutineRef [],
                     args: Exprs [EXPRESSION | READS] : Index,
                 }
-                /// Declare a per-block `__shared__` array.
+                /// Declare a per-block shared array of `dtype` elements.
                 ///
-                /// Renders to `__shared__ [__align__(N)] <dtype> <name>[<prod(extents)>];`. `extents` is the multi-dim shape used
-                /// to flatten `Load` / `Write` indices against this buffer. smem_bytes for `CudaOp` is computed by walking the
-                /// KernelOp body and summing `prod(extents) * sizeof(dtype)` across distinct `Smem` declarations.
+                /// `extents` is the multi-dim shape `Load` / `Write` indices against this buffer flatten with. Every shared
+                /// array has its place in one pool the launch sizes: the sum of `prod(extents)` elements of each distinct
+                /// declaration, each placed at its alignment.
                 ///
                 /// `align` is an optional explicit byte alignment. TMA destinations (`cp.async.bulk.tensor`) require 16-byte
                 /// aligned smem; the materializer sets `align=16` on TMA-target slabs. Default 0 means "no explicit alignment" —
@@ -353,21 +361,21 @@ macro_rules! with_statement_types {
                 kernel Smem {} {
                     name: Name [LOCAL_BUFFER],
                     extents: Ints [],
-                    dtype: Name [] = Name::from("float"),
+                    dtype: DType [] = DType::F32,
                     align: i64 [] = 0,
                 }
                 /// Thread-group barrier.
                 ///
-                /// `barrier_id == 0` (default): `__syncthreads();` — CTA-wide.
+                /// `barrier_id == 0` (default): `bar.sync 0;` — CTA-wide.
                 ///
-                /// `warp=True`: `__syncwarp();` — warp-scope only. For ordering a warp's own smem writes before its own reads of
+                /// `warp=True`: `bar.warp.sync` — warp-scope only. For ordering a warp's own smem writes before its own reads of
                 /// a WARP-PRIVATE buffer (the flash C→A handoff slab): post-Volta independent thread scheduling means even intra-
                 /// warp write→read needs the sync, but a CTA-wide barrier there convoys the block's warps for no ordering
                 /// benefit.
                 ///
                 /// `barrier_id > 0` and `count` set: `bar.sync <id>, <count>;` — named-barrier synchronizing exactly `count`
                 /// threads on barrier id `<id>` (one of 1..15). Used inside warp-specialized branches where only a subset of CTA
-                /// threads execute the sync — `__syncthreads()` would be CUDA UB because the enclosing `if (warp < P)` condition
+                /// threads execute the sync — a CTA-wide barrier would be undefined because the enclosing `if (warp < P)` condition
                 /// diverges across warps. The count must equal the number of threads that actually arrive at this barrier in
                 /// flight.
                 kernel Sync {} {
@@ -380,14 +388,11 @@ macro_rules! with_statement_types {
                 /// The kernel-IR realization of a :class:`~emmy.compiler.ir.tile.TileOp`'s thread schedule (geometry only — the
                 /// combine, if any, lives in the wrapped `body`): it maps the kernel's iteration space (the product of its `axes`
                 /// extents — the tile's `grid_axes`) onto a 1-D linear thread grid. Each thread derives a global linear id `_gid
-                /// = blockIdx.x * blockDim.x + threadIdx.x`, guards `_gid < N` (`N` = ∏ extents), decodes its per-axis indices
-                /// from `_gid`, and runs the `body` once. Index motion (broadcast, transpose, gather) is already encoded in the
-                /// body's `Load` index Expressions, so the decode only has to bind the axis induction variables.
-                ///
-                /// Renders to::
-                ///
-                /// int _gid = blockIdx.x * blockDim.x + threadIdx.x; if (_gid < N) { int a0 = _gid / s0;          // outermost
-                /// (s0 = ∏ inner extents) int a1 = _gid / s1 % e1; ... <body> }
+                /// = block_idx.x * block_dim.x + thread_idx.x`, guards `_gid < N` (`N` = ∏ extents), decodes its per-axis
+                /// indices from `_gid` (`a0 = _gid / s0` with `s0` = ∏ inner extents, `a1 = _gid / s1 % e1`, ...), and runs the
+                /// `body` once. Index motion (broadcast, transpose, gather) is already encoded in the body's `Load` index
+                /// Expressions, so the decode only has to bind the axis induction variables. The target lowering spells the
+                /// decode out as a `Grid`.
                 ///
                 /// The cuda lowering reads `N` to size the launch grid (`ceil(N / blockDim)` CTAs of `blockDim` threads). Static
                 /// extents only for now — a symbolic axis raises (the runtime-arg / masked-tile forms land as the skeleton
@@ -399,11 +404,11 @@ macro_rules! with_statement_types {
                 /// cooperative lanes). `None` is the scalar tier (one thread per cell, `blockDim = _BLOCK_SIZE`).
                 ///
                 /// `aux_threads` is the warp-specialized producer band appended PAST the cooperative cells (`blockDim =
-                /// block_threads + aux_threads`, the grid still `N / block_threads`). The decode becomes `_gid = blockIdx.x ·
-                /// block_threads + threadIdx.x % block_threads`: a compute thread decodes its own cell exactly as before, while
-                /// an aux thread wraps onto the CTA's first cells — its BLOCK-axis vars (functions of `blockIdx` alone) are
+                /// block_threads + aux_threads`, the grid still `N / block_threads`). The decode becomes `_gid = block_idx.x ·
+                /// block_threads + thread_idx.x % block_threads`: a compute thread decodes its own cell exactly as before, while
+                /// an aux thread wraps onto the CTA's first cells — its BLOCK-axis vars (functions of `block_idx` alone) are
                 /// correct (the producer fill needs the CTA tile origin), its unit/lane vars alias a compute cell and are never
-                /// read (the producer branch guards on the raw `threadIdx.x`, and the store side is guarded to compute threads).
+                /// read (the producer branch guards on the raw `thread_idx.x`, and the store side is guarded to compute threads).
                 kernel Tile {CHECKED} {
                     axes: Axes [AXIS],
                     body: Body [BODY],
@@ -418,8 +423,8 @@ macro_rules! with_statement_types {
                 /// aux_threads` threads, each binding every axis to its `decode` expression over `thread_idx.x` and
                 /// `block_idx.x` and running `body` once.
                 ///
-                /// The target lowering turns a `Tile` into one before it renders, so the decode is Kernel IR the
-                /// optimizer simplifies and an emitter spells, not text. The axes keep their ranges for the body; a
+                /// The target lowering turns a `Tile` into one before the kernel is compiled, so the decode is Kernel IR
+                /// the optimizer simplifies and the PTX compiler spells, not text. The axes keep their ranges for the body; a
                 /// `Cond` in the body masks the threads past the cells where the launch does not cover them exactly, and
                 /// the axes hold their ranges only under it. A thread's lane and warp, where the body reads them, are a
                 /// `Let` each ahead of that `Cond`.
@@ -441,9 +446,8 @@ macro_rules! with_statement_types {
                 /// 4/8-byte copies use `.ca`. `smem_index` / `src_index` address the *start* of the contiguous chunk;
                 /// `_stage_expand` picks the widest legal `nbytes` so e.g. an fp16 tile stages 8 halves per `cp.async`.
                 ///
-                /// Renders to inline PTX. The asm reads the smem address via `cvta.to.shared.u32` and the global pointer as a
-                /// 64-bit value; indices flatten via `render_index` against the buffer's declared shape (same as `Load` /
-                /// `Write`).
+                /// The shared address is 32-bit and the global one 64-bit; indices flatten against the buffer's declared shape
+                /// (same as `Load` / `Write`).
                 kernel CpAsyncCopy {} {
                     smem: Name [BUFFER_WRITE],
                     smem_index: Exprs [EXPRESSION | READS] : Index,
@@ -465,9 +469,9 @@ macro_rules! with_statement_types {
                 }
                 /// Host-built `CUtensorMap` descriptor for a TMA box copy.
                 ///
-                /// Declarative — renders nothing inside the kernel. The CUDA backend walks the `KernelOp` body, calls
-                /// `cuTensorMapEncodeTiled` once per distinct `TmaDescriptor` at compile time, and binds the resulting 128-byte
-                /// descriptor as a `__grid_constant__` kernel arg. `name` matches the parameter name referenced by sibling
+                /// Declarative — writes no instruction. The CUDA backend walks the `KernelOp` body, calls
+                /// `cuTensorMapEncodeTiled` once per distinct `TmaDescriptor` at launch, and passes the resulting 128-byte
+                /// descriptor as a kernel parameter. `name` matches the parameter name referenced by sibling
                 /// `TmaLoad` stmts. `src_buf` names the global buffer the descriptor addresses (used by the kernel-arg pipeline
                 /// to add `src_buf` to the parameter list).
                 kernel TmaDescriptor {} {
@@ -476,7 +480,6 @@ macro_rules! with_statement_types {
                     src_shape: Ints [],
                     box_extents: Ints [],
                     swizzle: Name [] = Name::from("NONE"),
-                    dtype: Name [] = Name::from("float"),
                 }
                 /// `cp.async.bulk.tensor.<rank>d` — single-thread box copy.
                 ///
@@ -496,7 +499,7 @@ macro_rules! with_statement_types {
                 ///
                 /// With `slot=None`: initializes a scalar mbarrier (single-slot path). With `slot=Expression`: initializes one
                 /// element of a per-slot mbarrier array. The materializer emits one `MbarrierInit` per literal slot index in the
-                /// buffer count, hoisted to the kernel prologue inside `Cond(threadIdx.x == 0, [...]) + Sync()`.
+                /// buffer count, hoisted to the kernel prologue inside `Cond(thread_idx.x == 0, [...]) + Sync()`.
                 kernel MbarrierInit {} {
                     mbar: Name [],
                     count: i64 [] = 1,
@@ -521,7 +524,7 @@ macro_rules! with_statement_types {
                 /// up to `count` registers. Used by warp- specialized kernels so producer warps drop registers and consumer warps
                 /// claim them, decoupling occupancy from the consumer's pressure.
                 ///
-                /// Requires sm_90+. On older targets NVCC rejects the instruction at compile time — only a warp-specialized
+                /// Requires sm_90+. On older targets ptxas rejects the instruction — only a warp-specialized
                 /// materialization emits this Statement, and that path is already TMA-gated to sm_90+ anyway.
                 kernel SetMaxNReg {} {
                     count: i64 [],
@@ -547,8 +550,8 @@ macro_rules! with_statement_types {
                 /// ("acc","acc__o")),)`).
                 ///
                 /// Named-barrier support: `barrier_id > 0` routes the per-iter sync to `bar.sync <id>, <count>` instead of
-                /// `__syncthreads()` — required inside a warp-specialized consumer branch (a __syncthreads on a warp-divergent
-                /// cond is UB).
+                /// `bar.sync 0` — required inside a warp-specialized consumer branch (a CTA-wide barrier on a warp-divergent
+                /// cond is undefined).
                 ///
                 /// `lane` set: the slab holds one partial per warp and `tid_var` is the thread's warp. Warp 0 alone folds
                 /// the slab, in registers: its lane `lane` takes slot `lane % length`, one `WarpShuffle` butterfly over
@@ -877,8 +880,8 @@ macro_rules! with_statement_types {
                 /// Store an mma.sync f32 accumulator array to the output buffer with a per-lane epilogue downconvert.
                 ///
                 /// mma.sync has no `store_matrix_sync` — each lane owns 4 elements of the M×N=16×8 C tile (rows `g` / `g+8` with
-                /// `g = lane/4`, cols `(lane%4)*2 + {0,1}`) and writes them directly. `frag` is the f32 `float c[4]`; when the
-                /// destination buffer is narrower (`__half*`) each value is converted via `__float2half`. `ldm` is the output row
+                /// `g = lane/4`, cols `(lane%4)*2 + {0,1}`) and writes them directly. `frag` is the f32 accumulator; when the
+                /// destination buffer is narrower (f16) each value is converted to it. `ldm` is the output row
                 /// stride (N) — `0` auto-resolves from the buffer's inner extent.
                 ///
                 /// `epilogue` optionally carries a fused pointwise chain — residual adds, bias / scale broadcasts, activations, a
@@ -912,10 +915,10 @@ macro_rules! with_statement_types {
                 /// `fragment_index`. Together they select the coupled 32×32 accumulator map; neither is a schedule choice or a
                 /// wire-codec field.
                 ///
-                /// `atomic` renders each store as an `atomicAdd` accumulate instead of a plain assign — `030_cut`'s atomic
+                /// `atomic` makes each store an `atom.add` accumulate instead of a plain assign — `030_cut`'s atomic
                 /// finalize on the mma tier: every split partition's C fragment adds into the (per-launch zero-init'd) output.
-                /// f16 / bf16 keep the vectorized row pair (native packed-pair `atomicAdd`); an f32 destination has no packed
-                /// atomic below sm_90, so it drops to per-element scalar `atomicAdd`\ s.
+                /// f16 / bf16 keep the vectorized row pair (native packed-pair add); an f32 destination has no packed
+                /// atomic below sm_90, so it drops to per-element scalar adds.
                 kernel RegStore {CHECKED} {
                     dst_buffer: Name [BUFFER_WRITE],
                     dst_index: Exprs [EXPRESSION] : Index,
@@ -1437,7 +1440,7 @@ mod tests {
         }
         assert_eq!(
             blake3::hash(listing.as_bytes()).to_hex().as_str(),
-            "ee3da8b8e2f70d0fb65c6713f3ba3c43b5047d0a938489a13deb08973ca4c4ec",
+            "eed8f32e87a0b1055192dd4e04c657b0bd527f33dd8d6808dac1840a43b78c6e",
             "{listing}"
         );
     }
