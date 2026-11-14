@@ -497,13 +497,14 @@ the featurizer asks the scheduling problem when it featurizes a schedule row (`F
 `S_warp_eligible` column). The answer is read off the sites' own atoms, not off the rows, so a pin naming the scalar
 tier cannot erase "tensor cores were on offer here" from the rows it does enumerate.
 
-**The session kernel cache.** Greedy lowering of one fused kernel is a function — Loop-IR program in,
-lowered `KernelOp` out — and `pipeline/kernel_cache.py` memoizes it at its boundary: `tile/lift/005`
-fetches a finished lowering (io rebound through `Statement.rename_buffers`) before the lift, and
-`lowering/cuda/001` harvests every single-kernel lowering just before the per-graph negotiations
-(zero-init delegation, rendering) that deliberately sit below the boundary. Caller-owned on
-`Context.kernel_cache` (nothing installs it by default), greedy-only (tune strips it, pricing probes
-strip it), multi-kernel origins poison their key. A twin program compiles ~750x faster than cold.
+**The session kernel cache.** Greedy lowering of one kernel is a function — the tile its kernel-set decisions start
+from in, lowered `KernelOp` out — and `pipeline/kernel_cache.py` memoizes it at its boundary: `tile/cut/010` fetches a
+finished lowering (io rebound through `Statement.rename_buffers`) ahead of the cut, and `lowering/cuda/001` harvests
+every single-kernel lowering under that tile just before the per-graph negotiations (zero-init delegation,
+rendering) that deliberately sit below the boundary. The tile is the hit's `source`, so a hit's name and render are a
+fresh lowering's, and each piece a cut leaves is cached as a kernel of its own. Caller-owned on `Context.kernel_cache`
+(nothing installs it by default), greedy-only (tune strips it, pricing probes strip it), a split's origin poisons its
+key.
 
 **The domains and pool identity.** Each `schedule()` call projects fixed independent domains from `p` and `t`, builds
 one immutable `c`, then evaluates Algorithm 1(c, p, t). `Fork.pool_id` stamps the deploy identity, target, ordered

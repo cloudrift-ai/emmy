@@ -99,7 +99,6 @@ def test_a_fork_less_reader_in_a_wider_twin_settles_the_family_folded():
     axis_k = Axis("k", 8)
     flat = replace(
         reader,
-        name="z",
         op=contraction(axis_k, slab("xv", "x", "k"), (slab("wv", "w", "k"), "acc")),
         output_specs=(OutputSpec(parse_body("z[n] = acc")[0]),),
     )

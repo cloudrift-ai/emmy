@@ -347,7 +347,7 @@ def kernel_tile(op):
     another term (a carried state's serial form) does not change which tile that is. Every fact about a kernel is
     computed off this one tile: its exact identity (:func:`kernel_identity`), its ``S_*`` stamps, the definition a
     ``kernel`` row stores. Every kernel the tuner and ``run --bench`` measure has one, the kernel-cache replay
-    included (a cached kernel keeps its chain)."""
+    included (a cached kernel's chain starts at the tile it was fetched for)."""
     from emmy.compiler.ir.tile import TileOp  # noqa: PLC0415
 
     tiles = [ancestor for ancestor in op.source_chain() if isinstance(ancestor, TileOp)]
