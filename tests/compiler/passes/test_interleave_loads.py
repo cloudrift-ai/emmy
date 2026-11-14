@@ -8,9 +8,9 @@ from emmy.compiler.dtype import BF16, F16, F32
 from emmy.compiler.ir.expression import Literal
 from emmy.compiler.ir.kernel import KernelOp
 from emmy.compiler.ir.stmt import Body, Load, parse_body
+from emmy.compiler.pipeline.passes.lowering.kernel._vector import vectorize_loads as _vectorize_loads
+from emmy.compiler.pipeline.passes.lowering.kernel._vector import vectorize_stores as _vectorize_stores
 
-_vectorize_loads = import_module("emmy.compiler.pipeline.passes.lowering.kernel.050_vectorize_loads")._vectorize_body
-_vectorize_stores = import_module("emmy.compiler.pipeline.passes.lowering.kernel.080_vectorize_stores")._vectorize_body
 _interleave = import_module("emmy.compiler.pipeline.passes.lowering.kernel.095_interleave_loads")
 _sink_loads = _interleave._sink_loads
 _pair_ldmatrix = import_module("emmy.compiler.pipeline.passes.lowering.kernel.096_pair_ldmatrix_loads")._walk

@@ -25,7 +25,7 @@ GPU/tier/pool-size cell before qualifying a candidate at the requested median-ra
   and the corpus's rank aggregate is dominated by pools small enough to rank by accident (44% under 100
   candidates). Hence the pool-size axis — a top-1 rate is only readable against the pool it was scored over.
 
-**Cells carry the axes they were keyed on, as a dict.** Measured pools key on ``gpu`` x ``H_opt``; golden pools
+**Cells carry the axes they were keyed on, as a dict.** Measured pools key on ``gpu``; golden pools
 on ``gpu`` x ``tier`` x pool-size bucket; both carry ``half``, because the composite prior's two halves fail for
 different reasons — the offline half decides what a cold sweep measures at all, the online half owns deploys
 once trustworthy — and one unlabelled number would hide which. A fixed axis tuple would force the golden side's
@@ -221,9 +221,9 @@ def _measured_metrics(entries: list[tuple[MeasuredGroup, np.ndarray]]) -> dict:
 
 
 def measured_summaries(half: str, groups: Sequence[MeasuredGroup], score: Scorer) -> list[Summary]:
-    """Cells over benched pools, keyed ``gpu`` x ``H_opt`` — the axes :func:`~..db.export.measured_groups`
-    already grouped on, minus the op identity that separates the pools within a summary."""
-    return _summaries(groups, score, lambda g: {"gpu": g.gpu, "H_opt": f"O{g.h_opt:g}"}, _measured_metrics, half=half)
+    """Cells over benched pools, keyed ``gpu`` — the card :func:`~..db.export.measured_groups` already grouped on,
+    without the op identity and regime that separate the pools within a summary."""
+    return _summaries(groups, score, lambda g: {"gpu": g.gpu}, _measured_metrics, half=half)
 
 
 # --- golden pools: where the verified row landed --------------------------------------------------------

@@ -16,9 +16,11 @@ One subpackage per IR level:
                  statements). One ``LoopOp`` per GPU kernel.
 - ``tile``     — Tile IR (``TileOp`` + ``Tile`` / ``Tile`` / ``Coop`` /
                  ``Sync`` schedule wrappers, reusing Loop IR leaves).
-                 Lowers directly to CUDA source.
-- ``cuda``     — Device IR (``CudaOp`` carrying rendered ``__global__``
-                 source + launch geometry).
+                 Lowers to Kernel IR (``kernel``).
+- ``kernel``   — Kernel IR (``KernelOp``: the whole kernel, explicit
+                 threads, shared memory and fragments).
+- ``cuda``     — Device IR (``CudaOp`` carrying the kernel's PTX +
+                 launch geometry).
 
 The ``Graph`` container and rewrite pipeline live outside ``ir/`` — see
 ``emmy.compiler.graph`` and ``emmy.compiler.pipeline``.

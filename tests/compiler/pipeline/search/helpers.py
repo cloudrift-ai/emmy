@@ -73,18 +73,14 @@ def perf_row(
     bindings: dict | None = None,
     gpu: str = GPU_5090,
     cc: int = 120,
-    opt: int = 3,
-    flags: str = "",
     **over,
 ) -> PerfRow:
-    """A measured CUDA ``perf`` row of ``kernel`` on a registry-known card, in the plain-flags regime
-    of ``opt`` — the row a live bench there writes — with ``**over`` overriding any field. ``knobs``
-    is the schedule row, the f16 matmul one by default."""
+    """A measured CUDA ``perf`` row of ``kernel`` on a registry-known card, in the standard regime — the row a live
+    bench there writes — with ``**over`` overriding any field. ``knobs`` is the schedule row, the f16 matmul one by
+    default."""
     kw = dict(
         gpu=gpu,
         arch=f"sm_{cc}",
-        opt=opt,
-        flags=flags,
         kernel=kernel,
         bindings=dict(bindings or {}),
         knobs=dict(F16_MATMUL_ROW if knobs is None else knobs),

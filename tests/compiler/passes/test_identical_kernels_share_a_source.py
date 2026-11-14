@@ -1,8 +1,8 @@
-"""Two kernels of one exact identity are one kernel: one name, one CUDA source, each launch binding its own buffers.
+"""Two kernels of one exact identity are one kernel: one name, one PTX text, each launch binding its own buffers.
 
 The kernels below compute ``out[i] = 2 * x[i] - y[N - 1 - i]`` over buffers named and declared in different orders:
 the second declares its ``y`` first. The reversed read tells the two operands apart by structure, so the declaration
-order is no part of the identity. A kernel's name is its identity and its source is rendered on role slots, so both
+order is no part of the identity. A kernel's name is its identity and its code is compiled on role slots, so both
 launch the one source; the launch arguments follow each kernel's roles, never its declaration order.
 """
 

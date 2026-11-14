@@ -29,7 +29,7 @@ from emmy.compiler import dtype as dtypes
 from emmy.compiler.dim import Dim, paged_declarations
 from emmy.compiler.dtype import DataType
 from emmy.compiler.ir.cuda import TmaDescMeta
-from emmy.compiler.ir.cuda.ir import resolve_dim
+from emmy.compiler.ir.cuda.ir import renamed, resolve_dim
 from emmy.compiler.ir.expression import BinaryExpression, Expression, Literal, Var
 
 if TYPE_CHECKING:
@@ -121,23 +121,20 @@ class LaunchSpec:
 
 @dataclass
 class KernelSpec:
-    """How to obtain one kernel's device code: ``source`` (compile via the cubin cache — the
-    from-graph path) and/or ``binary_key`` (a content-addressed cubin-cache key — the pack
-    path). A pack stores only the key; a missing cubin falls back to full recompilation."""
+    """How to obtain one kernel's device code: ``source``, its PTX text (assembled via the cubin
+    cache — the from-graph path), and/or ``binary_key`` (a content-addressed cubin-cache key — the
+    pack path). A pack stores only the key; a missing cubin falls back to full recompilation."""
 
     source: str | None = None
     binary_key: str | None = None
-    # Whether this kernel must compile for the arch-SUFFIXED target (``sm_120a``). TMA needs it,
-    # and so does the block-scaled fp4 mma, which ptxas refuses on the plain target.
-    arch_specific: bool = False
     # Whether the kernel waits on the grid ahead of it (``griddepcontrol.wait``) before its first
     # memory access, which lets the runtime launch it as a programmatic dependent launch. A kernel
-    # that does not wait, or a plan stored before the renderer emitted the wait, launches serialized.
+    # for a card before sm_90, which has no such wait, launches serialized.
     dependent_launch: bool = False
 
     @classmethod
     def from_op(cls, op) -> KernelSpec:
-        return cls(source=op.kernel_source, arch_specific=op.arch_specific, dependent_launch=op.dependent_launch)
+        return cls(source=op.kernel_source, dependent_launch=op.dependent_launch)
 
 
 @dataclass
@@ -224,7 +221,7 @@ def plan_from_graph(graph: Graph) -> ExecutionPlan:
             continue
         if not isinstance(op, CudaOp):
             raise TypeError(f"plan_from_graph: node {nid!r} has non-CudaOp {type(op).__name__!r}; lowering must produce Graph[CudaOp].")
-        # Kernels of one identity under one schedule render one source and share it; one carrying a neighbor's
+        # Kernels of one identity under one schedule compile to one code and share it; one carrying a neighbor's
         # zero-init or another pick is other code, launched under its own symbol.
         symbol = merge_kernels(kernels, {op.kernel_name: KernelSpec.from_op(op)})[op.kernel_name]
         launches.append(
@@ -278,7 +275,7 @@ def merge_kernels(kernels: dict[str, KernelSpec], incoming: dict[str, KernelSpec
         name = kernel
         if kernel in kernels and kernels[kernel] != spec:
             name = f"{kernel}_{hashlib.sha1(spec.source.encode()).hexdigest()[:8]}"
-            spec = replace(spec, source=spec.source.replace(f" {kernel}(", f" {name}("), binary_key=None)
+            spec = replace(spec, source=renamed(spec.source, kernel, name), binary_key=None)
         kernels[name] = spec
         names[kernel] = name
     return names
@@ -676,7 +673,6 @@ def plan_to_dict(plan: ExecutionPlan) -> dict:
             name: {
                 **({"source": spec.source} if spec.source is not None else {}),
                 **({"binary_key": spec.binary_key} if spec.binary_key is not None else {}),
-                "arch_specific": spec.arch_specific,
                 **({"dependent_launch": True} if spec.dependent_launch else {}),
             }
             for name, spec in plan.kernels.items()
@@ -759,8 +755,6 @@ def plan_from_dict(d: dict) -> ExecutionPlan:
             name: KernelSpec(
                 source=spec.get("source"),
                 binary_key=spec.get("binary_key"),
-                # ``uses_tma`` is the key packs baked before the fp4 atom wrote; same meaning, narrower name.
-                arch_specific=bool(spec.get("arch_specific", spec.get("uses_tma", False))),
                 dependent_launch=bool(spec.get("dependent_launch", False)),
             )
             for name, spec in d.get("kernels", {}).items()

@@ -105,6 +105,25 @@ def test_a_loop_that_takes_copies_seeds_its_own_folds_only() -> None:
     assert sorted(stmt.name for stmt in op.body.iter() if isinstance(stmt, Init)) == ["acc", "total"]
 
 
+def test_an_outer_loop_written_out_keeps_the_carriers_it_seeded_ahead_of_itself() -> None:
+    """The outer loop of such a nest written out too: the seed of ``total`` it moved ahead of itself stands outside
+    every copy, so each copy folds into ``total`` itself, and only each trip's own names are the copy's."""
+    body = (
+        "for c in 0..2 unroll=true:\n"
+        "    init f32 dot = 0.0\n"
+        "    for k in 0..2 unroll=true seed=false:\n"
+        "        f32 a = load A[i, c, k]\n"
+        "        f32 dot <- add(dot, a)\n"
+        "    f32 total <- maximum(total, dot) over c\n"
+        "f32 O[i] = total"
+    )
+    op = _unrolled(body)
+    assert not _loops(op)
+    folds = [stmt.name for stmt in op.body.iter() if isinstance(stmt, Accum)]
+    assert folds.count("total") == 2 and "total__u0" not in folds
+    assert [stmt.name for stmt in op.body.iter() if isinstance(stmt, Init)] == ["total", "dot__u0", "dot__u1"]
+
+
 @pytest.mark.parametrize(("extent", "copies"), [(8, 2), (16, 4)])
 def test_a_lane_loop_unrolls_when_every_lane_runs_the_same_trips(extent: int, copies: int) -> None:
     op = _unrolled(f"for j in lane..{extent} step 4 unroll=true:\n    f32 a = load A[i, j]\n    O[i, j] = a")
@@ -126,8 +145,9 @@ def test_a_trip_only_some_lanes_run_keeps_the_loop_bound_as_its_guard() -> None:
 
 
 def test_a_long_loop_keeps_rolling_over_copies_of_its_body() -> None:
-    """A 128-trip K loop runs 32 copies of its body per trip, the ``n``-th at the axis ``n`` steps on; the fragment
-    it accumulates into and the one it reloads keep their names."""
+    """A 128-trip K loop runs 32 copies of its body per trip, the ``n``-th at the axis ``n`` steps on, and says it is
+    unrolled, so no code generator unrolls it again; the fragment it accumulates into and the one it reloads keep
+    their names."""
     body = (
         "RegFragment(name=c, role=c, dtype=f32)\n"
         "RegFragment(name=a, role=a, dtype=f16)\n"
@@ -137,7 +157,7 @@ def test_a_long_loop_keeps_rolling_over_copies_of_its_body() -> None:
         "    MmaSyncPtx(c_frag=c, a_frag=a, b_frag=b, shape=(16, 8, 16))"
     )
     [loop] = _loops(_unrolled(body))
-    assert (str(loop.start), str(loop.step), loop.unroll) == ("0", "512", False)
+    assert (str(loop.start), str(loop.step), loop.unroll, loop.unrolled) == ("0", "512", False, True)
     loads = [stmt for stmt in loop.body if not isinstance(stmt, MmaSyncPtx)]
     assert [str(stmt.src_index[0]) for stmt in loads] == ["k", *(f"k + {16 * n}" for n in range(1, 32))]
     assert {(stmt.c_frag, stmt.b_frag) for stmt in loop.body if isinstance(stmt, MmaSyncPtx)} == {("c", "b")}
@@ -163,5 +183,4 @@ def test_a_lowered_matmul_reaches_code_generation_with_no_loop_flagged() -> None
     assert not _loops(kernel)
     folds = sum(isinstance(stmt, Accum) for stmt in kernel.body.iter())
     assert folds and folds % 64 == 0  # one fold per trip and register cell
-    # CUDA spelling: moves to the PTX compiler's tests
-    assert "#pragma unroll" not in cuda.kernel_source
+    assert ".pragma" not in cuda.kernel_source

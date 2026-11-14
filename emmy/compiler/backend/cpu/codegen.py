@@ -376,7 +376,7 @@ class _Fn:
         b, one = self.b, ir.Constant(F32, 1.0)
         binary = {"add": b.fadd, "subtract": b.fsub, "multiply": b.fmul, "divide": b.fdiv}
         if op == "multiply":
-            # A product feeding an accumulation fuses into one FMA, as nvcc fuses it by default; ``combine`` marks
+            # A product feeding an accumulation fuses into one FMA, as the CUDA backend does by default (CONTRACT_FMA); ``combine`` marks
             # the accumulating add the same way, and nothing else is, so no other sum changes.
             return b.fmul(*args, flags=CONTRACT)
         if op in binary:

@@ -591,7 +591,7 @@ def test_precision_pin_precedence(monkeypatch):
 
 
 def test_fma_contraction_keeps_its_own_default_under_the_umbrella(monkeypatch):
-    """nvcc contracts multiply-adds in the standard regime too, so the umbrella never moves ``CONTRACT_FMA``: only
+    """The standard regime contracts multiply-adds too, so the umbrella never moves ``CONTRACT_FMA``: only
     its own pin turns it off, and a recorded regime that omits it reads it on."""
     from emmy.compiler.pipeline.search.space import CONTRACT_FMA, FAST_DIV, precision_pin, precision_pins
 

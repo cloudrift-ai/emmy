@@ -26,17 +26,17 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 # Each --ir stage maps to (passes to run, formatter). "graph" pretty-prints
-# the whole Graph (inputs/constants/nodes/outputs). "kernels" renders just
+# the whole Graph (inputs/constants/nodes/outputs). "kernels" prints just
 # the post-lowering per-kernel bodies — dispatching on LoopOp / TileOp /
-# CudaOp by type; the syntax itself (``for`` loops vs CUDA source)
-# disambiguates the IR level.
+# CudaOp by type; the syntax itself (``for`` loops vs PTX) disambiguates
+# the IR level.
 _IR_STAGES = {
     "torch": ([], "graph"),
     "tensor": (TENSOR_PASSES, "graph"),
     "loop": (LOOP_PASSES, "kernels"),
     "tile": (TILE_PASSES, "kernels"),
     "kernel": (KERNEL_PASSES, "kernels"),
-    "cuda": (CUDA_PASSES, "kernels"),
+    "ptx": (CUDA_PASSES, "kernels"),
 }
 
 _DEFAULT_PASSES = LOOP_PASSES
@@ -518,31 +518,6 @@ def add_diagnostics_args(parser) -> None:
     )
 
 
-def add_nvcc_args(parser) -> None:
-    """Register ``--nvcc-flags`` (shared by ``compile`` / ``run`` / ``tune``)."""
-    parser.add_argument(
-        "--nvcc-flags",
-        default=None,
-        help=(
-            "Override the extra nvcc compile flags (space-separated), e.g. "
-            '"-Xcicc -O1". Default everywhere is nvcc\'s own -O3, the deployable regime: tune measures in the '
-            "same regime it deploys into, so a tuned latency is the deployed one. Pinning a non-deployable opt "
-            "level makes a sweep rank only against itself — its rows key to that regime and no deploy reads them. "
-            "Folded into the cubin + perf cache keys. Equivalent to setting EMMY_NVCC_FLAGS."
-        ),
-    )
-
-
-def apply_nvcc_flags(args, default: str) -> str:
-    """Resolve and publish the effective extra nvcc flags. Thin CLI adapter that
-    extracts ``--nvcc-flags`` from ``args`` and delegates the override/precedence
-    (``--nvcc-flags`` > pre-set env > command ``default``) to
-    :func:`emmy.config.set_nvcc_flags`, so every callsite (CLI, programmatic,
-    tests) shares one implementation. Must run before any compile/bench. Returns
-    the effective string."""
-    return config.set_nvcc_flags(getattr(args, "nvcc_flags", None), default)
-
-
 def setup_pipeline_runtime(args) -> None:
     """Apply verbosity, diff-render config, and target overrides from parsed args."""
     from emmy.compiler.pipeline.rule_diff import RuleRenderConfig, set_config, should_use_color
@@ -585,10 +560,10 @@ def register_compile_command(subparsers):
     parser.add_argument(
         "--ir",
         choices=list(_IR_STAGES),
-        default="cuda",
+        default="ptx",
         help=(
             "IR stage to print to stdout (or ``--output``) — defaults to "
-            "``cuda`` (the final lowered stage). Use a lower stage like "
+            "``ptx`` (each kernel's PTX, the final lowered stage). Use a lower stage like "
             "``loop`` / ``tile`` / ``kernel`` to inspect intermediate IRs."
         ),
     )
@@ -607,7 +582,6 @@ def register_compile_command(subparsers):
     )
     add_quantize_arg(parser)
     add_diagnostics_args(parser)
-    add_nvcc_args(parser)
     parser.set_defaults(func=handle_compile)
 
 
@@ -625,7 +599,6 @@ def handle_compile(args):
     from emmy.compiler.pipeline.search.db import SearchDB
 
     setup_pipeline_runtime(args)
-    apply_nvcc_flags(args, default="")  # compile uses nvcc default -O3 (representative codegen)
     passes = resolve_passes(args)
     graph, _, bundle = load_or_trace(args)
     if getattr(args, "quantize", None):

@@ -18,6 +18,9 @@ from emmy.compiler.pipeline.search.pins import pinned_knobs
 from tests.compiler.helpers import compile_with_kernels, requires_cuda, requires_sm, statements
 from tests.compiler.terms import contraction, projection, slab
 
+#: The card the structural tests compile for; a test that runs its kernel compiles for the card it runs on.
+_CARD = Context.from_target((12, 0))
+
 
 def _graph(dtype: str) -> Graph:
     body = parse_body(
@@ -46,10 +49,11 @@ def _products(kernels) -> set[tuple]:
     return {(tuple(mma.shape), mma.ab_dtype, mma.c_dtype) for mma in statements(kernels, MmaSyncPtx)}
 
 
-def _compiled(dtype: str, reduce: str = "", *, kernels: bool = False):
-    """The batched matvec compiled under its tensor-core pins; with ``kernels``, beside its Kernel IR."""
+def _compiled(dtype: str, reduce: str = "", *, kernels: bool = False, ctx: Context = _CARD):
+    """The batched matvec compiled under its tensor-core pins, for ``ctx``'s card; with ``kernels``, beside its Kernel
+    IR."""
     with pinned_knobs({"PLACE": "fuse", "WORK": "w1x1", "TILE": f"mma_m16n8k16_{dtype}_f32/f1x1", "REDUCE": reduce, "STAGE": ""}):
-        compiled = compile_with_kernels(_graph(dtype), ctx=Context.from_target((12, 0)))
+        compiled = compile_with_kernels(_graph(dtype), ctx=ctx)
     return compiled if kernels else compiled[0]
 
 
@@ -80,11 +84,14 @@ def _rank_one_graph(dtype: str, k_size: int = 64, n_size: int = 32, *, reshape_o
     return graph
 
 
-def _rank_one_compiled(dtype: str, k_size: int = 64, n_size: int = 32, *, reshape_output: bool = False, kernels: bool = False):
-    """The rank-one projection compiled under its tensor-core pins; with ``kernels``, beside its Kernel IR."""
+def _rank_one_compiled(
+    dtype: str, k_size: int = 64, n_size: int = 32, *, reshape_output: bool = False, kernels: bool = False, ctx: Context = _CARD
+):
+    """The rank-one projection compiled under its tensor-core pins, for ``ctx``'s card; with ``kernels``, beside its
+    Kernel IR."""
     graph = _rank_one_graph(dtype, k_size, n_size, reshape_output=reshape_output)
     with pinned_knobs({"PLACE": "fuse", "WORK": "w1x1", "TILE": f"mma_m16n8k16_{dtype}_f32/f1x1", "REDUCE": "", "STAGE": ""}):
-        compiled = compile_with_kernels(graph, ctx=Context.from_target((12, 0)))
+        compiled = compile_with_kernels(graph, ctx=ctx)
     return compiled if kernels else compiled[0]
 
 
@@ -165,7 +172,9 @@ def test_rank_one_projection_matches_independent_reference(dtype: str, n_size: i
     else:
         a, w = a.astype(np.float16), w.astype(np.float16)
         a_ref, w_ref = a.astype(np.float32), w.astype(np.float32)
-    result, _ = CudaBackend().run(_rank_one_compiled(dtype, n_size=n_size, reshape_output=reshape_output), input_data={"a": a, "w": w})
+    result, _ = CudaBackend().run(
+        _rank_one_compiled(dtype, n_size=n_size, reshape_output=reshape_output, ctx=Context.probe()), input_data={"a": a, "w": w}
+    )
     expected = (a_ref @ w_ref).reshape((n_size // 128, 128) if reshape_output else (n_size,))
     np.testing.assert_allclose(result.outputs["out"], expected, rtol=1e-3, atol=1e-3)
 
@@ -194,7 +203,7 @@ def test_batched_matvec_matches_independent_reference(dtype: str, reduce: str) -
     else:
         a, w = a.astype(np.float16), w.astype(np.float16)
         a_ref, w_ref = a.astype(np.float32), w.astype(np.float32)
-    result, _ = CudaBackend().run(_compiled(dtype, reduce), input_data={"a": a, "w": w})
+    result, _ = CudaBackend().run(_compiled(dtype, reduce, ctx=Context.probe()), input_data={"a": a, "w": w})
     expected = np.einsum("bmk,bmkn->bmn", a_ref, w_ref)
     np.testing.assert_allclose(result.outputs["out"].reshape(expected.shape), expected, rtol=1e-3, atol=1e-3)
 
@@ -235,7 +244,7 @@ def test_row_scaled_fp8_b_matches_independent_reference() -> None:
     bits = rng.integers(0, 256, (32, 16), dtype=np.uint8)
     bits[(bits == 0x7F) | (bits == 0xFF)] = 0
     with pinned_knobs({"PLACE": "fuse", "WORK": "w1x1", "TILE": "mma_m16n8k16_f16_f32/f1x1", "REDUCE": "", "STAGE": ""}):
-        compiled, kernels = compile_with_kernels(_row_scaled_fp8_graph(), ctx=Context.from_target((12, 0)))
+        compiled, kernels = compile_with_kernels(_row_scaled_fp8_graph(), ctx=Context.probe())
     assert len(kernels) == 1
     result, _ = CudaBackend().run(compiled, input_data={"a": a, "scale": scale, "bits": bits})
     expected = np.einsum("mk,mk,kn->mn", a.astype(np.float32), scale.astype(np.float32), decode_f8(bits, "f8e4m3"))
@@ -272,7 +281,7 @@ def test_grouped_weight_row_batch_matches_independent_reference() -> None:
     a = rng.standard_normal((6, 2, 32)).astype(np.float16)
     w = rng.standard_normal((32, 2 * 6 * 16)).astype(np.float16)
     with pinned_knobs({"PLACE": "fuse", "WORK": "w1x1", "TILE": "mma_m16n8k16_f16_f32/f1x1", "REDUCE": "", "STAGE": ""}):
-        compiled, kernels = compile_with_kernels(_grouped_weight_graph(), ctx=Context.from_target((12, 0)))
+        compiled, kernels = compile_with_kernels(_grouped_weight_graph(), ctx=Context.probe())
     assert len(kernels) == 1 and statements(kernels, MmaSyncPtx)
     result, _ = CudaBackend().run(compiled, input_data={"a": a, "w": w})
     expected = np.empty((6, 2, 16), dtype=np.float32)

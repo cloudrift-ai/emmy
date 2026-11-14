@@ -40,7 +40,7 @@ engine:
     vllm:
       # The published prebuilt image (docker/vllm-emmy-serve/): model snapshot, warmed
       # sm_120 cubins and the execution-plan pack baked in, so a cold start pays no HF
-      # download, no nvcc compile, and — on a pack hit — no compiler frontend either.
+      # download, no ptxas assembly, and — on a pack hit — no compiler frontend either.
       #
       # The settings below MATCH the shape models/gemma-4-12b-it.env pins, and that
       # agreement is the whole point of a serving recipe: the pack is keyed on the serving

@@ -288,7 +288,7 @@ def lane_bank_distribution(
 # LDS.128 vectorization model
 # ---------------------------------------------------------------------------
 #
-# nvcc fuses N consecutive scalar fp32 loads from smem into a single
+# ptxas fuses N consecutive scalar fp32 loads from smem into a single
 # ``ld.shared.v4`` (LDS.128) when they read 4 contiguous fp32. The warp
 # drains in 4 cycles regardless — so the first ``vec_width`` distinct
 # addresses per bank are "absorbed" into the natural drain (no extra
@@ -353,13 +353,10 @@ def annotate_lds128(results: list[BankConflictResult]) -> None:
 # ---------------------------------------------------------------------------
 
 
-_ELEM_BYTES = {"float": 4, "__half": 2, "__nv_bfloat16": 2, "double": 8, "int": 4}
-
-
 def _binding_result(b: StageBinding, k_iter: int, warp_id: int) -> BankConflictResult | None:
     """Evaluate one binding into a :class:`BankConflictResult` (or ``None`` — un-evaluable)."""
     extents = tuple(int(e) for e in b.slab.extents)
-    elem_bytes = _ELEM_BYTES.get(b.slab.dtype, 4)
+    elem_bytes = b.slab.dtype.nbytes
     extra_env: dict[str, int] = {}
     for ax in b.enclosing_loop_axes:
         hi = ax.extent.as_static() - 1 if ax.extent.is_static else 0
@@ -399,7 +396,7 @@ def _full_sweep(b: StageBinding, r: BankConflictResult, warp_id: int) -> None:
     extents = tuple(int(e) for e in b.slab.extents)
     if len(extents) != 2:
         return
-    elem_bytes = _ELEM_BYTES.get(b.slab.dtype, 4)
+    elem_bytes = b.slab.dtype.nbytes
     inner = b.enclosing_loop_axes[-1] if b.enclosing_loop_axes else None
     iters = inner.extent.as_static() if inner is not None and inner.extent.is_static else 1
     outer_env = {ax.name: 0 for ax in b.enclosing_loop_axes[:-1]}

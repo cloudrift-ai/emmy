@@ -237,15 +237,17 @@ def _offered(graph: Graph, *, frontend: bool = False) -> list[dict]:
     return offered
 
 
-def _lower(graph: Graph, placement: dict[str, str]) -> Graph:
+def _lower(graph: Graph, placement: dict[str, str], ctx: Context = _CTX) -> Graph:
+    """``graph`` lowered under ``placement`` for ``ctx``'s card: a test that runs the kernels names the card it runs
+    on."""
     with pinned_knobs(placement):
-        lowered, _ = Run(Pipeline.build(CUDA_PASSES), _CTX).resolve(graph, direct_classic_leaf)
+        lowered, _ = Run(Pipeline.build(CUDA_PASSES), ctx).resolve(graph, direct_classic_leaf)
     lowered.validate()
     return lowered
 
 
-def _lower_cut(graph: Graph, spelling: str) -> Graph:
-    return _lower(graph, {spelling: "cut"})
+def _lower_cut(graph: Graph, spelling: str, ctx: Context = _CTX) -> Graph:
+    return _lower(graph, {spelling: "cut"}, ctx)
 
 
 def _case_match(case: str) -> tuple[Match, Graph]:
@@ -685,7 +687,7 @@ def test_softmax_state_cut_is_offered_and_pinned_cut_lowers() -> None:
     offered = _offered(_softmax_graph(), frontend=True)
     # Direct division leaves one cuttable seam: the maximum and denominator carrier.
     assert {"PLACE": "fuse"} in offered and {"PLACE": "cut"} in offered
-    lowered = _lower_cut(_softmax_graph(), "PLACE")
+    lowered = _lower_cut(_softmax_graph(), "PLACE", Context.probe())
     cuda = [node for node in lowered.nodes.values() if type(node.op).__name__ == "CudaOp"]
     assert len(cuda) == 2
     assert len(next(node for node in cuda if "__place_" in node.id).outputs) == 2  # maximum + denominator state
@@ -1057,7 +1059,7 @@ def test_indexed_reader_omits_an_unread_workspace_component() -> None:
 def test_block_projection_cut_matches_packed_pair_and_block_oracles() -> None:
     graph = _block_pair_projection_graph()
     (seam,) = [seam for seam in cuttable_seams(_lifted_parent(graph.copy())) if seam.node.as_contraction() is not None]
-    cut = _lower_cut(graph, seam.spelling)
+    cut = _lower_cut(graph, seam.spelling, Context.probe())
     rng = np.random.default_rng(31)
     x = rng.standard_normal((2, 32)).astype(np.float16)
     w = rng.standard_normal((32, 32)).astype(np.float16)
@@ -1156,7 +1158,7 @@ def test_reindexed_projection_cut_matches_pair_and_block_oracles() -> None:
     """Workspace reads preserve each original channel's row, including the two packed-pair lanes."""
     graph = _projection_views_graph()
     (seam,) = [seam for seam in cuttable_seams(_lifted_parent(graph.copy())) if seam.node.as_contraction() is not None]
-    cut = _lower_cut(graph, seam.spelling)
+    cut = _lower_cut(graph, seam.spelling, Context.probe())
     rng = np.random.default_rng(21)
     x = rng.standard_normal((2, 32)).astype(np.float16)
     w = rng.standard_normal((32, 32)).astype(np.float16)
@@ -1227,7 +1229,7 @@ def test_a_value_read_under_a_reduce_and_at_the_free_axis_is_one_seam(m: int) ->
 def test_a_clustered_value_cut_once_computes_the_right_answer(m: int) -> None:
     graph = _norm_residual_graph(m)
     (seam,) = [seam for seam in cuttable_seams(_lifted_parent(graph.copy())) if seam.node.as_contraction() is not None]
-    cut = _lower_cut(graph, seam.spelling)
+    cut = _lower_cut(graph, seam.spelling, Context.probe())
     rng = np.random.default_rng(0)
     x = rng.standard_normal((m, 64)).astype(np.float16)
     w = rng.standard_normal((64, 32)).astype(np.float16)
@@ -1688,7 +1690,7 @@ def test_a_lone_contraction_is_a_channel_of_the_twin_it_equals() -> None:
 def test_a_twin_cut_once_serves_its_lone_channel_reader() -> None:
     graph = _twin_norm_graph()
     (seam,) = [seam for seam in cuttable_seams(_lifted_parent(graph.copy())) if seam.node.as_contraction() is not None]
-    cut = _lower_cut(graph, seam.spelling)
+    cut = _lower_cut(graph, seam.spelling, Context.probe())
     rng = np.random.default_rng(0)
     x = rng.standard_normal((16, 64)).astype(np.float16)
     wk = rng.standard_normal((64, 32)).astype(np.float16)
@@ -1777,7 +1779,7 @@ def test_a_matmul_piece_writes_its_workspace_in_its_weight_layout(product: str, 
 
 @requires_cuda
 def test_a_rope_projection_cut_once_computes_the_right_answer() -> None:
-    cut = _lower_cut(_rope_graph(), _rope_seam().spelling)
+    cut = _lower_cut(_rope_graph(), _rope_seam().spelling, Context.probe())
     rng = np.random.default_rng(0)
     x, wq, wk = (rng.standard_normal(shape).astype(np.float16) for shape in ((1, 64), (64, 32), (64, 16)))
     c, s = (rng.standard_normal((1, 1, 8)).astype(np.float16) for _ in range(2))
@@ -1829,7 +1831,7 @@ def test_a_gqa_value_read_at_its_flat_channel_is_stored_once_per_kv_head() -> No
 def test_a_gqa_value_stored_once_per_kv_head_computes_the_right_answer() -> None:
     graph = _gqa_value_graph()
     (seam,) = [seam for seam in cuttable_seams(_lifted_parent(graph.copy())) if seam.node.as_contraction() is not None]
-    cut = _lower_cut(graph, seam.spelling)
+    cut = _lower_cut(graph, seam.spelling, Context.probe())
     rng = np.random.default_rng(0)
     x, w, y = (rng.standard_normal(shape).astype(np.float16) for shape in ((1, 64), (64, 16), (32, 16)))
     (out_name,) = cut.outputs
@@ -2281,8 +2283,8 @@ def test_staged_child_cut_preserves_both_requant_outputs() -> None:
     }
     inputs["mul_static_fp4_shift"][:] = 0
     backend = CudaBackend()
-    single = backend.run(_lower(graph.copy(), {**parent, **first}), input_data=inputs)[0].outputs
-    staged = backend.run(_lower(graph.copy(), {**parent, **first, **second}), input_data=inputs)[0].outputs
+    single = backend.run(_lower(graph.copy(), {**parent, **first}, Context.probe()), input_data=inputs)[0].outputs
+    staged = backend.run(_lower(graph.copy(), {**parent, **first, **second}, Context.probe()), input_data=inputs)[0].outputs
 
     for name in graph.outputs:
         np.testing.assert_array_equal(staged[name], single[name])
@@ -2380,7 +2382,7 @@ def test_two_staged_cuts_preserve_norm_residual_values() -> None:
         once, _ = Run(Pipeline.build([*TILE_PASSES[:-1]]), _CTX).resolve(_norm_residual_graph(1), lambda fork: fork.options[0])
     [piece] = [once.nodes[output].op for output in once.outputs]
     pins = {**first, f"PLACE@{piece.name}/map.1/map": "cut"}
-    cut = _lower(_norm_residual_graph(1), pins)
+    cut = _lower(_norm_residual_graph(1), pins, Context.probe())
     assert sum(isinstance(node.op, CudaOp) for node in cut.nodes.values()) == 3
 
     rng = np.random.default_rng(0)
@@ -2834,7 +2836,7 @@ def test_a_kernel_pin_that_leaves_no_row_is_refused_by_name() -> None:
 @pytest.mark.parametrize("rows", [1, 2])
 def test_computed_operand_cut_keeps_bf16_before_fp8_output(rows) -> None:
     """A later FP8 encode cannot change the precision of an earlier contraction operand."""
-    from emmy.compiler.backend.cuda.nvcc import compile_to_cubin, nvcc_path
+    from emmy.compiler.backend.cuda.ptxas import compile_to_cubin, ptxas_path
     from emmy.compiler.dtype import BF16, F8E4M3
 
     m, n, k = Axis("m", rows), Axis("n", 4), Axis("k", 8)
@@ -2866,8 +2868,8 @@ def test_computed_operand_cut_keeps_bf16_before_fp8_output(rows) -> None:
     producer = next(node for node in lowered.nodes.values() if isinstance(node.op, CudaOp) and "__place_" in node.id)
     assert producer.output.dtype == BF16
     assert lowered.buffer("out").dtype == F8E4M3
-    if nvcc_path() is None:
-        pytest.skip("nvcc unavailable")
+    if ptxas_path() is None:
+        pytest.skip("ptxas unavailable")
     for node in lowered.nodes.values():
         if isinstance(node.op, CudaOp):
             assert compile_to_cubin(node.op.kernel_source, node.op.kernel_name, arch="sm_120a").exists()

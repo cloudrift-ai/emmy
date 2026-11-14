@@ -500,8 +500,8 @@ tier cannot erase "tensor cores were on offer here" from the rows it does enumer
 **The session kernel cache.** Greedy lowering of one kernel is a function — the tile its kernel-set decisions start
 from in, lowered `KernelOp` out — and `pipeline/kernel_cache.py` memoizes it at its boundary: `tile/cut/010` fetches a
 finished lowering (io rebound through `Statement.rename_buffers`) ahead of the cut, and `lowering/cuda/001` harvests
-every single-kernel lowering under that tile just before the per-graph negotiations (zero-init delegation,
-rendering) that deliberately sit below the boundary. The tile is the hit's `source`, so a hit's name and render are a
+every single-kernel lowering under that tile just before the per-graph negotiations (zero-init delegation, code
+generation) that deliberately sit below the boundary. The tile is the hit's `source`, so a hit's name and code are a
 fresh lowering's, and each piece a cut leaves is cached as a kernel of its own. Caller-owned on `Context.kernel_cache`
 (nothing installs it by default), greedy-only (tune strips it, pricing probes strip it), a split's origin poisons its
 key.
@@ -539,7 +539,7 @@ How to comply:
   nested reductions remain nested `Fold` statements regardless of which frontend operation produced them.
 - **Gate in the negative.** Enumerating admissible shapes is shape matching by another name. Walk the body and
   report the first thing the transform *fundamentally cannot do* (an epilogue folds unless it has an ineligible op or
-  dependency) — the eligible set then grows with the renderer instead of with a hand-maintained list.
+  dependency) — the eligible set then grows with the code generator instead of with a hand-maintained list.
 - **Bail conservatively on well-formedness, never on shape identity.** `return None` / `RuleSkipped` for a body
   the rule doesn't fully understand is fine; the conditions must be structural properties (escaping values,
   symbolic extents, mixed dtypes), not "is this the X kernel".

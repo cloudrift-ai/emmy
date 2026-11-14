@@ -1,7 +1,7 @@
 #!/bin/bash
 # Warm one model's caches on the TARGET GPU: serve once from the plain vllm-emmy image
 # with ./warm mounted at /opt/emmy, so the model snapshot lands in warm/hf and every
-# compiled kernel in warm/cubin — with the image's nvcc (toolkit_tag) at -O3 and the
+# assembled kernel in warm/cubin — with the image's ptxas (its version keys the cache) and the
 # pinned config (cache-key parity with the baked image, which runs the same serve.sh).
 # Requires HF_TOKEN in the env UNLESS warm/hf is pre-seeded with the model snapshot (a
 # gated download happens here, once). Set HF_HUB_OFFLINE=1 with a pre-seeded snapshot to

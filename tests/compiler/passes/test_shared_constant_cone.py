@@ -14,7 +14,6 @@ sm_80, sm_89 and sm_120.
 
 from __future__ import annotations
 
-import re
 from dataclasses import replace
 from importlib import import_module
 
@@ -48,31 +47,12 @@ factor = import_module("emmy.compiler.pipeline.passes.lowering.kernel._factor")
 
 _CAP = (8, 0)
 _M, _K, _N = 1, 32, 16  # M=1 — the decode row, whose contraction folds serially per channel
-_DECL = re.compile(r"^\s*(?:const\s+)?(?:float|double|half|__half|int|unsigned|long|bool)\s+(\w+)\s*(?:=|;)")
 
 
 def _names(stmt) -> tuple[str, ...]:
     """The names an ``Assign``'s value reads as direct operands (a bare-name value is its one operand)."""
     operands = (stmt.value,) if isinstance(stmt.value, Var) else stmt.value.operands
     return tuple(operand.name for operand in operands)
-
-
-def _redeclared(source: str) -> list[str]:
-    """Names declared twice within ONE brace scope — exactly what nvcc rejects."""
-    scopes: list[dict[str, int]] = [{}]
-    clashes: list[str] = []
-    for line in source.splitlines():
-        declared = _DECL.match(line)
-        if declared and declared.group(1) in scopes[-1]:
-            clashes.append(declared.group(1))
-        elif declared:
-            scopes[-1][declared.group(1)] = 1
-        for char in line:
-            if char == "{":
-                scopes.append({})
-            elif char == "}" and len(scopes) > 1:
-                scopes.pop()
-    return clashes
 
 
 def _gate_up_graph() -> Graph:
@@ -120,13 +100,10 @@ def _scalar_tier(monkeypatch):
 def test_sibling_cones_share_one_declaration_of_a_broadcast_constant(_scalar_tier) -> None:
     set_target(_CAP)
     try:
-        lowered, kernels = compile_with_kernels(_gate_up_graph(), ctx=Context(compute_capability=_CAP))
+        _lowered, kernels = compile_with_kernels(_gate_up_graph(), ctx=Context(compute_capability=_CAP))
     finally:
         set_target(None)
     assert kernels, "the graph must lower to at least one kernel"
-    # CUDA spelling: moves to the PTX compiler's tests (nvcc's one declaration of a name per brace scope)
-    sources = {node.op.kernel_name: node.op.kernel_source for node in lowered.nodes.values() if getattr(node.op, "kernel_source", None)}
-    assert {name: _redeclared(src) for name, src in sources.items() if _redeclared(src)} == {}
     # Every reduction step reads the shared constant through ONE binding used by both sibling
     # cones: a kernel that reads it binds it once, and every use pairs up — an ILP partition
     # multiplies the uses (one pair per register copy), never the binding.

@@ -48,7 +48,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 
 from emmy.compiler.dim import Dim
-from emmy.compiler.dtype import I32
+from emmy.compiler.dtype import F32, I32, U64, DataType
 from emmy.compiler.ir.address import copies_aligned, copy_width
 from emmy.compiler.ir.axis import Axis
 from emmy.compiler.ir.expression import (
@@ -402,7 +402,7 @@ def cp_async_wait(group: int) -> list[Statement]:
     return [CpAsyncWait(group=group), Sync()]
 
 
-def slab_smem(name: str, rows: int, cols: int, dtype: str, *, align: int = 0) -> Smem:
+def slab_smem(name: str, rows: int, cols: int, dtype: DataType, *, align: int = 0) -> Smem:
     """A row-major ``rows × cols`` operand slab; ``ldm`` (the staged-load row stride)
     is ``cols``. ``align`` stamps an explicit byte alignment — TMA destination slabs
     need 128 B (``cp.async.bulk.tensor`` requires an aligned smem base)."""
@@ -410,7 +410,7 @@ def slab_smem(name: str, rows: int, cols: int, dtype: str, *, align: int = 0) ->
 
 
 def sync_row_fill(
-    *, slab: str, src: str, extent: int, grid_vars: tuple, linear_tid: Expression, n_threads: int, dtype: str
+    *, slab: str, src: str, extent: int, grid_vars: tuple, linear_tid: Expression, n_threads: int, dtype: DataType
 ) -> list[Statement]:
     """The synchronous ``smem`` 1-D operand fill: cooperatively copy the CTA-shared row
     ``src[grid…, 0:extent]`` into a length-``extent`` smem ``slab``, then a CTA barrier so
@@ -429,9 +429,9 @@ def sync_row_fill(
 
 
 def stat_rows(
-    stats: tuple[str, ...], slab_of, row_axis: Axis, dtype: str = "float", dtypes: dict[str, str] | None = None
+    stats: tuple[str, ...], slab_of, row_axis: Axis, dtype: DataType = F32, dtypes: dict[str, DataType] | None = None
 ) -> list[Statement]:
-    """One length-``rows`` smem row per bridged statistic, each at its own C type."""
+    """One length-``rows`` smem row per bridged statistic, each at its own dtype."""
     per = dtypes or {}
     return [Smem(name=slab_of(nm), extents=(row_axis.extent.as_static(),), dtype=per.get(nm, dtype)) for nm in stats]
 
@@ -444,8 +444,8 @@ def sync_stat_fill(
     row_body: list[Statement],
     cta: CtaTile,
     stat=None,
-    dtype: str = "float",
-    dtypes: dict[str, str] | None = None,
+    dtype: DataType = F32,
+    dtypes: dict[str, DataType] | None = None,
     declare: bool = True,
 ) -> list[Statement]:
     """The ``smem`` compute fill's per-row STATISTIC prologue — the fused norm→linear warp edge's
@@ -458,10 +458,10 @@ def sync_stat_fill(
     CTA barrier publishes them to the A compute-fill. A ``row_body`` with no foldable reduce
     ``Loop`` (or a sub-warp CTA) falls back to the serial one-row-per-THREAD stripe.
 
-    A row is declared at its OWN bridged value's C type (``dtypes``, name → C type; ``dtype`` for
-    anything absent). The declaration is where a bridged value's dtype is stated — ``Smem``'s render
-    registers it and the cell's read picks it up — so a row declared float would put the cell's
-    arithmetic in f32 whatever crossed it, and the bit operations have no f32 spelling.
+    A row is declared at its OWN bridged value's dtype (``dtypes``, name → dtype; ``dtype`` for
+    anything absent). The declaration is where a bridged value's dtype is stated — the cell's read
+    picks it up — so a row declared f32 would put the cell's arithmetic in f32 whatever crossed it,
+    and the bit operations have no f32 spelling.
 
     ``declare=False`` leaves the rows' declarations out — a per-chunk statistic refills rows the
     kernel declared once, ahead of its K loop (:func:`stat_rows`)."""
@@ -578,7 +578,7 @@ def software_swizzle(inner_elems: int, elem_bytes: int) -> str:
     return f"{mode}@{inner_elems.bit_length() - 1}"
 
 
-def tma_descriptor(name: str, src: str, box: tuple[int, int], dtype: str, *, swizzle: str = "NONE", elem_bytes: int = 4) -> TmaDescriptor:
+def tma_descriptor(name: str, src: str, box: tuple[int, int], *, swizzle: str = "NONE", elem_bytes: int = 4) -> TmaDescriptor:
     """A host-encoded ``CUtensorMap`` for the operand ``src`` with a ``box`` tile
     (C-order). The source globalDim is resolved from the bound array at launch, so a
     symbolic (masked-M) extent rides the runtime shape and TMA zero-fills the box
@@ -592,7 +592,7 @@ def tma_descriptor(name: str, src: str, box: tuple[int, int], dtype: str, *, swi
         atom, _ = pick_swizzle_atom(box[-1], elem_bytes)
         if atom < box[-1]:
             box = (*box[:-1], box[-1] // atom, atom)
-    return TmaDescriptor(name=name, src_buf=src, src_shape=(), box_extents=box, swizzle=swizzle, dtype=dtype)
+    return TmaDescriptor(name=name, src_buf=src, src_shape=(), box_extents=box, swizzle=swizzle)
 
 
 # --------------------------------------------------------------------------- #
@@ -665,13 +665,12 @@ class Operand:
     # already spell. ``index`` / ``coords`` fold the atom into the row; the TMA fill deposits one
     # ``(bk, atom)`` box per atom because a box cannot step its gmem column between row blocks.
     atoms: int = 1
-    # This operand's OWN element dtype / size, when it differs from the transport-level
-    # ``slab_dtype`` / ``elem_bytes`` (a mixed-dtype scalar contraction — fp32 A × fp16 B, the
-    # norm→linear split-combine shape). ``None`` inherits the transport's. Sizing the B fill with
-    # A's element width issued 16 B ``cp.async`` chunks at fp32 spacing over fp16 memory —
-    # misaligned addresses + overlapped data (the Gemma ``k_linear_reduce`` bench_fail cluster).
-    dtype: str | None = None
-    elem_bytes: int | None = None
+    # This operand's OWN element dtype, when it differs from the transport-level ``slab_dtype`` (a
+    # mixed-dtype scalar contraction — fp32 A × fp16 B, the norm→linear split-combine shape).
+    # ``None`` inherits the transport's. Sizing the B fill with A's element width issued 16 B
+    # ``cp.async`` chunks at fp32 spacing over fp16 memory — misaligned addresses + overlapped data
+    # (the Gemma ``k_linear_reduce`` bench_fail cluster).
+    dtype: DataType | None = None
     # The companion BLOCK-SCALE slab of a byte-slab operand (NVFP4 or block-scaled fp8 weights) —
     # ``(slab name, the k block the scale spans, logical k per byte)``. One stored byte is one or
     # two logical K elements and every ``block`` of them share one scale, so the drain reads this
@@ -687,6 +686,11 @@ class Operand:
     @property
     def slab(self) -> str:
         return f"_{self.tag}_smem"
+
+    @property
+    def elem_bytes(self) -> int | None:
+        """The bytes of one element of this slab's own dtype, ``None`` when it inherits the transport's."""
+        return self.dtype.nbytes if self.dtype is not None else None
 
     @property
     def desc(self) -> str:
@@ -729,11 +733,10 @@ class SyncOperand:
     # COMPUTES fills its own slab and still hands the drain the stored scales beside it, so the
     # drain must read the pairing off either kind.
     scale: tuple | None = None
-    # This slab's OWN element dtype / size, when it differs from the transport's ``slab_dtype`` /
-    # ``elem_bytes`` — an fp8 weight's block-scale slab keeps its f32 scale beside 16-bit operand
-    # slabs. ``None`` inherits the transport's.
-    dtype: str | None = None
-    elem_bytes: int | None = None
+    # This slab's OWN element dtype, when it differs from the transport's ``slab_dtype`` — an fp8
+    # weight's block-scale slab keeps its f32 scale beside 16-bit operand slabs. ``None`` inherits
+    # the transport's.
+    dtype: DataType | None = None
     # ``k0 -> stmts`` run once per chunk ahead of this slab's cells, barrier included — the cone's
     # per-chunk statistic (:func:`~emmy.compiler.ir.schedule.views.cone_seam`'s ``chunk``), whose
     # rows the cells read back. ``None`` when the cone has none.
@@ -744,6 +747,11 @@ class SyncOperand:
     @property
     def slab(self) -> str:
         return f"_{self.tag}_smem"
+
+    @property
+    def elem_bytes(self) -> int | None:
+        """The bytes of one element of this slab's own dtype, ``None`` when it inherits the transport's."""
+        return self.dtype.nbytes if self.dtype is not None else None
 
     def slot_row(self, slot: Expression) -> Expression | None:  # noqa: ARG002
         """Always ``None`` — a sync-filled slab is SINGLE-BUFFER by construction: the compute /
@@ -794,11 +802,11 @@ class SyncTransport:
     The compute fill assigns each thread a run of ``V`` **contiguous** slab cells (``V`` = the
     16-byte vector width, always dividing the slab's inner extent): the ``row``/``col`` derivation
     hoists out of the per-cell code (one div/mod per run, not per cell), the per-thread gmem reads
-    and smem stores are contiguous (nvcc merges them into wide accesses), and the cone stmts are
+    and smem stores are contiguous (ptxas merges them into wide accesses), and the cone stmts are
     replicated per lane-local cell with a ``__c<j>`` SSA suffix."""
 
     operands: tuple[SyncOperand, ...]
-    slab_dtype: str
+    slab_dtype: DataType
     cta: CtaTile
     # The optional one-shot per-row statistic prologue (:func:`sync_stat_fill` — the fused
     # norm→linear cone's cooperative reduce), emitted once ahead of the K-loop.
@@ -810,7 +818,6 @@ class SyncTransport:
     # filled here, and deliberately absent from :func:`_staged_slabs`: with nothing advancing there
     # is no live range to schedule, so they never enter the pipeline at all.
     invariant_operands: tuple[Operand, ...] = ()
-    elem_bytes: int = 2
     # ``True`` → the peers copy with the BLOCKING vector load/store (no ``cp.async`` on the target).
     copy_sync: bool = False
     # ``True`` → the schedule asked for a ring (``depth >= 2``), so split that blocking copy across
@@ -819,6 +826,11 @@ class SyncTransport:
     # The kernel's gmem buffers by name — the shapes :meth:`_run_plans` proves a vector read's alignment against. A
     # read of a buffer missing here stays per-cell.
     inputs: object = None
+
+    @property
+    def elem_bytes(self) -> int:
+        """The bytes of one element of :attr:`slab_dtype`."""
+        return self.slab_dtype.nbytes
 
     @property
     def register_staged(self) -> bool:
@@ -1098,9 +1110,13 @@ class CpAsyncTransport:
     masked-axis clamp)."""
 
     operands: tuple[Operand, Operand]
-    slab_dtype: str
-    elem_bytes: int
+    slab_dtype: DataType
     cta: CtaTile
+
+    @property
+    def elem_bytes(self) -> int:
+        """The bytes of one element of :attr:`slab_dtype`."""
+        return self.slab_dtype.nbytes
 
     def slab_decls(self, ring: int) -> list[Statement]:
         # Every slab here is cp.async-filled, so each aligns to its copy chunk or its swizzle atom,
@@ -1157,10 +1173,14 @@ class TmaTransport:
     gates the ring slot the same way ``CpAsyncWait(in_flight)`` gates a commit group."""
 
     operands: tuple[Operand, Operand]
-    slab_dtype: str
-    elem_bytes: int
+    slab_dtype: DataType
     cta: CtaTile
     mbar: str = "_mbar"
+
+    @property
+    def elem_bytes(self) -> int:
+        """The bytes of one element of :attr:`slab_dtype`."""
+        return self.slab_dtype.nbytes
 
     @property
     def _tid0(self) -> Expression:
@@ -1178,7 +1198,6 @@ class TmaTransport:
                 op.desc,
                 op.buf,
                 op.box_extents,
-                op.dtype or self.slab_dtype,
                 swizzle=op.swizzle,
                 elem_bytes=op.elem_bytes or self.elem_bytes,
             )
@@ -1190,7 +1209,7 @@ class TmaTransport:
             slab_smem(op.slab, ring * op.shape[0], op.shape[1], op.dtype or self.slab_dtype, align=_SWIZZLE_SLAB_ALIGN[op.swizzle])
             for op in self.operands
         ]
-        decls.append(Smem(name=self.mbar, extents=(ring,), dtype="unsigned long long"))
+        decls.append(Smem(name=self.mbar, extents=(ring,), dtype=U64))
         return decls
 
     def _box_coords(self, op: Operand, k0: Expression) -> tuple:
@@ -1309,7 +1328,7 @@ def _producer_band_kloop(
     """
     tid = Builtin("thread_idx.x")
     decls = transport.slab_decls(ring)
-    decls.append(Smem(name=_EMPTY_MBAR, extents=(ring,), dtype="unsigned long long"))
+    decls.append(Smem(name=_EMPTY_MBAR, extents=(ring,), dtype=U64))
     # Prologue (pre-split, CTA-wide): ONE raw-tid-elected thread inits both mbarrier rings — the
     # transport's wrapped ``linear_tid == 0`` election would match one compute AND one aux thread
     # here — then a CTA barrier publishes the init. The transport's own prologue is not used.

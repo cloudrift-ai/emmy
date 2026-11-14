@@ -16,7 +16,7 @@ throughout is defined in the repository's `GLOSSARY.md`; anything beyond it is e
 
 ## The path a model takes
 
-Emmy takes a PyTorch model and produces CUDA source it can launch. It does that in three stages, each one a bit
+Emmy takes a PyTorch model and produces GPU kernels it can launch. It does that in three stages, each one a bit
 closer to the hardware than the last.
 
 ```
@@ -29,7 +29,7 @@ a graph of tensor operations              ← matrix multiplication, RMSNorm, so
 a graph of fused loops, one per kernel    ← "these operations run together, over these axes"
    │   tile lowering, kernel lowering
    ▼
-a graph of CUDA kernels                   ← actual source, compiled and launched
+a graph of CUDA kernels                   ← PTX, assembled and launched
    ▼
 GPU
 ```
@@ -127,7 +127,7 @@ EMMY_DUMP_DIR=/tmp/emmy-dump emmy compile Qwen/Qwen3-Embedding-0.6B --layer 0
 ```
 
 The files are numbered in pass order, so the graph before and after each phase sits side by side, and the generated
-CUDA source is in there too. Nothing has to run on a GPU for this — you are reading the compiler's output, not
+PTX is in there too. Nothing has to run on a GPU for this — you are reading the compiler's output, not
 executing it. If the machine has no CUDA device at all, name the card you want the compiler to target so that passes
 gated on hardware features take the same path they would there:
 
@@ -136,6 +136,6 @@ emmy compile Qwen/Qwen3-Embedding-0.6B --layer 0 --target sm_89 --ir tile
 ```
 
 `--ir` prints a single stage instead of saving everything. The stages are `torch`, `tensor`, `loop`, `tile`, `kernel`
-and `cuda` — the same sequence as the diagram, at increasing levels of detail.
+and `ptx` — the same sequence as the diagram, at increasing levels of detail.
 
 Next: [2. Passes and rewrite rules](./02-passes-and-rewrite-rules.md).

@@ -13,8 +13,6 @@ signature rather than trusting the hint.
 
 from __future__ import annotations
 
-import re
-
 import numpy as np
 import pytest
 
@@ -92,21 +90,15 @@ def _kernels(compiled):
     return [node.op for node in compiled.nodes.values() if getattr(node.op, "kernel_source", None)]
 
 
-def _signature(kernel) -> str:
-    # CUDA spelling: moves to the PTX compiler's tests (the page table as a kernel parameter)
-    return re.search(r'extern "C" __global__[^{]*', kernel.kernel_source).group(0)
-
-
-def _spelled(kernel, argument: str) -> str:
-    """How the source spells the parameter the launch binds ``argument`` to: the source names a buffer by its role
-    slot, at the argument's position."""
-    params = _signature(kernel).split("(", 1)[1].rsplit(")", 1)[0].split(",")
-    return params[kernel.arg_order.index(argument)].split()[-1]
+def _page_reads(kernel) -> int:
+    """How many addresses of a page the kernel reads from a table: a 64-bit load each."""
+    return kernel.kernel_source.count("ld.global.u64")
 
 
 def test_paged_hint_reaches_the_kernel_abi(monkeypatch):
     """The marked buffers take a page table in place of a pointer, the launcher binds that table
-    by name, and every read of them goes through it — codegen only, so no GPU is needed."""
+    by name, and every read of them goes through it, reading its page's address from the table —
+    codegen only, so no GPU is needed."""
     pytest.importorskip("torch")
     from emmy.compiler.backend.plan import PLAN_FORMAT_PAGED, plan_from_graph, plan_to_dict
 
@@ -116,14 +108,9 @@ def test_paged_hint_reaches_the_kernel_abi(monkeypatch):
     compiled = _compile_read(paged=True)
     (kernel,) = _kernels(compiled)
 
-    signature = _signature(kernel)
     for name in ("k", "v"):
-        table = _spelled(kernel, f"{name}__pages")
-        assert f"const float* const* {table}" in signature, signature
-        assert not re.search(rf"const float\* {table.removesuffix('__pages')}\b", signature), signature
-        # CUDA spelling: moves to the PTX compiler's tests (the Kernel IR indexes a paged buffer by dimension)
-        assert f"{table}[" in kernel.kernel_source
-    assert "k__pages" in kernel.arg_order and "k" not in kernel.arg_order
+        assert f"{name}__pages" in kernel.arg_order and name not in kernel.arg_order
+    assert _page_reads(kernel) >= 2
     # The table is a runtime contract of its own: a plan carrying one serializes as the paged format.
     assert plan_to_dict(plan_from_graph(compiled))["format"] == PLAN_FORMAT_PAGED
 
@@ -136,8 +123,7 @@ def test_unpaged_build_is_byte_identical_to_before(monkeypatch):
     monkeypatch.setenv("EMMY_REDUCE", "")
     (kernel,) = _kernels(_compile_read(paged=False))
 
-    # CUDA spelling: moves to the PTX compiler's tests
-    assert "__pages" not in kernel.kernel_source
+    assert _page_reads(kernel) == 0
     assert kernel.arg_order == tuple(dict.fromkeys(kernel.arg_order))
     assert "k" in kernel.arg_order and "v" in kernel.arg_order
 
@@ -152,13 +138,9 @@ def test_a_paged_output_stored_over_its_cache_writes_through_the_table_at_its_in
     (kernel,) = _kernels(compiled)
     name = compiled.outputs[0]
 
-    signature = _signature(kernel)
-    table, past = _spelled(kernel, f"{name}__pages"), _spelled(kernel, "past")
-    assert f"float* const* {table}" in signature, signature
-    assert f"const long long* __restrict__ {past}" in signature and not kernel.runtime_args, signature
-    # CUDA spelling: moves to the PTX compiler's tests (the page a store resolves from its index)
-    page = kernel.kernel_source.split(f"{table}[", 1)[1].split("]", 1)[0]
-    assert f"/ {PAGE}" in page and past in kernel.kernel_source, page  # the page of a value computed from ``past``, not an axis
+    # ``past`` is a buffer the kernel reads, never a launch argument, and each store reads its page's address.
+    assert "past" in kernel.arg_order and not kernel.runtime_args
+    assert _page_reads(kernel) >= 1
     assert f"{name}__pages" in kernel.arg_order and name not in kernel.arg_order
     assert compiled.buffer(name).alias == "cache"
 
@@ -178,13 +160,10 @@ def test_one_page_buffer_resolves_its_base_once(monkeypatch):
     graph.hints.set("cuda.paged_buffers", (("k", 2, SEQ), ("v", 2, SEQ)))
     (kernel,) = _kernels(CudaBackend().compile(graph))
 
-    signature = _signature(kernel)
     for name in ("k", "v"):
-        table = _spelled(kernel, f"{name}__pages")
-        assert f"const float* const* {table}" in signature, signature
-        # CUDA spelling: moves to the PTX compiler's tests (a one-page buffer's base, resolved once)
-        assert f"const float* {table.removesuffix('__pages')} = {table}[0];" in kernel.kernel_source
-    assert kernel.kernel_source.count("__pages[") == 2
+        assert f"{name}__pages" in kernel.arg_order and name not in kernel.arg_order
+    # Each buffer's one page address is read once, where the kernel starts.
+    assert _page_reads(kernel) == 2
 
 
 def test_a_paged_weight_is_one_page_in_the_layout_its_kernel_reads():

@@ -7,7 +7,6 @@ from emmy.compiler.dtype import F16, F32, I32
 from emmy.compiler.ir.elementwise import ElementwiseImpl
 from emmy.compiler.ir.expression import Var
 from emmy.compiler.ir.kernel.ir import MmaSyncPtx, RegStore, WgmmaMma
-from emmy.compiler.ir.render import RenderCtx, render_stmt
 from emmy.compiler.ir.sigma import Sigma
 from emmy.compiler.ir.stmt import Assign, Body, Load, Select, check_types, parse_body
 from emmy.compiler.ir.types import epilogue_conversions
@@ -29,18 +28,14 @@ def _is_m16n8k16(kernels) -> bool:
     return any(tuple(mma.shape) == (16, 8, 16) for mma in statements(kernels, MmaSyncPtx))
 
 
-def test_fp4_encode_in_register_epilogue_emits_its_helper() -> None:
-    from emmy.compiler.ir.cuda.ir import CudaOp
+def test_fp4_encode_stays_in_the_register_epilogue() -> None:
     from tests.compiler.realization.helpers import CASES_DIR, load_case
 
     case = load_case(CASES_DIR / "matmul/mma-fp4-encode-epilogue.json")
-    compiled, kernels = case_kernels(case)
+    _compiled, kernels = case_kernels(case)
     assert len(kernels) == 1
     assert _is_m16n8k16(kernels)
     assert "to_f4e2m1" in operations(kernels)
-    # CUDA spelling: moves to the PTX compiler's tests
-    (source,) = [node.op.kernel_source for node in compiled.nodes.values() if isinstance(node.op, CudaOp)]
-    assert "unsigned char emmy_to_f4e2m1(float value)" in source
 
 
 @requires_cuda
@@ -96,17 +91,16 @@ def _typed_store(tail, buffers) -> RegStore:
     return store.replace(epilogue=epilogue_conversions(store.epilogue, store.epilogue_params, buffers, native_f16_ops()))
 
 
-def _render(chain: str) -> tuple[str, object]:
-    """Render the register epilogue of the projection ``chain`` (a body's text) feeding ``out[m, n]``: the CUDA text and
-    the typed epilogue."""
+def _epilogue(chain: str) -> tuple[list[str], object]:
+    """The typed register epilogue of the projection ``chain`` (a body's text) feeding ``out[m, n]``: its lines in the
+    text form, and its statements."""
     chain = parse_body(chain)
     store = _typed_store([*chain, *parse_body(f"out[m, n] = {chain[-1].name}")], {"out": F16})
-    ctx = RenderCtx(shapes={"out": (16, 16), "neg_inf": (1,)}, buffer_dtypes={"out": "f16"})
-    return "\n".join(render_stmt(store, ctx)), store.epilogue
+    return [line.strip() for stmt in store.epilogue for line in str(stmt).splitlines()], store.epilogue
 
 
 def test_typed_copy_narrows_the_fragment_value_before_its_consumer() -> None:
-    source, epilogue = _render(
+    lines, epilogue = _epilogue(
         """
         f16 narrow = copy(acc)
         result = copy(narrow)
@@ -114,40 +108,38 @@ def test_typed_copy_narrows_the_fragment_value_before_its_consumer() -> None:
     )
 
     assert epilogue[0].dtype is F16
-    assert "const __half narrow_e0 = __float2half(_c[0]);" in source
-    assert "const __half result_e0 = narrow_e0;" in source
+    assert lines == ["f16 narrow = (f16)acc", "f16 result = narrow"]
 
 
 def test_untyped_copy_keeps_the_existing_f32_epilogue() -> None:
-    source, epilogue = _render("result = copy(acc)")
+    lines, epilogue = _epilogue("result = copy(acc)")
 
     assert epilogue[0].dtype is F32
-    assert "const float result_e0 = _c[0];" in source
-    assert "__float2half(_c[0])" not in source
+    assert lines == ["f32 result = acc"]
 
 
-def test_typed_literal_binding_survives_fragment_epilogue_rendering() -> None:
-    source, epilogue = _render(
+def test_typed_literal_binding_survives_fragment_epilogue_typing() -> None:
+    lines, epilogue = _epilogue(
         """
         let f32 scale = 0.125
         result = multiply(acc, scale)
         """
     )
     assert str(epilogue[0]) == "let f32 scale = 0.125"
-    assert "const float scale_e0 = 0.125f;" in source
-    assert "const float result_e0 = _c[0] * scale_e0;" in source
+    assert lines == ["let f32 scale = 0.125", "f32 result = acc * scale"]
 
 
 def test_fragment_epilogue_substitutes_binding_coordinates_and_rejects_unbound_values() -> None:
-    source, _ = _render(
+    lines, _ = _epilogue(
         """
         let i32 column = n
         result = multiply(acc, column)
         """
     )
-    assert "const int column_e0 = _t * 2 + 0 + n;" in source
+    # The coordinate is the element's own column (``__N__``) past the tile's.
+    assert lines[0] == "let i32 column = __N__ + n"
     with pytest.raises(RuleSkipped, match="projection epilogue reads.*missing"):
-        _render(
+        _epilogue(
             """
             let f32 scale = missing
             result = multiply(acc, scale)
@@ -198,26 +190,15 @@ def test_fast_exp_policy_reaches_generated_fragment_epilogues(monkeypatch, fast_
                 assert expected in ops and ("exp" if enabled else "exp_fast") not in ops
         assert any(isinstance(stmt, WgmmaMma) for stmt in kernel.body.iter())
         compiled = Pipeline.build([FINAL_LOWERING_PASS]).run(lowered, ctx=ctx)
-    # CUDA spelling: moves to the PTX compiler's tests
-    (source,) = [node.op.kernel_source for node in compiled.nodes.values() if isinstance(node.op, CudaOp)]
-    assert ("__expf(" in source) == enabled
+    assert [node.op for node in compiled.nodes.values() if isinstance(node.op, CudaOp)]
     values = np.array([-12, -1, 0, 1, 12], dtype=np.float32)
     np.testing.assert_array_equal(ElementwiseImpl(expected)(values), np.exp(values))
 
 
-def test_transposed_fragment_store_uses_both_output_strides() -> None:
-    (store,) = parse_body("RegStore(dst_buffer=out, dst_index=(n, m), frag=_c, shape=(16, 8, 16), row_dim=1, col_dim=0)")
-    source = "\n".join(render_stmt(store, RenderCtx(shapes={"out": (16, 16)}, buffer_dtypes={"out": "f16"})))
-
-    assert "reinterpret_cast<__half2*>" not in source
-    assert "(_t * 2 + 1) * 16" in source
-    assert "out[n * 16 + m + _g + (_t * 2 + 0) * 16]" in source
-
-
-def test_a_mask_over_an_op_result_renders_after_that_op() -> None:
+def test_a_mask_over_an_op_result_stands_after_that_op() -> None:
     """A causal mask may select a value the chain computes (a scaled score), not only a loaded one:
-    the ternary renders once that op has run."""
-    source, _ = _render(
+    the select stands once that op has run."""
+    lines, _ = _epilogue(
         """
         ninf = load neg_inf[0]
         scaled = multiply(acc, acc)
@@ -228,13 +209,13 @@ def test_a_mask_over_an_op_result_renders_after_that_op() -> None:
         """
     )
 
-    assert source.index("scaled_e0 =") < source.index("masked_e0 = ((") < source.index("result_e0 = masked_e0")
+    assert lines.index("f32 scaled = acc * acc") < lines.index("masked = select:") < lines.index("f32 result = masked")
 
 
 def test_a_mask_over_a_narrowed_value_widens_both_branches() -> None:
     """A chain op keeps the tail's dtype, so a mask over a narrowed value converts back: an epilogue's select is f32,
     every branch converted to it ahead of the select."""
-    source, epilogue = _render(
+    lines, epilogue = _epilogue(
         """
         ninf = load neg_inf[0]
         f16 narrow = copy(acc)
@@ -248,8 +229,7 @@ def test_a_mask_over_a_narrowed_value_widens_both_branches() -> None:
     dtypes = {stmt.name: stmt.dtype for stmt in epilogue if isinstance(stmt, (Assign, Load))}
     (select,) = [stmt for stmt in epilogue if isinstance(stmt, Select)]
     assert dtypes["narrow"] is F16 and {dtypes[branch.value] for branch in select.branches} == {F32}
-    # CUDA spelling: moves to the PTX compiler's tests
-    assert "const float narrow__f32_e0 = __half2float(narrow_e0);" in source
+    assert "f32 narrow__f32 = (f32)narrow" in lines
 
 
 def test_integer_load_in_fragment_epilogue_keeps_shift_operands_integer() -> None:
@@ -263,11 +243,10 @@ def test_integer_load_in_fragment_epilogue_keeps_shift_operands_integer() -> Non
         """
     )
     store = _typed_store(tail, {"out": I32, "shift": I32})
-    ctx = RenderCtx(shapes={"out": (16, 16), "shift": (1,)}, buffer_dtypes={"out": "i32", "shift": "i32"})
-    source = "\n".join(render_stmt(store, ctx))
+    lines = [str(stmt) for stmt in store.epilogue]
 
-    assert "const int shift_e0 = shift[0];" in source
-    assert "int bits_e0 = code_e0 << shift_e0;" in source
+    assert "i32 shift = load shift[0]" in lines
+    assert "i32 bits = code << shift" in lines
 
 
 @requires_sm90

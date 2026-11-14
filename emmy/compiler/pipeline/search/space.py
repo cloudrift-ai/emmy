@@ -235,8 +235,8 @@ FAST_EXP = Knob(
 
 # The other instruction classes of the precision-trading family, each pin-only and, but for FMA contraction, following
 # FAST_MATH like FAST_EXP. An approximate instruction is an operation the kernel body names
-# (``lowering/kernel/130_approximate_math``); flush to zero and FMA contraction hold for a whole kernel and are nvcc
-# flags (``backend.cuda.nvcc.precision_flags``).
+# (``lowering/kernel/130_approximate_math``); flush to zero and FMA contraction hold for a whole kernel and reach the
+# PTX compiler as the kernel's two precision decisions.
 
 FAST_DIV = Knob(
     "FAST_DIV",
@@ -257,15 +257,15 @@ FLUSH_TO_ZERO = Knob(
     "FLUSH_TO_ZERO",
     KnobType.BOOL,
     hints=(False,),
-    help="Flush f32 subnormal operands and results to zero (nvcc --ftz=true). Unset follows FAST_MATH.",
+    help="Flush f32 subnormal operands and results to zero (the .ftz instruction forms). Unset follows FAST_MATH.",
 )
 
 CONTRACT_FMA = Knob(
     "CONTRACT_FMA",
     KnobType.BOOL,
     hints=(True,),
-    help="Contract a multiply and an add into one fused multiply-add (nvcc --fmad). On in both regimes, as nvcc's "
-    "default is, so the umbrella never turns it off; pin 0 to round every multiply and add on its own.",
+    help="Contract a multiply and an add into one fused multiply-add (fma). On in both regimes, so the umbrella "
+    "never turns it off; pin 0 to round every multiply and add on its own.",
 )
 
 
@@ -337,8 +337,8 @@ FP8_MMA = Knob(
 #: row into the fast-math lane.
 PRECISION_KNOBS = (FAST_MATH, FAST_EXP, F16_MMA_F32_ACC, FP8_MMA, FAST_DIV, FAST_SQRT, FLUSH_TO_ZERO, CONTRACT_FMA)
 
-#: The precision-trading knobs whose default is their own first hint, not the umbrella's decision: nvcc contracts
-#: multiply-adds in the standard regime as well, so the umbrella leaves contraction on in both.
+#: The precision-trading knobs whose default is their own first hint, not the umbrella's decision: the standard
+#: regime contracts multiply-adds as well, so the umbrella leaves contraction on in both.
 _OWN_DEFAULT = (CONTRACT_FMA,)
 
 #: The regime knobs: the input pins a measured row is filed under beside the card and the kernel — the

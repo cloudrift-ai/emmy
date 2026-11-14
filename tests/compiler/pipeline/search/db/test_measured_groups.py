@@ -1,6 +1,6 @@
 """``measured_groups`` — measured ``perf`` rows packed into comparison sets.
 
-A group here is the set of configs that genuinely competed: one op, one card, one nvcc regime. What makes
+A group here is the set of configs that genuinely competed: one op, one card, one precision regime. What makes
 that non-trivial is that three plausible spellings of "one op" are wrong, and two kinds of row carry a
 number that is not a measurement. Each is pinned below, because every one of them fails silently — a
 misgrouped or mislabelled pool still produces a confident-looking correlation.
@@ -51,20 +51,14 @@ def test_cold_and_hot_measurements_form_separate_groups():
     assert len({group.key for group in groups}) == 2
 
 
-def test_cards_never_pool_and_a_non_deployable_regime_never_arrives():
-    """Two axes, two fates. Cards never pool — they are different tuning problems. A row from a
-    non-deployable regime does not reach a pool at all: the shared admission filter
-    (``freeze_reason``) drops it, because a measurement taken where nothing deploys answers a
-    question nothing asks. The ``H_opt`` key stays part of the grouping key anyway — it is the
-    pool's honest label of what it was measured under, a report cell reads it, and it is what would
-    catch a regression that let a second regime back in."""
+def test_cards_never_pool():
+    """Cards are different tuning problems, so the same kernel measured on two cards is two pools."""
     rows = [
-        _row("a", us=200.0, knobs=_feats(), opt=3),
-        _row("b", us=300.0, knobs=_feats(), opt=1),  # same kernel, non-deployable regime
-        _row("d", us=500.0, knobs=_feats(), opt=3, gpu=_GPU2),
+        _row("a", us=200.0, knobs=_feats()),
+        _row("d", us=500.0, knobs=_feats(), gpu=_GPU2),
     ]
     groups, dropped = measured_groups(rows, _stamped)
-    assert dropped == {"non-deployable regime (H_opt=1)": 1}
+    assert not dropped
     assert len(groups) == 2 and all(len(g.feats) == 1 for g in groups)
 
 
@@ -140,13 +134,12 @@ def test_every_row_is_either_grouped_or_counted():
     rows = [
         _row("a", us=500.0, knobs=_feats()),
         _row("b", us=1e9, knobs=_feats(TILE="f4x4"), status="bench_fail"),
-        _row("c", us=200.0, knobs=_feats(TILE="f8x8"), opt=1),
         _row("d", us=300.0, knobs=_feats(TILE="f8x8"), precision={"FAST_MATH": True}),  # the other precision regime: its own pool
-        _row("e", us=400.0, knobs=_feats(TILE="f2x4"), flags="-lineinfo"),  # not a regime: pools with the plain row
+        _row("e", us=400.0, knobs=_feats(TILE="f2x4")),
     ]
     groups, dropped = measured_groups(rows, _stamped)
     assert sum(len(g.feats) for g in groups) + sum(dropped.values()) == len(rows)
-    assert dropped == {"bench_fail": 1, "non-deployable regime (H_opt=1)": 1}
+    assert dropped == {"bench_fail": 1}
     assert [g.latency_us.tolist() for g in groups] == [[500.0, 400.0], [300.0]]
 
 
@@ -166,19 +159,6 @@ def test_only_a_golden_pool_can_be_asked_which_rows_are_the_answer():
     assert golden.golden_ids == (1,)
     assert isinstance(golden, Group) and not hasattr(measured, "golden_ids")
     assert not hasattr(golden, "latency_us")  # and the reverse: a golden pool has no measurement to report
-
-
-def test_a_measured_pool_carries_the_regime_it_was_measured_under():
-    """``h_opt`` rides on the group rather than being recovered from its packed columns: a report keys
-    a cell on it, so it has to survive the trip from the row to the pool. Only the deployable regime
-    reaches a pool, so today every cell reads the same value — the field says which one, instead of
-    leaving a reader to assume."""
-    rows = [
-        _row("a", us=200.0, knobs=_feats(), opt=3),
-        _row("b", us=300.0, knobs=_feats(), opt=1),
-    ]
-    groups, _ = measured_groups(rows, _stamped)
-    assert [g.h_opt for g in groups] == [3.0]
 
 
 def test_measured_pools_do_not_combine_independent_precision_regimes():

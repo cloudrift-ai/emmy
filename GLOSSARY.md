@@ -240,8 +240,13 @@ describe how a term is used in Emmy; they are not meant to replace a full textbo
 - **Carrier** — The temporary state maintained by a reduction and the rule for combining partial states. A sum's
   carrier can be one accumulated number; stable softmax needs several related values.
 - **Tensor core** — Specialized GPU hardware for performing small matrix operations efficiently.
-- **nvcc / NVRTC** — Two NVIDIA CUDA compilers. nvcc compiles ahead of execution; NVRTC compiles CUDA source at
-  runtime.
+- **nvcc / NVRTC** — Two NVIDIA CUDA C++ compilers. Emmy uses neither: it writes PTX itself.
+- **PTX** — NVIDIA's assembly language for GPU kernels: typed instructions over virtual registers. The `emmy-ptx`
+  crate, the Kernel IR to PTX compiler, writes every kernel's code in it; it is the stage `emmy compile --ir ptx`
+  prints.
+- **ptxas** — NVIDIA's PTX assembler, part of the CUDA toolkit. It turns PTX text into the machine code a card runs
+  (a cubin), and does register allocation, instruction scheduling and loop unrolling on the way. It is the one
+  toolkit binary Emmy runs.
 - **CUDA graph capture** — Recording a sequence of GPU launches so the sequence can be replayed with less CPU
   overhead.
 - **Paged buffer** — A buffer reached through a page table instead of one base address: cut along one axis every
@@ -336,11 +341,10 @@ describe how a term is used in Emmy; they are not meant to replace a full textbo
 - **Realize** — A recorded configuration *realizes* when the compiler, at the point where it makes that choice, offers
   a candidate matching the recording. A configuration that realizes nowhere cannot be deployed, however good the
   measurement stored with it.
-- **Regime** — The settings a measurement was taken under, or that a compile is running under: chiefly the compiler
-  optimization level (`-O3`, the deployable one and the only one anything is measured in) plus whether fast-math
-  approximations are enabled. Measurements taken in different regimes are not interchangeable, which is why tuning
-  measures in the regime it deploys into. A lower optimization level remains available as a compile-speed option for
-  the test suite; it is not a measurement lane, and nothing measured under one is read by a deploy.
+- **Regime** — The settings a measurement was taken under, or that a compile is running under: the precision
+  decisions (whether fast-math approximations are enabled, and each independent override) and whether the cache was
+  evicted before each launch. Measurements taken in different regimes are not interchangeable, which is why tuning
+  measures in the regime it deploys into.
 - **Candidate** — One complete set of choices that the compiler could use.
 - **Greedy selection** — Choosing the candidate that currently appears best without exploring alternatives during
   normal compilation.
