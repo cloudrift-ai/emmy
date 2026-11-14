@@ -36,11 +36,12 @@ emmy compile -c "nn.RMSNorm(2048)(torch.randn(1,32,2048))"
 # Benchmark against eager PyTorch and torch.compile
 emmy run --bench -c "nn.Softmax(dim=-1)(torch.randn(1,28,2048,2048))"
 
-# Inspect the generated CUDA
-emmy compile -c "nn.RMSNorm(2048)(torch.randn(1,32,2048))" --ir cuda
+# Inspect the generated PTX
+emmy compile -c "nn.RMSNorm(2048)(torch.randn(1,32,2048))" --ir ptx
 ```
 
-Running compiled kernels requires an NVIDIA GPU and the CUDA toolkit (`nvcc`); source builds also need Rust.
+Running compiled kernels requires an NVIDIA GPU and the CUDA toolkit's PTX assembler (`ptxas`); source builds also
+need Rust.
 For GPUs older than Turing, use CUDA 12 and a PyTorch build that supports your GPU. Fast math is enabled by default;
 set `EMMY_FAST_MATH=0` to disable it.
 
@@ -85,70 +86,35 @@ kernel k_b70c36714207  inputs: rms_norm_mean_count, rms_norm_eps, x, p_weight  o
             rms_norm[0, a1, a3] = v5
 ```
 
-**Optimized CUDA kernel**: `emmy compile -c "nn.RMSNorm(2048)(torch.randn(1,32,2048))" --ir cuda`
+**Optimized kernel, as PTX**: `emmy compile -c "nn.RMSNorm(2048)(torch.randn(1,32,2048))" --ir ptx` (an excerpt;
+each Kernel IR statement stands as a comment above its instructions)
 
-```c
-extern "C" __global__
-__launch_bounds__(256) void k_b70c36714207(const float* buf0, const float* buf2, float* buf1) {
-    float in0 = 2048.0f;
-    float in1 = 1e-06f;
-    {
-        int a1 = blockIdx.x;
-        int a0 = threadIdx.x;
-        float acc0 = 0.0f;
-        __syncthreads();
-        __shared__ float x_smem[2048];
-        for (int x_smem_flat = a0; x_smem_flat < 2048; x_smem_flat += 256) {
-            {
-                unsigned int _smem_addr = __cvta_generic_to_shared(&x_smem[x_smem_flat]);
-                asm volatile("cp.async.ca.shared.global [%0], [%1], 4;\n"
-                             :: "r"(_smem_addr), "l"(&buf0[a1 * 2048 + x_smem_flat])
-                             : "memory");
-            }
-        }
-        asm volatile("cp.async.commit_group;\n" ::: "memory");
-        asm volatile("cp.async.wait_group 0;\n" ::: "memory");
-        __syncthreads();
-        __shared__ float p_weight_smem[2048];
-        for (int p_weight_smem_flat = a0; p_weight_smem_flat < 2048; p_weight_smem_flat += 256) {
-            {
-                unsigned int _smem_addr = __cvta_generic_to_shared(&p_weight_smem[p_weight_smem_flat]);
-                asm volatile("cp.async.ca.shared.global [%0], [%1], 4;\n"
-                             :: "r"(_smem_addr), "l"(&buf2[p_weight_smem_flat])
-                             : "memory");
-            }
-        }
-        asm volatile("cp.async.commit_group;\n" ::: "memory");
-        asm volatile("cp.async.wait_group 0;\n" ::: "memory");
-        __syncthreads();
-        for (int a2 = a0; a2 < 2048; a2 += 256) {
-            float in2 = x_smem[a2];
-            float v0 = in2 * in2;
-            acc0 += v0;
-        }
-        __shared__ float acc0_smem[256];
-        acc0_smem[a0] = acc0;
-        __syncthreads();
-        for (int s = 128; s > 0; s >>= 1) {
-            if (a0 < s) {
-                acc0_smem[a0] = acc0_smem[a0] + acc0_smem[a0 + s];
-            }
-            __syncthreads();
-        }
-        __syncthreads();
-        float acc0_b = acc0_smem[0];
-        float v1 = acc0_b / in0;
-        float v2 = v1 + in1;
-        float v3 = rsqrtf(v2);
-        for (int a3 = a0; a3 < 2048; a3 += 256) {
-            float in3 = x_smem[a3];
-            float in4 = p_weight_smem[a3];
-            float v4 = in3 * v3;
-            float v5 = v4 * in4;
-            buf1[a1 * 2048 + a3] = v5;
-        }
-    }
-}
+```
+.visible .entry k_b70c36714207(
+	.param .u64 .ptr .align 16 k_b70c36714207_param_0,
+	.param .u64 .ptr .align 16 k_b70c36714207_param_1,
+	.param .u64 .ptr .align 16 k_b70c36714207_param_2
+)
+.maxntid 256, 1, 1
+{
+	...
+	// Grid(axes=(a0 in 0..32, a1_co in 0..256), decode=(block_idx.x, thread_idx.x), block_threads=256):
+	mov.u32 %r0, %ctaid.x;
+	mov.u32 %r1, %tid.x;
+	// init f32 acc0 = 0
+	mov.f32 %f0, 0f00000000;
+	// f32 in0__u0 = load buf0[2048 * a0 + a1_co]
+	mul.wide.s32 %rd3, %r0, 8192;
+	add.s64 %rd4, %rd0, %rd3;
+	mul.wide.s32 %rd5, %r1, 4;
+	add.s64 %rd6, %rd4, %rd5;
+	ld.global.nc.f32 %f1, [%rd6];
+	// f32 v0__u0 = in0__u0 * in0__u0
+	// f32 acc0 <- add(acc0, v0__u0) over a1_co
+	fma.rn.ftz.f32 %f0, %f1, %f1, %f0;
+	// f32 in0__u1 = load buf0[2048 * a0 + a1_co + 256]
+	ld.global.nc.f32 %f2, [%rd6+1024];
+	...
 ```
 
 ## Tune
@@ -428,6 +394,9 @@ require CloudRift organization access.
   bodies, their text, value numbering and normalization (see [ARCHITECTURE.md](crates/emmy-ir/ARCHITECTURE.md));
   [crates/emmy-ir-py/](crates/emmy-ir-py/) is the `emmy.emmy_ir` extension the `ir/stmt` and `ir/expression` modules
   export from
+- [crates/emmy-ptx/](crates/emmy-ptx/) — The compiler from Kernel IR to PTX: an instruction list, its builder, printer
+  and verifier, and the rule of each statement type; scalar kernels so far, and no pipeline stage calls it yet (see
+  [ARCHITECTURE.md](crates/emmy-ptx/ARCHITECTURE.md))
 - [crates/emmy-server/](crates/emmy-server/) — Native HTTP adapter: text and image processing
   (see [ARCHITECTURE.md](crates/emmy-server/ARCHITECTURE.md))
 - [docs/](docs/) — Docusaurus user-docs site (getting started, benchmarking, custom configurations, deployment)

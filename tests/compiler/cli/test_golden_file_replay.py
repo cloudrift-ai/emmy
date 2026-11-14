@@ -262,7 +262,7 @@ def _args(path, **overrides):
         "golden": str(path),
         "code": None,
         "input": None,
-        "ir": "cuda",
+        "ir": "ptx",
         "dynamic": None,
     }
     values.update(overrides)
@@ -695,7 +695,6 @@ def test_recorded_route_cuts_the_selected_compile_target(run_cli, tmp_path, monk
     path = tmp_path / "working-route.json"
     document = _working_placement_route(path)
     monkeypatch.delenv("EMMY_KNOBS", raising=False)
-    monkeypatch.setenv("EMMY_NVCC_FLAGS", "")
     monkeypatch.setenv("EMMY_TUNE_DB", str(tmp_path / "tune.db"))
     if explicit:
         [(key, value)] = _routed_cut(document).items()
@@ -1624,7 +1623,6 @@ def test_isolated_record_fills_only_the_named_proposal_without_target_latency(mo
 
     monkeypatch.setattr(run, "_bench_greedy_isolated", isolated)
     monkeypatch.setattr(run, "_print_kernel_stats", lambda *_args, **_kwargs: None)
-    monkeypatch.setenv("EMMY_NVCC_FLAGS", "")
     target.set_target((8, 9))
     try:
         with pinned_knobs(selected_regime(args)):
@@ -1679,7 +1677,6 @@ def test_strict_isolated_record_requires_captured_comparison_before_write(monkey
     monkeypatch.setattr(run, "_bench_greedy_isolated", _fake_isolated)
     monkeypatch.setattr(run, "_print_kernel_stats", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(run, "_record_bench_evidence", lambda *_args, **_kwargs: None)
-    monkeypatch.setenv("EMMY_NVCC_FLAGS", "")
     target.set_target((8, 9))
     try:
         with pinned_knobs(selected_regime(args) | selected_decisions(args)):
@@ -1700,7 +1697,7 @@ def test_strict_isolated_record_requires_captured_comparison_before_write(monkey
 
 
 def _bench_fresh_seed(
-    monkeypatch, tmp_path, *, record_greedy: bool, whole_file=False, no_record_evidence=False, failure=None, warmup=5, compile_flags=""
+    monkeypatch, tmp_path, *, record_greedy: bool, whole_file=False, no_record_evidence=False, failure=None, warmup=5
 ) -> tuple:
     """``run --golden PATH --realization working.route --bench`` on a proposal (a row with no schedule and no
     measurement, such as a trace inventory's seed) of a norm into a matmul, the greedy compile cut and split
@@ -1715,7 +1712,6 @@ def _bench_fresh_seed(
     monkeypatch.setenv("EMMY_FAST_MATH", "0")
     db_path = tmp_path / "autotune.db"
     monkeypatch.setenv("EMMY_TUNE_DB", str(db_path))
-    monkeypatch.setenv("EMMY_NVCC_FLAGS", compile_flags)
     path = tmp_path / "working.json"
     document = inventory_document(_norm_matmul_graph(), (8, 9))
     [row] = document.rows
@@ -1784,15 +1780,14 @@ def test_run_bench_records_the_greedy_compiles_routing_rows(monkeypatch, tmp_pat
     assert len(arms) == 2 and _CUT in arms, "the cut and the split of its piece"
 
 
-@pytest.mark.parametrize("mode", ["record", "opt-out", "non-deployable", "substandard", "accuracy", "scaled-accuracy", "timing"])
+@pytest.mark.parametrize("mode", ["record", "opt-out", "substandard", "accuracy", "scaled-accuracy", "timing"])
 def test_whole_file_bench_records_fresh_route_only_after_a_valid_measurement(monkeypatch, tmp_path, mode):
     """A fresh whole-file bench makes its cut/split deployable; excluded regimes and failed checks publish no evidence."""
     from emmy import config
     from emmy.compiler.pipeline.search.db import SearchDB
     from emmy.compiler.pipeline.search.policy.greedy import EvidenceError
 
-    compile_flags = "-Xcicc -O1" if mode == "non-deployable" else ""
-    ctx = Context.from_target((8, 9), gpu_name="NVIDIA GeForce RTX 4090", compile_flags=compile_flags, cold_cache=False)
+    ctx = Context.from_target((8, 9), gpu_name="NVIDIA GeForce RTX 4090", precision={}, cold_cache=False)
     monkeypatch.setattr(Context, "probe", classmethod(lambda cls: ctx))
     path, db_path, benched = _bench_fresh_seed(
         monkeypatch,
@@ -1802,7 +1797,6 @@ def test_whole_file_bench_records_fresh_route_only_after_a_valid_measurement(mon
         no_record_evidence=mode == "opt-out",
         failure=mode if mode in {"accuracy", "scaled-accuracy", "timing"} else None,
         warmup=1 if mode == "substandard" else 5,
-        compile_flags=compile_flags,
     )
     assert not benched, "a file walk does not treat its unmeasured proposal as a pinned comparison"
     document = GoldenFile.load(path)
@@ -1855,7 +1849,6 @@ def test_a_kernel_bench_records_a_pieces_own_decision_for_its_parent(monkeypatch
     monkeypatch.setenv("EMMY_FAST_MATH", "0")
     db_path = tmp_path / "autotune.db"
     monkeypatch.setenv("EMMY_TUNE_DB", str(db_path))
-    monkeypatch.setenv("EMMY_NVCC_FLAGS", "")  # the deployable regime: bench evidence is recorded only there
     monkeypatch.delenv("EMMY_KNOBS", raising=False)
     path = tmp_path / "working-route.json"
     document = inventory_document(_norm_matmul_graph(), (8, 9))
@@ -1942,7 +1935,6 @@ def test_run_files_a_hung_greedy_kernel_as_bench_fail_evidence(monkeypatch, tmp_
 
     db_path = tmp_path / "autotune.db"
     monkeypatch.setenv("EMMY_TUNE_DB", str(db_path))
-    monkeypatch.setenv("EMMY_NVCC_FLAGS", "")  # the deployable regime: perf evidence is recorded only there
     path = tmp_path / "working-route.json"
     _working_placement_route(path)
     args = _run_args(path, realization="working.route", record=False, record_greedy=True, pin_route=True, strict_correctness=False)

@@ -122,6 +122,7 @@ pub fn unify_siblings(body: &Body) -> Result<Body> {
             body: renamed,
             unroll: l.unroll,
             seed: l.seed,
+            unrolled: l.unrolled,
         }));
     }
     Ok(body.rebuilt(stmts))
@@ -162,6 +163,7 @@ pub(crate) fn merge_sibling_reduce_loops_here(body: &Body) -> Body {
             && a.axis.extent == b.axis.extent
             && a.unroll == b.unroll
             && a.seed == b.seed
+            && a.unrolled == b.unrolled
     };
     if !reduces
         .iter()
@@ -251,6 +253,7 @@ pub(crate) fn merge_sibling_reduce_loops_here(body: &Body) -> Body {
                 body: merged.body.concat(renamed.stmts()),
                 unroll: merged.unroll,
                 seed: merged.seed,
+                unrolled: merged.unrolled,
             };
             consumed.insert(j);
             absorbed_from.insert(j);

@@ -266,7 +266,7 @@ def _decision_key(fp: ForkPoint, blocked: dict | None) -> tuple | None:
 
 
 # Process-wide memo for the built DB index, keyed on (db path, mtime, context key, card).
-# The index depends only on the DB file, the card and cc+nvcc-flags (NOT the
+# The index depends only on the DB file, the card and the context key (NOT the
 # op shape — ``structural_key`` folds neither), so for a serve boot it is identical
 # across all ~96 program compiles; without this the 527 MB perf scan reran each time.
 # Bounded to the current key (cleared on miss), like ``_load_prior_cached``.
@@ -346,10 +346,9 @@ def _db_measured_index_build(db, ctx) -> _Measured:
 
     Rows are indexed by the exact identity of the kernel they measured — the one evidence join: the same
     identity is the same kernel, and nothing else about a kernel takes part (knob values are stringified
-    because perf knobs round-trip JSON). One context key is sufficient: tune measures in the deployable regime, and
-    ``Context.structural_key`` gives that regime one key however its flags are spelled. Rows from a
-    deliberately non-deployable compile key elsewhere and are not consulted, and neither are rows
-    another card measured (``SearchDB.iter_perf`` reads this card's rows in this regime).
+    because perf knobs round-trip JSON). Rows measured in another precision or cache regime key elsewhere and are not
+    consulted, and neither are rows another card measured (``SearchDB.iter_perf`` reads this card's rows in this
+    regime).
 
     A non-``ok`` row is evidence too — the bench watchdog measured that variant not finishing — but
     it is evidence a ranker cannot use, since its sentinel latency is a timeout constant rather

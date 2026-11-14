@@ -145,12 +145,11 @@ target reconstructs and lowers for the exact compute capability; otherwise it is
 a bounded fix and retrace. The layer-to-program mapping goes in the summary; the report gets only counts and gaps.
 
 **Recording.** Record every target with `emmy run --golden <working.json> --bench --record`, and the kernel set the
-greedy pick took with `--record-greedy`, then repeat the deployable O3 correctness check on the recorded rows. Every
-retained target needs a deployable O3 measurement, a positive reference-backend measurement, and a `torch.compile`
-measurement. When no recorded row beats the greedy pick, record the correct greedy pick rather than dropping the
-target.
+greedy pick took with `--record-greedy`, then repeat the correctness check on the recorded rows. Every retained
+target needs a deployable measurement, a positive reference-backend measurement, and a `torch.compile` measurement.
+When no recorded row beats the greedy pick, record the correct greedy pick rather than dropping the target.
 
-**The bar: every target on par with `torch.compile` or faster.** Bench the working golden at deployable optimization:
+**The bar: every target on par with `torch.compile` or faster.** Bench the working golden:
 
 ```bash
 emmy run --golden <working.json> --bench --bench-backends eager,tcompile,emmy --strict --json <out>
@@ -325,8 +324,8 @@ the tables that help, drawing from:
   justified the choice;
 - the full-context latency lane: the three request times, the slowest one the recipe carries, and every larger
   context the 290-second rule rejected;
-- Emmy eligibility with its evidence; compiler coverage, tuned target counts, O3 verification, targets still slower
-  than `torch.compile`, and remaining gaps; the golden's path when it is complete;
+- Emmy eligibility with its evidence; compiler coverage, tuned target counts, the verification of the recorded rows,
+  targets still slower than `torch.compile`, and remaining gaps; the golden's path when it is complete;
 - for an Emmy recipe, the published image tag, kernel-tuning summary, and the accuracy result behind the FAST_MATH
   decision; for a vLLM or SGLang recipe, that engine's result without a comparison column;
 - one `emmy bench experiments/<model>/<name> ...` reproduction command filtered to the selected lane;
@@ -350,9 +349,9 @@ emmy deploy ssh --dry-run --recipe recipes/<model> --ssh <target>
 Also check:
 
 - the coverage manifest accounts for every layer and seam; a complete trace has a committed golden whose every row
-  has paired positive O3 and reference timings and lowers on the requested compute capability, and a partial trace
+  has paired positive Emmy and reference timings and lowers on the requested compute capability, and a partial trace
   has nothing under `golden/`;
-- only repeated O3 rows are called deployable, and each tuning winner names its O1 ranking lane;
+- only repeated measurements are called deployable;
 - a serving recipe has at least one successful result for its exact lane, and its report uses only numbers from that
   run;
 - the recipe's `full_context_latency_s` is the slowest request of this platform's full-context latency lane in the

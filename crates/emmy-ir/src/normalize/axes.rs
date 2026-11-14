@@ -171,12 +171,13 @@ pub(crate) fn output_storage_depth(stmts: &Body, axis: &Name) -> Option<usize> {
     }
 }
 
-pub(crate) fn loop_over(axis: AxisRef, body: Body, unroll: bool, seed: bool) -> Body {
+pub(crate) fn loop_over(axis: AxisRef, body: Body, l: &Loop) -> Body {
     Body::new(vec![Arc::new(Statement::Loop(Loop {
         axis,
         body,
-        unroll,
-        seed,
+        unroll: l.unroll,
+        seed: l.seed,
+        unrolled: l.unrolled,
     }))])
 }
 
@@ -387,7 +388,7 @@ pub fn canonicalize_free_axis_order(body: &Body) -> Result<Body> {
         let candidate = |order: &[Loop]| -> Key {
             let mut result = terminal.clone();
             for l in order.iter().rev() {
-                result = loop_over(l.axis.clone(), result, l.unroll, l.seed);
+                result = loop_over(l.axis.clone(), result, l);
             }
             text_key(&rename_ssa_sequential(&result))
         };
@@ -421,7 +422,7 @@ pub fn canonicalize_free_axis_order(body: &Body) -> Result<Body> {
     }
     let mut result = terminal;
     for l in sorted.iter().rev() {
-        result = loop_over(l.axis.clone(), result, l.unroll, l.seed);
+        result = loop_over(l.axis.clone(), result, l);
     }
     Ok(result)
 }

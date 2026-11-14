@@ -490,7 +490,16 @@ name = "emmy-ir-py"
 version = "0.1.0"
 dependencies = [
  "emmy-ir",
+ "emmy-ptx",
  "pyo3",
+]
+
+[[package]]
+name = "emmy-ptx"
+version = "0.1.0"
+dependencies = [
+ "emmy-ir",
+ "libm",
 ]
 
 [[package]]

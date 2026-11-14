@@ -5,7 +5,7 @@ import pytest
 
 from emmy.compiler.ir.elementwise import ElementwiseImpl
 from emmy.compiler.ir.expression import BinaryExpression, FunctionCallExpression, Literal, TernaryExpression
-from emmy.compiler.ir.render import op_to_expression
+from emmy.compiler.ir.loop.render import op_to_expression
 from emmy.compiler.ir.stmt import dtype_promote
 
 
@@ -133,14 +133,3 @@ def test_a_literal_contributes_no_dtype_to_a_promotion():
     assert promoted_dtype(parse("2 * 3"), f16) == "i32"
     assert promoted_dtype(parse("2.5 * 3"), f16) == "f32"
     assert promoted_dtype(parse("x + z"), f16) == "f32", "a name without a dtype is f32"
-
-
-def test_the_renderer_spells_a_literal_at_the_named_operands_dtype():
-    """``2 * x`` over f16 renders as one f16 multiply, the literal spelled at f16, not promoted to f32 for the literal."""
-    from emmy.compiler.ir.expression import parse
-    from emmy.compiler.ir.render import RenderCtx
-    from emmy.compiler.ir.stmt import Assign
-    from tests.compiler.helpers import render_typed
-
-    [line] = render_typed([Assign("y", parse("2 * x"))], RenderCtx(ssa_dtypes={"x": "f16"}))
-    assert line.strip() == "__half y = __hmul_rn(__float2half(2.0f), x);"

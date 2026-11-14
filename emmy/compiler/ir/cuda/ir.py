@@ -1,14 +1,13 @@
-"""CudaOp — graph-level wrapper around a rendered CUDA kernel.
+"""CudaOp — graph-level wrapper around a compiled kernel.
 
-Produced by ``passes/lowering/cuda`` by rendering each ``KernelOp`` body
-to a ``__global__`` source string. The final graph before codegen is
-``Graph[CudaOp + InputOp + ConstantOp]``; the CUDA backend walks it in
-topological order, emits one ``kernel_name<<<grid, block>>>(args)``
-launch per node, and wires buffer pointers by node id.
+Produced by ``passes/lowering/cuda`` by compiling each ``KernelOp`` body to PTX text. The final graph before codegen
+is ``Graph[CudaOp + InputOp + ConstantOp]``; the CUDA backend walks it in topological order, emits one launch per
+node, and wires buffer pointers by node id.
 """
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, field
 
 from emmy.compiler.ir.base import Op
@@ -54,7 +53,7 @@ class CudaOp(Op):
     TMA descriptor params).
     """
 
-    kernel_source: str = ""  # complete __global__ function
+    kernel_source: str = ""  # the kernel's PTX text
     kernel_name: str = ""
     arg_order: tuple[str, ...] = ()  # kernel-param names in positional order
     grid: tuple[GridDimSpec, GridDimSpec, GridDimSpec] = ((1,), (1,), (1,))
@@ -72,9 +71,6 @@ class CudaOp(Op):
     #: Serial launch axes ``(name, extent)``: the launcher runs the kernel once per coordinate in
     #: order, passing the coordinate through the ``runtime_args`` slot of the same name.
     serial: tuple[tuple[str, int], ...] = ()
-    #: Whether the kernel must be assembled for the arch-suffixed target (``sm_<cc>a``): it holds TMA, the
-    #: block-scaled fp4 ``mma`` or ``wgmma``.
-    arch_specific: bool = False
     #: Whether the kernel waits on the grid ahead of it before its first memory access, so the runtime may launch
     #: it as a programmatic dependent launch. Every lowered kernel does; a hand-written source says so itself.
     dependent_launch: bool = False
@@ -83,11 +79,18 @@ class CudaOp(Op):
         return self.kernel_source
 
     def identity_key(self, *, structural: bool = True, with_io: bool = False, with_knobs: bool = False) -> str | None:
-        """Override :meth:`Op.identity_key` whole: digest of the rendered source + launch
-        params — past rendering, body / io / knobs are all realized into the artifact, so the
-        lattice flags have nothing left to fold and are accepted-and-ignored. The kernel's name is in the source, and
-        it is the kernel's exact identity, so one kernel has one source wherever it is compiled."""
+        """Override :meth:`Op.identity_key` whole: digest of the kernel's code + launch params — past code
+        generation, body / io / knobs are all realized into the artifact, so the lattice flags have nothing left to
+        fold and are accepted-and-ignored. The kernel's name stands in its code, and it is the kernel's exact
+        identity, so one kernel has one code wherever it is compiled."""
         return digest(type(self).__name__, self.kernel_source, self.arg_order, self.grid, self.block, self.smem_bytes)
+
+
+def renamed(source: str, old: str, new: str) -> str:
+    """The PTX text ``source`` of kernel ``old`` with the kernel named ``new``: its entry and the parameter and shared
+    symbols the PTX printer derives from the entry's name (``<name>_param_<i>``, ``<name>_shared_<i>``), and nothing
+    else."""
+    return re.sub(rf"(?<![\w$]){re.escape(old)}(?=(?:_param_\d+|_shared_\d+)?(?![\w$]))", new, source)
 
 
 def resolve_dim(spec, sym_values: dict[str, int]) -> int:

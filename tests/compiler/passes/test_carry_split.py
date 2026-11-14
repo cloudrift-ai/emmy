@@ -67,8 +67,8 @@ def test_an_unmapped_carried_kernel_uses_ordered_cuda_launches() -> None:
     graph = Pipeline.build(["tile/lift", "lowering/kernel", "lowering/cuda"]).run(_graph(steps=STEPS))
     (op,) = (node.op for node in graph.nodes.values() if isinstance(node.op, CudaOp))
     assert len(op.serial) == 1 and op.serial[0][1] == STEPS
-    # CUDA spelling: moves to the PTX compiler's tests
-    assert "std::vector" not in op.kernel_source
+    # The carried state is in registers: the kernel takes no local memory.
+    assert ".local" not in op.kernel_source
 
 
 def test_the_walk_is_offered_its_split_and_declines_it_by_default() -> None:

@@ -47,7 +47,6 @@ from __future__ import annotations
 from dataclasses import dataclass, replace
 from importlib import import_module
 
-from emmy.compiler.backend.cuda.dtype import cuda_name
 from emmy.compiler.dtype import F32
 from emmy.compiler.ir.address import clamp_to
 from emmy.compiler.ir.axis import Axis, Window
@@ -285,7 +284,7 @@ def _factorize(op, ctx: Ctx, tail: tuple, out_val: str, store=None, output_specs
         plain = tuple(spec for spec in output_specs if id(spec) not in streamed_ids)
         # An output sweep whose axis the peeled root's cone reads cannot wrap here: the peel binds
         # the root OUTSIDE the projection, so no wrap position inside ``proj`` encloses the reduce
-        # and the sweep coordinate renders as an undefined identifier at nvcc (DeepSeek-V4's fused
+        # and the sweep coordinate is a name nothing defines (DeepSeek-V4's fused
         # ``k_div_36_reduce``, whose per-column mean read the store sweep's column). The serial
         # fold realizes the shape whole — bind the UNPEELED projection so ``apply_output_specs``
         # wraps operand and projection together.
@@ -408,13 +407,13 @@ def _one_value_per_name(stmts) -> list:
     other's. Two peel levels that carry the same cone bind the same names to the same statements and
     the dedup above collapses them, which is what the tag is for. A placement cut breaks the tie — it
     replaces one level's cone with a workspace read and leaves the other computing in place — so the
-    two bind one name to two values, and nvcc rejects the second declaration (DeepSeek-V4's
+    two bind one name to two values, an SSA fault (DeepSeek-V4's
     ``post1.k_div_64_reduce`` under a cut, where one ``in0`` is a broadcast constant and the other is
     the workspace the cut materialized, and both derive ``v73`` from it).
 
-    The sweep is positional, which is what makes it right in one C scope: a use before the second
-    binding means the first value and a use after it means the second, exactly as the redeclaration
-    nvcc refuses would have read. Exported accumulators count as bindings too: a partial copy of
+    The sweep is positional, which is what makes it right in one scope: a use before the second
+    binding means the first value and a use after it means the second, exactly as the second binding
+    would have read. Exported accumulators count as bindings too: a partial copy of
     a reduction is a different loop even when some outputs retain their original names.
     Nothing moves while the two agree.
 
@@ -843,7 +842,6 @@ def emit_combine(
     prog = tuple(fold.combine.body)
     dtype = next((a.dtype for a in prog if a.dtype is not None), None) or F32
 
-    smem_c = cuda_name(dtype)
     bufs = tuple(f"{st}_smem" for st in state)
     if inner is not None:
         # The transposed (``coop-t``) combine: threads sharing an output lane sit ``scale``
@@ -861,7 +859,7 @@ def emit_combine(
                 BinaryExpression("/", slot, Literal(warp_size, "int")),
             )
         idx = BinaryExpression("+", BinaryExpression("*", slot, Literal(scale, "int")), Var(iv))
-        out: list[Statement] = [Smem(name=b, extents=(n_threads * scale,), dtype=smem_c) for b in bufs]
+        out: list[Statement] = [Smem(name=b, extents=(n_threads * scale,), dtype=dtype) for b in bufs]
         out += [Write(output=b, index=(idx,), values=(st,)) for b, st in zip(bufs, state, strict=True)]
         out.append(Sync())
         out.append(
@@ -889,7 +887,7 @@ def emit_combine(
             hierarchical = i > 0 and folds[i - 1] is FoldMove.SHFL
             width = n_threads // warp_size if hierarchical else n_threads
             tid_var = "warp" if hierarchical else t
-            out += [Smem(name=b, extents=(width,), dtype=smem_c) for b in bufs]
+            out += [Smem(name=b, extents=(width,), dtype=dtype) for b in bufs]
             if hierarchical:
                 # Lane-0 of each warp stages that warp's broadcast state, indexed by ``warp``.
                 out.append(
@@ -1274,7 +1272,7 @@ def _tile_reduce_axis(
             grid_vars=grid_vars,
             linear_tid=start,
             n_threads=coop,
-            dtype=cuda_name(ctx.inputs[staged].dtype),
+            dtype=ctx.inputs[staged].dtype,
         )
         n_grid = len(grid)
         rloop = rloop.replace(body=Body(tuple(_restage_loads(list(rloop.body), staged, smem_name, n_grid, grid_vars))))

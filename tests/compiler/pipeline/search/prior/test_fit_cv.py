@@ -11,7 +11,6 @@ import numpy as np
 import pytest
 
 from emmy.commands.fit import register_fit_command
-from emmy.compiler.context import FAST_MATH_FLAG
 from emmy.compiler.pipeline.search import features, ranking
 from emmy.compiler.pipeline.search.dataset import Dataset, GoldenPool, GoldenRow
 from emmy.compiler.pipeline.search.dataset.group import GoldenGroup
@@ -100,7 +99,7 @@ def test_builder_pins_every_golden_row_of_a_pool_and_keys_regimes_apart(monkeypa
     std = [{"TILE": "a"}, {"TILE": "b"}, {"TILE": "c"}]
     fastmath = [*std, {"TILE": "f"}]  # the extra atom row the standard enumeration never emits
     groups, skipped = _build(
-        [_pool("m.512", std, ["b", "c", "zz"]), _pool("m.512", fastmath, ["f"], regime=FAST_MATH_FLAG)],
+        [_pool("m.512", std, ["b", "c", "zz"]), _pool("m.512", fastmath, ["f"], regime="FAST_MATH")],
         monkeypatch,
     )
     assert [(c.key, c.golden_ids, len(c.feats)) for c in groups] == [("gpuA/k_m.512", (1, 2), 3), ("gpuA/k_m.512#2", (3,), 4)]

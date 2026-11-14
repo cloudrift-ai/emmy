@@ -14,7 +14,6 @@ from __future__ import annotations
 from emmy.compiler.graph import Graph, Tensor
 from emmy.compiler.ir.base import ConstantOp, InputOp
 from emmy.compiler.ir.loop.ir import LoopOp
-from emmy.compiler.ir.render import render_stmt
 from emmy.compiler.ir.stmt import Body, parse_body
 
 # ---------------------------------------------------------------------------
@@ -273,13 +272,10 @@ def test_structural_key_handles_fragment_repack() -> None:
     renamed = volta.rewrite(lambda n: {"a0": "a9", "c0": "c8"}.get(n, n))
     assert (renamed.frag, renamed.srcs, renamed.fragment_layout, renamed.part) == ("a9", ("c8",), "m8n8k4", 3)
 
-    from emmy.compiler.ir.kernel.ir import RenderCtx
-
     for layout in ("m16n8k16", "m8n8k4"):
         b = FragmentRepack(frag="b", srcs=("c",), fragment_layout=layout, part=3, role="b")
         renamed = b.rewrite(lambda name: "new_" + name)
-        assert renamed.role == "b" and renamed.part == 3
-        assert "emmy_c_to_b" in render_stmt(renamed, RenderCtx())[0]
+        assert (renamed.role, renamed.part, renamed.frag, renamed.srcs) == ("b", 3, "new_b", ("new_c",))
         Body((renamed,)).structural_key()
 
 

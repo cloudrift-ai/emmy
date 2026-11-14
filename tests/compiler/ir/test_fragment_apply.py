@@ -1,32 +1,12 @@
-"""``FragmentApply``'s coordinate and global-memory operand kinds — the fragment-tier mask and bias."""
+"""``FragmentApply``'s global-memory operand kind — the fragment-tier bias: what it reads, under renaming. How each
+operand kind is computed per element is the PTX compiler's (``crates/emmy-ptx/tests/fragment.rs``)."""
 
 from emmy.compiler.ir.elementwise import ElementwiseImpl
-from emmy.compiler.ir.expression import BinaryExpression, Literal, Var
-from emmy.compiler.ir.kernel.ir import COORD, FRAG, FRAG_COL, FRAG_ROW, GMEM, UNIFORM, FragmentApply, fragment_args
-from emmy.compiler.ir.render import RenderCtx, render_stmt
+from emmy.compiler.ir.expression import Literal, Var
+from emmy.compiler.ir.kernel.ir import FRAG, FRAG_COL, FRAG_ROW, GMEM, FragmentApply, fragment_args
 
 
-def _causal_mask() -> FragmentApply:
-    return FragmentApply(
-        out="s",
-        op=ElementwiseImpl("where"),
-        args=fragment_args((BinaryExpression(">", Var(FRAG_COL), Var(FRAG_ROW)), Literal(-1e30), "s"), (COORD, UNIFORM, FRAG)),
-        in_place=True,
-        row_base=Var("q"),
-        col_base=BinaryExpression("+", Var("kv"), Literal(8, "int")),
-    )
-
-
-def test_coordinate_mask_renders_one_guarded_line_per_element() -> None:
-    lines = render_stmt(_causal_mask(), RenderCtx())
-    stores = [ln.strip() for ln in lines if ln.strip().startswith("s[")]
-    assert len(stores) == 4, "every element of the m16n8 fragment is masked at its own coordinates"
-    assert stores[0] == "s[0] = ((kv + 8 + (_t * 2 + 0) > q + _g) ? (-1e+30f) : (s[0]));"
-    assert "_g + 8" in stores[2], "the second row of the lane's pair sits eight rows down"
-    assert not any("#pragma unroll" in ln for ln in lines), "a coordinate operand differs per element, so no loop"
-
-
-def test_gmem_operand_reads_the_buffer_at_absolute_coordinates_and_converts() -> None:
+def test_a_gmem_operand_is_a_read_of_its_buffer() -> None:
     bias = FragmentApply(
         out="s",
         op=ElementwiseImpl("add"),
@@ -35,17 +15,5 @@ def test_gmem_operand_reads_the_buffer_at_absolute_coordinates_and_converts() ->
         row_base=Var("q"),
         col_base=Var("kv"),
     )
-    ctx = RenderCtx(shapes={"mask": (1, 64, 64)}, buffer_dtypes={"mask": "f16"})
-    lines = render_stmt(bias, ctx)
     assert bias.external_reads() == ("mask",)
     assert bias.rename_buffers({"mask": "m0"}).external_reads() == ("m0",)
-    assert "s[3] = s[3] + __half2float(mask[(q + (_g + 8)) * 64 + (kv + (_t * 2 + 1))]);" in [ln.strip() for ln in lines]
-
-
-def test_plain_operands_keep_the_unrolled_loop_form() -> None:
-    scale = FragmentApply(
-        out="s", op=ElementwiseImpl("multiply"), args=fragment_args(("s", Literal(0.125)), (FRAG, UNIFORM)), in_place=True
-    )
-    lines = render_stmt(scale, RenderCtx())
-    assert any("#pragma unroll" in ln for ln in lines)
-    assert any("s[_e] = s[_e] * 0.125f;" in ln for ln in lines)

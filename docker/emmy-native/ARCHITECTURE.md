@@ -27,7 +27,7 @@ any other image.
    size, images, the drafter) and environment (`extra_env`: the widths and the pager budgets). The flags and budgets
    are fixed in the pack, so they belong to the bake, not to the server. With `PREPARE_IMAGE` naming an Emmy serving
    image built from the same checkout (`make vllm-emmy-image`), the preparation runs in it, so the pack's cubins come
-   from that image's nvcc, the toolchain the golden rows were recorded with.
+   from that image's ptxas, the toolchain the golden rows were recorded with.
 2. **Build the binaries** from the same checkout (`cargo build --release --locked`). They are built on the bake host,
    so the base image's glibc must be at least the host's.
 3. **Split and build.** `split_hf.sh` (shared with [vllm-emmy-serve](../vllm-emmy-serve/ARCHITECTURE.md)) balances

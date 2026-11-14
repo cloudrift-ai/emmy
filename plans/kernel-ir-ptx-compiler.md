@@ -20,6 +20,10 @@ kernel's structure on the rendered text any more (below). Step 12 has begun: two
 closed and the finalization audit is applied (below). No step ran the perf lane, the whole suite or an sm_70 kernel
 on a V100 yet; they are what is left of the closing step.
 
+PR B is draft #1399. Its switch (milestone 7) is done but for the refit: the opt level is gone (2026-11-13), and
+the featurizer version (13 to 14) and the tune DB version (14 to 15) are bumped, so the shipped weights refuse to load
+until both priors are refit (milestone 7).
+
 | Step | Commit | Corpus CUDA |
 | --- | --- | --- |
 | 1 | `60144bb83` | identical |
@@ -474,6 +478,106 @@ lists which corpus cases still do. That fallback exists only inside the PR.
 6. **Speed.** The perf lane on every held card against PR A. A slower case is compared with cicc's PTX for the same
    kernel (`nvcc -ptx`), then explained or fixed. First thing to try for a rolled loop: placing a compiler-made
    address part in the outermost scope that defines its operands, which the builder does not do until a case needs it.
+   *The unrolling nvcc did on its own* (`118_unroll_as_nvcc`, `119_vectorize_copies`, the loop field `unrolled`).
+   Most of what stayed slower after the first speed commits was loops cicc unrolled without being asked. Its rule,
+   read off `nvcc -ptx -arch=sm_120` (CUDA 13.0) across trip counts and body sizes, with the body sized in Kernel IR
+   as the work of one trip (one per access, fold, selection and branch, one more for a changing address, one per
+   operation whose value changes, a math function by the instructions cicc writes: `exp` 14, `log` 28, `tanh` 17,
+   `sin` 88, `pow` 113, the fast forms 1 to 3):
+   - A static counted loop of `N` trips is written out when `N·(size + 2) ≤ 480` (96 trips of a two-statement body
+     are, 97 are not), else steps the largest power of two `C` dividing `N` with `C·(size + 2) ≤ 199`. It carries no
+     `.pragma`. An odd `N` gets four copies with the exit test between the third and the fourth (not modelled).
+   - A loop over a runtime bound takes 16, 8, 4 or 2 copies by `C·(size + 7) ≤ 228`, none past a size of 89. The
+     remainder is blocks of `C/2`, `C/4`, … copies, each under its bit of the count left, and with 16 copies the
+     last three trips a loop of one copy; the stepping loop and that loop carry `.pragma "nounroll"`, nothing else
+     does. A thread-start loop over a symbolic extent gets the same; one over a static extent cicc left to ptxas
+     below 24 trips (and copied 16 times from 24 on, not modelled).
+   - A loop with a barrier is not unrolled at run time; the tensor-core loops over a symbolic K stayed rolled.
+   - Checked on the corpus: the symbolic reductions (16 copies, blocks 8 and 4, loop), their ILP forms (4, then 2
+     and 1), softmax's normalize (8; the online pass 4), the f32 matmuls' 128-trip `_ki` loop over shared slabs (4,
+     the four A reads one `ld.shared.v4`), `qwen3emb/sdpa-s32`'s inner loops (16) all come out as cicc's.
+
+   The rule is a fixed copy of nvcc, like step A8's two limits; the number of copies moves under the `UNROLL` knob
+   with them. `119` runs the vector widenings again over the copies (cicc merged them after unrolling); a stepping
+   loop states its step, so the alignment proof holds. Every loop the unroll passes leave stepping several trips says
+   `unrolled`, and the PTX compiler marks it `.pragma "nounroll"`: unmarked, ptxas unrolled the compact static loops
+   in full where it had left cicc's alone (`qwen3emb/sdpa-s32`: 11,344 machine instructions and 0.53 s of ptxas,
+   2,216 and 0.06 s marked, 180 to 82 us). The CUDA renderer writes `#pragma unroll 1` on the runtime-bound ones
+   only, which is what cicc marked: marking the static ones too cost nvcc's build up to 1.6x where ptxas used to
+   finish cicc's unrolling.
+
+   Measured on the rented RTX 5090, two rounds per generator taking turns, against the lanes before it: through
+   nvcc, median 1.001, 8 of 101 cases past 5 us more than 5% slower and 28 faster, total 20.8 to 13.4 ms; through
+   PTX, median 1.000, 10 slower and 30 faster, total 18.5 to 13.5 ms (the symbolic reductions 0.59, the f32
+   projections 0.40 to 0.46, `qwen3emb/sdpa-s32` 0.52). Between the two generators: median 1.015, 32 slower and 16
+   faster.
+
+   *Loop shape and the exponential* (`00f98f4f7` to `87c6d1621`), each found by putting this compiler's PTX beside
+   cicc's for the same kernel:
+   - A kept loop's loads waited on its arithmetic because an address read the counter shifted to bytes in every
+     trip; ptxas then issued the last load of a trip into the registers of the first. Stepping a multiple of the
+     counter by the term's bytes, as cicc steps a pointer, puts every load of the trip ahead (the serial reductions
+     10.0 to 6.9 us). The same in 32 bits for a shared address gives each slab read of the f32 projections a
+     register of its own (`matmul-qproj-s512` 48 to 64 registers, 75 to 69 us). Only a loop kept rolled reads the
+     multiples: in one ptxas may unroll each byte factor was a register and an add for nothing
+     (`gdn-conv-join-in-place-name` 69 to 77 us, back to 68 on the dev box).
+   - ptxas wrote out in full the static loops of at most four trips cicc left it, which run the sibling loops of a
+     register tile side by side; such a loop is no longer marked (`norm-weight-linear-f16-computed-b` 52.9 to 31.1
+     us, `computed-a-nested-contraction-scalar` 17.2 to 10.7, both now faster than nvcc's build). Whether ptxas
+     unrolls an unmarked loop of cicc's turned on details no rule here reproduces: with a stepped pointer, the
+     order of the counter's and the pointer's increments decided it on `reduce/combine-l2-serial`.
+   - The exponential is cicc's `expf` sequence, bit for bit (three machine instructions fewer); the softmax kernels
+     lost most of their gap (`combine-softmax-serial` 84.7 to 70.6 us). The division is the same `div.rn.f32`
+     subroutine call in both builds, at the same places, so it is no difference.
+   - A load widening of shared slabs in Kernel IR was tried and dropped: ptxas already merges the scalar reads.
+
+   Measured on the rented RTX 5090 (`87c6d1621`), two rounds per generator taking turns, against the lanes before
+   these commits: through PTX, median 0.997, 2 of 104 cases past 5 us more than 5% slower
+   (`qwen3emb/matmul-qproj-s128` 1.06, `matmul/bf16-scalar-sync-d2-sm120` 1.06) and 22 faster, total 23.36 to
+   23.14 ms over the 213 cases; through nvcc unchanged (median 1.000, total 22.89 to 22.90 ms). Between the two
+   generators: median 1.003, 16 slower and 24 faster.
+
+   *Fragment loads and the register count* (`54c95bb33`, `f62b3f77d`), each found by putting this compiler's PTX
+   beside cicc's for the same kernel and assembling transplants of one into the other:
+   - ptxas sizes a kernel's registers for more blocks on a multiprocessor than a small launch places there. Where
+     our code fits fewer registers it takes them, by reusing a fragment's registers for the next fragment's loads,
+     which then issue after the products that read the first: two trips to memory a step
+     (`matmul/f16-symbolic-k-gmem` 48 registers, 66 with `.minnctapersm 1`, 19.4 to 11.5 us on the dev box; the
+     masked-K `m128n128k132` products 174 and 255 registers, 9.5 to 6.6 us). cicc's PTX for the same kernels got
+     more registers without the directive (56 and 255). What moves ptxas's choice was not found; it is none of
+     these, each transplanted alone: the PTX version, `.maxntid` against `.reqntid`, parameter declarations and
+     `cvta`, `.nc`, `.u16` against `.b16`, predicated loads against cicc's branches around them, the packs late,
+     the K bound stepped, the grid wait's place, SSA registers, a block boundary between steps, and the register
+     use level (`-regUsageLevel` 10 left ours at 173). A launch of one wave (a static grid of no more blocks than
+     the card has multiprocessors) now states `.minnctapersm 1`. On every kernel the directive measured median
+     0.994 against the lanes before, 24 faster and 6 slower, the slower ones large grids
+     (`attention/sdpa-hd128-staged-value`, 2,048 blocks, 1.19x), which keep ptxas's choice.
+   - A fragment wholly past its clamp was a branch around its loads; the branch closed a block at each fragment's
+     packs, which waited on that fragment's loads before the next fragment's issued. The clamp's test is a guard of
+     each load now (`matmul/f16-symbolic-batched-mk-greedy` 57.2 to 37.7 us, cicc's build 46.5).
+
+   Measured on the rented RTX 5090 (`f62b3f77d`), two rounds per generator taking turns, against the lanes at
+   `87c6d1621`: through PTX, median 0.997, 24 of 102 cases past 5 us faster and 3 slower (`qwen3emb/matmul-add-oproj-s32`
+   and `-downproj-s32` 1.07, from faster than cicc's build to level with it; `fused/nvfp4-gate-up-requant-place-cut`
+   1.06), total 23.14 to 23.01 ms; through nvcc unchanged (median 0.999). Between the two generators: median 0.998,
+   11 slower and 32 faster; the slowest are the three below, the serial and atomic reductions (1.09 to 1.11) and
+   five cases at 1.05 to 1.07. What is left:
+   - `matmul/f16-scalar-register-tile` (1.22x): its row stages A through TMA and reads it a half at a time across
+     64 unrolled K steps; cicc merges each row's eight steps into one `ld.shared.v4` (208 `LDS.128` against our
+     1,664 `LDS.U16`) and ptxas does not. A widening of shared reads across unrolled copies, in Kernel IR.
+   - `attention/sdpa-hd256-f16acc-value-wide-row` (1.23x): the score scale and the mask bias are two
+     `FragmentApply` statements, a multiply into a fragment and an add of it, so the fusion rule, which takes a
+     multiply read once in its own scope, never sees them: no `fma` at all against cicc's 146, and 40 bytes of
+     spills against 8.
+   - `scan/f32-cumsum-row` (1.17x): its loop of eight trips is marked `nounroll`; cicc keeps it rolled too, but
+     unmarked ptxas writes it out and the case runs in 5.4 us against cicc's build's 10.7 on the dev box. The
+     four-trip bound of the unmarked loops is cicc's, and moving it needs a lane, `qwen3emb/sdpa-s32` first.
+   - cicc unrolls a loop `118` leaves stepping a second time where its copies' vector loads make the body small
+     (`reduce/cross-cta-sum-atomic`: 32 copies a trip in the CUDA text, 64 in cicc's PTX, more loads in flight).
+     The case is level now, but the rule is not modelled; it belongs to `118` under the `UNROLL` knob.
+   - The f32 matmuls over shared slabs still trail the build whose four copies counted to a constant (ptxas
+     software-pipelined only that), through both generators.
+
 7. **The switch.** The fallback goes, and with it:
    - the Kernel IR renderers, the C++ helpers, `CudaRenderTarget`, the nvcc wrapper. The Loop IR runner keeps its C
      renderer for the shared statements.
@@ -492,6 +596,32 @@ lists which corpus cases still do. That fallback exists only inside the PR.
    - **Docs.** The CUDA backend, IR and passes `ARCHITECTURE.md` files, `AGENTS.md` (prerequisites, running tests),
      `README.md`, `GLOSSARY.md` for PTX.
    - Then record runs on each card and the refit.
+
+   *Done 2026-11-13, except the opt level and the refit.* The PTX compiler is the only code generator; a refusal is
+   an error. Deleted: the Kernel IR renderers and helpers (`ir/kernel/render.py`, the `render_stmt` registrations in
+   `ir/kernel/ir.py`), the shared `ir/render.py`, both `render_target.py`, `backend/cuda/nvcc.py`, the differential
+   test and the renderer-only tests. The Loop IR runner keeps a host C++ renderer of the shared statements,
+   `ir/loop/render.py`. `backend/cuda/ptxas.py` assembles: ptxas on `PATH` or under `$CUDA_HOME`/`$CUDA_PATH`, the
+   cubin keyed on the PTX, the target and ptxas's `--version`. The pack's environment is the arch and the ptxas
+   version. The kernel merge renames PTX symbols (`ir.cuda.ir.renamed`: the entry, `_param_N`, `_shared_N`). The
+   stage is `--ir ptx`; the dump writes `.ptx`. The corpus `built` stage assembles for the declared card without
+   one, and skips a target the installed ptxas refuses (CUDA 13: `sm_70`).
+
+   The compiler gained what the renderer still held: paged buffers (a table of pages, `Param.page`), float masks under
+   `and`/`or`/`not`, 8-bit float encoding below `sm_89` in software, 16-bit and unsigned 64-bit integers, bitcasts and
+   doubles as a value converted through (EXL3), the Volta slab layouts as integer expressions, combines at the type
+   their states are held at, a half maximum or minimum accumulator at f32 where the target has no instruction for it,
+   and no fused multiply-add at f16 (eager rounds the product).
+
+   *Opt level removed 2026-11-13.* `split_opt_level`, `_OPT_TOKEN`, `H_opt`, `DEPLOYABLE_OPT`, the tune DB's
+   `opt` and `flags` context columns and the freeze's deployable-opt gate are gone; a context's DB regime is its
+   card, target, cache mode and precision decisions. `Context.compile_flags` keeps the two precision tokens' spelling
+   and the context key digests it whole, so every context key moved with the tune DB version. Measured pools key on
+   card, kernel signature and regime, and report by card. Featurizer version 13 to 14, tune DB version 14 to 15.
+   No tree of either shipped prior splits on `H_opt` (no borders), but the version gate refuses both files, so a
+   greedy compile ranks by emission order and the reproduction gate, `test_shipped_artifacts_load` and the `eval
+   prior` CLI test fail until the refit (README, "Fit the priors", at the shipped iteration counts: schedule 400,
+   placement 3000).
 
 ### Checks
 

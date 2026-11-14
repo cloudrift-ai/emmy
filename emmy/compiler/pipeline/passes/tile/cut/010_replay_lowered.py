@@ -4,7 +4,7 @@ The rule sits ahead of the cut, on the tile the kernel-set decisions start from:
 (+ hints + pins) was already lowered this session rewrites STRAIGHT to the cached, io-rebound ``KernelOp`` — no
 fork, no enumeration, no materialization. The tile becomes the kernel's ``source``, so its name and its buffer
 slots are computed exactly as a fresh lowering's. Everything downstream treats it as any other kernel: the tile and
-kernel passes don't match a ``KernelOp``, and the ``lowering/cuda`` group (zero-init delegation, rendering) runs
+kernel passes don't match a ``KernelOp``, and the ``lowering/cuda`` group (zero-init delegation, code generation) runs
 fresh on the assembled graph, per graph, as it must (those are the cross-kernel negotiations the cache boundary
 deliberately excludes). A piece a cut leaves is a tile of its own, so it is fetched the same way.
 

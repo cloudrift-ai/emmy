@@ -1,8 +1,8 @@
-"""Kernel IR — the fully-scheduled kernel form, just above CUDA source.
+"""Kernel IR — the fully-scheduled kernel form, the input of the PTX compiler.
 
 Kernel IR sits between Tile IR (schedule decisions as structural Stmts)
-and CUDA source (text). Its body contains the explicit hardware
-machinery: ``Tile`` (thread/block coord bindings), ``Smem`` (``__shared__``
+and PTX (text). Its body contains the explicit hardware
+machinery: ``Tile`` (thread/block coord bindings), ``Smem`` (shared
 arrays), ``Sync`` (barriers), the transports into shared memory
 (``CpAsync*``, ``Tma*`` + ``Mbarrier*``), the cross-thread combines
 (``WarpShuffle``, ``TreeHalve``) and the tensor-core register fragments
@@ -11,11 +11,11 @@ arrays), ``Sync`` (barriers), the transports into shared memory
 Pipeline shape::
 
     Tile IR ──materialize_tile──▶ Kernel IR
-                    ──render_kernelop──▶ CUDA source
+                    ──ptx.compile_kernel──▶ PTX
 
 **Leaf compute reuses the shared statements directly**. ``Load`` / ``Assign`` /
 ``Let`` / ``Select`` / ``Write`` / ``Accum`` / ``Cond`` / ``Loop`` come straight
-from ``ir.stmt`` — buffer names are strings, so they render as they are.
+from ``ir.stmt`` — buffer names are strings, so they compile as they are.
 
 Kernel IR deliberately contains no scheduling decisions — those live in
 Tile IR and are materialized away before reaching this layer. A
@@ -24,16 +24,14 @@ Tile IR and are materialized away before reaching this layer. A
 
 from __future__ import annotations
 
-import math
-from collections.abc import Mapping
-from dataclasses import dataclass, replace
-from functools import cache, cached_property
+from dataclasses import dataclass
+from functools import cached_property
 
 from emmy.compiler.dim import Dim
 from emmy.compiler.dtype import I32
 from emmy.compiler.ir.axis import Axis
 from emmy.compiler.ir.body_op import BodyOp
-from emmy.compiler.ir.elementwise import _REDUCE_SPELLING, ElementwiseImpl
+from emmy.compiler.ir.elementwise import ElementwiseImpl
 from emmy.compiler.ir.expression import (
     BinaryExpression,
     Builtin,
@@ -45,19 +43,6 @@ from emmy.compiler.ir.expression import (
     TernaryExpression,
     Var,
 )
-from emmy.compiler.ir.render import (
-    RenderCtx,
-    _flat_index,
-    _pad,
-    op_to_expression,
-    render_address,
-    render_body,
-    render_expression,
-    render_index,
-    render_merge_program,
-    render_stmt,
-)
-from emmy.compiler.ir.sigma import Sigma
 from emmy.compiler.ir.stmt import (
     Accum,
     Assign,
@@ -74,7 +59,6 @@ from emmy.compiler.ir.stmt import (
     free_names,
 )
 from emmy.emmy_ir import (  # the Kernel IR statement types, declared with the shared ones in the emmy-ir crate
-    FRAGMENT_LANE,
     BlockScaleLoad,
     CpAsyncCommit,
     CpAsyncCopy,
@@ -110,57 +94,11 @@ from emmy.emmy_ir import (  # the Kernel IR statement types, declared with the s
     WgmmaMma,
     WgmmaWait,
     fragment_table,
-    paired_accumulator_table,
 )
 
 # ---------------------------------------------------------------------------
 # Hardware primitives
 # ---------------------------------------------------------------------------
-
-
-@render_stmt.register
-def _(stmt: Smem, ctx: RenderCtx) -> list[str]:
-    """``__shared__ <dtype> <name>[<prod(extents)>];`` and register the
-    buffer's shape so subsequent ``Load``/``Write`` flatten correctly.
-
-    When ``ctx.smem_dynamic_offsets`` carries this buffer's offset,
-    emit a pointer alias into the shared ``_smem_pool`` (extern
-    dynamic smem) instead of a static ``__shared__`` array — the
-    renderer falls back to the dynamic path when total per-CTA smem
-    would exceed the 48 KB static cap.
-    """
-    from emmy.compiler.backend.cuda.dtype import canonical_from_cuda_name  # noqa: PLC0415
-
-    total = 1
-    for e in stmt.extents:
-        total *= int(e)
-    ctx.shapes[stmt.name] = tuple(int(e) for e in stmt.extents)
-    # Register the smem buffer's canonical dtype so Load/Write
-    # against this name pick the right local C type. Mbarrier slabs
-    # (``"unsigned long long"``) map to None and stay out of the
-    # dtype-aware path.
-    smem_canonical = canonical_from_cuda_name(stmt.dtype)
-    if smem_canonical is not None:
-        ctx.buffer_dtypes[stmt.name] = smem_canonical
-    if stmt.name in ctx.smem_dynamic_offsets:
-        offset = ctx.smem_dynamic_offsets[stmt.name]
-        return [f"{_pad(ctx.indent)}{stmt.dtype}* {stmt.name} = reinterpret_cast<{stmt.dtype}*>(_smem_pool + {offset});"]
-    ali = f"__align__({stmt.align}) " if stmt.align else ""
-    return [f"{_pad(ctx.indent)}__shared__ {ali}{stmt.dtype} {stmt.name}[{total}];"]
-
-
-@render_stmt.register
-def _(stmt: Sync, ctx: RenderCtx) -> list[str]:
-    pad = _pad(ctx.indent)
-    if stmt.warp:
-        if stmt.barrier_id != 0:
-            raise ValueError("Sync(warp=True) cannot carry a named barrier_id")
-        return [f"{pad}__syncwarp();"]
-    if stmt.barrier_id == 0:
-        return [f"{pad}__syncthreads();"]
-    if stmt.count is None:
-        raise ValueError(f"Sync(barrier_id={stmt.barrier_id}) requires count")
-    return [f'{pad}asm volatile("bar.sync {stmt.barrier_id}, {stmt.count};\\n" ::: "memory");']
 
 
 #: Threads per block of the scalar tier: one thread per cell over this fixed block.
@@ -190,7 +128,7 @@ def tile_cells(tile: Tile) -> int:
     ``BLOCK_SIZE``. This is ``blockDim`` minus any aux band, i.e. the divisor the cuda lowering
     uses for ``gridDim = ceil(n_elements / cells)``. So ``n_elements % cells == 0`` (and no aux
     band) means the static grid covers the iteration space exactly — no partial last block, so
-    the ``_gid < N`` tail guard is provably always-true and the render elides it."""
+    the ``_gid < N`` tail guard is provably always-true and the grid elides it."""
     if tile.block_threads is not None:
         return tile.block_threads
     return BLOCK_SIZE
@@ -205,8 +143,7 @@ def tile_n_dim(tile: Tile):
     """Total iteration-space size as a :class:`Dim` — the ∏ of the axis extents, holding a
     symbolic factor (a dynamic ``seq_len``) when any axis is symbolic. The cuda lowering
     sizes the launch from this (``ceil(n_dim / blockDim)`` CTAs, ``seq_len`` resolved at
-    launch); the renderer guards ``_gid < n_dim`` so the partial last block is masked."""
-    from emmy.compiler.dim import Dim  # noqa: PLC0415
+    launch); the grid guards ``_gid < n_dim`` so the partial last block is masked."""
 
     n = Dim(1)
     for a in tile.axes:
@@ -360,272 +297,12 @@ def _raster_pair(tile: Tile) -> tuple[int, int] | None:
     return gi, oi
 
 
-@render_stmt.register
-def _(node: Tile, ctx: RenderCtx) -> list[str]:
-    return render_stmt(decode_tile(node), ctx)
-
-
-@render_stmt.register
-def _(node: Grid, ctx: RenderCtx) -> list[str]:
-    pad = _pad(ctx.indent)
-    decoded = [f"{pad}int {axis.name} = {render_expression(value, ctx)};" for axis, value in zip(node.axes, node.decode, strict=True)]
-    return decoded + render_body(node.body, ctx)
-
-
-@render_stmt.register
-def _(node: CpAsyncCopy, ctx: RenderCtx) -> list[str]:
-    # The source and a plain destination hold one flat index. A destination with a lane offset keeps its tile's row
-    # and column, which the swizzle split reads.
-    smem_flat = render_index(node.smem, node.smem_index, ctx)
-    src_flat = ctx.memory_for(node.src).flat(node.src_index, ctx)
-    if node.lane_index is not None:
-        cols = ctx.shapes[node.smem][-1]
-        lane = f"({render_expression(node.lane_index[0], ctx)}) * {cols} + ({render_expression(node.lane_index[1], ctx)})"
-        split = swizzled_slab_index(
-            node.swizzle, cols, lane, node.smem_index[0], node.smem_index[1], ctx, lane_rows=node.lane_rows, lane_col_mod=cols
-        )
-        smem_flat = split if split is not None else f"{smem_flat} + {lane}"
-        if split is None and swizzle_xor(node.swizzle):
-            smem_flat = f"{swizzle_fn(node.swizzle)}({smem_flat})"
-    elif swizzle_xor(node.swizzle):
-        smem_flat = f"{swizzle_fn(node.swizzle)}({smem_flat})"
-    pad = _pad(ctx.indent)
-    # ``emmy_cp_async_{cg,ca}`` (the cp.async prelude) does the ``cvta`` internally, so this is a
-    # single call — no ``_smem_addr`` local and no wrapping ``{ }`` block. .cg is 16-byte-only.
-    dst, src = f"&{node.smem}[{smem_flat}]", f"&{node.src}[{src_flat}]"
-    if node.valid is not None and node.nbytes == 16:
-        call = f"emmy_cp_async_cg_z({dst}, {src}, {render_expression(node.valid, ctx)})"
-    else:
-        call = f"emmy_cp_async_cg({dst}, {src})" if node.nbytes == 16 else f"emmy_cp_async_ca<{node.nbytes}>({dst}, {src})"
-    return [f"{pad}{call};"]
-
-
-@render_stmt.register
-def _(stmt: CpAsyncCommit, ctx: RenderCtx) -> list[str]:
-    return [f"{_pad(ctx.indent)}emmy_cp_async_commit();"]
-
-
-@render_stmt.register
-def _(stmt: CpAsyncWait, ctx: RenderCtx) -> list[str]:
-    return [f"{_pad(ctx.indent)}emmy_cp_async_wait<{stmt.group}>();"]
-
-
-@render_stmt.register
-def _(stmt: TmaDescriptor, ctx: RenderCtx) -> list[str]:
-    # Descriptor is a kernel parameter built host-side; no in-kernel render.
-    return []
-
-
-@render_stmt.register
-def _(node: TmaLoad, ctx: RenderCtx) -> list[str]:
-    smem_flat = render_index(node.smem, node.smem_index, ctx)
-    rank = len(node.coords)
-    # PTX expects coords in driver order (innermost-first), which is
-    # the reverse of our C-order ``coords`` (== ``stage.origin``).
-    coord_args = ", ".join(render_expression(c, ctx) for c in reversed(node.coords))
-    mbar_addr = "&" + node.mbar if node.mbar_slot is None else f"&{node.mbar}[{render_expression(node.mbar_slot, ctx)}]"
-    pad = _pad(ctx.indent)
-    # The ``cp_async_bulk_tensor_<rank>d`` helpers are defined in the
-    # kernel prelude — single-CTA ``.shared::cta`` qualifier; cluster
-    # launches would need a separate helper variant.
-    return [
-        f"{pad}cp_async_bulk_tensor_{rank}d(&{node.smem}[{smem_flat}], {node.desc}, {coord_args}, {mbar_addr});",
-    ]
-
-
-@render_stmt.register
-def _(stmt: MbarrierInit, ctx: RenderCtx) -> list[str]:
-    pad = _pad(ctx.indent)
-    addr = "&" + stmt.mbar if stmt.slot is None else f"&{stmt.mbar}[{render_expression(stmt.slot, ctx)}]"
-    return [f"{pad}mbarrier_init({addr}, {stmt.count});"]
-
-
-@render_stmt.register
-def _(stmt: MbarrierArriveExpectTx, ctx: RenderCtx) -> list[str]:
-    pad = _pad(ctx.indent)
-    addr = "&" + stmt.mbar if stmt.slot is None else f"&{stmt.mbar}[{render_expression(stmt.slot, ctx)}]"
-    return [f"{pad}mbarrier_arrive_expect_tx({addr}, {stmt.bytes_});"]
-
-
-@render_stmt.register
-def _(stmt: MbarrierArrive, ctx: RenderCtx) -> list[str]:
-    pad = _pad(ctx.indent)
-    addr = "&" + stmt.mbar if stmt.slot is None else f"&{stmt.mbar}[{render_expression(stmt.slot, ctx)}]"
-    return [f"{pad}mbarrier_arrive({addr});"]
-
-
-@render_stmt.register
-def _(stmt: SetMaxNReg, ctx: RenderCtx) -> list[str]:
-    pad = _pad(ctx.indent)
-    return [f'{pad}asm volatile("setmaxnreg.{stmt.direction}.sync.aligned.u32 {stmt.count};\\n");']
-
-
-@render_stmt.register
-def _(stmt: MbarrierWait, ctx: RenderCtx) -> list[str]:
-    pad = _pad(ctx.indent)
-    addr = "&" + stmt.mbar if stmt.slot is None else f"&{stmt.mbar}[{render_expression(stmt.slot, ctx)}]"
-    phase_expression = render_expression(stmt.phase, ctx)
-    return [f"{pad}mbarrier_wait_parity({addr}, {phase_expression});"]
-
-
-@render_stmt.register
-def _(stmt: TreeHalve, ctx: RenderCtx) -> list[str]:
-    pad = _pad(ctx.indent)
-    in1 = _pad(ctx.indent + 1)
-    in2 = _pad(ctx.indent + 2)
-
-    def operand(expression: Expression) -> str:
-        text = render_expression(expression, ctx)
-        return text if isinstance(expression, Var) else f"({text})"
-
-    t = operand(stmt.tid_var)
-    ty = ctx.type_name(stmt.dtype.name)
-    if stmt.barrier_id == 0:
-        sync_line = f"{in1}__syncthreads();"
-    else:
-        if stmt.barrier_count is None:
-            raise ValueError(f"TreeHalve(barrier_id={stmt.barrier_id}) requires barrier_count")
-        sync_line = f'{in1}asm volatile("bar.sync {stmt.barrier_id}, {stmt.barrier_count};\\n" ::: "memory");'
-    half = int(stmt.length) // 2
-    if stmt.inner is not None:
-        iv, scale = operand(stmt.inner[0]), stmt.inner[1]
-        slot, slot_s, root = f"{t} * {scale} + {iv}", f"({t} + s) * {scale} + {iv}", str(iv)
-    else:
-        slot, slot_s, root = t, f"{t} + s", "0"
-    # The carried names' dtypes as declared by the enclosing seed — a selecting fp16 carrier
-    # (``__half`` max) keeps its declaration while the tree folds float shadows of the same
-    # names. Captured before those shadows overwrite the flat ssa map, restored after the
-    # broadcast so the epilogue's conversions read the live declaration, not the dead shadow.
-    outer_dtypes = {st: ctx.ssa_dtypes.get(st) for st in stmt.state}
-    if stmt.lane is not None:
-        # The slab holds one partial per warp, so warp 0 alone folds it with a register butterfly.
-        lane = operand(stmt.lane)
-        out = [f"{pad}if ({t} == 0) {{"]
-        for buf, st in zip(stmt.bufs, stmt.state, strict=True):
-            out.append(f"{in1}{ty} {st} = {buf}[{lane} & {stmt.length - 1}];")
-            ctx.ssa_dtypes[st] = stmt.dtype.name
-        butterfly = WarpShuffle(
-            state=stmt.state, state_b=stmt.state_b, combine_states=stmt.combine_states, length=stmt.length, dtype=stmt.dtype
-        )
-        out.extend(render_stmt(butterfly, ctx.child()))
-        out.append(f"{in1}if ({lane} == 0) {{")
-        out.extend(f"{in2}{buf}[0] = {st};" for buf, st in zip(stmt.bufs, stmt.state, strict=True))
-        out += [f"{in1}}}", f"{pad}}}", f"{pad}__syncthreads();"]
-        for buf, st in zip(stmt.bufs, stmt.state, strict=True):
-            out.append(f"{pad}{st} = {buf}[0];")
-            ctx.ssa_dtypes[st] = outer_dtypes[st] or stmt.dtype.name
-        return out
-    out: list[str] = [f"{pad}for (int s = {half}; s > 0; s >>= 1) {{", f"{in1}if ({t} < s) {{"]
-    # Shadow temps named after the carried state so ``combine_states`` (which
-    # reassigns ``state``) folds ``buf[t+s]`` into ``buf[t]`` per component.
-    for buf, st, sb in zip(stmt.bufs, stmt.state, stmt.state_b, strict=True):
-        out.append(f"{in2}{ty} {st} = {buf}[{slot}];")
-        out.append(f"{in2}{ty} {sb} = {buf}[{slot_s}];")
-        ctx.ssa_dtypes[st] = stmt.dtype.name
-        ctx.ssa_dtypes[sb] = stmt.dtype.name
-    out.extend(render_merge_program(stmt.combine_states, stmt.state, ctx, pad=in2, dtype=stmt.dtype))
-    for buf, st in zip(stmt.bufs, stmt.state, strict=True):
-        out.append(f"{in2}{buf}[{slot}] = {st};")
-    out.append(f"{in1}}}")
-    out.append(sync_line)
-    out.append(f"{pad}}}")
-    # Broadcast the reduced state back into the carried SSA names (in place) — from the
-    # segment root (this lane's slot 0) when segment-indexed. The assignment reuses the
-    # ENCLOSING declaration (implicitly narrowing for a selecting fp16 carrier), so the
-    # dtype record must say what that declaration says.
-    for buf, st in zip(stmt.bufs, stmt.state, strict=True):
-        out.append(f"{pad}{st} = {buf}[{root}];")
-        ctx.ssa_dtypes[st] = outer_dtypes[st] or stmt.dtype.name
-    return out
-
-
-@render_stmt.register
-def _(stmt: WarpShuffle, ctx: RenderCtx) -> list[str]:
-    pad = _pad(ctx.indent)
-    inner = _pad(ctx.indent + 1)
-    ty = ctx.type_name(stmt.dtype.name)
-    out: list[str] = []
-    s = 1 if stmt.prefix else int(stmt.length) // 2
-    while 0 < s < stmt.length:
-        # Block-scope each step so the shuffled state_b + merge temps redeclare
-        # cleanly per round (the carried state is declared by an enclosing Init).
-        out.append(f"{pad}{{")
-        for st, sb in zip(stmt.state, stmt.state_b, strict=True):
-            exchange = (
-                f"__shfl_up_sync(__activemask(), {st}, {s}, {stmt.length})"
-                if stmt.prefix
-                else f"__shfl_xor_sync(__activemask(), {st}, {s})"
-            )
-            out.append(f"{inner}{ty} {sb} = {exchange};")
-            ctx.ssa_dtypes[sb] = stmt.dtype.name
-        if stmt.prefix:
-            out.append(f"{inner}if (threadIdx.x % {stmt.length} >= {s}) {{")
-        merge_pad = _pad(ctx.indent + 2) if stmt.prefix else inner
-        out.extend(render_merge_program(stmt.combine_states, stmt.state, ctx, pad=merge_pad, dtype=stmt.dtype))
-        if stmt.prefix:
-            out.append(f"{inner}}}")
-        out.append(f"{pad}}}")
-        s = s << 1 if stmt.prefix else s >> 1
-    return out
-
-
-@render_stmt.register
-def _(stmt: WarpBroadcast, ctx: RenderCtx) -> list[str]:
-    pad = _pad(ctx.indent)
-    return [f"{pad}{name} = __shfl_sync(__activemask(), {name}, {stmt.length - 1}, {stmt.length});" for name in stmt.state]
-
-
 #: The per-arg distribution kinds of a :class:`FragmentApply` operand.
 FRAG = "frag"  # a C-fragment operand — indexed per element (``arg[i]``)
 ROW = "row"  # a per-row scalar — broadcast by row (suffix ``0`` for rows g, ``1`` for rows g+8)
 UNIFORM = "uniform"  # a cell-uniform scalar / literal — the same value for all 4 elements
 COORD = "coord"  # a predicate over the element's absolute coordinates (``FRAG_ROW`` / ``FRAG_COL``)
 GMEM = "gmem"  # a ``(buffer, index)`` load template over the element's absolute coordinates
-
-
-@cache
-def accumulator_table(layout: str, cell: tuple[int, int] | None = None):
-    """The lane-to-element row of an accumulator of floats in ``layout`` (the crate's ``fragment_table``): per
-    register the element's row and column offset in the tile, as expressions over the lane coordinates the row
-    names, and the row-reduce XOR masks. ``cell`` set gives the row of that register cell of Volta's paired tile
-    instead. A ``wgmma`` accumulator reads the ``m16n8k16`` row. Raises for a layout the table does not have."""
-    return fragment_table(layout, "c", "f32") if cell is None else paired_accumulator_table(cell)
-
-
-def _elements(table) -> tuple[tuple[Expression, Expression], ...]:
-    """The ``(row, column)`` offsets of every element a lane holds, in register order."""
-    return tuple(element for register in table.registers for element in register)
-
-
-def _rows(table) -> tuple[Expression, ...]:
-    """The distinct rows a lane holds, in element order."""
-    return tuple(dict.fromkeys(row for row, _ in _elements(table)))
-
-
-def _elem_row(table) -> tuple[int, ...]:
-    """Per element, which of the lane's rows it stands in."""
-    rows = _rows(table)
-    return tuple(rows.index(row) for row, _ in _elements(table))
-
-
-#: The thread's lane in its warp as the lane coordinates of a pointwise statement spell it, and as a store does.
-_LANE = BinaryExpression("&", Builtin("thread_idx.x"), Literal(31, "int"))
-_STORE_LANE = Var("(threadIdx.x & 31)")
-
-
-def _lane_coordinates(table, ctx: RenderCtx, lane: Expression = _LANE) -> list[str]:
-    """Each lane coordinate of ``table`` as ``name = value`` in C, over ``lane``."""
-    cuda = replace(ctx, builtins={**ctx.builtins, "thread_idx.x": "threadIdx.x"})
-    return [f"{name} = {render_expression(value.substitute({FRAGMENT_LANE: lane}), cuda)}" for name, value in table.coordinates]
-
-
-def _lane_preamble(ctx: RenderCtx, pad: str, table) -> list[str]:
-    """Declare a fragment row's lane coordinates, once per C scope."""
-    names = {name for name, _ in table.coordinates}
-    if names <= ctx.scope_decls:
-        return []
-    ctx.scope_decls.update(names)
-    return [f"{pad}const int {', '.join(_lane_coordinates(table, ctx))};"]
 
 
 def fragment_args(args: tuple, kinds: tuple[str, ...]) -> tuple[FragmentArg, ...]:
@@ -642,118 +319,8 @@ def fragment_args(args: tuple, kinds: tuple[str, ...]) -> tuple[FragmentArg, ...
     return tuple(one(arg, kind) for arg, kind in zip(args, kinds, strict=True))
 
 
-def _row_expression(stmt: FragmentApply, names: tuple[str, ...]) -> Expression:
-    """The per-row scalar for the loop element ``_e`` — a ternary over the layout's row split
-    (m16n8: ``(_e < 2 ? row0 : row1)``). Where a lane's rows are contiguous blocks of elements, the
-    boundaries are ``elements / rows`` apart; else each element picks its row."""
-    elem_row = _elem_row(accumulator_table(stmt.layout))
-    rows = max(elem_row) + 1
-    block = len(elem_row) // rows
-    contiguous = [r for r in range(rows) for _ in range(block)]
-    if list(elem_row) == contiguous:
-        expression: Expression = Var(names[rows - 1])
-        for r in range(rows - 2, -1, -1):
-            expression = TernaryExpression(BinaryExpression("<", Var("_e"), Literal((r + 1) * block, "int")), Var(names[r]), expression)
-        return expression
-    expression = Var(names[elem_row[-1]])
-    for i in range(len(elem_row) - 2, -1, -1):
-        expression = TernaryExpression(BinaryExpression("==", Var("_e"), Literal(i, "int")), Var(names[elem_row[i]]), expression)
-    return expression
-
-
-def _frag_coords(stmt: FragmentApply, i: int) -> dict[str, Expression]:
-    """Element ``i``'s absolute coordinates for the reserved vars: tile origin + layout offset."""
-    row, col = _elements(accumulator_table(stmt.layout))[i]
-    sub: dict[str, Expression] = {}
-    if stmt.col_base is not None:
-        sub[FRAG_COL] = BinaryExpression("+", stmt.col_base, col)
-    if stmt.row_base is not None:
-        sub[FRAG_ROW] = BinaryExpression("+", stmt.row_base, row)
-    return sub
-
-
-def _frag_operand(stmt: FragmentApply, arg: FragmentArg, ctx: RenderCtx, i: int | None) -> Expression:
-    """One operand's expression for element ``i`` — or for the loop var ``_e`` when ``None``."""
-    if arg.kind == FRAG:
-        return Var(f"{arg.names[0]}[{'_e' if i is None else i}]")
-    if arg.kind == ROW:
-        return _row_expression(stmt, arg.names) if i is None else Var(arg.names[_elem_row(accumulator_table(stmt.layout))[i]])
-    if arg.kind == COORD:
-        return arg.expressions[0].substitute(_frag_coords(stmt, i))
-    if arg.kind == GMEM:
-        sub = _frag_coords(stmt, i)
-        text = f"{arg.buffer}[{render_index(arg.buffer, tuple(e.substitute(sub) for e in arg.expressions), ctx)}]"
-        dt = ctx.buffer_dtypes.get(arg.buffer, "f32")
-        return Var(text if dt == "f32" else ctx.target.convert(text, dt, "f32"))
-    # UNIFORM — the fragment algebra is f32; a narrower scalar (e.g. an ``__half`` constant
-    # load) converts through the target intrinsic, like the scalar ``Assign``'s promote rule.
-    if arg.expressions:
-        return arg.expressions[0]
-    nm = arg.names[0]
-    dt = ctx.ssa_dtypes.get(nm) if ctx.ssa_dtypes else None
-    if dt and dt != "f32":
-        from emmy.compiler.ir.expression import FunctionCallExpression  # noqa: PLC0415
-
-        converted = ctx.target.convert(nm, dt, "f32")
-        paren = converted.index("(") if "(" in converted else -1
-        if paren > 0 and converted.endswith(")"):
-            return FunctionCallExpression(converted[:paren], [Var(nm)])
-    return Var(nm)
-
-
-def _frag_element(stmt: FragmentApply, ctx: RenderCtx, i: int | None) -> str:
-    argvars = [_frag_operand(stmt, arg, ctx, i) for arg in stmt.args]
-    return render_expression(op_to_expression(stmt.op.name, argvars), ctx)
-
-
-@render_stmt.register
-def _(stmt: FragmentApply, ctx: RenderCtx) -> list[str]:
-    """One ``#pragma unroll`` loop over the fragment's ``n_elems`` — ``out[_e] = op(args_e)``
-    — instead of ``n_elems`` straight-line assignments. The ROW operand renders as the row-split
-    ternary, so the m16n8 2-rows/lane structure stays legible (``_e < 2 ? row0 : row1``); identical
-    SASS (nvcc unrolls the pragma). A COORD / GMEM operand differs per element in its coordinate
-    expression rather than in an index, so it renders unrolled, one guarded line per element."""
-    pad = _pad(ctx.indent)
-    table = accumulator_table(stmt.layout)
-    n = len(_elements(table))
-    lines = [] if stmt.in_place else [f"{pad}float {stmt.out}[{n}];"]
-    if any(arg.kind in (COORD, GMEM) for arg in stmt.args):
-        lines += _lane_preamble(ctx, pad, table)
-        return lines + [f"{pad}{stmt.out}[{i}] = {_frag_element(stmt, ctx, i)};" for i in range(n)]
-    inner = ctx.child()
-    lines.append(f"{pad}#pragma unroll")
-    lines.append(f"{pad}for (int _e = 0; _e < {n}; _e++) {{")
-    lines.append(f"{_pad(inner.indent)}{stmt.out}[_e] = {_frag_element(stmt, inner, None)};")
-    lines.append(f"{pad}}}")
-    return lines
-
-
-@render_stmt.register
-def _(stmt: FragmentRowReduce, ctx: RenderCtx) -> list[str]:
-    pad = _pad(ctx.indent)
-    f32 = ctx.type_name("f32")
-
-    def combine(parts: list[str]) -> str:
-        e = parts[0]
-        for p in parts[1:]:
-            e = _binary_combine_expression(stmt.op, e, p, ctx.target, "f32")
-        return e
-
-    table = accumulator_table(stmt.layout)
-    elem_row = _elem_row(table)
-    top_parts = [f"{f}[{i}]" for f in stmt.frags for i, row in enumerate(elem_row) if row == 0]
-    bot_parts = [f"{f}[{i}]" for f in stmt.frags for i, row in enumerate(elem_row) if row == 1]
-    out = [f"{pad}{f32} {stmt.top} = {combine(top_parts)};", f"{pad}{f32} {stmt.bot} = {combine(bot_parts)};"]
-    ctx.ssa_dtypes[stmt.top] = ctx.ssa_dtypes[stmt.bot] = "f32"
-    for s in table.reduce_xors:
-        for nm in (stmt.top, stmt.bot):
-            shfl = f"__shfl_xor_sync(0xffffffff, {nm}, {s})"
-            out.append(f"{pad}{nm} = {_binary_combine_expression(stmt.op, nm, shfl, ctx.target, 'f32')};")
-    return out
-
-
 #: The reserved coordinate Vars a :class:`FragmentApply` COORD / GMEM template is written over — the element's
-#: ABSOLUTE query row / key column; the render substitutes each element's coords (tile origin +
+#: ABSOLUTE query row / key column; the PTX compiler substitutes each element's coords (tile origin +
 #: layout offset) for these.
 FRAG_ROW = "__frow"
 FRAG_COL = "__fcol"
@@ -766,38 +333,16 @@ ELEM_COL = "__N__"
 # ---------------------------------------------------------------------------
 # Warp-level MMA: ``mma.sync.aligned`` + ``ldmatrix`` (the ``s16816`` path
 # cuBLAS / CUTLASS use) — the sole tensor-core Statement family. Operands are
-# *explicit per-thread register arrays* with a PTX-fixed lane→element layout,
-# referenced positionally inside inline PTX (``RegFragment`` / ``LdmatrixLoad`` / ``FragmentLoad``
-# / ``MmaSyncPtx`` / ``RegStore``), rendered via the ``_MMA_SYNC_PRELUDE``
-# helper wrappers (pure PTX — NVRTC-clean, no ``<mma.h>``). Emitted by
+# *explicit per-thread register arrays* with a PTX-fixed lane→element layout
+# (``RegFragment`` / ``LdmatrixLoad`` / ``FragmentLoad`` / ``MmaSyncPtx`` / ``RegStore``), which the PTX
+# compiler expands per lane from the lane-to-element table. Emitted by
 # the kernel atom lowering (``lowering/kernel/_atom.py``) from the tile's ``Atom`` spec.
-# (The opaque ``nvcuda::wmma`` node family was removed — the swizzled mma.sync
-# slab beat it.)
 # ---------------------------------------------------------------------------
 
 
 def fragment_registers(stmt: RegFragment) -> int:
     """How many registers a lane holds of the fragment ``stmt`` declares: its row of the lane-to-element table says."""
     return len(fragment_table(stmt.fragment_layout, stmt.role, stmt.dtype.name).registers)
-
-
-@render_stmt.register
-def _(stmt: RegFragment, ctx: RenderCtx) -> list[str]:
-    n_regs = fragment_registers(stmt)
-    ctx.ssa_dtypes[stmt.name] = stmt.dtype.name
-    # A lane's register of block scales is one register by the fragment's own name.
-    dims = "" if stmt.role in ("sfa", "sfb") else f"[{n_regs}]"
-    if stmt.role == "c" and stmt.dtype.nbytes != 2:
-        return [f"{_pad(ctx.indent)}float {stmt.name}{dims} = {{{', '.join(['0.0f'] * n_regs)}}};"]
-    if stmt.role == "c":
-        # f16-accumulate C: packed half pairs, zero bits = 0.0h pairs (rezeroed by FragmentPromote).
-        return [f"{_pad(ctx.indent)}unsigned {stmt.name}{dims} = {{{', '.join(['0u'] * n_regs)}}};"]
-    return [f"{_pad(ctx.indent)}unsigned {stmt.name}{dims};"]
-
-
-def frag_dtype(ctx: RenderCtx, frag: str) -> str | None:
-    """Canonical dtype token of a fragment (``None`` when no :class:`RegFragment` declares it)."""
-    return ctx.ssa_dtypes.get(frag)
 
 
 # Per-lane fp16 element XOR matching the TMA hardware smem swizzle (the
@@ -865,377 +410,6 @@ def swizzle_base(mode: str) -> str:
     return mode.partition(_SWIZZLE_SHIFT_SEP)[0]
 
 
-def swizzle_fn(mode: str) -> str:
-    """The ``emmy_swizzle_*`` helper name for a mode spelling — one helper per distinct
-    ``(mask, shift)`` pair, so two slabs sharing a spelling share the emitted function."""
-    base = swizzle_base(mode)
-    return f"emmy_swizzle_{base.lower()}" + ("" if mode == base else f"_s{swizzle_xor(mode)[0]}")
-
-
-def _multiple_of(expression: Expression, d: int, aligned: Mapping[str, int] | None = None) -> bool:
-    """Whether ``expression`` is provably a multiple of ``d``: a literal that is, a loop counter whose
-    stride is (``aligned``, a render context's), a sum or difference of two that are, or a product
-    one of whose literal factors supplies what the other need not."""
-    if d == 1:
-        return True
-    if isinstance(expression, Literal):
-        return isinstance(expression.value, int) and expression.value % d == 0
-    if isinstance(expression, Var):
-        return aligned is not None and expression.name in aligned and aligned[expression.name] % d == 0
-    if isinstance(expression, BinaryExpression) and expression.op in ("+", "-"):
-        return _multiple_of(expression.left, d, aligned) and _multiple_of(expression.right, d, aligned)
-    if isinstance(expression, BinaryExpression) and expression.op == "*":
-        for lit, other in ((expression.left, expression.right), (expression.right, expression.left)):
-            if (
-                isinstance(lit, Literal)
-                and isinstance(lit.value, int)
-                and lit.value
-                and _multiple_of(other, d // math.gcd(lit.value, d), aligned)
-            ):
-                return True
-    return False
-
-
-def swizzled_slab_index(
-    mode: str, ldm: int, lane: str, row: Expression, col: Expression, ctx: RenderCtx, *, lane_rows: int, lane_col_mod: int
-) -> str | None:
-    """The swizzled slab element index of ``(row, col)`` plus a lane's own ``lane`` offset, split so
-    the swizzle is applied to the lane's part ONCE — ``None`` when the split does not apply.
-
-    The XOR swizzle ``e ^ (((e >> s) & m) << 3)`` is linear over bit-disjoint parts:
-    ``swz(a | b) = swz(a) ^ swz(b)``. A lane's offset spans ``lane_rows`` rows and the column
-    positions ``lane_col_mod`` apart, so a tile base whose row is a multiple of ``lane_rows`` and
-    whose column is a multiple of ``lane_col_mod`` (within the row) shares no bit with it, and
-    once the base row also clears the XOR's own field (a multiple of eight rows on every mode), its
-    row lands above every swizzled bit and adds: ``(swz(lane) ^ swz(col)) + row·ldm``. ``swz(lane)``
-    is one per-lane value a loop hoists, ``swz(col)`` a constant nvcc folds, and the row an
-    immediate offset of the load — where re-applying the swizzle to every load's full index
-    recomputed the XOR from ``threadIdx`` each time and was a fifth of an attention chunk's
-    instructions."""
-    xor = swizzle_xor(mode)
-    if xor is None or ldm < 8 or ldm & (ldm - 1) or lane_rows & (lane_rows - 1) or lane_col_mod & (lane_col_mod - 1):
-        return None
-    shift, mask = xor
-    field_mod = 1 << max(0, shift + (mask + 1).bit_length() - ldm.bit_length())
-    if not (_multiple_of(row, max(lane_rows, field_mod), ctx.aligned) and _multiple_of(col, lane_col_mod, ctx.aligned)):
-        return None
-    fn = swizzle_fn(mode)
-    return f"({fn}({lane}) ^ {fn}({render_expression(col, ctx)})) + ({render_expression(row, ctx)}) * {ldm}"
-
-
-def smem_layout_index(mode: str, flat: str, buffer: str, ctx: RenderCtx, indices: tuple[Expression, ...] = ()) -> str:
-    """Render ``flat`` through the slab layout selected by ``mode``.
-
-    Modern layouts are the existing one-argument XOR. Volta A needs both logical dimensions:
-    the crosswise physical stride is the slab's row count, while Volta B's congruous layout uses
-    the ordinary logical row stride. Their writer already has those dimensions, so pass them to
-    the layout directly instead of flattening and dividing the result apart again in every K-loop
-    deposit. ``NONE`` and unknown spellings stay row-major.
-    """
-    if mode == VOLTA_CROSSWISE:
-        assert len(indices) == 2, "the Volta A layout needs a logical (row, column) index"
-        rows, _ = ctx.shapes[buffer]
-        row, col = (render_expression(e, ctx) for e in indices)
-        return f"emmy_volta_crosswise({row}, {col}, {rows})"
-    if mode == VOLTA_B_CONGRUOUS:
-        assert len(indices) == 2, "the Volta B layout needs a logical (row, column) index"
-        cols = ctx.shapes[buffer][-1]
-        row, col = (render_expression(e, ctx) for e in indices)
-        return f"emmy_volta_b_congruous({row}, {col}, {cols})"
-    return flat if not swizzle_xor(mode) else f"{swizzle_fn(mode)}({flat})"
-
-
-@render_stmt.register
-def _(node: BlockScaleLoad, ctx: RenderCtx) -> list[str]:
-    flat = render_index(node.src_buffer, node.src_index, ctx)
-    # The slab declares the scales at their storage dtype (``__nv_fp8_e4m3``); the loader moves
-    # them as the raw ue4m3 bytes the instruction reads, so the pointer casts rather than the
-    # slab changing type — a byte-typed slab would lose that the bytes ARE e4m3 to every other
-    # reader of ``ctx.buffer_dtypes``.
-    src = f"reinterpret_cast<const unsigned char*>(&{node.src_buffer}[{flat}])"
-    # An ASSIGNMENT: the scale fragment is declared once beside the operand fragments
-    # (``RegFragment`` at zero registers), so a double-buffered k-loop reloads it per step.
-    return [f"{_pad(ctx.indent)}{node.frag} = emmy_mma_load_sf{node.role}_f4({src}, {node.ldm});"]
-
-
-def _swizzled_addr(node: LdmatrixLoad, flat: str, lane: str, ctx: RenderCtx, lane_rows: int, lane_col_mod: int) -> str:
-    """The lane's slab address: the tile base ``flat`` plus the lane's own ``lane`` offset,
-    which spans ``lane_rows`` rows and columns ``lane_col_mod`` apart, through the slab's
-    swizzle — split per :func:`swizzled_slab_index` wherever the tile base allows, so the
-    swizzle of the lane's part is computed once for the whole drain."""
-    if not swizzle_xor(node.swizzle):
-        return f"&{node.src_buffer}[{flat} + {lane}]"
-    split = None
-    if len(node.src_index) == 2 and ctx.shapes.get(node.src_buffer, (0, 0))[-1] == node.ldm:
-        split = swizzled_slab_index(
-            node.swizzle, node.ldm, lane, node.src_index[0], node.src_index[1], ctx, lane_rows=lane_rows, lane_col_mod=lane_col_mod
-        )
-    # ``emmy_swizzle_<mode>`` (preamble, built from ``LDMATRIX_SWIZZLE_XOR``) applies
-    # ``e ^ (((e >> shift) & mask) << 3)`` — the helper spells the (often long) element
-    # index once instead of inlining it twice around the XOR.
-    return f"&{node.src_buffer}[{split if split is not None else f'{swizzle_fn(node.swizzle)}({flat} + {lane})'}]"
-
-
-@render_stmt.register
-def _(node: FragmentLoad, ctx: RenderCtx) -> list[str]:
-    """One call of a C++ loader: the gather lives in the kernel prelude's helpers, picked here from the statement's
-    fields, until the PTX compiler expands it from the crate's lane-to-element table."""
-    if node.src_dtype is None or node.dtype is None:
-        raise ValueError(f"FragmentLoad of {node.frag!r} carries no element types (120_explicit_conversions stamps them)")
-    src_dt, frag_dt = node.src_dtype.name, node.dtype.name
-    flat = render_index(node.src_buffer, node.src_index, ctx)
-    ldm = node.ldm if node.ldm is not None else _resolve_ldm(node.src_buffer, ctx)
-    if not node.staged:
-        # Operand not staged in smem — ldmatrix can't reach gmem, so read the
-        # fragment straight from gmem (each lane adds its own (row,col) inside
-        # the helper). No swizzle: that's a TMA-smem-layout concern only.
-        # A source buffer traced at a dtype other than the fragment's (the gemma layer's
-        # f32 V intermediate) converts per element: the helper's fragment element type F
-        # is passed explicitly, so the pack writes true 16-bit halves instead of raw f32
-        # bit patterns (matched dtypes keep the bare call — byte-identical output).
-        targs = "" if src_dt == frag_dt else f"<{ctx.type_name(src_dt)}, {ctx.type_name(frag_dt)}>"
-        b8 = frag_dt in ("f8e4m3", "f8e5m2")
-        addr = render_address(node.src_buffer, node.src_index, ctx)
-        if node.fragment_layout == "m8n8k4":
-            shape = tuple(Dim(d) for d in ctx.shapes.get(node.src_buffer, ()))
-            aligned = len(shape) == len(node.src_index) and all(d.is_static for d in shape)
-            if aligned:
-                aligned = all(
-                    _multiple_of(index * Literal(math.prod(s.as_static() for s in shape[d + 1 :]), "int"), 4)
-                    for d, index in enumerate(node.src_index)
-                )
-            vector = aligned and ldm % 4 == 0 and node.k_zero is None and src_dt in ("f16", "f32") and frag_dt == "f16"
-            if vector and (node.role == "a" or node.b_trans):
-                left = "16"
-                if node.clamp is not None:
-                    base, bound = node.clamp
-                    left = f"({render_expression(bound, ctx)}) - ({render_expression(base, ctx)})"
-                args = f"<{ctx.type_name(src_dt)}, {'true' if node.role == 'a' else 'false'}>"
-                return [f"{_pad(ctx.indent)}emmy_mma884_load_gmem4{args}({node.frag}, {addr}, {ldm}, {left});"]
-            if node.k_zero is not None:
-                kbase, kbound = render_expression(node.k_zero[0], ctx), render_expression(node.k_zero[1], ctx)
-                k_left = f"({kbound}) - ({kbase})"
-                if node.clamp is not None:
-                    base, bound = render_expression(node.clamp[0], ctx), render_expression(node.clamp[1], ctx)
-                    mn_left = f"({bound}) - ({base})"
-                    helper = (
-                        "emmy_mma884_load_a_gmem_mclamp_kzero"
-                        if node.role == "a"
-                        else ("emmy_mma884_load_b_gmem_trans_nclamp_kzero" if node.b_trans else "emmy_mma884_load_b_gmem_nclamp_kzero")
-                    )
-                    return [f"{_pad(ctx.indent)}{helper}{targs}({node.frag}, {addr}, {ldm}, {mn_left}, {k_left});"]
-                helper = (
-                    "emmy_mma884_load_a_gmem_kzero"
-                    if node.role == "a"
-                    else ("emmy_mma884_load_b_gmem_trans_kzero" if node.b_trans else "emmy_mma884_load_b_gmem_kzero")
-                )
-                return [f"{_pad(ctx.indent)}{helper}{targs}({node.frag}, {addr}, {ldm}, {k_left});"]
-            if node.clamp is not None:
-                base, bound = render_expression(node.clamp[0], ctx), render_expression(node.clamp[1], ctx)
-                helper = (
-                    "emmy_mma884_load_a_gmem_mclamp"
-                    if node.role == "a"
-                    else ("emmy_mma884_load_b_gmem_trans_nclamp" if node.b_trans else "emmy_mma884_load_b_gmem_nclamp")
-                )
-                return [f"{_pad(ctx.indent)}{helper}{targs}({node.frag}, {addr}, {ldm}, ({bound}) - ({base}));"]
-            helper = (
-                "emmy_mma884_load_a_gmem"
-                if node.role == "a"
-                else ("emmy_mma884_load_b_gmem_trans" if node.b_trans else "emmy_mma884_load_b_gmem")
-            )
-            return [f"{_pad(ctx.indent)}{helper}{targs}({node.frag}, {addr}, {ldm});"]
-        if b8:
-            # fp8 fragments gather RAW bytes with the k32 fragment map (the ``_b8`` helper
-            # family) — there is no per-element convert (the mma consumes storage bits), so
-            # the source buffer must already carry the fragment dtype, and no masked-K byte
-            # gather exists (the schedule offers the fp8 atoms only on a static K).
-            if src_dt != frag_dt:
-                raise ValueError(f"fp8 mma fragment {node.frag}: source buffer {node.src_buffer!r} is {src_dt}, not {frag_dt}")
-            if node.k_zero is not None:
-                raise ValueError("fp8 mma fragments have no masked-K byte gather — the fp8 atoms are static-K only")
-        sfx = "_b8" if b8 else ""
-        if node.k_zero is not None:
-            # Masked-K (symbolic reduce): zero-fill (not clamp) the K halves
-            # past the runtime extent so the mma reduction stays correct — K is
-            # summed, so a duplicate corrupts it. ``k_left`` = in-range K elements
-            # from the tile base; may co-occur with an M/N clamp. Transposed-B (K
-            # contiguous) has its own (n, k)-swapped zero-fill helper.
-            kbase, kbound = render_expression(node.k_zero[0], ctx), render_expression(node.k_zero[1], ctx)
-            k_left = f"({kbound}) - ({kbase})"
-            if node.clamp is not None:
-                base, bound = render_expression(node.clamp[0], ctx), render_expression(node.clamp[1], ctx)
-                mn_left = f"({bound}) - ({base})"
-                if node.role == "a":
-                    helper = "emmy_mma_load_a_gmem_mclamp_kzero"
-                else:
-                    helper = "emmy_mma_load_b_gmem_trans_nclamp_kzero" if node.b_trans else "emmy_mma_load_b_gmem_nclamp_kzero"
-                return [f"{_pad(ctx.indent)}{helper}{targs}({node.frag}, {addr}, {ldm}, {mn_left}, {k_left});"]
-            if node.role == "a":
-                helper = "emmy_mma_load_a_gmem_kzero"
-            else:
-                helper = "emmy_mma_load_b_gmem_trans_kzero" if node.b_trans else "emmy_mma_load_b_gmem_kzero"
-            return [f"{_pad(ctx.indent)}{helper}{targs}({node.frag}, {addr}, {ldm}, {k_left});"]
-        if node.clamp is not None:
-            # Masked axis: clamp the lane coordinate to the in-range
-            # elements left from the tile base (>= 1 — the boundary Cond
-            # admitted the tile).
-            base, bound = render_expression(node.clamp[0], ctx), render_expression(node.clamp[1], ctx)
-            if node.role == "a":
-                helper = "emmy_mma_load_a_gmem_mclamp"
-            else:
-                helper = "emmy_mma_load_b_gmem_trans_nclamp" if node.b_trans else "emmy_mma_load_b_gmem_nclamp"
-            return [f"{_pad(ctx.indent)}{helper}{sfx}{targs}({node.frag}, {addr}, {ldm}, ({bound}) - ({base}));"]
-        if node.role == "a":
-            helper = "emmy_mma_load_a_gmem"
-        else:
-            helper = "emmy_mma_load_b_gmem_trans" if node.b_trans else "emmy_mma_load_b_gmem"
-        return [f"{_pad(ctx.indent)}{helper}{sfx}{targs}({node.frag}, {addr}, {ldm});"]
-    if node.fragment_layout == "m8n8k4":
-        # SM70 has no ldmatrix. The Volta fragment's cooperative lane map is the same for
-        # global and shared addresses, so point its inlined gather at the staged slab; ptxas
-        # resolves the generic pointer to ordinary LDS instructions. Fill-side clamps make
-        # the slab exact, and the first implementation intentionally keeps it unswizzled.
-        targs = "" if src_dt == frag_dt else f"<{ctx.type_name(src_dt)}, {ctx.type_name(frag_dt)}>"
-        if node.slab_layout == VOLTA_CROSSWISE:
-            # A, or a TRANSPOSED B — whose slab is K-contiguous like A's and so takes the
-            # same storage; the reader differs only in which lane bit selects the half.
-            assert node.pair_frag is not None and src_dt == frag_dt == "f16"
-            assert node.role == "a" or node.b_trans, "a canonical B reads the congruous layout, not crosswise"
-            row, col = (render_expression(e, ctx) for e in node.src_index)
-            rows = ctx.shapes[node.src_buffer][0]
-            helper = "emmy_mma884_load_a_crosswise_pair" if node.role == "a" else "emmy_mma884_load_b_crosswise_pair"
-            return [f"{_pad(ctx.indent)}{helper}({node.frag}, {node.pair_frag}, {node.src_buffer}, {row}, {col}, {rows});"]
-        if node.slab_layout == VOLTA_B_CONGRUOUS:
-            assert node.role == "b" and node.pair_frag is not None and src_dt == frag_dt == "f16"
-            row, col = (render_expression(e, ctx) for e in node.src_index)
-            return [
-                f"{_pad(ctx.indent)}emmy_mma884_load_b_congruous_pair({node.frag}, {node.pair_frag}, "
-                f"{node.src_buffer}, {row}, {col}, {ldm});"
-            ]
-        assert node.pair_frag is None and node.slab_layout == "NONE"
-        helper = (
-            "emmy_mma884_load_a_smem"
-            if node.role == "a"
-            else ("emmy_mma884_load_b_smem_trans" if node.b_trans else "emmy_mma884_load_b_smem")
-        )
-        return [f"{_pad(ctx.indent)}{helper}{targs}({node.frag}, &{node.src_buffer}[{flat}], {ldm});"]
-    # Staged 1-byte (fp8) slab — the cooperative byte-gather drain: the gmem fragment
-    # loaders' lane→element map pointed at the smem slab (generic-address loads; ptxas
-    # resolves them to LDS after inlining). A 16-bit fragment (W8A16) converts per
-    # element via the loader's F template arg (the same ``<__nv_fp8_e4m3, __half>``
-    # spelling as the gmem-direct convert); an fp8 fragment (the k32 atoms) repacks raw
-    # bytes via the ``_b8`` family. ``flat`` already strides the PADDED slab decl and
-    # ``ldm`` carries the same padded row stride, so the two agree by construction.
-    if node.scale_buffer is not None:
-        scale_flat = render_index(node.scale_buffer, node.scale_index, ctx)
-        args = f"&{node.src_buffer}[{flat}], {ldm}, &{node.scale_buffer}[{scale_flat}], {node.scale_ldm}"
-        if src_dt in ("f8e4m3", "f8e5m2"):
-            # Block-scaled fp8 B: each byte pair converts to two exact 16-bit values, both
-            # multiply the k block's f32 scale, and the product rounds once to the fragment.
-            x2 = {"f8e4m3": "__nv_fp8x2_e4m3", "f8e5m2": "__nv_fp8x2_e5m2"}[src_dt]
-            call = f"emmy_mma_load_b_smem_trans_f8s_{frag_dt}<{ctx.type_name(src_dt)}, {x2}>"
-            return [f"{_pad(ctx.indent)}{call}({node.frag}, {args});"]
-        # Packed-pair (NVFP4) B: each byte decodes to two values through the e2m1 value
-        # table and both take the k block's scale, read from the companion slab. The scale
-        # slab carries the fragment's own dtype, so it names which drain form to call.
-        scale_dt = ctx.buffer_dtypes.get(node.scale_buffer, "f16")
-        return [f"{_pad(ctx.indent)}emmy_mma_load_b_smem_trans_f4s_{scale_dt}({node.frag}, {args});"]
-    k_contig = node.role == "a" or node.b_trans  # each lane's K run is slab-contiguous
-    if frag_dt in ("f8e4m3", "f8e5m2", "f4e2m1x2"):
-        # Raw-byte repack, no per-element convert: the mma consumes storage bits. The k64
-        # 4-bit fragment map is byte-for-byte the k32 8-bit one — a lane owns 4 bytes per
-        # register either way, and a packed row is K/2 bytes where an fp8 row is K — so
-        # the same ``_b8v`` helpers serve both, with ``ldm`` carrying the byte stride.
-        # Contiguous-K lanes load one u32; a canonical K-major B strides its 4 bytes
-        # across rows — the scalar gather.
-        if k_contig:
-            trans = "_trans" if node.b_trans else ""
-            call = f"emmy_mma_load_{node.role}_smem{trans}_b8v<{ctx.type_name(src_dt)}>"
-        else:
-            call = "emmy_mma_load_b_gmem_b8"
-    elif node.b_trans and frag_dt == "f16":
-        # W8A16 pair convert: one fp8x2 load + one hardware cvt.rn.f16x2 per k-half.
-        x2 = {"f8e4m3": "__nv_fp8x2_e4m3", "f8e5m2": "__nv_fp8x2_e5m2"}[src_dt]
-        call = f"emmy_mma_load_b_smem_trans_f8_f16<{ctx.type_name(src_dt)}, {x2}>"
-    else:
-        # Canonical K-major B (K-strided bytes) or a bf16 fragment: the scalar
-        # per-element convert via the gmem loader template, pointed at the slab.
-        trans = "_trans" if node.b_trans else ""
-        call = f"emmy_mma_load_{node.role}_gmem{trans}<{ctx.type_name(src_dt)}, {ctx.type_name(frag_dt)}>"
-    return [f"{_pad(ctx.indent)}{call}({node.frag}, &{node.src_buffer}[{flat}], {ldm});"]
-
-
-@render_stmt.register
-def _(node: LdmatrixLoad, ctx: RenderCtx) -> list[str]:
-    flat = render_index(node.src_buffer, node.src_index, ctx)
-    lane = "(threadIdx.x & 31)"
-    if node.pair_frag is not None:
-        # Paired x4 — two slab-adjacent B fragments in one ldmatrix (096_pair_ldmatrix_loads).
-        # Transposed-B (N-major slab): the pair is N-adjacent — lanes 0-15 address ``frag``'s 8
-        # N rows × two k8 col-halves, lanes 16-31 the same at N+8 (plain x4). Canonical-B
-        # (K-major slab): the pair is N(col)-adjacent — lanes 0-15 address the 16 K rows at
-        # ``frag``'s col, lanes 16-31 at col+8 (x4.trans).
-        if node.b_trans:
-            elem = f"(({lane} % 8) + ({lane} / 16) * 8) * {node.ldm} + (({lane} / 8) % 2) * 8"
-            helper = "emmy_ldmatrix_x4_pair"
-        else:
-            elem = f"({lane} % 16) * {node.ldm} + ({lane} / 16) * 8"
-            helper = "emmy_ldmatrix_x4_trans_pair"
-        # The helper loads both fragments' registers directly (no ``_p4`` staging temp / block).
-        return [f"{_pad(ctx.indent)}{helper}({node.frag}, {node.pair_frag}, {_swizzled_addr(node, flat, elem, ctx, 16, 16)});"]
-    if node.role == "a":
-        # 16×16 A: x4 — lane addresses M-row (lane%16), K-col block (lane/16)*8.
-        addr = _swizzled_addr(node, flat, f"({lane} % 16) * {node.ldm} + ({lane} / 16) * 8", ctx, 16, 16)
-        return [f"{_pad(ctx.indent)}emmy_ldmatrix_x4({node.frag}, {addr});"]
-    # Transposed-B (Q@K^T): the slab keeps the operand's native N-major layout
-    # (N rows × K cols), which IS the mma's col-major B — a plain x2 (no
-    # .trans) with N-row addresses: lanes 0-7 address the 8 N rows of the k16
-    # half 0, lanes 8-15 the same rows at K col 8 (each 8x8 matrix's rows land
-    # as the fragment's (k, k+1) pairs, cf. ``emmy_mma_load_b_gmem_trans``).
-    if node.b_trans:
-        addr = _swizzled_addr(node, flat, f"({lane} % 8) * {node.ldm} + (({lane} / 8) % 2) * 8", ctx, 8, 16)
-        return [f"{_pad(ctx.indent)}emmy_ldmatrix_x2({node.frag}, {addr});"]
-    # 16×8 B: x2.trans — lane addresses K-row (lane%16); .trans yields col-major.
-    addr = _swizzled_addr(node, flat, f"({lane} % 16) * {node.ldm}", ctx, 16, 8)
-    return [f"{_pad(ctx.indent)}emmy_ldmatrix_x2_trans({node.frag}, {addr});"]
-
-
-@render_stmt.register
-def _(stmt: MmaSyncPtx, ctx: RenderCtx) -> list[str]:
-    m, n, k = stmt.shape
-    # Wrapper names follow the atom convention's <ab>_<acc> dtype pair (emmy_mma_m16n8k16_f16_f32).
-    # ``c`` is passed for both the ``d`` (out) and ``c`` (in) operands.
-    wrapper = f"emmy_mma_m{m}n{n}k{k}_{stmt.ab_dtype}_{stmt.c_dtype}"
-    if stmt.b_row_major:
-        assert (m, n, k) == (8, 8, 4), "only the Volta atom has a row-major B wrapper"
-        wrapper += "_brow"
-    if stmt.sfa_frag is not None:
-        # The block-scaled wrapper accumulates in place, so it takes the scale registers
-        # where the others take ``c`` a second time.
-        args = f"{stmt.c_frag}, {stmt.a_frag}, {stmt.b_frag}, {stmt.sfa_frag}, {stmt.sfb_frag}"
-        return [f"{_pad(ctx.indent)}{wrapper}({args});"]
-    return [f"{_pad(ctx.indent)}{wrapper}({stmt.c_frag}, {stmt.a_frag}, {stmt.b_frag}, {stmt.c_frag});"]
-
-
-@render_stmt.register
-def _(stmt: FragmentPromote, ctx: RenderCtx) -> list[str]:
-    suffix = "_m8n8k4" if stmt.fragment_layout == "m8n8k4" else ""
-    return [f"{_pad(ctx.indent)}emmy_mma_promote_f16acc{suffix}({stmt.dst}, {stmt.src});"]
-
-
-@render_stmt.register
-def _(stmt: FragmentRepack, ctx: RenderCtx) -> list[str]:
-    assert stmt.role in ("a", "b")
-    if stmt.fragment_layout == "m8n8k4":
-        assert len(stmt.srcs) == 1 and stmt.ab_dtype == "f16"
-        return [f"{_pad(ctx.indent)}emmy_c_to_{stmt.role}_f16_m8n8k4<{stmt.part}>({stmt.frag}, {stmt.srcs[0]});"]
-    if stmt.role == "b":
-        assert stmt.fragment_layout == "m16n8k16" and stmt.ab_dtype == "f16" and len(stmt.srcs) == 1
-        return [f"{_pad(ctx.indent)}emmy_c_to_b_f16({stmt.frag}, {stmt.srcs[0]});"]
-    assert len(stmt.srcs) == 2
-    return [f"{_pad(ctx.indent)}emmy_c_to_a_{stmt.ab_dtype}({stmt.frag}, {stmt.srcs[0]}, {stmt.srcs[1]});"]
-
-
 # ---------------------------------------------------------------------------
 # Hopper warp-group MMA (``wgmma``): the asynchronous instruction discipline
 # ---------------------------------------------------------------------------
@@ -1251,410 +425,9 @@ def wgmma_descriptor_bits(addr: int, lbo: int, sbo: int, mode: int) -> int:
     offset >> 4, 49-51 the base offset (0 — every slab is aligned to its swizzle period), 62-63 the
     layout type (:data:`WGMMA_LAYOUT_TYPE`).
 
-    The Python twin of ``emmy_wgmma_desc`` in the render prelude, which is what the kernel runs;
-    the two spell one formula so a test can check the bits without a Hopper card."""
+    The PTX compiler writes the same formula into the kernel; this twin lets a test check the bits without a
+    Hopper card."""
     return ((addr >> 4) & 0x3FFF) | (((lbo >> 4) & 0x3FFF) << 16) | (((sbo >> 4) & 0x3FFF) << 32) | (mode << 62)
-
-
-@render_stmt.register
-def _(stmt: WgmmaDescriptor, ctx: RenderCtx) -> list[str]:
-    mode = WGMMA_LAYOUT_TYPE[swizzle_base(stmt.swizzle)]
-    src = stmt.smem if stmt.smem_index is None else f"&{stmt.smem}[{render_expression(stmt.smem_index, ctx)}]"
-    args = f"emmy_smem_u32({src}), {stmt.lbo_bytes}, {stmt.sbo_bytes}, {mode}"
-    return [f"{_pad(ctx.indent)}unsigned long long {stmt.name} = emmy_wgmma_desc({args});"]
-
-
-def wgmma_form(stmt: WgmmaMma) -> str:
-    """``"ss"`` (both operands through descriptors) or ``"rs"`` (A in registers)."""
-    return "ss" if stmt.a_desc is not None else "rs"
-
-
-def wgmma_wrapper(stmt: WgmmaMma) -> str:
-    """The prelude wrapper this cell calls — one per ``(N, ab_dtype, form)`` a kernel uses."""
-    return f"emmy_wgmma_m64n{stmt.shape[1]}k16_{stmt.ab_dtype}_f32_{wgmma_form(stmt)}"
-
-
-def _wgmma_a(stmt: WgmmaMma) -> str:
-    return stmt.a_desc if stmt.a_desc is not None else stmt.a_frag
-
-
-@render_stmt.register
-def _(stmt: WgmmaMma, ctx: RenderCtx) -> list[str]:
-    # The transpose bits are PTX immediates, which nvcc accepts only as integral constant
-    # expressions — template arguments of the wrapper, not function parameters.
-    tnsp = f"<{stmt.trans_a}, {stmt.trans_b}>" if wgmma_form(stmt) == "ss" else f"<{stmt.trans_b}>"
-    return [f"{_pad(ctx.indent)}{wgmma_wrapper(stmt)}{tnsp}({', '.join(stmt.c_frags)}, {_wgmma_a(stmt)}, {stmt.b_desc}, {stmt.scale_d});"]
-
-
-@render_stmt.register
-def _(stmt: WgmmaFence, ctx: RenderCtx) -> list[str]:
-    return [f'{_pad(ctx.indent)}asm volatile("wgmma.fence.sync.aligned;\\n" ::: "memory");']
-
-
-@render_stmt.register
-def _(stmt: WgmmaCommit, ctx: RenderCtx) -> list[str]:
-    return [f'{_pad(ctx.indent)}asm volatile("wgmma.commit_group.sync.aligned;\\n" ::: "memory");']
-
-
-@render_stmt.register
-def _(stmt: WgmmaWait, ctx: RenderCtx) -> list[str]:
-    return [f'{_pad(ctx.indent)}asm volatile("wgmma.wait_group.sync.aligned {stmt.group};\\n" ::: "memory");']
-
-
-def _store_swz(node: RegStore, addr: str) -> str:
-    """The store address, XOR-permuted through the slab's swizzle helper when this store
-    targets a swizzled smem slab — inert at the default ``"NONE"``."""
-    return addr if not swizzle_xor(node.swizzle) else f"{swizzle_fn(node.swizzle)}({addr})"
-
-
-def _pair_store(node: RegStore, addr: str, v0: str, v1: str, vec2: str, packer: str) -> str:
-    """One vectorized row-pair store line — a plain assign, or (``atomic``) the packed-pair
-    ``atomicAdd`` (native f16x2 / bf16x2 red; the caller keeps f32 off this path pre-sm90)."""
-    tgt = f"reinterpret_cast<{vec2}*>(&{node.dst_buffer}[{_store_swz(node, addr)}])"
-    if node.atomic:
-        return f"atomicAdd({tgt}, {packer}({v0}, {v1}));"
-    return f"*{tgt} = {packer}({v0}, {v1});"
-
-
-def _elem_store(node: RegStore, addr: str, val: str, dst_dt: str) -> str:
-    """One per-element store line — plain assign (the implicit f32→dst conversion), or
-    (``atomic``) a scalar ``atomicAdd`` with the conversion made explicit (no float overload
-    on a ``__half*`` / ``__nv_bfloat16*`` destination)."""
-    if node.atomic:
-        conv = {"f16": "__float2half({})", "bf16": "__float2bfloat16({})"}.get(dst_dt, "{}")
-        return f"atomicAdd(&{node.dst_buffer}[{addr}], {conv.format(val)});"
-    return f"{node.dst_buffer}[{_store_swz(node, addr)}] = {val};"
-
-
-def _store_table(node: RegStore):
-    """The lane-to-element row of the accumulator ``node`` stores."""
-    return accumulator_table(node.fragment_layout, tuple(node.fragment_index) if node.volta_interleaved else None)
-
-
-def _store_lane(node: RegStore, ctx: RenderCtx) -> list[str]:
-    """The declarations of the lane coordinates ``node``'s row reads, one C statement each."""
-    return [f"const int {coordinate};" for coordinate in _lane_coordinates(_store_table(node), ctx, _STORE_LANE)]
-
-
-def _element_coords(node: RegStore, ctx: RenderCtx) -> list[tuple[str, str, Expression, Expression]]:
-    """Per element ``(row C text, col C text, row Expression, col Expression)``, the texts as one address term."""
-
-    def term(offset: Expression) -> str:
-        text = render_expression(offset, ctx)
-        return text if isinstance(offset, Var) else f"({text})"
-
-    return [(term(row), term(col), row, col) for row, col in _elements(_store_table(node))]
-
-
-def _element_values(node: RegStore, ctx: RenderCtx) -> tuple[list[list[str]], list[str]]:
-    """``(per_element_preamble, values)``: the value each fragment element stores, and the lines that compute it (so a
-    guarded store can scope element ``i``'s reads inside element ``i``'s boundary check). Without an epilogue the value
-    is the register ``frag[i]``. With one, the typed epilogue is printed once per element: each parameter is that
-    element's register, the reserved :data:`ELEM_ROW` / :data:`ELEM_COL` its row and column offset in the fragment (a
-    load index and a select predicate already carry the cell base), and every name it defines takes the element's
-    suffix. Every line is a constant of the store's ``{ }`` block."""
-    coords = _element_coords(node, ctx)
-    if node.epilogue is None:
-        return [[] for _ in coords], [f"{node.frag}[{i}]" for i in range(len(coords))]
-    frags = (node.frag, *node.extra_frags)
-    per_elem: list[list[str]] = []
-    vals: list[str] = []
-    for i, (_row, _col, row_off, col_off) in enumerate(coords):
-        names = {acc: f"{fr}[{i}]" for acc, fr in zip(node.epilogue_params, frags, strict=True)}
-        ctx.ssa_dtypes.update(dict.fromkeys(names.values(), "f32"))
-        names |= {name: f"{name}_e{i}" for st in node.epilogue for name in st.defines()}
-        sigma = Sigma({ELEM_ROW: row_off, ELEM_COL: col_off})
-        lines: list[str] = []
-        for st in node.epilogue:
-            local = st.rewrite(lambda name, names=names: names.get(name, name), sigma)
-            if isinstance(local, Load):  # an epilogue's load keeps one index per dimension
-                local = local.replace(index=(_flat_index(local.input, local.index, ctx),))
-            lines.extend(f"const {line}" for line in render_stmt(local, replace(ctx, indent=0)))
-        per_elem.append(lines)
-        vals.append(names[node.epilogue_result])
-    return per_elem, vals
-
-
-def _scaled_offset(term: str, stride: int | str) -> str:
-    return term if stride == 1 else f"({term}) * {stride}"
-
-
-def _store_addr(node: RegStore, flat: str, row: str, col: str, row_stride: int | str, col_stride: int | str) -> str:
-    """Flat address of one fragment element under its independently derived M/N strides."""
-    return f"{flat} + {_scaled_offset(row, row_stride)} + {_scaled_offset(col, col_stride)}"
-
-
-def _render_run(node: RegStore, ctx: RenderCtx, *, flat: str, ldm, dst_dt: str) -> list[str] | None:
-    """The four cells of :attr:`run` as one 16-byte store per lane and row, or ``None`` for a
-    destination that is not 16-bit or whose row stride breaks the 16-byte alignment.
-
-    Lane ``t`` of a quad holds columns ``2t, 2t+1`` of each cell. Three ``shfl.xor`` rounds
-    transpose the quad's 4×4 grid of packed pairs: in round ``s`` a lane sends the pair of
-    cell ``t^s`` and receives, from lane ``t^s``, that lane's pair of cell ``t``. Lane ``t``
-    then holds all eight columns of cell ``t`` and writes them at ``8t`` past the first
-    cell. The quad runs whole, as the fragment stores it replaces already assume."""
-    vec2 = {"f16": "__half2", "bf16": "__nv_bfloat162"}.get(dst_dt)
-    if vec2 is None or not isinstance(ldm, int) or ldm % 8:
-        return None
-    packer = {"f16": "__floats2half2_rn", "bf16": "__floats2bfloat162_rn"}[dst_dt]
-    pad = _pad(ctx.indent)
-    cells = (node, *node.run)
-    names = [[f"_wp{r}_{k}" for k in range(len(cells))] for r in (0, 1)]
-    lines = [
-        f"{pad}{{ {' '.join(_store_lane(node, ctx))}",
-        f"{pad}  unsigned {', '.join(n for row in names for n in row)};",
-    ]
-    for k, cell in enumerate(cells):
-        pre, vals = _element_values(cell, ctx)
-        lines.append(f"{pad}  {{")
-        lines += [f"{pad}    {ln}" for group in pre for ln in group]
-        for r in (0, 1):
-            pair = f"{packer}({vals[2 * r]}, {vals[2 * r + 1]})"
-            lines.append(f"{pad}    {{ {vec2} _h = {pair}; {names[r][k]} = *reinterpret_cast<unsigned*>(&_h); }}")
-        lines.append(f"{pad}  }}")
-
-    def pick(*by_lane: str) -> str:
-        return f"(_t == 0 ? {by_lane[0]} : _t == 1 ? {by_lane[1]} : _t == 2 ? {by_lane[2]} : {by_lane[3]})"
-
-    for r, row in ((0, "_g"), (1, "(_g + 8)")):
-        p0, p1, p2, p3 = names[r]
-        q1, q2, q3 = (f"_wq{r}_{s}" for s in (1, 2, 3))
-        lines += [
-            f"{pad}  const unsigned {q1} = __shfl_xor_sync(0xffffffffu, {pick(p1, p0, p3, p2)}, 1);",
-            f"{pad}  const unsigned {q2} = __shfl_xor_sync(0xffffffffu, {pick(p2, p3, p0, p1)}, 2);",
-            f"{pad}  const unsigned {q3} = __shfl_xor_sync(0xffffffffu, {pick(p3, p2, p1, p0)}, 3);",
-            f"{pad}  *reinterpret_cast<uint4*>(&{node.dst_buffer}[{flat} + {row} * {ldm} + _t * 8]) = make_uint4("
-            f"{pick(p0, q1, q2, q3)}, {pick(q1, p1, q3, q2)}, {pick(q2, q3, p2, q1)}, {pick(q3, q2, q1, p3)});",
-        ]
-    lines.append(f"{pad}}}")
-    return lines
-
-
-def _render_m8n8k4(node: RegStore, ctx: RenderCtx, *, flat: str, ldm, ldn, dst_dt: str, pre: list[list[str]], vals: list[str]) -> list[str]:
-    """Store an m8n8k4 accumulator under the selected Volta warp-tile arrangement."""
-    pad = _pad(ctx.indent)
-    # Each four-lane group and its +16 partner own one 8x8 computation. _vr/_vc are the lane's
-    # base coordinates under either the ordinary 16x16 cell or paired 32x32 warp-tile map.
-    lane, quadrant, *base = _store_lane(node, ctx)
-    lines = [f"{pad}{{ {lane} {quadrant}", *(f"{pad}  {coordinate}" for coordinate in base)]
-    mbase = mbound = nbase = nbound = None
-    if node.m_guard is not None:
-        mbase, mbound = (render_expression(e, ctx) for e in node.m_guard)
-    if node.n_guard is not None:
-        nbase, nbound = (render_expression(e, ctx) for e in node.n_guard)
-    vec2 = {"f16": "__half2", "bf16": "__nv_bfloat162", "f32": "float2"}.get(dst_dt)
-    if nbound is None and ldn == 1 and vec2 is not None and not (node.atomic and dst_dt == "f32"):
-        packer = {"f16": "__floats2half2_rn", "bf16": "__floats2bfloat162_rn", "f32": "make_float2"}[dst_dt]
-        coords = _element_coords(node, ctx)
-        for pair in range(0, len(coords), 2):
-            row, col, _row_expression, _col_expression = coords[pair]
-            indent = f"{pad}  "
-            if mbound is not None:
-                lines.append(f"{indent}if (({mbase}) + {row} < ({mbound})) {{")
-                indent += "  "
-            lines.extend(f"{indent}{ln}" for ln in (*pre[pair], *pre[pair + 1]))
-            addr = _store_addr(node, flat, row, col, ldm, ldn)
-            lines.append(f"{indent}{_pair_store(node, addr, vals[pair], vals[pair + 1], vec2, packer)}")
-            if mbound is not None:
-                lines.append(f"{pad}  }}")
-        lines.append(f"{pad}}}")
-        return lines
-    for i, (row, col, _row_expression, _col_expression) in enumerate(_element_coords(node, ctx)):
-        preds = []
-        if mbound is not None:
-            preds.append(f"({mbase}) + {row} < ({mbound})")
-        if nbound is not None:
-            preds.append(f"({nbase}) + {col} < ({nbound})")
-        indent = f"{pad}  "
-        if preds:
-            lines.append(f"{indent}if ({' && '.join(preds)}) {{")
-            indent += "  "
-        lines.extend(f"{indent}{ln}" for ln in pre[i])
-        addr = _store_addr(node, flat, row, col, ldm, ldn)
-        lines.append(f"{indent}{_elem_store(node, addr, vals[i], dst_dt)}")
-        if preds:
-            lines.append(f"{pad}  }}")
-    lines.append(f"{pad}}}")
-    return lines
-
-
-def _render_guarded(
-    node: RegStore, ctx: RenderCtx, *, flat: str, ldm, ldn, dst_dt: str, pre: list[list[str]], vals: list[str]
-) -> list[str]:
-    """Masked-tile store: each fragment element's store (and its epilogue
-    gmem reads, which index the same possibly-out-of-range coordinates)
-    runs under that element's own boundary check. With only an ``m_guard``
-    the two columns of a row share the row predicate, so the vectorized
-    row-pair store survives; an ``n_guard`` splits the pair (its columns
-    straddle the bound) into per-element scalar stores."""
-    pad = _pad(ctx.indent)
-    m_pred: list[str | None] = [None] * 4
-    n_pred: list[str | None] = [None] * 4
-    if node.m_guard is not None:
-        base, bound = render_expression(node.m_guard[0], ctx), render_expression(node.m_guard[1], ctx)
-        m_pred = [f"({base}) + _g < ({bound})"] * 2 + [f"({base}) + _g + 8 < ({bound})"] * 2
-    if node.n_guard is not None:
-        base, bound = render_expression(node.n_guard[0], ctx), render_expression(node.n_guard[1], ctx)
-        n_pred = [
-            f"({base}) + _t * 2 < ({bound})",
-            f"({base}) + _t * 2 + 1 < ({bound})",
-            f"({base}) + _t * 2 < ({bound})",
-            f"({base}) + _t * 2 + 1 < ({bound})",
-        ]
-    lines = [f"{pad}{{ {' '.join(_store_lane(node, ctx))}"]
-    vec2 = {"f16": "__half2", "bf16": "__nv_bfloat162", "f32": "float2"}.get(dst_dt)
-    if node.n_guard is None and ldn == 1 and vec2 is not None and not (node.atomic and dst_dt == "f32"):
-        # Row-guarded vectorized pairs: elements {0,1} share row _g,
-        # {2,3} share row _g+8; each pair's preamble + store sit inside
-        # the pair's row check.
-        packer = {"f16": "__floats2half2_rn", "bf16": "__floats2bfloat162_rn", "f32": "make_float2"}[dst_dt]
-        for pair, addr_row in ((0, "_g"), (2, "(_g + 8)")):
-            addr = f"{flat} + {addr_row} * {ldm} + _t * 2"
-            lines.append(f"{pad}  if ({m_pred[pair]}) {{")
-            lines += [f"{pad}    {ln}" for ln in (*pre[pair], *pre[pair + 1])]
-            lines.append(f"{pad}    {_pair_store(node, addr, vals[pair], vals[pair + 1], vec2, packer)}")
-            lines.append(f"{pad}  }}")
-        lines.append(f"{pad}}}")
-        return lines
-    # Per-element scalar stores under the conjunction of the live guards.
-    for i in range(4):
-        row = "_g" if i < 2 else "(_g + 8)"
-        preds = " && ".join(p for p in (m_pred[i], n_pred[i]) if p is not None)
-        addr = _store_addr(node, flat, row, f"_t * 2 + {i & 1}", ldm, ldn)
-        lines.append(f"{pad}  if ({preds}) {{")
-        lines += [f"{pad}    {ln}" for ln in pre[i]]
-        lines.append(f"{pad}    {_elem_store(node, addr, vals[i], dst_dt)}")
-        lines.append(f"{pad}  }}")
-    lines.append(f"{pad}}}")
-    return lines
-
-
-@render_stmt.register
-def _(node: RegStore, ctx: RenderCtx) -> list[str]:
-    flat = render_index(node.dst_buffer, node.dst_index, ctx)
-    ldm = node.ldm if node.ldm else _resolve_ldm(node.dst_buffer, ctx, node.row_dim)
-    ldn = node.ldn or (_dim_stride(node.dst_buffer, node.col_dim, ctx) if node.col_dim is not None else 1)
-    dst_dt = ctx.buffer_dtypes.get(node.dst_buffer, "f32")
-    pad = _pad(ctx.indent)
-    pre, vals = _element_values(node, ctx)
-    if node.fragment_layout == "m8n8k4":
-        return _render_m8n8k4(node, ctx, flat=flat, ldm=ldm, ldn=ldn, dst_dt=dst_dt, pre=pre, vals=vals)
-    # C is 16×8: lane owns (row g, cols 2t,2t+1) and (row g+8, cols 2t,2t+1)
-    # with g = lane/4, t = lane%4. The two cols per row are CONTIGUOUS, so
-    # each row's pair is one vectorized 4-byte store (``__half2`` / ``float2``)
-    # rather than two scalar stores — halves the epilogue store count and
-    # the address arithmetic. ldm strides over N (the output row width). The
-    # base ``flat`` is tile-aligned and ``2t`` is even, so the pair is
-    # 4-/8-byte aligned. The ``{ }`` block scopes _g/_t (and the per-element
-    # epilogue temps) per RegStore.
-    if node.run and (wide := _render_run(node, ctx, flat=flat, ldm=ldm, dst_dt=dst_dt)) is not None:
-        return wide
-    if node.run:  # a destination the 16-byte row cannot serve stores each cell on its own
-        return [ln for cell in (node.replace(run=()), *node.run) for ln in render_stmt(cell, ctx)]
-    if node.m_guard is not None or node.n_guard is not None:
-        return _render_guarded(node, ctx, flat=flat, ldm=ldm, ldn=ldn, dst_dt=dst_dt, pre=pre, vals=vals)
-    lane_stmt = " ".join(_store_lane(node, ctx))
-    if node.epilogue is None:
-        # Flash output store: no per-element epilogue temps, so declare _g/_t once per scope
-        # (reused by sibling stores) and emit the stores flat — no wrapping { } block, so a
-        # store alone in a loop body renders ``for (…) { … }`` not ``for (…) { { … } }``.
-        names = {name for name, _ in _store_table(node).coordinates}
-        head, base, close = ([] if names <= ctx.scope_decls else [f"{pad}{lane_stmt}"]), pad, ""
-        ctx.scope_decls.update(names)
-    else:
-        # Fused epilogue: the { } scopes the per-element temps (they collide across sibling
-        # register-tile cells, which reuse the same names), so it stays.
-        head, base, close = [f"{pad}{{ {lane_stmt}"], f"{pad}  ", " }"
-    body = [f"{base}{ln}" for group in pre for ln in group]
-    vec2 = {"f16": "__half2", "bf16": "__nv_bfloat162", "f32": "float2"}.get(dst_dt)
-    if ldn == 1 and vec2 is not None and not (node.atomic and dst_dt == "f32"):  # no packed f32 atomicAdd pre-sm90
-        packer = {"f16": "__floats2half2_rn", "bf16": "__floats2bfloat162_rn", "f32": "make_float2"}[dst_dt]
-        lo = f"{flat} + _g * {ldm} + _t * 2"
-        hi = f"{flat} + (_g + 8) * {ldm} + _t * 2"
-        body += [
-            f"{base}{_pair_store(node, lo, vals[0], vals[1], vec2, packer)}",
-            f"{base}{_pair_store(node, hi, vals[2], vals[3], vec2, packer)}",
-        ]
-    else:  # per-element scalar stores (dtypes without a 2-vector packer; atomic f32)
-        coords = (("_g", "_t * 2 + 0"), ("_g", "_t * 2 + 1"), ("(_g + 8)", "_t * 2 + 0"), ("(_g + 8)", "_t * 2 + 1"))
-        body += [
-            f"{base}{_elem_store(node, _store_addr(node, flat, row, col, ldm, ldn), vals[i], dst_dt)}"
-            for i, (row, col) in enumerate(coords)
-        ]
-    if close:
-        body[-1] += close
-    return head + body
-
-
-def _ext_to_c(ext, ctx: RenderCtx) -> int | str:
-    """One buffer-shape extent as a C term: static dims yield their ``int``,
-    a symbolic ``Dim`` renders its Expression against the runtime kernel arg
-    (parenthesized — the result is interpolated into ``* {…}`` address
-    strings)."""
-    if hasattr(ext, "is_static"):
-        if ext.is_static:
-            return ext.as_static()
-        return f"({render_expression(ext.expression, ctx)})"
-    return int(ext)
-
-
-def _dim_stride(buffer: str, dim: int, ctx: RenderCtx) -> int | str:
-    """Row-major element stride of ``buffer``'s dim ``dim`` — the product of
-    the trailing extents. Used by the fragment-epilogue render to apply a
-    fragment element's row / col motion on an operand dim at that operand's
-    own layout (a transposed residual's "n" dim strides by its row width,
-    not by 1). A symbolic trailing extent makes the stride a C expression
-    string over the runtime kernel arg instead of an int."""
-    shape = ctx.shapes.get(buffer)
-    if shape is None:
-        raise ValueError(f"RegStore epilogue: buffer {buffer!r} not in ctx.shapes (no shape registered)")
-    static = 1
-    sym: list[str] = []
-    for ext in shape[dim + 1 :]:
-        term = _ext_to_c(ext, ctx)
-        if isinstance(term, int):
-            static *= term
-        else:
-            sym.append(term)
-    if not sym:
-        return static
-    expression = " * ".join(sym if static == 1 else [str(static), *sym])
-    return f"({expression})"
-
-
-def _resolve_ldm(buffer: str, ctx: RenderCtx, row_dim: int | None = None) -> int | str:
-    """Look up the row-major row stride for ``buffer`` from the kernel render context. Used by
-    a :class:`FragmentLoad` with no ``ldm`` and a :class:`RegStore` with ``ldm == 0`` (auto).
-    With ``row_dim`` (the index position carrying the M coordinate — ``RegStore.row_dim``) the
-    stride is the product of every extent after that dim, which stays correct when the N
-    coordinate spans several trailing dims (the re-fused split store); without it, the legacy
-    inner-extent read. Accepts both raw int extents and :class:`Dim` extents (Tensor.shape) —
-    a symbolic inner extent (e.g. QK^T's ``(seq, seq)`` output) resolves to
-    a C expression over the runtime kernel arg (the M9 runtime-ldm path);
-    every consumer interpolates ``ldm`` into an address string, so the
-    int/str split is transparent."""
-    if row_dim is not None:
-        return _dim_stride(buffer, row_dim, ctx)
-    shape = ctx.shapes.get(buffer)
-    if shape is None:
-        raise ValueError(f"_resolve_ldm: buffer {buffer!r} not in ctx.shapes (no shape registered)")
-    return _ext_to_c(shape[-1], ctx)
-
-
-def _binary_combine_expression(op: ElementwiseImpl, a: str, b: str, target=None, dt: str = "f32") -> str:
-    """Render a 2-arg combine for ``ElementwiseImpl`` reduce ops at ``dt``.
-
-    ``target`` (optional) provides the dtype-specific intrinsic spelling.
-    ``None`` keeps the legacy f32 spellings for callers that haven't
-    plumbed a target through yet.
-    """
-    spelling = _REDUCE_SPELLING.get(op.reduce_canon)
-    if spelling is None:
-        raise ValueError(f"TreeHalve: unsupported op {op.name!r}")
-    if spelling.infix is not None:
-        return f"{a} {spelling.infix} {b}"
-    fn = target.intrinsic(spelling.intrinsic, dt) if target is not None else f"{spelling.intrinsic}f"
-    return f"{fn}({a}, {b})"
 
 
 # ``StridedLoop`` is shared infrastructure — defined in ``ir/stmt.py``
@@ -1683,7 +456,7 @@ _MAX_CTAS = 65536
 def pack_smem(smems) -> tuple[dict[str, int], int]:  # noqa: ANN001 — smems: Iterable[Smem]
     """Pack ``Smem`` buffers into one contiguous pool, padding each to its
     alignment. Walks the buffers in order, aligns the running cursor to
-    ``max(nbytes_of(dtype), s.align)`` before placing each buffer, and returns
+    ``max(dtype.nbytes, s.align)`` before placing each buffer, and returns
     ``({name: byte_offset}, total_padded_bytes)``.
 
     Single source of truth for the per-CTA smem footprint: ``KernelOp.smem_bytes``
@@ -1693,17 +466,15 @@ def pack_smem(smems) -> tuple[dict[str, int], int]:  # noqa: ANN001 — smems: I
     e.g. a 512/1024 B swizzle-atom-aligned operand)."""
     from math import prod  # noqa: PLC0415
 
-    from emmy.compiler.backend.cuda.dtype import nbytes_of  # noqa: PLC0415
-
     offsets: dict[str, int] = {}
     cursor = 0
     for s in smems:
         elements = prod(int(e) for e in s.extents) if s.extents else 1
-        align = max(nbytes_of(s.dtype), int(s.align) if s.align else 0)
+        align = max(s.dtype.nbytes, int(s.align) if s.align else 0)
         if align:
             cursor = (cursor + align - 1) // align * align
         offsets[s.name] = cursor
-        cursor += elements * nbytes_of(s.dtype)
+        cursor += elements * s.dtype.nbytes
     return offsets, cursor
 
 
@@ -1715,7 +486,7 @@ class KernelOp(BodyOp):
     a graph node, carries a body of Kernel IR stmts.
 
     Buffer shapes are *not* baked in — the surrounding graph supplies
-    them at render time, same as ``TileOp``. Kernel signature is derived
+    them where the kernel is compiled, same as ``TileOp``. Kernel signature is derived
     from the body: distinct ``Load.input`` names become kernel input
     params, distinct ``Write.output`` names become writeable output
     params, ordered by first appearance. ``Smem`` buffers are excluded.
@@ -1745,10 +516,10 @@ class KernelOp(BodyOp):
         return {s.name: s for s in self if isinstance(s, Smem)}
 
     def smem_bytes(self) -> int:
-        """Total static + dynamic ``__shared__`` bytes declared in the body —
+        """Total static + dynamic shared bytes declared in the body —
         the padding-aware pool footprint from :func:`pack_smem` (each buffer
-        aligned to ``max(sizeof(dtype), Smem.align)``), so this matches the
-        renderer's pool packer and the launch-time pool size."""
+        aligned to ``max(dtype.nbytes, Smem.align)``), so this matches the
+        launch-time pool size."""
         return pack_smem(self.smem_buffers.values())[1]
 
     def validate(self, ctx) -> bool:
@@ -1825,6 +596,15 @@ __all__ = [
     "WgmmaFence",
     "WgmmaCommit",
     "WgmmaWait",
+    "BlockScaleLoad",
+    "FragmentApply",
+    "FragmentLoad",
+    "FragmentPromote",
+    "FragmentRepack",
+    "FragmentRowReduce",
+    "LdmatrixLoad",
+    "MmaSyncPtx",
+    "RegStore",
     "StridedLoop",
     "Statement",
     # Top-level

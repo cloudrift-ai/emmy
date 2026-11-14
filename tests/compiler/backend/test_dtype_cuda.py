@@ -1,21 +1,12 @@
-"""End-to-end fp16 elementwise chain on the CUDA backend.
-
-Verifies that an fp16-typed graph compiles through NVRTC with the
-``__half`` parameter type + ``cuda_fp16.h`` include + load/store
-conversion intrinsics, runs on the GPU, and returns fp16 numerics that
-match eager numpy within fp16 tolerance.
-"""
+"""Narrow float dtypes on the CUDA backend: fp16, bf16 and fp8 graphs compile, run on the GPU, and return the
+numerics eager gives within the dtype's tolerance."""
 
 from __future__ import annotations
-
-import re
 
 import numpy as np
 import pytest
 
-from emmy import config
 from emmy.compiler import dtype as dt
-from emmy.compiler.backend.cuda.dtype import canonical_from_cuda_name, cuda_name, nbytes_of
 from emmy.compiler.graph import Graph, Tensor
 from emmy.compiler.ir.base import InputOp
 from emmy.compiler.ir.frontend.ir import MatmulOp, RmsNormOp
@@ -47,16 +38,15 @@ def test_f16_to_bf16_intermediate_rounds_before_multiply():
 
     backend = CudaBackend()
     compiled = backend.compile(graph)
-    # CUDA spelling: moves to the PTX compiler's tests
     sources = "\n".join(n.op.kernel_source for n in compiled.nodes.values() if hasattr(n.op, "kernel_source"))
-    assert "__float2bfloat16" in sources
+    assert "cvt.rn.bf16.f32" in sources
     actual, _ = backend.run(compiled, input_data=feed)
     np.testing.assert_array_equal(actual.outputs["out"], expected.outputs["out"])
 
 
 @requires_cuda
-@pytest.mark.parametrize(("length", "vector"), [(8194, "__nv_bfloat162"), (4096, "uint2")])
-def test_bf16_runs_load_and_store_as_one_access(length, vector):
+@pytest.mark.parametrize(("length", "width"), [(8194, 2), (4096, 4)])
+def test_bf16_runs_load_and_store_as_one_access(length, width):
     """A bf16 pointwise kernel reads and writes each lane's run as one vector access, as an f16 one does, and computes
     what the numpy backend does."""
     from emmy.compiler.backend.cuda.backend import CudaBackend
@@ -75,11 +65,8 @@ def test_bf16_runs_load_and_store_as_one_access(length, vector):
     kernels = kernels_of(compiled)
     assert any(load.input == "x" and load.width > 1 for load in statements(kernels, Load)), "one vector read per run"
     assert any(write.output == "y" and write.width > 1 for write in statements(kernels, Write)), "one vector write per run"
-    # CUDA spelling: moves to the PTX compiler's tests (the vector type a run's width spells)
     sources = "\n".join(n.op.kernel_source for n in compiled.nodes.values() if hasattr(n.op, "kernel_source"))
-    # Buffers are spelled by their role slot: one vector load of the input, one vector store of the output.
-    assert re.search(rf"\*reinterpret_cast<const {re.escape(vector)}\*>\(&buf\d+\[", sources), sources
-    assert re.search(rf"\*reinterpret_cast<{re.escape(vector)}\*>\(&buf\d+\[", sources), sources
+    assert f"ld.global.nc.v{width}.b16" in sources and f"st.global.v{width}.b16" in sources, sources
     actual, _ = backend.run(compiled, input_data=feed)
     np.testing.assert_array_equal(actual.outputs["y"], expected.outputs["y"])
 
@@ -87,10 +74,10 @@ def test_bf16_runs_load_and_store_as_one_access(length, vector):
 @requires_cuda
 @pytest.mark.parametrize(("dtype", "delta"), [(dt.F16, 2**-10), (dt.F32, 2**-13)])
 def test_separate_multiply_and_add_preserve_rounding(dtype, delta):
-    """A multiply and an add round separately, as eager does. f16 needs no flag: its ops are spelled
-    ``__hmul_rn`` / ``__hadd_rn``, which nvcc never contracts. f32 keeps nvcc's default contraction,
-    so the check turns it off explicitly."""
+    """A multiply and an add round separately, as eager does, where the kernel's fusion decision is off. f16 is
+    never fused; f32 is fused by default, so the check turns the decision off."""
     from emmy.compiler.backend.cuda.backend import CudaBackend
+    from emmy.compiler.pipeline.search.pins import pinned_knobs
 
     graph = Graph()
     for name in ("a", "b", "c"):
@@ -100,8 +87,7 @@ def test_separate_multiply_and_add_preserve_rounding(dtype, delta):
     graph.inputs, graph.outputs = ["a", "b", "c"], ["out"]
     inputs = {name: np.full(32, value, dtype=dtype.np) for name, value in (("a", 1 + delta), ("b", 1 - delta), ("c", -1))}
     backend = CudaBackend()
-    flags = config.nvcc_flags() if dtype == dt.F16 else f"{config.nvcc_flags()} --fmad=false"
-    with config.nvcc_flags_override(flags):
+    with pinned_knobs({} if dtype == dt.F16 else {"CONTRACT_FMA": False}):
         compiled = backend.compile(graph)
         result, _ = backend.run(compiled, input_data=inputs)
     np.testing.assert_array_equal(result.outputs["out"], inputs["a"] * inputs["b"] + inputs["c"])
@@ -124,69 +110,6 @@ def test_scalar_fp16_matmul_widens_products_before_accumulation():
         compiled = backend.compile(graph)
     result, _ = backend.run(compiled, input_data={"a": a, "b": b})
     np.testing.assert_array_equal(result.outputs["out"], a @ b)
-
-
-def test_cuda_name_int_dtypes():
-    # I32/I64 must map to the C type names the kernel renderer emits in
-    # parameter signatures for graphs whose placeholder inputs carry an
-    # integer dtype (input_ids / position_ids from HF whole-model traces).
-    assert cuda_name(dt.I32) == "int"
-    assert cuda_name(dt.I64) == "long long"
-    # Aliases route through the same mapping.
-    assert cuda_name("int32") == "int"
-    assert cuda_name("int64") == "long long"
-    assert cuda_name("long") == "long long"
-
-
-def test_cuda_name_table_consistent_with_byte_sizes():
-    """Every C spelling in ``_CUDA_NAME`` resolves through ``nbytes_of`` to its dtype's own byte size."""
-    from emmy.compiler.backend.cuda.dtype import _CUDA_NAME
-
-    for dtype, cname in _CUDA_NAME.items():
-        assert nbytes_of(cname) == dtype.nbytes, (dtype.name, cname)
-
-
-def test_every_shared_c_spelling_names_the_dtype_its_inverse_returns():
-    """The table is not injective — one-byte dtypes share ``unsigned char`` — so the inverse must
-    pick, and the pick has to be written down. Dict order would decide it otherwise, invisibly, and
-    the next byte-wide dtype would flip it."""
-    from collections import Counter
-
-    from emmy.compiler.backend.cuda.dtype import _CUDA_NAME, _SHARED_CUDA_NAMES
-
-    shared = {name for name, n in Counter(_CUDA_NAME.values()).items() if n > 1}
-    assert shared == set(_SHARED_CUDA_NAMES), "a C spelling gained or lost a second dtype without a declared winner"
-    for name, canonical in _SHARED_CUDA_NAMES.items():
-        assert canonical_from_cuda_name(name) == canonical
-        assert canonical in {d.name for d, c in _CUDA_NAME.items() if c == name}
-
-
-def test_canonical_from_cuda_name_int_dtypes():
-    # The inverse mapping is what ``Smem``'s render consults to recover the
-    # canonical DataType from a kernel-internal C name.
-    assert canonical_from_cuda_name("int") == "i32"
-    assert canonical_from_cuda_name("long long") == "i64"
-
-
-def test_nbytes_of_int_dtypes():
-    # ``nbytes_of`` is the per-element size table used by the slab budget
-    # / smem accounting. Must agree with the canonical DataType sizes.
-    assert nbytes_of(dt.I32) == 4
-    assert nbytes_of(dt.I64) == 8
-    assert nbytes_of("i32") == 4
-    assert nbytes_of("i64") == 8
-
-
-def test_fp8_cuda_traits():
-    # Registry completeness for the fp8 storage dtypes (M1 — no kernel computes
-    # on fp8 yet): C names, the <cuda_fp8.h> include, 1-byte accounting.
-    from emmy.compiler.backend.cuda.dtype import cuda_includes
-
-    assert cuda_name(dt.F8E4M3) == "__nv_fp8_e4m3"
-    assert cuda_name(dt.F8E5M2) == "__nv_fp8_e5m2"
-    assert cuda_includes([dt.F8E4M3, dt.F8E5M2]) == ["<cuda_fp8.h>"]
-    for spelling in (dt.F8E4M3, "f8e4m3", "float8_e4m3fn", "__nv_fp8_e4m3", "__nv_fp8_e5m2"):
-        assert nbytes_of(spelling) == 1
 
 
 @requires_cuda
@@ -228,21 +151,15 @@ def test_fp16_elementwise_chain_cuda(monkeypatch, fast_math):
     monkeypatch.setenv("EMMY_FAST_MATH", str(int(fast_math)))
     graph = _fp16_chain_graph()
     compiled = CudaBackend().compile(Pipeline.build(LOOP_PASSES).run(graph))
-    # Verify the rendered CUDA source picked up fp16 signature + include
-    # for at least one kernel (there will be one after fusion).
+    # One kernel after fusion. An f16 exponential computes in f32 and rounds once, the approximate one under fast
+    # math; the negation after it stays in halves.
     from emmy.compiler.ir.cuda import CudaOp
 
     cuda_nodes = [n for n in compiled.nodes.values() if isinstance(n.op, CudaOp)]
     assert cuda_nodes, "expected at least one CudaOp after lowering"
-    # CUDA spelling: moves to the PTX compiler's tests
     sources = "\n".join(n.op.kernel_source for n in cuda_nodes)
-    assert "__half" in sources, f"expected __half in kernel sources, got:\n{sources}"
-    assert "cuda_fp16.h" in sources, f"expected cuda_fp16.h include, got:\n{sources}"
-    if fast_math:
-        assert "__expf" in sources and "__float2half" in sources and "__half2float" in sources
-    else:
-        assert "hexp" in sources, f"expected native hexp, got:\n{sources}"
-        assert "__half2float" not in sources, f"native fp16 chain should not promote to float, got:\n{sources}"
+    assert "neg.f16" in sources and "cvt.rn.f16.f32" in sources and "cvt.f32.f16" in sources, sources
+    assert ("ex2.approx" in sources and "0f4B400001" not in sources) == fast_math, sources
 
     rng = np.random.default_rng(0)
     x_data = (rng.standard_normal(1024) * 0.5).astype(np.float16)
@@ -273,14 +190,13 @@ def test_fp16_fallback_to_float_for_non_native_op():
     from emmy.compiler.ir.cuda import CudaOp
 
     compiled = CudaBackend().compile(Pipeline.build(LOOP_PASSES).run(_fp16_erf_graph()))
-    # CUDA spelling: moves to the PTX compiler's tests
     sources = "\n".join(n.op.kernel_source for n in compiled.nodes.values() if isinstance(n.op, CudaOp))
-    # Signature stays __half; the fallback inserts __half2float on the
-    # input and __float2half on the store, with f32 erff in between.
-    assert re.search(r"__half\* __restrict__ buf\d+", sources), sources
-    assert "erff" in sources, f"expected fallback to f32 erff, got:\n{sources}"
-    assert "__half2float" in sources, f"expected promote-to-float at use, got:\n{sources}"
-    assert "__float2half" in sources, f"expected demote-to-half at store, got:\n{sources}"
+    # The buffers stay halves; the fallback widens the input and narrows the store, with the f32 error function
+    # in between.
+    assert any(line.strip().startswith("ld.global.nc") and ".b16" in line for line in sources.splitlines()), sources
+    assert "fma.rn" in sources and ".f32" in sources, f"expected the f32 error function, got:\n{sources}"
+    assert "cvt.f32.f16" in sources, f"expected promote-to-float at use, got:\n{sources}"
+    assert "cvt.rn.f16.f32" in sources, f"expected demote-to-half at store, got:\n{sources}"
 
     rng = np.random.default_rng(1)
     x_data = (rng.standard_normal(1024) * 0.5).astype(np.float16)
@@ -318,10 +234,9 @@ def test_fp16_reduction_uses_fp32_accumulator_on_cuda():
     # The accumulator is f32 (the promotion); the value converts at the combine, the store back to f16.
     folds = statements(kernels_of(compiled), Accum)
     assert folds and all(fold.dtype == dt.F32 for fold in folds), folds
-    # CUDA spelling: moves to the PTX compiler's tests
     sources = "\n".join(n.op.kernel_source for n in compiled.nodes.values() if isinstance(n.op, CudaOp))
-    assert "__half2float" in sources, f"expected __half2float at combine, got:\n{sources}"
-    assert "__float2half" in sources, f"expected __float2half at store, got:\n{sources}"
+    assert "cvt.f32.f16" in sources, f"expected the half widened at the combine, got:\n{sources}"
+    assert "cvt.rn.f16.f32" in sources, f"expected the sum narrowed at the store, got:\n{sources}"
 
     rng = np.random.default_rng(2)
     x_data = (rng.standard_normal(1024) * 0.1).astype(np.float16)
@@ -398,8 +313,8 @@ def test_fp16_rmsnorm_cuda():
 @requires_cuda
 def test_fp16_max_reduction_stays_in_fp16():
     """``max`` is a selection (no magnitude accumulation), so it stays in
-    the input dtype. The kernel should declare ``__half`` for the
-    accumulator and use ``__hmax`` — not promote to float."""
+    the input dtype. The kernel keeps a half accumulator and takes the
+    half maximum — not promote to float."""
     from emmy.compiler.backend.cuda.backend import CudaBackend
     from emmy.compiler.ir.cuda import CudaOp
 
@@ -415,15 +330,14 @@ def test_fp16_max_reduction_stays_in_fp16():
     # The accumulator is f16: a selection needs no precision boost.
     folds = statements(kernels_of(compiled), Accum)
     assert folds and all(fold.dtype == dt.F16 for fold in folds), folds
-    # CUDA spelling: moves to the PTX compiler's tests
     sources = "\n".join(n.op.kernel_source for n in compiled.nodes.values() if isinstance(n.op, CudaOp))
-    # The combine uses __hmax (native fp16 max), not fmaxf.
-    assert "__hmax" in sources, f"expected __hmax intrinsic for fp16 max, got:\n{sources}"
+    # The combine is the half maximum, not the f32 one.
+    assert "max.f16" in sources and "max.f32" not in sources, f"expected the half maximum, got:\n{sources}"
 
 
 @requires_cuda
 def test_f32_floor_renders_and_rounds_down():
-    """``floor`` (Ministral 3's position-dependent query scale) renders as ``floorf``."""
+    """``floor`` (Ministral 3's position-dependent query scale) is the conversion that rounds toward minus infinity."""
     from emmy.compiler.backend.cuda.backend import CudaBackend
     from emmy.compiler.ir.cuda import CudaOp
 
@@ -432,9 +346,8 @@ def test_f32_floor_renders_and_rounds_down():
     g.add_node(op=ElementwiseOp("floor"), inputs=["x"], output=Tensor("y", (1024,), dt.F32), node_id="y")
     g.inputs, g.outputs = ["x"], ["y"]
     compiled = CudaBackend().compile(Pipeline.build(LOOP_PASSES).run(g))
-    # CUDA spelling: moves to the PTX compiler's tests
     sources = "\n".join(n.op.kernel_source for n in compiled.nodes.values() if isinstance(n.op, CudaOp))
-    assert "floorf" in sources, sources
+    assert "cvt.rmi." in sources, sources
 
     x_data = (np.random.default_rng(2).standard_normal(1024) * 8).astype(np.float32)
     result, _ = CudaBackend().run(compiled, input_data={"x": x_data})

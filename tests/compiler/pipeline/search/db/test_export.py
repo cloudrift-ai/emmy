@@ -68,7 +68,7 @@ def test_a_kernel_pool_opens_the_candidates_its_golden_program_opens(tmp_path):
     assert (group.key, group.name, group.tier, group.gpu) == (f"{GPU_5090}/{pool.name}", pool.name, "warp", GPU_5090)
 
     case = corpus.load_case(corpus.CASES_DIR / _MATMUL)
-    ctx = Context.from_target(case.compute_cap, gpu_name=CARDS[case.compute_cap], compile_flags="")
+    ctx = Context.from_target(case.compute_cap, gpu_name=CARDS[case.compute_cap], precision={})
     with pinned_knobs(case.row.pins):
         file_side = enumerate_graph(case.program(), ctx)
     db_side = enumerate_pool(pool, pool_context(pool))
@@ -99,7 +99,7 @@ def test_a_carried_kernels_pool_offers_both_storage_arms_and_a_golden_lands_on_i
 
     graph = carried_state_graph()
     kernel = KernelDef(loop_ir=graph.to_wire(), formed=True)
-    ctx = Context.from_target((7, 0), gpu_name=CARDS[(7, 0)], compile_flags="")
+    ctx = Context.from_target((7, 0), gpu_name=CARDS[(7, 0)], precision={})
     schedule = {k: v for k, v in _PINS.items() if k in ("WORK", "REDUCE")}
     with pinned_knobs({"FAST_MATH": True}):
         file_side = enumerate_graph(graph, ctx, prefer=schedule)
@@ -286,7 +286,7 @@ def test_a_placement_label_is_what_the_golden_of_that_card_did():
     db = tuned_db(None, (_CUT,), source="golden:case")
     [parent] = [pool for pool in placement_pools(db, golden_pools(db)[0]) if pool.rows]
     other = "NVIDIA Tesla V100 SXM3 32GB"
-    whole = dict(us=1.0, flags=parent.regime, bindings=parent.bindings, knobs={"WORK": "t1"})
+    whole = dict(us=1.0, bindings=parent.bindings, knobs={"WORK": "t1"})
     db.record_perf_row(perf_row(parent.kernel.exact_identity, gpu=parent.gpu, cc=70, source="golden:case", **whole))
     db.record_perf_row(perf_row(parent.kernel.exact_identity, gpu=other, cc=70, source="golden:other", **whole))
     assert {pool.gpu for pool in golden_pools(db)[0] if pool.kernel == parent.kernel} == {parent.gpu, other}
@@ -298,7 +298,7 @@ def test_a_cut_a_golden_took_is_the_label_with_no_piece_measured():
     """What a golden did is the label, not what it measured: a file whose rows lost their times still says where
     it cut the kernel, and the placement space marks that cut though the DB holds no measurement of any piece."""
     case = corpus.load_case(corpus.CASES_DIR / _CUT)
-    ctx = Context.from_target(case.compute_cap, gpu_name=CARDS[case.compute_cap], compile_flags="")
+    ctx = Context.from_target(case.compute_cap, gpu_name=CARDS[case.compute_cap], precision={})
     db = SearchDB()
     assert import_rows(db, ctx, case.document, [replace(row, measurements=None) for row in case.rows], source="golden:case") == 0
     pools, _dropped = golden_pools(db)

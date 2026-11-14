@@ -508,7 +508,8 @@ contract lives in [native/ARCHITECTURE.md](native/ARCHITECTURE.md); vLLM remains
   table-resolved inputs and no decoded dense expert weight exists.
   Single-token sparse decode uses the generic fixed-slot tier: the selected experts' E-leading coded tensors are
   gathered by the selector, their factorized contraction runs batched over the picks, and the routed outputs combine
-  in fp32. EXL3 has no format-specific operation, native helper, or CUDA source below the birth-time spelling boundary.
+  in fp32. EXL3 has no format-specific operation, native helper, or hand-written kernel below the birth-time spelling
+  boundary.
   Prefill and unsupported fixed-slot shapes use the same generic symbolic programs rather than a separate kernel path.
 
   A **hyper-connection** architecture (DeepSeek V4, Qwen3.8-Flash-Next) changes what the seam carries, and the runner
@@ -939,13 +940,13 @@ Recorded follow-ups, in impact order:
   **generative** path no longer needs it: `run_device` is capture-aware and `serve --runner generate` defaults to
   whole-step decode graphs (see `gen_runner.py` above). A checkpoint with GDN layers is the exception: it serves
   eager (see `vllm_model_gen.py` above).
-- Startup compiles the whole model (~1–2 min for 0.6B warm-cubin-cache; first boot pays nvcc). `EMMY_CUBIN_CACHE`
+- Startup compiles the whole model (~1–2 min for 0.6B warm-cubin-cache; first boot pays ptxas). `EMMY_CUBIN_CACHE`
   persistence across container restarts is what keeps reboots fast. **`EMMY_PACK_DIR`** cuts the rest of the warm
   boot: `EmmyForwardRunner.create` keys an execution-plan pack (`compiler/backend/pack.py`) on model id + config
   hash + serving shape — a hit loads binary-keyed plans (`CompiledProgram.build_from_plan`) and skips trace, pass
   pipeline, fork resolution, and codegen entirely (weights still bind from the checkpoint via the plan's
   `source_path` refs); a miss compiles in full and writes the pack for the next boot. Any mismatch — retune under
-  a different config, nvcc/toolkit change, evicted cubin — silently falls back to the full compile; a changed golden
+  a different config, ptxas change, evicted cubin — silently falls back to the full compile; a changed golden
   recompiles only the programs whose rows it changed (next bullet).
   The generative arm's key drops the model id (a baked image resolves the model to a snapshot *path* offline while
   the warm boot uses the hub id) and excludes only `eos_token_id` from the config digest: EOS is generation policy

@@ -81,7 +81,7 @@ To verify a row still living in a working golden file, select both the file and 
 on every command (`run`, `compile`, `serve`):
 
 ```bash
-emmy compile --golden _tune/model/working.json --realization target.name --ir cuda
+emmy compile --golden _tune/model/working.json --realization target.name --ir ptx
 emmy run --golden _tune/model/working.json --realization target.name --bench
 ```
 

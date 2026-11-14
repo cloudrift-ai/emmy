@@ -2,7 +2,7 @@
 
 The release pipeline for **one model on one GPU**, served by `EmmyGenModel`, with the compiled CUDA kernels
 (**cubins**), the **HF model snapshot**, and the **execution-plan pack** (`emmy/compiler/backend/pack.py`) baked in.
-Cold-start pays zero `nvcc` compiles, zero HF downloads, and — on a pack hit — none of the compiler frontend either
+Cold-start pays zero `ptxas` runs, zero HF downloads, and — on a pack hit — none of the compiler frontend either
 (no trace / pass pipeline / fork resolution / codegen; boot collapses from ~25 min to ~weight-load time), so
 `docker run --gpus all --ipc=host -p 8000:8000
 cloudriftai/vllm-emmy-<slug>:<runtime-version>-<source-sha>` serves with no `HF_TOKEN` and no network dependency on
@@ -63,25 +63,23 @@ and target GPU, and `make serve-models` lists the models that already have a pin
 
 ## Why a "warm" step exists: the cache-key parity contract
 
-**Why not just cross-compile?** `nvcc` targets any arch from any machine, but the cache is **content-addressed, not
-searched**: at boot the server generates each kernel's source,
-computes `sha1(source, name, arch, toolkit_tag, flags)` (see `emmy/compiler/backend/cuda/nvcc.py`), and looks up
-that exact file. A cubin built from source that differs by one character has a different hash and is simply never
+**Why not just cross-compile?** `ptxas` assembles for any arch on any machine, but the cache is **content-addressed,
+not searched**: at boot the server generates each kernel's PTX, computes `sha1(ptx, arch, ptxas_version)` (see
+`emmy/compiler/backend/cuda/ptxas.py`), and looks up that exact file. A cubin built from PTX that differs by one
+character has a different hash and is simply never
 found — locally-produced cubins aren't "slightly worse", they're invisible. So the image doesn't need "kernels that
 run on the target card"; it needs **the exact kernels the released server will ask for**, and two of the hash inputs can't be
 reproduced off the card:
 
-- the kernel **source** — the compiler picks each kernel's schedule partly from the **live-probed** GPU features; a
-  memorized-spec cross-compile can drift on any feature that steers a pick, changing the source text and the hash;
+- the kernel's **PTX** — the compiler picks each kernel's schedule partly from the **live-probed** GPU features; a
+  memorized-spec cross-compile can drift on any feature that steers a pick, changing the text and the hash;
 - the kernel **set** — the programs are enumerated by an actual `emmy serve --generate` boot (48 layers × symbolic +
   decode twins at the pinned config), which must load the ~24 GB model — a serving run, not a compile.
 
 Hence the warm: one real serving run on the target card, inside the image. The full contract it satisfies:
 
-- `source` — live-probed target-card featurization + the real program enumeration (above).
-- `toolkit_tag` is the compiling nvcc — the warm must run **inside the image**, not on the host toolchain.
-- `flags` — production `-O3`: never warm with `EMMY_NVCC_FLAGS` set to a non-deployable opt level (it would
-  poison the key).
+- `ptx` — live-probed target-card featurization + the real program enumeration (above).
+- `ptxas_version` is the assembling ptxas — the warm must run **inside the image**, not on the host toolchain.
 - The serving config (model / revision / dtype / max-model-len / max-num-batched-tokens / decode bucket / cudagraph
   capture ladder / any pinned flag that moves the plugin's path, such as `--kv-cache-dtype`) changes **which
   programs exist and their shapes** — warm and release must use identical values. The revision is the one whose

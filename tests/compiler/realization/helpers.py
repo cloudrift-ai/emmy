@@ -4,11 +4,12 @@ A case file is a golden with one traced program and one target kernel; its rows 
 compiler is expected to realize — one per kernel of the set the target compiles to — and its routing rows the
 kernel-set decisions that mint the pieces. ``realized``, ``built`` and ``correct`` ask the whole set of the compile
 the way a deploy would: the case is the compile's only evidence, strict, and no hand pin rides beside it
-(:func:`evidence_scope`). Everything here is GPU-free except :func:`built` and :func:`correct`.
+(:func:`evidence_scope`). Everything here is GPU-free except :func:`correct`; :func:`built` needs ptxas.
 """
 
 from __future__ import annotations
 
+import functools
 import re
 from contextlib import contextmanager
 from dataclasses import dataclass, replace
@@ -330,24 +331,52 @@ def _unstamped_families(knobs: dict, rows: list[dict]) -> set[str]:
     return wanted - stamped
 
 
-def built(case: Case):
-    """Stage 2 — nvcc accepts the kernel the evidence picks. Returns the compiled graph, raising on refusal."""
-    from emmy.compiler.backend.cuda.program import CompiledProgram  # noqa: PLC0415
-    from emmy.compiler.backend.gpu_lock import gpu_lock  # noqa: PLC0415
+@functools.cache
+def assembles(compute_cap: tuple[int, int]) -> bool:
+    """Whether the installed ptxas assembles code for a card of ``compute_cap``: the one of CUDA 13 no longer takes
+    ``sm_70``, which an older toolkit's does."""
+    import subprocess  # noqa: PLC0415
+    import tempfile  # noqa: PLC0415
 
-    graph, _taken = lowered(case, Context.probe())
-    with gpu_lock():
-        CompiledProgram.build(graph, seeded_inputs(case.program()))
+    from emmy.emmy_ir import compile_ptx, parse_body  # noqa: PLC0415
+
+    from emmy.compiler.backend.cuda import ptxas  # noqa: PLC0415
+    from emmy.compiler.dtype import F32  # noqa: PLC0415
+    from emmy.compiler.ir.kernel.interface import Interface, Param  # noqa: PLC0415
+
+    major, minor = compute_cap
+    body = "Grid(axes=(i in 0..256), decode=(thread_idx.x), block_threads=256):\n    f32 x = load a[i]\n    f32 o[i] = x"
+    interface = Interface((Param("a", "input", F32, "a"), Param("o", "output", F32, "o")), {}, 0)
+    probe, _ = compile_ptx("probe", parse_body(body), interface, sm=major * 10 + minor)
+    with tempfile.TemporaryDirectory() as scratch:
+        text = Path(scratch) / "probe.ptx"
+        text.write_text(probe)
+        command = [ptxas.ptxas_path(), f"-arch=sm_{major}{minor}", "-o", str(Path(scratch) / "probe.cubin"), str(text)]
+        return subprocess.run(command, capture_output=True).returncode == 0
+
+
+def built(case: Case):
+    """Stage 2 — ptxas assembles every kernel the evidence picks, for the case's declared card. GPU-free: the code is
+    the case's at its declared capability, as :func:`realized` lowers it. Returns the lowered graph, raising on a
+    refusal."""
+    from emmy.compiler.backend.cuda import ptxas  # noqa: PLC0415
+    from emmy.compiler.ir.cuda.ir import CudaOp  # noqa: PLC0415
+
+    graph, _taken = lowered(case, case.context())
+    for node in graph.nodes.values():
+        if isinstance(node.op, CudaOp):
+            ptxas.compile_to_cubin(node.op.kernel_source, node.op.kernel_name)
     return graph
 
 
-def correct(case: Case, compiled) -> None:
-    """Stage 3 — the kernel the evidence picks computes the reference answer: the kernel's traced ops run on the
-    numpy backend (``GoldenFile.reference_program``); a kernel with no exact frontend twin compares against the
-    same-input greedy execution of the same program."""
+def correct(case: Case) -> None:
+    """Stage 3 — the kernel the evidence picks computes the reference answer on the card: the kernel's traced ops run
+    on the numpy backend (``GoldenFile.reference_program``); a kernel with no exact frontend twin compares against
+    the same-input greedy execution of the same program."""
     from emmy.compiler.backend.cuda.backend import CudaBackend  # noqa: PLC0415
     from emmy.compiler.backend.numpy import NumpyBackend  # noqa: PLC0415
 
+    compiled, _taken = lowered(case, Context.probe())
     program = case.program()
     sources = {}
     feed = seeded_inputs(program, sources=sources)
@@ -440,8 +469,7 @@ def _tolerance(narrow: bool, reference: np.ndarray) -> dict[str, float]:
 #
 # The stages above answer "can this schedule be realized and is it correct". This answers "and is it still as fast
 # as it was" — the failure a lockout leaves behind when the compiler quietly stops selecting a schedule and falls
-# back to a slower tier. It cannot ride the correctness walker: `make test` compiles at `-Xcicc -O1`, which is not a
-# measurement lane.
+# back to a slower tier. It cannot ride the correctness walker: `make test` never measures.
 
 #: Where a stored latency stops being a match. MEASURED, not guessed: ten estimates per case over four repeats on an
 #: idle RTX 5090, spanning 1.5 us to 579 us, put the best-of-three estimator's own run-to-run spread at a median of
@@ -486,14 +514,13 @@ def bench_command(case: Case, output: Path) -> list[str]:
 
 def measure(case: Case, *, within: float | None = None) -> tuple[list[float], float]:
     """Best-of-N emmy microseconds for the case's own schedule, and the torch.compile number. Stops early once a
-    sample lands at or below ``within``. Deployable optimization is forced: the correctness lane's `-O1` changes
-    runtime performance."""
+    sample lands at or below ``within``."""
     import json  # noqa: PLC0415
     import os  # noqa: PLC0415
     import subprocess  # noqa: PLC0415
     import tempfile  # noqa: PLC0415
 
-    environment = {**os.environ, "EMMY_NVCC_FLAGS": ""}
+    environment = dict(os.environ)
     samples: list[float] = []
     tcompile = 0.0
     with tempfile.TemporaryDirectory(prefix="emmy_corpus_bench_") as directory:

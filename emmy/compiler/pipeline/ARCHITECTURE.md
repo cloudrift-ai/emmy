@@ -62,7 +62,7 @@ spot from knowledge recorded earlier, in a fixed order — measured first:
 
 That order has a name — the **deploy evidence hierarchy**. The list above is only a summary. **Part 3's "The deploy
 evidence hierarchy" is the authoritative statement** of the exact order, of what the evidence index holds, and of the
-rule that measured evidence applies only to a compile at deployable `-O3` flags.
+rule that measured evidence applies only to a compile in the regime it was measured in.
 
 Kernel-set forks — a cut, a split, a weight layout: the ones that change a kernel's identity or the kernel set —
 follow the same rule, and are decided before any schedule. A cut or split decision the tune DB stores on the kernel (a
@@ -103,7 +103,7 @@ recorded from those rows ────────────▶ recipe-local / 
                                        weights/schedule.json, placement.json ▶ greedy compile, the priors
 ```
 
-Benchmarks use deployable compiler flags. Their context also distinguishes precision and hot/cold cache regimes:
+Benchmarks measure the code a deploy runs. Their context distinguishes precision and hot/cold cache regimes:
 a compile reads only matching evidence, and freeze/export preserve the regime. Cold timing fetches weights from
 memory before each kernel; it does not predict the partial cache reuse of a complete serving request. The regime a
 compile runs in is declared, never inferred from the rows: a serving config declares its server's cache regime
@@ -119,7 +119,7 @@ rule matches a `LoopOp` and returns several tile options.
 2. `greedy_decide` first tries to descend directly to a measured complete row. Without direct evidence,
    it ranks the complete offered rows — streamed off the lazy walk in bounded chunks, so memory stays O(chunk)
    however large the pool; no kernel is built until the choice is made (Part 4).
-3. Each compared row contains the compile context's `H_*` features (which GPU, which nvcc flags), the kernel's `S_*`
+3. Each compared row contains the compile context's `H_*` features (which GPU, which regime), the kernel's `S_*`
    features (a summary of its body and loop extents, computed from the kernel), and complete knob values (Part 6).
 4. **The evidence index.** The fastest measured row of the same kernel — the same exact identity — at the sizes the
    compile binds its symbolic dims to, that agrees with an offered leaf: a tune DB `perf` row under this compile's own
@@ -157,7 +157,7 @@ Everything in this table recurs on nearly every page below. The rest of the docu
 | **to pin a knob** | To force a knob's value by hand instead of letting the compiler choose — from the environment (`EMMY_STAGE=d2/smem-async`), or by reproducing a golden entry's recorded values. A *pinned row* is a benchmark of such a forced configuration. |
 | **to stamp a value** | To write a value onto an op as metadata, where later passes can read it: the knob values a fork decided. Nothing computed from the op is stamped onto it: a kernel's name is computed from its exact identity (`wire.kernel_name`), and its `S_*` *stamps* — its shape/body features — keep the word but are computed from the kernel where they are read (`features.stamps`). |
 | **to realize** | A recorded configuration *realizes* at a fork when the options the compiler actually offers there include one that matches it. A recording that realizes nowhere cannot be deployed, no matter how good its recorded µs. |
-| **regime** | The compiler flags, precision pins and hot/cold cache mode a measurement was taken under. Benchmarks use deployable `-O3`; a compile reads evidence from its matching regime. |
+| **regime** | The precision pins and hot/cold cache mode a measurement was taken under; a compile reads evidence from its matching regime. |
 | **prior** | The ranking model — the **offline prior**, fit ahead of time by `emmy fit` and shipped with the repo. It answers only where nothing measured decides. |
 | **terminal** | A fully-lowered candidate (every fork on its path resolved) that can be benchmarked. |
 | **golden file** | A card's measurements in the tune DB's shape — kernels, kernel-set decisions, measured rows — beside the traced programs they came from. It stores inputs only; a compile imports its rows under the identity it computes from each stored kernel. |
@@ -520,7 +520,7 @@ the model can rate some of them far above the golden. On the V100 Qwen3.8-27B-FP
 reproduced. The fix is a fit and a gate that draw the way the deploy draws; until then a cold V100 compile needs
 recorded evidence.
 
-**A subtlety about features.** The `H_*` features (which GPU, which nvcc level) have the same value for every
+**A subtlety about features.** The `H_*` features (which GPU, which regime) have the same value for every
 candidate competing at one fork, so on their own they cannot change a ranking within that set. A tree can still
 combine one with a per-candidate feature — split on the card, then on the accumulator width — which is how a single
 model can prefer f16 accumulation on one architecture and f32 on another; the default view carries `H_cc` for that
@@ -569,8 +569,7 @@ At a **schedule fork** (one kernel's row):
    otherwise fail no earlier than leaf matching. An off merely inherited down the branch is a pin rather than a
    decision and still admits. The index is built once per compile and memoized per process on
    the DB path and mtime, the context key and the card. It holds the DB's `perf` rows of the context's backend for this
-   compile's context key (one lane, because a sweep measures in the regime a deploy compiles in; rows from a
-   deliberately non-deployable `--nvcc-flags` run key elsewhere and are simply never consulted) — the box's own
+   compile's context key (one lane, because a sweep measures in the regime a deploy compiles in) — the box's own
    `run --bench` rows and the **golden rows** in scope, which the compile imports before it picks
    (`golden.evidence.evidence_db`): the live card's repository files, or the file `--golden PATH` names, once per
    golden digest into the tune DB — created on first use, and imported under the lock beside the file so the workers
@@ -799,8 +798,8 @@ design, so there only a node with a recorded rejection counts.
 ## Part 5: Recording evidence
 
 Nothing in this package benchmarks on its own initiative. A measurement is taken by `run --bench`, and it reaches
-the next compile as a `perf` row of the tune DB. Every writer records in the deployable regime — the flags `compile` /
-`run` / `serve` use — so a recorded latency is the deployed latency and no store carries a per-regime lane (Part 3).
+the next compile as a `perf` row of the tune DB. Every writer records in the deployable regime — the precision decisions `compile`
+/ `run` / `serve` use — so a recorded latency is the deployed latency and no store carries a per-regime lane (Part 3).
 
 - **`run --bench`** records every clean pinned row (a golden row, an `--ab` row) and the greedy pick's own isolated
   re-bench, one `kernel` + `perf` row per benched kernel (`bench_record.persist_kernel_perf`), so a replayed golden
@@ -827,11 +826,9 @@ All bench timings are **CUDA-graph-captured** by default (pure GPU time); each `
 `captured` column, and on write a captured measurement supersedes a wall-semantics one for the same key (never the
 reverse), so old rows upgrade in place.
 
-**One measurement regime.** The single-regime rule was measured, not assumed. An earlier sweep ranked candidates at
-`-Xcicc -O1` and re-benched near-best configs at `-O3`, which put a proxy in charge of the search. The proxy's error
-was *biased along tile area* — the axis being tuned — so it systematically priced wide tiles as slow (paired over
-1,818 configs: p90 regret 1.68×, and the `-O1` argmin was the `-O3` argmin on only 44.5% of pools), and the compile
-time it was buying no longer existed: over 4,888 nvcc compiles, `-O3` compiled at a median 0.96× of `-O1`.
+**One measurement regime.** A search ranks candidates by the code a deploy runs, never by a cheaper proxy build: a
+proxy's error lies along the axes being tuned. ptxas assembles every kernel one way, and no context, feature or `perf`
+row names an optimization level.
 
 Searching a kernel's schedule space on the card is future work: a ranked sweep that scores the kernel's complete rows
 with the offline prior, benches the top few, searches locally from the best measured one, and writes what it measures
@@ -911,11 +908,11 @@ tables hold compilable kernels, the decisions that minted them, and measurements
 - **`context`** — one row per backend, card and regime: the card (`Context.hardware_id`, the PCIe product name — two
   SKUs off one die, H100 and H200, RTX 5090 and RTX PRO 6000, share a compute capability, and without it their rows
   would overwrite each other), the target as the backend spells it (`sm_120`; on the CPU backend, LLVM's name for
-  the host CPU, with the card its product name and thread count — `Context.for_cpu`), the cicc opt level and the
-  residual compiler flags (`""` in the plain regime, so `""` and `-Xcicc -O3` are one regime), every effective
-  precision decision, and `cold_cache`. Independent overrides of the `FAST_MATH` umbrella partition evidence even
-  when they leave nvcc flags unchanged. The context captures these inputs before compilation; A/B recording
-  reconstructs it inside each row's replay-pin scope. Omitted independent pins inherit the recorded umbrella.
+  the host CPU, with the card its product name and thread count — `Context.for_cpu`), every effective precision
+  decision, and `cold_cache`. Independent overrides of the `FAST_MATH` umbrella partition evidence like any other
+  decision. The context captures these
+  inputs before compilation; A/B recording reconstructs it inside each row's replay-pin scope. Omitted independent pins
+  inherit the recorded umbrella.
   Publishing a recorded regime spells those effective defaults explicitly, so ambient overrides cannot leak in;
   equivalent omitted and explicit defaults share one regime without rewriting the stored row's pins.
   Cold measurements evict L2 and the instruction caches before each timed launch. The replayable `COLD_CACHE` golden input pin carries that
@@ -983,15 +980,12 @@ its regime as the input pin `FAST_MATH`, its median. A freeze has no traced prog
 data but nothing a restamp can lower again; a compiler change that re-keys a kernel leaves its frozen rows behind.
 
 - **What freezes** is `freeze_reason(row, shape)`'s call, `shape` being the stamps of the row's kernel, computed
-  from its stored definition (`freeze.kernel_ops`): an `ok` row on a card the GPU registry knows, at the deployable
-  opt level, whose kernel still lowers (one that does not is dropped as a stale kernel), that passes the two
+  from its stored definition (`freeze.kernel_ops`): an `ok` row on a card the GPU registry knows whose kernel still
+  lowers (one that does not is dropped as a stale kernel), that passes the two
   physical-plausibility checks (`implausible_value_reason`, which reads the row's
   `bindings` as the size a symbolic axis ran at, and `impossible_kernel_reason`). The effective precision decisions
-  and cache mode define its regime (`regime_of`), including independent overrides; other compiler flags are not
-  stored or gated on. A failed bench is not a measurement (the tune DB keeps it), and a row a compile imported from
-  a golden file is the file's. The opt-level gate is what keeps a freeze a fair yardstick: a freeze is the corpus
-  a reported prior number is computed over, so rows from a regime nothing deploys in would put half a card's pools
-  in a lane no one runs.
+  and cache mode define its regime (`regime_of`), including independent overrides. A failed bench is not a
+  measurement (the tune DB keeps it), and a row a compile imported from a golden file is the file's.
   `measured_groups` inherits the same filter, and keys its pools by regime, so an analysis over a live DB agrees with
   one over a freeze.
 - **Freezing the same DB twice yields the same bytes**: rows sort by content, and the golden dump is deterministic.
@@ -1032,8 +1026,8 @@ implausible arithmetic intensity) and anything from the `--ir` path are never re
 
 **A failure blames one kernel** (`bench_record.persist_bench_failure`, the one writer for a failed bench, which `run
 --bench`'s greedy row comes through). A kernel whose row is a `bench_fail` fails every graph it is in — its identity
-is its rendered source and launch geometry, the same bytes wherever it appears — so a failure is recorded only
-against the kernel the failure names — the watchdog's hang, or nvcc's refusal of a kernel's source — and the innocent
+is its PTX and launch geometry, the same bytes wherever it appears — so a failure is recorded only
+against the kernel the failure names — the watchdog's hang, or ptxas's refusal of a kernel's PTX — and the innocent
 kernels stay rowless; the name is read off the message text, since the exception class does not cross the worker
 pipe, and with the quote `repr` escapes when the message also holds a `"`. A failure that names no kernel in a
 multi-kernel graph — a wall kill — blames none of them and records nothing: the DB holds measurements of kernels and
@@ -1324,15 +1318,15 @@ recorded as an ordinary row). The nightly refresh posts those counts per space.
 projecting the packed matrix onto the model's own columns with its own absent-value fill — is where a score comes
 from.
  - A MEASURED pool (`--pools measured`: the dataset's measured pools — the DB's `perf` rows, every candidate benched,
-grouped by `(gpu, kernel signature, H_opt)`) can answer what a wrong pick COST — Spearman over the pool, and regret at
+grouped by `(gpu, kernel signature, regime)`) can answer what a wrong pick COST — Spearman over the pool, and regret at
 k=1 (the deploy question: the pick ships, so its latency IS the cost) and k=10 (the tuning question: bench the top
 ten, keep the measured best). This is the half that tracks deployed speed.
 - A GOLDEN pool (`--pools golden`: an enumeration with the verified-optimum row marked) can only answer WHERE the
   known-good row landed, and is reported as a SCREEN. A rank is blind to the latency gap behind it, and the corpus
   aggregate is dominated by pools small enough to rank by accident, so golden summaries are stratified by pool size.
 
-**Every summary publishes what it covered.** Summaries carry the axes they were keyed on as a dict — measured: `gpu` ×
-`H_opt`; golden: `gpu` × `tier` × pool-size bucket — along with how many pools keyed into them, how many the model
+**Every summary publishes what it covered.** Summaries carry the axes they were keyed on as a dict — measured: `gpu`;
+golden: `gpu` × `tier` × pool-size bucket — along with how many pools keyed into them, how many the model
 could not score at all, and — where a metric has a size minimum and so covers fewer pools than the summary holds —
 that metric's own count. The minimums differ (regret needs two rows, Spearman five, regret@10 eleven), so on the RTX
 5090 freeze's 176 pools those counts are 149, 107 and 45. An aggregate that averaged the excluded pools in would be
@@ -1607,26 +1601,26 @@ hold decisions only, every key a registered knob (Part 6).
 **`FAST_MATH` / `F16_MMA_F32_ACC` / `FP8_MMA` / `FAST_EXP` / `FAST_DIV` / `FAST_SQRT` / `FLUSH_TO_ZERO` /
 `CONTRACT_FMA`** (BOOL, pin-only precision restrictions) — the **precision-trading family**. Precedence per knob: its
 own pin > the `FAST_MATH` umbrella > true (`space.precision_pin`); `CONTRACT_FMA` alone keeps its own default, on in
-both regimes as nvcc's is, so only its own pin turns contraction off (`space.precision_default`). `F16_MMA_F32_ACC`
+both regimes, so only its own pin turns contraction off (`space.precision_default`). `F16_MMA_F32_ACC`
 admits the fixed domain's f16-accumulate atom choices (`mma_m16n8k16_f16_f16` — chunked f32 register promote), while
 `FP8_MMA` admits its native fp8 atoms. Without the effective gate, Algorithm 1's immutable context excludes those
 choices while composing its lazy frontier.
 The other five are one knob per instruction class, each picking the instruction its class compiles to.
-`FAST_EXP` swaps libm `expf` for `__expf` (`lowering/kernel/130_approximate_math`); `FAST_DIV` picks approximate division
-and reciprocal, and is the one home of multiplying by a reciprocal (`lowering/kernel/040_split_invariant_divides`);
+`FAST_EXP` swaps the exact exponential for the approximate one (`lowering/kernel/130_approximate_math`); `FAST_DIV`
+picks approximate division and reciprocal, and is the one home of multiplying by a reciprocal
+(`lowering/kernel/040_split_invariant_divides`);
 `FAST_SQRT` the approximate square root; `FLUSH_TO_ZERO` flushes subnormals; `CONTRACT_FMA` fuses a multiply and an
 add. `FAST_EXP` with `FLUSH_TO_ZERO` off is the fast exponential that keeps subnormal results: ptxas lowers the
-non-flushing `ex2.approx.f32` under `__expf` to one hardware exponential on a halved argument and a squaring of its
+non-flushing `ex2.approx.f32` to one hardware exponential on a halved argument and a squaring of its
 result, as accurate there as an explicit shift and scale. The approximate instruction of a class is an operation the
 kernel body names (`exp_fast`, `divide_fast`, `reciprocal_fast`, `sqrt_fast`), written by
 `lowering/kernel/130_approximate_math`; with the umbrella and `FAST_EXP` both on, the same pass picks the approximate
 logarithm, sine, cosine, hyperbolic tangent and power, which no knob names. Flush to zero and contraction hold for a
-whole kernel, so they are the two nvcc flags (`backend.cuda.nvcc.precision_flags`): `--ftz=true` and `--fmad=false`,
-each where the decision is not nvcc's default. nvcc is never passed `--use_fast_math`, `--prec-div` or `--prec-sqrt`:
-it compiles what the body does not name approximate at its own precise defaults. The fast-math lane's flag string is
-therefore `--ftz=true`, and it is part of that lane's context key and of its cubin keys.
-`FAST_MATH` remains `unfeatured`: schedule choices keep their concrete knob identity, and the flush flag
-and independent overrides separate measurement contexts.
+whole kernel, so they reach the PTX compiler as its two precision decisions. What the body does not name approximate
+is compiled exact. The context key folds in every effective precision decision, the umbrella's included, and a
+dataset names a regime by the umbrella and the decisions that differ from it (`dataset.regime_of`: `FAST_MATH`,
+`FAST_MATH CONTRACT_FMA=0`). `FAST_MATH` remains `unfeatured`: schedule choices keep their concrete knob identity,
+and the regime separates measurement contexts.
 New golden inventories and measurements record the effective umbrella explicitly, so replay preserves that regime.
 
 ### Classic schedule keys
@@ -1670,7 +1664,7 @@ of algebraic rewrites they may apply are documented there too.
 | `loop/fusion/`            | `roll_recurrence` first rolls an unrolled recurrence into one kernel that carries its state (`passes/ARCHITECTURE.md`). `merge_loop_ops` then maximally splices each downstream Loop region without consulting Tile IR or schedule support. Non-reconvergent consumers become ports of one multi-output `LoopOp`; one shared splicer worklist deduplicates their common producers. Only semantic splice legality stops a merge. |
 | `tile/{lift,cut,schedule}/` | `010_lift` forms each kernel through `lift_kernel`, the formation cut and split pieces share: it re-fuses free axes a fused reshape split (`p → f/Q, q → f%Q`, kept only when every access folds clean), so split and unsplit spellings of one contraction converge to one kernel identity, then converts the complete inner loop nest to a canonically factored Fold tree; `020_twisted` rewrites the exp family; `030_cut` reaches a fixpoint over stored-edge cuts, constant layouts, then cross-CTA splits; `040_schedule` schedules each stored tree. |
 | `lowering/kernel/`        | `010_materialize` lowers the selected schedule through `_factor.factorize`, followed by the Kernel IR peepholes. See [`passes/lowering/kernel/ARCHITECTURE.md`](passes/lowering/kernel/ARCHITECTURE.md). |
-| `lowering/cuda/`          | `delegate_zero_init` (first) moves an atomic accumulator's per-launch zero-init off the runtime memset and into a dataflow-predecessor kernel as a `ZeroPrologue` stmt (every thread of the grid writes a stride of zero words ahead of the kernel's own work; stream order guarantees happen-before) — one CUDA-graph MEMSET node saved per site; the capture's first launch and symbolic-shaped accumulators keep their memset, and the slab planner starts the buffer's live interval at the delegating launch (`CudaOp.zero_prologues`). `lower_kernelop` then renders the `KernelOp` body to a `__global__` source string (`ir/kernel/render.py::render_kernelop`) and mutates the node's op to `CudaOp` in place. |
+| `lowering/cuda/`          | `delegate_zero_init` (first) moves an atomic accumulator's per-launch zero-init off the runtime memset and into a dataflow-predecessor kernel as a `ZeroPrologue` stmt (every thread of the grid writes a stride of zero words ahead of the kernel's own work; stream order guarantees happen-before) — one CUDA-graph MEMSET node saved per site; the capture's first launch and symbolic-shaped accumulators keep their memset, and the slab planner starts the buffer's live interval at the delegating launch (`CudaOp.zero_prologues`). `lower_kernelop` then compiles the kernel to PTX with the Kernel IR to PTX compiler (`ir/kernel/ptx.py`, the `emmy-ptx` crate) and mutates the node's op to `CudaOp` in place; a refusal of the compiler is an error. |
 
 SiLU decomposition follows PyTorch opmath precision: f16 and bf16 inputs widen once to f32, the primitive
 negative/exp/denominator/reciprocal chain and final product compute in f32, and the result converts once to the

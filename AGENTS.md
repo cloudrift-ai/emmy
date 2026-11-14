@@ -34,12 +34,15 @@ relevant `ARCHITECTURE.md` before answering.
 - Python 3.12+ with `venv`
 - A Rust toolchain (`cargo`): compiled programs execute through the Rust runtime (the `emmy.emmy_runtime`
   extension), and the compiler's statements and expressions are the `emmy.emmy_ir` extension; `make setup` builds
-  both into the package. Use the README architecture index for their design.
+  both into the package. The `emmy.emmy_ir` extension also holds the Kernel IR to PTX compiler, the only code
+  generator. Use the README architecture index for their design.
+- The CUDA toolkit's `ptxas` (on `PATH` or under `CUDA_HOME`), which assembles each kernel's PTX; NVIDIA ships it in
+  the `cuda-nvcc` package. nvcc itself is not used.
 - `make setup` to create the virtual environment and install dependencies
 - Docker and Docker Compose for local deployments
 - `HF_TOKEN` environment variable for HuggingFace model downloads
 - `EMMY_DUMP_DIR` environment variable (optional) — when set, compiler stages dump intermediate debug artifacts
-  (graphs, CUDA kernels, execution plans) to this directory. Frontend provenance slices used by `run --bench` stay
+  (graphs, each kernel's PTX, execution plans) to this directory. Frontend provenance slices used by `run --bench` stay
   in memory; stable Torch IR is persisted only inside golden files. A kernel's name is `k_` and the first 12 hex digits
   of its exact identity (`k_3f2a1b9c04de`), so it says nothing about the operations the kernel realizes.
 - `EMMY_FREEZE_DIR` environment variable (optional) — the directory a `run --bench --tune N` freezes its rows into as
@@ -61,7 +64,7 @@ relevant `ARCHITECTURE.md` before answering.
 All `EMMY_*` config env vars are read and written through one module — `emmy/config.py`, the sole owner of
 `os.environ` for these vars (the `EMMY_<KNOB>` namespace is the one exception, owned by
 `compiler/pipeline/knob.py`; provider/secret vars stay with `emmy/redact.py`). CLI `--flag` overrides (e.g.
-`--nvcc-flags`) resolve through `config.py` inside the library, not the command layer, so programmatic callers and tests
+`--golden`) resolve through `config.py` inside the library, not the command layer, so programmatic callers and tests
 get the same precedence. `config.py` is the source of truth for the full var list — do not maintain a copy here.
 
 ## Compiler Invariant: Loop Fusion Is Maximal
@@ -134,23 +137,15 @@ Contribution Instructions).
 make test                                                        # the whole suite — finalization only
 ```
 
-`make test` compiles CUDA kernels at **`-Xcicc -O1`** — the **correctness lane**: `-O1` changes runtime perf, not
-a kernel's numerics. It can change a pick, though: the opt level is a schedule-prior feature, and under the default
-fast math a pick can be an f16-accumulate atom. A test that checks numerics and leaves the schedule to the prior pins
-`FAST_MATH` off. The deployable perf tests (`tests/perf`, `-m perf`) are skipped here, running at `-O3` via
-`make bench-kernels`. It also sets `EMMY_GOLDEN_FILE=` (set, empty): no repository golden is evidence in this lane,
-because the lane never asks how fast a pick is and importing a card's goldens is work every worker process would
-repeat; a test that needs golden evidence scopes it itself (`--golden PATH`, `golden.records_override`). To re-run the suite at deployable `-O3`, prefix `EMMY_NVCC_FLAGS=` (empty) or run `pytest`
-directly. Every pytest session, `make test` or direct, also runs on a fresh tune DB (the root `tests/conftest.py`
+Every compile is the deployable one: the code a test builds is the code a served model runs. Under the default fast
+math a pick can be an f16-accumulate atom, so a test that checks numerics and leaves the schedule to the prior pins
+`FAST_MATH` off. The perf tests (`tests/perf`, `-m perf`) are skipped by `make test` and run via
+`make bench-kernels`. `make test` also sets `EMMY_GOLDEN_FILE=` (set, empty): no repository golden is evidence in
+the suite, because it never asks how fast a pick is and importing a card's goldens is work every worker process
+would repeat; a test that needs golden evidence scopes it itself (`--golden PATH`, `golden.records_override`). Every
+pytest session, `make test` or direct, also runs on a fresh tune DB (the root `tests/conftest.py`
 points `EMMY_TUNE_DB` at one unless the caller names one), so no test picks from a machine's stored measurements; a
 test that needs a DB sets its own.
-
-The lane saves far less than this file used to claim. Measured on an RTX 5090 (CUDA 13.0, 16 cores, one repo, only the
-opt level varying): cold cubin cache **923 s at `-O1` vs 1031 s at `-O3`** (1.12×); warm **718 s vs 760 s** (1.06×);
-identical results every run. The retired "~3× faster" was never re-measured after the WMMA→`mma.sync` migration
-removed the cicc unroll blowup it rested on. The cold/warm gap also puts kernel compilation at roughly a fifth of the
-suite's wall time, so it is not the dominant cost either. Keeping `-O1` here buys ~12% cold; dropping it would leave
-one compile regime everywhere in the repo.
 
 The default suite holds every repository golden — the hardware goldens and each maintained recipe's model golden —
 to the fresh lowering of its own traced programs: a restamp (`emmy golden restamp`) must change nothing, one test node
@@ -188,11 +183,12 @@ filename: no suffix means every stage must pass, `_xfail_<stage>` means it is a 
   the program lowers to. `make test` detects this on its own, on any machine; `make test-corpus-regen` is the fix —
   the same restamp every golden gets. It refuses to write when the restamped case's verdict contradicts its filename;
   that refusal is the signal, not an obstacle to work around.
-- **The corpus never asks for something this machine cannot do.** With no GPU, the only obligation is the stale case
-  above, and it is always fixable where you are: `realized` runs at the case's declared capability, while `built` and
-  `correct` run only on a card whose capability equals it.
-- **Latency is measured in `tests/perf/`, whose case list IS the corpus.** `make test` compiles at `-O1` and never
-  measures; `make bench-kernels` benches every closed case the card can run, prints the comparison against eager and
+- **The corpus never asks for something this machine cannot do.** With no GPU, the obligations are the stale case
+  above, always fixable where you are, and `built`: `realized` runs at the case's declared capability, `built`
+  assembles that code with ptxas for the declared card on any machine whose ptxas takes the target (CUDA 13's no
+  longer takes `sm_70`, so a Volta case is built where an older toolkit is installed), and `correct` runs only on a
+  card whose capability equals it.
+- **Latency is measured in `tests/perf/`, whose case list IS the corpus.** `make test` never measures; `make bench-kernels` benches every closed case the card can run, prints the comparison against eager and
   `torch.compile`, and reports a case slower than its stored number. A regression there is a finding, not a failure.
 - **Never write a benchmark script.** `emmy run --golden FILE --bench --record` benches a golden and writes its
   timings back. If it cannot express what you need, that is a missing flag to add, not a script to write.
@@ -266,9 +262,8 @@ Quick test models / scripts (for local iteration):
 ## Key Make Targets
 
 - `make setup` — create venv and install dependencies (includes ruff)
-- `make test` — run `pytest` using the venv (skips the off-lane `perf` / `goldens` tests). Compiles
-  kernels at `-Xcicc -O1` (correctness lane, ~12% faster than `-O3` on a cold cache; perf tests use `-O3` via
-  `make bench-kernels`)
+- `make test` — run `pytest` using the venv (skips the off-lane `perf` / `goldens` tests, which
+  `make bench-kernels` and the golden workflows run)
 - `make test-corpus-regen` — restamp the realization corpus's derived half after a lowering or schedule-codec
   change (`make test` detects the staleness on any machine; this applies the fix)
 - `make test-durations` — re-measure `tests/durations_cpu.json`, the checked-in CPU test timings the suite balances its

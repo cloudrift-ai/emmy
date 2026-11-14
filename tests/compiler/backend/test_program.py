@@ -14,7 +14,7 @@ from emmy.compiler.graph import Graph, Tensor
 from emmy.compiler.ir.base import InputOp
 from emmy.compiler.ir.cuda import CudaOp
 from emmy.compiler.pipeline.search.pins import pinned_knobs
-from tests.compiler.helpers import requires_cuda
+from tests.compiler.helpers import device_compute_capability, kernel_ptx, requires_cuda
 
 
 def test_bf16_host_values_materialize_as_bits():
@@ -67,12 +67,17 @@ def test_bf16_buffer_view_has_logical_dtype_and_shares_storage():
     assert backing[2:4].view(torch.uint16).item() == 0x4000
 
 
-EW_ADD_SOURCE = """
-extern "C" __global__ void ew_add(const float* A, const float* B, float* C) {
-    int i = blockIdx.x * blockDim.x + threadIdx.x;
-    if (i < ELEMENTS) C[i] = A[i] + B[i];
-}
-"""
+def ew_add_source(n: int) -> str:
+    """The PTX of ``ew_add(A, B, C)``: ``C = A + B`` over ``n`` elements, 256 threads a block."""
+    body = f"""
+    Grid(axes=(i in 0..{n}), decode=(block_idx.x * 256 + thread_idx.x), block_threads=256):
+        if block_idx.x * 256 + thread_idx.x < {n}:
+            f32 a = load A[i]
+            f32 b = load B[i]
+            f32 c = a + b
+            f32 C[i] = c
+    """
+    return kernel_ptx("ew_add", body, (("A", "input", "f32"), ("B", "input", "f32"), ("C", "output", "f32")))
 
 
 def _make_add_graph(n: int = 8) -> Graph:
@@ -82,7 +87,7 @@ def _make_add_graph(n: int = 8) -> Graph:
     g.add_node(op=InputOp(), inputs=[], output=Tensor("B", (n,)), node_id="B")
     g.add_node(
         op=CudaOp(
-            kernel_source=EW_ADD_SOURCE.replace("ELEMENTS", str(n)),
+            kernel_source=ew_add_source(n),
             kernel_name="ew_add",
             arg_order=("A", "B", "C"),
             grid=((n + 255) // 256, 1, 1),
@@ -112,7 +117,7 @@ def _make_chain_graph(n: int = 8) -> Graph:
     g.add_node(op=InputOp(), inputs=[], output=Tensor("B", (n,)), node_id="B")
     g.add_node(
         op=CudaOp(
-            kernel_source=EW_ADD_SOURCE.replace("ELEMENTS", str(n)),
+            kernel_source=ew_add_source(n),
             kernel_name="ew_add",
             arg_order=("A", "B", "T"),
             grid=((n + 255) // 256, 1, 1),
@@ -124,7 +129,7 @@ def _make_chain_graph(n: int = 8) -> Graph:
     )
     g.add_node(
         op=CudaOp(
-            kernel_source=EW_ADD_SOURCE.replace("ELEMENTS", str(n)),
+            kernel_source=ew_add_source(n),
             kernel_name="ew_add",
             arg_order=("T", "T", "C"),
             grid=((n + 255) // 256, 1, 1),
@@ -290,7 +295,7 @@ def test_straight_line_code_is_slower_after_cache_eviction():
         {},
         {},
         [LaunchSpec("code", "code", ("scratch", "sink"), ((sms,), (1,), (1,)), ((128,), (1,), (1,)), 0, (), writes=("sink",))],
-        {"code": KernelSpec(source=straight_line_source("code", 32 * 1024))},
+        {"code": KernelSpec(source=straight_line_source("code", 32 * 1024, device_compute_capability()))},
     )
     with gpu_lock():
         prog = CompiledProgram.build_from_plan(plan, {"scratch": torch.zeros(4, device="cuda")})

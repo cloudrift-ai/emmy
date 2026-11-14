@@ -3,11 +3,10 @@
 from __future__ import annotations
 
 import math
-import re
 
 import pytest
 
-from emmy.compiler.backend.cuda import nvcc
+from emmy.compiler.backend.cuda import ptxas
 from emmy.compiler.context import Context
 from emmy.compiler.dim import Dim
 from emmy.compiler.dtype import F16
@@ -31,13 +30,11 @@ from emmy.compiler.ir.kernel.ir import (
     Sync,
     TmaLoad,
 )
-from emmy.compiler.ir.render import render_stmt
 from emmy.compiler.ir.schedule.catalog import MAX_FRAGMENT_REGISTERS, warp_tile_moves
 from emmy.compiler.ir.stmt import Assign, Body, Let, Load, StridedLoop, Write
 from emmy.compiler.ir.tile import TileOp
 from emmy.compiler.pipeline import TILE_PASSES, Pipeline
 from emmy.compiler.pipeline.knob import family_value
-from emmy.compiler.target import set_target
 from tests.compiler.helpers import compile_with_kernels, operations, statements, text
 
 VOLTA = "mma_m8n8k4_f16_f32"
@@ -99,15 +96,20 @@ def _pin_sdpa(monkeypatch) -> None:
     monkeypatch.setenv("EMMY_RASTER", "")
 
 
-def _kernel(src: str) -> str:
-    """The kernel function of ``src``, past the prelude that defines every helper it may call: a spelling check reads
-    the calls the kernel makes, never the prelude, which carries every Volta helper whether the kernel calls it or not.
-    A kernel body is in normal form, so its fragments and axes carry the normal form's names (``v0``, ``a0``)."""
-    return src[src.index("__global__") :]
+def _instructions(ptx: str) -> list[str]:
+    """The instructions of a kernel's PTX, one a line, each without its guard and past the statement comments."""
+    lines = (line.strip() for line in ptx.splitlines())
+    code = (line.split(" ", 1)[1] if line.startswith("@") else line for line in lines if line and not line.startswith(("//", ".")))
+    return [line for line in code if not line.endswith((":", "{", "}"))]
+
+
+def _count(ptx: str, opcode: str) -> int:
+    """How many instructions of ``ptx`` are ``opcode`` with any operands."""
+    return sum(line.split()[0] == opcode for line in _instructions(ptx))
 
 
 def _source(graph: Graph, ctx: Context) -> tuple:
-    """The one kernel ``graph`` compiles to: its Kernel IR, its knobs and its CUDA, which only a spelling check reads."""
+    """The one kernel ``graph`` compiles to: its Kernel IR, its knobs and its PTX, which only an instruction check reads."""
     compiled, kernels = compile_with_kernels(graph, ctx=ctx)
     ops = [node.op for node in compiled.nodes.values() if isinstance(node.op, CudaOp)]
     assert len(ops) == 1
@@ -238,11 +240,10 @@ def test_sm70_source_uses_only_the_volta_mma_family(monkeypatch, trans) -> None:
     fragments = statements(kernel, RegFragment)
     assert sorted(fragment.role for fragment in fragments if fragment.role in ("a", "b")) == ["a", "b"], "one A and one B fragment"
     assert [fragment.dtype.name for fragment in fragments if fragment.role == "c"] == ["f32"], "one accumulator"
-    # CUDA spelling: moves to the PTX compiler's tests
-    # A transposed B is K-contiguous in memory: its one unrolled K step starts at a literal offset, so it loads four
-    # halves at a time, as A does. A plain B strides K by its row and loads element by element.
-    assert ("emmy_mma884_load_gmem4<__half, false>(" in _kernel(src)) == trans
-    assert ("emmy_mma884_load_b_gmem(" in _kernel(src)) != trans
+    # A transposed B is K-contiguous in memory: its one unrolled K step starts at a literal offset, so it loads its
+    # halves two at a time, as A does. A plain B strides K by its row and loads element by element.
+    assert _count(src, "ld.global.nc.b16") == (0 if trans else 4)
+    assert _count(src, "ld.global.nc.b32") == (4 if trans else 2)
 
 
 @pytest.mark.parametrize("role,trans", [("a", False), ("b", True), ("b", False)])
@@ -253,17 +254,20 @@ def test_sm70_source_uses_only_the_volta_mma_family(monkeypatch, trans) -> None:
     ids=["aligned", "offset", "stride", "k-tail"],
 )
 def test_volta_direct_vectors_require_aligned_complete_runs(role, trans, dtype, stride, offset, masked_k, aligned):
+    """A Volta fragment read from global memory takes its halves two at a time only where the run is complete and its
+    address provably aligned; anything else is read an element at a time."""
+    from emmy.emmy_ir import compile_ptx, parse_body
+
     from emmy.compiler.dtype import F16
     from emmy.compiler.dtype import get as dtype_get
     from emmy.compiler.ir.expression import Literal, Var
+    from emmy.compiler.ir.kernel.interface import Interface, Param
     from emmy.compiler.ir.kernel.ir import FragmentLoad
-    from emmy.compiler.ir.render import RenderCtx
 
-    ctx = RenderCtx(shapes={"x": (Dim(17), Dim(stride))})
     load = FragmentLoad(
         frag="r",
         src_buffer="x",
-        src_index=(Var("row"), Literal(offset, "int")),
+        src_index=(Var("t"), Literal(offset, "int")),
         role=role,
         b_trans=trans,
         ldm=stride,
@@ -273,8 +277,13 @@ def test_volta_direct_vectors_require_aligned_complete_runs(role, trans, dtype, 
         src_dtype=dtype_get(dtype),
         dtype=F16,
     )
-    source = "\n".join(render_stmt(load, ctx))
-    assert ("load_gmem4<" in source) == (aligned and (role == "a" or trans))
+    fragment = f"RegFragment(name=r, role={role}, dtype=f16, fragment_layout=m8n8k4)"
+    body = f"Grid(axes=(t in 0..32), decode=(thread_idx.x), block_threads=32):\n    {fragment}\n    {load}"
+    interface = Interface((Param("x", "input", dtype_get(dtype), "x", shape=(17, stride)),), {}, 0)
+    ptx, _ = compile_ptx("k", parse_body(body), interface, sm=70)
+    wide = aligned and (role == "a" or trans) and dtype == "f16"
+    assert _count(ptx, "ld.global.nc.b32") == (2 if wide else 0)
+    assert _count(ptx, f"ld.global.nc.{'b16' if dtype == 'f16' else 'f32'}") == (0 if wide else 4)
 
 
 def test_sm70_m1_linear_synthesizes_a_masked_mma_row(monkeypatch) -> None:
@@ -300,8 +309,8 @@ def test_sm70_sync_copy_stages_fragments_without_newer_instructions(monkeypatch,
     _pin(monkeypatch, VOLTA, stage="d1/smem")
     kernel, knobs, _ = _source(_graph(k=16, trans=trans), Context(compute_capability=(7, 0)))
     assert family_value(knobs, "STAGE") == "d1/smem"
-    slabs = {smem.name: (smem.dtype, math.prod(smem.extents)) for smem in statements(kernel, Smem)}
-    assert slabs == {"_a_smem": ("__half", 64), "_b_smem": ("__half", 64)}
+    slabs = {smem.name: (smem.dtype.name, math.prod(smem.extents)) for smem in statements(kernel, Smem)}
+    assert slabs == {"_a_smem": ("f16", 64), "_b_smem": ("f16", 64)}
     assert [(load.src_buffer, load.b_trans) for load in _drains(kernel, "a")] == [("_a_smem", False)]
     assert [(load.src_buffer, load.b_trans) for load in _drains(kernel, "b")] == [("_b_smem", trans)]
     assert len(statements(kernel, Sync)) == 2
@@ -315,14 +324,14 @@ def test_sm70_contiguous_staged_fragments_use_one_wide_load(monkeypatch) -> None
     # The plain gather of each staged operand, the B one transposed: A and an N-major B in their slabs, unpaired.
     assert [(load.b_trans, load.slab_layout) for load in _drains(kernel, "a")] == [(False, "NONE")]
     assert [(load.b_trans, load.slab_layout) for load in _drains(kernel, "b")] == [(True, "NONE")]
-    # CUDA spelling: moves to the PTX compiler's tests (each drain's helper is the one-uint2 load)
-    assert "emmy_mma884_load_a_smem(" in _kernel(src) and "emmy_mma884_load_b_smem_trans(" in _kernel(src)
+    # Each drain reads its slab a word of two halves at a time.
+    assert _count(src, "ld.shared.b32") == 4 and _count(src, "ld.shared.b16") == 0
 
 
 def test_sm70_materialized_tiles_use_paired_volta_layout_loads(monkeypatch) -> None:
     """Even Volta register tiles derive the coupled CUTLASS fill/drain layouts by default."""
     _pin(monkeypatch, VOLTA, tile="f2x2", stage="d1/smem")
-    kernel, _, src = _source(_graph(m=32, n=32, k=16), Context(compute_capability=(7, 0)))
+    kernel, _, _ = _source(_graph(m=32, n=32, k=16), Context(compute_capability=(7, 0)))
     assert _slab_writes(kernel, "_a_smem", "V70A")
     assert _slab_writes(kernel, "_b_smem", "V70B")
     assert [(load.slab_layout, load.pair_frag is not None) for load in _drains(kernel, "a")] == [("V70A", True)]
@@ -330,16 +339,13 @@ def test_sm70_materialized_tiles_use_paired_volta_layout_loads(monkeypatch) -> N
     assert sum(mma.b_row_major for mma in statements(kernel, MmaSyncPtx)) == 4
     # The interleaved accumulator map is coupled to the paired layouts.
     assert all(store.volta_interleaved for store in statements(kernel, RegStore))
-    # CUDA spelling: moves to the PTX compiler's tests (the interleaved map's lane quadrant and column half)
-    assert "const int _vq = _vl >> 2;" in src
-    assert "((_vq >> 1) & 1) * 8" in src
 
 
 def test_sm70_transposed_b_drains_the_crosswise_layout(monkeypatch) -> None:
     """A transposed B stages K-contiguous like A, so it reads A's crosswise layout back rather
     than falling to the plain row-major tile whose 64-byte row is bank-conflicted."""
     _pin(monkeypatch, VOLTA, tile="f2x2", stage="d1/smem")
-    kernel, _, src = _source(_graph(m=32, n=32, k=16, trans=True), Context(compute_capability=(7, 0)))
+    kernel, _, _ = _source(_graph(m=32, n=32, k=16, trans=True), Context(compute_capability=(7, 0)))
     assert _slab_writes(kernel, "_a_smem", "V70A")
     assert _slab_writes(kernel, "_b_smem", "V70A")
     assert not _slab_writes(kernel, "_b_smem", "V70B"), "the congruous layout is for an N-contiguous B"
@@ -351,8 +357,6 @@ def test_sm70_transposed_b_drains_the_crosswise_layout(monkeypatch) -> None:
     assert [mma.b_row_major for mma in statements(kernel, MmaSyncPtx)] == [False] * 4
     # The interleaved accumulator map is unchanged: the column half still comes from lane bit 3.
     assert all(store.volta_interleaved for store in statements(kernel, RegStore))
-    # CUDA spelling: moves to the PTX compiler's tests
-    assert "((_vq >> 1) & 1) * 8" in src
 
 
 def test_sm70_pair_policy_off_retains_the_unpaired_gather(monkeypatch) -> None:
@@ -383,21 +387,18 @@ def test_sm70_computed_tiles_use_the_same_paired_layouts(monkeypatch) -> None:
 def test_sm70_gmem_direct_tile_keeps_the_ordinary_accumulator_map(monkeypatch) -> None:
     """The paired accumulator map is coupled to a staged operand layout, never used alone."""
     _pin(monkeypatch, VOLTA, tile="f2x2")
-    kernel, _, src = _source(_graph(m=32, n=32, k=16), Context(compute_capability=(7, 0)))
+    kernel, _, _ = _source(_graph(m=32, n=32, k=16), Context(compute_capability=(7, 0)))
     products = statements(kernel, MmaSyncPtx)
     assert not any(mma.b_row_major for mma in products)
     assert len(products) == 4 * (16 // 4)  # the 2x2 register tile, at each K step
     assert not any(store.volta_interleaved for store in statements(kernel, RegStore))
-    # CUDA spelling: moves to the PTX compiler's tests
-    assert "const int _vq = (_vl & 15) >> 2;" in src
 
 
 def test_sm70_output_stores_contiguous_fragment_pairs(monkeypatch) -> None:
     """The eight Volta accumulator elements leave registers as four contiguous half2 pairs."""
     _pin(monkeypatch, VOLTA)
     _, _, src = _source(_graph(), Context(compute_capability=(7, 0)))
-    # CUDA spelling: moves to the PTX compiler's tests
-    assert len(re.findall(r"\*reinterpret_cast<__half2\*>\(&buf\d+\[", src)) == 4  # the output, spelled by its role
+    assert _count(src, "st.global.v2.b16") == 4 and _count(src, "st.global.b16") == 0
 
 
 def test_sm70_masked_rows_keep_contiguous_fragment_pairs(monkeypatch) -> None:
@@ -406,8 +407,7 @@ def test_sm70_masked_rows_keep_contiguous_fragment_pairs(monkeypatch) -> None:
     kernel, _, src = _source(_graph(m=Dim("seq_len", hint=512)), Context(compute_capability=(7, 0)))
     (store,) = statements(kernel, RegStore)
     assert store.m_guard is not None and store.m_guard[1] == Var("seq_len")
-    # CUDA spelling: moves to the PTX compiler's tests
-    assert len(re.findall(r"\*reinterpret_cast<__half2\*>\(&buf\d+\[", src)) == 4  # the output, spelled by its role
+    assert _count(src, "st.global.v2.b16") == 4 and _count(src, "st.global.b16") == 0
 
 
 def test_sm70_sync_copy_composes_ring_and_register_pipelines(monkeypatch) -> None:
@@ -415,8 +415,8 @@ def test_sm70_sync_copy_composes_ring_and_register_pipelines(monkeypatch) -> Non
     kernel, knobs, _ = _source(_graph(k=32), Context(compute_capability=(7, 0)))
     assert family_value(knobs, "TILE") == f"{VOLTA}/f1x1/k2"
     assert family_value(knobs, "STAGE") == "d2/smem/p2"
-    slabs = {smem.name: (smem.dtype, math.prod(smem.extents)) for smem in statements(kernel, Smem)}
-    assert slabs == {"_a_smem": ("__half", 256), "_b_smem": ("__half", 256)}
+    slabs = {smem.name: (smem.dtype.name, math.prod(smem.extents)) for smem in statements(kernel, Smem)}
+    assert slabs == {"_a_smem": ("f16", 256), "_b_smem": ("f16", 256)}
     operands = [fragment for fragment in statements(kernel, RegFragment) if fragment.role in ("a", "b")]
     assert len(operands) == 4, "two register slots of the A and the B fragment"
     calls = [(mma.c_frag, mma.a_frag, mma.b_frag) for mma in statements(kernel, MmaSyncPtx)]
@@ -513,10 +513,9 @@ def test_sm70_attention_uses_the_volta_fragment_layout(monkeypatch) -> None:
     reduces = statements(kernel, FragmentRowReduce)
     assert reduces and all(reduce.layout == "m8n8k4" for reduce in reduces)
     _assert_volta_only(kernel)
-    # CUDA spelling: moves to the PTX compiler's tests (the eight registers and the butterflies of one row)
-    assert "for (int _e = 0; _e < 8; _e++)" in src
-    assert "__shfl_xor_sync(0xffffffff" in src
-    assert ", 4)" in src and ", 2)" in src
+    # The lanes that share a row join through the butterflies of lane distance 4 and 2.
+    butterflies = {line.split(",")[2].strip() for line in _instructions(src) if line.startswith("shfl.sync.bfly.b32")}
+    assert {"4", "2"} <= butterflies, butterflies
 
 
 def test_sm70_causal_attention_selects_the_mask_per_fragment_element(monkeypatch) -> None:
@@ -531,8 +530,8 @@ def test_sm70_causal_attention_selects_the_mask_per_fragment_element(monkeypatch
     causal, bound = masks["__frow < __fcol"], masks["seq_len <= __fcol"]
     assert causal.row_base is not None and causal.col_base == bound.col_base, "both read the same key column"
     assert {repack.fragment_layout for repack in statements(kernel, FragmentRepack)} == {"m8n8k4"}
-    # CUDA spelling: moves to the PTX compiler's tests (the coordinates resolve to the lane's row and column)
-    assert "__frow" not in src and "__fcol" not in src
+    # The coordinates resolve to the lane's row and column: no instruction reads them by name.
+    assert not any("__frow" in line or "__fcol" in line for line in _instructions(src))
 
 
 def test_sm70_attention_rings_its_key_and_value_through_registers(monkeypatch) -> None:
@@ -586,16 +585,15 @@ def test_modern_computed_a_edge_keeps_the_cp_async_peer_copy(monkeypatch) -> Non
     assert statements(kernel, CpAsyncCopy)
     assert statements(kernel, LdmatrixLoad) and "rsqrt" in operations(kernel)
     assert not any(load.fragment_layout == "m8n8k4" for load in statements(kernel, FragmentLoad))
-    # CUDA spelling: moves to the PTX compiler's tests (the Volta prelude stays out)
-    assert "emmy_mma884" not in src
+    assert not any(line.startswith("mma.sync.aligned.m8n8k4") for line in _instructions(src))
 
 
-def test_modern_mma_source_does_not_gain_the_volta_prelude(monkeypatch) -> None:
+def test_modern_mma_source_holds_no_volta_product(monkeypatch) -> None:
     _pin(monkeypatch, AMPERE)
     kernel, _, src = _source(_graph(k=16), Context(compute_capability=(8, 0)))
     assert {tuple(mma.shape) for mma in statements(kernel, MmaSyncPtx)} == {(16, 8, 16)}
-    # CUDA spelling: moves to the PTX compiler's tests
-    assert "emmy_mma884" not in src and "mma.sync.aligned.m8n8k4" not in src
+    products = [line for line in _instructions(src) if line.startswith("mma.sync.aligned")]
+    assert products and not any(".m8n8k4." in line for line in products)
 
 
 def test_sm70_modern_atom_pin_restricts_the_schedule_to_empty(monkeypatch) -> None:
@@ -613,17 +611,8 @@ def test_sm70_newer_stage_pin_refuses(monkeypatch, stage) -> None:
         Pipeline.build(TILE_PASSES).run(_graph(), ctx=Context(compute_capability=(7, 0)))
 
 
-def test_requested_target_reaches_nvcc_arch_and_cubin_key(monkeypatch) -> None:
-    monkeypatch.setattr(nvcc, "_toolkit_tag", lambda: "toolkit")
-    monkeypatch.setenv("EMMY_NVCC_FLAGS", "")
-    try:
-        set_target((7, 0))
-        arch70 = nvcc.device_arch(False)
-        key70 = nvcc._cubin_key("source", "kernel", arch70)
-        set_target((8, 0))
-        arch80 = nvcc.device_arch(False)
-        key80 = nvcc._cubin_key("source", "kernel", arch80)
-    finally:
-        set_target(None)
+def test_the_text_s_target_reaches_the_ptxas_arch_and_cubin_key(monkeypatch) -> None:
+    monkeypatch.setattr(ptxas, "version", lambda: "ptxas")
+    arch70, arch80 = (ptxas._target(f".version 7.8\n.target sm_{sm}\n") for sm in (70, 80))
     assert (arch70, arch80) == ("sm_70", "sm_80")
-    assert key70 != key80
+    assert ptxas._cubin_key("source", arch70) != ptxas._cubin_key("source", arch80)

@@ -67,25 +67,22 @@ own](./07-golden-configurations.md).
 ## Measurements are not interchangeable
 
 One more thing has to be introduced here, because everything after this page depends on it: a measurement is only
-true of the settings it was taken under. Those settings are called the **regime**, and the part of it that matters
-most is the optimization level the CUDA compiler ran at.
+true of the settings it was taken under. Those settings are called the **regime**: the card, the precision
+decisions, and whether the caches were cold.
 
-`-O3` is the **deployable** setting. It is what `emmy compile` and `emmy run` use, so it is what a served model
-actually runs — and it is what `emmy run --bench` measures at too. **Emmy measures in the regime it deploys
-into**, so a recorded latency is the latency you get.
+Every compile builds the same code a served model runs, so `emmy run --bench` measures what is deployed. **Emmy
+measures in the regime it deploys into**, so a recorded latency is the latency you get.
 
-That sounds too obvious to state, so it is worth saying why it needs stating. An earlier search benched thousands
-of configurations, and a cheaper compiler setting (`-Xcicc -O1`) was once used to make that affordable, on the
-assumption that it would still *rank* correctly even if the absolute numbers were off. It did not. The cheap
-setting's error was not random noise but a systematic bias along tile size: it made big register tiles look slow,
-which is exactly the family it was most important to get right. Ranking in a regime you do not deploy in means the
-winner of the search need not be the winner in production.
+That sounds too obvious to state, so it is worth saying why it needs stating. An earlier search benched thousands of
+configurations, and a cheaper compiler setting (a lower optimization level) was once used to make that affordable, on
+the assumption that it would still *rank* correctly even if the absolute numbers were off. It did not. The cheap
+setting's error was not random noise but a systematic bias along tile size: it made big register tiles look slow, which
+is exactly the family it was most important to get right. Ranking in a regime you do not deploy in means the winner of
+the search need not be the winner in production.
 
 The general lesson outlives the specific setting: **a measurement is only evidence about the conditions it was taken
 under.** Emmy therefore keeps the regime on every stored measurement and gates on it, so a number taken under some
-other setting is never silently read as if it applied here. If you deliberately pin a different optimization level
-with `--nvcc-flags`, the bench still runs and still records — but under that regime's own identity, where no ordinary
-compile will read it. You will get a warning saying so.
+other setting is never silently read as if it applied here.
 
 ## Where this is going
 

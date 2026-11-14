@@ -1,14 +1,14 @@
 """Cross-process source determinism — the contract the content-addressed cubin cache
-(``nvcc._cache_key``: sha1 over source among others) stands on.
+(``ptxas._cubin_key``: sha1 over the PTX text, the target and ptxas's version) stands on.
 
-Rendered kernel source must be byte-identical across interpreter launches: an
-address- or seed-derived token in the text re-keys the kernel on every boot, which
-silently defeats the on-disk cubin cache (each server start recompiles) and makes a
+A kernel's PTX must be byte-identical across interpreter launches: an address- or
+seed-derived token in the text re-keys the kernel on every boot, which silently
+defeats the on-disk cubin cache (each server start reassembles) and makes a
 prebuilt-cache image impossible. Found on a real RTX 5090 release run: ~270 of ~580
-serving kernels re-keyed per boot — a rendered temp name embedded ``id(self)``. The
+serving kernels re-keyed per boot — a temp name of the code embedded ``id(self)``. The
 compile here runs in two SUBPROCESSES (fresh address space and hash seed — an
 in-process double compile cannot see this class of bug), off-GPU (CUDA hidden;
-sources render without a device), and the traced pointwise add is pinned to an
+code is generated without a device, for a named card), and the traced pointwise add is pinned to an
 explicit ``f2`` register-strip schedule. The pin keeps coverage independent of
 deploy-policy and tune-database picks.
 """
@@ -21,7 +21,10 @@ import hashlib
 import torch
 from emmy.compiler.backend.cuda.backend import CudaBackend
 from emmy.compiler.pipeline.search.pins import pinned_knobs
+from emmy.compiler.target import set_target
 from emmy.compiler.trace.torch import trace_module
+
+set_target((12, 0))  # no device answers here, so the PTX names its card
 
 class M(torch.nn.Module):
     def forward(self, x):
@@ -33,7 +36,7 @@ with pinned_knobs({"TILE": "f2"}):
 for _nid, node in sorted(c.nodes.items()):
     src = getattr(node.op, "kernel_source", None)
     if src:
-        marker = "VS" if "_vs_" in src else "--"
+        marker = "VS" if "st.global.v2.f32" in src else "--"
         print(node.op.kernel_name, marker, hashlib.sha1(src.encode()).hexdigest())
 """
 

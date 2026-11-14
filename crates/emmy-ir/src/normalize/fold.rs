@@ -1,7 +1,8 @@
-//! The folds: a select whose branches bind one value, a literal into the expressions that read it, and a value nothing
-//! reads.
+//! The folds: a select whose branches bind one value, a condition its test decides and conditions side by side that
+//! test the same thing, a literal into the expressions that read it, and a value nothing reads.
 
 use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
 
 use super::{assign, with_bodies};
 use crate::Name;
@@ -40,6 +41,56 @@ pub fn fold_trivial_selects(body: &Body) -> Body {
         }
         Some(stmt.clone())
     })
+}
+
+/// Every condition whose test is a literal replaced by the side it takes, and every run of conditions side by side
+/// that test the same thing one condition holding their bodies in order, where none has another side and none ahead
+/// defines a name the test reads. The statements stand in a scope other than their own: a body the optimized form
+/// takes has a name of its own for every binding, so none collides. A register tile's epilogue guards each element
+/// of a row by the same test, and one condition makes the test once and computes once what the stores share.
+pub fn fold_conditions(body: &Body) -> Body {
+    let mut out: Vec<Arc<Statement>> = Vec::new();
+    for stmt in body.stmts() {
+        let nested = stmt.nested();
+        let stmt = if nested.is_empty() {
+            stmt.clone()
+        } else {
+            with_bodies(stmt, nested.iter().map(fold_conditions).collect())
+        };
+        let Statement::Cond(cond) = &*stmt else {
+            out.push(stmt);
+            continue;
+        };
+        if let Expr::Literal(decided) = &*cond.cond {
+            let side = if decided.value.truthy() {
+                &cond.body
+            } else {
+                &cond.else_body
+            };
+            out.extend(side.stmts().iter().cloned());
+            continue;
+        }
+        if let Some(Statement::Cond(last)) = out.last().map(|last| &**last)
+            && last.cond == cond.cond
+            && last.else_body.is_empty()
+            && cond.else_body.is_empty()
+            && !cond
+                .cond
+                .free_vars()
+                .iter()
+                .any(|name| last.body.definitions().contains_key(name))
+        {
+            let joined = [last.body.stmts(), cond.body.stmts()].concat();
+            let joined = Statement::Cond(Cond {
+                body: Body::new(joined),
+                ..last.clone()
+            });
+            *out.last_mut().expect("a condition stands last") = Arc::new(joined);
+            continue;
+        }
+        out.push(stmt);
+    }
+    body.rebuilt(out)
 }
 
 /// Every `Let` of a float literal at the default precision, or of an integer literal with no declared width, spelled
@@ -150,8 +201,37 @@ pub fn drop_unread_values(body: &Body) -> Body {
 mod tests {
     use super::drop_unread_values;
     use crate::identity::canonicalize_identity;
-    use crate::normalize::normalize_body;
     use crate::normalize::testing::*;
+    use crate::normalize::{normalize_body, optimize_body};
+
+    #[test]
+    fn a_run_of_one_test_is_one_condition_with_the_bodies_in_order() {
+        // Two stores under one test are one condition; a test that reads a name the first body defines, another
+        // side, or a statement between keeps the conditions apart.
+        let given = body(
+            "if i < n:\n    x = load a[i]\n    o[i] = x\nif i < n:\n    y = load a[i + 1]\n    o[i + 1] = y\n\
+             if i + 1 < n:\n    z = load a[i + 2]\n    o[i + 2] = z",
+        );
+        assert_eq!(
+            text(&optimize_body(&given).unwrap()),
+            "if i < n:\n    x = load a[i]\n    o[i] = x\n    y = load a[i + 1]\n    o[i + 1] = y\n\
+             if i + 1 < n:\n    z = load a[i + 2]\n    o[i + 2] = z"
+        );
+        let apart = body(
+            "x = load a[i]\nif i < n:\n    o[i] = x\nelse:\n    o[i + 1] = x\nif i < n:\n    o[i + 2] = x",
+        );
+        assert_eq!(text(&optimize_body(&apart).unwrap()), text(&apart));
+    }
+
+    #[test]
+    fn a_decided_condition_is_its_one_side() {
+        let given =
+            body("x = load a[0]\nif 1:\n    o[0] = x\nif 0:\n    o[1] = x\nelse:\n    o[2] = x");
+        assert_eq!(
+            text(&optimize_body(&given).unwrap()),
+            "x = load a[0]\no[0] = x\no[2] = x"
+        );
+    }
 
     #[test]
     fn unread_values_leave_with_everything_only_they_read() {

@@ -400,7 +400,7 @@ drafting gate gives a tiny Qwen3.5 a head that drafts the target's own pick agai
 draft, and checks transformers' greedy tokens drafted and not, captured or not, through chunked prefill. Its layers
 are attention only: without evidence a tiny Gated DeltaNet step runs past the worker's deadline, so a verify step's
 per-row state carry is checked on the CPU and by the recipes' gates on the card. It
-hides Python and NVCC from the native
+hides Python and ptxas from the native
 child's PATH after export. The same exported binaries also run through the Python API; logits must be bit-identical
 at every checked step. Independent NumPy checks cover rotary rounding and causal attention through cache position
 4,096, including a shorter request after the largest one.
@@ -572,7 +572,7 @@ programs go away for a batched step and stay for the single-request programs unt
      step has one) and its own page. Two forms, to be measured against each other at `B` of 8 and 32: one launch per
      row of today's one-row program, which keeps cp.async and costs `B` launches a layer; and one program whose batch
      row is a grid axis, each CTA reading its row's page. The second reads several pages in one launch, so it takes
-     cp.async only once the renderer resolves a page per CTA, and gmem-direct reads until then.
+     cp.async only once the PTX compiler resolves a page per CTA, and gmem-direct reads until then.
    - *Native's own row-wise programs* (embedding gather, final norm, head, greedy selection) at `B` rows.
 3. *A batched verify step,* `B` requests of `K + 1` rows: the same programs at `B (K + 1)` rows, the attention fold
    taking each request's rows beside its group as the single-request verify step does, the accept, pick and drafter
