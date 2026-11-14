@@ -753,9 +753,9 @@ def states_as_buffers(body: Body, prefix: str, inputs: Mapping[str, Tensor]) -> 
     kernel's own Loop IR (:func:`lift_serial`).
 
     The loop that carries a state becomes the kernel's time: one launch per step, in order. The
-    buffer keeps every step, indexed by the step, the free axes outside the loop and the cell. A
-    ``Pre`` read is a load one step back, the seed where there is no step before the first; the
-    ``Carry`` is a store of its value at this step. A state the term already stores that way
+    buffer keeps two steps, this one and the one before, indexed by the step modulo two, the free
+    axes outside the loop and the cell. A ``Pre`` read is a load one step back, the seed where there
+    is no step before the first; the ``Carry`` is a store of its value at this step. A state the term already stores that way
     (:func:`stored_states`) keeps that output as its buffer: the read is a read of it one step
     back, the ``Carry`` stores nothing twice, and ``shapes`` names no buffer for it. Nothing of the
     step's own algebra changes, so the rest of the nest lifts as it always did. ``inputs`` are the
@@ -763,6 +763,9 @@ def states_as_buffers(body: Body, prefix: str, inputs: Mapping[str, Tensor]) -> 
     """
     serial: list[Axis] = []
     shapes: dict[str, tuple] = {}
+
+    def slot(step: Expression) -> Expression:
+        return BinaryExpression("%", step, Literal(2, "int"))
 
     def read(stmt: Pre, time: Axis, outer: tuple[Axis, ...], seeds: dict[str, float | str], stored: dict) -> tuple[Statement, ...]:
         step = Var(time.name)
@@ -773,7 +776,7 @@ def states_as_buffers(body: Body, prefix: str, inputs: Mapping[str, Tensor]) -> 
             cells = {cell.name: at for cell, at in zip(carry.index, stmt.index, strict=True) if isinstance(cell, Var)}
             buffer, index = write.output, tuple(expression.substitute({time.name: previous, **cells}) for expression in write.index)
         else:
-            buffer, index = f"{prefix}__{stmt.carrier}", (previous, *(Var(axis.name) for axis in outer), *stmt.index)
+            buffer, index = f"{prefix}__{stmt.carrier}", (slot(previous), *(Var(axis.name) for axis in outer), *stmt.index)
         held, seed = f"{stmt.name}__prev", f"{stmt.name}__seed"
         start = seeds[stmt.carrier]
         # The seed is a buffer of the state's shape (the tensor an unrolled loop started from) or a constant.
@@ -791,7 +794,7 @@ def states_as_buffers(body: Body, prefix: str, inputs: Mapping[str, Tensor]) -> 
     def define(stmt: Carry, time: Axis, outer: tuple[Axis, ...], stored: dict) -> tuple[Statement, ...]:
         if stmt.name in stored:
             return ()
-        index = (Var(time.name), *(Var(axis.name) for axis in outer), *stmt.index)
+        index = (slot(Var(time.name)), *(Var(axis.name) for axis in outer), *stmt.index)
         return (Write(output=f"{prefix}__{stmt.name}", index=index, values=(stmt.value,)),)
 
     def walk(stmts: Body, outer: tuple[Axis, ...], time: Axis | None, seeds: dict[str, float | str], stored: dict) -> Body:
@@ -810,7 +813,7 @@ def states_as_buffers(body: Body, prefix: str, inputs: Mapping[str, Tensor]) -> 
                 carried = {carry.name: carry.seed for carry in stmt.body.carries if carry.name in stmt.carries}
                 stored = stored_states(stmt, outer)
                 buffers = {name: cells for name, cells in stmt.carries.items() if name not in stored}
-                shapes.update((f"{prefix}__{name}", (stmt.axis, *outer, *cells)) for name, cells in buffers.items())
+                shapes.update((f"{prefix}__{name}", (Axis(stmt.axis.name, 2), *outer, *cells)) for name, cells in buffers.items())
                 out.append(stmt.replace(body=walk(stmt.body, outer, stmt.axis, carried, stored)))
             elif isinstance(stmt, Loop) and time is None:
                 out.append(stmt.replace(body=walk(stmt.body, (*outer, stmt.axis), time, seeds, stored)))
