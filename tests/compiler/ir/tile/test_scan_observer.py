@@ -9,7 +9,6 @@ the reduce loop, after the observer stmts)."""
 
 from __future__ import annotations
 
-import dataclasses
 from textwrap import indent
 
 import pytest
@@ -48,7 +47,7 @@ def _observed(fold: Fold, obs: str | None = None) -> Fold:
     (acc,) = fold.combine.results
     obs = obs or f"{acc}__obs"
     observe = Lambda(params=(fold.axis, acc), body=parse_body(f"{obs} = copy({acc})"), results=(obs,))
-    return dataclasses.replace(fold, observe=observe)
+    return fold.replace(observe=observe)
 
 
 # --- formation ----------------------------------------------------------------------------------- #
@@ -60,16 +59,16 @@ def test_observer_formation_gates() -> None:
     assert scan.observe is not None and fold.observe is None
     assert scan.exposes == ("acc", "acc__obs")
 
-    with pytest.raises(AssertionError, match="zero-axis"):
+    with pytest.raises(ValueError, match="zero-axis"):
         Fold(lift=Lambda(params=(), body=parse_body(""), results=()), observe=scan.observe)
-    with pytest.raises(AssertionError, match="positionally"):
+    with pytest.raises(ValueError, match="positionally"):
         # A closed λ over the same names, bound in the wrong ORDER: the observer's contract is
         # positional — the iteration var first, then the carried state.
-        dataclasses.replace(fold, observe=Lambda.closing(("acc", "k"), parse_body("t = copy(acc)"), ("t",)))
-    with pytest.raises(AssertionError, match="FRESH"):
+        fold.replace(observe=Lambda.closing(("acc", "k"), parse_body("t = copy(acc)"), ("t",)))
+    with pytest.raises(ValueError, match="FRESH"):
         # Observing the state under its own name is ill-formed — the boundary distinguishes a
         # streamed store from a post-fold store by the name.
-        dataclasses.replace(fold, observe=Lambda(params=("k", "acc"), body=parse_body(""), results=("acc",)))
+        fold.replace(observe=Lambda(params=("k", "acc"), body=parse_body(""), results=("acc",)))
 
 
 def test_exp_family_declines_an_observer() -> None:
@@ -87,8 +86,8 @@ def test_exp_family_declines_an_observer() -> None:
     twist = Twist(recipe=SOFTMAX, channels=(0,))
     fold = Fold(lift=lift, init=(float("-inf"), 0.0), base=Lambda.componentwise(SOFTMAX.base[:2], names), twist=twist)
     observe = Lambda(params=("k", *names), body=parse_body("m__obs = copy(m_i)"), results=("m__obs",))
-    with pytest.raises(AssertionError, match="does not support a per-step observer"):
-        dataclasses.replace(fold, observe=observe)
+    with pytest.raises(ValueError, match="does not support a per-step observer"):
+        fold.replace(observe=observe)
 
 
 # --- identity ------------------------------------------------------------------------------------ #

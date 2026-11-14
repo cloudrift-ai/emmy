@@ -1,0 +1,9 @@
+[package]
+name = "emmy-pure"
+version = "0.1.0"
+edition = "2024"
+license = "Apache-2.0"
+description = "The compiler's pure terms: the lambda every IR level binds with, and the Tile IR fold term and its twist."
+
+[dependencies]
+emmy-ir = { path = "../emmy-ir" }

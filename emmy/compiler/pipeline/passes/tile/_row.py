@@ -259,7 +259,7 @@ def _paired_by_loads(tile: TileOp) -> TileOp:
         for spec in tile.output_specs
     )
     operands = tuple(respelled if edge is region else edge for edge in op.operands)
-    return replace(tile, op=replace(op, operands=operands), output_specs=specs)
+    return replace(tile, op=op.replace(operands=operands), output_specs=specs)
 
 
 def _read_coordinates(mine: Load, read: Load, own: set[str], theirs: set[str], axes: dict, ctx: SimplifyCtx) -> dict | None:
@@ -329,7 +329,7 @@ def _recoordinated(node: Fold, sigma: FoldingSigma) -> Fold:
     operands = tuple(_recoordinated(edge, sigma) for edge in node.operands)
     body = Body(stmt.rewrite(lambda name: name, sigma) for stmt in node.lift.body)
     lift = Lambda.closing(tuple(param for param in node.lift.params if param not in sigma.mapping), body, node.lift.results)
-    return replace(node, operands=operands, lift=lift)
+    return node.replace(operands=operands, lift=lift)
 
 
 def _renamable(region: Fold, names: set[str]) -> bool:
@@ -521,7 +521,7 @@ def _align_owned_sweeps(piece: TileOp) -> TileOp:
         substitutions[sweep] = substitution
     operands = tuple(region.rewrite(lambda name: name, substitutions[sweep]) for (region, _, _), sweep in zip(regions, sweeps, strict=True))
     specs = tuple(replace(spec, write=spec.write.substitute(substitutions[spec.sweep]), sweep=anchor) for spec in piece.output_specs)
-    aligned = replace(piece, op=replace(op, operands=operands), output_specs=specs)
+    aligned = replace(piece, op=op.replace(operands=operands), output_specs=specs)
     return aligned if all(not spec.sweep for spec in aligned.output_specs) else piece
 
 

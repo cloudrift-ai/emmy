@@ -45,7 +45,7 @@ def _passthrough(node: Fold) -> tuple[Fold, ...] | None:
 def _normalize_fold(fold: Fold) -> Fold:
     children = tuple(_normalize_fold(edge) for edge in fold.operands)
     operands = tuple(part for edge in children for part in (_passthrough(edge) or (edge,)))
-    node = replace(fold, operands=operands) if operands != fold.operands else fold
+    node = fold.replace(operands=operands) if operands != fold.operands else fold
     if (collapsed := _passthrough(node)) is not None and len(collapsed) == 1:
         return collapsed[0]
     # Independent contractions or statistics over different coordinates each get their own term.
@@ -137,7 +137,7 @@ def _prune_unread(root: Fold, stored: frozenset[str] = frozenset()) -> Fold:
             if want:  # else no component survives, and the operand leaves with every param it bound
                 operands.append(new.exposing(tuple(name for index, name in enumerate(edge.exposes) if index in want)))
                 params.extend(slots[index] for index in sorted(want))
-        rebuilt = node if same else replace(node, operands=tuple(operands), lift=replace(node.lift, params=(*lead, *params, *trailing)))
+        rebuilt = node if same else node.replace(operands=tuple(operands), lift=node.lift.replace(params=(*lead, *params, *trailing)))
         done[id(node)] = rebuilt
         return rebuilt
 
@@ -152,7 +152,7 @@ def _prune_unread(root: Fold, stored: frozenset[str] = frozenset()) -> Fold:
         carriers = [edge for edge in pruned.operands if stored <= set(edge.exposes)]
         if len(carriers) != 1:
             if not stored & pruned.step().defined:
-                pruned = replace(pruned, lift=replace(pruned.lift, body=Body(), results=()))
+                pruned = pruned.replace(lift=pruned.lift.replace(body=Body(), results=()))
             break
         pruned = carriers[0]
     return pruned
@@ -214,9 +214,9 @@ def _share_common_cones(root: Fold) -> Fold:
         body = tuple(member(stmt) for stmt in node.lift.body)
         current = node
         if any(piece is not edge for piece, edge in zip(operands, node.operands, strict=True)):
-            current = replace(current, operands=operands)
+            current = current.replace(operands=operands)
         if any(piece is not stmt for piece, stmt in zip(body, node.lift.body, strict=True)):
-            current = replace(current, lift=replace(current.lift, body=Body(body)))
+            current = current.replace(lift=current.lift.replace(body=Body(body)))
         # The canonical form IS the key: a dict lookup and an alpha-equality test are the same
         # operation, so there is no prefilter bucket and no pairwise rescan. The exposed names
         # ride beside it: a consumer's lift reads an edge's results BY NAME, so two values that

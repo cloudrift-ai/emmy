@@ -23,25 +23,34 @@ use crate::statement::{PyStatement, statement_type_of, statements_from_py, wrap_
 /// Python object. An entry outlives its body only until the next purge.
 type Wrappers = Arc<[OnceLock<Py<PyAny>>]>;
 
-/// How many entries a table grows by between two purges of its dead ones.
+/// The fewest inserts between two purges of a table's dead entries.
 const PURGE_EVERY: usize = 1024;
 
 /// A table of per-object state on this side of the boundary, keyed by the shared object's address while it lives:
 /// a body's statement wrappers, a subroutine's one Python object. An entry outlives its object only until the next
-/// purge, every `PURGE_EVERY` inserts; the table is not bounded (a live object keeps
-/// its one wrapper).
-struct Tables<T, V> {
+/// purge; the table is not bounded (a live object keeps its one wrapper). A purge walks every entry, so the next one
+/// waits for as many inserts as the purge left entries alive, never fewer than `PURGE_EVERY`: an insert costs a
+/// constant share of the walks whatever the table holds. (A purge due at every length that was a multiple of
+/// `PURGE_EVERY` walked the whole table on every insert that took a dead object's address, which a body made and
+/// dropped in a loop does every time.)
+pub(crate) struct Tables<T, V> {
     entries: HashMap<usize, (std::sync::Weak<T>, V)>,
+    /// Inserts since the last purge.
+    inserts: usize,
+    /// Inserts the next purge waits for.
+    budget: usize,
 }
 
 impl<T, V> Tables<T, V> {
     fn new() -> Tables<T, V> {
         Tables {
             entries: HashMap::new(),
+            inserts: 0,
+            budget: PURGE_EVERY,
         }
     }
 
-    fn get<R>(&mut self, object: &Arc<T>, read: impl FnOnce(&V) -> R) -> Option<R> {
+    pub(crate) fn get<R>(&mut self, object: &Arc<T>, read: impl FnOnce(&V) -> R) -> Option<R> {
         self.entries
             .get(&(Arc::as_ptr(object) as usize))
             .and_then(|(alive, value)| {
@@ -54,7 +63,7 @@ impl<T, V> Tables<T, V> {
 
     /// Remember `value` for `object`: the value a dead object at the same address left, for the caller to drop
     /// outside the lock, and whether the table is due for a purge.
-    fn insert(&mut self, object: &Arc<T>, value: V) -> (Option<V>, bool) {
+    pub(crate) fn insert(&mut self, object: &Arc<T>, value: V) -> (Option<V>, bool) {
         let old = self
             .entries
             .insert(
@@ -62,21 +71,29 @@ impl<T, V> Tables<T, V> {
                 (Arc::downgrade(object), value),
             )
             .map(|(_, old)| old);
-        (old, self.entries.len().is_multiple_of(PURGE_EVERY))
+        self.inserts += 1;
+        let due = self.inserts >= self.budget;
+        if due {
+            self.inserts = 0;
+        }
+        (old, due)
     }
 
     /// The values of every entry whose object is gone, removed from the table.
     fn dead(&mut self) -> Vec<V> {
-        self.entries
+        let dead = self
+            .entries
             .extract_if(|_, (alive, _)| alive.strong_count() == 0)
             .map(|(_, (_, value))| value)
-            .collect()
+            .collect();
+        self.budget = self.entries.len().max(PURGE_EVERY);
+        dead
     }
 }
 
 /// Drop the dead entries of `tables`, outside its lock: a value may hold Python objects whose finalizers come back
 /// here, and the objects it held may have kept other entries alive, so the purge runs again while it frees any.
-fn purge<T, V>(table: &Table<T, V>) {
+pub(crate) fn purge<T, V>(table: &Table<T, V>) {
     loop {
         let dead = table.lock().dead();
         if dead.is_empty() {
@@ -87,16 +104,16 @@ fn purge<T, V>(table: &Table<T, V>) {
 }
 
 /// A table behind its lock: what the statics hold.
-struct Table<T, V>(Mutex<Tables<T, V>>);
+pub(crate) struct Table<T, V>(Mutex<Tables<T, V>>);
 
 impl<T, V> Table<T, V> {
-    fn lock(&self) -> std::sync::MutexGuard<'_, Tables<T, V>> {
+    pub(crate) fn lock(&self) -> std::sync::MutexGuard<'_, Tables<T, V>> {
         emmy_ir::locked(&self.0)
     }
 }
 
 /// The one table under `cell`, built on first use.
-fn tables<T: Send + Sync + 'static, V: Send + 'static>(
+pub(crate) fn tables<T: Send + Sync + 'static, V: Send + 'static>(
     cell: &'static OnceLock<Table<T, V>>,
 ) -> &'static Table<T, V> {
     cell.get_or_init(|| Table(Mutex::new(Tables::new())))
