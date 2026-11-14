@@ -87,6 +87,20 @@ def _groups(document: GoldenFile) -> dict[tuple, list[Row]]:
     return out
 
 
+def golden_groups(golden: GoldenFile) -> dict[tuple, list[Row]]:
+    """``golden``'s groups. A row that records no sizes counts at every size of its kernel
+    (``GoldenFile.target_rows``): where the kernel has rows at recorded sizes in the same regime, it joins each of
+    those groups instead of making one of its own."""
+    groups = _groups(golden)
+    for key in [key for key in groups if key[1] == "{}"]:
+        sized = [other for other in groups if other != key and (other[0], other[2]) == (key[0], key[2])]
+        if sized:
+            rows = groups.pop(key)
+            for other in sized:
+                groups[other] = groups[other] + rows
+    return groups
+
+
 def _of_group(groups: dict[tuple, list[Row]], key: tuple) -> list[Row]:
     """The rows of ``groups`` on the golden group ``key``. A golden row that records no sizes counts at every size of
     its kernel (``GoldenFile.target_rows``), so its group takes the kernel's rows in its regime at any sizes."""
@@ -140,7 +154,7 @@ def build(golden: GoldenFile, freezes: Sequence[GoldenFile] = (), existing: Gold
     for freeze in reversed(freezes):
         for key, rows in _groups(freeze).items():
             measured.setdefault(key, []).extend(rows)
-    for key, rows in _groups(golden).items():
+    for key, rows in golden_groups(golden).items():
         best = [row for row in rows if row.measured]
         if not best:
             continue

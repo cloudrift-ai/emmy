@@ -10,7 +10,18 @@ from pathlib import Path
 import pytest
 
 from emmy.compiler.pipeline.search import candidates
-from emmy.compiler.pipeline.search.candidates import FEWEST, LARGE, MOST, SMALL, _groups, _schedule, build, candidate_paths, target
+from emmy.compiler.pipeline.search.candidates import (
+    FEWEST,
+    LARGE,
+    MOST,
+    SMALL,
+    _groups,
+    _schedule,
+    build,
+    candidate_paths,
+    golden_groups,
+    target,
+)
 from emmy.compiler.pipeline.search.golden import GoldenFile, Measurements, Row, restamp
 from emmy.compiler.pipeline.search.golden.repository import _RECORDS_DIR, document_of
 
@@ -83,7 +94,7 @@ def test_a_candidate_file_holds_candidates_of_its_hardware_goldens_groups(path: 
     document, golden = GoldenFile.load(path), _golden_of(path)
     assert (document.gpu_name, document.compute_cap) == (golden.gpu_name, golden.compute_cap)
     assert (document.programs, document.kernels, document.routing) == (golden.programs, golden.kernels, golden.routing)
-    groups = _groups(golden)
+    groups = golden_groups(golden)
     for key, rows in _groups(document).items():
         key = key if key in groups else (key[0], "{}", key[2])  # a golden row that records no sizes counts at every size
         assert key in groups, f"{rows[0].name}: no group of the golden"
